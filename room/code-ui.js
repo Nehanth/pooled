@@ -732,7 +732,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (conTimer) return;
     conTimer = requestAnimationFrame(() => {
       conTimer = 0;
-      const P = ports.get(active), rows = $("pv-con-rows"), stick = rows.scrollHeight - rows.scrollTop - rows.clientHeight < 30;
+      const P = ports.get(active), rows = $("pv-con-rows"), stick = P?.stuck !== false;
       rows.replaceChildren();
       const cur = (P?.rows || []).filter((r) => !r.old && !r.sep);
       const errs = cur.filter((r) => r.level === "error").length, warns = cur.filter((r) => r.level === "warn").length, logs = cur.length - errs - warns;
@@ -755,6 +755,12 @@ export function codeUI({ onMode = () => {} } = {}) {
       if (stick) rows.scrollTop = rows.scrollHeight;
     });
   }
+  // each port's console follows new rows unless the reader scrolled up. The check can't run while the
+  // console is hidden (another tab, Chat, a phone's Agent view: height 0), so it is kept per port, and
+  // the rows jump to the newest when the console shows again
+  const conRows = $("pv-con-rows");
+  conRows.addEventListener("scroll", () => { const P = ports.get(active); if (P && conRows.clientHeight) P.stuck = conRows.scrollHeight - conRows.scrollTop - conRows.clientHeight < 30; }, { passive: true });
+  new ResizeObserver(() => { if (conRows.clientHeight && ports.get(active)?.stuck !== false) conRows.scrollTop = conRows.scrollHeight; }).observe(conRows);
   function conOpen(open) {
     $("pv-console").classList.toggle("closed", !open);
     $("pv-con-toggle").setAttribute("aria-expanded", String(open));
