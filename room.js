@@ -789,7 +789,10 @@ async function keepAwake() {
     }
     await awakeVideo.play();
     if (!wakeLock) awakeStatus("screen stays awake (video) \u2713");
-  } catch (e) { if (!wakeLock) awakeStatus("This screen can\u2019t stay awake on its own: set Auto-Lock to Never"); }
+  } catch (e) {
+    // the setting is Auto-Lock on an iPhone, the screen timeout (Settings > Display) on Android
+    if (!wakeLock) awakeStatus(`This screen can\u2019t stay awake on its own: ${myMeta?.ua === "iPhone" ? "set Auto-Lock to Never" : "set the screen timeout to its longest (Settings \u203a Display)"}`);
+  }
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { keepAwake(); document.title = "pooled \u00b7 room"; } });
 document.addEventListener("touchstart", keepAwake, { passive: true });
