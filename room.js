@@ -2226,7 +2226,8 @@ new MutationObserver(() => bandFold(bandFolded())).observe($("chatpane"), { attr
   new ResizeObserver(stick).observe(out);
   const coarse = matchMedia("(pointer: coarse)");
   const kbd = () => {
-    const a = document.activeElement, typing = a && (a.id === "ai-prompt" || a.id === "code-prompt" || a.id === "ed-text");
+    const a = document.activeElement, typing = a && (a.id === "ai-prompt" || a.id === "code-prompt" || a.id === "ed-text"
+      || (!!a.closest?.("#code-pane") && a.matches("textarea, input[type=text]")));   // e.g. a rejection's reason
     document.body.classList.toggle("kbd", !!(typing && coarse.matches && (visualViewport?.height ?? innerHeight) < 600));
     // how much of the page the keyboard covers where the browser does not shrink the page for it
     // (iOS Safari): Code on a phone lifts its prompt by that much
