@@ -305,6 +305,7 @@ export async function initCode(api, { mock = null } = {}) {
   function newTask(by = null) {
     if (running || !project) return false;
     agent?.reset(); sessionJson = null;
+    if (model?.stats) model.stats.last = null;   // the meter measures the fresh conversation, not the last run's prompt
     mid = "";
     note(`new task${by ? ` (${by})` : ""}: the agent starts fresh · files and previews stay`);
     save();
