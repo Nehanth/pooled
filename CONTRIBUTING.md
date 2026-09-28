@@ -58,7 +58,7 @@ To run the site locally, serve the repository root with `npm run serve` (or `npx
 
 **Commit messages**: imperative subject line under 72 characters, a body that says *why*, and the measured effect for performance work.
 
-**After submitting**: CI runs syntax checks and the unit tests, and Vercel posts a preview URL for your branch on the PR (every branch gets `<project>-git-<branch>-nehanths-projects.vercel.app`; see [RELEASE.md](RELEASE.md)). GPU tests run on the maintainer's hardware before merge; say which tests you ran locally and on what GPU. Merging to `main` deploys production.
+**After submitting**: CI runs syntax checks and the unit tests, and a maintainer can build a Vercel preview of your branch when it helps review (previews are opt-in; see [RELEASE.md](RELEASE.md)). GPU tests run on the maintainer's hardware before merge; say which tests you ran locally and on what GPU. Merging to `main` deploys production.
 
 ## Coding guidelines
 

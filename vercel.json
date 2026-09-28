@@ -1,6 +1,7 @@
 {
   "framework": null,
   "trailingSlash": false,
+  "ignoreCommand": "if [ \"$VERCEL_ENV\" = production ]; then exit 1; fi; case \"$VERCEL_GIT_COMMIT_MESSAGE\" in *\"[preview]\"*) exit 1;; esac; exit 0",
   "rewrites": [
     { "source": "/room", "destination": "/p2p.html" },
     { "source": "/r/:code", "destination": "/p2p.html" }

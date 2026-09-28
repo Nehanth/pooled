@@ -4,7 +4,7 @@ Pooled deploys through Vercel's git integration. Git tags mark milestones people
 
 | Push to | Deploys to |
 |---|---|
-| any branch | a public preview, `https://<project>-git-<branch>-nehanths-projects.vercel.app` (PRs get the link as a bot comment). The first part is the Vercel project's name, so it changes if the project is renamed. |
+| any branch | nothing by default: previews are opt-in (`ignoreCommand` in `vercel.json`). A commit whose message contains `[preview]` builds a public preview, `https://<project>-git-<branch>-nehanths-projects.vercel.app` (PRs get the link as a bot comment). The first part is the Vercel project's name, so it changes if the project is renamed. |
 | `feat/engine-opt` | also `https://pooled-dev.vercel.app` (staging) |
 | `main` | production, [pooled.run](https://pooled.run) |
 
