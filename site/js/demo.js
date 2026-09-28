@@ -38,7 +38,7 @@
     const b = ANI.slice().sort(() => Math.random() - .5);
     NAMES = [0, 1, 2].map(i => b[i]);
     demo.querySelectorAll("[data-name]").forEach(el => { el.textContent = NAMES[+el.dataset.name]; });
-    ANSWER = `Pooled splits big models across these 3 devices, so together they run models none of them could run alone. It can chat, or write code.`;
+    ANSWER = `Pooled splits big models across devices, so together they run models none of them could run alone. It can chat, or write code.`;
     WORDS = ANSWER.split(" "); timeWords();
   };
 
