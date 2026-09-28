@@ -5,6 +5,7 @@ import { argmax } from "../engine/engine.js";
 import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, MOE_PATH, wideOpts } from "./load_model.js";
 import { GPU_SAMPLE, ARGMAX_WIDE, gpuGreedy, checkHeadIds } from "./gpusample_check.js";
 const N = +(Deno.env.get("TOKENS") || 40), K = +(Deno.env.get("K") || 3);
+const MOEFL = Deno.env.get("MOE_FUSED_LAYOUT") ? (Deno.env.get("MOE_FUSED_LAYOUT").startsWith("{") ? JSON.parse(Deno.env.get("MOE_FUSED_LAYOUT")) : Deno.env.get("MOE_FUSED_LAYOUT")) : undefined;   // moeFusedLayout: legacy | wide | JSON (unset: auto)
 const MOEK = Deno.env.get("MOE_KERNEL") ? (Deno.env.get("MOE_KERNEL").startsWith("{") ? JSON.parse(Deno.env.get("MOE_KERNEL")) : Deno.env.get("MOE_KERNEL")) : undefined;   // moeKernel: legacy | default | JSON
 const PATH = Deno.env.get("MOE") || MOE_PATH;
 const { device } = await gpuDevice();
@@ -20,7 +21,7 @@ const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: tru
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
   // DRAFTCHAIN=0 / SPECFUSE=0: per-submit drafts / separate verify submits (A/B; same output)
   draftChain: Deno.env.get("DRAFTCHAIN") !== "0", specFuse: Deno.env.get("SPECFUSE") !== "0",
-  moeFuse: Deno.env.get("MOE_FUSE") !== "0", moeDnRows: +(Deno.env.get("MOE_DN_ROWS") || 1), moeKernel: MOEK,   // MOE_FUSE=0: unfused MoE kernels (A/B)
+  moeFuse: Deno.env.get("MOE_FUSE") !== "0", moeDnRows: +(Deno.env.get("MOE_DN_ROWS") || 1), moeKernel: MOEK, moeFusedLayout: MOEFL,   // MOE_FUSE=0: unfused MoE kernels (A/B)
   // MOEGROUP=U (unset: the engine default, 256 tiled; 0: off): expert-grouped prefill in ubatches of up to U tokens (U a multiple of BCOLS; these prompts are ~25 tokens:
   // with the default BCOLS=4, MOEGROUP=16 puts all but the last 0..7 prompt tokens through it), MOEGROUP_UC: pairs per chunk
   ...(Deno.env.get("BCOLS") ? { batchCols: +Deno.env.get("BCOLS"), coopRowsB: +Deno.env.get("BCOLS") >= 16 ? 1 : 4 } : {}),
@@ -31,6 +32,7 @@ console.log(`moeGroupPrefill ${eng.moeGrpU || "off"}${eng.moeGrpU ? ` UC ${eng.m
 console.log(`draftChain ${!!eng.draftChain}, specFuse ${eng.specFuse}, gpuSample ${eng.gpuSample}, argmaxWide ${eng.argmaxWide}`);
 console.log(`${arch}: ${L} layers, mtp tensors ${hasMtp}, engine mtp ${!!eng.mtp}, moeFuse ${eng.moeFuse}; loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s`);
 if (eng.moeK) console.log("moeKernel", JSON.stringify(eng.moeK));
+if (eng.moeFuse) console.log("moeFusedLayout", JSON.stringify(eng.moe.layout || "legacy"));
 const V = tok.vocab;
 const chat = (q) => [V["<|im_start|>"], ...tok.encode("user\n" + q), V["<|im_end|>"], ...tok.encode("\n"), V["<|im_start|>"], ...tok.encode("assistant\n"), V["<think>"], ...tok.encode("\n\n"), V["</think>"], ...tok.encode("\n\n")];
 // (plain "The capital of France is" is a near tie after " Paris": "." 19.029 vs "," 18.968 here, llama.cpp CUDA picks ",". Not used as a golden.)
