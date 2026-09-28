@@ -165,7 +165,8 @@
   .peer-stats b { color: var(--text); font-weight: 500; }
   .pop .bw-btn { margin-top: 10px; font: 500 12px/1 var(--sans); padding: 7px 10px; color: var(--ink-2); }
   /* this device's GB, with a quiet -/+ */
-  .buf.gbstep { display: inline-flex; align-items: center; gap: 2px; }
+  .buf.gbstep { display: inline-flex; align-items: center; gap: 2px; margin-left: auto; }
+  .peer-sub:has(.gbstep) > [aria-hidden] { display: none; }   /* no '·' run into the − : the stepper sits apart, at the right */
   .buf.gbstep .bv { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
   .buf.gbstep .step { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; display: grid; place-items: center; font: 400 14px/1 var(--sans); color: var(--muted); background: transparent; }
   .buf.gbstep .step:hover:not(:disabled) { background: var(--panel-2); color: var(--text); transform: none; }
