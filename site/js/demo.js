@@ -16,6 +16,8 @@
   "use strict";
   document.documentElement.classList.add("js"); // also set early by boot.js
   const $ = id => document.getElementById(id);
+  // the code's colours, as the room's editor shows them (site/js/hl.js); plain text without it
+  const HL = (path, line) => window.PooledHL ? window.PooledHL(path, line) : String(line).replace(/&/g, "&amp;").replace(/</g, "&lt;");
   const RM = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const demo = $("demo");
   if (!demo || !window.PooledApps) return;
@@ -433,10 +435,10 @@
     ["c-t0", "c-t1", "c-t2"].forEach(k => {
       const card = at(k), f = card.querySelector(".br").textContent, rs = card.querySelector(".rs");
       card.querySelector(".nl").textContent = lineOut[f]; rs.textContent = "";
-      A.files[f].filter(Boolean).slice(0, 3).forEach(txt => { const sp = document.createElement("span"); sp.className = "r add"; sp.textContent = txt; rs.append(sp); });
+      A.files[f].filter(Boolean).slice(0, 3).forEach(txt => { const sp = document.createElement("span"); sp.className = "r add"; sp.innerHTML = HL(f, txt); rs.append(sp); });
     });
     const diff = $("diff"); diff.textContent = "";
-    A.diff.forEach(([k, txt]) => { const sp = document.createElement("span"); sp.className = "r " + k; sp.textContent = txt; diff.append(sp); });
+    A.diff.forEach(([k, txt]) => { const sp = document.createElement("span"); sp.className = "r " + k; sp.innerHTML = HL("game.js", txt); diff.append(sp); });
     game.setAttribute("aria-label", A.aria);
     CAPS[5] = `Switch to Code and ask for ${A.ask}`; labelDots();
     if (inst) inst.destroy();
@@ -447,7 +449,7 @@
   const liveTo = k => {
     if (k === liveShown) return;
     if (k < liveShown || liveShown < 0) { lvPre.textContent = ""; liveShown = 0; }
-    for (let i = liveShown; i < k; i++) { const sp = document.createElement("span"); sp.textContent = liveSrc[i] || " "; lvPre.append(sp); }
+    for (let i = liveShown; i < k; i++) { const sp = document.createElement("span"); sp.innerHTML = liveSrc[i] ? HL(lvF.textContent, liveSrc[i]) : " "; lvPre.append(sp); }
     while (lvPre.children.length > 6) lvPre.firstChild.remove();
     liveShown = k;
     const n = writing && liveSrc.length ? Math.round(writing[5] * k / liveSrc.length) : k;
@@ -552,10 +554,11 @@
   ].sort((a, b) => a[0] - b[0]);
   let EV = EVENTS();
 
-  const toastB = $("toastB"), toastC = $("toastC");
+  const toastB = $("toastB"), toastC = $("toastC"), NARROW = matchMedia("(max-width: 640px)");
+  // a phone shows one device at a time: "heron joined" waits until the two screens have folded into the room
   const frame = t => {
     // "heron joined", "lynx joined": the room's toast, for a few seconds after each device comes in
-    [[toastB, S1 + 1.65], [toastC, JOIN3]].forEach(([el, t0]) => {
+    [[toastB, NARROW.matches ? S1 + 2.1 : S1 + 1.65], [toastC, JOIN3]].forEach(([el, t0]) => {
       const st = t >= t0 && t < t0 + 3.8 ? "on" : t >= t0 + 3.8 && t < t0 + 4.2 ? "out" : "";
       if (el.dataset.st !== st) { el.dataset.st = st; el.classList.remove("on", "out"); if (st) el.classList.add(st); }
     });   // Invite shows only while devices are joining (steps 2 and 3)

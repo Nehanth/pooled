@@ -125,6 +125,8 @@ ol,ul{list-style:none}
 .toast [data-name]{text-transform:lowercase}
 .toast.on{display:flex;animation:toastin .45s var(--ease) both}
 .toast.out{display:flex;animation:toastout .4s ease-in both}
+@keyframes toastdown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:none}}
+@keyframes toastup{to{opacity:0;transform:translateY(-6px)}}
 @keyframes toastin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 @keyframes toastout{to{opacity:0;transform:translateY(4px)}}
 html:not(.js) .toasts{display:none}
@@ -255,8 +257,8 @@ html:not(.js) .card{display:none}
 /* under the meter, as in the room (#ap-need): the model's need, and whether it fits */
 .need{display:flex;align-items:baseline;gap:6px;margin:0 0 14px;font-size:var(--t-sm);color:var(--ink-3);white-space:nowrap}
 .need b{font:500 var(--t-sm)/1 var(--mono);color:var(--ink)}
-.need span{margin-left:auto;font:400 var(--t-sm)/1 var(--mono);color:var(--ink-2)}
-.need.ok span{color:var(--blue-text)}
+.need>span:last-child{margin-left:auto;font:400 var(--t-sm)/1 var(--mono);color:var(--ink-2)}
+.need.ok>span:last-child{color:var(--blue-text)}
 .cd-note{margin-top:auto;padding:0 2px 10px;font-size:var(--t-sm);line-height:1.5;color:var(--ink-3)}
 .devs{display:flex;flex-direction:column;gap:6px}
 .devs li{display:flex;align-items:center;gap:8px;min-width:0;height:19px;font-size:var(--t-md);color:var(--ink)}
@@ -331,6 +333,30 @@ html:not(.js) .ldc{display:none}
   .lc-head{gap:12px 14px}
   .lc-head .dl{width:34px;height:34px}
   .lc-row .lw{display:none}
+  .lc-t{font-size:20px}
+  .lc-rows{margin:14px 0 12px}
+  .lc-row{height:40px}
+  .lc-strip{height:18px}
+  .lc-status{margin-top:12px}
+}
+/* a short phone: the download card in fewer lines */
+@media (max-width:640px) and (max-height:820px){
+  .ldc{padding:14px 14px 12px}
+  .lc-head .dl{width:28px;height:28px}
+  .lc-t{font-size:18px}
+  .lc-note{font-size:var(--t-sm);margin-top:3px}
+  .lc-rows{margin:10px 0 10px}
+  .lc-row{height:34px}
+  .lc-strip{height:16px}
+  .lc-status{margin-top:10px}
+}
+/* a short phone: a tighter hero, so the demo keeps room for its cards */
+.need .nn2{display:none}
+@media (max-width:400px){.need .nn{display:none}.need .nn2{display:inline}}
+@media (max-width:640px) and (max-height:820px){
+  .hero{padding:6px 0 10px}
+  .hero h1{font-size:clamp(29px,8.4vw,36px)}
+  .hero .sub{font-size:14px;line-height:1.45;margin-top:8px}
 }
 @media (prefers-reduced-motion:reduce){.dl circle,.lc-status .src::before{animation:none}.dl circle{opacity:1;transform:none}}
 .bd-h{display:flex;flex-direction:column;align-items:center;gap:7px;margin-bottom:26px;text-align:center;min-width:0;transition:margin .9s var(--glide)}
@@ -508,9 +534,9 @@ html:not(.js) .ldc{display:none}
   -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 24px),transparent)}
 @media (max-height:820px){.wlive pre{--lvmax:3}.diff .rs .r:nth-child(n+4){display:none}}
 .demo.editing .app{transition:none}
-.wlive pre span{display:block;flex:none;min-height:1.55em;overflow:hidden;animation:ln .2s var(--ease)}
+.wlive pre>span{display:block;flex:none;min-height:1.55em;overflow:hidden;animation:ln .2s var(--ease)}
 @keyframes ln{from{opacity:0}}
-.wlive pre span:last-child::after{content:"";display:inline-block;width:6px;height:11px;margin-left:2px;vertical-align:-1px;background:var(--blue)}
+.wlive pre>span:last-child::after{content:"";display:inline-block;width:6px;height:11px;margin-left:2px;vertical-align:-1px;background:var(--blue)}
 .diff{border-top:1px solid var(--rule-2);font-size:var(--t-sm);line-height:1.5;-webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 20px),transparent);mask-image:linear-gradient(90deg,#000 calc(100% - 20px),transparent)}
 .diff .dh{display:flex;align-items:center;gap:10px;padding:6px 24px 6px 10px;background:var(--bg-3);color:var(--ink-3)}
 .diff .dh b{font-weight:500;color:var(--ink)}
@@ -518,8 +544,15 @@ html:not(.js) .ldc{display:none}
 .diff .rs{padding:4px 0}
 .diff .r{display:block;position:relative;padding:0 10px 0 24px;white-space:pre;overflow:hidden;color:var(--ink)}
 .diff .r::before{position:absolute;left:10px}
-.diff .add{background:var(--diff-add)}.diff .add::before{content:"+";color:var(--ok)}
-.diff .del{background:var(--diff-del)}.diff .del::before{content:"-";color:var(--del)}
+/* the code's colours, as the room's editor (p2p.html #ed-hl .t-*); no orange: numbers are indigo */
+:is(.wlive pre,.diff) :is(.t-k,.t-t){color:var(--blue-600)}
+:is(.wlive pre,.diff) .t-s{color:#1F7A45}
+:is(.wlive pre,.diff) .t-c{color:#8A8D96;font-style:italic}
+:is(.wlive pre,.diff) .t-n{color:#5B4BD6}
+:is(.wlive pre,.diff) :is(.t-f,.t-p){color:#0E6E8C}
+:is(.wlive pre,.diff) .t-a{color:#7446B8}
+.diff .r.add{background:var(--diff-add)}.diff .r.add::before{content:"+";color:var(--ok)}
+.diff .r.del{background:var(--diff-del)}.diff .r.del::before{content:"-";color:var(--del)}
 .agent .composer{margin:8px 18px 14px}
 .cbar{flex:none;display:flex;align-items:center;gap:8px;padding:6px 18px 0;font-size:var(--t-sm);color:var(--ink-3)}
 .cb-auto{display:inline-flex;align-items:center;gap:6px}
@@ -687,27 +720,17 @@ html:not(.js) .sb-dots i{display:none}
 }
 /* a narrow stage: two tabs side by side as two small screens; the model card shows one side at a time */
 @container stage (max-width:600px){
-  .s-tabs{gap:10px;padding:10px 10px 12px}
-  .js .demo.merge #tabA{transform:translateX(calc(50% + 5px)) scale(.94)}
-  .js .demo.merge #tabB{transform:translateX(calc(-50% - 5px)) scale(.94)}
-  .tab-dev{height:22px;gap:6px;font-size:var(--t-sm)}
-  .tab-bar{height:26px;padding:0 6px}
-  .url{height:18px;padding:0 7px;gap:4px;font-size:10px}
-  .tab-body{padding:8px}
-  .mcard{max-width:none;border-radius:var(--r-md)}
-  .mpre,.mpost,.mjoin{padding:11px 10px 10px}
-  .mcard h3{font-size:var(--t-xl)}
-  .mpre>p:not(.nm-k),.nm-k{display:none}
-  .devname{height:32px;margin:10px 0 10px;padding:0 2px 0 9px;gap:4px;font-size:var(--t-md)}
-  .devname .shuf{width:24px;height:24px}
-  .mjoin .devname{margin-top:10px}
-  .mcode{gap:3px;font-size:26px}
-  .mwait,.mjoined{margin-top:8px;padding-top:8px;align-items:flex-start;font-size:var(--t-sm);line-height:1.35}
-  .mwait .live{margin-top:4px}
-  .slots{gap:4px;margin:0 0 10px}
-  .slots i{width:auto;flex:1 1 0;height:36px;font-size:17px}
-  .mbtn,.mok{height:34px;font-size:var(--t-md)}
-  .mok{gap:5px;font-size:var(--t-sm)}
+  /* one device's screen at a time: the laptop starts the room, then the desktop takes the stage to join it */
+  .s-tabs{grid-template-columns:minmax(0,1fr);grid-template-areas:"t";gap:0;padding:12px 14px 14px}
+  .tab{grid-area:t;transition:transform .55s var(--ease),opacity .4s var(--ease)}
+  .js #tabB.idle{opacity:0;transform:translateX(28px);pointer-events:none}
+  .js .s-tabs:has(#tabB:not(.idle)) #tabA{opacity:0;transform:translateX(-28px);pointer-events:none}
+  .js .demo.merge #tabA{transform:translateX(-28px)}
+  .js .demo.merge #tabB{transform:scale(.96);opacity:0}
+  .tab-dev{height:30px;gap:7px;font-size:var(--t-md)}
+  .tab-body{padding:14px}
+  html:not(.js) .tab{grid-area:auto}
+  html:not(.js) .s-tabs{grid-template-areas:none;gap:14px;height:auto}
 
   .card{width:calc(100% - 24px)}
   .card[data-face="pool"] .cd-pick,.card[data-face="pick"] .cd-pool{display:none}
@@ -803,13 +826,22 @@ html:not(.js) .sb-dots i{display:none}
   .chip::before{margin-right:0}
   .hd-sum{margin-left:0;font-size:var(--t-xs)}
   .hd-k{display:none}
-  .toasts{left:16px;right:16px;align-items:center}
+  /* a phone: the notice drops into the room bar itself, at its right end (where Invite and this device's
+     button sit for a moment), so it never covers a card; the new device's chip slides in beside it */
+  .toasts{top:7px;right:8px;bottom:auto;left:auto;align-items:flex-end}
+  .toast{padding:7px 12px 7px 11px;border-radius:10px;font-size:var(--t-sm);box-shadow:0 0 0 1px var(--rule),0 6px 18px -8px rgba(20,22,29,.3)}
+  .toast.on{animation-name:toastdown}
+  .toast.out{animation-name:toastup}
+  .toasts:has(#toastC:is(.on,.out)) #toastB{display:none}   /* one notice at a time: the newest */
+  .win:has(.toast:is(.on,.out)) :is(.hd-sum,.hd-inv,.hd-me){opacity:0;transition:opacity .2s}
+  .hd-sum,.hd-inv,.hd-me{transition:opacity .3s .1s}
   .hd-code{margin-right:0}
   .hd-inv{width:30px;height:30px;padding:0}
   .hd-inv .lbl,.hd-sum .pw{display:none}
   .hd-me{width:30px;height:30px}
   .pv-addr .pth,.pv-open{display:none}
-  html:not(.js) .s-tabs{height:470px}
+  html:not(.js) .s-tabs{height:auto;grid-template-columns:minmax(0,1fr);gap:14px}
+  html:not(.js) .tab-body{min-height:220px}
 
   .agent .composer{margin:6px 12px 12px}
   .log{padding:10px 12px 6px}
