@@ -274,16 +274,18 @@ export async function initCode(api, { mock = null } = {}) {
     try { ui.fileChanged(p, await project.ws.read(p)); } catch {}
   }
 
+  // the host's project controls while the agent works: they say why nothing happens (members hear the same)
+  const busyNote = () => localNote("the agent is working: try again when it is done", true);
   $("code-proj-select").addEventListener("change", async (e) => {
     const id = e.target.value;
     if (!isHost()) { if (id && id !== peerProj.cur) askHost({ t: "ai-code-cmd", cmd: "open", id }); e.target.value = peerProj.cur; return; }
     if (!id || id === project?.id) return;
-    if (running) { e.target.value = project?.id || ""; return; }
+    if (running) { e.target.value = project?.id || ""; busyNote(); return; }
     try { await useProject(await openProject(id)); } catch (err) { localNote(err.message, true); refreshProjects(); }
   });
   const newName = $("code-new-name");
   $("code-new").addEventListener("click", () => {
-    if (running) return;
+    if (running) { busyNote(); return; }
     const on = newName.hidden;
     newName.hidden = !on; $("code-proj-select").hidden = on;
     if (on) { newName.value = ""; newName.focus(); }
@@ -298,10 +300,11 @@ export async function initCode(api, { mock = null } = {}) {
   });
   $("code-open").dataset.can = canOpenFolder() ? "1" : "";
   $("code-open").addEventListener("click", async () => {
-    if (running || !isHost()) return;
+    if (!isHost()) return;
+    if (running) { busyNote(); return; }
     try { const p = await openFolder(); if (p) await useProject(p); } catch (err) { localNote("could not open the folder: " + err.message, true); }
   });
-  $("code-newtask").addEventListener("click", () => { if (isHost()) newTask(); else askHost({ t: "ai-code-cmd", cmd: "newtask" }); });
+  $("code-newtask").addEventListener("click", () => { if (!isHost()) askHost({ t: "ai-code-cmd", cmd: "newtask" }); else if (running) busyNote(); else newTask(); });
   function newTask(by = null) {
     if (running || !project) return false;
     agent?.reset(); sessionJson = null;
