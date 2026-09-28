@@ -112,6 +112,8 @@ try {
   check("top navigation blocked", F.top);
   check("alert does not block", F.alert === "returned");
 
+  // the frame's messages reach this page after the evaluate above returns
+  await page.waitForFunction(() => window.__logs.some((e) => e.text === "alert: hello") && window.__logs.some((e) => /404 p2p\.html \(fetch\)/.test(e.text)), null, { timeout: 5000 }).catch(() => {});
   const L = await page.evaluate(() => window.__logs.map((e) => ({ level: e.level, text: e.text.split("\n")[0], src: e.src, line: e.line })));
   check("console.log carries its file and line", L.some((e) => e.level === "log" && e.text === 'drawing rgb(255, 0, 0)' && e.src === "lib/draw.js" && e.line === 3), JSON.stringify(L));
   check("the uncaught error carries game.js:6", L.some((e) => e.level === "error" && /boom is not defined/.test(e.text) && e.src === "game.js" && e.line === 6), JSON.stringify(L));
@@ -233,9 +235,12 @@ button{width:120px;height:40px;margin:20px}</style></head><body><div class="game
   await page.evaluate(() => { for (const [k, v] of Object.entries(window.__fit)) { v.destroy(); document.getElementById("fit-" + k).remove(); } for (const p of [5180, 5181, 5182, 5183]) window.__server.stop(p); });
 
   // local mode (no other site): a blob: document, whose base URL is not the page's either, and a
-  // page that navigates itself away is put back, then stopped
+  // page that navigates itself away is put back, then stopped. It goes to a data: URL, which stays
+  // in this process: a page that goes to another site (or to an error page) moves the frame to
+  // another process and back each time, and Playwright sometimes loses track of such a frame and
+  // dies on an internal assert (FrameManager.frameAttached; 1.49 here, the same code in 1.63).
   const local = await page.evaluate(async () => {
-    await window.__ws.write("away/index.html", `<p id=a>stay</p><script>console.log("base " + document.baseURI); setTimeout(() => { location.href = "http://127.0.0.1:1/?u=" + encodeURIComponent(document.baseURI); }, 200)</script>`);
+    await window.__ws.write("away/index.html", `<p id=a>stay</p><script>console.log("base " + document.baseURI); setTimeout(() => { location.href = "data:text/html,<p>away</p>"; }, 200)</script>`);
     const el = document.createElement("div"); document.body.append(el);
     const logs = [];
     let v = null, src = "";
@@ -264,6 +269,9 @@ button{width:120px;height:40px;margin:20px}</style></head><body><div class="game
     for (let i = 0; i < 80 && !states.includes("hung"); i++) await new Promise((r) => setTimeout(r, 100));
     clearInterval(iv);
     const ms = Math.round(performance.now() - t0);
+    // the relay is one process: the visible preview :5173 hung with it, and its own watchdog says so
+    // up to a second later; wait for that here, not in the middle of the run_js checks below
+    for (let i = 0; i < 40 && !window.__logs.some((e) => /preview hung/.test(e.text)); i++) await new Promise((r) => setTimeout(r, 100));
     const logs = await window.__T.preview_logs.run({ port: 5176 });
     const out = { states, ticks, ms, frame: !!v.frame, gate: el.querySelector(".pv-run")?.textContent, logs };
     v.destroy();
