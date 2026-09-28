@@ -1597,7 +1597,9 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   if (ai.engine) { ai.engine.mtpBatchRefill = MTP_REFILL; ai.engine.mtpPreDraft = PRE_DRAFT; }
   ai.range = range;
   ai.model = modelKey;
-  aiLoading(false);
+  // the load card stays up (its "Starting" mark once every device has its layers) until the room
+  // is online: the host takes it down in aiMaybeReady, a worker on ai-ready-all. Taking it down here
+  // showed the model picker for the seconds between this device's layers and the room's.
 }
 
 // ---- host ----
@@ -1713,6 +1715,7 @@ async function aiStart(modelArg) {
     log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}: ${splitDesc}`);
     ai.loadingShard = true;
     try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX); } finally { ai.loadingShard = false; }
+    if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
     aiStatus(n === 1
       ? `solo: all ${L} layers local — ready`
       : `layers ${ranges[0][0]}–${ranges[0][1] - 1} ready · syncing with ${ai.chain.length} device${ai.chain.length > 1 ? "s" : ""}…`);
@@ -1774,6 +1777,9 @@ function aiPeerLeft(id, name) {
   const why = `${name || "a device"} left${layers ? ` (layers ${layers})` : ""}`;
   ai.degraded = true;
   ai.readyPeers.delete(id);
+  // left before the room came online: drop the load card so the panel's Re-deal button shows
+  // (while this device still loads, aiStart does it once its layers are in)
+  if (!ai.loadingShard && !$("ai-panel").classList.contains("online")) aiLoading(false);
   ai.fed = null; ckptClear();
   failWaiters(new Error(why));
   $("ai-row").style.display = ai.engine ? "flex" : "none";
@@ -1817,6 +1823,7 @@ function aiMaybeReady() {
   showRedeal(false);
   aiStatus(`cluster online · ${n} device${n > 1 ? "s" : ""}, ${ai.cfg.num_hidden_layers} layers split ${n} ways`);
   clearInterval(ai.progTimer);
+  if ($("load-card").classList.contains("on")) aiLoading(false);   // (a device back from a reload also lands here, with the chat up)
   $("ai-panel").classList.add("online");
   $("ai-row").style.display = "flex";
   $("chat-tools").hidden = false;
@@ -2809,7 +2816,7 @@ async function aiOnData(from, d) {
         await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model));
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
         aiStatus(`layers ${d.range[0]}–${d.range[1] - 1} ready · syncing with the room…`);
-        aiLoading(true, `layers ${d.range[0]}–${d.range[1] - 1} ready`);
+        $("ldg-title").textContent = `layers ${d.range[0]}–${d.range[1] - 1} ready`;   // the card stays up as it is (Starting) until ai-ready-all
         $("ldg-sub").textContent = "syncing with the rest of the room";
         $("ldg-fill").style.width = "100%";
         sendTo(ai.hostId, { t: "ai-ready" });
