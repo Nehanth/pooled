@@ -365,7 +365,8 @@ for (const S of splits) {
       // off the rails: a divergence on a clear top-1 (margin > 1 logit) is a failure
       if (d >= 0 && ref[name].margins[d] > 1) { fail++; console.log(`  FAIL: split diverges from solo on a clear token (margin ${ref[name].margins[d].toFixed(3)})`); }
     }
-  }  const R = +env("BENCH", "0");
+  }
+  const R = +env("BENCH", "0");
   if (R) for (const [name, prompt] of CASES) {
     const t = { plain: { off: [], on: [] }, spec: { off: [], on: [] } };
     const fuse0 = host.hostFuse;
