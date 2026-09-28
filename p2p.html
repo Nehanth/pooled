@@ -18,8 +18,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Funnel+Display:wght@400;500&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 
-<link rel="icon" href="/favicon.ico?v=2" sizes="16x16 32x32 48x48">
-<link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2">
+<link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=3">
 <link rel="manifest" href="/site.webmanifest?v=2">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
 <title>pooled · room</title>
@@ -1042,12 +1041,13 @@
   #ed-text:focus { box-shadow: none; }
   #ed-text[readonly] { caret-color: transparent; }
   /* token colours: the editor and the edit window over the preview (no orange: numbers are indigo) */
-  #ed-hl :is(.t-k, .t-t) { color: var(--accent-hover); }
-  #ed-hl .t-s { color: #1F7A45; }
-  #ed-hl .t-c { color: #8A8D96; font-style: italic; }
-  #ed-hl .t-n { color: #5B4BD6; }
-  #ed-hl :is(.t-f, .t-p) { color: #0E6E8C; }
-  #ed-hl .t-a { color: #7446B8; }
+  /* syntax colours: the editor, the code the agent is writing, and its diffs */
+  :is(#ed-hl, .cm-live .code, .cm-diff .r) :is(.t-k, .t-t) { color: var(--accent-hover); }
+  :is(#ed-hl, .cm-live .code, .cm-diff .r) .t-s { color: #1F7A45; }
+  :is(#ed-hl, .cm-live .code, .cm-diff .r) .t-c { color: #8A8D96; font-style: italic; }
+  :is(#ed-hl, .cm-live .code, .cm-diff .r) .t-n { color: #5B4BD6; }
+  :is(#ed-hl, .cm-live .code, .cm-diff .r) :is(.t-f, .t-p) { color: #0E6E8C; }
+  :is(#ed-hl, .cm-live .code, .cm-diff .r) .t-a { color: #7446B8; }
   #ed-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 28px; text-align: center; font-size: 13px; line-height: 1.5; color: var(--muted); text-wrap: balance; background: var(--panel-3); background-image: radial-gradient(circle at 1px 1px, var(--rule-2) 1px, transparent 0); background-size: 16px 16px; }
   #ed-empty b { color: var(--text); font-weight: 500; }
   #ed-empty[hidden] { display: none; }

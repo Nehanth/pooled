@@ -54,16 +54,17 @@ function diffBlock(d, onFull) {
   box.append(head, rows);
   if (!d.rows) {
     const all = [...(d.head || [])], tail = d.tail || [];
-    for (const t of all) rows.append(h("div", "r r-add", t || " "));
+    const addRow = (t) => { const r = h("div", "r r-add"); r.innerHTML = t ? highlight(d.path, t) : " "; rows.append(r); };
+    for (const t of all) addRow(t);
     const hidden = d.lines - all.length - tail.length;
     if (hidden > 0 || !all.length) rows.append(h("div", "r r-skip", all.length ? `… ${plural(hidden, "more line")} (view full file to read them)` : d.isNew ? `(${plural(d.lines, "line")}, too long to show)` : "(too many changes to show)"));
-    for (const t of tail) rows.append(h("div", "r r-add", t || " "));
+    for (const t of tail) addRow(t);
     return box;
   }
   if (!d.isNew && !d.add && !d.del) { rows.append(h("div", "r r-skip", "(no changes)")); return box; }
   for (const [op, text, skip] of d.rows) {
     if (skip) { rows.append(h("div", "r r-skip", `… ${plural(skip, "unchanged line")}`)); continue; }
-    rows.append(h("div", "r" + (op === "+" ? " r-add" : op === "-" ? " r-del" : ""), text || " "));
+    const r = h("div", "r" + (op === "+" ? " r-add" : op === "-" ? " r-del" : "")); r.innerHTML = text ? highlight(d.path, text) : " "; rows.append(r);
   }
   if (d.more) rows.append(h("div", "r r-skip", `… ${plural(d.more, "more line")}`));
   return box;
@@ -321,7 +322,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     el.querySelector(".nm").textContent = p.name === "edit_file" ? "editing" : "writing";
     el.querySelector("b").textContent = p.path || "";
     el.querySelector(".n").textContent = `${p.code.split("\n").length} lines`;
-    pre.textContent = p.code;
+    pre.innerHTML = highlight(p.path, p.code);   // syntax colours as it is written
     pre.scrollTop = pre.scrollHeight;
     follow(stick);
     editWin.show(p);

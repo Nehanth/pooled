@@ -137,7 +137,7 @@ export function computeScreen({ state, keepAwake = () => {} }) {
     // one status line and one small line: this screen is for the person whose device it is
     let title, sub;
     const model = s.model || "the model";
-    if (s.phase === "serving" && has) { title = "Working"; sub = `Layers ${lay} · ${model}`; }   // the title says Serving between answers
+    if (s.phase === "serving" && has) { title = "Serving"; sub = `Layers ${lay} · ${model}`; }   // while it works too: the hop dot and the numbers show the passes
     else if (s.phase === "loading") { title = s.pct != null ? `Loading ${Math.round(s.pct)}%` : "Loading"; sub = has ? `Layers ${lay} · ${model}` : model; }
     else if (s.phase === "serving") { title = "Not holding layers"; sub = `The other devices run ${model}`; }
     else { title = "Standing by"; sub = ""; }
@@ -146,7 +146,7 @@ export function computeScreen({ state, keepAwake = () => {} }) {
     // serving, and no pass for a moment: say so, and let the logo rest
     const quiet = s.phase === "serving" && has && (!stamps.length || performance.now() - stamps[stamps.length - 1][0] > 2500);
     root.toggleAttribute("data-quiet", quiet);
-    if (quiet) title = "Serving";   // holding its layers, waiting for the next question
+    // (between answers the title stays "Serving" too; the numbers keep the last run)
     $("cs-title").textContent = title; $("cs-sub").textContent = sub;
     if ($("cs-live")) { $("cs-live").hidden = !(s.phase === "serving" && has); renderStats(); }
     // this device's slice of the model
