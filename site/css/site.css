@@ -811,6 +811,15 @@ html:not(.js) .sb-dots i{display:none}
   .chip .cg{display:none}
   .bd-stats>span:last-child{display:none}
 }
+/* tablet: the phone's two-row step bar (the whole caption above the dots) instead of an ellipsised one */
+@media (min-width:641px) and (max-width:900px){
+  .stepbar{flex-wrap:wrap;gap:0 6px;padding:8px 6px 2px 12px}
+  .sb-now{flex-basis:100%;padding-right:8px;align-items:flex-start;gap:10px}
+  .sb-n{margin-top:2px}
+  .sb-t{white-space:normal;line-height:1.35;min-height:calc(2.7em + 4px);padding-top:4px}
+  .sb-dots{margin-left:-4px}
+  .replay{margin-left:auto}
+}
 @media (min-width:641px) and (max-width:720px){
   .hd-k,.hd-sum .pw{display:none}   /* "Room" and "pooled" too, as on a phone */
 }
