@@ -305,7 +305,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     let el = find(k);
     // the call is complete: the card stays (hidden) as the place its tool card goes, so text the
     // model writes after the call lands under it
-    if (d.end) { if (el) { el.hidden = true; el.classList.add("ended"); } editWin.end(); return; }
+    if (d.end) { if (el) { el.hidden = true; el.classList.add("ended"); } return; }   // (the overlay follows the call's card)
     if (!el) {
       closeText();
       el = h("div", "cm-live"); el.dataset.k = k; el.dataset.raw = "";
@@ -330,7 +330,7 @@ export function codeUI({ onMode = () => {} } = {}) {
 
   // ---------------- the edit overlay: once an app is served, while the agent edits a file the preview
   // frosts over with the Pooled dots in their wave and "Editing game.js" (no code: the code shows in the agent's card), then
-  // "Reloading" once the call is complete, and it lifts when the preview has reloaded (or after a moment).
+  // "Reloading" once the call is approved, and it lifts when the preview has reloaded (or after a moment).
   // Host and peers alike (it is drawn from the same ai-code-live messages).
   const editWin = (() => {
     let el = null, raf = 0, last = null, closeT = 0, revAt = 0, shownAt = 0, doneT = 0;
@@ -410,6 +410,10 @@ export function codeUI({ onMode = () => {} } = {}) {
       sum.querySelector(".br").title = d.brief;
     }
     const chip = sum.querySelector(".chip");
+    // the preview's 'Editing' overlay follows the call: 'Reloading…' once it is approved (the file gets
+    // written); lifted, with no reload, while it waits for an answer or when it is declined or fails
+    if (d.state === "approved" || d.state === "done") editWin.end();
+    else if (d.state === "pending" || d.state === "declined" || d.state === "error" || d.state === "stopped") editWin.close();
     if (d.state) {
       chip.className = "chip " + d.state.replace(/[^a-z]/g, "");
       chip.textContent = d.state === "pending" ? "needs approval" : d.state;
