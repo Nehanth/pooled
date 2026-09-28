@@ -158,6 +158,7 @@
 
   /* ---------- the caption bar ---------- */
   const dotBtns = [...demo.querySelectorAll(".sb-dots button")];
+  dotBtns.forEach(b => b.removeAttribute("tabindex"));   // (the markup keeps them out of the tab order for no-JS)
   const CAPS = dotBtns.map(b => b.querySelector(".lbl").textContent);
   const sbN = $("sbN"), sbT = $("sbT");
   let shownStep = -2;

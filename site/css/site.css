@@ -655,8 +655,7 @@ html:not(.js) .game canvas{display:none}
 
 
 /* ---------- no JS: every scene, finished, one under the other ---------- */
-html:not(.js) .modes .pill{display:none}
-html:not(.js) .modes button{color:var(--ink-2)}
+html:not(.js) .modes{display:none}   /* a switch nothing drives: both scenes show below */
 html:not(.js) .body{height:auto}
 html:not(.js) .s-tabs{height:400px}
 html:not(.js) #tabA .mpre,html:not(.js) #tabA .mwait,html:not(.js) #tabB .mbtn{display:none}
@@ -677,7 +676,7 @@ html:not(.js) .sb-dots{display:block;counter-reset:st}
 html:not(.js) .sb-dots li{counter-increment:st;font-size:var(--t-lg);line-height:1.9;color:var(--ink-2)}
 html:not(.js) .sb-dots li.gap{margin-left:0}
 html:not(.js) .sb-dots li::before{content:counter(st) ". ";font:500 var(--t-sm)/1 var(--mono);color:var(--ink-3)}
-html:not(.js) .sb-dots button{display:inline;height:auto;padding:0;cursor:default}
+html:not(.js) .sb-dots button{display:inline;height:auto;padding:0;cursor:default;pointer-events:none}
 html:not(.js) .sb-dots i{display:none}
 
 /* ---------- the stage fits the screen (demo.js sets --body-h so the hero and the demo share the first
