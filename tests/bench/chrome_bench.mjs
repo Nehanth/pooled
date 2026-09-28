@@ -17,7 +17,9 @@ const root = new URL("../..", import.meta.url).pathname, model = process.argv[2]
 const GOLD = { "q36moe": ["```python\ndef two_sum(nums, target):\n    seen = {}\n    for i, num in enumerate(nums):\n        complement = target - num\n        if complement in seen:", "A hash map is a data structure that stores key-value pairs, allowing for efficient retrieval, insertion, and deletion operations. It uses a hash function to compute an index into an array of buckets or slots"] };
 const wcache = process.env.WCACHE !== "0", prof = process.env.CHROME_PROFILE ?? path.join(os.homedir(), ".cache", "swarmllm-chrome-bench");
 const srv = spawn("node", [root + "tests/bench/serve.mjs", root, "8791"], { stdio: "inherit" }); await new Promise((r) => setTimeout(r, 600));
-const args = ["--no-sandbox", "--headless=new", "--enable-unsafe-webgpu", "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan", "--ignore-gpu-blocklist", "--js-flags=--max-old-space-size=65536"];
+// the ANGLE / Vulkan flags are Linux-only: on macOS they leave the tab without a WebGPU adapter (Chrome runs WebGPU on Metal by default)
+const args = ["--no-sandbox", "--headless=new", "--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--js-flags=--max-old-space-size=65536",
+  ...(process.platform === "linux" ? ["--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"] : [])];
 let b, ctx;
 const exe = process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : {};
 if (prof && prof !== "0") { ctx = await chromium.launchPersistentContext(prof, { headless: false, args, ...exe }); console.log("chrome profile:", prof); }

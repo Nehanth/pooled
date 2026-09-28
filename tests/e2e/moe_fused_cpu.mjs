@@ -10,9 +10,11 @@
 //      (per-slot terms, reductions and combine order are the same code), for every format pair and R
 //   3. an N-column launch gives each column the same values as that column launched alone
 //   4. both are close to a float64 reference, and the interpreter reports no races
+// Checks 3 and 4 run again with the wide fused layout (moeFusedLayout: engine/wgsl/moe.js gusKernelWide /
+// dncKernelWide), whose sums are in another order (check 2 does not apply to it).
 // The interpreter's float rounding is not a GPU's, so "same" here means the same expression tree;
 // the GPU-side bit checks are tests/test_moe.js (speculative == plain, llama.cpp text).
-import { moeWGSL, moeFusedWGSL } from "../../engine/wgsl/moe.js";
+import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout } from "../../engine/wgsl/moe.js";
 import { f16ToF32, f32ToF16 } from "../../engine/gguf.js";
 const WR = process.env.WGSL_REFLECT;
 if (!WR) { console.log("set WGSL_REFLECT to wgsl_reflect.module.js (see the header); skipping"); process.exit(0); }
@@ -44,9 +46,12 @@ const run = (code, kernel, grid, bufs) => {
 const same = (a, b) => a.length === b.length && a.every((v, i) => Object.is(v, b[i]));
 
 const dim = 64, ei = 32, nExp = 12, K = +(process.env.MOE_K || 3), KS = K + 1, C = 2;   // MOE_K=8 for the real top-k (slower)
-for (const [gf, sgf, df, sdf, R, sDim] of [["q4", "q8", "q4", "q8", 2, 32], ["q8", "q8", "q8", "q8", 4, 32], ["q4", "q4", "q8", "q4", 1, 64]]) {
-  const hs = Math.max(ei, sDim);
-  const code = HEAD + moeWGSL() + moeFusedWGSL({ K, R, gu: [[gf, sgf]], dn: [[df, sdf]] });
+const WIDE = [null, moeFusedLayout("wide", K), moeFusedLayout({ gu: { WG: 16, TPR: 2, R: 2 }, dn: { WG: 16, TPR: 4, R: 3 } }, K)];
+for (const [gf, sgf, df, sdf, R, sDim, lay] of [["q4", "q8", "q4", "q8", 2, 32, 0], ["q8", "q8", "q8", "q8", 4, 32, 0], ["q4", "q4", "q8", "q4", 1, 64, 0],
+  ["q4", "q8", "q4", "q8", 1, 32, 1], ["q8", "q4", "q8", "q4", 1, 64, 2]]) {
+  const hs = Math.max(ei, sDim), layout = WIDE[lay];
+  // the unfused chain in the legacy layout: the legacy fused kernels have its per-slot terms and reductions
+  const code = HEAD + moeWGSL(moeKernelConfig("legacy", { dim, inter: ei })) + moeFusedWGSL({ K, R, gu: [[gf, sgf]], dn: [[df, sdf]], layout });
   const Wg = quant(gf, nExp * ei, dim), Wu = quant(gf, nExp * ei, dim), Wd = quant(df, nExp * dim, ei);
   const Sg = quant(sgf, sDim, dim), Su = quant(sgf, sDim, dim), Sd = quant(sdf, dim, sDim);
   const logits = Float32Array.from({ length: C * (nExp + 1) }, () => (rnd() - 0.5) * 4);
@@ -54,7 +59,7 @@ for (const [gf, sgf, df, sdf, R, sDim] of [["q4", "q8", "q4", "q8", 2, 32], ["q8
   const x = Float32Array.from({ length: C * dim }, () => rnd() - 0.5);
   const x0 = Float32Array.from({ length: C * dim }, () => rnd() - 0.5);
   // shared gate/up packed as the engine packs them: [gate qs | up qs | gate sc | up sc]
-  const pk = new Uint32Array(Sg.qs.length + Su.qs.length + Sg.sc.length + Su.sc.length);
+  const pk = new Uint32Array(Math.ceil((Sg.qs.length + Su.qs.length + Sg.sc.length + Su.sc.length) / 4) * 4);   // whole vec4s, as the engine rounds it
   pk.set(Sg.qs, 0); pk.set(Su.qs, Sg.qs.length); pk.set(Sg.sc, Sg.qs.length + Su.qs.length); pk.set(Su.sc, Sg.qs.length + Su.qs.length + Sg.sc.length);
   const oUq = Sg.qs.length, oGs = oUq + Su.qs.length, oUs = oGs + Sg.sc.length;
   const U = (xs, dOut, dIn, ys, p) => new Uint32Array([dOut, dIn, sDim, nExp, xs, ys, 1, 1, p ? oUq : 0, p ? oGs : 0, p ? oUs : 0, 0]);
@@ -63,14 +68,15 @@ for (const [gf, sgf, df, sdf, R, sDim] of [["q4", "q8", "q4", "q8", 2, 32], ["q8
     const lg = logits.slice(c0 * (nExp + 1), (c0 + n) * (nExp + 1)), sel = new Uint32Array(n * KS), w = new Float32Array(n * KS);
     const h = new Float32Array(n * KS * hs), xo = x0.slice(c0 * dim, (c0 + n) * dim);
     run(code, "moe_route", [n, 1, 1], [lg, sel, w, U(nExp + 1, 0, 0, 0)]);
-    run(code, `moe_gus_${gf}_${sgf}`, [Math.ceil(hs / 4), n * KS, 1], [Wg.qs, Wg.sc, Wu.qs, Wu.sc, x.slice(c0 * dim, (c0 + n) * dim), h, sel, pk, U(dim, ei, dim, hs, true)]);
-    run(code, `moe_dnc_${df}_${sdf}`, [Math.ceil(dim / R), n, 1], [Wd.qs, Wd.sc, h, xo, sel, w, Sd.qs, Sd.sc, U(dim, dim, ei, hs)]);
+    run(code, `moe_gus_${gf}_${sgf}`, [Math.ceil(hs / (layout ? layout.gu.rows : 4)), n * KS, 1], [Wg.qs, Wg.sc, Wu.qs, Wu.sc, x.slice(c0 * dim, (c0 + n) * dim), h, sel, pk, U(dim, ei, dim, hs, true)]);
+    run(code, `moe_dnc_${df}_${sdf}`, [Math.ceil(dim / (layout ? layout.dn.rows : R)), n, 1], [Wd.qs, Wd.sc, h, xo, sel, w, Sd.qs, Sd.sc, U(dim, dim, ei, hs)]);
     return { sel, w, xo };
   };
   const all = fused(0, C);
   let colsOk = true;
   for (let c = 0; c < C; c++) { const one = fused(c, 1); if (!same(one.xo, all.xo.subarray(c * dim, (c + 1) * dim)) || !same(one.sel, all.sel.subarray(c * KS, (c + 1) * KS))) colsOk = false; }
-  check(`${gf}/${sgf} gate-up, ${df}/${sdf} down, R ${R}, sDim ${sDim}: ${C}-column launch == one column at a time`, colsOk);
+  const lname = layout ? `wide ${JSON.stringify(layout)}` : `R ${R}`;
+  check(`${gf}/${sgf} gate-up, ${df}/${sdf} down, ${lname}, sDim ${sDim}: ${C}-column launch == one column at a time`, colsOk);
 
   // the unfused chain on the same inputs
   const MOE = (a) => new Uint32Array(a);
@@ -95,7 +101,7 @@ for (const [gf, sgf, df, sdf, R, sDim] of [["q4", "q8", "q4", "q8", 2, 32], ["q8
   const xu = x0.slice();
   run(code, "moe_combine", [Math.ceil(dim / 64), C, 1], [xu, yR, wR, yS, sg, MOE([dim, 0, K, dim, dim, dim, 1, 1])]);
   let maxD = 0; for (let i = 0; i < xu.length; i++) maxD = Math.max(maxD, Math.abs(xu[i] - all.xo[i]));
-  check(`fused chain == unfused chain (router, gu, dn, shared as a 1-expert stack, combine)`, same(xu, all.xo), `max |diff| ${maxD.toExponential(2)}`);
+  if (!layout) check(`fused chain == unfused chain (router, gu, dn, shared as a 1-expert stack, combine)`, same(xu, all.xo), `max |diff| ${maxD.toExponential(2)}`);
 
   // float64 reference
   let maxErr = 0, maxRef = 0;

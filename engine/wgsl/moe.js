@@ -228,6 +228,9 @@ function termOff(fmt, Q, qo, SC, so, X, er, xc, nb = "nb", b = "b", O = FOPS) {
 // it is below K. That is exactly the order of moe_router's K argmax rounds (ties to the lower index), so
 // the ids and weights are the same bits, without the 8 x 8 barrier rounds. Slot K gets the shared gate
 // sigmoid(logit[nExp]) with moe_combine's expression.
+// The rank loop reads the probabilities 4 per load from a vec4 copy (rt_q, padded with -1: below every
+// probability), and a thread stops counting once its rank reaches K (it is not picked either way).
+// Both leave every id and weight bit unchanged.
 export function routeKernel(K) {
   const KS = K + 1;
   return `
@@ -236,6 +239,7 @@ export function routeKernel(K) {
 @group(1) @binding(2) var<storage, read_write> rt_w: array<f32>;
 @group(1) @binding(3) var<uniform> rt_s: MOEF;
 var<workgroup> rt_p: array<f32, 1024>;
+var<workgroup> rt_q: array<vec4<f32>, 256>;
 var<workgroup> rt_v: array<f32, 256>;
 var<workgroup> rt_ki: array<u32, ${K}>;
 var<workgroup> rt_kv: array<f32, ${K}>;
@@ -259,10 +263,22 @@ fn moe_route(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id)
   let inv = 1.0 / rt_v[0];
   for (var i: u32 = t; i < n; i += 256u) { rt_p[i] = rt_p[i] * inv; }
   workgroupBarrier();
+  let n4 = (n + 3u) >> 2u;
+  for (var i: u32 = t; i < n4; i += 256u) {
+    let j = i * 4u;
+    rt_q[i] = vec4<f32>(rt_p[j], select(-1.0, rt_p[min(j + 1u, 1023u)], j + 1u < n), select(-1.0, rt_p[min(j + 2u, 1023u)], j + 2u < n),
+      select(-1.0, rt_p[min(j + 3u, 1023u)], j + 3u < n));
+  }
+  workgroupBarrier();
   for (var i: u32 = t; i < n; i += 256u) {
     let p = rt_p[i];
     var r: u32 = 0u;
-    for (var j: u32 = 0u; j < n; j++) { let q = rt_p[j]; r += select(0u, 1u, q > p || (q == p && j < i)); }
+    for (var j4: u32 = 0u; j4 < n4; j4++) {
+      let q = rt_q[j4]; let j = j4 * 4u;
+      r += select(0u, 1u, q.x > p || (q.x == p && j < i)) + select(0u, 1u, q.y > p || (q.y == p && j + 1u < i))
+         + select(0u, 1u, q.z > p || (q.z == p && j + 2u < i)) + select(0u, 1u, q.w > p || (q.w == p && j + 3u < i));
+      if (r >= ${K}u) { break; }
+    }
     if (r < ${K}u && p == p) { rt_ki[r] = i; rt_kv[r] = p; }
   }
   workgroupBarrier();
@@ -373,16 +389,188 @@ ${tree(WG, KS * R, `${P}_red`)}
 }`;
 }
 
-// The fused kernels for one engine: K (top-k), R (output rows per moe_dnc workgroup), and the
-// (routed, shared) format pairs the model's layers need for gate/up and for down.
-export function moeFusedWGSL({ K, R = 2, gu = [], dn = [] }) {
+// ---- fused kernels, wide layout (engine option moeFusedLayout: the default on Apple GPUs) ----
+// The kernels above give each thread a quarter of one 32-weight block per row, then reduce 2 x ROWS (moe_gus) or
+// (K + 1) x R (moe_dnc) arrays over all 256 / 64 threads. At the 35B-A3B shape (dIn 2048 / 512) that is one block
+// per thread and an 8- / 6-level workgroup-memory tree: on an M5 Max (Chrome / Metal) they are barrier bound
+// (~280 / ~230 GB/s against the ~380-440 GB/s of the dense GEMVs; docs/bench-log.md, 2026-09-27).
+// The wide layout applies the unfused kernels' "wide" option to the fused ones: a workgroup of WG threads is cut
+// into groups of TPR threads, each group owns R consecutive rows, each thread owns whole blocks (one 16 B
+// vec4<u32> load per Q4 block, two per Q8 block, x as 8 vec4s) and adds nb / TPR of them per row, and each group
+// reduces its own rows with a log2(TPR)-level tree. Each (column, slot) pair still runs the same code whatever
+// the pass width, so the batched path (verify / prefill) stays bit-identical to the one-token path. The sums are
+// in another order than the legacy layout's, so the MoE bits differ from it (equally valid; the MoE goldens are
+// llama.cpp text). The shared expert's packed gate/up buffer and its down weights are read as vec4<u32> too
+// (the engine rounds the packed buffer up to 16 B; the up qs offset oUq must be a multiple of 4 words).
+// Picked by tests/bench/moe_fused_sweep.js on the M5 Max (Deno / Metal, interleaved, 2026-09-28): per launch vs the
+// legacy kernels, moe_gus ~0.55x (TPR 16 / 32 at R 1 best; R 4 and TPR 8 slower), moe_dnc ~0.65x (TPR 8 / 16 best;
+// TPR 1 / 2 and R 2 much slower). On the GB10 (Vulkan) the wide moe_dnc is slower than the legacy one.
+export const MOEF_WIDE = Object.freeze({
+  // gate/up (512 x 2048 per expert, 64 blocks per row): 16 threads x 4 blocks per row, 8 rows per workgroup
+  gu: Object.freeze({ WG: 128, TPR: 16, R: 1 }),
+  // down (2048 x 512 per expert, 16 blocks per row): 8 threads x 2 blocks per row, 8 rows per workgroup
+  dn: Object.freeze({ WG: 64, TPR: 8, R: 1 }),
+});
+// opt: undefined / "legacy" -> null (the legacy fused kernels above) | "wide" (MOEF_WIDE) | { gu?: {...}, dn?: {...} }
+// (partial overrides of MOEF_WIDE). Returns null or { gu, dn } with WG, TPR, R and rows (= (WG / TPR) * R) resolved.
+export function moeFusedLayout(opt, K = 8) {
+  if (opt == null || opt === "legacy") return null;
+  if (typeof opt === "string" && opt !== "wide") throw new Error(`moeFusedLayout: unknown preset ${opt}`);
+  const o = typeof opt === "string" ? {} : opt;
+  const one = (kind) => {
+    const c = { ...MOEF_WIDE[kind], ...(o[kind] || {}) }, { WG, TPR, R } = c;
+    if (!pow2(WG) || WG > 256 || WG < 4) throw new Error(`moeFusedLayout.${kind}.WG must be a power of two in [4, 256] (got ${WG})`);
+    if (!pow2(TPR) || TPR > WG) throw new Error(`moeFusedLayout.${kind}.TPR must be a power of two <= WG (got ${TPR})`);
+    if (!Number.isInteger(R) || R < 1 || R > 4 || R > TPR) throw new Error(`moeFusedLayout.${kind}.R must be an integer in [1, min(4, TPR)] (got ${R})`);
+    const red = (kind === "gu" ? 2 : K + 1) * R * WG * 4;
+    if (red > WG_MEM) throw new Error(`moeFusedLayout.${kind}: ${red} B of reduction scratch exceeds ${WG_MEM} B of workgroup memory`);
+    return Object.freeze({ WG, TPR, R, rows: (WG / TPR) * R });
+  };
+  return Object.freeze({ gu: one("gu"), dn: one("dn") });
+}
+
+// One wide block term: scale sc times the dot of weight vec4 w (Q4) or wa / wb (Q8) with x0 .. x7 (the block's 32 inputs).
+// Q4_0 word i holds weights 4i .. 4i + 3 (low nibbles) and 16 + 4i .. (high nibbles); Q8_0 word i holds weights 4i .. 4i + 3.
+function termWide(fmt, sc, w, O) {
+  if (fmt === "q4") {
+    const p = (i) => `(dot(${O.q4lo(`${w}[${i}u]`)}, x${i}) + dot(${O.q4hi(`${w}[${i}u]`)}, x${i + 4}))`;
+    return `${sc} * ((${p(0)} + ${p(1)}) + (${p(2)} + ${p(3)}))`;
+  }
+  const d = (v, i, s) => `dot(${O.i8x4(`${v}[${i}u]`)}, x${s})`;
+  const h = (v, o) => `((${d(v, 0, o)} + ${d(v, 1, o + 1)}) + (${d(v, 2, o + 2)} + ${d(v, 3, o + 3)}))`;
+  return `${sc} * (${h(`${w}a`, 0)} + ${h(`${w}b`, 4)})`;
+}
+// the weight vec4 load(s) of block bi from vec4 array Q at vec4 offset qo ("" or "o + ")
+const wLoadWide = (fmt, w, Q, qo, bi) => fmt === "q4" ? `let ${w} = ${Q}[${qo}${bi}];`
+  : `let ${w}a = ${Q}[${qo}${bi} * 2u]; let ${w}b = ${Q}[${qo}${bi} * 2u + 1u];`;
+// block bi's f16 scale from u32 array SC, or (vec4 = true) from vec4<u32> array SC at word offset so
+const scWide = (SC, bi, vec4 = false, so = "") => vec4 ? `unpack2x16float(${SC}[(${so} + (${bi} >> 1u)) >> 2u][(${so} + (${bi} >> 1u)) & 3u])[${bi} & 1u]`
+  : `unpack2x16float(${SC}[${bi} >> 1u])[${bi} & 1u]`;
+const xWide = (X, xc) => Array.from({ length: 8 }, (_, s) => `let x${s} = ${X}[${xc} + b * 8u + ${s}u];`).join(" ");
+// reduction of n arrays of WG floats over the TPR lanes of each group (log2 TPR barrier levels)
+const groupTree = (WG, TPR, n, red) => `
+  workgroupBarrier();${TPR === 1 ? "" : `
+  for (var st: u32 = ${TPR / 2}u; st > 0u; st >>= 1u) {
+    if (lane < st) {
+${Array.from({ length: n }, (_, a) => `      ${red}[${a * WG}u + t] += ${red}[${a * WG}u + t + st];`).join("\n")}
+    }
+    workgroupBarrier();
+  }`}`;
+
+// gate/up, wide layout: same bindings, grid y and output as gusKernel; grid x = ceil(max(dOut, sDim) / c.rows).
+export function gusKernelWide(fmt, sfmt, K, c, O = FOPS) {
+  const KS = K + 1, P = `gs${fmt}${sfmt}`, D = O.div, { WG, TPR, R } = c, RPW = (WG / TPR) * R;
+  const rs = Array.from({ length: R }, (_, r) => r), each = (f, sep = "\n") => rs.map(f).join(sep);
+  return `
+@group(1) @binding(0) var<storage, read> ${P}_gq: array<vec4<u32>>;
+@group(1) @binding(1) var<storage, read> ${P}_gs: array<u32>;
+@group(1) @binding(2) var<storage, read> ${P}_uq: array<vec4<u32>>;
+@group(1) @binding(3) var<storage, read> ${P}_us: array<u32>;
+@group(1) @binding(4) var<storage, read> ${P}_x: array<vec4<f32>>;
+@group(1) @binding(5) var<storage, read_write> ${P}_h: array<f32>;
+@group(1) @binding(6) var<storage, read> ${P}_sel: array<u32>;
+@group(1) @binding(7) var<storage, read> ${P}_sh: array<vec4<u32>>;
+@group(1) @binding(8) var<uniform> ${P}_s: MOEF;
+var<workgroup> ${P}_red: array<f32, ${2 * R * WG}>;
+@compute @workgroup_size(${WG})
+fn moe_gus_${fmt}_${sfmt}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let S = ${P}_s; let t = lid.x; let cs = wg.y; let col = ${D("cs", `${KS}u`)}; let slot = cs - col * ${KS}u;
+  let lane = t % ${TPR}u; let grp = ${D("t", `${TPR}u`)}; let nb = ${D("S.dIn", "32u")}; let row0 = wg.x * ${RPW}u + grp * ${R}u; let xc = col * (${D("S.xs", "4u")});
+${each((r) => `  var g${r}: f32 = 0.0; var u${r}: f32 = 0.0;`)}
+  var dOut = S.dOut;
+  if (slot < ${K}u) {
+    let e = ${P}_sel[cs];
+${each((r) => `    let er${r} = e * S.dOut + min(row0 + ${r}u, S.dOut - 1u);`)}
+    for (var b: u32 = lane; b < nb; b += ${TPR}u) {
+      ${xWide(`${P}_x`, "xc")}
+${each((r) => `      let bi${r} = er${r} * nb + b; ${wLoadWide(fmt, `qg${r}`, `${P}_gq`, "", `bi${r}`)} ${wLoadWide(fmt, `qu${r}`, `${P}_uq`, "", `bi${r}`)}
+      g${r} += ${termWide(fmt, scWide(`${P}_gs`, `bi${r}`), `qg${r}`, O)};
+      u${r} += ${termWide(fmt, scWide(`${P}_us`, `bi${r}`), `qu${r}`, O)};`)}
+    }
+  } else {
+    dOut = S.sDim;
+    let ou = S.oUq >> 2u;
+${each((r) => `    let sr${r} = min(row0 + ${r}u, S.sDim - 1u);`)}
+    for (var b: u32 = lane; b < nb; b += ${TPR}u) {
+      ${xWide(`${P}_x`, "xc")}
+${each((r) => `      let bi${r} = sr${r} * nb + b; ${wLoadWide(sfmt, `qg${r}`, `${P}_sh`, "", `bi${r}`)} ${wLoadWide(sfmt, `qu${r}`, `${P}_sh`, "ou + ", `bi${r}`)}
+      g${r} += ${termWide(sfmt, scWide(`${P}_sh`, `bi${r}`, true, "S.oGs"), `qg${r}`, O)};
+      u${r} += ${termWide(sfmt, scWide(`${P}_sh`, `bi${r}`, true, "S.oUs"), `qu${r}`, O)};`)}
+    }
+  }
+${each((r) => `  ${P}_red[${r * WG}u + t] = g${r}; ${P}_red[${(R + r) * WG}u + t] = u${r};`)}
+${groupTree(WG, TPR, 2 * R, `${P}_red`)}
+  if (lane < ${R}u) {
+    let row = row0 + lane;
+    if (row < dOut) { let gg = ${P}_red[lane * ${WG}u + grp * ${TPR}u]; ${P}_h[cs * S.ys + row] = gg / (1.0 + exp(-gg)) * ${P}_red[(${R}u + lane) * ${WG}u + grp * ${TPR}u]; }
+  }
+}`;
+}
+
+// down + combine + residual, wide layout: same bindings, grid y and epilogue (order of the combine) as dncKernel;
+// grid x = ceil(dOut / c.rows).
+export function dncKernelWide(fmt, sfmt, K, c, O = FOPS) {
+  const KS = K + 1, P = `dc${fmt}${sfmt}`, D = O.div, { WG, TPR, R } = c, RPW = (WG / TPR) * R;
+  const ks = Array.from({ length: K }, (_, k) => k), rs = Array.from({ length: R }, (_, r) => r);
+  const acc = (k, r) => `y${k}_${r}`;
+  return `
+@group(1) @binding(0) var<storage, read> ${P}_q: array<vec4<u32>>;
+@group(1) @binding(1) var<storage, read> ${P}_sc: array<u32>;
+@group(1) @binding(2) var<storage, read> ${P}_h: array<vec4<f32>>;
+@group(1) @binding(3) var<storage, read_write> ${P}_x: array<f32>;
+@group(1) @binding(4) var<storage, read> ${P}_sel: array<u32>;
+@group(1) @binding(5) var<storage, read> ${P}_w: array<f32>;
+@group(1) @binding(6) var<storage, read> ${P}_sq: array<vec4<u32>>;
+@group(1) @binding(7) var<storage, read> ${P}_ss: array<u32>;
+@group(1) @binding(8) var<uniform> ${P}_s: MOEF;
+var<workgroup> ${P}_red: array<f32, ${KS * R * WG}>;
+@compute @workgroup_size(${WG})
+fn moe_dnc_${fmt}_${sfmt}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let S = ${P}_s; let t = lid.x; let col = wg.y; let lane = t % ${TPR}u; let grp = ${D("t", `${TPR}u`)};
+  let nb = ${D("S.dIn", "32u")}; let nbs = ${D("S.sDim", "32u")}; let row0 = wg.x * ${RPW}u + grp * ${R}u; let hs4 = ${D("S.ys", "4u")};
+${rs.map((r) => `  let rr${r} = min(row0 + ${r}u, S.dOut - 1u);`).join("\n")}
+${ks.map((k) => `  let e${k} = ${P}_sel[col * ${KS}u + ${k}u]; let xc${k} = (col * ${KS}u + ${k}u) * hs4;
+  ${rs.map((r) => `var ${acc(k, r)}: f32 = 0.0; let er${k}_${r} = e${k} * S.dOut + rr${r};`).join(" ")}`).join("\n")}
+  ${rs.map((r) => `var ${acc(K, r)}: f32 = 0.0;`).join(" ")}
+  let xcs = (col * ${KS}u + ${K}u) * hs4;
+  for (var b: u32 = lane; b < nb; b += ${TPR}u) {
+${ks.map((k) => `    {
+      ${xWide(`${P}_h`, `xc${k}`)}
+${rs.map((r) => `      let bi${r} = er${k}_${r} * nb + b; ${wLoadWide(fmt, `q${r}`, `${P}_q`, "", `bi${r}`)}
+      ${acc(k, r)} += ${termWide(fmt, scWide(`${P}_sc`, `bi${r}`), `q${r}`, O)};`).join("\n")}
+    }`).join("\n")}
+  }
+  for (var b: u32 = lane; b < nbs; b += ${TPR}u) {
+    ${xWide(`${P}_h`, "xcs")}
+${rs.map((r) => `    let bi${r} = rr${r} * nbs + b; ${wLoadWide(sfmt, `q${r}`, `${P}_sq`, "", `bi${r}`)}
+    ${acc(K, r)} += ${termWide(sfmt, scWide(`${P}_ss`, `bi${r}`), `q${r}`, O)};`).join("\n")}
+  }
+${Array.from({ length: KS }, (_, k) => rs.map((r) => `  ${P}_red[${(k * R + r) * WG}u + t] = ${acc(k, r)};`).join("\n")).join("\n")}
+${groupTree(WG, TPR, KS * R, `${P}_red`)}
+  if (lane < ${R}u) {
+    let row = row0 + lane;
+    if (row < S.dOut) {
+      let wb = col * ${KS}u; let rb = grp * ${TPR}u;
+      var o: f32 = 0.0;
+      for (var k: u32 = 0u; k < ${K}u; k++) { o += ${P}_w[wb + k] * ${P}_red[(k * ${R}u + lane) * ${WG}u + rb]; }
+      o += ${P}_w[wb + ${K}u] * ${P}_red[(${K * R}u + lane) * ${WG}u + rb];
+      ${P}_x[col * S.xs + row] += o;
+    }
+  }
+}`;
+}
+
+// The fused kernels for one engine: K (top-k), R (output rows per legacy moe_dnc workgroup), the
+// (routed, shared) format pairs the model's layers need for gate/up and for down, and layout
+// (moeFusedLayout(...): null = the legacy kernels, else the wide ones).
+export function moeFusedWGSL({ K, R = 2, gu = [], dn = [], layout = null }) {
   if (!(K >= 1 && K <= 16) || ![1, 2, 4].includes(R)) throw new Error(`moeFusedWGSL: K ${K}, R ${R}`);
   return /* wgsl */ `
 // ---------------- fused mixture of experts (engine/wgsl/moe.js moeFusedWGSL) ----------------
 struct MOEF { dOut: u32, dIn: u32, sDim: u32, nExp: u32, xs: u32, ys: u32, norm: u32, shOff: u32, oUq: u32, oGs: u32, oUs: u32, pad: u32 };
 ${routeKernel(K)}
-${gu.map(([f, s]) => gusKernel(f, s, K)).join("\n")}
-${dn.map(([f, s]) => dncKernel(f, s, K, R)).join("\n")}
+${gu.map(([f, s]) => layout ? gusKernelWide(f, s, K, layout.gu) : gusKernel(f, s, K)).join("\n")}
+${dn.map(([f, s]) => layout ? dncKernelWide(f, s, K, layout.dn) : dncKernel(f, s, K, R)).join("\n")}
 `;
 }
 

@@ -4,7 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
-<title>pooled</title>
+<title>pooled: pool your devices, run AI together</title>
+<link rel="canonical" href="https://pooled.run/">
 <meta name="description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="pooled">
@@ -19,6 +20,7 @@
 <meta name="twitter:title" content="pooled: pool your devices, run AI together">
 <meta name="twitter:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
 <meta name="twitter:image" content="https://pooled.run/site/og.png">
+<meta name="twitter:image:alt" content="The Pooled demo: a Tetris game an agent wrote, on a model pooled across three devices">
 <meta name="theme-color" content="#F6F5F1">
 <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=3">
 <link rel="manifest" href="/site.webmanifest?v=2">
@@ -294,16 +296,17 @@
 
         <!-- the caption: which step this is; each dot jumps to one -->
         <div class="stepbar" id="stepbar">
-          <p class="sb-now"><span class="sb-n" id="sbN">8/8</span><span class="sb-t" id="sbT" aria-live="polite">Ask for a change. It edits the code and reloads.</span></p>
+          <p class="sb-now"><span class="sb-n" id="sbN">8/8</span><span class="sb-t" id="sbT" aria-live="off">Ask for a change. It edits the code and reloads.</span></p>
+          <!-- tabindex=-1 until demo.js runs: without JS the steps are a plain list, not dead buttons -->
           <ol class="sb-dots" aria-label="Steps">
-            <li><button type="button" data-step="0"><i></i><span class="lbl">Start a room. Your laptop already has a name.</span></button></li>
-            <li><button type="button" data-step="1"><i></i><span class="lbl">Join from your desktop with the code</span></button></li>
-            <li><button type="button" data-step="2"><i></i><span class="lbl">Each device lends some memory. A friend's phone joins in too.</span></button></li>
-            <li><button type="button" data-step="3"><i></i><span class="lbl">Pick a model that fits. Each device downloads only its own layers.</span></button></li>
-            <li><button type="button" data-step="4"><i></i><span class="lbl">Every word passes through every device, 40 layers in total.</span></button></li>
-            <li class="gap"><button type="button" data-step="5"><i></i><span class="lbl">Switch to Code and ask for a game</span></button></li>
-            <li><button type="button" data-step="6"><i></i><span class="lbl">It writes the files and serves them on :5173</span></button></li>
-            <li><button type="button" data-step="7"><i></i><span class="lbl">Ask for a change. It edits the code and reloads.</span></button></li>
+            <li><button type="button" data-step="0" tabindex="-1"><i></i><span class="lbl">Start a room. Your laptop already has a name.</span></button></li>
+            <li><button type="button" data-step="1" tabindex="-1"><i></i><span class="lbl">Join from your desktop with the code</span></button></li>
+            <li><button type="button" data-step="2" tabindex="-1"><i></i><span class="lbl">Each device lends some memory. A friend's phone joins in too.</span></button></li>
+            <li><button type="button" data-step="3" tabindex="-1"><i></i><span class="lbl">Pick a model that fits. Each device downloads only its own layers.</span></button></li>
+            <li><button type="button" data-step="4" tabindex="-1"><i></i><span class="lbl">Every word passes through every device, 40 layers in total.</span></button></li>
+            <li class="gap"><button type="button" data-step="5" tabindex="-1"><i></i><span class="lbl">Switch to Code and ask for a game</span></button></li>
+            <li><button type="button" data-step="6" tabindex="-1"><i></i><span class="lbl">It writes the files and serves them on :5173</span></button></li>
+            <li><button type="button" data-step="7" tabindex="-1"><i></i><span class="lbl">Ask for a change. It edits the code and reloads.</span></button></li>
           </ol>
           <button class="replay" id="replay" type="button" aria-label="Replay from the start" title="Replay"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v3h3"/></svg></button>
         </div>

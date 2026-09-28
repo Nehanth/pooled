@@ -29,7 +29,7 @@ import { runJsTool, runJsAvailable } from "../harness/run-js.js";
 import { mountPreview, openPreviewTab } from "../harness/preview-frame.js";
 import { PreviewPublisher, PreviewSubscriber } from "../harness/preview-sync.js";
 import { lineDiff } from "../harness/diff.js";
-import { listProjects, createProject, openProject, openFolder, canOpenFolder, saveSession, loadSession } from "../harness/projects.js";
+import { listProjects, createProject, openProject, openFolder, canOpenFolder, saveSession, loadSession, slugify } from "../harness/projects.js";
 import { roomModel } from "../harness/room-model.js";
 import { detectStyle } from "../harness/tools.js";
 import { normPath, riskyPath } from "../harness/workspace.js";
@@ -177,8 +177,12 @@ export async function initCode(api, { mock = null } = {}) {
   function fillProjects(list, cur, { guest = false } = {}) {
     const sel = $("code-proj-select");
     sel.replaceChildren(new Option(list.length ? "Open a project…" : "No projects yet", ""));
+    const n = new Map();
+    for (const p of list) n.set(p.name, (n.get(p.name) || 0) + 1);
     for (const p of list) {
-      const o = new Option(p.name + (p.kind === "folder" ? " (folder)" : ""), p.id);
+      // two projects with one name: the later ones carry their number (opfs:counter-2 is "counter (2)")
+      const k = n.get(p.name) > 1 && new RegExp(`^opfs:${slugify(p.name)}-(\\d+)$`).exec(p.id)?.[1];
+      const o = new Option(p.name + (k ? ` (${k})` : "") + (p.kind === "folder" ? " (folder)" : ""), p.id);
       o.disabled = guest && p.kind === "folder";   // a folder on the host's disk: the host opens it
       sel.add(o);
     }
@@ -193,7 +197,7 @@ export async function initCode(api, { mock = null } = {}) {
   function closeProject({ keepQueue = false } = {}) {
     if (running) ctrl?.abort();
     if (!keepQueue) for (const q of queue.splice(0)) tell(q.from, "the project changed: your queued request was dropped", true);
-    publisher?.close(); server?.close();
+    server?.close(); publisher?.close();   // in this order: the server's stops reach the members (ai-pv-stop) before the publisher unsubscribes
     for (const port of [...ui.ports.keys()]) ui.dropPort(port);
     project = server = publisher = agent = model = null; agentSrc = null; tools = [];
   }
@@ -274,16 +278,18 @@ export async function initCode(api, { mock = null } = {}) {
     try { ui.fileChanged(p, await project.ws.read(p)); } catch {}
   }
 
+  // the host's project controls while the agent works: they say why nothing happens (members hear the same)
+  const busyNote = () => localNote("the agent is working: try again when it is done", true);
   $("code-proj-select").addEventListener("change", async (e) => {
     const id = e.target.value;
     if (!isHost()) { if (id && id !== peerProj.cur) askHost({ t: "ai-code-cmd", cmd: "open", id }); e.target.value = peerProj.cur; return; }
     if (!id || id === project?.id) return;
-    if (running) { e.target.value = project?.id || ""; return; }
+    if (running) { e.target.value = project?.id || ""; busyNote(); return; }
     try { await useProject(await openProject(id)); } catch (err) { localNote(err.message, true); refreshProjects(); }
   });
   const newName = $("code-new-name");
   $("code-new").addEventListener("click", () => {
-    if (running) return;
+    if (running) { busyNote(); return; }
     const on = newName.hidden;
     newName.hidden = !on; $("code-proj-select").hidden = on;
     if (on) { newName.value = ""; newName.focus(); }
@@ -298,13 +304,15 @@ export async function initCode(api, { mock = null } = {}) {
   });
   $("code-open").dataset.can = canOpenFolder() ? "1" : "";
   $("code-open").addEventListener("click", async () => {
-    if (running || !isHost()) return;
+    if (!isHost()) return;
+    if (running) { busyNote(); return; }
     try { const p = await openFolder(); if (p) await useProject(p); } catch (err) { localNote("could not open the folder: " + err.message, true); }
   });
-  $("code-newtask").addEventListener("click", () => { if (isHost()) newTask(); else askHost({ t: "ai-code-cmd", cmd: "newtask" }); });
+  $("code-newtask").addEventListener("click", () => { if (!isHost()) askHost({ t: "ai-code-cmd", cmd: "newtask" }); else if (running) busyNote(); else newTask(); });
   function newTask(by = null) {
     if (running || !project) return false;
     agent?.reset(); sessionJson = null;
+    if (model?.stats) model.stats.last = null;   // the meter measures the fresh conversation, not the last run's prompt
     mid = "";
     note(`new task${by ? ` (${by})` : ""}: the agent starts fresh · files and previews stay`);
     save();
@@ -316,7 +324,7 @@ export async function initCode(api, { mock = null } = {}) {
     if (project?.kind !== "folder") userAuto = e.target.checked;
     sendProjects();
   });
-  $("pv-to-agent").addEventListener("click", () => { $("code-prompt").value = "Fix the errors in the preview console"; grow(); $("code-prompt").focus(); });
+  $("pv-to-agent").addEventListener("click", () => { ui.tab("agent"); $("code-prompt").value = "Fix the errors in the preview console"; grow(); $("code-prompt").focus(); });
 
   // a line only this screen sees (not part of the session)
   function localNote(text, err = false) { ui.apply({ t: "ai-code-note", text, err }); }
@@ -349,13 +357,13 @@ export async function initCode(api, { mock = null } = {}) {
   }
   async function approve(call, info) {
     const i = callIdx.get(call);
-    const diff = info ? makeDiff(info) : null;
+    const diff = info && !info.error ? makeDiff(info) : null;   // a call that fails changes nothing: no diff on its card
     // a file of a folder on disk that can run commands (package.json, a script, a dotfile) always
     // asks, whatever auto-approve and "Allow edits for this task" say
     if (diff && project?.kind === "folder" && riskyPath(diff.path)) diff.risky = true;
     // a failing edit is not worth a question (the tool returns the error to the model), nor is a
     // write that changes nothing
-    const same = diff && !diff.error && diff.rows && !diff.isNew && !diff.add && !diff.del;
+    const same = diff && diff.rows && !diff.isNew && !diff.add && !diff.del;
     const auto = !diff?.risky && ($("code-auto").checked || allowTask || info?.error || same);
     tool(i, { state: auto ? "approved" : "pending", diff }, { diff: wireDiff(diff) });
     if (auto) return true;
@@ -484,7 +492,8 @@ export async function initCode(api, { mock = null } = {}) {
     handEdits.clear();
     try { r = await agent.run(text + told, { signal: ctrl.signal }); }
     catch (err) { console.error(err); r = { steps: 0, calls: 0, reason: "error" }; note("error: " + err.message, true); }
-    finally { flushTok(); api.unlock(); }
+    // a live chunk still waiting for its timer belongs to this run: dropped, so it never lands after its end
+    finally { flushTok(); clearTimeout(liveTimer); liveTimer = 0; liveRaw = null; liveSent = 0; api.unlock(); }
     if (r.reason === "stopped") note("stopped");
     if (r.reason === "context") note(r.text, true);
     emit({ t: "ai-code-done", mid, steps: r.steps, reason: r.reason, stats: stats(r, t0, gen0) });
@@ -756,7 +765,8 @@ export async function initCode(api, { mock = null } = {}) {
       if (api.hostId() && api.peers().includes(api.hostId())) api.send(api.hostId(), { t: "ai-code-sync" });
       peerRunning();
     }
-    if (!$("code-row").hidden) setTimeout(() => $("code-prompt").focus(), 0);
+    // not on touch screens: a focused prompt opens the keyboard (and the keyboard layout) before anyone asked to type
+    if (!$("code-row").hidden && !matchMedia("(pointer: coarse)").matches) setTimeout(() => $("code-prompt").focus(), 0);
   }
   api.onRole(() => {
     const host = isHost();

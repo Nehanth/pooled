@@ -176,19 +176,23 @@
     const settle = () => { P.forEach(p => { const h = home(p, t); p.x = h[0]; p.y = h[1]; }); };
 
     if (RM) {
-      const still = () => { if (!size()) return; t = 3; if (o.logo) gather = t - 10; settle(); draw(); };
+      // one frame: the closer's mark already formed and crisp (gather >= 0, long enough ago)
+      const still = () => { if (!size()) return; t = o.logo ? 13 : 3; if (o.logo) gather = t - 10; settle(); draw(); };
       still(); addEventListener("resize", still);
+      if ("ResizeObserver" in window) new ResizeObserver(still).observe(c);
       return { still };
     }
     size(); settle(); draw();
     addEventListener("resize", () => { size(); draw(); });
+    // the canvas's box changes without a window resize too (the web font lands, the section reflows)
+    if ("ResizeObserver" in window) new ResizeObserver(() => { size(); draw(); }).observe(c);
     if ("IntersectionObserver" in window) {
       new IntersectionObserver(es => {
-        visible = es[0].isIntersecting;
+        visible = es[es.length - 1].isIntersecting;   // the latest entry: one batch can carry [false, true]
         if (visible) { last = 0; wake(); } else if (raf) { cancelAnimationFrame(raf); raf = 0; }
       }).observe(c);
       if (o.logo) new IntersectionObserver((es, io) => {
-        if (!es[0].isIntersecting) return;
+        if (!es.some(e => e.isIntersecting)) return;
         measure(); gather = t; io.disconnect();
       }, { threshold: .3 }).observe(c.parentNode);   // the closer section, 30% on screen
     } else { visible = true; if (o.logo) gather = 0; }
