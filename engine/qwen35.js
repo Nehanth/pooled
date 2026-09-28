@@ -39,6 +39,12 @@ export function prefillMathFeatures(adapter, mode = envPrefillMath()) {
 
 // MoE prefill ubatch (tokens) for the default expert-grouped + wide prefill (moeGroupPrefill, prefillUbatch)
 export const MOE_PREFILL_UBATCH = 256;
+// wide prefill: layers per command buffer. A wide chunk encodes a compute pass and a copy per NC-column
+// sub-batch per layer, so one command buffer for the whole model grows with ubatch x layers. On Apple M5
+// (Metal, Deno / wgpu) a whole-model buffer at ubatch 256 lost the device (27B and MoE); 192 columns, or 28
+// of the MoE's 40 layers at 256, passed. Submitting every 8 layers fixes it; the results are bit-identical
+// (the GEMM has no split-K, so chunking and submit boundaries do not change the arithmetic).
+export const WIDE_SUBMIT_LAYERS = 8;
 
 export class Qwen35Engine {
   // Option defaults applied under every create() call's own options (test runners set these from the
@@ -2073,8 +2079,11 @@ export class Qwen35Engine {
     if (gB && this.layers.some((L) => this._wideGrp(L, w)) && gB.sortW !== w) {   // the grouped sort's pair count
       q.writeBuffer(gB.sortU, 0, new Uint32Array([w * this.moe.KS, ...gB.sortArgs])); gB.sortW = w;
     }
-    const enc = this.device.createCommandEncoder();
-    for (let l = 0; l < this.layers.length; l++) this._encodeLayerWide(enc, l, basePos, w);
+    let enc = this.device.createCommandEncoder();
+    for (let l = 0; l < this.layers.length; l++) {
+      if (l && l % WIDE_SUBMIT_LAYERS === 0) { q.submit([enc.finish()]); enc = this.device.createCommandEncoder(); }
+      this._encodeLayerWide(enc, l, basePos, w);
+    }
     enc.copyBufferToBuffer(Wx.buf, (w - 1) * Wx.stride, this.x, 0, this.dims.dim * 4);
     q.submit([enc.finish()]);
     if (this.mtp && this.mtpFill !== false) for (let j = 0; j < w / NC; j++) {
