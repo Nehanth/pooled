@@ -49,6 +49,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 HOST_ARGS=("$@")
+# tracing (--trace-rounds in the host's args): every guest traces too, the computers as in xroom_pair.sh
+# (--trace-out) and the phone with xroom_phone.mjs --trace-out (the whole session); the chain report
+# (tests/e2e/xroom_chain_report.mjs) then splits every traced lap per device. XROOM_PHONE_TRACE=1
+# traces the phone without tracing the host (its cost, or a long run's per-lap numbers over time).
+TRACE=0; for a in "${HOST_ARGS[@]}"; do [ "$a" = --trace-rounds ] && TRACE=1; done
+PTRACE=$TRACE; [ "${XROOM_PHONE_TRACE:-0}" = 1 ] && PTRACE=1
 has() { case ",$DEVICES," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
 for d in ${DEVICES//,/ }; do case "$d" in here|there|phone) ;; *) echo "unknown device $d (here, there, phone)" >&2; exit 2 ;; esac; done
 case "$HOST" in here|there) ;; *) echo "--host here|there (a computer hosts; the room would make it the model host anyway)" >&2; exit 2 ;; esac
@@ -110,6 +116,15 @@ if has here && [ -n "${XROOM_GPURUN:-}" ]; then
   done
   [ "$ok" = 1 ] || { log "this GPU stayed busy"; exit 1; }
 fi
+# the other machine's system clock against this one's (lowest round trip of 5; the chain report uses it
+# only to put a worker's laps into the host's rounds)
+if [ "$USE_THERE" = 1 ]; then
+  best=""; for _ in 1 2 3 4 5; do
+    a=$(date +%s%3N); m=$(remote 'python3 -c "import time; print(int(time.time() * 1000))"' 2>/dev/null | tail -1); b=$(date +%s%3N)
+    [ -n "$m" ] && { r=$((b - a)); o=$((m - (a + b) / 2)); if [ -z "$best" ] || [ "$r" -lt "${best% *}" ]; then best="$r $o"; fi; }
+  done
+  [ -n "$best" ] && echo "mac_minus_here ${best#* } rtt ${best% *}" > "$OUT/clock.txt"
+fi
 REMOTE_IP=""
 if has there; then
   REMOTE_IP=${XROOM_REMOTE_IP:-}
@@ -142,7 +157,8 @@ else
   # and waits for the host's code in a file, as in xroom_pair.sh
   if has here; then
     LSIG=$SIGNAL; [ "$SIGNAL" != cloud ] && LSIG=127.0.0.1:$SIG_PORT
-    $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role guest --signal "$LSIG" --codefile "$OUT/code.txt" --gb "$GUEST_GB" > "$OUT/guest-here.out" 2> "$OUT/guest-here.log" &
+    GT=(); [ "$TRACE" = 1 ] && GT=(--trace-out "$OUT/guest-here.trace.json")
+    $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role guest --signal "$LSIG" --codefile "$OUT/code.txt" --gb "$GUEST_GB" "${GT[@]}" > "$OUT/guest-here.out" 2> "$OUT/guest-here.log" &
     GPIDS+=("$!"); PIDS+=("$!")
     for _ in $(seq 1 1200); do grep -q "waiting for the room code" "$OUT/guest-here.log" 2>/dev/null && break; kill -0 "${GPIDS[0]}" 2>/dev/null || break; sleep 1; done
     grep -q "waiting for the room code" "$OUT/guest-here.log" 2>/dev/null || { log "the guest here did not start"; cat "$OUT/guest-here.out" >&2; exit 1; }
@@ -157,13 +173,15 @@ echo "$CODE" > "$OUT/code.txt"
 log "room $CODE ($DEVICES, host $HOST)"
 if [ "$HOST" = here ] && has there; then
   RSIG=$SIGNAL
-  remote "cd ~/$RDIR && node tests/e2e/xroom.mjs --role guest --signal $RSIG --code $CODE --gb $GUEST_GB --tag $RUN" > "$OUT/guest-there.out" 2> "$OUT/guest-there.log" &
+  GT=""; [ "$TRACE" = 1 ] && GT="--trace-out /tmp/$RUN-guest-trace.json"
+  remote "cd ~/$RDIR && node tests/e2e/xroom.mjs --role guest --signal $RSIG --code $CODE --gb $GUEST_GB $GT --tag $RUN" > "$OUT/guest-there.out" 2> "$OUT/guest-there.log" &
   GPIDS+=("$!"); PIDS+=("$!")
 fi
 PPID_=""
 if has phone; then
   PQ=$(printf '%q' "$PHONE_QUERY")
-  phone_remote "cd $PDIR && node tests/e2e/xroom_phone.mjs --url $PHONE_URL --query $PQ --code $CODE --gb $PHONE_GB --wd-port ${XROOM_PHONE_WDPORT:-4444} --out /tmp/$RUN-phone.json --shot /tmp/$RUN-phone.png --tag $RUN" > "$OUT/phone.out" 2> "$OUT/phone.log" &
+  PT=""; [ "$PTRACE" = 1 ] && PT="--trace-out /tmp/$RUN-phone-trace.json"
+  phone_remote "cd $PDIR && node tests/e2e/xroom_phone.mjs --url $PHONE_URL --query $PQ --code $CODE --gb $PHONE_GB --wd-port ${XROOM_PHONE_WDPORT:-4444} --out /tmp/$RUN-phone.json --shot /tmp/$RUN-phone.png $PT --tag $RUN" > "$OUT/phone.out" 2> "$OUT/phone.log" &
   PPID_=$!; GPIDS+=("$PPID_"); PIDS+=("$PPID_")
 fi
 # the host's exit code in RC; any guest that ends first is a failure (the host would wait for it)
@@ -181,11 +199,15 @@ if has phone; then
   phone_remote "cat /tmp/$RUN-phone.json" > "$OUT/phone.json" 2>/dev/null
   phone_remote "base64 < /tmp/$RUN-phone.png" 2>/dev/null | base64 -d > "$OUT/phone.png" 2>/dev/null
   [ -s "$OUT/phone.json" ] || cp "$OUT/phone.out" "$OUT/phone.json" 2>/dev/null
+  [ "$PTRACE" = 1 ] && phone_remote "cat /tmp/$RUN-phone-trace.json" > "$OUT/phone.trace.json" 2>/dev/null
 fi
+if has there && [ "$TRACE" = 1 ] && [ "$HOST" = here ]; then remote "cat /tmp/$RUN-guest-trace.json" > "$OUT/guest-there.trace.json" 2>/dev/null; fi
 if has there; then { echo "# ping $REMOTE_IP after"; ping -c 20 -i 0.2 -q "$REMOTE_IP" 2>&1 | tail -2; } >> "$OUT/ping.txt"; fi
 if [ -s "$OUT/host.json" ]; then
   PING=(); [ -s "$OUT/ping.txt" ] && PING=(--ping "$OUT/ping.txt" --ping-log "$OUT/ping_during.txt")
   node "$ROOT/tests/e2e/xroom_report.mjs" "$OUT/host.json" "${PING[@]}" > "$OUT/report.txt" 2>&1 || log "report failed (see $OUT/report.txt)"
+  W=(); for f in "$OUT"/guest-here.trace.json "$OUT"/guest-there.trace.json "$OUT"/phone.trace.json; do [ -s "$f" ] && W+=("$f"); done
+  if [ "${#W[@]}" -gt 0 ]; then node "$ROOT/tests/e2e/xroom_chain_report.mjs" "$OUT/host.json" "${W[@]}" --clock "$OUT/clock.txt" > "$OUT/chain.txt" 2>&1 || log "chain report failed (see $OUT/chain.txt)"; fi
 fi
 log "done: $OUT"
 grep -v '^CODE' "$OUT/host.out"

@@ -84,7 +84,11 @@ const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; cha
 function rep(src, a, b) { if (!src.includes(a)) throw new Error("room.js changed: anchor not found: " + a.slice(0, 80)); return src.replace(a, b); }
 // window.__xConns: the room's links, for the WebRTC path the result reports (xroom's linkStats).
 function serveRoom(src) {
-  src = rep(src, "function broadcastAll(obj) {", "window.__xBroadcast = (o) => broadcastAll(o); window.__xConns = () => conns;\nfunction broadcastAll(obj) {");
+  src = rep(src, "function broadcastAll(obj) {", "window.__xBroadcast = (o) => broadcastAll(o); window.__xConns = () => conns;\n" +
+    // the workers' own compute ms per frame kind (their ai-tele reports: an EMA of unpack + layers +
+    // readback, "one" = a plain token, "spec" = a verify block, "pre" = prefill), by device name
+    "window.__xTele = () => Object.fromEntries([...(ai.teleBy || new Map())].map(([id, v]) => [conns.get(id)?.name || id, v]));\n" +
+    "function broadcastAll(obj) {");
   // the cooperative GEMV shape this device's autotune picked (timed at load, so it can differ
   // between loads, and the GEMV's summation order follows it)
   // (--tune WG,ROWS forces a shape instead: the diagnostic for whether the shape changes the output)
@@ -286,7 +290,8 @@ try {
       const pre = /prefill (\d+) tok in ([\d.]+)s/.exec(st), dec = /(\d+) tok · ([\d.]+) tok\/s/.exec(st), acc = /(\d+)% drafts accepted/.exec(st), lk = /(\d+) tok by lookup/.exec(st);
       const answer = await p.evaluate(() => [...document.querySelectorAll(".m.bot .bubble")].pop()?.textContent || "");
       const crumb = await p.evaluate(() => { try { return JSON.parse(localStorage.getItem("pooled-crumb") || "{}").s || ""; } catch { return ""; } });
-      const row = { idx, mode, prompt: pn, round: r, traced, t0: tRound, t1: Date.now(), ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2],
+      const tele = await p.evaluate(() => window.__xTele?.() || null).catch(() => null);
+      const row = { idx, mode, prompt: pn, round: r, traced, tele, t0: tRound, t1: Date.now(), ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2],
         accepted: acc ? +acc[1] / 100 : null, lookupTok: lk ? +lk[1] : 0, rtt: s.rtt, status: st.slice(0, 240), crumb: crumb.slice(0, 300),
         answerSha: crypto.createHash("sha256").update(answer).digest("hex").slice(0, 16), answer };
       if (traced) {
