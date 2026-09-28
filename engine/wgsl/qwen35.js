@@ -1069,3 +1069,104 @@ fn attn_glue(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id)
   }
 }
 `;
+
+// attn_flash_h: attn_flash with HG of the G query heads that share a kv head per workgroup (grid z =
+// nKV * G / HG instead of nKV), for GPUs that a decode's few (split, kv head) workgroups leave mostly
+// idle: at 1 column and < 256 positions attn_flash launches nKV workgroups (2 on the 35B-A3B), each
+// with G * 64 serial dot products per 64-position chunk. Per head the arithmetic is attn_flash's
+// exactly (the same split and 64-position chunks, the same serial score sum over the head dim, the
+// same running max / sum and the same output order), so the partials are bit-identical; only which
+// workgroup owns a head changes (K and V are read G / HG times, from cache). Other changes, all
+// order-preserving: G and HG are baked in, so the per-head output sums are HG scalar registers (a
+// runtime-indexed private array lives in scratch memory on some compilers); K rows are read as
+// vec4<u32> (8 halves a load) and q as vec4s from workgroup memory; the V loop takes 4 positions a
+// step when the chunk is full. Needs hd % 8 == 0, hd <= 256, HG <= 4 (one thread per score) and G % HG == 0.
+export function flashHeadsWGSL(G, HG) {
+  if (G % HG || HG > 4) throw new Error(`attn_flash_h: ${HG} heads per workgroup (1, 2 or 4, dividing ${G})`);
+  const NHG = G / HG, hs = Array.from({ length: HG }, (_, h) => h);
+  const words = [0, 1, 2, 3].map((j) => `let k${j} = unpack2x16float(kq[${j}]);
+          s += fh_qs[qv + ${j >> 1}u][${(2 * j) % 4}] * k${j}.x;
+          s += fh_qs[qv + ${j >> 1}u][${(2 * j) % 4 + 1}] * k${j}.y;`).join("\n          ");
+  const vstep = (t) => `{
+          let v = unpack2x16float(fh_v[(c0 + ${t}) * kvw + vo])[tid & 1u];
+          ${hs.map((h) => `a${h} += fh_sc[${h * 64}u + ${t}] * v;`).join(" ")}
+        }`;
+  return `
+@group(1) @binding(0) var<storage, read> fh_q: array<f32>;
+@group(1) @binding(1) var<storage, read> fh_k: array<vec4<u32>>;   // f16 pairs, 4 words a load
+@group(1) @binding(2) var<storage, read> fh_v: array<u32>;
+@group(1) @binding(3) var<storage, read_write> fh_o: array<f32>;
+@group(1) @binding(4) var<storage, read_write> fh_ml: array<f32>;
+@group(1) @binding(5) var<uniform> fh: FA;
+var<workgroup> fh_qs: array<vec4<f32>, ${HG * 64}>;   // HG * headDim <= HG * 256
+var<workgroup> fh_sc: array<f32, ${HG * 64}>;
+var<workgroup> fh_m: array<f32, ${HG}>;
+var<workgroup> fh_l: array<f32, ${HG}>;
+var<workgroup> fh_a: array<f32, ${HG}>;
+@compute @workgroup_size(256)
+fn attn_flash_h(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let sp = wg.x; let col = wg.y; let g = wg.z / ${NHG}u; let tid = lid.x;
+  let h0 = g * ${G}u + (wg.z % ${NHG}u) * ${HG}u;   // first query head of this workgroup
+  let seqLen = frame.seqLen + col;
+  let t0 = sp * fh.splitLen;
+  if (t0 >= seqLen) { return; }
+  let t1 = min(seqLen, t0 + fh.splitLen);
+  let hd = cfg.headDim;
+  let hw = hd / 2u; let kvw = cfg.kvDim / 2u;
+  let rs = sqrt(f32(hd));
+  for (var w: u32 = tid; w < ${HG}u * hd / 4u; w += 256u) {
+    let e = col * fh.s0 + h0 * hd + 4u * w;
+    fh_qs[w] = vec4<f32>(fh_q[e], fh_q[e + 1u], fh_q[e + 2u], fh_q[e + 3u]);
+  }
+  if (tid < ${HG}u) { fh_m[tid] = -3.0e38; fh_l[tid] = 0.0; }
+  ${hs.map((h) => `var a${h}: f32 = 0.0;`).join(" ")}
+  let vo = g * hw + tid / 2u;
+  workgroupBarrier();
+  for (var c0: u32 = t0; c0 < t1; c0 += 64u) {
+    let n = min(64u, t1 - c0);
+    if (tid < ${HG * 64}u) {
+      let h = tid / 64u; let t = tid % 64u;
+      if (t < n) {
+        let kb = ((c0 + t) * kvw + g * hw) / 4u;
+        let qb = h * hd / 4u;
+        var s: f32 = 0.0;
+        for (var p: u32 = 0u; p < hw / 4u; p++) {
+          let kq = fh_k[kb + p];
+          let qv = qb + 2u * p;
+          ${words}
+        }
+        fh_sc[tid] = s / rs;
+      }
+    }
+    workgroupBarrier();
+    if (tid < ${HG}u) {
+      let b = tid * 64u;
+      var cm = fh_m[tid];
+      for (var t: u32 = 0u; t < n; t++) { cm = max(cm, fh_sc[b + t]); }
+      let alpha = exp(fh_m[tid] - cm);
+      var l = fh_l[tid] * alpha;
+      for (var t: u32 = 0u; t < n; t++) { let e = exp(fh_sc[b + t] - cm); fh_sc[b + t] = e; l += e; }
+      fh_m[tid] = cm; fh_l[tid] = l; fh_a[tid] = alpha;
+    }
+    workgroupBarrier();
+    if (tid < hd) {
+      ${hs.map((h) => `a${h} *= fh_a[${h}u];`).join(" ")}
+      if (n == 64u) {
+        for (var t: u32 = 0u; t < 64u; t += 4u) {
+        ${[0, 1, 2, 3].map((j) => vstep(j ? `t + ${j}u` : "t")).join("\n        ")}
+        }
+      } else {
+        for (var t: u32 = 0u; t < n; t++) ${vstep("t")}
+      }
+    }
+    workgroupBarrier();
+  }
+  if (tid < hd) {
+    ${hs.map((h) => `fh_o[((col * cfg.nH + h0 + ${h}u) * fh.maxSplits + sp) * hd + tid] = a${h};`).join("\n    ")}
+  }
+  if (tid < ${HG}u) {
+    let b = (col * cfg.nH + h0 + tid) * fh.maxSplits + sp;
+    fh_ml[b * 2u] = fh_m[tid]; fh_ml[b * 2u + 1u] = fh_l[tid];
+  }
+}`;
+}

@@ -7,8 +7,8 @@ import { WGSL } from "./wgsl/base.js";
 import { gemmWGSL, GEMM_S, GEMM_TILE } from "./wgsl/gemm.js";
 import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SGM_SYNTAX, SGM_DEFAULT } from "./wgsl/gemm_sgm.js";
 import { gemmWideWGSL, wideTileConfig } from "./wgsl/gemm_wide.js";
-import { coopWGSL, probeUnpack } from "./wgsl/coop.js";
-import { WGSL2 } from "./wgsl/qwen35.js";
+import { coopWGSL, probeUnpack, coopWideConfig } from "./wgsl/coop.js";
+import { WGSL2, flashHeadsWGSL } from "./wgsl/qwen35.js";
 import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout } from "./wgsl/moe.js";
 import { attnTileWGSL, attnTileConfig } from "./wgsl/attn_tile.js";
 import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows } from "./wgsl/moe_group.js";
@@ -164,7 +164,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, coopWide, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnHeads, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -180,6 +180,10 @@ export class Qwen35Engine {
     this.mvVariant = matvecVariant;
     this.coopWG = coopWG; this.coopRows = coopRows;
     this.NC = batchCols; this.coopRowsB = coopRowsB;   // batched (prefill/verify) column count, rows per WG
+    // coopWide: the dense GEMVs (matvec_*_coop, their _acc and batched twins) in the wide layout (engine/wgsl/coop.js
+    // wideGEMV): { WG, TPR, R } | "wide" (COOP_WIDE) | undefined / null (the coop layout). The fused gate/up GEMVs keep coop.
+    this.coopWideCfg = matvecVariant === "coop" ? coopWideConfig(coopWide) : null;
+    this.mvRows = this.coopWideCfg ? this.coopWideCfg.rows : coopRows;   // rows per one-column GEMV workgroup
     const M = meta;
     const dim = M["qwen35.embedding_length"];
     const nH = M["qwen35.attention.head_count"];
@@ -262,6 +266,11 @@ export class Qwen35Engine {
     this.kvQ8 = this.flash && kvQ8 === true && hd % 32 === 0;
     this.ksPipe = this.kvQ8 ? "kv_store_q8" : "kv_store";
     this.faPipe = this.kvQ8 ? "attn_flash_q8" : "attn_flash";
+    // attnHeads: query heads per flash workgroup (engine/wgsl/qwen35.js attn_flash_h; 1, 2 or 4, dividing
+    // nH / nKV): nKV * G / attnHeads workgroups per split instead of nKV, same bits as attn_flash.
+    // undefined / 0 / G: attn_flash.
+    const G = nH / nKV;
+    this.faHG = this.flash && !this.kvQ8 && [1, 2, 4].includes(attnHeads) && G % attnHeads === 0 && attnHeads < G && hd % 8 === 0 ? attnHeads : 0;
     // two columns per workgroup in batched passes (attn_flash_t2): K/V read once per pair, same bits
     this.attnTileOn = this.flash && !this.kvQ8 && attnTile !== false && 2 * (nH / nKV) * hd <= 3072 && nH / nKV <= 8;
     this.attnTile = this.attnTileOn;
@@ -421,7 +430,7 @@ export class Qwen35Engine {
 
     // ---- pipelines with explicit layouts ----
     const unpack = await probeUnpack(device);
-    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack)
+    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack, this.coopWideCfg)
       + (this.moe ? moeWGSL(this.moeK) : "")
       + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && this.moeGrpTiled ? tiledGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
@@ -429,7 +438,8 @@ export class Qwen35Engine {
       + (this.moeGrpU && !this.moeGrpTiled ? moeGroupWGSL({ K: this.moe.K, R: dnGroupRows(this.moeGrpUC), UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.gemmOn ? gemmWGSL({ N: batchCols, pairs: this._gemmPairs, pairs8: this._gemm8Pairs, UNPACK: unpack, R16: this._pmR16 }) : "")
-      + (this.ubatch ? gemmWideWGSL(this.wideCfg, { UNPACK: unpack }) : "") + WGSL2 });
+      + (this.ubatch ? gemmWideWGSL(this.wideCfg, { UNPACK: unpack }) : "") + WGSL2
+      + (this.faHG ? flashHeadsWGSL(nH / nKV, this.faHG) : "") });
     const C = GPUShaderStage.COMPUTE;
     const layout0 = device.createBindGroupLayout({
       entries: [
@@ -474,6 +484,7 @@ export class Qwen35Engine {
       argmax: ["ro", "rw", "u"], emb_gather: ["ro", "ro", "ro", "rw", "u"],
       topk_a: ["ro", "rw", "u"], topk_b: ["ro", "rw", "u"],
     };
+    if (this.faHG) G1.attn_flash_h = G1.attn_flash;
     if (this.moe) Object.assign(G1, {
       moe_router: ["ro", "rw", "rw", "u"], moe_combine: ["rw", "ro", "ro", "ro", "ro", "u"],
       moe_gu_q4: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"], moe_gu_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"],
@@ -639,7 +650,7 @@ export class Qwen35Engine {
       acc = acc && coop;
       const pipe = coop ? base + "_coop" + (acc ? "_acc" : "") : base;
       const bufs = w.kind === "f32" ? [w.buf, x, y, this._shape(dOut, dIn)] : [w.qs, w.sc, x, y, this._shape(dOut, dIn)];
-      return { pipe, acc, wgs: coop ? Math.ceil(dOut / this.coopRows) : Math.ceil(dOut / 64), bg: this._bg(this.pipes[pipe], 1, bufs) };
+      return { pipe, acc, wgs: coop ? Math.ceil(dOut / this.mvRows) : Math.ceil(dOut / 64), bg: this._bg(this.pipes[pipe], 1, bufs) };
     };
     this._mv = mv;
     const guOp = (wg2, wu2, x, y, dOut, dIn, xB, yB) => {
@@ -705,7 +716,8 @@ export class Qwen35Engine {
       if (!this.fuseProjOn) return null;
       const m = this._fuseW(parts.map(([src, w, rows]) => ({ src, w, rows })), dIn);
       this.fuseStats[m ? "merged" : "apart"]++;
-      const decodeOK = !!m && Qwen35Engine._rowsKeep(parts.map((p) => p[2]), this.coopRows);
+      // (the wide layout has no tail branch: any row grouping keeps a row's arithmetic)
+      const decodeOK = !!m && Qwen35Engine._rowsKeep(parts.map((p) => p[2]), this.coopWideCfg ? 1 : this.coopRows);
       if (decodeOK) this.fuseStats.decodeOps++;
       return m && { ...m, decodeOK };
     };
@@ -1203,6 +1215,8 @@ export class Qwen35Engine {
   _gemmAt(op, nCols) { return !!(op && op.gemm && nCols === this.NC && this.gemm !== false && !(op.gemm.q8 && this.gemm8 === false)); }
   // rows per workgroup for a W-column batched kernel; mirrors rowsFor() in coop.js
   _rowsFor(W) { return Math.max(1, Math.min(8, Math.round(this.coopRowsB * this.NC / W))); }
+  // the same for the batched dense GEMVs (matvec_*_coop_b*), which the wide layout replaces
+  _rowsForMV(W) { return this.coopWideCfg ? this.coopWideCfg.rowsB : this._rowsFor(W); }
   _d3(pass, pipe, bg, wgs) {
     pass.setPipeline(this.pipes[pipe]);
     pass.setBindGroup(0, (this._common || this.bgCommonFor)[pipe]);
@@ -1257,7 +1271,8 @@ export class Qwen35Engine {
         const p = enc.beginComputePass();
         if (this.flash) {
           this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / (this.kvQ8 ? 32 : 2) / 64), 1, 1);
-          this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
+          if (this.faHG) this._dxyz(p, "attn_flash_h", L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nH / this.faHG);
+          else this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
           this._dxyz(p, "attn_combine", L.bgCombine, D.nH, 1, 1);
         } else {
           this._d(p, "attn_scores", L.bgScores, D.nH * seqLen);
@@ -1512,6 +1527,7 @@ export class Qwen35Engine {
       "rmsnorm_mc", "add_res_mc", "dn_gates_mc", "dn_conv_mc", "dn_l2_mc", "dn_pre_mc", "dn_delta_mc", "dn_gatenorm_mc",
       "qsplit_mc", "head_norm_mc", "rope_part_mc", "sigmoid_mul_mc", "attn_glue",
       "attn_scores_mc", "attn_softmax_wg_mc", "attn_out_mc", "kv_store", "attn_flash", "attn_combine", "kv_store_q8", "attn_flash_q8", "attn_flash_t2",
+      ...(this.faHG ? ["attn_flash_h"] : []),
       ...(this.pipes.attn_flash_tile ? ["attn_flash_tile", "attn_combine_tile"] : []),
       ...(this.moe ? ["moe_router", "moe_combine", "moe_gu_q4", "moe_gu_q8", "moe_dn_q4", "moe_dn_q8"] : []),
       ...(this.moeFuse ? ["moe_route", ...this.moe.guPairs.map((p) => "moe_gus_" + p), ...this.moe.dnPairs.map((p) => "moe_dnc_" + p)] : [])];
@@ -1526,11 +1542,11 @@ export class Qwen35Engine {
       const pipe = base + "_coop_b" + (acc ? "_acc" : "");
       const shp = this._shapeB(dOut, dIn, xB.stride / 16, yB.stride / 4);
       const bufs = w.kind === "f32" ? [w.buf, yv(xB), yv(yB), shp] : [w.qs, w.sc, yv(xB), yv(yB), shp];
-      const op = { pipe, acc, wgs: Math.ceil(dOut / this._rowsFor(this.NC)), bg: this._bg(this.pipes[pipe], 1, bufs) };
+      const op = { pipe, acc, wgs: Math.ceil(dOut / this._rowsForMV(this.NC)), bg: this._bg(this.pipes[pipe], 1, bufs) };
       for (const W of [8, 4]) if (this.NC > W) {
         op[`pipe${W}`] = `${base}_coop_b${W}${acc ? "_acc" : ""}`;
         op[`bg${W}`] = this._bg(this.pipes[op[`pipe${W}`]], 1, bufs);
-        op[`wgs${W}`] = Math.ceil(dOut / this._rowsFor(W));   // narrower twins carry more rows per workgroup
+        op[`wgs${W}`] = Math.ceil(dOut / this._rowsForMV(W));   // narrower twins carry more rows per workgroup
       }
       const S2 = this._gemmShapes.get(`${dOut}x${dIn}`);
       if (S2 && xT && (w.kind === "q4" || (w.kind === "q8" && this._gemm8Set.has(`${dIn}:${S2}`)))) {
@@ -1614,7 +1630,7 @@ export class Qwen35Engine {
     // this.layers.length, so prefill can fill the draft cache for a whole chunk in one pass
     // a merged batched op must keep the row grouping of every kernel width it can run at
     const batchWidths = [this.NC, ...[8, 4].filter((W) => this.NC > W)];
-    const batchOK = (f) => batchWidths.every((W) => Qwen35Engine._rowsKeep(f.lens, this._rowsFor(W)));
+    const batchOK = (f) => batchWidths.every((W) => Qwen35Engine._rowsKeep(f.lens, this.coopWideCfg ? 1 : this._rowsFor(W)));
     this.layerB = (this.mtpLayer ? [...this.layers, this.mtpLayer] : this.layers).map((L) => {
       const bgNormC = (w, c) => this._bg2res(this.pipes.rmsnorm,
         [slice(B.x, c), { buffer: w.buf }, slice(B.xn, c), { buffer: this.uDim }]);
@@ -1847,6 +1863,7 @@ export class Qwen35Engine {
         this._dMC(p, "attn_combine_tile", M.combineTile, D.nH * 256, 256, nCols);
       } else {
         if (this.attnTile && M.flashT2 && nCols > 1) this._dMC(p, "attn_flash_t2", M.flashT2, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, Math.ceil(nCols / 2), D.nKV);
+        else if (this.faHG) this._dMC(p, "attn_flash_h", M.flash, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, nCols, D.nH / this.faHG);
         else this._dMC(p, this.faPipe, M.flash, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, nCols, D.nKV);
         this._dMC(p, "attn_combine", M.combine, D.nH * 256, 256, nCols);
       }

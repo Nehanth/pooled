@@ -21,7 +21,7 @@ export async function probeUnpack(device) {
   return device.__unpackOk;
 }
 
-export function coopWGSL(WG = 256, ROWS = 4, WGB = 64, COLS = 4, ROWSB = ROWS, UNPACK = true) {
+export function coopWGSL(WG = 256, ROWS = 4, WGB = 64, COLS = 4, ROWSB = ROWS, UNPACK = true, WIDE = null) {
   // Rows per workgroup for a C-column batched kernel: hold accumulators/thread
   // constant, so the 8- and 4-column twins are not starved of rows when COLS=16.
   const rowsFor = (C) => Math.max(1, Math.min(8, Math.round(ROWSB * COLS / C)));
@@ -372,8 +372,7 @@ var<workgroup> mvc_part: array<f32, ${WG * ROWS}>;   // [${ROWS} rows][${WG} thr
 fn mvf_row(off4: u32, xa: vec4<f32>, xb: vec4<f32>) -> f32 {
   return dot(mv_w4[off4], xa) + dot(mv_w4[off4 + 1u], xb);
 }
-${singleCoop}
-${singleCoopAcc}
+${WIDE ? wideGEMV(WIDE, [COLS, 8, 4].filter((c, i) => i === 0 || c < COLS), { q4lo, q4hi, i8x4 }).single : singleCoop + "\n" + singleCoopAcc}
 
 // ---- batched (COLS-column) variants for prefill / verify: each weight word is
 // loaded and decoded once and applied to C token columns (rowsFor(C) rows per WG). x is [C][xs4] vec4s,
@@ -383,7 +382,7 @@ struct BShape { dOut: u32, dIn: u32, xs4: u32, ys: u32 };
 @group(1) @binding(3) var<uniform> mvb_shape: BShape;
 @group(1) @binding(4) var<uniform> qb_shape: BShape;
 var<workgroup> mvb_part: array<f32, ${2 * rowsFor(4) * WGB}>;
-${[COLS, 8, 4].filter((c, i) => i === 0 || c < COLS).map((C) => [false, true].map((ACC) => ["", "_q8", "_q4"].map((kind) => {
+${WIDE ? wideGEMV(WIDE, [COLS, 8, 4].filter((c, i) => i === 0 || c < COLS), { q4lo, q4hi, i8x4 }).batched : [COLS, 8, 4].filter((c, i) => i === 0 || c < COLS).map((C) => [false, true].map((ACC) => ["", "_q8", "_q4"].map((kind) => {
   const shp = kind === "" ? "mvb_shape" : "qb_shape";
   const xbuf = kind === "" ? "mv_x4" : kind === "_q8" ? "q8_x4" : "q4_x4";
   const ybuf = kind === "" ? "mv_y" : kind === "_q8" ? "q8_y" : "q4_y";
@@ -456,3 +455,100 @@ ${guAll}
 `;
 }
 
+
+// ---- wide GEMV layout (engine option coopWide; for GPUs without subgroups where the coop layout above is
+// load- and barrier-bound, e.g. Apple GPUs in Safari) ----
+// The coop kernels give each thread an 8-weight quarter of a 32-weight block (two 4-byte Q8 loads or one Q4
+// word a block row) and reduce ROWS arrays over the whole workgroup (log2 WG barrier levels). The wide layout
+// is the fused MoE kernels' (engine/wgsl/moe.js, moeFusedLayout "wide") applied to the dense GEMVs: groups of
+// TPR threads, each group owns R consecutive rows, each thread owns whole blocks (b = lane, lane + TPR, ...: one
+// 16-byte vec4<u32> load per Q4 block, two per Q8 block, eight vec4<f32> of x), and each group reduces its rows
+// with a log2(TPR)-level tree. Rows past dOut are clamped (computed, never stored), so no row has a tail branch.
+// The batched kernels (b<C>: verify and short prefill passes) run the same per-row code for every column (same
+// lanes, same block order, same term and the same tree), so a column's output has the same bits in a C-column
+// pass as in the one-column kernel: decode and verify agree, spec == plain. Its sums are in another order
+// than the coop layout's (as are coop's at another WG), so a device's GEMV bits depend on the layout.
+// Entry points and bindings are the coop ones, so the engine only changes its grid (rows per workgroup:
+// (WG / TPR) * R one-column, WG / TPR batched).
+export const COOP_WIDE = Object.freeze({ WG: 64, TPR: 8, R: 1 });
+export function coopWideConfig(opt) {
+  if (!opt) return null;
+  const c = { ...COOP_WIDE, ...(opt === true || opt === "wide" ? {} : opt) }, p2 = (n) => Number.isInteger(n) && n > 0 && (n & (n - 1)) === 0;
+  if (!p2(c.WG) || c.WG > 256 || !p2(c.TPR) || c.TPR > c.WG || ![1, 2, 4].includes(c.R)) throw new Error(`coopWide: ${JSON.stringify(opt)} (WG, TPR powers of two, TPR <= WG <= 256, R 1, 2 or 4)`);
+  return Object.freeze({ ...c, rows: (c.WG / c.TPR) * c.R, rowsB: c.WG / c.TPR });
+}
+function wideGEMV({ WG, TPR, R }, widths, O) {
+  const RPW = (WG / TPR) * R, rs = Array.from({ length: R }, (_, r) => r);
+  const KINDS = [["", "mv", "mv_w4", "mv_x4", "mv_y"], ["_q8", "q8", "q8_qs4", "q8_x4", "q8_y"], ["_q4", "q4", "q4_qs4", "q4_x4", "q4_y"]];
+  // one block's term for row index expression ri, x vec4s named x0..x7 (prefix px)
+  const term = (k, Q, ri, px) => {
+    if (k === "_q4") {
+      const p = (i) => `(dot(${O.q4lo(`w[${i}]`)}, ${px}${i}) + dot(${O.q4hi(`w[${i}]`)}, ${px}${i + 4}))`;
+      return { load: `let w = ${Q}[${ri} * nb + b];`, expr: `sc * ((${p(0)} + ${p(1)}) + (${p(2)} + ${p(3)}))`, sc: `let sc = q4s(${ri} * nb + b);` };
+    }
+    if (k === "_q8") {
+      const d = (v, i, s) => `dot(${O.i8x4(`bitcast<i32>(${v}[${i}])`)}, ${px}${s})`;
+      const h = (v, o) => `((${d(v, 0, o)} + ${d(v, 1, o + 1)}) + (${d(v, 2, o + 2)} + ${d(v, 3, o + 3)}))`;
+      return { load: `let wa = ${Q}[(${ri} * nb + b) * 2u]; let wb = ${Q}[(${ri} * nb + b) * 2u + 1u];`, expr: `sc * (${h("wa", 0)} + ${h("wb", 4)})`, sc: `let sc = q8s(${ri} * nb + b);` };
+    }
+    const d = (i) => `dot(${Q}[wo + ${i}u], ${px}${i})`;
+    return { load: `let wo = ${ri} * (dIn / 4u) + b * 8u;`, expr: `((${d(0)} + ${d(1)}) + (${d(2)} + ${d(3)})) + ((${d(4)} + ${d(5)}) + (${d(6)} + ${d(7)}))`, sc: "" };
+  };
+  const tree = (n, red, W) => `
+  workgroupBarrier();${TPR === 1 ? "" : `
+  for (var st: u32 = ${TPR / 2}u; st > 0u; st >>= 1u) {
+    if (lane < st) {
+${Array.from({ length: n }, (_, a) => `      ${red}[${a * W}u + t] += ${red}[${a * W}u + t + st];`).join("\n")}
+    }
+    workgroupBarrier();
+  }`}`;
+  const single = KINDS.map(([k, P, Q, X, Y]) => [false, true].map((ACC) => `
+@compute @workgroup_size(${WG})
+fn matvec${k}_coop${ACC ? "_acc" : ""}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = lid.x; let lane = t % ${TPR}u; let grp = t / ${TPR}u;
+  let dIn = ${P}_shape.dIn; let dOut = ${P}_shape.dOut; let nb = dIn / 32u;
+  let row0 = (wg.y * 32768u + wg.x) * ${RPW}u + grp * ${R}u;
+${rs.map((r) => `  let rr${r} = min(row0 + ${r}u, dOut - 1u); var a${r}: f32 = 0.0;`).join("\n")}
+  for (var b: u32 = lane; b < nb; b += ${TPR}u) {
+    ${Array.from({ length: 8 }, (_, s) => `let x${s} = ${X}[b * 8u + ${s}u];`).join(" ")}
+${rs.map((r) => { const T = term(k, Q, `rr${r}`, "x"); return `    { ${T.load} ${T.sc}\n      a${r} += ${T.expr}; }`; }).join("\n")}
+  }
+${rs.map((r) => `  mvw_red[${r * WG}u + t] = a${r};`).join("\n")}
+${tree(R, "mvw_red", WG)}
+  if (lane < ${R}u) {
+    let row = row0 + lane;
+    if (row < dOut) { ${Y}[row] ${ACC ? "+=" : "="} mvw_red[lane * ${WG}u + grp * ${TPR}u]; }
+  }
+}`).join("\n")).join("\n");
+  const batched = widths.map((C) => KINDS.map(([k, P, Q, X, Y]) => [false, true].map((ACC) => {
+    const shp = k === "" ? "mvb_shape" : "qb_shape", cs = Array.from({ length: C }, (_, m) => m), T = term(k, Q, "rr", "x");
+    return `
+@compute @workgroup_size(${WG})
+fn matvec${k}_coop_b${C === widths[0] ? "" : C}${ACC ? "_acc" : ""}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = lid.x; let lane = t % ${TPR}u; let grp = t / ${TPR}u;
+  let dIn = ${shp}.dIn; let dOut = ${shp}.dOut; let xs4 = ${shp}.xs4; let ys = ${shp}.ys; let nb = dIn / 32u;
+  let row = (wg.y * 32768u + wg.x) * ${WG / TPR}u + grp;
+  let rr = min(row, dOut - 1u);
+  ${cs.map((m) => `var a${m}: f32 = 0.0;`).join(" ")}
+  for (var b: u32 = lane; b < nb; b += ${TPR}u) {
+    ${T.load} ${T.sc}
+${cs.map((m) => `    { ${Array.from({ length: 8 }, (_, s) => `let x${s} = ${X}[${m}u * xs4 + b * 8u + ${s}u];`).join(" ")}\n      a${m} += ${T.expr}; }`).join("\n")}
+  }
+${cs.map((m) => `  mvwb_red[${m * WG}u + t] = a${m};`).join("\n")}
+${tree(C, "mvwb_red", WG)}
+  if (row < dOut) {
+    for (var m: u32 = lane; m < ${C}u; m += ${TPR}u) { ${Y}[m * ys + row] ${ACC ? "+=" : "="} mvwb_red[m * ${WG}u + grp * ${TPR}u]; }
+  }
+}`;
+  }).join("\n")).join("\n")).join("\n");
+  return {
+    single: `
+@group(1) @binding(0) var<storage, read> q8_qs4: array<vec4<u32>>;
+@group(1) @binding(0) var<storage, read> q4_qs4: array<vec4<u32>>;
+var<workgroup> mvw_red: array<f32, ${R * WG}>;
+${single}`,
+    batched: `
+var<workgroup> mvwb_red: array<f32, ${Math.max(...widths) * WG}>;
+${batched}`,
+  };
+}

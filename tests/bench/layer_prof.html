@@ -9,7 +9,12 @@
 // Runs anywhere with WebGPU; tests/bench/layer_prof.mjs drives it on an iPhone (Safari over WebDriver)
 // or in Chrome. ?model=<url of the .gguf, Range requests> &lo=39&hi=40 &n=40 (calls per measurement)
 // &cols=4 &phone=1 &gaps=0,20,40 (also time the plain lap with that many ms idle before each call, as in a
-// room where the device waits for the rest of the lap: a GPU that clocks down when idle shows it). Result in window.RESULT.
+// room where the device waits for the rest of the lap: a GPU that clocks down when idle shows it)
+// &opts=<json> (engine options over the defaults above, e.g. {"attnHeads":1}). Result in window.RESULT.
+// A/B mode, &ab=<json array of engine option sets> (e.g. [{},{"attnHeads":1}]): one engine per set on
+// the same weights, then &rounds=R rounds, each timing every engine (order alternating per round) over
+// &n plain calls at positions &pos.. and n / 2 &cols-column verify calls, with &gap ms idle before each
+// call; per-engine medians over all rounds, so thermal drift hits every variant alike.
 import { Qwen35Engine } from "../../engine/qwen35.js";
 import { autotuneCoop } from "../../engine/autotune.js";
 import { parseGGUFHeader, qwen35Weights, streamEntryToGPU } from "../../engine/gguf.js";
@@ -33,8 +38,46 @@ try {
   for (;;) { try { G = parseGGUFHeader(head.buffer); break; } catch (e) { if (hb >= 256 << 20) throw e; hb *= 2; head = await readAt(0, hb); } }
   G.streamEntry = (info) => streamEntryToGPU(device, info, (i) => fetch(MODEL, { headers: { Range: `bytes=${i.byteOffset}-${i.byteOffset + i.byteLength - 1}` } }));
   const t0 = performance.now();
-  const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: LO, hi: HI, hasEmbed: false, hasHead: false, mtp: false });
-  const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [LO, HI], hasEmbed: false, hasHead: false, maxSeq: 4096, coopWG: tune.wg, coopRows: tune.rows, batchCols: 16, coopRowsB: 1, moeFuse: true, moeDnRows: 1 });
+  // fresh weights per engine: engine creation repacks and releases some of the streamed GPU buffers
+  const mk = async (o) => Qwen35Engine.create({ device, meta: G.meta, weights: await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: LO, hi: HI, hasEmbed: false, hasHead: false, mtp: false }), layerRange: [LO, HI], hasEmbed: false, hasHead: false, maxSeq: 4096, coopWG: tune.wg, coopRows: tune.rows, batchCols: 16, coopRowsB: 1, moeFuse: true, moeDnRows: 1, ...JSON.parse(q.get("opts") || "{}"), ...o });
+  if (q.get("ab")) {
+    const sets = JSON.parse(q.get("ab")), R = +(q.get("rounds") || 6), P0 = +(q.get("pos") || 300), GAP = +(q.get("gap") || 0);
+    const engs = [];
+    for (const o of sets) { engs.push(await mk(o)); await device.queue.onSubmittedWorkDone(); log(`engine ${JSON.stringify(o)}: faHG ${engs.at(-1).faHG || 0}, moe layout ${JSON.stringify(engs.at(-1).moe?.layout || null)}`); }
+    const dim = engs[0].dims.dim;
+    const rnd = (n) => { const x = new Float32Array(n); for (let i = 0; i < n; i++) x[i] = (Math.random() - 0.5) * 0.5; return x; };
+    const x1 = rnd(dim), xb = rnd(dim * COLS), idle = () => (GAP ? new Promise((r) => setTimeout(r, GAP)) : null);
+    // on-device check per engine, from a reset state: 4 tokens one at a time vs the same 4 as one verify pass
+    // (bitwise: decode == verify is what keeps spec == plain), and each engine's outputs vs engine 0's
+    const xc = rnd(dim * COLS), bits = (a, b) => { const u = new Uint32Array(a.buffer, a.byteOffset, a.length), v = new Uint32Array(b.buffer, b.byteOffset, b.length); for (let i = 0; i < u.length; i++) if (u[i] !== v[i]) return false; return true; };
+    const rel = (r, g) => { let md = 0, sc = 1e-6; for (let i = 0; i < r.length; i++) { md = Math.max(md, Math.abs(g[i] - r[i])); sc = Math.max(sc, Math.abs(r[i])); } return md / sc; };
+    const checks = [];
+    for (const e of engs) {
+      e.reset(); const seq = []; for (let c = 0; c < COLS; c++) seq.push((await e.runHidden(xc.subarray(c * dim, (c + 1) * dim), c)).slice());
+      e.reset(); const bat = (await e.runHiddenBatch(xc, 0, true)).slice();
+      checks.push({ seq, decodeEqVerify: seq.every((v, c) => bits(v, bat.subarray(c * dim, (c + 1) * dim))) });
+    }
+    checks.forEach((c, k) => { c.bitsEqEngine0 = c.seq.every((v, i) => bits(v, checks[0].seq[i])); c.relVsEngine0 = Math.max(...c.seq.map((v, i) => rel(checks[0].seq[i], v))); });
+    checks.forEach((c, k) => log(`check [${k}]: decode ${c.decodeEqVerify ? "==" : "!="} verify bitwise; vs [0] ${c.bitsEqEngine0 ? "same bits" : "relDiff " + c.relVsEngine0.toExponential(2)}`));
+    const W = engs.map(() => ({ plain: [], block: [] }));
+    const lap = async (e, k, warm) => {
+      for (let i = 0; i < N; i++) { await idle(); const t = performance.now(); await e.runHidden(x1, P0 + i); if (!warm) W[k].plain.push(performance.now() - t); }
+      for (let i = 0; i < N / 2; i++) { await idle(); const t = performance.now(); await e.runHiddenBatch(xb, P0 + COLS * i, { base: 0, total: COLS }); if (!warm) W[k].block.push(performance.now() - t); }
+    };
+    for (let k = 0; k < engs.length; k++) await lap(engs[k], k, true);
+    for (let r = 0; r < R; r++) {
+      const order = engs.map((_, k) => (r % 2 ? engs.length - 1 - k : k));
+      for (const k of order) await lap(engs[k], k, false);
+      log(`round ${r + 1}/${R}: ` + engs.map((_, k) => `[${k}] plain ${r2(med(W[k].plain.slice(-N)))} block${COLS} ${r2(med(W[k].block.slice(-N / 2)))}`).join(", "));
+    }
+    const p95 = (a) => r2([...a].sort((x, y) => x - y)[Math.floor(0.95 * a.length)]);
+    window.RESULT = { lo: LO, hi: HI, tune, ua: navigator.userAgent, pos: P0, gap: GAP, rounds: R, n: N, cols: COLS,
+      variants: sets.map((o, k) => ({ opts: o, decodeEqVerify: checks[k].decodeEqVerify, bitsEqEngine0: checks[k].bitsEqEngine0, relVsEngine0: checks[k].relVsEngine0, plainMs: r2(med(W[k].plain)), plainP95: p95(W[k].plain), blockMs: r2(med(W[k].block)), blockP95: p95(W[k].block),
+        plainRounds: Array.from({ length: R }, (_, r) => r2(med(W[k].plain.slice(r * N, (r + 1) * N)))), blockRounds: Array.from({ length: R }, (_, r) => r2(med(W[k].block.slice(r * N / 2, (r + 1) * N / 2)))) })) };
+    log(JSON.stringify(window.RESULT.variants));
+    throw "done";
+  }
+  const eng = await mk({});
   const dim = eng.dims.dim;
   log(`layers ${LO}-${HI - 1} (${HI - LO}) loaded in ${((performance.now() - t0) / 1000).toFixed(1)} s, dim ${dim}, moe ${!!eng.moe || !!eng.moeFuse}`);
   const rnd = (n) => { const x = new Float32Array(n); for (let i = 0; i < n; i++) x[i] = (Math.random() - 0.5) * 0.5; return x; };
@@ -70,5 +113,5 @@ try {
     log(`idle ${g} ms before each call: plain wall ${r2(med(w))} ms (p95 ${out.gaps.at(-1).plainP95}), block${COLS} wall ${r2(med(w2))} ms`);
   }
   window.RESULT = out;
-} catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; }
+} catch (e) { if (e !== "done") { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; } }
 </script>

@@ -1559,6 +1559,9 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       ...(new URLSearchParams(location.search).get("fuse") === "0" ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
       // ?kv=q8: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics a little
       kvQ8: new URLSearchParams(location.search).get("kv") === "q8",
+      // ?faheads=1|2|4|0: query heads per decode-attention workgroup (engine attnHeads; same bits at every
+      // setting, so devices may differ); 0 = attn_flash's all heads of a kv head, unset = the engine's default
+      ...(new URLSearchParams(location.search).has("faheads") ? { attnHeads: parseInt(new URLSearchParams(location.search).get("faheads"), 10) || 0 } : {}),
       // ?moefuse=0: the unfused MoE FFN kernels (A/B). The fused path (the default) gives different
       // MoE bits, so every device of a room should run the same setting; ?moednrows=1|2|4 tunes it
       moeFuse: new URLSearchParams(location.search).get("moefuse") !== "0",
