@@ -791,6 +791,8 @@ export function codeUI({ onMode = () => {} } = {}) {
     onReload(fn) { onReload = fn; },
     onOpen(fn) { onOpen = fn; },
     portTab, dropPort, activate, status, logRow, ports,
+    // phones: show one of the tabs (Agent, Preview, Files); wider screens show them all
+    tab(t) { if (phone.matches) setTab(t); },
     // how much of the context window the agent's conversation uses, as a percentage and a ring
     ctx(used, max) {
       const el = $("code-ctx");

@@ -316,7 +316,7 @@ export async function initCode(api, { mock = null } = {}) {
     if (project?.kind !== "folder") userAuto = e.target.checked;
     sendProjects();
   });
-  $("pv-to-agent").addEventListener("click", () => { $("code-prompt").value = "Fix the errors in the preview console"; grow(); $("code-prompt").focus(); });
+  $("pv-to-agent").addEventListener("click", () => { ui.tab("agent"); $("code-prompt").value = "Fix the errors in the preview console"; grow(); $("code-prompt").focus(); });
 
   // a line only this screen sees (not part of the session)
   function localNote(text, err = false) { ui.apply({ t: "ai-code-note", text, err }); }
