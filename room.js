@@ -50,6 +50,7 @@ import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel
 import { working, liveWords } from "./room/working.js";
 import { attachBrowserWeightCache, convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
 import { resumableGenerate, waitForRoom, linkSilent, backFromAway, sameShard, guestResume, GUEST_KEY, REJOIN_GRACE_MS, LINK_SILENT_MS } from "./room/resume.js";
+import { GpuWaker } from "./room/gpuwake.js";
 
 // Hidden-state transport (room/transport.js). ?wire=off falls back to PeerJS messages;
 // ?wire=slice uses one sliced channel; ?wire=stripeN spreads slices over N peer connections.
@@ -61,6 +62,13 @@ const WIRE_STRIPES = WIRE === "off" ? 0 : WIRE.startsWith("stripe") ? Math.max(1
 // Signaling: ?signal=host:port points PeerJS at our own PeerServer (the emulator and big
 // rooms use one); default is the public PeerJS cloud.
 const SIGNAL = new URLSearchParams(location.search).get("signal");
+// GPU wake (room/gpuwake.js): a phone worker asks the host (hello meta `wake`) for an `ai-wake` at
+// the start of every decode lap and keeps its GPU busy until the frame arrives, so its layers do not
+// run on a clocked-down GPU. ?wake=0 turns it off on this device (as a worker it does not ask, as the
+// host it sends none); ?wake=1 asks for it on any device; ?wake=keep also spins from the moment this
+// worker sends its own frame on (no host signal needed). ?wakems caps one spin (default 50 ms).
+const WAKE = new URLSearchParams(location.search).get("wake") || "";
+const WAKE_MAX_MS = Math.max(1, parseInt(new URLSearchParams(location.search).get("wakems"), 10) || 50);
 const SIGNAL_OPTS = SIGNAL ? (() => { const [host, port] = SIGNAL.split(":"); return { host, port: +port || 443, path: "/", secure: location.protocol === "https:" }; })() : {};
 
 // Topology: every device keeps ONE link to the host (control, roster, tokens). Data links
@@ -186,6 +194,7 @@ const metaPromise = (async () => {
   const m = await probeGPU();
   if (m.webgpu && m.budgetGB) m.contribGB = Math.max(0.2, Math.round(m.budgetGB * 0.5 * 10) / 10);
   m.phone = m.ua === "iPhone" || m.ua === "Android";
+  if (m.webgpu && WAKE !== "0" && (m.phone || WAKE === "1" || WAKE === "keep")) m.wake = 1;
   // phones and tablets lend at most what their browser tab survives (room/pledge.js, #207)
   const rule = pledgeRule(m.ua, navigator.deviceMemory);
   if (rule.capped) {
@@ -1968,8 +1977,8 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   mascot("Grabbing my slice of the model… hang tight.");
   // a previous attempt in this tab still owns its weights: release them first, or the
   // second load doubles GPU memory and every buffer after the limit comes back invalid
-  if (ai.device) { try { ai.device.destroy(); } catch {} ai.device = null; ai.engine = null; }
-  ai.held = null;
+  if (ai.device) { try { ai.waker?.destroy(); ai.device.destroy(); } catch {} ai.device = null; ai.engine = null; }
+  ai.held = null; ai.waker = null;
   ai.firstGpuError = null;
   ai.peerBytes = 0; ai.netBytes = 0; cacheHits = 0;   // per load: a count left from an earlier load in this tab mislabels the status
   if (!Qwen35Engine) { aiStatus("loading the inference engine\u2026"); await loadEngine(); }
@@ -2537,6 +2546,13 @@ function sendChain(msg) {
   const saved = ctl.sv != null && ai.ckpt?.items.find((x) => x.key === ctl.sv);
   if (saved) ckptPersist(ctl.sv, saved.ids, saved.pin);
 }
+// a decode lap starts: the workers that asked for it (a phone) wake their GPU now, so it is clocked
+// up when this lap's frame reaches them (room/gpuwake.js). A hint only: a worker that misses it or
+// gets it late is just slower, and it is ignored once its frame has arrived.
+function wakeChain(pos) {
+  if (WAKE === "0" || !ai.chain.length) return;
+  for (const id of ai.chain) if (conns.get(id)?.meta?.wake) sendTo(id, { t: "ai-wake", pos });
+}
 // forget the conversation state on every device: here now, on the chain with the next frame
 function resetState() {
   try { ai.engine.reset?.(); } catch {}
@@ -2742,6 +2758,7 @@ async function aiPipeToken(id, needLogits = true, fillNext, desc = null) {
     return null;
   }
   const tHost = performance.now();
+  if (needLogits) wakeChain(pos);
   let h = await ai.engine.embedRun(id, pos);
   if (badF32(h)) throw new Error(`NaN after HOST layers (pos ${pos}) — host GPU kernel issue`);
   if (ai.chain.length) {
@@ -3232,6 +3249,7 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
       const spec = ai.chain.length ? {
         runTrunk: async (tokens, pos) => {
           const tLap = performance.now();
+          wakeChain(pos);
           const n = tokens.length, hdim = ai.engine.dims.dim, NC = ai.engine.NC || 4;
           const hb = new Float32Array(n * hdim);
           for (let c = 0; c < n; c += NC) {
@@ -3533,6 +3551,7 @@ async function workerFrame(d) {
     const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };
     if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
     else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
+    if (d.spec) keepWarm(d.basePos);
   } else {
     // one token: run my layers, forward along the chain
     const hin = unpackWire(d);
@@ -3544,9 +3563,18 @@ async function workerFrame(d) {
     const msg = { pos: d.pos, ...packWire(h) };
     if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
     else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
+    keepWarm(d.pos);
     if (d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
   }
 }
+
+// GPU wake on a worker (room/gpuwake.js): spin until the next frame arrives (aiOnData stops it)
+function gpuWake() {
+  if (!ai.engine || !ai.device || !myMeta.wake) return;
+  try { (ai.waker ||= new GpuWaker(ai.device)).wake(WAKE_MAX_MS); } catch { myMeta.wake = 0; }
+}
+// ?wake=keep: also spin from the moment this worker has sent frame `p` on, unless the next one is already here
+function keepWarm(p) { if (WAKE === "keep" && ai.lastFramePos === p) gpuWake(); }
 
 // the host's tab closed: the room is over for everyone else
 // A host tab that reloads can resume the room (it keeps the conversation in localStorage), so the
@@ -3639,7 +3667,7 @@ function resumeHost(r) {
 // room's layers, chat or state), and the host ignores them altogether.
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
-  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-share"]);
+  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-share", "ai-wake"]);
 async function aiOnData(from, d) {
   if (d.t.startsWith("ai-code") || d.t.startsWith("ai-pv")) { codeOnData(from, d); return; }
   const e = conns.get(from);
@@ -3807,9 +3835,15 @@ async function aiOnData(from, d) {
     case "ai-wpart": onWeightPart(d); break;
     case "ai-wack": onWeightAck(d); break;
     case "ai-map": renderMap(d.nodes, d.st, d.live); break;
+    case "ai-wake":
+      // the frame of this lap may have overtaken its wake (they ride different channels)
+      if (ai.role === "worker" && d.pos > (ai.lastFramePos ?? -1)) gpuWake();
+      break;
     case "ai-hidden-b":
     case "ai-hidden":
       if (ai.role !== "worker") break;
+      ai.waker?.stop();
+      ai.lastFramePos = d.t === "ai-hidden" ? d.pos : d.basePos;
       ai.q = ai.q.then(() => workerFrame(d)).catch((err) => {
         aiStatus("⚠ " + err.message);
         sendTo(ai.hostId, { t: "ai-error", message: err.message });

@@ -3,7 +3,7 @@
 //
 //   node tests/bench/layer_prof.mjs --model models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf --lo 39 --hi 40
 //        [--browser ios|chrome] [--ip 10.0.0.210] [--port 8443] [--wd-port 4460] [--n 40] [--cols 4]
-//        [--phone 1] [--gaps 0,20,40] [--out result.json]
+//        [--phone 1] [--gaps 0,20,40] [--warm 10,20] [--out result.json]
 //
 // ios: serves this checkout over https on --ip:--port with a throwaway self-signed certificate (the
 //   phone needs a secure context for WebGPU; the WebDriver session accepts the certificate with
@@ -24,7 +24,7 @@ const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "../.
 const BROWSER = arg("browser", "ios"), PORT = +arg("port", 8443), IP = arg("ip", "127.0.0.1");
 const MODEL = arg("model"); if (!MODEL) throw new Error("--model <path under the checkout>");
 const PHONE = arg("phone", BROWSER === "ios" ? "1" : "0");
-const QS = `model=/${MODEL}&lo=${arg("lo", 0)}&hi=${arg("hi", +arg("lo", 0) + 1)}&n=${arg("n", 40)}&cols=${arg("cols", 4)}&phone=${PHONE}&gaps=${arg("gaps", "")}`;
+const QS = `model=/${MODEL}&lo=${arg("lo", 0)}&hi=${arg("hi", +arg("lo", 0) + 1)}&n=${arg("n", 40)}&cols=${arg("cols", 4)}&phone=${PHONE}&gaps=${arg("gaps", "")}&warm=${arg("warm", "")}`;
 const t0 = Date.now(); const log = (...a) => console.error(((Date.now() - t0) / 1000).toFixed(0) + "s", ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".json": "application/json" };
