@@ -23,6 +23,13 @@
 // no hello: status "nohost"), and while it lives the other previews' watchdogs pause (the relay is
 // one site, so one process: a snippet's loop would read as their hang). When it goes while the
 // relay is hung, the other relay previews get fresh frames, so the hung process has none left.
+// Fit: the app's document reports its content size (preview-build.js); a page wider or taller than
+// the box (a fixed 300x600 board and a side panel, on a phone) is scaled down to fit it, "contain",
+// never up. The frame is laid out at the box size divided by the scale, then transform: scale()d
+// back to the box, so the page sees a larger viewport and the browser maps pointer and touch
+// input through the transform. Height is fitted only down to FIT_MIN_H (a long page scrolls
+// instead); an axis whose overflow grows with the viewport (100vw, min-height: 100vh plus a margin)
+// is left alone. A page that fits gets scale 1 and the frame is untouched. The handle's `scale`.
 //   onLog({ level, text, src, line, col, ms, rev })
 //   onStatus({ state: "idle"|"loading"|"ready"|"stopped"|"waiting"|"hung", rev, path })
 // autorun false (a peer's first view) shows a "Run preview :port" button instead of running it.
@@ -31,6 +38,8 @@ import { buildPreviewDoc } from "./preview-build.js";
 const LEVELS = new Set(["log", "info", "warn", "error"]);
 const str = (v, n) => String(v ?? "").slice(0, n);
 export const HANG_MS = 3000, HELLO_MS = 5000, MAX_NAV = 3;
+// fit: the lowest scale for a tall page, for any page; steps per document; room around a scaled page (px)
+const FIT_MIN_H = 0.5, FIT_MIN = 0.2, FIT_STEPS = 6, FIT_PAD = 24;
 const views = new Set();   // the visible previews of this page (not run frames)
 let runs = 0;              // run_js frames alive
 
@@ -70,7 +79,53 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     source.pushLog?.(port, entry); onLog(entry);
   };
 
+  // ---- fit (see the top): nat = per axis, the content size that needed a smaller scale
+  let fit = 1, nat = { x: 0, y: 0 }, skip = { x: false, y: false }, step = null, steps = 0;
+  const box = () => ({ w: el.clientWidth, h: el.clientHeight });
+  const fitReset = () => { nat = { x: 0, y: 0 }; skip = { x: false, y: false }; step = null; steps = 0; };
+  const fitTarget = (b) => {
+    let t = nat.x ? Math.min(1, b.w / (nat.x + FIT_PAD)) : 1;   // a scaled page keeps a little room at its edges
+    const th = nat.y ? b.h / (nat.y + FIT_PAD) : 1;
+    if (th < t && th >= FIT_MIN_H) t = th;
+    return Math.max(FIT_MIN, Math.min(1, t));
+  };
+  const applyFit = (t) => {
+    fit = t >= 1 ? 1 : t;
+    if (!frame) return;
+    const st = frame.style;
+    if (fit === 1) { st.position = st.left = st.top = st.transform = st.transformOrigin = ""; st.width = st.height = "100%"; return; }
+    const b = box();
+    if (win.getComputedStyle(el).position === "static") el.style.position = "relative";
+    el.style.overflow = "hidden";
+    st.position = "absolute"; st.left = st.top = "0"; st.transformOrigin = "0 0";
+    st.width = b.w / t + "px"; st.height = b.h / t + "px"; st.transform = `scale(${t})`;
+  };
+  const onSize = (d) => {
+    if (run || !frame) return;
+    if (d.first) { fitReset(); if (fit !== 1) { applyFit(1); return; } }   // a new document starts at the box's size
+    const b = box();
+    if (!b.w || !b.h) return;   // hidden (another tab): measured again when it shows
+    const num = (k) => Math.max(0, Number(d[k]) || 0);
+    if (Math.abs(num("iw") - b.w / fit) > 2 || Math.abs(num("ih") - b.h / fit) > 2) return;   // measured before the last resize; another follows
+    const o = { x: num("sw") - num("cw"), y: num("sh") - num("ch") }, v = { x: num("iw"), y: num("ih") }, s = { x: num("sw"), y: num("sh") };
+    if (step && step.fit === fit) {   // the first look after a step: an overflow that did not shrink follows the viewport
+      for (const a of ["x", "y"]) if (step.o[a] > 0 && o[a] >= step.o[a] * 0.8) { skip[a] = true; nat[a] = 0; }
+      step = null;
+    }
+    for (const a of ["x", "y"]) if (!skip[a] && o[a] > Math.max(8, v[a] * 0.03)) nat[a] = Math.max(nat[a], s[a]);
+    const t = fitTarget(b);
+    if (Math.abs(t - fit) < 0.005 || steps >= FIT_STEPS) return;
+    steps++;
+    step = { fit: t >= 1 ? 1 : t, o: { x: nat.x ? o.x : 0, y: nat.y ? o.y : 0 } };
+    applyFit(t);
+  };
+  const ro = !run && win.ResizeObserver ? new win.ResizeObserver(() => {
+    if (frame && (fit !== 1 || nat.x || nat.y) && el.clientWidth && el.clientHeight) applyFit(fitTarget(box()));
+  }) : null;
+  ro?.observe(el);
+
   const makeFrame = () => {
+    fitReset(); fit = 1;
     frame = doc.createElement("iframe");
     frame.setAttribute("sandbox", "allow-scripts");
     frame.setAttribute("allow", "");
@@ -188,7 +243,8 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     } else if (d.t === "ready" || d.t === "idle") {
       source.frameEvent?.(port, { t: d.t, rev, ms });
       if (d.t === "ready") status("ready");
-    } else if (d.t === "done") onDone?.(d);   // run_js's snippet finished
+    } else if (d.t === "size") onSize(d);
+    else if (d.t === "done") onDone?.(d);   // run_js's snippet finished
     else if (d.t === "nav") {
       const p = str(d.path, 300);
       const snap = source.snapshot(port);
@@ -239,6 +295,7 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     get rev() { return rev; },
     get path() { return path; },
     get loaded() { return html != null; },
+    get scale() { return fit; },
     run: start,
     reload() { if (running) load(); },
     navigate(p) { path = p || null; load(); },
@@ -250,7 +307,7 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
         const stuck = mode === "relay" && (hung || (hello && Date.now() - beat > 1500));
         if (stuck) queueMicrotask(() => { for (const v of views) v.refresh(); });
       } else views.delete(me);
-      off(); detach(); clearInterval(dog); clearTimeout(helloTimer);
+      off(); detach(); clearInterval(dog); clearTimeout(helloTimer); ro?.disconnect();
       win.removeEventListener("message", onMessage);
       frame?.remove(); gate?.remove();
       if (url) URL.revokeObjectURL(url);
@@ -266,7 +323,7 @@ export function openPreviewTab(source, port, path = null) {
   if (!snap) return false;
   const { html } = buildPreviewDoc(snap, { path: path && snap.files.has(path) ? path : snap.entry, nonce: "" });
   const esc = (t) => t.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
-  const page = `<!doctype html><meta charset="utf-8"><title>localhost:${port}</title>`
+  const page = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>localhost:${port}</title>`
     + `<style>html,body{margin:0;height:100%;background:#fff}iframe{border:0;width:100%;height:100%;display:block}</style>`
     + `<iframe sandbox="allow-scripts" allow="" referrerpolicy="no-referrer" srcdoc="${esc(html)}"></iframe>`;
   const url = URL.createObjectURL(new Blob([page], { type: "text/html" }));

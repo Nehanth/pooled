@@ -1,6 +1,6 @@
 // harness/preview-build.js: one self-contained document from a snapshot (data: URLs all the way
 // down), CSP and capture script first.
-import { buildPreviewDoc, resolveRef, mimeFor, CSP, urlKey } from "../../harness/preview-build.js";
+import { buildPreviewDoc, resolveRef, mimeFor, CSP, urlKey, CAPTURE_SOURCE } from "../../harness/preview-build.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -128,6 +128,14 @@ Deno.test("CSP meta and capture script come before the agent's markup, whatever 
     if (/^<!doctype/i.test(h)) ok(/^<!doctype/i.test(html), k + ": doctype stays first");
   }
   ok(CSP.startsWith("default-src 'none'") && CSP.includes("connect-src data: blob:") && !CSP.includes("'self'"));
+});
+
+Deno.test("a page without a viewport meta gets one; one it has is kept, not doubled", () => {
+  const VP = /<meta\b[^>]*name=["']?viewport/gi;
+  eq(buildPreviewDoc(snap({ "index.html": "<!doctype html><canvas></canvas>" })).html.match(VP).length, 1);
+  const own = buildPreviewDoc(snap({ "index.html": `<!doctype html><head><meta name="viewport" content="width=500"></head>` })).html;
+  eq(own.match(VP).length, 1); ok(own.includes('content="width=500"'));
+  ok(CAPTURE_SOURCE.includes('t: "size"'), "the frame reports its content size for the fit");
 });
 
 Deno.test("the capture config cannot close its <script> early", () => {

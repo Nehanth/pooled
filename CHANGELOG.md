@@ -4,6 +4,9 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 
 ## [Unreleased]
 
+### Fixed
+- **Code previews fit their box**: an app with a fixed layout (a 300x600 tetris board and a side panel) is scaled down to fit the preview on a phone or a narrow pane instead of being cropped; clicks and keys still reach it, and apps that already fit are untouched.
+
 ## [1.0.0] - 2026-09-27
 
 The first stable release: peer-to-peer inference in the browser at [pooled.run](https://pooled.run).

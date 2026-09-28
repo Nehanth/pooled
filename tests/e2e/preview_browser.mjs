@@ -166,6 +166,72 @@ try {
   });
   check("click-to-run gate", gated.before === "Run preview :5173" && gated.after, JSON.stringify(gated));
 
+  // fit: a fixed-size app wider than a phone's preview (a 300x600 board and a 400px side panel) is
+  // scaled down into the box, and a click and a key still reach it; pages that fit are left alone
+  const wide = `<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#14161f;color:#eee;font:14px monospace}
+.game{display:flex;gap:0;width:700px;height:640px}.board{width:300px;height:600px;background:#223;border:2px solid #556}.side{width:396px;padding:0}
+button{width:120px;height:40px;margin:20px}</style></head><body><div class="game"><canvas class="board" width="300" height="600"></canvas>
+<div class="side"><p id="score">score 0</p><button id="fitbtn" onclick="document.getElementById('score').textContent='clicked'">Start</button></div></div>
+<script>addEventListener("keydown", (e) => { document.getElementById("score").textContent = "key " + e.key; });</script></body></html>`;
+  const appFrame = async (id) => {
+    for (let i = 0; i < 50; i++) {
+      for (const f of page.frames()) if (await f.evaluate((id) => !!document.getElementById(id), id).catch(() => false)) return f;
+      await page.waitForTimeout(100);
+    }
+    return null;
+  };
+  const settle = () => page.waitForTimeout(700);
+  await page.evaluate(async (wide) => {
+    await window.__ws.write("wide/index.html", wide);
+    await window.__ws.write("fluid/index.html", `<!doctype html><body style="margin:0"><p id=fl style="width:100%">a paragraph that wraps to any width</p></body>`);
+    await window.__ws.write("vh/index.html", `<!doctype html><body style="min-height:100vh;padding:30px;margin:0"><p id=vh>full height plus padding</p></body>`);
+    await window.__ws.write("long/index.html", `<!doctype html><body style="margin:0"><div id=lg style="height:3000px">a long page</div></body>`);
+    window.__fit = {};
+    for (const [dir, port] of [["wide", 5180], ["fluid", 5181], ["vh", 5182], ["long", 5183]]) {
+      const el = document.createElement("div");
+      el.style.cssText = "width:390px;height:600px;position:relative";
+      el.id = "fit-" + dir;
+      document.body.append(el);
+      window.__fit[dir] = window.__mountPreview(el, window.__server, port);
+      await window.__T.serve.run({ dir, port });
+    }
+  }, wide);
+  const wf = await appFrame("fitbtn");
+  await settle();
+  const fitOf = () => page.evaluate(() => Object.fromEntries(Object.entries(window.__fit).map(([k, v]) => {
+    const el = document.getElementById("fit-" + k), r = v.frame.getBoundingClientRect(), b = el.getBoundingClientRect();
+    return [k, { scale: +v.scale.toFixed(3), w: Math.round(r.width), h: Math.round(r.height), inside: r.left >= b.left - 1 && r.top >= b.top - 1 && r.right <= b.right + 1 && r.bottom <= b.bottom + 1 }];
+  })));
+  let fit = await fitOf();
+  const inner = await wf.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth, ih: innerHeight }));
+  check("fit: a 700px-wide app is scaled into a 390px box", fit.wide.scale > 0.5 && fit.wide.scale < 0.6 && fit.wide.inside && fit.wide.w <= 391, JSON.stringify({ fit, inner }));
+  check("fit: the scaled app has no horizontal overflow", inner.sw <= inner.iw, JSON.stringify(inner));
+  check("fit: a responsive page keeps scale 1", fit.fluid.scale === 1 && fit.fluid.w === 390, JSON.stringify(fit.fluid));
+  check("fit: min-height 100vh plus padding is not shrunk", fit.vh.scale === 1, JSON.stringify(fit.vh));
+  check("fit: a long page scrolls instead of shrinking", fit.long.scale === 1, JSON.stringify(fit.long));
+  // a click where the button shows on screen reaches it (the transform maps the pointer)
+  const btn = await wf.evaluate(() => { const r = document.getElementById("fitbtn").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+  const at = await page.evaluate(({ x, y }) => { const f = window.__fit.wide.frame.getBoundingClientRect(), s = window.__fit.wide.scale; return { x: f.left + x * s, y: f.top + y * s }; }, btn);
+  await page.mouse.click(at.x, at.y);
+  check("fit: a click on the scaled app's button registers", await wf.evaluate(() => document.getElementById("score").textContent) === "clicked", JSON.stringify({ btn, at }));
+  await page.keyboard.press("ArrowLeft");
+  check("fit: keys reach the scaled app", await wf.evaluate(() => document.getElementById("score").textContent) === "key ArrowLeft");
+  // a wider box: no scale; narrower again: scaled again
+  await page.evaluate(() => { document.getElementById("fit-wide").style.cssText = "width:1000px;height:800px;position:relative"; });
+  await settle();
+  const big = (await fitOf()).wide;
+  await page.evaluate(() => { document.getElementById("fit-wide").style.cssText = "width:390px;height:600px;position:relative"; });
+  await settle();
+  const small = (await fitOf()).wide;
+  check("fit: follows the box (never above 1, down again when it narrows)", big.scale === 1 && small.scale < 0.6 && small.inside, JSON.stringify({ big, small }));
+  // a new revision that fits starts over at scale 1
+  await page.evaluate(() => window.__ws.write("wide/index.html", `<!doctype html><body style="margin:0"><p id=fitnew>fits now</p></body>`));
+  await appFrame("fitnew");
+  await settle();
+  fit = await fitOf();
+  check("fit: a new revision that fits is back at scale 1", fit.wide.scale === 1 && fit.wide.w === 390, JSON.stringify(fit.wide));
+  await page.evaluate(() => { for (const [k, v] of Object.entries(window.__fit)) { v.destroy(); document.getElementById("fit-" + k).remove(); } for (const p of [5180, 5181, 5182, 5183]) window.__server.stop(p); });
+
   // local mode (no other site): a blob: document, whose base URL is not the page's either, and a
   // page that navigates itself away is put back, then stopped
   const local = await page.evaluate(async () => {

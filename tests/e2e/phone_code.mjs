@@ -2,7 +2,8 @@
 // bar at the bottom (room/code-ui.js phone tabs). Two phone-sized tabs in a real room (local
 // PeerServer, real WebRTC, no WebGPU), the host driving a scripted model (tests/scripted-model.js):
 //
-//   build -> the approval waits above the prompt -> the first app served opens Preview
+//   build -> the approval waits above the prompt -> the first app served opens Preview, its
+//   700px-wide layout scaled to fit the phone, a click on its button still landing
 //   -> a second request asks again while the host is on Files: a dot on Agent
 //   -> approved from Agent -> the new revision puts a dot on Preview -> Files -> a file opens
 //   full screen, Back returns to the tree -> the guest gets the same layout, prompt included.
@@ -35,7 +36,7 @@ const peerjsJs = fs.readFileSync(path.join(peerjsDir, "dist/peerjs.min.js"));
 // the scripted model (runs in the host page): a page and its style, served; the second request edits the style
 async function installModel() {
   const { scripted, xmlCall } = await import("/tests/scripted-model.js");
-  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Todo</title><link rel="stylesheet" href="style.css"></head><body><h1>Todo</h1><ul><li>milk</li><li>eggs</li></ul><script>console.log("todo ready")</script></body></html>\n`;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Todo</title><link rel="stylesheet" href="style.css"></head><body><h1>Todo</h1><div class="board" style="display:flex;gap:20px;width:700px"><ul style="width:300px;height:400px;margin:0;background:#eef"><li>milk</li><li>eggs</li></ul><div style="width:380px"><p id="count">2 items</p><button id="add" style="width:140px;height:44px" onclick="document.getElementById('count').textContent='added'">Add</button></div></div><script>console.log("todo ready")</script></body></html>\n`;
   const css = "body { font: 16px system-ui; margin: 24px; }\nh1 { font-size: 22px; }\n";
   window.__pooledMock.model = scripted([
     "Two files: the page and its style.\n" + xmlCall("write_file", { path: "index.html", content: html }),
@@ -132,6 +133,29 @@ try {
   s = await look(host);
   check("Preview shows alone, the app filling it", s.preview && !s.agent && !s.files && s.selected === "preview", JSON.stringify(s));
   check("the preview frame fills most of the screen", await host.evaluate(() => document.getElementById("pv-frame-wrap").getBoundingClientRect().height > innerHeight * 0.35));
+  // the app is 700px wide (a fixed layout, as a model writes a game): scaled into the phone's box, and a click still lands
+  let app = null;
+  for (let i = 0; i < 50 && !app; i++) {
+    for (const f of host.frames()) if (await f.evaluate(() => !!document.getElementById("add")).catch(() => false)) app = f;
+    if (!app) await host.waitForTimeout(100);
+  }
+  await host.waitForTimeout(800);
+  const fitted = await host.evaluate(() => {
+    const f = document.querySelector("#pv-frame-wrap iframe"), r = f.getBoundingClientRect(), w = document.getElementById("pv-frame-wrap").getBoundingClientRect();
+    return { transform: f.style.transform, inside: r.left >= w.left - 1 && r.right <= w.right + 1 && r.top >= w.top - 1 && r.bottom <= w.bottom + 1, overflow: document.documentElement.scrollWidth - innerWidth };
+  });
+  const inApp = await app?.evaluate(() => ({ sw: document.documentElement.scrollWidth, iw: innerWidth }));
+  check("a 700px-wide app is scaled to fit the phone's preview", /scale\(0\.\d+\)/.test(fitted.transform) && fitted.inside && fitted.overflow <= 0 && inApp && inApp.sw <= inApp.iw, JSON.stringify({ fitted, inApp }));
+  const btn = await app.evaluate(() => { const r = document.getElementById("add").getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; });
+  const at = await host.evaluate(({ x, y }) => {
+    const f = document.querySelector("#pv-frame-wrap iframe"), r = f.getBoundingClientRect(), s = r.width / f.offsetWidth;
+    return { x: r.left + x * s, y: r.top + y * s };
+  }, btn);
+  // a click where the button shows on screen (headless Chromium does not route synthetic touches
+  // into the relay's cross-site frame, scaled or not, so this is a mouse click)
+  await host.mouse.click(at.x, at.y);
+  await app.waitForFunction(() => document.getElementById("count").textContent === "added", null, { timeout: 3000 }).catch(() => {});
+  check("a click on a button inside the scaled app registers", await app.evaluate(() => document.getElementById("count").textContent) === "added", JSON.stringify({ btn, at }));
   await host.waitForFunction(() => document.querySelectorAll(".cm-stats").length >= 1, null, { timeout: 30000 });
   await host.waitForFunction(() => !document.getElementById("ctab-agent").classList.contains("busy"), null, { timeout: 5000 }).catch(() => {});
   check("done: the Agent tab stops pulsing", await host.evaluate(() => !document.getElementById("ctab-agent").classList.contains("busy")));

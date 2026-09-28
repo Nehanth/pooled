@@ -257,6 +257,58 @@ function capture(C) {
     send({ t: "ready", ms: Math.round(performance.now()) });
     setTimeout(() => send({ t: "idle", ms: Math.round(performance.now()) }), 500);
   });
+
+  // the page's content size against its viewport, for the parent to scale a fixed-size layout (a
+  // 300x600 board and a side panel) down into the preview's box (preview-frame.js, fit). Measured
+  // on load, resize and DOM changes, sent when it changes. Two overflows the document's scroll size
+  // leaves out are added: content left of or above the page's origin (a centred flex row wider than
+  // the viewport spills both ways, and only the right half scrolls), and what the body or a
+  // full-page wrapper clips (overflow: hidden). A few levels deep; positioned overlays not counted.
+  let first = true, last = "", queued = 0;
+  const measure = () => {
+    queued = 0;
+    const d = document.documentElement, se = document.scrollingElement || d, b = document.body;
+    if (!d) return;
+    const iw = innerWidth, ih = innerHeight;
+    let sw = Math.max(se.scrollWidth, d.scrollWidth), sh = Math.max(se.scrollHeight, d.scrollHeight), left = 0, top = 0, n = 0;
+    const clips = (s) => s.overflowX !== "visible" || s.overflowY !== "visible";
+    const clipped = (e, x, y) => { sw = Math.max(sw, x + e.scrollWidth); sh = Math.max(sh, y + e.scrollHeight); };
+    const walk = (e, depth) => {
+      for (const c of e.children) {
+        if (++n > 400) return;
+        const r = c.getBoundingClientRect(), x = r.left + scrollX, y = r.top + scrollY;
+        if (r.width < 2 || r.height < 2) continue;
+        let cs = null;
+        const st = () => cs || (cs = getComputedStyle(c));
+        if ((x < left || y < top) && !/fixed|absolute/.test(st().position)) { left = Math.min(left, x); top = Math.min(top, y); }
+        if (depth >= 4 || !c.firstElementChild) continue;
+        if (clips(st())) {   // a scroller or a clipped box of its own: only a full-page one counts
+          if (r.width < iw * 0.9 || r.height < ih * 0.9) continue;
+          clipped(c, x, y);
+        }
+        walk(c, depth + 1);
+      }
+    };
+    if (b) {
+      const r = b.getBoundingClientRect();
+      if (clips(getComputedStyle(b))) clipped(b, r.left + scrollX, r.top + scrollY);
+      walk(b, 1);
+    }
+    const m = { t: "size", sw: Math.ceil(sw - left), sh: Math.ceil(sh - top), cw: se.clientWidth, ch: se.clientHeight, iw, ih };
+    const k = JSON.stringify(m);
+    if (k === last) return;
+    last = k; m.first = first; first = false;
+    send(m);
+  };
+  const soon = () => { if (!queued) queued = setTimeout(measure, 50); };
+  const watch = () => {
+    measure();
+    try { const ro = new ResizeObserver(soon); ro.observe(document.documentElement); if (document.body) ro.observe(document.body); } catch {}
+    try { new MutationObserver(soon).observe(document.documentElement, { childList: true, subtree: true, attributes: true, characterData: true }); } catch {}
+  };
+  if (document.readyState === "loading") addEventListener("DOMContentLoaded", watch); else setTimeout(watch);
+  addEventListener("load", soon);
+  addEventListener("resize", soon);
 }
 export const CAPTURE_SOURCE = capture.toString();
 
@@ -358,7 +410,10 @@ export function buildPreviewDoc(snapshot, { path, nonce = "" } = {}) {
   for (const [u, p] of Object.entries(urlToPath)) keys[urlKey(u)] = p;
   for (const p of files.keys()) if (!/\.html?$/i.test(p)) assets[p] = asset(p);
   const C = { nonce, path: page, keys, assets, missing: [...missing], warnings };
-  const head = `<meta http-equiv="Content-Security-Policy" content="${CSP}"><script>(${CAPTURE_SOURCE})(${scriptJson(C)});</script>`;
+  // a page without a viewport meta gets one, so it lays out at the device's width when shown on
+  // its own (open in a tab); inside the frame, the frame's size is the viewport either way
+  const vp = /<meta\b[^>]*\bname\s*=\s*["']?viewport\b/i.test(html) ? "" : `<meta name="viewport" content="width=device-width, initial-scale=1">`;
+  const head = `<meta http-equiv="Content-Security-Policy" content="${CSP}"><script>(${CAPTURE_SOURCE})(${scriptJson(C)});</script>${vp}`;
   const dt = /^\s*<!doctype[^>]*>/i.exec(html);
   html = dt ? dt[0] + head + html.slice(dt[0].length) : head + html;
   return { html, missing: [...missing], warnings, urlToPath };
