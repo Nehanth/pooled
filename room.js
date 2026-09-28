@@ -3137,7 +3137,13 @@ document.addEventListener("keydown", (e) => {
 });
 document.addEventListener("change", (e) => { if (e.target.closest?.("#room-menu")) syncSegs(); });
 buildSegs();
-$("room-menu").addEventListener("toggle", () => { if ($("room-menu").open) syncSegs(); });
+$("room-menu").addEventListener("toggle", () => {
+  if (!$("room-menu").open) return;
+  syncSegs();
+  // the room card pictures a finished answer's speed: not offered before one, and Share only where the browser can
+  $("card-btn").hidden = !(bestTps || lastMap?.st?.tps || lastSoloTps);
+  $("card-share").hidden = !navigator.canShare;
+});
 $("menu-close").addEventListener("click", () => { $("room-menu").open = false; $("room-menu").querySelector("summary").focus(); });
 $("cache-clear").addEventListener("click", async (ev) => {
   ev.preventDefault();
