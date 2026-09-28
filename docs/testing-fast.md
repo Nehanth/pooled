@@ -125,3 +125,38 @@ Q38=1 $D prof_ts.js                            # per-kernel GPU ms (drop Q38 for
 ```
 
 `run.sh q38` (one process per file) remains the reference; run it before landing. The Chrome bench path (`WCACHE=1`, `serve.mjs`) was not re-run in this validation.
+
+## Two-machine rooms (tests/e2e/xroom*.mjs)
+
+A real room across two machines, one headless browser on each: each serves its own checkout on
+127.0.0.1 and loads its layers from its own `models/` (`?peerweights=0`), the PeerJS signaling server
+runs on the machine you start from, and the WebRTC link between the machines is direct. Manual trigger
+only (two GPUs).
+
+| file | what it does |
+|---|---|
+| `tests/e2e/xroom.mjs` | One end of the room (`--role host` or `--role guest`). The host creates the room, prints `CODE XXXX`, waits for the guest, loads the model, then for every mode (`plain,spec`), prompt (`japan`, `twosum`) and round asks with the `exact` preset and records prefill, decode tok/s, acceptance, TTFT, the peer-card ping, the answer's sha-256 and the selected ICE candidate pair with Chrome's STUN round trip. `--solo`: no guest (the one-device reference on the same page path). `--trace-rounds 2,5`: those rounds are traced on both ends (see below). |
+| `tests/e2e/xroom_pair.sh` | Drives both ends from one machine: copies the checkout to the other machine, takes its GPU lock, starts the host (here or there: `--here host|guest`), starts the guest with the host's code, waits for the result, fetches the guest's trace, releases the lock, pings the other machine before and after. Machine-specific commands come from the environment (`XROOM_REMOTE`, `XROOM_SYNC`, `XROOM_LOCAL_IP`, `XROOM_LOCK`, `XROOM_GPURUN`, ...; see its header). |
+| `tests/e2e/xroom_report.mjs` | Tables from a traced run: aligns the two machines' clocks from the frames themselves (forward and backward delay of every lap), then every lap split as `room_prof_report.mjs` does, plus the wire per frame size (forward + backward needs no clock) against the ping. |
+| `tests/e2e/xwire_lab.mjs` | CPU only: one frame out and back over the real link, by size (4 to 80 KB) and by how it is sent (the room's sliced/striped wire, one stripe, unordered, one raw message, PeerJS `send`, the JSON ping). |
+| `tests/e2e/room_trace.mjs` | The trace marks and GPU hooks, shared with `room_prof.mjs` (one machine). |
+
+```sh
+# environment for the machine you start from (example: ssh wrappers kept outside the repo)
+export XROOM_REMOTE=~/bin/other.sh XROOM_SYNC=~/bin/other-sync.sh XROOM_LOCAL_IP=100.x.y.z
+export XROOM_REMOTE_ENV='export PATH=$HOME/.local/node/bin:$PATH;'
+export XROOM_REMOTE_PREP='[ -e node_modules ] || ln -s ~/tools/node_modules node_modules'
+# MoE, host here, 3 rounds per mode and prompt, the third one traced
+tests/e2e/xroom_pair.sh --out /tmp/xr-moe -- --model qwen3.6-35b-moe --gb 13 --prompts japan,twosum --rounds 3 --trace-rounds 2,5,8,11
+cat /tmp/xr-moe/report.txt
+# the same with the host on the other machine
+tests/e2e/xroom_pair.sh --here guest --out /tmp/xr-moe-r -- --model qwen3.6-35b-moe --gb 13 --prompts japan,twosum --rounds 3 --trace-rounds 2,5,8,11
+# wire lab: B on the other machine first, then A here
+node tests/e2e/xwire_lab.mjs --role b --signal <this machine>:9000     # on the other machine
+node tests/e2e/xwire_lab.mjs --role a --out /tmp/xwire.json
+```
+
+Tracing costs a little (a GPU timestamp pair around every command buffer, a mark per event), so a
+traced round's tok/s is not the headline number: report the untraced rounds and use the traced one
+for the split. Every answer to one prompt must have the same sha-256 across rounds, modes, both
+directions and the `--solo` run.
