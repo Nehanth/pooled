@@ -587,3 +587,57 @@ prompt is `japan` (172 tokens with the template), exact sampling, a new chat per
 All four answers start with the same text (greedy). At 26 tok/s plain, one lap (GB10 20 layers → M5 Max 20 layers
 → back) is about 38 ms, including a ~6-7 ms WebRTC round trip. The GB10-only 2-device emulation at 0 ms (above)
 gave 27.9 / 32.7.
+
+## 2026-09-28: wide fused MoE expert kernels on Apple, faster moe_route (branch perf/metal-moe-fused-expert-kernels-apple)
+
+The profile of 2026-09-27 found the fused expert kernels barrier bound on the M5 Max: moe_gus (256 threads, 4 rows,
+one 32-weight block quarter per thread at dIn 2048, 8-level tree over 8 arrays) and moe_dnc (64 threads, one block per
+thread at dIn 512, 6-level tree over 9 arrays) ran at ~280 / ~230 GB/s, moe_route took 16.6 µs a layer.
+
+Changes:
+- `moeFusedLayout` engine option (engine/wgsl/moe.js `gusKernelWide` / `dncKernelWide`): groups of TPR threads per R
+  rows, each thread owns whole blocks (16 B vec4<u32> loads), a log2(TPR) tree per group. Default: `wide` when the
+  adapter vendor is Apple (Chrome / Safari), `legacy` elsewhere (the GB10's bits are unchanged). MOEF_WIDE =
+  gate/up 128 threads / 16 per row / 1 row, down 64 / 8 / 1 (picked by the sweep below). The MoE bits on Apple change
+  (another summation order); batched == one-token still holds (spec == plain).
+- moe_route: the top-K rank loop reads the probabilities 4 per load from a vec4 copy and stops once a thread's rank
+  reaches K. Same ids and weights bit for bit (tests/e2e/moe_fused_cpu.mjs: moe_route == moe_router); on every GPU.
+
+Kernel A/B (`tests/bench/moe_fused_sweep.js`, new: synthetic 35B-A3B shapes, 40 launches per timed pass, variants
+interleaved round by round; `REF=<origin/main engine/wgsl/moe.js>` adds main's kernels as "ref"). The Mac was heavily
+loaded during these runs by other processes (absolute µs are 2-4x the quiet-machine profile), so only the ratios mean
+anything. Median µs per launch, M5 Max, Deno / Metal:
+
+| kernel | main (ref) | this branch, legacy layout | this branch, wide |
+|---|---|---|---|
+| moe_gus | 194.9 | 194.3 | 95.7 (0.49x) |
+| moe_dnc | 124.5 | 123.9 | 68.9 (0.55x) |
+| moe_route | 98.8 | 52.8 (0.53x) | 52.4 |
+
+Layout sweep (2 runs, same tool): gate/up TPR 16 or 32 at R 1 best (TPR 8 / R 2 and 256-thread R 4 slower); down TPR 8
+or 16 best, TPR 1 / 2 and R 2 much slower. GB10 (Vulkan), same tool: moe_route 26.7 -> 16.5 µs; wide moe_gus 57.3 -> 51.7
+but wide moe_dnc 36.8 -> 45.3 µs, hence legacy stays the default there (Chrome decode with the wide layout forced:
+plain 49.2-49.6 vs 50.0-50.6, spec +3-4%).
+
+Chrome 154 decode on the Mac (`chrome_bench.mjs <moe> 40`, base = origin/main, runs interleaved, all golden,
+spec == plain, 0 GPU errors), plain / spec tok/s, two-sum then hash-map:
+
+| run | main | this branch |
+|---|---|---|
+| 1 | 75.8 / 93.0, 38.6 / 13.0 | 73.3 / 96.1, 39.1 / 15.2 |
+| 2 | 67.8 / 75.1, 23.2 / 10.3 | 73.7 / 97.7, 40.6 / 17.7 |
+| 3 | 68.2 / 75.1, 22.9 / 9.1 | 70.7 / 88.9, 31.7 / 10.2 |
+
+These are far below the quiet-machine numbers (85.9 / 135.5) and swing 2x between runs, so they only say "not
+slower": this branch is ahead in 11 of 12 pairs. Scaling the kernel ratios onto the quiet profile (moe_gus 1.60, moe_dnc
+0.98, moe_route 0.55 ms per token) gives about 1.5 ms of 11.7 ms, i.e. roughly +13% plain decode; to be re-measured on
+an idle Mac.
+
+GB10 Chrome decode (default = legacy layout, only moe_route changed), 2 runs each: main plain 50.0 / 50.5, 49.0 / 50.2,
+spec 79.9 / 72.7, 80.8 / 72.8; branch plain 50.5 / 50.1, 50.4 / 50.6, spec 81.2 / 72.3, 80.9 / 72.3 (noise).
+
+Gates: test_moe.js 3/3 llama.cpp + spec == plain on the Mac (MOE_FUSED_LAYOUT=wide, and the default) and on the GB10
+(default, and MOE_FUSED_LAYOUT=wide); test_q38_bits.js ATTN_PREFILL_TILE=0 unchanged (GB10 85b12667 / eba0b8d5, Mac
+b72e4d1f / ac403b4e); unit tests (tests/unit/moe_fused_wide_test.js new); tests/e2e/moe_fused_cpu.mjs (WGSL
+interpreter, race detection) passes for the legacy and two wide layouts (its fused == unfused check now uses the legacy
+unfused layout; it had failed since MOE_DEFAULT became the unfused default).

@@ -9,7 +9,7 @@ import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SG
 import { gemmWideWGSL, wideTileConfig } from "./wgsl/gemm_wide.js";
 import { coopWGSL, probeUnpack } from "./wgsl/coop.js";
 import { WGSL2 } from "./wgsl/qwen35.js";
-import { moeWGSL, moeFusedWGSL, moeKernelConfig } from "./wgsl/moe.js";
+import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout } from "./wgsl/moe.js";
 import { attnTileWGSL, attnTileConfig } from "./wgsl/attn_tile.js";
 import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows } from "./wgsl/moe_group.js";
 import { f16ToF32, f32ToF16 } from "./gguf.js";
@@ -158,7 +158,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -213,6 +213,17 @@ export class Qwen35Engine {
         this.moe.KS = this.moe.K + 1; this.moe.sDim = inter; this.moe.hs = Math.max(ei, inter); this.moe.R = moeDnRows;
         this.moe.guPairs = [...new Set(moeLs.map((L) => L.expGate.kind + "_" + L.shGate.kind))];
         this.moe.dnPairs = [...new Set(moeLs.map((L) => L.expDown.kind + "_" + L.shDown.kind))];
+        // fused kernel layout (engine/wgsl/moe.js moeFusedLayout): "legacy" | "wide" | { gu: {...}, dn: {...} }. Default
+        // (undefined / "auto"): the wide layout on Apple GPUs, where the legacy one is barrier bound (M5 Max, Chrome:
+        // docs/bench-log.md), the legacy kernels everywhere else (their bits unchanged). Either keeps batched == one-token.
+        // (Deno: device.adapterInfo panics in wgpu-core once the adapter is dropped, and its adapter info is empty anyway)
+        const info = adapterInfo ?? (typeof Deno === "undefined" ? device.adapterInfo : null), autoL = moeFusedLayoutOpt === undefined || moeFusedLayoutOpt === "auto";
+        const lay = moeFusedLayout(autoL ? (/apple/i.test(info?.vendor || "") ? "wide" : "legacy") : moeFusedLayoutOpt, this.moe.K);
+        const wideMem = !lay || Math.max(2 * lay.gu.R * lay.gu.WG, this.moe.KS * lay.dn.R * lay.dn.WG) * 4 <= device.limits.maxComputeWorkgroupStorageSize;
+        if (!wideMem) console.warn("moeFusedLayout: reduction scratch over the device's workgroup memory; legacy fused kernels");
+        this.moe.layout = wideMem ? lay : null;
+        // output rows per moe_gus / moe_dnc workgroup (grid x = ceil(rows / these))
+        this.moe.gusRows = this.moe.layout ? this.moe.layout.gu.rows : 4; this.moe.dncRows = this.moe.layout ? this.moe.layout.dn.rows : moeDnRows;
       } else console.warn(`MoE: fused FFN off (unfused kernels): ${!moeLs.length ? "no MoE layers" : ![1, 2, 4].includes(moeDnRows) ? `moeDnRows ${moeDnRows} not 1, 2 or 4`
         : !wgMemOK ? "moe_dnc workgroup memory over the device limit" : "a layer's router / shared-expert tensors are not fusable"}`);
     }
@@ -351,6 +362,7 @@ export class Qwen35Engine {
         : gU % batchCols || gU < 2 * batchCols ? `ubatch ${gU} is not a multiple of batchCols ${batchCols} (at least 2 passes)`
         : ![1, 2, 4, 8, 16].includes(UC) ? `moeGroupUC ${UC} is not 1, 2, 4, 8 or 16`
         : moeGroupTiled && UC > 8 ? `moeGroupUC ${UC}: the tiled kernels take at most 8`
+        : !moeGroupTiled && this.moe.layout ? "moeGroupTiled: false mirrors the legacy fused kernels (moeFusedLayout is not legacy)"
         : !moeGroupTiled && UC * R * 64 * 4 > Math.min(16384, device.limits.maxComputeWorkgroupStorageSize) - 16 ? `moeGroupUC ${UC} x ${R} down rows exceed workgroup memory`
         : gU * (this.moe.K + 1) * dim * 4 > device.limits.maxStorageBufferBindingSize ? `ubatch ${gU} expert outputs exceed the storage-binding limit`
         : gU > device.limits.maxComputeWorkgroupsPerDimension
@@ -405,7 +417,7 @@ export class Qwen35Engine {
     const unpack = await probeUnpack(device);
     const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack)
       + (this.moe ? moeWGSL(this.moeK) : "")
-      + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
+      + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && this.moeGrpTiled ? tiledGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && !this.moeGrpTiled ? moeGroupWGSL({ K: this.moe.K, R: dnGroupRows(this.moeGrpUC), UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
@@ -660,7 +672,9 @@ export class Qwen35Engine {
       const sizes = parts.map((b) => b.byteLength !== undefined ? b.byteLength : b.size);
       if (sizes.some((n) => n % 4)) throw new Error("packGU: unaligned shared-expert tensor");
       const offs = [0]; for (const n of sizes) offs.push(offs[offs.length - 1] + n);
-      const buf = device.createBuffer({ size: offs[4], usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      // the wide fused kernels read it as vec4<u32>: whole 16 B elements, and the up qs start on one
+      if (this.moe.layout && offs[1] % 16) throw new Error("packGU: shared up qs not 16-byte aligned");
+      const buf = device.createBuffer({ size: Math.ceil(offs[4] / 16) * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       let enc = null;
       parts.forEach((b, i) => {
         if (b.byteLength !== undefined) device.queue.writeBuffer(buf, offs[i], b.buffer, b.byteOffset, b.byteLength);
@@ -1277,11 +1291,11 @@ export class Qwen35Engine {
     const p = enc.beginComputePass();
     this._d(p, "rmsnorm", L.bgNorm2, 256, 256);
     if (L.fused) {   // router (+ shared gate) GEMV, route, gate/up over K + 1 slots, down + combine
-      const { KS, hs, R } = this.moe;
+      const { KS, hs, gusRows, dncRows } = this.moe;
       this._dop(p, L.mvRouter);
       this._dxyz(p, "moe_route", L.bgRoute, 1, 1, 1);
-      this._dxyz(p, L.gusPipe, L.bgGus, Math.ceil(hs / 4), KS, 1);
-      this._dxyz(p, L.dncPipe, L.bgDnc, Math.ceil(D.dim / R), 1, 1);
+      this._dxyz(p, L.gusPipe, L.bgGus, Math.ceil(hs / gusRows), KS, 1);
+      this._dxyz(p, L.dncPipe, L.bgDnc, Math.ceil(D.dim / dncRows), 1, 1);
       p.end();
       return;
     }
@@ -1859,12 +1873,12 @@ export class Qwen35Engine {
   _encMoeFfn(p, L, LB, M, nCols, G, routeOnly = false) {
     const D = this.dims;
     if (L.fused) {   // same four launches as the one-token path, one workgroup row per column
-      const { KS, hs, R } = this.moe;
+      const { KS, hs, gusRows, dncRows } = this.moe;
       this._dop(p, LB.router, nCols);
       this._dMC(p, "moe_route", M.route, nCols * 256, 256, 1);
       if (routeOnly) return;
-      this._dMC(p, L.gusPipe, M.gus, Math.ceil(hs / 4) * 64, 64, nCols * KS);
-      this._dMC(p, L.dncPipe, M.dnc, Math.ceil(D.dim / R) * 64, 64, nCols);
+      this._dMC(p, L.gusPipe, M.gus, Math.ceil(hs / gusRows) * 64, 64, nCols * KS);
+      this._dMC(p, L.dncPipe, M.dnc, Math.ceil(D.dim / dncRows) * 64, 64, nCols);
       return;
     }
     const { K, inter: ei } = this.moe;
