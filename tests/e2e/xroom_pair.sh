@@ -24,7 +24,9 @@
 #   XROOM_LOCAL_IP     this machine's address as the other one sees it (the signaling server's)
 #   XROOM_REMOTE_IP    the other machine's address for the ping (default: from its $SSH_CONNECTION)
 #   XROOM_LOCK         optional. '$XROOM_LOCK acquire' / 'release': the other machine's GPU lock, held
-#                      for the whole run and released on any exit
+#                      for the whole run and released on any exit. acquire must print LOCKED. If this
+#                      script is killed while acquire is still waiting, a wait loop that runs on the
+#                      other machine (over ssh) can outlive it and take the lock later: kill it there.
 #   XROOM_GPURUN       optional. A wrapper the local side runs through (e.g. one that waits for this
 #                      machine's GPU to be idle, then execs its arguments)
 # Outputs in --out DIR: host.json (the host's result; with --trace-rounds also its traces), host.log,
@@ -103,6 +105,18 @@ wait_host() {   # the host's exit code in RC; a guest that ends first is a failu
   done
   wait "$HPID"; RC=$?
 }
+# XROOM_GPURUN may give up (a wrapper with a timeout prints something and runs nothing): with the
+# other machine's lock already held, keep waiting for this GPU (XROOM_GPURUN_TRIES, default 8)
+# rather than drop the lock and queue for it again
+gpu_wait() {
+  [ -z "$GPURUN" ] && return 0
+  for _ in $(seq 1 "${XROOM_GPURUN_TRIES:-8}"); do
+    [ "$($GPURUN echo XROOM_GPU_FREE 2>&1 | tail -1)" = XROOM_GPU_FREE ] && return 0
+    log "this GPU is busy; waiting again"
+  done
+  return 1
+}
+gpu_wait || { log "this GPU stayed busy"; exit 1; }
 if [ "$HERE" = host ]; then
   # host here (it runs the signaling server), guest there
   $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role host --out "$OUT/host.json" "${HOST_ARGS[@]}" > "$OUT/host.out" 2> "$OUT/host.log" &
