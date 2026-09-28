@@ -776,7 +776,7 @@
 
   /* ---------- start when 30% visible ---------- */
   new IntersectionObserver(es => {
-    visible = es[0].isIntersecting;
+    visible = es[es.length - 1].isIntersecting;
     if (visible) begin();
     wake();
   }, { threshold: .3 }).observe(win);
