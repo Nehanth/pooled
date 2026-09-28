@@ -756,7 +756,8 @@ export async function initCode(api, { mock = null } = {}) {
       if (api.hostId() && api.peers().includes(api.hostId())) api.send(api.hostId(), { t: "ai-code-sync" });
       peerRunning();
     }
-    if (!$("code-row").hidden) setTimeout(() => $("code-prompt").focus(), 0);
+    // not on touch screens: a focused prompt opens the keyboard (and the keyboard layout) before anyone asked to type
+    if (!$("code-row").hidden && !matchMedia("(pointer: coarse)").matches) setTimeout(() => $("code-prompt").focus(), 0);
   }
   api.onRole(() => {
     const host = isHost();

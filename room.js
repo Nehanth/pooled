@@ -1831,7 +1831,7 @@ function aiMaybeReady() {
   setAfterAnswer(false, !!ai.conv.turns.length);
   emptyText("The model is ready. Ask anything.");
   sysNote(`Model ready on ${n} device${n > 1 ? "s" : ""}`);
-  $("ai-prompt").focus();
+  if (!matchMedia("(pointer: coarse)").matches) $("ai-prompt").focus();   // touch: the keyboard opens when the user taps the prompt
   broadcastAll({ t: "ai-ready-all", model: ai.model });
   pushMap(0, null, false, true);
   offerRedealForNewcomers();
