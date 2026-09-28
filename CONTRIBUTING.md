@@ -17,7 +17,7 @@ Contributions written with AI assistance are welcome. You are responsible for th
 The engine runs in browsers and, for testing, in [Deno](https://deno.com) (which ships WebGPU). You need a GPU with WebGPU support to run most tests.
 
 ```bash
-git clone https://github.com/Nehanth/pooled && cd swarmllm
+git clone https://github.com/Nehanth/pooled && cd pooled
 curl -fsSL https://deno.land/install.sh | sh          # Deno 2.x
 npm test                                               # quick unit tests (no GPU)
 ```

@@ -19,9 +19,9 @@
   <img alt="runtime" src="https://img.shields.io/badge/runs%20on-WebGPU%20%2B%20WebRTC-16171c">
 </p>
 
-https://github.com/user-attachments/assets/4f349e4b-c699-45da-abe8-e9162689293e
+<p align="center"><a href="https://github.com/Nehanth/pooled/releases/download/v1.0.0/pooled-demo-2026-09-27.mp4"><img alt="Demo video: Pooled running Qwen 3.6 35B across a Mac and an iPhone, and Code mode building a Tetris game" src="docs/media/demo-2026-09-27.jpg" width="820"></a></p>
 
-<p align="center"><sub>Demo, recorded September 7, 2026: Qwen 3.8 27B across a MacBook and an iPhone in browser tabs, same Wi‑Fi, 400 tokens at 10.7 tok/s. <a href="https://github.com/Nehanth/pooled/releases/download/v0.2.0/swarmllm-demo-2026-09-07.mp4">Download</a>.</sub></p>
+<p align="center"><sub>Demo, recorded September 27, 2026 (2:29, with voice and subtitles): Qwen 3.6 35B MoE across a Mac and an iPhone in browser tabs. The phone chats with it, then Code mode builds a Tetris game, fixes its own bug and restyles it. <a href="https://github.com/Nehanth/pooled/releases/download/v1.0.0/pooled-demo-2026-09-27.mp4">Watch</a> · <a href="https://github.com/Nehanth/pooled/releases/download/v0.2.0/swarmllm-demo-2026-09-07.mp4">the September 7 demo</a>.</sub></p>
 
 Pooled runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.
 
@@ -60,7 +60,7 @@ Design: [docs/design/harness-app.md](docs/design/harness-app.md). What the agent
 ## Run it locally
 
 ```bash
-git clone https://github.com/Nehanth/pooled && cd swarmllm
+git clone https://github.com/Nehanth/pooled && cd pooled
 npx -y serve -l 8080 .        # then open http://localhost:8080/room
 ```
 

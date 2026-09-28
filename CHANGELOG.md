@@ -2,16 +2,15 @@
 
 All notable changes to Pooled (called SwarmLLM before September 2026). Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Entries before the rename keep the old name.
 
-## [Unreleased]
-
-### Fixed
-- **Code previews fit their box**: an app with a fixed layout (a 300x600 tetris board and a side panel) is scaled down to fit the preview on a phone or a narrow pane instead of being cropped; clicks and keys still reach it, and apps that already fit are untouched.
-
 ## [1.0.0] - 2026-09-27
 
 The first stable release: peer-to-peer inference in the browser at [pooled.run](https://pooled.run).
 
 ### Added
+- **Demo video** (September 27, 2026): Qwen 3.6 35B MoE across a Mac and an iPhone; the phone chats, both devices drive Code, which builds a Tetris game, fixes its own bug and restyles it. Attached to this release.
+- **Syntax colours in Code** as the agent writes, in its diffs and on the landing demo.
+- **The load card turns to the Pooled mark** ("Starting <model>") once every device has its layers, while a big model gets onto the GPUs.
+- **The band's live pill** changes word every two seconds while the room writes ("Twinkling…", "Weaving…").
 - **Anyone in a room can drive Code** (not only the host): requests queue with the asker's name, the asker or the host approves or stops, and the model's heavy role goes to the strongest device (WebGPU, a computer before a phone, then memory).
 - **Code on phones** as Agent / Preview / Files tabs, with the prompt above the keyboard and approvals that can't be missed; other devices' previews run by themselves.
 - **The landing demo matches the room** (download card with each device's layers, the chat band's token sweep, Code cards and the Editing overlay) and starts at Chat.
@@ -86,6 +85,11 @@ The first stable release: peer-to-peer inference in the browser at [pooled.run](
 - **SwarmLLM is now Pooled, at [pooled.run](https://pooled.run).** swarmllm.ai and www.swarmllm.ai redirect to pooled.run for good, and join links like `/r/ABCD` keep working. The repo moved to github.com/Nehanth/pooled; the old GitHub URLs redirect. Browser caches are per site, so the first visit to pooled.run downloads model weights again. Rooms now use the PeerJS id prefix `pooled-room-`, so a pooled.run tab and an old swarmllm.ai tab never land in the same room.
 
 ### Fixed
+- **Code follow-ups printed their tool calls as text** (`<tool_tool_calls>`): re-tokenized answers now keep `<tool_call>` and friends as single tokens, a garbled opener can't be sampled, and a stray `<function=…>` block still runs.
+- **Code previews fit their box**: an app with a fixed layout (a 300x600 tetris board and a side panel) is scaled down to fit the preview on a phone or a narrow pane instead of being cropped; clicks and keys still reach it, and apps that already fit are untouched.
+- **The folded layers bar** sizes each device by its share of the layers, so a phone holding one or two layers never drops out.
+- **Landing on phones**: one device at a time in the join scene, notices in the room bar instead of over the cards, and a chat that follows the answer as it is written.
+- A crisp favicon at tab size, light on dark tab strips.
 - **The 35B MoE on Apple GPUs:** the expert-grouped prefill kernel wrote single components of shared vec4s, which Metal can lose; it gave wrong output when a Mac hosted the MoE. Now a scalar array, same arithmetic order.
 - **Rooms could not start a model:** the load-time kernel check read a merged q/k/v view as a buffer.
 - **Code in a tab opened before a deploy** failed to link a newer module; it now falls back or asks to reload.
