@@ -197,7 +197,7 @@ export async function initCode(api, { mock = null } = {}) {
   function closeProject({ keepQueue = false } = {}) {
     if (running) ctrl?.abort();
     if (!keepQueue) for (const q of queue.splice(0)) tell(q.from, "the project changed: your queued request was dropped", true);
-    publisher?.close(); server?.close();
+    server?.close(); publisher?.close();   // in this order: the server's stops reach the members (ai-pv-stop) before the publisher unsubscribes
     for (const port of [...ui.ports.keys()]) ui.dropPort(port);
     project = server = publisher = agent = model = null; agentSrc = null; tools = [];
   }
