@@ -158,6 +158,7 @@
 
   /* ---------- the caption bar ---------- */
   const dotBtns = [...demo.querySelectorAll(".sb-dots button")];
+  dotBtns.forEach(b => b.removeAttribute("tabindex"));   // (the markup keeps them out of the tab order for no-JS)
   const CAPS = dotBtns.map(b => b.querySelector(".lbl").textContent);
   const sbN = $("sbN"), sbT = $("sbT");
   let shownStep = -2;
@@ -290,6 +291,7 @@
     // before the bytes flow the room says what this device is doing; then the bytes, the total and the time left
     const b = +gb >= 1 ? gb + " GB" : Math.round(gb * 1024) + " MB";
     lcStatus.innerHTML = gb == null ? '<span class="src gpu">This device</span><span>Getting this device ready</span>'
+      : pcts.every(x => x >= 100) ? '<span class="src">Ready</span><span class="b">22.5 GB on 3 devices</span>'   // every row loaded: not "Downloading 22.5 of 22.5"
       : `<span class="src">Downloading</span><span class="b">${b} of 22.5 GB</span>` + (eta ? `<span class="eta${/^estimating/.test(eta) ? " wait" : ""}">${eta}</span>` : "");
   };
   const loadAt = t => {
@@ -400,6 +402,7 @@
 
   /* ---------- chat ---------- */
   const msgs = $("msgs"), chatTyped = $("chatTyped"), chatComposer = $("chatComposer");
+  msgs.addEventListener("scroll", () => msgs.classList.toggle("scrolled", msgs.scrollTop > 0), { passive: true });
   const Q1 = "what is Pooled?", q1El = demo.querySelector('[data-at="q1"]');
   // the chat follows its last line, gliding (a jump when seeking, or with reduced motion)
   const glide = top => { top = Math.max(0, Math.min(msgs.scrollHeight - msgs.clientHeight, top)); if (Math.abs(top - msgs.scrollTop) < 1) return; if (RM || frozen) msgs.scrollTop = top; else msgs.scrollTo({ top, behavior: "smooth" }); };
@@ -645,6 +648,7 @@
     setDevices(3); joining = -1; lent = LEND.slice(); rungHover(-1); rungSelect(2); card.dataset.face = "pick";
     model.classList.add("dl"); rowsEl.classList.add("dealt"); loadAt(FILL1 + 1);
     words = -1; flowing = true; coding = false; flow(END);
+    bdTok.textContent = WORDS.length + Math.floor((GAME + .6 - C) / .12);   // the Code run's tokens too, about where the live run ends (flow() counts the chat's only)
     demo.querySelectorAll("[data-at]").forEach(el => el.classList.remove("pending", "enter"));
     saysText.forEach((txt, el) => { const s = el.querySelector(".say"); if (s) { s.textContent = txt; s.classList.remove("cursor"); } });
     chatTyped.textContent = ""; codeTyped.textContent = ""; chatComposer.classList.remove("hot"); codeComposer.classList.remove("hot");
@@ -672,6 +676,7 @@
   let raf = 0, last = 0, visible = false, frozen = false, playing = false;
   const needs = () => !frozen && !playing && visible && !document.hidden && tl.started && !tl.done;
   function loop(now) {
+    if (sbT.getAttribute("aria-live") !== "off") sbT.setAttribute("aria-live", "off");
     const dt = last ? Math.min(.1, (now - last) / 1000) : .016; last = now;
     tl.advance(dt * rate(tl.t));
     raf = needs() ? requestAnimationFrame(loop) : 0;
@@ -693,10 +698,13 @@
     while (tl.t < s - 1e-6) tl.advance(Math.min(1 / 30, s - tl.t));
     inst.draw(); wake();
   };
+  // the caption is announced when the visitor moves to a step, not on every step the autoplay reaches
   const goStep = k => {
+    sbT.setAttribute("aria-live", "polite");
     if (RM) {
       if (k >= STEPS.length - 1) { stopPlay(true); tl.final(); return; }
-      const ends = [S1 - .3, S2 - .3, S3 - .3, CH - .3, A1 + .5, c(FILES - .1), c(CHANGE - .1)];
+      // step 2 ends before the tabs merge (S1 + 2.1): after that the window is blank until the pool scene
+      const ends = [S1 - .3, S1 + 2.0, S3 - .3, CH - .3, A1 + .5, c(FILES - .1), c(CHANGE - .1)];
       seek(ends[k], true); tl.done = true; flow(A1 + 1); paintBar(STEPS[k]); return;
     }
     seek(STEPS[k]);
@@ -776,7 +784,7 @@
 
   /* ---------- start when 30% visible ---------- */
   new IntersectionObserver(es => {
-    visible = es[0].isIntersecting;
+    visible = es[es.length - 1].isIntersecting;
     if (visible) begin();
     wake();
   }, { threshold: .3 }).observe(win);

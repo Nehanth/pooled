@@ -119,6 +119,19 @@ try {
   for (const p of Object.values(tabs)) await p.waitForFunction((n) => document.querySelectorAll(".peer-card").length >= n, N, { timeout: 60000 + 2000 * N });
   log(N, "devices in room");
   await tabs.host.waitForTimeout(3000);   // stripe connections
+  // from the load card to the chat, no tab may show the model picker in between (it did for the
+  // seconds between the host's own layers and the room's: the "Pick a model" flash)
+  for (const p of Object.values(tabs)) await p.evaluate(() => {
+    const panel = document.getElementById("ai-panel"), w = window.__pickFlash = { armed: false, since: 0, shows: [] };
+    const check = () => {
+      const online = panel.classList.contains("online"), loading = panel.classList.contains("loading");
+      if (loading) w.armed = true;
+      const picker = w.armed && !online && !loading;
+      if (picker && !w.since) w.since = performance.now();
+      if (!picker && w.since) { w.shows.push(Math.round(performance.now() - w.since)); w.since = 0; }
+    };
+    new MutationObserver(check).observe(panel, { attributes: true, attributeFilter: ["class"] });
+  });
   await tabs.host.selectOption("#ai-model", MODEL);
   await tabs.host.click("#ai-start");
   log("model start pressed");
@@ -131,6 +144,9 @@ try {
   log("online:", await tabs.host.textContent("#ai-status"));
   const split = await tabs.host.evaluate(() => [...document.querySelectorAll("#chat-log div")].map((d) => d.textContent).filter((t) => /layer split/.test(t)).slice(-1)[0] || "");
   log(split);
+  const pickFlash = {};
+  for (const [n, p] of Object.entries(tabs)) { const ms = await p.evaluate(() => window.__pickFlash.shows); if (ms.length) pickFlash[n] = ms; }
+  log("model picker shown between the load card and the chat (ms):", JSON.stringify(pickFlash));
   const results = [];
   for (let r = 0; r < ROUNDS; r++) {
     await tabs.host.fill("#ai-prompt", PROMPT); await tabs.host.click("#ai-send");
@@ -144,9 +160,9 @@ try {
   // the room's own log carries GPU validation errors that never reach the console
   const roomErrs = {}; for (const [n, p] of Object.entries(tabs)) roomErrs[n] = await p.evaluate(() => [...document.querySelectorAll("#chat-log div")].map((d) => d.textContent).filter((t) => t.includes("\u26a0")).map((t) => t.slice(0, 160)));
   const nRoomErrs = Object.values(roomErrs).reduce((a, e) => a + e.length, 0);
-  const ok = results.every((s) => s.status.startsWith("ready")) && Object.values(errs).every((e) => e.length === 0) && nRoomErrs === 0;
+  const ok = results.every((s) => s.status.startsWith("ready")) && Object.values(errs).every((e) => e.length === 0) && nRoomErrs === 0 && !Object.keys(pickFlash).length;
   const linkSummary = Object.fromEntries(Object.entries(wire).map(([n, l]) => [n, (l || []).map((x) => `${x.name}:${x.chans}ch ${x.sent}/${x.recv}`).join(", ")]));
-  console.log(JSON.stringify({ ok, wire: WIRE, model: MODEL, devices: DEVICES, phones: PHONES, code, split, results, links: DEVICES > 6 ? Object.fromEntries(Object.entries(linkSummary).slice(0, 4)) : linkSummary, errors: Object.fromEntries(Object.entries(errs).filter(([, v]) => v.length)), roomErrors: { count: nRoomErrs, first: Object.fromEntries(Object.entries(roomErrs).filter(([, v]) => v.length).map(([k, v]) => [k, v.slice(0, 2)]).slice(0, 3)) } }, null, 1));
+  console.log(JSON.stringify({ ok, wire: WIRE, model: MODEL, devices: DEVICES, phones: PHONES, code, split, pickFlash, results, links: DEVICES > 6 ? Object.fromEntries(Object.entries(linkSummary).slice(0, 4)) : linkSummary, errors: Object.fromEntries(Object.entries(errs).filter(([, v]) => v.length)), roomErrors: { count: nRoomErrs, first: Object.fromEntries(Object.entries(roomErrs).filter(([, v]) => v.length).map(([k, v]) => [k, v.slice(0, 2)]).slice(0, 3)) } }, null, 1));
   process.exitCode = ok ? 0 : 1;
 } catch (e) {
   console.error("FAILED:", String(e).slice(0, 400));

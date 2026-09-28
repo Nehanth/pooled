@@ -305,7 +305,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     let el = find(k);
     // the call is complete: the card stays (hidden) as the place its tool card goes, so text the
     // model writes after the call lands under it
-    if (d.end) { if (el) { el.hidden = true; el.classList.add("ended"); } editWin.end(); return; }
+    if (d.end) { if (el) { el.hidden = true; el.classList.add("ended"); } return; }   // (the overlay follows the call's card)
     if (!el) {
       closeText();
       el = h("div", "cm-live"); el.dataset.k = k; el.dataset.raw = "";
@@ -330,7 +330,7 @@ export function codeUI({ onMode = () => {} } = {}) {
 
   // ---------------- the edit overlay: once an app is served, while the agent edits a file the preview
   // frosts over with the Pooled dots in their wave and "Editing game.js" (no code: the code shows in the agent's card), then
-  // "Reloading" once the call is complete, and it lifts when the preview has reloaded (or after a moment).
+  // "Reloading" once the call is approved, and it lifts when the preview has reloaded (or after a moment).
   // Host and peers alike (it is drawn from the same ai-code-live messages).
   const editWin = (() => {
     let el = null, raf = 0, last = null, closeT = 0, revAt = 0, shownAt = 0, doneT = 0;
@@ -394,7 +394,7 @@ export function codeUI({ onMode = () => {} } = {}) {
       // the model's text before a tool call is complete once the call starts; the card takes the
       // place of the live card that showed the call being typed
       closeText();
-      const at = log.querySelector(".cm-live");
+      const at = [...log.querySelectorAll(`.cm-live[data-k^="${CSS.escape(key("l", d.mid, ""))}"]`)].pop();   // this request's, never an earlier run's
       el = add(h("div", "cm-tool"), at);
       at?.remove();
       el.dataset.k = k;
@@ -410,6 +410,10 @@ export function codeUI({ onMode = () => {} } = {}) {
       sum.querySelector(".br").title = d.brief;
     }
     const chip = sum.querySelector(".chip");
+    // the preview's 'Editing' overlay follows the call: 'Reloading…' once it is approved (the file gets
+    // written); lifted, with no reload, while it waits for an answer or when it is declined or fails
+    if (d.state === "approved" || d.state === "done") editWin.end();
+    else if (d.state === "pending" || d.state === "declined" || d.state === "error" || d.state === "stopped") editWin.close();
     if (d.state) {
       chip.className = "chip " + d.state.replace(/[^a-z]/g, "");
       chip.textContent = d.state === "pending" ? "needs approval" : d.state;
@@ -424,6 +428,13 @@ export function codeUI({ onMode = () => {} } = {}) {
       pre.textContent = d.result;
     }
     if (d.diff && !el.querySelector(".cm-diff")) el.append(diffBlock(d.diff, host ? viewFull : null));
+    // this card's proposed file is open from 'view full file': once written the editor shows the file
+    // itself (editable); declined, the label says it was not written
+    const dp = el.querySelector(".cm-diff .dh b")?.textContent;
+    if (host && proposed && dp === proposed && edPath == null && d.state) {
+      if (d.state === "done") { proposed = null; fileClick(dp); $("code-tree").querySelector(`.f[data-path="${CSS.escape(dp)}"]`)?.classList.add("on"); }
+      else if (d.state === "declined" || d.state === "error" || d.state === "stopped") { proposed = null; $("ed-path").textContent = $("ed-path").title = `${dp} · proposed, not written`; }
+    }
     // everyone sees the pending state; whoever may answer it (the asker, the host) gets buttons from ask()
     let ap = el.querySelector(".cm-approve");
     if (d.state === "pending" && !host && !ap) { ap = h("div", "cm-approve"); ap.append(h("span", "wait", waitText(d.mid))); el.append(ap); }
@@ -478,7 +489,7 @@ export function codeUI({ onMode = () => {} } = {}) {
       all.onclick = () => done("all");
       no.onclick = () => {
         ap.replaceChildren(); head();
-        const why = h("input"); why.type = "text"; why.placeholder = "why? (optional, the agent reads it)"; why.maxLength = 300;
+        const why = h("input"); why.type = "text"; why.placeholder = matchMedia("(max-width: 640px)").matches ? "why? (optional)" : "why? (optional, the agent reads it)"; why.maxLength = 300;
         const send = h("button", null, "Reject"); send.type = "button";
         const back = h("button", null, "Cancel"); back.type = "button";
         ap.append(why, send, back);
@@ -501,6 +512,7 @@ export function codeUI({ onMode = () => {} } = {}) {
   let fileClick = () => {}, saveFile = null;
   const drafts = new Map();   // path -> unsaved text, kept while other files are open
   let edPath = null, edBase = "", edRO = true, hlRaf = 0;
+  let hlPath = "", proposed = null;   // the colours of a pathless view (a proposed file); which proposed file shows
   const ta = $("ed-text"), hl = $("ed-hl"), gutter = $("ed-ln"), edBox = $("ed");
   const PHONE = matchMedia("(max-width: 640px)");
   if (PHONE.matches) $("code-prompt").placeholder = "";   // phones: an empty box (the Agent tab says what it is)
@@ -533,7 +545,7 @@ export function codeUI({ onMode = () => {} } = {}) {
   const dirty = () => edPath != null && !edRO && ta.value !== edBase;
   function paint() {
     hlRaf = 0;
-    hl.innerHTML = highlight(edPath || "", ta.value) + "\n";
+    hl.innerHTML = highlight(edPath || hlPath, ta.value) + "\n";
     const n = ta.value.split("\n").length;
     if (+gutter.dataset.n !== n) { gutter.dataset.n = n; gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n"); }
   }
@@ -549,9 +561,9 @@ export function codeUI({ onMode = () => {} } = {}) {
     st.className = d ? "dirty" : "";
   }
   // open a file in the editor: text, and whether it can be saved (label: why it is shown, e.g. a proposed file)
-  function openFile(path, text, { readOnly = !host || !saveFile, label = null } = {}) {
+  function openFile(path, text, { readOnly = !host || !saveFile, label = null, hl = path } = {}) {
     if (edPath != null && dirty()) drafts.set(edPath, ta.value);
-    edPath = path; edRO = readOnly || path == null;
+    edPath = path; edRO = readOnly || path == null; hlPath = hl || ""; proposed = null;
     edBase = text ?? "";
     ta.value = !edRO && drafts.has(path) ? drafts.get(path) : edBase;
     ta.readOnly = edRO;
@@ -562,13 +574,13 @@ export function codeUI({ onMode = () => {} } = {}) {
     paint(); edState();
     edBox.scrollTop = 0; edBox.scrollLeft = 0;
   }
-  function viewFile(text, label = null) {
+  function viewFile(text, label = null, hl = null) {
     if (text == null) {
-      edPath = null; edBase = ""; ta.value = ""; edRO = true; cp.classList.remove("ed-open");
+      proposed = null; edPath = null; edBase = ""; ta.value = ""; edRO = true; cp.classList.remove("ed-open");
       edBox.hidden = true; $("ed-bar").hidden = true; $("ed-empty").hidden = false;
       return;
     }
-    openFile(null, text, { readOnly: true, label: label || "" });
+    openFile(null, text, { readOnly: true, label: label || "", hl });
   }
   // the file changed underneath (the agent wrote it): take the new text unless there are unsaved edits
   function fileChanged(path, text) {
@@ -616,7 +628,8 @@ export function codeUI({ onMode = () => {} } = {}) {
   function viewFull(path, text) {
     outTab("files");
     $("code-tree").querySelectorAll(".f.on").forEach((x) => x.classList.remove("on"));
-    viewFile(text, `${path} · proposed, not written yet`);
+    viewFile(text, `${path} · proposed, not written yet`, path);
+    proposed = path;
     if (phone.matches) { edOpen(true); setTab("files"); } else $("files-panel").scrollIntoView({ block: "nearest" });
   }
   function outTab(name) {
@@ -703,12 +716,14 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (P) a.append(h("span", "host", "localhost"), `:${active}/${P.path || "index.html"}`);
     else a.textContent = "No port served";
     $("pv-open").hidden = !P || !P.rev;
+    $("pv-state").dataset.state = P?.state || "";   // green only for a running rev
     $("pv-state").textContent = P ? (P.state === "ready" ? `rev ${P.rev}` : P.state === "loading" ? "loading…" : P.state === "waiting" ? "Click to run" : P.state === "stopped" ? "stopped" : P.state === "hung" ? "hung" : "") : "";
   }
   function status(port, s) {
     const P = ports.get(port);
     if (!P) return;
-    if (s.rev && s.rev !== P.rev && s.state === "loading") {
+    // a new rev, or the same one loading again (Reload, run again after a hang): the rows so far are the old load's
+    if (s.rev && s.state === "loading" && (s.rev !== P.rev || P.state !== "loading")) {
       P.rows.forEach((r) => (r.old = true));
       P.rows.push({ sep: `rev ${s.rev}` + (P.rev ? " · reloaded" : "") });
     }
@@ -731,15 +746,16 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (conTimer) return;
     conTimer = requestAnimationFrame(() => {
       conTimer = 0;
-      const P = ports.get(active), rows = $("pv-con-rows"), stick = rows.scrollHeight - rows.scrollTop - rows.clientHeight < 30;
+      const P = ports.get(active), rows = $("pv-con-rows"), stick = P?.stuck !== false;
       rows.replaceChildren();
       const cur = (P?.rows || []).filter((r) => !r.old && !r.sep);
       const errs = cur.filter((r) => r.level === "error").length, warns = cur.filter((r) => r.level === "warn").length, logs = cur.length - errs - warns;
       const c = $("pv-counts");
       c.replaceChildren();
-      if (errs) c.append(h("b", "e", plural(errs, "error")), " · ");
-      if (warns) c.append(h("b", "w", plural(warns, "warning")), " · ");
-      c.append(plural(logs, "log"));
+      // no '0 logs' next to errors or warnings: one line in the header on a phone
+      const sh = phone.matches;
+      const parts = [errs && h("b", "e", plural(errs, sh ? "err" : "error")), warns && h("b", "w", plural(warns, sh ? "warn" : "warning")), (logs || !(errs || warns)) && plural(logs, "log")].filter(Boolean);
+      parts.forEach((x, i) => c.append(...(i ? [" · ", x] : [x])));
       c.dataset.errors = String(errs);
       $("pv-to-agent").hidden = !drive || !errs;   // only when there is something to fix
       for (const r of P?.rows || []) {
@@ -753,6 +769,12 @@ export function codeUI({ onMode = () => {} } = {}) {
       if (stick) rows.scrollTop = rows.scrollHeight;
     });
   }
+  // each port's console follows new rows unless the reader scrolled up. The check can't run while the
+  // console is hidden (another tab, Chat, a phone's Agent view: height 0), so it is kept per port, and
+  // the rows jump to the newest when the console shows again
+  const conRows = $("pv-con-rows");
+  conRows.addEventListener("scroll", () => { const P = ports.get(active); if (P && conRows.clientHeight) P.stuck = conRows.scrollHeight - conRows.scrollTop - conRows.clientHeight < 30; }, { passive: true });
+  new ResizeObserver(() => { if (conRows.clientHeight && ports.get(active)?.stuck !== false) conRows.scrollTop = conRows.scrollHeight; }).observe(conRows);
   function conOpen(open) {
     $("pv-console").classList.toggle("closed", !open);
     $("pv-con-toggle").setAttribute("aria-expanded", String(open));
@@ -791,6 +813,8 @@ export function codeUI({ onMode = () => {} } = {}) {
     onReload(fn) { onReload = fn; },
     onOpen(fn) { onOpen = fn; },
     portTab, dropPort, activate, status, logRow, ports,
+    // phones: show one of the tabs (Agent, Preview, Files); wider screens show them all
+    tab(t) { if (phone.matches) setTab(t); },
     // how much of the context window the agent's conversation uses, as a percentage and a ring
     ctx(used, max) {
       const el = $("code-ctx");

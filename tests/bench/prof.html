@@ -22,7 +22,7 @@ try {
     // GPU sampling on by default (?gpusample=0: the logits path); ?argmaxwide=0|1 overrides the two-stage draft argmax
     gpuSample: q.get("gpusample") !== "0", argmaxWide: (q.get("argmaxwide") ?? (q.get("gpusample") === "0" ? "0" : "1")) === "1" });
   log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s, adapter ${ad.info?.vendor}, mtp ${!!eng.mtp}, moeFuse ${!!eng.moeFuse}, draftVocab ${eng.draftVocab || "off"}, gpuSample ${eng.gpuSample}, argmaxWide ${eng.argmaxWide}, timestamps ${feats.length > 0}`);
-  const out = await profileDecode({ eng, device, tok, argmax, log, N: +(q.get("tokens") || 24), STEPS: +(q.get("steps") || 12), K: +(q.get("k") || 3) });
+  const out = await profileDecode({ eng, device, tok, argmax, log, N: +(q.get("tokens") || 24), STEPS: +(q.get("steps") || 12), K: +(q.get("k") || 3), roomPath: q.get("roompath") === "1" });
   window.RESULT = { runtime: "chrome", arch, ...out };
 } catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; }
 </script>

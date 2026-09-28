@@ -716,3 +716,60 @@ Deno (wgpu/Metal), `MODEL=moe FILLS=512,4096,16384 $D bench_ctx.js` (engine defa
 | tests/e2e/moe_fused_cpu.mjs (WGSL interpreter) | MOE FUSED CPU PASS (legacy + two wide layouts, no races) | |
 
 **Open: MoE test_prefill_wide at 700 tokens on the Mac.** It hit the known Deno-only `mapAsync` validation error once. That is the same error bench_ctx hits on main, and on this branch bench_ctx with the same wide + grouped prefill defaults ran 2 of 2 times. The wide-prefill branch passed this case when it was measured on its own. An A/B job (this branch vs 42136dd alone, alternated 2x) was set up twice but never ran: the first time the SSH connection dropped, the second time the shared Mac GPU lock stayed taken by other jobs for over an hour. Whether this is intermittent or caused by the combination is not settled. Output never silently changes: when the error happens, the run throws.
+
+## 2026-09-28: M5 Max profile at main c6ca8cc (Chrome 154 / Deno 2.9.7, Metal)
+
+Same Mac Studio as above. Chrome runs: `CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"`.
+
+**Bandwidth and floors** (`tests/bench/bw_probe.js`, new: streaming read of a 1 GiB buffer, slope between 2 and 6
+passes per submit so the submit round trip cancels). Chrome: **443 GB/s** read (u32 or vec4 loads within 3%), copy
+199 GB/s; per dispatch 1.2 µs, per compute pass 1.7 µs, **per compute pass + `copyBufferToBuffer` 17.1 µs** (a
+blit costs ~15 µs on Metal). Deno: 486 GB/s, pass 24.8 µs, and an **empty submit + `onSubmittedWorkDone` round
+trip of 12.5 ms**; a 4-byte `mapAsync` round trip is 14.5 ms (`prof_moe_decode.js` sync floor), vs 0.27 ms in
+Chrome. So every Deno decode number on the Mac carries ~13 ms per sync: Deno MoE plain is 28.0 ms/token for
+12.1 ms of kernels. Use Chrome for Mac speed numbers.
+
+**Decode, Chrome** (`node tests/prof/prof_chrome.mjs <model> out.json roompath=1`):
+
+| | plain ms/token | kernel sum | weights read per token | kernels vs 443 GB/s | spec K=3 |
+|---|---|---|---|---|---|
+| MoE | 11.66 (85.8 tok/s) | 10.02 ms, 420 dispatches | 2.0 GB | 45% | 26.1 ms/step, 3.67 tok/step, 140.7 tok/s |
+| 27B | 47.05 (21.3 tok/s) | 40.45 ms, 563 dispatches | 15.1 GB | 84% | 75.9 ms/step, 3.5 tok/step, 46.1 tok/s |
+
+MoE kernel families per plain token: DeltaNet projections 2.45 ms (~260 GB/s), expert gate/up 1.60, LM head 1.26
+(~330 GB/s), DeltaNet core 1.11 (`dn_delta_gn` 33.7 µs x 30 for 4 MB of state each), expert down 0.98, attention
+projections 0.83, attention core 0.60, `moe_route` 0.55 (16.6 µs each, one workgroup), router GEMV 0.32, norms 0.29.
+The 27B's GEMVs run at ~374 GB/s (`matvec_q4_gu` 268 µs) and the LM head at ~425 GB/s: the 27B is near the roofline,
+the MoE is not. Encoder structure (new counters): plain MoE token 1 submit, 87 passes, 483 dispatches, 1 copy;
+one speculative step 120 passes, 627 dispatches, **142 `copyBufferToBuffer` moving 81.5 MB** (124 of them in
+`_verifyFused`: the replay state `S -> S_pre` and conv / beta / decay copies per DeltaNet layer).
+
+Room path (roadmap 24 gate 1): `embedRun` + `headFromHiddenIds` vs `forwardTokenIds`, same tab, best of 3:
+MoE 12.14 vs 11.66 ms (+4.1%), 27B 48.21 vs 47.49 ms (+1.5%).
+
+GEMV shape A/B (`chrome_bench.mjs <moe> 40 'opts={"coopWG":W,"coopRows":R}'`, plain / spec tok/s, two-sum and
+hash-map, all golden, spec == plain): default 256/4 85.9 / 135.5, 86.0 / 121.2; 64/2 **93.2 / 143.9, 93.9 / 129.0**;
+32/4 93.1 / 140.0; 128/4 92.2 / 140.1; 64/4 92.1 / 140.4; 64/8 90.6 / 130.9; 128/8 89.9 / 131.5. 27B: default
+21.66 / 47.2, 64/4 22.48 / 47.2, 128/8 21.28 / 41.2. (At dIn 2048 a 256-thread row group gives each thread one
+32-weight block, then an 8-level tree.)
+
+**Prefill:** `chromium-experimental-subgroup-matrix` is exposed (subgroup size 32) but only with f32->f32 and
+f16->f16 8x8x8 configs, so `prefillMath=sgmatrix` (needs f16->f32) is unavailable on Apple. The MoE has no 16-column
+GEMM shapes (`gemmOn false`), so `prefillMath` does not apply to it at all.
+
+**Wide prefill with 256-column chunks fails on Apple.** `MODEL=27b PREFILL_UBATCH=256 LENS=150,700
+test_prefill_wide.js`: 150 tokens (one 128-column chunk) relDiff 2.2e-5, greedy and spec identical; 700 tokens
+(256-column chunks): device lost, reported as `OperationError: validation error occurred` at the next `mapAsync`.
+The MoE with `MOEGROUP=0` does the same. `diag_map` (MoE defaults): a 255-token prompt (a 192-column chunk) passes,
+256 / 320 / 448 / 511 tokens lose the device, at maxSeq 2048, 8192 or 32768 alike (not memory). Chrome reports no
+error and returns wrong numbers: 27B `prefilllen=2048&prefillall=1&ubatch=256` relDiff **0.836**, argmax 318 vs
+34062. This is the Deno "wide + grouped" `mapAsync` error above; grouped prefill is not needed to trigger it.
+
+**27B spec != plain at 16384** is the harness overrun `bench_ctx.js` now refuses: with `CTX=16640`, fill 16384 gives
+spec == plain (22/36).
+
+Deno `bench_ctx.js` (`MODEL=... FILLS=512,4096,16384`; MoE with `PREFILL_UBATCH=0`, since the default crashes as
+above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32.04 / 28.05, spec 42.26 / 42.71 /
+43.92; 27B prefill 31.9 / 58.5 / 53.6, plain 14.79 / 14.35 / 12.43, spec 23.54 / 21.13 / 15.96, spec == plain on
+every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
+prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).

@@ -78,7 +78,22 @@ export function installProf(device, eng, { mode = "submit", maxQ = 8 * 4096 } = 
     if (P.mode === "submit") {
       const i = q2();
       if (i >= 0) { rec.q = i; enc.beginComputePass({ timestampWrites: { querySet: qsOf(i), beginningOfPassWriteIndex: qi(i) } }).end(); }
-    } else if (P.mode === "kernel") {
+    }
+    // encoder structure (every mode but kernel, which re-splits the passes): compute passes, dispatches,
+    // copyBufferToBuffer calls (a compute -> blit -> compute encoder switch on Metal) and bytes copied
+    rec.passes = 0; rec.dispatches = 0; rec.copies = 0; rec.copyBytes = 0;
+    const obp = enc.beginComputePass.bind(enc), ocp = enc.copyBufferToBuffer.bind(enc);
+    if (P.mode !== "kernel") {
+      enc.beginComputePass = (d) => {
+        const p = obp(d); rec.passes++;
+        const od = p.dispatchWorkgroups.bind(p), oi = p.dispatchWorkgroupsIndirect?.bind(p);
+        p.dispatchWorkgroups = (...a) => { rec.dispatches++; return od(...a); };
+        if (oi) p.dispatchWorkgroupsIndirect = (...a) => { rec.dispatches++; return oi(...a); };
+        return p;
+      };
+    }
+    enc.copyBufferToBuffer = (...a) => { rec.copies++; rec.copyBytes += a.length === 5 ? a[4] : a.length === 3 ? a[2] : 0; return ocp(...a); };
+    if (P.mode === "kernel") {
       const ob = enc.beginComputePass.bind(enc);
       enc.beginComputePass = () => {
         let pipe = null; const bgs = {};
@@ -101,7 +116,7 @@ export function installProf(device, eng, { mode = "submit", maxQ = 8 * 4096 } = 
     }
     const ofin = enc.finish.bind(enc);
     enc.finish = (dd) => {
-      if (P.mode === "submit" && rec.q >= 0) enc.beginComputePass({ timestampWrites: { querySet: qsOf(rec.q), endOfPassWriteIndex: qi(rec.q) + 1 } }).end();
+      if (P.mode === "submit" && rec.q >= 0) obp({ timestampWrites: { querySet: qsOf(rec.q), endOfPassWriteIndex: qi(rec.q) + 1 } }).end();
       const cb = ofin(dd); cbRec.set(cb, rec); return cb;
     };
     return enc;

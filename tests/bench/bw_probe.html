@@ -1,0 +1,18 @@
+<!doctype html><title>bandwidth probe</title><pre id="log"></pre>
+<script type="module">
+// Achievable bandwidth and dispatch / pass / blit floors in a real browser tab, see tests/bench/bw_probe.js.
+// Driver: node tests/bench/bw_probe.mjs ['MB=1024&REPS=8']
+import { bwProbe } from "./bw_probe.js";
+const q = new URLSearchParams(location.search);
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+try {
+  const ad = await navigator.gpu.requestAdapter();
+  const device = await ad.requestDevice({ requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize,
+    maxComputeInvocationsPerWorkgroup: ad.limits.maxComputeInvocationsPerWorkgroup, maxComputeWorkgroupSizeX: ad.limits.maxComputeWorkgroupSizeX } });
+  const errs = []; device.addEventListener("uncapturederror", (e) => errs.push(e.error?.message));
+  log(`adapter ${ad.info?.vendor} ${ad.info?.architecture}`);
+  const r = await bwProbe(device, { MB: +(q.get("MB") || 1024), REPS: +(q.get("REPS") || 8), log });
+  log(JSON.stringify(r) + ` GPU errors ${errs.length}${errs.length ? ": " + errs[0] : ""}`);
+  window.RESULT = r;
+} catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; }
+</script>

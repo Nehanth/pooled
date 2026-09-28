@@ -20,9 +20,18 @@
 //   mountPreview(el, source, port, { onLog, onStatus, autorun = true, relay = relayUrl(), onShow, onDone, run })
 //     -> { reload(), destroy(), frame, rev }
 // run: a hidden run_js frame (harness/run-js.js). It never falls back to local mode (no relay, or
-// no hello: status "nohost"), and while it lives the other previews' watchdogs pause (the relay is
-// one site, so one process: a snippet's loop would read as their hang). When it goes while the
-// relay is hung, the other relay previews get fresh frames, so the hung process has none left.
+// no hello: status "nohost"), and while it lives in the relay (from its hello) the other previews'
+// watchdogs pause (the relay is one site, so one process: a snippet's loop would read as their
+// hang). Not before its hello: a relay process that is hung already must still be seen as hung.
+// When it goes while the relay is hung, the other relay previews get fresh frames, so the hung
+// process has none left.
+// After a hang: Chrome gives a new frame of the relay's site the process that already hosts that
+// site, and a hung process goes away only some time after its last frame. A relay frame made in
+// that window joins the hung process and never says hello. So relay frames made within QUIET_MS of
+// a hang wait that long before loading, and on a page whose relay has answered before, a frame
+// with no hello is not taken for "no relay": it and every other frame still waiting for a hello
+// (so none of them keeps the old process alive) are made again after QUIET_MS, up to HELLO_RETRIES
+// times, before local mode (a preview) or "nohost" (a run).
 // Fit: the app's document reports its content size (preview-build.js); a page wider or taller than
 // the box (a fixed 300x600 board and a side panel, on a phone) is scaled down to fit it, "contain",
 // never up. The frame is laid out at the box size divided by the scale, then transform: scale()d
@@ -37,11 +46,15 @@ import { buildPreviewDoc } from "./preview-build.js";
 
 const LEVELS = new Set(["log", "info", "warn", "error"]);
 const str = (v, n) => String(v ?? "").slice(0, n);
-export const HANG_MS = 3000, HELLO_MS = 5000, MAX_NAV = 3;
+export const HANG_MS = 3000, HELLO_MS = 5000, MAX_NAV = 3, QUIET_MS = 1000, HELLO_RETRIES = 2;
 // fit: the lowest scale for a tall page, for any page; steps per document; room around a scaled page (px)
 const FIT_MIN_H = 0.5, FIT_MIN = 0.2, FIT_STEPS = 6, FIT_PAD = 24;
 const views = new Set();   // the visible previews of this page (not run frames)
-let runs = 0;              // run_js frames alive
+let runs = 0;              // run_js frames alive in the relay (said hello)
+const waiting = new Set(); // mounts whose relay frame has not said hello yet
+let relayOk = false;       // a relay frame of this page has said hello: the host is there
+let quietUntil = 0;        // no new relay frame loads before this (a hung relay process is going away)
+const quiet = () => { quietUntil = Date.now() + QUIET_MS; };
 
 // The relay's address: <meta name="preview-origin" content="https://..."> on the page (a second
 // deployment of this site on another registrable domain), else in development the other loopback
@@ -69,7 +82,7 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
   let frame = null, mode = relay ? "relay" : "local";
   let nonce = "", rev = 0, path = null, detach = () => {}, running = autorun, gate = null;
   let url = null, expect = 0, navs = 0, html = null;
-  let hello = false, beat = 0, dog = 0, helloTimer = 0, hung = false;
+  let hello = false, beat = 0, dog = 0, helloTimer = 0, hung = false, tries = 0;
   // the in-frame capture script rate-limits itself, but the app's code can post directly
   let win0 = 0, count = 0;
   const flood = () => { const now = Date.now(); if (now - win0 > 1000) { win0 = now; count = 0; } return ++count > 300; };
@@ -134,21 +147,29 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     frame.className = "pv-frame";
     frame.style.cssText = "border:0;width:100%;height:100%;display:block;background:#fff";
     hello = false; expect = 0; navs = 0;
+    if (!running) frame.style.display = "none";
+    clearTimeout(helloTimer);
     if (mode === "relay") {
       expect = 1;
-      frame.src = relay;
-      clearTimeout(helloTimer);
-      // the relay never answered (not deployed, blocked): run here instead
-      helloTimer = setTimeout(() => {
-        if (hello || !frame) return;
-        if (run) { status("nohost"); return; }
-        log("warn", "the isolated preview host did not answer; running the preview in this tab");
-        mode = "local"; frame.remove(); makeFrame(); if (running) load();
-      }, HELLO_MS);
+      waiting.add(me);
+      const f = frame, wait = quietUntil - Date.now();
+      const go = () => { if (frame === f) { f.src = relay; helloTimer = setTimeout(noHello, HELLO_MS); } };
+      if (wait > 0) helloTimer = setTimeout(go, wait); else go();
     }
     el.appendChild(frame);
     frame.addEventListener("load", onFrameLoad);   // after inserting: the empty frame's about:blank load is not a navigation
   };
+  const noHello = () => {
+    if (hello || !frame) return;
+    // the relay answered on this page before: its process is still going away after a hang
+    if (relayOk && tries < HELLO_RETRIES) { quiet(); for (const m of [...waiting]) m.retry(); return; }
+    waiting.delete(me);
+    if (run) { status("nohost"); return; }
+    // the relay never answered (not deployed, blocked): run here instead
+    log("warn", "the isolated preview host did not answer; running the preview in this tab");
+    mode = "local"; frame.remove(); makeFrame(); if (running) load();
+  };
+  const retry = () => { tries++; frame?.remove(); makeFrame(); };   // the document is sent on hello
   const blank = () => {
     html = null;
     if (!frame) return;
@@ -212,7 +233,7 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
   };
   const onHang = () => {
     clearInterval(dog); dog = 0;
-    hung = true; hello = false;
+    hung = true; hello = false; quiet();
     frame?.remove(); frame = null;
     detach(); detach = () => {};
     log("error", `preview hung (infinite loop?): no answer for ${HANG_MS / 1000} s, so it was stopped; it runs again on the next edit`);
@@ -228,7 +249,11 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     const d = e.data;
     if (!d || typeof d !== "object") return;
     if (mode === "relay" && typeof d.pvr === "string") {
-      if (d.pvr === "hello" && !hello) { hello = true; clearTimeout(helloTimer); watchdog(); show(); }
+      if (d.pvr === "hello" && !hello) {
+        hello = true; relayOk = true; tries = 0; waiting.delete(me); clearTimeout(helloTimer);
+        if (run && !counted) { counted = true; runs++; }
+        watchdog(); show();
+      }
       else if (d.pvr === "beat") beat = Date.now();
       else if (d.pvr === "nav") navBlocked(!!d.stopped);
       return;
@@ -276,13 +301,12 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     clearInterval(dog); dog = 0; clearTimeout(helloTimer);
     frame.remove(); makeFrame(); if (running) load();
   };
-  const me = { refresh };
-  let gone = false;
-  if (run) runs++; else views.add(me);
+  const me = { refresh, retry };
+  let gone = false, counted = false;
+  if (!run) views.add(me);
   makeFrame();
   if (autorun) start();
   else {
-    frame.style.display = "none";
     gate = doc.createElement("button");
     gate.type = "button"; gate.className = "pv-run"; gate.textContent = `Run preview :${port}`;
     gate.addEventListener("click", start);
@@ -303,10 +327,11 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
       if (gone) return;
       gone = true;
       if (run) {
-        runs--;
+        if (counted) runs--;
         const stuck = mode === "relay" && (hung || (hello && Date.now() - beat > 1500));
-        if (stuck) queueMicrotask(() => { for (const v of views) v.refresh(); });
+        if (stuck) { quiet(); queueMicrotask(() => { for (const v of views) v.refresh(); }); }
       } else views.delete(me);
+      waiting.delete(me);
       off(); detach(); clearInterval(dog); clearTimeout(helloTimer); ro?.disconnect();
       win.removeEventListener("message", onMessage);
       frame?.remove(); gate?.remove();

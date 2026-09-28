@@ -42,12 +42,12 @@ ol,ul{list-style:none}
 .btn-star:hover{background:var(--bg-2);box-shadow:inset 0 0 0 1px var(--ink-3)}
 .btn-star .gh{flex:none;color:var(--ink)}
 .btn-star .star{flex:none;fill:#E3B341;margin-left:1px}
-.btn-star.has-n .st-l{display:none}
-.btn-star.has-n .st-n{margin-left:0;padding-left:0;border-left:0}
 .btn-star .st-n{margin-left:3px;padding-left:9px;border-left:1px solid var(--rule-3);line-height:18px;font-variant-numeric:tabular-nums}
 @media (max-width:640px){
   .btn-star{padding:0 10px;gap:5px}
   .btn-star .st-n{margin-left:1px;padding-left:7px}
+  .btn-star.has-n .st-l{display:none}
+  .btn-star.has-n .st-n{margin-left:0;padding-left:0;border-left:0}
 }
 /* ---------- end Star button ---------- */
 .ctas .btn-star{height:auto;align-self:stretch}
@@ -352,7 +352,7 @@ html:not(.js) .ldc{display:none}
 }
 /* a short phone: a tighter hero, so the demo keeps room for its cards */
 .need .nn2{display:none}
-@media (max-width:400px){.need .nn{display:none}.need .nn2{display:inline}}
+@media (max-width:400px),(min-width:641px) and (max-width:960px){.need .nn{display:none}.need .nn2{display:inline}}   /* a tablet's pool card is as narrow as a small phone's */
 @media (max-width:640px) and (max-height:820px){
   .hero{padding:6px 0 10px}
   .hero h1{font-size:clamp(29px,8.4vw,36px)}
@@ -436,6 +436,8 @@ html:not(.js) .ldc{display:none}
 .s-chat{top:var(--band)!important;display:flex;flex-direction:column}
 /* the conversation sits in the middle of the stage, not at the bottom of a tall empty one */
 .msgs{flex:1;min-height:0;overflow:hidden;padding:max(24px,8%) 48px 6px;display:flex;flex-direction:column;justify-content:flex-start;gap:14px}   /* top first, like the room: nothing re-centres as messages arrive */
+/* scrolled: the top edge fades like the Code log's, so a message scrolled almost out never shows as a cut-off sliver */
+.msgs.scrolled{-webkit-mask-image:linear-gradient(transparent 12px,#000 32px);mask-image:linear-gradient(transparent 12px,#000 32px)}
 .msgs>*{flex:none}
 .who{display:block;margin-bottom:4px;font-size:var(--t-sm);font-weight:500;color:var(--ink-3)}
 .q,.a{display:flex;flex-direction:column;align-items:flex-start;max-width:min(80%,680px)}
@@ -655,8 +657,7 @@ html:not(.js) .game canvas{display:none}
 
 
 /* ---------- no JS: every scene, finished, one under the other ---------- */
-html:not(.js) .modes .pill{display:none}
-html:not(.js) .modes button{color:var(--ink-2)}
+html:not(.js) .modes{display:none}   /* a switch nothing drives: both scenes show below */
 html:not(.js) .body{height:auto}
 html:not(.js) .s-tabs{height:400px}
 html:not(.js) #tabA .mpre,html:not(.js) #tabA .mwait,html:not(.js) #tabB .mbtn{display:none}
@@ -677,7 +678,7 @@ html:not(.js) .sb-dots{display:block;counter-reset:st}
 html:not(.js) .sb-dots li{counter-increment:st;font-size:var(--t-lg);line-height:1.9;color:var(--ink-2)}
 html:not(.js) .sb-dots li.gap{margin-left:0}
 html:not(.js) .sb-dots li::before{content:counter(st) ". ";font:500 var(--t-sm)/1 var(--mono);color:var(--ink-3)}
-html:not(.js) .sb-dots button{display:inline;height:auto;padding:0;cursor:default}
+html:not(.js) .sb-dots button{display:inline;height:auto;padding:0;cursor:default;pointer-events:none}
 html:not(.js) .sb-dots i{display:none}
 
 /* ---------- the stage fits the screen (demo.js sets --body-h so the hero and the demo share the first
@@ -806,6 +807,23 @@ html:not(.js) .sb-dots i{display:none}
 }
 @media (max-width:820px){
   .files{display:none}
+}
+/* tablet: the room bar's three chips and the band's stats need the room their GB labels and 'context' took */
+@media (min-width:641px) and (max-width:900px){
+  .chip .cg{display:none}
+  .bd-stats>span:last-child{display:none}
+}
+/* tablet: the phone's two-row step bar (the whole caption above the dots) instead of an ellipsised one */
+@media (min-width:641px) and (max-width:900px){
+  .stepbar{flex-wrap:wrap;gap:0 6px;padding:8px 6px 2px 12px}
+  .sb-now{flex-basis:100%;padding-right:8px;align-items:flex-start;gap:10px}
+  .sb-n{margin-top:2px}
+  .sb-t{white-space:normal;line-height:1.35;min-height:calc(2.7em + 4px);padding-top:4px}
+  .sb-dots{margin-left:-4px}
+  .replay{margin-left:auto}
+}
+@media (min-width:641px) and (max-width:720px){
+  .hd-k,.hd-sum .pw{display:none}   /* "Room" and "pooled" too, as on a phone */
 }
 
 /* ---------- phone ---------- */
