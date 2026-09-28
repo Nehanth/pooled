@@ -646,6 +646,7 @@
     setDevices(3); joining = -1; lent = LEND.slice(); rungHover(-1); rungSelect(2); card.dataset.face = "pick";
     model.classList.add("dl"); rowsEl.classList.add("dealt"); loadAt(FILL1 + 1);
     words = -1; flowing = true; coding = false; flow(END);
+    bdTok.textContent = WORDS.length + Math.floor((GAME + .6 - C) / .12);   // the Code run's tokens too, about where the live run ends (flow() counts the chat's only)
     demo.querySelectorAll("[data-at]").forEach(el => el.classList.remove("pending", "enter"));
     saysText.forEach((txt, el) => { const s = el.querySelector(".say"); if (s) { s.textContent = txt; s.classList.remove("cursor"); } });
     chatTyped.textContent = ""; codeTyped.textContent = ""; chatComposer.classList.remove("hot"); codeComposer.classList.remove("hot");
