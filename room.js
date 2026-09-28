@@ -685,6 +685,8 @@ function joinFailed(text) {
   joinWait(false);
   $("join-status").textContent = text;
   $("create-btn").disabled = $("join-btn").disabled = false;
+  // on a phone the status line sits below the fold: bring it to where the user is looking
+  $("join-status").scrollIntoView({ block: "center", behavior: "smooth" });
 }
 // --- join / create ---
 async function start(create, resume = null) {
