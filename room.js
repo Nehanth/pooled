@@ -2134,22 +2134,48 @@ function renderMap(nodes, st, live) {
 }
 // The folded band's split: one small block per layer, in the colour of the device that holds it, with
 // small gaps, so it reads as layers dealt out even with one device. On a narrow bar a block stands for a
-// few layers (at least 5 px a block); it is redrawn when the bar changes width.
+// few layers (at least 5 px a block); the blocks are shared out by device, each device getting at least
+// one, so a phone holding a single layer never drops out of the bar. Redrawn when the bar changes width.
 let miniSpans = [], miniTotal = 0, miniW = -1;
+// blocks per part: in proportion to its layers, at least one each (largest remainders get the spares)
+function miniShare(lens, n) {
+  const total = lens.reduce((a, b) => a + b, 0);
+  const got = lens.map((l) => Math.max(1, Math.floor((l * n) / total)));
+  const rem = lens.map((l, i) => ({ i, r: (l * n) / total - Math.floor((l * n) / total) })).sort((a, b) => b.r - a.r);
+  let left = n - got.reduce((a, b) => a + b, 0);
+  for (let j = 0, idle = 0; left > 0 && idle < rem.length; j = (j + 1) % rem.length) {
+    const i = rem[j].i;
+    if (got[i] < lens[i]) { got[i]++; left--; idle = 0; } else idle++;   // never more blocks than layers
+  }
+  while (left < 0) { const k = got.indexOf(Math.max(...got)); if (got[k] <= 1) break; got[k]--; left++; }
+  return got;
+}
 function paintMini(force = false) {
   const mini = $("swarm-map").querySelector(".sm-mini");
   const w = mini.clientWidth;
   if (!w || (!force && w === miniW)) return;
   miniW = w;
   if (!miniTotal) { mini.innerHTML = ""; return; }
-  const n = Math.max(1, Math.min(miniTotal, Math.floor((w + 2) / 7))), per = miniTotal / n;
+  // the bar in order: each device's span, and any layers not dealt yet
+  const parts = [];
+  let at = 0;
+  miniSpans.map((sp, k) => ({ sp, k })).sort((a, b) => a.sp.lo - b.sp.lo).forEach(({ sp, k }) => {
+    if (sp.lo > at) parts.push({ lo: at, hi: sp.lo });
+    if (sp.hi > Math.max(sp.lo, at)) parts.push({ lo: Math.max(sp.lo, at), hi: sp.hi, sp, k });
+    at = Math.max(at, sp.hi);
+  });
+  if (at < miniTotal) parts.push({ lo: at, hi: miniTotal });
+  const n = Math.max(parts.length, Math.min(miniTotal, Math.floor((w + 2) / 7)));
+  const share = miniShare(parts.map((p) => p.hi - p.lo), n);
   let html = "";
-  for (let c = 0; c < n; c++) {
-    const lo = Math.floor(c * per), hi = Math.max(lo + 1, Math.floor((c + 1) * per));
-    const k = miniSpans.findIndex((sp) => lo >= sp.lo && lo < sp.hi), sp = miniSpans[k];
-    const range = hi - lo > 1 ? `layers ${lo + 1}\u2013${hi}` : `layer ${lo + 1}`;
-    html += sp ? `<i style="--sw:${devColor(sp.name)};--k:${k}" title="${esc(String(sp.name))}: ${range}"></i>` : `<i class="none" title="${range}: not dealt"></i>`;
-  }
+  parts.forEach((p, j) => {
+    const per = (p.hi - p.lo) / share[j];
+    for (let c = 0; c < share[j]; c++) {
+      const lo = p.lo + Math.floor(c * per), hi = Math.max(lo + 1, p.lo + Math.floor((c + 1) * per));
+      const range = hi - lo > 1 ? `layers ${lo + 1}\u2013${hi}` : `layer ${lo + 1}`;
+      html += p.sp ? `<i style="--sw:${devColor(p.sp.name)};--k:${p.k}" title="${esc(String(p.sp.name))}: ${range}"></i>` : `<i class="none" title="${range}: not dealt"></i>`;
+    }
+  });
   mini.innerHTML = html;
   mini.title = miniSpans.map((sp) => `${sp.name}: layers ${sp.lo + 1}\u2013${sp.hi}`).join(" \u00b7 ");
 }
