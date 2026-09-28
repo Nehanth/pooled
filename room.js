@@ -1128,7 +1128,25 @@ function aiLoading(show, title) {
   $("ai-panel").classList.toggle("loading", !!show);
   $("load-card").classList.toggle("on", !!show);
   $("ai-empty").style.display = show ? "none" : "";
-  if (show) { $("lc-model").textContent = MODELS[$("ai-model").value]?.label.split("·")[0].trim() || ""; lcBytes = false; eta.t0 = 0; lcStatus(null, "Getting this device ready"); loadCardRender(); }
+  if (show) { $("lc-model").textContent = MODELS[$("ai-model").value]?.label.split("·")[0].trim() || ""; lcBytes = false; eta.t0 = 0; lcStatus(null, "Getting this device ready"); }
+  lcStarting(false);
+  if (show) loadCardRender();
+}
+// Every device has its layers: the card turns to the Pooled mark in its wave, "Starting <model>", and
+// the step it is on, until the room opens. After a short wait, so a small model that starts at once
+// goes straight to the chat without the card flashing.
+let lcStartT = 0;
+function lcStarting(on, n = 0) {
+  const card = $("load-card");
+  if (!on) { clearTimeout(lcStartT); lcStartT = 0; if (card.classList.contains("starting")) { card.classList.remove("starting"); $("lc-verb").textContent = "Loading"; $("load-card").querySelector(".lc-note").textContent = "Each device downloads only its own layers."; } return; }
+  if (lcStartT || card.classList.contains("starting")) return;
+  lcStartT = setTimeout(() => {
+    lcStartT = 0;
+    if (!card.classList.contains("on")) return;
+    card.classList.add("starting");
+    $("lc-verb").textContent = "Starting";
+    card.querySelector(".lc-note").textContent = n > 2 ? `All ${n} devices have their layers` : n === 2 ? "Both devices have their layers" : "The layers are all here";
+  }, 700);
 }
 function loadCardRender() {
   const rows = $("lc-rows"); if (!rows) return;
@@ -1155,6 +1173,8 @@ function loadCardRender() {
   }
   strip.innerHTML = html;
   $("lc-sum").textContent = `${total} layers · ${spans.length} device${spans.length > 1 ? "s" : ""}`;
+  const allIn = spans.length > 0 && spans.every((x) => ((ai.prog || {})[x.nm] ?? 0) >= 100);
+  if (allIn) lcStarting(true, spans.length); else lcStarting(false);
 }
 // This device's line under the card: where its bytes come from (the network, devices in the room,
 // or the browser's cache), how far along, and a time left once the rate has settled (30 s of data,

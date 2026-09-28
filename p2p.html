@@ -652,6 +652,15 @@
   #lc-status .b { font: 400 12px/1 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
   #lc-status .eta { margin-left: auto; color: var(--text); font-weight: 500; }
   #lc-status .eta.wait { color: var(--muted); font-weight: 400; }
+  /* every device has its layers: the rows give way to the Pooled mark in its wave while the model starts
+     (on the GPUs, the devices linked up), until the room opens on the chat */
+  #load-card.starting { text-align: center; }
+  #load-card.starting :is(#lc-rows, #lc-strip) { display: none; }
+  #load-card.starting .lc-head { flex-direction: column; gap: 22px; padding: 18px 0 4px; animation: enter .45s var(--ease); }
+  #load-card.starting .lc-head .dl { width: 76px; height: 76px; }
+  #load-card.starting .lc-head .dl circle { animation-duration: 1.6s; }
+  #load-card.starting .lc-h { flex-basis: auto; }
+  #load-card.starting #lc-status { justify-content: center; margin-top: 18px; }
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
   #ai-output { display: none; flex: 1; min-height: 0; overflow-y: auto; white-space: normal; word-wrap: break-word; padding: 20px var(--gutter) 10px; background: transparent; scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
@@ -1494,7 +1503,7 @@
       </div>
     </div>
     <div id="load-card">
-      <div class="lc-head"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><div class="lc-h"><p class="lc-t">Loading <span id="lc-model"></span></p><p class="lc-note">Each device downloads only its own layers.</p></div><span id="lc-sum"></span></div>
+      <div class="lc-head"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><div class="lc-h"><p class="lc-t"><span id="lc-verb">Loading</span> <span id="lc-model"></span></p><p class="lc-note">Each device downloads only its own layers.</p></div><span id="lc-sum"></span></div>
       <div id="lc-rows"></div>
       <div id="lc-strip" aria-hidden="true"></div>
       <p id="lc-status" aria-live="polite"></p>
