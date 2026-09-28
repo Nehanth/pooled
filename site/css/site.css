@@ -352,7 +352,7 @@ html:not(.js) .ldc{display:none}
 }
 /* a short phone: a tighter hero, so the demo keeps room for its cards */
 .need .nn2{display:none}
-@media (max-width:400px){.need .nn{display:none}.need .nn2{display:inline}}
+@media (max-width:400px),(min-width:641px) and (max-width:960px){.need .nn{display:none}.need .nn2{display:inline}}   /* a tablet's pool card is as narrow as a small phone's */
 @media (max-width:640px) and (max-height:820px){
   .hero{padding:6px 0 10px}
   .hero h1{font-size:clamp(29px,8.4vw,36px)}
