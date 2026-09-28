@@ -402,6 +402,7 @@
 
   /* ---------- chat ---------- */
   const msgs = $("msgs"), chatTyped = $("chatTyped"), chatComposer = $("chatComposer");
+  msgs.addEventListener("scroll", () => msgs.classList.toggle("scrolled", msgs.scrollTop > 0), { passive: true });
   const Q1 = "what is Pooled?", q1El = demo.querySelector('[data-at="q1"]');
   // the chat follows its last line, gliding (a jump when seeking, or with reduced motion)
   const glide = top => { top = Math.max(0, Math.min(msgs.scrollHeight - msgs.clientHeight, top)); if (Math.abs(top - msgs.scrollTop) < 1) return; if (RM || frozen) msgs.scrollTop = top; else msgs.scrollTo({ top, behavior: "smooth" }); };

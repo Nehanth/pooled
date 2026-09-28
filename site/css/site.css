@@ -436,6 +436,8 @@ html:not(.js) .ldc{display:none}
 .s-chat{top:var(--band)!important;display:flex;flex-direction:column}
 /* the conversation sits in the middle of the stage, not at the bottom of a tall empty one */
 .msgs{flex:1;min-height:0;overflow:hidden;padding:max(24px,8%) 48px 6px;display:flex;flex-direction:column;justify-content:flex-start;gap:14px}   /* top first, like the room: nothing re-centres as messages arrive */
+/* scrolled: the top edge fades like the Code log's, so a message scrolled almost out never shows as a cut-off sliver */
+.msgs.scrolled{-webkit-mask-image:linear-gradient(transparent 12px,#000 32px);mask-image:linear-gradient(transparent 12px,#000 32px)}
 .msgs>*{flex:none}
 .who{display:block;margin-bottom:4px;font-size:var(--t-sm);font-weight:500;color:var(--ink-3)}
 .q,.a{display:flex;flex-direction:column;align-items:flex-start;max-width:min(80%,680px)}
