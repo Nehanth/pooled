@@ -674,6 +674,7 @@
   let raf = 0, last = 0, visible = false, frozen = false, playing = false;
   const needs = () => !frozen && !playing && visible && !document.hidden && tl.started && !tl.done;
   function loop(now) {
+    if (sbT.getAttribute("aria-live") !== "off") sbT.setAttribute("aria-live", "off");
     const dt = last ? Math.min(.1, (now - last) / 1000) : .016; last = now;
     tl.advance(dt * rate(tl.t));
     raf = needs() ? requestAnimationFrame(loop) : 0;
@@ -695,7 +696,9 @@
     while (tl.t < s - 1e-6) tl.advance(Math.min(1 / 30, s - tl.t));
     inst.draw(); wake();
   };
+  // the caption is announced when the visitor moves to a step, not on every step the autoplay reaches
   const goStep = k => {
+    sbT.setAttribute("aria-live", "polite");
     if (RM) {
       if (k >= STEPS.length - 1) { stopPlay(true); tl.final(); return; }
       // step 2 ends before the tabs merge (S1 + 2.1): after that the window is blank until the pool scene
