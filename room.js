@@ -3143,6 +3143,7 @@ $("room-menu").addEventListener("toggle", () => {
   // the room card pictures a finished answer's speed: not offered before one, and Share only where the browser can
   $("card-btn").hidden = !(bestTps || lastMap?.st?.tps || lastSoloTps);
   $("card-share").hidden = !navigator.canShare;
+  $("export-chat").disabled = !document.querySelector("#ai-output .m.user");   // nothing asked yet: nothing to save
 });
 $("menu-close").addEventListener("click", () => { $("room-menu").open = false; $("room-menu").querySelector("summary").focus(); });
 // two steps: the first click says how much would go, a second one within a few seconds deletes it
