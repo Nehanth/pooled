@@ -478,8 +478,10 @@ function ensureCard(id, name, meta) {
     cards.set(id, card);
     updateCluster();
     log("room", `${name || id} joined`);
-    presence(name || id, true);
-    if ($("ai-output").style.display === "block") sysNote(`${name || id} joined${meta?.contribGB && meta?.webgpu ? ` with ${meta.contribGB} GB` : ""}`, "join");
+    const noted = $("ai-output").style.display === "block";
+    if (noted) sysNote(`${name || id} joined${meta?.contribGB && meta?.webgpu ? ` with ${meta.contribGB} GB` : ""}`, "join");
+    // the chat on screen says it in the log already: no toast on top of that same line
+    if (!(noted && $("ai-output").getClientRects().length)) presence(name || id, true);
     mascot(`${name || id} joined! ${members.size + 1} devices in the room.`);
   }
   const e = conns.get(id);
