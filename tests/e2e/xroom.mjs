@@ -11,6 +11,8 @@
 //   both : [--port 8123] (http; https weights on port + 1) [--signal-port 9000] [--query "a=1&b=2"]
 //          [--name gb10] [--chrome <path>] (macOS defaults to /Applications/Google Chrome.app)
 //   host : [--signal <ip>:<port> --signal-server 0] when the signaling server runs elsewhere
+//   both : [--signal cloud] the public PeerJS server (the page's default; rooms with a phone, see
+//          tests/e2e/xroom_phone.mjs); host: [--peers N] wait for N devices, itself included (default 2)
 //   diagnostics (host): [--fixk K] every draft-head step drafts K (the room otherwise picks 3/5/7 by
 //          measured tok/s); [--tune WG,ROWS] forces the GEMV shape the load-time autotune would pick
 //
@@ -54,6 +56,10 @@ const ROUNDS = +arg("rounds", 2), MAXNEW = +arg("maxnew", 128), GBV = arg("gb", 
 const MODES = arg("modes", "plain,spec").split(",");
 const PORT = +arg("port", 8123), TLS_PORT = PORT + 1, SIG_PORT = +arg("signal-port", 9000);
 const SIGNAL = arg("signal", `127.0.0.1:${SIG_PORT}`), MAXMIN = +arg("maxmin", 60);
+// --signal cloud: the page's default signaling (the public PeerJS server), what an https page on a
+// phone uses (it cannot reach a plain ws:// server): every device in the room must use the same one
+const CLOUD = SIGNAL === "cloud";
+const PEERS = +arg("peers", 2);   // host: wait for this many devices in the room (itself included)
 const TRACE_ROUNDS = new Set(String(arg("trace-rounds", "")).split(",").filter((x) => x !== "").map(Number));
 const TRACE = ROLE === "host" ? TRACE_ROUNDS.size > 0 : !!arg("trace-out");
 const QUERY = arg("query", "");   // extra room URL parameters, "a=1&b=2"
@@ -134,11 +140,11 @@ const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert:
 // the signaling server listens on every interface: the guest machine reaches it over the LAN / tailnet
 // (--signal-server 0: someone else runs it, e.g. xroom_pair.sh when the host is the other machine)
 let peerServer = null;
-if (ROLE === "host" && arg("signal-server", "1") !== "0") {   // a solo room still registers its code
+if (ROLE === "host" && !CLOUD && arg("signal-server", "1") !== "0") {   // a solo room still registers its code
   peerServer = spawn(arg("peerjs", path.join(ROOT, "node_modules/.bin/peerjs")), ["--port", String(SIG_PORT), "--path", "/", "--host", "0.0.0.0"], { stdio: "ignore" });
   await new Promise((r) => setTimeout(r, 1500));
 }
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?signal=${SIGNAL}&maxnew=${MAXNEW}&peerweights=0&dev=1` + (QUERY ? "&" + QUERY : "");
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?${CLOUD ? "" : `signal=${SIGNAL}&`}maxnew=${MAXNEW}&peerweights=0&dev=1` + (QUERY ? "&" + QUERY : "");
 const mac = process.platform === "darwin";
 const ARGS = [...(mac ? [] : ["--no-sandbox", "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"]),
   "--headless=new", "--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--disable-features=WebRtcHideLocalIpsWithMdns", "--js-flags=--max-old-space-size=65536",
@@ -238,7 +244,7 @@ try {
   if (!SOLO) {
     console.log("CODE " + code);
     if (arg("codefile")) fs.writeFileSync(arg("codefile"), code);
-    await p.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 15 * 60e3, polling: 1000 });
+    await p.waitForFunction((n) => document.querySelectorAll(".peer-card").length >= n, PEERS, { timeout: 15 * 60e3, polling: 1000 });
     log("guest in", JSON.stringify(await snap()));
   }
   await p.waitForTimeout(3000);
