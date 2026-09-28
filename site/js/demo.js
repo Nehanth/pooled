@@ -356,6 +356,7 @@
   // re-wrap); the chat follows the line being written. (Reserving the final size left an empty, clipped box.)
   const sayTo = n => { aVis.textContent = WORDS.slice(0, n).join(" "); aGhost.textContent = ""; };
   const flow = t => {
+    if (t < C && demo.dataset.scene === "chat" && !aLi.classList.contains("pending")) track();
     aLi.classList.toggle("streaming", t >= A0 && t < A1);
     if ((t >= A1) !== aLi.classList.contains("done")) { aLi.classList.toggle("done", t >= A1); toBottom(); }
     const wait = t < WT[1];   // from the moment the answer's place shows until its first word: the working line
@@ -393,29 +394,28 @@
   // scroll down just enough to show an element's bottom (never up)
   const showBottom = (el, pad) => { const need = el.getBoundingClientRect().bottom + pad - msgs.getBoundingClientRect().bottom; if (need >= 1) glide(msgs.scrollTop + need); };
   const toBottom = () => showBottom(aLi, 6);
-  // when the question is sent, the answer's place takes the finished answer's height (an invisible reserve; the
-  // bubble itself grows a line at a time) and the chat glides once, just enough for all of it to show but never
-  // past the question (unless the chat is too short for both). After that the words only fill downward: nothing scrolls while it streams. (On a short
-  // chat it used to jump up at the first word, mid-answer and again at the end.)
-  const reserve = glideNow => {
+  // the answer's place keeps the finished answer's height from the start (an invisible reserve; the bubble itself
+  // grows a line at a time), so nothing below it moves and the numbers line appears in place
+  const reserve = () => {
     aLi.style.minHeight = "";
     const cls = aLi.className, vis = aVis.textContent;
     aLi.classList.remove("wait"); aVis.textContent = ""; aGhost.textContent = WORDS.join(" ");
     const h = aLi.getBoundingClientRect().height;
     aLi.className = cls; aVis.textContent = vis; aGhost.textContent = "";
     aLi.style.minHeight = h + "px";
-    if (!glideNow) return;
-    // (both may still be 6px low, rising in)
-    const mr = msgs.getBoundingClientRect(), qTop = q1El.getBoundingClientRect().top - mr.top - 14, aTop = aLi.getBoundingClientRect().top - mr.top - 12;
-    const over = aLi.getBoundingClientRect().bottom + 6 - mr.bottom;
-    // keep the question in sight if the answer still fits under it; on a very short chat, give the answer all of it
-    if (over >= 1) glide(msgs.scrollTop + (over <= qTop ? over : Math.min(over, aTop)));
   };
-  // while the answer streams: only if the chat is too short for the whole answer, follow the line being written
-  const follow = () => {
-    const c = a1.querySelector(".cur"), ref = c && c.getClientRects().length ? c : aVis;
-    if (ref) showBottom(ref, 18);
+  // every frame the chat eases down toward the line being written (the working line, then the cursor, then the
+  // numbers): it goes down as the answer is written, never ahead of it and never up, and never in jumps
+  const track = () => {
+    const c = a1.querySelector(".cur");
+    const ref = aLi.classList.contains("wait") ? aLi.querySelector(".wkb") : aLi.classList.contains("done") ? aLi : c && c.getClientRects().length ? c : aVis;
+    if (!ref) return;
+    const need = ref.getBoundingClientRect().bottom + (ref === aLi ? 6 : 18) - msgs.getBoundingClientRect().bottom;
+    if (need < .5) return;
+    const max = msgs.scrollHeight - msgs.clientHeight;
+    msgs.scrollTop = Math.min(max, msgs.scrollTop + (RM || frozen ? need : Math.max(.5, need * .22)));
   };
+  const follow = track;
   const typeInto = (el, text, t0, t1, t) => {
     const n = Math.max(0, Math.min(text.length, Math.ceil((t - t0) / (t1 - t0) * text.length)));
     if (el.textContent.length !== n) el.textContent = text.slice(0, n);
@@ -535,7 +535,7 @@
     // 5: chat
     [CH, () => scene("chat")],
     [CH + .3, () => { geo = null; chatComposer.classList.add("hot"); }],
-    [CH + .95, () => { chatTyped.textContent = ""; chatComposer.classList.remove("hot"); show("q1"); show("a1"); sayTo(0); reserve(true); measure(); }],
+    [CH + .95, () => { chatTyped.textContent = ""; chatComposer.classList.remove("hot"); show("q1"); show("a1"); sayTo(0); reserve(); measure(); }],
     // the answer ends on "It can chat, or write code.": a second later the Code tab is pressed, as if clicked, and the story goes on there
     [C - .3, () => press(mCode, 300)],
     // 6: Code
@@ -760,7 +760,7 @@
   };
   fit(true);
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fit(true));
-  addEventListener("resize", () => { fit(); geo = null; if (demo.dataset.scene === "chat") { measure(); if (aLi.style.minHeight) reserve(false); } });
+  addEventListener("resize", () => { fit(); geo = null; if (demo.dataset.scene === "chat") { measure(); if (aLi.style.minHeight) reserve(); } });
 
   /* ---------- start when 30% visible ---------- */
   new IntersectionObserver(es => {
