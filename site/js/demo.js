@@ -29,7 +29,6 @@
   const scene = s => { demo.dataset.scene = s; };
   const flag = (cls, on) => demo.classList.toggle(cls, on);
   const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
-  const pickOne = a => a[(Math.random() * a.length) | 0];
   const gbs = x => (Math.round(x * 10) / 10) + " GB";
 
   /* ---------- friendly names: every device gets one, and you can change it ---------- */
@@ -109,6 +108,8 @@
       aria: "The Breakout game the agent wrote, playing itself. Play it with the arrow keys or the pointer; Escape hands it back."
     }
   };
+  // the apps in the order the loops build them: tetris last
+  const ORDER = ["shooter", "snake", "breakout", "tetris"];
   Object.values(APPS).forEach(a => { a.files = { "index.html": html(a.title), "style.css": css("#0B0F1F"), "game.js": a.src }; });
   /* ---------- Chat | Code ---------- */
   const mChat = $("mChat"), mCode = $("mCode"), modes = mChat.parentNode, win = $("win");
@@ -648,10 +649,10 @@
     paintBar(Math.min(tl.t, END), true);
     if (tl.t >= END && tl.fired >= EV.length) nextLoop();
   };
-  // a new loop: new names, a different app
+  // a new loop: new names, the next app. Tetris comes last in the round (it is what the demo video builds)
   const nextLoop = () => {
     newNames(); EV = EVENTS();
-    useApp(pickOne(Object.keys(APPS).filter(n => n !== APP)));
+    useApp(ORDER[(ORDER.indexOf(APP) + 1) % ORDER.length]);
     tl.reset();
   };
 
@@ -769,7 +770,7 @@
   }, { threshold: .3 }).observe(win);
   document.addEventListener("visibilitychange", wake);
 
-  useApp("tetris"); labelDots();
+  useApp(ORDER[0]); labelDots();
   if (RM) tl.final(); else tl.reset();
   demo.dataset.ready = "1";   // the static page shows the finished Code scene; with JS it starts at Chat, step 1
 
