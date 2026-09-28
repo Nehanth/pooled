@@ -1160,7 +1160,7 @@
     /* phones: the GitHub link in the first row, before Invite */
     body.in-room #gh-link { order: 1; }
     body.in-room :is(#share-btn, #compute-open, #room-menu) { order: 2; }
-    #join-pledge input { width: 32px !important; flex: none; }
+    #join-pledge input { width: calc(4ch + 2px) !important; flex: none; }   /* room for "10.5" in the mono font */
     #join-pledge .ap-step .step { width: 34px; height: 34px; }
     .pledge input { font-size: 16px; }
     #swarm-map { padding: 10px 12px 12px; gap: 8px; }
