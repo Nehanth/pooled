@@ -160,3 +160,73 @@ Tracing costs a little (a GPU timestamp pair around every command buffer, a mark
 traced round's tok/s is not the headline number: report the untraced rounds and use the traced one
 for the split. Every answer to one prompt must have the same sha-256 across rounds, modes, both
 directions and the `--solo` run.
+
+## Rooms with the iPhone (tests/e2e/xroom_phone.mjs, xroom_cluster.sh)
+
+An iPhone's Safari as a room member, driven over WebDriver from the Mac it is USB-attached to, next to
+the computers' headless Chrome (`xroom.mjs`). Manual trigger only.
+
+| file | what it does |
+|---|---|
+| `tests/e2e/xroom_phone.mjs` | Runs on the Mac the phone is attached to (Node 18+, no dependencies). Starts `safaridriver -p 4444`, opens a session on the phone (`{"browserName":"safari","platformName":"iOS"}`), opens the room page, sets the name and the memory pledge (`--gb`, 0.5 GB is a phone's minimum), joins with `--code` (or waits for one in `--codefile`), then samples the page every 2 s until the host leaves: the status line, the layers it was dealt (the header's device mark), the peer cards and any page error. One JSON line at the end (join time, layers, load time, status samples, errors, why it ended); `--shot` saves the phone's screen. The session is deleted and safaridriver stopped on any exit. `--probe`: the phone's WebGPU adapter on that page, then exit. |
+| `tests/e2e/xroom_cluster.sh` | Any subset of `here` (this machine), `there` (the other machine, over `XROOM_REMOTE`) and `phone`, with `--host here` or `--host there`: syncs the checkout, takes the locks in the order phone, there, here (`XROOM_PHONE_LOCK`, `XROOM_LOCK`, `XROOM_GPURUN`), starts the host, hands its code to every guest, waits for the host's JSON, collects `phone.json` and `phone.png`, releases everything on any exit. `XROOM_PHONE_REMOTE` runs commands on the phone's Mac (default `XROOM_REMOTE`; `local` when you start from that Mac). See its header. |
+| `tests/e2e/xroom.mjs` | `--signal cloud`: the page's default signaling (the public PeerJS server) instead of a local one. `--peers N`: the host waits for N devices (itself included) before it loads. |
+
+**Why the phone needs its own rig.** iOS Safari only gives WebGPU to a secure context, so the phone
+cannot open a plain-HTTP checkout on another machine's address, and an https page cannot reach a
+plain `ws://` signaling server. So in a room with the phone every device uses the public PeerJS server
+(`--signal cloud`): the computers keep serving their own checkout on 127.0.0.1 (a secure context) and
+loading their layers from their own `models/`, and the phone opens an https page:
+
+- `https://pooled.run/room` (production = `main`), the default `--phone-url`;
+- a branch: its Vercel preview, `https://pooled-git-<branch>-nehanths-projects.vercel.app/room`
+  (built on every push, no Vercel login needed; check the deployment's commit before you trust it);
+- your own https server: pass `--insecure` to `xroom_phone.mjs` (the WebDriver capability
+  `acceptInsecureCerts`).
+
+The phone's page and the computers' checkouts must be the same room protocol (in practice: the same
+commit). The phone downloads its own slice from Hugging Face (`peerweights=0` on the computers, and the
+model host is never a weight source), so keep its share small: its pledge decides it (by memory, it
+gets about `L * gb / sum of pledges` layers and at least one), and a 0.5 GB pledge against a 13 GB
+(1.7B) or 40 GB (MoE) host gives it exactly one layer, the last one: the room deals the host first and
+then the other devices by peer id, so with two devices the guest always holds the last layers; with
+three the two guests' order is random (the host's JSON has the split).
+
+**iOS quirks.** A WebDriver tap on the Join button can land as a long press (it selects the button's
+text and fires no click); `xroom_phone.mjs` then clicks from the page (`jsClick: true` in its result),
+which joins the same way but may not get the screen wake lock. Keep the phone unlocked and on power;
+Safari suspends a tab whose screen locks. Only one WebDriver session can drive the phone at a time.
+
+```sh
+# environment (machine-specific wrappers kept outside the repo), plus xroom_pair.sh's
+export XROOM_PHONE_LOCK=~/bin/phonelock.sh        # acquire|release, prints LOCKED
+# the phone's WebGPU on a page (run on the Mac)
+node tests/e2e/xroom_phone.mjs --probe --url https://pooled-git-<branch>-nehanths-projects.vercel.app/room
+# this machine hosts, the phone holds the last layer
+tests/e2e/xroom_cluster.sh --devices here,phone --out /tmp/xc -- --model qwen3-1.7b --gb 13 --prompts twosum --rounds 2 --maxnew 128
+tests/e2e/xroom_cluster.sh --devices here,phone --out /tmp/xc-moe -- --model qwen3.6-35b-moe --gb 40 --prompts twosum --rounds 2 --maxnew 128
+# all three, branch code on the phone
+tests/e2e/xroom_cluster.sh --devices here,there,phone --phone-url https://pooled-git-<branch>-nehanths-projects.vercel.app/room -- --model qwen3-1.7b --gb 13
+# the one-device reference for the answer
+node tests/e2e/xroom.mjs --role host --solo --model qwen3.6-35b-moe --gb 40 --prompts twosum --rounds 2 --maxnew 128
+```
+
+First results (2026-09-28, GB10 host + iPhone 14 Pro Max, iOS 26.6.2 / Safari 26.6.1, same home Wi-Fi,
+main = c6ca8cc plus the harness; `twosum`, 128 tokens, `exact` preset, two runs per config, each with
+2 plain + 2 spec rounds):
+
+| room | split | load (host online) | phone: dealt to serving | decode tok/s, plain | spec | answer |
+|---|---|---|---|---|---|---|
+| Qwen3 1.7B, GB10 alone (`--solo`) | 28 | 19 s | | 48.6-52.9 | (no draft head) | f358dc39 |
+| Qwen3 1.7B, GB10 + iPhone | 27 + 1 (layer 28) | 21-22 s | 18-20 s | 24.7-28.5 | | f358dc39, every round |
+| Qwen3.6 35B MoE, GB10 alone | 40 | 163-166 s | | 40.5-42.9 | 62.4-64.7 (80% accepted) | 1df98ce0 |
+| Qwen3.6 35B MoE, GB10 + iPhone | 39 + 1 (layer 40) | 157 s | 153-155 s | 17.7-21.2 | 21.5-35.6 (55-67%) | 1df98ce0, every round, plain = spec |
+
+The same 1.7B room with the phone on the branch's Vercel preview gave the same answer (17.7-27.9 tok/s).
+The phone link was direct (host / server-reflexive candidates on the LAN, IPv6 and IPv4, STUN round
+trip 4-9 ms; no relay). The load time is the host's 20 GB; the phone's one MoE layer arrives well within
+it. One phone layer halves the decode rate of the MoE: every token now takes a Wi-Fi round trip to the
+phone and back plus the phone's own layer, which is the thing to measure next (xroom_report.mjs's
+per-lap split needs the phone page traced, which it is not yet). Spec rounds vary most (21.5 to 35.6)
+because acceptance and the draft length the room picks depend on measured timing. Runs were a few
+minutes each with the phone cool; no throttling was seen at this length, and none was looked for.

@@ -122,7 +122,14 @@ try {
   out.code = code;
   await exec((c) => { const el = document.getElementById("code-input"); el.value = c; el.dispatchEvent(new Event("input", { bubbles: true })); }, code);
   const tJoin = Date.now();
-  await click("#join-btn");
+  // a WebDriver tap on iOS can land as a long press (it selects the button's text, no click event):
+  // then press it from the page (an untrusted click still joins; only the wake lock may be refused)
+  await click("#join-btn").catch((e) => log("tap failed:", String(e).slice(0, 120)));
+  await sleep(3000);
+  if (!(await exec(() => document.getElementById("join-status")?.textContent || document.body.classList.contains("in-room")))) {
+    out.jsClick = true; log("the tap did not join; clicking from the page");
+    await exec(() => { getSelection()?.removeAllRanges(); document.getElementById("join-btn").click(); });
+  }
   for (;;) {
     const s = await exec(SNAP);
     if (s.inRoom && s.peers.length >= 2) { out.joinS = +((Date.now() - tJoin) / 1000).toFixed(1); log("joined", JSON.stringify(s).slice(0, 400)); break; }
