@@ -708,7 +708,8 @@ export function codeUI({ onMode = () => {} } = {}) {
   function status(port, s) {
     const P = ports.get(port);
     if (!P) return;
-    if (s.rev && s.rev !== P.rev && s.state === "loading") {
+    // a new rev, or the same one loading again (Reload, run again after a hang): the rows so far are the old load's
+    if (s.rev && s.state === "loading" && (s.rev !== P.rev || P.state !== "loading")) {
       P.rows.forEach((r) => (r.old = true));
       P.rows.push({ sep: `rev ${s.rev}` + (P.rev ? " · reloaded" : "") });
     }
