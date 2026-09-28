@@ -134,14 +134,19 @@ else
   # host there, guest here; the signaling server stays here
   "$ROOT/node_modules/.bin/peerjs" --port "$SIG_PORT" --path / --host 0.0.0.0 > /dev/null 2>&1 &
   SIGPID=$!; sleep 1.5
+  # the guest starts first (through XROOM_GPURUN, which checks this machine's GPU before anything
+  # of this run is on it) and waits for the host's code in a file
+  TR=(); [ "$tracing" = 1 ] && TR=(--trace-out "$OUT/guest-trace.json")
+  $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role guest --signal "127.0.0.1:$SIG_PORT" --codefile "$OUT/code.txt" --gb "$GUEST_GB" "${TR[@]}" > "$OUT/guest.out" 2> "$OUT/guest.log" &
+  GPID=$!; PIDS+=("$GPID")
+  for _ in $(seq 1 1200); do grep -q "waiting for the room code" "$OUT/guest.log" 2>/dev/null && break; kill -0 "$GPID" 2>/dev/null || break; sleep 1; done
+  grep -q "waiting for the room code" "$OUT/guest.log" 2>/dev/null || { log "the guest did not start"; cat "$OUT/guest.out" >&2; exit 1; }
   QARGS=$(printf ' %q' "${HOST_ARGS[@]}")
   remote "cd ~/$RDIR && node tests/e2e/xroom.mjs --role host --signal $XROOM_LOCAL_IP:$SIG_PORT --signal-server 0 --out /tmp/$RUN-host.json $QARGS --tag $RUN" > "$OUT/host.out" 2> "$OUT/host.log" &
   HPID=$!; PIDS+=("$HPID")
   CODE=$(wait_code "$OUT/host.out" "$HPID" 1200) || { log "the host printed no code"; tail -5 "$OUT/host.log" >&2; exit 1; }
-  log "room $CODE; starting the guest here"
-  TR=(); [ "$tracing" = 1 ] && TR=(--trace-out "$OUT/guest-trace.json")
-  $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role guest --signal "127.0.0.1:$SIG_PORT" --code "$CODE" --gb "$GUEST_GB" "${TR[@]}" > "$OUT/guest.out" 2> "$OUT/guest.log" &
-  GPID=$!; PIDS+=("$GPID")
+  echo "$CODE" > "$OUT/code.txt"
+  log "room $CODE; the guest here joins"
   wait_host
   remote "cat /tmp/$RUN-host.json" > "$OUT/host.json"
   log "host exited ($RC); waiting for the guest"

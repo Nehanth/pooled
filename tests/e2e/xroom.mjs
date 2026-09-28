@@ -6,7 +6,7 @@
 //   host : node tests/e2e/xroom.mjs --role host [--model qwen3.6-35b-moe|qwen3.8-27b] [--gb 13]
 //          [--rounds 2] [--maxnew 128] [--modes plain,spec] [--prompts japan,twosum]
 //          [--trace-rounds 2] [--out result.json] [--solo]
-//   guest: node tests/e2e/xroom.mjs --role guest --signal <host ip>:9000 --code ABCD [--gb 12]
+//   guest: node tests/e2e/xroom.mjs --role guest --signal <host ip>:9000 --code ABCD|--codefile f [--gb 12]
 //          [--trace-out guest-trace.json]
 //   both : [--port 8123] (http; https weights on port + 1) [--signal-port 9000] [--query "a=1&b=2"]
 //          [--name gb10] [--chrome <path>] (macOS defaults to /Applications/Google Chrome.app)
@@ -201,7 +201,16 @@ try {
   await p.waitForTimeout(1000);
   await p.fill("#name-input", arg("name", mac ? "m5max" : "gb10")); await p.fill("#join-gb", GBV);
   if (ROLE === "guest") {
-    await p.fill("#code-input", arg("code")); await p.click("#join-btn");
+    // --code, or (--codefile) wait for whoever starts the host to write the code there: a guest can
+    // then be started, and hold its GPU, before the host exists
+    let code = arg("code");
+    if (!code) log("waiting for the room code in", arg("codefile"));
+    for (const tEnd = Date.now() + 30 * 60e3; !code && Date.now() < tEnd; await p.waitForTimeout(1000)) {
+      try { code = (fs.readFileSync(arg("codefile"), "utf8").match(/[A-Z0-9]{4}/) || [])[0]; } catch {}
+      if (!code && !arg("codefile")) throw new Error("--code or --codefile");
+    }
+    if (!code) throw new Error("no room code in " + arg("codefile"));
+    await p.fill("#code-input", code); await p.click("#join-btn");
     await p.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 120000 });
     log("joined", JSON.stringify(await snap()));
     p.waitForFunction(() => window.__xTune, null, { timeout: 40 * 60e3, polling: 1000 }).then(async () => log("autotune", JSON.stringify(await p.evaluate(() => window.__xTune)))).catch(() => {});
