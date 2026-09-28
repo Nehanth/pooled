@@ -1354,7 +1354,8 @@
     #code-pane #pv-con-head button { min-height: 36px; }
     #code-pane :is(#ed-save, #ed-revert) { height: 36px; }
     #ed-save kbd { display: none; }
-    .seg button { height: 36px; }
+    .seg button, .seg.chips button { height: 36px; }
+    #mode-bar button, #mode-bar::before { height: 36px; }   /* Chat | Code, the pill under it too */
   }
   @media (max-width: 400px) { .seg button { flex: 1 1 auto; padding: 0 6px; } .ms { padding-left: 16px; padding-right: 16px; } #sm-ctx { font-size: 11px; letter-spacing: -.02em; } }   /* '123k / 128k' inside its quarter of the band */
   @media (prefers-reduced-motion: reduce) {
