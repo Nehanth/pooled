@@ -25,8 +25,24 @@ const after = (text, extra) => { const C = mk("xml", extra); C.setText(text); re
 Deno.test("free text outside tool calls; stop allowed there", () => {
   const C = mk();
   eq(C.allowed(), null);
-  C.push("hello <tool"); eq(C.allowed(), null);
-  C.push("_call"); eq(C.allowed(), null, "not yet a call");
+  C.push("hello <too"); eq(C.allowed(), null);
+});
+
+Deno.test("after \"<tool\" the tag can only become <tool_call> (or <tool_response>)", () => {
+  // Qwen 3.6 wrote "<tool_tool_calls>" once its earlier calls were spelled out in text: the parser
+  // never saw a call and the call's text was shown. From "<tool" on, only the real openers can follow.
+  const C = after("I'll edit it.\n<tool");
+  const w = words(C.allowed());
+  ok(w.includes("_") && w.includes("<|im_end|>"), "_ (toward _call>) and the stop");
+  ok(w.includes("a") && w.includes(" "), "\"<toolbar\" or \"<tool \" are still free text");
+  const C2 = after("I'll edit it.\n<tool_");
+  eq(words(C2.allowed()), ["c", "r", "<|im_end|>"].sort(), "only toward call> or response>");
+  ok(!words(C2.allowed()).includes("_file"), "no \"<tool__file\"");
+  const C3 = after("x <tool_call");
+  eq(words(C3.allowed()), [">", ">\n", "<|im_end|>"].sort(), "then the closing >");
+  // and once it is written in pieces, the call is constrained as usual
+  const C4 = after("x <tool_call>");
+  eq(words(C4.allowed()), ["\n"], "the call proper");
 });
 
 Deno.test("xml: the whole call is constrained, step by step", () => {

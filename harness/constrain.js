@@ -17,7 +17,8 @@
 //
 // Masks are a function of the automaton state (not of the text inside a value), computed with one
 // vocabulary scan per distinct state and cached per (tokenizer, tools) across steps and requests:
-// literal states keep a short allow list, values a short deny list. Nothing is masked outside calls.
+// literal states keep a short allow list, values a short deny list. Outside calls only one thing is
+// masked: after "<tool" the tag must go on to <tool_call> (or <tool_response>), never a garbled one.
 //
 //   const C = new ToolCallConstraint(tools, { vocabSize, tokenText, style, stops, thinking })
 //   C.allowed() -> null (anything) | { allow: Int32Array } | { deny: Int32Array }   (sorted ids)
@@ -28,6 +29,10 @@ const OPEN = "<tool_call>", THINK_END = "</think>", CLOSE_P = "</parameter>";
 const FORBID = new Set(["<tool_call>", "</tool_call>", "\n<function=", "\n</function>", "\n<parameter="]);
 const PREFIXES = new Set();
 for (const p of [CLOSE_P, ...FORBID]) for (let k = 1; k < p.length; k++) PREFIXES.add(p.slice(0, k));
+// free text that has written this much of "<tool_call>" ("<tool") is a tag being opened: from there
+// only <tool_call> or <tool_response> may follow, so a garbled opener ("<tool_tool_calls>", which the
+// parser does not see as a call) cannot be written at all
+const GUARD = 5, OPENERS = [OPEN, "<tool_response>"];
 const DIGIT = /[0-9]/;
 const MAX_KEYS = 512;
 
@@ -152,7 +157,8 @@ export class ToolCallConstraint {
 
   _key(st) {
     if (this.style !== "xml") { const s = this._jsonSlot(st); return s ? "J|" + s.typed : null; }
-    if (st.k === "F" || st.k === "T") return null;
+    if (st.k === "F") return st.m >= GUARD ? "F|" + st.m : null;
+    if (st.k === "T") return null;
     if (st.k === "L") return `L|${st.tag}|${st.fn}|${st.given}|${st.typed}`;
     if (st.k === "V") return `V|${st.fn}|${st.given}|${st.pm}`;
     return `N|${st.fn}|${st.given}|${st.ty}|${st.d}|${st.sign}`;
@@ -186,6 +192,23 @@ export class ToolCallConstraint {
     const st = this.st, json = this.style !== "xml";
     const slot = json ? this._jsonSlot(st) : null;
     const allow = [], deny = [], first = new Map();
+    if (st.k === "F") {
+      // free text ending in "<tool" (a tag being opened): the tag can only become <tool_call> (or the
+      // <tool_response> the adapter cuts at). "<tool" then a token not starting with "_" is still
+      // free ("<toolbar>"); stop tokens stay allowed.
+      const pre = OPEN.slice(0, st.m);
+      for (let id = 0; id < this.vocabSize; id++) {
+        const w = this.tokenText(id);
+        let ok = this.stops.has(id);
+        if (!ok && w) {
+          const t = pre + w;
+          ok = OPENERS.some((o) => o.startsWith(t) || t.startsWith(o)) || (st.m === GUARD && w[0] !== "_");
+        }
+        (ok ? allow : deny).push(id);
+      }
+      if (!allow.length) return null;
+      return allow.length <= deny.length ? { allow: Int32Array.from(allow) } : { deny: Int32Array.from(deny) };
+    }
     for (let id = 0; id < this.vocabSize; id++) {
       let ok;
       if (this.stops.has(id)) ok = false;
