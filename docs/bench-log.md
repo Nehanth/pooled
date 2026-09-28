@@ -675,18 +675,33 @@ Reading the table:
 - 27B is unchanged: wide prefill is opt-in for dense models, so bench_ctx does not use it.
 - In every run, spec == plain, the Chrome output matches the golden text and there are 0 GPU errors.
 
-### M5 Max (Metal): the MoE engine defaults now run under Deno; speed not measurable this session
+### M5 Max (Metal): Chrome MoE decode +5.6% plain, +11% spec; the Deno MoE defaults run
 
-The Mac was heavily loaded by other processes during the whole session. NVIDIA Sync used 240-290% CPU, fileproviderd 100-140%, and the GPU was 23-89% utilized when none of these jobs were running. Plain decode on identical code swung from 6 to 32 tok/s (about 33 on a quiet machine), so none of the Mac speed numbers below support a speed claim.
+The Chrome runs come from a quiet period of the Mac: main's numbers match the earlier quiet-machine baseline (85.9 / 135.5). They used Chrome 154 through `chrome_bench.mjs` with the macOS flag fix from PR #205, copied into both checkouts. Every run gave golden text, spec == plain and 0 GPU errors.
 
-| `MODEL=moe FILLS=512,4096,16384 $D bench_ctx.js` (engine defaults) | main c6ca8cc | perf/metal |
+| Chrome 154, `chrome_bench.mjs <moe> 40` | main c6ca8cc | perf/metal |
 |---|---|---|
-| run 1 | **fails**: `OperationError: validation error occurred` at `forwardToken` `mapAsync` after the first prefill | runs: prefill 18.4 / 55.9 / 32.5, spec == plain on every row, 0 GPU errors |
-| run 2 | **fails** (same error) | runs: prefill 22.6 / 112.3 / 108.7, spec == plain on every row, 0 GPU errors |
+| plain two-sum / hash-map, 5 interleaved runs | 85.32 / 86.26, 86.44 / 86.17, 86.32 / 86.25, 86.40 / 86.26, 86.11 / 85.26 | 90.80 / 91.25, 89.70 / 90.51, 91.23 / 91.31, 91.06 / 91.40, 90.97 / 91.14 |
+| plain, mean | 86.1 | **90.9 (+5.6%)** |
+| spec two-sum / hash-map | 137.81 / 122.61, 137.37 / 122.68, 137.76 / 122.90, 135.61 / 122.72, 136.13 / 122.24 | 152.22 / 135.72, 152.40 / 136.08, 152.46 / 136.39, 151.93 / 136.21, 150.58 / 136.03 |
+| spec, mean | 136.9 / 122.6 | **151.9 / 136.1 (+11%)** |
+| `prefilllen=2048&prefillall=1`, all off / all on tok/s (2 runs) | 173.9 / 242.5, 172.4 / 243.9 | 196.8 / 262.5, 195.0 / 261.1 (+13% / +8%) |
+| same, relDiff (argmax) | 0.292, 0.227 (520 = 520) | 0.382, 0.173 (520 = 520) |
+| 27B `prefilllen=2048&ubatch=256` (1 run): off / wide tok/s, relDiff | 63.9 / 109.8, 0.0316 | 63.7 / 112.5, 0.0172 |
+| 27B decode plain / spec | 21.64 / 45.51 | 21.77 / 45.13 |
 
-With `PREFILL_UBATCH=0`, both base and branch run. Prefill 512 / 4k / 16k was 19.4 / 24.9 / 36.1 and 36.0 / 104.3 / 85.5 on base, and 45.6 / 92.4 / 103.8 and 20.7 / 111.3 / 93.5 on the branch. That spread is load noise.
+- The decode gain comes from the wide fused layout: this is the "+13% estimated" from the per-branch kernel A/B, now measured at +5.6% plain. Spec gains more, probably because its verify step runs the same fused kernels once per column.
+- The Chrome prefill relDiff (0.17-0.38 on the MoE with all options on, 0.02-0.03 on the 27B) is the open Chrome-on-Metal nondeterminism noted on the wide-prefill branch. It is present on main and not changed by this branch; argmax is equal in every run.
+- The 27B is unchanged, as expected: it has no MoE layers, and in Chrome, one command buffer per chunk was not failing.
 
-The Chrome runs on the Mac (MoE decode, prefill 2048, 27B `ubatch=256`) and the 27B Deno bench_ctx did not complete this session. The shared SSH connection to the Mac dropped partway through. The Chrome evidence for the wide fused layout on the Mac is therefore still the per-branch kernel A/B above: moe_gus 0.49x, moe_dnc 0.55x, moe_route 0.53x of main, interleaved in one run.
+Deno (wgpu/Metal), `MODEL=moe FILLS=512,4096,16384 $D bench_ctx.js` (engine defaults). This ran earlier, while the Mac was loaded: NVIDIA Sync used 240-290% CPU and plain decode on identical code swung from 6 to 32 tok/s. So only the pass/fail column means anything:
+
+| run | main c6ca8cc | perf/metal |
+|---|---|---|
+| 1 | **fails**: `OperationError: validation error occurred` at `forwardToken` `mapAsync` after the first prefill | runs, spec == plain on every row, 0 GPU errors |
+| 2 | **fails** (same error) | runs, spec == plain on every row, 0 GPU errors |
+
+`PREFILL_UBATCH=0` and the 27B (`CTX=16640`) ran on both base and branch, with spec == plain on every row including the 27B at 16384 (22/36). The speed spread from the load makes those numbers meaningless, so they are not listed.
 
 ### Gates
 
