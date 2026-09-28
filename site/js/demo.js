@@ -386,18 +386,34 @@
 
   /* ---------- chat ---------- */
   const msgs = $("msgs"), chatTyped = $("chatTyped"), chatComposer = $("chatComposer");
-  const Q1 = "what is Pooled?";
+  const Q1 = "what is Pooled?", q1El = demo.querySelector('[data-at="q1"]');
   // the chat follows its last line, gliding (a jump when seeking, or with reduced motion)
-  const toBottom = () => { const top = msgs.scrollHeight - msgs.clientHeight; if (Math.abs(top - msgs.scrollTop) < 1) return; if (RM || frozen) msgs.scrollTop = top; else msgs.scrollTo({ top, behavior: "smooth" }); };
-  // while the answer streams: follow the line being written (the bubble already has its final size, so going
-  // to the bottom would scroll ahead of the words and hide the question); only ever downward
+  const glide = top => { top = Math.max(0, Math.min(msgs.scrollHeight - msgs.clientHeight, top)); if (Math.abs(top - msgs.scrollTop) < 1) return; if (RM || frozen) msgs.scrollTop = top; else msgs.scrollTo({ top, behavior: "smooth" }); };
+  // scroll down just enough to show an element's bottom (never up)
+  const showBottom = (el, pad) => { const need = el.getBoundingClientRect().bottom + pad - msgs.getBoundingClientRect().bottom; if (need >= 1) glide(msgs.scrollTop + need); };
+  const toBottom = () => showBottom(aLi, 6);
+  // when the question is sent, the answer's place takes the finished answer's height (an invisible reserve; the
+  // bubble itself grows a line at a time) and the chat glides once, just enough for all of it to show but never
+  // past the question (unless the chat is too short for both). After that the words only fill downward: nothing scrolls while it streams. (On a short
+  // chat it used to jump up at the first word, mid-answer and again at the end.)
+  const reserve = glideNow => {
+    aLi.style.minHeight = "";
+    const cls = aLi.className, vis = aVis.textContent;
+    aLi.classList.remove("wait"); aVis.textContent = ""; aGhost.textContent = WORDS.join(" ");
+    const h = aLi.getBoundingClientRect().height;
+    aLi.className = cls; aVis.textContent = vis; aGhost.textContent = "";
+    aLi.style.minHeight = h + "px";
+    if (!glideNow) return;
+    // (both may still be 6px low, rising in)
+    const mr = msgs.getBoundingClientRect(), qTop = q1El.getBoundingClientRect().top - mr.top - 14, aTop = aLi.getBoundingClientRect().top - mr.top - 12;
+    const over = aLi.getBoundingClientRect().bottom + 6 - mr.bottom;
+    // keep the question in sight if the answer still fits under it; on a very short chat, give the answer all of it
+    if (over >= 1) glide(msgs.scrollTop + (over <= qTop ? over : Math.min(over, aTop)));
+  };
+  // while the answer streams: only if the chat is too short for the whole answer, follow the line being written
   const follow = () => {
     const c = a1.querySelector(".cur"), ref = c && c.getClientRects().length ? c : aVis;
-    if (!ref) return;
-    const need = ref.getBoundingClientRect().bottom + 18 - msgs.getBoundingClientRect().bottom;
-    if (need < 1) return;
-    const top = Math.min(msgs.scrollHeight - msgs.clientHeight, msgs.scrollTop + need);
-    if (RM || frozen) msgs.scrollTop = top; else msgs.scrollTo({ top, behavior: "smooth" });
+    if (ref) showBottom(ref, 18);
   };
   const typeInto = (el, text, t0, t1, t) => {
     const n = Math.max(0, Math.min(text.length, Math.ceil((t - t0) / (t1 - t0) * text.length)));
@@ -518,7 +534,7 @@
     // 5: chat
     [CH, () => scene("chat")],
     [CH + .3, () => { geo = null; chatComposer.classList.add("hot"); }],
-    [CH + .95, () => { chatTyped.textContent = ""; chatComposer.classList.remove("hot"); show("q1"); show("a1"); sayTo(0); follow(); measure(); }],
+    [CH + .95, () => { chatTyped.textContent = ""; chatComposer.classList.remove("hot"); show("q1"); show("a1"); sayTo(0); reserve(true); measure(); }],
     // the answer ends on "It can chat, or write code.": a second later the Code tab is pressed, as if clicked, and the story goes on there
     [C - .3, () => press(mCode, 300)],
     // 6: Code
@@ -605,7 +621,7 @@
     LOGKEYS.forEach(k => log.append(at(k)));
     app.classList.add("blank"); brLoad.classList.remove("go");
     if (!inst.human) { inst.stop(); inst.v2(false); }
-    msgs.scrollTop = 0; log.scrollTop = 0;
+    aLi.style.minHeight = ""; msgs.scrollTop = 0; log.scrollTop = 0;
     paintBar(0, true);
   };
   tl.final = () => {
@@ -743,7 +759,7 @@
   };
   fit(true);
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fit(true));
-  addEventListener("resize", () => { fit(); geo = null; if (demo.dataset.scene === "chat") measure(); });
+  addEventListener("resize", () => { fit(); geo = null; if (demo.dataset.scene === "chat") { measure(); if (aLi.style.minHeight) reserve(false); } });
 
   /* ---------- start when 30% visible ---------- */
   new IntersectionObserver(es => {

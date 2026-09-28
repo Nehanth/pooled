@@ -710,7 +710,8 @@ html:not(.js) .sb-dots i{display:none}
   .rows{gap:10px}
   .cells{height:24px}
   .lk-l{margin-top:12px}
-  .msgs{padding-top:16px}
+  .msgs{padding-top:16px;gap:10px}
+  .ctools{display:none}   /* the chat keeps room for the question and the whole answer */
 }
 @container stage (max-height:350px){
   .cd-h span{display:none}
