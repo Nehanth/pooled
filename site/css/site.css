@@ -806,6 +806,14 @@ html:not(.js) .sb-dots i{display:none}
 @media (max-width:820px){
   .files{display:none}
 }
+/* tablet: the room bar's three chips and the band's stats need the room their GB labels and 'context' took */
+@media (min-width:641px) and (max-width:900px){
+  .chip .cg{display:none}
+  .bd-stats>span:last-child{display:none}
+}
+@media (min-width:641px) and (max-width:720px){
+  .hd-k,.hd-sum .pw{display:none}   /* "Room" and "pooled" too, as on a phone */
+}
 
 /* ---------- phone ---------- */
 @media (max-width:640px){
