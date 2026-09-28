@@ -3138,15 +3138,32 @@ document.addEventListener("keydown", (e) => {
 document.addEventListener("change", (e) => { if (e.target.closest?.("#room-menu")) syncSegs(); });
 buildSegs();
 $("room-menu").addEventListener("toggle", () => {
-  if (!$("room-menu").open) return;
+  if (!$("room-menu").open) { if (cacheArmed) cacheDisarm(); return; }
   syncSegs();
   // the room card pictures a finished answer's speed: not offered before one, and Share only where the browser can
   $("card-btn").hidden = !(bestTps || lastMap?.st?.tps || lastSoloTps);
   $("card-share").hidden = !navigator.canShare;
 });
 $("menu-close").addEventListener("click", () => { $("room-menu").open = false; $("room-menu").querySelector("summary").focus(); });
+// two steps: the first click says how much would go, a second one within a few seconds deletes it
+let cacheArmed = 0;
+function cacheLabel(t, sub) { const a = $("cache-clear"); a.childNodes[1].textContent = t; a.querySelector("small").textContent = sub; }
+const cacheDisarm = () => { cacheArmed = 0; cacheLabel("Clear cached weights", "Frees this device's disk; the next start downloads again"); };
+async function cachedBytes() {
+  const c = await getWeightCache(); let n = 0;
+  if (c) for (const k of await c.keys()) n += +((await c.match(k))?.headers.get("x-swarm-len") || 0);
+  return n;
+}
 $("cache-clear").addEventListener("click", async (ev) => {
   ev.preventDefault();
+  if (!cacheArmed) {
+    const n = await cachedBytes().catch(() => 0);
+    if (!n) { toast("no cached weights on this device"); return; }
+    cacheLabel(`Clear ${fmtBytes(n)}?`, "Press again to delete them; the next start downloads them again");
+    const t = cacheArmed = setTimeout(() => { if (cacheArmed === t) cacheDisarm(); }, 6000);
+    return;
+  }
+  cacheDisarm();
   try { await caches.delete("swarmllm-weights-v1"); weightCache = null; toast("cached weights cleared"); } catch { toast("could not clear the cache"); }
 });
 $("new-chat").addEventListener("click", aiNewChat);
