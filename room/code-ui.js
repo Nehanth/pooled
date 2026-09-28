@@ -424,6 +424,13 @@ export function codeUI({ onMode = () => {} } = {}) {
       pre.textContent = d.result;
     }
     if (d.diff && !el.querySelector(".cm-diff")) el.append(diffBlock(d.diff, host ? viewFull : null));
+    // this card's proposed file is open from 'view full file': once written the editor shows the file
+    // itself (editable); declined, the label says it was not written
+    const dp = el.querySelector(".cm-diff .dh b")?.textContent;
+    if (host && proposed && dp === proposed && edPath == null && d.state) {
+      if (d.state === "done") { proposed = null; fileClick(dp); $("code-tree").querySelector(`.f[data-path="${CSS.escape(dp)}"]`)?.classList.add("on"); }
+      else if (d.state === "declined" || d.state === "error" || d.state === "stopped") { proposed = null; $("ed-path").textContent = $("ed-path").title = `${dp} · proposed, not written`; }
+    }
     // everyone sees the pending state; whoever may answer it (the asker, the host) gets buttons from ask()
     let ap = el.querySelector(".cm-approve");
     if (d.state === "pending" && !host && !ap) { ap = h("div", "cm-approve"); ap.append(h("span", "wait", waitText(d.mid))); el.append(ap); }
@@ -501,6 +508,7 @@ export function codeUI({ onMode = () => {} } = {}) {
   let fileClick = () => {}, saveFile = null;
   const drafts = new Map();   // path -> unsaved text, kept while other files are open
   let edPath = null, edBase = "", edRO = true, hlRaf = 0;
+  let hlPath = "", proposed = null;   // the colours of a pathless view (a proposed file); which proposed file shows
   const ta = $("ed-text"), hl = $("ed-hl"), gutter = $("ed-ln"), edBox = $("ed");
   const PHONE = matchMedia("(max-width: 640px)");
   if (PHONE.matches) $("code-prompt").placeholder = "";   // phones: an empty box (the Agent tab says what it is)
@@ -533,7 +541,7 @@ export function codeUI({ onMode = () => {} } = {}) {
   const dirty = () => edPath != null && !edRO && ta.value !== edBase;
   function paint() {
     hlRaf = 0;
-    hl.innerHTML = highlight(edPath || "", ta.value) + "\n";
+    hl.innerHTML = highlight(edPath || hlPath, ta.value) + "\n";
     const n = ta.value.split("\n").length;
     if (+gutter.dataset.n !== n) { gutter.dataset.n = n; gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n"); }
   }
@@ -549,9 +557,9 @@ export function codeUI({ onMode = () => {} } = {}) {
     st.className = d ? "dirty" : "";
   }
   // open a file in the editor: text, and whether it can be saved (label: why it is shown, e.g. a proposed file)
-  function openFile(path, text, { readOnly = !host || !saveFile, label = null } = {}) {
+  function openFile(path, text, { readOnly = !host || !saveFile, label = null, hl = path } = {}) {
     if (edPath != null && dirty()) drafts.set(edPath, ta.value);
-    edPath = path; edRO = readOnly || path == null;
+    edPath = path; edRO = readOnly || path == null; hlPath = hl || ""; proposed = null;
     edBase = text ?? "";
     ta.value = !edRO && drafts.has(path) ? drafts.get(path) : edBase;
     ta.readOnly = edRO;
@@ -562,13 +570,13 @@ export function codeUI({ onMode = () => {} } = {}) {
     paint(); edState();
     edBox.scrollTop = 0; edBox.scrollLeft = 0;
   }
-  function viewFile(text, label = null) {
+  function viewFile(text, label = null, hl = null) {
     if (text == null) {
-      edPath = null; edBase = ""; ta.value = ""; edRO = true; cp.classList.remove("ed-open");
+      proposed = null; edPath = null; edBase = ""; ta.value = ""; edRO = true; cp.classList.remove("ed-open");
       edBox.hidden = true; $("ed-bar").hidden = true; $("ed-empty").hidden = false;
       return;
     }
-    openFile(null, text, { readOnly: true, label: label || "" });
+    openFile(null, text, { readOnly: true, label: label || "", hl });
   }
   // the file changed underneath (the agent wrote it): take the new text unless there are unsaved edits
   function fileChanged(path, text) {
@@ -616,7 +624,8 @@ export function codeUI({ onMode = () => {} } = {}) {
   function viewFull(path, text) {
     outTab("files");
     $("code-tree").querySelectorAll(".f.on").forEach((x) => x.classList.remove("on"));
-    viewFile(text, `${path} · proposed, not written yet`);
+    viewFile(text, `${path} · proposed, not written yet`, path);
+    proposed = path;
     if (phone.matches) { edOpen(true); setTab("files"); } else $("files-panel").scrollIntoView({ block: "nearest" });
   }
   function outTab(name) {
