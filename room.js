@@ -560,7 +560,7 @@ function onData(from, d) {
     case "bye":
       toast(d.reason);
       log("room", d.reason);
-      if (from === PREFIX + roomCode) { $("room-over").hidden = false; $("room-over-why").textContent = d.reason; }
+      if (from === PREFIX + roomCode) { $("room-over").hidden = false; $("room-over-h").textContent = "Room over"; $("room-over-why").textContent = d.reason; }
       break;
     case "roster": {
       // the host's view of the room: draw a card per device, no mesh connections
@@ -2685,7 +2685,9 @@ function hostGone() {
   codeRoleChanged();
   $("ai-row").style.display = "none";
   $("room-over").hidden = false;
+  $("room-over-h").textContent = "Host reconnecting";
   $("room-over-why").textContent = "The host's tab closed. Waiting a minute in case it comes back…";
+  const was = $("ai-status").textContent;
   aiStatus("the host left; waiting for it to come back…");
   const t0 = Date.now();
   clearInterval(hostGone.timer);
@@ -2694,6 +2696,7 @@ function hostGone() {
     if (Date.now() - t0 > HOST_WAIT_MS) {
       clearInterval(hostGone.timer);
       ai.engine = null;
+      $("room-over-h").textContent = "Room over";
       $("room-over-why").textContent = "The host didn't come back. The host holds the conversation and the model's first and last layers, so this room can't answer any more.";
       aiStatus("the host left; this room is over");
       mascot("The host left. Start a new room?");
@@ -2707,7 +2710,8 @@ function hostGone() {
       conn.send({ t: "hello", name: myName, meta: myMeta, v: PROTOCOL, back: 1 });
       ai.hostId = PREFIX + roomCode;
       $("room-over").hidden = true;
-      aiStatus("the host is back; waiting for it to deal the layers…");
+      // layers to deal only if a model was running; otherwise the card goes back to what it said
+      aiStatus(ai.role ? "the host is back; waiting for it to deal the layers…" : was);
       toast("the host is back");
     });
     conn.on("error", () => {});
