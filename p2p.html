@@ -1302,7 +1302,7 @@
     #pv-con-rows { max-height: 104px; }
     #pv-state { margin-left: 4px; }
     /* the agent: its log scrolls, the prompt stays at the bottom */
-    #chatpane.code-mode .ag-h { height: 40px; }
+    #chatpane.code-mode .ag-h { display: none; }   /* the tab bar names the view, the band the model: 40px more for the log */
     #chatpane.code-mode #code-log { flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px; -webkit-mask-image: linear-gradient(transparent, #000 16px); mask-image: linear-gradient(transparent, #000 16px); }
     #chatpane.code-mode #code-row { margin: 6px 10px 10px; }
     #chatpane.code-mode .cm-jump { margin-top: -44px; }
