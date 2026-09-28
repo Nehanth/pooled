@@ -18,7 +18,7 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // regenerate, an edited question or a branch resumes from the longest saved turn instead of
 // prefilling the whole conversation again. 0 turns it off.
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
-import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
+import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DROP_ALL } from "./room/transport.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
@@ -32,6 +32,9 @@ import { working, liveWords } from "./room/working.js";
 // ?wire=slice uses one sliced channel; ?wire=stripeN spreads slices over N peer connections.
 const WIRE = (new URLSearchParams(location.search).get("wire") || "stripe4").toLowerCase();
 const WIRE_STRIPES = WIRE === "off" ? 0 : WIRE.startsWith("stripe") ? Math.max(1, Math.min(8, parseInt(WIRE.slice(6), 10) || 1)) : 1;
+// ?ka=ms: keep-alive period on a wire link while frames flow (keeps a phone's Wi-Fi out of power
+// save between laps; room/transport.js), ?ka=0 turns it off
+{ const ka = new URLSearchParams(location.search).get("ka"); if (ka != null) setKeepalive(parseInt(ka, 10) || 0); }
 // Signaling: ?signal=host:port points PeerJS at our own PeerServer (the emulator and big
 // rooms use one); default is the public PeerJS cloud.
 const SIGNAL = new URLSearchParams(location.search).get("signal");
@@ -505,7 +508,7 @@ ensureLink.pending = new Set();
 
 function sendTo(id, obj) { conns.get(id)?.conn.send(obj); }
 // debug: per-peer wire state (channels open, frames sent/received) — `pooledDebug()` in the console (`swarmDebug()` still works)
-window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0 }));
+window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0, ka: e.link?.kaSent ?? 0 }));
 // activations go over the sliced wire channel when it is up, else as a normal message
 // ?netlag=ms delays every activation frame this device sends, to emulate a slow link in tests
 // (equal delays keep send order)
