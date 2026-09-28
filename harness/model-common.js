@@ -103,6 +103,27 @@ export function asyncQueue() {
 // assistant text -> the ids it was sampled as. Re-tokenizing the text can split it differently,
 // and then the prompt no longer extends what the caches hold. prune(texts) keeps only the turns
 // still in the conversation, so the map does not grow without bound.
+// An assistant turn's text as ids, when its sampled ids are not at hand (a new tokenizer, a restored
+// session): the tags the model writes as single added tokens (<tool_call>, <think>, ...) become those
+// tokens, as they were sampled, instead of being spelled out in text pieces. Spelled out, the model
+// sees its own earlier calls in a form it was never trained on and copies it on the next request
+// ("<tool_tool_calls>..."), which no longer parses as a call. Only these tags: the rest is plain text.
+const TURN_TAGS = ["<tool_call>", "</tool_call>", "<think>", "</think>", "<tool_response>", "</tool_response>"];
+export function encodeTurn(tok, text) {
+  const tags = TURN_TAGS.filter((t) => Number.isInteger(tok.vocab?.[t]));
+  if (!tags.length) return tok.encode(text);
+  const ids = [];
+  const re = new RegExp(tags.map((t) => t.replace(/[/]/g, "\\/")).join("|"), "g");
+  let at = 0;
+  for (const m of text.matchAll(re)) {
+    if (m.index > at) ids.push(...tok.encode(text.slice(at, m.index)));
+    ids.push(tok.vocab[m[0]]);
+    at = m.index + m[0].length;
+  }
+  if (at < text.length) ids.push(...tok.encode(text.slice(at)));
+  return ids;
+}
+
 export class OwnIds {
   constructor() { this.map = new Map(); }
   get(text) { return this.map.get(text); }

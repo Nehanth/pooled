@@ -171,6 +171,8 @@ export class Agent {
         const bare = bareCalls(shown, this.byName);
         // or as a bare JSON object ({"name": "write_file", "arguments": {...}}), seen from Qwen3 1.7B
         if (!bare.length) bare.push(...bareJsonCalls(shown, this.byName));
+        // or a <function=NAME> block whose <tool_call> opener came out garbled ("<tool_tool_calls>")
+        if (!bare.length) bare.push(...bareFunctionCalls(shown, this.byName));
         if (bare.length) { for (const c of bare) c.bare = true; found.push(...bare); }
       }
       // small-model slips: a tool's other name, arguments under other names or types
@@ -473,6 +475,24 @@ function jsonEnd(text, at) {
 // Calls written as bare tags named after a known tool, children named after its parameters:
 // <write_file>\n<path>a.html</path>\n<content>\n...\n</content>\n</write_file>. Only known
 // tools and parameters count, so HTML the model merely quotes is left alone.
+// Calls written as XML <function=NAME> ... </function> blocks without a well-formed <tool_call> around
+// them (the opener garbled, "<tool_tool_calls>", seen from Qwen 3.6 on a follow-up request): parsed
+// like a call body. Only known tools, and only complete blocks.
+export function bareFunctionCalls(text, byName) {
+  const out = [];
+  if (!text || !byName?.size) return out;
+  const re = /<function=([^>\s]+)>[\s\S]*?<\/function>/g;
+  let m;
+  while ((m = re.exec(text))) {
+    const c = parseCallBody(m[0], (n) => byName.get(n)?.parameters);
+    if (c.error) continue;
+    const name = fixToolName(c.name, (n) => byName.has(n));
+    if (!byName.has(name)) continue;
+    out.push({ name, arguments: c.arguments || {} });
+  }
+  return out;
+}
+
 export function bareCalls(text, byName) {
   const out = [];
   if (!text || !byName?.size) return out;

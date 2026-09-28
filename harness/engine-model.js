@@ -7,7 +7,7 @@
 // never re-tokenizes them differently and the prefix stays reusable. Decoding is greedy by
 // default; with the draft head, speculative steps give the same tokens faster.
 import { buildIds, reusablePrefix, specials } from "../room/conversation.js";
-import { tokenTexts, constrainedSampler, OwnIds } from "./model-common.js";
+import { tokenTexts, constrainedSampler, OwnIds, encodeTurn } from "./model-common.js";
 
 // tools (optional): the agent's tool list; inside a tool call the whole XML call (function and
 // parameter names included) is then constrained to the grammar (harness/constrain.js), on every sampled position including
@@ -25,7 +25,7 @@ export function engineModel(engine, tok, { thinking = false, maxNew = 1024, K = 
   async function* generate({ system = "", turns, signal } = {}) {
     stats.calls++;
     own.prune(turns.filter((t) => t.role === "assistant").map((t) => t.text));
-    const T = turns.map((t) => (t.role === "assistant" ? { role: "assistant", ids: own.get(t.text) || tok.encode(t.text) } : { role: "user", text: t.text }));
+    const T = turns.map((t) => (t.role === "assistant" ? { role: "assistant", ids: own.get(t.text) || encodeTurn(tok, t.text) } : { role: "user", text: t.text }));
     const ids = buildIds(tok, { system, turns: T, thinking });
     if (ids.length + 2 > engine.maxSeq) throw new Error(`conversation is ${ids.length} tokens; the context is ${engine.maxSeq}`);
     const reused = reusablePrefix(fed, ids);

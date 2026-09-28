@@ -260,6 +260,16 @@ Deno.test("agent: the same failing call three steps in a row stops the run as st
   eq(r.steps, 3);
 });
 
+Deno.test("agent: a <function=> call with a garbled <tool_call> opener still runs", async () => {
+  const log = [];
+  // what Qwen 3.6 wrote on a follow-up request when its earlier calls had been re-tokenized as text
+  const garbled = "<tool_tool_calls>\n<function=write_file>\n<parameter=path>\nstyle.css\n</parameter>\n<parameter=content>\nbody { background: #e8e8f0; }\n</parameter>\n</function>\n</tool_call>";
+  const A = new Agent({ generate: scripted([garbled, "done"]), tools: tools(log) });
+  const r = await A.run("use lighter colors");
+  eq(r.reason, "done");
+  eq(log, [["write", "style.css"]]);
+  ok(/hint: this ran/.test(A.turns[2].text), A.turns[2].text);
+});
 Deno.test("agent: a known tool written as bare tags (no <tool_call>) runs", async () => {
   const log = [];
   const bare = "<write_file>\n<path>index.html</path>\n<content>\n<!DOCTYPE html>\n<h1>hello</h1>\n</content>\n</write_file>";

@@ -9,7 +9,7 @@
 // The caller holds the room's lock (api.lock) for the whole agent run.
 import { buildIds, specials, splitThink } from "../room/conversation.js";
 import { pickSampler } from "../room/sampling.js";
-import { tokenTexts, constrainedSampler, deltaDecoder, asyncQueue, OwnIds } from "./model-common.js";
+import { tokenTexts, constrainedSampler, deltaDecoder, asyncQueue, OwnIds, encodeTurn } from "./model-common.js";
 
 export class ContextFull extends Error {
   constructor(n, max) {
@@ -56,7 +56,7 @@ export function roomModel(api, {
     const T = tok(), S = specials(T), maxSeq = api.maxSeq();
     const think = thinking && S.think !== undefined;
     own.prune(turns.filter((t) => t.role === "assistant").map((t) => t.text));
-    const R = turns.map((t) => (t.role === "assistant" ? { role: "assistant", ids: own.get(t.text) || T.encode(t.text) } : { role: "user", text: t.text }));
+    const R = turns.map((t) => (t.role === "assistant" ? { role: "assistant", ids: own.get(t.text) || encodeTurn(T, t.text) } : { role: "user", text: t.text }));
     const ids = buildIds(T, { system, turns: R, thinking: think });
     if (ids.length > maxSeq - MARGIN) throw new ContextFull(ids.length, maxSeq);
     stats.calls++;
