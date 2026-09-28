@@ -223,6 +223,7 @@ const SNAP = () => {
     peers: [...document.querySelectorAll(".peer-card")].map((c) => c.textContent.replace(/\s+/g, " ").trim().slice(0, 160)),
     hostLeft: /host left/.test($("ai-status")?.textContent || "") || !!($("room-over") && !$("room-over").hidden),
     errs: (window.__xErrs || []).splice(0), visible: document.visibilityState,
+    wake: window.pooledWake?.() || null,   // GPU wake counters (room/gpuwake.js), on pages that have it
   };
 };
 
@@ -288,6 +289,7 @@ try {
     try { s = await exec(SNAP); }
     catch (e) { out.errors.push("snapshot: " + String(e).slice(0, 200)); if (out.errors.length > 5) throw new Error("the page stopped answering (tab reloaded or crashed?)"); continue; }
     out.errors.push(...s.errs);
+    if (s.wake) out.wake = s.wake;
     if (TRACE_OUT) { try { await pullTrace(false); } catch (e) { out.errors.push("trace pull: " + String(e).slice(0, 160)); } }
     if (!tLoad && /loading/.test(s.mine)) { tLoad = Date.now(); out.layers = s.mine; log("dealt:", s.mine); }
     if (tLoad && !out.loadS && /holds layers/.test(s.mine)) { out.loadS = +((Date.now() - tLoad) / 1000).toFixed(1); out.layers = s.mine; log("online:", s.mine, "after", out.loadS, "s"); }

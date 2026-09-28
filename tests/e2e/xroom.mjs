@@ -64,6 +64,9 @@ const TRACE_ROUNDS = new Set(String(arg("trace-rounds", "")).split(",").filter((
 const TRACE = ROLE === "host" ? TRACE_ROUNDS.size > 0 : !!arg("trace-out");
 const QUERY = arg("query", "");   // extra room URL parameters, "a=1&b=2"
 const FIXK = Math.max(0, Math.min(7, parseInt(arg("fixk", "0"), 10) || 0));
+// host: [--wakes 1,0] run every round once per value, the host's GPU wake on (1) or off (0) for it
+// (room/gpuwake.js; the order flips every other round, so a phone warming up hits both alike)
+const WAKES = String(arg("wakes", "")).split(",").filter((x) => x !== "").map((x) => x === "1");
 const TUNE = arg("tune") ? arg("tune").split(",").map((x) => parseInt(x, 10)) : null;   // e.g. 64,4
 if (TUNE && !(TUNE.length === 2 && [64, 128, 256].includes(TUNE[0]) && [4, 8].includes(TUNE[1]))) throw new Error("--tune WG,ROWS with WG 64|128|256 and ROWS 4|8");
 const PROMPTS = {
@@ -169,7 +172,7 @@ p.on("pageerror", (e) => errs.push(String(e).slice(0, 200)));
 p.on("crash", () => { errs.push("crashed"); console.error("CRASHED"); });
 p.on("console", (m) => { if (m.type() === "error" || /GPU|lost|memory|webrtc|ice/i.test(m.text())) console.error("console:", m.text().slice(0, 200)); });
 const t0 = Date.now(); const log = (...a) => console.error(((Date.now() - t0) / 1000).toFixed(0) + "s", ...a);
-const snap = () => p.evaluate(() => ({ status: document.getElementById("ai-status")?.textContent, sub: document.getElementById("ldg-sub")?.textContent, last: [...document.querySelectorAll("#chat-log div")].slice(-1)[0]?.textContent,
+const snap = () => p.evaluate(() => ({ wake: window.pooledWake?.() || null, status: document.getElementById("ai-status")?.textContent, sub: document.getElementById("ldg-sub")?.textContent, last: [...document.querySelectorAll("#chat-log div")].slice(-1)[0]?.textContent,
   peers: [...document.querySelectorAll(".peer-card")].map((c) => c.textContent.replace(/\s+/g, " ").trim().slice(0, 160)), rtt: [...document.querySelectorAll(".peer-card .rtt")].map((e) => e.textContent) }));
 // the page's trace, shifted onto this process's clock (Date.now() based: the machines' system clocks;
 // xroom_report refines the guest's offset from the frames)
@@ -268,7 +271,10 @@ try {
   let idx = 0;
   for (const mode of MODES) {
     await p.evaluate((ns) => { window.__nospec = ns; }, mode === "plain");
-    for (const pn of PROMPT_NAMES) for (let r = 0; r < ROUNDS; r++, idx++) {
+    const nW = Math.max(1, WAKES.length);
+    for (const pn of PROMPT_NAMES) for (let rw = 0; rw < ROUNDS * nW; rw++, idx++) {
+      const r = Math.floor(rw / nW), k = rw % nW, wake = WAKES.length ? WAKES[r % 2 ? nW - 1 - k : k] : null;
+      if (wake !== null) await p.evaluate((on) => window.pooledWakeHost?.(on), wake);
       const traced = TRACE_ROUNDS.has(idx);
       await p.evaluate(() => document.getElementById("new-chat").click());
       await p.waitForTimeout(500);
@@ -291,7 +297,7 @@ try {
       const answer = await p.evaluate(() => [...document.querySelectorAll(".m.bot .bubble")].pop()?.textContent || "");
       const crumb = await p.evaluate(() => { try { return JSON.parse(localStorage.getItem("pooled-crumb") || "{}").s || ""; } catch { return ""; } });
       const tele = await p.evaluate(() => window.__xTele?.() || null).catch(() => null);
-      const row = { idx, mode, prompt: pn, round: r, traced, tele, t0: tRound, t1: Date.now(), ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2],
+      const row = { idx, mode, prompt: pn, round: r, ...(wake !== null ? { wake } : {}), traced, tele, t0: tRound, t1: Date.now(), ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2],
         accepted: acc ? +acc[1] / 100 : null, lookupTok: lk ? +lk[1] : 0, rtt: s.rtt, status: st.slice(0, 240), crumb: crumb.slice(0, 300),
         answerSha: crypto.createHash("sha256").update(answer).digest("hex").slice(0, 16), answer };
       if (traced) {

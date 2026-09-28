@@ -1893,8 +1893,9 @@ function sendChain(msg) {
 // a decode lap starts: the workers that asked for it (a phone) wake their GPU now, so it is clocked
 // up when this lap's frame reaches them (room/gpuwake.js). A hint only: a worker that misses it or
 // gets it late is just slower, and it is ignored once its frame has arrived.
+let wakeSend = WAKE !== "0";
 function wakeChain(pos) {
-  if (WAKE === "0" || !ai.chain.length) return;
+  if (!wakeSend || !ai.chain.length) return;
   for (const id of ai.chain) if (conns.get(id)?.meta?.wake) sendTo(id, { t: "ai-wake", pos });
 }
 // forget the conversation state on every device: here now, on the chain with the next frame
@@ -2719,6 +2720,10 @@ function gpuWake() {
   if (!ai.engine || !ai.device || !myMeta.wake) return;
   try { (ai.waker ||= new GpuWaker(ai.device)).wake(WAKE_MAX_MS); } catch { myMeta.wake = 0; }
 }
+// debug: how often this worker woke its GPU (`pooledWake()` in the console)
+// and, on the host, switch sending it for A/B runs (tests/e2e/xroom.mjs --wakes 1,0)
+window.pooledWakeHost = (on) => { wakeSend = !!on; };
+window.pooledWake = () => ({ sending: wakeSend, asked: !!myMeta.wake, mode: WAKE || "default", ...(ai.waker?.stats || {}) });
 // ?wake=keep: also spin from the moment this worker has sent frame `p` on, unless the next one is already here
 function keepWarm(p) { if (WAKE === "keep" && ai.lastFramePos === p) gpuWake(); }
 
