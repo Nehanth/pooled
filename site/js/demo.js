@@ -696,7 +696,8 @@
   const goStep = k => {
     if (RM) {
       if (k >= STEPS.length - 1) { stopPlay(true); tl.final(); return; }
-      const ends = [S1 - .3, S2 - .3, S3 - .3, CH - .3, A1 + .5, c(FILES - .1), c(CHANGE - .1)];
+      // step 2 ends before the tabs merge (S1 + 2.1): after that the window is blank until the pool scene
+      const ends = [S1 - .3, S1 + 2.0, S3 - .3, CH - .3, A1 + .5, c(FILES - .1), c(CHANGE - .1)];
       seek(ends[k], true); tl.done = true; flow(A1 + 1); paintBar(STEPS[k]); return;
     }
     seek(STEPS[k]);
