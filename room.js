@@ -843,8 +843,13 @@ $("code-input").addEventListener("input", (e) => {
   const el = e.target, v = el.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
   if (el.value !== v) el.value = v;
   codeReady();
-  if (v.length === 4 && e.isTrusted && document.activeElement === el) $("join-btn").focus();
+  if (v.length === 4 && e.isTrusted && document.activeElement === el) { $("join-btn").focus(); el.parentElement.scrollIntoView({ block: "nearest" }); }
+  else codeInView();
 });
+// a phone's keyboard shrinks the screen after the boxes took focus: keep the four boxes whole in view,
+// not half under the header or the keyboard (the input is an overlay the browser scrolls to by its caret)
+const codeInView = () => { if (document.activeElement === $("code-input")) $("code-input").parentElement.scrollIntoView({ block: "nearest" }); };
+visualViewport?.addEventListener("resize", codeInView);
 // Virtual devices: the host can add devices that are iframes of this page on this same computer.
 // Each joins the room like any other device (its own WebGPU device, its own WebRTC link, its own
 // layers), which shows what a room does before friends arrive; the GPU is shared, so it is a
