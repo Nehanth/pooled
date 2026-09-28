@@ -308,6 +308,17 @@
 
   /* ---------- 5: a hidden state, through every layer, once per word ---------- */
   const pkt = $("pkt"), a1 = $("a1"), bdLive = $("bdLive");
+  // the band's pill while the room writes: a word every two seconds, as in the room ("Twinkling…", "Weaving…"),
+  // counted on the story's clock so seeking shows the right one; s < 0: "Ready"
+  const LIVE = ["Twinkling", "Weaving", "Shimmering", "Humming", "Stitching", "Conjuring", "Scribbling", "Whirring", "Sparkling", "Spinning"];
+  let liveK = -2;
+  const liveWord = s => {
+    const k = s < 0 ? -1 : Math.floor(s / 2) % LIVE.length;
+    if (k === liveK) return;
+    const anim = liveK >= 0 && k >= 0 && !RM && !frozen;
+    liveK = k; bdLive.textContent = k < 0 ? "Ready" : LIVE[k] + "\u2026";
+    if (anim && bdLive.animate) bdLive.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.7,.2,1)" });
+  };
   let geo = null;
   const measure = () => {
     const R = rowsEl.getBoundingClientRect(), k = (R.width / rowsEl.offsetWidth) || 1;
@@ -362,12 +373,13 @@
     const wait = t < WT[1];   // from the moment the answer's place shows until its first word: the working line
     if (wait !== aLi.classList.contains("wait")) { aLi.classList.toggle("wait", wait); follow(); }
     if (t < A0 || t >= A1) {
-      if (flowing) { flowing = false; band.classList.remove("writing"); bdLive.textContent = "Ready"; sweep(null); a1.classList.remove("cursor"); }
+      if (flowing) { flowing = false; band.classList.remove("writing"); liveWord(-1); sweep(null); a1.classList.remove("cursor"); }
       const n = t < A0 ? 0 : WORDS.length;
       if (n !== words) { words = n; sayTo(n); bdTok.textContent = n ? WORDS.length : 0; }
       return;
     }
-    if (!flowing) { flowing = true; band.classList.add("writing"); bdLive.textContent = "Writing"; }
+    if (!flowing) { flowing = true; band.classList.add("writing"); }
+    liveWord(t - A0);
     let w = 0; while (w < WORDS.length - 1 && t >= WT[w + 1]) w++;
     if (w !== words) { words = w; sayTo(w); a1.classList.add("cursor"); bdTok.textContent = w + 1; follow(); }
     // the room's sweep: one per word while words are slow, then one per lap that the faster words ride along with
@@ -583,7 +595,7 @@
     if (t > CH + .3 && t < CH + .95) typeInto(chatTyped, Q1, CH + .35, CH + .8, t);
     if (t >= CH) flow(t);
     // Code: the room's band says Writing while the agent writes
-    if (t >= C) { const on = !!writing || streams.length > 0; if (on !== band.classList.contains("writing")) { band.classList.toggle("writing", on); bdLive.textContent = on ? "Writing" : "Ready"; } codeFlow(t, on); }
+    if (t >= C) { const on = !!writing || streams.length > 0; if (on !== band.classList.contains("writing")) { band.classList.toggle("writing", on); if (!on) liveWord(-1); } if (on) liveWord(t - C); codeFlow(t, on); }
     if (t > c(.55) && t < c(ASK)) typeInto(codeTyped, A.prompt, c(.65), c(1.85), t);
     if (t > c(CHANGE) && t < c(CHANGE + 1.25)) typeInto(codeTyped, A.prompt2, c(CHANGE + .1), c(CHANGE + 1.1), t);
     if (writing) {

@@ -47,3 +47,19 @@ export function working({ since = performance.now(), label = "Working" } = {}) {
   tick();
   return el;
 }
+
+// The band's pill while the room is writing: a word that changes every two seconds, like the working
+// line's verbs ("Twinkling…", "Weaving…"); "Ready" otherwise. liveWords(el) returns set(on).
+export const LIVE = ["Twinkling", "Weaving", "Shimmering", "Humming", "Stitching", "Conjuring", "Scribbling", "Whirring", "Sparkling", "Spinning"];
+export function liveWords(el) {
+  let timer = 0, k = 0;
+  const show = (anim) => {
+    el.textContent = LIVE[k % LIVE.length] + "\u2026";
+    if (anim && !reduced() && el.animate) el.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.7,.2,1)" });
+  };
+  return (on) => {
+    if (on === !!timer) return;
+    if (on) { k = 0; show(false); timer = setInterval(() => { k++; show(true); }, 2000); }
+    else { clearInterval(timer); timer = 0; el.textContent = "Ready"; }
+  };
+}

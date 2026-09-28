@@ -26,7 +26,7 @@ import { lookupDrafts } from "./room/lookup.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
 import { computeScreen } from "./room/compute.js";
-import { working } from "./room/working.js";
+import { working, liveWords } from "./room/working.js";
 
 // Hidden-state transport (room/transport.js). ?wire=off falls back to PeerJS messages;
 // ?wire=slice uses one sliced channel; ?wire=stripeN spreads slices over N peer connections.
@@ -2062,6 +2062,7 @@ function mapStats(tps, acc) {
   return { tps, acc, lap: Math.round(lap), gpu: Math.round(gpu), net: Math.max(0, Math.round(lap - gpu)) };
 }
 let lastMap = null, bestTps = 0;
+let smLive = null;
 function renderMap(nodes, st, live) {
   const el = $("swarm-map"); if (!el || !nodes?.length) return;
   lastMap = { nodes, st: { ...(lastMap?.st || {}), ...(st || {}) } };
@@ -2122,7 +2123,7 @@ function renderMap(nodes, st, live) {
   const S = lastMap.st;
   $("sm-tps").textContent = S?.tps ? S.tps.toFixed(1) : "-";
   $("sm-lap").textContent = S?.lap ? String(Math.round(S.lap)) : "-";
-  el.querySelector(".sm-lt").textContent = live ? "Writing" : "Ready";
+  (smLive ||= liveWords(el.querySelector(".sm-lt")))(!!live);   // "Twinkling…", "Weaving…" while writing
   el.querySelector(".sm-live").title = live ? "the room is writing an answer" : "waiting for a question";
   const bits = [];
   if (st?.tps) bits.push(`${st.tps.toFixed(1)} tok/s`);

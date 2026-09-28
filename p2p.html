@@ -401,6 +401,8 @@
   .sm-live { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px 0 8px; border-radius: 999px; background: var(--panel-2); font: 500 12px/1 var(--sans); letter-spacing: -.005em; color: var(--ink-2); }
   .sm-live i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); opacity: .75; }
   #swarm-map.live .sm-live { background: var(--accent-soft); color: var(--accent-text); }
+  .sm-lt { display: inline-block; }
+  #swarm-map.live .sm-live { min-width: 104px; }   /* the words change every two seconds; the pill keeps its size */
   #swarm-map.live .sm-live i { background: var(--accent); opacity: 1; animation: livebeat 1.1s var(--ease) infinite; }
   @keyframes livebeat { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } 60% { box-shadow: 0 0 0 5px transparent; } }
   /* the numbers: tok/s, ms a lap, tokens so far, context used of max */
