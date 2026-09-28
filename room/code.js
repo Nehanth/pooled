@@ -492,7 +492,8 @@ export async function initCode(api, { mock = null } = {}) {
     handEdits.clear();
     try { r = await agent.run(text + told, { signal: ctrl.signal }); }
     catch (err) { console.error(err); r = { steps: 0, calls: 0, reason: "error" }; note("error: " + err.message, true); }
-    finally { flushTok(); api.unlock(); }
+    // a live chunk still waiting for its timer belongs to this run: dropped, so it never lands after its end
+    finally { flushTok(); clearTimeout(liveTimer); liveTimer = 0; liveRaw = null; liveSent = 0; api.unlock(); }
     if (r.reason === "stopped") note("stopped");
     if (r.reason === "context") note(r.text, true);
     emit({ t: "ai-code-done", mid, steps: r.steps, reason: r.reason, stats: stats(r, t0, gen0) });

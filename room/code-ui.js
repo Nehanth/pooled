@@ -394,7 +394,7 @@ export function codeUI({ onMode = () => {} } = {}) {
       // the model's text before a tool call is complete once the call starts; the card takes the
       // place of the live card that showed the call being typed
       closeText();
-      const at = log.querySelector(".cm-live");
+      const at = [...log.querySelectorAll(`.cm-live[data-k^="${CSS.escape(key("l", d.mid, ""))}"]`)].pop();   // this request's, never an earlier run's
       el = add(h("div", "cm-tool"), at);
       at?.remove();
       el.dataset.k = k;
