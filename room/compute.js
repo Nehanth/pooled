@@ -184,6 +184,7 @@ export function computeScreen({ state, keepAwake = () => {} }) {
       clearInterval(timer); timer = 0;
       if (raf) cancelAnimationFrame(raf); raf = 0;
       packets.length = 0;
+      $("compute-open")?.focus({ preventScroll: true });   // back to the button that opened it
     }
   }
   $("compute-exit").addEventListener("click", () => show(false));
