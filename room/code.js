@@ -29,7 +29,7 @@ import { runJsTool, runJsAvailable } from "../harness/run-js.js";
 import { mountPreview, openPreviewTab } from "../harness/preview-frame.js";
 import { PreviewPublisher, PreviewSubscriber } from "../harness/preview-sync.js";
 import { lineDiff } from "../harness/diff.js";
-import { listProjects, createProject, openProject, openFolder, canOpenFolder, saveSession, loadSession } from "../harness/projects.js";
+import { listProjects, createProject, openProject, openFolder, canOpenFolder, saveSession, loadSession, slugify } from "../harness/projects.js";
 import { roomModel } from "../harness/room-model.js";
 import { detectStyle } from "../harness/tools.js";
 import { normPath, riskyPath } from "../harness/workspace.js";
@@ -177,8 +177,12 @@ export async function initCode(api, { mock = null } = {}) {
   function fillProjects(list, cur, { guest = false } = {}) {
     const sel = $("code-proj-select");
     sel.replaceChildren(new Option(list.length ? "Open a project…" : "No projects yet", ""));
+    const n = new Map();
+    for (const p of list) n.set(p.name, (n.get(p.name) || 0) + 1);
     for (const p of list) {
-      const o = new Option(p.name + (p.kind === "folder" ? " (folder)" : ""), p.id);
+      // two projects with one name: the later ones carry their number (opfs:counter-2 is "counter (2)")
+      const k = n.get(p.name) > 1 && new RegExp(`^opfs:${slugify(p.name)}-(\\d+)$`).exec(p.id)?.[1];
+      const o = new Option(p.name + (k ? ` (${k})` : "") + (p.kind === "folder" ? " (folder)" : ""), p.id);
       o.disabled = guest && p.kind === "folder";   // a folder on the host's disk: the host opens it
       sel.add(o);
     }
