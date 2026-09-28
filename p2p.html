@@ -825,6 +825,17 @@
   .cs-hop { width: 7px; height: 7px; border-radius: 50%; background: var(--me); opacity: .35; }
   #compute-exit { white-space: nowrap; }
   .cs-foot { flex: none; padding: 18px 20px; padding-bottom: max(18px, env(safe-area-inset-bottom)); text-align: center; font-size: 12px; color: var(--on-game-2); }
+  /* short screens (a phone in landscape): a smaller mark and title, and the screen scrolls if it still doesn't fit */
+  @media (max-height: 500px) {
+    #compute-screen { overflow-y: auto; }
+    .cs-top { padding-top: max(10px, env(safe-area-inset-top)); padding-bottom: 6px; }
+    .cs-stage { height: 104px; }
+    #cs-logo { width: 80px; }
+    #cs-title { font-size: 30px; }
+    #cs-sub { margin-top: 6px; font-size: 15px; }
+    #cs-strip { margin-top: 14px; }
+    .cs-foot { padding-top: 10px; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  }
   /* ---- Code mode (room/code.js, room/code-ui.js; docs/design/harness-app.md E): the landing's Code step.
      Files on the left, the agent in the middle, the app it serves on the right ---- */
   #chatpane.code-mode > :not(#topline, #code-pane) { display: none !important; }
