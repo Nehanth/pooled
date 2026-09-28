@@ -822,10 +822,12 @@ function deviceMark() {
 setInterval(deviceMark, 1000);
 $("create-btn").addEventListener("click", () => { keepAwake(); start(true); });
 // (auto-rejoin removed: the user prefers to see what happened)
-$("join-btn").addEventListener("click", () => { keepAwake(); start(false); });
-$("code-input").addEventListener("keydown", (e) => { if (e.key === "Enter") start(false); });
+// Join only with a whole code: the greyed button and Enter in a short code do nothing but put the cursor back
+const codeOk = () => /^[A-Z0-9]{4,6}$/i.test($("code-input").value.trim());
+$("join-btn").addEventListener("click", () => { if (!codeOk()) { $("code-input").focus(); return; } keepAwake(); start(false); });
+$("code-input").addEventListener("keydown", (e) => { if (e.key === "Enter" && codeOk()) start(false); });
 const codeReady = () => {
-  $("join-btn").classList.toggle("ready", /^[A-Z0-9]{4,6}$/i.test($("code-input").value.trim()));
+  $("join-btn").classList.toggle("ready", codeOk());
   $("code-input").parentElement.classList.toggle("full", $("code-input").value.length >= 4);
 };
 // four boxes, four characters: letters and digits only; the fourth one hands off to Join (on a
