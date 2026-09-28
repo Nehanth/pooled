@@ -641,3 +641,63 @@ Gates: test_moe.js 3/3 llama.cpp + spec == plain on the Mac (MOE_FUSED_LAYOUT=wi
 b72e4d1f / ac403b4e); unit tests (tests/unit/moe_fused_wide_test.js new); tests/e2e/moe_fused_cpu.mjs (WGSL
 interpreter, race detection) passes for the legacy and two wide layouts (its fused == unfused check now uses the legacy
 unfused layout; it had failed since MOE_DEFAULT became the unfused default).
+
+## 2026-09-28: Metal optimizations (overnight), branch perf/metal
+
+This branch combines the two Metal branches that were kept:
+- **perf/metal-wide-prefill-256-apple** (42136dd). `_prefillWide` submits a command buffer every `WIDE_SUBMIT_LAYERS = 8` layers instead of one per whole-model chunk. This fixes ubatch 256 on Apple Metal under Deno, and the arithmetic is unchanged.
+- **perf/metal-moe-fused-expert-kernels-apple** (b46c1cd). Adds the `moeFusedLayout` wide fused expert kernels, the default on Apple adapters in Chrome and Safari, and the faster `moe_route`, which gives the same bits on every GPU.
+
+Both cherry-picked cleanly onto main c6ca8cc, and the sections above give the details of each.
+
+Commands:
+- Deno: `D = deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights --allow-net`, run from `tests/`.
+- Chrome: `node tests/bench/chrome_bench.mjs <model> 40 [extra]`.
+- Base (origin/main) and branch ran alternately in the same session: base, branch, base, branch.
+- bench_ctx builds its prompt from repo source that this branch edits (engine/qwen35.js, engine/wgsl/moe.js). The GB10 A/B therefore sets `CTX_SRC=<base checkout>`, so base and branch prefill the same tokens.
+
+### GB10 (NVIDIA, Vulkan): no regression, MoE prefill +5%
+
+| | main c6ca8cc | perf/metal |
+|---|---|---|
+| bench_ctx MoE defaults, prefill 512 / 4k / 16k (2 runs) | 259.0 / 360.5 / 297.7, 293.8 / 362.4 / 298.2 | 288.7 / 381.2 / 311.3, 303.9 / 382.7 / 311.1 |
+| bench_ctx MoE defaults, plain decode 512 / 4k / 16k | 26.53 / 26.60 / 23.53, 26.68 / 26.39 / 23.54 | 27.32 / 26.79 / 23.87, 26.85 / 26.44 / 23.94 |
+| bench_ctx MoE defaults, spec decode 512 / 4k / 16k | 33.43 / 31.37 / 34.04, 33.55 / 31.54 / 33.73 | 33.55 / 31.52 / 34.11, 33.65 / 31.88 / 33.94 |
+| bench_ctx 27B `CTX=16640`, prefill / plain / spec at 4k | 75.7 / 9.05 / 13.25 | 75.6 / 9.11 / 13.27 |
+| Chrome MoE decode, plain two-sum / hash-map (2 runs) | 49.97 / 50.69, 50.99 / 50.26 | 49.04 / 50.01, 50.23 / 49.59 |
+| Chrome MoE decode, spec two-sum / hash-map | 79.61 / 72.39, 81.83 / 71.94 | 80.68 / 71.58, 81.66 / 71.44 |
+| Chrome MoE `prefilllen=2048&prefillall=1`, all-on tok/s (relDiff) | 251.8 (2.14e-3), 249.3 (2.38e-3) | 258.2 (2.14e-3), 258.6 (2.14e-3) |
+
+Reading the table:
+- MoE prefill (bench_ctx, same tokens) is 5-6% faster at 4k and 4-5% faster at 16k, consistently across both run pairs. This is outside the noise. The likely cause is the per-8-layer submit: the GPU starts on the first layers while the rest are still being encoded.
+- Chrome prefill at 2048 tokens is +3% (2 runs each).
+- Decode is unchanged (<2%, noise). The GB10 keeps the legacy fused layout, so only `moe_route` changed for it.
+- 27B is unchanged: wide prefill is opt-in for dense models, so bench_ctx does not use it.
+- In every run, spec == plain, the Chrome output matches the golden text and there are 0 GPU errors.
+
+### M5 Max (Metal): the MoE engine defaults now run under Deno; speed not measurable this session
+
+The Mac was heavily loaded by other processes during the whole session. NVIDIA Sync used 240-290% CPU, fileproviderd 100-140%, and the GPU was 23-89% utilized when none of these jobs were running. Plain decode on identical code swung from 6 to 32 tok/s (about 33 on a quiet machine), so none of the Mac speed numbers below support a speed claim.
+
+| `MODEL=moe FILLS=512,4096,16384 $D bench_ctx.js` (engine defaults) | main c6ca8cc | perf/metal |
+|---|---|---|
+| run 1 | **fails**: `OperationError: validation error occurred` at `forwardToken` `mapAsync` after the first prefill | runs: prefill 18.4 / 55.9 / 32.5, spec == plain on every row, 0 GPU errors |
+| run 2 | **fails** (same error) | runs: prefill 22.6 / 112.3 / 108.7, spec == plain on every row, 0 GPU errors |
+
+With `PREFILL_UBATCH=0`, both base and branch run. Prefill 512 / 4k / 16k was 19.4 / 24.9 / 36.1 and 36.0 / 104.3 / 85.5 on base, and 45.6 / 92.4 / 103.8 and 20.7 / 111.3 / 93.5 on the branch. That spread is load noise.
+
+The Chrome runs on the Mac (MoE decode, prefill 2048, 27B `ubatch=256`) and the 27B Deno bench_ctx did not complete this session. The shared SSH connection to the Mac dropped partway through. The Chrome evidence for the wide fused layout on the Mac is therefore still the per-branch kernel A/B above: moe_gus 0.49x, moe_dnc 0.55x, moe_route 0.53x of main, interleaved in one run.
+
+### Gates
+
+| Gate | GB10 | M5 Max |
+|---|---|---|
+| `test_moe.js` (default) | MATCH llama.cpp 3/3, spec == plain on 3/3 (layout legacy) | MATCH 3/3, spec == plain on 3/3 (Deno: layout legacy, new moe_route) |
+| `MOE_FUSED_LAYOUT=wide test_moe.js` | MATCH 3/3, spec == plain on 3/3 | MATCH 3/3, spec == plain on 3/3 |
+| `ATTN_PREFILL_TILE=0 test_q38_bits.js` | BITS plain 85b12667 hidden eba0b8d5 (unchanged) | BITS plain b72e4d1f hidden ac403b4e (unchanged); spec == plain; GPU sampling == logits path |
+| `MODEL=27b PREFILL_UBATCH=256 LENS=150,700,2100 test_prefill_wide.js` | PASS, max relDiff 7.26e-5 | **PASS**, max relDiff 6.50e-5, 0 GPU errors (main: validation error at 700) |
+| `MODEL=moe [PREFILL_UBATCH=256] LENS=150,700,2100 test_prefill_wide.js` | PASS, max relDiff 1.23e-3 | 150 tokens pass (3.64e-5); **700: `validation error occurred` at `forwardToken` `mapAsync`** (see below) |
+| unit tests, `node --check`, generator_smoke | 248 passed / 0 failed, pass, pass | (not run on the Mac) |
+| tests/e2e/moe_fused_cpu.mjs (WGSL interpreter) | MOE FUSED CPU PASS (legacy + two wide layouts, no races) | |
+
+**Open: MoE test_prefill_wide at 700 tokens on the Mac.** It hit the known Deno-only `mapAsync` validation error once. That is the same error bench_ctx hits on main, and on this branch bench_ctx with the same wide + grouped prefill defaults ran 2 of 2 times. The wide-prefill branch passed this case when it was measured on its own. I set up an A/B job (this branch vs 42136dd alone, alternated 2x) but could not run it because the SSH connection dropped. Whether this is intermittent or caused by the combination is not settled. Output never silently changes: when the error happens, the run throws.

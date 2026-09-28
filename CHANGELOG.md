@@ -2,6 +2,15 @@
 
 All notable changes to Pooled (called SwarmLLM before September 2026). Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Entries before the rename keep the old name.
 
+## [Unreleased]
+
+### Changed
+- **Metal (Apple GPUs)**:
+  - The MoE's default prompt processing (wide prefill at ubatch 256 plus grouped experts) no longer loses the device under Deno on an M5 Max. Wide prefill now submits every 8 layers, which also makes GB10 MoE prefill about 5% faster, with bit-identical results.
+  - Apple GPUs in Chrome and Safari get wider fused MoE expert kernels (`moeFusedLayout`; M5 Max kernel time: gate/up 0.49x, down 0.55x).
+  - `moe_route` is 1.6-1.9x faster on every GPU (GB10 and M5 Max) and gives the same bits.
+  - Other GPUs keep their output bits. MoE output on Apple still matches llama.cpp, and spec == plain.
+
 ## [1.0.0] - 2026-09-27
 
 The first stable release: peer-to-peer inference in the browser at [pooled.run](https://pooled.run).
