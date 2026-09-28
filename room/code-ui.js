@@ -703,6 +703,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (P) a.append(h("span", "host", "localhost"), `:${active}/${P.path || "index.html"}`);
     else a.textContent = "No port served";
     $("pv-open").hidden = !P || !P.rev;
+    $("pv-state").dataset.state = P?.state || "";   // green only for a running rev
     $("pv-state").textContent = P ? (P.state === "ready" ? `rev ${P.rev}` : P.state === "loading" ? "loading…" : P.state === "waiting" ? "Click to run" : P.state === "stopped" ? "stopped" : P.state === "hung" ? "hung" : "") : "";
   }
   function status(port, s) {
