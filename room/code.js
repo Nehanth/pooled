@@ -349,13 +349,13 @@ export async function initCode(api, { mock = null } = {}) {
   }
   async function approve(call, info) {
     const i = callIdx.get(call);
-    const diff = info ? makeDiff(info) : null;
+    const diff = info && !info.error ? makeDiff(info) : null;   // a call that fails changes nothing: no diff on its card
     // a file of a folder on disk that can run commands (package.json, a script, a dotfile) always
     // asks, whatever auto-approve and "Allow edits for this task" say
     if (diff && project?.kind === "folder" && riskyPath(diff.path)) diff.risky = true;
     // a failing edit is not worth a question (the tool returns the error to the model), nor is a
     // write that changes nothing
-    const same = diff && !diff.error && diff.rows && !diff.isNew && !diff.add && !diff.del;
+    const same = diff && diff.rows && !diff.isNew && !diff.add && !diff.del;
     const auto = !diff?.risky && ($("code-auto").checked || allowTask || info?.error || same);
     tool(i, { state: auto ? "approved" : "pending", diff }, { diff: wireDiff(diff) });
     if (auto) return true;
