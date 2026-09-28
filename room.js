@@ -2153,24 +2153,10 @@ function renderMap(nodes, st, live) {
   el.querySelector(".sm-meta").title = `${nodes.length} device${nodes.length > 1 ? "s" : ""}: every token takes a lap through all of them`;
   deviceMark();
 }
-// The folded band's split: one small block per layer, in the colour of the device that holds it, with
-// small gaps, so it reads as layers dealt out even with one device. On a narrow bar a block stands for a
-// few layers (at least 5 px a block); the blocks are shared out by device, each device getting at least
-// one, so a phone holding a single layer never drops out of the bar. Redrawn when the bar changes width.
+// The folded band's split: one segment per device, as wide as its share of the layers (at least a few
+// px, so a phone holding one or two layers never drops out of the bar), in the device's colour, with a
+// thin tick between its layers when they are wide enough to show. Redrawn when the bar changes width.
 let miniSpans = [], miniTotal = 0, miniW = -1;
-// blocks per part: in proportion to its layers, at least one each (largest remainders get the spares)
-function miniShare(lens, n) {
-  const total = lens.reduce((a, b) => a + b, 0);
-  const got = lens.map((l) => Math.max(1, Math.floor((l * n) / total)));
-  const rem = lens.map((l, i) => ({ i, r: (l * n) / total - Math.floor((l * n) / total) })).sort((a, b) => b.r - a.r);
-  let left = n - got.reduce((a, b) => a + b, 0);
-  for (let j = 0, idle = 0; left > 0 && idle < rem.length; j = (j + 1) % rem.length) {
-    const i = rem[j].i;
-    if (got[i] < lens[i]) { got[i]++; left--; idle = 0; } else idle++;   // never more blocks than layers
-  }
-  while (left < 0) { const k = got.indexOf(Math.max(...got)); if (got[k] <= 1) break; got[k]--; left++; }
-  return got;
-}
 function paintMini(force = false) {
   const mini = $("swarm-map").querySelector(".sm-mini");
   const w = mini.clientWidth;
@@ -2186,18 +2172,16 @@ function paintMini(force = false) {
     at = Math.max(at, sp.hi);
   });
   if (at < miniTotal) parts.push({ lo: at, hi: miniTotal });
-  const n = Math.max(parts.length, Math.min(miniTotal, Math.floor((w + 2) / 7)));
-  const share = miniShare(parts.map((p) => p.hi - p.lo), n);
-  let html = "";
-  parts.forEach((p, j) => {
-    const per = (p.hi - p.lo) / share[j];
-    for (let c = 0; c < share[j]; c++) {
-      const lo = p.lo + Math.floor(c * per), hi = Math.max(lo + 1, p.lo + Math.floor((c + 1) * per));
-      const range = hi - lo > 1 ? `layers ${lo + 1}\u2013${hi}` : `layer ${lo + 1}`;
-      html += p.sp ? `<i style="--sw:${devColor(p.sp.name)};--k:${p.k}" title="${esc(String(p.sp.name))}: ${range}"></i>` : `<i class="none" title="${range}: not dealt"></i>`;
-    }
-  });
-  mini.innerHTML = html;
+  const room = w - 2 * (parts.length - 1);   // the bar less the gaps between segments
+  mini.innerHTML = parts.map((p) => {
+    const n = p.hi - p.lo, px = room * n / miniTotal;
+    const range = n > 1 ? `layers ${p.lo + 1}\u2013${p.hi}` : `layer ${p.lo + 1}`;
+    // a tick between layers when each layer gets at least 5 px
+    const ticks = n > 1 && px / n >= 5 ? ` mini-ticks" style="--n:${n};` : `" style="`;
+    return p.sp
+      ? `<i class="seg${ticks}flex-grow:${n};--sw:${devColor(p.sp.name)};--k:${p.k}" title="${esc(String(p.sp.name))}: ${range}"></i>`
+      : `<i class="seg none${ticks}flex-grow:${n}" title="${range}: not dealt"></i>`;
+  }).join("");
   mini.title = miniSpans.map((sp) => `${sp.name}: layers ${sp.lo + 1}\u2013${sp.hi}`).join(" \u00b7 ");
 }
 if (typeof ResizeObserver === "function") new ResizeObserver(() => paintMini()).observe($("swarm-map").querySelector(".sm-mini"));

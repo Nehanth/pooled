@@ -416,8 +416,10 @@
   /* folded: the split as small blocks, one per layer (or per few on a narrow bar), each in the colour
      of the device holding it, with small gaps (room.js paintMini) */
   .sm-mini { display: none; flex: 1 1 0; min-width: 40px; height: 16px; gap: 2px; align-items: stretch; }
-  .sm-mini i { flex: 1 1 0; min-width: 0; border-radius: 2px; background: var(--sw); box-shadow: inset 0 0 0 1px rgba(20,22,29,.06); }
-  .sm-mini i.none { background: var(--rule-2); }
+  .sm-mini i { flex: 1 1 0; min-width: 5px; border-radius: 2px; background: var(--sw); box-shadow: inset 0 0 0 1px rgba(20,22,29,.06); }
+  /* a device's segment: its layers as blocks, a 1.5px cut between them (in the band's colour) */
+  .sm-mini i.mini-ticks { background: linear-gradient(90deg, transparent calc(100% - 1.5px), var(--panel-3) 0) 0 0 / calc(100% / var(--n)) 100% repeat-x, var(--sw); background-clip: padding-box; }
+  .sm-mini i.none { --sw: var(--rule-2); background: var(--rule-2); }
   #swarm-map.folded .sm-mini { display: flex; }
   #swarm-map.folded .sm-strip { display: none; }
   #swarm-map.folded { gap: 0; padding-top: 8px; padding-bottom: 8px; }
