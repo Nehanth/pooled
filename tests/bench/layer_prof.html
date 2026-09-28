@@ -8,7 +8,8 @@
 // timestamped pass, tests/prof/gpuprof.js "kernel" mode; its sum is larger than the submit's GPU time).
 // Runs anywhere with WebGPU; tests/bench/layer_prof.mjs drives it on an iPhone (Safari over WebDriver)
 // or in Chrome. ?model=<url of the .gguf, Range requests> &lo=39&hi=40 &n=40 (calls per measurement)
-// &cols=4 &phone=1. Result in window.RESULT.
+// &cols=4 &phone=1 &gaps=0,20,40 (also time the plain lap with that many ms idle before each call, as in a
+// room where the device waits for the rest of the lap: a GPU that clocks down when idle shows it). Result in window.RESULT.
 import { Qwen35Engine } from "../../engine/qwen35.js";
 import { autotuneCoop } from "../../engine/autotune.js";
 import { parseGGUFHeader, qwen35Weights, streamEntryToGPU } from "../../engine/gguf.js";
@@ -58,6 +59,15 @@ try {
     const pipes = Object.entries(bySum(all, (k) => k.name, (k) => k.ms)).map(([p, o]) => ({ pipe: p, ms: r2(o.ms / K), n: r2(o.n / K), usEach: r2(1000 * o.ms / o.n) })).sort((a, b) => b.ms - a.ms).slice(0, 20);
     out[name].kernels = { totalMs: r2(total / K), dispatches: r2(all.length / K), cats, pipes };
     log(`${name} kernels: ${r2(total / K)} ms over ${r2(all.length / K)} dispatches\n` + table(cats, ["category", "ms", "dispatches", "pct"]) + "\n" + table(pipes, ["pipe", "ms", "n", "usEach"]));
+  }
+  const gaps = (q.get("gaps") || "").split(",").filter((x) => x !== "").map(Number);
+  out.gaps = [];
+  for (const g of gaps) {
+    const w = [], w2 = [];
+    for (let i = 0; i < N; i++) { await new Promise((r) => setTimeout(r, g)); w.push(await plain()); }
+    for (let i = 0; i < Math.min(N, 20); i++) { await new Promise((r) => setTimeout(r, g)); w2.push(await block()); }
+    out.gaps.push({ gapMs: g, plainWall: r2(med(w)), plainP95: r2([...w].sort((a, b) => a - b)[Math.floor(0.95 * w.length)]), blockWall: r2(med(w2)) });
+    log(`idle ${g} ms before each call: plain wall ${r2(med(w))} ms (p95 ${out.gaps.at(-1).plainP95}), block${COLS} wall ${r2(med(w2))} ms`);
   }
   window.RESULT = out;
 } catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; }

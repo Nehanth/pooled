@@ -873,3 +873,133 @@ above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32
 43.92; 27B prefill 31.9 / 58.5 / 53.6, plain 14.79 / 14.35 / 12.43, spec 23.54 / 21.13 / 15.96, spec == plain on
 every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
 prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).
+
+## 2026-09-28: device matrix (Spark, M5 Max, iPhone 14 Pro Max)
+
+Branch perf/cluster-matrix (main c6ca8cc + b749f99 merged, + the room harness). Every device runs main's code: the
+iPhone opens https://pooled.run/room (production = main; public PeerJS signaling, HF weights, 0.5 GB pledge), the
+GB10 ("Spark": headless Chromium, Vulkan) and the M5 Max (headless Chrome 154, Metal) serve their own checkout on
+127.0.0.1 with local weights. Runner: `tests/e2e/xroom_cluster.sh --devices <here,there,phone> -- --model M --gb G
+--prompts japan,twosum --rounds 2 --maxnew 128 [--trace-rounds 1,3,5,7]` (2 plain + 2 spec rounds per prompt,
+exact sampling), per-device chain report `xroom_chain_report.mjs`, phone lap trace injected over WebDriver
+(`XROOM_PHONE_TRACE=1`, GPU timestamps on the page's own passes). All on home Wi-Fi (both computers are on Wi-Fi
+too, see "two-machine room" above). Numbers are per round; two runs per config unless noted.
+
+**Coverage.** Measured: C (Spark + iPhone) MoE and 1.7B, A (Spark + Mac) MoE, the phone thermal run, per-layer
+profiles on the phone and the GB10, one-device references on the GB10. **Not measured: B (Mac + iPhone) and D (all
+three), the Mac as host, the 27B.** They need the Mac's GPU lock, and four batches of the Spark+Mac job were
+queued on it at the same time: our D run waited the lock's full 90 minutes and gave up (`no lock`); the queued runs
+(D host Spark / host Mac, B, 1.7B on B and D, Mac solo references) are still in the runner's chain and will land in
+the scratch results; this section is to be extended with them.
+
+### Matrix: tok/s (per round), acceptance, answers
+
+Qwen3.6 35B-A3B MoE Q4, `--gb 40` (C) / `--gb 13` (A). embed + head always on the host (GB10).
+
+| combo | split | load (host online) | plain japan | plain twosum | spec japan (acc) | spec twosum (acc) | answers |
+|---|---|---|---|---|---|---|---|
+| GB10 alone (3 runs) | 40+embed | 163-168 s | 35.4, 37.0 | 39.8, 40.2 | 45.5, 47.5 (59%) | 63.1, 64.9 (80%) | japan a0e7f9bd, twosum dcc61ede |
+| A GB10 + M5 Max, run 1 | 20+embed / 20 | 103 s | 29.8, 29.7 | 33.3, 29.9 | 37.0, 26.1 (42, 37%) | 53.5, 51.6 (67%) | japan **plain 8e29cc8d, spec 44efa784**; twosum dcc61ede |
+| A run 2 | same | 106 s | 29.3, 29.9 | 30.4, 28.4 | 38.0, 34.7 (42%) | 54.0, 56.8 (67%) | japan 44efa784 (plain == spec), twosum dcc61ede |
+| C GB10 + iPhone, run 1 | 39+embed / 1 (layer 40 of 40) | 158 s; phone joined 4.2 s, slice served at 159 s | 21.7, 19.3 | 25.4, 19.4 | 28.7, 27.9 (48, 52%) | 38.6, 24.7 (67, 50%) | japan 3f42e667, twosum dcc61ede, plain == spec |
+| C run 2 | same | 164 s | 14.7, 21.7 | 25.0, 23.7 | 25.0, 25.7 (48, 44%) | 34.5, 38.0 (67%) | same |
+| C, twosum only, earlier main (smoke, 2 runs) | same | 157 s | | 17.7-21.2 | | 21.5-35.6 (55-67%) | 1df98ce0 = its solo |
+
+Qwen3 1.7B Q8, `--gb 13`: GB10 alone 49.1 (japan) / 51.3 (twosum) plain, load 18 s; **C** (27+embed / 1, the
+phone holds layer 28 of 28), 5 runs: plain 25.6-29.0, load 20-22 s, answers japan 166285f6 / twosum e19cba7f
+= the GB10 alone (the 1.7B has no draft head: spec = plain).
+
+Correctness: every C round gives the same answer in plain and spec, and `twosum` equals the one-device answer. `japan`
+never equals the one-device GB10 answer once a second GPU is in the chain: C departs at character 359 ("the \"herd\"
+mentality" vs the GB10's wording), A at character 128 ("local vibes" vs "nightlife"). A different device's layers
+with an f16 wire is expected to move a long prose answer (as noted in the two-machine entry); what is not expected
+is **A run 1: plain 8e29cc8d != spec 44efa784 within one session**, again reproducing the open item from the
+two-machine entry (diverges at character 350: `the "herd."` vs `the "herd" where possible.`). With the phone (C)
+plain == spec held in all 16 japan rounds. The japan/twosum answer shas moved (1df98ce0 -> dcc61ede for twosum)
+between the smoke runs and these, on both the solo and room sides together, when main b749f99 was merged.
+
+### Where a lap goes (traced rounds, medians, ms)
+
+| round | lap p50 / p95 | host pre (its layers + embed) | host GPU | wait (other devices + wire) p50 / p95 | head | wire, all hops, p50 / p95 | worker residence p50 / p95 |
+|---|---|---|---|---|---|---|---|
+| A plain japan (GB10 20 + Mac 20) | 33.4 / 37.2 | 12.2 | 9.7 | 15.3 / 17.1 | 4.2 | 8.6 / 10.4 | Mac 6.6 / 7.8 (readback-wait 6.4) |
+| C plain japan (GB10 39 + phone 1) | 47.0 / 60.3 | 22.3 | 18.3 | 17.3 / 28.9 | 4.3 | 7.9 / 17.7 | phone 9 / 13 |
+| C plain twosum | 40.4 / 56.1 | 18.4 | 15.0 | 15.9 / 25.6 | 4.2 | 8.8 / 20.6 | phone 6 / 11 |
+| C spec japan (step) | 89.6 / 129 | 35.7 | 31.5 | 28.1 / 51.7 | | 11.5 / 33.7 | phone 15 / 25 |
+| C spec twosum (step) | 114.7 / 881 | 52.0 | 47.2 | 32.7 / 821 | | 12.4 / 807 | phone 19 / 35 |
+| C 1.7B plain japan (GB10 27 + phone 1) | 33.5 / 44.9 | 14.5 | 11.8 | 14.5 / 22.6 | 3.3 | 8.3 / 16.1 | phone 5 / 11: GPU 3.9, readback 1.1 |
+
+Per layer (one-token decode, MoE, GPU time): GB10 0.47 ms (18.3 ms / 39 layers in C, 9.7 / 20 in A; `layer_prof`
+alone: 0.41 DeltaNet layer 38, 0.54 attention layer 39); M5 Max <= 0.33 ms (20 layers inside a 6.6 ms residence);
+**iPhone 3 ms back-to-back** (`tests/bench/layer_prof.mjs --browser ios`, layer 38 or 39, wall 3 ms p95 4, map wait
+3.7-4.1 ms) but **6.8-11.7 ms per lap inside the room** (GPU timestamps on the page, layer 39). One phone layer
+costs as much GPU time as 15-25 GB10 layers, and its two Wi-Fi hops another ~8 ms; its share of the model is 1/40.
+1.7B: phone 3.9 ms for one layer vs GB10 0.44 (11.8 / 27).
+
+Phone kernels, one-token decode of layer 39 (full attention + MoE), per-dispatch timestamps (each dispatch in its own
+pass, so the sum, 5.8 ms, exceeds the 3 ms wall; read the ratios): attn_flash 1.47 ms, matvec_q8_coop (q/kv proj) 2
+x 0.72, moe_gus_q4_q8 0.79, moe_dnc_q4_q8 0.74, matvec_q4_coop_acc (o proj) 0.52, the rest < 0.2 each. Layer 38
+(DeltaNet): the qkvz projection matvec_q4_coop 1.44 ms is the largest. The same kernels on the GB10 total 0.63 /
+0.43 ms. 4-column verify (block4) on the phone: 7-11 ms for 1-2 layers vs 3-5 plain, MoE expert kernels grow the
+most (0.8 -> 1.3 ms each).
+
+**The phone's GPU cools between laps.** `layer_prof --gaps` (idle ms before each call, 60 calls each; layers 39 / 38-39):
+
+| idle before call | 0 | 10 | 20 | 40 | 80 | 0 again |
+|---|---|---|---|---|---|---|
+| 1 layer, plain wall ms (p95) | 5 (9) | 7 (9) | 8 (10) | 7 (11) | 9 (11) | 5 (6) |
+| 2 layers, plain wall ms (p95) | 5 (6) | | 10 (15) | 12 (14) | | 6 (7) |
+
+In the room the phone idles ~35-40 ms of every 47 ms lap, which is why its layer takes 7-10 ms there instead of 3-5.
+(A third gap run hung the phone page and timed out after 30 min; no result.)
+
+Links: phone <-> GB10 over IPv6 host candidates, direct (no relay), STUN RTT 4-10 ms with single samples at 18 and
+125 ms; peer-card rtt 4-15 ms, one 136 ms. GB10 <-> Mac: STUN 4-8 ms, ICMP 3.2 ms min / 11-56 ms avg with a 96 ms
+max in A run 1. Median wire per lap is the same with the phone (7.9-8.8 ms both hops) as with the Mac (8.6), but the
+p95 is twice as high (17.7-20.6 vs 10.4), and one C spec round had an 0.8 s stall (lap p95 881 ms).
+
+Acceptance per draft depth in C (traced rounds): japan K=3 0.61 (38 steps), K=5 0.20 (4), K=7 0.14 (2, 245 ms a
+step); twosum K=3 0.75 (4), K=7 0.49 (10). The picker spends steps at K=5/7, where a phone verify of 8 columns is
+30+ ms; spec's gain over plain in C is 1.3-1.5x (as on one device, 1.3-1.6x), but from a lower base.
+
+### The phone over 7.4 minutes (C, MoE, plain japan, 16 rounds x 512 tokens, 8,147 traced laps)
+
+tok/s per round: 20.4, 18.7, 20.3, 19.4, 19.5, 19.8, 19.7, 19.9, 17.7, 19.7, 20.3, 19.9, 19.7, 19.6, 18.8, 19.3: flat,
+no throttling visible in throughput, one answer (1926bd..) in all 16. The phone's GPU ms per lap (layer 39) depends
+on the position (full attention: the KV it reads grows), so, binned by position and by time:
+
+| position | 0-2 min | 2-4 min | 4-6 min | 6-7.4 min |
+|---|---|---|---|---|
+| 160-340 | 7.34 | 6.55 | 6.68 | 8.00 |
+| 340-520 | 8.20 | 9.62 | 8.36 | 11.43 |
+| 520-700 | 7.54 | 10.34 | 10.05 | 10.77 |
+
+About +3 ms from position 250 to 600 (attention), and +10-40% in the last 1.5 minutes at the same position: the
+onset of throttling, still hidden because the phone is ~20% of a lap. Longer runs or more phone layers will show it.
+
+### What to fix, ranked (phone first; none duplicates the Spark+Mac experiments)
+
+1. **Where the phone's layers go.** Today the phone gets the last layer, which in Qwen3.5/3.6 is a full-attention
+   layer: its cost grows with context on a GPU without subgroups (+3 ms per lap from position 250 to 600) and its
+   KV cache lives on the smallest device. Put phone slices on DeltaNet (linear attention) layers, whose cost and
+   state are constant, and do not deal a layer to a phone at all when the model fits on the others (a phone's layer
+   costs 15-25 GB10 layers of time + two Wi-Fi hops for 1/40 of the model: C runs at 50-60% of the GB10 alone).
+   room/plan.js (the deal), room.js (the plan's consumers). Expected: C's phone residence flat at ~6 ms instead of
+   7-12; with "no layer when not needed" the room runs at the host's own speed.
+2. **Keep the phone's GPU awake for its hop.** Back to back its layer takes 3-5 ms; after the 20-40 ms idle it gets
+   in a room lap it takes 7-12 ms. Let the host send a tiny "your hidden is coming" control message to each phone
+   worker when a lap starts, and have the phone submit a short dummy dispatch (or its own queue writes) so the GPU
+   is clocked up when the hidden arrives. room.js (host lap start, `workerFrame`), room/transport.js. Expected -3
+   to -5 ms a lap in C/D (~+8-10% tok/s), to be checked against thermals (the thermal run above as the gate).
+3. **No-subgroup kernels on the phone.** attn_flash (1.5 ms, 25-30% of the phone's attention layer) and the q8/q4
+   coop matvecs dominate; the 4-column verify path grows the MoE expert kernels 60%. Profile with the page's
+   timestamp-query on Safari and tune the decode attention split / matvec tiles for the 32 KB, no-subgroup path.
+   engine/wgsl/ (attention, matvec, moe). Expected phone layer 3 -> ~2 ms hot; small in C today (phone ~20% of a
+   lap) but it grows with every layer a phone holds and in B.
+4. **Wi-Fi jitter to the phone.** Same median wire as GB10 <-> Mac, twice the p95, and a 0.8 s stall in one round.
+   Likely iOS Wi-Fi power save between sparse frames; try a light keep-alive on the data channel while a room is
+   generating and measure p95 / stalls. room/transport.js. Expected lap p95 -8 to -10 ms in C, fewer stall rounds.
+
+Not ranked: thermal-aware pacing (no throughput loss in 7.4 min with one layer; revisit with 2+ phone layers), the
+speculative depth picker with a phone in the chain (K=5/7 cost 30+ ms of phone verify; belongs to the depth-policy
+work, input handed over here).

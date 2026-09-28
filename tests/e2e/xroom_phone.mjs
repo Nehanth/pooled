@@ -130,10 +130,18 @@ const PT_INIT = () => {
       const oEnc = d.createCommandEncoder.bind(d);
       d.createCommandEncoder = (dd) => {
         const e = oEnc(dd);
-        const rec = { q: rec0.nq % MAXQ, d: did, tEnc: T(), t: 0, gpu: -1 }; rec0.nq += 2;
-        e.beginComputePass({ timestampWrites: { querySet: qs, beginningOfPassWriteIndex: rec.q } }).end();
+        // the timestamps go on the encoder's own compute passes (the first pass's beginning, every
+        // pass's end: the last one written wins): on iOS Safari an empty timestamped pass reads 0
+        const rec = { q: rec0.nq % MAXQ, d: did, tEnc: T(), t: 0, gpu: -1, passes: 0 }; rec0.nq += 2;
+        const obp = e.beginComputePass.bind(e);
+        e.beginComputePass = (pd = {}) => {
+          if (pd.timestampWrites) return obp(pd);
+          const tw = { querySet: qs, endOfPassWriteIndex: rec.q + 1 };
+          if (!rec.passes++) tw.beginningOfPassWriteIndex = rec.q;
+          return obp({ ...pd, timestampWrites: tw });
+        };
         const fin = e.finish.bind(e);
-        e.finish = (x) => { e.beginComputePass({ timestampWrites: { querySet: qs, endOfPassWriteIndex: rec.q + 1 } }).end(); const cb = fin(x); cbRec.set(cb, rec); return cb; };
+        e.finish = (x) => { const cb = fin(x); if (rec.passes) cbRec.set(cb, rec); return cb; };
         return e;
       };
       let busy = false;
