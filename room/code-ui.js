@@ -737,9 +737,10 @@ export function codeUI({ onMode = () => {} } = {}) {
       const errs = cur.filter((r) => r.level === "error").length, warns = cur.filter((r) => r.level === "warn").length, logs = cur.length - errs - warns;
       const c = $("pv-counts");
       c.replaceChildren();
-      if (errs) c.append(h("b", "e", plural(errs, "error")), " · ");
-      if (warns) c.append(h("b", "w", plural(warns, "warning")), " · ");
-      c.append(plural(logs, "log"));
+      // no '0 logs' next to errors or warnings: one line in the header on a phone
+      const sh = phone.matches;
+      const parts = [errs && h("b", "e", plural(errs, sh ? "err" : "error")), warns && h("b", "w", plural(warns, sh ? "warn" : "warning")), (logs || !(errs || warns)) && plural(logs, "log")].filter(Boolean);
+      parts.forEach((x, i) => c.append(...(i ? [" · ", x] : [x])));
       c.dataset.errors = String(errs);
       $("pv-to-agent").hidden = !drive || !errs;   // only when there is something to fix
       for (const r of P?.rows || []) {

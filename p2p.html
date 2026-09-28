@@ -1022,7 +1022,7 @@
   #code-pane .pv-run:hover { transform: scale(1.03); }
   #pv-console { flex: none; border-top: 1px solid var(--rule-2); background: var(--panel); font: 400 12px/1.4 var(--mono); overflow: hidden; }
   #pv-con-head { display: flex; align-items: center; gap: 6px; min-height: 32px; padding: 2px 6px 2px 4px; flex-wrap: wrap; }
-  #pv-counts { color: var(--muted); flex: 1; min-width: 0; }
+  #pv-counts { color: var(--muted); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #pv-counts b.e { color: var(--err); font-weight: 500; } #pv-counts b.w { color: var(--ink); font-weight: 500; }
   #code-pane #pv-con-head button { display: inline-flex; align-items: center; gap: 6px; background: transparent; border-color: transparent; padding: 4px 8px; font: 500 12px/1 var(--sans); color: var(--muted); }
   #pv-con-toggle svg { transition: transform .2s var(--ease); }
