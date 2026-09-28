@@ -654,6 +654,8 @@ setInterval(() => broadcastAll({ t: "ping", ts: performance.now() }), 2500);
 const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
 $("gb-minus").addEventListener("click", () => stepGB(-1));
 $("gb-plus").addEventListener("click", () => stepGB(1));
+// a typed amount is clamped like the steps once the box is left (100 becomes 64, -5 the minimum)
+$("join-gb").addEventListener("change", () => stepGB(0));
 // a friendly name for this device ("otter"): one lowercase word, filled in on the join screen; any edit wins
 const NAMES = ["otter", "falcon", "panda", "fox", "heron", "koala", "lynx", "robin", "badger", "dolphin", "owl", "tiger", "wombat", "sparrow",
   "moose", "gecko", "puffin", "beaver", "marten", "crane", "finch", "orca", "bison", "lemur", "raven", "tapir", "walrus", "yak", "zebra",
@@ -694,7 +696,7 @@ async function start(create, resume = null) {
   $("join-status").textContent = "Connecting…";
   myMeta = await metaPromise;
   const gbIn = parseFloat($("join-gb").value);
-  myMeta.contribGB = Math.max(myMeta.phone ? 0.5 : 1, gbIn > 0 ? gbIn : (myMeta.contribGB || 1));
+  myMeta.contribGB = Math.min(64, Math.max(myMeta.phone ? 0.5 : 1, gbIn > 0 ? gbIn : (myMeta.contribGB || 1)));
 
   // STUN for hole-punching; TURN as fallback for symmetric NAT / CGNAT peers.
   // ICE prefers direct candidates, so TURN only carries traffic when a direct
