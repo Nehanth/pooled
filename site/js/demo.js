@@ -290,6 +290,7 @@
     // before the bytes flow the room says what this device is doing; then the bytes, the total and the time left
     const b = +gb >= 1 ? gb + " GB" : Math.round(gb * 1024) + " MB";
     lcStatus.innerHTML = gb == null ? '<span class="src gpu">This device</span><span>Getting this device ready</span>'
+      : pcts.every(x => x >= 100) ? '<span class="src">Ready</span><span class="b">22.5 GB on 3 devices</span>'   // every row loaded: not "Downloading 22.5 of 22.5"
       : `<span class="src">Downloading</span><span class="b">${b} of 22.5 GB</span>` + (eta ? `<span class="eta${/^estimating/.test(eta) ? " wait" : ""}">${eta}</span>` : "");
   };
   const loadAt = t => {
