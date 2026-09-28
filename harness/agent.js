@@ -35,7 +35,8 @@ export function capResult(s, max) {
 }
 // one line naming a call, e.g. "read_file game.js 1 200"
 export function briefCall(c) {
-  const vals = Object.values(c.arguments || {}).map((v) => {
+  const vals = Object.entries(c.arguments || {}).map(([k, v]) => {
+    if (k === "append") return v === true || v === "true" ? "(append)" : null;   // write_file's flag, not a bare 'true'
     const s = typeof v === "string" ? v : JSON.stringify(v);
     return s.includes("\n") || s.length > 40 ? null : s;
   }).filter((v) => v != null && v !== "");
