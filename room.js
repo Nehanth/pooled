@@ -20,7 +20,7 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
-import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
+import { planSplit, planForSpeed, placeLayers, phonesToLeaveOut, isPhoneMeta, layerSpans, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
 import { lookupDrafts } from "./room/lookup.js";
 import { drawCard } from "./room/card.js";
@@ -168,7 +168,7 @@ const ICONS = {
 };
 const iconFor = (meta) => meta.phone || /iPhone|Android$/.test(meta.ua || "") ? ICONS.phone : /Mac|iPad/.test(meta.ua || "") ? ICONS.laptop : ICONS.desk;
 // "0–19" (what the deal sends) -> "1–20", the way people count layers
-const humanRange = (r) => { const m = /^(\d+)\D+(\d+)$/.exec(String(r || "")); return m ? `${+m[1] + 1}\u2013${+m[2] + 1}` : String(r || ""); };
+const humanRange = (r) => layerSpans(r).map(([lo, hi]) => `${lo + 1}\u2013${hi}`).join(", ") || String(r || "");
 // One colour per device, everywhere (chips, pool bar, loading rows, band, Lend screen): given once,
 // in join order, to each device that can hold layers. A device that only asks is grey everywhere.
 const SWATCH = ["#2A45E0", "#2B2F3C", "#7C8FFF", "#5E616B", "#B9C6FF", "#1C33B8",
@@ -1175,7 +1175,7 @@ function loadCardRender() {
     return `<div class="lc-row${pct >= 100 ? " done" : ""}${l || !order.length ? "" : " out"}" style="--sw:${devColor(nm)}"><i class="sw"></i><div class="n"><span class="nm">${esc(String(nm))}${nm === myName ? " <small>(you)</small>" : ""}</span>${l ? `<span class="lr">${pct >= 100 ? "" : '<span class="lw">downloading </span>'}layers ${esc(humanRange(l))}</span>` : ""}</div><div class="bar"><div class="fill" style="width:${pct}%"></div></div><div class="pct">${pct >= 100 ? "ready" : pct + "%"}</div></div>`;
   }).join("");
   // the model as a strip of layers: each device's share fills in as its download goes
-  const spans = order.map((nm) => { const m = /^(\d+)\D+(\d+)$/.exec(by[nm]); return m ? { nm, lo: +m[1], hi: +m[2] + 1 } : null; }).filter(Boolean);
+  const spans = order.flatMap((nm) => layerSpans(by[nm]).map(([lo, hi]) => ({ nm, lo, hi })));   // a host with a tail has two
   const total = spans.reduce((t, x) => Math.max(t, x.hi), 0);
   const strip = $("lc-strip");
   if (!total) { strip.innerHTML = ""; $("lc-sum").textContent = ""; return; }
@@ -1416,7 +1416,9 @@ function setCtx(used, max) {
   el.classList.toggle("warn", used > max * 0.8);
 }
 
-async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey)) {
+// tail (the host of a hybrid model only, room/plan.js placeLayers): layers [lo, hi) it also runs,
+// in a second engine, on the hidden state the chain returns; the load card counts both
+async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), tail = null) {
   const M = MODELS[modelKey];
   aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
   aiStatus("requesting GPU\u2026");
@@ -1424,6 +1426,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   // a previous attempt in this tab still owns its weights: release them first, or the
   // second load doubles GPU memory and every buffer after the limit comes back invalid
   if (ai.device) { try { ai.device.destroy(); } catch {} ai.device = null; ai.engine = null; }
+  ai.tail = null; ai.tailCtl = new Map(); ai.tailQ = Promise.resolve();
   ai.firstGpuError = null;
   ai.peerBytes = 0; ai.netBytes = 0; cacheHits = 0;   // per load: a count left from an earlier load in this tab mislabels the status
   const adapter = await navigator.gpu?.requestAdapter();
@@ -1518,9 +1521,11 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
     // the host also loads the model's multi-token-prediction block: it drafts
     // tokens that the trunk then verifies in one batched pass (same output, faster)
     const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, mtp: hasHead };
-    const total = qwen35ShardBytes(G, opts);
+    const tailOpts = tail && { lo: tail[0], hi: tail[1], hasEmbed: false, hasHead: false };
+    const mainBytes = qwen35ShardBytes(G, opts);
+    const total = mainBytes + (tailOpts ? qwen35ShardBytes(G, tailOpts) : 0);
     const names = [];
-    for (let l = range[0]; l < range[1]; l++) names.push(...Object.values(qwen35NamesFor(G, l)).filter((v) => typeof v === "string"));
+    for (const [a, b] of tail ? [range, tail] : [range]) for (let l = a; l < b; l++) names.push(...Object.values(qwen35NamesFor(G, l)).filter((v) => typeof v === "string"));
     if (hasEmbed || hasHead) names.push(GGML_EMBED);
     if (hasHead) {
       names.push(GGML_FINAL_NORM, GGML_OUTPUT);
@@ -1529,12 +1534,13 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
     }
     planPrefetch(M.gguf, shardInfos(G, names));
     G.streamEntry = streamWithRetry(M.gguf, streamOpts);
-    const weights = await qwen35Weights(G, rangeBytesOf(M.gguf), opts, (done) => onProg(done, total),
-      (e, name) => gpuUploadEntry(ai.device, e, name === GGML_EMBED));   // straight to the GPU, RAM stays flat
+    const upload = (e, name) => gpuUploadEntry(ai.device, e, name === GGML_EMBED);   // straight to the GPU, RAM stays flat
+    const weights = await qwen35Weights(G, rangeBytesOf(M.gguf), opts, (done) => onProg(done, total), upload);
+    const tailWeights = tailOpts && await qwen35Weights(G, rangeBytesOf(M.gguf), tailOpts, (done) => onProg(mainBytes + done, total), upload);
     aiStatus("building GPU pipelines (compiling shaders)\u2026");
-    ai.engine = await Qwen35Engine.create({
+    const engineFor = (weights, layerRange, hasEmbed, hasHead) => Qwen35Engine.create({
       device: ai.device, meta: G.meta, weights, vocab: G.tensors[GGML_EMBED]?.shape?.[0],
-      layerRange: range, hasEmbed, hasHead, maxSeq: ctx,
+      layerRange, hasEmbed, hasHead, maxSeq: ctx,
       coopWG: ai.tune?.wg, coopRows: ai.tune?.rows,
       // 16 batch columns: prefill passes go through the row-stationary GEMM
       // (docs/research/prefill-gemm-v2.md). Speculative verifies are <= 8
@@ -1575,6 +1581,8 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       gpuSample: GPU_SAMPLE,
       argmaxWide: ARGMAX_WIDE,
     });
+    ai.engine = await engineFor(weights, range, hasEmbed, hasHead);
+    if (tailWeights) ai.tail = await engineFor(tailWeights, tail, false, false);
   } else if (M.kind === "gguf") {
     aiStatus("reading model index\u2026");
     const G = ai.G && ai.GModel === modelKey ? ai.G : await fetchGGUFHeader(M.gguf, false);   // vocab comes from tokenizer.json
@@ -1650,8 +1658,11 @@ async function aiStart(modelArg) {
     const M = MODELS[modelKey];
     // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every device builds its engine with it
     const ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
-    // devices without WebGPU join as ask-only guests: they get the chat, not layers
-    ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu).sort();
+    // devices without WebGPU join as ask-only guests: they get the chat, not layers. Phones go
+    // last in the chain (by id within each kind), so a phone's slice can stay off the model's last
+    // layer (room/plan.js placeLayers)
+    const phoneId = (id) => isPhoneMeta(conns.get(id)?.meta);
+    ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu).sort((a, b) => phoneId(a) - phoneId(b) || (a < b ? -1 : a > b ? 1 : 0));
     ai.leftOut = new Set();
     ai.plan = new Map();                      // name -> load message, so a reloaded device can be re-seated
     ai.chainNames = ai.chain.map((id) => conns.get(id)?.name || id);
@@ -1688,19 +1699,39 @@ async function aiStart(modelArg) {
     let caps = [Math.max(pledgeOf(myMeta) - embedBytes, layerBytes / 2),
       ...ai.chain.map((id) => Math.max(pledgeOf(conns.get(id)?.meta), layerBytes / 2))];
     let assigned, ranges;
+    const nameOf = (id) => conns.get(id)?.name || id;
     if ($("ai-split").value === "speed") {
       // fastest devices first (measured ms per layer from earlier answers), fewest hops; devices
       // that are not needed stay in the room as ask-only guests
-      const nameOf = (id) => conns.get(id)?.name || id;
       const sp = planForSpeed(L, caps.map((c) => Math.floor(c / layerBytes)), [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))]);
       const keep = sp.used.filter((i) => i > 0).map((i) => i - 1);
       ai.leftOut = new Set(ai.chain.filter((_, i) => !keep.includes(i)));
       ai.chain = keep.map((i) => ai.chain[i]);
       ai.chainNames = ai.chain.map(nameOf);
       assigned = sp.used.map((i) => sp.assigned[i]);
-      ranges = sp.used.map((i) => sp.ranges[i]);
       caps = sp.used.map((i) => caps[i]);
-    } else ({ assigned, ranges } = planSplit(L, caps));
+    } else {
+      // by memory, but phones hold layers only when the computers cannot hold the model
+      // (room/plan.js phonesToLeaveOut); ?phonelayers=1 deals them layers anyway
+      const out = PHONE_LAYERS ? [] : phonesToLeaveOut(L, caps.map((c) => c / layerBytes), [false, ...ai.chain.map(phoneId)]);
+      if (out.length) {
+        ai.leftOut = new Set(out.map((i) => ai.chain[i - 1]));
+        ai.chain = ai.chain.filter((id) => !ai.leftOut.has(id));
+        ai.chainNames = ai.chain.map(nameOf);
+        caps = caps.filter((_, i) => !out.includes(i));
+        log("room", `${[...ai.leftOut].map(nameOf).join(", ")} ask${ai.leftOut.size > 1 ? "" : "s"} without holding layers: the computers hold the whole model, and a phone's layer would slow every token`);
+      }
+      ({ assigned } = planSplit(L, caps));
+    }
+    // a hybrid model's last layer is full attention: when the chain ends on a phone, the host keeps
+    // that layer as a tail and the phone gets DeltaNet layers (room/plan.js placeLayers; ?phonetail=0: off)
+    const interval = M.kind === "qwen35" ? ai.G.meta["qwen35.full_attention_interval"] || 4 : 0;
+    const placed = placeLayers(L, assigned, {
+      isFull: (i) => interval > 0 && PHONE_TAIL && i % interval === interval - 1,
+      phone: [false, ...ai.chain.map(phoneId)],
+    });
+    ranges = placed.ranges;
+    const tail = placed.tail;
     ai.layersN = Object.fromEntries([[myName, assigned[0]], ...ai.chain.map((id, i) => [conns.get(id)?.name || id, assigned[i + 1]])]);
 
     const needGB = (L * layerBytes + embedBytes) / 2 ** 30;
@@ -1724,13 +1755,13 @@ async function aiStart(modelArg) {
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });
       sendTo(id, msg);
     });
-    ai.layersByName = Object.fromEntries([[myName, `${ranges[0][0]}–${ranges[0][1] - 1}`], ...ai.chain.map((id, i) => [conns.get(id)?.name || id, `${ranges[i + 1][0]}–${ranges[i + 1][1] - 1}`])]);
+    ai.layersByName = Object.fromEntries([[myName, `${ranges[0][0]}–${ranges[0][1] - 1}${tail ? `, ${tail[0]}–${tail[1] - 1}` : ""}`], ...ai.chain.map((id, i) => [conns.get(id)?.name || id, `${ranges[i + 1][0]}–${ranges[i + 1][1] - 1}`])]);
     broadcastAll({ t: "ai-layers", by: ai.layersByName });
-    const splitDesc = [`you ${assigned[0]}+embed`, ...ai.chain.map((id, i) =>
+    const splitDesc = [`you ${assigned[0]}+embed${tail ? ` (layers ${ranges[0][0]}–${ranges[0][1] - 1} and ${tail[0]}–${tail[1] - 1} after the chain)` : ""}`, ...ai.chain.map((id, i) =>
       `${conns.get(id)?.name || id} ${assigned[i + 1]}`)].join(" · ");
     log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}: ${splitDesc}`);
     ai.loadingShard = true;
-    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX); } finally { ai.loadingShard = false; }
+    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, tail); } finally { ai.loadingShard = false; }
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
     aiStatus(n === 1
       ? `solo: all ${L} layers local — ready`
@@ -1742,7 +1773,7 @@ async function aiStart(modelArg) {
   } catch (err) {
     clearInterval(ai.progTimer);
     aiLoading(false);
-    ai.engine = null;
+    ai.engine = null; ai.tail = null;
     $("ai-panel").classList.remove("online");
     aiStatus("failed: " + err.message);
     ai.busy = false;
@@ -1761,7 +1792,7 @@ async function aiRedeal() {
   const model = ai.model || $("ai-model").value;
   failWaiters(new Error("re-dealing the layers"));
   ckptClear();
-  ai.engine = null; ai.busy = false; ai.fed = null;
+  ai.engine = null; ai.tail = null; ai.busy = false; ai.fed = null;
   $("ai-panel").classList.remove("online");
   $("ai-row").style.display = "none";
   showRedeal(false);
@@ -1878,7 +1909,25 @@ function sendChain(msg) {
   ai.frames = (ai.frames || 0) + 1;
   ai.hostAmax = Math.max(0.9 * (ai.hostAmax || 0), wireStats.lastMax || 0);
   const ctl = ai.pendingCtl; ai.pendingCtl = {};
+  if (ai.tail) ai.tailCtl.set(lapKey(msg), ctl);   // the host's tail applies it when the frame is back
   sendHidden(ai.chain[0], { ...msg, ...ctl });
+}
+const lapKey = (d) => (d.t === "ai-hidden-b" || d.t === "ai-hiddenret-b" ? "b" + d.basePos : d.pos);
+// a frame back from the end of the chain completes its lap. With a tail (room/plan.js placeLayers)
+// the host first runs its last layers on it: frames strictly in arrival order, each after the
+// control that rode with it, exactly as on a device of the chain.
+function lapReturn(d) {
+  const key = lapKey(d);
+  if (!ai.tail) { const h = unpackWire(d); lapDone(key, h); return; }
+  const E = ai.tail, ctl = ai.tailCtl.get(key) || {};
+  ai.tailCtl.delete(key);
+  ai.tailQ = (ai.tailQ || Promise.resolve()).then(async () => {
+    if (E !== ai.tail) return;                  // re-dealt meanwhile
+    applyCtl(E, ctl);
+    const x = unpackWire(d);
+    const h = d.t === "ai-hiddenret-b" ? await runFrameBatch(E, d, x) : await E.runHidden(x, d.pos);
+    lapDone(key, h);
+  }).catch((err) => { const w = ai.waiters.get(key); if (w) { ai.waiters.delete(key); w.rej(err); } });
 }
 // forget the conversation state on every device: here now, on the chain with the next frame
 function resetState() {
@@ -1932,6 +1981,11 @@ const FILL_DRAFTS = new URLSearchParams(location.search).get("fill") !== "0";
 const MTP_REFILL = new URLSearchParams(location.search).get("mtprefill") !== "0";
 const PRE_DRAFT = new URLSearchParams(location.search).get("predraft") !== "0";
 const DRAFT_VOCAB = (() => { const v = new URLSearchParams(location.search).get("draftvocab"); return v === null ? 65536 : parseInt(v, 10) || 0; })();
+// ?phonelayers=1: phones hold layers even when the computers can hold the model (room/plan.js
+// phonesToLeaveOut); ?phonetail=0: a phone at the end of the chain keeps the model's last layer
+// instead of the host (placeLayers). A/B and demos.
+const PHONE_LAYERS = new URLSearchParams(location.search).get("phonelayers") === "1";
+const PHONE_TAIL = new URLSearchParams(location.search).get("phonetail") !== "0";
 const MTP_BATCH = new URLSearchParams(location.search).get("mtpbatch") !== "0";   // ?mtpbatch=0: one draft-cache row per submit, for A/B
 const GPU_SAMPLE = new URLSearchParams(location.search).get("gpusample") !== "0";   // on by default; see the engine options in aiLoadShard
 const ARGMAX_WIDE = (new URLSearchParams(location.search).get("argmaxwide") ?? (GPU_SAMPLE ? "1" : "0")) === "1";
@@ -2124,7 +2178,7 @@ function renderMap(nodes, st, live) {
   // the layer band: one lane per device (its name, its layers, its ms), stacked. Every lane spans the
   // whole model (one column per layer, or per few for deep models) and fills the columns its device
   // holds, in its colour; the sweep runs down the staircase. Lanes thin out as devices join.
-  const spans = nodes.map((x, i) => { const m = /^(\d+)\D+(\d+)$/.exec(String(x.layers || "")); return m ? { i, name: x.name, lo: +m[1], hi: +m[2] + 1 } : null; }).filter(Boolean);
+  const spans = nodes.flatMap((x, i) => layerSpans(x.layers).map(([lo, hi]) => ({ i, name: x.name, lo, hi })));   // a host with a tail: two lanes
   const total = spans.reduce((t, x) => Math.max(t, x.hi), 0);
   const strip = el.querySelector(".sm-strip");
   const sig = spans.map((x) => `${x.i}:${x.name}:${x.lo}-${x.hi}`).join(",");
@@ -2646,30 +2700,42 @@ function clearChat() {
 // Frames run strictly one after another in arrival order (the transport delivers them in send
 // order), so several prefill rounds can be queued here while the GPU works. Control that rides
 // on a frame (reset, rollback) applies before it, and goes on down the chain with it.
-async function workerFrame(d) {
-  if (!ai.engine) return;
+// the control that rides on a frame (reset, rollback, checkpoint save / drop / load), applied to
+// engine E before the frame runs; returns what to pass on down the chain
+function applyCtl(E, d) {
   const ctl = {};
   // order matters: a pending rollback belongs to the answer that just ended, the save records
   // that answer's final state, and only then may the state be reset or replaced by a checkpoint
   // (also before a reset: the save may record the state first, and the host saved its own after
   // its rollback)
-  if (d.rb != null) { ai.engine.restoreDN?.(d.rb); ctl.rb = d.rb; }
-  if (d.sv != null) { ai.engine.saveSlot?.(d.sv); ctl.sv = d.sv; }
-  if (d.dp != null) { for (const k of [].concat(d.dp)) k === DROP_ALL ? ai.engine.dropAllSlots?.() : ai.engine.dropSlot?.(k); ctl.dp = d.dp; }
-  if (d.reset) { ai.engine.reset?.(); ctl.reset = 1; }
-  if (d.ld != null) { ai.engine.loadSlot?.(d.ld); ctl.ld = d.ld; }
+  if (d.rb != null) { E.restoreDN?.(d.rb); ctl.rb = d.rb; }
+  if (d.sv != null) { E.saveSlot?.(d.sv); ctl.sv = d.sv; }
+  if (d.dp != null) { for (const k of [].concat(d.dp)) k === DROP_ALL ? E.dropAllSlots?.() : E.dropSlot?.(k); ctl.dp = d.dp; }
+  if (d.reset) { E.reset?.(); ctl.reset = 1; }
+  if (d.ld != null) { E.loadSlot?.(d.ld); ctl.ld = d.ld; }
+  return ctl;
+}
+// a batched frame (d.n hiddens from d.basePos) through engine E's layers
+async function runFrameBatch(E, d, xs) {
+  const nTok = d.n || 4;
+  const wdim = E.dims.dim;
+  const hb = new Float32Array(nTok * wdim);
+  const NC = E.NC || 4;
+  for (let c = 0; c < nTok; c += NC) {
+    const m = Math.min(NC, nTok - c);
+    hb.set(await E.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false), c * wdim);
+  }
+  return hb;
+}
+async function workerFrame(d) {
+  if (!ai.engine) return;
+  const ctl = applyCtl(ai.engine, d);
   const t0 = performance.now();
   if (d.t === "ai-hidden-b") {
     // n hiddens in, my layers (batched), n hiddens on
-    const xs = unpackWire(d);
     const nTok = d.n || 4;
-    const wdim = ai.engine.dims.dim;
-    const hb = new Float32Array(nTok * wdim);
-    const NC = ai.engine.NC || 4;
-    for (let c = 0; c < nTok; c += NC) {
-      const m = Math.min(NC, nTok - c);
-      hb.set(await ai.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false), c * wdim);
-    }
+    const xs = unpackWire(d);
+    const hb = await runFrameBatch(ai.engine, d, xs);
     if (badF32(hb)) { aiStatus(`⚠ NaN in batched prefill on this device`); sendTo(ai.hostId, { t: "ai-error", message: "NaN in batched prefill" }); }
     teleNote(d.spec ? "spec" : "pre", performance.now() - t0);
     compute.pass(nTok, performance.now() - t0);
@@ -2885,8 +2951,8 @@ async function aiOnData(from, d) {
         sendTo(ai.hostId, { t: "ai-error", message: err.message });
       });
       break;
-    case "ai-hiddenret-b": lapDone("b" + d.basePos, unpackWire(d)); break;
-    case "ai-hiddenret": lapDone(d.pos, unpackWire(d)); break;
+    case "ai-hiddenret-b":
+    case "ai-hiddenret": lapReturn(d); break;
     case "ai-visibility":
       ai.visibility = d.mode;
       toast(d.mode === "all" ? "the host shows the chat to everyone" : d.mode === "host" ? "the host keeps the chat private" : "the host shows each answer to whoever asked");
@@ -3122,7 +3188,7 @@ const SEG_HELP = {
   "ai-visibility": { all: "Everyone in the room sees the questions and the answers.", host: "Only this device sees the text. Every device still helps write it.", asker: "Each answer goes to whoever asked it. Every device still helps write it." },
   "ai-length": { short: "About a paragraph at most (150 tokens).", normal: "A few paragraphs (400 tokens).", long: "Room for long answers and code (1,200 tokens)." },
   "ai-sampling": { creative: "Varied wording: ask twice, get two different answers.", focused: "Steadier wording, fewer surprises.", exact: "Always the likeliest word: the same question gets the same answer." },
-  "ai-split": { memory: "Every device holds some layers, sized by the memory it gives.", speed: "The fastest devices hold the layers, with the fewest hops. Takes effect when the layers are dealt again." },
+  "ai-split": { memory: "Every computer holds layers, sized by the memory it gives. A phone holds layers only when the computers can't fit the model.", speed: "The fastest devices hold the layers, with the fewest hops. Takes effect when the layers are dealt again." },
 };
 const segLabel = (id, o) => SEG_LABEL[id]?.[o.value] || o.text.replace(/\s*\(.*\)$/, "").replace(/^./, (c) => c.toUpperCase());
 function buildSegs() {
