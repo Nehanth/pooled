@@ -42,12 +42,12 @@ ol,ul{list-style:none}
 .btn-star:hover{background:var(--bg-2);box-shadow:inset 0 0 0 1px var(--ink-3)}
 .btn-star .gh{flex:none;color:var(--ink)}
 .btn-star .star{flex:none;fill:#E3B341;margin-left:1px}
-.btn-star.has-n .st-l{display:none}
-.btn-star.has-n .st-n{margin-left:0;padding-left:0;border-left:0}
 .btn-star .st-n{margin-left:3px;padding-left:9px;border-left:1px solid var(--rule-3);line-height:18px;font-variant-numeric:tabular-nums}
 @media (max-width:640px){
   .btn-star{padding:0 10px;gap:5px}
   .btn-star .st-n{margin-left:1px;padding-left:7px}
+  .btn-star.has-n .st-l{display:none}
+  .btn-star.has-n .st-n{margin-left:0;padding-left:0;border-left:0}
 }
 /* ---------- end Star button ---------- */
 .ctas .btn-star{height:auto;align-self:stretch}
