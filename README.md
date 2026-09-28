@@ -19,7 +19,7 @@
   <img alt="runtime" src="https://img.shields.io/badge/runs%20on-WebGPU%20%2B%20WebRTC-16171c">
 </p>
 
-https://github.com/user-attachments/assets/24000247-3f0c-42d8-800d-78fe5f7c4cc4
+https://github.com/user-attachments/assets/5142d877-e4d5-4f6b-9b5e-0ef48dcb73f6
 
 <p align="center"><sub>Demo, recorded September 27, 2026 (2:29, with voice and subtitles): Qwen 3.6 35B MoE across a Mac and an iPhone in browser tabs. The phone chats with it, then Code mode builds a Tetris game, fixes its own bug and restyles it. <a href="https://github.com/Nehanth/pooled/releases/download/v1.0.0/pooled-demo-2026-09-27.mp4">Download</a> · <a href="https://github.com/Nehanth/pooled/releases/download/v0.2.0/swarmllm-demo-2026-09-07.mp4">the September 7 demo</a>.</sub></p>
 
