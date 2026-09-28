@@ -1078,8 +1078,8 @@
   #ed-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 28px; text-align: center; font-size: 13px; line-height: 1.5; color: var(--muted); text-wrap: balance; background: var(--panel-3); background-image: radial-gradient(circle at 1px 1px, var(--rule-2) 1px, transparent 0); background-size: 16px 16px; }
   #ed-empty b { color: var(--text); font-weight: 500; }
   #ed-empty[hidden] { display: none; }
+  /* the dot means unsaved only (the open file has the row highlight) */
   #code-tree .f.dirty::after { content: ""; flex: none; width: 6px; height: 6px; margin-left: auto; border-radius: 50%; background: var(--warn); }
-  #code-tree .f.on:not(.dirty)::after { content: ""; flex: none; width: 5px; height: 5px; margin-left: auto; border-radius: 50%; background: var(--blue); }
   /* the output column's edge: drag to resize it */
   #code-grip { display: none; position: absolute; top: 0; bottom: 0; left: -5px; z-index: 6; width: 10px; cursor: col-resize; touch-action: none; }
   #code-grip::after { content: ""; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; background: transparent; transition: background .15s; }
