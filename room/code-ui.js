@@ -255,7 +255,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     log.querySelector(".cm-working")?.remove();
     if (!on || !runAt) return;
     const w = h("div", "cm-working");
-    w.append(W.working({ since: runAt, label: "the agent is working" }));
+    w.append(W.working({ since: runAt, label: "the agent is working", lead: "The room's model is reading" }));
     add(w);
   }
 

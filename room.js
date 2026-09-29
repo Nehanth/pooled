@@ -1301,7 +1301,8 @@ function chatBotStart(mid) {
   m.innerHTML = `<div class="who"><span class="wn"></span><span class="wd" aria-hidden="true"><i></i><i></i><i></i></span></div><div class="bubble"></div>`;
   m.querySelector(".wn").textContent = shortName(ai.model || $("ai-model").value) || "room";
   // until the first token: the working line (the first piece replaces it)
-  m.querySelector(".bubble").append(working());
+  const n = Object.keys(ai.layersByName || {}).length;
+  m.querySelector(".bubble").append(working({ lead: n ? `Reading your message on ${n} device${n > 1 ? "s" : ""}` : "" }));
   m.classList.add("live");
   m.pieces = [];
   o.appendChild(m); scrollChat();
