@@ -10,6 +10,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
   - Apple GPUs in Chrome and Safari get wider fused MoE expert kernels (`moeFusedLayout`; M5 Max kernel time: gate/up 0.49x, down 0.55x). Qwen 3.6 35B decode in Chrome on an M5 Max: +5.6% plain (86.1 -> 90.9 tok/s), +11% spec.
   - `moe_route` is 1.6-1.9x faster on every GPU (GB10 and M5 Max) and gives the same bits.
   - Other GPUs keep their output bits. MoE output on Apple still matches llama.cpp, and spec == plain.
+- **First run, accessibility and speed**: a laptop alone now gives the 4 GB the smallest model needs (and a short room offers "Give N GB from this device"), Start says what it will download, a Start/Join tap made before the room script loads is kept, and the landing page and join screen say what a room needs; the room is a labelled radio group with real headings, a live-announced conversation and AA contrast, and the landing demo has a Pause button; the room no longer loads the inference engine or blocks on PeerJS before the join screen works (JS before join 271 -> 135 KB, fonts self-hosted), Lighthouse accessibility 91 -> 100 (landing) and 98 -> 100 (room).
 
 ## [1.0.0] - 2026-09-27
 
