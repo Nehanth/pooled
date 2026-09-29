@@ -512,9 +512,11 @@
   #api-open svg { flex: none; width: 15px; height: 15px; }
   #api-open[hidden] { display: none; }
   /* a client is connected: a blue dot that breathes, like the room's live marks */
-  #api-open .api-dot { display: none; width: 6px; height: 6px; margin-left: -1px; border-radius: 50%; background: var(--accent); animation: livebeat 2.4s var(--ease) infinite; }
+  #api-open .api-dot { display: none; position: absolute; top: 6px; right: 6px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: livebeat 2.4s var(--ease) infinite; }
   #api-open.live .api-dot { display: block; }
   header #api-open { height: 34px; padding: 0 12px 0 10px; font-size: 13px; }
+  /* a header just too narrow for the label (821-900px, a phone on its side): the plug icon alone */
+  @media (min-width: 821px) and (max-width: 900px), (max-height: 500px) and (pointer: coarse) { header #api-open > span { display: none; } header #api-open { padding: 0 9px; } }
   #mode-bar button[aria-disabled="true"] { opacity: .55; cursor: default; }
   #mode-bar button[aria-disabled="true"].fresh::after { display: none; }
   /* Code selected: the pill goes black with a soft blue glow, the word white, stars twinkling inside (site/js/sparkle.js) */
@@ -862,9 +864,13 @@
   .api-pr { flex: none; font: 400 12px/1 var(--mono); color: var(--muted); }
   #api-cmd { flex: 1; min-width: 0; font: 400 12px/1.2 var(--mono); color: var(--text); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
   #api-cmd::-webkit-scrollbar { display: none; }
+  .api-cmd-w { position: relative; flex: 1; min-width: 0; display: flex; }
+  .api-cmd-w::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 28px; background: linear-gradient(to right, transparent, var(--panel-3)); opacity: 0; transition: opacity .15s var(--ease); pointer-events: none; }
+  .api-cmd-w.more::after { opacity: 1; }
+  #api-cmd:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
   #api-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 1px 0 rgba(255,255,255,.18) inset, 0 6px 16px -8px rgba(42,69,224,.7); }
   #api-copy:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-  .api-urls { display: flex; flex-direction: column; border: 1px solid var(--rule-2); border-radius: 12px; overflow: hidden; }
+  .api-urls { display: flex; flex-direction: column; border: 1px solid var(--rule-2); border-radius: 12px; }
   .api-url { display: flex; align-items: center; gap: 12px; min-height: 38px; padding: 3px 4px 3px 12px; }
   .api-url + .api-url { border-top: 1px solid var(--rule-2); }
   .api-url > span { flex: none; width: 70px; font-size: 13px; color: var(--muted); }
@@ -896,8 +902,10 @@
   #api-clients .ic { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text); }
   #api-clients .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
   #api-clients .nm b { font: 500 13px/1.2 var(--sans); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #api-clients .nm small { font: 400 12px/1.3 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #api-clients .nm small { display: flex; gap: 0 4px; min-width: 0; font: 400 12px/1.3 var(--sans); color: var(--muted); }
   #api-clients .nm small > span { white-space: nowrap; }
+  #api-clients .nm small > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  #api-clients .nm small > span:not(:first-child) { flex: none; }
   #api-clients .nm small .n { font: 400 11px/1 var(--mono); color: var(--ink-2); }
   #api-clients li button, .pop .api-kick { flex: none; height: 30px; padding: 0 12px; font: 500 12px/1 var(--sans); }
   #api-clients li button { color: var(--del); }
@@ -1481,12 +1489,24 @@
     #api-code-copy { height: 36px; }
     .api-sub { padding-left: 15px; }
     #api-code { font-size: 11px; }
-    #api-clients .nm small { white-space: normal; }
+    #api-clients .nm small { flex-wrap: wrap; }
+    #api-clients .nm small > span:first-child { overflow: visible; white-space: normal; }
+    /* bigger phone targets: close, and Disconnect (destructive) */
+    .api-head { padding-right: 58px; }
+    .api-head .x { top: 8px; right: 6px; width: 44px; height: 44px; }
+    #api-clients li button { height: 38px; }
     #share-copy { height: 36px; }
     /* no composer on screen (picking or loading a model): toasts sit at the bottom edge */
     body.in-room:not(:has(#ai-panel.online)) #toasts { bottom: calc(20px + env(safe-area-inset-bottom)); }
     /* this device on the join card with no GPU: the line sits under the name, not under its label */
     #join-pledge.no-gpu .jp-ask { padding-left: 96px; }
+  }
+  /* the narrowest phones (360px): the example's Copy as an icon, each URL's label on its own line */
+  @media (max-width: 380px) {
+    #api-code-copy .lb { display: none; }
+    #api-code-copy { width: 36px; padding: 0; justify-content: center; }
+    .api-url { flex-wrap: wrap; row-gap: 0; padding-top: 6px; }
+    .api-url > span { width: 100%; font-size: 12px; }
   }
   /* ---- Code on a phone, upright or in landscape (a short touch screen, however wide): one view at
      a time (Agent, Preview, Files) and a tab bar at the bottom (room/code-ui.js sets data-ptab and
@@ -1706,7 +1726,7 @@
     <h1 class="sr-only" id="room-h">Room</h1>
     <div id="topline">
       <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
-      <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div><button id="api-open" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="api-sheet" hidden title="Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.8v2.9M10 1.8v2.9M4.3 4.7h7.4v2.4a3.7 3.7 0 0 1-7.4 0zM8 10.8v3.4"/></svg><span>Serve API</span><i class="api-dot" aria-hidden="true"></i></button></div>
+      <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div><button id="api-open" type="button" aria-label="Serve API" aria-haspopup="dialog" aria-expanded="false" aria-controls="api-sheet" hidden title="Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.8v2.9M10 1.8v2.9M4.3 4.7h7.4v2.4a3.7 3.7 0 0 1-7.4 0zM8 10.8v3.4"/></svg><span>Serve API</span><i class="api-dot" aria-hidden="true"></i></button></div>
     </div>
     <div id="chat-log" class="dev-only"></div>
     <div id="ai-empty"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><span id="ai-empty-t">Pick a model and press Start</span></div>
@@ -1859,8 +1879,9 @@
   <div class="api-pop" role="dialog" aria-modal="false" aria-labelledby="api-h" aria-describedby="api-status api-sub">
     <div class="api-head">
       <h2 id="api-h">Serve API</h2>
-      <p id="api-status" class="api-status" role="status"><i aria-hidden="true"></i><span>Waiting for a client</span></p>
+      <p id="api-status" class="api-status"><i aria-hidden="true"></i><span>Waiting for a client</span></p>
       <p id="api-sub" class="api-sub">Run step 1. Your tool shows up here when it connects.</p>
+      <p id="api-live" class="sr-only" aria-live="polite"></p>
       <button id="api-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
     </div>
     <section id="api-clients-wrap" class="api-s" hidden>
@@ -1868,11 +1889,11 @@
       <ul id="api-clients"></ul>
     </section>
     <section class="api-s api-step one">
-      <h3><i class="api-n" aria-hidden="true"><span>1</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.3l2 2 4-4.6"/></svg></i>Run this on your computer</h3>
-      <div class="linkrow"><span class="api-pr" aria-hidden="true">$</span><code id="api-cmd"></code><button id="api-copy" type="button">Copy</button></div>
+      <h3><i class="api-n" aria-hidden="true"><span>1</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.3l2 2 4-4.6"/></svg></i><span class="sr-only">Step 1: </span>Run this on your computer</h3>
+      <div class="linkrow"><span class="api-pr" aria-hidden="true">$</span><span class="api-cmd-w"><code id="api-cmd"></code></span><button id="api-copy" type="button">Copy</button></div>
     </section>
     <section class="api-s api-step">
-      <h3><i class="api-n" aria-hidden="true"><span>2</span></i>Point any OpenAI or Anthropic tool here</h3>
+      <h3><i class="api-n" aria-hidden="true"><span>2</span></i><span class="sr-only">Step 2: </span>Point any OpenAI or Anthropic tool here</h3>
       <div class="api-urls">
         <div class="api-url"><span>OpenAI</span><code>http://127.0.0.1:8080/v1</code><button type="button" class="icon-act" data-copy="http://127.0.0.1:8080/v1" data-what="OpenAI URL" aria-label="Copy the OpenAI URL" title="Copy"></button></div>
         <div class="api-url"><span>Anthropic</span><code>http://127.0.0.1:8080</code><button type="button" class="icon-act" data-copy="http://127.0.0.1:8080" data-what="Anthropic URL" aria-label="Copy the Anthropic URL" title="Copy"></button></div>
@@ -1880,7 +1901,7 @@
       <p class="api-hint">Any API key works. In Continue or Open WebUI (Settings, Connections), add an OpenAI connection with the OpenAI URL. Used <code>--port</code>? Change 8080.</p>
     </section>
     <section class="api-s api-step">
-      <h3><i class="api-n" aria-hidden="true"><span>3</span></i>Try it</h3>
+      <h3><i class="api-n" aria-hidden="true"><span>3</span></i><span class="sr-only">Step 3: </span>Try it</h3>
       <div class="api-ex">
         <div class="api-try">
           <div class="api-tabs" role="tablist" aria-label="Example">
@@ -1896,7 +1917,7 @@
       </div>
     </section>
     <div class="api-foot">
-      <label id="api-allow-row" class="api-set" hidden><span><b>Allow API clients</b><small>Off disconnects every client and refuses new ones.</small></span><span class="switch"><input type="checkbox" id="api-allow" role="switch" checked><i aria-hidden="true"></i></span></label>
+      <label id="api-allow-row" class="api-set" hidden><span><b id="api-allow-t">Allow API clients</b><small id="api-allow-d">Off disconnects every client and refuses new ones.</small></span><span class="switch"><input type="checkbox" id="api-allow" role="switch" aria-labelledby="api-allow-t" aria-describedby="api-allow-d" checked><i aria-hidden="true"></i></span></label>
       <p class="api-note">Needs Node 22 or newer. Requests use this room's GPUs and show in the chat under the room's visibility setting.</p>
     </div>
   </div>
