@@ -7,7 +7,7 @@
 //   -> a second request asks again while the host is on Files: a dot on Agent
 //   -> approved from Agent -> the new revision puts a dot on Preview -> Files -> a file opens
 //   full screen, Back returns to the tree -> the guest gets the same layout, prompt included
-//   -> the host's phone in landscape (640x360 to 932x430) keeps the phone layout.
+//   -> the host's phone in landscape (568x320 to 932x430) keeps the phone layout, and upright again after.
 //
 //   NODE_PATH=<dir with peer + peerjs + playwright> node tests/e2e/phone_code.mjs [--headed] [--width 390 --height 844]
 //   --port 18995 --signal-port 9016
@@ -212,18 +212,28 @@ try {
   // the host's phone turned sideways (#142, #143): still the phone layout, however wide, with the
   // prompt above the tab bar, on screen, and the log (two tasks long by now) scrolling above it
   await host.tap("#ctab-agent");
-  for (const [w, hh] of [[640, 360], [740, 360], [844, 390], [932, 430]]) {
+  for (const [w, hh] of [[568, 320], [640, 360], [740, 360], [844, 390], [932, 430]]) {
     await host.setViewportSize({ width: w, height: hh });
     await host.waitForTimeout(300);
     const l = await host.evaluate(() => {
       const r = (id) => document.getElementById(id).getBoundingClientRect();
       const row = r("code-row"), tabs = r("code-tabs"), log = r("code-log");
-      return { row: [row.top, row.bottom], tabs: [tabs.top, tabs.bottom], log: [log.top, log.bottom], h: innerHeight, tab: document.getElementById("code-pane").dataset.ptab,
-        overflow: document.documentElement.scrollWidth - innerWidth };
+      const hdr = document.querySelector("header");
+      return { row: [row.top, row.bottom], tabs: [tabs.top, tabs.bottom], log: [log.top, log.bottom], h: innerHeight, w: innerWidth, tab: document.getElementById("code-pane").dataset.ptab,
+        overflow: document.documentElement.scrollWidth - innerWidth, hdrRight: Math.max(...[...hdr.children].filter((c) => c.getBoundingClientRect().width).map((c) => c.getBoundingClientRect().right)) };
     });
+    // the header row fits the screen: if it did not, the page would zoom out (innerWidth grows past
+    // the screen's width, so overflow alone would not show it)
     check(`${w}x${hh}: the phone tabs, the prompt above them and on screen, the log gets the rest`,
-      l.tab === "agent" && l.tabs[1] <= l.h + 1 && l.row[1] <= l.tabs[0] + 1 && l.row[0] >= l.log[1] - 1 && l.log[1] - l.log[0] >= 100 && l.overflow <= 0, JSON.stringify(l));
+      l.tab === "agent" && l.w === w && l.h === hh && l.hdrRight <= w && l.tabs[1] >= l.h - 1 && l.tabs[1] <= l.h + 1 && l.row[1] <= l.tabs[0] + 1 && l.row[0] >= l.log[1] - 1 && l.log[1] - l.log[0] >= 100 && l.overflow <= 0, JSON.stringify(l));
   }
+  // turned upright again: the page is not left zoomed out, the tab bar is on screen and answers a tap
+  await host.setViewportSize({ width: 390, height: 844 });
+  await host.waitForTimeout(300);
+  const up = await host.evaluate(() => ({ w: innerWidth, vv: Math.round(visualViewport.height), bottom: Math.round(document.getElementById("code-tabs").getBoundingClientRect().bottom) }));
+  check("390x844 again: not zoomed, the tab bar at the bottom", up.w === 390 && up.vv === 844 && up.bottom <= 845, JSON.stringify(up));
+  await host.tap("#ctab-files", { timeout: 5000 });
+  check("390x844 again: a tap on Files lands", (await look(host)).files);
   check("no console errors", !errs.length, errs.join("\n"));
   code = results.every((r) => r.ok) ? 0 : 1;
 } catch (e) {
