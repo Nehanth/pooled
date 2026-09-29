@@ -59,7 +59,7 @@ let code = 1;
 try {
   const page = await browser.newPage();
   const pageErrors = [];
-  page.on("pageerror", (e) => { if (!/boom is not defined|Cannot access 'ctx'/.test(String(e))) pageErrors.push(String(e)); });   // the app's own bug is expected
+  page.on("pageerror", (e) => { if (!/boom is not defined|Cannot access 'ctx'|nope is not defined/.test(String(e))) pageErrors.push(String(e)); });   // the app's own bug is expected
   await page.goto(`http://127.0.0.1:${PORT}/__blank.html`);
   const serveOut = await page.evaluate(setup);
   console.log("--- serve result\n" + serveOut + "\n---");
@@ -155,6 +155,23 @@ try {
     && /· 2 errors:/.test(broken) && /error main\.js:2:\d+ ReferenceError: Cannot access 'ctx' before initialization/.test(broken) && /\nmissing: gone\.png$/.test(broken), broken);
   const ports = await page.evaluate(() => window.__server.ports().map((p) => `${p.port}:${p.dir}`).join(" "));
   check("both ports listed", ports === "5173: 5174:broken", ports);
+
+  // errors in the page's own markup (an inline script, an onclick) name the page's lines, not the
+  // built document's, which has the capture script ahead of them (#164)
+  const inl = await page.evaluate(async () => {
+    await window.__ws.write("admin/index.html", `<p>x</p><script>console.error("custom error")</script><button id="b" onclick="nope()">go</button>`);
+    const el = document.createElement("div"); document.body.append(el);
+    window.__view3 = window.__mountPreview(el, window.__server, 5175);
+    const out = await window.__T.serve.run({ dir: "admin", port: 5175 });
+    return out;
+  });
+  for (const f of page.frames()) if (/^(about:srcdoc|blob:)/.test(f.url())) await f.evaluate(() => { const b = document.getElementById("b"); if (b?.tagName === "BUTTON") setTimeout(() => b.click()); }).catch(() => {});
+  await page.waitForFunction(() => window.__server.logs(5175, 0).lines.some((e) => /nope is not defined/.test(e.text)), null, { timeout: 5000 }).catch(() => {});
+  const inlLogs = await page.evaluate(() => window.__server.logs(5175, 0).lines.map((e) => `${e.src}:${e.line} ${e.text}`).join("\n"));
+  console.log("--- serve :5175\n" + inl + "\n" + inlLogs + "\n---");
+  check("inline script error at index.html:1:<col in the file>", /error index\.html:1:\d+ custom error/.test(inl), inl);
+  check("onclick error names index.html:1", /^index\.html:1 ReferenceError: nope is not defined/m.test(inlLogs) && /onclick \(index\.html:1:\d+\)/.test(inlLogs), inlLogs);
+  await page.evaluate(() => { window.__view3.destroy(); window.__server.stop(5175); });
 
   // a peer-style mount waits for a click before running anything
   const gated = await page.evaluate(async () => {
