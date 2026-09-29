@@ -140,11 +140,11 @@ Deno.test("resume: a reloaded guest tab walks back into its room", () => {
 // room.js aiRejoin over stubs: who gets told what when a device comes back
 function rejoinRoom({ chain, names, ready }) {
   const sent = [], logs = [];
-  const ai = { role: "host", chain: chain.slice(), chainNames: names.slice(), readyPeers: new Set(ready), plan: new Map(names.map((n, i) => [n, { msg: { t: "ai-load", model: "m", range: [i * 4, i * 4 + 4], next: "x" } }])), fed: [], idleRedeal: 0 };
+  const ai = { role: "host", chain: chain.slice(), chainNames: names.slice(), readyPeers: new Set(ready), plan: new Map(names.map((n, i) => [n, { msg: { t: "ai-load", model: "m", range: [i * 4, i * 4 + 4], next: "x" } }])), fed: [], idleRedeal: 0, relinks: new Map() };
   const el = { style: {} };
   const fns = roomFns(["aiRejoin"], {
     ai, peer: { id: "HOST" }, sendTo: (id, m) => sent.push([id, m]), log: (_, t) => logs.push(t), aiStatus: () => {},
-    ckptClear: () => {}, $: () => el, clearTimeout: () => {},
+    ckptClear: () => {}, $: () => el, clearTimeout: () => {}, setTimeout: () => 0, aiMaybeReady: () => {}, RELINK_MS: 15000,
   });
   return { ai, sent, fns };
 }
@@ -154,6 +154,7 @@ Deno.test("resume: a device back under the same id (after a lock) is re-seated i
   r.fns.aiRejoin("B", "phone");
   eq(r.sent.map(([id, m]) => [id, m.t, m.next, m.relink]), [["A", "ai-next", "B", 1], ["B", "ai-load", "C", undefined]]);
   eq(r.ai.fed, null, "the caches are re-prefilled");
+  eq([...r.ai.relinks.keys()], ["B"], "the room waits for A's fresh link to B (ai-linked)");
   // still in the chain and ready (a blip the host never noticed): nothing to do
   const q = rejoinRoom({ chain: ["A", "B"], names: ["fox", "phone"], ready: ["A", "B"] });
   q.fns.aiRejoin("B", "phone");
@@ -165,6 +166,7 @@ Deno.test("resume: a reloaded device (new id) takes its old slot; the first slot
   r.fns.aiRejoin("A2", "phone");
   eq(r.ai.chain, ["A2", "B"]);
   eq(r.sent.map(([id, m]) => [id, m.t, m.next]), [["A2", "ai-load", "B"]]);
+  eq(r.ai.relinks.size, 0, "nobody before it: no link to wait for");
   // the last slot's next is the host
   const s = rejoinRoom({ chain: ["A", "B"], names: ["fox", "phone"], ready: ["A"] });
   s.fns.aiRejoin("B2", "phone");
