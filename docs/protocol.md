@@ -58,6 +58,32 @@ Hidden states travel as binary frames: an f16-packed `Uint16Array` (10 KB for `d
 
 The host owns the conversation: `{system, turns}` rendered to ChatML ids by `room/conversation.js`, with assistant turns kept as the exact sampled ids. It also tracks `fed`, the exact tokens every device's caches hold. A new question prefills only what follows `fed` when `fed` is a strict prefix of the new ids; otherwise (the persona changed, older turns were dropped to fit `MAX_SEQ`, a failure) it resets and prefills everything. Neither decode path pipes the end token through the chain, so both leave the caches holding exactly prompt + answer.
 
+## Spare copies (experimental)
+
+Off by default: the host's "Keep spare copies" switch (Settings, Model) or `?spares=1` on the host's page. Only the host decides. An idle computer in the room holds a loaded copy of one worker's layers; when that worker leaves, or stops answering, the spare takes its slot at once instead of the whole room re-dealing. No weights move and no other device reloads.
+
+- **Who.** Every device that can hold layers must advertise `meta.rep = 1` in `hello`; one that does not (an older tab) turns the feature off quietly for that room. The model host is never copied: it holds the conversation, the embedding, the head and the draft block, and losing it keeps the resume path above. Phones and devices without WebGPU are never spares.
+- **The deal** (`room/plan.js` `planReplicas`). The model is packed onto the fewest, most reliable devices (a computer, then a laptop on battery, then a phone; then the fastest measured; then the most memory), so some computers stay free. Each free computer can copy one worker segment it holds whole with 10% headroom (KV cache at the room's context included), at most 1.5x slower per layer when both are measured, preferring the same GPU; the riskiest and biggest segments are covered first (`coverSegments`: phone 4, laptop on battery 2, computer 1, times 1 + the segment's share of the model). When not one segment can be covered, the room deals exactly as it would with the switch off. A computer that joins an online room is made a spare if it covers a segment that has none, instead of being offered a re-deal.
+- **Arming.** The spares load once the room is online, so they never slow the room's own start and can take their weights from the room.
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `ai-spare {model, range, ctx, of, ofName, next, prev, host, inv, pin?}` | host → spare | load layers `range` quietly (the chat stays up) as a copy of worker `of`; open links to its would-be neighbours `prev` and `next` now, so a takeover never waits on ICE. `pin: {wg, rows}` is the copied worker's GEMV shape (reported in its `ai-ready {tune}`), used instead of this device's autotune |
+| `ai-spare-ready {of}` / `ai-spare-fail {of?, message}` | spare → host | loaded and linked / could not load or take over |
+| `ai-spare-drop` | host → spare | no longer needed (switch off, or a new deal): free the GPU memory |
+| `ai-promote {next, prev}` | host → spare | take the slot: become a worker forwarding to `next`, taking frames only from `prev`. Frames that arrive from the new upstream before this message are held (up to 32) and run after it |
+| `ai-promoted` | new worker → host | seated, and its link to `next` is up |
+| `ai-failover {from, to, layers}` | host → all | every screen says who took over which layers; the host also sends a fresh `ai-layers` (the replaced worker, if it is still there, becomes an ask-only guest) |
+| `ai-probe {n}` / `ai-probe-ok {n}` | host → worker / back | liveness while a lap is late (below) |
+
+**Takeover** (`room/spares.js` `failoverPlan`). For worker `P` at slot `i` with ready spare `S`: the device before `P` gets `ai-next {next: S}` (so `P` gets no new input), the device after `P` gets `ai-upstream {id: S}` (so late frames from `P`, if it is still alive somewhere, are dropped), and `S` gets `ai-promote`. The host is its own neighbour at either end: it sends to the new `chain[0]` and takes returns only from the new last device. The laps in flight went through `P`, so they fail at once (the answer so far stays in the chat and the history). `S` holds the layers but none of the conversation, so every device resets on the next frame and drops its checkpoints (`reset`, `dp: 0xffff`), and once `S` reports `ai-promoted` the host replays the tokens the caches held after the last complete answer, through the ordinary prefill path, while the room is idle (a question asked meanwhile waits in the queue). The next question then prefills only what is new. If `S` does not report within 15 s, the room degrades exactly as it would have without it.
+
+**When.** A takeover starts when `P`'s link closes (`aiPeerLeft`, the same moment the room used to go degraded), or when `P` stops answering: while a lap is later than max(300 ms, 3 x the usual lap + two hops), the host sends `ai-probe` to every worker that has a ready spare, once a second, and a worker that misses two in a row while the lap is still out is suspected. A page's message loop answers probes while its GPU works, so a slow device (a phone) never flaps; a frozen tab does not answer. Another detector can call the same entry point: `window.pooledSuspect(peerId)` returns true when a spare took over. After a takeover another idle computer, if any, copies the segments left without a spare, and a device that comes back after leaving joins as a newcomer, so it can become a spare itself.
+
+None of this changes the frame format or an older device's behaviour (they ignore the new messages, and their presence turns the feature off), so the protocol version stays 4.
+
+Not yet: a live standby that computes every frame in step (the sender sends each frame to the worker and its spare, and the spare keeps its last outputs), which would make a takeover lose no lap and need no replay; copies held only on disk; and a split that moves layers so a slightly small computer can still cover a segment.
+
 ## Link lifecycle
 
 | Message | Direction | Meaning |

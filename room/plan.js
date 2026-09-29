@@ -144,7 +144,8 @@ export function coverSegments(segments, candidates, { headroom = 1.1, slowdown =
 
 // Deal the layers so that spares are possible: pack the model onto the fewest, most reliable
 // devices (a computer before a laptop on battery before a phone, then the fastest measured, then
-// the most memory; the host always holds at least one layer), and keep the rest free to be spares.
+// the most memory; the last one to take layers is the smallest that holds what is left, so the
+// bigger ones stay free; the host always holds at least one layer), and keep the rest free to be spares.
 // caps: layers each device can hold (host first), meta: each device's meta, msPerLayer: measured
 // (optional). Returns planForSpeed's shape plus spareOf: Map(primary device idx -> spare device idx)
 // and idle: devices that hold nothing and cover nothing. When not one segment can be covered, it
@@ -152,15 +153,23 @@ export function coverSegments(segments, candidates, { headroom = 1.1, slowdown =
 export function planReplicas(L, caps, meta = [], msPerLayer = [], opts = {}) {
   const n = caps.length;
   const ms = (i) => (msPerLayer[i] > 0 ? msPerLayer[i] : Infinity);
-  const order = [...caps.keys()].filter((i) => i > 0)
-    .sort((a, b) => deviceRisk(meta[a]) - deviceRisk(meta[b]) || ms(a) - ms(b) || caps[b] - caps[a] || a - b);
   const assigned = new Array(n).fill(0);
   assigned[0] = Math.max(1, Math.min(L, Math.floor(caps[0])));
   let left = L - assigned[0];
-  for (const i of order) {
-    if (left <= 0) break;
-    const take = Math.min(left, Math.max(0, Math.floor(caps[i])));
-    assigned[i] = take; left -= take;
+  // fill from the most reliable tier down. Within a tier, a device that can take everything left
+  // does (the fastest, then the smallest such: a bigger one stays free to copy it); otherwise the
+  // fastest, then the biggest, takes all it can
+  const rest = [...caps.keys()].filter((i) => i > 0 && Math.floor(caps[i]) > 0);
+  while (left > 0 && rest.length) {
+    const tier = Math.min(...rest.map((i) => deviceRisk(meta[i])));
+    const inTier = rest.filter((i) => deviceRisk(meta[i]) === tier);
+    const fit = inTier.filter((i) => Math.floor(caps[i]) >= left);
+    const pick = fit.length
+      ? fit.sort((a, b) => ms(a) - ms(b) || caps[a] - caps[b] || a - b)[0]
+      : inTier.sort((a, b) => ms(a) - ms(b) || caps[b] - caps[a] || a - b)[0];
+    assigned[pick] = Math.min(left, Math.floor(caps[pick]));
+    left -= assigned[pick];
+    rest.splice(rest.indexOf(pick), 1);
   }
   if (left > 0) return null;   // the model needs every device: no room for a spare
   const used = assigned.map((a, i) => (a > 0 ? i : -1)).filter((i) => i >= 0);

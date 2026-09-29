@@ -448,6 +448,14 @@
   .hl span { font: 400 12px/1 var(--mono); flex: none; }
   .hl .lr { flex: none; margin-left: auto; padding-left: 6px; color: var(--muted); }
   .hl .lms { color: var(--accent-text); min-width: 5ch; text-align: right; }
+  /* a spare copy of a lane's layers: its device's name after the lane's, dimmed while it loads */
+  .hl .sm-sp { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font: 400 11px/1 var(--mono); color: var(--muted); opacity: .6; }
+  .hl .sm-sp::before { content: "+"; color: var(--faint); }
+  .hl .sm-sp i { flex: none; width: 7px; height: 7px; border-radius: 2px; border: 1px dashed var(--sw2); }
+  .hl .sm-sp.on { opacity: 1; }
+  .hl .sm-sp.on i { border-style: solid; background: var(--sw2); }
+  .peer-card.spare .play { color: var(--muted); }
+  .set-l small.exp { margin-left: 6px; font: 400 10.5px/1 var(--mono); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
   .hl .lms:empty { display: none; }
   /* a lane's dot flashes as the pass reaches its first layer */
   .hl .act { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--sw); }
@@ -1417,6 +1425,10 @@
             <div class="set-l"><b id="l-split">Layer split</b><span class="set-help" data-help="ai-split"></span></div>
             <div class="seg" data-for="ai-split" role="radiogroup" aria-labelledby="l-split"></div>
             <select id="ai-split" class="seg-src" aria-labelledby="l-split" tabindex="-1"><option value="memory">by memory (every device holds some)</option><option value="speed">for speed (fastest devices, fewest hops)</option></select>
+          </div>
+          <div class="set set-row">
+            <div class="set-l"><b id="l-spares">Keep spare copies <small class="exp">experimental</small></b><span>Idle computers hold a copy of a device's layers and take over at once if it leaves, instead of the room re-dealing. The model then sits on fewer devices.</span></div>
+            <label class="switch"><input type="checkbox" id="ai-spares" role="switch" aria-labelledby="l-spares"><i aria-hidden="true"></i></label>
           </div>
         </section>
       </div>

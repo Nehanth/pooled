@@ -20,10 +20,10 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
-import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
+import { planSplit, planForSpeed, planReplicas, coverSegments, spareCapable, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
 import { lookupDrafts } from "./room/lookup.js";
-import { fseqNext, seqStale } from "./room/spares.js";
+import { fseqNext, seqStale, failoverPlan, makeProber, lapDeadline } from "./room/spares.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
 import { computeScreen } from "./room/compute.js";
@@ -143,6 +143,7 @@ const metaPromise = (async () => {
   const m = await probeGPU();
   if (m.webgpu && m.budgetGB) m.contribGB = Math.max(0.2, Math.round(m.budgetGB * 0.5 * 10) / 10);
   m.phone = m.ua === "iPhone" || m.ua === "Android";
+  m.rep = 1;   // speaks the spare-copy messages (ai-spare, ai-promote, ai-probe): docs/protocol.md "Spare copies"
   if (m.phone) { m.contribGB = 0.5; $("join-gb").min = "0.5"; $("join-gb").step = "0.5"; }
   else if (m.contribGB) m.contribGB = Math.max(1, Math.round(m.contribGB));
   if (m.contribGB) $("join-gb").value = m.contribGB;
@@ -1417,9 +1418,10 @@ function setCtx(used, max) {
   el.classList.toggle("warn", used > max * 0.8);
 }
 
-async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey)) {
+async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), { quiet = false } = {}) {
   const M = MODELS[modelKey];
-  aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
+  // quiet: a spare copy loading in a room that is online; the chat stays up, no load card
+  if (!quiet) aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
   aiStatus("requesting GPU\u2026");
   mascot("Grabbing my slice of the model… hang tight.");
   // a previous attempt in this tab still owns its weights: release them first, or the
@@ -1456,6 +1458,8 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   ai.device.lost.then((l) => crumb("GPU device lost: " + l.reason + " " + l.message));
   aiStatus("tuning kernels for this GPU\u2026");
   ai.tune = await autotuneCoop(ai.device).catch(() => ({ wg: 256, rows: 4 }));
+  // a spare copy takes the kernel shape of the device it copies (the GEMV's summation order follows it)
+  if (ai.pinTune) { ai.tune = { ...ai.tune, wg: ai.pinTune.wg, rows: ai.pinTune.rows, pinned: 1 }; ai.pinTune = null; }
   crumb(`autotune: WG=${ai.tune.wg} ROWS=${ai.tune.rows}`);
   const isPhone = myMeta?.phone;
   ai.myPct = 0;
@@ -1685,11 +1689,31 @@ async function aiStart(modelArg) {
       layerBytes = (2 * d * d + 2 * kvDim * d + 3 * cfg.intermediate_size * d) * 4;
       embedBytes = cfg.vocab_size * d * 4;
     }
-    const pledgeOf = (m) => ((m?.contribGB ?? (m?.maxBufGB ? m.maxBufGB * 0.5 : 0.5))) * 2 ** 30;
+    const pledgeOf = pledgeBytes;
     let caps = [Math.max(pledgeOf(myMeta) - embedBytes, layerBytes / 2),
       ...ai.chain.map((id) => Math.max(pledgeOf(conns.get(id)?.meta), layerBytes / 2))];
     let assigned, ranges;
-    if ($("ai-split").value === "speed") {
+    ai.layerBytes = layerBytes;
+    // spare copies (experimental): pack the model onto the fewest, most reliable devices and keep
+    // idle computers to hold copies of the workers' layers. null = no copy possible: deal as usual
+    const oldSpares = new Set([...(ai.spareOf?.values() || [])]);
+    ai.spareOf = new Map(); ai.spareReady = new Set(); ai.pendingSpares = null; ai.failover = null;
+    const rp = sparesOn() && sparesSpoken() && ai.chain.length >= 2
+      ? planReplicas(L, caps.map((c) => c / layerBytes), [myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)],
+        [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(conns.get(id)?.name || id))])
+      : null;
+    if (rp) {
+      const all = ai.chain;
+      const keep = rp.used.filter((i) => i > 0).map((i) => i - 1);
+      ai.chain = keep.map((i) => all[i]);
+      ai.leftOut = new Set(all.filter((id) => !ai.chain.includes(id)));
+      ai.chainNames = ai.chain.map((id) => conns.get(id)?.name || id);
+      ai.pendingSpares = new Map([...rp.spareOf].map(([p, sp]) => [all[p - 1], all[sp - 1]]));   // armed once the room is online
+      assigned = rp.used.map((i) => rp.assigned[i]);
+      ranges = rp.used.map((i) => rp.ranges[i]);
+      caps = rp.used.map((i) => caps[i]);
+      log("room", `spare copies: ${[...ai.pendingSpares].map(([p, sp]) => `${conns.get(sp)?.name || sp} copies ${conns.get(p)?.name || p}`).join(", ")}`);
+    } else if ($("ai-split").value === "speed") {
       // fastest devices first (measured ms per layer from earlier answers), fewest hops; devices
       // that are not needed stay in the room as ask-only guests
       const nameOf = (id) => conns.get(id)?.name || id;
@@ -1703,6 +1727,8 @@ async function aiStart(modelArg) {
       caps = sp.used.map((i) => caps[i]);
     } else ({ assigned, ranges } = planSplit(L, caps));
     ai.layersN = Object.fromEntries([[myName, assigned[0]], ...ai.chain.map((id, i) => [conns.get(id)?.name || id, assigned[i + 1]])]);
+    // devices that held a copy in the last deal and hold nothing now free their GPU memory
+    for (const id of oldSpares) if (!ai.chain.includes(id) && ![...(ai.pendingSpares?.values() || [])].includes(id)) sendTo(id, { t: "ai-spare-drop" });
 
     const needGB = (L * layerBytes + embedBytes) / 2 ** 30;
     const haveGB = caps.reduce((s, c) => s + c, embedBytes) / 2 ** 30;
@@ -1730,7 +1756,7 @@ async function aiStart(modelArg) {
     broadcastAll({ t: "ai-layers", by: ai.layersByName });
     const splitDesc = [`you ${assigned[0]}+embed`, ...ai.chain.map((id, i) =>
       `${conns.get(id)?.name || id} ${assigned[i + 1]}`)].join(" · ");
-    log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}: ${splitDesc}`);
+    log("room", `${M.label} — layer split ${rp ? "with spare copies" : $("ai-split").value === "speed" ? "for speed" : "by pledge"}: ${splitDesc}`);
     ai.loadingShard = true;
     try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX); } finally { ai.loadingShard = false; }
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
@@ -1779,7 +1805,7 @@ function showRedeal(on, why) {
   $("redeal-why").hidden = b.hidden;
 }
 // devices with a GPU that are in the room but hold no layers (joined after the start)
-function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && !ai.chain.includes(id) && !ai.leftOut?.has(id)); }
+function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && !ai.chain.includes(id) && !ai.leftOut?.has(id) && !isSpare(id)); }
 function offerRedealForNewcomers() {
   if (ai.role !== "host" || !ai.engine || ai.degraded) return;
   const spare = sparePeers();
@@ -1790,6 +1816,9 @@ function offerRedealForNewcomers() {
 // waits for a re-deal
 function aiPeerLeft(id, name) {
   if (ai.role !== "host") return;
+  // a worker with a spare copy ready: the spare takes its place, no re-deal (spareTakeover)
+  if (ai.chain.includes(id) && spareTakeover(id, name, "left")) return;
+  if (isSpare(id)) spareGone(id);
   if (!ai.chain.includes(id)) { offerRedealForNewcomers(); if (!sparePeers().length && !ai.degraded) showRedeal(false); return; }
   const layers = ai.layersByName?.[name];
   const why = `${name || "a device"} left${layers ? ` (layers ${layers})` : ""}`;
@@ -1807,11 +1836,192 @@ function aiPeerLeft(id, name) {
   codeRoleChanged();
 }
 
+// ---- spare copies (experimental; docs/protocol.md "Spare copies") ----
+// An idle computer holds a loaded copy of one worker's layers. When that worker leaves (its link
+// closes) or stops answering (stallProbe, or window.pooledSuspect from another detector), the spare
+// takes its slot at once: the device before it forwards to the spare, the device after it takes
+// frames only from the spare, and the host replays the conversation so every cache matches again.
+// No weights move, nobody else reloads, the room never goes degraded. The host is never copied.
+// Off by default: the host's "Keep spare copies" switch or ?spares=1.
+function sparesOn() { return !!$("ai-spares")?.checked; }
+// every device in the room that could hold layers speaks the spare messages (meta.rep); an older tab
+// in the room turns the feature off quietly
+function sparesSpoken() { return [...conns.values()].every((e) => !e.meta?.webgpu || e.meta?.rep); }
+function pledgeBytes(m) { return ((m?.contribGB ?? (m?.maxBufGB ? m.maxBufGB * 0.5 : 0.5))) * 2 ** 30; }
+function isSpare(id) { return !!ai.spareOf && [...ai.spareOf.values()].includes(id); }
+const nameOfId = (id) => (id === peer?.id ? myName : conns.get(id)?.name || id);
+
+// cover what can be covered now: workers without a spare, idle computers in the room
+function armSpares() {
+  if (ai.role !== "host" || !ai.engine || ai.degraded || !sparesOn() || !sparesSpoken()) return;
+  if (ai.readyPeers.size < ai.chain.length) return;
+  ai.spareOf ||= new Map(); ai.spareReady ||= new Set();
+  const planned = ai.pendingSpares; ai.pendingSpares = null;
+  const pairs = [];
+  if (planned) for (const [p, sp] of planned) if (ai.chain.includes(p) && conns.has(sp) && !ai.chain.includes(sp)) pairs.push([p, sp]);
+  const taken = new Set([...ai.spareOf.values(), ...pairs.map((x) => x[1])]);
+  const covered = new Set([...ai.spareOf.keys(), ...pairs.map((x) => x[0])]);
+  const segs = ai.chain.map((id, i) => ({ idx: i, id, layers: ai.layersN?.[nameOfId(id)] || 0, meta: conns.get(id)?.meta, ms: ai.msPerLayer.get(nameOfId(id)) }))
+    .filter((x) => x.layers && !covered.has(x.id));
+  const cands = [...conns.keys()].filter((id) => !ai.chain.includes(id) && !taken.has(id) && spareCapable(conns.get(id)?.meta))
+    .map((id, k) => ({ idx: k, id, cap: pledgeBytes(conns.get(id)?.meta) / (ai.layerBytes || Infinity), meta: conns.get(id)?.meta, ms: ai.msPerLayer.get(nameOfId(id)) }));
+  if (segs.length && cands.length) for (const [si, ci] of coverSegments(segs, cands)) pairs.push([segs.find((x) => x.idx === si).id, cands.find((x) => x.idx === ci).id]);
+  for (const [p, sp] of pairs) assignSpare(p, sp);
+  if (pairs.length && !sparePeers().length && !ai.degraded) showRedeal(false);
+}
+function assignSpare(p, sp) {
+  const i = ai.chain.indexOf(p), entry = ai.plan?.get(nameOfId(p));
+  if (i < 0 || !entry) return;
+  ai.spareOf.set(p, sp); ai.spareReady.delete(sp);
+  ai.leftOut?.delete(sp);
+  const m = entry.msg;
+  sendTo(sp, { t: "ai-spare", model: m.model, range: m.range, ctx: m.ctx, of: p, ofName: nameOfId(p), host: peer.id, inv: m.inv,
+    next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", prev: i > 0 ? ai.chain[i - 1] : peer.id, ...(ai.tuneBy?.get(p) ? { pin: ai.tuneBy.get(p) } : {}) });
+  log("room", `${nameOfId(sp)} is loading a spare copy of ${nameOfId(p)}'s layers ${humanRange(ai.layersByName?.[nameOfId(p)])}`);
+  mapRefresh();
+}
+function dropSpares() {
+  for (const sp of ai.spareOf?.values() || []) sendTo(sp, { t: "ai-spare-drop" });
+  ai.spareOf = new Map(); ai.spareReady = new Set(); ai.pendingSpares = null;
+  mapRefresh();
+}
+// a spare left, or its worker is gone: forget it, and cover the segment again if another computer can
+function spareGone(sp) {
+  for (const [p, x] of ai.spareOf || []) if (x === sp) ai.spareOf.delete(p);
+  ai.spareReady?.delete(sp);
+  mapRefresh();
+  setTimeout(armSpares, 0);
+}
+
+// The worker `id` is gone (left) or suspected (stopped answering): put its ready spare in its slot.
+// Returns false when it has none, and the caller carries on as before (the room degrades).
+function spareTakeover(id, name, why = "left") {
+  if (ai.role !== "host" || !ai.engine || !ai.spareOf) return false;
+  const sp = ai.spareOf.get(id);
+  if (!sp || !ai.spareReady.has(sp) || !conns.has(sp)) return false;
+  const plan = failoverPlan({ chain: ai.chain, dead: id, spare: sp, hostId: peer.id });
+  if (!plan) return false;
+  const t0 = performance.now();
+  const pName = name || ai.chainNames?.[plan.i] || nameOfId(id), sName = nameOfId(sp);
+  const layers = ai.layersByName?.[pName];
+  // the laps in flight went through the gone device: fail them now (the answer ends; its text so
+  // far stays in the chat and the history)
+  const err = new Error(`${pName} ${why}; ${sName} took over layers ${humanRange(layers)}`);
+  err.failover = 1;
+  failWaiters(err);
+  for (const { to, msg } of plan.msgs) sendTo(to, msg);
+  ai.chain = plan.chain;
+  ai.chainNames[plan.i] = sName;
+  const entry = ai.plan.get(pName);
+  ai.plan.delete(pName);
+  if (entry) ai.plan.set(sName, { ...entry, msg: { ...entry.msg, next: plan.down || "host", prev: plan.up || peer.id } });
+  const ren = (o) => { if (!o || !(pName in o)) return o; const v = o[pName]; const r = { ...o }; delete r[pName]; r[sName] = v; return r; };
+  ai.layersByName = ren(ai.layersByName); ai.layersN = ren(ai.layersN);
+  ai.readyPeers.delete(id); ai.readyPeers.add(sp);
+  ai.spareOf.delete(id); ai.spareReady.delete(sp);
+  ai.teleBy.delete(id);
+  ai.leftOut?.add(id);   // if it is still here (suspected, not gone), it is a guest now, not a newcomer
+  // the spare holds the layers but none of the conversation: every device starts clean with the
+  // next frame (and drops its saved checkpoints), and the host replays what the caches held
+  ai.failover = { t0, from: pName, to: sName, id: sp, layers, why, ms: null, replayMs: null, replay: ai.fedStable?.slice() || null };
+  ai.fed = null; ai.pending = null; ai.pendingCtl = {};
+  ckptClear(true);
+  broadcastAll({ t: "ai-layers", by: ai.layersByName });
+  broadcastAll({ t: "ai-failover", from: pName, to: sName, layers });
+  const note = `${sName} took over layers ${humanRange(layers)} from ${pName}`;
+  log("room", `${pName} ${why}: ${note}, no re-deal`);
+  sysNote(note, "join");
+  toast(note);
+  aiStatus(note);
+  mapRefresh();
+  saveHost();
+  codeRoleChanged();
+  // no answer from the spare in 15 s: the room degrades as it would have without it
+  setTimeout(() => { if (ai.failover?.id === sp && ai.failover.ms == null && ai.chain.includes(sp)) { log("room", `${sName} did not take over in time`); aiPeerLeft(sp, sName); } }, 15000);
+  return true;
+}
+// the spare is seated and its link to the next device is up
+function spareSeated(from) {
+  const f = ai.failover;
+  if (!f || f.id !== from || f.ms != null) return;
+  f.ms = Math.round(performance.now() - f.t0);
+  ai.pendingCtl = { ...ai.pendingCtl, dp: [DROP_ALL] };   // the others' checkpoints no longer match the room
+  log("room", `${f.to} took over in ${f.ms} ms`);
+  setTimeout(armSpares, 0);   // another idle computer can copy the segments now uncovered
+  // the answer that was running when the worker went is still unwinding: replay once it has
+  const tryReplay = (n = 0) => {
+    if (!f.replay || ai.fed?.length) return;
+    if (ai.busy && n < 40) { setTimeout(() => tryReplay(n + 1), 250); return; }
+    spareReplay();
+  };
+  tryReplay();
+}
+// Replay what the caches held before the takeover, so the next question prefills only what is new.
+// Runs when the room is idle; a question asked meanwhile waits in the queue.
+async function spareReplay() {
+  const f = ai.failover, ids = f?.replay;
+  if (!ids?.length || ai.busy || ai.degraded || !ai.engine || ai.fed?.length) return;
+  f.replay = null;
+  ai.busy = "replay"; ai.abort = false;
+  const t0 = performance.now();
+  try {
+    resetState();
+    await aiPrefill(ids, { aborted: () => ai.abort || ai.degraded, onStatus: (st) => aiStatus(`${f.to} took over: rebuilding the conversation, ${st}`) });
+    if (ai.fed?.length === ids.length) ai.fedStable = ai.fed.slice();
+    f.replayMs = Math.round(performance.now() - t0);
+    log("room", `rebuilt the conversation (${ids.length} tokens) on the new chain in ${(f.replayMs / 1000).toFixed(1)} s`);
+    aiStatus(`cluster online · ${f.to} took over layers ${humanRange(f.layers)}`);
+  } catch (err) {
+    ai.fed = null; ai.pendingCtl = {}; ckptClear(true);
+    log("room", `rebuilding the conversation failed (${err.message}); the next question prefills it`);
+  } finally {
+    if (ai.busy === "replay") { ai.busy = false; ai.abort = false; }
+    setTimeout(nextQueued, 0);
+  }
+}
+// Another detector (a stalled lap here, or a network watchdog) thinks `id` is gone. With a spare
+// ready it takes over now; otherwise nothing happens here. For fix/net-drop: window.pooledSuspect.
+function suspect(id, why = "stopped answering") {
+  if (ai.role !== "host" || !ai.chain.includes(id)) return false;
+  return spareTakeover(id, nameOfId(id), why);
+}
+window.pooledSuspect = suspect;
+// A late lap with a spare ready: probe the covered workers every second (ai-probe, answered by the
+// page's message loop even while its GPU works). Two missed probes in a row while a lap is still out
+// and that worker is suspected: a frozen tab stops answering, a slow one does not.
+const prober = makeProber({ strikes: 2 });
+const probeOut = new Map();   // id -> probe number not answered yet
+let probeTimer = null;
+function stallProbe() {
+  if (probeTimer || ai.role !== "host") return;
+  const tick = () => {
+    const covered = ai.chain.filter((id) => ai.spareReady?.has(ai.spareOf?.get(id)));
+    if (!ai.waiters.size || !covered.length) { clearInterval(probeTimer); probeTimer = null; prober.clear(); probeOut.clear(); return; }
+    for (const id of covered) {
+      if (probeOut.has(id) && prober.missed(id)) {
+        probeOut.delete(id);
+        if (suspect(id)) { prober.clear(); probeOut.clear(); return; }
+      }
+      const n = ai.probeN = (ai.probeN || 0) + 1;
+      if (!probeOut.has(id)) probeOut.set(id, n);
+      sendTo(id, { t: "ai-probe", n });
+    }
+  };
+  tick();
+  probeTimer = setInterval(tick, 1000);
+}
+// debug and tests: who copies whom, and the last takeover
+window.pooledSpares = () => ({
+  on: sparesOn(), chain: (ai.chain || []).map(nameOfId), spares: [...(ai.spareOf || [])].map(([p, sp]) => ({ of: nameOfId(p), spare: nameOfId(sp), ready: !!ai.spareReady?.has(sp) })),
+  failover: ai.failover ? { from: ai.failover.from, to: ai.failover.to, ms: ai.failover.ms, replayMs: ai.failover.replayMs, why: ai.failover.why } : null, role: ai.role, range: ai.range,
+});
+
 // a newcomer while the room is online gets the chat as a guest, and the conversation so far
 function aiWelcome(id) {
   if (ai.role !== "host" || !ai.engine || ai.readyPeers.size < ai.chain.length || ai.chain.includes(id)) return;
   sendTo(id, { t: "ai-ready-all", model: ai.model });
   if (ai.visibility === "all" && ai.transcript.length) sendTo(id, { t: "ai-history", items: ai.transcript.slice(-20) });
+  armSpares();   // a computer that joins an online room can hold a spare copy instead of waiting for a re-deal
   offerRedealForNewcomers();
 }
 
@@ -1854,6 +2064,7 @@ function aiMaybeReady() {
   if (!matchMedia("(pointer: coarse)").matches) $("ai-prompt").focus();   // touch: the keyboard opens when the user taps the prompt
   broadcastAll({ t: "ai-ready-all", model: ai.model });
   pushMap(0, null, false, true);
+  armSpares();
   offerRedealForNewcomers();
   setTimeout(nextQueued, 0);
   saveHost();
@@ -1867,9 +2078,11 @@ function aiMaybeReady() {
 function lapWait(key, ms, what) {
   return new Promise((res, rej) => {
     const timer = setTimeout(() => { ai.waiters.delete(key); rej(new Error(`pipeline timeout (${what})`)); }, ms);
+    // with a spare copy ready, a lap that runs late gets the chain probed (stallProbe)
+    const late = ai.spareReady?.size ? setTimeout(stallProbe, lapDeadline(ai.lapStat?.lap)) : null;
     ai.waiters.set(key, {
-      res: (h) => { clearTimeout(timer); res(h); },
-      rej: (e) => { clearTimeout(timer); rej(e); },
+      res: (h) => { clearTimeout(timer); clearTimeout(late); res(h); },
+      rej: (e) => { clearTimeout(timer); clearTimeout(late); rej(e); },
     });
   });
 }
@@ -2108,7 +2321,8 @@ function mapNodes(kind = "spec") {
   for (const id of ai.chain) {
     const t = ai.teleBy.get(id) || {};
     const name = conns.get(id)?.name || id;
-    nodes.push({ name, layers: ai.layersByName?.[name] || "", ms: t[kind] ?? t.spec ?? t.one, amax: t.amax });
+    const sp = ai.spareOf?.get(id);   // spare copy: its name, and whether it is loaded (spareOk)
+    nodes.push({ name, layers: ai.layersByName?.[name] || "", ms: t[kind] ?? t.spec ?? t.one, amax: t.amax, ...(sp ? { spare: nameOfId(sp), spareOk: ai.spareReady?.has(sp) ? 1 : 0 } : {}) });
   }
   return nodes;
 }
@@ -2141,7 +2355,7 @@ function renderMap(nodes, st, live) {
   const spans = nodes.map((x, i) => { const m = /^(\d+)\D+(\d+)$/.exec(String(x.layers || "")); return m ? { i, name: x.name, lo: +m[1], hi: +m[2] + 1 } : null; }).filter(Boolean);
   const total = spans.reduce((t, x) => Math.max(t, x.hi), 0);
   const strip = el.querySelector(".sm-strip");
-  const sig = spans.map((x) => `${x.i}:${x.name}:${x.lo}-${x.hi}`).join(",");
+  const sig = spans.map((x) => `${x.i}:${x.name}:${x.lo}-${x.hi}:${nodes[x.i]?.spare || ""}${nodes[x.i]?.spareOk ? "+" : ""}`).join(",");
   if (strip.dataset.sig !== sig) {
     strip.dataset.sig = sig;
     const n = Math.min(total, 64), per = total / Math.max(1, n);
@@ -2152,7 +2366,9 @@ function renderMap(nodes, st, live) {
       for (; c < n && c * per < sp.hi; c++) cells += `<i style="--c:${c};grid-column:${c + 1}"></i>`;
       const dev = [...conns.values()].find((e) => e.name === sp.name)?.meta;
       const icon = iconFor(sp.name === myName ? myMeta : dev || {});
-      return `<div class="sm-half" data-name="${esc(String(sp.name))}" style="--sw:${devColor(sp.name)};--c0:${c0}" title="${esc(String(sp.name))}: layers ${sp.lo + 1}–${sp.hi}"><p class="hl"><i class="act" aria-hidden="true"></i>${icon}<b>${esc(String(sp.name))}</b><span class="lr">layers ${sp.lo + 1}–${sp.hi}</span><span class="lms"></span></p><div class="cells">${cells}</div></div>`;
+      const cp = nodes[sp.i]?.spare;   // a spare copy of this lane's layers
+      const cpTag = cp ? `<span class="sm-sp${nodes[sp.i].spareOk ? " on" : ""}" style="--sw2:${devColor(cp)}" title="${esc(String(cp))} ${nodes[sp.i].spareOk ? "holds a spare copy of these layers and takes over if " + esc(String(sp.name)) + " leaves" : "is loading a spare copy of these layers"}"><i></i>${esc(String(cp))}</span>` : "";
+      return `<div class="sm-half" data-name="${esc(String(sp.name))}" style="--sw:${devColor(sp.name)};--c0:${c0}" title="${esc(String(sp.name))}: layers ${sp.lo + 1}–${sp.hi}"><p class="hl"><i class="act" aria-hidden="true"></i>${icon}<b>${esc(String(sp.name))}</b>${cpTag}<span class="lr">layers ${sp.lo + 1}–${sp.hi}</span><span class="lms"></span></p><div class="cells">${cells}</div></div>`;
     }).join("");
     strip.style.setProperty("--cells", n);
     el.style.setProperty("--lanes", Math.max(1, sorted.length));
@@ -2172,10 +2388,13 @@ function renderMap(nodes, st, live) {
   // the device cards say which layers they hold, in the strip's colours
   for (const card of document.querySelectorAll("#peers .peer-card")) {
     const k = nodes.findIndex((x) => x.name === card.dataset.name);
+    const cp = k < 0 ? nodes.find((x) => x.spare === card.dataset.name) : null;   // this device holds a spare copy
     card.style.setProperty("--sw", devColor(card.dataset.name));
     card.style.setProperty("--k", Math.max(0, k));
     card.classList.toggle("holds", k >= 0 && !!nodes[k].layers);
-    card.querySelector(".play").textContent = k >= 0 && nodes[k].layers ? `layers ${humanRange(nodes[k].layers)}` : "";
+    card.classList.toggle("spare", !!cp);
+    card.querySelector(".play").textContent = k >= 0 && nodes[k].layers ? `layers ${humanRange(nodes[k].layers)}`
+      : cp ? `spare ${humanRange(cp.layers)}${cp.spareOk ? "" : " (loading)"}` : "";
   }
   const S = lastMap.st;
   $("sm-tps").textContent = S?.tps ? S.tps.toFixed(1) : "-";
@@ -2295,6 +2514,8 @@ function sysNote(text, kind = "") {
   if (o.style.display === "block") scrollChat();
 }
 let mapAt = 0;
+// redraw the map now (a spare armed or took over) keeping the last answer's speed on it
+function mapRefresh() { if (ai.role === "host" && ai.engine) pushMap(lastMap?.st?.tps || 0, lastMap?.st?.acc ?? null, false, true); }
 function pushMap(tps, acc, live, force) {
   const now = performance.now();
   if (!force && now - mapAt < 800) return;
@@ -2521,6 +2742,7 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
   if (ai.chain.length && count) { pushMap(tps, acc, false, true); noteSpeeds(); }
   else if (count > 8) lastSoloTps = Math.max(lastSoloTps, tps);
   ckptSave();   // this answer's end state, on every device, for a later regenerate or branch
+  ai.fedStable = ai.fed ? ai.fed.slice() : null;   // what a spare that takes over replays (spareReplay)
   const reason = aborted() ? "abort" : capped ? (full ? "ctx" : "max") : "stop";
   return { tokens, reason, reused, prefilled, count, tps, acc, copied, tPre, tDecode, preFrames, stats, capped };
 }
@@ -2641,7 +2863,7 @@ function markReplaced() {
 function aiNewChat() {
   if (ai.role !== "host" || ai.busy === "gen" || ai.busy === "code") return;
   ai.conv = { turns: [] };
-  ai.fed = null;
+  ai.fed = null; ai.fedStable = null;
   ai.transcript = [];
   clearChat();
   setAfterAnswer(false, false);
@@ -2705,6 +2927,19 @@ async function workerFrame(d) {
     else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
     if (d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
   }
+}
+
+// a compute frame for this worker's queue. Fencing: only from the device before me (ai.upstream,
+// from ai-load / ai-upstream / ai-promote; unset when the host predates it), each numbered frame once
+function acceptFrame(from, d) {
+  if (ai.role !== "worker") return;
+  if (ai.upstream && from !== ai.upstream) return;
+  if (seqStale(d.fseq, ai.lastF)) return;
+  if (d.fseq) ai.lastF = d.fseq;
+  ai.q = ai.q.then(() => workerFrame(d)).catch((err) => {
+    aiStatus("⚠ " + err.message);
+    sendTo(ai.hostId, { t: "ai-error", message: err.message });
+  });
 }
 
 // the host's tab closed: the room is over for everyone else
@@ -2792,7 +3027,7 @@ function resumeHost(r) {
 // room's layers, chat or state), and the host ignores them altogether.
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
-  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-upstream"]);
+  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-upstream", "ai-spare", "ai-spare-drop", "ai-promote", "ai-failover", "ai-probe"]);
 async function aiOnData(from, d) {
   if (d.t.startsWith("ai-code") || d.t.startsWith("ai-pv")) { codeOnData(from, d); return; }
   const e = conns.get(from);
@@ -2846,7 +3081,7 @@ async function aiOnData(from, d) {
       ai.next = d.next;
       ai.hostId = d.host;
       ai.upstream = d.prev || null;   // older hosts send no prev: then frames are taken from anyone, as before
-      ai.lastF = 0;
+      ai.lastF = 0; ai.early = null;
       ai.q = Promise.resolve();
       ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;
       ensureLink(d.next);   // open the link to my chain neighbour while the weights download
@@ -2857,7 +3092,7 @@ async function aiOnData(from, d) {
         $("ldg-title").textContent = `layers ${d.range[0]}–${d.range[1] - 1} ready`;   // the card stays up as it is (Starting) until ai-ready-all
         $("ldg-sub").textContent = "syncing with the rest of the room";
         $("ldg-fill").style.width = "100%";
-        sendTo(ai.hostId, { t: "ai-ready" });
+        sendTo(ai.hostId, { t: "ai-ready", ...(ai.tune ? { tune: { wg: ai.tune.wg, rows: ai.tune.rows } } : {}) });
       } catch (err) {
         aiLoading(false);
         aiStatus("failed: " + err.message);
@@ -2865,6 +3100,70 @@ async function aiOnData(from, d) {
       }
       break;
     }
+    case "ai-spare": {   // hold a copy of a worker's layers, ready to take its place
+      if (ai.role === "host" || ai.role === "worker" || !Array.isArray(d.range) || !MODELS[d.model]) break;
+      const same = ai.role === "spare" && ai.engine && ai.model === d.model && ai.range?.[0] === d.range[0] && ai.range?.[1] === d.range[1];
+      ai.role = "spare"; ai.hostId = d.host; ai.next = d.next; ai.upstream = d.prev || null; ai.early = [];
+      ai.spareFor = String(d.ofName || "a worker").slice(0, 40);
+      const lr = `${d.range[0] + 1}\u2013${d.range[1]}`;
+      try {
+        if (!same) {
+          ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;
+          ai.pinTune = d.pin && [64, 128, 256].includes(d.pin.wg) && [1, 2, 4, 8].includes(d.pin.rows) ? { wg: d.pin.wg, rows: d.pin.rows } : null;
+          await aiLoadShard(d.model, d.range, false, false, d.ctx || maxSeqFor(d.model), { quiet: true });
+          if (ai.role !== "spare") break;   // dropped or dealt again while loading
+        }
+        // links to the neighbours it would have, up now so a takeover never waits on ICE
+        ensureLink(d.next); ensureLink(d.prev);
+        sendTo(ai.hostId, { t: "ai-spare-ready", of: d.of });
+        aiStatus(`spare copy of layers ${lr} (${ai.spareFor}'s): takes over if it leaves`);
+        sysNote(`This device keeps a spare copy of ${ai.spareFor}'s layers ${lr}`);
+      } catch (err) {
+        ai.role = "guest"; ai.engine = null; ai.range = null;
+        try { ai.device?.destroy(); } catch {}
+        ai.device = null;
+        aiStatus("cluster online · this device asks, the others think");
+        sendTo(ai.hostId, { t: "ai-spare-fail", of: d.of, message: String(err.message || err).slice(0, 200) });
+      }
+      break;
+    }
+    case "ai-spare-drop":
+      if (ai.role !== "spare") break;
+      ai.role = "guest"; ai.engine = null; ai.range = null; ai.early = null;
+      try { ai.device?.destroy(); } catch {}
+      ai.device = null;
+      aiStatus("cluster online · this device asks, the others think");
+      break;
+    case "ai-promote": {   // the worker this spare copies is gone: take its slot
+      if (ai.role !== "spare" || !ai.engine) { sendTo(from, { t: "ai-spare-fail", message: "not holding a spare copy" }); break; }
+      ai.role = "worker"; ai.next = d.next; ai.upstream = d.prev || null; ai.lastF = 0; ai.q = Promise.resolve();
+      try { ai.engine.dropAllSlots?.(); ai.engine.reset?.(); } catch {}
+      const early = ai.early || []; ai.early = null;
+      // frames wait for the link to the next device (it was opened when the copy loaded)
+      ai.q = ai.q.then(() => ensureLink(d.next, 10000)).then((up) => sendTo(ai.hostId, up ? { t: "ai-promoted" } : { t: "ai-spare-fail", message: "could not reach the next device" }));
+      for (const [f, fr] of early) acceptFrame(f, fr);
+      aiStatus(`took over layers ${ai.range[0] + 1}\u2013${ai.range[1]} from ${ai.spareFor || "a device that left"}`);
+      break;
+    }
+    case "ai-failover":
+      toast(`${d.to} took over layers ${humanRange(d.layers)} from ${d.from}`);
+      sysNote(`${d.from} left; ${d.to} took over its layers`, "join");
+      break;
+    case "ai-probe": if (ai.role === "worker") sendTo(from, { t: "ai-probe-ok", n: d.n }); break;
+    case "ai-probe-ok": if (ai.role === "host") { probeOut.delete(from); prober.answered(from); } break;
+    case "ai-spare-ready":
+      if (ai.role !== "host" || ai.spareOf?.get(d.of) !== from) break;
+      ai.spareReady.add(from);
+      log("room", `${nameOfId(from)} holds a spare copy of ${nameOfId(d.of)}'s layers ${humanRange(ai.layersByName?.[nameOfId(d.of)])}`);
+      mapRefresh();
+      break;
+    case "ai-promoted": if (ai.role === "host") spareSeated(from); break;
+    case "ai-spare-fail":
+      if (ai.role !== "host") break;
+      log("room", `${nameOfId(from)}: spare copy failed: ${String(d.message || "").slice(0, 200)}`);
+      if (ai.failover?.id === from && ai.failover.ms == null && ai.chain.includes(from)) aiPeerLeft(from, nameOfId(from));
+      else spareGone(from);
+      break;
     case "ai-hostprog": {
       const now = Date.now();
       ai.prog = { ...(d.all || {}), [myName]: Math.round(ai.myPct || 0) };
@@ -2881,6 +3180,7 @@ async function aiOnData(from, d) {
     case "ai-ready":
       if (ai.role !== "host" || !ai.chain.includes(from)) break;
       ai.readyPeers.add(from);
+      if (d.tune && [64, 128, 256].includes(d.tune.wg) && [1, 2, 4, 8].includes(d.tune.rows)) (ai.tuneBy ||= new Map()).set(from, { wg: d.tune.wg, rows: d.tune.rows });
       if (e?.card) { e.card.querySelector(".bw").textContent = "ready"; peerStatus(e.card, "ready", true); }
       aiMaybeReady();
       break;
@@ -2896,16 +3196,10 @@ async function aiOnData(from, d) {
     case "ai-map": renderMap(d.nodes, d.st, d.live); break;
     case "ai-hidden-b":
     case "ai-hidden":
-      if (ai.role !== "worker") break;
-      // fencing: compute frames only from the device before me (ai.upstream, from ai-load /
-      // ai-upstream; unset when the host predates it), and each numbered frame once
-      if (ai.upstream && from !== ai.upstream) break;
-      if (seqStale(d.fseq, ai.lastF)) break;
-      if (d.fseq) ai.lastF = d.fseq;
-      ai.q = ai.q.then(() => workerFrame(d)).catch((err) => {
-        aiStatus("⚠ " + err.message);
-        sendTo(ai.hostId, { t: "ai-error", message: err.message });
-      });
+      // a spare told to take over may see its new upstream's first frame before the host's
+      // ai-promote: hold a few until then
+      if (ai.role === "spare" && ai.early && ai.early.length < 32) { ai.early.push([from, d]); break; }
+      acceptFrame(from, d);
       break;
     case "ai-hiddenret-b": lapDone("b" + d.basePos, unpackWire(d), d.fseq); break;
     case "ai-hiddenret": lapDone(d.pos, unpackWire(d), d.fseq); break;
@@ -3112,6 +3406,17 @@ if (MOCK) window.__pooledMock = { model: null, api: roomApi };
 
 $("ai-start").addEventListener("click", aiStartAnywhere);
 $("ai-redeal").addEventListener("click", aiRedeal);
+// Keep spare copies: the host's switch (?spares=1 turns it on for this page). Takes effect at once:
+// on, idle computers load copies (or the host suggests a re-deal to free some); off, they drop them.
+$("ai-spares").checked = new URLSearchParams(location.search).get("spares") === "1";
+$("ai-spares").addEventListener("change", () => {
+  if (ai.role !== "host" || !ai.engine) return;
+  if (!sparesOn()) { dropSpares(); toast("spare copies off"); return; }
+  if (!sparesSpoken()) { toast("a device in the room runs an older Pooled: spare copies stay off"); return; }
+  armSpares();
+  if (!ai.spareOf?.size) showRedeal(true, "re-deal to pack the model onto fewer devices and keep the others as spare copies");
+  else toast("spare copies on");
+});
 $("ai-split").addEventListener("change", () => {
   if (ai.role === "host" && ai.engine) showRedeal(true, $("ai-split").value === "speed" ? "re-deal to put the layers on the fastest devices (measured on the answers so far)" : "re-deal to split by memory again");
 });

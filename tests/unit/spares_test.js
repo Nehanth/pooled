@@ -31,13 +31,21 @@ Deno.test("spares: planReplicas packs the model and keeps a device free to copy 
   eq(p.idle, [3]);
 });
 
+Deno.test("spares: the device that takes the remainder is the smallest that holds it, so a bigger one can copy it", () => {
+  // host 20 of 28; a 1 GB-ish computer (8 layers) and a 2 GB-ish one (16): the small one takes the
+  // 8 left and the big one copies it (biggest-first would leave only the small one, too small)
+  const p = planReplicas(28, [20, 8, 16], [desk(), desk(), desk()]);
+  eq(p.assigned, [20, 8, 0]);
+  eq([...p.spareOf], [[1, 2]]);
+});
+
 Deno.test("spares: planReplicas returns null when the model needs every device or no spare fits", () => {
   eq(planReplicas(28, [10, 10, 10], [desk(), desk(), desk()]), null, "every device needed");
   // worker holds 10, the only free device can hold 5
   eq(planReplicas(28, [18, 12, 5], [desk(), desk(), desk()]), null, "the free device is too small");
-  // free device of exactly the segment size: no 10% headroom
-  eq(planReplicas(28, [18, 12, 10], [desk(), desk(), desk()]), null, "no headroom");
-  ok(planReplicas(28, [18, 12, 11], [desk(), desk(), desk()]), "with headroom");
+  // two devices of 10 for a 10-layer segment: no 10% headroom
+  eq(planReplicas(28, [18, 10, 10], [desk(), desk(), desk()]), null, "no headroom");
+  eq([...planReplicas(28, [18, 11, 10], [desk(), desk(), desk()]).spareOf], [[2, 1]], "the 10 takes the layers, the 11 copies them");
 });
 
 Deno.test("spares: phones hold layers only when needed, and are never spares", () => {
@@ -51,8 +59,8 @@ Deno.test("spares: phones hold layers only when needed, and are never spares", (
   const q = planReplicas(33, [18, 6, 6, 7], [desk(), phone, desk(), desk()]);
   eq(q, null, "every device needed, the phone included");
   const r = planReplicas(30, [18, 6, 5, 7, 8], [desk(), phone, desk(), desk(), desk()]);
-  eq(r.assigned, [18, 0, 0, 4, 8], "the two biggest computers hold the rest");
-  eq([...r.spareOf], [[3, 2]], "the 5-layer computer copies the 4-layer segment");
+  eq(r.assigned, [18, 0, 4, 0, 8], "the biggest computer, then the smallest that holds what is left");
+  eq([...r.spareOf], [[2, 3]], "the 7-layer computer copies the 4-layer segment");
   eq(r.idle, [1]);
 });
 
