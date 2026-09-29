@@ -17,7 +17,10 @@
 //       </tool_call>
 // Results go back in a user turn as <tool_response> ... </tool_response> blocks, one per call,
 // in call order. detectStyle() reads the GGUF's own chat template (tokenizer.chat_template) so the
-// prompt matches what the model was trained on; the parser accepts both formats either way.
+// prompt matches what the model was trained on; the parser accepts both formats either way, plus
+// the near misses room models write: a ```json fence inside the call, JSON arguments inside
+// <function=NAME>, <function name="x"> / <parameter name="p"> / <invoke> spellings, and several
+// calls in one <tool_call> block (splitCallBody).
 
 // tools: [{ name, description, parameters: JSON schema object }]
 
@@ -62,7 +65,7 @@ export function renderCalls(calls, style = "json") {
 // Returns { name, arguments } or { error, raw } when the model produced something malformed.
 export function parseCallBody(body, schemaFor = () => null) {
   const raw = body;
-  const b = body.trim();
+  const b = unfence(normalizeXmlCall(body).trim());
   const fm = /^<function=([^>\s]+)>([\s\S]*?)(?:<\/function>\s*)?$/.exec(b);
   if (fm) {
     const name = fm[1], args = {};
@@ -72,6 +75,10 @@ export function parseCallBody(body, schemaFor = () => null) {
     const re = /<parameter=([^>\s]+)>\n?([\s\S]*?)(?:\n?<\/parameter>|\n(?=<parameter=)|\n?$)/g;
     let m;
     while ((m = re.exec(fm[2]))) args[m[1]] = coerce(m[2], props[m[1]]);
+    // no <parameter=> at all but a JSON object: <function=serve>\n{"dir": "."}\n</function>
+    if (!Object.keys(args).length && /^\s*\{/.test(fm[2])) {
+      try { const o = parseLooseJSON(unfence(fm[2].trim())); if (o && typeof o === "object" && !Array.isArray(o)) return { name, arguments: o.arguments ?? o.parameters ?? o }; } catch { /* no arguments */ }
+    }
     return { name, arguments: args };
   }
   try {
@@ -91,8 +98,71 @@ export function parseCallBody(body, schemaFor = () => null) {
     if (typeof a === "string") { try { a = parseLooseJSON(a); } catch { /* leave as text */ } }
     return { name: name.trim(), arguments: a ?? {} };
   } catch (e) {
-    return { error: "tool call is not valid JSON: " + e.message, raw };
+    const msg = String(e.message || e);
+    return { error: "tool call is not valid JSON: " + (msg.length > 120 ? msg.slice(0, 120) + "…" : msg), raw };
   }
+}
+
+// The XML call spellings other models use, as the Qwen one: <function name="x"> / <invoke name="x">
+// for <function=x>, <parameter name="p"> for <parameter=p>, and a quoted <function="x">. Only tags
+// at the start of a line (or right after the opener) change, so a value that merely quotes one is
+// left alone.
+export function normalizeXmlCall(text) {
+  if (!/<(?:function|invoke|parameter)[\s="']/.test(text)) return text;
+  return text
+    .replace(/(^|\n)([ \t]*)<(?:function|invoke)\s+name\s*=\s*["']?([^"'>\s]+)["']?\s*>/g, "$1$2<function=$3>")
+    .replace(/(^|\n)([ \t]*)<\/invoke>/g, "$1$2</function>")
+    .replace(/(^|\n)([ \t]*)<function=["']([^"'>\s]+)["']\s*>/g, "$1$2<function=$3>")
+    .replace(/(^|\n)([ \t]*)<parameter\s+name\s*=\s*["']?([^"'>\s]+)["']?\s*>/g, "$1$2<parameter=$3>")
+    .replace(/(^|\n)([ \t]*)<parameter=["']([^"'>\s]+)["']\s*>/g, "$1$2<parameter=$3>");
+}
+
+// a call body wrapped in a Markdown fence (```json ... ```), as small models write it
+const unfence = (s) => s.replace(/^```[\w-]*[ \t]*\n?/, "").replace(/\n?```\s*$/, "");
+
+// One <tool_call> body that holds several calls, as separate bodies: <function=a>..</function>
+// <function=b>..</function> (a stray <tool_call> between them, the closer forgotten, is dropped),
+// a JSON array of calls, or JSON objects one after another. A body with one call comes back as is.
+export function splitCallBody(body) {
+  const b = normalizeXmlCall(body);
+  // (both tags on lines of their own: a value that merely contains them stays one call)
+  const between = /(?<=(?:^|\n)[ \t]*<\/function>)[ \t]*\n\s*(?:<\/?tool_call>\s*)*(?=<function=[^>\s<]+>)/;
+  if (between.test(b)) return b.split(new RegExp(between.source, "g")).filter((s) => s.trim());
+  const t = unfence(b.trim());
+  if (!t.startsWith("{") && !t.startsWith("[")) return [body];
+  const named = (o) => o && typeof o === "object" && [o.name, o.tool, o.function?.name ?? o.function].some((v) => typeof v === "string");
+  try {
+    const o = JSON.parse(t);
+    if (Array.isArray(o) && o.length > 1 && o.every(named)) return o.map((x) => JSON.stringify(x));
+    return [body];
+  } catch { /* maybe several objects */ }
+  const parts = [];
+  let at = 0;
+  while (at < t.length) {
+    const s = t.indexOf("{", at);
+    if (s < 0 || t.slice(at, s).trim()) break;
+    const e = objectEnd(t, s);
+    if (e < 0) break;
+    parts.push(t.slice(s, e));
+    at = e;
+  }
+  if (parts.length > 1 && !t.slice(at).trim()) {
+    try { if (parts.every((p) => named(JSON.parse(p)))) return parts; } catch { /* not clean JSON */ }
+  }
+  return [body];
+}
+
+// the index just past the JSON object that starts at `at` (strings respected), or -1 when it never closes
+function objectEnd(text, at) {
+  let depth = 0, inStr = false, esc = false;
+  for (let i = at; i < text.length; i++) {
+    const c = text[i];
+    if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; continue; }
+    if (c === '"') inStr = true;
+    else if (c === "{" || c === "[") depth++;
+    else if ((c === "}" || c === "]") && --depth === 0) return i + 1;
+  }
+  return -1;
 }
 
 // JSON.parse, then the near misses small models write for a call: extra or missing closing braces,
@@ -175,8 +245,10 @@ export class ToolCallParser {
       } else {
         const j = this.buf.indexOf("</tool_call>");
         if (j < 0) break;
-        const c = parseCallBody(this.buf.slice(0, j), this.schemaFor);
-        calls.push(c); this.calls.push(c);
+        for (const body of splitCallBody(this.buf.slice(0, j))) {
+          const c = parseCallBody(body, this.schemaFor);
+          calls.push(c); this.calls.push(c);
+        }
         this.buf = this.buf.slice(j + "</tool_call>".length);
         this.inCall = false; this.eatNL = true;
       }
@@ -189,11 +261,12 @@ export class ToolCallParser {
       // a model that stops right after </function> without closing the call still meant it; without
       // </function> the answer was cut mid-call (length cap) and its last value is a fragment
       // also accept a call that ends right after a closed parameter (seen from Qwen: no </function>)
-      let done = /<\/function>/.test(this.buf) || /^\s*<function=[^>\s]+>[\s\S]*<\/parameter>\s*$/.test(this.buf);
+      const buf = normalizeXmlCall(this.buf);
+      let done = /<\/function>/.test(buf) || /^\s*<function=[^>\s]+>[\s\S]*<\/parameter>\s*$/.test(buf);
       // a JSON call the model ended without </tool_call>: complete if it parses (loosely)
       if (!done && /^\s*\{/.test(this.buf)) { try { const o = parseLooseJSON(this.buf.trim()); done = !!o && typeof o.name === "string" && (o.arguments !== undefined || o.parameters !== undefined); } catch { /* still open */ } }
-      const c = done ? parseCallBody(this.buf, this.schemaFor) : { error: "unterminated <tool_call>", raw: this.buf, open: true };
-      r.calls.push(c); this.calls.push(c);
+      const cs = done ? splitCallBody(this.buf).map((b) => parseCallBody(b, this.schemaFor)) : [{ error: "unterminated <tool_call>", raw: this.buf, open: true }];
+      r.calls.push(...cs); this.calls.push(...cs);
     } else r.text = this.buf;
     this.buf = ""; this.inCall = false;
     return r;

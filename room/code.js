@@ -405,7 +405,7 @@ export async function initCode(api, { mock = null } = {}) {
         break;
       case "usage": ctxMeter(); break;
       case "limit": note(`stopped after ${e.steps} steps`); break;
-      case "stuck": note("stopped: the same tool call failed three times in a row" + (api.peers().length ? ". With other devices in the room, the split model may be producing bad output: try it on one device, or re-deal" : ". Try rephrasing the request, or a bigger model"), true); break;
+      case "stuck": note("stopped: " + (e.why?.replace(/[.…]+$/, "") || "the same tool call failed three times in a row") + (api.peers().length ? ". With other devices in the room, the split model may be producing bad output: try it on one device, or re-deal" : ". Try rephrasing the request, or a bigger model"), true); break;
     }
   }
   function stats(r, t0, gen0) {

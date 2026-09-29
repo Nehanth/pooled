@@ -14,7 +14,7 @@
 // Events (onEvent): step, delta (raw streamed text), text (visible text), call-live, tool-start,
 // tool, usage, compacted, trimmed, stopped, stuck, done, limit, card (a recovery note was added,
 // harness/cards.js).
-import { toolsSystemPrompt, toolResponses, ToolCallParser, parseCallBody, parseLooseJSON } from "./tools.js";
+import { toolsSystemPrompt, toolResponses, ToolCallParser, parseCallBody, parseLooseJSON, normalizeXmlCall } from "./tools.js";
 import { pickCard, hint, PRIORITY, MAX_PER } from "./cards.js";
 import { fixArgs, fixToolName } from "./argfix.js";
 
@@ -26,6 +26,21 @@ const CLEAN = /^serving [^\n]*\n(?:loaded in \d+ ms · no errors|still loading a
 // said after a clean serve to a small (JSON-style) model, which otherwise tends to write the same files again
 export const SERVED_OK = "\nnext: the page loads with no errors. If it does what was asked, reply with one short line saying what you built (no tool call). Otherwise fix it with edit_file.";
 export const CONTEXT_FULL = "context full: start a new task (the files are kept)";
+// the same failure this many steps in a row stops the request (one step before, the model is warned)
+export const STUCK_AFTER = 3;
+// the same page error seen by this many checks, each after a change: a note at WARN, a stop at STOP
+export const PAGE_ERR = { warn: 3, stop: 5 };
+
+// the first line of a result, short enough for a note or the stop message
+export const firstLine = (s, max = 160) => { const l = String(s ?? "").split("\n")[0].trim(); return l.length > max ? l.slice(0, max) + "…" : l; };
+// the first page error a serve / preview_logs result reports ("game.js:41:5 ReferenceError: ctx is
+// not defined"), or null; "no errors" results give ""
+export function pageError(name, result) {
+  if (name !== "serve" && name !== "preview_logs") return null;
+  const m = /^\[[\d.]+s\] error (.*?)(?: ×\d+)?$/m.exec(result);
+  if (m) return firstLine(m[1]);
+  return CLEAN.test(result) ? "" : null;
+}
 
 // head and tail of a long tool result (errors are usually at the end, headers at the start)
 export function capResult(s, max) {
@@ -72,6 +87,7 @@ export class Agent {
     const R = this.reqs[req] = { calls: [], done: false, answer: "", cards: {} };
     this.turns.push({ role: "user", text: userText, req });
     let calls = 0, shown = "", failRun = 0, lastFail = "", empty = 0, mut = 0;
+    let pageErr = { sig: "", n: 0, mut: -1 };   // the page error the checks keep reporting, and after how many changes
     let prevStep = new Map();   // the last step's calls: name+args -> { step, result, mut }
     let cleanAt = -1;           // mut when a serve last loaded with no errors (-1: not since the last change)
     const fails = new Map();    // a failed call (name+args) -> { n: times, mut } since the last change
@@ -172,7 +188,8 @@ export class Agent {
         const bare = bareCalls(shown, this.byName);
         // or as a bare JSON object ({"name": "write_file", "arguments": {...}}), seen from Qwen3 1.7B
         if (!bare.length) bare.push(...bareJsonCalls(shown, this.byName));
-        // or a <function=NAME> block whose <tool_call> opener came out garbled ("<tool_tool_calls>")
+        // or <function=NAME> / <invoke name="NAME"> blocks whose <tool_call> opener came out garbled
+        // ("<tool_tool_calls>") or missing
         if (!bare.length) bare.push(...bareFunctionCalls(shown, this.byName));
         if (bare.length) { for (const c of bare) c.bare = true; found.push(...bare); }
       }
@@ -224,7 +241,7 @@ export class Agent {
         // the same failing call again with other calls in between (read_file, edit_file, read_file,
         // the same edit_file...): not caught as a repeat of the last step, so counted here
         let n = 0;
-        if (key && /^error/.test(r)) { const f = fails.get(key); n = f && f.mut === mut ? f.n + 1 : 1; fails.set(key, { n, mut }); }
+        if (key && /^(?:error|unchanged)/.test(r)) { const f = fails.get(key); n = f && f.mut === mut ? f.n + 1 : 1; fails.set(key, { n, mut }); }
         again.push(n);
         reps.push(rep);
         if (key) cur.set(key, rep ? prev : { step, result: r, mut });
@@ -245,20 +262,43 @@ export class Agent {
         return { text, steps: step, calls, reason: "done" };
       }
       this._card(R, found, results, reps.map((x, i) => x || again[i] >= 2), step);
-      this.turns.push({ role: "user", text: toolResponses(results), req, calls: briefs });
-      if (signal?.aborted) return stopped(step);
       // the same failure three steps in a row: the model (or the room) is stuck, so stop and say so
-      // instead of burning the context on retries
-      const failed = plain.length && plain.every((r, i) => reps[i] || /^error/.test(r));
+      // instead of burning the context on retries. "unchanged" (a write of what the file already
+      // has) did nothing either, so it counts as a failure here.
+      const failed = plain.length && plain.every((r, i) => reps[i] || /^(?:error|unchanged)/.test(r));
       const sig = failed ? plain.map((r) => r.replace(/\d+/g, "#").slice(0, 80)).join("|") : "";
       failRun = failed && (sig === lastFail || failRun === 0) ? failRun + 1 : failed ? 1 : 0;
       lastFail = sig;
       // or one failing call made a third time with nothing changed in between
-      const same = plain.length && plain.every((r, i) => again[i] >= 3);
-      if (failRun >= 3 || same) {
+      const same = plain.length && plain.every((r, i) => again[i] >= STUCK_AFTER);
+      // the page keeps reporting the same first error although the model keeps changing files
+      let bumped = false;
+      for (let i = 0; i < found.length; i++) {
+        const pe = pageError(found[i].name, plain[i]);
+        if (pe === null || reps[i]) continue;
+        const k = pe.replace(/\d+/g, "#");
+        if (!pe) pageErr = { sig: "", n: 0, mut };
+        else if (k !== pageErr.sig) pageErr = { sig: k, n: 1, mut, text: pe };
+        else if (mut > pageErr.mut) { pageErr = { ...pageErr, n: pageErr.n + 1, mut, text: pe }; bumped = true; }
+      }
+      const pageStuck = pageErr.n >= PAGE_ERR.stop && pageErr.mut === mut;
+      // one step before the stop, say what is being repeated so the model can change course
+      const last = results.length - 1;
+      if (!pageStuck && failRun === STUCK_AFTER - 1 && !same) {
+        results[last] += `\nnote: this failed the same way last step (${firstLine(plain.find((r) => /^(?:error|unchanged)/.test(r)) ?? plain[0], 100)}). Do something different: the task stops if it fails a third time.`;
+      } else if (!pageStuck && pageErr.n === PAGE_ERR.warn && bumped) {
+        results[last] += `\nnote: the page showed this same error after each of your last ${pageErr.n - 1} changes: ${pageErr.text}. Those changes did not fix it: read_file the lines it names and fix the cause there.`;
+      }
+      this.turns.push({ role: "user", text: toolResponses(results), req, calls: briefs });
+      if (signal?.aborted) return stopped(step);
+      if (failRun >= STUCK_AFTER || same || pageStuck) {
+        const f = plain.findIndex((r) => /^(?:error|unchanged)/.test(r)), i = Math.max(0, f), n = same ? STUCK_AFTER : failRun;
+        const why = pageStuck ? `the page showed the same error after ${pageErr.n - 1} changes: ${pageErr.text}`
+          : f < 0 ? `${briefCall(found[i])} was repeated ${n} times with nothing changed`
+          : `${briefCall(found[i])} failed ${n} times in a row: ${firstLine(plain[i])}`;
         finish(); close();
-        this.onEvent({ type: "stuck", step, error: results[0] });
-        return { text: "Stopped: the same tool call failed three times in a row.", steps: step, calls, reason: "stuck" };
+        this.onEvent({ type: "stuck", step, error: results[0], why });
+        return { text: `Stopped: ${why}`, steps: step, calls, reason: "stuck" };
       }
     }
     finish(); close();
@@ -482,6 +522,7 @@ function jsonEnd(text, at) {
 export function bareFunctionCalls(text, byName) {
   const out = [];
   if (!text || !byName?.size) return out;
+  text = normalizeXmlCall(text);
   const re = /<function=([^>\s]+)>[\s\S]*?<\/function>/g;
   let m;
   while ((m = re.exec(text))) {
