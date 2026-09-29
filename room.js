@@ -371,6 +371,10 @@ function updateCluster() {
   $("peers-n").textContent = String(all.length);
   renderPool(pledged);
 }
+// the device list scrolls past four and a half rows (p2p.html #ap-devs): fade its bottom while more rows are below
+function devsEdge() { const l = $("ap-devs"); l.classList.toggle("more", l.scrollTop < l.scrollHeight - l.clientHeight - 1); }
+$("ap-devs").addEventListener("scroll", devsEdge, { passive: true });
+if (typeof ResizeObserver === "function") new ResizeObserver(devsEdge).observe($("ap-devs"));
 // The model card's side: what the room pools (one segment per device, in its colour, with a tick at
 // each model's need), what this device lends (+/-), and the invite (QR, code, copy link).
 function renderPool(pledged) {
@@ -390,6 +394,7 @@ function renderPool(pledged) {
   if (selNeed) { const [k, gb] = selNeed, short = gb - pledged; $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b><span>${short > 0 ? `${+short.toFixed(1)} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0); }
   $("ap-devs").innerHTML = devs.map((d) => `<li style="--sw:${devColor(d.name)}"><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB</b></li>`).join("")
     || '<li class="none">No device with WebGPU yet</li>';
+  devsEdge();
   const can = !!myMeta.webgpu;
   $("ap-step").hidden = !can; $("ap-no").hidden = can;
   if (can) { if (document.activeElement !== $("ap-gb")) $("ap-gb").value = myMeta.contribGB; $("ap-minus").disabled = myMeta.contribGB <= lendMin(); $("ap-plus").disabled = myMeta.contribGB >= 64; }
