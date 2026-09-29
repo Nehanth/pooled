@@ -538,8 +538,9 @@ one shared agent session per room, run on the model host. A member's request goe
 `ai-code-ask` and queues (six at most, two per member) behind the current run; its bubble carries
 the member's name. The member who asked, or the host, answers its approvals (`ai-code-approve`)
 and can stop it (`ai-code-stop`); others see "waiting for <name> to approve". Any member can start
-a new task, open or create a project saved in the host's browser, or tick auto-approve
-(`ai-code-cmd`); `ai-code-projects` mirrors the host's project list and `ai-code-sync` asks for the
+a new task, open or create a project saved in the host's browser (empty, or from a starter
+template in harness/templates.js: `{cmd: "new", name, tpl}`, the host checks `tpl` against its
+list), or tick auto-approve (`ai-code-cmd`); `ai-code-projects` mirrors the host's project list and `ai-code-sync` asks for the
 session on opening Code. The host alone opens a folder from disk, saves in the editor, and drives
 a folder project (what the agent reads there would reach the asker's screen). With "Only me" or
 "Whoever asked", Code stays the host's. A line above the log says where the agent runs and where

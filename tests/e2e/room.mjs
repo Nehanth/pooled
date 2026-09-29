@@ -45,7 +45,7 @@ const srv = http.createServer((q, r) => {
   if (!p.startsWith(ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { r.statusCode = 404; r.end(); return; }
   r.setHeader("content-type", MIME[path.extname(p)] || "application/octet-stream"); fs.createReadStream(p).pipe(r);
 }).listen(PORT, "127.0.0.1");
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?wire=${WIRE}` + (CLOUD ? "" : `&signal=127.0.0.1:${SIGNAL_PORT}`);
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?split=memory&wire=${WIRE}` + (CLOUD ? "" : `&signal=127.0.0.1:${SIGNAL_PORT}`);
 import { spawn } from "child_process";
 let peerServer = null;
 if (!CLOUD) {
