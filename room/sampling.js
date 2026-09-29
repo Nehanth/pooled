@@ -54,16 +54,25 @@ export function aiSampleTop(cands, temp = 0.8) {
 // candidates object (GPU sampling) or logits vector?
 const isCands = (x) => !!x && x.ids instanceof Uint32Array && !!x.vals;
 
+// logits -> token id for a temperature and top-k: temp 0 is greedy. The returned function carries
+// .gpu = { kind: "greedy" } | { kind: "topk", k, temp }: an engine with gpuSample on then samples on
+// the GPU and hands it { ids, vals, bad } (k pairs) instead of the logits, and it accepts either. A
+// wrapper that masks the logits first (the tool-name constraint) is a new function without .gpu,
+// so it still gets the full logits. topk is clamped to 1..64 (engine/topk.js TOPK_MAX) so GPU
+// sampling keeps working for any value an API client asks for.
+export const TOPK_LIMIT = 64;
+export function makeSampler({ temp = 0.8, topK = 40 } = {}) {
+  const t = Number.isFinite(+temp) && +temp > 0 ? +temp : 0;
+  const k = Math.max(1, Math.min(TOPK_LIMIT, Math.round(+topK) || 40));
+  const f = t === 0
+    ? (x) => (isCands(x) ? x.ids[0] : greedy(x))
+    : (x) => (isCands(x) ? aiSampleTop(x, t) : aiSample(x, t, k));
+  f.gpu = t === 0 ? { kind: "greedy" } : { kind: "topk", k, temp: t };
+  return f;
+}
+
 // logits -> token id for a preset key (unknown keys fall back to creative).
-// The returned function carries .gpu = { kind: "greedy" } | { kind: "topk", k, temp }: an engine
-// with gpuSample on then samples on the GPU and hands it { ids, vals, bad } (k pairs) instead of
-// the logits, and it accepts either. A wrapper that masks the logits first (the tool-name
-// constraint) is a new function without .gpu, so it still gets the full logits.
 export function pickSampler(key) {
   const p = SAMPLING[key] || SAMPLING.creative;
-  const f = p.temp === 0
-    ? (x) => (isCands(x) ? x.ids[0] : greedy(x))
-    : (x) => (isCands(x) ? aiSampleTop(x, p.temp) : aiSample(x, p.temp, p.topk));
-  f.gpu = p.temp === 0 ? { kind: "greedy" } : { kind: "topk", k: p.topk, temp: p.temp };
-  return f;
+  return makeSampler({ temp: p.temp, topK: p.topk });
 }
