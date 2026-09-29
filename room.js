@@ -1210,6 +1210,7 @@ let ai = {
   chain: [],             // host: worker peer ids in pipeline order
   next: null,            // worker: peer id to forward hidden to, or "host"
   readyPeers: new Set(),
+  relinks: new Map(),    // host: device id -> deadline, while the device before it opens a fresh link to it (aiRejoin)
   pos: 0,
   waiters: new Map(),    // host: lap key (pos, or "b" + basePos) -> { res, rej } for a frame on its way round the chain
   busy: false,
@@ -1740,6 +1741,7 @@ async function aiStart(modelArg) {
     ai.role = "host";
     ai.degraded = false;
     ai.readyPeers = new Set();
+    ai.relinks = new Map();
     ai.teleBy = new Map();
     const modelKey = $("ai-model").value;
     const M = MODELS[modelKey];
@@ -1938,16 +1940,23 @@ function aiRejoin(newId, name) {
   clearTimeout(ai.idleRedeal);
   const { msg } = ai.plan.get(name);
   const fresh = { ...msg, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: peer.id };
-  if (i > 0) sendTo(ai.chain[i - 1], { t: "ai-next", next: newId, relink: 1 });
+  // the device before it opens a fresh link and says so (ai-linked): until then the chain is not whole,
+  // even with every device ready (the first frames of a resumed answer would go down the dead link)
+  if (i > 0) { sendTo(ai.chain[i - 1], { t: "ai-next", next: newId, relink: 1 }); ai.relinks.set(newId, Date.now() + RELINK_MS); setTimeout(aiMaybeReady, RELINK_MS + 100); }
   sendTo(newId, fresh);
   ai.fed = null; ckptClear(true);           // its fresh engine holds nothing: re-prefill next time
   log("room", `${name} came back into its slot`);
   aiStatus(`${name} reconnected, getting its layers back…`);
   $("ai-row").style.display = ai.readyPeers.size >= ai.chain.length ? "flex" : "none";
 }
+const RELINK_MS = 15000;   // how long the host waits for an ai-linked (an older device never sends one)
+function relinking() {
+  for (const [id, until] of ai.relinks) if (Date.now() > until || !ai.chain.includes(id)) ai.relinks.delete(id);
+  return ai.relinks.size > 0;
+}
 function aiMaybeReady() {
   if (ai.role !== "host" || !ai.engine) return;
-  if (ai.readyPeers.size < ai.chain.length) return;
+  if (ai.readyPeers.size < ai.chain.length || relinking()) return;
   const n = ai.chain.length + 1;
   ai.degraded = false;
   clearTimeout(ai.idleRedeal);
@@ -2495,7 +2504,7 @@ async function roomRecover(err, kind, status, aborted) {
   const say = (s) => { status(s); aiStatus(s); };
   try {
     await waitForRoom({
-      ready: () => !!ai.engine && !ai.degraded && !ai.loadingShard && ai.readyPeers.size >= ai.chain.length && ai.chain.every((id) => conns.has(id)),
+      ready: () => !!ai.engine && !ai.degraded && !ai.loadingShard && ai.readyPeers.size >= ai.chain.length && ai.chain.every((id) => conns.has(id)) && !relinking(),
       gone: missingNames,
       redeal: async () => {
         log("room", `${missingNames().join(", ")} did not come back in ${Math.round(REJOIN_GRACE_MS / 1000)} s: re-dealing the layers (experimental auto re-deal)`);
@@ -2988,7 +2997,13 @@ async function aiOnData(from, d) {
     case "ai-next":
       // relink: the device after this one came back under the same id; the old link to it is dead
       if (d.relink && conns.has(d.next)) dropLink(d.next, "came back: opening a fresh link");
-      ai.next = d.next; ensureLink(d.next);
+      ai.next = d.next;
+      ensureLink(d.next).then((ok) => { if (d.relink) sendTo(ai.hostId || from, { t: "ai-linked", next: d.next, ok }); });
+      break;
+    case "ai-linked":   // worker -> host: its fresh link to a device that came back is up
+      if (ai.role !== "host" || !ai.chain.includes(from)) break;
+      ai.relinks.delete(d.next);
+      aiMaybeReady();
       break;
     case "ai-layers":
       ai.layersByName = d.by; loadCardRender();
