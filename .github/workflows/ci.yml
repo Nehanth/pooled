@@ -25,6 +25,7 @@ jobs:
         run: |
           for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js scripts/*.mjs; do node --check "$f"; done
       - name: Unit tests (no GPU)
+        id: unit
         # the unit tests import node: builtins via tests/weight_cache.js; without npm ci there is no local
         # node_modules, so Deno must not read package.json (it would look for @types/node there)
         env: { DENO_NO_PACKAGE_JSON: "1" }
@@ -35,7 +36,8 @@ jobs:
         run: deno run --allow-read tests/unit/generator_smoke.js
       - name: No failed, errored or unexplained skipped unit tests
         # deno test only fails on failures; this also fails on 0 tests and on a skip not listed in the script
-        if: ${{ !cancelled() }}
+        # (runs after a test failure too, for the list; not when an earlier step kept the tests from running)
+        if: ${{ !cancelled() && steps.unit.outcome != 'skipped' }}
         run: node scripts/check-test-report.mjs unit-report.xml
   browser:
     # Code mode's preview in headless Chromium, no GPU needed. Optional until it has a track record in CI.

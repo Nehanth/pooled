@@ -819,7 +819,7 @@ $("compute-open").addEventListener("click", () => compute.open());
 // the header's dots button says whether this device is working: "on" while it holds layers
 function deviceMark() {
   const s = computeState(), b = $("compute-open");
-  const on = s.lo != null && s.hi != null && s.phase !== "idle";
+  const on = s.lo != null && s.hi != null && s.hi > s.lo && s.phase !== "idle";   // lo == hi holds nothing
   const tip = on ? (s.phase === "loading" ? `This device \u00b7 loading layers ${s.lo + 1}\u2013${s.hi}` : `This device \u00b7 holds layers ${s.lo + 1}\u2013${s.hi}`) : "This device";
   if (b.dataset.tip === tip && b.classList.contains("on") === on) return;
   b.classList.toggle("on", on);

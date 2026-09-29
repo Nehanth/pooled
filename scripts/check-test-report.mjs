@@ -3,7 +3,7 @@
 // ran at all (a bad glob), or when a test was skipped that is not on the list below. deno test
 // already exits non-zero on failures; this catches the quiet ways a suite can stop testing.
 //   node scripts/check-test-report.mjs report.xml
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 // Tests that may skip, by name prefix, and why. Anything else that skips fails CI.
 export const MAY_SKIP = [
@@ -37,6 +37,7 @@ export function problems(report, allow = MAY_SKIP) {
 if (import.meta.main ?? process.argv[1]?.endsWith("check-test-report.mjs")) {
   const file = process.argv[2];
   if (!file) { console.error("usage: node scripts/check-test-report.mjs report.xml"); process.exit(2); }
+  if (!existsSync(file)) { console.error(`::error::no test report at ${file}: deno test stopped before writing it`); process.exit(1); }
   const r = parseJunit(readFileSync(file, "utf8"));
   const bad = problems(r);
   console.log(`${r.total} tests, ${r.failed.length} failed, ${r.skipped.length} skipped (allowed: ${MAY_SKIP.map(([p]) => p).join(", ")})`);
