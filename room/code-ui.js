@@ -511,7 +511,10 @@ export function codeUI({ onMode = () => {} } = {}) {
   // project (the preview reloads, the agent is told); peers and proposed files open read-only.
   let fileClick = () => {}, saveFile = null;
   const drafts = new Map();   // path -> unsaved text, kept while other files are open
-  let edPath = null, edBase = "", edRO = true, hlRaf = 0;
+  const draftFrom = new Map();   // path -> the file's text when that draft was started
+  // edBase: the file as it is now; edFrom: the file as it was when the unsaved edits began. They
+  // differ when the agent wrote the file underneath the edits: Save then asks before overwriting.
+  let edPath = null, edBase = "", edFrom = "", edRO = true, hlRaf = 0, edForce = false;
   let hlPath = "", proposed = null;   // the colours of a pathless view (a proposed file); which proposed file shows
   const ta = $("ed-text"), hl = $("ed-hl"), gutter = $("ed-ln"), edBox = $("ed");
   const PHONE = matchMedia("(max-width: 640px)");
@@ -543,6 +546,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (paths.length > 500) t.append(h("div", "none", `(+${paths.length - 500} more)`));
   }
   const dirty = () => edPath != null && !edRO && ta.value !== edBase;
+  const conflict = () => dirty() && edFrom !== edBase;
   function paint() {
     hlRaf = 0;
     hl.innerHTML = highlight(edPath || hlPath, ta.value) + "\n";
@@ -550,22 +554,27 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (+gutter.dataset.n !== n) { gutter.dataset.n = n; gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n"); }
   }
   function edState() {
-    const d = dirty();
-    if (edPath != null && !edRO) { if (d) drafts.set(edPath, ta.value); else drafts.delete(edPath); }
+    const d = dirty(), c = conflict();
+    if (!d) { edFrom = edBase; edForce = false; }
+    if (edPath != null && !edRO) { if (d) { drafts.set(edPath, ta.value); draftFrom.set(edPath, edFrom); } else { drafts.delete(edPath); draftFrom.delete(edPath); } }
     $("code-tree").querySelector(`.f[data-path="${CSS.escape(edPath || "")}"]`)?.classList.toggle("dirty", d);
     $("ed-save").disabled = !d; $("ed-save").hidden = edRO;
     $("ed-revert").hidden = !d;
+    $("ed-revert").textContent = c ? "Reload" : "Revert";
+    $("ed-revert").title = c ? "Drop your edits and load the file as it is now" : "";
     const st = $("ed-state");
     if (st.dataset.flash && !d) return;
-    st.textContent = edRO ? "read only" : d ? "unsaved" : "";
+    st.textContent = edRO ? "read only" : c ? (edForce ? "Save again to overwrite the agent's change" : "changed by the agent · Reload, or Save to keep yours") : d ? "unsaved" : "";
     st.className = d ? "dirty" : "";
   }
   // open a file in the editor: text, and whether it can be saved (label: why it is shown, e.g. a proposed file)
   function openFile(path, text, { readOnly = !host || !saveFile, label = null, hl = path } = {}) {
-    if (edPath != null && dirty()) drafts.set(edPath, ta.value);
-    edPath = path; edRO = readOnly || path == null; hlPath = hl || ""; proposed = null;
+    if (edPath != null && dirty()) { drafts.set(edPath, ta.value); draftFrom.set(edPath, edFrom); }
+    edPath = path; edRO = readOnly || path == null; hlPath = hl || ""; proposed = null; edForce = false;
     edBase = text ?? "";
-    ta.value = !edRO && drafts.has(path) ? drafts.get(path) : edBase;
+    const draft = !edRO && drafts.has(path);
+    ta.value = draft ? drafts.get(path) : edBase;
+    edFrom = draft ? draftFrom.get(path) ?? edBase : edBase;
     ta.readOnly = edRO;
     $("ed-path").textContent = label || path || "";
     $("ed-path").title = label || path || "";
@@ -576,27 +585,30 @@ export function codeUI({ onMode = () => {} } = {}) {
   }
   function viewFile(text, label = null, hl = null) {
     if (text == null) {
-      proposed = null; edPath = null; edBase = ""; ta.value = ""; edRO = true; cp.classList.remove("ed-open");
+      proposed = null; edPath = null; edBase = edFrom = ""; ta.value = ""; edRO = true; cp.classList.remove("ed-open");
       edBox.hidden = true; $("ed-bar").hidden = true; $("ed-empty").hidden = false;
       return;
     }
     openFile(null, text, { readOnly: true, label: label || "", hl });
   }
-  // the file changed underneath (the agent wrote it): take the new text unless there are unsaved edits
+  // the file changed underneath (the agent wrote it): take the new text unless there are unsaved
+  // edits; with edits, keep them and say so (edFrom stays the text they were made against)
   function fileChanged(path, text) {
     if (path !== edPath || text == null) return;
-    if (dirty()) { edBase = text; edState(); return; }
+    if (dirty()) { edBase = text; edForce = false; edState(); return; }
     if (ta.value === text) return;
     const top = edBox.scrollTop;
     edBase = text; ta.value = text; paint(); edState(); edBox.scrollTop = top;
   }
   async function save() {
     if (!dirty() || !saveFile) return;
+    // the agent changed the file since these edits began: the first Save only asks
+    if (conflict() && !edForce) { edForce = true; edState(); return; }
     const path = edPath, text = ta.value, st = $("ed-state");
     $("ed-save").disabled = true; st.textContent = "saving…";
     try {
       await saveFile(path, text);
-      if (edPath === path) { edBase = text; drafts.delete(path); st.dataset.flash = "1"; st.textContent = "saved"; st.className = "ok"; setTimeout(() => { st.removeAttribute("data-flash"); edState(); }, 1800); }
+      if (edPath === path) { edBase = edFrom = text; edForce = false; drafts.delete(path); draftFrom.delete(path); st.dataset.flash = "1"; st.textContent = "saved"; st.className = "ok"; setTimeout(() => { st.removeAttribute("data-flash"); edState(); }, 1800); }
       edState();
       say(`saved ${path}`);
     } catch (e) { st.textContent = "not saved: " + e.message; st.className = "err"; $("ed-save").disabled = false; }
@@ -623,7 +635,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (e.key === "Escape") { ta.blur(); e.preventDefault(); }
   });
   $("ed-save").onclick = save;
-  $("ed-revert").onclick = () => { if (edPath == null) return; drafts.delete(edPath); ta.value = edBase; paint(); edState(); ta.focus(); };
+  $("ed-revert").onclick = () => { if (edPath == null) return; drafts.delete(edPath); draftFrom.delete(edPath); ta.value = edFrom = edBase; paint(); edState(); ta.focus(); };
   // a long proposed file, from its approval card (host only): shown read-only in the editor
   function viewFull(path, text) {
     outTab("files");
