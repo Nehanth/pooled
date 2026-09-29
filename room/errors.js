@@ -82,7 +82,8 @@ export function joinStep(ms, ice) {
 // this module words its own message and ignores that bye, an older tab shows the bye as it is.
 // `name`/`theyHost` describe the other device, `me`/`iAmHost` this one.
 export function versionMismatch({ mine, theirs, name, theyHost = false, me, iAmHost = false }) {
-  theirs = theirs ?? 1;
+  // `theirs` comes off the wire: a missing one is 1, anything else not a small whole number shows as "?"
+  theirs = theirs == null ? 1 : Number.isInteger(theirs) && theirs >= 0 && theirs < 1e6 ? theirs : "?";
   return { local: versionLine(name, theyHost, theirs, mine), remote: versionLine(me, iAmHost, mine, theirs) };
 }
 // how the reader's tab (on `reader`) should read the other device (`who`, on `other`)
@@ -90,7 +91,8 @@ function versionLine(who, whoHost, other, reader) {
   const label = whoHost ? "This room's host" : who || "A device";
   const again = whoHost ? ", then join again" : "";
   const nums = `(protocol ${other}, this tab ${reader})`;
-  return other < reader
+  return other === "?" || reader === "?" ? `${label} is on a different version of Pooled ${nums}. Reload both pages so they match${again}.`
+    : other < reader
     ? `${label} is on an older version of Pooled ${nums}. Ask ${whoHost ? "the host" : "them"} to reload the page${again}.`
     : `${label} is on a newer version of Pooled ${nums}. Reload this page to update${again}.`;
 }

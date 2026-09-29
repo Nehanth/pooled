@@ -85,3 +85,11 @@ Deno.test("errors: a peer from before versioning counts as protocol 1", () => {
   sentence(m.local); sentence(m.remote);
   ok(/A device is on/.test(versionMismatch({ mine: 4, theirs: 3 }).local), "no name");
 });
+Deno.test("errors: a version that is not a small whole number shows as ? and asks both to reload", () => {
+  for (const v of ["4<b>", { x: 1 }, 4.5, -1, 1e9, "x".repeat(500)]) {
+    const m = versionMismatch({ mine: 4, theirs: v, name: "otter", me: "host", iAmHost: true });
+    ok(/protocol \?, this tab 4/.test(m.local) && /protocol 4, this tab \?/.test(m.remote), m.local + " | " + m.remote);
+    ok(/different version .*Reload both pages/.test(m.local) && /different version .*then join again\.$/.test(m.remote), m.remote);
+    sentence(m.local); sentence(m.remote);
+  }
+});

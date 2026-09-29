@@ -539,6 +539,7 @@ function onData(from, d) {
     case "hello":
       // one protocol per room: a tab from an older or newer deploy is told to reload
       if (d.v !== PROTOCOL) { versionRefused(from, d); break; }
+      versionSeen.delete(from);   // back on the same version (a reload): its bye counts again
       // a peer picks its own name: keep it a short plain string (it is also escaped wherever it is shown)
       d.name = String(d.name ?? from).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(from).slice(0, 8);
       e.name = d.name; e.meta = d.meta;
@@ -736,11 +737,12 @@ async function start(create, resume = null) {
     $("join-status").textContent = "Reaching the other devices…";
     const conn = peer.connect(PREFIX + code, { reliable: true });
     // "still connecting" after a few seconds; more time while the two devices are still finding a path
-    const t0 = performance.now();
+    const t0 = performance.now(), me = peer;
     const timeout = setInterval(() => {
-      if (!$("join-btn").disabled) { clearInterval(timeout); return; }   // failed already (peer.on("error"))
+      // failed already (peer.on("error")), or a newer Join press owns the screen now
+      if (peer !== me || !$("join-btn").disabled) { clearInterval(timeout); return; }
       const step = joinStep(performance.now() - t0, conn.peerConnection?.iceConnectionState);
-      if (step.fail) { clearInterval(timeout); joinFailed(step.fail); }
+      if (step.fail) { clearInterval(timeout); try { conn.close(); } catch {} joinFailed(step.fail); }   // closed, so a late open can't pull a failed join into the room
       else if (step.status) $("join-status").textContent = step.status;
     }, 1000);
     conn.on("open", () => {
@@ -775,7 +777,12 @@ async function start(create, resume = null) {
       return;
     }
     if ($("room-screen").style.display === "flex") {   // in the room already: not a join failure
+      // a link to a device that left (the 3 s host-return retries, a chain neighbour): those callers
+      // say what it means themselves, and a line per retry would flood the log
+      if (err.type === "peer-unavailable") { console.warn("peer", err.message); return; }
       const text = peerErrorText(err.type, { inRoom: true });
+      if (text === peerErrorShown.text && Date.now() - peerErrorShown.t < 30000) return;   // "network" then "disconnected" read the same
+      peerErrorShown.text = text; peerErrorShown.t = Date.now();
       log("room", text);
       if (peerErrorLoud(err.type)) toast(text, { kind: "error" });
       return;
@@ -784,6 +791,7 @@ async function start(create, resume = null) {
   });
 }
 
+const peerErrorShown = { text: "", t: 0 };
 let wakeLock = null, awakeVideo = null;
 function awakeStatus(s) { const el = $("awake"); if (el && myMeta?.phone) el.textContent = s; }
 async function keepAwake() {
