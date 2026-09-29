@@ -42,9 +42,10 @@ const NOMODEL = flag("nomodel");
 const ONLY = arg("only", "");   // comma list of scenario names to run from the plan
 const PROMPT = arg("prompt", "Explain in about a hundred words how a bicycle gear system works, then list three tips for riding up a steep hill.");
 const NEED = { "qwen3-1.7b": 2.0, "qwen3-0.6b": 0.8 }[MODEL] || 2;
-const GB = (i) => String(Math.ceil(NEED / DEVICES + (i === 0 ? 1 : 0.5)));
+const GB = (i) => arg("gb", String(Math.ceil(NEED / DEVICES + (i === 0 ? 1 : 0.5))));
 const LOCAL = { "Qwen3-0.6B-Q8_0.gguf": "models/qwen/model.gguf", "Qwen3-1.7B-Q8_0.gguf": "models/qwen17/model.gguf" };
-const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
+// --root serves another checkout (e.g. origin/main, to compare) with this harness
+const ROOT = path.resolve(arg("root", path.resolve(new URL(".", import.meta.url).pathname, "../..")));
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
 const t0 = Date.now();
 const log = (...a) => console.error(((Date.now() - t0) / 1000).toFixed(1) + "s", ...a);
@@ -67,7 +68,7 @@ const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert:
   r.writeHead(m ? 206 : 200, { "content-type": "application/octet-stream", "content-range": `bytes ${lo}-${hi}/${size}`, "accept-ranges": "bytes", "content-length": String(hi - lo + 1), "access-control-allow-origin": "*", "access-control-expose-headers": "content-range, content-length, accept-ranges" });
   fs.createReadStream(p, { start: lo, end: hi }).pipe(r);
 }).listen(TLS_PORT, "127.0.0.1");
-const peerServer = spawn(path.join(ROOT, "node_modules/.bin/peerjs"), ["--port", String(SIG_PORT), "--path", "/", "--host", "127.0.0.1"], { stdio: "ignore" });
+const peerServer = spawn(path.resolve(new URL(".", import.meta.url).pathname, "../../node_modules/.bin/peerjs"), ["--port", String(SIG_PORT), "--path", "/", "--host", "127.0.0.1"], { stdio: "ignore" });
 await sleep(1500);
 
 // ---------- UDP shaper for WebRTC ----------
@@ -220,6 +221,13 @@ function watch() {
 async function setupRoom(names) {
   for (const n of names) await tabs[n].goto(url(n));
   for (const n of names) await tabs[n].waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
+  // a tab whose WebGPU adapter request came back empty (the GPU busy with other browsers) joins
+  // as an ask-only guest and never gets layers: reload it until it has an adapter
+  if (!NOMODEL) for (const n of names) for (let k = 0; k < 4; k++) {
+    if (await tabs[n].evaluate(async () => !!(await navigator.gpu?.requestAdapter()))) break;
+    log(n, "has no WebGPU adapter, reloading"); await sleep(2000);
+    await tabs[n].goto(url(n)); await tabs[n].waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
+  }
   for (const [i, n] of names.entries()) { await tabs[n].fill("#name-input", n); await tabs[n].fill("#join-gb", GB(i)); }
   const host = tabs[names[0]];
   await host.click("#create-btn");
@@ -227,6 +235,8 @@ async function setupRoom(names) {
   const code = (await host.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
   for (const n of names.slice(1)) { await tabs[n].fill("#code-input", code); await tabs[n].click("#join-btn"); await tabs[n].waitForTimeout(200); }
   for (const n of names) await tabs[n].waitForFunction((k) => document.querySelectorAll(".peer-card").length >= k, names.length, { timeout: 60000 });
+  const noGpu = await host.evaluate(() => [...document.querySelectorAll(".peer-gpu")].map((e) => e.textContent).filter((t) => /no WebGPU/.test(t)));
+  if (noGpu.length && !NOMODEL) log("WARNING: devices without WebGPU (they get no layers):", noGpu.join(" | "));
   return code;
 }
 async function loadModel(names) {
@@ -235,7 +245,14 @@ async function loadModel(names) {
   await host.selectOption("#ai-model", MODEL);
   const tl = Date.now();
   await host.click("#ai-start");
-  for (const n of names) await tabs[n].waitForFunction(() => document.getElementById("ai-panel").classList.contains("online") || /^failed:/.test(document.getElementById("ai-status").textContent), null, { timeout: 900000, polling: 1000 });
+  const prog = setInterval(async () => { const st = {}; for (const n of names) st[n] = (await snap(tabs[n])).status; log("loading", JSON.stringify(st).slice(0, 400)); }, 20000);
+  // the host's panel goes online once every device in the deal has loaded; a device left out of
+  // the deal (no WebGPU) never goes online, so only wait for it briefly
+  const up = () => document.getElementById("ai-panel").classList.contains("online") || /^failed:/.test(document.getElementById("ai-status").textContent);
+  try {
+    await host.waitForFunction(up, null, { timeout: 900000, polling: 1000 });
+    for (const n of names.slice(1)) await tabs[n].waitForFunction(up, null, { timeout: 30000, polling: 1000 }).catch(() => log(n, "is not in the deal:", ""));
+  } finally { clearInterval(prog); }
   const st = await host.textContent("#ai-status");
   if (/^failed:/.test(st)) throw new Error("load " + st);
   await host.evaluate(() => { const s = document.getElementById("ai-sampling"); s.value = "exact"; s.dispatchEvent(new Event("change")); });
