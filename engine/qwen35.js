@@ -292,11 +292,14 @@ export class Qwen35Engine {
     //   dn:   dn_pre folded into dn_delta_gn (needs dnFuse)    -1 dispatch per DeltaNet layer
     //   conv: dn_conv in the [qkv | z] GEMV's epilogue         -1 dispatch per DeltaNet layer
     //   attn: kv_store in attn_glue, sigmoid_mul in attn_combine (f16 flash KV, attnGlue) -2 per attention layer
-    // layerFuse: true (all) | false | "dn,conv,attn" | { dn, conv, attn }; engine.layerFuse.<k> = false at runtime for A/B.
+    //   norm: an attention layer's input rmsnorm folded into its [k | v] GEMV, run before q (coop.js NRM)
+    //         -1 per attention layer. (The MoE router / DeltaNet beta-alpha norm folds are perf/decode-moe-bandwidth's.)
+    //   pass: forwardToken's layers and head in one compute pass (91 -> 1 passes per MoE token)
+    // layerFuse: true (all) | false | "dn,conv,attn,norm" | { dn, conv, attn, norm }; engine.layerFuse.<k> = false at runtime for A/B.
     {
       const want = (k) => layerFuse === true || layerFuse === undefined ? true : layerFuse === false ? false
         : typeof layerFuse === "string" ? layerFuse.split(",").map((x) => x.trim()).includes(k) : layerFuse[k] !== false;
-      this.layerFuse = { dn: want("dn"), conv: want("conv") && matvecVariant === "coop", attn: want("attn") };
+      this.layerFuse = { dn: want("dn"), conv: want("conv") && matvecVariant === "coop", attn: want("attn"), norm: want("norm") && matvecVariant === "coop", pass: want("pass") };
     }
     // Merged projection GEMVs (docs/research/kernels-next-2026-09.md D5): at load, the DeltaNet
     // [qkv | z] and [beta | alpha] weights and the attention [k | v] weights are row-concatenated
@@ -432,7 +435,7 @@ export class Qwen35Engine {
 
     // ---- pipelines with explicit layouts ----
     const unpack = await probeUnpack(device);
-    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack, true)
+    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack, true, true)
       + (this.moe ? moeWGSL(this.moeK) : "")
       + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && this.moeGrpTiled ? tiledGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
@@ -483,6 +486,7 @@ export class Qwen35Engine {
       attn_glue_kv: ["ro", "rw", "ro", "ro", "ro", "ro", "rw", "rw", "u"], attn_combine_g: ["ro", "ro", "rw", "ro", "u"],
       matvec_coop_cv: ["ro", "ro", "rw", "u", "ro", "rw", "rw", "u"],
       matvec_q8_coop_cv: ["ro", "ro", "ro", "rw", "u", "ro", "rw", "rw", "u"], matvec_q4_coop_cv: ["ro", "ro", "ro", "rw", "u", "ro", "rw", "rw", "u"],
+      matvec_coop_n: ["ro", "ro", "rw", "u", "ro", "rw"], matvec_q8_coop_n: ["ro", "ro", "ro", "rw", "u", "ro", "rw"], matvec_q4_coop_n: ["ro", "ro", "ro", "rw", "u", "ro", "rw"],
       kv_store: ["ro", "ro", "rw", "rw", "u"], attn_flash: ["ro", "ro", "ro", "rw", "rw", "u"], attn_combine: ["ro", "ro", "rw", "u"],
       kv_store_q8: ["ro", "ro", "rw", "rw", "rw", "rw", "u"], attn_flash_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"], attn_flash_t2: ["ro", "ro", "ro", "rw", "rw", "u"],
       attn_scores_mc: ["ro", "ro", "rw", "u"], attn_softmax_wg_mc: ["rw"], attn_out_mc: ["ro", "ro", "rw", "u"],
@@ -657,6 +661,14 @@ export class Qwen35Engine {
       return { pipe, acc, wgs: coop ? Math.ceil(dOut / this.coopRows) : Math.ceil(dOut / 64), bg: this._bg(this.pipes[pipe], 1, bufs) };
     };
     this._mv = mv;
+    // layerFuse.norm: a GEMV over rmsnorm(x) with the norm computed in-kernel from the residual x
+    // (coop.js NRM); workgroup 0 also writes xn for the layer's other GEMVs
+    const mvN = (w, nw, y, dOut) => {
+      if (!coop || !w || !nw || nw.kind !== "f32") return null;
+      const pipe = (w.kind === "q8" ? "matvec_q8" : w.kind === "q4" ? "matvec_q4" : "matvec") + "_coop_n";
+      const bufs = w.kind === "f32" ? [w.buf, this.x, y, this._shape(dOut, dim)] : [w.qs, w.sc, this.x, y, this._shape(dOut, dim)];
+      return { pipe, wgs: Math.ceil(dOut / this.coopRows), bg: this._bg(this.pipes[pipe], 1, [...bufs, nw.buf, this.xn]) };
+    };
     const guOp = (wg2, wu2, x, y, dOut, dIn, xB, yB) => {
       if (!coop || !wg2 || !wu2 || wg2.kind !== wu2.kind) return null;
       const base = wg2.kind === "q8" ? "matvec_q8_gu" : wg2.kind === "q4" ? "matvec_q4_gu" : "matvec_gu";
@@ -807,7 +819,7 @@ export class Qwen35Engine {
         if (f) {
           [R.wk, R.wv] = f.parts;
           R.fKV = f;
-          if (f.decodeOK) R.mvKV = mv(f.w, this.xn, this.k.buffer, f.rows, dim);
+          if (f.decodeOK) { R.mvKV = mv(f.w, this.xn, this.k.buffer, f.rows, dim); R.mvKVn = mvN(f.w, R.attnNorm, this.k.buffer, f.rows); }
         }
         R.mvQ = mv(R.wq, this.xn, this.qFull, nH * hd * 2, dim);
         R.mvK = mv(R.wk, this.xn, this.k, kvDim, dim);
@@ -1270,11 +1282,14 @@ export class Qwen35Engine {
     if (L.isFull) {
       const lfA = LF.attn && this.flash && !this.kvQ8 && this.attnGlue && !!L.bgGlueKv;
       {
-        const p = enc.beginComputePass();
+        const p = this._pp || enc.beginComputePass();
+        if (LF.norm && this.fuseProj && L.mvKVn) { this._dop(p, L.mvKVn); this._dop(p, L.mvQ); }   // norm in the [k | v] GEMV, then q
+        else {
         this._d(p, "rmsnorm", L.bgNorm1, 256, 256);
         this._dop(p, L.mvQ);
         if (this.fuseProj && L.mvKV) this._dop(p, L.mvKV);
         else { this._dop(p, L.mvK); this._dop(p, L.mvV); }
+        }
         if (lfA) this._d(p, "attn_glue_kv", L.bgGlueKv, (D.nH + D.nKV) * 64);
         else if (this.attnGlue) this._d(p, "attn_glue", L.bgGlue, (D.nH + D.nKV) * 64);
         else {
@@ -1284,7 +1299,7 @@ export class Qwen35Engine {
           this._d(p, "rope_part", L.bgRopeQ, D.nH * D.nRot / 2);
           this._d(p, "rope_part", L.bgRopeK, D.nKV * D.nRot / 2);
         }
-        p.end();
+        if (p !== this._pp) p.end();
       }
       if (!this.flash) {
         const k = Qwen35Engine._res(this.k), v = Qwen35Engine._res(this.v);
@@ -1292,7 +1307,7 @@ export class Qwen35Engine {
         enc.copyBufferToBuffer(v.buffer, v.offset || 0, L.vCache, pos * D.kvDim * 4, D.kvDim * 4);
       }
       {
-        const p = enc.beginComputePass();
+        const p = this._pp || enc.beginComputePass();
         if (lfA) {
           this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
           this._dxyz(p, "attn_combine_g", L.bgCombineG, D.nH, 1, 1);
@@ -1309,10 +1324,10 @@ export class Qwen35Engine {
         if (!lfA) this._d(p, "sigmoid_mul", L.bgSigMul, D.qDim);
         this._dop(p, L.mvO);
         if (!L.mvO.acc) this._d(p, "add_res", this.bgAddTmp, D.dim);
-        p.end();
+        if (p !== this._pp) p.end();
       }
     } else {
-      const p = enc.beginComputePass();
+      const p = this._pp || enc.beginComputePass();
       this._d(p, "rmsnorm", L.bgNorm1, 256, 256);
       const cv = LF.conv && !!L.mvQKVcv;   // conv in the qkv GEMV's epilogue
       if (this.fuseProj && L.mvQZ) this._dop(p, cv ? L.mvQZcv : L.mvQZ);
@@ -1331,7 +1346,7 @@ export class Qwen35Engine {
       }
       this._dop(p, L.mvOut);
       if (!L.mvOut.acc) this._d(p, "add_res", this.bgAddTmp, D.dim);
-      p.end();
+      if (p !== this._pp) p.end();
     }
     this._encodeFFN(enc, L);
   }
@@ -1339,7 +1354,7 @@ export class Qwen35Engine {
   // The FFN half of a layer (post-attention norm, then the dense or MoE FFN, residual added).
   _encodeFFN(enc, L) {
     const D = this.dims;
-    const p = enc.beginComputePass();
+    const p = this._pp || enc.beginComputePass();
     this._d(p, "rmsnorm", L.bgNorm2, 256, 256);
     if (L.fused) {   // router (+ shared gate) GEMV, route, gate/up over K + 1 slots, down + combine
       const { KS, hs, gusRows, dncRows } = this.moe;
@@ -1347,7 +1362,7 @@ export class Qwen35Engine {
       this._dxyz(p, "moe_route", L.bgRoute, 1, 1, 1);
       this._dxyz(p, L.gusPipe, L.bgGus, Math.ceil(hs / gusRows), KS, 1);
       this._dxyz(p, L.dncPipe, L.bgDnc, Math.ceil(D.dim / dncRows), 1, 1);
-      p.end();
+      if (p !== this._pp) p.end();
       return;
     }
     if (L.moe) {
@@ -1364,7 +1379,7 @@ export class Qwen35Engine {
         if (!rs) this._dop(p, L.mvShRouter);
       }
       this._dxyz(p, "moe_combine", L.bgMoeCombine, Math.ceil(D.dim / 64), 1, 1);
-      p.end();
+      if (p !== this._pp) p.end();
       return;
     }
     if (L.gu) this._dop(p, L.gu);
@@ -1375,7 +1390,7 @@ export class Qwen35Engine {
     }
     this._dop(p, L.mvDown);
     if (!L.mvDown.acc) this._d(p, "add_res", this.bgAddTmp, D.dim);
-    p.end();
+    if (p !== this._pp) p.end();
   }
   // Debug / test hook: run only layer i's FFN block on a given residual x (one token).
   async ffnOnly(i, xIn) {
@@ -2974,14 +2989,19 @@ export class Qwen35Engine {
   // the next call submits at once instead of paying the CPU encode (~900 dispatches) on the critical
   // path. Same commands, same bits. engine.encodeAhead = false for A/B.
   // desc: forwardTokenIds' GPU sampling descriptor (the head's top-k in the same buffer), null: logits
-  _fwdKey(desc = null) { return [this.attnGlue, this.fuseProj, this.dnFuse, this.layerFuse.dn, this.layerFuse.conv, this.layerFuse.attn, this.softmaxWG, this.b4, this.skip ? 1 : 0, this._common ? 1 : 0, desc ? topkK(desc) : 0].join(); }
+  _fwdKey(desc = null) { return [this.attnGlue, this.fuseProj, this.dnFuse, this.layerFuse.dn, this.layerFuse.conv, this.layerFuse.attn, this.layerFuse.norm, this.layerFuse.pass, this.softmaxWG, this.b4, this.skip ? 1 : 0, this._common ? 1 : 0, desc ? topkK(desc) : 0].join(); }
   _encodeForward(pos, desc = null) {
     const { vocab } = this.dims;
     const enc = this.device.createCommandEncoder();
+    // layerFuse.pass: the whole token (every layer and the head) in one compute pass instead of 2-3
+    // per layer; dispatches stay in the same order (each dispatch is its own usage scope)
+    const one = this.layerFuse.pass && this.flash;
+    this._pp = one ? enc.beginComputePass() : null;
     for (let i = 0; i < this.layers.length; i++) this._encodeLayerR(enc, this.layers[i], pos);
     if (desc) {
       const op = this._tkOp("one", this.logits, vocab, 0, topkK(desc), this.topBuf);
-      const p = enc.beginComputePass();
+      const p = this._pp || enc.beginComputePass();
+      this._pp = null;
       this._d(p, "rmsnorm", this.bgFinalNorm, 256, 256);
       this._dop(p, this.headOp);
       this._dTopk(p, op, 1);
@@ -2992,7 +3012,8 @@ export class Qwen35Engine {
       return { pos, key: this._fwdKey(desc), cb: enc.finish(), stage, op };
     }
     {
-      const p = enc.beginComputePass();
+      const p = this._pp || enc.beginComputePass();
+      this._pp = null;
       this._d(p, "rmsnorm", this.bgFinalNorm, 256, 256);
       this._dop(p, this.headOp);
       p.end();

@@ -1,6 +1,8 @@
 // Dispatch fusions vs the kernels they replace: attn_glue (qsplit + q/k head_norm + rope),
-// dn_delta_gn (dn_delta + dn_gatenorm) and the batched attention of prefill passes
-// (attn_*_mc: all columns per dispatch; attn_flash_t2: two columns per workgroup). Every logit of the decode after a batched prefill must be
+// dn_delta_gn (dn_delta + dn_gatenorm), the batched attention of prefill passes
+// (attn_*_mc: all columns per dispatch; attn_flash_t2: two columns per workgroup) and the decode layer
+// fusions (engine.layerFuse: dn_pre in dn_delta_gn, conv in the qkv GEMV, kv_store / sigmoid_mul in the
+// attention glue / combine, rmsnorm in the small GEMVs, one compute pass per token). Every logit of the decode after a batched prefill must be
 // bit-identical with each fusion on and off; also times decode.
 //   NODE_PATH=... node tests/e2e/fusion_synth.mjs [--model f.gguf] [--prompt-len 200] [--tokens 24]
 import fs from "fs"; import os from "os"; import path from "path";
@@ -25,8 +27,10 @@ async function pageMain({ plen, ntok }) {
   const eng = await Qwen35Engine.create({ device, meta: G.meta, layerRange: [0, L], hasEmbed: true, hasHead: true, vocab: G.tensors[GGML_EMBED].shape[0],
     maxSeq: 2048, batchCols: 16, coopRowsB: 1, coopWG: 64, weights: await qwen35Weights(G, bytesOf, { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true }) });
   const prompt = Array.from({ length: plen }, (_, i) => 33 + ((i * 7919) % 90));
-  const run = async (glue, dn, mc, tile = false) => {
+  const LFK = Object.keys(eng.layerFuse);
+  const run = async (glue, dn, mc, tile = false, lf = "") => {
     eng.attnGlue = glue; eng.dnFuse = dn; eng.attnMC = mc; eng.attnTile = tile; eng.reset(); eng.mtpFill = false;
+    for (const k of LFK) eng.layerFuse[k] = lf === "all" || lf.split(",").includes(k);
     await eng.prefillTokens(prompt.slice(0, -1));
     const logs = [];
     let lg = await eng.forwardToken(prompt[plen - 1]); logs.push(lg);
@@ -37,8 +41,10 @@ async function pageMain({ plen, ntok }) {
   };
   const a = await run(false, false, false);
   let ok = !errs.length;
-  for (const [glue, dn, mc, tile, name] of [[true, false, false, false, "attn_glue"], [false, true, false, false, "dn_delta_gn"], [false, false, true, false, "attn_*_mc"], [false, false, false, true, "attn_flash_t2"], [true, true, true, true, "all"]]) {
-    const b = await run(glue, dn, mc, tile);
+  for (const [glue, dn, mc, tile, name, lf] of [[true, false, false, false, "attn_glue"], [false, true, false, false, "dn_delta_gn"], [false, false, true, false, "attn_*_mc"], [false, false, false, true, "attn_flash_t2"],
+    [false, true, false, false, "layerFuse.dn", "dn"], [false, false, false, false, "layerFuse.conv", "conv"], [true, false, false, false, "layerFuse.attn", "attn"],
+    [false, false, false, false, "layerFuse.norm", "norm"], [false, false, false, false, "layerFuse.pass", "pass"], [true, true, true, true, "all", "all"]]) {
+    const b = await run(glue, dn, mc, tile, lf || "");
     let diff = 0;
     for (let i = 0; i < ntok; i++) for (let j = 0; j < a.logs[i].length; j++) if (!Object.is(a.logs[i][j], b.logs[i][j])) diff++;
     ok = ok && diff === 0;

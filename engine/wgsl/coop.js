@@ -21,7 +21,7 @@ export async function probeUnpack(device) {
   return device.__unpackOk;
 }
 
-export function coopWGSL(WG = 256, ROWS = 4, WGB = 64, COLS = 4, ROWSB = ROWS, UNPACK = true, CV = false) {
+export function coopWGSL(WG = 256, ROWS = 4, WGB = 64, COLS = 4, ROWSB = ROWS, UNPACK = true, CV = false, NRM = false) {
   // Rows per workgroup for a C-column batched kernel: hold accumulators/thread
   // constant, so the 8- and 4-column twins are not starved of rows when COLS=16.
   const rowsFor = (C) => Math.max(1, Math.min(8, Math.round(ROWSB * COLS / C)));
@@ -378,6 +378,51 @@ fn ${P}_conv(c: u32, x: f32) {
   ${P}_st[c * 3u + 1u] = ${P}_st[c * 3u + 2u];
   ${P}_st[c * 3u + 2u] = x;
 }`;
+  // normed variants (NRM, engine layerFuse "norm"): rmsnorm folded into a small GEMV. Every workgroup
+  // recomputes the norm of the raw residual x exactly as the rmsnorm kernel does (256 partial sums, each
+  // strided by 256 with four loads in flight, then the same halving tree; WG < 256 threads each run
+  // several of the 256 partials), normalises its own x slices in registers ((x * inv) * w, as rmsnorm
+  // writes them) and workgroup 0 also writes the whole normed vector for the layer's later dispatches.
+  // Same bits as rmsnorm followed by the plain GEMV. For GEMVs with few workgroups (router, beta/alpha, k/v).
+  const nrmDecl = (P, b0) => `
+@group(1) @binding(${b0}) var<storage, read> ${P}_w4: array<vec4<f32>>;   // norm weight
+@group(1) @binding(${b0 + 1}) var<storage, read_write> ${P}_xn: array<f32>;  // normed x, written by workgroup 0`;
+  const nrmPro = (X4, P, n) => {
+    const X = (i) => `${X4}[(${i}) >> 2u][(${i}) & 3u]`;
+    return `
+  for (var v: u32 = t; v < 256u; v += ${WG}u) {
+    var ss: f32 = 0.0;
+    var i: u32 = v;
+    for (; i + 768u < ${n}; i += 1024u) {
+      let v0 = ${X("i")}; let v1 = ${X("i + 256u")}; let v2 = ${X("i + 512u")}; let v3 = ${X("i + 768u")};
+      ss += v0 * v0; ss += v1 * v1; ss += v2 * v2; ss += v3 * v3;
+    }
+    for (; i < ${n}; i += 256u) { let v = ${X("i")}; ss += v * v; }
+    nrm_p[v] = ss;
+  }
+  workgroupBarrier();
+  var nstride: u32 = 128u;
+  while (nstride > 0u) {
+    for (var v: u32 = t; v < nstride; v += ${WG}u) { nrm_p[v] += nrm_p[v + nstride]; }
+    workgroupBarrier();
+    nstride = nstride / 2u;
+  }
+  let ninv = inverseSqrt(nrm_p[0] / f32(${n}) + cfg.eps);
+  if (wg.x == 0u && wg.y == 0u) {
+    for (var j: u32 = t; j < ${n}; j += ${WG}u) { ${P}_xn[j] = ${X("j")} * ninv * ${P}_w4[j >> 2u][j & 3u]; }
+  }`;
+  };
+  const singleCoopN = !NRM ? "" : "var<workgroup> nrm_p: array<f32, 256>;" + nrmDecl("nrf", 4) + nrmDecl("nrq", 5) + "\n"
+    + singleCoop.replace(/fn (q8|q4)_row\([\s\S]*?\n}\n/g, "")
+      .split(/(?=@compute)/).map((k) => {
+        const m = k.match(/fn matvec(_q8|_q4)?_coop\(/);
+        if (!m) return k;
+        const X4 = m[1] === "_q8" ? "q8_x4" : m[1] === "_q4" ? "q4_x4" : "mv_x4", P = m[1] ? "nrq" : "nrf";
+        const shape = m[1] === "_q8" ? "q8_shape" : m[1] === "_q4" ? "q4_shape" : "mv_shape";
+        return k.replace(/_coop\(/, "_coop_n(")
+          .replace(new RegExp(`let (\\w+) = ${X4}\\[([^;]+)\\];`, "g"), (_, v, idx) => `let ${v} = (${X4}[${idx}] * ninv) * ${P}_w4[${idx}];`)
+          .replace("let t = lid.x;\n", `let t = lid.x;${nrmPro(X4, P, `${shape}.dIn`)}\n`);
+      }).join("");
   const singleCoopCv = !CV ? "" : cvDecl("cvf", 4) + cvDecl("cvq", 5) + "\n" + singleCoop.replace(/fn (q8|q4)_row\([\s\S]*?\n}\n/g, "")
     .replace(/_coop\(/g, "_coop_cv(")
     .replace(/(\w+)_y\[row\] = (mvc_part\[t \* \d+u\]);/g, (m, P, v) => {
@@ -401,6 +446,7 @@ fn mvf_row(off4: u32, xa: vec4<f32>, xb: vec4<f32>) -> f32 {
 ${singleCoop}
 ${singleCoopAcc}
 ${singleCoopCv}
+${singleCoopN}
 
 // ---- batched (COLS-column) variants for prefill / verify: each weight word is
 // loaded and decoded once and applied to C token columns (rowsFor(C) rows per WG). x is [C][xs4] vec4s,
