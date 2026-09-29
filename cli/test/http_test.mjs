@@ -125,3 +125,17 @@ test("a request the room goes quiet on fails with 504 and frees the line; a host
   assert.equal((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).status, 200);
   await t.close();
 });
+
+test("a known path with the wrong method is 405 with Allow; an unknown one 404", async () => {
+  const t = await start();
+  const g = await t.req("GET", "/v1/chat/completions");
+  assert.equal(g.status, 405);
+  assert.equal(g.headers.allow, "POST");
+  assert.equal(JSON.parse(g.body).error.code, "method_not_allowed");
+  const m = await t.req("GET", "/v1/messages", { headers: { "anthropic-version": "2023-06-01" } });
+  assert.equal(m.status, 405);
+  assert.equal(JSON.parse(m.body).type, "error");
+  assert.equal((await t.req("POST", "/v1/models")).status, 405);
+  assert.equal((await t.req("GET", "/v1/nope")).status, 404);
+  await t.close();
+});

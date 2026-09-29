@@ -232,6 +232,9 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
       if (path.startsWith("/v1/models/") && req.method === "GET") { models(req, res, path.slice("/v1/models/".length)); return; }
       if (path === "/v1/chat/completions" && req.method === "POST") { await chat(req, res, "openai"); return; }
       if (path === "/v1/messages" && req.method === "POST") { await chat(req, res, "anthropic"); return; }
+      // a known path with the wrong method is 405 with Allow, as the real APIs answer
+      const allow = { "/v1/chat/completions": "POST", "/v1/messages": "POST", "/v1/models": "GET", "/health": "GET", "/": "GET" }[path] || (path.startsWith("/v1/models/") ? "GET" : null);
+      if (allow) { res.setHeader("allow", allow); throw new ApiError("method", `${req.method} ${path} is not allowed: use ${allow}`); }
       throw new ApiError("notfound", /^\/v1\/(embeddings|completions|responses|messages\/count_tokens)/.test(path) ? `${req.method} ${path} ${NOT_V1}` : `unknown path ${req.method} ${path}`);
     } catch (e) {
       if (!(e instanceof ApiError)) { log(`error: ${e.stack || e}`); e = new ApiError("server", String(e.message || e)); }
