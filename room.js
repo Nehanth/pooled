@@ -1730,7 +1730,7 @@ async function aiStart(modelArg) {
     broadcastAll({ t: "ai-layers", by: ai.layersByName });
     const splitDesc = [`you ${assigned[0]}+embed`, ...ai.chain.map((id, i) =>
       `${conns.get(id)?.name || id} ${assigned[i + 1]}`)].join(" · ");
-    log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}: ${splitDesc}`);
+    log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}${ROOM_KV === "q8" ? ", int8 KV" : ""}: ${splitDesc}`);
     ai.loadingShard = true;
     try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); } finally { ai.loadingShard = false; }
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel

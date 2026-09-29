@@ -29,7 +29,7 @@ Deno.test("parseKV: f16 by default, q8 when asked, a typo is an error", () => {
 
 Deno.test("planCtx: preset with no CTX fits 32K plus headroom, never below the room default", () => {
   eq(planCtx({ tokens: 32 }), { fills: [1024, 8192, 32768], maxSeq: 33024, dropped: [] });
-  eq(planCtx({ tokens: 32, roomDefault: 65536 }).maxSeq, 65536, "MoE room default is larger");
+  eq(planCtx({ tokens: 32, roomDefault: 65536 }).maxSeq, 65536, "a room default above the preset wins");
   eq(planCtx({ tokens: 32, roomDefault: 16384 }).maxSeq, 33024, "27B: raised to hold 32K");
 });
 
