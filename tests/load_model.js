@@ -27,6 +27,15 @@ if (envGet("ATTN_PREFILL_TILE")) Qwen35Engine.defaults.attnPrefillTile = envGet(
 if (envGet("ATTN_PREFILL_TK")) Qwen35Engine.defaults.attnPrefillTK = +envGet("ATTN_PREFILL_TK");
 if (envGet("ATTN_PREFILL_SPLITS")) Qwen35Engine.defaults.attnPrefillSplits = +envGet("ATTN_PREFILL_SPLITS");
 
+// The room's engine settings for a Deno test or bench (engine/preset.js): ROOM_FLAGS takes the room's own
+// query-string switches, e.g. ROOM_FLAGS="draftvocab=0&kv=q8". Unset: exactly what the room runs.
+// extra: { flag: value } defaults a script sets on top (ROOM_FLAGS still wins).
+export function roomFlags(extra = {}) {
+  const q = new URLSearchParams(extra);
+  for (const [k, v] of new URLSearchParams(envGet("ROOM_FLAGS") || "")) q.set(k, v);
+  return q;
+}
+
 export const Q38_PATH = new URL("../models/q38/model.gguf", import.meta.url).pathname;
 export const MOE_PATH = new URL("../models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", import.meta.url).pathname;
 

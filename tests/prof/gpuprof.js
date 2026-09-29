@@ -15,6 +15,8 @@
 // created (forwardToken, _verifyFused, _mtpRefill, _readback...), set by wrappers on the engine.
 // Timestamps need the device to have "timestamp-query"; without it only CPU-side numbers exist.
 
+import { pipeFamily } from "./families.js";
+
 const LABELED = ["forwardToken", "embedRun", "runHidden", "embedRunBatch", "runHiddenBatch", "headFromHidden", "headBatch",
   "_verifyFused", "_draftChain", "_mtpRun", "_mtpRefill", "_preDraft0", "_restoreDN", "_adoptHidden", "_readback", "prefillTokens", "_mtpFillBatch"];
 const DRAFT = new Set(["_draftChain", "_mtpRun", "_mtpRefill", "_preDraft0", "_mtpFillBatch"]);
@@ -52,7 +54,7 @@ function pipeCategory(name, ctx) {
   if (/^argmax/.test(name)) return "LM head";
   if (/^emb_gather/.test(name)) return "MTP draft";
   if (/^xpose/.test(name)) return "transpose (GEMM prefill)";
-  return "other:" + name;
+  return pipeFamily(name);   // every other pipeline by its family (tests/prof/families.js), never lost as "other"
 }
 
 export function installProf(device, eng, { mode = "submit", maxQ = 8 * 4096 } = {}) {
@@ -68,7 +70,12 @@ export function installProf(device, eng, { mode = "submit", maxQ = 8 * 4096 } = 
   const origCreate = device.createCommandEncoder.bind(device);
   const cbRec = new WeakMap();
   const opCat = opCategories(eng);
-  const pname = new Map(Object.entries(eng.pipes).map(([k, v]) => [v, k]));
+  // pipeline -> name, from the engine's own pipeline list (rebuilt if the engine has added one since)
+  let pname = new Map(), pnameN = -1;
+  const pipeName = (p) => {
+    if (!pname.has(p) && Object.keys(eng.pipes).length !== pnameN) { const e = Object.entries(eng.pipes); pname = new Map(e.map(([k, v]) => [v, k])); pnameN = e.length; }
+    return pname.get(p) || "?";
+  };
 
   device.createCommandEncoder = (d) => {
     const enc = origCreate(d);
@@ -100,7 +107,7 @@ export function installProf(device, eng, { mode = "submit", maxQ = 8 * 4096 } = 
         return {
           setPipeline(p) { pipe = p; }, setBindGroup(i, b) { bgs[i] = b; },
           dispatchWorkgroups(x, y = 1, z = 1) {
-            const name = pname.get(pipe) || "?";
+            const name = pipeName(pipe);
             const c = P.ctx;
             let cat = c.op ? opCat.get(c.op) || "other GEMV" : pipeCategory(name, c);
             if (c.draft || (c.L && c.L === eng.mtpLayer)) cat = "MTP draft";

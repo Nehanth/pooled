@@ -100,6 +100,7 @@ export async function initCode(api, { mock = null } = {}) {
 
   // ================================================================ host
   let project = null, server = null, publisher = null, tools = [], agent = null, agentSrc = null, agentStyle = null, model = null;
+  let offPorts = () => {};   // unsubscribes portUpdate from the project's preview server
   let sessionJson = null, hist = [], tree = [], running = false, ctrl = null, allowTask = false;
   let userAuto = null;   // the user's own tick of "auto-approve edits", kept across projects
   let mid = "", toolN = 0;
@@ -200,6 +201,7 @@ export async function initCode(api, { mock = null } = {}) {
   function closeProject({ keepQueue = false } = {}) {
     if (running) ctrl?.abort();
     if (!keepQueue) for (const q of queue.splice(0)) tell(q.from, "the project changed: your queued request was dropped", true);
+    offPorts(); offPorts = () => {};   // closing stops the ports, which is not the user stopping them (they stay in the session)
     server?.close(); publisher?.close();   // in this order: the server's stops reach the members (ai-pv-stop) before the publisher unsubscribes
     for (const port of [...ui.ports.keys()]) ui.dropPort(port);
     project = server = publisher = agent = model = null; agentSrc = null; tools = [];
@@ -213,7 +215,7 @@ export async function initCode(api, { mock = null } = {}) {
     // run_js only when the snippet runs on the isolated preview host (a loop there cannot freeze the room)
     tools = [...codingTools(p.ws, { server }), ...previewTools(server), ...(runJsAvailable() ? [runJsTool(server)] : [])];
     publisher = new PreviewPublisher(server, { send: api.send, broadcast: api.broadcast, channel: api.channel });
-    server.onUpdate(portUpdate);
+    offPorts = server.onUpdate(portUpdate);
     const saved = await loadSession(p.id).catch(() => null);
     sessionJson = saved?.agent || null;
     hist = Array.isArray(saved?.hist) ? saved.hist : [];
@@ -231,11 +233,19 @@ export async function initCode(api, { mock = null } = {}) {
     api.broadcast({ t: "ai-code-history", sid, items: hist.slice(-HIST), tree });
     refreshProjects();
     ctxMeter();
+    // the ports this project had served come back (#176); one whose folder or page is gone stays off
+    const srv = server;
+    for (const s of Array.isArray(saved?.ports) ? saved.ports : []) {
+      if (server !== srv) break;
+      try { await srv.serve({ dir: str(s.dir, 300), port: s.port, entry: str(s.entry, 300) }); } catch (e) { localNote(`:${s.port} not served again: ${e.message}`, true); }
+    }
   }
   const escapeHTML = (s) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   function portUpdate(u) {
-    if (u.stopped) { ui.dropPort(u.port); return; }
+    // a port served or stopped goes into the session (a run saves it when it ends)
+    if (u.stopped) { ui.dropPort(u.port); if (!running) save(); return; }
     if (ui.ports.has(u.port)) return;   // the mounted frame follows its own updates
+    if (!running) save();
     const port = u.port, src = server;
     ui.portTab(port, { closable: true, mount: (el) => mountPreview(el, src, port, { onLog: (e) => ui.logRow(port, e), onStatus: (s) => ui.status(port, s) }) });
     ui.activate(port);
@@ -425,7 +435,8 @@ export async function initCode(api, { mock = null } = {}) {
   function localNote(text, err = false) { ui.apply({ t: "ai-code-note", text, err }); }
   function save() {
     if (!project) return;
-    saveSession(project.id, { v: 1, agent: agent ? agent.toJSON() : sessionJson, hist: hist.slice(-4 * HIST) }).catch((e) => console.warn("code session not saved", e));
+    const ports = server ? server.ports().map(({ port, dir, entry }) => ({ port, dir, entry })) : [];
+    saveSession(project.id, { v: 1, agent: agent ? agent.toJSON() : sessionJson, hist: hist.slice(-4 * HIST), ports }).catch((e) => console.warn("code session not saved", e));
   }
   function ctxMeter() {
     if (!agent || !model?.count) { ui.ctx(0); return; }   // a scripted model has no token count to show
@@ -614,7 +625,7 @@ export async function initCode(api, { mock = null } = {}) {
         makeModel: ({ tools }) => ({ ...roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" }), style }),
         onResult: ({ rec, trajectory }) => {
           lines.push(JSON.stringify(rec), JSON.stringify({ trajectory }));
-          localNote(`${rec.ok ? "PASS" : "FAIL"} ${rec.id} · ${rec.reason} · ${rec.steps} steps · ${rec.generated} tok · ${(rec.ms / 1000).toFixed(0)} s`, !rec.ok);
+          localNote(`${rec.ok ? "PASS" : "FAIL"} ${rec.id} · ${rec.reason} · ${rec.steps} steps · ${rec.prompt} prefilled / ${rec.reused} reused · ${rec.generated} tok · ${(rec.ms / 1000).toFixed(0)} s`, !rec.ok);
         },
       });
       localNote(S.summary(recs));
@@ -850,13 +861,16 @@ export async function initCode(api, { mock = null } = {}) {
     ui.setHost(host, { canDrive: host || (shared() && peerProj.kind !== "folder") });
     driverNote();
   }
+  // an example the room's model can build on a first try: the default room runs the 1.7B, which a
+  // tetris game sets up to fail; the bigger models get the game
+  const example = () => /^qwen3-(0\.6b|1\.7b)$|^smollm/.test(api.model?.() || "") ? "a tip calculator" : "a tetris game";
   function placeholderFor(host) {
     if (host) {
       ui.placeholder(api.ready()
-        ? "<b>Code mode</b>: the room's model writes a web app, serves it on a port and fixes its own errors.<br>Ask for something to build, like “a tetris game”."
+        ? `<b>Code mode</b>: the room's model writes a web app, serves it on a port and fixes its own errors.<br>Ask for something to build, like “${example()}”.`
         : "<b>Code mode</b> runs on the room's model.<br>Pick a model in Chat and press Start, then ask for something to build.");
     } else ui.placeholder(shared()
-      ? `<b>Code mode</b>: ask for something to build, like “a tetris game”.<br>The agent runs on ${escapeHTML(hostName())}'s device; everyone in the room sees it work, live`
+      ? `<b>Code mode</b>: ask for something to build, like “${example()}”.<br>The agent runs on ${escapeHTML(hostName())}'s device; everyone in the room sees it work, live`
       : `only ${escapeHTML(hostName())} uses Code in this room`);
   }
   function entered() {

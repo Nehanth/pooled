@@ -2,6 +2,10 @@
 
 export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 4.0, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "smollm-135m": 0.6 };
 
+// The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
+// each device downloads about its share of the layers, so the picker can say what this device will fetch.
+export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84 };
+
 // The models the room's picker offers. The others stay for tests and ?dev=1.
 export const PICKER = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 
@@ -57,10 +61,20 @@ export const maxSeqFor = (model, ask = 0) => {
   if (!c) return MODELS[model]?.kind === "qwen35" ? MAX_SEQ_LONG : MAX_SEQ;
   return ask > 0 ? Math.min(c.max, Math.max(2048, Math.round(ask / 256) * 256)) : c.def;
 };
-// f16 K+V bytes per position, averaged over a model's layers (for dealing layers by memory)
-export const kvBytesPerLayerPos = (meta) => {
+// KV cache format per room: "f16" (the default) or "q8" (int8 values + one f32 scale per 32, engine
+// kvQ8, ~56% of f16's memory; asked for with ?kv=q8). Only the qwen35 engine has the int8 kernels, so
+// any other model, or any other ask, stays f16. The host decides and sends it with ai-load, so every
+// device of a room keeps the same format and the layer deal counts the right bytes.
+export const KV_MODES = ["f16", "q8"];
+export const kvModeFor = (model, ask) => (ask === "q8" && MODELS[model]?.kind === "qwen35" ? "q8" : "f16");
+// A device's format for an ai-load: the host's `kv` when it sent one (so a worker's own ?kv= cannot
+// make it differ from the room), else this device's own ask (a host from before the field existed).
+export const kvForLoad = (model, sent, ownAsk) => kvModeFor(model, sent ?? ownAsk);
+// K+V bytes per position, averaged over a model's layers (for dealing layers by memory), f16 or int8
+export const kvBytesPerLayerPos = (meta, kv = "f16") => {
   const kvDim = (meta["qwen35.attention.head_count_kv"] || 0) * (meta["qwen35.attention.key_length"] || 0);
-  return kvDim * 2 * 2 / (meta["qwen35.full_attention_interval"] || 1);
+  const perKV = kv === "q8" ? kvDim + kvDim / 32 * 4 : kvDim * 2;   // int8 values + f32 scales, or f16
+  return perKV * 2 / (meta["qwen35.full_attention_interval"] || 1);
 };
 export const MAX_NEW = 400;    // longest answer, tokens
 export const MAX_NEW_THINKING = 1200;   // with thinking on, the think block comes out of the same budget

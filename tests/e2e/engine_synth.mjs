@@ -53,7 +53,8 @@ export const GPU_ARGS = process.env.E2E_GPU === "real"
   : ["--no-sandbox", "--headless=new", "--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
 // static server for the repo root; extra: { "/__x": "/abs/file" } serves files outside it
-export function serveRepo(port, extra = {}) {
+// headers(url): extra response headers for a path (preview_browser.mjs: the relay's, from vercel.json)
+export function serveRepo(port, extra = {}, { headers = () => null } = {}) {
   return http.createServer((q, r) => {
     const url = decodeURIComponent(q.url.split("?")[0]);
     if (url === "/__blank.html") { r.setHeader("content-type", MIME[".html"]); r.end("<!doctype html><title>e2e</title><body>e2e</body>"); return; }
@@ -63,6 +64,7 @@ export function serveRepo(port, extra = {}) {
     if (!fs.existsSync(p) || fs.statSync(p).isDirectory()) { r.statusCode = 404; r.end(); return; }
     r.setHeader("content-type", MIME[path.extname(p)] || "application/octet-stream");
     r.setHeader("cache-control", "no-store");
+    for (const [k, v] of Object.entries(headers(url) || {})) r.setHeader(k, v);
     // Range requests (tests/eval/eval.html streams a model too big for a tab's heap tensor by tensor)
     const m = /^bytes=(\d+)-(\d*)$/.exec(q.headers.range || "");
     if (m) {
