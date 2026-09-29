@@ -1,11 +1,20 @@
 // Pooled room: signaling, WebRTC mesh, layer assignment, weight streaming and the
 // generation loop (prefill, decode, speculative verify). Served with p2p.html at /room.
-import { autotuneCoop, makeTokenizer, DenseEngine, argmax, fetchModelShard, shardTensorNames, gpuSelfTest, kernelMicroTests }
-  from "./engine/engine.js";
+// The inference engine (engine/engine.js, engine/qwen35.js and their WGSL kernels, ~250 KB) is not
+// part of the join screen's module graph: loadEngine() imports it when this device enters a room,
+// and aiLoadShard waits for it. The join screen works as soon as the lobby modules below are in.
+import { argmax } from "./engine/sampling.js";
+let autotuneCoop, makeTokenizer, DenseEngine, fetchModelShard, shardTensorNames, gpuSelfTest, kernelMicroTests, Qwen35Engine;
+let engineLoad = null;
+function loadEngine() {
+  return engineLoad ||= Promise.all([import("./engine/engine.js"), import("./engine/qwen35.js")]).then(([e, q]) => {
+    ({ autotuneCoop, makeTokenizer, DenseEngine, fetchModelShard, shardTensorNames, gpuSelfTest, kernelMicroTests } = e);
+    ({ Qwen35Engine } = q);
+  }, (err) => { engineLoad = null; throw new Error("couldn't load the inference engine (" + (err?.message || err) + "). Check the connection and try again"); });
+}
 import { f32ToF16, f16ToF32, parseGGUFHeader, ggufWeights, ggufShardBytes, GGML_EMBED, GGML_OUTPUT, GGML_FINAL_NORM,
   ggmlLayerNames, qwen35Weights, qwen35ShardBytes, qwen35MtpBytes, qwen35LayerNames, qwen35NamesFor, tokenizerFromGGUF, gpuUploadEntry, streamEntryToGPU }
   from "./engine/gguf.js";
-import { Qwen35Engine } from "./engine/qwen35.js";
 import { WIRE_F16, badF32, f32ToB64, packF16, unpackF16, asU16, packWire, unpackWire, asF32, b64ToF32, wireStats } from "./room/wire.js";
 import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
@@ -404,6 +413,7 @@ $("ap-gb").addEventListener("focus", (e) => e.target.select());
 $("ap-copy").addEventListener("click", copyRoomLink);
 
 function enterRoom() {
+  loadEngine().catch(() => {});   // fetch the engine while the room fills; aiLoadShard reports a failure when it needs it
   $("join-screen").style.display = "none";
   $("room-screen").style.display = "flex";
   $("room-badge").style.display = "";
@@ -1428,6 +1438,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   if (ai.device) { try { ai.device.destroy(); } catch {} ai.device = null; ai.engine = null; }
   ai.firstGpuError = null;
   ai.peerBytes = 0; ai.netBytes = 0; cacheHits = 0;   // per load: a count left from an earlier load in this tab mislabels the status
+  if (!Qwen35Engine) { aiStatus("loading the inference engine\u2026"); await loadEngine(); }
   const adapter = await navigator.gpu?.requestAdapter();
   if (!adapter) throw new Error("no WebGPU on this device");
   ai.device = await adapter.requestDevice({
