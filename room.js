@@ -601,6 +601,7 @@ function onData(from, d) {
     }
     case "ping": sendTo(from, { t: "pong", ts: d.ts }); break;
     case "pong": {
+      e.missed = 0;
       e.rtt = Math.round(performance.now() - d.ts);
       if (e.card) e.card.querySelector(".rtt").textContent = e.rtt + " ms";
       break;
@@ -663,7 +664,23 @@ async function bwTest(id) {
 window.addEventListener("pagehide", () => { try { broadcastAll({ t: "leaving" }); } catch {} });
 
 // --- ping loop ---
-setInterval(() => broadcastAll({ t: "ping", ts: performance.now() }), 2500);
+// The host also drops an API client (`pooled serve`) that stopped answering: a bridge that was killed
+// (kill -9, a crash, a laptop lid) never says "leaving", and its data channel can take over a minute
+// to close, while its running answer holds the room. Counted in pings, not wall time, so a host tab
+// that was busy or throttled for a while does not drop a live bridge (the interval fires once after).
+const API_MISSED_PINGS = 6;   // ~15 s
+setInterval(() => {
+  broadcastAll({ t: "ping", ts: performance.now() });
+  if (!isHost) return;
+  for (const [id, e] of conns) {
+    if (!e.meta?.api) continue;
+    e.missed = (e.missed || 0) + 1;
+    if (e.missed > API_MISSED_PINGS) {
+      log("room", `API client ${e.name || id} stopped answering; dropping it`);
+      try { e.conn.close(); } catch {}
+    }
+  }
+}, 2500);
 
 const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
 $("gb-minus").addEventListener("click", () => stepGB(-1));

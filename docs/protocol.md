@@ -103,6 +103,8 @@ A code run holds the room's generation lock for all its steps, so chat questions
 | `ai-stop {rid}` | bridge → host | stop this request: honoured while it runs (after the lap in flight) or while it waits in the host's queue (answered `ai-busy {rid, code: "gone"}`). Sent when the HTTP client disconnects |
 | `ai-ready-all {model, label}` | host → all | as before, plus the model's display label (the bridge's `/v1/models`) |
 
+The bridge answers every `ping` with `pong`. The host drops an API client that missed 6 pings in a row (about 15 s): a bridge that was killed never sends `leaving`, and its data channel can take over a minute to close while its answer holds the room.
+
 API exchanges show in the chat with "via API · not part of this chat's memory", are not saved with the room (`saveHost`), and hide Continue / Regenerate (their history is the client's). Old peers ignore the new fields on known messages and never see `ai-ask {api}`, which is why this is not a protocol change: `PROTOCOL` stays 4.
 
 ## Versioning
