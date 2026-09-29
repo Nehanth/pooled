@@ -25,10 +25,14 @@
 // hang). Not before its hello: a relay process that is hung already must still be seen as hung.
 // When it goes while the relay is hung, the other relay previews get fresh frames, so the hung
 // process has none left. The same when a preview hangs the relay: every relay preview stops
-// answering at once, and there is no telling from here whose code is looping. The hang is charged
-// to the one that was shown a new document last (new code; a reload of the same document, as a
-// port serving the whole project gets for any write, does not count), and the others move to
-// fresh frames quietly, with no error on their ports.
+// answering at once, and there is no telling from here for sure whose code is looping. The hang is
+// charged to one preview only when something points at it: it was shown a new document (new code;
+// a reload of the same document, as a port serving the whole project gets for any write, does not
+// count) within SHOWN_MS before the relay's last heartbeat, or else its frame has the focus (the
+// user's click or key set the loop off: a game). The others then move to fresh frames quietly,
+// with no error on their ports. With neither, every stuck preview is charged: guessing would put
+// the error on a healthy port and move the looping one quietly to a fresh frame, where it loops
+// again and the next guess is charged, until it is the last one left.
 // After a hang: Chrome gives a new frame of the relay's site the process that already hosts that
 // site, and a hung process goes away only some time after its last frame. A relay frame made in
 // that window joins the hung process and never says hello. So relay frames made within QUIET_MS of
@@ -51,6 +55,8 @@ import { buildPreviewDoc } from "./preview-build.js";
 const LEVELS = new Set(["log", "info", "warn", "error"]);
 const str = (v, n) => String(v ?? "").slice(0, n);
 export const HANG_MS = 3000, HELLO_MS = 5000, MAX_NAV = 3, QUIET_MS = 1000, HELLO_RETRIES = 2;
+// a hang this soon after a preview's new document (ms before the relay's last heartbeat) is that document's
+export const SHOWN_MS = 1500;
 // fit: the lowest scale for a tall page, for any page; steps per document; room around a scaled page (px)
 const FIT_MIN_H = 0.5, FIT_MIN = 0.2, FIT_STEPS = 6, FIT_PAD = 24;
 const views = new Set();   // the visible previews of this page (not run frames)
@@ -241,17 +247,24 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
   // the relay stopped answering: one process for all of this page's relay previews (see the top)
   const hangRelay = () => {
     const stuck = [...views].filter((v) => v === me || v.stuck());
-    const culprit = stuck.reduce((a, v) => (v.shown > a.shown ? v : a));
+    const last = Math.max(...stuck.map((v) => v.beat));
+    const newest = stuck.reduce((a, v) => (v.shown > a.shown ? v : a));
+    const culprit = newest.shown && newest.shown >= last - SHOWN_MS ? newest : stuck.find((v) => v.focused());
+    if (!culprit) {
+      const ports = stuck.map((v) => ":" + v.port).join(", ");
+      for (const v of stuck) v.hang(stuck.length > 1 ? `; the previews on ${ports} share one process and stopped together, so the loop is in one of them` : "");
+      return;
+    }
     culprit.hang();
     for (const v of stuck) if (v !== culprit) v.refresh();
   };
-  const onHang = () => {
+  const onHang = (why = "") => {
     clearInterval(dog); dog = 0;
     hung = true; hello = false; quiet();
     shownDoc = "";   // running it again is new code again
     frame?.remove(); frame = null;
     detach(); detach = () => {};
-    log("error", `preview hung (infinite loop?): no answer for ${HANG_MS / 1000} s, so it was stopped; it runs again on the next edit`);
+    log("error", `preview hung (infinite loop?): no answer for ${HANG_MS / 1000} s, so it was stopped${why}; it runs again on the next edit`);
     status("hung");
     gate = doc.createElement("button");
     gate.type = "button"; gate.className = "pv-run"; gate.textContent = `preview hung · run :${port} again`;
@@ -317,8 +330,10 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     frame.remove(); makeFrame(); if (running) load();
   };
   const me = {
-    refresh, retry, hang: () => onHang(),
+    refresh, retry, port, hang: (why) => onHang(why),
     get shown() { return shown; },
+    get beat() { return beat; },
+    focused: () => !!frame && doc.activeElement === frame,
     stuck: () => mode === "relay" && hello && !hung && Date.now() - beat > 1500,
   };
   let gone = false, counted = false;
