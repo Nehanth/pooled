@@ -21,6 +21,7 @@ const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
+import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { lookupDrafts } from "./room/lookup.js";
 import { drawCard } from "./room/card.js";
@@ -93,6 +94,10 @@ async function probeGPU() {
         // measurement (see measureBudgetGB) which replaces this estimate.
         meta.budgetGB = meta.maxBufGB;
         meta.canMeasure = meta.ua !== "iPhone" && meta.ua !== "Android";
+        // how fast this GPU moves memory (room/gpuspeed.js), which picks the model host among
+        // computers; phones skip it (they never host over a computer). ?gbps=N pins it, 0 = unknown
+        const pin = new URLSearchParams(location.search).get("gbps");
+        meta.gbps = pin !== null ? Math.max(0, +pin || 0) : meta.canMeasure ? await measureCopyGBps(a) : 0;
       }
     } catch {}
   }

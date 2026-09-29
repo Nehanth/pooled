@@ -940,3 +940,71 @@ one "off" session. That session is the only one where both ends' autotune picked
 in the first two-machine sessions comes from the cooperative GEMV shape the load-time autotune picks. It
 predates this change and is not caused by it. The next thing to chase is which device's plain (one-column)
 GEMV shape changes the bits against its batched verify.
+
+## 2026-09-28: which device hosts, and where the split falls (branch perf/room-placement)
+
+Same harness and machines as above, over the home LAN (Wi-Fi on both ends; Tailscale to the Mac was down).
+MoE (Qwen3.6-35B-A3B Q4_0) and the 27B, exact sampling, 128 tokens, `japan` and `twosum`, 2 untraced rounds
+per mode and prompt, each config run in 2 sessions interleaved with the others (so 4 samples per cell). The
+link was bad all evening: ping averages 15-150 ms with peaks of 100-440 ms (p50 during a round 3.5-6 ms, p90
+often 20-300 ms), so single rounds swing by 30%+ and only medians are quoted.
+
+**The question.** A spec step spends about 60% of its time on the host (embedding, 20 layers, head, drafting,
+rollback and refill), and the M5 Max moves memory about twice as fast as the GB10. Does it help to give the
+Mac more layers (split by speed), or to make the Mac the host?
+
+### MoE, split point and host (origin/perf/room-harness b25aa6a, `--split` and `--here guest`), median tok/s
+
+| config | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| GB10 hosts, 20 / 20 (pledge) | 29.0 | 31.3 | 34.0 | 51.5 |
+| GB10 hosts 16, Mac 24 | 29.9 | 30.6 | 36.6 | 47.3 |
+| GB10 hosts 12, Mac 28 | 29.4 | 33.2 | 39.1 | 41.8 |
+| **Mac hosts, 20 / 20** | **31.6** (+9%) | **34.9** (+11%) | **47.4** (+39%) | **61.8** (+20%) |
+| Mac hosts 16, GB10 24 | 30.3 | 32.2 | 45.0 | 58.5 |
+| Mac hosts 24, GB10 16 | 32.9 | 35.3 | 49.4 | 63.3 |
+
+Moving layers to the Mac while the GB10 hosts is within noise (the Mac's layers overlap nothing; they are
+simply 2x cheaper per layer, a few ms a lap). Moving the **host role** is what pays: the head, the sampler,
+the draft block and the rollback/refill all run on the faster memory, and they sit on every token's
+critical path. Mac-host 24/16 is a little ahead of 20/20 (+1-4%, within noise).
+
+### The change: pick the model host by GPU speed
+
+`room/gpuspeed.js` times a 64 MB buffer copy at page load (8 copies, best of 5 passes, its own device,
+destroyed afterwards); the result travels in the device's `hello` meta as `gbps` (old tabs don't send it,
+and a missing value leaves the pick by memory, so no protocol bump). `pickModelHost` still starts from the
+device that lends the most memory, then hands the host role to a device of the same kind that copies at
+least 1.5x faster and lends at least half as much memory (a phone never beats a computer). Measured in the
+same headless browsers as the rooms, 6 page loads each: **GB10 185-199 GB/s** (one outlier 106), 274-454 ms
+for the probe including device creation; **M5 Max 370-398 GB/s**, 11-33 ms. The ratio is about 2.0, so the Mac
+hosts even when it lends less (12 GB against 13). `?gbps=N` pins the value (0 = unknown).
+
+Checked in a real room (`xroom.mjs --speedpick`): the GB10 pressed Start and the Mac took the model host
+(Mac layers 1-18 + embed/head, GB10 serving 19-40, the split by pledge), online in 63 s. The harness pins
+its host page (`?gbps=0`) so `--here host|guest` still means what it says.
+
+Same code, pinned both ways (2 sessions; the second batch had ping p90 up to 300 ms, so plain is noise):
+
+| | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| MoE, GB10 hosts -> Mac hosts, all 8 samples | 25.4 -> 26.5 (+4%) | 28.4 -> 32.2 (+13%) | 30.7 -> 39.4 (+28%) | 45.3 -> 55.4 (+22%) |
+| 27B (31 / 33 layers), 4 samples | 9.4 -> 9.6 (+2%, noise) | 9.3 -> 9.0 (-4%, stalls) | 10.8 -> 12.6 (+17%) | 18.2 -> 21.6 (+19%) |
+
+The 27B across two machines is new: GB10-hosted spec twosum 18.2 matches the GB10 two-tab loopback (18.3);
+Mac-hosted 21.6 beats it. One GB10 alone, `--solo`, 2 runs each, before -> after the change (the probe runs at
+load), range over 4 rounds: plain japan 34.9-35.9 -> 35.9-37.2, plain twosum 40.1-41.5 -> 40.4-43.4, spec japan 45.7-47.8 -> 46.0-47.7 (59%), spec twosum 64.0-68.1 -> 65.1-67.8
+(80%): unchanged within noise, same answers (a0e7f9bd / 1df98ce0), spec == plain.
+
+### Correctness
+
+- `twosum`: one answer (1df98ce0…) in every config, split, host direction, mode, session and the solo runs.
+- 27B: `japan` 94b0f2de… and `twosum` 1df98ce0… in every round, both directions, plain == spec.
+- MoE `japan` depends on where the split falls, on either host: 16/24 (either host) gives the one-device
+  answer a0e7f9bd; 24/16 and 12/28 give 3f42e6… (from character 359); 20/20 gives 8e29cc… or 44efa7… (from
+  character 128, "local vibes"), and those two split at character 350 (`the "herd."` vs `the "herd" where
+  possible.`), a near tie that lands either way by session and by mode, on the old code as on the new (GB10
+  hosting, base code: plain 8e29cc / spec 44efa7 in one session, both 44efa7 in the next; Mac hosting, new
+  code: both 8e29cc in both sessions). The Vulkan + Metal split with an f16 wire moves a close argmax; the
+  host change changes no split's arithmetic. Open, as before.
+- No engine change (27B bit goldens not rerun). Unit tests: 245 passed, 0 failed.

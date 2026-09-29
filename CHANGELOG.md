@@ -10,6 +10,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
   - Apple GPUs in Chrome and Safari get wider fused MoE expert kernels (`moeFusedLayout`; M5 Max kernel time: gate/up 0.49x, down 0.55x). Qwen 3.6 35B decode in Chrome on an M5 Max: +5.6% plain (86.1 -> 90.9 tok/s), +11% spec.
   - `moe_route` is 1.6-1.9x faster on every GPU (GB10 and M5 Max) and gives the same bits.
   - Other GPUs keep their output bits. MoE output on Apple still matches llama.cpp, and spec == plain.
+- **The model host is the device whose GPU moves memory fastest**, when it is clearly faster (1.5x a copy's GB/s, measured at page load in `room/gpuspeed.js`, about 12-450 ms) and lends at least half the memory of the device that would host by memory. Before, it was the device that lent the most memory. GB10 + M5 Max room (the Mac copies at about 390 GB/s, the GB10 at about 190): the Mac hosts, and the MoE's speculative decode is +20-39% (plain +9-11% on a calm link), the 27B's speculative +17-19% (plain unchanged). Same tokens for a given split; the GB10 alone is unchanged. `?gbps=N` pins the value (0 = unknown, which leaves the pick by memory).
 
 ## [1.0.0] - 2026-09-27
 
