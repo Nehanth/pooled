@@ -556,9 +556,10 @@
   #ap-need b { font: 500 12px/1 var(--mono); color: var(--text); }
   #ap-need span { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--ink-2); }
   #ap-need.ok span { color: var(--accent-text); }
-  /* four and a half rows, then the list scrolls: the card keeps its height as more devices join */
-  #ap-devs { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 111px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
-  #ap-devs.more { -webkit-mask-image: linear-gradient(#000 calc(100% - 24px), transparent); mask-image: linear-gradient(#000 calc(100% - 24px), transparent); }
+  /* four and a half rows (20px rows, 6px gaps), then the list scrolls: the card keeps its height as more
+     devices join. The fade covers only the half row, so the four above it stay clear */
+  #ap-devs { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 115px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  #ap-devs.more { -webkit-mask-image: linear-gradient(#000 calc(100% - 14px), transparent); mask-image: linear-gradient(#000 calc(100% - 14px), transparent); }
   #ap-devs li { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; color: var(--text); }
   #ap-devs li i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--sw); }
   #ap-devs li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
