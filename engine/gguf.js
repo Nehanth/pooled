@@ -208,7 +208,7 @@ export async function ggufEntry(G, bytesOf, name, optional, onBytes = () => {}) 
     if (hit) { onBytes(info.byteLength); return hit; }
   }
   // the embedding stays on the CPU too (per-token row lookups), so it takes the normal path
-  if (G.streamEntry && name !== GGML_EMBED && info.shape.length === 2 && (info.ggmlType === GGML_Q8_0 || info.ggmlType === GGML_Q4_0)) {
+  if (G.streamEntry && name !== GGML_EMBED && info.shape.length === 2 && streamable(info.ggmlType)) {
     const e = await G.streamEntry(info);
     if (e) { onBytes(info.byteLength); return e; }
   }
@@ -635,12 +635,28 @@ export function gpuUploadEntry(device, e, keepCpu = false) {
 }
 
 
+// Types streamEntryToGPU takes: Q4_0 / Q8_0 are repacked as they arrive, the other quants
+// (Q4_1, Q5_0, Q5_K, Q6_K) are requantized to Q8 a few rows at a time (streamRequantToGPU).
+// F32 / F16 / BF16 stay on the CPU path: they are the small tensors (norms, biases, conv).
+export const streamable = (t) => t === GGML_Q8_0 || t === GGML_Q4_0 || t === GGML_Q4_1 || t === GGML_Q5_0 || t === GGML_Q5_K || t === GGML_Q6_K;
+
+// Staging memory for the streamed uploads, reused from tensor to tensor (a shard streams hundreds of
+// tensors one after another: without this each one left a few MB of garbage behind). A stream
+// borrows one and gives it back when done; concurrent streams simply get their own.
+const stagePool = [];
+function borrowStage(bytes) {
+  const i = stagePool.findIndex((b) => b.byteLength >= bytes);
+  return i >= 0 ? stagePool.splice(i, 1)[0] : new ArrayBuffer(bytes);
+}
+function giveStage(buf) { if (stagePool.length < 2) stagePool.push(buf); }
+
 // Stream a Q4_0 / Q8_0 tensor straight from the network into GPU buffers.
 // Nothing tensor-sized ever exists in JS: chunks arrive, whole blocks are
 // repacked into a small reused staging area and written out, the rest waits
 // for the next chunk. Peak CPU memory ~ one network chunk + staging (a few
 // MB) instead of 3x the tensor. This is what keeps an iPhone tab alive.
 export async function streamEntryToGPU(device, info, openRange, { pace = 0, staging = 4 * 2 ** 20 } = {}) {
+  if (info.ggmlType !== GGML_Q4_0 && info.ggmlType !== GGML_Q8_0) return streamRequantToGPU(device, info, openRange, { pace, staging });
   const q4 = info.ggmlType === GGML_Q4_0;
   const BLK = q4 ? 18 : Q8_0_BLOCK_BYTES;      // bytes per block in the file
   const QSB = q4 ? 16 : QK8_0;                 // quant bytes per block on the GPU
@@ -651,15 +667,17 @@ export async function streamEntryToGPU(device, info, openRange, { pace = 0, stag
   const oom = await device.popErrorScope();
   if (oom) throw new Error(`GPU out of memory while allocating ${info.name} (${(info.byteLength / 2 ** 20).toFixed(0)} MB): this device pledged more than its GPU can hold`);
   const blocksPerFlush = Math.max(1, Math.floor(staging / QSB));
-  const qsStage = new Uint8Array(blocksPerFlush * QSB), qsStage16 = new Uint16Array(qsStage.buffer);
-  const scStage = new Uint16Array(blocksPerFlush);   // raw f16 scales
+  const stage = borrowStage(blocksPerFlush * (QSB + 2)), scAt = blocksPerFlush * QSB;
+  try {
+  const qsStage = new Uint8Array(stage, 0, scAt), qsStage16 = new Uint16Array(stage, 0, scAt / 2);
+  const scStage = new Uint16Array(stage, scAt, blocksPerFlush);   // raw f16 scales
   let staged = 0, block = 0;
   const flush = async () => {
     if (!staged) return;
     const first = block - staged;
     // byte views only: WebKit and Chrome disagree on element-vs-byte sizes for typed arrays
-    device.queue.writeBuffer(qsBuf, first * QSB, qsStage.buffer, 0, staged * QSB);
-    device.queue.writeBuffer(scBuf, first * 2, scStage.buffer, 0, staged * 2);
+    device.queue.writeBuffer(qsBuf, first * QSB, stage, 0, staged * QSB);
+    device.queue.writeBuffer(scBuf, first * 2, stage, scAt, staged * 2);
     staged = 0;
     await new Promise((r) => setTimeout(r, 0));      // let WebKit hand the copy to the GPU process before we make more
   };
@@ -693,6 +711,63 @@ export async function streamEntryToGPU(device, info, openRange, { pace = 0, stag
   }
   await flush();
   if (block !== nb) throw new Error(`short tensor ${info.name}: ${block}/${nb} blocks`);
+  } finally { giveStage(stage); }
   if (pace) await new Promise((r) => setTimeout(r, pace));   // give the allocator time to return pages
   return { kind: q4 ? "q4" : "q8", shape: info.shape, gpu: { kind: q4 ? "q4" : "q8", qs: qsBuf, sc: scBuf } };
+}
+
+// A K-quant (or Q4_1 / Q5_0) tensor, requantized to Q8 on its way to the GPU. The CPU path
+// (convertEntry -> requantQ8Streaming) holds the whole tensor's bytes plus the whole Q8 output
+// (a MoE expert-down tensor: 160 MB in, 256 MiB out, both alive at once) and this is what killed
+// iPhone tabs on layers 0-4 (#207). Here only one chunk of rows is ever in JS: the rows arrive,
+// are dequantized and quantized exactly as requantQ8Streaming does (Q8 blocks are 32 elements
+// within a row, so the row chunking never changes a bit), and are written to the GPU buffers.
+export async function streamRequantToGPU(device, info, openRange, { pace = 0, staging = 4 * 2 ** 20 } = {}) {
+  const [rows, cols] = info.shape;
+  const rowBytes = ggmlTypeBytes(info.ggmlType, cols);
+  if (!(rowBytes > 0) || cols % 32) throw new Error(`can't stream ${info.name}: type ${info.ggmlType}, ${cols} columns`);
+  const n = rows * cols, nb = n / 32;
+  device.pushErrorScope("out-of-memory");
+  const qsBuf = device.createBuffer({ size: Math.ceil(n / 4) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+  const scBuf = device.createBuffer({ size: Math.ceil(nb / 2) * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+  const oom = await device.popErrorScope();
+  if (oom) throw new Error(`GPU out of memory while allocating ${info.name} (${(info.byteLength / 2 ** 20).toFixed(0)} MB): this device pledged more than its GPU can hold`);
+  // rows per chunk: about `staging` bytes of f32 while converting, an even count so every chunk's
+  // scales start on a 4-byte boundary of the scale buffer
+  const CH = Math.max(2, Math.floor(staging / (cols * 4)) & ~1);
+  const stage = borrowStage(CH * rowBytes);
+  const rowBuf = new Uint8Array(stage, 0, CH * rowBytes);   // reused for every chunk
+  let fill = 0, row = 0;
+  try {
+  const flush = async () => {
+    const rc = fill / rowBytes;
+    if (!rc) return;
+    const sub = { ggmlType: info.ggmlType, nElems: rc * cols, shape: [rc, cols] };
+    const q = quantizeQ8(dequantF32(sub, rowBuf.subarray(0, fill)));
+    device.queue.writeBuffer(qsBuf, row * cols, q.qs.buffer, 0, rc * cols);
+    const scBytes = (rc * cols / 32) * 2;           // odd block count (the last chunk): q.scales is padded to a word
+    device.queue.writeBuffer(scBuf, (row * cols / 32) * 2, q.scales.buffer, 0, Math.ceil(scBytes / 4) * 4);
+    row += rc; fill = 0;
+    await new Promise((r) => setTimeout(r, 0));
+  };
+  const r = await openRange(info);
+  if (!r.ok && r.status !== 206) throw new Error("range fetch failed for " + info.name);
+  const reader = r.body.getReader();
+  let got = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    for (let o = 0; o < value.length;) {
+      const take = Math.min(value.length - o, rowBuf.length - fill, info.byteLength - got);
+      if (take <= 0) break;
+      rowBuf.set(value.subarray(o, o + take), fill);
+      fill += take; o += take; got += take;
+      if (fill === rowBuf.length) await flush();
+    }
+  }
+  if (got !== info.byteLength || fill % rowBytes) throw new Error(`short tensor ${info.name}: ${got}/${info.byteLength} bytes`);
+  await flush();
+  } finally { giveStage(stage); }
+  if (pace) await new Promise((r) => setTimeout(r, pace));
+  return { kind: "q8", shape: info.shape, gpu: { kind: "q8", qs: qsBuf, sc: scBuf } };
 }

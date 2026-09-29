@@ -25,6 +25,7 @@ import { qrSVG } from "./room/qr.js";
 import { lookupDrafts } from "./room/lookup.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
+import { pledgeRule, pledgeGB, afterLoadDeath } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { working, liveWords } from "./room/working.js";
 
@@ -142,7 +143,15 @@ const metaPromise = (async () => {
   const m = await probeGPU();
   if (m.webgpu && m.budgetGB) m.contribGB = Math.max(0.2, Math.round(m.budgetGB * 0.5 * 10) / 10);
   m.phone = m.ua === "iPhone" || m.ua === "Android";
-  if (m.phone) { m.contribGB = 0.5; $("join-gb").min = "0.5"; $("join-gb").step = "0.5"; }
+  // phones and tablets lend at most what their browser tab survives (room/pledge.js, #207)
+  const rule = pledgeRule(m.ua, navigator.deviceMemory);
+  if (rule.capped) {
+    m.pledgeMax = rule.max;
+    m.contribGB = rule.def;
+    $("join-gb").min = String(rule.min); $("join-gb").step = String(rule.step); $("join-gb").max = String(rule.max);
+    $("join-gb").title = rule.why;
+    if (m.webgpu) { $("ap-cap").textContent = rule.why; $("ap-cap").hidden = false; }
+  }
   else if (m.contribGB) m.contribGB = Math.max(1, Math.round(m.contribGB));
   if (m.contribGB) $("join-gb").value = m.contribGB;
   return m;
@@ -377,21 +386,24 @@ function renderPool(pledged) {
     || '<li class="none">No device with WebGPU yet</li>';
   const can = !!myMeta.webgpu;
   $("ap-step").hidden = !can; $("ap-no").hidden = can;
-  if (can) { if (document.activeElement !== $("ap-gb")) $("ap-gb").value = myMeta.contribGB; $("ap-minus").disabled = myMeta.contribGB <= lendMin(); $("ap-plus").disabled = myMeta.contribGB >= 64; }
+  if (can) { if (document.activeElement !== $("ap-gb")) $("ap-gb").value = myMeta.contribGB; $("ap-minus").disabled = myMeta.contribGB <= lendMin(); $("ap-plus").disabled = myMeta.contribGB >= lendMax(); }
 }
-const lendMin = () => (myMeta.phone ? 0.5 : 1);
-function selfSteps(card) { const s = card.querySelectorAll(".gbstep .step"); if (s.length) { s[0].disabled = myMeta.contribGB <= lendMin(); s[1].disabled = myMeta.contribGB >= 64; } }
+const lendRule = () => pledgeRule(myMeta.ua, navigator.deviceMemory);
+const lendMin = () => (myMeta.phone ? 0.5 : lendRule().min);
+const lendMax = () => myMeta.pledgeMax || 64;
+const lendStep = () => (myMeta.phone ? 0.5 : lendRule().step);
+function selfSteps(card) { const s = card.querySelectorAll(".gbstep .step"); if (s.length) { s[0].disabled = myMeta.contribGB <= lendMin(); s[1].disabled = myMeta.contribGB >= lendMax(); } }
 // lend a different amount: this device's card, the room's total, and every other device hear it
 function lendGB(v) {
-  v = Math.round(Math.min(64, Math.max(lendMin(), v)) * 10) / 10;
+  v = Math.round(Math.min(lendMax(), Math.max(lendMin(), v)) * 10) / 10;
   if (!myMeta.webgpu || v === myMeta.contribGB) return;
   myMeta.contribGB = v;
   const selfCard = document.querySelector(".peer-card.self");
   if (selfCard) { setLends(selfCard, v); selfSteps(selfCard); }
   updateCluster(); broadcastAll({ t: "pledge", gb: v });
 }
-$("ap-minus").addEventListener("click", () => lendGB(myMeta.contribGB - (myMeta.phone ? 0.5 : 1)));
-$("ap-plus").addEventListener("click", () => lendGB(myMeta.contribGB + (myMeta.phone ? 0.5 : 1)));
+$("ap-minus").addEventListener("click", () => lendGB(myMeta.contribGB - lendStep()));
+$("ap-plus").addEventListener("click", () => lendGB(myMeta.contribGB + lendStep()));
 // or type the amount: applied on Enter or on leaving the box, clamped like the steps (and shown back as applied)
 function typedGB() {
   const el = $("ap-gb"), v = parseFloat(String(el.value).replace(",", "."));
@@ -434,7 +446,7 @@ function selfStepper() {
     buf.classList.add("gbstep");
     buf.innerHTML = '<button class="step" type="button" data-d="-1" aria-label="Less memory">\u2212</button><span class="bv"></span><button class="step" type="button" data-d="1" aria-label="More memory">+</button>';
     buf.querySelector(".bv").textContent = text;
-    buf.addEventListener("click", (e) => { const b = e.target.closest(".step"); if (b) lendGB(myMeta.contribGB + +b.dataset.d * (myMeta.phone ? 0.5 : 1)); });
+    buf.addEventListener("click", (e) => { const b = e.target.closest(".step"); if (b) lendGB(myMeta.contribGB + +b.dataset.d * lendStep()); });
   }
   selfSteps(selfCard);
 }
@@ -549,7 +561,7 @@ function onData(from, d) {
       ensureCard(from, d.name, d.meta);
       if (isHost) {
         roster.set(from, { name: d.name, meta: d.meta }); broadcastRoster();
-        aiRejoin(from, d.name);
+        if (!aiLoadDeath(from, d)) aiRejoin(from, d.name);
         if (d.died?.during && d.died.ago > 2) log("room", `${d.name} came back: its tab was killed ${d.died.ago} s ago while ${d.died.during}. Phones kill background tabs; keep the screen on.`);
         if (ai.visibility !== "all") sendTo(from, { t: "ai-visibility", mode: ai.visibility });
         if (!d.back) aiWelcome(from); else offerRedealForNewcomers();
@@ -653,7 +665,7 @@ window.addEventListener("pagehide", () => { try { broadcastAll({ t: "leaving" })
 // --- ping loop ---
 setInterval(() => broadcastAll({ t: "ping", ts: performance.now() }), 2500);
 
-const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
+const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(parseFloat(i.max) || 64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
 $("gb-minus").addEventListener("click", () => stepGB(-1));
 $("gb-plus").addEventListener("click", () => stepGB(1));
 // a typed amount is clamped like the steps once the box is left (100 becomes 64, -5 the minimum)
@@ -700,7 +712,9 @@ async function start(create, resume = null) {
   $("join-status").textContent = "Connecting…";
   myMeta = await metaPromise;
   const gbIn = parseFloat($("join-gb").value);
-  myMeta.contribGB = Math.min(64, Math.max(myMeta.phone ? 0.5 : 1, gbIn > 0 ? gbIn : (myMeta.contribGB || 1)));
+  myMeta.contribGB = Math.min(lendMax(), Math.max(lendMin(), gbIn > 0 ? gbIn : (myMeta.contribGB || 1)));
+  // killed while loading layers last time (the breadcrumb below): come back with the smallest share
+  try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (myMeta.pledgeMax && c?.loading && Date.now() - c.t < 10 * 60 * 1000) myMeta.contribGB = lendMin(); } catch {}
 
   // STUN for hole-punching; TURN as fallback for symmetric NAT / CGNAT peers.
   // ICE prefers direct candidates, so TURN only carries traffic when a direct
@@ -733,7 +747,7 @@ async function start(create, resume = null) {
       clearTimeout(timeout);
       wire(conn, "host", undefined, true);
       let died = null;
-      if (!VQ.get("embed")) try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c && Date.now() - c.t < 10 * 60 * 1000) died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000) }; } catch {}
+      if (!VQ.get("embed")) try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c && Date.now() - c.t < 10 * 60 * 1000) died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000), loading: !!c.loading }; } catch {}
       conn.send({ t: "hello", name: myName, meta: myMeta, died, v: PROTOCOL });
       enterRoom();
     });
@@ -953,26 +967,32 @@ async function rangeFetch(url, lo, hi, noCache = false) {
   const src = !noCache && ai.wsrc?.url === url ? ai.wsrc.map.get(lo + "-" + hi) : null;
   if (src) {
     try {
-      const buf = await peerGet(src, url, lo, hi);
-      ai.peerBytes = (ai.peerBytes || 0) + buf.byteLength;
-      const resp = new Response(buf, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(buf.byteLength) } });
-      if (c && !myMeta?.phone) c.put(key, resp.clone()).catch(() => {});
+      // streamed: the parts go to the reader as they arrive, with flow control (peerGet), so a
+      // phone never holds a whole 150 MB range in JS (#207). A failure after this point surfaces
+      // in the reader, marked retryNet: the loaders then fetch the range from the network.
+      const body = await peerGet(src, url, lo, hi);
+      const resp = new Response(body, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(hi - lo + 1) } });
+      if (c && !myMeta?.phone) storeRange(c, key, resp.clone(), hi - lo + 1);
       return resp;
     } catch (err) { crumb(`peer weights from ${conns.get(src)?.name || src} failed (${err.message}); using the network`); ai.wsrc.map.delete(lo + "-" + hi); }
   }
   ai.netBytes = (ai.netBytes || 0) + (hi - lo + 1);
   const r = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } });
   if (r.status !== 206) throw new Error("model host refused range requests");
-  if (c && !myMeta?.phone) {   // phones skip the store (no spare RAM for the copy); Cache API refuses 206s, so store as a plain 200
-    try {
-      // buffer the copy fully first, so a complete body is the only thing that ever gets stored
-      r.clone().arrayBuffer().then((buf) => {
-        if (buf.byteLength !== hi - lo + 1) return;
-        return c.put(key, new Response(buf, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(buf.byteLength) } }));
-      }).then(() => { ai.cachedBytes = (ai.cachedBytes || 0) + (hi - lo + 1); }, () => {});
-    } catch {}
-  }
+  // phones skip the store (no spare RAM for the copy); Cache API refuses 206s, so store as a plain 200
+  if (c && !myMeta?.phone) storeRange(c, key, r.clone(), hi - lo + 1);
   return r;
+}
+// Store a range in the weight cache as it streams (no whole-range copy in JS). A body that errors
+// makes put() fail and nothing is stored; one that ends short is stored but never trusted: every
+// read checks the length (rangeFetch below keys on x-swarm-len, the loaders on the bytes they got).
+function storeRange(c, key, r, len) {
+  try {
+    let got = 0;
+    const counted = r.body.pipeThrough(new TransformStream({ transform(ch, ctl) { got += ch.byteLength; ctl.enqueue(ch); } }));
+    c.put(key, new Response(counted, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(len) } }))
+      .then(() => { if (got !== len) return c.delete(key); ai.cachedBytes = (ai.cachedBytes || 0) + len; }, () => {});
+  } catch {}
 }
 // ---- weights from the room: devices share the ranges they have cached ----
 // Inventory: the "lo-hi" byte ranges of `url` this device has cached (phones cache nothing).
@@ -999,48 +1019,113 @@ function weightSources(url, inv) {
   for (const [id, have] of Object.entries(inv || {})) if (id !== peer.id) for (const k of have || []) if (!map.has(k)) map.set(k, id);
   return { url, map };
 }
-const wGets = new Map();   // request id -> { buf, got, res, rej, timer }
+// A range from a device in the room, streamed with flow control: the requester says how much it
+// lets the sender run ahead (win) and acks what its reader has taken; the sender waits for the acks.
+// Before this, the whole range (up to 160 MB for a MoE expert tensor) was collected in one JS buffer
+// on the phone, and a prefetched range kept a second one alive: that killed iPhone tabs (#207).
+const W_PART = 64 * 1024;
+const W_WIN = 8 * 2 ** 20;
+const wGets = new Map();   // request id -> { ctl, got, len, acked, timer, first, fail, body }
 let wSeq = 0;
+// -> a ReadableStream of the range, once its first part is here (rejects on a miss or a silent source)
 async function peerGet(src, url, lo, hi) {
   if (!(await ensureLink(src, 10000))) throw new Error("no link");
   const len = hi - lo + 1, id = `${peer.id}:${++wSeq}`;
   return new Promise((res, rej) => {
-    const w = { buf: new Uint8Array(len), got: 0, res, rej, timer: null };
-    const idle = () => { clearTimeout(w.timer); w.timer = setTimeout(() => { wGets.delete(id); rej(new Error("stalled")); }, 15000); };
-    w.idle = idle; idle();
+    const w = { got: 0, len, acked: 0, timer: null, ctl: null, first: { res, rej } };
+    const fail = (err) => {
+      clearTimeout(w.timer); wGets.delete(id);
+      sendTo(src, { t: "ai-wack", id, cancel: 1 });
+      err.retryNet = true;   // the loaders fetch the range from the network instead
+      if (w.first) { w.first.rej(err); w.first = null; } else try { w.ctl.error(err); } catch {}
+    };
+    w.fail = fail;
+    // Called by the stream after every read and every enqueue while there is room in the queue
+    // (it returns at once, so it never blocks a later call). Acks what the reader took; with the
+    // queue empty it acks everything, so the sender is never held back while the reader waits.
+    // Silence counts only while the reader waits on an empty queue (a prefetched range may sit
+    // unread for a while, and that is fine).
+    const pull = () => {
+      const queued = Math.max(0, W_WIN - w.ctl.desiredSize);
+      const taken = w.got - queued;
+      if (taken > w.acked && (taken - w.acked >= W_WIN / 4 || !queued)) { w.acked = taken; sendTo(src, { t: "ai-wack", id, got: taken }); }
+      clearTimeout(w.timer);
+      if (!queued && w.got < w.len) w.timer = setTimeout(() => fail(new Error("stalled")), 15000);
+    };
+    const body = new ReadableStream({
+      start(ctl) { w.ctl = ctl; },
+      pull,
+      cancel() { clearTimeout(w.timer); wGets.delete(id); sendTo(src, { t: "ai-wack", id, cancel: 1 }); },
+    }, new ByteLengthQueuingStrategy({ highWaterMark: W_WIN }));
+    w.body = body;
     wGets.set(id, w);
-    sendTo(src, { t: "ai-wget", id, url, lo, hi });
+    sendTo(src, { t: "ai-wget", id, url, lo, hi, win: W_WIN });
   });
 }
 function onWeightPart(d) {
   const w = wGets.get(d.id); if (!w) return;
-  if (d.miss) { clearTimeout(w.timer); wGets.delete(d.id); w.rej(new Error("not cached there")); return; }
+  if (d.miss) { w.fail(new Error("not cached there")); return; }
   if (d.data) {
     const part = d.data instanceof Uint8Array ? d.data : new Uint8Array(d.data);
-    if (d.off >= 0 && d.off + part.length <= w.buf.length) { w.buf.set(part, d.off); w.got += part.length; }
-    w.idle();
+    if (d.off !== w.got || w.got + part.length > w.len) { w.fail(new Error(`part out of order at ${d.off}/${w.got}`)); return; }
+    w.got += part.length;
+    ai.peerBytes = (ai.peerBytes || 0) + part.length;
+    clearTimeout(w.timer);
+    w.ctl.enqueue(part);
+    if (w.first) { w.first.res(w.body); w.first = null; }
   }
   if (d.done) {
+    if (w.got !== w.len) { w.fail(new Error(`short: ${w.got}/${w.len}`)); return; }
     clearTimeout(w.timer); wGets.delete(d.id);
-    if (w.got === w.buf.length) w.res(w.buf.buffer); else w.rej(new Error(`short: ${w.got}/${w.buf.length}`));
+    if (w.first) { w.first.res(w.body); w.first = null; }
+    w.ctl.close();
   }
 }
-// serve a cached range to a device in the room, 64 KB at a time, minding the channel's buffer
+// serve a cached range to a device in the room, 64 KB at a time, straight from the cache's body
+// stream (not the whole range in memory), minding the channel's buffer and the requester's window
+const wServes = new Map();   // request id -> { acked, cancel, wake }
+function onWeightAck(d) {
+  const s = wServes.get(d.id); if (!s) return;
+  if (d.cancel) s.cancel = true; else s.acked = Math.max(s.acked, +d.got || 0);
+  const wake = s.wake; s.wake = null; wake?.();
+}
 async function serveWeight(from, d) {
   const e = conns.get(from); if (!e) return;
   const c = await getWeightCache();
   const hit = c && Number.isInteger(d.lo) && Number.isInteger(d.hi) ? await c.match(cacheKey(d.url, d.lo, d.hi)).catch(() => null) : null;
-  if (!hit || hit.headers.get("x-swarm-len") !== String(d.hi - d.lo + 1)) { sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return; }
-  const buf = new Uint8Array(await hit.arrayBuffer());
-  const CH = 64 * 1024;
-  for (let off = 0; off < buf.length; off += CH) {
-    if (!conns.has(from)) return;
-    e.conn.send({ t: "ai-wpart", id: d.id, off, data: buf.subarray(off, Math.min(buf.length, off + CH)) });
-    while (e.conn.dataChannel && e.conn.dataChannel.bufferedAmount > 4 * 2 ** 20) await new Promise((r) => setTimeout(r, 10));
-  }
-  sendTo(from, { t: "ai-wpart", id: d.id, done: 1 });
-  ai.servedBytes = (ai.servedBytes || 0) + buf.length;
+  const len = d.hi - d.lo + 1;
+  if (!hit || hit.headers.get("x-swarm-len") !== String(len)) { sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return; }
+  const win = +d.win > 0 ? +d.win : Infinity;   // (a requester from before flow control sends no window)
+  const s = { acked: 0, cancel: false, wake: null };
+  wServes.set(d.id, s);
+  const reader = hit.body.getReader();
+  try {
+    let off = 0, pend = new Uint8Array(0);
+    for (;;) {
+      const { value, done } = await reader.read();
+      let buf = done ? pend : pend.length ? concat(pend, value) : value;
+      let o = 0;
+      while (buf.length - o >= W_PART || (done && o < buf.length)) {
+        while (off - s.acked >= win && !s.cancel && conns.has(from)) {
+          const t0 = Date.now();
+          await new Promise((r) => { s.wake = r; setTimeout(r, 1000); });
+          if (Date.now() - t0 >= 1000 && off - s.acked >= win) s.idle = (s.idle || 0) + 1; else s.idle = 0;
+          if (s.idle > 120) return;   // the requester stopped reading for 2 minutes: give up on it
+        }
+        if (s.cancel || !conns.has(from)) return;
+        const n = Math.min(W_PART, buf.length - o);
+        e.conn.send({ t: "ai-wpart", id: d.id, off, data: buf.subarray(o, o + n) });
+        o += n; off += n;
+        while (e.conn.dataChannel && e.conn.dataChannel.bufferedAmount > 4 * 2 ** 20) await new Promise((r) => setTimeout(r, 10));
+      }
+      pend = buf.subarray(o);
+      if (done) break;
+    }
+    sendTo(from, { t: "ai-wpart", id: d.id, done: 1 });
+    ai.servedBytes = (ai.servedBytes || 0) + off;
+  } finally { wServes.delete(d.id); reader.cancel().catch(() => {}); }
 }
+const concat = (a, b) => { const m = new Uint8Array(a.length + b.length); m.set(a); m.set(b, a.length); return m; };
 
 async function fetchGGUFHeader(url, needTokenizer = true) {
   let size = 12 * 2 ** 20;
@@ -1055,7 +1140,7 @@ let pacerHook = null;
 const streamWithRetry = (url, streamOpts) => async (info) => {
   try { return await streamEntryToGPU(ai.device, info, openRangeOf(url), streamOpts); }
   catch (e) {
-    if (!/short tensor/.test(String(e))) throw e;
+    if (!/short tensor/.test(String(e)) && !e?.retryNet) throw e;   // (retryNet: a room device stopped sending it)
     const c = await getWeightCache();
     if (c) c.delete(cacheKey(url, info.byteOffset, info.byteOffset + info.byteLength - 1)).catch(() => {});
     return streamEntryToGPU(ai.device, info, (i) => rangeFetch(url, i.byteOffset, i.byteOffset + i.byteLength - 1, true), streamOpts);
@@ -1067,21 +1152,31 @@ const streamWithRetry = (url, streamOpts) => async (info) => {
 // several are in flight at once. Phones keep one: every buffered body is RAM they do not have.
 // ?prefetch=N overrides (0 = off, for A/B).
 const PREFETCH_Q = new URLSearchParams(location.search).get("prefetch");
-const prefetcher = { url: null, list: [], at: new Map(), pending: new Map() };
+// The loader asks for tensors in model order, not file order, so "the next one in the file" is often
+// one it already has: those are never fetched again (taken). Fetching them anyway was ~450 MB of
+// unread downloads per MoE layer, and on an iPhone they piled up in Safari's networking process
+// until iOS killed it and the page with it (#207, measured with memprobe.html ?pfdedupe).
+const prefetcher = { url: null, list: [], at: new Map(), pending: new Map(), taken: new Set() };
 function planPrefetch(url, infos) {
+  clearPrefetch();
   prefetcher.url = url;
   prefetcher.list = infos.filter(Boolean).sort((a, b) => a.byteOffset - b.byteOffset);
   prefetcher.at = new Map(prefetcher.list.map((x, i) => [x.byteOffset, i]));
-  prefetcher.pending = new Map();
+}
+// drop what nobody will read: cancel the bodies so the browser lets go of them now
+function clearPrefetch() {
+  for (const p of prefetcher.pending.values()) p.then((r) => r.body?.cancel?.()).catch(() => {});
+  prefetcher.pending = new Map(); prefetcher.taken = new Set(); prefetcher.url = null;
 }
 function rangeOf(url, info) {
   const lo = info.byteOffset, hi = info.byteOffset + info.byteLength - 1;
   if (url !== prefetcher.url) return rangeFetch(url, lo, hi);
   const ahead = PREFETCH_Q != null ? Math.max(0, parseInt(PREFETCH_Q, 10) || 0) : myMeta?.phone ? 1 : 4;
   const i = prefetcher.at.get(lo);
+  prefetcher.taken.add(lo);
   if (i !== undefined) for (let k = i + 1; k <= i + ahead && k < prefetcher.list.length; k++) {
     const n = prefetcher.list[k];
-    if (!prefetcher.pending.has(n.byteOffset)) {
+    if (!prefetcher.pending.has(n.byteOffset) && !prefetcher.taken.has(n.byteOffset)) {
       const p = rangeFetch(url, n.byteOffset, n.byteOffset + n.byteLength - 1);
       p.catch(() => {});
       prefetcher.pending.set(n.byteOffset, p);
@@ -1102,7 +1197,7 @@ const rangeBytesOf = (url) => async (info) => {
   if (pacerHook) await pacerHook();
   crumb("fetching " + info.name + " (" + (info.byteLength / 2 ** 20).toFixed(0) + " MB)");
   let r = await rangeOf(url, info);
-  let bytes = new Uint8Array(await r.arrayBuffer());
+  let bytes = await r.arrayBuffer().then((b) => new Uint8Array(b), (e) => { if (e?.retryNet) return new Uint8Array(0); throw e; });
   if (bytes.length !== info.byteLength) {
     r = await rangeFetch(url, info.byteOffset, info.byteOffset + info.byteLength - 1, true);
     bytes = new Uint8Array(await r.arrayBuffer());
@@ -1136,7 +1231,9 @@ let ai = {
 
 function aiStatus(s) { $("ai-status").textContent = s; crumb(s); if ($("load-card").classList.contains("on") && !lcBytes) lcStatus(null, s); }
 // breadcrumb: if iOS kills the tab, the reloaded page can say where it died
-function crumb(s) { try { localStorage.setItem("pooled-crumb", JSON.stringify({ s, t: Date.now(), mem: performance.memory?.usedJSHeapSize })); } catch {} }
+// loading: this tab was loading its layers (a kill then means the share was too big for it, #207)
+var crumbLoading = false;   // var: crumb can run before the rest of the module is initialised
+function crumb(s) { try { localStorage.setItem("pooled-crumb", JSON.stringify({ s, t: Date.now(), mem: performance.memory?.usedJSHeapSize, loading: crumbLoading || undefined })); } catch {} }
 // (crumb is kept in localStorage for debugging, not shown on the join screen)
 function aiLoading(show, title) {
   $("ai-loading").style.display = show ? "block" : "none";
@@ -1416,7 +1513,17 @@ function setCtx(used, max) {
   el.classList.toggle("warn", used > max * 0.8);
 }
 
-async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey)) {
+// the breadcrumbs written while this runs say "loading": if iOS kills the tab now, the host learns
+// from the hello after the reload that this share was too big for it (aiLoadDeath)
+async function aiLoadShard(...args) {
+  crumbLoading = true;
+  try { return await aiLoadShardIn(...args); }
+  finally {
+    crumbLoading = false;
+    try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c?.loading) { delete c.loading; localStorage.setItem("pooled-crumb", JSON.stringify(c)); } } catch {}
+  }
+}
+async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey)) {
   const M = MODELS[modelKey];
   aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
   aiStatus("requesting GPU\u2026");
@@ -1605,7 +1712,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       layerRange: range, hasEmbed, hasHead, maxSeq: MAX_SEQ,
     });
   }
-  prefetcher.pending.clear(); prefetcher.url = null;
+  clearPrefetch();
   if (ai.peerBytes) log("room", `${myName}: ${(ai.peerBytes / 2 ** 20).toFixed(1)} MB of weights came from devices in the room, ${((ai.netBytes || 0) / 2 ** 20).toFixed(1)} MB from the network`);
   if (ai.engine) ai.engine.mtpBatchFill = MTP_BATCH;
   // after a verify: the draft-cache refill as one batched pass (?mtprefill=0: one submit per row)
@@ -1651,7 +1758,8 @@ async function aiStart(modelArg) {
     // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every device builds its engine with it
     const ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
     // devices without WebGPU join as ask-only guests: they get the chat, not layers
-    ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu).sort();
+    // (a device whose tab was killed twice while loading its layers stays a guest: aiLoadDeath)
+    ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && conns.get(id)?.conn?.open !== false && !ai.dropped?.has(conns.get(id)?.name)).sort();
     ai.leftOut = new Set();
     ai.plan = new Map();                      // name -> load message, so a reloaded device can be re-seated
     ai.chainNames = ai.chain.map((id) => conns.get(id)?.name || id);
@@ -1684,9 +1792,13 @@ async function aiStart(modelArg) {
       layerBytes = (2 * d * d + 2 * kvDim * d + 3 * cfg.intermediate_size * d) * 4;
       embedBytes = cfg.vocab_size * d * 4;
     }
-    const pledgeOf = (m) => ((m?.contribGB ?? (m?.maxBufGB ? m.maxBufGB * 0.5 : 0.5))) * 2 ** 30;
-    let caps = [Math.max(pledgeOf(myMeta) - embedBytes, layerBytes / 2),
-      ...ai.chain.map((id) => Math.max(pledgeOf(conns.get(id)?.meta), layerBytes / 2))];
+    // what each device lends, held to its kind's cap (phones: room/pledge.js) and to a share this host
+    // lowered after the device's tab was killed while loading (aiLoadDeath)
+    ai.shareCap ??= new Map();
+    const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name)) * 2 ** 30;
+    let caps = [Math.max(pledgeOf(myMeta, myName) - embedBytes, layerBytes / 2),
+      ...ai.chain.map((id) => Math.max(pledgeOf(conns.get(id)?.meta, conns.get(id)?.name || id), layerBytes / 2))];
+    ai.layerGB = layerBytes / 2 ** 30;
     let assigned, ranges;
     if ($("ai-split").value === "speed") {
       // fastest devices first (measured ms per layer from earlier answers), fewest hops; devices
@@ -1731,6 +1843,7 @@ async function aiStart(modelArg) {
     log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}: ${splitDesc}`);
     ai.loadingShard = true;
     try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX); } finally { ai.loadingShard = false; }
+    if (ai.redealPending) { ai.busy = false; aiAutoRedeal(ai.redealWhy); return; }   // a device died while loading: deal again
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
     aiStatus(n === 1
       ? `solo: all ${L} layers local — ready`
@@ -1813,6 +1926,45 @@ function aiWelcome(id) {
   offerRedealForNewcomers();
 }
 
+// A device in the chain comes back from a tab that was killed while it loaded its layers (the
+// "loading" breadcrumb in its hello: iOS closes a Safari tab that goes over its memory budget, #207).
+// Putting it back in its slot would load the same layers and get it killed again, so the room is
+// re-dealt: with a smaller share for it, or without it (it stays as a guest that can ask) when it
+// was down to one layer already or was killed twice (room/pledge.js afterLoadDeath).
+// Returns true when it handled the device (aiRejoin must not re-seat it).
+function aiLoadDeath(newId, d) {
+  const name = d.name;
+  if (ai.role !== "host" || !d.died?.loading || !ai.plan?.has(name) || !ai.chainNames?.includes(name)) return false;
+  ai.loadDeaths ??= new Map(); ai.shareCap ??= new Map(); ai.dropped ??= new Set();
+  const deaths = (ai.loadDeaths.get(name) || 0) + 1;
+  ai.loadDeaths.set(name, deaths);
+  const meta = conns.get(newId)?.meta;
+  const r = afterLoadDeath({ layers: ai.layersN?.[name] || 1, layerGB: ai.layerGB || 0.5, gb: pledgeGB(meta, ai.shareCap.get(name)), deaths });
+  let why;
+  if (r.drop) {
+    ai.dropped.add(name);
+    why = `${name}'s browser closed its tab while it loaded its layers${deaths > 1 ? " again" : ""}: re-dealing without it (it can still ask)`;
+    sendTo(newId, { t: "ai-share", drop: true, why: "This device's browser closed the tab while it loaded its layers, so the room runs without it. You can still ask questions." });
+  } else {
+    ai.shareCap.set(name, r.gb);
+    why = `${name}'s browser closed its tab while it loaded its layers: re-dealing with a smaller share for it (${r.gb} GB)`;
+    sendTo(newId, { t: "ai-share", gb: r.gb, why: `This device's browser closed the tab while it loaded its layers, so it now holds less of the model (${r.gb} GB).` });
+  }
+  log("room", why);
+  sysNote(why);
+  // the link from before the reload may not have timed out yet: close it, so the re-deal can't pick it
+  for (const [id, e] of conns) if (id !== newId && e.name === name) try { e.conn.close(); } catch {}
+  aiAutoRedeal(why);
+  return true;
+}
+// re-deal on its own (after a load death); waits for this device's own layers when they are still loading
+function aiAutoRedeal(why) {
+  if (ai.role !== "host") return;
+  if (ai.loadingShard || ai.busy === "gen" || ai.busy === "code") { ai.redealWhy = why; ai.redealPending = true; return; }
+  ai.redealPending = false;
+  aiStatus(why);
+  setTimeout(() => aiRedeal(), 500);   // after the old link's close has run
+}
 // a device whose tab got reloaded comes back with a new peer id: put it back in its slot
 function aiRejoin(newId, name) {
   if (ai.role !== "host" || !ai.plan?.has(name)) return;
@@ -2789,7 +2941,7 @@ function resumeHost(r) {
 // room's layers, chat or state), and the host ignores them altogether.
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
-  "ai-visibility", "ai-style", "ai-busy", "ai-wait"]);
+  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-share"]);
 async function aiOnData(from, d) {
   if (d.t.startsWith("ai-code") || d.t.startsWith("ai-pv")) { codeOnData(from, d); return; }
   const e = conns.get(from);
@@ -2831,6 +2983,15 @@ async function aiOnData(from, d) {
       aiLoading(true, "re-dealing the layers");
       $("ldg-sub").textContent = `${d.by} is re-dealing the layers over the devices in the room`;
       aiStatus(`${d.by} is re-dealing the layers…`);
+      break;
+    case "ai-share":   // the host lowered this device's share (or left it out) after its tab was killed while loading
+      if (!d.drop && d.gb > 0) {
+        myMeta.contribGB = Math.max(0.1, Math.min(myMeta.contribGB || d.gb, d.gb));
+        const selfCard = document.querySelector(".peer-card.self");
+        if (selfCard) { setLends(selfCard, myMeta.contribGB); selfSteps(selfCard); }
+        updateCluster();
+      }
+      log("room", d.why); toast(d.why); aiStatus(d.why);
       break;
     case "ai-degraded":
       aiStatus(`${d.why} — waiting for the host to re-deal the layers`);
@@ -2887,6 +3048,7 @@ async function aiOnData(from, d) {
     case "ai-inv": if (ai.invWait && ai.invWait.url === d.url && Array.isArray(d.have)) ai.invWait.inv[from] = d.have.slice(0, 20000); break;
     case "ai-wget": if (PEER_WEIGHTS) serveWeight(from, d); else sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); break;
     case "ai-wpart": onWeightPart(d); break;
+    case "ai-wack": onWeightAck(d); break;
     case "ai-map": renderMap(d.nodes, d.st, d.live); break;
     case "ai-hidden-b":
     case "ai-hidden":
