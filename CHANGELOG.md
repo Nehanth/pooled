@@ -16,6 +16,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
   - Other GPUs keep their output bits. MoE output on Apple still matches llama.cpp, and spec == plain.
 
 ### Fixed
+- **Rooms on bad networks**: signaling falls back through a list of servers (`window.POOLED_SIGNAL_SERVERS`, or `?signal=` as a comma list; the public PeerJS cloud stays the default) and says so when none answers ([docs/self-host-signaling.md](docs/self-host-signaling.md)); the host flags a device that goes silent mid-answer within 3.5-5 s and holds the answer for it (Stop gives up), so a device that was only frozen finishes it; a link that died fails the answer in ~15 s and is redialed with the same layers, and a device silent for 30 s is dropped with a re-deal offer (before, a silent death was never noticed while idle); late frames on lossy links are waited for instead of skipped after 5 s (5% loss: 1.8 -> 6.7 tok/s); an optional TURN relay (`?turn=`, the Network box) for strict NATs. No protocol bump (`ai-linklost` is new and ignored by older hosts). Before/after numbers in [docs/bench-log.md](docs/bench-log.md).
 - **Room chat: emoji and non-Latin text no longer show broken characters (U+FFFD)** while an answer streams: a character split across two tokens is sent once it is whole.
 - **The tokenizer no longer freezes the host on one very long word**: merging was quadratic in a word's length (a 32,000-letter run took 18 s on the host's main thread); it now takes 42 ms, with the same tokens.
 

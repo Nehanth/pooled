@@ -773,3 +773,54 @@ above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32
 43.92; 27B prefill 31.9 / 58.5 / 53.6, plain 14.79 / 14.35 / 12.43, spec 23.54 / 21.13 / 15.96, spec == plain on
 every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
 prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).
+
+## 2026-09-29: rooms on bad networks, origin/main vs fix/network-resilience (GB10)
+
+Branch fix/network-resilience = fix/net-signaling + fix/net-drop + fix/net-lossy, plus drop detection
+changed to hold a silent device instead of failing the answer (see the freeze rows). Same harness for both
+columns: `tests/e2e/room_chaos.mjs --root <checkout>` (3 headless Chromium tabs on one GB10, Qwen3 1.7B Q8,
+96 new tokens, local PeerServer, every WebRTC packet through the userland UDP shaper; `join` uses 2 tabs and
+no model). Base = origin/main e3e5152. One run per cell. "identical" = same text as that run's baseline.
+
+| Plan / scenario | origin/main | fix/network-resilience |
+|---|---|---|
+| baseline (LAN) | 34.4 tok/s | 30.2 tok/s |
+| RTT 50 / 150 / 300 ms | 9.3 / 3.8 / 1.8 tok/s, identical | 9.0 / 3.8 / 2.0 tok/s, identical |
+| 1% loss, RTT 50 ms | 6.2 tok/s | 7.6 tok/s |
+| 5% loss, RTT 50 ms | 1.8 tok/s (4.2 s stall) | 5.5 tok/s (2.0 s stall) |
+| 15% loss, RTT 50 ms | failed after 115 s (pipeline timeout) | failed after 164 s (pipeline timeout), 317 of 475 chars written |
+| 2 s freeze, one guest / all | completes, identical | completes, identical |
+| 5 s freeze, one guest | completes, identical (6.2 s stall) | completes, identical (6.3 s stall) |
+| 12 s freeze, one guest | completes, identical (15.3 s stall) | completes, identical (15.3 s stall) |
+| 8 s freeze, every device | completes, identical | completes, identical |
+| 20 s freeze, one guest | answer fails after 32 s, next question fails too (the room never answers again) | answer fails after 18 s ("the link to guest1 dropped; ask again"), next question identical |
+| guest's network dies while idle | never noticed; next question fails after 90 s | host drops it after 61 s, re-deal 11 s, next answer OK |
+| guest's network dies mid-answer | fails after 90 s, card never dropped | host flags it in ~3.6 s, answer fails after 16 s, card dropped 15 s later |
+| signaling down mid-answer, next answer | both identical | both identical |
+| new device joins while signaling is down | "error: server-error" | "Can't reach the signaling server …" + self-host link |
+| new device joins after signaling is back | "no room with that code" (host never re-registers) | joins in 0.9 s |
+| signaling blip 5 s / 30 s, then a new device joins | "no room with that code" | joins in 0.25 s |
+| host / guest opens with signaling refused | "error: network" / "error: server-error" | "Can't reach the signaling server …" |
+| host / guest opens with signaling blackholed | stuck on "Connecting…" | "Can't reach …" after 20 s, buttons re-enabled |
+| signaling down, a device leaves, re-deal | fails (new links need signaling) | fails the same way |
+| no direct path, no relay | "no room with that code" (wrong) | "found the room, but the direct connection failed … add a relay under Network", Network box opens |
+| no direct path, TURN relay (`?turn=`) | no relay support: join times out | all 4 links on the relay, 20.8 tok/s relay-only |
+
+Drop detection on its own (`tests/e2e/room_drop.mjs --devices 3`, 161 tokens, all 16 checks pass):
+RTT 300 ms + 5% loss and RTT 600 ms + 5% loss finish identical with nobody flagged (longest silence 1.7 s
+against a 3.9 s limit, 2.4 s against 5.0 s); a dead middle / last device is flagged in 3.6 / 3.9 s, the
+answer fails at 16.8 / 16.9 s when ICE gives up on the link, the re-deal is offered 14 s after that and the
+room answers again. Signaling fallback (`tests/e2e/signal_fallback.mjs`, no GPU): 19 of 19.
+
+Why drop detection now holds instead of failing: with fix/net-drop as first merged, the heartbeat failed the
+answer 3.5-5 s into any silence, so the 5, 8 and 12 s freezes above failed on this branch while origin/main
+finished them. The heartbeat now flags the device ("guest1 stopped responding; waiting for it (Stop gives
+up)") and a new question waits for it; it counts as back only after answering a ping sent after the silence
+began. A link ICE gives up on (~15 s) still fails the answer at once and is redialed, and a device silent for
+30 s is dropped with a re-deal offer. The decode lap-timeout floor went from 15 s to 25 s, since a 12 s freeze
+leaves a 15 s gap between two tokens.
+
+Still open: 15% loss is too slow to finish 96 tokens in either column. The first answer after that failed
+15%-loss answer took 23 s to prefill on this branch (1.2 s on origin/main); the cause isn't traced yet. A
+freeze longer than ~15 s still fails the answer in flight, and it isn't retried automatically. A re-deal
+while signaling is down still fails.
