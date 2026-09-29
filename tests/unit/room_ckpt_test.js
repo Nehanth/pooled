@@ -137,7 +137,7 @@ Deno.test("ckptClear drops the host's slots, and tells the chain DROP_ALL only w
   ];
   for (const c of cases) {
     const h = host({ chain: c.chain, fed: [1, 2, 3], ckptMax: 4 });
-    for (let i = 0; i < c.saved; i++) { h.ai.fed.push(10 + i); h.ckptSave(); }
+    for (let i = 0; i < c.saved; i++) { h.ai.fed.push(10 + i); h.ckptSave(); h.ai.pendingCtl = {}; }   // each save's frame went out
     h.ai.pendingCtl = {};
     h.engine.log = [];
     h.ckptClear(c.tell);
@@ -154,8 +154,36 @@ Deno.test("ckptClear(true) keeps the rest of the pending control and does not re
   h.ai.pendingCtl = { ...h.ai.pendingCtl, rb: 2 };
   h.ckptClear(true);
   eq(h.ai.pendingCtl, { sv: 1, rb: 2, dp: [DROP_ALL] });
+  // a worker runs sv before dp, so a save sharing a frame with DROP_ALL would be dropped at once
+  // on every worker: it is not made at all
   h.ckptSave();
-  eq(h.ai.ckptN, 2, "a new slot number, never one a worker might still hold");
+  eq(h.ai.pendingCtl, { sv: 1, rb: 2, dp: [DROP_ALL] }, "no save rides with DROP_ALL");
+  eq(h.ai.ckpt.items, []);
+  h.ai.pendingCtl = {};                           // the frame went out
+  h.ckptSave();
+  eq(h.ai.pendingCtl, { sv: 2 }, "a new slot number, never one a worker might still hold");
+});
+
+Deno.test("ckptSave: a second save before any frame went out supersedes the first everywhere", () => {
+  const cases = [
+    { name: "no eviction", ckptMax: 4, pre: 0, want: { sv: 2 }, keys: [2] },
+    { name: "first save evicted one: its drop stays pending", ckptMax: 1, pre: 1, want: { sv: 3, dp: [1] }, keys: [3] },
+    { name: "with a rollback and a load pending", ckptMax: 2, pre: 0, pend: { rb: 1, ld: 9 }, want: { rb: 1, ld: 9, sv: 2 }, keys: [2] },
+  ];
+  for (const c of cases) {
+    const h = host({ fed: [1], ckptMax: c.ckptMax });
+    for (let i = 0; i < c.pre; i++) { h.ckptSave(); h.ai.pendingCtl = {}; }
+    h.ai.pendingCtl = { ...(c.pend || {}) };
+    h.ai.fed.push(2); h.ckptSave();               // not sent...
+    h.ckptSave();                                 // ...and saved again
+    eq(h.ai.pendingCtl, c.want, c.name);
+    eq(h.ai.ckpt.items.map((x) => x.key), c.keys, c.name + ": host index");
+    eq([...h.engine.slots.keys()], c.keys, c.name + ": host slots");
+  }
+  // solo: nothing is pending, nothing superseded; both saves stand
+  const s = host({ chain: [], fed: [1], ckptMax: 4 });
+  s.ckptSave(); s.ckptSave();
+  eq(s.ai.ckpt.items.map((x) => x.key), [1, 2]);
 });
 
 Deno.test("ckptClear survives an engine whose dropSlot throws", () => {
@@ -204,7 +232,7 @@ function fakeLink() {
 
 Deno.test("ckptSave evicts the least recently used checkpoint (a resume counts as a use) and drops it everywhere", () => {
   const h = host({ fed: [1, 2], ckptMax: 2 });
-  h.ckptSave();                                  // 1: [1 2]
+  h.ckptSave(); h.ai.pendingCtl = {};            // 1: [1 2], sent
   h.ai.fed = [1, 2, 3, 4]; h.ckptSave();          // 2: [1 2 3 4]
   h.ai.pendingCtl = {};
   // a resume from 1 makes 2 the oldest
@@ -219,7 +247,7 @@ Deno.test("ckptSave evicts the least recently used checkpoint (a resume counts a
 
 Deno.test("ckptSave with ckpt=1 keeps exactly one checkpoint", () => {
   const h = host({ fed: [1], ckptMax: 1 });
-  for (let i = 0; i < 5; i++) { h.ai.fed.push(i); h.ckptSave(); }
+  for (let i = 0; i < 5; i++) { h.ai.fed.push(i); h.ckptSave(); h.ai.pendingCtl = {}; }
   eq(h.ai.ckpt.items.length, 1);
   eq([...h.engine.slots.keys()], [5]);
 });
@@ -239,7 +267,7 @@ Deno.test("ckptSave keeps a pending rollback, reset or load in front of it", () 
 Deno.test("ckptResume loads the longest checkpoint only when it beats what the caches hold", () => {
   const mk = () => {
     const h = host({ fed: [1, 2, 3], ckptMax: 4 });
-    h.ckptSave();                                  // 1: [1 2 3]
+    h.ckptSave(); h.ai.pendingCtl = {};            // 1: [1 2 3], sent
     h.ai.fed = [1, 2, 3, 4, 5]; h.ckptSave();       // 2: [1 2 3 4 5]
     h.ai.pendingCtl = {}; h.engine.log = [];
     return h;
@@ -384,7 +412,9 @@ function makeRoom(nWorkers, ckptMax = 2) {
   const send = (to, msg) => queue.push({ to, msg });
   const workers = [];
   for (let i = 0; i < nWorkers; i++) workers.push(worker({ next: i + 1 < nWorkers ? "w" + (i + 1) : "host", send }));
-  const h = host({ chain: workers.map((_, i) => "w" + i), ckptMax, out: { push: ({ to, msg }) => send(to, msg) } });
+  // every frame the host sends must fit the wire header (one sv, one ld, at most two drops)
+  const wire = ({ to, msg }) => { sendFrame(fakeLink(), { ...msg, data: new Uint16Array(2) }); send(to, msg); };
+  const h = host({ chain: workers.map((_, i) => "w" + i), ckptMax, out: { push: wire } });
   const pump = async () => {
     while (queue.length) {
       const { to, msg } = queue.shift();
@@ -489,6 +519,23 @@ const SCENARIOS = [
     { ids: [...T1, 20], answer: [21], wantReused: 0 },
     { ids: [...T1, 30], answer: [31], wantReused: 0 },          // the old saves are gone everywhere
   ] },
+  { name: "a device rejoins, then Stop before the first frame, then a turn", turns: [
+    { ids: Q1, answer: A1 },
+    { ids: [...T1, 20], answer: [21] },
+    { rejoin: true },
+    { ids: [...T1, 30], abort: true },
+    { ids: [...T1, 40], answer: [41], wantReused: 0 },
+    { ids: [...T1, 40, 41, 50], answer: [51], wantReused: T1.length + 2 },
+  ] },
+  { name: "Stop again and again (ckpt=2): drops never pile up past the header's two", turns: [
+    { ids: Q1, answer: A1 },
+    { ids: [...T1, 20], answer: [21] },
+    { ids: [...T1, 20, 21, 30], answer: [31] },
+    { ids: [...T1, 20, 21, 30, 31, 40], abort: true },
+    { ids: [...T1, 20, 21, 30, 31, 40], abort: true },
+    { ids: [...T1, 20, 21, 30, 31, 40], abort: true },
+    { ids: [...T1, 20, 21, 60], answer: [61], wantReused: T1.length + 2 },   // resume from turn 2's save
+  ] },
   { name: "Stop after a reset, before the first frame", turns: [
     { ids: Q1, answer: A1 },
     { ids: [7, 7, 7], abort: true },                             // reset pending, nothing fed: no save
@@ -521,6 +568,9 @@ Deno.test("a save superseded before its frame went out is never loaded later", a
   await room.turn([...T1, 20, 21], { abort: true });
   await room.turn([...T1, 30, 31], { answer: [32] });
   // every key the host may resume from is a slot the worker has
-  for (const x of room.h.ai.ckpt.items) ok(room.workers[0].engine.slots.has(x.key), `host indexes slot ${x.key} the worker never saved`);
+  for (const x of room.h.ai.ckpt.items) {
+    if (x.key === room.h.ai.pendingCtl.sv) continue;   // on its way with the next frame
+    ok(room.workers[0].engine.slots.has(x.key), `host indexes slot ${x.key} the worker never saved`);
+  }
   await room.turn([...T1, 40, 41], { answer: [42] });   // would throw "no saved slot" on the worker
 });
