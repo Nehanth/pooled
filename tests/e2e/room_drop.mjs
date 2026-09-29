@@ -8,7 +8,7 @@
 //
 // Scenarios: baseline; noise300 / noise600 (RTT 300 / 600 ms with 5% loss both ways: the answer
 // completes and matches the baseline, no device is dropped; reports the longest silence the host
-// saw per device against its limit); die-mid (the middle device of the chain goes silent
+// saw per device against its limit, which must stay 0.5 s under it); die-mid (the middle device of the chain goes silent
 // mid-answer); die-last (the last device, which sends the hidden states back to the host); after
 // each death the host re-deals over the devices left and answers again.
 //
@@ -334,8 +334,10 @@ try {
     row({ scenario: nm, rtt, loss: 0.05, ...r, sameAsBaseline: same(r.text), liveness: lv, packetsLost: stats.lost - lost0 });
     check(`${nm}: answer completes, nobody dropped`, r.ok && !/stopped responding|left/.test(r.status), r.status);
     check(`${nm}: same text as the baseline`, same(r.text) === "identical", same(r.text));
-    const worst = lv ? Math.max(0, ...Object.values(lv.maxSilence)) : null;
-    check(`${nm}: longest silence under the 3 s floor`, worst != null && worst < 3000, JSON.stringify(lv?.maxSilence));
+    // every device's longest silence stays half a second under the limit it was held to (the
+    // limit follows its measured RTT; the 3.5 s floor when none was measured)
+    const tight = lv ? Object.entries(lv.maxSilence).filter(([n, ms]) => ms > (lv.limit?.[n] ?? 3500) - 500) : null;
+    check(`${nm}: longest silence well under the limit`, tight != null && Object.keys(lv.maxSilence).length > 0 && !tight.length, JSON.stringify(lv));
     const sn = await snap(tabs[H]);
     check(`${nm}: every device still in the room`, sn.cards === names.length && !sn.redeal, JSON.stringify(sn));
   }

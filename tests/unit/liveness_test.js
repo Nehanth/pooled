@@ -19,12 +19,12 @@ function run(L, { ms, step = 250, ids = ["a"], hearFrom = () => true, rtt = () =
   return { dead, pings };
 }
 
-Deno.test("deadAfter: 3 s on a LAN, grows with the round trip, capped at 5 s", () => {
+Deno.test("deadAfter: 3.5 s on a LAN, grows with the round trip, capped at 5 s", () => {
   eq(deadAfter(null), DEAD_MIN_MS);
   eq(deadAfter(0), DEAD_MIN_MS);
   eq(deadAfter(20), DEAD_MIN_MS);
-  eq(deadAfter(300), 3100);
-  eq(deadAfter(600), 3700);
+  eq(deadAfter(300), 3900);
+  eq(deadAfter(600), 4800);
   eq(deadAfter(5000), DEAD_MAX_MS);
   eq(deadAfter(NaN), DEAD_MIN_MS);
 });
@@ -57,7 +57,7 @@ Deno.test("silence before the answer began does not count (idle pings are 2.5 s 
   const r = run(L, { t0: 2400, ms: 2500, hearFrom: () => false });
   eq(r.dead, [], "counted from arm time, not from the idle pong");
   const r2 = run(L, { t0: 5150, ms: 1000, hearFrom: () => false });
-  ok(r2.dead.length > 0, "but a device silent since the start is dead ~3 s in");
+  ok(r2.dead.length > 0, "but a device silent since the start is dead ~3.5 s in");
 });
 
 Deno.test("a stalled host tab (late tick) resets the baseline instead of blaming everyone", () => {
@@ -78,10 +78,11 @@ Deno.test("300 ms latency with retransmission stalls: gaps under the limit are t
   // a double SCTP loss at RTT 600 ms: ~1 s + 2 s of head-of-line blocking on top of the ping period
   const L = makeLiveness();
   arm(L, 0);
-  const holes = [[4000, 6500], [20000, 22900]];
+  // the e2e run (tests/e2e/room_drop.mjs noise600) saw 3.65 s of silence at RTT 600 ms + 5% loss
+  const holes = [[4000, 6500], [20000, 23700]];
   const r = run(L, { ms: 40000, rtt: () => 600, hearFrom: (_, t) => t % 500 === 0 && !holes.some(([a, b]) => t >= a && t < b) });
   eq(r.dead, []);
-  ok(L.maxSilence.get("a") >= 2900, "the stall was seen: " + L.maxSilence.get("a"));
+  ok(L.maxSilence.get("a") >= 3600, "the stall was seen: " + L.maxSilence.get("a"));
 });
 
 Deno.test("disarm stops judging; forget drops a device", () => {
@@ -94,8 +95,8 @@ Deno.test("disarm stops judging; forget drops a device", () => {
   ok(!L.heard.has("a") && !L.maxSilence.has("a"));
   arm(L, 60000);
   eq(L.since, 60000, "re-armed from now");
-  for (const t of [61000, 62000, 63000]) eq(tick(L, t, ["a"]).dead, [], "t=" + t);
-  ok(tick(L, 63100, ["a"]).dead.length === 1, "silent 3.1 s since re-arming");
+  for (const t of [61000, 62000, 63000, 63400]) eq(tick(L, t, ["a"]).dead, [], "t=" + t);
+  ok(tick(L, 63600, ["a"]).dead.length === 1, "silent 3.6 s since re-arming");
 });
 
 Deno.test("lapTimeout: fixed fallback until 4 laps are measured, then tied to the slowest lap", () => {

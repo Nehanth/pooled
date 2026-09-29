@@ -19,7 +19,7 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // prefilling the whole conversation again. 0 turns it off.
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
-import { makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, lapTimeout } from "./room/liveness.js";
+import { makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, lapTimeout } from "./room/liveness.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
@@ -658,7 +658,7 @@ setInterval(() => broadcastAll({ t: "ping", ts: performance.now() }), 2500);
 // --- drop detection (room/liveness.js) ---
 // While an answer runs, the host pings every device in the chain twice a second and treats
 // anything it hears from one (a pong, any message, any wire slice) as a sign of life. A device
-// silent past deadAfter(rtt) (3-5 s) is dead: its link is closed here, which fails the laps in
+// silent past deadAfter(rtt) (3.5-5 s) is dead: its link is closed here, which fails the laps in
 // flight and puts the room in the degraded / re-deal state at once, instead of waiting ~30 s for
 // ICE to notice or for a lap to time out. ?hb=0 turns it off (A/B runs).
 const liveness = makeLiveness();
@@ -685,7 +685,9 @@ function hbLoop() {
 }
 setInterval(hbLoop, 250);
 // tests: the longest silence seen per chain device while answering, and the limits in force
-window.pooledLiveness = () => ({ armed: liveness.armed, maxSilence: Object.fromEntries([...liveness.maxSilence].map(([id, ms]) => [conns.get(id)?.name || id, Math.round(ms)])) });
+window.pooledLiveness = () => ({ armed: liveness.armed,
+  maxSilence: Object.fromEntries([...liveness.maxSilence].map(([id, ms]) => [conns.get(id)?.name || id, Math.round(ms)])),
+  limit: Object.fromEntries([...liveness.maxSilence.keys()].map((id) => [conns.get(id)?.name || id, deadAfter(conns.get(id)?.rtt)])) });
 
 const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
 $("gb-minus").addEventListener("click", () => stepGB(-1));

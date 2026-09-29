@@ -12,19 +12,21 @@
 // everything behind it until SCTP retransmits it (an RTO, ~1 s at first, doubling on each loss of
 // the same packet). The silence limit has to cover a double loss at the worst latency we support
 // (300 ms one way, 5% loss) without a false alarm, and stay within ~3-5 s. Measured with
-// tests/e2e/room_drop.mjs (docs/protocol.md, "Drop detection").
+// tests/e2e/room_drop.mjs on 3 devices, Qwen3 1.7B: the longest silence was 0.65 s on a LAN,
+// 2.5 s at RTT 300 ms + 5% loss and 3.65 s at RTT 600 ms + 5% loss, against limits of 3.5, 3.9
+// and 4.8 s (docs/protocol.md, "Drop detection").
 //
 // Pure: no DOM, no timers; the caller passes the clock.
 
 export const HB_BUSY_MS = 500;     // ping period to chain devices while answering
-export const DEAD_MIN_MS = 3000;   // never call a device dead sooner than this
+export const DEAD_MIN_MS = 3500;   // never call a device dead sooner than this
 export const DEAD_MAX_MS = 5000;   // ... nor later
 export const STALL_MS = 1200;      // a tick this late means this tab stalled: its inbox is stale, judge nothing
 
 // How long a device may stay silent before it counts as dead, given its measured round trip.
 export function deadAfter(rttMs) {
   const rtt = Number.isFinite(rttMs) && rttMs > 0 ? rttMs : 0;
-  return Math.round(Math.min(DEAD_MAX_MS, Math.max(DEAD_MIN_MS, 2500 + 2 * rtt)));
+  return Math.round(Math.min(DEAD_MAX_MS, Math.max(DEAD_MIN_MS, 3000 + 3 * rtt)));
 }
 
 // Tracks when each device was last heard from and who went silent while armed (an answer runs).
