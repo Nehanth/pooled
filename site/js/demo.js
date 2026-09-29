@@ -730,6 +730,10 @@
   const canPlay = () => demo.classList.contains("served") && demo.classList.contains("app-on") && !demo.classList.contains("editing");
   const startPlay = () => {
     if (playing || !canPlay()) return false;
+    // the agent's turn finishes first (the whole reply, its numbers, Send again, the band back to Ready), so the
+    // story waits on a settled pane rather than mid-sentence for as long as the visitor plays
+    const end = tl.t < c(SERVED + .6) ? c(SERVED + .6) : tl.t >= GAME && tl.t < GAME + .9 ? GAME + .9 : 0;
+    while (tl.t < end + 1e-3) tl.advance(Math.min(1 / 30, end + 1e-3 - tl.t));
     playing = true; halt();
     flag("playing", true); flag("touch", touchy());
     inst.play(); inst.v2(true); inst.start();
