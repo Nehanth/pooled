@@ -233,6 +233,12 @@ Deno.test("plan: a computer whose GPU copies memory clearly faster hosts, if it 
   eq(pickModelHost([gb10, { ...mac, meta: { ...mac.meta, contribGB: 6.5 } }]), "m");
   // either side unmeasured (an older tab, a failed probe, ?gbps=0): memory decides
   eq(pickModelHost([gb10, { ...mac, meta: { ...mac.meta, gbps: 0 } }]), "g");
+  // the same GPU on both (two tabs on one machine, one probed while the GPU was busy): memory decides
+  const tab = (id, gb, gbps) => ({ id, meta: { webgpu: true, ua: "Device", contribGB: gb, gbps, gpu: "nvidia blackwell" } });
+  eq(pickModelHost([tab("a", 2, 110), tab("b", 1, 199)]), "a");
+  eq(pickModelHost([tab("b", 1, 199), tab("a", 2, 110)]), "a");
+  // a different GPU still takes it
+  eq(pickModelHost([tab("a", 2, 110), { ...mac, meta: { ...mac.meta, contribGB: 2, gpu: "apple metal-3" } }]), "m");
   eq(pickModelHost([{ ...gb10, meta: { ...gb10.meta, gbps: undefined } }, mac]), "g");
   // a phone never wins on speed over a computer
   eq(pickModelHost([gb10, { id: "p", meta: { webgpu: true, phone: true, contribGB: 13, gbps: 900 } }]), "g");

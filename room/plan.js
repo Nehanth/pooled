@@ -100,8 +100,10 @@ export function planForSpeed(L, caps, msPerLayer = []) {
 // path, so a device of the same kind whose GPU copies memory clearly faster (meta.gbps, measured at
 // load by room/gpuspeed.js, at least SPEED_EDGE times the memory pick's) and that lends at least
 // half as much memory hosts instead: the fastest such device, then memory, then id. A device that
-// did not measure (an older tab, or a probe that failed) leaves the pick by memory as it is.
-// devices: [{ id, meta: { webgpu, contribGB, phone, ua, gbps } }]. Returns an id (null for none).
+// did not measure (an older tab, or a probe that failed) leaves the pick by memory as it is, and so
+// does a device with the same GPU as the memory pick (meta.gpu, e.g. two tabs on one machine or two
+// identical machines): the same GPU copies at the same speed, so a gap there is load at probe time.
+// devices: [{ id, meta: { webgpu, contribGB, phone, ua, gbps, gpu } }]. Returns an id (null for none).
 export const SPEED_EDGE = 1.5;
 export function pickModelHost(devices) {
   const isPhone = (m) => !!(m?.phone || /^(iPhone|Android)$/.test(m?.ua || ""));
@@ -119,6 +121,7 @@ export function pickModelHost(devices) {
   for (const d of ds) {
     const k = key(d);
     if (k[0] !== kb[0] || k[1] !== kb[1] || k[2] < 0.5 * kb[2] || bps(d) < SPEED_EDGE * bps(best)) continue;
+    if (d !== best && d.meta?.gpu && d.meta.gpu === best.meta?.gpu) continue;   // same GPU: the gap is noise
     if (!fast || bps(d) > bps(fast) || (bps(d) === bps(fast) && cmp(d, fast) > 0)) fast = d;
   }
   return (fast || best).id;
