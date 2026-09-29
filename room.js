@@ -316,15 +316,26 @@ function setModelValue(key) { if (!MODELS[key]) return; addModelOption(key); $("
 function renderLadder(pledged) {
   const el = $("ai-ladder"); if (!el) return;
   const none = !(pledged > 0);
+  // a radio group: one tab stop (the picked row), arrows move the pick. The rows are re-rendered
+  // on every change, so the focus follows the picked row when it was in the group.
+  const had = el.contains(document.activeElement);
   el.innerHTML = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + ladder(PICK_NEED, pledged).map((x) => {
     const gb = `<span class="nd">${NEED_GB[x.key] ?? ""} GB</span>`;
     const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">needs ${x.short} GB more</span>`;
-    return `<button type="button" class="rung${x.ok ? " ok" : " short"}${x.key === $("ai-model").value ? " sel" : ""}" data-k="${x.key}" aria-pressed="${x.key === $("ai-model").value}"${x.ok ? "" : ' title="Invite a device to fit this"'}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
+    const sel = x.key === $("ai-model").value;
+    return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${x.ok ? "" : ' title="Invite a device to fit this"'}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
+  if (!el.querySelector(".rung.sel")) el.querySelector(".rung")?.setAttribute("tabindex", "0");
+  if (had) el.querySelector('.rung[tabindex="0"]')?.focus({ preventScroll: true });
 }
-$("ai-ladder").addEventListener("click", (e) => {
-  const b = e.target.closest(".rung"); if (!b || $("ai-model").disabled) return;
-  setModelValue(b.dataset.k); modelTouched = true; updateCluster();
+function pickRung(b) { if (!b || $("ai-model").disabled) return; setModelValue(b.dataset.k); modelTouched = true; updateCluster(); }
+$("ai-ladder").addEventListener("click", (e) => pickRung(e.target.closest(".rung")));
+$("ai-ladder").addEventListener("keydown", (e) => {
+  const rs = [...$("ai-ladder").querySelectorAll(".rung")], i = rs.indexOf(e.target.closest(".rung"));
+  const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+  const to = step ? (i + step + rs.length) % rs.length : e.key === "Home" ? 0 : e.key === "End" ? rs.length - 1 : -1;
+  if (i < 0 || to < 0) return;
+  e.preventDefault(); pickRung(rs[to]);
 });
 function updateNeed(pledged) {
   if (!modelTouched && !ai.engine && !ai.busy && !$("ai-model").disabled) $("ai-model").value = bestFit(PICK_NEED, pledged);
