@@ -94,6 +94,8 @@ export class Bridge extends EventEmitter {
         }
         if (err.type !== "peer-unavailable") this.log(`peer error: ${err.type || err.message}`);
       });
+      // nobody has a reason to dial the bridge: refuse links it did not open (each costs a native connection)
+      this.peer.on("connection", (c) => { try { c.close(); } catch {} });
       this.peer.on("disconnected", () => { if (!this.closing && !this.peer.destroyed) setTimeout(() => { try { this.peer.reconnect(); } catch {} }, 1000); });
       this.peer.on("open", () => {
         this.dial(false, (hello) => {
