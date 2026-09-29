@@ -18,7 +18,9 @@ Usage
 
 Options
   --port <n>        HTTP port (default 8080)
-  --token <t>       require "Authorization: Bearer <t>" or "x-api-key: <t>" on every request
+  --token-file <f>  require the token in this file as "Authorization: Bearer <t>" or
+                    "x-api-key: <t>" on every request (or set POOLED_TOKEN)
+  --token <t>       the same, given on the command line (other local users can read it with ps)
   --name <s>        how the room shows this client (default: "pooled serve" and 4 random letters)
   --signal <h:p>    PeerJS signaling server, as the room page's ?signal= (default: PeerJS cloud)
   --max-queue <n>   requests that may wait here behind the running one before 429 / 529
@@ -38,7 +40,7 @@ try {
   opts = parseArgs({
     allowPositionals: true,
     options: {
-      port: { type: "string", default: "8080" }, token: { type: "string" }, name: { type: "string" },
+      port: { type: "string", default: "8080" }, token: { type: "string" }, "token-file": { type: "string" }, name: { type: "string" },
       signal: { type: "string" }, "max-queue": { type: "string", default: "8" },
       quiet: { type: "boolean" }, "json-log": { type: "boolean" },
       version: { type: "boolean", short: "v" }, help: { type: "boolean", short: "h" },
@@ -60,7 +62,20 @@ const port = +o.port;
 if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error("pooled: --port must be a port number"); process.exit(2); }
 const maxQueue = Math.max(0, parseInt(o["max-queue"], 10));
 if (!Number.isFinite(maxQueue)) { console.error("pooled: --max-queue must be a number"); process.exit(2); }
-if (o.token === "") { console.error("pooled: --token must not be empty"); process.exit(2); }
+// the token: POOLED_TOKEN or --token-file (not visible in ps), else --token with a warning
+let token = null;
+if (o["token-file"]) {
+  try { token = readFileSync(o["token-file"], "utf8").trim(); }
+  catch (e) { console.error(`pooled: cannot read --token-file: ${e.message}`); process.exit(2); }
+  if (!token) { console.error("pooled: the --token-file is empty"); process.exit(2); }
+} else if (process.env.POOLED_TOKEN != null) {
+  token = process.env.POOLED_TOKEN.trim();
+  if (!token) { console.error("pooled: POOLED_TOKEN is empty"); process.exit(2); }
+} else if (o.token != null) {
+  if (o.token === "") { console.error("pooled: --token must not be empty"); process.exit(2); }
+  token = o.token;
+  if (!o.quiet) console.error("pooled: note: other users on this computer can read --token from the process list; POOLED_TOKEN or --token-file keeps it out of it");
+}
 
 const log = (msg, level = "info") => {
   if (o.quiet && level !== "error") return;
@@ -71,7 +86,7 @@ const log = (msg, level = "info") => {
 const tag = Math.random().toString(36).slice(2, 6).padEnd(4, "0");
 const bridge = new Bridge({ code, signal: o.signal || null, name: cleanLabel(o.name) || `pooled serve ${tag}`, client: `pooled-cli/${VERSION}`, log });
 // POOLED_KEEPALIVE_MS: the queue keep-alive interval (tests; 10 s otherwise)
-const api = createServer({ bridge, port, token: o.token || null, maxQueue, log, version: VERSION, keepAliveMs: +process.env.POOLED_KEEPALIVE_MS || undefined });
+const api = createServer({ bridge, port, token, maxQueue, log, version: VERSION, keepAliveMs: +process.env.POOLED_KEEPALIVE_MS || undefined });
 
 // the port first: fail fast, before joining a room
 let bound;
@@ -91,7 +106,7 @@ const print = (s) => { if (!o.quiet) console.log(s); };
 print(`pooled serve · room ${code} · ${label()}
   OpenAI     http://127.0.0.1:${bound}/v1         (OPENAI_BASE_URL, any API key)
   Anthropic  http://127.0.0.1:${bound}            (ANTHROPIC_BASE_URL)
-  bound to 127.0.0.1 only · ${o.token ? "token required" : "no token (add --token to require one)"}`);
+  bound to 127.0.0.1 only · ${token ? "token required" : "no token (set POOLED_TOKEN to require one)"}`);
 if (o["json-log"]) log(JSON.stringify({ ready: bridge.ready, port: bound, room: code }));
 
 let wasReady = bridge.ready;

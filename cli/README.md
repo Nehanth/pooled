@@ -7,7 +7,7 @@ $ npx @pooled/cli serve ABCD
 pooled serve · room ABCD · Qwen3.6 35B MoE · Q4
   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
-  bound to 127.0.0.1 only · no token (add --token to require one)
+  bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
 ```
 
 Requirements: Node 22 or newer. No GPU is needed on this machine. The room's host page must be open, and the room's model started for requests to be answered (until then they get `503` with `Retry-After: 5`).
@@ -28,14 +28,16 @@ A browser tab cannot accept HTTP connections, so this small Node process joins t
 pooled serve <ROOM CODE | room link> [options]
 
   --port <n>        HTTP port (default 8080)
-  --token <t>       require "Authorization: Bearer <t>" or "x-api-key: <t>" on every request
+  --token-file <f>  require the token in this file as "Authorization: Bearer <t>" or
+                    "x-api-key: <t>" on every request (or set POOLED_TOKEN)
+  --token <t>       the same, given on the command line (other local users can read it with ps)
   --name <s>        how the room shows this client (default: "pooled serve" and 4 random letters)
   --signal <h:p>    PeerJS signaling server, as the room page's ?signal= (default: PeerJS cloud)
   --max-queue <n>   requests that may wait here before 429 / 529 (default 8)
   --quiet / --json-log
 ```
 
-The endpoint listens on `127.0.0.1` only. Requests whose `Host` is not `127.0.0.1:<port>` / `localhost:<port>`, and any request with an `Origin` header, are refused (403), so a web page cannot use the room through your browser. Without `--token` any API key is accepted (some tools insist on one).
+The endpoint listens on `127.0.0.1` only. Requests whose `Host` is not `127.0.0.1:<port>` / `localhost:<port>`, and any request with an `Origin` header, are refused (403), so a web page cannot use the room through your browser. Without a token any API key is accepted (some tools insist on one). With one (`POOLED_TOKEN`, `--token-file` or `--token`), every path needs it except `/health`, which then answers only `{"ok": true}`.
 
 ## APIs
 
@@ -44,7 +46,7 @@ The endpoint listens on `127.0.0.1` only. Requests whose `Host` is not `127.0.0.
 | `POST /v1/chat/completions` | OpenAI chat completions, streaming (`stream: true`, `stream_options.include_usage`) and not |
 | `POST /v1/messages` | Anthropic Messages, streaming and not |
 | `GET /v1/models`, `GET /v1/models/{id}` | the room's model, `pooled/<model>` (Anthropic's shape when the request has `anthropic-version` or `x-api-key`) |
-| `GET /health` | `{room, connected, ready, model, queue}`, no auth, for scripts |
+| `GET /health` | `{ok, room, connected, ready, model, queue, served}` for scripts; with a token set and not given, only `{ok: true}` |
 
 Parameters: `max_tokens` / `max_completion_tokens` (default 1024 for OpenAI, capped by the room's context), `temperature` (0 is greedy; OpenAI 0 to 2, Anthropic 0 to 1; absent uses the room's setting), `top_k` (1 to 64, default 40), `stop` / `stop_sequences` (up to 4), thinking (OpenAI `reasoning_effort` other than `none` / `minimal`, returned as `reasoning_content`; Anthropic `thinking: {type: "enabled"}`). `model` can be any string. `top_p` and `seed` are accepted and ignored. `usage.prompt_tokens_details.cached_tokens` (OpenAI) and `usage.cache_read_input_tokens` (Anthropic) report the prompt tokens the room already held.
 

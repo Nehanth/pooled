@@ -9,7 +9,7 @@ $ npx @pooled/cli serve ABCD
 pooled serve · room ABCD · Qwen3.6 35B MoE · Q4 (3 devices)
   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
-  bound to 127.0.0.1 only · no token (add --token to require one)
+  bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
 ```
 
 Any tool that speaks the OpenAI chat API or the Anthropic Messages API to a base URL (Continue,
@@ -116,7 +116,9 @@ Fallback if the org cannot be created: `pooled-cli` (same bin). Nothing is publi
 pooled serve <ROOM CODE | room link> [options]
 
   --port <n>        HTTP port (default 8080)
-  --token <t>       require "Authorization: Bearer <t>" or "x-api-key: <t>" on every request
+  --token-file <f>  require the token in this file as "Authorization: Bearer <t>" or
+                    "x-api-key: <t>" on every request (or set POOLED_TOKEN)
+  --token <t>       the same, given on the command line (other local users can read it with ps)
   --name <s>        how the room shows this client (default: "pooled serve" and 4 random letters;
                     never the hostname, which every guest would see)
   --signal <h:p>    PeerJS signaling server, same as the room page's ?signal= (default: PeerJS cloud)
@@ -315,7 +317,7 @@ it is listed as a follow-up because Claude Code calls it, although Claude Code a
 
 ### Also
 
-`GET /health` → `{"room": "ABCD", "connected": true, "ready": true, "model": "pooled/qwen3.6-35b-moe", "queue": 0}`
+`GET /health` → `{"ok": true, "room": "ABCD", "connected": true, "ready": true, "model": "pooled/qwen3.6-35b-moe", "queue": 0}`
 (no auth, for scripts waiting on startup). `GET /` → a one-screen plain-text banner with the base URLs.
 
 ## 5. Conversation mapping and the protocol addition

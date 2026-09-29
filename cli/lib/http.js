@@ -2,6 +2,7 @@
 // local FIFO (one request in flight in the room at a time), and turning the room's messages for a
 // request into an OpenAI or Anthropic response or stream.
 import http from "node:http";
+import { timingSafeEqual, createHash } from "node:crypto";
 import { ApiError, bad, clientFromUA, newRid, LIMITS } from "./common.js";
 import { parseOpenAI, openaiError, openaiResponse, OpenAIStream, openaiModels } from "./openai.js";
 import { parseAnthropic, anthropicError, anthropicResponse, AnthropicStream, anthropicModels } from "./anthropic.js";
@@ -36,6 +37,15 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     const { status, body } = api === "anthropic" ? anthropicError(e) : openaiError(e);
     json(res, status, body, e.retryAfter ? { "retry-after": String(e.retryAfter) } : {});
   }
+
+  // --token: "Authorization: Bearer <t>" or "x-api-key: <t>", compared in constant time
+  const digest = (s) => createHash("sha256").update(String(s)).digest();
+  const tokenHash = token ? digest(token) : null;
+  function keyOf(req) {
+    const auth = String(req.headers.authorization || "");
+    return auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : String(req.headers["x-api-key"] || "");
+  }
+  const authorized = (req) => !token || timingSafeEqual(digest(keyOf(req)), tokenHash);
 
   function readBody(req) {
     return new Promise((resolve, reject) => {
@@ -193,14 +203,13 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
       if (host !== `127.0.0.1:${bound}` && host !== `localhost:${bound}`) throw new ApiError("forbidden", `Host ${host || "(none)"} is not allowed: use http://127.0.0.1:${bound}`);
       if (req.headers.origin != null) throw new ApiError("forbidden", "requests from web pages (with an Origin header) are not allowed");
       if (path === "/health" && req.method === "GET") {
-        json(res, 200, { room: bridge.code, connected: bridge.connected, ready: bridge.ready, model: modelId(), queue: queue.length + (active ? 1 : 0), served: served.n, ...(bridge.kicked ? { closed: bridge.kicked } : {}) });
+        // with --token, a caller without it learns only that something is up: the room code alone
+        // would let it join the room directly, around the token
+        if (!authorized(req)) { json(res, 200, { ok: true }); return; }
+        json(res, 200, { ok: true, room: bridge.code, connected: bridge.connected, ready: bridge.ready, model: modelId(), queue: queue.length + (active ? 1 : 0), served: served.n, ...(bridge.kicked ? { closed: bridge.kicked } : {}) });
         return;
       }
-      if (token) {
-        const auth = String(req.headers.authorization || "");
-        const key = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : String(req.headers["x-api-key"] || "");
-        if (key !== token) throw new ApiError("auth", key ? "invalid API key" : "missing API key: this pooled serve was started with --token");
-      }
+      if (!authorized(req)) throw new ApiError("auth", keyOf(req) ? "invalid API key" : "missing API key: this pooled serve was started with a token");
       if (path === "/" && req.method === "GET") { res.writeHead(200, { "content-type": "text/plain; charset=utf-8" }); res.end(banner()); return; }
       if (path === "/v1/models" && req.method === "GET") { models(req, res, ""); return; }
       if (path.startsWith("/v1/models/") && req.method === "GET") { models(req, res, path.slice("/v1/models/".length)); return; }

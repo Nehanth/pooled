@@ -80,10 +80,10 @@ function startBridge(code, port, extra = []) {
   bridges.push(b);
   return b;
 }
-async function waitHealth(base, pred, ms = 60000) {
+async function waitHealth(base, pred, ms = 60000, headers = {}) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
-    try { const h = await (await fetch(base + "/health")).json(); if (pred(h)) return h; } catch {}
+    try { const h = await (await fetch(base + "/health", { headers })).json(); if (pred(h)) return h; } catch {}
     await new Promise((r) => setTimeout(r, 300));
   }
   throw new Error("bridge not ready in time");
@@ -254,7 +254,9 @@ try {
   await soft("token", async () => {
     const P2 = await freePort();
     startBridge(code, P2, ["--token", "s3cret", "--name", "token-bridge"]);
-    await waitHealth(`http://127.0.0.1:${P2}`, (h) => h.ready, 30000);
+    await waitHealth(`http://127.0.0.1:${P2}`, (h) => h.ready, 30000, { authorization: "Bearer s3cret" });
+    const bare = await (await fetch(`http://127.0.0.1:${P2}/health`)).json();
+    check("--token: /health without it says only ok (no room code)", JSON.stringify(bare) === '{"ok":true}', JSON.stringify(bare));
     const no = await fetch(`http://127.0.0.1:${P2}/v1/models`);
     check("--token: 401 without it", no.status === 401 && (await no.json()).error?.code === "invalid_api_key");
     const noA = await fetch(`http://127.0.0.1:${P2}/v1/messages`, { method: "POST", headers: { ...J, "x-api-key": "wrong" }, body: "{}" });

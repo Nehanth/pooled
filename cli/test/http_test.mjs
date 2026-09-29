@@ -82,3 +82,18 @@ test("a full context window is model_context_window_exceeded on Anthropic, lengt
   assert.equal(JSON.parse((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).body).choices[0].finish_reason, "length");
   await t.close();
 });
+
+test("with a token, /health tells a caller without it only that it is up", async () => {
+  const t = await start({ token: "s3cret" });
+  assert.deepEqual(JSON.parse((await t.req("GET", "/health")).body), { ok: true });
+  assert.deepEqual(JSON.parse((await t.req("GET", "/health", { headers: { authorization: "Bearer nope" } })).body), { ok: true });
+  const full = JSON.parse((await t.req("GET", "/health", { headers: { authorization: "Bearer s3cret" } })).body);
+  assert.equal(full.room, "ABCD");
+  assert.equal((await t.req("GET", "/v1/models")).status, 401);
+  assert.equal((await t.req("GET", "/v1/models", { headers: { "x-api-key": "s3cre" } })).status, 401);
+  assert.equal((await t.req("GET", "/v1/models", { headers: { "x-api-key": "s3cret" } })).status, 200);
+  await t.close();
+  const open = await start();
+  assert.equal(JSON.parse((await open.req("GET", "/health")).body).room, "ABCD", "no token: everything is open anyway");
+  await open.close();
+});
