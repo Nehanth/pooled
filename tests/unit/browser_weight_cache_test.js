@@ -159,6 +159,7 @@ Deno.test("second load through ggufEntry takes the cached entries, no read and t
   const names = Object.keys(m.G.tensors);
   const fresh = {};
   for (const n of names) fresh[n] = await ggufEntry(G1, m.bytesOf, n, false);
+  await G1.entryCache.flush();
   assertEquals(G1.entryCache.stats.write, 2);           // the f32 norm is not worth a file
   assertEquals(m.reads(), 3);
 
@@ -174,6 +175,7 @@ Deno.test("invalidation: a new revision, header or converter drops the old entri
   const m = makeModel();
   const c1 = await open(root, m.G);
   await ggufEntry({ ...m.G, entryCache: c1 }, m.bytesOf, "token_embd.weight", false);
+  await c1.flush();
   const top = await root.getDirectoryHandle(WCACHE_DIR);
   assertEquals(top.children.size, 1);
 
@@ -203,6 +205,7 @@ Deno.test("a damaged entry is dropped and converted fresh; leftover temp files a
   const c1 = await open(root, m.G);
   const info = m.G.tensors["token_embd.weight"];
   const e = await ggufEntry({ ...m.G, entryCache: c1 }, m.bytesOf, info.name, false);
+  await c1.flush();
   const dir = c1.dir, f = dir.children.get(entryFile(info.name));
   f.data = f.data.slice(0, f.data.byteLength - 8);          // torn write
   await dir.getFileHandle(entryFile(info.name) + ".tmp-dead", { create: true });
@@ -214,6 +217,7 @@ Deno.test("a damaged entry is dropped and converted fresh; leftover temp files a
   assert(!dir.children.has(entryFile(info.name)));
   const again = await ggufEntry({ ...m.G, entryCache: c2 }, m.bytesOf, info.name, false);
   assert(same(again, e));
+  await c2.flush();
   assert(dir.children.has(entryFile(info.name)));           // rewritten
 });
 
@@ -232,18 +236,18 @@ Deno.test("quota: no write near the limit, a quota error makes the cache read-on
   const root2 = new FakeDir();
   const c = await open(root2, m.G);
   root2.failWrites = true;
-  await c.put(info, e);
+  await c.put(info, e); await c.flush();
   assert(c.readOnly);
   assertEquals(c.stats.full, 1);
   assertEquals([...c.dir.children.keys()].filter((n) => n.endsWith(".bin") || n.includes(".tmp-")), []);
   root2.failWrites = false;
-  await c.put(info, e);                                     // read-only for the rest of this load
+  await c.put(info, e); await c.flush();                    // read-only for the rest of this load
   assertEquals(c.stats.write, 0);
 
   const noEst = await open(new FakeDir(), m.G, { estimate: null });
   assert(noEst.readOnly);
   const throws = await open(new FakeDir(), m.G, { estimate: async () => { throw new Error("no"); } });
-  await throws.put(info, e);
+  await throws.put(info, e); await throws.flush();
   assertEquals(throws.stats.write, 0);
 });
 
@@ -259,6 +263,7 @@ Deno.test("attach, size and clear", async () => {
   assertEquals(c.meta.converter, LOADER_VERSION);
   assertEquals(c.meta.revision, "0123abcd");
   await ggufEntry(G, m.bytesOf, "token_embd.weight", false);
+  await c.flush();
   await attachBrowserWeightCache({ ...m.G }, URL_PIN, { storage, srcUrl: "https://x/engine/gguf.js", fetchFn });
   assertEquals(fetches, 1);                                 // hashed once per page
   assertEquals(await convertedBytes(root), HDR + m.G.tensors["token_embd.weight"].nElems * 4);
@@ -272,4 +277,41 @@ Deno.test("attach, size and clear", async () => {
   const G3 = { ...m.G };
   assertEquals(await attachBrowserWeightCache(G3, URL_PIN, { storage: { getDirectory: async () => { throw new Error("SecurityError"); } }, srcUrl: "y", fetchFn }), null);
   assertEquals(G3.entryCache, null);
+});
+
+Deno.test("writes run in the background, at most a window of bytes at a time", async () => {
+  const m = makeModel();
+  const root = new FakeDir();
+  // hold every entry write open until released, to see what put waits for
+  const gates = [];
+  const orig = FakeFile.prototype.createWritable;
+  FakeFile.prototype.createWritable = async function () {
+    const w = await orig.call(this);
+    if (!this.name.includes(".tmp-")) return w;
+    const close = w.close;
+    w.close = () => new Promise((r) => gates.push(r)).then(close);
+    return w;
+  };
+  try {
+    const q8 = m.G.tensors["blk.0.ffn_down.weight"], bf = m.G.tensors["token_embd.weight"];
+    const eq = convertEntry(q8, await m.bytesOf(q8)), eb = convertEntry(bf, await m.bytesOf(bf));
+    const sizeQ = encodeEntry(q8, eq).bytes, sizeB = encodeEntry(bf, eb).bytes;
+    const c = await open(root, m.G, { writeWindow: sizeQ + sizeB - 1 });   // room for one of the two
+    await c.put(q8, eq);                                   // returns with the write still open
+    assertEquals([c.pending.size, c.pendingBytes, c.stats.write], [1, sizeQ, 0]);
+    let second = false;
+    const p2 = c.put(bf, eb).then(() => { second = true; });
+    await new Promise((r) => setTimeout(r, 10));
+    assert(!second, "the second put waits: the window is full");
+    while (!gates.length) await new Promise((r) => setTimeout(r, 1));
+    gates.shift()();
+    await p2;
+    assertEquals(c.stats.write, 1);
+    const f = c.flush();
+    while (!gates.length) await new Promise((r) => setTimeout(r, 1));
+    gates.shift()();
+    await f;
+    assertEquals([c.pending.size, c.pendingBytes, c.stats.write], [0, 0, 2]);
+    assertEquals(await c.get(bf) !== null, true);
+  } finally { FakeFile.prototype.createWritable = orig; }
 });

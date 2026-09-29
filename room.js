@@ -1053,8 +1053,10 @@ async function useConvertedCache(G, url) {
   if (!WCACHE) { G.entryCache = null; return null; }
   return attachBrowserWeightCache(G, url, { srcUrl: new URL("./engine/gguf.js", import.meta.url).href, verify: WCACHE_VERIFY });
 }
-function convertedSummary(c, t0) {
-  if (!c || !(c.stats.hit || c.stats.write || c.stats.full)) return;
+async function convertedSummary(c, t0) {
+  if (!c) return;
+  await c.flush();   // background writes done before the engine is built
+  if (!(c.stats.hit || c.stats.write || c.stats.full)) return;
   const msg = `${c.summary()}; this device's layers loaded in ${((performance.now() - t0) / 1000).toFixed(1)} s`;
   console.info(msg);
   if (c.stats.hit) log("room", `${myName}: ${msg}`);
@@ -1550,7 +1552,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
     const wc = await useConvertedCache(G, M.gguf), tw = performance.now();
     const weights = await qwen35Weights(G, rangeBytesOf(M.gguf), opts, (done) => onProg(done, total),
       (e, name) => gpuUploadEntry(ai.device, e, name === GGML_EMBED));   // straight to the GPU, RAM stays flat
-    convertedSummary(wc, tw);
+    await convertedSummary(wc, tw);
     aiStatus("building GPU pipelines (compiling shaders)\u2026");
     ai.engine = await Qwen35Engine.create({
       device: ai.device, meta: G.meta, weights, vocab: G.tensors[GGML_EMBED]?.shape?.[0],
@@ -1610,7 +1612,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
     const wc = await useConvertedCache(G, M.gguf), tw = performance.now();
     const weights = await ggufWeights(G, rangeBytesOf(M.gguf), opts, (done) => onProg(done, total),
       (e, name) => gpuUploadEntry(ai.device, e, name === GGML_EMBED));
-    convertedSummary(wc, tw);
+    await convertedSummary(wc, tw);
     aiStatus("building GPU pipelines\u2026");
     ai.engine = await DenseEngine.create({
       coopWG: ai.tune?.wg, coopRows: ai.tune?.rows,

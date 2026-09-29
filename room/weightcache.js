@@ -16,15 +16,16 @@
 // key deletes the other directories of the same model (same URL up to the revision): they can
 // never be read again.
 //
-// Safety: an entry is written under a temp name and renamed into place; on read the header and
-// the exact file size are checked against the tensor info, and anything off is dropped and
-// converted fresh. Quota: an entry is only written while the origin keeps a reserve free (the raw
+// Safety: an entry is written (in the background, a bounded amount at a time) under a temp name
+// and renamed into place; on read the header and the exact file size are checked against the
+// tensor info, and anything off is dropped and converted fresh. Quota: an entry is only written while the origin keeps a reserve free (the raw
 // download cache matters more than this one); a quota error makes the cache read-only for the load.
 // Everything here is best effort: any failure means "convert as before", never a failed load.
 
 export const WCACHE_EPOCH = 1;          // same meaning as LOADER_EPOCH in tests/weight_cache.js
 export const WCACHE_DIR = "pooled-converted-weights";
 export const MIN_ENTRY_BYTES = 256 * 1024;   // smaller tensors convert faster than a file open
+export const WRITE_WINDOW = 128 * 2 ** 20;    // bytes of entries written in the background at once
 const MAGIC = 0x43575753;               // "SWWC", the CLI cache's format
 const FORMAT = 1;
 export const HDR = 64;
@@ -159,15 +160,17 @@ async function writeWhole(dir, name, parts) {
 
 export class BrowserWeightCache {
   // dir: this key's OPFS directory handle; have: entry file names already in it
-  constructor(dir, meta, { have = new Set(), estimate = null, verify = false, policy = worthCaching } = {}) {
-    this.dir = dir; this.meta = meta; this.have = have;
+  constructor(dir, meta, { have = new Set(), estimate = null, verify = false, policy = worthCaching, writeWindow = WRITE_WINDOW } = {}) {
+    this.dir = dir; this.meta = meta; this.have = have; this.window = writeWindow;
+    this.pending = new Set(); this.pendingBytes = 0;
     this.estimate = estimate; this.verify = verify; this.policy = policy;
     this.readOnly = !estimate;
+    // writeMs: time the load waited on writes (they mostly overlap the conversion)
     this.stats = { hit: 0, miss: 0, bad: 0, write: 0, skip: 0, full: 0, hitBytes: 0, writeBytes: 0, readMs: 0, writeMs: 0 };
   }
 
   // Open (creating) the directory for this model under root, drop the model's other directories.
-  // opts: { url, revision, G, converter, variant, estimate, verify, policy }. null when unusable.
+  // opts: { url, revision, G, converter, variant, estimate, verify, policy, writeWindow }. null when unusable.
   static async open(root, opts) {
     try {
       const top = await root.getDirectoryHandle(WCACHE_DIR, { create: true });
@@ -182,7 +185,7 @@ export class BrowserWeightCache {
         if (n.endsWith(".bin")) have.add(n);
         else if (n.includes(".tmp-")) dir.removeEntry(n).catch(() => {});   // a tab that died mid-write
       }
-      const c = new BrowserWeightCache(dir, { ...meta, dir: name }, { have, estimate: opts.estimate, verify: opts.verify, policy: opts.policy });
+      const c = new BrowserWeightCache(dir, { ...meta, dir: name }, { have, estimate: opts.estimate, verify: opts.verify, policy: opts.policy, writeWindow: opts.writeWindow });
       return c;
     } catch { return null; }
   }
@@ -204,16 +207,37 @@ export class BrowserWeightCache {
     }
   }
 
-  // Store a freshly converted entry, when the policy wants it and the quota has room.
+  // Store a freshly converted entry, when the policy wants it and the quota has room. The write
+  // runs in the background so it overlaps the next tensor's download and conversion; put only
+  // waits when more than writeWindow bytes are still being written (that caps the extra memory the
+  // pending entries hold). flush() waits for all of them.
   async put(info, e) {
     if (this.readOnly || !this.policy(info)) { this.stats.skip++; return; }
     const enc = encodeEntry(info, e);
     if (!enc) { this.stats.skip++; return; }
     let est = null;
     try { est = await this.estimate(); } catch { /* unknown: no write */ }
-    if (!quotaAllows(est, enc.bytes)) { this.stats.full++; return; }
-    const f = entryFile(info.name), tmp = `${f}.tmp-${Math.random().toString(36).slice(2)}`;
+    // usage does not count the writes still in flight yet
+    if (!quotaAllows(est, enc.bytes + this.pendingBytes)) { this.stats.full++; return; }
+    const tw = performance.now();
+    while (this.pending.size && this.pendingBytes + enc.bytes > this.window) await Promise.race(this.pending);
+    this.stats.writeMs += performance.now() - tw;
+    if (this.readOnly) { this.stats.skip++; return; }
+    this.pendingBytes += enc.bytes;
+    const p = this._write(entryFile(info.name), enc).finally(() => { this.pendingBytes -= enc.bytes; this.pending.delete(p); });
+    this.pending.add(p);
+  }
+
+  // Wait for the background writes. room.js calls this before it builds the engine, so every
+  // entry is on disk before anything could touch its CPU copy, and the summary counts every write.
+  async flush() {
     const t0 = performance.now();
+    while (this.pending.size) await Promise.all([...this.pending]);
+    this.stats.writeMs += performance.now() - t0;
+  }
+
+  async _write(f, enc) {
+    const tmp = `${f}.tmp-${Math.random().toString(36).slice(2)}`;
     try {
       const h = await this.dir.getFileHandle(tmp, { create: true });
       const w = await h.createWritable();
@@ -228,7 +252,7 @@ export class BrowserWeightCache {
         await writeWhole(this.dir, f, enc.parts);
       }
       this.have.add(f);
-      this.stats.write++; this.stats.writeBytes += enc.bytes; this.stats.writeMs += performance.now() - t0;
+      this.stats.write++; this.stats.writeBytes += enc.bytes;
     } catch (err) {
       // out of space (QuotaExceededError) or no writable files in this browser: read-only from here
       this.readOnly = true;
@@ -240,7 +264,7 @@ export class BrowserWeightCache {
   summary() {
     const s = this.stats, mb = (b) => (b / 2 ** 20).toFixed(0) + " MB";
     return `converted weights: ${s.hit} from this device (${mb(s.hitBytes)}, ${(s.readMs / 1000).toFixed(1)} s), ` +
-      `${s.write} saved (${mb(s.writeBytes)}, ${(s.writeMs / 1000).toFixed(1)} s)` +
+      `${s.write} saved (${mb(s.writeBytes)}, ${(s.writeMs / 1000).toFixed(1)} s waited)` +
       (s.bad ? `, ${s.bad} bad dropped` : "") + (s.full ? `, ${s.full} not saved (storage nearly full)` : "");
   }
 }
