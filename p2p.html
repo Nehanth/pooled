@@ -618,6 +618,8 @@
   .rung.sel::before { box-shadow: inset 0 0 0 4.5px var(--accent); }
   #ai-redeal { width: 100%; font: 500 13px/1 var(--sans); border-color: var(--warn); color: var(--warn-text); }
   #redeal-why { font-size: 12px; color: var(--ink-2); }
+  #ai-give { width: 100%; font: 500 13px/1 var(--sans); }
+  #ai-panel:is(.loading, .online) #ai-give { display: none; }
   #ai-loading { display: none !important; }
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
   /* loading: the landing's pick card. The logo's wave, what loads, each device's share of it, and
@@ -1489,6 +1491,7 @@
           <span id="ai-status"></span>
           <p class="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
           <button id="ai-start" class="primary">Start the model</button>
+          <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
           <div id="redeal-why" hidden></div>
           <button id="ai-redeal" type="button" hidden>Re-deal the layers</button>
         </div>

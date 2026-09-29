@@ -137,13 +137,17 @@ preflight().then((v) => {
   $("join-pledge").classList.add("no-gpu");
   $("ap-no").textContent = v.line;
 });
+// the least any model in the picker needs (the 1.7B's 4 GB)
+const SMALLEST_NEED = Math.min(...PICKER.map((k) => NEED_GB[k]));
 // probe once at load; fill the contribution selector
 const metaPromise = (async () => {
   const m = await probeGPU();
   if (m.webgpu && m.budgetGB) m.contribGB = Math.max(0.2, Math.round(m.budgetGB * 0.5 * 10) / 10);
   m.phone = m.ua === "iPhone" || m.ua === "Android";
   if (m.phone) { m.contribGB = 0.5; $("join-gb").min = "0.5"; $("join-gb").step = "0.5"; }
-  else if (m.contribGB) m.contribGB = Math.max(1, Math.round(m.contribGB));
+  // a laptop gives at least what the smallest model needs, when its probe allows, so one laptop can
+  // run the 1.7B alone (half of maxBufferSize is 2 GB on a typical laptop, and 2 GB runs nothing)
+  else if (m.contribGB) m.contribGB = Math.max(1, Math.round(m.contribGB), Math.min(SMALLEST_NEED, Math.floor(m.budgetGB)));
   if (m.contribGB) $("join-gb").value = m.contribGB;
   return m;
 })();
@@ -326,6 +330,15 @@ $("ai-ladder").addEventListener("click", (e) => {
   const b = e.target.closest(".rung"); if (!b || $("ai-model").disabled) return;
   setModelValue(b.dataset.k); modelTouched = true; updateCluster();
 });
+// how much this device would give to cover `short` GB, or 0 when it can't: needs WebGPU, and stays
+// within what its probe allows (a phone keeps its small default; a laptop goes up to its budget)
+function giveFor(short) {
+  if (!(short > 0) || !myMeta.webgpu || myMeta.phone) return 0;
+  const v = Math.ceil((myMeta.contribGB + short) * 10 - 1e-6) / 10;
+  const cap = Math.min(64, Math.max(SMALLEST_NEED, Math.floor(myMeta.budgetGB || 0)));
+  return v <= cap ? Math.ceil(v) : 0;
+}
+$("ai-give").addEventListener("click", (e) => lendGB(+e.currentTarget.dataset.gb));
 function updateNeed(pledged) {
   if (!modelTouched && !ai.engine && !ai.busy && !$("ai-model").disabled) $("ai-model").value = bestFit(PICK_NEED, pledged);
   renderLadder(pledged);
@@ -338,6 +351,10 @@ function updateNeed(pledged) {
     : `Needs ${need} GB. The room has ${has} GB, ${(need - pledged).toFixed(1)} GB short.`;
   $("ai-need").classList.toggle("ok", ok);
   if (!ai.busy && !ai.engine) $("ai-start").disabled = !ok;
+  // short, and this device alone can close the gap: offer that one tap next to the disabled Start
+  const give = giveFor(need - pledged);
+  $("ai-give").hidden = ok || !give || ai.busy || !!ai.engine;
+  if (give) { $("ai-give").textContent = `Give ${give} GB from this device`; $("ai-give").dataset.gb = give; }
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
 }
