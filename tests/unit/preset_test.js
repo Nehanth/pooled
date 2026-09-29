@@ -60,10 +60,21 @@ Deno.test("room.js builds its Qwen engine from the preset and reads no engine fl
 });
 
 Deno.test("benchmarks and profilers build their Qwen engines from the same preset", () => {
-  for (const p of ["benchmarks/bench.js", "benchmarks/bench_breakdown.js", "tests/prof/prof_moe_decode.js", "tests/bench/prof.html", "tests/bench/bench.html", "tests/test_moe_split.js"]) {
+  for (const p of ["benchmarks/bench.js", "benchmarks/bench_breakdown.js", "benchmarks/bench_enc_probe.js", "benchmarks/bench_pipe_ab2.js", "tests/prof/prof_moe_decode.js", "tests/bench/prof.html", "tests/bench/bench.html", "tests/test_moe_split.js"]) {
     const src = read(p);
     if (!/import \{[^}]*roomQwen35Options[^}]*\} from "[./]*engine\/preset\.js"/.test(src)) throw new Error(`${p} does not import the preset`);
     if (!src.includes("...roomQwen35Options(")) throw new Error(`${p} does not pass the preset to Qwen35Engine.create`);
     if (!src.includes("applyRoomFlags(")) throw new Error(`${p} does not apply the preset's engine flags`);
+  }
+});
+
+Deno.test("every benchmark and profiler that builds a Qwen engine takes the preset", () => {
+  const dirs = ["benchmarks", "tests/prof", "tests/bench"];
+  for (const d of dirs) {
+    for (const e of Deno.readDirSync(new URL("../../" + d, import.meta.url))) {
+      if (!/\.(js|html)$/.test(e.name)) continue;
+      const src = read(`${d}/${e.name}`);
+      if (src.includes("Qwen35Engine.create(") && !src.includes("...roomQwen35Options(")) throw new Error(`${d}/${e.name} builds a Qwen engine without the room's preset (engine/preset.js)`);
+    }
   }
 });

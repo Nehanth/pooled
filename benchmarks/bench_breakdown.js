@@ -38,7 +38,8 @@ async function timeBatch(n = REPS) {
   return (performance.now() - t0) / n;
 }
 async function timeSingle(n = REPS) {
-  eng.reset(); eng.pos = 0;
+  // drop the encode-ahead buffer: its key only says whether some skip set was on, not which one
+  eng.reset(); eng.pos = 0; eng._fwdPre = null;
   await eng.forwardToken(10);
   const t0 = performance.now();
   for (let i = 0; i < n; i++) await eng.forwardToken(10);
