@@ -458,6 +458,17 @@ try {
   await peer.waitForFunction(() => document.getElementById("code-proj-select").value === "opfs:peer-project" && /peer-e2e started the project/.test(document.getElementById("code-log").textContent), null, { timeout: 10000 })
     .then(() => check("peer: follows the new project", true), () => check("peer: follows the new project", false));
 
+  // ---- back to the first project: its preview comes back on its port (#176)
+  await host.selectOption("#code-proj-select", "opfs:tetris");
+  const tab5173 = () => [...document.querySelectorAll("#pv-tabs .pv-tab")].some((t) => t.textContent === ":5173");
+  await host.waitForFunction(tab5173, null, { timeout: 10000 }).catch(() => {});
+  await host.waitForFunction(() => /^rev \d+$/.test(document.getElementById("pv-state").textContent), null, { timeout: 10000 }).catch(() => {});
+  await host.waitForTimeout(700);
+  const R = await host.evaluate((f) => ({ proj: document.getElementById("code-proj-select").value, tab: eval(f)(), state: document.getElementById("pv-state").textContent }), `(${tab5173})`);
+  const rePx = await appFrame(host)?.evaluate(() => { const c = document.getElementById("board"), d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data; let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i]) n++; return n; }).catch((e) => String(e));
+  check("reopening a project serves its preview again", R.proj === "opfs:tetris" && R.tab && rePx > 1000, JSON.stringify({ R, rePx }));
+  if (arg("reopen-shot", null)) await host.screenshot({ path: arg("reopen-shot", null) });
+
   // ---- chat mode is still there
   await host.click("#mode-chat");
   check("Chat tab brings the chat back", await host.evaluate(() => !document.getElementById("chatpane").classList.contains("code-mode") && getComputedStyle(document.getElementById("code-pane")).display === "none"));

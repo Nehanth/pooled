@@ -97,6 +97,7 @@ export async function initCode(api, { mock = null } = {}) {
 
   // ================================================================ host
   let project = null, server = null, publisher = null, tools = [], agent = null, agentSrc = null, agentStyle = null, model = null;
+  let offPorts = () => {};   // unsubscribes portUpdate from the project's preview server
   let sessionJson = null, hist = [], tree = [], running = false, ctrl = null, allowTask = false;
   let userAuto = null;   // the user's own tick of "auto-approve edits", kept across projects
   let mid = "", toolN = 0;
@@ -197,6 +198,7 @@ export async function initCode(api, { mock = null } = {}) {
   function closeProject({ keepQueue = false } = {}) {
     if (running) ctrl?.abort();
     if (!keepQueue) for (const q of queue.splice(0)) tell(q.from, "the project changed: your queued request was dropped", true);
+    offPorts(); offPorts = () => {};   // closing stops the ports, which is not the user stopping them (they stay in the session)
     server?.close(); publisher?.close();   // in this order: the server's stops reach the members (ai-pv-stop) before the publisher unsubscribes
     for (const port of [...ui.ports.keys()]) ui.dropPort(port);
     project = server = publisher = agent = model = null; agentSrc = null; tools = [];
@@ -210,7 +212,7 @@ export async function initCode(api, { mock = null } = {}) {
     // run_js only when the snippet runs on the isolated preview host (a loop there cannot freeze the room)
     tools = [...codingTools(p.ws, { server }), ...previewTools(server), ...(runJsAvailable() ? [runJsTool(server)] : [])];
     publisher = new PreviewPublisher(server, { send: api.send, broadcast: api.broadcast, channel: api.channel });
-    server.onUpdate(portUpdate);
+    offPorts = server.onUpdate(portUpdate);
     const saved = await loadSession(p.id).catch(() => null);
     sessionJson = saved?.agent || null;
     hist = Array.isArray(saved?.hist) ? saved.hist : [];
@@ -224,11 +226,19 @@ export async function initCode(api, { mock = null } = {}) {
     api.broadcast({ t: "ai-code-history", sid, items: hist.slice(-HIST), tree });
     refreshProjects();
     ctxMeter();
+    // the ports this project had served come back (#176); one whose folder or page is gone stays off
+    const srv = server;
+    for (const s of Array.isArray(saved?.ports) ? saved.ports : []) {
+      if (server !== srv) break;
+      try { await srv.serve({ dir: str(s.dir, 300), port: s.port, entry: str(s.entry, 300) }); } catch (e) { localNote(`:${s.port} not served again: ${e.message}`, true); }
+    }
   }
   const escapeHTML = (s) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   function portUpdate(u) {
-    if (u.stopped) { ui.dropPort(u.port); return; }
+    // a port served or stopped goes into the session (a run saves it when it ends)
+    if (u.stopped) { ui.dropPort(u.port); if (!running) save(); return; }
     if (ui.ports.has(u.port)) return;   // the mounted frame follows its own updates
+    if (!running) save();
     const port = u.port, src = server;
     ui.portTab(port, { closable: true, mount: (el) => mountPreview(el, src, port, { onLog: (e) => ui.logRow(port, e), onStatus: (s) => ui.status(port, s) }) });
     ui.activate(port);
@@ -330,7 +340,8 @@ export async function initCode(api, { mock = null } = {}) {
   function localNote(text, err = false) { ui.apply({ t: "ai-code-note", text, err }); }
   function save() {
     if (!project) return;
-    saveSession(project.id, { v: 1, agent: agent ? agent.toJSON() : sessionJson, hist: hist.slice(-4 * HIST) }).catch((e) => console.warn("code session not saved", e));
+    const ports = server ? server.ports().map(({ port, dir, entry }) => ({ port, dir, entry })) : [];
+    saveSession(project.id, { v: 1, agent: agent ? agent.toJSON() : sessionJson, hist: hist.slice(-4 * HIST), ports }).catch((e) => console.warn("code session not saved", e));
   }
   function ctxMeter() {
     if (!agent || !model?.count) { ui.ctx(0); return; }   // a scripted model has no token count to show
