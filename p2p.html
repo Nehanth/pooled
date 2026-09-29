@@ -14,9 +14,10 @@
 <!-- Code mode's preview host: this site deployed on another registrable domain (e.g. https://pooled-preview.example, not a subdomain of pooled.run),
      so the agent's app runs in a process of its own (harness/preview-frame.js relayUrl). Empty: it runs in this tab. -->
 <meta name="preview-origin" content="">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Funnel+Display:wght@400;500&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="preload" href="/site/fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/site/fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/site/fonts/funnel-display-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/site/css/fonts.css">
 
 <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=3">
 <link rel="manifest" href="/site.webmanifest?v=2">
@@ -63,9 +64,9 @@
     --warn-text: var(--accent-text);
     --err: var(--del);
     --game: #0B0F1F; --on-game: #EEF0F6; --on-game-2: #A9B0C4;
-    --display: "Funnel Display", "Geist", ui-sans-serif, system-ui, sans-serif;
-    --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --display: "Funnel Display", "Funnel Display Fallback", "Geist", ui-sans-serif, system-ui, sans-serif;
+    --sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, "SF Mono", Menlo, monospace;
     --ease: cubic-bezier(.2,.7,.2,1);
     --lap: 600ms;
     color-scheme: light;
