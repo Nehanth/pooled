@@ -920,26 +920,6 @@ D_after_moe_2 failed at join (the public PeerJS server said no room for the code
 Runs between 20:28 and 21:15 overlap a phone-lock mix-up in another job (the lock was released under running
 jobs); in B and D after the phone only joins, and B_after_moe_1/2 agree to within 2%.
 
-The other phone rooms (same branch, preview, `xroom_cluster.sh`, 2 runs after; before = the device matrix's runs on
-main's rule; there was only one clean "before" D run, D_moe_here_2):
-
-| room (35B MoE) | split now | plain japan | plain twosum | spec japan | spec twosum |
-|---|---|---|---|---|---|
-| B before: M5 Max 30 GB host + iPhone (B_moe_1) | Mac 39 + phone 1 | 28.5-29.4 | 26.9-32.4 | 43.7-44.4 | 37.5-56.6 |
-| **B after** (B_after_moe_1/2) | **Mac 40, phone asks** | **68.4-70.3** | **81.8-83.1** | **95.1-96.0** | **130.2-133.5** |
-| D before: GB10 13 + M5 Max 12 + iPhone (D_moe_here_2) | 19 + 20 + phone 1 | 18.7-19.5 | 18.5-20.9 | 19.1-21.3 | 27.6-27.9 |
-| **D after** (D_after_moe_1/3) | **20 + 20, phone asks** | 18.7-26.5 | 16.6-25.1 | 27.0-29.0 | 37.5-56.4 |
-| A (GB10 + M5 Max, matrix A_moe_1/2), same split as D after | 20 + 20 | 29.3-29.9 | 28.4-33.3 | 26.1-38.0 | 51.6-56.8 |
-
-B: the M5 Max alone runs the MoE at 2.4x plain / 2.2-2.4x spec of what it did with the phone's layer (answers
-3f42e667 / dcc61ede as before, plain == spec). D: now the A room; plain is noisy and below the matrix's A numbers
-(Wi-Fi at 21:00-22:30; D_after_moe_2 failed at join, "no room with that code" from the public PeerJS server, and was
-rerun as D_after_moe_3), spec is +35-100% over D with the phone. **Correctness caveat, not new:** without the
-phone D is the GB10 + M5 Max room, and in both D after runs japan gave plain 8e29cc8d but spec 44efa784 in the same
-session, exactly the open item of the two-machine entry (A_moe_1 had the same pair; A_moe_2 had 44efa784 for both).
-With the phone at layer 39, D happened to give a0e7f9bd for both. twosum dcc61ede everywhere. The divergence belongs
-to the GB10 + M5 Max chain (the f16 wire and two GPU vendors), not to the deal: this change only removes the phone.
-
 **2. Keep the phone off the last (full-attention) layer (tried, dropped).** The chain ends on the phone, so it held
 layer 39, full attention (+3 ms over the context without subgroups, its KV cache on the phone). Tried: the host
 keeps layer 39 as a tail, a second engine run on the returned hidden before the head, and every slice moves one
