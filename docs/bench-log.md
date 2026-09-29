@@ -865,9 +865,11 @@ Census at 2048: 331,508 dispatches (131k of them per-column `silu_mul`, 16 per l
 1. **MoE: MMQ-style grouped expert GEMM** (tolerance, prefill-only). Replace the UC=8 tiled kernels with a real
    per-expert tile over all of that expert's tokens in the ubatch (BN 16-64 token columns, dequantize-once weight
    tile, the wide GEMM's 64x64 register blocking), run the shared expert as one dense wide GEMM over the whole chunk,
-   and try U=512 (more tokens per expert). Hypothesis: the experts are bound by per-8-pair weight re-reads and reduction
-   traffic, not DRAM (2.0 TFLOPS, ~70 GB/s effective); at wide-GEMM efficiency (5.5 TFLOPS) they drop from 42-45% to
-   ~15%. **Expected: MoE prefill +35-45% (Deno 2048: 387 -> ~540 tok/s).**
+   then raise U. Hypothesis: the experts are bound by per-8-pair weight re-reads and reduction traffic, not DRAM
+   (2.0 TFLOPS, ~70 GB/s effective); at wide-GEMM efficiency (5.5 TFLOPS) they drop from 42-45% to ~15%. Supporting
+   measurement: a bigger ubatch alone does nothing, because the UC=8 chunking caps the reuse per weight load:
+   `MOEGROUP=512 PREFILL_UBATCH=512` gave 389.7 / 394.9 / 398.5 tok/s at 2048 and 366.1 / 369.2 / 376.4 at 8192
+   (two runs that briefly shared the GPU; slow outliers dropped) vs 387.5 and 367.8 at U=256. **Expected: MoE prefill +35-45% (Deno 2048: 387 -> ~540 tok/s).**
 2. **DP4a (Q8_1 activations) in the wide prefill GEMM, and wide prefill on by default for the 27B.** Wide on is
    already measured at +26-29% on the 27B in Deno (72 -> 90 at 512, 75.5 -> 97.4 at 2048; relDiff was 5.2e-4 on
    2026-09-27). The 27B is then 84% f32 FMA GEMM at 5.8 TFLOPS against a 16.7 TFLOPS f32 peak; `dot4I8Packed`
