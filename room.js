@@ -133,9 +133,11 @@ preflight().then((v) => {
   $("join-gpu-t").textContent = v.line;
   $("join-gpu-d").textContent = v.detail || "";
   $("join-gpu").querySelector("details").hidden = !v.detail;
+  $("join-gpu").querySelector("details").open = !!v.detail;   // the remedy is the useful part: show it
   $("join-gpu").hidden = false;
   $("join-pledge").classList.add("no-gpu");
   $("ap-no").textContent = v.line;
+  if (v.detail) { const d = document.createElement("span"); d.className = "ap-no-d"; d.textContent = v.detail; $("ap-no").append(" ", d); }
 });
 // the least any model in the picker needs (the 1.7B's 4 GB)
 const SMALLEST_NEED = Math.min(...PICKER.map((k) => NEED_GB[k]));
