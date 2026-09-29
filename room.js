@@ -172,8 +172,10 @@ const humanRange = (r) => { const m = /^(\d+)\D+(\d+)$/.exec(String(r || "")); r
 // One colour per device, everywhere (chips, pool bar, loading rows, band, Lend screen): given once,
 // in join order, to each device that can hold layers. A device that only asks is grey everywhere.
 const SWATCH = ["#2A45E0", "#2B2F3C", "#7C8FFF", "#5E616B", "#B9C6FF", "#1C33B8",
-  // devices 7 to 16: more of the same family (blues, indigo, slate), each distinct from its neighbours
-  "#4F6BFF", "#3E4454", "#9AABFF", "#7B7F8A", "#2F3FA8", "#D3DBFF", "#454D8F", "#9DA1AB", "#6E86FF", "#1A1D26"];
+  // devices 7 to 16: the same family (slate, sky and royal blue, indigo), each picked to be as far as possible
+  // from every colour before it, counting a lightness step of 0.12 (OKLab) or a hue/chroma step of 0.12 as
+  // one unit: below one, a 6 px dot or a thin bar reads the same (the old shades sat at 0.25-0.67)
+  "#8C939B", "#127ABE", "#320578", "#7E4FFB", "#5D4DA4", "#114B75", "#79B1E0", "#7F73C3", "#4074FB", "#5912CA"];
 // past 16 devices: shades generated in the same blue-to-slate range (hue 222-232), so no two neighbours match
 function swatch(i) {
   if (i < SWATCH.length) return SWATCH[i];
