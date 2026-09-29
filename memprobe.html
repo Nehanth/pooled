@@ -22,10 +22,10 @@
 // and what does loading real layers cost at its peak vs once loaded? Issue #207.
 //
 // Modes (?mode=):
-//   js     allocate JS ArrayBuffers of ?step MB (default 64), each filled so its pages are dirty, one
+//   js     allocate JS ArrayBuffers of ?step MB (default 64), each filled with random bytes, one
 //          every ?pause ms (default 300), until ?max MB (default 16384) or the tab dies
 //   gpu    the same with WebGPU buffers (STORAGE|COPY_DST, ?step MB each, capped at the device's
-//          maxBufferSize), each filled with writeBuffer from one reused 8 MB source
+//          maxBufferSize), each filled with writeBuffer from one reused 8 MB random source
 //   load   load layers [?lo, ?hi) of ?model (moe | 27b) exactly the way a phone in a room does
 //          (room.js aiLoadShard: 256 MB buffer cap, streamed Q4_0/Q8_0 tensors with a 2 MB staging
 //          area and 300 ms pace, prefetch 1, other quants fetched whole and converted on the CPU),
@@ -95,11 +95,16 @@ if (prev && !prev.done && !prev.err) {
 mp.prev = prev;
 
 // ---- JS memory in steps ----
+// Fill with random bytes: iOS compresses memory, and a constant fill compresses to almost nothing
+// (a first run with .fill() reached 14 GB of JS on a 6 GB iPhone without a kill). Weights are
+// incompressible too. One 8 MB random block, copied: the compressor works page by page, no dedupe.
+const RND = new Uint8Array(8 * MB);
+for (let o = 0; o < RND.length; o += 65536) crypto.getRandomValues(RND.subarray(o, o + 65536));
 const hold = [];
 function allocJS(mb) {
-  const ab = new ArrayBuffer(mb * MB);
-  new Uint32Array(ab).fill(0x5a5a5a5a + hold.length);   // dirty every page
-  hold.push(ab);
+  const u8 = new Uint8Array(mb * MB);
+  for (let o = 0; o < u8.length; o += RND.length) u8.set(RND.subarray(0, Math.min(RND.length, u8.length - o)), o);
+  hold.push(u8.buffer);
   mp.jsMB += mb;
 }
 async function jsSteps(step, pause, max, phase = "js") {
@@ -135,7 +140,7 @@ async function gpuSteps(step, pause, max) {
   mp.phase = "gpu";
   const d = await gpuDevice();
   step = Math.min(step, Math.floor(d.limits.maxBufferSize / MB));
-  const src = new Uint8Array(8 * MB).fill(0xa5);
+  const src = RND;   // random, see allocJS
   const bufs = [];
   while (acct.gpu / MB + step <= max) {
     mp.steps++;
