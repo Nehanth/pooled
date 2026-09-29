@@ -355,7 +355,10 @@ try {
     if (hb) {
       check(`${nm}: host notices ${V} within 6 s`, detectMs != null && detectMs <= 6000, `${detectMs} ms`);
       check(`${nm}: the answer ends (fails fast)`, !r.timedOut && /stopped responding/.test(r.status + JSON.stringify(scr)), r.status);
-      check(`${nm}: re-deal offered`, !!scr.redeal, scr.redeal);
+      // the device is held for EVICT_MS (a freeze keeps its place), then dropped: re-deal offered
+      const redealMs = await until(H, (x) => !!x.redeal, 30000);
+      row({ scenario: nm + "_evict", victim: V, redealOfferedMsAfterAnswerEnd: redealMs });
+      check(`${nm}: re-deal offered within 20 s of the answer failing`, redealMs != null && redealMs <= 20000, `${redealMs} ms`);
     }
     names.splice(names.indexOf(V), 1); delete tabs[V];   // out of the room (its browser stays open, cut off)
     const rd = await redealAndWait(H);

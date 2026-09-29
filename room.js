@@ -20,7 +20,7 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // prefilling the whole conversation again. 0 turns it off.
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL, DUP_SLICES } from "./room/transport.js";
-import { makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, lapTimeout } from "./room/liveness.js";
+import { makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, lapTimeout, suspectCheck, STALL_MS } from "./room/liveness.js";
 import { turnFrom, iceConfig, shareQuery, linkPath, normTurn, TURN_KEY } from "./room/ice.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
@@ -814,13 +814,19 @@ setInterval(() => {
 // --- drop detection (room/liveness.js) ---
 // While an answer runs, the host pings every device in the chain twice a second and treats
 // anything it hears from one (a pong, any message, any wire slice) as a sign of life. A device
-// silent past deadAfter(rtt) (3.5-5 s) is dead: its link is closed here, which fails the laps in
-// flight and puts the room in the degraded / re-deal state at once, instead of waiting ~30 s for
-// ICE to notice or for a lap to time out. ?hb=0 turns it off (A/B runs).
+// silent past deadAfter(rtt) (3.5-5 s) is held: the laps in flight fail at once ("<name> stopped
+// responding; ask again") instead of waiting for a lap timeout, and the next question waits for
+// it. A frozen device that comes back keeps its place and layers (no re-deal); one still silent
+// after EVICT_MS (15 s) is dropped: its link is closed, which puts the room in the degraded /
+// re-deal state. ?hb=0 turns it off (A/B runs).
 const liveness = makeLiveness();
 const HB_ON = new URLSearchParams(location.search).get("hb") !== "0";
+let hbLast = 0;
 function hbLoop() {
   const now = performance.now();
+  const stalled = hbLast && now - hbLast > STALL_MS;   // this tab did not run: its inbox is stale
+  hbLast = now;
+  if (isHost && !stalled) hbSuspects(now);
   const on = HB_ON && isHost && ai.role === "host" && (ai.busy === "gen" || ai.busy === "code") && ai.chain.length > 0 && !ai.degraded;
   if (!on) { hbDisarm(liveness); hbTick(liveness, now, []); return; }
   hbArm(liveness, now);
@@ -830,13 +836,34 @@ function hbLoop() {
   if (r.ping) for (const id of ids) sendTo(id, { t: "ping", ts: now });
   for (const { id, silentMs, limitMs } of r.dead) {
     const e = conns.get(id);
-    if (!e || e.dead) continue;
-    e.dead = true;
-    console.warn(`[room] ${e.name} silent ${silentMs} ms (limit ${limitMs} ms, rtt ${e.rtt ?? "?"} ms): dropping it`);
-    try { e.conn.close(); } catch {}
-    for (const sc of e.stripes || []) { try { sc.close(); } catch {} }
-    // PeerJS emits close from close(); if that ever does not happen, drop the link by hand
-    if (conns.get(id) === e) { conns.delete(id); dropCard(id); members.delete(id); roster.delete(id); broadcastRoster(); aiPeerLeft(id, e.name, "stopped responding"); updateCluster(); }
+    if (!e || e.dead || e.suspect) continue;
+    e.suspect = { since: now - silentMs };
+    console.warn(`[room] ${e.name} silent ${silentMs} ms (limit ${limitMs} ms, rtt ${e.rtt ?? "?"} ms): failing the answer, holding its place`);
+    log("room", `${e.name} stopped responding; waiting for it`);
+    noteLink(peer.id + "|" + id, e.name, false);   // the next question waits for it (linksUp)
+    failWaiters(new Error(`${e.name} stopped responding; ask again`));
+    ai.fed = null; ckptClear(true);
+  }
+}
+// held devices: back (heard from again) or dropped (silent past EVICT_MS)
+function hbSuspects(now) {
+  for (const [id, e] of conns) {
+    if (!e.suspect || e.dead) continue;
+    const st = suspectCheck(Math.max(e.heard || 0, e.link?.heard || 0), e.suspect.since, now);
+    if (st === "back") {
+      e.suspect = null;
+      noteLink(peer.id + "|" + id, e.name, true);
+      log("room", `${e.name} is responding again`);
+      if (ai.role === "host" && !ai.busy && !ai.degraded) aiStatus(`${e.name} is back: ask again`);
+    } else if (st === "evict") {
+      e.dead = true;
+      noteLink(peer.id + "|" + id, e.name, true);
+      console.warn(`[room] ${e.name} silent ${Math.round(now - e.suspect.since)} ms: dropping it`);
+      try { e.conn.close(); } catch {}
+      for (const sc of e.stripes || []) { try { sc.close(); } catch {} }
+      // PeerJS emits close from close(); if that ever does not happen, drop the link by hand
+      if (conns.get(id) === e) { conns.delete(id); dropCard(id); members.delete(id); roster.delete(id); broadcastRoster(); aiPeerLeft(id, e.name, "stopped responding"); updateCluster(); }
+    }
   }
 }
 setInterval(hbLoop, 250);

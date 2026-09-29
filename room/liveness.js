@@ -5,8 +5,10 @@
 // The host pings every device in the chain every HB_BUSY_MS while an answer runs (the plain
 // `ping`/`pong` every protocol version answers, so this needs no protocol change) and counts
 // anything it receives from a device as a sign of life: a pong, any control message, any slice
-// on any of its wire channels. A device silent for longer than deadAfter(rtt) is dead: the host
-// closes its link, which takes the existing path (every lap in flight fails, `ai-degraded`, re-deal).
+// on any of its wire channels. A device silent for longer than deadAfter(rtt) is held: every lap
+// in flight fails now ("<name> stopped responding; ask again") and the next question waits for it.
+// If it is heard again it simply carries on (a freeze); silent past EVICT_MS it is dropped, which
+// takes the existing path (`ai-degraded`, re-deal).
 //
 // Why these numbers: the control channel is reliable and ordered, so one lost packet holds
 // everything behind it until SCTP retransmits it (an RTO, ~1 s at first, doubling on each loss of
@@ -21,7 +23,12 @@
 export const HB_BUSY_MS = 500;     // ping period to chain devices while answering
 export const DEAD_MIN_MS = 3500;   // never call a device dead sooner than this
 export const DEAD_MAX_MS = 5000;   // ... nor later
-export const STALL_MS = 1200;      // a tick this late means this tab stalled: its inbox is stale, judge nothing
+export const STALL_MS = 1200;
+// A device that went silent is held, not dropped: the answer in flight fails at once (its frames
+// are late at best), but the device keeps its place and layers in case it was only frozen (a
+// Wi-Fi stall, a laptop lid, a busy phone). Only past EVICT_MS of silence is it dropped (the
+// re-deal path). 15 s is when ICE gives up on a link anyway (see watchLink in room.js).
+export const EVICT_MS = 15000;      // a tick this late means this tab stalled: its inbox is stale, judge nothing
 
 // How long a device may stay silent before it counts as dead, given its measured round trip.
 export function deadAfter(rttMs) {
@@ -57,6 +64,15 @@ export function tick(L, now, ids, rttOf = () => null) {
     if (silent > limit) out.dead.push({ id, silentMs: Math.round(silent), limitMs: limit });
   }
   return out;
+}
+
+// A held (suspect) device, checked on every loop whether or not an answer runs: "back" once
+// anything arrived from it after it went silent, "evict" once it has been silent EVICT_MS,
+// otherwise "wait". lastHeard: when it was last heard from; silentSince: when the silence began
+// (lastHeard, or when the answer started if that was later).
+export function suspectCheck(lastHeard, silentSince, now) {
+  if (lastHeard > silentSince) return "back";
+  return now - silentSince > EVICT_MS ? "evict" : "wait";
 }
 
 // Lap timeout for a decode lap (one token, or a speculative verify) from the laps measured so

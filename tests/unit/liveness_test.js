@@ -1,7 +1,7 @@
 // room/liveness.js: drop detection on the host. A fake clock drives it; the numbers mirror what
 // the host sees in a room (pings every 500 ms, pongs, wire slices, a tab that stalls).
 import { makeLiveness, heard, arm, disarm, forget, tick, deadAfter, lapTimeout,
-  HB_BUSY_MS, DEAD_MIN_MS, DEAD_MAX_MS, STALL_MS, LAP_MIN_MS } from "../../room/liveness.js";
+  HB_BUSY_MS, DEAD_MIN_MS, DEAD_MAX_MS, STALL_MS, LAP_MIN_MS, suspectCheck, EVICT_MS } from "../../room/liveness.js";
 
 function ok(c, m) { if (!c) throw new Error(m || "assertion failed"); }
 function eq(a, b, m) { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(`${m ? m + ": " : ""}${x} !== ${y}`); }
@@ -108,4 +108,14 @@ Deno.test("lapTimeout: fixed fallback until 4 laps are measured, then tied to th
   eq(lapTimeout({ n: 10, lap: 3000, max: 3300 }, 30000, 600), 6 * 3300 + 1200 + 2000, "RTT 600 ms + 5% loss: clear of the 14 s stalls seen there");
   eq(lapTimeout({ n: 10, lap: 9000, max: 12000 }, 30000), 30000, "never above the fallback");
   eq(lapTimeout({ n: 10, lap: 400, max: 0 }, 30000), 30000, "no max yet");
+});
+
+Deno.test("suspectCheck: a held device is back once heard after its silence began, dropped after EVICT_MS", () => {
+  eq(EVICT_MS, 15000);
+  eq(suspectCheck(1000, 1000, 5000), "wait", "still silent");
+  eq(suspectCheck(1000, 1000, 1000 + EVICT_MS), "wait", "exactly at the limit");
+  eq(suspectCheck(1000, 1000, 1001 + EVICT_MS), "evict");
+  eq(suspectCheck(9000, 1000, 9100), "back", "heard again after an 8 s freeze");
+  eq(suspectCheck(9000, 1000, 1001 + EVICT_MS), "back", "heard beats the clock");
+  eq(suspectCheck(0, 4000, 4000 + EVICT_MS + 1), "evict", "silence counted from when the answer began");
 });
