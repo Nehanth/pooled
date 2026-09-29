@@ -1075,15 +1075,16 @@
   #ed { flex: 1; min-height: 220px; overflow: auto; background: var(--panel); scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
   #ed[hidden] { display: none; }
   .ed-in { display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: max-content; min-height: 100%; }
-  #ed-ln, #ed-hl, #ed-text { font: 400 12px/1.7 var(--mono); letter-spacing: 0; font-variant-ligatures: none; tab-size: 2; -moz-tab-size: 2; }
+  #ed-ln, #ed-hl, #ed-text, .ed-mirror { font: 400 12px/1.7 var(--mono); letter-spacing: 0; font-variant-ligatures: none; tab-size: 2; -moz-tab-size: 2; }
   #ed-ln { position: sticky; left: 0; z-index: 1; padding: 14px 12px 40px 12px; min-width: 46px; text-align: right; white-space: pre; color: var(--faint); background: var(--panel-3); box-shadow: 1px 0 0 var(--rule-2); user-select: none; }
   .ed-code { position: relative; min-width: 0; }
-  #ed-hl, #ed-text { margin: 0; padding: 14px 24px 40px 16px; white-space: pre; word-wrap: normal; overflow-wrap: normal; border: 0; }
+  #ed-hl, #ed-text, .ed-mirror { margin: 0; padding: 14px 24px 40px 16px; white-space: pre; word-wrap: normal; overflow-wrap: normal; border: 0; }
   #ed-hl { min-height: 100%; color: var(--text); pointer-events: none; }
   #ed-text { position: absolute; inset: 0; width: 100%; height: 100%; resize: none; overflow: hidden; background: transparent; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--accent); border-radius: 0; outline: none; box-shadow: none; }
   #ed-text::selection { background: rgba(42,69,224,.18); -webkit-text-fill-color: transparent; }
   #ed-text:focus { box-shadow: none; }
   #ed-text[readonly] { caret-color: transparent; }
+  .ed-mirror { display: none; }
   /* token colours: the editor and the edit window over the preview (no orange: numbers are indigo) */
   /* syntax colours: the editor, the code the agent is writing, and its diffs */
   :is(#ed-hl, .cm-live .code, .cm-diff .r) :is(.t-k, .t-t) { color: var(--accent-hover); }
@@ -1231,7 +1232,7 @@
     .cs-room { padding-left: 10px; font-size: 13px; }
   }
   @media (pointer: coarse) {
-    input, select, textarea, #ai-prompt, #code-prompt, #ed-text, #ed-hl, #ed-ln, #code-pane select, #code-pane input[type="text"] { font-size: 16px; }
+    input, select, textarea, #ai-prompt, #code-prompt, #ed-text, #ed-hl, #ed-ln, .ed-mirror, #code-pane select, #code-pane input[type="text"] { font-size: 16px; }
     :is(.pchip, #band-toggle, .copy-ans, #menu-close, #name-shuffle, #share-close, #code-auto-l, #code-newtask, #pv-reload) { position: relative; }
     :is(.pchip, #band-toggle, .copy-ans, #menu-close, #name-shuffle, #share-close, #code-auto-l, #code-newtask, #pv-reload)::before { content: ""; position: absolute; inset: -8px; }
     #name-shuffle, #share-close { position: absolute; }
@@ -1305,10 +1306,14 @@
     body.in-room:not(:has(#ai-panel.online)) #toasts { bottom: calc(20px + env(safe-area-inset-bottom)); }
     /* this device on the join card with no GPU: the line sits under the name, not under its label */
     #join-pledge.no-gpu .jp-ask { padding-left: 96px; }
-    /* ---- Code on a phone: one view at a time (Agent, Preview, Files) and a tab bar at the bottom
-       (room/code-ui.js sets data-ptab; the desktop columns are untouched) ---- */
+  }
+  /* ---- Code on a phone, upright or in landscape (a short touch screen, however wide): one view at
+     a time (Agent, Preview, Files) and a tab bar at the bottom (room/code-ui.js sets data-ptab and
+     matches the same query; the desktop columns are untouched) ---- */
+  @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
     #chatpane.code-mode #code-pane { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; padding-bottom: var(--kb, 0px); }
-    #chatpane.code-mode #code-pane > :is(#code-agent, #code-out, #code-files) { display: none; grid-row: 1; grid-column: 1; min-height: 0; max-height: none; border: 0; order: 0; }
+    #chatpane.code-mode #code-pane > :is(#code-agent, #code-out, #code-files) { display: none; grid-row: 1; grid-column: 1; min-height: 0; max-height: none; width: auto; max-width: none; border: 0; order: 0; }
+    #code-pane #code-grip { display: none; }   /* the desktop columns' resize handle, when a landscape phone is wide enough for them */
     #code-pane[data-ptab="agent"] > #code-agent,
     #code-pane[data-ptab="preview"] > #code-out,
     #code-pane[data-ptab="files"]:not(.ed-open) > #code-files,
@@ -1322,6 +1327,7 @@
     #pv-state { margin-left: 4px; }
     /* the agent: its log scrolls, the prompt stays at the bottom */
     #chatpane.code-mode .ag-h { display: none; }   /* the tab bar names the view, the band the model: 40px more for the log */
+    #chatpane.code-mode #code-agent { overflow: hidden; }   /* on a short screen only the log gives up height, never the prompt */
     #chatpane.code-mode #code-log { flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px; -webkit-mask-image: linear-gradient(transparent, #000 16px); mask-image: linear-gradient(transparent, #000 16px); }
     #chatpane.code-mode #code-row { margin: 6px 10px 10px; }
     #chatpane.code-mode .cm-jump { margin-top: -44px; }
@@ -1340,7 +1346,11 @@
     #code-tree .d { height: 36px; }
     #code-pane #code-open { display: none; }
     #code-pane #ed-back { display: grid; place-items: center; flex: none; width: 40px; height: 40px; margin-left: -8px; padding: 0; border: 0; background: transparent; color: var(--ink-2); }
-    #ed-bar { height: 52px; padding-left: 10px; }
+    #ed-bar { height: 52px; padding-left: 10px; padding-right: 16px; }
+    /* long lines wrap (room/code-ui.js numbers the file's lines in the gutter, measured on .ed-mirror) */
+    #code-pane .ed-in { min-width: 0; }
+    #ed-hl, #ed-text, .ed-mirror { white-space: pre-wrap; overflow-wrap: break-word; word-wrap: break-word; }
+    .ed-mirror { display: block; position: absolute; top: 0; left: 0; right: 0; visibility: hidden; pointer-events: none; }
     /* the tab bar */
     #code-pane #code-tabs { display: flex; grid-row: 2; grid-column: 1; height: calc(56px + env(safe-area-inset-bottom)); padding: 0 8px env(safe-area-inset-bottom); background: var(--panel-3); border-top: 1px solid var(--rule-2); }
     #code-pane #code-tabs button { position: relative; flex: 1 1 0; min-width: 0; height: 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--muted); font: 500 12px/1 var(--sans); letter-spacing: -.005em; }
@@ -1360,6 +1370,13 @@
     /* the preview's address gets the room ("sandbox" is a tooltip with no hover here) */
     #pv-sandbox { display: none; }
     #pv-bar { gap: 4px; }
+    /* two ports or more: their tabs get a row of their own, thumb-sized, with the stop button at the
+       far end of each tab, so the address keeps the row below */
+    #pv-bar:has(.pv-tabw + .pv-tabw) { flex-wrap: wrap; height: auto; row-gap: 6px; padding-top: 6px; padding-bottom: 6px; }
+    #pv-bar:has(.pv-tabw + .pv-tabw) #pv-tabs { order: -2; flex: 1 1 100%; display: flex; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+    #pv-tabs .pv-tabw { flex: 1 0 128px; min-width: 0; }
+    #code-pane .pv-tab { flex: 1; min-width: 0; height: 36px; padding: 0 12px; text-align: left; font-size: 13px; }
+    #code-pane .pv-x { width: 36px; height: 36px; margin-right: 0; }
   }
   @media (max-width: 820px) and (pointer: coarse) {
     /* thumb-sized: the composers' buttons, the output tabs, the project and console buttons */
@@ -1371,6 +1388,27 @@
     #ed-save kbd { display: none; }
     .seg button, .seg.chips button { height: 36px; }
     #mode-bar button, #mode-bar::before { height: 36px; }   /* Chat | Code, the pill under it too */
+  }
+  /* ---- short screens (a phone in landscape): one header row with Chat | Code in it (room.js moves
+     the switch), a lower tab bar, so the pane keeps most of the height ---- */
+  @media (max-width: 820px) and (max-height: 500px) and (pointer: coarse) {
+    body.in-room header { flex-wrap: nowrap; }
+    body.in-room :is(.hbrk, #peers) { display: none; }   /* the devices' row; the total stays, the devices are a tap away in Room settings */
+    body.in-room #hdr-sum { order: 0; }
+  }
+  @media (max-width: 640px) and (max-height: 500px) and (pointer: coarse) {
+    /* the narrowest (568px, an iPhone SE held sideways): the one row goes without the total and
+       Invite's label, as on the narrowest upright phones, or it outgrows the screen and the page zooms out */
+    body.in-room #hdr-sum { width: 0; padding: 0; font-size: 0; }
+    #share-btn .lbl { display: none; }
+    #share-btn { width: 36px; padding: 0; justify-content: center; }
+  }
+  @media (max-height: 500px) and (pointer: coarse) {
+    #chat-log { display: none; }   /* the room's event log (dev), as on phones held upright */
+    header #mode-bar button, header #mode-bar::before { width: 64px; }
+    header #mode-bar:has(#mode-code[aria-selected="true"])::before { transform: translateX(64px); }
+    #code-pane #code-tabs { height: calc(44px + env(safe-area-inset-bottom)); }
+    #code-pane #code-tabs button { height: 44px; flex-direction: row; gap: 8px; }
   }
   @media (max-width: 400px) { .seg button { flex: 1 1 auto; padding: 0 6px; } .ms { padding-left: 16px; padding-right: 16px; } #sm-ctx { font-size: 11px; letter-spacing: -.02em; } }   /* '123k / 128k' inside its quarter of the band */
   @media (prefers-reduced-motion: reduce) {
@@ -1635,6 +1673,13 @@
     <h2 id="room-over-h">Room over</h2>
     <div class="k" id="room-over-why"></div>
     <div class="row"><button id="room-over-new" type="button" class="primary">Start a new room</button></div>
+  </div>
+</div>
+<div id="leave" class="overlay" hidden>
+  <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="leave-h" aria-describedby="leave-why">
+    <h2 id="leave-h">Leave the room?</h2>
+    <div class="k" id="leave-why"></div>
+    <div class="row"><button id="leave-stay" type="button" class="primary">Stay</button><button id="leave-go" type="button">Leave</button></div>
   </div>
 </div>
 <div id="compute-screen" role="dialog" aria-label="This device's screen" data-phase="idle" hidden>

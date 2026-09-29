@@ -499,15 +499,19 @@ announces a session (`ai-code-start` or `ai-pv`), with a dot when something new 
 
 **`#code-pane`** (host): two columns over 900 px, stacked below.
 
-Phones (640 px and narrower) show one view at a time, picked from `#code-tabs`, a tab bar at the
-bottom (`role="tablist"`, 56 px plus the safe area): **Agent** (the log, the prompt at the bottom;
+Phones (640 px and narrower, and short touch screens, `(max-height: 500px) and (pointer: coarse)`:
+a phone in landscape, however wide) show one view at a time, picked from `#code-tabs`, a tab bar at
+the bottom (`role="tablist"`, 56 px plus the safe area, 44 px on a short screen): **Agent** (the log, the prompt at the bottom;
 an approval waits in `#code-dock` above the prompt), **Preview** (the app at full height with its
 address bar) and **Files** (project and tree; a file opens the editor full screen with a back arrow).
 A dot on a tab: Agent pulses while the agent works and holds a dot while an approval waits, Preview
 gets one for a new revision served while elsewhere. The first app served in a session opens
 Preview. The tab is kept per session (`sessionStorage`); guests get the same layout. While typing,
 the tab bar steps aside and the prompt sits on the keyboard (`--kb` where the browser does not
-resize the page).
+resize the page). On a short screen Chat | Code moves into the header row and the devices' chip row
+goes, so the pane keeps the height. The editor soft-wraps long lines on phones; the gutter numbers
+the file's lines, with blank rows beside wrapped ones. Two served ports or more get a row of
+port tabs of their own above the address.
 
 - Left, the agent:
   - `#code-project`: project select, `New`, `Open folder…`, project name. Host only.

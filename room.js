@@ -263,6 +263,7 @@ document.addEventListener("keydown", (e) => {
   chipPop(null); $("room-menu").open = false;
   if (!$("share").hidden) closeShare();
   if (!$("card").hidden) closeCard();
+  if (!$("leave").hidden) closeLeave();
 });
 document.addEventListener("pointerdown", (e) => {
   const t = e.target.closest?.("[data-tip]"); if (!t) return;
@@ -1003,7 +1004,7 @@ function openShare() {
 $("room-badge").addEventListener("click", openShare);
 $("share-btn").addEventListener("click", openShare);
 for (const b of document.querySelectorAll("[data-invite]")) b.addEventListener("click", (e) => { e.preventDefault(); openShare(); });
-// the overlays (Invite, Room card, Room over) are modal: while one is open, the page behind it is
+// the overlays (Invite, Room card, Room over, Leave) are modal: while one is open, the page behind it is
 // inert, so Tab cycles inside the sheet and nothing behind the blur takes focus or clicks
 const overlays = [...document.querySelectorAll(".overlay")];
 let modalReturn = null;   // what had focus before an overlay that opened on its own took it
@@ -1036,6 +1037,25 @@ $("share").addEventListener("click", (e) => { if (e.target === $("share")) close
 $("room-over-close").addEventListener("click", () => { $("room-over").hidden = true; });
 $("share-copy").addEventListener("click", copyRoomLink);
 $("share-native").addEventListener("click", () => navigator.share?.({ title: "Join my Pooled room", text: `Room ${roomCode}: add this device to the AI model we run together`, url: roomLink() }).catch(() => {}));
+// the logo leads home. In a room it asks first: it sits in the thumb's corner on a phone, and
+// leaving ends the room for everyone (the host) or takes this device's layers with it
+const logoLink = document.querySelector(".logo a");
+logoLink.addEventListener("click", (e) => {
+  if (!document.body.classList.contains("in-room")) return;
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;   // a new tab or window keeps the room open: no need to ask
+  e.preventDefault();
+  $("leave-h").textContent = `Leave room ${roomCode}?`;
+  $("leave-why").textContent = isHost
+    ? (conns.size ? "The room ends for the other devices: this tab holds the conversation and the model's first and last layers." : "The room and its model close.")
+    : `If this device holds some of the model's layers, the room has to re-deal them. You can join again with the code ${roomCode}.`;
+  $("leave").hidden = false;
+  $("leave-stay").focus({ preventScroll: true });
+});
+// (syncModal first: the header stays inert until it runs, and an inert logo would not take focus)
+function closeLeave() { $("leave").hidden = true; syncModal(); focusBack(logoLink); }
+$("leave-stay").addEventListener("click", closeLeave);
+$("leave").addEventListener("click", (e) => { if (e.target === $("leave")) closeLeave(); });
+$("leave-go").addEventListener("click", () => { location.href = logoLink.href; });
 $("room-over-new").addEventListener("click", () => { location.href = location.pathname.startsWith("/r/") ? "/room" : location.pathname.replace(/\?.*$/, ""); });
 // A host that reloads its tab goes straight back into its room (no note on the join screen): only on a
 // real reload of this tab, and only while the guests are still waiting for it (HOST_WAIT_MS).
@@ -2398,7 +2418,8 @@ const bandMode = () => ($("chatpane").classList.contains("code-mode") ? "code" :
 function bandFolded() {
   let v = null;
   try { v = localStorage.getItem("pooled-band-" + bandMode()); } catch {}
-  return v ? v === "folded" : bandMode() === "code" || innerWidth < 820;   // Code, and phones, start with it folded
+  // Code, and phones (upright, or on their side: a short touch screen), start with it folded
+  return v ? v === "folded" : bandMode() === "code" || innerWidth < 820 || matchMedia("(max-height: 500px) and (pointer: coarse)").matches;
 }
 function bandFold(on, save = false) {
   const el = $("swarm-map"), b = $("band-toggle");
@@ -2411,9 +2432,10 @@ function bandFold(on, save = false) {
 $("band-toggle").addEventListener("click", () => bandFold(!$("swarm-map").classList.contains("folded"), true));
 bandFold(bandFolded());
 new MutationObserver(() => bandFold(bandFolded())).observe($("chatpane"), { attributes: true, attributeFilter: ["class"] });
-// Chat | Code sits in the room bar at 820px and wider (the same node, moved), in its own strip on phones
+// Chat | Code sits in the room bar at 820px and wider and on short touch screens (a phone in
+// landscape, where its own strip costs too much height); in its own strip on phones held upright
 {
-  const home = document.querySelector(".mode-row"), wide = matchMedia("(min-width: 821px)");
+  const home = document.querySelector(".mode-row"), wide = matchMedia("(min-width: 821px), (max-height: 500px) and (pointer: coarse)");
   const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); };
   place(); wide.addEventListener("change", place);
 }
