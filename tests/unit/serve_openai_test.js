@@ -27,7 +27,9 @@ Deno.test("openai: system and developer messages anywhere join the system prompt
 });
 Deno.test("openai: unsupported features are a clear 400", () => {
   throws400({ messages: [msg("q")], tools: [{ type: "function", function: { name: "f" } }] }, /tool calls are not supported by pooled serve yet \(v1 is chat only\)/, "tools");
-  throws400({ messages: [msg("q")], tool_choice: "auto" }, /tool calls/, "tool_choice");
+  throws400({ messages: [msg("q")], tool_choice: "required" }, /tool calls/, "tool_choice");
+  throws400({ messages: [msg("q")], tool_choice: { type: "function", function: { name: "f" } } }, /tool calls/, "tool_choice object");
+  for (const tc of ["auto", "none"]) eq(parseOpenAI({ messages: [msg("q")], tool_choice: tc, tools: [] }).messages.length, 1, `tool_choice ${tc} with no tools is fine`);
   throws400({ messages: [msg("q"), { role: "tool", content: "r", tool_call_id: "x" }] }, /tool calls/, "tool role");
   throws400({ messages: [{ role: "assistant", content: null, tool_calls: [{ id: "x" }] }, msg("q")] }, /tool calls/, "tool_calls");
   throws400({ messages: [msg([{ type: "image_url", image_url: { url: "data:" } }])] }, /only text content is supported/, "image");

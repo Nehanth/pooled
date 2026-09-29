@@ -26,7 +26,7 @@ export function parseAnthropic(b) {
   if (typeof b.model !== "string" || !b.model) throw bad("model: Field required");
   if (b.max_tokens == null) throw bad("max_tokens: Field required");
   if (!Array.isArray(b.messages)) throw bad("messages: Field required");
-  if (b.tools?.length || (b.tool_choice != null && b.tool_choice?.type !== "none")) throw bad(TOOLS_MSG);
+  if (b.tools?.length || (b.tool_choice != null && b.tool_choice?.type !== "none" && b.tool_choice?.type !== "auto")) throw bad(TOOLS_MSG);
   const system = b.system == null ? "" : textOf(b.system, "system");
   const msgs = b.messages.map((m, i) => {
     if (!m || (m.role !== "user" && m.role !== "assistant")) throw bad(`messages.${i}.role: must be user or assistant`);

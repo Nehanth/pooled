@@ -27,7 +27,9 @@ function textOf(content, i) {
 export function parseOpenAI(b) {
   if (!b || typeof b !== "object" || Array.isArray(b)) throw bad("the body must be a JSON object");
   if (!Array.isArray(b.messages)) throw bad("messages is required", "messages");
-  if (b.tools?.length || b.functions?.length || (b.tool_choice != null && b.tool_choice !== "none") || b.function_call != null) throw bad(TOOLS_MSG, "tools");
+  // tool_choice "auto" / "none" with no tools is what some clients send by default: nothing to call
+  if (b.tools?.length || b.functions?.length || (b.tool_choice != null && b.tool_choice !== "none" && b.tool_choice !== "auto")
+    || (b.function_call != null && b.function_call !== "none" && b.function_call !== "auto")) throw bad(TOOLS_MSG, "tools");
   if (b.n != null && b.n !== 1) throw bad("n must be 1", "n");
   if (b.logprobs || b.top_logprobs != null) throw bad("logprobs are not supported", "logprobs");
   if (b.response_format != null && b.response_format?.type !== "text") throw bad("JSON mode is not supported yet", "response_format");

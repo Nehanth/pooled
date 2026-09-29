@@ -30,6 +30,8 @@ Deno.test("anthropic: required fields, ranges and unsupported features", () => {
   throws400(req({ messages: [{ role: "user", content: "q" }, { role: "assistant", content: "pre" }] }), /last message must be from the user/, "prefill");
   throws400(req({ stop_sequences: ["x".repeat(65)] }), /1 to 64/, "stop length");
   throws400(req({ thinking: { type: "sometimes" } }), /thinking.type/, "thinking");
+  throws400(req({ tool_choice: { type: "any" } }), /tool calls/, "tool_choice any");
+  for (const type of ["auto", "none"]) eq(parseAnthropic(req({ tool_choice: { type }, tools: [] })).messages.length, 1, `tool_choice ${type} with no tools is fine`);
 });
 
 const ROOM = [
