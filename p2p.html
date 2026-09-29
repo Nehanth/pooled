@@ -11,8 +11,9 @@
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://pooled.run/site/og.png?v=2">
-<!-- Code mode's preview host: this site deployed on another registrable domain (e.g. https://pooled-preview.example, not a subdomain of pooled.run),
-     so the agent's app runs in a process of its own (harness/preview-frame.js relayUrl). Empty: it runs in this tab. -->
+<!-- Code mode's preview host: preview-host/ deployed on another registrable domain (e.g. https://pooled-preview.vercel.app, not a subdomain of pooled.run),
+     so the agent's app runs in a process of its own (harness/preview-frame.js relayUrl). One origin, or "host=origin" entries per host:
+     "pooled.run=https://... pooled-dev.vercel.app=https://...". Empty or no entry for this host: it runs in this tab. Setup: roadmap/29. -->
 <meta name="preview-origin" content="">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

@@ -56,19 +56,46 @@ let relayOk = false;       // a relay frame of this page has said hello: the hos
 let quietUntil = 0;        // no new relay frame loads before this (a hung relay process is going away)
 const quiet = () => { quietUntil = Date.now() + QUIET_MS; };
 
-// The relay's address: <meta name="preview-origin" content="https://..."> on the page (a second
-// deployment of this site on another registrable domain), else in development the other loopback
-// name (localhost <-> 127.0.0.1 are different sites), else null (local mode).
+// The relay's address: <meta name="preview-origin" content="..."> on the page (a second
+// deployment on another registrable domain, previewOrigin below), else in development the other
+// loopback name (localhost <-> 127.0.0.1 are different sites), else null (local mode).
 export function relayUrl(doc = globalThis.document) {
   const loc = doc?.defaultView?.location;
   if (!loc) return null;
-  const meta = doc.querySelector?.('meta[name="preview-origin"]')?.content?.trim();
+  const meta = doc.querySelector?.('meta[name="preview-origin"]')?.content;
   const path = "/harness/preview-relay.html";
-  if (meta) return meta.replace(/\/+$/, "") + path;
+  const origin = previewOrigin(meta, loc.hostname);
+  if (origin) return origin + path;
   const port = loc.port ? ":" + loc.port : "";
   if (loc.hostname === "localhost") return `${loc.protocol}//127.0.0.1${port}${path}`;
   if (loc.hostname === "127.0.0.1") return `${loc.protocol}//localhost${port}${path}`;
   return null;
+}
+
+// The meta's origin for a page on `host`. One static page serves production and staging, so the
+// content is a list (spaces or commas): "host=origin" entries for one host each, and a bare origin
+// for any other host, e.g.
+//   "pooled.run=https://pooled-preview.vercel.app pooled-dev.vercel.app=https://pooled-preview-dev.vercel.app"
+// An exact host entry wins over a bare one. Only an https origin (http on loopback) is taken, and
+// not one on the page's own host or a parent or child of it (a subdomain shares the site, so the
+// process: no isolation). Anything else: null.
+export function previewOrigin(content, host) {
+  let exact = null, any = null;
+  for (const tok of String(content ?? "").split(/[\s,]+/)) {
+    if (!tok) continue;
+    const i = tok.indexOf("=");
+    if (i < 0) { any ??= tok; continue; }
+    if (tok.slice(0, i).toLowerCase() === String(host).toLowerCase()) exact ??= tok.slice(i + 1);
+  }
+  const v = exact ?? any;
+  if (!v) return null;
+  let u;
+  try { u = new URL(v); } catch { return null; }
+  const loop = u.hostname === "localhost" || u.hostname === "127.0.0.1";
+  if (!(u.protocol === "https:" || (u.protocol === "http:" && loop))) return null;
+  const h = String(host).toLowerCase(), o = u.hostname;
+  if (h && (o === h || o.endsWith("." + h) || h.endsWith("." + o))) return null;
+  return u.origin;
 }
 
 export function mountPreview(el, source, port, { onLog = () => {}, onStatus = () => {}, autorun = true, relay = undefined, onShow = null, onDone = null, run = false } = {}) {

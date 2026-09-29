@@ -1,0 +1,15 @@
+{
+  "framework": null,
+  "buildCommand": "rm -rf public && mkdir -p public/harness && cp ../harness/preview-relay.html public/harness/",
+  "outputDirectory": "public",
+  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- ../harness/preview-relay.html .",
+  "trailingSlash": false,
+  "headers": [
+    { "source": "/(.*)", "headers": [{ "key": "X-Content-Type-Options", "value": "nosniff" }] },
+    { "source": "/harness/preview-relay.html", "headers": [
+      { "key": "Content-Security-Policy", "value": "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob: https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'unsafe-inline' data: https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com; img-src data: blob:; media-src data: blob:; connect-src data: blob:; worker-src blob: data:; form-action 'none'; frame-ancestors https://pooled.run https://pooled-dev.vercel.app http://localhost:* http://127.0.0.1:*" },
+      { "key": "Referrer-Policy", "value": "no-referrer" },
+      { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+    ] }
+  ]
+}

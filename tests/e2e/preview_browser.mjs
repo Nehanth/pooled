@@ -4,6 +4,7 @@
 // (another site: its own process with --site-per-process, the default in desktop Chrome); one mount
 // runs in local mode (a blob: frame of the page). No WebGPU, no room, no PeerJS; ~20 seconds.
 //   node tests/e2e/preview_browser.mjs
+import fs from "node:fs";
 import { loadPlaywright, chromiumPath, serveRepo } from "./engine_synth.mjs";
 const PORT = 18986;
 
@@ -50,7 +51,10 @@ setTimeout(() => {
   return await T.serve.run({});
 }
 
-const srv = serveRepo(PORT, {});
+// the relay gets the headers the preview site sends (preview-host/vercel.json: CSP, frame-ancestors)
+const relayHeaders = Object.fromEntries(JSON.parse(fs.readFileSync(new URL("../../preview-host/vercel.json", import.meta.url), "utf8"))
+  .headers.find((h) => h.source === "/harness/preview-relay.html").headers.map((h) => [h.key, h.value]));
+const srv = serveRepo(PORT, {}, { headers: (url) => url === "/harness/preview-relay.html" ? relayHeaders : null });
 const { chromium } = await loadPlaywright();
 const browser = await chromium.launch({ executablePath: chromiumPath(), args: ["--no-sandbox", "--site-per-process"] });
 const results = [];
@@ -66,6 +70,8 @@ try {
   check("serve reports the port and files", /^serving \. on :5173 \(index\.html, 8 files, [\d.]+ (KB|B)\)/.test(serveOut), serveOut);
   check("serve reports the load and the error with its file:line", /loaded in \d+ ms · 1 error:/.test(serveOut) && /error game\.js:6:\d+ ReferenceError: boom is not defined/.test(serveOut), serveOut);
 
+  const relayCsp = (await page.request.get(`http://localhost:${PORT}/harness/preview-relay.html`)).headers()["content-security-policy"] || "";
+  check("the relay is served with the preview site's CSP (frame-ancestors lets the room frame it)", /frame-ancestors [^;]*127\.0\.0\.1/.test(relayCsp), relayCsp);
   // the app's document: in the relay a srcdoc child, in local mode a blob: frame
   const frame = () => page.frames().find((f) => /^(about:srcdoc|blob:)/.test(f.url()));
   check("relay mode: the preview runs in the relay on the other site", await page.evaluate(() => window.__view.mode) === "relay"
