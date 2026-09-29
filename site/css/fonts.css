@@ -1,5 +1,6 @@
 /* Self-hosted web fonts (OFL-1.1: Geist and Geist Mono by Vercel, Funnel Display by NORD ID), the woff2 files
    Google Fonts serves, split by script the same way; a browser downloads only the scripts a page uses.
+   vercel.json caches site/fonts for a year (immutable): a changed file needs a new file name.
    Generated from fonts.googleapis.com css2?family=Funnel+Display:wght@400;500&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500.
    The "… Fallback" faces are local fonts scaled to the web font's metrics, so text keeps its size and
    line breaks while the web font loads and the swap does not move the page (CLS). */
