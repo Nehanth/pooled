@@ -923,10 +923,14 @@ const overlays = [...document.querySelectorAll(".overlay")];
 function syncModal() {
   const open = overlays.some((o) => !o.hidden);
   for (const el of document.querySelectorAll("body > header, #join-screen, #room-screen")) el.inert = open;
+  // the compute screen (a lending device's screen) sits above the overlays: while it is up, they wait
+  // underneath, out of the Tab order, and take focus only once it closes
+  const computing = $("compute-screen")?.hidden === false;
+  for (const o of overlays) o.inert = computing;
   // one that opened on its own (Room over) takes focus from the page it now covers
-  if (open && !document.activeElement?.closest?.(".overlay")) overlays.find((o) => !o.hidden).querySelector("button")?.focus({ preventScroll: true });
+  if (open && !computing && !document.activeElement?.closest?.(".overlay")) overlays.find((o) => !o.hidden).querySelector("button")?.focus({ preventScroll: true });
 }
-for (const o of overlays) new MutationObserver(syncModal).observe(o, { attributes: true, attributeFilter: ["hidden"] });
+for (const o of [...overlays, $("compute-screen")].filter(Boolean)) new MutationObserver(syncModal).observe(o, { attributes: true, attributeFilter: ["hidden"] });
 function closeShare() { $("share").hidden = true; syncModal(); if (document.body.classList.contains("in-room")) $("share-btn").focus({ preventScroll: true }); }
 $("share-close").addEventListener("click", closeShare);
 $("share").addEventListener("click", (e) => { if (e.target === $("share")) closeShare(); });
