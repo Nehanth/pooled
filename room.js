@@ -11,7 +11,7 @@ import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
 import { PrefixIndex } from "./harness/prefix.js";
-import { MODELS, NEED_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos } from "./room/models.js";
+import { MODELS, NEED_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -358,6 +358,16 @@ function updateNeed(pledged) {
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
   const give = giveFor(need - pledged);
   $("ai-give").hidden = ok || !give || ai.busy || !!ai.engine;
+  // what pressing Start costs this device: about its share of the weights file (layers are dealt by
+  // memory given), so a phone on mobile data sees ~0.2 GB and a laptop alone the whole file
+  const file = FILE_GB[$("ai-model").value];
+  const mine = ok && file && myMeta.webgpu && myMeta.contribGB ? file * Math.min(1, myMeta.contribGB / pledged) : 0;
+  const size = (gb) => gb < 1 ? `${Math.max(10, Math.round(gb * 1024 / 10) * 10)} MB` : `${gb.toFixed(1)} GB`;
+  $("ap-note").textContent = mine
+    ? (mine >= file * 0.98 ? `Start downloads the whole ${size(file)} model to this device, once. It stays cached for next time.`
+      : `Start downloads about ${size(mine)} to this device (its share of ${size(file)}), once. It stays cached for next time.`)
+    : ok && file && !myMeta.webgpu ? "This device only chats, so it downloads no layers."
+    : "Each device downloads only its own layers, once. They stay cached for next time.";
   // every device here is chat only: say why Start is off, right under it
   $("ai-why").hidden = pledged > 0 || ai.busy || !!ai.engine;
   // and say so beside the stepper, which is the one-tap fix (not a second device)
