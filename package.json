@@ -19,6 +19,7 @@
     "test:q38once": "tests/run.sh q38once",
     "test:cache": "deno test --allow-read --allow-write tests/unit/weight_cache_test.js",
     "test:all": "tests/run.sh all",
+    "test:runsh": "tests/run.sh selftest",
     "bench": "deno run --unstable-webgpu --allow-read --allow-env benchmarks/bench.js",
     "bench:q38": "MODEL=q38 deno run --unstable-webgpu --allow-read --allow-env --allow-write=${WEIGHT_CACHE:-$HOME/.cache/swarmllm-weights} benchmarks/bench.js",
     "bench:breakdown": "deno run --unstable-webgpu --allow-read --allow-env benchmarks/bench_breakdown.js",
