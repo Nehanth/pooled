@@ -3129,6 +3129,7 @@ const roomApi = {
   role: () => ai.role,                                  // "host" | "worker" | "guest" | undefined
   ready: () => MOCK || simReady || (!!ai.engine && !ai.degraded),   // host: can generate now (simReady: ?sim=1 pictures only)
   tok: () => ai.tok,
+  model: () => ai.model || $("ai-model").value,   // the room's model key (Code's empty state sizes its example to it)
   chatTemplate: () => ai.tok?.chatTemplate || ai.G?.meta?.["tokenizer.chat_template"] || "",
   maxSeq: () => ctxMax(),
   generate: roomGenerate,
