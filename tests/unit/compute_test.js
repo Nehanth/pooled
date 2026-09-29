@@ -106,7 +106,7 @@ Deno.test("compute screen: the status line for each phase, table-driven", () => 
     [{ phase: "loading", model: "Qwen", devices: 2 }, "Loading", "Qwen", true],
     [{ phase: "serving", devices: 2, model: "Qwen" }, "Not holding layers", "The other devices run Qwen", true],
     [{ phase: "serving", devices: 2 }, "Not holding layers", "The other devices run the model", true],
-    [{ phase: "idle", devices: 1 }, "Standing by", "", true],
+    [{ phase: "idle", devices: 1 }, "Standing by", "Waiting for the room to start a model", true],
   ];
   for (const [state, title, sub, liveHidden] of cases) {
     st = state;
