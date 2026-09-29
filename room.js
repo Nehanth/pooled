@@ -512,6 +512,8 @@ function relink(entry, id, tries) {
   if (conns.get(id) !== entry || !peer || peer.destroyed) return;
   if (tries >= 8) { log("room", `could not reconnect to ${entry.name}`); try { entry.conn.close(); } catch {} return; }
   const c = peer.connect(id, { reliable: true });
+  // PeerJS returns nothing while it is cut off from the signaling server: try again later
+  if (!c) { setTimeout(() => relink(entry, id, tries + 1), 2000 * Math.min(tries + 1, 4)); return; }
   let done = false;
   const retry = () => { if (done) return; done = true; try { c.close(); } catch {} setTimeout(() => relink(entry, id, tries + 1), 2000 * Math.min(tries + 1, 4)); };
   const to = setTimeout(retry, 20000);
@@ -568,6 +570,7 @@ function chainLinkLost(id, name) {
 // link does not stay on fewer associations for the rest of the session.
 function dialStripe(entry, id, tries = 0) {
   const sc = peer.connect(id, { reliable: true, label: "stripe" });
+  if (!sc) { if (tries < 4) setTimeout(() => { if (conns.get(id) === entry && entry.conn.open) dialStripe(entry, id, tries + 1); }, 2000 * (tries + 1)); return; }
   let opened = false;
   sc.on("open", () => { opened = true; attachWire(entry.link, sc, (m) => onData(id, m)); watchLink(sc, () => sc.close()); });
   sc.on("error", () => {});

@@ -149,3 +149,14 @@ Deno.test("relink: linksUp gives up after RELINK_WAIT_MS so a question is never 
   await t.fns.linksUp();
   ok(performance.now() - t0 < 1000);
 });
+
+Deno.test("relink: while cut off from signaling PeerJS dials nothing; relink keeps trying instead of throwing", async () => {
+  const t = setup({ role: "worker" });
+  const e = t.entry("peerB", true);
+  let calls = 0;
+  t.g.peer.connect = () => { calls++; return undefined; };
+  e.conn.peerConnection.set("failed");
+  for (let i = 0; i < 20 && !e.conn.closed; i++) await sleep(80);
+  ok(calls >= 2, `tried again (${calls})`);
+  eq(e.conn.closed, 1, "and gave up in the end");
+});

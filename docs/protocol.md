@@ -58,7 +58,7 @@ A network that passes no packets for longer than ICE's write timeout (about 15 s
 Each device watches every link's `RTCPeerConnection`. When one fails:
 
 - The side that dialed it dials a new connection to the same peer id and sends `hello` with `back: 1`; both sides swap it in with a fresh wire (frame ids restart) and close the dead one and its stripes. The device keeps its place in the chain and its layers. A failed stripe is closed and redialed the same way.
-- The other side waits 45 s for that, then closes the link (the device left, as before).
+- The other side waits 45 s for that, then closes the link (the device left, as before). A device whose network died silently is therefore dropped about a minute after it went quiet (before, its link stayed open and the room waited on it indefinitely).
 - The host fails every lap in flight at once ("the link to X dropped; ask again") and the next question prefills from scratch. A worker whose link to another worker dropped tells the host with `ai-linklost`.
 
 No PROTOCOL change: a peer that predates this sees an ordinary new connection from a device it knows (it already replaces the old entry), and ignores `ai-linklost`.
