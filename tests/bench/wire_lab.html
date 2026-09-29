@@ -22,6 +22,7 @@
        wire4      room/transport.js striped over all STRIPES peer connections: the room's default
        wire4unord wire4 with ordered: false, reliable
        wire4rtx0  wire4 as attachWire builds `ordered: false` on main (maxRetransmits: 0)
+       wire4dup   wire4 with every slice sent twice, on two stripes (first copy wins)
      B echoes each frame on the path it came in on, with its own timings in the first 12 bytes. -->
 <style>
   :root { --bg: #fff; --fg: #111; --mut: #666; --line: #ddd; }
@@ -50,7 +51,7 @@ $("status").textContent = `role ${role}, isolated ${crossOriginIsolated}`;
 const SLICE = 4600;
 // negotiated channel ids (the room uses 77 for the wire, 78 for the keep-alive branch's pings)
 const RAW = { raw: [79, { ordered: true }], rawslice: [79, { ordered: true }], rawunord: [80, { ordered: false }], rawrtx0: [81, { ordered: false, maxRetransmits: 0 }] };
-const WIRES = { wire4: [77, {}, 0], wire1: [85, {}, 1], wire4unord: [86, { ordered: false }, 0], wire4rtx0: [87, { ordered: false, maxRetransmits: 0 }, 0] };
+const WIRES = { wire4: [77, {}, 0], wire1: [85, {}, 1], wire4unord: [86, { ordered: false }, 0], wire4rtx0: [87, { ordered: false, maxRetransmits: 0 }, 0], wire4dup: [88, { dup: true }, 0] };
 const KA_ID = 84;
 S.paths = ["pj", "pjraw", ...Object.keys(RAW), ...Object.keys(WIRES)];
 
@@ -61,7 +62,7 @@ function makeRun(onMsg) {
   const mark = (path) => { const r = R.rx[path] || (R.rx[path] = { first: null, last: null }); const t = now(); if (r.first == null) r.first = t; r.last = t; };
   const take = (path) => { const r = R.rx[path] || { first: null, last: null }; R.rx[path] = { first: null, last: null }; return r; };
   const wrap = (path, ch) => { const inner = ch.onmessage; ch.onmessage = (ev) => { mark(path); inner && inner.call(ch, ev); }; };
-  for (const [name, [id, opt, one]] of Object.entries(WIRES)) R.wires[name] = { link: T.makeLink(), id, opt, one };
+  for (const [name, [id, opt, one]] of Object.entries(WIRES)) { R.wires[name] = { link: T.makeLink(), id, opt, one }; if (opt.dup) R.wires[name].link.dup = true; }
   // slices of rawslice: [seq u32][k u16][n u16] + payload
   const rs = { parts: 0, n: 0, buf: null, seq: -1 };
   R.addConn = (c, idx) => {

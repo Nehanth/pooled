@@ -11,6 +11,8 @@
 // Suites (A decides; B follows each run's config from the connection metadata):
 //   paths   every path x --sizes (default 1,2,4,8,16,32,64 KB), --reps frames 20 ms apart (a lap's idle)
 //   gap     wire4 at 4 and 16 KB, idle between frames 0..1000 ms, keep-alive off and every 10 ms
+//   tail    wire4 vs wire4dup (each slice also sent on the next stripe), 4 KB, 3000 frames each, 25 ms apart,
+//           interleaved in blocks of 100: p99.9 and the count of stalled frames
 //   answer  a plain answer's lap: A sends, B "computes" 7 ms, echoes, A "computes" 12 ms, 128 laps an
 //           answer, 3 s between answers, 4 answers; 4 KB (MoE), 10 KB (27B), 16 KB (4-column verify);
 //           keep-alive off / on. The first lap after the pause is reported apart.
@@ -28,8 +30,8 @@ const flag = (k) => process.argv.includes("--" + k);
 const LOOP = flag("loopback"), ROLE = LOOP ? "a" : arg("role", "a");
 const REPS = +arg("reps", 200), GAP = +arg("gap", 20);
 const SIZES = arg("sizes", "1,2,4,8,16,32,64").split(",").map((x) => Math.round(+x * 1024));
-const SUITES = arg("suite", "paths,gap,answer").split(",");
-const PATHS = arg("paths", "pj,pjraw,raw,rawslice,rawunord,rawrtx0,wire1,wire4,wire4unord,wire4rtx0").split(",");
+const SUITES = arg("suite", "paths,gap,answer,tail").split(",");
+const PATHS = arg("paths", "pj,pjraw,raw,rawslice,rawunord,rawrtx0,wire1,wire4,wire4unord,wire4rtx0,wire4dup").split(",");
 const PORT = +arg("port", 8187), SIG_PORT = +arg("signal-port", 9047);
 const SIGNAL = arg("signal", `127.0.0.1:${SIG_PORT}`), BID = arg("id", "pooled-wirelab-b-" + (LOOP ? process.pid : "x"));
 const ROOT = path.resolve(arg("root", path.join(path.dirname(new URL(import.meta.url).pathname), "../..")));
@@ -45,6 +47,11 @@ function transportSrc() {
   if (!s.includes(a1) || !s.includes(a2)) throw new Error("room/transport.js changed: attachWire anchors not found");
   s = s.replace(a1, "export function attachWire(link, conn, onFrame, { ordered = true, __id = WIRE_ID, __opt = null } = {}) {");
   s = s.replace(a2, "{ negotiated: true, id: __id, ordered, ...(__opt ? (__opt.maxRetransmits != null ? { maxRetransmits: __opt.maxRetransmits } : {}) : (ordered ? {} : { maxRetransmits: 0 })) }");
+  // wire4dup: every slice also goes out on the next stripe (a hedge against one association's
+  // loss recovery); the receiver keeps the first copy (duplicate slices and frames are ignored)
+  const a3 = "    const ch = open[(link.rr++) % open.length];\n    ch.send(buf);";
+  if (!s.includes(a3)) throw new Error("room/transport.js changed: sendFrame anchor not found");
+  s = s.replace(a3, a3 + "\n    if (link.dup && open.length > 1) open[link.rr % open.length].send(buf);");
   return s;
 }
 const srv = http.createServer((q, r) => {
@@ -149,6 +156,25 @@ try {
           const rows = await run("wire4", bytes, reps, gap);
           const r = { suite: "gap", path: "wire4", bytes, gap, ka, rows, ...summarize(rows) }; out.results.push(r);
           line(`gap ka ${String(ka).padStart(2)} ${String(bytes / 1024).padStart(2)} KB idle ${String(gap).padStart(4)} ms`, r);
+        }
+      });
+    }
+  }
+  if (SUITES.includes("tail")) {
+    // long interleaved runs for the tail (p99.9, stalls): blocks of 100 frames per path in turn
+    const tp = arg("tail-paths", "wire4,wire4dup").split(","), n = +arg("tail-n", 3000), tg = +arg("tail-gap", 25);
+    for (const ka of arg("tail-ka", "10").split(",").map(Number)) {
+      await withRun({ ka }, async () => {
+        for (const bytes of arg("tail-sizes", "4").split(",").map((x) => +x * 1024)) {
+          const acc = Object.fromEntries(tp.map((p) => [p, []]));
+          for (let done = 0; done < n; done += 100) for (const p of tp) acc[p].push(...await run(p, bytes, Math.min(100, n - done), tg));
+          for (const p of tp) {
+            const one = acc[p].filter(Boolean).map((x) => (x.rtt - x.turnB) / 2);
+            const r = { suite: "tail", path: p, bytes, gap: tg, ka, rows: acc[p], ...summarize(acc[p]), p999: quant(one, 0.999), over20: one.filter((x) => x > 20).length, over100: one.filter((x) => x > 100).length };
+            out.results.push(r);
+            line(`tail ka ${String(ka).padStart(2)} ${String(bytes / 1024).padStart(2)} KB ${p.padEnd(8)}`, r);
+            console.log(`   p95 ${f2(r.oneway.p95)} p99.9 ${f2(r.p999)}  frames > 20 ms: ${r.over20}, > 100 ms: ${r.over100}`);
+          }
         }
       });
     }
