@@ -874,6 +874,73 @@ above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32
 every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
 prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).
 
+## 2026-09-28: phone placement (GB10 + iPhone 14 Pro Max, branch perf/cluster-phone-placement)
+
+Two ideas from the device matrix below, tried on the real phone. Phone on the branch's Vercel preview
+(`https://pooled-git-perf-cluster-phone-placement-nehanths-projects.vercel.app/room`, public PeerJS, HF weights,
+0.5 GB pledge), GB10 host on the same commit from 127.0.0.1 with local weights, Qwen3.6 35B MoE, exact sampling,
+`tests/e2e/xroom_cluster.sh --devices here,phone --phone-url <preview> -- --model qwen3.6-35b-moe --gb 40 --prompts
+japan,twosum --rounds 2 --maxnew 128 [--query ...]`, 2 runs per config (each 2 plain + 2 spec rounds per prompt),
+all in one evening session (19:00-20:35), the phone on power and unlocked.
+
+**1. Phones hold no layers while the computers can hold the model (kept).** `room/plan.js phonesToLeaveOut`: by
+memory, when the host and the other computers can hold every layer, phones join as ask-only guests (as the speed
+split already did); `?phonelayers=1` on the host deals them layers anyway.
+
+| config (GB10 40 GB pledge + iPhone 0.5 GB) | plain japan | plain twosum | spec japan | spec twosum | sha japan / twosum |
+|---|---|---|---|---|---|
+| before (cluster-matrix C_moe_1/2: GB10 39 + iPhone layer 39) | 14.7-21.7 | 19.4-25.4 | 25.0-28.7 | 24.7-38.6 | 3f42e667 / dcc61ede |
+| same split on this branch, `phonelayers=1` (C_notail_moe_1/2) | 17.9-19.8 | 23.7-24.4 | 20.9-29.0 | 25.3-39.7 | 3f42e667 / dcc61ede |
+| **after: phone asks, GB10 holds 40** (C_after_moe_1/2, C_final_moe_1) | **35.8-37.4** | **39.7-41.4** | **45.3-46.8** | **62.4-67.2** | a0e7f9bd / dcc61ede |
+| GB10 alone (matrix reference) | 35.4-37.0 | 39.8-40.2 | 45.5-47.5 | 63.1-64.9 | a0e7f9bd / dcc61ede |
+
+About 1.9x plain and 1.6-1.9x spec over the phone holding a layer, and the same as the GB10 alone (within noise),
+with the GB10-alone answers (a0e7f9bd / dcc61ede) and plain == spec in every round. Qwen3 1.7B (13 GB host):
+48.6/47.2 and 49.2/50.0 japan, 48.9/47.1 and 51.0/50.4 twosum (C_after_q17_1/2), vs 25.6-29.0 with the phone's
+layer before and 49.1/51.3 alone; shas 166285f6 / e19cba7f as alone. The phone's page still joins in 4.2 s and
+stays in the room as a guest.
+
+The other combos with the phone (main's baselines from the device-matrix runs, same session evening; after = this
+branch, phone on the preview, it asks and holds nothing):
+
+| combo | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| B before: M5 Max 39 + iPhone 1 (30 GB host, B_moe_1) | 28.5/29.4 | 26.9/32.4 | 43.7/44.4 | 37.5/56.6 |
+| **B after: M5 Max 40, phone asks** (B_after_moe_1/2) | **68.4/69.5, 68.8/70.3** | **83.1/81.8, 82.1/82.5** | **95.2/96.0, 95.1/95.3** | **130.2/133.5, 132.2/131.6** |
+| D before: GB10 19 + M5 Max 20 + iPhone 1 (D_moe_here_2) | 19.5/18.7 | 18.5/20.9 | 19.1/21.3 | 27.9/27.6 |
+| D after: GB10 20 + M5 Max 20, phone asks (D_after_moe_1, _3) | 26.5/18.7, 23.2/20.8 | 16.6/23.8, 25.1/22.8 | 29.0/27.2, 28.4/27.0 | 43.0/40.9, 37.5/56.4 |
+| A (GB10 20 + M5 Max 20, no phone; matrix A_moe_1/2) | 29.7-29.9 | 28.4-33.3 | 26.1-38.0 | 51.6-56.8 |
+
+B goes 2.3-2.4x plain and 2.2-3.5x spec (the Mac alone; answers 3f42e667 / dcc61ede, plain == spec, the same as
+B before). D after is A's split (the phone is out of the chain), so it gains over D before (spec +35-100%) but reads
+below the earlier A runs in plain (16.6-26.5 vs 28.4-33.3): the same code path as A, run 1.5-2 h later on the shared
+Wi-Fi, so read the gap as run-to-run conditions, not the phone (it sends no frames). D's japan has plain 8e29cc8d
+vs spec 44efa784 in both runs: the GB10 + M5 Max open item from the matrix (A run 1 did the same), not this change.
+D_after_moe_2 failed at join (the public PeerJS server said no room for the code) and was rerun as D_after_moe_3.
+Runs between 20:28 and 21:15 overlap a phone-lock mix-up in another job (the lock was released under running
+jobs); in B and D after the phone only joins, and B_after_moe_1/2 agree to within 2%.
+
+**2. Keep the phone off the last (full-attention) layer (tried, dropped).** The chain ends on the phone, so it held
+layer 39, full attention (+3 ms over the context without subgroups, its KV cache on the phone). Tried: the host
+keeps layer 39 as a tail, a second engine run on the returned hidden before the head, and every slice moves one
+earlier, so the phone gets layer 38 (DeltaNet). Same answers (3f42e667 / dcc61ede, plain == spec). Numbers
+(`phonelayers=1`, tail vs `phonetail=0`, 2 runs each, interleaved):
+
+| | plain japan | plain twosum | spec japan | spec twosum | phone 1-col GPU p50 (run 1, traced) | phone verify-block GPU p50 (run 1) | host tail p50 (local stand-in) |
+|---|---|---|---|---|---|---|---|
+| tail (phone: layer 38, DeltaNet) | 19.3/19.9, 18.6/18.9 | 22.0/22.5, 22.8/17.8 | 22.9/21.0, 22.8/23.2 | 33.3/36.3, 36.4/32.5 | 5.7 ms | 30.0 ms | 3.2 ms |
+| no tail (phone: layer 39, attention) | 18.9/17.9, 19.4/19.8 | 23.7/23.9, 24.4/23.7 | 25.0/20.9, 29.0/25.2 | 37.7/25.3, 38.5/39.7 | 7.4 ms | 25.8 ms | - |
+
+The phone's one-column time did drop (7.4 -> 5.7 ms p50 over the first 30 s), as predicted, but its 4-8-column
+verify blocks rose (DeltaNet's per-column state snapshots and serial recurrence cost more on the phone than a few
+columns of attention at these contexts), and the tail's own submit + readback adds 3.2 ms p50 per lap on the host
+(measured in the local stand-in, p95 77 ms: an occasional stall). Net: plain within noise, spec slightly worse. Not kept
+(commit 5f4cffb has it; 4e0b2fe reverts it). With rule 1 the phone only holds layers when the computers can't hold
+the model, and then the context-growth of its attention layer is the smaller problem.
+
+Local stand-in (a GB10 tab posing as an iPhone, `xroom.mjs --ua iphone`, 22 GB host pledge): the tail gave the
+same answers as the phone at layer 39 and cost 26.5-29.1 vs 28.9-32.4 plain tok/s.
+
 ## 2026-09-28: device matrix (Spark, M5 Max, iPhone 14 Pro Max)
 
 Branch perf/cluster-matrix (main c6ca8cc + b749f99 merged, + the room harness). Every device runs main's code: the

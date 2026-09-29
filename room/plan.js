@@ -91,6 +91,22 @@ export function planForSpeed(L, caps, msPerLayer = []) {
   return { assigned, ranges, used: assigned.map((a, i) => (a > 0 ? i : -1)).filter((i) => i >= 0) };
 }
 
+// A phone: its own flag, or a phone user agent (the meta a device sends when it joins).
+export function isPhoneMeta(m) {
+  return !!(m?.phone || /^(iPhone|Android)$/.test(m?.ua || ""));
+}
+
+// Phones hold layers only when the computers cannot. One layer on a phone costs as much as 15-25
+// layers on a desktop GPU plus two Wi-Fi hops per token (docs/bench-log.md, device matrix), so a
+// room whose computers can hold the whole model runs faster with its phones as ask-only guests.
+// capsLayers: layers each device can hold (host first); phone: which devices are phones. The host
+// always counts as a computer (it holds the embedding and the head either way). Returns the
+// device indices (never 0) to leave out: every phone when the others hold all L layers, else none.
+export function phonesToLeaveOut(L, capsLayers, phone) {
+  const others = capsLayers.reduce((s, c, i) => s + (i === 0 || !phone[i] ? Math.max(0, Math.floor(c)) : 0), 0);
+  return others >= L ? capsLayers.map((_, i) => i).filter((i) => i > 0 && phone[i]) : [];
+}
+
 // The device that becomes the model host when someone presses Start. The model host holds the
 // embedding, the head and the draft block, samples every token and runs the Code agent, so it is
 // the strongest device, whoever pressed Start: a device with WebGPU first, then a computer before
@@ -98,12 +114,11 @@ export function planForSpeed(L, caps, msPerLayer = []) {
 // screen), then the most memory lent, then the lowest id so every screen picks the same one.
 // devices: [{ id, meta: { webgpu, contribGB, phone, ua } }]. Returns an id (null for none).
 export function pickModelHost(devices) {
-  const isPhone = (m) => !!(m?.phone || /^(iPhone|Android)$/.test(m?.ua || ""));
   const gb = (m) => (m?.webgpu ? +m?.contribGB || 0 : 0);
   let best = null;
   for (const d of devices) {
     if (!d?.id) continue;
-    const k = [d.meta?.webgpu ? 1 : 0, isPhone(d.meta) ? 0 : 1, gb(d.meta)];
+    const k = [d.meta?.webgpu ? 1 : 0, isPhoneMeta(d.meta) ? 0 : 1, gb(d.meta)];
     if (!best) { best = { id: d.id, k }; continue; }
     const c = k[0] - best.k[0] || k[1] - best.k[1] || k[2] - best.k[2] || (d.id < best.id ? 1 : -1);
     if (c > 0) best = { id: d.id, k };

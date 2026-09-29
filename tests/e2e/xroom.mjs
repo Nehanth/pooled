@@ -10,6 +10,7 @@
 //          [--trace-out guest-trace.json]
 //   both : [--port 8123] (http; https weights on port + 1) [--signal-port 9000] [--query "a=1&b=2"]
 //          [--name gb10] [--chrome <path>] (macOS defaults to /Applications/Google Chrome.app)
+//          [--ua iphone] the page sees an iPhone (a stand-in for the phone, see --ua below)
 //   host : [--signal <ip>:<port> --signal-server 0] when the signaling server runs elsewhere
 //   both : [--signal cloud] the public PeerJS server (the page's default; rooms with a phone, see
 //          tests/e2e/xroom_phone.mjs); host: [--peers N] wait for N devices, itself included (default 2)
@@ -153,7 +154,10 @@ const mac = process.platform === "darwin";
 const ARGS = [...(mac ? [] : ["--no-sandbox", "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"]),
   "--headless=new", "--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--disable-features=WebRtcHideLocalIpsWithMdns", "--js-flags=--max-old-space-size=65536",
   ...(TRACE ? ["--enable-webgpu-developer-features"] : [])];   // unquantized GPU timestamps
-const UA = mac ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36" : "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+// --ua iphone: the page sees an iPhone (a phone's pledge steps and buffer caps, and the room deals it
+// layers as a phone, room/plan.js): a stand-in for the phone on a computer, for correctness runs
+const UA = arg("ua") === "iphone" ? "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1"
+  : mac ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36" : "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const CHROME = arg("chrome", mac ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "");
 const prof = fs.mkdtempSync(path.join(os.tmpdir(), "xroom-profile-"));
 const ctx = await chromium.launchPersistentContext(prof, { headless: false, args: ARGS, userAgent: UA, ignoreHTTPSErrors: true, ...(CHROME ? { executablePath: CHROME } : {}) });

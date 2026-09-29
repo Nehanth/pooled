@@ -188,9 +188,12 @@ The phone's page and the computers' checkouts must be the same room protocol (in
 commit). The phone downloads its own slice from Hugging Face (`peerweights=0` on the computers, and the
 model host is never a weight source), so keep its share small: its pledge decides it (by memory, it
 gets about `L * gb / sum of pledges` layers and at least one), and a 0.5 GB pledge against a 13 GB
-(1.7B) or 40 GB (MoE) host gives it exactly one layer, the last one: the room deals the host first and
-then the other devices by peer id, so with two devices the guest always holds the last layers; with
-three the two guests' order is random (the host's JSON has the split).
+(1.7B) or 40 GB (MoE) host gave it exactly one layer, the last one, up to perf/cluster-matrix. Since
+perf/cluster-phone-placement a phone holds layers only when the computers cannot hold the model:
+the MoE's 22.5 GB room need is met by a 22 GB host pledge alone, so a GB10 host leaves the phone an
+ask-only guest (`--query phonelayers=1` in the host's args deals it the last layer anyway, for A/B).
+`xroom.mjs --ua iphone` runs a computer tab that the room treats as a phone (a local stand-in, for
+correctness runs).
 
 **iOS quirks.** A WebDriver tap on the Join button can land as a long press (it selects the button's
 text and fires no click); `xroom_phone.mjs` then clicks from the page (`jsClick: true` in its result),
