@@ -12,7 +12,7 @@
 import http from "http";
 import fs from "fs";
 import path from "path";
-import { execFileSync, execFile } from "child_process";
+import { execFileSync, execFile, spawn } from "child_process";
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf("--" + k); return i >= 0 ? argv[i + 1] : d; };
@@ -27,7 +27,11 @@ const MIME = { ".html": "text/html", ".js": "text/javascript", ".mjs": "text/jav
 let cur = null;   // the run being measured
 const srv = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/mp-log") {
-    let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => { try { const e = JSON.parse(b); if (cur && e.run === cur.run) { cur.ev = e; cur.events.push({ ...e, at: Date.now() - cur.t0 }); } } catch {} res.end("ok"); });
+    let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => {
+      let stop = false;
+      try { const e = JSON.parse(b); if (cur && e.run === cur.run && !cur.over) { if (e.ev !== "hb") { cur.ev = e; cur.events.push({ ...e, at: Date.now() - cur.t0 }); } } else stop = true; } catch {}
+      res.end(stop ? "stop" : "ok");
+    });
     return;
   }
   const u = decodeURIComponent(new URL(req.url, "http://x").pathname);
@@ -37,6 +41,8 @@ const srv = http.createServer((req, res) => {
   fs.createReadStream(f).pipe(res);
 });
 await new Promise((r) => srv.listen(PORT, "127.0.0.1", r));
+// Safari suspends pages while the display sleeps: keep it awake for the whole batch
+const awake = spawn("caffeinate", ["-dimu", "-t", "7200"], { stdio: "ignore" });
 
 const pids = (pat) => { try { return execFileSync("pgrep", ["-f", pat]).toString().trim().split("\n").filter(Boolean).map(Number); } catch { return []; } };
 const fp = (pid) => new Promise((res) => execFile("footprint", ["-p", String(pid)], { timeout: 3000 }, (err, out) => {
@@ -56,8 +62,12 @@ for (const q of runs) {
   const tEnd = Date.now() + +arg("maxmin", 15) * 60e3;
   while (Date.now() < tEnd) {
     await sleep(200);
-    if (!wc) { const n = pids("com.apple.WebKit.WebContent").filter((p) => !before.has(p)); if (n.length) { wc = n[n.length - 1]; log(q, "tab process", wc); } }
-    const a = wc ? await fp(wc) : { mb: null }, g = gpuPid ? await fp(gpuPid) : { mb: null };
+    // the tab's process: Safari may start more than one (a prewarmed spare), so take the biggest new one
+    const fresh = pids("com.apple.WebKit.WebContent").filter((p) => !before.has(p));
+    const fps = await Promise.all(fresh.map(async (p) => [p, await fp(p)]));
+    let a = { mb: null };
+    for (const [p, f] of fps) if (f.mb != null && (a.mb == null || f.mb > a.mb)) { a = f; if (wc !== p) { wc = p; log(q, "tab process", wc, f.mb, "MB"); } }
+    const g = gpuPid ? await fp(gpuPid) : { mb: null };
     const ev = cur.ev || {};
     const s = { t: Date.now() - cur.t0, wc: a.mb, gpu: g.mb != null && gpu0 != null ? +(g.mb - gpu0).toFixed(1) : null, phase: ev.phase, ev: ev.ev, info: (ev.info || "").slice(0, 60), gpuAcct: ev.gpuMB, jsAcct: ev.jsAcctMB };
     cur.samples.push(s);
@@ -65,9 +75,11 @@ for (const q of runs) {
     if (s.gpu > gpuPeak.gpu) gpuPeak = s;
     if (ev.phase === "done" || ev.phase === "error") { end = ev.phase; break; }
   }
+  cur.over = true;   // the page's next heartbeat gets "stop" and empties the tab
   // steady: the tab after the load settled (the page waits ?settle ms before "done")
   const steady = cur.samples.slice(-3);
   const last = wc ? await fp(wc) : {};
+  if (last.peak == null) last.peak = Math.max(0, ...cur.samples.map((x) => x.wc || 0));
   const out = { q, run, end, wcPid: wc, wcPeakMB: last.peak, wcPeakSample: peak, gpuPeakSample: gpuPeak,
     steadyWcMB: steady.length ? Math.min(...steady.map((x) => x.wc ?? Infinity)) : null, steadyGpuMB: steady.length ? steady[steady.length - 1].gpu : null,
     result: cur.events.find((e) => e.ev === "done")?.info || cur.events.find((e) => e.ev === "error")?.info || null,
@@ -79,4 +91,5 @@ for (const q of runs) {
   await sleep(+arg("hold", 4000) + 4000);
 }
 srv.close();
+awake.kill();
 process.exit(0);

@@ -72,10 +72,17 @@ function note(ev, extra = {}) {
     gpuPeakMB: acct.gpuPeak / MB, jsAcctPeakMB: acct.jsPeak / MB, last: e, at: Date.now(), done: mp.phase === "done", err: mp.err, result: mp.result || null });
   // ?beacon=1: also POST every event to the page's own server (/mp-log), which samples the tab's
   // process footprint alongside it (tests/e2e/memprobe_mac.mjs, desktop Safari)
-  if (Q.get("beacon")) fetch("/mp-log", { method: "POST", body: JSON.stringify({ run, phase: mp.phase, jsAcctMB: acct.js / MB, ...e }) }).catch(() => {});
+  if (Q.get("beacon")) beacon({ run, phase: mp.phase, jsAcctMB: acct.js / MB, ...e });
   $("big").textContent = `${mp.phase} · JS ${mp.jsMB.toFixed(0)} MB · GPU ${(acct.gpu / MB).toFixed(0)} MB`;
   $("log").textContent = mp.events.slice(-14).map((x) => `${(x.t / 1000).toFixed(1)}s ${x.ev} js=${x.jsMB} gpu=${x.gpuMB}${x.info ? " " + x.info : ""}`).join("\n");
 }
+
+// ?beacon=1: the server answers "stop" once it has given up on this run (the tab then empties itself)
+function beacon(o) {
+  fetch("/mp-log", { method: "POST", body: JSON.stringify(o) }).then((r) => r.text()).then((t) => { if (t === "stop") cleanup(); }).catch(() => {});
+}
+function cleanup() { mp.weights = mp.engine = mp.gpuBufs = null; try { mp.device?.destroy(); } catch {} hold.length = 0; location.replace("about:blank"); }
+if (Q.get("beacon")) setInterval(() => beacon({ run, ev: "hb" }), 5000);
 
 // ---- a previous run of this tab that never finished = the tab was killed ----
 const prev = lsGet();
@@ -193,12 +200,19 @@ async function loadLayers() {
     }
     return r;
   };
-  const pf = { list: [], at: new Map(), pending: new Map() };
+  // ?pfdedupe=1: never prefetch a tensor that was already loaded. room.js rangeOf does: the loader asks for
+  // tensors in model order, not file order, so "the next one in the file" is often one it already has, and
+  // that second copy is fetched and never read (~98% of a MoE shard's bytes, ~47% of a 27B shard's)
+  const dedupe = Q.get("pfdedupe") === "1";
+  const pf = { list: [], at: new Map(), pending: new Map(), done: new Set() };
+  mp.dupPrefetchMB = 0;
   const rangeOf = (info) => {
     const a = info.byteOffset, b = a + info.byteLength - 1;
     const i = pf.at.get(a);
+    pf.done.add(a);
     if (i !== undefined) for (let k = i + 1; k <= i + ahead && k < pf.list.length; k++) {
       const n = pf.list[k];
+      if (pf.done.has(n.byteOffset)) { if (dedupe) continue; mp.dupPrefetchMB += n.byteLength / MB; }
       if (!pf.pending.has(n.byteOffset)) { const p = rangeFetch(n.byteOffset, n.byteOffset + n.byteLength - 1); p.catch(() => {}); pf.pending.set(n.byteOffset, p); note("prefetch", { info: `${n.name} ${(n.byteLength / MB).toFixed(0)} MB` }); }
     }
     const p = pf.pending.get(a);
@@ -295,12 +309,12 @@ async function main() {
     await sleep(+(Q.get("settle") || 3000));
     if (Q.get("then") === "js") await jsSteps(step, pause, max, "headroom");
   } else throw new Error("unknown mode " + mode);
-  mp.result = { jsMB: mp.jsMB, gpuMB: acct.gpu / MB, gpuPeakMB: acct.gpuPeak / MB, jsAcctPeakMB: acct.jsPeak / MB, gpuOOM: mp.gpuOOM || null, lost: mp.lost || null, loadedAt: mp.loadedAt || null };
+  mp.result = { dupPrefetchMB: Math.round(mp.dupPrefetchMB || 0), jsMB: mp.jsMB, gpuMB: acct.gpu / MB, gpuPeakMB: acct.gpuPeak / MB, jsAcctPeakMB: acct.jsPeak / MB, gpuOOM: mp.gpuOOM || null, lost: mp.lost || null, loadedAt: mp.loadedAt || null };
   mp.phase = "done";
   note("done", { info: JSON.stringify(mp.result) });
 }
 main().catch((e) => { mp.err = String(e?.stack || e); mp.phase = "error"; note("error", { info: String(e).slice(0, 300) }); })
   // beacon runs leave the tab empty when they end, so the next run starts from a clean GPU
-  .finally(() => { if (Q.get("beacon") && mode !== "report") setTimeout(() => { mp.weights = mp.engine = mp.gpuBufs = null; mp.device?.destroy(); hold.length = 0; location.replace("about:blank"); }, +(Q.get("hold") || 4000)); });
+  .finally(() => { if (Q.get("beacon") && mode !== "report") setTimeout(cleanup, +(Q.get("hold") || 4000)); });
 </script>
 </html>
