@@ -68,7 +68,10 @@ function draw() {
 
 function restart() { stars = []; score = 0; lives = 3; over = false; }
 
-document.addEventListener("keydown", (e) => { keys[e.key] = true; if (e.key === " " && over) restart(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key === " " || e.key.startsWith("Arrow")) e.preventDefault();   // the page does not scroll while playing
+  keys[e.key] = true; if (e.key === " " && over) restart();
+});
 document.addEventListener("keyup", (e) => { keys[e.key] = false; });
 canvas.addEventListener("pointermove", (e) => { basket.x = (e.offsetX / canvas.clientWidth) * W; });
 canvas.addEventListener("pointerdown", () => { if (over) restart(); });

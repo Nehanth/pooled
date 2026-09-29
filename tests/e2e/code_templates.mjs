@@ -90,6 +90,9 @@ try {
   const opts = await host.evaluate(() => [...document.getElementById("code-new-tpl").options].map((o) => o.value));
   check("the picker: an empty project first, then the templates", opts[0] === "" && ["game", "dashboard", "form", "landing"].every((id) => opts.includes(id)), opts.join(","));
   await host.selectOption("#code-new-tpl", "game");
+  await host.selectOption("#code-new-tpl", "landing");
+  check("picking another one renames a name a template filled", (await host.inputValue("#code-new-name")) === "Landing page");
+  await host.selectOption("#code-new-tpl", "game");
   check("picking a template fills an empty name", (await host.inputValue("#code-new-name")) === "Game");
   if (SHOTS) await host.screenshot({ path: path.join(SHOTS, "templates-new.png") });
   await host.press("#code-new-name", "Enter");

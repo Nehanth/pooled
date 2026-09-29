@@ -369,11 +369,13 @@ export async function initCode(api, { mock = null } = {}) {
     newForm(on);
     if (on) { newName.value = ""; newTpl.value = ""; newName.focus(); }
   });
+  // a template fills an empty name, or one it filled itself (so picking another one renames it)
   newTpl.addEventListener("change", () => {
-    const t = templateById(newTpl.value);
-    if (t && !newName.value.trim()) newName.value = t.label;
+    const t = templateById(newTpl.value), cur = newName.value.trim();
+    if (t && (!cur || TEMPLATES.some((x) => x.label === cur))) newName.value = t.label;
     newName.focus();
   });
+  newTpl.addEventListener("keydown", (e) => { if (e.key === "Escape") newForm(false); });
   newName.addEventListener("keydown", async (e) => {
     if (e.key === "Escape") { newForm(false); return; }
     if (e.key !== "Enter" || !newName.value.trim()) return;

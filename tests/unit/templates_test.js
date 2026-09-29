@@ -86,3 +86,8 @@ Deno.test("applyTemplate, then serve: the project runs in Preview straight away"
     server.close();
   }
 });
+
+Deno.test("templates: the game keeps the arrow keys and Space from scrolling the page", () => {
+  const js = templateById("game").files["app.js"];
+  ok(/e\.key === " " \|\| e\.key\.startsWith\("Arrow"\)\) e\.preventDefault\(\)/.test(js), "preventDefault on arrows and Space");
+});
