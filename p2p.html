@@ -870,6 +870,19 @@
   #code-proj-kind:empty { display: none; }
   .fh { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 8px; font: 500 12px/1 var(--mono); color: var(--text); }
   .fh svg { flex: none; color: var(--muted); }
+  /* Download (room/code-export.js): a quiet button on the Files heading, its two choices under it */
+  #code-pane #code-dl { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; flex: none; background: transparent; border-color: transparent; color: var(--muted); font: 500 11px/1 var(--sans); }
+  #code-pane #code-dl:hover:not(:disabled), #code-pane #code-dl[aria-expanded="true"] { color: var(--text); background: var(--panel); border-color: var(--border); }
+  #code-dl-menu { display: flex; flex-direction: column; gap: 4px; margin: 2px 4px 8px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+  #code-dl-menu[hidden] { display: none; }
+  .fh #code-dl svg { color: inherit; }
+  #code-pane #code-dl-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; text-align: left; background: transparent; border-color: transparent; color: var(--text); }
+  #code-pane #code-dl-menu button:hover:not(:disabled) { background: var(--panel-2); border-color: var(--border); }
+  #code-pane #code-dl-menu button:focus-visible { outline-offset: -2px; }
+  #code-dl-menu button span { font: 400 11px/1.2 var(--mono); color: var(--muted); }
+  #code-dl-note { margin: 0; padding: 2px 6px; font: 400 11px/1.35 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+  #code-dl-note:empty { display: none; }
+  #code-dl-note.err { color: var(--err); }
   #code-tree { flex: 1; min-height: 0; overflow: auto; font: 400 12px/1.2 var(--mono); scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
   #code-tree .d { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 8px; color: var(--muted); white-space: nowrap; }
   #code-tree .d::before { content: ""; flex: none; width: 13px; height: 13px; background: currentColor; -webkit-mask: var(--i-dir) center / contain no-repeat; mask: var(--i-dir) center / contain no-repeat; }
@@ -1322,6 +1335,8 @@
     #chatpane.code-mode #code-files { padding: 12px 10px 8px; }
     #chatpane.code-mode #code-tree { flex: 1; min-height: 0; }
     #code-pane #code-tree .f { height: 44px; font-size: 14px; }
+    #code-pane #code-dl { min-height: 36px; font-size: 12px; }
+    #code-pane #code-dl-menu button { min-height: 44px; justify-content: center; font-size: 14px; }
     #code-tree .d { height: 36px; }
     #code-pane #code-open { display: none; }
     #code-pane #ed-back { display: grid; place-items: center; flex: none; width: 40px; height: 40px; margin-left: -8px; padding: 0; border: 0; background: transparent; color: var(--ink-2); }
@@ -1548,7 +1563,12 @@
           <button id="code-open" type="button" hidden>Open folder…</button>
           <span id="code-proj-kind"></span>
         </div>
-        <p class="fh"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 3.5h4l1.2 1.3h5.8v6.7h-11z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>Files</p>
+        <p class="fh"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 3.5h4l1.2 1.3h5.8v6.7h-11z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>Files<button id="code-dl" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="code-dl-menu" title="Download the project"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.5v6.5M3.2 5.4 6 8.2l2.8-2.8M2 10.5h8"/></svg>Download</button></p>
+        <div id="code-dl-menu" hidden>
+          <button type="button" data-dl="zip">Project <span>.zip · every file</span></button>
+          <button type="button" data-dl="html">One HTML file <span>the app, ready to open</span></button>
+          <p id="code-dl-note" role="status" aria-live="polite"></p>
+        </div>
         <div id="code-tree"><div class="none">No files yet</div></div>
       </aside>
       <div id="code-agent">
