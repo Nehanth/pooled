@@ -768,13 +768,15 @@ async function start(create, resume = null) {
 }
 
 let wakeLock = null, awakeVideo = null;
+let awakeMode = null;   // how this screen stays on: "lock" (the Wake Lock API), "video", "none"; null before the first try
 function awakeStatus(s) { const el = $("awake"); if (el && myMeta?.phone) el.textContent = s; }
 async function keepAwake() {
   // 1. the real API (iOS 16.4+, must be called from a tap)
   try {
     if (!wakeLock && navigator.wakeLock) {
       wakeLock = await navigator.wakeLock.request("screen");
-      wakeLock.addEventListener("release", () => { wakeLock = null; awakeStatus("screen lock: released"); });
+      wakeLock.addEventListener("release", () => { wakeLock = null; awakeMode = awakeVideo && !awakeVideo.paused ? "video" : "none"; awakeStatus("screen lock: released"); compute.refresh(); });
+      awakeMode = "lock";
       awakeStatus("screen stays awake \u2713");
     }
   } catch (e) { awakeStatus("wake lock failed: " + (e?.message || e)); }
@@ -788,9 +790,10 @@ async function keepAwake() {
       document.body.appendChild(awakeVideo);
     }
     await awakeVideo.play();
-    if (!wakeLock) awakeStatus("screen stays awake (video) \u2713");
+    if (!wakeLock) { awakeMode = "video"; awakeStatus("screen stays awake (video) \u2713"); }
   } catch (e) {
     // the setting is Auto-Lock on an iPhone, the screen timeout (Settings > Display) on Android
+    if (!wakeLock) awakeMode = "none";
     if (!wakeLock) awakeStatus(`This screen can\u2019t stay awake on its own: ${myMeta?.ua === "iPhone" ? "set Auto-Lock to Never" : "set the screen timeout to its longest (Settings \u203a Display)"}`);
   }
 }
@@ -812,9 +815,13 @@ function computeState() {
     phase: online ? "serving" : loading ? "loading" : "idle",
     pct: ai.myPct ?? (ai.prog || {})[myName] ?? null,
     color: devColor(myName),
+    bytes: ai.range || mineDeal ? ai.shardBytes || 0 : 0,   // this device's share of the weights, once its load has started
+    awake: awakeMode, ios: myMeta?.ua === "iPhone" || myMeta?.ua === "iPad",
+    // the room ended, or the host is gone and may come back: the Room over card says which
+    over: $("room-over").hidden ? null : { final: $("room-over-h").textContent === "Room over", why: $("room-over-why").textContent },
   };
 }
-const compute = computeScreen({ state: computeState, keepAwake });
+const compute = computeScreen({ state: computeState, keepAwake, newRoom: () => $("room-over-new").click() });
 $("compute-open").addEventListener("click", () => compute.open());
 // the header's dots button says whether this device is working: "on" while it holds layers
 function deviceMark() {
@@ -1418,6 +1425,7 @@ function setCtx(used, max) {
 
 async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey)) {
   const M = MODELS[modelKey];
+  ai.shardBytes = 0;   // until this load's first progress says how big the new range is
   aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
   aiStatus("requesting GPU\u2026");
   mascot("Grabbing my slice of the model… hang tight.");
@@ -1473,6 +1481,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       : ai.peerBytes ? `getting weights from devices in the room\u2026`
       : cacheHits ? `loading weights from this device's cache\u2026` : `downloading weights\u2026`);
     ai.myPct = total ? done / total * 100 : 0;
+    ai.shardBytes = total;   // the lending screen shows how much this device holds
     ai.prog = ai.prog || {}; ai.progAt = ai.progAt || {};
     ai.prog[myName] = Math.round(ai.myPct); ai.progAt[myName] = Date.now();
     if (ai.role === "worker") sendTo(ai.hostId, { t: "ai-progress", pct: Math.round(ai.myPct) });
