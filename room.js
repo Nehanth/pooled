@@ -1162,6 +1162,7 @@ let ai = {
   visibility: "all",   // who sees the chat: all | host | asker (room/visibility.js)
   engine: null, tok: null, cfg: null, device: null,
   role: null,            // "host" | "worker" | "guest"
+  gone: new Set(),       // the host: chain ids whose link closed, so a same-id rejoin is re-seated (aiRejoin)
   chain: [],             // host: worker peer ids in pipeline order
   next: null,            // worker: peer id to forward hidden to, or "host"
   readyPeers: new Set(),
@@ -1703,6 +1704,7 @@ async function aiStart(modelArg) {
     ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu).sort();
     ai.leftOut = new Set();
     ai.plan = new Map();                      // name -> load message, so a reloaded device can be re-seated
+    ai.gone = new Set();                      // chain ids whose link closed (aiPeerLeft), for a same-id rejoin
     ai.chainNames = ai.chain.map((id) => conns.get(id)?.name || id);
     const n = ai.chain.length + 1;
     let L, layerBytes, embedBytes, cfg = null;
@@ -1869,6 +1871,7 @@ function aiPeerLeft(id, name) {
   const why = `${name || "a device"} left${layers ? ` (layers ${layers})` : ""}`;
   ai.degraded = true;
   ai.readyPeers.delete(id);
+  ai.gone.add(id);   // it may come back under the same peer id (the ping loop dropped a live but stalled tab): aiRejoin
   // left before the room came online: drop the load card so the panel's Re-deal button shows
   // (while this device still loads, aiStart does it once its layers are in)
   if (!ai.loadingShard && !$("ai-panel").classList.contains("online")) aiLoading(false);
@@ -1889,14 +1892,17 @@ function aiWelcome(id) {
   offerRedealForNewcomers();
 }
 
-// a device whose tab got reloaded comes back with a new peer id: put it back in its slot
+// a device that left comes back to its slot: a reloaded tab with a new peer id, or a tab the ping loop
+// dropped while it was stalled (suspended, a long task), which reconnects under the same peer id
 function aiRejoin(newId, name) {
   if (ai.role !== "host" || !ai.plan?.has(name)) return;
   const i = ai.chainNames.indexOf(name);
-  if (i < 0 || ai.chain[i] === newId || ai.chain.includes(newId)) return;
+  if (i < 0) return;
+  if (ai.chain[i] === newId ? !ai.gone.has(newId) : ai.chain.includes(newId)) return;
   const oldId = ai.chain[i];
   ai.chain[i] = newId;
   ai.readyPeers.delete(oldId);
+  ai.gone.delete(oldId); ai.gone.delete(newId);
   const { msg } = ai.plan.get(name);
   const fresh = { ...msg, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: peer.id };
   if (i > 0) sendTo(ai.chain[i - 1], { t: "ai-next", next: newId });
@@ -2902,6 +2908,13 @@ async function aiOnData(from, d) {
       toast(d.why);
       break;
     case "ai-load": {
+      // the host re-seats this device while its load of the same layers still runs (it dropped this tab
+      // and it reconnected): keep that load, it reports ai-ready to the host when it is in
+      const loadKey = `${d.model || "smollm-135m"}:${d.range}`;
+      if (ai.loadingShard && ai.role === "worker" && ai.loadKey === loadKey) {
+        ai.next = d.next; ai.hostId = d.host; ensureLink(d.next);
+        break;
+      }
       setModelValue(d.model);
       ai.role = "worker";
       ai.next = d.next;
@@ -2911,7 +2924,7 @@ async function aiOnData(from, d) {
       ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;
       ensureLink(d.next);   // open the link to my chain neighbour while the weights download
       try {
-        ai.loadingShard = true;
+        ai.loadingShard = true; ai.loadKey = loadKey;
         try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model)); } finally { ai.loadingShard = false; }
         if (ai.startFailed) throw new Error(ai.startFailed);
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
