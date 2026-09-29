@@ -907,6 +907,7 @@ $("share-native").addEventListener("click", () => navigator.share?.({ title: "Jo
 const logoLink = document.querySelector(".logo a");
 logoLink.addEventListener("click", (e) => {
   if (!document.body.classList.contains("in-room")) return;
+  if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;   // a new tab or window keeps the room open: no need to ask
   e.preventDefault();
   $("leave-h").textContent = `Leave room ${roomCode}?`;
   $("leave-why").textContent = isHost
