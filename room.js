@@ -411,6 +411,7 @@ function enterRoom() {
   roomSince = performance.now();
   $("compute-open").hidden = false;
   $("room-badge").textContent = roomCode;
+  $("room-h").textContent = `Room ${roomCode}`;
   $("side-code").textContent = roomCode;
   $("side-code").addEventListener("click", openShare);
   $("ap-qr").innerHTML = qrSVG(roomLink(), { size: 112 });

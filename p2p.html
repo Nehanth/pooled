@@ -528,11 +528,11 @@
   .ap-side > section { padding: 18px 20px; }
   .ap-side > section + section { border-top: 1px solid var(--rule-2); }
   .ap-h { display: flex; flex-direction: column; gap: 6px; padding: 22px 22px 6px; }
-  .ap-h b { font: 400 26px/1.1 var(--display); letter-spacing: -.025em; }
+  .ap-h h2 { font: 400 26px/1.1 var(--display); letter-spacing: -.025em; }
   .ap-h span { font-size: 13px; color: var(--muted); }
   #ai-panel.online .ap-h, #ai-panel.online .ap-note { display: none; }
   .ap-note { margin-top: auto; padding: 0 2px 4px; font-size: 12px; color: var(--muted); }
-  .ap-k { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--muted); }
+  .ap-k { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 13px; font-weight: 400; color: var(--muted); }
   .ap-k b { font: 500 22px/1 var(--mono); letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums; }
   /* the pool: one segment per device, a tick where each model starts to fit */
   #ap-meter { position: relative; height: 10px; margin: 14px 0 10px; border-radius: 5px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
@@ -1188,7 +1188,7 @@
     .ap-side { border-left: 0; border-top: 1px solid var(--rule-2); }
     .ap-side > section { padding: 16px; }
     .ap-h { padding: 18px 16px 4px; }
-    .ap-h b { font-size: 22px; }
+    .ap-h h2 { font-size: 22px; }
     #ai-head { padding: 8px 10px 12px; }
     .rung { height: 46px; font-size: 13px; padding: 0 12px 0 10px; gap: 8px; }
     #ai-start { height: 46px; }
@@ -1436,7 +1436,7 @@
   <a id="gh-link" class="gh-link" href="https://github.com/Nehanth/pooled" target="_blank" rel="noopener" aria-label="pooled on GitHub" title="GitHub"><svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
 </header>
 
-<div id="join-screen">
+<main id="join-screen">
   <h1>Start a room, <span>or join one.</span></h1>
   <p class="lede">Each device in a room shares some memory, and together they run one open AI model in your browser tabs.</p>
   <div class="jpanel">
@@ -1461,10 +1461,11 @@
   <div id="join-gpu" hidden><p><i aria-hidden="true"></i><span id="join-gpu-t"></span></p><details><summary>Details</summary><p id="join-gpu-d"></p></details></div>
   <div id="join-status" role="status" aria-live="polite"></div>
   <p class="jfoot">Works best in Chrome or Edge. Devices without WebGPU can still join and ask.</p>
-</div>
+</main>
 
 <div id="room-screen">
   <main id="chatpane">
+    <h1 class="sr-only" id="room-h">Room</h1>
     <div id="topline">
       <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
       <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div></div>
@@ -1473,7 +1474,7 @@
     <div id="ai-empty"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><span id="ai-empty-t">Pick a model and press Start</span></div>
     <div id="ai-panel">
       <div class="ap-main">
-        <p class="ap-h"><b>Pick a model</b><span>Anyone in the room can start it.</span></p>
+        <div class="ap-h"><h2>Pick a model</h2><span>Anyone in the room can start it.</span></div>
         <div id="ai-head">
           <span id="ai-title">MODEL</span>
           <select id="ai-model" aria-label="Model">
@@ -1500,20 +1501,20 @@
       </div>
       <div class="ap-side">
         <section class="ap-pool" aria-label="The room's memory">
-          <p class="ap-k"><span>The room pools</span><b id="ap-total">0 GB</b></p>
+          <h3 class="ap-k"><span>The room pools</span><b id="ap-total">0 GB</b></h3>
           <div id="ap-meter" aria-hidden="true"><div class="apm-fill"></div><div class="apm-ticks"></div></div>
           <p id="ap-need" hidden></p>
           <ul id="ap-devs" aria-label="What each device gives"></ul>
         </section>
         <section class="ap-me" id="ap-me" aria-label="This device">
-          <p class="ap-k"><span>This device gives</span></p>
+          <h3 class="ap-k"><span>This device gives</span></h3>
           <div class="ap-step" id="ap-step"><button class="step" id="ap-minus" type="button" aria-label="Less memory">&minus;</button><input id="ap-gb" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Memory this device gives, in GB" value="1"><span class="u">GB</span><button class="step" id="ap-plus" type="button" aria-label="More memory">+</button></div>
           <p class="ap-no" id="ap-no" hidden>This browser can't use its graphics chip, so this device can chat but not help run the model.</p>
         </section>
         <section class="ap-room" id="side-room" aria-label="Invite more devices">
           <div id="ap-qr" aria-hidden="true"></div>
           <div class="ap-inv">
-            <p class="ap-k"><span>Invite more devices</span></p>
+            <h3 class="ap-k"><span>Invite more devices</span></h3>
             <p class="ap-code"><span id="side-code" title="Invite a device">----</span></p>
             <p class="side-hint">Scan it, or type the code on another device. More devices fit bigger models.</p>
             <div class="ap-btns"><button type="button" id="ap-copy">Copy link</button><button type="button" data-invite>Full-size QR</button></div>
