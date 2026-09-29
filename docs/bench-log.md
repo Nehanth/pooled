@@ -773,3 +773,120 @@ above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32
 43.92; 27B prefill 31.9 / 58.5 / 53.6, plain 14.79 / 14.35 / 12.43, spec 23.54 / 21.13 / 15.96, spec == plain on
 every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
 prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).
+
+## 2026-09-29: prefill profile on the GB10 at main 2f1704e, vs llama.cpp (branch perf/prefill-profile)
+
+Prefill (prompt processing) tok/s for both models at 512 / 2048 / 8192-token prompts, each a fresh prefill from an
+empty cache (like llama-bench `pp`), and where the time goes per kernel family. Engine defaults unless noted: MoE =
+wide prefill U=256 + expert-grouped tiled FFN + tiled prefill attention (TK 8); 27B = 16-column GEMM passes + tiled
+prefill attention, wide prefill off (opt-in on dense models). MTP draft-cache fill on in every run (engine default).
+
+**Measurement caveat.** Other workflows' room/eval tests ran on the GPU all day, several of them outside
+`gpurun.sh`. Every run logged the number of GPU compute apps every 5 s. The Deno rows below are clean (one app, ours)
+except where noted; the llama.cpp rows ran before the load. **Every Chrome 27B run and most Chrome MoE runs shared the
+GPU** (up to 9 apps), so those are lower bounds: treat the Deno rows as the reference.
+
+### Prefill tok/s
+
+| | 512 | 2048 | 8192 |
+|---|---|---|---|
+| llama.cpp CUDA (749f688, `llama-bench -p 512,2048,8192 -n 0 -r 3 -fa 1`), 35B-A3B MoE | 2411 ± 112 | 2399 ± 9 | 2337 ± 12 |
+| llama.cpp CUDA, 27B | 883 ± 35 | 895 ± 6 | 873 ± 1 |
+| Pooled Deno, MoE defaults (2 runs) | 334.2 / 325.5 | 387.5 / 387.4 | 367.8 / 366.2 |
+| Pooled Deno, 27B defaults (2 runs) | 71.9 / 72.1 | 75.5 / 75.6 | 72.9 / 72.8 |
+| Pooled Deno, 27B `PREFILL_UBATCH=256` (wide GEMM, 2 runs) | 90.3 / 90.1 | 97.3 / 97.5 | not run |
+| Pooled Chrome 131 (Playwright), MoE, all prefill options off / on (= defaults), 2 runs | 168.6 / 346.8, 168.4 / 362.0 | 88.9* / 380.7*, 162.2* / 400.4* | 127.1* / 363.5*, 112.7* / 330.7* |
+| Pooled Chrome, 27B, default / `ubatch=256`, 2 runs (all shared the GPU) | 60.0 / 72.7, 67.6 / 86.1 | 49.0 / 70.0, 77.0 / 98.8 | 70.4 / 70.8, 73.9 / 62.1 |
+
+\* shared the GPU for part of the run. Argmax equal off/on in every Chrome run; all-on vs all-off relDiff MoE
+6e-3..1.5e-1 (the known MoE routing near-tie amplification, see the 2026-09-27 entries), 27B 3e-5..4.4e-4.
+
+Gap to llama.cpp: MoE 6.2-7.2x, 27B 12x (defaults) / 9.2-9.8x (wide on). llama.cpp's MMQ runs the Q4_0 matmuls on
+int8 tensor cores; this engine runs f32 FMA (16.7 TFLOPS measured peak on the GB10, no subgroups in wgpu).
+
+### Where the time goes (Deno, `tests/prof_prefill_skip.js`)
+
+A family's cost is (full prefill time) - (time with that family's dispatches skipped); no timestamp queries.
+Skipping one family also removes the stalls it causes, so the rows overlap and do not add to 100%
+("unaccounted" is the remainder, negative when they overlap). `fixed` = time with every kernel skipped (encoding,
+submits, copies, writeBuffer, syncs): the upper bound for dispatch / submit overhead.
+
+**35B-A3B MoE, defaults** (ms and % of the full prefill; the run before the classifier fix below, so the per-sub-batch
+router + shared-gate GEMV shows as `router GEMV` and the DeltaNet beta/alpha GEMV as part of `dn_proj`):
+
+| Family | 512 (1532 ms) | 2048 (5285 ms) | 8192 (22275 ms) |
+|---|---|---|---|
+| MoE experts (grouped tiled gate/up + down + combine, sort) | 638 (41.7%) | 2358 (44.6%) | 9302 (41.8%) |
+| attention core (tiled prefill flash, per 16-column sub-batch) | 160 (10.4%) | 602 (11.4%) | 4398 (19.7%) |
+| DeltaNet core (conv, gates, recurrence, gated norm) | 202 (13.2%) | 754 (14.3%) | 2979 (13.4%) |
+| DeltaNet projections (wide GEMM + beta/alpha GEMV) | 191 (12.4%) | 758 (14.4%) | 3273 (14.7%) |
+| router GEMV (per 16-column sub-batch, batched GEMV) + `moe_route` | 181 (11.8%) | 738 (14.0%) | 2964 (13.3%) |
+| MTP draft-cache fill | 99 (6.5%) | 369 (7.0%) | 1717 (7.7%) |
+| attention projections (wide GEMM) | 65 (4.2%) | 204 (3.9%) | 860 (3.9%) |
+| fixed (all kernels skipped) | 148 (9.7%) | 384 (7.3%) | 1338 (6.0%) |
+| norms / glue | 15 (1.0%) | 31 (0.6%) | 136 (0.6%) |
+| other (the last token's `forwardToken` and head) | 81 (5.3%) | 103 (1.9%) | 121 (0.5%) |
+
+Census at 8192: 166,629 dispatches, 2,388 submits, 253,816 buffer copies, 50,204 writeBuffer (256 MB), 1 mapAsync.
+
+**27B, defaults** (clean run; `PREFILL_UBATCH=256` gives the same shares, at 90 / 97 tok/s):
+
+| Family | 512 (7099 ms) | 2048 (27089 ms) |
+|---|---|---|
+| FFN gate / up / down GEMMs | 3989 (56.2%) | 15114 (55.8%) |
+| DeltaNet projections | 1546 (21.8%) | 5793 (21.4%) |
+| attention projections | 395 (5.6%) | 1520 (5.6%) |
+| DeltaNet core | 318 (4.5%) | 1268 (4.7%) |
+| norms / glue (incl. 16 per-column `silu_mul` per layer) | 275 (3.9%) | 887 (3.3%) |
+| attention core | 177 (2.5%) | 875 (3.2%) |
+| MTP draft-cache fill | 173 (2.4%) | 666 (2.5%) |
+| fixed (all kernels skipped) | 205 (2.9%) | 688 (2.5%) |
+
+Census at 2048: 331,508 dispatches (131k of them per-column `silu_mul`, 16 per layer per pass), 530 submits, 1 mapAsync.
+
+**By the task's families:**
+- **GEMM tiles, Q4_0.** The 27B is 83% projections. Its GEMMs run at 4.6 TFLOPS (16-column path) and 5.8 TFLOPS
+  (wide 64x64 tile); llama.cpp's 895 tok/s is ~48 TFLOPS effective. On the MoE the wide GEMMs (DeltaNet and attention
+  projections, 5.2-5.7 TFLOPS) are 18%.
+- **Attention prefill.** Small on the 27B (3%). On the MoE it grows to 20% at 8192: it runs per 16-column sub-batch
+  even inside a 256-column wide chunk, so K/V are re-read 16x per chunk, at ~1.25 TFLOPS.
+- **DeltaNet.** No chunked form on main: the recurrence runs serially per 16-column sub-batch. 4.5% on the 27B,
+  13-14% on the MoE at every length.
+- **MoE expert batching.** Tokens are grouped per expert (`moe_gsort`, U=256), but the tiled kernels take chunks of
+  at most UC=8 (token, slot) pairs, so each expert's weights are re-read per 8 pairs, and the shared expert (used by
+  all 256 tokens) is re-read 32 times per ubatch. Experts: ~56 MFLOP per token-layer, 18.5 TFLOP at 8192 in 9.3 s =
+  **2.0 TFLOPS**, a third of the dense wide GEMM.
+- **Dispatch / submit overhead** is at most 3% (27B) to 6-10% (MoE; every wide chunk ends with
+  `onSubmittedWorkDone`, and the per-sub-batch structure makes ~500 copies per 16 tokens).
+- **Readbacks**: one `mapAsync` per prefill (the last token's logits). Not a factor.
+
+### Top 3 opportunities (ranked by expected gain)
+
+1. **MoE: MMQ-style grouped expert GEMM** (tolerance, prefill-only). Replace the UC=8 tiled kernels with a real
+   per-expert tile over all of that expert's tokens in the ubatch (BN 16-64 token columns, dequantize-once weight
+   tile, the wide GEMM's 64x64 register blocking), run the shared expert as one dense wide GEMM over the whole chunk,
+   and try U=512 (more tokens per expert). Hypothesis: the experts are bound by per-8-pair weight re-reads and reduction
+   traffic, not DRAM (2.0 TFLOPS, ~70 GB/s effective); at wide-GEMM efficiency (5.5 TFLOPS) they drop from 42-45% to
+   ~15%. **Expected: MoE prefill +35-45% (Deno 2048: 387 -> ~540 tok/s).**
+2. **DP4a (Q8_1 activations) in the wide prefill GEMM, and wide prefill on by default for the 27B.** Wide on is
+   already measured at +26-29% on the 27B in Deno (72 -> 90 at 512, 75.5 -> 97.4 at 2048; relDiff was 5.2e-4 on
+   2026-09-27). The 27B is then 84% f32 FMA GEMM at 5.8 TFLOPS against a 16.7 TFLOPS f32 peak; `dot4I8Packed`
+   measured 59.7 TOPS (3.6x). Hypothesis: quantizing each chunk's activations to Q8_1 per 32 once and dotting with
+   dp4a halves the GEMM time. **Expected: 27B ~97 -> ~160 tok/s; MoE +8-10% on its projections (and more if
+   opportunity 1 uses the same inner loop).**
+3. **Take attention, DeltaNet, the router and the MTP fill off the 16-column sub-batch loop inside wide chunks.**
+   Today a 256-token chunk runs these 16 times per layer: attention re-reads K/V per 16 columns (MoE 20% at 8192), the
+   DeltaNet recurrence is serial over the chunk (13%), the router GEMV re-streams its f32 weights per sub-batch and
+   `moe_route` runs per sub-batch (11-14%), the MTP fill runs GEMVs per sub-batch (7%), plus ~500 copies per 16 tokens.
+   Hypothesis: one attention tile over all 256 query columns per KV read, the chunked (WY) DeltaNet form over 64-column
+   chunks, the router as a wide GEMM (f32 or bf16) and one `moe_route` per chunk, and the MTP fill on the wide GEMM
+   cut these ~45% of MoE prefill roughly in half. **Expected: MoE +20-30% at 512-2048, +30-35% at 8192; 27B +5%.**
+
+Commands:
+- `cd tests && MODEL=moe|27b [LENS=512,2048] [SKIPS=0] [PREFILL_UBATCH=256] deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights prof_prefill_skip.js`
+- `node tests/bench/chrome_bench.mjs <gguf> 4 "batchcols=16&prefilllen=N&prefillall=1&opts=%7B%22maxSeq%22%3A8400%7D"` (MoE), `...&ubatch=256` (27B)
+- `llama-bench -m <gguf> -p 512,2048,8192 -n 0 -r 3 -fa 1`
+
+`tests/prof_prefill_skip.js` is new on this branch. It builds its op-to-family map after the warm-up prefill, because
+the batched and wide ops only exist after the first prefill (the first version filed every 27B projection under
+`proj_other`).
