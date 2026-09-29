@@ -170,13 +170,15 @@ function hostWith(layersN) {
 }
 Deno.test("aiLoadDeath: first kill while loading shrinks the phone's share and re-deals; the second leaves it out", () => {
   const h = hostWith({ host: 30, phone: 2 });
-  const died = { during: "streaming blk.38.ffn_down_exps.weight (160 MB)", ago: 20, loading: true };
+  const died = { during: "streaming blk.38.ffn_down_exps.weight (160 MB)", ago: 20, at: 1000, loading: true };
   ok(h.f.aiLoadDeath("new", { name: "phone", died }), "handled");
+  ok(h.f.aiLoadDeath("new", { name: "phone", died: { ...died, ago: 25 } }), "the same kill reported again (another link)");
+  eq(h.redeals.length, 1, "counted once");
   eq(h.ai.shareCap.get("phone"), 0.46);
   eq(h.sent[0][1].t, "ai-share"); eq(h.sent[0][1].gb, 0.46);
   eq(h.redeals.length, 1, "re-dealt");
   eq(h.closed, ["old"], "the stale link is closed");
-  ok(h.f.aiLoadDeath("new", { name: "phone", died }), "handled again");
+  ok(h.f.aiLoadDeath("new", { name: "phone", died: { ...died, at: 2000 } }), "a second kill");
   ok(h.ai.dropped.has("phone"), "left out after a second kill");
   eq(h.sent[1][1].drop, true);
   eq(h.redeals.length, 2);

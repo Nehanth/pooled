@@ -69,6 +69,16 @@ const rand = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)))
 let peer = null;          // my PeerJS peer
 let isHost = false;
 let roomCode = null;
+// The breadcrumb the previous page of this tab left (room.js crumb): what it was doing when it was
+// last heard from, so a tab iOS killed can say so when it rejoins. Read once per page load, and its
+// "loading" mark consumed at once, so one kill is reported once (not again on a later reconnect).
+const diedCrumb = (() => {
+  try {
+    const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null");
+    if (c?.loading) localStorage.setItem("pooled-crumb", JSON.stringify({ ...c, loading: undefined }));
+    return c && Date.now() - c.t < 10 * 60 * 1000 ? c : null;
+  } catch { return null; }
+})();
 let myName = null;
 let myMeta = {};
 // conns: peerId -> { conn, name, meta, rtt, mbps, card }
@@ -714,7 +724,7 @@ async function start(create, resume = null) {
   const gbIn = parseFloat($("join-gb").value);
   myMeta.contribGB = Math.min(lendMax(), Math.max(lendMin(), gbIn > 0 ? gbIn : (myMeta.contribGB || 1)));
   // killed while loading layers last time (the breadcrumb below): come back with the smallest share
-  try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (myMeta.pledgeMax && c?.loading && Date.now() - c.t < 10 * 60 * 1000) myMeta.contribGB = lendMin(); } catch {}
+  if (myMeta.pledgeMax && diedCrumb?.loading) myMeta.contribGB = lendMin();
 
   // STUN for hole-punching; TURN as fallback for symmetric NAT / CGNAT peers.
   // ICE prefers direct candidates, so TURN only carries traffic when a direct
@@ -747,7 +757,7 @@ async function start(create, resume = null) {
       clearTimeout(timeout);
       wire(conn, "host", undefined, true);
       let died = null;
-      if (!VQ.get("embed")) try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c && Date.now() - c.t < 10 * 60 * 1000) died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000), loading: !!c.loading }; } catch {}
+      if (!VQ.get("embed") && diedCrumb) { const c = diedCrumb; died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000), at: c.t, loading: !!c.loading }; }
       conn.send({ t: "hello", name: myName, meta: myMeta, died, v: PROTOCOL });
       enterRoom();
     });
@@ -1935,7 +1945,11 @@ function aiWelcome(id) {
 function aiLoadDeath(newId, d) {
   const name = d.name;
   if (ai.role !== "host" || !d.died?.loading || !ai.plan?.has(name) || !ai.chainNames?.includes(name)) return false;
-  ai.loadDeaths ??= new Map(); ai.shareCap ??= new Map(); ai.dropped ??= new Set();
+  ai.loadDeaths ??= new Map(); ai.shareCap ??= new Map(); ai.dropped ??= new Set(); ai.deathsSeen ??= new Set();
+  // the same kill again (the device's hello on another link, or a reconnect): already handled
+  const kill = name + "@" + (d.died.at ?? d.died.ago);
+  if (ai.deathsSeen.has(kill)) return true;
+  ai.deathsSeen.add(kill);
   const deaths = (ai.loadDeaths.get(name) || 0) + 1;
   ai.loadDeaths.set(name, deaths);
   const meta = conns.get(newId)?.meta;
