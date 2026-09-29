@@ -291,7 +291,8 @@ try {
       const answer = await p.evaluate(() => [...document.querySelectorAll(".m.bot .bubble")].pop()?.textContent || "");
       const crumb = await p.evaluate(() => { try { return JSON.parse(localStorage.getItem("pooled-crumb") || "{}").s || ""; } catch { return ""; } });
       const tele = await p.evaluate(() => window.__xTele?.() || null).catch(() => null);
-      const row = { idx, mode, prompt: pn, round: r, traced, tele, t0: tRound, t1: Date.now(), ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2],
+      const links = await p.evaluate(() => window.pooledDebug?.() || null).catch(() => null);
+      const row = { idx, mode, prompt: pn, round: r, traced, tele, links, t0: tRound, t1: Date.now(), ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2],
         accepted: acc ? +acc[1] / 100 : null, lookupTok: lk ? +lk[1] : 0, rtt: s.rtt, status: st.slice(0, 240), crumb: crumb.slice(0, 300),
         answerSha: crypto.createHash("sha256").update(answer).digest("hex").slice(0, 16), answer };
       if (traced) {
