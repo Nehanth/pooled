@@ -1,7 +1,7 @@
 // Code mode's preview origin (roadmap 29): the preview-origin meta's per-host list
 // (harness/preview-frame.js previewOrigin, relayUrl), and the relay's headers in both Vercel configs
 // (vercel.json for pooled.run, preview-host/vercel.json for the second site).
-import { previewOrigin, relayUrl } from "../../harness/preview-frame.js";
+import { previewOrigin, relayUrl, siteOf } from "../../harness/preview-frame.js";
 import { CSP } from "../../harness/preview-build.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
@@ -42,8 +42,21 @@ Deno.test("previewOrigin: refuses insecure, malformed and same-site origins", ()
   eq(previewOrigin("pooled.run=", "pooled.run"), null, "empty value");
   eq(previewOrigin("https://pooled.run", "pooled.run"), null, "the page's own host");
   eq(previewOrigin("https://preview.pooled.run", "pooled.run"), null, "a subdomain shares the site");
-  eq(previewOrigin("https://run", "pooled.run"), null, "a parent");
-  eq(previewOrigin("http://127.0.0.1:8080", "localhost"), "http://127.0.0.1:8080", "http on loopback is fine");
+  eq(previewOrigin("https://pooled.run", "app.pooled.run"), null, "a parent");
+  eq(previewOrigin("https://preview.pooled.run", "www.pooled.run"), null, "a sibling subdomain shares the site");
+  eq(previewOrigin("https://pooled-preview.vercel.app", "pooled-dev.vercel.app"), "https://pooled-preview.vercel.app", "vercel.app names are separate sites");
+  eq(previewOrigin("https://x.pooled-dev.vercel.app", "pooled-dev.vercel.app"), null, "a child of a vercel.app name");
+  eq(previewOrigin("http://127.0.0.1:8080", "localhost", "http:"), "http://127.0.0.1:8080", "http on loopback is fine from an http page");
+  eq(previewOrigin("http://127.0.0.1:8080", "pooled.run", "https:"), null, "not from an https page");
+});
+
+Deno.test("siteOf: last two labels, three under a two-part suffix; IPs and single labels as they are", () => {
+  eq(siteOf("preview.pooled.run"), "pooled.run");
+  eq(siteOf("A.B.Pooled.Run."), "pooled.run");
+  eq(siteOf("x.example.co.uk"), "example.co.uk");
+  eq(siteOf("pooled-git-x.vercel.app"), "pooled-git-x.vercel.app");
+  eq(siteOf("127.0.0.1"), "127.0.0.1");
+  eq(siteOf("localhost"), "localhost");
 });
 
 const fakeDoc = (href, content) => ({

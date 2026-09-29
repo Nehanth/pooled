@@ -2,7 +2,7 @@
   "framework": null,
   "buildCommand": "rm -rf public && mkdir -p public/harness && cp ../harness/preview-relay.html public/harness/",
   "outputDirectory": "public",
-  "ignoreCommand": "git diff --quiet HEAD^ HEAD -- ../harness/preview-relay.html .",
+  "ignoreCommand": "git diff --quiet \"${VERCEL_GIT_PREVIOUS_SHA:-HEAD^}\" HEAD -- ../harness/preview-relay.html .",
   "trailingSlash": false,
   "headers": [
     { "source": "/(.*)", "headers": [{ "key": "X-Content-Type-Options", "value": "nosniff" }] },

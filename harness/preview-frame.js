@@ -64,7 +64,7 @@ export function relayUrl(doc = globalThis.document) {
   if (!loc) return null;
   const meta = doc.querySelector?.('meta[name="preview-origin"]')?.content;
   const path = "/harness/preview-relay.html";
-  const origin = previewOrigin(meta, loc.hostname);
+  const origin = previewOrigin(meta, loc.hostname, loc.protocol);
   if (origin) return origin + path;
   const port = loc.port ? ":" + loc.port : "";
   if (loc.hostname === "localhost") return `${loc.protocol}//127.0.0.1${port}${path}`;
@@ -76,10 +76,10 @@ export function relayUrl(doc = globalThis.document) {
 // content is a list (spaces or commas): "host=origin" entries for one host each, and a bare origin
 // for any other host, e.g.
 //   "pooled.run=https://pooled-preview.vercel.app pooled-dev.vercel.app=https://pooled-preview-dev.vercel.app"
-// An exact host entry wins over a bare one. Only an https origin (http on loopback) is taken, and
-// not one on the page's own host or a parent or child of it (a subdomain shares the site, so the
-// process: no isolation). Anything else: null.
-export function previewOrigin(content, host) {
+// An exact host entry wins over a bare one. Only an https origin (http on loopback, from an http
+// page) is taken, and not one on the page's own site (a subdomain or sibling shares the site, so
+// the process: no isolation). Anything else: null.
+export function previewOrigin(content, host, protocol = "https:") {
   let exact = null, any = null;
   for (const tok of String(content ?? "").split(/[\s,]+/)) {
     if (!tok) continue;
@@ -92,10 +92,21 @@ export function previewOrigin(content, host) {
   let u;
   try { u = new URL(v); } catch { return null; }
   const loop = u.hostname === "localhost" || u.hostname === "127.0.0.1";
-  if (!(u.protocol === "https:" || (u.protocol === "http:" && loop))) return null;
-  const h = String(host).toLowerCase(), o = u.hostname;
-  if (h && (o === h || o.endsWith("." + h) || h.endsWith("." + o))) return null;
+  if (!(u.protocol === "https:" || (u.protocol === "http:" && loop && protocol !== "https:"))) return null;
+  if (host && siteOf(u.hostname) === siteOf(host)) return null;
   return u.origin;
+}
+
+// Registrable domain ("site") of a host name, close enough for the check above: the last two
+// labels, or three under a known two-part suffix (co.uk, vercel.app, ...). IP addresses and single
+// labels are their own site.
+const SUFFIX2 = new Set(["co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz", "co.in",
+  "com.br", "com.cn", "vercel.app", "github.io", "pages.dev", "netlify.app", "web.app", "workers.dev", "fly.dev"]);
+export function siteOf(host) {
+  const h = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (!h || /^[\d.]+$/.test(h) || h.includes(":") || !h.includes(".")) return h;
+  const p = h.split(".");
+  return p.slice(SUFFIX2.has(p.slice(-2).join(".")) ? -3 : -2).join(".");
 }
 
 export function mountPreview(el, source, port, { onLog = () => {}, onStatus = () => {}, autorun = true, relay = undefined, onShow = null, onDone = null, run = false } = {}) {

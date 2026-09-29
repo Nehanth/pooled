@@ -12,10 +12,10 @@ Code mode runs the agent's app in a sandboxed frame. Without a second site, that
 - Update SECURITY.md's Code mode section once it is live.
 
 ## In the repo
-- `preview-host/vercel.json`: a Vercel project that serves only `/harness/preview-relay.html` (the build copies it into `public/`). It rebuilds only when the relay or `preview-host/` changes.
+- `preview-host/vercel.json`: a Vercel project that serves only `/harness/preview-relay.html` (the build copies it into `public/`). It rebuilds only when the relay or `preview-host/` changed since the last deployed commit.
 - The relay is served with a CSP: the preview document's own policy (`harness/preview-build.js` `CSP`, which the app's srcdoc document inherits from the relay), plus `form-action 'none'` and `frame-ancestors` for pooled.run, pooled-dev.vercel.app and loopback. No `X-Frame-Options`. `vercel.json` sends the same headers for pooled.run's own copy, so a second domain added to the main project works too.
-- The `preview-origin` meta takes one origin, or `host=origin` entries, so one static `p2p.html` can point production and staging at different preview sites. It refuses plain http (except loopback) and the page's own host or a parent or child of it.
-- `tests/unit/preview_origin_test.js` checks the parsing and that both configs carry the same relay headers. `tests/e2e/preview_browser.mjs` serves the relay with those headers, so the hang and `run_js` checks run under the real policy.
+- The `preview-origin` meta takes one origin, or `host=origin` entries, so one static `p2p.html` can point production and staging at different preview sites. It refuses plain http (except loopback from an http page) and any origin on the page's own site (the same host, a subdomain or a sibling).
+- `tests/unit/preview_host_test.js` checks the parsing and that both configs carry the same relay headers. `tests/e2e/preview_browser.mjs` serves the relay with those headers, so the hang and `run_js` checks run under the real policy.
 
 ## Deploy step (owner)
 Nothing below is done by the repo; it needs Vercel access.
