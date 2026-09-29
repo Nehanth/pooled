@@ -660,27 +660,31 @@ html:not(.js) .game canvas{display:none}
 
 /* ---------- no JS: every scene, finished, one under the other ---------- */
 html:not(.js) .modes{display:none}   /* a switch nothing drives: both scenes show below */
-html:not(.js) .body{height:auto}
+html:not(.js) .body{height:auto;container:stage/inline-size}   /* the narrow stage's rules (@container stage) hold without JS too */
 html:not(.js) .s-tabs{height:400px}
 html:not(.js) #tabA .mpre,html:not(.js) #tabA .mwait,html:not(.js) #tabB .mbtn{display:none}
 html:not(.js) #tabA .mpost,html:not(.js) #tabA .mjoined,html:not(.js) #tabB .mok{display:flex}
 html:not(.js) .model{position:static;padding:30px 0;border-top:1px solid var(--rule-2)}
 html:not(.js) .cells i{background:var(--sw);box-shadow:none}
+html:not(.js) .bd-s{white-space:normal;text-wrap:balance}
 html:not(.js) .pkt{display:none}
 html:not(.js) .s-chat{border-top:1px solid var(--rule-2)}
 html:not(.js) .msgs{padding-top:24px}
 html:not(.js) .composer,html:not(.js) .wlive{display:none}
 html:not(.js) .a .m-acts{visibility:visible}
 html:not(.js) :is(.diff.new,.ctools,.cbar){display:none}
-html:not(.js) .log{-webkit-mask-image:none;mask-image:none;overflow:auto}
-html:not(.js) .s-code{height:600px;border-top:1px solid var(--rule-2)}
+/* the whole log, down to the change and its reply (a scroll box would open at its top, the change hidden) */
+html:not(.js) .log{-webkit-mask-image:none;mask-image:none;overflow:visible}
+html:not(.js) .s-code{min-height:600px;border-top:1px solid var(--rule-2)}
+html:not(.js) .board-static{max-height:560px}
 html:not(.js) .pvcol{width:var(--pvw)}
 html:not(.js) .stepbar{display:block;padding:14px 18px}
 html:not(.js) .sb-dots{display:block;counter-reset:st}
-html:not(.js) .sb-dots li{counter-increment:st;font-size:var(--t-lg);line-height:1.9;color:var(--ink-2)}
+html:not(.js) .sb-dots li{display:flex;align-items:baseline;counter-increment:st;font-size:var(--t-lg);line-height:1.6;padding:3px 0;color:var(--ink-2)}
 html:not(.js) .sb-dots li.gap{margin-left:0}
-html:not(.js) .sb-dots li::before{content:counter(st) ". ";font:500 var(--t-sm)/1 var(--mono);color:var(--ink-3)}
-html:not(.js) .sb-dots button{display:inline;height:auto;padding:0;cursor:default;pointer-events:none}
+html:not(.js) .sb-dots li::before{content:counter(st) ".";flex:none;min-width:2.2em;font:500 var(--t-sm)/1 var(--mono);color:var(--ink-3)}
+/* a block, left-aligned, beside its number: an inline button is an inline-block, and a long one wrapped away from it */
+html:not(.js) .sb-dots button{display:block;height:auto;padding:0;text-align:left;cursor:default;pointer-events:none}
 html:not(.js) .sb-dots i{display:none}
 
 /* ---------- the stage fits the screen (demo.js sets --body-h so the hero and the demo share the first
@@ -881,7 +885,7 @@ html:not(.js) .sb-dots i{display:none}
   .pvcol{position:absolute;inset:0;width:auto!important;opacity:0;visibility:hidden;transition:opacity .45s var(--ease),visibility 0s .45s}
   .demo.served.app-on .pvcol{opacity:1;visibility:visible;transition:opacity .45s var(--ease),visibility 0s}
   .pv{width:auto!important;border-left:0}
-  html:not(.js) .pvcol{position:static;height:480px}
+  html:not(.js) .pvcol{position:static;height:480px;opacity:1;visibility:visible}   /* no .served without JS: the finished app shows */
   html:not(.js) .s-code{flex-direction:column;height:auto}
 
   .stepbar{flex-wrap:wrap;gap:0 6px;margin-top:10px;padding:8px 6px 2px 12px}
