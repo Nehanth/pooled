@@ -665,7 +665,6 @@ html:not(.js) .game canvas{display:none}
 .closer h2{max-width:15em;margin:0 auto;font:400 clamp(34px,4.8vw,60px)/1.05 var(--display);letter-spacing:-.035em;text-wrap:balance;text-shadow:0 0 24px var(--bg),0 0 6px var(--bg)}
 .closer h2 span{color:var(--blue)}
 .ctas{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-top:34px}
-.needs{max-width:36em;margin:26px auto 0;font:400 14px/1.55 var(--sans);color:var(--ink-3);text-wrap:pretty;text-shadow:0 0 14px var(--bg),0 0 4px var(--bg)}
 .footer{border-top:1px solid var(--rule)}
 .foot-in{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px 24px;padding-top:22px;padding-bottom:26px;font-size:var(--t-md);color:var(--ink-3)}
 
