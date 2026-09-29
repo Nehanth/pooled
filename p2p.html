@@ -123,6 +123,11 @@
   /* device chips (room.js peerCard): dot in the device's layer colour, icon, name, GB; a click opens its card */
   #peers { flex: 0 1 auto; min-width: 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px; margin: -2px 0; }
   #peers::-webkit-scrollbar { display: none; }
+  /* more chips than fit: the clipped edge fades (room.js peersEdge), so the row reads as scrollable */
+  #peers:is(.fade-l, .fade-r) { --fl: 0px; --fr: 0px; -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--fl), #000 calc(100% - var(--fr)), transparent); mask-image: linear-gradient(90deg, transparent, #000 var(--fl), #000 calc(100% - var(--fr)), transparent); }
+  #peers.fade-l { --fl: 32px; }
+  #peers.fade-r { --fr: 32px; }
+  #peers:has(> .peer-card > .pop:not([hidden])) { -webkit-mask-image: none; mask-image: none; }   /* a mask clips the open card too (it is fixed, but still inside) */
   .peer-card { --sw: var(--faint); flex: none; position: relative; animation: chipin .5s var(--ease); }
   @keyframes chipin { from { opacity: 0; transform: translateX(-6px) scale(.96); } }
   .pchip { --chip-bd: var(--border); display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border: 1px solid var(--chip-bd); border-radius: 8px; background: var(--panel); font: 400 12px/1 var(--sans); color: var(--text); white-space: nowrap; }

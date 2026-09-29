@@ -266,7 +266,22 @@ document.addEventListener("pointerdown", (e) => {
   t.addEventListener("pointerleave", () => t.classList.remove("tip-off"), { once: true });
 });
 addEventListener("resize", () => chipPop(null));
-$("peers").addEventListener("scroll", () => chipPop(null), { passive: true });
+$("peers").addEventListener("scroll", () => { chipPop(null); peersEdge(); }, { passive: true });
+// more chips than the header has room for: fade the side(s) that hide some, and let a mouse wheel
+// scroll the row sideways (only a trackpad or a drag could reach the last chips before)
+function peersEdge() {
+  const b = $("peers"), max = b.scrollWidth - b.clientWidth;
+  b.classList.toggle("fade-l", max > 1 && b.scrollLeft > 1);
+  b.classList.toggle("fade-r", max > 1 && b.scrollLeft < max - 1);
+}
+$("peers").addEventListener("wheel", (e) => {
+  const b = $("peers");
+  if (e.ctrlKey || Math.abs(e.deltaY) <= Math.abs(e.deltaX) || b.scrollWidth <= b.clientWidth) return;
+  e.preventDefault();
+  b.scrollLeft += e.deltaY * (e.deltaMode === 1 ? 16 : 1);
+}, { passive: false });
+if (typeof ResizeObserver === "function") new ResizeObserver(peersEdge).observe($("peers"));
+new MutationObserver(peersEdge).observe($("peers"), { childList: true, subtree: true, characterData: true });
 // what a card says about its device (the sim hook repaints with made-up devices)
 function paintCard(card, name, meta, self) {
   card.querySelector(".pname").textContent = name;
