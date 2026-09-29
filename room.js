@@ -11,6 +11,7 @@ import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
 import { PrefixIndex } from "./harness/prefix.js";
+import { CkptStore } from "./room/ckpt-store.js";
 import { MODELS, NEED_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
@@ -18,6 +19,10 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // regenerate, an edited question or a branch resumes from the longest saved turn instead of
 // prefilling the whole conversation again. 0 turns it off.
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
+// ...and a copy of each on disk (OPFS, room/ckpt-store.js), so a device that reloads reads its part
+// back instead of the room prefilling the whole conversation again. ?ckptdisk=0: GPU copies only.
+const ckptDisk = CKPT_MAX && new URLSearchParams(location.search).get("ckptdisk") !== "0" && globalThis.navigator?.storage?.getDirectory
+  ? new CkptStore() : null;
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
@@ -1738,6 +1743,9 @@ async function aiStart(modelArg) {
     ai.fed = [];                              // fresh engines everywhere: nothing cached yet
     ai.pendingCtl = {};
     ckptClear();
+    ai.ckptRestoring = true;                  // ...except checkpoints saved to disk before a reload
+    const back = await ckptRestore().finally(() => { ai.ckptRestoring = false; });
+    if (back) log("room", `${back} saved checkpoint${back > 1 ? "s" : ""} read back from disk`);
     aiMaybeReady();
   } catch (err) {
     clearInterval(ai.progTimer);
@@ -1825,13 +1833,13 @@ function aiRejoin(newId, name) {
   const fresh = { ...msg, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: peer.id };
   if (i > 0) sendTo(ai.chain[i - 1], { t: "ai-next", next: newId });
   sendTo(newId, fresh);
-  ai.fed = null; ckptClear(true);           // its fresh engine holds nothing: re-prefill next time
+  ai.fed = null; ckptRejoin();              // its fresh engine holds only what it reads back from disk
   log("room", `${name} came back — reloading its layers`);
   aiStatus(`${name} reconnected, reloading its layers…`);
   $("ai-row").style.display = ai.readyPeers.size >= ai.chain.length ? "flex" : "none";
 }
 function aiMaybeReady() {
-  if (ai.role !== "host" || !ai.engine) return;
+  if (ai.role !== "host" || !ai.engine || ai.ckptRestoring) return;   // (aiStart calls it again once the restore is done)
   if (ai.readyPeers.size < ai.chain.length) return;
   const n = ai.chain.length + 1;
   ai.degraded = false;
@@ -1879,6 +1887,10 @@ function sendChain(msg) {
   ai.hostAmax = Math.max(0.9 * (ai.hostAmax || 0), wireStats.lastMax || 0);
   const ctl = ai.pendingCtl; ai.pendingCtl = {};
   sendHidden(ai.chain[0], { ...msg, ...ctl });
+  // the chain saves with this frame: only now is it a checkpoint every device has, so only now
+  // does the host's own copy go to disk (a reloaded host must not index a slot no worker saved)
+  const saved = ctl.sv != null && ai.ckpt?.items.find((x) => x.key === ctl.sv);
+  if (saved) ckptPersist(ctl.sv, saved.ids);
 }
 // forget the conversation state on every device: here now, on the chain with the next frame
 function resetState() {
@@ -1893,10 +1905,13 @@ function resetState() {
   ai.pendingCtl = ai.chain.length ? { ...(rb != null ? { rb } : {}), ...(sv != null ? { sv } : {}), ...(dp != null ? { dp } : {}), reset: 1 } : {};
 }
 // ---- checkpoints (?ckpt): the room's state after an answer, saved on every device ----
+// (tellChain: the states are bad, so the disk copies go too; without it the engines were rebuilt,
+// and the copies on disk are what a restore reads back)
 function ckptClear(tellChain = false) {   // engines rebuilt or in an unknown state: nothing saved is usable
   const keys = ai.ckpt ? ai.ckpt.items.map((x) => x.key) : [];
   for (const k of keys) { try { ai.engine?.dropSlot?.(k); } catch {} }
   if (tellChain && keys.length && ai.chain.length) ai.pendingCtl = { ...ai.pendingCtl, dp: [DROP_ALL] };
+  if (tellChain) ckptForget([DROP_ALL]);
   ai.ckpt = new PrefixIndex(1 << 30); ai.ckptN = ai.ckptN || 0;
 }
 function ckptSave() {
@@ -1915,9 +1930,11 @@ function ckptSave() {
     const old = ai.ckpt.items.reduce((a, b) => (a.t < b.t ? a : b));
     ai.ckpt.remove(old.key); ai.engine.dropSlot(old.key); drop.push(old.key);
   }
+  if (drop.length) ckptForget(drop);
   const key = ai.ckptN = (ai.ckptN || 0) % 65534 + 1;   // slot numbers ride the frame header (u16)
   ai.engine.saveSlot(key);
   ai.ckpt.add(ai.fed.slice(), key);
+  if (!ai.chain.length) ckptPersist(key, ai.fed);   // solo: no chain to wait for (sendChain does it otherwise)
   if (ai.chain.length) {
     const dp = [...new Set([...[].concat(ai.pendingCtl?.dp ?? []), ...drop])];
     ai.pendingCtl = { ...ai.pendingCtl, sv: key, ...(dp.length ? { dp } : {}) };
@@ -1932,6 +1949,58 @@ function ckptResume(ids, reused) {
   ai.pos = b.n; ai.fed = ids.slice(0, b.n);
   if (ai.chain.length) { const { reset, ...rest } = ai.pendingCtl || {}; ai.pendingCtl = { ...rest, ld: b.key }; }
   return b.n;
+}
+// where this device's copy of a slot lives on disk: the room, the model and its layers
+function ckptWhere(slot) { return { room: roomCode, model: ai.model, sig: ai.engine.stateSignature(), slot }; }
+// copy slot `key` (just saved on the GPU) to disk, in the background; ids: the host's tokens for it
+function ckptPersist(key, ids) {
+  if (!ckptDisk || !ai.engine?.exportSlot || !ai.engine.stateSignature || !roomCode) return;
+  const E = ai.engine, where = ckptWhere(key);
+  // read when the write's turn comes: a slot dropped or an engine replaced by then is skipped
+  ckptDisk.put(where, () => (ai.engine === E ? E.exportSlot(key) : Promise.reject(new Error("engine replaced"))), ids ? { ids: Array.from(ids) } : {})
+    .catch(() => false);
+}
+function ckptForget(keys) {
+  if (!ckptDisk || !roomCode || !keys?.length) return;
+  ckptDisk.drop(roomCode, keys.includes(DROP_ALL) ? "all" : keys).catch(() => {});
+}
+// After this device's layers load (a reload, the host resuming its room, a re-deal): read the copies
+// of its part back into GPU slots. The host also gets its index back (the tokens of each checkpoint);
+// a worker just holds the slots for when the host asks (ld), and a load it is missing fails that
+// question, which the host then prefills instead (roomGenerate).
+async function ckptRestore() {
+  if (!ckptDisk || !ai.engine?.importState || !ai.engine.stateSignature || !roomCode) return 0;
+  const E = ai.engine, host = ai.role === "host";
+  let n = 0;
+  try {
+    const have = (await ckptDisk.list(ckptWhere(0))).filter((c) => !host || Array.isArray(c.meta.ids));
+    for (const c of have.slice(0, CKPT_MAX + 1)) {
+      const st = await ckptDisk.get(ckptWhere(c.slot));
+      if (!st || ai.engine !== E) continue;
+      try { E.importState(st); E.saveSlot(c.slot); } catch { continue; }   // another shape: not ours after all
+      n++;
+      ai.ckptN = Math.max(ai.ckptN || 0, c.slot);   // never hand out a number a device may still have on disk
+      if (host) {
+        if (!ai.ckpt) ckptClear();
+        if (ai.ckpt.items.length < CKPT_MAX) ai.ckpt.add(st.meta.ids, c.slot);
+        else E.dropSlot(c.slot);
+      }
+    }
+  } catch {}
+  if (n && ai.engine === E) { E.reset?.(); if (host) { ai.pos = 0; ai.fed = []; } }
+  return n;
+}
+// A device of the chain came back with a fresh engine that reads its copies back from disk
+// (ckptRestore). The checkpoints it can have are those whose save went out on a frame before it
+// left: keep those, forget one still waiting to go out (no device saved it; on the fresh engine it
+// would save nothing useful). Without disk copies nothing saved survives it: drop everything.
+function ckptRejoin() {
+  if (!ckptDisk) { ckptClear(true); return; }
+  const { sv, ...rest } = ai.pendingCtl || {};
+  if (sv == null) return;
+  ai.ckpt?.remove(sv);
+  try { ai.engine?.dropSlot?.(sv); } catch {}
+  ai.pendingCtl = rest;
 }
 
 // Speculative drafting reads the draft block's own KV cache, which prefill fills with the trunk's
@@ -2344,7 +2413,7 @@ const MAXNEW_PARAM = Math.max(0, parseInt(new URLSearchParams(location.search).g
 //   signal                AbortSignal; ai.abort (the Stop button) works too
 // -> { tokens, reason: "stop"|"max"|"ctx"|"abort", reused, prefilled, count, tps, acc, copied,
 //      tPre, tDecode, preFrames, stats }
-async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(ai.settings.sampling), signal, onStatus = () => {} } = {}) {
+async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(ai.settings.sampling), signal, onStatus = () => {}, again = false } = {}) {
   if (!ai.engine) throw new Error("the model is not loaded");
   // a device in the chain is gone: its frames would go nowhere and wait out the lap timeouts
   if (ai.degraded) throw new Error("a device left: re-deal the layers first");
@@ -2357,8 +2426,11 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
   // the sampler's candidates. Only for a sampler that says it reads them (.gpu); a wrapper that
   // masks logits has no .gpu and keeps the full-logits path. specStep checks the same itself.
   const desc = ai.engine.gpuDescFor?.(sample) || null;
+  let fromCkpt = false;
   try {
-    reused = ckptResume(ids, reusablePrefix(ai.fed, ids));
+    const cached = reusablePrefix(ai.fed, ids);
+    reused = ckptResume(ids, cached);
+    fromCkpt = reused > cached;
     // Continue after a cap that landed on a written token: the caches hold the whole open answer,
     // so there is nothing to prefill, and the next token was already sampled when it stopped
     const pend = ai.pending; ai.pending = null;
@@ -2506,6 +2578,12 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
     ai.fed = null;            // the caches are in an unknown state: the next request starts clean
     ai.pendingCtl = {};
     ckptClear(true);
+    // a device did not have the checkpoint (it reloaded before its copy reached the disk, or the disk
+    // was full): nothing was answered yet, so prefill everything instead, once
+    if (fromCkpt && !again && !tokens.length && !aborted() && /no saved slot/.test(err.message)) {
+      onStatus("a device is missing a saved checkpoint: prefilling the conversation instead…");
+      return roomGenerate(ids, { onToken, stop, maxNew, sample, signal, onStatus, again: true });
+    }
     throw err;
   }
   const secs = tDecode / 1000, tps = count / Math.max(secs, 1e-3);
@@ -2665,8 +2743,8 @@ async function workerFrame(d) {
   // (also before a reset: the save may record the state first, and the host saved its own after
   // its rollback)
   if (d.rb != null) { ai.engine.restoreDN?.(d.rb); ctl.rb = d.rb; }
-  if (d.sv != null) { ai.engine.saveSlot?.(d.sv); ctl.sv = d.sv; }
-  if (d.dp != null) { for (const k of [].concat(d.dp)) k === DROP_ALL ? ai.engine.dropAllSlots?.() : ai.engine.dropSlot?.(k); ctl.dp = d.dp; }
+  if (d.sv != null) { ai.engine.saveSlot?.(d.sv); ckptPersist(d.sv); ctl.sv = d.sv; }
+  if (d.dp != null) { for (const k of [].concat(d.dp)) k === DROP_ALL ? ai.engine.dropAllSlots?.() : ai.engine.dropSlot?.(k); ckptForget([].concat(d.dp)); ctl.dp = d.dp; }
   if (d.reset) { ai.engine.reset?.(); ctl.reset = 1; }
   if (d.ld != null) { ai.engine.loadSlot?.(d.ld); ctl.ld = d.ld; }
   const t0 = performance.now();
@@ -2752,7 +2830,7 @@ function saveHost() {
   if (!isHost || !roomCode) return;   // from the moment the room exists, not only once a model runs
   try {
     localStorage.setItem(HOST_KEY, JSON.stringify({ code: roomCode, name: myName, model: ai.model || null, turns: ai.conv.turns,
-      transcript: ai.transcript.slice(-20), settings: ai.settings, peers: ai.chainNames || [], split: $("ai-split").value, t: Date.now() }));
+      transcript: ai.transcript.slice(-20), settings: ai.settings, peers: ai.chainNames || [], split: $("ai-split").value, ckptN: ai.ckptN || 0, t: Date.now() }));
   } catch {}
 }
 addEventListener("pagehide", saveHost);   // stamp the saved room as the tab unloads, so a reload can go straight back in
@@ -2762,6 +2840,7 @@ function savedHost() {
 function resumeHost(r) {
   ai.conv = { turns: Array.isArray(r.turns) ? r.turns : [] };
   ai.transcript = Array.isArray(r.transcript) ? r.transcript : [];
+  ai.ckptN = Number.isInteger(r.ckptN) ? r.ckptN : 0;   // slot numbers go on from here: a device's old copy is never mistaken for a new one
   if (r.settings) {
     ai.settings = { ...ai.settings, ...r.settings };
     for (const [id, k] of [["ai-persona", "persona"], ["ai-sampling", "sampling"], ["ai-length", "length"]]) if (ai.settings[k]) $(id).value = ai.settings[k];
@@ -2847,6 +2926,7 @@ async function aiOnData(from, d) {
       try {
         await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model));
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
+        await ckptRestore();   // this device's part of the room's checkpoints, if it saved any before a reload
         aiStatus(`layers ${d.range[0]}–${d.range[1] - 1} ready · syncing with the room…`);
         $("ldg-title").textContent = `layers ${d.range[0]}–${d.range[1] - 1} ready`;   // the card stays up as it is (Starting) until ai-ready-all
         $("ldg-sub").textContent = "syncing with the rest of the room";

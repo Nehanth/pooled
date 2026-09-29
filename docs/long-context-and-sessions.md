@@ -71,6 +71,27 @@ a re-deal or a failed answer clears them. Order on a device: rollback, save, dro
 `tests/e2e/room_synth.mjs --regen --expect-reuse` checks that a regenerate over 3 devices resumes
 from a checkpoint and repeats the greedy answer. `?ckpt=0` turns it off.
 
+Each device also keeps a copy of its part on disk (OPFS, `room/ckpt-store.js`), so a reload does not
+lose it. Nothing new goes over the wire: a device writes its copy when it applies `sv` and removes
+it on `dp`. The host writes its own copy only once the `sv` has gone out on a frame, with the
+checkpoint's token ids in the header, so it never indexes a slot the chain did not save. A copy is
+named by room code, slot and a hash of the model and the engine's `stateSignature()` (layers, KV
+format), and the header repeats them; a copy for other layers or another model, or in another file
+format version, reads as missing. A new copy of a slot removes the old one first, so a failed write
+(out of quota: the oldest copies of other rooms go first and the write is tried once more) leaves
+the slot missing, never stale.
+
+- A worker that reloads reads its copies back into GPU slots before it says it is ready. The host
+  keeps the checkpoints whose save went out before the worker left and forgets the one still
+  pending, so the next question resumes from the last answer the chain saved.
+- A host that reloads resumes its room (the conversation is in localStorage, with the slot
+  counter), reads its copies and their token ids back, and every device reads its own when the
+  layers are dealt again. Slot numbers go on from the saved counter, so an old copy on a device is
+  never taken for a new one.
+- A device missing the slot the host loads fails that frame ("no saved slot"); the host then drops
+  every checkpoint and prefills the whole conversation instead, once, before any token is shown.
+- `?ckptdisk=0` keeps checkpoints on the GPU only.
+
 ### Several sessions on one engine
 
 `harness/sessions.js` (`Sessions`): `switchTo(id)` parks the current conversation in a GPU slot
@@ -179,8 +200,8 @@ each chosen expert once per token today), timing on real hardware.
 ## Next
 
 1. Time it on two Macs and a GB10: decode tok/s at 1K / 8K context, prefill tok/s, `?fuse=0`.
-2. Persist room checkpoints to OPFS on every device (the engine and store are there; the room
-   keeps them on the GPU today), so a session survives a reload.
+2. Room checkpoints on disk (landed, above): time a reload of one device on real hardware, and
+   stream the copy part by part (today a device reads its whole part into memory to write it).
 3. Stable prompt rendering for agents: never drop old turns (it breaks reuse); compact instead.
 4. Several sessions at once: per-session KV / state slots batched through one pass (design:
    research/tabby-next-2026-09.md §2).

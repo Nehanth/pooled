@@ -12,7 +12,7 @@ A coding agent reads files, writes files, and reads errors, so its context fills
 - Prompt-lookup drafts over the whole context, so copying code back is cheap.
 
 ## Still open
-- Save room checkpoints to disk (OPFS) on every device, so a session survives a reload.
+- Room checkpoints on disk (OPFS) on every device landed (`room/ckpt-store.js`); still to do: check a reload on real hardware and stream the copy to disk part by part.
 - Stable prompt rendering for agents: compact old turns instead of dropping them, which breaks prefix reuse.
 - Several sessions at once through one batched pass.
 - Timing on real hardware at 1K, 8K and 32K context, with rows in the bench log.

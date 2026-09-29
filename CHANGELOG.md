@@ -4,6 +4,9 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 
 ## [Unreleased]
 
+### Added
+- **Room checkpoints on disk**: every device keeps a copy of its part of the room's checkpoints in OPFS, so a device or host that reloads reads it back and the next question resumes from the last saved answer instead of prefilling the whole conversation. A device missing its copy makes the host prefill instead. No wire change; `?ckptdisk=0` turns it off.
+
 ### Changed
 - **Metal (Apple GPUs)**:
   - The MoE's default prompt processing (wide prefill at ubatch 256 plus grouped experts) no longer loses the device under Deno on an M5 Max. Wide prefill now submits every 8 layers, which also makes GB10 MoE prefill about 5% faster, with bit-identical results.
