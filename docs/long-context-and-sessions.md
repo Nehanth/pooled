@@ -31,7 +31,11 @@ each has a switch for A/B timing on real hardware.
 - Switch: `Qwen35Engine.create({ attnFlash: false })` restores the f32 path.
 - int8 KV (`kvQ8: true`, room `?kv=q8`): one f32 scale per 32 values, `kv_store_q8` /
   `attn_flash_q8` from the same template as the f16 kernel. 36 KB per token for the whole 27B.
-  Opt-in until someone checks long-document quality on the real model.
+  Opt-in. The room host's `?kv=` decides for every device (sent with `ai-load`), and the layer
+  deal counts int8 bytes. Timed on GB10 with the 35B MoE (bench log, 2026-09-29): the same 32
+  greedy tokens as f16 at 1K, 8K and 32K and 0.35 GB of KV instead of 0.63 GB, but a 32K prompt
+  prefills 3.5x slower, because tiled prefill attention is off with int8 KV. It stays off by
+  default until tiled prefill attention supports it.
 - Any `maxSeq` works; the split length grows past 32K so a head never has more than 128 splits.
   Memory at 32K: 2.1 GB of KV for the whole model in f16, 1.2 GB in int8 (q4 KV is not
   recommended: it hurts long documents and tool calls, research §3).

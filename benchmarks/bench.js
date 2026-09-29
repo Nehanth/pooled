@@ -5,10 +5,13 @@
 //   MODEL=qwen|q38     (default qwen: 0.6B Q8_0; q38: 27B Q4_0, full 64 layers)
 //   TOKENS=<n>         decode tokens to time (default 32)
 //   VARIANT=coop|legacy  matvec kernel variant (default coop once it exists)
+//   ROOM_FLAGS=<query>   q38: the room's switches (engine/preset.js), e.g. ROOM_FLAGS="kv=q8"; unset: the room's
+//                        settings. BCOLS / ROWSB override its batch columns / batched rows per workgroup.
 import { DenseEngine, makeTokenizer, argmax } from "../engine/engine.js";
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { parseGGUFHeader, ggufWeights } from "../engine/gguf.js";
-import { openGGUF } from "../tests/load_model.js";
+import { openGGUF, roomFlags } from "../tests/load_model.js";
+import { roomQwen35Options, applyRoomFlags } from "../engine/preset.js";
 
 const MODEL = Deno.env.get("MODEL") || "qwen";
 const TOKENS = +(Deno.env.get("TOKENS") || 32);
@@ -41,9 +44,12 @@ if (MODEL === "q38") {
   tok = model.tokenizer();
   const L = +(Deno.env.get("LAYERS") || (G.meta["qwen35.block_count"] - (G.meta["qwen35.nextn_predict_layers"] || 0)));
   const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true });
-  eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L],
-    hasEmbed: true, hasHead: true, maxSeq: 512, matvecVariant: VARIANT, coopWG: WG, coopRows: ROWS,
-    batchCols: +(Deno.env.get("BCOLS") || 4), coopRowsB: +(Deno.env.get("ROWSB") || ROWS) });
+  // the room's engine settings (engine/preset.js), so this number is the room's; the kernel tuning (WG, ROWS)
+  // is per device in the room too (autotune), so it stays a knob here
+  const flags = roomFlags(), BCOLS = Deno.env.get("BCOLS"), ROWSB = Deno.env.get("ROWSB");
+  eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], vocab: G.tensors["token_embd.weight"]?.shape?.[0],
+    hasEmbed: true, hasHead: true, maxSeq: 512, matvecVariant: VARIANT, coopWG: WG, coopRows: ROWS, ...roomQwen35Options(flags),
+    ...(BCOLS ? { batchCols: +BCOLS, coopRowsB: +(ROWSB || (+BCOLS >= 16 ? 1 : ROWS)) } : ROWSB ? { coopRowsB: +ROWSB } : {}) }), flags);
 } else {
   const readAt = await openFile(Deno.env.get("GGUF") || "../models/qwen/model.gguf");
   const G = parseGGUFHeader((await readAt(0, 64 << 20)).buffer, { skipTokenizer: true });
@@ -55,11 +61,11 @@ if (MODEL === "q38") {
   eng = await DenseEngine.create({ device, cfg, weights, layerRange: [0, L],
     hasEmbed: true, hasHead: true, maxSeq: 512, matvecVariant: VARIANT, coopWG: WG, coopRows: ROWS });
 }
-console.log(`load: ${((performance.now() - t0) / 1000).toFixed(1)}s  model=${MODEL} variant=${VARIANT}`);
+console.log(`load: ${((performance.now() - t0) / 1000).toFixed(1)}s  model=${MODEL} variant=${VARIANT}${MODEL === "q38" ? ` batchCols=${eng.NC} draftVocab=${eng.draftVocab || "off"} gpuSample=${eng.gpuSample} kvQ8=${eng.kvQ8}` : ""}`);
 
 const REP = +(Deno.env.get("REP") || 1);
 promptIds = tok.encode("The quick brown fox jumps over the lazy dog. ".repeat(REP) + "In a distant future, ");
-// prefill: batched (4 tokens/pass) for all but the last prompt token
+// prefill: batched (batchCols tokens/pass) for all but the last prompt token
 const tp0 = performance.now();
 let logits = null;
 await eng.prefillTokens(promptIds.slice(0, -1));

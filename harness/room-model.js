@@ -9,14 +9,9 @@
 // The caller holds the room's lock (api.lock) for the whole agent run.
 import { buildIds, specials, splitThink } from "../room/conversation.js";
 import { pickSampler } from "../room/sampling.js";
-import { tokenTexts, constrainedSampler, deltaDecoder, asyncQueue, OwnIds, encodeTurn } from "./model-common.js";
+import { tokenTexts, constrainedSampler, deltaDecoder, asyncQueue, OwnIds, encodeTurn, ContextFull } from "./model-common.js";
 
-export class ContextFull extends Error {
-  constructor(n, max) {
-    super(`the conversation is ${n} tokens and the context is ${max}: start a new task (the files are kept)`);
-    this.name = "ContextFull"; this.tokens = n; this.max = max;
-  }
-}
+export { ContextFull };
 
 const TAG = "<tool_response>";   // the model starting to invent a tool's result: end the answer there
 const MARGIN = 16;               // positions kept free past the answer (the template's end tokens)
