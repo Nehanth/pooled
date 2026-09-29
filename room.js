@@ -11,6 +11,7 @@ import { WIRE_F16, badF32, f32ToB64, packF16, unpackF16, asU16, packWire, unpack
 import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
+import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle } from "./room/api.js";
 import { PrefixIndex } from "./harness/prefix.js";
 import { MODELS, NEED_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
@@ -19,20 +20,24 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // regenerate, an edited question or a branch resumes from the longest saved turn instead of
 // prefilling the whole conversation again. 0 turns it off.
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
-import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
+import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DROP_ALL } from "./room/transport.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
-import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
+import { planSplit, planForSpeed, phonesToLeaveOut, isPhoneMeta, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
 import { lookupDrafts } from "./room/lookup.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
 import { computeScreen } from "./room/compute.js";
+import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
 
 // Hidden-state transport (room/transport.js). ?wire=off falls back to PeerJS messages;
 // ?wire=slice uses one sliced channel; ?wire=stripeN spreads slices over N peer connections.
 const WIRE = (new URLSearchParams(location.search).get("wire") || "stripe4").toLowerCase();
 const WIRE_STRIPES = WIRE === "off" ? 0 : WIRE.startsWith("stripe") ? Math.max(1, Math.min(8, parseInt(WIRE.slice(6), 10) || 1)) : 1;
+// ?ka=ms: keep-alive period on a wire link while frames flow (keeps a phone's Wi-Fi out of power
+// save between laps; room/transport.js), ?ka=0 turns it off
+{ const ka = new URLSearchParams(location.search).get("ka"); if (ka != null) setKeepalive(parseInt(ka, 10) || 0); }
 // Signaling: ?signal=host:port points PeerJS at our own PeerServer (the emulator and big
 // rooms use one); default is the public PeerJS cloud.
 const SIGNAL = new URLSearchParams(location.search).get("signal");
@@ -166,8 +171,10 @@ const ICONS = {
   laptop: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M3 3.5h10v7H3zM1.2 12.5h13.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
   desk: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.8 2.8h12.4v8.4H1.8zM8 11.2v2.6M5.2 13.8h5.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
   phone: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="4.5" y="1.5" width="7" height="13" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 12.2h2" stroke="currentColor" stroke-width="1.3"/></svg>',
+  // an API client (`pooled serve`): angle brackets, code talking to the room
+  api: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M5.5 4 1.8 8l3.7 4M10.5 4l3.7 4-3.7 4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
 };
-const iconFor = (meta) => meta.phone || /iPhone|Android$/.test(meta.ua || "") ? ICONS.phone : /Mac|iPad/.test(meta.ua || "") ? ICONS.laptop : ICONS.desk;
+const iconFor = (meta) => meta.api ? ICONS.api : meta.phone || /iPhone|Android$/.test(meta.ua || "") ? ICONS.phone : /Mac|iPad/.test(meta.ua || "") ? ICONS.laptop : ICONS.desk;
 // "0–19" (what the deal sends) -> "1–20", the way people count layers
 const humanRange = (r) => { const m = /^(\d+)\D+(\d+)$/.exec(String(r || "")); return m ? `${+m[1] + 1}\u2013${+m[2] + 1}` : String(r || ""); };
 // One colour per device, everywhere (chips, pool bar, loading rows, band, Lend screen): given once,
@@ -231,12 +238,14 @@ function peerCard(id, name, meta, self) {
         <span>bw <b class="bw">-</b></span>
       </div>
       ${self ? "" : '<button class="bw-btn dev-only" type="button">test bandwidth</button>'}
+      ${!self && meta.api && isHost ? '<button class="api-kick" type="button">Disconnect</button>' : ""}
     </div>`;
   paintCard(card, name, meta, self);
   $("peers").appendChild(card);
   if (devSlots.size) orderCards();
   card.querySelector(".pchip").addEventListener("click", (e) => { e.stopPropagation(); chipPop(card); });
   if (!self) card.querySelector(".bw-btn").addEventListener("click", () => bwTest(id));
+  card.querySelector(".api-kick")?.addEventListener("click", () => { chipPop(null); apiKick(id); });
   return card;
 }
 // one device card open at a time, placed under its chip (fixed, so the scrolling chip row never clips it)
@@ -259,6 +268,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   chipPop(null); $("room-menu").open = false;
   if (!$("share").hidden) closeShare();
+  if ($("api-sheet") && !$("api-sheet").hidden) closeApi();
   if (!$("card").hidden) $("card").hidden = true;
 });
 document.addEventListener("pointerdown", (e) => {
@@ -275,16 +285,16 @@ function paintCard(card, name, meta, self) {
   if (self) card.querySelector(".pn").insertAdjacentHTML("beforeend", " <small>(you)</small>");
   card.querySelector(".pic").innerHTML = card.querySelector(".pic2").innerHTML = iconFor(meta);
   card.querySelector(".dot").className = "dot " + (self || meta.webgpu ? "ok" : "warn");
-  card.querySelector(".pkind").textContent = !meta.ua || meta.ua === "Device" ? "Computer" : meta.ua;
+  card.querySelector(".pkind").textContent = meta.api ? `API client${meta.client ? " \u00b7 " + meta.client : ""}` : !meta.ua || meta.ua === "Device" ? "Computer" : meta.ua;
   // the GPU name is missing when the browser hides adapter info (and on sim devices): show only what we know
   const kind = !meta.ua || meta.ua === "Device" ? "Computer" : meta.ua;
   card.querySelector(".peer-gpu").textContent = meta.webgpu === false ? `${kind} · no WebGPU` : meta.gpu ? `${kind} · ${meta.gpu}` : kind;
   const budget = meta.budgetGB || meta.maxBufGB;
-  setBuf(card, meta.webgpu === false ? "no WebGPU" : meta.contribGB ? lends(meta.contribGB) : (budget ? budget + " GB" : "-"));
-  card.querySelector(".cg").textContent = meta.webgpu === false ? "chat only" : meta.contribGB ? meta.contribGB + " GB" : "";
-  card.querySelector(".pchip").title = meta.webgpu === false ? `${name}: this device can ask but can't hold model layers` : `${name}: ${card.querySelector(".buf").textContent.replace(/[\u2212+]/g, "").trim()}`;
+  setBuf(card, meta.api ? "no layers" : meta.webgpu === false ? "no WebGPU" : meta.contribGB ? lends(meta.contribGB) : (budget ? budget + " GB" : "-"));
+  card.querySelector(".cg").textContent = meta.api ? "API" : meta.webgpu === false ? "chat only" : meta.contribGB ? meta.contribGB + " GB" : "";
+  card.querySelector(".pchip").title = meta.api ? `${name}: an API client (pooled serve) asking through this room` : meta.webgpu === false ? `${name}: this device can ask but can't hold model layers` : `${name}: ${card.querySelector(".buf").textContent.replace(/[\u2212+]/g, "").trim()}`;
   card.style.setProperty("--sw", devColor(name));
-  peerStatus(card, meta.webgpu === false ? "chat only" : self ? "this device" : "connected");
+  peerStatus(card, meta.api ? "API client" : meta.webgpu === false ? "chat only" : self ? "this device" : "connected");
 }
 // the status word on a device card: connected, loading N%, ready. While it loads, its chip shows the %
 function peerStatus(card, text, ok = false) {
@@ -344,15 +354,16 @@ function updateNeed(pledged) {
 }
 $("ai-model").addEventListener("change", () => { modelTouched = true; updateCluster(); });
 function updateCluster() {
-  const all = [myMeta, ...[...members.values()].map(m => m.meta)];
+  const all = [myMeta, ...[...members.values()].map(m => m.meta).filter((m) => !m?.api)];
+  const apis = members.size + 1 - all.length;
   const gpus = all.filter(m => m && m.webgpu).length;
   // only devices with WebGPU hold layers; the others join as ask-only guests
   const pledged = all.reduce((s, m) => s + (m?.webgpu ? m?.contribGB || 0 : 0), 0);
   updateNeed(pledged);
   const mem = all.reduce((s, m) => s + (m?.budgetGB || m?.maxBufGB || 0), 0);
   $("cluster-summary").textContent = DEV
-    ? `${all.length} device${all.length > 1 ? "s" : ""} \u00b7 ${gpus} WebGPU \u00b7 ${pledged.toFixed(1)} GB pledged`
-    : `${all.length} device${all.length > 1 ? "s" : ""} \u00b7 ${+pledged.toFixed(1)} GB pooled`;
+    ? `${all.length} device${all.length > 1 ? "s" : ""}${apis ? ` \u00b7 ${apis} API client${apis > 1 ? "s" : ""}` : ""} \u00b7 ${gpus} WebGPU \u00b7 ${pledged.toFixed(1)} GB pledged`
+    : `${all.length} device${all.length > 1 ? "s" : ""}${apis ? ` \u00b7 ${apis} API client${apis > 1 ? "s" : ""}` : ""} \u00b7 ${+pledged.toFixed(1)} GB pooled`;
   $("hdr-sum").innerHTML = `<b>${+pledged.toFixed(1)} GB</b> pooled`;
   $("peers-n").textContent = String(all.length);
   renderPool(pledged);
@@ -361,7 +372,7 @@ function updateCluster() {
 // each model's need), what this device lends (+/-), and the invite (QR, code, copy link).
 function renderPool(pledged) {
   const devs = [{ name: myName, meta: myMeta }, ...[...members.values()].map((m) => ({ name: m.name || "device", meta: m.meta || {} }))].sort((x, y) => bySlot(x.name, y.name))
-    .filter((d) => d.meta?.webgpu && d.meta?.contribGB);
+    .filter((d) => d.meta?.webgpu && d.meta?.contribGB && !d.meta?.api);
   const needs = Object.entries(PICK_NEED).sort((a, b) => a[1] - b[1]);
   const top = Math.max(pledged, ...needs.map((x) => x[1])) * 1.06 || 1;
   $("ap-total").textContent = `${+pledged.toFixed(1)} GB`;
@@ -463,7 +474,8 @@ function wire(conn, name, meta, initiator = false) {
     conns.delete(conn.peer);
     if (isHost) {   // on the host a closed link means the device left; workers wait for the roster
       dropCard(conn.peer); members.delete(conn.peer); roster.delete(conn.peer); broadcastRoster();
-      log("room", `${e?.name || conn.peer} left`);
+      log("room", `${e?.meta?.api ? "API client " : ""}${e?.name || conn.peer} left`);
+      apiPeerGone(conn.peer);
       aiPeerLeft(conn.peer, e?.name);
     } else if (conn.peer === PREFIX + roomCode) { log("room", "lost the link to the host"); hostGone(); }
     updateCluster();
@@ -478,9 +490,10 @@ function ensureCard(id, name, meta) {
     card = peerCard(id, name || id, meta || {}, false);
     cards.set(id, card);
     updateCluster();
-    log("room", `${name || id} joined`);
+    const who = meta?.api ? `API client ${name || id}` : name || id;
+    log("room", `${who} joined`);
     const noted = $("ai-output").style.display === "block";
-    if (noted) sysNote(`${name || id} joined${meta?.contribGB && meta?.webgpu ? ` with ${meta.contribGB} GB` : ""}`, "join");
+    if (noted) sysNote(`${who} joined${meta?.contribGB && meta?.webgpu ? ` with ${meta.contribGB} GB` : ""}`, "join");
     // the chat on screen says it in the log already: no toast on top of that same line
     if (!(noted && $("ai-output").getClientRects().length)) presence(name || id, true);
     mascot(`${name || id} joined! ${members.size + 1} devices in the room.`);
@@ -506,7 +519,7 @@ ensureLink.pending = new Set();
 
 function sendTo(id, obj) { conns.get(id)?.conn.send(obj); }
 // debug: per-peer wire state (channels open, frames sent/received) — `pooledDebug()` in the console (`swarmDebug()` still works)
-window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0 }));
+window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0, ka: e.link?.kaSent ?? 0 }));
 // activations go over the sliced wire channel when it is up, else as a normal message
 // ?netlag=ms delays every activation frame this device sends, to emulate a slow link in tests
 // (equal delays keep send order)
@@ -545,7 +558,10 @@ function onData(from, d) {
       }
       // a peer picks its own name: keep it a short plain string (it is also escaped wherever it is shown)
       d.name = String(d.name ?? from).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(from).slice(0, 8);
+      // an API client (`pooled serve`, cli/): an ask-only guest with no layers; the host may refuse it
+      d.meta = helloMeta(d.meta, isHost);   // on a guest, meta.api is the host saying it serves API clients
       e.name = d.name; e.meta = d.meta;
+      if (d.meta?.api && isHost && !apiWelcome(from, d)) break;
       members.set(from, { name: d.name, meta: d.meta });
       ensureCard(from, d.name, d.meta);
       if (isHost) {
@@ -590,6 +606,7 @@ function onData(from, d) {
     }
     case "ping": sendTo(from, { t: "pong", ts: d.ts }); break;
     case "pong": {
+      e.missed = 0;
       e.rtt = Math.round(performance.now() - d.ts);
       if (e.card) e.card.querySelector(".rtt").textContent = e.rtt + " ms";
       break;
@@ -652,7 +669,23 @@ async function bwTest(id) {
 window.addEventListener("pagehide", () => { try { broadcastAll({ t: "leaving" }); } catch {} });
 
 // --- ping loop ---
-setInterval(() => broadcastAll({ t: "ping", ts: performance.now() }), 2500);
+// The host also drops an API client (`pooled serve`) that stopped answering: a bridge that was killed
+// (kill -9, a crash, a laptop lid) never says "leaving", and its data channel can take over a minute
+// to close, while its running answer holds the room. Counted in pings, not wall time, so a host tab
+// that was busy or throttled for a while does not drop a live bridge (the interval fires once after).
+const API_MISSED_PINGS = 6;   // ~15 s
+setInterval(() => {
+  broadcastAll({ t: "ping", ts: performance.now() });
+  if (!isHost) return;
+  for (const [id, e] of conns) {
+    if (!e.meta?.api) continue;
+    e.missed = (e.missed || 0) + 1;
+    if (e.missed > API_MISSED_PINGS) {
+      log("room", `API client ${e.name || id} stopped answering; dropping it`);
+      try { e.conn.close(); } catch {}
+    }
+  }
+}, 2500);
 
 const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
 $("gb-minus").addEventListener("click", () => stepGB(-1));
@@ -748,7 +781,9 @@ async function start(create, resume = null) {
         return;
       }
       wire(conn);
-      conn.send({ t: "hello", name: myName, meta: myMeta, v: PROTOCOL });
+      // the host says it answers API clients (docs/protocol.md "API clients"); not part of myMeta,
+      // which the roster shows everyone
+      conn.send({ t: "hello", name: myName, meta: isHost ? { ...myMeta, api: 1 } : myMeta, v: PROTOCOL });
     });
   });
 
@@ -930,12 +965,12 @@ let weightCache = null, cacheHits = 0;
 // The names "swarmllm-weights-v1", "https://weights.swarmllm.ai/" (a cache key namespace, never
 // fetched) and the "x-swarm-len" header are from before the rename to Pooled. They stay so weights
 // people already downloaded keep working; the Cache API is per site, so pooled.run starts empty anyway.
+// Keys and per-model bookkeeping live in room/weightcache.js.
 async function getWeightCache() {
   if (weightCache !== null) return weightCache;
-  try { weightCache = await caches.open("swarmllm-weights-v1"); } catch { weightCache = false; }
+  try { weightCache = await caches.open(CACHE_NAME); } catch { weightCache = false; }
   return weightCache;
 }
-function cacheKey(url, lo, hi) { return "https://weights.swarmllm.ai/" + encodeURIComponent(url) + "/" + lo + "-" + hi; }
 async function rangeFetch(url, lo, hi, noCache = false) {
   const c = await getWeightCache();
   const key = cacheKey(url, lo, hi);
@@ -980,7 +1015,7 @@ async function rangeFetch(url, lo, hi, noCache = false) {
 const PEER_WEIGHTS = new URLSearchParams(location.search).get("peerweights") !== "0";
 async function cachedRanges(url) {
   const c = await getWeightCache(); if (!c) return [];
-  const prefix = "https://weights.swarmllm.ai/" + encodeURIComponent(url) + "/";
+  const prefix = CACHE_PREFIX + encodeURIComponent(url) + "/";
   try { return (await c.keys()).map((r) => r.url).filter((u) => u.startsWith(prefix)).map((u) => u.slice(prefix.length)).filter((x) => /^\d+-\d+$/.test(x)); }
   catch { return []; }
 }
@@ -1128,7 +1163,11 @@ let ai = {
   conv: { turns: [] },   // host: the conversation (room/conversation.js)
   fed: [],               // host: the exact tokens every device's caches hold, in order; null = unknown, reset first
   pendingCtl: {},        // host: control for the chain that rides on the next frame ({ reset } or { rb })
-  settings: { persona: "default", sampling: "creative", thinking: false, length: "normal" },
+  settings: { persona: "default", sampling: "creative", thinking: false, length: "normal", apiAllow: true },
+  apis: new Map(),       // host: API clients (`pooled serve`): peer id -> { name, client, answered }
+  apiKicked: new Set(),  // host: API clients disconnected this session (a reconnect is refused)
+  apiCache: new AnswerCache(8),   // host: text -> sampled ids of recent API answers (room/api.js)
+  apiRun: null,          // host: the API request being answered { rid, from, ac }
   transcript: [],        // host: [{ name, text, reply, stats }] for devices that join later
   teleBy: new Map(),     // host: worker id -> compute ms per frame kind, from ai-tele
   msPerLayer: new Map(), // host: device name -> measured verify compute per layer (the speed split uses it)
@@ -1658,7 +1697,8 @@ async function aiStart(modelArg) {
       // fastest devices first (measured ms per layer from earlier answers), fewest hops; devices
       // that are not needed stay in the room as ask-only guests
       const nameOf = (id) => conns.get(id)?.name || id;
-      const sp = planForSpeed(L, caps.map((c) => Math.floor(c / layerBytes)), [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))]);
+      const sp = planForSpeed(L, caps.map((c) => Math.floor(c / layerBytes)), [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
+        [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))]);
       const keep = sp.used.filter((i) => i > 0).map((i) => i - 1);
       ai.leftOut = new Set(ai.chain.filter((_, i) => !keep.includes(i)));
       ai.chain = keep.map((i) => ai.chain[i]);
@@ -1666,7 +1706,20 @@ async function aiStart(modelArg) {
       assigned = sp.used.map((i) => sp.assigned[i]);
       ranges = sp.used.map((i) => sp.ranges[i]);
       caps = sp.used.map((i) => caps[i]);
-    } else ({ assigned, ranges } = planSplit(L, caps));
+    } else {
+      // by memory, but phones hold layers only when the computers cannot hold the model
+      // (room/plan.js phonesToLeaveOut); ?phonelayers=1 deals them layers anyway
+      const nameOf = (id) => conns.get(id)?.name || id;
+      const out = PHONE_LAYERS ? [] : phonesToLeaveOut(L, caps.map((c) => c / layerBytes), [false, ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))]);
+      if (out.length) {
+        ai.leftOut = new Set(out.map((i) => ai.chain[i - 1]));
+        ai.chain = ai.chain.filter((id) => !ai.leftOut.has(id));
+        ai.chainNames = ai.chain.map(nameOf);
+        caps = caps.filter((_, i) => !out.includes(i));
+        log("room", `${[...ai.leftOut].map(nameOf).join(", ")} ask${ai.leftOut.size > 1 ? "" : "s"} without holding layers: the computers hold the whole model, and a phone's layer would slow every token`);
+      }
+      ({ assigned, ranges } = planSplit(L, caps));
+    }
     ai.layersN = Object.fromEntries([[myName, assigned[0]], ...ai.chain.map((id, i) => [conns.get(id)?.name || id, assigned[i + 1]])]);
 
     const needGB = (L * layerBytes + embedBytes) / 2 ** 30;
@@ -1774,7 +1827,7 @@ function aiPeerLeft(id, name) {
 // a newcomer while the room is online gets the chat as a guest, and the conversation so far
 function aiWelcome(id) {
   if (ai.role !== "host" || !ai.engine || ai.readyPeers.size < ai.chain.length || ai.chain.includes(id)) return;
-  sendTo(id, { t: "ai-ready-all", model: ai.model });
+  sendTo(id, { t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label });
   if (ai.visibility === "all" && ai.transcript.length) sendTo(id, { t: "ai-history", items: ai.transcript.slice(-20) });
   offerRedealForNewcomers();
 }
@@ -1815,7 +1868,7 @@ function aiMaybeReady() {
   emptyText("The model is ready. Ask anything.");
   sysNote(`Model ready on ${n} device${n > 1 ? "s" : ""}`);
   if (!matchMedia("(pointer: coarse)").matches) $("ai-prompt").focus();   // touch: the keyboard opens when the user taps the prompt
-  broadcastAll({ t: "ai-ready-all", model: ai.model });
+  broadcastAll({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label });
   pushMap(0, null, false, true);
   offerRedealForNewcomers();
   setTimeout(nextQueued, 0);
@@ -1906,6 +1959,11 @@ function ckptResume(ids, reused) {
 // (roadmap 25: +18–45% tokens per lap after a prompt). Drafts only change speed, never output.
 // ?fill=0 turns it off for A/B runs.
 const FILL_DRAFTS = new URLSearchParams(location.search).get("fill") !== "0";
+// ?phonelayers=1: phones hold layers even when the computers can hold the model (room/plan.js
+// phonesToLeaveOut), for A/B and demos
+const PHONE_LAYERS = new URLSearchParams(location.search).get("phonelayers") === "1";
+// ?split=memory|speed picks the layer split at load (test harnesses pin "memory"; the default is speed)
+{ const sp = new URLSearchParams(location.search).get("split"); if (sp === "memory" || sp === "speed") $("ai-split").value = sp; }
 const MTP_BATCH = roomEngineFlags(location.search).mtpBatchFill;   // ?mtpbatch=0: one draft-cache row per submit, for A/B
 function fillDrafts(h, ids, i0, basePos, n) {
   if (!FILL_DRAFTS || !ai.engine?.mtp) return;
@@ -2500,6 +2558,7 @@ async function aiGenerate(textArg, who, askerId = peer.id, mode = "ask") {
   ai.abort = false;
   ai.askerId = askerId;
   ai.lastAsker = askerId;
+  ai.lastWasApi = false;
   setBusyUI(true, true);
   const S = specials(ai.tok);
   const persona = PERSONAS[ai.settings.persona] || PERSONAS.default;
@@ -2522,15 +2581,21 @@ async function aiGenerate(textArg, who, askerId = peer.id, mode = "ask") {
     dropped = fit.dropped;
     ai.conv.turns = fit.turns;
     const cap = thinking ? MAX_NEW_THINKING : (ANSWER_LEN[ai.settings.length] ?? MAX_NEW);
-    const onToken = (tok, drafted) => {
-      const piece = ai.tok.decode([tok]);
-      answer.push(tok);
+    // a character split across tokens goes out whole, never as two U+FFFD
+    const pieces = pieceDecoder(ai.tok);
+    const show = (piece, drafted) => {
+      if (!piece) return;
       reply += piece;
       chatBotPiece(piece, drafted);
       sendChat({ t: "ai-token", text: piece, d: drafted || 0 }, askerId);
     };
+    const onToken = (tok, drafted) => {
+      answer.push(tok);
+      show(pieces.push(tok), drafted);
+    };
     inGen = true;   // from here roomGenerate cleans up after itself on failure
-    r = await roomGenerate(fit.ids, { onToken, stop, maxNew: MAXNEW_PARAM || cap, sample, onStatus: aiStatus });
+    try { r = await roomGenerate(fit.ids, { onToken, stop, maxNew: MAXNEW_PARAM || cap, sample, onStatus: aiStatus }); }
+    finally { show(pieces.flush(), 0); }
     capped = r.capped;
     stats = r.stats + (dropped ? ` · ${dropped} oldest exchange${dropped > 1 ? "s" : ""} forgotten to fit` : "");
   } catch (err) {
@@ -2577,6 +2642,7 @@ function aiCommand(cmd, from) {
     if (from === peer.id) toast(why); else sendTo(from, { t: "ai-busy", why });
     return;
   }
+  if (ai.lastWasApi) { const why = "the last answer went to an API client: ask again instead"; if (from === peer.id) toast(why); else sendTo(from, { t: "ai-busy", why }); return; }
   const byAsker = from === ai.lastAsker || from === peer.id;
   if (!byAsker) { sendTo(from, { t: "ai-busy", why: "only the host or whoever asked can do that" }); return; }
   const turns = ai.conv.turns;
@@ -2713,7 +2779,7 @@ function saveHost() {
   if (!isHost || !roomCode) return;   // from the moment the room exists, not only once a model runs
   try {
     localStorage.setItem(HOST_KEY, JSON.stringify({ code: roomCode, name: myName, model: ai.model || null, turns: ai.conv.turns,
-      transcript: ai.transcript.slice(-20), settings: ai.settings, peers: ai.chainNames || [], split: $("ai-split").value, t: Date.now() }));
+      transcript: ai.transcript.filter((t) => !t.api).slice(-20), settings: ai.settings, peers: ai.chainNames || [], split: $("ai-split").value, t: Date.now() }));
   } catch {}
 }
 addEventListener("pagehide", saveHost);   // stamp the saved room as the tab unloads, so a reload can go straight back in
@@ -2890,7 +2956,7 @@ async function aiOnData(from, d) {
     case "ai-gendone":
       chatBotEnd(d.hidden ? "answer hidden by the host" : null, d.stats);
       setBusyUI(false);
-      setAfterAnswer(!!d.capped && !d.hidden, !d.failed && !d.hidden);
+      setAfterAnswer(!!d.capped && !d.hidden && !d.api, !d.failed && !d.hidden && !d.api);
       if (d.ctx) setCtx(d.ctx.used, d.ctx.max);
       mascot("Your turn. Ask anything.");
       break;
@@ -2919,6 +2985,7 @@ async function aiOnData(from, d) {
       break;
     case "ai-ask":
       if (ai.role !== "host") break;
+      if (d.api) { apiAsk(from, d); break; }
       aiAsk(String(d.text || "").slice(0, 8000), String(e?.name || "guest"), from);
       break;
     case "ai-queued":
@@ -2926,6 +2993,7 @@ async function aiOnData(from, d) {
       break;
     case "ai-queue": showQueue(d.n); break;
     case "ai-stop":
+      if (ai.role === "host" && d.rid != null) { apiStop(from, String(d.rid)); break; }
       if (ai.role === "host" && ai.busy === "gen" && from === ai.askerId) { ai.abort = true; aiStatus(`${e?.name || "the asker"} pressed stop…`); }
       break;
     case "ai-busy": toast(d.why || "the room is still answering, try again in a moment"); break;
@@ -2945,8 +3013,8 @@ const MOCK = new URLSearchParams(location.search).get("mock") === "code" && ["12
 // a project, the auto-approve box, and "send me the session" on opening Code). room/code.js checks
 // each against its own state (who asked the run, the project list) and caps every field.
 const CODE_FROM_HOST = new Set(["ai-code-start", "ai-code-tok", "ai-code-live", "ai-code-tool", "ai-code-note", "ai-code-done", "ai-code-files", "ai-code-history",
-  "ai-code-projects", "ai-code-msg", "ai-pv", "ai-pv-blob", "ai-pv-stop"]);
-const CODE_TO_HOST = new Set(["ai-pv-want", "ai-code-ask", "ai-code-stop", "ai-code-approve", "ai-code-cmd", "ai-code-sync"]);
+  "ai-code-projects", "ai-code-msg", "ai-pv", "ai-pv-blob", "ai-pv-stop", "ai-code-share"]);
+const CODE_TO_HOST = new Set(["ai-pv-want", "ai-code-ask", "ai-code-stop", "ai-code-approve", "ai-code-cmd", "ai-code-sync", "ai-code-share-ask"]);
 const CODE_DRIVE = new Set(["ai-code-ask", "ai-code-cmd", "ai-code-sync"]);   // these load Code on a host that has not opened it
 const CODE_MSG_MAX = 12000;   // a member's message, serialized (a request is at most 4000 characters)
 const codeHandlers = new Map();   // message type -> fn(from, d)
@@ -3075,7 +3143,7 @@ $("ai-visibility").addEventListener("change", (e) => {
 for (const [k, v] of Object.entries(PERSONAS)) $("ai-persona").add(new Option(v.label, k));
 for (const [k, v] of Object.entries(SAMPLING)) $("ai-sampling").add(new Option(v.label, k));
 function styleChanged() {
-  ai.settings = { persona: $("ai-persona").value, sampling: $("ai-sampling").value, thinking: $("ai-thinking").checked, length: $("ai-length").value };
+  ai.settings = withStyle(ai.settings, { persona: $("ai-persona").value, sampling: $("ai-sampling").value, thinking: $("ai-thinking").checked, length: $("ai-length").value });
   broadcastAll({ t: "ai-style", ...ai.settings });
   saveHost();
 }
@@ -3094,7 +3162,7 @@ const SEG_HELP = {
   "ai-visibility": { all: "Everyone in the room sees the questions and the answers.", host: "Only this device sees the text. Every device still helps write it.", asker: "Each answer goes to whoever asked it. Every device still helps write it." },
   "ai-length": { short: "About a paragraph at most (150 tokens).", normal: "A few paragraphs (400 tokens).", long: "Room for long answers and code (1,200 tokens)." },
   "ai-sampling": { creative: "Varied wording: ask twice, get two different answers.", focused: "Steadier wording, fewer surprises.", exact: "Always the likeliest word: the same question gets the same answer." },
-  "ai-split": { memory: "Every device holds some layers, sized by the memory it gives.", speed: "The fastest devices hold the layers, with the fewest hops. Takes effect when the layers are dealt again." },
+  "ai-split": { memory: "Every computer holds layers, sized by the memory it gives. A phone holds layers only when the computers can't fit the model.", speed: "The fastest devices hold the layers, with the fewest hops; the rest join to ask. Before the first answer measures them, computers go before phones. Takes effect when the layers are dealt again." },
 };
 const segLabel = (id, o) => SEG_LABEL[id]?.[o.value] || o.text.replace(/\s*\(.*\)$/, "").replace(/^./, (c) => c.toUpperCase());
 function buildSegs() {
@@ -3130,6 +3198,7 @@ buildSegs();
 $("room-menu").addEventListener("toggle", () => {
   if (!$("room-menu").open) { if (cacheArmed) cacheDisarm(); return; }
   syncSegs();
+  renderCacheModels();
   // the room card pictures a finished answer's speed: not offered before one, and Share only where the browser can
   $("card-btn").hidden = !(bestTps || lastMap?.st?.tps || lastSoloTps);
   $("card-share").hidden = !navigator.canShare;
@@ -3155,8 +3224,44 @@ $("cache-clear").addEventListener("click", async (ev) => {
     return;
   }
   cacheDisarm();
-  try { await caches.delete("swarmllm-weights-v1"); weightCache = null; toast("cached weights cleared"); } catch { toast("could not clear the cache"); }
+  try { await caches.delete(CACHE_NAME); weightCache = null; toast("cached weights cleared"); } catch { toast("could not clear the cache"); }
+  renderCacheModels();
 });
+// One row per cached model with its size and a Delete button (two steps, like Clear above), so one
+// model's weights can go while the others stay. Filled each time the menu opens.
+// A newer render (menu reopened, a delete finished) wins over one still reading the cache.
+let cacheRenderGen = 0;
+async function renderCacheModels() {
+  const gen = ++cacheRenderGen, ul = $("cache-models"), c = await getWeightCache();
+  const list = c ? await cachedModels(c, MODELS).catch(() => []) : [];
+  if (gen !== cacheRenderGen) return;
+  ul.replaceChildren(); ul.hidden = !list.length;
+  if (!list.length) return;
+  for (const g of list) {
+    const li = document.createElement("li"), name = document.createElement("span"), b = document.createElement("button");
+    name.textContent = g.label.split("\u00b7")[0].trim();
+    const size = document.createElement("small"); size.textContent = fmtBytes(g.bytes); name.append(" ", size);
+    const what = name.firstChild.textContent;
+    const disarm = () => { armed = 0; b.textContent = "Delete"; b.setAttribute("aria-label", `Delete the cached weights of ${what}`); };
+    let armed = 0; b.type = "button"; disarm();
+    b.addEventListener("click", async () => {
+      if (!armed) {
+        b.textContent = `Delete ${fmtBytes(g.bytes)}?`;
+        b.setAttribute("aria-label", `Press again to delete ${fmtBytes(g.bytes)} of cached weights of ${what}`);
+        const t = armed = setTimeout(() => { if (armed === t) disarm(); }, 6000);
+        return;
+      }
+      armed = 0; b.disabled = true;
+      try { const r = await deleteModel(c, g.url); toast(`deleted ${fmtBytes(r.bytes)} of cached weights`); } catch { toast("could not delete those weights"); }
+      renderCacheModels();
+    });
+    li.append(name, b); ul.append(li);
+  }
+  // what the browser counts for this whole site (weights plus a little else), to check the sizes against
+  const est = await navigator.storage?.estimate?.().catch(() => null);
+  if (gen !== cacheRenderGen) return;
+  if (est?.usage) { const li = document.createElement("li"); li.className = "cache-est"; li.textContent = `This site uses ${fmtBytes(est.usage)} of this device's storage`; ul.append(li); }
+}
 $("new-chat").addEventListener("click", aiNewChat);
 $("draft-view").addEventListener("click", () => setDraftView(!draftView));
 $("export-chat").addEventListener("click", () => { $("room-menu").open = false; exportChat(); });
@@ -3192,9 +3297,183 @@ function nextQueued() {
   if (ai.role !== "host" || ai.busy || ai.degraded || !ai.engine || !ai.queue?.length) return;
   const q = ai.queue.shift();
   broadcastAll({ t: "ai-queue", n: ai.queue.length }); showQueue(ai.queue.length);
-  aiGenerate(q.text, q.name, q.from);
+  if (q.api) apiGenerate(q); else aiGenerate(q.text, q.name, q.from);
 }
 function showQueue(n) { $("queue-note").textContent = n ? `${n} queued` : ""; }
+
+// ---- API clients: `pooled serve` (cli/) turns the room into a local OpenAI / Anthropic endpoint ----
+// The bridge joins as an ask-only guest with no layers (meta.api, webgpu false) and sends whole
+// conversations (ai-ask {api: 1, rid, system, messages, params}); the host answers each with
+// roomGenerate on its own ids, never touching the chat's conversation (room/api.js,
+// docs/design/serve.md, docs/protocol.md "API clients").
+// host: a hello from an API client. false = refused (told why with a bye)
+function apiWelcome(from, d) {
+  const why = !ai.settings.apiAllow ? "the host does not allow API clients in this room"
+    : ai.apiKicked.has(from) ? "the host disconnected this API client" : null;
+  if (why) { apiBye(from, why); return false; }
+  const known = ai.apis.get(from);
+  ai.apis.set(from, { name: d.name, client: d.meta.client, answered: known?.answered || 0 });
+  apiPanel();
+  return true;
+}
+function apiBye(id, reason) {
+  sendTo(id, { t: "bye", reason });
+  setTimeout(() => { try { conns.get(id)?.conn.close(); } catch {} }, 400);   // after the bye is out
+}
+// host: Disconnect on the card or the panel, or API clients switched off
+function apiKick(id, reason = "the host disconnected this API client") {
+  if (!ai.apis.has(id)) return;
+  ai.apiKicked.add(id);
+  apiPeerGone(id);
+  apiBye(id, reason);
+  log("room", `disconnected API client ${conns.get(id)?.name || id}`);
+}
+// host: an API client left (or was disconnected): its queued asks go, its running one stops
+function apiPeerGone(id) {
+  if (!ai.apis.has(id)) return;
+  ai.apis.delete(id);
+  if (ai.queue?.length) {
+    const n = ai.queue.length;
+    ai.queue = ai.queue.filter((q) => !(q.api && q.from === id));
+    if (ai.queue.length !== n) { broadcastAll({ t: "ai-queue", n: ai.queue.length }); showQueue(ai.queue.length); }
+  }
+  if (ai.apiRun?.from === id) ai.apiRun.ac.abort();
+  apiPanel();
+}
+function apiAsk(from, d) {
+  const rid = typeof d.rid === "string" ? d.rid.slice(0, API_LIMITS.rid) : "";
+  const busy = (why, code, extra = {}) => sendTo(from, { t: "ai-busy", why, rid, code, ...extra });
+  if (!ai.apis.has(from)) return busy("this device did not join as an API client", "bad");
+  if (!ai.settings.apiAllow) return busy("the host does not allow API clients in this room", "off");
+  const v = validateApiAsk(d);
+  if (v.err) return busy(v.err, v.code);
+  if (ai.degraded) return busy("a device left the room; the host has to re-deal the layers first", "degraded");
+  if (!ai.engine || ai.readyPeers.size < ai.chain.length) return busy("the model is still loading", "loading");
+  const entry = { api: v.req, name: ai.apis.get(from).name, from };
+  if (!ai.busy && !ai.queue?.length) { apiGenerate(entry); return; }
+  ai.queue ||= [];
+  if (ai.queue.length >= QUEUE_MAX || ai.queue.filter((q) => q.from === from).length >= 2) {
+    setTimeout(nextQueued, 0);
+    return busy("the room's queue is full, try again after this answer", "queue");
+  }
+  ai.queue.push(entry);
+  setTimeout(nextQueued, 0);
+  sendTo(from, { t: "ai-queued", pos: ai.queue.length, rid });
+  broadcastAll({ t: "ai-queue", n: ai.queue.length }); showQueue(ai.queue.length);
+}
+// the asker's stop: the running answer ends after the lap in flight; a queued one is dropped
+function apiStop(from, rid) {
+  if (ai.apiRun && ai.apiRun.rid === rid && ai.apiRun.from === from) { ai.apiRun.ac.abort(); aiStatus("the API client stopped its request…"); return; }
+  const i = ai.queue?.findIndex((q) => q.api && q.from === from && q.api.rid === rid) ?? -1;
+  if (i >= 0) {
+    ai.queue.splice(i, 1);
+    sendTo(from, { t: "ai-busy", rid, code: "gone", why: "removed from the queue" });
+    broadcastAll({ t: "ai-queue", n: ai.queue.length }); showQueue(ai.queue.length);
+  }
+}
+async function apiGenerate({ api: req, name, from }) {
+  const rid = req.rid;
+  if (!conns.has(from) || !ai.apis.has(from)) { setTimeout(nextQueued, 0); return; }   // left while it waited
+  if (ai.busy || !ai.engine) { (ai.queue ||= []).unshift({ api: req, name, from }); return; }
+  if (ai.degraded) { sendTo(from, { t: "ai-busy", rid, code: "degraded", why: "a device left the room; the host has to re-deal the layers first" }); return; }
+  let prompt;
+  try { prompt = apiPrompt(ai.tok, req, ctxMax(), ai.apiCache); }
+  catch (err) { prompt = { err: err.message, code: "bad" }; }
+  if (prompt.err) { sendTo(from, { t: "ai-busy", rid, code: prompt.code, why: prompt.err, n: prompt.n, max: prompt.max }); setTimeout(nextQueued, 0); return; }
+  const client = req.params.client;
+  ai.busy = "gen";
+  ai.abort = false;
+  ai.askerId = from;
+  ai.lastWasApi = true;
+  const run = ai.apiRun = { rid, from, ac: new AbortController() };
+  setBusyUI(true, true);
+  setAfterAnswer(false, false);
+  // the screens: the room's visibility applies as for any guest, except that the asker (the bridge)
+  // gets its own full stream below, never a stand-in; under "asker" only the host's screen shows it
+  const { full, hidden } = chatRecipients(ai.visibility || "all", from, [...conns.keys()]);
+  const toScreens = (msg) => {
+    for (const id of full) if (id !== from) sendTo(id, msg);
+    if (msg.t !== "ai-token") for (const id of hidden) if (id !== from) sendTo(id, { t: msg.t, name: msg.name, stats: msg.stats, asker: msg.asker, ctx: msg.ctx, api: 1, hidden: true });
+  };
+  const label = `${name} · ${client} (API)`;
+  const last = req.messages[req.messages.length - 1].text;
+  const shown = last.length > API_LIMITS.shown ? last.slice(0, API_LIMITS.shown) + "…" : last;
+  chatUser(label, shown);
+  const mid = ai.msgSeq = (ai.msgSeq || 0) + 1;
+  chatBotStart(mid);
+  toScreens({ t: "ai-genstart", name: label, text: shown, asker: from, cont: 0, mid, api: 1 });
+  sendTo(from, { t: "ai-genstart", rid, api: 1, client, promptTokens: prompt.ids.length, model: ai.model, name: label, asker: from, mid });
+  let raw = "";
+  const res = await apiRun({
+    tok: ai.tok, req, prompt, cache: ai.apiCache, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
+    generate: (ids, o) => roomGenerate(ids, { ...o, maxNew: MAXNEW_PARAM ? Math.min(MAXNEW_PARAM, o.maxNew) : o.maxNew, onStatus: aiStatus }),
+    send: (msg) => sendTo(from, msg),
+    onPiece: (piece, d) => { raw += piece; chatBotPiece(piece, d); toScreens({ t: "ai-token", text: piece, d: d || 0 }); },
+  });
+  if (res.err) aiStatus("generation failed: " + res.err);
+  const stats = (res.err ? "failed: " + res.err : res.stats) + " · via API · not part of this chat's memory";
+  const ctx = { used: ai.fed ? ai.pos : 0, max: ctxMax() };
+  chatBotEnd(res.err && !raw ? "⚠ " + res.err : null, stats);
+  toScreens({ t: "ai-gendone", stats, ctx, failed: res.err ? 1 : 0, capped: 0, api: 1 });
+  sendTo(from, { t: "ai-gendone", rid, api: 1, reason: res.reason, stopSeq: res.stopSeq || undefined, usage: res.usage, reused: res.reused, stats, ctx, failed: res.err ? 1 : 0, err: res.err || undefined });
+  ai.transcript.push({ name: label, text: shown, reply: raw, stats, mid, api: 1 });
+  if (ai.transcript.length > 50) ai.transcript.shift();
+  const c = ai.apis.get(from); if (c) c.answered++;
+  apiPanel();
+  setCtx(ctx.used, ctx.max);
+  if (!res.err) aiStatus(`ready — API answer for ${name}: ${res.usage.in} prompt tok${res.reused ? ` (${res.reused} reused)` : ""}, ${res.stats}`);
+  ai.busy = false;
+  ai.abort = false;
+  if (ai.apiRun === run) ai.apiRun = null;
+  setBusyUI(false);
+  setTimeout(nextQueued, 0);
+  if (ai.degraded) showRedeal(true);
+}
+
+// "Use from code": the command that serves this room on the user's own computer, and (host) the
+// API clients connected now, with Disconnect
+function apiCommand() {
+  return `npx @pooled/cli serve ${roomCode || "CODE"}${SIGNAL ? ` --signal ${SIGNAL}` : ""}`;
+}
+function apiPanel() {
+  if (!$("api-sheet")) return;
+  $("api-cmd").textContent = apiCommand();
+  const box = $("api-clients"), list = isHost ? [...ai.apis.entries()] : [...members.entries()].filter(([, m]) => m.meta?.api).map(([id, m]) => [id, { name: m.name, client: m.meta.client }]);
+  $("api-clients-wrap").hidden = !list.length;
+  box.replaceChildren(...list.map(([id, c]) => {
+    const li = document.createElement("li");
+    const t = document.createElement("span");
+    t.textContent = `${c.name}${c.client ? " · " + c.client : ""}${isHost ? ` · ${c.answered} answered` : ""}`;
+    li.appendChild(t);
+    if (isHost) {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = "Disconnect";
+      b.addEventListener("click", () => apiKick(id));
+      li.appendChild(b);
+    }
+    return li;
+  }));
+  if ($("api-allow")) { $("api-allow").checked = !!ai.settings.apiAllow; $("api-allow-row").hidden = !isHost; }
+}
+function openApi() {
+  $("room-menu").open = false;
+  apiPanel();
+  $("api-sheet").hidden = false;
+  $("api-close").focus({ preventScroll: true });
+}
+function closeApi() { $("api-sheet").hidden = true; }
+if ($("api-sheet")) {
+  $("api-open").addEventListener("click", openApi);
+  $("api-close").addEventListener("click", closeApi);
+  $("api-sheet").addEventListener("click", (e) => { if (e.target === $("api-sheet")) closeApi(); });
+  $("api-copy").addEventListener("click", () => copyText(apiCommand(), "command"));
+  $("api-allow").addEventListener("change", (e) => {
+    ai.settings.apiAllow = e.target.checked;
+    if (!ai.settings.apiAllow) for (const id of [...ai.apis.keys()]) apiKick(id, "the host does not allow API clients in this room");
+    toast(ai.settings.apiAllow ? "API clients can join this room" : "API clients are off in this room");
+    saveHost(); apiPanel();
+  });
+}
 function aiSubmit() {
   const text = $("ai-prompt").value.trim();
   if (!text) return;
