@@ -6,6 +6,7 @@ import { f32ToF16, f16ToF32, parseGGUFHeader, ggufWeights, ggufShardBytes, GGML_
   ggmlLayerNames, qwen35Weights, qwen35ShardBytes, qwen35MtpBytes, qwen35LayerNames, qwen35NamesFor, tokenizerFromGGUF, gpuUploadEntry, streamEntryToGPU }
   from "./engine/gguf.js";
 import { Qwen35Engine } from "./engine/qwen35.js";
+import { roomQwen35Options, roomEngineFlags, applyRoomFlags } from "./engine/preset.js";
 import { WIRE_F16, badF32, f32ToB64, packF16, unpackF16, asU16, packWire, unpackWire, asF32, b64ToF32, wireStats } from "./room/wire.js";
 import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
@@ -1536,44 +1537,11 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       device: ai.device, meta: G.meta, weights, vocab: G.tensors[GGML_EMBED]?.shape?.[0],
       layerRange: range, hasEmbed, hasHead, maxSeq: ctx,
       coopWG: ai.tune?.wg, coopRows: ai.tune?.rows,
-      // 16 batch columns: prefill passes go through the row-stationary GEMM
-      // (docs/research/prefill-gemm-v2.md). Speculative verifies are <= 8
-      // columns and drop to the 8- or 4-column GEMV twins automatically, so
-      // the generated stream is unchanged.
-      batchCols: 16, coopRowsB: 1,
-      // ?draftvocab=N: draft over the first N vocabulary rows only (engine/qwen35.js). Default 65536:
-      // the head is the biggest matrix a draft reads (1.35 GB of Q8 on the 27B, 0.54 GB on the MoE),
-      // and on English prose and code only 1-2.5% of tokens lie above 65536
-      // (benchmarks/draftvocab_coverage.js). For other scripts (Chinese ~84% above it) the engine
-      // falls back to the full head by itself (draftVocabAuto). ?draftvocab=0: full head always.
-      // ?dvauto=0: the small head always. Drafts only, the output never changes.
-      draftVocab: DRAFT_VOCAB,
-      draftVocabAuto: new URLSearchParams(location.search).get("dvauto") !== "0",
-      // the K drafts of a speculative step, its verify and its LM head in one submit (keeps the
-      // embedding table, or its first draftvocab rows, on the GPU); ?draftchain=0 turns it off
-      draftChain: new URLSearchParams(location.search).get("draftchain") !== "0",
-      // ?specfuse=0: speculative verify as separate trunk / head submits (A/B; same output bits)
-      specFuse: new URLSearchParams(location.search).get("specfuse") !== "0",
-      // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched
-      // attention) for A/B timing; both give the same bits, so devices may differ
-      ...(new URLSearchParams(location.search).get("fuse") === "0" ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
-      // ?kv=q8: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics a little
-      kvQ8: new URLSearchParams(location.search).get("kv") === "q8",
-      // ?moefuse=0: the unfused MoE FFN kernels (A/B). The fused path (the default) gives different
-      // MoE bits, so every device of a room should run the same setting; ?moednrows=1|2|4 tunes it
-      moeFuse: new URLSearchParams(location.search).get("moefuse") !== "0",
-      moeDnRows: parseInt(new URLSearchParams(location.search).get("moednrows"), 10) || 1,
-      // Prefill options (attnPrefillTile, prefillUbatch, moeGroupPrefill) are deliberately not passed: every
-      // device takes the engine's defaults, so host and workers agree. Tiled prefill attention runs on the
-      // 16-column prefill frames of every device; wide GEMM + expert-grouped MoE only in solo prefillTokens
-      // (the device holding the embedding; a split prefill sends 16-column frames). ?kv=q8 turns the tiled
-      // attention off and ?moefuse=0 the grouped MoE on that device only.
-      // GPU sampling, on by default (?gpusample=0: off): argmax / top-k of the head in the same submit,
-      // 16-520 bytes back instead of the 1 MB logits vector; a masked sampler (tool-name constraint)
-      // still gets the logits. ?argmaxwide=0|1 (default: same as gpusample): the draft argmax as the
-      // two-stage multi-workgroup kernel.
-      gpuSample: GPU_SAMPLE,
-      argmaxWide: ARGMAX_WIDE,
+      // the room's settings (engine/preset.js: 16 batch columns, the small draft head, fused kernels, GPU
+      // sampling, and the ?flags that change them). The benchmarks and profilers build their engines from
+      // the same preset, so their numbers come from these settings. Prefill options are not set there:
+      // every device takes the engine's defaults, so host and workers agree.
+      ...roomQwen35Options(location.search),
     });
   } else if (M.kind === "gguf") {
     aiStatus("reading model index\u2026");
@@ -1607,10 +1575,8 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   }
   prefetcher.pending.clear(); prefetcher.url = null;
   if (ai.peerBytes) log("room", `${myName}: ${(ai.peerBytes / 2 ** 20).toFixed(1)} MB of weights came from devices in the room, ${((ai.netBytes || 0) / 2 ** 20).toFixed(1)} MB from the network`);
-  if (ai.engine) ai.engine.mtpBatchFill = MTP_BATCH;
-  // after a verify: the draft-cache refill as one batched pass (?mtprefill=0: one submit per row)
-  // and the next step's first draft run in that same pass (?predraft=0: off). Drafts only.
-  if (ai.engine) { ai.engine.mtpBatchRefill = MTP_REFILL; ai.engine.mtpPreDraft = PRE_DRAFT; }
+  // batched draft-cache fill and refill, next step's first draft in the verify's pass (engine/preset.js)
+  applyRoomFlags(ai.engine, location.search);
   ai.range = range;
   ai.model = modelKey;
   // the load card stays up (its "Starting" mark once every device has its layers) until the room
@@ -1940,12 +1906,7 @@ function ckptResume(ids, reused) {
 // (roadmap 25: +18–45% tokens per lap after a prompt). Drafts only change speed, never output.
 // ?fill=0 turns it off for A/B runs.
 const FILL_DRAFTS = new URLSearchParams(location.search).get("fill") !== "0";
-const MTP_REFILL = new URLSearchParams(location.search).get("mtprefill") !== "0";
-const PRE_DRAFT = new URLSearchParams(location.search).get("predraft") !== "0";
-const DRAFT_VOCAB = (() => { const v = new URLSearchParams(location.search).get("draftvocab"); return v === null ? 65536 : parseInt(v, 10) || 0; })();
-const MTP_BATCH = new URLSearchParams(location.search).get("mtpbatch") !== "0";   // ?mtpbatch=0: one draft-cache row per submit, for A/B
-const GPU_SAMPLE = new URLSearchParams(location.search).get("gpusample") !== "0";   // on by default; see the engine options in aiLoadShard
-const ARGMAX_WIDE = (new URLSearchParams(location.search).get("argmaxwide") ?? (GPU_SAMPLE ? "1" : "0")) === "1";
+const MTP_BATCH = roomEngineFlags(location.search).mtpBatchFill;   // ?mtpbatch=0: one draft-cache row per submit, for A/B
 function fillDrafts(h, ids, i0, basePos, n) {
   if (!FILL_DRAFTS || !ai.engine?.mtp) return;
   const dim = ai.engine.dims.dim, E = ai.engine;

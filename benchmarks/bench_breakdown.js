@@ -1,66 +1,67 @@
-// Where does a batched pass (engine default width, 4 columns) spend its time? Times full passes with
-// kernel families skipped (results are garbage; timing is what matters).
-// Known stale: the family lists below predate attn_flash, attn_glue, dn_pre,
-// dn_delta_gn, the prefill GEMM and the *_acc GEMVs, so with engine defaults
-// most families now read about 0. Rebuild them from eng.pipes before quoting.
+// Where does a pass spend its time? Times full passes with one kernel family skipped at a time (results
+// are garbage; timing is what matters), for a single-token decode pass and a batched pass of the
+// engine's batch width.
+//   deno run --unstable-webgpu --allow-read --allow-env benchmarks/bench_breakdown.js
+// env: LAYERS (default: every trunk layer), GGUF (default models/q38/model.gguf), REPS (passes per timing, 6),
+//      ROOM_FLAGS: the room's switches (engine/preset.js), e.g. ROOM_FLAGS="fuse=0"; unset: the room's settings
+// The engine is built with the room's settings, and the families come from the engine's own pipeline
+// list (tests/prof/families.js): every pipeline it created is in exactly one family, so a new kernel is
+// never silently counted as "everything else". The baseline is re-timed next to every skipped run
+// (the mean of the runs before and after), so drift over the run does not turn into negative costs.
+// eng.skip is checked on the GEMV op's own pipeline, so a full-width batched pass's prefill GEMM (which
+// runs in place of that GEMV) is counted in the GEMV family; the "prefill GEMM" row then reads ~0.
 import { Qwen35Engine } from "../engine/qwen35.js";
-import { parseGGUFHeader, qwen35Weights } from "../engine/gguf.js";
-const openFile = async (path) => { const fh = await Deno.open(path); return async (off, len) => { await fh.seek(off, Deno.SeekMode.Start); const out = new Uint8Array(len); let got = 0; while (got < len) { const n = await fh.read(out.subarray(got)); if (n === null) break; got += n; } return out; }; };
+import { roomQwen35Options, applyRoomFlags } from "../engine/preset.js";
+import { openGGUF, roomFlags, trunkLayers } from "../tests/load_model.js";
+import { pipeNames, familiesOf } from "../tests/prof/families.js";
+
 const adapter = await navigator.gpu.requestAdapter();
 const device = await adapter.requestDevice({ requiredLimits: { maxBufferSize: adapter.limits.maxBufferSize, maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize } });
-const readAt = await openFile(new URL("../models/q38/model.gguf", import.meta.url).pathname);
-const G = parseGGUFHeader((await readAt(0, 64 << 20)).buffer, { skipTokenizer: true });
-const L = +(Deno.env.get("LAYERS") || 64);
-const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true });
-const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, vocab: 248320, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512 });
+const model = openGGUF(Deno.env.get("GGUF") || new URL("../models/q38/model.gguf", import.meta.url).pathname, { skipTokenizer: true });
+const G = model.G;
+const L = +(Deno.env.get("LAYERS") || trunkLayers(G));
+const REPS = +(Deno.env.get("REPS") || 6);
+const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true });
+const flags = roomFlags();
+const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, vocab: G.tensors["token_embd.weight"].shape[0], layerRange: [0, L],
+  hasEmbed: true, hasHead: true, maxSeq: 512, ...roomQwen35Options(flags) }), flags);
 eng._initBatch();
-const ids = [10, 11, 12, 13];
-async function timeBatch(n = 6) {
+const NC = eng.NC, ids = Array.from({ length: NC }, (_, i) => 10 + i);
+console.log(`${L} layers, batchCols ${NC}, room flags "${flags}"`);
+
+async function timeBatch(n = REPS) {
   eng.reset(); eng.pos = 0;
   await eng.embedRunBatch(ids, 0); await device.queue.onSubmittedWorkDone();
   const t0 = performance.now();
-  for (let i = 0; i < n; i++) await eng.embedRunBatch(ids, 4 * (i + 1));
+  for (let i = 0; i < n; i++) await eng.embedRunBatch(ids, NC * (i + 1));
   await device.queue.onSubmittedWorkDone();
   return (performance.now() - t0) / n;
 }
-async function timeSingle(n = 6) {
+async function timeSingle(n = REPS) {
   eng.reset(); eng.pos = 0;
   await eng.forwardToken(10);
   const t0 = performance.now();
   for (let i = 0; i < n; i++) await eng.forwardToken(10);
   return (performance.now() - t0) / n;
 }
-const single = await timeSingle();
-console.log(`single pass: ${single.toFixed(1)} ms`);
-const famsS = {
-  "matvec coop (all decode matvecs+head)": ["matvec_q4_coop", "matvec_q8_coop", "matvec_coop", "matvec_q4_gu", "matvec_q8_gu", "matvec_gu"],
-  "dn_delta": ["dn_delta"],
-  "dn_conv": ["dn_conv"],
-  "dn_gates/l2/gatenorm": ["dn_gates", "dn_l2", "dn_gatenorm"],
-  "rmsnorm + add_res": ["rmsnorm", "add_res"],
-  "attention (scores/softmax/out)": ["attn_scores", "attn_softmax", "attn_out"],
-  "qsplit/head_norm/rope/sigmoid": ["qsplit", "head_norm", "rope_part", "sigmoid_mul"],
-};
-for (const [name, list] of Object.entries(famsS)) {
-  eng.skip = new Set(list);
-  const t = await timeSingle();
-  console.log(`  single without ${name.padEnd(38)} ${t.toFixed(1)} ms  -> family costs ~${(single - t).toFixed(1)} ms`);
+
+// every pipeline the engine created, by family
+const fams = familiesOf(pipeNames(eng));
+console.log(`${pipeNames(eng).length} pipelines in ${Object.keys(fams).length} families:`);
+for (const [fam, list] of Object.entries(fams)) console.log(`  ${fam.padEnd(28)} ${list.join(" ")}`);
+
+for (const [what, time] of [["single-token pass", timeSingle], [`batched pass (${NC} columns)`, timeBatch]]) {
+  eng.skip = null;
+  let base = await time();
+  console.log(`${what}: ${base.toFixed(1)} ms`);
+  for (const [fam, list] of Object.entries(fams)) {
+    eng.skip = new Set(list);
+    const t = await time();
+    eng.skip = null;
+    const after = await time(), ref = (base + after) / 2;
+    base = after;
+    console.log(`  without ${fam.padEnd(28)} ${t.toFixed(1)} ms (baseline ${ref.toFixed(1)})  -> family costs ~${(ref - t).toFixed(1)} ms`);
+  }
 }
 eng.skip = null;
-const full = await timeBatch();
-console.log(`batched pass (all): ${full.toFixed(1)} ms`);
-const fams = {
-  "matvec _b (all batched matvecs)": ["matvec_q4_coop_b", "matvec_q8_coop_b", "matvec_coop_b", "matvec_q4_gu_b", "matvec_q8_gu_b", "matvec_gu_b"],
-  "dn_delta_mc": ["dn_delta_mc"],
-  "dn_conv_mc": ["dn_conv_mc"],
-  "dn_gates/l2/gatenorm": ["dn_gates_mc", "dn_l2_mc", "dn_gatenorm_mc"],
-  "rmsnorm_mc + add_res_mc": ["rmsnorm_mc", "add_res_mc"],
-  "attention (scores/softmax/out)": ["attn_scores", "attn_softmax", "attn_out"],
-  "qsplit/head_norm/rope/sigmoid": ["qsplit_mc", "head_norm_mc", "rope_part_mc", "sigmoid_mul_mc"],
-};
-for (const [name, list] of Object.entries(fams)) {
-  eng.skip = new Set(list);
-  const t = await timeBatch();
-  console.log(`  without ${name.padEnd(34)} ${t.toFixed(1)} ms  -> family costs ~${(full - t).toFixed(1)} ms`);
-}
-eng.skip = null;
+model.close();
