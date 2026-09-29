@@ -16,6 +16,7 @@
 
 ## Design
 
+- [design/language.md](design/language.md): the Pooled look (tokens, type, spacing, components, do and don't). Read it before any UI change.
 - [design/harness-app.md](design/harness-app.md): Code mode, the in-browser coding agent.
 - [design/harness-light.md](design/harness-light.md): making Code mode lighter and sturdier, from small-model harnesses.
 

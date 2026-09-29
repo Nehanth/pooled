@@ -827,7 +827,7 @@
   /* Serve API: pooled serve (cli/). A popover that grows out of its button (room.js places it under the
      button, the caret at the button's centre); a sheet from the bottom on phones (below) */
   #api-sheet[hidden] { display: none; }
-  .api-pop { --cx: 40px; position: fixed; z-index: 60; top: 64px; left: 12px; width: min(440px, calc(100vw - 24px)); max-height: calc(100vh - 80px); max-height: calc(100dvh - 80px); overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 1px 2px rgba(20,22,29,.05), 0 24px 60px -20px rgba(20,22,29,.32); text-align: left; transform-origin: var(--cx) -8px; animation: apigrow .2s var(--ease); scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
+  .api-pop { --cx: 40px; position: fixed; z-index: 60; top: 64px; left: 12px; width: min(464px, calc(100vw - 24px)); max-height: calc(100vh - 80px); max-height: calc(100dvh - 80px); overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 1px 2px rgba(20,22,29,.05), 0 24px 60px -20px rgba(20,22,29,.32); text-align: left; transform-origin: var(--cx) -8px; animation: apigrow .2s var(--ease); scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
   @keyframes apigrow { from { opacity: 0; transform: translateY(-6px) scale(.97); } }
   .api-caret { position: fixed; z-index: 61; width: 12px; height: 12px; margin: -6px 0 0 -6px; background: var(--panel); border-left: 1px solid var(--border); border-top: 1px solid var(--border); border-radius: 3px 0 0 0; transform: rotate(45deg); animation: csin .2s var(--ease); pointer-events: none; }
   .api-head { position: relative; padding: 16px 52px 12px 18px; }
@@ -842,7 +842,22 @@
   .api-status.live i { background: var(--accent); animation: livebeat 2.4s var(--ease) infinite; }
   .api-status.off i { background: var(--border-2); }
   .api-s { padding: 12px 18px 14px; border-top: 1px solid var(--rule-2); }
-  .api-s > h3 { font: 500 13px/1.2 var(--sans); letter-spacing: -.005em; color: var(--ink-3); margin-bottom: 8px; }
+  .api-sub { margin-top: 4px; padding-left: 15px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+  .api-sub:empty { display: none; }
+  .api-s > h3 { display: flex; align-items: center; gap: 8px; font: 500 13px/1.2 var(--sans); letter-spacing: -.005em; color: var(--ink-3); margin-bottom: 8px; }
+  /* numbered steps: 1 is the one action (filled in the accent); once a client is connected (host) it turns into a tick */
+  .api-n { flex: none; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--border-2); font: 500 11px/1 var(--mono); font-style: normal; color: var(--muted); }
+  .api-n svg { display: none; }
+  .api-step.one .api-n { background: var(--accent); box-shadow: none; color: #fff; }
+  .api-pop.done .api-step.one .api-n span { display: none; }
+  .api-pop.done .api-step.one .api-n svg { display: block; }
+  /* the steps hang off one hairline, from each number down to the next */
+  .api-step { position: relative; }
+  .api-step + .api-step { border-top: 0; padding-top: 4px; }
+  .api-step:has(+ .api-step)::after { content: ""; position: absolute; left: 26px; top: 26px; bottom: -4px; width: 1px; background: var(--rule-2); }
+  .api-step.one::after { top: 34px; }
+  .api-step { padding-left: 44px; }
+  .api-step > h3 { margin-left: -26px; }
   .api-s .linkrow { margin-top: 0; }
   .api-pr { flex: none; font: 400 12px/1 var(--mono); color: var(--muted); }
   #api-cmd { flex: 1; min-width: 0; font: 400 12px/1.2 var(--mono); color: var(--text); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
@@ -855,15 +870,24 @@
   .api-url > span { flex: none; width: 70px; font-size: 13px; color: var(--muted); }
   .api-url code { flex: 1; min-width: 0; font: 400 12px/1.3 var(--mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .api-pop .icon-act { flex: none; width: 30px; height: 30px; }
-  .api-try { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  /* the example: tabs, the code and a per-tab hint in one card, split by hairlines; its Copy lives in the tab row */
+  .api-ex { border: 1px solid var(--rule-2); border-radius: 12px; background: var(--panel-3); overflow: hidden; }
+  .api-try { display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 6px; border-bottom: 1px solid var(--rule-2); background: var(--panel); }
   .api-tabs { display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
   .api-tabs button { height: 26px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; font: 500 12px/1 var(--sans); color: var(--muted); transition: color .15s var(--ease), background-color .15s var(--ease), box-shadow .15s var(--ease); }
   .api-tabs button:hover:not(:disabled) { background: transparent; border: 0; color: var(--text); }
   .api-tabs button[aria-selected="true"], .api-tabs button[aria-selected="true"]:hover:not(:disabled) { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(20,22,29,.08), 0 0 0 1px rgba(20,22,29,.05); }
   .api-tabs button:active:not(:disabled) { transform: none; }
-  #api-code-copy { margin-left: auto; }
-  #api-code { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--rule-2); border-radius: 12px; background: var(--panel-3); font: 400 12px/1.6 var(--mono); color: var(--text); white-space: pre; overflow-x: auto; tab-size: 2; scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
-  #api-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #api-code-copy { margin-left: auto; width: auto; height: 28px; padding: 0 10px 0 8px; gap: 6px; display: inline-flex; align-items: center; font: 500 12px/1 var(--sans); }
+  #api-code-copy.done .lb { color: var(--ok); }
+  .api-code-w { position: relative; }
+  /* code wider than the card: a fade at the right edge says it scrolls */
+  .api-code-w::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 28px; background: linear-gradient(to right, transparent, var(--panel-3)); opacity: 0; transition: opacity .15s var(--ease); pointer-events: none; }
+  .api-code-w.more::after { opacity: 1; }
+  .api-ex-hint { padding: 8px 12px; border-top: 1px solid var(--rule-2); font-size: 12px; line-height: 1.4; color: var(--muted); }
+  .api-ex-hint code, .api-hint code { font: 400 11px/1 var(--mono); color: var(--ink-2); }
+  #api-code { margin: 0; padding: 10px 12px; border: 0; border-radius: 0; background: var(--panel-3); font: 400 12px/1.6 var(--mono); color: var(--text); white-space: pre; overflow-x: auto; tab-size: 2; scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
+  #api-code:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   #api-code .c { color: var(--muted); }
   #api-code .u { color: var(--accent-text); }
   .api-hint { margin-top: 8px; font-size: 12px; line-height: 1.5; color: var(--muted); }
@@ -872,7 +896,9 @@
   #api-clients .ic { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text); }
   #api-clients .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
   #api-clients .nm b { font: 500 13px/1.2 var(--sans); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #api-clients .nm small { font: 400 11px/1.2 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #api-clients .nm small { font: 400 12px/1.3 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #api-clients .nm small > span { white-space: nowrap; }
+  #api-clients .nm small .n { font: 400 11px/1 var(--mono); color: var(--ink-2); }
   #api-clients li button, .pop .api-kick { flex: none; height: 30px; padding: 0 12px; font: 500 12px/1 var(--sans); }
   #api-clients li button { color: var(--del); }
   .pop .api-kick { margin-top: 10px; }
@@ -1446,10 +1472,14 @@
     .api-head::before { content: ""; position: absolute; top: 7px; left: 50%; width: 36px; height: 4px; margin-left: -18px; border-radius: 2px; background: var(--border-2); }
     .api-head .x { top: 14px; right: 12px; }
     .api-s { padding-left: 20px; padding-right: 20px; }
+    .api-step { padding-left: 46px; }
+    .api-step:has(+ .api-step)::after { left: 28px; }
     .api-foot { padding: 14px 20px 18px; }
     #api-copy { height: 36px; }
     .api-pop .icon-act { width: 36px; height: 36px; }
-    .api-tabs button { height: 32px; padding: 0 12px; }
+    .api-tabs button { height: 32px; padding: 0 10px; }
+    #api-code-copy { height: 36px; }
+    .api-sub { padding-left: 15px; }
     #api-code { font-size: 11px; }
     #api-clients .nm small { white-space: normal; }
     #share-copy { height: 36px; }
@@ -1826,37 +1856,44 @@
 </div>
 <div id="api-sheet" hidden>
   <i class="api-caret" aria-hidden="true"></i>
-  <div class="api-pop" role="dialog" aria-modal="false" aria-labelledby="api-h" aria-describedby="api-status">
+  <div class="api-pop" role="dialog" aria-modal="false" aria-labelledby="api-h" aria-describedby="api-status api-sub">
     <div class="api-head">
       <h2 id="api-h">Serve API</h2>
       <p id="api-status" class="api-status" role="status"><i aria-hidden="true"></i><span>Waiting for a client</span></p>
+      <p id="api-sub" class="api-sub">Run step 1. Your tool shows up here when it connects.</p>
       <button id="api-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
     </div>
-    <section class="api-s">
-      <h3>Run this on your computer</h3>
+    <section id="api-clients-wrap" class="api-s" hidden>
+      <h3>Connected now</h3>
+      <ul id="api-clients"></ul>
+    </section>
+    <section class="api-s api-step one">
+      <h3><i class="api-n" aria-hidden="true"><span>1</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.3l2 2 4-4.6"/></svg></i>Run this on your computer</h3>
       <div class="linkrow"><span class="api-pr" aria-hidden="true">$</span><code id="api-cmd"></code><button id="api-copy" type="button">Copy</button></div>
     </section>
-    <section class="api-s">
-      <h3>Then point any OpenAI or Anthropic tool here</h3>
+    <section class="api-s api-step">
+      <h3><i class="api-n" aria-hidden="true"><span>2</span></i>Point any OpenAI or Anthropic tool here</h3>
       <div class="api-urls">
         <div class="api-url"><span>OpenAI</span><code>http://127.0.0.1:8080/v1</code><button type="button" class="icon-act" data-copy="http://127.0.0.1:8080/v1" data-what="OpenAI URL" aria-label="Copy the OpenAI URL" title="Copy"></button></div>
         <div class="api-url"><span>Anthropic</span><code>http://127.0.0.1:8080</code><button type="button" class="icon-act" data-copy="http://127.0.0.1:8080" data-what="Anthropic URL" aria-label="Copy the Anthropic URL" title="Copy"></button></div>
       </div>
-      <div class="api-try">
-        <div class="api-tabs" role="tablist" aria-label="Example">
-          <button type="button" role="tab" id="api-t-curl" aria-controls="api-code" aria-selected="true">curl</button>
-          <button type="button" role="tab" id="api-t-py" aria-controls="api-code" aria-selected="false" tabindex="-1">Python</button>
-          <button type="button" role="tab" id="api-t-js" aria-controls="api-code" aria-selected="false" tabindex="-1">JS</button>
-          <button type="button" role="tab" id="api-t-anth" aria-controls="api-code" aria-selected="false" tabindex="-1">Anthropic</button>
-        </div>
-        <button type="button" id="api-code-copy" class="icon-act" data-what="example" aria-label="Copy the example" title="Copy"></button>
-      </div>
-      <pre id="api-code" role="tabpanel" aria-labelledby="api-t-curl" tabindex="0"></pre>
-      <p class="api-hint">Continue, Open WebUI and the like: add an OpenAI provider with the OpenAI URL and any API key.</p>
+      <p class="api-hint">Any API key works. In Continue or Open WebUI (Settings, Connections), add an OpenAI connection with the OpenAI URL. Used <code>--port</code>? Change 8080.</p>
     </section>
-    <section id="api-clients-wrap" class="api-s" hidden>
-      <h3>Connected now</h3>
-      <ul id="api-clients"></ul>
+    <section class="api-s api-step">
+      <h3><i class="api-n" aria-hidden="true"><span>3</span></i>Try it</h3>
+      <div class="api-ex">
+        <div class="api-try">
+          <div class="api-tabs" role="tablist" aria-label="Example">
+            <button type="button" role="tab" id="api-t-curl" aria-controls="api-code" aria-selected="true">curl</button>
+            <button type="button" role="tab" id="api-t-py" aria-controls="api-code" aria-selected="false" tabindex="-1">Python</button>
+            <button type="button" role="tab" id="api-t-js" aria-controls="api-code" aria-selected="false" tabindex="-1">JS</button>
+            <button type="button" role="tab" id="api-t-anth" aria-controls="api-code" aria-selected="false" tabindex="-1">Anthropic</button>
+          </div>
+          <button type="button" id="api-code-copy" class="icon-act" data-what="example" aria-label="Copy the example" title="Copy"></button>
+        </div>
+        <div class="api-code-w"><pre id="api-code" role="tabpanel" aria-labelledby="api-t-curl" tabindex="0"></pre></div>
+        <p id="api-ex-hint" class="api-ex-hint"></p>
+      </div>
     </section>
     <div class="api-foot">
       <label id="api-allow-row" class="api-set" hidden><span><b>Allow API clients</b><small>Off disconnects every client and refuses new ones.</small></span><span class="switch"><input type="checkbox" id="api-allow" role="switch" checked><i aria-hidden="true"></i></span></label>

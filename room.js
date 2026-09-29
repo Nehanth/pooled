@@ -3851,7 +3851,7 @@ function apiWelcome(from, d) {
     : ai.apiKicked.has(from) ? "the host disconnected this API client" : null;
   if (why) { apiBye(from, why); return false; }
   const known = ai.apis.get(from);
-  ai.apis.set(from, { name: d.name, client: d.meta.client, answered: known?.answered || 0 });
+  ai.apis.set(from, { name: d.name, client: d.meta.client, answered: known?.answered || 0, tool: known?.tool });
   apiPanel();
   return true;
 }
@@ -3886,6 +3886,9 @@ function apiAsk(from, d) {
   if (!ai.settings.apiAllow) return busy("the host does not allow API clients in this room", "off");
   const v = validateApiAsk(d);
   if (v.err) return busy(v.err, v.code);
+  // the program behind the bridge (its User-Agent, read by cli/lib/http.js: Continue, OpenAI/Python...), for the Serve API panel
+  const tool = v.req.params.client !== "API" ? v.req.params.client : null, known = ai.apis.get(from);
+  if (tool && known.tool !== tool) { known.tool = tool; apiPanel(); }
   if (ai.degraded) return busy("a device left the room; the host has to re-deal the layers first", "degraded");
   if (!ai.engine || ai.readyPeers.size < ai.chain.length) return busy("the model is still loading", "loading");
   const entry = { api: v.req, name: ai.apis.get(from).name, from };
@@ -4001,6 +4004,13 @@ r = client.messages.create(model="pooled", max_tokens=400,
     messages=[{"role": "user", "content": "Hi"}])
 print(r.content[0].text)`,
 };
+// one line under each example, in its card: how to stream (the install line is in the code)
+const API_EX_HINTS = {
+  curl: 'Add <code>"stream": true</code> to stream tokens.',
+  py: 'Pass <code>stream=True</code> to stream tokens.',
+  js: 'Pass <code>stream: true</code> to stream tokens.',
+  anth: 'The same room through the Messages API. <code>stream=True</code> streams.',
+};
 let apiTab = "curl";
 function apiCommand() {
   return `npx @pooled/cli serve ${roomCode || "CODE"}${SIGNAL ? ` --signal ${SIGNAL}` : ""}`;
@@ -4021,7 +4031,16 @@ function apiShowTab(key) {
   $("api-code").innerHTML = API_EXAMPLES[key].split("\n").map((l) => /^\s*(#|\/\/)/.test(l) ? `<span class="c">${esc(l)}</span>`
     : esc(l).replaceAll(API_BASE, `<span class="u">${API_BASE}</span>`)).join("\n");
   $("api-code").scrollLeft = 0;
+  $("api-ex-hint").innerHTML = API_EX_HINTS[key];
+  apiFade();
 }
+// a fade at the code's right edge while more of it is out of view
+function apiFade() {
+  const c = $("api-code");
+  c.parentElement.classList.toggle("more", c.scrollWidth - c.clientWidth - c.scrollLeft > 2);
+}
+// an API client by what the person knows: the tool (from its User-Agent) once it has asked, else the bridge's name
+const apiLabel = (c) => c.tool || c.name;
 function apiPanel() {
   if (!$("api-sheet")) return;
   const list = apiClients(), running = isHost && ai.apiRun && ai.apis.get(ai.apiRun.from);
@@ -4032,19 +4051,28 @@ function apiPanel() {
   const st = $("api-status"), off = isHost && !ai.settings.apiAllow;
   st.className = "api-status " + (off ? "off" : list.length ? "live" : "wait");
   st.querySelector("span").textContent = off ? "API clients are off in this room"
-    : running ? `Answering ${running.name}`
-    : list.length === 1 ? `${list[0][1].name} is connected`
+    : running ? `Answering ${apiLabel(running)}`
+    : list.length === 1 ? `${apiLabel(list[0][1])} is connected`
     : list.length ? `${list.length} API clients connected`
     : "Waiting for a client to connect";
+  $("api-sub").textContent = off ? "Turn on Allow API clients below to let tools in."
+    : list.length ? "" : "Run step 1. Your tool shows up here when it connects.";
+  // step 1 done: the host sees a tick on it while a client is connected
+  $("api-sheet").querySelector(".api-pop").classList.toggle("done", isHost && list.length > 0);
   $("api-clients-wrap").hidden = !list.length;
   $("api-clients").replaceChildren(...list.map(([id, c]) => {
     const li = document.createElement("li");
     li.innerHTML = `<span class="ic">${ICONS.api}</span><span class="nm"><b></b><small></small></span>`;
-    li.querySelector("b").textContent = c.name;
-    li.querySelector("small").textContent = [c.client, isHost ? `${c.answered} answered` : ""].filter(Boolean).join(" · ") || "API client";
+    li.querySelector("b").textContent = apiLabel(c);
+    // "via pooled serve kqzt · 3 answered": each part kept whole, mono only for the number
+    const parts = [c.tool ? `via ${c.name}` : c.client || "API client"].map((t) => { const e = document.createElement("span"); e.textContent = t; return e; });
+    if (isHost) { const e = document.createElement("span"); e.innerHTML = `<span class="n"></span> answered`; e.firstChild.textContent = c.answered; parts.push(e); }
+    const sm = li.querySelector("small");
+    parts.forEach((e, i) => { if (i) sm.append(" · "); sm.append(e); });
+    sm.title = [c.name, c.client].filter(Boolean).join(" · ");
     if (isHost) {
       const b = document.createElement("button");
-      b.type = "button"; b.textContent = "Disconnect"; b.setAttribute("aria-label", `Disconnect ${c.name}`);
+      b.type = "button"; b.textContent = "Disconnect"; b.setAttribute("aria-label", `Disconnect ${apiLabel(c)}`);
       b.addEventListener("click", () => { apiKick(id); if (!$("api-sheet").contains(document.activeElement)) $("api-copy").focus({ preventScroll: true }); });
       li.appendChild(b);
     }
@@ -4082,11 +4110,13 @@ function closeApi(back = true) {
 }
 if ($("api-sheet")) {
   for (const b of $("api-sheet").querySelectorAll(".icon-act")) b.innerHTML = COPY_SVG;
+  $("api-code-copy").insertAdjacentHTML("beforeend", '<span class="lb">Copy</span>');
+  $("api-code").addEventListener("scroll", apiFade, { passive: true });
   $("api-open").addEventListener("click", () => $("api-sheet").hidden ? openApi() : closeApi());
   $("api-close").addEventListener("click", () => closeApi());
   $("api-sheet").addEventListener("click", (e) => { if (e.target === $("api-sheet")) closeApi(); });   // the phone sheet's scrim
   document.addEventListener("pointerdown", (e) => { if (!$("api-sheet").hidden && !apiSheetMQ.matches && !e.target.closest?.("#api-sheet, #api-open")) closeApi(false); });
-  addEventListener("resize", apiPlace);
+  addEventListener("resize", () => { apiPlace(); if (!$("api-sheet").hidden) apiFade(); });
   addEventListener("scroll", apiPlace, true);
   apiSheetMQ.addEventListener("change", () => closeApi(false));
   $("api-copy").addEventListener("click", () => copyText(apiCommand(), "command"));
