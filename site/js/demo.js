@@ -778,6 +778,13 @@
     document.documentElement.style.setProperty("--body-h", px + "px");
     geo = null;
   };
+  // the load card keeps to the stage: on a short one it scales down whole, so its title and status line never clip
+  const ldc = $("ldc");
+  const fitLdc = () => {
+    const h = ldc.offsetHeight, room = bodyEl.clientHeight - 16;
+    ldc.style.setProperty("--ldc-k", h > room && room > 0 ? (room / h).toFixed(3) : "1");
+  };
+  if (window.ResizeObserver) { const ro = new ResizeObserver(fitLdc); ro.observe(ldc); ro.observe(bodyEl); }
   fit(true);
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fit(true));
   addEventListener("resize", () => { fit(); geo = null; if (demo.dataset.scene === "chat") { measure(); if (aLi.style.minHeight) reserve(); } });

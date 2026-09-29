@@ -287,9 +287,11 @@ html:not(.js) .card{display:none}
 /* while downloading, the band waits unseen at the top at its chat size, so the chat can fade it in where it stays */
 .demo[data-scene="split"] .model{justify-content:flex-start}
 .js .demo[data-scene="split"] .band{opacity:0;transform:none;pointer-events:none;transition:none}
+/* --ldc-k: demo.js scales the card down on a stage too short for it. `scale` applies after the translate, so it
+   scales about the layout box's top left, which the translate has put at the card's centre: it stays centred */
 .ldc{position:absolute;left:50%;top:calc(var(--body-h) / 2);width:min(560px,calc(100% - 32px));padding:24px 24px 20px;background:var(--white);border:1px solid var(--rule);border-radius:16px;
   box-shadow:0 1px 2px rgba(20,22,29,.04),0 12px 24px -12px rgba(20,22,29,.10),0 40px 80px -40px rgba(20,22,29,.22);transform:translate(-50%,-50%);
-  opacity:0;visibility:hidden;transition:opacity .3s var(--ease),visibility 0s .3s}
+  scale:var(--ldc-k,1);transform-origin:0 0;opacity:0;visibility:hidden;transition:opacity .3s var(--ease),visibility 0s .3s}
 .js .demo[data-scene="split"] .ldc{opacity:1;visibility:visible;transition:opacity .35s var(--ease) .15s,visibility 0s}
 .js .demo[data-scene="split"] .model.dl .ldc{animation:ldcin .45s var(--ease) .15s backwards}
 @keyframes ldcin{from{opacity:0;transform:translate(-50%,calc(-50% + 8px))}}
