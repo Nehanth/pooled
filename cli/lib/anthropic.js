@@ -52,7 +52,9 @@ export function parseAnthropic(b) {
 
 const STOP = { stop: "end_turn", abort: "end_turn", stop_seq: "stop_sequence", max: "max_tokens", ctx: "max_tokens" };
 export const stopReason = (r) => STOP[r] || "end_turn";
-const usageOf = (u, reused) => ({ input_tokens: u.in, output_tokens: u.out, ...(reused ? { cache_read_input_tokens: reused } : {}) });
+// input_tokens leaves out the tokens read from the cache, as in the Messages API (the OpenAI side counts
+// them in prompt_tokens, with cached_tokens as a detail)
+const usageOf = (u, reused) => ({ input_tokens: Math.max(0, u.in - (reused || 0)), output_tokens: u.out, ...(reused ? { cache_read_input_tokens: reused } : {}) });
 
 export function anthropicResponse({ id, model, text, think, thinking, reason, stopSeq, usage, reused }) {
   const content = [];
@@ -94,11 +96,11 @@ export class AnthropicStream {
     if (!th && this.kind !== "text") s += this.close() + this.open("text");
     return s + ev("content_block_delta", { type: "content_block_delta", index: this.block, delta: th ? { type: "thinking_delta", thinking: text } : { type: "text_delta", text } });
   }
-  done({ reason, stopSeq, usage }) {
+  done({ reason, stopSeq, usage, reused }) {
     let s = "";
     if (this.kind !== "text") s += this.close() + this.open("text");
     s += this.close();
-    s += ev("message_delta", { type: "message_delta", delta: { stop_reason: stopReason(reason), stop_sequence: reason === "stop_seq" ? stopSeq ?? null : null }, usage: { output_tokens: usage.out } });
+    s += ev("message_delta", { type: "message_delta", delta: { stop_reason: stopReason(reason), stop_sequence: reason === "stop_seq" ? stopSeq ?? null : null }, usage: usageOf(usage, reused) });
     return s + ev("message_stop", { type: "message_stop" });
   }
   error(e) { return ev("error", anthropicError(e).body); }

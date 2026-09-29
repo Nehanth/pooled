@@ -37,7 +37,7 @@ const ROOM = [
   { t: "ai-token", text: "Hel" }, { t: "ai-token", text: "lo" },
   { t: "ai-gendone", reason: "stop", usage: { in: 812, out: 2 } },
 ];
-const play = (s, room) => room.map((d) => d.t === "ai-genstart" ? s.start(d.promptTokens) : d.t === "ai-token" ? s.token(d.text, !!d.th) : s.done({ reason: d.reason, stopSeq: d.stopSeq, usage: d.usage })).join("");
+const play = (s, room) => room.map((d) => d.t === "ai-genstart" ? s.start(d.promptTokens) : d.t === "ai-token" ? s.token(d.text, !!d.th) : s.done({ reason: d.reason, stopSeq: d.stopSeq, usage: d.usage, reused: d.reused })).join("");
 
 Deno.test("anthropic: the stream, byte for byte", () => {
   const s = new AnthropicStream({ id: "r7", model: "pooled/qwen3-1.7b", thinking: false });
@@ -48,7 +48,7 @@ Deno.test("anthropic: the stream, byte for byte", () => {
     'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}\n\n' +
     'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}\n\n' +
     'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n' +
-    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}\n\n' +
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":812,"output_tokens":2}}\n\n' +
     'event: message_stop\ndata: {"type":"message_stop"}\n\n');
 });
 Deno.test("anthropic: thinking is block 0 with a signature delta, the text block is 1", () => {
@@ -72,9 +72,10 @@ Deno.test("anthropic: thinking asked but none came still ends with a text block;
 Deno.test("anthropic: non-stream response", () => {
   eq(anthropicResponse({ id: "r7", model: "pooled/q", text: "Hello", think: "", thinking: false, reason: "stop", usage: { in: 812, out: 2 } }),
     { id: "msg_r7", type: "message", role: "assistant", model: "pooled/q", content: [{ type: "text", text: "Hello" }], stop_reason: "end_turn", stop_sequence: null, usage: { input_tokens: 812, output_tokens: 2 } });
-  const t = anthropicResponse({ id: "a", model: "m", text: "x", think: "t", thinking: true, reason: "stop_seq", stopSeq: "END", usage: { in: 1, out: 1 }, reused: 3 });
+  const t = anthropicResponse({ id: "a", model: "m", text: "x", think: "t", thinking: true, reason: "stop_seq", stopSeq: "END", usage: { in: 39, out: 1 }, reused: 22 });
   eq(t.content, [{ type: "thinking", thinking: "t", signature: "" }, { type: "text", text: "x" }]);
-  eq([t.stop_reason, t.stop_sequence, t.usage.cache_read_input_tokens], ["stop_sequence", "END", 3]);
+  eq([t.stop_reason, t.stop_sequence], ["stop_sequence", "END"]);
+  eq(t.usage, { input_tokens: 17, output_tokens: 1, cache_read_input_tokens: 22 }, "input_tokens leaves out the cache reads");
   eq(["stop", "abort", "stop_seq", "max", "ctx"].map(stopReason), ["end_turn", "end_turn", "stop_sequence", "max_tokens", "max_tokens"]);
 });
 Deno.test("anthropic: error shapes and statuses", () => {
@@ -87,4 +88,10 @@ Deno.test("anthropic: models list", () => {
   eq(anthropicModels("pooled/q", "Qwen3 1.7B · Q8 (Pooled room ABCD)", Date.UTC(2026, 8, 28)),
     { data: [{ type: "model", id: "pooled/q", display_name: "Qwen3 1.7B · Q8 (Pooled room ABCD)", created_at: "2026-09-28T00:00:00.000Z" }], has_more: false, first_id: "pooled/q", last_id: "pooled/q" });
   eq(anthropicModels(null, "", 0).data, []);
+});
+Deno.test("anthropic: the stream's message_delta carries the final usage, cache reads apart", () => {
+  const s = new AnthropicStream({ id: "r7", model: "m", thinking: false });
+  const out = play(s, [ROOM[0], { t: "ai-token", text: "x" }, { t: "ai-gendone", reason: "stop", usage: { in: 39, out: 4 }, reused: 22 }]);
+  const delta = out.split("\n\n").find((e) => e.startsWith("event: message_delta"));
+  eq(JSON.parse(delta.split("\n")[1].slice(6)).usage, { input_tokens: 17, output_tokens: 4, cache_read_input_tokens: 22 });
 });
