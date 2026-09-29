@@ -49,19 +49,40 @@ Deno.test("agent: a failed edit gets the edit card once; the card is not repeate
   eq(A.reqs[1].cards, { edit: 1 });
 });
 
-Deno.test("agent: the same call again with nothing changed is answered without running; a write in between runs it", async () => {
+Deno.test("agent: the same read again with nothing changed is answered as a repeat; a write in between makes it fresh", async () => {
   const ws = new MemoryWorkspace({ "a.js": "let a = 1;\n" }), runs = [];
   const tools = codingTools(ws).map((t) => (t.name === "read_file" ? { ...t, run: (a) => { runs.push(a.path); return t.run(a); } } : t));
   const rd = call("read_file", { path: "a.js" });
   const A = new Agent({ generate: scripted([rd, rd, call("write_file", { path: "a.js", content: "let a = 2;" }), rd, "ok"]), tools });
   const r = await A.run("look");
   eq(r.reason, "done");
-  eq(runs, ["a.js", "a.js"], "step 2 did not run; step 4 ran after the write");
+  eq(runs, ["a.js", "a.js", "a.js"], "a read runs again to check the file (it can change outside the agent)");
   ok(A.turns[4].text.includes("1|let a = 1; (same call as step 1; nothing changed)" + hint("loop")), A.turns[4].text);
   // a model that keeps repeating is stopped as stuck instead of burning the steps
   const B = new Agent({ generate: scripted(Array(8).fill(rd)), tools: codingTools(ws) });
   const rb = await B.run("look");
   eq([rb.reason, rb.steps], ["stuck", 4]);
+});
+
+Deno.test("agent: a repeated read after the file changed outside the agent gets the new content, not a stale answer", async () => {
+  const ws = new MemoryWorkspace({ "a.js": "let a = 1;\n" });
+  const rd = call("read_file", { path: "a.js" });
+  // the user saves the file in the editor while the model writes its second answer
+  const gen = scripted([rd, rd, "ok"]);
+  let n = 0;
+  const A = new Agent({ generate: (x) => { if (++n === 2) ws.files.set("a.js", "let a = 2;\n"); return gen(x); }, tools: codingTools(ws) });
+  const r = await A.run("look");
+  eq(r.reason, "done");
+  ok(A.turns[4].text.includes("1|let a = 2;"), A.turns[4].text);
+  ok(!A.turns[4].text.includes("same call as step"), A.turns[4].text);
+  ok(!A.turns[4].text.includes(hint("loop")), "no loop card for a changed file");
+  // a mutating call repeated with nothing changed is still not run twice
+  const writes = [];
+  const tools = codingTools(ws).map((t) => (t.name === "write_file" ? { ...t, run: (a) => { writes.push(a.path); return t.run(a); } } : t));
+  const wr = call("write_file", { path: "b.js", content: "x" });
+  const B = new Agent({ generate: scripted([wr, wr, "ok"]), tools });
+  await B.run("write");
+  eq(writes, ["b.js"]);
 });
 
 Deno.test("agent: an empty answer gets one nudge; a second one ends the request", async () => {

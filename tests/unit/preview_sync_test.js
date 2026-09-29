@@ -1,7 +1,7 @@
 // harness/preview-sync.js: a host's PreviewServer mirrored to a peer over an in-memory link.
 import { MemoryWorkspace, watch } from "../../harness/workspace.js";
 import { PreviewServer } from "../../harness/preview.js";
-import { PreviewPublisher, PreviewSubscriber } from "../../harness/preview-sync.js";
+import { PreviewPublisher, PreviewSubscriber, chunkCount } from "../../harness/preview-sync.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -9,7 +9,7 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 const text = (s) => new TextDecoder().decode(s.bytes);
 
 // host <-> peer "P"; every message goes through structuredClone like a data channel would copy it
-function link({ tamper } = {}) {
+function link({ tamper, chunk = 64 << 10 } = {}) {
   const ws = watch(new MemoryWorkspace({ "index.html": "<canvas></canvas><script type=module src=game.js></script>", "game.js": "let a = 1;\n", "big.bin": "x".repeat(150000) }));
   const server = new PreviewServer(ws, { debounce: 10 });
   const log = [];
@@ -20,7 +20,7 @@ function link({ tamper } = {}) {
     if (tamper) tamper(m);
     queueMicrotask(() => (m.t === "ai-pv" ? sub.onManifest("H", m) : m.t === "ai-pv-blob" ? sub.onBlob("H", m) : sub.onStop("H", m)));
   };
-  pub = new PreviewPublisher(server, { send: (id, m) => toPeer(m), broadcast: toPeer, chunk: 64 << 10 });
+  pub = new PreviewPublisher(server, { send: (id, m) => toPeer(m), broadcast: toPeer, chunk });
   sub = new PreviewSubscriber({ hostId: "H", send: (m) => { log.push(m.t + ":" + m.hs.length); queueMicrotask(() => pub.onWant("P", structuredClone(m))); } });
   return { ws, server, pub, sub, log };
 }
@@ -49,6 +49,31 @@ Deno.test("preview sync: the first rev fetches every blob, the next only what ch
   eq(L.sub.snapshot(5173), null);
   ok(ups[ups.length - 1].stopped);
   L.server.close();
+});
+
+Deno.test("preview sync: any publisher chunk size reaches the peer (clamped to what a subscriber accepts)", async () => {
+  // 128 KiB chunks were refused as "bigger than its manifest said"; 4 KiB chunks made a 150 kB file
+  // more chunks than the fixed count bound and were dropped, so the preview never arrived
+  for (const [chunk, blobs] of [[128 << 10, 1 + 1 + 3], [1024, 1 + 1 + 37]]) {
+    const L = link({ chunk });
+    const s = await L.server.serve({ port: 5173 });
+    const p = await settle(L.sub, 5173, s.rev);
+    ok(p, `peer has rev 1 with chunk ${chunk}`);
+    eq(p.files.get("big.bin").bytes.length, 150000);
+    eq(L.log.filter((t) => t === "ai-pv-blob").length, blobs, `chunk ${chunk}`);
+    L.server.close();
+  }
+  eq(chunkCount(0), 1); eq(chunkCount(4096), 1); eq(chunkCount(4097), 2); eq(chunkCount(150000, 64 << 10), 3);
+});
+
+Deno.test("preview sync: a blob split into more chunks than its size allows is ignored", async () => {
+  const sent = [];
+  const sub = new PreviewSubscriber({ hostId: "H", send: (m) => sent.push(m) });
+  const h = "0123456789abcdef0123";
+  sub.onManifest("H", { t: "ai-pv", port: 5173, rev: 1, entry: "index.html", manifest: [["index.html", "", h, 10]] });
+  eq(sent.length, 1);
+  await sub.onBlob("H", { t: "ai-pv-blob", h, i: 0, n: 5, b: new Uint8Array(2).buffer });
+  eq(sub.parts.get(h).got, 0, "10 bytes come in one chunk");
 });
 
 Deno.test("preview sync: bad hashes, oversized manifests and foreign senders are dropped", async () => {

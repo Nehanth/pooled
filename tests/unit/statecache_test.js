@@ -269,6 +269,23 @@ Deno.test("Sessions: close forgets a session wherever it is", async () => {
   eq(await S.switchTo("a"), "new", "a closed session comes back empty");
 });
 
+Deno.test("Sessions: no file is left behind once a session is loaded, persisted or closed", async () => {
+  const { e, c, S } = sessions(0);
+  await S.switchTo("a"); e.feed(1);
+  await S.switchTo("b");                 // a spilled to disk
+  eq((await c.entries()).map((x) => x.key), ["t-a"]);
+  eq(await S.switchTo("a"), "disk");     // b spilled; a's file is stale now and removed
+  eq((await c.entries()).map((x) => x.key), ["t-b"]);
+  await S.close("a");                    // a was loaded from disk: closing it leaves no file
+  await S.close("b");
+  eq((await c.entries()).length, 0, "b's file removed");
+  await S.switchTo("p"); e.feed(9);
+  await S.persist();
+  await S.close("p");                    // the active session's persisted file goes with it
+  eq((await c.entries()).length, 0, "p's persisted file removed");
+  eq(await c.remove("nothing"), false);
+});
+
 Deno.test("Sessions: ids with odd characters get safe, distinct-enough cache keys", async () => {
   const { e, c, S } = sessions(0);
   await S.switchTo("proj/x y"); e.feed(7);

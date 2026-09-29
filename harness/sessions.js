@@ -41,10 +41,13 @@ export class Sessions {
     await this._spill();
     return from;
   }
+  // the file is removed once loaded: the session now lives on the engine and moves on from it, and
+  // nothing else points at the file (a stale copy would sit on disk until evicted)
   async _loadDisk(id) {
     const st = await this.cache.get(this._key(id));
     if (!st) return false;
     this.e.importState(st);
+    await this.cache.remove(this._key(id));
     return true;
   }
   // keep at most gpuSlots parked sessions on the GPU; the least recently used go to disk
@@ -65,10 +68,11 @@ export class Sessions {
     if (this.active == null) return;
     await this.cache.put(this._key(this.active), await this.e.exportState(), { id: this.active });
   }
-  // Forget a session everywhere.
+  // Forget a session everywhere. Its file goes wherever the session is: persist() also writes one
+  // for the active session.
   async close(id) {
     if (this.where.get(id) === "gpu") this.e.dropSlot(this._slot(id));
-    if (this.where.get(id) === "disk") await (await this.cache._d()).removeEntry(this._key(id) + ".bin").catch(() => {});
+    if (this.where.has(id) || this.active === id) await this.cache.remove(this._key(id));
     this.where.delete(id); this.used.delete(id);
     if (this.active === id) { this.active = null; this.e.reset(); }
   }

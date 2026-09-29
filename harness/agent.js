@@ -196,13 +196,21 @@ export class Agent {
         calls++;
         R.calls.push({ name: c.name, arguments: c.arguments });
         briefs.push(briefCall(c));
-        // the same call as last step with nothing changed since: answer from memory, do not run it
+        // the same call as last step with nothing changed since: answer from memory. A call that
+        // only reads (read_file, list_dir, search) is run again anyway, since the files can change
+        // outside the agent (the user's editor, another program on a folder on disk), and is a
+        // repeat only when its result is the same; a mutating call is not run twice.
         const key = c.error || LIVE.has(c.name) ? null : c.name + "\u0000" + JSON.stringify(c.arguments || {});
-        const prev = key && prevStep.get(key), rep = !!prev && prev.mut === mut && !signal?.aborted;
+        const prev = key && prevStep.get(key);
         // the same call twice in one answer (e.g. a forced second call): run it once
         const dup = c.error ? null : c.name + "\u0000" + JSON.stringify(c.arguments || {});
         const twice = !!dup && seen.has(dup);
         if (dup) seen.add(dup);
+        let rep = !!prev && prev.mut === mut && !signal?.aborted, fresh = null;
+        if (rep && !twice && this.byName.get(c.name) && !this.byName.get(c.name).mutates) {
+          fresh = await this._runCall(c, step, signal);   // (its tool-start / tool events go out here)
+          rep = fresh === prev.result && !signal?.aborted;
+        }
         let r;
         if (signal?.aborted) r = STOPPED;
         else if (twice) {
@@ -214,10 +222,9 @@ export class Agent {
           const inPrompt = this.turns.some((t) => t.role === "user" && t.text.includes(prev.result));
           r = inPrompt ? `${prev.result.split("\n")[0]} (same call as step ${prev.step}; nothing changed)`
             : `${prev.result}\n(same call as step ${prev.step}; nothing changed)`;
-          this.onEvent({ type: "tool-start", call: c, step });
-          this.onEvent({ type: "tool", call: c, result: r, step, ms: 0 });
+          if (fresh == null) { this.onEvent({ type: "tool-start", call: c, step }); this.onEvent({ type: "tool", call: c, result: r, step, ms: 0 }); }
         } else {
-          r = await this._runCall(c, step, signal);
+          r = fresh ?? await this._runCall(c, step, signal);
           if (this.byName.get(c.name)?.mutates && !/^(error|declined|unchanged)/.test(r)) mut++;
           if (c.name === "serve" && CLEAN.test(r)) cleanAt = mut;
         }
