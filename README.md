@@ -71,7 +71,7 @@ curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/jso
   -d '{"model": "pooled", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
 ```
 
-The bridge joins the room as an API client with no layers, so requests run on the room's GPUs, one at a time in the room's queue, and show in the chat under the room's visibility setting. It listens on 127.0.0.1 only; `--token` makes it require a key. v1 is chat only: no tool calls, images or JSON mode (they get a clear 400). Setup for each tool: [cli/README.md](cli/README.md). Design: [docs/design/serve.md](docs/design/serve.md).
+The bridge joins the room as an API client with no layers, so requests run on the room's GPUs, one at a time in the room's queue, and show in the chat under the room's visibility setting. It listens on 127.0.0.1 only; `POOLED_TOKEN` makes it require a key. Prompts go to the room's host and, unless the host limits who sees answers, to everyone in the room: see [who sees your prompts](cli/README.md#who-sees-your-prompts). v1 is chat only: no tool calls, images or JSON mode (they get a clear 400). Setup for each tool: [cli/README.md](cli/README.md). Design: [docs/design/serve.md](docs/design/serve.md).
 
 ## Run it locally
 

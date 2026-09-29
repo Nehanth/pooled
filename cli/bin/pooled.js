@@ -108,7 +108,8 @@ const print = (s) => { if (!o.quiet) console.log(s); };
 print(`pooled serve · room ${code} · ${label()}
   OpenAI     http://127.0.0.1:${bound}/v1         (OPENAI_BASE_URL, any API key)
   Anthropic  http://127.0.0.1:${bound}            (ANTHROPIC_BASE_URL)
-  bound to 127.0.0.1 only · ${token ? "token required" : "no token (set POOLED_TOKEN to require one)"}`);
+  bound to 127.0.0.1 only · ${token ? "token required" : "no token (set POOLED_TOKEN to require one)"}
+  prompts go to the room's host and may be shown to everyone in the room`);
 if (o["json-log"]) log(JSON.stringify({ ready: bridge.ready, port: bound, room: code }));
 
 let wasReady = bridge.ready;

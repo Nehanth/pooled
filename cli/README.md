@@ -8,6 +8,7 @@ pooled serve · room ABCD · Qwen3.6 35B MoE · Q4
   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
   bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
+  prompts go to the room's host and may be shown to everyone in the room
 ```
 
 Requirements: Node 22 or newer. No GPU is needed on this machine. The room's host page must be open, and the room's model started for requests to be answered (until then they get `503` with `Retry-After: 5`).
@@ -33,11 +34,20 @@ pooled serve <ROOM CODE | room link> [options]
   --token <t>       the same, given on the command line (other local users can read it with ps)
   --name <s>        how the room shows this client (default: "pooled serve" and 4 random letters)
   --signal <h:p>    PeerJS signaling server, as the room page's ?signal= (default: PeerJS cloud)
-  --max-queue <n>   requests that may wait here before 429 / 529 (default 8)
+  --max-queue <n>   requests that may wait here behind the running one before 429 / 529
+                    (default 8; 0 = only when idle)
   --quiet / --json-log
 ```
 
 The endpoint listens on `127.0.0.1` only. Requests whose `Host` is not `127.0.0.1:<port>` / `localhost:<port>`, and any request with an `Origin` header, are refused (403), so a web page cannot use the room through your browser. Without a token any API key is accepted (some tools insist on one). With one (`POOLED_TOKEN`, `--token-file` or `--token`), every path needs it except `/health`, which then answers only `{"ok": true}`.
+
+## Who sees your prompts
+
+Everything a tool sends goes to the room's host, a browser tab on someone's device, and the room's other devices compute on it. Coding tools send file contents, and sometimes secrets, so point them only at a room you trust.
+
+- The host's screen shows every API request: the last user message (up to 2000 characters) and the answer.
+- Other people in the room see the same unless the host sets the room's answers to **Only me** or **Whoever asked**.
+- If the host's page closes, the bridge knocks on the room's code for a minute in case the page reloads. The room code is the only name involved, so a page that opens a room with that code within the minute would receive the next requests. Stop the bridge (Ctrl-C) when the room ends.
 
 ## APIs
 

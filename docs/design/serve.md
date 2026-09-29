@@ -10,6 +10,7 @@ pooled serve · room ABCD · Qwen3.6 35B MoE · Q4 (3 devices)
   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
   bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
+  prompts go to the room's host and may be shown to everyone in the room
 ```
 
 Any tool that speaks the OpenAI chat API or the Anthropic Messages API to a base URL (Continue,
