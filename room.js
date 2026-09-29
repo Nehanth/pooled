@@ -60,6 +60,9 @@ function toast(text, { sw = null, kind = "" } = {}) {
   t.textContent = text;
   box.appendChild(t);
   while (box.children.length > 3) box.firstElementChild.remove();
+  // gone once its fade-out ends (p2p.html: toastout at 3.6 s, 7.8 s for .error), so a faded toast
+  // never keeps its space or one of the three slots; the timer is a fallback (reduced motion, no animation)
+  t.addEventListener("animationend", (e) => { if (e.animationName === "toastout") t.remove(); });
   setTimeout(() => t.remove(), kind === "error" ? 8400 : 4200);
 }
 // someone joined or left: a toast, but not for the devices already here when this tab came in
