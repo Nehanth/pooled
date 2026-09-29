@@ -1970,7 +1970,13 @@ function ckptSave(pin = false) {
     if (p?.pin && p.ids.length === ai.fed.length && p.ids.every((t, i) => t === ai.fed[i])) pin = true;
     ai.ckpt.remove(prev); try { ai.engine.dropSlot(prev); } catch {}
   }
+  // the caches hold exactly a checkpoint already on every device (Stop right after the pinned
+  // save, solo; or a regenerate stopped before its first frame): keep that one instead of a
+  // second slot with the same state, which would only evict an answer checkpoint
+  const same = ai.ckpt.items.find((x) => x.ids.length === ai.fed.length && x.ids.every((t, i) => t === ai.fed[i]));
+  if (same && (same.pin || !pin)) { same.t = ++ai.ckpt.clock; return; }
   const drop = [];
+  if (same) { ai.ckpt.remove(same.key); ai.engine.dropSlot(same.key); drop.push(same.key); }   // re-saved pinned below
   if (pin) for (const old of ai.ckpt.pinned()) { ai.ckpt.remove(old.key); ai.engine.dropSlot(old.key); drop.push(old.key); }
   else while (ai.ckpt.unpinned().length >= CKPT_MAX) {
     const old = ai.ckpt.unpinned().reduce((a, b) => (a.t < b.t ? a : b));
@@ -2452,9 +2458,12 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
     const cut = CKPT_MAX && ai.engine.saveSlot ? pinSplit(reused, pin, ids.length) : 0;
     let logits = null;
     if (!cut) logits = rest.length ? await aiPrefill(rest, { aborted, onStatus, desc }) : null;
-    else if (await aiPrefill(ids.slice(reused, cut), { aborted, onStatus, desc }) && !aborted()) {
-      ckptSave(true);
-      logits = await aiPrefill(ids.slice(cut), { aborted, onStatus, desc });
+    else {
+      const part = await aiPrefill(ids.slice(reused, cut), { aborted, onStatus, desc });
+      // the whole fixed start is in the caches (also when Stop came during its last lap): pin it,
+      // or the next request, which reuses it from the plain end save, would never pin it
+      if (ai.fed?.length === cut) ckptSave(true);
+      if (part && !aborted()) logits = await aiPrefill(ids.slice(cut), { aborted, onStatus, desc });
     }
     tPre = performance.now() - t0Pre;
     if (prefilled) compute.pass(prefilled);

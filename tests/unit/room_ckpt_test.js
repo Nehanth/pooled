@@ -180,10 +180,27 @@ Deno.test("ckptSave: a second save before any frame went out supersedes the firs
     eq(h.ai.ckpt.items.map((x) => x.key), c.keys, c.name + ": host index");
     eq([...h.engine.slots.keys()], c.keys, c.name + ": host slots");
   }
-  // solo: nothing is pending, nothing superseded; both saves stand
+  // solo: nothing is pending, nothing superseded; a save of tokens already saved keeps that slot
   const s = host({ chain: [], fed: [1], ckptMax: 4 });
   s.ckptSave(); s.ckptSave();
+  eq(s.ai.ckpt.items.map((x) => x.key), [1], "no second slot for the same state");
+  s.ai.fed.push(2); s.ckptSave();
   eq(s.ai.ckpt.items.map((x) => x.key), [1, 2]);
+});
+
+Deno.test("ckptSave: the same tokens again never evict an answer checkpoint; a pin promotes the existing one", () => {
+  const s = host({ chain: [], fed: [1, 2], ckptMax: 1 });
+  s.ckptSave(true);                               // pinned at [1, 2]
+  s.ckptSave();                                   // Stop right after it (solo): the end save
+  eq(s.ai.ckpt.items.map((x) => [x.key, x.pin]), [[1, true]], "the pinned one stands, no duplicate");
+  s.ai.fed.push(3); s.ckptSave();
+  s.ai.fed.length = 2; s.ckptSave();              // back at the pinned tokens: still one slot there
+  eq(s.ai.ckpt.items.map((x) => [x.key, x.pin]), [[1, true], [2, false]]);
+  // an answer checkpoint at the tokens being pinned becomes the pinned one (no second slot)
+  const t = host({ chain: [], fed: [5, 6], ckptMax: 2 });
+  t.ckptSave(); t.ckptSave(true);
+  eq(t.ai.ckpt.items.map((x) => x.pin), [true]);
+  eq([...t.engine.slots.keys()].length, 1);
 });
 
 Deno.test("ckptClear survives an engine whose dropSlot throws", () => {
@@ -217,7 +234,7 @@ Deno.test("ckptSave: slot numbers run 1..65534 and wrap to 1, never 0 or DROP_AL
   const h = host({ fed: [1], ckptMax: 1 });
   h.ai.ckptN = 65532;
   const keys = [];
-  for (let i = 0; i < 4; i++) { h.ai.pendingCtl = {}; h.ckptSave(); keys.push(h.ai.pendingCtl.sv); }
+  for (let i = 0; i < 4; i++) { h.ai.pendingCtl = {}; h.ai.fed.push(2 + i); h.ckptSave(); keys.push(h.ai.pendingCtl.sv); }
   eq(keys, [65533, 65534, 1, 2]);
   ok(!keys.includes(0) && !keys.includes(DROP_ALL));
   // and every one of them fits the frame header
@@ -445,6 +462,7 @@ function makeRoom(nWorkers, ckptMax = 2) {
     // roomGenerate's checkpoint logic, around a prefill of what is new and an answer. pin: the
     // system prompt's length (Code mode): the prefill pauses there for a pinned save. stopInPin /
     // stopAfterPin: Stop during the first part, or after its save but before the rest's frame.
+    // (roomGenerate pins the first part whenever all of it reached the caches, Stop or not.)
     async turn(ids, { answer = [], abort = false, reject = null, pin = 0, stopInPin = false, stopAfterPin = false } = {}) {
       let reused = h.ckptResume(ids, reusablePrefix(h.ai.fed, ids));
       if (!reused) h.resetState();
