@@ -200,7 +200,7 @@ const ICONS = {
   desk: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M1.8 2.8h12.4v8.4H1.8zM8 11.2v2.6M5.2 13.8h5.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
   phone: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><rect x="4.5" y="1.5" width="7" height="13" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 12.2h2" stroke="currentColor" stroke-width="1.3"/></svg>',
   // an API client (`pooled serve`): angle brackets, code talking to the room
-  api: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M5.5 4 1.8 8l3.7 4M10.5 4l3.7 4-3.7 4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+  api: '<svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M6 1.8v2.9M10 1.8v2.9M4.3 4.7h7.4v2.4a3.7 3.7 0 0 1-7.4 0zM8 10.8v3.4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>',   // a plug: an API client (pooled serve)
 };
 const iconFor = (meta) => meta.api ? ICONS.api : meta.phone || /iPhone|Android$/.test(meta.ua || "") ? ICONS.phone : /Mac|iPad/.test(meta.ua || "") ? ICONS.laptop : ICONS.desk;
 // "0–19" (what the deal sends) -> "1–20", the way people count layers
@@ -724,6 +724,7 @@ function onData(from, d) {
       }
       for (const id of [...members.keys()]) if (!seen.has(id)) { members.delete(id); dropCard(id); }
       updateCluster();
+      apiPanel();   // the API clients in the roster: the Serve API dot and list
       break;
     }
     case "ping": sendTo(from, { t: "pong", ts: d.ts }); break;
@@ -2722,7 +2723,7 @@ new MutationObserver(() => bandFold(bandFolded())).observe($("chatpane"), { attr
   const home = document.querySelector(".mode-row"), wide = matchMedia("(min-width: 821px), (max-height: 500px) and (pointer: coarse)");
   const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); b.after($("api-open")); };
   place(); wide.addEventListener("change", place);
-  const sync = () => { $("api-open").hidden = $("mode-bar").hidden; };
+  const sync = () => { $("api-open").hidden = $("mode-bar").hidden; if ($("api-open").hidden) closeApi(false); };
   sync(); new MutationObserver(sync).observe($("mode-bar"), { attributes: true, attributeFilter: ["hidden"] });
 }
 // phones: the chat stays on the newest message when the screen shrinks (the keyboard opens), if
@@ -3924,6 +3925,7 @@ async function apiGenerate({ api: req, name, from }) {
   ai.askerId = from;
   ai.lastWasApi = true;
   const run = ai.apiRun = { rid, from, ac: new AbortController() };
+  apiPanel();
   setBusyUI(true, true);
   setAfterAnswer(false, false);
   // the screens: the room's visibility applies as for any guest, except that the asker (the bridge)
@@ -3968,43 +3970,146 @@ async function apiGenerate({ api: req, name, from }) {
   if (ai.degraded) showRedeal(true);
 }
 
-// Serve API (the button next to Chat | Code): the command that serves this room on the user's own computer, and (host) the
-// API clients connected now, with Disconnect
+// Serve API (the button next to Chat | Code): a popover under it (a sheet from the bottom on phones) with the
+// command that serves this room on the user's own computer, its two base URLs, short examples, who is
+// connected now (the host can Disconnect each), and the host's switch for API clients
+const API_BASE = "http://127.0.0.1:8080";
+const API_EXAMPLES = {
+  curl: `curl ${API_BASE}/v1/chat/completions \\
+  -H 'content-type: application/json' \\
+  -d '{"model": "pooled",
+    "messages": [{"role": "user", "content": "Hi"}]}'`,
+  py: `# pip install openai
+from openai import OpenAI
+
+client = OpenAI(base_url="${API_BASE}/v1", api_key="pooled")
+r = client.chat.completions.create(
+    model="pooled", messages=[{"role": "user", "content": "Hi"}])
+print(r.choices[0].message.content)`,
+  js: `// npm install openai
+import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "${API_BASE}/v1", apiKey: "pooled" });
+const r = await client.chat.completions.create({
+  model: "pooled", messages: [{ role: "user", content: "Hi" }] });
+console.log(r.choices[0].message.content);`,
+  anth: `# pip install anthropic
+from anthropic import Anthropic
+
+client = Anthropic(base_url="${API_BASE}", api_key="pooled")
+r = client.messages.create(model="pooled", max_tokens=400,
+    messages=[{"role": "user", "content": "Hi"}])
+print(r.content[0].text)`,
+};
+let apiTab = "curl";
 function apiCommand() {
   return `npx @pooled/cli serve ${roomCode || "CODE"}${SIGNAL ? ` --signal ${SIGNAL}` : ""}`;
 }
+// the API clients in this room: the host's own map (with how many answers each got), or the roster's
+function apiClients() {
+  return isHost ? [...ai.apis.entries()] : [...members.entries()].filter(([, m]) => m.meta?.api).map(([id, m]) => [id, { name: m.name, client: m.meta.client }]);
+}
+function apiShowTab(key) {
+  apiTab = key;
+  for (const b of document.querySelectorAll(".api-tabs [role=tab]")) {
+    const on = b.id === `api-t-${key}`;
+    b.setAttribute("aria-selected", String(on)); b.tabIndex = on ? 0 : -1;
+    if (on) $("api-code").setAttribute("aria-labelledby", b.id);
+  }
+  // comments muted, the base URL in the accent: the one thing to change if --port moves it
+  const esc = (t) => t.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+  $("api-code").innerHTML = API_EXAMPLES[key].split("\n").map((l) => /^\s*(#|\/\/)/.test(l) ? `<span class="c">${esc(l)}</span>`
+    : esc(l).replaceAll(API_BASE, `<span class="u">${API_BASE}</span>`)).join("\n");
+  $("api-code").scrollLeft = 0;
+}
 function apiPanel() {
   if (!$("api-sheet")) return;
+  const list = apiClients(), running = isHost && ai.apiRun && ai.apis.get(ai.apiRun.from);
+  $("api-open").classList.toggle("live", list.length > 0);
+  $("api-open").title = list.length ? `Serve API: ${list.length} API client${list.length > 1 ? "s" : ""} connected` : "Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer";
+  if ($("api-sheet").hidden) return;
   $("api-cmd").textContent = apiCommand();
-  const box = $("api-clients"), list = isHost ? [...ai.apis.entries()] : [...members.entries()].filter(([, m]) => m.meta?.api).map(([id, m]) => [id, { name: m.name, client: m.meta.client }]);
+  const st = $("api-status"), off = isHost && !ai.settings.apiAllow;
+  st.className = "api-status " + (off ? "off" : list.length ? "live" : "wait");
+  st.querySelector("span").textContent = off ? "API clients are off in this room"
+    : running ? `Answering ${running.name}`
+    : list.length === 1 ? `${list[0][1].name} is connected`
+    : list.length ? `${list.length} API clients connected`
+    : "Waiting for a client to connect";
   $("api-clients-wrap").hidden = !list.length;
-  box.replaceChildren(...list.map(([id, c]) => {
+  $("api-clients").replaceChildren(...list.map(([id, c]) => {
     const li = document.createElement("li");
-    const t = document.createElement("span");
-    t.textContent = `${c.name}${c.client ? " · " + c.client : ""}${isHost ? ` · ${c.answered} answered` : ""}`;
-    li.appendChild(t);
+    li.innerHTML = `<span class="ic">${ICONS.api}</span><span class="nm"><b></b><small></small></span>`;
+    li.querySelector("b").textContent = c.name;
+    li.querySelector("small").textContent = [c.client, isHost ? `${c.answered} answered` : ""].filter(Boolean).join(" · ") || "API client";
     if (isHost) {
       const b = document.createElement("button");
-      b.type = "button"; b.textContent = "Disconnect";
-      b.addEventListener("click", () => apiKick(id));
+      b.type = "button"; b.textContent = "Disconnect"; b.setAttribute("aria-label", `Disconnect ${c.name}`);
+      b.addEventListener("click", () => { apiKick(id); if (!$("api-sheet").contains(document.activeElement)) $("api-copy").focus({ preventScroll: true }); });
       li.appendChild(b);
     }
     return li;
   }));
   if ($("api-allow")) { $("api-allow").checked = !!ai.settings.apiAllow; $("api-allow-row").hidden = !isHost; }
 }
-function openApi() {
-  $("room-menu").open = false;
-  apiPanel();
-  $("api-sheet").hidden = false;
-  $("api-close").focus({ preventScroll: true });
+// desktop: under the button, its left edge a little left of the button's, kept on screen; the caret
+// on the button's centre and the popover growing from there. Phones: CSS makes it a bottom sheet
+const apiSheetMQ = matchMedia("(max-width: 640px)");
+function apiPlace() {
+  if ($("api-sheet").hidden || apiSheetMQ.matches) return;
+  const r = $("api-open").getBoundingClientRect(), pop = $("api-sheet").querySelector(".api-pop");
+  if (!r.width) { closeApi(false); return; }   // the button went away (the room ended, the switch hid)
+  const w = pop.offsetWidth, left = Math.max(12, Math.min(r.left - 12, innerWidth - w - 12)), top = r.bottom + 10, cx = r.left + r.width / 2;
+  Object.assign(pop.style, { left: left + "px", top: top + "px", maxHeight: `calc(100dvh - ${top + 16}px)` });
+  pop.style.setProperty("--cx", cx - left + "px");
+  Object.assign($("api-sheet").querySelector(".api-caret").style, { left: cx + "px", top: top + "px" });
 }
-function closeApi() { $("api-sheet").hidden = true; }
+function openApi() {
+  $("room-menu").open = false; chipPop(null);
+  $("api-sheet").hidden = false;
+  $("api-open").setAttribute("aria-expanded", "true");
+  $("api-sheet").querySelector(".api-pop").setAttribute("aria-modal", String(apiSheetMQ.matches));
+  apiShowTab(apiTab); apiPanel(); apiPlace();
+  $("api-copy").focus({ preventScroll: true });
+}
+// back = return focus to the button (Esc, the close button, the scrim); a click elsewhere keeps its own focus
+function closeApi(back = true) {
+  if ($("api-sheet").hidden) return;
+  const inside = $("api-sheet").contains(document.activeElement);
+  $("api-sheet").hidden = true;
+  $("api-open").setAttribute("aria-expanded", "false");
+  if ((back || inside) && !$("api-open").hidden && $("api-open").offsetParent) $("api-open").focus({ preventScroll: true });
+}
 if ($("api-sheet")) {
-  $("api-open").addEventListener("click", openApi);
-  $("api-close").addEventListener("click", closeApi);
-  $("api-sheet").addEventListener("click", (e) => { if (e.target === $("api-sheet")) closeApi(); });
+  for (const b of $("api-sheet").querySelectorAll(".icon-act")) b.innerHTML = COPY_SVG;
+  $("api-open").addEventListener("click", () => $("api-sheet").hidden ? openApi() : closeApi());
+  $("api-close").addEventListener("click", () => closeApi());
+  $("api-sheet").addEventListener("click", (e) => { if (e.target === $("api-sheet")) closeApi(); });   // the phone sheet's scrim
+  document.addEventListener("pointerdown", (e) => { if (!$("api-sheet").hidden && !apiSheetMQ.matches && !e.target.closest?.("#api-sheet, #api-open")) closeApi(false); });
+  addEventListener("resize", apiPlace);
+  addEventListener("scroll", apiPlace, true);
+  apiSheetMQ.addEventListener("change", () => closeApi(false));
   $("api-copy").addEventListener("click", () => copyText(apiCommand(), "command"));
+  for (const b of $("api-sheet").querySelectorAll(".api-url .icon-act")) b.addEventListener("click", () => copyText(b.dataset.copy, b.dataset.what, b));
+  $("api-code-copy").addEventListener("click", (e) => copyText(API_EXAMPLES[apiTab], "example", e.currentTarget));
+  const tabs = [...$("api-sheet").querySelectorAll(".api-tabs [role=tab]")];
+  for (const b of tabs) {
+    b.addEventListener("click", () => apiShowTab(b.id.slice(6)));
+    b.addEventListener("keydown", (e) => {
+      const i = tabs.indexOf(b), j = e.key === "ArrowRight" ? i + 1 : e.key === "ArrowLeft" ? i - 1 : e.key === "Home" ? 0 : e.key === "End" ? tabs.length - 1 : null;
+      if (j == null) return;
+      e.preventDefault();
+      const t = tabs[(j + tabs.length) % tabs.length]; apiShowTab(t.id.slice(6)); t.focus();
+    });
+  }
+  // Tab stays inside while it is open
+  $("api-sheet").addEventListener("keydown", (e) => {
+    if (e.key !== "Tab") return;
+    const f = [...$("api-sheet").querySelectorAll("button, input, pre[tabindex], [tabindex='0']")].filter((el) => !el.closest("[hidden]") && el.tabIndex >= 0 && el.offsetParent);
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  });
   $("api-allow").addEventListener("change", (e) => {
     ai.settings.apiAllow = e.target.checked;
     if (!ai.settings.apiAllow) for (const id of [...ai.apis.keys()]) apiKick(id, "the host does not allow API clients in this room");

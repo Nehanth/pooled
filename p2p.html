@@ -502,14 +502,19 @@
   #mode-bar button:hover:not(:disabled) { background: transparent; color: var(--text); }
   #mode-bar button:active:not(:disabled) { transform: none; }
   #mode-bar button[aria-selected="true"] { color: var(--text); }
-  /* Serve API: its own button next to Chat | Code (it opens a sheet, it is not a third mode). Same outer
-     box as the switch in each place it sits (38px in the strip, 34px in the header, 42px on phones),
-     so the two line up; a quieter look than the switch's selected pill */
-  #api-open { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 38px; margin-left: 8px; padding: 0 14px 0 12px; border: 0; border-radius: 12px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); font: 500 14px/1 var(--sans); color: var(--muted); transition: color .2s var(--ease), background-color .2s var(--ease); }
-  #api-open:hover:not(:disabled) { background: var(--panel); color: var(--text); }
+  /* Serve API: its own button next to Chat | Code (it opens a popover, it is not a third mode). Same outer
+     box as the switch in each place it sits (38px in the strip, 34px in the header, 42px on phones) and
+     the switch's outer radius, but a plain white control with a ring, not a well: a sibling, not a segment.
+     While its popover is open it stays pressed in blue, the popover's caret pointing at it */
+  #api-open { position: relative; flex: none; display: inline-flex; align-items: center; gap: 7px; height: 38px; margin-left: 8px; padding: 0 14px 0 12px; border: 0; border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--border), 0 1px 2px rgba(20,22,29,.05); font: 500 14px/1 var(--sans); color: var(--ink-2); transition: color .15s var(--ease), background-color .15s var(--ease), box-shadow .15s var(--ease); }
+  #api-open:hover:not(:disabled) { background: var(--panel-3); box-shadow: inset 0 0 0 1px var(--border-2), 0 1px 2px rgba(20,22,29,.05); color: var(--text); }
+  #api-open[aria-expanded="true"], #api-open[aria-expanded="true"]:hover:not(:disabled) { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--a3); color: var(--accent-text); }
   #api-open svg { flex: none; width: 15px; height: 15px; }
   #api-open[hidden] { display: none; }
-  header #api-open { height: 34px; padding: 0 12px 0 10px; border-radius: 11px; font-size: 13px; }
+  /* a client is connected: a blue dot that breathes, like the room's live marks */
+  #api-open .api-dot { display: none; width: 6px; height: 6px; margin-left: -1px; border-radius: 50%; background: var(--accent); animation: livebeat 2.4s var(--ease) infinite; }
+  #api-open.live .api-dot { display: block; }
+  header #api-open { height: 34px; padding: 0 12px 0 10px; font-size: 13px; }
   #mode-bar button[aria-disabled="true"] { opacity: .55; cursor: default; }
   #mode-bar button[aria-disabled="true"].fresh::after { display: none; }
   /* Code selected: the pill goes black with a soft blue glow, the word white, stars twinkling inside (site/js/sparkle.js) */
@@ -819,24 +824,67 @@
   #share-url { flex: 1; min-width: 0; font: 400 12px/1.2 var(--mono); color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
   #share-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border-color: var(--accent); color: #fff; }
   #share-copy:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-  /* Serve API: pooled serve (cli/) */
-  #api-sheet .sheet { text-align: left; align-items: stretch; }
-  #api-sheet h2, #api-sheet .k { text-align: center; align-self: center; }
-  #api-cmd { flex: 1; min-width: 0; font: 400 12px/1.4 var(--mono); color: var(--text); overflow-wrap: anywhere; text-align: left; }
-  #api-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border-color: var(--accent); color: #fff; }
+  /* Serve API: pooled serve (cli/). A popover that grows out of its button (room.js places it under the
+     button, the caret at the button's centre); a sheet from the bottom on phones (below) */
+  #api-sheet[hidden] { display: none; }
+  .api-pop { --cx: 40px; position: fixed; z-index: 60; top: 64px; left: 12px; width: min(440px, calc(100vw - 24px)); max-height: calc(100vh - 80px); max-height: calc(100dvh - 80px); overflow-y: auto; overscroll-behavior: contain; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 1px 2px rgba(20,22,29,.05), 0 24px 60px -20px rgba(20,22,29,.32); text-align: left; transform-origin: var(--cx) -8px; animation: apigrow .2s var(--ease); scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
+  @keyframes apigrow { from { opacity: 0; transform: translateY(-6px) scale(.97); } }
+  .api-caret { position: fixed; z-index: 61; width: 12px; height: 12px; margin: -6px 0 0 -6px; background: var(--panel); border-left: 1px solid var(--border); border-top: 1px solid var(--border); border-radius: 3px 0 0 0; transform: rotate(45deg); animation: csin .2s var(--ease); pointer-events: none; }
+  .api-head { position: relative; padding: 16px 52px 12px 18px; }
+  .api-head h2 { font: 400 22px/1.1 var(--display); letter-spacing: -.02em; color: var(--text); }
+  .api-head .x { position: absolute; top: 10px; right: 10px; display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; color: var(--muted); background: transparent; }
+  .api-head .x:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+  .api-status { display: flex; align-items: center; gap: 8px; margin-top: 5px; font-size: 13px; line-height: 1.35; color: var(--muted); }
+  .api-status i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .api-status.wait i { animation: apiwait 1.6s var(--ease) infinite; }
+  @keyframes apiwait { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  .api-status.live { color: var(--text); }
+  .api-status.live i { background: var(--accent); animation: livebeat 2.4s var(--ease) infinite; }
+  .api-status.off i { background: var(--border-2); }
+  .api-s { padding: 12px 18px 14px; border-top: 1px solid var(--rule-2); }
+  .api-s > h3 { font: 500 13px/1.2 var(--sans); letter-spacing: -.005em; color: var(--ink-3); margin-bottom: 8px; }
+  .api-s .linkrow { margin-top: 0; }
+  .api-pr { flex: none; font: 400 12px/1 var(--mono); color: var(--muted); }
+  #api-cmd { flex: 1; min-width: 0; font: 400 12px/1.2 var(--mono); color: var(--text); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+  #api-cmd::-webkit-scrollbar { display: none; }
+  #api-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border-color: var(--accent); color: #fff; box-shadow: 0 1px 0 rgba(255,255,255,.18) inset, 0 6px 16px -8px rgba(42,69,224,.7); }
   #api-copy:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-  .api-urls { margin: 16px 0 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; font-size: 13px; }
-  .api-urls dt { color: var(--muted); }
-  .api-urls dd { margin: 0; font: 400 12px/1.5 var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
-  .api-h { margin-top: 18px; font: 600 12px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-  #api-clients { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  #api-clients li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
-  #api-clients li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .api-urls { display: flex; flex-direction: column; border: 1px solid var(--rule-2); border-radius: 12px; overflow: hidden; }
+  .api-url { display: flex; align-items: center; gap: 12px; min-height: 38px; padding: 3px 4px 3px 12px; }
+  .api-url + .api-url { border-top: 1px solid var(--rule-2); }
+  .api-url > span { flex: none; width: 70px; font-size: 13px; color: var(--muted); }
+  .api-url code { flex: 1; min-width: 0; font: 400 12px/1.3 var(--mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .api-pop .icon-act { flex: none; width: 30px; height: 30px; }
+  .api-try { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .api-tabs { display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .api-tabs button { height: 26px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; font: 500 12px/1 var(--sans); color: var(--muted); transition: color .15s var(--ease), background-color .15s var(--ease), box-shadow .15s var(--ease); }
+  .api-tabs button:hover:not(:disabled) { background: transparent; border: 0; color: var(--text); }
+  .api-tabs button[aria-selected="true"], .api-tabs button[aria-selected="true"]:hover:not(:disabled) { background: var(--panel); color: var(--text); box-shadow: 0 1px 2px rgba(20,22,29,.08), 0 0 0 1px rgba(20,22,29,.05); }
+  .api-tabs button:active:not(:disabled) { transform: none; }
+  #api-code-copy { margin-left: auto; }
+  #api-code { margin-top: 8px; padding: 10px 12px; border: 1px solid var(--rule-2); border-radius: 12px; background: var(--panel-3); font: 400 12px/1.6 var(--mono); color: var(--text); white-space: pre; overflow-x: auto; tab-size: 2; scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
+  #api-code:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #api-code .c { color: var(--muted); }
+  #api-code .u { color: var(--accent-text); }
+  .api-hint { margin-top: 8px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+  #api-clients { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  #api-clients li { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 6px 6px 8px; border: 1px solid var(--rule-2); border-radius: 12px; }
+  #api-clients .ic { flex: none; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text); }
+  #api-clients .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+  #api-clients .nm b { font: 500 13px/1.2 var(--sans); color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #api-clients .nm small { font: 400 11px/1.2 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #api-clients li button, .pop .api-kick { flex: none; height: 30px; padding: 0 12px; font: 500 12px/1 var(--sans); }
+  #api-clients li button { color: var(--del); }
   .pop .api-kick { margin-top: 10px; }
-  #api-allow-row { margin-top: 18px; display: flex; align-items: center; gap: 12px; font-size: 13px; }
-  #api-allow-row > span:first-child { flex: 1; color: var(--ink-2); }
-  #api-sheet .api-note { margin-top: 16px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+  /* apart from the steps: the host's setting and the fine print, on the quieter paper */
+  .api-foot { padding: 12px 18px 14px; border-top: 1px solid var(--rule-2); background: var(--panel-3); display: flex; flex-direction: column; gap: 10px; }
+  .api-set { display: flex; align-items: center; gap: 16px; cursor: pointer; }
+  .api-set[hidden] { display: none; }
+  .api-set > span:first-child { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+  .api-set b { font: 500 14px/1.25 var(--sans); color: var(--text); }
+  .api-set small { font-size: 12px; line-height: 1.4; color: var(--muted); }
+  .api-note { font-size: 12px; line-height: 1.5; color: var(--muted); }
+  .api-set:not([hidden]) + .api-note { padding-top: 10px; border-top: 1px solid var(--rule-2); }
   .sheet.invite .row { margin-top: 12px; }
   .sheet .scan { margin-top: 10px; font-size: 13px; color: var(--muted); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -1390,6 +1438,20 @@
     .sheet .row button { flex: 1 1 0; height: 44px; padding: 0 16px; }
     #share-qr svg { width: 172px; height: 172px; }
     .sheet.invite .linkrow { margin-top: 18px; }
+    /* Serve API: the popover becomes a sheet from the bottom, over a scrim */
+    #api-sheet::before { content: ""; position: fixed; inset: 0; z-index: 59; background: rgba(20,22,29,.32); animation: csin .25s var(--ease); }
+    .api-pop { top: auto !important; left: 0 !important; right: 0; bottom: 0; width: auto; max-height: 90vh; max-height: 90dvh; border-radius: 16px 16px 0 0; border-bottom: 0; padding-bottom: env(safe-area-inset-bottom); animation: sheetup .32s var(--ease); }
+    .api-caret { display: none; }
+    .api-head { padding: 24px 52px 14px 20px; }
+    .api-head::before { content: ""; position: absolute; top: 7px; left: 50%; width: 36px; height: 4px; margin-left: -18px; border-radius: 2px; background: var(--border-2); }
+    .api-head .x { top: 14px; right: 12px; }
+    .api-s { padding-left: 20px; padding-right: 20px; }
+    .api-foot { padding: 14px 20px 18px; }
+    #api-copy { height: 36px; }
+    .api-pop .icon-act { width: 36px; height: 36px; }
+    .api-tabs button { height: 32px; padding: 0 12px; }
+    #api-code { font-size: 11px; }
+    #api-clients .nm small { white-space: normal; }
     #share-copy { height: 36px; }
     /* no composer on screen (picking or loading a model): toasts sit at the bottom edge */
     body.in-room:not(:has(#ai-panel.online)) #toasts { bottom: calc(20px + env(safe-area-inset-bottom)); }
@@ -1614,7 +1676,7 @@
     <h1 class="sr-only" id="room-h">Room</h1>
     <div id="topline">
       <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
-      <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div><button id="api-open" type="button" aria-haspopup="dialog" hidden title="Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 4 1.8 8l3.7 4M10.5 4l3.7 4-3.7 4"/></svg><span>Serve API</span></button></div>
+      <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div><button id="api-open" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="api-sheet" hidden title="Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.8v2.9M10 1.8v2.9M4.3 4.7h7.4v2.4a3.7 3.7 0 0 1-7.4 0zM8 10.8v3.4"/></svg><span>Serve API</span><i class="api-dot" aria-hidden="true"></i></button></div>
     </div>
     <div id="chat-log" class="dev-only"></div>
     <div id="ai-empty"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><span id="ai-empty-t">Pick a model and press Start</span></div>
@@ -1762,20 +1824,44 @@
     <div class="row"><button id="share-native" type="button" hidden>Share…</button></div>
   </div>
 </div>
-<div id="api-sheet" class="overlay" hidden>
-  <div class="sheet" role="dialog" aria-labelledby="api-h">
-    <button id="api-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
-    <h2 id="api-h">Serve API</h2>
-    <div class="k">Run this on your computer (Node 22 or newer). Any tool that speaks the OpenAI or Anthropic API can then use this room's model.</div>
-    <div class="linkrow"><div id="api-cmd"></div><button id="api-copy" type="button">Copy</button></div>
-    <dl class="api-urls">
-      <dt>OpenAI</dt><dd>http://127.0.0.1:8080/v1</dd>
-      <dt>Anthropic</dt><dd>http://127.0.0.1:8080</dd>
-      <dt>Try it</dt><dd>curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{"model":"pooled","messages":[{"role":"user","content":"Hi"}]}'</dd>
-    </dl>
-    <div id="api-clients-wrap" hidden><div class="api-h">Connected API clients</div><ul id="api-clients"></ul></div>
-    <label id="api-allow-row" hidden><span>Allow API clients in this room</span><span class="switch"><input type="checkbox" id="api-allow" role="switch" checked><i aria-hidden="true"></i></span></label>
-    <p class="api-note">Runs on your computer; requests use this room's GPUs and appear in the chat under the room's visibility setting.</p>
+<div id="api-sheet" hidden>
+  <i class="api-caret" aria-hidden="true"></i>
+  <div class="api-pop" role="dialog" aria-modal="false" aria-labelledby="api-h" aria-describedby="api-status">
+    <div class="api-head">
+      <h2 id="api-h">Serve API</h2>
+      <p id="api-status" class="api-status" role="status"><i aria-hidden="true"></i><span>Waiting for a client</span></p>
+      <button id="api-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
+    </div>
+    <section class="api-s">
+      <h3>Run this on your computer</h3>
+      <div class="linkrow"><span class="api-pr" aria-hidden="true">$</span><code id="api-cmd"></code><button id="api-copy" type="button">Copy</button></div>
+    </section>
+    <section class="api-s">
+      <h3>Then point any OpenAI or Anthropic tool here</h3>
+      <div class="api-urls">
+        <div class="api-url"><span>OpenAI</span><code>http://127.0.0.1:8080/v1</code><button type="button" class="icon-act" data-copy="http://127.0.0.1:8080/v1" data-what="OpenAI URL" aria-label="Copy the OpenAI URL" title="Copy"></button></div>
+        <div class="api-url"><span>Anthropic</span><code>http://127.0.0.1:8080</code><button type="button" class="icon-act" data-copy="http://127.0.0.1:8080" data-what="Anthropic URL" aria-label="Copy the Anthropic URL" title="Copy"></button></div>
+      </div>
+      <div class="api-try">
+        <div class="api-tabs" role="tablist" aria-label="Example">
+          <button type="button" role="tab" id="api-t-curl" aria-controls="api-code" aria-selected="true">curl</button>
+          <button type="button" role="tab" id="api-t-py" aria-controls="api-code" aria-selected="false" tabindex="-1">Python</button>
+          <button type="button" role="tab" id="api-t-js" aria-controls="api-code" aria-selected="false" tabindex="-1">JS</button>
+          <button type="button" role="tab" id="api-t-anth" aria-controls="api-code" aria-selected="false" tabindex="-1">Anthropic</button>
+        </div>
+        <button type="button" id="api-code-copy" class="icon-act" data-what="example" aria-label="Copy the example" title="Copy"></button>
+      </div>
+      <pre id="api-code" role="tabpanel" aria-labelledby="api-t-curl" tabindex="0"></pre>
+      <p class="api-hint">Continue, Open WebUI and the like: add an OpenAI provider with the OpenAI URL and any API key.</p>
+    </section>
+    <section id="api-clients-wrap" class="api-s" hidden>
+      <h3>Connected now</h3>
+      <ul id="api-clients"></ul>
+    </section>
+    <div class="api-foot">
+      <label id="api-allow-row" class="api-set" hidden><span><b>Allow API clients</b><small>Off disconnects every client and refuses new ones.</small></span><span class="switch"><input type="checkbox" id="api-allow" role="switch" checked><i aria-hidden="true"></i></span></label>
+      <p class="api-note">Needs Node 22 or newer. Requests use this room's GPUs and show in the chat under the room's visibility setting.</p>
+    </div>
   </div>
 </div>
 <div id="card" class="overlay" hidden>
