@@ -62,6 +62,11 @@ export class StateCache {
     this._touch(key).catch(() => {});
     return { sig: h.sig, pos: h.pos, parts, meta: h.meta };
   }
+  // -> whether a file was removed
+  async remove(key) {
+    const d = await this._d();
+    return d.removeEntry(key + ".bin").then(() => true, () => false);
+  }
   async _touch(key) {   // LRU order: rewrite nothing, just remember the use
     const m = JSON.parse(localStorageGet(this.dirName) || "{}"); m[key] = Date.now(); localStorageSet(this.dirName, JSON.stringify(m));
   }

@@ -3,7 +3,8 @@
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { makeTokenizer } from "../engine/engine.js";
 import { qwen35Weights, tokenizerFromGGUF } from "../engine/gguf.js";
-import { openGGUF, MOE_PATH } from "./load_model.js";
+import { openGGUF, MOE_PATH, roomFlags } from "./load_model.js";
+import { roomQwen35Options, applyRoomFlags } from "../engine/preset.js";
 const PATH = Deno.env.get("MOE") || MOE_PATH;
 const model = openGGUF(PATH);   // converted-weights cache (tests/weight_cache.js)
 const readAt = model.readAt;
@@ -11,8 +12,10 @@ const ad = await navigator.gpu.requestAdapter(); const device = await ad.request
 const G = model.G; const tok = makeTokenizer(tokenizerFromGGUF(G.meta));
 const arch = G.meta["general.architecture"], L = G.meta[arch + ".block_count"] - (G.meta[arch + ".nextn_predict_layers"] || 0);
 const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true });
-const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
-  moeFuse: Deno.env.get("MOE_FUSE") !== "0", moeDnRows: +(Deno.env.get("MOE_DN_ROWS") || 1) });   // MOE_FUSE=0: unfused MoE kernels (A/B)
+// the room's settings (engine/preset.js); MOE_FUSE=0 / MOE_DN_ROWS=N are ?moefuse / ?moednrows, ROOM_FLAGS takes any other
+const flags = roomFlags({ ...(Deno.env.get("MOE_FUSE") ? { moefuse: Deno.env.get("MOE_FUSE") } : {}), ...(Deno.env.get("MOE_DN_ROWS") ? { moednrows: Deno.env.get("MOE_DN_ROWS") } : {}) });
+const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
+  vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(flags) }), flags);   // MOE_FUSE=0: unfused MoE kernels (A/B)
 // count dispatches per pipeline for one token
 const count = {}; const wrap = (fn, nameOf) => function (...a) { const n = nameOf(a); count[n] = (count[n] || 0) + 1; return fn.apply(this, a); };
 const o3 = eng._d3, oxyz = eng._dxyz, od = eng._d;

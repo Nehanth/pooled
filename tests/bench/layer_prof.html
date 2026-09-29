@@ -14,6 +14,7 @@ import { Qwen35Engine } from "../../engine/qwen35.js";
 import { autotuneCoop } from "../../engine/autotune.js";
 import { parseGGUFHeader, qwen35Weights, streamEntryToGPU } from "../../engine/gguf.js";
 import { installProf, bySum, r2, table } from "../prof/gpuprof.js";
+import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 const q = new URLSearchParams(location.search), MODEL = q.get("model");
 const LO = +(q.get("lo") || 0), HI = +(q.get("hi") || LO + 1), N = +(q.get("n") || 40), COLS = +(q.get("cols") || 4), PHONE = q.get("phone") === "1";
 const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
@@ -34,7 +35,9 @@ try {
   G.streamEntry = (info) => streamEntryToGPU(device, info, (i) => fetch(MODEL, { headers: { Range: `bytes=${i.byteOffset}-${i.byteOffset + i.byteLength - 1}` } }));
   const t0 = performance.now();
   const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: LO, hi: HI, hasEmbed: false, hasHead: false, mtp: false });
-  const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [LO, HI], hasEmbed: false, hasHead: false, maxSeq: 4096, coopWG: tune.wg, coopRows: tune.rows, batchCols: 16, coopRowsB: 1, moeFuse: true, moeDnRows: 1 });
+  // the room's settings (engine/preset.js), with the room's own ?flags (?moefuse=0, ?fuse=0, ?kv=q8, ...)
+  const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [LO, HI], hasEmbed: false, hasHead: false, maxSeq: 4096,
+    coopWG: tune.wg, coopRows: tune.rows, ...roomQwen35Options(q) }), q);
   const dim = eng.dims.dim;
   log(`layers ${LO}-${HI - 1} (${HI - LO}) loaded in ${((performance.now() - t0) / 1000).toFixed(1)} s, dim ${dim}, moe ${!!eng.moe || !!eng.moeFuse}`);
   const rnd = (n) => { const x = new Float32Array(n); for (let i = 0; i < n; i++) x[i] = (Math.random() - 0.5) * 0.5; return x; };

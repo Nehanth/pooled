@@ -451,3 +451,97 @@ Deno.test("room disk: a host that reloads keeps the age order, so the next save 
   h2.ckptSave();
   eq(h2.ai.ckpt.items.map((x) => x.key).sort(), [3, 4], "slot 2, the oldest, made room");
 });
+
+// ---------------------------------------------------------------------------------------------
+// the pinned system prompt checkpoint (Code mode, issue #73) and its disk copies
+
+const slotsOn = async (d, e) => (await d.list({ room: "ABC", model: "m", sig: e.stateSignature() })).map((c) => c.slot).sort((a, b) => a - b);
+
+Deno.test("room disk (pin): a pinned checkpoint replaced by a new system prompt loses its disk copy everywhere", async () => {
+  const h = host(), w = worker();
+  await lap(h, w, [1, 2, 3, 4]); h.ckptSave(true);           // the system prompt, pinned: slot 1
+  await answer(h, w, [5]);                                    // sv 1 goes out; the answer is slot 2
+  await lap(h, w, [6]);                                       // sv 2 goes out
+  await flush(h.disk); await flush(w.disk);
+  eq(await slotsOn(h.disk, h.engine), [1, 2]); eq(await slotsOn(w.disk, w.engine), [1, 2]);
+  // another system prompt: its pinned save replaces slot 1
+  h.resetState(); h.engine.st = [];
+  await lap(h, w, [7, 8, 9]); h.ckptSave(true);
+  await lap(h, w, [10]);                                      // sv 3 and dp 1 go out
+  await flush(h.disk); await flush(w.disk);
+  eq(await slotsOn(h.disk, h.engine), [2, 3], "host: the old pinned copy is gone");
+  eq(await slotsOn(w.disk, w.engine), [2, 3], "worker: the old pinned copy is gone");
+});
+
+Deno.test("room disk (pin): an answer checkpoint promoted to the pinned one loses its disk copy (solo)", async () => {
+  const h = host({ chain: [] });
+  h.engine.run([5, 6], 0); h.ai.fed = [5, 6];
+  h.ckptSave();                                               // slot 1, an answer checkpoint
+  h.ckptSave(true);                                           // the same tokens pinned: slot 2 replaces it
+  await flush(h.disk);
+  eq(await slotsOn(h.disk, h.engine), [2]);
+  eq((await h.disk.list({ room: "ABC", model: "m", sig: h.engine.stateSignature() }))[0].meta.pin, true);
+});
+
+Deno.test("room disk (pin): a save superseded before its frame, when the next save keeps an existing slot, never reaches a worker's disk", async () => {
+  const h = host(), w = worker();
+  await answer(h, w, [1, 2, 3]);                              // slot 1
+  await lap(h, w, [4, 5]); h.ckptSave();                      // sv 1 went out; slot 2 pending
+  // a regenerate from slot 1, stopped before its first frame: the caches hold slot 1's tokens
+  eq(h.ckptResume([1, 2, 3, 9], 0), 3);
+  h.ckptSave();                                               // supersedes slot 2, keeps slot 1
+  eq(h.ai.pendingCtl.sv, undefined, "slot 2 no longer goes out");
+  eq(h.ai.ckpt.items.map((x) => x.key), [1]);
+  await lap(h, w, [9]);
+  await flush(h.disk); await flush(w.disk);
+  ok(!w.engine.slots.has(2), "no orphan slot on the worker's GPU");
+  eq(await slotsOn(w.disk, w.engine), [1], "nor on its disk");
+  eq(await slotsOn(h.disk, h.engine), [1]);
+});
+
+Deno.test("room disk (pin): the pinned flag is stored with the checkpoint (chain and solo)", async () => {
+  const h = host(), w = worker();
+  await lap(h, w, [1, 2, 3]); h.ckptSave(true);               // slot 1 pinned
+  await answer(h, w, [4]);                                    // slot 2 not pinned
+  await lap(h, w, [5]);
+  await flush(h.disk);
+  const meta = Object.fromEntries((await h.disk.list({ room: "ABC", model: "m", sig: h.engine.stateSignature() })).map((c) => [c.slot, c.meta]));
+  eq(meta[1], { ids: [1, 2, 3], pin: true });
+  eq(meta[2], { ids: [1, 2, 3, 4] }, "an answer checkpoint carries no pin");
+  const s = host({ chain: [] });
+  s.engine.run([7, 8], 0); s.ai.fed = [7, 8];
+  s.ckptSave(true);
+  await flush(s.disk);
+  eq((await s.disk.list({ room: "ABC", model: "m", sig: s.engine.stateSignature() }))[0].meta.pin, true);
+});
+
+Deno.test("room disk (pin): after a reload the pinned checkpoint is pinned again, and answer saves never evict it", async () => {
+  const h = host({ ckptMax: 1 }), w = worker({ ckptMax: 1 });
+  await lap(h, w, [1, 2, 3, 4]); h.ckptSave(true);           // the system prompt: slot 1, pinned
+  await answer(h, w, [5]);                                    // slot 2
+  await answer(h, w, [6]);                                    // slot 3 evicts slot 2 (never the pinned one)
+  await lap(h, w, [7]);
+  await flush(h.disk); await flush(w.disk);
+  eq(await slotsOn(h.disk, h.engine), [1, 3]); eq(await slotsOn(w.disk, w.engine), [1, 3]);
+  // both tabs reload
+  const h2 = host({ disk: h.disk, ckptMax: 1 }), w2 = worker({ disk: w.disk, ckptMax: 1 });
+  h2.ckptClear();
+  eq((await h2.ckptRestore()).sort(), [1, 3]);
+  eq(h2.ai.ckpt.items.map((x) => [x.key, x.pin]).sort(), [[1, true], [3, false]], "the pinned one is pinned again");
+  eq((await w2.ckptRestore()).sort(), [1, 3], "the worker reads the pinned one back too");
+  h2.ai.ckptHeld = new Map([["w0", [1, 3]]]);
+  h2.ckptPrune();
+  eq(h2.ai.ckpt.items.map((x) => x.key).sort(), [1, 3], "nothing pruned");
+  // answer saves (ckpt=1) replace each other and never evict the pinned one
+  eq(h2.ckptResume([1, 2, 3, 4, 20], 0), 4, "resume from the pinned system prompt");
+  await answer(h2, w2, [20]);
+  await answer(h2, w2, [21]);
+  await answer(h2, w2, [22]);
+  await lap(h2, w2, [23]);
+  eq(w2.engine.st, [1, 2, 3, 4, 20, 21, 22, 23], "the worker ran from its restored pinned state");
+  eq(h2.ai.ckpt.pinned().map((x) => x.key), [1], "still pinned, still there");
+  eq(h2.ai.ckpt.unpinned().length, 1);
+  eq(h2.ckptResume([1, 2, 3, 4, 99], 0), 4, "the system prompt still resumes");
+  await flush(h2.disk); await flush(w2.disk);
+  ok((await slotsOn(w2.disk, w2.engine)).includes(1), "and its copy stays on the worker's disk");
+});

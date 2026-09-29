@@ -31,7 +31,11 @@ each has a switch for A/B timing on real hardware.
 - Switch: `Qwen35Engine.create({ attnFlash: false })` restores the f32 path.
 - int8 KV (`kvQ8: true`, room `?kv=q8`): one f32 scale per 32 values, `kv_store_q8` /
   `attn_flash_q8` from the same template as the f16 kernel. 36 KB per token for the whole 27B.
-  Opt-in until someone checks long-document quality on the real model.
+  Opt-in. The room host's `?kv=` decides for every device (sent with `ai-load`), and the layer
+  deal counts int8 bytes. Timed on GB10 with the 35B MoE (bench log, 2026-09-29): the same 32
+  greedy tokens as f16 at 1K, 8K and 32K and 0.35 GB of KV instead of 0.63 GB, but a 32K prompt
+  prefills 3.5x slower, because tiled prefill attention is off with int8 KV. It stays off by
+  default until tiled prefill attention supports it.
 - Any `maxSeq` works; the split length grows past 32K so a head never has more than 128 splits.
   Memory at 32K: 2.1 GB of KV for the whole model in f16, 1.2 GB in int8 (q4 KV is not
   recommended: it hurts long documents and tool calls, research §3).
@@ -94,7 +98,21 @@ the slot missing, never stale.
   resumes from an older checkpoint or prefills.
 - When a device of the chain leaves, the host keeps its checkpoints (the other devices still hold
   them); a re-deal clears them and every device reads its copies back.
+- The pinned system prompt checkpoint (below) goes to disk with `pin` in its header; a host that
+  reloads indexes it pinned again (besides its newest `?ckpt=N` answer checkpoints), so answer saves
+  still never evict it, and a worker reads back one more copy for it. A pinned one replaced by a new
+  system prompt, or an answer checkpoint promoted to pinned, loses its disk copy like any dropped slot.
 - `?ckptdisk=0` keeps checkpoints on the GPU only.
+
+Code mode also pins the system prompt + tools (issue #73): `roomModel` passes its length as `pin`,
+and when the caches do not hold it yet `roomGenerate` prefills up to there, saves a pinned
+checkpoint (`ckptSave(true)`, riding the next frame like any save), then prefills the rest. The
+pinned one is not counted in `?ckpt=N` and is never evicted by answer saves; a new system prompt
+replaces it everywhere. When compaction rewrites old turns, the next step resumes there and
+prefills only what follows. `engineModel` does the same on one engine with a GPU slot
+(`pin: false` turns it off). Tests: `tests/unit/room_ckpt_test.js` ("pin: ..." scenarios, host and
+workers in sync), `tests/unit/kv_reuse_test.js` (a 22-step session with compactions: every step
+reuses everything the engine held, or the system prompt after a compaction).
 
 ### Several sessions on one engine
 
@@ -157,7 +175,9 @@ Unit tests: `tests/unit/tools_test.js`, `constrain_test.js`, `prefix_test.js`.
   every position a speculative step checks too, so a call can only name declared tools and
   parameters.
 - `Agent({ budget, count })`: past the token budget the oldest tool outputs are cut to a stub
-  (oldest first, never the latest, down to 75% so it does not cut every step).
+  (oldest first, never the latest two, down to 60% so it does not cut every step). The stub
+  (`stubResults`) and the fold line depend only on the turn, so a compacted turn renders the same
+  on every later step; the `compacted` event's `at` is the first turn that changed.
 
 Tests: `tests/unit/agent_test.js` (tools and loop with a scripted model),
 `tests/e2e/agent_synth.mjs` (follow-up turns reuse the prefix and match a fresh engine; spec ==
@@ -206,7 +226,8 @@ each chosen expert once per token today), timing on real hardware.
 1. Time it on two Macs and a GB10: decode tok/s at 1K / 8K context, prefill tok/s, `?fuse=0`.
 2. Room checkpoints on disk (landed, above): time a reload of one device on real hardware, and
    stream the copy part by part (today a device reads its whole part into memory to write it).
-3. Stable prompt rendering for agents: never drop old turns (it breaks reuse); compact instead.
+3. Stable prompt rendering for agents: done in part (#73: compaction is stable and the system
+   prompt stays cached); a compaction still prefills everything after the system prompt once.
 4. Several sessions at once: per-session KV / state slots batched through one pass (design:
    research/tabby-next-2026-09.md §2).
 5. Pipelined speculative windows across devices (Mesh-LLM keeps several verifies in flight;
