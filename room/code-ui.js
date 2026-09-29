@@ -519,7 +519,13 @@ export function codeUI({ onMode = () => {} } = {}) {
   let hlPath = "", proposed = null;   // the colours of a pathless view (a proposed file); which proposed file shows
   const ta = $("ed-text"), hl = $("ed-hl"), gutter = $("ed-ln"), edBox = $("ed");
   const PHONE = matchMedia(PHONE_Q);
-  if (PHONE.matches) $("code-prompt").placeholder = "";   // phones: an empty box (the Agent tab says what it is)
+  // the prompt's hint: p2p.html's, a shorter one that fits a phone's box, and while a run goes
+  // (not on phones, where it would not fit) that Send queues the next request
+  const promptBox = $("code-prompt"), PH = promptBox.placeholder;
+  let runOn = false;
+  const promptHint = () => { promptBox.placeholder = PHONE.matches ? "Ask for an app or a change" : runOn ? "Queue another request" : PH; };
+  promptHint();
+  PHONE.addEventListener("change", promptHint);
   $("ed-save").querySelector("kbd").textContent = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "\u2318S" : "Ctrl+S";
   function tree(paths) {
     const t = $("code-tree");
@@ -858,9 +864,7 @@ export function codeUI({ onMode = () => {} } = {}) {
       $("code-send").textContent = on ? "Queue" : "Send";
       $("code-send").title = on ? "Runs after the current request" : "";
       $("code-stop").hidden = !(on && canStop);
-      const pr = $("code-prompt");
-      pr.dataset.ph ||= pr.placeholder;
-      pr.placeholder = on && !PHONE.matches ? "Queue another request" : pr.dataset.ph;
+      runOn = on; promptHint();
     },
   };
 }
