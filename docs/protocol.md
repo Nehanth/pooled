@@ -83,6 +83,8 @@ The host's coding agent and its previews (docs/design/harness-app.md, room/code.
 | `ai-pv-want {port, rev, hs}` | peer → host | the blobs a peer does not hold yet; the host answers only hashes in that port's current manifest |
 | `ai-pv-blob {h, i, n, b}` | host → peer | chunk `i` of `n` (64 KB, `b` an ArrayBuffer) of blob `h`; the host waits while the data channel has over 1 MB buffered. The peer verifies the hash before using it |
 | `ai-pv-stop {port}` | host → all | the port is no longer served |
+| `ai-code-share {mid, port, rev, name, by}` | host → all | "Share with the room": a card in every timeline with Download (the app as one `.html` file, built by each device from its own hash-checked copy of that port's rev and sandboxed like a preview, harness/app-export.js) and Open full screen (the device's own preview frame). Kept in the history for late joiners |
+| `ai-code-share-ask {port}` | member → host | a member who can drive asks the host to share a served port; the host sends `ai-code-share` naming them |
 
 A code run holds the room's generation lock for all its steps, so chat questions asked meanwhile queue and run after it. None of this changes the frame format, so the protocol version stays 4: an older peer ignores these messages.
 

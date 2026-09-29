@@ -2973,8 +2973,8 @@ const MOCK = new URLSearchParams(location.search).get("mock") === "code" && ["12
 // a project, the auto-approve box, and "send me the session" on opening Code). room/code.js checks
 // each against its own state (who asked the run, the project list) and caps every field.
 const CODE_FROM_HOST = new Set(["ai-code-start", "ai-code-tok", "ai-code-live", "ai-code-tool", "ai-code-note", "ai-code-done", "ai-code-files", "ai-code-history",
-  "ai-code-projects", "ai-code-msg", "ai-pv", "ai-pv-blob", "ai-pv-stop"]);
-const CODE_TO_HOST = new Set(["ai-pv-want", "ai-code-ask", "ai-code-stop", "ai-code-approve", "ai-code-cmd", "ai-code-sync"]);
+  "ai-code-projects", "ai-code-msg", "ai-pv", "ai-pv-blob", "ai-pv-stop", "ai-code-share"]);
+const CODE_TO_HOST = new Set(["ai-pv-want", "ai-code-ask", "ai-code-stop", "ai-code-approve", "ai-code-cmd", "ai-code-sync", "ai-code-share-ask"]);
 const CODE_DRIVE = new Set(["ai-code-ask", "ai-code-cmd", "ai-code-sync"]);   // these load Code on a host that has not opened it
 const CODE_MSG_MAX = 12000;   // a member's message, serialized (a request is at most 4000 characters)
 const codeHandlers = new Map();   // message type -> fn(from, d)
