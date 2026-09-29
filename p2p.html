@@ -745,6 +745,13 @@
   details.think { margin: 2px 0 8px; padding: 6px 10px; border-left: 2px solid var(--border-2); color: var(--muted); font-size: 13px; }
   details.think summary { cursor: pointer; font-size: 12px; }
   /* ---- toasts, share sheet, the room-over card ---- */
+  /* the signaling server dropped while in a room (room.js watchSignaling): links stay up, new devices can't join */
+  #signal-note { position: fixed; top: calc(64px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 95; width: max-content; max-width: min(560px, calc(100vw - 32px)); box-sizing: border-box;
+    padding: 9px 14px; border: 1px solid var(--rule-2); border-radius: 12px; background: var(--panel); color: var(--ink-2); font: 400 13px/1.4 var(--sans); box-shadow: 0 10px 30px -12px rgba(20,22,29,.25); }
+  #signal-note[hidden] { display: none; }
+  #signal-note::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
+  #join-status.signal-down { color: var(--ink); border-color: var(--warn); }
+  #join-status.signal-down a { color: var(--accent-text); }
   #toasts { position: fixed; bottom: calc(104px + env(safe-area-inset-bottom)); right: max(16px, 3vw, calc(12px + env(safe-area-inset-right))); z-index: 90; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
   body:not(.in-room) #toasts { bottom: auto; top: 72px; }
   @media (max-width: 640px) { #toasts { left: 16px; right: 16px; align-items: center; } }
@@ -1672,6 +1679,7 @@
   </div>
   <p class="cs-foot">Keep this screen on.</p>
 </div>
+<div id="signal-note" role="status" aria-live="polite" hidden></div>
 <div id="toasts" role="status" aria-live="polite"></div>
 <script src="/site/js/sparkle.js"></script>
 <script type="module" src="/room.js"></script>

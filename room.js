@@ -28,15 +28,22 @@ import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
 import { computeScreen } from "./room/compute.js";
 import { working, liveWords } from "./room/working.js";
+import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 
 // Hidden-state transport (room/transport.js). ?wire=off falls back to PeerJS messages;
 // ?wire=slice uses one sliced channel; ?wire=stripeN spreads slices over N peer connections.
 const WIRE = (new URLSearchParams(location.search).get("wire") || "stripe4").toLowerCase();
 const WIRE_STRIPES = WIRE === "off" ? 0 : WIRE.startsWith("stripe") ? Math.max(1, Math.min(8, parseInt(WIRE.slice(6), 10) || 1)) : 1;
-// Signaling: ?signal=host:port points PeerJS at our own PeerServer (the emulator and big
-// rooms use one); default is the public PeerJS cloud.
+// Signaling (room/signal.js): the public PeerJS cloud by default; a deployment can list fallbacks in
+// window.POOLED_SIGNAL_SERVERS, tried in order when one is down; ?signal=host:port (or a comma list)
+// wins over both (the emulator and big rooms point it at our own PeerServer). See
+// docs/self-host-signaling.md.
 const SIGNAL = new URLSearchParams(location.search).get("signal");
-const SIGNAL_OPTS = SIGNAL ? (() => { const [host, port] = SIGNAL.split(":"); return { host, port: +port || 443, path: "/", secure: location.protocol === "https:" }; })() : {};
+const PAGE_SECURE = location.protocol === "https:";
+const SIGNALS = serverList({ query: SIGNAL, configured: window.POOLED_SIGNAL_SERVERS, pageSecure: PAGE_SECURE });
+// what a page with no ?signal= would try first: the invite link names the server only when it differs
+const SIGNAL_FIRST = serverList({ configured: window.POOLED_SIGNAL_SERVERS, pageSecure: PAGE_SECURE })[0].spec;
+let signalServer = null;   // the server this tab registered on ({ spec, label, opts })
 
 // Topology: every device keeps ONE link to the host (control, roster, tokens). Data links
 // between chain neighbours open when the layers are dealt (ensureLink), so a room of N
@@ -714,18 +721,21 @@ function joinWait(on, text = "") {
 }
 function joinFailed(text) {
   joinWait(false);
+  $("join-status").classList.remove("signal-down");
   $("join-status").textContent = text;
   $("create-btn").disabled = $("join-btn").disabled = false;
   // on a phone the status line sits below the fold: bring it to where the user is looking
   $("join-status").scrollIntoView({ block: "center", behavior: "smooth" });
 }
 // --- join / create ---
-async function start(create, resume = null) {
+// from: where in the server list to start (a joiner that found no room on one server tries the next)
+async function start(create, resume = null, from = 0) {
   myName = resume?.name || $("name-input").value.trim() || (create ? "host" : "peer") + "-" + rand(2);
   const code = resume?.code || (create ? rand(4) : $("code-input").value.trim().toUpperCase());
   if (!code) { $("join-status").textContent = "Enter a room code"; return; }
   $("create-btn").disabled = $("join-btn").disabled = true;
   joinWait(true, create ? (resume ? `Opening room ${code} again` : "Opening your room") : `Joining room ${code}`);
+  $("join-status").classList.remove("signal-down");
   $("join-status").textContent = "Connecting…";
   myMeta = await metaPromise;
   const gbIn = parseFloat($("join-gb").value);
@@ -742,31 +752,61 @@ async function start(create, resume = null) {
       ...(window.TURN_SERVERS || []),
     ],
   };
-  // host claims the well-known id for the code; joiners get random ids
-  peer = new Peer(create ? PREFIX + code : undefined, { debug: 1, config: ICE, ...SIGNAL_OPTS });
+  // a host coming back after a reload goes to the server its room was on first: its guests are there
+  let servers = SIGNALS;
+  const was = resume?.signal && !SIGNAL ? parseServer(resume.signal, PAGE_SECURE) : null;
+  if (was) servers = [was, ...SIGNALS.filter((x) => x.spec !== was.spec)];
+  // host claims the well-known id for the code; joiners get random ids. The first server that answers
+  // wins; one that is down or unreachable hands over to the next (room/signal.js).
+  let got;
+  try {
+    got = await openPeer(Peer, create ? PREFIX + code : undefined, { debug: 1, config: ICE }, servers, {
+      from,
+      onTry: (s, i, err) => {
+        $("join-status").textContent = err ? `${servers[i - 1].label} isn’t answering; trying ${s.label}…` : servers.length > 1 || from ? `Connecting to ${s.label}…` : "Connecting…";
+        if (err) log("room", `signaling: ${servers[i - 1].label} failed (${err.type || err.message}); trying ${s.label}`);
+      },
+    });
+  } catch (err) {
+    // resuming: the old tab's id is still registered until the signaling server notices it left
+    if (resume && err.type === "unavailable-id" && (resume.tries = (resume.tries || 0) + 1) < 30) {
+      $("join-status").textContent = `waiting for room ${code} to be free again (the old tab is still registered)…`;
+      setTimeout(() => start(true, resume), 3000);
+      return;
+    }
+    if (err.type === "signaling-down") { signalingDown(err.tried); return; }
+    joinFailed(err.type === "unavailable-id" ? "that code is already hosting a room: press Join instead"
+      : "error: " + (err.type || err.message));
+    return;
+  }
+  peer = got.peer;
+  signalServer = got.server;
+  if (got.index > 0 || from) log("room", `signaling on ${signalServer.label}`);
+  watchSignaling(peer);
 
-  peer.on("open", () => {
-    isHost = create;
-    roomCode = code;
-    if (create) { enterRoom(); if (resume) resumeHost(resume); return; }
+  isHost = create;
+  roomCode = code;
+  let joinTimer = null;
+  if (create) { enterRoom(); if (resume) resumeHost(resume); }
+  else {
     // joiner: connect to host
     $("join-status").textContent = "Reaching the other devices…";
     const conn = peer.connect(PREFIX + code, { reliable: true });
-    const timeout = setTimeout(() => {
+    joinTimer = setTimeout(() => {
       const ice = conn.peerConnection?.iceConnectionState;
       joinFailed(ice === "checking" || ice === "failed" || ice === "disconnected"
         ? "found the room, but the direct connection failed (strict NAT/firewall on one side). Trying a relay: give it ~20 s, or try another network"
         : "no room with that code (is the host page open?)");
     }, 15000);
     conn.on("open", () => {
-      clearTimeout(timeout);
+      clearTimeout(joinTimer);
       wire(conn, "host", undefined, true);
       let died = null;
       if (!VQ.get("embed")) try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c && Date.now() - c.t < 10 * 60 * 1000) died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000) }; } catch {}
       conn.send({ t: "hello", name: myName, meta: myMeta, died, v: PROTOCOL });
       enterRoom();
     });
-  });
+  }
 
   peer.on("connection", (conn) => {
     conn.on("open", () => {
@@ -783,19 +823,67 @@ async function start(create, resume = null) {
   });
 
   peer.on("error", (err) => {
-    // resuming: the old tab's id is still registered until the signaling server notices it left
-    if (resume && err.type === "unavailable-id" && (resume.tries = (resume.tries || 0) + 1) < 30) {
-      $("join-status").textContent = `waiting for room ${code} to be free again (the old tab is still registered)…`;
-      try { peer.destroy(); } catch {}
-      peer = null;
-      setTimeout(() => start(true, resume), 3000);
+    if ($("room-screen").style.display === "flex") {   // in the room already: not a join failure
+      // losing the signaling server is shown by watchSignaling; the room itself keeps going
+      if (!FALLBACK_ERRORS.has(err.type)) $("join-status").textContent = "error: " + err.type;
       return;
     }
-    if ($("room-screen").style.display === "flex") { $("join-status").textContent = "error: " + err.type; return; }   // in the room already: not a join failure
-    joinFailed(err.type === "unavailable-id" ? "that code is already hosting a room: press Join instead"
-      : err.type === "peer-unavailable" ? "no room with that code"
+    // no such room on this server: the host may have fallen back to a later one in the list
+    if (!create && err.type === "peer-unavailable" && got.index + 1 < servers.length) {
+      clearTimeout(joinTimer);
+      const next = servers[got.index + 1];
+      log("room", `no room ${code} on ${signalServer.label}; looking on ${next.label}`);
+      const p = peer; peer = null; try { p.destroy(); } catch {}
+      start(false, null, got.index + 1);
+      return;
+    }
+    clearTimeout(joinTimer);
+    joinFailed(err.type === "peer-unavailable" ? "no room with that code"
+      : FALLBACK_ERRORS.has(err.type) ? `lost the signaling server (${signalServer.label}) while joining: try again`
       : "error: " + err.type);
   });
+}
+
+// No signaling server answered: say what that means (the room can't be found or opened, a running
+// room would be fine) and what to do, on the join screen.
+function signalingDown(tried) {
+  const names = tried.filter((x, i) => tried.indexOf(x) === i).join(", ");
+  joinFailed(`Can’t reach the signaling server${tried.length > 1 ? "s" : ""} (${names}). Devices use ${tried.length > 1 ? "them" : "it"} only to find each other, and ${tried.length > 1 ? "they" : "it"} may be down or blocked on this network. Rooms already running are not affected. Try again in a minute, or `);
+  const a = document.createElement("a");
+  a.href = "https://github.com/Nehanth/pooled/blob/main/docs/self-host-signaling.md";
+  a.target = "_blank"; a.rel = "noopener";
+  a.textContent = "run your own signaling server";
+  $("join-status").append(a, ".");
+  $("join-status").classList.add("signal-down");
+}
+
+// In a room, the signaling server can drop (the cloud restarts, the network blips). The links already
+// open are direct and keep working; only new devices can't find the room. Say so and reconnect with
+// backoff (PeerJS keeps our id: reconnect() re-registers it) until the server is back.
+function watchSignaling(p) {
+  let tries = 0, timer = null;
+  const again = () => {
+    timer = null;
+    if (p !== peer || p.destroyed || !p.disconnected) return;
+    try { p.reconnect(); } catch {}
+    timer = setTimeout(again, reconnectDelay(tries++));
+  };
+  p.on("disconnected", () => {
+    if (p !== peer || p.destroyed) return;
+    signalNote(true);
+    if (!timer) timer = setTimeout(again, reconnectDelay(tries++));
+  });
+  p.on("open", () => {
+    clearTimeout(timer); timer = null; tries = 0;
+    if (p === peer && signalNote.on) { signalNote(false); toast("signaling is back: new devices can join again"); }
+  });
+}
+function signalNote(on) {
+  signalNote.on = on;
+  const el = $("signal-note");
+  if (!el) return;
+  el.hidden = !on;
+  if (on) el.textContent = `Lost the signaling server (${signalServer?.label || "PeerJS"}). The devices here keep working; new devices can’t join until it’s back. Reconnecting…`;
 }
 
 let wakeLock = null, awakeVideo = null;
@@ -905,8 +993,17 @@ $("add-virtual").addEventListener("click", addVirtual);
 // elsewhere (a local static server, the emulator), the link keeps this page's path and query
 // (signal=, wire=) and adds ?code=.
 function roomLink() {
-  if (location.pathname === "/room" || location.pathname.startsWith("/r/")) return `${location.origin}/r/${roomCode}`;
+  // a room on anything but the page's usual first server: the link names it, so joiners look there
+  if (location.pathname === "/room" || location.pathname.startsWith("/r/")) {
+    // (dev=0: a signal= link would otherwise open the page in dev mode, see p2p.html)
+    const sig = signalServer && signalServer.spec !== SIGNAL_FIRST ? "?signal=" + encodeURIComponent(signalServer.spec) + (DEV ? "" : "&dev=0") : "";
+    return `${location.origin}/r/${roomCode}${sig}`;
+  }
   const q = new URLSearchParams(location.search); q.set("code", roomCode);
+  if (signalServer && (q.has("signal") || signalServer.spec !== SIGNAL_FIRST)) {
+    if (!q.has("signal") && !DEV) q.set("dev", "0");
+    q.set("signal", signalServer.spec);
+  }
   return `${location.origin}${location.pathname}?${q}`;
 }
 function copyRoomLink() {
@@ -2794,7 +2891,7 @@ function hostGone() {
 function saveHost() {
   if (!isHost || !roomCode) return;   // from the moment the room exists, not only once a model runs
   try {
-    localStorage.setItem(HOST_KEY, JSON.stringify({ code: roomCode, name: myName, model: ai.model || null, turns: ai.conv.turns,
+    localStorage.setItem(HOST_KEY, JSON.stringify({ code: roomCode, name: myName, signal: signalServer?.spec || null, model: ai.model || null, turns: ai.conv.turns,
       transcript: ai.transcript.filter((t) => !t.api).slice(-20), settings: ai.settings, peers: ai.chainNames || [], split: $("ai-split").value, t: Date.now() }));
   } catch {}
 }
