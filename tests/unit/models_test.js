@@ -1,7 +1,7 @@
 // room/models.js: maxSeqFor decides every room's context window (host and devices build their
 // engines with it) and kvBytesPerLayerPos decides how many layers each device is dealt at that
 // context. Both are pure; nothing else asserts them.
-import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvModeFor, KV_MODES } from "../../room/models.js";
+import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvModeFor, kvForLoad, KV_MODES } from "../../room/models.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -155,6 +155,25 @@ Deno.test("kvModeFor: ?kv= read the way room.js reads it", () => {
   eq(kvModeFor("qwen3.8-27b", ask("?kv=q8&ctx=32768")), "q8");
   eq(kvModeFor("qwen3.8-27b", ask("")), "f16", "missing -> f16");
   eq(kvModeFor("qwen3.8-27b", ask("?kv=")), "f16", "empty -> f16");
+});
+
+Deno.test("kvForLoad: the host's kv wins over a worker's own ?kv=, so every device builds the same cache", () => {
+  const k = "qwen3.6-35b-moe";
+  eq(kvForLoad(k, "f16", "q8"), "f16", "host f16, worker ?kv=q8 -> f16");
+  eq(kvForLoad(k, "q8", null), "q8", "host q8, worker without ?kv -> q8");
+  eq(kvForLoad(k, "q8", "f16"), "q8");
+  eq(kvForLoad(k, undefined, "q8"), "q8", "a host without the field: the worker's own ask, as before");
+  eq(kvForLoad(k, undefined, null), "f16");
+  eq(kvForLoad(k, "junk", "q8"), "f16", "a bad value from the host is f16, not the worker's ask");
+  eq(kvForLoad("smollm-135m", "q8", "q8"), "f16", "no int8 kernels");
+});
+
+Deno.test("room.js: the host sends its KV format with ai-load and workers build with it", () => {
+  const src = Deno.readTextFileSync(new URL("../../room.js", import.meta.url));
+  ok(/t: "ai-load",[^\n]*\bkv: ROOM_KV\b/.test(src), "ai-load carries kv: ROOM_KV");
+  ok(/aiLoadShard\(modelKey, ranges\[0\], true, true, ROOM_CTX, ROOM_KV\)/.test(src), "the host builds with ROOM_KV");
+  ok(/aiLoadShard\([^\n]*kvForLoad\(d\.model, d\.kv, KV_ASK\)\)/.test(src), "workers build with the host's kv");
+  ok(/\* kvBytesPerLayerPos\(ai\.G\.meta, ROOM_KV\)/.test(src), "the layer deal counts the room's KV bytes");
 });
 
 Deno.test("kvBytesPerLayerPos: int8 is values + one f32 scale per 32, ~56% of f16", () => {

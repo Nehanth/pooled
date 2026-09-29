@@ -63,6 +63,9 @@ export const maxSeqFor = (model, ask = 0) => {
 // device of a room keeps the same format and the layer deal counts the right bytes.
 export const KV_MODES = ["f16", "q8"];
 export const kvModeFor = (model, ask) => (ask === "q8" && MODELS[model]?.kind === "qwen35" ? "q8" : "f16");
+// A device's format for an ai-load: the host's `kv` when it sent one (so a worker's own ?kv= cannot
+// make it differ from the room), else this device's own ask (a host from before the field existed).
+export const kvForLoad = (model, sent, ownAsk) => kvModeFor(model, sent ?? ownAsk);
 // K+V bytes per position, averaged over a model's layers (for dealing layers by memory), f16 or int8
 export const kvBytesPerLayerPos = (meta, kv = "f16") => {
   const kvDim = (meta["qwen35.attention.head_count_kv"] || 0) * (meta["qwen35.attention.key_length"] || 0);
