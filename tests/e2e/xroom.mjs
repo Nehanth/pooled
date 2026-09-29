@@ -92,9 +92,10 @@ function serveRoom(src) {
   // the cooperative GEMV shape this device's autotune picked (timed at load, so it can differ
   // between loads, and the GEMV's summation order follows it)
   // (--tune WG,ROWS forces a shape instead: the diagnostic for whether the shape changes the output)
-  src = rep(src, "  ai.tune = await autotuneCoop(ai.device).catch(() => ({ wg: 256, rows: 4 }));", TUNE
-    ? `  ai.tune = { wg: ${TUNE[0]}, rows: ${TUNE[1]}, forced: 1 }; window.__xTune = ai.tune;`
-    : "  ai.tune = await autotuneCoop(ai.device).catch(() => ({ wg: 256, rows: 4 })); window.__xTune = ai.tune;");
+  const TA = "  ai.tune = await autotuneCoop(ai.device, { wide: wideOK }).catch(() => ({ wg: 256, rows: 4, wide: null }));";
+  src = rep(src, TA, TUNE
+    ? `  ai.tune = { wg: ${TUNE[0]}, rows: ${TUNE[1]}, wide: null, forced: 1 }; window.__xTune = ai.tune;`
+    : TA + " window.__xTune = ai.tune;");
   // --fixk K: every draft-head step in a room drafts K (the room otherwise picks 3, 5 or 7 by
   // measured tok/s, which depends on timing); the diagnostic for acceptance against a solo run (K = 3)
   if (FIXK) src = rep(src, "      const pickK = () => {\n", `      const pickK = () => { if (ai.chain.length) return ${FIXK};\n`);
