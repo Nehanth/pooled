@@ -21,6 +21,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-inv-req {url}` / `ai-inv {url, have}` | host → all / all → host | before dealing, the host asks what byte ranges of the model each device has cached; the inventory goes out with every `ai-load` (`inv`) |
 | `ai-wget {id, url, lo, hi}` / `ai-wpart {id, off, data \| done \| miss}` | device ↔ device | take a cached range from another device instead of the model host, in 64 KB parts; any failure falls back to the network |
 | `ai-stop` | guest → host | stop the answer being generated. Honoured from the device that asked (the host can always stop); decoding ends after the lap in flight and `ai-gendone` unlocks every screen |
+| `ai-linklost {name}` | worker → host | the worker's link to `name` (another device in the chain) went down and is being replaced; frames on it are gone, so the host fails the laps in flight now instead of timing out. Hosts that predate it ignore it |
 | `ai-degraded {why}` | host → all | a device in the chain left; every lap in flight failed at once and the room waits for a re-deal |
 | `ai-redeal {by, model}` | host → all | the host is dealing the layers again over the devices now in the room (after a departure, or to include late joiners); fresh `ai-load`s follow, cached ranges reload in seconds, the conversation is kept and re-prefilled on the next question |
 | `ai-ready-all {model}` to one device | host → newcomer | a device that joins an online room becomes an ask-only guest right away, followed by `ai-history {items}` (the last 20 exchanges) when the chat is visible to everyone |
@@ -49,6 +50,18 @@ Hidden states travel as binary frames: an f16-packed `Uint16Array` (10 KB for `d
 - Because of that, the host keeps up to 6 prefill rounds in flight: round r+1 runs on the host while round r is on a worker, and the chain works as a pipeline. Output is unchanged: every device sees the same frames in the same order.
 - The prefill rounds come back as full hidden states, which the host feeds to the draft block (`mtpRun`) so the first speculative steps after a prompt draft from a warm cache.
 - Inside a batched frame, columns are processed strictly in order; snapshot slots are indexed by global column (`frame.snap` packs base and total), so an 8-column verify split into two 4-column chunks on an older worker still rolls back correctly.
+
+## Dead links
+
+A network that passes no packets for longer than ICE's write timeout (about 15 s: frozen Wi-Fi, a closed laptop lid, a phone changing networks) kills a link's candidate pairs for good. Chrome then reports `connectionState: "failed"` while `iceConnectionState` stays `disconnected` and SCTP and every data channel still look open, so PeerJS never closes the connection and nothing sent on it arrives again. Shorter freezes recover on their own (the transport waits for late frames, above).
+
+Each device watches every link's `RTCPeerConnection`. When one fails:
+
+- The side that dialed it dials a new connection to the same peer id and sends `hello` with `back: 1`; both sides swap it in with a fresh wire (frame ids restart) and close the dead one and its stripes. The device keeps its place in the chain and its layers. A failed stripe is closed and redialed the same way.
+- The other side waits 45 s for that, then closes the link (the device left, as before).
+- The host fails every lap in flight at once ("the link to X dropped; ask again") and the next question prefills from scratch. A worker whose link to another worker dropped tells the host with `ai-linklost`.
+
+No PROTOCOL change: a peer that predates this sees an ordinary new connection from a device it knows (it already replaces the old entry), and ignores `ai-linklost`.
 
 ## Connecting: STUN and an optional TURN relay
 

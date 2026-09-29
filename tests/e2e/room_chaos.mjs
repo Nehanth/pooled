@@ -112,10 +112,10 @@ async function relayFor(tab, ip, port) {
 }
 const INIT = `(() => {
   const O = window.RTCPeerConnection; if (!O) return;
-  window.__ice = []; let n = 0;
+  window.__ice = []; window.__pcs = []; let n = 0;
   class P extends O {
     constructor(...a) {
-      super(...a); const id = ++n;
+      super(...a); const id = ++n; window.__pcs.push([id, this]);
       this.addEventListener("icecandidate", (e) => { const c = e.candidate?.candidate; if (c) window.__chaosLocal(c).catch(() => {}); });
       this.addEventListener("iceconnectionstatechange", () => window.__ice.push([Date.now(), id, this.iceConnectionState]));
     }
@@ -290,6 +290,13 @@ async function ask(hostName, { during, timeoutMs = 240000, newChat = true } = {}
     tokens: dec && +dec[1], tps: dec && +dec[2], maxStallS: +(maxGap / 1000).toFixed(2), stallAtS: gapAt && +(gapAt / 1000).toFixed(1), chars: text.length, text,
     status: st.slice(0, 200), guestSeen, during: dur ? await dur : null };
 }
+// what each tab's links look like after a failure: wire state, every peer connection's states,
+// the room log's last lines
+const diag = async () => { const o = {}; for (const [n, p] of Object.entries(tabs)) o[n] = await p.evaluate(() => ({
+  wire: window.pooledDebug?.(),
+  pcs: (window.__pcs || []).map(([id, pc]) => [id, pc.iceConnectionState, pc.connectionState, pc.sctp?.state || null]),
+  log: [...document.querySelectorAll("#chat-log div")].slice(-8).map((d) => d.textContent.slice(0, 160)),
+})).catch((e) => String(e).slice(0, 80)); return o; };
 const iceLog = async (n) => (await tabs[n].evaluate(() => window.__ice).catch(() => [])).map(([t, id, s]) => [t, id, s]);
 const toastLog = async (n) => (await tabs[n].evaluate(() => window.__toasts).catch(() => []));
 // wait until fn(snapshot) holds on a tab; returns ms or null
@@ -433,9 +440,9 @@ try {
         await sleep(3000);
         const ice = {}; for (const n of names) ice[n] = (await iceLog(n)).filter(([, , s]) => s !== "checking" && s !== "new");
         const toasts = {}; for (const n of names) toasts[n] = await toastLog(n);
-        row({ scenario: nm, ...r, sameAsBaseline: same(r.text), ice, toasts });
+        row({ scenario: nm, ...r, sameAsBaseline: same(r.text), ice, toasts, ...(r.ok ? {} : { diag: await diag() }) });
         // the room still answers afterwards?
-        if (!r.ok) { const again = await ask(H).catch((e) => ({ err: String(e) })); row({ scenario: nm + "_next", ...again, sameAsBaseline: same(again.text) }); }
+        if (!r.ok) { const again = await ask(H).catch((e) => ({ err: String(e) })); row({ scenario: nm + "_next", ...again, sameAsBaseline: same(again.text), ...(again.ok ? {} : { diag: await diag() }) }); }
       }
       C.rtt = 0;
     }
