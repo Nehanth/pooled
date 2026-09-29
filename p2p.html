@@ -775,6 +775,24 @@
   #share-url { flex: 1; min-width: 0; font: 400 12px/1.2 var(--mono); color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
   #share-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border-color: var(--accent); color: #fff; }
   #share-copy:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  /* "Use from code": pooled serve (cli/) */
+  #api-sheet .sheet { text-align: left; align-items: stretch; }
+  #api-sheet h2, #api-sheet .k { text-align: center; align-self: center; }
+  #api-cmd { flex: 1; min-width: 0; font: 400 12px/1.4 var(--mono); color: var(--text); overflow-wrap: anywhere; text-align: left; }
+  #api-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border-color: var(--accent); color: #fff; }
+  #api-copy:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .api-urls { margin: 16px 0 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 12px; font-size: 13px; }
+  .api-urls dt { color: var(--muted); }
+  .api-urls dd { margin: 0; font: 400 12px/1.5 var(--mono); color: var(--ink-2); overflow-wrap: anywhere; }
+  .api-h { margin-top: 18px; font: 600 12px/1.2 var(--sans); color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  #api-clients { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  #api-clients li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+  #api-clients li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #api-clients li button, .pop .api-kick { flex: none; height: 30px; padding: 0 12px; font: 500 12px/1 var(--sans); }
+  .pop .api-kick { margin-top: 10px; }
+  #api-allow-row { margin-top: 18px; display: flex; align-items: center; gap: 12px; font-size: 13px; }
+  #api-allow-row > span:first-child { flex: 1; color: var(--ink-2); }
+  #api-sheet .api-note { margin-top: 16px; font-size: 12px; line-height: 1.5; color: var(--muted); }
   .sheet.invite .row { margin-top: 12px; }
   .sheet .scan { margin-top: 10px; font-size: 13px; color: var(--muted); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
@@ -1424,6 +1442,7 @@
         <h3 id="ms-room">Room</h3>
         <div class="menu-acts">
           <button id="export-chat" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7M5 6.5l3 3 3-3M3 11.5v2h10v-2"/></svg></span>Save the chat<small>The conversation as a Markdown file</small></button>
+          <button id="api-open" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 4 1.8 8l3.7 4M10.5 4l3.7 4-3.7 4"/></svg></span>Use from code<small>This room as an OpenAI or Anthropic endpoint on your computer</small></button>
           <button id="card-btn" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M2.5 11l3.5-3.5 2.5 2.5 2-2 3 3"/><circle cx="10.8" cy="5.9" r=".9"/></svg></span>Room card<small>A picture of this room's devices and speed</small></button>
           <span id="cache-line"><a href="#" id="cache-clear"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.7 9h6.6l.7-9"/></svg></span>Clear cached weights<small>Frees this device's disk; the next start downloads again</small></a></span>
         </div>
@@ -1603,6 +1622,22 @@
     <div id="share-code"></div>
     <div class="linkrow"><div id="share-url"></div><button id="share-copy" type="button">Copy link</button></div>
     <div class="row"><button id="share-native" type="button" hidden>Share…</button></div>
+  </div>
+</div>
+<div id="api-sheet" class="overlay" hidden>
+  <div class="sheet" role="dialog" aria-labelledby="api-h">
+    <button id="api-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
+    <h2 id="api-h">Use from code</h2>
+    <div class="k">Run this on your computer (Node 22 or newer). Any tool that speaks the OpenAI or Anthropic API can then use this room's model.</div>
+    <div class="linkrow"><div id="api-cmd"></div><button id="api-copy" type="button">Copy</button></div>
+    <dl class="api-urls">
+      <dt>OpenAI</dt><dd>http://127.0.0.1:8080/v1</dd>
+      <dt>Anthropic</dt><dd>http://127.0.0.1:8080</dd>
+      <dt>Try it</dt><dd>curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{"model":"pooled","messages":[{"role":"user","content":"Hi"}]}'</dd>
+    </dl>
+    <div id="api-clients-wrap" hidden><div class="api-h">Connected API clients</div><ul id="api-clients"></ul></div>
+    <label id="api-allow-row" hidden><span>Allow API clients in this room</span><span class="switch"><input type="checkbox" id="api-allow" role="switch" checked><i aria-hidden="true"></i></span></label>
+    <p class="api-note">Runs on your computer; requests use this room's GPUs and appear in the chat under the room's visibility setting.</p>
   </div>
 </div>
 <div id="card" class="overlay" hidden>
