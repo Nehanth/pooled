@@ -14,7 +14,7 @@ const msg = (content, role = "user") => ({ role, content });
 
 Deno.test("openai: a plain request maps to the internal request with defaults", () => {
   const r = parseOpenAI({ model: "anything", messages: [msg("be brief", "system"), msg("hi")] });
-  eq(r, { api: "openai", client: "", stream: false, includeUsage: false, system: "be brief", messages: [{ role: "user", text: "hi" }],
+  eq(r, { api: "openai", stream: false, includeUsage: false, system: "be brief", messages: [{ role: "user", text: "hi" }],
     maxTokens: 1024, temperature: null, topK: null, stop: [], thinking: false });
 });
 Deno.test("openai: system and developer messages anywhere join the system prompt; same roles merge", () => {
@@ -22,7 +22,7 @@ Deno.test("openai: system and developer messages anywhere join the system prompt
     max_completion_tokens: 7, temperature: 0, top_k: 500, stop: "\n", reasoning_effort: "high", user: "alice", stream: true, stream_options: { include_usage: true } });
   eq(r.system, "a\n\nx");
   eq(r.messages, [{ role: "user", text: "q1\n\nq2" }, { role: "assistant", text: "ans" }, { role: "user", text: "q3" }]);
-  eq([r.maxTokens, r.temperature, r.topK, r.stop, r.thinking, r.client, r.stream, r.includeUsage], [7, 0, 64, ["\n"], true, "alice", true, true]);
+  eq([r.maxTokens, r.temperature, r.topK, r.stop, r.thinking, r.client, r.stream, r.includeUsage], [7, 0, 64, ["\n"], true, undefined, true, true], "user is not the label");
   eq(parseOpenAI({ messages: [msg("q")], reasoning_effort: "minimal" }).thinking, false);
 });
 Deno.test("openai: unsupported features are a clear 400", () => {

@@ -1,6 +1,6 @@
 // The Anthropic Messages API: request validation and mapping onto the internal request, response
 // bodies, stream events and errors (docs/design/serve.md section 4).
-import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages, cleanLabel } from "./common.js";
+import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages } from "./common.js";
 
 const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, toolarge: 413, busy: 529, unavailable: 529, server: 500 };
 const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "authentication_error", forbidden: "permission_error", notfound: "not_found_error", toolarge: "request_too_large", busy: "overloaded_error", unavailable: "overloaded_error", server: "api_error" };
@@ -41,7 +41,6 @@ export function parseAnthropic(b) {
   if (t != null && !(t?.type === "enabled" || t?.type === "disabled")) throw bad("thinking.type must be enabled or disabled");
   return {
     api: "anthropic",
-    client: cleanLabel(typeof b.metadata?.user_id === "string" ? b.metadata.user_id : ""),
     stream: !!b.stream,
     system, messages, maxTokens,
     temperature, topK: tk == null ? null : Math.min(tk, LIMITS.topK),

@@ -3,7 +3,6 @@
 // docs/design/serve.md; cli/README.md for setting up tools.
 import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
-import os from "node:os";
 
 const major = +process.versions.node.split(".")[0];
 if (major < 22) { console.error("pooled needs Node 22 or newer"); process.exit(1); }
@@ -20,7 +19,7 @@ Usage
 Options
   --port <n>        HTTP port (default 8080)
   --token <t>       require "Authorization: Bearer <t>" or "x-api-key: <t>" on every request
-  --name <s>        how the room shows this client (default: "API · <hostname>")
+  --name <s>        how the room shows this client (default: "pooled serve" and 4 random letters)
   --signal <h:p>    PeerJS signaling server, as the room page's ?signal= (default: PeerJS cloud)
   --max-queue <n>   requests that may wait here behind the running one before 429 / 529
                     (default 8; 0 = only when idle)
@@ -68,8 +67,9 @@ const log = (msg, level = "info") => {
   if (o["json-log"]) console.error(JSON.stringify({ t: new Date().toISOString(), level, msg }));
   else console.error(`${new Date().toTimeString().slice(0, 8)} ${msg}`);
 };
-const host = os.hostname().split(".")[0].slice(0, 20) || "computer";
-const bridge = new Bridge({ code, signal: o.signal || null, name: cleanLabel(o.name) || `API · ${host}`, client: `pooled-cli/${VERSION}`, log });
+// never the hostname by default: every guest in the room sees this name
+const tag = Math.random().toString(36).slice(2, 6).padEnd(4, "0");
+const bridge = new Bridge({ code, signal: o.signal || null, name: cleanLabel(o.name) || `pooled serve ${tag}`, client: `pooled-cli/${VERSION}`, log });
 // POOLED_KEEPALIVE_MS: the queue keep-alive interval (tests; 10 s otherwise)
 const api = createServer({ bridge, port, token: o.token || null, maxQueue, log, version: VERSION, keepAliveMs: +process.env.POOLED_KEEPALIVE_MS || undefined });
 

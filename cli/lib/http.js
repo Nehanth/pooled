@@ -130,7 +130,9 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
   async function chat(req, res, api) {
     const body = await readBody(req);
     const r = api === "anthropic" ? parseAnthropic(body) : parseOpenAI(body);
-    r.client ||= clientFromUA(req.headers["user-agent"]) || "API";
+    // the label the room shows: the client program from User-Agent, never the request's user /
+    // metadata.user_id (often an account or session id)
+    r.client = clientFromUA(req.headers["user-agent"]) || "API";
     const why = unavailable();
     if (why) throw why;
     // --max-queue counts requests waiting behind the one the room is answering: 0 means answer only when idle

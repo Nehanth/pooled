@@ -1,6 +1,6 @@
 // The OpenAI chat completions API: request validation and mapping onto the internal request,
 // response bodies, stream chunks and errors (docs/design/serve.md section 4).
-import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages, cleanLabel } from "./common.js";
+import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages } from "./common.js";
 
 const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, toolarge: 413, busy: 429, unavailable: 503, server: 500 };
 const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "invalid_request_error", forbidden: "permission_error", notfound: "invalid_request_error", toolarge: "invalid_request_error", busy: "rate_limit_exceeded", unavailable: "server_error", server: "server_error" };
@@ -23,7 +23,7 @@ function textOf(content, i) {
   }).join("");
 }
 
-// body (parsed JSON) -> internal request { api, client, stream, includeUsage, system, messages, maxTokens, temperature, topK, stop, thinking }
+// body (parsed JSON) -> internal request { api, stream, includeUsage, system, messages, maxTokens, temperature, topK, stop, thinking }
 export function parseOpenAI(b) {
   if (!b || typeof b !== "object" || Array.isArray(b)) throw bad("the body must be a JSON object");
   if (!Array.isArray(b.messages)) throw bad("messages is required", "messages");
@@ -51,7 +51,6 @@ export function parseOpenAI(b) {
   const effort = b.reasoning_effort;
   return {
     api: "openai",
-    client: cleanLabel(typeof b.user === "string" ? b.user : ""),
     stream: !!b.stream,
     includeUsage: !!b.stream_options?.include_usage,
     system: sys, messages,

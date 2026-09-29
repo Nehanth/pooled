@@ -15,7 +15,7 @@ Deno.test("anthropic: a request maps to the internal request", () => {
   const r = parseAnthropic(req({ system: [{ type: "text", text: "be" }, { type: "text", text: " brief" }], temperature: 1, top_k: 5, stop_sequences: ["END"], metadata: { user_id: "bob" },
     thinking: { type: "enabled", budget_tokens: 1024 }, stream: true,
     messages: [{ role: "user", content: [{ type: "text", text: "a" }] }, { role: "user", content: "b" }, { role: "assistant", content: [{ type: "thinking", thinking: "t", signature: "" }, { type: "text", text: "ans" }] }, { role: "user", content: "c" }] }));
-  eq(r, { api: "anthropic", client: "bob", stream: true, system: "be brief",
+  eq(r, { api: "anthropic", stream: true, system: "be brief",
     messages: [{ role: "user", text: "a\n\nb" }, { role: "assistant", text: "ans" }, { role: "user", text: "c" }],
     maxTokens: 100, temperature: 1, topK: 5, stop: ["END"], thinking: true });
 });

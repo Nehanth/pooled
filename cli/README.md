@@ -29,7 +29,7 @@ pooled serve <ROOM CODE | room link> [options]
 
   --port <n>        HTTP port (default 8080)
   --token <t>       require "Authorization: Bearer <t>" or "x-api-key: <t>" on every request
-  --name <s>        how the room shows this client (default: "API · <hostname>")
+  --name <s>        how the room shows this client (default: "pooled serve" and 4 random letters)
   --signal <h:p>    PeerJS signaling server, as the room page's ?signal= (default: PeerJS cloud)
   --max-queue <n>   requests that may wait here before 429 / 529 (default 8)
   --quiet / --json-log

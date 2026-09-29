@@ -117,7 +117,8 @@ pooled serve <ROOM CODE | room link> [options]
 
   --port <n>        HTTP port (default 8080)
   --token <t>       require "Authorization: Bearer <t>" or "x-api-key: <t>" on every request
-  --name <s>        how the room shows this client (default: "API · <short hostname>")
+  --name <s>        how the room shows this client (default: "pooled serve" and 4 random letters;
+                    never the hostname, which every guest would see)
   --signal <h:p>    PeerJS signaling server, same as the room page's ?signal= (default: PeerJS cloud)
   --max-queue <n>   HTTP requests waiting here before 429/529 (default 8)
   --quiet / --json-log
@@ -167,9 +168,10 @@ Every endpoint maps onto one internal request:
   maxTokens, temperature?, topK?, stop: [string] (≤ 4, each ≤ 64 chars), thinking: bool }
 ```
 
-`client` is the attribution the room shows: the `user` field (OpenAI) or `metadata.user_id`
-(Anthropic) when set, else a label from `User-Agent` (`Continue`, `OpenAI/Python`,
-`Anthropic/JS`, `curl`, …, capped at 40 chars), else `API`.
+`client` is the attribution the room shows: a label from `User-Agent` (`Continue`,
+`OpenAI/Python`, `Anthropic/JS`, `curl`, …, capped at 40 chars), else `API`. The OpenAI `user`
+field and Anthropic `metadata.user_id` are ignored: tools fill them with account or session ids,
+and the label is shown to the room.
 
 ### Shared rules
 
