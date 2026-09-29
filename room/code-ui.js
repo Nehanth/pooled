@@ -547,12 +547,34 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (paths.length > 500) t.append(h("div", "none", `(+${paths.length - 500} more)`));
   }
   const dirty = () => edPath != null && !edRO && ta.value !== edBase;
+  // phones: long lines wrap (16px mono, the size that keeps iOS from zooming, fits about 22
+  // columns). The gutter still numbers the file's lines, with blank rows beside the rows a line
+  // wraps onto, measured on a hidden copy of the lines laid out like the text (.ed-mirror)
+  const mirror = h("div", "ed-mirror"); mirror.setAttribute("aria-hidden", "true");
+  ta.after(mirror);
+  let rows = null;   // wrapped rows per line, while lines wrap
+  function wrapRows(lines) {
+    if (!PHONE.matches || edBox.hidden) { mirror.replaceChildren(); return null; }
+    mirror.replaceChildren(...lines.map((l) => h("div", null, l || " ")));
+    const lh = parseFloat(getComputedStyle(mirror).lineHeight) || 1;
+    const r = [...mirror.children].map((d) => Math.max(1, Math.round(d.offsetHeight / lh)));
+    mirror.replaceChildren();
+    return r;
+  }
   function paint() {
     hlRaf = 0;
     hl.innerHTML = highlight(edPath || hlPath, ta.value) + "\n";
-    const n = ta.value.split("\n").length;
-    if (+gutter.dataset.n !== n) { gutter.dataset.n = n; gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n"); }
+    const lines = ta.value.split("\n");
+    rows = wrapRows(lines);
+    const k = rows ? rows.join() : String(lines.length);
+    if (gutter.dataset.k !== k) { gutter.dataset.k = k; gutter.textContent = lines.map((_, i) => (i + 1) + (rows ? "\n".repeat(rows[i] - 1) : "")).join("\n"); }
   }
+  const setWrap = () => { ta.wrap = PHONE.matches ? "soft" : "off"; if (!edBox.hidden) paint(); };
+  PHONE.addEventListener("change", setWrap);
+  setWrap();
+  // the width changes (the phone turns, the file opens full screen): the lines wrap differently
+  let edW = 0;
+  new ResizeObserver(() => { if (edBox.clientWidth !== edW) { edW = edBox.clientWidth; if (rows || PHONE.matches) hlRaf ||= requestAnimationFrame(paint); } }).observe(edBox);
   function edState() {
     const d = dirty();
     if (edPath != null && !edRO) { if (d) drafts.set(edPath, ta.value); else drafts.delete(edPath); }
@@ -609,9 +631,11 @@ export function codeUI({ onMode = () => {} } = {}) {
   function reveal() {
     const cs = getComputedStyle(ta), lh = parseFloat(cs.lineHeight) || 19, pt = parseFloat(cs.paddingTop) || 0;
     const before = ta.value.slice(0, ta.selectionEnd), line = before.split("\n").length - 1;
-    const y = pt + line * lh;
+    // wrapped lines (phones): the rows above the caret's line, and the caret somewhere in its own rows
+    const above = rows ? rows.slice(0, line).reduce((a, b) => a + b, 0) : line, own = rows?.[line] ?? 1;
+    const y = pt + above * lh;
     if (y < edBox.scrollTop) edBox.scrollTop = y - lh;
-    else if (y + lh * 2 > edBox.scrollTop + edBox.clientHeight) edBox.scrollTop = y + lh * 2 - edBox.clientHeight;
+    else if (y + lh * (own + 1) > edBox.scrollTop + edBox.clientHeight) edBox.scrollTop = Math.min(y, y + lh * (own + 1) - edBox.clientHeight);
   }
   const insert = (text) => { if (!document.execCommand("insertText", false, text)) { ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end"); ta.dispatchEvent(new Event("input")); } };
   ta.addEventListener("input", () => { hlRaf ||= requestAnimationFrame(paint); edState(); reveal(); });

@@ -1060,15 +1060,16 @@
   #ed { flex: 1; min-height: 220px; overflow: auto; background: var(--panel); scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
   #ed[hidden] { display: none; }
   .ed-in { display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: max-content; min-height: 100%; }
-  #ed-ln, #ed-hl, #ed-text { font: 400 12px/1.7 var(--mono); letter-spacing: 0; font-variant-ligatures: none; tab-size: 2; -moz-tab-size: 2; }
+  #ed-ln, #ed-hl, #ed-text, .ed-mirror { font: 400 12px/1.7 var(--mono); letter-spacing: 0; font-variant-ligatures: none; tab-size: 2; -moz-tab-size: 2; }
   #ed-ln { position: sticky; left: 0; z-index: 1; padding: 14px 12px 40px 12px; min-width: 46px; text-align: right; white-space: pre; color: var(--faint); background: var(--panel-3); box-shadow: 1px 0 0 var(--rule-2); user-select: none; }
   .ed-code { position: relative; min-width: 0; }
-  #ed-hl, #ed-text { margin: 0; padding: 14px 24px 40px 16px; white-space: pre; word-wrap: normal; overflow-wrap: normal; border: 0; }
+  #ed-hl, #ed-text, .ed-mirror { margin: 0; padding: 14px 24px 40px 16px; white-space: pre; word-wrap: normal; overflow-wrap: normal; border: 0; }
   #ed-hl { min-height: 100%; color: var(--text); pointer-events: none; }
   #ed-text { position: absolute; inset: 0; width: 100%; height: 100%; resize: none; overflow: hidden; background: transparent; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--accent); border-radius: 0; outline: none; box-shadow: none; }
   #ed-text::selection { background: rgba(42,69,224,.18); -webkit-text-fill-color: transparent; }
   #ed-text:focus { box-shadow: none; }
   #ed-text[readonly] { caret-color: transparent; }
+  .ed-mirror { display: none; }
   /* token colours: the editor and the edit window over the preview (no orange: numbers are indigo) */
   /* syntax colours: the editor, the code the agent is writing, and its diffs */
   :is(#ed-hl, .cm-live .code, .cm-diff .r) :is(.t-k, .t-t) { color: var(--accent-hover); }
@@ -1216,7 +1217,7 @@
     .cs-room { padding-left: 10px; font-size: 13px; }
   }
   @media (pointer: coarse) {
-    input, select, textarea, #ai-prompt, #code-prompt, #ed-text, #ed-hl, #ed-ln, #code-pane select, #code-pane input[type="text"] { font-size: 16px; }
+    input, select, textarea, #ai-prompt, #code-prompt, #ed-text, #ed-hl, #ed-ln, .ed-mirror, #code-pane select, #code-pane input[type="text"] { font-size: 16px; }
     :is(.pchip, #band-toggle, .copy-ans, #menu-close, #name-shuffle, #share-close, #code-auto-l, #code-newtask, #pv-reload) { position: relative; }
     :is(.pchip, #band-toggle, .copy-ans, #menu-close, #name-shuffle, #share-close, #code-auto-l, #code-newtask, #pv-reload)::before { content: ""; position: absolute; inset: -8px; }
     #name-shuffle, #share-close { position: absolute; }
@@ -1330,7 +1331,11 @@
     #code-tree .d { height: 36px; }
     #code-pane #code-open { display: none; }
     #code-pane #ed-back { display: grid; place-items: center; flex: none; width: 40px; height: 40px; margin-left: -8px; padding: 0; border: 0; background: transparent; color: var(--ink-2); }
-    #ed-bar { height: 52px; padding-left: 10px; }
+    #ed-bar { height: 52px; padding-left: 10px; padding-right: 16px; }
+    /* long lines wrap (room/code-ui.js numbers the file's lines in the gutter, measured on .ed-mirror) */
+    #code-pane .ed-in { min-width: 0; }
+    #ed-hl, #ed-text, .ed-mirror { white-space: pre-wrap; overflow-wrap: break-word; word-wrap: break-word; }
+    .ed-mirror { display: block; position: absolute; top: 0; left: 0; right: 0; visibility: hidden; pointer-events: none; }
     /* the tab bar */
     #code-pane #code-tabs { display: flex; grid-row: 2; grid-column: 1; height: calc(56px + env(safe-area-inset-bottom)); padding: 0 8px env(safe-area-inset-bottom); background: var(--panel-3); border-top: 1px solid var(--rule-2); }
     #code-pane #code-tabs button { position: relative; flex: 1 1 0; min-width: 0; height: 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--muted); font: 500 12px/1 var(--sans); letter-spacing: -.005em; }
