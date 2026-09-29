@@ -7,7 +7,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | Message | Direction | Meaning |
 |---|---|---|
 | `ai-wait` | host → worker | join accepted; wait for assignment |
-| `ai-load {model, range, next, host}` | host → worker | download and load layers `[range[0], range[1])`; forward to `next` |
+| `ai-load {model, range, next, prev, host}` | host → worker | download and load layers `[range[0], range[1])`; forward to `next`, take frames only from `prev` (see compute frames) |
 | `ai-progress {pct}` / `ai-hostprog` | worker ↔ host | download progress for the room UI |
 | `ai-ready` / `ai-ready-all` | worker → host / host → all | layers loaded; room online |
 | `ai-reset` | host → all | "new chat": the host forgot the conversation; screens clear the transcript. It does **not** reset any engine: devices keep their caches between questions (multi-turn), and a reset rides on the next frame instead (see compute frames) |
@@ -40,6 +40,10 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 Control rides on frames. A frame's header flags byte (`room/transport.js` `packFlags`) carries `spec` (verify: snapshot the recurrent state after every column), `reset` (clear recurrent state and start from position 0 before this frame) and `rb` (restore the recurrent state to the snapshot after column `k` before this frame: the host rejected drafts after `k`). The host queues a reset or rollback and attaches it to the next frame it sends; each worker applies it, then forwards it with the frame. There is no separate `ai-rollback` message any more: sent on its own channel it could be overtaken by the next frame after a lost packet, and a worker would verify from the wrong state.
 
 Checkpoint control rides the same way, in header bytes 24..31 (u16 each, 0 = none): `sv` saves this device's state (its layers' KV rows, DeltaNet states, conv windows) as GPU slot `sv` before the frame, `ld` loads slot `ld`, `dp` drops up to two slots (`0xffff` = all). A device applies them in the order rollback, save, drop, reset, load, then runs the frame and forwards the control with it. The host saves after every answer (`?ckpt=N` keeps the last N, default 2) and loads the longest saved answer that is a prefix of a new prompt, so a regenerate or branch prefills only what is new (docs/long-context-and-sessions.md).
+
+Every compute frame carries a frame number `fseq` (u16, 1..65535, wrapping to 1; `0` = none) in header bytes 18..19, which protocol 4 left zero. The host numbers each frame it sends, every worker copies the number onto the frame it forwards, and the return frame brings it back: the host resolves a lap only with the return that carries that lap's number, so a stale return (a lap that failed and was asked again at the same position) can no longer resolve the new one. Returns without a number, from a device that predates it, are taken as before. A worker drops a numbered frame at or up to 64 behind the last one it queued (a duplicate); anything further behind is a new numbering (the host reloaded) and is taken.
+
+Each worker also takes compute frames only from its **upstream**, the device before it in the chain (the host for the first): `ai-load` carries it as `prev`, and `ai-upstream {id}` (host → worker) changes it when the device before it is replaced (a reloaded device back in its slot, or a spare taking over). A worker whose `ai-load` has no `prev` (an older host) takes frames from anyone, as before. This fences a replaced device: even if it is still alive somewhere, its late frames go nowhere.
 
 Hidden states travel as binary frames: an f16-packed `Uint16Array` (10 KB for `dim = 5120`) with the wire format flag `WIRE_F16`; decoders accept f32 for older peers. Frames are correlated by position (`pos` / `basePos`), and the host keeps a timeout per outstanding lap.
 

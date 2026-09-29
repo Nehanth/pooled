@@ -23,6 +23,7 @@ import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversat
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
 import { lookupDrafts } from "./room/lookup.js";
+import { fseqNext, seqStale } from "./room/spares.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
 import { computeScreen } from "./room/compute.js";
@@ -1718,6 +1719,7 @@ async function aiStart(modelArg) {
       const msg = {
         t: "ai-load", model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX,
         next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host",
+        prev: i > 0 ? ai.chain[i - 1] : peer.id,
         host: peer.id,
         inv,
       };
@@ -1822,8 +1824,9 @@ function aiRejoin(newId, name) {
   ai.chain[i] = newId;
   ai.readyPeers.delete(oldId);
   const { msg } = ai.plan.get(name);
-  const fresh = { ...msg, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: peer.id };
+  const fresh = { ...msg, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", prev: i > 0 ? ai.chain[i - 1] : peer.id, host: peer.id };
   if (i > 0) sendTo(ai.chain[i - 1], { t: "ai-next", next: newId });
+  if (i + 1 < ai.chain.length) sendTo(ai.chain[i + 1], { t: "ai-upstream", id: newId });   // it takes frames only from its upstream
   sendTo(newId, fresh);
   ai.fed = null; ckptClear(true);           // its fresh engine holds nothing: re-prefill next time
   log("room", `${name} came back — reloading its layers`);
@@ -1871,14 +1874,25 @@ function lapWait(key, ms, what) {
   });
 }
 function failWaiters(err) { for (const [k, w] of ai.waiters) { ai.waiters.delete(k); w.rej(err); } }
-function lapDone(key, h) { const w = ai.waiters.get(key); if (w) { ai.waiters.delete(key); w.res(h); } }
+// a return frame resolves the lap waiting under its position only if it is that lap's frame: a
+// stale return (a lap failed and asked again at the same position) carries an older number.
+// Returns without a number (a device from before numbering) are taken as before.
+function lapDone(key, h, fseq) {
+  const w = ai.waiters.get(key);
+  if (!w || (w.fseq && fseq && w.fseq !== fseq)) return;
+  ai.waiters.delete(key); w.res(h);
+}
 // send a frame to the first device of the chain; a pending reset or rollback rides with it,
 // so it reaches every device strictly before the frame it applies to
 function sendChain(msg) {
   ai.frames = (ai.frames || 0) + 1;
   ai.hostAmax = Math.max(0.9 * (ai.hostAmax || 0), wireStats.lastMax || 0);
   const ctl = ai.pendingCtl; ai.pendingCtl = {};
-  sendHidden(ai.chain[0], { ...msg, ...ctl });
+  // every frame gets the next number; the lap waiting for it remembers it (lapDone)
+  const fseq = ai.fseq = fseqNext(ai.fseq || 0);
+  const w = ai.waiters.get(msg.t === "ai-hidden" ? msg.pos : "b" + msg.basePos);
+  if (w) w.fseq = fseq;
+  sendHidden(ai.chain[0], { ...msg, ...ctl, fseq });
 }
 // forget the conversation state on every device: here now, on the chain with the next frame
 function resetState() {
@@ -2675,7 +2689,7 @@ async function workerFrame(d) {
     compute.pass(nTok, performance.now() - t0);
     // the verify flag travels with the frame: every device snapshots its recurrent state per
     // column, or a later rollback on it restores a stale snapshot
-    const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };
+    const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...(d.fseq ? { fseq: d.fseq } : {}), ...packWire(hb) };
     if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
     else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
   } else {
@@ -2686,7 +2700,7 @@ async function workerFrame(d) {
     if (badF32(h)) { aiStatus(`⚠ NaN PRODUCED by this device (pos ${d.pos}, layers ${ai.range[0]}–${ai.range[1] - 1}) — GPU kernel issue here`); sendTo(ai.hostId, { t: "ai-error", message: `NaN produced on worker layers ${ai.range[0]}–${ai.range[1] - 1}` }); }
     teleNote("one", performance.now() - t0);
     compute.pass(1, performance.now() - t0);
-    const msg = { pos: d.pos, ...packWire(h) };
+    const msg = { pos: d.pos, ...(d.fseq ? { fseq: d.fseq } : {}), ...packWire(h) };
     if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
     else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
     if (d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
@@ -2778,7 +2792,7 @@ function resumeHost(r) {
 // room's layers, chat or state), and the host ignores them altogether.
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
-  "ai-visibility", "ai-style", "ai-busy", "ai-wait"]);
+  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-upstream"]);
 async function aiOnData(from, d) {
   if (d.t.startsWith("ai-code") || d.t.startsWith("ai-pv")) { codeOnData(from, d); return; }
   const e = conns.get(from);
@@ -2799,6 +2813,7 @@ async function aiOnData(from, d) {
       else aiStatus(`${d.by} started the model…`);
       break;
     case "ai-next": ai.next = d.next; ensureLink(d.next); break;
+    case "ai-upstream": ai.upstream = d.id || null; break;
     case "ai-layers":
       ai.layersByName = d.by; loadCardRender();
       if (ai.role === "worker" && !d.by[myName]) {   // not in this deal: ask-only guest, GPU memory freed
@@ -2830,6 +2845,8 @@ async function aiOnData(from, d) {
       ai.role = "worker";
       ai.next = d.next;
       ai.hostId = d.host;
+      ai.upstream = d.prev || null;   // older hosts send no prev: then frames are taken from anyone, as before
+      ai.lastF = 0;
       ai.q = Promise.resolve();
       ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;
       ensureLink(d.next);   // open the link to my chain neighbour while the weights download
@@ -2880,13 +2897,18 @@ async function aiOnData(from, d) {
     case "ai-hidden-b":
     case "ai-hidden":
       if (ai.role !== "worker") break;
+      // fencing: compute frames only from the device before me (ai.upstream, from ai-load /
+      // ai-upstream; unset when the host predates it), and each numbered frame once
+      if (ai.upstream && from !== ai.upstream) break;
+      if (seqStale(d.fseq, ai.lastF)) break;
+      if (d.fseq) ai.lastF = d.fseq;
       ai.q = ai.q.then(() => workerFrame(d)).catch((err) => {
         aiStatus("⚠ " + err.message);
         sendTo(ai.hostId, { t: "ai-error", message: err.message });
       });
       break;
-    case "ai-hiddenret-b": lapDone("b" + d.basePos, unpackWire(d)); break;
-    case "ai-hiddenret": lapDone(d.pos, unpackWire(d)); break;
+    case "ai-hiddenret-b": lapDone("b" + d.basePos, unpackWire(d), d.fseq); break;
+    case "ai-hiddenret": lapDone(d.pos, unpackWire(d), d.fseq); break;
     case "ai-visibility":
       ai.visibility = d.mode;
       toast(d.mode === "all" ? "the host shows the chat to everyone" : d.mode === "host" ? "the host keeps the chat private" : "the host shows each answer to whoever asked");
