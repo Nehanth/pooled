@@ -59,16 +59,47 @@ const quiet = () => { quietUntil = Date.now() + QUIET_MS; };
 // The relay's address: <meta name="preview-origin" content="https://..."> on the page (a second
 // deployment of this site on another registrable domain), else in development the other loopback
 // name (localhost <-> 127.0.0.1 are different sites), else null (local mode).
+// A meta the relay cannot isolate is ignored (local mode, and no run_js): not an http(s) URL, plain
+// http from an https page (blocked as mixed content), or the page's own site (a subdomain such as
+// preview.pooled.run shares the room's process, so a loop there would freeze the room).
 export function relayUrl(doc = globalThis.document) {
   const loc = doc?.defaultView?.location;
   if (!loc) return null;
   const meta = doc.querySelector?.('meta[name="preview-origin"]')?.content?.trim();
   const path = "/harness/preview-relay.html";
-  if (meta) return meta.replace(/\/+$/, "") + path;
+  if (meta) {
+    const why = relayProblem(meta, loc);
+    if (!why) return meta.replace(/\/+$/, "") + path;
+    console.warn(`preview-origin ignored: ${why}`);
+    return null;
+  }
   const port = loc.port ? ":" + loc.port : "";
   if (loc.hostname === "localhost") return `${loc.protocol}//127.0.0.1${port}${path}`;
   if (loc.hostname === "127.0.0.1") return `${loc.protocol}//localhost${port}${path}`;
   return null;
+}
+
+// Registrable domain ("site") of a host name, close enough for a relay check: the last two labels,
+// or three under a known two-part suffix (co.uk, github.io, ...). IP addresses and single labels
+// are their own site.
+const SUFFIX2 = new Set(["co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.jp", "co.nz", "co.in",
+  "com.br", "com.cn", "vercel.app", "github.io", "pages.dev", "netlify.app", "web.app", "workers.dev", "fly.dev"]);
+export function siteOf(host) {
+  const h = String(host || "").toLowerCase().replace(/\.$/, "");
+  if (!h || /^[\d.]+$/.test(h) || h.includes(":") || !h.includes(".")) return h;
+  const p = h.split(".");
+  const n = SUFFIX2.has(p.slice(-2).join(".")) ? 3 : 2;
+  return p.slice(-n).join(".");
+}
+
+// Why a preview-origin value cannot isolate previews from the page at `loc`, or "" when it can.
+export function relayProblem(origin, loc) {
+  let u;
+  try { u = new URL(origin); } catch { return "not a URL"; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return "not an http(s) URL";
+  if (loc?.protocol === "https:" && u.protocol !== "https:") return "an https page needs an https preview origin";
+  if (loc?.hostname && siteOf(u.hostname) === siteOf(loc.hostname)) return "same site as the page (it would share the room's process)";
+  return "";
 }
 
 export function mountPreview(el, source, port, { onLog = () => {}, onStatus = () => {}, autorun = true, relay = undefined, onShow = null, onDone = null, run = false } = {}) {
