@@ -11,9 +11,9 @@ jobs:
         with: { deno-version: v2.x }
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - name: Syntax check (engine, room, harness, site, tests, benchmarks)
+      - name: Syntax check (engine, room, harness, site, tests incl. unit and e2e, benchmarks)
         run: |
-          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js benchmarks/*.js; do node --check "$f"; done
+          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js; do node --check "$f"; done
       - name: Unit tests (no GPU)
         # the unit tests import node: builtins via tests/weight_cache.js; without npm ci there is no local
         # node_modules, so Deno must not read package.json (it would look for @types/node there)
