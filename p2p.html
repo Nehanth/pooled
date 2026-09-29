@@ -996,14 +996,11 @@
   .api-ex-hint { padding: 8px 12px; border-top: 1px solid var(--cs-rule-2); font-size: 12px; line-height: 1.4; color: var(--on-game-2); }
   /* who is connected: the host can Disconnect each */
   #api-clients { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
-  #api-clients li { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 6px 6px 6px 8px; border: 1px solid var(--cs-rule); border-radius: var(--r-md); background: var(--cs-2); }
+  #api-clients li { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 6px 6px 8px; border: 1px solid var(--cs-rule); border-radius: var(--r-md); background: var(--cs-2); }
   #api-clients .ic { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: color-mix(in srgb, var(--blue-400) 16%, transparent); color: var(--blue-200); }
-  #api-clients .nm { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-  #api-clients .nm b { font: 500 13px/1.2 var(--sans); color: var(--on-game); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #api-clients .nm small { display: flex; gap: 0 4px; min-width: 0; font: 400 12px/1.3 var(--sans); color: var(--on-game-2); }
-  #api-clients .nm small > span { white-space: nowrap; }
-  #api-clients .nm small > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  #api-clients .nm small > span:not(:first-child) { flex: none; }
+  #api-clients .nm { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+  #api-clients .nm b { min-width: 0; font: 500 13px/1.2 var(--sans); color: var(--on-game); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #api-clients .nm small { flex: none; font: 400 12px/1.2 var(--sans); color: var(--on-game-2); white-space: nowrap; }
   #api-clients .nm small .n { font: 400 11px/1 var(--mono); color: var(--on-game); }
   #api-clients li button { flex: none; height: 32px; padding: 0 12px; border: 1px solid var(--cs-rule); border-radius: 8px; background: transparent; font: 500 12px/1 var(--sans); color: color-mix(in srgb, var(--del) 45%, var(--on-game)); }
   #api-clients li button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--del) 60%, transparent); background: color-mix(in srgb, var(--del) 16%, transparent); }
@@ -1040,8 +1037,6 @@
     .api-url { flex-wrap: wrap; align-content: center; row-gap: 2px; padding-top: 8px; padding-bottom: 6px; }
     .api-url > span { width: 100%; font-size: 12px; }
     #api-clients li button { height: 44px; }
-    #api-clients .nm small { flex-wrap: wrap; }
-    #api-clients .nm small > span:first-child { overflow: visible; white-space: normal; }
     #compute-exit { height: 44px; }
   }
   @media (max-width: 380px) { .api-tabs button { padding: 0 8px; } }

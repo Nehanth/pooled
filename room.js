@@ -4096,13 +4096,11 @@ function apiPanel() {
     const li = document.createElement("li");
     li.innerHTML = `<span class="ic">${ICONS.api}</span><span class="nm"><b></b><small></small></span>`;
     li.querySelector("b").textContent = apiLabel(c);
-    // "via pooled serve kqzt · 3 answered": each part kept whole, mono only for the number
-    const parts = [c.tool ? `via ${c.name}` : c.client || "API client"].map((t) => { const e = document.createElement("span"); e.textContent = t; return e; });
-    if (isHost) { const e = document.createElement("span"); e.innerHTML = `<span class="n"></span> answered`; e.firstChild.textContent = c.answered; parts.push(e); }
+    // one line: "curl · 3 answered" (the count on the host, which has it); the bridge's own name and
+    // user agent only in the tooltip, they mean nothing to most people
     const sm = li.querySelector("small");
-    // the dot rides on the part before it, so a wrapped line never starts or ends on a bare dot
-    parts.forEach((e, i) => { if (i < parts.length - 1) e.append(" ·"); sm.append(e); });
-    sm.title = [c.name, c.client].filter(Boolean).join(" · ");
+    if (isHost) { sm.innerHTML = `· <span class="n"></span> answered`; sm.querySelector(".n").textContent = c.answered; } else sm.remove();
+    li.querySelector(".nm").title = [c.name, c.client].filter(Boolean).join(" · ");
     if (isHost) {
       const b = document.createElement("button");
       b.type = "button"; b.textContent = "Disconnect"; b.dataset.id = id; b.setAttribute("aria-label", `Disconnect ${apiLabel(c)}`);
