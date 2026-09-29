@@ -683,14 +683,18 @@ window.addEventListener("pagehide", () => { try { broadcastAll({ t: "leaving" })
 // the data channel's own close can take minutes to surface. Treat it as gone, the same path as a close.
 // A late tick means this tab was the one stalled (throttled, or a long task): its queue of pongs is not
 // read yet, so it judges nobody on that tick.
-const PING_MS = 2500, SILENT_MS = 10000;
+// The other side cannot tell a stalled tab from a gone one, so a guest gives the host longer
+// (HOST_SILENT_MS): the host's main thread does the heaviest work (its shard load, the first and last
+// layers), and a guest that drops a live host tears the room down for itself and leaves the host's
+// chain degraded. A host that really vanished is still noticed in well under a minute.
+const PING_MS = 2500, SILENT_MS = 10000, HOST_SILENT_MS = 30000;
 let pingAt = performance.now();
 setInterval(() => {
   const now = performance.now(), late = now - pingAt > 2 * PING_MS;
   pingAt = now;
   for (const [id, e] of [...conns]) {
     if (late) { e.seen = now; continue; }
-    if (now - e.seen > SILENT_MS) { log("room", `${e.name || id} stopped answering for ${Math.round((now - e.seen) / 1000)} s: dropping it`); try { e.conn.close(); } catch {} }
+    if (now - e.seen > (id === PREFIX + roomCode ? HOST_SILENT_MS : SILENT_MS)) { log("room", `${e.name || id} stopped answering for ${Math.round((now - e.seen) / 1000)} s: dropping it`); try { e.conn.close(); } catch {} }
   }
   broadcastAll({ t: "ping", ts: now });
 }, PING_MS);
