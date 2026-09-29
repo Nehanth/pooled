@@ -713,8 +713,11 @@ export function codeUI({ onMode = () => {} } = {}) {
   function bar() {
     const P = ports.get(active), a = $("pv-addr");
     a.replaceChildren();
-    if (P) a.append(h("span", "host", "localhost"), `:${active}/${P.path || "index.html"}`);
+    // "sandbox", not "localhost": the app runs in a sandboxed frame in this tab, and a first-timer
+    // read "localhost" as a server on their own machine (the sandbox tag is hidden on phones)
+    if (P) a.append(h("span", "host", "sandbox"), `:${active}/${P.path || "index.html"}`);
     else a.textContent = "No port served";
+    a.title = P ? "The app runs in a sandboxed frame in this tab, not on your computer's network" : "";
     $("pv-open").hidden = !P || !P.rev;
     $("pv-state").dataset.state = P?.state || "";   // green only for a running rev
     $("pv-state").textContent = P ? (P.state === "ready" ? `rev ${P.rev}` : P.state === "loading" ? "loading…" : P.state === "waiting" ? "Click to run" : P.state === "stopped" ? "stopped" : P.state === "hung" ? "hung" : "") : "";
