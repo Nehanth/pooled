@@ -5,8 +5,8 @@
 // with this, a copy on disk under the same slot number the frame header carries. A device that
 // reloads (or a host that reloads and deals the layers again) reads its copies back into GPU slots
 // before it says it is ready, so the host can load a checkpoint instead of prefilling the whole
-// conversation. Nothing new goes over the wire: saves, drops and loads are still the sv / dp / ld of
-// the frame header. A device missing a slot fails the load and the host falls back to a prefill.
+// conversation. No new message: saves, drops and loads are still the sv / dp / ld of the frame
+// header, and a device lists the slots it read back in its ai-ready, so the host forgets any it lacks.
 //
 // A copy is only valid for exactly the room, model and layer range (the engine's stateSignature(),
 // which also covers the KV format) it was made on, so the file name carries the room code and a hash
@@ -149,7 +149,7 @@ export class CkptStore {
       if (mismatch(h, { room, model, sig }) || h.slot !== p.slot) { await d.removeEntry(name).catch(() => {}); continue; }
       out.push({ slot: h.slot, pos: h.pos, meta: h.meta || {}, t: h.t || 0 });
     }
-    return out.sort((a, b) => b.t - a.t);
+    return out.sort((a, b) => b.t - a.t || b.slot - a.slot);   // (same millisecond: the higher slot is newer)
   }
   // -> { sig, pos, parts, meta } or null (missing, damaged, another format or another room/model/layers)
   get(where) { return this._run(() => this._get(where)); }

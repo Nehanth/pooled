@@ -5,7 +5,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 ## [Unreleased]
 
 ### Added
-- **Room checkpoints on disk**: every device keeps a copy of its part of the room's checkpoints in OPFS, so a device or host that reloads reads it back and the next question resumes from the last saved answer instead of prefilling the whole conversation. A device missing its copy makes the host prefill instead. No wire change; `?ckptdisk=0` turns it off.
+- **Room checkpoints on disk**: every device keeps a copy of its part of the room's checkpoints in OPFS, so a device or host that reloads reads it back and the next question resumes from the last saved answer instead of prefilling the whole conversation. A device lists the copies it read back when it says it is ready, and the host forgets any checkpoint a device lacks, so it prefills instead of asking for it. No new message; `?ckptdisk=0` turns it off.
 
 ### Changed
 - **Metal (Apple GPUs)**:

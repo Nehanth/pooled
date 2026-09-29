@@ -2,7 +2,7 @@
 // store over an in-memory stand-in for OPFS (quota errors included), and the room.js functions that
 // use it (cut out of room.js by room_src.js), host and worker: a worker that reloads reads its part
 // back and the host loads it; a host that reloads gets its checkpoint index back; a device missing
-// its copy fails the load with the error roomGenerate falls back on.
+// its copy says so in its ai-ready and the host forgets that checkpoint (ckptPrune).
 import { CKPT_FORMAT, CkptStore, CkptFormatError, encodeHeader, decodeHeader, decodeCkpt, headerLength, mismatch, parseName, safeRoom, sigHash }
   from "../../room/ckpt-store.js";
 import { roomFns } from "./room_src.js";
@@ -249,7 +249,7 @@ class FakeEngine {
   async runHidden(x, pos) { this.run([x[0]], pos); return Float32Array.of(x[0]); }
   async runHiddenBatch(xs, base) { this.run(Array.from(xs), base); return Float32Array.from(xs); }
 }
-const HOST_FNS = ["sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin"];
+const HOST_FNS = ["sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin", "ckptPrune"];
 function host({ disk = store(), engine = new FakeEngine(0, 8), chain = ["w0"], ckptMax = 2, out = [], ckptN = 0 } = {}) {
   const ai = { role: "host", model: "m", chain, pendingCtl: {}, fed: [], pos: 0, engine, ckpt: null, ckptN };
   const fns = roomFns(HOST_FNS, { ai, CKPT_MAX: ckptMax, PrefixIndex, DROP_ALL, wireStats: { lastMax: 0 }, ckptDisk: disk, roomCode: "ABC", sendHidden: (to, msg) => out.push(msg) });
@@ -285,7 +285,7 @@ Deno.test("room disk: a worker that reloads reads its part back, and the host re
 
   // the worker's tab reloads: a fresh engine, same layers, same disk
   const w2 = worker({ disk: w.disk });
-  eq(await w2.ckptRestore(), 1);
+  eq(await w2.ckptRestore(), [1]);
   eq([...w2.engine.slots.keys()], [1]);
   eq(w2.engine.st, [], "restored into a slot; the live state starts empty");
   h.ai.fed = null; h.ckptRejoin();          // what aiRejoin does
@@ -308,7 +308,7 @@ Deno.test("room disk: a host that reloads gets its checkpoint index back, and sl
   await flush(h.disk);
   const h2 = host({ disk: h.disk, ckptN: 0 });
   h2.ckptClear();
-  eq(await h2.ckptRestore(), 2);
+  eq(await h2.ckptRestore(), [1, 2]);
   eq(h2.ai.ckpt.items.map((x) => [x.key, x.ids]).sort(), [[1, [1, 2, 3]], [2, [1, 2, 3, 4, 5]]]);
   eq(h2.ai.ckptN, 2, "the next save is slot 3, never a number a device may still hold");
   eq(h2.engine.st, [], "the host's live state is reset after the restore");
@@ -324,13 +324,13 @@ Deno.test("room disk: solo, the save goes to disk at once", async () => {
   eq((await h.disk.list({ room: "ABC", model: "m", sig: h.engine.stateSignature() })).map((c) => c.meta.ids), [[1, 2]]);
 });
 
-Deno.test("room disk: a device dealt other layers finds nothing, and the load fails the way roomGenerate retries on", async () => {
+Deno.test("room disk: a device dealt other layers finds nothing, and a load would fail", async () => {
   const h = host(), w = worker();
   await answer(h, w, [1, 2, 3]);
   await lap(h, w, [4]);
   await flush(w.disk);
   const w2 = worker({ disk: w.disk, engine: new FakeEngine(8, 12) });
-  eq(await w2.ckptRestore(), 0);
+  eq(await w2.ckptRestore(), []);
   let err = null;
   try { await w2.workerFrame({ t: "ai-hidden-b", basePos: 3, n: 1, x: [9], ld: 1 }); } catch (e) { err = e; }
   ok(err && /no saved slot/.test(err.message), err?.message);
@@ -359,4 +359,44 @@ Deno.test("room disk: without disk copies a rejoin still drops everything (the G
   h.ckptRejoin();
   eq(h.ai.ckpt.items, []);
   eq(h.ai.pendingCtl.dp, [DROP_ALL]);
+});
+
+Deno.test("room disk: the host forgets the checkpoints a reloaded device did not read back", async () => {
+  const h = host({ chain: ["w0", "w1"] }), w = worker();
+  await answer(h, w, [1, 2, 3]);
+  await answer(h, w, [4, 5]);
+  await lap(h, w, [6]);                      // slots 1 and 2 are out on the chain
+  eq(h.ai.ckpt.items.map((x) => x.key), [1, 2]);
+  h.ai.pendingCtl = {};
+  // w0 read back only slot 2 (its copy of slot 1 never reached the disk); w1 reports both
+  h.ai.ckptHeld = new Map([["w0", [2]], ["w1", [1, 2]]]);
+  h.ckptPrune();
+  eq(h.ai.ckpt.items.map((x) => x.key), [2]);
+  ok(!h.engine.slots.has(1), "the host's own GPU slot goes too");
+  eq(h.ai.pendingCtl.dp, [1], "the chain drops it with the next frame");
+  eq(h.ai.ckptHeld.size, 0, "each report is used once");
+  eq(h.ckptResume([1, 2, 3, 4, 5, 9], 0), 5, "the resume only asks for a slot every device holds");
+  // a device from an older build lists nothing: nothing it could be asked to load is kept
+  h.ai.ckptHeld = new Map([["w1", undefined]]);
+  h.ckptPrune();
+  eq(h.ai.ckpt.items, []);
+  // a report from a device that is no longer in the chain is ignored
+  h.ai.ckpt.add([7], 9); h.ai.ckptHeld = new Map([["gone", []]]);
+  h.ckptPrune();
+  eq(h.ai.ckpt.items.map((x) => x.key), [9]);
+});
+
+Deno.test("room disk: a host that reloads keeps the age order, so the next save evicts the oldest", async () => {
+  const h = host(), w = worker();
+  await answer(h, w, [1]);
+  await answer(h, w, [2]);
+  await answer(h, w, [3]);                   // slot 1 evicted; slot 2 out
+  await lap(h, w, [4]);                      // slot 3 out
+  await flush(h.disk);
+  const h2 = host({ disk: h.disk });
+  h2.ckptClear();
+  eq(await h2.ckptRestore(), [2, 3], "oldest first");
+  h2.engine.st = [1, 2, 3, 4, 5]; h2.ai.fed = [1, 2, 3, 4, 5];
+  h2.ckptSave();
+  eq(h2.ai.ckpt.items.map((x) => x.key).sort(), [3, 4], "slot 2, the oldest, made room");
 });

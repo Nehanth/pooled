@@ -72,7 +72,7 @@ a re-deal or a failed answer clears them. Order on a device: rollback, save, dro
 from a checkpoint and repeats the greedy answer. `?ckpt=0` turns it off.
 
 Each device also keeps a copy of its part on disk (OPFS, `room/ckpt-store.js`), so a reload does not
-lose it. Nothing new goes over the wire: a device writes its copy when it applies `sv` and removes
+lose it. No new message: a device writes its copy when it applies `sv` and removes
 it on `dp`. The host writes its own copy only once the `sv` has gone out on a frame, with the
 checkpoint's token ids in the header, so it never indexes a slot the chain did not save. A copy is
 named by room code, slot and a hash of the model and the engine's `stateSignature()` (layers, KV
@@ -88,8 +88,12 @@ the slot missing, never stale.
   counter), reads its copies and their token ids back, and every device reads its own when the
   layers are dealt again. Slot numbers go on from the saved counter, so an old copy on a device is
   never taken for a new one.
-- A device missing the slot the host loads fails that frame ("no saved slot"); the host then drops
-  every checkpoint and prefills the whole conversation instead, once, before any token is shown.
+- A device that loads its layers lists the slots it read back in its `ai-ready`, and the host
+  forgets every checkpoint that device lacks (its copy never reached the disk, or the disk was
+  full), so it never asks the chain to load a slot a device does not hold; the next question then
+  resumes from an older checkpoint or prefills.
+- When a device of the chain leaves, the host keeps its checkpoints (the other devices still hold
+  them); a re-deal clears them and every device reads its copies back.
 - `?ckptdisk=0` keeps checkpoints on the GPU only.
 
 ### Several sessions on one engine
