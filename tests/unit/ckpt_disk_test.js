@@ -226,6 +226,29 @@ Deno.test("CkptStore: a state bigger than the budget is not written; the budget 
   eq((await s.list(W(0))).map((c) => c.slot), [3, 2]);
 });
 
+Deno.test("CkptStore: a temp file left by a reload mid-write is removed once stale, and counts against the budget while fresh", async () => {
+  // the directory's clock is the store's clock here: a file written at t is (now - t) old
+  const dir = new MemDir();
+  let now = 0;
+  const s = new CkptStore({ root: async () => dir, budgetBytes: 1200, tmpStaleMs: 50, now: () => now }); s.mem = dir;
+  ok(await s.put(W(1), st({ lo: 0, hi: 8 }, 1, 400)));
+  // another tab reloaded while writing slot 2: its <name>.ckpt.tmp stays behind
+  const real = [...dir.files.keys()][0], stray = real.replace(/\.1\.ckpt$/, ".2.ckpt.tmp");
+  dir.files.set(stray, { bytes: new Uint8Array(600), t: ++dir.clock });
+  now = dir.clock;
+  eq((await s.list(W(0))).map((c) => c.slot), [1], "a temp file is never listed as a copy");
+  ok(dir.files.has(stray), "fresh: another tab may still be writing it");
+  // fresh, it counts against the budget: the next write makes room by dropping the oldest (the temp too)
+  ok(await s.put(W(3), st({ lo: 0, hi: 8 }, 3, 400)));
+  ok(dir.used() <= 1200, `the directory holds ${dir.used()} bytes, over the 1200 budget`);
+  // a stale one is removed by the next listing
+  dir.files.set(stray, { bytes: new Uint8Array(600), t: ++dir.clock });
+  now = dir.clock + 51;
+  eq((await s.list(W(0))).map((c) => c.slot), [3]);
+  ok(!dir.files.has(stray), "the stale temp file is gone");
+  ok([...dir.files.keys()].every((n) => n.endsWith(".ckpt")), [...dir.files.keys()].join());
+});
+
 // ---------------------------------------------------------------------------------------------
 // room.js: host and worker with disk copies
 
@@ -384,6 +407,34 @@ Deno.test("room disk: the host forgets the checkpoints a reloaded device did not
   h.ai.ckpt.add([7], 9); h.ai.ckptHeld = new Map([["gone", []]]);
   h.ckptPrune();
   eq(h.ai.ckpt.items.map((x) => x.key), [9]);
+});
+
+Deno.test("room disk: slots a reloaded worker read back that the host does not index are dropped from its GPU and disk", async () => {
+  const h = host(), w = worker();
+  await answer(h, w, [1]);
+  await answer(h, w, [2]);
+  await answer(h, w, [3]);                   // slot 1 evicted everywhere; slot 2 out
+  await lap(h, w, [4]);                      // slot 3 out
+  // a copy the host no longer has (lost with its own reload): the worker still has it on disk
+  w.engine.st = [1, 2, 3, 4]; w.engine.saveSlot(7); w.ckptPersist(7);
+  await flush(w.disk);
+  const w2 = worker({ disk: w.disk });
+  const slots = await w2.ckptRestore();
+  eq(slots.slice().sort(), [2, 3, 7], "a worker reads back up to CKPT_MAX + 1");
+  eq([...w2.engine.slots.keys()].sort(), [2, 3, 7]);
+  h.ai.pendingCtl = {}; h.ai.fed = []; h.engine.st = [];
+  h.ai.ckptHeld = new Map([["w0", slots]]);
+  h.ckptPrune();
+  eq(h.ai.ckpt.items.map((x) => x.key).sort(), [2, 3], "the host's index is untouched");
+  eq(h.ai.pendingCtl.dp, [7], "the orphan goes with the next frame");
+  ok(h.ai.ckptN >= 7, "new slot numbers go past it");
+  await lap(h, w2, [9]);
+  await flush(w2.disk);
+  eq([...w2.engine.slots.keys()].sort(), [2, 3], "no orphaned GPU slot on the worker");
+  eq((await w2.disk.list({ room: "ABC", model: "m", sig: w2.engine.stateSignature() })).map((c) => c.slot).sort(), [2, 3]);
+  h.ai.fed = [9]; h.engine.st = [9];
+  h.ckptSave();
+  ok(h.ai.pendingCtl.sv > 7, `the next save is slot ${h.ai.pendingCtl.sv}, not one being dropped`);
 });
 
 Deno.test("room disk: a host that reloads keeps the age order, so the next save evicts the oldest", async () => {

@@ -2049,14 +2049,21 @@ async function ckptRestore() {
 // for a slot it lacks. Runs once the host's own restore is done (aiMaybeReady).
 function ckptPrune() {
   if (!ai.ckptHeld?.size) return;
-  const drop = [];
-  for (const [id, slots] of ai.ckptHeld) {
-    if (!ai.chain.includes(id)) continue;
+  const drop = [], reports = [...ai.ckptHeld].filter(([id]) => ai.chain.includes(id));
+  for (const [, slots] of reports) {
     const held = new Set(Array.isArray(slots) ? slots : []);
     for (const x of ai.ckpt?.items.slice() || []) if (!held.has(x.key)) {
       ai.ckpt.remove(x.key); try { ai.engine?.dropSlot?.(x.key); } catch {}
       drop.push(x.key);
     }
+  }
+  // a device reads back more than the host indexes (a worker keeps CKPT_MAX + 1, and copies the host
+  // lost): a slot it holds that the index does not name would sit on its GPU for good, so the chain
+  // drops it too. Slot numbers go on past it, so no new save can land on a number still being dropped.
+  const kept = new Set((ai.ckpt?.items || []).map((x) => x.key));
+  for (const [, slots] of reports) for (const k of Array.isArray(slots) ? slots : []) {
+    if (!Number.isInteger(k) || kept.has(k) || drop.includes(k)) continue;
+    drop.push(k); ai.ckptN = Math.max(ai.ckptN || 0, k);
   }
   ai.ckptHeld.clear();
   if (!drop.length) return;

@@ -14,7 +14,9 @@
 // another format version, reads as missing and is removed.
 //
 // File: [u32 magic][u32 header length][header JSON][part 0][part 1]... Written to a temp name and
-// renamed, so a crash never leaves a half file under a real name. The old copy of a slot is removed
+// renamed, so a crash never leaves a half file under a real name. A temp file left by a tab that
+// reloaded mid-write counts against the budget while it is fresh (another tab of this origin may
+// still be writing it) and is removed once it is older than tmpStaleMs. The old copy of a slot is removed
 // before a new one is written, so a failed write leaves the slot missing (a prefill), never stale.
 
 export const CKPT_FORMAT = 1;
@@ -80,8 +82,10 @@ const isQuota = (e) => e?.name === "QuotaExceededError" || /quota/i.test(e?.mess
 
 export class CkptStore {
   // root: () => the OPFS root directory handle (tests pass an in-memory one)
-  constructor({ dirName = "pooled-ckpt", budgetBytes = 4 * 2 ** 30, root = () => navigator.storage.getDirectory() } = {}) {
+  // tmpStaleMs: a <name>.ckpt.tmp this old is a write that never finished (the tab reloaded); now: the clock
+  constructor({ dirName = "pooled-ckpt", budgetBytes = 4 * 2 ** 30, root = () => navigator.storage.getDirectory(), tmpStaleMs = 10 * 60e3, now = () => Date.now() } = {}) {
     this.dirName = dirName; this.budget = budgetBytes; this.root = root; this.dir = null;
+    this.tmpStaleMs = tmpStaleMs; this.now = now;
     this.q = Promise.resolve();
     this.failures = 0;   // writes given up on (quota, or the state was gone before it was read)
   }
@@ -139,8 +143,8 @@ export class CkptStore {
   list(where) { return this._run(() => this._list(where)); }
   async _list({ room, model, sig }) {
     const d = await this._d(), hash = await sigHash(model, sig), out = [];
-    for (const { name, file, p } of await this._files(d)) {
-      if (p.room !== safeRoom(room) || p.hash !== hash) continue;
+    for (const { name, file, p, tmp } of await this._files(d)) {
+      if (tmp || p.room !== safeRoom(room) || p.hash !== hash) continue;
       let h;
       try {
         const n = headerLength(await readSlice(file, 0, 8));
@@ -167,18 +171,25 @@ export class CkptStore {
   // drop slots of a room (any layers); slots: a number, a list, or "all"
   drop(room, slots) { return this._run(async () => {
     const d = await this._d();
-    if (slots === "all") { for (const f of await this._files(d)) if (f.p.room === safeRoom(room)) await d.removeEntry(f.name).catch(() => {}); return; }
+    if (slots === "all") { for (const f of await this._files(d)) if (!f.tmp && f.p.room === safeRoom(room)) await d.removeEntry(f.name).catch(() => {}); return; }
     for (const s of [].concat(slots)) await this._dropSlot(d, room, s);
   }); }
   async _dropSlot(d, room, slot) {
-    for (const f of await this._files(d)) if (f.p.room === safeRoom(room) && f.p.slot === slot) await d.removeEntry(f.name).catch(() => {});
+    for (const f of await this._files(d)) if (!f.tmp && f.p.room === safeRoom(room) && f.p.slot === slot) await d.removeEntry(f.name).catch(() => {});
   }
+  // every copy in the directory, with the temp files of writes in progress (tmp: true; the budget
+  // counts them and _evict may drop them). A temp file older than tmpStaleMs is a write that never
+  // finished (the tab reloaded or closed mid-write): removed here.
   async _files(d) {
     const out = [];
     for await (const [name, h] of d.entries()) {
-      const p = parseName(name);
+      const tmp = name.endsWith(EXT + ".tmp");
+      const p = parseName(tmp ? name.slice(0, -4) : name);
       if (!p || h.kind === "directory") continue;
-      try { const file = await h.getFile(); out.push({ name, file, p, bytes: file.size, t: file.lastModified }); } catch {}
+      let file;
+      try { file = await h.getFile(); } catch { continue; }
+      if (tmp && this.now() - file.lastModified > this.tmpStaleMs) { await d.removeEntry(name).catch(() => {}); continue; }
+      out.push({ name, file, p, tmp, bytes: file.size, t: file.lastModified });
     }
     return out;
   }
