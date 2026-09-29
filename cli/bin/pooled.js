@@ -83,6 +83,8 @@ catch (e) {
 try { await bridge.connect(); }
 catch (e) { console.error(`pooled: ${e.message}`); api.server.close(); process.exit(1); }
 
+// the host's ai-ready-all follows its hello: give it a moment, so the banner can name the model
+if (!bridge.ready) await new Promise((r) => { const t = setTimeout(r, 1500); bridge.once("state", () => { if (bridge.ready) { clearTimeout(t); r(); } }); });
 const label = () => (bridge.ready ? `${bridge.modelLabel || bridge.model}` : "model not ready yet");
 const print = (s) => { if (!o.quiet) console.log(s); };
 print(`pooled serve · room ${code} · ${label()}
