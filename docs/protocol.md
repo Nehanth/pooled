@@ -1,6 +1,6 @@
 # Room protocol
 
-Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction only). The host registers with PeerJS as `pooled-room-<CODE>`; before the rename to Pooled the prefix was `swarmllm-room-`, so a pooled.run tab and an old swarmllm.ai tab never meet in one room. One browser is the **host**: it owns the conversation, the tokenizer, the embedding table, the LM head and the sampler. The others are **workers** holding contiguous layer ranges; together they form a **chain** in layer order, with the last worker sending back to the host.
+Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction only). The host registers with PeerJS as `pooled-room-<CODE>`; before the rename to Pooled the prefix was `swarmllm-room-`, so a pooled.run tab and an old swarmllm.ai tab never meet in one room. One browser is the **host**: it owns the conversation, the tokenizer, the embedding table, the LM head and the sampler. The others are **workers** holding contiguous layer ranges; together they form a **chain** in layer order, with the last worker sending back to the host. By memory, phones hold no layers at all while the host and the other computers can hold the model (`phonesToLeaveOut`; `?phonelayers=1` overrides): they join as ask-only guests.
 
 ## Lifecycle
 
@@ -46,6 +46,7 @@ Hidden states travel as binary frames: an f16-packed `Uint16Array` (10 KB for `d
 ## Ordering guarantees
 
 - Data channels are ordered and reliable. Frames are sliced (≤ 4.6 KB) and striped across several associations, so consecutive frames can complete out of order at the receiver; the transport hands them over strictly in send order (a gap with no progress for 5 s is skipped, and a frame arriving after its gap was skipped is dropped rather than run out of order). A worker runs frames one at a time from a queue in that order, so recurrent states advance deterministically.
+- Keep-alive: while a wire link has carried a frame in the last 1.5 s, each end sends a 1-byte message on a second negotiated channel (id 78, `swarm-ka`, unordered, never retransmitted) whenever it has sent nothing on that link for 10 ms (`?ka=ms`, `?ka=0` off). It keeps a phone's Wi-Fi out of power save between laps. Receivers ignore it; a peer without the channel drops it, so it is not a protocol change.
 - Because of that, the host keeps up to 6 prefill rounds in flight: round r+1 runs on the host while round r is on a worker, and the chain works as a pipeline. Output is unchanged: every device sees the same frames in the same order.
 - The prefill rounds come back as full hidden states, which the host feeds to the draft block (`mtpRun`) so the first speculative steps after a prompt draft from a warm cache.
 - Inside a batched frame, columns are processed strictly in order; snapshot slots are indexed by global column (`frame.snap` packs base and total), so an 8-column verify split into two 4-column chunks on an older worker still rolls back correctly.
@@ -83,8 +84,31 @@ The host's coding agent and its previews (docs/design/harness-app.md, room/code.
 | `ai-pv-want {port, rev, hs}` | peer → host | the blobs a peer does not hold yet; the host answers only hashes in that port's current manifest |
 | `ai-pv-blob {h, i, n, b}` | host → peer | chunk `i` of `n` (64 KB, `b` an ArrayBuffer) of blob `h`; the host waits while the data channel has over 1 MB buffered. The peer verifies the hash before using it |
 | `ai-pv-stop {port}` | host → all | the port is no longer served |
+| `ai-code-share {mid, port, rev, name, by}` | host → all | "Share with the room": a card in every timeline with Download (the app as one `.html` file, built by each device from its own hash-checked copy of that port's rev and sandboxed like a preview, harness/app-export.js) and Open full screen (the device's own preview frame). Kept in the history for late joiners |
+| `ai-code-share-ask {port}` | member → host | a member who can drive asks the host to share a served port; the host sends `ai-code-share` naming them |
 
 A code run holds the room's generation lock for all its steps, so chat questions asked meanwhile queue and run after it. None of this changes the frame format, so the protocol version stays 4: an older peer ignores these messages.
+
+## API clients
+
+`pooled serve` (the `cli/` package, docs/design/serve.md) joins a room as one more ask-only guest with no layers and turns HTTP requests from OpenAI / Anthropic clients into room messages. An API request is stateless and separate from the room's chat: the bridge sends the whole conversation every time, the host renders it with the chat's own template (`buildIds`) and runs `roomGenerate` on the ids, as Code mode does. `ai.conv` is never read or written. The host keeps the sampled ids of its last 8 API answers (`room/api.js`, host memory only) and uses them when a client resends an answer byte for byte, so a follow-up prefills only the new turn.
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `hello {…, meta: {…, api: 1}}` | host → guest | this host answers API asks. The bridge refuses to serve without it (an older host) |
+| `hello {name, v, meta: {api: 1, client, webgpu: false, ua: "API"}}` | bridge → host | an API client: never dealt layers (`webgpu: false`), shown with its own card, not counted as a device. With "Allow API clients" off, or after the host disconnected it this session, the answer is `bye {reason}` |
+| `ai-ask {api: 1, rid, system, messages: [{role, text}], params: {maxTokens, temperature?, topK?, stop?, thinking?, thinkBudget?, client}}` | bridge → host | one request. `rid` ≤ 32 chars (`[A-Za-z0-9_-]`), ≤ 200 messages, ≤ 400k chars, the last message the user's, `stop` ≤ 4 × 64 chars. With `thinkBudget`, once the reasoning used that many tokens the host closes the think block and continues from the same ids, so the rest of `maxTokens` goes to the answer. It joins the room's one queue (10, two per device). No `text` field: an older host drops it on its empty-question check |
+| `ai-queued {pos, rid}` | host → bridge | waiting at position `pos` |
+| `ai-busy {rid, code, why, n?, max?}` | host → bridge | refused: `queue` (full), `ctx` (the prompt is `n` tokens, over `max` = context − 32; never trimmed), `bad` (validation), `off` (API clients disabled), `degraded`, `loading`, `gone` (removed from the queue by its `ai-stop`) |
+| `ai-genstart {rid, api: 1, client, promptTokens, model}` | host → bridge | the answer starts. The other screens get the usual `ai-genstart` (name "*name* · *client* (API)", the last user message ≤ 2000 chars, `api: 1`) under `ai-visibility`; under `asker` only the host's screen shows it |
+| `ai-token {rid, text, d, th?}` | host → bridge | answer text, stop strings already applied (a tail that may start a stop string is held back). `th: 1` marks think-block text (the tags are not sent). The asking bridge always gets every token, whatever the visibility |
+| `ai-gendone {rid, api: 1, reason, stopSeq?, usage: {in, out}, reused, stats, failed, err?}` | host → bridge | `reason`: `stop` (end token), `stop_seq`, `max`, `ctx` (context full), `abort` (the host pressed Stop), `error` (with `err`). `reused`: prompt tokens the room's caches already held |
+| `ai-stop {rid}` | bridge → host | stop this request: honoured while it runs (after the lap in flight) or while it waits in the host's queue (answered `ai-busy {rid, code: "gone"}`). Sent when the HTTP client disconnects |
+| `ai-ready-all {model, label}` | host → all | as before, plus the model's display label (the bridge's `/v1/models`) |
+
+The bridge answers every `ping` with `pong`. The host drops an API client that missed 6 pings in a row (about 15 s): a bridge that was killed never sends `leaving`, and its data channel can take over a minute to close while its answer holds the room.
+
+API exchanges show in the chat with "via API · not part of this chat's memory", are not saved with the room (`saveHost`), and hide Continue / Regenerate (their history is the client's). Old peers ignore the new fields on known messages and never see `ai-ask {api}`, which is why this is not a protocol change: `PROTOCOL` stays 4.
 
 ## Versioning
 

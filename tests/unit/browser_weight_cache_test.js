@@ -1,4 +1,4 @@
-// Browser converted-weights cache (room/weightcache.js, issue #77): cache keys, invalidation on a
+// Browser converted-weights cache (room/convertedcache.js, issue #77): cache keys, invalidation on a
 // revision / header / converter change, the entry format, quota handling, and a second load through
 // engine/gguf.js ggufEntry that skips the conversion. OPFS is an in-memory fake here.
 //   deno test --allow-read --no-check tests/unit/browser_weight_cache_test.js
@@ -8,7 +8,8 @@ import { LOADER_VERSION } from "../weight_cache.js";
 import {
   WCACHE_DIR, HDR, revisionOf, modelOf, headerFingerprint, cacheDirName, converterVersion, worthCaching, quotaAllows,
   encodeEntry, decodeEntry, entryFile, BrowserWeightCache, convertedBytes, clearConverted, attachBrowserWeightCache,
-} from "../../room/weightcache.js";
+  convertedByModel, deleteConverted,
+} from "../../room/convertedcache.js";
 
 // ---- a small in-memory OPFS: directories, files, writables, move ----
 const notFound = (n) => Object.assign(new Error(`${n} not found`), { name: "NotFoundError" });
@@ -314,4 +315,27 @@ Deno.test("writes run in the background, at most a window of bytes at a time", a
     assertEquals([c.pending.size, c.pendingBytes, c.stats.write], [0, 0, 2]);
     assertEquals(await c.get(bf) !== null, true);
   } finally { FakeFile.prototype.createWritable = orig; }
+});
+
+Deno.test("per model: sizes and deleting one model's converted weights (room menu Delete) leaves the others", async () => {
+  const root = new FakeDir();
+  const m = makeModel();
+  const info = m.G.tensors["token_embd.weight"];
+  const OTHER = "https://huggingface.co/org/other/resolve/main/Other-Q4_0.gguf";
+  for (const url of [URL_PIN, OTHER]) {
+    const c = await open(root, m.G, { url });
+    await ggufEntry({ ...m.G, entryCache: c }, m.bytesOf, info.name, false);
+    await c.flush();
+  }
+  const one = HDR + info.nElems * 4;
+  const by = await convertedByModel(root);
+  assertEquals(by.get(modelOf(URL_PIN)), one);
+  assertEquals(by.get(modelOf(OTHER)), one);
+  // the room lists the model under its catalogue URL (resolve/main): any revision of it matches
+  assertEquals(await deleteConverted(root, URL_MAIN), one);
+  const after = await convertedByModel(root);
+  assert(!after.has(modelOf(URL_PIN)));
+  assertEquals(after.get(modelOf(OTHER)), one);
+  assertEquals(await convertedBytes(root), one);
+  assertEquals(await deleteConverted(new FakeDir(), OTHER), 0);   // nothing cached yet
 });

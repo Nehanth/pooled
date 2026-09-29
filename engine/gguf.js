@@ -201,7 +201,7 @@ export async function ggufEntry(G, bytesOf, name, optional, onBytes = () => {}) 
   }
   // stacked MoE experts [nExp][dOut][dIn] are an ordinary matrix of nExp * dOut rows
   const info = info0.shape.length === 3 ? { ...info0, shape: [info0.shape[0] * info0.shape[1], info0.shape[2]] } : info0;
-  // converted-weights cache (tests/weight_cache.js, Deno/Node only): a hit returns the exact
+  // converted-weights cache (tests/weight_cache.js in Deno/Node, room/convertedcache.js in the browser): a hit returns the exact
   // bytes the conversion below would produce, without reading or converting the tensor
   if (G.entryCache) {
     const hit = await G.entryCache.get(info);
@@ -437,6 +437,8 @@ export function tokenizerFromGGUF(meta) {
       vocab: Object.fromEntries(tokens.map((t, i) => [t, i])),
       merges,
     },
+    // which pre-tokenizer split the model uses (qwen2, qwen35, ...); see preSplitter in tokenizer.js
+    pre: meta["tokenizer.ggml.pre"],
   };
   return tj; // caller passes through makeTokenizer-compatible builder
 }
