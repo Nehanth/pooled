@@ -1554,6 +1554,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       draftChain: new URLSearchParams(location.search).get("draftchain") !== "0",
       // ?specfuse=0: speculative verify as separate trunk / head submits (A/B; same output bits)
       specFuse: new URLSearchParams(location.search).get("specfuse") !== "0",
+      hostFuse: HOST_FUSE,
       // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched
       // attention) for A/B timing; both give the same bits, so devices may differ
       ...(new URLSearchParams(location.search).get("fuse") === "0" ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
@@ -1935,6 +1936,8 @@ const DRAFT_VOCAB = (() => { const v = new URLSearchParams(location.search).get(
 const MTP_BATCH = new URLSearchParams(location.search).get("mtpbatch") !== "0";   // ?mtpbatch=0: one draft-cache row per submit, for A/B
 const GPU_SAMPLE = new URLSearchParams(location.search).get("gpusample") !== "0";   // on by default; see the engine options in aiLoadShard
 const ARGMAX_WIDE = (new URLSearchParams(location.search).get("argmaxwide") ?? (GPU_SAMPLE ? "1" : "0")) === "1";
+// the host's share of each lap in one submit (engine hostFuse); ?hostfuse=0 for A/B, same output
+const HOST_FUSE = new URLSearchParams(location.search).get("hostfuse") !== "0";
 function fillDrafts(h, ids, i0, basePos, n) {
   if (!FILL_DRAFTS || !ai.engine?.mtp) return;
   const dim = ai.engine.dims.dim, E = ai.engine;
@@ -1956,7 +1959,11 @@ function fillDrafts(h, ids, i0, basePos, n) {
 // fillNext: the prompt token after this one, to fill the draft cache with this position's hidden.
 // desc: GPU sampling descriptor (engine.gpuDescFor(sample)): returns the sampler's candidates
 // { ids, vals, bad } instead of the logits (the sampler reads either).
-async function aiPipeToken(id, needLogits = true, fillNext, desc = null) {
+// ahead (plain decoding in a chain, see roomGenerate): { h, t0, defer, onSent }. h: the host's
+// layers for id already ran (engine.headAhead, started at t0), so the lap starts with the send;
+// onSent: runs while the other devices work; defer: returns null without running the head (the
+// next headAhead runs it in the same submit as the next token's layers).
+async function aiPipeToken(id, needLogits = true, fillNext, desc = null, ahead = null) {
   const pos = ai.pos;
   if (!ai.chain.length && !needLogits) {
     // solo prefill: layers only, no head, no readback; sync every 8 tokens
@@ -1966,13 +1973,14 @@ async function aiPipeToken(id, needLogits = true, fillNext, desc = null) {
     ai.pos++; ai.fed?.push(id);
     return null;
   }
-  const tHost = performance.now();
-  let h = await ai.engine.embedRun(id, pos);
+  const tHost = ahead?.t0 ?? performance.now();
+  let h = ahead?.h || await ai.engine.embedRun(id, pos);
   if (badF32(h)) throw new Error(`NaN after HOST layers (pos ${pos}) — host GPU kernel issue`);
   if (ai.chain.length) {
     const hostMs = performance.now() - tHost;
     const returned = lapWait(pos, 30000, "token");
     sendChain({ t: "ai-hidden", pos, ...packWire(h) });
+    ahead?.onSent?.();
     h = await returned;
     if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos}) — check peer status lines`);
     noteLap(performance.now() - tHost, hostMs);
@@ -1980,7 +1988,7 @@ async function aiPipeToken(id, needLogits = true, fillNext, desc = null) {
     if (!needLogits && fillNext !== undefined) fillDrafts(h, [id, fillNext], 0, pos, 1);
   } // solo mode: engine holds every layer, embedRun already produced the final hidden
   ai.pos++; ai.fed?.push(id);
-  if (!needLogits) return null;   // prefill: skip the head entirely
+  if (!needLogits || ahead?.defer) return null;   // prefill: skip the head entirely
   if (desc) {
     const c = await ai.engine.headFromHiddenIds(h, desc);
     if (c.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
@@ -2384,11 +2392,12 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
       // speculative decoding: the model's own draft head proposes up to K tokens,
       // one batched trunk pass verifies them (byte-identical to plain decoding)
       const spec = ai.chain.length ? {
-        runTrunk: async (tokens, pos) => {
-          const tLap = performance.now();
+        // pre: { hs, t0 } when the engine already ran the host's layers with the drafts (hostFuse)
+        runTrunk: async (tokens, pos, pre = null) => {
+          const tLap = pre?.t0 ?? performance.now();
           const n = tokens.length, hdim = ai.engine.dims.dim, NC = ai.engine.NC || 4;
-          const hb = new Float32Array(n * hdim);
-          for (let c = 0; c < n; c += NC) {
+          const hb = pre?.hs || new Float32Array(n * hdim);
+          if (!pre) for (let c = 0; c < n; c += NC) {
             const m = Math.min(NC, n - c);
             hb.set(await ai.engine.embedRunBatch(tokens.slice(c, c + m), pos + c, { base: c, total: n }), c * hdim);
           }
@@ -2403,6 +2412,7 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
         },
         // the rollback rides on the next frame (sendChain), strictly before it on every device
         onReject: async (k) => { ai.pendingCtl = { rb: k }; },
+        preTrunk: true,
       } : {};
       if (ai.chain.length && ai.lastHidden && first == null) ai.engine.setHidden(ai.lastHidden);
       ai.engine.pos = ai.pos;
@@ -2476,17 +2486,45 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
     } else {
       // plain decoding. An end token is not piped through the chain: the next turn's template
       // writes <|im_end|> itself, so both paths leave the caches holding exactly prompt + answer
-      for (let i = 0; i < maxNew && !aborted(); i++) {
-        const next = i === 0 && first != null ? first : sample(logits);
-        if (eos(next)) break;
-        emit(next, false);
-        if (ai.pos >= ctxMax() - 1) { capped = true; break; }   // no position left for another token
-        logits = await aiPipeToken(next, true, undefined, desc);
-        if (ai.chain.length) pushMap(count / ((performance.now() - t0) / 1000), null, true);
-      }
+      // ahead (greedy GPU sampling in a chain, HOST_FUSE): from the second lap on, the head of the
+      // hidden the chain returned and the host's layers on its pick are one submit (engine
+      // headAhead), the hidden goes out before the token is shown, and a pick that is not piped (a
+      // stop token, the cap, an abort) has its layers undone (dropAhead)
+      const ahead = HOST_FUSE && ai.chain.length > 0 && desc?.kind === "greedy" && !!ai.engine.canHeadAhead?.();
+      let deferred = false;   // ahead: the head of ai.lastHidden has not run yet
+      try {
+        for (let i = 0; i < maxNew && !aborted(); i++) {
+          let next, pre = null;
+          const tLap = performance.now();
+          if (i === 0 && first != null) next = first;
+          else if (!deferred) next = sample(logits);
+          else {
+            const r = await ai.engine.headAhead(ai.lastHidden, ai.pos, desc);
+            if (r.cands.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
+            logits = r.cands; deferred = false;
+            next = sample(r.cands);
+            if (r.h && next === r.cands.ids[0]) pre = r.h;
+          }
+          if (eos(next)) break;
+          if (ai.pos >= ctxMax() - 1) { emit(next, false); capped = true; break; }   // no position left for another token
+          if (ahead) {
+            if (pre) ai.engine.keepAhead(); else ai.engine.dropAhead();
+            logits = null; deferred = true;
+            await aiPipeToken(next, true, undefined, desc, { h: pre, t0: tLap, defer: true, onSent: () => emit(next, false) });
+          } else {
+            emit(next, false);
+            logits = await aiPipeToken(next, true, undefined, desc);
+          }
+          if (ai.chain.length) pushMap(count / ((performance.now() - t0) / 1000), null, true);
+        }
+      } finally { if (ahead) ai.engine.dropAhead(); }   // a pick that was not piped: its layers undone
       if (count >= maxNew) {
         capped = true;
         // for Continue: the chosen id (sample reads logits or GPU candidates alike)
+        if (deferred && !aborted() && ai.pos < ctxMax() - 1) {
+          logits = await ai.engine.headFromHiddenIds(ai.lastHidden, desc);
+          if (logits.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
+        }
         if (logits && !aborted() && ai.pos < ctxMax() - 1) ai.pending = { next: sample(logits), at: ai.pos };
       }
     }

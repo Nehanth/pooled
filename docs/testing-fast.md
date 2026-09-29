@@ -151,6 +151,9 @@ tests/e2e/xroom_pair.sh --out /tmp/xr-moe -- --model qwen3.6-35b-moe --gb 13 --p
 cat /tmp/xr-moe/report.txt
 # the same with the host on the other machine
 tests/e2e/xroom_pair.sh --here guest --out /tmp/xr-moe-r -- --model qwen3.6-35b-moe --gb 13 --prompts japan,twosum --rounds 3 --trace-rounds 2,5,8,11
+# pin the cooperative GEMV shape on both ends (the load-time autotune can pick differently per run, and
+# the shape can change a plain answer's bits; see bench-log 2026-09-28, hostFuse); A/B a room option
+tests/e2e/xroom_pair.sh --guest-tune 64,4 --out /tmp/xr-pin -- --model qwen3.6-35b-moe --gb 13 --tune 64,4 --query hostfuse=0
 # wire lab: B on the other machine first, then A here
 node tests/e2e/xwire_lab.mjs --role b --signal <this machine>:9000     # on the other machine
 node tests/e2e/xwire_lab.mjs --role a --out /tmp/xwire.json

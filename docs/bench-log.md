@@ -873,3 +873,70 @@ Not measured in this round: the Mac as host (GB10 as guest) and the 27B across t
 GPU lock was held by other jobs for most of the window (one wait lasted 90 minutes), and then the shared SSH
 connection to the Mac expired. The harness supports both (`xroom_pair.sh --here guest`, `--model
 qwen3.8-27b`); the 27B two-tab loopback room on the GB10 gives plain 9.2, spec 18.3 tok/s (63%) on twosum.
+
+## 2026-09-28: the room host's share of a lap in one submit (branch perf/room-host-one-submit, `hostFuse`)
+
+Change: a chain host used to run its share of each lap as separate GPU round trips (submit, map, read back).
+Plain greedy decoding took 3 submits and 2 maps per token; a speculative step took 7 and 5. Now:
+- **Plain** (greedy, GPU sampling, in a chain): the head of the hidden the chain returned, the GPU gather of
+  its pick and the host's layers on it run as one command buffer with one readback (`engine.headAhead`).
+  The hidden goes out before the token is shown. The recurrent state is saved in the same buffer and put
+  back (`dropAhead`) when the pick is not piped (a stop token, the cap, an abort).
+- **Speculative, draft chain on**: the draft chain, the drafts' embeddings gathered into the verify columns
+  and the host's layers run in one submit (`_hostTrunkFused`).
+- Same kernels, same inputs, same order, so the same bits. `?hostfuse=0` restores the old path for A/B.
+
+The prose prompt (`japan`) does not take the speculative fused path. The reduced-vocabulary draft head
+misses more than 5% there, so `draftVocabAuto` turns the draft chain off, and those steps run the
+unchanged per-token drafting on both sides of the A/B. Its spec numbers below are the same code twice
+(noise). Solo never reaches either path (both need a chain).
+
+MoE, GB10 host (20 layers + embed/head) + M5 Max guest (20 layers), LAN Wi-Fi (IPv6 host candidates),
+exact sampling, 128 tokens. `tests/e2e/xroom_pair.sh -- --model qwen3.6-35b-moe --gb 13 --prompts
+japan,twosum --rounds 2|3 [--query hostfuse=0]`, sessions alternated off/on. Untraced rounds, tok/s median
+(n = rounds):
+
+| | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| off, 4 sessions (n=8) | 28.1 | 28.6 | 34.1 (41%) | 51.7 (67%) |
+| **on**, 4 sessions (n=8) | **29.9 (+6.8%)** | **31.9 (+11%)** | 34.1 (same path) | **54.0 (+4.5%)** |
+| off, GEMV shape 64/4 pinned on both ends (`--tune 64,4`, `--guest-tune 64,4`; n=2) | 27.0 | 30.4 | 35.7 | 50.5 |
+| **on**, same pin (n=4) | **30.9** | **32.6** | 34.6 (same path) | **54.0** |
+| off, `--fixk 3` (n=4) | | | 36.6 (49%) | 58.2 (80%) |
+| **on**, `--fixk 3` (n=4) | | | 38.0 (same path) | 58.8 (+1%, noise) |
+
+The spread inside a cell is 5-10 tok/s and follows ping spikes on the Wi-Fi (off: plain twosum 23.2-33.1;
+on: 24.0-35.6). The traced rounds are the cleaner comparison. Medians over the laps, GB10 clock,
+`xroom_report.mjs`:
+
+| traced round | off (2 sessions) | on (2 sessions) |
+|---|---|---|
+| plain japan, one token | 33.3 / 34.2 ms: layers 11.8 + head 4.2, 3 submits, 2 maps | **31.5 / 31.9 ms**: head + layers 15.2, 1 submit, 1 map |
+| plain twosum, one token | 31.2 / 32.4 ms | **28.5 / 28.5 ms** |
+| plain, send -> hidden back | 15.1-16.0 ms | 15.0-16.2 ms (unchanged: the Mac and the wire) |
+| spec twosum, drafting + host layers | 24.0 / 22.9 ms (2 submits, 2 maps) | **21.2 / 21.1 ms** (1 submit, 1 map) |
+
+So it saves about 2-3 ms of a ~33 ms plain token and about 2 ms of a ~50-55 ms spec step. That is less than
+the 4-5 ms estimated up front: the GPU work itself does not shrink (head + layers 12.3 ms of GPU), only the
+extra sync and the idle gap between submits go away.
+
+In process on the GB10 (`BENCH=2 tests/test_moe_split.js`, split at 20, same process, off / on medians):
+plain +7 to +24% over five prompts, spec -7% (bash, 22 tokens) to +14%.
+
+One device (`xroom.mjs --solo`, GB10, 4 rounds per cell, off / on): plain japan 35.7 / 35.5, plain twosum
+41.9 / 41.3, spec japan 47.8 / 47.4, spec twosum 67.8 / 66.6. Same code path, so this is noise; the answers
+are identical.
+
+Correctness:
+- `test_moe_split` passes with both paths: split == solo, spec == plain, and checkpoint/resume with a
+  pending rollback.
+- 27B `test_q38_bits` with `ATTN_PREFILL_TILE=0`: BITS 85b12667 / eba0b8d5 on the GB10 and b72e4d1f /
+  ac403b4e on the Mac, unchanged.
+- In the two-machine room every round of a cell gave the same answer, on and off.
+
+The one outlier is plain `japan`: 8e29cc8d in 7 of 8 unpinned sessions, and 44efa784 (the spec answer) in
+one "off" session. That session is the only one where both ends' autotune picked the 64/4 GEMV shape. With
+64/4 pinned on both ends, plain == spec == 44efa784 in every round, on and off. So the plain != spec seen
+in the first two-machine sessions comes from the cooperative GEMV shape the load-time autotune picks. It
+predates this change and is not caused by it. The next thing to chase is which device's plain (one-column)
+GEMV shape changes the bits against its batched verify.
