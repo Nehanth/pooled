@@ -423,8 +423,10 @@ do. The host's Stop button stops an API answer like any other.
   - "Connected API clients": name, client label, requests answered, with Disconnect on the host;
   - one sentence: "Runs on your computer; requests use this room's GPUs and appear in the chat
     under the room's visibility setting."
-  A panel in the room menu, not a third tab next to Chat | Code: it is set up once and has no live
-  content worth a tab. It uses the existing sheet styles (share sheet) and `textContent` only.
+  Not a third tab next to Chat | Code: it is set up once and has no live content worth a tab. As
+  built, it is the API half of the dark Serve API page (`#compute-screen`, opened by the black
+  **Serve API** button in the room's header), beside this device's layers and passes; with a client
+  connected the steps fold under "How to connect". `textContent` only.
 - **Chat.** An API request appears as a normal exchange: the asker line reads
   "*name* · *client* (API)", the text is the last user message (2,000 chars, "…"), and the note
   "via API · not part of this chat's memory". It follows `ai-visibility`: `all` → everyone sees it;

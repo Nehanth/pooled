@@ -299,7 +299,6 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   chipPop(null); $("room-menu").open = false;
   if (!$("share").hidden) closeShare();
-  if ($("api-sheet") && !$("api-sheet").hidden) closeApi();
   if (!$("card").hidden) closeCard();
   if (!$("leave").hidden) closeLeave();
 });
@@ -1060,17 +1059,19 @@ function roomOver() {
   return overClosed ? card : null;
 }
 $("room-over-close").addEventListener("click", () => { overClosed = true; });
-const compute = computeScreen({ state: computeState, keepAwake, newRoom: () => $("room-over-new").click() });
+// Serve API: the header's black button opens the dark page, this device's layers and passes beside
+// the endpoint and how to connect (the API half is apiPanel's, below)
+const compute = computeScreen({ state: computeState, keepAwake, newRoom: () => $("room-over-new").click(), onShow: apiShown });
 $("compute-open").addEventListener("click", () => compute.open());
-// the header's dots button says whether this device is working: "on" while it holds layers
+// the button's mark says whether this device is working ("on" while it holds layers: the dots breathe),
+// its tooltip which layers; its name stays "Serve API"
 function deviceMark() {
   const s = computeState(), b = $("compute-open");
   const on = s.lo != null && s.hi != null && s.hi > s.lo && s.phase !== "idle";   // lo == hi holds nothing
-  const tip = on ? (s.phase === "loading" ? `This device \u00b7 loading layers ${s.lo + 1}\u2013${s.hi}` : `This device \u00b7 holds layers ${s.lo + 1}\u2013${s.hi}`) : "This device";
+  const tip = on ? (s.phase === "loading" ? `This device is loading layers ${s.lo + 1}\u2013${s.hi}` : `This device holds layers ${s.lo + 1}\u2013${s.hi}`) : "Use this room from your own tools";
   if (b.dataset.tip === tip && b.classList.contains("on") === on) return;
   b.classList.toggle("on", on);
   b.dataset.tip = tip;
-  b.setAttribute("aria-label", tip.replace(" \u00b7 ", ": "));
 }
 setInterval(deviceMark, 1000);
 $("create-btn").addEventListener("click", () => { keepAwake(); start(true); });
@@ -1147,8 +1148,6 @@ const overlays = [...document.querySelectorAll(".overlay")];
 let modalReturn = null;   // what had focus before an overlay that opened on its own took it
 function syncModal() {
   const open = overlays.some((o) => !o.hidden);
-  // Serve API is a popover, not an overlay: it closes when one opens over the page (Host reconnecting, Room over)
-  if (open) closeApi(false);
   for (const el of document.querySelectorAll("body > header, #join-screen, #room-screen")) el.inert = open;
   // the compute screen (a lending device's screen) sits above the overlays: while it is up, they wait
   // underneath, out of the Tab order, and take focus only once it closes
@@ -2721,13 +2720,10 @@ bandFold(bandFolded());
 new MutationObserver(() => bandFold(bandFolded())).observe($("chatpane"), { attributes: true, attributeFilter: ["class"] });
 // Chat | Code sits in the room bar at 820px and wider and on short touch screens (a phone in
 // landscape, where its own strip costs too much height); in its own strip on phones held upright.
-// Serve API rides right after it and shows whenever it does.
 {
   const home = document.querySelector(".mode-row"), wide = matchMedia("(min-width: 821px), (max-height: 500px) and (pointer: coarse)");
-  const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); b.after($("api-open")); };
-  place(); wide.addEventListener("change", () => { place(); apiPlace(); });
-  const sync = () => { $("api-open").hidden = $("mode-bar").hidden; if ($("api-open").hidden) closeApi(false); };
-  sync(); new MutationObserver(sync).observe($("mode-bar"), { attributes: true, attributeFilter: ["hidden"] });
+  const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); };
+  place(); wide.addEventListener("change", place);
 }
 // phones: the chat stays on the newest message when the screen shrinks (the keyboard opens), if
 // the reader was at the bottom; while typing, the header chips, the band and Chat | Code step aside
@@ -3976,9 +3972,9 @@ async function apiGenerate({ api: req, name, from }) {
   if (ai.degraded) showRedeal(true);
 }
 
-// Serve API (the button next to Chat | Code): a popover under it (a sheet from the bottom on phones) with the
-// command that serves this room on the user's own computer, its two base URLs, short examples, who is
-// connected now (the host can Disconnect each), and the host's switch for API clients
+// Serve API (the header's black button, the dark page's API half): the command that serves this room on
+// the user's own computer, its two base URLs, short examples, who is connected now (the host can
+// Disconnect each), and the host's switch for API clients
 const API_BASE = "http://127.0.0.1:8080";
 const API_EXAMPLES = {
   curl: `curl ${API_BASE}/v1/chat/completions \\
@@ -4051,12 +4047,14 @@ function apiSay(t) {
 let apiSeen = null;   // the client ids the panel last showed, to announce who came and went
 // an API client by what the person knows: the tool (from its User-Agent) once it has asked, else the bridge's name
 const apiLabel = (c) => c.tool || c.name;
+// where focus goes when the control it was on goes away: the command's Copy, or with the steps
+// folded "How to connect", or Back
+const apiHome = () => [$("api-copy"), $("api-how").querySelector("summary"), $("compute-exit")].find((el) => el.getClientRects().length);
 function apiPanel() {
-  if (!$("api-sheet")) return;
+  if (!$("api-panel")) return;
   const list = apiClients(), running = isHost && ai.apiRun && ai.apis.get(ai.apiRun.from);
-  $("api-open").classList.toggle("live", list.length > 0);
-  $("api-open").title = list.length ? `Serve API: ${list.length} API client${list.length > 1 ? "s" : ""} connected` : "Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer";
-  if ($("api-sheet").hidden) return;
+  $("compute-open").classList.toggle("live", list.length > 0);
+  if (!compute.isOpen) return;
   if ($("api-cmd").textContent !== apiCommand()) { $("api-cmd").textContent = apiCommand(); apiFade(); }
   const st = $("api-status"), off = isHost && !ai.settings.apiAllow;
   st.className = "api-status " + (off ? "off" : list.length ? "live" : "wait");
@@ -4067,9 +4065,24 @@ function apiPanel() {
     : "Waiting for a client to connect";
   $("api-sub").textContent = off ? "Turn on Allow API clients below to let tools in."
     : list.length ? "" : "Run step 1. Your tool shows up here when it connects.";
+  // beside this device's layers and passes: what the room is serving ("Serving Continue via API · 12 requests answered")
+  const answered = isHost ? list.reduce((t, [, c]) => t + (c.answered || 0), 0) : null;
+  $("cs-api").hidden = !list.length;
+  if (list.length) {
+    const who = list.length === 1 ? apiLabel(list[0][1]) : `${list.length} API clients`;
+    const t = $("cs-api-t");
+    t.replaceChildren(running ? "Answering " : "Serving ", Object.assign(document.createElement("b"), { textContent: who }), " via API");
+    if (answered != null) { const n = document.createElement("span"); n.className = "n"; n.textContent = answered; t.append(" · ", n, ` request${answered === 1 ? "" : "s"} answered`); }
+  }
   // step 1 done: the host sees a tick on it while a client is connected
-  $("api-sheet").querySelector(".api-pop").classList.toggle("done", isHost && list.length > 0);
+  $("api-panel").classList.toggle("done", isHost && list.length > 0);
   $("api-clients-wrap").hidden = !list.length;
+  // with a client connected the serving view leads and the steps fold under "How to connect" (once, as it
+  // connects: the reader can open them again; never shut under the focus)
+  const how = $("api-how"), was = how.classList.contains("flat");
+  how.classList.toggle("flat", !list.length);
+  if (!list.length) how.open = true;
+  else if (was && !how.contains(document.activeElement)) how.open = false;
   const ids = list.map(([id]) => id);
   if (apiSeen) {
     const came = list.filter(([id]) => !apiSeen.includes(id)), went = apiSeen.length - (ids.length - came.length);
@@ -4077,7 +4090,7 @@ function apiPanel() {
     else if (went > 0) apiSay(list.length ? `An API client left. ${list.length} connected` : "The API client left. Waiting for a client");
   }
   apiSeen = ids;
-  // the list is rebuilt: a focused Disconnect gets its focus back on the new button (or Copy, if that client left)
+  // the list is rebuilt: a focused Disconnect gets its focus back on the new button (or a steady control, if that client left)
   const had = $("api-clients").contains(document.activeElement) ? document.activeElement.dataset.id || "" : null;
   $("api-clients").replaceChildren(...list.map(([id, c]) => {
     const li = document.createElement("li");
@@ -4088,63 +4101,37 @@ function apiPanel() {
     if (isHost) { const e = document.createElement("span"); e.innerHTML = `<span class="n"></span> answered`; e.firstChild.textContent = c.answered; parts.push(e); }
     const sm = li.querySelector("small");
     // the dot rides on the part before it, so a wrapped line never starts or ends on a bare dot
-    parts.forEach((e, i) => { if (i < parts.length - 1) e.append("\u00a0·"); sm.append(e); });
+    parts.forEach((e, i) => { if (i < parts.length - 1) e.append(" ·"); sm.append(e); });
     sm.title = [c.name, c.client].filter(Boolean).join(" · ");
     if (isHost) {
       const b = document.createElement("button");
       b.type = "button"; b.textContent = "Disconnect"; b.dataset.id = id; b.setAttribute("aria-label", `Disconnect ${apiLabel(c)}`);
-      b.addEventListener("click", () => { apiKick(id); if (!$("api-sheet").contains(document.activeElement)) $("api-copy").focus({ preventScroll: true }); });
+      b.addEventListener("click", () => { apiKick(id); if (!$("compute-screen").contains(document.activeElement)) apiHome()?.focus({ preventScroll: true }); });
       li.appendChild(b);
     }
     return li;
   }));
-  if (had != null) (had && [...$("api-clients").querySelectorAll("button")].find((b) => b.dataset.id === had) || $("api-copy")).focus({ preventScroll: true });
+  if (had != null) (had && [...$("api-clients").querySelectorAll("button")].find((b) => b.dataset.id === had) || apiHome())?.focus({ preventScroll: true });
   if ($("api-allow")) { $("api-allow").checked = !!ai.settings.apiAllow; $("api-allow-row").hidden = !isHost; }
 }
-// desktop: under the button, its left edge a little left of the button's, kept on screen; the caret
-// on the button's centre and the popover growing from there. Phones: CSS makes it a bottom sheet
-const apiSheetMQ = matchMedia("(max-width: 640px)");
-function apiPlace() {
-  if ($("api-sheet").hidden || apiSheetMQ.matches) return;
-  const r = $("api-open").getBoundingClientRect(), pop = $("api-sheet").querySelector(".api-pop");
-  if (!r.width) { closeApi(false); return; }   // the button went away (the room ended, the switch hid)
-  const w = pop.offsetWidth, left = Math.max(12, Math.min(r.left - 12, innerWidth - w - 12)), top = r.bottom + 10, cx = r.left + r.width / 2;
-  Object.assign(pop.style, { left: left + "px", top: top + "px", maxHeight: `calc(100dvh - ${top + 16}px)` });
-  pop.style.setProperty("--cx", cx - left + "px");
-  Object.assign($("api-sheet").querySelector(".api-caret").style, { left: cx + "px", top: top + "px" });
-}
-function openApi() {
+// the dark page opened (or closed): the API half starts from what is true now, and announces only what changes after
+function apiShown(open) {
+  apiSeen = null;
+  if (!open || !$("api-panel")) return;
   $("room-menu").open = false; chipPop(null);
-  $("api-sheet").hidden = false;
-  $("api-open").setAttribute("aria-expanded", "true");
-  $("api-sheet").querySelector(".api-pop").setAttribute("aria-modal", String(apiSheetMQ.matches));
-  apiShowTab(apiTab); apiPanel(); apiPlace();
-  $("api-copy").focus({ preventScroll: true });
+  apiShowTab(apiTab); apiPanel(); requestAnimationFrame(apiFade);
 }
-// back = return focus to the button (Esc, the close button, the scrim); a click elsewhere keeps its own focus
-function closeApi(back = true) {
-  if ($("api-sheet").hidden) return;
-  const inside = $("api-sheet").contains(document.activeElement);
-  $("api-sheet").hidden = true; apiSeen = null;
-  $("api-open").setAttribute("aria-expanded", "false");
-  if ((back || inside) && !$("api-open").hidden && $("api-open").offsetParent) $("api-open").focus({ preventScroll: true });
-}
-if ($("api-sheet")) {
-  for (const b of $("api-sheet").querySelectorAll(".icon-act")) b.innerHTML = COPY_SVG;
+if ($("api-panel")) {
+  for (const b of $("api-panel").querySelectorAll(".icon-act")) b.innerHTML = COPY_SVG;
   $("api-code-copy").insertAdjacentHTML("beforeend", '<span class="lb">Copy</span>');
   $("api-code").addEventListener("scroll", apiFade, { passive: true });
   $("api-cmd").addEventListener("scroll", apiFade, { passive: true });
-  $("api-open").addEventListener("click", () => $("api-sheet").hidden ? openApi() : closeApi());
-  $("api-close").addEventListener("click", () => closeApi());
-  $("api-sheet").addEventListener("click", (e) => { if (e.target === $("api-sheet")) closeApi(); });   // the phone sheet's scrim
-  document.addEventListener("pointerdown", (e) => { if (!$("api-sheet").hidden && !apiSheetMQ.matches && !e.target.closest?.("#api-sheet, #api-open")) closeApi(false); });
-  addEventListener("resize", () => { apiPlace(); if (!$("api-sheet").hidden) apiFade(); });
-  addEventListener("scroll", apiPlace, true);
-  apiSheetMQ.addEventListener("change", () => closeApi(false));
+  addEventListener("resize", () => { if (compute.isOpen) apiFade(); });
+  $("api-how").addEventListener("toggle", () => { if ($("api-how").open) apiFade(); });
   $("api-copy").addEventListener("click", () => copyText(apiCommand(), "command"));
-  for (const b of $("api-sheet").querySelectorAll(".api-url .icon-act")) b.addEventListener("click", () => copyText(b.dataset.copy, b.dataset.what, b).then((ok) => ok && apiSay(`${b.dataset.what} copied`)));
+  for (const b of $("api-panel").querySelectorAll(".api-url .icon-act")) b.addEventListener("click", () => copyText(b.dataset.copy, b.dataset.what, b).then((ok) => ok && apiSay(`${b.dataset.what} copied`)));
   $("api-code-copy").addEventListener("click", (e) => copyText(API_EXAMPLES[apiTab], "example", e.currentTarget).then((ok) => ok && apiSay("Example copied")));
-  const tabs = [...$("api-sheet").querySelectorAll(".api-tabs [role=tab]")];
+  const tabs = [...$("api-panel").querySelectorAll(".api-tabs [role=tab]")];
   for (const b of tabs) {
     b.addEventListener("click", () => apiShowTab(b.id.slice(6)));
     b.addEventListener("keydown", (e) => {
@@ -4154,14 +4141,6 @@ if ($("api-sheet")) {
       const t = tabs[(j + tabs.length) % tabs.length]; apiShowTab(t.id.slice(6)); t.focus();
     });
   }
-  // Tab stays inside while it is open
-  $("api-sheet").addEventListener("keydown", (e) => {
-    if (e.key !== "Tab") return;
-    const f = [...$("api-sheet").querySelectorAll("button, input, pre[tabindex], [tabindex='0']")].filter((el) => !el.closest("[hidden]") && el.tabIndex >= 0 && el.offsetParent);
-    const first = f[0], last = f[f.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-  });
   $("api-allow").addEventListener("change", (e) => {
     ai.settings.apiAllow = e.target.checked;
     if (!ai.settings.apiAllow) for (const id of [...ai.apis.keys()]) apiKick(id, "the host does not allow API clients in this room");
@@ -4294,6 +4273,17 @@ if (new URLSearchParams(location.search).get("sim") === "1" && ["127.0.0.1", "lo
     pulse(n = 1) { for (let i = 0; i < n; i++) setTimeout(() => { pulseAt = 0; mapPulse(); }, i * 250); },
     idle() { $("ai-panel").classList.remove("online", "loading"); ai.range = null; },
     compute(on) { on ? compute.open() : compute.close(); },
+    // Serve API: made-up API clients, e.g. apis([{ tool: "Continue", answered: 12 }]); [] for none.
+    // The host keeps them in its own map; as a guest (guest()) they are in the roster
+    apis(list = [{ tool: "Continue", answered: 12 }]) {
+      for (const k of [...ai.apis.keys(), ...members.keys()]) if (k.startsWith("sim-api-")) { ai.apis.delete(k); members.delete(k); }
+      list.forEach((c, i) => {
+        const e = { name: `pooled serve ${String(roomCode).toLowerCase()}`, client: c.client || "OpenAI API", answered: c.answered || 0, tool: c.tool };
+        if (isHost) ai.apis.set(`sim-api-${i}`, e); else members.set(`sim-api-${i}`, { name: e.name, meta: { api: 1, client: e.client } });
+      });
+      apiPanel();
+    },
+    guest() { isHost = false; apiPanel(); },
     passes(on) {
       clearInterval(passTimer); passTimer = 0;
       if (on) passTimer = setInterval(() => compute.pass(1, 14 + Math.random() * 8), 90);

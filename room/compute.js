@@ -1,6 +1,8 @@
-// This device's screen: a full-screen view for a device that is only lending its memory and GPU (a phone on a
-// charger, a laptop in the corner). It shows which layers this device holds, and a packet of dots
-// runs through the logo every time a real forward pass runs here. Pure presentation: it reads the
+// Serve API, the dark page: a full screen that shows which layers this device holds (a phone on a charger,
+// a laptop in the corner lending its memory and GPU), with a packet of dots running through the logo every
+// time a real forward pass runs here, beside the room's API half (room.js apiPanel fills #api-panel: the
+// endpoint, how to connect, who is connected). This module draws the device half and runs the page:
+// open and close, Esc, the focus trap and focus return. Pure presentation: it reads the
 // room's state through `state()` and is told about passes by `pass(n, ms)`; it never touches the
 // GPU. The canvas only animates while packets are in flight, the page is visible and the screen
 // is open; with reduced motion only the counters move.
@@ -62,7 +64,8 @@ export function lendNotes(s) {
   return notes;
 }
 
-export function computeScreen({ state, keepAwake = () => {}, newRoom = () => {} }) {
+// onShow(open) runs after the page opens or closes (room.js fills the API half then)
+export function computeScreen({ state, keepAwake = () => {}, newRoom = () => {}, onShow = () => {} }) {
   const root = $("compute-screen"), cv = $("cs-flow"), logo = $("cs-logo");
   if (!root || !cv || !logo) return { open() {}, close() {}, pass() {}, refresh() {}, get isOpen() { return false; } };
   logo.innerHTML = DOTS.map(([x, y, r], i) => `<circle cx="${x}" cy="${y}" r="${r}" style="--i:${i};--rc:${Math.round(x / 7) + Math.round(y / 7)}"${i === 8 ? ' class="lit"' : ""}/>`).join("");
@@ -238,15 +241,17 @@ export function computeScreen({ state, keepAwake = () => {}, newRoom = () => {} 
       packets.length = 0;
       $("compute-open")?.focus({ preventScroll: true });   // back to the button that opened it
     }
+    onShow(on);
   }
   $("compute-exit").addEventListener("click", () => show(false));
   $("cs-new")?.addEventListener("click", () => newRoom());
   addEventListener("keydown", (e) => {
     if (!open) return;
     if (e.key === "Escape") { show(false); return; }
-    // a modal screen: Tab cycles through its own buttons, never to the room hidden behind it
+    // a modal screen: Tab cycles through its own controls (buttons, the switch, a folded step list's
+    // summary, a code block that scrolls), never to the room hidden behind it; only ones on screen count
     if (e.key !== "Tab") return;
-    const f = [...root.querySelectorAll("button")].filter((b) => !b.hidden && !b.disabled);
+    const f = [...root.querySelectorAll("button, input, summary, [tabindex]")].filter((b) => !b.hidden && !b.disabled && b.tabIndex >= 0 && (!b.getClientRects || b.getClientRects().length));
     if (!f.length) return;
     const i = f.indexOf(document.activeElement);
     if (e.shiftKey ? i <= 0 : i === f.length - 1 || i < 0) { e.preventDefault(); f[e.shiftKey ? f.length - 1 : 0].focus(); }

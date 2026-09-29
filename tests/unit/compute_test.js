@@ -93,6 +93,28 @@ Deno.test("compute screen: open and close toggle the screen, the browser bar col
   eq(s.isOpen, false, "the exit button closes");
 }));
 
+Deno.test("compute screen (Serve API): onShow follows open and close; Tab cycles through every control on screen", () => withDom((dom) => {
+  const shown = [];
+  const s = computeScreen({ state: () => ({ phase: "idle", devices: 1 }), onShow: (on) => shown.push(on) });
+  s.open(); s.open(); s.close(); s.close();
+  eq(shown, [true, false], "once per change");
+  // the API half: a button, the switch, a folded summary, a code block, a hidden button, a -1 tab and one off screen (in a closed <details>)
+  const el = (id, o = {}) => ({ id, hidden: false, disabled: false, tabIndex: 0, getClientRects: () => [1], focus() { dom.focused = id; }, ...o });
+  const f = [el("compute-exit"), el("api-copy", { getClientRects: () => [] }), el("summary"), el("api-t-py", { tabIndex: -1 }), el("api-code"), el("cs-new", { hidden: true }), el("api-allow")];
+  let sel = "";
+  $(dom, "compute-screen").querySelectorAll = (q) => { sel = q; return f; };
+  s.open();
+  const tab = (from, shiftKey = false) => { document.activeElement = f.find((x) => x.id === from); let prevented = false; for (const h of dom.winOn.keydown) h({ key: "Tab", shiftKey, preventDefault: () => { prevented = true; } }); return prevented; };
+  dom.focused = null;
+  ok(tab("api-allow"), "Tab on the last control wraps"); eq(dom.focused, "compute-exit");
+  ok(["button", "input", "summary", "[tabindex]"].every((k) => sel.includes(k)), "the trap looks past buttons: " + sel);
+  dom.focused = null;
+  ok(tab("compute-exit", true), "Shift+Tab on the first wraps back"); eq(dom.focused, "api-allow");
+  ok(!tab("summary"), "in the middle the browser moves focus");
+  delete document.activeElement;
+  s.close();
+}));
+
 Deno.test("compute screen: the status line for each phase, table-driven", () => withDom((dom) => {
   let st = {};
   const s = computeScreen({ state: () => st });
