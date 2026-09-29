@@ -489,7 +489,7 @@ export function codeUI({ onMode = () => {} } = {}) {
       all.onclick = () => done("all");
       no.onclick = () => {
         ap.replaceChildren(); head();
-        const why = h("input"); why.type = "text"; why.placeholder = matchMedia("(max-width: 640px)").matches ? "why? (optional)" : "why? (optional, the agent reads it)"; why.maxLength = 300;
+        const why = h("input"); why.type = "text"; why.placeholder = matchMedia("(max-width: 640px)").matches ? "why? (optional)" : "why? (optional, the agent reads it)"; why.maxLength = 300; why.setAttribute("aria-label", "Why reject it (optional, the agent reads it)");
         const send = h("button", null, "Reject"); send.type = "button";
         const back = h("button", null, "Cancel"); back.type = "button";
         ap.append(why, send, back);

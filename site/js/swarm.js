@@ -172,7 +172,8 @@
       if (now - last >= 31 || !last) { last = now; step(dt); draw(); }
       wake();
     }
-    const wake = () => { if (!RM && visible && !document.hidden && !raf) raf = requestAnimationFrame(frame); };
+    let paused = false;   // the demo's Pause button holds the swarms too
+    const wake = () => { if (!RM && !paused && visible && !document.hidden && !raf) raf = requestAnimationFrame(frame); };
     const settle = () => { P.forEach(p => { const h = home(p, t); p.x = h[0]; p.y = h[1]; }); };
 
     if (RM) {
@@ -199,6 +200,8 @@
     document.addEventListener("visibilitychange", () => { last = 0; wake(); });
     wake();
     return {
+      get paused() { return paused; },
+      set paused(v) { paused = !!v; if (paused && raf) { cancelAnimationFrame(raf); raf = 0; } else if (!paused) { last = 0; wake(); } },
       get t() { return t; },
       set t(v) { t = v; settle(); draw(); },
       gatherNow(ago) { measure(); gather = t - (ago || 0); settle(); draw(); }

@@ -322,17 +322,27 @@ function setModelValue(key) { if (!MODELS[key]) return; addModelOption(key); $("
 function renderLadder(pledged) {
   const el = $("ai-ladder"); if (!el) return;
   const none = !(pledged > 0);
+  // a radio group: one tab stop (the picked row), arrows move the pick. The rows are re-rendered
+  // on every change, so the focus follows the picked row when it was in the group.
+  const had = el.contains(document.activeElement);
   el.innerHTML = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + ladder(PICK_NEED, pledged).map((x) => {
     const gb = `<span class="nd">${NEED_GB[x.key] ?? ""} GB</span>`;
     const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">needs ${x.short} GB more</span>`;
     // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
     const sel = !none && x.key === $("ai-model").value;
-    return `<button type="button" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-pressed="${sel}"${x.ok ? "" : ` title="${giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
+    return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${x.ok ? "" : ` title="${giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
+  if (!el.querySelector(".rung.sel")) el.querySelector(".rung")?.setAttribute("tabindex", "0");
+  if (had) el.querySelector('.rung[tabindex="0"]')?.focus({ preventScroll: true });
 }
-$("ai-ladder").addEventListener("click", (e) => {
-  const b = e.target.closest(".rung"); if (!b || $("ai-model").disabled) return;
-  setModelValue(b.dataset.k); modelTouched = true; updateCluster();
+function pickRung(b) { if (!b || $("ai-model").disabled) return; setModelValue(b.dataset.k); modelTouched = true; updateCluster(); }
+$("ai-ladder").addEventListener("click", (e) => pickRung(e.target.closest(".rung")));
+$("ai-ladder").addEventListener("keydown", (e) => {
+  const rs = [...$("ai-ladder").querySelectorAll(".rung")], i = rs.indexOf(e.target.closest(".rung"));
+  const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+  const to = step ? (i + step + rs.length) % rs.length : e.key === "Home" ? 0 : e.key === "End" ? rs.length - 1 : -1;
+  if (i < 0 || to < 0) return;
+  e.preventDefault(); pickRung(rs[to]);
 });
 // how much this device would give to cover `short` GB, or 0 when it can't: needs WebGPU, and stays
 // within what its probe allows (a phone keeps its small default; a laptop goes up to its budget)
@@ -374,6 +384,10 @@ function updateNeed(pledged) {
   $("ap-me-hint").hidden = ok || !give;
   $("ap-me-hint").textContent = `Raise this to ${give} GB to fit ${shortName($("ai-model").value)}.`;
   if (give) { $("ai-give").textContent = `Give ${give} GB from this device`; $("ai-give").dataset.gb = give; }
+  // why Start is off, for screen readers (sighted users see it in the rows and the pool card)
+  $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
+    : `${shortName($("ai-model").value)} needs ${need} GB and the room has ${has} GB, ${+(need - pledged).toFixed(1)} GB short. Invite a device or give more memory.`;
+  if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
 }
@@ -447,6 +461,7 @@ function enterRoom() {
   roomSince = performance.now();
   $("compute-open").hidden = false;
   $("room-badge").textContent = roomCode;
+  $("room-h").textContent = `Room ${roomCode}`;
   $("side-code").textContent = roomCode;
   $("side-code").addEventListener("click", openShare);
   $("ap-qr").innerHTML = qrSVG(roomLink(), { size: 112 });
@@ -1298,7 +1313,9 @@ function chatBotStart(mid) {
   const m = document.createElement("div");
   m.className = "m bot";
   if (mid != null) m.dataset.mid = mid;
-  m.innerHTML = `<div class="who"><span class="wn"></span><span class="wd" aria-hidden="true"><i></i><i></i><i></i></span></div><div class="bubble"></div>`;
+  // the bubble stays out of the live region while tokens stream in (#ai-output is role=log);
+  // chatBotEnd swaps in a fresh bubble so a screen reader announces the finished answer once
+  m.innerHTML = `<div class="who"><span class="wn"></span><span class="wd" aria-hidden="true"><i></i><i></i><i></i></span></div><div class="bubble" aria-hidden="true"></div>`;
   m.querySelector(".wn").textContent = shortName(ai.model || $("ai-model").value) || "room";
   // until the first token: the working line (the first piece replaces it)
   const n = Object.keys(ai.layersByName || {}).length;
@@ -1333,6 +1350,9 @@ function chatBotPiece(text, d) {
 function chatBotEnd(note, stats) {
   if (!botEl) chatBotStart();
   if (note) botEl.pieces = [{ t: note, d: 0 }];
+  // a new bubble node (not the streamed one un-hidden) is what the log announces
+  const fresh = document.createElement("div"); fresh.className = "bubble";
+  botEl.querySelector(".bubble").replaceWith(fresh);
   renderBot(botEl, false);
   botEl.classList.remove("live");
   // a finished answer in a background tab: say so in the tab title until the tab is looked at
