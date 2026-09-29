@@ -285,6 +285,7 @@ export function codeUI({ onMode = () => {} } = {}) {
       }
       case "ai-code-live": liveCard(d); break;
       case "ai-code-tool": toolCard(d); break;
+      case "ai-code-share": wait(false); closeText(); shareCard(d); break;
       case "ai-code-note": wait(false); closeText(); add(h("div", "cm-note" + (d.err ? " err" : ""), words(d.text))); break;
       case "ai-code-done": {
         runAt = 0; wait(false); editWin.close(); busy(false);
@@ -296,6 +297,25 @@ export function codeUI({ onMode = () => {} } = {}) {
         break;
       }
     }
+  }
+
+  // "Share with the room": a line in every device's timeline with a Download button (the built app
+  // as one sandboxed .html file, from this device's own copy) and Open full screen (this device's
+  // preview frame). room/code.js does both through onShareAct.
+  let shareAct = () => {};
+  function shareCard(d) {
+    const c = h("div", "cm-share");
+    const t = h("div", "st");
+    t.append(h("b", null, d.by || "the host"), " shared ", h("b", null, d.name || "the app"), " with the room ", h("span", "at", `:${d.port} · rev ${d.rev}`));
+    const row = h("div", "sb");
+    const dl = h("button", "ok", "Download"); dl.type = "button"; dl.title = "Save the app as one .html file (it runs sandboxed)";
+    dl.onclick = () => shareAct("download", d);
+    const fs = h("button", null, "Open full screen"); fs.type = "button";
+    fs.onclick = () => shareAct("full", d);
+    row.append(dl, fs);
+    c.append(t, row);
+    add(c);
+    say(`${d.by || "the host"} shared ${d.name || "the app"} with the room`);
   }
 
   // code being written: the model is still typing a write_file / edit_file call. Shown live, then
@@ -700,6 +720,7 @@ export function codeUI({ onMode = () => {} } = {}) {
   function dropPort(port) {
     const P = ports.get(port);
     if (!P) return;
+    if (fullView === P.view) unfull();
     P.mount?.destroy(); P.wrap.remove(); P.view.remove();
     ports.delete(port);
     grow();
@@ -718,6 +739,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     $("pv-open").hidden = !P || !P.rev;
     // relay: the app runs on the preview site, in a process of its own (harness/preview-frame.js)
     $("pv-sandbox").dataset.tip = P?.mount?.mode === "relay" ? "Runs in a sandboxed frame on a separate site, in a process of its own." : "Runs in a sandboxed frame in this tab.";
+    shareBtn.hidden = !P || !P.rev || !drive;
     $("pv-state").dataset.state = P?.state || "";   // green only for a running rev
     $("pv-state").textContent = P ? (P.state === "ready" ? `rev ${P.rev}` : P.state === "loading" ? "loading…" : P.state === "waiting" ? "Click to run" : P.state === "stopped" ? "stopped" : P.state === "hung" ? "hung" : "") : "";
   }
@@ -785,6 +807,44 @@ export function codeUI({ onMode = () => {} } = {}) {
   $("pv-clear").onclick = () => { const P = ports.get(active); if (P) { P.rows = []; renderConsole(); } };
   $("pv-reload").onclick = () => { if (active != null) onReload(active); };
   $("pv-open").onclick = () => { if (active != null) onOpen(active, ports.get(active)?.path || null); };
+  // Share with the room: whoever can drive (the host, or a member asking it)
+  let onShare = () => {};
+  const shareBtn = h("button", null); shareBtn.id = "pv-share"; shareBtn.type = "button"; shareBtn.hidden = true;
+  shareBtn.title = "Share with the room: every device gets a Download button for this app";
+  shareBtn.setAttribute("aria-label", "Share with the room");
+  shareBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.5v6.5M3.5 4 6 1.5 8.5 4M2 7v2.5a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V7"/></svg><span class="l">Share</span>';
+  shareBtn.onclick = () => { if (active != null) onShare(active); };
+  $("pv-open").after(shareBtn);
+  // Open full screen: the port's own view (its sandboxed frame, fitted as usual) over the whole
+  // screen. The Fullscreen API where there is one; a fixed layer with a close button everywhere
+  // (an iPhone has no element fullscreen)
+  let fullView = null;
+  function full(port) {
+    const P = ports.get(port);
+    if (!P) return false;
+    activate(port);
+    if (phone.matches) setTab("preview");
+    else outTab("preview");
+    unfull();
+    fullView = P.view;
+    fullView.classList.add("pv-full");
+    const x = h("button", "pv-full-x"); x.type = "button"; x.setAttribute("aria-label", "Exit full screen"); x.title = "Exit full screen";
+    x.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg>';
+    x.onclick = unfull;
+    fullView.append(x);
+    try { fullView.requestFullscreen?.({ navigationUI: "hide" })?.catch?.(() => {}); } catch {}
+    return true;
+  }
+  function unfull() {
+    const v = fullView;
+    if (!v) return;
+    fullView = null;
+    v.classList.remove("pv-full");
+    v.querySelector(".pv-full-x")?.remove();
+    if (document.fullscreenElement === v) document.exitFullscreen?.().catch?.(() => {});
+  }
+  document.addEventListener("fullscreenchange", () => { if (fullView && document.fullscreenElement !== fullView) unfull(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && fullView) unfull(); });
 
   // ---------------- host vs peer chrome. Anyone who can drive gets the project bar, the prompt
   // and the bar under the log; only the host opens a folder on disk or saves in the editor.
@@ -795,6 +855,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     $("code-row").hidden = !drive;
     $("code-bar").hidden = !drive;
     $("pv-to-agent").hidden = !drive || !(+$("pv-counts").dataset.errors > 0);
+    shareBtn.hidden = !ports.get(active)?.rev || !drive;
     if (edPath != null) { edRO = !host || !saveFile; ta.readOnly = edRO; edState(); }
   }
   // a line above the log about where the agent runs (empty: hidden)
@@ -814,6 +875,9 @@ export function codeUI({ onMode = () => {} } = {}) {
     onClosePort(fn) { onClose = fn; },
     onReload(fn) { onReload = fn; },
     onOpen(fn) { onOpen = fn; },
+    onShare(fn) { onShare = fn; },
+    onShareAct(fn) { shareAct = fn; },
+    full, unfull,
     portTab, dropPort, activate, status, logRow, ports,
     // phones: show one of the tabs (Agent, Preview, Files); wider screens show them all
     tab(t) { if (phone.matches) setTab(t); },
