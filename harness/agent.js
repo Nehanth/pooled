@@ -14,7 +14,7 @@
 // Events (onEvent): step, delta (raw streamed text), text (visible text), call-live, tool-start,
 // tool, usage, compacted, trimmed, stopped, stuck, done, limit, card (a recovery note was added,
 // harness/cards.js).
-import { toolsSystemPrompt, toolResponses, ToolCallParser, parseCallBody, parseLooseJSON } from "./tools.js";
+import { toolsSystemPrompt, toolResponses, ToolCallParser, parseCallBody, parseLooseJSON, normalizeXmlCall } from "./tools.js";
 import { pickCard, hint, PRIORITY, MAX_PER } from "./cards.js";
 import { fixArgs, fixToolName } from "./argfix.js";
 
@@ -23,9 +23,43 @@ const EMPTY = "(empty answer: call a tool or say you are done)";
 const LIVE = new Set(["preview_logs", "run_js"]);   // results that can change with time: a repeat is not a loop
 // a clean serve: the page loaded with no errors (harness/preview-tools.js)
 const CLEAN = /^serving [^\n]*\n(?:loaded in \d+ ms · no errors|still loading after 2 s · no errors)/;
+// a read run again gives the same result: for serve, ignoring what changes on every reload of the
+// same page (harness/preview-tools.js): its load time, the log timestamps, the error / warning counts,
+// the ×N fold counts (a loop throwing each frame) and the "more: preview_logs since=N" cursor
+export const timeless = (s) => s
+  .replace(/loaded in \d+ ms/g, "loaded")
+  .replace(/^((?:loaded|still loading after 2 s) · )(.*)$/m, (_, a, counts) => a + counts.replace(/\d+ (error|warning)s?\b/g, "$1s"))
+  .replace(/^\[\d+(?:\.\d+)?s\] /gm, "")
+  .replace(/ ×\d+$/gm, "")
+  .replace(/^more: preview_logs since=\d+$/gm, "more: preview_logs");
+const sameResult = (name, a, b) => a === b || (name === "serve" && timeless(a) === timeless(b));
 // said after a clean serve to a small (JSON-style) model, which otherwise tends to write the same files again
 export const SERVED_OK = "\nnext: the page loads with no errors. If it does what was asked, reply with one short line saying what you built (no tool call). Otherwise fix it with edit_file.";
 export const CONTEXT_FULL = "context full: start a new task (the files are kept)";
+// the same failure this many steps in a row stops the request (one step before, the model is warned)
+export const STUCK_AFTER = 3;
+// the same page error seen by this many checks, each after a change: a note at WARN, a stop at STOP
+export const PAGE_ERR = { warn: 3, stop: 5 };
+
+// the first line of a result, short enough for a note or the stop message
+export const firstLine = (s, max = 160) => { const l = String(s ?? "").split("\n")[0].trim(); return l.length > max ? l.slice(0, max) + "…" : l; };
+// the first page error a serve / preview_logs result reports ("game.js:41:5 ReferenceError: ctx is
+// not defined"), or null; "no errors" results give "". preview_logs can list older pages' logs too:
+// only its "first error:" line or the lines under the current page's "(rev N, current)" count.
+const ERR_LINE = /^(?:first error: )?\[[\d.]+s\] error (.*?)(?: ×\d+)?$/m;
+export function pageError(name, result) {
+  if (name !== "serve" && name !== "preview_logs") return null;
+  let text = String(result ?? "");
+  if (name === "preview_logs") {
+    const first = /^first error: .*$/m.exec(text), cur = text.lastIndexOf(", current)\n");
+    if (first) text = first[0];
+    else if (cur >= 0) text = text.slice(cur);
+    else return null;
+  }
+  const m = ERR_LINE.exec(text);
+  if (m) return firstLine(m[1]);
+  return CLEAN.test(text) ? "" : null;
+}
 
 // head and tail of a long tool result (errors are usually at the end, headers at the start)
 export function capResult(s, max) {
@@ -41,6 +75,19 @@ export function briefCall(c) {
     return s.includes("\n") || s.length > 40 ? null : s;
   }).filter((v) => v != null && v !== "");
   return [c.name || "?", ...vals].join(" ");
+}
+
+// A tool-result turn in its compacted form: each <tool_response> over 200 characters becomes a stub
+// naming its call (calls[k], the turn's call briefs), shorter ones stay. It depends on nothing but
+// its arguments and a stub is short, so compacting a compacted turn changes nothing: the turn then
+// renders the same on every later step.
+export function stubResults(text, calls) {
+  let k = 0;
+  return text.replace(/<tool_response>\n([\s\S]*?)\n<\/tool_response>/g, (m, body) => {
+    const name = calls?.[k++];
+    if (body.length <= 200) return m;
+    return `<tool_response>\n(output of ${name || "this call"} dropped; run it again if needed)\n</tool_response>`;
+  });
 }
 
 export class Agent {
@@ -72,6 +119,7 @@ export class Agent {
     const R = this.reqs[req] = { calls: [], done: false, answer: "", cards: {} };
     this.turns.push({ role: "user", text: userText, req });
     let calls = 0, shown = "", failRun = 0, lastFail = "", empty = 0, mut = 0;
+    let pageErr = { sig: "", n: 0, mut: -1 };   // the page error the checks keep reporting, and after how many changes
     let prevStep = new Map();   // the last step's calls: name+args -> { step, result, mut }
     let cleanAt = -1;           // mut when a serve last loaded with no errors (-1: not since the last change)
     const fails = new Map();    // a failed call (name+args) -> { n: times, mut } since the last change
@@ -172,7 +220,8 @@ export class Agent {
         const bare = bareCalls(shown, this.byName);
         // or as a bare JSON object ({"name": "write_file", "arguments": {...}}), seen from Qwen3 1.7B
         if (!bare.length) bare.push(...bareJsonCalls(shown, this.byName));
-        // or a <function=NAME> block whose <tool_call> opener came out garbled ("<tool_tool_calls>")
+        // or <function=NAME> / <invoke name="NAME"> blocks whose <tool_call> opener came out garbled
+        // ("<tool_tool_calls>") or missing
         if (!bare.length) bare.push(...bareFunctionCalls(shown, this.byName));
         if (bare.length) { for (const c of bare) c.bare = true; found.push(...bare); }
       }
@@ -196,13 +245,21 @@ export class Agent {
         calls++;
         R.calls.push({ name: c.name, arguments: c.arguments });
         briefs.push(briefCall(c));
-        // the same call as last step with nothing changed since: answer from memory, do not run it
+        // the same call as last step with nothing changed since: answer from memory. A call that
+        // only reads (read_file, list_dir, search, serve) is run again anyway, since the files can change
+        // outside the agent (the user's editor, another program on a folder on disk), and is a
+        // repeat only when its result is the same (serve: apart from its timings); a mutating call is not run twice.
         const key = c.error || LIVE.has(c.name) ? null : c.name + "\u0000" + JSON.stringify(c.arguments || {});
-        const prev = key && prevStep.get(key), rep = !!prev && prev.mut === mut && !signal?.aborted;
+        const prev = key && prevStep.get(key);
         // the same call twice in one answer (e.g. a forced second call): run it once
         const dup = c.error ? null : c.name + "\u0000" + JSON.stringify(c.arguments || {});
         const twice = !!dup && seen.has(dup);
         if (dup) seen.add(dup);
+        let rep = !!prev && prev.mut === mut && !signal?.aborted, fresh = null;
+        if (rep && !twice && this.byName.get(c.name) && !this.byName.get(c.name).mutates) {
+          fresh = await this._runCall(c, step, signal);   // (its tool-start / tool events go out here)
+          rep = sameResult(c.name, fresh, prev.result) && !signal?.aborted;
+        }
         let r;
         if (signal?.aborted) r = STOPPED;
         else if (twice) {
@@ -214,17 +271,16 @@ export class Agent {
           const inPrompt = this.turns.some((t) => t.role === "user" && t.text.includes(prev.result));
           r = inPrompt ? `${prev.result.split("\n")[0]} (same call as step ${prev.step}; nothing changed)`
             : `${prev.result}\n(same call as step ${prev.step}; nothing changed)`;
-          this.onEvent({ type: "tool-start", call: c, step });
-          this.onEvent({ type: "tool", call: c, result: r, step, ms: 0 });
+          if (fresh == null) { this.onEvent({ type: "tool-start", call: c, step }); this.onEvent({ type: "tool", call: c, result: r, step, ms: 0 }); }
         } else {
-          r = await this._runCall(c, step, signal);
+          r = fresh ?? await this._runCall(c, step, signal);
           if (this.byName.get(c.name)?.mutates && !/^(error|declined|unchanged)/.test(r)) mut++;
           if (c.name === "serve" && CLEAN.test(r)) cleanAt = mut;
         }
         // the same failing call again with other calls in between (read_file, edit_file, read_file,
         // the same edit_file...): not caught as a repeat of the last step, so counted here
         let n = 0;
-        if (key && /^error/.test(r)) { const f = fails.get(key); n = f && f.mut === mut ? f.n + 1 : 1; fails.set(key, { n, mut }); }
+        if (key && /^(?:error|unchanged)/.test(r)) { const f = fails.get(key); n = f && f.mut === mut ? f.n + 1 : 1; fails.set(key, { n, mut }); }
         again.push(n);
         reps.push(rep);
         if (key) cur.set(key, rep ? prev : { step, result: r, mut });
@@ -245,20 +301,43 @@ export class Agent {
         return { text, steps: step, calls, reason: "done" };
       }
       this._card(R, found, results, reps.map((x, i) => x || again[i] >= 2), step);
-      this.turns.push({ role: "user", text: toolResponses(results), req, calls: briefs });
-      if (signal?.aborted) return stopped(step);
       // the same failure three steps in a row: the model (or the room) is stuck, so stop and say so
-      // instead of burning the context on retries
-      const failed = plain.length && plain.every((r, i) => reps[i] || /^error/.test(r));
+      // instead of burning the context on retries. "unchanged" (a write of what the file already
+      // has) did nothing either, so it counts as a failure here.
+      const failed = plain.length && plain.every((r, i) => reps[i] || /^(?:error|unchanged)/.test(r));
       const sig = failed ? plain.map((r) => r.replace(/\d+/g, "#").slice(0, 80)).join("|") : "";
       failRun = failed && (sig === lastFail || failRun === 0) ? failRun + 1 : failed ? 1 : 0;
       lastFail = sig;
       // or one failing call made a third time with nothing changed in between
-      const same = plain.length && plain.every((r, i) => again[i] >= 3);
-      if (failRun >= 3 || same) {
+      const same = plain.length && plain.every((r, i) => again[i] >= STUCK_AFTER);
+      // the page keeps reporting the same first error although the model keeps changing files
+      let bumped = false;
+      for (let i = 0; i < found.length; i++) {
+        const pe = pageError(found[i].name, plain[i]);
+        if (pe === null || reps[i]) continue;
+        const k = pe.replace(/\d+/g, "#");
+        if (!pe) pageErr = { sig: "", n: 0, mut };
+        else if (k !== pageErr.sig) pageErr = { sig: k, n: 1, mut, text: pe };
+        else if (mut > pageErr.mut) { pageErr = { ...pageErr, n: pageErr.n + 1, mut, text: pe }; bumped = true; }
+      }
+      const pageStuck = pageErr.n >= PAGE_ERR.stop && pageErr.mut === mut;
+      // one step before the stop, say what is being repeated so the model can change course
+      const last = results.length - 1;
+      if (!pageStuck && failRun === STUCK_AFTER - 1 && !same) {
+        results[last] += `\nnote: this failed the same way last step (${firstLine(plain.find((r) => /^(?:error|unchanged)/.test(r)) ?? plain[0], 100)}). Do something different: the task stops if it fails a third time.`;
+      } else if (!pageStuck && pageErr.n === PAGE_ERR.warn && bumped) {
+        results[last] += `\nnote: the page showed this same error after each of your last ${pageErr.n - 1} changes: ${pageErr.text}. Those changes did not fix it: read_file the lines it names and fix the cause there.`;
+      }
+      this.turns.push({ role: "user", text: toolResponses(results), req, calls: briefs });
+      if (signal?.aborted) return stopped(step);
+      if (failRun >= STUCK_AFTER || same || pageStuck) {
+        const f = plain.findIndex((r) => /^(?:error|unchanged)/.test(r)), i = Math.max(0, f), n = same ? STUCK_AFTER : failRun;
+        const why = pageStuck ? `the page showed the same error after ${pageErr.n - 1} changes: ${pageErr.text}`
+          : f < 0 ? `${briefCall(found[i])} was repeated ${n} times with nothing changed`
+          : `${briefCall(found[i])} failed ${n} times in a row: ${firstLine(plain[i])}`;
         finish(); close();
-        this.onEvent({ type: "stuck", step, error: results[0] });
-        return { text: "Stopped: the same tool call failed three times in a row.", steps: step, calls, reason: "stuck" };
+        this.onEvent({ type: "stuck", step, error: results[0], why });
+        return { text: `Stopped: ${why}`, steps: step, calls, reason: "stuck" };
       }
     }
     finish(); close();
@@ -327,29 +406,28 @@ export class Agent {
 
   _size() { return this.count(this.system) + this.turns.reduce((n, t) => n + this.count(t.text) + 4, 0); }
 
-  // Past the budget, compact down to 60% of it. Every compaction changes the middle of the prompt
-  // (a full re-prefill across the room), so it should be rare and free a lot each time:
+  // Past the budget, compact down to 60% of it. Every compaction changes the middle of the prompt,
+  // so everything after the first changed turn is prefilled again (the system prompt + tools stay
+  // cached: the model adapters checkpoint them, issue #73). It should be rare and free a lot:
   // 1. stub old tool results, 2. fold finished requests into one line each, 3. drop the oldest
   // folded requests, 4. give up ("full"). The current request's own turns are only ever stubbed.
+  // Each step works oldest first and produces a stable form (stubResults, _foldLine: functions of
+  // the turn alone), so a compacted turn renders the same on every later step and the turns
+  // before the first changed one (the `at` of the "compacted" event) keep their cached prefix.
   _compact(cur) {
     const B = this.budget();
     const before = this._size();
     if (before <= B) return null;
     const target = B * 0.6;
-    let tier = 0;
+    let tier = 0, at = Infinity;
     // 1. tool results older than the last 2 steps, oldest first
     const res = this.turns.map((t, i) => i).filter((i) => this.turns[i].role === "user" && this.turns[i].text.startsWith("<tool_response>"));
     let cut = 0;
     for (const i of res.slice(0, -2)) {
       if (this._size() <= target) break;
       const t = this.turns[i];
-      let k = 0;
-      const text = t.text.replace(/<tool_response>\n([\s\S]*?)\n<\/tool_response>/g, (m, body) => {
-        const name = t.calls?.[k++];
-        if (body.length <= 200) return m;
-        return `<tool_response>\n(output of ${name || "this call"} dropped; run it again if needed)\n</tool_response>`;
-      });
-      if (text !== t.text) { t.text = text; cut++; tier = 1; }
+      const text = stubResults(t.text, t.calls);
+      if (text !== t.text) { t.text = text; cut++; tier = 1; at = Math.min(at, i); }
     }
     if (cut) this.onEvent({ type: "trimmed", turns: cut });
     // 2. fold earlier finished requests, oldest first
@@ -361,17 +439,19 @@ export class Agent {
       const user = this.turns[idx[0]];
       const line = { role: "assistant", text: this._foldLine(r), req: r, folded: true };
       this.turns.splice(idx[0], idx.length, { ...user }, line);
-      tier = 2;
+      tier = 2; at = Math.min(at, idx[0] + 1);
     }
     // 3. drop the oldest earlier requests whole
     for (const r of earlier) {
       if (this._size() <= target) break;
+      const i = this.turns.findIndex((t) => t.req === r);
+      if (i >= 0) at = Math.min(at, i);
       this.turns = this.turns.filter((t) => t.req !== r);
       delete this.reqs[r];
       tier = 3;
     }
     const after = this._size();
-    if (tier) this.onEvent({ type: "compacted", tier, before, after });
+    if (tier) this.onEvent({ type: "compacted", tier, before, after, at });
     if (after > B) { this.onEvent({ type: "compacted", tier: 4, before, after }); return "full"; }
     return tier;
   }
@@ -482,6 +562,7 @@ function jsonEnd(text, at) {
 export function bareFunctionCalls(text, byName) {
   const out = [];
   if (!text || !byName?.size) return out;
+  text = normalizeXmlCall(text);
   const re = /<function=([^>\s]+)>[\s\S]*?<\/function>/g;
   let m;
   while ((m = re.exec(text))) {

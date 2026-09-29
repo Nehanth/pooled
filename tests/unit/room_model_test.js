@@ -37,10 +37,10 @@ function fakeRoom(tok, replies, { maxSeq = 4096, onStep } = {}) {
   const room = {
     fed: [], calls: [], maxSeqV: maxSeq,
     tok: () => tok, maxSeq: () => room.maxSeqV,
-    async generate(ids, { onToken, stop, maxNew, sample, signal }) {
+    async generate(ids, { onToken, stop, maxNew, sample, signal, pin }) {
       const script = replies[call++] || ["<|im_end|>"];
       const reused = reusablePrefix(room.fed, ids);
-      room.calls.push({ ids: ids.slice(), reused, fedBefore: room.fed.slice(), maxNew });
+      room.calls.push({ ids: ids.slice(), reused, fedBefore: room.fed.slice(), maxNew, pin });
       room.fed = ids.slice();
       const tokens = [];
       let reason = "stop";
@@ -120,6 +120,20 @@ Deno.test("room model: assistant turns replay their sampled ids, so each step ex
   const expected = [...c0.ids, ...[..."hello world"].map((ch) => tok.ID[ch])];
   eq(c1.ids.slice(0, expected.length), expected, "prompt = previous prompt + the answer's own ids");
   eq(c1.reused, c0.ids.length + 11, "everything the caches held was reused");
+});
+
+Deno.test("room model: the system prompt's length goes to the room as pin (its own checkpoint, issue #73)", async () => {
+  const tok = makeTok();
+  const room = fakeRoom(tok, [["ok", "<|im_end|>"], ["ok", "<|im_end|>"], ["ok", "<|im_end|>"]]);
+  const m = roomModel(room, { sample: argmax });
+  await collect(m.generate({ system: "the tools", turns: [{ role: "user", text: "hi" }] }));
+  await collect(m.generate({ system: "the tools", turns: [{ role: "user", text: "other" }] }));
+  await collect(m.generate({ turns: [{ role: "user", text: "hi" }] }));
+  const sys = [tok.ID["<|im_start|>"], ...tok.encode("system\nthe tools"), tok.ID["<|im_end|>"], ...tok.encode("\n")];
+  eq(room.calls[0].pin, sys.length);
+  eq(room.calls[0].ids.slice(0, sys.length), sys, "the prompt starts with exactly those tokens");
+  eq(room.calls[1].pin, sys.length);
+  eq(room.calls[2].pin, 0, "no system prompt: nothing to pin");
 });
 
 Deno.test("room model: turns no longer in the conversation are pruned from the id map", async () => {

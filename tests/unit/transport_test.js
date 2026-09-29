@@ -94,3 +94,30 @@ Deno.test("transport carries checkpoint control (save / load / drop) with the fr
     if (!threw) throw new Error("accepted " + JSON.stringify(bad));
   }
 });
+Deno.test("transport keep-alive: 1-byte messages on the keep-alive channel while frames flow, none once idle or with ka=0", async () => {
+  const { setKeepalive, KA_ID } = await import("../../room/transport.js");
+  const made = [], sent = [];
+  const pc = { createDataChannel: (label, o) => { const c = { label, o, readyState: "open", bufferedAmount: 0, send: (b) => sent.push({ label, n: b.byteLength }), set onmessage(_) {}, set onclose(_) {} }; made.push(c); return c; } };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    setKeepalive(5);
+    const link = makeLink();
+    attachWire(link, { peerConnection: pc }, () => {});
+    const ka = made.find((c) => c.label === "swarm-ka");
+    if (!ka || ka.o.id !== KA_ID || !ka.o.negotiated || ka.o.ordered !== false || ka.o.maxRetransmits !== 0) throw new Error("keep-alive channel " + JSON.stringify(ka?.o));
+    await wait(30);
+    if (sent.length) throw new Error("keep-alive before any frame");
+    sendFrame(link, { t: "ai-hidden", pos: 0, data: new Uint16Array(8) });
+    const frames = sent.length;
+    await wait(60);
+    const kas = sent.slice(frames).filter((s) => s.label === "swarm-ka");
+    if (kas.length < 3 || kas.some((s) => s.n !== 1)) throw new Error("keep-alives while active: " + JSON.stringify(kas));
+    link.active -= 2000;                                   // as if the last frame were 2 s ago
+    await wait(20); const n = sent.length; await wait(40);
+    if (sent.length !== n) throw new Error("keep-alive kept going on an idle link");
+    setKeepalive(0);
+    sendFrame(link, { t: "ai-hidden", pos: 1, data: new Uint16Array(8) });
+    const m = sent.length; await wait(40);
+    if (sent.length !== m) throw new Error("keep-alive with ka=0");
+  } finally { setKeepalive(10); }
+});

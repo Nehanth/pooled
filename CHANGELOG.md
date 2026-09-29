@@ -4,13 +4,27 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 
 ## [Unreleased]
 
+### Added
+- **`pooled serve`: a room as a local OpenAI and Anthropic endpoint** (roadmap 04, `cli/`, package `@pooled/cli`, not published yet). `npx @pooled/cli serve ABCD` joins the room as an API client with no layers and serves `POST /v1/chat/completions` and `POST /v1/messages` (streaming and not), `GET /v1/models` and `/health` on 127.0.0.1, so Continue, Open WebUI, LiteLLM, the `openai` / `anthropic` SDKs and curl run on the room's model. Requests share the room's one queue; a client's follow-up turn reuses the room's caches (exact sampled ids), so only the new turn is prefilled. `temperature`, `top_k`, `max_tokens`, stop sequences and thinking map onto the room's sampler; tools, images, `n > 1` and JSON mode get a clear 400. Host and Origin checks against web pages, an optional token (`POOLED_TOKEN`). Prompts go to the room's host and follow the room's visibility (see cli/README.md, "Who sees your prompts").
+- **In the room**: API clients get their own card ("API client · Continue") and are not counted as devices; the host can disconnect one or switch API clients off; the room menu's **Use from code** panel gives the command for the room. API exchanges show in the chat marked "via API · not part of this chat's memory" and follow the room's visibility (the asking client always gets its whole answer). Protocol: new fields on existing messages, `PROTOCOL` stays 4 ([docs/protocol.md](docs/protocol.md#api-clients)).
+
 ### Changed
+- **Code mode keeps the system prompt cached through compaction** (#73): the prefill pauses after the system prompt + tools and saves a checkpoint there (on every device in a room; it is never evicted by the answer checkpoints), so when compaction rewrites old turns the next step prefills only what follows it instead of the whole prompt. Same tokens at the same positions, so answers do not change. The eval runner shows tokens reused next to tokens prefilled for each task.
+- **Rooms with phones** (device matrix, Spark + M5 Max + iPhone 14 Pro Max):
+  - The layer split now defaults to **For speed**: the fastest devices fill first, each up to what it lends, and devices that aren't needed join to ask. Before the first answer measures each device, computers go before phones (an unmeasured phone counts as 20x slower), so a phone only takes the layers the computers can't hold. By memory is still in the room settings; `?split=memory|speed` picks one at load (the test harnesses pin `memory`).
+  - A room split by memory no longer gives a phone layers when the other devices can hold the model; the phone joins as an ask-only guest (`?phonelayers=1` restores the old split). Qwen 3.6 35B on a GB10 + iPhone room: 1.6-1.9x faster, the same speed as the GB10 alone.
+  - Keep-alive while an answer runs: each end sends 1 byte every 10 ms of silence on its own unordered channel (id 78), so Wi-Fi power save doesn't park the radio between laps. No protocol bump; `?ka=0` turns it off. Qwen3 1.7B, GB10 + iPhone: +17% plain.
+  - Test rig for rooms with the iPhone (`tests/e2e/xroom_phone.mjs`, `xroom_cluster.sh`) and the measured matrix in docs/bench-log.md.
 - **Metal (Apple GPUs)**:
   - The MoE's default prompt processing (wide prefill at ubatch 256 plus grouped experts) no longer loses the device under Deno on an M5 Max. Wide prefill now submits every 8 layers, which also makes GB10 MoE prefill about 5% faster, with bit-identical results.
   - Apple GPUs in Chrome and Safari get wider fused MoE expert kernels (`moeFusedLayout`; M5 Max kernel time: gate/up 0.49x, down 0.55x). Qwen 3.6 35B decode in Chrome on an M5 Max: +5.6% plain (86.1 -> 90.9 tok/s), +11% spec.
   - `moe_route` is 1.6-1.9x faster on every GPU (GB10 and M5 Max) and gives the same bits.
   - Other GPUs keep their output bits. MoE output on Apple still matches llama.cpp, and spec == plain.
 - **First run, accessibility and speed**: a laptop alone now gives the 4 GB the smallest model needs (and a short room offers "Give N GB from this device"), Start says what it will download, a Start/Join tap made before the room script loads is kept, and the landing page and join screen say what a room needs; the room is a labelled radio group with real headings, a live-announced conversation and AA contrast, and the landing demo has a Pause button; the room no longer loads the inference engine or blocks on PeerJS before the join screen works (JS before join 271 -> 135 KB, fonts self-hosted), Lighthouse accessibility 91 -> 100 (landing) and 98 -> 100 (room).
+
+### Fixed
+- **Room chat: emoji and non-Latin text no longer show broken characters (U+FFFD)** while an answer streams: a character split across two tokens is sent once it is whole.
+- **The tokenizer no longer freezes the host on one very long word**: merging was quadratic in a word's length (a 32,000-letter run took 18 s on the host's main thread); it now takes 42 ms, with the same tokens.
 
 ## [1.0.0] - 2026-09-27
 
