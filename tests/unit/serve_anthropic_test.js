@@ -76,7 +76,7 @@ Deno.test("anthropic: non-stream response", () => {
   eq(t.content, [{ type: "thinking", thinking: "t", signature: "" }, { type: "text", text: "x" }]);
   eq([t.stop_reason, t.stop_sequence], ["stop_sequence", "END"]);
   eq(t.usage, { input_tokens: 17, output_tokens: 1, cache_read_input_tokens: 22 }, "input_tokens leaves out the cache reads");
-  eq(["stop", "abort", "stop_seq", "max", "ctx"].map(stopReason), ["end_turn", "end_turn", "stop_sequence", "max_tokens", "max_tokens"]);
+  eq(["stop", "stop_seq", "max", "ctx"].map(stopReason), ["end_turn", "stop_sequence", "max_tokens", "model_context_window_exceeded"]);
 });
 Deno.test("anthropic: error shapes and statuses", () => {
   const e = (kind, m) => anthropicError(new ApiError(kind, m));

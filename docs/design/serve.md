@@ -244,6 +244,8 @@ data: [DONE]
   without `[DONE]` (what OpenAI does).
 
 `finish_reason`: `stop` (end token or a stop string), `length` (`max_tokens` or context full).
+When the host presses Stop the request ends as an error (503, or an error chunk and no `[DONE]`
+while streaming): a cut-off answer must not read as a finished one.
 A stop pressed by the host ends with `stop` as well.
 
 ### OpenAI: `GET /v1/models`
@@ -299,8 +301,9 @@ data: {"type":"message_stop"}
   `signature_delta` with `""`, `content_block_stop`; then the text block at index 1.
 - Failure mid-stream: `event: error\ndata: {"type":"error","error":{"type":"api_error","message":"…"}}`, close.
 
-`stop_reason`: `end_turn` (end token, or the host pressed stop), `stop_sequence` (with
-`stop_sequence` set to the one that matched), `max_tokens` (`max_tokens` or the context is full).
+`stop_reason`: `end_turn` (end token), `stop_sequence` (with `stop_sequence` set to the one that
+matched), `max_tokens`, `model_context_window_exceeded` (the context is full). When the host
+presses Stop the request ends as an error (529, or an `error` event and no `message_stop`).
 
 ### Anthropic: `GET /v1/models`
 

@@ -61,7 +61,7 @@ export function parseOpenAI(b) {
   };
 }
 
-const FINISH = { stop: "stop", stop_seq: "stop", abort: "stop", max: "length", ctx: "length" };
+const FINISH = { stop: "stop", stop_seq: "stop", max: "length", ctx: "length" };   // abort never gets here (http.js: an error)
 export const finishReason = (r) => FINISH[r] || "stop";
 const usageOf = (u, reused) => ({ prompt_tokens: u.in, completion_tokens: u.out, total_tokens: u.in + u.out, ...(reused ? { prompt_tokens_details: { cached_tokens: reused } } : {}) });
 

@@ -52,3 +52,33 @@ test("--max-queue 0 answers when idle and refuses only while busy", async () => 
   assert.equal((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).status, 200, "idle again: accepted");
   await t.close();
 });
+
+test("the host's Stop ends the request as an error, never as a finished answer", async () => {
+  const t = await start();
+  const stopped = (rid, h) => setImmediate(() => {
+    h({ t: "ai-genstart", rid, promptTokens: 5 });
+    h({ t: "ai-token", rid, text: "par" });
+    h({ t: "ai-gendone", rid, reason: "abort", usage: { in: 5, out: 1 } });
+  });
+  t.bridge.onAsk = stopped;
+  const a = await t.req("POST", "/v1/chat/completions", { body: chatBody() });
+  assert.equal(a.status, 503);
+  assert.match(JSON.parse(a.body).error.message, /host stopped this answer/);
+  const s = await t.req("POST", "/v1/chat/completions", { body: chatBody({ stream: true }) });
+  assert.equal(s.status, 200);
+  assert.match(s.body, /"content":"par"/);
+  assert.match(s.body, /host stopped this answer/);
+  assert.doesNotMatch(s.body, /\[DONE\]|"finish_reason":"stop"/);
+  const m = await t.req("POST", "/v1/messages", { body: msgBody({ stream: true }) });
+  assert.match(m.body, /event: error/);
+  assert.doesNotMatch(m.body, /message_stop|end_turn/);
+  await t.close();
+});
+
+test("a full context window is model_context_window_exceeded on Anthropic, length on OpenAI", async () => {
+  const t = await start();
+  t.bridge.onAsk = answer("x", { reason: "ctx" });
+  assert.equal(JSON.parse((await t.req("POST", "/v1/messages", { body: msgBody() })).body).stop_reason, "model_context_window_exceeded");
+  assert.equal(JSON.parse((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).body).choices[0].finish_reason, "length");
+  await t.close();
+});

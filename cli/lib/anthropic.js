@@ -49,7 +49,9 @@ export function parseAnthropic(b) {
   };
 }
 
-const STOP = { stop: "end_turn", abort: "end_turn", stop_seq: "stop_sequence", max: "max_tokens", ctx: "max_tokens" };
+// abort never gets here (http.js turns the host's Stop into an error); a full context window is the
+// Messages API's model_context_window_exceeded, not max_tokens
+const STOP = { stop: "end_turn", stop_seq: "stop_sequence", max: "max_tokens", ctx: "model_context_window_exceeded" };
 export const stopReason = (r) => STOP[r] || "end_turn";
 // input_tokens leaves out the tokens read from the cache, as in the Messages API (the OpenAI side counts
 // them in prompt_tokens, with cached_tokens as a detail)

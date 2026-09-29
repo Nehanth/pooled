@@ -103,6 +103,9 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
       case "ai-gendone": {
         const usage = { in: d.usage?.in ?? job.promptTokens ?? 0, out: d.usage?.out ?? 0 };
         if (d.reason === "error" || (d.failed && !d.reason)) { jobError(job, new ApiError("server", `generation failed in the room: ${d.err || "unknown error"}`)); return; }
+        // the host pressed Stop (the only abort a live client sees): a cut-off answer must not read as a
+        // finished one, so it ends as an error (an error event, or 503 / 529), never with stop / end_turn
+        if (d.reason === "abort") { jobError(job, new ApiError("unavailable", `the room's host stopped this answer after ${usage.out} tokens`)); return; }
         const out = { reason: d.reason, stopSeq: d.stopSeq, usage, reused: d.reused || 0 };
         served.n++;
         log(`${job.label}: ${usage.in} prompt + ${usage.out} tokens, ${d.reason}${d.reused ? `, ${d.reused} reused` : ""}`);

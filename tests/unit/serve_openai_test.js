@@ -89,7 +89,7 @@ Deno.test("openai: non-stream response and finish reasons", () => {
     choices: [{ index: 0, message: { role: "assistant", content: "Hello", refusal: null }, logprobs: null, finish_reason: "stop" }],
     usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 } });
   eq(openaiResponse({ id: "a", created: 0, model: "m", text: "x", think: "t", reason: "stop", usage: { in: 1, out: 1 } }).choices[0].message.reasoning_content, "t");
-  eq(["stop", "stop_seq", "abort", "max", "ctx"].map(finishReason), ["stop", "stop", "stop", "length", "length"]);
+  eq(["stop", "stop_seq", "max", "ctx"].map(finishReason), ["stop", "stop", "length", "length"]);
 });
 Deno.test("openai: error shapes and statuses", () => {
   const e = (kind, m, o) => openaiError(new ApiError(kind, m, o));
