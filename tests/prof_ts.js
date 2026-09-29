@@ -4,7 +4,8 @@
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { makeTokenizer } from "../engine/engine.js";
 import { qwen35Weights, tokenizerFromGGUF } from "../engine/gguf.js";
-import { openGGUF } from "./load_model.js";
+import { openGGUF, roomFlags } from "./load_model.js";
+import { roomQwen35Options, applyRoomFlags } from "../engine/preset.js";
 const MOEK = Deno.env.get("MOE_KERNEL") ? (Deno.env.get("MOE_KERNEL").startsWith("{") ? JSON.parse(Deno.env.get("MOE_KERNEL")) : Deno.env.get("MOE_KERNEL")) : undefined;   // moeKernel: legacy | default | JSON
 const PATH = Deno.env.get("Q38") ? "../models/q38/model.gguf" : (Deno.env.get("MOE") || "../models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf");
 const model = openGGUF(PATH);   // node:fs reads through the converted-weights cache (tests/weight_cache.js; WEIGHT_CACHE=0 disables)
@@ -14,8 +15,10 @@ const device = await ad.requestDevice({ requiredFeatures: ["timestamp-query"], r
 const G = model.G; const tok = makeTokenizer(tokenizerFromGGUF(G.meta));
 const arch = G.meta["general.architecture"], L = G.meta[arch + ".block_count"] - (G.meta[arch + ".nextn_predict_layers"] || 0);
 const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true });
-const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
-  moeFuse: Deno.env.get("MOE_FUSE") !== "0", moeDnRows: +(Deno.env.get("MOE_DN_ROWS") || 1), moeKernel: MOEK });   // MOE_FUSE=0: unfused MoE kernels (A/B)
+// the room's settings (engine/preset.js); MOE_FUSE=0 / MOE_DN_ROWS=N are ?moefuse / ?moednrows, ROOM_FLAGS takes any other
+const flags = roomFlags({ ...(Deno.env.get("MOE_FUSE") ? { moefuse: Deno.env.get("MOE_FUSE") } : {}), ...(Deno.env.get("MOE_DN_ROWS") ? { moednrows: Deno.env.get("MOE_DN_ROWS") } : {}) });
+const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
+  vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(flags), moeKernel: MOEK }), flags);   // MOE_FUSE=0: unfused MoE kernels (A/B)
 if (eng.moeK) console.log("moeKernel", JSON.stringify(eng.moeK), "moeFuse", eng.moeFuse);
 const ids = tok.encode("The capital of France is"); for (const id of ids) await eng.forwardToken(id);
 // wall time, normal path

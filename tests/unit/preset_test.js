@@ -60,7 +60,7 @@ Deno.test("room.js builds its Qwen engine from the preset and reads no engine fl
 });
 
 Deno.test("benchmarks and profilers build their Qwen engines from the same preset", () => {
-  for (const p of ["benchmarks/bench.js", "benchmarks/bench_breakdown.js", "benchmarks/bench_enc_probe.js", "benchmarks/bench_pipe_ab2.js", "tests/prof/prof_moe_decode.js", "tests/bench/prof.html", "tests/bench/bench.html", "tests/test_moe_split.js"]) {
+  for (const p of ["benchmarks/bench.js", "benchmarks/bench_breakdown.js", "benchmarks/bench_enc_probe.js", "benchmarks/bench_pipe_ab2.js", "tests/prof/prof_moe_decode.js", "tests/bench/prof.html", "tests/bench/bench.html", "tests/bench/layer_prof.html", "tests/test_moe_split.js"]) {
     const src = read(p);
     if (!/import \{[^}]*roomQwen35Options[^}]*\} from "[./]*engine\/preset\.js"/.test(src)) throw new Error(`${p} does not import the preset`);
     if (!src.includes("...roomQwen35Options(")) throw new Error(`${p} does not pass the preset to Qwen35Engine.create`);
@@ -76,5 +76,19 @@ Deno.test("every benchmark and profiler that builds a Qwen engine takes the pres
       const src = read(`${d}/${e.name}`);
       if (src.includes("Qwen35Engine.create(") && !src.includes("...roomQwen35Options(")) throw new Error(`${d}/${e.name} builds a Qwen engine without the room's preset (engine/preset.js)`);
     }
+  }
+});
+
+// the Deno profilers and benchmarks at the top of tests/ (prof_*.js, bench_*.js) and the memory probe page.
+// Exempt, each on purpose: prefill tile sweeps and calibrations that pin their own prefill options, and
+// bench_ctx.js (long-context runs; its engine options are being reworked in PR #252, move it then).
+const PRESET_EXEMPT = new Set(["tests/prof_prefill.js", "tests/bench_wide_tiles.js", "tests/calib_attn_tile.js", "tests/bench_ctx.js"]);
+Deno.test("the tests/ profilers and benchmarks and memprobe.html take the preset too", () => {
+  const files = ["memprobe.html"];
+  for (const e of Deno.readDirSync(new URL("../../tests", import.meta.url))) if (/^(prof|bench)_.*\.js$/.test(e.name)) files.push(`tests/${e.name}`);
+  const missing = files.filter((p) => !PRESET_EXEMPT.has(p) && read(p).includes("Qwen35Engine.create(") && !read(p).includes("...roomQwen35Options("));
+  if (missing.length) throw new Error(`build a Qwen engine without the room's preset (engine/preset.js): ${missing.join(", ")}`);
+  for (const p of ["tests/prof_ts.js", "tests/prof_moe.js", "tests/prof_overhead.js", "memprobe.html"]) {
+    if (!read(p).includes("applyRoomFlags(")) throw new Error(`${p} does not apply the preset's engine flags`);
   }
 });
