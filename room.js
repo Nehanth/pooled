@@ -768,7 +768,8 @@ async function start(create, resume = null) {
 }
 
 let wakeLock = null, awakeVideo = null;
-let awakeMode = null;   // how this screen stays on: "lock" (the Wake Lock API), "video", "none"; null before the first try
+let awakeMode = null;
+let overClosed = false;   // the Room over card was closed with the room still over (see roomOver)   // how this screen stays on: "lock" (the Wake Lock API), "video", "none"; null before the first try
 function awakeStatus(s) { const el = $("awake"); if (el && myMeta?.phone) el.textContent = s; }
 async function keepAwake() {
   // 1. the real API (iOS 16.4+, must be called from a tap)
@@ -817,10 +818,18 @@ function computeState() {
     color: devColor(myName),
     bytes: ai.range || mineDeal ? ai.shardBytes || 0 : 0,   // this device's share of the weights, once its load has started
     awake: awakeMode, ios: myMeta?.ua === "iPhone" || myMeta?.ua === "iPad",
-    // the room ended, or the host is gone and may come back: the Room over card says which
-    over: $("room-over").hidden ? null : { final: $("room-over-h").textContent === "Room over", why: $("room-over-why").textContent },
+    over: roomOver(),
   };
 }
+// the room ended, or the host is gone and may come back: the Room over card says which. Closing the
+// card doesn't bring the room back, so it still counts until the host is connected again.
+function roomOver() {
+  const card = { final: $("room-over-h").textContent === "Room over", why: $("room-over-why").textContent };
+  if (!$("room-over").hidden) return card;
+  if (overClosed && !card.final && conns.has(PREFIX + roomCode)) overClosed = false;
+  return overClosed ? card : null;
+}
+$("room-over-close").addEventListener("click", () => { overClosed = true; });
 const compute = computeScreen({ state: computeState, keepAwake, newRoom: () => $("room-over-new").click() });
 $("compute-open").addEventListener("click", () => compute.open());
 // the header's dots button says whether this device is working: "on" while it holds layers

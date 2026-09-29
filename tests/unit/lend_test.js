@@ -24,6 +24,7 @@ Deno.test("lend: no notes when all is well, idle or the room is over", () => {
   eq(lendNotes({ ...serving, awake: "lock", battery: { charging: true, level: 0.5 } }), []);
   eq(lendNotes({ phase: "idle", awake: "none" }), []);
   eq(lendNotes({ ...serving, awake: "none", over: { final: true } }), []);
+  eq(lendNotes({ phase: "serving", lo: null, hi: null, awake: "none" }), [], "no notes for a device that holds no layers");
 });
 Deno.test("lend: a screen that can sleep says which setting to change", () => {
   const [a] = lendNotes({ ...serving, awake: "none", ios: true }), [b] = lendNotes({ ...serving, awake: "none" });

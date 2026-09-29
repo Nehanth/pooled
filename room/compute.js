@@ -50,7 +50,8 @@ export function lendStatus(s) {
 // can sleep, a battery that is running down, a tab that was in the background. `awayMs` is how long
 // the tab was just hidden (null once the note has had its time).
 export function lendNotes(s) {
-  if (s.over || s.phase === "idle") return [];
+  // only while this device loads or holds layers: a device the room isn't using has nothing to keep up
+  if (s.over || s.phase === "idle" || (s.phase === "serving" && (s.lo == null || s.hi == null))) return [];
   const notes = [];
   if (s.awayMs >= 3000) notes.push(`This tab was in the background for ${Math.round(s.awayMs / 1000)} s, and passes can stall there. Keep it in front while lending.`);
   if (s.awake === "none") notes.push(s.ios ? "This screen can sleep and stop serving: set Auto-Lock to Never." : "This screen can sleep and stop serving: set the screen timeout to its longest.");
