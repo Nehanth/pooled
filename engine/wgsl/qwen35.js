@@ -86,16 +86,17 @@ fn dn_delta_gn(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_i
 }`;
 }
 
-// attn_flash (f16 KV) and attn_flash_q8 (int8 KV, one f32 scale per 32 values, llama.cpp q8_0
-// style) from one template: same structure and arithmetic order, only the K/V reads differ.
+// attn_flash (f16 KV) and attn_flash_q8 (llama.cpp q8_0 KV: int8 values, one f16 scale per 32) from
+// one template: same structure; the q8 score sums each 32-value block in integers-as-f32 and applies
+// the block's scale once (sum_b d_b * sum_i q_i * x_i), and V is dequantised value by value.
 function flashWGSL(q8) {
   const P = q8 ? "fq" : "fa";
   const binds = q8
     ? `@group(1) @binding(0) var<storage, read> ${P}_q: array<f32>;
 @group(1) @binding(1) var<storage, read> ${P}_k: array<u32>;      // 4 int8 per word
 @group(1) @binding(2) var<storage, read> ${P}_v: array<u32>;
-@group(1) @binding(3) var<storage, read> ${P}_ks: array<f32>;     // one scale per 32 values
-@group(1) @binding(4) var<storage, read> ${P}_vs: array<f32>;
+@group(1) @binding(3) var<storage, read> ${P}_ks: array<u32>;     // one f16 scale per 32 values, 2 per word
+@group(1) @binding(4) var<storage, read> ${P}_vs: array<u32>;
 @group(1) @binding(5) var<storage, read_write> ${P}_o: array<f32>;
 @group(1) @binding(6) var<storage, read_write> ${P}_ml: array<f32>;
 @group(1) @binding(7) var<uniform> ${P}: FA;`
@@ -110,12 +111,18 @@ function flashWGSL(q8) {
         let sb = (c0 + t) * (cfg.kvDim / 32u) + g * (hd / 32u);
         let qb = h * hd;
         var s: f32 = 0.0;
-        for (var p: u32 = 0u; p < hd / 4u; p++) {
-          let w = ${P}_k[kb + p]; let sc = ${P}_ks[sb + p / 8u];
-          s += fa_qs[qb + 4u * p] * (f32(bitcast<i32>(w << 24u) >> 24u) * sc);
-          s += fa_qs[qb + 4u * p + 1u] * (f32(bitcast<i32>(w << 16u) >> 24u) * sc);
-          s += fa_qs[qb + 4u * p + 2u] * (f32(bitcast<i32>(w << 8u) >> 24u) * sc);
-          s += fa_qs[qb + 4u * p + 3u] * (f32(bitcast<i32>(w) >> 24u) * sc);
+        for (var b: u32 = 0u; b < hd / 32u; b++) {
+          var bs: f32 = 0.0;
+          for (var j: u32 = 0u; j < 8u; j++) {
+            let p = b * 8u + j;
+            let w = ${P}_k[kb + p];
+            bs += fa_qs[qb + 4u * p] * f32(bitcast<i32>(w << 24u) >> 24u);
+            bs += fa_qs[qb + 4u * p + 1u] * f32(bitcast<i32>(w << 16u) >> 24u);
+            bs += fa_qs[qb + 4u * p + 2u] * f32(bitcast<i32>(w << 8u) >> 24u);
+            bs += fa_qs[qb + 4u * p + 3u] * f32(bitcast<i32>(w) >> 24u);
+          }
+          let si = sb + b;
+          s += bs * unpack2x16float(${P}_ks[si / 2u])[si & 1u];
         }`
     : `let kb = (c0 + t) * kvw + g * hw;
         let qb = h * hd;
@@ -127,7 +134,8 @@ function flashWGSL(q8) {
         }`;
   const vread = q8
     ? `let vw = ${P}_v[(c0 + t) * (cfg.kvDim / 4u) + g * (hd / 4u) + tid / 4u];
-        let v = f32(bitcast<i32>(vw << (24u - 8u * (tid & 3u))) >> 24u) * ${P}_vs[(c0 + t) * (cfg.kvDim / 32u) + (g * hd + tid) / 32u];`
+        let vsi = (c0 + t) * (cfg.kvDim / 32u) + (g * hd + tid) / 32u;
+        let v = f32(bitcast<i32>(vw << (24u - 8u * (tid & 3u))) >> 24u) * unpack2x16float(${P}_vs[vsi / 2u])[vsi & 1u];`
     : `let v = unpack2x16float(${P}_v[(c0 + t) * kvw + g * hw + tid / 2u])[tid & 1u];`;
   return `
 ${binds}
@@ -181,6 +189,132 @@ fn attn_flash${q8 ? "_q8" : ""}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(l
   if (tid < G) {
     let b = (col * cfg.nH + g * G + tid) * ${P}.maxSplits + sp;
     ${P}_ml[b * 2u] = fa_m[tid]; ${P}_ml[b * 2u + 1u] = fa_l[tid];
+  }
+}`;
+}
+
+// attn_flash_t2 (f16 KV) and attn_flash_t2_q8 (q8_0 KV) from one template; the q8 score and V reads
+// are attn_flash_q8's, term for term, so t2_q8 is bit-identical to attn_flash_q8 per column.
+function flashT2WGSL(q8) {
+  const P = q8 ? "fu" : "ft";
+  const binds = q8
+    ? `@group(1) @binding(0) var<storage, read> ${P}_q: array<f32>;
+@group(1) @binding(1) var<storage, read> ${P}_k: array<u32>;
+@group(1) @binding(2) var<storage, read> ${P}_v: array<u32>;
+@group(1) @binding(3) var<storage, read> ${P}_ks: array<u32>;
+@group(1) @binding(4) var<storage, read> ${P}_vs: array<u32>;
+@group(1) @binding(5) var<storage, read_write> ${P}_o: array<f32>;
+@group(1) @binding(6) var<storage, read_write> ${P}_ml: array<f32>;
+@group(1) @binding(7) var<uniform> ${P}: FA;`
+    : `@group(1) @binding(0) var<storage, read> ${P}_q: array<f32>;
+@group(1) @binding(1) var<storage, read> ${P}_k: array<u32>;
+@group(1) @binding(2) var<storage, read> ${P}_v: array<u32>;
+@group(1) @binding(3) var<storage, read_write> ${P}_o: array<f32>;
+@group(1) @binding(4) var<storage, read_write> ${P}_ml: array<f32>;
+@group(1) @binding(5) var<uniform> ${P}: FA;`;
+  const dot = q8
+    ? `let kb = (c0 + t) * (cfg.kvDim / 4u) + g * (hd / 4u);
+        let sb = (c0 + t) * (cfg.kvDim / 32u) + g * (hd / 32u);
+        let qb = j * hd;
+        var s: f32 = 0.0;
+        for (var b: u32 = 0u; b < hd / 32u; b++) {
+          var bs: f32 = 0.0;
+          for (var i: u32 = 0u; i < 8u; i++) {
+            let p = b * 8u + i;
+            let w = ${P}_k[kb + p];
+            bs += ft_qs[qb + 4u * p] * f32(bitcast<i32>(w << 24u) >> 24u);
+            bs += ft_qs[qb + 4u * p + 1u] * f32(bitcast<i32>(w << 16u) >> 24u);
+            bs += ft_qs[qb + 4u * p + 2u] * f32(bitcast<i32>(w << 8u) >> 24u);
+            bs += ft_qs[qb + 4u * p + 3u] * f32(bitcast<i32>(w) >> 24u);
+          }
+          let si = sb + b;
+          s += bs * unpack2x16float(${P}_ks[si / 2u])[si & 1u];
+        }`
+    : `let kb = (c0 + t) * kvw + g * hw;
+        let qb = j * hd;
+        var s: f32 = 0.0;
+        for (var p: u32 = 0u; p < hw; p++) {
+          let kk = unpack2x16float(${P}_k[kb + p]);
+          s += ft_qs[qb + 2u * p] * kk.x;
+          s += ft_qs[qb + 2u * p + 1u] * kk.y;
+        }`;
+  const vread = q8
+    ? `let vw = ${P}_v[(c0 + t) * (cfg.kvDim / 4u) + g * (hd / 4u) + tid / 4u];
+        let vsi = (c0 + t) * (cfg.kvDim / 32u) + (g * hd + tid) / 32u;
+        let v = f32(bitcast<i32>(vw << (24u - 8u * (tid & 3u))) >> 24u) * unpack2x16float(${P}_vs[vsi / 2u])[vsi & 1u];`
+    : `let v = unpack2x16float(${P}_v[(c0 + t) * kvw + g * hw + tid / 2u])[tid & 1u];`;
+  return `
+${binds}
+@compute @workgroup_size(256)
+fn attn_flash_t2${q8 ? "_q8" : ""}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let sp = wg.x; let cb = wg.y * 2u; let g = wg.z; let tid = lid.x;
+  let nc = max(frame.nCols, 1u);
+  let hd = cfg.headDim; let G = cfg.nH / cfg.nKV;
+  let hw = hd / 2u; let kvw = cfg.kvDim / 2u;
+  let rs = sqrt(f32(hd));
+  let t0 = sp * ${P}.splitLen;
+  // where each of the two columns stops in this split (t0 = nothing to do)
+  let s0 = frame.seqLen + cb; let s1 = s0 + 1u;
+  let e0 = select(t0, min(s0, t0 + ${P}.splitLen), cb < nc && t0 < s0);
+  let e1 = select(t0, min(s1, t0 + ${P}.splitLen), cb + 1u < nc && t0 < s1);
+  let t1 = max(e0, e1);
+  if (t1 <= t0) { return; }
+  let GH = 2u * G;
+  for (var w: u32 = tid; w < GH * hd; w += 256u) {
+    let c = w / (G * hd);
+    if (cb + c < nc) { ft_qs[w] = ${P}_q[(cb + c) * ${P}.s0 + g * G * hd + w % (G * hd)]; }
+  }
+  if (tid < GH) { ft_m[tid] = -3.0e38; ft_l[tid] = 0.0; }
+  var acc: array<f32, 16>;
+  for (var j: u32 = 0u; j < 16u; j++) { acc[j] = 0.0; }
+  workgroupBarrier();
+  for (var c0: u32 = t0; c0 < t1; c0 += 64u) {
+    let n0 = select(0u, min(64u, e0 - c0), c0 < e0);
+    let n1 = select(0u, min(64u, e1 - c0), c0 < e1);
+    for (var w: u32 = tid; w < GH * 64u; w += 256u) {
+      let j = w / 64u; let t = w % 64u;
+      if (t < select(n0, n1, j >= G)) {
+        ${dot}
+        ft_sc[w] = s / rs;
+      }
+    }
+    workgroupBarrier();
+    if (tid < GH) {
+      let n = select(n0, n1, tid >= G);
+      if (n > 0u) {
+        let b = tid * 64u;
+        var cm = ft_m[tid];
+        for (var t: u32 = 0u; t < n; t++) { cm = max(cm, ft_sc[b + t]); }
+        let alpha = exp(ft_m[tid] - cm);
+        var l = ft_l[tid] * alpha;
+        for (var t: u32 = 0u; t < n; t++) { let e = exp(ft_sc[b + t] - cm); ft_sc[b + t] = e; l += e; }
+        ft_m[tid] = cm; ft_l[tid] = l; ft_a[tid] = alpha;
+      }
+    }
+    workgroupBarrier();
+    if (tid < hd) {
+      if (n0 > 0u) { for (var h: u32 = 0u; h < G; h++) { acc[h] *= ft_a[h]; } }
+      if (n1 > 0u) { for (var h: u32 = 0u; h < G; h++) { acc[G + h] *= ft_a[G + h]; } }
+      let nm = max(n0, n1);
+      for (var t: u32 = 0u; t < nm; t++) {
+        ${vread}
+        if (t < n0) { for (var h: u32 = 0u; h < G; h++) { acc[h] += ft_sc[h * 64u + t] * v; } }
+        if (t < n1) { for (var h: u32 = 0u; h < G; h++) { acc[G + h] += ft_sc[(G + h) * 64u + t] * v; } }
+      }
+    }
+    workgroupBarrier();
+  }
+  for (var c: u32 = 0u; c < 2u; c++) {
+    if (select(e0, e1, c == 1u) > t0) {
+      let col = cb + c;
+      if (tid < hd) {
+        for (var h: u32 = 0u; h < G; h++) { ${P}_o[((col * cfg.nH + g * G + h) * ${P}.maxSplits + sp) * hd + tid] = acc[c * G + h]; }
+      }
+      if (tid < G) {
+        let b = (col * cfg.nH + g * G + tid) * ${P}.maxSplits + sp;
+        ${P}_ml[b * 2u] = ft_m[c * G + tid]; ${P}_ml[b * 2u + 1u] = ft_l[c * G + tid];
+      }
+    }
   }
 }`;
 }
@@ -839,14 +973,16 @@ fn kv_store(@builtin(global_invocation_id) gid: vec3<u32>) {
   ks_vc[row] = pack2x16float(vec2<f32>(ks_v[vo], ks_v[vo + 1u]));
 }
 
-// kv_store_q8: one thread per 32-value block of a K and a V row: scale = max|x| / 127, values
-// rounded to int8, 4 per word. The flash kernel dequantises value * scale.
+// kv_store_q8: llama.cpp q8_0 for each 32-value block of a K and a V row: d = max|x| / 127, values
+// round(x / d) as int8 (4 per word), d stored as f16 (quantisation uses the f32 d, as quantize_row_q8_0
+// does). One thread per pair of blocks, so each thread writes whole words of the scale arrays (2 f16
+// per word). 34 bytes per 32 values: 53% of f16. Needs kvDim % 64 == 0.
 @group(1) @binding(0) var<storage, read> k8_k: array<f32>;
 @group(1) @binding(1) var<storage, read> k8_v: array<f32>;
 @group(1) @binding(2) var<storage, read_write> k8_kc: array<u32>;
 @group(1) @binding(3) var<storage, read_write> k8_vc: array<u32>;
-@group(1) @binding(4) var<storage, read_write> k8_ks: array<f32>;
-@group(1) @binding(5) var<storage, read_write> k8_vs: array<f32>;
+@group(1) @binding(4) var<storage, read_write> k8_ks: array<u32>;
+@group(1) @binding(5) var<storage, read_write> k8_vs: array<u32>;
 @group(1) @binding(6) var<uniform> k8_mc: MC;           // s0 k column stride, s1 v column stride
 fn k8_block(x: ptr<function, array<f32, 32>>) -> vec2<f32> {   // (scale, 1/scale)
   var a: f32 = 0.0;
@@ -857,26 +993,37 @@ fn k8_block(x: ptr<function, array<f32, 32>>) -> vec2<f32> {   // (scale, 1/scal
 fn k8_pack(x: ptr<function, array<f32, 32>>, inv: f32, j: u32) -> u32 {
   var w: u32 = 0u;
   for (var b: u32 = 0u; b < 4u; b++) {
-    let q = i32(clamp(round((*x)[4u * j + b] * inv), -127.0, 127.0));
+    // roundf (half away from zero, as quantize_row_q8_0), not WGSL round (half to even)
+    let v = (*x)[4u * j + b] * inv;
+    let q = i32(clamp(sign(v) * floor(abs(v) + 0.5), -127.0, 127.0));
     w = w | ((bitcast<u32>(q) & 255u) << (8u * b));
   }
   return w;
 }
 @compute @workgroup_size(64)
 fn kv_store_q8(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let blk = gid.x; let col = gid.y;
-  let nb = cfg.kvDim / 32u;
-  if (blk >= nb) { return; }
+  let pr = gid.x; let col = gid.y;
+  let np = cfg.kvDim / 64u;
+  if (pr >= np) { return; }
   let p = frame.pos + col;
   var x: array<f32, 32>;
-  for (var i: u32 = 0u; i < 32u; i++) { x[i] = k8_k[col * k8_mc.s0 + blk * 32u + i]; }
-  var r = k8_block(&x);
-  k8_ks[p * nb + blk] = r.x;
-  for (var j: u32 = 0u; j < 8u; j++) { k8_kc[p * (cfg.kvDim / 4u) + blk * 8u + j] = k8_pack(&x, r.y, j); }
-  for (var i: u32 = 0u; i < 32u; i++) { x[i] = k8_v[col * k8_mc.s1 + blk * 32u + i]; }
-  r = k8_block(&x);
-  k8_vs[p * nb + blk] = r.x;
-  for (var j: u32 = 0u; j < 8u; j++) { k8_vc[p * (cfg.kvDim / 4u) + blk * 8u + j] = k8_pack(&x, r.y, j); }
+  var d = vec2<f32>(0.0);
+  for (var h: u32 = 0u; h < 2u; h++) {
+    let blk = pr * 2u + h;
+    for (var i: u32 = 0u; i < 32u; i++) { x[i] = k8_k[col * k8_mc.s0 + blk * 32u + i]; }
+    let r = k8_block(&x);
+    d[h] = r.x;
+    for (var j: u32 = 0u; j < 8u; j++) { k8_kc[p * (cfg.kvDim / 4u) + blk * 8u + j] = k8_pack(&x, r.y, j); }
+  }
+  k8_ks[p * np + pr] = pack2x16float(d);
+  for (var h: u32 = 0u; h < 2u; h++) {
+    let blk = pr * 2u + h;
+    for (var i: u32 = 0u; i < 32u; i++) { x[i] = k8_v[col * k8_mc.s1 + blk * 32u + i]; }
+    let r = k8_block(&x);
+    d[h] = r.x;
+    for (var j: u32 = 0u; j < 8u; j++) { k8_vc[p * (cfg.kvDim / 4u) + blk * 8u + j] = k8_pack(&x, r.y, j); }
+  }
+  k8_vs[p * np + pr] = pack2x16float(d);
 }
 
 // attn_flash: one 256-thread workgroup per (split of splitLen positions, column, kv head). The
@@ -899,97 +1046,13 @@ ${flashWGSL(true)}
 // read once for both columns' 2 x G query heads. Per (column, head) the scores, the running max /
 // sum and the output accumulate in exactly attn_flash's order, so the partials are bit-identical
 // to running the columns one by one (decode and verify still agree). Needs 2 * G * headDim <= 3072.
-@group(1) @binding(0) var<storage, read> ft_q: array<f32>;
-@group(1) @binding(1) var<storage, read> ft_k: array<u32>;
-@group(1) @binding(2) var<storage, read> ft_v: array<u32>;
-@group(1) @binding(3) var<storage, read_write> ft_o: array<f32>;
-@group(1) @binding(4) var<storage, read_write> ft_ml: array<f32>;
-@group(1) @binding(5) var<uniform> ft: FA;
 var<workgroup> ft_qs: array<f32, 3072>;
 var<workgroup> ft_sc: array<f32, 768>;
 var<workgroup> ft_m: array<f32, 16>;
 var<workgroup> ft_l: array<f32, 16>;
 var<workgroup> ft_a: array<f32, 16>;
-@compute @workgroup_size(256)
-fn attn_flash_t2(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let sp = wg.x; let cb = wg.y * 2u; let g = wg.z; let tid = lid.x;
-  let nc = max(frame.nCols, 1u);
-  let hd = cfg.headDim; let G = cfg.nH / cfg.nKV;
-  let hw = hd / 2u; let kvw = cfg.kvDim / 2u;
-  let rs = sqrt(f32(hd));
-  let t0 = sp * ft.splitLen;
-  // where each of the two columns stops in this split (t0 = nothing to do)
-  let s0 = frame.seqLen + cb; let s1 = s0 + 1u;
-  let e0 = select(t0, min(s0, t0 + ft.splitLen), cb < nc && t0 < s0);
-  let e1 = select(t0, min(s1, t0 + ft.splitLen), cb + 1u < nc && t0 < s1);
-  let t1 = max(e0, e1);
-  if (t1 <= t0) { return; }
-  let GH = 2u * G;
-  for (var w: u32 = tid; w < GH * hd; w += 256u) {
-    let c = w / (G * hd);
-    if (cb + c < nc) { ft_qs[w] = ft_q[(cb + c) * ft.s0 + g * G * hd + w % (G * hd)]; }
-  }
-  if (tid < GH) { ft_m[tid] = -3.0e38; ft_l[tid] = 0.0; }
-  var acc: array<f32, 16>;
-  for (var j: u32 = 0u; j < 16u; j++) { acc[j] = 0.0; }
-  workgroupBarrier();
-  for (var c0: u32 = t0; c0 < t1; c0 += 64u) {
-    let n0 = select(0u, min(64u, e0 - c0), c0 < e0);
-    let n1 = select(0u, min(64u, e1 - c0), c0 < e1);
-    for (var w: u32 = tid; w < GH * 64u; w += 256u) {
-      let j = w / 64u; let t = w % 64u;
-      if (t < select(n0, n1, j >= G)) {
-        let kb = (c0 + t) * kvw + g * hw;
-        let qb = j * hd;
-        var s: f32 = 0.0;
-        for (var p: u32 = 0u; p < hw; p++) {
-          let kk = unpack2x16float(ft_k[kb + p]);
-          s += ft_qs[qb + 2u * p] * kk.x;
-          s += ft_qs[qb + 2u * p + 1u] * kk.y;
-        }
-        ft_sc[w] = s / rs;
-      }
-    }
-    workgroupBarrier();
-    if (tid < GH) {
-      let n = select(n0, n1, tid >= G);
-      if (n > 0u) {
-        let b = tid * 64u;
-        var cm = ft_m[tid];
-        for (var t: u32 = 0u; t < n; t++) { cm = max(cm, ft_sc[b + t]); }
-        let alpha = exp(ft_m[tid] - cm);
-        var l = ft_l[tid] * alpha;
-        for (var t: u32 = 0u; t < n; t++) { let e = exp(ft_sc[b + t] - cm); ft_sc[b + t] = e; l += e; }
-        ft_m[tid] = cm; ft_l[tid] = l; ft_a[tid] = alpha;
-      }
-    }
-    workgroupBarrier();
-    if (tid < hd) {
-      if (n0 > 0u) { for (var h: u32 = 0u; h < G; h++) { acc[h] *= ft_a[h]; } }
-      if (n1 > 0u) { for (var h: u32 = 0u; h < G; h++) { acc[G + h] *= ft_a[G + h]; } }
-      let nm = max(n0, n1);
-      for (var t: u32 = 0u; t < nm; t++) {
-        let v = unpack2x16float(ft_v[(c0 + t) * kvw + g * hw + tid / 2u])[tid & 1u];
-        if (t < n0) { for (var h: u32 = 0u; h < G; h++) { acc[h] += ft_sc[h * 64u + t] * v; } }
-        if (t < n1) { for (var h: u32 = 0u; h < G; h++) { acc[G + h] += ft_sc[(G + h) * 64u + t] * v; } }
-      }
-    }
-    workgroupBarrier();
-  }
-  for (var c: u32 = 0u; c < 2u; c++) {
-    if (select(e0, e1, c == 1u) > t0) {
-      let col = cb + c;
-      if (tid < hd) {
-        for (var h: u32 = 0u; h < G; h++) { ft_o[((col * cfg.nH + g * G + h) * ft.maxSplits + sp) * hd + tid] = acc[c * G + h]; }
-      }
-      if (tid < G) {
-        let b = (col * cfg.nH + g * G + tid) * ft.maxSplits + sp;
-        ft_ml[b * 2u] = ft_m[c * G + tid]; ft_ml[b * 2u + 1u] = ft_l[c * G + tid];
-      }
-    }
-  }
-}
-
+${flashT2WGSL(false)}
+${flashT2WGSL(true)}
 @group(1) @binding(0) var<storage, read> fc_o: array<f32>;
 @group(1) @binding(1) var<storage, read> fc_ml: array<f32>;
 @group(1) @binding(2) var<storage, read_write> fc_out: array<f32>;

@@ -1557,7 +1557,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched
       // attention) for A/B timing; both give the same bits, so devices may differ
       ...(new URLSearchParams(location.search).get("fuse") === "0" ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
-      // ?kv=q8: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics a little
+      // ?kv=q8: llama.cpp q8_0 KV cache (53% of f16's memory) for long contexts; changes the numerics a little
       kvQ8: new URLSearchParams(location.search).get("kv") === "q8",
       // ?moefuse=0: the unfused MoE FFN kernels (A/B). The fused path (the default) gives different
       // MoE bits, so every device of a room should run the same setting; ?moednrows=1|2|4 tunes it
@@ -1566,8 +1566,8 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       // Prefill options (attnPrefillTile, prefillUbatch, moeGroupPrefill) are deliberately not passed: every
       // device takes the engine's defaults, so host and workers agree. Tiled prefill attention runs on the
       // 16-column prefill frames of every device; wide GEMM + expert-grouped MoE only in solo prefillTokens
-      // (the device holding the embedding; a split prefill sends 16-column frames). ?kv=q8 turns the tiled
-      // attention off and ?moefuse=0 the grouped MoE on that device only.
+      // (the device holding the embedding; a split prefill sends 16-column frames). ?moefuse=0 turns the
+      // grouped MoE off on that device only (?kv=q8 keeps the tiled attention: it reads q8_0 K/V too).
       // GPU sampling, on by default (?gpusample=0: off): argmax / top-k of the head in the same submit,
       // 16-520 bytes back instead of the 1 MB logits vector; a masked sampler (tool-name constraint)
       // still gets the logits. ?argmaxwide=0|1 (default: same as gpusample): the draft argmax as the

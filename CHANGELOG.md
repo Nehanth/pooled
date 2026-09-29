@@ -5,6 +5,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 ## [Unreleased]
 
 ### Changed
+- **KV cache `kvQ8` is now llama.cpp q8_0** (f16 scale per 32 values: 53% of f16's bytes instead of 56%), and it keeps the two-column verify kernel and the tiled prefill attention. Still opt-in (`kvQ8: true`, room `?kv=q8`): Qwen 3.6 35B at 32K decodes +7% plain / +16% spec on GB10, but mean KL against f16 is 0.04 and perplexity on the true text rises 6% (docs/research/kv-quant-2026-09.md). States saved with the old int8 layout are refused.
 - **Metal (Apple GPUs)**:
   - The MoE's default prompt processing (wide prefill at ubatch 256 plus grouped experts) no longer loses the device under Deno on an M5 Max. Wide prefill now submits every 8 layers, which also makes GB10 MoE prefill about 5% faster, with bit-identical results.
   - Apple GPUs in Chrome and Safari get wider fused MoE expert kernels (`moeFusedLayout`; M5 Max kernel time: gate/up 0.49x, down 0.55x). Qwen 3.6 35B decode in Chrome on an M5 Max: +5.6% plain (86.1 -> 90.9 tok/s), +11% spec.

@@ -10,6 +10,7 @@ import { f16ToF32, f32ToF16 } from "../../engine/gguf.js";
 
 const H = {
   unpack2x16float: (w) => [f16ToF32(w & 0xffff), f16ToF32(w >>> 16)],
+  i8x4: (w) => [(w << 24) >> 24, (w << 16) >> 24, (w << 8) >> 24, w >> 24],
   vmad: (a, s, v) => typeof s === "number" ? a.map((x, j) => x + s * v[j]) : a.map((x, j) => x + s[j] * v[j]),
   select: (f, t, c) => (c ? t : f), min: Math.min, max: Math.max, exp: Math.exp, sqrt: Math.sqrt, f32: (x) => x,
 };
@@ -34,16 +35,31 @@ function runGrid(body, names, args, gx, gy, gz, wgArrays) {
 }
 
 // one prefill pass of nc columns at basePos; returns max relative error vs exact attention
-function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgMem = 16384 }) {
+// q8: the caches are llama.cpp q8_0 (int8 words + f16 scales, 2 per word) and the reference uses the
+// dequantised values; rows at or past seqEnd get a NaN scale.
+function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgMem = 16384, q8 = false }) {
   const G = nH / nKV, kvDim = nKV * hd;
   const { faSplit, faSplits } = faSizing(maxSeq);
-  const c = attnTileConfig({ hd, G, faSplit, faSplits, wgMem, target, tk });
+  const c = attnTileConfig({ hd, G, faSplit, faSplits, wgMem, target, tk, q8 });
   if (!c) throw new Error("config rejected");
   const seqEnd = basePos + nc;
   // K/V caches (f16 pairs); rows at or past seqEnd hold NaN: the kernel must never use them
-  const kc = new Uint32Array(maxSeq * kvDim / 2), vc = new Uint32Array(maxSeq * kvDim / 2);
+  let kc = new Uint32Array(maxSeq * kvDim / 2), vc = new Uint32Array(maxSeq * kvDim / 2);
   const K = new Float64Array(maxSeq * kvDim), V = new Float64Array(maxSeq * kvDim);
-  for (let p = 0; p < maxSeq; p++) for (let w = 0; w < kvDim / 2; w++) {
+  const ks = new Uint32Array(maxSeq * kvDim / 64), vs = new Uint32Array(maxSeq * kvDim / 64);
+  if (q8) {
+    kc = new Uint32Array(maxSeq * kvDim / 4); vc = new Uint32Array(maxSeq * kvDim / 4);
+    for (const [c8, sc, R, amp, off] of [[kc, ks, K, 2, 0.5], [vc, vs, V, 1, 0.5]]) for (let p = 0; p < maxSeq; p++) for (let b = 0; b < kvDim / 32; b++) {
+      const x = Array.from({ length: 32 }, () => (rnd() - off) * amp * (b % 3 + 1));
+      const d = Math.max(...x.map(Math.abs)) / 127, dh = p < seqEnd ? f32ToF16(d) : 0x7e00;
+      sc[p * kvDim / 64 + (b >> 1)] |= dh << (16 * (b & 1));
+      for (let i = 0; i < 32; i++) {
+        const qv = Math.max(-127, Math.min(127, Math.round(x[i] / d)));
+        c8[p * kvDim / 4 + b * 8 + (i >> 2)] |= (qv & 255) << (8 * (i & 3));
+        R[p * kvDim + b * 32 + i] = p < seqEnd ? qv * f16ToF32(dh) : NaN;
+      }
+    }
+  } else for (let p = 0; p < maxSeq; p++) for (let w = 0; w < kvDim / 2; w++) {
     const pk = (i, a, f) => { const h = p < seqEnd ? f32ToF16(f) : 0x7e00; a[p * kvDim + 2 * w + i] = p < seqEnd ? f16ToF32(h) : NaN; return h; };
     kc[p * kvDim / 2 + w] = pk(0, K, (rnd() - 0.5) * 2) | (pk(1, K, (rnd() - 0.5) * 2) << 16);
     vc[p * kvDim / 2 + w] = pk(0, V, rnd() - 0.5) | (pk(1, V, rnd() - 0.5) << 16);
@@ -56,7 +72,7 @@ function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgM
   const U = { s0, s1, splitLen: faSplit, maxSplits: faSplits };
   const js = attnTileBodies(c, true);
   const wgA = () => [Array.from({ length: c.TK * hd / 4 }, () => [NaN, NaN, NaN, NaN]), new Float64Array(c.TK * 256).fill(NaN)];
-  runGrid(js.flash, ["cfg", "frame", "at_q", "at_k", "at_v", "at_o", "at_ml", "atu"], [cfg, frame, q, kc, vc, faO, faML, U],
+  runGrid(js.flash, ["cfg", "frame", "at_q", "at_k", "at_v", "at_ks", "at_vs", "at_o", "at_ml", "atu"], [cfg, frame, q, kc, vc, ks, vs, faO, faML, U],
     faSplits, nKV, Math.ceil(nc / c.CW), wgA);
   runGrid(js.combine, ["cfg", "frame", "atc_o", "atc_ml", "atc_out", "atc"], [cfg, frame, faO, faML, out, U], nH, nc, 1, wgA);
   let maxRel = 0;
@@ -100,8 +116,8 @@ Deno.test("attn_tile: split length mirror and bounds", () => {
 });
 
 Deno.test("attn_tile: WGSL shape", () => {
-  for (const [hd, G, wgMem] of [[256, 6, 16384], [256, 8, 16384], [256, 8, 32768], [128, 4, 16384], [64, 2, 16384]]) {
-    const c = attnTileConfig({ hd, G, faSplit: 256, faSplits: 64, wgMem });
+  for (const [hd, G, wgMem, q8] of [[256, 6, 16384], [256, 8, 16384], [256, 8, 32768], [128, 4, 16384], [64, 2, 16384], [256, 8, 16384, true], [256, 6, 32768, true]]) {
+    const c = attnTileConfig({ hd, G, faSplit: 256, faSplits: 64, wgMem, q8 });
     const src = attnTileWGSL(c);
     const bytes = c.TK * hd * 4 + c.TK * 256 * 4;
     if (bytes > wgMem) throw new Error("workgroup memory over the limit");
@@ -122,9 +138,12 @@ const cases = [
   { name: "27B shape, TK 16", hd: 256, nH: 24, nKV: 4, basePos: 90, maxSeq: 4096, wgMem: 32768 },
   { name: "small head, 1 split target", hd: 64, nH: 8, nKV: 2, basePos: 219, maxSeq: 2048, target: 1 },
   { name: "8-column batch", hd: 128, nH: 12, nKV: 2, nc: 8, basePos: 77, maxSeq: 1024 },
+  { name: "q8_0 KV, MoE shape, 5 splits", hd: 256, nH: 16, nKV: 2, basePos: 301, maxSeq: 4096, q8: true },
+  { name: "q8_0 KV, 27B shape, TK 16", hd: 256, nH: 24, nKV: 4, basePos: 90, maxSeq: 4096, wgMem: 32768, q8: true },
+  { name: "q8_0 KV, small head", hd: 64, nH: 8, nKV: 2, basePos: 219, maxSeq: 2048, target: 1, q8: true },
 ];
 for (const t of cases) Deno.test(`attn_tile: ${t.name}`, () => {
   const { maxRel, c, splits } = check(t);
-  console.log(`  ${t.name}: TK ${c.TK}, CW ${c.CW}, ${splits} splits, max rel err ${maxRel.toExponential(2)} (float64 run, f16 K/V)`);
+  console.log(`  ${t.name}: TK ${c.TK}, CW ${c.CW}, ${splits} splits, max rel err ${maxRel.toExponential(2)} (float64 run, ${t.q8 ? "q8_0" : "f16"} K/V)`);
   if (!(maxRel < 1e-9)) throw new Error(`max rel err ${maxRel}`);
 });

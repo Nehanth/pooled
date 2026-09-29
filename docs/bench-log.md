@@ -773,3 +773,11 @@ above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32
 43.92; 27B prefill 31.9 / 58.5 / 53.6, plain 14.79 / 14.35 / 12.43, spec 23.54 / 21.13 / 15.96, spec == plain on
 every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
 prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).
+
+## 2026-09-29: q8_0 KV cache (kvQ8, opt-in), branch perf/kf-kv-quant, GB10
+
+Deno `bench_ctx.js`, MoE, CTX 33000, f16 vs q8_0 back to back: fill 8192 plain 15.79 -> 16.47, spec 22.89 -> 23.49;
+fill 32000 plain 11.45 -> 12.29 (+7%), spec 13.22 -> 15.29 (+16%); prefill -3%; spec == plain on every row.
+Quality (`kv_quant_eval.js`, code corpus): KL(f16 || q8_0) mean 0.0045 at 4K (below the prefill-reorder noise
+floor, 0.013), 0.040 at 32K (noise floor 0.0003), top-1 97.9%, ppl 1.182 -> 1.253. Kept opt-in.
+Details: docs/research/kv-quant-2026-09.md.

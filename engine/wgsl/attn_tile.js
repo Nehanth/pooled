@@ -33,13 +33,14 @@
 import { wgslToJs } from "./moe.js";
 
 // { HD, G, CW, TK, FASPLIT, FASPLITS, TARGET } or null when the shape is not supported
-export function attnTileConfig({ hd, G, faSplit, faSplits, wgMem = 16384, target = 32, tk = 0 }) {
+export function attnTileConfig({ hd, G, faSplit, faSplits, wgMem = 16384, target = 32, tk = 0, q8 = false }) {
+  if (q8 && hd % 32 !== 0) return null;
   if (!(hd % 16 === 0 && hd >= 16 && hd <= 256 && G >= 1 && G <= 64)) return null;
   if (faSplit % 64 !== 0 || faSplits < 1) return null;
   const bytes = (TK) => TK * hd * 4 + TK * 256 * 4;
   const TK = tk || [16, 8, 4].find((t) => bytes(t) <= wgMem);
   if (!TK || bytes(TK) > wgMem) return null;
-  return { HD: hd, G, CW: Math.floor(64 / G), TK, FASPLIT: faSplit, FASPLITS: faSplits, TARGET: Math.max(1, target | 0) };
+  return { HD: hd, G, CW: Math.floor(64 / G), TK, FASPLIT: faSplit, FASPLITS: faSplits, TARGET: Math.max(1, target | 0), Q8: !!q8 };
 }
 
 // JavaScript mirror of the kernel's split length for a pass whose last column sees seqEnd positions
@@ -53,6 +54,8 @@ function emit(js) {
     div: (a, b) => js ? `Math.floor((${a}) / (${b}))` : `((${a}) / (${b}))`,
     vzero: js ? `[0, 0, 0, 0]` : `vec4<f32>(0.0)`,
     v4of2: (a, b) => js ? `[...unpack2x16float(${a}), ...unpack2x16float(${b})]` : `vec4<f32>(unpack2x16float(${a}), unpack2x16float(${b}))`,
+    // four int8 of a q8_0 word times the block scale (the same f32 products attn_flash_q8 forms)
+    q8v4: (w, sc) => js ? `vmad([0, 0, 0, 0], ${sc}, i8x4(${w}))` : `(vec4<f32>(f32(bitcast<i32>(${w} << 24u) >> 24u), f32(bitcast<i32>(${w} << 16u) >> 24u), f32(bitcast<i32>(${w} << 8u) >> 24u), f32(bitcast<i32>(${w}) >> 24u)) * ${sc})`,
     v4: (a, b, c, d) => js ? `[${a}, ${b}, ${c}, ${d}]` : `vec4<f32>(${a}, ${b}, ${c}, ${d})`,
     vmad: (acc, s, v) => js ? `${acc} = vmad(${acc}, ${s}, ${v});` : `${acc} += ${s} * ${v};`,
     vscale: (acc, s) => js ? `${acc} = vmad([0, 0, 0, 0], ${s}, ${acc});` : `${acc} *= ${s};`,
@@ -74,12 +77,17 @@ export function attnTileBodies(c, js = false) {
   const { HD, G, CW, TK } = c;
   const NQ = HD / 16, HD4 = HD / 4, HW = HD / 2, RR = CW * G;
   const I = Array.from({ length: NQ }, (_, i) => i), T = Array.from({ length: TK }, (_, t) => t);
+  // K or V tile -> at_kv as f32 vec4s: f16 pairs, or (Q8) llama.cpp q8_0 words (4 int8) times the
+  // block's f16 scale (${src}s: 2 per word, one per 32 values)
   const tileLoad = (src) => `for (var w: u32 = tid; w < ${TK * HD4}u; w += 256u) {
       let t = ${E.div("w", `${HD4}u`)}; let d4 = w % ${HD4}u;
       ${E.vdecl("kv")}
-      if (c0 + t < t1) {
+      if (c0 + t < t1) {${c.Q8 ? `
+        let si = (c0 + t) * ${E.div("cfg.kvDim", "32u")} + g * ${HD / 32}u + ${E.div("d4", "8u")};
+        let sc = unpack2x16float(${src}s[${E.div("si", "2u")}])[si % 2u];
+        kv = ${E.q8v4(`${src}[(c0 + t) * ${E.div("cfg.kvDim", "4u")} + g * ${HD4}u + d4]`, "sc")};` : `
         let kb = (c0 + t) * kvw + g * ${HW}u + d4 * 2u;
-        kv = ${E.v4of2(`${src}[kb]`, `${src}[kb + 1u]`)};
+        kv = ${E.v4of2(`${src}[kb]`, `${src}[kb + 1u]`)};`}
       }
       at_kv[w] = kv;
     }`;
@@ -168,7 +176,8 @@ export function attnTileBodies(c, js = false) {
 }
 
 // A standalone module (compiled only when attnPrefillTile is on, so a problem here cannot take down
-// the main module). Bindings match attn_flash_t2 / attn_combine, so the engine binds the same buffers.
+// the main module). Bindings match attn_flash_t2 / attn_combine (Q8: attn_flash_q8), so the engine binds
+// the same buffers.
 export function attnTileWGSL(c) {
   const { flash, combine } = attnTileBodies(c);
   return /* wgsl */ `
@@ -183,11 +192,17 @@ struct FA { s0: u32, s1: u32, splitLen: u32, maxSplits: u32 };   // q col stride
 @group(0) @binding(1) var<uniform> frame: Frame;
 
 @group(1) @binding(0) var<storage, read> at_q: array<f32>;
-@group(1) @binding(1) var<storage, read> at_k: array<u32>;      // f16 pairs
+${c.Q8 ? `@group(1) @binding(1) var<storage, read> at_k: array<u32>;      // q8_0: 4 int8 per word
+@group(1) @binding(2) var<storage, read> at_v: array<u32>;
+@group(1) @binding(3) var<storage, read> at_ks: array<u32>;     // f16 scales, 2 per word
+@group(1) @binding(4) var<storage, read> at_vs: array<u32>;
+@group(1) @binding(5) var<storage, read_write> at_o: array<f32>;
+@group(1) @binding(6) var<storage, read_write> at_ml: array<f32>;
+@group(1) @binding(7) var<uniform> atu: FA;` : `@group(1) @binding(1) var<storage, read> at_k: array<u32>;      // f16 pairs
 @group(1) @binding(2) var<storage, read> at_v: array<u32>;
 @group(1) @binding(3) var<storage, read_write> at_o: array<f32>;
 @group(1) @binding(4) var<storage, read_write> at_ml: array<f32>;
-@group(1) @binding(5) var<uniform> atu: FA;
+@group(1) @binding(5) var<uniform> atu: FA;`}
 var<workgroup> at_kv: array<vec4<f32>, ${c.TK * c.HD / 4}>;
 var<workgroup> at_sp: array<f32, ${c.TK * 256}>;
 @compute @workgroup_size(256)

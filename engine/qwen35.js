@@ -63,7 +63,7 @@ export class Qwen35Engine {
   // is exactly the same as never having left (tests/e2e/state_synth.mjs). A device only holds its
   // own layers, so in a room every device saves and restores its own part under the same key.
   _stateParts(pos = this.pos) {
-    const kvRow = this.dims.kvDim * (this.kvQ8 ? 1 : this.flash ? 2 : 4), scRow = this.dims.kvDim / 32 * 4;
+    const kvRow = this.dims.kvDim * (this.kvQ8 ? 1 : this.flash ? 2 : 4), scRow = this.dims.kvDim / 32 * 2;
     const parts = [];
     for (const L of this.mtpLayer ? [...this.layers, this.mtpLayer] : this.layers) {
       if (L.isFull) {
@@ -78,7 +78,7 @@ export class Qwen35Engine {
   // What a saved state must match to be loaded here.
   stateSignature() {
     // pm only when prefill ran with f16 operands, so f32-made states keep their old signature
-    return { v: 1, lo: this.lo, hi: this.hi, mtp: !!this.mtpLayer, flash: !!this.flash, kvQ8: !!this.kvQ8, dims: [this.dims.dim, this.dims.kvDim, this.dims.nVH, this.dims.convDim],
+    return { v: 1, lo: this.lo, hi: this.hi, mtp: !!this.mtpLayer, flash: !!this.flash, kvQ8: this.kvQ8 ? "q8_0" : false, dims: [this.dims.dim, this.dims.kvDim, this.dims.nVH, this.dims.convDim],
       // wide prefill sums projections in another order: its states are not interchangeable with the default's
       ...(this.ubatch && this.prefillWide !== false ? { ub: this.ubatch } : {}),
       ...(this.prefillMath && this.prefillMath !== "f32" && this._pmAvail?.[this.prefillMath] ? { pm: this.prefillMath } : {}) };
@@ -257,13 +257,16 @@ export class Qwen35Engine {
     this.flash = attnFlash !== false && hd <= 256 && nH % nKV === 0 && nH / nKV <= 8 && nH / nKV * hd <= 2048;
     this.faSplit = Math.max(256, Math.ceil(maxSeq / 128 / 64) * 64);   // <= 128 splits per head
     this.faSplits = Math.ceil(maxSeq / this.faSplit);
-    // kvQ8: int8 K/V with one scale per 32 values (~56% of f16's memory: 36 KB per token for the
-    // whole 27B), for 32K+ contexts. Off by default: it changes the numerics (tests/e2e/flash_synth.mjs --q8).
-    this.kvQ8 = this.flash && kvQ8 === true && hd % 32 === 0;
+    // kvQ8: llama.cpp q8_0 K/V (int8, one f16 scale per 32 values: 53% of f16's memory, 34.8 KB per
+    // token for the whole 27B), for long contexts. Off by default: it changes the numerics
+    // (tests/kv_quant_eval.js, docs/research/kv-quant-2026-09.md; tests/e2e/flash_synth.mjs --q8).
+    this.kvQ8 = this.flash && kvQ8 === true && hd % 32 === 0 && kvDim % 64 === 0;
     this.ksPipe = this.kvQ8 ? "kv_store_q8" : "kv_store";
     this.faPipe = this.kvQ8 ? "attn_flash_q8" : "attn_flash";
+    this.ft2Pipe = this.kvQ8 ? "attn_flash_t2_q8" : "attn_flash_t2";
     // two columns per workgroup in batched passes (attn_flash_t2): K/V read once per pair, same bits
-    this.attnTileOn = this.flash && !this.kvQ8 && attnTile !== false && 2 * (nH / nKV) * hd <= 3072 && nH / nKV <= 8;
+    // (q8_0 KV: attn_flash_t2_q8, the same bits as attn_flash_q8)
+    this.attnTileOn = this.flash && attnTile !== false && 2 * (nH / nKV) * hd <= 3072 && nH / nKV <= 8;
     this.attnTile = this.attnTileOn;
     // attnPrefillTile: tiled causal flash attention for full-width prefill passes (engine/wgsl/attn_tile.js):
     // one workgroup per (split, kv head, group of up to 64 query rows) instead of per column (pair).
@@ -278,9 +281,10 @@ export class Qwen35Engine {
     // The kernel is compiled whenever it is not explicitly false, so engine.attnPrefillTile can be flipped
     // at runtime for A/B runs.
     const aptOn = attnPrefillTile !== false;
-    this.attnPTCfg = this.flash && !this.kvQ8 && attnPrefillTile !== false
+    // With kvQ8 the tile dequantises the q8_0 K/V as it stages them (the same values attn_flash_q8 reads).
+    this.attnPTCfg = this.flash && attnPrefillTile !== false
       ? attnTileConfig({ hd, G: nH / nKV, faSplit: this.faSplit, faSplits: this.faSplits,
-        wgMem: device.limits.maxComputeWorkgroupStorageSize, target: attnPrefillSplits, tk: attnPrefillTK }) : null;
+        wgMem: device.limits.maxComputeWorkgroupStorageSize, target: attnPrefillSplits, tk: attnPrefillTK, q8: this.kvQ8 }) : null;
     // fused attention glue (qsplit + q/k head_norm + rope in one dispatch, bit-identical); its
     // staging array holds one 256-wide head. engine.attnGlue = false restores the five dispatches.
     this.attnGlueOn = attnGlue !== false && hd <= 256;
@@ -469,7 +473,7 @@ export class Qwen35Engine {
       attn_glue: ["ro", "rw", "rw", "rw", "ro", "ro", "u", "u"],
       dn_delta_gn: ["ro", "ro", "ro", "rw", "ro", "ro", "rw", "u"],
       kv_store: ["ro", "ro", "rw", "rw", "u"], attn_flash: ["ro", "ro", "ro", "rw", "rw", "u"], attn_combine: ["ro", "ro", "rw", "u"],
-      kv_store_q8: ["ro", "ro", "rw", "rw", "rw", "rw", "u"], attn_flash_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"], attn_flash_t2: ["ro", "ro", "ro", "rw", "rw", "u"],
+      kv_store_q8: ["ro", "ro", "rw", "rw", "rw", "rw", "u"], attn_flash_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"], attn_flash_t2: ["ro", "ro", "ro", "rw", "rw", "u"], attn_flash_t2_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"],
       attn_scores_mc: ["ro", "ro", "rw", "u"], attn_softmax_wg_mc: ["rw"], attn_out_mc: ["ro", "ro", "rw", "u"],
       argmax: ["ro", "rw", "u"], emb_gather: ["ro", "ro", "ro", "rw", "u"],
       topk_a: ["ro", "rw", "u"], topk_b: ["ro", "rw", "u"],
@@ -785,8 +789,8 @@ export class Qwen35Engine {
         R.kCache = device.createBuffer({ size: maxSeq * kvDim * kvBytes, usage: S });
         R.vCache = device.createBuffer({ size: maxSeq * kvDim * kvBytes, usage: S });
         if (this.kvQ8) {
-          R.kScale = device.createBuffer({ size: maxSeq * kvDim / 32 * 4, usage: S });
-          R.vScale = device.createBuffer({ size: maxSeq * kvDim / 32 * 4, usage: S });
+          R.kScale = device.createBuffer({ size: maxSeq * kvDim / 32 * 2, usage: S });   // f16 scales
+          R.vScale = device.createBuffer({ size: maxSeq * kvDim / 32 * 2, usage: S });
         }
         const f = fuse([[L.wk, R.wk, kvDim], [L.wv, R.wv, kvDim]], dim);
         if (f) {
@@ -1256,7 +1260,7 @@ export class Qwen35Engine {
       {
         const p = enc.beginComputePass();
         if (this.flash) {
-          this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / (this.kvQ8 ? 32 : 2) / 64), 1, 1);
+          this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / (this.kvQ8 ? 64 : 2) / 64), 1, 1);
           this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
           this._dxyz(p, "attn_combine", L.bgCombine, D.nH, 1, 1);
         } else {
@@ -1390,7 +1394,7 @@ export class Qwen35Engine {
   // problem there only turns the option off (with a warning) instead of failing the engine.
   async _initAttnTile(device, layout0, bufType) {
     const C = GPUShaderStage.COMPUTE;
-    const specs = { attn_flash_tile: ["ro", "ro", "ro", "rw", "rw", "u"], attn_combine_tile: ["ro", "ro", "rw", "u"] };
+    const specs = { attn_flash_tile: this.kvQ8 ? ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"] : ["ro", "ro", "ro", "rw", "rw", "u"], attn_combine_tile: ["ro", "ro", "rw", "u"] };
     const pipes = {};
     let fail = null;
     device.pushErrorScope("validation");
@@ -1511,7 +1515,7 @@ export class Qwen35Engine {
       "dn_gates", "dn_conv", "dn_l2", "dn_delta", "dn_gatenorm",
       "rmsnorm_mc", "add_res_mc", "dn_gates_mc", "dn_conv_mc", "dn_l2_mc", "dn_pre_mc", "dn_delta_mc", "dn_gatenorm_mc",
       "qsplit_mc", "head_norm_mc", "rope_part_mc", "sigmoid_mul_mc", "attn_glue",
-      "attn_scores_mc", "attn_softmax_wg_mc", "attn_out_mc", "kv_store", "attn_flash", "attn_combine", "kv_store_q8", "attn_flash_q8", "attn_flash_t2",
+      "attn_scores_mc", "attn_softmax_wg_mc", "attn_out_mc", "kv_store", "attn_flash", "attn_combine", "kv_store_q8", "attn_flash_q8", "attn_flash_t2", "attn_flash_t2_q8",
       ...(this.pipes.attn_flash_tile ? ["attn_flash_tile", "attn_combine_tile"] : []),
       ...(this.moe ? ["moe_router", "moe_combine", "moe_gu_q4", "moe_gu_q8", "moe_dn_q4", "moe_dn_q8"] : []),
       ...(this.moeFuse ? ["moe_route", ...this.moe.guPairs.map((p) => "moe_gus_" + p), ...this.moe.dnPairs.map((p) => "moe_dnc_" + p)] : [])];
@@ -1634,9 +1638,11 @@ export class Qwen35Engine {
         flash: this.flash && this._bg2res(this.pipes[this.faPipe], [whole(B.q), { buffer: L.kCache }, { buffer: L.vCache },
           ...(this.kvQ8 ? [{ buffer: L.kScale }, { buffer: L.vScale }] : []), { buffer: this.faO }, { buffer: this.faML },
           { buffer: this.faUB }]),
-        flashT2: this.attnTileOn && this._bg2res(this.pipes.attn_flash_t2, [whole(B.q), { buffer: L.kCache }, { buffer: L.vCache }, { buffer: this.faO }, { buffer: this.faML }, { buffer: this.faUB }]),
+        flashT2: this.attnTileOn && this._bg2res(this.pipes[this.ft2Pipe], [whole(B.q), { buffer: L.kCache }, { buffer: L.vCache },
+          ...(this.kvQ8 ? [{ buffer: L.kScale }, { buffer: L.vScale }] : []), { buffer: this.faO }, { buffer: this.faML }, { buffer: this.faUB }]),
         combine: this.flash && this._bg2res(this.pipes.attn_combine, [{ buffer: this.faO }, { buffer: this.faML }, whole(B.attnOut), { buffer: this.faUB }]),
-        flashTile: !!this.pipes.attn_flash_tile && this._bg2res(this.pipes.attn_flash_tile, [whole(B.q), { buffer: L.kCache }, { buffer: L.vCache }, { buffer: this.faO }, { buffer: this.faML }, { buffer: this.faUB }]),
+        flashTile: !!this.pipes.attn_flash_tile && this._bg2res(this.pipes.attn_flash_tile, [whole(B.q), { buffer: L.kCache }, { buffer: L.vCache },
+          ...(this.kvQ8 ? [{ buffer: L.kScale }, { buffer: L.vScale }] : []), { buffer: this.faO }, { buffer: this.faML }, { buffer: this.faUB }]),
         combineTile: !!this.pipes.attn_combine_tile && this._bg2res(this.pipes.attn_combine_tile, [{ buffer: this.faO }, { buffer: this.faML }, whole(B.attnOut), { buffer: this.faUB }]),
         scoresMC: this.scoresMC && this._bg2res(this.pipes.attn_scores_mc, [whole(B.q), { buffer: L.kCache }, { buffer: this.scoresMC }, mcU(0, st(B.q))]),
         softmaxMC: this.scoresMC && this._bg2res(this.pipes.attn_softmax_wg_mc, [{ buffer: this.scoresMC }]),
@@ -1839,14 +1845,14 @@ export class Qwen35Engine {
   _encAttnCore(p, LB, M, basePos, nCols) {
     const D = this.dims;
     if (this.flash) {
-      this._dMC(p, this.ksPipe, M.kvStore, D.kvDim / (this.kvQ8 ? 32 : 2), 64, nCols);
+      this._dMC(p, this.ksPipe, M.kvStore, D.kvDim / (this.kvQ8 ? 64 : 2), 64, nCols);
       if (this.attnPrefillTile && M.flashTile && nCols === this.NC && nCols > 1 && !this._snapNow) {
         // full-width prefill pass (never a verify): tiled kernel over every split slot (slots past this
         // pass's split count exit at once; the kernel derives the split length from frame), then its combine
         this._dMC(p, "attn_flash_tile", M.flashTile, this.faSplits * 256, 256, D.nKV, Math.ceil(nCols / this.attnPTCfg.CW));
         this._dMC(p, "attn_combine_tile", M.combineTile, D.nH * 256, 256, nCols);
       } else {
-        if (this.attnTile && M.flashT2 && nCols > 1) this._dMC(p, "attn_flash_t2", M.flashT2, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, Math.ceil(nCols / 2), D.nKV);
+        if (this.attnTile && M.flashT2 && nCols > 1) this._dMC(p, this.ft2Pipe, M.flashT2, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, Math.ceil(nCols / 2), D.nKV);
         else this._dMC(p, this.faPipe, M.flash, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, nCols, D.nKV);
         this._dMC(p, "attn_combine", M.combine, D.nH * 256, 256, nCols);
       }
