@@ -1,13 +1,14 @@
-// room/transport.js edge cases: the real 5 s gap timer (driven by a fake clock), re-arming on
-// progress, header layout, control bytes mixed together, malformed and adversarial slices, the
+// room/transport.js edge cases: gaps (a frame late on a reliable channel is waited for; one that
+// went down with a closed channel is skipped at once or after 5 s; the 60 s backstop), re-arming
+// on progress, sending small frames twice, avoiding a backed-up channel, header layout, control bytes mixed together, malformed and adversarial slices, the
 // 30 s cleanup of half-received frames, wireReady and striping over channels that close.
 // No GPU, no network: channels are stubs and the clock is fake.
 import {
   makeLink, sendFrame, attachWire, wireReady, packFlags, unpackFlags, packCkpt, unpackCkpt,
-  SLICE_BYTES, WIRE_ID, DROP_ALL,
+  SLICE_BYTES, WIRE_ID, DROP_ALL, DUP_SLICES,
 } from "../../room/transport.js";
 
-const HDR = 32, PER = SLICE_BYTES - HDR, GAP_MS = 5000;
+const HDR = 32, PER = SLICE_BYTES - HDR, GAP_MS = 5000, GAP_MAX_MS = 60000;
 function ok(c, m) { if (!c) throw new Error(m || "assertion failed"); }
 function eq(a, b, m) { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(`${m ? m + ": " : ""}${x} !== ${y}`); }
 function throws(f, m) { let t = false; try { f(); } catch { t = true; } if (!t) throw new Error("did not throw: " + m); }
@@ -38,17 +39,32 @@ function withClock(fn) {
   }
 }
 
-function sender(n = 1) {
-  const link = makeLink(), out = [];
-  for (let i = 0; i < n; i++) link.chans.push({ readyState: "open", send: (buf) => out.push({ i, buf }) });
+function sender(n = 1, opts) {
+  const link = makeLink(opts), out = [];
+  for (let i = 0; i < n; i++) link.chans.push({ readyState: "open", bufferedAmount: 0, send: (buf) => out.push({ i, buf }) });
   return { link, out };
 }
-// a receiving link driven through attachWire's onmessage (receive() is module-private)
+// a receiving link driven through attachWire's onmessage (receive() is module-private), with one
+// channel per sending channel: deliver(buf, i) arrives on channel i, close(i) closes it. Channels
+// open on first use; open(n) opens the first n up front (an idle channel counts for gaps).
 function receiver(onFrame, opts) {
-  const link = makeLink(); let handler = null, onclose = null, cfg = null;
-  const ch = { set onmessage(f) { handler = f; }, set onclose(f) { onclose = f; }, readyState: "open" };
-  attachWire(link, { peerConnection: { createDataChannel: (label, c) => { cfg = { label, ...c }; return ch; } } }, onFrame, opts);
-  return { link, deliver: (buf) => handler({ data: buf }), close: () => onclose(), cfg: () => cfg, ch };
+  const link = makeLink(), chans = [];
+  const open = (n) => {
+    while (chans.length < n) {
+      const c = { handler: null, onclose: null, cfg: null };
+      c.ch = { set onmessage(f) { c.handler = f; }, set onclose(f) { c.onclose = f; }, readyState: "open" };
+      attachWire(link, { peerConnection: { createDataChannel: (label, cf) => { c.cfg = { label, ...cf }; return c.ch; } } }, onFrame, opts);
+      chans.push(c);
+    }
+  };
+  open(1);
+  return {
+    link, open,
+    deliver: (buf, i = 0) => { open(i + 1); chans[i].handler({ data: buf }); },
+    send: (o) => { open(o.i + 1); chans[o.i].handler({ data: o.buf }); },   // an entry of sender().out
+    close: (i = 0) => { chans[i].ch.readyState = "closed"; chans[i].onclose(); },
+    cfg: () => chans[0].cfg, ch: chans[0].ch,
+  };
 }
 const frame = (pos, words = 8, extra = {}) => ({ t: "ai-hidden", pos, data: new Uint16Array(words).fill(pos & 0xffff), ...extra });
 const hdr = (buf) => { const dv = new DataView(buf); return { magic: dv.getUint16(0), kind: dv.getUint8(2), flags: dv.getUint8(3), id: dv.getUint32(4), pos: dv.getUint32(8), n: dv.getUint16(12), k: dv.getUint16(14), nSlices: dv.getUint16(16), total: dv.getUint32(20) }; };
@@ -61,68 +77,112 @@ function forge({ id = 1, kind = 0, flags = 0, pos = 0, n = 1, k = 0, nSlices = 1
   return buf;
 }
 
-// ---------------------------------------------------------------- gap skip with the real timer
+// ---------------------------------------------------------------- gaps
 
-Deno.test("transport gap: a missing frame holds later ones for exactly 5 s, then they flow and the late one is dropped", () => withClock((clock) => {
+Deno.test("transport gap: a frame late on an open channel is waited for (a 12 s freeze), not skipped", () => withClock((clock) => {
+  const { link, out } = sender(2, { dup: 0 }); for (let p = 1; p <= 4; p++) sendFrame(link, frame(p));
+  eq(out.map((o) => o.i), [0, 1, 0, 1]);
+  const got = []; const r = receiver((m) => got.push(m.pos)); r.open(2);
+  r.send(out[1]); r.send(out[3]);                           // channel 1 flows, channel 0 is frozen
+  eq(got, []);
+  clock.advance(12000); eq(got, [], "still waiting after 12 s: the old 5 s skip dropped frame 1 here");
+  r.send(out[0]); r.send(out[2]);                           // the freeze ends
+  eq(got, [1, 2, 3, 4]); eq(link.sent, 4); eq(r.link.skipped, 0);
+  eq(clock.pending(), 0, "no timer left");
+}));
+
+Deno.test("transport gap: the 60 s backstop skips a frame that never comes, then drops it if it does", () => withClock((clock) => {
+  const { link, out } = sender(2, { dup: 0 }); for (let p = 1; p <= 4; p++) sendFrame(link, frame(p));
+  const got = []; const r = receiver((m) => got.push(m.pos)); r.open(2);
+  r.send(out[1]); r.send(out[3]);
+  clock.advance(GAP_MAX_MS - 1); eq(got, []);
+  clock.advance(1); eq(got, [2], "skipped frame 1 at 60 s, now waiting for 3");
+  clock.advance(GAP_MAX_MS); eq(got, [2, 4]);
+  r.send(out[0]); r.send(out[2]); eq(got, [2, 4], "late frames dropped");
+  eq(r.link.skipped, 2); eq(r.link.rx.size, 0); eq(clock.pending(), 0);
+}));
+
+Deno.test("transport gap: an ordered channel that shows a newer frame proves the older one lost, at once", () => withClock((clock) => {
   const { link, out } = sender(); for (let p = 1; p <= 4; p++) sendFrame(link, frame(p));
   const got = []; const r = receiver((m) => got.push(m.pos));
-  r.deliver(out[1].buf); r.deliver(out[2].buf);            // frame 1 lost
-  eq(got, [], "nothing before the gap fills");
-  eq(clock.pending(), 1, "one gap timer armed");
-  clock.advance(GAP_MS - 1); eq(got, [], "still held at 4999 ms");
-  clock.advance(1); eq(got, [2, 3], "skipped at 5000 ms");
-  eq(clock.pending(), 0, "nothing left to wait for, no timer");
-  eq(r.link.expect, 4);
-  r.deliver(out[0].buf); eq(got, [2, 3], "late frame 1 dropped");
-  r.deliver(out[3].buf); eq(got, [2, 3, 4], "the frame after the skip is delivered at once");
-  eq(clock.pending(), 0); eq(r.link.done.size, 0);
-}));
-
-Deno.test("transport gap: the timer re-arms when delivery made progress instead of skipping", () => withClock((clock) => {
-  const { link, out } = sender(); for (let p = 1; p <= 4; p++) sendFrame(link, frame(p));
-  const got = []; const r = receiver((m) => got.push(m.pos));
-  r.deliver(out[1].buf); r.deliver(out[3].buf);            // waiting for 1 (and 3)
-  clock.advance(3000); r.deliver(out[0].buf);              // 1 arrives: 1, 2 flow; now waiting for 3
-  eq(got, [1, 2]);
-  clock.advance(2000);                                      // first timer fires at t=5000: progress seen, re-arm
-  eq(got, [1, 2], "no skip when the awaited frame arrived meanwhile");
-  eq(clock.pending(), 1, "re-armed for the next gap");
-  clock.advance(GAP_MS - 1); eq(got, [1, 2], "held until 5 s after the re-arm");
-  clock.advance(1); eq(got, [1, 2, 4], "frame 3 skipped at t=10000");
-  r.deliver(out[2].buf); eq(got, [1, 2, 4], "late 3 dropped");
-}));
-
-Deno.test("transport gap: a gap that fills in time leaves a harmless timer and no double delivery", () => withClock((clock) => {
-  const { link, out } = sender(); for (let p = 1; p <= 3; p++) sendFrame(link, frame(p));
-  const got = []; const r = receiver((m) => got.push(m.pos));
-  r.deliver(out[2].buf); r.deliver(out[1].buf); r.deliver(out[0].buf);
-  eq(got, [1, 2, 3]);
-  clock.advance(60000); eq(got, [1, 2, 3]); eq(clock.pending(), 0);
-}));
-
-Deno.test("transport gap: several gaps are skipped one at a time, each after its own 5 s", () => withClock((clock) => {
-  const { link, out } = sender(); for (let p = 1; p <= 6; p++) sendFrame(link, frame(p));
-  const got = []; const r = receiver((m) => got.push(m.pos));
-  for (const i of [5, 3, 1]) r.deliver(out[i].buf);        // 2, 4, 6 arrive; 1, 3, 5 lost
-  const table = [[GAP_MS, [2]], [2 * GAP_MS, [2, 4]], [3 * GAP_MS, [2, 4, 6]]];
-  for (const [t, want] of table) { clock.advance(t - clock.now - 1); ok(got.length === want.length - 1, "early at " + t); clock.advance(1); eq(got, want, "at " + t); }
+  r.deliver(out[1].buf); eq(got, [2], "frame 1 cannot come any more on the only channel");
+  r.deliver(out[0].buf); eq(got, [2], "and is dropped if it does");
+  r.deliver(out[3].buf); eq(got, [2, 4]);
   eq(clock.pending(), 0);
 }));
 
-Deno.test("transport gap: a skip followed by more multi-slice frames interleaved across stripes", () => withClock((clock) => {
-  const { link, out } = sender(3);
-  const words = (PER * 2 + 100) / 2;                        // 3 slices each
+Deno.test("transport gap: a channel closing with a frame on it: skipped at once when the others have moved on", () => withClock((clock) => {
+  const { link, out } = sender(2, { dup: 0 }); for (let p = 1; p <= 4; p++) sendFrame(link, frame(p));
+  const got = []; const r = receiver((m) => got.push(m.pos)); r.open(2);
+  r.send(out[1]); r.send(out[3]);                           // 1 and 3 were on channel 0
+  eq(got, []);
+  r.close(0);
+  eq(got, [2, 4], "1 and 3 went down with channel 0");
+  eq(clock.pending(), 0);
+}));
+
+Deno.test("transport gap: after a close, a frame an idle channel could still bring is skipped 5 s later", () => withClock((clock) => {
+  const { link, out } = sender(3, { dup: 0 }); for (let p = 1; p <= 2; p++) sendFrame(link, frame(p));
+  eq(out.map((o) => o.i), [0, 1]);
+  const got = []; const r = receiver((m) => got.push(m.pos)); r.open(3);
+  r.send(out[1]);
+  clock.advance(3000); r.close(0);                          // channel 2 is idle: it proves nothing
+  clock.advance(GAP_MS - 1); eq(got, []);
+  clock.advance(1); eq(got, [2]);
+  eq(clock.pending(), 0);
+}));
+
+Deno.test("transport gap: the timer re-arms when delivery made progress instead of skipping", () => withClock((clock) => {
+  const { link, out } = sender(2, { dup: 0 }); for (let p = 1; p <= 6; p++) sendFrame(link, frame(p));
+  const got = []; const r = receiver((m) => got.push(m.pos)); r.open(2);
+  r.send(out[1]);                                           // 2 on channel 1; 1 late on channel 0
+  clock.advance(40000); r.send(out[0]);                     // 1 arrives at 40 s: 1, 2 flow
+  eq(got, [1, 2]);
+  r.send(out[3]); r.send(out[5]);                           // 4, 6 arrive; 3 and 5 late on channel 0
+  clock.advance(GAP_MAX_MS - 1); eq(got, [1, 2], "a full 60 s from the last progress");
+  r.send(out[2]); eq(got, [1, 2, 3, 4]);
+  clock.advance(GAP_MAX_MS - 1); eq(got, [1, 2, 3, 4]);
+  clock.advance(1); eq(got, [1, 2, 3, 4, 6], "frame 5 skipped 60 s after frame 3's progress");
+}));
+
+Deno.test("transport gap: a gap that fills in time leaves no timer and no double delivery", () => withClock((clock) => {
+  const { link, out } = sender(3, { dup: 0 }); for (let p = 1; p <= 3; p++) sendFrame(link, frame(p));
+  const got = []; const r = receiver((m) => got.push(m.pos));
+  r.send(out[2]); r.send(out[1]); r.send(out[0]);
+  eq(got, [1, 2, 3]);
+  clock.advance(120000); eq(got, [1, 2, 3]); eq(clock.pending(), 0);
+}));
+
+Deno.test("transport gap: a link with an unordered channel keeps the 5 s skip (messages there can be lost)", () => withClock((clock) => {
+  const { link, out } = sender(); for (let p = 1; p <= 4; p++) sendFrame(link, frame(p));
+  const got = []; const r = receiver((m) => got.push(m.pos), { ordered: false });
+  r.deliver(out[1].buf); r.deliver(out[2].buf);
+  eq(got, [], "no proof from order on an unordered channel");
+  clock.advance(GAP_MS - 1); eq(got, []);
+  clock.advance(1); eq(got, [2, 3]);
+  r.deliver(out[0].buf); eq(got, [2, 3]);
+  r.deliver(out[3].buf); eq(got, [2, 3, 4]);
+}));
+
+Deno.test("transport gap: multi-slice frames interleaved over stripes, one of them losing a slice with its channel", () => withClock((clock) => {
+  const { link, out } = sender(3, { dup: 0 });
+  const words = (PER * 2 + 100) / 2;                        // 3 slices each, one per channel
   const sizes = [];
   for (let p = 1; p <= 4; p++) { sendFrame(link, { t: "ai-hidden-b", basePos: p * 10, n: 2, data: new Uint16Array(words).fill(p) }); sizes.push(out.length); }
   const slicesOf = (f) => out.slice(f ? sizes[f - 1] : 0, sizes[f]);
   const got = []; const r = receiver((m) => { got.push(m.basePos); ok(m.data.every((v) => v === m.basePos / 10), "payload intact"); });
-  // frame 1 loses its middle slice; frames 2..4 interleave slice by slice
-  const f1 = slicesOf(0); r.deliver(f1[0].buf); r.deliver(f1[2].buf);
-  for (let k = 0; k < 3; k++) for (const f of [3, 1, 2]) r.deliver(slicesOf(f)[k].buf);
+  r.open(3);
+  const f1 = slicesOf(0), lostCh = f1[1].i;
+  r.send(f1[0]); r.send(f1[2]);                             // frame 1's middle slice is on a channel that will close
+  for (let k = 0; k < 3; k++) for (const f of [3, 1, 2]) { const o = slicesOf(f)[k]; if (o.i !== lostCh) r.send(o); }
   eq(got, []);
-  clock.advance(GAP_MS); eq(got, [20, 30, 40]);
-  r.deliver(f1[1].buf); eq(got, [20, 30, 40], "frame 1 completing late is dropped");
-  eq(r.link.rx.size, 0);
+  r.close(lostCh);                                          // frames 1..4 each lost one slice with it
+  eq(got, [], "the other channels show frame 4, so 1..3 are lost, but 4 is incomplete too");
+  link.chans[lostCh].readyState = "closed";                 // the sender sees the close too
+  sendFrame(link, { t: "ai-hidden-b", basePos: 50, n: 2, data: new Uint16Array(words).fill(5) });
+  for (const o of out.slice(sizes[3])) { ok(o.i !== lostCh, "nothing sent on the closed channel"); r.send(o); }
+  eq(got.at(-1), 50, "a frame sent after the close still gets through");
+  ok(r.link.skipped >= 4); eq(clock.pending(), 0);
 }));
 
 // ---------------------------------------------------------------- header layout and slicing
@@ -132,7 +192,7 @@ Deno.test("transport: header layout, kinds, pos vs basePos, n default, slice bou
   // payload bytes -> expected slice count
   const sizes = [[0, 1], [2, 1], [PER, 1], [PER + 2, 2], [PER * 2, 2], [PER * 2 + 2, 3]];
   for (const [t, key, kind] of kinds) for (const [bytes, nSlices] of sizes) {
-    const { link, out } = sender(2);
+    const { link, out } = sender(2, { dup: 0 });
     const data = new Uint16Array(bytes / 2); for (let i = 0; i < data.length; i++) data[i] = i * 7 + kind;
     ok(sendFrame(link, { t, [key]: 4000000000, data }), "sent");
     eq(out.length, nSlices, `${t} ${bytes} B`);
@@ -226,7 +286,7 @@ Deno.test("transport: frames mixing rb + reset + spec + sv + ld + dp carry every
     { reset: 1, dp: [7] },
   ];
   for (const c of table) {
-    const { link, out } = sender(3);
+    const { link, out } = sender(3, { dup: 0 });
     sendFrame(link, { t: "ai-hiddenret-b", basePos: 11, n: 3, ...c, data: new Uint16Array((PER * 2 + 10) / 2) });
     eq(out.length, 3);
     for (const { buf } of out) eq(new Uint8Array(buf, 3, 1)[0], packFlags(c), "flags on every slice");
@@ -289,10 +349,10 @@ Deno.test("transport: slices that disagree with the frame's first slice are igno
 }));
 
 Deno.test("transport: a duplicate slice after its frame completed does not open a new partial", () => withClock(() => {
-  const { link, out } = sender(2); sendFrame(link, { t: "ai-hidden-b", basePos: 0, n: 1, data: new Uint16Array(PER) });   // 2 slices
+  const { link, out } = sender(2, { dup: 0 }); sendFrame(link, { t: "ai-hidden-b", basePos: 0, n: 1, data: new Uint16Array(PER) });   // 2 slices
   eq(out.length, 2);
   const got = []; const r = receiver((m) => got.push(m));
-  for (const { buf } of out) r.deliver(buf);
+  for (const o of out) r.send(o);
   eq(got.length, 1);
   r.deliver(out[0].buf);
   eq(r.link.rx.size, 0, "a stale slice leaked a partial");
@@ -335,7 +395,7 @@ Deno.test("transport: wireReady is true only while some channel is open", () => 
 });
 
 Deno.test("transport: round-robin striping skips non-open channels and continues across frames", () => {
-  const link = makeLink(), out = [];
+  const link = makeLink({ dup: 0 }), out = [];
   const states = ["open", "connecting", "open", "open"];
   states.forEach((s, i) => link.chans.push({ readyState: s, send: (buf) => out.push(i) }));
   const three = new Uint16Array((PER * 2 + 2) / 2);
@@ -347,25 +407,90 @@ Deno.test("transport: round-robin striping skips non-open channels and continues
   eq(out.slice(6), [2, 3], "a closed channel drops out of the rotation");
 });
 
-Deno.test("transport: a channel that closes mid-send leaves a gap the receiver skips after 5 s", () => withClock((clock) => {
-  const link = makeLink(), wire = [];
+Deno.test("transport: a channel that refuses a send mid-frame: the slice goes out on another one, nothing is lost", () => withClock((clock) => {
+  const link = makeLink({ dup: 0 }), wire = [];
   let sends = 0;
-  const chans = [0, 1].map((i) => ({ readyState: "open", send(buf) {
+  const chans = [0, 1].map((i) => ({ i, readyState: "open", bufferedAmount: 0, send(buf) {
     if (this.readyState !== "open") throw new Error("InvalidStateError");
-    wire.push(buf);
+    wire.push({ i, buf });
     if (++sends === 4) chans[1].readyState = "closed";          // channel 1 dies after frame 2's first slice
   } }));
   link.chans.push(...chans);
   const three = (p) => ({ t: "ai-hidden-b", basePos: p, n: 1, data: new Uint16Array((PER * 2 + 2) / 2).fill(p) });
-  sendFrame(link, three(1));                                     // slices on 0, 1, 0
-  throws(() => sendFrame(link, three(2)), "send on a closed channel");   // 1 ok, 0 ok, 1 throws
-  eq(wire.length, 5, "frame 2 got two of its three slices out");
-  link.chans = link.chans.filter((c) => c !== chans[1]);         // what attachWire's onclose does
-  ok(wireReady(link));
+  ok(sendFrame(link, three(1)));                                 // slices on 0, 1, 0
+  ok(sendFrame(link, three(2)));                                 // 1, then 0 and 0: the closed channel is passed over
+  eq(wire.map((w) => w.i), [0, 1, 0, 1, 0, 0]);
   ok(sendFrame(link, three(3)));
   const got = []; const r = receiver((m) => got.push(m.basePos));
-  for (const b of wire) r.deliver(b);
-  eq(got, [1], "frame 3 waits behind the dead frame 2");
-  clock.advance(GAP_MS); eq(got, [1, 3]);
-  eq(r.link.rx.size, 1, "frame 2's partial stays until the 30 s sweep");
+  for (const w of wire) r.send(w);
+  eq(got, [1, 2, 3]); eq(clock.pending(), 0);
+}));
+
+Deno.test("transport: a send that no channel takes returns quietly, and the receiver skips the frame once the close shows", () => withClock((clock) => {
+  const link = makeLink({ dup: 0 }), wire = [];
+  const chans = [0, 1].map((i) => ({ i, readyState: "open", bufferedAmount: 0, send(buf) { if (this.dead) throw new Error("InvalidStateError"); wire.push({ i, buf }); } }));
+  link.chans.push(...chans);
+  const three = (p) => ({ t: "ai-hidden-b", basePos: p, n: 1, data: new Uint16Array((PER * 2 + 2) / 2).fill(p) });
+  sendFrame(link, three(1));
+  chans[0].dead = chans[1].dead = true;                          // both still say "open" but refuse
+  ok(sendFrame(link, three(2)), "does not throw");
+  chans[0].dead = chans[1].dead = false;
+  sendFrame(link, three(3));
+  const got = []; const r = receiver((m) => got.push(m.basePos));
+  for (const w of wire) r.send(w);
+  eq(got, [1, 3], "both channels showed frame 3, so frame 2 can never come");
+}));
+
+// ---------------------------------------------------------------- small frames twice, backed-up channels
+
+Deno.test("transport dup: frames of up to DUP_SLICES slices go out twice on two different channels; larger ones once", () => {
+  for (const nSl of [1, 2, DUP_SLICES, DUP_SLICES + 1, 8]) {
+    const { link, out } = sender(4);
+    const bytes = nSl === 1 ? 64 : PER * (nSl - 1) + 2;
+    sendFrame(link, { t: "ai-hidden-b", basePos: 0, n: 1, data: new Uint16Array(bytes / 2) });
+    const twice = nSl <= DUP_SLICES;
+    eq(out.length, twice ? 2 * nSl : nSl, nSl + " slices");
+    if (twice) for (let k = 0; k < nSl; k++) { const a = out[2 * k], b = out[2 * k + 1]; eq(hdr(a.buf).k, k); eq(hdr(b.buf).k, k); ok(a.i !== b.i, "copies on different channels"); }
+    eq(link.dups, twice ? nSl : 0);
+  }
+  const one = sender(1); sendFrame(one.link, frame(1)); eq(one.out.length, 1, "one channel: no copy");
+  const off = sender(3, { dup: 0 }); sendFrame(off.link, frame(1)); eq(off.out.length, 1, "dup: 0 turns it off");
+});
+
+Deno.test("transport dup: the receiver takes whichever copy comes first and delivers every frame once, in order", () => withClock((clock) => {
+  const { link, out } = sender(3);
+  for (let p = 1; p <= 30; p++) sendFrame(link, frame(p, 16 + p));
+  eq(out.length, 60);
+  // channel 0 is badly lossy: everything on it arrives only after the rest (or never)
+  const got = []; const r = receiver((m) => { got.push(m.pos); ok(m.data.length === 16 + m.pos && m.data.every((v) => v === m.pos), "payload"); });
+  r.open(3);
+  for (const o of out) if (o.i !== 0) r.send(o);
+  const want = Array.from({ length: 30 }, (_, i) => i + 1);
+  eq(got, want.filter((p) => out.some((o) => o.i !== 0 && hdr(o.buf).pos === p)).slice(0, got.length));
+  for (const o of out) if (o.i === 0) r.send(o);              // channel 0 catches up
+  eq(got, want, "all 30, once each, in order");
+  eq(r.link.recv, 30); eq(r.link.rx.size, 0); eq(r.link.skipped, 0); eq(clock.pending(), 0);
+}));
+
+Deno.test("transport pick: a channel with data backed up gets no new slices while others are free", () => {
+  const { link, out } = sender(3, { dup: 0 });
+  link.chans[1].bufferedAmount = 50000;                       // lost a packet: its queue is waiting on a retransmission
+  const three = new Uint16Array((PER * 2 + 2) / 2);
+  for (let f = 0; f < 3; f++) sendFrame(link, { t: "ai-hidden-b", basePos: f, n: 1, data: three });
+  ok(out.every((o) => o.i !== 1), "backed-up channel skipped: " + out.map((o) => o.i));
+  ok(out.some((o) => o.i === 0) && out.some((o) => o.i === 2), "the others share the load");
+  link.chans[1].bufferedAmount = 0;
+  const { out: o2 } = { out };
+  const before = o2.length; sendFrame(link, { t: "ai-hidden-b", basePos: 9, n: 1, data: three });
+  ok(o2.slice(before).some((o) => o.i === 1), "used again once it drained");
+});
+
+Deno.test("transport gap: a close long ago does not bring back the 5 s skip for a later freeze", () => withClock((clock) => {
+  const { link, out } = sender(3, { dup: 0 }); for (let p = 1; p <= 3; p++) sendFrame(link, frame(p));
+  const got = []; const r = receiver((m) => got.push(m.pos)); r.open(3);
+  r.close(2);                                               // a stripe died early in the session
+  clock.advance(20000);
+  r.send(out[1]);                                           // frame 2 on channel 1; frame 1 frozen on channel 0
+  clock.advance(GAP_MS * 3); eq(got, [], "still waiting 15 s later");
+  r.send(out[0]); eq(got, [1, 2]);
 }));
