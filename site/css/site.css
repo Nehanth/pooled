@@ -780,6 +780,16 @@ html:not(.js) .sb-dots i{display:none}
   .composer{margin:6px 12px 12px}
   .ctools{margin:6px 12px 0}
 }
+/* a short, wide stage (a 1280x720 laptop): Code folds the band, as the room's fold toggle does (the name, Writing,
+   the numbers), so the files, the agent and the served app get the 78px its rows took */
+@container stage (max-height:400px) and (min-width:601px){
+  .demo[data-scene="code"] .model{height:44px}
+  .demo[data-scene="code"] .s-code{top:44px!important}
+  .demo[data-scene="code"] .band{padding:8px 12px 0 16px}
+  .demo[data-scene="code"] .bd-h{height:28px;margin:0}
+  .demo[data-scene="code"] .rows{display:none}
+  .demo[data-scene="code"] .bd-tog svg{transform:rotate(180deg)}
+}
 
 /* ---------- wide: the headline on one line ---------- */
 @media (min-width:1100px){
