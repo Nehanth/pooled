@@ -1307,6 +1307,7 @@
     #pv-state { margin-left: 4px; }
     /* the agent: its log scrolls, the prompt stays at the bottom */
     #chatpane.code-mode .ag-h { display: none; }   /* the tab bar names the view, the band the model: 40px more for the log */
+    #chatpane.code-mode #code-agent { overflow: hidden; }   /* on a short screen only the log gives up height, never the prompt */
     #chatpane.code-mode #code-log { flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px; -webkit-mask-image: linear-gradient(transparent, #000 16px); mask-image: linear-gradient(transparent, #000 16px); }
     #chatpane.code-mode #code-row { margin: 6px 10px 10px; }
     #chatpane.code-mode .cm-jump { margin-top: -44px; }
@@ -1356,6 +1357,19 @@
     #ed-save kbd { display: none; }
     .seg button, .seg.chips button { height: 36px; }
     #mode-bar button, #mode-bar::before { height: 36px; }   /* Chat | Code, the pill under it too */
+  }
+  /* ---- short screens (a phone in landscape): one header row with Chat | Code in it (room.js moves
+     the switch), a lower tab bar, so the pane keeps most of the height ---- */
+  @media (max-width: 820px) and (max-height: 500px) and (pointer: coarse) {
+    body.in-room header { flex-wrap: nowrap; }
+    body.in-room :is(.hbrk, #peers) { display: none; }   /* the devices' row; the total stays, the devices are a tap away in Room settings */
+    body.in-room #hdr-sum { order: 0; }
+  }
+  @media (max-height: 500px) and (pointer: coarse) {
+    header #mode-bar button, header #mode-bar::before { width: 64px; }
+    header #mode-bar:has(#mode-code[aria-selected="true"])::before { transform: translateX(64px); }
+    #code-pane #code-tabs { height: calc(44px + env(safe-area-inset-bottom)); }
+    #code-pane #code-tabs button { height: 44px; flex-direction: row; gap: 8px; }
   }
   @media (max-width: 400px) { .seg button { flex: 1 1 auto; padding: 0 6px; } .ms { padding-left: 16px; padding-right: 16px; } #sm-ctx { font-size: 11px; letter-spacing: -.02em; } }   /* '123k / 128k' inside its quarter of the band */
   @media (prefers-reduced-motion: reduce) {

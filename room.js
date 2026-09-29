@@ -2227,9 +2227,10 @@ function bandFold(on, save = false) {
 $("band-toggle").addEventListener("click", () => bandFold(!$("swarm-map").classList.contains("folded"), true));
 bandFold(bandFolded());
 new MutationObserver(() => bandFold(bandFolded())).observe($("chatpane"), { attributes: true, attributeFilter: ["class"] });
-// Chat | Code sits in the room bar at 820px and wider (the same node, moved), in its own strip on phones
+// Chat | Code sits in the room bar at 820px and wider and on short touch screens (a phone in
+// landscape, where its own strip costs too much height); in its own strip on phones held upright
 {
-  const home = document.querySelector(".mode-row"), wide = matchMedia("(min-width: 821px)");
+  const home = document.querySelector(".mode-row"), wide = matchMedia("(min-width: 821px), (max-height: 500px) and (pointer: coarse)");
   const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); };
   place(); wide.addEventListener("change", place);
 }
