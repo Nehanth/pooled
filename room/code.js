@@ -27,6 +27,7 @@ import { PreviewServer } from "../harness/preview.js";
 import { previewTools } from "../harness/preview-tools.js";
 import { runJsTool, runJsAvailable } from "../harness/run-js.js";
 import { mountPreview, openPreviewTab } from "../harness/preview-frame.js";
+import { downloadApp } from "../harness/app-export.js";
 import { PreviewPublisher, PreviewSubscriber } from "../harness/preview-sync.js";
 import { lineDiff } from "../harness/diff.js";
 import { listProjects, createProject, openProject, openFolder, canOpenFolder, saveSession, loadSession, slugify } from "../harness/projects.js";
@@ -250,6 +251,62 @@ export async function initCode(api, { mock = null } = {}) {
       return snap ? { snap, port, path: ui.ports.get(port)?.path || null } : null;
     },
     name: () => peerProj.list.find((p) => p.id === peerProj.cur)?.name || "",
+  });
+
+  // ---- Share with the room: whoever can drive asks, the host sends ai-code-share through emit (the
+  // timeline, the history for late joiners, everyone Code reaches). No new trust: every device
+  // builds the download from its own copy of the preview (a peer's is PreviewSubscriber's,
+  // hash-checked against the ai-pv manifest), and the file runs sandboxed like a preview
+  // (harness/app-export.js). Each device keeps the shared rev's snapshot, so Download gives that
+  // rev after the agent moves on; the SHARE_KEEP newest.
+  const SHARE_KEEP = 3;
+  const shares = new Map();        // "port:rev" -> snapshot
+  const sharePending = new Set();  // "port:rev" shared before this peer had that rev
+  let shareHook = null, shareAt = 0;
+  const pvSource = () => (isHost() ? server : sub);
+  function keepShare(port, rev) {
+    const k = `${port}:${rev}`, s = pvSource()?.snapshot(port);
+    if (!s || s.rev !== rev) {
+      if (!isHost() && !(s && s.rev > rev)) { sharePending.add(k); if (sharePending.size > 20) sharePending.delete(sharePending.values().next().value); }
+      if (!isHost() && sub && !shareHook) shareHook = sub.onUpdate((u) => { if (!u.stopped && sharePending.delete(`${u.port}:${u.rev}`)) keepShare(u.port, u.rev); });
+      return false;
+    }
+    shares.delete(k); shares.set(k, s);
+    while (shares.size > SHARE_KEEP) shares.delete(shares.keys().next().value);
+    return true;
+  }
+  function shareNow(port, by) {
+    const s = server?.snapshot(port);
+    if (!isHost() || !s) return false;
+    if (shares.has(`${s.port}:${s.rev}`) || Date.now() - shareAt < 1500) return false;   // shared already, or a double click
+    shareAt = Date.now();
+    keepShare(s.port, s.rev);
+    emit({ t: "ai-code-share", mid, port: s.port, rev: s.rev, name: str(project?.name || "app", 60), by: str(by || "the host", 60) });
+    return true;
+  }
+  ui.onShare((port) => {
+    if (isHost()) { if (!shareNow(port, api.name?.())) localNote("already shared with the room"); return; }
+    if (!shared()) return;
+    askHost({ t: "ai-code-share-ask", port: +port });
+  });
+  api.on("ai-code-share-ask", (from, d) => {
+    if (!isHost() || !shared()) return;
+    const port = Number(d?.port);
+    if (!Number.isInteger(port) || !server?.snapshot(port)) return;
+    if (!shareNow(port, api.nameOf?.(from) || "a member")) tell(from, "already shared with the room");
+  });
+  ui.onShareAct((kind, d) => {
+    const cur = pvSource()?.snapshot(d.port);
+    if (kind === "full") {
+      if (!ui.full(d.port)) localNote(`:${d.port} is no longer served here${shares.has(`${d.port}:${d.rev}`) ? ": Download still has it" : ""}`, true);
+      return;
+    }
+    let snap = shares.get(`${d.port}:${d.rev}`) || (cur?.rev === d.rev ? cur : null);
+    if (!snap && cur && cur.rev > d.rev) { snap = cur; localNote(`rev ${d.rev} is gone from this device: downloaded rev ${cur.rev}, the latest`); }
+    if (!snap) { localNote(cur ? `rev ${d.rev} is still on its way to this device: try again in a moment` : `:${d.port} is no longer served, and this device did not keep rev ${d.rev}`, true); return; }
+    downloadApp(snap, { name: d.name || "app", rev: snap.rev })
+      .then((how) => { if (how === "blocked") localNote("the browser wanted a fresh tap: press Download again"); })
+      .catch((err) => localNote("could not build the download: " + err.message, true));
   });
   // the Files view: the host opens a file to edit it (a very long one read-only); a peer sees the
   // files of a served preview, read-only
@@ -664,6 +721,11 @@ export async function initCode(api, { mock = null } = {}) {
     if ("n" in d) o.n = d.n >>> 0;
     if (d.reset) o.reset = true;
     if (d.end) o.end = true;
+    if (d.t === "ai-code-share") {
+      const port = Number(d.port);
+      o.port = Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : 0;
+      o.rev = d.rev >>> 0; o.name = str(d.name, 60); o.by = str(d.by, 60);
+    }
     if (d.diff && typeof d.diff === "object") {
       const x = d.diff;
       const lines = (a) => (Array.isArray(a) ? a.slice(0, 50).map((t) => str(t, 200)) : null);
@@ -693,6 +755,7 @@ export async function initCode(api, { mock = null } = {}) {
     setChrome();
     ui.poke();
     const m = clean(d);
+    if (m.t === "ai-code-share") { if (!m.port || !m.rev) return; keepShare(m.port, m.rev); }
     if (m.t === "ai-code-start" && m.sid && m.sid !== sid) { sid = m.sid; }
     // an answered approval: this screen's buttons go (whoever answered)
     if (m.t === "ai-code-tool" && m.state && m.state !== "pending") ui.cancelAsk(m.mid, m.i);
@@ -708,7 +771,7 @@ export async function initCode(api, { mock = null } = {}) {
       });
     }
   };
-  for (const t of ["ai-code-start", "ai-code-tok", "ai-code-live", "ai-code-tool", "ai-code-note", "ai-code-done"]) api.on(t, (from, d) => peerMsg(d));
+  for (const t of ["ai-code-start", "ai-code-tok", "ai-code-live", "ai-code-tool", "ai-code-note", "ai-code-done", "ai-code-share"]) api.on(t, (from, d) => peerMsg(d));
   api.on("ai-code-files", (from, d) => { if (!isHost() && Array.isArray(d.tree)) ui.tree(d.tree.slice(0, 500).map((p) => str(p, 300))); });
   api.on("ai-code-history", (from, d) => {
     if (isHost()) return;
@@ -716,7 +779,11 @@ export async function initCode(api, { mock = null } = {}) {
     sid = str(d.sid, 40);
     ui.clear();
     peerRun = null;
-    for (const it of (Array.isArray(d.items) ? d.items : []).slice(-HIST)) if (it && typeof it === "object") { const m = clean(it); track(m); ui.apply(m); }
+    for (const it of (Array.isArray(d.items) ? d.items : []).slice(-HIST)) if (it && typeof it === "object") {
+      const m = clean(it);
+      if (m.t === "ai-code-share") { if (!m.port || !m.rev) continue; keepShare(m.port, m.rev); }
+      track(m); ui.apply(m);
+    }
     // a run cut from the history's window is still going: the host says whose it is
     if (d.run && typeof d.run === "object") peerRun = { mid: str(d.run.mid, 40), from: str(d.run.from, 80) };
     if (!$("code-log").children.length) placeholderFor(false);

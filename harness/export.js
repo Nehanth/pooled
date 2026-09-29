@@ -13,7 +13,7 @@
 // sandbox="allow-scripts", as "Open" does (harness/preview-frame.js openPreviewTab). Opened from
 // disk it runs in an opaque origin: no access to the file:// folder, cookies or storage, and no
 // network beyond what the preview's CSP lets through.
-import { buildPreviewDoc, mimeFor } from "./preview-build.js";
+import { buildPreviewDoc, mimeFor, CSP } from "./preview-build.js";
 import { normPath, secretPath, SKIP_DIRS } from "./workspace.js";
 
 // ---------------------------------------------------------------- zip (PKWARE APPNOTE 4.3)
@@ -112,8 +112,11 @@ const escHtml = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").re
 export function appHtml(snap, { path = null, title = "" } = {}) {
   const page = path && snap.files.has(path) ? path : snap.entry;
   const doc = buildPreviewDoc(snap, { path: page, nonce: "" });
-  const t = title || /<title[^>]*>([^<]*)<\/title>/i.exec(new TextDecoder().decode(snap.files.get(page)?.bytes || new Uint8Array()))?.[1]?.trim() || page;
+  const t = String(title || /<title[^>]*>([^<]*)<\/title>/i.exec(new TextDecoder().decode(snap.files.get(page)?.bytes || new Uint8Array()))?.[1]?.trim() || page).slice(0, 80);
+  // the wrapper carries the preview's CSP too: a srcdoc document inherits its parent's policy, so
+  // the app gets the room's network rules even if the inner policy were ever dropped
   const html = `<!doctype html>\n<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">`
+    + `<meta http-equiv="Content-Security-Policy" content="${escHtml(CSP)}">`
     + `<meta name="referrer" content="no-referrer"><title>${escHtml(t)}</title>`
     + `<style>html,body{margin:0;height:100%;background:#fff}iframe{border:0;width:100%;height:100%;display:block}</style></head>\n`
     + `<!-- Made in Pooled Code mode (https://pooled.run). The app runs in a sandboxed frame, as in its preview. -->\n`
