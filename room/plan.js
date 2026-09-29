@@ -5,13 +5,21 @@
 // out). Every device gets at least one layer; rounding leftovers go to the largest remainders.
 // Returns { assigned: [count per device], ranges: [[lo, hi) per device] }.
 export function planSplit(L, caps) {
-  const totalCap = caps.reduce((s, c) => s + c, 0);
+  // a cap that is not a positive number (a malformed pledge) counts as nothing; when nobody
+  // offers anything the layers are dealt evenly instead of dividing by zero
+  caps = caps.map((c) => (Number.isFinite(c) && c > 0 ? c : 0));
+  const top = Math.max(0, ...caps);
+  if (top > 0) caps = caps.map((c) => c / top);   // only the ratios matter; keeps L * c finite
+  let totalCap = caps.reduce((s, c) => s + c, 0);
+  if (!(totalCap > 0)) { caps = caps.map(() => 1); totalCap = caps.length; }
   const assigned = caps.map((c) => Math.floor(L * c / totalCap));
   const fracs = caps.map((c, i) => ({ i, f: L * c / totalCap - assigned[i] })).sort((a, b) => b.f - a.f);
   const rem = L - assigned.reduce((a, b) => a + b, 0);
   for (let k = 0; k < rem; k++) assigned[fracs[k % fracs.length].i]++;
-  for (let i = 1; i < assigned.length; i++)
-    if (assigned[i] === 0) { const j = assigned.indexOf(Math.max(...assigned)); assigned[j]--; assigned[i]++; }
+  // the host first (it runs the embedding and the head, so it must hold a layer too), and only
+  // take a layer from a device that keeps one: with fewer layers than devices the last ones wait
+  for (let i = 0; i < assigned.length; i++)
+    if (assigned[i] === 0) { const j = assigned.indexOf(Math.max(...assigned)); if (assigned[j] > 1 || (i === 0 && L > 0)) { assigned[j]--; assigned[i]++; } }
   const ranges = [];
   let acc = 0;
   for (const a of assigned) { ranges.push([acc, acc + a]); acc += a; }
@@ -54,6 +62,8 @@ export function codeFromLocation(pathname = "", search = "", hash = "") {
 // one layer (it holds the embedding and the head anyway). Returns planSplit's shape plus
 // `used`: the device indices that hold layers, in the original order.
 export function planForSpeed(L, caps, msPerLayer = []) {
+  caps = caps.map((c) => (Number.isFinite(c) && c > 0 ? c : 0));   // a malformed cap holds nothing
+  msPerLayer = msPerLayer || [];
   const n = caps.length;
   const known = msPerLayer.filter((x) => x > 0);
   const fallback = known.length ? Math.max(...known) * 1.5 : 1;   // unmeasured: assume slower than any measured device
