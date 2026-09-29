@@ -460,16 +460,22 @@ function wire(conn, name, meta, initiator = false) {
   conn.on("close", () => {
     const e = conns.get(conn.peer);
     if (e && e.conn !== conn) return;   // an older link to the same device
-    conns.delete(conn.peer);
-    if (isHost) {   // on the host a closed link means the device left; workers wait for the roster
-      dropCard(conn.peer); members.delete(conn.peer); roster.delete(conn.peer); broadcastRoster();
-      log("room", `${e?.name || conn.peer} left`);
-      aiPeerLeft(conn.peer, e?.name);
-    } else if (conn.peer === PREFIX + roomCode) { log("room", "lost the link to the host"); hostGone(); }
-    updateCluster();
+    if (!e && isHost && !roster.has(conn.peer)) return;   // already dropped (dropStaleNamesake)
+    peerGone(conn.peer, e);
   });
   conn.on("error", () => {});
   return entry;
+}
+
+// a link is gone (closed, or dropped as silent): on the host the device left; workers wait for the roster
+function peerGone(id, e) {
+  conns.delete(id);
+  if (isHost) {
+    dropCard(id); members.delete(id); roster.delete(id); broadcastRoster();
+    log("room", `${e?.name || id} left`);
+    aiPeerLeft(id, e?.name);
+  } else if (id === PREFIX + roomCode) { log("room", "lost the link to the host"); hostGone(); }
+  updateCluster();
 }
 
 function ensureCard(id, name, meta) {
@@ -548,7 +554,19 @@ function onData(from, d) {
       d.name = String(d.name ?? from).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(from).slice(0, 8);
       // names are the room's keys (colours, layers, load progress, the plan): the host makes a taken one
       // unique ("laptop 2"), and the device takes the name the roster gives it
-      if (isHost) d.name = uniqueName(d.name, from);
+      if (isHost) {
+        // the name is held by a device that has been quiet for a second: ping it and decide in a moment
+        const quiet = !probedHellos.has(d) && [...roster].find(([rid, m]) => rid !== from && m.name === d.name && !(performance.now() - (conns.get(rid)?.seen ?? -Infinity) < 1000));
+        if (quiet) {
+          const since = performance.now();
+          sendTo(quiet[0], { t: "ping", ts: since });
+          probedHellos.set(d, since);
+          setTimeout(() => { if (conns.get(from) === e) onData(from, d); }, NAME_PROBE_MS);
+          break;
+        }
+        if (probedHellos.has(d)) dropStaleNamesake(d.name, from, probedHellos.get(d));
+        d.name = uniqueName(d.name, from);
+      }
       e.name = d.name; e.meta = d.meta;
       members.set(from, { name: d.name, meta: d.meta });
       ensureCard(from, d.name, d.meta);
@@ -632,6 +650,23 @@ function uniqueName(name, id) {
   let n = 2;
   while (taken.has(`${base} ${n}`)) n++;
   return `${base} ${n}`;
+}
+// the host: a device that asks for a name held by a device that has gone quiet is most likely that
+// device back from a crash or a killed tab (its old link never closed, so the ping loop has not dropped
+// it yet). The hello waits NAME_PROBE_MS while the quiet one is pinged; if it did not answer, it is
+// dropped, so the newcomer keeps its name and aiRejoin gives it its layers back. One that answers keeps
+// its name and the newcomer gets a number (uniqueName).
+const NAME_PROBE_MS = 1500, probedHellos = new WeakMap();   // hello message -> when its namesake was pinged
+function dropStaleNamesake(name, id, since) {
+  const now = performance.now();
+  for (const [rid, m] of [...roster]) {
+    if (rid === id || m.name !== name) continue;
+    const e = conns.get(rid);
+    if (e && e.seen >= since) continue;   // it answered: alive
+    log("room", `${name} is back under a new link: dropping its old one, silent for ${e ? Math.round((now - e.seen) / 1000) : "?"} s`);
+    peerGone(rid, e);
+    try { e?.conn.close(); } catch {}
+  }
 }
 // a device: the host listed this device under another name (the one asked for was taken)
 function renameSelf(name) {
