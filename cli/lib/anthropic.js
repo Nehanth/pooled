@@ -39,6 +39,8 @@ export function parseAnthropic(b) {
   const tk = b.top_k == null ? null : checkInt(b.top_k, 1, 1e9, "top_k");
   const t = b.thinking;
   if (t != null && !(t?.type === "enabled" || t?.type === "disabled")) throw bad("thinking.type must be enabled or disabled");
+  // budget_tokens: the reasoning stops there and the rest of max_tokens goes to the answer
+  const budget = t?.type === "enabled" ? checkInt(t.budget_tokens, 1, LIMITS.maxTokens, "thinking.budget_tokens") : null;
   return {
     api: "anthropic",
     stream: !!b.stream,
@@ -46,6 +48,7 @@ export function parseAnthropic(b) {
     temperature, topK: tk == null ? null : Math.min(tk, LIMITS.topK),
     stop: parseStop(b.stop_sequences, "stop_sequences"),
     thinking: t?.type === "enabled",
+    thinkBudget: budget != null && budget < maxTokens ? budget : null,
   };
 }
 

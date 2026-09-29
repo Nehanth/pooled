@@ -19,7 +19,7 @@ const ask = (over = {}) => ({ api: 1, rid: "r1", messages: [{ role: "user", text
 Deno.test("api: validation accepts a plain ask and fills defaults", () => {
   const { req, err } = validateApiAsk(ask({ params: {} }));
   ok(!err, err);
-  eq(req.params, { maxTokens: 1024, temperature: null, topK: null, stop: [], thinking: false, client: "API" });
+  eq(req.params, { maxTokens: 1024, temperature: null, topK: null, stop: [], thinking: false, thinkBudget: null, client: "API" });
 });
 Deno.test("api: validation rejects bad shapes", () => {
   const bad = (d, m) => { const v = validateApiAsk(d); ok(v.err && v.code === "bad", m + ": " + JSON.stringify(v)); };
@@ -205,4 +205,35 @@ Deno.test("api: a partial character at the very end still goes out (flushed as i
   const ids = byteTok.encode("a🦀").slice(0, -1);
   eq(ids.map((id) => d.push(id)).join(""), "a");
   eq(d.flush(), "\uFFFD");
+});
+Deno.test("api: a thinking budget closes the think block and gives the rest of max_tokens to the answer", async () => {
+  const calls = [];
+  const gen = async (ids, o) => {
+    calls.push({ ids: ids.slice(), maxNew: o.maxNew });
+    const answer = calls.length === 1 ? [4, ...tok.encode("\n" + "hmm ".repeat(100))] : [...tok.encode("four"), 2];
+    let n = 0;
+    for (const t of answer) {
+      if (o.signal.aborted) return { reason: "abort", reused: 7, stats: "s" };
+      if (o.stop.has(t)) return { reason: "stop", reused: 0, stats: "s2" };
+      if (n >= o.maxNew) return { reason: "max", reused: 0, stats: "s" };
+      o.onToken(t, 0); n++;
+    }
+    return { reason: "stop", reused: 0, stats: "s2" };
+  };
+  const { res, sent } = await runAsk(ask({ params: { maxTokens: 50, thinking: true, thinkBudget: 20 } }), [], { gen });
+  eq(calls.length, 2, "a second pass after the budget");
+  const first = calls[0].ids.length;
+  eq(calls[1].ids.slice(first, first + 20).length, 20, "the second pass starts from the first one's ids");
+  eq(calls[1].ids.slice(-4), [1000 + 10, 5, 1000 + 10, 1000 + 10], "…then a closed think block");
+  eq(calls[1].maxNew, 30, "what is left of max_tokens");
+  eq(res.text, "four");
+  ok(res.think.startsWith("hmm") && res.think.length < 80, res.think);
+  eq([res.reason, res.usage.out, res.reused], ["stop", 24, 7]);
+  eq(sent.filter((m) => !m.th).map((m) => m.text).join(""), "four");
+});
+Deno.test("api: no second pass when the answer started within the budget, or thinking is off", async () => {
+  let n = 0;
+  const gen = async (ids, o) => { n++; return fakeGen([4, ...tok.encode("\nhm\n"), 5, ...tok.encode("\n\n" + "x".repeat(40)), 2])(ids, o); };
+  const { res } = await runAsk(ask({ params: { maxTokens: 100, thinking: true, thinkBudget: 10 } }), [], { gen });
+  eq(n, 1); eq(res.reason, "stop"); eq(res.text, "x".repeat(40));
 });

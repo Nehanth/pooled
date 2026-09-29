@@ -100,7 +100,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     const r = job.req;
     const ok = bridge.ask(job.rid, {
       system: r.system, messages: r.messages,
-      params: { maxTokens: r.maxTokens, temperature: r.temperature ?? undefined, topK: r.topK ?? undefined, stop: r.stop, thinking: r.thinking, client: r.client },
+      params: { maxTokens: r.maxTokens, temperature: r.temperature ?? undefined, topK: r.topK ?? undefined, stop: r.stop, thinking: r.thinking, thinkBudget: r.thinkBudget ?? undefined, client: r.client },
     }, (d) => onRoom(job, d));
     if (!ok) jobError(job, new ApiError("unavailable", "not connected to the room", { retryAfter: 5 }));
   }

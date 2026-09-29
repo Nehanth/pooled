@@ -50,10 +50,12 @@ export function validateApiAsk(d) {
   let temperature = null, topK = null;
   if (p.temperature != null) { temperature = +p.temperature; if (!(temperature >= 0 && temperature <= 2)) return bad("temperature out of range"); }
   if (p.topK != null) { topK = Math.floor(+p.topK); if (!(topK >= 1)) return bad("topK out of range"); }
+  let thinkBudget = null;
+  if (p.thinkBudget != null) { thinkBudget = Math.floor(+p.thinkBudget); if (!(thinkBudget >= 1 && thinkBudget <= API_LIMITS.maxTokens)) return bad("thinkBudget out of range"); }
   const stop = p.stop == null ? [] : p.stop;
   if (!Array.isArray(stop) || stop.length > API_LIMITS.stops || stop.some((s) => typeof s !== "string" || !s || s.length > API_LIMITS.stopLen))
     return bad(`stop: at most ${API_LIMITS.stops} non-empty strings of at most ${API_LIMITS.stopLen} characters`);
-  return { req: { rid, system, messages, params: { maxTokens, temperature, topK, stop, thinking: !!p.thinking, client: clean(p.client, API_LIMITS.client) || "API" } } };
+  return { req: { rid, system, messages, params: { maxTokens, temperature, topK, stop, thinking: !!p.thinking, thinkBudget, client: clean(p.client, API_LIMITS.client) || "API" } } };
 }
 
 // text -> the exact ids that were sampled for it, for the last few answers (host memory only). A
@@ -208,7 +210,7 @@ export async function apiRun({ tok, req, prompt, generate, send, onPiece = () =>
   const { ids, thinking, S } = prompt;
   const rid = req.rid;
   const split = new ThinkSplit(thinking), stopper = new StopMatcher(req.params.stop);
-  const ac = new AbortController();
+  let ac = new AbortController();
   const onAbort = () => ac.abort();
   signal?.addEventListener?.("abort", onAbort);
   const answerIds = [];
@@ -222,23 +224,40 @@ export async function apiRun({ tok, req, prompt, generate, send, onPiece = () =>
       if (stopper.hit) { ac.abort(); return; }
     }
   };
+  // thinking budget (Anthropic thinking.budget_tokens): once the reasoning has used it, this pass is
+  // stopped and a second one continues from the same ids with the think block closed, so the rest
+  // of max_tokens goes to the answer
+  const budget = thinking && S.thinkEnd !== undefined && req.params.thinkBudget ? req.params.thinkBudget : 0;
+  let overBudget = false;
+  const stopIds = new Set([S.imEnd, S.eot].filter((x) => x !== undefined));
+  const sample = apiSampler(req.params, fallback);
+  const onToken = (id, drafted) => {
+    if (stopper.hit || overBudget) return;
+    count++;
+    answerIds.push(id);
+    const piece = pieces.push(id);
+    if (piece) { onPiece(piece, drafted); out(split.push(piece), drafted || 0); }
+    if (budget && count >= budget && count < req.params.maxTokens && split.state !== "answer" && split.state !== "gap") { overBudget = true; ac.abort(); }
+  };
   let r = null, err = null;
   try {
-    r = await generate(ids, {
-      stop: new Set([S.imEnd, S.eot].filter((x) => x !== undefined)),
-      maxNew: Math.max(1, Math.min(req.params.maxTokens, ctxMax - ids.length)),
-      sample: apiSampler(req.params, fallback),
-      signal: ac.signal,
-      onToken: (id, drafted) => {
-        if (stopper.hit) return;
-        count++;
-        answerIds.push(id);
-        const piece = pieces.push(id);
-        if (!piece) return;
-        onPiece(piece, drafted);
-        out(split.push(piece), drafted || 0);
-      },
-    });
+    r = await generate(ids, { stop: stopIds, maxNew: Math.max(1, Math.min(req.params.maxTokens, ctxMax - ids.length)), sample, signal: ac.signal, onToken });
+    if (overBudget && r.reason === "abort" && !signal?.aborted) {
+      const close = [...tok.encode("\n"), S.thinkEnd, ...tok.encode("\n\n")];
+      const ids2 = [...ids, ...answerIds, ...close];
+      const held = pieces.flush();
+      if (held) { onPiece(held, 0); out(split.push(held)); }
+      const closeText = tok.decode(close);
+      onPiece(closeText, 0); out(split.push(closeText));
+      const left = Math.min(req.params.maxTokens - count, ctxMax - ids2.length);
+      if (left > 0) {
+        overBudget = false;
+        ac = new AbortController();
+        if (signal?.aborted) ac.abort();
+        const r2 = await generate(ids2, { stop: stopIds, maxNew: left, sample, signal: ac.signal, onToken });
+        r = { ...r2, reused: r.reused || 0 };
+      } else r = { ...r, reason: ctxMax - ids2.length <= 0 ? "ctx" : "max" };
+    }
   } catch (e) { err = e; }
   signal?.removeEventListener?.("abort", onAbort);
   if (!stopper.hit) {

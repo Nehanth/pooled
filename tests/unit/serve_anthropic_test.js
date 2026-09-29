@@ -17,7 +17,9 @@ Deno.test("anthropic: a request maps to the internal request", () => {
     messages: [{ role: "user", content: [{ type: "text", text: "a" }] }, { role: "user", content: "b" }, { role: "assistant", content: [{ type: "thinking", thinking: "t", signature: "" }, { type: "text", text: "ans" }] }, { role: "user", content: "c" }] }));
   eq(r, { api: "anthropic", stream: true, system: "be brief",
     messages: [{ role: "user", text: "a\n\nb" }, { role: "assistant", text: "ans" }, { role: "user", text: "c" }],
-    maxTokens: 100, temperature: 1, topK: 5, stop: ["END"], thinking: true });
+    maxTokens: 100, temperature: 1, topK: 5, stop: ["END"], thinking: true, thinkBudget: null }, "a budget over max_tokens is no budget");
+  eq(parseAnthropic(req({ max_tokens: 2000, thinking: { type: "enabled", budget_tokens: 1024 } })).thinkBudget, 1024);
+  eq(parseAnthropic(req({ thinking: { type: "disabled" } })).thinkBudget, null);
 });
 Deno.test("anthropic: required fields, ranges and unsupported features", () => {
   throws400({ messages: [], max_tokens: 1 }, /model/, "model");
