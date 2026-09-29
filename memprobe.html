@@ -43,6 +43,7 @@
 // live state for a WebDriver poller (tests/e2e/memprobe_phone.mjs).
 import { parseGGUFHeader, qwen35NamesFor, qwen35Weights, qwen35ShardBytes, gpuUploadEntry, streamEntryToGPU, GGML_EMBED } from "/engine/gguf.js";
 import { Qwen35Engine } from "/engine/qwen35.js";
+import { roomQwen35Options, applyRoomFlags } from "/engine/preset.js";
 import { autotuneCoop } from "/engine/autotune.js";
 import { MODELS, maxSeqFor } from "/room/models.js";
 
@@ -282,11 +283,11 @@ async function loadLayers() {
   if (Q.get("engine") !== "0") {
     mp.phase = "engine";
     const ctx = +Q.get("ctx") || maxSeqFor(key);
-    mp.engine = await Qwen35Engine.create({
+    // the room's settings (engine/preset.js), with the room's own ?flags (?kv=q8, ?moefuse=0, ...)
+    mp.engine = applyRoomFlags(await Qwen35Engine.create({
       device, meta: G.meta, weights, vocab: G.tensors[GGML_EMBED]?.shape?.[0], layerRange: [lo, hi], hasEmbed: false, hasHead: false, maxSeq: ctx,
-      coopWG: tune.wg, coopRows: tune.rows, batchCols: 16, coopRowsB: 1, draftVocab: 65536, draftVocabAuto: true, draftChain: true, specFuse: true,
-      moeFuse: true, moeDnRows: 1, gpuSample: true, argmaxWide: true,
-    });
+      coopWG: tune.wg, coopRows: tune.rows, ...roomQwen35Options(Q),
+    }), Q);
     await device.queue.onSubmittedWorkDone();
     note("engine-done", { info: `ctx ${ctx}` });
   }
