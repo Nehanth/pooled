@@ -610,8 +610,11 @@
   /* short: a neutral tag in the shape of "fits" (calm, no warning colour) */
   .rung .more { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
   .rung.ok { color: var(--text); }
-  .rung.short:not(.sel) { opacity: .6; }
-  .rung.short:not(.sel):hover:not(:disabled) { opacity: .85; }
+  /* short rows stay selectable, so their text keeps AA contrast: only the circle and chip fade */
+  .rung.short:not(.sel) { color: var(--ink-4); }
+  .rung.short:not(.sel)::before { opacity: .6; }
+  .rung.short:not(.sel) .more { color: var(--ink-3); box-shadow: none; }
+  .rung.short:not(.sel):hover:not(:disabled) { color: var(--muted); }
   .ai-nogpu { font-size: 13px; color: var(--muted); padding: 2px 4px 4px; }
   .rung:hover:not(:disabled) { background: var(--panel-3); border-color: var(--border-2); }
   .rung.sel, .rung.sel:hover:not(:disabled) { border-color: var(--accent); color: var(--text); background: var(--accent-soft); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-soft) 60%, transparent); }
