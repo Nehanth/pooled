@@ -36,6 +36,7 @@ import { detectStyle } from "../harness/tools.js";
 import { normPath, riskyPath } from "../harness/workspace.js";
 import { CODE_SYSTEM } from "../harness/code-prompt.js";
 import { codeExport } from "./code-export.js";
+import { TEMPLATES, templateById, applyTemplate } from "../harness/templates.js";
 
 const $ = (id) => document.getElementById(id);
 const str = (v, n) => String(v ?? "").slice(0, n);
@@ -204,7 +205,7 @@ export async function initCode(api, { mock = null } = {}) {
     project = server = publisher = agent = model = null; agentSrc = null; tools = [];
   }
   // keepAuto: the project pump() made for the first request keeps the box as the user left it
-  async function useProject(p, { keepAuto = false } = {}) {
+  async function useProject(p, { keepAuto = false, template = null } = {}) {
     if (!p) return;
     closeProject({ keepQueue: keepAuto });
     project = p;
@@ -221,7 +222,11 @@ export async function initCode(api, { mock = null } = {}) {
     if (!keepAuto || p.kind === "folder") $("code-auto").checked = p.kind === "opfs" && userAuto !== false;
     ui.clear();
     for (const m of hist) ui.apply(m);
-    if (!hist.length) ui.placeholder(`project <b>${escapeHTML(p.name)}</b> is empty<br>ask for something to build`);
+    if (!hist.length) {
+      ui.placeholder(template
+        ? `project <b>${escapeHTML(p.name)}</b> starts from the ${escapeHTML(template.label)} template: it runs in Preview<br>ask for a change, like “${escapeHTML(template.next)}”`
+        : `project <b>${escapeHTML(p.name)}</b> is empty<br>ask for something to build`);
+    }
     await sendFiles();
     api.broadcast({ t: "ai-code-history", sid, items: hist.slice(-HIST), tree });
     refreshProjects();
@@ -354,21 +359,42 @@ export async function initCode(api, { mock = null } = {}) {
     if (running) { e.target.value = project?.id || ""; busyNote(); return; }
     try { await useProject(await openProject(id)); } catch (err) { localNote(err.message, true); refreshProjects(); }
   });
-  const newName = $("code-new-name");
+  // New: a name, and what to start from (empty, or a starter template, harness/templates.js)
+  const newName = $("code-new-name"), newTpl = $("code-new-tpl");
+  newTpl.replaceChildren(new Option("Empty project", ""), ...TEMPLATES.map((t) => Object.assign(new Option(`Start from: ${t.label}`, t.id), { title: t.blurb })));
+  const newForm = (on) => { newName.hidden = newTpl.hidden = !on; $("code-proj-select").hidden = on; };
   $("code-new").addEventListener("click", () => {
     if (running) { busyNote(); return; }
     const on = newName.hidden;
-    newName.hidden = !on; $("code-proj-select").hidden = on;
-    if (on) { newName.value = ""; newName.focus(); }
+    newForm(on);
+    if (on) { newName.value = ""; newTpl.value = ""; newName.focus(); }
+  });
+  newTpl.addEventListener("change", () => {
+    const t = templateById(newTpl.value);
+    if (t && !newName.value.trim()) newName.value = t.label;
+    newName.focus();
   });
   newName.addEventListener("keydown", async (e) => {
-    if (e.key === "Escape") { newName.hidden = true; $("code-proj-select").hidden = false; return; }
+    if (e.key === "Escape") { newForm(false); return; }
     if (e.key !== "Enter" || !newName.value.trim()) return;
-    const name = newName.value.trim().slice(0, 40);
-    newName.hidden = true; $("code-proj-select").hidden = false;
-    if (!isHost()) { askHost({ t: "ai-code-cmd", cmd: "new", name }); return; }
-    try { await useProject(await createProject(name)); } catch (err) { localNote("could not create the project: " + err.message, true); }
+    const name = newName.value.trim().slice(0, 40), tpl = newTpl.value;
+    newForm(false);
+    if (!isHost()) { askHost({ t: "ai-code-cmd", cmd: "new", name, tpl }); return; }
+    try { await newProject(name, tpl); } catch (err) { localNote("could not create the project: " + err.message, true); }
   });
+  // a project from a template has its files before useProject lists them, and is served straight
+  // away so it shows running in Preview; the prompt box gets a first change to ask for
+  async function newProject(name, tplId, { suggest = true } = {}) {
+    const p = await createProject(name), t = templateById(tplId);
+    if (t) await applyTemplate(p.ws, t.id);
+    await useProject(p, { template: t });
+    if (t && project === p) {
+      await server.serve({});
+      const box = $("code-prompt");
+      if (suggest && !box.value.trim()) { box.value = t.next; grow(); }
+    }
+    return t;
+  }
   $("code-open").dataset.can = canOpenFolder() ? "1" : "";
   $("code-open").addEventListener("click", async () => {
     if (!isHost()) return;
@@ -664,8 +690,8 @@ export async function initCode(api, { mock = null } = {}) {
       } else if (d.cmd === "new") {
         const name = str(d.name, 40).replace(/[\u0000-\u001f\u007f]/g, "").trim();
         if (!name) return;
-        await useProject(await createProject(name));
-        note(`${who} started the project ${name}`);
+        const t = await newProject(name, str(d.tpl, 40), { suggest: false });
+        note(`${who} started the project ${name}${t ? ` from the ${t.label} template` : ""}`);
       }
     } catch (err) { tell(from, err.message, true); }
   });
