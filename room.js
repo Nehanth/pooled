@@ -61,6 +61,7 @@ let roomSince = Infinity;
 const presence = (name, joined) => { if (performance.now() - roomSince > 2500) toast(`${name} ${joined ? "joined" : "left"}`, { sw: joined ? devColor(name) : "var(--faint)", kind: "presence" }); };
 function mascot() {}
 const PREFIX = "pooled-room-";   // PeerJS id prefix (was "swarmllm-room-" before the rename; PROTOCOL did not change)
+const NAME_KEY = "pooled-name";   // sessionStorage: this tab's device name, so a reload rejoins under the same name
 const HOST_KEY = "pooled-host", OLD_HOST_KEY = "swarm-host";   // localStorage: what a host needs to resume its room after a reload (the old key is still read)
 const rand = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)))
   .map(b => "ABCDEFGHJKMNPQRSTVWXYZ23456789"[b % 30]).join("");
@@ -709,6 +710,7 @@ function joinFailed(text) {
 // --- join / create ---
 async function start(create, resume = null) {
   myName = resume?.name || $("name-input").value.trim() || (create ? "host" : "peer") + "-" + rand(2);
+  if (!VQ.get("embed")) try { sessionStorage.setItem(NAME_KEY, myName); } catch {}   // a virtual device's iframe shares the tab's storage
   const code = resume?.code || (create ? rand(4) : $("code-input").value.trim().toUpperCase());
   if (!code) { $("join-status").textContent = "Enter a room code"; return; }
   $("create-btn").disabled = $("join-btn").disabled = true;
@@ -751,6 +753,9 @@ async function start(create, resume = null) {
       let died = null;
       if (!VQ.get("embed")) try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c && Date.now() - c.t < 10 * 60 * 1000) died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000) }; } catch {}
       conn.send({ t: "hello", name: myName, meta: myMeta, died, v: PROTOCOL });
+      // put the room in the address bar (a typed code never was), so a reload joins it again like a link,
+      // under the same name: the host re-seats a device's layers by name (aiRejoin)
+      if (!VQ.get("embed")) try { history.replaceState(history.state, "", roomLink()); } catch {}
       enterRoom();
     });
   });
@@ -928,6 +933,7 @@ const linkCode = codeFromLocation(location.pathname, location.search, location.h
 const VQ = new URLSearchParams(location.search);
 if (VQ.get("embed") === "1") document.documentElement.classList.add("embed");
 if (VQ.get("vname")) $("name-input").value = VQ.get("vname").slice(0, 20);
+else try { const n = sessionStorage.getItem(NAME_KEY); if (n) $("name-input").value = n; } catch {}   // this tab's name from before a reload
 if (+VQ.get("vgb") > 0) $("join-gb").value = +VQ.get("vgb");
 if (backAsHost && Date.now() - backAsHost.t < 60000 && !(linkCode && linkCode !== backAsHost.code)) {
   metaPromise.then(() => { if (!peer) start(true, backAsHost); });
