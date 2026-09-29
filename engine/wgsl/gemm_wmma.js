@@ -31,7 +31,13 @@ export const WMMA_FEATURES_OPT = ["subgroups"];
 export const WMMA_DEFAULT = Object.freeze({ i8: { BM: 64, BN: 64, SM: 32, SN: 32, KB: 1, PAD: 4 }, f32: { BM: 64, BN: 64, SM: 32, SN: 32, KB: 1, PAD: 4 } });
 // "template": subgroupMatrixLoad<T, row_major>(p, off, stride) (current Dawn, the gpuweb proposal);
 // "bool": subgroupMatrixLoad<T>(p, off, colMajor, stride) (Chromium <= 153 at least). Both are tried.
-export const WMMA_SYNTAX = ["template", "bool"];
+// Type parameter order: Chrome 153 (GB10) takes the proposal's subgroup_matrix_left<T, M, K>,
+// right<T, K, N>, result<T, M, N> ("template"); older Dawn spelled them <T, cols, rows> ("template-km",
+// "bool"). All square shapes (Apple 8x8x8) read the same either way. Tried in this order.
+export const WMMA_SYNTAX = ["template", "template-km", "bool"];
+const mtypes = (syntax, T, TR, M, N, K) => syntax === "template"
+  ? [`subgroup_matrix_left<${T}, ${M}, ${K}>`, `subgroup_matrix_right<${T}, ${K}, ${N}>`, `subgroup_matrix_result<${TR}, ${M}, ${N}>`]
+  : [`subgroup_matrix_left<${T}, ${K}, ${M}>`, `subgroup_matrix_right<${T}, ${N}, ${K}>`, `subgroup_matrix_result<${TR}, ${N}, ${M}>`];
 
 const rng = (n) => Array.from({ length: n }, (_, i) => i);
 
@@ -68,10 +74,10 @@ export function wmmaPlan(mc, opt = {}, wgMem = 16384) {
   return Object.freeze({ ...t, ...mc, NS, T, smem, KS: 32 * KB });
 }
 
-const ld = (syntax, ty, arr, off, colMajor, stride) => syntax === "template"
+const ld = (syntax, ty, arr, off, colMajor, stride) => syntax !== "bool"
   ? `subgroupMatrixLoad<${ty}, ${colMajor ? "col_major" : "row_major"}>(&${arr}, ${off}, ${stride})`
   : `subgroupMatrixLoad<${ty}>(&${arr}, ${off}, ${colMajor}, ${stride})`;
-const st = (syntax, arr, off, v, colMajor, stride) => syntax === "template"
+const st = (syntax, arr, off, v, colMajor, stride) => syntax !== "bool"
   ? `subgroupMatrixStore<${colMajor ? "col_major" : "row_major"}>(&${arr}, ${off}, ${v}, ${stride})`
   : `subgroupMatrixStore(&${arr}, ${off}, ${v}, ${colMajor}, ${stride})`;
 
@@ -79,7 +85,7 @@ const st = (syntax, arr, off, v, colMajor, stride) => syntax === "template"
 function i8Kernel(fmt, acc, P, syntax) {
   const { BM, BN, SM, SN, KB, WSTR, NS, T, SG, M, N } = P, WC = BN / SN, TI = SM / M, TJ = SN / N, RA = SM / SG;
   const units = BM * KB, uPer = Math.ceil(units / T), xsU = BN * KB, xsPer = Math.ceil(xsU / T);
-  const L = `subgroup_matrix_left<i8, 32, ${M}>`, R = `subgroup_matrix_right<i8, ${N}, 32>`, C = `subgroup_matrix_result<i32, ${N}, ${M}>`;
+  const [L, R, C] = mtypes(syntax, "i8", "i32", M, N, 32);
   const nib = (w, sh) => `((((${sh ? `(${w} >> 4u)` : w} & 0x0F0F0F0Fu) | 0x80808080u) - 0x08080808u) ^ 0x80808080u)`;
   const wstage = rng(uPer).map((j) => `
     { let li = t + ${j * T}u; if (li < ${units}u) {
@@ -158,7 +164,7 @@ fn wmma_quant(@builtin(global_invocation_id) gid: vec3<u32>) {
 // ---- f32 family ----
 function f32Kernel(fmt, acc, P, syntax) {
   const { BM, BN, SM, SN, KB, WSTR4, T, M, N, K } = P, WC = BN / SN, TI = SM / M, TJ = SN / N, KS = 32 * KB;
-  const L = `subgroup_matrix_left<f32, ${K}, ${M}>`, R = `subgroup_matrix_right<f32, ${N}, ${K}>`, C = `subgroup_matrix_result<f32, ${N}, ${M}>`;
+  const [L, R, C] = mtypes(syntax, "f32", "f32", M, N, K);
   const units = BM * KB, uPer = Math.ceil(units / T);
   const q4lo = (w) => `(vec4<f32>(unpack4xU8(${w} & 0x0F0F0F0Fu)) - vec4<f32>(8.0))`, q4hi = (w) => `(vec4<f32>(unpack4xU8((${w} >> 4u) & 0x0F0F0F0Fu)) - vec4<f32>(8.0))`;
   const wstage = rng(uPer).map((j) => `

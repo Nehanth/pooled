@@ -1034,7 +1034,7 @@ export class Qwen35Engine {
     let P;
     try { P = wmmaPlan(mc, { BN: this.wideCfg.BN, ...o, kind: undefined }, device.limits.maxComputeWorkgroupStorageSize); } catch (e) { return no(e.message); }
     if (P.BN !== this.wideCfg.BN) return no(`tile width ${P.BN} must equal the wide GEMM's ${this.wideCfg.BN}`);
-    const D = this.dims, dIns = [D.dim, D.dInner, D.qDim, ...(this.layers.some((L) => !L.moe) ? [D.inter] : [])].filter(Boolean);
+    const D = this.dims, dIns = [D.dim, D.dInner, D.qDim, D.inter].filter(Boolean);   // (MoE: inter unused, still a multiple of 32)
     if (dIns.some((d) => d % P.KS)) return no(`a projection width is not a multiple of ${P.KS}`);
     const names = ["gemm_m_q4", "gemm_m_q4_acc", "gemm_m_q8", "gemm_m_q8_acc"], pipes = {};
     try {

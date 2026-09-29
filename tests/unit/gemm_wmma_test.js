@@ -61,7 +61,7 @@ Deno.test("generated WGSL: entry points and builtin spelling", () => {
       const s = gemmWmmaWGSL(P, syntax);
       ok(s.startsWith("enable chromium_experimental_subgroup_matrix;"), "enable first");
       for (const e of ["gemm_m_q4", "gemm_m_q4_acc", "gemm_m_q8", "gemm_m_q8_acc", ...(P.kind === "i8" ? ["wmma_quant"] : [])]) ok(s.includes(`fn ${e}(`), `${P.kind} ${syntax}: ${e}`);
-      ok(syntax === "template" ? /, (row|col)_major>\(/.test(s) : !/_major>/.test(s), `${P.kind} ${syntax} spelling`);
+      ok(syntax !== "bool" ? /, (row|col)_major>\(/.test(s) : !/_major>/.test(s), `${P.kind} ${syntax} spelling`);
       ok(!/\$\{|undefined|NaN/.test(s), `${P.kind} ${syntax}: template leftovers`);
     }
   }

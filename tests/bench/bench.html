@@ -57,7 +57,7 @@ try {
   // ?mma=i8|f32|1|JSON: subgroup-matrix wide prefill GEMM (engine option prefillMma; needs ubatch), requests its feature
   const MMA = q.get("mma") ? (/^[\[{]/.test(q.get("mma")) ? JSON.parse(q.get("mma")) : q.get("mma") === "1" ? true : q.get("mma")) : undefined;
   const ad = await navigator.gpu.requestAdapter(); const device = await ad.requestDevice({ requiredFeatures: [...new Set([...prefillMathFeatures(ad, PM), ...(MMA ? prefillMmaFeatures(ad) : [])])],
-    requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, ...(PM || q.has("ubatch") ? { maxComputeWorkgroupStorageSize: ad.limits.maxComputeWorkgroupStorageSize } : {}) } });
+    requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, ...(PM || MMA || q.has("ubatch") ? { maxComputeWorkgroupStorageSize: ad.limits.maxComputeWorkgroupStorageSize } : {}) } });
   let gpuErrors = 0;
   device.addEventListener("uncapturederror", (e) => { if (gpuErrors++ < 3) log("GPU ERROR " + e.error?.message?.slice(0, 200)); });
   if (PM || MMA) log(`adapter features: ${[...ad.features].filter((f) => /f16|subgroup/.test(f)).join(", ") || "(no f16 / subgroup features)"}; subgroupMatrixConfigs ${JSON.stringify([...(ad.info?.subgroupMatrixConfigs || [])].map((c) => [c.componentType, c.resultComponentType, c.M, c.N, c.K]))}; subgroup ${ad.info?.subgroupMinSize}..${ad.info?.subgroupMaxSize}`);
