@@ -173,9 +173,12 @@ const humanRange = (r) => { const m = /^(\d+)\D+(\d+)$/.exec(String(r || "")); r
 // One colour per device, everywhere (chips, pool bar, loading rows, band, Lend screen): given once,
 // in join order, to each device that can hold layers. A device that only asks is grey everywhere.
 const SWATCH = ["#2A45E0", "#2B2F3C", "#7C8FFF", "#5E616B", "#B9C6FF", "#1C33B8",
-  // devices 7 to 16: more of the same family (blues, indigo, slate), each distinct from its neighbours
-  "#4F6BFF", "#3E4454", "#9AABFF", "#7B7F8A", "#2F3FA8", "#D3DBFF", "#454D8F", "#9DA1AB", "#6E86FF", "#1A1D26"];
-// past 16 devices: shades generated in the same blue-to-slate range (hue 222-232), so no two neighbours match
+  // devices 7 to 16: slate, sky, royal and navy blue, plus violets (#320578, #7E4FFB, #5D4DA4, #7F73C3,
+  // #5912CA sit at OKLCH hue 289, past the tokens' 267-275), each picked to be as far as possible
+  // from every colour before it, counting a lightness step of 0.12 (OKLab) or a hue/chroma step of 0.12 as
+  // one unit: below one, a 6 px dot or a thin bar reads the same (the old shades sat at 0.25-0.67)
+  "#8C939B", "#127ABE", "#320578", "#7E4FFB", "#5D4DA4", "#114B75", "#79B1E0", "#7F73C3", "#4074FB", "#5912CA"];
+// past 16 devices: shades generated in a blue-to-slate range (hue 222-232), so no two neighbours match
 function swatch(i) {
   if (i < SWATCH.length) return SWATCH[i];
   const k = i - SWATCH.length, hue = 222 + (k * 7) % 11, sat = k % 3 === 2 ? 12 : 55 + (k * 13) % 30, light = 28 + (k * 17) % 50;
@@ -259,7 +262,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   chipPop(null); $("room-menu").open = false;
   if (!$("share").hidden) closeShare();
-  if (!$("card").hidden) $("card").hidden = true;
+  if (!$("card").hidden) closeCard();
 });
 document.addEventListener("pointerdown", (e) => {
   const t = e.target.closest?.("[data-tip]"); if (!t) return;
@@ -267,7 +270,22 @@ document.addEventListener("pointerdown", (e) => {
   t.addEventListener("pointerleave", () => t.classList.remove("tip-off"), { once: true });
 });
 addEventListener("resize", () => chipPop(null));
-$("peers").addEventListener("scroll", () => chipPop(null), { passive: true });
+$("peers").addEventListener("scroll", () => { chipPop(null); peersEdge(); }, { passive: true });
+// more chips than the header has room for: fade the side(s) that hide some, and let a mouse wheel
+// scroll the row sideways (only a trackpad or a drag could reach the last chips before)
+function peersEdge() {
+  const b = $("peers"), max = b.scrollWidth - b.clientWidth;
+  b.classList.toggle("fade-l", max > 1 && b.scrollLeft > 1);
+  b.classList.toggle("fade-r", max > 1 && b.scrollLeft < max - 1);
+}
+$("peers").addEventListener("wheel", (e) => {
+  const b = $("peers");
+  if (e.ctrlKey || Math.abs(e.deltaY) <= Math.abs(e.deltaX) || b.scrollWidth <= b.clientWidth) return;
+  e.preventDefault();
+  b.scrollLeft += e.deltaY * (e.deltaMode === 1 ? 16 : 1);
+}, { passive: false });
+if (typeof ResizeObserver === "function") new ResizeObserver(peersEdge).observe($("peers"));
+new MutationObserver(peersEdge).observe($("peers"), { childList: true, subtree: true, characterData: true });
 // what a card says about its device (the sim hook repaints with made-up devices)
 function paintCard(card, name, meta, self) {
   card.querySelector(".pname").textContent = name;
@@ -357,6 +375,10 @@ function updateCluster() {
   $("peers-n").textContent = String(all.length);
   renderPool(pledged);
 }
+// the device list scrolls past four and a half rows (p2p.html #ap-devs): fade its bottom while more rows are below
+function devsEdge() { const l = $("ap-devs"); l.classList.toggle("more", l.scrollTop < l.scrollHeight - l.clientHeight - 1); }
+$("ap-devs").addEventListener("scroll", devsEdge, { passive: true });
+if (typeof ResizeObserver === "function") new ResizeObserver(devsEdge).observe($("ap-devs"));
 // The model card's side: what the room pools (one segment per device, in its colour, with a tick at
 // each model's need), what this device lends (+/-), and the invite (QR, code, copy link).
 function renderPool(pledged) {
@@ -376,6 +398,7 @@ function renderPool(pledged) {
   if (selNeed) { const [k, gb] = selNeed, short = gb - pledged; $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b><span>${short > 0 ? `${+short.toFixed(1)} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0); }
   $("ap-devs").innerHTML = devs.map((d) => `<li style="--sw:${devColor(d.name)}"><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB</b></li>`).join("")
     || '<li class="none">No device with WebGPU yet</li>';
+  devsEdge();
   const can = !!myMeta.webgpu;
   $("ap-step").hidden = !can; $("ap-no").hidden = can;
   if (can) { if (document.activeElement !== $("ap-gb")) $("ap-gb").value = myMeta.contribGB; $("ap-minus").disabled = myMeta.contribGB <= lendMin(); $("ap-plus").disabled = myMeta.contribGB >= 64; }
@@ -980,7 +1003,34 @@ function openShare() {
 $("room-badge").addEventListener("click", openShare);
 $("share-btn").addEventListener("click", openShare);
 for (const b of document.querySelectorAll("[data-invite]")) b.addEventListener("click", (e) => { e.preventDefault(); openShare(); });
-function closeShare() { $("share").hidden = true; if (document.body.classList.contains("in-room")) $("share-btn").focus({ preventScroll: true }); }
+// the overlays (Invite, Room card, Room over) are modal: while one is open, the page behind it is
+// inert, so Tab cycles inside the sheet and nothing behind the blur takes focus or clicks
+const overlays = [...document.querySelectorAll(".overlay")];
+let modalReturn = null;   // what had focus before an overlay that opened on its own took it
+function syncModal() {
+  const open = overlays.some((o) => !o.hidden);
+  for (const el of document.querySelectorAll("body > header, #join-screen, #room-screen")) el.inert = open;
+  // the compute screen (a lending device's screen) sits above the overlays: while it is up, they wait
+  // underneath, out of the Tab order, and take focus only once it closes
+  const computing = $("compute-screen")?.hidden === false;
+  for (const o of overlays) o.inert = computing;
+  // one that opened on its own (Room over) takes focus from the page it now covers
+  const ae = document.activeElement;
+  // (focus left on a sheet that just closed counts as outside, e.g. Invite closed over Room over)
+  if (open && !computing && !overlays.some((o) => !o.hidden && o.contains(ae))) {
+    if (ae && ae !== document.body && !ae.closest?.(".overlay")) modalReturn = ae;
+    overlays.find((o) => !o.hidden).querySelector("button")?.focus({ preventScroll: true });
+  }
+  // and gives it back when it closes (host back, a redeal, its close button), unless focus moved on
+  if (!open) {
+    const back = modalReturn; modalReturn = null;
+    if (back?.isConnected && (!ae || ae === document.body || ae.closest?.(".overlay"))) back.focus({ preventScroll: true });
+  }
+}
+for (const o of [...overlays, $("compute-screen")].filter(Boolean)) new MutationObserver(syncModal).observe(o, { attributes: true, attributeFilter: ["hidden"] });
+// a closed sheet hands focus back to its opener, or, if another sheet is still up, leaves it for later
+function focusBack(el) { if (overlays.some((o) => !o.hidden)) modalReturn = el; else el.focus({ preventScroll: true }); }
+function closeShare() { $("share").hidden = true; syncModal(); if (document.body.classList.contains("in-room")) focusBack($("share-btn")); }
 $("share-close").addEventListener("click", closeShare);
 $("share").addEventListener("click", (e) => { if (e.target === $("share")) closeShare(); });
 $("room-over-close").addEventListener("click", () => { $("room-over").hidden = true; });
@@ -1442,11 +1492,13 @@ function openCard() {
   drawCard($("card-canvas"), { model: (MODELS[ai.model || $("ai-model").value]?.label || "").split("\u00b7")[0].trim(),
     code: roomCode, nodes, tps, acc: lastMap?.st?.acc, lap: lastMap?.st?.lap, date: new Date().toISOString().slice(0, 10) });
   $("card").hidden = false;
+  $("card-close").focus({ preventScroll: true });
 }
+function closeCard() { $("card").hidden = true; syncModal(); focusBack($("room-menu").querySelector("summary")); }
 async function cardBlob() { return new Promise((res) => $("card-canvas").toBlob(res, "image/png")); }
 $("card-btn").addEventListener("click", () => { $("room-menu").open = false; openCard(); });
-$("card-close").addEventListener("click", () => { $("card").hidden = true; });
-$("card").addEventListener("click", (e) => { if (e.target === $("card")) $("card").hidden = true; });
+$("card-close").addEventListener("click", closeCard);
+$("card").addEventListener("click", (e) => { if (e.target === $("card")) closeCard(); });
 $("card-save").addEventListener("click", async () => {
   const a = document.createElement("a"); a.href = URL.createObjectURL(await cardBlob()); a.download = `pooled-${roomCode || "room"}.png`; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);

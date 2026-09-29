@@ -123,6 +123,11 @@
   /* device chips (room.js peerCard): dot in the device's layer colour, icon, name, GB; a click opens its card */
   #peers { flex: 0 1 auto; min-width: 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px; margin: -2px 0; }
   #peers::-webkit-scrollbar { display: none; }
+  /* more chips than fit: the clipped edge fades (room.js peersEdge), so the row reads as scrollable */
+  #peers:is(.fade-l, .fade-r) { --fl: 0px; --fr: 0px; -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--fl), #000 calc(100% - var(--fr)), transparent); mask-image: linear-gradient(90deg, transparent, #000 var(--fl), #000 calc(100% - var(--fr)), transparent); }
+  #peers.fade-l { --fl: 32px; }
+  #peers.fade-r { --fr: 32px; }
+  #peers:has(> .peer-card > .pop:not([hidden])) { -webkit-mask-image: none; mask-image: none; }   /* a mask clips the open card too (it is fixed, but still inside) */
   .peer-card { --sw: var(--faint); flex: none; position: relative; animation: chipin .5s var(--ease); }
   @keyframes chipin { from { opacity: 0; transform: translateX(-6px) scale(.96); } }
   .pchip { --chip-bd: var(--border); display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border: 1px solid var(--chip-bd); border-radius: 8px; background: var(--panel); font: 400 12px/1 var(--sans); color: var(--text); white-space: nowrap; }
@@ -531,7 +536,7 @@
   .ap-h b { font: 400 26px/1.1 var(--display); letter-spacing: -.025em; }
   .ap-h span { font-size: 13px; color: var(--muted); }
   #ai-panel.online .ap-h, #ai-panel.online .ap-note { display: none; }
-  .ap-note { margin-top: auto; padding: 0 2px 4px; font-size: 12px; color: var(--muted); }
+  .ap-note { margin-top: 2px; padding: 0 2px 4px; font-size: 12px; color: var(--muted); }   /* under the rows, not pushed down as the device list grows */
   .ap-k { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--muted); }
   .ap-k b { font: 500 22px/1 var(--mono); letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums; }
   /* the pool: one segment per device, a tick where each model starts to fit */
@@ -551,7 +556,10 @@
   #ap-need b { font: 500 12px/1 var(--mono); color: var(--text); }
   #ap-need span { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--ink-2); }
   #ap-need.ok span { color: var(--accent-text); }
-  #ap-devs { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  /* four and a half rows (20px rows, 6px gaps), then the list scrolls: the card keeps its height as more
+     devices join. The fade covers only the half row, so the four above it stay clear */
+  #ap-devs { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 115px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  #ap-devs.more { -webkit-mask-image: linear-gradient(#000 calc(100% - 14px), transparent); mask-image: linear-gradient(#000 calc(100% - 14px), transparent); }
   #ap-devs li { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; color: var(--text); }
   #ap-devs li i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--sw); }
   #ap-devs li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -748,6 +756,13 @@
   #toasts { position: fixed; bottom: calc(104px + env(safe-area-inset-bottom)); right: max(16px, 3vw, calc(12px + env(safe-area-inset-right))); z-index: 90; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
   body:not(.in-room) #toasts { bottom: auto; top: 72px; }
   @media (max-width: 640px) { #toasts { left: 16px; right: 16px; align-items: center; } }
+  /* toasts keep clear of open panels: beside Room settings (on a phone, under its sheet), and on the
+     model and loading cards (no composer yet) at the bottom edge, as wide as the gutter beside the card */
+  @media (min-width: 641px) {
+    body:has(#room-menu[open]) #toasts { right: auto; left: max(16px, 3vw, calc(12px + env(safe-area-inset-left))); align-items: flex-start; }
+    body.in-room:not(:has(#ai-panel.online)) #toasts { bottom: calc(20px + env(safe-area-inset-bottom)); max-width: max(150px, calc(50vw - 430px - max(16px, 3vw) - 12px)); }
+  }
+  @media (max-width: 640px) { body:has(#room-menu[open]) #toasts { z-index: 19; } }
   .toast { display: flex; align-items: center; gap: 9px; background: var(--text); color: #fff; font: 500 13px/1.3 var(--sans); padding: 10px 14px; border-radius: 12px; box-shadow: 0 10px 30px rgba(20,21,26,0.2); animation: toastin 0.45s var(--ease) both, toastout 0.4s ease-in 3.6s both; }
   .toast::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--sw, var(--blue-400)); }
   /* joined / left: a quieter chip, the device's colour as its dot */
@@ -1593,7 +1608,7 @@
 </div>
 
 <div id="share" class="overlay" hidden>
-  <div class="sheet invite" role="dialog" aria-labelledby="share-h">
+  <div class="sheet invite" role="dialog" aria-modal="true" aria-labelledby="share-h">
     <button id="share-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
     <h2 id="share-h">Invite a device</h2>
     <div class="k">Open the link or scan the code on another device. It joins this room and adds its memory.</div>
@@ -1606,7 +1621,7 @@
   </div>
 </div>
 <div id="card" class="overlay" hidden>
-  <div class="sheet wide" role="dialog" aria-labelledby="card-h">
+  <div class="sheet wide" role="dialog" aria-modal="true" aria-labelledby="card-h">
     <button id="card-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
     <h2 id="card-h">Room card</h2>
     <div class="k">A picture of this room's devices and speed, to keep or share.</div>
@@ -1615,7 +1630,7 @@
   </div>
 </div>
 <div id="room-over" class="overlay" hidden>
-  <div class="sheet" role="alertdialog" aria-labelledby="room-over-h">
+  <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="room-over-h">
     <button id="room-over-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
     <h2 id="room-over-h">Room over</h2>
     <div class="k" id="room-over-why"></div>
