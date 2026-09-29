@@ -7,6 +7,7 @@
   "use strict";
   const RM = matchMedia("(prefers-reduced-motion: reduce)").matches;
   const TAU = Math.PI * 2;
+  let loaded = document.readyState === "complete";
   const ease = x => x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x);
   // cubic-bezier(x1,y1,x2,y2), as in CSS: solve x(u) = x for u, return y(u)
   const bezier = (x1, y1, x2, y2) => x => {
@@ -172,8 +173,10 @@
       if (now - last >= 31 || !last) { last = now; step(dt); draw(); }
       wake();
     }
+    // the loop starts once the page has loaded: until then the still frame drawn below stands in, and the
+    // main thread goes to parsing, fonts and first paint (a 4x-throttled phone spent ~1.3s here during load)
     let paused = false;   // the demo's Pause button holds the swarms too
-    const wake = () => { if (!RM && !paused && visible && !document.hidden && !raf) raf = requestAnimationFrame(frame); };
+    const wake = () => { if (!RM && loaded && !paused && visible && !document.hidden && !raf) raf = requestAnimationFrame(frame); };
     const settle = () => { P.forEach(p => { const h = home(p, t); p.x = h[0]; p.y = h[1]; }); };
 
     if (RM) {
@@ -198,6 +201,7 @@
       }, { threshold: .3 }).observe(c.parentNode);   // the closer section, 30% on screen
     } else { visible = true; if (o.logo) gather = 0; }
     document.addEventListener("visibilitychange", () => { last = 0; wake(); });
+    if (!loaded) addEventListener("load", () => setTimeout(() => { loaded = true; last = 0; wake(); }, 0), { once: true });
     wake();
     return {
       get paused() { return paused; },
