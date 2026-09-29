@@ -1554,6 +1554,9 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       draftChain: new URLSearchParams(location.search).get("draftchain") !== "0",
       // ?specfuse=0: speculative verify as separate trunk / head submits (A/B; same output bits)
       specFuse: new URLSearchParams(location.search).get("specfuse") !== "0",
+      // ?readone=0: hidden-state readbacks as a second copy submit into one staging buffer, and a worker
+      // runs its queued frames one after another (the old path, for A/B; same bits)
+      readOne: new URLSearchParams(location.search).get("readone") !== "0",
       // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched
       // attention) for A/B timing; both give the same bits, so devices may differ
       ...(new URLSearchParams(location.search).get("fuse") === "0" ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
@@ -2041,7 +2044,11 @@ async function aiPrefill(ids, { aborted = () => ai.abort, onStatus = aiStatus, d
         const nChunks = Math.max(1, Math.min(Math.floor(16 / W), Math.floor((ids.length - 1 - i) / W)));
         const n = nChunks * W, basePos = ai.pos, i0 = i;
         const hb = new Float32Array(n * hdim);
-        for (let c = 0; c < nChunks; c++)
+        if (ai.engine.readOne && ai.engine.embedRunBatchSubmit) {   // every chunk submitted, then one wait
+          const ps = [];
+          for (let c = 0; c < nChunks; c++) ps.push(ai.engine.embedRunBatchSubmit(ids.slice(i + c * W, i + (c + 1) * W), basePos + c * W));
+          for (let c = 0; c < nChunks; c++) hb.set(await ps[c], c * W * hdim);
+        } else for (let c = 0; c < nChunks; c++)
           hb.set(await ai.engine.embedRunBatch(ids.slice(i + c * W, i + (c + 1) * W), basePos + c * W), c * W * hdim);
         if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
         if (ai.chain.length) {
@@ -2657,8 +2664,21 @@ function clearChat() {
 // Frames run strictly one after another in arrival order (the transport delivers them in send
 // order), so several prefill rounds can be queued here while the GPU works. Control that rides
 // on a frame (reset, rollback) applies before it, and goes on down the chain with it.
+// With an engine that reads back through a staging pool (engine.readOne), a frame is split in two:
+// workerFrame submits its GPU work and returns a finisher that waits for the readback and sends. The
+// next queued frame is submitted as soon as this one's is (ai.q), while the finishers run in order
+// (ai.sendQ), so a frame's readback wait overlaps the next frame's GPU work instead of idling the GPU.
+function workerEnqueue(d) {
+  const started = ai.q.then(() => workerFrame(d));
+  ai.q = started.then(() => {}, () => {});
+  ai.sendQ = (ai.sendQ || Promise.resolve()).then(() => started).then((fin) => fin?.()).catch((err) => {
+    aiStatus("⚠ " + err.message);
+    sendTo(ai.hostId, { t: "ai-error", message: err.message });
+  });
+}
 async function workerFrame(d) {
   if (!ai.engine) return;
+  const pipe = !!(ai.engine.readOne && ai.engine.runHiddenSubmit);
   const ctl = {};
   // order matters: a pending rollback belongs to the answer that just ended, the save records
   // that answer's final state, and only then may the state be reset or replaced by a checkpoint
@@ -2670,6 +2690,8 @@ async function workerFrame(d) {
   if (d.reset) { ai.engine.reset?.(); ctl.reset = 1; }
   if (d.ld != null) { ai.engine.loadSlot?.(d.ld); ctl.ld = d.ld; }
   const t0 = performance.now();
+  // a frame's time on this device: from its start, or from the end of the frame it was queued behind
+  const took = () => { const now = performance.now(), ms = now - Math.max(t0, ai.workerDoneAt || 0); ai.workerDoneAt = now; return ms; };
   if (d.t === "ai-hidden-b") {
     // n hiddens in, my layers (batched), n hiddens on
     const xs = unpackWire(d);
@@ -2677,30 +2699,45 @@ async function workerFrame(d) {
     const wdim = ai.engine.dims.dim;
     const hb = new Float32Array(nTok * wdim);
     const NC = ai.engine.NC || 4;
+    const parts = [];
     for (let c = 0; c < nTok; c += NC) {
       const m = Math.min(NC, nTok - c);
-      hb.set(await ai.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false), c * wdim);
+      const snap = d.spec ? { base: c, total: nTok } : false;
+      if (pipe) parts.push([c, ai.engine.runHiddenBatchSubmit(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, snap)]);
+      else hb.set(await ai.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, snap), c * wdim);
     }
-    if (badF32(hb)) { aiStatus(`⚠ NaN in batched prefill on this device`); sendTo(ai.hostId, { t: "ai-error", message: "NaN in batched prefill" }); }
-    teleNote(d.spec ? "spec" : "pre", performance.now() - t0);
-    compute.pass(nTok, performance.now() - t0);
-    // the verify flag travels with the frame: every device snapshots its recurrent state per
-    // column, or a later rollback on it restores a stale snapshot
-    const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };
-    if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
-    else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
+    const finB = async () => {
+      for (const [c, p] of parts) hb.set(await p, c * wdim);
+      if (badF32(hb)) { aiStatus(`⚠ NaN in batched prefill on this device`); sendTo(ai.hostId, { t: "ai-error", message: "NaN in batched prefill" }); }
+      const msB = took();
+      teleNote(d.spec ? "spec" : "pre", msB);
+      compute.pass(nTok, msB);
+      // the verify flag travels with the frame: every device snapshots its recurrent state per
+      // column, or a later rollback on it restores a stale snapshot
+      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };
+      if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
+      else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
+    };
+    if (pipe) return finB;
+    await finB();
   } else {
     // one token: run my layers, forward along the chain
     const hin = unpackWire(d);
     if (badF32(hin)) { aiStatus(`⚠ NaN ARRIVED at this device (pos ${d.pos}) — upstream peer broken`); }
-    const h = await ai.engine.runHidden(hin, d.pos);
-    if (badF32(h)) { aiStatus(`⚠ NaN PRODUCED by this device (pos ${d.pos}, layers ${ai.range[0]}–${ai.range[1] - 1}) — GPU kernel issue here`); sendTo(ai.hostId, { t: "ai-error", message: `NaN produced on worker layers ${ai.range[0]}–${ai.range[1] - 1}` }); }
-    teleNote("one", performance.now() - t0);
-    compute.pass(1, performance.now() - t0);
-    const msg = { pos: d.pos, ...packWire(h) };
-    if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
-    else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
-    if (d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
+    const hp = pipe ? ai.engine.runHiddenSubmit(hin, d.pos) : null;
+    const fin1 = async () => {
+      const h = hp ? await hp : await ai.engine.runHidden(hin, d.pos);
+      if (badF32(h)) { aiStatus(`⚠ NaN PRODUCED by this device (pos ${d.pos}, layers ${ai.range[0]}–${ai.range[1] - 1}) — GPU kernel issue here`); sendTo(ai.hostId, { t: "ai-error", message: `NaN produced on worker layers ${ai.range[0]}–${ai.range[1] - 1}` }); }
+      const ms1 = took();
+      teleNote("one", ms1);
+      compute.pass(1, ms1);
+      const msg = { pos: d.pos, ...packWire(h) };
+      if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
+      else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
+      if (d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
+    };
+    if (pipe) return fin1;
+    await fin1();
   }
 }
 
@@ -2841,7 +2878,7 @@ async function aiOnData(from, d) {
       ai.role = "worker";
       ai.next = d.next;
       ai.hostId = d.host;
-      ai.q = Promise.resolve();
+      ai.q = Promise.resolve(); ai.sendQ = Promise.resolve();
       ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;
       ensureLink(d.next);   // open the link to my chain neighbour while the weights download
       try {
@@ -2891,10 +2928,7 @@ async function aiOnData(from, d) {
     case "ai-hidden-b":
     case "ai-hidden":
       if (ai.role !== "worker") break;
-      ai.q = ai.q.then(() => workerFrame(d)).catch((err) => {
-        aiStatus("⚠ " + err.message);
-        sendTo(ai.hostId, { t: "ai-error", message: err.message });
-      });
+      workerEnqueue(d);
       break;
     case "ai-hiddenret-b": lapDone("b" + d.basePos, unpackWire(d)); break;
     case "ai-hiddenret": lapDone(d.pos, unpackWire(d)); break;

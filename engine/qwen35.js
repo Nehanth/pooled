@@ -164,11 +164,17 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, readOne = true }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
     this.gpuSample = !!gpuSample;
+    // readOne: a hidden-state readback (runHidden / embedRun / the batched passes) copies into a MAP_READ
+    // buffer from a small pool inside the layers' own command buffer and requests the map right after that
+    // one submit, so a caller can submit the next frame before this one's map resolves (runHiddenSubmit,
+    // runHiddenBatchSubmit; a room worker with queued frames). false: the old path (layers submit, a
+    // second copy submit, one staging buffer), for A/B. Same bits either way.
+    this.readOne = readOne !== false;
     // argmaxWide: the draft argmax as the two-stage multi-workgroup kernel (topk_a/b, k = 1) instead
     // of the single-workgroup one. Same tie rule, same result; false keeps the old kernel (A/B).
     this.argmaxWide = !!argmaxWide;
@@ -1369,6 +1375,26 @@ export class Qwen35Engine {
     return out;
   }
 
+  // MAP_READ staging from a pool (by size): a buffer goes back once its map was read and unmapped, so
+  // any number of readbacks can be in flight
+  _stageGet(bytes) {
+    const l = (this._stages ||= new Map()).get(bytes);
+    return l?.pop() || this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  }
+  // copies ([src, srcOffset, dstOffset, bytes]...) into a pooled staging buffer at the end of enc, submits
+  // enc, and requests the map at once; returns a promise of the Float32Array (a copy; the buffer is reused)
+  _submitRead(enc, copies, bytes) {
+    const st = this._stageGet(bytes);
+    for (const [src, so, dO, n] of copies) enc.copyBufferToBuffer(src, so, st, dO, n);
+    this.device.queue.submit([enc.finish()]);
+    return st.mapAsync(GPUMapMode.READ, 0, bytes).then(() => {
+      const out = Float32Array.from(new Float32Array(st.getMappedRange(0, bytes)));
+      st.unmap();
+      const l = this._stages.get(bytes); if (l) l.push(st); else this._stages.set(bytes, [st]);
+      return out;
+    });
+  }
+
   async _readback(srcBuf, stageBuf, n) {
     const enc = this.device.createCommandEncoder();
     enc.copyBufferToBuffer(srcBuf, 0, stageBuf, 0, n * 4);
@@ -2116,6 +2142,12 @@ export class Qwen35Engine {
     const { dim } = this.dims;
     const enc = this.device.createCommandEncoder();
     for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, basePos, n);
+    if (this.readOne) {
+      this.pos = basePos + n;
+      const copies = [];
+      for (let c = 0; c < n; c++) copies.push([this.B.x.buf, c * this.B.x.stride, c * dim * 4, dim * 4]);
+      return this._submitRead(enc, copies, n * dim * 4);
+    }
     for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, this.stageXB, c * dim * 4, dim * 4);
     this.device.queue.submit([enc.finish()]);
     await this.stageXB.mapAsync(GPUMapMode.READ, 0, n * dim * 4);
@@ -2132,7 +2164,9 @@ export class Qwen35Engine {
     this._snapNow = { base, total };
     return (((total << 8) | (base + 1)) | (this.replay ? 0x80000000 : 0)) >>> 0;
   }
-  async embedRunBatch(ids, basePos, snapshot = false) {
+  async embedRunBatch(ids, basePos, snapshot = false) { return this.embedRunBatchSubmit(ids, basePos, snapshot); }
+  // submits the pass now and returns the readback promise (with readOne, frames can be queued behind it)
+  embedRunBatchSubmit(ids, basePos, snapshot = false) {
     if (!this.B) this._initBatch();
     const n = ids.length;
     this.pos = basePos;
@@ -2143,7 +2177,8 @@ export class Qwen35Engine {
     }
     return this._runBatchAndRead(basePos, n);
   }
-  async runHiddenBatch(xs, basePos, snapshot = false) {
+  async runHiddenBatch(xs, basePos, snapshot = false) { return this.runHiddenBatchSubmit(xs, basePos, snapshot); }
+  runHiddenBatchSubmit(xs, basePos, snapshot = false) {
     if (!this.B) this._initBatch();
     const { dim } = this.dims;
     const n = xs.length / dim;
@@ -2882,19 +2917,12 @@ export class Qwen35Engine {
     // fire-and-forget; callers batch backpressure via onSubmittedWorkDone()
   }
 
-  async embedRun(tokenId, pos) {
-    this._pre = null;
-    const { dim } = this.dims;
-    this.pos = pos;
-    this._setFrame(pos, pos + 1);
-    this.device.queue.writeBuffer(this.x, 0, this._embedRowF32(tokenId));
-    const enc = this.device.createCommandEncoder();
-    for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
-    this.device.queue.submit([enc.finish()]);
-    return await this._readback(this.x, this.stageX, dim);
-  }
-
-  async runHidden(xIn, pos) {
+  async embedRun(tokenId, pos) { return this._runXSubmit(this._embedRowF32(tokenId), pos); }
+  embedRunSubmit(tokenId, pos) { return this._runXSubmit(this._embedRowF32(tokenId), pos); }
+  async runHidden(xIn, pos) { return this._runXSubmit(xIn, pos); }
+  // submits my layers on xIn now and returns the readback promise (see readOne)
+  runHiddenSubmit(xIn, pos) { return this._runXSubmit(xIn, pos); }
+  _runXSubmit(xIn, pos) {
     this._pre = null;
     const { dim } = this.dims;
     this.pos = pos;
@@ -2902,8 +2930,9 @@ export class Qwen35Engine {
     this.device.queue.writeBuffer(this.x, 0, xIn);
     const enc = this.device.createCommandEncoder();
     for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
+    if (this.readOne) return this._submitRead(enc, [[this.x, 0, 0, dim * 4]], dim * 4);
     this.device.queue.submit([enc.finish()]);
-    return await this._readback(this.x, this.stageX, dim);
+    return this._readback(this.x, this.stageX, dim);
   }
 
   async headFromHidden(xIn) {

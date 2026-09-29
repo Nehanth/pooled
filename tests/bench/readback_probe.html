@@ -1,0 +1,113 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>readback probe</title><pre id="log"></pre>
+<script type="module">
+// How fast does this browser hand a small GPU result back to JS? A room worker's hop is: write the
+// incoming hidden, run its layers, copy the output hidden to a MAP_READ buffer, mapAsync, read, send.
+// This page times that shape on a synthetic workload (memory-bound passes over a ?mb MB buffer, ?disp
+// dispatches per frame, tuned to ?ms of GPU time) with ?dim floats out, in several readback variants:
+//   base     layers submit, then a second submit for the copy, then mapAsync (engine/qwen35.js _readback)
+//   one      the copy in the layers' command buffer, one submit, then mapAsync
+//   wd       one submit, await onSubmittedWorkDone, then mapAsync
+//   big      one submit, mapAsync of the first dim*4 bytes of a 1 MB MAP_READ buffer
+//   fresh    one submit into a MAP_READ buffer created for this frame (destroyed after)
+//   ring2/3  frames queued back to back (as a prefill round or a queued lap): frame i+1 is written and
+//            submitted before frame i's map is awaited, a ring of 2 or 3 MAP_READ buffers
+//   gpu      frames submitted with no readback, one onSubmittedWorkDone at the end: the GPU time floor
+// and the sync floor with no work (?ms=0 row). Safari rounds performance.now() to 1 ms, so every number
+// is a mean over ?n frames under one clock read, repeated ?rounds times in alternating order (median).
+// ?gap=<ms> idles before each frame (a room worker waits for the rest of the lap). Result in window.RESULT.
+const q = new URLSearchParams(location.search);
+const DIM = +(q.get("dim") || 2048), N = +(q.get("n") || 60), R = +(q.get("rounds") || 5), MB = +(q.get("mb") || 32);
+const DISP = +(q.get("disp") || 30), TARGET = q.get("ms") ? +q.get("ms") : 4, GAP = +(q.get("gap") || 0);
+const VARS = (q.get("vars") || "base,one,wd,big,fresh,ring2,ring3,gpu").split(",");
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+window.LOG = () => document.getElementById("log").textContent;
+const med = (a) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+const r2 = (x) => Math.round(x * 100) / 100;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+try {
+  const ad = await navigator.gpu.requestAdapter();
+  const dev = await ad.requestDevice();
+  const U = GPUBufferUsage;
+  const W = dev.createBuffer({ size: MB << 20, usage: U.STORAGE | U.COPY_DST });
+  { const u = new Uint32Array(1 << 20); for (let i = 0; i < u.length; i++) u[i] = (i * 2654435761) >>> 0; for (let o = 0; o < MB; o += 4) dev.queue.writeBuffer(W, o << 20, u); }
+  const X = dev.createBuffer({ size: DIM * 4, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
+  const mod = dev.createShaderModule({ code: `
+@group(0) @binding(0) var<storage, read> w: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read_write> x: array<f32>;
+struct P { n: u32, off: u32 }
+@group(0) @binding(2) var<uniform> p: P;
+@compute @workgroup_size(256) fn main(@builtin(global_invocation_id) g: vec3u, @builtin(num_workgroups) nw: vec3u) {
+  let stride = nw.x * 256u; var acc = 0u;
+  for (var i = g.x; i < p.n; i += stride) { let v = w[i]; acc += v.x ^ v.y ^ v.z ^ v.w; }
+  let o = (g.x + p.off) % arrayLength(&x); if (g.x < arrayLength(&x)) { x[o] = x[o] * 0.5 + f32(acc & 7u); }
+}` });
+  const pipe = dev.createComputePipeline({ layout: "auto", compute: { module: mod, entryPoint: "main" } });
+  let n4 = (MB << 20) / 16;   // vec4s read per dispatch (calibrated below)
+  const Pu = dev.createBuffer({ size: 16, usage: U.UNIFORM | U.COPY_DST });
+  const bg = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: W } }, { binding: 1, resource: { buffer: X } }, { binding: 2, resource: { buffer: Pu } }] });
+  const setN = () => dev.queue.writeBuffer(Pu, 0, new Uint32Array([n4, 0]));
+  let disp = DISP;
+  const encWork = (enc) => { if (!disp) return; const pass = enc.beginComputePass(); pass.setPipeline(pipe); pass.setBindGroup(0, bg); for (let i = 0; i < disp; i++) pass.dispatchWorkgroups(256); pass.end(); };
+  const xin = new Float32Array(DIM).fill(0.25);
+  const stage = (sz = DIM * 4) => dev.createBuffer({ size: sz, usage: U.MAP_READ | U.COPY_DST });
+  const S1 = stage(), SB = stage(1 << 20), RING = [stage(), stage(), stage()];
+  let sink = 0;
+  const take = (buf) => { const a = Float32Array.from(new Float32Array(buf.getMappedRange(0, DIM * 4))); buf.unmap(); sink += a[1]; return a; };
+  // one frame, sequential (write input, work, read output back)
+  const frame = {
+    async base() { dev.queue.writeBuffer(X, 0, xin); const e = dev.createCommandEncoder(); encWork(e); dev.queue.submit([e.finish()]); const c = dev.createCommandEncoder(); c.copyBufferToBuffer(X, 0, S1, 0, DIM * 4); dev.queue.submit([c.finish()]); await S1.mapAsync(GPUMapMode.READ); take(S1); },
+    async one() { dev.queue.writeBuffer(X, 0, xin); const e = dev.createCommandEncoder(); encWork(e); e.copyBufferToBuffer(X, 0, S1, 0, DIM * 4); dev.queue.submit([e.finish()]); await S1.mapAsync(GPUMapMode.READ); take(S1); },
+    async wd() { dev.queue.writeBuffer(X, 0, xin); const e = dev.createCommandEncoder(); encWork(e); e.copyBufferToBuffer(X, 0, S1, 0, DIM * 4); dev.queue.submit([e.finish()]); await dev.queue.onSubmittedWorkDone(); await S1.mapAsync(GPUMapMode.READ); take(S1); },
+    async big() { dev.queue.writeBuffer(X, 0, xin); const e = dev.createCommandEncoder(); encWork(e); e.copyBufferToBuffer(X, 0, SB, 0, DIM * 4); dev.queue.submit([e.finish()]); await SB.mapAsync(GPUMapMode.READ, 0, DIM * 4); take(SB); },
+    async fresh() { dev.queue.writeBuffer(X, 0, xin); const s = stage(); const e = dev.createCommandEncoder(); encWork(e); e.copyBufferToBuffer(X, 0, s, 0, DIM * 4); dev.queue.submit([e.finish()]); await s.mapAsync(GPUMapMode.READ); take(s); s.destroy(); },
+  };
+  // n frames in flight through a ring of `depth` stage buffers
+  const ring = async (n, depth) => {
+    const pend = [];
+    for (let i = 0; i < n; i++) {
+      if (GAP) await sleep(GAP);
+      const s = RING[i % depth];   // free: its map from frame i - depth was awaited (and unmapped)
+      dev.queue.writeBuffer(X, 0, xin);
+      const e = dev.createCommandEncoder(); encWork(e); e.copyBufferToBuffer(X, 0, s, 0, DIM * 4); dev.queue.submit([e.finish()]);
+      pend.push(s.mapAsync(GPUMapMode.READ).then(() => take(s)));
+      while (pend.length >= depth) await pend.shift();   // frames i-depth+2..i stay queued behind the one read
+    }
+    await Promise.all(pend);
+  };
+  const gpuOnly = async (n) => { for (let i = 0; i < n; i++) { dev.queue.writeBuffer(X, 0, xin); const e = dev.createCommandEncoder(); encWork(e); dev.queue.submit([e.finish()]); } await dev.queue.onSubmittedWorkDone(); };
+  const timeVar = async (v, n) => {
+    const t0 = performance.now();
+    if (v === "gpu") await gpuOnly(n);
+    else if (v.startsWith("ring")) await ring(n, +v.slice(4));
+    else for (let i = 0; i < n; i++) { if (GAP) await sleep(GAP); await frame[v](); }
+    return (performance.now() - t0) / n - (GAP && v !== "gpu" ? GAP : 0);
+  };
+  // calibrate: dispatch size so that one frame's GPU time is about TARGET ms
+  setN();
+  for (let k = 0; k < 3; k++) await timeVar("gpu", 10);
+  if (TARGET > 0) {
+    for (let it = 0; it < 8; it++) {
+      const t = await timeVar("gpu", 20);
+      const f = TARGET / Math.max(t, 0.05);
+      if (Math.abs(f - 1) < 0.08) break;
+      n4 = Math.max(1024, Math.min((MB << 20) / 16, Math.round(n4 * f)));
+      if (n4 === (MB << 20) / 16 && f > 1) { disp = Math.round(disp * f); }
+      setN();
+    }
+  } else disp = 0;
+  const gpuMs = await timeVar("gpu", 30);
+  log(`${ad.info?.vendor || ""} ${ad.info?.architecture || ""} · dim ${DIM} · ${disp} dispatches x ${r2(n4 * 16 / 2 ** 20)} MB · GPU ${r2(gpuMs)} ms/frame (target ${TARGET}) · gap ${GAP}`);
+  const T = Object.fromEntries(VARS.map((v) => [v, []]));
+  for (const v of VARS) await timeVar(v, 6);   // warm
+  for (let r = 0; r < R; r++) {
+    const order = r % 2 ? [...VARS].reverse() : VARS;
+    for (const v of order) T[v].push(await timeVar(v, v === "gpu" ? N : N));
+    log(`round ${r + 1}/${R}: ` + VARS.map((v) => `${v} ${r2(T[v].at(-1))}`).join(" · "));
+  }
+  const out = { ua: navigator.userAgent, dim: DIM, gap: GAP, targetMs: TARGET, disp, mbPerDispatch: r2(n4 * 16 / 2 ** 20), n: N, rounds: R, gpuMs: r2(gpuMs), sink: sink !== 0,
+    ms: Object.fromEntries(VARS.map((v) => [v, r2(med(T[v]))])), all: Object.fromEntries(VARS.map((v) => [v, T[v].map(r2)])) };
+  out.overMs = Object.fromEntries(VARS.map((v) => [v, r2(out.ms[v] - (out.ms.gpu ?? 0))]));
+  log("median ms/frame: " + JSON.stringify(out.ms) + "\nover the GPU floor: " + JSON.stringify(out.overMs));
+  window.RESULT = out;
+} catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; }
+</script>

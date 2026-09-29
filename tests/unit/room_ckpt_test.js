@@ -403,6 +403,60 @@ Deno.test("workerFrame with no engine yet does nothing", async () => {
   await w.workerFrame({ t: "ai-hidden", pos: 0, x: [1], reset: 1 });
 });
 
+// a worker whose engine reads back through a staging pool (engine.readOne): workerEnqueue submits a
+// queued frame while the previous one's readback is still pending, and the sends stay in frame order
+class FakePipeEngine extends FakeEngine {
+  constructor() { super(); this.readOne = true; this.reads = []; }
+  _read(v, tag) { let res; const p = new Promise((r) => (res = r)); this.reads.push({ tag, done: () => res(v) }); this.log.push("submit" + tag); return p; }
+  runHiddenSubmit(x, pos) { this.run([x[0]], pos); return this._read(Float32Array.of(x[0]), pos); }
+  runHiddenBatchSubmit(xs, base) { this.run(Array.from(xs), base); return this._read(Float32Array.from(xs), "b" + base); }
+}
+function pipeWorker({ next = "host" } = {}) {
+  const sent = [], errs = [];
+  const engine = new FakePipeEngine();
+  const ai = { engine, next, hostId: "host", range: [0, 1], q: Promise.resolve() };
+  const fns = roomFns(["workerEnqueue", "workerFrame"], {
+    ai, DROP_ALL, performance,
+    unpackWire: (d) => Float32Array.from(d.x),
+    packWire: (h) => ({ x: Array.from(h) }),
+    badF32: () => false,
+    aiStatus: () => {}, teleNote: () => {}, compute: { pass() {} },
+    sendTo: (to, msg) => errs.push(msg), sendHidden: (to, msg) => sent.push(msg),
+  });
+  return { ai, engine, sent, errs, ...fns };
+}
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+Deno.test("pipelined worker: the next frame is submitted before this one's readback, sends keep frame order", async () => {
+  const w = pipeWorker();
+  w.workerEnqueue({ t: "ai-hidden-b", basePos: 0, n: 2, x: [1, 2] });
+  w.workerEnqueue({ t: "ai-hidden-b", basePos: 2, n: 2, x: [3, 4], sv: 7 });
+  w.workerEnqueue({ t: "ai-hidden", pos: 4, x: [5] });
+  await tick(); await tick();
+  eq(w.engine.log, ["submitb0", "sv7", "submitb2", "submit4"], "all three submitted, control before its own frame");
+  eq(w.sent.length, 0, "nothing sent before a readback resolved");
+  w.engine.reads[1].done(); w.engine.reads[2].done();   // out of order: frame 0 must still go first
+  await tick(); await tick();
+  eq(w.sent.length, 0, "frames 2 and 4 wait for frame 0");
+  w.engine.reads[0].done();
+  await tick(); await tick(); await tick();
+  eq(w.sent.map((m) => m.basePos ?? m.pos), [0, 2, 4]);
+  eq(w.sent.map((m) => m.t), ["ai-hiddenret-b", "ai-hiddenret-b", "ai-hiddenret"]);
+  eq(w.engine.st, [1, 2, 3, 4, 5]);
+});
+
+Deno.test("pipelined worker: a failing frame reports once, the frames after it still run", async () => {
+  const w = pipeWorker();
+  w.engine.slots.clear();
+  w.workerEnqueue({ t: "ai-hidden", pos: 0, x: [1], ld: 9 });   // no slot 9: throws before its layers
+  w.workerEnqueue({ t: "ai-hidden", pos: 0, x: [2] });
+  for (let i = 0; i < 4; i++) await tick();
+  eq(w.errs.map((m) => m.t), ["ai-error"]);
+  w.engine.reads[0].done();
+  for (let i = 0; i < 4; i++) await tick();
+  eq(w.sent.map((m) => m.x), [[2]]);
+});
+
 // ---------------------------------------------------------------------------------------------
 // the room as a whole: a host and 1..4 workers, token-level state on every device. After every
 // frame round, every worker must hold exactly the host's state, and exactly the host's slots.
