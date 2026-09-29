@@ -1,0 +1,248 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wire lab</title>
+<!-- Wire lab: what one activation frame costs between two browsers, and where the time goes.
+     CPU only (no model, no WebGPU). Driven by tests/e2e/wire_lab.mjs (loopback or two machines);
+     also usable by hand: open ?role=b&signal=host:port&id=X on one device, ?role=a&...&to=X on the other,
+     then call lab.suite(...) from the console of A. Served cross-origin isolated (COOP/COEP) so
+     performance.now() is good to 5 us.
+
+     One run = one A->B introduction (PeerJS signaling) that opens STRIPES PeerJS DataConnections
+     (each its own RTCPeerConnection, as the room's ?wire=stripe4). On those peer connections the
+     page opens, next to PeerJS's own channel, negotiated channels for every send path, so the paths
+     share the same ICE pair and SCTP association(s) and differ only in how bytes are sent:
+       pj         PeerJS DataConnection.send({ t, pos, data }) (BinaryPack, 16300-byte chunks): ?wire=off
+       pjraw      a second PeerJS connection with serialization "raw" (ArrayBuffer in, ArrayBuffer out)
+       raw        one RTCDataChannel.send per frame, ordered + reliable, no slicing
+       rawslice   the same channel, frame cut in 4600-byte messages, reassembled in the page (no transport)
+       rawunord   raw, ordered: false (reliable)
+       rawrtx0    raw, ordered: false, maxRetransmits: 0 (unreliable)
+       wire1      room/transport.js on one peer connection (4600-byte slices, ordered)
+       wire4      room/transport.js striped over all STRIPES peer connections: the room's default
+       wire4unord wire4 with ordered: false, reliable
+       wire4rtx0  wire4 as attachWire builds `ordered: false` on main (maxRetransmits: 0)
+     B echoes each frame on the path it came in on, with its own timings in the first 12 bytes. -->
+<style>
+  :root { --bg: #fff; --fg: #111; --mut: #666; --line: #ddd; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --mut: #999; --line: #333; } }
+  body { background: var(--bg); color: var(--fg); font: 13px/1.4 ui-monospace, Menlo, monospace; margin: 16px; }
+  table { border-collapse: collapse; } td, th { border-bottom: 1px solid var(--line); padding: 2px 8px; text-align: right; }
+  th { color: var(--mut); font-weight: normal; } #log { white-space: pre-wrap; color: var(--mut); }
+</style>
+<h3>Wire lab</h3>
+<div id="status">loading</div>
+<table id="out"></table>
+<div id="log"></div>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" crossorigin="anonymous"></script>
+<script type="module">
+const T = await import("/room/transport.js");
+const P = new URLSearchParams(location.search), role = P.get("role") || "a";
+const [host, port] = (P.get("signal") || "127.0.0.1:9000").split(":");
+const STRIPES = +P.get("stripes") || 4;
+const ICE = { iceServers: P.get("stun") === "0" ? [] : [{ urls: ["stun:stun.l.google.com:19302"] }] };
+const now = () => performance.now();
+const $ = (id) => document.getElementById(id);
+const log = (s) => { $("log").textContent += s + "\n"; };
+const S = window.lab = { iso: crossOriginIsolated, role };
+$("status").textContent = `role ${role}, isolated ${crossOriginIsolated}`;
+
+const SLICE = 4600;
+// negotiated channel ids (the room uses 77 for the wire, 78 for the keep-alive branch's pings)
+const RAW = { raw: [79, { ordered: true }], rawslice: [79, { ordered: true }], rawunord: [80, { ordered: false }], rawrtx0: [81, { ordered: false, maxRetransmits: 0 }] };
+const WIRES = { wire4: [77, {}, 0], wire1: [85, {}, 1], wire4unord: [86, { ordered: false }, 0], wire4rtx0: [87, { ordered: false, maxRetransmits: 0 }, 0] };
+const KA_ID = 84;
+S.paths = ["pj", "pjraw", ...Object.keys(RAW), ...Object.keys(WIRES)];
+
+// One run's set of links, the same on both ends. `onMsg(path, frame, rec)` gets a delivered
+// frame; rec = { first, last } raw-message arrival times for it.
+function makeRun(onMsg) {
+  const R = { pcs: [], conns: [], pj: null, pjraw: null, raw: {}, wires: {}, ka: null, rx: {} };
+  const mark = (path) => { const r = R.rx[path] || (R.rx[path] = { first: null, last: null }); const t = now(); if (r.first == null) r.first = t; r.last = t; };
+  const take = (path) => { const r = R.rx[path] || { first: null, last: null }; R.rx[path] = { first: null, last: null }; return r; };
+  const wrap = (path, ch) => { const inner = ch.onmessage; ch.onmessage = (ev) => { mark(path); inner && inner.call(ch, ev); }; };
+  for (const [name, [id, opt, one]] of Object.entries(WIRES)) R.wires[name] = { link: T.makeLink(), id, opt, one };
+  // slices of rawslice: [seq u32][k u16][n u16] + payload
+  const rs = { parts: 0, n: 0, buf: null, seq: -1 };
+  R.addConn = (c, idx) => {
+    R.conns[idx] = c; const pc = c.peerConnection; R.pcs[idx] = pc;
+    for (const [name, W] of Object.entries(R.wires)) {
+      if (W.one && idx !== 0) continue;
+      const ch = T.attachWire(W.link, c, (m) => onMsg(name, m, take(name)), { ordered: W.opt.ordered !== false, __id: W.id, __opt: W.opt });
+      wrap(name, ch);
+    }
+    if (idx !== 0) return;
+    // PeerJS's own channel: time the raw chunks under it
+    R.pj = c; const pjch = c.dataChannel; if (pjch) wrap("pj", pjch);
+    c.on("data", (d) => onMsg("pj", d, take("pj")));
+    for (const [name, [id, opt]] of Object.entries(RAW)) {
+      if (name === "rawslice") continue;
+      const ch = pc.createDataChannel("lab-" + name, { negotiated: true, id, ...opt }); ch.binaryType = "arraybuffer"; R.raw[name] = ch;
+      ch.onmessage = (ev) => {
+        if (name !== "raw") { onMsg(name, ev.data, take(name)); return; }
+        const dv = new DataView(ev.data);
+        if (ev.data.byteLength >= 8 && dv.getUint32(0) === 0x534c4943) {   // "SLIC": a rawslice slice
+          const seq = dv.getUint32(4), k = dv.getUint16(8), n = dv.getUint16(10), total = dv.getUint32(12);
+          if (seq !== rs.seq) { rs.seq = seq; rs.parts = 0; rs.n = n; rs.buf = new Uint8Array(total); }
+          rs.buf.set(new Uint8Array(ev.data, 16), k * (SLICE - 16)); rs.parts++;
+          if (rs.parts === rs.n) onMsg("rawslice", rs.buf.buffer, take("rawslice"));
+          return;
+        }
+        onMsg("raw", ev.data, take("raw"));
+      };
+      const inner = ch.onmessage; ch.onmessage = (ev) => { const dv = ev.data.byteLength >= 4 ? new DataView(ev.data) : null; mark(name === "raw" && dv && dv.getUint32(0) === 0x534c4943 ? "rawslice" : name); inner(ev); };
+    }
+    R.raw.rawslice = R.raw.raw;
+    R.ka = pc.createDataChannel("lab-ka", { negotiated: true, id: KA_ID, ordered: false, maxRetransmits: 0 });
+    R.ka.onmessage = () => {};
+  };
+  R.addRaw = (c) => { R.pjraw = c; if (c.dataChannel) wrap("pjraw", c.dataChannel); c.on("data", (d) => onMsg("pjraw", d, take("pjraw"))); };
+  R.ready = () => R.conns.filter((c) => c && c.open).length >= STRIPES && R.pjraw?.open && Object.values(R.raw).every((ch) => ch.readyState === "open")
+    && Object.values(R.wires).every((W) => W.link.chans.filter((c) => c.readyState === "open").length >= (W.one ? 1 : STRIPES)) && R.ka?.readyState === "open";
+  // send `buf` (ArrayBuffer, first 16 bytes free for timings, bytes 16..19 = seq) on a path
+  R.send = (path, buf, seq, ret) => {
+    if (path === "pj") { R.pj.send({ t: ret ? "ai-hiddenret" : "ai-hidden", pos: seq, data: new Uint16Array(buf) }); return R.pj.dataChannel; }
+    if (path === "pjraw") { R.pjraw.send(buf); return R.pjraw.dataChannel; }
+    if (path === "rawslice") {
+      const ch = R.raw.raw, per = SLICE - 16, total = buf.byteLength, n = Math.max(1, Math.ceil(total / per));
+      for (let k = 0; k < n; k++) {
+        const len = Math.min(per, total - k * per), s = new ArrayBuffer(16 + len), dv = new DataView(s);
+        dv.setUint32(0, 0x534c4943); dv.setUint32(4, seq); dv.setUint16(8, k); dv.setUint16(10, n); dv.setUint32(12, total);
+        new Uint8Array(s, 16).set(new Uint8Array(buf, k * per, len)); ch.send(s);
+      }
+      return ch;
+    }
+    if (R.raw[path]) { R.raw[path].send(buf); return R.raw[path]; }
+    const W = R.wires[path];
+    T.sendFrame(W.link, { t: ret ? "ai-hiddenret" : "ai-hidden", pos: seq, data: new Uint16Array(buf) });
+    return W.link.chans;
+  };
+  // keep-alive: 1 byte every `ms` on an unordered, never-retransmitted channel (0 = off)
+  R.keepalive = (ms) => { clearInterval(R.kaT); if (ms > 0) R.kaT = setInterval(() => { if (R.ka.readyState === "open" && R.ka.bufferedAmount === 0) R.ka.send(new Uint8Array(1)); }, ms); };
+  return R;
+}
+// payload bytes of a delivered frame, whatever path it came on
+function bytesOf(path, m) {
+  if (path === "pj") { const d = m.data; return d instanceof ArrayBuffer ? d : d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength); }
+  if (S.wirePath(path)) return m.data.buffer.slice(m.data.byteOffset, m.data.byteOffset + m.data.byteLength);
+  return m;
+}
+S.wirePath = (p) => p.startsWith("wire");
+
+// ---------------- B: echo ----------------
+if (role === "b") {
+  const runs = new Map();
+  let R = null, peer = null;
+  // B may start before A's signaling server is up (two machines): retry until it registers
+  const join = () => {
+    peer = new Peer(P.get("id"), { host, port: +port, path: "/", secure: false, config: ICE, debug: 0 });
+    peer.on("open", () => { S.registered = true; $("status").textContent += " · registered"; });
+    peer.on("error", (e) => { if (!S.registered && ["network", "server-error", "socket-error", "socket-closed", "unavailable-id"].includes(e.type)) { peer.destroy(); setTimeout(join, 1000); } });
+    peer.on("disconnected", () => { if (!peer.destroyed) setTimeout(() => { try { peer.reconnect(); } catch {} }, 1000); });
+    peer.on("connection", onConn);
+  };
+  const echo = (path, m, rec) => {
+    const td = now();
+    const buf = bytesOf(path, m);
+    const seq = new DataView(buf).getUint32(16);
+    const f = new Float32Array(buf, 0, 4);
+    f[1] = rec.first != null ? td - rec.first : -1;   // first raw message -> delivered
+    f[2] = rec.last != null ? td - rec.last : -1;     // last raw message -> delivered (decode / reassembly / dispatch)
+    const hold = S.hold || 0;
+    // f[0] = turnaround (delivered -> handed back to the channel, including a hold that stands in
+    // for B's own compute); the send call itself stays in A's residual
+    const go = () => { f[0] = now() - td; R.send(path, buf, seq, 1); };
+    if (hold > 0) setTimeout(go, hold); else go();
+  };
+  function onConn(c) {
+    const md = c.metadata || {};
+    if (md.bye) { S.done = true; return; }
+    if (md.cfg) { S.hold = md.cfg.holdB || 0; }
+    if (!runs.has(md.run)) runs.set(md.run, makeRun((p, m, rec) => echo(p, m, rec)));
+    R = runs.get(md.run);
+    const run = R;
+    c.on("open", () => { if (md.raw) run.addRaw(c); else { run.addConn(c, md.idx); if (md.idx === 0) run.keepalive(md.cfg?.ka || 0); } });
+  }
+  join();
+  // A's connection metadata carries the run's config (B's hold, keep-alive period)
+  S.loaded = true;
+  $("status").textContent += ` · B ready as ${P.get("id")}`;
+}
+
+// ---------------- A: drive ----------------
+if (role === "a") {
+  let R = null, peer = null, pending = null;
+  const onMsg = (path, m, rec) => {
+    const td = now();
+    if (!pending || pending.path !== path) return;
+    const buf = bytesOf(path, m); if (buf.byteLength < 20) return;
+    const seq = new DataView(buf).getUint32(16);
+    if (seq !== pending.seq) return;   // a late echo of a frame that timed out
+    const f = new Float32Array(buf, 0, 4);
+    const p = pending; pending = null;
+    p.res({ rtt: td - p.t0, send: p.t1 - p.t0, turnB: f[0], spreadB: f[1], decodeB: f[2], spreadA: rec.first != null ? td - rec.first : -1, decodeA: rec.last != null ? td - rec.last : -1, buf: p.buf, at: p.t0 });
+  };
+  S.open = async (run, cfg = {}) => {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      peer = new Peer(undefined, { host, port: +port, path: "/", secure: false, config: ICE, debug: 0 });
+      R = makeRun(onMsg);
+      const ok = await new Promise((res) => {
+        const t0 = now();
+        peer.on("open", () => {
+          for (let i = 0; i < STRIPES; i++) { const c = peer.connect(P.get("to"), { reliable: true, label: i ? "stripe" : undefined, metadata: { run: run + attempt, idx: i, cfg } }); c.on("open", () => R.addConn(c, i)); }
+          const c = peer.connect(P.get("to"), { reliable: true, serialization: "raw", metadata: { run: run + attempt, raw: 1, cfg } }); c.on("open", () => R.addRaw(c));
+        });
+        const t = setInterval(() => { if (R.ready()) { clearInterval(t); res(true); } else if (now() - t0 > 8000) { clearInterval(t); res(false); } }, 20);
+      });
+      if (ok) { S.R = R; return true; }
+      peer.destroy();
+    }
+    throw new Error("B never answered");
+  };
+  S.close = async (last) => {
+    R.keepalive(0);
+    if (last) { peer.connect(P.get("to"), { metadata: { bye: 1 } }); await new Promise((r) => setTimeout(r, 1000)); }
+    peer.destroy();
+  };
+  // the selected ICE pair of peer connection 0 and Chrome's STUN round trip on it
+  S.path = async () => {
+    const st = await R.pcs[0].getStats(); let pair = null; const c = {};
+    st.forEach((r) => { if (r.type === "candidate-pair" && r.nominated && r.state === "succeeded") pair = r; if (/candidate$/.test(r.type)) c[r.id] = r; });
+    if (!pair) return null;
+    const l = c[pair.localCandidateId], r = c[pair.remoteCandidateId];
+    return { local: l && `${l.address} ${l.candidateType} ${l.protocol}`, remote: r && `${r.address} ${r.candidateType}`, stunRttMs: pair.currentRoundTripTime * 1000 };
+  };
+  let seqN = 1;
+  S.once = (path, bytes, timeout = 3000) => new Promise((res) => {
+    const buf = new ArrayBuffer(Math.max(bytes, 32));
+    const u = new Uint16Array(buf); for (let i = 10; i < u.length; i++) u[i] = (i * 2654435761) >>> 16;
+    const seq = seqN++; new DataView(buf).setUint32(16, seq);
+    const p = pending = { path, seq, res, t0: 0, t1: 0, buf: 0 };
+    const to = setTimeout(() => { if (pending === p) { pending = null; res(null); } }, timeout);
+    const r0 = p.res; p.res = (v) => { clearTimeout(to); r0(v); };
+    p.t0 = now();
+    const chans = R.send(path, buf, seq, 0);
+    p.t1 = now();
+    p.buf = Math.max(0, ...[].concat(chans).map((c) => c?.bufferedAmount || 0));
+  });
+  // reps frames on a path; gap = idle ms between an echo and the next send; holdA = ms A "computes"
+  // (idle main thread, as a device waiting on its GPU) before each send
+  S.run = async (path, bytes, reps, gap = 0) => {
+    const out = [];
+    for (let i = 0; i < reps; i++) {
+      out.push(await S.once(path, bytes));
+      if (gap) await new Promise((r) => setTimeout(r, gap));
+    }
+    return out;
+  };
+  S.keepalive = (ms) => R.keepalive(ms);
+  // tell B the session is over (two-machine runs: B's driver exits on it)
+  S.bye = async () => {
+    const p = new Peer(undefined, { host, port: +port, path: "/", secure: false, config: ICE, debug: 0 });
+    await new Promise((r) => p.on("open", r));
+    p.connect(P.get("to"), { metadata: { bye: 1 } });
+    await new Promise((r) => setTimeout(r, 1500)); p.destroy();
+  };
+  S.loaded = true;
+}
+</script>
