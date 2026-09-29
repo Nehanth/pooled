@@ -133,7 +133,8 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     r.client ||= clientFromUA(req.headers["user-agent"]) || "API";
     const why = unavailable();
     if (why) throw why;
-    if (queue.length >= maxQueue) throw new ApiError("busy", `${queue.length} requests are already waiting here (--max-queue ${maxQueue})`, { retryAfter: 5 });
+    // --max-queue counts requests waiting behind the one the room is answering: 0 means answer only when idle
+    if ((active || queue.length) && queue.length >= maxQueue) throw new ApiError("busy", `${queue.length} requests are already waiting here (--max-queue ${maxQueue})`, { retryAfter: 5 });
     const rid = newRid();
     const job = { rid, api, req: r, res, stream: r.stream, created: Math.floor(Date.now() / 1000), state: "waiting", text: "", think: "", hostPos: 0,
       label: `${api === "anthropic" ? "messages" : "chat"} ${rid} (${r.client})` };

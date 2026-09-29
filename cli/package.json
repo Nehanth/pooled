@@ -11,6 +11,9 @@
   "license": "MIT",
   "author": "Nehanth Narendrula",
   "type": "module",
+  "scripts": {
+    "test": "node --test test/*_test.mjs"
+  },
   "bin": {
     "pooled": "bin/pooled.js"
   },

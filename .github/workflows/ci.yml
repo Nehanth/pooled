@@ -20,6 +20,8 @@ jobs:
         env: { DENO_NO_PACKAGE_JSON: "1" }
         # --parallel runs test files on all cores; the slow MoE layout sweep is split across files for it
         run: deno test --parallel --allow-read tests/unit
+      - name: pooled serve HTTP bridge (Node, a stand-in room)
+        run: node --test cli/test/*_test.mjs
       - name: Kernel generator sanity
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: deno run --allow-read tests/unit/generator_smoke.js

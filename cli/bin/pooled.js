@@ -22,7 +22,8 @@ Options
   --token <t>       require "Authorization: Bearer <t>" or "x-api-key: <t>" on every request
   --name <s>        how the room shows this client (default: "API · <hostname>")
   --signal <h:p>    PeerJS signaling server, as the room page's ?signal= (default: PeerJS cloud)
-  --max-queue <n>   requests that may wait here before 429 / 529 (default 8)
+  --max-queue <n>   requests that may wait here behind the running one before 429 / 529
+                    (default 8; 0 = only when idle)
   --quiet           print only errors
   --json-log        one JSON object per log line
   -v, --version     print the version
