@@ -108,3 +108,20 @@ test("the room dropping the running request (ai-busy gone) answers the client in
   assert.equal((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).status, 200, "the next one runs");
   await t.close();
 });
+
+test("a request the room goes quiet on fails with 504 and frees the line; a host-queued one waits longer", async () => {
+  const t = await start({ idleMs: 150, hostQueuedMs: 600 });
+  t.bridge.onAsk = () => {};   // taken, never answered
+  const t0 = Date.now();
+  const r = await t.req("POST", "/v1/chat/completions", { body: chatBody() });
+  assert.equal(r.status, 504);
+  assert.ok(Date.now() - t0 < 1000);
+  assert.equal(t.bridge.stopped.length, 1, "the room is told to stop it");
+  const m = await t.req("POST", "/v1/messages", { body: msgBody({ stream: true }) });
+  assert.equal(m.status, 504, "nothing streamed yet: a real status");
+  assert.equal(JSON.parse(m.body).error.type, "timeout_error");
+  // queued at the host: ai-queued arms the long timer, then the answer comes after the short one
+  t.bridge.onAsk = (rid, h) => { setImmediate(() => h({ t: "ai-queued", rid, pos: 1 })); setTimeout(() => answer()(rid, h), 350); };
+  assert.equal((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).status, 200);
+  await t.close();
+});

@@ -9,9 +9,14 @@ import { parseAnthropic, anthropicError, anthropicResponse, AnthropicStream, ant
 import { SSEWriter } from "./sse.js";
 
 const KEEPALIVE_MS = 10000;
+// How long a request the room has may go without a message from it before it fails with 504: the
+// room took it and went quiet (a bug, or a host that dropped it). Generous: prefilling a long prompt
+// in a room of phones can take minutes before the first token. While the host holds it in its own
+// queue behind other answers (ai-queued), the wait can be long and legitimate: 30 minutes.
+const IDLE_MS = 300000, HOST_QUEUED_MS = 1800000;
 const NOT_V1 = "is not available in pooled serve v1";
 
-export function createServer({ bridge, port, token = null, maxQueue = 8, log = () => {}, version = "", keepAliveMs = KEEPALIVE_MS }) {
+export function createServer({ bridge, port, token = null, maxQueue = 8, log = () => {}, version = "", keepAliveMs = KEEPALIVE_MS, idleMs = IDLE_MS, hostQueuedMs = HOST_QUEUED_MS }) {
   const queue = [];          // jobs waiting here, oldest first
   let active = null;         // the job the room is working on
   const served = { n: 0 };
@@ -71,6 +76,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     if (job.state === "done") return;
     job.state = "done";
     clearInterval(job.keep);
+    clearTimeout(job.idle);
     const i = queue.indexOf(job); if (i >= 0) queue.splice(i, 1);
     if (active === job) active = null;
     setImmediate(pump);
@@ -90,6 +96,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     if (why) { jobError(job, why); setImmediate(pump); return; }
     active = job;
     job.state = "asked";
+    watch(job, idleMs);
     const r = job.req;
     const ok = bridge.ask(job.rid, {
       system: r.system, messages: r.messages,
@@ -97,8 +104,18 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     }, (d) => onRoom(job, d));
     if (!ok) jobError(job, new ApiError("unavailable", "not connected to the room", { retryAfter: 5 }));
   }
+  // (re)arm the job's silence timer: on expiry the room is told to stop and the client gets a 504
+  function watch(job, ms) {
+    clearTimeout(job.idle);
+    job.idle = setTimeout(() => {
+      if (job.state === "done") return;
+      bridge.stop(job.rid);
+      jobError(job, new ApiError("timeout", `the room sent nothing for this request in ${+(ms / 1000).toFixed(1)} s`));
+    }, ms);
+  }
   function onRoom(job, d) {
     if (job.state === "done") return;
+    watch(job, d.t === "ai-queued" ? hostQueuedMs : idleMs);
     switch (d.t) {
       case "ai-queued": job.hostPos = d.pos; return;
       case "ai-genstart":
@@ -221,8 +238,10 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
       fail(res, api, e);
     }
   });
-  // requests hang for as long as the room takes: no server-side timeouts
+  // a request lasts as long as the room takes (the per-job silence timer above bounds it); only local
+  // processes can connect at all, and at most 64 at once
   server.requestTimeout = 0; server.headersTimeout = 60000; server.keepAliveTimeout = 5000;
+  server.maxConnections = 64;
 
   // Ctrl-C: open requests end with an error
   function closeAll(why) {

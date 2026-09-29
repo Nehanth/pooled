@@ -2,8 +2,8 @@
 // bodies, stream events and errors (docs/design/serve.md section 4).
 import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages } from "./common.js";
 
-const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, toolarge: 413, busy: 529, unavailable: 529, server: 500 };
-const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "authentication_error", forbidden: "permission_error", notfound: "not_found_error", toolarge: "request_too_large", busy: "overloaded_error", unavailable: "overloaded_error", server: "api_error" };
+const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, method: 405, toolarge: 413, busy: 529, unavailable: 529, timeout: 504, server: 500 };
+const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "authentication_error", forbidden: "permission_error", notfound: "not_found_error", method: "invalid_request_error", toolarge: "request_too_large", busy: "overloaded_error", unavailable: "overloaded_error", timeout: "timeout_error", server: "api_error" };
 
 export function anthropicError(e) {
   const kind = e instanceof ApiError ? e.kind : "server";

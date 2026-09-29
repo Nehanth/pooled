@@ -130,8 +130,11 @@ Errors come in each API's own shape (`{"error": {...}}` / `{"type": "error", "er
 | missing or wrong key (with `--token`) | 401 | 401 |
 | foreign Host, or an Origin header | 403 | 403 |
 | queue full here or in the room | 429 | 529 |
-| model not ready, host gone, client disconnected by the host | 503 | 529 |
+| model not ready, host gone, client disconnected by the host, the host pressed Stop | 503 | 529 |
+| the room sent nothing for a request for 5 minutes (30 while the host queues it) | 504 | 504 |
 | generation failed in the room | 500 | 500 |
+
+Once a stream has started, an error comes as an error chunk (OpenAI, no `[DONE]`) or an `error` event (Anthropic).
 
 ## Development
 

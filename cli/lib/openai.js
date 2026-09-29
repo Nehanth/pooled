@@ -2,9 +2,9 @@
 // response bodies, stream chunks and errors (docs/design/serve.md section 4).
 import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages } from "./common.js";
 
-const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, toolarge: 413, busy: 429, unavailable: 503, server: 500 };
-const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "invalid_request_error", forbidden: "permission_error", notfound: "invalid_request_error", toolarge: "invalid_request_error", busy: "rate_limit_exceeded", unavailable: "server_error", server: "server_error" };
-const CODE = { ctx: "context_length_exceeded", auth: "invalid_api_key", notfound: "not_found", toolarge: "request_too_large", busy: "rate_limit_exceeded", unavailable: "service_unavailable", server: "server_error" };
+const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, method: 405, toolarge: 413, busy: 429, unavailable: 503, timeout: 504, server: 500 };
+const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "invalid_request_error", forbidden: "permission_error", notfound: "invalid_request_error", method: "invalid_request_error", toolarge: "invalid_request_error", busy: "rate_limit_exceeded", unavailable: "server_error", timeout: "server_error", server: "server_error" };
+const CODE = { ctx: "context_length_exceeded", auth: "invalid_api_key", notfound: "not_found", method: "method_not_allowed", toolarge: "request_too_large", busy: "rate_limit_exceeded", unavailable: "service_unavailable", timeout: "timeout", server: "server_error" };
 
 export function openaiError(e) {
   const kind = e instanceof ApiError ? e.kind : "server";

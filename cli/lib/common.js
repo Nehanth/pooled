@@ -15,7 +15,7 @@ export const LIMITS = {
 
 // An error with the kind that picks its status and body in each API's shape.
 //   bad 400 · ctx 400 (context_length_exceeded) · auth 401 · forbidden 403 · notfound 404
-//   toolarge 413 · busy 429 / 529 · unavailable 503 / 529 · server 500
+//   method 405 · toolarge 413 · busy 429 / 529 · unavailable 503 / 529 · timeout 504 · server 500
 export class ApiError extends Error {
   constructor(kind, message, { param = null, retryAfter = null } = {}) {
     super(message);
