@@ -70,6 +70,9 @@ function note(ev, extra = {}) {
   // the breadcrumb: written BEFORE the step it describes, so a death points at the step that killed it
   lsSet({ run, mode, url: location.href, phase: mp.phase, steps: mp.steps, jsMB: mp.jsMB, gpuMB: acct.gpu / MB, ballastMB: mp.ballastMB,
     gpuPeakMB: acct.gpuPeak / MB, jsAcctPeakMB: acct.jsPeak / MB, last: e, at: Date.now(), done: mp.phase === "done", err: mp.err, result: mp.result || null });
+  // ?beacon=1: also POST every event to the page's own server (/mp-log), which samples the tab's
+  // process footprint alongside it (tests/e2e/memprobe_mac.mjs, desktop Safari)
+  if (Q.get("beacon")) fetch("/mp-log", { method: "POST", body: JSON.stringify({ run, phase: mp.phase, jsAcctMB: acct.js / MB, ...e }) }).catch(() => {});
   $("big").textContent = `${mp.phase} · JS ${mp.jsMB.toFixed(0)} MB · GPU ${(acct.gpu / MB).toFixed(0)} MB`;
   $("log").textContent = mp.events.slice(-14).map((x) => `${(x.t / 1000).toFixed(1)}s ${x.ev} js=${x.jsMB} gpu=${x.gpuMB}${x.info ? " " + x.info : ""}`).join("\n");
 }
@@ -163,7 +166,7 @@ async function loadLayers() {
       if (hit) { mp.cacheHits = (mp.cacheHits || 0) + (b - a + 1); return hit; }
     }
     const r = await fetch(url, { headers: { Range: `bytes=${a}-${b}` } });
-    if (r.status !== 206) throw new Error("no range support: " + r.status);
+    if (r.status !== 206) throw new Error(`no range support: ${r.status} for ${a}-${b} (${(await r.text().catch(() => "")).slice(0, 120)})`);
     if (Q.get("src") === "peer" && a > 0) {
       // room.js peerGet/onWeightPart (1000-1026) + rangeFetch 956-960: a range taken from a device in
       // the room arrives as 64 KB parts copied into one whole-range Uint8Array, then is wrapped in a Response
@@ -176,10 +179,10 @@ async function loadLayers() {
       }
       note("peer-whole", { info: `${(len / MB).toFixed(0)} MB in JS` });
       const resp = new Response(whole.buffer, { status: 200 });
-      const body = resp.body; let freed = false;
+      let freed = false;
       const free = () => { if (!freed) { freed = true; acct.js -= len; } };
-      // released when the consumer has read it all
-      return { ok: true, status: 200, body: body.pipeThrough(new TransformStream({ flush: free })), arrayBuffer: async () => { const x = await resp.arrayBuffer(); free(); return x; } };
+      // the consumer either streams the body or takes arrayBuffer(); the whole range counts until it is read
+      return { ok: true, status: 200, get body() { return resp.body.pipeThrough(new TransformStream({ flush: free })); }, arrayBuffer: async () => { const x = await resp.arrayBuffer(); free(); return x; } };
     }
     if (cache && cacheMode === "put") {
       // room.js:966-973 (desktop): a full JS copy of the body, then Cache.put
@@ -296,6 +299,8 @@ async function main() {
   mp.phase = "done";
   note("done", { info: JSON.stringify(mp.result) });
 }
-main().catch((e) => { mp.err = String(e?.stack || e); mp.phase = "error"; note("error", { info: String(e).slice(0, 300) }); });
+main().catch((e) => { mp.err = String(e?.stack || e); mp.phase = "error"; note("error", { info: String(e).slice(0, 300) }); })
+  // beacon runs leave the tab empty when they end, so the next run starts from a clean GPU
+  .finally(() => { if (Q.get("beacon") && mode !== "report") setTimeout(() => { mp.weights = mp.engine = mp.gpuBufs = null; mp.device?.destroy(); hold.length = 0; location.replace("about:blank"); }, +(Q.get("hold") || 4000)); });
 </script>
 </html>
