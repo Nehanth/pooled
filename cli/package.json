@@ -5,7 +5,7 @@
   "homepage": "https://pooled.run",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Nehanth/pooled.git",
+    "url": "git+https://github.com/Nehanth/pooled.git",
     "directory": "cli"
   },
   "license": "MIT",
