@@ -6,6 +6,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 
 ### Changed
 - **Rooms with phones** (device matrix, Spark + M5 Max + iPhone 14 Pro Max):
+  - The layer split now defaults to **For speed**: the fastest devices fill first, each up to what it lends, and devices that aren't needed join to ask. Before the first answer measures each device, computers go before phones (an unmeasured phone counts as 20x slower), so a phone only takes the layers the computers can't hold. By memory is still in the room settings; `?split=memory|speed` picks one at load (the test harnesses pin `memory`).
   - A room split by memory no longer gives a phone layers when the other devices can hold the model; the phone joins as an ask-only guest (`?phonelayers=1` restores the old split). Qwen 3.6 35B on a GB10 + iPhone room: 1.6-1.9x faster, the same speed as the GB10 alone.
   - Keep-alive while an answer runs: each end sends 1 byte every 10 ms of silence on its own unordered channel (id 78), so Wi-Fi power save doesn't park the radio between laps. No protocol bump; `?ka=0` turns it off. Qwen3 1.7B, GB10 + iPhone: +17% plain.
   - Test rig for rooms with the iPhone (`tests/e2e/xroom_phone.mjs`, `xroom_cluster.sh`) and the measured matrix in docs/bench-log.md.

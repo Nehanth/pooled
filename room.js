@@ -1695,7 +1695,8 @@ async function aiStart(modelArg) {
       // fastest devices first (measured ms per layer from earlier answers), fewest hops; devices
       // that are not needed stay in the room as ask-only guests
       const nameOf = (id) => conns.get(id)?.name || id;
-      const sp = planForSpeed(L, caps.map((c) => Math.floor(c / layerBytes)), [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))]);
+      const sp = planForSpeed(L, caps.map((c) => Math.floor(c / layerBytes)), [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
+        [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))]);
       const keep = sp.used.filter((i) => i > 0).map((i) => i - 1);
       ai.leftOut = new Set(ai.chain.filter((_, i) => !keep.includes(i)));
       ai.chain = keep.map((i) => ai.chain[i]);
@@ -1962,6 +1963,8 @@ const DRAFT_VOCAB = (() => { const v = new URLSearchParams(location.search).get(
 // ?phonelayers=1: phones hold layers even when the computers can hold the model (room/plan.js
 // phonesToLeaveOut), for A/B and demos
 const PHONE_LAYERS = new URLSearchParams(location.search).get("phonelayers") === "1";
+// ?split=memory|speed picks the layer split at load (test harnesses pin "memory"; the default is speed)
+{ const sp = new URLSearchParams(location.search).get("split"); if (sp === "memory" || sp === "speed") $("ai-split").value = sp; }
 const MTP_BATCH = new URLSearchParams(location.search).get("mtpbatch") !== "0";   // ?mtpbatch=0: one draft-cache row per submit, for A/B
 const GPU_SAMPLE = new URLSearchParams(location.search).get("gpusample") !== "0";   // on by default; see the engine options in aiLoadShard
 const ARGMAX_WIDE = (new URLSearchParams(location.search).get("argmaxwide") ?? (GPU_SAMPLE ? "1" : "0")) === "1";
@@ -3152,7 +3155,7 @@ const SEG_HELP = {
   "ai-visibility": { all: "Everyone in the room sees the questions and the answers.", host: "Only this device sees the text. Every device still helps write it.", asker: "Each answer goes to whoever asked it. Every device still helps write it." },
   "ai-length": { short: "About a paragraph at most (150 tokens).", normal: "A few paragraphs (400 tokens).", long: "Room for long answers and code (1,200 tokens)." },
   "ai-sampling": { creative: "Varied wording: ask twice, get two different answers.", focused: "Steadier wording, fewer surprises.", exact: "Always the likeliest word: the same question gets the same answer." },
-  "ai-split": { memory: "Every computer holds layers, sized by the memory it gives. A phone holds layers only when the computers can't fit the model.", speed: "The fastest devices hold the layers, with the fewest hops. Takes effect when the layers are dealt again." },
+  "ai-split": { memory: "Every computer holds layers, sized by the memory it gives. A phone holds layers only when the computers can't fit the model.", speed: "The fastest devices hold the layers, with the fewest hops; the rest join to ask. Before the first answer measures them, computers go before phones. Takes effect when the layers are dealt again." },
 };
 const segLabel = (id, o) => SEG_LABEL[id]?.[o.value] || o.text.replace(/\s*\(.*\)$/, "").replace(/^./, (c) => c.toUpperCase());
 function buildSegs() {

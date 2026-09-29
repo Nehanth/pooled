@@ -58,16 +58,19 @@ export function codeFromLocation(pathname = "", search = "", hash = "") {
 // its layers plus one network hop per device in the chain, so: fill the fastest devices first,
 // each up to what it can hold, and leave out devices that are not needed. caps: layers each
 // device can hold (host first); msPerLayer: measured compute per layer (null or missing = not
-// measured yet: then fewest hops wins, biggest devices first). The host always keeps at least
-// one layer (it holds the embedding and the head anyway). Returns planSplit's shape plus
-// `used`: the device indices that hold layers, in the original order.
-export function planForSpeed(L, caps, msPerLayer = []) {
+// measured yet: then fewest hops wins, biggest devices first). phone: devices that are phones;
+// until a phone is measured it counts as PHONE_COST times slower than an unmeasured computer, so
+// computers fill first. The host always keeps at least one layer (it holds the embedding and the
+// head anyway). Returns planSplit's shape plus `used`: the device indices that hold layers, in
+// the original order.
+export const PHONE_COST = 20;   // one iPhone layer ~ 15-25 GB10 layers (docs/bench-log.md, device matrix)
+export function planForSpeed(L, caps, msPerLayer = [], phone = []) {
   caps = caps.map((c) => (Number.isFinite(c) && c > 0 ? c : 0));   // a malformed cap holds nothing
   msPerLayer = msPerLayer || [];
   const n = caps.length;
   const known = msPerLayer.filter((x) => x > 0);
   const fallback = known.length ? Math.max(...known) * 1.5 : 1;   // unmeasured: assume slower than any measured device
-  const cost = caps.map((_, i) => msPerLayer[i] > 0 ? msPerLayer[i] : fallback);
+  const cost = caps.map((_, i) => msPerLayer[i] > 0 ? msPerLayer[i] : fallback * (phone?.[i] ? PHONE_COST : 1));
   const order = [...caps.keys()].sort((a, b) => cost[a] - cost[b] || (a === 0) * -1 + (b === 0) || caps[b] - caps[a] || a - b);
   const assigned = new Array(n).fill(0);
   assigned[0] = 1;

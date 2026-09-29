@@ -149,7 +149,7 @@ if (ROLE === "host" && !CLOUD && arg("signal-server", "1") !== "0") {   // a sol
   peerServer = spawn(arg("peerjs", path.join(ROOT, "node_modules/.bin/peerjs")), ["--port", String(SIG_PORT), "--path", "/", "--host", "0.0.0.0"], { stdio: "ignore" });
   await new Promise((r) => setTimeout(r, 1500));
 }
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?${CLOUD ? "" : `signal=${SIGNAL}&`}maxnew=${MAXNEW}&peerweights=0&dev=1` + (QUERY ? "&" + QUERY : "");
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?${CLOUD ? "" : `signal=${SIGNAL}&`}maxnew=${MAXNEW}&peerweights=0&dev=1&split=${arg("split", "memory")}` + (QUERY ? "&" + QUERY : "");
 const mac = process.platform === "darwin";
 const ARGS = [...(mac ? [] : ["--no-sandbox", "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"]),
   "--headless=new", "--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--disable-features=WebRtcHideLocalIpsWithMdns", "--js-flags=--max-old-space-size=65536",
