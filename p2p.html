@@ -358,6 +358,22 @@
   #join-gpu details[open] summary::after { transform: translateY(0) rotate(-135deg); }
   #join-gpu summary:hover { color: var(--text); }
   #join-gpu details p { margin-top: 6px; color: var(--muted); overflow-wrap: anywhere; }
+  /* Network: an optional TURN relay, folded away under the footer line */
+  #join-net { width: min(680px, 100%); margin-top: 10px; font-size: 13px; line-height: 1.5; color: var(--ink-2); }
+  #join-net summary { width: fit-content; margin: 0 auto; cursor: pointer; color: var(--muted); font-weight: 500; list-style: none; }
+  #join-net summary::-webkit-details-marker { display: none; }
+  #join-net summary::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 7px; border: solid currentColor; border-width: 0 1.3px 1.3px 0; transform: translateY(-2px) rotate(45deg); transition: transform .2s var(--ease); }
+  #join-net[open] summary::after { transform: translateY(0) rotate(-135deg); }
+  #join-net summary:hover { color: var(--text); }
+  #join-net .jn-body { margin-top: 10px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-3); display: grid; gap: 10px; }
+  #join-net .jn-help { color: var(--muted); text-wrap: pretty; }
+  #join-net .jn-row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; }
+  #join-net .jn-row input { min-width: 0; padding: 8px 10px; font-size: 13px; }
+  #join-net .jn-chk { display: flex; align-items: baseline; gap: 8px; color: var(--ink-2); }
+  #join-net .jn-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #join-net .jn-acts button { height: 32px; padding: 0 14px; font: 500 13px/1 var(--sans); }
+  #turn-note { color: var(--muted); }
+  @media (max-width: 560px) { #join-net .jn-row { grid-template-columns: 1fr; } }
   #join-screen:has(#join-gpu:not([hidden])) .jfoot { display: none; }
   #join-status:empty { display: none; }
   /* joining: the code in mono */
@@ -1461,6 +1477,19 @@
   <div id="join-gpu" hidden><p><i aria-hidden="true"></i><span id="join-gpu-t"></span></p><details><summary>Details</summary><p id="join-gpu-d"></p></details></div>
   <div id="join-status" role="status" aria-live="polite"></div>
   <p class="jfoot">Works best in Chrome or Edge. Devices without WebGPU can still join and ask.</p>
+  <details id="join-net">
+    <summary>Network</summary>
+    <div class="jn-body">
+      <p class="jn-help">Can't connect from this network? A relay (TURN) server carries the traffic when two devices can't reach each other directly. Pooled doesn't run one: use your own (coturn, for example) or a provider's. Saved in this browser only; join links never include it.</p>
+      <div class="jn-row">
+        <input id="turn-url" placeholder="turn:relay.example.org:3478" autocomplete="off" spellcheck="false" aria-label="Relay server URL">
+        <input id="turn-user" placeholder="Username" autocomplete="off" spellcheck="false" aria-label="Relay username">
+        <input id="turn-cred" type="password" placeholder="Password" autocomplete="off" aria-label="Relay password">
+      </div>
+      <label class="jn-chk"><input id="turn-force" type="checkbox"> Always go through the relay (the other devices never see this device's IP address)</label>
+      <div class="jn-acts"><button id="turn-save" type="button">Save</button><button id="turn-clear" type="button">Remove</button><span id="turn-note" role="status" aria-live="polite"></span></div>
+    </div>
+  </details>
 </div>
 
 <div id="room-screen">
