@@ -8,6 +8,21 @@ import { cleanText } from "./common.js";
 export const PREFIX = "pooled-room-";
 export const PROTOCOL = 4;          // room/transport.js PROTOCOL: the host says bye to any other
 const JOIN_MS = 15000, KNOCK_MS = 3000, HOST_WAIT_MS = 60000;
+// PeerJS rebuilds a message split into chunks with the chunk count the sender states, with no
+// limit: one message from the host could grow as large as it likes before our code sees it. The
+// biggest the room sends (a welcome with the chat's recent transcript) is a few hundred KB.
+const MAX_CHUNKS = 256, MAX_PARTIAL = 8;   // ~4 MB per message (16 KB chunks), 8 being rebuilt at once
+export function guardChunks(conn) {
+  const orig = typeof conn._handleChunk === "function" ? conn._handleChunk.bind(conn) : null;
+  if (!orig) return;
+  conn._handleChunk = (data) => {
+    const { total, n } = data || {};
+    if (!Number.isInteger(total) || total < 1 || total > MAX_CHUNKS || !Number.isInteger(n) || n < 0 || n >= total) return;
+    const partial = conn._chunkedData || {};
+    if (!partial[data.__peerData] && Object.keys(partial).length >= MAX_PARTIAL) return;
+    orig(data);
+  };
+}
 const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
 
 let PeerClass = null;
@@ -93,6 +108,7 @@ export class Bridge extends EventEmitter {
   // open a link to the host; onHello(hostHello) once it greets us
   dial(back, onHello) {
     const conn = this.peer.connect(PREFIX + this.code, { reliable: true });
+    guardChunks(conn);
     let greeted = false;
     conn.on("open", () => {
       if (this.conn && this.conn !== conn && this.conn.open) { try { conn.close(); } catch {} return; }
