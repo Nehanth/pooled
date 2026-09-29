@@ -866,6 +866,20 @@
   .cs-hop { width: 7px; height: 7px; border-radius: 50%; background: var(--me); opacity: .35; }
   #compute-exit { white-space: nowrap; }
   .cs-foot { flex: none; padding: 18px 20px; padding-bottom: max(18px, env(safe-area-inset-bottom)); text-align: center; font-size: 12px; color: var(--on-game-2); }
+  .cs-foot { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .cs-foot p { margin: 0; }
+  /* what could stop this device serving: a sleeping screen, a battery, a background tab */
+  #cs-notes { display: flex; flex-direction: column; gap: 6px; width: min(520px, 100%); margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 1.4; color: var(--on-game); }
+  #cs-notes[hidden] { display: none; }
+  #cs-notes li { padding: 8px 12px; border: 1px solid rgba(255,200,87,.35); border-radius: 8px; background: rgba(255,200,87,.08); }
+  #cs-new { height: 40px; padding: 0 18px; font: 500 14px/1 var(--sans); color: #000; background: var(--on-game); border: 0; border-radius: 8px; }
+  #cs-new[hidden] { display: none; }
+  #cs-new:hover { background: #fff; }
+  #compute-screen :is(#compute-exit, #cs-new):focus-visible { outline: 2px solid var(--blue-400); outline-offset: 2px; }
+  /* the room ended: the mark rests, dimmed, instead of breathing as if it still worked */
+  #compute-screen[data-phase="over"] #cs-logo circle { animation: none; opacity: .28; }
+  #compute-screen[data-phase="over"] .cs-live { background: var(--on-game-2); box-shadow: none; }
+  #compute-screen[data-phase="over"] .cs-foot p { display: none; }
   /* short screens (a phone in landscape): a smaller mark and title, and the screen scrolls if it still doesn't fit */
   @media (max-height: 500px) {
     #compute-screen { overflow-y: auto; }
@@ -1760,7 +1774,7 @@
     <div class="row"><button id="leave-stay" type="button" class="primary">Stay</button><button id="leave-go" type="button">Leave</button></div>
   </div>
 </div>
-<div id="compute-screen" role="dialog" aria-label="This device's screen" data-phase="idle" hidden>
+<div id="compute-screen" role="dialog" aria-modal="true" aria-label="Lend this device" data-phase="idle" hidden>
   <div class="cs-top">
     <span class="cs-brand"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8"/><circle cx="10.2" cy="3.4" r="1.99"/><circle cx="18.5" cy="3.4" r="2.38"/><circle cx="3.4" cy="10.2" r="1.99"/><circle cx="10.2" cy="10.2" r="2.38"/><circle cx="18.5" cy="10.2" r="2.94"/><circle cx="3.4" cy="18.5" r="2.38"/><circle cx="10.2" cy="18.5" r="2.94"/><circle cx="18.5" cy="18.5" r="3.9" fill="#7C8FFF"/></svg><span>pooled</span></span>
     <span class="cs-room"><span class="cs-live" aria-hidden="true"></span>Room <b id="cs-code">----</b><span class="cs-n">&middot; <span id="cs-devs">1 device</span></span></span>
@@ -1773,7 +1787,11 @@
     <p id="cs-live" hidden><span class="cs-hopk"><i class="cs-hop" aria-hidden="true"></i>hop</span><span><b id="cs-rate">0</b> tok/s</span><span><b id="cs-tok">0</b> tokens here</span><span><b id="cs-ms">-</b> per hop</span></p>
     <div id="cs-strip" aria-hidden="true"></div>
   </div>
-  <p class="cs-foot">Keep this screen on.</p>
+  <div class="cs-foot">
+    <ul id="cs-notes" aria-live="polite" hidden></ul>
+    <button id="cs-new" type="button" hidden>Start a new room</button>
+    <p>Keep this screen on, plugged in and in front.</p>
+  </div>
 </div>
 <div id="toasts" role="status" aria-live="polite"></div>
 <script src="/site/js/sparkle.js"></script>
