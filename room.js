@@ -259,6 +259,7 @@ document.addEventListener("keydown", (e) => {
   chipPop(null); $("room-menu").open = false;
   if (!$("share").hidden) closeShare();
   if (!$("card").hidden) $("card").hidden = true;
+  if (!$("leave").hidden) closeLeave();
 });
 document.addEventListener("pointerdown", (e) => {
   const t = e.target.closest?.("[data-tip]"); if (!t) return;
@@ -901,6 +902,23 @@ $("share").addEventListener("click", (e) => { if (e.target === $("share")) close
 $("room-over-close").addEventListener("click", () => { $("room-over").hidden = true; });
 $("share-copy").addEventListener("click", copyRoomLink);
 $("share-native").addEventListener("click", () => navigator.share?.({ title: "Join my Pooled room", text: `Room ${roomCode}: add this device to the AI model we run together`, url: roomLink() }).catch(() => {}));
+// the logo leads home. In a room it asks first: it sits in the thumb's corner on a phone, and
+// leaving ends the room for everyone (the host) or takes this device's layers with it
+const logoLink = document.querySelector(".logo a");
+logoLink.addEventListener("click", (e) => {
+  if (!document.body.classList.contains("in-room")) return;
+  e.preventDefault();
+  $("leave-h").textContent = `Leave room ${roomCode}?`;
+  $("leave-why").textContent = isHost
+    ? (conns.size ? "The room ends for the other devices: this tab holds the conversation and the model's first and last layers." : "The room and its model close.")
+    : `If this device holds some of the model's layers, the room has to re-deal them. You can join again with the code ${roomCode}.`;
+  $("leave").hidden = false;
+  $("leave-stay").focus({ preventScroll: true });
+});
+function closeLeave() { $("leave").hidden = true; logoLink.focus({ preventScroll: true }); }
+$("leave-stay").addEventListener("click", closeLeave);
+$("leave").addEventListener("click", (e) => { if (e.target === $("leave")) closeLeave(); });
+$("leave-go").addEventListener("click", () => { location.href = logoLink.href; });
 $("room-over-new").addEventListener("click", () => { location.href = location.pathname.startsWith("/r/") ? "/room" : location.pathname.replace(/\?.*$/, ""); });
 // A host that reloads its tab goes straight back into its room (no note on the join screen): only on a
 // real reload of this tab, and only while the guests are still waiting for it (HOST_WAIT_MS).
