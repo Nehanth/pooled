@@ -560,6 +560,7 @@
   #ap-devs li.none { color: var(--muted); }
   /* this device: lend N GB */
   .ap-me { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .ap-me-hint { flex-basis: 100%; font-size: 12px; color: var(--accent); }
   .ap-step { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--border-2); border-radius: 12px; background: var(--panel); }
   .ap-step .step { width: 34px; height: 34px; padding: 0; border: 0; border-radius: 8px; font: 400 17px/1 var(--sans); color: var(--ink-2); background: transparent; display: grid; place-items: center; }
   .ap-step .step:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
@@ -1511,6 +1512,7 @@
         <section class="ap-me" id="ap-me" aria-label="This device">
           <p class="ap-k"><span>This device gives</span></p>
           <div class="ap-step" id="ap-step"><button class="step" id="ap-minus" type="button" aria-label="Less memory">&minus;</button><input id="ap-gb" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Memory this device gives, in GB" value="1"><span class="u">GB</span><button class="step" id="ap-plus" type="button" aria-label="More memory">+</button></div>
+          <p class="ap-me-hint" id="ap-me-hint" hidden></p>
           <p class="ap-no" id="ap-no" hidden>This browser can't use its graphics chip, so this device can chat but not help run the model.</p>
         </section>
         <section class="ap-room" id="side-room" aria-label="Invite more devices">
@@ -1518,7 +1520,7 @@
           <div class="ap-inv">
             <p class="ap-k"><span>Invite more devices</span></p>
             <p class="ap-code"><span id="side-code" title="Invite a device">----</span></p>
-            <p class="side-hint">Scan it, or type the code on another device. More devices fit bigger models.</p>
+            <p class="side-hint">Scan it, or type the code on another device. Each device adds the memory it gives.</p>
             <div class="ap-btns"><button type="button" id="ap-copy">Copy link</button><button type="button" data-invite>Full-size QR</button></div>
           </div>
         </section>
