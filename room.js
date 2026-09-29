@@ -930,8 +930,9 @@ function syncModal() {
   for (const o of overlays) o.inert = computing;
   // one that opened on its own (Room over) takes focus from the page it now covers
   const ae = document.activeElement;
-  if (open && !computing && !ae?.closest?.(".overlay")) {
-    if (ae && ae !== document.body) modalReturn = ae;
+  // (focus left on a sheet that just closed counts as outside, e.g. Invite closed over Room over)
+  if (open && !computing && !overlays.some((o) => !o.hidden && o.contains(ae))) {
+    if (ae && ae !== document.body && !ae.closest?.(".overlay")) modalReturn = ae;
     overlays.find((o) => !o.hidden).querySelector("button")?.focus({ preventScroll: true });
   }
   // and gives it back when it closes (host back, a redeal, its close button), unless focus moved on
@@ -941,7 +942,9 @@ function syncModal() {
   }
 }
 for (const o of [...overlays, $("compute-screen")].filter(Boolean)) new MutationObserver(syncModal).observe(o, { attributes: true, attributeFilter: ["hidden"] });
-function closeShare() { $("share").hidden = true; syncModal(); if (document.body.classList.contains("in-room")) $("share-btn").focus({ preventScroll: true }); }
+// a closed sheet hands focus back to its opener, or, if another sheet is still up, leaves it for later
+function focusBack(el) { if (overlays.some((o) => !o.hidden)) modalReturn = el; else el.focus({ preventScroll: true }); }
+function closeShare() { $("share").hidden = true; syncModal(); if (document.body.classList.contains("in-room")) focusBack($("share-btn")); }
 $("share-close").addEventListener("click", closeShare);
 $("share").addEventListener("click", (e) => { if (e.target === $("share")) closeShare(); });
 $("room-over-close").addEventListener("click", () => { $("room-over").hidden = true; });
@@ -1403,7 +1406,7 @@ function openCard() {
   $("card").hidden = false;
   $("card-close").focus({ preventScroll: true });
 }
-function closeCard() { $("card").hidden = true; syncModal(); $("room-menu").querySelector("summary").focus({ preventScroll: true }); }
+function closeCard() { $("card").hidden = true; syncModal(); focusBack($("room-menu").querySelector("summary")); }
 async function cardBlob() { return new Promise((res) => $("card-canvas").toBlob(res, "image/png")); }
 $("card-btn").addEventListener("click", () => { $("room-menu").open = false; openCard(); });
 $("card-close").addEventListener("click", closeCard);
