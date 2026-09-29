@@ -258,7 +258,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   chipPop(null); $("room-menu").open = false;
   if (!$("share").hidden) closeShare();
-  if (!$("card").hidden) $("card").hidden = true;
+  if (!$("card").hidden) closeCard();
 });
 document.addEventListener("pointerdown", (e) => {
   const t = e.target.closest?.("[data-tip]"); if (!t) return;
@@ -895,7 +895,17 @@ function openShare() {
 $("room-badge").addEventListener("click", openShare);
 $("share-btn").addEventListener("click", openShare);
 for (const b of document.querySelectorAll("[data-invite]")) b.addEventListener("click", (e) => { e.preventDefault(); openShare(); });
-function closeShare() { $("share").hidden = true; if (document.body.classList.contains("in-room")) $("share-btn").focus({ preventScroll: true }); }
+// the overlays (Invite, Room card, Room over) are modal: while one is open, the page behind it is
+// inert, so Tab cycles inside the sheet and nothing behind the blur takes focus or clicks
+const overlays = [...document.querySelectorAll(".overlay")];
+function syncModal() {
+  const open = overlays.some((o) => !o.hidden);
+  for (const el of document.querySelectorAll("body > header, #join-screen, #room-screen")) el.inert = open;
+  // one that opened on its own (Room over) takes focus from the page it now covers
+  if (open && !document.activeElement?.closest?.(".overlay")) overlays.find((o) => !o.hidden).querySelector("button")?.focus({ preventScroll: true });
+}
+for (const o of overlays) new MutationObserver(syncModal).observe(o, { attributes: true, attributeFilter: ["hidden"] });
+function closeShare() { $("share").hidden = true; syncModal(); if (document.body.classList.contains("in-room")) $("share-btn").focus({ preventScroll: true }); }
 $("share-close").addEventListener("click", closeShare);
 $("share").addEventListener("click", (e) => { if (e.target === $("share")) closeShare(); });
 $("room-over-close").addEventListener("click", () => { $("room-over").hidden = true; });
@@ -1355,11 +1365,13 @@ function openCard() {
   drawCard($("card-canvas"), { model: (MODELS[ai.model || $("ai-model").value]?.label || "").split("\u00b7")[0].trim(),
     code: roomCode, nodes, tps, acc: lastMap?.st?.acc, lap: lastMap?.st?.lap, date: new Date().toISOString().slice(0, 10) });
   $("card").hidden = false;
+  $("card-close").focus({ preventScroll: true });
 }
+function closeCard() { $("card").hidden = true; syncModal(); $("room-menu").querySelector("summary").focus({ preventScroll: true }); }
 async function cardBlob() { return new Promise((res) => $("card-canvas").toBlob(res, "image/png")); }
 $("card-btn").addEventListener("click", () => { $("room-menu").open = false; openCard(); });
-$("card-close").addEventListener("click", () => { $("card").hidden = true; });
-$("card").addEventListener("click", (e) => { if (e.target === $("card")) $("card").hidden = true; });
+$("card-close").addEventListener("click", closeCard);
+$("card").addEventListener("click", (e) => { if (e.target === $("card")) closeCard(); });
 $("card-save").addEventListener("click", async () => {
   const a = document.createElement("a"); a.href = URL.createObjectURL(await cardBlob()); a.download = `pooled-${roomCode || "room"}.png`; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
