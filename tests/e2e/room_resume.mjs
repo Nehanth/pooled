@@ -18,7 +18,8 @@
 //   code    a Code mode run (the agent writing a small app) is interrupted mid-step by --code-action
 //           (lock by default, or reload): the run waits, carries on inside the step it was in, and ends
 //           with its stats line and no "a device left: stopped" note; the files it wrote are kept.
-//           Not in the default set: --scenarios lock,reload,code,kill
+//           Not in the default set; the 0.6B's 2k context fills in a few steps, so use the 1.7B:
+//           --scenarios code --model qwen3-1.7b (pledges --gbs 3,2,1)
 //
 // With a real phone (tests/e2e/resume_phone.mjs drives it over WebDriver from the Mac it is attached to):
 //   node tests/e2e/room_resume.mjs --url https://<preview>/room --external iphone --rounds 2 --code-out code.txt
@@ -43,6 +44,8 @@ const SCEN = arg("scenarios", "lock,reload,kill").split(",");
 const VICTIM = arg("victim", "phone");
 const AWAY = +arg("away", 20);
 const CODE_ACTION = arg("code-action", "lock");
+const GBS = arg("gbs", MODEL === "qwen3-1.7b" ? "3,2,1" : "2,1,0.5").split(",");   // pledges: host, worker, phone
+const CTX = +arg("ctx", SCEN.includes("code") ? 8192 : 0);   // a Code run needs room for its system prompt and tools
 const CODE_PROMPT = arg("code-prompt", "Make a small counter app: index.html with a button that counts clicks, and a style.css. Write both files, then serve it.");
 const AT_TOK = +arg("at", 24);          // interrupt once the answer has this many tokens
 const URL_MODE = process.argv.includes("--external");
@@ -128,11 +131,17 @@ async function lock(p, secs) {
     for (const w of window.__ws || []) { try { w.close(); } catch {} }
   });
   await p.waitForTimeout(300);
+  // Chromium does not freeze a page that is really visible (the lifecycle call is accepted and
+  // ignored), so the page's JS is also paused in the debugger: no pings, no frames, no timers, the
+  // links go quiet without closing, as on a locked iPhone.
   let frozen = true;
-  try { await cdp.send("Page.setWebLifecycleState", { state: "frozen" }); } catch (e) { frozen = false; log("could not freeze the page:", e.message); }
+  try { await cdp.send("Page.setWebLifecycleState", { state: "frozen" }); } catch (e) { frozen = false; }
+  try { await cdp.send("Debugger.enable"); await cdp.send("Debugger.pause"); frozen = true; } catch (e) { log("could not pause the page:", e.message); }
   log(`locked (${frozen ? "frozen" : "hidden only"}) for ${secs} s`);
   await new Promise((r) => setTimeout(r, secs * 1000));
-  if (frozen) await cdp.send("Page.setWebLifecycleState", { state: "active" });
+  await cdp.send("Debugger.resume").catch(() => {});
+  await cdp.send("Debugger.disable").catch(() => {});
+  await cdp.send("Page.setWebLifecycleState", { state: "active" }).catch(() => {});
   await p.evaluate(() => {
     delete document.visibilityState; delete document.hidden;
     document.dispatchEvent(new Event("visibilitychange"));
@@ -192,9 +201,9 @@ async function codeScenario(r) {
 
 const out = { model: MODEL, victim: VICTIM, scenarios: {} };
 try {
-  for (const p of Object.values(tabs)) await p.goto(BASE + (p === tabs.host ? `&maxnew=${MAXNEW}` : ""));
+  for (const p of Object.values(tabs)) await p.goto(BASE + (p === tabs.host ? `&maxnew=${MAXNEW}${CTX ? `&ctx=${CTX}` : ""}` : ""));
   for (const p of Object.values(tabs)) await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
-  for (const [n, p] of Object.entries(tabs)) { await p.fill("#name-input", n + "-rs"); await p.fill("#join-gb", n === "host" ? "2" : n === "phone" ? "0.5" : "1"); }
+  for (const [n, p] of Object.entries(tabs)) { await p.fill("#name-input", n + "-rs"); await p.fill("#join-gb", GBS[n === "host" ? 0 : n === "worker" ? 1 : 2]); }
   await tabs.host.click("#create-btn");
   await tabs.host.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
   const code = (await tabs.host.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
@@ -250,6 +259,7 @@ try {
       await waitTokens(AT_TOK);
       const at = await st(tabs.host);
       r.interruptedAt = at.slice(0, 60);
+      const shownAt = (await lastReply()).length;
       log(sc, "interrupting", VICTIM, "at", at.slice(0, 60));
       const t1 = Date.now();
       if (sc === "lock") {
@@ -270,12 +280,17 @@ try {
       r.chars = reply.length;
       if (!r.sameText) { let i = 0; while (i < reply.length && reply[i] === base[i]) i++; r.diffAt = i; r.got = reply.slice(Math.max(0, i - 40), i + 60); r.want = base.slice(Math.max(0, i - 40), i + 60); }
       r.hostLog = (await roomLog(tabs.host)).slice(-8).map((t) => t.slice(0, 180));
+      r.noticed = r.hostLog.some((t) => /no data for|left|is waiting/.test(t));   // the host saw the device go (not just a slow lap)
       if (sc !== "kill") {
         await waitOnline(tabs[VICTIM], 120000).catch(() => {});
         r.victimStatus = (await st(tabs[VICTIM])).slice(0, 160);
         r.victimLog = (await roomLog(tabs[VICTIM])).slice(-5).map((t) => t.slice(0, 180));
       }
-      r.ok = done.startsWith("ready") && r.sameText;
+      // after a re-deal the layers run on other devices (another kernel path, other rounding): greedy
+      // decoding may then pick a different near-tie token later on. What must hold is that nothing
+      // already shown changed and the answer ran to its end.
+      r.keptShown = r.sameText || r.diffAt >= shownAt;
+      r.ok = done.startsWith("ready") && (sc === "kill" ? r.keptShown && /carried on/.test(r.stats) : r.sameText);
       log(sc, r.ok ? "OK" : "FAILED", r.secs, "s:", r.status.slice(0, 140));
     } catch (e) {
       r.error = String(e).slice(0, 300);

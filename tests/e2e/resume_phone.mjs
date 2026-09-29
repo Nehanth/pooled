@@ -4,7 +4,7 @@
 // No dependencies (Node 18+: fetch).
 //
 //   node tests/e2e/resume_phone.mjs --code ABCD --url https://<preview>/room --actions background,reload
-//        [--name iphone] [--gb 0.5] [--away 30] [--skip 1] [--wd-port 4447] [--maxmin 20] [--out r.json]
+//        [--name iphone] [--gb 0.5] [--away 30] [--skip 1] [--wd-port 4447] [--maxmin 20] [--linger 90] [--out r.json]
 //
 // For every action, the phone waits for the next answer the room streams (after --skip answers), lets
 // it run a few seconds, then:
@@ -24,6 +24,7 @@ const URL0 = arg("url", "https://pooled.run/room"), CODE = arg("code");
 const WD_PORT = +arg("wd-port", 4447), WD = `http://127.0.0.1:${WD_PORT}`;
 const NAME = arg("name", "iphone"), GB = arg("gb", "0.5"), AWAY = +arg("away", 30), SKIP = +arg("skip", 1), MAXMIN = +arg("maxmin", 20);
 const ACTIONS = arg("actions", "background,reload").split(",");
+const LINGER = +arg("linger", 90);
 const t0 = Date.now();
 const log = (...a) => console.error(((Date.now() - t0) / 1000).toFixed(0) + "s [phone]", ...a);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -105,16 +106,15 @@ try {
   s = await until((x) => x.online, 900000, "the room to come online", 3000);
   out.awakeOnline = s.awake;
   log("online:", s.status.slice(0, 100), "| awake:", s.awake);
-  let seen = s.answers;
   let skip = SKIP;
   for (const action of ACTIONS) {
     const a = { action };
     out.actions.push(a);
-    // the next answer to interrupt (the host asks one after the other)
+    // the next answer to interrupt (the host asks one after the other, each in a new chat, which
+    // clears this screen's chat too: an answer streaming now is one that has not ended)
     for (;;) {
-      s = await until((x) => x.answers > seen, 900000, "an answer", 1000);
-      seen = s.answers;
-      if (skip-- > 0) { log("letting answer", seen, "run (baseline)"); await until((x) => x.lastEnded, 600000, "the baseline to end", 2000); continue; }
+      s = await until((x) => x.answers > 0 && !x.lastEnded, 900000, "an answer", 1000);
+      if (skip-- > 0) { log("letting an answer run (baseline)"); await until((x) => x.lastEnded, 600000, "the baseline to end", 2000); continue; }
       break;
     }
     s = await until((x) => x.lastChars > 60 || x.lastEnded, 300000, "the answer to stream", 500);
@@ -150,8 +150,11 @@ try {
     a.secs = Math.round((Date.now() - ta) / 1000);
     a.after = { status: s.status.slice(0, 140), stats: s.lastStats.slice(0, 160), links: s.links, awake: s.awake, log: s.log };
     log(action, "ended after", a.secs, "s:", s.lastStats.slice(0, 120));
-    seen = s.answers;
   }
+  // closing the WebDriver session closes the tab, which the room sees as the phone leaving: stay
+  // until the answer in flight has ended on the host's side (a reloaded tab never sees its end)
+  log("staying", LINGER, "s so the room can finish the answer");
+  await sleep(LINGER * 1000);
   await finish(0, "done");
 } catch (e) {
   out.errors.push(String(e).slice(0, 500));
