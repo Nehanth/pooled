@@ -1911,7 +1911,12 @@ function ckptSave(pin = false) {
   // before the first prefill round): the frame header carries one save, so this one supersedes it.
   // Forget it here too, or a later resume could load a slot no worker saved. Its drops stay pending.
   const prev = ai.chain.length ? ai.pendingCtl?.sv : null;
-  if (prev != null) { ai.ckpt.remove(prev); try { ai.engine.dropSlot(prev); } catch {} }
+  if (prev != null) {
+    // a pinned save superseded at the same tokens (Stop right after it) stays pinned
+    const p = ai.ckpt.items.find((x) => x.key === prev);
+    if (p?.pin && p.ids.length === ai.fed.length && p.ids.every((t, i) => t === ai.fed[i])) pin = true;
+    ai.ckpt.remove(prev); try { ai.engine.dropSlot(prev); } catch {}
+  }
   const drop = [];
   if (pin) for (const old of ai.ckpt.pinned()) { ai.ckpt.remove(old.key); ai.engine.dropSlot(old.key); drop.push(old.key); }
   else while (ai.ckpt.unpinned().length >= CKPT_MAX) {

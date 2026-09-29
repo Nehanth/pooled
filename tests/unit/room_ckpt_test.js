@@ -578,6 +578,15 @@ const SCENARIOS = [
     { ids: [9, 9, 9, 9, 2], answer: [3], pin: 4, wantReused: 4 },
     { ids: [9, 9, 9, 9, 4], answer: [5], pin: 4, wantReused: 4 },
   ] },
+  // the save that supersedes the pinned one holds the same tokens, so it stays pinned: answer
+  // saves then never evict it, and a later rewrite of the middle still resumes there
+  { name: "pin: the save that supersedes a pinned one stays pinned", turns: [
+    { ids: [9, 9, 9, 9, 1], pin: 4, stopAfterPin: true },
+    { ids: [9, 9, 9, 9, 2], answer: [3], pin: 4, wantReused: 4 },
+    { ids: [9, 9, 9, 9, 2, 3, 5], answer: [6], pin: 4 },
+    { ids: [9, 9, 9, 9, 2, 3, 5, 6, 7], answer: [8], pin: 4 },
+    { ids: [9, 9, 9, 9, 4], answer: [5], pin: 4, wantReused: 4 },
+  ] },
   { name: "Stop after a reset, before the first frame", turns: [
     { ids: Q1, answer: A1 },
     { ids: [7, 7, 7], abort: true },                             // reset pending, nothing fed: no save
