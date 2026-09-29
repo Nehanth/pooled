@@ -1070,3 +1070,48 @@ onset of throttling, still hidden because the phone is ~20% of a lap. Longer run
 Not ranked: thermal-aware pacing (no throughput loss in 7.4 min with one layer; revisit with 2+ phone layers), the
 speculative depth picker with a phone in the chain (K=5/7 cost 30+ ms of phone verify; belongs to the depth-policy
 work, input handed over here).
+
+## 2026-09-28/29: keep-alive on the wire while generating (C: Spark + iPhone)
+
+Branch perf/cluster-phone-wifi-jitter (f02efdd on perf/cluster-matrix). While a wire link carried a frame in the
+last 1.5 s, each end sends a 1-byte message on a negotiated unordered, never-retransmitted channel (id 78) whenever
+it sent nothing on that link for 10 ms (`?ka=ms`, `?ka=0` off; not a protocol change, see docs/protocol.md). Same
+code on both sides: the phone opens the branch's Vercel preview, the GB10 its checkout; A/B by `?ka=0` vs `?ka=10`
+(and `?ka=4`) on every device, interleaved in the same lock hold. `xroom_cluster.sh --devices here,phone
+--phone-url <preview>/room --phone-query "dev=1&ka=K" -- --model M --gb G --prompts japan,twosum --rounds 2
+--maxnew 128 --query ka=K --trace-rounds ...`, 0.5 GB phone pledge (1 layer: MoE layer 40, 1.7B layer 28).
+
+tok/s, mean over every round of the runs (range):
+
+| model | config | runs | plain | spec |
+|---|---|---|---|---|
+| 1.7B | ka=0 | 4 | 22.7 (18.5-27.1) | - |
+| 1.7B | ka=10 | 3 | 26.5 (24.3-28.5) | - |
+| 1.7B | ka=4 | 2 | 24.6 (14.2-28.8) | - |
+| MoE | ka=0 | 3 (1 more failed to start) | 20.8 (13.6-25.5) | 30.6 (24.1-37.0) |
+| MoE | ka=10 | 4 | 21.9 (19.1-26.3) | 31.3 (22.3-41.5) |
+| MoE | ka=4 | 2 | 22.9 (19.1-26.2) | 32.6 (26.4-38.9) |
+
+Phone-side hop gaps (phone send → next frame in, plain decode laps of traced rounds, per run):
+
+| model | config | laps > 300 ms per run | max gap (ms) |
+|---|---|---|---|
+| 1.7B | ka=0 | 2, 3, 2, 2 | 689, 766, 663, 445 |
+| 1.7B | ka=10 | 1, 0, 0 | 327, 156, 262 |
+| 1.7B | ka=4 | 0, 0 | 211, 200 |
+| MoE | ka=0 | 2, 2, 1 | 770, 724, 672 |
+| MoE | ka=10 | 1, 0, 1, 1 | 315, 167, 308, 332 |
+| MoE | ka=4 | 0, 0 | 191, 189 |
+
+- **What it does:** it cuts the tail, not the p95. The 0.4-0.8 s stalls (2-3 per 522-lap run on the 1.7B) mostly
+  go away and the worst gap halves. Lap p50/p95 and wire p50/p95 do not move (wire p95 14-24 ms in both configs;
+  the expected -8 to -10 ms p95 did not happen). The phone's own residence is unchanged (8-10 ms p50).
+- **Throughput:** 1.7B plain +17% (the on range sits above most of the off range; a 0.7 s stall in a ~5 s round
+  is ~14% alone). MoE +5% plain / +2% spec, inside the noise of 3-4 runs; the untraced rounds show +15% plain only
+  because two off rounds hit stalls (13.6, 17.7).
+- **Correctness:** same answer in every round off and on (MoE japan 3f42e667, twosum dcc61ede; 1.7B 166285f6 /
+  e19cba7f, = GB10 alone); unit tests 251 pass. No engine change.
+- **Not measured:** A (Spark + Mac), B (Mac + iPhone), D (all three) with the keep-alive on vs off. Every attempt
+  on 09-29 waited out the Mac GPU lock (90 min; the Spark+Mac integration job held it while waiting for the Spark
+  GPU) and further runs were not permitted in this session. The keep-alive also runs on computer-computer links
+  (~100 one-byte messages/s per link while generating); a regression there is unlikely but unverified.

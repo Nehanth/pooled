@@ -223,6 +223,7 @@ const SNAP = () => {
     peers: [...document.querySelectorAll(".peer-card")].map((c) => c.textContent.replace(/\s+/g, " ").trim().slice(0, 160)),
     hostLeft: /host left/.test($("ai-status")?.textContent || "") || !!($("room-over") && !$("room-over").hidden),
     errs: (window.__xErrs || []).splice(0), visible: document.visibilityState,
+    links: window.pooledDebug?.() || null,   // per-peer wire channels, frames sent/received, keep-alives sent
   };
 };
 
@@ -291,8 +292,9 @@ try {
     if (TRACE_OUT) { try { await pullTrace(false); } catch (e) { out.errors.push("trace pull: " + String(e).slice(0, 160)); } }
     if (!tLoad && /loading/.test(s.mine)) { tLoad = Date.now(); out.layers = s.mine; log("dealt:", s.mine); }
     if (tLoad && !out.loadS && /holds layers/.test(s.mine)) { out.loadS = +((Date.now() - tLoad) / 1000).toFixed(1); out.layers = s.mine; log("online:", s.mine, "after", out.loadS, "s"); }
+    if (s.links?.length) out.links = s.links;   // the last one with the host still in the room
     if (s.status !== lastStatus) { lastStatus = s.status; out.samples.push({ t: Math.round((Date.now() - t0) / 1000), status: s.status.slice(0, 200), mine: s.mine }); if (out.samples.length > 200) out.samples.splice(0, 50); }
-    if (Date.now() - lastLog > 20000) { lastLog = Date.now(); log(JSON.stringify({ ...s, errs: undefined }).slice(0, 500)); }
+    if (Date.now() - lastLog > 20000) { lastLog = Date.now(); log(JSON.stringify({ ...s, errs: undefined, links: undefined }).slice(0, 500)); }
     if (s.hostLeft) { out.last = s; await finish(0, "host left"); }
     if (s.peers.length >= 2) seen = Date.now(); else if (Date.now() - seen > 6000) { out.last = s; await finish(0, "room empty"); }
   }

@@ -6,7 +6,7 @@
 # samples); the others join with its code. Manual trigger only.
 #
 #   tests/e2e/xroom_cluster.sh --devices here,there,phone [--host here|there] [--out DIR] [--no-sync]
-#        [--guest-gb 12] [--phone-gb 0.5] [--phone-url https://pooled.run/room] [--phone-query dev=1]
+#        [--guest-gb 12] [--guest-query "a=1&b=2"] [--phone-gb 0.5] [--phone-url https://pooled.run/room] [--phone-query dev=1]
 #        -- <host xroom.mjs args>
 #   e.g. tests/e2e/xroom_cluster.sh --devices here,phone --out /tmp/xc -- --model qwen3-1.7b --gb 13 --prompts twosum --rounds 2
 #
@@ -34,7 +34,7 @@
 # (xroom_phone.mjs's result: the layers it was dealt, its load time, status samples, page errors),
 # phone.log, phone.png (the phone's screen at the end), ping.txt, report.txt (xroom_report.mjs).
 set -u
-DEVICES="" HOST=here OUT="" SYNC=1 GUEST_GB=12 PHONE_GB=0.5 PHONE_URL=https://pooled.run/room PHONE_QUERY=dev=1
+DEVICES="" HOST=here OUT="" SYNC=1 GUEST_GB=12 PHONE_GB=0.5 PHONE_URL=https://pooled.run/room PHONE_QUERY=dev=1 GUEST_QUERY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --devices) DEVICES=$2; shift 2 ;;
@@ -42,6 +42,7 @@ while [ $# -gt 0 ]; do
     --out) OUT=$2; shift 2 ;;
     --no-sync) SYNC=0; shift ;;
     --guest-gb) GUEST_GB=$2; shift 2 ;;
+    --guest-query) GUEST_QUERY=$2; shift 2 ;;
     --phone-gb) PHONE_GB=$2; shift 2 ;;
     --phone-url) PHONE_URL=$2; shift 2 ;;
     --phone-query) PHONE_QUERY=$2; shift 2 ;;
@@ -159,7 +160,7 @@ else
   if has here; then
     LSIG=$SIGNAL; [ "$SIGNAL" != cloud ] && LSIG=127.0.0.1:$SIG_PORT
     GT=(); [ "$TRACE" = 1 ] && GT=(--trace-out "$OUT/guest-here.trace.json")
-    $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role guest --signal "$LSIG" --codefile "$OUT/code.txt" --gb "$GUEST_GB" "${GT[@]}" > "$OUT/guest-here.out" 2> "$OUT/guest-here.log" &
+    $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role guest --signal "$LSIG" --codefile "$OUT/code.txt" --gb "$GUEST_GB" --query "$GUEST_QUERY" "${GT[@]}" > "$OUT/guest-here.out" 2> "$OUT/guest-here.log" &
     GPIDS+=("$!"); PIDS+=("$!")
     for _ in $(seq 1 1200); do grep -q "waiting for the room code" "$OUT/guest-here.log" 2>/dev/null && break; kill -0 "${GPIDS[0]}" 2>/dev/null || break; sleep 1; done
     grep -q "waiting for the room code" "$OUT/guest-here.log" 2>/dev/null || { log "the guest here did not start"; cat "$OUT/guest-here.out" >&2; exit 1; }
@@ -175,7 +176,7 @@ log "room $CODE ($DEVICES, host $HOST)"
 if [ "$HOST" = here ] && has there; then
   RSIG=$SIGNAL
   GT=""; [ "$TRACE" = 1 ] && GT="--trace-out /tmp/$RUN-guest-trace.json"
-  remote "cd ~/$RDIR && node tests/e2e/xroom.mjs --role guest --signal $RSIG --code $CODE --gb $GUEST_GB $GT --tag $RUN" > "$OUT/guest-there.out" 2> "$OUT/guest-there.log" &
+  remote "cd ~/$RDIR && node tests/e2e/xroom.mjs --role guest --signal $RSIG --code $CODE --gb $GUEST_GB --query $(printf '%q' "$GUEST_QUERY") $GT --tag $RUN" > "$OUT/guest-there.out" 2> "$OUT/guest-there.log" &
   GPIDS+=("$!"); PIDS+=("$!")
 fi
 PPID_=""
