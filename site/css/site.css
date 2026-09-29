@@ -648,6 +648,12 @@ html:not(.js) .game canvas{display:none}
 .replay{position:relative;display:none;place-items:center;flex:none;width:34px;height:34px;border-radius:var(--r-sm);color:var(--ink-3)}
 .js .replay{display:grid}
 .replay:hover{background:var(--bg-3);color:var(--ink)}
+/* pause / play the story (WCAG 2.2.2): it sits just before Replay; paused, the demo's CSS animations hold too */
+.js .replay[hidden]{display:none}
+.stepbar #pause:not([hidden])+.replay{margin-left:-8px}
+#pause .i-play,#pause.paused .i-pause{display:none}
+#pause.paused .i-play{display:block}
+.demo.paused *,.demo.paused *::before,.demo.paused *::after{animation-play-state:paused!important}
 
 /* ---------- closer + footer ---------- */
 .closer{position:relative;overflow:hidden;padding:clamp(80px,11vw,140px) 0 clamp(80px,10vw,128px);text-align:center}
