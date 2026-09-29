@@ -26,7 +26,7 @@
     "node": ">=22"
   },
   "dependencies": {
-    "node-datachannel": "^0.33.4",
+    "node-datachannel": "0.33.4",
     "peerjs": "1.5.4"
   },
   "devDependencies": {

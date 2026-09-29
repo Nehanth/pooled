@@ -9,7 +9,7 @@
       "version": "0.1.0",
       "license": "MIT",
       "dependencies": {
-        "node-datachannel": "^0.33.4",
+        "node-datachannel": "0.33.4",
         "peerjs": "1.5.4"
       },
       "bin": {

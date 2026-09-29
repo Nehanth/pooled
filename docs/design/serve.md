@@ -89,7 +89,7 @@ cli/
   lib/anthropic.js    same for the Messages API
   lib/sse.js          SSE writer (flush per event, keep-alive comments, client-gone detection)
   README.md           setup for curl, Continue, Open WebUI, LiteLLM, the two SDKs
-  package-lock.json
+  npm-shrinkwrap.json   the exact dependency tree, published with the package (npx ignores package-lock.json)
 ```
 
 No other runtime dependencies (no express, no yargs). `cli/node_modules/` is git-ignored like the
