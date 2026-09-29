@@ -773,3 +773,40 @@ above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32
 43.92; 27B prefill 31.9 / 58.5 / 53.6, plain 14.79 / 14.35 / 12.43, spec 23.54 / 21.13 / 15.96, spec == plain on
 every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
 prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).
+
+## 2026-09-29: MoE decode, fewer launches per layer (branch perf/decode-moe-bandwidth), GB10 Chrome
+
+What the MoE decode spends its time on (`tests/prof_ts.js`, Deno timestamps, one dispatch per pass, so small
+kernels carry ~10-15 µs of pass overhead each): the expert kernels are close to what they can do (`moe_gus` 74 µs =
+~155 GB/s in the model, 206 GB/s in `moe_fused_sweep.js`; `moe_dnc` 52 µs / 159 GB/s in the sweep, the wide and
+`moeDnRows` 2 / 4 variants are no faster on the GB10); the rest of a MoE layer was four small serial launches
+(post-attention `rmsnorm` 9 µs, the f32 router GEMV 15 µs, `moe_route` 20 µs, DeltaNet input `rmsnorm` 9 µs).
+
+Changes (MoE models only; the 27B's kernels and bits are untouched):
+- `moe_nrt` (`moeNormRouter`, default on): post-attention RMSNorm + router GEMV in one launch. Each workgroup
+  sums x*x and W_r . (x*w) in one loop and one tree, writes inv * dot; workgroup 0 writes xn for `moe_gus`. The
+  router is stored as BF16 (the file's router is BF16; the loader widened it exactly): 2.1 -> 1.05 MB per layer.
+- `dn_nba` (`dnNormBA`, default on): the same kernel for a DeltaNet layer's input RMSNorm + merged F32 beta/alpha
+  GEMV, before the [qkv|z] GEMV that reads its xn.
+- `moe_route`: with renormalized weights (Qwen3.5/3.6) rank the logits and softmax over the 8 picked logits only
+  (the full sum cancels), no 256-wide trees; the rank counts among candidates (>= the smallest of 8 group maxima)
+  instead of all 256. 20 -> 17 µs in the model, 12.4 µs in the sweep.
+- 502 -> 432 dispatches per token. Tried and dropped: routing inside every `moe_gus` workgroup (+34..57 µs per
+  launch: the prologue runs once per wave of workgroups), routing next to the shared expert in one launch (neutral).
+
+Correctness: `test_moe.js` MATCH llama.cpp 3/3, spec == plain 3/3, GPU sampling == logits path (also with
+`GPU_SAMPLE=0`); `test_moe_split.js` PASS; `MODEL=moe LENS=150,700 test_prefill_wide.js` PASS (max relDiff 1.4e-3);
+`test_q38_bits.js` BITS plain 8a532ef5 hidden 52f2ae10 (unchanged); unit tests 433/433; `tests/e2e/moe_fused_cpu.mjs`
+PASS (K 3 and 8). The router weights' last bits change (llama.cpp text is the MoE golden).
+
+Chrome decode tok/s (`chrome_bench.mjs <moe> 64 japan=1`, plain / spec K=3, mean of 3 interleaved runs vs origin/main
+2f1704e in its own worktree):
+
+| | two-sum | hash-map | japan |
+|---|---|---|---|
+| main | 50.16 / 82.17 | 50.01 / 69.68 | 43.38 / 52.98 |
+| branch | 52.14 / 85.61 | 52.47 / 73.22 | 45.05 / 54.99 |
+| gain | +3.9% / +4.2% | +4.9% / +5.1% | +3.8% / +3.8% |
+
+Acceptance unchanged (48/54, 44/63, 39/75). Kernel sum per token 19.15 -> 18.55 ms (Deno). Not measured on the M5 Max;
+the three changes apply there too (they do not depend on the fused expert layout).

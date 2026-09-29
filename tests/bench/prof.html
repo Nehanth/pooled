@@ -20,7 +20,8 @@ try {
   const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true });
   const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512, draftVocab: +(q.get("draftvocab") || 0),
     // GPU sampling on by default (?gpusample=0: the logits path); ?argmaxwide=0|1 overrides the two-stage draft argmax
-    gpuSample: q.get("gpusample") !== "0", argmaxWide: (q.get("argmaxwide") ?? (q.get("gpusample") === "0" ? "0" : "1")) === "1" });
+    gpuSample: q.get("gpusample") !== "0", argmaxWide: (q.get("argmaxwide") ?? (q.get("gpusample") === "0" ? "0" : "1")) === "1",
+    ...JSON.parse(q.get("opts") || "{}") });   // ?opts=<json>: extra engine create options (A/B), e.g. {"moeNormRouter":false}
   log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s, adapter ${ad.info?.vendor}, mtp ${!!eng.mtp}, moeFuse ${!!eng.moeFuse}, draftVocab ${eng.draftVocab || "off"}, gpuSample ${eng.gpuSample}, argmaxWide ${eng.argmaxWide}, timestamps ${feats.length > 0}`);
   const out = await profileDecode({ eng, device, tok, argmax, log, N: +(q.get("tokens") || 24), STEPS: +(q.get("steps") || 12), K: +(q.get("k") || 3), roomPath: q.get("roompath") === "1" });
   window.RESULT = { runtime: "chrome", arch, ...out };
