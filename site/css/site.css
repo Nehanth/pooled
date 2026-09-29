@@ -360,6 +360,10 @@ html:not(.js) .ldc{display:none}
   .hero h1{font-size:clamp(29px,8.4vw,36px)}
   .hero .sub{font-size:14px;line-height:1.45;margin-top:8px}
 }
+/* a small phone (360x640, 375x667): the headline alone, so the window and its caption bar still share the first screen */
+@media (max-width:640px) and (max-height:700px){
+  .hero .sub{display:none}
+}
 @media (prefers-reduced-motion:reduce){.dl circle,.lc-status .src::before{animation:none}.dl circle{opacity:1;transform:none}}
 .bd-h{display:flex;flex-direction:column;align-items:center;gap:7px;margin-bottom:26px;text-align:center;min-width:0;transition:margin .9s var(--glide)}
 .bd-n{font:400 var(--d-md)/1.1 var(--display);letter-spacing:-.02em;white-space:nowrap}
@@ -729,6 +733,13 @@ html:not(.js) .sb-dots i{display:none}
   .cd-sec{padding:12px 16px}
   .cd-me .ap-step .step{width:28px;height:28px}
 }
+/* a small phone's stage (down to 280px, demo.js fit): the join card keeps inside its tab */
+@container stage (max-height:300px){
+  .mjoin .devname{margin-top:10px;margin-bottom:10px}
+  .slots{margin-bottom:10px}
+  .slots i{height:40px}
+  .mbtn,.mok{height:34px}
+}
 /* a narrow stage: two tabs side by side as two small screens; the model card shows one side at a time */
 @container stage (max-width:600px){
   /* one device's screen at a time: the laptop starts the room, then the desktop takes the stage to join it */
@@ -794,6 +805,15 @@ html:not(.js) .sb-dots i{display:none}
   .demo[data-scene="code"] .bd-h{height:28px;margin:0}
   .demo[data-scene="code"] .rows{display:none}
   .demo[data-scene="code"] .bd-tog svg{transform:rotate(180deg)}
+}
+/* a small phone's stage (down to 280px): the model picker in fewer pixels (after the narrow stage's sizes) */
+@container stage (max-height:300px){
+  .cd-pick{padding:10px 14px}
+  .cd-h{margin-bottom:8px}
+  .rungs{gap:4px;margin-bottom:8px}
+  .rungs li{height:36px}
+  .cd-note{padding-bottom:6px}
+  .cd-pick .mbtn{height:36px}
 }
 
 /* ---------- wide: the headline on one line ---------- */
