@@ -142,14 +142,17 @@ preflight().then((v) => {
   $("join-pledge").classList.add("no-gpu");
   $("ap-no").textContent = v.line;
 });
-// probe once at load; fill the contribution selector
+// probe once at load; fill the contribution selector, unless an amount was already chosen there
+// (typed, stepped or filled in while the probe ran: it takes up to ~0.5 s with the copy timing)
+let joinGbChosen = false;
+for (const [id, ev] of [["join-gb", "input"], ["gb-minus", "click"], ["gb-plus", "click"]]) $(id).addEventListener(ev, () => { joinGbChosen = true; });
 const metaPromise = (async () => {
   const m = await probeGPU();
   if (m.webgpu && m.budgetGB) m.contribGB = Math.max(0.2, Math.round(m.budgetGB * 0.5 * 10) / 10);
   m.phone = m.ua === "iPhone" || m.ua === "Android";
   if (m.phone) { m.contribGB = 0.5; $("join-gb").min = "0.5"; $("join-gb").step = "0.5"; }
   else if (m.contribGB) m.contribGB = Math.max(1, Math.round(m.contribGB));
-  if (m.contribGB) $("join-gb").value = m.contribGB;
+  if (m.contribGB && !joinGbChosen) $("join-gb").value = m.contribGB;
   return m;
 })();
 
@@ -917,7 +920,7 @@ const linkCode = codeFromLocation(location.pathname, location.search, location.h
 const VQ = new URLSearchParams(location.search);
 if (VQ.get("embed") === "1") document.documentElement.classList.add("embed");
 if (VQ.get("vname")) $("name-input").value = VQ.get("vname").slice(0, 20);
-if (+VQ.get("vgb") > 0) $("join-gb").value = +VQ.get("vgb");
+if (+VQ.get("vgb") > 0) { $("join-gb").value = +VQ.get("vgb"); joinGbChosen = true; }
 if (backAsHost && Date.now() - backAsHost.t < 60000 && !(linkCode && linkCode !== backAsHost.code)) {
   metaPromise.then(() => { if (!peer) start(true, backAsHost); });
 } else if (linkCode) {
