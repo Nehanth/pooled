@@ -108,7 +108,7 @@
   .logo svg { flex: none; fill: currentColor; }
   body.in-room .logo a { font-size: 17px; }
   .spacer { flex: 1; min-width: 0; }
-  body:not(.in-room) :is(#room-badge, #peers, #hdr-sum, #share-btn, #room-menu, header #mode-bar) { display: none !important; }
+  body:not(.in-room) :is(#room-badge, #peers, #hdr-sum, #share-btn, #room-menu, header #mode-bar, header #api-open) { display: none !important; }
 
   /* Room K7QX: the landing's room label; a click opens the invite sheet */
   #room-badge {
@@ -488,6 +488,11 @@
   #mode-bar button:hover:not(:disabled) { background: transparent; color: var(--text); }
   #mode-bar button:active:not(:disabled) { transform: none; }
   #mode-bar button[aria-selected="true"] { color: var(--text); }
+  /* Serve API: its own button next to Chat | Code (it opens a sheet, it is not a third mode) */
+  #api-open { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 38px; margin-left: 8px; padding: 0 14px; border: 0; border-radius: 12px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); font: 500 14px/1 var(--sans); color: var(--muted); transition: color .2s var(--ease); }
+  #api-open:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
+  #api-open svg { flex: none; }
+  #api-open[hidden] { display: none; }
   /* Code selected: the pill goes black with a soft blue glow, the word white, stars twinkling inside (site/js/sparkle.js) */
   #mode-bar::before { transition: transform .55s cubic-bezier(.65,0,.25,1), background-color .3s ease, box-shadow .3s ease; }
   #mode-bar:has(#mode-code[aria-selected="true"])::before { background: #0B0D14; box-shadow: 0 1px 2px rgba(0,0,0,.25), 0 0 16px -3px rgba(110,134,255,.6); }
@@ -775,7 +780,7 @@
   #share-url { flex: 1; min-width: 0; font: 400 12px/1.2 var(--mono); color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
   #share-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border-color: var(--accent); color: #fff; }
   #share-copy:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-  /* "Use from code": pooled serve (cli/) */
+  /* Serve API: pooled serve (cli/) */
   #api-sheet .sheet { text-align: left; align-items: stretch; }
   #api-sheet h2, #api-sheet .k { text-align: center; align-self: center; }
   #api-cmd { flex: 1; min-width: 0; font: 400 12px/1.4 var(--mono); color: var(--text); overflow-wrap: anywhere; text-align: left; }
@@ -1373,7 +1378,8 @@
     #code-pane :is(#ed-save, #ed-revert) { height: 36px; }
     #ed-save kbd { display: none; }
     .seg button, .seg.chips button { height: 36px; }
-    #mode-bar button, #mode-bar::before { height: 36px; }   /* Chat | Code, the pill under it too */
+    #mode-bar button, #mode-bar::before { height: 36px; }
+    #api-open { height: 42px; }   /* Chat | Code, the pill under it too */
   }
   @media (max-width: 400px) { .seg button { flex: 1 1 auto; padding: 0 6px; } .ms { padding-left: 16px; padding-right: 16px; } #sm-ctx { font-size: 11px; letter-spacing: -.02em; } }   /* '123k / 128k' inside its quarter of the band */
   @media (prefers-reduced-motion: reduce) {
@@ -1442,7 +1448,6 @@
         <h3 id="ms-room">Room</h3>
         <div class="menu-acts">
           <button id="export-chat" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7M5 6.5l3 3 3-3M3 11.5v2h10v-2"/></svg></span>Save the chat<small>The conversation as a Markdown file</small></button>
-          <button id="api-open" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 4 1.8 8l3.7 4M10.5 4l3.7 4-3.7 4"/></svg></span>Use from code<small>This room as an OpenAI or Anthropic endpoint on your computer</small></button>
           <button id="card-btn" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M2.5 11l3.5-3.5 2.5 2.5 2-2 3 3"/><circle cx="10.8" cy="5.9" r=".9"/></svg></span>Room card<small>A picture of this room's devices and speed</small></button>
           <span id="cache-line"><a href="#" id="cache-clear"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.7 9h6.6l.7-9"/></svg></span>Clear cached weights<small>Frees this device's disk; the next start downloads again</small></a></span>
         </div>
@@ -1486,7 +1491,7 @@
   <main id="chatpane">
     <div id="topline">
       <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
-      <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div></div>
+      <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div><button id="api-open" type="button" aria-haspopup="dialog" hidden title="Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5.5 4 1.8 8l3.7 4M10.5 4l3.7 4-3.7 4"/></svg><span>Serve API</span></button></div>
     </div>
     <div id="chat-log" class="dev-only"></div>
     <div id="ai-empty"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><span id="ai-empty-t">Pick a model and press Start</span></div>
@@ -1627,7 +1632,7 @@
 <div id="api-sheet" class="overlay" hidden>
   <div class="sheet" role="dialog" aria-labelledby="api-h">
     <button id="api-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
-    <h2 id="api-h">Use from code</h2>
+    <h2 id="api-h">Serve API</h2>
     <div class="k">Run this on your computer (Node 22 or newer). Any tool that speaks the OpenAI or Anthropic API can then use this room's model.</div>
     <div class="linkrow"><div id="api-cmd"></div><button id="api-copy" type="button">Copy</button></div>
     <dl class="api-urls">
