@@ -13,7 +13,7 @@ pooled serve · room ABCD · Qwen3.6 35B MoE · Q4
 
 Requirements: Node 22 or newer. No GPU is needed on this machine. The room's host page must be open, and the room's model started for requests to be answered (until then they get `503` with `Retry-After: 5`).
 
-The room menu's **Use from code** shows this command with the room's code.
+In the room, the black **Serve API** button in the header opens the Serve API page: this command with the room's code, the base URLs, examples, and who is connected.
 
 ## How it works
 

@@ -3,7 +3,7 @@
 Instructions for coding agents (Claude Code, Codex, Cursor, …). Humans: see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## What this is
-A from-scratch WebGPU inference engine (`engine/`), a browser room runtime (`p2p.html` + `room.js` + `room/`) that splits one LLM's layers across devices over WebRTC, and Code mode (`harness/`), a coding agent on the room's model. No build step, no framework, ES modules only. Read [architecture.md](architecture.md) first, then [kernels.md](kernels.md), and [design/harness-app.md](design/harness-app.md) for Code mode.
+A from-scratch WebGPU inference engine (`engine/`), a browser room runtime (`p2p.html` + `room.js` + `room/`) that splits one LLM's layers across devices over WebRTC, and Code mode (`harness/`), a coding agent on the room's model. No build step, no framework, ES modules only. Read [architecture.md](architecture.md) first, then [kernels.md](kernels.md), and [design/harness-app.md](design/harness-app.md) for Code mode. For any UI change, follow [design/language.md](design/language.md).
 
 ## Non-negotiables (from GOVERNANCE.md)
 - Output must stay **bit-exact**: golden tests must pass, and the speculative stream must equal plain decoding (`tests/test_mtp.js`). Approximations need a default-off switch.

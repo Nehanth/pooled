@@ -72,11 +72,12 @@ export function unpackFlags(f) {
 // hand over, done: Map<msgId, completed frame waiting for an earlier one>, hi: Map<channel,
 // highest frame id received on it>, closedAt: when a wire channel of this link last closed,
 // unordered: some channel may drop messages (attachWire { ordered: false }), dup: frames of up to
-// this many slices are sent twice (0 = never), heard: when anything last arrived on this
-// link's wire, even one slice of a big frame (drop detection, room/liveness.js) }
+// this many slices are sent twice (0 = never), rxAt: when anything last arrived on this link's
+// wire (a slice of a frame or a keep-alive byte: a sign of life, room/liveness.js), ka*: keep-alive }
 export function makeLink({ dup = DUP_SLICES } = {}) {
   return { chans: [], rr: 0, rx: new Map(), nextId: 1, sent: 0, recv: 0, expect: 1, done: new Map(), gapTimer: null, gapFor: 0,
-    hi: new Map(), closedAt: null, unordered: false, dup, dups: 0, skipped: 0, heard: 0 };
+    hi: new Map(), closedAt: null, unordered: false, dup, dups: 0, skipped: 0,
+    ka: [], kaRr: 0, kaSent: 0, lastTx: 0, active: 0, rxAt: 0 };
 }
 
 // Open the wire channel on a PeerJS DataConnection's RTCPeerConnection. Both sides call this with
@@ -87,7 +88,7 @@ export function attachWire(link, conn, onFrame, { ordered = true } = {}) {
   const ch = pc.createDataChannel("swarm-wire", { negotiated: true, id: WIRE_ID, ordered, ...(ordered ? {} : { maxRetransmits: 0 }) });
   ch.binaryType = "arraybuffer";
   if (!ordered) link.unordered = true;
-  ch.onmessage = (ev) => { link.heard = performance.now(); receive(link, ev.data, onFrame, ch); };
+  ch.onmessage = (ev) => { link.rxAt = performance.now(); receive(link, ev.data, onFrame, ch); };
   ch.onclose = () => {
     link.chans = link.chans.filter((c) => c !== ch);
     link.hi.delete(ch);
@@ -96,6 +97,7 @@ export function attachWire(link, conn, onFrame, { ordered = true } = {}) {
     if (link.done.size) { clearTimeout(link.gapTimer); link.gapTimer = null; checkGap(link, onFrame); }
   };
   link.chans.push(ch);
+  attachKeepalive(link, pc);
   return ch;
 }
 
@@ -108,6 +110,7 @@ export function sendFrame(link, msg) {
   const open = link.chans.filter((c) => c.readyState === "open");
   if (!open.length) return false;
   link.sent++;
+  kaNote(link, true);
   const u16 = msg.data;
   const bytes = new Uint8Array(u16.buffer, u16.byteOffset, u16.byteLength);
   const per = SLICE_BYTES - HDR;
@@ -183,6 +186,7 @@ function receive(link, buf, onFrame, ch) {
   if (r.got < r.n) return;
   link.rx.delete(id);
   link.recv++;
+  kaNote(link, false);
   const data = new Uint16Array(r.buf.buffer, 0, total >> 1);
   const t = KINDS[kind];
   const msg = { t, enc: "f16", data, n, ...unpackFlags(flags), ...r.ck };
@@ -251,4 +255,50 @@ function checkGap(link, onFrame) {
     }
     checkGap(link, onFrame);
   }, lossy ? GAP_MS : GAP_MAX_MS);
+}
+
+// Keep-alive while frames flow. A phone's Wi-Fi drops into power save between sparse frames: in a
+// room a lap is ~50 ms and the phone's own slice is busy for ~10 of it, so the radio idles ~40 ms
+// per lap, and a frame for a dozing phone waits at the access point for its next wake-up (the
+// phone hop's wire time: the same median as a computer's, twice the p95, a 0.8 s stall). While a
+// link has carried a frame in the last KA_ACTIVE_MS, each end sends a 1-byte message whenever it
+// has sent nothing for KA_MS, which keeps both radios awake; it stops by itself when the room goes
+// quiet. The bytes ride their own negotiated channel (KA_ID), unordered and never retransmitted,
+// so a lost one holds up nothing; being on the same association as the frames, they also let the
+// receiver report a lost frame slice at once instead of the sender waiting out a retransmission
+// timeout. A peer without the channel drops them (the SCTP stream is unknown to it), so this needs
+// no protocol bump. ?ka=ms in the room URL sets the period, ?ka=0 turns it off.
+export const KA_ID = 78;
+const KA_ACTIVE_MS = 1500;
+const KA_BYTE = new Uint8Array([0]);
+let kaMs = 10, kaTimer = null;
+const kaLinks = new Set();
+export function setKeepalive(ms) { kaMs = Math.max(0, +ms || 0); }
+function attachKeepalive(link, pc) {
+  if (!link.ka) return;
+  const ch = pc.createDataChannel("swarm-ka", { negotiated: true, id: KA_ID, ordered: false, maxRetransmits: 0 });
+  ch.addEventListener?.("message", () => { link.rxAt = performance.now(); });   // the peer's keep-alive bytes: it is alive
+  ch.onclose = () => { link.ka = link.ka.filter((c) => c !== ch); };
+  link.ka.push(ch);
+}
+function kaNote(link, tx) {
+  const now = performance.now();
+  link.active = now;
+  if (tx) link.lastTx = now;
+  if (!kaMs || !link.ka?.length) return;
+  kaLinks.add(link);
+  if (!kaTimer) kaTimer = setInterval(kaTick, kaMs);
+}
+function kaTick() {
+  const now = performance.now();
+  for (const link of kaLinks) {
+    if (now - link.active > KA_ACTIVE_MS) { kaLinks.delete(link); continue; }
+    if (now - link.lastTx < kaMs) continue;
+    // one association per tick, in turn: one packet keeps the radio up, the rotation gives every
+    // association a recent packet for loss reports
+    const open = link.ka.filter((c) => c.readyState === "open" && c.bufferedAmount < 1024);
+    if (!open.length) continue;
+    try { open[(link.kaRr++) % open.length].send(KA_BYTE); link.kaSent++; link.lastTx = now; } catch {}
+  }
+  if (!kaLinks.size || !kaMs) { clearInterval(kaTimer); kaTimer = null; }
 }

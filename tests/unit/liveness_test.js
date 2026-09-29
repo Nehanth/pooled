@@ -1,121 +1,93 @@
-// room/liveness.js: drop detection on the host. A fake clock drives it; the numbers mirror what
-// the host sees in a room (pings every 500 ms, pongs, wire slices, a tab that stalls).
-import { makeLiveness, heard, arm, disarm, forget, tick, deadAfter, lapTimeout,
-  HB_BUSY_MS, DEAD_MIN_MS, DEAD_MAX_MS, STALL_MS, LAP_MIN_MS, suspectCheck, EVICT_MS } from "../../room/liveness.js";
+// room/liveness.js: the ping loop's silent-link drop (#124) and the host's duplicate-name probe. No GPU.
+import { PING_MS, SILENT_MS, PHONE_SILENT_MS, HOST_SILENT_MS, lastHeard, silentLimit, isSilentGone, midLoad,
+  uniqueName, quietNamesake, staleNamesakes, renameTo, QUIET_MS } from "../../room/liveness.js";
 
-function ok(c, m) { if (!c) throw new Error(m || "assertion failed"); }
-function eq(a, b, m) { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(`${m ? m + ": " : ""}${x} !== ${y}`); }
+const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
+const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 
-// drive one device through a run: hearFrom(t) says whether a message arrives at time t
-function run(L, { ms, step = 250, ids = ["a"], hearFrom = () => true, rtt = () => 50, t0 = 0 }) {
-  const dead = [];
-  let pings = 0;
-  for (let t = t0; t <= t0 + ms; t += step) {
-    for (const id of ids) if (hearFrom(id, t)) heard(L, id, t);
-    const r = tick(L, t, ids, rtt);
-    if (r.ping) pings++;
-    for (const d of r.dead) dead.push({ t, ...d });
-  }
-  return { dead, pings };
-}
-
-Deno.test("deadAfter: 3.5 s on a LAN, grows with the round trip, capped at 5 s", () => {
-  eq(deadAfter(null), DEAD_MIN_MS);
-  eq(deadAfter(0), DEAD_MIN_MS);
-  eq(deadAfter(20), DEAD_MIN_MS);
-  eq(deadAfter(300), 3900);
-  eq(deadAfter(600), 4800);
-  eq(deadAfter(5000), DEAD_MAX_MS);
-  eq(deadAfter(NaN), DEAD_MIN_MS);
+Deno.test("silent drop: a computer that vanished is dropped after SILENT_MS", () => {
+  ok(!isSilentGone({ now: SILENT_MS, heard: 0 }), "at the limit it stays");
+  ok(isSilentGone({ now: SILENT_MS + 1, heard: 0 }), "past the limit it goes");
+  ok(SILENT_MS >= 4 * PING_MS, "several pings fit in the limit");
 });
 
-Deno.test("nothing is judged until armed, and a live device is never dead", () => {
-  const L = makeLiveness();
-  eq(tick(L, 10000, ["a"]).dead, [], "unarmed");
-  arm(L, 10000);
-  const r = run(L, { t0: 10000, ms: 60000, hearFrom: (_, t) => t % 500 === 0 });
-  eq(r.dead, []);
-  ok(r.pings >= 60000 / HB_BUSY_MS - 1, "pings every 500 ms: " + r.pings);
+Deno.test("silent drop: a phone with its screen locked for a while keeps its link", () => {
+  ok(!isSilentGone({ now: 30000, heard: 0, phone: true }), "30 s locked: kept");
+  ok(isSilentGone({ now: PHONE_SILENT_MS + 1, heard: 0, phone: true }), "gone for over a minute: dropped");
+  ok(PHONE_SILENT_MS > SILENT_MS && PHONE_SILENT_MS >= 60000);
 });
 
-Deno.test("a device that goes silent is dead within its limit (+ one tick), and only it", () => {
-  const L = makeLiveness();
-  arm(L, 0);
-  const dieAt = 5000;
-  const r = run(L, { ms: 20000, ids: ["a", "b"], hearFrom: (id, t) => id === "a" || t < dieAt });
-  ok(r.dead.length > 0, "b called dead");
-  ok(r.dead.every((d) => d.id === "b"), "only b");
-  const first = r.dead[0];
-  ok(first.t - dieAt > DEAD_MIN_MS - 250 && first.t - dieAt <= DEAD_MIN_MS + 500, "detected at " + (first.t - dieAt));
-  eq(first.limitMs, deadAfter(50));
+Deno.test("silent drop: a guest gives the host longer", () => {
+  ok(!isSilentGone({ now: 20000, heard: 0, toHost: true }));
+  ok(isSilentGone({ now: HOST_SILENT_MS + 1, heard: 0, toHost: true }));
+  eq(silentLimit({ toHost: true, phone: true }), HOST_SILENT_MS, "the host link's limit does not depend on the phone flag");
 });
 
-Deno.test("silence before the answer began does not count (idle pings are 2.5 s apart)", () => {
-  const L = makeLiveness();
-  heard(L, "a", 0);            // the last idle pong
-  arm(L, 2400);                // a question starts 2.4 s later
-  const r = run(L, { t0: 2400, ms: 2500, hearFrom: () => false });
-  eq(r.dead, [], "counted from arm time, not from the idle pong");
-  const r2 = run(L, { t0: 5150, ms: 1000, hearFrom: () => false });
-  ok(r2.dead.length > 0, "but a device silent since the start is dead ~3.5 s in");
+Deno.test("silent drop: never while a device loads its layers", () => {
+  eq(silentLimit({ loading: true }), Infinity);
+  ok(!isSilentGone({ now: 10 * 60000, heard: 0, loading: true }), "a worker blocked on a shard for 10 min is kept");
+  ok(!isSilentGone({ now: 10 * 60000, heard: 0, loading: true, toHost: true }));
+  ok(!isSilentGone({ now: 10 * 60000, heard: 0, loading: true, phone: true }));
 });
 
-Deno.test("a stalled host tab (late tick) resets the baseline instead of blaming everyone", () => {
-  const L = makeLiveness();
-  arm(L, 0);
-  run(L, { ms: 1000 });                      // heard up to t=1000
-  // the host's main thread blocks for 6 s; the pongs that came meanwhile are still queued
-  const r = tick(L, 7000, ["a"]);
-  eq(r.dead, [], "no verdict on the first tick after a stall");
-  ok(7000 - L.lastTick === 0 && L.since === 7000);
-  // the queued pong is handled next, and it goes on normally
-  const r2 = run(L, { t0: 7250, ms: 5000, hearFrom: (_, t) => t % 500 === 0 });
-  eq(r2.dead, []);
-  ok(STALL_MS < DEAD_MIN_MS);
+Deno.test("silent drop: a late tick (this tab stalled) judges nobody", () => {
+  ok(!isSilentGone({ now: 10 * 60000, heard: 0, late: true }));
 });
 
-Deno.test("300 ms latency with retransmission stalls: gaps under the limit are tolerated", () => {
-  // a double SCTP loss at RTT 600 ms: ~1 s + 2 s of head-of-line blocking on top of the ping period
-  const L = makeLiveness();
-  arm(L, 0);
-  // the e2e run (tests/e2e/room_drop.mjs noise600) saw 3.65 s of silence at RTT 600 ms + 5% loss
-  const holes = [[4000, 6500], [20000, 23700]];
-  const r = run(L, { ms: 40000, rtt: () => 600, hearFrom: (_, t) => t % 500 === 0 && !holes.some(([a, b]) => t >= a && t < b) });
-  eq(r.dead, []);
-  ok(L.maxSilence.get("a") >= 3600, "the stall was seen: " + L.maxSilence.get("a"));
+Deno.test("lastHeard: a message, a wire frame or a keep-alive byte all count", () => {
+  eq(lastHeard({ seen: 5, link: { rxAt: 9 } }), 9);
+  eq(lastHeard({ seen: 12, link: { rxAt: 9 } }), 12);
+  eq(lastHeard({ seen: 5 }), 5);
+  eq(lastHeard(undefined), -Infinity);
+  // a phone streaming hidden states answers no ping while busy, but its frames keep it alive
+  const e = { seen: 0, link: { rxAt: 58000 } };
+  ok(!isSilentGone({ now: 60000, heard: lastHeard(e) }));
 });
 
-Deno.test("disarm stops judging; forget drops a device", () => {
-  const L = makeLiveness();
-  arm(L, 0);
-  run(L, { ms: 1000 });
-  disarm(L);
-  eq(tick(L, 60000, ["a"]).dead, []);
-  forget(L, "a");
-  ok(!L.heard.has("a") && !L.maxSilence.has("a"));
-  arm(L, 60000);
-  eq(L.since, 60000, "re-armed from now");
-  for (const t of [61000, 62000, 63000, 63400]) eq(tick(L, t, ["a"]).dead, [], "t=" + t);
-  ok(tick(L, 63600, ["a"]).dead.length === 1, "silent 3.6 s since re-arming");
+Deno.test("midLoad: only a chain device that has not reported ready, while the start runs", () => {
+  ok(midLoad({ starting: true, inChain: true, ready: false }));
+  ok(!midLoad({ starting: true, inChain: true, ready: true }));
+  ok(!midLoad({ starting: true, inChain: false, ready: false }), "a device not in the chain loads nothing");
+  ok(!midLoad({ starting: false, inChain: true, ready: false }), "after the start (online) it is not loading");
 });
 
-Deno.test("lapTimeout: fixed fallback until 4 laps are measured, then tied to the slowest lap", () => {
-  eq(lapTimeout(null, 30000), 30000);
-  eq(lapTimeout({ n: 3, lap: 200, max: 300 }, 30000), 30000, "too few laps");
-  eq(lapTimeout({ n: 10, lap: 200, max: 300 }, 30000), LAP_MIN_MS, "fast laps: the floor");
-  eq(lapTimeout({ n: 10, lap: 800, max: 1500 }, 90000, 600), LAP_MIN_MS, "a 1.5 s lap: still the floor");
-  eq(lapTimeout({ n: 10, lap: 2000, max: 2500 }, 90000, 600), LAP_MIN_MS, "RTT 600 ms + 5% loss: clear of the 14 s stalls seen there");
-  eq(lapTimeout({ n: 10, lap: 3500, max: 4000 }, 90000, 600), 6 * 4000 + 1200 + 2000, "slow laps: tied to the slowest");
-  eq(lapTimeout({ n: 10, lap: 9000, max: 12000 }, 30000), 30000, "never above the fallback");
-  eq(lapTimeout({ n: 10, lap: 400, max: 0 }, 30000), 30000, "no max yet");
+Deno.test("uniqueName: a free name is kept, a taken one gets the next number", () => {
+  const roster = new Map([["a", { name: "laptop" }], ["b", { name: "laptop 2" }], ["c", { name: "phone" }]]);
+  eq(uniqueName("desk", "z", "host", roster), "desk");
+  eq(uniqueName("laptop", "z", "host", roster), "laptop 3");
+  eq(uniqueName("laptop", "a", "host", roster), "laptop", "a device's own entry does not count against it");
+  eq(uniqueName("host", "z", "host", roster), "host 2", "the host's own name is taken");
+  const long = "x".repeat(40);
+  eq(uniqueName(long, "z", long, new Map()), "x".repeat(36) + " 2", "the number fits in the 40-char name");
 });
 
-Deno.test("suspectCheck: a held device is back once heard after its silence began, dropped after EVICT_MS", () => {
-  eq(EVICT_MS, 30000);
-  eq(suspectCheck(1000, 1000, 5000), "wait", "still silent");
-  eq(suspectCheck(1000, 1000, 1000 + EVICT_MS), "wait", "exactly at the limit");
-  eq(suspectCheck(1000, 1000, 1001 + EVICT_MS), "evict");
-  eq(suspectCheck(9000, 1000, 9100), "back", "heard again after an 8 s freeze");
-  eq(suspectCheck(9000, 1000, 1001 + EVICT_MS), "back", "heard beats the clock");
-  eq(suspectCheck(0, 4000, 4000 + EVICT_MS + 1), "evict", "silence counted from when the answer began");
+Deno.test("quietNamesake: probe a namesake only when it has been quiet", () => {
+  const roster = new Map([["a", { name: "laptop" }], ["b", { name: "phone" }]]);
+  const heard = { a: 1000, b: 1000 };
+  const heardOf = (id) => heard[id] ?? -Infinity;
+  eq(quietNamesake("laptop", "z", roster, heardOf, 1000 + QUIET_MS - 1), null, "heard from just now: no probe");
+  eq(quietNamesake("laptop", "z", roster, heardOf, 1000 + QUIET_MS), "a");
+  eq(quietNamesake("desk", "z", roster, heardOf, 99999), null, "no namesake");
+  eq(quietNamesake("laptop", "a", roster, heardOf, 99999), null, "a device is not its own namesake");
+  eq(quietNamesake("laptop", "z", new Map([["q", { name: "laptop" }]]), heardOf, 0), "q", "a namesake with no link is quiet");
+});
+
+Deno.test("staleNamesakes: after the probe, drop only those that did not answer", () => {
+  const roster = new Map([["a", { name: "laptop" }], ["b", { name: "laptop" }], ["c", { name: "phone" }]]);
+  const heard = { a: 500, b: 2100, c: 0 };
+  const heardOf = (id) => heard[id] ?? -Infinity;
+  eq(staleNamesakes("laptop", "z", roster, heardOf, 2000), ["a"], "b answered the probe");
+  eq(staleNamesakes("laptop", "a", roster, heardOf, 2000), [], "the newcomer's own entry is never dropped");
+  eq(staleNamesakes("phone", "z", roster, heardOf, 2000), ["c"]);
+  eq(staleNamesakes("desk", "z", roster, heardOf, 2000), []);
+});
+
+Deno.test("renameTo: a device takes the name the host's roster gives it", () => {
+  const members = [{ id: "h", name: "host" }, { id: "me", name: "laptop 2" }];
+  eq(renameTo(members, "me", "laptop", true), "laptop 2");
+  eq(renameTo(members, "me", "laptop 2", true), null, "same name: nothing to do");
+  eq(renameTo(members, "me", "laptop", false), null, "only the host's roster counts");
+  eq(renameTo(members, "other", "laptop", true), null, "not listed yet");
+  eq(renameTo([{ id: "me", name: "" }], "me", "laptop", true), null, "an empty name is ignored");
+  eq(renameTo(undefined, "me", "laptop", true), null);
 });

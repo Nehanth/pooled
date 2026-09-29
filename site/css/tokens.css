@@ -21,9 +21,9 @@
   --game:#0B0F1F; --on-game:#EEF0F6; --on-game-2:#A9B0C4;
 
   /* type */
-  --display:"Funnel Display","Geist",ui-sans-serif,system-ui,sans-serif;
-  --sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
-  --mono:"Geist Mono",ui-monospace,"SF Mono",Menlo,monospace;
+  --display:"Funnel Display","Funnel Display Fallback","Geist",ui-sans-serif,system-ui,sans-serif;
+  --sans:"Geist","Geist Fallback",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"Geist Mono","Geist Mono Fallback",ui-monospace,"SF Mono",Menlo,monospace;
   --t-xs:11px; --t-sm:12px; --t-md:13px; --t-base:14px; --t-lg:15px; --t-xl:17px;
   --d-sm:22px; --d-md:26px; --d-lg:36px; --d-xl:clamp(38px,5vw,60px);
 

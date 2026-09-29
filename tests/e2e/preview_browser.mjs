@@ -4,6 +4,7 @@
 // (another site: its own process with --site-per-process, the default in desktop Chrome); one mount
 // runs in local mode (a blob: frame of the page). No WebGPU, no room, no PeerJS; ~20 seconds.
 //   node tests/e2e/preview_browser.mjs
+import fs from "node:fs";
 import { loadPlaywright, chromiumPath, serveRepo } from "./engine_synth.mjs";
 const PORT = 18986;
 
@@ -50,7 +51,10 @@ setTimeout(() => {
   return await T.serve.run({});
 }
 
-const srv = serveRepo(PORT, {});
+// the relay gets the headers the preview site sends (preview-host/vercel.json: CSP, frame-ancestors)
+const relayHeaders = Object.fromEntries(JSON.parse(fs.readFileSync(new URL("../../preview-host/vercel.json", import.meta.url), "utf8"))
+  .headers.find((h) => h.source === "/harness/preview-relay.html").headers.map((h) => [h.key, h.value]));
+const srv = serveRepo(PORT, {}, { headers: (url) => url === "/harness/preview-relay.html" ? relayHeaders : null });
 const { chromium } = await loadPlaywright();
 const browser = await chromium.launch({ executablePath: chromiumPath(), args: ["--no-sandbox", "--site-per-process"] });
 const results = [];
@@ -59,13 +63,15 @@ let code = 1;
 try {
   const page = await browser.newPage();
   const pageErrors = [];
-  page.on("pageerror", (e) => { if (!/boom is not defined|Cannot access 'ctx'/.test(String(e))) pageErrors.push(String(e)); });   // the app's own bug is expected
+  page.on("pageerror", (e) => { if (!/boom is not defined|Cannot access 'ctx'|nope is not defined/.test(String(e))) pageErrors.push(String(e)); });   // the app's own bug is expected
   await page.goto(`http://127.0.0.1:${PORT}/__blank.html`);
   const serveOut = await page.evaluate(setup);
   console.log("--- serve result\n" + serveOut + "\n---");
   check("serve reports the port and files", /^serving \. on :5173 \(index\.html, 8 files, [\d.]+ (KB|B)\)/.test(serveOut), serveOut);
   check("serve reports the load and the error with its file:line", /loaded in \d+ ms · 1 error:/.test(serveOut) && /error game\.js:6:\d+ ReferenceError: boom is not defined/.test(serveOut), serveOut);
 
+  const relayCsp = (await page.request.get(`http://localhost:${PORT}/harness/preview-relay.html`)).headers()["content-security-policy"] || "";
+  check("the relay is served with the preview site's CSP (frame-ancestors lets the room frame it)", /frame-ancestors [^;]*127\.0\.0\.1/.test(relayCsp), relayCsp);
   // the app's document: in the relay a srcdoc child, in local mode a blob: frame
   const frame = () => page.frames().find((f) => /^(about:srcdoc|blob:)/.test(f.url()));
   check("relay mode: the preview runs in the relay on the other site", await page.evaluate(() => window.__view.mode) === "relay"
@@ -155,6 +161,23 @@ try {
     && /· 2 errors:/.test(broken) && /error main\.js:2:\d+ ReferenceError: Cannot access 'ctx' before initialization/.test(broken) && /\nmissing: gone\.png$/.test(broken), broken);
   const ports = await page.evaluate(() => window.__server.ports().map((p) => `${p.port}:${p.dir}`).join(" "));
   check("both ports listed", ports === "5173: 5174:broken", ports);
+
+  // errors in the page's own markup (an inline script, an onclick) name the page's lines, not the
+  // built document's, which has the capture script ahead of them (#164)
+  const inl = await page.evaluate(async () => {
+    await window.__ws.write("admin/index.html", `<p>x</p><script>console.error("custom error")</script><button id="b" onclick="nope()">go</button>`);
+    const el = document.createElement("div"); document.body.append(el);
+    window.__view3 = window.__mountPreview(el, window.__server, 5175);
+    const out = await window.__T.serve.run({ dir: "admin", port: 5175 });
+    return out;
+  });
+  for (const f of page.frames()) if (/^(about:srcdoc|blob:)/.test(f.url())) await f.evaluate(() => { const b = document.getElementById("b"); if (b?.tagName === "BUTTON") setTimeout(() => b.click()); }).catch(() => {});
+  await page.waitForFunction(() => window.__server.logs(5175, 0).lines.some((e) => /nope is not defined/.test(e.text)), null, { timeout: 5000 }).catch(() => {});
+  const inlLogs = await page.evaluate(() => window.__server.logs(5175, 0).lines.map((e) => `${e.src}:${e.line} ${e.text}`).join("\n"));
+  console.log("--- serve :5175\n" + inl + "\n" + inlLogs + "\n---");
+  check("inline script error at index.html:1:<col in the file>", /error index\.html:1:\d+ custom error/.test(inl), inl);
+  check("onclick error names index.html:1", /^index\.html:1 ReferenceError: nope is not defined/m.test(inlLogs) && /onclick \(index\.html:1:\d+\)/.test(inlLogs), inlLogs);
+  await page.evaluate(() => { window.__view3.destroy(); window.__server.stop(5175); });
 
   // a peer-style mount waits for a click before running anything
   const gated = await page.evaluate(async () => {
@@ -269,16 +292,22 @@ button{width:120px;height:40px;margin:20px}</style></head><body><div class="game
     for (let i = 0; i < 80 && !states.includes("hung"); i++) await new Promise((r) => setTimeout(r, 100));
     clearInterval(iv);
     const ms = Math.round(performance.now() - t0);
-    // the relay is one process: the visible preview :5173 hung with it, and its own watchdog says so
-    // up to a second later; wait for that here, not in the middle of the run_js checks below
-    for (let i = 0; i < 40 && !window.__logs.some((e) => /preview hung/.test(e.text)); i++) await new Promise((r) => setTimeout(r, 100));
+    // the relay is one process: the visible previews :5173 and :5174 stalled with it, but the hang
+    // is charged to :5176 alone (its document is the newest; :5173 serves the whole project, so the
+    // write above reloaded it with the same document), and they move to fresh frames quietly (#167).
+    // The hang is charged in one go, so once :5176 is hung, wait for the fresh frames to load again.
+    const tHung = Date.now();
+    for (let i = 0; i < 100 && ![5173, 5174].every((p) => window.__server.loadedAt(p) > tHung); i++) await new Promise((r) => setTimeout(r, 100));
+    const reloaded = [5173, 5174].map((p) => window.__server.loadedAt(p) > tHung);
     const logs = await window.__T.preview_logs.run({ port: 5176 });
-    const out = { states, ticks, ms, frame: !!v.frame, gate: el.querySelector(".pv-run")?.textContent, logs };
+    const others = [5173, 5174].map((p) => window.__server.logs(p, 0).lines.filter((e) => /preview hung/.test(e.text)).length);
+    const out = { states, ticks, ms, frame: !!v.frame, gate: el.querySelector(".pv-run")?.textContent, logs, others, reloaded, again: await window.__T.serve.run({ dir: "broken", port: 5174 }) };
     v.destroy();
     return out;
   });
   check("an infinite loop is detected; the room page kept running", hang.states.includes("hung") && hang.ticks >= hang.ms / 250 && !hang.frame, JSON.stringify(hang));
   check("the hang is in preview_logs and the pane offers to run it again", /preview hung \(infinite loop\?\)/.test(hang.logs) && /run :5176 again/.test(hang.gate || ""), JSON.stringify(hang));
+  check("the other previews are not charged with the hang, and run on", hang.others.join() === "0,0" && hang.reloaded.join() === "true,true" && /loaded in \d+ ms/.test(hang.again), JSON.stringify(hang));
 
   // run_js: a hidden frame of its own, through the relay; the visible preview is untouched
   const rj = await page.evaluate(async () => {

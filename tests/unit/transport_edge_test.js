@@ -53,7 +53,9 @@ function receiver(onFrame, opts) {
     while (chans.length < n) {
       const c = { handler: null, onclose: null, cfg: null };
       c.ch = { set onmessage(f) { c.handler = f; }, set onclose(f) { c.onclose = f; }, readyState: "open" };
-      attachWire(link, { peerConnection: { createDataChannel: (label, cf) => { c.cfg = { label, ...cf }; return c.ch; } } }, onFrame, opts);
+      // attachWire may also open the keep-alive channel (swarm-ka); only the wire channel is under test here.
+      const other = { readyState: "open", send() {} };
+      attachWire(link, { peerConnection: { createDataChannel: (label, cf) => { if (label !== "swarm-wire") return other; c.cfg = { label, ...cf }; return c.ch; } } }, onFrame, opts);
       chans.push(c);
     }
   };

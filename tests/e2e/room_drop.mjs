@@ -355,7 +355,7 @@ try {
     if (hb) {
       check(`${nm}: host notices ${V} within 6 s`, detectMs != null && detectMs <= 6000, `${detectMs} ms`);
       check(`${nm}: the answer ends (the link fails or the device is dropped)`, !r.timedOut && r.totalS <= 45 && /generation failed/.test(r.status), `${r.status} after ${r.totalS} s`);
-      // the device is held for EVICT_MS (a freeze keeps its place), then dropped: re-deal offered
+      // the device is held (a freeze keeps its place) until the ping loop drops it as silent: re-deal offered
       const redealMs = await until(H, (x) => !!x.redeal, 45000);
       row({ scenario: nm + "_evict", victim: V, redealOfferedMsAfterAnswerEnd: redealMs });
       check(`${nm}: re-deal offered within 35 s of the answer failing`, redealMs != null && redealMs <= 35000, `${redealMs} ms`);
