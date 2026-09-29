@@ -1,6 +1,8 @@
 // harness/engine-model.js with a fake engine and a word-level tokenizer: prefix reuse between
 // calls, stop tokens, and the tool-name constraint applied while sampling.
 import { engineModel } from "../../harness/engine-model.js";
+import { ContextFull } from "../../harness/model-common.js";
+import { Agent } from "../../harness/agent.js";
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 
@@ -62,4 +64,19 @@ Deno.test("second call prefills only the new tokens and keeps the sampled ids", 
   const first = tok.encode("<|im_start|>system\ns<|im_end|>\n").length;
   ok(m.stats.reused >= first + 5, `reused ${m.stats.reused} tokens (system prompt alone is ${first})`);
   eq(m.stats.calls, 2);
+});
+
+Deno.test("a conversation past the context throws ContextFull, and the agent ends the request with reason context", async () => {
+  const E = fakeEngine(["hello", "<|im_end|>"]);
+  E.maxSeq = 40;
+  const m = engineModel(E, tok, { spec: false });
+  let err = null;
+  try { await collect(m.generate({ system: "s", turns: [{ role: "user", text: "x".repeat(60) }] })); } catch (e) { err = e; }
+  ok(err instanceof ContextFull, "threw " + err);
+  eq([err.name, err.max], ["ContextFull", 40]);
+  ok(err.tokens > 40, "tokens " + err.tokens);
+  eq(E.prefilled, 0, "nothing was prefilled");
+  const A = new Agent({ generate: m.generate, tools: [] });
+  const r = await A.run("x".repeat(60));
+  eq(r.reason, "context");
 });

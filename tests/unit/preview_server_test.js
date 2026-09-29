@@ -9,6 +9,8 @@ const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); 
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 const rejects = async (p, re) => { try { await p; } catch (e) { ok(re.test(e.message), e.message); return; } throw new Error("did not throw"); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// wait for a condition instead of a fixed sleep: a loaded CI runner can take longer than any guess
+const until = async (cond, what, ms = 5000) => { for (const end = Date.now() + ms; !cond();) { if (Date.now() > end) throw new Error("timed out waiting for " + what); await sleep(2); } };
 
 const app = () => watch(new MemoryWorkspace({
   "index.html": "<canvas></canvas><script type=module src=game.js></script>",
@@ -67,7 +69,7 @@ Deno.test("serve fails with messages the model can act on", async () => {
 });
 
 Deno.test("live reload: a write under the dir bumps rev after the debounce; outside or same content does not", async () => {
-  const ws = app(), s = server(ws);
+  const ws = app(), s = server(ws, { debounce: 100 });   // wide enough that three quick writes always land in one update
   await s.serve({ dir: "", port: 5173 });
   await s.serve({ dir: "notes", port: 5174, entry: "plan.md" });
   const seen = [];
@@ -75,14 +77,15 @@ Deno.test("live reload: a write under the dir bumps rev after the debounce; outs
   await ws.write("game.js", "console.log(2)\n");
   await ws.write("game.js", "console.log(3)\n");   // debounced into one update
   await ws.write("new.js", "export {}");
-  await sleep(40);
+  await until(() => seen.length, "the first update");
   eq(seen, [{ port: 5173, rev: 2, changed: ["game.js", "new.js"] }]);
   eq(new TextDecoder().decode(s.snapshot(5173).files.get("game.js").bytes), "console.log(3)\n");
   await ws.write("game.js", "console.log(3)\n");   // same bytes
-  await sleep(40);
+  eq(await s.flush(5173), { rev: 2 }, "re-snapshotting now finds nothing new");
   eq(seen.length, 1, "no rev for an unchanged file");
   await ws.remove("notes");
-  await sleep(40);
+  await until(() => seen.length >= 3, "an update on each port");
+  seen.sort((a, b) => a.port - b.port);
   eq(seen.slice(1).map((u) => [u.port, u.rev, u.changed]), [[5173, 3, ["notes/plan.md"]], [5174, 2, ["plan.md"]]]);
   eq(s.logs(5174).lines.map((e) => e.text), ["plan.md was removed; the preview shows a 404 page"]);
   s.close();
