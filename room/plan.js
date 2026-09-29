@@ -81,12 +81,6 @@ export function planForSpeed(L, caps, msPerLayer = []) {
   return { assigned, ranges, used: assigned.map((a, i) => (a > 0 ? i : -1)).filter((i) => i >= 0) };
 }
 
-// A device's layers as the room shows them: "0–19", or with the host's tail "0–37, 39–39".
-// Returns [[lo, hi) per span]; a string without a range gives [].
-export function layerSpans(s) {
-  return String(s ?? "").split(",").map((p) => /^\s*(\d+)\D+(\d+)\s*$/.exec(p)).filter(Boolean).map((m) => [+m[1], +m[2] + 1]);
-}
-
 // A phone: its own flag, or a phone user agent (the meta a device sends when it joins).
 export function isPhoneMeta(m) {
   return !!(m?.phone || /^(iPhone|Android)$/.test(m?.ua || ""));
@@ -101,30 +95,6 @@ export function isPhoneMeta(m) {
 export function phonesToLeaveOut(L, capsLayers, phone) {
   const others = capsLayers.reduce((s, c, i) => s + (i === 0 || !phone[i] ? Math.max(0, Math.floor(c)) : 0), 0);
   return others >= L ? capsLayers.map((_, i) => i).filter((i) => i > 0 && phone[i]) : [];
-}
-
-// Where each device's layers sit: assigned[i] layers per device in chain order, host first. A
-// hybrid model (Qwen3.5/3.6: full attention every few layers, DeltaNet in between) ends on a full
-// attention layer, and the chain's last device holds it. On a phone that is the worst layer to
-// hold: attention without subgroups grows with the context (+3 ms from position 250 to 600 on an
-// iPhone 14 Pro Max) and its KV cache sits on the smallest device, while a DeltaNet layer costs the
-// same at every position with a fixed-size state. So when the chain ends on a phone and that moves
-// a full-attention layer off the phones, every device's slice moves one layer earlier and the host
-// keeps the model's last layer as a tail: it runs it on the hidden state the chain returns, before
-// the head. No extra hop and nothing changes on the other devices (each still gets one range).
-// isFull(i): layer i is full attention. Returns { ranges: [[lo, hi) per device], tail: [lo, hi)
-// the host runs after the chain, or null }.
-export function placeLayers(L, assigned, { isFull = () => false, phone = [] } = {}) {
-  const ranges = [];
-  let acc = 0;
-  for (const a of assigned) { ranges.push([acc, acc + a]); acc += a; }
-  const n = assigned.length;
-  if (n < 2 || acc !== L || !phone[n - 1] || assigned[0] < 2) return { ranges, tail: null };
-  let p = n - 1;                                   // the phones at the end of the chain
-  while (p > 1 && phone[p - 1]) p--;
-  const fulls = (a, b) => { let k = 0; for (let i = a; i < b; i++) k += isFull(i) ? 1 : 0; return k; };
-  if (fulls(ranges[p][0] - 1, L - 1) >= fulls(ranges[p][0], L)) return { ranges, tail: null };
-  return { ranges: ranges.map(([a, b], i) => (i === 0 ? [a, b - 1] : [a - 1, b - 1])), tail: [L - 1, L] };
 }
 
 // The device that becomes the model host when someone presses Start. The model host holds the

@@ -222,7 +222,7 @@ Deno.test("plan: the model host is the strongest device, a computer before a pho
   eq(pickModelHost([]), null);
 });
 
-import { phonesToLeaveOut, placeLayers, layerSpans, isPhoneMeta } from "../../room/plan.js";
+import { phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
 Deno.test("plan: phones hold layers only when the computers cannot hold the model", () => {
   // GB10 (80 layers' room) + a phone: the phone asks without layers
   eq(phonesToLeaveOut(40, [80, 1], [false, true]), [1]);
@@ -235,27 +235,7 @@ Deno.test("plan: phones hold layers only when the computers cannot hold the mode
   eq(phonesToLeaveOut(40, [80, 1], [true, true]), [1]);
   eq(phonesToLeaveOut(40, [80, 30], [false, false]), []);
 });
-Deno.test("plan: placeLayers keeps a phone at the end of the chain off the last full-attention layer", () => {
-  const isFull = (i) => i % 4 === 3;                 // Qwen3.6: full attention every 4th layer
-  // GB10 39 + phone 1: the phone gets layer 38 (DeltaNet), the host keeps 0-37 and 39 as a tail
-  eq(placeLayers(40, [39, 1], { isFull, phone: [false, true] }), { ranges: [[0, 38], [38, 39]], tail: [39, 40] });
-  // three phone layers: 36-38, all DeltaNet
-  eq(placeLayers(40, [37, 3], { isFull, phone: [false, true] }), { ranges: [[0, 36], [36, 39]], tail: [39, 40] });
-  // host, Mac, phone: every slice one earlier, the Mac included
-  eq(placeLayers(40, [20, 19, 1], { isFull, phone: [false, false, true] }), { ranges: [[0, 19], [19, 38], [38, 39]], tail: [39, 40] });
-  // the chain ends on a computer, or a dense model (no DeltaNet), or the host has one layer: as dealt
-  eq(placeLayers(40, [20, 20], { isFull, phone: [false, false] }), { ranges: [[0, 20], [20, 40]], tail: null });
-  eq(placeLayers(28, [27, 1], { phone: [false, true] }), { ranges: [[0, 27], [27, 28]], tail: null });
-  eq(placeLayers(28, [27, 1], { isFull: () => true, phone: [false, true] }), { ranges: [[0, 27], [27, 28]], tail: null });
-  eq(placeLayers(40, [1, 39], { isFull, phone: [false, true] }).tail, null);
-  // a model that does not end on full attention: nothing to move
-  eq(placeLayers(39, [38, 1], { isFull, phone: [false, true] }).tail, null);
-});
-Deno.test("plan: layerSpans reads one or two spans; isPhoneMeta", () => {
-  eq(layerSpans("0–19"), [[0, 20]]);
-  eq(layerSpans("0–37, 39–39"), [[0, 38], [39, 40]]);
-  eq(layerSpans(""), []);
-  eq(layerSpans(undefined), []);
+Deno.test("plan: isPhoneMeta", () => {
   ok(isPhoneMeta({ phone: true }) && isPhoneMeta({ ua: "iPhone" }) && isPhoneMeta({ ua: "Android" }));
   ok(!isPhoneMeta({ ua: "Mac" }) && !isPhoneMeta(null));
 });

@@ -38,19 +38,11 @@ export function patchRoom(s) {
     "          { const __w = packWire(hb); __HP('h.pack1', 'ai-hidden-b', pos, tokens.length); sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...__w }); }\n          const h = await returned; __HP('h.ret', 'ai-hidden-b', pos, tokens.length);", f);
   s = rep(s, "        const toks = viaLookup ? await ai.engine.specStepDrafts(next, sample, lk, spec) : await ai.engine.specStep(next, sample, K, spec);",
     "        __HP('h.step0', viaLookup ? 'lookup' : 'draft', ai.engine.pos, viaLookup ? lk.length : K); const toks = viaLookup ? await ai.engine.specStepDrafts(next, sample, lk, spec) : await ai.engine.specStep(next, sample, K, spec); __HP('h.step1', viaLookup ? 'lookup' : 'draft', ai.engine.pos, toks.length);", f);
-  // host, returned frames (h.tail1: the host's tail layers ran on it, room/plan.js placeLayers)
-  if (s.includes("function lapReturn(d) {")) {
-    const P = "d.t === 'ai-hiddenret-b' ? d.basePos : d.pos";
-    s = rep(s, "  if (!ai.tail) { const h = unpackWire(d); lapDone(key, h); return; }",
-      `  __HP('h.unp0', d.t, ${P}); if (!ai.tail) { const h = unpackWire(d); __HP('h.unp1', d.t, ${P}); lapDone(key, h); return; }`, f);
-    s = rep(s, "    const x = unpackWire(d);\n", `    const x = unpackWire(d); __HP('h.unp1', d.t, ${P});\n`, f);
-    s = rep(s, "    lapDone(key, h);\n  }).catch(", `    __HP('h.tail1', d.t, ${P}); lapDone(key, h);\n  }).catch(`, f);
-  } else {
+  // host, returned frames
   s = rep(s, "    case \"ai-hiddenret-b\": lapDone(\"b\" + d.basePos, unpackWire(d)); break;",
     "    case \"ai-hiddenret-b\": { __HP('h.unp0', 'ai-hiddenret-b', d.basePos); const __u = unpackWire(d); __HP('h.unp1', 'ai-hiddenret-b', d.basePos); lapDone(\"b\" + d.basePos, __u); break; }", f);
   s = rep(s, "    case \"ai-hiddenret\": lapDone(d.pos, unpackWire(d)); break;",
     "    case \"ai-hiddenret\": { __HP('h.unp0', 'ai-hiddenret', d.pos); const __u = unpackWire(d); __HP('h.unp1', 'ai-hiddenret', d.pos); lapDone(d.pos, __u); break; }", f);
-  }
   // worker
   s = rep(s, "      ai.q = ai.q.then(() => workerFrame(d))", "      __HP('w.enq', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos); ai.q = ai.q.then(() => workerFrame(d))", f);
   s = rep(s, "  const t0 = performance.now();\n  if (d.t === \"ai-hidden-b\") {", "  const t0 = performance.now(); __HP('w.start', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos, d.n || 1);\n  if (d.t === \"ai-hidden-b\") {", f);

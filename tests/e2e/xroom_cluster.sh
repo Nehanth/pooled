@@ -16,8 +16,9 @@
 # https://pooled.run/room for main, or the branch's Vercel preview for a branch. Without the phone,
 # the signaling server runs here, as in xroom_pair.sh.
 # Layers are dealt by memory in the room's order (the host first, then the other devices by peer id,
-# which is random): with two devices the guest always holds the last layers; with three the order of
-# the two guests varies from run to run (the host's JSON has the split it used).
+# which is random): a phone holds layers only when the computers cannot hold the model (--query
+# phonelayers=1 in the host's args deals it layers anyway); with two devices the guest holds the last
+# layers. The host's JSON has the split it used.
 #
 # Environment (nothing machine-specific lives in the repo): XROOM_REMOTE, XROOM_SYNC, XROOM_REMOTE_DIR,
 # XROOM_REMOTE_ENV, XROOM_REMOTE_PREP, XROOM_LOCAL_IP, XROOM_REMOTE_IP, XROOM_LOCK, XROOM_GPURUN as in
