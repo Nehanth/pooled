@@ -34,6 +34,7 @@ import { roomModel } from "../harness/room-model.js";
 import { detectStyle } from "../harness/tools.js";
 import { normPath, riskyPath } from "../harness/workspace.js";
 import { CODE_SYSTEM } from "../harness/code-prompt.js";
+import { codeExport } from "./code-export.js";
 
 const $ = (id) => document.getElementById(id);
 const str = (v, n) => String(v ?? "").slice(0, n);
@@ -241,6 +242,15 @@ export async function initCode(api, { mock = null } = {}) {
     else P?.mount.reload();
   });
   ui.onOpen((port, path) => { openPreviewTab(isHost() ? server : sub, port, path); });
+  // Download (Files heading): the host's project, or the preview on screen
+  codeExport({
+    project: () => (isHost() && project ? { name: project.name, ws: project.ws } : null),
+    preview: () => {
+      const port = ui.activePort, snap = port != null ? (isHost() ? server : sub)?.snapshot(port) : null;
+      return snap ? { snap, port, path: ui.ports.get(port)?.path || null } : null;
+    },
+    name: () => peerProj.list.find((p) => p.id === peerProj.cur)?.name || "",
+  });
   // the Files view: the host opens a file to edit it (a very long one read-only); a peer sees the
   // files of a served preview, read-only
   const EDIT_MAX = 300000;
