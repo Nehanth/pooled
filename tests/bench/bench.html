@@ -7,7 +7,7 @@
 // prefillTokens path, as the room) and decode TOKENS more tokens there; reports tok/s for both.
 // ?pmab=N: prefill tok/s on N tokens with ?prefillmath=... A/B vs the f32 GEMM (before the decode checks).
 // ?opts=<json>: extra engine create options; ?set=<json>: engine fields set after create (A/B switches).
-import { Qwen35Engine, prefillMathFeatures } from "../../engine/qwen35.js";
+import { Qwen35Engine, prefillMathFeatures, prefillMmaFeatures } from "../../engine/qwen35.js";
 import { makeTokenizer, argmax, DenseEngine } from "../../engine/engine.js";
 import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, streamEntryToGPU, ggufWeights } from "../../engine/gguf.js";
 const q = new URLSearchParams(location.search), MODEL = q.get("model"), N = +(q.get("tokens") || 40), K = +(q.get("k") || 3), GOLD = JSON.parse(q.get("gold") || "[]");
@@ -54,17 +54,19 @@ try {
   // ?prefillmath=f32|f16|sgmatrix (prefill GEMM operand precision, engine/qwen35.js PREFILL_MATH); sgmatrix
   // requests Chrome's subgroup-matrix + shader-f16 features when the adapter has them, else the engine falls back
   const PM = q.get("prefillmath") || undefined, SGM = q.get("sgm") ? JSON.parse(q.get("sgm")) : undefined;
-  const ad = await navigator.gpu.requestAdapter(); const device = await ad.requestDevice({ requiredFeatures: prefillMathFeatures(ad, PM),
+  // ?mma=i8|f32|1|JSON: subgroup-matrix wide prefill GEMM (engine option prefillMma; needs ubatch), requests its feature
+  const MMA = q.get("mma") ? (/^[\[{]/.test(q.get("mma")) ? JSON.parse(q.get("mma")) : q.get("mma") === "1" ? true : q.get("mma")) : undefined;
+  const ad = await navigator.gpu.requestAdapter(); const device = await ad.requestDevice({ requiredFeatures: [...new Set([...prefillMathFeatures(ad, PM), ...(MMA ? prefillMmaFeatures(ad) : [])])],
     requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, ...(PM || q.has("ubatch") ? { maxComputeWorkgroupStorageSize: ad.limits.maxComputeWorkgroupStorageSize } : {}) } });
   let gpuErrors = 0;
   device.addEventListener("uncapturederror", (e) => { if (gpuErrors++ < 3) log("GPU ERROR " + e.error?.message?.slice(0, 200)); });
-  if (PM) log(`adapter features: ${[...ad.features].filter((f) => /f16|subgroup/.test(f)).join(", ") || "(no f16 / subgroup features)"}; subgroupMatrixConfigs ${JSON.stringify([...(ad.info?.subgroupMatrixConfigs || [])].map((c) => [c.componentType, c.resultComponentType, c.M, c.N, c.K]))}; subgroup ${ad.info?.subgroupMinSize}..${ad.info?.subgroupMaxSize}`);
+  if (PM || MMA) log(`adapter features: ${[...ad.features].filter((f) => /f16|subgroup/.test(f)).join(", ") || "(no f16 / subgroup features)"}; subgroupMatrixConfigs ${JSON.stringify([...(ad.info?.subgroupMatrixConfigs || [])].map((c) => [c.componentType, c.resultComponentType, c.M, c.N, c.K]))}; subgroup ${ad.info?.subgroupMinSize}..${ad.info?.subgroupMaxSize}`);
   const G = parseGGUFHeader((await readAt(0, 64 << 20)).buffer);
   const arch = G.meta["general.architecture"], L = G.meta[arch + ".block_count"] - (G.meta[arch + ".nextn_predict_layers"] || 0);
   const dense = arch !== "qwen35" && arch !== "qwen35moe", dirURL = MODEL.replace(/[^/]+$/, "");
   const tok = makeTokenizer(dense ? await (await fetch(dirURL + "tokenizer.json")).json() : tokenizerFromGGUF(G.meta));
   const FILLS = (q.get("prefill") || "").split(",").filter(Boolean).map(Number);
-  const MAXSEQ = Math.max(dense ? 8192 : 512, ...FILLS.map((f) => f + N + 16), (+q.get("pmab") || 0) + 256);
+  const MAXSEQ = Math.max(dense ? 8192 : 512, ...FILLS.map((f) => f + N + 16), (+q.get("pmab") || 0) + 256, (+q.get("prefilllen") || 0) + N + 16);
   const XOPTS = JSON.parse(q.get("opts") || "{}"), XSET = JSON.parse(q.get("set") || "{}");
   // stream Q4_0/Q8_0 tensors straight into GPU buffers, as the room does (a 21 GB model does not fit in a tab's JS heap)
   G.streamEntry = (info) => streamEntryToGPU(device, info, (i) => fetch(MODEL, { headers: { Range: `bytes=${i.byteOffset}-${i.byteOffset + i.byteLength - 1}` } }));
@@ -94,13 +96,14 @@ try {
     prefillUbatch: opt("ubatch", undefined), ...(q.get("tile") ? { prefillTile: JSON.parse(q.get("tile")) } : {}),   // ?ubatch=256: wide prefill GEMM
     // ?gpusample=0: the logits path (GPU sampling is the engine default), ?argmaxwide=0|1: the draft argmax kernel alone
     ...(q.has("gpusample") ? { gpuSample: q.get("gpusample") !== "0" } : {}), ...(q.has("argmaxwide") ? { argmaxWide: q.get("argmaxwide") !== "0" } : {}),
-    moeKernel: MOEK, prefillMath: PM, prefillSgm: SGM, adapterInfo: ad.info, ...(q.has("attnptile") ? { attnPrefillTile: q.get("attnptile") !== "0" } : {}), ...(q.has("attnptk") ? { attnPrefillTK: +q.get("attnptk") } : {}) });   // ?attnptile=0: attn_flash for prefill instead of the tiled prefill attention (default: on), &attnptk=N its tile; ?moefuse=0: unfused MoE (A/B); ?moe=legacy|default|JSON: unfused expert GEMV layout
+    moeKernel: MOEK, prefillMath: PM, prefillSgm: SGM, ...(MMA ? { prefillMma: MMA } : {}), adapterInfo: ad.info, ...(q.has("attnptile") ? { attnPrefillTile: q.get("attnptile") !== "0" } : {}), ...(q.has("attnptk") ? { attnPrefillTK: +q.get("attnptk") } : {}) });   // ?attnptile=0: attn_flash for prefill instead of the tiled prefill attention (default: on), &attnptk=N its tile; ?moefuse=0: unfused MoE (A/B); ?moe=legacy|default|JSON: unfused expert GEMV layout
   // greedy decode: with GPU sampling the head's argmax runs on the GPU (forwardTokenIds, a .gpu sampler for specStep)
   const GS = !dense && !!eng.gpuSample;
   const G1 = Object.assign((x) => (x && x.ids instanceof Uint32Array ? x.ids[0] : argmax(x)), { gpu: { kind: "greedy" } });
   const fwd = (id) => (GS ? eng.forwardTokenIds(id) : eng.forwardToken(id)), pick = GS ? G1 : argmax;
   eng.mtpBatchRefill = opt("mtprefill", 1) !== 0; eng.mtpPreDraft = opt("predraft", 1) !== 0;
   Object.assign(eng, XSET);
+  if (MMA) log(`prefillMma ${JSON.stringify(MMA)}: ${eng.mmaOn ? "on " + JSON.stringify({ kind: eng.mmaP.kind, mma: `${eng.mmaP.M}x${eng.mmaP.N}x${eng.mmaP.K}`, BM: eng.mmaP.BM, BN: eng.mmaP.BN, SM: eng.mmaP.SM, SN: eng.mmaP.SN, KB: eng.mmaP.KB, T: eng.mmaP.T, smem: eng.mmaP.smem, syntax: eng.mmaSyntax }) : "OFF (" + eng.mmaWhy + ")"}`);
   if (Object.keys(XOPTS).length || Object.keys(XSET).length) log(`opts ${JSON.stringify(XOPTS)} set ${JSON.stringify(XSET)}`);
   if (PM) log(`prefillMath requested ${PM}, running ${eng.prefillMath}${eng.sgmWhy ? " (" + eng.sgmWhy + ")" : ""}${eng.sgmCfg ? ", sgm " + JSON.stringify(eng.sgmCfg) : ""}, GEMM ${eng.gemmOn ? "on" : "off (needs batchcols=16)"}`);
   log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s${G.entryCache ? " (pre-converted tensors from serve.mjs)" : ""}, mtp ${!!eng.mtp}, adapter ${ad.info?.vendor}, draftVocab ${eng.draftVocab || "off"}, gpuSample ${GS}, argmaxWide ${!!eng.argmaxWide}, refill ${eng.mtpBatchRefill ? "batched" : "per-row"}, predraft ${eng.mtpPreDraft}`);
@@ -135,21 +138,26 @@ try {
     pids = pids.slice(0, +q.get("prefilllen"));
     const res = {};
     const ALL = q.get("prefillall") === "1", apt = eng.attnPrefillTile, mg = eng.moeGroup;
-    for (const wide of eng.ubatch || ALL ? [false, true] : [false]) {
-      eng.reset(); eng.prefillWide = wide && !!eng.ubatch; if (eng.mtp) eng.mtpFill = true;
+    // &prefillmodes=default,wide,mma (the default: all that exist; mma = wide with the subgroup-matrix GEMM)
+    const modes = (q.get("prefillmodes") || "default,wide,mma").split(",").filter((m) => m === "default" || ((eng.ubatch || ALL) && m === "wide") || (eng.mmaOn && m === "mma"));
+    for (const md of modes) {
+      const wide = md !== "default";
+      eng.reset(); eng.prefillWide = wide && !!eng.ubatch; eng.prefillMma = md === "mma"; if (eng.mtp) eng.mtpFill = true;
       if (ALL) { eng.attnPrefillTile = wide && apt; eng.moeGroup = wide && mg; }
       const t1 = performance.now(); await eng.prefillTokens(pids.slice(0, -1)); const lg = Float32Array.from(await eng.forwardToken(pids.at(-1)));
-      res[wide ? "wide" : "default"] = { tokps: +(pids.length / ((performance.now() - t1) / 1000)).toFixed(1), argmax: argmax(lg), lg };
+      res[md] = { tokps: +(pids.length / ((performance.now() - t1) / 1000)).toFixed(1), argmax: argmax(lg), lg };
     }
+    eng.prefillMma = !!eng.mmaOn;
     const relOf = (a, b) => { let md = 0, sc = 1e-6; for (let i = 0; i < a.length; i++) { md = Math.max(md, Math.abs(a[i] - b[i])); sc = Math.max(sc, Math.abs(b[i])); } return +(md / sc).toExponential(2); };
-    if (res.wide) res.relDiff = relOf(res.wide.lg, res.default.lg);
+    if (res.wide && res.default) res.relDiff = relOf(res.wide.lg, res.default.lg);
+    if (res.mma) { if (res.default) res.mma.relDiff = relOf(res.mma.lg, res.default.lg); if (res.wide) res.mma.relDiffWide = relOf(res.mma.lg, res.wide.lg); }
     if (q.get("prefillseq") === "1") {   // &prefillseq=1: both against one-token-at-a-time decode (the batched-prefill baseline)
       eng.reset(); eng.prefillWide = false; if (ALL) { eng.attnPrefillTile = false; eng.moeGroup = false; } if (eng.mtp) eng.mtpFill = false;
       let lg = null; for (const id of pids) lg = await eng.forwardToken(id);
       const seq = Float32Array.from(lg); res.seqArgmax = argmax(seq);
-      for (const k of ["default", "wide"]) if (res[k]) res[k].relDiffSeq = relOf(res[k].lg, seq);
+      for (const k of ["default", "wide", "mma"]) if (res[k]) res[k].relDiffSeq = relOf(res[k].lg, seq);
     }
-    for (const k of ["default", "wide"]) if (res[k]) delete res[k].lg;
+    for (const k of ["default", "wide", "mma"]) if (res[k]) delete res[k].lg;
     eng.prefillWide = !!eng.ubatch; if (ALL) { eng.attnPrefillTile = apt; eng.moeGroup = mg; }
     log("prefill " + JSON.stringify({ tokens: pids.length, ubatch: eng.ubatch, all: ALL, tile: eng.wideCfg, ...res })); out.push({ prefill: res });
   }

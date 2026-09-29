@@ -1,0 +1,114 @@
+<!doctype html><title>wmma gemm bench</title><pre id="log"></pre>
+<script type="module">
+// Wide prefill GEMM kernels alone (no model): the f32 tiled GEMM (engine/wgsl/gemm_wide.js, the
+// default wide prefill) vs the subgroup-matrix GEMM (engine/wgsl/gemm_wmma.js) on the 27B and MoE
+// wide-path shapes, random Q4_0 / Q8_0 weights, `w` token columns. Reports ms and effective TOPS
+// (2 * dOut * dIn * w / time) per kernel and relative L2 errors on sampled rows:
+//   f32   wide GEMM vs float64 (dequantized weights, f32 activations)
+//   mma   subgroup-matrix GEMM vs float64: the numerics change (i8: activation quantization)
+//   twin  (i8) subgroup-matrix GEMM vs a float64 model of the same quantized arithmetic: index math
+// Driver: node tests/bench/wmma_gemm.mjs ['reps=10&w=256&tile={"BM":64,...}&prefer=i8&syntax=bool']
+import { gemmWideWGSL, wideTileConfig } from "../../engine/wgsl/gemm_wide.js";
+import { gemmWmmaWGSL, pickWmmaConfig, wmmaPlan, wmmaXqWords, wmmaI8Ref, WMMA_FEATURE, WMMA_FEATURES_OPT, WMMA_SYNTAX } from "../../engine/wgsl/gemm_wmma.js";
+import { f32ToF16 } from "../../engine/gguf.js";
+const q = new URLSearchParams(location.search), REPS = +(q.get("reps") || 10), W = +(q.get("w") || 256);
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+const SH = (q.get("shapes") || "17408x5120q4,12288x5120q4,10240x5120q4,6144x5120q4,5120x17408q8,5120x6144q8,8192x2048q4,4096x2048q4,2048x4096q8,2048x4096q4").split(",")
+  .map((s) => { const m = s.match(/(\d+)x(\d+)(q4|q8)/); return { dOut: +m[1], dIn: +m[2], kind: m[3] }; });
+const f16 = (h) => { const s = h >> 15, e = (h >> 10) & 31, m = h & 1023; return (s ? -1 : 1) * (e ? 2 ** (e - 15) * (1 + m / 1024) : 2 ** -14 * (m / 1024)); };
+const out = { shapes: [] };
+try {
+  const ad = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
+  const has = ad.features.has(WMMA_FEATURE);
+  const device = await ad.requestDevice({ requiredFeatures: [...(has ? [WMMA_FEATURE] : []), ...WMMA_FEATURES_OPT.filter((f) => ad.features.has(f))],
+    requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize,
+      maxComputeWorkgroupStorageSize: ad.limits.maxComputeWorkgroupStorageSize, maxComputeInvocationsPerWorkgroup: ad.limits.maxComputeInvocationsPerWorkgroup } });
+  const errs = []; device.addEventListener("uncapturederror", (e) => { errs.push(e.error?.message); log("GPU error: " + e.error?.message); });
+  const info = device.adapterInfo || ad.info;
+  out.adapter = { vendor: info.vendor, arch: info.architecture, sg: [info.subgroupMinSize, info.subgroupMaxSize], ua: navigator.userAgent.match(/Chrome\/[\d.]+/)?.[0],
+    configs: [...(info.subgroupMatrixConfigs || [])].map((c) => `${c.componentType}->${c.resultComponentType} ${c.M}x${c.N}x${c.K}`), feature: has, f16: ad.features.has("shader-f16") };
+  log("adapter " + JSON.stringify(out.adapter));
+  const wideCfg = wideTileConfig({}, device.limits.maxComputeWorkgroupStorageSize);
+  const pre = "struct BShape { dOut: u32, dIn: u32, xs4: u32, ys: u32 };\nstruct MC { n: u32, s0: u32, s1: u32, s2: u32 };\n";
+  const wideMod = device.createShaderModule({ code: pre + gemmWideWGSL(wideCfg) });
+  const wi = (await wideMod.getCompilationInfo()).messages.filter((m) => m.type === "error"); if (wi.length) throw new Error("wide: " + wi[0].message);
+  const mc = has ? pickWmmaConfig(info, q.get("prefer") || undefined) : { why: "feature missing" };
+  let P = null, mod = null;
+  if (mc.kind) {
+    P = wmmaPlan(mc, q.get("tile") ? JSON.parse(q.get("tile")) : {}, device.limits.maxComputeWorkgroupStorageSize);
+    for (const syntax of q.get("syntax") ? [q.get("syntax")] : WMMA_SYNTAX) {
+      const m = device.createShaderModule({ code: gemmWmmaWGSL(P, syntax) });
+      const e = (await m.getCompilationInfo()).messages.filter((x) => x.type === "error");
+      if (e.length) { log(`wmma (${syntax}) does not compile: L${e[0].lineNum}: ${e[0].message}`); continue; }
+      mod = m; out.syntax = syntax; break;
+    }
+    out.plan = { kind: P.kind, mma: `${P.M}x${P.N}x${P.K}`, BM: P.BM, BN: P.BN, SM: P.SM, SN: P.SN, KB: P.KB, PAD: P.PAD, T: P.T, smem: P.smem };
+    log("wmma plan " + JSON.stringify(out.plan) + " syntax " + out.syntax);
+  } else log("wmma unavailable: " + mc.why);
+
+  const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC, U = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
+  const buf = (d, usage = S) => { const b = device.createBuffer({ size: Math.max(16, d.byteLength), usage }); device.queue.writeBuffer(b, 0, d); return b; };
+  const pipe = async (m, entryPoint) => { device.pushErrorScope("validation"); const p = await device.createComputePipelineAsync({ layout: "auto", compute: { module: m, entryPoint } }).catch((e) => { throw new Error(entryPoint + ": " + e.message); }); const er = await device.popErrorScope(); if (er) throw new Error(entryPoint + ": " + er.message); return p; };
+  const bg = (p, bs) => device.createBindGroup({ layout: p.getBindGroupLayout(1), entries: bs.map((b, i) => ({ binding: i, resource: { buffer: b } })) });
+  const time = async (steps) => {
+    const enc = (n) => { const e = device.createCommandEncoder(), ps = e.beginComputePass(); for (let r = 0; r < n; r++) for (const [p, g, x, y] of steps) { ps.setPipeline(p); ps.setBindGroup(1, g); ps.dispatchWorkgroups(x, y); } ps.end(); return e.finish(); };
+    device.queue.submit([enc(1)]); await device.queue.onSubmittedWorkDone();
+    const t0 = performance.now(); device.queue.submit([enc(REPS)]); await device.queue.onSubmittedWorkDone(); return (performance.now() - t0) / REPS;
+  };
+  const read = async (b, n) => { const s = device.createBuffer({ size: n * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const e = device.createCommandEncoder(); e.copyBufferToBuffer(b, 0, s, 0, n * 4); device.queue.submit([e.finish()]);
+    await s.mapAsync(GPUMapMode.READ); const o = Float32Array.from(new Float32Array(s.getMappedRange())); s.unmap(); s.destroy(); return o; };
+  const run1 = async (steps) => { const e = device.createCommandEncoder(), ps = e.beginComputePass(); for (const [p, g, x, y] of steps) { ps.setPipeline(p); ps.setBindGroup(1, g); ps.dispatchWorkgroups(x, y); } ps.end(); device.queue.submit([e.finish()]); };
+  const rel = (a, b) => { let n = 0, d = 0; for (let i = 0; i < a.length; i++) { n += (a[i] - b[i]) ** 2; d += b[i] ** 2; } return +Math.sqrt(n / d).toExponential(2); };
+  let seed = 12345; const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 2 ** 32);
+  for (const sh of SH) {
+    const { dOut, dIn, kind } = sh, nb = dIn / 32, xs4 = dIn / 4, ys = dOut;
+    const qw = new Uint32Array(dOut * nb * (kind === "q8" ? 8 : 4)); for (let i = 0; i < qw.length; i++) qw[i] = (rnd() * 2 ** 32) >>> 0;
+    const scH = new Uint16Array(dOut * nb + (dOut * nb & 1)); for (let i = 0; i < dOut * nb; i++) scH[i] = f32ToF16(0.004 + rnd() * 0.02);
+    const x = new Float32Array(W * dIn); for (let i = 0; i < x.length; i++) x[i] = (rnd() * 2 - 1) * (i % 97 === 0 ? 20 : 1);   // a few outliers
+    const qs = buf(qw), sc = buf(new Uint32Array(scH.buffer)), xb = buf(x), shp = buf(new Uint32Array([dOut, dIn, xs4, ys]), U);
+    const y = device.createBuffer({ size: W * ys * 4, usage: S });
+    const r = { shape: `${dOut}x${dIn}${kind}`, w: W }, flops = 2 * dOut * dIn * W;
+    // sampled rows: float64 exact and (i8) the quantized twin
+    const rows = Array.from({ length: 48 }, (_, i) => Math.floor(i * dOut / 48) + (i % 7));
+    const wq = new Float32Array(rows.length * dIn), ws = new Float32Array(rows.length * nb);
+    rows.forEach((row, ri) => { for (let b = 0; b < nb; b++) { ws[ri * nb + b] = f16(scH[row * nb + b]); for (let k = 0; k < 32; k++) {
+      let v; if (kind === "q4") { const jj = (k & 15) >> 2, i = k & 3, byte = (qw[(row * nb + b) * 4 + jj] >>> (8 * i)) & 255; v = (k < 16 ? byte & 15 : byte >> 4) - 8; }
+      else { const byte = (qw[(row * nb + b) * 8 + (k >> 2)] >>> (8 * (k & 3))) & 255; v = byte > 127 ? byte - 256 : byte; }
+      wq[ri * dIn + b * 32 + k] = v; } } });
+    const exact = new Float64Array(W * rows.length);
+    for (let c = 0; c < W; c++) rows.forEach((row, ri) => { let a = 0; for (let b = 0; b < nb; b++) { let s = 0; for (let k = 0; k < 32; k++) s += wq[ri * dIn + b * 32 + k] * x[c * dIn + b * 32 + k]; a += s * ws[ri * nb + b]; } exact[c * rows.length + ri] = a; });
+    const pick = (yv) => { const o = new Float64Array(W * rows.length); for (let c = 0; c < W; c++) rows.forEach((row, ri) => { o[c * rows.length + ri] = yv[c * ys + row]; }); return o; };
+    // f32 wide GEMM
+    const pw = await pipe(wideMod, `gemm_w_${kind}`), stW = [[pw, bg(pw, [qs, sc, xb, y, shp]), Math.ceil(dOut / wideCfg.BM), W / wideCfg.BN]];
+    const msW = await time(stW); run1(stW); const yW = pick(await read(y, W * ys));
+    r.f32 = { ms: +msW.toFixed(3), tops: +(flops / msW / 1e9).toFixed(2), err: rel(yW, exact) };
+    if (mod) {
+      const pg = await pipe(mod, `gemm_m_${kind}`), steps = [];
+      let twin = null;
+      if (P.kind === "i8") {
+        const xqw = wmmaXqWords(W, dIn), xq = device.createBuffer({ size: xqw * 4, usage: S });
+        const qshp = buf(new Uint32Array([W, dIn, xs4, W * dIn / 4]), U), gshp = buf(new Uint32Array([dOut, dIn, W * dIn / 4, ys]), U);
+        const pq = await pipe(mod, "wmma_quant");
+        const gb = [qs, sc, xq, y, gshp], s2 = [pg, bg(pg, gb), Math.ceil(dOut / P.BM), W / P.BN]; s2.bufs = gb;
+        steps.push([pq, bg(pq, [xb, xq, qshp]), Math.ceil(nb / 64), W], s2);
+        const tr = wmmaI8Ref({ wq, ws, x, dOut: rows.length, dIn, cols: W });   // y[c * nrows + ri]
+        twin = tr;
+        r.quantOnly = +(await time([steps[0]])).toFixed(3);
+      } else { const gb = [qs, sc, xb, y, shp], s2 = [pg, bg(pg, gb), Math.ceil(dOut / P.BM), W / P.BN]; s2.bufs = gb; steps.push(s2); }
+      await device.queue.writeBuffer(y, 0, new Float32Array(W * ys));
+      const ms = await time(steps); run1(steps); const yM = pick(await read(y, W * ys));
+      r.mma = { ms: +ms.toFixed(3), tops: +(flops / ms / 1e9).toFixed(2), err: rel(yM, exact), speedup: +(msW / ms).toFixed(2) };
+      if (twin) r.mma.twin = rel(yM, twin);
+      // += variant: y already holds yM; y += again must give 2 yM
+      const pa = await pipe(mod, `gemm_m_${kind}_acc`), last = steps[steps.length - 1];
+      const accSteps = [...steps.slice(0, -1), [pa, bg(pa, last.bufs), last[2], last[3]]];
+      run1(accSteps); const y2 = pick(await read(y, W * ys));
+      r.mma.acc = rel(y2, yM.map((v) => 2 * v));
+    }
+    out.shapes.push(r); log(JSON.stringify(r));
+  }
+  if (errs.length) out.errors = errs;
+} catch (e) { out.error = String(e.stack || e); log("ERROR " + out.error); }
+window.RESULT = out;
+</script>
