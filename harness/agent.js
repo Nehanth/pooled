@@ -23,6 +23,9 @@ const EMPTY = "(empty answer: call a tool or say you are done)";
 const LIVE = new Set(["preview_logs", "run_js"]);   // results that can change with time: a repeat is not a loop
 // a clean serve: the page loaded with no errors (harness/preview-tools.js)
 const CLEAN = /^serving [^\n]*\n(?:loaded in \d+ ms · no errors|still loading after 2 s · no errors)/;
+// a read run again gives the same result: for serve, ignoring its load time and log timestamps
+const timeless = (s) => s.replace(/loaded in \d+ ms/g, "loaded").replace(/^\[\d+(?:\.\d+)?s\] /gm, "");
+const sameResult = (name, a, b) => a === b || (name === "serve" && timeless(a) === timeless(b));
 // said after a clean serve to a small (JSON-style) model, which otherwise tends to write the same files again
 export const SERVED_OK = "\nnext: the page loads with no errors. If it does what was asked, reply with one short line saying what you built (no tool call). Otherwise fix it with edit_file.";
 export const CONTEXT_FULL = "context full: start a new task (the files are kept)";
@@ -197,9 +200,9 @@ export class Agent {
         R.calls.push({ name: c.name, arguments: c.arguments });
         briefs.push(briefCall(c));
         // the same call as last step with nothing changed since: answer from memory. A call that
-        // only reads (read_file, list_dir, search) is run again anyway, since the files can change
+        // only reads (read_file, list_dir, search, serve) is run again anyway, since the files can change
         // outside the agent (the user's editor, another program on a folder on disk), and is a
-        // repeat only when its result is the same; a mutating call is not run twice.
+        // repeat only when its result is the same (serve: apart from its timings); a mutating call is not run twice.
         const key = c.error || LIVE.has(c.name) ? null : c.name + "\u0000" + JSON.stringify(c.arguments || {});
         const prev = key && prevStep.get(key);
         // the same call twice in one answer (e.g. a forced second call): run it once
@@ -209,7 +212,7 @@ export class Agent {
         let rep = !!prev && prev.mut === mut && !signal?.aborted, fresh = null;
         if (rep && !twice && this.byName.get(c.name) && !this.byName.get(c.name).mutates) {
           fresh = await this._runCall(c, step, signal);   // (its tool-start / tool events go out here)
-          rep = fresh === prev.result && !signal?.aborted;
+          rep = sameResult(c.name, fresh, prev.result) && !signal?.aborted;
         }
         let r;
         if (signal?.aborted) r = STOPPED;

@@ -85,6 +85,23 @@ Deno.test("agent: a repeated read after the file changed outside the agent gets 
   eq(writes, ["b.js"]);
 });
 
+Deno.test("agent: a repeated serve with the same errors is a repeat even though its load time differs", async () => {
+  let n = 0, err = "boom";
+  const serve = { name: "serve", description: "s", parameters: { type: "object", properties: {} }, mutates: false,
+    run: async () => `serving . on :5173\nloaded in ${++n * 7} ms · 1 error:\n[0.${n}s] error a.js:1 ${err}` };
+  const sv = call("serve", {});
+  const A = new Agent({ generate: scripted(Array(8).fill(sv)), tools: [serve] });
+  const r = await A.run("go");
+  eq([r.reason, r.steps, n], ["stuck", 4, 4], "each serve ran, and the same errors three times is stuck");
+  ok(A.turns[4].text.includes("(same call as step 1; nothing changed)"), A.turns[4].text);
+  // other errors on the second serve: fresh, not a repeat
+  n = 0;
+  const gen = scripted([sv, sv, "ok"]);
+  const B = new Agent({ generate: (x) => { if (n === 1) err = "other"; return gen(x); }, tools: [serve] });
+  await B.run("go");
+  ok(B.turns[4].text.includes("error a.js:1 other") && !B.turns[4].text.includes("same call as step"), B.turns[4].text);
+});
+
 Deno.test("agent: an empty answer gets one nudge; a second one ends the request", async () => {
   const seen = [];
   const A = new Agent({ generate: scripted(["", "Done: nothing to do."], seen), tools: codingTools(new MemoryWorkspace()) });
