@@ -113,11 +113,19 @@ function receive(link, buf, onFrame) {
   const kind = dv.getUint8(2), flags = dv.getUint8(3), id = dv.getUint32(4), pos = dv.getUint32(8), n = dv.getUint16(12);
   const ck = unpackCkpt(dv);   // every slice carries the same control
   const k = dv.getUint16(14), nSlices = dv.getUint16(16), total = dv.getUint32(20);
+  // a slice of a frame already delivered or skipped: ignore it rather than open a partial that
+  // leaks (and drop what a skipped frame had gathered)
+  if (id < link.expect || link.done.has(id)) { link.rx.delete(id); return; }
+  const per = SLICE_BYTES - HDR;
+  // a slice must fit the frame exactly (index in range, same slice count and size as the first
+  // slice seen, the payload length sendFrame gives slice k); anything else would throw in set()
+  // after counting, or count toward completion and deliver a frame with a slice missing
+  if (k >= nSlices || buf.byteLength - HDR !== Math.min(per, total - k * per)) return;
   let r = link.rx.get(id);
   if (!r) { r = { parts: new Array(nSlices), got: 0, n: nSlices, buf: new Uint8Array(total), t: performance.now(), ck }; link.rx.set(id, r); }
+  if (r.n !== nSlices || r.buf.length !== total) return;
   if (r.parts[k]) return;   // duplicate
   r.parts[k] = true; r.got++;
-  const per = SLICE_BYTES - HDR;
   r.buf.set(new Uint8Array(buf, HDR), k * per);
   if (r.got < r.n) return;
   link.rx.delete(id);

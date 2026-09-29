@@ -1920,6 +1920,14 @@ function ckptClear(tellChain = false) {   // engines rebuilt or in an unknown st
 function ckptSave() {
   if (!CKPT_MAX || !ai.fed?.length || !ai.engine?.saveSlot) return;
   if (!ai.ckpt) ckptClear();
+  // a worker applies sv before dp, so a save riding with DROP_ALL would be gone at once on every
+  // worker: skip it (the host would otherwise index a slot the chain does not have)
+  if (ai.chain.length && [].concat(ai.pendingCtl?.dp ?? []).includes(DROP_ALL)) return;
+  // a save still waiting for its frame never reached the chain (no frame went out since, e.g. Stop
+  // before the first prefill round): the frame header carries one save, so this one supersedes it.
+  // Forget it here too, or a later resume could load a slot no worker saved. Its drops stay pending.
+  const prev = ai.chain.length ? ai.pendingCtl?.sv : null;
+  if (prev != null) { ai.ckpt.remove(prev); try { ai.engine.dropSlot(prev); } catch {} }
   const drop = [];
   while (ai.ckpt.items.length >= CKPT_MAX) {
     const old = ai.ckpt.items.reduce((a, b) => (a.t < b.t ? a : b));
@@ -1928,7 +1936,10 @@ function ckptSave() {
   const key = ai.ckptN = (ai.ckptN || 0) % 65534 + 1;   // slot numbers ride the frame header (u16)
   ai.engine.saveSlot(key);
   ai.ckpt.add(ai.fed.slice(), key);
-  if (ai.chain.length) ai.pendingCtl = { ...ai.pendingCtl, sv: key, ...(drop.length ? { dp: drop } : {}) };
+  if (ai.chain.length) {
+    const dp = [...new Set([...[].concat(ai.pendingCtl?.dp ?? []), ...drop])];
+    ai.pendingCtl = { ...ai.pendingCtl, sv: key, ...(dp.length ? { dp } : {}) };
+  }
 }
 // resume from the longest checkpoint that is a prefix of ids, if it beats what the caches hold
 function ckptResume(ids, reused) {

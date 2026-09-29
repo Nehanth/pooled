@@ -11,14 +11,15 @@ jobs:
         with: { deno-version: v2.x }
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
-      - name: Syntax check (engine, room, harness, site, tests, benchmarks)
+      - name: Syntax check (engine, room, harness, site, tests incl. unit and e2e, benchmarks)
         run: |
-          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js benchmarks/*.js; do node --check "$f"; done
+          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js; do node --check "$f"; done
       - name: Unit tests (no GPU)
         # the unit tests import node: builtins via tests/weight_cache.js; without npm ci there is no local
         # node_modules, so Deno must not read package.json (it would look for @types/node there)
         env: { DENO_NO_PACKAGE_JSON: "1" }
-        run: deno test --allow-read tests/unit
+        # --parallel runs test files on all cores; the slow MoE layout sweep is split across files for it
+        run: deno test --parallel --allow-read tests/unit
       - name: Kernel generator sanity
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: deno run --allow-read tests/unit/generator_smoke.js
@@ -29,10 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: 22 }
+        with: { node-version: 22, cache: npm }
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
       - name: Install Playwright Chromium
         run: |
           npm ci
-          npx playwright install --with-deps chromium
+          if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then npx playwright install-deps chromium; else npx playwright install --with-deps chromium; fi
       - name: Preview in the browser
         run: node tests/e2e/preview_browser.mjs
