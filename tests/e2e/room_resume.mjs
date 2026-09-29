@@ -15,6 +15,10 @@
 //           under the same name, reloads its layers, and the answer carries on.
 //   kill    the tab closes for good: after the grace period (60 s) the host re-deals the layers
 //           over the two devices left (experimental auto re-deal) and the answer carries on.
+//   code    a Code mode run (the agent writing a small app) is interrupted mid-step by --code-action
+//           (lock by default, or reload): the run waits, carries on inside the step it was in, and ends
+//           with its stats line and no "a device left: stopped" note; the files it wrote are kept.
+//           Not in the default set: --scenarios lock,reload,code,kill
 //
 // With a real phone (tests/e2e/resume_phone.mjs drives it over WebDriver from the Mac it is attached to):
 //   node tests/e2e/room_resume.mjs --url https://<preview>/room --external iphone --rounds 2 --code-out code.txt
@@ -38,8 +42,12 @@ const PROMPT = arg("prompt", "Tell a long story about a lighthouse keeper and th
 const SCEN = arg("scenarios", "lock,reload,kill").split(",");
 const VICTIM = arg("victim", "phone");
 const AWAY = +arg("away", 20);
+const CODE_ACTION = arg("code-action", "lock");
+const CODE_PROMPT = arg("code-prompt", "Make a small counter app: index.html with a button that counts clicks, and a style.css. Write both files, then serve it.");
 const AT_TOK = +arg("at", 24);          // interrupt once the answer has this many tokens
-const MAXNEW = +arg("maxnew", 220);
+const URL_MODE = process.argv.includes("--external");
+const MAXNEW = +arg("maxnew", URL_MODE ? 900 : 220);   // a real phone needs a long answer to catch mid-way
+const GAP = +arg("gap", 25);                            // seconds between rounds with a real phone
 const PORT = +arg("port", 8133), SIGNAL_PORT = +arg("signal-port", 9013);
 const URL0 = arg("url", null), EXTERNAL = arg("external", null), ROUNDS = +arg("rounds", 2), CODE_OUT = arg("code-out", null);
 const LOCAL = { "Qwen3-0.6B-Q8_0.gguf": "models/qwen/model.gguf", "Qwen3-1.7B-Q8_0.gguf": "models/qwen17/model.gguf" };
@@ -133,6 +141,55 @@ async function lock(p, secs) {
   return frozen;
 }
 
+// the Code scenario: start a run, interrupt the victim once the agent is writing, check the run ends by itself
+const codeState = () => tabs.host.evaluate(() => {
+  const log = document.getElementById("code-log");
+  return {
+    stats: [...log.querySelectorAll(".cm-stats")].map((e) => e.textContent.slice(0, 160)),
+    notes: [...log.querySelectorAll(".cm-note")].map((e) => (e.classList.contains("err") ? "ERR " : "") + e.textContent.slice(0, 160)),
+    tools: log.querySelectorAll(".cm-tool").length,
+    text: [...log.querySelectorAll(".cm-text, .cm-live")].reduce((n, e) => n + e.textContent.length, 0),
+    files: [...document.querySelectorAll("#code-tree .f[data-path]")].map((e) => e.dataset.path).slice(0, 20),
+    busy: document.getElementById("ctab-agent")?.classList.contains("busy") || !!document.querySelector("#code-log .cm-live, #code-log [aria-busy=true]"),
+  };
+});
+async function codeScenario(r) {
+  try {
+    await tabs.host.click("#mode-code");
+    await tabs.host.waitForSelector("#code-prompt", { state: "visible", timeout: 30000 });
+    await tabs.host.waitForTimeout(1500);
+    const s0 = await codeState();
+    await tabs.host.fill("#code-prompt", CODE_PROMPT);
+    await tabs.host.click("#code-send");
+    // interrupt once the agent has been writing for a moment (a step in flight)
+    await tabs.host.waitForFunction((n) => { const l = document.getElementById("code-log"); return [...l.querySelectorAll(".cm-text, .cm-live")].reduce((a, e) => a + e.textContent.length, 0) > n; }, s0.text + 80, { timeout: 180000, polling: 100 });
+    const before = await codeState();
+    r.interruptedAt = { text: before.text - s0.text, stats: before.stats.length, files: before.files };
+    log("code: interrupting", VICTIM, "by", CODE_ACTION, "with", r.interruptedAt.text, "chars of agent output");
+    const t1 = Date.now();
+    if (CODE_ACTION === "lock") r.frozen = await lock(tabs[VICTIM], AWAY);
+    else if (CODE_ACTION === "reload") { await tabs[VICTIM].reload(); log("reloaded", VICTIM); }
+    await tabs.host.waitForFunction((n) => document.querySelectorAll("#code-log .cm-stats").length > n, s0.stats.length, { timeout: 600000, polling: 500 });
+    const after = await codeState();
+    r.secs = Math.round((Date.now() - t1) / 1000);
+    r.stats = after.stats.slice(s0.stats.length);
+    r.notes = after.notes.slice(s0.notes.length);
+    r.files = after.files;
+    r.hostLog = (await roomLog(tabs.host)).slice(-8).map((t) => t.slice(0, 180));
+    r.waited = r.hostLog.some((t) => /Code run is waiting/.test(t));
+    r.carriedOn = r.hostLog.some((t) => /whole again/.test(t));
+    const stopped = r.notes.some((t) => /device left|stopped|error/i.test(t));
+    r.ok = !stopped && r.carriedOn;
+    log("code", r.ok ? "OK" : "FAILED", r.secs, "s:", JSON.stringify({ stats: r.stats, notes: r.notes, files: r.files }).slice(0, 300));
+    await waitOnline(tabs[VICTIM], 120000).catch(() => {});
+  } catch (e) {
+    r.error = String(e).slice(0, 300);
+    r.code = await codeState().catch(() => null);
+    r.hostLog = (await roomLog(tabs.host).catch(() => [])).slice(-10).map((t) => t.slice(0, 180));
+    log("code ERROR", r.error);
+  }
+}
+
 const out = { model: MODEL, victim: VICTIM, scenarios: {} };
 try {
   for (const p of Object.values(tabs)) await p.goto(BASE + (p === tabs.host ? `&maxnew=${MAXNEW}` : ""));
@@ -168,7 +225,7 @@ try {
     for (let i = 0; i < ROUNDS; i++) {
       const r = out.scenarios["round" + (i + 1)] = { ok: false };
       try {
-        await tabs.host.waitForTimeout(8000);   // the phone script is ready for the next answer
+        await tabs.host.waitForTimeout(GAP * 1000);   // the phone script is ready for the next answer
         await waitOnline(tabs.host, 400000);
         await tabs.host.waitForFunction(() => !document.getElementById("ai-send").disabled && document.getElementById("ai-row").style.display !== "none", null, { timeout: 400000 });
         const t1 = Date.now();
@@ -187,6 +244,7 @@ try {
   }
   for (const sc of EXTERNAL ? [] : SCEN) {
     const r = out.scenarios[sc] = { ok: false };
+    if (sc === "code") { await codeScenario(r); await tabs.host.click("#mode-chat").catch(() => {}); await tabs.host.waitForTimeout(500); continue; }
     try {
       await ask();
       await waitTokens(AT_TOK);

@@ -61,7 +61,7 @@ const PAGE_STATE = () => {
   const ind = $("awake-ind");
   return {
     joined: document.body.classList.contains("in-room"), online: !!$("ai-panel")?.classList.contains("online"),
-    status: $("ai-status")?.textContent || "", over: $("room-over") && !$("room-over").hidden ? $("room-over-h")?.textContent : "",
+    status: $("ai-status")?.textContent || "", joinStatus: $("join-status")?.textContent || "", over: $("room-over") && !$("room-over").hidden ? $("room-over-h")?.textContent : "",
     answers: bots.length, lastChars: last?.querySelector(".bubble")?.textContent.length || 0, lastEnded: !!last?.querySelector(".stats"),
     lastStats: last?.querySelector(".stats")?.textContent || "", awake: ind ? (ind.hidden ? "hidden" : ind.className || "shown") : "none",
     visible: document.visibilityState, log: [...document.querySelectorAll("#chat-log div")].slice(-4).map((d) => d.textContent.slice(0, 160)),
@@ -71,9 +71,10 @@ const PAGE_STATE = () => {
 const state = () => exec(PAGE_STATE);
 async function until(pred, ms, what, every = 1500) {
   const tEnd = Date.now() + ms;
-  let s = null;
+  let s = null, tLog = Date.now();
   while (Date.now() < tEnd) {
     try { s = await state(); if (pred(s)) return s; } catch (e) { s = { err: String(e).slice(0, 160) }; }
+    if (Date.now() - tLog > 30000) { tLog = Date.now(); log("still waiting for", what + ":", JSON.stringify(s).slice(0, 300)); }
     await sleep(every);
   }
   throw new Error(`timeout waiting for ${what}: ${JSON.stringify(s).slice(0, 400)}`);
@@ -87,12 +88,19 @@ try {
   log("session", sid);
   await wd("POST", S("/url"), { url: URL0 + (URL0.includes("?") ? "&" : "?") + "dev=1" });
   await until(() => true, 20000, "page");
+  // the GPU probe fills in the pledge: set ours after it, or it overwrites it
+  for (let i = 0; i < 120; i++) { if (await exec(() => { const g = document.getElementById("join-gb"); return !!g && g.value !== "" && g.value !== "1"; }).catch(() => false)) break; await sleep(500); }
   await exec((name, gb, code) => {
     const set = (id, v) => { const el = document.getElementById(id); el.value = v; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); };
     set("name-input", name); set("join-gb", gb); set("code-input", code);
   }, NAME, GB, CODE);
-  await click("#join-btn");   // a real tap: the wake lock wants one
-  let s = await until((x) => x.joined, 60000, "join");
+  await click("#join-btn").catch((e) => log("tap failed:", String(e).slice(0, 120)));   // a real tap: the wake lock wants one
+  await sleep(1500);
+  if (!(await exec(() => document.getElementById("join-status")?.textContent || document.body.classList.contains("in-room")))) {
+    log("the tap did not join; clicking from the page");
+    await exec(() => { document.getElementById("join-btn").click(); return true; });
+  }
+  let s = await until((x) => x.joined, 120000, "join");
   log("joined");
   s = await until((x) => x.online, 900000, "the room to come online", 3000);
   out.awakeOnline = s.awake;
