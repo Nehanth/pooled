@@ -30,12 +30,15 @@ export function verdict(f) {
     if (f.hasGpuApi) return no(PHONE, "The browser has WebGPU but offered no GPU on this phone (a blocklisted driver?). Chrome 121 or later may help.");
     return no(PHONE, "This Android browser has no WebGPU: use Chrome 121 or later.");
   }
-  if (!f.secure) return no(DESK, "WebGPU needs a secure page: open this over https (or localhost).");
-  if (f.hasGpuApi) return no(DESK, "WebGPU is on, but the browser offered no GPU (a blocklisted driver?). Try chrome://flags/#enable-unsafe-webgpu, or another browser.");
-  if (/Firefox\//.test(ua)) return no(DESK, "Firefox does not have WebGPU on this platform yet: use Chrome or Edge 113+, or Safari 26+.");
+  // when the fix is in this browser (a flag, an update), the line says so instead of "use Chrome",
+  // and the page shows the remedy open, not behind a collapsed Details
+  const CHAT = "so this device can chat but not help run the model yet.";
+  if (!f.secure) return no(`This page isn't secure, ${CHAT}`, "WebGPU needs a secure page: open this over https (or localhost).");
+  if (f.hasGpuApi) return no(`This browser has WebGPU but found no usable GPU, ${CHAT}`, "A blocklisted driver? Try chrome://flags/#enable-unsafe-webgpu, then reload, or another browser.");
+  if (/Firefox\//.test(ua)) return no(`Firefox has no WebGPU here, ${CHAT}`, "Use Chrome or Edge 113+, or Safari 26+.");
   if (/Linux/.test(ua) && /Chrome\//.test(ua) && !/Android/.test(ua))
-    return no(DESK, "Chrome on Linux: enable chrome://flags/#enable-unsafe-webgpu and chrome://flags/#enable-vulkan, then reload.");
-  if (/Safari\//.test(ua) && !/Chrome\//.test(ua)) return no(DESK, "Safari needs version 26 for WebGPU: update macOS, or use Chrome.");
+    return no(`WebGPU is off in Chrome on Linux, ${CHAT} Two flags turn it on:`, "Enable chrome://flags/#enable-unsafe-webgpu and chrome://flags/#enable-vulkan, then reload.");
+  if (/Safari\//.test(ua) && !/Chrome\//.test(ua)) return no(`This Safari has no WebGPU, ${CHAT}`, "Safari 26 has it: update macOS, or use Chrome.");
   return no(DESK, "Use Chrome or Edge 113+, or Safari 26+.");
 }
 

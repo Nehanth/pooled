@@ -133,6 +133,8 @@ try {
   s = await look(host);
   check("Preview shows alone, the app filling it", s.preview && !s.agent && !s.files && s.selected === "preview", JSON.stringify(s));
   check("the preview frame fills most of the screen", await host.evaluate(() => document.getElementById("pv-frame-wrap").getBoundingClientRect().height > innerHeight * 0.35));
+  // the sandbox tag is hidden on phones, so the address itself must not read as a server on this machine
+  check("the preview address reads sandbox:5173, not localhost", /^sandbox:5173\//.test((await host.textContent("#pv-addr")).trim()), await host.textContent("#pv-addr"));
   // the app is 700px wide (a fixed layout, as a model writes a game): scaled into the phone's box, and a click still lands
   let app = null;
   for (let i = 0; i < 50 && !app; i++) {

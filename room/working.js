@@ -25,8 +25,11 @@ export function verbs(rand = Math.random) {
   };
 }
 
-// a <span class="working">; since: the performance.now() the wait started
-export function working({ since = performance.now(), label = "Working" } = {}) {
+// a <span class="working">; since: the performance.now() the wait started; lead: what is happening,
+// in plain words ("Reading your message on 2 devices"), shown for the first LEAD_MS before the verbs,
+// since the verbs alone don't say what the wait is
+export const LEAD_MS = 4000;
+export function working({ since = performance.now(), label = "Working", lead = "" } = {}) {
   const el = document.createElement("span");
   el.className = "working";
   el.innerHTML = `${MARK}<span class="wk-v" aria-hidden="true"></span><span class="sr-only">${label}</span>`;
@@ -36,11 +39,13 @@ export function working({ since = performance.now(), label = "Working" } = {}) {
   const tick = () => {
     if (el.isConnected) seen = true;
     else if (seen || performance.now() - born > 10000) { clearInterval(timer); return; }
-    const t = performance.now() - since, w = Math.floor(t / 2000);
+    const t = performance.now() - since, w = lead && t < LEAD_MS ? -2 : Math.floor(t / 2000);
     if (w !== word) {
+      const first = word === -1;
       word = w;
-      v.textContent = next() + "…";
-      if (w > 0 && !reduced() && v.animate) v.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.7,.2,1)" });
+      v.textContent = (w === -2 ? lead : next()) + "…";
+      if (first) return;
+      if (!reduced() && v.animate) v.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.7,.2,1)" });
     }
   };
   const timer = setInterval(tick, 250);

@@ -745,13 +745,16 @@ export async function initCode(api, { mock = null } = {}) {
     ui.setHost(host, { canDrive: host || (shared() && peerProj.kind !== "folder") });
     driverNote();
   }
+  // an example the room's model can build on a first try: the default room runs the 1.7B, which a
+  // tetris game sets up to fail; the bigger models get the game
+  const example = () => /^qwen3-(0\.6b|1\.7b)$|^smollm/.test(api.model?.() || "") ? "a tip calculator" : "a tetris game";
   function placeholderFor(host) {
     if (host) {
       ui.placeholder(api.ready()
-        ? "<b>Code mode</b>: the room's model writes a web app, serves it on a port and fixes its own errors.<br>Ask for something to build, like “a tetris game”."
+        ? `<b>Code mode</b>: the room's model writes a web app, serves it on a port and fixes its own errors.<br>Ask for something to build, like “${example()}”.`
         : "<b>Code mode</b> runs on the room's model.<br>Pick a model in Chat and press Start, then ask for something to build.");
     } else ui.placeholder(shared()
-      ? `<b>Code mode</b>: ask for something to build, like “a tetris game”.<br>The agent runs on ${escapeHTML(hostName())}'s device; everyone in the room sees it work, live`
+      ? `<b>Code mode</b>: ask for something to build, like “${example()}”.<br>The agent runs on ${escapeHTML(hostName())}'s device; everyone in the room sees it work, live`
       : `only ${escapeHTML(hostName())} uses Code in this room`);
   }
   function entered() {

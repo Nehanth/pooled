@@ -138,6 +138,7 @@ Deno.test("preflight: phones are checked first and told in phone words", () => {
   for (const v of [no(UA.iphone), no(UA.iphone, { hasGpuApi: true }), no(UA.ipad, { touchPoints: 5 })]) ok(/^This phone's GPU/.test(v.line) && /join and chat/.test(v.line), v.line);
   ok(/Chrome or Edge on a laptop/.test(no(UA.mac).line), "desktop line");
   ok(!/chrome:\/\//.test(no(UA.linux).line), "the flag hint stays in the details");
+  ok(!/Chrome or Edge/.test(no(UA.linux).line) && /off in Chrome on Linux/.test(no(UA.linux).line), "Chrome on Linux is told to turn it on, not to use Chrome");
 });
 Deno.test("conversation: an open assistant turn (Continue) extends the caches without an end token", () => {
   const t1 = [{ role: "user", text: "a" }];

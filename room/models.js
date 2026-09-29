@@ -2,6 +2,10 @@
 
 export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 4.0, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "smollm-135m": 0.6 };
 
+// The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
+// each device downloads about its share of the layers, so the picker can say what this device will fetch.
+export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84 };
+
 // The models the room's picker offers. The others stay for tests and ?dev=1.
 export const PICKER = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 
