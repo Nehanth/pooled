@@ -132,7 +132,7 @@ export function computeScreen({ state, keepAwake = () => {} }) {
     const s = state();
     $("cs-code").textContent = s.code || "----";
     $("cs-devs").textContent = `${s.devices} device${s.devices === 1 ? "" : "s"}`;
-    const has = s.lo != null && s.hi != null;
+    const has = s.lo != null && s.hi != null && s.hi > s.lo;   // an empty range (lo == hi) holds nothing
     const lay = has ? `${s.lo + 1}–${s.hi}` : "";
     // one status line and one small line: this screen is for the person whose device it is
     let title, sub;
