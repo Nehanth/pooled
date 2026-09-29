@@ -23,8 +23,15 @@ const EMPTY = "(empty answer: call a tool or say you are done)";
 const LIVE = new Set(["preview_logs", "run_js"]);   // results that can change with time: a repeat is not a loop
 // a clean serve: the page loaded with no errors (harness/preview-tools.js)
 const CLEAN = /^serving [^\n]*\n(?:loaded in \d+ ms · no errors|still loading after 2 s · no errors)/;
-// a read run again gives the same result: for serve, ignoring its load time and log timestamps
-const timeless = (s) => s.replace(/loaded in \d+ ms/g, "loaded").replace(/^\[\d+(?:\.\d+)?s\] /gm, "");
+// a read run again gives the same result: for serve, ignoring what changes on every reload of the
+// same page (harness/preview-tools.js): its load time, the log timestamps, the error / warning counts,
+// the ×N fold counts (a loop throwing each frame) and the "more: preview_logs since=N" cursor
+export const timeless = (s) => s
+  .replace(/loaded in \d+ ms/g, "loaded")
+  .replace(/^((?:loaded|still loading after 2 s) · )(.*)$/m, (_, a, counts) => a + counts.replace(/\d+ (error|warning)s?\b/g, "$1s"))
+  .replace(/^\[\d+(?:\.\d+)?s\] /gm, "")
+  .replace(/ ×\d+$/gm, "")
+  .replace(/^more: preview_logs since=\d+$/gm, "more: preview_logs");
 const sameResult = (name, a, b) => a === b || (name === "serve" && timeless(a) === timeless(b));
 // said after a clean serve to a small (JSON-style) model, which otherwise tends to write the same files again
 export const SERVED_OK = "\nnext: the page loads with no errors. If it does what was asked, reply with one short line saying what you built (no tool call). Otherwise fix it with edit_file.";

@@ -102,6 +102,25 @@ Deno.test("agent: a repeated serve with the same errors is a repeat even though 
   ok(B.turns[4].text.includes("error a.js:1 other") && !B.turns[4].text.includes("same call as step"), B.turns[4].text);
 });
 
+Deno.test("agent: a repeated serve of the same broken page is stuck at step 4 though its counts, ×N and more: cursor change", async () => {
+  // real serve output: the error count, the fold count and the preview_logs cursor all grow on each reload
+  let n = 0, err = "boom";
+  const serve = { name: "serve", description: "s", parameters: { type: "object", properties: {} }, mutates: false,
+    run: async () => { n++; return `serving . on :5173 (index.html, 2 files, 1 KB)\nloaded in ${n * 13} ms · ${n * 40} errors, ${n} warning${n > 1 ? "s" : ""}:\n` +
+      `[0.${n}s] error game.js:12 ${err}\n  at tick (game.js:12) ×${n * 40}\n[0.${n}s] warn game.js:3 slow ×${n}\nmore: preview_logs since=${n * 57}`; } };
+  const sv = call("serve", {});
+  const A = new Agent({ generate: scripted(Array(30).fill(sv)), tools: [serve] });
+  const r = await A.run("go");
+  eq([r.reason, r.steps, n], ["stuck", 4, 4], "the same broken page served again is a loop, not 24 serves");
+  ok(A.turns[4].text.includes("(same call as step 1; nothing changed)"), A.turns[4].text);
+  // a different error on the next serve: fresh, not a repeat
+  n = 0;
+  const gen = scripted([sv, sv, "ok"]);
+  const B = new Agent({ generate: (x) => { if (n === 1) err = "other"; return gen(x); }, tools: [serve] });
+  await B.run("go");
+  ok(B.turns[4].text.includes("error game.js:12 other") && !B.turns[4].text.includes("same call as step"), B.turns[4].text);
+});
+
 Deno.test("agent: an empty answer gets one nudge; a second one ends the request", async () => {
   const seen = [];
   const A = new Agent({ generate: scripted(["", "Done: nothing to do."], seen), tools: codingTools(new MemoryWorkspace()) });
