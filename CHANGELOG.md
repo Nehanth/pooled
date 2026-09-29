@@ -2,6 +2,11 @@
 
 All notable changes to Pooled (called SwarmLLM before September 2026). Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Entries before the rename keep the old name.
 
+## [Unreleased]
+
+### Changed
+- **The model host is the device whose GPU moves memory fastest**, when it is clearly faster (1.5x a copy's GB/s, measured at page load in `room/gpuspeed.js`, about 12-450 ms) and lends at least half the memory of the device that would host by memory. Before, it was the device that lent the most memory. GB10 + M5 Max room (the Mac copies at about 390 GB/s, the GB10 at about 190): the Mac hosts, and the MoE's speculative decode is +20-39% (plain +9-11% on a calm link), the 27B's speculative +17-19% (plain unchanged). Same tokens for a given split; the GB10 alone is unchanged. `?gbps=N` pins the value (0 = unknown, which leaves the pick by memory).
+
 ## [1.0.0] - 2026-09-27
 
 The first stable release: peer-to-peer inference in the browser at [pooled.run](https://pooled.run).

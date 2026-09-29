@@ -86,17 +86,30 @@ export function planForSpeed(L, caps, msPerLayer = []) {
 // the strongest device, whoever pressed Start: a device with WebGPU first, then a computer before
 // a phone (a phone's lent memory says little about its GPU, and a phone tab sleeps with its
 // screen), then the most memory lent, then the lowest id so every screen picks the same one.
-// devices: [{ id, meta: { webgpu, contribGB, phone, ua } }]. Returns an id (null for none).
+// Then speed: decode is bound by memory bandwidth and the host's extra work sits on every token's
+// path, so a device of the same kind whose GPU copies memory clearly faster (meta.gbps, measured at
+// load by room/gpuspeed.js, at least SPEED_EDGE times the memory pick's) and that lends at least
+// half as much memory hosts instead: the fastest such device, then memory, then id. A device that
+// did not measure (an older tab, or a probe that failed) leaves the pick by memory as it is.
+// devices: [{ id, meta: { webgpu, contribGB, phone, ua, gbps } }]. Returns an id (null for none).
+export const SPEED_EDGE = 1.5;
 export function pickModelHost(devices) {
   const isPhone = (m) => !!(m?.phone || /^(iPhone|Android)$/.test(m?.ua || ""));
   const gb = (m) => (m?.webgpu ? +m?.contribGB || 0 : 0);
+  const key = (d) => [d.meta?.webgpu ? 1 : 0, isPhone(d.meta) ? 0 : 1, gb(d.meta)];
+  // > 0 when a is the better pick by kind, then memory, then the lower id
+  const cmp = (a, b) => { const x = key(a), y = key(b); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2] || (a.id < b.id ? 1 : -1); };
+  const ds = devices.filter((d) => d?.id);
   let best = null;
-  for (const d of devices) {
-    if (!d?.id) continue;
-    const k = [d.meta?.webgpu ? 1 : 0, isPhone(d.meta) ? 0 : 1, gb(d.meta)];
-    if (!best) { best = { id: d.id, k }; continue; }
-    const c = k[0] - best.k[0] || k[1] - best.k[1] || k[2] - best.k[2] || (d.id < best.id ? 1 : -1);
-    if (c > 0) best = { id: d.id, k };
+  for (const d of ds) if (!best || cmp(d, best) > 0) best = d;
+  if (!best) return null;
+  const bps = (d) => +d.meta?.gbps || 0, kb = key(best);
+  if (!kb[0] || !(bps(best) > 0)) return best.id;
+  let fast = null;
+  for (const d of ds) {
+    const k = key(d);
+    if (k[0] !== kb[0] || k[1] !== kb[1] || k[2] < 0.5 * kb[2] || bps(d) < SPEED_EDGE * bps(best)) continue;
+    if (!fast || bps(d) > bps(fast) || (bps(d) === bps(fast) && cmp(d, fast) > 0)) fast = d;
   }
-  return best?.id ?? null;
+  return (fast || best).id;
 }
