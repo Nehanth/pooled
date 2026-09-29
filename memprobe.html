@@ -156,7 +156,11 @@ async function gpuSteps(step, pause, max) {
     await sleep(pause);
   }
   mp.gpuBufs = bufs;   // keep them alive
+  mp.device = d;
 }
+// give the GPU memory back when the page goes (a WebGPU device can outlive its page in Safari's GPU
+// process: after a 16 GB gpu run the next pages got out-of-memory on their first 128 MB buffer)
+addEventListener("pagehide", () => { try { for (const b of mp.gpuBufs || []) b.destroy(); mp.device?.destroy(); } catch {} });
 
 // ---- a real layer load, the phone's way (mirrors room.js rangeFetch / rangeOf / streamWithRetry / rangeBytesOf / aiLoadShard) ----
 const MODEL = { moe: "qwen3.6-35b-moe", "27b": "qwen3.8-27b" };
