@@ -59,7 +59,7 @@ export function unpackFlags(f) {
 
 // Per-link state: { chans: [RTCDataChannel], rr, rx: Map<msgId, partial>, expect: next id to
 // hand over, done: Map<msgId, completed frame waiting for an earlier one> }
-export function makeLink() { return { chans: [], rr: 0, rx: new Map(), nextId: 1, sent: 0, recv: 0, expect: 1, done: new Map(), gapTimer: null }; }
+export function makeLink() { return { chans: [], rr: 0, rx: new Map(), nextId: 1, sent: 0, recv: 0, expect: 1, done: new Map(), gapTimer: null, heard: 0 }; }
 
 // Open the wire channel on a PeerJS DataConnection's RTCPeerConnection. Both sides call this with
 // the same id, so no ondatachannel event fires and PeerJS never sees the channel.
@@ -68,7 +68,9 @@ export function attachWire(link, conn, onFrame, { ordered = true } = {}) {
   if (!pc) return null;
   const ch = pc.createDataChannel("swarm-wire", { negotiated: true, id: WIRE_ID, ordered, ...(ordered ? {} : { maxRetransmits: 0 }) });
   ch.binaryType = "arraybuffer";
-  ch.onmessage = (ev) => receive(link, ev.data, onFrame);
+  // link.heard: when anything last arrived on this link's wire, even one slice of a big frame
+  // (drop detection counts it as a sign of life, room/liveness.js)
+  ch.onmessage = (ev) => { link.heard = performance.now(); receive(link, ev.data, onFrame); };
   ch.onclose = () => { link.chans = link.chans.filter((c) => c !== ch); };
   link.chans.push(ch);
   return ch;

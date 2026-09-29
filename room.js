@@ -19,6 +19,7 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // prefilling the whole conversation again. 0 turns it off.
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
+import { makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, lapTimeout } from "./room/liveness.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
@@ -455,15 +456,16 @@ function wire(conn, name, meta, initiator = false) {
     }
   }
 
-  conn.on("data", (d) => onData(conn.peer, d));
+  conn.on("data", (d) => { entry.heard = performance.now(); onData(conn.peer, d); });
   conn.on("close", () => {
     const e = conns.get(conn.peer);
     if (e && e.conn !== conn) return;   // an older link to the same device
     conns.delete(conn.peer);
+    hbForget(liveness, conn.peer);
     if (isHost) {   // on the host a closed link means the device left; workers wait for the roster
       dropCard(conn.peer); members.delete(conn.peer); roster.delete(conn.peer); broadcastRoster();
-      log("room", `${e?.name || conn.peer} left`);
-      aiPeerLeft(conn.peer, e?.name);
+      log("room", `${e?.name || conn.peer} ${e?.dead ? "stopped responding" : "left"}`);
+      aiPeerLeft(conn.peer, e?.name, e?.dead ? "stopped responding" : "left");
     } else if (conn.peer === PREFIX + roomCode) { log("room", "lost the link to the host"); hostGone(); }
     updateCluster();
   });
@@ -652,6 +654,38 @@ window.addEventListener("pagehide", () => { try { broadcastAll({ t: "leaving" })
 
 // --- ping loop ---
 setInterval(() => broadcastAll({ t: "ping", ts: performance.now() }), 2500);
+
+// --- drop detection (room/liveness.js) ---
+// While an answer runs, the host pings every device in the chain twice a second and treats
+// anything it hears from one (a pong, any message, any wire slice) as a sign of life. A device
+// silent past deadAfter(rtt) (3-5 s) is dead: its link is closed here, which fails the laps in
+// flight and puts the room in the degraded / re-deal state at once, instead of waiting ~30 s for
+// ICE to notice or for a lap to time out. ?hb=0 turns it off (A/B runs).
+const liveness = makeLiveness();
+const HB_ON = new URLSearchParams(location.search).get("hb") !== "0";
+function hbLoop() {
+  const now = performance.now();
+  const on = HB_ON && isHost && ai.role === "host" && (ai.busy === "gen" || ai.busy === "code") && ai.chain.length > 0 && !ai.degraded;
+  if (!on) { hbDisarm(liveness); hbTick(liveness, now, []); return; }
+  hbArm(liveness, now);
+  const ids = ai.chain.filter((id) => conns.has(id));
+  for (const id of ids) { const e = conns.get(id); hbHeard(liveness, id, Math.max(e.heard || 0, e.link?.heard || 0)); }
+  const r = hbTick(liveness, now, ids, (id) => conns.get(id)?.rtt);
+  if (r.ping) for (const id of ids) sendTo(id, { t: "ping", ts: now });
+  for (const { id, silentMs, limitMs } of r.dead) {
+    const e = conns.get(id);
+    if (!e || e.dead) continue;
+    e.dead = true;
+    console.warn(`[room] ${e.name} silent ${silentMs} ms (limit ${limitMs} ms, rtt ${e.rtt ?? "?"} ms): dropping it`);
+    try { e.conn.close(); } catch {}
+    for (const sc of e.stripes || []) { try { sc.close(); } catch {} }
+    // PeerJS emits close from close(); if that ever does not happen, drop the link by hand
+    if (conns.get(id) === e) { conns.delete(id); dropCard(id); members.delete(id); roster.delete(id); broadcastRoster(); aiPeerLeft(id, e.name, "stopped responding"); updateCluster(); }
+  }
+}
+setInterval(hbLoop, 250);
+// tests: the longest silence seen per chain device while answering, and the limits in force
+window.pooledLiveness = () => ({ armed: liveness.armed, maxSilence: Object.fromEntries([...liveness.maxSilence].map(([id, ms]) => [conns.get(id)?.name || id, Math.round(ms)])) });
 
 const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
 $("gb-minus").addEventListener("click", () => stepGB(-1));
@@ -1646,6 +1680,7 @@ async function aiStart(modelArg) {
     ai.degraded = false;
     ai.readyPeers = new Set();
     ai.teleBy = new Map();
+    ai.lapStat = null;                        // a new chain: lap timeouts start from the fixed fallbacks again
     const modelKey = $("ai-model").value;
     const M = MODELS[modelKey];
     // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every device builds its engine with it
@@ -1786,11 +1821,11 @@ function offerRedealForNewcomers() {
 
 // a device in the chain left: every lap in flight fails now instead of timing out, and the room
 // waits for a re-deal
-function aiPeerLeft(id, name) {
+function aiPeerLeft(id, name, verb = "left") {
   if (ai.role !== "host") return;
   if (!ai.chain.includes(id)) { offerRedealForNewcomers(); if (!sparePeers().length && !ai.degraded) showRedeal(false); return; }
   const layers = ai.layersByName?.[name];
-  const why = `${name || "a device"} left${layers ? ` (layers ${layers})` : ""}`;
+  const why = `${name || "a device"} ${verb}${layers ? ` (layers ${layers})` : ""}`;
   ai.degraded = true;
   ai.readyPeers.delete(id);
   // left before the room came online: drop the load card so the panel's Re-deal button shows
@@ -1870,6 +1905,8 @@ function lapWait(key, ms, what) {
     });
   });
 }
+// the slowest round trip to a device in the chain (pongs), for lap timeouts
+function chainRtt() { return Math.max(0, ...ai.chain.map((id) => conns.get(id)?.rtt || 0)); }
 function failWaiters(err) { for (const [k, w] of ai.waiters) { ai.waiters.delete(k); w.rej(err); } }
 function lapDone(key, h) { const w = ai.waiters.get(key); if (w) { ai.waiters.delete(key); w.res(h); } }
 // send a frame to the first device of the chain; a pending reset or rollback rides with it,
@@ -1982,7 +2019,7 @@ async function aiPipeToken(id, needLogits = true, fillNext, desc = null) {
   if (badF32(h)) throw new Error(`NaN after HOST layers (pos ${pos}) — host GPU kernel issue`);
   if (ai.chain.length) {
     const hostMs = performance.now() - tHost;
-    const returned = lapWait(pos, 30000, "token");
+    const returned = lapWait(pos, lapTimeout(ai.lapStat, 30000, chainRtt()), "token");
     sendChain({ t: "ai-hidden", pos, ...packWire(h) });
     h = await returned;
     if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos}) — check peer status lines`);
@@ -2095,8 +2132,9 @@ async function aiPrefill(ids, { aborted = () => ai.abort, onStatus = aiStatus, d
 // Workers report their compute per frame kind (ai-tele); the host times each lap, so what is left
 // is the wire. The map shows the chain, what each device holds and how long its part takes.
 function noteLap(lapMs, hostMs) {
-  const L = ai.lapStat ||= { lap: 0, host: 0, n: 0 };
+  const L = ai.lapStat ||= { lap: 0, host: 0, n: 0, max: 0 };
   L.lap = L.n ? 0.7 * L.lap + 0.3 * lapMs : lapMs;
+  L.max = Math.max(lapMs, 0.98 * (L.max || 0));   // the slowest recent lap, fading over ~50 laps (lap timeouts)
   L.host = L.n ? 0.7 * L.host + 0.3 * hostMs : hostMs;
   L.n++;
 }
@@ -2405,7 +2443,7 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
           }
           if (badF32(hb)) throw new Error(`NaN after HOST layers (pos ${pos})`);
           const hostMs = performance.now() - tLap;
-          const returned = lapWait("b" + pos, 90000, "verify");
+          const returned = lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, chainRtt()), "verify");
           sendChain({ t: "ai-hidden-b", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb) });
           const h = await returned;
           if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos})`);
