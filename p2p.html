@@ -1644,6 +1644,23 @@
 </div>
 <div id="toasts" role="status" aria-live="polite"></div>
 <script src="/site/js/sparkle.js"></script>
+<script>
+// Start a room and Join show before room.js (a module that imports the whole engine) is wired. A tap in
+// that window used to do nothing; keep it, show the wait state at once, and room.js runs it on load.
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  function keep(kind, text) {
+    if (window.pooledWired || window.pooledEarly) return;
+    window.pooledEarly = kind;
+    $("join-screen").classList.add("waiting"); $("join-wait").hidden = false; $("jw-t").textContent = text;
+  }
+  $("create-btn").addEventListener("click", function () { keep("create", "Opening your room"); });
+  $("join-btn").addEventListener("click", function () {
+    var c = $("code-input").value.trim();
+    if (/^[A-Z0-9]{4,6}$/i.test(c)) keep("join", "Joining room " + c.toUpperCase());
+  });
+})();
+</script>
 <script type="module" src="/room.js"></script>
 </body>
 </html>

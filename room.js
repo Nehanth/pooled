@@ -940,7 +940,15 @@ if (backAsHost && Date.now() - backAsHost.t < 60000 && !(linkCode && linkCode !=
   joinWait(true, `Joining room ${linkCode}`);
   $("join-status").textContent = "Checking this device\u2026";
   metaPromise.then(() => { if (!peer) start(false); });
+} else if (window.pooledEarly) {
+  // a tap on Start a room or Join before this module (the whole engine) had loaded: p2p.html's early
+  // script kept it and showed the wait state; run it now instead of dropping it
+  const early = window.pooledEarly;
+  if (early === "create") { keepAwake(); start(true); }
+  else if (codeOk()) { keepAwake(); start(false); }
+  else joinWait(false);
 }
+window.pooledWired = true;
 
 // ================= distributed inference =================
 
