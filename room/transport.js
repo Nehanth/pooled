@@ -60,7 +60,7 @@ export function unpackFlags(f) {
 // Per-link state: { chans: [RTCDataChannel], rr, rx: Map<msgId, partial>, expect: next id to
 // hand over, done: Map<msgId, completed frame waiting for an earlier one> }
 export function makeLink() { return { chans: [], rr: 0, rx: new Map(), nextId: 1, sent: 0, recv: 0, expect: 1, done: new Map(), gapTimer: null,
-  ka: [], kaRr: 0, kaSent: 0, lastTx: 0, active: 0 }; }
+  ka: [], kaRr: 0, kaSent: 0, lastTx: 0, active: 0, rxAt: 0 }; }
 
 // Open the wire channel on a PeerJS DataConnection's RTCPeerConnection. Both sides call this with
 // the same id, so no ondatachannel event fires and PeerJS never sees the channel.
@@ -69,7 +69,7 @@ export function attachWire(link, conn, onFrame, { ordered = true } = {}) {
   if (!pc) return null;
   const ch = pc.createDataChannel("swarm-wire", { negotiated: true, id: WIRE_ID, ordered, ...(ordered ? {} : { maxRetransmits: 0 }) });
   ch.binaryType = "arraybuffer";
-  ch.onmessage = (ev) => receive(link, ev.data, onFrame);
+  ch.onmessage = (ev) => { link.rxAt = performance.now(); receive(link, ev.data, onFrame); };   // rxAt: a sign of life (room/liveness.js)
   ch.onclose = () => { link.chans = link.chans.filter((c) => c !== ch); };
   link.chans.push(ch);
   attachKeepalive(link, pc);
@@ -197,6 +197,7 @@ export function setKeepalive(ms) { kaMs = Math.max(0, +ms || 0); }
 function attachKeepalive(link, pc) {
   if (!link.ka) return;
   const ch = pc.createDataChannel("swarm-ka", { negotiated: true, id: KA_ID, ordered: false, maxRetransmits: 0 });
+  ch.addEventListener?.("message", () => { link.rxAt = performance.now(); });   // the peer's keep-alive bytes: it is alive
   ch.onclose = () => { link.ka = link.ka.filter((c) => c !== ch); };
   link.ka.push(ch);
 }

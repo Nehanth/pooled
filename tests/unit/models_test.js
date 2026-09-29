@@ -1,7 +1,7 @@
 // room/models.js: maxSeqFor decides every room's context window (host and devices build their
 // engines with it) and kvBytesPerLayerPos decides how many layers each device is dealt at that
 // context. Both are pure; nothing else asserts them.
-import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos } from "../../room/models.js";
+import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvModeFor, kvForLoad, KV_MODES } from "../../room/models.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -133,6 +133,67 @@ Deno.test("kvBytesPerLayerPos x maxSeqFor: the 27B's whole KV cache at 16k is 1 
   const layers = 64;   // 16 of them are attention layers
   const total = layers * maxSeqFor("qwen3.8-27b") * kvBytesPerLayerPos(meta);
   eq(total, 2 ** 30);
+});
+
+Deno.test("kvModeFor: int8 KV only when asked for, and only on the qwen35 engine", () => {
+  eq(KV_MODES, ["f16", "q8"]);
+  const qwen35 = Object.keys(MODELS).filter((k) => MODELS[k].kind === "qwen35");
+  const other = Object.keys(MODELS).filter((k) => MODELS[k].kind !== "qwen35");
+  ok(qwen35.length && other.length, "need both kinds in the catalogue");
+  for (const k of qwen35) {
+    eq(kvModeFor(k, "q8"), "q8", `${k} ?kv=q8`);
+    for (const ask of [null, undefined, "", "f16", "Q8", "int8", "q4", "1"]) eq(kvModeFor(k, ask), "f16", `${k} ask ${ask}: off by default`);
+  }
+  for (const k of other) eq(kvModeFor(k, "q8"), "f16", `${k}: no int8 kernels, stays f16`);
+  eq(kvModeFor("no-such-model", "q8"), "f16");
+  eq(kvModeFor(undefined, "q8"), "f16");
+});
+
+Deno.test("kvModeFor: ?kv= read the way room.js reads it", () => {
+  const ask = (q) => new URLSearchParams(q).get("kv");
+  eq(kvModeFor("qwen3.8-27b", ask("?kv=q8")), "q8");
+  eq(kvModeFor("qwen3.8-27b", ask("?kv=q8&ctx=32768")), "q8");
+  eq(kvModeFor("qwen3.8-27b", ask("")), "f16", "missing -> f16");
+  eq(kvModeFor("qwen3.8-27b", ask("?kv=")), "f16", "empty -> f16");
+});
+
+Deno.test("kvForLoad: the host's kv wins over a worker's own ?kv=, so every device builds the same cache", () => {
+  const k = "qwen3.6-35b-moe";
+  eq(kvForLoad(k, "f16", "q8"), "f16", "host f16, worker ?kv=q8 -> f16");
+  eq(kvForLoad(k, "q8", null), "q8", "host q8, worker without ?kv -> q8");
+  eq(kvForLoad(k, "q8", "f16"), "q8");
+  eq(kvForLoad(k, undefined, "q8"), "q8", "a host without the field: the worker's own ask, as before");
+  eq(kvForLoad(k, undefined, null), "f16");
+  eq(kvForLoad(k, "junk", "q8"), "f16", "a bad value from the host is f16, not the worker's ask");
+  eq(kvForLoad("smollm-135m", "q8", "q8"), "f16", "no int8 kernels");
+});
+
+Deno.test("room.js: the host sends its KV format with ai-load and workers build with it", () => {
+  const src = Deno.readTextFileSync(new URL("../../room.js", import.meta.url));
+  ok(/t: "ai-load",[^\n]*\bkv: ROOM_KV\b/.test(src), "ai-load carries kv: ROOM_KV");
+  ok(/aiLoadShard\(modelKey, ranges\[0\], true, true, ROOM_CTX, ROOM_KV\)/.test(src), "the host builds with ROOM_KV");
+  ok(/aiLoadShard\([^\n]*kvForLoad\(d\.model, d\.kv, KV_ASK\)\)/.test(src), "workers build with the host's kv");
+  ok(/\* kvBytesPerLayerPos\(ai\.G\.meta, ROOM_KV\)/.test(src), "the layer deal counts the room's KV bytes");
+});
+
+Deno.test("kvBytesPerLayerPos: int8 is values + one f32 scale per 32, ~56% of f16", () => {
+  const m = (kv, key, interval) => ({ "qwen35.attention.head_count_kv": kv, "qwen35.attention.key_length": key, "qwen35.full_attention_interval": interval });
+  // 27B: kvDim 1024 -> 1024 int8 + 32 scales * 4 = 1152 per K (or V), 2304 per attention layer, 1 in 4 -> 576
+  eq(kvBytesPerLayerPos(m(4, 256, 4), "q8"), 576);
+  eq(kvBytesPerLayerPos(m(2, 256, 4), "q8"), 288, "35B MoE");
+  eq(kvBytesPerLayerPos(m(4, 256, 4), "f16"), 1024, "explicit f16 = the default");
+  eq(kvBytesPerLayerPos(m(4, 256, 4), "junk"), 1024, "unknown format counts as f16");
+  eq(kvBytesPerLayerPos({}, "q8"), 0, "no KV cache");
+  for (const [kv, key] of [[4, 256], [2, 256], [8, 128], [1, 32]]) {
+    const r = kvBytesPerLayerPos(m(kv, key, 1), "q8") / kvBytesPerLayerPos(m(kv, key, 1));
+    ok(Math.abs(r - 0.5625) < 1e-12, `${kv}x${key}: q8/f16 ${r}`);
+  }
+});
+
+Deno.test("kvBytesPerLayerPos x maxSeqFor: the 27B's int8 KV cache at 32K is 1.125 GB (the changelog's 1.2 GB)", () => {
+  const meta = { "qwen35.attention.head_count_kv": 4, "qwen35.attention.key_length": 256, "qwen35.full_attention_interval": 4 };
+  eq(64 * maxSeqFor("qwen3.8-27b", 32768) * kvBytesPerLayerPos(meta, "q8"), 1.125 * 2 ** 30);
+  eq(64 * maxSeqFor("qwen3.8-27b", 32768) * kvBytesPerLayerPos(meta), 2 * 2 ** 30, "f16: 2 GB");
 });
 
 Deno.test("catalogue: picker models exist, have memory needs and URLs by kind", () => {

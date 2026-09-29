@@ -14,6 +14,9 @@ const $ = (id) => document.getElementById(id);
 const h = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const CON_MAX = 300;   // console rows kept per port
+// the phone layout (one view at a time, a tab bar): phones held upright, and phones in landscape,
+// which can be 900px wide but only 360-430px tall. The same query as p2p.html's phone Code block.
+const PHONE_Q = "(max-width: 640px), (max-height: 500px) and (pointer: coarse)";
 
 // rows: lineDiff output as [[op, text, skip?]] (the wire form). Too long to diff: head / tail
 // (the first and last lines of the proposed file) and, on the host, full for "view full file".
@@ -173,10 +176,11 @@ export function codeUI({ onMode = () => {} } = {}) {
     e.preventDefault(); t.focus(); t.click();
   });
   arrows($("mode-bar")); arrows($("code-out-tabs")); arrows($("code-tabs"));
-  // ---------------- phones (640px and narrower): one view at a time, Agent / Preview / Files, from a
-  // tab bar at the bottom. The last tab is kept for the session; a dot on a tab says something
-  // happened there (a new revision, an approval waiting) or, on Agent, that the agent is working.
-  const phone = matchMedia("(max-width: 640px)");
+  // ---------------- phones (640px and narrower, or a short touch screen: a phone in landscape): one
+  // view at a time, Agent / Preview / Files, from a tab bar at the bottom. The last tab is kept for
+  // the session; a dot on a tab says something happened there (a new revision, an approval waiting)
+  // or, on Agent, that the agent is working. The query matches p2p.html's phone Code block.
+  const phone = matchMedia(PHONE_Q);
   const cp = $("code-pane"), TABS = ["agent", "preview", "files"];
   let ptab = "agent";
   try { const t = sessionStorage.getItem("pooled-code-tab"); if (TABS.includes(t)) ptab = t; } catch {}
@@ -509,7 +513,7 @@ export function codeUI({ onMode = () => {} } = {}) {
       all.onclick = () => done("all");
       no.onclick = () => {
         ap.replaceChildren(); head();
-        const why = h("input"); why.type = "text"; why.placeholder = matchMedia("(max-width: 640px)").matches ? "why? (optional)" : "why? (optional, the agent reads it)"; why.maxLength = 300;
+        const why = h("input"); why.type = "text"; why.placeholder = matchMedia(PHONE_Q).matches ? "why? (optional)" : "why? (optional, the agent reads it)"; why.maxLength = 300;
         const send = h("button", null, "Reject"); send.type = "button";
         const back = h("button", null, "Cancel"); back.type = "button";
         ap.append(why, send, back);
@@ -531,11 +535,20 @@ export function codeUI({ onMode = () => {} } = {}) {
   // project (the preview reloads, the agent is told); peers and proposed files open read-only.
   let fileClick = () => {}, saveFile = null;
   const drafts = new Map();   // path -> unsaved text, kept while other files are open
-  let edPath = null, edBase = "", edRO = true, hlRaf = 0;
+  const draftFrom = new Map();   // path -> the file's text when that draft was started
+  // edBase: the file as it is now; edFrom: the file as it was when the unsaved edits began. They
+  // differ when the agent wrote the file underneath the edits: Save then asks before overwriting.
+  let edPath = null, edBase = "", edFrom = "", edRO = true, hlRaf = 0, edForce = false;
   let hlPath = "", proposed = null;   // the colours of a pathless view (a proposed file); which proposed file shows
   const ta = $("ed-text"), hl = $("ed-hl"), gutter = $("ed-ln"), edBox = $("ed");
-  const PHONE = matchMedia("(max-width: 640px)");
-  if (PHONE.matches) $("code-prompt").placeholder = "";   // phones: an empty box (the Agent tab says what it is)
+  const PHONE = matchMedia(PHONE_Q);
+  // the prompt's hint: p2p.html's, a shorter one that fits a phone's box, and while a run goes
+  // (not on phones, where it would not fit) that Send queues the next request
+  const promptBox = $("code-prompt"), PH = promptBox.placeholder;
+  let runOn = false;
+  const promptHint = () => { promptBox.placeholder = PHONE.matches ? "Ask for an app or a change" : runOn ? "Queue another request" : PH; };
+  promptHint();
+  PHONE.addEventListener("change", promptHint);
   $("ed-save").querySelector("kbd").textContent = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent) ? "\u2318S" : "Ctrl+S";
   function tree(paths) {
     const t = $("code-tree");
@@ -563,29 +576,57 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (paths.length > 500) t.append(h("div", "none", `(+${paths.length - 500} more)`));
   }
   const dirty = () => edPath != null && !edRO && ta.value !== edBase;
+  // phones: long lines wrap (16px mono, the size that keeps iOS from zooming, fits about 22
+  // columns). The gutter still numbers the file's lines, with blank rows beside the rows a line
+  // wraps onto, measured on a hidden copy of the lines laid out like the text (.ed-mirror)
+  const mirror = h("div", "ed-mirror"); mirror.setAttribute("aria-hidden", "true");
+  ta.after(mirror);
+  let rows = null;   // wrapped rows per line, while lines wrap
+  function wrapRows(lines) {
+    if (!PHONE.matches || edBox.hidden) { mirror.replaceChildren(); return null; }
+    mirror.replaceChildren(...lines.map((l) => h("div", null, l || " ")));
+    const lh = parseFloat(getComputedStyle(mirror).lineHeight) || 1;
+    const r = [...mirror.children].map((d) => Math.max(1, Math.round(d.offsetHeight / lh)));
+    mirror.replaceChildren();
+    return r;
+  }
+  const conflict = () => dirty() && edFrom !== edBase;
   function paint() {
     hlRaf = 0;
     hl.innerHTML = highlight(edPath || hlPath, ta.value) + "\n";
-    const n = ta.value.split("\n").length;
-    if (+gutter.dataset.n !== n) { gutter.dataset.n = n; gutter.textContent = Array.from({ length: n }, (_, i) => i + 1).join("\n"); }
+    const lines = ta.value.split("\n");
+    rows = wrapRows(lines);
+    const k = rows ? rows.join() : String(lines.length);
+    if (gutter.dataset.k !== k) { gutter.dataset.k = k; gutter.textContent = lines.map((_, i) => (i + 1) + (rows ? "\n".repeat(rows[i] - 1) : "")).join("\n"); }
   }
+  const setWrap = () => { ta.wrap = PHONE.matches ? "soft" : "off"; if (!edBox.hidden) paint(); };
+  PHONE.addEventListener("change", setWrap);
+  setWrap();
+  // the width changes (the phone turns, the file opens full screen): the lines wrap differently
+  let edW = 0;
+  new ResizeObserver(() => { if (edBox.clientWidth !== edW) { edW = edBox.clientWidth; if (rows || PHONE.matches) hlRaf ||= requestAnimationFrame(paint); } }).observe(edBox);
   function edState() {
-    const d = dirty();
-    if (edPath != null && !edRO) { if (d) drafts.set(edPath, ta.value); else drafts.delete(edPath); }
+    const d = dirty(), c = conflict();
+    if (!d) { edFrom = edBase; edForce = false; }
+    if (edPath != null && !edRO) { if (d) { drafts.set(edPath, ta.value); draftFrom.set(edPath, edFrom); } else { drafts.delete(edPath); draftFrom.delete(edPath); } }
     $("code-tree").querySelector(`.f[data-path="${CSS.escape(edPath || "")}"]`)?.classList.toggle("dirty", d);
     $("ed-save").disabled = !d; $("ed-save").hidden = edRO;
     $("ed-revert").hidden = !d;
+    $("ed-revert").textContent = c ? "Reload" : "Revert";
+    $("ed-revert").title = c ? "Drop your edits and load the file as it is now" : "";
     const st = $("ed-state");
     if (st.dataset.flash && !d) return;
-    st.textContent = edRO ? "read only" : d ? "unsaved" : "";
+    st.textContent = edRO ? "read only" : c ? (edForce ? "Save again to overwrite the agent's change" : "changed by the agent · Reload, or Save to keep yours") : d ? "unsaved" : "";
     st.className = d ? "dirty" : "";
   }
   // open a file in the editor: text, and whether it can be saved (label: why it is shown, e.g. a proposed file)
   function openFile(path, text, { readOnly = !host || !saveFile, label = null, hl = path } = {}) {
-    if (edPath != null && dirty()) drafts.set(edPath, ta.value);
-    edPath = path; edRO = readOnly || path == null; hlPath = hl || ""; proposed = null;
+    if (edPath != null && dirty()) { drafts.set(edPath, ta.value); draftFrom.set(edPath, edFrom); }
+    edPath = path; edRO = readOnly || path == null; hlPath = hl || ""; proposed = null; edForce = false;
     edBase = text ?? "";
-    ta.value = !edRO && drafts.has(path) ? drafts.get(path) : edBase;
+    const draft = !edRO && drafts.has(path);
+    ta.value = draft ? drafts.get(path) : edBase;
+    edFrom = draft ? draftFrom.get(path) ?? edBase : edBase;
     ta.readOnly = edRO;
     $("ed-path").textContent = label || path || "";
     $("ed-path").title = label || path || "";
@@ -596,27 +637,30 @@ export function codeUI({ onMode = () => {} } = {}) {
   }
   function viewFile(text, label = null, hl = null) {
     if (text == null) {
-      proposed = null; edPath = null; edBase = ""; ta.value = ""; edRO = true; cp.classList.remove("ed-open");
+      proposed = null; edPath = null; edBase = edFrom = ""; ta.value = ""; edRO = true; cp.classList.remove("ed-open");
       edBox.hidden = true; $("ed-bar").hidden = true; $("ed-empty").hidden = false;
       return;
     }
     openFile(null, text, { readOnly: true, label: label || "", hl });
   }
-  // the file changed underneath (the agent wrote it): take the new text unless there are unsaved edits
+  // the file changed underneath (the agent wrote it): take the new text unless there are unsaved
+  // edits; with edits, keep them and say so (edFrom stays the text they were made against)
   function fileChanged(path, text) {
     if (path !== edPath || text == null) return;
-    if (dirty()) { edBase = text; edState(); return; }
+    if (dirty()) { edBase = text; edForce = false; edState(); return; }
     if (ta.value === text) return;
     const top = edBox.scrollTop;
     edBase = text; ta.value = text; paint(); edState(); edBox.scrollTop = top;
   }
   async function save() {
     if (!dirty() || !saveFile) return;
+    // the agent changed the file since these edits began: the first Save only asks
+    if (conflict() && !edForce) { edForce = true; edState(); return; }
     const path = edPath, text = ta.value, st = $("ed-state");
     $("ed-save").disabled = true; st.textContent = "saving…";
     try {
       await saveFile(path, text);
-      if (edPath === path) { edBase = text; drafts.delete(path); st.dataset.flash = "1"; st.textContent = "saved"; st.className = "ok"; setTimeout(() => { st.removeAttribute("data-flash"); edState(); }, 1800); }
+      if (edPath === path) { edBase = edFrom = text; edForce = false; drafts.delete(path); draftFrom.delete(path); st.dataset.flash = "1"; st.textContent = "saved"; st.className = "ok"; setTimeout(() => { st.removeAttribute("data-flash"); edState(); }, 1800); }
       edState();
       say(`saved ${path}`);
     } catch (e) { st.textContent = "not saved: " + e.message; st.className = "err"; $("ed-save").disabled = false; }
@@ -625,9 +669,11 @@ export function codeUI({ onMode = () => {} } = {}) {
   function reveal() {
     const cs = getComputedStyle(ta), lh = parseFloat(cs.lineHeight) || 19, pt = parseFloat(cs.paddingTop) || 0;
     const before = ta.value.slice(0, ta.selectionEnd), line = before.split("\n").length - 1;
-    const y = pt + line * lh;
+    // wrapped lines (phones): the rows above the caret's line, and the caret somewhere in its own rows
+    const above = rows ? rows.slice(0, line).reduce((a, b) => a + b, 0) : line, own = rows?.[line] ?? 1;
+    const y = pt + above * lh;
     if (y < edBox.scrollTop) edBox.scrollTop = y - lh;
-    else if (y + lh * 2 > edBox.scrollTop + edBox.clientHeight) edBox.scrollTop = y + lh * 2 - edBox.clientHeight;
+    else if (y + lh * (own + 1) > edBox.scrollTop + edBox.clientHeight) edBox.scrollTop = Math.min(y, y + lh * (own + 1) - edBox.clientHeight);
   }
   const insert = (text) => { if (!document.execCommand("insertText", false, text)) { ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, "end"); ta.dispatchEvent(new Event("input")); } };
   ta.addEventListener("input", () => { hlRaf ||= requestAnimationFrame(paint); edState(); reveal(); });
@@ -643,7 +689,7 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (e.key === "Escape") { ta.blur(); e.preventDefault(); }
   });
   $("ed-save").onclick = save;
-  $("ed-revert").onclick = () => { if (edPath == null) return; drafts.delete(edPath); ta.value = edBase; paint(); edState(); ta.focus(); };
+  $("ed-revert").onclick = () => { if (edPath == null) return; drafts.delete(edPath); draftFrom.delete(edPath); ta.value = edFrom = edBase; paint(); edState(); ta.focus(); };
   // a long proposed file, from its approval card (host only): shown read-only in the editor
   function viewFull(path, text) {
     outTab("files");
@@ -737,6 +783,8 @@ export function codeUI({ onMode = () => {} } = {}) {
     if (P) a.append(h("span", "host", "localhost"), `:${active}/${P.path || "index.html"}`);
     else a.textContent = "No port served";
     $("pv-open").hidden = !P || !P.rev;
+    // relay: the app runs on the preview site, in a process of its own (harness/preview-frame.js)
+    $("pv-sandbox").dataset.tip = P?.mount?.mode === "relay" ? "Runs in a sandboxed frame on a separate site, in a process of its own." : "Runs in a sandboxed frame in this tab.";
     shareBtn.hidden = !P || !P.rev || !drive;
     $("pv-state").dataset.state = P?.state || "";   // green only for a running rev
     $("pv-state").textContent = P ? (P.state === "ready" ? `rev ${P.rev}` : P.state === "loading" ? "loading…" : P.state === "waiting" ? "Click to run" : P.state === "stopped" ? "stopped" : P.state === "hung" ? "hung" : "") : "";
@@ -894,9 +942,7 @@ export function codeUI({ onMode = () => {} } = {}) {
       $("code-send").textContent = on ? "Queue" : "Send";
       $("code-send").title = on ? "Runs after the current request" : "";
       $("code-stop").hidden = !(on && canStop);
-      const pr = $("code-prompt");
-      pr.dataset.ph ||= pr.placeholder;
-      pr.placeholder = on && !PHONE.matches ? "Queue another request" : pr.dataset.ph;
+      runOn = on; promptHint();
     },
   };
 }

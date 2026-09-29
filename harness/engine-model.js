@@ -11,7 +11,7 @@
 // #73): when the rest of the prompt changes in the middle (Agent compaction), the next request
 // loads that slot and prefills only what follows it. `pin: false` turns it off.
 import { buildIds, reusablePrefix, specials } from "../room/conversation.js";
-import { tokenTexts, constrainedSampler, OwnIds, encodeTurn } from "./model-common.js";
+import { tokenTexts, constrainedSampler, OwnIds, encodeTurn, ContextFull } from "./model-common.js";
 import { isPrefix, pinSplit } from "./prefix.js";
 
 const PIN_SLOT = "engine-model:pin";
@@ -42,7 +42,7 @@ export function engineModel(engine, tok, { thinking = false, maxNew = 1024, K = 
     own.prune(turns.filter((t) => t.role === "assistant").map((t) => t.text));
     const T = turns.map((t) => (t.role === "assistant" ? { role: "assistant", ids: own.get(t.text) || encodeTurn(tok, t.text) } : { role: "user", text: t.text }));
     const ids = buildIds(tok, { system, turns: T, thinking });
-    if (ids.length + 2 > engine.maxSeq) throw new Error(`conversation is ${ids.length} tokens; the context is ${engine.maxSeq}`);
+    if (ids.length + 2 > engine.maxSeq) throw new ContextFull(ids.length, engine.maxSeq);   // the agent ends the request (reason "context")
     let reused = reusablePrefix(fed, ids);
     // the middle changed: resume after the system prompt + tools if that is still the start
     if (!reused && pinned && pinned.length < ids.length && isPrefix(pinned, ids)) {

@@ -1115,3 +1115,22 @@ Phone-side hop gaps (phone send → next frame in, plain decode laps of traced r
   on 09-29 waited out the Mac GPU lock (90 min; the Spark+Mac integration job held it while waiting for the Spark
   GPU) and further runs were not permitted in this session. The keep-alive also runs on computer-computer links
   (~100 one-byte messages/s per link while generating); a regression there is unlikely but unverified.
+
+## 2026-09-29: long context at 1K, 8K and 32K, f16 vs int8 KV (issue #71, branch perf/longer-context-timing), GB10 Deno
+
+`cd tests && MODEL=moe KV=f16|q8 HW=GB10 deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights bench_ctx.js`, then `bench_ctx_compare.js f16.log q8.log`. maxSeq 33024 for both. Prefill tok/s is for the tokens added to reach that fill (1024, then 7168, then 24576). Decode is 32 tokens of whatever the text is at that point, so it is noisy; read it as "no collapse at 32K", not as a trend. Other jobs were queued on the GPU but not running.
+
+| Date | Model | Hardware | KV | Context | Prefill tok/s | Plain decode tok/s | Spec decode tok/s | Spec = plain |
+|---|---|---|---|---|---|---|---|---|
+| Sep 29 | moe | GB10 (Deno) | f16 | 1K | 136.6 | 11.8 | 14.17 (21/36) | yes |
+| Sep 29 | moe | GB10 (Deno) | f16 | 8K | 116 | 22.13 | 24.16 (17/42) | yes |
+| Sep 29 | moe | GB10 (Deno) | f16 | 32K | 125.5 | 9.92 | 13.07 (24/27) | yes |
+| Sep 29 | moe | GB10 (Deno) | q8 | 1K | 126.1 | 14.58 | 23.34 (22/33) | yes |
+| Sep 29 | moe | GB10 (Deno) | q8 | 8K | 94.7 | 13.79 | 13.21 (17/42) | yes |
+| Sep 29 | moe | GB10 (Deno) | q8 | 32K | 36.2 | 19.3 | 28.48 (24/27) | yes |
+
+- int8 KV gave the same 32 greedy tokens as f16 at every fill.
+- int8 KV prefill at 32K is 0.29x f16 (679.6 s vs 195.8 s): the engine turns tiled prefill attention off with kvQ8, so long prompts fall back to the slower attention path.
+- KV cache: 0.63 GB f16, 0.35 GB int8 at this maxSeq.
+- Not yet run: the 27B at 1K / 8K / 32K (f16 and int8), and repeated decode runs to average out the noise.
+- int8 KV decision for now: keep it off by default. It saves memory and keeps the tokens, but a 32K prompt takes 3.5x as long to prefill. Revisit once tiled prefill attention supports int8 KV.

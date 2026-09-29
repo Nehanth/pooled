@@ -2,40 +2,60 @@ name: CI
 on:
   push: { branches: [main, feat/engine-opt] }
   pull_request:
+# read-only token: no job here writes to the repo
+permissions: { contents: read }
+# a new push to a PR cancels its older run; main keeps every run
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Actions are pinned to full commit SHAs (the tag in the comment); bump them together.
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: denoland/setup-deno@v2
-        with: { deno-version: v2.x }
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed   # v2.0.5
+        # a pinned Deno so a new release can't turn CI red on its own; cache: the deno.land std
+        # modules generator.test.js imports, keyed on deno.lock
+        with: { deno-version: v2.9.5, cache: true }
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020   # v4.4.0
         with: { node-version: 22 }
-      - name: Syntax check (engine, room, harness, site, tests incl. unit and e2e, benchmarks)
+      - name: Syntax check (engine, room, harness, site, tests incl. unit and e2e, benchmarks, scripts)
         run: |
-          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js; do node --check "$f"; done
+          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js scripts/*.mjs; do node --check "$f"; done
       - name: Unit tests (no GPU)
+        id: unit
         # the unit tests import node: builtins via tests/weight_cache.js; without npm ci there is no local
         # node_modules, so Deno must not read package.json (it would look for @types/node there)
         env: { DENO_NO_PACKAGE_JSON: "1" }
         # --parallel runs test files on all cores; the slow MoE layout sweep is split across files for it
-        run: deno test --parallel --allow-read tests/unit
+        run: deno test --parallel --allow-read --junit-path=unit-report.xml tests/unit
       - name: pooled serve HTTP bridge (Node, a stand-in room)
         run: node --test cli/test/*_test.mjs
       - name: Kernel generator sanity
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: deno run --allow-read tests/unit/generator_smoke.js
+      - name: No failed, errored or unexplained skipped unit tests
+        # deno test only fails on failures; this also fails on 0 tests and on a skip not listed in the script
+        # (runs after a test failure too, for the list; not when an earlier step kept the tests from running)
+        if: ${{ !cancelled() && steps.unit.outcome != 'skipped' }}
+        run: node scripts/check-test-report.mjs unit-report.xml
+      - name: tests/run.sh selftest (no GPU; a printed FAIL must fail the run)
+        env: { DENO_NO_PACKAGE_JSON: "1" }
+        run: tests/run.sh selftest
   browser:
     # Code mode's preview in headless Chromium, no GPU needed. Optional until it has a track record in CI.
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020   # v4.4.0
         with: { node-version: 22, cache: npm }
       - name: Cache Playwright browsers
         id: pw-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830   # v4.3.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
