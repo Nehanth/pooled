@@ -621,7 +621,8 @@
   #ai-redeal { width: 100%; font: 500 13px/1 var(--sans); border-color: var(--warn); color: var(--warn-text); }
   #redeal-why { font-size: 12px; color: var(--ink-2); }
   #ai-give { width: 100%; font: 500 13px/1 var(--sans); }
-  #ai-panel:is(.loading, .online) #ai-give { display: none; }
+  #ai-panel:is(.loading, .online) :is(#ai-give, #ai-why) { display: none; }
+  #ai-why { font-size: 12px; line-height: 1.45; color: var(--ink-2); text-align: center; }
   #ai-loading { display: none !important; }
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
   /* loading: the landing's pick card. The logo's wave, what loads, each device's share of it, and
@@ -1494,6 +1495,7 @@
           <p class="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
           <button id="ai-start" class="primary">Start the model</button>
           <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
+          <p id="ai-why" hidden>No device in this room can run a model: none has WebGPU. Join from a laptop or desktop in Chrome or Edge (or Safari 26) to start one.</p>
           <div id="redeal-why" hidden></div>
           <button id="ai-redeal" type="button" hidden>Re-deal the layers</button>
         </div>

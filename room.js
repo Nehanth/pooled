@@ -325,7 +325,9 @@ function renderLadder(pledged) {
   el.innerHTML = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + ladder(PICK_NEED, pledged).map((x) => {
     const gb = `<span class="nd">${NEED_GB[x.key] ?? ""} GB</span>`;
     const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">needs ${x.short} GB more</span>`;
-    return `<button type="button" class="rung${x.ok ? " ok" : " short"}${x.key === $("ai-model").value ? " sel" : ""}" data-k="${x.key}" aria-pressed="${x.key === $("ai-model").value}"${x.ok ? "" : ` title="${giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
+    // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
+    const sel = !none && x.key === $("ai-model").value;
+    return `<button type="button" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-pressed="${sel}"${x.ok ? "" : ` title="${giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
 }
 $("ai-ladder").addEventListener("click", (e) => {
@@ -356,6 +358,8 @@ function updateNeed(pledged) {
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
   const give = giveFor(need - pledged);
   $("ai-give").hidden = ok || !give || ai.busy || !!ai.engine;
+  // every device here is chat only: say why Start is off, right under it
+  $("ai-why").hidden = pledged > 0 || ai.busy || !!ai.engine;
   // and say so beside the stepper, which is the one-tap fix (not a second device)
   $("ap-me-hint").hidden = ok || !give;
   $("ap-me-hint").textContent = `Raise this to ${give} GB to fit ${shortName($("ai-model").value)}.`;
