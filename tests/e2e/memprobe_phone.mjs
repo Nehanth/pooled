@@ -48,6 +48,11 @@ async function stop() {
   if (sid) { try { await wd("DELETE", `/session/${sid}`, null, 30000); } catch {} sid = null; }
   if (driver) { driver.kill(); driver = null; }
 }
+// a web content process that iOS kills can take the WebDriver session with it: start a new one
+async function ensure() {
+  try { await wd("GET", S("/url"), null, 15000); return; } catch (e) { log("session gone, restarting:", String(e).slice(0, 160)); }
+  await stop(); await sleep(5000); await start();
+}
 process.on("SIGTERM", async () => { await stop(); process.exit(1); });
 process.on("SIGINT", async () => { await stop(); process.exit(1); });
 
@@ -56,16 +61,19 @@ const MP = () => { const m = window.__mp; if (!m) return null; const e = m.event
   return { boot: m.boot, run: m.run, phase: m.phase, jsMB: m.jsMB, gpuMB: e.gpuMB, steps: m.steps, last: e.ev + (e.info ? " " + e.info : ""), t: m.t,
     died: m.died, err: m.err, result: m.result, adapter: m.adapter, lost: m.lost || null, load: m.load ? { ...m.load, tensors: m.load.tensors.length } : null, cacheHits: m.cacheHits || 0 }; };
 async function probeRun(base, q, maxMin) {
+  await ensure();
   const run = `r${Date.now().toString(36)}`;
   const url = base + (base.includes("?") ? "&" : "?") + q + "&run=" + run;
   const out = { q, run, url, timeline: [] };
   await wd("POST", S("/url"), { url }, 90000);
-  let boot = null, misses = 0; const tEnd = Date.now() + maxMin * 60e3;
+  let boot = null, misses = 0, nulls = 0; const tEnd = Date.now() + maxMin * 60e3;
   while (Date.now() < tEnd) {
     await sleep(1000);
     let s;
-    try { s = await exec(MP); misses = 0; } catch (e) { if (++misses > 20) { out.end = "no answer"; out.error = String(e).slice(0, 200); break; } continue; }
-    if (!s) continue;
+    try { s = await exec(MP); misses = 0; } catch (e) { if (++misses > 20 || /invalid session|no such window|session.*not.*exist/i.test(String(e))) { out.end = "no answer"; out.error = String(e).slice(0, 200); break; } continue; }
+    // a page without __mp after the probe had booted: Safari shows its own error page instead of reloading
+    if (!s) { if (boot && ++nulls > 15) { out.end = "no answer"; break; } continue; }
+    nulls = 0;
     if (!boot) boot = s.boot;
     out.timeline.push([Math.round((Date.now() - t0) / 1000), s.phase, Math.round(s.jsMB), Math.round(s.gpuMB || 0), s.steps, s.last.slice(0, 80)]);
     if (s.boot !== boot || s.phase === "died") {
@@ -76,6 +84,16 @@ async function probeRun(base, q, maxMin) {
     if (out.timeline.length % 10 === 1) log(q, JSON.stringify(out.timeline[out.timeline.length - 1]));
   }
   out.end = out.end || "timeout";
+  if (out.end === "no answer" || out.end === "timeout") {
+    // read the breadcrumb from a fresh page: did the tab die, and at which step?
+    try {
+      await ensure();
+      await wd("POST", S("/url"), { url: base + (base.includes("?") ? "&" : "?") + "mode=report&run=" + run + "-report" }, 90000);
+      await sleep(3000);
+      const s = await exec(MP);
+      if (s?.died?.run === run) { out.end = "died"; out.died = s.died; out.recovered = true; }
+    } catch (e) { out.reportError = String(e).slice(0, 200); }
+  }
   if (out.timeline.length > 400) out.timeline = [...out.timeline.slice(0, 50), ...out.timeline.slice(-350)];
   // a clean page for the next run (and let the phone settle)
   try { await wd("POST", S("/url"), { url: base + (base.includes("?") ? "&" : "?") + "mode=clear" }, 60000); } catch {}
