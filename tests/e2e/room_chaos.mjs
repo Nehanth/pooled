@@ -245,6 +245,8 @@ async function loadModel(names) {
   const host = tabs[names[0]];
   await host.waitForTimeout(2000);
   await host.selectOption("#ai-model", MODEL);
+  // split by memory so every device holds layers (the default split for speed can leave the host alone)
+  await host.evaluate(() => { const s = document.getElementById("ai-split"); if (s) { s.value = "memory"; s.dispatchEvent(new Event("change", { bubbles: true })); } });
   const tl = Date.now();
   await host.click("#ai-start");
   const prog = setInterval(async () => { const st = {}; for (const n of names) st[n] = (await snap(tabs[n])).status; log("loading", JSON.stringify(st).slice(0, 400)); }, 20000);
