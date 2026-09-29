@@ -441,7 +441,7 @@ function selfStepper() {
 
 // --- connection wiring ---
 function wire(conn, name, meta, initiator = false) {
-  const entry = { conn, name: name || conn.peer, meta: meta || {}, rtt: null, card: null, link: makeLink(), stripes: [] };
+  const entry = { conn, name: name || conn.peer, meta: meta || {}, rtt: null, card: null, link: makeLink(), stripes: [], seen: performance.now() };
   conns.set(conn.peer, entry);
   if (WIRE_STRIPES > 0) {
     attachWire(entry.link, conn, (m) => onData(conn.peer, m));
@@ -532,6 +532,7 @@ function onData(from, d) {
     return;
   }
   const e = conns.get(from);
+  if (e) e.seen = performance.now();   // any message counts as a sign of life (the ping loop drops silent links)
   if (!d || typeof d.t !== "string") return;
   if (d.t.startsWith("ai-")) { aiOnData(from, d); return; }
   switch (d.t) {
@@ -651,7 +652,22 @@ async function bwTest(id) {
 window.addEventListener("pagehide", () => { try { broadcastAll({ t: "leaving" }); } catch {} });
 
 // --- ping loop ---
-setInterval(() => broadcastAll({ t: "ping", ts: performance.now() }), 2500);
+// Every device answers a ping at once, so a link that has said nothing for SILENT_MS is a device that
+// vanished without a clean close (a crashed or killed tab, a laptop asleep, wifi gone): no pagehide, and
+// the data channel's own close can take minutes to surface. Treat it as gone, the same path as a close.
+// A late tick means this tab was the one stalled (throttled, or a long task): its queue of pongs is not
+// read yet, so it judges nobody on that tick.
+const PING_MS = 2500, SILENT_MS = 10000;
+let pingAt = performance.now();
+setInterval(() => {
+  const now = performance.now(), late = now - pingAt > 2 * PING_MS;
+  pingAt = now;
+  for (const [id, e] of [...conns]) {
+    if (late) { e.seen = now; continue; }
+    if (now - e.seen > SILENT_MS) { log("room", `${e.name || id} stopped answering for ${Math.round((now - e.seen) / 1000)} s: dropping it`); try { e.conn.close(); } catch {} }
+  }
+  broadcastAll({ t: "ping", ts: now });
+}, PING_MS);
 
 const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
 $("gb-minus").addEventListener("click", () => stepGB(-1));
