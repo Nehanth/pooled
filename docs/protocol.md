@@ -21,7 +21,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-inv-req {url}` / `ai-inv {url, have}` | host → all / all → host | before dealing, the host asks what byte ranges of the model each device has cached; the inventory goes out with every `ai-load` (`inv`) |
 | `ai-wget {id, url, lo, hi}` / `ai-wpart {id, off, data \| done \| miss}` | device ↔ device | take a cached range from another device instead of the model host, in 64 KB parts; any failure falls back to the network |
 | `ai-stop` | guest → host | stop the answer being generated. Honoured from the device that asked (the host can always stop); decoding ends after the lap in flight and `ai-gendone` unlocks every screen |
-| `ai-degraded {why}` | host → all | a device in the chain left; every lap in flight failed at once and the room waits for a re-deal |
+| `ai-degraded {why}` | host → all | a device in the chain left (or stopped responding, see Drop detection); every lap in flight failed at once and the room waits for a re-deal |
 | `ai-redeal {by, model}` | host → all | the host is dealing the layers again over the devices now in the room (after a departure, or to include late joiners); fresh `ai-load`s follow, cached ranges reload in seconds, the conversation is kept and re-prefilled on the next question |
 | `ai-ready-all {model}` to one device | host → newcomer | a device that joins an online room becomes an ask-only guest right away, followed by `ai-history {items}` (the last 20 exchanges) when the chat is visible to everyone |
 | `ai-style {persona, sampling, thinking}` | host → all | the host changed the answer style (screens show a toast); takes effect on the next question |
@@ -41,7 +41,7 @@ Control rides on frames. A frame's header flags byte (`room/transport.js` `packF
 
 Checkpoint control rides the same way, in header bytes 24..31 (u16 each, 0 = none): `sv` saves this device's state (its layers' KV rows, DeltaNet states, conv windows) as GPU slot `sv` before the frame, `ld` loads slot `ld`, `dp` drops up to two slots (`0xffff` = all). A device applies them in the order rollback, save, drop, reset, load, then runs the frame and forwards the control with it. The host saves after every answer (`?ckpt=N` keeps the last N, default 2) and loads the longest saved answer that is a prefix of a new prompt, so a regenerate or branch prefills only what is new (docs/long-context-and-sessions.md).
 
-Hidden states travel as binary frames: an f16-packed `Uint16Array` (10 KB for `dim = 5120`) with the wire format flag `WIRE_F16`; decoders accept f32 for older peers. Frames are correlated by position (`pos` / `basePos`), and the host keeps a timeout per outstanding lap.
+Hidden states travel as binary frames: an f16-packed `Uint16Array` (10 KB for `dim = 5120`) with the wire format flag `WIRE_F16`; decoders accept f32 for older peers. Frames are correlated by position (`pos` / `basePos`), and the host keeps a timeout per outstanding lap: 30 s for a token lap and 90 s for a verify or prefill round until four decode laps have been measured, then `max(15 s, 6 × the slowest recent lap + 2 × RTT + 2 s)` for decode laps (`lapTimeout` in `room/liveness.js`). A dead device is caught sooner by drop detection; the lap timeout is for a frame lost on a live chain.
 
 ## Ordering guarantees
 
@@ -61,6 +61,11 @@ The host owns the conversation: `{system, turns}` rendered to ChatML ids by `roo
 | `hello {name, meta, v, died?}` | both ways on every link | `v` is the protocol version; a mismatch gets `bye {reason}` and the newcomer is told to reload. `died` is a joiner's crumb from a tab that was killed (surfaced on the host) |
 | `hello {…, back: 1}` | returning guest → host | a device reconnecting to a host that resumed the room (it keeps its transcript, so no `ai-history`) |
 | `leaving` | all → all | sent on `pagehide`; the receiver closes the link at once instead of waiting for ICE to notice (tens of seconds), so a departure mid-answer fails within a lap |
+| `ping {ts}` / `pong {ts}` | all → all / reply | every 2.5 s to every link (the RTT on each card); while an answer runs the host also pings each device in the chain every 500 ms (drop detection) |
+
+## Drop detection
+
+A device that dies without a `leaving` (its network drops, the tab freezes or is killed) used to hold the room until ICE gave up (~30 s) or a lap timed out. While an answer runs, the host now counts anything it receives from a chain device as a sign of life (a `pong` to its 500 ms `ping`, any control message, any slice on any of its wire channels) and closes the link of a device silent for longer than `clamp(3 s + 3 × RTT, 3.5 s, 5 s)` (`room/liveness.js`). Closing it takes the departure path: every lap in flight fails, `ai-degraded {why: "<name> stopped responding (layers …)"}` goes out and the host offers a re-deal. Silence before the answer began does not count, and a host tab that itself stalled (a timer tick more than 1.2 s late) restarts the count rather than blaming every device. The limit covers SCTP head-of-line stalls on a working link: with 5% loss the longest silence measured was 2.5 s at a 300 ms round trip (limit 3.9 s) and 3.65 s at 600 ms, i.e. 300 ms one way (limit 4.8 s) (tests/e2e/room_drop.mjs). Only the host judges and it only uses `ping`/`pong`, which every protocol version answers, so this needs no protocol change. `?hb=0` turns it off.
 
 ## Resuming a room
 
