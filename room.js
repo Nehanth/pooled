@@ -349,6 +349,10 @@ function updateNeed(pledged) {
     : `Needs ${need} GB. The room has ${has} GB, ${(need - pledged).toFixed(1)} GB short.`;
   $("ai-need").classList.toggle("ok", ok);
   if (!ai.busy && !ai.engine) $("ai-start").disabled = !ok;
+  // why Start is off, for screen readers (sighted users see it in the rows and the pool card)
+  $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
+    : `${shortName($("ai-model").value)} needs ${need} GB and the room has ${has} GB, ${+(need - pledged).toFixed(1)} GB short. Invite a device or give more memory.`;
+  if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
 }
