@@ -188,3 +188,26 @@ Deno.test("codingTools with a server: a snapshot that fails is reported, not 're
   ok(/preview :5174 not updated: big\.md is 100 B/.test(r), r);
   s.close();
 });
+
+Deno.test("serve lists errors before warnings, repeats folded; preview_logs keeps the first error in sight", async () => {
+  const s = server(app()), t = T(s);
+  const off = fakeFrame(s, 5173, () => [
+    { level: "warn", text: "AudioContext was not allowed to start", ms: 50 },
+    { level: "error", text: "ReferenceError: grid is not defined", src: "game.js", line: 12, col: 3, ms: 100 },
+    { level: "error", text: "TypeError: cannot read 'x'", src: "game.js", line: 80, col: 1, ms: 116 },
+    { level: "error", text: "ReferenceError: grid is not defined", src: "game.js", line: 12, col: 3, ms: 132 },
+  ]);
+  const r = await t.serve.run({});
+  const rows = r.split("\n");
+  eq(rows[1], "loaded in 12 ms · 3 errors, 1 warning:");
+  ok(/error game\.js:12:3 ReferenceError: grid is not defined ×2$/.test(rows[2]), r);
+  ok(/error game\.js:80:1 TypeError/.test(rows[3]) && /warn AudioContext/.test(rows[4]), r);
+  off();
+  // the first error, then a flood of logs that pushes it out of preview_logs' window
+  const since = s.cursor(5173);
+  s.pushLog(5173, { level: "error", text: "SyntaxError: missing ) after argument list", src: "game.js", line: 7, col: 20, ms: 10, rev: s.snapshot(5173).rev });
+  for (let i = 0; i < 80; i++) s.pushLog(5173, { level: "log", text: "frame " + i, ms: 20, rev: s.snapshot(5173).rev });
+  const logs = await t.preview_logs.run({ since });
+  ok(/\nfirst error: \[0\.0s\] error game\.js:7:20 SyntaxError: missing \) after argument list\n/.test(logs), logs);
+  s.close();
+});

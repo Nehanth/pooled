@@ -65,7 +65,7 @@ const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert:
 }).listen(TLS_PORT, "127.0.0.1");
 const peerServer = spawn(path.join(ROOT, "node_modules/.bin/peerjs"), ["--port", String(SIGNAL_PORT), "--path", "/"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 1500));
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}&maxnew=${MAXNEW}&peerweights=0` + (arg("query") ? "&" + arg("query") : "");   // --query "gpusample=0": extra room URL options on every device
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?split=memory&signal=127.0.0.1:${SIGNAL_PORT}&maxnew=${MAXNEW}&peerweights=0` + (arg("query") ? "&" + arg("query") : "");   // --query "gpusample=0": extra room URL options on every device
 
 // One Chromium per device, each with its own on-disk profile: a separate browser process and GPU
 // process per device, like separate machines, and the Cache API weight store on disk. (With every

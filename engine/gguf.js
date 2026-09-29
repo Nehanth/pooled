@@ -437,6 +437,8 @@ export function tokenizerFromGGUF(meta) {
       vocab: Object.fromEntries(tokens.map((t, i) => [t, i])),
       merges,
     },
+    // which pre-tokenizer split the model uses (qwen2, qwen35, ...); see preSplitter in tokenizer.js
+    pre: meta["tokenizer.ggml.pre"],
   };
   return tj; // caller passes through makeTokenizer-compatible builder
 }
