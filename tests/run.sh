@@ -10,6 +10,7 @@
 # WEIGHT_CACHE=0 disables it, WEIGHT_CACHE=<dir> moves it.
 set -uo pipefail
 cd "$(dirname "$0")"
+trap 'rm -f "${TMPDIR:-/tmp}"/pooled-run.$$.*' EXIT   # a Ctrl-C mid-test leaves no temp output behind
 WC="${WEIGHT_CACHE:-$HOME/.cache/swarmllm-weights}"
 D="deno run --unstable-webgpu --allow-read --allow-env --allow-write=$WC --allow-net"   # net: test_shard fetches from Hugging Face
 quick=(test_selftest.js test_qwen.js test_smollm.js test_stream.js test_batch.js test_reset.js test_qwen_split.js test_qwen_stream.js test_batch_split.js)
@@ -19,25 +20,26 @@ q38=(test_q38.js test_batch_q38.js test_mtp.js test_b4.js test_twins.js test_gem
 # run_one <file> [tail lines]: runs one test, prints the last lines of its output, returns 1 on a
 # nonzero exit, a FAIL line, or (STRICT=1) a SKIP line. The full output is checked, not just the tail.
 run_one() {
-  local out code tmp
-  tmp=$(mktemp "${TMPDIR:-/tmp}/pooled-run.XXXXXX")
+  local code tmp r=0
+  tmp=$(mktemp "${TMPDIR:-/tmp}/pooled-run.$$.XXXXXX")
   if [ "${2:-4}" = all ]; then $D "$1" 2>&1 | grep -v "^TU:\|^MESA" | tee "$tmp"; code=${PIPESTATUS[0]}   # streams
   else $D "$1" 2>&1 | grep -v "^TU:\|^MESA" >"$tmp"; code=${PIPESTATUS[0]}; tail -n "${2:-4}" "$tmp"; fi
-  out=$(cat "$tmp"); rm -f "$tmp"
-  if [ "$code" -ne 0 ]; then echo "--- $1 exited $code"; return 1; fi
-  if grep -qE '(^|[^A-Za-z])FAIL(ED)?([^A-Za-z]|$)' <<<"$out"; then echo "--- $1 printed FAIL but exited 0"; return 1; fi
-  if [ "${STRICT:-0}" = 1 ] && grep -qE '(^|[^A-Za-z])SKIP(PED)?([^A-Za-z]|$)' <<<"$out"; then echo "--- $1 printed SKIP (STRICT=1)"; return 1; fi
-  return 0
+  if [ "$code" -ne 0 ]; then echo "--- $1 exited $code"; r=1
+  elif grep -qE '(^|[^A-Za-z])FAIL(ED)?([^A-Za-z]|$)' "$tmp"; then echo "--- $1 printed FAIL but exited 0"; r=1
+  elif [ "${STRICT:-0}" = 1 ] && grep -qE '(^|[^A-Za-z])SKIP(PED)?([^A-Za-z]|$)' "$tmp"; then echo "--- $1 printed SKIP (STRICT=1)"; r=1; fi
+  rm -f "$tmp"
+  return $r
 }
 
 # selftest: each fixture's name says what run_one must return (pass_* 0, fail_* 1, skip_* 0 or 1 under STRICT=1)
 selftest() {
-  local bad=0 f want got
+  local bad=0 n=0 f want got
   for f in fixtures/run_sh/*.js; do
     case "$(basename "$f")" in pass_*) want=0;; fail_*) want=1;; skip_*) want=$([ "${STRICT:-0}" = 1 ] && echo 1 || echo 0);; *) continue;; esac
-    run_one "$f" 0 >/dev/null; got=$?
+    run_one "$f" 0 >/dev/null; got=$?; n=$((n + 1))
     if [ "$got" -eq "$want" ]; then echo "ok   $f -> $got"; else echo "BAD  $f -> $got, expected $want"; bad=1; fi
   done
+  [ "$n" -gt 0 ] || { echo "BAD  no fixtures found in tests/fixtures/run_sh/"; bad=1; }   # a missing dir must not pass
   [ "$bad" -eq 0 ] && echo "RUN.SH SELFTEST PASS" || echo "RUN.SH SELFTEST BROKEN"
   return $bad
 }

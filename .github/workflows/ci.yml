@@ -23,6 +23,9 @@ jobs:
       - name: Kernel generator sanity
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: deno run --allow-read tests/unit/generator_smoke.js
+      - name: tests/run.sh selftest (no GPU; a printed FAIL must fail the run)
+        env: { DENO_NO_PACKAGE_JSON: "1" }
+        run: tests/run.sh selftest
   browser:
     # Code mode's preview in headless Chromium, no GPU needed. Optional until it has a track record in CI.
     runs-on: ubuntu-latest
