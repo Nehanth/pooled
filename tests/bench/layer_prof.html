@@ -59,21 +59,29 @@ try {
     }
     checks.forEach((c, k) => { c.bitsEqEngine0 = c.seq.every((v, i) => bits(v, checks[0].seq[i])); c.relVsEngine0 = Math.max(...c.seq.map((v, i) => rel(checks[0].seq[i], v))); });
     checks.forEach((c, k) => log(`check [${k}]: decode ${c.decodeEqVerify ? "==" : "!="} verify bitwise; vs [0] ${c.bitsEqEngine0 ? "same bits" : "relDiff " + c.relVsEngine0.toExponential(2)}`));
-    const W = engs.map(() => ({ plain: [], block: [] }));
+    // Safari rounds performance.now() to 1 ms, so besides per-call walls each round also records the mean
+    // over its calls (one clock read around all of them; with &gap the idle time is subtracted as scheduled)
+    const W = engs.map(() => ({ plain: [], block: [], plainMean: [], blockMean: [] }));
     const lap = async (e, k, warm) => {
+      let t0 = performance.now();
       for (let i = 0; i < N; i++) { await idle(); const t = performance.now(); await e.runHidden(x1, P0 + i); if (!warm) W[k].plain.push(performance.now() - t); }
+      if (!warm && !GAP) W[k].plainMean.push((performance.now() - t0) / N);
+      t0 = performance.now();
       for (let i = 0; i < N / 2; i++) { await idle(); const t = performance.now(); await e.runHiddenBatch(xb, P0 + COLS * i, { base: 0, total: COLS }); if (!warm) W[k].block.push(performance.now() - t); }
+      if (!warm && !GAP) W[k].blockMean.push((performance.now() - t0) / (N / 2));
     };
     for (let k = 0; k < engs.length; k++) await lap(engs[k], k, true);
     for (let r = 0; r < R; r++) {
       const order = engs.map((_, k) => (r % 2 ? engs.length - 1 - k : k));
       for (const k of order) await lap(engs[k], k, false);
-      log(`round ${r + 1}/${R}: ` + engs.map((_, k) => `[${k}] plain ${r2(med(W[k].plain.slice(-N)))} block${COLS} ${r2(med(W[k].block.slice(-N / 2)))}`).join(", "));
+      log(`round ${r + 1}/${R}: ` + engs.map((_, k) => `[${k}] plain ${r2(med(W[k].plain.slice(-N)))} (mean ${r2(W[k].plainMean.at(-1) ?? NaN)}) block${COLS} ${r2(med(W[k].block.slice(-N / 2)))} (mean ${r2(W[k].blockMean.at(-1) ?? NaN)})`).join(", "));
     }
     const p95 = (a) => r2([...a].sort((x, y) => x - y)[Math.floor(0.95 * a.length)]);
     window.RESULT = { lo: LO, hi: HI, tune, ua: navigator.userAgent, pos: P0, gap: GAP, rounds: R, n: N, cols: COLS,
       variants: sets.map((o, k) => ({ opts: o, decodeEqVerify: checks[k].decodeEqVerify, bitsEqEngine0: checks[k].bitsEqEngine0, relVsEngine0: checks[k].relVsEngine0, plainMs: r2(med(W[k].plain)), plainP95: p95(W[k].plain), blockMs: r2(med(W[k].block)), blockP95: p95(W[k].block),
-        plainRounds: Array.from({ length: R }, (_, r) => r2(med(W[k].plain.slice(r * N, (r + 1) * N)))), blockRounds: Array.from({ length: R }, (_, r) => r2(med(W[k].block.slice(r * N / 2, (r + 1) * N / 2)))) })) };
+        plainRounds: Array.from({ length: R }, (_, r) => r2(med(W[k].plain.slice(r * N, (r + 1) * N)))), blockRounds: Array.from({ length: R }, (_, r) => r2(med(W[k].block.slice(r * N / 2, (r + 1) * N / 2)))),
+        plainMean: W[k].plainMean.length ? r2(med(W[k].plainMean)) : null, blockMean: W[k].blockMean.length ? r2(med(W[k].blockMean)) : null,
+        plainMeanRounds: W[k].plainMean.map(r2), blockMeanRounds: W[k].blockMean.map(r2) })) };
     log(JSON.stringify(window.RESULT.variants));
     throw "done";
   }
