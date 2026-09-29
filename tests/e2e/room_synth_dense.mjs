@@ -153,7 +153,7 @@ async function session(browser, modelBytes, peerjsJs, nDev, label) {
   const status = (p) => p.evaluate(() => [document.getElementById("ai-status")?.textContent, document.getElementById("ldg-sub")?.textContent].join(" | "));
   const pledges = pledgesFor(nDev);
   const out = { label, devices: nDev, rounds: [], errors: errs };
-  const base = `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}`;
+  const base = `http://127.0.0.1:${PORT}/p2p.html?split=memory&signal=127.0.0.1:${SIGNAL_PORT}`;
   const maxNewQ = arg("max-new", ""); const baseQ = (maxNewQ ? `&maxnew=${maxNewQ}` : "") + (arg("netlag") ? `&netlag=${arg("netlag")}` : "") + (arg("query") ? `&${arg("query")}` : "");
   try {
     for (const p of Object.values(tabs)) await p.goto(base + baseQ);
