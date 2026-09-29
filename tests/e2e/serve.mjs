@@ -305,6 +305,59 @@ try {
     check("host: the stopped answer is marked stopped", await page.evaluate(() => /stopped/.test([...document.querySelectorAll(".m.bot")].map((m) => m.textContent).join(" "))));
   });
 
+  await soft("unicode", async () => {
+    const LINE = "🧑‍💻 👍🏽 🦀 🫠 नमस्ते दुनिया ∃y 𝔘𝔫𝔦";
+    const body = { model: "x", temperature: 0, max_tokens: 80, messages: [{ role: "user", content: `Repeat exactly, nothing else: ${LINE}` }] };
+    const j = await (await post("/v1/chat/completions", body)).json();
+    const text = j.choices?.[0]?.message?.content || "";
+    const s = await readSSE(await post("/v1/chat/completions", { ...body, stream: true }));
+    const streamed = s.events.map((e) => e.data?.choices?.[0]?.delta?.content || "").join("");
+    check("characters split across tokens arrive whole (no U+FFFD), non-stream and stream", text.length > 5 && !text.includes("\uFFFD") && !streamed.includes("\uFFFD") && streamed === text, JSON.stringify({ text, streamed }));
+  });
+
+  await soft("anthropic usage", async () => {
+    const msgs = [{ role: "user", content: Q }, { role: "assistant", content: turn1 || "Paris." }, { role: "user", content: "And of Spain?" }];
+    const o = await (await post("/v1/chat/completions", { model: "x", temperature: 0, max_tokens: 20, messages: msgs })).json();
+    const a = await (await post("/v1/messages", { model: "x", temperature: 0, max_tokens: 20, messages: msgs }, { "anthropic-version": "2023-06-01" })).json();
+    const u = a.usage || {};
+    // a cache read only happens when the room still holds this prefix; either way input + cache reads must equal the prompt
+    check("Anthropic input_tokens leaves out cache reads (input + cache reads = OpenAI prompt_tokens)", u.input_tokens + (u.cache_read_input_tokens || 0) === o.usage?.prompt_tokens, JSON.stringify({ openai: o.usage, anthropic: u }));
+  });
+
+  await soft("thinking budget", async () => {
+    const m = await (await post("/v1/messages", { model: "x", max_tokens: 300, temperature: 0, thinking: { type: "enabled", budget_tokens: 48 },
+      messages: [{ role: "user", content: "Think it through, then answer in one sentence: why is the sky blue?" }] }, { "anthropic-version": "2023-06-01" })).json();
+    const think = m.content?.find((b) => b.type === "thinking")?.thinking || "", text = m.content?.find((b) => b.type === "text")?.text || "";
+    check("thinking.budget_tokens: the reasoning stops at the budget and the answer gets the rest", think.length > 0 && text.trim().length > 0 && m.usage?.output_tokens <= 300, JSON.stringify(m).slice(0, 400));
+  });
+
+  await soft("host stop", async () => {
+    const r = await post("/v1/chat/completions", { model: "x", max_tokens: 400, stream: true, messages: [{ role: "user", content: "Write a long story about a lighthouse." }] });
+    let clicked = false;
+    const s = await readSSE(r, async (ev) => {
+      if (!clicked && ev.data?.choices?.[0]?.delta?.content) { clicked = true; await page.waitForSelector("#ai-send.stop", { timeout: 5000 }); await page.click("#ai-send"); }
+    });
+    const last = s.events[s.events.length - 1]?.data;
+    check("host Stop: the client gets an error, not a finished answer", !!last?.error && /host stopped/.test(last.error.message) && !s.events.some((e) => e.data?.choices?.[0]?.finish_reason), JSON.stringify(last).slice(0, 200));
+  });
+
+  await soft("killed bridge", async () => {
+    const P3 = await freePort();
+    const b3 = startBridge(code, P3, ["--name", "kill-bridge"]);
+    await waitHealth(`http://127.0.0.1:${P3}`, (h) => h.ready, 30000);
+    const r = await fetch(`http://127.0.0.1:${P3}/v1/chat/completions`, { method: "POST", headers: J, body: JSON.stringify({ model: "x", max_tokens: 600, stream: true, messages: [{ role: "user", content: "Write a long story about a lighthouse." }] }) });
+    const dec = new TextDecoder(); let seen = "";
+    for await (const chunk of r.body) { seen += dec.decode(chunk, { stream: true }); if ((seen.match(/"content":"[^"]/g) || []).length >= 3) break; }
+    b3.kill("SIGKILL");
+    const t = Date.now();
+    const q = await (await post("/v1/chat/completions", { model: "x", max_tokens: 5, temperature: 0, messages: [{ role: "user", content: "Say OK." }] })).json();
+    const ms = Date.now() - t;
+    check("a bridge killed mid-answer frees the room in under 30 s (was 73 s)", q.choices?.[0]?.message && ms < 30000, `${ms} ms ${JSON.stringify(q).slice(0, 120)}`);
+    const gone = await page.waitForFunction(() => ![...document.querySelectorAll(".peer-card")].some((c) => /kill-bridge/.test(c.textContent)), null, { timeout: 30000 }).then(() => true, () => false);
+    check("host: the killed bridge's card goes", gone);
+    log("killed bridge: next answer after", ms, "ms");
+  });
+
   await soft("chat", async () => {
     const shown = await page.evaluate(() => [...document.querySelectorAll(".m")].map((m) => m.textContent).join("\n"));
     check("host chat: API exchanges show with the client and the note", /\(API\)/.test(shown) && /via API · not part of this chat's memory/.test(shown), shown.slice(-400));
