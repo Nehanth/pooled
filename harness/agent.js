@@ -34,12 +34,21 @@ export const PAGE_ERR = { warn: 3, stop: 5 };
 // the first line of a result, short enough for a note or the stop message
 export const firstLine = (s, max = 160) => { const l = String(s ?? "").split("\n")[0].trim(); return l.length > max ? l.slice(0, max) + "…" : l; };
 // the first page error a serve / preview_logs result reports ("game.js:41:5 ReferenceError: ctx is
-// not defined"), or null; "no errors" results give ""
+// not defined"), or null; "no errors" results give "". preview_logs can list older pages' logs too:
+// only its "first error:" line or the lines under the current page's "(rev N, current)" count.
+const ERR_LINE = /^(?:first error: )?\[[\d.]+s\] error (.*?)(?: ×\d+)?$/m;
 export function pageError(name, result) {
   if (name !== "serve" && name !== "preview_logs") return null;
-  const m = /^\[[\d.]+s\] error (.*?)(?: ×\d+)?$/m.exec(result);
+  let text = String(result ?? "");
+  if (name === "preview_logs") {
+    const first = /^first error: .*$/m.exec(text), cur = text.lastIndexOf(", current)\n");
+    if (first) text = first[0];
+    else if (cur >= 0) text = text.slice(cur);
+    else return null;
+  }
+  const m = ERR_LINE.exec(text);
   if (m) return firstLine(m[1]);
-  return CLEAN.test(result) ? "" : null;
+  return CLEAN.test(text) ? "" : null;
 }
 
 // head and tail of a long tool result (errors are usually at the end, headers at the start)

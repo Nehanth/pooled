@@ -118,7 +118,8 @@ export function normalizeXmlCall(text) {
 }
 
 // a call body wrapped in a Markdown fence (```json ... ```), as small models write it
-const unfence = (s) => s.replace(/^```[\w-]*[ \t]*\n?/, "").replace(/\n?```\s*$/, "");
+// (only a fence that opens the body: a value that merely ends with ``` keeps it)
+const unfence = (s) => (/^```/.test(s) ? s.replace(/^```[\w-]*[ \t]*\n?/, "").replace(/\n?```\s*$/, "") : s);
 
 // One <tool_call> body that holds several calls, as separate bodies: <function=a>..</function>
 // <function=b>..</function> (a stray <tool_call> between them, the closer forgotten, is dropped),

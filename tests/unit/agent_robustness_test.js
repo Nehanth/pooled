@@ -59,6 +59,10 @@ Deno.test("formats: several calls in one <tool_call> block run as several calls"
   eq(parseAll('<tool_call>\n{"name": "list_dir", "arguments": {}}\n{"name": "read_file", "arguments": {"path": "x"}}').calls.map((c) => c.name), ["list_dir", "read_file"]);
 });
 
+Deno.test("formats: a value that only ends with ``` keeps it", () => {
+  eq(parseCallBody("<function=write_file>\n<parameter=path>\nREADME.md\n</parameter>\n<parameter=content>\nrun:\n```\nnpm start\n```", schemaFor).arguments.content, "run:\n```\nnpm start\n```");
+});
+
 Deno.test("formats: a malformed call's error is short", () => {
   const r = parseCallBody('{"name": "write_file", "arguments": {"path": "a.js", "content": ' + '"x" + '.repeat(200) + "}}");
   ok(r.error && r.error.length <= 170, r.error);
@@ -124,6 +128,11 @@ Deno.test("loops: a page error that changes (progress) or a check without a chan
   eq(pageError("serve", "serving . on :5173\nloaded in 5 ms · no errors"), "");
   eq(pageError("read_file", "[0.1s] error x"), null);
   eq(pageError("preview_logs", "(rev 2, current)\n[1.0s] error game.js:9:2 tick failed ×12\nnext: since=13"), "game.js:9:2 tick failed");
+  // an older page's error in preview_logs is not the current page's
+  eq(pageError("preview_logs", "(rev 1)\n[0.2s] error game.js:3 old crash\n(rev 2, current)\n[1.0s] log ok\nnext: since=4"), null);
+  eq(pageError("preview_logs", "(rev 1)\n[0.2s] error game.js:3 old crash\n(rev 2, current)\n[1.0s] error game.js:5 new crash\nnext: since=4"), "game.js:5 new crash");
+  eq(pageError("preview_logs", "(3 earlier lines, since=0; newest shown)\nfirst error: [0.1s] error game.js:7:2 SyntaxError: bad\n[0.9s] log frame\nnext: since=9"), "game.js:7:2 SyntaxError: bad");
+  eq(pageError("preview_logs", "(rev 1)\n[0.2s] error game.js:3 old crash\nnext: since=2"), null);
 });
 
 Deno.test("preview feedback: errors first, repeats folded into their first copy", () => {
