@@ -286,16 +286,19 @@ button{width:120px;height:40px;margin:20px}</style></head><body><div class="game
     for (let i = 0; i < 80 && !states.includes("hung"); i++) await new Promise((r) => setTimeout(r, 100));
     clearInterval(iv);
     const ms = Math.round(performance.now() - t0);
-    // the relay is one process: the visible preview :5173 hung with it, and its own watchdog says so
-    // up to a second later; wait for that here, not in the middle of the run_js checks below
-    for (let i = 0; i < 40 && !window.__logs.some((e) => /preview hung/.test(e.text)); i++) await new Promise((r) => setTimeout(r, 100));
+    // the relay is one process: the visible previews :5173 and :5174 stalled with it, but the hang
+    // is charged to :5176 alone (its document is the newest; :5173 serves the whole project, so the
+    // write above reloaded it with the same document), and they move to fresh frames quietly (#167)
+    await new Promise((r) => setTimeout(r, 2500));
     const logs = await window.__T.preview_logs.run({ port: 5176 });
-    const out = { states, ticks, ms, frame: !!v.frame, gate: el.querySelector(".pv-run")?.textContent, logs };
+    const others = [5173, 5174].map((p) => window.__server.logs(p, 0).lines.filter((e) => /preview hung/.test(e.text)).length);
+    const out = { states, ticks, ms, frame: !!v.frame, gate: el.querySelector(".pv-run")?.textContent, logs, others, again: await window.__T.serve.run({ dir: "broken", port: 5174 }) };
     v.destroy();
     return out;
   });
   check("an infinite loop is detected; the room page kept running", hang.states.includes("hung") && hang.ticks >= hang.ms / 250 && !hang.frame, JSON.stringify(hang));
   check("the hang is in preview_logs and the pane offers to run it again", /preview hung \(infinite loop\?\)/.test(hang.logs) && /run :5176 again/.test(hang.gate || ""), JSON.stringify(hang));
+  check("the other previews are not charged with the hang, and run on", hang.others.join() === "0,0" && /loaded in \d+ ms/.test(hang.again), JSON.stringify(hang));
 
   // run_js: a hidden frame of its own, through the relay; the visible preview is untouched
   const rj = await page.evaluate(async () => {

@@ -24,7 +24,11 @@
 // watchdogs pause (the relay is one site, so one process: a snippet's loop would read as their
 // hang). Not before its hello: a relay process that is hung already must still be seen as hung.
 // When it goes while the relay is hung, the other relay previews get fresh frames, so the hung
-// process has none left.
+// process has none left. The same when a preview hangs the relay: every relay preview stops
+// answering at once, and there is no telling from here whose code is looping. The hang is charged
+// to the one that was shown a new document last (new code; a reload of the same document, as a
+// port serving the whole project gets for any write, does not count), and the others move to
+// fresh frames quietly, with no error on their ports.
 // After a hang: Chrome gives a new frame of the relay's site the process that already hosts that
 // site, and a hung process goes away only some time after its last frame. A relay frame made in
 // that window joins the hung process and never says hello. So relay frames made within QUIET_MS of
@@ -83,6 +87,7 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
   let nonce = "", rev = 0, path = null, detach = () => {}, running = autorun, gate = null;
   let url = null, expect = 0, navs = 0, html = null;
   let hello = false, beat = 0, dog = 0, helloTimer = 0, hung = false, tries = 0;
+  let shown = 0, shownDoc = "";   // when the relay was last sent a document unlike the one before
   // the in-frame capture script rate-limits itself, but the app's code can post directly
   let win0 = 0, count = 0;
   const flood = () => { const now = Date.now(); if (now - win0 > 1000) { win0 = now; count = 0; } return ++count > 300; };
@@ -182,6 +187,8 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     if (mode === "relay") {
       if (!hello) return;   // sent on hello
       frame.contentWindow?.postMessage({ pvr: "doc", html }, "*");   // the relay is sandboxed too: an opaque origin
+      const d = html.split(nonce).join("");
+      if (d !== shownDoc) { shownDoc = d; shown = Date.now(); }
       onShow?.();
       return;
     }
@@ -228,12 +235,20 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     beat = Date.now();
     dog = setInterval(() => {
       if (doc.visibilityState !== "visible" || (!run && runs)) { beat = Date.now(); return; }
-      if (Date.now() - beat > HANG_MS) onHang();
+      if (Date.now() - beat > HANG_MS) run ? onHang() : hangRelay();
     }, 500);
+  };
+  // the relay stopped answering: one process for all of this page's relay previews (see the top)
+  const hangRelay = () => {
+    const stuck = [...views].filter((v) => v === me || v.stuck());
+    const culprit = stuck.reduce((a, v) => (v.shown > a.shown ? v : a));
+    culprit.hang();
+    for (const v of stuck) if (v !== culprit) v.refresh();
   };
   const onHang = () => {
     clearInterval(dog); dog = 0;
     hung = true; hello = false; quiet();
+    shownDoc = "";   // running it again is new code again
     frame?.remove(); frame = null;
     detach(); detach = () => {};
     log("error", `preview hung (infinite loop?): no answer for ${HANG_MS / 1000} s, so it was stopped; it runs again on the next edit`);
@@ -301,7 +316,11 @@ export function mountPreview(el, source, port, { onLog = () => {}, onStatus = ()
     clearInterval(dog); dog = 0; clearTimeout(helloTimer);
     frame.remove(); makeFrame(); if (running) load();
   };
-  const me = { refresh, retry };
+  const me = {
+    refresh, retry, hang: () => onHang(),
+    get shown() { return shown; },
+    stuck: () => mode === "relay" && hello && !hung && Date.now() - beat > 1500,
+  };
   let gone = false, counted = false;
   if (!run) views.add(me);
   makeFrame();
