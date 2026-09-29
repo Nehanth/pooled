@@ -1252,7 +1252,9 @@ function chatBotStart(mid) {
   const m = document.createElement("div");
   m.className = "m bot";
   if (mid != null) m.dataset.mid = mid;
-  m.innerHTML = `<div class="who"><span class="wn"></span><span class="wd" aria-hidden="true"><i></i><i></i><i></i></span></div><div class="bubble"></div>`;
+  // the bubble stays out of the live region while tokens stream in (#ai-output is role=log);
+  // chatBotEnd swaps in a fresh bubble so a screen reader announces the finished answer once
+  m.innerHTML = `<div class="who"><span class="wn"></span><span class="wd" aria-hidden="true"><i></i><i></i><i></i></span></div><div class="bubble" aria-hidden="true"></div>`;
   m.querySelector(".wn").textContent = shortName(ai.model || $("ai-model").value) || "room";
   // until the first token: the working line (the first piece replaces it)
   m.querySelector(".bubble").append(working());
@@ -1286,6 +1288,9 @@ function chatBotPiece(text, d) {
 function chatBotEnd(note, stats) {
   if (!botEl) chatBotStart();
   if (note) botEl.pieces = [{ t: note, d: 0 }];
+  // a new bubble node (not the streamed one un-hidden) is what the log announces
+  const fresh = document.createElement("div"); fresh.className = "bubble";
+  botEl.querySelector(".bubble").replaceWith(fresh);
   renderBot(botEl, false);
   botEl.classList.remove("live");
   // a finished answer in a background tab: say so in the tab title until the tab is looked at
