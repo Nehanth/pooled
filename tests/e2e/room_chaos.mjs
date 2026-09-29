@@ -324,7 +324,7 @@ try {
         await tabs[h].goto(url(h)); await tabs[h].waitForFunction(() => document.getElementById("join-gb").value !== "");
         const w = watch(); const ts = Date.now();
         await tabs[h].click("#create-btn");
-        const ms = await until(h, (s) => s.inRoom || /error|fail|no room|could not/i.test(s.join), 45000);
+        const ms = await until(h, (s) => s.inRoom || /error|fail|no room|could not|can.t reach/i.test(s.join), 45000);
         await sleep(1000); const s = await snap(tabs[h]); w.stop();
         await sig[h].set("pass");
         const recover = await until(h, (s) => s.inRoom, 20000);
@@ -339,7 +339,7 @@ try {
         await tabs[g].fill("#code-input", code);
         const w = watch();
         await tabs[g].click("#join-btn");
-        const ms = await until(g, (s) => s.inRoom || /error|fail|no room|could not/i.test(s.join), 45000);
+        const ms = await until(g, (s) => s.inRoom || /error|fail|no room|could not|can.t reach/i.test(s.join), 45000);
         await sleep(1000); const s = await snap(tabs[g]);
         await sig[g].set("pass");
         const rec = await until(g, (s) => s.inRoom, 30000);
@@ -409,7 +409,7 @@ try {
       await tabs[N].fill("#name-input", N); await tabs[N].fill("#code-input", code);
       const tj = Date.now();
       await tabs[N].click("#join-btn");
-      const ms = await until(N, (s) => s.inRoom || /error|fail|no room|could not/i.test(s.join), 45000, tj);
+      const ms = await until(N, (s) => s.inRoom || /error|fail|no room|could not|can.t reach/i.test(s.join), 45000, tj);
       await sleep(1500); w.stop();
       row({ scenario: nm, what: `signaling down ${secs} s for every device, then back; a new device joins 10 s later`, screensAfter: scr,
         lateJoinMs: ms, lateScreen: await snap(tabs[N]), hostCards: (await snap(tabs[H])).cards, sinceBlipS: +((Date.now() - ts) / 1000).toFixed(1), timeline: w.tl });
@@ -508,7 +508,7 @@ try {
         await tabs[N].fill("#name-input", N); await tabs[N].fill("#code-input", code);
         const ts = Date.now();
         await tabs[N].click("#join-btn");
-        const ms = await until(N, (s) => s.inRoom || /error|fail|no room|could not/i.test(s.join), 45000, ts);
+        const ms = await until(N, (s) => s.inRoom || /error|fail|no room|could not|can.t reach/i.test(s.join), 45000, ts);
         await sleep(1500);
         row({ scenario: "sig-late-join-" + mode, what: "a new device joins " + label, detectMs: ms, screen: await snap(tabs[N]), hostCards: (await snap(tabs[H])).cards });
       }

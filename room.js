@@ -815,11 +815,11 @@ setInterval(() => {
 // --- drop detection (room/liveness.js) ---
 // While an answer runs, the host pings every device in the chain twice a second and treats
 // anything it hears from one (a pong, any message, any wire slice) as a sign of life. A device
-// silent past deadAfter(rtt) (3.5-5 s) is held: the laps in flight fail at once ("<name> stopped
-// responding; ask again") instead of waiting for a lap timeout, and the next question waits for
-// it. A frozen device that comes back keeps its place and layers (no re-deal); one still silent
-// after EVICT_MS (30 s) is dropped: its link is closed, which puts the room in the degraded /
-// re-deal state. ?hb=0 turns it off (A/B runs).
+// silent past deadAfter(rtt) (3.5-5 s) is held: the host says so at once, the answer waits
+// for it (Stop gives up) and a new question waits for it. A frozen device that comes back finishes
+// the answer and keeps its place and layers (no re-deal); a link ICE gives up on (~15 s) fails the
+// answer (chainLinkLost) and is redialed; a device still silent after EVICT_MS (30 s) is dropped:
+// its link is closed, which puts the room in the degraded / re-deal state. ?hb=0 turns it off.
 const liveness = makeLiveness();
 const HB_ON = new URLSearchParams(location.search).get("hb") !== "0";
 let hbLast = 0;
@@ -839,11 +839,13 @@ function hbLoop() {
     const e = conns.get(id);
     if (!e || e.dead || e.suspect) continue;
     e.suspect = { since: now - silentMs };
-    console.warn(`[room] ${e.name} silent ${silentMs} ms (limit ${limitMs} ms, rtt ${e.rtt ?? "?"} ms): failing the answer, holding its place`);
+    console.warn(`[room] ${e.name} silent ${silentMs} ms (limit ${limitMs} ms, rtt ${e.rtt ?? "?"} ms): holding the answer for it`);
     log("room", `${e.name} stopped responding; waiting for it`);
-    noteLink(peer.id + "|" + id, e.name, false);   // the next question waits for it (linksUp)
-    failWaiters(new Error(`${e.name} stopped responding; ask again`));
-    ai.fed = null; ckptClear(true);
+    noteLink(peer.id + "|" + id, e.name, false);   // a new question waits for it (linksUp)
+    // the answer is held, not failed: frames on a frozen link are late, not lost, and a device that
+    // comes back finishes it. Stop gives up now; a link ICE gives up on fails it (chainLinkLost).
+    aiStatus(`${e.name} stopped responding; waiting for it (Stop gives up)…`);
+    toast(`${e.name} stopped responding; waiting for it`);
   }
 }
 // held devices: back (heard from again) or dropped (silent past EVICT_MS)
@@ -858,7 +860,7 @@ function hbSuspects(now) {
       e.suspect = null;
       noteLink(peer.id + "|" + id, e.name, true);
       log("room", `${e.name} is responding again`);
-      if (ai.role === "host" && !ai.busy && !ai.degraded) aiStatus(`${e.name} is back: ask again`);
+      toast(`${e.name} is back`);
     } else if (st === "evict") {
       e.dead = true;
       noteLink(peer.id + "|" + id, e.name, true);

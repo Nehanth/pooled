@@ -104,8 +104,8 @@ Deno.test("lapTimeout: fixed fallback until 4 laps are measured, then tied to th
   eq(lapTimeout({ n: 3, lap: 200, max: 300 }, 30000), 30000, "too few laps");
   eq(lapTimeout({ n: 10, lap: 200, max: 300 }, 30000), LAP_MIN_MS, "fast laps: the floor");
   eq(lapTimeout({ n: 10, lap: 800, max: 1500 }, 90000, 600), LAP_MIN_MS, "a 1.5 s lap: still the floor");
-  eq(lapTimeout({ n: 10, lap: 2000, max: 2500 }, 90000, 600), 6 * 2500 + 1200 + 2000);
-  eq(lapTimeout({ n: 10, lap: 3000, max: 3300 }, 30000, 600), 6 * 3300 + 1200 + 2000, "RTT 600 ms + 5% loss: clear of the 14 s stalls seen there");
+  eq(lapTimeout({ n: 10, lap: 2000, max: 2500 }, 90000, 600), LAP_MIN_MS, "RTT 600 ms + 5% loss: clear of the 14 s stalls seen there");
+  eq(lapTimeout({ n: 10, lap: 3500, max: 4000 }, 90000, 600), 6 * 4000 + 1200 + 2000, "slow laps: tied to the slowest");
   eq(lapTimeout({ n: 10, lap: 9000, max: 12000 }, 30000), 30000, "never above the fallback");
   eq(lapTimeout({ n: 10, lap: 400, max: 0 }, 30000), 30000, "no max yet");
 });

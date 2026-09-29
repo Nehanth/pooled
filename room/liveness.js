@@ -80,10 +80,11 @@ export function suspectCheck(lastHeard, silentSince, now) {
 // far: generous against the slowest recent lap, but seconds rather than the 30-90 s fallbacks
 // used before any lap is measured (the first laps compile pipelines and warm caches). A dead
 // device is caught by the silence check above; this is for a frame lost on a live chain, so it
-// stays well clear of the stalls a lossy link causes (14 s between two tokens at RTT 600 ms and
+// stays well clear of the stalls a frozen or lossy link causes (15 s between two tokens after a
+// 12 s freeze, tests/e2e/room_chaos.mjs; 14 s at RTT 600 ms and
 // 5% loss, with laps averaging 3 s).
 // stat: { n, lap (EMA ms), max (decaying max ms) }; fallback: the old fixed timeout.
-export const LAP_MIN_MS = 15000;
+export const LAP_MIN_MS = 25000;
 export function lapTimeout(stat, fallback, rttMs = 0) {
   if (!stat || stat.n < 4 || !(stat.max > 0)) return fallback;
   const rtt = Number.isFinite(rttMs) && rttMs > 0 ? rttMs : 0;
