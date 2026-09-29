@@ -1,6 +1,6 @@
 // room/api.js: the host's side of `pooled serve` API asks (validation, stop strings, the think
 // block, exact-id reuse, context rejection) and room/sampling.js makeSampler.
-import { validateApiAsk, AnswerCache, apiTurns, StopMatcher, ThinkSplit, apiPrompt, apiRun, apiSampler, API_LIMITS } from "../../room/api.js";
+import { validateApiAsk, AnswerCache, apiTurns, StopMatcher, ThinkSplit, apiPrompt, apiRun, apiSampler, API_LIMITS, pieceDecoder } from "../../room/api.js";
 import { makeSampler, pickSampler } from "../../room/sampling.js";
 import { buildIds, reusablePrefix } from "../../room/conversation.js";
 
@@ -175,4 +175,34 @@ Deno.test("api: a generation failure is reason error with the message", async ()
   const { res, sent } = await runAsk(ask(), [], { gen });
   eq(res.reason, "error"); eq(res.err, "pipeline timeout (decode)");
   eq(sent.map((m) => m.text).join(""), "x");
+});
+
+// a byte-level tokenizer like the real one: one id per UTF-8 byte (2000 + byte), so emoji and most
+// scripts take several ids per character
+const byteTok = {
+  vocab: { "<|im_start|>": 1, "<|im_end|>": 2, "<|endoftext|>": 3 },
+  encode: (s) => [...new TextEncoder().encode(s)].map((b) => 2000 + b),
+  decode: (ids) => new TextDecoder().decode(new Uint8Array(ids.filter((i) => i >= 2000).map((i) => i - 2000))),
+};
+Deno.test("api: characters split across tokens arrive whole (no U+FFFD), streamed and in the text", async () => {
+  const text = "🧑‍💻 👍🏽 🦀 नमस्ते ∃y 𝔘𝔫𝔦 ok";
+  const d = pieceDecoder(byteTok);
+  const out = byteTok.encode(text).map((id) => d.push(id)).join("") + d.flush();
+  eq(out, text);
+  const { req } = validateApiAsk(ask({ params: { maxTokens: 500 } }));
+  const prompt = apiPrompt(byteTok, req, 4096, null);
+  const sent = [], screens = [];
+  const res = await apiRun({ tok: byteTok, req, prompt, ctxMax: 4096, fallback: pickSampler("exact"), generate: fakeGen([...byteTok.encode(text), 2]),
+    send: (m) => sent.push(m), onPiece: (p) => screens.push(p) });
+  eq(res.text, text);
+  eq(sent.map((m) => m.text).join(""), text);
+  ok(sent.every((m) => !m.text.includes("\uFFFD")), "a token message with U+FFFD");
+  eq(screens.join(""), text);
+  eq(res.usage.out, byteTok.encode(text).length, "every id counted");
+});
+Deno.test("api: a partial character at the very end still goes out (flushed as it is)", () => {
+  const d = pieceDecoder(byteTok);
+  const ids = byteTok.encode("a🦀").slice(0, -1);
+  eq(ids.map((id) => d.push(id)).join(""), "a");
+  eq(d.flush(), "\uFFFD");
 });

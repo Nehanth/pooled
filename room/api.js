@@ -164,6 +164,24 @@ export class ThinkSplit {
   }
 }
 
+// Token ids -> text as they are sampled. One character can span tokens (an emoji, most non-Latin
+// scripts): decoding each id on its own gives U+FFFD for each half. Ids are held until their text
+// no longer ends in a partial character (at most 16, after which the text goes out as it is).
+// push(id) -> the text that is complete now ("" while holding); flush() -> whatever is held.
+export function pieceDecoder(tok) {
+  let held = [];
+  return {
+    push(id) {
+      held.push(id);
+      const s = tok.decode(held);
+      if (s.endsWith("\uFFFD") && held.length < 16) return "";
+      held = [];
+      return s;
+    },
+    flush() { const s = held.length ? tok.decode(held) : ""; held = []; return s; },
+  };
+}
+
 // the sampler an API ask gets: temperature 0 greedy, > 0 top-k at that temperature (top-k 40 unless
 // asked); no temperature -> the room's preset (fallback), or creative's 0.8 when only top_k was given
 export function apiSampler(params, fallback) {
@@ -194,6 +212,7 @@ export async function apiRun({ tok, req, prompt, generate, send, onPiece = () =>
   const onAbort = () => ac.abort();
   signal?.addEventListener?.("abort", onAbort);
   const answerIds = [];
+  const pieces = pieceDecoder(tok);
   let text = "", think = "", count = 0;
   const out = (parts, d = 0) => {
     for (const p of parts) {
@@ -214,13 +233,18 @@ export async function apiRun({ tok, req, prompt, generate, send, onPiece = () =>
         if (stopper.hit) return;
         count++;
         answerIds.push(id);
-        const piece = tok.decode([id]);
+        const piece = pieces.push(id);
+        if (!piece) return;
         onPiece(piece, drafted);
         out(split.push(piece), drafted || 0);
       },
     });
   } catch (e) { err = e; }
   signal?.removeEventListener?.("abort", onAbort);
+  if (!stopper.hit) {
+    const last = pieces.flush();
+    if (last) { onPiece(last, 0); out(split.push(last)); }
+  }
   if (!stopper.hit) {
     out(split.flush());
     const rest = stopper.flush();

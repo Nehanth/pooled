@@ -10,7 +10,7 @@ import { WIRE_F16, badF32, f32ToB64, packF16, unpackF16, asU16, packWire, unpack
 import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
-import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS } from "./room/api.js";
+import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder } from "./room/api.js";
 import { PrefixIndex } from "./harness/prefix.js";
 import { MODELS, NEED_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
@@ -2597,15 +2597,21 @@ async function aiGenerate(textArg, who, askerId = peer.id, mode = "ask") {
     dropped = fit.dropped;
     ai.conv.turns = fit.turns;
     const cap = thinking ? MAX_NEW_THINKING : (ANSWER_LEN[ai.settings.length] ?? MAX_NEW);
-    const onToken = (tok, drafted) => {
-      const piece = ai.tok.decode([tok]);
-      answer.push(tok);
+    // a character split across tokens goes out whole, never as two U+FFFD
+    const pieces = pieceDecoder(ai.tok);
+    const show = (piece, drafted) => {
+      if (!piece) return;
       reply += piece;
       chatBotPiece(piece, drafted);
       sendChat({ t: "ai-token", text: piece, d: drafted || 0 }, askerId);
     };
+    const onToken = (tok, drafted) => {
+      answer.push(tok);
+      show(pieces.push(tok), drafted);
+    };
     inGen = true;   // from here roomGenerate cleans up after itself on failure
-    r = await roomGenerate(fit.ids, { onToken, stop, maxNew: MAXNEW_PARAM || cap, sample, onStatus: aiStatus });
+    try { r = await roomGenerate(fit.ids, { onToken, stop, maxNew: MAXNEW_PARAM || cap, sample, onStatus: aiStatus }); }
+    finally { show(pieces.flush(), 0); }
     capped = r.capped;
     stats = r.stats + (dropped ? ` · ${dropped} oldest exchange${dropped > 1 ? "s" : ""} forgotten to fit` : "");
   } catch (err) {
