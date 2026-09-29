@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Memory probe</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #111; --dim: #666; --bad: #b00020; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --dim: #999; --bad: #ff6b6b; } }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 14px/1.4 ui-monospace, Menlo, monospace; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  #big { font-size: 22px; margin: 8px 0; }
+  #died { color: var(--bad); white-space: pre-wrap; }
+  #log { white-space: pre-wrap; color: var(--dim); font-size: 12px; }
+</style>
+<h1>Pooled memory probe</h1>
+<div id="big">starting…</div>
+<div id="died"></div>
+<div id="log"></div>
+<script type="module">
+// How much memory can this tab use before the OS kills it (iOS Safari reloads the page, no exception),
+// and what does loading real layers cost at its peak vs once loaded? Issue #207.
+//
+// Modes (?mode=):
+//   js     allocate JS ArrayBuffers of ?step MB (default 64), each filled with random bytes, one
+//          every ?pause ms (default 300), until ?max MB (default 16384) or the tab dies
+//   gpu    the same with WebGPU buffers (STORAGE|COPY_DST, ?step MB each, capped at the device's
+//          maxBufferSize), each filled with writeBuffer from one reused 8 MB random source
+//   load   load layers [?lo, ?hi) of ?model (moe | 27b) exactly the way a phone in a room does
+//          (room.js aiLoadShard: 256 MB buffer cap, streamed Q4_0/Q8_0 tensors with a 2 MB staging
+//          area and 300 ms pace, prefetch 1, other quants fetched whole and converted on the CPU),
+//          then build the engine (?engine=0 skips it). ?ballast=MB of JS is allocated first (a peak
+//          test: does the load still fit with that much less room?). ?then=js probes the headroom
+//          left after the load (JS steps until death). ?prefetch=, ?staging=MB, ?pace=ms override
+//          the phone settings. ?cache=put stores ranges in the Cache API the desktop way
+//          (room.js rangeFetch: a full clone of every body); ?cache=hit reads them back from it.
+//          ?src=peer: every range arrives the way a range from another device in the room does
+//          (room.js peerGet: 64 KB parts copied into one whole-range buffer, wrapped in a Response).
+//   report show what the last run recorded (also shown by every mode on start)
+//   clear  forget the last run
+// ?run=<id> names the run. Progress is kept in localStorage ("memprobe") before every step, so a
+// page that iOS reloads (or a later ?mode=report) shows the step it died at. window.__mp holds the
+// live state for a WebDriver poller (tests/e2e/memprobe_phone.mjs).
+import { parseGGUFHeader, qwen35NamesFor, qwen35Weights, qwen35ShardBytes, gpuUploadEntry, streamEntryToGPU, GGML_EMBED } from "/engine/gguf.js";
+import { Qwen35Engine } from "/engine/qwen35.js";
+import { autotuneCoop } from "/engine/autotune.js";
+import { MODELS, maxSeqFor } from "/room/models.js";
+
+const Q = new URLSearchParams(location.search);
+const MB = 2 ** 20;
+const mode = Q.get("mode") || "report";
+const run = Q.get("run") || String(Date.now());
+const KEY = "memprobe";
+const t0 = performance.now();
+const now = () => Math.round(performance.now() - t0);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const $ = (id) => document.getElementById(id);
+
+const mp = window.__mp = { boot: Math.random().toString(36).slice(2), run, mode, phase: "boot", jsMB: 0, gpuMB: 0, ballastMB: 0,
+  steps: 0, events: [], t: 0, peakAcct: 0, err: null, died: null, url: location.href };
+const lsGet = () => { try { return JSON.parse(localStorage.getItem(KEY) || "null"); } catch { return null; } };
+const lsSet = (o) => { try { localStorage.setItem(KEY, JSON.stringify(o)); } catch {} };
+// what the tab has allocated that JS can see (weights on the GPU, JS copies in flight); the rest
+// (WebKit's own buffering of fetch bodies and writeBuffer copies) is what ballast runs measure
+const acct = { gpu: 0, gpuPeak: 0, js: 0, jsPeak: 0 };
+function note(ev, extra = {}) {
+  const e = { t: now(), ev, jsMB: +mp.jsMB.toFixed(1), gpuMB: +(acct.gpu / MB).toFixed(1), ...extra };
+  mp.events.push(e); if (mp.events.length > 400) mp.events.splice(1, 1);
+  mp.t = e.t;
+  // the breadcrumb: written BEFORE the step it describes, so a death points at the step that killed it
+  lsSet({ run, mode, url: location.href, phase: mp.phase, steps: mp.steps, jsMB: mp.jsMB, gpuMB: acct.gpu / MB, ballastMB: mp.ballastMB,
+    gpuPeakMB: acct.gpuPeak / MB, jsAcctPeakMB: acct.jsPeak / MB, last: e, at: Date.now(), done: mp.phase === "done", err: mp.err, result: mp.result || null });
+  // ?beacon=1: also POST every event to the page's own server (/mp-log), which samples the tab's
+  // process footprint alongside it (tests/e2e/memprobe_mac.mjs, desktop Safari)
+  if (Q.get("beacon")) beacon({ run, phase: mp.phase, jsAcctMB: acct.js / MB, ...e });
+  $("big").textContent = `${mp.phase} · JS ${mp.jsMB.toFixed(0)} MB · GPU ${(acct.gpu / MB).toFixed(0)} MB`;
+  $("log").textContent = mp.events.slice(-14).map((x) => `${(x.t / 1000).toFixed(1)}s ${x.ev} js=${x.jsMB} gpu=${x.gpuMB}${x.info ? " " + x.info : ""}`).join("\n");
+}
+
+// ?beacon=1: the server answers "stop" once it has given up on this run (the tab then empties itself)
+function beacon(o) {
+  fetch("/mp-log", { method: "POST", body: JSON.stringify(o) }).then((r) => r.text()).then((t) => { if (t === "stop") cleanup(); }).catch(() => {});
+}
+function cleanup() { mp.weights = mp.engine = mp.gpuBufs = null; try { mp.device?.destroy(); } catch {} hold.length = 0; location.replace("about:blank"); }
+if (Q.get("beacon")) setInterval(() => beacon({ run, ev: "hb" }), 5000);
+
+// ---- a previous run of this tab that never finished = the tab was killed ----
+const prev = lsGet();
+if (prev && !prev.done && !prev.err) {
+  mp.died = { ...prev, noticedAfterS: Math.round((Date.now() - prev.at) / 1000) };
+  $("died").textContent = `last run "${prev.run}" (${prev.mode}) died in phase ${prev.phase} after step ${prev.steps}: JS ${(+prev.jsMB).toFixed(0)} MB, GPU ${(+prev.gpuMB).toFixed(0)} MB, ballast ${(+prev.ballastMB || 0).toFixed(0)} MB; last event ${JSON.stringify(prev.last)}`;
+} else if (prev) {
+  $("died").textContent = `last run "${prev.run}" (${prev.mode}) ${prev.err ? "failed: " + prev.err : "finished"}: ${JSON.stringify(prev.result || {}).slice(0, 400)}`;
+}
+mp.prev = prev;
+
+// ---- JS memory in steps ----
+// Fill with random bytes: iOS compresses memory, and a constant fill compresses to almost nothing
+// (a first run with .fill() reached 14 GB of JS on a 6 GB iPhone without a kill). Weights are
+// incompressible too. One 8 MB random block, copied: the compressor works page by page, no dedupe.
+const RND = new Uint8Array(8 * MB);
+for (let o = 0; o < RND.length; o += 65536) crypto.getRandomValues(RND.subarray(o, o + 65536));
+const hold = [];
+function allocJS(mb) {
+  const u8 = new Uint8Array(mb * MB);
+  for (let o = 0; o < u8.length; o += RND.length) u8.set(RND.subarray(0, Math.min(RND.length, u8.length - o)), o);
+  hold.push(u8.buffer);
+  mp.jsMB += mb;
+}
+async function jsSteps(step, pause, max, phase = "js") {
+  mp.phase = phase;
+  while (mp.jsMB + step <= max) {
+    mp.steps++;
+    note("js+", { info: `-> ${mp.jsMB + step} MB` });
+    allocJS(step);
+    await sleep(pause);
+  }
+}
+
+// ---- WebGPU memory in steps ----
+async function gpuDevice(capMB = 0) {
+  const a = await navigator.gpu?.requestAdapter();
+  if (!a) throw new Error("no WebGPU");
+  const cap = (v) => capMB ? Math.min(v, capMB * MB) : v;
+  const d = await a.requestDevice({ requiredLimits: { maxBufferSize: cap(a.limits.maxBufferSize), maxStorageBufferBindingSize: cap(a.limits.maxStorageBufferBindingSize) } });
+  // account every buffer (the engine's too)
+  const oc = d.createBuffer.bind(d);
+  d.createBuffer = (desc) => {
+    const b = oc(desc), sz = desc.size;
+    acct.gpu += sz; acct.gpuPeak = Math.max(acct.gpuPeak, acct.gpu);
+    const od = b.destroy.bind(b); let gone = false;
+    b.destroy = () => { if (!gone) { gone = true; acct.gpu -= sz; } return od(); };
+    return b;
+  };
+  d.lost.then((i) => { mp.lost = `${i.reason}: ${i.message}`; note("device-lost", { info: mp.lost }); });
+  mp.adapter = { maxBuffer: a.limits.maxBufferSize, maxBind: a.limits.maxStorageBufferBindingSize, features: [...a.features].sort().join(",") };
+  return d;
+}
+async function gpuSteps(step, pause, max) {
+  mp.phase = "gpu";
+  const d = await gpuDevice();
+  step = Math.min(step, Math.floor(d.limits.maxBufferSize / MB));
+  const src = RND;   // random, see allocJS
+  const bufs = [];
+  while (acct.gpu / MB + step <= max) {
+    mp.steps++;
+    note("gpu+", { info: `-> ${acct.gpu / MB + step} MB` });
+    d.pushErrorScope("out-of-memory");
+    const b = d.createBuffer({ size: step * MB, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    for (let o = 0; o < step * MB; o += src.byteLength) d.queue.writeBuffer(b, o, src, 0, Math.min(src.byteLength, step * MB - o));
+    await d.queue.onSubmittedWorkDone();
+    const oom = await d.popErrorScope();
+    if (oom) { note("gpu-oom", { info: oom.message }); mp.gpuOOM = acct.gpu / MB; break; }
+    if (mp.lost) break;
+    bufs.push(b);
+    await sleep(pause);
+  }
+  mp.gpuBufs = bufs;   // keep them alive
+  mp.device = d;
+}
+// give the GPU memory back when the page goes (a WebGPU device can outlive its page in Safari's GPU
+// process: after a 16 GB gpu run the next pages got out-of-memory on their first 128 MB buffer)
+addEventListener("pagehide", () => { try { for (const b of mp.gpuBufs || []) b.destroy(); mp.device?.destroy(); } catch {} });
+
+// ---- a real layer load, the phone's way (mirrors room.js rangeFetch / rangeOf / streamWithRetry / rangeBytesOf / aiLoadShard) ----
+const MODEL = { moe: "qwen3.6-35b-moe", "27b": "qwen3.8-27b" };
+async function loadLayers() {
+  const key = MODEL[Q.get("model") || "moe"] || Q.get("model");
+  const M = MODELS[key]; if (!M) throw new Error("unknown model " + key);
+  const url = M.gguf;
+  const lo = +(Q.get("lo") ?? 39), hi = +(Q.get("hi") ?? lo + 1);
+  const cacheMode = Q.get("cache") || "0";
+  const ahead = Q.has("prefetch") ? +Q.get("prefetch") : 1;
+  const streamOpts = { pace: Q.has("pace") ? +Q.get("pace") : 300, staging: (Q.has("staging") ? +Q.get("staging") : 2) * MB };
+  mp.load = { key, lo, hi, cacheMode, ahead, streamOpts, tensors: [] };
+  const cache = cacheMode === "0" ? null : await caches.open("memprobe-weights-v1");
+  const ckey = (a, b) => "https://weights.memprobe/" + encodeURIComponent(url) + "/" + a + "-" + b;
+  let inflight = 0;   // bodies fetched (or being fetched) that nobody has read yet
+  const rangeFetch = async (a, b, noCache) => {
+    if (cache && cacheMode === "hit" && !noCache) {
+      const hit = await cache.match(ckey(a, b));
+      if (hit) { mp.cacheHits = (mp.cacheHits || 0) + (b - a + 1); return hit; }
+    }
+    const r = await fetch(url, { headers: { Range: `bytes=${a}-${b}` } });
+    if (r.status !== 206) throw new Error(`no range support: ${r.status} for ${a}-${b} (${(await r.text().catch(() => "")).slice(0, 120)})`);
+    if (Q.get("src") === "peer" && a > 0) {
+      // room.js peerGet/onWeightPart (1000-1026) + rangeFetch 956-960: a range taken from a device in
+      // the room arrives as 64 KB parts copied into one whole-range Uint8Array, then is wrapped in a Response
+      const len = b - a + 1, whole = new Uint8Array(len);
+      acct.js += len; acct.jsPeak = Math.max(acct.jsPeak, acct.js);
+      const rd = r.body.getReader(); let off = 0;
+      for (;;) {
+        const { value, done } = await rd.read(); if (done) break;
+        for (let o = 0; o < value.length; o += 65536) { const part = value.slice(o, Math.min(value.length, o + 65536)); whole.set(part, off); off += part.length; }
+      }
+      note("peer-whole", { info: `${(len / MB).toFixed(0)} MB in JS` });
+      const resp = new Response(whole.buffer, { status: 200 });
+      let freed = false;
+      const free = () => { if (!freed) { freed = true; acct.js -= len; } };
+      // the consumer either streams the body or takes arrayBuffer(); the whole range counts until it is read
+      return { ok: true, status: 200, get body() { return resp.body.pipeThrough(new TransformStream({ flush: free })); }, arrayBuffer: async () => { const x = await resp.arrayBuffer(); free(); return x; } };
+    }
+    if (cache && cacheMode === "put") {
+      // room.js:966-973 (desktop): a full JS copy of the body, then Cache.put
+      r.clone().arrayBuffer().then((buf) => {
+        acct.js += buf.byteLength; acct.jsPeak = Math.max(acct.jsPeak, acct.js);
+        return cache.put(ckey(a, b), new Response(buf, { status: 200, headers: { "x-swarm-len": String(buf.byteLength) } })).finally(() => { acct.js -= buf.byteLength; });
+      }).catch(() => {});
+    }
+    return r;
+  };
+  // ?pfdedupe=1: never prefetch a tensor that was already loaded. room.js rangeOf does: the loader asks for
+  // tensors in model order, not file order, so "the next one in the file" is often one it already has, and
+  // that second copy is fetched and never read (~98% of a MoE shard's bytes, ~47% of a 27B shard's)
+  const dedupe = Q.get("pfdedupe") === "1";
+  const pf = { list: [], at: new Map(), pending: new Map(), done: new Set() };
+  mp.dupPrefetchMB = 0;
+  const rangeOf = (info) => {
+    const a = info.byteOffset, b = a + info.byteLength - 1;
+    const i = pf.at.get(a);
+    pf.done.add(a);
+    if (i !== undefined) for (let k = i + 1; k <= i + ahead && k < pf.list.length; k++) {
+      const n = pf.list[k];
+      if (pf.done.has(n.byteOffset)) { if (dedupe) continue; mp.dupPrefetchMB += n.byteLength / MB; }
+      if (!pf.pending.has(n.byteOffset)) { const p = rangeFetch(n.byteOffset, n.byteOffset + n.byteLength - 1); p.catch(() => {}); pf.pending.set(n.byteOffset, p); note("prefetch", { info: `${n.name} ${(n.byteLength / MB).toFixed(0)} MB` }); }
+    }
+    const p = pf.pending.get(a);
+    if (p) { pf.pending.delete(a); return p; }
+    return rangeFetch(a, b);
+  };
+  const t = (info, how) => { mp.steps++; mp.load.tensors.push({ name: info.name, MB: +(info.byteLength / MB).toFixed(1), type: info.ggmlType, how, t: now() }); note(how, { info: `${info.name} ${(info.byteLength / MB).toFixed(0)} MB` }); };
+
+  mp.phase = "device";
+  const device = await gpuDevice(256);   // room.js:1431-1435, phone
+  note("device");
+  mp.phase = "autotune";
+  const tune = await autotuneCoop(device).catch(() => ({ wg: 256, rows: 4 }));
+  note("autotune", { info: `${tune.wg}/${tune.rows}` });
+  mp.phase = "header";
+  let G;
+  for (let size = 12 * MB; ; size *= 2) {
+    const r = await rangeFetch(0, size - 1);
+    const buf = await r.arrayBuffer();
+    try { G = parseGGUFHeader(buf, { skipTokenizer: true }); break; } catch (e) { if (size > 256 * MB) throw e; }
+  }
+  note("header");
+  const opts = { lo, hi, hasEmbed: false, hasHead: false, mtp: false };
+  const names = [];
+  for (let l = lo; l < hi; l++) names.push(...Object.values(qwen35NamesFor(G, l)).filter((v) => typeof v === "string"));
+  pf.list = [...new Set(names)].map((n) => G.tensors[n]).filter(Boolean).sort((x, y) => x.byteOffset - y.byteOffset);
+  pf.at = new Map(pf.list.map((x, i) => [x.byteOffset, i]));
+  mp.load.shardMB = +(qwen35ShardBytes(G, opts) / MB).toFixed(0);
+  mp.phase = "weights";
+  G.streamEntry = async (info) => {
+    t(info, "stream");
+    const e = await streamEntryToGPU(device, info, rangeOf, streamOpts);
+    note("streamed", { info: info.name });
+    return e;
+  };
+  const bytesOf = async (info) => {
+    t(info, "whole");
+    const r = await rangeOf(info);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    acct.js += bytes.byteLength; acct.jsPeak = Math.max(acct.jsPeak, acct.js);
+    note("whole-in", { info: `${info.name} ${(bytes.byteLength / MB).toFixed(0)} MB` });
+    bytes.__acct = bytes.byteLength;
+    pendingWhole.push(bytes);
+    return bytes;
+  };
+  const pendingWhole = [];
+  const weights = await qwen35Weights(G, bytesOf, opts, () => {}, (e, name) => {
+    // ggufEntry has converted the whole bytes into e (qs/scales or f32): account both, then upload
+    // while convertEntry ran, the whole-tensor bytes and its output were both alive
+    const cpu = (e.qs?.byteLength || 0) + (e.scales?.byteLength || 0) + (e.data?.byteLength || 0);
+    acct.jsPeak = Math.max(acct.jsPeak, acct.js + cpu);
+    if (cpu > 4 * MB) note("converted", { info: `${name} ${e.kind} ${(cpu / MB).toFixed(0)} MB on the CPU, whole ${(acct.js / MB).toFixed(0)} MB` });
+    for (const b of pendingWhole.splice(0)) acct.js -= b.__acct;
+    gpuUploadEntry(device, e, name === GGML_EMBED);   // room.js:1533 (drops e.qs / e.scales)
+  });
+  await device.queue.onSubmittedWorkDone();
+  note("weights-done");
+  if (Q.get("engine") !== "0") {
+    mp.phase = "engine";
+    const ctx = +Q.get("ctx") || maxSeqFor(key);
+    mp.engine = await Qwen35Engine.create({
+      device, meta: G.meta, weights, vocab: G.tensors[GGML_EMBED]?.shape?.[0], layerRange: [lo, hi], hasEmbed: false, hasHead: false, maxSeq: ctx,
+      coopWG: tune.wg, coopRows: tune.rows, batchCols: 16, coopRowsB: 1, draftVocab: 65536, draftVocabAuto: true, draftChain: true, specFuse: true,
+      moeFuse: true, moeDnRows: 1, gpuSample: true, argmaxWide: true,
+    });
+    await device.queue.onSubmittedWorkDone();
+    note("engine-done", { info: `ctx ${ctx}` });
+  }
+  mp.weights = weights;   // keep alive
+  mp.device = device;
+}
+
+// ---- main ----
+async function main() {
+  const step = +(Q.get("step") || 64), pause = +(Q.get("pause") || 300), max = +(Q.get("max") || 16384);
+  if (mode === "report") { mp.phase = "report"; $("big").textContent = "report"; return; }
+  if (mode === "clear") { localStorage.removeItem(KEY); mp.phase = "cleared"; $("big").textContent = "cleared"; return; }
+  if (mp.died && mp.died.run === run) { mp.phase = "died"; $("big").textContent = "this run died (see above); not starting again"; return; }
+  if (prev && prev.run === run && prev.done) { mp.phase = "done"; $("big").textContent = "this run already finished"; return; }
+  note("start", { info: navigator.userAgent });
+  const ballast = +(Q.get("ballast") || 0);
+  if (ballast) {
+    mp.phase = "ballast";
+    for (let b = 0; b < ballast; b += 64) { mp.steps++; note("ballast+"); allocJS(Math.min(64, ballast - b)); await sleep(50); }
+    mp.ballastMB = ballast;
+    note("ballast-done");
+    await sleep(1000);
+  }
+  if (mode === "js") await jsSteps(step, pause, max);
+  else if (mode === "gpu") await gpuSteps(step, pause, max);
+  else if (mode === "load") {
+    await loadLayers();
+    mp.loadedAt = { jsMB: mp.jsMB, gpuMB: acct.gpu / MB, t: now() };
+    await sleep(+(Q.get("settle") || 3000));
+    if (Q.get("then") === "js") await jsSteps(step, pause, max, "headroom");
+  } else throw new Error("unknown mode " + mode);
+  mp.result = { dupPrefetchMB: Math.round(mp.dupPrefetchMB || 0), jsMB: mp.jsMB, gpuMB: acct.gpu / MB, gpuPeakMB: acct.gpuPeak / MB, jsAcctPeakMB: acct.jsPeak / MB, gpuOOM: mp.gpuOOM || null, lost: mp.lost || null, loadedAt: mp.loadedAt || null };
+  mp.phase = "done";
+  note("done", { info: JSON.stringify(mp.result) });
+}
+main().catch((e) => { mp.err = String(e?.stack || e); mp.phase = "error"; note("error", { info: String(e).slice(0, 300) }); })
+  // beacon runs leave the tab empty when they end, so the next run starts from a clean GPU
+  .finally(() => { if (Q.get("beacon") && mode !== "report") setTimeout(cleanup, +(Q.get("hold") || 4000)); });
+</script>
+</html>
