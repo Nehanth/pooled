@@ -195,6 +195,23 @@ Deno.test("planForSpeed: when unmeasured, the host alone is used if it can hold 
   }
 });
 
+Deno.test("planForSpeed: unmeasured phones go after computers; a measured phone keeps its speed", () => {
+  const cases = [
+    // [name, L, caps, msPerLayer, phone, expected assigned]
+    ["computers can hold it: the phone asks only", 10, [5, 8, 8], [], [false, true, false], [5, 0, 5]],
+    ["same room without phone flags: lowest index first", 10, [5, 8, 8], [], [], [5, 5, 0]],
+    ["a phone is needed: it takes only the rest", 20, [8, 8, 10], [], [false, false, true], [8, 8, 4]],
+    ["a phone host still keeps its one layer", 10, [5, 20], [], [true, false], [1, 9]],
+    ["measured phone faster than an unmeasured computer is used first", 10, [5, 8, 8], [1, 0.5, null], [false, true, false], [2, 8, 0]],
+    ["measured computers still beat an unmeasured phone", 10, [5, 8, 8], [1, null, 2], [false, true, false], [5, 0, 5]],
+  ];
+  for (const [name, L, caps, ms, phone, want] of cases) {
+    const p = planForSpeed(L, caps, ms, phone);
+    eq(p.assigned, want, name);
+    checkShape(L, caps.length, p, name);
+  }
+});
+
 // ---------------------------------------------------------------- pickModelHost
 
 Deno.test("pickModelHost: table of edge cases", () => {

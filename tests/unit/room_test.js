@@ -138,6 +138,7 @@ Deno.test("preflight: phones are checked first and told in phone words", () => {
   for (const v of [no(UA.iphone), no(UA.iphone, { hasGpuApi: true }), no(UA.ipad, { touchPoints: 5 })]) ok(/^This phone's GPU/.test(v.line) && /join and chat/.test(v.line), v.line);
   ok(/Chrome or Edge on a laptop/.test(no(UA.mac).line), "desktop line");
   ok(!/chrome:\/\//.test(no(UA.linux).line), "the flag hint stays in the details");
+  ok(!/Chrome or Edge/.test(no(UA.linux).line) && /off in Chrome on Linux/.test(no(UA.linux).line), "Chrome on Linux is told to turn it on, not to use Chrome");
 });
 Deno.test("conversation: an open assistant turn (Continue) extends the caches without an end token", () => {
   const t1 = [{ role: "user", text: "a" }];
@@ -247,4 +248,22 @@ Deno.test("plan: a computer whose GPU copies memory clearly faster hosts, if it 
   eq(pickModelHost([gb10, mac, mac2]), "n");
   eq(pickModelHost([gb10, mac, { ...mac2, meta: { ...mac2.meta, gbps: 450 } }]), "m");
   eq(pickModelHost([gb10, { ...mac, id: "q" }, { ...mac, id: "k" }]), "k");
+});
+
+import { phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
+Deno.test("plan: phones hold layers only when the computers cannot hold the model", () => {
+  // GB10 (80 layers' room) + a phone: the phone asks without layers
+  eq(phonesToLeaveOut(40, [80, 1], [false, true]), [1]);
+  // host + Mac hold it: both phones out, the Mac stays
+  eq(phonesToLeaveOut(40, [20, 30, 1, 2], [false, false, true, true]), [2, 3]);
+  // the computers are short: every phone keeps its share
+  eq(phonesToLeaveOut(40, [35, 1], [false, true]), []);
+  eq(phonesToLeaveOut(40, [20, 19, 1], [false, false, true]), []);
+  // a phone host counts as a computer; no phone guests, nothing to leave out
+  eq(phonesToLeaveOut(40, [80, 1], [true, true]), [1]);
+  eq(phonesToLeaveOut(40, [80, 30], [false, false]), []);
+});
+Deno.test("plan: isPhoneMeta", () => {
+  ok(isPhoneMeta({ phone: true }) && isPhoneMeta({ ua: "iPhone" }) && isPhoneMeta({ ua: "Android" }));
+  ok(!isPhoneMeta({ ua: "Mac" }) && !isPhoneMeta(null));
 });

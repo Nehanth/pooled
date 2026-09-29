@@ -30,6 +30,8 @@ import { Qwen35Engine } from "../engine/qwen35.js";
 import { makeTokenizer, argmax } from "../engine/engine.js";
 import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, f32ToF16, f16ToF32 } from "../engine/gguf.js";
 import { lookupDrafts } from "../room/lookup.js";
+import { roomQwen35Options, applyRoomFlags } from "../engine/preset.js";
+import { roomFlags } from "./load_model.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
 const N = +env("TOKENS", 64), NC = +env("NC", 16), SYNTH = env("SYNTH", "0") === "1";
@@ -47,15 +49,14 @@ const G = parseGGUFHeader((await readAt(0, 64 << 20)).buffer);
 const nBlk = G.meta["qwen35.block_count"], nextn = G.meta["qwen35.nextn_predict_layers"] || 0, L = nBlk - nextn;
 const bytesOf = (i) => readAt(i.byteOffset, i.byteLength);
 const vocabRows = G.tensors["token_embd.weight"].shape[0];
-// the room's engine options (room.js aiLoadShard)
-const common = { device, meta: G.meta, maxSeq: CTX, batchCols: NC, coopRowsB: 1, vocab: vocabRows,
-  draftVocab: SYNTH ? 0 : 65536, draftChain: env("DRAFTCHAIN", "1") !== "0", specFuse: env("SPECFUSE", "1") !== "0",
-  moeFuse: env("MOE_FUSE", "1") !== "0", hostFuse: env("HOSTFUSE", "1") !== "0",
+// the room's engine options (engine/preset.js, what room.js aiLoadShard passes); the env knobs below are
+// the room's ?flags (DRAFTCHAIN=0 is ?draftchain=0 ...), and ROOM_FLAGS takes any other
+const flags = roomFlags({ ...(SYNTH ? { draftvocab: "0" } : {}), draftchain: env("DRAFTCHAIN", "1"), specfuse: env("SPECFUSE", "1"), moefuse: env("MOE_FUSE", "1"), hostfuse: env("HOSTFUSE", "1") });
+const common = { device, meta: G.meta, maxSeq: CTX, vocab: vocabRows, ...roomQwen35Options(flags), batchCols: NC, coopRowsB: 1,
   // the prefill options come from the engine defaults, as in room.js (tiled prefill attention on every
   // device; wide GEMM + expert-grouped MoE on the device that holds the embedding, used by solo
   // prefillTokens only: the split prefill runs 16-column frames). OPTS=0: all three off everywhere (A/B).
   ...(env("OPTS", "") === "0" ? { attnPrefillTile: false, moeGroupPrefill: 0, prefillUbatch: 0 } : {}) };
-const roomFlags = (e) => { e.mtpBatchFill = true; e.mtpBatchRefill = true; e.mtpPreDraft = true; return e; };
 // per-device kernel tuning (room.js autotuneCoop picks these per GPU): WG,ROWS for the worker,
 // e.g. WORKER_TUNE=64,8 to stand in for a phone whose autotune differs from the host's
 const tune = (v) => v ? (([wg, rows]) => ({ coopWG: wg, coopRows: rows }))(v.split(",").map(Number)) : {};
@@ -63,7 +64,7 @@ const mk = async (lo, hi, hasEmbed, hasHead) => {
   const t0 = performance.now();
   const weights = await qwen35Weights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp: hasHead });
   const t = lo > 0 ? tune(env("WORKER_TUNE", "")) : hasEmbed && hi < L ? tune(env("HOST_TUNE", "")) : {};
-  const e = roomFlags(await Qwen35Engine.create({ ...common, ...t, weights, layerRange: [lo, hi], hasEmbed, hasHead }));
+  const e = applyRoomFlags(await Qwen35Engine.create({ ...common, ...t, weights, layerRange: [lo, hi], hasEmbed, hasHead }), flags);
   console.log(`  engine [${lo},${hi})${hasEmbed ? " +embed" : ""}${hasHead ? " +head" : ""}${e.mtp ? " +mtp" : ""}: moeFuse ${e.moeFuse}, attnPrefillTile ${e.attnPrefillTile}, moeGroupPrefill ${e.moeGrpU || "off"}, prefillUbatch ${e.ubatch || "off"}, ${((performance.now() - t0) / 1000).toFixed(0)} s`);
   return e;
 };

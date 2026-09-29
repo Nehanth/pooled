@@ -62,7 +62,7 @@ const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert:
 const peerServer = spawn(path.join(ROOT, "node_modules/.bin/peerjs"), ["--port", String(SIGNAL_PORT), "--path", "/"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 1500));
 // --query "a=1&b=2": extra room URL parameters on every tab (e.g. gpusample=1)
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}&maxnew=${MAXNEW}&peerweights=0&wire=${WIRE}` + (arg("query") ? "&" + arg("query") : "");
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?split=memory&signal=127.0.0.1:${SIGNAL_PORT}&maxnew=${MAXNEW}&peerweights=0&wire=${WIRE}` + (arg("query") ? "&" + arg("query") : "");
 
 // One Chromium per device, each with its own on-disk profile (as tests/e2e/room_latency.mjs on
 // bench/latency does: with every tab in one off-the-record context the Cache API weight store lives

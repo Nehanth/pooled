@@ -6,6 +6,7 @@ import { Qwen35Engine } from "../../engine/qwen35.js";
 import { makeTokenizer, argmax } from "../../engine/engine.js";
 import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, streamEntryToGPU } from "../../engine/gguf.js";
 import { profileDecode } from "../prof/moe_decode_prof.js";
+import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 const q = new URLSearchParams(location.search), MODEL = q.get("model");
 const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
 const readAt = async (off, len) => { const r = await fetch(MODEL, { headers: { Range: `bytes=${off}-${off + len - 1}` } }); return new Uint8Array(await r.arrayBuffer()); };
@@ -18,9 +19,10 @@ try {
   G.streamEntry = (info) => streamEntryToGPU(device, info, (i) => fetch(MODEL, { headers: { Range: `bytes=${i.byteOffset}-${i.byteOffset + i.byteLength - 1}` } }));
   const t0 = performance.now();
   const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true });
-  const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512, draftVocab: +(q.get("draftvocab") || 0),
-    // GPU sampling on by default (?gpusample=0: the logits path); ?argmaxwide=0|1 overrides the two-stage draft argmax
-    gpuSample: q.get("gpusample") !== "0", argmaxWide: (q.get("argmaxwide") ?? (q.get("gpusample") === "0" ? "0" : "1")) === "1" });
+  // the room's settings (engine/preset.js), with the room's own ?flags (?gpusample=0, ?draftvocab=0, ...)
+  const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
+    vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(q),
+    ...JSON.parse(q.get("opts") || "{}") }), q);   // ?opts=<json>: extra engine create options (A/B), e.g. {"moeNormRouter":false}
   log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s, adapter ${ad.info?.vendor}, mtp ${!!eng.mtp}, moeFuse ${!!eng.moeFuse}, draftVocab ${eng.draftVocab || "off"}, gpuSample ${eng.gpuSample}, argmaxWide ${eng.argmaxWide}, timestamps ${feats.length > 0}`);
   const out = await profileDecode({ eng, device, tok, argmax, log, N: +(q.get("tokens") || 24), STEPS: +(q.get("steps") || 12), K: +(q.get("k") || 3), roomPath: q.get("roompath") === "1" });
   window.RESULT = { runtime: "chrome", arch, ...out };

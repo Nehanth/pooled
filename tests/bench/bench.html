@@ -8,6 +8,7 @@
 // ?pmab=N: prefill tok/s on N tokens with ?prefillmath=... A/B vs the f32 GEMM (before the decode checks).
 // ?opts=<json>: extra engine create options; ?set=<json>: engine fields set after create (A/B switches).
 import { Qwen35Engine, prefillMathFeatures } from "../../engine/qwen35.js";
+import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { makeTokenizer, argmax, DenseEngine } from "../../engine/engine.js";
 import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, streamEntryToGPU, ggufWeights } from "../../engine/gguf.js";
 const q = new URLSearchParams(location.search), MODEL = q.get("model"), N = +(q.get("tokens") || 40), K = +(q.get("k") || 3), GOLD = JSON.parse(q.get("gold") || "[]");
@@ -84,22 +85,22 @@ try {
   const opt = (k, d) => (q.has(k) ? +q.get(k) : d);
   const eng = dense ? await DenseEngine.create({ device, cfg: await (await fetch(dirURL + "config.json")).json(), layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: MAXSEQ,
       weights: await ggufWeights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true }), ...XOPTS })
-    : await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: MAXSEQ, ...XOPTS,
-    draftVocab: opt("draftvocab", 0), draftVocabAuto: opt("dvauto", 1) !== 0, ...(q.has("batchcols") ? { batchCols: +q.get("batchcols"), coopRowsB: +q.get("batchcols") >= 16 ? 1 : 4 } : {}),
-    draftChain: q.get("draftchain") !== "0", specFuse: q.get("specfuse") !== "0",
-    moeFuse: q.get("moefuse") !== "0", moeDnRows: +(q.get("moednrows") || 1),
+    : await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: MAXSEQ, vocab: G.tensors["token_embd.weight"]?.shape?.[0],
+    // the room's settings (engine/preset.js), read from this page's query string with the room's own flags
+    // (draftvocab, dvauto, draftchain, specfuse, fuse, kv, moefuse, moednrows, gpusample, argmaxwide); the rest
+    // below are bench-only A/B knobs on top
+    ...roomQwen35Options(q), ...XOPTS,
+    ...(q.has("batchcols") ? { batchCols: +q.get("batchcols"), coopRowsB: +q.get("batchcols") >= 16 ? 1 : 4 } : {}),
     // (unset: the engine defaults, 256 on the MoE for both; 0: off)
     // ?moegroup=U: expert-grouped prefill in U-token ubatches (a multiple of batchcols; U <= the prompt length to take effect), ?moegroupuc=8, ?moegrouptiled=0: the exact (slower) grouped kernels
     moeGroupPrefill: opt("moegroup", undefined), moeGroupUC: opt("moegroupuc", 8), moeGroupTiled: opt("moegrouptiled", 1) !== 0,
     prefillUbatch: opt("ubatch", undefined), ...(q.get("tile") ? { prefillTile: JSON.parse(q.get("tile")) } : {}),   // ?ubatch=256: wide prefill GEMM
-    // ?gpusample=0: the logits path (GPU sampling is the engine default), ?argmaxwide=0|1: the draft argmax kernel alone
-    ...(q.has("gpusample") ? { gpuSample: q.get("gpusample") !== "0" } : {}), ...(q.has("argmaxwide") ? { argmaxWide: q.get("argmaxwide") !== "0" } : {}),
     moeKernel: MOEK, prefillMath: PM, prefillSgm: SGM, adapterInfo: ad.info, ...(q.has("attnptile") ? { attnPrefillTile: q.get("attnptile") !== "0" } : {}), ...(q.has("attnptk") ? { attnPrefillTK: +q.get("attnptk") } : {}) });   // ?attnptile=0: attn_flash for prefill instead of the tiled prefill attention (default: on), &attnptk=N its tile; ?moefuse=0: unfused MoE (A/B); ?moe=legacy|default|JSON: unfused expert GEMV layout
   // greedy decode: with GPU sampling the head's argmax runs on the GPU (forwardTokenIds, a .gpu sampler for specStep)
   const GS = !dense && !!eng.gpuSample;
   const G1 = Object.assign((x) => (x && x.ids instanceof Uint32Array ? x.ids[0] : argmax(x)), { gpu: { kind: "greedy" } });
   const fwd = (id) => (GS ? eng.forwardTokenIds(id) : eng.forwardToken(id)), pick = GS ? G1 : argmax;
-  eng.mtpBatchRefill = opt("mtprefill", 1) !== 0; eng.mtpPreDraft = opt("predraft", 1) !== 0;
+  applyRoomFlags(eng, q);   // ?mtpbatch=0, ?mtprefill=0, ?predraft=0 as in the room
   Object.assign(eng, XSET);
   if (Object.keys(XOPTS).length || Object.keys(XSET).length) log(`opts ${JSON.stringify(XOPTS)} set ${JSON.stringify(XSET)}`);
   if (PM) log(`prefillMath requested ${PM}, running ${eng.prefillMath}${eng.sgmWhy ? " (" + eng.sgmWhy + ")" : ""}${eng.sgmCfg ? ", sgm " + JSON.stringify(eng.sgmCfg) : ""}, GEMM ${eng.gemmOn ? "on" : "off (needs batchcols=16)"}`);
@@ -153,7 +154,9 @@ try {
     eng.prefillWide = !!eng.ubatch; if (ALL) { eng.attnPrefillTile = apt; eng.moeGroup = mg; }
     log("prefill " + JSON.stringify({ tokens: pids.length, ubatch: eng.ubatch, all: ALL, tile: eng.wideCfg, ...res })); out.push({ prefill: res });
   }
-  for (const [i, prompt] of ["Write the Python code for two sum. Code only.", "Explain what a hash map is in two sentences."].entries()) {
+  // ?japan=1: also the room's standard `japan` prompt (docs/bench-log.md), no golden
+  const JAPAN = "I am planning a two week trip through Japan in late October with my partner. We land in Tokyo, want three days there, then a day trip to Nikko, then the bullet train to Kyoto for four days with a side trip to Nara, then two nights in Osaka, and we fly home from Osaka. We like food markets, old temples, hiking, and small neighborhood bars, and we want to avoid the most crowded tourist spots where we can. Our budget is moderate, around two hundred dollars a day for the two of us not counting hotels. Please give me a day by day itinerary with one main activity each morning and afternoon, a neighborhood to eat dinner in each night, and tell me which days I should buy a rail pass for and whether it is worth it at all.";
+  for (const [i, prompt] of ["Write the Python code for two sum. Code only.", "Explain what a hash map is in two sentences.", ...(q.get("japan") === "1" ? [JAPAN] : [])].entries()) {
     const ids = chat(prompt);
     eng.reset(); if (eng.mtp) eng.mtpFill = false; await eng.prefillTokens(ids.slice(0, -1)); let lg = await fwd(ids.at(-1));
     let next = pick(lg); const gen = [next]; t0 = performance.now();

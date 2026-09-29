@@ -7,7 +7,7 @@
 // the workers hold drifts from what they actually hold, the room either fails a lap ("no saved
 // slot") or, worse, runs a worker's layers on the wrong state and answers garbage without an error.
 import { roomFns, fnSource } from "./room_src.js";
-import { PrefixIndex } from "../../harness/prefix.js";
+import { PrefixIndex, pinSplit } from "../../harness/prefix.js";
 import { DROP_ALL, sendFrame, makeLink } from "../../room/transport.js";
 import { reusablePrefix } from "../../room/conversation.js";
 
@@ -45,30 +45,30 @@ class FakeEngine {
   async runHiddenBatch(xs, base) { this.run(Array.from(xs), base); return Float32Array.from(xs); }
 }
 
-const HOST_FNS = ["sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume"];
+const HOST_FNS = ["sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin"];
 
-// the host's functions over a stub ai; sent frames land in `out`
-function host({ chain = ["w0"], ckptMax = 2, fed = [], engine = new FakeEngine(), out = [] } = {}) {
-  const ai = { chain, pendingCtl: {}, fed, pos: fed ? fed.length : 0, engine, ckpt: null, ckptN: 0 };
+// the host's functions over a stub ai; sent frames land in `out`. disk: a CkptStore (null: GPU only)
+function host({ chain = ["w0"], ckptMax = 2, fed = [], engine = new FakeEngine(), out = [], disk = null, room = "ROOM", model = "m" } = {}) {
+  const ai = { role: "host", model, chain, pendingCtl: {}, fed, pos: fed ? fed.length : 0, engine, ckpt: null, ckptN: 0 };
   const fns = roomFns(HOST_FNS, {
-    ai, CKPT_MAX: ckptMax, PrefixIndex, DROP_ALL, wireStats: { lastMax: 0 },
+    ai, CKPT_MAX: ckptMax, PrefixIndex, DROP_ALL, wireStats: { lastMax: 0 }, ckptDisk: disk, roomCode: room,
     sendHidden: (to, msg) => out.push({ to, msg }),
   });
   return { ai, out, engine, ...fns };
 }
 
 // a worker's workerFrame over a stub ai; what it forwards lands in `send`
-function worker({ next = "host", engine = new FakeEngine(), send = () => {} } = {}) {
-  const ai = { engine, next, hostId: "host", range: [0, 1] };
-  const { workerFrame } = roomFns(["workerFrame"], {
-    ai, DROP_ALL, performance,
+function worker({ next = "host", engine = new FakeEngine(), send = () => {}, disk = null, room = "ROOM", model = "m", ckptMax = 2 } = {}) {
+  const ai = { role: "worker", model, engine, next, hostId: "host", range: [0, 1] };
+  const { workerFrame, ckptRestore } = roomFns(["workerFrame", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore"], {
+    ai, DROP_ALL, performance, ckptDisk: disk, roomCode: room, CKPT_MAX: ckptMax, ckptClear: () => {},
     unpackWire: (d) => Float32Array.from(d.x),
     packWire: (h) => ({ x: Array.from(h) }),
     badF32: () => false,
     aiStatus: () => {}, sendTo: () => {}, teleNote: () => {}, compute: { pass() {} },
     sendHidden: send,
   });
-  return { ai, engine, workerFrame };
+  return { ai, engine, workerFrame, ckptRestore };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -180,10 +180,38 @@ Deno.test("ckptSave: a second save before any frame went out supersedes the firs
     eq(h.ai.ckpt.items.map((x) => x.key), c.keys, c.name + ": host index");
     eq([...h.engine.slots.keys()], c.keys, c.name + ": host slots");
   }
-  // solo: nothing is pending, nothing superseded; both saves stand
+  // solo: nothing is pending, nothing superseded; a save of tokens already saved keeps that slot
   const s = host({ chain: [], fed: [1], ckptMax: 4 });
   s.ckptSave(); s.ckptSave();
+  eq(s.ai.ckpt.items.map((x) => x.key), [1], "no second slot for the same state");
+  s.ai.fed.push(2); s.ckptSave();
   eq(s.ai.ckpt.items.map((x) => x.key), [1, 2]);
+});
+
+Deno.test("ckptSave: the same tokens again never evict an answer checkpoint; a pin promotes the existing one", () => {
+  const s = host({ chain: [], fed: [1, 2], ckptMax: 1 });
+  s.ckptSave(true);                               // pinned at [1, 2]
+  s.ckptSave();                                   // Stop right after it (solo): the end save
+  eq(s.ai.ckpt.items.map((x) => [x.key, x.pin]), [[1, true]], "the pinned one stands, no duplicate");
+  s.ai.fed.push(3); s.ckptSave();
+  s.ai.fed.length = 2; s.ckptSave();              // back at the pinned tokens: still one slot there
+  eq(s.ai.ckpt.items.map((x) => [x.key, x.pin]), [[1, true], [2, false]]);
+  // an answer checkpoint at the tokens being pinned becomes the pinned one (no second slot)
+  const t = host({ chain: [], fed: [5, 6], ckptMax: 2 });
+  t.ckptSave(); t.ckptSave(true);
+  eq(t.ai.ckpt.items.map((x) => x.pin), [true]);
+  eq([...t.engine.slots.keys()].length, 1);
+});
+
+Deno.test("ckptSave: a superseded save does not go out when the next save keeps an existing slot", () => {
+  const h = host({ fed: [1, 2, 3], ckptMax: 2 });
+  h.ckptSave(); h.ai.pendingCtl = {};             // slot 1 went out
+  h.ai.fed.push(4, 5); h.ckptSave();              // slot 2 pending
+  h.ai.pendingCtl = { ...h.ai.pendingCtl, ld: 1 }; h.ai.fed = [1, 2, 3];   // a resume of slot 1, Stop before a frame
+  h.ckptSave();
+  eq(h.ai.pendingCtl, { ld: 1 }, "no sv of a slot the host forgot");
+  eq(h.ai.ckpt.items.map((x) => x.key), [1]);
+  eq([...h.engine.slots.keys()], [1]);
 });
 
 Deno.test("ckptClear survives an engine whose dropSlot throws", () => {
@@ -217,7 +245,7 @@ Deno.test("ckptSave: slot numbers run 1..65534 and wrap to 1, never 0 or DROP_AL
   const h = host({ fed: [1], ckptMax: 1 });
   h.ai.ckptN = 65532;
   const keys = [];
-  for (let i = 0; i < 4; i++) { h.ai.pendingCtl = {}; h.ckptSave(); keys.push(h.ai.pendingCtl.sv); }
+  for (let i = 0; i < 4; i++) { h.ai.pendingCtl = {}; h.ai.fed.push(2 + i); h.ckptSave(); keys.push(h.ai.pendingCtl.sv); }
   eq(keys, [65533, 65534, 1, 2]);
   ok(!keys.includes(0) && !keys.includes(DROP_ALL));
   // and every one of them fits the frame header
@@ -442,12 +470,22 @@ function makeRoom(nWorkers, ckptMax = 2) {
       h.ai.fed.length = h.ai.pos = h.engine.lastBase + k + 1;
       h.ai.pendingCtl = { rb: k };
     },
-    // roomGenerate's checkpoint logic, around a prefill of what is new and an answer
-    async turn(ids, { answer = [], abort = false, reject = null } = {}) {
+    // roomGenerate's checkpoint logic, around a prefill of what is new and an answer. pin: the
+    // system prompt's length (Code mode): the prefill pauses there for a pinned save. stopInPin /
+    // stopAfterPin: Stop during the first part, or after its save but before the rest's frame.
+    // (roomGenerate pins the first part whenever all of it reached the caches, Stop or not.)
+    async turn(ids, { answer = [], abort = false, reject = null, pin = 0, stopInPin = false, stopAfterPin = false } = {}) {
       let reused = h.ckptResume(ids, reusablePrefix(h.ai.fed, ids));
       if (!reused) h.resetState();
+      const cut = pinSplit(reused, pin, ids.length);
+      if (cut && !abort) {
+        if (stopInPin) { await room.feed(ids.slice(reused, cut - 1)); h.ckptSave(); return reused; }
+        await room.feed(ids.slice(reused, cut));
+        h.ckptSave(true);
+        if (stopAfterPin) { h.ckptSave(); return reused; }
+      }
       if (!abort) {
-        await room.feed(ids.slice(reused));
+        await room.feed(ids.slice(cut || reused));
         if (answer.length) await room.feed(answer);
         if (reject != null) room.reject(reject);
       }
@@ -461,6 +499,8 @@ function makeRoom(nWorkers, ckptMax = 2) {
         for (const [k, v] of h.engine.slots) eq(w.engine.slots.get(k), v, `${when}: worker ${i} slot ${k}`);
       }
       eq(h.ai.ckpt ? h.ai.ckpt.items.map((x) => x.key).sort((a, b) => a - b) : [], [...h.engine.slots.keys()].sort((a, b) => a - b), `${when}: host index vs host slots`);
+      ok(!h.ai.ckpt || h.ai.ckpt.pinned().length <= 1, `${when}: at most one pinned checkpoint`);
+      ok(!h.ai.ckpt || h.ai.ckpt.unpinned().length <= ckptMax, `${when}: at most ckpt answer checkpoints`);
       eq(h.engine.st, h.ai.fed, `${when}: host fed`);
     },
   };
@@ -535,6 +575,46 @@ const SCENARIOS = [
     { ids: [...T1, 20, 21, 30, 31, 40], abort: true },
     { ids: [...T1, 20, 21, 30, 31, 40], abort: true },
     { ids: [...T1, 20, 21, 60], answer: [61], wantReused: T1.length + 2 },   // resume from turn 2's save
+  ] },
+  // the pinned system prompt (Code mode, issue #73): SYS is the system prompt + tools
+  { name: "pin: a compacted prompt resumes at the system prompt", turns: [
+    { ids: Q1, answer: A1, pin: SYS.length },
+    { ids: [...T1, 20], answer: [21], pin: SYS.length, wantReused: T1.length },
+    { ids: [...SYS, 50, 51], answer: [52], pin: SYS.length, wantReused: SYS.length },   // middle rewritten
+    { ids: [...SYS, 50, 51, 52, 53], answer: [54], pin: SYS.length, wantReused: SYS.length + 3 },
+  ] },
+  { name: "pin: answer saves never evict it (ckpt=1)", ckptMax: 1, turns: [
+    { ids: Q1, answer: A1, pin: SYS.length },
+    { ids: [...T1, 20], answer: [21], pin: SYS.length },
+    { ids: [...T1, 20, 21, 22], answer: [23], pin: SYS.length },
+    { ids: [...T1, 20, 21, 22, 23, 24], answer: [25], pin: SYS.length },
+    { ids: [...SYS, 60], answer: [61], pin: SYS.length, wantReused: SYS.length },
+  ] },
+  { name: "pin: another system prompt replaces it on every device", turns: [
+    { ids: Q1, answer: A1, pin: SYS.length },
+    { ids: [5, 6, 7, 8, 9, 10], answer: [11], pin: 4, wantReused: 0 },
+    { ids: [5, 6, 7, 8, 70], answer: [71], pin: 4, wantReused: 4 },
+    { ids: [...SYS, 72], answer: [73], pin: SYS.length, wantReused: 0 },   // the old one is gone
+  ] },
+  { name: "pin: Stop during the system prompt, then again", turns: [
+    { ids: Q1, pin: SYS.length, stopInPin: true },
+    { ids: Q1, answer: A1, pin: SYS.length, wantReused: SYS.length - 1 },
+    { ids: [...SYS, 80], answer: [81], pin: SYS.length, wantReused: SYS.length },
+  ] },
+  { name: "pin: Stop after the pinned save, before the rest's frame (the end save supersedes it)", turns: [
+    { ids: Q1, answer: A1, pin: SYS.length },
+    { ids: [9, 9, 9, 9, 1], pin: 4, stopAfterPin: true },
+    { ids: [9, 9, 9, 9, 2], answer: [3], pin: 4, wantReused: 4 },
+    { ids: [9, 9, 9, 9, 4], answer: [5], pin: 4, wantReused: 4 },
+  ] },
+  // the save that supersedes the pinned one holds the same tokens, so it stays pinned: answer
+  // saves then never evict it, and a later rewrite of the middle still resumes there
+  { name: "pin: the save that supersedes a pinned one stays pinned", turns: [
+    { ids: [9, 9, 9, 9, 1], pin: 4, stopAfterPin: true },
+    { ids: [9, 9, 9, 9, 2], answer: [3], pin: 4, wantReused: 4 },
+    { ids: [9, 9, 9, 9, 2, 3, 5], answer: [6], pin: 4 },
+    { ids: [9, 9, 9, 9, 2, 3, 5, 6, 7], answer: [8], pin: 4 },
+    { ids: [9, 9, 9, 9, 4], answer: [5], pin: 4, wantReused: 4 },
   ] },
   { name: "Stop after a reset, before the first frame", turns: [
     { ids: Q1, answer: A1 },

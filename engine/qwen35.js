@@ -9,7 +9,7 @@ import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SG
 import { gemmWideWGSL, wideTileConfig } from "./wgsl/gemm_wide.js";
 import { coopWGSL, probeUnpack } from "./wgsl/coop.js";
 import { WGSL2 } from "./wgsl/qwen35.js";
-import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout } from "./wgsl/moe.js";
+import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout, normRouterKernel } from "./wgsl/moe.js";
 import { attnTileWGSL, attnTileConfig } from "./wgsl/attn_tile.js";
 import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows } from "./wgsl/moe_group.js";
 import { f16ToF32, f32ToF16 } from "./gguf.js";
@@ -164,7 +164,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -230,6 +230,11 @@ export class Qwen35Engine {
         this.moe.layout = wideMem ? lay : null;
         // output rows per moe_gus / moe_dnc workgroup (grid x = ceil(rows / these))
         this.moe.gusRows = this.moe.layout ? this.moe.layout.gu.rows : 4; this.moe.dncRows = this.moe.layout ? this.moe.layout.dn.rows : moeDnRows;
+        // moeNormRouter (default on): the post-attention RMSNorm and the router GEMV in one launch (moe_nrt, engine/wgsl/moe.js
+        // normRouterKernel), the router in BF16 when every layer's router is exactly BF16 (bartowski's files: yes). false:
+        // rmsnorm + the f32 router GEMV, as before.
+        const bfExact = (d) => { const u = new Uint32Array(d.buffer, d.byteOffset, d.length); for (let i = 0; i < u.length; i++) if (u[i] & 0xffff) return false; return true; };
+        this.moe.nrt = moeNormRouter !== false && dim % 4 === 0 ? { ROWS: 4, bf16: moeLs.every((L) => bfExact(L.router.data) && bfExact(L.shRouter.data)) } : null;
       } else console.warn(`MoE: fused FFN off (unfused kernels): ${!moeLs.length ? "no MoE layers" : ![1, 2, 4].includes(moeDnRows) ? `moeDnRows ${moeDnRows} not 1, 2 or 4`
         : !wgMemOK ? "moe_dnc workgroup memory over the device limit" : "a layer's router / shared-expert tensors are not fusable"}`);
     }
@@ -296,6 +301,10 @@ export class Qwen35Engine {
     // keeps the old separate buffers entirely. Only for the coop GEMV ladder.
     this.fuseProjOn = fuseProj !== false && matvecVariant === "coop";
     this.fuseProj = this.fuseProjOn;
+    // dnNormBA (MoE models, default on; the 27B keeps its bits): a DeltaNet layer's input RMSNorm and its merged F32
+    // beta / alpha GEMV in one launch (dn_nba: engine/wgsl/moe.js normRouterKernel, as moe_nrt), which also writes xn
+    // for the [qkv | z] GEMV that follows. Decode and the batched passes both run it (with fuseProj on), so spec == plain.
+    this.dnNba = dnNormBA !== false && !!this.moe && this.fuseProjOn;
     // batched attention for verify / prefill passes (one dispatch per stage for all columns instead
     // of three per column; bit-identical, needs the workgroup softmax). engine.attnMC = false for A/B.
     this.attnMCOn = attnMC !== false && this.softmaxWG;
@@ -423,7 +432,8 @@ export class Qwen35Engine {
     const unpack = await probeUnpack(device);
     const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack)
       + (this.moe ? moeWGSL(this.moeK) : "")
-      + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
+      + (this.dnNba ? normRouterKernel({ ROWS: 4, bf16: false, name: "dn_nba", P: "nba", struct: !(this.moeFuse && this.moe.nrt) }) : "")
+      + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, nrt: this.moe.nrt, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && this.moeGrpTiled ? tiledGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && !this.moeGrpTiled ? moeGroupWGSL({ K: this.moe.K, R: dnGroupRows(this.moeGrpUC), UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
@@ -479,8 +489,10 @@ export class Qwen35Engine {
       moe_gu_q4: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"], moe_gu_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"],
       moe_dn_q4: ["ro", "ro", "ro", "rw", "ro", "u"], moe_dn_q8: ["ro", "ro", "ro", "rw", "ro", "u"],
     });
+    if (this.dnNba) G1.dn_nba = ["ro", "ro", "ro", "rw", "rw", "u"];
     if (this.moeFuse) {
       G1.moe_route = ["ro", "rw", "rw", "u"];
+      if (this.moe.nrt) G1.moe_nrt = ["ro", "ro", "ro", "rw", "rw", "u"];
       for (const p of this.moe.guPairs) G1["moe_gus_" + p] = ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "ro", "u"];
       for (const p of this.moe.dnPairs) G1["moe_dnc_" + p] = ["ro", "ro", "ro", "rw", "ro", "ro", "ro", "ro", "u"];
     }
@@ -721,7 +733,12 @@ export class Qwen35Engine {
         const rp = new Float32Array((nExp + 1) * dim);
         rp.set(L.router.data); rp.set(L.shRouter.data, nExp * dim);
         L.router.data = L.shRouter.data = null;
-        R.router = { kind: "f32", buf: this._buf(rp, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC) };
+        const nrt = this.moe.nrt;
+        if (nrt && nrt.bf16) {   // moe_nrt's BF16 router: two values per word (the f32 values' high halves, exact)
+          const u = new Uint32Array(rp.buffer), pk = new Uint32Array(u.length / 2);
+          for (let i = 0; i < pk.length; i++) pk[i] = (u[2 * i] >>> 16) | (u[2 * i + 1] & 0xffff0000);
+          R.router = { kind: "bf16", buf: this._buf(pk, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC) };
+        } else R.router = { kind: "f32", buf: this._buf(rp, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC) };
         R.expGate = up(L.expGate); R.expUp = up(L.expUp); R.expDown = up(L.expDown);
         const lim = device.limits.maxStorageBufferBindingSize;
         for (const [w, n] of [[R.expGate, "ffn_gate_exps"], [R.expUp, "ffn_up_exps"], [R.expDown, "ffn_down_exps"]])
@@ -733,7 +750,8 @@ export class Qwen35Engine {
         R.gusgPipe = R.gusPipe.replace("moe_gus_", "moe_gusg_"); R.dngPipe = R.dncPipe.replace("moe_dnc_", "moe_dng_");
         R.moeU = (xs, dOut, dIn, ys, pk) => [dOut, dIn, sDim, nExp, xs, ys, norm, 1, pk ? pk.oUq : 0, pk ? pk.oGs : 0, pk ? pk.oUs : 0, 0];
         const U = (a) => this._buf(new Uint32Array(a), GPUBufferUsage.UNIFORM);
-        R.mvRouter = mv(R.router, this.xn, MB.logits, nExp + 1, dim);
+        if (nrt) R.bgNrt = this._bg(this.pipes.moe_nrt, 1, [this.x, R.postNorm.buf, R.router.buf, this.xn, MB.logits, U([dim, nExp + 1, dim, nExp + 1, dim, 0, 0, 0])]);
+        else R.mvRouter = mv(R.router, this.xn, MB.logits, nExp + 1, dim);
         R.bgRoute = this._bg(this.pipes.moe_route, 1, [MB.logits, MB.sel, MB.selw, U(R.moeU(nExp + 1, 0, 0, 0))]);
         R.bgGus = this._bg(this.pipes[R.gusPipe], 1, [R.expGate.qs, R.expGate.sc, R.expUp.qs, R.expUp.sc, this.xn, MB.hF, MB.sel, R.shPack.buf,
           U(R.moeU(dim, ei, dim, hs, R.shPack))]);
@@ -837,6 +855,9 @@ export class Qwen35Engine {
           [R.wBeta, R.wAlpha] = fba.parts;
           R.fBA = fba;
           if (fba.decodeOK) R.mvBA = mv(fba.w, this.xn, this.betaRaw.buffer, fba.rows, dim);
+          // dnNormBA: input norm + beta / alpha in one launch (writes xn too); ls = output column stride
+          if (this.dnNba && fba.w.kind === "f32") R.bgNba = this._bg(this.pipes.dn_nba, 1, [this.x, R.attnNorm.buf, fba.w.buf, this.xn, this.betaRaw.buffer,
+            this._buf(new Uint32Array([dim, fba.rows, dim, fba.rows, dim, 0, 0, 0]), GPUBufferUsage.UNIFORM)]);
         }
         R.mvQKV = mv(R.wqkv, this.xn, this.qkv, convDim, dim);
         R.mvZ = mv(R.wz, this.xn, this.z, dInner, dim);
@@ -1275,11 +1296,15 @@ export class Qwen35Engine {
       }
     } else {
       const p = enc.beginComputePass();
-      this._d(p, "rmsnorm", L.bgNorm1, 256, 256);
+      const nba = this.fuseProj && L.bgNba;   // input norm + beta / alpha, then [qkv | z] on its xn
+      if (nba) this._dxyz(p, "dn_nba", L.bgNba, Math.ceil(L.fBA.rows / 4), 1, 1);
+      else this._d(p, "rmsnorm", L.bgNorm1, 256, 256);
       if (this.fuseProj && L.mvQZ) this._dop(p, L.mvQZ);
       else { this._dop(p, L.mvQKV); this._dop(p, L.mvZ); }
-      if (this.fuseProj && L.mvBA) this._dop(p, L.mvBA);
-      else { this._dop(p, L.mvBeta); this._dop(p, L.mvAlpha); }
+      if (!nba) {
+        if (this.fuseProj && L.mvBA) this._dop(p, L.mvBA);
+        else { this._dop(p, L.mvBeta); this._dop(p, L.mvAlpha); }
+      }
       this._d(p, "dn_conv", L.bgConv, D.convDim);
       this._d(p, "dn_pre", L.bgPre, 128, 128);      // gates + L2(q,k) fused
       if (this.dnFuse) this._d(p, "dn_delta_gn", L.bgDeltaGn, D.nVH * 128, 128);
@@ -1298,10 +1323,11 @@ export class Qwen35Engine {
   _encodeFFN(enc, L) {
     const D = this.dims;
     const p = enc.beginComputePass();
-    this._d(p, "rmsnorm", L.bgNorm2, 256, 256);
-    if (L.fused) {   // router (+ shared gate) GEMV, route, gate/up over K + 1 slots, down + combine
+    if (!(L.fused && this.moe.nrt)) this._d(p, "rmsnorm", L.bgNorm2, 256, 256);
+    if (L.fused) {   // (norm +) router (+ shared gate) GEMV, route, gate/up over K + 1 slots, down + combine
       const { KS, hs, gusRows, dncRows } = this.moe;
-      this._dop(p, L.mvRouter);
+      if (this.moe.nrt) this._dxyz(p, "moe_nrt", L.bgNrt, Math.ceil((this.moe.nExp + 1) / this.moe.nrt.ROWS), 1, 1);
+      else this._dop(p, L.mvRouter);
       this._dxyz(p, "moe_route", L.bgRoute, 1, 1, 1);
       this._dxyz(p, L.gusPipe, L.bgGus, Math.ceil(hs / gusRows), KS, 1);
       this._dxyz(p, L.dncPipe, L.bgDnc, Math.ceil(D.dim / dncRows), 1, 1);
@@ -1516,8 +1542,9 @@ export class Qwen35Engine {
       "qsplit_mc", "head_norm_mc", "rope_part_mc", "sigmoid_mul_mc", "attn_glue",
       "attn_scores_mc", "attn_softmax_wg_mc", "attn_out_mc", "kv_store", "attn_flash", "attn_combine", "kv_store_q8", "attn_flash_q8", "attn_flash_t2",
       ...(this.pipes.attn_flash_tile ? ["attn_flash_tile", "attn_combine_tile"] : []),
+      ...(this.dnNba ? ["dn_nba"] : []),
       ...(this.moe ? ["moe_router", "moe_combine", "moe_gu_q4", "moe_gu_q8", "moe_dn_q4", "moe_dn_q8"] : []),
-      ...(this.moeFuse ? ["moe_route", ...this.moe.guPairs.map((p) => "moe_gus_" + p), ...this.moe.dnPairs.map((p) => "moe_dnc_" + p)] : [])];
+      ...(this.moeFuse ? ["moe_route", ...(this.moe.nrt ? ["moe_nrt"] : []), ...this.moe.guPairs.map((p) => "moe_gus_" + p), ...this.moe.dnPairs.map((p) => "moe_dnc_" + p)] : [])];
     this.bgCommonB = cix.map((c) => {
       const m = {};
       for (const name of colPipes)
@@ -1680,7 +1707,9 @@ export class Qwen35Engine {
       if (L.fused) {
         const { nExp, inter: ei, hs } = this.moe;
         const U = (a) => ({ buffer: this._buf(new Uint32Array(a), GPUBufferUsage.UNIFORM) });
-        R.router = mvB(L.router, B.xn, B.mLogits, nExp + 1, D.dim);
+        if (this.moe.nrt) mc.nrt = this._bg2res(this.pipes.moe_nrt, [whole(B.x), { buffer: L.postNorm.buf }, { buffer: L.router.buf }, whole(B.xn), whole(B.mLogits),
+          U([D.dim, nExp + 1, st(B.x), st(B.mLogits), st(B.xn), 0, 0, 0])]);
+        else R.router = mvB(L.router, B.xn, B.mLogits, nExp + 1, D.dim);
         mc.route = this._bg2res(this.pipes.moe_route, [whole(B.mLogits), { buffer: B.mSel }, { buffer: B.mSelw }, U(L.moeU(st(B.mLogits), 0, 0, 0))]);
         mc.gus = this._bg2res(this.pipes[L.gusPipe], [{ buffer: L.expGate.qs }, { buffer: L.expGate.sc }, { buffer: L.expUp.qs }, { buffer: L.expUp.sc },
           whole(B.xn), { buffer: B.mHF }, { buffer: B.mSel }, { buffer: L.shPack.buf }, U(L.moeU(st(B.xn), ei, D.dim, hs, L.shPack))]);
@@ -1731,6 +1760,8 @@ export class Qwen35Engine {
           mvB(L.wBeta, B.xn, B.betaRaw, D.nVH, D.dim), mvB(L.wAlpha, B.xn, B.alpha, D.nVH, D.dim)];
         if (L.fQZ && batchOK(L.fQZ)) R.qz = mvB(L.fQZ.w, B.xn, { buf: B.qkv.buf, stride: B.qkv.stride }, L.fQZ.rows, D.dim);
         if (L.fBA && batchOK(L.fBA)) R.ba = mvB(L.fBA.w, B.xn, { buf: B.betaRaw.buf, stride: B.betaRaw.stride }, L.fBA.rows, D.dim);
+        if (L.bgNba) R.nba = this._bg2res(this.pipes.dn_nba, [whole(B.x), { buffer: L.attnNorm.buf }, { buffer: L.fBA.w.buf }, whole(B.xn), { buffer: B.betaRaw.buf },
+          { buffer: this._buf(new Uint32Array([D.dim, L.fBA.rows, st(B.x), B.betaRaw.stride / 4, st(B.xn), 0, 0, 0]), GPUBufferUsage.UNIFORM) }]);
         R.out = mvB(L.wOut, B.gated, B.x, D.dim, D.dInner, true, this.gemmOn ? B.aoT : null);
         for (let c = 0; c < NC; c++) Object.assign(R.cols[c], {
           gates: this._bg2res(this.pipes.dn_gates, [slice(B.alpha, c), slice(B.betaRaw, c),
@@ -1790,13 +1821,15 @@ export class Qwen35Engine {
       const R = this.replay && L.rp && this._snapNow;   // a verify pass: keep what replay needs
       if (R && R.base === 0) enc.copyBufferToBuffer(L.S, 0, L.S_pre, 0, L.S.size);
       const p = enc.beginComputePass();
-      this._dMC(p, "rmsnorm_mc", M.norm1, 256, 256, nCols);
+      const nba = this.fuseProj && LB.nba;   // input norm + beta / alpha (as the one-token path), then [qkv | z]
+      if (nba) this._dMC(p, "dn_nba", LB.nba, Math.ceil(this.layers[i].fBA.rows / 4) * 64, 64, nCols);
+      else this._dMC(p, "rmsnorm_mc", M.norm1, 256, 256, nCols);
       if (G) this._dop(p, this.xposeXn);
       const [oqkv, oz, obeta, oalpha] = LB.dnOps;
       // full-width prefill keeps qkv and z on the GEMM, which has no merged form
       if (this.fuseProj && LB.qz && !this._gemmAt(oqkv, nCols) && !this._gemmAt(oz, nCols)) this._dop(p, LB.qz, nCols);
       else { this._dop(p, oqkv, nCols); this._dop(p, oz, nCols); }
-      this._encDnMid(p, LB, M, nCols);
+      this._encDnMid(p, LB, M, nCols, !!nba);
       if (G) this._dop(p, this.xposeGated);
       this._dop(p, LB.out, nCols);
       if (!LB.out.acc) this._dMC(p, "add_res_mc", M.addTmp, D.dim, 64, nCols);
@@ -1806,7 +1839,7 @@ export class Qwen35Engine {
     }
     {
       const p = enc.beginComputePass();
-      this._dMC(p, "rmsnorm_mc", M.norm2, 256, 256, nCols);
+      if (!(L.fused && this.moe.nrt)) this._dMC(p, "rmsnorm_mc", M.norm2, 256, 256, nCols);   // (moe_nrt: the norm is in the router launch)
       if (L.moe) {
         this._encMoeFfn(p, L, LB, M, nCols, G, routeOnly);
         p.end();
@@ -1867,11 +1900,14 @@ export class Qwen35Engine {
     this._dMC(p, "sigmoid_mul_mc", M.sigMul, D.qDim, 64, nCols);
   }
   // DeltaNet beta / alpha projections, conv, gates + L2, recurrence, gated norm: B.xn, B.qkv, B.z -> B.gated
-  _encDnMid(p, LB, M, nCols) {
+  // baDone: dn_nba already wrote beta / alpha
+  _encDnMid(p, LB, M, nCols, baDone = false) {
     const D = this.dims;
     const [, , obeta, oalpha] = LB.dnOps;
-    if (this.fuseProj && LB.ba && !this._gemmAt(obeta, nCols) && !this._gemmAt(oalpha, nCols)) this._dop(p, LB.ba, nCols);
-    else { this._dop(p, obeta, nCols); this._dop(p, oalpha, nCols); }
+    if (!baDone) {
+      if (this.fuseProj && LB.ba && !this._gemmAt(obeta, nCols) && !this._gemmAt(oalpha, nCols)) this._dop(p, LB.ba, nCols);
+      else { this._dop(p, obeta, nCols); this._dop(p, oalpha, nCols); }
+    }
     this._dMC(p, "dn_conv_mc", M.conv, D.convDim, 64, 1);           // loops over columns
     this._dMC(p, "dn_pre_mc", M.pre, 128, 128, nCols);              // gates + L2(q,k) fused, one WG per column
     this._dMC(p, "dn_delta_mc", M.delta, D.nVH * 128, 128, 1);     // loops over columns
@@ -1883,7 +1919,8 @@ export class Qwen35Engine {
     const D = this.dims;
     if (L.fused) {   // same four launches as the one-token path, one workgroup row per column
       const { KS, hs, gusRows, dncRows } = this.moe;
-      this._dop(p, LB.router, nCols);
+      if (this.moe.nrt) this._dMC(p, "moe_nrt", M.nrt, Math.ceil((this.moe.nExp + 1) / this.moe.nrt.ROWS) * 64, 64, nCols);   // norm + router
+      else this._dop(p, LB.router, nCols);
       this._dMC(p, "moe_route", M.route, nCols * 256, 256, 1);
       if (routeOnly) return;
       this._dMC(p, L.gusPipe, M.gus, Math.ceil(hs / gusRows) * 64, 64, nCols * KS);
@@ -2042,6 +2079,7 @@ export class Qwen35Engine {
         const gB = this.gB, ss = NC * this.moe.KS * 4, tx = this._wTwin.get(B.x.buf), txn = this._wTwin.get(B.xn.buf);
         for (let j = 0; j < J; j++) {
           this._wCopy(enc, B.xn, j, false);
+          if (this.moe.nrt) this._wCopy(enc, B.x, j, false);   // moe_nrt norms x itself
           this._mcCommon = this.bgCommonW[j];
           const p = enc.beginComputePass();
           this._encMoeFfn(p, L, LB, M, NC, G, true);

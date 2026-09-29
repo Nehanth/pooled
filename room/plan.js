@@ -58,16 +58,19 @@ export function codeFromLocation(pathname = "", search = "", hash = "") {
 // its layers plus one network hop per device in the chain, so: fill the fastest devices first,
 // each up to what it can hold, and leave out devices that are not needed. caps: layers each
 // device can hold (host first); msPerLayer: measured compute per layer (null or missing = not
-// measured yet: then fewest hops wins, biggest devices first). The host always keeps at least
-// one layer (it holds the embedding and the head anyway). Returns planSplit's shape plus
-// `used`: the device indices that hold layers, in the original order.
-export function planForSpeed(L, caps, msPerLayer = []) {
+// measured yet: then fewest hops wins, biggest devices first). phone: devices that are phones;
+// until a phone is measured it counts as PHONE_COST times slower than an unmeasured computer, so
+// computers fill first. The host always keeps at least one layer (it holds the embedding and the
+// head anyway). Returns planSplit's shape plus `used`: the device indices that hold layers, in
+// the original order.
+export const PHONE_COST = 20;   // one iPhone layer ~ 15-25 GB10 layers (docs/bench-log.md, device matrix)
+export function planForSpeed(L, caps, msPerLayer = [], phone = []) {
   caps = caps.map((c) => (Number.isFinite(c) && c > 0 ? c : 0));   // a malformed cap holds nothing
   msPerLayer = msPerLayer || [];
   const n = caps.length;
   const known = msPerLayer.filter((x) => x > 0);
   const fallback = known.length ? Math.max(...known) * 1.5 : 1;   // unmeasured: assume slower than any measured device
-  const cost = caps.map((_, i) => msPerLayer[i] > 0 ? msPerLayer[i] : fallback);
+  const cost = caps.map((_, i) => msPerLayer[i] > 0 ? msPerLayer[i] : fallback * (phone?.[i] ? PHONE_COST : 1));
   const order = [...caps.keys()].sort((a, b) => cost[a] - cost[b] || (a === 0) * -1 + (b === 0) || caps[b] - caps[a] || a - b);
   const assigned = new Array(n).fill(0);
   assigned[0] = 1;
@@ -91,6 +94,22 @@ export function planForSpeed(L, caps, msPerLayer = []) {
   return { assigned, ranges, used: assigned.map((a, i) => (a > 0 ? i : -1)).filter((i) => i >= 0) };
 }
 
+// A phone: its own flag, or a phone user agent (the meta a device sends when it joins).
+export function isPhoneMeta(m) {
+  return !!(m?.phone || /^(iPhone|Android)$/.test(m?.ua || ""));
+}
+
+// Phones hold layers only when the computers cannot. One layer on a phone costs as much as 15-25
+// layers on a desktop GPU plus two Wi-Fi hops per token (docs/bench-log.md, device matrix), so a
+// room whose computers can hold the whole model runs faster with its phones as ask-only guests.
+// capsLayers: layers each device can hold (host first); phone: which devices are phones. The host
+// always counts as a computer (it holds the embedding and the head either way). Returns the
+// device indices (never 0) to leave out: every phone when the others hold all L layers, else none.
+export function phonesToLeaveOut(L, capsLayers, phone) {
+  const others = capsLayers.reduce((s, c, i) => s + (i === 0 || !phone[i] ? Math.max(0, Math.floor(c)) : 0), 0);
+  return others >= L ? capsLayers.map((_, i) => i).filter((i) => i > 0 && phone[i]) : [];
+}
+
 // The device that becomes the model host when someone presses Start. The model host holds the
 // embedding, the head and the draft block, samples every token and runs the Code agent, so it is
 // the strongest device, whoever pressed Start: a device with WebGPU first, then a computer before
@@ -106,9 +125,8 @@ export function planForSpeed(L, caps, msPerLayer = []) {
 // devices: [{ id, meta: { webgpu, contribGB, phone, ua, gbps, gpu } }]. Returns an id (null for none).
 export const SPEED_EDGE = 1.5;
 export function pickModelHost(devices) {
-  const isPhone = (m) => !!(m?.phone || /^(iPhone|Android)$/.test(m?.ua || ""));
   const gb = (m) => (m?.webgpu ? +m?.contribGB || 0 : 0);
-  const key = (d) => [d.meta?.webgpu ? 1 : 0, isPhone(d.meta) ? 0 : 1, gb(d.meta)];
+  const key = (d) => [d.meta?.webgpu ? 1 : 0, isPhoneMeta(d.meta) ? 0 : 1, gb(d.meta)];
   // > 0 when a is the better pick by kind, then memory, then the lower id
   const cmp = (a, b) => { const x = key(a), y = key(b); return x[0] - y[0] || x[1] - y[1] || x[2] - y[2] || (a.id < b.id ? 1 : -1); };
   const ds = devices.filter((d) => d?.id);

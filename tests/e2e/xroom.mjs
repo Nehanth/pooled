@@ -10,9 +10,13 @@
 //          [--trace-out guest-trace.json]
 //   both : [--port 8123] (http; https weights on port + 1) [--signal-port 9000] [--query "a=1&b=2"]
 //          [--name gb10] [--chrome <path>] (macOS defaults to /Applications/Google Chrome.app)
+//          [--ua iphone] the page sees an iPhone (a stand-in for the phone, see --ua below)
 //   host : [--signal <ip>:<port> --signal-server 0] when the signaling server runs elsewhere
+//   both : [--signal cloud] the public PeerJS server (the page's default; rooms with a phone, see
+//          tests/e2e/xroom_phone.mjs); host: [--peers N] wait for N devices, itself included (default 2)
 //   diagnostics (host): [--fixk K] every draft-head step drafts K (the room otherwise picks 3/5/7 by
-//          measured tok/s); [--split N,M] layers per device, host first; [--tune WG,ROWS] forces the GEMV shape the load-time autotune would pick
+//          measured tok/s); [--split memory|speed] the room's layer split (default memory); [--split N,M] layers per device,
+//          host first; [--tune WG,ROWS] forces the GEMV shape the load-time autotune would pick
 //          [--speedpick] the room picks the model host by GPU speed as it would for a user (room/plan.js
 //          pickModelHost): records who took it at Start and whether the room came online, and asks nothing
 //
@@ -59,14 +63,22 @@ const ROUNDS = +arg("rounds", 2), MAXNEW = +arg("maxnew", 128), GBV = arg("gb", 
 const MODES = arg("modes", "plain,spec").split(",");
 const PORT = +arg("port", 8123), TLS_PORT = PORT + 1, SIG_PORT = +arg("signal-port", 9000);
 const SIGNAL = arg("signal", `127.0.0.1:${SIG_PORT}`), MAXMIN = +arg("maxmin", 60);
+// --signal cloud: the page's default signaling (the public PeerJS server), what an https page on a
+// phone uses (it cannot reach a plain ws:// server): every device in the room must use the same one
+const CLOUD = SIGNAL === "cloud";
+const PEERS = +arg("peers", 2);   // host: wait for this many devices in the room (itself included)
 const TRACE_ROUNDS = new Set(String(arg("trace-rounds", "")).split(",").filter((x) => x !== "").map(Number));
 const TRACE = ROLE === "host" ? TRACE_ROUNDS.size > 0 : !!arg("trace-out");
 const QUERY = arg("query", "");   // extra room URL parameters, "a=1&b=2"
 const FIXK = Math.max(0, Math.min(7, parseInt(arg("fixk", "0"), 10) || 0));
-// --split N,M,...: layers per device, host first then the chain in order (must add up to the
-// model's layer count); the placement diagnostic, instead of the room's split by pledge
-const SPLIT = arg("split") ? arg("split").split(",").map((x) => parseInt(x, 10)) : null;
-if (SPLIT && SPLIT.some((x) => !(x > 0))) throw new Error("--split N,M,... with every count > 0");
+// --split memory|speed: the room's layer split (?split=, pinned to "memory" by default so a run does
+// not depend on load-time layer timings). --split N,M,...: layers per device, host first then the
+// chain in order (must add up to the model's layer count); the placement diagnostic, dealt over the
+// split by memory
+const SPLIT_ARG = String(arg("split", "memory"));
+const SPLIT_MODE = /^(memory|speed)$/.test(SPLIT_ARG) ? SPLIT_ARG : "memory";
+const SPLIT = SPLIT_MODE === SPLIT_ARG ? null : SPLIT_ARG.split(",").map((x) => parseInt(x, 10));
+if (SPLIT && SPLIT.some((x) => !(x > 0))) throw new Error("--split memory|speed|N,M,... with every count > 0");
 const SPEEDPICK = flag("speedpick");
 const TUNE = arg("tune") ? arg("tune").split(",").map((x) => parseInt(x, 10)) : null;   // e.g. 64,4
 if (TUNE && !(TUNE.length === 2 && [64, 128, 256].includes(TUNE[0]) && [4, 8].includes(TUNE[1]))) throw new Error("--tune WG,ROWS with WG 64|128|256 and ROWS 4|8");
@@ -88,7 +100,11 @@ const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; cha
 function rep(src, a, b) { if (!src.includes(a)) throw new Error("room.js changed: anchor not found: " + a.slice(0, 80)); return src.replace(a, b); }
 // window.__xConns: the room's links, for the WebRTC path the result reports (xroom's linkStats).
 function serveRoom(src) {
-  src = rep(src, "function broadcastAll(obj) {", "window.__xBroadcast = (o) => broadcastAll(o); window.__xConns = () => conns;\nfunction broadcastAll(obj) {");
+  src = rep(src, "function broadcastAll(obj) {", "window.__xBroadcast = (o) => broadcastAll(o); window.__xConns = () => conns;\n" +
+    // the workers' own compute ms per frame kind (their ai-tele reports: an EMA of unpack + layers +
+    // readback, "one" = a plain token, "spec" = a verify block, "pre" = prefill), by device name
+    "window.__xTele = () => Object.fromEntries([...(ai.teleBy || new Map())].map(([id, v]) => [conns.get(id)?.name || id, v]));\n" +
+    "function broadcastAll(obj) {");
   // the cooperative GEMV shape this device's autotune picked (timed at load, so it can differ
   // between loads, and the GEMV's summation order follows it)
   // (--tune WG,ROWS forces a shape instead: the diagnostic for whether the shape changes the output)
@@ -98,7 +114,8 @@ function serveRoom(src) {
   // --fixk K: every draft-head step in a room drafts K (the room otherwise picks 3, 5 or 7 by
   // measured tok/s, which depends on timing); the diagnostic for acceptance against a solo run (K = 3)
   // --split: deal the given layer counts (the room checks nothing else about the plan)
-  if (SPLIT) src = rep(src, "    } else ({ assigned, ranges } = planSplit(L, caps));\n", `    } else ({ assigned, ranges } = planSplit(L, caps));
+  // (SPLIT pins ?split=memory, so this is the split by memory's planSplit)
+  if (SPLIT) src = rep(src, "      ({ assigned, ranges } = planSplit(L, caps));\n", `      ({ assigned, ranges } = planSplit(L, caps));
     { const f = ${JSON.stringify(SPLIT)}; if (f.length !== assigned.length || f.reduce((a, b) => a + b, 0) !== L) throw new Error("--split " + f + ": need " + assigned.length + " counts adding up to " + L);
       assigned = f; let a = 0; ranges = f.map((x) => [a, a += x]); }
 `);
@@ -149,16 +166,20 @@ const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert:
 // the signaling server listens on every interface: the guest machine reaches it over the LAN / tailnet
 // (--signal-server 0: someone else runs it, e.g. xroom_pair.sh when the host is the other machine)
 let peerServer = null;
-if (ROLE === "host" && arg("signal-server", "1") !== "0") {   // a solo room still registers its code
+if (ROLE === "host" && !CLOUD && arg("signal-server", "1") !== "0") {   // a solo room still registers its code
   peerServer = spawn(arg("peerjs", path.join(ROOT, "node_modules/.bin/peerjs")), ["--port", String(SIG_PORT), "--path", "/", "--host", "0.0.0.0"], { stdio: "ignore" });
   await new Promise((r) => setTimeout(r, 1500));
 }
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?signal=${SIGNAL}&maxnew=${MAXNEW}&peerweights=0&dev=1` + (ROLE === "host" && !SOLO && !SPEEDPICK ? "&gbps=0" : "") + (QUERY ? "&" + QUERY : "");
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?${CLOUD ? "" : `signal=${SIGNAL}&`}maxnew=${MAXNEW}&peerweights=0&dev=1&split=${SPLIT_MODE}` +
+  (ROLE === "host" && !SOLO && !SPEEDPICK ? "&gbps=0" : "") + (QUERY ? "&" + QUERY : "");
 const mac = process.platform === "darwin";
 const ARGS = [...(mac ? [] : ["--no-sandbox", "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"]),
   "--headless=new", "--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--disable-features=WebRtcHideLocalIpsWithMdns", "--js-flags=--max-old-space-size=65536",
   ...(TRACE ? ["--enable-webgpu-developer-features"] : [])];   // unquantized GPU timestamps
-const UA = mac ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36" : "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+// --ua iphone: the page sees an iPhone (a phone's pledge steps and buffer caps, and the room deals it
+// layers as a phone, room/plan.js): a stand-in for the phone on a computer, for correctness runs
+const UA = arg("ua") === "iphone" ? "Mozilla/5.0 (iPhone; CPU iPhone OS 26_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.6 Mobile/15E148 Safari/604.1"
+  : mac ? "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36" : "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 const CHROME = arg("chrome", mac ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "");
 const prof = fs.mkdtempSync(path.join(os.tmpdir(), "xroom-profile-"));
 const ctx = await chromium.launchPersistentContext(prof, { headless: false, args: ARGS, userAgent: UA, ignoreHTTPSErrors: true, ...(CHROME ? { executablePath: CHROME } : {}) });
@@ -253,7 +274,7 @@ try {
   if (!SOLO) {
     console.log("CODE " + code);
     if (arg("codefile")) fs.writeFileSync(arg("codefile"), code);
-    await p.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 15 * 60e3, polling: 1000 });
+    await p.waitForFunction((n) => document.querySelectorAll(".peer-card").length >= n, PEERS, { timeout: 15 * 60e3, polling: 1000 });
     log("guest in", JSON.stringify(await snap()));
   }
   await p.waitForTimeout(3000);
@@ -306,7 +327,9 @@ try {
       const pre = /prefill (\d+) tok in ([\d.]+)s/.exec(st), dec = /(\d+) tok · ([\d.]+) tok\/s/.exec(st), acc = /(\d+)% drafts accepted/.exec(st), lk = /(\d+) tok by lookup/.exec(st);
       const answer = await p.evaluate(() => [...document.querySelectorAll(".m.bot .bubble")].pop()?.textContent || "");
       const crumb = await p.evaluate(() => { try { return JSON.parse(localStorage.getItem("pooled-crumb") || "{}").s || ""; } catch { return ""; } });
-      const row = { idx, mode, prompt: pn, round: r, traced, t0: tRound, t1: Date.now(), ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2],
+      const tele = await p.evaluate(() => window.__xTele?.() || null).catch(() => null);
+      const links = await p.evaluate(() => window.pooledDebug?.() || null).catch(() => null);
+      const row = { idx, mode, prompt: pn, round: r, traced, tele, links, t0: tRound, t1: Date.now(), ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2],
         accepted: acc ? +acc[1] / 100 : null, lookupTok: lk ? +lk[1] : 0, rtt: s.rtt, status: st.slice(0, 240), crumb: crumb.slice(0, 300),
         answerSha: crypto.createHash("sha256").update(answer).digest("hex").slice(0, 16), answer };
       if (traced) {

@@ -9,6 +9,8 @@ const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); 
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 const rejects = async (p, re) => { try { await p; } catch (e) { ok(re.test(e.message), e.message); return; } throw new Error("did not throw"); };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// wait for a condition instead of a fixed sleep: a loaded CI runner can take longer than any guess
+const until = async (cond, what, ms = 5000) => { for (const end = Date.now() + ms; !cond();) { if (Date.now() > end) throw new Error("timed out waiting for " + what); await sleep(2); } };
 
 const app = () => watch(new MemoryWorkspace({
   "index.html": "<canvas></canvas><script type=module src=game.js></script>",
@@ -67,7 +69,7 @@ Deno.test("serve fails with messages the model can act on", async () => {
 });
 
 Deno.test("live reload: a write under the dir bumps rev after the debounce; outside or same content does not", async () => {
-  const ws = app(), s = server(ws);
+  const ws = app(), s = server(ws, { debounce: 100 });   // wide enough that three quick writes always land in one update
   await s.serve({ dir: "", port: 5173 });
   await s.serve({ dir: "notes", port: 5174, entry: "plan.md" });
   const seen = [];
@@ -75,14 +77,15 @@ Deno.test("live reload: a write under the dir bumps rev after the debounce; outs
   await ws.write("game.js", "console.log(2)\n");
   await ws.write("game.js", "console.log(3)\n");   // debounced into one update
   await ws.write("new.js", "export {}");
-  await sleep(40);
+  await until(() => seen.length, "the first update");
   eq(seen, [{ port: 5173, rev: 2, changed: ["game.js", "new.js"] }]);
   eq(new TextDecoder().decode(s.snapshot(5173).files.get("game.js").bytes), "console.log(3)\n");
   await ws.write("game.js", "console.log(3)\n");   // same bytes
-  await sleep(40);
+  eq(await s.flush(5173), { rev: 2 }, "re-snapshotting now finds nothing new");
   eq(seen.length, 1, "no rev for an unchanged file");
   await ws.remove("notes");
-  await sleep(40);
+  await until(() => seen.length >= 3, "an update on each port");
+  seen.sort((a, b) => a.port - b.port);
   eq(seen.slice(1).map((u) => [u.port, u.rev, u.changed]), [[5173, 3, ["notes/plan.md"]], [5174, 2, ["plan.md"]]]);
   eq(s.logs(5174).lines.map((e) => e.text), ["plan.md was removed; the preview shows a 404 page"]);
   s.close();
@@ -186,5 +189,28 @@ Deno.test("codingTools with a server: a snapshot that fails is reported, not 're
   await s.serve({ dir: "notes", port: 5174, entry: "plan.md" });
   const r = await t.write_file.run({ path: "notes/big.md", content: "x".repeat(100) });
   ok(/preview :5174 not updated: big\.md is 100 B/.test(r), r);
+  s.close();
+});
+
+Deno.test("serve lists errors before warnings, repeats folded; preview_logs keeps the first error in sight", async () => {
+  const s = server(app()), t = T(s);
+  const off = fakeFrame(s, 5173, () => [
+    { level: "warn", text: "AudioContext was not allowed to start", ms: 50 },
+    { level: "error", text: "ReferenceError: grid is not defined", src: "game.js", line: 12, col: 3, ms: 100 },
+    { level: "error", text: "TypeError: cannot read 'x'", src: "game.js", line: 80, col: 1, ms: 116 },
+    { level: "error", text: "ReferenceError: grid is not defined", src: "game.js", line: 12, col: 3, ms: 132 },
+  ]);
+  const r = await t.serve.run({});
+  const rows = r.split("\n");
+  eq(rows[1], "loaded in 12 ms · 3 errors, 1 warning:");
+  ok(/error game\.js:12:3 ReferenceError: grid is not defined ×2$/.test(rows[2]), r);
+  ok(/error game\.js:80:1 TypeError/.test(rows[3]) && /warn AudioContext/.test(rows[4]), r);
+  off();
+  // the first error, then a flood of logs that pushes it out of preview_logs' window
+  const since = s.cursor(5173);
+  s.pushLog(5173, { level: "error", text: "SyntaxError: missing ) after argument list", src: "game.js", line: 7, col: 20, ms: 10, rev: s.snapshot(5173).rev });
+  for (let i = 0; i < 80; i++) s.pushLog(5173, { level: "log", text: "frame " + i, ms: 20, rev: s.snapshot(5173).rev });
+  const logs = await t.preview_logs.run({ since });
+  ok(/\nfirst error: \[0\.0s\] error game\.js:7:20 SyntaxError: missing \) after argument list\n/.test(logs), logs);
   s.close();
 });

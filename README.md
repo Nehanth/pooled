@@ -57,6 +57,22 @@ Switch the room to Code and ask for something, like "build a tetris game". The r
 
 Design: [docs/design/harness-app.md](docs/design/harness-app.md). What the agent can and cannot touch: [SECURITY.md](SECURITY.md#code-mode).
 
+## Use Pooled from your tools
+
+A room can serve its model to anything that speaks the OpenAI or the Anthropic API (Continue, Open WebUI, LiteLLM, the `openai` and `anthropic` SDKs, curl). In a room, the black **Serve API** button in the header opens the Serve API page with the command for that room; run it on your own computer (Node 22 or newer, no GPU needed there):
+
+```bash
+npx @pooled/cli serve ABCD
+# pooled serve · room ABCD · Qwen3.6 35B MoE · Q4
+#   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
+#   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
+
+curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model": "pooled", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
+```
+
+The bridge joins the room as an API client with no layers, so requests run on the room's GPUs, one at a time in the room's queue, and show in the chat under the room's visibility setting. It listens on 127.0.0.1 only; `POOLED_TOKEN` makes it require a key. Prompts go to the room's host and, unless the host limits who sees answers, to everyone in the room: see [who sees your prompts](cli/README.md#who-sees-your-prompts). v1 is chat only: no tool calls, images or JSON mode (they get a clear 400). Setup for each tool: [cli/README.md](cli/README.md). Design: [docs/design/serve.md](docs/design/serve.md).
+
 ## Run it locally
 
 ```bash
