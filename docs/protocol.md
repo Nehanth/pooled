@@ -45,10 +45,22 @@ Hidden states travel as binary frames: an f16-packed `Uint16Array` (10 KB for `d
 
 ## Ordering guarantees
 
-- Data channels are ordered and reliable. Frames are sliced (≤ 4.6 KB) and striped across several associations, so consecutive frames can complete out of order at the receiver; the transport hands them over strictly in send order (a gap with no progress for 5 s is skipped, and a frame arriving after its gap was skipped is dropped rather than run out of order). A worker runs frames one at a time from a queue in that order, so recurrent states advance deterministically.
+- Data channels are ordered and reliable. Frames are sliced (≤ 4.6 KB) and striped across several associations, so consecutive frames can complete out of order at the receiver; the transport hands them over strictly in send order. A missing frame on a reliable link is late, not lost (a device's network froze, a lost packet is waiting out SCTP's retransmission timer), so the receiver waits for it: it skips the gap at once only when every open channel has already delivered a newer frame (nothing older can still be queued), after 5 s when a channel closed in the last 15 s (the frame may have gone down with it), and otherwise after a 60 s backstop. A frame arriving after its gap was skipped is dropped rather than run out of order. Frames of up to 3 slices (a decode token's hidden state) are sent twice, on two associations, so one lost packet does not stall a token behind a retransmission timeout; receivers drop the second copy (`?wiredup=0` turns this off). Slices go to the open channel with the least data queued. A worker runs frames one at a time from a queue in that order, so recurrent states advance deterministically.
 - Because of that, the host keeps up to 6 prefill rounds in flight: round r+1 runs on the host while round r is on a worker, and the chain works as a pipeline. Output is unchanged: every device sees the same frames in the same order.
 - The prefill rounds come back as full hidden states, which the host feeds to the draft block (`mtpRun`) so the first speculative steps after a prompt draft from a warm cache.
 - Inside a batched frame, columns are processed strictly in order; snapshot slots are indexed by global column (`frame.snap` packs base and total), so an 8-column verify split into two 4-column chunks on an older worker still rolls back correctly.
+
+## Connecting: STUN and an optional TURN relay
+
+Links are direct WebRTC connections. Every device uses public STUN servers to find its public address; that is enough on most home and office networks. When both sides are behind symmetric NAT or carrier-grade NAT, or a firewall blocks UDP, no direct path exists and the join fails after 15 s with "found the room, but the direct connection failed" (the Network box under the join form opens). A TURN relay fixes that: it forwards the traffic between the two devices.
+
+Pooled does not run a relay and ships no credentials; it is off by default. To use one (your own [coturn](https://github.com/coturn/coturn), or a provider's):
+
+- **Network box** under the join form: relay URL (`turn:relay.example.org:3478`, `turns:` for TLS, comma-separate several), username and password. Saved in this browser only.
+- **URL**: `?turn=turn:relay.example.org:3478&turnuser=NAME&turncred=PASSWORD`. Overrides the saved setting.
+- **Self-hosted deployments**: define `window.TURN_SERVERS` (an `RTCIceServer` array) before `room.js` loads.
+
+ICE still prefers a direct path and only falls back to the relay when it has to. `?relay=1` (or "Always go through the relay") uses only the relay, so the other devices never see this device's IP address. Every device that cannot connect directly needs the relay configured; a device with an open network can reach a relayed one without it. Join links and QR codes never include `turn`, `turnuser`, `turncred` or `relay`. `pooledDebug()` shows each link's `path` (`direct` or `relay`), and the room log notes relayed links. A relay adds a hop to every token's round trip, so decode is slower through it than over a direct path. Tested with `node tests/e2e/room_chaos.mjs --plan turn` (a local test TURN server, `tests/e2e/turn_server.mjs`, with every direct candidate dropped).
 
 ## Conversation state
 

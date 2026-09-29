@@ -769,13 +769,15 @@ async function start(create, resume = null) {
     $("join-status").textContent = "Reaching the other devices…";
     const conn = peer.connect(PREFIX + code, { reliable: true });
     const timeout = setTimeout(() => {
-      const ice = conn.peerConnection?.iceConnectionState;
-      joinFailed(ice === "checking" || ice === "failed" || ice === "disconnected"
+      const pc = conn.peerConnection, ice = pc?.iceConnectionState;
+      // the host answered (or ICE got as far as checking): the room exists, the connection is what failed
+      const found = !!pc?.remoteDescription || ice === "checking" || ice === "failed" || ice === "disconnected";
+      joinFailed(found
         ? (ICE.iceServers.length > 1
           ? "found the room, but could not connect, not even through the relay (TURN) server. Check its address and password under Network, or try another network"
           : "found the room, but the direct connection failed (strict NAT or firewall on one side). A relay (TURN) server gets around that: add one under Network below, or try another network")
         : "no room with that code (is the host page open?)");
-      if (ice === "checking" || ice === "failed" || ice === "disconnected") $("join-net").open = true;
+      if (found && $("join-net")) $("join-net").open = true;
     }, 15000);
     conn.on("open", () => {
       clearTimeout(timeout);
