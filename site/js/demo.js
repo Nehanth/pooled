@@ -751,9 +751,11 @@
   }
   pvBack.addEventListener("click", () => stopPlay());
   game.addEventListener("pointerdown", e => { lastPointer = e.pointerType; if (!playing) startPlay(); });
+  // only a game key (or Enter) takes it over: Tab passing through, shortcuts and modifiers leave the story alone
+  const PLAY_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " ", "Enter"]);
   game.addEventListener("keydown", e => {
     if (e.key === "Escape") { stopPlay(); return; }
-    if (!playing && !startPlay()) return;
+    if (!playing && !(PLAY_KEYS.has(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey && startPlay())) return;
     if (inst.key(e, true)) e.preventDefault();
   });
   game.addEventListener("keyup", e => { if (playing) inst.key(e, false); });
@@ -779,7 +781,7 @@
     fitW = w; fitH = h;
     const b = bodyEl.getBoundingClientRect(), s = stepbar.getBoundingClientRect();
     const top = b.top + scrollY, below = s.bottom - b.bottom, phone = w <= 640;
-    const px = Math.round(Math.min(phone ? 520 : 580, Math.max(300, h - top - below - (phone ? 10 : 16))));
+    const px = Math.round(Math.min(phone ? 520 : 580, Math.max(phone ? 280 : 300, h - top - below - (phone ? 10 : 16))));
     document.documentElement.style.setProperty("--body-h", px + "px");
     geo = null;
   };
