@@ -21,7 +21,8 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-inv-req {url}` / `ai-inv {url, have}` | host → all / all → host | before dealing, the host asks what byte ranges of the model each device has cached; the inventory goes out with every `ai-load` (`inv`) |
 | `ai-wget {id, url, lo, hi}` / `ai-wpart {id, off, data \| done \| miss}` | device ↔ device | take a cached range from another device instead of the model host, in 64 KB parts; any failure falls back to the network |
 | `ai-stop` | guest → host | stop the answer being generated. Honoured from the device that asked (the host can always stop); decoding ends after the lap in flight and `ai-gendone` unlocks every screen |
-| `ai-degraded {why}` | host → all | a device in the chain left; every lap in flight failed at once and the room waits for a re-deal |
+| `ai-degraded {why}` | host → all | a device in the chain left; every lap in flight failed at once and the room waits for the device to come back into its slot, or for a re-deal (see "A device that drops out") |
+| `ai-next {next, relink?}` | host → worker | the device after this one changed (it came back under a new id). `relink: 1`: it came back under the same id (a phone back from a lock); drop the old link to it, which is dead, and open a fresh one |
 | `ai-redeal {by, model}` | host → all | the host is dealing the layers again over the devices now in the room (after a departure, or to include late joiners); fresh `ai-load`s follow, cached ranges reload in seconds, the conversation is kept and re-prefilled on the next question |
 | `ai-ready-all {model}` to one device | host → newcomer | a device that joins an online room becomes an ask-only guest right away, followed by `ai-history {items}` (the last 20 exchanges) when the chat is visible to everyone |
 | `ai-style {persona, sampling, thinking}` | host → all | the host changed the answer style (screens show a toast); takes effect on the next question |
@@ -59,12 +60,22 @@ The host owns the conversation: `{system, turns}` rendered to ChatML ids by `roo
 | Message | Direction | Meaning |
 |---|---|---|
 | `hello {name, meta, v, died?}` | both ways on every link | `v` is the protocol version; a mismatch gets `bye {reason}` and the newcomer is told to reload. `died` is a joiner's crumb from a tab that was killed (surfaced on the host) |
-| `hello {…, back: 1}` | returning guest → host | a device reconnecting to a host that resumed the room (it keeps its transcript, so no `ai-history`) |
+| `hello {…, back: 1}` | returning guest → host | a device reconnecting: to a host that resumed the room, after its own link dropped (a lock, the background), or from a reloaded tab that rejoined by itself. It keeps its transcript, so no `ai-history`; the host re-seats it in its old slot by name (`aiRejoin`) |
 | `leaving` | all → all | sent on `pagehide`; the receiver closes the link at once instead of waiting for ICE to notice (tens of seconds), so a departure mid-answer fails within a lap |
 
 ## Resuming a room
 
 The host keeps `{code, name, model, turns, transcript, settings, peers}` in `localStorage` after every answer. A reloaded host page offers "resume room ABCD" for 15 minutes: it claims the same PeerJS id (retrying while the old registration expires), restores the conversation, waits up to 25 s for the devices that held layers and deals again; the next question re-prefills the history. When the host link closes, the other devices keep knocking on the host id every 3 s for a minute before calling the room over.
+
+## A device that drops out (#207)
+
+A locked iPhone (or Safari in the background) stops running the page and its WebRTC links go quiet without closing; a phone that uses too much memory is reloaded by iOS. The room treats both as "gone for a while":
+
+- **Silent links are dropped.** Every device records when anything last arrived on each link (the 2.5 s ping keeps idle links busy). A link silent for 12 s (45 s while the room is loading, when a device may be busy converting weights) is closed and handled like a departure. A tab that was itself hidden does not count its own hidden time against the others, and when it comes back it reconnects PeerJS signaling at once and drops any link that has not carried anything 8 s later.
+- **The device comes back by itself.** A worker whose host link dropped knocks on the host id every 3 s (after reconnecting signaling) and sends `hello {back: 1}`. The host re-seats it by name: a fresh `ai-load` for its old slot, and `ai-next {relink}` to the device before it. A worker that still holds exactly those layers (`model`, `range`, `ctx`) skips the download and only resets its state, then answers `ai-ready`. A reloaded guest tab rejoins its room under the same name from `sessionStorage` (`pooled-guest`, 10 minutes) and says why it reloaded (the crumb).
+- **Answers and Code runs wait.** When a chain device drops mid-answer or mid-Code-run, the host's generation does not fail: it waits for the room to be whole again and runs again with the prompt plus every token already emitted (room/resume.js `resumableGenerate`), so nothing already shown changes and greedy output is the same as without the drop. The run keeps the room's lock throughout; a Code run keeps its files and timeline and carries on inside the step it was in.
+- **Auto re-deal (experimental, host setting, on by default).** If the device is not back within 60 s, the host re-deals the layers over the devices still there (`ai-redeal`, as the button does) and the waiting answer carries on over the new deal. An idle room does the same after 60 s. Off: the room waits (an answer gives up after 6 minutes) or for the Re-deal button.
+- **Screen Wake Lock.** Every device holding layers asks for the screen wake lock (a silent video on older iOS), again on every `visibilitychange` back to visible; a small sun in the header is lit while the screen is kept on and shows a warning when it is not.
 
 ## Code mode
 

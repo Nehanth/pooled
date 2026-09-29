@@ -145,7 +145,7 @@ try {
   if (CODE_OUT) fs.writeFileSync(CODE_OUT, code);
   for (const n of ["worker", "phone"].filter((k) => tabs[k])) { await tabs[n].fill("#code-input", code); await tabs[n].click("#join-btn"); await tabs[n].waitForTimeout(200); }
   if (EXTERNAL) log(`waiting for ${EXTERNAL} to join room ${code}…`);
-  for (const p of Object.values(tabs)) await p.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 3, null, { timeout: EXTERNAL ? 900000 : 60000 });
+  for (const p of Object.values(tabs)) await p.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 3, null, { timeout: EXTERNAL ? 3600000 : 60000 });
   await tabs.host.waitForTimeout(2500);
   await tabs.host.evaluate(() => { const s = document.getElementById("ai-sampling"); s.value = "exact"; s.dispatchEvent(new Event("change")); });
   await tabs.host.evaluate((m) => { const s = document.getElementById("ai-model"); s.value = m; s.dispatchEvent(new Event("change")); }, MODEL);
