@@ -7,6 +7,7 @@
 //      mapAsync wait, and a per-phase table of the speculative step (drafts, verify, refill, rollback)
 //   3. kernel mode: GPU ms per category per plain token and per speculative step
 import { installProf, bySum, r2, table } from "./gpuprof.js";
+import { pipeNames, pipeRows } from "./families.js";
 
 export async function profileDecode({ eng, device, tok, argmax, log, N = 24, STEPS = 12, K = 3, prompt: text, roomPath = false }) {
   const V = tok.vocab;
@@ -107,14 +108,22 @@ export async function profileDecode({ eng, device, tok, argmax, log, N = 24, STE
       const all = P.subs.flatMap((s) => s.kern);
       const c = bySum(all, (k) => k.cat, (k) => k.ms), total = all.reduce((a, k) => a + k.ms, 0);
       return { total: r2(total / units), dispatches: r2(all.length / units), rows: Object.entries(c).map(([cat, o]) => ({ category: cat, ms: r2(o.ms / units), dispatches: r2(o.n / units), pct: r2(100 * o.ms / total) })).sort((a, b) => b.ms - a.ms),
-        pipes: Object.entries(bySum(all, (k) => k.name, (k) => k.ms)).map(([p, o]) => ({ pipe: p, ms: r2(o.ms / units), n: r2(o.n / units), usEach: r2(1000 * o.ms / o.n) })).sort((a, b) => b.ms - a.ms).slice(0, 25) };
+        // every pipeline the engine created (tests/prof/families.js), the ones this run never dispatched at 0
+        pipes: pipeRows(pipeNames(eng), all, units) };
     };
     nx = await startPlain(); ({ next: nx } = await plainRun(2, nx));
     const KN = 6;
     P.start(); ({ next: nx } = await plainRun(KN, nx)); P.stop(); await P.resolve();
     out.kernels.plain = cats(KN);
     log(`kernel mode, plain token: sum ${out.kernels.plain.total} ms over ${out.kernels.plain.dispatches} dispatches\n` + table(out.kernels.plain.rows, ["category", "ms", "dispatches", "pct"]));
-    log(table(out.kernels.plain.pipes, ["pipe", "ms", "n", "usEach"]));
+    const logPipes = (rows) => {
+      const used = rows.filter((r) => r.n > 0), idle = rows.filter((r) => !r.n);
+      log(table(used, ["pipe", "family", "ms", "n", "usEach"]));
+      log(`${rows.length} pipelines in the engine, ${used.length} dispatched${idle.length ? `; not dispatched: ${idle.map((r) => r.pipe).join(" ")}` : ""}`);
+      const unl = rows.filter((r) => r.unlisted);
+      if (unl.length) log(`WARNING: dispatched but not in eng.pipes: ${unl.map((r) => r.pipe).join(" ")}`);
+    };
+    logPipes(out.kernels.plain.pipes);
     if (hasMtp) {
       nx = await startSpec(); ({ next: nx } = await specRun(2, nx));
       const KS = 6;
@@ -124,6 +133,7 @@ export async function profileDecode({ eng, device, tok, argmax, log, N = 24, STE
       out.kernels.specByLabel = Object.entries(byL).map(([l, o]) => ({ label: l, ms: r2(o.ms / KS), dispatches: r2(o.n / KS) })).sort((a, b) => b.ms - a.ms);
       log(`kernel mode, speculative step K=${K}: sum ${out.kernels.spec.total} ms over ${out.kernels.spec.dispatches} dispatches\n` + table(out.kernels.spec.rows, ["category", "ms", "dispatches", "pct"]));
       log(table(out.kernels.specByLabel, ["label", "ms", "dispatches"]));
+      logPipes(out.kernels.spec.pipes);
     }
     P.mode = "submit";
   }

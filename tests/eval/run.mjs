@@ -64,7 +64,7 @@ try {
 
   const recs = [];
   const pad = (s, n) => String(s).padEnd(n);
-  console.log(`${pad("task", 12)} ${pad("ok", 4)} ${pad("reason", 8)} ${pad("steps", 5)} ${pad("calls", 5)} ${pad("prefill", 8)} ${pad("gen", 7)} ${pad("ctx", 6)} ${pad("s", 6)} cards`);
+  console.log(`${pad("task", 12)} ${pad("ok", 4)} ${pad("reason", 8)} ${pad("steps", 5)} ${pad("calls", 5)} ${pad("prefill", 8)} ${pad("reused", 8)} ${pad("gen", 7)} ${pad("ctx", 6)} ${pad("s", 6)} cards`);
   for (let k = 0; k < REPEAT; k++) {
     for (const id of ids) {
       const { rec, trajectory } = await page.evaluate((i) => window.__eval.task(i), id);
@@ -73,7 +73,7 @@ try {
       fs.appendFileSync(jsonl, JSON.stringify(rec) + "\n");
       fs.writeFileSync(path.join(outDir, `${id}${REPEAT > 1 ? "-" + k : ""}.json`), JSON.stringify(trajectory, null, 1));
       const cards = Object.entries(rec.cards).map(([c, n]) => `${c}×${n}`).join(" ");
-      console.log(`${pad(id, 12)} ${pad(rec.ok ? "PASS" : "FAIL", 4)} ${pad(rec.reason, 8)} ${pad(rec.steps, 5)} ${pad(rec.calls, 5)} ${pad(rec.prompt, 8)} ${pad(rec.generated, 7)} ${pad(rec.ctx, 6)} ${pad((rec.ms / 1000).toFixed(1), 6)} ${cards}`);
+      console.log(`${pad(id, 12)} ${pad(rec.ok ? "PASS" : "FAIL", 4)} ${pad(rec.reason, 8)} ${pad(rec.steps, 5)} ${pad(rec.calls, 5)} ${pad(rec.prompt, 8)} ${pad(rec.reused, 8)} ${pad(rec.generated, 7)} ${pad(rec.ctx, 6)} ${pad((rec.ms / 1000).toFixed(1), 6)} ${cards}`);
       if (!rec.ok) console.log("    " + rec.check.split("\n").slice(0, 6).join("\n    "));
     }
   }

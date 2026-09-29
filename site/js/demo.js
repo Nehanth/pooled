@@ -674,8 +674,8 @@
   };
 
   /* ---------- driver: one rAF, only while the window is on screen, the page is visible and nobody is playing ---------- */
-  let raf = 0, last = 0, visible = false, frozen = false, playing = false;
-  const needs = () => !frozen && !playing && visible && !document.hidden && tl.started && !tl.done;
+  let raf = 0, last = 0, visible = false, frozen = false, playing = false, paused = false;
+  const needs = () => !paused && !frozen && !playing && visible && !document.hidden && tl.started && !tl.done;
   function loop(now) {
     if (sbT.getAttribute("aria-live") !== "off") sbT.setAttribute("aria-live", "off");
     const dt = last ? Math.min(.1, (now - last) / 1000) : .016; last = now;
@@ -699,8 +699,22 @@
     while (tl.t < s - 1e-6) tl.advance(Math.min(1 / 30, s - tl.t));
     inst.draw(); wake();
   };
+  // Pause / Play (WCAG 2.2.2): holds the story, the self-playing game, the demo's CSS animations and the
+  // swarm canvases. Replay or a step dot plays again. Reduced motion has nothing moving, so no button.
+  const pauseBtn = $("pause");
+  const setPaused = on => {
+    paused = on;
+    demo.classList.toggle("paused", on); pauseBtn.classList.toggle("paused", on);
+    pauseBtn.setAttribute("aria-label", on ? "Play the demo" : "Pause the demo"); pauseBtn.title = on ? "Play" : "Pause";
+    [window.__swarm, window.__swarm2].forEach(s => s && "paused" in s && (s.paused = on));
+    if (on) { stopPlay(true); halt(); if (inst && !inst.human) inst.stop(); }
+    else { if (inst && !inst.human && demo.classList.contains("app-on")) inst.start(); wake(); }
+  };
+  if (RM) pauseBtn.hidden = true;
+  pauseBtn.addEventListener("click", () => setPaused(!paused));
   // the caption is announced when the visitor moves to a step, not on every step the autoplay reaches
   const goStep = k => {
+    if (paused) setPaused(false);
     sbT.setAttribute("aria-live", "polite");
     if (RM) {
       if (k >= STEPS.length - 1) { stopPlay(true); tl.final(); return; }
@@ -746,7 +760,7 @@
     playing = false; flag("playing", false); flag("touch", false);
     pad.querySelectorAll(".on").forEach(b => b.classList.remove("on"));
     inst.auto(); inst.reset(11); inst.v2(true); inst.warm(WARM_S[APP]);
-    if (!RM) inst.start();
+    if (!RM && !paused) inst.start();
     if (!quiet && document.activeElement === game) game.blur();
     wake();
   }
