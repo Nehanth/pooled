@@ -26,7 +26,43 @@ const onDark = (c) => {
 const THEME_LIGHT = "#F6F5F1", THEME_DARK = "#000000";
 const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(1) + "k" : String(n);
 
-export function computeScreen({ state, keepAwake = () => {} }) {
+const gb = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GB" : Math.max(1, Math.round(b / 2 ** 20)) + " MB";
+
+// What the screen says: one status line and one small line, from the room's state `s` (see
+// computeState in room.js). An ended room wins over everything else, so the screen never sits on a
+// stale "Serving" after the host has gone.
+export function lendStatus(s) {
+  if (s.over) return s.over.final
+    ? { title: "Room over", sub: s.over.why || "The host left, so this room can't answer any more. Start a new room to lend this device again." }
+    : { title: "Host reconnecting", sub: s.over.why || "The host's tab closed. Waiting a minute in case it comes back." };
+  const has = s.lo != null && s.hi != null && s.hi > s.lo;   // an empty range (lo == hi) holds nothing
+  const model = s.model || "the model";
+  // "Layers 1–20 · 2.4 GB · Qwen": which layers, and how much of the model's weights they are
+  const held = has ? `Layers ${s.lo + 1}–${s.hi}${s.bytes ? " · " + gb(s.bytes) : ""} · ${model}` : "";
+  // while it works too: the hop dot and the numbers show the passes (between answers it stays "Serving")
+  if (s.phase === "serving" && has) return { title: "Serving", sub: held };
+  if (s.phase === "loading") return { title: s.pct != null ? `Loading ${Math.round(s.pct)}%` : "Loading", sub: has ? held : model };
+  if (s.phase === "serving") return { title: "Not holding layers", sub: `The other devices run ${model}` };
+  return { title: "Standing by", sub: "Waiting for the room to start a model" };
+}
+
+// The things that stop a lending device from serving, as short notes for its owner: a screen that
+// can sleep, a battery that is running down, a tab that was in the background. `awayMs` is how long
+// the tab was just hidden (null once the note has had its time).
+export function lendNotes(s) {
+  // only while this device loads or holds layers: a device the room isn't using has nothing to keep up
+  if (s.over || s.phase === "idle" || (s.phase === "serving" && !(s.lo != null && s.hi != null && s.hi > s.lo))) return [];
+  const notes = [];
+  if (s.awayMs >= 3000) notes.push(`This tab was in the background for ${Math.round(s.awayMs / 1000)} s, and passes can stall there. Keep it in front while lending.`);
+  if (s.awake === "none") notes.push(s.ios ? "This screen can sleep and stop serving: set Auto-Lock to Never." : "This screen can sleep and stop serving: set the screen timeout to its longest.");
+  const b = s.battery;
+  if (b && !b.charging) notes.push(b.level != null && b.level <= 0.2
+    ? `Battery at ${Math.round(b.level * 100)}% and not charging. Battery saver can pause this tab: plug in to keep serving.`
+    : "Not charging. Lending uses the battery fast: plug in to keep serving.");
+  return notes;
+}
+
+export function computeScreen({ state, keepAwake = () => {}, newRoom = () => {} }) {
   const root = $("compute-screen"), cv = $("cs-flow"), logo = $("cs-logo");
   if (!root || !cv || !logo) return { open() {}, close() {}, pass() {}, refresh() {}, get isOpen() { return false; } };
   logo.innerHTML = DOTS.map(([x, y, r], i) => `<circle cx="${x}" cy="${y}" r="${r}" style="--i:${i};--rc:${Math.round(x / 7) + Math.round(y / 7)}"${i === 8 ? ' class="lit"' : ""}/>`).join("");
@@ -36,6 +72,7 @@ export function computeScreen({ state, keepAwake = () => {} }) {
   const stamps = [];            // [time, tokens] of the passes over the last few seconds, for the rate
   const packets = [];           // { t0, dur }
   let W = 0, H = 0, dpr = 1, cy = 0, lx = 0, lw = 0;
+  let hiddenAt = 0, awayMs = null, awayAt = 0, battery = null;
 
   function size() {
     const r = cv.getBoundingClientRect();
@@ -132,23 +169,32 @@ export function computeScreen({ state, keepAwake = () => {} }) {
     const s = state();
     $("cs-code").textContent = s.code || "----";
     $("cs-devs").textContent = `${s.devices} device${s.devices === 1 ? "" : "s"}`;
-    const has = s.lo != null && s.hi != null;
-    const lay = has ? `${s.lo + 1}–${s.hi}` : "";
+    const has = s.lo != null && s.hi != null && s.hi > s.lo;   // an empty range (lo == hi) holds nothing
     // one status line and one small line: this screen is for the person whose device it is
-    let title, sub;
-    const model = s.model || "the model";
-    if (s.phase === "serving" && has) { title = "Serving"; sub = `Layers ${lay} · ${model}`; }   // while it works too: the hop dot and the numbers show the passes
-    else if (s.phase === "loading") { title = s.pct != null ? `Loading ${Math.round(s.pct)}%` : "Loading"; sub = has ? `Layers ${lay} · ${model}` : model; }
-    else if (s.phase === "serving") { title = "Not holding layers"; sub = `The other devices run ${model}`; }
-    else { title = "Standing by"; sub = ""; }
-    root.dataset.phase = s.phase;
+    const { title, sub } = lendStatus(s);
+    root.dataset.phase = s.over ? "over" : s.phase;
     if (s.color) root.style.setProperty("--me", onDark(s.color));
     // serving, and no pass for a moment: say so, and let the logo rest
-    const quiet = s.phase === "serving" && has && (!stamps.length || performance.now() - stamps[stamps.length - 1][0] > 2500);
+    const quiet = !s.over && s.phase === "serving" && has && (!stamps.length || performance.now() - stamps[stamps.length - 1][0] > 2500);
     root.toggleAttribute("data-quiet", quiet);
     // (between answers the title stays "Serving" too; the numbers keep the last run)
     $("cs-title").textContent = title; $("cs-sub").textContent = sub;
-    if ($("cs-live")) { $("cs-live").hidden = !(s.phase === "serving" && has); renderStats(); }
+    if ($("cs-live")) { $("cs-live").hidden = !(!s.over && s.phase === "serving" && has); renderStats(); }
+    // what could stop this device serving (sleep, battery, a background tab); a room that ended offers a new one
+    if (awayAt && performance.now() - awayAt > 20000) { awayMs = null; awayAt = 0; }
+    const notes = lendNotes({ ...s, awayMs, battery: battery && { charging: battery.charging, level: battery.level } });
+    const ul = $("cs-notes");
+    if (ul && ul.dataset.sig !== notes.join("|")) {
+      ul.dataset.sig = notes.join("|");
+      ul.replaceChildren(...notes.map((t) => Object.assign(document.createElement("li"), { textContent: t })));
+      ul.hidden = !notes.length;
+    }
+    const nb = $("cs-new");
+    if (nb) {
+      const show = !!s.over?.final;
+      if (show && nb.hidden) { nb.hidden = false; if (root.contains(document.activeElement)) nb.focus({ preventScroll: true }); }
+      else if (!show) nb.hidden = true;
+    }
     // this device's slice of the model
     const strip = $("cs-strip"), total = s.total || 0;
     const n = total ? Math.min(total, 64) : 0, per = total ? total / n : 1;
@@ -163,7 +209,7 @@ export function computeScreen({ state, keepAwake = () => {} }) {
       strip.innerHTML = html;
       strip.style.setProperty("--n", n);
     }
-    strip.hidden = !n;
+    strip.hidden = !n || !!s.over;
     renderStats();
   }
 
@@ -175,7 +221,13 @@ export function computeScreen({ state, keepAwake = () => {} }) {
     document.querySelector('meta[name="theme-color"]')?.setAttribute("content", on ? THEME_DARK : THEME_LIGHT);
     document.documentElement.classList.toggle("computing", on);
     if (on) {
-      keepAwake();
+      keepAwake();   // from the tap that opened the screen: the wake lock needs a user gesture on iOS
+      // on battery the screen says so (Chrome and Android; Safari and Firefox have no battery API)
+      if (!battery && navigator.getBattery) navigator.getBattery().then((b) => {
+        battery = b;
+        for (const ev of ["chargingchange", "levelchange"]) b.addEventListener(ev, refresh);
+        refresh();
+      }).catch(() => {});
       requestAnimationFrame(() => { size(); kick(); });
       refresh();
       timer = setInterval(refresh, 1000);
@@ -188,9 +240,29 @@ export function computeScreen({ state, keepAwake = () => {} }) {
     }
   }
   $("compute-exit").addEventListener("click", () => show(false));
-  addEventListener("keydown", (e) => { if (open && e.key === "Escape") show(false); });
+  $("cs-new")?.addEventListener("click", () => newRoom());
+  addEventListener("keydown", (e) => {
+    if (!open) return;
+    if (e.key === "Escape") { show(false); return; }
+    // a modal screen: Tab cycles through its own buttons, never to the room hidden behind it
+    if (e.key !== "Tab") return;
+    const f = [...root.querySelectorAll("button")].filter((b) => !b.hidden && !b.disabled);
+    if (!f.length) return;
+    const i = f.indexOf(document.activeElement);
+    if (e.shiftKey ? i <= 0 : i === f.length - 1 || i < 0) { e.preventDefault(); f[e.shiftKey ? f.length - 1 : 0].focus(); }
+  });
   addEventListener("resize", () => { if (open) { size(); kick(); } });
-  document.addEventListener("visibilitychange", () => { if (open && !document.hidden) { size(); kick(); refresh(); } });
+  document.addEventListener("visibilitychange", () => {
+    if (!open) return;
+    if (document.hidden) {
+      hiddenAt = performance.now();
+      // the tab strip is all its owner sees now: say what this tab needs
+      if (root.dataset.phase === "serving" || root.dataset.phase === "loading") document.title = "Lending \u00b7 bring this tab back \u00b7 pooled";
+      return;
+    }
+    if (hiddenAt) { awayMs = performance.now() - hiddenAt; awayAt = performance.now(); hiddenAt = 0; }
+    size(); kick(); refresh();
+  });
 
   return {
     open: () => show(true),

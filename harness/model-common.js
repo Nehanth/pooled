@@ -4,6 +4,15 @@
 // from an assistant turn's text to the exact ids it was sampled as. DOM-free.
 import { ToolCallConstraint } from "./constrain.js";
 
+// The conversation no longer fits the context: both adapters throw it before asking the model, and
+// the agent ends the request with reason "context" (harness/agent.js).
+export class ContextFull extends Error {
+  constructor(n, max) {
+    super(`the conversation is ${n} tokens and the context is ${max}: start a new task (the files are kept)`);
+    this.name = "ContextFull"; this.tokens = n; this.max = max;
+  }
+}
+
 // id -> decoded text of that one token, cached (the constraint scans the vocabulary with it)
 export function tokenTexts(tok) {
   const texts = [];
