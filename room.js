@@ -3201,21 +3201,26 @@ $("cache-clear").addEventListener("click", async (ev) => {
 });
 // One row per cached model with its size and a Delete button (two steps, like Clear above), so one
 // model's weights can go while the others stay. Filled each time the menu opens.
+// A newer render (menu reopened, a delete finished) wins over one still reading the cache.
+let cacheRenderGen = 0;
 async function renderCacheModels() {
-  const ul = $("cache-models"), c = await getWeightCache();
+  const gen = ++cacheRenderGen, ul = $("cache-models"), c = await getWeightCache();
   const list = c ? await cachedModels(c, MODELS).catch(() => []) : [];
+  if (gen !== cacheRenderGen) return;
   ul.replaceChildren(); ul.hidden = !list.length;
   if (!list.length) return;
   for (const g of list) {
     const li = document.createElement("li"), name = document.createElement("span"), b = document.createElement("button");
     name.textContent = g.label.split("\u00b7")[0].trim();
     const size = document.createElement("small"); size.textContent = fmtBytes(g.bytes); name.append(" ", size);
-    b.type = "button"; b.textContent = "Delete"; b.setAttribute("aria-label", `Delete the cached weights of ${name.firstChild.textContent}`);
-    let armed = 0;
+    const what = name.firstChild.textContent;
+    const disarm = () => { armed = 0; b.textContent = "Delete"; b.setAttribute("aria-label", `Delete the cached weights of ${what}`); };
+    let armed = 0; b.type = "button"; disarm();
     b.addEventListener("click", async () => {
       if (!armed) {
         b.textContent = `Delete ${fmtBytes(g.bytes)}?`;
-        const t = armed = setTimeout(() => { if (armed === t) { armed = 0; b.textContent = "Delete"; } }, 6000);
+        b.setAttribute("aria-label", `Press again to delete ${fmtBytes(g.bytes)} of cached weights of ${what}`);
+        const t = armed = setTimeout(() => { if (armed === t) disarm(); }, 6000);
         return;
       }
       armed = 0; b.disabled = true;
@@ -3226,6 +3231,7 @@ async function renderCacheModels() {
   }
   // what the browser counts for this whole site (weights plus a little else), to check the sizes against
   const est = await navigator.storage?.estimate?.().catch(() => null);
+  if (gen !== cacheRenderGen) return;
   if (est?.usage) { const li = document.createElement("li"); li.className = "cache-est"; li.textContent = `This site uses ${fmtBytes(est.usage)} of this device's storage`; ul.append(li); }
 }
 $("new-chat").addEventListener("click", aiNewChat);
