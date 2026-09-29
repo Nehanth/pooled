@@ -11,7 +11,7 @@ import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
 import { PrefixIndex } from "./harness/prefix.js";
-import { MODELS, NEED_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos } from "./room/models.js";
+import { MODELS, NEED_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvModeFor } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -1416,7 +1416,7 @@ function setCtx(used, max) {
   el.classList.toggle("warn", used > max * 0.8);
 }
 
-async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey)) {
+async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, KV_ASK)) {
   const M = MODELS[modelKey];
   aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
   aiStatus("requesting GPU\u2026");
@@ -1557,8 +1557,9 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched
       // attention) for A/B timing; both give the same bits, so devices may differ
       ...(new URLSearchParams(location.search).get("fuse") === "0" ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
-      // ?kv=q8: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics a little
-      kvQ8: new URLSearchParams(location.search).get("kv") === "q8",
+      // ?kv=q8 on the host: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics
+      // a little. Off by default; the host sends its choice with ai-load (room/models.js kvModeFor)
+      kvQ8: kv === "q8",
       // ?moefuse=0: the unfused MoE FFN kernels (A/B). The fused path (the default) gives different
       // MoE bits, so every device of a room should run the same setting; ?moednrows=1|2|4 tunes it
       moeFuse: new URLSearchParams(location.search).get("moefuse") !== "0",
@@ -1566,8 +1567,8 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       // Prefill options (attnPrefillTile, prefillUbatch, moeGroupPrefill) are deliberately not passed: every
       // device takes the engine's defaults, so host and workers agree. Tiled prefill attention runs on the
       // 16-column prefill frames of every device; wide GEMM + expert-grouped MoE only in solo prefillTokens
-      // (the device holding the embedding; a split prefill sends 16-column frames). ?kv=q8 turns the tiled
-      // attention off and ?moefuse=0 the grouped MoE on that device only.
+      // (the device holding the embedding; a split prefill sends 16-column frames). ?kv=q8 on the host turns the
+      // tiled attention off on every device; ?moefuse=0 turns the grouped MoE off on that device only.
       // GPU sampling, on by default (?gpusample=0: off): argmax / top-k of the head in the same submit,
       // 16-520 bytes back instead of the 1 MB logits vector; a masked sampler (tool-name constraint)
       // still gets the logits. ?argmaxwide=0|1 (default: same as gpusample): the draft argmax as the
@@ -1650,6 +1651,7 @@ async function aiStart(modelArg) {
     const M = MODELS[modelKey];
     // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every device builds its engine with it
     const ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
+    const ROOM_KV = kvModeFor(modelKey, KV_ASK);   // KV cache format for every device: f16, or int8 with ?kv=q8
     // devices without WebGPU join as ask-only guests: they get the chat, not layers
     ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu).sort();
     ai.leftOut = new Set();
@@ -1663,7 +1665,7 @@ async function aiStart(modelArg) {
       ai.GModel = modelKey;
       L = ai.G.meta["qwen35.block_count"] - (ai.G.meta["qwen35.nextn_predict_layers"] || 0);
       layerBytes = qwen35ShardBytes(ai.G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4
-        + ROOM_CTX * kvBytesPerLayerPos(ai.G.meta);   // the attention layers' KV cache at this room's context
+        + ROOM_CTX * kvBytesPerLayerPos(ai.G.meta, ROOM_KV);   // the attention layers' KV cache at this room's context
       embedBytes = (ai.G.tensors[GGML_EMBED]?.byteLength || 0) + (ai.G.tensors[GGML_OUTPUT]?.byteLength || 0) + qwen35MtpBytes(ai.G);
     } else {
       cfg = await (await fetch(M.cfg)).json();
@@ -1716,7 +1718,7 @@ async function aiStart(modelArg) {
     ai.wsrc = M.gguf ? weightSources(M.gguf, inv) : null;
     ai.chain.forEach((id, i) => {
       const msg = {
-        t: "ai-load", model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX,
+        t: "ai-load", model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX, kv: ROOM_KV,
         next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host",
         host: peer.id,
         inv,
@@ -1730,7 +1732,7 @@ async function aiStart(modelArg) {
       `${conns.get(id)?.name || id} ${assigned[i + 1]}`)].join(" · ");
     log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}: ${splitDesc}`);
     ai.loadingShard = true;
-    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX); } finally { ai.loadingShard = false; }
+    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); } finally { ai.loadingShard = false; }
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
     aiStatus(n === 1
       ? `solo: all ${L} layers local — ready`
@@ -1944,6 +1946,7 @@ const MTP_REFILL = new URLSearchParams(location.search).get("mtprefill") !== "0"
 const PRE_DRAFT = new URLSearchParams(location.search).get("predraft") !== "0";
 const DRAFT_VOCAB = (() => { const v = new URLSearchParams(location.search).get("draftvocab"); return v === null ? 65536 : parseInt(v, 10) || 0; })();
 const MTP_BATCH = new URLSearchParams(location.search).get("mtpbatch") !== "0";   // ?mtpbatch=0: one draft-cache row per submit, for A/B
+const KV_ASK = new URLSearchParams(location.search).get("kv");   // ?kv=q8: int8 KV cache (host only; see aiLoadShard)
 const GPU_SAMPLE = new URLSearchParams(location.search).get("gpusample") !== "0";   // on by default; see the engine options in aiLoadShard
 const ARGMAX_WIDE = (new URLSearchParams(location.search).get("argmaxwide") ?? (GPU_SAMPLE ? "1" : "0")) === "1";
 function fillDrafts(h, ids, i0, basePos, n) {
@@ -2845,7 +2848,8 @@ async function aiOnData(from, d) {
       ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;
       ensureLink(d.next);   // open the link to my chain neighbour while the weights download
       try {
-        await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model));
+        // d.kv: the host's KV format (a host without it: this device's own ?kv=, as before)
+        await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model), kvModeFor(d.model, d.kv || KV_ASK));
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
         aiStatus(`layers ${d.range[0]}–${d.range[1] - 1} ready · syncing with the room…`);
         $("ldg-title").textContent = `layers ${d.range[0]}–${d.range[1] - 1} ready`;   // the card stays up as it is (Starting) until ai-ready-all
