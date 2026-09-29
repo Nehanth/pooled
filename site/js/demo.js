@@ -650,6 +650,7 @@
     words = -1; flowing = true; coding = false; flow(END);
     bdTok.textContent = WORDS.length + Math.floor((GAME + .6 - C) / .12);   // the Code run's tokens too, about where the live run ends (flow() counts the chat's only)
     demo.querySelectorAll("[data-at]").forEach(el => el.classList.remove("pending", "enter"));
+    LOGKEYS.forEach(k => log.append(at(k)));   // in story order: a partly played run has moved the ones it showed to the end
     saysText.forEach((txt, el) => { const s = el.querySelector(".say"); if (s) { s.textContent = txt; s.classList.remove("cursor"); } });
     chatTyped.textContent = ""; codeTyped.textContent = ""; chatComposer.classList.remove("hot"); codeComposer.classList.remove("hot");
     Object.keys(fItems).forEach(n => fileState(n, "done", lineOut[n])); fileState("game.js", "mod", lineOut.edit);
