@@ -144,6 +144,27 @@ try {
   const post = (p, body, headers = {}) => fetch(BASE + p, { method: "POST", headers: { ...J, ...headers }, body: JSON.stringify(body) });
   const Q = "In one short sentence: what is the capital of France?";
 
+  // a guest that joins after the model runs (an ask-only device, no layers): the host's hello says it
+  // serves API clients, which must not make the guest show the host as one
+  await soft("guest view", async () => {
+    const g = await ctx.newPage();
+    g.on("pageerror", (e) => pageErrs.push("guest: " + String(e).slice(0, 200)));
+    await g.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG_PORT}&dev=1`);
+    await g.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
+    await g.fill("#name-input", "guest"); await g.fill("#code-input", code); await g.click("#join-btn");
+    await g.waitForFunction(() => [...document.querySelectorAll(".peer-card")].some((c) => /spark-host/.test(c.textContent)), null, { timeout: 30000 });
+    await g.waitForTimeout(1500);
+    const hostCard = await g.evaluate(() => [...document.querySelectorAll(".peer-card")].find((c) => /spark-host/.test(c.textContent))?.textContent || "");
+    check("guest: the host's card is a computer, not an API client", hostCard && !/API client/.test(hostCard), hostCard.slice(0, 200));
+    await g.close();
+  });
+  // changing an answer style must not turn API clients off (styleChanged kept only the style fields)
+  await soft("style change", async () => {
+    for (const v of ["concise", "default"]) await page.evaluate((v) => { const s = document.getElementById("ai-persona"); s.value = v; s.dispatchEvent(new Event("change")); }, v);
+    const r = await post("/v1/chat/completions", { model: "x", temperature: 0, max_tokens: 8, messages: [{ role: "user", content: "Say hi." }] });
+    check("after an answer-style change: API requests still answered", r.status === 200, r.status + " " + (await r.text()).slice(0, 200));
+  });
+
   await soft("models", async () => {
     const m = await (await fetch(BASE + "/v1/models")).json();
     check("GET /v1/models (OpenAI shape)", m.object === "list" && m.data[0]?.id === MID && m.data[0]?.owned_by === "pooled", JSON.stringify(m));

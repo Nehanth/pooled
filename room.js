@@ -10,7 +10,7 @@ import { WIRE_F16, badF32, f32ToB64, packF16, unpackF16, asU16, packWire, unpack
 import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
-import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder } from "./room/api.js";
+import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle } from "./room/api.js";
 import { PrefixIndex } from "./harness/prefix.js";
 import { MODELS, NEED_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
@@ -554,7 +554,7 @@ function onData(from, d) {
       // a peer picks its own name: keep it a short plain string (it is also escaped wherever it is shown)
       d.name = String(d.name ?? from).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(from).slice(0, 8);
       // an API client (`pooled serve`, cli/): an ask-only guest with no layers; the host may refuse it
-      if (d.meta?.api) d.meta = apiMeta(d.meta);
+      d.meta = helloMeta(d.meta, isHost);   // on a guest, meta.api is the host saying it serves API clients
       e.name = d.name; e.meta = d.meta;
       if (d.meta?.api && isHost && !apiWelcome(from, d)) break;
       members.set(from, { name: d.name, meta: d.meta });
@@ -3159,7 +3159,7 @@ $("ai-visibility").addEventListener("change", (e) => {
 for (const [k, v] of Object.entries(PERSONAS)) $("ai-persona").add(new Option(v.label, k));
 for (const [k, v] of Object.entries(SAMPLING)) $("ai-sampling").add(new Option(v.label, k));
 function styleChanged() {
-  ai.settings = { persona: $("ai-persona").value, sampling: $("ai-sampling").value, thinking: $("ai-thinking").checked, length: $("ai-length").value };
+  ai.settings = withStyle(ai.settings, { persona: $("ai-persona").value, sampling: $("ai-sampling").value, thinking: $("ai-thinking").checked, length: $("ai-length").value });
   broadcastAll({ t: "ai-style", ...ai.settings });
   saveHost();
 }
@@ -3285,7 +3285,6 @@ function showQueue(n) { $("queue-note").textContent = n ? `${n} queued` : ""; }
 // conversations (ai-ask {api: 1, rid, system, messages, params}); the host answers each with
 // roomGenerate on its own ids, never touching the chat's conversation (room/api.js,
 // docs/design/serve.md, docs/protocol.md "API clients").
-const apiMeta = (m) => ({ api: 1, webgpu: false, ua: "API", client: String(m?.client ?? "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").slice(0, 40) });
 // host: a hello from an API client. false = refused (told why with a bye)
 function apiWelcome(from, d) {
   const why = !ai.settings.apiAllow ? "the host does not allow API clients in this room"

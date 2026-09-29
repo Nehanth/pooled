@@ -1,6 +1,6 @@
 // room/api.js: the host's side of `pooled serve` API asks (validation, stop strings, the think
 // block, exact-id reuse, context rejection) and room/sampling.js makeSampler.
-import { validateApiAsk, AnswerCache, apiTurns, StopMatcher, ThinkSplit, apiPrompt, apiRun, apiSampler, API_LIMITS, pieceDecoder } from "../../room/api.js";
+import { validateApiAsk, AnswerCache, apiTurns, StopMatcher, ThinkSplit, apiPrompt, apiRun, apiSampler, API_LIMITS, pieceDecoder, helloMeta, withStyle } from "../../room/api.js";
 import { makeSampler, pickSampler } from "../../room/sampling.js";
 import { buildIds, reusablePrefix } from "../../room/conversation.js";
 
@@ -236,4 +236,19 @@ Deno.test("api: no second pass when the answer started within the budget, or thi
   const gen = async (ids, o) => { n++; return fakeGen([4, ...tok.encode("\nhm\n"), 5, ...tok.encode("\n\n" + "x".repeat(40)), 2])(ids, o); };
   const { res } = await runAsk(ask({ params: { maxTokens: 100, thinking: true, thinkBudget: 10 } }), [], { gen });
   eq(n, 1); eq(res.reason, "stop"); eq(res.text, "x".repeat(40));
+});
+
+Deno.test("api: a hello's meta.api marks an API client on the host, and is dropped on a guest", () => {
+  const host = { ua: "Mac", webgpu: true, contribGB: 20, api: 1 };
+  eq(helloMeta(host, false), { ua: "Mac", webgpu: true, contribGB: 20 }, "a guest keeps the host as a computer");
+  eq(helloMeta({ api: 1, client: "curl<x>\u0007", webgpu: true, contribGB: 64 }, true), { api: 1, webgpu: false, ua: "API", client: "curlx" }, "the host keeps a fixed API shape");
+  const plain = { ua: "iPhone", webgpu: true };
+  ok(helloMeta(plain, true) === plain && helloMeta(plain, false) === plain, "no api flag: unchanged");
+  eq(helloMeta(undefined, false), undefined);
+});
+Deno.test("api: changing an answer style keeps API clients allowed (and any other setting)", () => {
+  const before = { persona: "default", sampling: "creative", thinking: false, length: "normal", apiAllow: true, later: 7 };
+  const after = withStyle(before, { persona: "pirate", sampling: "exact", thinking: 1, length: "short" });
+  eq(after, { persona: "pirate", sampling: "exact", thinking: true, length: "short", apiAllow: true, later: 7 });
+  eq(withStyle({ ...before, apiAllow: false }, before).apiAllow, false, "an explicit off stays off");
 });

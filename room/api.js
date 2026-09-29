@@ -280,3 +280,19 @@ export async function apiRun({ tok, req, prompt, generate, send, onPiece = () =>
   return { reason, stopSeq: stopper.hit, usage: { in: ids.length, out: count }, text, think,
     reused: r?.reused || 0, stats: r?.stats || "", err: err ? String(err.message || err) : null };
 }
+
+// The meta a device keeps for a peer's hello. API clients connect to the host only, so on the host
+// meta.api marks an API client (kept to a fixed, cleaned shape), while on a guest it can only be
+// the host saying it serves them: dropped there, or the guest would show the host as an API client.
+export function helloMeta(meta, isHost) {
+  if (!meta?.api) return meta;
+  if (isHost) return { api: 1, webgpu: false, ua: "API", client: String(meta.client ?? "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").slice(0, 40) };
+  const { api, ...rest } = meta;
+  return rest;
+}
+
+// The room's settings after the host changes an answer style: the style fields come from the
+// controls, everything else (apiAllow and any later setting) is kept.
+export function withStyle(settings, style) {
+  return { ...settings, persona: style.persona, sampling: style.sampling, thinking: !!style.thinking, length: style.length };
+}
