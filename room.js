@@ -1542,6 +1542,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
     return m;
   };
   const pacer = async () => {
+    if (ai.startFailed) throw new Error(ai.startFailed);   // the start was stopped (aiStartStopped): no point loading the rest
     while (ai.myPct < 100 && ai.myPct > slowest() + 4) {
       aiStatus(`downloading weights\u2026 in step with the room (${Math.round(ai.myPct)}%)`);
       await new Promise((r) => setTimeout(r, 250));
@@ -1691,6 +1692,7 @@ async function aiStart(modelArg) {
   try {
     ai.role = "host";
     ai.degraded = false;
+    ai.startFailed = null;
     ai.readyPeers = new Set();
     ai.teleBy = new Map();
     const modelKey = $("ai-model").value;
@@ -1778,6 +1780,7 @@ async function aiStart(modelArg) {
     log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}: ${splitDesc}`);
     ai.loadingShard = true;
     try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX); } finally { ai.loadingShard = false; }
+    if (ai.startFailed) throw new Error(ai.startFailed);   // a device failed to load its layers while this one loaded
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
     aiStatus(n === 1
       ? `solo: all ${L} layers local — ready`
@@ -1787,15 +1790,41 @@ async function aiStart(modelArg) {
     ckptClear();
     aiMaybeReady();
   } catch (err) {
-    clearInterval(ai.progTimer);
-    aiLoading(false);
-    ai.engine = null;
-    $("ai-panel").classList.remove("online");
-    aiStatus("failed: " + err.message);
-    ai.busy = false;
-    $("ai-start").disabled = false;
-    $("ai-model").disabled = false;
+    aiStartStopped(ai.startFailed || err.message);   // a device that failed first is the reason, not what this load hit after
   }
+}
+// A start that cannot finish: this device failed, or a device in the chain could not load its layers
+// (ai-error with load). Every screen goes back to the model picker with Start on, so the room can try
+// again (the other screens are told with ai-start-failed). While this device still loads its own layers
+// the load stops at its next tensor (the pacer) and aiStart's catch lands here.
+function aiStartStopped(why) {
+  ai.startFailed = null;
+  clearInterval(ai.progTimer);
+  aiLoading(false);
+  ai.engine = null;
+  ai.chain = []; ai.chainNames = []; ai.plan = null;   // nothing to re-seat or re-deal
+  failWaiters(new Error(why));
+  $("ai-panel").classList.remove("online");
+  aiStatus("failed: " + why);
+  ai.busy = false;
+  $("ai-start").disabled = false;
+  $("ai-model").disabled = false;
+  updateCluster();
+  broadcastAll({ t: "ai-start-failed", why });
+}
+function aiLoadFailed(from, name, message) {
+  const why = `${name} couldn't load its layers (${message})`;
+  toast(`${why}: back to the model picker`);
+  if (ai.loadingShard) { ai.startFailed = why; aiStatus(`${why}: stopping the start…`); }
+  else aiStartStopped(why);
+}
+
+// a worker whose start was stopped: its layers are not needed, free them (the next ai-load deals afresh)
+function workerStopped() {
+  if (ai.role !== "worker") return;
+  ai.role = null; ai.range = null; ai.engine = null;
+  try { ai.device?.destroy(); } catch {}
+  ai.device = null;
 }
 
 // Deal the layers again over whoever is in the room now: after a device left (the room is
@@ -2825,7 +2854,7 @@ function resumeHost(r) {
 // room's layers, chat or state), and the host ignores them altogether.
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
-  "ai-visibility", "ai-style", "ai-busy", "ai-wait"]);
+  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed"]);
 async function aiOnData(from, d) {
   if (d.t.startsWith("ai-code") || d.t.startsWith("ai-pv")) { codeOnData(from, d); return; }
   const e = conns.get(from);
@@ -2878,10 +2907,13 @@ async function aiOnData(from, d) {
       ai.next = d.next;
       ai.hostId = d.host;
       ai.q = Promise.resolve();
+      ai.startFailed = null;
       ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;
       ensureLink(d.next);   // open the link to my chain neighbour while the weights download
       try {
-        await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model));
+        ai.loadingShard = true;
+        try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model)); } finally { ai.loadingShard = false; }
+        if (ai.startFailed) throw new Error(ai.startFailed);
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
         aiStatus(`layers ${d.range[0]}–${d.range[1] - 1} ready · syncing with the room…`);
         $("ldg-title").textContent = `layers ${d.range[0]}–${d.range[1] - 1} ready`;   // the card stays up as it is (Starting) until ai-ready-all
@@ -2889,12 +2921,26 @@ async function aiOnData(from, d) {
         $("ldg-fill").style.width = "100%";
         sendTo(ai.hostId, { t: "ai-ready" });
       } catch (err) {
+        if (ai.startFailed) { workerStopped(); break; }   // the host stopped the start (ai-start-failed): this load stopped with it
         aiLoading(false);
         aiStatus("failed: " + err.message);
-        sendTo(ai.hostId, { t: "ai-error", message: err.message });
+        toast(`This device couldn't load its layers (${err.message}). Press Start to try again.`);
+        ai.engine = null;
+        $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
+        sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1 });   // load: the host stops the start
       }
       break;
     }
+    case "ai-start-failed":   // the host stopped the start: back to the picker, and a load still running here stops (the pacer)
+      ai.startFailed = d.why || "the start was stopped";
+      if (!ai.loadingShard) workerStopped();   // (a load in flight stops at its next tensor, and its catch does this)
+      aiLoading(false);
+      $("ai-panel").classList.remove("online");
+      $("ai-row").style.display = "none";
+      $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
+      if (!/^failed:/.test($("ai-status").textContent)) toast(`The model didn't start: ${d.why}. Press Start to try again.`);
+      aiStatus("the model didn't start: " + d.why);
+      break;
     case "ai-hostprog": {
       const now = Date.now();
       ai.prog = { ...(d.all || {}), [myName]: Math.round(ai.myPct || 0) };
@@ -2916,7 +2962,11 @@ async function aiOnData(from, d) {
       break;
     case "ai-error":
       aiStatus(`peer ${e?.name || from} failed: ${d.message}`);
-      if (ai.role === "host" && ai.chain.includes(from)) failWaiters(new Error(`${e?.name || from}: ${d.message}`));
+      if (ai.role === "host" && ai.chain.includes(from)) {
+        failWaiters(new Error(`${e?.name || from}: ${d.message}`));
+        // a device could not load its layers while the room was starting: the start cannot finish
+        if (d.load && ai.busy === true && !$("ai-panel").classList.contains("online")) aiLoadFailed(from, e?.name || from, d.message);
+      }
       break;
     case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0 }); } break;
     case "ai-inv-req": cachedRanges(d.url).then((have) => sendTo(from, { t: "ai-inv", url: d.url, have })); break;
