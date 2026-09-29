@@ -1454,8 +1454,13 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   try { tdev.destroy(); } catch {}
   ai.device.lost.then((l) => crumb("GPU device lost: " + l.reason + " " + l.message));
   aiStatus("tuning kernels for this GPU\u2026");
-  ai.tune = await autotuneCoop(ai.device).catch(() => ({ wg: 256, rows: 4 }));
-  crumb(`autotune: WG=${ai.tune.wg} ROWS=${ai.tune.rows}`);
+  // no subgroups (Safari: iPhone, iPad, Mac): the decode kernels for that path. The autotune also times the wide
+  // GEMV layout (engine coopWide) and keeps it if it wins; flash attention takes one query head per workgroup
+  // (engine attnHeads, the same bits as attn_flash). ?coopwide=0 / ?faheads=0 turn them off, for A/B.
+  ai.noSubgroups = !adapter.features.has("subgroups");
+  const wideOK = ai.noSubgroups && new URLSearchParams(location.search).get("coopwide") !== "0";
+  ai.tune = await autotuneCoop(ai.device, { wide: wideOK }).catch(() => ({ wg: 256, rows: 4, wide: null }));
+  crumb(`autotune: WG=${ai.tune.wg} ROWS=${ai.tune.rows}${ai.tune.wide ? " wide " + JSON.stringify(ai.tune.wide) : ""}${wideOK ? "" : " (coop only)"}`);
   const isPhone = myMeta?.phone;
   ai.myPct = 0;
   ai.prog = { [myName]: 0 }; ai.progAt = { [myName]: Date.now() };
@@ -1560,8 +1565,11 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       // ?kv=q8: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics a little
       kvQ8: new URLSearchParams(location.search).get("kv") === "q8",
       // ?faheads=1|2|4|0: query heads per decode-attention workgroup (engine attnHeads; same bits at every
-      // setting, so devices may differ); 0 = attn_flash's all heads of a kv head, unset = the engine's default
-      ...(new URLSearchParams(location.search).has("faheads") ? { attnHeads: parseInt(new URLSearchParams(location.search).get("faheads"), 10) || 0 } : {}),
+      // setting, so devices may differ); 0 = attn_flash's all heads of a kv head; unset: 1 without subgroups, else 0.
+      // coopWide: the autotune's pick (only ever set without subgroups; it changes this device's GEMV sums, and
+      // decode == verify holds either way)
+      attnHeads: new URLSearchParams(location.search).has("faheads") ? parseInt(new URLSearchParams(location.search).get("faheads"), 10) || 0 : ai.noSubgroups ? 1 : 0,
+      coopWide: ai.tune?.wide || null,
       // ?moefuse=0: the unfused MoE FFN kernels (A/B). The fused path (the default) gives different
       // MoE bits, so every device of a room should run the same setting; ?moednrows=1|2|4 tunes it
       moeFuse: new URLSearchParams(location.search).get("moefuse") !== "0",
