@@ -732,6 +732,7 @@ function onData(from, d) {
     case "pong": {
       e.missed = 0;
       e.rtt = Math.round(performance.now() - d.ts);
+      if (Number.isFinite(d.ts)) e.pongFor = Math.max(e.pongFor || 0, d.ts);   // drop detection: a ping sent then was answered
       if (e.card) e.card.querySelector(".rtt").textContent = e.rtt + " ms";
       break;
     }
@@ -817,7 +818,7 @@ setInterval(() => {
 // silent past deadAfter(rtt) (3.5-5 s) is held: the laps in flight fail at once ("<name> stopped
 // responding; ask again") instead of waiting for a lap timeout, and the next question waits for
 // it. A frozen device that comes back keeps its place and layers (no re-deal); one still silent
-// after EVICT_MS (15 s) is dropped: its link is closed, which puts the room in the degraded /
+// after EVICT_MS (30 s) is dropped: its link is closed, which puts the room in the degraded /
 // re-deal state. ?hb=0 turns it off (A/B runs).
 const liveness = makeLiveness();
 const HB_ON = new URLSearchParams(location.search).get("hb") !== "0";
@@ -849,7 +850,10 @@ function hbLoop() {
 function hbSuspects(now) {
   for (const [id, e] of conns) {
     if (!e.suspect || e.dead) continue;
-    const st = suspectCheck(Math.max(e.heard || 0, e.link?.heard || 0), e.suspect.since, now);
+    // back only on a round trip: a pong to a ping sent after the silence began (a late packet
+    // still draining from before the freeze does not count)
+    if (now - (e.suspect.pinged || 0) >= 500) { e.suspect.pinged = now; sendTo(id, { t: "ping", ts: now }); }
+    const st = suspectCheck(e.pongFor || 0, e.suspect.since, now);
     if (st === "back") {
       e.suspect = null;
       noteLink(peer.id + "|" + id, e.name, true);

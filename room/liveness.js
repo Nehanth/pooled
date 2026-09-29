@@ -23,12 +23,13 @@
 export const HB_BUSY_MS = 500;     // ping period to chain devices while answering
 export const DEAD_MIN_MS = 3500;   // never call a device dead sooner than this
 export const DEAD_MAX_MS = 5000;   // ... nor later
-export const STALL_MS = 1200;
+export const STALL_MS = 1200;      // a tick this late means this tab stalled: its inbox is stale, judge nothing
 // A device that went silent is held, not dropped: the answer in flight fails at once (its frames
 // are late at best), but the device keeps its place and layers in case it was only frozen (a
 // Wi-Fi stall, a laptop lid, a busy phone). Only past EVICT_MS of silence is it dropped (the
-// re-deal path). 15 s is when ICE gives up on a link anyway (see watchLink in room.js).
-export const EVICT_MS = 15000;      // a tick this late means this tab stalled: its inbox is stale, judge nothing
+// re-deal path). 30 s leaves room for a link that ICE gave up on (~15 s) to be redialed once the
+// device is back (watchLink / relink in room.js), which keeps its layers.
+export const EVICT_MS = 30000;
 
 // How long a device may stay silent before it counts as dead, given its measured round trip.
 export function deadAfter(rttMs) {
@@ -66,10 +67,10 @@ export function tick(L, now, ids, rttOf = () => null) {
   return out;
 }
 
-// A held (suspect) device, checked on every loop whether or not an answer runs: "back" once
-// anything arrived from it after it went silent, "evict" once it has been silent EVICT_MS,
-// otherwise "wait". lastHeard: when it was last heard from; silentSince: when the silence began
-// (lastHeard, or when the answer started if that was later).
+// A held (suspect) device, checked on every loop whether or not an answer runs: "back" once it
+// answered a ping sent after it went silent (a full round trip, not a late packet draining from
+// before), "evict" once it has been silent EVICT_MS, otherwise "wait". lastHeard: the send time
+// of the latest ping it answered; silentSince: when the silence began.
 export function suspectCheck(lastHeard, silentSince, now) {
   if (lastHeard > silentSince) return "back";
   return now - silentSince > EVICT_MS ? "evict" : "wait";

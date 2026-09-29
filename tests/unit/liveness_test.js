@@ -111,7 +111,7 @@ Deno.test("lapTimeout: fixed fallback until 4 laps are measured, then tied to th
 });
 
 Deno.test("suspectCheck: a held device is back once heard after its silence began, dropped after EVICT_MS", () => {
-  eq(EVICT_MS, 15000);
+  eq(EVICT_MS, 30000);
   eq(suspectCheck(1000, 1000, 5000), "wait", "still silent");
   eq(suspectCheck(1000, 1000, 1000 + EVICT_MS), "wait", "exactly at the limit");
   eq(suspectCheck(1000, 1000, 1001 + EVICT_MS), "evict");
