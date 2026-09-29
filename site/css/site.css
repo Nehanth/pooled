@@ -639,7 +639,7 @@ html:not(.js) .game canvas{display:none}
 @keyframes capin{from{opacity:0;transform:translateY(5px)}}
 .sb-dots{display:flex;align-items:center}
 .sb-dots li.gap{margin-left:10px}
-.sb-dots button{position:relative;display:grid;place-items:center;height:34px;padding:0 4px;border-radius:var(--r-sm)}
+.sb-dots button{position:relative;display:grid;place-items:center;min-width:24px;height:34px;padding:0 4px;border-radius:var(--r-sm)}   /* 24px: WCAG 2.5.8 target size */
 .sb-dots button:hover{background:var(--bg-3)}
 .sb-dots i{display:block;width:7px;height:7px;border-radius:4px;background:var(--rule-3);transition:width .4s var(--ease),background-color .3s}
 .sb-dots .done i{background:var(--ink-3)}
@@ -862,7 +862,7 @@ html:not(.js) .sb-dots i{display:none}
   .sb-now{flex-basis:100%;padding-right:8px;align-items:flex-start;gap:10px}
   .sb-n{margin-top:2px}
   .sb-t{white-space:normal;line-height:1.35;min-height:calc(2.7em + 4px);padding-top:4px}
-  .sb-dots{margin-left:-4px}
+  .sb-dots{margin-left:-9px}   /* the first dot lines up with the step number (the buttons are 24px wide) */
   .replay{margin-left:auto}
 }
 @media (min-width:641px) and (max-width:720px){
@@ -919,7 +919,7 @@ html:not(.js) .sb-dots i{display:none}
   .sb-now{flex-basis:100%;padding-right:8px;align-items:flex-start;gap:10px}
   .sb-n{min-width:36px;height:24px;margin-top:2px}
   .sb-t{font-size:var(--t-base);white-space:normal;line-height:1.35;min-height:calc(2.7em + 4px);padding-top:4px}
-  .sb-dots{margin-left:-4px}
+  .sb-dots{margin-left:-9px}   /* the first dot lines up with the step number (the buttons are 24px wide) */
   .sb-dots li.gap{margin-left:6px}
   .sb-dots button{height:32px}
   .replay{margin-left:auto;height:32px}
@@ -944,3 +944,6 @@ html:not(.js) .sb-dots i{display:none}
 /* the room bar's Invite: always there once there is a room, as in the room (not over the two tabs, before anyone is in one) */
 .js .demo[data-scene="tabs"] .hd-inv{opacity:0;visibility:hidden}
 .hd-inv{transition:opacity .3s var(--ease),visibility 0s}
+
+/* 320px: the 24px step dots, Pause and Replay still fit on one line */
+@media (max-width:340px){.sb-dots li.gap{margin-left:0}.js .replay{width:28px}}
