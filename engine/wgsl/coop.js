@@ -21,7 +21,7 @@ export async function probeUnpack(device) {
   return device.__unpackOk;
 }
 
-export function coopWGSL(WG = 256, ROWS = 4, WGB = 64, COLS = 4, ROWSB = ROWS, UNPACK = true) {
+export function coopWGSL(WG = 256, ROWS = 4, WGB = 64, COLS = 4, ROWSB = ROWS, UNPACK = true, CV = false) {
   // Rows per workgroup for a C-column batched kernel: hold accumulators/thread
   // constant, so the 8- and 4-column twins are not starved of rows when COLS=16.
   const rowsFor = (C) => Math.max(1, Math.min(8, Math.round(ROWSB * COLS / C)));
@@ -358,6 +358,32 @@ ${reduce}
   // accumulate variants: y[row] += W x (residual add folded into the matvec)
   const singleCoopAcc = singleCoop.replace(/fn (q8|q4)_row\([\s\S]*?\n}\n/g, "")   // helpers already defined once
     .replace(/_coop\(/g, "_coop_acc(").replace(/_y\[row\] = /g, "_y[row] += ");
+  // conv variants (CV, engine layerFuse "conv"): the DeltaNet [qkv | z] GEMV with dn_conv in its
+  // epilogue. Rows below convDim are the qkv channels: the row's thread runs dn_conv's statements on
+  // the reduced value (causal conv over the rolling state, SiLU, state shift) and writes the conv
+  // output; the other rows (padding, z) are stored as usual. Each channel belongs to one workgroup,
+  // so the state update has no race. Needs the DN struct (WGSL2) in the same module.
+  const cvDecl = (P, b0) => `
+@group(1) @binding(${b0}) var<storage, read> ${P}_w: array<f32>;        // conv weights [convDim, 4]
+@group(1) @binding(${b0 + 1}) var<storage, read_write> ${P}_st: array<f32>;  // rolling state [convDim, 3]
+@group(1) @binding(${b0 + 2}) var<storage, read_write> ${P}_y: array<f32>;   // conv output [convDim]
+@group(1) @binding(${b0 + 3}) var<uniform> ${P}_dn: DN;
+fn ${P}_conv(c: u32, x: f32) {
+  var acc = ${P}_w[c * 4u + 3u] * x;
+  acc += ${P}_w[c * 4u + 0u] * ${P}_st[c * 3u + 0u];
+  acc += ${P}_w[c * 4u + 1u] * ${P}_st[c * 3u + 1u];
+  acc += ${P}_w[c * 4u + 2u] * ${P}_st[c * 3u + 2u];
+  ${P}_y[c] = acc / (1.0 + exp(-acc));
+  ${P}_st[c * 3u + 0u] = ${P}_st[c * 3u + 1u];
+  ${P}_st[c * 3u + 1u] = ${P}_st[c * 3u + 2u];
+  ${P}_st[c * 3u + 2u] = x;
+}`;
+  const singleCoopCv = !CV ? "" : cvDecl("cvf", 4) + cvDecl("cvq", 5) + "\n" + singleCoop.replace(/fn (q8|q4)_row\([\s\S]*?\n}\n/g, "")
+    .replace(/_coop\(/g, "_coop_cv(")
+    .replace(/(\w+)_y\[row\] = (mvc_part\[t \* \d+u\]);/g, (m, P, v) => {
+      const C = P === "mv" ? "cvf" : "cvq";
+      return `let v = ${v}; if (row < ${C}_dn.convDim) { ${C}_conv(row, v); } else { ${P}_y[row] = v; }`;
+    });
   return /* wgsl */ `
 var<workgroup> mvc_part: array<f32, ${WG * ROWS}>;   // [${ROWS} rows][${WG} threads]
 
@@ -374,6 +400,7 @@ fn mvf_row(off4: u32, xa: vec4<f32>, xb: vec4<f32>) -> f32 {
 }
 ${singleCoop}
 ${singleCoopAcc}
+${singleCoopCv}
 
 // ---- batched (COLS-column) variants for prefill / verify: each weight word is
 // loaded and decoded once and applied to C token columns (rowsFor(C) rows per WG). x is [C][xs4] vec4s,
