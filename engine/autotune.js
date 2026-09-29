@@ -6,8 +6,12 @@
 import { WGSL } from "./wgsl/base.js";
 import { probeUnpack, coopWGSL } from "./wgsl/coop.js";
 
-export async function autotuneCoop(device, { dIn = 5120, dOut = 17408, kind = "q4" } = {}) {
-  const candidates = [[256, 4], [128, 4], [256, 8], [128, 8], [64, 4]];
+// wide: also time the wide GEMV layout (engine/wgsl/coop.js coopWide) at a few shapes; the result's .wide is the
+// fastest one when it beats every coop shape by > 3%, else null (callers pass it as the engine's coopWide).
+// Rooms ask for it only on adapters without subgroups (Safari), where the coop layout is load bound.
+export const WIDE_CANDIDATES = [{ WG: 64, TPR: 8, R: 1 }, { WG: 128, TPR: 16, R: 1 }, { WG: 64, TPR: 4, R: 2 }];
+export async function autotuneCoop(device, { dIn = 5120, dOut = 17408, kind = "q4", wide = false } = {}) {
+  const candidates = [[256, 4], [128, 4], [256, 8], [128, 8], [64, 4], ...(wide ? WIDE_CANDIDATES : [])];
   const nb = dIn / 32;
   const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
   const qs = device.createBuffer({ size: dOut * (kind === "q4" ? dIn / 2 : dIn), usage: S });
@@ -20,10 +24,11 @@ export async function autotuneCoop(device, { dIn = 5120, dOut = 17408, kind = "q
   const frameB = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM });
   const C = GPUShaderStage.COMPUTE;
   const results = [];
-  for (const [wg, rows] of candidates) {
+  for (const cand of candidates) {
+    const W = Array.isArray(cand) ? null : cand, [wg, rows] = W ? [W.WG, (W.WG / W.TPR) * W.R] : cand;
     try {
       const entry = kind === "q4" ? "matvec_q4_coop" : "matvec_q8_coop";
-      const mod = device.createShaderModule({ code: WGSL + coopWGSL(wg, rows, 64, 4, 4, await probeUnpack(device)) });
+      const mod = device.createShaderModule({ code: WGSL + coopWGSL(W ? 64 : wg, W ? 4 : rows, 64, 4, 4, await probeUnpack(device), W) });
       const l0 = device.createBindGroupLayout({ entries: [0, 1].map((b) => ({ binding: b, visibility: C, buffer: { type: "uniform" } })) });
       const l1 = device.createBindGroupLayout({ entries: ["read-only-storage", "read-only-storage", "read-only-storage", "storage", "uniform"].map((t, i) => ({ binding: i, visibility: C, buffer: { type: t } })) });
       const pipe = await device.createComputePipelineAsync({
@@ -53,15 +58,18 @@ export async function autotuneCoop(device, { dIn = 5120, dOut = 17408, kind = "q
       while (performance.now() - tw < (results.length ? 40 : 250)) await run(20);
       const t0 = performance.now();
       await run(100);
-      results.push({ wg, rows, ms: (performance.now() - t0) / 100 });
+      results.push({ wg, rows, ...(W ? { wide: W } : {}), ms: (performance.now() - t0) / 100 });
     } catch { /* config not supported on this device; skip */ }
   }
   for (const b of [qs, sc, x, y]) b.destroy();
-  if (!results.length) return { wg: 256, rows: 4, results };
+  if (!results.length) return { wg: 256, rows: 4, wide: null, results };
   results.sort((a, b) => a.ms - b.ms);
-  const best = results[0];
+  const coopR = results.filter((r) => !r.wide), wideBest = results.find((r) => r.wide);
+  const wideWin = wideBest && (!coopR.length || wideBest.ms * 1.03 < coopR[0].ms) ? wideBest.wide : null;
+  if (!coopR.length) return { wg: 256, rows: 4, wide: wideWin, results };
+  const best = coopR[0];
   // prefer the default unless a config wins by >3% (noise guard)
-  const def = results.find((r) => r.wg === 256 && r.rows === 4);
+  const def = coopR.find((r) => r.wg === 256 && r.rows === 4);
   const pick = def && def.ms <= best.ms * 1.03 ? def : best;
-  return { wg: pick.wg, rows: pick.rows, results };
+  return { wg: pick.wg, rows: pick.rows, wide: wideWin, results };
 }

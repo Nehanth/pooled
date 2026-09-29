@@ -25,6 +25,10 @@ import { Qwen35Engine, prefillMathFeatures } from "../engine/qwen35.js";
 const envGet = (k) => globalThis.Deno?.env.get(k);
 if (envGet("ATTN_PREFILL_TILE")) Qwen35Engine.defaults.attnPrefillTile = envGet("ATTN_PREFILL_TILE") !== "0";
 if (envGet("ATTN_PREFILL_TK")) Qwen35Engine.defaults.attnPrefillTK = +envGet("ATTN_PREFILL_TK");
+//   ATTN_HEADS=1|2|4      query heads per decode flash workgroup (engine attnHeads, attn_flash_h; same bits)
+//   COOP_WIDE='{"WG":64,"TPR":8,"R":1}'  the wide GEMV layout (engine coopWide; other GEMV sums)
+if (envGet("ATTN_HEADS")) Qwen35Engine.defaults.attnHeads = +envGet("ATTN_HEADS");
+if (envGet("COOP_WIDE")) Qwen35Engine.defaults.coopWide = JSON.parse(envGet("COOP_WIDE"));
 if (envGet("ATTN_PREFILL_SPLITS")) Qwen35Engine.defaults.attnPrefillSplits = +envGet("ATTN_PREFILL_SPLITS");
 
 export const Q38_PATH = new URL("../models/q38/model.gguf", import.meta.url).pathname;
