@@ -900,6 +900,26 @@ with the GB10-alone answers (a0e7f9bd / dcc61ede) and plain == spec in every rou
 layer before and 49.1/51.3 alone; shas 166285f6 / e19cba7f as alone. The phone's page still joins in 4.2 s and
 stays in the room as a guest.
 
+The other combos with the phone (main's baselines from the device-matrix runs, same session evening; after = this
+branch, phone on the preview, it asks and holds nothing):
+
+| combo | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| B before: M5 Max 39 + iPhone 1 (30 GB host, B_moe_1) | 28.5/29.4 | 26.9/32.4 | 43.7/44.4 | 37.5/56.6 |
+| **B after: M5 Max 40, phone asks** (B_after_moe_1/2) | **68.4/69.5, 68.8/70.3** | **83.1/81.8, 82.1/82.5** | **95.2/96.0, 95.1/95.3** | **130.2/133.5, 132.2/131.6** |
+| D before: GB10 19 + M5 Max 20 + iPhone 1 (D_moe_here_2) | 19.5/18.7 | 18.5/20.9 | 19.1/21.3 | 27.9/27.6 |
+| D after: GB10 20 + M5 Max 20, phone asks (D_after_moe_1, _3) | 26.5/18.7, 23.2/20.8 | 16.6/23.8, 25.1/22.8 | 29.0/27.2, 28.4/27.0 | 43.0/40.9, 37.5/56.4 |
+| A (GB10 20 + M5 Max 20, no phone; matrix A_moe_1/2) | 29.7-29.9 | 28.4-33.3 | 26.1-38.0 | 51.6-56.8 |
+
+B goes 2.3-2.4x plain and 2.2-3.5x spec (the Mac alone; answers 3f42e667 / dcc61ede, plain == spec, the same as
+B before). D after is A's split (the phone is out of the chain), so it gains over D before (spec +35-100%) but reads
+below the earlier A runs in plain (16.6-26.5 vs 28.4-33.3): the same code path as A, run 1.5-2 h later on the shared
+Wi-Fi, so read the gap as run-to-run conditions, not the phone (it sends no frames). D's japan has plain 8e29cc8d
+vs spec 44efa784 in both runs: the GB10 + M5 Max open item from the matrix (A run 1 did the same), not this change.
+D_after_moe_2 failed at join (the public PeerJS server said no room for the code) and was rerun as D_after_moe_3.
+Runs between 20:28 and 21:15 overlap a phone-lock mix-up in another job (the lock was released under running
+jobs); in B and D after the phone only joins, and B_after_moe_1/2 agree to within 2%.
+
 **2. Keep the phone off the last (full-attention) layer (tried, dropped).** The chain ends on the phone, so it held
 layer 39, full attention (+3 ms over the context without subgroups, its KV cache on the phone). Tried: the host
 keeps layer 39 as a tail, a second engine run on the returned hidden before the head, and every slice moves one
