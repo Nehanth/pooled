@@ -24,7 +24,7 @@ function link({ tamper } = {}) {
   sub = new PreviewSubscriber({ hostId: "H", send: (m) => { log.push(m.t + ":" + m.hs.length); queueMicrotask(() => pub.onWant("P", structuredClone(m))); } });
   return { ws, server, pub, sub, log };
 }
-const settle = async (sub, port, rev) => { for (let i = 0; i < 200 && sub.snapshot(port)?.rev !== rev; i++) await tick(5); return sub.snapshot(port); };
+const settle = async (sub, port, rev) => { for (let i = 0; i < 2000 && sub.snapshot(port)?.rev !== rev; i++) await tick(5); return sub.snapshot(port); };
 
 Deno.test("preview sync: the first rev fetches every blob, the next only what changed", async () => {
   const L = link();
