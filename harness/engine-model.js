@@ -6,13 +6,20 @@
 // The model's own turns are kept as the exact ids it sampled (keyed by their text), so rendering
 // never re-tokenizes them differently and the prefix stays reusable. Decoding is greedy by
 // default; with the draft head, speculative steps give the same tokens faster.
+//
+// The system prompt + tools is checkpointed in a GPU slot on the way through the prefill (issue
+// #73): when the rest of the prompt changes in the middle (Agent compaction), the next request
+// loads that slot and prefills only what follows it. `pin: false` turns it off.
 import { buildIds, reusablePrefix, specials } from "../room/conversation.js";
 import { tokenTexts, constrainedSampler, OwnIds, encodeTurn } from "./model-common.js";
+import { isPrefix, pinSplit } from "./prefix.js";
+
+const PIN_SLOT = "engine-model:pin";
 
 // tools (optional): the agent's tool list; inside a tool call the whole XML call (function and
 // parameter names included) is then constrained to the grammar (harness/constrain.js), on every sampled position including
 // the ones a speculative step checks, so accepted tokens always satisfy it.
-export function engineModel(engine, tok, { thinking = false, maxNew = 1024, K = 3, spec = true, sample = null, tools = null, style = "xml" } = {}) {
+export function engineModel(engine, tok, { thinking = false, maxNew = 1024, K = 3, spec = true, sample = null, tools = null, style = "xml", pin = true } = {}) {
   const S = specials(tok);
   const pick0 = sample || ((lg) => { let b = 0; for (let i = 1; i < lg.length; i++) if (lg[i] > lg[b]) b = i; return b; });
   const stop = new Set([S.imEnd, S.eot].filter(Number.isInteger));
@@ -20,7 +27,15 @@ export function engineModel(engine, tok, { thinking = false, maxNew = 1024, K = 
   const pick = cs.sample;
   const own = new OwnIds();   // assistant text -> the ids it was sampled as
   let fed = [];            // exactly the tokens the engine's caches hold
-  const stats = { calls: 0, reused: 0, prefilled: 0, generated: 0, last: null };
+  let pinned = null;       // the tokens saved in PIN_SLOT (the system prompt + tools), or null
+  const slots = pin && typeof engine.saveSlot === "function" && typeof engine.loadSlot === "function";
+  const stats = { calls: 0, reused: 0, prefilled: 0, generated: 0, pins: 0, last: null };
+  // tokens of the system prompt alone (the conversation's ids start with exactly these)
+  let sysKey = null, sysN = 0;
+  const systemLen = (system) => {
+    if (system !== sysKey) { sysKey = system; sysN = system ? buildIds(tok, { system, turns: [], thinking }).length : 0; }
+    return sysN;
+  };
 
   async function* generate({ system = "", turns, signal } = {}) {
     stats.calls++;
@@ -28,10 +43,24 @@ export function engineModel(engine, tok, { thinking = false, maxNew = 1024, K = 
     const T = turns.map((t) => (t.role === "assistant" ? { role: "assistant", ids: own.get(t.text) || encodeTurn(tok, t.text) } : { role: "user", text: t.text }));
     const ids = buildIds(tok, { system, turns: T, thinking });
     if (ids.length + 2 > engine.maxSeq) throw new Error(`conversation is ${ids.length} tokens; the context is ${engine.maxSeq}`);
-    const reused = reusablePrefix(fed, ids);
+    let reused = reusablePrefix(fed, ids);
+    // the middle changed: resume after the system prompt + tools if that is still the start
+    if (!reused && pinned && pinned.length < ids.length && isPrefix(pinned, ids)) {
+      try { engine.loadSlot(PIN_SLOT); fed = pinned.slice(); reused = pinned.length; }
+      catch { pinned = null; }   // the slot is gone (dropped by someone else): prefill it again
+    }
     if (!reused) { engine.reset(); fed = []; }
     stats.reused += reused; stats.prefilled += ids.length - reused;
-    const rest = ids.slice(reused);
+    // prefill up to the end of the system prompt, save it, then the rest (same tokens, same
+    // positions: the answer does not change, only where the prefill pauses)
+    const cut = slots ? pinSplit(reused, systemLen(system), ids.length) : 0;
+    if (cut) {
+      await engine.prefillTokens(ids.slice(reused, cut));
+      engine.saveSlot(PIN_SLOT);
+      pinned = ids.slice(0, cut);
+      stats.pins++;
+    }
+    const rest = ids.slice(cut || reused);
     if (rest.length > 1) await engine.prefillTokens(rest.slice(0, -1));
     fed = ids.slice(0, -1);   // (prefillTokens wrote all but the last prompt token)
     cs.setText("");

@@ -519,7 +519,7 @@ export async function initCode(api, { mock = null } = {}) {
         makeModel: ({ tools }) => ({ ...roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" }), style }),
         onResult: ({ rec, trajectory }) => {
           lines.push(JSON.stringify(rec), JSON.stringify({ trajectory }));
-          localNote(`${rec.ok ? "PASS" : "FAIL"} ${rec.id} · ${rec.reason} · ${rec.steps} steps · ${rec.generated} tok · ${(rec.ms / 1000).toFixed(0)} s`, !rec.ok);
+          localNote(`${rec.ok ? "PASS" : "FAIL"} ${rec.id} · ${rec.reason} · ${rec.steps} steps · ${rec.prompt} prefilled / ${rec.reused} reused · ${rec.generated} tok · ${(rec.ms / 1000).toFixed(0)} s`, !rec.ok);
         },
       });
       localNote(S.summary(recs));

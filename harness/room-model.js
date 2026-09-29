@@ -3,9 +3,11 @@
 // roomApi.generate (room.js roomGenerate). The room decides prefix reuse by comparing exact ids
 // with what its caches and checkpoints hold, so this adapter only has to render the conversation
 // the same way every step: assistant turns replay the exact ids they were sampled as, and step
-// N+1 prefills just the tool response and the next assistant header.
+// N+1 prefills just the tool response and the next assistant header. The length of the system
+// prompt + tools goes along as `pin`: the room checkpoints that point on the way through the
+// prefill, so a compaction that rewrites the middle of the prompt does not prefill it again.
 //
-// api: { tok(), maxSeq(), generate(ids, { onToken, stop, maxNew, sample, signal }) -> result }.
+// api: { tok(), maxSeq(), generate(ids, { onToken, stop, maxNew, sample, signal, pin }) -> result }.
 // The caller holds the room's lock (api.lock) for the whole agent run.
 import { buildIds, specials, splitThink } from "../room/conversation.js";
 import { pickSampler } from "../room/sampling.js";
@@ -49,6 +51,13 @@ export function roomModel(api, {
       for (const v of Object.values(t.vocab || {})) if (v >= vocabSize) vocabSize = v + 1;
     }
     return t;
+  };
+  // tokens of the system prompt alone, per tokenizer and text (the conversation's ids start with them)
+  let sysKey = null, sysN = 0;
+  const systemLen = (T, system, think) => {
+    const k = [T, system, think];
+    if (!sysKey || sysKey.some((x, i) => x !== k[i])) { sysKey = k; sysN = buildIds(T, { system, turns: [], thinking: think }).length; }
+    return sysN;
   };
   const reserve = () => Math.min(maxNew, Math.floor(api.maxSeq() / 4)) + 64;
 
@@ -101,7 +110,9 @@ export function roomModel(api, {
       // misbehaving engine), so stop decoding garbage instead of running to the cap
       if (cs.garbage && cutAt < 0) { garbage = true; cutAt = visible().length; ctrl.abort(); flush(true); }
     };
-    const run = api.generate(ids, { onToken, stop, maxNew: Math.min(maxNew, maxSeq - ids.length - MARGIN), sample: cs.sample, signal: ctrl.signal })
+    // pin: the system prompt + tools, which the room keeps as a checkpoint of its own (issue #73)
+    const pin = system ? systemLen(T, system, think) : 0;
+    const run = api.generate(ids, { onToken, stop, maxNew: Math.min(maxNew, maxSeq - ids.length - MARGIN), sample: cs.sample, signal: ctrl.signal, pin })
       .then((r) => { if (cutAt < 0) raw += dec.end(); text = flush(true); q.end(); return r; }, (err) => { q.end(err); throw err; });
     run.catch(() => {});
     let finished = false;

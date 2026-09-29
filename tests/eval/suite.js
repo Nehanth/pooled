@@ -11,7 +11,8 @@
 // token counters are the task's; a room model is built over the task's tools for the constraint).
 //
 // rec: { id, model, ok, reason, check, steps, calls, cards, forced, prompt, reused, generated,
-//        ctx, ms, firstMs }. prompt/reused/generated come from the model's `usage`; ctx is the
+//        compactions, ctx, ms, firstMs }. prompt (tokens prefilled) / reused (tokens already in
+// the caches) / generated come from the model's `usage`; compactions counts the agent's; ctx is the
 // agent's own estimate of the conversation at the end (system + turns, in tokens).
 import { Agent } from "../../harness/agent.js";
 import { CODE_SYSTEM } from "../../harness/code-prompt.js";
@@ -71,7 +72,7 @@ export async function runTask(task, { makeModel, root = document.body, onEvent =
   });
   const tools = [...codingTools(ws, { server }), ...previewTools(server), runJsTool(server, { runner: browserRunner(root.ownerDocument) })];   // as Code mode (room/code.js)
   const model = await makeModel({ task, tools });
-  const rec = { id: task.id, model: label, ok: false, reason: "", check: "", steps: 0, calls: 0, cards: {}, forced: 0, prompt: 0, reused: 0, generated: 0, ctx: 0, ms: 0, firstMs: 0 };
+  const rec = { id: task.id, model: label, ok: false, reason: "", check: "", steps: 0, calls: 0, cards: {}, forced: 0, prompt: 0, reused: 0, generated: 0, compactions: 0, ctx: 0, ms: 0, firstMs: 0 };
   const t0 = now();
   const agent = new Agent({
     generate: model.generate, tools, style: model.style || "xml", system: CODE_SYSTEM, maxSteps: task.maxSteps || 20, approve: async () => true,
@@ -80,6 +81,7 @@ export async function runTask(task, { makeModel, root = document.body, onEvent =
       if (e.type === "delta" && !rec.firstMs) rec.firstMs = Math.round(now() - t0);
       if (e.type === "usage") { rec.prompt += (e.prompt || 0) - (e.reused || 0); rec.reused += e.reused || 0; rec.generated += e.generated || 0; rec.forced += e.forced || 0; }
       if (e.type === "card") rec.cards[e.id] = (rec.cards[e.id] || 0) + 1;
+      if (e.type === "compacted" && e.tier < 4) rec.compactions++;
       onEvent({ task: task.id, ...e });
     },
   });
@@ -130,6 +132,6 @@ export function summary(recs) {
   const n = recs.length, ok = recs.filter((r) => r.ok).length, sum = (k) => recs.reduce((s, r) => s + (r[k] || 0), 0);
   const forced = sum("forced");
   return `success ${ok}/${n} (${n ? Math.round((100 * ok) / n) : 0} %) · steps ${(sum("steps") / (n || 1)).toFixed(1)}`
-    + ` · prefilled ${kt(sum("prompt"))} · generated ${kt(sum("generated"))} · ctx ${kt(Math.round(sum("ctx") / (n || 1)))}/task`
+    + ` · prefilled ${kt(sum("prompt"))} · reused ${kt(sum("reused"))} · generated ${kt(sum("generated"))} · ctx ${kt(Math.round(sum("ctx") / (n || 1)))}/task`
     + (forced ? ` · forced ${forced}` : "") + ` · ${Math.round(sum("ms") / 1000)} s`;
 }

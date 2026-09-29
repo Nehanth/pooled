@@ -71,6 +71,16 @@ a re-deal or a failed answer clears them. Order on a device: rollback, save, dro
 `tests/e2e/room_synth.mjs --regen --expect-reuse` checks that a regenerate over 3 devices resumes
 from a checkpoint and repeats the greedy answer. `?ckpt=0` turns it off.
 
+Code mode also pins the system prompt + tools (issue #73): `roomModel` passes its length as `pin`,
+and when the caches do not hold it yet `roomGenerate` prefills up to there, saves a pinned
+checkpoint (`ckptSave(true)`, riding the next frame like any save), then prefills the rest. The
+pinned one is not counted in `?ckpt=N` and is never evicted by answer saves; a new system prompt
+replaces it everywhere. When compaction rewrites old turns, the next step resumes there and
+prefills only what follows. `engineModel` does the same on one engine with a GPU slot
+(`pin: false` turns it off). Tests: `tests/unit/room_ckpt_test.js` ("pin: ..." scenarios, host and
+workers in sync), `tests/unit/kv_reuse_test.js` (a 22-step session with compactions: every step
+reuses everything the engine held, or the system prompt after a compaction).
+
 ### Several sessions on one engine
 
 `harness/sessions.js` (`Sessions`): `switchTo(id)` parks the current conversation in a GPU slot
@@ -132,7 +142,9 @@ Unit tests: `tests/unit/tools_test.js`, `constrain_test.js`, `prefix_test.js`.
   every position a speculative step checks too, so a call can only name declared tools and
   parameters.
 - `Agent({ budget, count })`: past the token budget the oldest tool outputs are cut to a stub
-  (oldest first, never the latest, down to 75% so it does not cut every step).
+  (oldest first, never the latest two, down to 60% so it does not cut every step). The stub
+  (`stubResults`) and the fold line depend only on the turn, so a compacted turn renders the same
+  on every later step; the `compacted` event's `at` is the first turn that changed.
 
 Tests: `tests/unit/agent_test.js` (tools and loop with a scripted model),
 `tests/e2e/agent_synth.mjs` (follow-up turns reuse the prefix and match a fresh engine; spec ==
@@ -181,7 +193,8 @@ each chosen expert once per token today), timing on real hardware.
 1. Time it on two Macs and a GB10: decode tok/s at 1K / 8K context, prefill tok/s, `?fuse=0`.
 2. Persist room checkpoints to OPFS on every device (the engine and store are there; the room
    keeps them on the GPU today), so a session survives a reload.
-3. Stable prompt rendering for agents: never drop old turns (it breaks reuse); compact instead.
+3. Stable prompt rendering for agents: done in part (#73: compaction is stable and the system
+   prompt stays cached); a compaction still prefills everything after the system prompt once.
 4. Several sessions at once: per-session KV / state slots batched through one pass (design:
    research/tabby-next-2026-09.md §2).
 5. Pipelined speculative windows across devices (Mesh-LLM keeps several verifies in flight;

@@ -5,6 +5,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 ## [Unreleased]
 
 ### Changed
+- **Code mode keeps the system prompt cached through compaction** (#73): the prefill pauses after the system prompt + tools and saves a checkpoint there (on every device in a room; it is never evicted by the answer checkpoints), so when compaction rewrites old turns the next step prefills only what follows it instead of the whole prompt. Same tokens at the same positions, so answers do not change. The eval runner shows tokens reused next to tokens prefilled for each task.
 - **Metal (Apple GPUs)**:
   - The MoE's default prompt processing (wide prefill at ubatch 256 plus grouped experts) no longer loses the device under Deno on an M5 Max. Wide prefill now submits every 8 layers, which also makes GB10 MoE prefill about 5% faster, with bit-identical results.
   - Apple GPUs in Chrome and Safari get wider fused MoE expert kernels (`moeFusedLayout`; M5 Max kernel time: gate/up 0.49x, down 0.55x). Qwen 3.6 35B decode in Chrome on an M5 Max: +5.6% plain (86.1 -> 90.9 tok/s), +11% spec.
