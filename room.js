@@ -2232,7 +2232,8 @@ const bandMode = () => ($("chatpane").classList.contains("code-mode") ? "code" :
 function bandFolded() {
   let v = null;
   try { v = localStorage.getItem("pooled-band-" + bandMode()); } catch {}
-  return v ? v === "folded" : bandMode() === "code" || innerWidth < 820;   // Code, and phones, start with it folded
+  // Code, and phones (upright, or on their side: a short touch screen), start with it folded
+  return v ? v === "folded" : bandMode() === "code" || innerWidth < 820 || matchMedia("(max-height: 500px) and (pointer: coarse)").matches;
 }
 function bandFold(on, save = false) {
   const el = $("swarm-map"), b = $("band-toggle");
