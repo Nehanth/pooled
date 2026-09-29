@@ -644,7 +644,7 @@ html:not(.js) .game canvas{display:none}
 .sb-dots i{display:block;width:7px;height:7px;border-radius:4px;background:var(--rule-3);transition:width .4s var(--ease),background-color .3s}
 .sb-dots .done i{background:var(--ink-3)}
 .sb-dots .cur i{width:24px;background:linear-gradient(90deg,var(--blue) var(--p,0%),var(--blue-200) var(--p,0%))}
-.js .sb-dots .lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.js .sb-dots .lbl,.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 .replay{position:relative;display:none;place-items:center;flex:none;width:34px;height:34px;border-radius:var(--r-sm);color:var(--ink-3)}
 .js .replay{display:grid}
 .replay:hover{background:var(--bg-3);color:var(--ink)}

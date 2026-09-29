@@ -72,7 +72,8 @@
     </div>
   </header>
 
-  <section class="stage" aria-label="How a room works">
+  <section class="stage" aria-labelledby="stage-h">
+    <h2 class="sr-only" id="stage-h">How a room works</h2>
     <div class="wrap">
       <div class="demo" id="demo" data-scene="tabs" data-mode="chat">
 
@@ -85,7 +86,7 @@
         <div class="win" id="win" role="tabpanel" aria-labelledby="mChat">
           <!-- the room: its code, and every device in it -->
           <div class="hd">
-            <span class="hd-room"><svg class="mark" width="16" height="16" aria-hidden="true"><use href="#i-mark"/></svg><span class="hd-k">Room</span><b class="hd-code" id="hdCode" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></b></span>
+            <span class="hd-room"><svg class="mark" width="16" height="16" aria-hidden="true"><use href="#i-mark"/></svg><span class="hd-k">Room</span><b class="hd-code" id="hdCode" role="img" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></b></span>
             <ul class="chips" id="chips" aria-label="Devices in the room">
               <li class="chip c0"><svg width="14" height="14" aria-hidden="true"><use href="#i-laptop"/></svg><span class="cn" data-name="0">fox</span><span class="cg">10 GB</span><span class="cst"></span></li>
               <li class="chip c1"><svg width="14" height="14" aria-hidden="true"><use href="#i-desk"/></svg><span class="cn" data-name="1">heron</span><span class="cg">12 GB</span><span class="cst"></span></li>
@@ -117,7 +118,7 @@
                       </div>
                       <div class="mpost">
                         <p class="mk">Room code</p>
-                        <p class="mcode" id="aCode" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></p>
+                        <p class="mcode" id="aCode" role="img" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></p>
                         <p class="mwait"><span class="live" aria-hidden="true"></span>Waiting for your other devices</p>
                         <p class="mjoined"><svg width="12" height="12" aria-hidden="true"><use href="#i-check"/></svg><span><span data-name="1">heron</span> joined</span></p>
                       </div>
@@ -135,7 +136,7 @@
                         <h3>Have a code?</h3>
                         <p class="nm-k">This device</p>
                         <span class="devname" id="nmB"><span class="nm-v" data-name="1">heron</span><span class="shuf" aria-hidden="true"><svg width="14" height="14"><use href="#i-shuffle"/></svg></span></span>
-                        <div class="slots" aria-label="Code typed: K7QX"><i>K</i><i>7</i><i>Q</i><i>X</i></div>
+                        <div class="slots" role="img" aria-label="Code typed: K7QX"><i>K</i><i>7</i><i>Q</i><i>X</i></div>
                         <span class="mbtn" id="bBtn">Join</span>
                         <p class="mok"><svg width="12" height="12" aria-hidden="true"><use href="#i-check"/></svg>Joined room K7QX</p>
                       </div>
