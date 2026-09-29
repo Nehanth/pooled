@@ -66,10 +66,10 @@ const profs = [];
 const persistent = async (opts) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-pm-prof-")); profs.push(d); return chromium.launchPersistentContext(d, { headless: false, args: ARGS, ignoreHTTPSErrors: true, ...opts }); };
 const hctx = await persistent({ userAgent: UA_DESKTOP }); await local(hctx);
 const wctx = await persistent({ userAgent: UA_DESKTOP }); await local(wctx);
-const pbrowser = await chromium.launch({ headless: false, args: ARGS });
-const pctx = await pbrowser.newContext({ userAgent: UA_PHONE, viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, ignoreHTTPSErrors: true }); await local(pctx);
-const browsers = [hctx, wctx, pbrowser];
-const host = hctx.pages()[0] || await hctx.newPage(), worker = wctx.pages()[0] || await wctx.newPage(), phone = await pctx.newPage();
+const pctx = await persistent({ userAgent: UA_PHONE, viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true }); await local(pctx);
+const phoneProfile = profs.at(-1);
+const browsers = [hctx, wctx, pctx];
+const host = hctx.pages()[0] || await hctx.newPage(), worker = wctx.pages()[0] || await wctx.newPage(), phone = pctx.pages()[0] || await pctx.newPage();
 const tabs = { host, worker, phone };
 const errs = { host: [], worker: [], phone: [] };
 for (const [n, p] of Object.entries(tabs)) {
@@ -77,8 +77,7 @@ for (const [n, p] of Object.entries(tabs)) {
   p.on("crash", () => { errs[n].push("tab crashed"); log(n, "TAB CRASHED"); });
   p.on("close", () => log(n, "tab closed"));
 }
-pbrowser.on("disconnected", () => log("PHONE BROWSER DISCONNECTED"));
-for (const [n, c] of [["host", hctx], ["worker", wctx]]) c.on("close", () => log(n, "BROWSER CLOSED"));
+for (const [n, c] of [["host", hctx], ["worker", wctx], ["phone", pctx]]) c.on("close", () => log(n, "BROWSER CLOSED"));
 const out = { model: MODEL, root: ROOT, phases: [], errors: errs };
 const status = (p) => p.evaluate(() => document.getElementById("ai-status").textContent);
 const roomLog = (p) => p.evaluate(() => [...document.querySelectorAll("#chat-log div")].map((d) => d.textContent));
@@ -116,7 +115,9 @@ function descendants(root) {
   return rows.filter((r) => set.has(r.pid));
 }
 async function sampler() {
-  const root = pbrowser.process()?.pid;
+  // the phone's browser: the process started with its profile directory (not a child: no --type)
+  const root = descendants(1).find((r) => r.args.includes(phoneProfile) && !/--type=/.test(r.args))?.pid;
+  if (!root) log("no phone browser process found: memory not sampled");
   let peakR = 0, peakN = 0, stop = false, n = 0;
   (async () => { while (!stop) { try { const ps = descendants(root); const kb = (re) => ps.filter((r) => re.test(r.args)).reduce((a, r) => a + r.rss, 0); peakR = Math.max(peakR, kb(/--type=renderer/)); peakN = Math.max(peakN, kb(/network\.mojom|--utility-sub-type=network/)); n++; } catch {} await new Promise((r) => setTimeout(r, 200)); } })();
   return () => { stop = true; return { rendererPeakMB: Math.round(peakR / 1024), networkPeakMB: Math.round(peakN / 1024), samples: n }; };
