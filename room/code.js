@@ -773,7 +773,8 @@ export async function initCode(api, { mock = null } = {}) {
     setChrome();
     if (!host && running) ctrl?.abort();
     // a device left mid-run: the next step would wait out the lap timeouts, so stop here
-    else if (running && !api.ready() && !ctrl?.signal.aborted) { note("a device left: stopped · re-deal the layers, then send again", true); ctrl?.abort(); }
+    // (unless the room is recovering: the run waits for the device, or a re-deal, and carries on)
+    else if (running && !api.ready() && !api.recovering?.() && !ctrl?.signal.aborted) { note("a device left: stopped · re-deal the layers, then send again", true); ctrl?.abort(); }
   });
   setChrome();
   return { show: (m) => ui.show(m), ctx: (used, max) => ui.ctx(used, max) };
