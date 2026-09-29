@@ -50,6 +50,14 @@ Deno.test("relayUrl and runJsAvailable: a good meta turns run_js on, a bad one l
   const w = console.warn; console.warn = (m) => { warned = m; };
   try { eq(relayUrl(page("https://pooled.run/room", "https://preview.pooled.run")), null); } finally { console.warn = w; }
   ok(/preview-origin ignored: same site/.test(warned), warned);
+  // the same bad value warns once, not every time the tools are listed
+  let n = 0;
+  console.warn = () => { n++; };
+  try {
+    for (let i = 0; i < 3; i++) relayUrl(page("https://pooled.run/room", "https://preview.pooled.run"));
+    relayUrl(page("https://pooled.run/room", "https://www.pooled.run"));
+  } finally { console.warn = w; }
+  eq(n, 1, "one warning for the new value only");
   eq(quiet(() => relayUrl(page("https://pooled.run/room", "http://pooled-preview.dev"))), null);
   ok(!quiet(() => runJsAvailable(page("https://pooled.run/room", "https://preview.pooled.run"))));
   // development: the other loopback name, no meta needed

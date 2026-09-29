@@ -62,6 +62,7 @@ const quiet = () => { quietUntil = Date.now() + QUIET_MS; };
 // A meta the relay cannot isolate is ignored (local mode, and no run_js): not an http(s) URL, plain
 // http from an https page (blocked as mixed content), or the page's own site (a subdomain such as
 // preview.pooled.run shares the room's process, so a loop there would freeze the room).
+let warned = "";   // the ignored preview-origin value already warned about
 export function relayUrl(doc = globalThis.document) {
   const loc = doc?.defaultView?.location;
   if (!loc) return null;
@@ -70,7 +71,7 @@ export function relayUrl(doc = globalThis.document) {
   if (meta) {
     const why = relayProblem(meta, loc);
     if (!why) return meta.replace(/\/+$/, "") + path;
-    console.warn(`preview-origin ignored: ${why}`);
+    if (warned !== meta) { warned = meta; console.warn(`preview-origin ignored: ${why}`); }   // once, not per tool list
     return null;
   }
   const port = loc.port ? ":" + loc.port : "";
