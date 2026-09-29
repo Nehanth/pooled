@@ -1355,6 +1355,13 @@
     /* the preview's address gets the room ("sandbox" is a tooltip with no hover here) */
     #pv-sandbox { display: none; }
     #pv-bar { gap: 4px; }
+    /* two ports or more: their tabs get a row of their own, thumb-sized, with the stop button at the
+       far end of each tab, so the address keeps the row below */
+    #pv-bar:has(.pv-tabw + .pv-tabw) { flex-wrap: wrap; height: auto; row-gap: 6px; padding-top: 6px; padding-bottom: 6px; }
+    #pv-bar:has(.pv-tabw + .pv-tabw) #pv-tabs { order: -2; flex: 1 1 100%; display: flex; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+    #pv-tabs .pv-tabw { flex: 1 0 128px; min-width: 0; }
+    #code-pane .pv-tab { flex: 1; min-width: 0; height: 36px; padding: 0 12px; text-align: left; font-size: 13px; }
+    #code-pane .pv-x { width: 36px; height: 36px; margin-right: 0; }
   }
   @media (max-width: 820px) and (pointer: coarse) {
     /* thumb-sized: the composers' buttons, the output tabs, the project and console buttons */
