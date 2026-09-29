@@ -267,6 +267,12 @@
   .menu-acts :is(button, a):hover .ic { background: var(--panel); box-shadow: inset 0 0 0 1px var(--border); color: var(--text); }
   .menu-acts button:active:not(:disabled) { transform: none; }
   #cache-line { display: contents; }
+  #cache-models { list-style: none; margin: 0 0 4px; padding: 0 0 0 44px; display: flex; flex-direction: column; gap: 4px; }
+  #cache-models li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+  #cache-models li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #cache-models li small { color: var(--muted); }
+  #cache-models li button { flex: none; height: 28px; padding: 0 10px; font: 500 12px/1 var(--sans); }
+  #cache-models li.cache-est { font-size: 12px; color: var(--muted); }
   #add-virtual { font: 500 12px/1 var(--sans); padding: 10px; border-style: dashed; border-color: var(--border-2); color: var(--muted); background: transparent; }
   #add-virtual:hover:not(:disabled) { color: var(--text); border-color: var(--muted); background: transparent; }
   #virtual { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -1427,6 +1433,7 @@
           <button id="card-btn" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M2.5 11l3.5-3.5 2.5 2.5 2-2 3 3"/><circle cx="10.8" cy="5.9" r=".9"/></svg></span>Room card<small>A picture of this room's devices and speed</small></button>
           <span id="cache-line"><a href="#" id="cache-clear"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.7 9h6.6l.7-9"/></svg></span>Clear cached weights<small>Frees this device's disk; the next start downloads again</small></a></span>
         </div>
+        <ul id="cache-models" aria-label="Cached models" hidden></ul>
         <div id="awake" class="side-hint"></div>
         <button id="add-virtual" class="dev-only" type="button" title="add a device that runs in a frame on this computer, to see the room work before friends join">+ Add a virtual device</button>
         <div id="virtual" hidden></div>

@@ -26,6 +26,7 @@ import { lookupDrafts } from "./room/lookup.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
 import { computeScreen } from "./room/compute.js";
+import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
 
 // Hidden-state transport (room/transport.js). ?wire=off falls back to PeerJS messages;
@@ -929,12 +930,12 @@ let weightCache = null, cacheHits = 0;
 // The names "swarmllm-weights-v1", "https://weights.swarmllm.ai/" (a cache key namespace, never
 // fetched) and the "x-swarm-len" header are from before the rename to Pooled. They stay so weights
 // people already downloaded keep working; the Cache API is per site, so pooled.run starts empty anyway.
+// Keys and per-model bookkeeping live in room/weightcache.js.
 async function getWeightCache() {
   if (weightCache !== null) return weightCache;
-  try { weightCache = await caches.open("swarmllm-weights-v1"); } catch { weightCache = false; }
+  try { weightCache = await caches.open(CACHE_NAME); } catch { weightCache = false; }
   return weightCache;
 }
-function cacheKey(url, lo, hi) { return "https://weights.swarmllm.ai/" + encodeURIComponent(url) + "/" + lo + "-" + hi; }
 async function rangeFetch(url, lo, hi, noCache = false) {
   const c = await getWeightCache();
   const key = cacheKey(url, lo, hi);
@@ -979,7 +980,7 @@ async function rangeFetch(url, lo, hi, noCache = false) {
 const PEER_WEIGHTS = new URLSearchParams(location.search).get("peerweights") !== "0";
 async function cachedRanges(url) {
   const c = await getWeightCache(); if (!c) return [];
-  const prefix = "https://weights.swarmllm.ai/" + encodeURIComponent(url) + "/";
+  const prefix = CACHE_PREFIX + encodeURIComponent(url) + "/";
   try { return (await c.keys()).map((r) => r.url).filter((u) => u.startsWith(prefix)).map((u) => u.slice(prefix.length)).filter((x) => /^\d+-\d+$/.test(x)); }
   catch { return []; }
 }
@@ -3169,6 +3170,7 @@ buildSegs();
 $("room-menu").addEventListener("toggle", () => {
   if (!$("room-menu").open) { if (cacheArmed) cacheDisarm(); return; }
   syncSegs();
+  renderCacheModels();
   // the room card pictures a finished answer's speed: not offered before one, and Share only where the browser can
   $("card-btn").hidden = !(bestTps || lastMap?.st?.tps || lastSoloTps);
   $("card-share").hidden = !navigator.canShare;
@@ -3194,8 +3196,38 @@ $("cache-clear").addEventListener("click", async (ev) => {
     return;
   }
   cacheDisarm();
-  try { await caches.delete("swarmllm-weights-v1"); weightCache = null; toast("cached weights cleared"); } catch { toast("could not clear the cache"); }
+  try { await caches.delete(CACHE_NAME); weightCache = null; toast("cached weights cleared"); } catch { toast("could not clear the cache"); }
+  renderCacheModels();
 });
+// One row per cached model with its size and a Delete button (two steps, like Clear above), so one
+// model's weights can go while the others stay. Filled each time the menu opens.
+async function renderCacheModels() {
+  const ul = $("cache-models"), c = await getWeightCache();
+  const list = c ? await cachedModels(c, MODELS).catch(() => []) : [];
+  ul.replaceChildren(); ul.hidden = !list.length;
+  if (!list.length) return;
+  for (const g of list) {
+    const li = document.createElement("li"), name = document.createElement("span"), b = document.createElement("button");
+    name.textContent = g.label.split("\u00b7")[0].trim();
+    const size = document.createElement("small"); size.textContent = fmtBytes(g.bytes); name.append(" ", size);
+    b.type = "button"; b.textContent = "Delete"; b.setAttribute("aria-label", `Delete the cached weights of ${name.firstChild.textContent}`);
+    let armed = 0;
+    b.addEventListener("click", async () => {
+      if (!armed) {
+        b.textContent = `Delete ${fmtBytes(g.bytes)}?`;
+        const t = armed = setTimeout(() => { if (armed === t) { armed = 0; b.textContent = "Delete"; } }, 6000);
+        return;
+      }
+      armed = 0; b.disabled = true;
+      try { const r = await deleteModel(c, g.url); toast(`deleted ${fmtBytes(r.bytes)} of cached weights`); } catch { toast("could not delete those weights"); }
+      renderCacheModels();
+    });
+    li.append(name, b); ul.append(li);
+  }
+  // what the browser counts for this whole site (weights plus a little else), to check the sizes against
+  const est = await navigator.storage?.estimate?.().catch(() => null);
+  if (est?.usage) { const li = document.createElement("li"); li.className = "cache-est"; li.textContent = `This site uses ${fmtBytes(est.usage)} of this device's storage`; ul.append(li); }
+}
 $("new-chat").addEventListener("click", aiNewChat);
 $("draft-view").addEventListener("click", () => setDraftView(!draftView));
 $("export-chat").addEventListener("click", () => { $("room-menu").open = false; exportChat(); });
