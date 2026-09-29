@@ -546,6 +546,9 @@ function onData(from, d) {
       }
       // a peer picks its own name: keep it a short plain string (it is also escaped wherever it is shown)
       d.name = String(d.name ?? from).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(from).slice(0, 8);
+      // names are the room's keys (colours, layers, load progress, the plan): the host makes a taken one
+      // unique ("laptop 2"), and the device takes the name the roster gives it
+      if (isHost) d.name = uniqueName(d.name, from);
       e.name = d.name; e.meta = d.meta;
       members.set(from, { name: d.name, meta: d.meta });
       ensureCard(from, d.name, d.meta);
@@ -570,6 +573,8 @@ function onData(from, d) {
       // the host's view of the room: draw a card per device, no mesh connections
       // colours follow the host's order (the host first, then join order), so a device has the
       // same colour on every screen (they used to go by first-seen order, which put "me" first)
+      const mine = d.members.find((m) => m.id === peer.id);
+      if (mine && mine.name && mine.name !== myName && from === PREFIX + roomCode) renameSelf(mine.name);
       const order = d.members.map((m) => m.name);
       if (order.join("\n") !== [...devSlots.keys()].slice(0, order.length).join("\n")) {
         devSlots.clear(); order.forEach((n) => devSlots.set(n, devSlots.size));
@@ -617,6 +622,26 @@ function onData(from, d) {
       log("room", `bandwidth to ${e.name}: ${d.mbps} Mbps`);
       break;
   }
+}
+
+// the host: a name no other device in the room uses (another device's, or this one's), with a number added if needed
+function uniqueName(name, id) {
+  const taken = new Set([myName, ...[...roster].filter(([rid]) => rid !== id).map(([, m]) => m.name)]);
+  if (!taken.has(name)) return name;
+  const base = name.slice(0, 36);
+  let n = 2;
+  while (taken.has(`${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
+// a device: the host listed this device under another name (the one asked for was taken)
+function renameSelf(name) {
+  toast(`${myName} was taken in this room: this device is ${name}`);
+  log("room", `the name ${myName} is taken here: this device is ${name}`);
+  myName = name;
+  $("name-input").value = name;
+  if (!VQ.get("embed")) try { sessionStorage.setItem(NAME_KEY, name); } catch {}
+  const card = document.querySelector(".peer-card.self");
+  if (card) { card.dataset.name = name; paintCard(card, name, myMeta, true); }
 }
 
 function broadcastRoster() {
