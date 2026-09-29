@@ -532,8 +532,9 @@
     [S1 + 1.45, () => press(bBtn, 260)],
     [S1 + 1.65, () => { tabB.classList.add("done"); tabA.classList.add("met"); setDevices(2, true); }],
     [S1 + 2.1, () => flag("merge", true)],
+    // the pool card fades in while the tabs fold away (a crossfade), so the window is never blank between steps 2 and 3
+    [S1 + 2.25, () => { scene("pool"); card.dataset.face = "pool"; }],
     // 3: now they are in, each lends memory: this laptop turns its amount up, the desktop sends its share
-    [S2, () => { scene("pool"); card.dataset.face = "pool"; }],
     ...Array.from({ length: LEND[0] }, (_, i) => [LEND0 + i * LENDI, () => { press(lendPlus, 100); lend(0, i + 1, i === LEND[0] - 1); }]),
     [CALM, () => lend(1, LEND[1], true)],
     // a friend's phone joins (its chip, its row), then adds its share: now the 35B model fits
