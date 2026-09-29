@@ -450,8 +450,10 @@ function enterRoom() {
   $("side-code").textContent = roomCode;
   $("side-code").addEventListener("click", openShare);
   $("ap-qr").innerHTML = qrSVG(roomLink(), { size: 112 });
-  // Chat | Code shows once a model is ready (?mock=code: at once, there is no model); peers see Code once the host starts a session
-  if (isHost) { $("host-controls").hidden = false; if (MOCK) $("mode-bar").hidden = false; }
+  // Chat | Code shows from the lobby on, so a visitor who came for Code sees where it is; Code stays
+  // off (codeGate) until a model is running (?mock=code: at once, there is no model)
+  if (isHost) $("host-controls").hidden = false;
+  $("mode-bar").hidden = false; codeGate();
   peerCard("self", myName, myMeta, true);
   updateCluster();
   log("room", `${roomCode}: type this code on your other devices`);
@@ -3068,8 +3070,10 @@ function codeWelcome(id) {
 // so the chat page's load cost does not change.
 function loadCode() {
   if (MOCK && isHost && !ai.role) { ai.role = "host"; ai.hostId = peer?.id; }
-  return codeLoad ||= import("./room/code.js").then((m) => m.initCode?.(roomApi, { mock: MOCK ? window.__pooledMock : null }))
+  const p = codeLoad ||= import("./room/code.js").then((m) => m.initCode?.(roomApi, { mock: MOCK ? window.__pooledMock : null }))
     .catch((err) => { codeLoad = null; throw err; });
+  codeGate();   // a Code session reached this device (a host's code message): its tab turns on
+  return p;
 }
 // In arrival order, even across the first message's lazy load.
 function codeOnData(from, d) {
@@ -3092,6 +3096,18 @@ function codeOnData(from, d) {
 // Chat is the room's first tab; Code is one click away (no switch on its own when the model is ready)
 let simReady = false;
 // initCode returns { show(mode) }; the Chat tab is handled by code.js once it is loaded
+// Code runs on the room's model: until one is online its tab is shown but off, and a tap says why
+function codeGate() {
+  const off = !MOCK && !codeLoad && !$("ai-panel").classList.contains("online") && $("mode-code").getAttribute("aria-selected") !== "true";
+  $("mode-code").setAttribute("aria-disabled", String(off));
+  $("mode-code").title = off ? "Start a model first: Code mode runs on the room's model" : "";
+}
+new MutationObserver(codeGate).observe($("ai-panel"), { attributes: true, attributeFilter: ["class"] });
+document.addEventListener("click", (e) => {
+  if (!e.target.closest?.("#mode-code") || $("mode-code").getAttribute("aria-disabled") !== "true") return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  toast("Start a model first: Code mode runs on the room's model.");
+}, true);
 document.addEventListener("click", (e) => { if (e.target.closest?.("#mode-code") && $("mode-code").getAttribute("aria-selected") !== "true") window.pooledSparkle?.($("mode-code")); }, true);   // switching to Code sparkles (site/js/sparkle.js); capture: before the tab flips
 // A tab opened before a deploy has the old modules in memory; Code mode's newer files can then fail to
 // link against them. Say so plainly: a host reloads (it goes straight back into its room), a guest is asked to.
