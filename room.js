@@ -172,11 +172,12 @@ const humanRange = (r) => { const m = /^(\d+)\D+(\d+)$/.exec(String(r || "")); r
 // One colour per device, everywhere (chips, pool bar, loading rows, band, Lend screen): given once,
 // in join order, to each device that can hold layers. A device that only asks is grey everywhere.
 const SWATCH = ["#2A45E0", "#2B2F3C", "#7C8FFF", "#5E616B", "#B9C6FF", "#1C33B8",
-  // devices 7 to 16: the same family (slate, sky and royal blue, indigo), each picked to be as far as possible
+  // devices 7 to 16: slate, sky, royal and navy blue, plus violets (#320578, #7E4FFB, #5D4DA4, #7F73C3,
+  // #5912CA sit at OKLCH hue 289, past the tokens' 267-275), each picked to be as far as possible
   // from every colour before it, counting a lightness step of 0.12 (OKLab) or a hue/chroma step of 0.12 as
   // one unit: below one, a 6 px dot or a thin bar reads the same (the old shades sat at 0.25-0.67)
   "#8C939B", "#127ABE", "#320578", "#7E4FFB", "#5D4DA4", "#114B75", "#79B1E0", "#7F73C3", "#4074FB", "#5912CA"];
-// past 16 devices: shades generated in the same blue-to-slate range (hue 222-232), so no two neighbours match
+// past 16 devices: shades generated in a blue-to-slate range (hue 222-232), so no two neighbours match
 function swatch(i) {
   if (i < SWATCH.length) return SWATCH[i];
   const k = i - SWATCH.length, hue = 222 + (k * 7) % 11, sat = k % 3 === 2 ? 12 : 55 + (k * 13) % 30, light = 28 + (k * 17) % 50;
