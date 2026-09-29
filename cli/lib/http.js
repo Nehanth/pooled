@@ -127,8 +127,8 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
       }
       case "ai-busy": {
         const code = d.code;
-        if (code === "gone") { finish(job); return; }
-        const e = code === "queue" ? new ApiError("busy", `the room's queue is full: ${d.why || "try again later"}`, { retryAfter: 5 })
+        const e = code === "gone" ? new ApiError("unavailable", d.why ? `the room dropped the request: ${d.why}` : "the room dropped the request", { retryAfter: 5 })
+          : code === "queue" ? new ApiError("busy", `the room's queue is full: ${d.why || "try again later"}`, { retryAfter: 5 })
           : code === "ctx" ? new ApiError("ctx", job.api === "anthropic" ? `prompt is too long: ${d.n} tokens > ${d.max} maximum`
             : `This model's maximum context length is ${d.max} tokens. However, your messages resulted in ${d.n} tokens.`, { param: "messages" })
           : code === "bad" ? bad(d.why || "the room refused the request")

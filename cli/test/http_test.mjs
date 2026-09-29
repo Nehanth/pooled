@@ -97,3 +97,14 @@ test("with a token, /health tells a caller without it only that it is up", async
   assert.equal(JSON.parse((await open.req("GET", "/health")).body).room, "ABCD", "no token: everything is open anyway");
   await open.close();
 });
+
+test("the room dropping the running request (ai-busy gone) answers the client instead of hanging", async () => {
+  const t = await start();
+  t.bridge.onAsk = (rid, h) => setImmediate(() => h({ t: "ai-busy", rid, code: "gone" }));
+  const r = await t.req("POST", "/v1/chat/completions", { body: chatBody() });
+  assert.equal(r.status, 503);
+  assert.match(JSON.parse(r.body).error.message, /dropped the request/);
+  t.bridge.onAsk = answer();
+  assert.equal((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).status, 200, "the next one runs");
+  await t.close();
+});
