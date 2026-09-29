@@ -189,7 +189,8 @@ async function launch(name, i) {
 const url = (name) => `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${sig[name].port}&maxnew=${MAXNEW}&peerweights=0${QUERY ? "&" + QUERY : ""}`;
 
 // what a screen shows, in a few fields
-const snap = (p) => p.evaluate(() => {
+const snap = (p) => Promise.race([sleep(2000).then(() => ({ err: "snapshot timed out" })), snap1(p)]);
+const snap1 = (p) => p.evaluate(() => {
   const vis = (id) => { const e = document.getElementById(id); return !!e && !e.hidden && e.offsetParent !== null; };
   const tx = (id) => (document.getElementById(id)?.textContent || "").replace(/\s+/g, " ").trim();
   return { status: tx("ai-status").slice(0, 160), join: tx("join-status").slice(0, 200), over: vis("room-over") ? tx("room-over-h") + ": " + tx("room-over-why") : "",
@@ -300,12 +301,14 @@ async function dieMid(H, V, label) {
   const r = await ask(H, { timeoutMs: 180000, during: async (ts) => {
     await tabs[H].waitForFunction(() => ([...document.querySelectorAll(".m.bot .bubble")].pop()?.textContent || "").length > 40, null, { timeout: 90000, polling: 50 });
     deathAt = Date.now(); C.dead.add(V); await sig[V].set("blackhole");
-    return { deathAtS: +((deathAt - ts) / 1000).toFixed(1) };
+    // how long until the host's screen says so, polled on the host alone
+    const seenMs = await until(H, (x) => /stopped responding|left|failed/.test(x.status || "") || !!x.redeal, 60000, deathAt);
+    return { deathAtS: +((deathAt - ts) / 1000).toFixed(1), seenMs };
   } });
   // when the host said so: the first timeline entry after the death that names it or shows the re-deal
   w.stop();
   const hit = w.tl.find((e) => e.tab === H && e.t + w.w0 >= deathAt && (/stopped responding|left|failed/.test(e.status) || e.redeal));
-  const detectMs = hit ? hit.t + w.w0 - deathAt : null;
+  const detectMs = r.during?.seenMs ?? (hit ? hit.t + w.w0 - deathAt : null);
   const scr = await snap(tabs[H]);
   row({ scenario: label, victim: V, ...r, detectMs, hostScreen: scr, timeline: w.tl.filter((e) => e.tab === H) });
   return { r, detectMs, scr };
