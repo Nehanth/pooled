@@ -40,6 +40,9 @@ export function clientFromUA(ua) {
   for (const [re, name] of known) if (re.test(ua)) return name;
   return ua.split(/[\s/(]/)[0].slice(0, LIMITS.client);
 }
+// text from the room for the terminal: no control characters (a hostile host could otherwise send
+// escape sequences: clear the screen, write the clipboard through OSC 52, fake log lines), capped
+export const cleanText = (s, n = 500) => String(s ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, n);
 export const cleanLabel = (s) => String(s ?? "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, LIMITS.client);
 
 // stop: a string or a list of up to 4 non-empty strings of at most 64 characters

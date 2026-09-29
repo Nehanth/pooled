@@ -54,7 +54,7 @@ if (pos[0] !== "serve") { console.error(`pooled: unknown command ${pos[0]}\n\n${
 
 const { Bridge, roomCodeFrom } = await import("../lib/room.js");
 const { createServer } = await import("../lib/http.js");
-const { cleanLabel } = await import("../lib/common.js");
+const { cleanLabel, cleanText } = await import("../lib/common.js");
 
 const code = roomCodeFrom(pos[1]);
 if (!code) { console.error(`pooled: give a room code (4 to 6 letters and digits) or a room link${pos[1] ? `, not "${pos[1]}"` : ""}`); process.exit(2); }
@@ -79,6 +79,8 @@ if (o["token-file"]) {
 
 const log = (msg, level = "info") => {
   if (o.quiet && level !== "error") return;
+  // every line can carry text from the room (errors, reasons, the model's name): no control characters
+  msg = String(msg).split("\n").map((l) => cleanText(l)).join("\n  ");
   if (o["json-log"]) console.error(JSON.stringify({ t: new Date().toISOString(), level, msg }));
   else console.error(`${new Date().toTimeString().slice(0, 8)} ${msg}`);
 };

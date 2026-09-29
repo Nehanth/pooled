@@ -3,6 +3,7 @@
 // room protocol (docs/protocol.md, "API clients") and hands each API request's messages to the
 // right HTTP response by its rid.
 import { EventEmitter } from "node:events";
+import { cleanText } from "./common.js";
 
 export const PREFIX = "pooled-room-";
 export const PROTOCOL = 4;          // room/transport.js PROTOCOL: the host says bye to any other
@@ -102,7 +103,7 @@ export class Bridge extends EventEmitter {
       if (!d || typeof d.t !== "string") return;
       if (d.t === "hello" && !greeted) {
         greeted = true;
-        this.hostMeta = d.meta || {}; this.hostName = d.name;
+        this.hostMeta = d.meta || {}; this.hostName = cleanText(d.name, 40);
         this.connected = true; this.gone = null;
         onHello?.(d);
         this.emit("state");
@@ -117,14 +118,17 @@ export class Bridge extends EventEmitter {
     switch (d.t) {
       case "ping": this.send({ t: "pong", ts: d.ts }); return;
       case "bye":
-        this.kicked = String(d.reason || "the host closed the link");
+        this.kicked = cleanText(d.reason, 300) || "the host closed the link";
         this.connected = false; this.ready = false;
         this.failAll("unavailable", this.kicked);
         this.log(`the host said: ${this.kicked}`);
         this.emit("state");
         return;
       case "ai-ready-all":
-        this.ready = true; this.model = d.model || this.model; this.modelLabel = d.label || this.modelLabel;
+        // the model's id and label end up in the terminal and in /v1/models: plain, short text only
+        this.ready = true;
+        this.model = cleanText(d.model, 80).replace(/[^\w.:+\-\/]/g, "") || this.model;
+        this.modelLabel = cleanText(d.label, 80) || this.modelLabel;
         this.readySince ??= Math.floor(Date.now() / 1000);
         this.emit("state");
         return;
