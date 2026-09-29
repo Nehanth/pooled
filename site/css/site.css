@@ -591,11 +591,11 @@ html:not(.js) .ldc{display:none}
 .pv-con .c{font:500 var(--t-sm)/1 var(--sans);color:var(--ink-3)}
 @media (max-height:860px){.pv-con{display:none}}
 /* the edit overlay: the preview frosts over while the agent edits the app (p2p.html .ew) */
-.ew{position:absolute;inset:0;z-index:2;display:grid;place-items:center;background:rgba(250,250,247,.55);-webkit-backdrop-filter:blur(3px) saturate(.9);backdrop-filter:blur(3px) saturate(.9);opacity:0;visibility:hidden;transition:opacity .25s var(--ease),visibility 0s .25s}
+.ew{position:absolute;inset:0;z-index:2;display:grid;pointer-events:none;place-items:center;background:rgba(250,250,247,.55);-webkit-backdrop-filter:blur(3px) saturate(.9);backdrop-filter:blur(3px) saturate(.9);opacity:0;visibility:hidden;transition:opacity .25s var(--ease),visibility 0s .25s}
 .demo.editing .ew{opacity:1;visibility:visible;transition:opacity .25s var(--ease),visibility 0s}
 .ew-box{display:flex;flex-direction:column;align-items:center;gap:12px;max-width:calc(100% - 32px)}
 .ew-t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%;font:500 var(--t-md)/1.2 var(--sans);color:var(--ink-2)}
-/* take the game over: offered for a moment during the story (.ask), and whenever the story is over (.done) */
+/* take the game over: whenever it is served and on screen, and not frosted over for an edit (demo.js canPlay) */
 .pv-back{display:none;flex:none;height:26px;padding:0 10px;border-radius:var(--r-sm);background:var(--white);box-shadow:inset 0 0 0 1px var(--rule-3);font:500 var(--t-sm)/1 var(--sans);color:var(--ink);white-space:nowrap}
 .pv-back:hover{background:var(--bg-3)}
 .demo.playing .pv-back{display:block}
@@ -616,7 +616,8 @@ html:not(.js) .pad{display:none}
 .pv-frame{position:relative;flex:1;min-height:0}
 .app{position:absolute;inset:0;transition:opacity .3s var(--ease)}
 .app.blank{opacity:0}
-.game{position:absolute;inset:0;outline:none;cursor:pointer}
+.game{position:absolute;inset:0;outline:none}
+.demo.served.app-on:not(.editing) .game{cursor:pointer}
 .game:focus-visible{box-shadow:inset 0 0 0 2px var(--blue-400)}
 .game canvas{position:absolute;inset:0;display:block;width:100%;height:100%}
 .board-static{position:absolute;left:50%;top:50%;height:calc(100% - 40px);width:auto;aspect-ratio:1/2;transform:translate(-50%,-50%);border-radius:6px}

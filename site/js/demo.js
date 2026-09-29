@@ -7,8 +7,8 @@
    every device, once per word. The answer ends "It can chat, or write code." and, a second later, the Code tab is pressed.
    Code: the visitor asks for an app (a different one each loop: Tetris, 2048, a space shooter, Snake,
    Breakout); the files appear as the agent writes them; it serves the app on :5173 and the preview opens
-   on it, running; then a change request, an edit, a reload, and the changed app plays for a moment (with
-   an offer to take it over) before the story starts again from the room.
+   on it, running; then a change request, an edit, a reload, and the changed app plays for a moment before
+   the story starts again from the room. Whenever the app is on screen, a click or a key takes it over.
    The parts worth following (the joining, the lending, the layer split, the first answer) run slower than
    the rest.
    The HTML holds the finished state (readable without JS). This script rewinds and replays it. */
@@ -570,7 +570,7 @@
     [c(SERVED), () => { setRun("c-t3", false); app.classList.remove("blank"); openPreview(); reload(); runGame(.6, false); }],
     [c(SERVED + .15), () => reveal(tool("c-s2"), .035)],
     [c(SERVED + .6), () => { tool("c-st2"); codeComposer.classList.remove("run"); }],
-    // 8: a change, an edit, a reload: the app, with the change, for a moment, and an offer to play it.
+    // 8: a change, an edit, a reload: the app, with the change, for a moment.
     //    (on a phone the preview covers the agent, so it steps aside while the change is asked for and made)
     [c(CHANGE), () => { flag("app-on", false); codeComposer.classList.add("hot"); }],
     [c(CHANGE + 1.25), () => { codeTyped.textContent = ""; codeComposer.classList.remove("hot"); codeComposer.classList.add("run"); tool("c-q2"); }],
@@ -579,10 +579,9 @@
     [c(CHANGE + 1.9), () => { liveEnd(); fileState("game.js", "mod"); tool("c-t4"); }],
     // the reload happens under the frost; the frost lifts as the changed app comes up (no dark flash between)
     [c(RELOAD), () => { pvRev.textContent = "rev 2"; app.classList.add("blank"); openPreview(); reload(); }],
-    [GAME, () => { flag("editing", false); app.classList.remove("blank"); runGame(.6, true); ask(true); }],
+    [GAME, () => { flag("editing", false); app.classList.remove("blank"); runGame(.6, true); }],
     [GAME + .25, () => reveal(tool("c-s3"), .035)],
     [GAME + .9, () => { tool("c-st3"); codeComposer.classList.remove("run"); }],
-    [GAME + 1.5 * SPEED, () => ask(false)],
   ].sort((a, b) => a[0] - b[0]);
   let EV = EVENTS();
 
@@ -618,7 +617,7 @@
   const LOGKEYS = ["c-q", "c-s1", "c-t0", "c-t1", "c-t2", "c-t3", "c-s2", "c-st2", "c-q2", "c-t4", "c-s3", "c-st3"];
   tl.reset = () => {
     tl.t = 0; tl.fired = 0; tl.done = false; streams = []; writing = null;
-    scene("tabs"); mode("chat"); ["merge", "served", "app-on", "ask", "done", "editing"].forEach(k => flag(k, false));
+    scene("tabs"); mode("chat"); ["merge", "served", "app-on", "done", "editing"].forEach(k => flag(k, false));
     codeComposer.classList.remove("run"); pvRev.textContent = "rev 1";
     tabA.classList.remove("done", "met"); tabB.classList.remove("done"); tabB.classList.add("idle"); letters(0);
     nmA.classList.remove("fresh"); nmB.classList.remove("fresh");
@@ -642,7 +641,7 @@
   };
   tl.final = () => {
     streams = []; writing = null; tl.done = true; tl.t = END; tl.fired = EV.length;
-    scene("code"); mode("code"); flag("merge", true); flag("served", true); flag("app-on", true); flag("ask", false); flag("done", true);
+    scene("code"); mode("code"); flag("merge", true); flag("served", true); flag("app-on", true); flag("done", true);
     flag("editing", false); codeComposer.classList.remove("run"); pvRev.textContent = "rev 2";
     tabA.classList.add("done", "met"); tabB.classList.add("done"); tabB.classList.remove("idle"); letters(4); setSlots(4, -1);
     setDevices(3); joining = -1; lent = LEND.slice(); rungHover(-1); rungSelect(2); card.dataset.face = "pick";
@@ -720,18 +719,19 @@
     const b = e.key === "ArrowLeft" ? mChat : mCode; b.focus(); b.click();
   });
 
-  /* ---------- the app: it plays itself; for a moment (or once the story is over) the visitor can take it over.
-     Then the story waits, the keys (or, on a touch screen, the pad) play it, and leaving it lets the story go on ---------- */
+  /* ---------- the app: it plays itself; whenever it is served and on screen (not frosted over for an edit) the
+     visitor can take it over. Then the story waits, the keys (or, on a touch screen, the pad) play it, and leaving
+     it lets the story go on ---------- */
   const pvBack = $("pvBack"), pad = $("pad"), pv = $("pv");
   const COARSE = matchMedia("(pointer: coarse)");
   let lastPointer = "";
   const touchy = () => lastPointer ? lastPointer !== "mouse" : COARSE.matches;
-  const ask = on => flag("ask", on);   // (no "Click to play" offer any more; clicking the game still plays it)
-  const canPlay = () => demo.classList.contains("served") && demo.classList.contains("app-on") && (demo.classList.contains("ask") || tl.done);
+  // (the pointer cursor follows the same rule: .demo.served.app-on:not(.editing) .game)
+  const canPlay = () => demo.classList.contains("served") && demo.classList.contains("app-on") && !demo.classList.contains("editing");
   const startPlay = () => {
     if (playing || !canPlay()) return false;
     playing = true; halt();
-    flag("playing", true); flag("touch", touchy()); flag("ask", false);
+    flag("playing", true); flag("touch", touchy());
     inst.play(); inst.v2(true); inst.start();
     game.focus({ preventScroll: true });
     return true;
