@@ -57,29 +57,35 @@ let quietUntil = 0;        // no new relay frame loads before this (a hung relay
 const quiet = () => { quietUntil = Date.now() + QUIET_MS; };
 
 // The relay's address: <meta name="preview-origin" content="..."> on the page (a second
-// deployment on another registrable domain, previewOrigin below), else in development the other
+// deployment on another registrable domain, previewEntry below), else in development the other
 // loopback name (localhost <-> 127.0.0.1 are different sites), else null (local mode).
+// A value the relay cannot isolate is ignored with one console warning (relayProblem), so outside
+// development that means local mode and no run_js: a subdomain such as preview.pooled.run shares
+// the room's process, so a loop there would freeze the room.
+let warned = "";   // the ignored preview-origin value already warned about
 export function relayUrl(doc = globalThis.document) {
   const loc = doc?.defaultView?.location;
   if (!loc) return null;
   const meta = doc.querySelector?.('meta[name="preview-origin"]')?.content;
   const path = "/harness/preview-relay.html";
-  const origin = previewOrigin(meta, loc.hostname, loc.protocol);
-  if (origin) return origin + path;
+  const v = previewEntry(meta, loc.hostname);
+  if (v) {
+    const why = relayProblem(v, loc);
+    if (!why) return new URL(v).origin + path;
+    if (warned !== v) { warned = v; console.warn(`preview-origin ignored: ${why}`); }   // once, not per tool list
+  }
   const port = loc.port ? ":" + loc.port : "";
   if (loc.hostname === "localhost") return `${loc.protocol}//127.0.0.1${port}${path}`;
   if (loc.hostname === "127.0.0.1") return `${loc.protocol}//localhost${port}${path}`;
   return null;
 }
 
-// The meta's origin for a page on `host`. One static page serves production and staging, so the
-// content is a list (spaces or commas): "host=origin" entries for one host each, and a bare origin
-// for any other host, e.g.
+// The meta's value for a page on `host`, unchecked. One static page serves production and staging,
+// so the content is a list (spaces or commas): "host=origin" entries for one host each, and a bare
+// origin for any other host, e.g.
 //   "pooled.run=https://pooled-preview.vercel.app pooled-dev.vercel.app=https://pooled-preview-dev.vercel.app"
-// An exact host entry wins over a bare one. Only an https origin (http on loopback, from an http
-// page) is taken, and not one on the page's own site (a subdomain or sibling shares the site, so
-// the process: no isolation). Anything else: null.
-export function previewOrigin(content, host, protocol = "https:") {
+// An exact host entry wins over a bare one. No entry for this host: null.
+export function previewEntry(content, host) {
   let exact = null, any = null;
   for (const tok of String(content ?? "").split(/[\s,]+/)) {
     if (!tok) continue;
@@ -87,14 +93,29 @@ export function previewOrigin(content, host, protocol = "https:") {
     if (i < 0) { any ??= tok; continue; }
     if (tok.slice(0, i).toLowerCase() === String(host).toLowerCase()) exact ??= tok.slice(i + 1);
   }
-  const v = exact ?? any;
-  if (!v) return null;
+  return exact ?? any;
+}
+
+// The origin the meta gives a page on `host` (served over `protocol`), or null when there is none
+// or relayProblem refuses it.
+export function previewOrigin(content, host, protocol = "https:") {
+  const v = previewEntry(content, host);
+  if (!v || relayProblem(v, { hostname: host, protocol })) return null;
+  return new URL(v).origin;
+}
+
+// Why a preview-origin value cannot isolate previews from the page at `loc`, or "" when it can.
+// Only https is taken (http on loopback, from an http page), and not an origin on the page's own
+// site (the same host, a subdomain or a sibling shares the site, so the process).
+export function relayProblem(origin, loc) {
   let u;
-  try { u = new URL(v); } catch { return null; }
+  try { u = new URL(origin); } catch { return "not a URL"; }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return "not an http(s) URL";
   const loop = u.hostname === "localhost" || u.hostname === "127.0.0.1";
-  if (!(u.protocol === "https:" || (u.protocol === "http:" && loop && protocol !== "https:"))) return null;
-  if (host && siteOf(u.hostname) === siteOf(host)) return null;
-  return u.origin;
+  if (u.protocol === "http:" && loc?.protocol === "https:") return "an https page needs an https preview origin";
+  if (u.protocol === "http:" && !loop) return "plain http is only for loopback";
+  if (loc?.hostname && siteOf(u.hostname) === siteOf(loc.hostname)) return "same site as the page (it would share the room's process)";
+  return "";
 }
 
 // Registrable domain ("site") of a host name, close enough for the check above: the last two

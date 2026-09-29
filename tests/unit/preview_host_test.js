@@ -1,7 +1,7 @@
 // Code mode's preview origin (roadmap 29): the preview-origin meta's per-host list
 // (harness/preview-frame.js previewOrigin, relayUrl), and the relay's headers in both Vercel configs
 // (vercel.json for pooled.run, preview-host/vercel.json for the second site).
-import { previewOrigin, relayUrl, siteOf } from "../../harness/preview-frame.js";
+import { previewEntry, previewOrigin, relayProblem, relayUrl, siteOf } from "../../harness/preview-frame.js";
 import { CSP } from "../../harness/preview-build.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
@@ -72,6 +72,28 @@ Deno.test("relayUrl: uses the meta's origin for the page's host, else loopback s
   eq(relayUrl(fakeDoc("http://localhost:8080/p2p.html", "")), "http://127.0.0.1:8080/harness/preview-relay.html");
   eq(relayUrl(fakeDoc("http://127.0.0.1:8080/p2p.html", null)), "http://localhost:8080/harness/preview-relay.html");
   eq(relayUrl(null), null);
+});
+
+Deno.test("relayUrl: a refused entry for this host warns once and leaves local mode (loopback swap in development)", () => {
+  const w = console.warn, seen = [];
+  console.warn = (m) => seen.push(m);
+  try {
+    const bad = "pooled.run=https://preview.pooled.run localhost=http://192.168.1.5:8080";
+    for (let i = 0; i < 3; i++) eq(relayUrl(fakeDoc("https://pooled.run/room", bad)), null, "a subdomain entry is refused");
+    eq(relayUrl(fakeDoc("https://pooled-dev.vercel.app/room", bad)), null, "no entry for this host: no warning");
+    eq(relayUrl(fakeDoc("http://localhost:8080/p2p.html", bad)), "http://127.0.0.1:8080/harness/preview-relay.html", "refused in development: the loopback relay");
+  } finally { console.warn = w; }
+  eq(seen.length, 2, "one warning per refused value: " + JSON.stringify(seen));
+  ok(/preview-origin ignored: same site/.test(seen[0]), seen[0]);
+  ok(/only for loopback/.test(seen[1]), seen[1]);
+});
+
+Deno.test("previewEntry and relayProblem agree with previewOrigin", () => {
+  eq(previewEntry(LIST, "pooled.run"), "https://pooled-preview.vercel.app");
+  eq(previewEntry(LIST, "other.example"), null);
+  eq(relayProblem("https://pooled-preview.vercel.app", { protocol: "https:", hostname: "pooled.run" }), "");
+  ok(/only for loopback/.test(relayProblem("http://192.168.1.5:8080", { protocol: "http:", hostname: "192.168.1.4" })));
+  ok(/http\(s\)/.test(relayProblem("ftp://pooled-preview.example", { protocol: "https:", hostname: "pooled.run" })));
 });
 
 Deno.test("p2p.html: a filled preview-origin has an entry for pooled.run", async () => {
