@@ -10,7 +10,7 @@
 export const FAMILIES = [
   ["GEMV (projections, LM head)", /^matvec/],
   ["prefill GEMM", /^gemm_/],
-  ["MoE router", /^moe_(router|route)$/],
+  ["MoE router", /^moe_(router|route|nrt)$/],   // nrt: the post-attention RMSNorm fused into the router GEMV
   ["MoE sort/combine", /^moe_(combine|combw|gsort)$/],
   ["MoE experts", /^moe_(gu|dn)/],
   ["DeltaNet core", /^dn_/],

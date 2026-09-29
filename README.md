@@ -59,7 +59,7 @@ Design: [docs/design/harness-app.md](docs/design/harness-app.md). What the agent
 
 ## Use Pooled from your tools
 
-A room can serve its model to anything that speaks the OpenAI or the Anthropic API (Continue, Open WebUI, LiteLLM, the `openai` and `anthropic` SDKs, curl). In the room menu, **Use from code** shows the command for that room; run it on your own computer (Node 22 or newer, no GPU needed there):
+A room can serve its model to anything that speaks the OpenAI or the Anthropic API (Continue, Open WebUI, LiteLLM, the `openai` and `anthropic` SDKs, curl). In a room, the **Serve API** button next to Chat and Code shows the command for that room; run it on your own computer (Node 22 or newer, no GPU needed there):
 
 ```bash
 npx @pooled/cli serve ABCD

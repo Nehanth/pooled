@@ -154,7 +154,9 @@ try {
     eng.prefillWide = !!eng.ubatch; if (ALL) { eng.attnPrefillTile = apt; eng.moeGroup = mg; }
     log("prefill " + JSON.stringify({ tokens: pids.length, ubatch: eng.ubatch, all: ALL, tile: eng.wideCfg, ...res })); out.push({ prefill: res });
   }
-  for (const [i, prompt] of ["Write the Python code for two sum. Code only.", "Explain what a hash map is in two sentences."].entries()) {
+  // ?japan=1: also the room's standard `japan` prompt (docs/bench-log.md), no golden
+  const JAPAN = "I am planning a two week trip through Japan in late October with my partner. We land in Tokyo, want three days there, then a day trip to Nikko, then the bullet train to Kyoto for four days with a side trip to Nara, then two nights in Osaka, and we fly home from Osaka. We like food markets, old temples, hiking, and small neighborhood bars, and we want to avoid the most crowded tourist spots where we can. Our budget is moderate, around two hundred dollars a day for the two of us not counting hotels. Please give me a day by day itinerary with one main activity each morning and afternoon, a neighborhood to eat dinner in each night, and tell me which days I should buy a rail pass for and whether it is worth it at all.";
+  for (const [i, prompt] of ["Write the Python code for two sum. Code only.", "Explain what a hash map is in two sentences.", ...(q.get("japan") === "1" ? [JAPAN] : [])].entries()) {
     const ids = chat(prompt);
     eng.reset(); if (eng.mtp) eng.mtpFill = false; await eng.prefillTokens(ids.slice(0, -1)); let lg = await fwd(ids.at(-1));
     let next = pick(lg); const gen = [next]; t0 = performance.now();

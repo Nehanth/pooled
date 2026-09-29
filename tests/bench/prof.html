@@ -21,7 +21,8 @@ try {
   const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true });
   // the room's settings (engine/preset.js), with the room's own ?flags (?gpusample=0, ?draftvocab=0, ...)
   const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
-    vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(q) }), q);
+    vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(q),
+    ...JSON.parse(q.get("opts") || "{}") }), q);   // ?opts=<json>: extra engine create options (A/B), e.g. {"moeNormRouter":false}
   log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s, adapter ${ad.info?.vendor}, mtp ${!!eng.mtp}, moeFuse ${!!eng.moeFuse}, draftVocab ${eng.draftVocab || "off"}, gpuSample ${eng.gpuSample}, argmaxWide ${eng.argmaxWide}, timestamps ${feats.length > 0}`);
   const out = await profileDecode({ eng, device, tok, argmax, log, N: +(q.get("tokens") || 24), STEPS: +(q.get("steps") || 12), K: +(q.get("k") || 3), roomPath: q.get("roompath") === "1" });
   window.RESULT = { runtime: "chrome", arch, ...out };

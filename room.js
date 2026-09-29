@@ -2716,11 +2716,14 @@ $("band-toggle").addEventListener("click", () => bandFold(!$("swarm-map").classL
 bandFold(bandFolded());
 new MutationObserver(() => bandFold(bandFolded())).observe($("chatpane"), { attributes: true, attributeFilter: ["class"] });
 // Chat | Code sits in the room bar at 820px and wider and on short touch screens (a phone in
-// landscape, where its own strip costs too much height); in its own strip on phones held upright
+// landscape, where its own strip costs too much height); in its own strip on phones held upright.
+// Serve API rides right after it and shows whenever it does.
 {
   const home = document.querySelector(".mode-row"), wide = matchMedia("(min-width: 821px), (max-height: 500px) and (pointer: coarse)");
-  const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); };
+  const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); b.after($("api-open")); };
   place(); wide.addEventListener("change", place);
+  const sync = () => { $("api-open").hidden = $("mode-bar").hidden; };
+  sync(); new MutationObserver(sync).observe($("mode-bar"), { attributes: true, attributeFilter: ["hidden"] });
 }
 // phones: the chat stays on the newest message when the screen shrinks (the keyboard opens), if
 // the reader was at the bottom; while typing, the header chips, the band and Chat | Code step aside
@@ -3965,7 +3968,7 @@ async function apiGenerate({ api: req, name, from }) {
   if (ai.degraded) showRedeal(true);
 }
 
-// "Use from code": the command that serves this room on the user's own computer, and (host) the
+// Serve API (the button next to Chat | Code): the command that serves this room on the user's own computer, and (host) the
 // API clients connected now, with Disconnect
 function apiCommand() {
   return `npx @pooled/cli serve ${roomCode || "CODE"}${SIGNAL ? ` --signal ${SIGNAL}` : ""}`;

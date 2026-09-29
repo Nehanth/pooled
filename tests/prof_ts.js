@@ -18,7 +18,8 @@ const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength)
 // the room's settings (engine/preset.js); MOE_FUSE=0 / MOE_DN_ROWS=N are ?moefuse / ?moednrows, ROOM_FLAGS takes any other
 const flags = roomFlags({ ...(Deno.env.get("MOE_FUSE") ? { moefuse: Deno.env.get("MOE_FUSE") } : {}), ...(Deno.env.get("MOE_DN_ROWS") ? { moednrows: Deno.env.get("MOE_DN_ROWS") } : {}) });
 const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
-  vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(flags), moeKernel: MOEK }), flags);   // MOE_FUSE=0: unfused MoE kernels (A/B)
+  vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(flags), moeKernel: MOEK,
+  moeNormRouter: Deno.env.get("MOE_NORM_ROUTER") !== "0" }), flags);   // MOE_NORM_ROUTER=0: rmsnorm + router GEMV launches instead of moe_nrt (A/B)   // MOE_FUSE=0: unfused MoE kernels (A/B)
 if (eng.moeK) console.log("moeKernel", JSON.stringify(eng.moeK), "moeFuse", eng.moeFuse);
 const ids = tok.encode("The capital of France is"); for (const id of ids) await eng.forwardToken(id);
 // wall time, normal path
