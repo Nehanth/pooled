@@ -713,6 +713,8 @@ async function start(create, resume = null) {
       ...(window.TURN_SERVERS || []),
     ],
   };
+  // PeerJS is a deferred script from cdn.jsdelivr.net (p2p.html): without it the page still renders, so say why nothing connects
+  if (typeof Peer !== "function") { joinFailed("couldn't load the connection library from cdn.jsdelivr.net (offline, or blocked by an extension or network). Reload to try again"); return; }
   // host claims the well-known id for the code; joiners get random ids
   peer = new Peer(create ? PREFIX + code : undefined, { debug: 1, config: ICE, ...SIGNAL_OPTS });
 
