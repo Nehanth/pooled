@@ -21,6 +21,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-inv-req {url}` / `ai-inv {url, have}` | host → all / all → host | before dealing, the host asks what byte ranges of the model each device has cached; the inventory goes out with every `ai-load` (`inv`) |
 | `ai-wget {id, url, lo, hi}` / `ai-wpart {id, off, data \| done \| miss}` | device ↔ device | take a cached range from another device instead of the model host, in 64 KB parts; any failure falls back to the network |
 | `ai-stop` | guest → host | stop the answer being generated. Honoured from the device that asked (the host can always stop); decoding ends after the lap in flight and `ai-gendone` unlocks every screen |
+| `ai-linklost {name}` | worker → host | the worker's link to `name` (another device in the chain) went down and is being replaced; frames on it are gone, so the host fails the laps in flight now instead of timing out. Hosts that predate it ignore it |
 | `ai-degraded {why}` | host → all | a device in the chain left (or stopped responding, see Drop detection); every lap in flight failed at once and the room waits for a re-deal |
 | `ai-redeal {by, model}` | host → all | the host is dealing the layers again over the devices now in the room (after a departure, or to include late joiners); fresh `ai-load`s follow, cached ranges reload in seconds, the conversation is kept and re-prefilled on the next question |
 | `ai-ready-all {model}` to one device | host → newcomer | a device that joins an online room becomes an ask-only guest right away, followed by `ai-history {items}` (the last 20 exchanges) when the chat is visible to everyone |
@@ -45,10 +46,34 @@ Hidden states travel as binary frames: an f16-packed `Uint16Array` (10 KB for `d
 
 ## Ordering guarantees
 
-- Data channels are ordered and reliable. Frames are sliced (≤ 4.6 KB) and striped across several associations, so consecutive frames can complete out of order at the receiver; the transport hands them over strictly in send order (a gap with no progress for 5 s is skipped, and a frame arriving after its gap was skipped is dropped rather than run out of order). A worker runs frames one at a time from a queue in that order, so recurrent states advance deterministically.
+- Data channels are ordered and reliable. Frames are sliced (≤ 4.6 KB) and striped across several associations, so consecutive frames can complete out of order at the receiver; the transport hands them over strictly in send order. A missing frame on a reliable link is late, not lost (a device's network froze, a lost packet is waiting out SCTP's retransmission timer), so the receiver waits for it: it skips the gap at once only when every open channel has already delivered a newer frame (nothing older can still be queued), after 5 s when a channel closed in the last 15 s (the frame may have gone down with it), and otherwise after a 60 s backstop. A frame arriving after its gap was skipped is dropped rather than run out of order. Frames of up to 3 slices (a decode token's hidden state) are sent twice, on two associations, so one lost packet does not stall a token behind a retransmission timeout; receivers drop the second copy (`?wiredup=0` turns this off). Slices go to the open channel with the least data queued. A worker runs frames one at a time from a queue in that order, so recurrent states advance deterministically.
 - Because of that, the host keeps up to 6 prefill rounds in flight: round r+1 runs on the host while round r is on a worker, and the chain works as a pipeline. Output is unchanged: every device sees the same frames in the same order.
 - The prefill rounds come back as full hidden states, which the host feeds to the draft block (`mtpRun`) so the first speculative steps after a prompt draft from a warm cache.
 - Inside a batched frame, columns are processed strictly in order; snapshot slots are indexed by global column (`frame.snap` packs base and total), so an 8-column verify split into two 4-column chunks on an older worker still rolls back correctly.
+
+## Dead links
+
+A network that passes no packets for longer than ICE's write timeout (about 15 s: frozen Wi-Fi, a closed laptop lid, a phone changing networks) kills a link's candidate pairs for good. Chrome then reports `connectionState: "failed"` while `iceConnectionState` stays `disconnected` and SCTP and every data channel still look open, so PeerJS never closes the connection and nothing sent on it arrives again. Shorter freezes recover on their own (the transport waits for late frames, above).
+
+Each device watches every link's `RTCPeerConnection`. When one fails:
+
+- The side that dialed it dials a new connection to the same peer id and sends `hello` with `back: 1`; both sides swap it in with a fresh wire (frame ids restart) and close the dead one and its stripes. The device keeps its place in the chain and its layers. A failed stripe is closed and redialed the same way.
+- The other side waits 45 s for that, then closes the link (the device left, as before). A device whose network died silently is therefore dropped about a minute after it went quiet (before, its link stayed open and the room waited on it indefinitely).
+- The host fails every lap in flight at once ("the link to X dropped; ask again") and the next question prefills from scratch. A worker whose link to another worker dropped tells the host with `ai-linklost`.
+
+No PROTOCOL change: a peer that predates this sees an ordinary new connection from a device it knows (it already replaces the old entry), and ignores `ai-linklost`.
+
+## Connecting: STUN and an optional TURN relay
+
+Links are direct WebRTC connections. Every device uses public STUN servers to find its public address; that is enough on most home and office networks. When both sides are behind symmetric NAT or carrier-grade NAT, or a firewall blocks UDP, no direct path exists and the join fails after 15 s with "found the room, but the direct connection failed" (the Network box under the join form opens). A TURN relay fixes that: it forwards the traffic between the two devices.
+
+Pooled does not run a relay and ships no credentials; it is off by default. To use one (your own [coturn](https://github.com/coturn/coturn), or a provider's):
+
+- **Network box** under the join form: relay URL (`turn:relay.example.org:3478`, `turns:` for TLS, comma-separate several), username and password. Saved in this browser only.
+- **URL**: `?turn=turn:relay.example.org:3478&turnuser=NAME&turncred=PASSWORD`. Overrides the saved setting.
+- **Self-hosted deployments**: define `window.TURN_SERVERS` (an `RTCIceServer` array) before `room.js` loads.
+
+ICE still prefers a direct path and only falls back to the relay when it has to. `?relay=1` (or "Always go through the relay") uses only the relay, so the other devices never see this device's IP address. Every device that cannot connect directly needs the relay configured; a device with an open network can reach a relayed one without it. Join links and QR codes never include `turn`, `turnuser`, `turncred` or `relay`. `pooledDebug()` shows each link's `path` (`direct` or `relay`), and the room log notes relayed links. A relay adds a hop to every token's round trip, so decode is slower through it than over a direct path. Tested with `node tests/e2e/room_chaos.mjs --plan turn` (a local test TURN server, `tests/e2e/turn_server.mjs`, with every direct candidate dropped).
 
 ## Conversation state
 

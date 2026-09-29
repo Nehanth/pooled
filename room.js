@@ -19,8 +19,9 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // regenerate, an edited question or a branch resumes from the longest saved turn instead of
 // prefilling the whole conversation again. 0 turns it off.
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
-import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
+import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL, DUP_SLICES } from "./room/transport.js";
 import { makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, lapTimeout } from "./room/liveness.js";
+import { turnFrom, iceConfig, shareQuery, linkPath, normTurn, TURN_KEY } from "./room/ice.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
@@ -35,6 +36,9 @@ import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } fr
 // ?wire=slice uses one sliced channel; ?wire=stripeN spreads slices over N peer connections.
 const WIRE = (new URLSearchParams(location.search).get("wire") || "stripe4").toLowerCase();
 const WIRE_STRIPES = WIRE === "off" ? 0 : WIRE.startsWith("stripe") ? Math.max(1, Math.min(8, parseInt(WIRE.slice(6), 10) || 1)) : 1;
+// frames of up to this many slices go out twice, on two associations (a lost packet then costs
+// nothing); ?wiredup=0 turns it off
+const WIRE_DUP = (() => { const v = parseInt(new URLSearchParams(location.search).get("wiredup"), 10); return v >= 0 ? Math.min(v, 64) : DUP_SLICES; })();
 // Signaling (room/signal.js): the public PeerJS cloud by default; a deployment can list fallbacks in
 // window.POOLED_SIGNAL_SERVERS, tried in order when one is down; ?signal=host:port (or a comma list)
 // wins over both (the emulator and big rooms point it at our own PeerServer). See
@@ -456,19 +460,18 @@ function selfStepper() {
 
 // --- connection wiring ---
 function wire(conn, name, meta, initiator = false) {
-  const entry = { conn, name: name || conn.peer, meta: meta || {}, rtt: null, card: null, link: makeLink(), stripes: [] };
+  const entry = { conn, name: name || conn.peer, meta: meta || {}, rtt: null, card: null, link: makeLink({ dup: WIRE_DUP }), stripes: [], path: null, initiator };
+  const prev = conns.get(conn.peer);
   conns.set(conn.peer, entry);
+  if (prev && prev.conn !== conn) retire(prev);   // a new link to a device we already had one to
+  watchLink(conn, () => linkDied(entry));
   if (WIRE_STRIPES > 0) {
     attachWire(entry.link, conn, (m) => onData(conn.peer, m));
     // extra associations for striping: the side that dialed opens them, the other side accepts
     // them in peer.on("connection") by label and attaches its end of the wire channel
-    if (initiator) for (let i = 1; i < WIRE_STRIPES; i++) {
-      const sc = peer.connect(conn.peer, { reliable: true, label: "stripe" });
-      sc.on("open", () => { attachWire(entry.link, sc, (m) => onData(conn.peer, m)); });
-      sc.on("error", () => {});
-      entry.stripes.push(sc);
-    }
+    if (initiator) for (let i = 1; i < WIRE_STRIPES; i++) dialStripe(entry, conn.peer);
   }
+  notePath(entry);
 
   conn.on("data", (d) => { entry.heard = performance.now(); onData(conn.peer, d); });
   conn.on("close", () => {
@@ -486,6 +489,123 @@ function wire(conn, name, meta, initiator = false) {
   });
   conn.on("error", () => {});
   return entry;
+}
+
+// --- dead links ---
+// A network that stops passing packets for longer than ICE's write timeout (~15 s: a frozen
+// Wi-Fi, a laptop lid, a phone switching networks) kills the link's candidate pairs for good:
+// Chrome reports connectionState "failed", but iceConnectionState stays "disconnected", SCTP
+// still says "connected" and every data channel stays "open", so PeerJS never closes the
+// connection. Nothing sent on it arrives again, and without this the room would wait on it
+// forever (every answer timing out). So a failed link is replaced: the side that dialed it dials
+// a new one to the same device (same peer id, same layers, a fresh wire); the other side waits
+// RELINK_WAIT_MS for that, then closes the link (the device left, as before).
+const RELINK_WAIT_MS = 45000;
+function watchLink(conn, onDead) {
+  const pc = conn.peerConnection;
+  if (!pc) return;
+  let fired = false;
+  const check = () => {
+    if (fired || !conn.open) return;
+    if (pc.connectionState === "failed" || pc.iceConnectionState === "failed") { fired = true; onDead(); }
+  };
+  pc.addEventListener("connectionstatechange", check);
+  pc.addEventListener("iceconnectionstatechange", check);
+}
+function linkDied(entry) {
+  const id = entry.conn.peer;
+  if (conns.get(id) !== entry) return;
+  log("room", `the link to ${entry.name} went down (no packets for too long)${entry.initiator ? "; reconnecting" : ""}`);
+  chainLinkLost(id, entry.name);
+  linkState(id, entry.name, false);
+  if (!entry.initiator) {
+    setTimeout(() => { if (conns.get(id) === entry) { log("room", `${entry.name} did not reconnect`); try { entry.conn.close(); } catch {} } }, RELINK_WAIT_MS);
+    return;
+  }
+  relink(entry, id, 0);
+}
+// dial a replacement link; wire() swaps it in and retires the dead one
+function relink(entry, id, tries) {
+  if (conns.get(id) !== entry || !peer || peer.destroyed) return;
+  if (tries >= 8) { log("room", `could not reconnect to ${entry.name}`); try { entry.conn.close(); } catch {} return; }
+  const c = peer.connect(id, { reliable: true });
+  // PeerJS returns nothing while it is cut off from the signaling server: try again later
+  if (!c) { setTimeout(() => relink(entry, id, tries + 1), 2000 * Math.min(tries + 1, 4)); return; }
+  let done = false;
+  const retry = () => { if (done) return; done = true; try { c.close(); } catch {} setTimeout(() => relink(entry, id, tries + 1), 2000 * Math.min(tries + 1, 4)); };
+  const to = setTimeout(retry, 20000);
+  c.on("open", () => {
+    if (done) return;
+    done = true; clearTimeout(to);
+    if (conns.get(id) !== entry) { try { c.close(); } catch {} return; }
+    wire(c, entry.name, entry.meta, true);
+    c.send({ t: "hello", name: myName, meta: myMeta, v: PROTOCOL, back: 1 });
+    log("room", `reconnected to ${entry.name}`);
+  });
+  c.on("error", () => {});
+  c.on("close", retry);
+}
+// a replaced link: close it and its stripes quietly (its close handlers see it is not current)
+function retire(old) {
+  for (const s of old.stripes) try { s.close(); } catch {}
+  try { old.conn.close(); } catch {}
+  chainLinkLost(old.conn.peer, old.name);
+  linkState(old.conn.peer, old.name, true);
+}
+// Host: links in the chain that are down and being replaced, "reporter|peer" -> { name, at }. A
+// question waits for them (up to RELINK_WAIT_MS) instead of sending frames into a dead link.
+// Workers report their own links with ai-linklost {up}.
+const linksDown = new Map();
+function linkState(id, name, up) {
+  if (ai.role === "worker") { const h = ai.hostId || PREFIX + roomCode; if (id !== h) sendTo(h, { t: "ai-linklost", name: String(name || ""), up: up ? 1 : 0 }); return; }
+  if (ai.role !== "host" || (!up && !ai.chain?.includes(id))) return;
+  noteLink(peer.id + "|" + id, name, up);
+}
+function noteLink(key, name, up) {
+  if (up) linksDown.delete(key); else linksDown.set(key, { name, at: performance.now() });
+}
+async function linksUp() {
+  const live = () => { for (const [k, v] of linksDown) if (performance.now() - v.at > RELINK_WAIT_MS + 5000) linksDown.delete(k); return [...linksDown.values()]; };
+  const t0 = performance.now();
+  for (let d = live(); d.length && performance.now() - t0 < RELINK_WAIT_MS; d = live()) {
+    aiStatus(`reconnecting to ${[...new Set(d.map((x) => x.name))].join(", ")}…`);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+// host: frames in flight on a lost link are gone, so a lap waiting on them fails now instead of
+// timing out, and the next question prefills from scratch
+// (a worker whose link to another device dropped tells the host with ai-linklost, see linkState)
+function chainLinkLost(id, name) {
+  if (ai.role !== "host" || !ai.engine || !ai.chain?.includes(id)) return;
+  if (!ai.waiters.size && ai.fed == null) return;
+  failWaiters(new Error(`the link to ${name || "a device"} dropped; ask again`));
+  ai.fed = null; ckptClear(true);
+}
+
+// One extra association for the wire. A stripe can fail on its own on a bad network (its ICE
+// times out while the main link survives): the dialing side opens a new one a few times, so the
+// link does not stay on fewer associations for the rest of the session.
+function dialStripe(entry, id, tries = 0) {
+  const sc = peer.connect(id, { reliable: true, label: "stripe" });
+  if (!sc) { if (tries < 4) setTimeout(() => { if (conns.get(id) === entry && entry.conn.open) dialStripe(entry, id, tries + 1); }, 2000 * (tries + 1)); return; }
+  let opened = false;
+  sc.on("open", () => { opened = true; attachWire(entry.link, sc, (m) => onData(id, m)); watchLink(sc, () => sc.close()); });
+  sc.on("error", () => {});
+  sc.on("close", () => {
+    entry.stripes = entry.stripes.filter((c) => c !== sc);
+    if (conns.get(id) !== entry || !peer || peer.destroyed || tries >= 4) return;
+    setTimeout(() => { if (conns.get(id) === entry && entry.conn.open) dialStripe(entry, id, opened ? 0 : tries + 1); }, 2000 * (tries + 1));
+  });
+  entry.stripes.push(sc);
+}
+// direct or through the TURN relay: read once the link has settled, logged, and shown in pooledDebug()
+function notePath(entry) {
+  setTimeout(async () => {
+    const pc = entry.conn.peerConnection;
+    if (!pc || conns.get(entry.conn.peer) !== entry) return;
+    try { entry.path = linkPath(await pc.getStats()); } catch { return; }
+    if (entry.path === "relay") log("room", `link to ${entry.name} goes through the relay (TURN)`);
+  }, 3000);
 }
 
 function ensureCard(id, name, meta) {
@@ -523,7 +643,7 @@ ensureLink.pending = new Set();
 
 function sendTo(id, obj) { conns.get(id)?.conn.send(obj); }
 // debug: per-peer wire state (channels open, frames sent/received) — `pooledDebug()` in the console (`swarmDebug()` still works)
-window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0 }));
+window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0, dups: e.link?.dups ?? 0, skipped: e.link?.skipped ?? 0, path: e.path }));
 // activations go over the sliced wire channel when it is up, else as a normal message
 // ?netlag=ms delays every activation frame this device sends, to emulate a slow link in tests
 // (equal delays keep send order)
@@ -755,6 +875,31 @@ function joinWait(on, text = "") {
     if (m) { const b = document.createElement("b"); b.textContent = m[2]; el.replaceChildren(m[1], b, m[3]); } else el.textContent = text;
   }
 }
+// --- network: the optional TURN relay (room/ice.js) ---
+function storedTurn() { try { return localStorage.getItem(TURN_KEY); } catch { return null; } }
+function turnConfig() { return turnFrom(new URLSearchParams(location.search), storedTurn()); }
+function turnForm() {
+  const t = turnConfig();
+  const note = (text) => { $("turn-note").textContent = text; };
+  if (t?.from === "url") note("set by this page's link (?turn=)");
+  else if (t?.urls?.length) note("relay saved");
+  let saved = null; try { saved = JSON.parse(storedTurn() || "null"); } catch {}
+  if (saved) { $("turn-url").value = [].concat(saved.urls || []).join(", "); $("turn-user").value = saved.username || ""; $("turn-cred").value = saved.credential || ""; $("turn-force").checked = !!saved.force; }
+  $("turn-save").addEventListener("click", () => {
+    const n = normTurn({ urls: $("turn-url").value, username: $("turn-user").value.trim(), credential: $("turn-cred").value, force: $("turn-force").checked });
+    if (!n || !n.urls.length) { note(n?.bad ? `not a relay URL: ${n.bad[0]} (want turn:host:port or turns:host:port)` : "enter the relay's URL first"); return; }
+    try { localStorage.setItem(TURN_KEY, JSON.stringify({ urls: n.urls, username: n.username, credential: n.credential, force: n.force })); } catch { note("this browser won't save it (private window?)"); return; }
+    note(n.bad ? `saved; ignored ${n.bad.join(", ")}` : "saved");
+  });
+  $("turn-clear").addEventListener("click", () => {
+    try { localStorage.removeItem(TURN_KEY); } catch {}
+    for (const id of ["turn-url", "turn-user", "turn-cred"]) $(id).value = "";
+    $("turn-force").checked = false;
+    note("removed");
+  });
+}
+if ($("join-net")) turnForm();
+
 function joinFailed(text) {
   joinWait(false);
   $("join-status").classList.remove("signal-down");
@@ -777,17 +922,12 @@ async function start(create, resume = null, from = 0) {
   const gbIn = parseFloat($("join-gb").value);
   myMeta.contribGB = Math.min(64, Math.max(myMeta.phone ? 0.5 : 1, gbIn > 0 ? gbIn : (myMeta.contribGB || 1)));
 
-  // STUN for hole-punching; TURN as fallback for symmetric NAT / CGNAT peers.
-  // ICE prefers direct candidates, so TURN only carries traffic when a direct
-  // path is impossible.
-  const ICE = {
-    iceServers: [
-      { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
-      // TURN fallback for symmetric-NAT peers goes here (needs credentials —
-      // see TURN_CREDS below); without it, strict-NAT peers can't join.
-      ...(window.TURN_SERVERS || []),
-    ],
-  };
+  // STUN for hole-punching; a TURN relay only when one is configured (room/ice.js: ?turn=, the
+  // Network box under the join form, or window.TURN_SERVERS). ICE prefers direct candidates, so
+  // the relay only carries traffic when a direct path is impossible (or ?relay=1 forces it).
+  const turn = turnConfig();
+  if (turn?.bad) log("room", `ignored relay URL${turn.bad.length > 1 ? "s" : ""} ${turn.bad.join(", ")} (want turn:host:port or turns:host:port)`);
+  const ICE = iceConfig(turn, window.TURN_SERVERS || []);
   // a host coming back after a reload goes to the server its room was on first: its guests are there
   let servers = SIGNALS;
   const was = resume?.signal && !SIGNAL ? parseServer(resume.signal, PAGE_SECURE) : null;
@@ -829,10 +969,15 @@ async function start(create, resume = null, from = 0) {
     $("join-status").textContent = "Reaching the other devices…";
     const conn = peer.connect(PREFIX + code, { reliable: true });
     joinTimer = setTimeout(() => {
-      const ice = conn.peerConnection?.iceConnectionState;
-      joinFailed(ice === "checking" || ice === "failed" || ice === "disconnected"
-        ? "found the room, but the direct connection failed (strict NAT/firewall on one side). Trying a relay: give it ~20 s, or try another network"
+      const pc = conn.peerConnection, ice = pc?.iceConnectionState;
+      // the host answered (or ICE got as far as checking): the room exists, the connection is what failed
+      const found = !!pc?.remoteDescription || ice === "checking" || ice === "failed" || ice === "disconnected";
+      joinFailed(found
+        ? (ICE.iceServers.length > 1
+          ? "found the room, but could not connect, not even through the relay (TURN) server. Check its address and password under Network, or try another network"
+          : "found the room, but the direct connection failed (strict NAT or firewall on one side). A relay (TURN) server gets around that: add one under Network below, or try another network")
         : "no room with that code (is the host page open?)");
+      if (found && $("join-net")) $("join-net").open = true;
     }, 15000);
     conn.on("open", () => {
       clearTimeout(joinTimer);
@@ -848,7 +993,11 @@ async function start(create, resume = null, from = 0) {
     conn.on("open", () => {
       if (conn.label === "stripe") {   // extra association for the hidden-state wire, not a new peer
         const e = conns.get(conn.peer);
-        if (e) { attachWire(e.link, conn, (m) => onData(conn.peer, m)); e.stripes.push(conn); }
+        if (e) {
+          attachWire(e.link, conn, (m) => onData(conn.peer, m)); e.stripes.push(conn);
+          conn.on("close", () => { e.stripes = e.stripes.filter((c) => c !== conn); });
+          watchLink(conn, () => conn.close());   // the dialing side opens a new one
+        }
         return;
       }
       wire(conn);
@@ -1035,7 +1184,7 @@ function roomLink() {
     const sig = signalServer && signalServer.spec !== SIGNAL_FIRST ? "?signal=" + encodeURIComponent(signalServer.spec) + (DEV ? "" : "&dev=0") : "";
     return `${location.origin}/r/${roomCode}${sig}`;
   }
-  const q = new URLSearchParams(location.search); q.set("code", roomCode);
+  const q = shareQuery(location.search); q.set("code", roomCode);   // never a relay password in a link
   if (signalServer && (q.has("signal") || signalServer.spec !== SIGNAL_FIRST)) {
     if (!q.has("signal") && !DEV) q.set("dev", "0");
     q.set("signal", signalServer.spec);
@@ -2729,6 +2878,7 @@ async function aiGenerate(textArg, who, askerId = peer.id, mode = "ask") {
   const answer = [];          // sampled ids of this answer, verbatim, for the next turn's history
   let reply = "", failed = null, stats = "", capped = false, dropped = 0, r = null, inGen = false;
   try {
+    await linksUp();   // a link in the chain is being replaced: frames sent now would be lost
     // the conversation with this question, trimmed to fit
     const fit = fitContext(ai.tok, { system: persona.system, turns: cont ? [...ai.conv.turns.slice(0, -1), { ...lastTurn, open: true }] : [...ai.conv.turns, { role: "user", text, name: asker }], thinking }, ctxMax(), MIN_ROOM);
     dropped = fit.dropped;
@@ -3012,6 +3162,13 @@ async function aiOnData(from, d) {
       $("ldg-sub").textContent = `${d.by} is re-dealing the layers over the devices in the room`;
       aiStatus(`${d.by} is re-dealing the layers…`);
       break;
+    case "ai-linklost": {   // a worker's link to another device in the chain dropped (up: 0, it is being replaced) or is back (up: 1)
+      if (ai.role !== "host" || !ai.chain.includes(from)) break;
+      const nm = String(d.name || "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").slice(0, 40);
+      if (d.up || !ai.chainNames?.includes(nm)) noteLink(from + "|" + nm, nm, true);
+      else { noteLink(from + "|" + nm, nm, false); chainLinkLost(from, nm); }
+      break;
+    }
     case "ai-degraded":
       aiStatus(`${d.why} — waiting for the host to re-deal the layers`);
       toast(d.why);
