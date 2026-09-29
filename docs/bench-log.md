@@ -773,3 +773,103 @@ above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32
 43.92; 27B prefill 31.9 / 58.5 / 53.6, plain 14.79 / 14.35 / 12.43, spec 23.54 / 21.13 / 15.96, spec == plain on
 every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
 prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).
+
+## 2026-09-28: two-machine room, where a lap goes (branch perf/room-harness, main at c6ca8cc)
+
+Harness: `tests/e2e/xroom.mjs` + `xroom_pair.sh` + `xroom_report.mjs` (docs/testing-fast.md, "Two-machine
+rooms"), wire lab `tests/e2e/xwire_lab.mjs`. GB10 (headless Chromium 131, Vulkan) + M5 Max (headless Chrome
+154, Metal). No room or engine change: every number is origin/main's code (trace marks are added at serve time).
+
+**The link is Wi-Fi on both ends**, not wired: the GB10's Ethernet has no carrier (`wlP9s9` carries the
+traffic) and the Mac's route goes through `en1` (Wi-Fi; `en0` inactive). WebRTC picks the LAN IPv6 host
+candidates (`2601:…` on both ends), not Tailscale. ICMP round trip over the LAN IPv6: 3.1 / 3.4 ms min / avg
+idle, 6.3 ms avg with a 4000-byte payload; over Tailscale 3.7-4.4 ms min, 5-48 ms avg depending on the hour,
+with spikes to 70-120 ms and, in one session, multi-second stalls (ping p90 6 s).
+
+### Wire lab: one frame out and back (`xwire_lab.mjs`, 200 frames per cell, 30 ms apart, 2 runs)
+
+One-way ms p50 (run 1 / run 2), = (round trip - echo turnaround) / 2:
+
+| send path | 4 KB | 10 KB | 16 KB | 32 KB | 40 KB | 80 KB |
+|---|---|---|---|---|---|---|
+| room wire (4 stripes, 4.6 KB slices, ordered) | 4.26 / 4.44 | 4.57 / 4.42 | 5.02 / 4.85 | 6.17 / 5.89 | 7.37 / 6.48 | 8.58 / 8.38 |
+| 1 stripe | 4.38 / 4.42 | 4.74 / 4.69 | 5.11 / 5.04 | 6.38 / 6.20 | 6.99 / 6.43 | 9.44 / 10.44 |
+| raw channel, one send per frame | 4.31 / 4.46 | 11.50 / 11.44 | 16.59 / 16.23 | 23.12 / 21.86 | 24.46 / 24.14 | 32.38 / 34.54 |
+| PeerJS `send()` (`?wire=off`) | 4.25 / 4.76 | 10.98 / 12.04 | 11.71 / 12.23 | 13.42 / 13.41 | 14.07 / 14.14 | 16.33 / 16.30 |
+| unordered (as `attachWire` builds it on main: maxRetransmits 0) | 4.38, 4 of 200 lost | 4.59, 4 lost | 4.94, 4 lost | 6.20 | 6.67, 2 lost | 8.71, 6 lost |
+| PeerJS JSON ping (the peer card's rtt) | 2.25 / 2.55 | | | | | |
+
+Reading: the network floor here is ~2.2 ms one-way for a tiny message and ~4.3 ms for a 4 KB hidden state
+(the MoE's one column): on this Wi-Fi a 4 KB frame costs ~2 ms more than a ping, which is the medium, not
+the code (ICMP shows the same with a 4000-byte payload). The room's sliced, striped wire is already the
+best of these at every size, 2-4x better than one unsliced send from 10 KB up (dcSCTP's burst limit), and
+2-3x better than PeerJS. Striping over 4 associations vs 1 is within noise below 40 KB and ~1-2 ms better at
+80 KB. Unordered delivery on main is also unreliable (`maxRetransmits: 0`): on Wi-Fi it lost 20 of 1,200
+frames, each costing the transport's 5 s gap timer. Keep it off. A raw `RTCDataChannel` layer of our own
+would not beat this: the room already sends raw negotiated channels with its own binary framing, and the
+floor is the link.
+
+### MoE, GB10 host (20 layers + embed/head) + M5 Max guest (20 layers), `japan` and `twosum`, 128 tokens
+
+tok/s per round (rounds 0, 1 untraced; round 2 traced), exact sampling:
+
+| session | plain japan | plain twosum | spec japan (acc) | spec twosum (acc) |
+|---|---|---|---|---|
+| 1 (ping 3.7-88 ms, avg 13) | 9.3, 12.1, 20.9 | 30.1, 30.5, 20.0 | 18.1 (41%), 20.9 (43%), 31.7 (40%) | 47.8 (67%), 44.3 (67%), 43.9 (48%) |
+| 2 (ping p90 up to 6 s) | 15.0, 4.3, 4.5 | 5.6, 4.2, 4.2 | 13.3, 6.3, 6.6 | 51.6, 4.6, 25.7 |
+
+Same GB10, one device (`--solo`, same page): plain 36.0 / 36.8 (japan), 42.8 / 41.6 (twosum); spec 46.6 /
+46.1 (59%), 65.5 / 66.7 (80%). Same GB10, two tabs on loopback (`room_prof.mjs`, twosum): plain 30.3, spec
+50.7 (67%). The round-to-round spread across machines (9 to 21 tok/s for the same answer) follows the Wi-Fi,
+not the code: session 2's rounds line up with the ping log's multi-second stalls.
+
+One plain token, traced (session 1, medians over 128 laps, GB10 clock): **36.1 ms** =
+
+| part | ms | of which |
+|---|---|---|
+| host: embed + its 20 layers + read the hidden back | 12.4 | GPU 9.7, `mapAsync` wait 2.6, encode 0.3 |
+| host: send, wait for the Mac and the wire both ways | 16.7 | wire ~4.3 each way (lab), Mac's 20 layers + readback ~8 |
+| host: head (upload, norm, LM head, top-k, map) | 4.2 | GPU 2.3, a second submit + `mapAsync` |
+| host: sampling, emit, UI until the next lap | 1.7 | |
+| submits / `mapAsync`s per token on the host | 3 / 2 | |
+
+One speculative step, `japan` (52 steps, 2.46 tokens per lap): **72.8 ms** = drafting 15.0 (3 submits, 2
+maps: the draft chain waits behind the previous step's rollback + refill on the GPU) + host layers for 4-8
+columns 19.7 + waiting for Mac and wire 26.7 + head, sampling, rollback, refill 4.9 + between steps 3.8.
+The host's GPU is busy ~30 ms of the 73, the Mac's ~16: **the host's serial share (drafts, its layers, the
+head, the rollback) is ~60% of a step**, the network ~15%, the Mac ~25%.
+
+### Draft acceptance in the room vs one device
+
+Per draft depth, from the traces (`h.step0` / `h.step1`, draft head only):
+
+| | K=3 | K=5 | K=7 |
+|---|---|---|---|
+| one GB10, twosum (spec always K=3) | 0.80 | | |
+| loopback room, twosum, 3 runs (`room_prof`, incl. `mtpbatch=0`, `draftchain=0`) | 0.80 (15 steps) | 0.40 (1) | 0.36 (2) |
+| GB10 + Mac, twosum (traced round) | 0.67 (3) | 0.30 (2) | 0.48 (11) |
+| GB10 + Mac, japan | 0.50 (35) | 0.31 (11) | 0.14 (3) |
+| 27B loopback room, twosum | 0.82 (11) | 0.30 (2) | 0.54 (4) |
+
+The draft head is as good in the room as on one device at the same depth (0.80 = 0.80). The room's lower
+headline acceptance is (1) the prompt (prose `japan` accepts ~50-59% even on one device; code ~80%) and
+(2) the room's depth picker: it probes K=5 and 7 and keeps the best measured tok/s, and every extra draft
+is accepted less often, so the ratio drops even when tokens per lap rise. On a noisy link the picker's
+tok/s samples are noisy too: the traced twosum round ran 11 of 16 steps at K=7.
+
+### Correctness observations (no change made)
+
+- Within a session, every round's answer to `twosum` is identical in all modes, both sessions, the solo run
+  and the 27B (sha 1df98ce0…); `twosum`'s answer is short code and insensitive.
+- `japan`: session 1 plain == spec (44efa784…), but **session 2 plain (8e29cc8d…, 3 rounds) != spec
+  (44efa784…, 3 rounds)**, same first 160 characters. The one-device GB10 answer (a0e7f9bd…) differs from both
+  from about the 25th token ("nightlife" vs "local vibes"): expected between a Vulkan and a Metal device with
+  an f16 wire (the 27B goldens already differ per machine). Forcing the GB10's GEMV autotune to (64,4),
+  (128,4) or (256,4) does not change its one-device answer, so the autotune is not the cause. Session 2 is the
+  one with multi-second network stalls; the harness now stores whole answers so the divergence point can be
+  found on the next occurrence. Open.
+
+Not measured in this round: the Mac as host (GB10 as guest) and the 27B across the two machines. The Mac's
+GPU lock was held by other jobs for most of the window (one wait lasted 90 minutes), and then the shared SSH
+connection to the Mac expired. The harness supports both (`xroom_pair.sh --here guest`, `--model
+qwen3.8-27b`); the 27B two-tab loopback room on the GB10 gives plain 9.2, spec 18.3 tok/s (63%) on twosum.
