@@ -63,4 +63,26 @@ Deno.test("preSplitter: the tricky pieces, by hand", () => {
   eq(smol("a  12"), ["a", "  ", "1", "2"], "Digits splits first, then GPT-2 on the rest");
   eq(preSplitter({ pre_tokenizer: { type: "Sequence", pretokenizers: [] } })("a 12"), ["a", " 12"], "no Split: GPT-2");
   eq(preSplitter({ pre: "llama-bpe" })("a 12"), ["a", " 12"], "unknown GGUF pre: GPT-2");
+  eq(qwen("x \u0085y"), ["x", " ", "\u0085y"], "U+0085 is whitespace (JS \\s says no)");
+  eq(qwen("\ufeff!"), ["\ufeff!"], "U+FEFF is not whitespace (JS \\s says yes)");
+});
+
+Deno.test("preSplitter: tokenizer.json steps run in order and keep the text between matches", () => {
+  // DeepSeek-V3 style: several Isolated Splits, where text a split does not match stays a piece
+  const multi = preSplitter({ pre_tokenizer: { type: "Sequence", pretokenizers: [
+    { type: "Split", pattern: { Regex: "\\p{N}{1,3}" }, behavior: "Isolated", invert: false },
+    { type: "Split", pattern: { Regex: " ?\\p{L}+" }, behavior: "Isolated", invert: false },
+  ] } });
+  eq(multi("ab 12345!"), ["ab", " ", "123", "45", "!"]);
+  // a Split followed by a ByteLevel that still runs its own GPT-2 regex
+  const both = preSplitter({ pre_tokenizer: { type: "Sequence", pretokenizers: [
+    { type: "Split", pattern: { String: "|" }, behavior: "Isolated", invert: false },
+    { type: "ByteLevel", use_regex: true },
+  ] } });
+  eq(both("a b|c"), ["a", " b", "|", "c"]);
+  eq(preSplitter({ pre_tokenizer: { type: "Digits", individual_digits: false } })("a123b"), ["a", "123", "b"]);
+  // a Split mode this file does not follow is skipped, which leaves GPT-2
+  const inverted = { type: "Split", pattern: { Regex: "x" }, behavior: "Isolated", invert: true };
+  eq(preSplitter({ pre_tokenizer: inverted })("a 12"), ["a", " 12"]);
+  eq(preSplitter({ pre_tokenizer: null })(""), []);
 });

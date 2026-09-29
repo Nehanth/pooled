@@ -48,6 +48,9 @@ export const CORPUS = [
   "\n",
   "!!!???...",
   "Tabby ids · fn(x) => 1024 ✓",
+  // Unicode White_Space vs JS \s: U+0085 is space, U+FEFF is not
+  "x \u0085y 1\u00852 \ufeff!BOM \ufeff\ufeffz",
+  "line\u2028sep\u2029para\u00a0nbsp\u3000ideo\u202f!\u205f\n",
 ];
 // qwen2 = Qwen 2/2.5/3, qwen35 = Qwen 3.5+, starcoder = the Digits split SmolLM uses, gpt-2 = default
 const VOCABS = ["qwen2", "qwen35", "starcoder", "gpt-2"];

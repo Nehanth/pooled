@@ -10,36 +10,77 @@ export const PRE_SPLITS = {
   qwen2: CONTRACTIONS + String.raw`|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`,
   // Qwen 3.5+: combining marks (\p{M}) count as letters, so "é" spelled e + U+0301 stays one word
   qwen35: CONTRACTIONS + String.raw`|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+`,
+  // SmolLM / StarCoder run this first (every digit is its own piece), then GPT-2 on the rest
+  digit: String.raw`\p{N}`,
 };
-// GGUF tokenizer.ggml.pre names (llama-vocab.cpp) that use a split other than plain GPT-2
+// GGUF tokenizer.ggml.pre names (llama-vocab.cpp) that use a split other than plain GPT-2; each is
+// a list of regexes run one after the other, like llama.cpp's regex_exprs
 const GGUF_PRE = {
-  "qwen2": "qwen2", "deepseek-r1-qwen": "qwen2", "stablelm2": "qwen2", "megrez": "qwen2",
-  "qwen35": "qwen35",
-  "smollm": "digits", "starcoder": "digits", "refact": "digits", "command-r": "digits",
+  "qwen2": ["qwen2"], "deepseek-r1-qwen": ["qwen2"], "kormo": ["qwen2"], "f2llmv2": ["qwen2"],
+  "stablelm2": ["qwen2"], "megrez": ["qwen2"],
+  "qwen35": ["qwen35"],
+  "smollm": ["digit", "gpt2"], "starcoder": ["digit", "gpt2"], "refact": ["digit", "gpt2"], "command-r": ["digit", "gpt2"],
 };
+
+// JS's \s is not Unicode's White_Space (which llama.cpp and HF tokenizers use): it has U+FEFF and
+// lacks U+0085. Swap in the Unicode set so "x \u0085y" splits the way the model saw it.
+const WS = String.raw`\t-\r \x85\xA0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000`;
+function unicodeSpace(src) {
+  let out = "", inClass = false;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === "\\") {
+      const n = src[++i];
+      if (n === "s") out += inClass ? WS : `[${WS}]`;
+      else if (n === "S" && !inClass) out += `[^${WS}]`;
+      else out += c + n;
+    } else {
+      if (c === "[") inClass = true;
+      else if (c === "]") inClass = false;
+      out += c;
+    }
+  }
+  return out;
+}
+
+// One split step, HF's "Isolated" behaviour: every match is a piece, and so is the text between.
+function isolate(src) {
+  const re = new RegExp(unicodeSpace(src), "gu");
+  return (text) => {
+    const out = [];
+    let at = 0;
+    for (const m of text.matchAll(re)) {
+      if (m.index > at) out.push(text.slice(at, m.index));
+      if (m[0]) out.push(m[0]);
+      at = m.index + m[0].length;
+    }
+    if (at < text.length) out.push(text.slice(at));
+    return out;
+  };
+}
 
 // Picks the split for a tokenizer.json (its pre_tokenizer) or a GGUF (tj.pre, from tokenizerFromGGUF).
 // Unknown or missing config falls back to GPT-2, which is what this file always used.
 export function preSplitter(tj) {
-  let src = PRE_SPLITS.gpt2, digits = false;
+  let srcs = [];
   if (tj.pre !== undefined) {
-    const kind = GGUF_PRE[tj.pre];
-    if (kind === "digits") digits = true;
-    else if (kind) src = PRE_SPLITS[kind];
+    srcs = (GGUF_PRE[tj.pre] || []).map((k) => PRE_SPLITS[k]);
   } else if (tj.pre_tokenizer) {
-    const steps = tj.pre_tokenizer.type === "Sequence" ? tj.pre_tokenizer.pretokenizers || [] : [tj.pre_tokenizer];
+    const p = tj.pre_tokenizer, steps = p.type === "Sequence" ? p.pretokenizers || [] : [p];
     for (const s of steps) {
-      if (s.type === "Digits" && s.individual_digits) digits = true;
-      const re = s.type === "Split" && s.pattern && s.pattern.Regex;
-      if (re) src = re.replace("(?i:'s|'t|'re|'ve|'m|'ll|'d)", CONTRACTIONS);
+      if (s.type === "Digits") srcs.push(s.individual_digits ? PRE_SPLITS.digit : String.raw`\p{N}+`);
+      else if (s.type === "ByteLevel" && s.use_regex !== false) srcs.push(PRE_SPLITS.gpt2);
+      else if (s.type === "Split" && !s.invert && (s.behavior || "Isolated") === "Isolated" && s.pattern) {
+        if (s.pattern.Regex) srcs.push(s.pattern.Regex.replaceAll("(?i:'s|'t|'re|'ve|'m|'ll|'d)", CONTRACTIONS));
+        else if (s.pattern.String) srcs.push(s.pattern.String.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&"));
+      }
     }
   }
-  let re;
-  try { re = new RegExp(src, "gu"); } catch { re = new RegExp(PRE_SPLITS.gpt2, "gu"); }
-  // Digits (SmolLM) runs first: every digit is its own piece, and the regex splits the text between
-  return digits
-    ? (text) => text.split(/(\p{N})/u).flatMap((c) => (c ? c.match(re) || [] : []))
-    : (text) => text.match(re) || [];
+  let steps;
+  try { steps = srcs.map(isolate); } catch { steps = []; }
+  if (!steps.length) steps = [isolate(PRE_SPLITS.gpt2)];
+  // each step splits every piece the step before it made (SmolLM: Digits, then GPT-2)
+  return (text) => steps.reduce((pieces, step) => pieces.flatMap(step), [text]).filter(Boolean);
 }
 
 export function makeTokenizer(tj) {
