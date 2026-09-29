@@ -42,7 +42,9 @@ const NOMODEL = flag("nomodel");
 const ONLY = arg("only", "");   // comma list of scenario names to run from the plan
 const PROMPT = arg("prompt", "Explain in about a hundred words how a bicycle gear system works, then list three tips for riding up a steep hill.");
 const NEED = { "qwen3-1.7b": 2.0, "qwen3-0.6b": 0.8 }[MODEL] || 2;
-const GB = (i) => arg("gb", String(Math.ceil(NEED / DEVICES + (i === 0 ? 1 : 0.5))));
+// the first tab pledges the most, so it is the model host (the strongest device deals the layers
+// and runs the sampler); the others pledge little, and the split by memory still gives each a share
+const GB = (i) => arg("gb", String(i === 0 ? Math.ceil(NEED) + 1 : 1));
 const LOCAL = { "Qwen3-0.6B-Q8_0.gguf": "models/qwen/model.gguf", "Qwen3-1.7B-Q8_0.gguf": "models/qwen17/model.gguf" };
 // --root serves another checkout (e.g. origin/main, to compare) with this harness
 const ROOT = path.resolve(arg("root", path.resolve(new URL(".", import.meta.url).pathname, "../..")));
@@ -264,16 +266,18 @@ async function loadModel(names) {
 async function ask(hostName, { during, timeoutMs = 240000, newChat = true } = {}) {
   const host = tabs[hostName];
   if (newChat) { await host.evaluate(() => document.getElementById("new-chat").click()); await host.waitForTimeout(400); }
-  for (const p of Object.values(tabs)) await p.evaluate(() => { window.__tok = []; window.__ice = []; window.__toasts = []; }).catch(() => {});
+  // clear every status line, so the previous answer's "ready — …" does not count as this one's end
+  for (const p of Object.values(tabs)) await p.evaluate(() => { window.__tok = []; window.__ice = []; window.__toasts = []; const e = document.getElementById("ai-status"); if (e) e.textContent = ""; }).catch(() => {});
   const ts = Date.now();
   await host.evaluate((text) => { const box = document.getElementById("ai-prompt"); box.value = text; box.dispatchEvent(new Event("input")); document.getElementById("ai-send").click(); }, PROMPT);
   let dur = null;
   if (during) dur = during(ts).catch((e) => ({ err: String(e) }));
   let timedOut = false;
-  try { await host.waitForFunction(() => /^ready — |^generation failed/.test(document.getElementById("ai-status").textContent), null, { timeout: timeoutMs, polling: 100 }); }
-  catch { timedOut = true; }
+  // the answer's final status shows on the model host, which may not be the tab that asked
+  const fin = async () => { for (const p of Object.values(tabs)) { const t = await p.textContent("#ai-status").catch(() => ""); if (/^ready — |^generation failed/.test(t)) return t; } return null; };
+  let st = null;
+  while (!(st = await fin())) { if (Date.now() - ts > timeoutMs) { timedOut = true; st = await host.textContent("#ai-status"); break; } await sleep(100); }
   const tEnd = Date.now();
-  const st = await host.textContent("#ai-status");
   const toks = await host.evaluate(() => window.__tok);
   const text = await host.evaluate(() => [...document.querySelectorAll(".m.bot .bubble")].pop()?.textContent || "");
   const first = toks.find(([, L]) => L > 0);
