@@ -920,6 +920,7 @@ for (const b of document.querySelectorAll("[data-invite]")) b.addEventListener("
 // the overlays (Invite, Room card, Room over) are modal: while one is open, the page behind it is
 // inert, so Tab cycles inside the sheet and nothing behind the blur takes focus or clicks
 const overlays = [...document.querySelectorAll(".overlay")];
+let modalReturn = null;   // what had focus before an overlay that opened on its own took it
 function syncModal() {
   const open = overlays.some((o) => !o.hidden);
   for (const el of document.querySelectorAll("body > header, #join-screen, #room-screen")) el.inert = open;
@@ -928,7 +929,16 @@ function syncModal() {
   const computing = $("compute-screen")?.hidden === false;
   for (const o of overlays) o.inert = computing;
   // one that opened on its own (Room over) takes focus from the page it now covers
-  if (open && !computing && !document.activeElement?.closest?.(".overlay")) overlays.find((o) => !o.hidden).querySelector("button")?.focus({ preventScroll: true });
+  const ae = document.activeElement;
+  if (open && !computing && !ae?.closest?.(".overlay")) {
+    if (ae && ae !== document.body) modalReturn = ae;
+    overlays.find((o) => !o.hidden).querySelector("button")?.focus({ preventScroll: true });
+  }
+  // and gives it back when it closes (host back, a redeal, its close button), unless focus moved on
+  if (!open) {
+    const back = modalReturn; modalReturn = null;
+    if (back?.isConnected && (!ae || ae === document.body || ae.closest?.(".overlay"))) back.focus({ preventScroll: true });
+  }
 }
 for (const o of [...overlays, $("compute-screen")].filter(Boolean)) new MutationObserver(syncModal).observe(o, { attributes: true, attributeFilter: ["hidden"] });
 function closeShare() { $("share").hidden = true; syncModal(); if (document.body.classList.contains("in-room")) $("share-btn").focus({ preventScroll: true }); }
