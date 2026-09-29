@@ -3,7 +3,7 @@
 // request into an OpenAI or Anthropic response or stream.
 import http from "node:http";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { ApiError, bad, clientFromUA, newRid, LIMITS } from "./common.js";
+import { ApiError, bad, clientFromUA, newRid, LIMITS, cleanText } from "./common.js";
 import { parseOpenAI, openaiError, openaiResponse, OpenAIStream, openaiModels } from "./openai.js";
 import { parseAnthropic, anthropicError, anthropicResponse, AnthropicStream, anthropicModels } from "./anthropic.js";
 import { SSEWriter } from "./sse.js";
@@ -14,6 +14,13 @@ const KEEPALIVE_MS = 10000;
 // in a room of phones can take minutes before the first token. While the host holds it in its own
 // queue behind other answers (ai-queued), the wait can be long and legitimate: 30 minutes.
 const IDLE_MS = 300000, HOST_QUEUED_MS = 1800000;
+// What the bridge takes from the room for one request. The host is another person's browser tab:
+// its messages are checked, never trusted to be well formed or to stop.
+const TOKEN_CHARS = 4096;             // one ai-token's text
+const ANSWER_CHARS = 8 << 20;         // an answer's text, and its reasoning, each
+const TOKEN_SLACK = 16;               // ai-token messages allowed past max_tokens before the bridge ends it
+const REASONS = new Set(["stop", "stop_seq", "max", "ctx", "abort", "error"]);
+const count = (x) => Math.max(0, Math.floor(+x) || 0);
 const NOT_V1 = "is not available in pooled serve v1";
 
 export function createServer({ bridge, port, token = null, maxQueue = 8, log = () => {}, version = "", keepAliveMs = KEEPALIVE_MS, idleMs = IDLE_MS, hostQueuedMs = HOST_QUEUED_MS }) {
@@ -113,43 +120,61 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
       jobError(job, new ApiError("timeout", `the room sent nothing for this request in ${+(ms / 1000).toFixed(1)} s`));
     }, ms);
   }
+  // the answer is complete: the finish chunk / events, or the whole response
+  function complete(job, out) {
+    served.n++;
+    log(`${job.label}: ${out.usage.in} prompt + ${out.usage.out} tokens, ${out.reason}${out.reused ? `, ${out.reused} reused` : ""}`);
+    if (job.stream) job.sse.end(job.fmt.done(out));
+    else if (job.api === "anthropic") json(job.res, 200, anthropicResponse({ id: job.rid, model: modelId(), text: job.text, think: job.think, thinking: job.req.thinking, ...out }));
+    else json(job.res, 200, openaiResponse({ id: job.rid, created: job.created, model: modelId(), text: job.text, think: job.think, ...out }));
+    finish(job);
+  }
   function onRoom(job, d) {
     if (job.state === "done") return;
     watch(job, d.t === "ai-queued" ? hostQueuedMs : idleMs);
     switch (d.t) {
-      case "ai-queued": job.hostPos = d.pos; return;
+      case "ai-queued": job.hostPos = count(d.pos); return;
       case "ai-genstart":
-        job.state = "streaming"; job.promptTokens = d.promptTokens;
+        if (job.state === "streaming") return;
+        job.state = "streaming"; job.promptTokens = count(d.promptTokens); job.tokens = 0;
         clearInterval(job.keep);
-        if (job.stream) job.sse.write(job.api === "anthropic" ? job.fmt.start(d.promptTokens) : job.fmt.start());
+        if (job.stream) job.sse.write(job.api === "anthropic" ? job.fmt.start(job.promptTokens) : job.fmt.start());
         return;
-      case "ai-token":
-        if (job.stream) job.sse.write(job.fmt.token(d.text, !!d.th));
-        else if (d.th) job.think += d.text; else job.text += d.text;
+      case "ai-token": {
+        if (job.state !== "streaming" || typeof d.text !== "string" || d.text.length > TOKEN_CHARS) return;
+        job.tokens++;
+        const th = !!d.th;
+        if (th) job.thinkChars = (job.thinkChars || 0) + d.text.length; else job.textChars = (job.textChars || 0) + d.text.length;
+        // a room that keeps sending past max_tokens (or an answer too big to hold) is cut off here
+        if (job.tokens > job.req.maxTokens + TOKEN_SLACK || job.thinkChars > ANSWER_CHARS || job.textChars > ANSWER_CHARS) {
+          bridge.stop(job.rid);
+          log(`${job.label}: the room sent more than was asked for; ended it`);
+          complete(job, { reason: "max", usage: { in: job.promptTokens, out: job.tokens - 1 }, reused: 0 });
+          return;
+        }
+        if (job.stream) job.sse.write(job.fmt.token(d.text, th));
+        else if (th) job.think += d.text; else job.text += d.text;
         return;
+      }
       case "ai-gendone": {
-        const usage = { in: d.usage?.in ?? job.promptTokens ?? 0, out: d.usage?.out ?? 0 };
-        if (d.reason === "error" || (d.failed && !d.reason)) { jobError(job, new ApiError("server", `generation failed in the room: ${d.err || "unknown error"}`)); return; }
+        const usage = { in: d.usage?.in != null ? count(d.usage.in) : job.promptTokens || 0, out: count(d.usage?.out) };
+        const reason = REASONS.has(d.reason) ? d.reason : d.failed ? "error" : "stop";
+        if (reason === "error") { jobError(job, new ApiError("server", `generation failed in the room: ${cleanText(d.err, 300) || "unknown error"}`)); return; }
         // the host pressed Stop (the only abort a live client sees): a cut-off answer must not read as a
         // finished one, so it ends as an error (an error event, or 503 / 529), never with stop / end_turn
-        if (d.reason === "abort") { jobError(job, new ApiError("unavailable", `the room's host stopped this answer after ${usage.out} tokens`)); return; }
-        const out = { reason: d.reason, stopSeq: d.stopSeq, usage, reused: d.reused || 0 };
-        served.n++;
-        log(`${job.label}: ${usage.in} prompt + ${usage.out} tokens, ${d.reason}${d.reused ? `, ${d.reused} reused` : ""}`);
-        if (job.stream) job.sse.end(job.fmt.done(out));
-        else if (job.api === "anthropic") json(job.res, 200, anthropicResponse({ id: job.rid, model: modelId(), text: job.text, think: job.think, thinking: job.req.thinking, ...out }));
-        else json(job.res, 200, openaiResponse({ id: job.rid, created: job.created, model: modelId(), text: job.text, think: job.think, ...out }));
-        finish(job);
+        if (reason === "abort") { jobError(job, new ApiError("unavailable", `the room's host stopped this answer after ${usage.out} tokens`)); return; }
+        const stopSeq = reason === "stop_seq" && job.req.stop.includes(d.stopSeq) ? d.stopSeq : null;
+        complete(job, { reason, stopSeq, usage, reused: Math.min(count(d.reused), usage.in) });
         return;
       }
       case "ai-busy": {
-        const code = d.code;
-        const e = code === "gone" ? new ApiError("unavailable", d.why ? `the room dropped the request: ${d.why}` : "the room dropped the request", { retryAfter: 5 })
-          : code === "queue" ? new ApiError("busy", `the room's queue is full: ${d.why || "try again later"}`, { retryAfter: 5 })
-          : code === "ctx" ? new ApiError("ctx", job.api === "anthropic" ? `prompt is too long: ${d.n} tokens > ${d.max} maximum`
-            : `This model's maximum context length is ${d.max} tokens. However, your messages resulted in ${d.n} tokens.`, { param: "messages" })
-          : code === "bad" ? bad(d.why || "the room refused the request")
-          : new ApiError("unavailable", d.why || "the room cannot answer now", { retryAfter: 5 });
+        const code = d.code, why = cleanText(d.why, 300);
+        const e = code === "gone" ? new ApiError("unavailable", why ? `the room dropped the request: ${why}` : "the room dropped the request", { retryAfter: 5 })
+          : code === "queue" ? new ApiError("busy", `the room's queue is full: ${why || "try again later"}`, { retryAfter: 5 })
+          : code === "ctx" ? new ApiError("ctx", job.api === "anthropic" ? `prompt is too long: ${count(d.n)} tokens > ${count(d.max)} maximum`
+            : `This model's maximum context length is ${count(d.max)} tokens. However, your messages resulted in ${count(d.n)} tokens.`, { param: "messages" })
+          : code === "bad" ? bad(why || "the room refused the request")
+          : new ApiError("unavailable", why || "the room cannot answer now", { retryAfter: 5 });
         jobError(job, e);
         return;
       }

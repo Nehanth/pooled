@@ -139,3 +139,31 @@ test("a known path with the wrong method is 405 with Allow; an unknown one 404",
   assert.equal((await t.req("GET", "/v1/nope")).status, 404);
   await t.close();
 });
+
+test("a room that floods tokens, sends non-text or odd usage cannot blow up the response", async () => {
+  const t = await start();
+  t.bridge.onAsk = (rid, h) => setImmediate(() => {
+    h({ t: "ai-genstart", rid, promptTokens: "x" });
+    h({ t: "ai-token", rid, text: { o: 1 } });
+    h({ t: "ai-token", rid, text: "y".repeat(5000) });
+    for (let i = 0; i < 200000; i++) h({ t: "ai-token", rid, text: "A" });
+    h({ t: "ai-gendone", rid, reason: "stop", usage: { in: "1", out: "2" } });
+  });
+  const r = await t.req("POST", "/v1/chat/completions", { body: chatBody({ max_tokens: 3 }) });
+  const j = JSON.parse(r.body);
+  assert.equal(j.choices[0].message.content, "A".repeat(3 + 16), "max_tokens plus the slack, then cut");
+  assert.equal(j.choices[0].finish_reason, "length");
+  assert.deepEqual(j.usage, { prompt_tokens: 0, completion_tokens: 19, total_tokens: 19 });
+  assert.ok(t.bridge.stopped.length === 1, "the room was told to stop");
+
+  t.bridge.onAsk = (rid, h) => setImmediate(() => {
+    h({ t: "ai-genstart", rid, promptTokens: 9 });
+    h({ t: "ai-token", rid, text: "ok" });
+    h({ t: "ai-gendone", rid, reason: "weird", stopSeq: "nope", usage: { in: "12", out: -4 }, reused: 1e9 });
+  });
+  const m = JSON.parse((await t.req("POST", "/v1/messages", { body: msgBody({ stop_sequences: ["END"] }) })).body);
+  assert.equal(m.stop_reason, "end_turn");
+  assert.equal(m.stop_sequence, null);
+  assert.deepEqual(m.usage, { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 12 });
+  await t.close();
+});
