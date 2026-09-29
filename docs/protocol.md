@@ -7,7 +7,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | Message | Direction | Meaning |
 |---|---|---|
 | `ai-wait` | host → worker | join accepted; wait for assignment |
-| `ai-load {model, range, next, host}` | host → worker | download and load layers `[range[0], range[1])`; forward to `next` |
+| `ai-load {v, model, range, next, host}` | host → worker | download and load layers `[range[0], range[1])`; forward to `next`. A worker on another protocol `v` refuses it with `ai-error` instead of loading |
 | `ai-progress {pct}` / `ai-hostprog` | worker ↔ host | download progress for the room UI |
 | `ai-ready` / `ai-ready-all` | worker → host / host → all | layers loaded; room online |
 | `ai-reset` | host → all | "new chat": the host forgot the conversation; screens clear the transcript. It does **not** reset any engine: devices keep their caches between questions (multi-turn), and a reset rides on the next frame instead (see compute frames) |
@@ -58,7 +58,7 @@ The host owns the conversation: `{system, turns}` rendered to ChatML ids by `roo
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `hello {name, meta, v, died?}` | both ways on every link | `v` is the protocol version; a mismatch gets `bye {reason}` and the newcomer is told to reload. `died` is a joiner's crumb from a tab that was killed (surfaced on the host) |
+| `hello {name, meta, v, died?}` | both ways on every link | `v` is the protocol version; on a mismatch each side says which one is older and who should reload (room/errors.js), and sends that as `bye {reason}` for a tab too old to word it itself. `died` is a joiner's crumb from a tab that was killed (surfaced on the host) |
 | `hello {…, back: 1}` | returning guest → host | a device reconnecting to a host that resumed the room (it keeps its transcript, so no `ai-history`) |
 | `leaving` | all → all | sent on `pagehide`; the receiver closes the link at once instead of waiting for ICE to notice (tens of seconds), so a departure mid-answer fails within a lap |
 

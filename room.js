@@ -19,6 +19,7 @@ const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // prefilling the whole conversation again. 0 turns it off.
 const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("ckpt") ?? "2", 10) || 0);
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "./room/transport.js";
+import { peerErrorText, peerErrorLoud, FetchError, joinStep, versionMismatch } from "./room/errors.js";
 import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
 import { planSplit, planForSpeed, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
 import { qrSVG } from "./room/qr.js";
@@ -46,7 +47,7 @@ const cards = new Map();     // id -> card element
 
 const $ = (id) => document.getElementById(id);
 // a short note top right that goes by itself; at most three at a time (the oldest goes first).
-// sw: a device's colour for the dot (joined / left)
+// sw: a device's colour for the dot (joined / left); kind "error" stays twice as long, to be read
 function toast(text, { sw = null, kind = "" } = {}) {
   const box = $("toasts"), t = document.createElement("div");
   t.className = "toast" + (kind ? " " + kind : "");
@@ -54,7 +55,7 @@ function toast(text, { sw = null, kind = "" } = {}) {
   t.textContent = text;
   box.appendChild(t);
   while (box.children.length > 3) box.firstElementChild.remove();
-  setTimeout(() => t.remove(), 4200);
+  setTimeout(() => t.remove(), kind === "error" ? 8400 : 4200);
 }
 // someone joined or left: a toast, but not for the devices already here when this tab came in
 let roomSince = Infinity;
@@ -537,11 +538,7 @@ function onData(from, d) {
   switch (d.t) {
     case "hello":
       // one protocol per room: a tab from an older or newer deploy is told to reload
-      if (d.v !== PROTOCOL) {
-        sendTo(from, { t: "bye", reason: `this room runs Pooled protocol ${PROTOCOL} and your tab runs ${d.v ?? 1}: reload both pages so they match` });
-        log("room", `${d.name || from} runs a different Pooled version (protocol ${d.v ?? 1}); asked it to reload`);
-        break;
-      }
+      if (d.v !== PROTOCOL) { versionRefused(from, d); break; }
       // a peer picks its own name: keep it a short plain string (it is also escaped wherever it is shown)
       d.name = String(d.name ?? from).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(from).slice(0, 8);
       e.name = d.name; e.meta = d.meta;
@@ -560,6 +557,7 @@ function onData(from, d) {
       conns.get(from)?.conn.close();
       break;
     case "bye":
+      if (versionSeen.has(from)) break;   // a version mismatch this tab already explained in its own words
       toast(d.reason);
       log("room", d.reason);
       if (from === PREFIX + roomCode) { $("room-over").hidden = false; $("room-over-h").textContent = "Room over"; $("room-over-why").textContent = d.reason; }
@@ -615,6 +613,20 @@ function onData(from, d) {
       log("room", `bandwidth to ${e.name}: ${d.mbps} Mbps`);
       break;
   }
+}
+
+// A peer on another protocol version (its hello): say which side is older and who should reload,
+// here and (as the bye reason) on its screen. The link stays up but the peer never joins the room.
+const versionSeen = new Set();
+function versionRefused(from, d) {
+  const theyHost = !isHost && from === PREFIX + roomCode;
+  const name = String(d.name ?? "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || "A device";
+  const { local, remote } = versionMismatch({ mine: PROTOCOL, theirs: d.v, name, theyHost, me: myName, iAmHost: isHost });
+  versionSeen.add(from);
+  sendTo(from, { t: "bye", reason: remote });
+  toast(local, { kind: "error" });
+  log("room", local);
+  if (theyHost) { $("room-over").hidden = false; $("room-over-h").textContent = "Different version"; $("room-over-why").textContent = local; }
 }
 
 function broadcastRoster() {
@@ -723,14 +735,16 @@ async function start(create, resume = null) {
     // joiner: connect to host
     $("join-status").textContent = "Reaching the other devices…";
     const conn = peer.connect(PREFIX + code, { reliable: true });
-    const timeout = setTimeout(() => {
-      const ice = conn.peerConnection?.iceConnectionState;
-      joinFailed(ice === "checking" || ice === "failed" || ice === "disconnected"
-        ? "found the room, but the direct connection failed (strict NAT/firewall on one side). Trying a relay: give it ~20 s, or try another network"
-        : "no room with that code (is the host page open?)");
-    }, 15000);
+    // "still connecting" after a few seconds; more time while the two devices are still finding a path
+    const t0 = performance.now();
+    const timeout = setInterval(() => {
+      if (!$("join-btn").disabled) { clearInterval(timeout); return; }   // failed already (peer.on("error"))
+      const step = joinStep(performance.now() - t0, conn.peerConnection?.iceConnectionState);
+      if (step.fail) { clearInterval(timeout); joinFailed(step.fail); }
+      else if (step.status) $("join-status").textContent = step.status;
+    }, 1000);
     conn.on("open", () => {
-      clearTimeout(timeout);
+      clearInterval(timeout);
       wire(conn, "host", undefined, true);
       let died = null;
       if (!VQ.get("embed")) try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c && Date.now() - c.t < 10 * 60 * 1000) died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000) }; } catch {}
@@ -760,10 +774,13 @@ async function start(create, resume = null) {
       setTimeout(() => start(true, resume), 3000);
       return;
     }
-    if ($("room-screen").style.display === "flex") { $("join-status").textContent = "error: " + err.type; return; }   // in the room already: not a join failure
-    joinFailed(err.type === "unavailable-id" ? "that code is already hosting a room: press Join instead"
-      : err.type === "peer-unavailable" ? "no room with that code"
-      : "error: " + err.type);
+    if ($("room-screen").style.display === "flex") {   // in the room already: not a join failure
+      const text = peerErrorText(err.type, { inRoom: true });
+      log("room", text);
+      if (peerErrorLoud(err.type)) toast(text, { kind: "error" });
+      return;
+    }
+    joinFailed(peerErrorText(err.type));
   });
 }
 
@@ -961,8 +978,10 @@ async function rangeFetch(url, lo, hi, noCache = false) {
     } catch (err) { crumb(`peer weights from ${conns.get(src)?.name || src} failed (${err.message}); using the network`); ai.wsrc.map.delete(lo + "-" + hi); }
   }
   ai.netBytes = (ai.netBytes || 0) + (hi - lo + 1);
-  const r = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } });
-  if (r.status !== 206) throw new Error("model host refused range requests");
+  let r;
+  try { r = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } }); }
+  catch { throw new FetchError(0, url); }   // offline, CORS or a blocked host: no status to go on
+  if (r.status !== 206) throw new FetchError(r.status, url);
   if (c && !myMeta?.phone) {   // phones skip the store (no spare RAM for the copy); Cache API refuses 206s, so store as a plain 200
     try {
       // buffer the copy fully first, so a complete body is the only thing that ever gets stored
@@ -1427,7 +1446,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   ai.firstGpuError = null;
   ai.peerBytes = 0; ai.netBytes = 0; cacheHits = 0;   // per load: a count left from an earlier load in this tab mislabels the status
   const adapter = await navigator.gpu?.requestAdapter();
-  if (!adapter) throw new Error("no WebGPU on this device");
+  if (!adapter) throw new Error("This browser has no WebGPU, so this device can't hold layers. Open the room in a recent Chrome, Edge or Safari, or run the model from another device");
   ai.device = await adapter.requestDevice({
     requiredLimits: {
       maxBufferSize: myMeta?.phone ? Math.min(adapter.limits.maxBufferSize, 256 * 2 ** 20) : adapter.limits.maxBufferSize,
@@ -1716,7 +1735,7 @@ async function aiStart(modelArg) {
     ai.wsrc = M.gguf ? weightSources(M.gguf, inv) : null;
     ai.chain.forEach((id, i) => {
       const msg = {
-        t: "ai-load", model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX,
+        t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX,
         next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host",
         host: peer.id,
         inv,
@@ -1863,7 +1882,7 @@ function aiMaybeReady() {
 // state(s), or rejects on timeout or as soon as a device in the chain leaves.
 function lapWait(key, ms, what) {
   return new Promise((res, rej) => {
-    const timer = setTimeout(() => { ai.waiters.delete(key); rej(new Error(`pipeline timeout (${what})`)); }, ms);
+    const timer = setTimeout(() => { ai.waiters.delete(key); rej(new Error(`pipeline timeout (${what}): a device in the room stopped answering. Check that every device's tab is open with its screen on, then ask again`)); }, ms);
     ai.waiters.set(key, {
       res: (h) => { clearTimeout(timer); res(h); },
       rej: (e) => { clearTimeout(timer); rej(e); },
@@ -2798,6 +2817,13 @@ async function aiOnData(from, d) {
     if (from !== (ai.hostId || PREFIX + roomCode)) return;
   }
   if (d.t === "ai-load" && ai.role === "host") return;
+  // layers dealt by a host on another protocol would fail as NaNs or timeouts: refuse them out loud
+  if (d.t === "ai-load" && d.v != null && d.v !== PROTOCOL) {
+    const { local, remote } = versionMismatch({ mine: PROTOCOL, theirs: d.v, theyHost: true, me: myName });
+    toast(local, { kind: "error" }); aiStatus(local);
+    sendTo(from, { t: "ai-error", message: remote });
+    return;
+  }
   // returned hidden states are only accepted from the end of the chain
   if ((d.t === "ai-hiddenret" || d.t === "ai-hiddenret-b") && from !== ai.chain[ai.chain.length - 1]) return;
   switch (d.t) {
