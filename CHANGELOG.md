@@ -5,7 +5,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 ## [Unreleased]
 
 ### Added
-- **`pooled serve`: a room as a local OpenAI and Anthropic endpoint** (roadmap 04, `cli/`, package `@pooled/cli`, not published yet). `npx @pooled/cli serve ABCD` joins the room as an API client with no layers and serves `POST /v1/chat/completions` and `POST /v1/messages` (streaming and not), `GET /v1/models` and `/health` on 127.0.0.1, so Continue, Open WebUI, LiteLLM, the `openai` / `anthropic` SDKs and curl run on the room's model. Requests share the room's one queue; a client's follow-up turn reuses the room's caches (exact sampled ids), so only the new turn is prefilled. `temperature`, `top_k`, `max_tokens`, stop sequences and thinking map onto the room's sampler; tools, images, `n > 1` and JSON mode get a clear 400. Host and Origin checks against web pages, optional `--token`.
+- **`pooled serve`: a room as a local OpenAI and Anthropic endpoint** (roadmap 04, `cli/`, package `@pooled/cli`, not published yet). `npx @pooled/cli serve ABCD` joins the room as an API client with no layers and serves `POST /v1/chat/completions` and `POST /v1/messages` (streaming and not), `GET /v1/models` and `/health` on 127.0.0.1, so Continue, Open WebUI, LiteLLM, the `openai` / `anthropic` SDKs and curl run on the room's model. Requests share the room's one queue; a client's follow-up turn reuses the room's caches (exact sampled ids), so only the new turn is prefilled. `temperature`, `top_k`, `max_tokens`, stop sequences and thinking map onto the room's sampler; tools, images, `n > 1` and JSON mode get a clear 400. Host and Origin checks against web pages, an optional token (`POOLED_TOKEN`). Prompts go to the room's host and follow the room's visibility (see cli/README.md, "Who sees your prompts").
 - **In the room**: API clients get their own card ("API client · Continue") and are not counted as devices; the host can disconnect one or switch API clients off; the room menu's **Use from code** panel gives the command for the room. API exchanges show in the chat marked "via API · not part of this chat's memory" and follow the room's visibility (the asking client always gets its whole answer). Protocol: new fields on existing messages, `PROTOCOL` stays 4 ([docs/protocol.md](docs/protocol.md#api-clients)).
 
 ### Changed
@@ -14,6 +14,10 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
   - Apple GPUs in Chrome and Safari get wider fused MoE expert kernels (`moeFusedLayout`; M5 Max kernel time: gate/up 0.49x, down 0.55x). Qwen 3.6 35B decode in Chrome on an M5 Max: +5.6% plain (86.1 -> 90.9 tok/s), +11% spec.
   - `moe_route` is 1.6-1.9x faster on every GPU (GB10 and M5 Max) and gives the same bits.
   - Other GPUs keep their output bits. MoE output on Apple still matches llama.cpp, and spec == plain.
+
+### Fixed
+- **Room chat: emoji and non-Latin text no longer show broken characters (U+FFFD)** while an answer streams: a character split across two tokens is sent once it is whole.
+- **The tokenizer no longer freezes the host on one very long word**: merging was quadratic in a word's length (a 32,000-letter run took 18 s on the host's main thread); it now takes 42 ms, with the same tokens.
 
 ## [1.0.0] - 2026-09-27
 
