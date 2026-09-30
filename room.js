@@ -4191,7 +4191,9 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
         const roomLeft = ctxMax() - ai.pos - 2;
         if (roomLeft < 0) { capped = true; break; }
         const ctxNow = [...(ai.fed || []), next], kMax = Math.min(ai.engine.maxDrafts || 7, roomLeft, maxNew - count);
-        let lk = LOOKUP ? lookupDrafts(ctxNow, kMax) : [], via = 2;
+        // a lookup guess that is wrong still costs its verify columns: up to 3 drafts (one batched pass
+        // per device) until a run is accepted in full (a copy in progress), then up to 7
+        let lk = LOOKUP ? lookupDrafts(ctxNow, ai.lkFullD ? kMax : Math.min(3, kMax)) : [], via = 2;
         // nothing to copy: the draft model's guesses, when there is one (?draft=)
         if (!lk.length && ai.draft && kMax > 0) { lk = await ai.draft.propose(ctxNow, Math.min(DRAFT_K, kMax)); via = 1; }
         let toks;
@@ -4202,7 +4204,9 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
           ai.pos = ai.engine.pos;
           ai.lastHidden = ai.engine.lastHidden;
           if (via === 2) copied += toks.length - 1;
+          ai.lkFullD = via === 2 && toks.length === lk.length + 1;
         } else {
+          ai.lkFullD = false;
           const lg = await aiPipeToken(next, true, undefined, desc);
           toks = [sample(lg)];
         }

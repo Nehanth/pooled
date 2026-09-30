@@ -628,6 +628,12 @@ export class DenseEngine {
     const uGlueBNN = this.fuseOn ? U([B.q.stride / 4, B.k.stride / 4, B.v.stride / 4, 0]) : null;
     const uGlueB1 = this.fuseOn && this.mergeQKV ? U([B.q.stride / 4, B.k.stride / 4, B.v.stride / 4, 0, qDim, 0, 0, 0]) : null;
     const uNormB = this.fuseOn ? U([dim, B.x.stride / 4, B.xn.stride / 4, 0]) : null;
+    // the verify head: final norm + LM head for 4 columns with one read of the head weights, with the
+    // exact ops (bit-identical per column to headFromHidden, like the layers' verify ops)
+    if (this.hasHead && this.verifyX && this.fuseOn) {
+      B.logits = mkB(this.dims.vocab);
+      this.headVX = { norm: this._bg(this.pipes.rmsnorm_dmc, 1, [B.x.buf, this.finalNorm.buf, B.xn.buf, uNormB]), op: mvB(this.headEntry, B.xn, B.logits, this.dims.vocab, dim, false, "_x") };
+    }
     // per-layer batched resources
     this.layerB = this.layers.map((L) => {
       const bgNormC = (xB, w, yB, c) => this._bg2res(this.pipes.rmsnorm,
@@ -919,9 +925,10 @@ export class DenseEngine {
     return await this._readback(this.logits, this.stageLogits, vocab);
   }
 
-  // final norm + LM head for n hiddens (n * dim floats) in ONE submit and one readback, column by
-  // column with the single-token kernels, so each column's logits are bit-identical to
-  // headFromHidden's -> array of n logits vectors
+  // final norm + LM head for n hiddens (n * dim floats) in ONE submit and one readback -> array of n
+  // logits vectors, each bit-identical to headFromHidden's. With the exact verify ops (verifyX) the
+  // head weights are read once per 4 columns (headVX); otherwise column by column with the
+  // single-token kernels. engine.batchHead = false forces the latter (A/B).
   async headBatch(hs, n = hs.length / this.dims.dim) {
     const { dim, vocab } = this.dims;
     const dev = this.device;
@@ -933,9 +940,21 @@ export class DenseEngine {
       this.stageLogitsN?.destroy();
       this.stageLogitsN = dev.createBuffer({ size: Math.max(8, n) * vocab * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     }
+    if (this.hasEmbed && !this.B) this._initBatch();
     dev.queue.writeBuffer(this.hsIn, 0, hs, 0, n * dim);
     const enc = dev.createCommandEncoder();
-    for (let c = 0; c < n; c++) {
+    if (this.headVX && this.batchHead !== false) {
+      const B = this.B, V = this.headVX;
+      for (let c0 = 0; c0 < n; c0 += 4) {
+        const m = Math.min(4, n - c0);
+        for (let c = 0; c < m; c++) enc.copyBufferToBuffer(this.hsIn, (c0 + c) * dim * 4, B.x.buf, c * B.x.stride, dim * 4);
+        const pass = enc.beginComputePass();
+        pass.setPipeline(this.pipes.rmsnorm_dmc); pass.setBindGroup(0, this.bgCommonB[0].rmsnorm_dmc); pass.setBindGroup(1, V.norm); pass.dispatchWorkgroups(1, m);
+        this._dispatchOp(pass, V.op);
+        pass.end();
+        for (let c = 0; c < m; c++) enc.copyBufferToBuffer(B.logits.buf, c * B.logits.stride, this.stageLogitsN, (c0 + c) * vocab * 4, vocab * 4);
+      }
+    } else for (let c = 0; c < n; c++) {
       enc.copyBufferToBuffer(this.hsIn, c * dim * 4, this.x, 0, dim * 4);
       const pass = enc.beginComputePass();
       this._dispatch(pass, "rmsnorm", this.bgFinalNorm, 256, 256);

@@ -129,13 +129,14 @@ async function spec(T, ids, sample, ref, dm = null) {
   let lg = await T.step(ids[ids.length - 1]);
   const ctx = [...ids];
   const toks = [];
-  let bitDiff = 0, cols = 0, laps = 0;
+  let bitDiff = 0, cols = 0, laps = 0, full = false;
   const cmp = (lgk, at) => { if (!ref || !ref.bits[at]) return; cols++; const a = new Uint32Array(lgk.buffer, lgk.byteOffset, lgk.length), b = ref.bits[at]; for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { bitDiff++; break; } };
   cmp(lg, 0);
   const t0 = performance.now();
   let next = sample(lg); toks.push(next);
   while (!EOS.has(next) && toks.length < N) {
-    let lk = lookupDrafts([...ctx, next], Math.min(E.maxDrafts, N - toks.length));
+    // as the room: up to 3 lookup drafts until a run is accepted in full, then up to maxDrafts
+    let lk = lookupDrafts([...ctx, next], Math.min(full ? E.maxDrafts : 3, N - toks.length));
     if (!lk.length && dm) lk = await dm.propose([...ctx, next], Math.min(DRAFTK, N - toks.length));
     laps++;
     let out;
@@ -149,6 +150,7 @@ async function spec(T, ids, sample, ref, dm = null) {
       cmp(lg, toks.length);
       out = [sample(lg)];
     }
+    full = lk.length > 0 && out.length === lk.length + 1;
     ctx.push(next, ...out.slice(0, -1));
     for (const t of out) { if (toks.length >= N) break; toks.push(t); if (EOS.has(t)) break; }
     next = toks[toks.length - 1];
