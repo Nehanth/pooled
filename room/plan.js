@@ -3,11 +3,16 @@
 // Deal L layers over devices in proportion to what each can hold. caps: bytes each device offers
 // for layers (host first; the host's cap already has the embedding, head and draft block taken
 // out). Every device gets at least one layer; rounding leftovers go to the largest remainders.
-// Returns { assigned: [count per device], ranges: [[lo, hi) per device] }.
-export function planSplit(L, caps) {
+// max (optional): the most layers each device may hold (its pledge in whole layers, room/plan.js
+// layerCaps). With it no device ever gets more than its max: what a full device cannot take goes to
+// the others with room, a device with max 0 holds nothing, and when the maxes cannot hold all L
+// layers the deal is not made (`short` says how many layers are missing; the room must not start).
+// Returns { assigned: [count per device], ranges: [[lo, hi) per device], short }.
+export function planSplit(L, caps, max = null) {
   // a cap that is not a positive number (a malformed pledge) counts as nothing; when nobody
   // offers anything the layers are dealt evenly instead of dividing by zero
   caps = caps.map((c) => (Number.isFinite(c) && c > 0 ? c : 0));
+  if (max) return splitWithin(L, caps, max.map((m) => (Number.isFinite(m) && m > 0 ? Math.floor(m) : 0)));
   const top = Math.max(0, ...caps);
   if (top > 0) caps = caps.map((c) => c / top);   // only the ratios matter; keeps L * c finite
   let totalCap = caps.reduce((s, c) => s + c, 0);
@@ -20,12 +25,76 @@ export function planSplit(L, caps) {
   // take a layer from a device that keeps one: with fewer layers than devices the last ones wait
   for (let i = 0; i < assigned.length; i++)
     if (assigned[i] === 0) { const j = assigned.indexOf(Math.max(...assigned)); if (assigned[j] > 1 || (i === 0 && L > 0)) { assigned[j]--; assigned[i]++; } }
-  const ranges = [];
-  let acc = 0;
-  for (const a of assigned) { ranges.push([acc, acc + a]); acc += a; }
-  return { assigned, ranges };
+  return { assigned, ranges: rangesOf(assigned), short: 0 };
+}
+const rangesOf = (assigned) => { const r = []; let acc = 0; for (const a of assigned) { r.push([acc, acc + a]); acc += a; } return r; };
+
+// planSplit with a most-layers-per-device: in proportion to caps, each device held to its max, the
+// excess dealt again over the devices with room (in proportion too), rounding leftovers to the
+// largest remainders among devices with room. The host keeps at least one layer; a device whose
+// max is 0 holds none; the others get one each while there are layers enough.
+function splitWithin(L, caps, max) {
+  const n = caps.length, assigned = new Array(n).fill(0);
+  if (!n || L <= 0) return { assigned, ranges: rangesOf(assigned), short: Math.max(0, L) };
+  const room = max.reduce((s, m) => s + m, 0);
+  if (max[0] < 1 || room < L) return { assigned, ranges: rangesOf(assigned), short: Math.max(L - room, max[0] < 1 ? 1 : 0) };
+  // weights: the byte caps' ratios, or even when none is given; a device with room but no weight
+  // (a malformed cap next to a whole max) still counts a little so it can take an overflow
+  const top = Math.max(0, ...caps);
+  const w = caps.map((c, i) => (max[i] > 0 ? (top > 0 ? Math.max(c / top, 1e-9) : 1) : 0));
+  let left = L;
+  // water-fill by weight: every round deals what is left over the devices still below their max
+  for (let guard = 0; left > 0 && guard < n + 2; guard++) {
+    const open = [...Array(n).keys()].filter((i) => assigned[i] < max[i]);
+    const tw = open.reduce((s, i) => s + w[i], 0);
+    const want = open.map((i) => ({ i, x: left * w[i] / tw }));
+    let dealt = 0;
+    for (const { i, x } of want) { const t = Math.min(Math.floor(x), max[i] - assigned[i]); assigned[i] += t; dealt += t; }
+    left -= dealt;
+    if (left > 0) {
+      // rounding leftovers: largest remainders among devices that still have room
+      const fr = want.filter(({ i }) => assigned[i] < max[i]).map(({ i, x }) => ({ i, f: x - Math.floor(x) })).sort((a, b) => b.f - a.f || a.i - b.i);
+      for (const { i } of fr) { if (left <= 0) break; assigned[i]++; left--; }
+    }
+  }
+  // then, as planSplit does, every device with room holds a layer (the host first), taken from the
+  // device holding the most while it keeps one: with fewer layers than devices the last ones wait
+  for (let i = 0; i < n; i++)
+    if (assigned[i] === 0 && max[i] > 0) { const j = assigned.indexOf(Math.max(...assigned)); if (assigned[j] > 1 || (i === 0 && j !== 0)) { assigned[j]--; assigned[i]++; } }
+  return { assigned, ranges: rangesOf(assigned), short: 0 };
 }
 
+// How many whole layers each device can hold within its pledge. pledges: bytes each device lends
+// (host first); layerBytes: one layer with its share of the KV cache at the room's context;
+// hostBytes: what the model host holds besides its layers (the embedding, the output head, the
+// draft block: room/models.js hostHeldBytes). A pledge is a promise: nobody is dealt more than this.
+export function layerCaps(pledges, layerBytes, hostBytes = 0) {
+  return pledges.map((p, i) => {
+    const b = (Number.isFinite(p) && p > 0 ? p : 0) - (i === 0 ? hostBytes : 0);
+    return layerBytes > 0 && b > 0 ? Math.floor(b / layerBytes + 1e-9) : 0;
+  });
+}
+
+// Whether a room's pledges hold a model, and if not by how much they fall short. Same arguments as
+// layerCaps plus L. Returns { fits, caps, missing, short, raise }: caps in layers per device,
+// missing layers, short = the fewest extra bytes one device could add to make it fit (0 when it
+// fits), raise[i] = the extra bytes device i alone would have to add (Infinity when it alone can't:
+// the host must hold the embedding and head plus a layer before anyone else's layers count).
+export function roomFit(L, pledges, layerBytes, hostBytes = 0) {
+  const caps = layerCaps(pledges, layerBytes, hostBytes);
+  const has = caps.reduce((s, c) => s + c, 0);
+  const hostOk = caps[0] >= 1;
+  const missing = Math.max(0, L - has, hostOk ? 0 : 1);
+  if (!missing) return { fits: true, caps, missing: 0, short: 0, raise: caps.map(() => 0) };
+  const p = (i) => (Number.isFinite(pledges[i]) && pledges[i] > 0 ? pledges[i] : 0);
+  const others = has - caps[0];
+  const raise = caps.map((c, i) => {
+    if (i === 0) return hostBytes + Math.max(1, L - others) * layerBytes - p(0);
+    if (!hostOk) return Infinity;
+    return (c + (L - has)) * layerBytes - p(i);
+  }).map((b) => (b === Infinity ? b : Math.max(1, Math.ceil(b))));
+  return { fits: false, caps, missing, short: Math.min(...raise), raise };
+}
 // What this room can run, smallest model first: [{ key, need, ok, short }]. short is how many
 // more GB the room needs for that model (0 when it fits).
 export function ladder(needGB, pledgedGB) {
@@ -61,8 +130,9 @@ export function codeFromLocation(pathname = "", search = "", hash = "") {
 // measured yet: then fewest hops wins, biggest devices first). phone: devices that are phones;
 // until a phone is measured it counts as PHONE_COST times slower than an unmeasured computer, so
 // computers fill first. The host always keeps at least one layer (it holds the embedding and the
-// head anyway). Returns planSplit's shape plus `used`: the device indices that hold layers, in
-// the original order.
+// head anyway). No device gets more than its cap: when the caps cannot hold all L layers (or the
+// host's cap is under one layer) nothing is dealt and `short` says how many layers are missing.
+// Returns planSplit's shape plus `used`: the device indices that hold layers, in the original order.
 export const PHONE_COST = 20;   // one iPhone layer ~ 15-25 GB10 layers (docs/bench-log.md, device matrix)
 export function planForSpeed(L, caps, msPerLayer = [], phone = []) {
   caps = caps.map((c) => (Number.isFinite(c) && c > 0 ? c : 0));   // a malformed cap holds nothing
@@ -80,18 +150,12 @@ export function planForSpeed(L, caps, msPerLayer = [], phone = []) {
     const take = Math.min(left, Math.max(0, Math.floor(caps[i]) - assigned[i]));
     assigned[i] += take; left -= take;
   }
-  // nobody can hold the rest: spread it over everyone in proportion to capacity, as planSplit does
-  if (left > 0) {
-    const tot = caps.reduce((s, c) => s + Math.max(c, 1), 0);
-    const extra = caps.map((c) => Math.floor(left * Math.max(c, 1) / tot));
-    let r = left - extra.reduce((a, b) => a + b, 0);
-    for (let k = 0; r > 0; k = (k + 1) % n, r--) extra[order[k]]++;
-    extra.forEach((x, i) => { assigned[i] += x; });
-  }
-  const ranges = [];
-  let acc = 0;
-  for (const a of assigned) { ranges.push([acc, acc + a]); acc += a; }
-  return { assigned, ranges, used: assigned.map((a, i) => (a > 0 ? i : -1)).filter((i) => i >= 0) };
+  // nobody can hold the rest: the room is short. A pledge is a promise, so nothing is spread past
+  // anyone's cap (this used to spill the rest over everyone by capacity): the caller must not start
+  // and says how short the room is (roomFit). The host needs its one layer within its cap too.
+  const short = Math.max(0, left) + (caps[0] < 1 && L > 0 ? 1 : 0);
+  if (short || L <= 0) assigned.fill(0);
+  return { assigned, ranges: rangesOf(assigned), short, used: assigned.map((a, i) => (a > 0 ? i : -1)).filter((i) => i >= 0) };
 }
 
 // A phone: its own flag, or a phone user agent (the meta a device sends when it joins).
@@ -143,4 +207,70 @@ export function pickModelHost(devices) {
     if (!fast || bps(d) > bps(fast) || (bps(d) === bps(fast) && cmp(d, fast) > 0)) fast = d;
   }
   return (fast || best).id;
+}
+
+// GB for the screen, rounded up to a tenth so "short by" never undersells what is missing
+export const gbUp = (bytes) => Math.ceil(bytes / 2 ** 30 * 10 - 1e-9) / 10;
+
+// The one sentence a room that is short for a model shows under Start (and the reason a start stops).
+// label: the model's short name; fit: roomFit's result (host first); names: the devices in the same
+// order; spareGB: how much more each device could still lend (0 for a phone at its cap). Names up to
+// two devices that could close the gap alone, the host's raise first when it is the smaller one.
+export function shortNote(label, fit, names = [], spareGB = []) {
+  if (fit.fits) return "";
+  const who = givers(fit, spareGB).slice(0, 2).map(({ i, b }) => `${names[i] || "a device"} could give ${gbUp(b)} GB more`);
+  const head = `This room is ${gbUp(shortBy(fit, spareGB))} GB short for ${label}`;
+  const host = fit.caps[0] < 1 ? `; the model host (${names[0] || "the biggest device"}) needs room for the embedding, the output head and a layer` : "";
+  return `${head}${host}. Add a device or raise a pledge${who.length ? `: ${who.join(", or ")}` : ""}.`;
+}
+// the devices that could close the gap alone, fewest bytes first: [{ i, b }]
+const givers = (fit, spareGB) => fit.raise.map((b, i) => ({ i, b })).filter(({ i, b }) => b < Infinity && gbUp(b) <= (spareGB[i] || 0) + 1e-9)
+  .sort((a, b) => a.b - b.b || a.i - b.i);
+// How short a room is, in bytes, for the screen: what the device that can give the least more would
+// have to add (so "0.8 GB short" and "Laptop could give 0.8 GB more" agree), or when no device can,
+// the smallest raise anyone would need. 0 when it fits.
+export function shortBy(fit, spareGB = []) {
+  if (fit.fits) return 0;
+  const g = givers(fit, spareGB);
+  return g.length ? g[0].b : fit.short;
+}
+
+// The whole deal the model host makes at Start, from bytes: which devices hold which layers, within
+// every pledge. L layers of layerBytes each (with their KV cache at the room's context); hostBytes
+// what the host holds besides its layers (room/models.js hostHeldBytes); pledges: bytes each device
+// lends, host first; mode: "speed" (planForSpeed: fastest first, ms per layer where measured) or
+// "memory" (planSplit in proportion to pledges, phones left out while the computers can hold the
+// model unless phoneLayers); phone: which devices are phones.
+// Returns { fit, used: device indices that hold layers (host first, in order), assigned and ranges
+// for those devices, held: bytes each device in `used` holds, out: { index: "small" | "unneeded" } }.
+// When the pledges cannot hold the model nothing is dealt: fit.fits is false (fit.short, fit.raise).
+export function dealRoom({ L, layerBytes, hostBytes = 0, pledges, mode = "memory", ms = [], phone = [], phoneLayers = false }) {
+  const fit = roomFit(L, pledges, layerBytes, hostBytes);
+  const none = { fit, used: [], assigned: [], ranges: [], held: [], out: {} };
+  if (!fit.fits) return none;
+  const out = {};
+  // a device whose pledge is under one layer holds none (the host always has room: fit says so)
+  let idx = fit.caps.map((c, i) => i).filter((i) => i === 0 || fit.caps[i] >= 1);
+  fit.caps.forEach((c, i) => { if (i > 0 && c < 1) out[i] = "small"; });
+  let assigned, ranges;
+  if (mode === "speed") {
+    const sp = planForSpeed(L, idx.map((i) => fit.caps[i]), idx.map((i) => ms?.[i]), idx.map((i) => !!phone?.[i]));
+    if (sp.short) return none;
+    idx.forEach((i, k) => { if (!sp.used.includes(k)) out[i] = "unneeded"; });
+    assigned = sp.used.map((k) => sp.assigned[k]); ranges = sp.used.map((k) => sp.ranges[k]);
+    idx = sp.used.map((k) => idx[k]);
+  } else {
+    const off = phoneLayers ? [] : phonesToLeaveOut(L, idx.map((i) => fit.caps[i]), idx.map((i, k) => k > 0 && !!phone?.[i]));
+    off.forEach((k) => { out[idx[k]] = "unneeded"; });
+    idx = idx.filter((_, k) => !off.includes(k));
+    const sp = planSplit(L, idx.map((i) => pledges[i] - (i === 0 ? hostBytes : 0)), idx.map((i) => fit.caps[i]));
+    if (sp.short) return none;
+    // fewer layers than devices: the ones dealt none are not needed
+    const keep = sp.assigned.map((a, k) => (k === 0 || a > 0 ? k : -1)).filter((k) => k >= 0);
+    idx.forEach((i, k) => { if (!keep.includes(k)) out[i] = "unneeded"; });
+    assigned = keep.map((k) => sp.assigned[k]); ranges = keep.map((k) => sp.ranges[k]);
+    idx = keep.map((k) => idx[k]);
+  }
+  const held = idx.map((i, k) => assigned[k] * layerBytes + (i === 0 ? hostBytes : 0));
+  return { fit, used: idx, assigned, ranges, held, out };
 }

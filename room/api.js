@@ -504,12 +504,14 @@ export class TurnCache {
 }
 
 // Render a v2 ask to ids and check the context.
+// turnIds(j, m) (optional): the exact ids of assistant message j from the caller's own store (Code
+// mode keeps them on its turns), in place of the cache lookup.
 // -> { ids, thinking, exact, S, profile, systemLen, histKey } or { err, code: "ctx", n, max }
-export function apiPrompt2(tok, req, ctxMax, { profile, cache = null, encoder = null, model = "" }) {
+export function apiPrompt2(tok, req, ctxMax, { profile, cache = null, encoder = null, model = "", turnIds: own = null }) {
   const S = specials(tok);
   const thinking = !!req.params.thinking && S.think !== undefined;
   const h = historyHashes(req);
-  const turnIds = cache ? (j, m) => cache.get(model + "|" + h[j] + "|" + canonAnswer(m.text, m.calls), m.reasoning) : () => null;
+  const turnIds = own || (cache ? (j, m) => cache.get(model + "|" + h[j] + "|" + canonAnswer(m.text, m.calls), m.reasoning) : () => null);
   const encode = encoder ? (s) => encoder.encode(tok, s) : (s) => tok.encode(s);
   const { ids, systemLen, exact } = renderApi(tok, req, profile, { encode, turnIds, thinking });
   const max = ctxMax - API_LIMITS.reserve;
@@ -523,8 +525,14 @@ export const GARBAGE_MSG = "the room's output did not follow the tool-call forma
 // call parsing and streaming (harness/tools.js CallStream) with ai-call messages, stop strings on
 // content only, a default think budget in the forcing modes, and the exact-id cache.
 //   tt / vocabSize: token texts and vocabulary size for the grammar (harness/model-common.js tokenTexts)
+//   garbage: the grammar's garbage rule ("count", or "mass" for Code mode: harness/model-common.js)
 // -> { reason, stopSeq, usage: {in, out, think}, text, think, calls: [{name, args}], open, reused, stats, err }
-export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () => {}, cache, fallback, ctxMax, signal, tt = null, vocabSize = 0, log = () => {} }) {
+// plus, for in-process callers (Code mode, harness/core-model.js; the wire never carries them):
+//   garbage (reason is then "error" with GARBAGE_MSG), forced / forcedFree (the grammar's forced
+//   positions: all of them / the model's own choices only), openArgs (the open call's arguments so
+//   far), raw (the decoded answer), gen: { prefilled, tps, tDecode } (from generate), and ids /
+//   thinkEnd whenever the answer is exact-id reusable (what the cache would get).
+export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () => {}, cache, fallback, ctxMax, signal, tt = null, vocabSize = 0, log = () => {}, garbage: garbageRule = "count" }) {
   const { ids, thinking, S, profile } = prompt;
   const P = req.params, rid = req.rid;
   const tools = req.tools || [];
@@ -546,12 +554,13 @@ export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () =
   try {
     cs = grammar
       ? constrainedSampler(base, tools, { tokenText: tt || tokenTexts(tok), vocabSize, style, stops: [...stopIds], thinking, thinkInPrompt: !!profile.thinkInPrompt,
-        mode, allowed: P.allowed, maxCalls: P.maxCalls, parallel: P.parallel, format: P.format,
+        mode, allowed: P.allowed, maxCalls: P.maxCalls, parallel: P.parallel, format: P.format, garbage: garbageRule,
         tags: Object.fromEntries(["<tool_call>", "</tool_call>", "<think>", "</think>", "<tool_response>", "</tool_response>"].map((t) => [t, V[t]])) })
       : constrainedSampler(base, null, {});
   } catch (e) {
     return { reason: "error", stopSeq: null, usage: { in: ids.length, out: 0, think: 0 }, text: "", think: "", calls: [], open: null, reused: 0, stats: "",
-      err: `could not build the tool-call grammar: ${String(e?.message || e).slice(0, 200)}` };
+      err: `could not build the tool-call grammar: ${String(e?.message || e).slice(0, 200)}`,
+      garbage: false, forced: 0, forcedFree: 0, openArgs: null, raw: "", gen: null, ids: null, thinkEnd: 0 };
   }
   const C = cs.constraint;
   const forcing = !!C?.forcing;
@@ -648,7 +657,8 @@ export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () =
   const open = !stopper.hit && calls.open ? { i: calls.open.i, name: calls.open.name } : null;
   if (C?.broken) log("the answer left the tool-call grammar (a bug): parsed as it came");
   // exact-id reuse: an answer that ended on an end token (or the grammar's end), nothing cut or held
-  if (cache && reason === "stop" && !open && !mismatch && (text.trim() || done.length)) {
+  let exactIds = null, exactEnd = 0;
+  if (reason === "stop" && !open && !mismatch && (text.trim() || done.length)) {
     const tail = headerTail(tok, S, profile, thinking);
     let thinkEnd = tail.length;
     if (thinking) {
@@ -658,8 +668,11 @@ export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () =
       else { k = seq.indexOf(V["<tool_call>"]); if (k < 0) k = seq.length; }   // closed by a call (XML) 
       thinkEnd = tail.length + k;
     }
-    cache.put(prompt.histKey + canonAnswer(text, done), { ids: [...tail, ...seq], thinkEnd, reasoned: !!think.trim(), reasoningHash: think.trim() ? hash64(think.trim()) : "" });
+    exactIds = [...tail, ...seq]; exactEnd = thinkEnd;
+    cache?.put(prompt.histKey + canonAnswer(text, done), { ids: exactIds, thinkEnd, reasoned: !!think.trim(), reasoningHash: think.trim() ? hash64(think.trim()) : "" });
   }
   return { reason, stopSeq: stopper.hit, usage: { in: ids.length, out: count, think: thinkCount }, text, think, calls: done, open,
-    reused: r?.reused || 0, stats: r?.stats || "", err: garbage ? GARBAGE_MSG : err ? String(err.message || err) : null };
+    reused: r?.reused || 0, stats: r?.stats || "", err: garbage ? GARBAGE_MSG : err ? String(err.message || err) : null,
+    garbage, forced: cs.forced || 0, forcedFree: cs.forcedFree || 0, openArgs: open ? calls.open.args ?? "" : null, raw,
+    gen: r ? { prefilled: r.prefilled ?? null, tps: r.tps || 0, tDecode: r.tDecode ?? null } : null, ids: exactIds, thinkEnd: exactEnd };
 }

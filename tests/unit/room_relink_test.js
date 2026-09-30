@@ -25,8 +25,8 @@ class FakeConn {
   close() { this.closed++; if (this.open) { this.open = false; this.emit("close"); } }
 }
 
-const NAMES = ["watchLink", "linkDied", "relink", "retire", "chainLinkLost", "linkState", "noteLink", "linksUp"];
-function setup({ role = "host", chain = [], waiters = 0, relinkWait = 40 } = {}) {
+const NAMES = ["watchLink", "linkDied", "relink", "retire", "chainLinkLost", "linkState", "noteLink", "linksUp", "helloFor"];
+function setup({ role = "host", chain = [], waiters = 0, relinkWait = 40, pass = "", key = "" } = {}) {
   const logs = [], dialed = [], wired = [], sentTo = [], failed = [];
   const conns = new Map();
   const ai = { role, engine: role === "host" ? {} : null, chain, chainNames: chain.map((id) => "n-" + id), waiters: new Map(), fed: [1, 2, 3], hostId: role === "worker" ? "pooled-room-ABCD" : null };
@@ -34,6 +34,7 @@ function setup({ role = "host", chain = [], waiters = 0, relinkWait = 40 } = {})
   const peer = { id: role === "host" ? "pooled-room-ABCD" : "me", destroyed: false, connect(id) { const c = new FakeConn(id); c.open = false; dialed.push(c); return c; } };
   const g = {
     ai, conns, peer, PROTOCOL: 4, PREFIX: "pooled-room-", roomCode: "ABCD", myName: "me", myMeta: {}, RELINK_WAIT_MS: relinkWait,
+    isHost: role === "host", myPass: pass, joinKey: key,
     linksDown: new Map(), performance,
     log: (_f, t) => logs.push(t),
     wire: (c, name, meta, initiator) => { const e = { conn: c, name, meta, initiator, stripes: [] }; conns.set(c.peer, e); wired.push(e); return e; },
@@ -62,6 +63,22 @@ Deno.test("relink: a link whose peer connection fails is redialed by the side th
   ok(t.wired[0].initiator, "as the dialing side again (it opens the stripes)");
   const hello = c.sent.find((m) => m.t === "hello");
   ok(hello && hello.back === 1 && hello.v === 4, "and says hello as a device coming back");
+  ok(!("pass" in hello) && !("join" in hello), "to another device: no pass");
+});
+
+Deno.test("relink: the redial to the host shows the pass the host gave this device, and never to anyone else", () => {
+  const P = "AbCdEfGhIjKlMnOpQrStUv", K = "ZyXwVuTsRqPoNmLkJiHgFe";
+  const t = setup({ role: "worker", pass: P, key: K });
+  const h = t.entry("pooled-room-ABCD", true);
+  h.conn.peerConnection.set("failed");
+  const c = t.dialed[0]; c.open = true; c.emit("open");
+  const hello = c.sent.find((m) => m.t === "hello");
+  eq([hello.join, hello.pass, hello.key, hello.back], [1, P, K, 1], "the host lets it back in without asking");
+  const o = t.entry("peerC", true);
+  o.conn.peerConnection.set("failed");
+  const c2 = t.dialed[1]; c2.open = true; c2.emit("open");
+  const h2 = c2.sent.find((m) => m.t === "hello");
+  ok(!("pass" in h2) && !("key" in h2) && !("join" in h2), JSON.stringify(h2));
 });
 
 Deno.test("relink: a dial that does not open is retried, and given up after a few tries (the link then closes)", async () => {

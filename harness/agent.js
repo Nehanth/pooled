@@ -13,8 +13,17 @@
 //         preview?(args) -> { path, before, after } }   (shown to approve() for mutating tools)
 // Events (onEvent): step, delta (raw streamed text), text (visible text), call-live, tool-start,
 // tool, usage, compacted, trimmed, stopped, stuck, done, limit, card (a recovery note was added,
-// harness/cards.js).
-import { toolsSystemPrompt, toolResponses, ToolCallParser, parseCallBody, parseLooseJSON, normalizeXmlCall } from "./tools.js";
+// harness/cards.js), bare (hcore: calls written outside the call format were run).
+//
+// Two model paths (room/code.js ?hcore=0|1):
+//   generate (legacy): raw text in, parsed here with ToolCallParser; assistant turns keep the raw
+//     text, tool results are one user turn of <tool_response> blocks
+//   model (hcore, harness/core-model.js): model.ask() runs the serve v2 core (the template's tool
+//     prompt, the strict grammar, CallStream) and returns content and calls. Assistant turns are
+//     { text, sampled: [{ name, args }] } (args: the JSON text as sampled), tool-result turns also
+//     carry `results` (the array; `text` stays the <tool_response> blocks, for sizes and checks).
+//     Either path renders the other's turns (toMessages / _legacyTurns).
+import { toolsSystemPrompt, toolResponses, ToolCallParser, parseCallBody, parseLooseJSON, normalizeXmlCall, renderCalls } from "./tools.js";
 import { pickCard, hint, PRIORITY, MAX_PER } from "./cards.js";
 import { fixArgs, fixToolName } from "./argfix.js";
 
@@ -90,6 +99,25 @@ export function stubResults(text, calls) {
   });
 }
 
+// The same for a turn's results array (hcore): a result over 200 characters becomes the stub.
+export function stubResultList(results, calls) {
+  return results.map((r, k) => (r.length <= 200 ? r : `(output of ${calls?.[k] || "this call"} dropped; run it again if needed)`));
+}
+// an hcore assistant turn as legacy text: its content, then its calls as markup in `style`
+export function legacyText(t, style = "xml") {
+  if (!t.sampled?.length) return t.text;
+  const calls = t.sampled.map((c) => ({ name: c.name, arguments: looseObject(c.args) }));
+  return (t.text ? t.text + (t.text.trim() ? "\n\n" : "") : "") + renderCalls(calls, style);
+}
+// a content's trailing call-tag fragments ("<toolly_call>", "</tool_call>"), taken off
+export function stripStrayTags(s) {
+  for (let t = s; ;) { const u = t.replace(/\s*<\/?[\w.]*tool[\w.]*>?\s*$/, ""); if (u === t) return t; t = u; }
+}
+const looseObject = (s) => {
+  if (s && typeof s === "object") return s;
+  try { const v = parseLooseJSON(String(s || "").trim() || "{}", { open: true }); return v && typeof v === "object" && !Array.isArray(v) ? v : {}; } catch { return {}; }
+};
+
 export class Agent {
   // budget: tokens the conversation may take (a number, or a function when the context can change,
   // e.g. roomModel().budget); count: text -> tokens (default ~3.5 characters per token).
@@ -99,15 +127,21 @@ export class Agent {
   // idsFor(text) / adopt(text, ids): the model's exact sampled ids, for toJSON / from; idsTag() names
   // the tokenizer they belong to, so a session saved under another model re-encodes its text.
   // coach: short "what to do next" notes after a clean serve (default: JSON-style models, the small ones)
-  constructor({ generate, tools, style = "xml", system = "", maxSteps = 24, approve = async () => true, onEvent = () => {},
+  constructor({ generate = null, model = null, tools, style = "xml", system = "", maxSteps = 24, approve = async () => true, onEvent = () => {},
     budget = Infinity, count = null, maxResultChars = 6000, usage = null, idsFor = null, adopt = null, idsTag = null, coach = null }) {
-    this.generate = generate; this.tools = tools; this.style = style; this.maxSteps = maxSteps;
+    this.generate = generate; this.model = model; this.tools = tools; this.maxSteps = maxSteps;
+    this.style = style = model ? model.style : style;
     this.coach = coach ?? style === "json";
     this.budget = typeof budget === "function" ? budget : () => budget;
     this.count = count || ((t) => Math.ceil(t.length / 3.5));
     this.approve = approve; this.onEvent = onEvent; this.maxResultChars = maxResultChars;
     this.usage = usage; this.idsFor = idsFor; this.adopt = adopt; this.idsTag = idsTag;
-    this.system = toolsSystemPrompt(tools.map(({ name, description, parameters }) => ({ name, description, parameters })), { style, system });
+    this.toolDefs = tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
+    this.systemRaw = system;
+    // the system turn the model sees (for sizes and the eval's trajectories): the template's tool
+    // block (hcore) or Code's own wording (legacy)
+    if (model) { this.system = model.systemText(system, this.toolDefs); this.idsTag = idsTag ?? (model.idsTag ? () => model.idsTag() : null); }
+    else this.system = toolsSystemPrompt(this.toolDefs, { style, system });
     this.byName = new Map(tools.map((t) => [t.name, t]));
     this.reset();
   }
@@ -147,88 +181,150 @@ export class Agent {
       if (signal?.aborted) return stopped(step - 1);
       this.onEvent({ type: "step", step });
       if (this._compact(req) === "full") return full(step);
-      const P = new ToolCallParser({ schemaFor: (n) => this.byName.get(n)?.parameters });
-      let raw = "";
+      let found = [], u = null;
       shown = "";
-      const found = [];
-      try {
-        for await (const d of this.generate({ system: this.system, turns: this.turns, signal })) {
-          raw += d;
-          this.onEvent({ type: "delta", text: d, step });
-          const r = P.feed(d);
-          shown += r.text; found.push(...r.calls);
-          if (r.text) this.onEvent({ type: "text", text: r.text, step });
-          // the tool call being typed, so the UI can show code as it is written (null once it is complete)
-          if (P.inCall) this.onEvent({ type: "call-live", raw: P.buf, step });
-          else if (r.calls.length) this.onEvent({ type: "call-live", raw: null, step });
+      if (this.model) {
+        // hcore: one answer from the serve v2 core (harness/core-model.js), calls already parsed
+        let live = null, res = null, failed = null;
+        const on = (ev) => {
+          if (ev.t === "delta") this.onEvent({ type: "delta", text: ev.text, step });
+          else if (ev.t === "text") { shown += ev.text; this.onEvent({ type: "text", text: ev.text, step }); }
+          // the call being typed, as append-only JSON-shaped text (room/code-ui.js parseLive reads
+          // it the same for both call styles and on older peers); null once it is complete
+          else if (ev.t === "call") { live = `{"name": ${JSON.stringify(ev.name)}, "arguments": `; this.onEvent({ type: "call-live", raw: live, step }); }
+          else if (ev.t === "args") { if (live != null) { live += ev.a; this.onEvent({ type: "call-live", raw: live, step }); } }
+          else if (ev.t === "end") { live = null; this.onEvent({ type: "call-live", raw: null, step }); }
+        };
+        try { res = await this.model.ask({ system: this.systemRaw, tools: this.toolDefs, turns: this.turns, signal, on }); }
+        catch (err) { failed = err; }
+        if (live != null) this.onEvent({ type: "call-live", raw: null, step });
+        // what was said stays; calls that never ran do not (no call in history without its result)
+        const keep = () => { if (shown.trim()) this.turns.push({ role: "assistant", text: shown, sampled: [], req }); };
+        if (failed?.name === "ContextFull") { keep(); return full(step); }
+        if (failed && !signal?.aborted) {
+          // the model failed (a device left, the model unloaded): keep what it said and close the
+          // turn, so the next request does not follow a dangling user turn
+          keep(); finish(); close();
+          throw failed;
         }
-      } catch (err) {
-        if (err?.name === "ContextFull") {
-          if (raw) this.turns.push({ role: "assistant", text: raw, req });
-          return full(step);
-        }
-        if (!signal?.aborted) {
-          // the model failed (a device left): keep what it said and close the turn, so the next
-          // request does not follow a dangling user turn
-          if (raw) this.turns.push({ role: "assistant", text: raw, req });
-          finish(); close();
-          throw err;
-        }
-      }
-      if (signal?.aborted) {
-        // keep what was said (the tool calls in it do not run)
-        if (raw) this.turns.push({ role: "assistant", text: raw, req });
-        return stopped(step);
-      }
-      const e = P.end();
-      const u = this.usage?.();
-      // the call grammar forced most of a call's tokens (the adapter ended the answer): the calls are
-      // the grammar's shape around garbage logits, not the model's, so none of them runs (a forced
-      // write_file would overwrite a file, auto-approved in a scratch project)
-      if (u?.reason === "garbage") {
-        for (const c of [...found, ...e.calls]) {
-          c.garbage = true;
-          c.error = `this answer was stopped and its calls were not run: ${u.forced} tokens were forced by the call format, so the room's engine is producing garbage (try again, or reload the model)`;
-          c.open = true;   // (no "write the call again" advice: the format was not the problem)
-        }
-      }
-      // a call left open by the length cap: its last value is a fragment, so say why instead of running it
-      else {
-        for (let i = 0; i < e.calls.length; i++) {
-          const c = e.calls[i];
-          if (!c.open) continue;
-          // a write_file cut mid-content: keep its complete lines instead of losing the whole answer,
-          // and tell the model exactly where to pick up (otherwise it retries the same long write and
-          // is cut at the same place again)
-          const part = salvageWrite(c.raw, (n) => this.byName.get(n)?.parameters);
-          if (part) { e.calls[i] = part; continue; }
-          if (u && (u.reason === "max" || u.reason === "ctx")) c.error = `your answer was cut at ${u.generated} tokens before the call was complete`;
-          else {
-            // ended mid-call for another reason (end of turn, a stop, a device hiccup): say which, so it can be traced
-            const tail = String(c.raw || "").slice(-160).replace(/\s+/g, " ").trim();
-            c.error = `your answer ended in the middle of a tool call${u ? ` (${u.reason || "stop"} after ${u.generated} tokens)` : ""}.${tail ? ` The call ended with: "${tail}"` : ""}`;
-            try { console.warn("[code] call ended early", u, JSON.stringify(String(c.raw || "").slice(-300))); } catch {}
+        if (signal?.aborted || !res || res.reason === "abort") { keep(); return stopped(step); }
+        u = this.usage?.() ?? this.model.stats?.last ?? null;
+        found = res.calls.map((c) => ({ name: c.name, arguments: c.arguments, sampled: c.sampled }));
+        let text = res.text;
+        if (res.reason === "garbage") {
+          // the engine's logits were not a model's (NaN, or almost no mass on anything the format
+          // allows): none of the calls runs (a forced write_file would overwrite a file)
+          if (res.open) found.push({ name: res.open.name, arguments: {}, sampled: "{}" });
+          for (const c of found) {
+            c.garbage = true; c.open = true;
+            c.error = `this answer was stopped and its calls were not run: the room's engine is producing garbage (the model's output stopped following the call format${u?.forcedAll ? ` after ${u.forcedAll} forced tokens` : ""}; try again, or reload the model)`;
+          }
+        } else if (res.open) found.push(this._openCall(res.open, u));
+        else if (!found.length) {
+          // no call, but a known tool written outside the call format (a bare JSON object, bare
+          // tags, a <function=...> block with no opener): run it, say how to write it next time
+          const b = bareFromText(text, this.byName);
+          if (b.calls.length) {
+            for (const c of b.calls) { c.bare = true; c.sampled = JSON.stringify(c.arguments); }
+            found.push(...b.calls); text = b.text;
+            this.onEvent({ type: "bare", n: b.calls.length, step });
+            try { console.warn(`[code] ${b.calls.length} call(s) written outside the call format`); } catch { /* no console */ }
           }
         }
+        // a garbled call opener left at the end of the content ("<toolly_call>", seen from Qwen3.6): the
+        // call after it ran (the grammar's line-initial <function= trigger), so it is noise the model
+        // would copy on its next answer
+        if (found.length && !found[0].bare) text = stripStrayTags(text);
+        if (u?.forced > 8 && res.reason !== "garbage") for (const c of found) if (c.error) c.error += ` (the call format forced ${u.forced} of the model's own tokens)`;
+        // small-model slips: arguments under other names or types (for running them; history keeps
+        // what was sampled)
+        for (const c of found) this._fix(c);
+        const turn = { role: "assistant", text, sampled: found.filter((c) => !c.garbage).map((c) => ({ name: c.name, args: c.sampled })), req };
+        this.turns.push(turn);
+        // the turn is exactly what was sampled: its ids replay next step (the prompt extends the caches)
+        if (res.ids && !res.open && text === res.text && found.length === res.calls.length && found.every((c) => !c.garbage && !c.bare)) this.model.setIds?.(turn, res.ids);
+      } else {
+        const P = new ToolCallParser({ schemaFor: (n) => this.byName.get(n)?.parameters });
+        let raw = "";
+        try {
+          for await (const d of this.generate({ system: this.system, turns: this._legacyTurns(), signal })) {
+            raw += d;
+            this.onEvent({ type: "delta", text: d, step });
+            const r = P.feed(d);
+            shown += r.text; found.push(...r.calls);
+            if (r.text) this.onEvent({ type: "text", text: r.text, step });
+            // the tool call being typed, so the UI can show code as it is written (null once it is complete)
+            if (P.inCall) this.onEvent({ type: "call-live", raw: P.buf, step });
+            else if (r.calls.length) this.onEvent({ type: "call-live", raw: null, step });
+          }
+        } catch (err) {
+          if (err?.name === "ContextFull") {
+            if (raw) this.turns.push({ role: "assistant", text: raw, req });
+            return full(step);
+          }
+          if (!signal?.aborted) {
+            // the model failed (a device left): keep what it said and close the turn, so the next
+            // request does not follow a dangling user turn
+            if (raw) this.turns.push({ role: "assistant", text: raw, req });
+            finish(); close();
+            throw err;
+          }
+        }
+        if (signal?.aborted) {
+          // keep what was said (the tool calls in it do not run)
+          if (raw) this.turns.push({ role: "assistant", text: raw, req });
+          return stopped(step);
+        }
+        const e = P.end();
+        u = this.usage?.();
+        // the call grammar forced most of a call's tokens (the adapter ended the answer): the calls are
+        // the grammar's shape around garbage logits, not the model's, so none of them runs (a forced
+        // write_file would overwrite a file, auto-approved in a scratch project)
+        if (u?.reason === "garbage") {
+          for (const c of [...found, ...e.calls]) {
+            c.garbage = true;
+            c.error = `this answer was stopped and its calls were not run: ${u.forced} tokens were forced by the call format, so the room's engine is producing garbage (try again, or reload the model)`;
+            c.open = true;   // (no "write the call again" advice: the format was not the problem)
+          }
+        }
+        // a call left open by the length cap: its last value is a fragment, so say why instead of running it
+        else {
+          for (let i = 0; i < e.calls.length; i++) {
+            const c = e.calls[i];
+            if (!c.open) continue;
+            // a write_file cut mid-content: keep its complete lines instead of losing the whole answer,
+            // and tell the model exactly where to pick up (otherwise it retries the same long write and
+            // is cut at the same place again)
+            const part = salvageWrite(c.raw, (n) => this.byName.get(n)?.parameters);
+            if (part) { e.calls[i] = part; continue; }
+            if (u && (u.reason === "max" || u.reason === "ctx")) c.error = `your answer was cut at ${u.generated} tokens before the call was complete`;
+            else {
+              // ended mid-call for another reason (end of turn, a stop, a device hiccup): say which, so it can be traced
+              const tail = String(c.raw || "").slice(-160).replace(/\s+/g, " ").trim();
+              c.error = `your answer ended in the middle of a tool call${u ? ` (${u.reason || "stop"} after ${u.generated} tokens)` : ""}.${tail ? ` The call ended with: "${tail}"` : ""}`;
+              try { console.warn("[code] call ended early", u, JSON.stringify(String(c.raw || "").slice(-300))); } catch {}
+            }
+          }
+        }
+        // many tokens forced by the call grammar: the logits were not the model's (a misbehaving engine)
+        if (u?.forced > 8 && u.reason !== "garbage") for (const c of [...found, ...e.calls]) if (c.error) c.error += ` (${u.forced} tokens were forced by the call format: the room's engine may be misbehaving)`;
+        shown += e.text; found.push(...e.calls);
+        // no <tool_call> at all, but the answer wrote a known tool as bare tags
+        // (<write_file><path>a</path><content>..</content></write_file>, seen from Qwen 3.6): run those
+        if (!found.length) {
+          const bare = bareCalls(shown, this.byName);
+          // or as a bare JSON object ({"name": "write_file", "arguments": {...}}), seen from Qwen3 1.7B
+          if (!bare.length) bare.push(...bareJsonCalls(shown, this.byName));
+          // or <function=NAME> / <invoke name="NAME"> blocks whose <tool_call> opener came out garbled
+          // ("<tool_tool_calls>") or missing
+          if (!bare.length) bare.push(...bareFunctionCalls(shown, this.byName));
+          if (bare.length) { for (const c of bare) c.bare = true; found.push(...bare); }
+        }
+        // small-model slips: a tool's other name, arguments under other names or types
+        for (const c of found) this._fix(c);
+        if (e.text) this.onEvent({ type: "text", text: e.text, step });
+        this.turns.push({ role: "assistant", text: raw, req });
       }
-      // many tokens forced by the call grammar: the logits were not the model's (a misbehaving engine)
-      if (u?.forced > 8 && u.reason !== "garbage") for (const c of [...found, ...e.calls]) if (c.error) c.error += ` (${u.forced} tokens were forced by the call format: the room's engine may be misbehaving)`;
-      shown += e.text; found.push(...e.calls);
-      // no <tool_call> at all, but the answer wrote a known tool as bare tags
-      // (<write_file><path>a</path><content>..</content></write_file>, seen from Qwen 3.6): run those
-      if (!found.length) {
-        const bare = bareCalls(shown, this.byName);
-        // or as a bare JSON object ({"name": "write_file", "arguments": {...}}), seen from Qwen3 1.7B
-        if (!bare.length) bare.push(...bareJsonCalls(shown, this.byName));
-        // or <function=NAME> / <invoke name="NAME"> blocks whose <tool_call> opener came out garbled
-        // ("<tool_tool_calls>") or missing
-        if (!bare.length) bare.push(...bareFunctionCalls(shown, this.byName));
-        if (bare.length) { for (const c of bare) c.bare = true; found.push(...bare); }
-      }
-      // small-model slips: a tool's other name, arguments under other names or types
-      for (const c of found) this._fix(c);
-      if (e.text) this.onEvent({ type: "text", text: e.text, step });
-      this.turns.push({ role: "assistant", text: raw, req });
       if (u) this.onEvent({ type: "usage", step, prompt: u.prompt, reused: u.reused, generated: u.generated, tps: u.tps, forced: u.forced || 0 });
       if (!found.length && !shown.trim() && !empty++ && step < this.maxSteps) {
         // an empty answer: one nudge, then a second empty answer ends the request
@@ -293,7 +389,7 @@ export class Agent {
       const idle = plain.length && plain.every((r, i) => reps[i] || /^unchanged/.test(r) || (found[i].name === "serve" && CLEAN.test(r))
         || (found[i].name === "preview_logs" && /^no new logs/.test(r)));
       if (cleanBefore >= 0 && cleanBefore === mut && idle && !signal?.aborted) {
-        this.turns.push({ role: "user", text: toolResponses(results), req, calls: briefs });
+        this._pushResults(results, briefs, req);
         const text = shown.trim() || "Done: the page is served with no errors.";
         this.turns.push({ role: "assistant", text, req });
         R.done = true; R.answer = text;
@@ -328,7 +424,7 @@ export class Agent {
       } else if (!pageStuck && pageErr.n === PAGE_ERR.warn && bumped) {
         results[last] += `\nnote: the page showed this same error after each of your last ${pageErr.n - 1} changes: ${pageErr.text}. Those changes did not fix it: read_file the lines it names and fix the cause there.`;
       }
-      this.turns.push({ role: "user", text: toolResponses(results), req, calls: briefs });
+      this._pushResults(results, briefs, req);
       if (signal?.aborted) return stopped(step);
       if (failRun >= STUCK_AFTER || same || pageStuck) {
         const f = plain.findIndex((r) => /^(?:error|unchanged)/.test(r)), i = Math.max(0, f), n = same ? STUCK_AFTER : failRun;
@@ -404,7 +500,44 @@ export class Agent {
     c.arguments = fixArgs(c.arguments ?? {}, t.parameters);
   }
 
-  _size() { return this.count(this.system) + this.turns.reduce((n, t) => n + this.count(t.text) + 4, 0); }
+  // a step's tool results as one user turn (hcore: the array too, for the core's tool messages)
+  _pushResults(results, briefs, req) {
+    const t = { role: "user", text: toolResponses(results), req, calls: briefs };
+    if (this.model) t.results = results.slice();
+    this.turns.push(t);
+  }
+  // a call left open (the length cap, or the answer ended mid-call), hcore: a write_file keeps its
+  // complete lines and runs (the model is told where to pick up); anything else becomes a call with
+  // what arguments it had and an error result, so history shows what the model wrote and why it
+  // did not run
+  _openCall(open, u) {
+    if (open.name === "write_file") {
+      const part = salvageArgs(open.args, this.byName.get("write_file")?.parameters);
+      if (part) return { ...part, sampled: JSON.stringify(part.arguments) };
+    }
+    const args = looseObject(open.args);
+    const c = { name: open.name, arguments: args, sampled: JSON.stringify(args), open: true, raw: open.args };
+    if (u && (u.reason === "max" || u.reason === "ctx")) c.error = `your answer was cut at ${u.generated} tokens before the call was complete`;
+    else {
+      const tail = String(open.args || "").slice(-160).replace(/\s+/g, " ").trim();
+      c.error = `your answer ended in the middle of a tool call${u ? ` (${u.reason || "stop"} after ${u.generated} tokens)` : ""}.${tail ? ` The call ended with: "${tail}"` : ""}`;
+      try { console.warn("[code] call ended early", u, JSON.stringify(String(open.args || "").slice(-300))); } catch { /* no console */ }
+    }
+    return c;
+  }
+  // the turns as the legacy path renders them: hcore assistant turns get their calls back as markup
+  // in the model's format (a session switched back to ?hcore=0 keeps working)
+  _legacyTurns() {
+    if (!this.turns.some((t) => Array.isArray(t.sampled))) return this.turns;
+    return this.turns.map((t) => (Array.isArray(t.sampled) ? { ...t, text: legacyText(t, this.style) } : t));
+  }
+  _turnSize(t) {
+    if (!Array.isArray(t.sampled)) return this.count(t.text) + 4;
+    if (!this.model?.callText) return this.count(legacyText(t, this.style)) + 4;
+    // the calls as the template renders them (an XML value is its text, not escaped JSON)
+    return this.count(t.text) + t.sampled.reduce((n, c) => n + this.count(this.model.callText(c)), 0) + 4;
+  }
+  _size() { return this.count(this.system) + this.turns.reduce((n, t) => n + this._turnSize(t), 0); }
 
   // Past the budget, compact down to 60% of it. Every compaction changes the middle of the prompt,
   // so everything after the first changed turn is prefilled again (the system prompt + tools stay
@@ -426,6 +559,11 @@ export class Agent {
     for (const i of res.slice(0, -2)) {
       if (this._size() <= target) break;
       const t = this.turns[i];
+      if (Array.isArray(t.results)) {
+        const r = stubResultList(t.results, t.calls);
+        if (r.some((x, k) => x !== t.results[k])) { t.results = r; t.text = toolResponses(r); cut++; tier = 1; at = Math.min(at, i); }
+        continue;
+      }
       const text = stubResults(t.text, t.calls);
       if (text !== t.text) { t.text = text; cut++; tier = 1; at = Math.min(at, i); }
     }
@@ -481,7 +619,8 @@ export class Agent {
       v: 1, req: this.req, reqs: this.reqs, ...(tag ? { tok: tag } : {}),
       turns: this.turns.map((t) => {
         const o = { ...t };
-        if (t.role === "assistant") { const ids = this.idsFor?.(t.text); if (ids) o.ids = Array.from(ids); }
+        if (t.role === "assistant" && this.model) { const v = this.model.idsOf?.(t); if (v) { o.ids = Array.from(v.ids); o.idsEnd = v.thinkEnd; } }
+        else if (t.role === "assistant" && !Array.isArray(t.sampled)) { const ids = this.idsFor?.(t.text); if (ids) o.ids = Array.from(ids); }
         return o;
       }),
     };
@@ -492,8 +631,11 @@ export class Agent {
     if (json?.v !== 1) return a;
     a.req = json.req || 0; a.reqs = json.reqs || {};
     const same = (json.tok ?? null) === a._tag();   // ids from another tokenizer (or an untagged save) are noise
-    a.turns = (json.turns || []).map(({ ids, ...t }) => {
-      if (same && ids && t.role === "assistant") a.adopt?.(t.text, ids);
+    a.turns = (json.turns || []).map(({ ids, idsEnd, ...t }) => {
+      if (same && ids && t.role === "assistant") {
+        if (a.model) { if (Array.isArray(t.sampled)) a.model.adoptIds?.(t, { ids, thinkEnd: idsEnd || 0 }); }
+        else if (!Array.isArray(t.sampled)) a.adopt?.(t.text, ids);
+      }
       return t;
     });
     return a;
@@ -510,6 +652,17 @@ export function salvageWrite(raw, schemaFor = () => null) {
   if (c?.error && /^\s*\{/.test(raw)) {
     try { const o = parseLooseJSON(raw.trim(), { open: true }); c = { name: o?.name, arguments: fixArgs(o?.arguments ?? o?.parameters ?? {}, schemaFor("write_file")) }; } catch { return null; }
   }
+  return salvageCall(c);
+}
+// hcore: an open write_file's arguments as CallStream streamed them (JSON text, cut anywhere)
+export function salvageArgs(args, schema = null) {
+  if (!args) return null;
+  let o;
+  try { o = parseLooseJSON(String(args).trim(), { open: true }); } catch { return null; }
+  if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+  return salvageCall({ name: "write_file", arguments: fixArgs(o, schema) });
+}
+function salvageCall(c) {
   const a = c?.arguments;
   if (c?.name !== "write_file" || !a || typeof a.path !== "string" || !a.path.trim() || typeof a.content !== "string") return null;
   const cut = a.content.lastIndexOf("\n");
@@ -522,7 +675,7 @@ export function salvageWrite(raw, schemaFor = () => null) {
 // Calls written as bare JSON objects outside <tool_call> (in a ```json fence or plain text):
 // {"name": "write_file", "arguments": {...}}. Only known tool names (or their usual other names)
 // with an arguments object count.
-export function bareJsonCalls(text, byName) {
+export function bareJsonCalls(text, byName, spans = null) {
   const out = [];
   if (!text || !byName?.size) return out;
   const re = /\{\s*"(?:name|tool|function)"\s*:/g;
@@ -535,6 +688,7 @@ export function bareJsonCalls(text, byName) {
     const name = fixToolName(c.name, (n) => byName.has(n));
     if (!byName.has(name) || !c.arguments || typeof c.arguments !== "object") continue;
     out.push({ name, arguments: c.arguments });
+    spans?.push([m.index, jsonEnd(text, m.index)]);
     re.lastIndex = Math.max(re.lastIndex, jsonEnd(text, m.index));   // (not the objects inside this one)
   }
   return out;
@@ -559,7 +713,7 @@ function jsonEnd(text, at) {
 // Calls written as XML <function=NAME> ... </function> blocks without a well-formed <tool_call> around
 // them (the opener garbled, "<tool_tool_calls>", seen from Qwen 3.6 on a follow-up request): parsed
 // like a call body. Only known tools, and only complete blocks.
-export function bareFunctionCalls(text, byName) {
+export function bareFunctionCalls(text, byName, spans = null) {
   const out = [];
   if (!text || !byName?.size) return out;
   text = normalizeXmlCall(text);
@@ -571,11 +725,12 @@ export function bareFunctionCalls(text, byName) {
     const name = fixToolName(c.name, (n) => byName.has(n));
     if (!byName.has(name)) continue;
     out.push({ name, arguments: c.arguments || {} });
+    spans?.push([m.index, m.index + m[0].length]);
   }
   return out;
 }
 
-export function bareCalls(text, byName) {
+export function bareCalls(text, byName, spans = null) {
   const out = [];
   if (!text || !byName?.size) return out;
   const names = [...byName.keys()].map((n) => n.replace(/[^\w-]/g, "")).join("|");
@@ -592,7 +747,25 @@ export function bareCalls(text, byName) {
       found++;
     }
     const req = t?.parameters?.required || [];
-    if (found && req.every((r) => r in args)) out.push({ name: m[1], arguments: args });
+    if (found && req.every((r) => r in args)) { out.push({ name: m[1], arguments: args }); spans?.push([m.index, m.index + m[0].length]); }
   }
   return out;
+}
+
+// hcore: the calls a text answer wrote outside the call format (bare tags, a bare JSON object, a
+// <function=...> block with its opener garbled or missing), found as the legacy path finds them,
+// and the text with them taken out (with the fences and stray call tags left around them), so the
+// history does not show them twice. -> { calls, text }
+export function bareFromText(text, byName) {
+  if (!text || !byName?.size) return { calls: [], text };
+  let spans = [], src = text;
+  let calls = bareCalls(src, byName, spans);
+  if (!calls.length) { spans = []; calls = bareJsonCalls(src, byName, spans); }
+  if (!calls.length) { spans = []; src = normalizeXmlCall(text); calls = bareFunctionCalls(src, byName, spans); }
+  if (!calls.length) return { calls: [], text };
+  let rest = "", at = 0;
+  for (const [a, b] of spans.sort((x, y) => x[0] - y[0])) { if (a < at) continue; rest += src.slice(at, a); at = b; }
+  rest += src.slice(at);
+  rest = rest.replace(/```[\w-]*\s*```/g, "").replace(/^[ \t]*<\/?[\w.]*tool[\w.]*>[ \t]*$/gm, "").replace(/\n{3,}/g, "\n\n").trim();
+  return { calls, text: rest };
 }

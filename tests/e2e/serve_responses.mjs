@@ -77,13 +77,13 @@ const soft = async (name, fn) => { try { await fn(); } catch (e) { check(name, f
 const freePort = () => new Promise((res) => { const s = net.createServer().listen(0, "127.0.0.1", () => { const p = s.address().port; s.close(() => res(p)); }); });
 let serve = null;
 try {
-  await page.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG_PORT}&dev=1` + (arg("query") ? "&" + arg("query") : ""));
+  await page.goto(`http://127.0.0.1:${PORT}/p2p.html?ask=0&signal=127.0.0.1:${SIG_PORT}&dev=1` + (arg("query") ? "&" + arg("query") : ""));
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "1", null, { timeout: 45000 }).catch(() => {});
   await page.fill("#name-input", "spark-host"); await page.fill("#join-gb", GBV);
   await page.click("#create-btn");
-  await page.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
-  const code = (await page.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+  await page.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
+  const code = (await page.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
   log("room", code);
   await page.selectOption("#ai-model", MODEL);
   await page.click("#ai-start");
