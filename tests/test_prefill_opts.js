@@ -43,6 +43,7 @@ const tok = model.tokenizer();
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead, mtp: hasMtp });
 const maxSeq = Math.ceil((Math.max(...LENS) + GEN + 64) / 256) * 256;
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead, maxSeq, batchCols: 16, coopRowsB: 1,
+  layerFuse: { "0": false, "1": true }[env("LAYER_FUSE", "")],   // LAYER_FUSE=0 / 1: decode layer fusion off / on (unset: engine default)
   ...wideOpts(), ...(env("MOEGROUP") ? { moeGroupPrefill: +env("MOEGROUP") } : {}), ...(env("MOEGROUP_UC") ? { moeGroupUC: +env("MOEGROUP_UC") } : {}) });
 const TOL = prefillTol(!!eng.moe);
 const set = (on) => { eng.attnPrefillTile = on && !!eng.attnPTCfg; eng.prefillWide = on && eng.ubatch > 0; eng.moeGroup = on && eng.moeGrpU > 0; };
