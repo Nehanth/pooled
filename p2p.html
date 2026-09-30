@@ -271,10 +271,6 @@
   .side-hint { font-size: 12px; color: var(--muted); }
   #awake:empty { display: none; }
   /* the screen-awake mark in the header: shown while this device holds layers (ok: the screen stays on; warn: it may sleep) */
-  #awake-ind { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--muted); position: relative; }
-  #awake-ind[hidden] { display: none; }
-  #awake-ind.ok { color: var(--accent); }
-  #awake-ind.warn { color: var(--warn-text); background: color-mix(in srgb, var(--warn) 14%, transparent); }
   .set-l .exp { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 999px; font: 500 10px/1.4 var(--sans); letter-spacing: .02em; text-transform: uppercase; color: var(--warn-text); background: color-mix(in srgb, var(--warn) 14%, transparent); vertical-align: 1px; }
   .menu-acts { display: flex; flex-direction: column; gap: 2px; margin: 0 -8px; }
   .menu-acts button, .menu-acts a { display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 12px; align-items: center; width: 100%; padding: 8px; border: 0; border-radius: 12px; background: transparent; text-align: left; text-decoration: none; color: var(--text); font: 500 14px/1.25 var(--sans); cursor: pointer; }
@@ -1690,7 +1686,6 @@
   <span class="hbrk" aria-hidden="true"></span>
   <span id="hdr-sum"></span>
   <button id="share-btn" class="hbtn" type="button" title="Invite a device: a link, a QR code or the room code"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span class="lbl">Invite</span></button>
-  <span id="awake-ind" class="tip-l" hidden role="status" aria-label="Screen stays on" data-tip="Screen stays on"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.6"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></svg></span>
   <button id="compute-open" class="hbtn tip-l" type="button" hidden aria-label="Serve API" aria-haspopup="dialog" aria-controls="compute-screen" data-tip="Use this room from your own tools"><svg class="mk" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle class="lit" cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><span class="lbl"><span class="lw">Serve </span>API</span><i class="api-dot" aria-hidden="true"></i></button>
   <details id="room-menu">
     <summary aria-label="Room settings" data-tip="Room settings" class="tip-l"><svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 6h8M15 6h2M3 14h2M9 14h8"/><circle cx="13" cy="6" r="2"/><circle cx="7" cy="14" r="2"/></svg></summary>
