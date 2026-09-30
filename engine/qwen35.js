@@ -3057,7 +3057,11 @@ export class Qwen35Engine {
     const enc = this.device.createCommandEncoder();
     for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
     this.device.queue.submit([enc.finish()]);
-    return await this._readback(this.x, this.stageX, dim);
+    const h = await this._readback(this.x, this.stageX, dim);
+    // the caches now hold [0, pos]: a checkpoint saved before the next frame (sv) must keep this
+    // row, as it does after a batch (_runBatchAndRead leaves pos at the batch's end)
+    this.pos = pos + 1;
+    return h;
   }
 
   async headFromHidden(xIn) {

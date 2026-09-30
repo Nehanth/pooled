@@ -518,6 +518,9 @@ export class RoomNode extends EventEmitter {
       }
     }
     ai.starting = true; ai.degraded = false; ai.readyPeers = new Set(); ai.model = modelKey; ai.online = false;
+    // a fresh deal: every device starts without checkpoints (a worker that keeps its layers drops its
+    // slots); what each worker applies comes with its ai-ready, which may arrive before this device's load ends
+    ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map();
     ai.relinks = new Map(); ai.gone = new Set(); ai.plan = new Map(); ai.lapStat = null;
     const ctx = nodeCtxFor(modelKey, this.ctxAsk), kv = kvModeFor(modelKey, null);
     ai.apiCache = new AnswerCache(8); ai.apiTurns.clear(); ai.apiEnc.clear(); ai.apiProf = null; ai.apiTT = null; ai.bounds.clear();
@@ -570,9 +573,7 @@ export class RoomNode extends EventEmitter {
     finally { ai.loadingShard = false; await src.close(); }
     this.log(`host layers ${ranges[0][0]}-${ranges[0][1] - 1} + embedding/head ready in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     ai.fed = []; ai.pendingCtl = {}; ai.pos = 0;
-    // a fresh deal: every device starts without checkpoints (a worker that keeps its layers drops its slots)
-    ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map();
-    try { ai.engine?.dropAllSlots?.(); } catch {}
+    try { ai.engine?.dropAllSlots?.(); } catch {}   // this device's own slots (it may have kept its layers)
     this.maybeReady();
     try { await readyAll; }
     catch (err) { ai.starting = false; this.freeLayers(null); ai.chain = []; ai.plan = new Map(); this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }

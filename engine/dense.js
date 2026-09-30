@@ -888,6 +888,8 @@ export class DenseEngine {
     const enc = this.device.createCommandEncoder();
     for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
     this.device.queue.submit([enc.finish()]);
-    return await this._readback(this.x, this.stageX, dim);
+    const h = await this._readback(this.x, this.stageX, dim);
+    this.pos = pos + 1;   // the caches now hold [0, pos]: a checkpoint saved before the next frame keeps this row (as the batched path does)
+    return h;
   }
 }
