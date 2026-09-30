@@ -14,7 +14,8 @@ sidebar:
     "Connecting: STUN and an optional TURN relay", room/ice.js (STUN servers, ?turn= / ?turnuser= / ?turncred= / ?relay=1,
     Network box saved in localStorage, window.TURN_SERVERS, join links strip them), p2p.html #join-net text and "Always go through
     the relay", room/signal.js (cloud default, fallback list, ?signal=, window.POOLED_SIGNAL_SERVERS; 8 s per server, 20 s for the last),
-    room/errors.js joinStep (5 s "Still connecting…", 15 s, 40 s while ICE checking), room.js signal note (~L1403). */}
+    room/errors.js joinStep (5 s "Still connecting…", 15 s, 40 s while ICE checking), room.js signal note (~L1403).
+    The site's relay: origin/main 74744ac (PR #264) docs/rooms-at-work.md, api/turn.mjs, room/ice.js wantDefaultRelay. */}
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
@@ -67,23 +68,25 @@ Measured with 3 browser tabs on one GB10 and a network shaper, Qwen3 1.7B, befor
 
 Devices connect directly to each other. Public STUN servers help each one find its public address, which is enough on most home and office networks. When both sides are behind strict NAT (common on mobile networks), or a firewall blocks UDP, there is no direct path.
 
+On pooled.run, the room then falls back to the site's **TURN relay** by itself, over TCP or TLS on port 443 if it has to. That covers most work and school networks. See [Rooms at work](/docs/rooms/at-work).
+
 What you see while joining:
 
 | After | You see |
 |---|---|
 | 5 s | "Still connecting…" |
 | 15 s, if the room answered | "Found the room; still looking for a path between the two devices…" (up to 40 s) |
-| Then | "Found the room, but these two devices can't reach each other…" and the **Network** box opens |
+| Then | "Found the room, but …" with the reason (no path, UDP blocked, or not even through the relay) and the **Network** box opens |
 
 Try these in order:
 
 1. Put both devices on the same Wi-Fi.
 2. Try another network, for example a phone hotspot.
-3. Use a **TURN relay**. It forwards the traffic between two devices that can't reach each other.
+3. Use a **TURN relay** of your own. It forwards the traffic between two devices that can't reach each other.
 
 ### Use a TURN relay
 
-Pooled doesn't run a relay and ships no credentials. Use your own ([coturn](https://github.com/coturn/coturn), see [TURN relay](/docs/self-host/turn)) or a provider's.
+pooled.run gives every room a relay already (see [Rooms at work](/docs/rooms/at-work)), so you rarely need this. Set your own when the site's relay is blocked too, or on a self-hosted site without one: your own ([coturn](https://github.com/coturn/coturn), see [TURN relay](/docs/self-host/turn)) or a provider's. A relay you set replaces the site's.
 
 <Tabs>
 <TabItem label="Network box">
@@ -110,7 +113,8 @@ Define `window.TURN_SERVERS`, an `RTCIceServer` array, before `room.js` loads.
 </Tabs>
 
 - The room still prefers a direct path and uses the relay only when it has to.
-- Every device that can't connect directly needs the relay set. A device on an open network can reach a relayed one without it.
+- Model weights never go over a relayed link. Only token traffic does.
+- Every device that can't connect directly needs your relay set. A device on an open network can reach a relayed one without it.
 - Join links and QR codes never include the relay settings, so the password doesn't end up in a chat.
 - A relay adds a hop to every token, so it is slower than a direct path.
 

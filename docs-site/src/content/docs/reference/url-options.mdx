@@ -66,7 +66,9 @@ These are safe to use. They are supported and stay stable.
 | `?kv=q8` | off (f16) | Host | Stores the KV cache as int8. Uses about 56% of the memory of f16. Only for Qwen 3.8 27B and Qwen 3.6 35B MoE. The host sends its choice to every device. |
 | `?signal=SERVER` | PeerJS cloud | Every device | Uses your own signaling server. A comma list is tried in order. See [signaling servers](/docs/self-host/signaling). |
 | `?turn=URL` | none | Every device | Uses a TURN relay, for networks where devices cannot connect directly. Add `?turnuser=` and `?turncred=` for its credentials. |
-| `?relay=1` | off | Every device | Sends all traffic through the relay, so other devices never see this device's IP address. Needs a relay from `?turn=` or the saved Network setting. |
+| `?relay=1` | off | Every device | Sends all traffic through the relay, so other devices never see this device's IP address. Works with any relay: `?turn=`, the saved Network setting, `window.TURN_SERVERS` or the site's `/api/turn`. |
+| `?relay=0` | off | Every device | Never asks the site's `/api/turn` for a relay. See [Rooms at work](/docs/rooms/at-work). |
+| `?turnapi=1` | off | Every device | On `localhost`, asks `/api/turn` for the site's relay anyway (it isn't asked there by default). |
 | `?phonelayers=1` | off | Host | Gives phones layers even when the computers can hold the model. Without it, a phone only gets layers the computers cannot hold. |
 | `?ka=0` | on (10 ms) | Every device | Turns off the keep-alive. While an answer runs, each end sends 1 byte after 10 ms of silence, so Wi-Fi power save does not park the radio between laps. `?ka=N` sets the period in ms. |
 | `?wake=0` | on for phones | Every device | Turns off GPU wake. A phone worker keeps its GPU busy from the start of each decode lap until its frame arrives, so its layers do not run on a clocked-down GPU. `?wake=1` asks for it on any device. |

@@ -49,6 +49,7 @@ export default defineConfig({
 						{ label: 'Client recipes', collapsed: false, items: [{ autogenerate: { directory: 'serve/recipes' } }] },
 					],
 				},
+				{ label: 'Terminal and agents', items: ['terminal', 'openclaw'] },
 				{ label: 'Code mode', items: [{ autogenerate: { directory: 'code' } }] },
 				{ label: 'Self-hosting', items: [{ autogenerate: { directory: 'self-host' } }] },
 				{ label: 'How it works', items: [{ autogenerate: { directory: 'internals' } }] },

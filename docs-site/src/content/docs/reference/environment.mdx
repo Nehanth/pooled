@@ -1,7 +1,7 @@
 ---
 title: Environment and globals
 eyebrow: Reference
-description: Environment variables for pooled serve and the test scripts, and the page globals a self-hosted deployment can set.
+description: Environment variables for pooled serve, the site's TURN relay and the test scripts, and the page globals a self-hosted deployment can set.
 sidebar:
   label: Environment and globals
   order: 3
@@ -15,6 +15,9 @@ Sources (origin/main 40bb0fa):
 - harness/preview-frame.js relayUrl / previewEntry / relayProblem (preview-origin meta: host=origin list, https, not same site)
 - p2p.html:17 <meta name="preview-origin" content="">
 - room.js:848 window.pooledDebug (swarmDebug alias)
+- origin/main 74744ac (PR #264): api/turn.mjs (TURN_KEY_ID + TURN_KEY_API_TOKEN, TURN_SECRET + TURN_HOST/TURN_URLS, TURN_TTL,
+  TURN_RATE, TURN_ALLOWED_ORIGINS; 204 when unset), docs/rooms-at-work.md, room.js window.pooledNet and
+  window.POOLED_TURN_ENDPOINT, room/ice.js wantDefaultRelay (window.TURN_SERVERS or a relay you set: /api/turn not asked)
 - tests/run.sh (WEIGHT_CACHE default ~/.cache/swarmllm-weights, STRICT=1), tests/weight_cache.js (WEIGHT_CACHE_VERIFY), docs/testing-fast.md (WEIGHT_CACHE_PRUNE)
 - tests/load_model.js:30-35 ROOM_FLAGS; benchmarks/bench.js header (MODEL=qwen|q38, TOKENS default 32)
 - tests/bench_ctx.js header (MODEL=moe|27b, FILLS, CTX, KV=f16|q8, HW, DATE), PR #252
@@ -39,6 +42,23 @@ The client tools read their own variables. These are the ones the banner prints:
 | `OPENCODE_DISABLE_CLAUDE_CODE` | opencode | `1` |
 
 See [Serve API recipes](/docs/serve/recipes) for why each one matters.
+
+## TURN relay (/api/turn)
+
+Set in the Vercel project (**Settings → Environment Variables**, for Production and Preview) for `api/turn.mjs`, the function that gives each room short-lived relay credentials. pooled.run sets the Cloudflare pair. With neither provider set, `POST /api/turn` answers `204` and rooms use direct links only. Environment variables reach only new deployments, so redeploy after changing them.
+
+| Variable | What it does |
+|---|---|
+| `TURN_KEY_ID` | Cloudflare Realtime TURN: the key's Turn Token ID. Needs `TURN_KEY_API_TOKEN`. |
+| `TURN_KEY_API_TOKEN` | Cloudflare: the key's API Token. Mark it Sensitive. |
+| `TURN_SECRET` | coturn in `use-auth-secret` mode: its `static-auth-secret`. Needs `TURN_HOST` or `TURN_URLS`. |
+| `TURN_HOST` | coturn: the relay's host name. Hands out `turn:HOST:3478` over UDP and TCP and `turns:HOST:443`. |
+| `TURN_URLS` | coturn: your own comma-separated `turn:` / `turns:` URLs, instead of `TURN_HOST`. |
+| `TURN_TTL` | Credential lifetime in seconds, 600 to 86400. Default 21600 (6 h). |
+| `TURN_RATE` | Credential requests per minute per IP, per function instance. Default 10. |
+| `TURN_ALLOWED_ORIGINS` | Other origins allowed to ask, comma-separated; `*` matches within one host label. The deployment's own origin is always allowed. |
+
+If both providers are set, Cloudflare wins. Model weights never go over the relay; only token traffic does. Setup, abuse and cost: [TURN relay](/docs/self-host/turn#the-sites-relay-apiturn).
 
 ## Page globals for self-hosting
 
@@ -75,7 +95,11 @@ An array of `RTCIceServer` objects, added to every WebRTC connection after the p
 Anything in the page is public. Credentials here can be read by anyone who opens the site. Use short-lived credentials from your TURN server, or have each person enter a relay in the room's **Network** box instead.
 :::
 
-A relay from `?turn=` or the saved **Network** setting is used as well. `?relay=1`, or **Always go through the relay** in the Network box, makes every connection use a relay only.
+A relay from `?turn=` or the saved **Network** setting is used as well. When either this or one of those is set, the page doesn't ask `/api/turn` for the site's relay. `?relay=1`, or **Always go through the relay** in the Network box, makes every connection use a relay only.
+
+### window.POOLED_TURN_ENDPOINT
+
+Where the page asks for the site's relay. Default `/api/turn`. On `localhost` the page asks only with `?turnapi=1`.
 
 ### preview-origin meta
 
@@ -97,7 +121,8 @@ Code mode runs previews in a sandbox. For `run_js` to work, previews must load f
 
 | Function | What it shows |
 |---|---|
-| `pooledDebug()` | Each peer link's state: open channels, frames sent and received, keep-alives, duplicates, skipped frames, and whether it goes direct or through a relay. `swarmDebug()` still works. |
+| `pooledDebug()` | Each peer link's state: open channels, frames sent and received, keep-alives, duplicates, skipped frames, and whether it goes direct or through a relay (`path`, and `via`: `udp`, `tcp` or `tls`). `swarmDebug()` still works. |
+| `pooledNet()` | This tab's relay (`relay`, and `from`: `yours`, `site` or `default` for `/api/turn`) and whether UDP gets out of this network (`udp`). |
 
 ## Tests and benchmarks
 

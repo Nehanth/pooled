@@ -17,6 +17,8 @@ Sources (for the fact-checker):
 - PR #236 (Lend this device screen), PR #253/#256 (Serve API page holds it now)
 - room/plan.js codeFromLocation() (code alphabet without I, L, O, U, 0, 1; link auto-joins)
 - room/qr.js (QR code), docs/protocol.md (lifecycle)
+- PR #268 (open, not merged): 6-character codes shown 4TK-G9P, invite key #k=, lobby with Allow / Deny, Room settings → Joining → "Ask before new devices join" (on by default)
+- origin/main 74744ac (PR #264): the site's TURN relay (/api/turn), p2p.html #join-net text
 */}
 
 Every device you add brings the memory it gives. More memory lets the room run a bigger model.
@@ -28,6 +30,15 @@ In the room, press **Invite** in the header, or click the room code next to the 
 - **A QR code.** On a phone, scan it with the camera app.
 - **The room code**, four characters, to type on the other device. Codes never use I, L, O, U, 0 or 1, so they are hard to misread.
 - **A link** like `https://pooled.run/r/K7QX`, with **Copy link**. On devices that support it, **Share…** opens the system share sheet.
+
+:::note[Coming soon (PR #268)]
+Room codes become six characters, shown as `4TK-G9P` (four-character codes of older rooms keep working), and the host decides who gets in:
+
+- A device with the **invite link** or QR code (it carries the room's key after `#k=`) comes in at once.
+- A device that types the **code alone** waits until the host presses **Allow** or **Deny** in a prompt under the header. **Room settings → Joining → Ask before new devices join** (on by default) turns this off.
+
+This is in [PR #268](https://github.com/Nehanth/pooled/pull/268), which isn't merged yet. Today codes are four characters and anyone with the code can join.
+:::
 
 The same QR code, code and **Copy link** button are also beside the model picker, under **Invite more devices**, with a **Full-size QR** button.
 
@@ -54,9 +65,9 @@ The join screen says what it is doing: `Connecting…`, then `Reaching the other
 |---|---|
 | `Still connecting…` | Wait a few more seconds. |
 | `No room with that code.` | Check the code, and that the page of whoever opened the room is still open. |
-| `Found the room, but these two devices can't reach each other` | A strict firewall or mobile network blocks the direct path. Put both devices on the same Wi-Fi, try another network, or add a relay under **Network**. |
+| `Found the room, but these two devices can't reach each other` | A strict firewall or mobile network blocks the direct path, and no relay helped. Put both devices on the same Wi-Fi, try another network, or add a relay under **Network**. See [Rooms at work](/docs/rooms/at-work#when-it-still-fails). |
 
-The **Network** box under the join form takes a TURN relay server. Pooled does not run one: use your own or a provider's. The setting is saved in this browser only and never goes into join links. See [TURN relay](/docs/self-host/turn).
+pooled.run gives every room a TURN relay, so devices on work networks that block direct connections still get in. See [Rooms at work](/docs/rooms/at-work). The **Network** box under the join form takes a relay of your own instead. The setting is saved in this browser only and never goes into join links. See [TURN relay](/docs/self-host/turn).
 
 ## What a lending device shows
 

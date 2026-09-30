@@ -54,7 +54,8 @@ The joiner found the room, but there is no network path between the two devices.
 
 1. Put both devices on the same Wi-Fi. This fixes most cases.
 2. Turn off any VPN on either device.
-3. If they must be on different networks, set up a **TURN relay**. Pooled doesn't run one, so use your own (coturn, for example) or a provider's. Then give it to the room in one of these ways:
+3. On pooled.run, the room already falls back to the site's TURN relay, over TCP or TLS on port 443 if it has to ([Rooms at work](/docs/rooms/at-work)). If the join still fails, the network may block the relay too: try a phone hotspot.
+4. Or set up a **TURN relay** of your own (coturn, for example, or a provider's). It replaces the site's. Give it to the room in one of these ways:
 
 <Tabs>
 <TabItem label="Network box">

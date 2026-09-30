@@ -105,7 +105,7 @@ After every answer the host saves the room (code, model, conversation, transcrip
 
 Every device uses public STUN servers to find its public address. That is enough on most home and office networks.
 
-When both sides are behind symmetric NAT or carrier-grade NAT, or a firewall blocks UDP, no direct path exists. The join fails after 15 s (up to 40 s while the browser is still trying paths) with "Found the room, but these two devices can't reach each other", and the Network box opens. A TURN relay fixes that. Pooled runs no relay and ships no credentials. See [TURN relay](/docs/self-host/turn).
+When both sides are behind symmetric NAT or carrier-grade NAT, or a firewall blocks UDP, no direct path exists. The join fails after 15 s (up to 40 s while the browser is still trying paths) with "Found the room, but these two devices can't reach each other", and the Network box opens. A TURN relay fixes that. No relay credentials ship in the page: pooled.run hands each device short-lived ones from `POST /api/turn` (Cloudflare TURN), and a relay the user sets wins over it. ICE still prefers a direct path. Model weights never cross a relayed link: a device whose link to a weight source is relayed fetches those ranges from the network, and the serving side answers `ai-wpart {miss: 1}` over a relayed link. See [Rooms at work](/docs/rooms/at-work) and [TURN relay](/docs/self-host/turn).
 
 ## Code mode messages
 

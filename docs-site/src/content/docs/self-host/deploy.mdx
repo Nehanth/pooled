@@ -17,6 +17,7 @@ sidebar:
   - preview-host/vercel.json, PR #248, roadmap/29-*.md "Deploy step (owner)" (second Vercel project for Code mode previews)
   - p2p.html <meta name="preview-origin" content=""> and its comment; harness/preview-frame.js relayUrl()/relayProblem()
   - room/signal.js (window.POOLED_SIGNAL_SERVERS), room/ice.js (window.TURN_SERVERS)
+  - origin/main 74744ac (PR #264): api/turn.mjs, vercel.json functions api/turn.mjs maxDuration 10, docs/rooms-at-work.md
   TODO(verify): the feat/engine-opt row follows from ignoreCommand (only VERCEL_ENV=production always builds; staging is a
   preview-env branch domain). RELEASE.md's table reads as if staging always deploys; confirm in the Vercel project settings.
 */}
@@ -84,6 +85,7 @@ A manual `npx vercel deploy --prod` is for emergencies only.
     2. Keep the root directory as the repo root. Framework preset: **Other**. `vercel.json` sets the install and build commands and the output folder.
     3. Deploy. Open `https://<your-project>.vercel.app/room`.
     4. Add your domain in the Vercel project settings, if you have one.
+    5. Optional: give rooms a TURN relay for work networks. Set `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` (a Cloudflare TURN key) in the project's environment variables and redeploy. `api/turn.mjs` then hands out short-lived credentials. See [The site's relay](/docs/self-host/turn#the-sites-relay-apiturn).
 
     </Steps>
 
@@ -104,6 +106,8 @@ A manual `npx vercel deploy --prod` is for emergencies only.
     - **Caching:** `engine/`, `room/`, `harness/` and `room.js` must revalidate on every load (`Cache-Control: public, max-age=0, must-revalidate`), so every device in a room runs the same code. Fonts under `/site/fonts/` can be cached for a year (`immutable`).
     - **The preview relay:** `/harness/preview-relay.html` needs its own headers. Copy them from `vercel.json`.
 
+    A static host has no `/api/turn` (a Vercel Function), so rooms get no default TURN relay there. They still work over direct links; set `window.TURN_SERVERS` for a relay of your own.
+
     Leave out what isn't for the public: `.vercelignore` lists it (`tests`, `benchmarks`, `docs`, `cli`, `scripts`, `models`, `*.md`, `package.json`, `serve.json` and more).
 
     [Run it locally](/docs/self-host/local#using-another-server) has a Caddy example of the rewrites.
@@ -121,7 +125,7 @@ Set these in `p2p.html`, before `room.js` loads.
 | Setting | What it does | Page |
 |---|---|---|
 | `window.POOLED_SIGNAL_SERVERS` | Ordered list of signaling servers. Default `["cloud"]`. | [Signaling servers](/docs/self-host/signaling#point-rooms-at-your-server) |
-| `window.TURN_SERVERS` | `RTCIceServer` array with your TURN relay. Default: none. | [TURN relay](/docs/self-host/turn#use-a-relay) |
+| `window.TURN_SERVERS` | `RTCIceServer` array with your TURN relay. Default: none (on Vercel, the site's `/api/turn` relay when it is set up). | [TURN relay](/docs/self-host/turn#use-your-own-relay) |
 | `<meta name="preview-origin">` | The second site for Code mode previews. Default: empty. | [Below](#code-mode-preview-site) |
 
 ```html title="p2p.html"

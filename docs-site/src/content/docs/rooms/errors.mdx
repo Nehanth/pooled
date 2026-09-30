@@ -14,7 +14,8 @@ sidebar:
     queue full (~L4628, QUEUE_MAX 10, two per device), "a device left: re-deal the layers first" (~L3766), degraded ask
     (~L4620), "This device couldn't load its layers (…)" (~L4173), "The model didn't start: …" (~L4187), context full
     (~L3749), "Start a model first: Code mode runs on the room's model." (~L4406), NaN messages (~L3926-3940),
-    "… was taken in this room: this device is …" (~L1012), "the host left; this room is over" (~L3984). */}
+    "… was taken in this room: this device is …" (~L1012), "the host left; this room is over" (~L3984).
+    Join-failure texts with a relay: origin/main 74744ac (PR #264) room.js pathFailText. */}
 
 Room errors are one sentence: what happened and what to do. In a room they show as a toast: connection and version errors stay about 8 seconds, other notices about 4. While joining they show on the join screen.
 
@@ -24,7 +25,10 @@ Room errors are one sentence: what happened and what to do. In a room they show 
 |---|---|---|
 | Still connecting… | Nothing yet after 5 s. | Wait. The room gives it 15 s. |
 | Found the room; still looking for a path between the two devices… | The host answered, and the two devices are trying network paths. | Wait up to 40 s. |
-| Found the room, but these two devices can't reach each other (a strict firewall or mobile network on one side). Put both on the same Wi-Fi, or try another network. | No direct path between the devices. | Same Wi-Fi, another network, or a [TURN relay](/docs/rooms/networks#use-a-turn-relay). |
+| Found the room, but these two devices can't reach each other (a strict firewall or mobile network on one side). A relay (TURN) server gets around that: add one under Network below. Or put both on the same Wi-Fi, or try another network. | No direct path between the devices, and no relay. | Same Wi-Fi, another network, or a [TURN relay](/docs/rooms/networks#use-a-turn-relay). |
+| Found the room, but this network blocks direct (UDP) connections and there is no relay (TURN) server to go around it. Add one under Network below, or try another network (a phone hotspot works). | A work network blocks UDP and no relay is available. | A phone hotspot, or a relay under **Network**. See [Rooms at work](/docs/rooms/at-work). |
+| Found the room, but could not connect, not even through the relay (TURN) server. This network may block it too (some work networks only let web traffic out). Try another network, or set up your own relay under Network. | Even the site's relay didn't get through. | Another network, or your own relay. |
+| Found the room, but could not connect, not even through the relay (TURN) server. Check its address and password under Network, or try another network. | Your own relay didn't work. | Check its address and password. |
 | No room with that code. Check the code, and that the host's page is still open. | The signaling server has no room with that code. | Check the code. The room lives in the host's tab: if it closed, the room is gone. |
 | That room code isn't valid. Codes are 4 to 6 letters and digits. | Typo. | Codes never use I, L, O, U, 0 or 1. |
 | That room code is already in use by an open room. Press Join to join it, or create a new room. | You tried to create a room with a code that exists. | Join it, or start a new room. |
