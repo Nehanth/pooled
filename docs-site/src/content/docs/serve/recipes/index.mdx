@@ -1,108 +1,170 @@
 ---
-title: Client recipes
-eyebrow: Serve API
-description: Setup for the tools people point at a room. Every recipe uses the same two base URLs. The coding agents also need to know the room's context size.
+title: Connect your tools
+eyebrow: Use it
+description: Setup for Codex CLI, Claude Code, opencode, Continue, Open WebUI, the OpenAI and Anthropic SDKs, LiteLLM and curl on a room.
 sidebar:
-  label: Overview
+  label: Connect your tools
   order: 0
 ---
 {/*
-Sources (origin/main 40bb0fa):
-- cli/README.md (top banner, Options, Tools: every recipe)
-- cli/lib/http.js: claudeOutput = max(1024, min(32000, floor(ctx/4))); opencodeOutput = min(8192, claudeOutput);
-  Codex compact limit = floor(ctx * 0.8); agentSettings() prints the banner lines
-- room/models.js CTX: qwen3-1.7b 8192/16384, qwen3.8-27b 16384/32768, qwen3.6-35b-moe 32768/65536
-- room.js:2516 ROOM_CTX = maxSeqFor(model, ?ctx=) on the host page
-- docs/design/serve.md section 14/15 (tested client versions)
-Table values computed from those formulas; cross-checked against cli/test/banner_test.mjs (65536 -> 52428, 16384)
-and cli/test/http_test.mjs (16384 -> 13107, 4096).
-Fact-checked against origin/main 40bb0fa on 2026-09-30.
-TODO: npm latest is @pooled/cli 0.2.0 (checked 2026-09-30). 0.2.0 prints only the Codex and Claude Code lines,
-and can print them for a stale 2048-token context when it joins before the model starts (fixed in 0.2.1, #261).
-Remove the 0.2.1 note below once 0.2.1 is published.
+Sources (origin/main):
+- cli/README.md "Tools" (every recipe), Options, APIs
+- cli/lib/http.js agentSettings(): Codex compact limit = floor(ctx * 0.8); Claude Code output = max(1024, min(32000, floor(ctx/4)));
+  opencode output = min(8192, that); opencodeConfig() (provider "pooled", @ai-sdk/openai-compatible, apiKey "x", model "pooled/" + /v1/models id)
+- cli/lib/banner.js: settings printed once the model is ready (@pooled/cli 0.2.1 on npm)
+- cli/test/banner_test.mjs, http_test.mjs (65536 -> 52428; 16384 -> 13107, 4096)
+- docs/design/serve.md §14-15: tested Codex CLI 0.104, Claude Code 2.1.285, opencode 1.18.33; Codex stream_idle_timeout_ms default 300 s
+- Not run against a room: Codex env_key, Open WebUI menu path by version, `litellm --config`.
 */}
 
-import { Aside, Steps } from '@astrojs/starlight/components';
+Every recipe assumes the bridge is running on the same computer. See [Serve API](/docs/serve) to start it. The base URLs are:
 
-Each recipe assumes the bridge is running on your computer:
+- **OpenAI:** `http://127.0.0.1:8080/v1` (Codex, opencode, Continue, Open WebUI, LiteLLM, the `openai` SDK)
+- **Anthropic:** `http://127.0.0.1:8080`, no `/v1` (Claude Code, the `anthropic` SDK)
 
-```bash
-npx @pooled/cli serve ABCD
-```
-
-Replace `ABCD` with your room's code. The bridge needs Node 22 or newer and no GPU. See the [Serve API quickstart](/docs/serve) for what it does.
-
-## The two base URLs
-
-| API | Base URL | Used by |
-|---|---|---|
-| OpenAI (Chat Completions, Responses) | `http://127.0.0.1:8080/v1` | Codex CLI, opencode, Continue, Open WebUI, LiteLLM, the `openai` SDK |
-| Anthropic (Messages) | `http://127.0.0.1:8080` | Claude Code, the `anthropic` SDK |
-
-The Anthropic URL has no `/v1`: the SDKs and Claude Code add it themselves.
-
-`model` can be any string. The recipes use `pooled`. The room always answers with its own model, and `GET /v1/models` lists it as `pooled/<model>`, for example `pooled/qwen3.6-35b-moe`.
-
-## API keys
-
-Without a token, the bridge accepts any API key. Some tools refuse to start without one, so the recipes pass `pooled` or `x`.
-
-If you start the bridge with a token (`POOLED_TOKEN`, `--token-file` or `--token`), every tool must send that token as its API key. It goes in `Authorization: Bearer <token>` or `x-api-key: <token>`, which is what the SDKs and tools do with the key you give them. See [CLI options and security](/docs/serve/options).
+`model` can be any string. Any API key works, unless you started the bridge with a token; then use the token as the key.
 
 ## Context settings for coding agents
 
-Codex CLI, Claude Code and opencode do not know the size of a model called `pooled`. If you do not tell them the room's context, they never compact the conversation. The room then refuses the first prompt that is too long.
-
-The bridge prints the right settings for your room once the room's model is ready (the opencode lines need `@pooled/cli` 0.2.1 or newer):
-
-```text
-For this room's 32768-token context:
-  Codex        model_context_window = 32768, model_auto_compact_token_limit = 26214  (~/.codex/config.toml)
-  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:8080 CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled
-  opencode     OPENCODE_DISABLE_CLAUDE_CODE=1 opencode, with this opencode.json:
-    {"provider":{"pooled":{ ... }}}
-```
-
-`GET /health` also returns the context as `ctx`. If you would rather work it out yourself, these are the values for each model:
+Codex, Claude Code and opencode don't know how big a model called `pooled` is. Without the room's context they never compact, and the room refuses the first prompt that is too long. **The bridge prints the right settings for your room** once its model is ready. `GET /health` returns the context as `ctx`.
 
 | Room | Context | Codex compact limit | Claude Code output | opencode output |
 |---|---|---|---|---|
-| Qwen3 1.7B (default) | 8192 | 6553 | 2048 | 2048 |
-| Qwen3 1.7B (`?ctx=16384`) | 16384 | 13107 | 4096 | 4096 |
-| Qwen3.8 27B (default) | 16384 | 13107 | 4096 | 4096 |
-| Qwen3.8 27B (`?ctx=32768`) | 32768 | 26214 | 8192 | 8192 |
-| Qwen3.6 35B MoE (default) | 32768 | 26214 | 8192 | 8192 |
-| Qwen3.6 35B MoE (`?ctx=65536`) | 65536 | 52428 | 16384 | 8192 |
+| Qwen3 1.7B | 8192 | 6553 | 2048 | 2048 |
+| Qwen3.8 27B | 16384 | 13107 | 4096 | 4096 |
+| Qwen3.8 27B, `?ctx=32768` | 32768 | 26214 | 8192 | 8192 |
+| Qwen3.6 35B MoE | 32768 | 26214 | 8192 | 8192 |
+| Qwen3.6 35B MoE, `?ctx=65536` | 65536 | 52428 | 16384 | 8192 |
 
-The rules behind the table:
+The host sets the context with `?ctx=` on the room page before starting the model. Use the MoE or the 27B at 32K for agents. The 1.7B is too small.
 
-- **Codex compact limit** is 0.8 of the context.
-- **Claude Code output** is a quarter of the context, at most 32000.
-- **opencode output** is a quarter of the context, at most 8192.
+## Codex CLI
 
-The host sets the room's context. They add `?ctx=` to the address of the room page before they start the model, for example `https://pooled.run/room?ctx=65536`. A room cannot go above its model's maximum.
+Add a provider to `~/.codex/config.toml`, with the numbers from the banner (this is a 32K room):
 
-<Aside type="tip" title="Use a big room for coding agents">
-Codex and Claude Code send a system prompt of 15,000 to 20,000 tokens before any history. Use the Qwen3.6 35B MoE (32K by default, up to 64K) or the Qwen3.8 27B at 32K. The 1.7B is capped at 16K, which leaves almost nothing after that prompt, and it often describes a command instead of calling the tool.
-</Aside>
+```toml title="~/.codex/config.toml"
+model = "pooled"
+model_provider = "pooled"
+model_context_window = 32768            # the room's context
+model_auto_compact_token_limit = 26214  # 0.8 of it
 
-## Recipes
+[model_providers.pooled]
+name = "Pooled"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+```
 
-- [Codex CLI](/docs/serve/recipes/codex): Responses API, `~/.codex/config.toml`.
-- [Claude Code](/docs/serve/recipes/claude-code): Messages API, environment variables.
-- [opencode](/docs/serve/recipes/opencode): Chat Completions, `opencode.json`.
-- [Continue](/docs/serve/recipes/continue): Chat Completions, `~/.continue/config.yaml`.
-- [Open WebUI](/docs/serve/recipes/open-webui): a connection in Settings.
-- [OpenAI and Anthropic SDKs](/docs/serve/recipes/sdks): Python and JavaScript.
-- [LiteLLM](/docs/serve/recipes/litellm): a `model_list` entry.
-- [curl](/docs/serve/recipes/curl): raw requests to every endpoint.
+Then run `codex` in your project.
 
-## Before you point a tool at a room
+- `model = "gpt-5-codex"` instead silences the "model metadata not found" warning. Codex then sends `apply_patch` as a custom tool, which works too.
+- Codex gives up on a stream silent for 5 minutes. The bridge sends an event every 10 s while it waits, but on a very slow room add `stream_idle_timeout_ms = 900000` to the provider.
+- With a token, add `env_key = "POOLED_TOKEN"` to the provider and export `POOLED_TOKEN`.
+- Codex always sends a `web_search` tool. The bridge skips it with one warning.
 
-<Aside type="caution" title="The room sees your prompts">
-Everything a tool sends goes to the room's host, a browser tab on someone else's device, and the other devices compute on it. Coding agents send file contents and sometimes secrets. Point them only at a room you trust, and stop the bridge (Ctrl-C) when the room ends. See [Privacy](/docs/privacy).
-</Aside>
+## Claude Code
 
-- One answer is generated at a time. The room's chat, Code mode and every API client share one queue, so a tool may wait behind someone else.
-- Every token takes a trip through each device that holds layers. A long first prompt can take a while to process, longer on a room of phones.
-- The first prompt of a session is the slow one. Later steps reuse the room's caches and only process the new part.
+Run this in your project (the banner prints it with your room's numbers):
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=pooled \
+  CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 \
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled
+```
+
+- `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is the room's context, so Claude Code compacts in time.
+- `CLAUDE_CODE_MAX_OUTPUT_TOKENS` is a quarter of the context. Without it, Claude Code says "Prompt is too long" before sending anything on a room under about 32K.
+- `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` stops side requests, such as titles, from queuing between the agent's steps.
+
+MCP servers work (up to 1024 tools). Anthropic's own server tools, like web search, are skipped.
+
+## opencode
+
+The banner prints an `opencode.json` for your room. Save it in your project, or in `~/.config/opencode/opencode.json`. For a 32K MoE room:
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "pooled": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Pooled room",
+      "options": { "baseURL": "http://127.0.0.1:8080/v1", "apiKey": "x" },
+      "models": {
+        "pooled/qwen3.6-35b-moe": { "name": "Qwen3.6 35B MoE · Q4", "tool_call": true, "limit": { "context": 32768, "output": 8192 } }
+      }
+    }
+  },
+  "model": "pooled/pooled/qwen3.6-35b-moe"
+}
+```
+
+Then run `OPENCODE_DISABLE_CLAUDE_CODE=1 opencode`. That variable stops opencode from loading `~/.claude/CLAUDE.md` and your skills into every prompt. Pass `--title` to `opencode run`, or set a `small_model`, to skip its title request.
+
+## Continue
+
+In `~/.continue/config.yaml`, then pick **Pooled room** in Continue's model menu:
+
+```yaml title="~/.continue/config.yaml"
+models:
+  - name: Pooled room
+    provider: openai
+    model: pooled
+    apiBase: http://127.0.0.1:8080/v1
+    apiKey: pooled
+    roles: [chat, edit]
+```
+
+The key must not be empty. Leave autocomplete to a local model: a room is too slow for completions as you type.
+
+## Open WebUI
+
+Open WebUI also uses port 8080, so start the bridge on another port:
+
+```bash
+npx @pooled/cli serve 4TKG9P --port 8081
+```
+
+In Open WebUI, add a connection under **Settings → Connections → OpenAI API**: URL `http://127.0.0.1:8081/v1`, any key. The room's model shows as `pooled/<model>`.
+
+The bridge only answers on `127.0.0.1`, so Open WebUI in Docker can't reach it. Run Open WebUI on the host, or its container with `--network=host`.
+
+## OpenAI and Anthropic SDKs
+
+Change the base URL and nothing else:
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+
+from anthropic import Anthropic
+client = Anthropic(base_url="http://127.0.0.1:8080", api_key="pooled")
+```
+
+The SDKs also read `OPENAI_BASE_URL` / `OPENAI_API_KEY` and `ANTHROPIC_BASE_URL` / `ANTHROPIC_API_KEY`, so existing code runs unchanged. Tools, streaming, JSON output and the Responses API all work. See [Tool calling](/docs/serve/tools).
+
+## LiteLLM
+
+```yaml title="config.yaml"
+model_list:
+  - model_name: pooled
+    litellm_params:
+      model: openai/pooled
+      api_base: http://127.0.0.1:8080/v1
+      api_key: pooled
+```
+
+Run the proxy on the same computer as the bridge. If others use your proxy, their prompts go to the room too.
+
+## curl
+
+```bash
+curl http://127.0.0.1:8080/health
+
+curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model": "pooled", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
+
+curl http://127.0.0.1:8080/v1/messages -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
+  -d '{"model": "pooled", "max_tokens": 200, "messages": [{"role": "user", "content": "Hi"}]}'
+```
+
+With a token, add `-H "Authorization: Bearer $POOLED_TOKEN"`. Status codes are on [HTTP endpoints](/docs/reference/endpoints#status-codes).
