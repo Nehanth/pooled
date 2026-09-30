@@ -249,11 +249,12 @@ test("dawn: per-OS package first, then webgpu; a clear message when neither is i
   assert.equal(x.hint, "h");
 });
 
-test("Dawn is optional: webgpu installs with the package when it can, and pooled serve works without it", async () => {
+test("Dawn installs with the package but never blocks it: webgpu is an optional dependency", async () => {
   const { readFileSync } = await import("node:fs");
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(pkg.dependencies.webgpu, undefined);
-  assert.equal(pkg.optionalDependencies?.webgpu, "0.6.1");
+  assert.equal(pkg.dependencies.webgpu, undefined);          // a failed Dawn install must not fail npm i
+  assert.equal(pkg.optionalDependencies?.webgpu, "0.6.1");   // the engine is tested on this release (dawn.js DAWN_VERSION)
+  assert.equal(pkg.peerDependencies?.webgpu, undefined);
 });
 
 test("autoRedeal: --devices re-deals when N are back, only for devices the last deal did not see", () => {
