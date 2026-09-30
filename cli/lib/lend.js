@@ -35,8 +35,8 @@ Options
                     a discrete GPU lends its free memory less ${DISCRETE_RESERVE_GB} GB; unified memory (Apple
                     silicon, GB10) lends the total less max(${UNIFIED_KEEP_GB} GB, ${Math.round(UNIFIED_KEEP_FRAC * 100)}%). "max" keeps only a
                     small margin. At most ${DESK_MAX_GB} GB per device.
-  --name <s>        how the room shows this device (default: "mac-", "linux-" or "pc-" and 3 letters made from this
-                    computer's hostname, the same each run, so a restart takes back its slot)
+  --name <s>        how the room shows this device (default: mac-, linux- or pc- and 3 letters
+                    made from the hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
                     default: the PeerJS cloud pooled.run uses)
   --no-pull         don't download the model: stream this device's layers from Hugging Face
