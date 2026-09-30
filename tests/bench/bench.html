@@ -95,6 +95,7 @@ try {
     // ?moegroup=U: expert-grouped prefill in U-token ubatches (a multiple of batchcols; U <= the prompt length to take effect), ?moegroupuc=8, ?moegrouptiled=0: the exact (slower) grouped kernels
     moeGroupPrefill: opt("moegroup", undefined), moeGroupUC: opt("moegroupuc", 8), moeGroupTiled: opt("moegrouptiled", 1) !== 0,
     prefillUbatch: opt("ubatch", undefined), ...(q.get("tile") ? { prefillTile: JSON.parse(q.get("tile")) } : {}),   // ?ubatch=256: wide prefill GEMM
+    ...(q.has("dp4a") ? { prefillDp4a: q.get("dp4a") !== "0" } : {}),   // ?dp4a=1|0: the wide GEMM as int8 dot products (engine option prefillDp4a; unset: the engine default)
     moeKernel: MOEK, prefillMath: PM, prefillSgm: SGM, adapterInfo: ad.info, ...(q.has("attnptile") ? { attnPrefillTile: q.get("attnptile") !== "0" } : {}), ...(q.has("attnptk") ? { attnPrefillTK: +q.get("attnptk") } : {}) });   // ?attnptile=0: attn_flash for prefill instead of the tiled prefill attention (default: on), &attnptk=N its tile; ?moefuse=0: unfused MoE (A/B); ?moe=legacy|default|JSON: unfused expert GEMV layout
   // greedy decode: with GPU sampling the head's argmax runs on the GPU (forwardTokenIds, a .gpu sampler for specStep)
   const GS = !dense && !!eng.gpuSample;
@@ -136,23 +137,28 @@ try {
     pids = pids.slice(0, +q.get("prefilllen"));
     const res = {};
     const ALL = q.get("prefillall") === "1", apt = eng.attnPrefillTile, mg = eng.moeGroup;
-    for (const wide of eng.ubatch || ALL ? [false, true] : [false]) {
-      eng.reset(); eng.prefillWide = wide && !!eng.ubatch; if (eng.mtp) eng.mtpFill = true;
+    // legs: "default" (wide off), "wide" (the f32 wide GEMM), "dp4a" (the int8 wide GEMM, when the engine built it)
+    const dp0 = eng.prefillDp4a, legs = [false, ...(eng.ubatch || ALL ? ["wide"] : []), ...(eng.dp4aCfg ? ["dp4a"] : [])];
+    for (const leg of legs) {
+      const wide = !!leg;
+      eng.reset(); eng.prefillWide = wide && !!eng.ubatch; eng.prefillDp4a = leg === "dp4a"; if (eng.mtp) eng.mtpFill = true;
       if (ALL) { eng.attnPrefillTile = wide && apt; eng.moeGroup = wide && mg; }
       const t1 = performance.now(); await eng.prefillTokens(pids.slice(0, -1)); const lg = Float32Array.from(await eng.forwardToken(pids.at(-1)));
-      res[wide ? "wide" : "default"] = { tokps: +(pids.length / ((performance.now() - t1) / 1000)).toFixed(1), argmax: argmax(lg), lg };
+      res[leg || "default"] = { tokps: +(pids.length / ((performance.now() - t1) / 1000)).toFixed(1), argmax: argmax(lg), lg };
     }
+    eng.prefillDp4a = dp0;
     const relOf = (a, b) => { let md = 0, sc = 1e-6; for (let i = 0; i < a.length; i++) { md = Math.max(md, Math.abs(a[i] - b[i])); sc = Math.max(sc, Math.abs(b[i])); } return +(md / sc).toExponential(2); };
     if (res.wide) res.relDiff = relOf(res.wide.lg, res.default.lg);
+    if (res.dp4a) res.relDiffDp4a = relOf(res.dp4a.lg, res.default.lg);
     if (q.get("prefillseq") === "1") {   // &prefillseq=1: both against one-token-at-a-time decode (the batched-prefill baseline)
       eng.reset(); eng.prefillWide = false; if (ALL) { eng.attnPrefillTile = false; eng.moeGroup = false; } if (eng.mtp) eng.mtpFill = false;
       let lg = null; for (const id of pids) lg = await eng.forwardToken(id);
       const seq = Float32Array.from(lg); res.seqArgmax = argmax(seq);
-      for (const k of ["default", "wide"]) if (res[k]) res[k].relDiffSeq = relOf(res[k].lg, seq);
+      for (const k of ["default", "wide", "dp4a"]) if (res[k]) res[k].relDiffSeq = relOf(res[k].lg, seq);
     }
-    for (const k of ["default", "wide"]) if (res[k]) delete res[k].lg;
+    for (const k of ["default", "wide", "dp4a"]) if (res[k]) delete res[k].lg;
     eng.prefillWide = !!eng.ubatch; if (ALL) { eng.attnPrefillTile = apt; eng.moeGroup = mg; }
-    log("prefill " + JSON.stringify({ tokens: pids.length, ubatch: eng.ubatch, all: ALL, tile: eng.wideCfg, ...res })); out.push({ prefill: res });
+    log("prefill " + JSON.stringify({ tokens: pids.length, ubatch: eng.ubatch, all: ALL, tile: eng.wideCfg, dp4a: eng.dp4aCfg, ...res })); out.push({ prefill: res });
   }
   // ?japan=1: also the room's standard `japan` prompt (docs/bench-log.md), no golden
   const JAPAN = "I am planning a two week trip through Japan in late October with my partner. We land in Tokyo, want three days there, then a day trip to Nikko, then the bullet train to Kyoto for four days with a side trip to Nara, then two nights in Osaka, and we fly home from Osaka. We like food markets, old temples, hiking, and small neighborhood bars, and we want to avoid the most crowded tourist spots where we can. Our budget is moderate, around two hundred dollars a day for the two of us not counting hotels. Please give me a day by day itinerary with one main activity each morning and afternoon, a neighborhood to eat dinner in each night, and tell me which days I should buy a rail pass for and whether it is worth it at all.";

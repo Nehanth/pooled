@@ -17,7 +17,7 @@
 import { mockDevice } from "./mock_gpu.js";
 import { buildSynthGGUF, SYNTH_MOE } from "../e2e/synth.mjs";
 import { parseGGUFHeader, qwen35Weights, GGML_EMBED } from "../../engine/gguf.js";
-import { Qwen35Engine, DP4A_DEFAULT } from "../../engine/qwen35.js";
+import { Qwen35Engine, DP4A_DEFAULT, dp4aAutoDevice } from "../../engine/qwen35.js";
 
 async function engineFor(buf, opts = {}) {
   const G = parseGGUFHeader(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
@@ -53,7 +53,7 @@ const byBg = (log) => {
 };
 // kernels the wide path replaces: the projection GEMVs / 16-column GEMM (+ transposes, reduces), the
 // trunk's batched norms and the per-column SiLU. Everything else must be dispatched identically.
-const PROJ = /^(matvec_.*coop_b|matvec_.*gu_b|gemm_(q4|q8|red|xpose)|rmsnorm_mc$|silu_mul$|add_res_mc$)/;
+const PROJ = /^(matvec_.*coop_b|matvec_.*gu_b|gemm_(q4|q8|red|xpose)|rmsnorm_mc$|silu_mul(_w)?$|add_res_mc$)/;
 const eq = (a, b, m) => { if (a !== b) throw new Error(`${m}: ${a} != ${b}`); };
 
 async function compare(model, n, U, wgMem) {
@@ -139,7 +139,13 @@ Deno.test("prefill defaults: wide on for an engine with the embedding (MoE + exp
   eq(!!worker.attnPrefillTile, true, "MoE worker attnPrefillTile"); eq(warns.length, 0, "MoE worker warnings: " + warns.join("; "));
   const dense = await engineFor(models.dense);
   eq(dense.eng.ubatch, 256, "dense prefillUbatch default"); eq(dense.eng.moeGrpU, 0, "dense moeGroupPrefill");
-  eq(!!dense.eng.dp4aCfg, DP4A_DEFAULT, "dense prefillDp4a default"); eq(!!host.eng.dp4aCfg, DP4A_DEFAULT, "MoE prefillDp4a default");
+  // dp4a "auto": per model kind, on the devices dp4aAutoDevice accepts (here: Deno, no vendor, not macOS)
+  const autoDev = dp4aAutoDevice(null);
+  eq(!!dense.eng.dp4aCfg, DP4A_DEFAULT.dense && autoDev, "dense prefillDp4a default"); eq(!!host.eng.dp4aCfg, DP4A_DEFAULT.moe && autoDev, "MoE prefillDp4a default");
+  eq(dp4aAutoDevice({ vendor: "nvidia" }), true, "auto on NVIDIA"); eq(dp4aAutoDevice({ vendor: "apple" }), false, "auto on Apple");
+  eq(dp4aAutoDevice({ vendor: "amd" }), false, "auto on unmeasured vendors");
+  const nv = await engineFor(models.dense, { engine: { adapterInfo: { vendor: "apple" } } });
+  eq(!!nv.eng.dp4aCfg, false, "dense prefillDp4a default on Apple"); eq(nv.warns.length, 0, "Apple auto: no warning");
   eq(dense.warns.length, 0, "dense warnings");
 });
 
@@ -179,4 +185,21 @@ Deno.test("dp4a wide prefill: each projection input quantized once, int8 GEMMs o
   // Apple GPUs: an explicit request warns and stays off
   const apple = await engineFor(models.dense, { engine: { prefillDp4a: true, adapterInfo: { vendor: "apple" } } });
   if (apple.eng.dp4aCfg || !apple.warns.some((w) => w.includes("prefillDp4a"))) throw new Error("dp4a on an Apple GPU");
+});
+
+// (the real 27B's full 16-column passes run gate / up as GEMMs, then this SiLU; the synthetic models have no GEMM
+// shapes, so plain GEMVs (no fused gate/up) stand in for that here)
+Deno.test("16-column pass: one multi-column SiLU (silu_mul_w) per dense FFN, none per column", async () => {
+  for (const model of ["dense", "q8out"]) {
+    const r = await trace(model, 100, { prefillUbatch: 0, matvecVariant: "plain" });
+    // per pass: every dense trunk layer, plus the MTP draft layer when the prefill fills the draft cache
+    const passes = Math.ceil(100 / 16), dense = r.eng.layers.filter((Ly) => !Ly.moe).length + (r.eng.mtp ? 1 : 0);
+    eq(r.log.filter((e) => e.pipe === "silu_mul").length, 0, `${model}: per-column silu_mul`);
+    const sw = r.log.filter((e) => e.pipe === "silu_mul_w");
+    eq(sw.length, dense * passes, `${model}: silu_mul_w dispatches`);
+    // grid y = the pass's column count (16, then the 4-column tail)
+    eq(sw.filter((e) => e.grid[1] === 16).length, dense * Math.floor(100 / 16), `${model}: full passes`);
+    // the tail pass: its 4 columns (the draft layer's fill may cover one column fewer: it pairs each token with the next)
+    eq(sw.filter((e) => e.grid[1] > 0 && e.grid[1] < 16 && e.grid[1] >= 100 % 16 - 1).length, dense, `${model}: tail pass`);
+  }
 });

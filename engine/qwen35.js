@@ -6,7 +6,7 @@
 import { WGSL } from "./wgsl/base.js";
 import { gemmWGSL, GEMM_S, GEMM_TILE } from "./wgsl/gemm.js";
 import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SGM_SYNTAX, SGM_DEFAULT } from "./wgsl/gemm_sgm.js";
-import { gemmWideWGSL, wideTileConfig, gemmDp4aWGSL, dp4aTileConfig, probeDp4a } from "./wgsl/gemm_wide.js";
+import { gemmWideWGSL, wideTileConfig, gemmDp4aWGSL, dp4aTileConfig, probeDp4a, SILU_MUL_W_WGSL } from "./wgsl/gemm_wide.js";
 import { coopWGSL, probeUnpack } from "./wgsl/coop.js";
 import { WGSL2 } from "./wgsl/qwen35.js";
 import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout, normRouterKernel } from "./wgsl/moe.js";
@@ -48,8 +48,16 @@ export const DENSE_PREFILL_UBATCH = 256;
 // of the MoE's 40 layers at 256, passed. Submitting every 8 layers fixes it; the results are bit-identical
 // (the GEMM has no split-K, so chunking and submit boundaries do not change the arithmetic).
 export const WIDE_SUBMIT_LAYERS = 8;
-// prefillDp4a default (undefined / "auto") where the device supports it (see _init)
-export const DP4A_DEFAULT = false;
+// prefillDp4a default (undefined / "auto"), per model kind, on the devices dp4aAutoDevice() accepts (see _init)
+export const DP4A_DEFAULT = Object.freeze({ dense: true, moe: false });
+// Devices where "auto" turns dp4a on: measured faster there (docs/bench-log.md, 2026-09-30). NVIDIA by the adapter's
+// vendor (Chrome); Deno reports no vendor, so there: any OS but macOS (the GB10 is where it was measured). Never Apple:
+// Metal has no native int8 dot product. Other vendors stay opt-in until measured.
+export function dp4aAutoDevice(info) {
+  const v = (info?.vendor || "").toLowerCase();
+  if (v) return v.includes("nvidia");
+  return typeof Deno !== "undefined" && Deno.build?.os !== "darwin";
+}
 
 export class Qwen35Engine {
   // Option defaults applied under every create() call's own options (test runners set these from the
@@ -445,9 +453,10 @@ export class Qwen35Engine {
     // scalar multiply-adds. engine.prefillDp4a = false switches it off at runtime (A/B).
     this.dp4aCfg = null;
     const dpAuto = prefillDp4a === undefined || prefillDp4a === "auto";
-    if (this.ubatch && (dpAuto ? DP4A_DEFAULT : !!prefillDp4a)) {
+    const dpInfo = adapterInfo ?? (typeof Deno === "undefined" ? device.adapterInfo : null);
+    if (this.ubatch && (dpAuto ? DP4A_DEFAULT[this.moe ? "moe" : "dense"] && dp4aAutoDevice(dpInfo) : !!prefillDp4a)) {
       let why = null, cfg = null;
-      const info = adapterInfo ?? (typeof Deno === "undefined" ? device.adapterInfo : null);
+      const info = dpInfo;
       try { cfg = dp4aTileConfig(prefillDp4aTile, device.limits.maxComputeWorkgroupStorageSize); } catch (e) { why = e.message; }
       if (why) { /* tile config error */ }
       else if (/apple/i.test(info?.vendor || "")) why = "Apple GPUs emulate dp4a";
@@ -480,7 +489,7 @@ export class Qwen35Engine {
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.gemmOn ? gemmWGSL({ N: batchCols, pairs: this._gemmPairs, pairs8: this._gemm8Pairs, UNPACK: unpack, R16: this._pmR16 }) : "")
       + (this.ubatch ? gemmWideWGSL(this.wideCfg, { UNPACK: unpack }) : "")
-      + (this.dp4aCfg ? gemmDp4aWGSL(this.dp4aCfg) : "") + WGSL2 });
+      + (this.dp4aCfg ? gemmDp4aWGSL(this.dp4aCfg) : "") + SILU_MUL_W_WGSL + WGSL2 });
     const C = GPUShaderStage.COMPUTE;
     const layout0 = device.createBindGroupLayout({
       entries: [
@@ -565,8 +574,8 @@ export class Qwen35Engine {
     // wide prefill GEMMs: the same (qs, sc, x, y, shape) layout
     if (this.ubatch) {
       for (const p of ["gemm_w_q4", "gemm_w_q4_acc", "gemm_w_q8", "gemm_w_q8_acc"]) G1[p] = G1.matvec_q4_coop_b;
-      G1.silu_mul_w = ["rw", "ro", "u"];
     }
+    G1.silu_mul_w = ["rw", "ro", "u"];   // SiLU(g) * u over many columns: the wide chunk and the batched pass (_encodeLayerBatch)
     if (this.dp4aCfg) {
       for (const p of ["gemm_d_q4", "gemm_d_q4_acc", "gemm_d_q8", "gemm_d_q8_acc"]) G1[p] = ["ro", "ro", "ro", "ro", "rw", "u"];
       G1.quant_q8_w = ["ro", "rw", "rw", "u"];
@@ -1496,6 +1505,14 @@ export class Qwen35Engine {
     pass.setBindGroup(1, bg);
     pass.dispatchWorkgroups(Math.ceil(threads / wg), ny, nz);
   }
+  // silu_mul_w over nCols columns of the batched g / u (it reads no group-0 binding)
+  _dSiluMC(pass, bg, nCols) {
+    if (this.skip && this.skip.has("silu_mul_w")) return;
+    pass.setPipeline(this.pipes.silu_mul_w);
+    pass.setBindGroup(0, this.bgCommonFor.silu_mul_w);
+    pass.setBindGroup(1, bg);
+    pass.dispatchWorkgroups(Math.ceil(this.dims.inter / 64), nCols);
+  }
   _dCol(pass, name, col, bg, threads, wg = 64) {
     if (this.skip && this.skip.has(name)) return;
     pass.setPipeline(this.pipes[name]);
@@ -1746,8 +1763,9 @@ export class Qwen35Engine {
           norm1: bgNormC(L.attnNorm, c),
           norm2: bgNormC(L.postNorm, c),
           addTmp: this._bg2res(this.pipes.add_res, [slice(B.x, c), slice(B.tmpDim, c)]),
-          silu: this._bg2res(this.pipes.silu_mul, [slice(B.g, c), slice(B.u, c)]),
         })),
+        // SiLU(g) * u for all nCols columns in one launch (silu_mul_w: silu_mul's expression, same bits)
+        silu: dense ? this._bg2res(this.pipes.silu_mul_w, [whole(B.g), whole(B.u), mcU(D.inter, st(B.g), st(B.u))]) : null,
       };
       if (L.fused) {
         const { nExp, inter: ei, hs } = this.moe;
@@ -1894,7 +1912,7 @@ export class Qwen35Engine {
       if (LB.gu && !G) this._dop(p, LB.gu, nCols);
       else {   // the GEMM has no fused gate/up: run them separately, then SiLU
         for (const op of LB.gateUp) this._dop(p, op, nCols);
-        for (let c = 0; c < nCols; c++) this._dCol(p, "silu_mul", c, LB.cols[c].silu, D.inter);
+        this._dSiluMC(p, LB.silu, nCols);
       }
       if (G) this._dop(p, this.xposeG);
       this._dop(p, LB.down, nCols);
@@ -1983,7 +2001,7 @@ export class Qwen35Engine {
       if (LB.gu && !G) this._dop(p, LB.gu, nCols);
       else {
         for (const op of LB.gateUp) this._dop(p, op, nCols);
-        for (let c = 0; c < nCols; c++) this._dCol(p, "silu_mul", c, LB.cols[c].silu, D.inter);
+        this._dSiluMC(p, LB.silu, nCols);
       }
       if (G) this._dop(p, this.xposeG);
       this._dop(p, LB.shDown, nCols);

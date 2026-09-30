@@ -129,7 +129,7 @@ export function wideKernel(fmt, acc, c, { js = false, UNPACK = true } = {}) {
   return { name, body: js ? wgslToJs(body) : body };
 }
 
-// WGSL for the wide path: Q4 / Q8 kernels (= and +=) plus the multi-column SiLU(g) * u.
+// WGSL for the wide path: Q4 / Q8 kernels (= and +=). Its SiLU is SILU_MUL_W_WGSL (always in the engine module).
 export function gemmWideWGSL(c, { UNPACK = true } = {}) {
   const kernels = ["q4", "q8"].flatMap((fmt) => [false, true].map((acc) => {
     const k = wideKernel(fmt, acc, c, { UNPACK });
@@ -147,9 +147,13 @@ fn ${k.name}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id)
 var<workgroup> gw_W: array<vec4<f32>, ${c.KS * c.BM / 4}>;
 var<workgroup> gw_X: array<vec4<f32>, ${c.KS * c.BN / 4}>;
 ${kernels.join("\n")}
+`;
+}
 
-// SiLU(g) * u over ny columns (n = width, s0 / s1 = column strides of g / u in floats): the same
-// expression as silu_mul, one dispatch for a whole ubatch instead of one per column.
+// SiLU(g) * u over many columns in one dispatch (MC: n = width, s0 / s1 = column strides of g / u in floats):
+// the same expression as silu_mul, bit-identical per element. Used by the wide prefill (a whole ubatch) and the
+// 16-column batched pass (prefill and verify), so it is part of every Qwen35 module (engine/qwen35.js).
+export const SILU_MUL_W_WGSL = /* wgsl */ `
 @group(1) @binding(0) var<storage, read_write> gws_g: array<f32>;
 @group(1) @binding(1) var<storage, read> gws_u: array<f32>;
 @group(1) @binding(2) var<uniform> gws_mc: MC;
@@ -162,9 +166,8 @@ fn silu_mul_w(@builtin(global_invocation_id) gid: vec3<u32>) {
   gws_g[o] = (g / (1.0 + exp(-g))) * gws_u[gid.y * gws_mc.s1 + i];
 }
 `;
-}
 
-// ---- DP4a wide prefill GEMM (prefillMath "dp4a"; llama.cpp's MMQ idea without tensor cores) ----
+// ---- DP4a wide prefill GEMM (engine option prefillDp4a; llama.cpp's MMQ idea without tensor cores) ----
 // Activations are quantized once per chunk and input to Q8_1-style blocks (quant_q8_w: per 32 values of a
 // column, d = amax / 127, q = round(x / d) as packed i8; compact layout xq[(col * nb + blk) * 2 + h],
 // xd[col * nb + blk]). The GEMM stages BM weight rows x KB blocks as packed i8 (Q4_0 nibbles re-centred to

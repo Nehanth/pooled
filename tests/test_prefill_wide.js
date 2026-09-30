@@ -24,7 +24,9 @@ const hasMtp = L < nBlk;
 const tok = model.tokenizer();
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp });
 const maxSeq = Math.ceil((Math.max(...LENS) + GEN + 64) / 256) * 256;
-const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq, batchCols: 16, coopRowsB: 1, ...wideOpts() });
+const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq, batchCols: 16, coopRowsB: 1, ...wideOpts(),
+  // the f32 wide GEMM (its 2e-3 / 2e-2 tolerance); the dp4a GEMM is tests/test_prefill_dp4a.js (PREFILL_DP4A=1 forces it here)
+  ...(Deno.env.get("PREFILL_DP4A") ? {} : { prefillDp4a: false }) });
 if (!eng.ubatch) { console.log("WIDE FAIL: prefillUbatch did not turn on (see the warning above)"); Deno.exit(1); }
 console.log(`${MODEL}: ${L} layers, mtp ${!!eng.mtp}, ubatch ${eng.ubatch}, tile ${JSON.stringify(eng.wideCfg)}, gemm16 ${eng.gemmOn}`);
 

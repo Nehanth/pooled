@@ -6,7 +6,7 @@
 // A second test compares float32 summation orders (the wide kernel's vs the 16-column GEMM's) against
 // float64 on a real 27B shape: the wide order is as accurate, just different. No GPU.
 //   deno test --no-check tests/unit/gemm_wide_test.js
-import { wideKernel, wideTileConfig, gemmWideWGSL, WIDE_TILE_DEFAULT } from "../../engine/wgsl/gemm_wide.js";
+import { wideKernel, wideTileConfig, gemmWideWGSL, WIDE_TILE_DEFAULT, SILU_MUL_W_WGSL } from "../../engine/wgsl/gemm_wide.js";
 import { f16ToF32, f32ToF16 } from "../../engine/gguf.js";
 
 const H = {
@@ -106,8 +106,10 @@ Deno.test("wide gemm: config resolution and WGSL emission", () => {
   let threw = false; try { wideTileConfig({ BM: 128, BN: 128, TM: 8, TN: 8 }, 16384); } catch { threw = true; }
   if (!threw) throw new Error("a 128x128 tile cannot fit 16 KB");
   const w = gemmWideWGSL(d);
-  for (const f of ["fn gemm_w_q4(", "fn gemm_w_q4_acc(", "fn gemm_w_q8(", "fn gemm_w_q8_acc(", "fn silu_mul_w(", "array<vec4<f32>, 512>"])
+  for (const f of ["fn gemm_w_q4(", "fn gemm_w_q4_acc(", "fn gemm_w_q8(", "fn gemm_w_q8_acc(", "array<vec4<f32>, 512>"])
     if (!w.includes(f)) throw new Error("WGSL is missing " + f);
+  // the multi-column SiLU is its own snippet (in every engine module: the wide chunk and the batched pass use it)
+  if (w.includes("fn silu_mul_w(") || !SILU_MUL_W_WGSL.includes("fn silu_mul_w(")) throw new Error("silu_mul_w belongs to SILU_MUL_W_WGSL only");
   if (gemmWideWGSL(d, { UNPACK: false }).includes("unpack4x")) throw new Error("UNPACK false still uses unpack4x");
 });
 
