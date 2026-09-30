@@ -4195,7 +4195,9 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
         // per device) until a run is accepted in full (a copy in progress), then up to 7
         let lk = LOOKUP ? lookupDrafts(ctxNow, ai.lkFullD ? kMax : Math.min(3, kMax)) : [], via = 2;
         // nothing to copy: the draft model's guesses, when there is one (?draft=)
-        if (!lk.length && ai.draft && kMax > 0) { lk = await ai.draft.propose(ctxNow, Math.min(DRAFT_K, kMax)); via = 1; }
+        // (only when the measured lap is long enough for the drafts to pay: DraftModel.pickK)
+        const dk = !lk.length && ai.draft && kMax > 0 ? ai.draft.pickK(ai.lapStat?.lap, Math.min(DRAFT_K, kMax)) : 0;
+        if (dk) { lk = await ai.draft.propose(ctxNow, dk); via = 1; }
         let toks;
         if (lk.length) {
           ai.engine.pos = ai.pos;
@@ -4205,6 +4207,7 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
           ai.lastHidden = ai.engine.lastHidden;
           if (via === 2) copied += toks.length - 1;
           ai.lkFullD = via === 2 && toks.length === lk.length + 1;
+          if (via === 1) ai.draft.note(lk.length, toks.length - 1);
         } else {
           ai.lkFullD = false;
           const lg = await aiPipeToken(next, true, undefined, desc);

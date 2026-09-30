@@ -164,6 +164,9 @@ These change speed, not the tokens, unless noted.
 |---|---|---|
 | `?fill=0` | on | Stops the host from filling the draft head's cache during a room prefill. Fewer drafts accepted after a prompt. |
 | `?lookup=0` | on | Drafts from the draft head only, without prompt lookup. |
+| `?densespec=0` | on | Dense models (Qwen3 0.6B / 1.7B / 4B) in a room decode one token per lap, without prompt-lookup drafts. |
+| `?draft=qwen3-0.6b` | off | Experimental. The host also loads Qwen3 0.6B whole (about 0.7 GB more on the host, outside the pledges) to draft for Qwen3 1.7B / 4B when prompt lookup finds nothing. Same tokens, more per lap, but the drafts add host GPU time. |
+| `?draftk=N` | `4` | Drafts per lap from `?draft=`, 1 to 7. |
 | `?tail=0` | on | The old per-token tail after a prefill. |
 | `?mtpbatch=0` | on | One draft-cache row per GPU submit. |
 | `?mtprefill=0` | on | Draft-cache refill after a verify as one submit per row. |

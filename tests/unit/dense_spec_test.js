@@ -158,3 +158,20 @@ Deno.test("draft model: syncs by common prefix, drafts greedily, never re-prefil
   eq(e.prefilled, 3); eq(d.held, [5, 1, 2]);
   eq(await d.propose([5], 0), []);
 });
+
+Deno.test("draft model: drafts only when the measured lap is long enough to pay for them", () => {
+  const d = new DraftModel({ pos: 0 }, { argmax: () => 0 });
+  eq(d.pickK(30, 4), 4, "nothing measured yet: draft (and measure)");
+  d.msPerTok = 8; d.acc = 0.5;
+  // 1 + 0.5 = 1.5 tokens for 30 + 8 ms beats 1 token per 30 ms? 1.5/38 > 1/30: yes
+  ok(d.pickK(30, 4) >= 1);
+  // a 10 ms lap: any draft costs more than the lap it would save
+  eq(d.pickK(10, 4), 0);
+  // a 100 ms lap (two 50 ms hops) with good acceptance: the longest run
+  d.acc = 0.8;
+  eq(d.pickK(100, 4), 4);
+  // acceptance falls: fewer drafts
+  d.acc = 0.2;
+  ok(d.pickK(100, 4) < 4);
+  d.note(4, 4); ok(d.acc > 0.2);
+});
