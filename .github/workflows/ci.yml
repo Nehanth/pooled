@@ -48,10 +48,9 @@ jobs:
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: tests/run.sh selftest
   browser:
-    # Code mode's preview in headless Chromium, no GPU needed. Optional until it has a track record in CI.
+    # Code mode's preview in headless Chromium, no GPU needed.
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020   # v4.4.0
