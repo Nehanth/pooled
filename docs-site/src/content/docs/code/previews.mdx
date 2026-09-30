@@ -1,9 +1,9 @@
 ---
-title: Previews
-eyebrow: Code mode
+title: Preview sandbox
+eyebrow: Internals
 description: How the agent's app runs on a virtual localhost, what the sandbox allows, how the console reaches the agent, and how other devices run the same preview.
 sidebar:
-  label: Previews
+  label: Preview sandbox
   order: 3
 ---
 {/*
@@ -25,18 +25,9 @@ sidebar:
   - CHANGELOG.md: "Code previews fit their box", "other devices' previews run by themselves"
 */}
 
-When the agent calls `serve`, the project's files are served on a virtual port, `:5173` by default. Nothing binds a real port. The preview pane shows a tab per port, with an address line like `sandbox:5173/index.html`, and runs the page in a sandboxed frame.
+When the agent calls `serve`, the project's files are served on a virtual port, `:5173` by default. Nothing binds a real port. The preview pane shows a tab per port (`sandbox:5173/index.html`) and runs the page in a sandboxed frame. A port's state reads `rev 3`, `loading…`, `stopped` or `hung`.
 
-## The preview bar
-
-| Control | What it does |
-|---|---|
-| Port tabs (`:5173`) | One per served port. The host can close one to stop serving it. |
-| State | `rev 3` when loaded, `loading…`, `stopped` or `hung`. |
-| **sandbox** | Hover to see where the app runs: in a frame in this tab, or on a separate site in a process of its own. |
-| Reload | Loads the current files again. |
-| **Open** | Opens the app full size in a new tab, still sandboxed. |
-| **Share** | Sends the app to everyone in the room. See [Share and download](/docs/code/share). |
+The controls (Reload, Open, Share, Console) are described in [Code mode](/docs/code#previews). This page covers how the preview works.
 
 ## Live reload
 
@@ -104,7 +95,7 @@ The room page points at the preview site with a meta tag. For example:
 The value is one origin, or `host=origin` entries so one page can send production and staging to different preview sites. The page checks it before using it. A value on the page's own site (the same host, a subdomain or a sibling), plain `http` (allowed only for `localhost` or `127.0.0.1`, from an `http` page), or anything that is not an http(s) URL is ignored with one console warning, and the preview stays in the tab. A subdomain would share the room's process, so it could not isolate anything.
 
 :::note[Not on pooled.run yet]
-The code is in place, but the `preview-origin` meta on pooled.run is still empty, so previews there run in the room's tab and `run_js` is off. Setting up the second site is covered in [Deploying the site](/docs/self-host/deploy). On `localhost`, the page uses `127.0.0.1` as its preview site (and the reverse), so both work in local development.
+The code is in place, but the `preview-origin` meta on pooled.run is still empty, so previews there run in the room's tab and `run_js` is off. Setting up the second site is covered in [Deploying the site](/docs/self-host/deploy#code-mode-preview-site). On `localhost`, the page uses `127.0.0.1` as its preview site (and the reverse), so both work in local development.
 :::
 
 If the preview site doesn't answer, the preview falls back to running in the tab and logs "the isolated preview host did not answer; running the preview in this tab".
