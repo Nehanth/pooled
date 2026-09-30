@@ -245,14 +245,15 @@ $ pooled join K7QX
 pooled join · room K7QX
   GPU      NVIDIA GB10 · 121.7 GB unified memory
   lending  64 GB  (121.7 GB of unified memory, less 42.6 GB kept for the system, capped at 64 GB per device; --gb to change)
-  anyone with the room code can use what this computer lends while it is in the room
+  anyone with the room code can use what this computer lends, and it sees the room's hidden states
+  (they carry the prompts and answers): lend to rooms you trust
   Ctrl-C leaves the room and frees the GPU
 room K7QX · online · 3 devices · layers 20-39 of qwen3.6-35b-moe · 24.1 tok/s · 1204 passes
 ```
 
 - **How much it lends.** WebGPU does not say how much memory a GPU has, so `pooled` asks the OS: `nvidia-smi` for NVIDIA cards, sysfs for AMD on Linux, the system's memory on Apple silicon and on GPUs that share it (GB10). A discrete GPU lends its free memory less 1.5 GB; unified memory lends the total less max(8 GB, 35%) (on Linux, never more than is free right now, less 2 GB); at most 64 GB per device. On a discrete GPU it then allocates that much for a moment to make sure it is there (`--no-check` skips this; unified memory skips it, since the OS's numbers are the memory itself and touching 64 GB of it takes about 20 s). `--gb N` sets it, `--gb max` keeps only a small margin. When the memory can't be read it lends half of the GPU's largest buffer and says so.
 - **The status line** shows the room, what is happening (waiting for the host to deal layers, loading, online, answering, a device left, rejoining), the devices in the room, the layers this computer holds, the room's speed on its last answer and how many passes ran here. Without a terminal (or with `--json-log`) it prints a line when that changes, and once a minute.
-- **When the link drops.** A lost signaling server does not stop the room (the links are direct); `pooled` reconnects to it with backoff (2, 4, 8, 16, 30 s), as the room page does, and tries the next server in a `--signal` list when one is down. When the link to the host drops it knocks for a minute and the host puts it back in its slot, with its layers still loaded. If the host does not come back, it joins the room again from scratch for `--wait` minutes (10 by default), then stops.
+- **When the link drops.** A lost signaling server does not stop the room (the links are direct); `pooled` reconnects to it with backoff (2, 4, 8, 16, 30 s), as the room page does, and tries the next server in a `--signal` list when one is down. When the link to the host drops it knocks for a minute and the host puts it back in its slot, with its layers still loaded. If the host does not come back, it joins the room again from scratch for `--wait` minutes (10 by default), then stops. It goes back only to a host of the same name: a room code is short and can be reused by a new room, and `pooled join` never joins a room you did not name (it leaves one with another host and says so). Without `--name`, the device's name is `node-` and 3 letters made from the hostname, the same on every run, so a `pooled join` started again after a crash takes back its slot.
 - **Errors** say what to do: no WebGPU adapter (Dawn needs Metal on macOS 26+, Vulkan on Linux, D3D12 on Windows), not enough GPU memory, no room with that code, the signaling server can't be reached, and a host on another protocol version (update with `npx @pooled/cli@latest`, or ask the host to reload).
 - **Dawn is optional.** `pooled serve` needs no GPU, and `webgpu` is about 95 MB with all five OS builds, so it is an optional peer dependency that `npm install @pooled/cli` does not fetch. `join` and `host` load it when they start and say how to install it when it is missing:
 
@@ -263,7 +264,7 @@ npx -p @pooled/cli -p webgpu@0.6.1 pooled join K7QX
 
 `pooled host --model qwen3.6-35b-moe` opens a room and prints its code and link. In a terminal, Enter deals the layers over the devices in the room (and again, re-deals after more join); `--devices N` deals as soon as N devices are in, and deals again by itself when a device stayed away past the minute's grace (the room went on without it) and N are back. Ask from the room page, or with `pooled serve <CODE>`. `pooled join --help` and `pooled host --help` list the options.
 
-Anyone with the room code can join, and every device that holds layers computes on every prompt, so lend to rooms you trust. Needs macOS 26 or newer, Linux with glibc 2.38 or newer (Ubuntu 24.04), or Windows (not yet tested).
+**Who sees what.** Anyone with the room code can join; there is no password yet. Every device that holds layers computes on every prompt: it receives the hidden state of each token, which carries the prompts, tool results and answers, so a `pooled join` device can in principle read what is asked in the room it lends to, and every device that joins a `pooled host` room can read what is asked there. The room's host picks the model (from Pooled's own list; a host can't make this device download anything else) and how many layers this device holds. Lend to rooms you trust, and share a host's code only with devices you trust. Needs macOS 26 or newer, Linux with glibc 2.38 or newer (Ubuntu 24.04), or Windows (not yet tested).
 
 ## Development
 

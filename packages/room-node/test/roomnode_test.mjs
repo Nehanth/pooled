@@ -171,6 +171,28 @@ test("host: a device that joins an online room gets the layer map, so an old wor
   assert.equal(w.ai.role, "guest"); assert.equal(w.ai.range, null); assert.ok(destroyed);
 });
 
+test("worker: a host of another name under the same code is another room: it leaves before hearing anything else", () => {
+  // a rejoin that expects its old host
+  const w = fakeNode({ host: false, name: "mac" });
+  w.expectHost = "host-ab";
+  let other = null; w.on("otherhost", (x) => { other = x; });
+  w.addPeer("pooled-room-TEST", "pooled-room-TEST");
+  w.onData("pooled-room-TEST", { t: "hello", name: "stranger", v: PROTOCOL, meta: { api: 2 } });
+  assert.deepEqual(other, { was: "host-ab", now: "stranger" });
+  assert.ok(!w.conns.has("pooled-room-TEST"), "the link to it is closed");
+  w.onData("pooled-room-TEST", { t: "ai-load", v: PROTOCOL, model: "qwen3-1.7b", range: [0, 28], next: "host" });
+  assert.equal(w.ai.role, null, "and an ai-load from it is ignored");
+  // knocking after the host link dropped: the name heard before is the one expected
+  const k = fakeNode({ host: false, name: "mac" });
+  k.addPeer("pooled-room-TEST", "pooled-room-TEST");
+  k.onData("pooled-room-TEST", { t: "hello", name: "host-ab", v: PROTOCOL, meta: { api: 2 } });
+  assert.equal(k.hostName, "host-ab"); assert.ok(!k.otherHost);
+  k.onData("pooled-room-TEST", { t: "hello", name: "host-ab", v: PROTOCOL, meta: { api: 2 }, back: 1 });
+  assert.ok(!k.otherHost, "the same host back is fine");
+  k.onData("pooled-room-TEST", { t: "hello", name: "host-zz", v: PROTOCOL, meta: { api: 2 } });
+  assert.equal(k.otherHost?.now, "host-zz");
+});
+
 test("host: ai-linklost from a chain worker fails the laps in flight", () => {
   const n = fakeNode();
   n.addPeer("a", "mac"); n.ai.chain = ["a"]; n.ai.fed = [1, 2];

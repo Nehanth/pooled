@@ -24,12 +24,19 @@ Options
                     a discrete GPU lends its free memory less ${DISCRETE_RESERVE_GB} GB; unified memory (Apple
                     silicon, GB10) lends the total less max(${UNIFIED_KEEP_GB} GB, ${Math.round(UNIFIED_KEEP_FRAC * 100)}%). "max" keeps only a
                     small margin. At most ${DESK_MAX_GB} GB per device.
-  --name <s>        how the room shows this device (default: "node-" and 3 random letters)
+  --name <s>        how the room shows this device (default: "node-" and 3 letters made from this
+                    computer's hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
                     default: the PeerJS cloud pooled.run uses)
   --models <dir>    read the weights from local files instead of downloading them
   --no-check        skip the test allocation that confirms the memory is there
-  --wait <min>      after the host is gone, keep trying to rejoin for this long (default 10)
+  --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
+                    (default 10); only a host of the same name: a room code can be reused by a
+                    new room, and pooled join never joins a room you did not name
+
+  Every device that holds layers computes on every prompt in the room: this computer sees the
+  hidden states of what is asked there (they carry the prompts and answers), and anyone with the
+  room code can use what it lends. Lend to rooms you trust.
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
   -h, --help        this help
@@ -58,6 +65,10 @@ Options
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
   -h, --help        this help
+
+  Anyone with the room code can join, and every device that holds layers sees the hidden states
+  of what is asked in the room (they carry the prompts and answers). Share the code only with
+  devices you trust.
 `;
 
 export class UsageError extends Error {}
@@ -260,6 +271,18 @@ export function tpsFromStats(stats) {
 }
 
 // ---------------- errors ----------------
+// pooled join's default name: "node-" and 3 letters from the hostname (hashed: the hostname itself,
+// often a person's name, is not shown to the room), the same on every run, so a join started again
+// after a crash is re-seated in its old slot (the host knows a device by its name)
+export function deviceName(hostname = "") {
+  let h = 2166136261;   // FNV-1a
+  for (const ch of String(hostname)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; }
+  const A = "abcdefghjkmnpqrstvwxyz";   // no i, l, o, u (they read alike)
+  let s = "";
+  for (let i = 0; i < 3; i++) { s += A[h % A.length]; h = Math.floor(h / A.length); }
+  return "node-" + s;
+}
+
 // the host's protocol vs this one -> what to do about it
 export function versionAdvice({ mine, theirs, theyHost = true, code = "" }) {
   const who = theyHost ? "This room's host" : "A device in this room";
@@ -299,6 +322,9 @@ export function explainError(err, { code = "", cmd = "join", mine = 4 } = {}) {
   if (t === "kicked") return { message: `The host refused this device: ${cleanText(msg, 300)}`, code: 1 };
   if (/out of memory|OOM|allocation failed|Failed to allocate|createBuffer/i.test(msg))
     return { message: `The GPU ran out of memory: ${cleanText(msg, 200)}`, hint: "Lend less with --gb N, or close other GPU apps.", code: 1 };
+  if (t === "other-host")
+    return { message: `Room ${code} now has another host (${cleanText(err.now, 40)}, not ${cleanText(err.was, 40)}): a new room under the same code, so pooled left it.`,
+      hint: `If you trust it, join it on purpose: pooled join ${code}`, code: 1 };
   if (t === "room-over") return { message: `Room ${code} is over: the host left and did not come back.`, code: 1 };
   return { message: cleanText(msg, 400), code: 1 };
 }

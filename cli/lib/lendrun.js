@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import { parseLendArgs, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
-  hostable, autoRedeal, fmtGb, passCounter, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
+  hostable, autoRedeal, fmtGb, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
 import { dawnLoader } from "./dawn.js";
 import { cleanText } from "./common.js";
 
@@ -118,18 +118,23 @@ async function prepare(opts, out) {
   return { rn, loader, rule, adapterName, mem };
 }
 
-function header(out, { title, adapterName, mem, rule }) {
+function header(out, { title, adapterName, mem, rule, hosting = false }) {
   const gpu = mem.kind === "discrete" ? `${mem.name} · ${fmtGb(mem.totalGB)} GB` : mem.kind === "unified" ? `${mem.name || adapterName} · ${fmtGb(mem.totalGB)} GB unified memory` : adapterName;
   out.print(`${title}
   GPU      ${gpu}
   lending  ${rule.gb} GB  (${rule.why}${rule.why.startsWith("--gb") || rule.why.includes("--gb sets it") ? "" : "; --gb to change"})
-  anyone with the room code can use what this computer lends while it is in the room
+  ${hosting
+    ? "anyone with the room code can join, and every device holding layers sees the hidden states of\n  what is asked here (they carry the prompts and answers): share the code only with devices you trust"
+    : "anyone with the room code can use what this computer lends, and it sees the room's hidden states\n  (they carry the prompts and answers): lend to rooms you trust"}
   Ctrl-C leaves the room and frees the GPU`);
 }
 
 // ---------------- pooled join ----------------
 async function runJoin(opts, out) {
   let code = opts.code;
+  // one name for the whole run, the same after a restart (the host re-seats a device by its name)
+  const name = opts.name || deviceName(os.hostname());
+  let hostName = null;   // the host this run joined: a rejoin only goes back to a host of that name
   const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
   header(out, { title: `pooled join · room ${code}`, adapterName, mem, rule });
   const passes = passCounter();
@@ -147,8 +152,8 @@ async function runJoin(opts, out) {
     }
     out.status(S);
   };
-  const joinOnce = () => rn.joinRoom(code, { pledgeGB: rule.gb, name: opts.name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
-    log: (m) => out.log(m) });
+  const joinOnce = () => rn.joinRoom(code, { pledgeGB: rule.gb, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
+    expectHost: hostName, log: (m) => out.log(m) });
   const attach = (n) => {
     n.on("loadprogress", (pct) => { S.pct = pct; });
     n.on("loaded", (x) => { S.pct = null; out.log(`holding layers ${x.range[0]}-${x.range[1] - 1} of ${x.model} (loaded in ${x.s.toFixed(1)} s)`); });
@@ -160,6 +165,8 @@ async function runJoin(opts, out) {
       if (d.t === "ai-gendone") { S.answering = false; const t = tpsFromStats(d.stats); if (t != null) S.tps = t; }
     });
     n.on("version", (v) => { if (v.theyHost) finish({ type: "version", theirs: v.theirs, theyHost: true }); });
+    n.on("members", () => { if (!hostName && n.hostName) hostName = n.hostName; });
+    n.on("otherhost", (x) => finish({ type: "other-host", ...x }));
     n.on("bye", (reason) => {
       const v = versionFromBye(reason, rn.PROTOCOL);
       finish(v ? { type: "version", theirs: v.theirs, theyHost: true } : Object.assign(new Error(String(reason || "")), { type: "kicked" }));
@@ -169,15 +176,22 @@ async function runJoin(opts, out) {
   // the host did not come back within a minute: start over (join again) with backoff, for --wait
   const rejoin = async () => {
     const old = node; node = null;
+    hostName ||= old?.hostName || null;
+    // never heard the host's name: there is nothing to tell its room from another under this code
+    if (!hostName) { await old?.close().catch(() => {}); finish({ type: "room-over" }); return; }
     S.phase = "rejoining"; S.range = null; S.tries = 0; S.devices = null; S.signaling = true; S.answering = false;
     await old?.close().catch(() => {});
     const t0 = Date.now();
-    out.log(`trying to join room ${code} again for up to ${Math.round(opts.waitMs / 60000)} min`);
+    out.log(`trying to join room ${code} again for up to ${Math.round(opts.waitMs / 60000)} min (only while its host is ${hostName})`);
     while (!leaving && !ended && Date.now() - t0 < opts.waitMs) {
       await new Promise((r) => setTimeout(r, rn.reconnectDelay(S.tries)));
       if (leaving || ended) return;
       S.tries++;
-      try { node = await joinOnce(); hostGone = false; attach(node); S.phase = "waiting"; S.tries = 0; out.log(`back in room ${code}`); return; }
+      try {
+        node = await joinOnce(); hostGone = false; attach(node); S.phase = "waiting"; S.tries = 0;
+        if (node.otherHost) finish({ type: "other-host", ...node.otherHost }); else out.log(`back in room ${code}`);
+        return;
+      }
       catch (e) {
         if (e?.type === "unavailable-id") continue;
         if (e?.code !== "room-not-found" && e?.type !== "signaling-down") out.log(`rejoin: ${cleanText(e?.message || e, 200)}`);
@@ -220,7 +234,7 @@ async function runHost(opts, out) {
   const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name, signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
     setup: { webgpu: loader }, log: (m) => out.log(m), ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   const code = node.code;
-  header(out, { title: `pooled host · room ${code} · ${rn.MODELS[opts.model].label}`, adapterName, mem, rule });
+  header(out, { title: `pooled host · room ${code} · ${rn.MODELS[opts.model].label}`, adapterName, mem, rule, hosting: true });
   out.print(`  join     ${ROOM_URL}${code}   or   pooled join ${code}
   ask      on the room page, or from your own tools: pooled serve ${code}`);
   const passes = passCounter();

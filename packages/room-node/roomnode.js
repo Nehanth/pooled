@@ -88,9 +88,13 @@ export class RoomNode extends EventEmitter {
   // whoever asked; an agent host uses "asker" so its prompts and answers stay off other devices'
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
-    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {} } = {}) {
+    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null } = {}) {
     super();
     this.setup = setup;   // setupNode options (webgpu: a loader for Dawn, dawnFlags)
+    // a worker: the host's name it will serve under this code (a rejoin after the room was over).
+    // Room codes are short and reusable; a host of another name is another room, which this device
+    // did not choose to join: it leaves (the "otherhost" event) before it hears anything else
+    this.expectHost = expectHost;
     this.visibility = visibility === "asker" || visibility === "host" ? visibility : "all";
     this.allowApi = allowApi !== false;
     this.ctxAsk = ctx;
@@ -288,6 +292,7 @@ export class RoomNode extends EventEmitter {
     if (e) e.seen = performance.now();
     if (!d || typeof d.t !== "string") return;
     if (process.env.RN_DEBUG && d.t !== "ping" && d.t !== "pong") this.log(`<- ${d.t} from ${e?.name || from}`);
+    if (this.otherHost && from === PREFIX + this.code) return;   // a stranger's room under this code: nothing from it
     if (d.t.startsWith("ai-")) { this.aiOnData(from, d).catch((err) => this.log("error: " + err.message)); return; }
     switch (d.t) {
       case "hello": {
@@ -323,6 +328,19 @@ export class RoomNode extends EventEmitter {
           }
         }
         d.name = cleanName(d.name, from);
+        // a worker: the host's hello comes first on its link. Under this code before (or asked for by
+        // expectHost) there was a host of another name: this is another room, so leave it
+        if (!this.isHost && from === PREFIX + this.code) {
+          const want = this.expectHost || this.hostName;
+          if (want && d.name !== want) {
+            this.otherHost = { was: want, now: d.name };
+            this.log(`room ${this.code} now has another host (${d.name}, was ${want}): leaving it`);
+            this.dropLink(from);
+            clearInterval(this.knock); this.knock = null; this.freeLayers(null); this.ai.online = false;
+            this.emit("otherhost", this.otherHost);
+            return;
+          }
+        }
         d.meta = helloMeta(d.meta, this.isHost);
         // a device coming back under its own name while its old link is still open but silent (a
         // phone back from a lock): the old link is dead, drop it now (room.js dropStaleNamesake)
@@ -539,7 +557,7 @@ export class RoomNode extends EventEmitter {
     this.failWaiters(new Error("the host left"));
     this.log("lost the link to the host");
     this.emit("hostgone");
-    if (this.closing || this.knock) return;
+    if (this.closing || this.knock || this.otherHost) return;
     const hostId = PREFIX + this.code, t0 = Date.now();
     this.knock = setInterval(() => {
       if (this.closing || this.conns.has(hostId)) { clearInterval(this.knock); this.knock = null; return; }

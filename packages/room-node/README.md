@@ -50,6 +50,7 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 | `signal` | a PeerServer `host:port` (TLS only on port 443), or `room/signal.js` specs as a comma list (`wss://host/path,cloud`): the first that answers is used, the next when one is down; default the PeerJS cloud server pooled.run uses. A signaling server that drops later is reconnected with backoff (the `signaling` event) |
 | `setup` | `setupNode` options: `webgpu` (an async loader returning `{ create, globals }`, for a caller that resolves Dawn from its own install, as `pooled join` does), `dawnFlags` |
 | `name` | this device's name in the room |
+| `expectHost` | `joinRoom`: the host's name this device will serve (a rejoin after its room was over). Room codes are short and get reused: a host of another name is another room, and the node leaves it before it hears anything else from it (the `otherhost` event). A worker always does this when a host of another name answers under the same code later (knocking after the host link dropped) |
 | `flags` | engine switches, as the room page's `?query` (`engine/preset.js`) |
 | `visibility` | who sees the answers on the room's screens (`room/visibility.js`): `all` (the room page's default), `asker` (only the asker; other screens get the "answering…" stand-in) or `host`. Set once; newcomers are told the mode |
 | `allowApi` | answer API asks from devices that joined as API clients (`pooled serve`, another OpenClaw in join mode); default true, `false` refuses them |
@@ -77,13 +78,13 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
   Returns `{ rid, stop() }`. `hostMeta` is what the host's hello says (`{ api: 2, ctx }`).
 - `redeal(why)`, `close()` (closes every link without counting them as departures, stops the re-deal timer, frees the engine and GPU). Events: `log`, `members`, `online`, `degraded`, `loaded`, `progress`,
   `hostgone`, `back`, `roomover`, `chat`, `chatanswer`, `answer`, `loadprogress` (this device's load, %),
-  `signaling` (false when the signaling server dropped, true when it is back), `version` (a hello on
+  `signaling` (false when the signaling server dropped, true when it is back), `otherhost` (`{ was, now }`: the code now belongs to a host of another name, and this node left it), `version` (a hello on
   another protocol: `{ theirs, theyHost, name }`), `bye`. `joinRoom` rejects with `code: "room-not-found"`
   as soon as the signaling server says there is no such room.
 
 ## From the command line
 
-`pooled join <CODE>` and `pooled host` in [`@pooled/cli`](../../cli/README.md#lend-your-gpu-pooled-join-and-pooled-host-preview) are the supported way (memory rule, status line, reconnects, errors). `join.mjs` is the bare version, kept for scripts:
+`pooled join <CODE>` and `pooled host` in [`@pooled/cli`](../../cli/README.md#lend-your-gpu-pooled-join-and-pooled-host-preview) are the supported way (memory rule, status line, reconnects, errors). `join.mjs` is the bare version, kept for scripts. Either way, a device that holds layers receives the hidden state of every token the room computes, which carries its prompts and answers: lend only to rooms you trust.
 
 ```sh
 node packages/room-node/join.mjs K7QX --gb 12 --name mac-studio [--signal host:port] [--models dir] [--state status.json]

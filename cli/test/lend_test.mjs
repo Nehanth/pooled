@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLendArgs, parseGb, autoRedeal, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, passCounter, explainError,
-  versionAdvice, versionFromBye, hostable, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB } from "../lib/lend.js";
+  versionAdvice, versionFromBye, hostable, deviceName, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB } from "../lib/lend.js";
 import { dawnLoader, dawnPackages, DAWN_VERSION } from "../lib/dawn.js";
 
 const GB = 2 ** 30;
@@ -68,6 +68,19 @@ test("--gb: numbers, max, and the per-device cap", () => {
 test("the help texts name every option", () => {
   for (const o of ["--gb", "--name", "--signal", "--models", "--no-check", "--wait", "--json-log", "--quiet", "--help"]) assert.ok(HELP_JOIN.includes(o), o);
   for (const o of ["--model", "--gb", "--devices", "--code", "--ctx", "--name", "--signal", "--models", "--no-check", "--json-log"]) assert.ok(HELP_HOST.includes(o), o);
+});
+
+test("the help texts say what a device in a room sees", () => {
+  assert.match(HELP_JOIN, /hidden states/); assert.match(HELP_HOST, /hidden states/);
+  assert.match(HELP_JOIN, /only a host of the same name/);
+});
+
+test("deviceName: the same for a hostname every run, different across hostnames, never the hostname itself", () => {
+  assert.equal(deviceName("mac-studio"), deviceName("mac-studio"));
+  assert.match(deviceName("mac-studio"), /^node-[a-z]{3}$/);
+  assert.notEqual(deviceName("mac-studio"), deviceName("spark"));
+  assert.ok(!deviceName("alice-laptop").includes("alice"));
+  assert.match(deviceName(""), /^node-[a-z]{3}$/);
 });
 
 // ---------------- memory ----------------
@@ -183,6 +196,8 @@ test("errors: each says what happened and what to do", () => {
   assert.match(x.message, /ran out of memory/); assert.match(x.hint, /--gb N/);
   x = ex(Object.assign(new Error("go away\x1b[2J"), { type: "kicked" }));
   assert.ok(!/\x1b/.test(x.message));
+  x = ex({ type: "other-host", was: "host-ab", now: "stranger" });
+  assert.match(x.message, /Room K7QX now has another host \(stranger, not host-ab\).*pooled left it/); assert.match(x.hint, /pooled join K7QX/);
   x = ex({ type: "room-over" });
   assert.match(x.message, /Room K7QX is over/);
   for (const e of [new Error("x"), { type: "no-adapter" }, { type: "version", theirs: 9 }]) assert.equal(ex(e).code, 1);
