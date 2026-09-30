@@ -163,3 +163,148 @@ fn silu_mul_w(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 `;
 }
+
+// ---- DP4a wide prefill GEMM (prefillMath "dp4a"; llama.cpp's MMQ idea without tensor cores) ----
+// Activations are quantized once per chunk and input to Q8_1-style blocks (quant_q8_w: per 32 values of a
+// column, d = amax / 127, q = round(x / d) as packed i8; compact layout xq[(col * nb + blk) * 2 + h],
+// xd[col * nb + blk]). The GEMM stages BM weight rows x KB blocks as packed i8 (Q4_0 nibbles re-centred to
+// q - 8 with ((w & 0x0F0F0F0F) + 0x78787878) ^ 0x80808080, Q8_0 words as they are) plus one f32 scale per
+// (row, block), and BN activation columns the same way. Each thread owns TM x TN outputs (rows ty + TY * r,
+// columns tx + TX * c: conflict-free vec4 reads of the column tile) and per block sums 8 dot4I8Packed per
+// output in exact i32, then adds f32(isum) * dW * dX to its f32 accumulator (k ascending by block).
+// Numerics: the activation rounding changes results (llama.cpp's prompt-processing numerics), so this is
+// prefill-tolerance, never used in decode or verify. Needs the packed_4x8_integer_dot_product WGSL feature.
+export const DP4A_TILE_DEFAULT = Object.freeze({ BM: 64, BN: 64, TM: 4, TN: 4, KB: 2 });
+
+export function dp4aTileConfig(opt = {}, wgMem = 16384) {
+  const c = { ...DP4A_TILE_DEFAULT, ...(opt || {}) };
+  const { BM, BN, TM, TN, KB } = c;
+  for (const [k, v] of Object.entries({ BM, BN, TM, TN, KB })) if (!Number.isInteger(v) || v <= 0) throw new Error(`dp4aTile.${k} must be a positive integer`);
+  if (BM % TM || BN % TN) throw new Error("dp4aTile: TM must divide BM and TN divide BN");
+  if (BN % 16) throw new Error("dp4aTile: BN must be a multiple of 16");
+  c.T = (BM / TM) * (BN / TN);
+  if (c.T > 256 || c.T < 32) throw new Error(`dp4aTile: ${c.T} threads per workgroup (need 32..256)`);
+  c.smem = KB * (BM + BN) * (32 + 4);
+  if (c.smem > wgMem) throw new Error(`dp4aTile: ${BM}x${BN} KB ${KB} needs ${c.smem} B of workgroup memory (limit ${wgMem})`);
+  c.KS = 32 * KB;
+  return Object.freeze(c);
+}
+
+// One dp4a GEMM kernel body (WGSL). fmt "q4" | "q8"; acc: y += instead of y =.
+export function dp4aKernel(fmt, acc, c) {
+  const { BM, BN, TM, TN, T, KB } = c;
+  const TX = BN / TN, TY = BM / TM;
+  const name = `gemm_d_${fmt}${acc ? "_acc" : ""}`;
+  const wUnits = BM * KB, xUnits = BN * KB, units = wUnits + xUnits, per = Math.ceil(units / T);
+  const R = rng(TM), Cc = rng(TN);
+  const wq = fmt === "q4"
+    ? `let q = gd_q[g]; let lo = ((q & vec4<u32>(0x0F0F0F0Fu)) + vec4<u32>(0x78787878u)) ^ vec4<u32>(0x80808080u);
+        let hi = (((q >> vec4<u32>(4u)) & vec4<u32>(0x0F0F0F0Fu)) + vec4<u32>(0x78787878u)) ^ vec4<u32>(0x80808080u);
+        gd_W[(bb * 2u) * ${BM}u + r] = lo; gd_W[(bb * 2u + 1u) * ${BM}u + r] = hi;`
+    : `gd_W[(bb * 2u) * ${BM}u + r] = gd_q[g * 2u]; gd_W[(bb * 2u + 1u) * ${BM}u + r] = gd_q[g * 2u + 1u];`;
+  const stage = rng(per).map((j) => `
+    { let li = t + ${j * T}u;
+      if (li < ${wUnits}u) {
+        let r = li % ${BM}u; let bb = li / ${BM}u;
+        let g = min(row0 + r, dOut - 1u) * nb + ks + bb;
+        ${wq}
+        gd_Wd[bb * ${BM}u + r] = unpack2x16float(gd_sc[g >> 1u])[g & 1u];
+      } else if (li < ${units}u) {
+        let l2 = li - ${wUnits}u; let cc = l2 % ${BN}u; let bb = l2 / ${BN}u;
+        let xb = (col0 + cc) * nb + ks + bb;
+        gd_X[(bb * 2u) * ${BN}u + cc] = gd_xq[xb * 2u]; gd_X[(bb * 2u + 1u) * ${BN}u + cc] = gd_xq[xb * 2u + 1u];
+        gd_Xd[bb * ${BN}u + cc] = gd_xd[xb];
+      } }`).join("");
+  const dot = (a, b) => `dot4I8Packed(${a}.x, ${b}.x) + dot4I8Packed(${a}.y, ${b}.y) + dot4I8Packed(${a}.z, ${b}.z) + dot4I8Packed(${a}.w, ${b}.w)`;
+  const block = (bb) => `
+    {
+      ${[0, 1].map((h) => `{
+        ${R.map((r) => `let w${r} = gd_W[${(bb * 2 + h) * BM}u + ty + ${r * TY}u];`).join(" ")}
+        ${Cc.map((q) => `let x${q} = gd_X[${(bb * 2 + h) * BN}u + tx + ${q * TX}u];`).join(" ")}
+        ${R.map((r) => Cc.map((q) => `i${r}_${q} ${h ? "+" : ""}= ${dot(`w${r}`, `x${q}`)};`).join(" ")).join("\n        ")}
+      }`).join("\n      ")}
+      ${R.map((r) => `let dw${r} = gd_Wd[${bb * BM}u + ty + ${r * TY}u];`).join(" ")}
+      ${Cc.map((q) => `let dx${q} = gd_Xd[${bb * BN}u + tx + ${q * TX}u];`).join(" ")}
+      ${R.map((r) => Cc.map((q) => `a${r}_${q} += f32(i${r}_${q}) * (dw${r} * dx${q});`).join(" ")).join("\n      ")}
+    }`;
+  const store = R.map((r) => `
+  { let row = row0 + ty + ${r * TY}u; if (row < dOut) {
+    ${Cc.map((q) => `gd_y[(col0 + tx + ${q * TX}u) * ys + row] ${acc ? "+=" : "="} a${r}_${q};`).join(" ")}
+  } }`).join("");
+  const body = `
+  let S = gd_s; let t = lid.x; let tx = t % ${TX}u; let ty = t / ${TX}u;
+  let dOut = S.dOut; let nb = S.dIn / 32u; let ys = S.ys;
+  let row0 = wg.x * ${BM}u; let col0 = wg.y * ${BN}u;
+  ${R.map((r) => Cc.map((q) => `var a${r}_${q} = 0.0; var i${r}_${q} = 0i;`).join(" ")).join("\n  ")}
+  for (var ks: u32 = 0u; ks < nb; ks += ${KB}u) {
+    workgroupBarrier();
+    ${stage}
+    workgroupBarrier();
+    ${rng(KB).map(block).join("")}
+  }
+  ${store}
+`;
+  return { name, body };
+}
+
+// WGSL for the dp4a path: quant_q8_w + the four GEMMs. Uses BShape and MC from the engine's module.
+export function gemmDp4aWGSL(c) {
+  const kernels = ["q4", "q8"].flatMap((fmt) => [false, true].map((acc) => {
+    const k = dp4aKernel(fmt, acc, c);
+    return `
+@compute @workgroup_size(${c.T})
+fn ${k.name}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {${k.body}}`;
+  }));
+  return /* wgsl */ `
+// ---- dp4a wide prefill GEMM (BM=${c.BM}, BN=${c.BN}, TM=${c.TM}, TN=${c.TN}, KB=${c.KB}; ${c.smem} B workgroup memory) ----
+@group(1) @binding(0) var<storage, read> gd_q: array<vec4<u32>>;
+@group(1) @binding(1) var<storage, read> gd_sc: array<u32>;
+@group(1) @binding(2) var<storage, read> gd_xq: array<vec4<u32>>;
+@group(1) @binding(3) var<storage, read> gd_xd: array<f32>;
+@group(1) @binding(4) var<storage, read_write> gd_y: array<f32>;
+@group(1) @binding(5) var<uniform> gd_s: BShape;
+var<workgroup> gd_W: array<vec4<u32>, ${2 * c.KB * c.BM}>;
+var<workgroup> gd_X: array<vec4<u32>, ${2 * c.KB * c.BN}>;
+var<workgroup> gd_Wd: array<f32, ${c.KB * c.BM}>;
+var<workgroup> gd_Xd: array<f32, ${c.KB * c.BN}>;
+${kernels.join("\n")}
+
+// Q8_1-style activation quantization of n = dIn values per column (x column stride s0 vec4s): per block of 32,
+// d = amax / 127, q = round(x / d) packed as i8, written compactly (nb = n / 32 blocks per column). 8 threads
+// per block, one vec4 each (coalesced), the block's amax through workgroup memory; grid (ceil(nb / 32), columns).
+@group(1) @binding(0) var<storage, read> gq_x: array<vec4<f32>>;
+@group(1) @binding(1) var<storage, read_write> gq_q: array<u32>;
+@group(1) @binding(2) var<storage, read_write> gq_d: array<f32>;
+@group(1) @binding(3) var<uniform> gq_mc: MC;
+var<workgroup> gq_m: array<f32, 256>;
+@compute @workgroup_size(256)
+fn quant_q8_w(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let nb = gq_mc.n / 32u; let t = lid.x; let blk = wg.x * 32u + t / 8u; let col = wg.y;
+  let ok = blk < nb;
+  var v = vec4<f32>(0.0);
+  if (ok) { v = gq_x[col * gq_mc.s0 + blk * 8u + t % 8u]; }
+  let a = abs(v);
+  gq_m[t] = max(max(a.x, a.y), max(a.z, a.w));
+  workgroupBarrier();
+  let g0 = t & ~7u;
+  var m = gq_m[g0];
+  for (var i = 1u; i < 8u; i++) { m = max(m, gq_m[g0 + i]); }
+  if (!ok) { return; }
+  let d = m / 127.0; let id = select(0.0, 1.0 / d, d > 0.0);
+  gq_q[(col * nb + blk) * 8u + t % 8u] = pack4xI8(vec4<i32>(round(v * id)));
+  if (t % 8u == 0u) { gq_d[col * nb + blk] = d; }
+}
+`;
+}
+
+// Whether this device can compile dot4I8Packed / pack4xI8 (cached on the device).
+export async function probeDp4a(device) {
+  if (device.__dp4aOk !== undefined) return device.__dp4aOk;
+  const lf = globalThis.navigator?.gpu?.wgslLanguageFeatures;
+  if (lf && !lf.has("packed_4x8_integer_dot_product")) return (device.__dp4aOk = false);
+  device.pushErrorScope("validation");
+  const m = device.createShaderModule({ code: `@compute @workgroup_size(1) fn p() { let v = dot4I8Packed(pack4xI8(vec4<i32>(1, -2, 3, -4)), 0x01010101u); }` });
+  const info = await m.getCompilationInfo();
+  const err = await device.popErrorScope();
+  return (device.__dp4aOk = !err && !info.messages.some((x) => x.type === "error"));
+}

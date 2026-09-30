@@ -22,10 +22,13 @@ import { Qwen35Engine, prefillMathFeatures } from "../engine/qwen35.js";
 //   ATTN_PREFILL_TK=4|8|16  its positions per tile (default: the largest that fits the workgroup memory;
 //                         16 needs 32 KB, which gpuDevice() then requests from the adapter)
 //   ATTN_PREFILL_SPLITS=N its target number of context splits per pass (default 32)
+//   PREFILL_DP4A=0|1      the wide prefill GEMM as int8 dot products on Q8_1-quantized activations
+//                         (engine option prefillDp4a; needs dot4I8Packed and the wide path)
 const envGet = (k) => globalThis.Deno?.env.get(k);
 if (envGet("ATTN_PREFILL_TILE")) Qwen35Engine.defaults.attnPrefillTile = envGet("ATTN_PREFILL_TILE") !== "0";
 if (envGet("ATTN_PREFILL_TK")) Qwen35Engine.defaults.attnPrefillTK = +envGet("ATTN_PREFILL_TK");
 if (envGet("ATTN_PREFILL_SPLITS")) Qwen35Engine.defaults.attnPrefillSplits = +envGet("ATTN_PREFILL_SPLITS");
+if (envGet("PREFILL_DP4A")) Qwen35Engine.defaults.prefillDp4a = envGet("PREFILL_DP4A") !== "0";
 
 // The room's engine settings for a Deno test or bench (engine/preset.js): ROOM_FLAGS takes the room's own
 // query-string switches, e.g. ROOM_FLAGS="draftvocab=0&kv=q8". Unset: exactly what the room runs.

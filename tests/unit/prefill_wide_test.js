@@ -7,16 +7,17 @@
 //    GEMV, attention glue / KV store / flash / combine / gate, the MoE router and experts, the whole
 //    MTP draft-cache fill) is dispatched with exactly the same bind group, grid and frame
 //    (positions, column count), in the same order per bind group, as the default 16-column prefill;
-//  * with prefillUbatch off (the dense default), the command stream is exactly the default path's;
-//  * the defaults: wide + expert-grouped prefill on for a MoE engine holding the embedding, off (silently)
-//    for a MoE worker without it and for dense models.
+//  * with prefillUbatch 0, or engine.prefillWide = false at runtime, the command stream is the 16-column path's;
+//  * the defaults: wide prefill on for an engine holding the embedding (MoE and dense), expert-grouped prefill
+//    on for the MoE; both off (silently) for a MoE worker without the embedding;
+//  * prefillDp4a: every wide projection as quant_q8_w + an int8 GEMM (gemm_d_*), valid commands, runtime switch.
 // The MoE comparison runs with moeGroupPrefill 0 on both sides (the per-sub-batch expert kernels are what
 // it checks; the grouped kernels are tests/unit/moe_group_engine_test.js's).
 //   deno test --no-check --allow-read tests/unit/prefill_wide_test.js
 import { mockDevice } from "./mock_gpu.js";
 import { buildSynthGGUF, SYNTH_MOE } from "../e2e/synth.mjs";
 import { parseGGUFHeader, qwen35Weights, GGML_EMBED } from "../../engine/gguf.js";
-import { Qwen35Engine } from "../../engine/qwen35.js";
+import { Qwen35Engine, DP4A_DEFAULT } from "../../engine/qwen35.js";
 
 async function engineFor(buf, opts = {}) {
   const G = parseGGUFHeader(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
@@ -57,7 +58,7 @@ const eq = (a, b, m) => { if (a !== b) throw new Error(`${m}: ${a} != ${b}`); };
 
 async function compare(model, n, U, wgMem) {
   const base = await trace(model, n, { prefillUbatch: 0, moeGroupPrefill: 0 });
-  const wide = await trace(model, n, { prefillUbatch: U, moeGroupPrefill: 0 }, wgMem);
+  const wide = await trace(model, n, { prefillUbatch: U, moeGroupPrefill: 0, prefillDp4a: false }, wgMem);
   if (wide.warns.length || !wide.eng.ubatch) throw new Error(`wide prefill did not turn on: ${wide.warns}`);
   const A = byBg(base.log), B = byBg(wide.log);
   let same = 0;
@@ -102,10 +103,12 @@ Deno.test("wide prefill: MoE (experts, router and draft fill per 16-column sub-b
   if (r.same < 60) throw new Error(`only ${r.same} shared bind groups compared`);
 });
 
-Deno.test("wide prefill: off by default and at runtime (engine.prefillWide = false), short prompts", async () => {
-  const base = await trace("dense", 100);
-  const off = await trace("dense", 100, { prefillUbatch: 0 });
-  eq(off.log.map((e) => `${e.pipe} ${e.grid} ${e.bg1} ${e.frame}`).join("|"), base.log.map((e) => `${e.pipe} ${e.grid} ${e.bg1} ${e.frame}`).join("|"), "prefillUbatch 0");
+Deno.test("wide prefill: off with prefillUbatch 0 and at runtime (engine.prefillWide = false), short prompts", async () => {
+  const base = await trace("dense", 100, { prefillUbatch: 0 });
+  const def = await engineFor(models.dense);   // the default engine (wide on) switched off at runtime: the 16-column path
+  def.eng.prefillWide = false; def.device.log.length = 0;
+  await def.eng.prefillTokens(ids(100));
+  eq(def.device.log.map((e) => `${e.pipe} ${e.grid} ${e.frame}`).join("|"), base.log.map((e) => `${e.pipe} ${e.grid} ${e.frame}`).join("|"), "prefillWide = false");
   const { eng, device } = await engineFor(models.dense, { engine: { prefillUbatch: 64 } });
   eng.prefillWide = false; device.log.length = 0;
   await eng.prefillTokens(ids(100));
@@ -119,7 +122,7 @@ Deno.test("wide prefill: off by default and at runtime (engine.prefillWide = fal
   if (bad.eng.ubatch || !bad.warns.some((w) => w.includes("wide prefill off"))) throw new Error("a ubatch that is not a multiple of BN was accepted");
 });
 
-Deno.test("prefill defaults: wide + expert-grouped on for a MoE engine with the embedding, off for its workers and for dense", async () => {
+Deno.test("prefill defaults: wide on for an engine with the embedding (MoE + expert-grouped, dense), off for MoE workers", async () => {
   const host = await engineFor(models.moe);
   eq(host.eng.ubatch, 256, "MoE host prefillUbatch default"); eq(host.eng.moeGrpU, 256, "MoE host moeGroupPrefill default");
   eq(!!host.eng.attnPrefillTile, true, "MoE attnPrefillTile default");
@@ -135,7 +138,8 @@ Deno.test("prefill defaults: wide + expert-grouped on for a MoE engine with the 
   eq(worker.ubatch, 0, "MoE worker prefillUbatch"); eq(worker.moeGrpU, 0, "MoE worker moeGroupPrefill");
   eq(!!worker.attnPrefillTile, true, "MoE worker attnPrefillTile"); eq(warns.length, 0, "MoE worker warnings: " + warns.join("; "));
   const dense = await engineFor(models.dense);
-  eq(dense.eng.ubatch, 0, "dense prefillUbatch default"); eq(dense.eng.moeGrpU, 0, "dense moeGroupPrefill");
+  eq(dense.eng.ubatch, 256, "dense prefillUbatch default"); eq(dense.eng.moeGrpU, 0, "dense moeGroupPrefill");
+  eq(!!dense.eng.dp4aCfg, DP4A_DEFAULT, "dense prefillDp4a default"); eq(!!host.eng.dp4aCfg, DP4A_DEFAULT, "MoE prefillDp4a default");
   eq(dense.warns.length, 0, "dense warnings");
 });
 
@@ -145,4 +149,34 @@ Deno.test("prefill defaults on a MoE: wide chunks with the expert-grouped kernel
   if (!n("gemm_w_")) throw new Error("no wide GEMMs");
   if (!n("moe_gsort") || !n("moe_gusg_") || !n("moe_dng_")) throw new Error("no expert-grouped kernels");
   eq(r.eng.pos, 300, "position after prefill");
+});
+
+Deno.test("dp4a wide prefill: each projection input quantized once, int8 GEMMs over the chunk, valid commands, runtime switch", async () => {
+  for (const [model, n, U, wgMem] of [["dense", 150, 64], ["q8out", 200, 128, 32768], ["moe", 150, 64]]) {
+    const r = await trace(model, n, { prefillUbatch: U, moeGroupPrefill: 0, prefillDp4a: true }, wgMem);
+    if (r.warns.length || !r.eng.dp4aCfg) throw new Error(`${model}: dp4a did not turn on: ${r.warns}`);
+    const dc = r.eng.dp4aCfg, BN = r.eng.wideCfg.BN, chunks = [];
+    for (let i = 0; n - i >= BN; ) { const w = Math.min(U, Math.floor((n - i) / BN) * BN); chunks.push(w); i += w; }
+    eq(r.log.filter((e) => e.pipe.startsWith("gemm_w_")).length, 0, `${model}: f32 wide GEMMs with dp4a on`);
+    const gd = r.log.filter((e) => e.pipe.startsWith("gemm_d_")), qz = r.log.filter((e) => e.pipe === "quant_q8_w");
+    const Ls = r.eng.layers;
+    const perLayer = Ls.reduce((s, Ly) => s + (Ly.isFull ? (Ly.fKV ? 3 : 4) : (Ly.fQZ ? 2 : 3)) + (Ly.moe ? 0 : 3), 0);
+    const qPerLayer = Ls.reduce((s, Ly) => s + 2 + (Ly.moe ? 0 : 2), 0);   // xn + attention / DeltaNet output (+ xn, SiLU output)
+    eq(gd.length, perLayer * chunks.length, `${model}: dp4a GEMM dispatches`);
+    eq(qz.length, qPerLayer * chunks.length, `${model}: quantize dispatches`);
+    let k = 0;
+    for (const w of chunks) for (let j = 0; j < perLayer; j++, k++) eq(gd[k].grid[1], w / dc.BN, `${model}: dp4a GEMM grid y`);
+    if (model === "q8out" && !(gd.some((e) => e.pipe === "gemm_d_q8_acc") && gd.some((e) => e.pipe === "gemm_d_q4"))) throw new Error("Q8 / Q4 dp4a GEMMs not both used");
+    if (!JSON.stringify(r.eng.stateSignature()).includes('"dp4a":1')) throw new Error(`${model}: signature without dp4a`);
+    // runtime switch: the f32 wide GEMMs again, no quantization, signature without dp4a
+    r.eng.prefillDp4a = false; r.eng.reset();
+    const { log } = r.eng.device;
+    log.length = 0;
+    await r.eng.prefillTokens(ids(n));
+    if (log.some((e) => e.pipe.startsWith("gemm_d_") || e.pipe === "quant_q8_w") || !log.some((e) => e.pipe.startsWith("gemm_w_"))) throw new Error(`${model}: prefillDp4a = false ignored`);
+    if (JSON.stringify(r.eng.stateSignature()).includes('"dp4a"')) throw new Error(`${model}: signature with dp4a off`);
+  }
+  // Apple GPUs: an explicit request warns and stays off
+  const apple = await engineFor(models.dense, { engine: { prefillDp4a: true, adapterInfo: { vendor: "apple" } } });
+  if (apple.eng.dp4aCfg || !apple.warns.some((w) => w.includes("prefillDp4a"))) throw new Error("dp4a on an Apple GPU");
 });

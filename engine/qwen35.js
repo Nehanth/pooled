@@ -6,7 +6,7 @@
 import { WGSL } from "./wgsl/base.js";
 import { gemmWGSL, GEMM_S, GEMM_TILE } from "./wgsl/gemm.js";
 import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SGM_SYNTAX, SGM_DEFAULT } from "./wgsl/gemm_sgm.js";
-import { gemmWideWGSL, wideTileConfig } from "./wgsl/gemm_wide.js";
+import { gemmWideWGSL, wideTileConfig, gemmDp4aWGSL, dp4aTileConfig, probeDp4a } from "./wgsl/gemm_wide.js";
 import { coopWGSL, probeUnpack } from "./wgsl/coop.js";
 import { WGSL2 } from "./wgsl/qwen35.js";
 import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout, normRouterKernel } from "./wgsl/moe.js";
@@ -39,12 +39,17 @@ export function prefillMathFeatures(adapter, mode = envPrefillMath()) {
 
 // MoE prefill ubatch (tokens) for the default expert-grouped + wide prefill (moeGroupPrefill, prefillUbatch)
 export const MOE_PREFILL_UBATCH = 256;
+// dense (27B) default wide prefill ubatch: +24-29% prefill on the GB10 with the f32 wide GEMM (72-76 -> 91-99 tok/s),
+// logits relDiff vs the 16-column path 4e-5..1.4e-4 (under the dense prefill tolerance 2e-3)
+export const DENSE_PREFILL_UBATCH = 256;
 // wide prefill: layers per command buffer. A wide chunk encodes a compute pass and a copy per NC-column
 // sub-batch per layer, so one command buffer for the whole model grows with ubatch x layers. On Apple M5
 // (Metal, Deno / wgpu) a whole-model buffer at ubatch 256 lost the device (27B and MoE); 192 columns, or 28
 // of the MoE's 40 layers at 256, passed. Submitting every 8 layers fixes it; the results are bit-identical
 // (the GEMM has no split-K, so chunking and submit boundaries do not change the arithmetic).
 export const WIDE_SUBMIT_LAYERS = 8;
+// prefillDp4a default (undefined / "auto") where the device supports it (see _init)
+export const DP4A_DEFAULT = false;
 
 export class Qwen35Engine {
   // Option defaults applied under every create() call's own options (test runners set these from the
@@ -81,6 +86,7 @@ export class Qwen35Engine {
     return { v: 1, lo: this.lo, hi: this.hi, mtp: !!this.mtpLayer, flash: !!this.flash, kvQ8: !!this.kvQ8, dims: [this.dims.dim, this.dims.kvDim, this.dims.nVH, this.dims.convDim],
       // wide prefill sums projections in another order: its states are not interchangeable with the default's
       ...(this.ubatch && this.prefillWide !== false ? { ub: this.ubatch } : {}),
+      ...(this.ubatch && this.prefillWide !== false && this.dp4aCfg && this.prefillDp4a !== false ? { dp4a: 1 } : {}),
       ...(this.prefillMath && this.prefillMath !== "f32" && this._pmAvail?.[this.prefillMath] ? { pm: this.prefillMath } : {}) };
   }
   // Read the state back to the CPU: { sig, pos, parts: [ArrayBuffer] }. One part at a time through
@@ -164,7 +170,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -393,14 +399,14 @@ export class Qwen35Engine {
     // width BN) through _encodeLayerWide: every Q4_0 / Q8_0 projection is ONE tiled GEMM over the
     // whole chunk (engine/wgsl/gemm_wide.js); the DeltaNet recurrence, attention and MoE experts run
     // on the existing batchCols-wide kernels, sub-batch by sub-batch. Prefill-tolerance numerics (a
-    // different summation order); decode and verify never use it. Default (undefined): 256 on a MoE
-    // engine that holds the embedding (the MoE prefill tolerance, see attnPrefillTile; its 64x64 tile
-    // fits the 16 KB default workgroup memory), off on dense models (27B gain is smaller; kept opt-in).
+    // different summation order); decode and verify never use it. Default (undefined): 256 on an engine
+    // that holds the embedding, MoE (MOE_PREFILL_UBATCH) and dense (DENSE_PREFILL_UBATCH) alike (its 64x64
+    // tile fits the 16 KB default workgroup memory).
     // An automatic setting that cannot be used here is silently off; an explicit one warns.
     // engine.prefillWide = false switches it off at runtime. prefillTile: { BM, BN, TM, TN, KB } overrides the tile.
     this.ubatch = 0; this.wideCfg = null;
     const ubAuto = prefillUbatch === undefined || prefillUbatch === "auto";
-    const UB = ubAuto ? (this.moe && hasEmbed && lo === 0 ? MOE_PREFILL_UBATCH : 0) : Math.floor(+prefillUbatch || 0);
+    const UB = ubAuto ? (hasEmbed && lo === 0 ? (this.moe ? MOE_PREFILL_UBATCH : DENSE_PREFILL_UBATCH) : 0) : Math.floor(+prefillUbatch || 0);
     if (UB > 0) {
       let why = null, cfg = null;
       try { cfg = wideTileConfig(prefillTile, device.limits.maxComputeWorkgroupStorageSize); } catch (e) { why = e.message; }
@@ -418,6 +424,28 @@ export class Qwen35Engine {
       else { this.ubatch = UB; this.wideCfg = cfg; }
     }
     this.prefillWide = this.ubatch > 0;
+
+    // ---- dp4a wide prefill GEMM (engine/wgsl/gemm_wide.js gemmDp4aWGSL) ----
+    // prefillDp4a: the wide chunk's projections as int8 dot products (dot4I8Packed) on activations
+    // quantized per 32 values (Q8_1-style, llama.cpp's MMQ numerics) instead of the f32 tiled GEMM.
+    // Prefill only (decode and verify never use it). Needs the wide path and the
+    // packed_4x8_integer_dot_product WGSL feature; skipped on Apple GPUs, where Metal emulates dp4a with
+    // scalar multiply-adds. engine.prefillDp4a = false switches it off at runtime (A/B).
+    this.dp4aCfg = null;
+    const dpAuto = prefillDp4a === undefined || prefillDp4a === "auto";
+    if (this.ubatch && (dpAuto ? DP4A_DEFAULT : !!prefillDp4a)) {
+      let why = null, cfg = null;
+      const info = adapterInfo ?? (typeof Deno === "undefined" ? device.adapterInfo : null);
+      try { cfg = dp4aTileConfig(prefillDp4aTile, device.limits.maxComputeWorkgroupStorageSize); } catch (e) { why = e.message; }
+      if (why) { /* tile config error */ }
+      else if (/apple/i.test(info?.vendor || "")) why = "Apple GPUs emulate dp4a";
+      else if (!(await probeDp4a(device))) why = "no packed_4x8_integer_dot_product on this device";
+      else if (this.wideCfg.BN % cfg.BN) why = `its tile width ${cfg.BN} must divide the wide tile width ${this.wideCfg.BN}`;
+      else if ([dim, dInner, qDim, ...(weights.layers.some((L) => !L.moe) ? [inter] : [])].some((d) => d % cfg.KS)) why = `a projection width is not a multiple of ${cfg.KS}`;
+      if (why) { if (!dpAuto) console.warn(`prefillDp4a: off (${why})`); }
+      else this.dp4aCfg = cfg;
+    }
+    this.prefillDp4a = !!this.dp4aCfg;
 
     // prefill GEMM operand precision (see PREFILL_MATH above). _pmAvail: the modes built for this
     // engine; engine.prefillMath can be switched at runtime among them (A/B), anything else runs f32.
@@ -439,7 +467,8 @@ export class Qwen35Engine {
       + (this.moeGrpU && !this.moeGrpTiled ? moeGroupWGSL({ K: this.moe.K, R: dnGroupRows(this.moeGrpUC), UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.gemmOn ? gemmWGSL({ N: batchCols, pairs: this._gemmPairs, pairs8: this._gemm8Pairs, UNPACK: unpack, R16: this._pmR16 }) : "")
-      + (this.ubatch ? gemmWideWGSL(this.wideCfg, { UNPACK: unpack }) : "") + WGSL2 });
+      + (this.ubatch ? gemmWideWGSL(this.wideCfg, { UNPACK: unpack }) : "")
+      + (this.dp4aCfg ? gemmDp4aWGSL(this.dp4aCfg) : "") + WGSL2 });
     const C = GPUShaderStage.COMPUTE;
     const layout0 = device.createBindGroupLayout({
       entries: [
@@ -525,6 +554,10 @@ export class Qwen35Engine {
     if (this.ubatch) {
       for (const p of ["gemm_w_q4", "gemm_w_q4_acc", "gemm_w_q8", "gemm_w_q8_acc"]) G1[p] = G1.matvec_q4_coop_b;
       G1.silu_mul_w = ["rw", "ro", "u"];
+    }
+    if (this.dp4aCfg) {
+      for (const p of ["gemm_d_q4", "gemm_d_q4_acc", "gemm_d_q8", "gemm_d_q8_acc"]) G1[p] = ["ro", "ro", "ro", "ro", "rw", "u"];
+      G1.quant_q8_w = ["ro", "rw", "rw", "u"];
     }
     const bufType = { u: "uniform", ro: "read-only-storage", rw: "storage" };
     this.pipes = {};
@@ -1976,10 +2009,29 @@ export class Qwen35Engine {
       return this._mcU[k] || (this._mcU[k] = { buffer: this._buf(new Uint32Array([n, s0, s1, s2]), GPUBufferUsage.UNIFORM) });
     };
     // y (+)= w x over the chunk: one launch, grid (dOut / BM, width / BN)
-    const wop = (w, x, y, dOut, dIn, acc = false) => {
+    let wop = (w, x, y, dOut, dIn, acc = false) => {
       const pipe = `gemm_w_${w.kind}${acc ? "_acc" : ""}`;
       if (!this.pipes[pipe]) throw new Error(`wide prefill: no GEMM for ${w.kind} weights`);
       return { pipe, gx: Math.ceil(dOut / cfg.BM), bg: this._bg(this.pipes[pipe], 1, [w.qs, w.sc, view(x), view(y), this._shapeB(dOut, dIn, x.stride / 16, y.stride / 4)]) };
+    };
+    // dp4a: each GEMM input is quantized once per chunk into one shared scratch (Xq, Xd: compact, nb = dIn / 32
+    // blocks per column), consumed by the GEMMs that follow it in the same pass. wop() then returns the dp4a
+    // GEMM as op.d next to the f32 one, and qop() the quantize dispatch; engine.prefillDp4a picks per chunk.
+    const dc = this.dp4aCfg;
+    if (dc) {
+      const maxIn = Math.max(D.dim, D.qDim, D.dInner || 0, dense ? D.inter : 0);
+      this._wDq = { q: dev.createBuffer({ size: U * maxIn, usage: S }), d: dev.createBuffer({ size: U * maxIn / 8, usage: S }) };
+    }
+    const qop = (x, dIn) => dc && { dIn, bg: this._bg2res(this.pipes.quant_q8_w, [Qwen35Engine._res(view(x)),
+      { buffer: this._wDq.q }, { buffer: this._wDq.d }, mcU(dIn, x.stride / 16)]) };
+    const wopF = wop;
+    wop = (w, x, y, dOut, dIn, acc = false) => {
+      const op = wopF(w, x, y, dOut, dIn, acc);
+      if (dc) {
+        const pipe = `gemm_d_${w.kind}${acc ? "_acc" : ""}`;
+        op.d = { pipe, gx: Math.ceil(dOut / dc.BM), bn: dc.BN, bg: this._bg(this.pipes[pipe], 1, [w.qs, w.sc, this._wDq.q, this._wDq.d, view(y), this._shapeB(dOut, dIn, 0, y.stride / 4)]) };
+      }
+      return op;
     };
     const uniq = (...bs) => bs.filter((b, i) => bs.findIndex((c) => c.buf === b.buf) === i);   // fuseProj segments share a buffer
     // one frame per sub-batch: [pos, seqLen, nCols, snap], written by prefillTokens before each chunk
@@ -1993,19 +2045,20 @@ export class Qwen35Engine {
       const R = {
         norm1: this._bg2res(this.pipes.rmsnorm_mc, [whole(Wt.x), { buffer: L.attnNorm.buf }, whole(Wt.xn), mcU(D.dim, st(Wt.x), st(Wt.xn))]),
         norm2: this._bg2res(this.pipes.rmsnorm_mc, [whole(Wt.x), { buffer: L.postNorm.buf }, whole(Wt.xn), mcU(D.dim, st(Wt.x), st(Wt.xn))]),
+        qXn: qop(Wt.xn, D.dim),
       };
       if (L.isFull) {
         R.proj = [wop(L.wq, Wt.xn, Wt.qFull, D.nH * D.hd * 2, D.dim)];
         // merged [k | v] rows (fuseProj) write the merged output layout: one launch
         if (L.fKV) R.proj.push(wop(L.fKV.w, Wt.xn, { buf: Wt.k.buf, stride: Wt.k.stride }, L.fKV.rows, D.dim));
         else R.proj.push(wop(L.wk, Wt.xn, Wt.k, D.kvDim, D.dim), wop(L.wv, Wt.xn, Wt.v, D.kvDim, D.dim));
-        R.out = wop(L.wo, Wt.attnOut, Wt.x, D.dim, D.qDim, true);
+        R.out = wop(L.wo, Wt.attnOut, Wt.x, D.dim, D.qDim, true); R.qOut = qop(Wt.attnOut, D.qDim);
         R.toNarrow = uniq(B.qFull, B.k, B.v);
         R.toWide = [B.attnOut];
       } else {
         R.proj = L.fQZ ? [wop(L.fQZ.w, Wt.xn, { buf: Wt.qkv.buf, stride: Wt.qkv.stride }, L.fQZ.rows, D.dim)]
           : [wop(L.wqkv, Wt.xn, Wt.qkv, D.convDim, D.dim), wop(L.wz, Wt.xn, Wt.z, D.dInner, D.dim)];
-        R.out = wop(L.wOut, Wt.gated, Wt.x, D.dim, D.dInner, true);
+        R.out = wop(L.wOut, Wt.gated, Wt.x, D.dim, D.dInner, true); R.qOut = qop(Wt.gated, D.dInner);
         R.toNarrow = uniq(B.xn, B.qkv, B.z);   // xn: the beta / alpha GEMV stays batched
         R.toWide = [B.gated];
       }
@@ -2013,7 +2066,7 @@ export class Qwen35Engine {
         R.gate = wop(L.ffnGate, Wt.xn, Wt.g, D.inter, D.dim);
         R.up = wop(L.ffnUp, Wt.xn, Wt.u, D.inter, D.dim);
         R.silu = this._bg2res(this.pipes.silu_mul_w, [whole(Wt.g), whole(Wt.u), mcU(D.inter, st(Wt.g), st(Wt.u))]);
-        R.down = wop(L.ffnDown, Wt.g, Wt.x, D.dim, D.inter, true);
+        R.down = wop(L.ffnDown, Wt.g, Wt.x, D.dim, D.inter, true); R.qG = qop(Wt.g, D.inter);
       }
       return R;
     });
@@ -2025,11 +2078,20 @@ export class Qwen35Engine {
     else enc.copyBufferToBuffer(tw, j * n, b.buf, 0, n);
   }
   _dW(p, op, w) {
+    if (op.d && this._dp4aOn) op = op.d;
     if (this.skip && this.skip.has(op.pipe)) return;
     p.setPipeline(this.pipes[op.pipe]);
     p.setBindGroup(0, this.bgCommonFor[op.pipe]);
     p.setBindGroup(1, op.bg);
-    p.dispatchWorkgroups(op.gx, w / this.wideCfg.BN);
+    p.dispatchWorkgroups(op.gx, w / (op.bn || this.wideCfg.BN));
+  }
+  // dp4a: quantize a GEMM input (qop from _initWide) for the dp4a GEMMs that follow in the same pass
+  _dQ(p, q, w) {
+    if (!q || !this._dp4aOn || (this.skip && this.skip.has("quant_q8_w"))) return;
+    p.setPipeline(this.pipes.quant_q8_w);
+    p.setBindGroup(0, this.bgCommonFor.quant_q8_w);
+    p.setBindGroup(1, q.bg);
+    p.dispatchWorkgroups(Math.ceil(q.dIn / 32 / 32), w);
   }
   // One layer over a wide chunk of w columns (w a multiple of BN, <= ubatch) at positions basePos...
   // Wt.x holds the chunk's residual stream. Projections: wide GEMMs; the rest: the batched kernels
@@ -2042,6 +2104,7 @@ export class Qwen35Engine {
       {
         const p = enc.beginComputePass();
         this._dMC(p, "rmsnorm_mc", LW.norm1, 256, 256, w);
+        this._dQ(p, LW.qXn, w);
         for (const op of LW.proj) this._dW(p, op, w);
         p.end();
       }
@@ -2057,15 +2120,18 @@ export class Qwen35Engine {
       }
       {
         const p = enc.beginComputePass();
+        this._dQ(p, LW.qOut, w);
         this._dW(p, LW.out, w);
         this._dMC(p, "rmsnorm_mc", LW.norm2, 256, 256, w);
         if (!L.moe) {
+          this._dQ(p, LW.qXn, w);
           this._dW(p, LW.gate, w);
           this._dW(p, LW.up, w);
           if (!(this.skip && this.skip.has("silu_mul_w"))) {
             p.setPipeline(this.pipes.silu_mul_w); p.setBindGroup(0, this.bgCommonFor.silu_mul_w); p.setBindGroup(1, LW.silu);
             p.dispatchWorkgroups(Math.ceil(D.inter / 64), w);
           }
+          this._dQ(p, LW.qG, w);
           this._dW(p, LW.down, w);
         }
         p.end();
@@ -2119,12 +2185,13 @@ export class Qwen35Engine {
       try { this._initWide(); }
       catch (e) {
         console.warn("wide prefill off:", String(e.message || e).slice(0, 300));
-        for (const b of this._wTwin?.values() || []) b.destroy();
-        this._wTwin = null; this.Wt = null; this.layerW = null; this.ubatch = 0; this.prefillWide = false;
+        for (const b of [...(this._wTwin?.values() || []), this._wDq?.q, this._wDq?.d]) b?.destroy();
+        this._wTwin = null; this._wDq = null; this.Wt = null; this.layerW = null; this.ubatch = 0; this.prefillWide = false; this.dp4aCfg = null; this.prefillDp4a = false;
         return false;
       }
     }
     const q = this.device.queue, NC = this.NC, basePos = this.pos, Wx = this.Wt.x;
+    this._dp4aOn = !!(this.dp4aCfg && this.prefillDp4a !== false);
     for (let j = 0; j < w / NC; j++) q.writeBuffer(this.frameW[j], 0, new Uint32Array([basePos + j * NC, basePos + j * NC + 1, NC, 0]));
     for (let c = 0; c < w; c++) q.writeBuffer(Wx.buf, c * Wx.stride, this._embedRowF32(ids[i + c]));
     const gB = this.gB;
@@ -2840,7 +2907,7 @@ export class Qwen35Engine {
     this._snapNow = null;   // not a verify: nothing to keep for replay
     let i = 0, sinceSync = 0;
     const NC = this.NC;
-    // wide prefill (opt-in): chunks of up to ubatch tokens, multiples of the GEMM tile width
+    // wide prefill (default on a whole-model engine): chunks of up to ubatch tokens, multiples of the GEMM tile width
     if (this.ubatch && this.prefillWide !== false) {
       const BN = this.wideCfg.BN;
       while (ids.length - i >= BN) {
