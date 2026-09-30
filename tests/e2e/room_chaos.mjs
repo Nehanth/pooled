@@ -444,7 +444,21 @@ try {
         const toasts = {}; for (const n of names) toasts[n] = await toastLog(n);
         row({ scenario: nm, ...r, sameAsBaseline: same(r.text), ice, toasts, ...(r.ok ? {} : { diag: await diag() }) });
         // the room still answers afterwards?
-        if (!r.ok) { const again = await ask(H).catch((e) => ({ err: String(e) })); row({ scenario: nm + "_next", ...again, sameAsBaseline: same(again.text), ...(again.ok ? {} : { diag: await diag() }) }); }
+        if (!r.ok) {
+          // ask again the way a person would: once the host's screen shows the room ready (a device
+          // that was dropped may rejoin and reload its layers on its own), re-dealing if it offers that
+          const tw = Date.now();
+          const ready = () => { const st = document.getElementById("ai-status").textContent, rd = document.getElementById("ai-redeal");
+            return rd && !rd.hidden ? "redeal" : document.getElementById("ai-panel").classList.contains("online") && getComputedStyle(document.getElementById("ai-row")).display !== "none" && !/re-deal|reloading|reconnecting|stopped responding/.test(st) ? "ok" : ""; };
+          let how = await tabs[H].waitForFunction(ready, null, { timeout: 90000, polling: 250 }).then((h) => h.jsonValue()).catch(() => "timeout");
+          if (how === "redeal") {
+            await tabs[H].evaluate(() => document.getElementById("ai-redeal").click());
+            await tabs[H].waitForFunction(ready, null, { timeout: 300000, polling: 500 }).catch(() => {});
+          }
+          const readyAfterS = +((Date.now() - tw) / 1000).toFixed(1);
+          const again = await ask(H).catch((e) => ({ err: String(e) }));
+          row({ scenario: nm + "_next", readyAfterS, redealt: how === "redeal", ...again, sameAsBaseline: same(again.text), ...(again.ok ? {} : { diag: await diag() }) });
+        }
       }
       C.rtt = 0;
     }
