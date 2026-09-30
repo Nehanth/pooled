@@ -86,10 +86,13 @@ test("the help texts say what a device in a room sees", () => {
 
 test("deviceName: the same for a hostname every run, different across hostnames, never the hostname itself", () => {
   assert.equal(deviceName("mac-studio"), deviceName("mac-studio"));
-  assert.match(deviceName("mac-studio"), /^node-[a-z]{3}$/);
+  assert.match(deviceName("mac-studio", "darwin"), /^mac-[a-z]{3}$/);
+  assert.match(deviceName("spark", "linux"), /^linux-[a-z]{3}$/);
+  assert.match(deviceName("desk", "win32"), /^pc-[a-z]{3}$/);
+  assert.match(deviceName("x", "aix"), /^node-[a-z]{3}$/);
   assert.notEqual(deviceName("mac-studio"), deviceName("spark"));
   assert.ok(!deviceName("alice-laptop").includes("alice"));
-  assert.match(deviceName(""), /^node-[a-z]{3}$/);
+  assert.match(deviceName("", "darwin"), /^mac-[a-z]{3}$/);
 });
 
 // ---------------- memory ----------------

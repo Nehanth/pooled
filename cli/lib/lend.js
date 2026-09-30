@@ -35,7 +35,7 @@ Options
                     a discrete GPU lends its free memory less ${DISCRETE_RESERVE_GB} GB; unified memory (Apple
                     silicon, GB10) lends the total less max(${UNIFIED_KEEP_GB} GB, ${Math.round(UNIFIED_KEEP_FRAC * 100)}%). "max" keeps only a
                     small margin. At most ${DESK_MAX_GB} GB per device.
-  --name <s>        how the room shows this device (default: "node-" and 3 letters made from this
+  --name <s>        how the room shows this device (default: "mac-", "linux-" or "pc-" and 3 letters made from this
                     computer's hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
                     default: the PeerJS cloud pooled.run uses)
@@ -357,16 +357,18 @@ export function tpsFromStats(stats) {
 }
 
 // ---------------- errors ----------------
-// pooled join's default name: "node-" and 3 letters from the hostname (hashed: the hostname itself,
-// often a person's name, is not shown to the room), the same on every run, so a join started again
-// after a crash is re-seated in its old slot (the host knows a device by its name)
-export function deviceName(hostname = "") {
+// the default device name: the kind of computer ("mac", "linux", "pc") and 3 letters from the
+// hostname (hashed: the hostname itself, often a person's name, is not shown to the room), the same
+// on every run, so a join started again after a crash is re-seated in its old slot (the host knows a
+// device by its name)
+const KIND = { darwin: "mac", linux: "linux", win32: "pc" };
+export function deviceName(hostname = "", platform = process.platform) {
   let h = 2166136261;   // FNV-1a
   for (const ch of String(hostname)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; }
   const A = "abcdefghjkmnpqrstvwxyz";   // no i, l, o, u (they read alike)
   let s = "";
   for (let i = 0; i < 3; i++) { s += A[h % A.length]; h = Math.floor(h / A.length); }
-  return "node-" + s;
+  return (KIND[platform] || "node") + "-" + s;
 }
 
 // the host's protocol vs this one -> what to do about it
