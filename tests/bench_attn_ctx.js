@@ -8,7 +8,8 @@
 //   ATTN_DECODE=v1|v2|both (engine option attnDecode; both = A/B in one process, alternating)
 //   cd tests && MODEL=moe deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights bench_attn_ctx.js
 import { Qwen35Engine } from "../engine/qwen35.js";
-import { openGGUF, trunkLayers } from "./load_model.js";
+import { openGGUF, trunkLayers, roomFlags } from "./load_model.js";
+import { roomQwen35Options, applyRoomFlags } from "../engine/preset.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
 const MODEL = env("MODEL", "moe");
@@ -27,8 +28,10 @@ let gpuErrors = 0;
 device.addEventListener?.("uncapturederror", (e) => { if (gpuErrors++ < 4) console.error("GPU ERROR:", e.error?.message?.slice(0, 300)); });
 const G = model.G, L = trunkLayers(G);
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true });
-const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: MAXSEQ,
-  attnDecode: MODES.includes("v2") ? "v2" : "v1" });
+// the room's settings (engine/preset.js; ROOM_FLAGS for others), with the decode attention under test
+const flags = roomFlags();
+const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: MAXSEQ,
+  ...roomQwen35Options(flags), attnDecode: MODES.includes("v2") ? "v2" : "v1" }), flags);
 console.log(`${MODEL}: maxSeq ${MAXSEQ}, faSplit ${eng.faSplit} (${eng.faSplits} slots), attnDecode compiled: ${!!eng.pipes.attn_dec}, subgroups ${device.features.has("subgroups")}`);
 const tok = model.tokenizer();
 const prompt = tok.encode("Write a short story about a lighthouse keeper.");
