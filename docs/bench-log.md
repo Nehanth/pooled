@@ -1174,51 +1174,51 @@ the three changes apply there too (they do not depend on the fused expert layout
 
 ## 2026-09-29: rooms on bad networks, origin/main vs fix/network-resilience (GB10)
 
-Branch fix/network-resilience = fix/net-signaling + fix/net-drop + fix/net-lossy, plus drop detection
-changed to hold a silent device instead of failing the answer (see the freeze rows). Same harness for both
-columns: `tests/e2e/room_chaos.mjs --root <checkout>` (3 headless Chromium tabs on one GB10, Qwen3 1.7B Q8,
-96 new tokens, local PeerServer, every WebRTC packet through the userland UDP shaper; `join` uses 2 tabs and
-no model). Base = origin/main e3e5152. One run per cell. "identical" = same text as that run's baseline.
+Branch fix/network-resilience = fix/net-signaling + fix/net-drop + fix/net-lossy, merged with origin/main
+5af2f66 (which added the keep-alive and the 15 s silent-link drop in the meantime). Same harness for both
+columns: `tests/e2e/room_chaos.mjs --root <checkout>` (3 headless Chromium tabs on one GB10, Qwen3 1.7B Q8
+split by memory so all three hold layers, 96 new tokens, local PeerServer, every WebRTC packet through the
+userland UDP shaper; `join` uses 2 tabs and no model). Base = origin/main 5af2f66. One run per cell;
+"identical" = same text as that run's LAN baseline. After a failed answer the harness waits until the room
+shows it is ready (re-dealing if it offers that), then asks again.
 
 | Plan / scenario | origin/main | fix/network-resilience |
 |---|---|---|
-| baseline (LAN) | 34.4 tok/s | 30.2 tok/s |
-| RTT 50 / 150 / 300 ms | 9.3 / 3.8 / 1.8 tok/s, identical | 9.0 / 3.8 / 2.0 tok/s, identical |
-| 1% loss, RTT 50 ms | 6.2 tok/s | 7.6 tok/s |
-| 5% loss, RTT 50 ms | 1.8 tok/s (4.2 s stall) | 5.5 tok/s (2.0 s stall) |
-| 15% loss, RTT 50 ms | failed after 115 s (pipeline timeout) | failed after 164 s (pipeline timeout), 317 of 475 chars written |
-| 2 s freeze, one guest / all | completes, identical | completes, identical |
-| 5 s freeze, one guest | completes, identical (6.2 s stall) | completes, identical (6.3 s stall) |
-| 12 s freeze, one guest | completes, identical (15.3 s stall) | completes, identical (15.3 s stall) |
-| 8 s freeze, every device | completes, identical | completes, identical |
-| 20 s freeze, one guest | answer fails after 32 s, next question fails too (the room never answers again) | answer fails after 18 s ("the link to guest1 dropped; ask again"), next question identical |
-| guest's network dies while idle | never noticed; next question fails after 90 s | host drops it after 61 s, re-deal 11 s, next answer OK |
-| guest's network dies mid-answer | fails after 90 s, card never dropped | host flags it in ~3.6 s, answer fails after 16 s, card dropped 15 s later |
-| signaling down mid-answer, next answer | both identical | both identical |
-| new device joins while signaling is down | "error: server-error" | "Can't reach the signaling server …" + self-host link |
-| new device joins after signaling is back | "no room with that code" (host never re-registers) | joins in 0.9 s |
-| signaling blip 5 s / 30 s, then a new device joins | "no room with that code" | joins in 0.25 s |
-| host / guest opens with signaling refused | "error: network" / "error: server-error" | "Can't reach the signaling server …" |
-| host / guest opens with signaling blackholed | stuck on "Connecting…" | "Can't reach …" after 20 s, buttons re-enabled |
+| RTT 50 / 150 / 300 ms | 7.5 / 3.5 / 1.9 tok/s, identical | 8.8 / 3.6 / 2.0 tok/s, identical |
+| 1% loss, RTT 50 ms | 6.0 tok/s | 8.1 tok/s |
+| 5% loss, RTT 50 ms | 4.4 tok/s | 7.3 tok/s |
+| 15% loss, RTT 50 ms | 1.4 tok/s (11.5 s stall) | 4.1 tok/s (2.3 s stall) |
+| 2 / 5 / 12 s freeze of one guest, 2 / 8 s of every device | complete, identical | complete, identical |
+| 20 s freeze of one guest | fails at 17 s ("guest1 left"); re-deal, next answer identical on 2 devices | fails at 16 s ("the link to guest1 dropped; ask again"); re-deal, next answer identical on 2 devices |
+| guest's network dies while idle | dropped after 17 s; re-deal 12 s; next answer OK | dropped after 16 s; re-deal 10.5 s; next answer OK |
+| guest's network dies mid-answer | fails at 16.8 s ("guest1 left") | host shows "guest1 stopped responding; waiting for it (Stop gives up)" at 3.6-5 s; fails at 15.4 s |
+| signaling down mid-answer, then the next answer | both identical | both identical |
+| new device joins while signaling is down | "Can't reach the room server. Check your internet connection…" | "Can't reach the signaling server (…). … Rooms already running are not affected" + a self-host link |
+| new device joins right after signaling is back | "No room with that code" (the host's registration is not back) | joins in 0.7 s |
+| signaling blip of 5 s / 30 s, then a new device joins | "No room with that code" | joins in 0.25 s |
+| host or guest opens the page with signaling refused | "Can't reach the room server…" | "Can't reach the signaling server…" |
+| host or guest opens with signaling blackholed | "Connecting…" until the server is back | "Can't reach the signaling server…" after 20 s, buttons usable again |
 | signaling down, a device leaves, re-deal | fails (new links need signaling) | fails the same way |
-| no direct path, no relay | "no room with that code" (wrong) | "found the room, but the direct connection failed … add a relay under Network", Network box opens |
-| no direct path, TURN relay (`?turn=`) | no relay support: join times out | all 4 links on the relay, 20.8 tok/s relay-only |
+| no direct path, no relay | "No room with that code" (the room exists) | "Found the room, but these two devices can't reach each other… A relay (TURN) server gets around that", Network box opens |
+| no direct path, TURN relay (`?turn=`) | no relay support: the join times out | all 4 links on the relay, 33.1 tok/s relay-only |
 
-Drop detection on its own (`tests/e2e/room_drop.mjs --devices 3`, 161 tokens, all 16 checks pass):
-RTT 300 ms + 5% loss and RTT 600 ms + 5% loss finish identical with nobody flagged (longest silence 1.7 s
-against a 3.9 s limit, 2.4 s against 5.0 s); a dead middle / last device is flagged in 3.6 / 3.9 s, the
-answer fails at 16.8 / 16.9 s when ICE gives up on the link, the re-deal is offered 14 s after that and the
-room answers again. Signaling fallback (`tests/e2e/signal_fallback.mjs`, no GPU): 19 of 19.
+Drop detection (`tests/e2e/room_drop.mjs --devices 3`, 161 tokens, all 16 checks pass): RTT 300 ms + 5% loss
+and RTT 600 ms + 5% loss finish identical with nobody flagged (longest silence 0.9 s against a 3.9 s limit and
+1.6 s against 4.8 s). A dead middle / last device is flagged in 5.1 / 3.9 s, the answer fails at 15-17 s
+(the link fails or the silent-link drop fires), the re-deal is offered at once and the room answers again.
+Signaling fallback (`tests/e2e/signal_fallback.mjs`, no GPU): 19 of 19.
 
-Why drop detection now holds instead of failing: with fix/net-drop as first merged, the heartbeat failed the
-answer 3.5-5 s into any silence, so the 5, 8 and 12 s freezes above failed on this branch while origin/main
-finished them. The heartbeat now flags the device ("guest1 stopped responding; waiting for it (Stop gives
-up)") and a new question waits for it; it counts as back only after answering a ping sent after the silence
-began. A link ICE gives up on (~15 s) still fails the answer at once and is redialed, and a device silent for
-30 s is dropped with a re-deal offer. The decode lap-timeout floor went from 15 s to 25 s, since a 12 s freeze
-leaves a 15 s gap between two tokens.
+How the three branches changed when merged:
+- Drop detection no longer fails the answer 3.5-5 s into a silence. As first merged it did, and a first matrix
+  run showed it failing 5, 8 and 12 s freezes that origin/main finishes. It now flags the device, holds the
+  answer (Stop gives up) and makes a new question wait; the device counts as back only after it answers a
+  ping sent after the silence began. Dropping a silent device is left to main's ping loop (15 s for a computer,
+  60 s for a phone).
+- Main's 15 s silent-link drop fires before ICE gives up (~15-17 s), so fix/net-lossy's redial of a dead link
+  no longer brings back a computer frozen for 20 s: it is dropped and rejoins through the re-deal, as on main.
+  The redial still applies to phones (60 s) and to links that fail while packets still flow.
+- The decode lap-timeout floor from fix/net-drop went from 15 s to 25 s: a 12 s freeze left a 15 s gap between
+  two tokens in the first run.
 
-Still open: 15% loss is too slow to finish 96 tokens in either column. The first answer after that failed
-15%-loss answer took 23 s to prefill on this branch (1.2 s on origin/main); the cause isn't traced yet. A
-freeze longer than ~15 s still fails the answer in flight, and it isn't retried automatically. A re-deal
-while signaling is down still fails.
+Still open: a re-deal while signaling is down still fails, and an answer caught in a freeze longer than
+~15 s isn't retried automatically.
