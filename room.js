@@ -1488,7 +1488,7 @@ async function keepAwake() {
   try {
     if (!wakeLock && navigator.wakeLock) {
       wakeLock = await navigator.wakeLock.request("screen");
-      wakeLock.addEventListener("release", () => { wakeLock = null; awakeMode = awakeVideo && !awakeVideo.paused ? "video" : "none"; awakeStatus("screen lock: released"); compute.refresh(); awakeMark(); });
+      wakeLock.addEventListener("release", () => { wakeLock = null; awakeMode = awakeVideo && !awakeVideo.paused ? "video" : "none"; awakeStatus("screen lock: released"); compute.refresh(); });
       awakeMode = "lock";
       awakeStatus("screen stays awake \u2713");
     }
@@ -1510,23 +1510,12 @@ async function keepAwake() {
     if (!wakeLock) awakeStatus(`This screen can\u2019t stay awake on its own: ${myMeta?.ua === "iPhone" ? "set Auto-Lock to Never" : "set the screen timeout to its longest (Settings \u203a Display)"}`);
   }
 }
-document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { keepAwake(); document.title = "pooled \u00b7 room"; } awakeMark(); });
-// The header's sun: shown while this device holds layers; lit when the screen is kept on (Wake Lock, or
-// the silent video on older iOS), a warning when it is not (the device would drop out if it sleeps).
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { keepAwake(); document.title = "pooled \u00b7 room"; } });
+// Whether this device is kept awake while it holds layers (Wake Lock, or the silent video on older
+// iOS). No header icon (the owner found it noise); the lend screen and the side hint still warn
+// when the screen may sleep. window.pooledAwake() is for tests and debugging.
 function holdsLayers() { return !!ai.engine && (ai.role === "host" || ai.role === "worker"); }
-function awakeMark() {
-  const el = $("awake-ind");
-  if (!el) return;
-  const on = holdsLayers() && document.body.classList.contains("in-room");
-  el.hidden = !on;
-  if (!on) return;
-  const ok = !!wakeLock || !!(awakeVideo && !awakeVideo.paused);
-  el.classList.toggle("ok", ok); el.classList.toggle("warn", !ok);
-  const tip = ok ? "Screen stays on while this device holds layers"
-    : `This screen may sleep and drop out of the room: tap the page${myMeta?.ua === "iPhone" ? ", or set Auto-Lock to Never" : ""}`;
-  if (el.dataset.tip !== tip) { el.dataset.tip = tip; el.setAttribute("aria-label", tip); }
-}
-setInterval(awakeMark, 1500);
+window.pooledAwake = () => ({ holds: holdsLayers(), awake: !!wakeLock || !!(awakeVideo && !awakeVideo.paused) });
 document.addEventListener("touchstart", keepAwake, { passive: true });
 // Lend this device: this device as a full screen that shows its layers and the passes going through it
 function computeState() {
@@ -2935,7 +2924,7 @@ function aiMaybeReady() {
   offerRedealForNewcomers();
   if (!ai.recovering) setTimeout(nextQueued, 0);
   saveHost();
-  awakeMark(); keepAwake();
+  keepAwake();
   mascot("Cluster online! Ask anything. Everyone in the room can.");
   codeRoleChanged();
 }
@@ -4178,7 +4167,6 @@ async function aiOnData(from, d) {
       ai.layersByName = d.by; loadCardRender();
       if (ai.role === "worker" && !d.by[myName]) {   // not in this deal: ask-only guest, GPU memory freed
         ai.role = "guest"; ai.range = null; ai.engine = null; ai.held = null;
-        awakeMark();
         try { ai.device?.destroy(); } catch {}
         ai.device = null;
       }
@@ -4247,7 +4235,7 @@ async function aiOnData(from, d) {
           if (ai.startFailed) throw new Error(ai.startFailed);
           ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv: kvForLoad(d.model, d.kv, KV_ASK) };
         }
-        awakeMark(); keepAwake();
+        keepAwake();
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
         const slots = await ckptRestore();   // this device's part of the room's checkpoints, if it saved any before a reload
         aiStatus(`layers ${d.range[0]}–${d.range[1] - 1} ready · syncing with the room…`);
