@@ -43,7 +43,7 @@ import { loadShard } from "./shard.js";
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { packWire, unpackWire, badF32 } from "../../room/wire.js";
 import { planSplit, planForSpeed, phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
-import { MODELS, CTX, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM } from "../../room/models.js";
+import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { isPrefix } from "../../harness/prefix.js";
 import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "../../room/conversation.js";
@@ -655,7 +655,9 @@ export class RoomNode extends EventEmitter {
     return ctxForBinding(ggufMeta, ctx, kv, bind);
   }
   setSplit(mode) { this.splitMode = mode === "speed" ? "speed" : "memory"; }
-  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory" }) {
+  // fitBytes: room/models.js roomBytes() for the model at this context (weights + KV per layer, what the
+  // host holds besides): the speed split fills each device by it, as the room page's roomFit does
+  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null }) {
     const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name)) * 2 ** 30;
     let chain = peers.map((p) => p.id);
     let caps = [Math.max(pledgeOf(self.meta, self.name) - embedBytes, layerBytes / 2), ...peers.map((p) => Math.max(pledgeOf(p.meta, p.name), layerBytes / 2))];
@@ -667,7 +669,10 @@ export class RoomNode extends EventEmitter {
     if (mode === "speed") {
       // fill the host first, then the biggest devices, each up to its pledge (in whole layers); a device
       // not needed joins without layers. Short (the pledges hold less than L in whole layers): by memory
-      const sp = planForSpeed(L, caps.map((c) => c / layerBytes), [], caps.map(() => false));
+      const per = fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
+      const allIds = [self, ...peers.filter((p) => chain.includes(p.id))];
+      const layerCaps = allIds.map((d, i) => Math.max(0, (pledgeOf(d.meta, d.name) - (i === 0 ? hostB : 0)) / per));
+      const sp = planForSpeed(L, layerCaps, [], layerCaps.map(() => false));
       if (!sp.short) {
         const used = sp.used.filter((i) => i > 0);
         leftOut.push(...chain.filter((_, k) => !used.includes(k + 1)));
@@ -721,7 +726,8 @@ export class RoomNode extends EventEmitter {
     const nameOf = (id) => this.conns.get(id)?.name || id;
     ai.dealtPeers = new Set(this.gpuPeers());   // every device this deal saw, left out or not (for a --devices host's re-deal)
     const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: this.conns.get(id)?.meta }));
-    const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode });
+    const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
+      fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16") });
     const { ranges, assigned } = plan;
     ai.chain = plan.chain; ai.chainNames = ai.chain.map(nameOf); ai.layerGB = layerBytes / 2 ** 30;
     ai.layersN = Object.fromEntries([[this.name, assigned[0]], ...ai.chain.map((id, i) => [nameOf(id), assigned[i + 1]])]);

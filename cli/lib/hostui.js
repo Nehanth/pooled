@@ -281,8 +281,8 @@ function statusText(s, S, { lib, spin, now }) {
   const tail = (t) => S.ink3(` · ${rest ? `${rest} · ` : ""}`) + t;
   if (!s.model) return S.ink3("choosing a model");
   if (s.step === "online") {
-    const gpu = s.devices.filter((d) => d.gb > 0 && d.range).length || s.devices.length;
-    return name + tail(`${S.acc(S.g.live)} online` + S.ink3(` · ${gpu} device${gpu === 1 ? "" : "s"}${s.onlineAt ? ` · up ${upFor(now - s.onlineAt)}` : ""}${s.tps ? ` · ${s.tps.toFixed(1)} tok/s` : ""}`));
+    const n = s.devices.length;
+    return name + tail(`${S.acc(S.g.live)} online` + S.ink3(` · ${n} device${n === 1 ? "" : "s"}${s.onlineAt ? ` · up ${upFor(now - s.onlineAt)}` : ""}${s.tps ? ` · ${s.tps.toFixed(1)} tok/s` : ""}`));
   }
   if (s.step === "starting") return name + tail(`${spin} loading` + (s.startedAt ? S.ink3(` · ${clock(now - s.startedAt)}`) : ""));
   if (s.dl.key === s.model && s.dl.state === "running") return name + tail(`${spin} downloading`);
@@ -307,6 +307,17 @@ export function dealPreview(s, lib) {
 // one device holds the model by its own pledge: spreading it is a choice, not a need
 const onePledgeHolds = (s, lib) => !!(lib && s.model && s.devices.some((d) => d.gb > 0 && roomFitNow(lib, { model: s.model, devices: [{ name: d.name, meta: { ...d.meta, webgpu: true, contribGB: d.gb } }] }).fits));
 
+// a device's GPU as the room reports it ("nvidia nvidia-gb10", "apple m3-pro") -> "NVIDIA GB10", "Apple M3 Pro"
+const VENDOR = { nvidia: "NVIDIA", amd: "AMD", apple: "Apple", intel: "Intel", qualcomm: "Qualcomm", arm: "Arm" };
+export function gpuLabel(g) {
+  let t = String(g || "").trim().split(/\s+/).filter(Boolean);
+  if (!t.length) return "";
+  const v = t[0].toLowerCase();
+  if (t.length > 1 && t[1].toLowerCase().startsWith(v + "-")) t = [t[0], t[1].slice(v.length + 1), ...t.slice(2)];
+  const words = t.join(" ").split(/[\s-]+/).map((w, i) => (i === 0 && VENDOR[w.toLowerCase()]) || (/^[a-z]*\d/i.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)));
+  return words.join(" ");
+}
+
 // the table of devices: DEVICE, GPU (70 columns and up), LENDS or LAYERS, and a state
 function deviceTable(s, S, { W, online, preview = null }) {
   const wide = W >= 69;
@@ -317,7 +328,7 @@ function deviceTable(s, S, { W, online, preview = null }) {
   cols.push({ h: "", w: 20 });
   const cut = (x, n) => (width(x) > n ? [...x].slice(0, n - 1).join("") + "…" : x);
   const rows = s.devices.map((d) => {
-    const gpuName = cut(String(d.meta?.gpu || (d.kind === "phone" ? "phone" : "")), 14);
+    const gpuName = cut(d.self && s.gpuName ? s.gpuName : gpuLabel(d.meta?.gpu) || (d.kind === "phone" ? "phone" : ""), 14);
     const chatOnly = d.gb == null;
     const name = d.self ? S.bold(cut(d.name, 12)) : chatOnly ? S.ink3(cut(d.name, 12)) : cut(d.name, 12);
     const mid = online ? (chatOnly || !d.range ? S.ink3(S.g.none) : String(d.range).replace(/[–-]/, S.g.dash)) : (chatOnly ? S.ink3(S.g.none) : gbNum(d.gb));
@@ -430,7 +441,8 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
   // room / starting / online
   const online = s.step === "online";
   if (s.step === "starting") {
-    const rows = s.devices.filter((d) => d.gb > 0).map((d) => ({ d, pct: d.pct ?? 0 })).sort((a, b) => a.pct - b.pct);
+    const dealt = s.devices.filter((d) => d.gb > 0 && d.range);
+    const rows = (dealt.length ? dealt : s.devices.filter((d) => d.gb > 0)).map((d) => ({ d, pct: d.pct ?? 0 })).sort((a, b) => a.pct - b.pct);
     const out = table(S, [{ h: "DEVICE", w: 12 }, { h: "LAYERS", w: 6 }, { h: "", w: 40 }], rows.map(({ d, pct }) => {
       const range = String(d.range || S.g.none).replace(/[–-]/, S.g.dash);
       if (pct >= 100) return [S.ink2(d.name), S.ink2(range), S.ink2("loaded")];

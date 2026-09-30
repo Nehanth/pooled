@@ -62,7 +62,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   S = initialState({ rows: rows0, model: opts.modelGiven ? opts.model : null, pledge: { gb: pledge0, max: Math.max(pd.max, pledge0), totalGB: pd.totalGB },
     fixedPledge: opts.gbGiven, flags: { start: opts.start, wait: opts.devices || 0, chat: opts.chat, split: opts.split }, pulled, code, link: "", yes: opts.yes, noPull: opts.noPull });
   S.pledgeDone = opts.gbGiven;
-  S.gpu = gpu; S.modelsDir = home; S.ctxAsk = opts.ctx || 0;
+  S.gpu = gpu; S.gpuName = mem.name || prepared.adapterName; S.modelsDir = home; S.ctxAsk = opts.ctx || 0;
   S.gate = opts.allowAll ? "allow-all" : opts.denyUnknown ? "deny-unknown" : "ask";
 
   // ---- effects

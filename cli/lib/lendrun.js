@@ -221,6 +221,10 @@ async function runJoin(opts, out) {
       const hm = node.conns.get(node.ai.hostId)?.meta || {};
       const mk = S.model || (hm.model && rn.MODELS[hm.model] ? hm.model : null);
       if (mk) S.modelLabel = rn.MODELS[mk].label.split("·")[0].trim();
+      // the host's model (from its hello, which may come a moment after the link opens, or change
+      // when the host picks another): download it now, before the host deals, unless --no-pull
+      const hostKey = hm.model && rn.MODELS[hm.model] ? hm.model : null;
+      if (hostKey && pledged && !opts.noPull && !onDisk.has(hostKey) && pulling?.key !== hostKey) ensurePulled(hostKey).catch(() => {});
       if (S.phase === "lobby") S.lobbyAt ||= Date.now();
       if (S.phase === "online" || S.phase === "answering") S.onlineAt ||= Date.now();
       S.you.gb = node.pledgeGB || S.you.gb;
@@ -231,8 +235,10 @@ async function runJoin(opts, out) {
   // every later one reads from disk; --no-pull streams this device's layers from Hugging Face instead.
   // A deal that comes while it downloads waits for it (the room node's beforeLoad)
   let pulling = null, pledged = null;
+  const onDisk = new Set();
   const ensurePulled = async (key) => {
-    if (opts.noPull || !rn.MODELS[key] || !rn.FILES?.[key] || modelState(opts.modelDir, key, rn.MODELS, rn.FILES, rn.LOCAL).pulled) return;
+    if (opts.noPull || onDisk.has(key) || !rn.MODELS[key] || !rn.FILES?.[key]) return;
+    if (modelState(opts.modelDir, key, rn.MODELS, rn.FILES, rn.LOCAL).pulled) { onDisk.add(key); return; }
     await pledged;
     if (pulling?.key !== key) pulling = { key, p: pullFirst(key) };
     await pulling.p;
@@ -254,7 +260,7 @@ async function runJoin(opts, out) {
       r = await pullWithProgress(rn, key, opts.modelDir, { quiet: opts.jsonLog });
       prompting = false;
     }
-    if (r.ok) out.log(`${key} downloaded: loading from disk`);
+    if (r.ok) { onDisk.add(key); out.log(`${key} downloaded: loading from disk`); }
     else if (!r.aborted) out.log(`download failed (${cleanText(r.error?.message || "", 200)}): streaming the layers from Hugging Face instead; pooled pull ${key} resumes it`, "error");
     tick();
   };

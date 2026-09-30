@@ -385,3 +385,12 @@ test("dealPlan split: speed puts it all on the host when its pledge holds it; me
   const n = new RoomNode({ pledgeGB: 4, split: "speed" }); assert.equal(n.splitMode, "speed");
   n.setSplit("spread"); assert.equal(n.splitMode, "memory");
 });
+
+test("dealPlan speed counts the KV cache like the room page: 1.7B, 2 GB + 2 GB splits (it does not all go to the host)", async () => {
+  const { roomBytes } = await import("../../../room/models.js");
+  const fitBytes = roomBytes("qwen3-1.7b", 16384, "f16");
+  const p = RoomNode.dealPlan({ L: 28, layerBytes: 53494784, embedBytes: 330612736, self: { name: "spark", meta: { contribGB: 2 } },
+    peers: [{ id: "b", name: "mac", meta: { contribGB: 2 } }], mode: "speed", fitBytes });
+  assert.deepEqual(p.chain, ["b"]);
+  assert.ok(p.assigned[0] > 0 && p.assigned[0] < 28, `host holds ${p.assigned[0]}`);
+});
