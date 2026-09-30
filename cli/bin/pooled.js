@@ -12,6 +12,12 @@ const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.u
 
 // join / host: their own options and help (lend.js); serve below is unchanged
 const cmd0 = process.argv[2];
+if (cmd0 === "chat") {
+  const { chatMain } = await import("../lib/chatrun.js");
+  const status = await chatMain(process.argv.slice(3), { version: VERSION });
+  await new Promise((r) => process.stdout.write("", r));   // a piped answer is all out before the exit
+  process.exit(status);
+}
 if (cmd0 === "join" || cmd0 === "host") {
   const { lendMain } = await import("../lib/lendrun.js");
   process.exitCode = await lendMain(cmd0, process.argv.slice(3));
@@ -22,6 +28,7 @@ const HELP = `pooled ${VERSION}: use a Pooled room from your own tools
 
 Usage
   pooled serve <ROOM CODE | room link> [options]
+  pooled chat  <ROOM CODE | room link> [prompt]    talk to the room's model here (chat --help)
   pooled join  <ROOM CODE | room link> [options]   lend this computer's GPU to a room (join --help)
   pooled host  [--model <key>] [options]           open a room on this computer (host --help)
 
@@ -30,6 +37,10 @@ pooled serve
   Joins the room as an API client (no layers, no GPU needed here) and serves its model on
   127.0.0.1 as an OpenAI (Chat Completions and Responses) and an Anthropic (Messages)
   compatible endpoint, tool calls included.
+
+  With the room's invite link (quote it: "https://pooled.run/r/4TKG9P#k=..."), the host lets
+  this client in at once. With the code alone, it waits until the host allows it (a host that
+  asks before new devices join) and the host's "Allow API clients" must be on either way.
 
 Options
   --port <n>        HTTP port (default 8080)
@@ -68,13 +79,15 @@ if (o.version) { console.log(VERSION); process.exit(0); }
 if (o.help || !pos.length || pos[0] === "help") { console.log(HELP); process.exit(pos.length && pos[0] !== "help" ? 2 : 0); }
 if (pos[0] !== "serve") { console.error(`pooled: unknown command ${pos[0]}\n\n${HELP}`); process.exit(2); }
 
-const { Bridge, roomCodeFrom } = await import("../lib/room.js");
+const { Bridge, roomCodeFrom, roomKeyFrom } = await import("../lib/room.js");
 const { createServer } = await import("../lib/http.js");
 const { showRoom } = await import("../lib/banner.js");
 const { cleanLabel, cleanText } = await import("../lib/common.js");
 
 const code = roomCodeFrom(pos[1]);
-if (!code) { console.error(`pooled: give a room code (4 to 6 letters and digits) or a room link${pos[1] ? `, not "${pos[1]}"` : ""}`); process.exit(2); }
+if (!code) { console.error(`pooled: give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link${pos[1] ? `, not "${pos[1]}"` : ""}`); process.exit(2); }
+// the invite link's key (#k=…): the host lets this client in without asking. Quote the link in the shell
+const key = roomKeyFrom(pos[1]);
 const port = +o.port;
 if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error("pooled: --port must be a port number"); process.exit(2); }
 const maxQueue = Math.max(0, parseInt(o["max-queue"], 10));
@@ -103,7 +116,7 @@ const log = (msg, level = "info") => {
 };
 // never the hostname by default: every guest in the room sees this name
 const tag = Math.random().toString(36).slice(2, 6).padEnd(4, "0");
-const bridge = new Bridge({ code, signal: o.signal || null, name: cleanLabel(o.name) || `pooled serve ${tag}`, client: `pooled-cli/${VERSION}`, log });
+const bridge = new Bridge({ code, key, signal: o.signal || null, name: cleanLabel(o.name) || `pooled serve ${tag}`, client: `pooled-cli/${VERSION}`, log });
 // POOLED_KEEPALIVE_MS: the queue keep-alive interval (tests; 10 s otherwise)
 const api = createServer({ bridge, port, token, maxQueue, log, version: VERSION, keepAliveMs: +process.env.POOLED_KEEPALIVE_MS || undefined });
 
