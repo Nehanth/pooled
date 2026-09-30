@@ -20,7 +20,8 @@ import { WIRE_F16, badF32, f32ToB64, packF16, unpackF16, asU16, packWire, unpack
 import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
-import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle } from "./room/api.js";
+import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
+import { tokenTexts } from "./harness/model-common.js";
 import { PrefixIndex, pinSplit } from "./harness/prefix.js";
 import { CkptStore } from "./room/ckpt-store.js";
 import { MODELS, NEED_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvModeFor, kvForLoad } from "./room/models.js";
@@ -36,7 +37,7 @@ const ckptDisk = CKPT_MAX && new URLSearchParams(location.search).get("ckptdisk"
   ? new CkptStore() : null;
 import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DROP_ALL } from "./room/transport.js";
 import { peerErrorText, peerErrorLoud, FetchError, joinStep, versionMismatch } from "./room/errors.js";
-import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
+import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "./room/conversation.js";
 import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
 import { planSplit, planForSpeed, phonesToLeaveOut, isPhoneMeta, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
@@ -975,7 +976,8 @@ async function start(create, resume = null) {
       wire(conn);
       // the host says it answers API clients (docs/protocol.md "API clients"); not part of myMeta,
       // which the roster shows everyone
-      conn.send({ t: "hello", name: myName, meta: isHost ? { ...myMeta, api: 1 } : myMeta, v: PROTOCOL });
+      // api: 2 = it also answers v2 asks (tools, structured output); ctx: its context size now
+      conn.send({ t: "hello", name: myName, meta: isHost ? { ...myMeta, api: 2, ctx: ctxMax() } : myMeta, v: PROTOCOL });
     });
   });
 
@@ -1462,7 +1464,10 @@ let ai = {
   settings: { persona: "default", sampling: "creative", thinking: false, length: "normal", apiAllow: true },
   apis: new Map(),       // host: API clients (`pooled serve`): peer id -> { name, client, answered }
   apiKicked: new Set(),  // host: API clients disconnected this session (a reconnect is refused)
-  apiCache: new AnswerCache(8),   // host: text -> sampled ids of recent API answers (room/api.js)
+  apiCache: new AnswerCache(8),   // host: text -> sampled ids of recent API answers (room/api.js), v1 asks
+  apiTurns: new TurnCache(),      // host: (history, answer) -> sampled ids of recent API answers, v2 asks
+  apiEnc: new EncodeCache(),      // host: text -> ids, for rendering v2 asks (clients resend their whole history)
+  apiProf: null,                  // host: the loaded model's template profile (room/conversation.js), for v2 asks
   apiRun: null,          // host: the API request being answered { rid, from, ac }
   transcript: [],        // host: [{ name, text, reply, stats }] for devices that join later
   teleBy: new Map(),     // host: worker id -> compute ms per frame kind, from ai-tele
@@ -1809,7 +1814,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   const streamOpts = { pace: isPhone ? 300 : 0, staging: isPhone ? 2 * 2 ** 20 : 8 * 2 ** 20 };
   if (M.cfg) {
     ai.cfg = await (await fetch(M.cfg)).json();
-    if (hasEmbed || hasHead) ai.tok = makeTokenizer(await (await fetch(M.tok)).json());
+    if (hasEmbed || hasHead) { ai.tok = makeTokenizer(await (await fetch(M.tok)).json()); apiModelLoaded(); }
   }
 
   const onProg = (done, total) => {
@@ -1863,6 +1868,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       // the model's own chat template: Code mode picks the tool-call format from it (Qwen 3.5+ use
       // XML <function=...> calls, with the full call grammar); without it every model got JSON
       ai.tok.chatTemplate = G.meta["tokenizer.chat_template"] || "";
+      apiModelLoaded();
     }
     // the host also loads the model's multi-token-prediction block: it drafts
     // tokens that the trunk then verifies in one batched pass (same output, faster)
@@ -2180,7 +2186,7 @@ function aiPeerLeft(id, name) {
 // a newcomer while the room is online gets the chat as a guest, and the conversation so far
 function aiWelcome(id) {
   if (ai.role !== "host" || !ai.engine || ai.readyPeers.size < ai.chain.length || ai.chain.includes(id)) return;
-  sendTo(id, { t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label });
+  sendTo(id, { t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax() });
   if (ai.visibility === "all" && ai.transcript.length) sendTo(id, { t: "ai-history", items: ai.transcript.slice(-20) });
   offerRedealForNewcomers();
 }
@@ -2225,7 +2231,7 @@ function aiMaybeReady() {
   emptyText("The model is ready. Ask anything.");
   sysNote(`Model ready on ${n} device${n > 1 ? "s" : ""}`);
   if (!matchMedia("(pointer: coarse)").matches) $("ai-prompt").focus();   // touch: the keyboard opens when the user taps the prompt
-  broadcastAll({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label });
+  broadcastAll({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax() });
   pushMap(0, null, false, true);
   offerRedealForNewcomers();
   setTimeout(nextQueued, 0);
@@ -2843,7 +2849,11 @@ const MAXNEW_PARAM = Math.max(0, parseInt(new URLSearchParams(location.search).g
 // pin: the length of the prompt's fixed start (Code mode: the system prompt + tools). When the
 // caches do not hold it yet, the prefill pauses there and saves a pinned checkpoint on every
 // device, so a later prompt that changes after it (a compacted agent conversation) resumes there.
-async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(ai.settings.sampling), signal, onStatus = () => {}, pin = 0 } = {}) {
+// pinTag: whose fixed start it is (API asks: a hash of it; Code mode: none). A pinned checkpoint
+// another tag used in the last PIN_KEEP_MS is not replaced (two agents in one room would otherwise
+// keep evicting each other's system prompt): the new request just runs without pinning.
+const PIN_KEEP_MS = 600000;
+async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(ai.settings.sampling), signal, onStatus = () => {}, pin = 0, pinTag = "" } = {}) {
   if (!ai.engine) throw new Error("the model is not loaded");
   // a device in the chain is gone: its frames would go nowhere and wait out the lap timeouts
   if (ai.degraded) throw new Error("a device left: re-deal the layers first");
@@ -2879,6 +2889,10 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
     // positions, so the answer is the same; the head's logits after the first part are unused)
     // Stopped during the first part: nothing more is sent, and the end-of-answer save below keeps
     // what the caches hold, as for any stop during a prefill.
+    const pinned = ai.ckpt?.pinned?.()[0];
+    const tag = pinTag || "code";
+    if (pinned && ai.pinInfo && reused >= pinned.ids.length && pinned.ids.length <= ids.length && pinned.ids.every((t, i) => t === ids[i])) ai.pinInfo.hitAt = performance.now();
+    if (pin && pinned && ai.pinInfo && ai.pinInfo.tag !== tag && performance.now() - ai.pinInfo.hitAt < PIN_KEEP_MS) pin = 0;
     const cut = CKPT_MAX && ai.engine.saveSlot ? pinSplit(reused, pin, ids.length) : 0;
     let logits = null;
     if (!cut) logits = rest.length ? await aiPrefill(rest, { aborted, onStatus, desc }) : null;
@@ -2886,7 +2900,7 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
       const part = await aiPrefill(ids.slice(reused, cut), { aborted, onStatus, desc });
       // the whole fixed start is in the caches (also when Stop came during its last lap): pin it,
       // or the next request, which reuses it from the plain end save, would never pin it
-      if (ai.fed?.length === cut) ckptSave(true);
+      if (ai.fed?.length === cut) { ckptSave(true); ai.pinInfo = { tag, hitAt: performance.now() }; }
       if (part && !aborted()) logits = await aiPrefill(ids.slice(cut), { aborted, onStatus, desc });
     }
     tPre = performance.now() - t0Pre;
@@ -3928,7 +3942,7 @@ function apiAsk(from, d) {
   const busy = (why, code, extra = {}) => sendTo(from, { t: "ai-busy", why, rid, code, ...extra });
   if (!ai.apis.has(from)) return busy("this device did not join as an API client", "bad");
   if (!ai.settings.apiAllow) return busy("the host does not allow API clients in this room", "off");
-  const v = validateApiAsk(d);
+  const v = validateApiAsk(d, { profile: d.api === 2 && ai.tok ? apiProfile() : null });
   if (v.err) return busy(v.err, v.code);
   // the program behind the bridge (its User-Agent, read by cli/lib/http.js: Continue, OpenAI/Python...), for the Serve API panel
   const tool = v.req.params.client !== "API" ? v.req.params.client : null, known = ai.apis.get(from);
@@ -3962,8 +3976,9 @@ async function apiGenerate({ api: req, name, from }) {
   if (!conns.has(from) || !ai.apis.has(from)) { setTimeout(nextQueued, 0); return; }   // left while it waited
   if (ai.busy || !ai.engine) { (ai.queue ||= []).unshift({ api: req, name, from }); return; }
   if (ai.degraded) { sendTo(from, { t: "ai-busy", rid, code: "degraded", why: "a device left the room; the host has to re-deal the layers first" }); return; }
+  const v2 = req.api === 2;
   let prompt;
-  try { prompt = apiPrompt(ai.tok, req, ctxMax(), ai.apiCache); }
+  try { prompt = v2 ? apiPrompt2(ai.tok, req, ctxMax(), { profile: apiProfile(), cache: ai.apiTurns, encoder: ai.apiEnc, model: ai.model || "" }) : apiPrompt(ai.tok, req, ctxMax(), ai.apiCache); }
   catch (err) { prompt = { err: err.message, code: "bad" }; }
   if (prompt.err) { sendTo(from, { t: "ai-busy", rid, code: prompt.code, why: prompt.err, n: prompt.n, max: prompt.max }); setTimeout(nextQueued, 0); return; }
   const client = req.params.client;
@@ -3983,26 +3998,40 @@ async function apiGenerate({ api: req, name, from }) {
     if (msg.t !== "ai-token") for (const id of hidden) if (id !== from) sendTo(id, { t: msg.t, name: msg.name, stats: msg.stats, asker: msg.asker, ctx: msg.ctx, api: 1, hidden: true });
   };
   const label = `${name} · ${client} (API)`;
-  const last = req.messages[req.messages.length - 1].text;
+  // the question the screens show: the last real user message (not tool results)
+  const q = v2 ? [...req.messages].reverse().find((m) => m.role === "user" && !m.aside) : null;
+  const last = v2 ? (q ? q.text : "(tool results)") : req.messages[req.messages.length - 1].text;
   const shown = last.length > API_LIMITS.shown ? last.slice(0, API_LIMITS.shown) + "…" : last;
   chatUser(label, shown);
   const mid = ai.msgSeq = (ai.msgSeq || 0) + 1;
   chatBotStart(mid);
   toScreens({ t: "ai-genstart", name: label, text: shown, asker: from, cont: 0, mid, api: 1 });
-  sendTo(from, { t: "ai-genstart", rid, api: 1, client, promptTokens: prompt.ids.length, model: ai.model, name: label, asker: from, mid });
+  sendTo(from, { t: "ai-genstart", rid, api: v2 ? 2 : 1, client, promptTokens: prompt.ids.length, model: ai.model, name: label, asker: from, mid, ...(v2 ? { style: prompt.profile.style } : {}) });
   let raw = "";
-  const res = await apiRun({
-    tok: ai.tok, req, prompt, cache: ai.apiCache, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
-    generate: (ids, o) => roomGenerate(ids, { ...o, maxNew: MAXNEW_PARAM ? Math.min(MAXNEW_PARAM, o.maxNew) : o.maxNew, onStatus: aiStatus }),
-    send: (msg) => sendTo(from, msg),
-    onPiece: (piece, d) => { raw += piece; chatBotPiece(piece, d); toScreens({ t: "ai-token", text: piece, d: d || 0 }); },
-  });
+  const screen = (piece, d) => { raw += piece; chatBotPiece(piece, d); toScreens({ t: "ai-token", text: piece, d: d || 0 }); };
+  const gen = (ids, o) => roomGenerate(ids, { ...o, maxNew: MAXNEW_PARAM ? Math.min(MAXNEW_PARAM, o.maxNew) : o.maxNew, onStatus: aiStatus });
+  const res = v2
+    ? await apiRun2({
+      tok: ai.tok, req, prompt, cache: ai.apiTurns, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
+      tt: apiTokenTexts(), log: (m) => log("api", m),
+      // the system prompt + tools, when long, is kept as the room's pinned checkpoint (tagged, so two
+      // clients with different tools do not keep replacing each other's)
+      generate: (ids, o) => gen(ids, { ...o, ...(prompt.systemLen >= 2048 ? { pin: prompt.systemLen, pinTag: pinTagOf(ids, prompt.systemLen) } : {}) }),
+      send: (msg) => { sendTo(from, msg); apiScreenMsg(msg, screen); },
+    })
+    : await apiRun({
+      tok: ai.tok, req, prompt, cache: ai.apiCache, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
+      generate: gen,
+      send: (msg) => sendTo(from, msg),
+      onPiece: screen,
+    });
   if (res.err) aiStatus("generation failed: " + res.err);
   const stats = (res.err ? "failed: " + res.err : res.stats) + " · via API · not part of this chat's memory";
   const ctx = { used: ai.fed ? ai.pos : 0, max: ctxMax() };
   chatBotEnd(res.err && !raw ? "⚠ " + res.err : null, stats);
   toScreens({ t: "ai-gendone", stats, ctx, failed: res.err ? 1 : 0, capped: 0, api: 1 });
-  sendTo(from, { t: "ai-gendone", rid, api: 1, reason: res.reason, stopSeq: res.stopSeq || undefined, usage: res.usage, reused: res.reused, stats, ctx, failed: res.err ? 1 : 0, err: res.err || undefined });
+  sendTo(from, { t: "ai-gendone", rid, api: v2 ? 2 : 1, reason: res.reason, stopSeq: res.stopSeq || undefined, usage: res.usage, reused: res.reused, stats, ctx, failed: res.err ? 1 : 0, err: res.err || undefined,
+    ...(v2 ? { calls: res.calls, ...(res.open ? { open: res.open } : {}) } : {}) });
   ai.transcript.push({ name: label, text: shown, reply: raw, stats, mid, api: 1 });
   if (ai.transcript.length > 50) ai.transcript.shift();
   const c = ai.apis.get(from); if (c) c.answered++;
@@ -4015,6 +4044,42 @@ async function apiGenerate({ api: req, name, from }) {
   setBusyUI(false);
   setTimeout(nextQueued, 0);
   if (ai.degraded) showRedeal(true);
+}
+
+// v2 asks: the loaded model's template profile (tool format, thinking rules), computed once per model
+function apiProfile() {
+  if (!ai.apiProf) {
+    ai.apiProf = templateProfile(roomApi.chatTemplate(), ai.tok);
+    if (!ai.apiProf.known) log("api", "this model's chat template keeps reasoning in an unrecognized way: past reasoning follows the last user query");
+  }
+  return ai.apiProf;
+}
+let apiTT = null, apiTTFor = null;
+function apiTokenTexts() { if (apiTTFor !== ai.tok) { apiTT = tokenTexts(ai.tok); apiTTFor = ai.tok; } return apiTT; }
+// a model was loaded: every cached id and the profile belong to the old one
+function apiModelLoaded() {
+  ai.apiCache = new AnswerCache(8);
+  ai.apiTurns.clear();
+  ai.apiEnc.clear();
+  ai.apiProf = null;
+}
+function pinTagOf(ids, n) { let h = 0; for (let i = 0; i < n; i++) h = (Math.imul(h, 31) + ids[i]) | 0; return n + ":" + (h >>> 0).toString(36); }
+// what a v2 answer looks like on the room's screens: reasoning in a think block (as the chat renders
+// raw answers), content as it is, a tool call as one compact line "→ name(args…)" (200 characters at most)
+function apiScreenMsg(msg, screen) {
+  const st = apiScreenMsg.st && apiScreenMsg.st.rid === msg.rid ? apiScreenMsg.st : (apiScreenMsg.st = { rid: msg.rid, think: false, n: 0 });
+  if (msg.t === "ai-token") {
+    if (msg.th) { if (!st.think) { st.think = true; screen("<think>\n", 0); } screen(msg.text, msg.d); return; }
+    if (st.think) { st.think = false; screen("\n</think>\n\n", 0); }
+    screen(msg.text, msg.d);
+  } else if (msg.t === "ai-call") {
+    if (st.think) { st.think = false; screen("\n</think>\n\n", 0); }
+    if (msg.name != null) { st.n = 0; screen(`\n→ ${msg.name}(`, 0); }
+    else if (msg.a != null) {
+      const room = 200 - st.n;
+      if (room > 0) { const a = msg.a.slice(0, room); st.n += a.length; screen(a + (msg.a.length > room ? "…" : ""), 0); }
+    } else if (msg.end) screen(")\n", 0);
+  }
 }
 
 // Serve API (the header's black button, the dark page's API half): the command that serves this room on

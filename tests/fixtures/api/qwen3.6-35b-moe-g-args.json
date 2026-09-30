@@ -1,0 +1,554 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs --grammar: the host's v2 pipeline (grammar, parser, ai-call) over greedy llama.cpp top-64 candidates.",
+ "model": "qwen3.6-35b-moe",
+ "case": "args",
+ "grammar": true,
+ "profile": {
+  "style": "xml",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": true,
+  "thinkRule": "afterQuery",
+  "trim": true,
+  "known": true
+ },
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "Search the web for \"rust async runtimes\": at most 3 results, tags web and news, exact match, only site docs.rs from year 2024."
+   }
+  ]
+ },
+ "params": {
+  "thinking": false
+ },
+ "maxTokens": 240,
+ "promptTokens": 529,
+ "ids": [
+  248058,
+  198,
+  27,
+  1628,
+  93260,
+  29,
+  198,
+  27,
+  15704,
+  76478,
+  29,
+  198,
+  34602,
+  3203,
+  1542,
+  14695,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  9226,
+  29,
+  198,
+  18,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  13679,
+  29,
+  198,
+  1143,
+  2817,
+  487,
+  328,
+  9689,
+  1293,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  44839,
+  29,
+  198,
+  1802,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  17572,
+  8349,
+  29,
+  198,
+  4754,
+  9233,
+  763,
+  328,
+  13715,
+  24822,
+  487,
+  328,
+  3056,
+  763,
+  220,
+  17,
+  15,
+  17,
+  19,
+  92,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  510,
+  1628,
+  29,
+  198,
+  248059
+ ],
+ "texts": [
+  "<tool_call>",
+  "\n",
+  "<",
+  "function",
+  "=search",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=query",
+  ">",
+  "\n",
+  "rust",
+  " async",
+  " run",
+  "times",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "limit",
+  ">",
+  "\n",
+  "3",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "tags",
+  ">",
+  "\n",
+  "[\"",
+  "web",
+  "\",",
+  " \"",
+  "news",
+  "\"]",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "exact",
+  ">",
+  "\n",
+  "true",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=f",
+  "ilters",
+  ">",
+  "\n",
+  "{\"",
+  "site",
+  "\":",
+  " \"",
+  "docs",
+  ".rs",
+  "\",",
+  " \"",
+  "year",
+  "\":",
+  " ",
+  "2",
+  "0",
+  "2",
+  "4",
+  "}",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "</",
+  "function",
+  ">",
+  "\n",
+  "</tool_call>"
+ ],
+ "text": "<tool_call>\n<function=search>\n<parameter=query>\nrust async runtimes\n</parameter>\n<parameter=limit>\n3\n</parameter>\n<parameter=tags>\n[\"web\", \"news\"]\n</parameter>\n<parameter=exact>\ntrue\n</parameter>\n<parameter=filters>\n{\"site\": \"docs.rs\", \"year\": 2024}\n</parameter>\n</function>\n</tool_call>",
+ "fellBack": 0,
+ "sent": [
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "name": "search"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "{\"query\": "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "rust"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " async"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " run"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "times"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": ", \"limit\": "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "3"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": ", \"tags\": "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "[\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "web"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\","
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " \""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "news"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\"]"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": ", \"exact\": "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "true"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": ", \"filters\": "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "{\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "site"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\":"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " \""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "docs"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": ".rs"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\","
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " \""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "year"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\":"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "2"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "0"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "2"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "4"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "}"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "}"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "end": 1
+  }
+ ],
+ "result": {
+  "reason": "stop",
+  "calls": [
+   {
+    "name": "search",
+    "args": "{\"query\": \"rust async runtimes\", \"limit\": 3, \"tags\": [\"web\", \"news\"], \"exact\": true, \"filters\": {\"site\": \"docs.rs\", \"year\": 2024}}"
+   }
+  ],
+  "open": null,
+  "text": "",
+  "think": "",
+  "usage": {
+   "in": 529,
+   "out": 94,
+   "think": 0
+  },
+  "err": null
+ }
+}

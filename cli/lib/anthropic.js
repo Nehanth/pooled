@@ -1,6 +1,6 @@
 // The Anthropic Messages API: request validation and mapping onto the internal request, response
 // bodies, stream events and errors (docs/design/serve.md section 4).
-import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages } from "./common.js";
+import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages, withDefaults, ids } from "./common.js";
 
 const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, method: 405, toolarge: 413, busy: 529, unavailable: 529, timeout: 504, server: 500 };
 const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "authentication_error", forbidden: "permission_error", notfound: "not_found_error", method: "invalid_request_error", toolarge: "request_too_large", busy: "overloaded_error", unavailable: "overloaded_error", timeout: "timeout_error", server: "api_error" };
@@ -116,3 +116,29 @@ export function anthropicModels(model, label, createdMs) {
   const data = model ? [{ type: "model", id: model, display_name: label, created_at: new Date(createdMs).toISOString() }] : [];
   return { data, has_more: false, first_id: data[0]?.id ?? null, last_id: data[0]?.id ?? null };
 }
+
+// ---- the adapter (docs/design/serve.md 11): today's behavior on the shared pipeline. Tools,
+// thinking signatures and the rest of section 8 come with the endpoint's own change.
+class AnthropicEncoder {
+  constructor(req, sse, meta) { this.sse = sse; this.s = new AnthropicStream({ id: meta.id, model: meta.model, thinking: req.thinking }); }
+  start(promptTokens) { this.sse.write(this.s.start(promptTokens)); }
+  think(t) { this.sse.write(this.s.token(t, true)); }
+  text(t) { this.sse.write(this.s.token(t, false)); }
+  callStart() {}
+  callArgs() {}
+  callEnd() {}
+  done(a) { this.sse.write(this.s.done({ reason: a.reason, stopSeq: a.stopSeq, usage: a.usage, reused: a.reused })); }
+  error(e) { this.sse.write(this.s.error(e)); }
+  keepAlive() { this.sse.write(this.s.keepAlive()); }
+}
+export const adapter = {
+  api: "anthropic",
+  label: "messages",
+  routes: [{ method: "POST", path: "/v1/messages" }],
+  parse: (body) => withDefaults(parseAnthropic(body)),
+  idFor: () => () => ids.toolu(),
+  encoder: (req, sse, meta) => new AnthropicEncoder(req, sse, meta),
+  final: (a, req) => anthropicResponse({ id: a.id, model: a.model, text: a.text, think: a.think, thinking: req.thinking, reason: a.reason, stopSeq: a.stopSeq, usage: a.usage, reused: a.reused }),
+  error: anthropicError,
+  streamError: (e) => ev("error", anthropicError(e).body),
+};

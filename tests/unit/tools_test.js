@@ -107,3 +107,108 @@ Deno.test("JSON calls from small models: extra/missing braces, a stray { before 
   P.feed('<tool_call>\n{"name": "list_dir", "arguments": {"path": "."}}}');
   eq(P.end().calls, [{ name: "list_dir", arguments: { path: "." } }]);
 });
+
+// ---- the API path (docs/design/serve.md): exact template text, coercion, the streaming parser ----
+import { pyJSON, toolsSystemPromptExact, callBodyText, callSeparator, coerce, CallStream } from "../../harness/tools.js";
+
+Deno.test("pyJSON writes what the templates' tojson writes (Python separators, key order, non-ASCII as is)", () => {
+  eq(pyJSON({ b: 1, a: [true, null, "x, y: z"], "ü": { e: 1.5, s: "a\"b\n" } }), '{"b": 1, "a": [true, null, "x, y: z"], "ü": {"e": 1.5, "s": "a\\"b\\n"}}');
+  eq(pyJSON([]), "[]"); eq(pyJSON({}), "{}"); eq(pyJSON("é"), '"é"'); eq(pyJSON({ u: undefined, n: NaN }), '{"n": null}');
+});
+Deno.test("toolsSystemPromptExact: the Qwen3 and Qwen3.5+ tool blocks (byte-exact tests: api_host_test renderApi)", () => {
+  const j = toolsSystemPromptExact(TOOLS, { style: "json", system: "S" });
+  ok(j.startsWith("S\n\n# Tools\n\nYou may call one or more functions") && j.includes('\n{"type": "function", "function": {"name": "read_file", "description": "Read a file", "parameters": {"type": "object"'), j.slice(0, 200));
+  ok(j.endsWith('<tool_call>\n{"name": <function-name>, "arguments": <args-json-object>}\n</tool_call>'));
+  const x = toolsSystemPromptExact(TOOLS, { style: "xml", system: "S", prefix: "Reasoning effort is set to low." });
+  ok(x.startsWith("Reasoning effort is set to low.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{") && x.endsWith("</IMPORTANT>\n\nS"));
+  eq(toolsSystemPromptExact([], { system: "S", prefix: "P" }), "P\n\nS");
+});
+Deno.test("callBodyText / callSeparator: past calls as the templates render them", () => {
+  eq(callBodyText({ name: "f", arguments: { a: "x y", n: 2, o: { k: [1] } } }, "json"), '\n{"name": "f", "arguments": {"a": "x y", "n": 2, "o": {"k": [1]}}}\n');
+  eq(callBodyText({ name: "f", arguments: { a: "x\ny", n: 2, o: { k: [1] }, e: "high" } }, "xml"),
+    "\n<function=f>\n<parameter=a>\nx\ny\n</parameter>\n<parameter=n>\n2\n</parameter>\n<parameter=o>\n{\"k\": [1]}\n</parameter>\n<parameter=e>\nhigh\n</parameter>\n</function>\n");
+  eq([callSeparator(0, "", "json"), callSeparator(0, "hi", "json"), callSeparator(1, "", "json")], ["", "\n", "\n"]);
+  eq([callSeparator(0, "  ", "xml"), callSeparator(0, "hi", "xml"), callSeparator(1, "hi", "xml")], ["", "\n\n", "\n"]);
+});
+Deno.test("coerce: vLLM's order (null, integer, number, boolean, object, array, string), type lists and anyOf", () => {
+  eq(coerce("5", { type: "integer" }), 5);
+  eq(coerce("5.5", { type: "number" }), 5.5);
+  eq(coerce("5.5", { type: "integer" }), "5.5", "not an integer: the text");
+  eq(coerce("True", { type: "boolean" }), true);
+  eq(coerce("null", { type: ["string", "null"] }), null);
+  eq(coerce("nullish", { type: ["string", "null"] }), "nullish");
+  eq(coerce("12", { anyOf: [{ type: "string" }, { type: "integer" }] }), 12, "integer before string");
+  eq(coerce('{"a": 1}', { type: "object" }), { a: 1 });
+  eq(coerce("[1, 2]", { type: ["array", "string"] }), [1, 2]);
+  eq(coerce("[1, 2", { type: ["array", "string"] }), "[1, 2");
+  eq(coerce("high", { enum: ["high", "low"] }), "high");
+  eq(coerce("42", undefined), 42, "no schema: a JSON value when it is one");
+  eq(coerce("hello", undefined), "hello");
+  eq(coerce("7", { $ref: "#/$defs/N" }, { $defs: { N: { type: "integer" } } }), 7, "refs resolve against the tool's schema");
+});
+
+// the CallStream contract, at every split point of the text
+const SCHEMA_TOOLS = [
+  { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" }, unit: { type: "string", enum: ["c", "f"] }, days: { type: "integer" }, opts: { type: "object" }, tags: { type: "array" }, maybe: { type: ["string", "null"] } }, required: ["city"] } },
+  { name: "noop", parameters: { type: "object", properties: {} } },
+];
+export function streamAll(text, style, { step = 0, tools = SCHEMA_TOOLS, allowed = null, constrained = true } = {}) {
+  const S = new CallStream({ style, tools, allowed, constrained });
+  const ev = [];
+  if (step <= 0) ev.push(...S.push(text));
+  else for (let i = 0; i < text.length; i += step) ev.push(...S.push(text.slice(i, i + step)));
+  ev.push(...S.end());
+  const frags = [];
+  for (const e of ev) if (e.t === "args") frags[e.i] = (frags[e.i] || "") + e.a;
+  for (const e of ev) if (e.t === "end") { if ((frags[e.i] || "") !== e.args) throw new Error(`fragments ${frags[e.i]} != args ${e.args}`); if (e.mismatch) throw new Error("mismatch on " + text); }
+  const names = ev.filter((e) => e.t === "call").map((e) => e.name);
+  return { text: ev.filter((e) => e.t === "text").map((e) => e.text).join(""), calls: S.calls, open: S.open, names, ev };
+}
+function everySplit(text, style, want, opts = {}) {
+  for (let step = 1; step <= Math.min(text.length, 40); step++) {
+    const r = streamAll(text, style, { ...opts, step });
+    eq({ text: r.text, calls: r.calls.map((c) => ({ name: c.name, args: JSON.parse(c.args) })), open: r.open && r.open.name }, want, `step ${step}`);
+    ok(!/<tool_c|<too$|<functio$/.test(r.text) || want.text.includes("<tool"), "no half tag leaked: " + r.text);
+  }
+}
+Deno.test("CallStream (xml): content, calls and typed values; string-capable values raw, enums unquoted; fragments = final args", () => {
+  const text = "Let me check.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis \"FR\"\nline 2\n</parameter>\n<parameter=unit>\nc\n</parameter>\n<parameter=days>\n3\n</parameter>\n"
+    + "<parameter=opts>\n{\"a\": [1, 2]}\n</parameter>\n<parameter=tags>\n[\"x\"]\n</parameter>\n<parameter=maybe>\nnull\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=noop>\n</function>\n</tool_call>";
+  everySplit(text, "xml", { text: "Let me check.", calls: [{ name: "get_weather", args: { city: "Paris \"FR\"\nline 2", unit: "c", days: 3, opts: { a: [1, 2] }, tags: ["x"], maybe: null } }, { name: "noop", args: {} }], open: null });
+  const r = streamAll(text, "xml");
+  eq(r.calls[0].args.slice(0, 44), '{"city": "Paris \\"FR\\"\\nline 2", "unit": "c"', "raw strings become JSON strings, as written");
+  const i = r.ev.findIndex((e) => e.t === "args" && e.a.includes("Paris"));
+  ok(i > 0 && i < r.ev.findIndex((e) => e.t === "args" && e.a.includes("unit")), "the string value streams before the call ends");
+});
+Deno.test("CallStream (json): the arguments object streams as written; the name once complete", () => {
+  const text = "Sure\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Tokyo \\\"x\\\" }\", \"days\": 2}}\n</tool_call>\n<tool_call>\n{\"name\": \"noop\", \"arguments\": {}}\n</tool_call>";
+  everySplit(text, "json", { text: "Sure", calls: [{ name: "get_weather", args: { city: "Tokyo \"x\" }", days: 2 } }, { name: "noop", args: {} }], open: null });
+  eq(streamAll(text, "json").calls[0].args, '{"city": "Tokyo \\"x\\" }", "days": 2}');
+});
+Deno.test("CallStream: plain text passes; a partial tag at the end is text; whitespace around calls is dropped", () => {
+  everySplit("Just an answer: a < b, <b>bold</b> and <tool nothing.\n", "xml", { text: "Just an answer: a < b, <b>bold</b> and <tool nothing.\n", calls: [], open: null });
+  everySplit("x <tool_c", "json", { text: "x <tool_c", calls: [], open: null });
+  everySplit("\n\n<tool_call>\n<function=noop>\n</function>\n</tool_call>\n\n", "xml", { text: "", calls: [{ name: "noop", args: {} }], open: null });
+});
+Deno.test("CallStream: an answer cut inside a call leaves it open; before its name nothing of it shows", () => {
+  everySplit("ok\n<tool_call>\n<function=get_weather>\n<parameter=city>\nPar", "xml", { text: "ok", calls: [], open: "get_weather" });
+  everySplit("ok\n<tool_call>\n<function=get_wea", "xml", { text: "ok", calls: [], open: null });
+  everySplit('<tool_call>\n{"name": "get_weather", "arguments": {"city": "P', "json", { text: "", calls: [], open: "get_weather" });
+});
+Deno.test("CallStream: the lazy bare trigger (xml), only at a line start and only for a declared name", () => {
+  everySplit("ok\n<function=noop>\n</function>\n</tool_call>", "xml", { text: "ok", calls: [{ name: "noop", args: {} }], open: null });
+  everySplit("see <function=noop> in docs", "xml", { text: "see <function=noop> in docs", calls: [], open: null });
+  everySplit("a\n<function=other>\nx", "xml", { text: "a\n<function=other>\nx", calls: [], open: null });
+});
+Deno.test("CallStream without the grammar: near misses are parsed whole; undeclared or broken calls stay content", () => {
+  everySplit("<tool_call>\n```json\n{\"name\": \"noop\", \"arguments\": {}}\n```\n</tool_call>", "json", { text: "", calls: [{ name: "noop", args: {} }], open: null }, { constrained: false });
+  everySplit("<tool_call>\n<function name=\"noop\">\n</function>\n</tool_call>", "xml", { text: "", calls: [{ name: "noop", args: {} }], open: null }, { constrained: false });
+  everySplit("text <tool_call>\n<function=nope>\n</function>\n</tool_call> after", "xml", { text: "text <tool_call>\n<function=nope>\n</function>\n</tool_call> after", calls: [], open: null }, { constrained: false });
+  everySplit("<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"A\"}}\n</tool_call>", "json", { text: "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"A\"}}\n</tool_call>", calls: [], open: null }, { allowed: ["noop"] });
+});
+Deno.test("CallStream: a value containing \"\\n</parameter>\" ends there (known limit: no lookahead)", () => {
+  const S = new CallStream({ style: "xml", tools: SCHEMA_TOOLS, constrained: false });
+  const ev = [...S.push("<tool_call>\n<function=get_weather>\n<parameter=city>\nA\n</parameter>\nB\n</parameter>\n</function>\n</tool_call>"), ...S.end()];
+  eq(JSON.parse(S.calls[0].args).city, "A", "what follows the first closer is lost");
+  ok(ev.find((e) => e.t === "end").mismatch, "and without the grammar the stray text makes the streamed arguments suspect: flagged");
+});

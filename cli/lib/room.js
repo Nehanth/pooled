@@ -148,13 +148,15 @@ export class Bridge extends EventEmitter {
         this.model = cleanText(d.model, 80).replace(/[^\w.:+\-\/]/g, "") || this.model;
         this.modelLabel = cleanText(d.label, 80) || this.modelLabel;
         this.readySince ??= Math.floor(Date.now() / 1000);
+        // a v2 host says its context size (it changes with the model): the early context check uses it
+        if (this.hostMeta && Number.isInteger(d.ctx) && d.ctx > 0) this.hostMeta.ctx = d.ctx;
         this.emit("state");
         return;
       case "ai-degraded": case "ai-redeal":
         this.ready = false;
         this.emit("state");
         return;
-      case "ai-queued": case "ai-genstart": case "ai-token": case "ai-gendone": case "ai-busy": {
+      case "ai-queued": case "ai-genstart": case "ai-token": case "ai-call": case "ai-gendone": case "ai-busy": {
         if (d.rid == null) return;   // the room's chat, not ours
         const h = this.reqs.get(String(d.rid));
         if (!h) return;
@@ -165,7 +167,10 @@ export class Bridge extends EventEmitter {
     }
   }
   send(msg) { try { if (this.conn?.open) { this.conn.send(msg); return true; } } catch {} return false; }
-  // an ask: handler(msg) gets ai-queued / ai-genstart / ai-token / ai-gendone / ai-busy for this rid
+  // what the host answers: 2 = v2 asks too (tools, formats; hello meta.api), 1 = plain ones only
+  get hostApi() { return Math.max(1, Math.floor(+this.hostMeta?.api) || 1); }
+  // an ask: handler(msg) gets ai-queued / ai-genstart / ai-token / ai-call / ai-gendone / ai-busy
+  // for this rid. body: common.askBody(req, v2) (a v2 body carries api: 2; send one only when hostApi >= 2)
   ask(rid, body, handler) {
     this.reqs.set(rid, handler);
     if (!this.send({ t: "ai-ask", api: 1, rid, ...body })) { this.reqs.delete(rid); return false; }

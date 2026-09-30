@@ -1,0 +1,215 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs: greedy, unconstrained llama.cpp output for this request as the room renders it.",
+ "model": "qwen3.5-2b",
+ "case": "write",
+ "profile": {
+  "style": "xml",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": true,
+  "thinkRule": "afterQuery",
+  "trim": true,
+  "known": true
+ },
+ "thinking": false,
+ "maxTokens": 200,
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "Create hello.py that prints \"hi\" and a <b>tag</b> string, using the write_file tool."
+   }
+  ]
+ },
+ "stop": "eos",
+ "promptTokens": 517,
+ "ids": [
+  248058,
+  198,
+  27,
+  1628,
+  28,
+  4775,
+  2378,
+  29,
+  198,
+  27,
+  15704,
+  79114,
+  29,
+  198,
+  14556,
+  6971,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  1733,
+  29,
+  198,
+  1302,
+  437,
+  5834,
+  871,
+  198,
+  1302,
+  9352,
+  65,
+  39632,
+  510,
+  65,
+  79751,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  510,
+  1628,
+  29,
+  198,
+  248059,
+  248046
+ ],
+ "texts": [
+  "<tool_call>",
+  "\n",
+  "<",
+  "function",
+  "=",
+  "write",
+  "_file",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=path",
+  ">",
+  "\n",
+  "hello",
+  ".py",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "content",
+  ">",
+  "\n",
+  "print",
+  "(\"",
+  "hi",
+  "\")",
+  "\n",
+  "print",
+  "(\"<",
+  "b",
+  ">tag",
+  "</",
+  "b",
+  ">\")",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "</",
+  "function",
+  ">",
+  "\n",
+  "</tool_call>",
+  "<|im_end|>"
+ ],
+ "text": "<tool_call>\n<function=write_file>\n<parameter=path>\nhello.py\n</parameter>\n<parameter=content>\nprint(\"hi\")\nprint(\"<b>tag</b>\")\n</parameter>\n</function>\n</tool_call><|im_end|>"
+}
