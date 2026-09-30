@@ -53,7 +53,7 @@ const MAXNEW = +arg("maxnew", URL_MODE ? 900 : 220);   // a real phone needs a l
 const GAP = +arg("gap", 25);                            // seconds between rounds with a real phone
 const PORT = +arg("port", 8133), SIGNAL_PORT = +arg("signal-port", 9013);
 const URL0 = arg("url", null), EXTERNAL = arg("external", null), ROUNDS = +arg("rounds", 2), CODE_OUT = arg("code-out", null);
-const LOCAL = { "Qwen3-0.6B-Q8_0.gguf": "models/qwen/model.gguf", "Qwen3-1.7B-Q8_0.gguf": "models/qwen17/model.gguf" };
+const LOCAL = { "Qwen3-0.6B-Q8_0.gguf": "models/qwen/model.gguf", "Qwen3-1.7B-Q8_0.gguf": "models/qwen17/model.gguf", "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf": "models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf" };
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
 
