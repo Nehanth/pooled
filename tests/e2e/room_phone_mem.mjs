@@ -49,7 +49,7 @@ const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert:
 }).listen(PORT + 1, "127.0.0.1");
 const peerServer = spawn(path.join(HERE, "node_modules/.bin/peerjs"), ["--port", String(SIGNAL_PORT), "--path", "/"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 1500));
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}&maxnew=24&dev=1&split=memory`;
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}&maxnew=24&dev=1&split=memory&phonelayers=1`;   // phonelayers: the phone tab holds layers even when the computers could hold the model (#233)
 
 const ARGS = ["--no-sandbox", "--headless=new", "--enable-unsafe-webgpu", "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan", "--ignore-gpu-blocklist", "--allow-loopback-in-peer-connection", "--js-flags=--max-old-space-size=65536"];
 const UA_DESKTOP = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";

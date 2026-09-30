@@ -62,7 +62,8 @@ const srv = http.createServer((q, r) => {
   if (!p.startsWith(ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { r.statusCode = 404; r.end(); return; }
   r.setHeader("content-type", MIME[path.extname(p)] || "application/octet-stream"); fs.createReadStream(p).pipe(r);
 }).listen(PORT, "127.0.0.1");
-const BASE = URL0 ? URL0 + (URL0.includes("?") ? "&" : "?") + "dev=1" : `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}`;
+// every device holds layers: split by memory, and phones too even when the computers could hold the model (#233)
+const BASE = (URL0 ? URL0 + (URL0.includes("?") ? "&" : "?") + "dev=1" : `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}`) + "&split=memory&phonelayers=1";
 const peerServer = URL0 ? null : spawn(path.join(ROOT, "node_modules/.bin/peerjs"), ["--port", String(SIGNAL_PORT), "--path", "/"], { stdio: "ignore" });
 if (peerServer) await new Promise((r) => setTimeout(r, 1500));
 const tlsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-resume-"));
