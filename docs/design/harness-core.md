@@ -93,9 +93,21 @@ a speculative step that accepted a stop id as a draft wrote tokens after it, and
 would be wrong on a hybrid model (DeltaNet state cannot roll back). The next prompt resumes from the
 pinned slot in that case; the common case (the stop is the step's last, unwritten sample) reuses
 everything.
+Fixed after the eval (review of 7df7c55): on a model with MTP drafts that case was common, because
+`strictSampler` kept masking past the stop: the grammar, still at `</tool_call>`, banned
+`<|im_start|>`, a drafted `<|endoftext|>` got through and was written, and the next prompt
+(`<|im_end|>\n<|im_start|>`) missed the cache: 13 of 24 MoE tasks re-prefilled from the pinned
+system prompt (tetris: 16,138 tokens where 1,211 were needed). Now the columns after a sampled stop
+in one verify take the model's own choice (they are never emitted, only cached), so the cache holds
+the template's `\n<|im_start|>`. On the reviewer's GPU check (MoE, 3 tasks x 2): 8 re-prefills to 0,
+37k prefilled tokens to 7.3k. This also applies to API clients (same sampler).
 
-Not done here: the free-state fast path in `GrammarConstraint.mask` (C1): the eval's decode time
-decides whether it is needed. A unit test with Qwen3.6's real token texts for the garbled opener
+Not done here: the free-state fast path in `GrammarConstraint.mask` (C1). The room page decodes
+2-20% slower on this path (Qwen3 1.7B, worst on long `write_file`s), but the mask is not the cause:
+replaying the eval's longest writes through both samplers with dense Qwen3 vocab-sized logits costs
+about 0.5 ms per token for the strict grammar against 0.4 ms for the lenient one (at ~35 tok/s a
+token takes ~28 ms). The gap is elsewhere (per-token streaming through `apiRun2` / `CallStream` and
+the room messages are the next suspects) and is not isolated yet. A unit test with Qwen3.6's real token texts for the garbled opener
 (C7) needs the tokenizer in the fixtures.
 
 ## 7. The switch and the eval
@@ -105,6 +117,24 @@ both arms on the same commit: `tests/eval/run.mjs --model engine --codemode --hc
 `--dense <dir>` for Qwen3 1.7B or `--weights` for the MoE, `--label`, `--repeat 2`). Default on
 when: 1.7B hcore 1 >= hcore 0; MoE hcore 1 >= hcore 0 - 2 (a second run of each arm when within 3);
 0 GPU errors, no more garbage-marked calls, wall time within +20%.
+
+
+Result (30 Sep, baseline args plus `--hcore`, 2 repeats, 0 GPU errors): **the default stays off.**
+
+| Run | Qwen3 1.7B | Qwen3.6 35B MoE |
+|---|---|---|
+| Baseline, main (29 Sep) | 4/24 | 16/24 |
+| Fresh baseline (b0fde7d) | 4/24 | 19/24 |
+| hcore 0 (7df7c55) | 4/24, 850 s | 18/24, 1069 s, 55k prefilled |
+| hcore 1 (7df7c55, two runs) | 2/24, 1548 s | 19/24 and 18/24, 858-882 s, 55-78k prefilled |
+| hcore 1 with the post-stop fix | 2/24, 1553 s | 19/24, 709 s, 35k prefilled |
+
+The MoE passes the gate. The 1.7B (greedy, so deterministic) loses `css` x2 on hcore 1, and the
+loss follows the tool-prompt wording, not how calls are handled: hcore 1 with Code mode's old
+wording and compact tool JSON scored 4/24 too, but passed stopwatch x2 and failed css. Zero calls
+were written outside the format on either model and path. The template's own wording stays (it is
+what API clients get). Before switching the default on, gate the 1.7B on a sampled preset with
+`--repeat 4`, or treat +-2 as its noise floor for greedy prompt changes.
 
 After hcore has been the default for a while, a follow-up deletes the legacy path:
 `toolsSystemPrompt`, `ToolCallParser` in the Agent, the lenient `ToolCallConstraint` and the legacy
