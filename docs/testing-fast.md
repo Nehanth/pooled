@@ -233,3 +233,23 @@ phone and back plus the phone's own layer, which is the thing to measure next (x
 per-lap split needs the phone page traced, which it is not yet). Spec rounds vary most (21.5 to 35.6)
 because acceptance and the draft length the room picks depend on measured timing. Runs were a few
 minutes each with the phone cool; no throttling was seen at this length, and none was looked for.
+
+## Rooms: a device that drops out (#207)
+
+`tests/e2e/room_resume.mjs` (loopback, Spark: host, desktop worker and a phone-shaped tab in headless Chromium, real WebRTC) interrupts an answer mid-stream and checks it finishes with the uninterrupted text. `lock` hides the tab, closes its signaling socket and pauses its JS in the debugger for 20 s (Chromium ignores a freeze on a visible page); `reload`; `kill` (closed for good: the experimental auto re-deal after 60 s). `--scenarios code --model qwen3-1.7b` does the same to a Code run mid-step (`--code-action lock|reload`).
+
+`tests/e2e/resume_phone.mjs` drives the real iPhone over WebDriver against `room_resume.mjs --url <preview>/room --external iphone`: `background` switches Safari to another tab for 30 s (the closest WebDriver gets to a lock: iOS stops the page's WebRTC), `reload` reloads the room's tab. A real screen lock needs a person.
+
+Results, 2026-09-29 (Qwen3 0.6B split 3 ways; the iPhone 14 Pro Max over the branch preview, host and worker on the Spark):
+
+| Where | Interrupt | Back in | Result |
+|---|---|---|---|
+| loopback | lock 20 s | 26 s | same text, the tab back in its slot with its layers |
+| loopback | reload | 18 s | same text, rejoined under its name, layers reloaded |
+| loopback | kill | 103 s | auto re-deal after 60 s over 2 devices; shown text kept, answer ran to the end |
+| loopback, 1.7B | Code run, lock 20 s | 39 s | run waited, carried on inside its step, wrote index.html + style.css, no stop note |
+| loopback, 1.7B | Code run, reload | 52 s | same |
+| iPhone | Safari in the background 30 s | 67 s | host dropped the silent link after 12 s, the phone reconnected by itself, layers still loaded (no download), same text |
+| iPhone | reload | 53 s | rejoined its slot from sessionStorage with the crumb shown, same text |
+
+Before the `ai-linked` handshake the first batch prefill after a phone came back timed out once (the device before it was still opening its fresh link): the answer recovered twice and took 165 s instead of 67 s.
