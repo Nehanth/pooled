@@ -86,7 +86,7 @@ try {
   A.start();
   const a0 = await until(() => { const s = A.status(); return s?.code ? s : null; }, 120000, "A opening the room");
   out.linkA = a0.link;
-  if (!a0.link.includes(`/r/${cfgA.code}#k=${keyA}`)) throw new Error(`A's link ${a0.link} is not the onboarding one`);
+  if (!a0.link.includes(`/r/${cfgA.code}`) || !a0.link.endsWith(`#k=${keyA}`)) throw new Error(`A's link ${a0.link} is not the onboarding one`);
   // B: joins with the code alone (no link, no key): A's owner is asked
   B.oc(["onboard", "--non-interactive", "--accept-risk", "--auth-choice", "pooled", "--gateway-port", String(B.port), "--skip-channels", "--skip-skills", "--skip-health", "--skip-daemon"],
     { POOLED_MODE: "join", POOLED_CODE: cfgA.code, POOLED_PLEDGE_GB: "3", POOLED_NO_SERVICE: "1" });

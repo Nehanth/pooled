@@ -6,6 +6,8 @@
 import { compileSchema } from "../../../harness/jsonschema.js";
 import { withDefaults, finishRequest, askBody, needsV2, parseArgs, IMAGE_PLACEHOLDER, LIMITS } from "../../../cli/lib/common.js";
 
+// the start of a notice turn (stream.js: the room talking, not the model): dropped on replay
+export const NOTICE = "⚠️ Pooled: ";
 export const MAX_TOKENS = 8192;   // one answer's cap (OpenClaw asks for its model's output limit)
 const partsText = (c) => typeof c === "string" ? c
   : Array.isArray(c) ? c.map((p) => p?.type === "text" ? p.text : p?.type === "image" ? IMAGE_PLACEHOLDER : "").join("") : "";
@@ -31,6 +33,7 @@ export function toRequest(context, options = {}, model = {}, log = () => {}) {
       const reasoning = parts.filter((p) => p.type === "thinking" && !p.redacted).map((p) => p.thinking).join("");
       const calls = parts.filter((p) => p.type === "toolCall").map((p) => ({ id: p.id, name: p.name, args: parseArgs(p.arguments, log) }));
       if (m.stopReason === "error" && !text && !calls.length) continue;   // a failed turn: nothing to replay
+      if (text.startsWith(NOTICE) && !calls.length) continue;   // a notice from the room, not an answer
       messages.push({ role: "assistant", text, ...(calls.length ? { calls } : {}), ...(reasoning ? { reasoning } : {}) });
     } else if (m.role === "toolResult") {
       messages.push({ role: "tool", id: m.toolCallId, text: (m.isError ? "Error: " : "") + partsText(m.content) });

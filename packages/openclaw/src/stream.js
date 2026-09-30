@@ -10,7 +10,7 @@
 import { Ask, Collector } from "../../../cli/lib/answer.js";
 import { ids, outcome, ApiError } from "../../../cli/lib/common.js";
 import { ensureRoom, roomSettings, transport, PooledError } from "./pool.js";
-import { toAsk } from "./convert.js";
+import { toAsk, NOTICE } from "./convert.js";
 import { remember } from "./prewarm.js";
 
 let seq = 0;
@@ -67,6 +67,20 @@ function openclawEncoder(stream, message) {
     },
     done() {}, error() {}, keepAlive() {},
   };
+}
+
+const NOTICE_CODES = new Set(["setup", "noroom", "lobby", "denied", "waiting", "memory", "degraded", "downloading", "install", "start", "off", "queue", "loading"]);
+export const isNotice = (error, message, signal) => !signal?.aborted && error instanceof PooledError && NOTICE_CODES.has(error.code) &&
+  !message.content.some((c) => c.type === "toolCall" || (c.type === "text" && c.text.trim()));
+function noticeTurn(stream, message, text) {
+  const body = NOTICE + text.replace(/^Pooled: /, "");
+  message.content = [{ type: "text", text: body }];
+  message.stopReason = "stop";
+  stream.push({ type: "text_start", contentIndex: 0, partial: message });
+  stream.push({ type: "text_delta", contentIndex: 0, delta: body, partial: message });
+  stream.push({ type: "text_end", contentIndex: 0, content: body, partial: message });
+  stream.push({ type: "done", reason: "stop", message });
+  stream.end(message);
 }
 
 export function createPooledStream({ getPluginConfig, log = () => {}, sdk }) {
@@ -126,6 +140,11 @@ export function createPooledStream({ getPluginConfig, log = () => {}, sdk }) {
       } catch (error) {
         const e = error instanceof PooledError || error instanceof ApiError ? new Error(`Pooled: ${error.message}`) : error;
         log(`request failed: ${e.message}`);
+        // OpenClaw shows a provider's error text to no one ("Agent run failed") and resubmits an
+        // error turn with no output up to 3 times. The room's own conditions (the lobby, waiting
+        // for devices, a download, a refusal) are things the owner acts on: they come back as the
+        // turn's visible text instead, once. convert.js drops them when the history is replayed.
+        if (isNotice(error, message, signal)) { noticeTurn(stream, message, e.message); return; }
         failTransportStream({ stream, output: message, error: e, signal });
       }
     })();

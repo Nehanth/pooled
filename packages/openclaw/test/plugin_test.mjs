@@ -195,6 +195,20 @@ test("stream: an older host gets no tools; the chat says why", async () => {
   assert.equal(room.asks.length, 0);
 });
 
+test("stream: the room's own conditions (queue full, loading, ...) come back as visible text, dropped on replay", async () => {
+  // OpenClaw hides a provider's error text and resubmits an empty error turn 3 times: a notice is a turn
+  const room = scriptedRoom({ script: [[{ t: "ai-busy", code: "queue" }], TEXT_TURN] });
+  const fn = install(room, { mode: "host", code: "TEST", model: "qwen3-1.7b" });
+  const c1 = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+  const r1 = await run(fn, c1);
+  assert.equal(r1.msg.stopReason, "stop");
+  assert.match(r1.msg.content[0].text, /^⚠️ Pooled: Pooled room TEST's queue is full/);
+  assert.deepEqual(r1.types, ["start", "text_start", "text_delta", "text_end", "done"]);
+  const c2 = { messages: [...c1.messages, { role: "assistant", content: r1.msg.content, stopReason: "stop" }, { role: "user", content: "hi again", timestamp: 2 }] };
+  await run(fn, c2);
+  assert.deepEqual(room.asks[1].messages.map((m) => m.role), ["user"]);   // the two user turns merge; the notice is gone
+});
+
 test("busyMessage: every refusal reads as a sentence with the room code", () => {
   const r = { code: "K7QX", link: "https://pooled.run/r/K7QX" };
   for (const code of ["ctx", "loading", "degraded", "off", "queue", "gone", "other"]) assert.match(busyMessage({ code, n: 1, max: 2, err: "x" }, r), /K7QX/);
