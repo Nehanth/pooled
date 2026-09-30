@@ -325,6 +325,16 @@ Deno.test("strict: whitespace in JSON: one space, or a newline and indentation; 
   ok(allows(C, "<|im_end|>") && allows(C, "\n") && !allows(C, "a"), "the value, then the end");
   ok(!allows(at('{"a": [1]', fmt), "<|im_end|>"), "not before it is complete");
 });
+Deno.test("strict: minItems / maxItems bound array lengths", () => {
+  const fmt = (a) => ({ format: { type: "schema", schema: { type: "object", properties: { a: { type: "array", items: { type: "integer" }, ...a } }, required: ["a"] } } });
+  const m = fmt({ minItems: 1, maxItems: 3 });
+  ok(!valid('{"a": []', m), "not fewer than minItems");
+  ok(valid('{"a": [1]}', m) && valid('{"a": [1, 2, 3]}', m), "1 to 3 items");
+  ok(!valid('{"a": [1, 2, 3,', m), "no fourth item");
+  ok(!valid('{"a": [1, 2]', fmt({ minItems: 3 })) && valid('{"a": [1, 2, 3, 4]}', fmt({ minItems: 3 })), "a minimum alone");
+  ok(valid('{"a": []}', fmt({ maxItems: 0 })) && !valid('{"a": [1', fmt({ maxItems: 0 })), "maxItems 0: only []");
+  ok(valid('{"a": [1, 2, 3]}', fmt({ minItems: 5, maxItems: 2 })), "an impossible pair is ignored");
+});
 Deno.test("strict: format only, and format with tools (a call or the value)", () => {
   const f = { format: { type: "json" } };
   const C = at("", f);

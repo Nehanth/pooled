@@ -636,8 +636,9 @@ declared names (narrowed by `allowed`), each parameter once, required ones befor
 typed values (string-capable values raw, string enums unquoted, everything else a JSON value of its
 schema). After the allowed number of calls only the end token is left. The JSON subset: types,
 `properties`, `required`, `additionalProperties`, `items` / `prefixItems`, `enum` / `const`,
-`anyOf` / `oneOf`, `allOf` (objects), `nullable`, local `$ref`; bounds and patterns are accepted,
-not enforced. Whitespace: one space, or a newline and indentation. Schemas are capped (10 k nodes,
+`anyOf` / `oneOf`, `allOf` (objects), `nullable`, local `$ref`, `minItems` / `maxItems` (added in
+the integration: the MoE wrote 4 items for `maxItems: 3`); string and number bounds and patterns
+are accepted, not enforced. Whitespace: one space, or a newline and indentation. Schemas are capped (10 k nodes,
 enum 1 k, anyOf 64, allOf 16, depth 32).
 
 Tags that are special tokens are atomic symbols in the grammar: structure can only be written with

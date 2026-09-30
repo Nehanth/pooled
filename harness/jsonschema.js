@@ -2,11 +2,11 @@
 // arguments and response_format (docs/design/serve.md, "Constraint modes"). DOM-free.
 //
 // The subset: type (one or a list), properties, required, additionalProperties (false or a schema),
-// items, prefixItems, enum, const, anyOf / oneOf (as anyOf), allOf (merged for objects, else the
-// first), nullable, $ref into $defs / definitions (recursive deeper than 6 -> any JSON value).
-// Accepted and not enforced: pattern, format, length and range bounds, multipleOf, uniqueItems,
-// default, description, title, $schema, examples. So types, required keys, enums and structure are
-// guaranteed; string and number bounds are not.
+// items, prefixItems, minItems / maxItems, enum, const, anyOf / oneOf (as anyOf), allOf (merged for
+// objects, else the first), nullable, $ref into $defs / definitions (recursive deeper than 6 -> any
+// JSON value). Accepted and not enforced: pattern, format, string length and number range bounds,
+// multipleOf, uniqueItems, default, description, title, $schema, examples. So types, required keys,
+// enums, array lengths and structure are guaranteed; string and number bounds are not.
 //
 // Rules the automaton applies to objects: declared keys in any order, each at most once, required
 // ones before the object closes; free keys only when there are no declared properties and
@@ -15,7 +15,7 @@
 // Node kinds (compileSchema(...).nodes[id]):
 //   { k: "any" }                                   any JSON value
 //   { k: "obj", props: [[key, id]], req: [index], free: id | null (null = none) }
-//   { k: "arr", items: id, prefix: [id] }
+//   { k: "arr", items: id, prefix: [id], min?, max? }   min / max: minItems / maxItems when given
 //   { k: "str", en: [string] | null }              en: the allowed values (enum / const)
 //   { k: "num" } | { k: "int" } | { k: "bool" } | { k: "null" }
 //   { k: "lit", texts: [jsonText] }                non-string enum / const values, written compactly
@@ -119,7 +119,13 @@ export function compileSchema(schema, { caps = SCHEMA_CAPS, doc = null } = {}) {
       case "array": {
         const prefix = Array.isArray(s.prefixItems) ? s.prefixItems.map((x) => node(x, depth + 1, refs)) : Array.isArray(s.items) ? s.items.map((x) => node(x, depth + 1, refs)) : [];
         const items = s.items && !Array.isArray(s.items) ? node(s.items, depth + 1, refs) : ANY;
-        return add({ k: "arr", items, prefix });
+        const a = { k: "arr", items, prefix };
+        // array lengths (minItems / maxItems); a minimum over maxItems or a bad value is left out
+        const lo = Number.isInteger(s.minItems) && s.minItems > 0 ? s.minItems : 0;
+        const hi = Number.isInteger(s.maxItems) && s.maxItems >= 0 ? s.maxItems : null;
+        if (lo && (hi == null || lo <= hi)) a.min = lo;
+        if (hi != null && hi >= lo) a.max = hi;
+        return add(a);
       }
       case "object": {
         const props = [];

@@ -780,15 +780,16 @@ export class GrammarConstraint {
         if (top.ph === "v0" || top.ph === "v") {
           const g = this._gap(top.w, ch, depth);
           if (g >= 0) return put({ ...top, w: g });
-          if (top.ph === "v0" && ch === "]") return this._jPop(fr);
+          if (top.ph === "v0" && ch === "]") return (nd.min || 0) <= 0 ? this._jPop(fr) : null;
+          if (top.ph === "v0" && nd.max === 0) return null;
           const s = this._jStart(itemNode, ch, depth);
           return s ? { fr: fr.slice(0, -1).concat([{ ...top, ph: "a", w: 0 }], s) } : null;
         }
         // ph "a": after an item
         const g = this._gap(top.w, ch, depth - 1);
         if (g >= 0) return put({ ...top, w: g });
-        if (ch === ",") return put({ ...top, ph: "v", w: 0 });
-        if (ch === "]") return this._jPop(fr);
+        if (ch === ",") return nd.max == null || top.i < nd.max ? put({ ...top, ph: "v", w: 0 }) : null;
+        if (ch === "]") return top.i >= (nd.min || 0) ? this._jPop(fr) : null;
         return null;
       }
     }

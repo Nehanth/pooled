@@ -50,6 +50,13 @@ Deno.test("jsonschema: keywords that are accepted but not enforced change nothin
   const bounded = compileSchema({ $schema: "x", title: "t", description: "d", type: "object", properties: { s: { type: "string", minLength: 2, maxLength: 5, pattern: "^a", format: "email", default: "aa" }, n: { type: "number", minimum: 0, maximum: 9, multipleOf: 3, exclusiveMinimum: 0 } }, examples: [] });
   eq(bounded.nodes, plain.nodes);
 });
+Deno.test("jsonschema: minItems / maxItems go on the array node", () => {
+  const n = (a) => compileSchema({ type: "array", items: { type: "string" }, ...a }).nodes.find((x) => x.k === "arr");
+  eq([n({ minItems: 1, maxItems: 3 }).min, n({ minItems: 1, maxItems: 3 }).max], [1, 3]);
+  eq([n({}).min, n({}).max, n({ minItems: 0 }).min], [undefined, undefined, undefined]);
+  eq([n({ minItems: 4, maxItems: 2 }).min, n({ minItems: 4, maxItems: 2 }).max], [undefined, undefined], "an impossible pair");
+  eq([n({ maxItems: 1.5 }).max, n({ minItems: -1 }).min], [undefined, undefined], "bad values");
+});
 Deno.test("jsonschema: caps (a request's schema must not stall the room)", () => {
   throwsSchema(() => compileSchema({ enum: Array.from({ length: SCHEMA_CAPS.enum + 1 }, (_, i) => "v" + i) }), /enum has more than/, "enum");
   throwsSchema(() => compileSchema({ anyOf: Array.from({ length: SCHEMA_CAPS.anyOf + 1 }, () => ({ type: "string" })) }), /anyOf/, "anyOf");
