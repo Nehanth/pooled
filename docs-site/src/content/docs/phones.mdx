@@ -15,7 +15,7 @@ Sources (for the fact-checker):
 - room/preflight.js: verdict() phone lines (Safari 26 / iOS 26; Android Chrome 121+; secure page)
 - room/compute.js lendNotes() (Auto-Lock, background tab, battery)
 - PR #233 (For speed default, phones only get layers when needed, ?phonelayers=1, keep-alive ?ka=0, GB10+iPhone MoE numbers)
-- PR #258 and #244 (iOS limits: 1536 MB tab, 840 MB networking process; caps; wake lock sun; reconnect; 60 s re-deal; phone GPU wake ?wake=0)
+- PR #258 and #244 (iOS limits: 1536 MB tab, 840 MB networking process; caps; wake lock; reconnect; 60 s re-deal; phone GPU wake ?wake=0)
 - CHANGELOG.md Unreleased, Fixed (#207)
 - docs/bench-log.md "2026-09-28: device matrix" (one phone layer ~ 15-25 GB10 layers)
 */}
@@ -65,7 +65,7 @@ The join screen and the device's status explain the cap when it applies.
 If your phone does hold layers, it has to stay awake and in front.
 
 - **Keep the room's tab in front.** A tab in the background can stall the whole room.
-- **Keep the screen on.** Pooled asks the browser to keep the screen awake while the phone holds layers. A sun icon in the header shows while the phone holds layers: lit when the screen is kept on, a warning when it is not. If it can't, set Auto-Lock to **Never** on an iPhone, or the screen timeout to its longest on Android.
+- **Keep the screen on.** Pooled asks the browser to keep the screen awake while the phone holds layers. If it can't, the device screen says so: set Auto-Lock to **Never** on an iPhone, or the screen timeout to its longest on Android.
 - **Plug it in.** Serving uses the battery fast, and battery saver can pause the tab.
 
 The Serve API page (the black button in the header) shows this device's layers and any of these warnings.

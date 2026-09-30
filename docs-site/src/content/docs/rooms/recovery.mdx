@@ -15,7 +15,7 @@ sidebar:
     reconnect, links silent 8 s later dropped; RELINK_WAIT_MS 45000; ~L2715-2737 degraded text, auto re-deal after 60 s idle;
     ~L4017 resume offer 15 min; wake lock ~L1406), p2p.html "Re-deal on its own" text, #ai-redeal "Re-deal the layers".
     docs/protocol.md (Dead links, Drop detection, Resuming a room: waits up to 25 s, knocks every 3 s for a minute;
-    A device that drops out), PR #259 (chaos table: notice at 3.6-5 s), PR #258 (iPhone 30 s background, reload results; wake lock sun),
+    A device that drops out), PR #259 (chaos table: notice at 3.6-5 s), PR #258 (iPhone 30 s background, reload results; wake lock),
     PR #242 + CHANGELOG (checkpoints on disk, 4 GiB budget, ?ckptdisk=0), room/compute.js lendStatus ("Host reconnecting"). */}
 
 import { Steps } from '@astrojs/starlight/components';
@@ -57,7 +57,7 @@ If a network stays silent for about 15 s, the browser can give up on a connectio
 
 A locked iPhone, or Safari in the background, stops running the page. The room gives phones longer before it drops them (60 s instead of 15 s).
 
-- **Keep the screen on.** Every device that holds layers asks the browser to keep its screen awake. A small sun in the header shows it's working. If it can't, the device screen tells you to set Auto-Lock to Never.
+- **Keep the screen on.** Every device that holds layers asks the browser to keep its screen awake. If it can't, the device screen tells you to set Auto-Lock to Never.
 - **Coming back.** A phone that was away for 3 s or more reconnects by itself. If its slot didn't change, it keeps its layers and skips the download.
 
 On an iPhone with 30 s in the background, the answer finished with the same text and the link survived.
