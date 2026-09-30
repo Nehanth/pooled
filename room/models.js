@@ -2,6 +2,35 @@
 
 export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 4.0, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "smollm-135m": 0.6 };
 
+// What the model host holds besides its layers, in bytes, from the file's own tensor sizes: the
+// embedding stays in JS memory for row lookups, the output head goes to the GPU (the embedding again
+// when the two are tied), and the Qwen 3.5/3.8 engines add the draft (MTP) block and, for the
+// one-submit draft chain, a GPU copy of the embedding table (engine/qwen35.js). This is what the
+// host's pledge pays for before its layers (room/plan.js layerCaps).
+export function hostHeldBytes(kind, { embed = 0, out = 0, mtp = 0 } = {}) {
+  const held = embed + (out || embed);
+  return kind === "qwen35" ? held + mtp + (mtp ? embed : 0) : held;
+}
+// K+V bytes per layer and position for a dense (Qwen3) room: the dense engine keeps its KV cache in
+// f32 (engine/dense.js), one K and one V row of kvDim per position
+export const denseKvBytesPerLayerPos = (kvDim) => 2 * kvDim * 4;
+
+// Each picker model's shape, from its GGUF header (the host reads the same numbers from the file at
+// Start, so these only let the picker say before Start whether the room's pledges hold the model):
+// L layers; layer = one layer's weights (the largest group's average for the hybrids); kvPos = K+V
+// bytes per layer and position by KV format; embed / out / mtp: the host-only tensors.
+export const SHAPE = {
+  "qwen3-1.7b": { kind: "gguf", L: 28, layer: 53494784, kvPos: { f16: denseKvBytesPerLayerPos(1024) }, embed: 330612736, out: 0, mtp: 0 },
+  "qwen3.8-27b": { kind: "qwen35", L: 64, layer: 223970464, kvPos: { f16: 1024, q8: 576 }, embed: 715161600, out: 1042944000, mtp: 265197568 },
+  "qwen3.6-35b-moe": { kind: "qwen35", L: 40, layer: 498197568, kvPos: { f16: 512, q8: 288 }, embed: 286064640, out: 417177600, mtp: 897955840 },
+};
+// { L, layerBytes, hostBytes } for a room running `model` at `ctx` positions with `kv` format, or
+// null for a model without a SHAPE (the picker then falls back to NEED_GB)
+export function roomBytes(model, ctx, kv = "f16") {
+  const s = SHAPE[model]; if (!s) return null;
+  return { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s) };
+}
+
 // The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
 // each device downloads about its share of the layers, so the picker can say what this device will fetch.
 export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84 };
