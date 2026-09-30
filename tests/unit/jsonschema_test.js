@@ -1,0 +1,101 @@
+// harness/jsonschema.js: the JSON Schema subset the API grammar enforces, compiled to a node table.
+import { compileSchema, stringCapable, schemaTypes, SchemaError, SCHEMA_CAPS } from "../../harness/jsonschema.js";
+
+const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
+const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
+const throwsSchema = (f, re, m) => { try { f(); } catch (e) { ok(e instanceof SchemaError && re.test(e.message), m + ": " + e.message); return; } throw new Error(m + ": no error"); };
+const node = (t) => t.nodes[t.root];
+
+Deno.test("jsonschema: objects keep declared keys, required indexes and no free keys", () => {
+  const t = compileSchema({ type: "object", properties: { a: { type: "string" }, b: { type: "integer" } }, required: ["b", "zzz"], additionalProperties: true });
+  const n = node(t);
+  eq(n.k, "obj");
+  eq(n.props.map(([k]) => k), ["a", "b"]);
+  eq(n.req, [1], "unknown required keys are dropped");
+  eq(n.free, null, "declared properties: no free keys even when additionalProperties is not false");
+  eq(t.nodes[n.props[1][1]].k, "int");
+  const free = node(compileSchema({ type: "object", additionalProperties: { type: "number" } }));
+  eq([free.props.length, compileSchema({ type: "object", additionalProperties: { type: "number" } }).nodes[free.free].k], [0, "num"]);
+  eq(node(compileSchema({ type: "object", additionalProperties: false })).free, null, "closed and empty");
+  eq(node(compileSchema({ type: "object" })).free != null, true, "no properties: free keys, any value");
+});
+Deno.test("jsonschema: enums, const, type lists, nullable, anyOf merge into first-character unions", () => {
+  eq(node(compileSchema({ enum: ["a", "b"] })), { k: "str", en: ["a", "b"] });
+  eq(node(compileSchema({ const: 3 })), { k: "lit", texts: ["3"] });
+  const u = node(compileSchema({ type: ["string", "null"] }));
+  eq([u.k, u.str != null, u.null != null, u.num], ["u", true, true, null]);
+  const n = node(compileSchema({ type: "integer", nullable: true }));
+  eq([n.k, n.num != null, n.null != null], ["u", true, true]);
+  const a = compileSchema({ anyOf: [{ type: "integer" }, { type: "number" }, { enum: ["x"] }, { type: "string" }] });
+  const an = node(a);
+  eq([a.nodes[an.num].k, a.nodes[an.str].en], ["num", null], "number covers integer; a free string covers the enum");
+  const o = compileSchema({ oneOf: [{ type: "object", properties: { a: { type: "string" } }, required: ["a"] }, { type: "object", properties: { b: { type: "boolean" } }, required: ["b"] }] });
+  const on = node(o);
+  eq([on.k, on.props.map(([k]) => k), on.req], ["obj", ["a", "b"], []], "two object branches: keys united, required only what both require");
+  eq(node(compileSchema({ anyOf: [{}, { type: "string" }] })).k, "any");
+});
+Deno.test("jsonschema: allOf merges objects; $ref / $defs / definitions resolve; recursion bottoms out in any", () => {
+  const m = node(compileSchema({ allOf: [{ type: "object", properties: { a: { type: "string" } }, required: ["a"] }, { properties: { b: { type: "integer" } }, required: ["b"] }] }));
+  eq([m.props.map(([k]) => k), m.req], [["a", "b"], [0, 1]]);
+  const r = compileSchema({ type: "object", properties: { p: { $ref: "#/$defs/P" }, q: { $ref: "#/definitions/Q" } }, $defs: { P: { type: "integer" } }, definitions: { Q: { enum: [1, 2] } } });
+  eq(node(r).props.map(([, id]) => r.nodes[id].k), ["int", "lit"]);
+  const tree = compileSchema({ $defs: { T: { type: "object", properties: { kids: { type: "array", items: { $ref: "#/$defs/T" } } } } }, $ref: "#/$defs/T" });
+  ok(tree.nodes.some((x) => x.k === "any"), "recursion deeper than 6 is any value");
+  ok(tree.nodes.length < 200, "and stays small: " + tree.nodes.length);
+  throwsSchema(() => compileSchema({ $ref: "https://example.com/s.json" }), /only local references/, "remote ref");
+  throwsSchema(() => compileSchema({ $ref: "#/$defs/nope" }), /does not resolve/, "missing ref");
+});
+Deno.test("jsonschema: keywords that are accepted but not enforced change nothing", () => {
+  const plain = compileSchema({ type: "object", properties: { s: { type: "string" }, n: { type: "number" } } });
+  const bounded = compileSchema({ $schema: "x", title: "t", description: "d", type: "object", properties: { s: { type: "string", minLength: 2, maxLength: 5, pattern: "^a", format: "email", default: "aa" }, n: { type: "number", minimum: 0, maximum: 9, multipleOf: 3, exclusiveMinimum: 0 } }, examples: [] });
+  eq(bounded.nodes, plain.nodes);
+});
+Deno.test("jsonschema: minItems / maxItems go on the array node", () => {
+  const n = (a) => compileSchema({ type: "array", items: { type: "string" }, ...a }).nodes.find((x) => x.k === "arr");
+  eq([n({ minItems: 1, maxItems: 3 }).min, n({ minItems: 1, maxItems: 3 }).max], [1, 3]);
+  eq([n({}).min, n({}).max, n({ minItems: 0 }).min], [undefined, undefined, undefined]);
+  eq([n({ minItems: 4, maxItems: 2 }).min, n({ minItems: 4, maxItems: 2 }).max], [undefined, undefined], "an impossible pair");
+  eq([n({ maxItems: 1.5 }).max, n({ minItems: -1 }).min], [undefined, undefined], "bad values");
+});
+Deno.test("jsonschema: caps (a request's schema must not stall the room)", () => {
+  throwsSchema(() => compileSchema({ enum: Array.from({ length: SCHEMA_CAPS.enum + 1 }, (_, i) => "v" + i) }), /enum has more than/, "enum");
+  throwsSchema(() => compileSchema({ anyOf: Array.from({ length: SCHEMA_CAPS.anyOf + 1 }, () => ({ type: "string" })) }), /anyOf/, "anyOf");
+  throwsSchema(() => compileSchema({ allOf: Array.from({ length: SCHEMA_CAPS.allOf + 1 }, () => ({ type: "object" })) }), /allOf/, "allOf");
+  let deep = { type: "string" };
+  for (let i = 0; i < SCHEMA_CAPS.depth + 2; i++) deep = { type: "array", items: deep };
+  throwsSchema(() => compileSchema(deep), /deeper than/, "depth");
+  const wide = { type: "object", properties: {} };
+  for (let i = 0; i < 400; i++) wide.properties["p" + i] = { type: "object", properties: Object.fromEntries(Array.from({ length: 30 }, (_, j) => ["q" + j, { type: "array", items: { type: "object", properties: { x: { type: "integer" } } } }])) };
+  throwsSchema(() => compileSchema(wide), /too large/, "nodes");
+});
+Deno.test("jsonschema: string-capable (XML values written raw) and the types for coercion", () => {
+  eq(["string", { type: "string", enum: ["high"] }, { const: "x" }].map((s) => stringCapable(typeof s === "string" ? { type: s } : s)), ["only", "only", "only"]);
+  eq([{ type: ["string", "null"] }, { anyOf: [{ type: "string" }, { type: "integer" }] }, {}, undefined].map((s) => stringCapable(s)), ["some", "some", "some", "some"]);
+  eq([{ type: "integer" }, { type: "object", properties: {} }, { enum: [1, 2] }, { type: "array" }].map((s) => stringCapable(s)), ["none", "none", "none", "none"]);
+  eq(stringCapable({ $ref: "#/$defs/S" }, { $defs: { S: { type: "string" } } }), "only");
+  eq([...schemaTypes({ anyOf: [{ type: "integer" }, { type: "null" }] })], ["integer", "null"]);
+  eq([...schemaTypes({ enum: ["a", 1, 1.5, null, true] })], ["string", "integer", "number", "null", "boolean"]);
+  eq(schemaTypes({ description: "anything" }), null);
+});
+Deno.test("jsonschema: $ref branches are memoized, work and nesting are capped, a self-referencing allOf ends", () => {
+  const mk = (k) => ({ $defs: { a: { anyOf: Array.from({ length: k }, () => ({ $ref: "#/$defs/a" })) } }, type: "object", properties: { x: { $ref: "#/$defs/a" } } });
+  const t0 = Date.now();
+  compileSchema(mk(64));
+  ok(Date.now() - t0 < 1000, "k=64 in " + (Date.now() - t0) + " ms (was k^6 expansions)");
+  let deep = { type: "string" }; for (let i = 0; i < 1500; i++) deep = { anyOf: [deep] };
+  throwsSchema(() => compileSchema(deep), /nests deeper/, "nested anyOf counts as nesting");
+  let all = { type: "string" }; for (let i = 0; i < 1500; i++) all = { allOf: [all] };
+  throwsSchema(() => compileSchema(all), /nests deeper/, "nested allOf too");
+  ok(compileSchema({ $defs: { a: { allOf: [{ $ref: "#/$defs/a" }] } }, $ref: "#/$defs/a" }).nodes.length >= 1, "self-referencing allOf");
+  // one budget shared by several schemas
+  const work = { left: 10 };
+  throwsSchema(() => { for (let i = 0; i < 5; i++) compileSchema({ type: "object", properties: { a: { type: "string" }, b: { type: "integer" }, c: { type: "array", items: { type: "string" } } } }, { work }); }, /too complex/, "shared work budget");
+  ok(SCHEMA_CAPS.work > 0 && SCHEMA_CAPS.stack > SCHEMA_CAPS.depth, "caps");
+  // stringCapable / schemaTypes stay bounded and answer conservatively past the caps
+  const p = mk(64);
+  const t1 = Date.now();
+  eq([stringCapable(p.properties.x, p), schemaTypes(p.properties.x, p)], ["some", null]);
+  ok(Date.now() - t1 < 1000, "bounded");
+  eq([stringCapable(deep), schemaTypes(deep)], ["some", null], "past the nesting cap: unknown");
+  eq([stringCapable({ anyOf: [{ type: "string" }] }), [...schemaTypes({ anyOf: [{ type: "integer" }] })]], ["only", ["integer"]], "normal schemas unchanged");
+});

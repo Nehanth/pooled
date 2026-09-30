@@ -1,0 +1,88 @@
+---
+title: Downloads and caching
+eyebrow: Rooms
+description: Each device downloads only its own layers, from Hugging Face or from another device in the room, and keeps them for next time. How to see and delete what is cached.
+sidebar:
+  label: Downloads and caching
+  order: 4
+---
+{/* Sources (origin/main 40bb0fa):
+    room/models.js (FILE_GB: 1.83 / 16.06 / 20.84 GB; model URLs on huggingface.co), README "How it works" (downloads only its own
+    layers, from Hugging Face or another device), room.js rangeFetch (~L1686: Cache API first, then a room device, then the network;
+    phones skip the store), gatherInventory (~L1742: waits 1.5 s; the host is never a source, ~L2593), peerGet (64 KB parts, 8 MB window,
+    15 s stall -> network), prefetch (~L1909: 4 ahead on computers, 1 on phones), "reading model index… (11 MB)" (~L2528),
+    cache-clear and renderCacheModels (~L4547-4610: two presses within 6 s, per-model Delete, storage estimate line),
+    room/weightcache.js (CACHE_NAME swarmllm-weights-v1, x-swarm-len size check), room/convertedcache.js + PR #250
+    (OPFS, K-quant->Q8, BF16/F16/Q5_0->f32, embedding; 1 GB or 15% quota reserve; 816 MB test 7.7 s -> 0.8 s; ?wcache=0),
+    PR #234 (delete one cached model; phones don't store weights so the list stays hidden), PR #258 (flow control, prefetch dedupe),
+    PR #245 (Start says what it downloads), room/errors.js fetchErrorText, docs/architecture.md "Memory and caching". */}
+
+When a room starts a model, each device downloads only the byte ranges of its own layers. A laptop that holds half the MoE fetches about half of its 20.8 GB, not the whole file.
+
+| Model | Whole weights file |
+|---|---|
+| Qwen3 1.7B (Q8) | 1.83 GB |
+| Qwen 3.8 27B (Q4) | 16.06 GB |
+| Qwen 3.6 35B MoE (Q4) | 20.84 GB |
+
+Before you press Start, the model picker says what this device will download: "the whole 1.8 GB model" for a laptop alone, less when other devices share the work.
+
+## Where the bytes come from
+
+For every piece of its layers, a device tries these in order:
+
+1. **Its own cache.** Layers it downloaded before load from disk.
+2. **Another device in the room.** Before dealing, the host asks every device what it has cached. A device that is missing a range takes it from one that has it, over the room's direct connection. On the same Wi-Fi this is usually much faster than Hugging Face. The host itself is never a source, because it is busy loading its own layers.
+3. **Hugging Face.** Range requests straight to the model's public file.
+
+Weights from another device stream in 64 KB parts, with at most 8 MB in flight, so a phone never holds a whole range in memory. If that device stalls for 15 s or fails, the range comes from Hugging Face instead.
+
+The host first reads the model's index (the file header, about 11 MB for the 27B and the MoE) to learn where each layer sits in the file.
+
+## What is cached
+
+| Cache | What it holds | Where |
+|---|---|---|
+| **Downloaded weights** | The raw byte ranges of this device's layers | The browser's Cache API |
+| **Converted weights** | Tensors the loader converts on the CPU before they go to the GPU | The browser's private file storage (OPFS) |
+
+**Downloaded weights** make a rejoin fast: a device that held the same layers before reloads them from disk in seconds. Every entry carries its size, and a short entry (a tab that died mid-write) is thrown away and downloaded again.
+
+**Converted weights** skip the CPU work on a second load. Some tensors (K-quants, BF16, F16, Q5_0, the embedding) are converted before they reach the GPU. That takes seconds per device. In a test with 48 such tensors (816 MB), the first load took 8.6 s and the second 0.8 s. The Q4_0 and Q8_0 matrices that stream straight to the GPU are not stored here. This cache only writes while the site keeps 1 GB or 15% of its storage quota free, and any problem with it falls back to converting as before.
+
+:::note[Phones]
+Phones don't keep downloaded weights. A phone tab has no spare memory for the copy the cache needs. A phone downloads its layers each time it loads them.
+:::
+
+The room also keeps checkpoints of the conversation on disk, so a reload doesn't re-read the whole chat. That is separate from the weights: see [Device drops and recovery](/docs/rooms/recovery#reloads).
+
+## See and delete cached models
+
+Open **Room settings** and look under **Room**.
+
+- **Clear cached weights** deletes every cached model on this device, downloaded and converted. Press it once to see the size ("Clear 16.1 GB?"), then again within 6 s to delete.
+- Below it, each cached model has its own row with its size and a **Delete** button. It also asks twice. Use it to free the 27B and keep the MoE.
+- The last line shows how much storage the whole site uses on this device, to check the sizes against.
+
+The next Start downloads whatever was deleted again.
+
+## When a download fails
+
+The room says what happened and what to do, and keeps the layers already cached. The usual ones:
+
+| You see | What to do |
+|---|---|
+| Can't reach Hugging Face to download the model… | Check your internet connection. A VPN, ad blocker or firewall can block it. Press Start again. |
+| Hugging Face is rate-limiting downloads (429)… | Wait a minute and press Start again. |
+| Hugging Face is busy or down right now (503)… | Wait a minute and press Start again. |
+
+All of them are in [Room errors](/docs/rooms/errors#downloads).
+
+## URL options
+
+| Option | Effect |
+|---|---|
+| `?wcache=0` | Don't use the converted-weights cache on this device. |
+| `?peerweights=0` | On the model host's page: don't ask the devices what they have cached, so every device downloads from Hugging Face. |
+
+More in [URL options](/docs/reference/url-options).

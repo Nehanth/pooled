@@ -1,0 +1,93 @@
+---
+title: Adding a model
+eyebrow: Contributing
+description: Which models the engine can run, and the steps to add one to the room.
+sidebar:
+  label: Adding a model
+  order: 3
+---
+
+{/*
+Sources (origin/main 40bb0fa):
+- docs/models.md (supported table, room/models.js fields, "Adding a model" steps, local layout)
+- room/models.js (NEED_GB, FILE_GB, PICKER, MODELS entry shape with kind gguf | qwen35 | safetensors, CTX, maxSeqFor, MAX_SEQ 2048, MAX_SEQ_LONG 8192)
+- engine/gguf.js line ~177: "map ggml tensor names -> the engine's internal names"
+- tests/reference/ref.cjs, ref_qwen.mjs (usage: node ref_qwen.mjs "prompt" [numTokens] [--golden out.json]), ref_q38.mjs
+- tests/golden/*.json (prompt, ids, perLayer)
+- GOVERNANCE.md: a new architecture or quantization format needs a design note
+- CONTRIBUTING.md: bench-log row for performance
+*/}
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Pooled ships no weights. Browsers fetch each tensor from a public Hugging Face repository with HTTP range requests, and tests read the same files from `models/`. A model the engine already understands needs only a few lines in the room's catalogue. A new architecture is a bigger job.
+
+## What the engine runs today
+
+| Model | File | Engine | Notes |
+|---|---|---|---|
+| Qwen 3.8 27B | GGUF Q4_0, about 15 GB, with the `nextn` draft layer | `Qwen35Engine` | 64 layers: 48 Gated DeltaNet and 16 attention. Speculative decoding with the built-in draft layer. |
+| Qwen 3.6 35B MoE (A3B) | GGUF Q4_0 (bartowski) | `Qwen35Engine` (`qwen35moe`) | 256 experts, 8 active per token. Router, experts and shared expert run on the GPU. |
+| Qwen3.5 122B-A10B MoE | GGUF | `Qwen35Engine` (`qwen35moe`) | Runs in the engine and its tests. Not in the room's picker. |
+| Qwen3 4B, 1.7B, 0.6B | GGUF Q4_0 or Q8_0 | `DenseEngine` | 0.6B is the golden-test model. |
+| SmolLM2 135M | safetensors f32 | `DenseEngine` | The smallest demo. Quantized to Q8 at load. |
+
+Models that share the hybrid layout of Qwen 3.5, 3.6 and 3.8, such as Qwen 3.5 2B or 9B, need only catalogue entries.
+
+<Aside type="caution">
+A new architecture or a new quantization format is a substantial change. Open an issue with the *Research / design proposal* template before you write the engine code. See [Contributing](/docs/contributing#changes-that-need-a-design-note-first).
+</Aside>
+
+## Steps
+
+<Steps>
+
+1. **Check the tensors.** Make sure the GGUF's tensor names and shapes match one of the two engines. `engine/gguf.js` holds the maps from ggml tensor names to the engine's internal names.
+
+2. **Add the model to the room's catalogue** in `room/models.js`:
+
+   ```js
+   // the whole model's memory need across the room, in GB
+   export const NEED_GB = { /* … */ "my-model": 6.2 };
+
+   export const MODELS = {
+     /* … */
+     "my-model": { label: "My Model · Q4", kind: "qwen35",
+       gguf: "https://huggingface.co/<org>/<repo>/resolve/main/<file>.gguf" },
+   };
+
+   // optional: default and largest context, when it should differ from the engine's default
+   export const CTX = { /* … */ "my-model": { def: 16384, max: 32768 } };
+   ```
+
+   `kind` is `gguf` for the dense engine, `qwen35` for the hybrid engine (including MoE), or `safetensors`. Dense models also need `cfg` and `tok` URLs for `config.json` and `tokenizer.json`. The numbers above are placeholders: measure `NEED_GB` for your model.
+
+3. **Decide whether the picker offers it.** `PICKER` lists the models people can choose. A picker model also needs a `FILE_GB` entry (the GGUF's size on Hugging Face), so the picker can say how much each device will download. Every other model stays available to tests and to rooms opened with `?dev=1`.
+
+4. **Make a golden and add a test.** The CPU reference implementations in `tests/reference/` are the source of truth that the WebGPU kernels must match:
+
+   ```bash
+   QWEN_DIR=../../models/mymodel node tests/reference/ref_qwen.mjs "The capital of France is" 8 --golden tests/golden/golden_mymodel.json
+   ```
+
+   `ref.cjs` covers Llama-style safetensors models, `ref_qwen.mjs` dense Qwen3 GGUFs (`QWEN_DIR` picks the folder, relative to `tests/reference/`), and `ref_q38.mjs` the Qwen 3.8 hybrid.
+
+   A golden file holds the prompt, its token ids, per-layer hidden-state samples at the last prompt position, the top logits and the generated tokens. Add a `tests/test_<model>.js` that loads the model, runs the prompt and compares against the golden. See [Testing](/docs/contributing/testing).
+
+5. **Measure it.** Record decode and prefill tokens/s in `docs/bench-log.md`, with the hardware and the commit. See [Benchmarking](/docs/contributing/benchmarks).
+
+6. **Update the docs.** Add the model to `docs/models.md`, and to [Which models fit](/docs/models) if it is in the picker.
+
+</Steps>
+
+## Context length
+
+The context a room opens with comes from `CTX` in `room/models.js`, and `?ctx=N` can raise it up to `max`:
+
+| Model | Default | Max |
+|---|---|---|
+| Qwen 3.8 27B | 16384 | 32768 |
+| Qwen 3.6 35B MoE | 32768 | 65536 |
+| Qwen3 1.7B | 8192 | 16384 |
+
+A model without a `CTX` entry gets 8192 tokens on the hybrid engine and 2048 on the dense engine. The hybrid models keep a KV cache only on their full-attention layers (one in four), so long context is cheap in memory: 64 KB per position for the 27B and 20 KB for the MoE, in f16. The caps keep each layer's K or V buffer at or under 64 MB. In practice the limit is prefill speed, not memory.

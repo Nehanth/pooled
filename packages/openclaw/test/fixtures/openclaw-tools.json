@@ -1,0 +1,413 @@
+{
+ "note": "The 11 tool definitions from a real OpenClaw 2026.9.6 agent request (OpenClaw is MIT licensed, Copyright (c) 2026 OpenClaw Foundation), with a short stand-in system prompt in place of OpenClaw's 28k-character one. Used by packages/openclaw/test/convert_test.mjs.",
+ "openclaw": "2026.9.6",
+ "systemPrompt": "You are a personal assistant running inside OpenClaw.\n\n## Tooling\nUse the tools to read and change files in the workspace. Prefer small, exact edits. Report what you changed.\n\n## Workspace\nYour working directory is ~/workspace. notes.txt holds the user's notes.",
+ "tools": [
+  {
+   "name": "apply_patch",
+   "description": "Patch one/many files. Input requires *** Begin Patch and *** End Patch.",
+   "parameters": {
+    "type": "object",
+    "required": [
+     "input"
+    ],
+    "properties": {
+     "input": {
+      "type": "string",
+      "description": "Patch content using the *** Begin Patch/End Patch format."
+     }
+    }
+   }
+  },
+  {
+   "name": "edit",
+   "description": "Exact single-file replacements. oldText unique/non-overlapping against original. Merge nearby changes; omit large unchanged spans.",
+   "parameters": {
+    "type": "object",
+    "required": [
+     "path",
+     "edits"
+    ],
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File path; relative/absolute."
+     },
+     "edits": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "required": [
+        "oldText",
+        "newText"
+       ],
+       "properties": {
+        "oldText": {
+         "type": "string",
+         "description": "Exact original text; unique and non-overlapping in this call."
+        },
+        "newText": {
+         "type": "string",
+         "description": "Replacement text."
+        }
+       }
+      },
+      "description": "Targeted replacements against original file; no overlap/nesting. Merge nearby changes."
+     }
+    }
+   }
+  },
+  {
+   "name": "exec",
+   "description": "Run shell now; background continuation supported. Completed calls return command output directly. Use process only when exec reports running with a sessionId; output text alone is not a process handle. Long run: automatic completion wake when enabled and output/failure occurs; otherwise process confirms completion. No sleep loops for reminders/follow-ups; use automations. TTY CLI/UI/coding agent: pty=true. Quote arguments containing shell metacharacters, including URL query strings with `?` or `&`.",
+   "parameters": {
+    "type": "object",
+    "required": [
+     "command"
+    ],
+    "properties": {
+     "title": {
+      "type": "string",
+      "maxLength": 120,
+      "description": "Every call: short purpose; never claim success. No secrets."
+     },
+     "command": {
+      "type": "string",
+      "description": "Shell command."
+     },
+     "workdir": {
+      "type": "string",
+      "description": "Omit/empty string: default; whitespace-only invalid."
+     },
+     "env": {
+      "type": "object",
+      "patternProperties": {
+       "^.*$": {
+        "type": "string"
+       }
+      },
+      "description": "Literal overrides; no expansion. Omit to inherit."
+     },
+     "yieldMs": {
+      "type": "number",
+      "description": "Milliseconds before backgrounding; default 10000."
+     },
+     "background": {
+      "type": "boolean",
+      "description": "Background now; timeoutSeconds applies."
+     },
+     "timeoutSeconds": {
+      "type": "number",
+      "description": "Process lifetime in seconds; 0 disables."
+     },
+     "pty": {
+      "type": "boolean",
+      "description": "PTY for TTY-required CLIs/coding agents."
+     },
+     "elevated": {
+      "type": "boolean",
+      "description": "Host elevation if allowed."
+     },
+     "host": {
+      "enum": [
+       "auto",
+       "sandbox",
+       "gateway",
+       "node"
+      ],
+      "type": "string",
+      "description": "Omit/auto: inherit configured host."
+     },
+     "ask": {
+      "type": "string",
+      "description": "Requests stricter approvals under tools.exec.mode and host policy; channel-origin calls cannot override host ask=off."
+     },
+     "node": {
+      "type": "string",
+      "description": "Node id/name for host=node."
+     }
+    }
+   }
+  },
+  {
+   "name": "ls",
+   "description": "List directory entries in binary filename order, including dotfiles and links. Names are JSON-quoted; / marks actual directories. Pass the returned after cursor with the same path to continue.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "Directory; default cwd."
+     },
+     "limit": {
+      "type": "number",
+      "description": "Max entries; default 500."
+     },
+     "after": {
+      "type": "string",
+      "description": "Filename cursor returned by the previous page."
+     }
+    }
+   }
+  },
+  {
+   "name": "process",
+   "description": "Control existing exec: list, poll, log, write, send-keys, submit, paste, kill. poll/log: status, output, quiet success, completion without auto-wake, input hints. Others: input/intervention. No polling as timer/reminder; scheduled follow-up uses automations.",
+   "parameters": {
+    "type": "object",
+    "required": [
+     "action"
+    ],
+    "properties": {
+     "action": {
+      "type": "string",
+      "enum": [
+       "list",
+       "poll",
+       "log",
+       "write",
+       "send-keys",
+       "submit",
+       "paste",
+       "kill",
+       "clear",
+       "remove"
+      ],
+      "description": "Process action (list|poll|log|write|send-keys|submit|paste|kill|clear|remove)"
+     },
+     "sessionId": {
+      "type": "string",
+      "description": "Required for every action except list."
+     },
+     "data": {
+      "type": "string",
+      "description": "Data to write for write"
+     },
+     "keys": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Key tokens to send for send-keys"
+     },
+     "hex": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "description": "Hex bytes to send for send-keys"
+     },
+     "literal": {
+      "type": "string",
+      "description": "Literal string for send-keys"
+     },
+     "text": {
+      "type": "string",
+      "description": "Text to paste for paste"
+     },
+     "bracketed": {
+      "type": "boolean",
+      "description": "Wrap paste in bracketed mode"
+     },
+     "eof": {
+      "type": "boolean",
+      "description": "Close stdin after write"
+     },
+     "offset": {
+      "type": "number",
+      "description": "Log offset"
+     },
+     "limit": {
+      "type": "number",
+      "description": "Log length"
+     },
+     "timeout": {
+      "type": "number",
+      "description": "For poll: wait up to this many milliseconds before returning; max 30000 ms, higher values are clamped to 30000",
+      "minimum": 0
+     }
+    }
+   }
+  },
+  {
+   "name": "read",
+   "description": "Read text/image file (jpg/png/gif/webp/bmp); images attach to model context. Text caps 2000 lines or 50KB. Continue with offset/limit, or cursor within a long line.",
+   "parameters": {
+    "type": "object",
+    "required": [
+     "path"
+    ],
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File path; relative/absolute."
+     },
+     "offset": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Start line; 1-based."
+     },
+     "limit": {
+      "type": "number",
+      "description": "Max lines."
+     },
+     "cursor": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Character position within the start line; 0-based."
+     },
+     "optional": {
+      "type": "boolean",
+      "const": true,
+      "description": "Missing paths return structured not_found instead of failing."
+     }
+    }
+   }
+  },
+  {
+   "name": "sessions_yield",
+   "description": "End this turn for pending child completion events; this is not a final-result submission. Return completed work normally. An unfinished subagent waiting for an incoming continuation must set waitFor:\"message\". Collector runs require agents_wait instead. acknowledgment can send a waiting reply for an otherwise-silent interactive parent.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "waitFor": {
+      "type": "string",
+      "const": "message",
+      "description": "Explicitly pause an unfinished subagent until an incoming continuation message. Does not schedule a message or submit the final result."
+     },
+     "message": {
+      "type": "string",
+      "description": "Private context for the resumed turn; not sent to the user."
+     },
+     "acknowledgment": {
+      "type": "string",
+      "description": "Optional waiting reply for an otherwise-silent interactive parent turn."
+     }
+    }
+   }
+  },
+  {
+   "name": "tool_call",
+   "description": "Call an exact Tool Search result id or name through OpenClaw.",
+   "parameters": {
+    "type": "object",
+    "required": [
+     "id"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "description": "Tool search result id or tool name."
+     },
+     "args": {
+      "type": "object",
+      "patternProperties": {
+       "^.*$": {}
+      },
+      "description": "Tool input."
+     }
+    }
+   }
+  },
+  {
+   "name": "tool_describe",
+   "description": "Load the full schema and metadata for one search result when its input is not already clear.",
+   "parameters": {
+    "type": "object",
+    "required": [
+     "id"
+    ],
+    "properties": {
+     "id": {
+      "type": "string",
+      "description": "Tool search result id or tool name."
+     }
+    }
+   }
+  },
+  {
+   "name": "tool_search",
+   "description": "Search the effective Tool Search catalog. Pass query for one search or queries for several independent searches in one call; a non-empty query joins a non-empty batch first, with its own limit. Batch results stay grouped in request order. Queries must be in English: matching is lexical against tool names and descriptions, which are written in English, so another language will usually match nothing. Pass an exact result id or name to tool_call; use tool_describe only when you need its input schema.",
+   "parameters": {
+    "type": "object",
+    "properties": {
+     "query": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "description": "Single search query, in English. A non-empty query joins a non-empty batch first. Null or blank is ignored beside a non-empty batch."
+     },
+     "limit": {
+      "anyOf": [
+       {
+        "type": "integer",
+        "minimum": 1
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "description": "Maximum number of single-search results. Omitted or null uses the default. With only batch queries, omit this or set it to null; set limits on each batch entry."
+     },
+     "queries": {
+      "anyOf": [
+       {
+        "type": "array",
+        "items": {
+         "type": "object",
+         "required": [
+          "query"
+         ],
+         "properties": {
+          "query": {
+           "type": "string",
+           "minLength": 1,
+           "maxLength": 512,
+           "description": "Search query, in English. Describe the capability you need."
+          },
+          "limit": {
+           "type": "integer",
+           "minimum": 1,
+           "description": "Maximum results for this query. Defaults to 8 when omitted."
+          }
+         }
+        },
+        "maxItems": 16
+       },
+       {
+        "type": "null"
+       }
+      ],
+      "description": "Independent searches. Prefer this alone for several searches; a non-empty query beside it runs as the first entry. Their effective limits may total at most 50; an omitted item limit counts as 8. The serialized query strings may use at most 512 UTF-8 bytes in total."
+     }
+    }
+   }
+  },
+  {
+   "name": "write",
+   "description": "Write/overwrite file; creates parent directories.",
+   "parameters": {
+    "type": "object",
+    "required": [
+     "path",
+     "content"
+    ],
+    "properties": {
+     "path": {
+      "type": "string",
+      "description": "File path; relative/absolute."
+     },
+     "content": {
+      "type": "string",
+      "description": "File content."
+     }
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,189 @@
+---
+title: Tool calling
+eyebrow: Serve API
+description: Function tools work on all three APIs. Every call is constrained to its tool's schema while the model writes it, so arguments always parse.
+sidebar:
+  label: Tool calling
+  order: 6
+---
+{/* Sources (origin/main 40bb0fa): cli/README.md (Chat Completions, Responses and Messages tool bullets),
+    docs/design/serve.md §11.3 (grammar modes), §11.4 (CallStream, </parameter> limit), §11.5 (exact-id cache),
+    §11.6 (limits), §12, §13, §15 (custom tools, 1024 tools); harness/constrain.js (MAX_CALLS = 16);
+    cli/lib/common.js (LIMITS.tools 1024, schemaChars 32000, toolName regex, maxCalls 128). */}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Send tools the way each API expects. The room lists them to the model in its own chat template, and a grammar constrains every call as it is written:
+
+- only declared tool names
+- each parameter once, required parameters always present
+- every value of its schema's type
+
+`strict` is accepted on Chat Completions and Responses, and it always holds whether you set it or not.
+
+## A round trip
+
+The model asks for a call, your code runs it, you send the result back, and the model answers.
+
+<Tabs syncKey="api">
+<TabItem label="Chat Completions">
+
+```python
+from openai import OpenAI
+import json
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}]
+messages = [{"role": "user", "content": "Weather in Paris?"}]
+
+r = client.chat.completions.create(model="pooled", messages=messages, tools=tools)
+msg = r.choices[0].message          # finish_reason == "tool_calls"
+messages.append(msg)
+for call in msg.tool_calls:
+    args = json.loads(call.function.arguments)
+    messages.append({"role": "tool", "tool_call_id": call.id, "content": f"18°C, clear in {args['city']}"})
+
+r = client.chat.completions.create(model="pooled", messages=messages, tools=tools)
+print(r.choices[0].message.content)
+```
+
+</TabItem>
+<TabItem label="Responses">
+
+```python
+from openai import OpenAI
+import json
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+tools = [{
+    "type": "function",
+    "name": "get_weather",
+    "description": "Current weather for a city",
+    "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+}]
+
+r = client.responses.create(model="pooled", input="Weather in Paris?", tools=tools)
+outputs = []
+for item in r.output:
+    if item.type == "function_call":
+        args = json.loads(item.arguments)
+        outputs.append({"type": "function_call_output", "call_id": item.call_id,
+                        "output": f"18°C, clear in {args['city']}"})
+
+r = client.responses.create(model="pooled", previous_response_id=r.id, input=outputs, tools=tools)
+print(r.output_text)
+```
+
+</TabItem>
+<TabItem label="Messages">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="pooled")
+tools = [{
+    "name": "get_weather",
+    "description": "Current weather for a city",
+    "input_schema": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+}]
+messages = [{"role": "user", "content": "Weather in Paris?"}]
+
+m = client.messages.create(model="pooled", max_tokens=1024, messages=messages, tools=tools)
+messages.append({"role": "assistant", "content": m.content})   # stop_reason == "tool_use"
+results = [
+    {"type": "tool_result", "tool_use_id": b.id, "content": f"18°C, clear in {b.input['city']}"}
+    for b in m.content if b.type == "tool_use"
+]
+messages.append({"role": "user", "content": results})
+
+m = client.messages.create(model="pooled", max_tokens=1024, messages=messages, tools=tools)
+print(m.content[-1].text)
+```
+
+</TabItem>
+</Tabs>
+
+Send the assistant turn back unchanged, reasoning included. The room then reuses its caches and prefills only the tool results, which keeps agent loops fast.
+
+## `tool_choice`
+
+| Intent | Chat Completions | Responses | Messages |
+|---|---|---|---|
+| Model decides (default) | `"auto"` | `"auto"` | `{"type": "auto"}` |
+| No calls | `"none"` | `"none"` | `{"type": "none"}` |
+| At least one call | `"required"` | `"required"` | `{"type": "any"}` |
+| This tool | `{"type": "function", "function": {"name": "f"}}` | `{"type": "function", "name": "f"}` | `{"type": "tool", "name": "f"}` |
+| Only some tools | `{"type": "allowed_tools", "allowed_tools": {"mode", "tools"}}` | `{"type": "allowed_tools", "mode", "tools"}` | |
+| One call at most | `parallel_tool_calls: false` | `parallel_tool_calls: false` | `disable_parallel_tool_use: true` |
+
+With `"none"`, the tools are left out of the prompt entirely.
+
+With a named tool on Chat Completions, `finish_reason` is `"stop"`, as OpenAI returns it. Otherwise calls end with `tool_calls` (Chat Completions) or `tool_use` (Messages).
+
+Responses also has `max_tool_calls` (1 to 128; the room still writes at most 16).
+
+## Parallel calls
+
+The model may make several calls in one answer, up to 16. After the last call only the end of the turn is allowed. Turn this off with the parallel settings above.
+
+## Streaming calls
+
+| API | How calls stream |
+|---|---|
+| Chat Completions | `delta.tool_calls`: first the id and name, then argument fragments |
+| Responses | `response.output_item.added`, `response.function_call_arguments.delta`, then `.done` (custom tools: the whole input in one `response.custom_tool_call_input.delta`, then `.done`, when the call ends) |
+| Messages | a `tool_use` block, then `input_json_delta` events |
+
+The fragments join to exactly the final arguments.
+
+## Custom tools (Responses only)
+
+Responses also takes custom (free-form) tools: the model writes one raw string, returned as a `custom_tool_call` item with `input`. A `grammar` format is shown to the model, not enforced.
+
+This is how Codex's `apply_patch` works when Codex uses a GPT-5 model name. On Chat Completions, custom tools are a `400`.
+
+## Cut-off calls
+
+A call can be cut by `max_tokens` mid-way:
+
+- In a whole (non-stream) answer, the cut call is left out on Chat Completions (`finish_reason: "length"`) and Messages (`stop_reason: "max_tokens"`). Responses keeps it as a call item with `status: "incomplete"`, and the response is `incomplete`.
+- In a stream, its name and partial arguments already went out. The finish reason tells you it was cut. On Responses the item ends with `status: "incomplete"`.
+
+Give agents enough `max_tokens` for their largest call, such as a file write.
+
+## Limits
+
+| Limit | Value |
+|---|---|
+| Tools per request | 1024 (Claude Code with MCP servers sends hundreds) |
+| Tool names | 1 to 128 letters, digits, `_ . : -`, unique |
+| One tool's schema | 32 000 characters |
+| All tools and the output format together | 10 000 grammar nodes, checked by the host |
+| Calls in one answer | 16 |
+
+:::caution[Known limit]
+On the Qwen3.5+ call format (the 27B and the 35B MoE), a string argument that contains a line `</parameter>` ends at that line.
+:::
+
+## Server tools
+
+Tools that run on OpenAI's or Anthropic's servers, such as `web_search`, are skipped with a logged warning. Your client's own tools, including MCP tools, work as function tools.

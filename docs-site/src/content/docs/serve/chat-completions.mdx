@@ -1,0 +1,145 @@
+---
+title: Chat Completions
+eyebrow: Serve API
+description: POST /v1/chat/completions, the OpenAI API most tools and SDKs speak. Streaming, tool calls, JSON output and thinking all work.
+sidebar:
+  label: Chat Completions
+  order: 3
+---
+{/* Sources (origin/main 40bb0fa): cli/README.md (APIs, Parameters, Chat Completions bullets), cli/lib/openai.js
+    (STATUS/TYPE/CODE tables, FINISH map, keepAlive ": keep-alive" / ": queued, N ahead"), cli/lib/common.js (LIMITS,
+    EFFORTS, IMAGE_PLACEHOLDER), cli/lib/openai.js 157 (logprobs/top_logprobs 400), 177-189 (top_k capped at LIMITS.topK), 202 (cached_tokens only when reused); cli/lib/openai.js 95-105 (thinking off by default); room/api.js (apiSampler: temp 0.8 / top_k 40 when one of them is given),
+    docs/design/serve.md §12, §15. */}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Base URL: `http://127.0.0.1:8080/v1`. Any API key works unless you [set a token](/docs/serve/options#require-a-token).
+
+<Tabs syncKey="lang">
+<TabItem label="curl">
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "pooled",
+  "messages": [
+    {"role": "system", "content": "Answer in one sentence."},
+    {"role": "user", "content": "What is a KV cache?"}
+  ],
+  "stream": true,
+  "stream_options": {"include_usage": true}
+}'
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+stream = client.chat.completions.create(
+    model="pooled",
+    messages=[{"role": "user", "content": "What is a KV cache?"}],
+    stream=True,
+)
+for chunk in stream:
+    print(chunk.choices[0].delta.content or "", end="")
+```
+
+</TabItem>
+<TabItem label="JavaScript">
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "http://127.0.0.1:8080/v1", apiKey: "pooled" });
+const r = await client.chat.completions.create({
+  model: "pooled",
+  messages: [{ role: "user", content: "What is a KV cache?" }],
+});
+console.log(r.choices[0].message.content);
+```
+
+</TabItem>
+</Tabs>
+
+## Parameters
+
+| Parameter | Behavior |
+|---|---|
+| `messages` | `system`, `developer`, `user`, `assistant` and `tool` messages. System and developer messages before the first other message are the system prompt. A later one joins the user turn just before it, or, after an assistant turn, the next user turn. |
+| `model` | Any string. The room serves its one model. |
+| `max_completion_tokens`, `max_tokens` | Default 16384. Above 65536 is capped, not refused. Always capped by the context left. `max_completion_tokens` wins if both are set. |
+| `temperature` | 0 to 2. `0` is greedy. Absent: the room's own setting (0.8 if you set only `top_k`). |
+| `top_k` | 1 or more; above 64 is capped to 64. Default 40 when you set `temperature`. |
+| `stop` | Up to 4 strings, 64 characters each. Applies to the answer text, not to tool calls. |
+| `stream`, `stream_options.include_usage` | Server-sent events. `include_usage` adds a usage chunk before `[DONE]`. |
+| `reasoning_effort` | `low`, `medium`, `high`, `xhigh`, `max` turn thinking on. `none` or `minimal` turn it off. Absent: off. |
+| `chat_template_kwargs.enable_thinking` | Turns thinking on or off when `reasoning_effort` is absent. |
+| `tools`, `tool_choice`, `parallel_tool_calls` | See [Tool calling](/docs/serve/tools). |
+| `response_format` | `json_object` or `json_schema`. See [Structured output](/docs/serve/structured-output). |
+| `top_p`, `seed`, `store`, `metadata`, `user`, `service_tier`, `prompt_cache_key` | Accepted and ignored. |
+
+## Thinking
+
+Thinking is off unless you ask for it, on every API. With thinking on, the model reasons before it answers. The reasoning comes back as `message.reasoning_content` (streamed as `delta.reasoning_content`), separate from `content`.
+
+Only Qwen3.8 uses the effort level. The other models think the same way at any level.
+
+When you send an assistant message back with `reasoning_content`, the room gets that reasoning as part of the turn. If it matches what the room wrote, the room reuses its caches.
+
+## Response
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "model": "pooled/qwen3.6-35b-moe",
+  "choices": [{
+    "index": 0,
+    "message": { "role": "assistant", "content": "A KV cache stores ...", "refusal": null },
+    "finish_reason": "stop"
+  }],
+  "usage": {
+    "prompt_tokens": 31, "completion_tokens": 42, "total_tokens": 73
+  }
+}
+```
+
+`finish_reason` is one of:
+
+- `stop`: the model finished, or hit a `stop` string.
+- `tool_calls`: the answer ends with tool calls.
+- `length`: the answer reached `max_tokens`, or the room's context is full.
+
+When the room reused its caches, `usage.prompt_tokens_details.cached_tokens` counts the prompt tokens it already held from an earlier request. `usage.completion_tokens_details.reasoning_tokens` counts thinking tokens when thinking was on.
+
+## Streaming
+
+The stream is standard Chat Completions chunks: a role chunk, then reasoning, content and tool-call chunks as the room writes them, the finish chunk, the usage chunk if asked, and `data: [DONE]`.
+
+While a request waits in the queue or the room prefills a long prompt, the bridge sends an SSE comment after every 10 s of silence (`: keep-alive`, or `: queued, 2 ahead`). Clients ignore these; they keep proxies and idle timers from closing the connection.
+
+If something fails after the stream started, you get an error chunk and no `[DONE]`.
+
+## Images and files
+
+This is a text-only model. An image or file part anywhere in the conversation becomes a short note, `[image omitted: this model reads text only]`, logged once. A pasted screenshot does not break the session.
+
+## Not supported
+
+Each of these is a clear `400`:
+
+- `custom` tools, and the deprecated `functions`, `function_call` and `role: "function"`
+- audio input
+- `n` greater than 1
+- a non-zero `presence_penalty` or `frequency_penalty`, a non-empty `logit_bias`
+- `logprobs`, `top_logprobs`
+- `prediction`, `web_search_options`
+- an assistant message last (prefill)
+
+:::note
+If the room's host runs an older Pooled without tool calling, requests with tools or `response_format` get a `400` asking to reload the host page.
+:::
+
+Errors follow OpenAI's shape, `{"error": {"message", "type", "param", "code"}}`. See [Limits and errors](/docs/serve/limits#errors).

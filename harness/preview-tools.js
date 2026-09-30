@@ -19,13 +19,14 @@ export function logLine(e) {
   const text = [first.slice(0, 300), ...more.map((l) => "  " + l.slice(0, 160))].join("\n");
   return `[${secs(e.t)}] ${e.level} ${where(e)}${text}`;
 }
-// consecutive identical entries fold into one line with ×N
-export function fold(lines) {
-  const out = [];
+// consecutive identical entries fold into one line with ×N; with { all: true } every repeat folds
+// into its first copy (a game loop that throws the same two errors each frame reads as two lines)
+export function fold(lines, { all = false } = {}) {
+  const out = [], at = new Map();
   for (const e of lines) {
-    const k = e.level + "\u0000" + e.src + e.line + "\u0000" + e.text, p = out[out.length - 1];
-    if (p && p.k === k && p.e.rev === e.rev) p.n++;
-    else out.push({ k, e, n: 1 });
+    const k = e.level + "\u0000" + e.src + e.line + "\u0000" + e.text + "\u0000" + e.rev, p = all ? at.get(k) : out[out.length - 1];
+    if (p && p.k === k) p.n++;
+    else { const r = { k, e, n: 1 }; out.push(r); at.set(k, r); }
   }
   return out.map(({ e, n }) => ({ e, n, text: logLine(e) + (n > 1 ? ` ×${n}` : "") }));
 }
@@ -111,7 +112,9 @@ export function previewTools(server) {
         const errs = lines.filter((e) => e.level === "error"), warns = lines.filter((e) => e.level === "warn");
         const counts = errs.length || warns.length ? [errs.length && plural(errs.length, "error"), warns.length && plural(warns.length, "warning")].filter(Boolean).join(", ") : "no errors";
         const state = idle ? `loaded in ${Math.round(idle.loadedMs)} ms` : "still loading after 2 s";
-        const shown = fold([...errs, ...warns].sort((a, b) => a.seq - b.seq)).slice(0, SERVE_LINES);
+        // errors first, in the order they happened (the first one is usually the cause, the rest
+        // its noise), then warnings
+        const shown = [...fold(errs, { all: true }), ...fold(warns, { all: true })].slice(0, SERVE_LINES);
         const out = [`${head}`, `${state} · ${counts}${shown.length ? ":" : ""}`, ...shown.map((s) => s.text)];
         if (lines.length > shown.reduce((k, s) => k + s.n, 0)) out.push(`more: preview_logs since=${since}`);
         return out.join("\n") + miss;
@@ -145,6 +148,9 @@ export function previewTools(server) {
         const cut = rows.length - keep, out = [];
         if (dropped) out.push(`(${dropped} older lines no longer kept)`);
         if (cut) out.push(`(${cut} earlier lines, since=${Number(since) || 0}; newest shown)`);
+        // the current page's first error scrolled out of view: keep it in sight, it is the one to fix
+        const first = rows.findIndex((r) => r.n && r.e.level === "error" && r.e.rev === snap.rev);
+        if (first >= 0 && first < cut) out.push(`first error: ${rows[first].text}`);
         out.push(...rows.slice(cut).map((r) => r.text), `next: since=${next}`);
         return out.join("\n");
       },

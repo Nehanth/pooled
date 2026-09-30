@@ -21,7 +21,18 @@ export const SLICE_BYTES = 4600;           // ~4 packets of 1150 B payload
 const HDR = 32;   // 24 bytes of frame + 8 of checkpoint control (protocol 4)
 const MAGIC = 0x5357;                      // "SW"
 const KINDS = ["ai-hidden", "ai-hidden-b", "ai-hiddenret", "ai-hiddenret-b"];
-const GAP_MS = 5000;                       // a frame that never completes stops holding back later ones after this
+// Gaps. Every wire channel is reliable and ordered, so a frame that has not arrived yet is late
+// (a freeze, a lost packet waiting out SCTP's retransmission timer), not lost, as long as the
+// channels that carried it are open. A frame is only ever lost with a channel that closed.
+const GAP_MS = 5000;        // a channel closed recently: a frame still missing this long went down with it
+const CLOSE_WINDOW_MS = 15000;   // "recently": frames sent before a close are the ones it can have taken along
+const GAP_MAX_MS = 60000;   // no channel closed: wait this long (a backstop; the host's own lap timeout is 30 s)
+// Small frames (a decode token's hidden state) go out twice, on two different associations, when
+// the link has more than one: a lost packet on one then costs nothing instead of a retransmission
+// timeout (hundreds of ms to seconds, because a lone message has no later packet to trigger a
+// fast retransmit). The receiver takes whichever copy completes first; protocol-4 receivers
+// already drop the second copy as a duplicate.
+export const DUP_SLICES = 3;
 
 // Room protocol version: peers with a different one are refused at hello (docs/protocol.md).
 export const PROTOCOL = 4;
@@ -58,8 +69,16 @@ export function unpackFlags(f) {
 }
 
 // Per-link state: { chans: [RTCDataChannel], rr, rx: Map<msgId, partial>, expect: next id to
-// hand over, done: Map<msgId, completed frame waiting for an earlier one> }
-export function makeLink() { return { chans: [], rr: 0, rx: new Map(), nextId: 1, sent: 0, recv: 0, expect: 1, done: new Map(), gapTimer: null }; }
+// hand over, done: Map<msgId, completed frame waiting for an earlier one>, hi: Map<channel,
+// highest frame id received on it>, closedAt: when a wire channel of this link last closed,
+// unordered: some channel may drop messages (attachWire { ordered: false }), dup: frames of up to
+// this many slices are sent twice (0 = never), rxAt: when anything last arrived on this link's
+// wire (a slice of a frame or a keep-alive byte: a sign of life, room/liveness.js), ka*: keep-alive }
+export function makeLink({ dup = DUP_SLICES } = {}) {
+  return { chans: [], rr: 0, rx: new Map(), nextId: 1, sent: 0, recv: 0, expect: 1, done: new Map(), gapTimer: null, gapFor: 0,
+    hi: new Map(), closedAt: null, unordered: false, dup, dups: 0, skipped: 0,
+    ka: [], kaRr: 0, kaSent: 0, lastTx: 0, active: 0, rxAt: 0 };
+}
 
 // Open the wire channel on a PeerJS DataConnection's RTCPeerConnection. Both sides call this with
 // the same id, so no ondatachannel event fires and PeerJS never sees the channel.
@@ -68,9 +87,17 @@ export function attachWire(link, conn, onFrame, { ordered = true } = {}) {
   if (!pc) return null;
   const ch = pc.createDataChannel("swarm-wire", { negotiated: true, id: WIRE_ID, ordered, ...(ordered ? {} : { maxRetransmits: 0 }) });
   ch.binaryType = "arraybuffer";
-  ch.onmessage = (ev) => receive(link, ev.data, onFrame);
-  ch.onclose = () => { link.chans = link.chans.filter((c) => c !== ch); };
+  if (!ordered) link.unordered = true;
+  ch.onmessage = (ev) => { link.rxAt = performance.now(); receive(link, ev.data, onFrame, ch); };
+  ch.onclose = () => {
+    link.chans = link.chans.filter((c) => c !== ch);
+    link.hi.delete(ch);
+    // whatever this channel still had in flight is gone: gaps may now be real
+    link.closedAt = performance.now();
+    if (link.done.size) { clearTimeout(link.gapTimer); link.gapTimer = null; checkGap(link, onFrame); }
+  };
   link.chans.push(ch);
+  attachKeepalive(link, pc);
   return ch;
 }
 
@@ -83,6 +110,7 @@ export function sendFrame(link, msg) {
   const open = link.chans.filter((c) => c.readyState === "open");
   if (!open.length) return false;
   link.sent++;
+  kaNote(link, true);
   const u16 = msg.data;
   const bytes = new Uint8Array(u16.buffer, u16.byteOffset, u16.byteLength);
   const per = SLICE_BYTES - HDR;
@@ -90,6 +118,7 @@ export function sendFrame(link, msg) {
   const id = link.nextId++ >>> 0;
   const pos = msg.t === "ai-hidden" || msg.t === "ai-hiddenret" ? msg.pos : msg.basePos;
   const flags = packFlags(msg);
+  const dup = open.length > 1 && nSlices <= link.dup;
   for (let k = 0, off = 0; k < nSlices; k++) {
     const len = Math.min(per, bytes.length - off);
     const buf = new ArrayBuffer(HDR + len), dv = new DataView(buf);
@@ -99,22 +128,49 @@ export function sendFrame(link, msg) {
     packCkpt(dv, msg);
     new Uint8Array(buf, HDR).set(bytes.subarray(off, off + len));
     off += len;
-    // round-robin over associations so a block never waits on one congestion window
-    const ch = open[(link.rr++) % open.length];
-    ch.send(buf);
+    // spread over associations so a block never waits on one congestion window
+    const ch = pick(link, open, null);
+    put(link, open, ch, buf);
+    if (dup) { put(link, open, pick(link, open, ch), buf); link.dups++; }
   }
   return true;
 }
+// The open channel with the least data queued, starting the search at the round-robin position so
+// equal channels take turns. A channel whose association lost a packet holds its later messages
+// back (ordered) and backs off its congestion window, so its queue grows; new slices go elsewhere.
+function pick(link, open, avoid) {
+  let best = null;
+  for (let i = 0; i < open.length; i++) {
+    const c = open[(link.rr + i) % open.length];
+    if (c === avoid) continue;
+    if (!best || (c.bufferedAmount || 0) < (best.bufferedAmount || 0)) best = c;
+  }
+  link.rr++;
+  return best;
+}
+// send, falling over to the other open channels if this one refuses (it closed under us); a slice
+// no channel takes is lost, and the receiver skips its frame once the close is seen
+function put(link, open, ch, buf) {
+  for (const c of [ch, ...open.filter((o) => o !== ch)]) {
+    if (!c || c.readyState !== "open") continue;
+    try { c.send(buf); return true; } catch {}
+  }
+  return false;
+}
 
-function receive(link, buf, onFrame) {
+function receive(link, buf, onFrame, ch) {
   if (!(buf instanceof ArrayBuffer) || buf.byteLength < HDR) return;
   const dv = new DataView(buf);
   if (dv.getUint16(0) !== MAGIC) return;
   const kind = dv.getUint8(2), flags = dv.getUint8(3), id = dv.getUint32(4), pos = dv.getUint32(8), n = dv.getUint16(12);
+  // the sender numbers frames in order and each channel is ordered: once a channel has shown id,
+  // nothing older can still come on it
+  if (ch && id > (link.hi.get(ch) || 0)) link.hi.set(ch, id);
+  if (link.done.size && id !== link.expect) checkGap(link, onFrame);
   const ck = unpackCkpt(dv);   // every slice carries the same control
   const k = dv.getUint16(14), nSlices = dv.getUint16(16), total = dv.getUint32(20);
-  // a slice of a frame already delivered or skipped: ignore it rather than open a partial that
-  // leaks (and drop what a skipped frame had gathered)
+  // a slice of a frame already delivered or skipped, or the second copy of a small frame: ignore
+  // it rather than open a partial that leaks (and drop what a skipped frame had gathered)
   if (id < link.expect || link.done.has(id)) { link.rx.delete(id); return; }
   const per = SLICE_BYTES - HDR;
   // a slice must fit the frame exactly (index in range, same slice count and size as the first
@@ -130,6 +186,7 @@ function receive(link, buf, onFrame) {
   if (r.got < r.n) return;
   link.rx.delete(id);
   link.recv++;
+  kaNote(link, false);
   const data = new Uint16Array(r.buf.buffer, 0, total >> 1);
   const t = KINDS[kind];
   const msg = { t, enc: "f16", data, n, ...unpackFlags(flags), ...r.ck };
@@ -140,14 +197,14 @@ function receive(link, buf, onFrame) {
 }
 
 // Frames complete out of order when their slices interleave across stripes; hand them over in
-// send order. A gap that never fills (a send that died halfway) is skipped after GAP_MS.
+// send order, holding later frames while an earlier one is still on its way.
 function deliverInOrder(link, id, msg, onFrame) {
   // a frame whose gap was already skipped: dropping it is the only safe choice, delivering it now
   // would run it after frames sent later (the waiter for it times out and says so)
   if (id < link.expect) return;
   link.done.set(id, msg);
   flush(link, onFrame);
-  armGap(link, onFrame);
+  checkGap(link, onFrame);
 }
 function flush(link, onFrame) {
   while (link.done.has(link.expect)) {
@@ -157,18 +214,91 @@ function flush(link, onFrame) {
     onFrame(m);
   }
 }
-// Skip a gap only when delivery has made no progress for GAP_MS: the timer remembers the frame it
-// was waiting for, and if that one arrived in the meantime it re-arms for the next gap instead.
-// Channels are reliable, so a real gap means a send died halfway (a closed channel).
-function armGap(link, onFrame) {
-  if (!link.done.size || link.gapTimer) return;
-  const waitingFor = link.expect;
+// Frame `id` can no longer arrive when every open channel has already delivered something newer
+// (each is ordered, so nothing older is queued behind it): some of its slices went out on a
+// channel that has since closed, or never went out at all. Not on links with a lossy channel.
+function provablyLost(link, id) {
+  if (link.unordered) return false;
+  const open = link.chans.filter((c) => c.readyState === "open");
+  return open.length > 0 && open.every((c) => (link.hi.get(c) || 0) > id);
+}
+function skipTo(link, id) {
+  for (let i = link.expect; i < id; i++) link.rx.delete(i);
+  link.skipped += id - link.expect;
+  link.expect = id;
+}
+// A missing frame holds back the later ones until it arrives. It is skipped at once when it
+// provably cannot arrive; otherwise after GAP_MS without progress if a channel closed recently
+// (or the link may drop messages), else only after GAP_MAX_MS (a backstop: channels are reliable,
+// and a freeze or a retransmission backoff can hold a frame for many seconds). The timer
+// remembers the frame it was waiting for; if that one arrived meanwhile it re-arms instead.
+function checkGap(link, onFrame) {
+  if (!link.done.size) { if (link.gapTimer) { clearTimeout(link.gapTimer); link.gapTimer = null; } return; }
+  for (;;) {
+    let moved = false;
+    while (!link.done.has(link.expect) && provablyLost(link, link.expect)) { skipTo(link, link.expect + 1); moved = true; }
+    if (!moved) break;
+    flush(link, onFrame);
+    if (!link.done.size) { clearTimeout(link.gapTimer); link.gapTimer = null; return; }
+  }
+  if (link.gapTimer && link.gapFor === link.expect) return;
+  clearTimeout(link.gapTimer);
+  const waitingFor = link.gapFor = link.expect;
+  const now = performance.now();
+  const lossy = link.unordered || (link.closedAt != null && now - link.closedAt < CLOSE_WINDOW_MS);
   link.gapTimer = setTimeout(() => {
     link.gapTimer = null;
     if (!link.done.size) return;
-    if (link.expect !== waitingFor) { armGap(link, onFrame); return; }
-    link.expect = Math.min(...link.done.keys());
-    flush(link, onFrame);
-    armGap(link, onFrame);
-  }, GAP_MS);
+    if (link.expect === waitingFor) {
+      skipTo(link, Math.min(...link.done.keys()));
+      flush(link, onFrame);
+    }
+    checkGap(link, onFrame);
+  }, lossy ? GAP_MS : GAP_MAX_MS);
+}
+
+// Keep-alive while frames flow. A phone's Wi-Fi drops into power save between sparse frames: in a
+// room a lap is ~50 ms and the phone's own slice is busy for ~10 of it, so the radio idles ~40 ms
+// per lap, and a frame for a dozing phone waits at the access point for its next wake-up (the
+// phone hop's wire time: the same median as a computer's, twice the p95, a 0.8 s stall). While a
+// link has carried a frame in the last KA_ACTIVE_MS, each end sends a 1-byte message whenever it
+// has sent nothing for KA_MS, which keeps both radios awake; it stops by itself when the room goes
+// quiet. The bytes ride their own negotiated channel (KA_ID), unordered and never retransmitted,
+// so a lost one holds up nothing; being on the same association as the frames, they also let the
+// receiver report a lost frame slice at once instead of the sender waiting out a retransmission
+// timeout. A peer without the channel drops them (the SCTP stream is unknown to it), so this needs
+// no protocol bump. ?ka=ms in the room URL sets the period, ?ka=0 turns it off.
+export const KA_ID = 78;
+const KA_ACTIVE_MS = 1500;
+const KA_BYTE = new Uint8Array([0]);
+let kaMs = 10, kaTimer = null;
+const kaLinks = new Set();
+export function setKeepalive(ms) { kaMs = Math.max(0, +ms || 0); }
+function attachKeepalive(link, pc) {
+  if (!link.ka) return;
+  const ch = pc.createDataChannel("swarm-ka", { negotiated: true, id: KA_ID, ordered: false, maxRetransmits: 0 });
+  ch.addEventListener?.("message", () => { link.rxAt = performance.now(); });   // the peer's keep-alive bytes: it is alive
+  ch.onclose = () => { link.ka = link.ka.filter((c) => c !== ch); };
+  link.ka.push(ch);
+}
+function kaNote(link, tx) {
+  const now = performance.now();
+  link.active = now;
+  if (tx) link.lastTx = now;
+  if (!kaMs || !link.ka?.length) return;
+  kaLinks.add(link);
+  if (!kaTimer) kaTimer = setInterval(kaTick, kaMs);
+}
+function kaTick() {
+  const now = performance.now();
+  for (const link of kaLinks) {
+    if (now - link.active > KA_ACTIVE_MS) { kaLinks.delete(link); continue; }
+    if (now - link.lastTx < kaMs) continue;
+    // one association per tick, in turn: one packet keeps the radio up, the rotation gives every
+    // association a recent packet for loss reports
+    const open = link.ka.filter((c) => c.readyState === "open" && c.bufferedAmount < 1024);
+    if (!open.length) continue;
+    try { open[(link.kaRr++) % open.length].send(KA_BYTE); link.kaSent++; link.lastTx = now; } catch {}
+  }
+  if (!kaLinks.size || !kaMs) { clearInterval(kaTimer); kaTimer = null; }
 }

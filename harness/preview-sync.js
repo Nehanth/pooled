@@ -12,7 +12,10 @@
 import { hashBytes } from "./preview.js";
 import { mimeFor } from "./preview-build.js";
 
-const CHUNK = 64 << 10, HIGH_WATER = 1 << 20;
+// A blob goes out in chunks of at most CHUNK bytes (the subscriber refuses bigger ones) and at least
+// MIN_CHUNK (so a file's chunk count stays bounded by its manifest size).
+const CHUNK = 64 << 10, MIN_CHUNK = 4 << 10, HIGH_WATER = 1 << 20;
+export const chunkCount = (size, chunk = MIN_CHUNK) => Math.max(1, Math.ceil(size / chunk));
 const HASH = /^[0-9a-f]{20}$/;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // a relative project path: no "..", no leading "/", no empty or dot segments
@@ -20,7 +23,8 @@ const okPath = (p) => typeof p === "string" && p.length > 0 && p.length <= 300 &
 
 export class PreviewPublisher {
   constructor(source, { send, broadcast, channel = () => null, chunk = CHUNK } = {}) {
-    this.source = source; this.send = send; this.broadcast = broadcast; this.channel = channel; this.chunk = chunk;
+    this.source = source; this.send = send; this.broadcast = broadcast; this.channel = channel;
+    this.chunk = Math.min(CHUNK, Math.max(MIN_CHUNK, Math.floor(chunk) || CHUNK));
     this.queues = new Map();   // peer id -> promise chain, so one peer's blobs go out one at a time
     this.off = source.onUpdate((u) => (u.stopped ? this.stopped(u.port) : this.announce(u.port)));
   }
@@ -42,7 +46,7 @@ export class PreviewPublisher {
     const hs = [...new Set(d.hs)].filter((h) => byHash.has(h)).slice(0, s.files.size);
     const q = (this.queues.get(from) || Promise.resolve()).then(async () => {
       for (const h of hs) {
-        const u8 = byHash.get(h), n = Math.max(1, Math.ceil(u8.length / this.chunk));
+        const u8 = byHash.get(h), n = chunkCount(u8.length, this.chunk);
         for (let i = 0; i < n; i++) {
           // back-pressure: a big snapshot must not sit in front of chat and agent messages
           for (let k = 0; (this.channel(from)?.bufferedAmount || 0) > HIGH_WATER && k < 500; k++) await sleep(20);
@@ -103,7 +107,7 @@ export class PreviewSubscriber {
     if (!this._from(from) || !d || !this.parts.has(d.h)) return;
     const P = this.parts.get(d.h), n = d.n >>> 0, i = d.i >>> 0;
     const b = d.b instanceof ArrayBuffer ? new Uint8Array(d.b) : ArrayBuffer.isView(d.b) ? new Uint8Array(d.b.buffer, d.b.byteOffset, d.b.byteLength) : null;
-    if (!b || !n || i >= n || n > Math.ceil(this.limits.maxFile / CHUNK) + 1 || (P.n && P.n !== n) || P.chunks[i]) return;
+    if (!b || !n || i >= n || n > chunkCount(P.size) || (P.n && P.n !== n) || P.chunks[i]) return;
     // sizes are checked per chunk, before anything is kept: a chunk over CHUNK, a file growing past
     // its manifest size, or everything held going past maxHeld is refused
     if (b.length > CHUNK || P.recv + b.length > P.size) { this._bad(d.h, "a file came bigger than its manifest said"); return; }

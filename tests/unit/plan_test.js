@@ -114,24 +114,24 @@ Deno.test("planForSpeed: table of edge cases", () => {
   const cases = [
     // [name, L, caps (layers each can hold), msPerLayer, expected assigned]
     ["1 device holds everything", 64, [64], [], [64]],
-    ["1 device overflowing still gets everything", 64, [10], [], [64]],
+    ["1 device overflowing: short, nothing dealt", 64, [10], [], [0]],
     ["L=1: only the host", 1, [5, 5], [], [1, 0]],
     ["fractional caps are floored", 10, [2.7, 3.9, 8.5], [], [2, 0, 8]],
-    ["host cap below 1 still keeps a layer", 10, [0.5, 20], [], [1, 9]],
-    ["host cap 0 still keeps a layer", 10, [0, 20], [], [1, 9]],
+    ["host cap below 1: short, nothing dealt", 10, [0.5, 20], [], [0, 0]],
+    ["host cap 0: short, nothing dealt", 10, [0, 20], [], [0, 0]],
     ["partial msPerLayer: unmeasured count as slower", 10, [5, 5, 5], [null, 2], [5, 5, 0]],
     ["msPerLayer null behaves like none", 10, [5, 5], null, [5, 5]],
-    ["msPerLayer longer than caps is ignored past the end", 10, [4, 4], [1, 2, 3], [5, 5]],
+    ["msPerLayer longer than caps is ignored past the end", 10, [5, 6], [1, 2, 3], [5, 5]],
     ["zero and negative ms count as unmeasured", 10, [5, 5, 5], [0, -3, 1], [5, 0, 5]],
     ["5 devices measured: fastest filled first, host keeps 1", 64, [20, 20, 20, 20, 20], [5, 1, 3, 2, 4], [1, 20, 20, 20, 3]],
     ["5 devices, some measured: measured first, then lowest index", 64, [20, 20, 20, 20, 20], [5, null, 3, null, 4], [20, 4, 20, 0, 20]],
-    // overflow: nobody can hold the rest, it is spread by capacity
-    ["spill: everyone full, rest by capacity", 20, [2, 3, 4], [], [5, 6, 9]],
-    ["spill with fractional caps", 20, [2.5, 3.5], [], [9, 11]],
-    ["spill with every cap 0", 20, [0, 0, 0], [], [8, 6, 6]],
+    // overflow: nobody can hold the rest; nothing is spread past a pledge (it used to be, by capacity)
+    ["short: everyone full", 20, [2, 3, 4], [], [0, 0, 0]],
+    ["short with fractional caps", 20, [2.5, 3.5], [], [0, 0]],
+    ["short with every cap 0", 20, [0, 0, 0], [], [0, 0, 0]],
     // more devices than layers left to place
     ["n > left: only as many devices as needed", 3, [1, 1, 1, 1, 1], [], [1, 1, 1, 0, 0]],
-    ["n > left, all caps 0: the host takes the rest", 2, [0, 0, 0, 0, 0], [], [2, 0, 0, 0, 0]],
+    ["n > left, all caps 0: short", 2, [0, 0, 0, 0, 0], [], [0, 0, 0, 0, 0]],
     // malformed caps hold nothing
     ["NaN cap holds nothing", 10, [5, NaN, 20], [], [5, 0, 5]],
     ["undefined cap holds nothing", 10, [5, undefined, 20], [], [5, 0, 5]],
@@ -141,6 +141,7 @@ Deno.test("planForSpeed: table of edge cases", () => {
   for (const [name, L, caps, ms, want] of cases) {
     const p = planForSpeed(L, caps, ms);
     eq(p.assigned, want, name);
+    if (p.short) { ok(sum(want) === 0, name + " short deals nothing"); continue; }
     checkShape(L, caps.length, p, name);
     eq(p.used, want.map((a, i) => (a > 0 ? i : -1)).filter((i) => i >= 0), name + " used");
   }
@@ -158,29 +159,29 @@ Deno.test("planForSpeed: properties over 3000 seeded random rooms", () => {
       msGen === "ties" ? pick(r, [2, 5]) : msGen === "some" && r() < 0.4 ? null : 0.5 + r() * 20);
     const ctx = `seed case ${t} planForSpeed(${L}, ${JSON.stringify(caps)}, ${JSON.stringify(ms)})`;
     const p = planForSpeed(L, caps, ms);
+    eq(planForSpeed(L, caps, ms).assigned, p.assigned, ctx + " deterministic");
+    // what each device may hold: its cap, never more (a pledge is a promise); the host needs one
+    const lim = caps.map((c) => Math.floor(c));
+    const room = sum(lim);
+    if (L > room || lim[0] < 1) {
+      ok(p.short >= Math.max(1, L - room), ctx + ` short ${p.short}`);
+      eq(sum(p.assigned), 0, ctx + " a short room deals nothing");
+      continue;
+    }
+    eq(p.short, 0, ctx + " fits");
     checkShape(L, n, p, ctx);
     ok(p.assigned[0] >= 1, ctx + " host keeps a layer");
     eq(p.used, p.assigned.map((a, i) => (a > 0 ? i : -1)).filter((i) => i >= 0), ctx + " used lists holders in order");
-    eq(planForSpeed(L, caps, ms).assigned, p.assigned, ctx + " deterministic");
-
-    // what each device may hold without overflowing (the host always holds at least one)
-    const lim = caps.map((c, i) => Math.max(Math.floor(c), i === 0 ? 1 : 0));
-    const room = sum(lim);
-    if (L <= room) {
-      p.assigned.forEach((a, i) => ok(a <= lim[i], ctx + ` device ${i} over its cap: ${a} > ${lim[i]}`));
-      // speed order: a strictly faster device is never left with room while a slower one holds
-      // layers beyond the host's mandatory one
-      const known = ms.filter((x) => x > 0);
-      const fb = known.length ? Math.max(...known) * 1.5 : 1;
-      const cost = caps.map((_, i) => (ms[i] > 0 ? ms[i] : fb));
-      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
-        if (!(cost[i] < cost[j])) continue;
-        const slowerHolds = p.assigned[j] > (j === 0 ? 1 : 0);
-        if (slowerHolds) eq(p.assigned[i], lim[i], ctx + ` faster device ${i} not full while slower ${j} holds layers`);
-      }
-    } else {
-      // overflowing: everyone is filled to its cap before anything spills
-      p.assigned.forEach((a, i) => ok(a >= Math.floor(caps[i]), ctx + ` device ${i} under its cap while overflowing`));
+    p.assigned.forEach((a, i) => ok(a <= lim[i], ctx + ` device ${i} over its cap: ${a} > ${lim[i]}`));
+    // speed order: a strictly faster device is never left with room while a slower one holds
+    // layers beyond the host's mandatory one
+    const known = ms.filter((x) => x > 0);
+    const fb = known.length ? Math.max(...known) * 1.5 : 1;
+    const cost = caps.map((_, i) => (ms[i] > 0 ? ms[i] : fb));
+    for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+      if (!(cost[i] < cost[j])) continue;
+      const slowerHolds = p.assigned[j] > (j === 0 ? 1 : 0);
+      if (slowerHolds) eq(p.assigned[i], lim[i], ctx + ` faster device ${i} not full while slower ${j} holds layers`);
     }
   }
 });
@@ -192,6 +193,23 @@ Deno.test("planForSpeed: when unmeasured, the host alone is used if it can hold 
     const L = int(r, 1, 100);
     const caps = [L + int(r, 0, 50), ...Array.from({ length: n - 1 }, () => int(r, 0, 200))];
     eq(planForSpeed(L, caps).used, [0], `planForSpeed(${L}, ${JSON.stringify(caps)})`);
+  }
+});
+
+Deno.test("planForSpeed: unmeasured phones go after computers; a measured phone keeps its speed", () => {
+  const cases = [
+    // [name, L, caps, msPerLayer, phone, expected assigned]
+    ["computers can hold it: the phone asks only", 10, [5, 8, 8], [], [false, true, false], [5, 0, 5]],
+    ["same room without phone flags: lowest index first", 10, [5, 8, 8], [], [], [5, 5, 0]],
+    ["a phone is needed: it takes only the rest", 20, [8, 8, 10], [], [false, false, true], [8, 8, 4]],
+    ["a phone host still keeps its one layer", 10, [5, 20], [], [true, false], [1, 9]],
+    ["measured phone faster than an unmeasured computer is used first", 10, [5, 8, 8], [1, 0.5, null], [false, true, false], [2, 8, 0]],
+    ["measured computers still beat an unmeasured phone", 10, [5, 8, 8], [1, null, 2], [false, true, false], [5, 0, 5]],
+  ];
+  for (const [name, L, caps, ms, phone, want] of cases) {
+    const p = planForSpeed(L, caps, ms, phone);
+    eq(p.assigned, want, name);
+    checkShape(L, caps.length, p, name);
   }
 });
 

@@ -1,0 +1,125 @@
+---
+title: Anthropic Messages
+eyebrow: Serve API
+description: POST /v1/messages, the Anthropic API Claude Code and the Anthropic SDKs speak. Tools, tool_choice, thinking and JSON output work.
+sidebar:
+  label: Anthropic Messages
+  order: 5
+---
+{/* Sources (origin/main 40bb0fa): cli/README.md (APIs, Parameters, Messages bullets), cli/lib/anthropic.js
+    (parseAnthropic: max_tokens required, temperature 0..1, thinking types, display, output_config.effort,
+    output_format; STOP map incl. model_context_window_exceeded; ping keep-alive; mcp_servers 400; thinking
+    signature = pooled1. blob), cli/lib/http.js (Anthropic shape on anthropic-version / x-api-key for /v1/models),
+    docs/design/serve.md §4, §15. */}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Base URL: `http://127.0.0.1:8080` (no `/v1`: the SDKs add it). Send an `anthropic-version` header as usual.
+
+<Tabs syncKey="lang">
+<TabItem label="curl">
+
+```bash
+curl http://127.0.0.1:8080/v1/messages -H 'content-type: application/json' -H 'anthropic-version: 2023-06-01' \
+  -d '{"model": "pooled", "max_tokens": 200, "messages": [{"role": "user", "content": "Hi"}]}'
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="pooled")
+with client.messages.stream(
+    model="pooled",
+    max_tokens=500,
+    messages=[{"role": "user", "content": "What is a KV cache?"}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="")
+```
+
+</TabItem>
+<TabItem label="TypeScript">
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+const client = new Anthropic({ baseURL: "http://127.0.0.1:8080", apiKey: "pooled" });
+const m = await client.messages.create({
+  model: "pooled",
+  max_tokens: 500,
+  messages: [{ role: "user", content: "What is a KV cache?" }],
+});
+console.log(m.content[0].type === "text" ? m.content[0].text : m.content);
+```
+
+</TabItem>
+</Tabs>
+
+## Parameters
+
+| Parameter | Behavior |
+|---|---|
+| `max_tokens` | Required, as in Anthropic's API. Above 65536 is capped, not refused. Always capped by the context left. |
+| `system` | A string or text blocks. |
+| `messages` | `user` and `assistant` turns with text, `tool_use`, `tool_result` and `thinking` blocks. |
+| `temperature` | 0 to 1. `0` is greedy. Absent: the room's own setting (0.8 if you set only `top_k`). |
+| `top_k` | 1 or more; above 64 is capped to 64. Default 40 when you set `temperature`. |
+| `stop_sequences` | Up to 4, 64 characters each. |
+| `thinking` | See [Thinking](#thinking). |
+| `tools`, `tool_choice` | See [Tool calling](/docs/serve/tools). |
+| `output_config.format`, `output_format` | `json_schema`. See [Structured output](/docs/serve/structured-output). |
+| `output_config.effort` | Accepted. |
+| `top_p` | Accepted and ignored. |
+
+## Thinking
+
+| `thinking` | Effect |
+|---|---|
+| `{"type": "enabled", "budget_tokens": N}` | Thinking on. Once the reasoning reaches `N` tokens, the room closes the thinking block and the rest of `max_tokens` goes to the answer. |
+| `{"type": "adaptive"}` | Thinking on, no budget. |
+| `{"type": "disabled"}` or absent | Thinking off. |
+| `"display": "omitted"` | Thinking runs, but the block comes back with empty text. |
+
+The thinking block's `signature` carries the reasoning itself (a `pooled1.` value). A client that sends the block back gives the room its exact reasoning, and the bridge stores nothing.
+
+## Response
+
+`stop_reason` is one of:
+
+- `end_turn`: the model finished.
+- `stop_sequence`: it hit one of `stop_sequences`.
+- `tool_use`: the answer ends with tool calls.
+- `max_tokens`: it reached `max_tokens`.
+- `model_context_window_exceeded`: the room's context filled up.
+
+`usage.cache_read_input_tokens` counts prompt tokens the room already held. As in Anthropic's API, `usage.input_tokens` leaves those out.
+
+## Streaming
+
+Standard Messages events: `message_start`, content block start, delta and stop events (`text_delta`, `thinking_delta`, `signature_delta`, `input_json_delta`), `message_delta` and `message_stop`.
+
+While the request waits in the queue or the room prefills, the bridge sends a `ping` event after every 10 s of silence. If something fails after the stream started, you get an `error` event.
+
+## Images and documents
+
+An image or document block, in a user turn or inside a `tool_result`, becomes a short note: `[image omitted: this model reads text only]`.
+
+## Skipped and refused
+
+Skipped, with a logged warning: Anthropic's own server tools (web search, bash, text editor and so on) and their result blocks.
+
+A `400`:
+
+- `search_result` blocks
+- a non-empty `mcp_servers` (connect MCP servers in your client instead)
+
+`/v1/messages/count_tokens` is `404`.
+
+Errors follow Anthropic's shape, `{"type": "error", "error": {"type", "message"}}`. Overload is `529` where OpenAI uses `429` and `503`. See [Limits and errors](/docs/serve/limits#errors).
+
+:::tip
+`GET /v1/models` answers in Anthropic's shape when the request has an `anthropic-version` header, or an `x-api-key` header and no `Authorization` header.
+:::

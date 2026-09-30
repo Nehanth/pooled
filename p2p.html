@@ -11,12 +11,14 @@
 <meta property="og:type" content="website">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://pooled.run/site/og.png?v=2">
-<!-- Code mode's preview host: this site deployed on another registrable domain (e.g. https://pooled-preview.example, not a subdomain of pooled.run),
-     so the agent's app runs in a process of its own (harness/preview-frame.js relayUrl). Empty: it runs in this tab. -->
+<!-- Code mode's preview host: preview-host/ deployed on another registrable domain (e.g. https://pooled-preview.vercel.app, not a subdomain of pooled.run),
+     so the agent's app runs in a process of its own (harness/preview-frame.js relayUrl). One origin, or "host=origin" entries per host:
+     "pooled.run=https://... pooled-dev.vercel.app=https://...". Empty or no entry for this host: it runs in this tab. Setup: roadmap/29. -->
 <meta name="preview-origin" content="">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Funnel+Display:wght@400;500&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="preload" href="/site/fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/site/fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/site/fonts/funnel-display-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/site/css/fonts.css">
 
 <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=3">
 <link rel="manifest" href="/site.webmanifest?v=2">
@@ -24,7 +26,8 @@
 <title>pooled · room</title>
 <script>if (/[?&](dev=1|signal=)/.test(location.search) && !/[?&]dev=0/.test(location.search)) document.documentElement.classList.add("dev");</script>
 <meta name="theme-color" content="#F6F5F1">
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<!-- deferred: runs after parsing, still before the room.js module (defer and module scripts run in document order) -->
+<script defer src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <link rel="stylesheet" href="/site/css/tokens.css">
 <style>
   /* Pooled room, in the landing's language (site/css/site.css): off-white, one blue, Funnel Display /
@@ -63,9 +66,9 @@
     --warn-text: var(--accent-text);
     --err: var(--del);
     --game: #0B0F1F; --on-game: #EEF0F6; --on-game-2: #A9B0C4;
-    --display: "Funnel Display", "Geist", ui-sans-serif, system-ui, sans-serif;
-    --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --display: "Funnel Display", "Funnel Display Fallback", "Geist", ui-sans-serif, system-ui, sans-serif;
+    --sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, "SF Mono", Menlo, monospace;
     --ease: cubic-bezier(.2,.7,.2,1);
     --lap: 600ms;
     color-scheme: light;
@@ -123,6 +126,11 @@
   /* device chips (room.js peerCard): dot in the device's layer colour, icon, name, GB; a click opens its card */
   #peers { flex: 0 1 auto; min-width: 0; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; padding: 2px; margin: -2px 0; }
   #peers::-webkit-scrollbar { display: none; }
+  /* more chips than fit: the clipped edge fades (room.js peersEdge), so the row reads as scrollable */
+  #peers:is(.fade-l, .fade-r) { --fl: 0px; --fr: 0px; -webkit-mask-image: linear-gradient(90deg, transparent, #000 var(--fl), #000 calc(100% - var(--fr)), transparent); mask-image: linear-gradient(90deg, transparent, #000 var(--fl), #000 calc(100% - var(--fr)), transparent); }
+  #peers.fade-l { --fl: 32px; }
+  #peers.fade-r { --fr: 32px; }
+  #peers:has(> .peer-card > .pop:not([hidden])) { -webkit-mask-image: none; mask-image: none; }   /* a mask clips the open card too (it is fixed, but still inside) */
   .peer-card { --sw: var(--faint); flex: none; position: relative; animation: chipin .5s var(--ease); }
   @keyframes chipin { from { opacity: 0; transform: translateX(-6px) scale(.96); } }
   .pchip { --chip-bd: var(--border); display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 10px; border: 1px solid var(--chip-bd); border-radius: 8px; background: var(--panel); font: 400 12px/1 var(--sans); color: var(--text); white-space: nowrap; }
@@ -185,9 +193,12 @@
   /* header GitHub link: the mark only */
   .gh-link { display: inline-grid; place-items: center; flex: none; width: 36px; height: 36px; border-radius: 8px; color: var(--ink-2); }
   .gh-link:hover { color: var(--ink); background: var(--bg-2); }
-  /* this device's screen (room/compute.js): the dots mark on a black button, no words. While this
-     device holds layers it is "on": an accent ring, and the mark's dots breathe in the logo's wave */
-  #compute-open { position: relative; width: 34px; padding: 0; justify-content: center; background: var(--ink); box-shadow: none; color: #fff; }
+  /* Serve API (room/compute.js, the dark page): the dots mark and "Serve API" on a black button, the
+     header's only black control. While this device holds layers the mark's dots breathe in the logo's
+     wave; while an API client is connected a blue dot sits on its corner */
+  #compute-open { position: relative; gap: 8px; padding: 0 13px 0 11px; background: var(--ink); box-shadow: none; color: #fff; }
+  #compute-open .api-dot { display: none; position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border-radius: 50%; background: var(--blue-400); box-shadow: 0 0 0 2px var(--panel-3); }
+  #compute-open.live .api-dot { display: block; }
   #compute-open:hover:not(:disabled) { background: var(--d1); box-shadow: none; }
   #compute-open:active:not(:disabled) { transform: scale(.94); }
   #compute-open .mk { display: block; fill: currentColor; overflow: visible; }
@@ -259,6 +270,8 @@
   .switch input:focus-visible + i { outline: 2px solid var(--accent); outline-offset: 2px; }
   .side-hint { font-size: 12px; color: var(--muted); }
   #awake:empty { display: none; }
+  /* the screen-awake mark in the header: shown while this device holds layers (ok: the screen stays on; warn: it may sleep) */
+  .set-l .exp { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 999px; font: 500 10px/1.4 var(--sans); letter-spacing: .02em; text-transform: uppercase; color: var(--warn-text); background: color-mix(in srgb, var(--warn) 14%, transparent); vertical-align: 1px; }
   .menu-acts { display: flex; flex-direction: column; gap: 2px; margin: 0 -8px; }
   .menu-acts button, .menu-acts a { display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 12px; align-items: center; width: 100%; padding: 8px; border: 0; border-radius: 12px; background: transparent; text-align: left; text-decoration: none; color: var(--text); font: 500 14px/1.25 var(--sans); cursor: pointer; }
   .menu-acts :is(button, a) small { grid-column: 2; font: 400 12px/1.4 var(--sans); color: var(--muted); }
@@ -267,6 +280,12 @@
   .menu-acts :is(button, a):hover .ic { background: var(--panel); box-shadow: inset 0 0 0 1px var(--border); color: var(--text); }
   .menu-acts button:active:not(:disabled) { transform: none; }
   #cache-line { display: contents; }
+  #cache-models { list-style: none; margin: 0 0 4px; padding: 0 0 0 44px; display: flex; flex-direction: column; gap: 4px; }
+  #cache-models li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
+  #cache-models li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  #cache-models li small { color: var(--muted); }
+  #cache-models li button { flex: none; height: 28px; padding: 0 10px; font: 500 12px/1 var(--sans); }
+  #cache-models li.cache-est { font-size: 12px; color: var(--muted); }
   #add-virtual { font: 500 12px/1 var(--sans); padding: 10px; border-style: dashed; border-color: var(--border-2); color: var(--muted); background: transparent; }
   #add-virtual:hover:not(:disabled) { color: var(--text); border-color: var(--muted); background: transparent; }
   #virtual { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -331,20 +350,29 @@
   #join-btn:hover:not(:disabled) { background: var(--panel-2); border-color: var(--border-2); }
   #join-btn.ready { background: var(--accent); border-color: var(--accent); color: #fff; }
   #join-btn.ready:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
-  /* the code: four boxes behind one input, one character per box */
-  .code-slots { position: relative; width: 204px; height: 52px; margin: 4px 0 18px; scroll-margin: 12px 0; }
-  .code-slots i { position: absolute; top: 0; width: 45px; height: 52px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-3); pointer-events: none; transition: border-color .15s, box-shadow .15s; }
-  .code-slots i:nth-child(1) { left: 0; } .code-slots i:nth-child(2) { left: 53px; } .code-slots i:nth-child(3) { left: 106px; } .code-slots i:nth-child(4) { left: 159px; }
+  /* the code: six boxes in two groups of three (4TK-G9P) behind one input. room.js (codeReady) writes
+     each character into its box; the input's own text and caret are invisible, and the box the next
+     character goes in has the ring. Older four-character codes fill the first four */
+  .code-slots { --cw: 40px; position: relative; display: flex; align-items: center; gap: 6px; width: max-content; height: 52px; margin: 4px 0 18px; scroll-margin: 12px 0; }
+  .code-slots i { flex: none; display: grid; place-items: center; width: var(--cw); height: 52px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-3); font: 500 24px/1 var(--mono); font-style: normal; color: var(--text); pointer-events: none; transition: border-color .15s, box-shadow .15s, background-color .15s; }
+  .code-slots b { flex: none; width: 8px; height: 1px; background: var(--muted); pointer-events: none; }
+  .code-slots i.on { background: var(--panel); border-color: var(--border-2); }
   #code-input {
-    position: absolute; top: 0; left: 0; width: calc(100% + 60px); height: 52px; z-index: 1;
-    background: transparent; border: 0; border-radius: 8px; box-shadow: none;
-    font: 500 26px/52px var(--mono); text-transform: uppercase; color: var(--text);
-    letter-spacing: calc(53px - 1ch); padding: 0 0 0 calc((45px - 1ch) / 2); text-align: left;
-    caret-color: var(--accent);
+    position: absolute; inset: 0; width: 100%; height: 52px; z-index: 1;
+    background: transparent; border: 0; border-radius: 8px; box-shadow: none; padding: 0;
+    font: 500 16px/52px var(--mono); color: transparent; caret-color: transparent; letter-spacing: 0;
   }
-  #code-input::placeholder { color: var(--faint); }
+  #code-input::selection { background: transparent; }
   #code-input:focus { box-shadow: none; }
-  .code-slots:focus-within i { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--panel); }
+  .code-slots:focus-within i.cur { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); background: var(--panel); }
+  /* the caret, in the empty box the next character goes in */
+  .code-slots:focus-within i.cur:empty::after { content: ""; width: 1px; height: 24px; background: var(--accent); animation: caret 1.1s steps(1) infinite; }
+  @keyframes caret { 50% { opacity: 0; } }
+  @media (max-width: 360px) { .code-slots { --cw: 36px; gap: 5px; } }
+  /* waiting for the host: a way back to the join screen */
+  #jw-cancel { margin-top: 18px; height: 36px; padding: 0 16px; font: 500 13px/1 var(--sans); }
+  #jw-cancel[hidden] { display: none; }
+  #join-status.refused { color: var(--text); }
   #join-status { font-size: 13px; color: var(--ink-2); min-height: 20px; max-width: 560px; text-align: center; margin-top: 16px; }
   #join-status:not(:empty) { padding: 9px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-3); }
   /* no WebGPU here: one calm line, the remedy behind Details */
@@ -358,6 +386,22 @@
   #join-gpu details[open] summary::after { transform: translateY(0) rotate(-135deg); }
   #join-gpu summary:hover { color: var(--text); }
   #join-gpu details p { margin-top: 6px; color: var(--muted); overflow-wrap: anywhere; }
+  /* Network: an optional TURN relay, folded away under the footer line */
+  #join-net { width: min(680px, 100%); margin-top: 10px; font-size: 13px; line-height: 1.5; color: var(--ink-2); }
+  #join-net summary { width: fit-content; margin: 0 auto; cursor: pointer; color: var(--muted); font-weight: 500; list-style: none; }
+  #join-net summary::-webkit-details-marker { display: none; }
+  #join-net summary::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 7px; border: solid currentColor; border-width: 0 1.3px 1.3px 0; transform: translateY(-2px) rotate(45deg); transition: transform .2s var(--ease); }
+  #join-net[open] summary::after { transform: translateY(0) rotate(-135deg); }
+  #join-net summary:hover { color: var(--text); }
+  #join-net .jn-body { margin-top: 10px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel-3); display: grid; gap: 10px; }
+  #join-net .jn-help { color: var(--muted); text-wrap: pretty; }
+  #join-net .jn-row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 8px; }
+  #join-net .jn-row input { min-width: 0; padding: 8px 10px; font-size: 13px; }
+  #join-net .jn-chk { display: flex; align-items: baseline; gap: 8px; color: var(--ink-2); }
+  #join-net .jn-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  #join-net .jn-acts button { height: 32px; padding: 0 14px; font: 500 13px/1 var(--sans); }
+  #turn-note { color: var(--muted); }
+  @media (max-width: 560px) { #join-net .jn-row { grid-template-columns: 1fr; } }
   #join-screen:has(#join-gpu:not([hidden])) .jfoot { display: none; }
   #join-status:empty { display: none; }
   /* joining: the code in mono */
@@ -373,7 +417,7 @@
   #join-wait { display: flex; flex-direction: column; align-items: center; gap: 22px; margin-top: 56px; animation: enter .35s var(--ease); }
   #join-wait[hidden] { display: none; }
   #join-wait .dl { width: 64px; height: 64px; }
-  #jw-t { font: 400 26px/1.15 var(--display); letter-spacing: -.02em; color: var(--text); text-align: center; }
+  #jw-t { font: 400 26px/1.15 var(--display); letter-spacing: -.02em; color: var(--text); text-align: center; text-wrap: balance; }
   #join-screen.waiting > :is(h1, .lede, .jpanel, .jfoot, #join-gpu) { display: none; }
   #join-screen.waiting { justify-content: center; padding-bottom: 12vh; }
   #join-screen.waiting #join-wait { margin-top: 0; }
@@ -488,6 +532,8 @@
   #mode-bar button:hover:not(:disabled) { background: transparent; color: var(--text); }
   #mode-bar button:active:not(:disabled) { transform: none; }
   #mode-bar button[aria-selected="true"] { color: var(--text); }
+  #mode-bar button[aria-disabled="true"] { opacity: .55; cursor: default; }
+  #mode-bar button[aria-disabled="true"].fresh::after { display: none; }
   /* Code selected: the pill goes black with a soft blue glow, the word white, stars twinkling inside (site/js/sparkle.js) */
   #mode-bar::before { transition: transform .55s cubic-bezier(.65,0,.25,1), background-color .3s ease, box-shadow .3s ease; }
   #mode-bar:has(#mode-code[aria-selected="true"])::before { background: #0B0D14; box-shadow: 0 1px 2px rgba(0,0,0,.25), 0 0 16px -3px rgba(110,134,255,.6); }
@@ -528,11 +574,11 @@
   .ap-side > section { padding: 18px 20px; }
   .ap-side > section + section { border-top: 1px solid var(--rule-2); }
   .ap-h { display: flex; flex-direction: column; gap: 6px; padding: 22px 22px 6px; }
-  .ap-h b { font: 400 26px/1.1 var(--display); letter-spacing: -.025em; }
+  .ap-h h2 { font: 400 26px/1.1 var(--display); letter-spacing: -.025em; }
   .ap-h span { font-size: 13px; color: var(--muted); }
   #ai-panel.online .ap-h, #ai-panel.online .ap-note { display: none; }
-  .ap-note { margin-top: auto; padding: 0 2px 4px; font-size: 12px; color: var(--muted); }
-  .ap-k { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--muted); }
+  .ap-note { margin-top: 2px; padding: 0 2px 4px; font-size: 12px; color: var(--muted); }   /* under the rows, not pushed down as the device list grows */
+  .ap-k { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; font-size: 13px; font-weight: 400; color: var(--muted); }
   .ap-k b { font: 500 22px/1 var(--mono); letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums; }
   /* the pool: one segment per device, a tick where each model starts to fit */
   #ap-meter { position: relative; height: 10px; margin: 14px 0 10px; border-radius: 5px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
@@ -551,7 +597,10 @@
   #ap-need b { font: 500 12px/1 var(--mono); color: var(--text); }
   #ap-need span { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--ink-2); }
   #ap-need.ok span { color: var(--accent-text); }
-  #ap-devs { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  /* four and a half rows (20px rows, 6px gaps), then the list scrolls: the card keeps its height as more
+     devices join. The fade covers only the half row, so the four above it stay clear */
+  #ap-devs { list-style: none; display: flex; flex-direction: column; gap: 6px; max-height: 115px; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+  #ap-devs.more { -webkit-mask-image: linear-gradient(#000 calc(100% - 14px), transparent); mask-image: linear-gradient(#000 calc(100% - 14px), transparent); }
   #ap-devs li { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; color: var(--text); }
   #ap-devs li i { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--sw); }
   #ap-devs li span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -560,6 +609,11 @@
   #ap-devs li.none { color: var(--muted); }
   /* this device: lend N GB */
   .ap-me { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .ap-me-hint { flex-basis: 100%; font-size: 12px; color: var(--accent); }
+  .ap-covers { flex-basis: 100%; font-size: 12px; line-height: 1.4; color: var(--muted); }
+  #ai-short { margin: 8px 2px 0; font-size: 12px; line-height: 1.45; color: var(--ink-2); }
+  #ai-panel.online #ai-short, #ai-panel.online .ap-covers { display: none; }
+  .pheld { margin-top: 6px; font-size: 12px; color: var(--muted); }
   .ap-step { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--border-2); border-radius: 12px; background: var(--panel); }
   .ap-step .step { width: 34px; height: 34px; padding: 0; border: 0; border-radius: 8px; font: 400 17px/1 var(--sans); color: var(--ink-2); background: transparent; display: grid; place-items: center; }
   .ap-step .step:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
@@ -567,6 +621,7 @@
   #ap-gb:focus { outline: none; background: var(--panel-2); }   /* type an amount: Enter or leaving the box applies it */
   .ap-step .u { font: 400 12px/1 var(--mono); color: var(--muted); margin-right: 4px; }
   .ap-no { flex-basis: 100%; font-size: 12px; color: var(--muted); }
+  .ap-no-d { display: block; margin-top: 4px; color: var(--ink-2); overflow-wrap: anywhere; }
   /* invite: the QR and the code, right in the card */
   .ap-room { display: flex; align-items: center; gap: 16px; }
   #ap-qr { flex: none; padding: 7px; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
@@ -610,14 +665,20 @@
   /* short: a neutral tag in the shape of "fits" (calm, no warning colour) */
   .rung .more { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
   .rung.ok { color: var(--text); }
-  .rung.short:not(.sel) { opacity: .6; }
-  .rung.short:not(.sel):hover:not(:disabled) { opacity: .85; }
+  /* short rows stay selectable, so their text keeps AA contrast: only the circle and chip fade */
+  .rung.short:not(.sel) { color: var(--ink-4); }
+  .rung.short:not(.sel)::before { opacity: .6; }
+  .rung.short:not(.sel) .more { color: var(--ink-3); box-shadow: none; }
+  .rung.short:not(.sel):hover:not(:disabled) { color: var(--muted); }
   .ai-nogpu { font-size: 13px; color: var(--muted); padding: 2px 4px 4px; }
   .rung:hover:not(:disabled) { background: var(--panel-3); border-color: var(--border-2); }
   .rung.sel, .rung.sel:hover:not(:disabled) { border-color: var(--accent); color: var(--text); background: var(--accent-soft); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent-soft) 60%, transparent); }
   .rung.sel::before { box-shadow: inset 0 0 0 4.5px var(--accent); }
   #ai-redeal { width: 100%; font: 500 13px/1 var(--sans); border-color: var(--warn); color: var(--warn-text); }
   #redeal-why { font-size: 12px; color: var(--ink-2); }
+  #ai-give { width: 100%; font: 500 13px/1 var(--sans); }
+  #ai-panel:is(.loading, .online) :is(#ai-give, #ai-why) { display: none; }
+  #ai-why { font-size: 12px; line-height: 1.45; color: var(--ink-2); text-align: center; }
   #ai-loading { display: none !important; }
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
   /* loading: the landing's pick card. The logo's wave, what loads, each device's share of it, and
@@ -745,10 +806,46 @@
   details.think { margin: 2px 0 8px; padding: 6px 10px; border-left: 2px solid var(--border-2); color: var(--muted); font-size: 13px; }
   details.think summary { cursor: pointer; font-size: 12px; }
   /* ---- toasts, share sheet, the room-over card ---- */
+  /* the signaling server dropped while in a room (room.js watchSignaling): links stay up, new devices can't join */
+  /* the host: a device asking to join (room.js joinRequests). Not modal and never takes focus by itself:
+     it sits under the header's right end (on a phone, across the top), announces itself to screen
+     readers, and waits; Tab reaches it right after the header. Several requests queue, one at a time */
+  #join-reqs { position: fixed; top: calc(64px + env(safe-area-inset-top)); right: max(16px, 3vw); z-index: 85; width: 340px; max-width: calc(100vw - 32px); box-sizing: border-box;
+    display: grid; grid-template-columns: 30px 1fr; gap: 4px 12px; padding: 14px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 1px 2px rgba(20,22,29,.05), 0 18px 40px -16px rgba(20,22,29,.28); animation: popin .22s var(--ease); }
+  #join-reqs[hidden] { display: none; }
+  #join-reqs .ic { grid-row: span 2; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--accent-soft); color: var(--accent-text); }
+  #jr-line { align-self: center; margin: 0; padding: 0; font: 500 14px/1.35 var(--sans); letter-spacing: 0; color: var(--text); overflow-wrap: anywhere; }
+  #jr-sub { font-size: 12px; line-height: 1.45; color: var(--muted); text-wrap: pretty; }
+  #join-reqs .jr-acts { grid-column: 2; display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  #join-reqs .jr-acts button { height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); }
+  #jr-more { margin-left: auto; font-size: 12px; color: var(--muted); }
+  #jr-more:empty { display: none; }
+  @media (max-width: 640px) {
+    #join-reqs { left: 12px; right: 12px; width: auto; max-width: none; top: calc(60px + env(safe-area-inset-top)); }
+    #join-reqs .jr-acts button { flex: 1; height: 44px; }
+    #jr-more { flex-basis: 100%; order: 3; margin-left: 0; }
+    #join-reqs .jr-acts { flex-wrap: wrap; }
+  }
+  #signal-note { position: fixed; top: calc(64px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 95; width: max-content; max-width: min(560px, calc(100vw - 32px)); box-sizing: border-box;
+    padding: 9px 14px; border: 1px solid var(--rule-2); border-radius: 12px; background: var(--panel); color: var(--ink-2); font: 400 13px/1.4 var(--sans); box-shadow: 0 10px 30px -12px rgba(20,22,29,.25); }
+  #signal-note[hidden] { display: none; }
+  #signal-note::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--warn); vertical-align: 1px; }
+  #join-status.signal-down { color: var(--ink); border-color: var(--warn); }
+  #join-status.signal-down a { color: var(--accent-text); }
   #toasts { position: fixed; bottom: calc(104px + env(safe-area-inset-bottom)); right: max(16px, 3vw, calc(12px + env(safe-area-inset-right))); z-index: 90; display: flex; flex-direction: column; align-items: flex-end; gap: 8px; pointer-events: none; }
   body:not(.in-room) #toasts { bottom: auto; top: 72px; }
   @media (max-width: 640px) { #toasts { left: 16px; right: 16px; align-items: center; } }
+  /* toasts keep clear of open panels: beside Room settings (on a phone, under its sheet), and on the
+     model and loading cards (no composer yet) at the bottom edge, as wide as the gutter beside the card */
+  @media (min-width: 641px) {
+    body:has(#room-menu[open]) #toasts { right: auto; left: max(16px, 3vw, calc(12px + env(safe-area-inset-left))); align-items: flex-start; }
+    body.in-room:not(:has(#ai-panel.online)) #toasts { bottom: calc(20px + env(safe-area-inset-bottom)); max-width: max(150px, calc(50vw - 430px - max(16px, 3vw) - 12px)); }
+  }
+  @media (max-width: 640px) { body:has(#room-menu[open]) #toasts { z-index: 19; } }
   .toast { display: flex; align-items: center; gap: 9px; background: var(--text); color: #fff; font: 500 13px/1.3 var(--sans); padding: 10px 14px; border-radius: 12px; box-shadow: 0 10px 30px rgba(20,21,26,0.2); animation: toastin 0.45s var(--ease) both, toastout 0.4s ease-in 3.6s both; }
+  /* an error stays about twice as long, to be read: fade out at 7.8 s (room.js drops it once the fade ends, ~8.2 s) */
+  .toast.error { animation: toastin 0.45s var(--ease) both, toastout 0.4s ease-in 7.8s both; }
   .toast::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--sw, var(--blue-400)); }
   /* joined / left: a quieter chip, the device's colour as its dot */
   .toast.presence { background: var(--panel); color: var(--text); font-weight: 400; padding: 11px 16px 11px 14px; border-radius: 12px; box-shadow: 0 0 0 1px var(--rule), 0 10px 30px -12px rgba(20,22,29,.25); }
@@ -775,17 +872,28 @@
   #share-url { flex: 1; min-width: 0; font: 400 12px/1.2 var(--mono); color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; }
   #share-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border-color: var(--accent); color: #fff; }
   #share-copy:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+  .pop .api-kick { flex: none; height: 30px; margin-top: 10px; padding: 0 12px; font: 500 12px/1 var(--sans); }
   .sheet.invite .row { margin-top: 12px; }
   .sheet .scan { margin-top: 10px; font-size: 13px; color: var(--muted); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
   .sheet.wide { width: min(680px, 100%); }
   #card-canvas { width: 100%; height: auto; margin-top: 20px; border-radius: 12px; border: 1px solid var(--border); }
 
-  /* ---- this device's screen: full screen, lending its memory and GPU (room/compute.js) ---- */
-  #compute-screen { position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); background: #000; color: var(--on-game); overflow: hidden; animation: csin .5s var(--ease); }
+  /* ---- Serve API: the dark page (room/compute.js draws this device's half, room.js apiPanel the API half).
+     This device's layers and passes on the left, the endpoint and how to connect on the right; one
+     column on phones. The page's own palette: black, --on-game ink, and tints of --on-game over black ---- */
+  #compute-screen {
+    --cs-bg: #000;
+    --cs-1: color-mix(in srgb, var(--on-game) 4%, var(--cs-bg));     /* the API card */
+    --cs-2: color-mix(in srgb, var(--on-game) 7%, var(--cs-bg));     /* wells: the command, the code */
+    --cs-3: color-mix(in srgb, var(--on-game) 13%, var(--cs-bg));    /* hover, the selected tab */
+    --cs-rule: color-mix(in srgb, var(--on-game) 13%, transparent);
+    --cs-rule-2: color-mix(in srgb, var(--on-game) 8%, transparent);
+    --cs-top: 66px;   /* the top bar's height: the device half sticks under it */
+    position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right); background: var(--cs-bg); color: var(--on-game); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: var(--cs-3) transparent; animation: csin .5s var(--ease); }
   @keyframes csin { from { opacity: 0; } }
   html.computing header, html.computing #room-screen, html.computing #join-screen { visibility: hidden; }
-  .cs-top { flex: none; display: flex; align-items: center; gap: 14px; padding: 16px 20px; padding-top: max(16px, env(safe-area-inset-top)); }
+  .cs-top { position: sticky; top: 0; z-index: 2; flex: none; display: flex; align-items: center; gap: 14px; padding: 16px 20px; padding-top: max(16px, env(safe-area-inset-top)); background: var(--cs-bg); }
   .cs-brand { display: inline-flex; align-items: center; gap: 9px; font: 500 17px/1 var(--sans); letter-spacing: -.02em; }
   .cs-brand svg { fill: var(--on-game); }
   .cs-room { display: inline-flex; align-items: center; gap: 8px; padding-left: 14px; border-left: 1px solid rgba(255,255,255,.12); font-size: 13px; color: var(--on-game-2); white-space: nowrap; }
@@ -827,9 +935,171 @@
   .cs-hop { width: 7px; height: 7px; border-radius: 50%; background: var(--me); opacity: .35; }
   #compute-exit { white-space: nowrap; }
   .cs-foot { flex: none; padding: 18px 20px; padding-bottom: max(18px, env(safe-area-inset-bottom)); text-align: center; font-size: 12px; color: var(--on-game-2); }
+  .cs-foot { display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .cs-foot p { margin: 0; }
+  /* what could stop this device serving: a sleeping screen, a battery, a background tab */
+  #cs-notes { display: flex; flex-direction: column; gap: 6px; width: min(520px, 100%); margin: 0; padding: 0; list-style: none; font-size: 13px; line-height: 1.4; color: var(--on-game); }
+  #cs-notes[hidden] { display: none; }
+  #cs-notes li { padding: 8px 12px; border: 1px solid rgba(255,200,87,.35); border-radius: 8px; background: rgba(255,200,87,.08); }
+  #cs-new { height: 40px; padding: 0 18px; font: 500 14px/1 var(--sans); color: #000; background: var(--on-game); border: 0; border-radius: 8px; }
+  #cs-new[hidden] { display: none; }
+  #cs-new:hover { background: #fff; }
+  #compute-screen :is(#compute-exit, #cs-new):focus-visible { outline: 2px solid var(--blue-400); outline-offset: 2px; }
+  /* the room ended: the mark rests, dimmed, instead of breathing as if it still worked */
+  #compute-screen[data-phase="over"] #cs-logo circle { animation: none; opacity: .28; }
+  #compute-screen[data-phase="over"] .cs-live { background: var(--on-game-2); box-shadow: none; }
+  #compute-screen[data-phase="over"] .cs-foot p { display: none; }
+  /* the two halves: stacked on phones (this device first), side by side from 960px, the device half
+     staying in view (sticky, centred) while the API half scrolls */
+  .cs-body { flex: 1 0 auto; display: flex; flex-direction: column; }
+  .cs-dev { flex: 1 0 auto; display: flex; flex-direction: column; }
+  .cs-say { display: flex; flex-direction: column; align-items: center; }
+  .cs-api { flex: none; margin: 8px 16px max(16px, env(safe-area-inset-bottom)); border: 1px solid var(--cs-rule); border-radius: var(--r-lg); background: var(--cs-1); overflow: hidden; text-align: left; }
+  #compute-screen[data-phase="over"] .cs-api { display: none; }   /* a room that ended serves nothing */
+  @media (min-width: 960px) {
+    .cs-body { flex-direction: row; align-items: flex-start; gap: clamp(24px, 4vw, 64px); padding: 0 24px 24px clamp(20px, 3vw, 40px); }
+    .cs-dev { position: sticky; top: var(--cs-top); flex: 1 1 0; min-width: 0; height: calc(100vh - var(--cs-top) - 24px); height: calc(100dvh - var(--cs-top) - 24px); }
+    .cs-dev .cs-foot { padding-bottom: 0; }
+    .cs-api { width: min(480px, 44vw); margin: 0; }
+    #compute-screen[data-phase="over"] .cs-body { padding: 0; }
+  }
+  @media (max-width: 959px) {
+    .cs-dev { flex: none; padding-bottom: 8px; }
+    .cs-stage { height: auto; margin-top: 0; padding: 20px 0 22px; }
+    #cs-logo { width: clamp(96px, 24vmin, 180px); }
+    .cs-text { margin-bottom: 0; }
+    .cs-foot { padding-top: 16px; padding-bottom: 8px; }
+    #compute-screen[data-phase="over"] .cs-dev { flex: 1 0 auto; }
+    #compute-screen[data-phase="over"] .cs-stage { margin-top: auto; }
+    #compute-screen[data-phase="over"] .cs-text { margin-bottom: auto; }
+  }
+  /* the API client this room serves, beside this device's layers and passes */
+  #cs-api { display: inline-flex; align-items: center; gap: 8px; max-width: 100%; margin-top: 18px; padding: 7px 14px 7px 12px; border: 1px solid color-mix(in srgb, var(--blue-400) 40%, transparent); border-radius: var(--r-pill); background: color-mix(in srgb, var(--blue-400) 10%, transparent); font-size: 13px; line-height: 1.3; color: var(--on-game-2); text-align: left; }
+  #cs-api[hidden] { display: none; }
+  #cs-api i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--blue-400); animation: livebeat 2.4s var(--ease) infinite; }
+  #cs-api b { font-weight: 500; color: var(--on-game); }
+  #cs-api .n { font: 400 12px/1 var(--mono); color: var(--on-game); }
+  #compute-screen :focus-visible { outline-color: var(--blue-400); }
+
+  /* the API half: the lede and the live status, who is connected, the three steps (folded under "How
+     to connect" while a client is connected), the host's switch and the fine print */
+  .api-head { padding: 18px 20px 16px; }
+  .api-head h2 { font: 400 22px/1.1 var(--display); letter-spacing: -.02em; color: var(--on-game); }
+  .api-lede { margin-top: 6px; font-size: 13px; line-height: 1.45; color: var(--on-game-2); }
+  .api-status { display: flex; align-items: center; gap: 8px; margin-top: 14px; font: 500 14px/1.35 var(--sans); color: var(--on-game); }
+  .api-status i { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--on-game-2); }
+  .api-status.wait i { animation: apiwait 1.6s var(--ease) infinite; }
+  @keyframes apiwait { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+  .api-status.live i { background: var(--blue-400); animation: livebeat 2.4s var(--ease) infinite; }
+  .api-status.off { color: var(--on-game-2); }
+  .api-status.off i { background: var(--cs-3); }
+  .api-sub { margin-top: 4px; padding-left: 15px; font-size: 12px; line-height: 1.45; color: var(--on-game-2); }
+  .api-sub:empty { display: none; }
+  .api-s { padding: 14px 20px 16px; border-top: 1px solid var(--cs-rule-2); }
+  .api-s > h3 { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font: 500 13px/1.2 var(--sans); letter-spacing: -.005em; color: var(--on-game-2); }
+  /* How to connect: a plain list of steps while nothing is connected; a disclosure once something is */
+  .api-how > summary { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 20px; border-top: 1px solid var(--cs-rule-2); list-style: none; cursor: pointer; font: 500 13px/1.2 var(--sans); color: var(--on-game-2); transition: color .15s var(--ease), background-color .15s var(--ease); }
+  .api-how > summary::-webkit-details-marker { display: none; }
+  .api-how > summary:hover { color: var(--on-game); background: var(--cs-2); }
+  .api-how > summary svg { flex: none; transition: transform .2s var(--ease); }
+  .api-how[open] > summary svg { transform: rotate(180deg); }
+  .api-how > summary:focus-visible { outline-offset: -2px; }
+  .api-how.flat > summary { display: none; }
+  /* numbered steps hanging off one hairline; 1 is the one action (in the accent), a tick once the host has a client */
+  .api-n { flex: none; display: grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; box-shadow: inset 0 0 0 1px var(--cs-rule); font: 500 11px/1 var(--mono); font-style: normal; color: var(--on-game-2); }
+  .api-n svg { display: none; }
+  .api-step.one .api-n { background: var(--accent); box-shadow: none; color: #fff; }
+  .cs-api.done .api-step.one .api-n span { display: none; }
+  .cs-api.done .api-step.one .api-n svg { display: block; }
+  .api-step { position: relative; padding-left: 46px; }
+  .api-step + .api-step { border-top: 0; padding-top: 4px; }
+  .api-step:has(+ .api-step)::after { content: ""; position: absolute; left: 28px; top: 32px; bottom: -4px; width: 1px; background: var(--cs-rule-2); }
+  .api-step + .api-step::after { top: 26px; }
+  .api-step > h3 { margin-left: -26px; color: var(--on-game); }
+  .cs-api .linkrow { margin-top: 0; border-color: var(--cs-rule); background: var(--cs-2); }
+  .api-pr { flex: none; font: 400 12px/1 var(--mono); color: var(--on-game-2); }
+  #api-cmd { flex: 1; min-width: 0; font: 400 12px/1.2 var(--mono); color: var(--on-game); white-space: nowrap; overflow-x: auto; scrollbar-width: none; }
+  #api-cmd::-webkit-scrollbar { display: none; }
+  .api-cmd-w { position: relative; flex: 1; min-width: 0; display: flex; }
+  .api-cmd-w::after, .api-code-w::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 28px; background: linear-gradient(to right, transparent, var(--cs-2)); opacity: 0; transition: opacity .15s var(--ease); pointer-events: none; }
+  .api-cmd-w.more::after, .api-code-w.more::after { opacity: 1; }
+  #api-cmd:focus-visible { outline: 2px solid var(--blue-400); outline-offset: 2px; border-radius: 4px; }
+  #api-copy { flex: none; height: 34px; padding: 0 14px; font: 500 13px/1 var(--sans); background: var(--accent); border: 0; color: #fff; box-shadow: 0 1px 0 rgba(255,255,255,.18) inset, 0 6px 16px -8px rgba(42,69,224,.7); }
+  #api-copy:hover:not(:disabled) { background: var(--accent-hover); }
+  .api-urls { display: flex; flex-direction: column; border: 1px solid var(--cs-rule); border-radius: var(--r-md); }
+  .api-url { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 3px 4px 3px 12px; }
+  .api-url + .api-url { border-top: 1px solid var(--cs-rule-2); }
+  .api-url > span { flex: none; width: 70px; font-size: 13px; color: var(--on-game-2); }
+  .api-url code { flex: 1; min-width: 0; font: 400 12px/1.3 var(--mono); color: var(--on-game); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cs-api .icon-act { flex: none; width: 32px; height: 32px; border: 0; background: transparent; color: var(--on-game-2); }
+  .cs-api .icon-act:hover:not(:disabled) { background: var(--cs-3); color: var(--on-game); }
+  .cs-api .icon-act.done, .cs-api .icon-act.done:hover:not(:disabled) { color: var(--blue-200); }
+  .api-hint { margin-top: 8px; font-size: 12px; line-height: 1.5; color: var(--on-game-2); }
+  .api-ex-hint code, .api-hint code { font: 400 11px/1 var(--mono); color: var(--on-game); }
+  /* the example: tabs, the code and a per-tab hint in one card; its Copy lives in the tab row */
+  .api-ex { border: 1px solid var(--cs-rule); border-radius: var(--r-md); background: var(--cs-2); overflow: hidden; }
+  .api-try { display: flex; align-items: center; gap: 8px; padding: 6px; border-bottom: 1px solid var(--cs-rule-2); background: var(--cs-1); }
+  .api-tabs { display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: var(--cs-bg); box-shadow: inset 0 0 0 1px var(--cs-rule-2); }
+  .api-tabs button { height: 26px; padding: 0 10px; border: 0; border-radius: 7px; background: transparent; font: 500 12px/1 var(--sans); color: var(--on-game-2); transition: color .15s var(--ease), background-color .15s var(--ease); }
+  .api-tabs button:hover:not(:disabled) { background: transparent; color: var(--on-game); }
+  .api-tabs button[aria-selected="true"], .api-tabs button[aria-selected="true"]:hover:not(:disabled) { background: var(--cs-3); color: var(--on-game); }
+  .api-tabs button:active:not(:disabled) { transform: none; }
+  .api-tabs button:focus-visible { outline-offset: -2px; }
+  #api-code-copy { margin-left: auto; width: auto; height: 28px; padding: 0 10px 0 8px; gap: 6px; display: inline-flex; align-items: center; font: 500 12px/1 var(--sans); }
+  .api-code-w { position: relative; }
+  #api-code { margin: 0; padding: 12px; border: 0; border-radius: 0; background: var(--cs-2); font: 400 12px/1.6 var(--mono); color: var(--on-game); white-space: pre; overflow-x: auto; tab-size: 2; scrollbar-width: thin; scrollbar-color: var(--cs-3) transparent; }
+  #api-code:focus-visible { outline-offset: -2px; }
+  #api-code .c { color: var(--on-game-2); }
+  #api-code .u { color: var(--blue-200); }
+  .api-ex-hint { padding: 8px 12px; border-top: 1px solid var(--cs-rule-2); font-size: 12px; line-height: 1.4; color: var(--on-game-2); }
+  /* who is connected: the host can Disconnect each */
+  #api-clients { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  #api-clients li { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 6px 6px 6px 8px; border: 1px solid var(--cs-rule); border-radius: var(--r-md); background: var(--cs-2); }
+  #api-clients .ic { flex: none; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 8px; background: color-mix(in srgb, var(--blue-400) 16%, transparent); color: var(--blue-200); }
+  #api-clients .nm { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+  #api-clients .nm b { min-width: 0; font: 500 13px/1.2 var(--sans); color: var(--on-game); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #api-clients .nm small { flex: none; font: 400 12px/1.2 var(--sans); color: var(--on-game-2); white-space: nowrap; }
+  #api-clients .nm small .n { font: 400 11px/1 var(--mono); color: var(--on-game); }
+  #api-clients li button { flex: none; height: 32px; padding: 0 12px; border: 1px solid var(--cs-rule); border-radius: 8px; background: transparent; font: 500 12px/1 var(--sans); color: color-mix(in srgb, var(--del) 45%, var(--on-game)); }
+  #api-clients li button:hover:not(:disabled) { border-color: color-mix(in srgb, var(--del) 60%, transparent); background: color-mix(in srgb, var(--del) 16%, transparent); }
+  /* apart from the steps: the host's switch and the fine print, quieter */
+  .api-foot { display: flex; flex-direction: column; gap: 10px; padding: 14px 20px 16px; border-top: 1px solid var(--cs-rule-2); background: var(--cs-bg); }
+  .api-set { display: flex; align-items: center; gap: 16px; cursor: pointer; }
+  .api-set[hidden] { display: none; }
+  .api-set > span:first-child { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+  .api-set b { font: 500 14px/1.25 var(--sans); color: var(--on-game); }
+  .api-set small { font-size: 12px; line-height: 1.4; color: var(--on-game-2); }
+  .api-set .switch i { background: var(--cs-3); }
+  .api-set .switch input:checked + i { background: var(--accent); }
+  .api-set .switch input:focus-visible + i { outline-color: var(--blue-400); }
+  .api-note { font-size: 12px; line-height: 1.5; color: var(--on-game-2); }
+  .api-set:not([hidden]) + .api-note { padding-top: 10px; border-top: 1px solid var(--cs-rule-2); }
+  /* phones: 44px targets; the narrowest (360px) tabs a little tighter */
+  @media (max-width: 640px) {
+    .api-head { padding: 18px 16px 14px; }
+    .api-s { padding-left: 16px; padding-right: 16px; }
+    .api-step { padding-left: 42px; }
+    .api-step > h3 { margin-left: -26px; }
+    .api-step:has(+ .api-step)::after { left: 24px; }
+    .api-how > summary { padding: 0 16px; }
+    .api-foot { padding: 14px 16px 16px; }
+    #api-copy { height: 44px; }
+    .cs-api .icon-act { width: 44px; height: 44px; }
+    .api-url { min-height: 48px; }
+    .api-tabs button { height: 38px; }
+    #api-code-copy { height: 44px; }
+    #api-code { font-size: 11px; }
+    /* the example's Copy as an icon (the tabs keep their room), each URL's label on its own line */
+    #api-code-copy .lb { display: none; }
+    #api-code-copy { width: 44px; padding: 0; justify-content: center; }
+    .api-url { flex-wrap: wrap; align-content: center; row-gap: 2px; padding-top: 8px; padding-bottom: 6px; }
+    .api-url > span { width: 100%; font-size: 12px; }
+    #api-clients li button { height: 44px; }
+    #compute-exit { height: 44px; }
+  }
+  @media (max-width: 380px) { .api-tabs button { padding: 0 8px; } }
   /* short screens (a phone in landscape): a smaller mark and title, and the screen scrolls if it still doesn't fit */
   @media (max-height: 500px) {
-    #compute-screen { overflow-y: auto; }
     .cs-top { padding-top: max(10px, env(safe-area-inset-top)); padding-bottom: 6px; }
     .cs-stage { height: 104px; }
     #cs-logo { width: 80px; }
@@ -864,12 +1134,26 @@
   #code-project { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 0 4px 10px; margin-bottom: 6px; border-bottom: 1px solid var(--rule-2); }
   #code-project .k { display: none; }
   #code-proj-select { flex: 1 1 100%; min-width: 0; }
-  #code-new-name { flex: 1 1 100%; min-width: 0; }
+  #code-new-name, #code-new-tpl { flex: 1 1 100%; min-width: 0; }
+  #code-new-tpl[hidden] { display: none; }
   #code-pane #code-new, #code-pane #code-open { background: var(--panel); color: var(--ink-2); }
   #code-proj-kind { flex-basis: 100%; font: 400 11px/1.3 var(--mono); color: var(--muted); }
   #code-proj-kind:empty { display: none; }
   .fh { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 8px; font: 500 12px/1 var(--mono); color: var(--text); }
   .fh svg { flex: none; color: var(--muted); }
+  /* Download (room/code-export.js): a quiet button on the Files heading, its two choices under it */
+  #code-pane #code-dl { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; flex: none; background: transparent; border-color: transparent; color: var(--muted); font: 500 11px/1 var(--sans); }
+  #code-pane #code-dl:hover:not(:disabled), #code-pane #code-dl[aria-expanded="true"] { color: var(--text); background: var(--panel); border-color: var(--border); }
+  #code-dl-menu { display: flex; flex-direction: column; gap: 4px; margin: 2px 4px 8px; padding: 6px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel); }
+  #code-dl-menu[hidden] { display: none; }
+  .fh #code-dl svg { color: inherit; }
+  #code-pane #code-dl-menu button { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; text-align: left; background: transparent; border-color: transparent; color: var(--text); }
+  #code-pane #code-dl-menu button:hover:not(:disabled) { background: var(--panel-2); border-color: var(--border); }
+  #code-pane #code-dl-menu button:focus-visible { outline-offset: -2px; }
+  #code-dl-menu button span { font: 400 11px/1.2 var(--mono); color: var(--muted); }
+  #code-dl-note { margin: 0; padding: 2px 6px; font: 400 11px/1.35 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
+  #code-dl-note:empty { display: none; }
+  #code-dl-note.err { color: var(--err); }
   #code-tree { flex: 1; min-height: 0; overflow: auto; font: 400 12px/1.2 var(--mono); scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
   #code-tree .d { display: flex; align-items: center; gap: 7px; height: 28px; padding: 0 8px; color: var(--muted); white-space: nowrap; }
   #code-tree .d::before { content: ""; flex: none; width: 13px; height: 13px; background: currentColor; -webkit-mask: var(--i-dir) center / contain no-repeat; mask: var(--i-dir) center / contain no-repeat; }
@@ -1003,6 +1287,20 @@
   #code-pane #pv-reload, #code-pane #pv-open { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; flex: none; background: transparent; border-color: transparent; color: var(--muted); }
   #code-pane #pv-reload { order: -1; justify-content: center; width: 30px; height: 30px; padding: 0; }
   #code-pane #pv-reload:hover, #code-pane #pv-open:hover { color: var(--text); background: var(--panel); border-color: var(--border); }
+  /* Share with the room (room/code-ui.js): a button beside Open; the card every device gets; a view over the whole screen */
+  #code-pane #pv-share { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; flex: none; background: transparent; border-color: transparent; color: var(--muted); }
+  #code-pane #pv-share:hover { color: var(--text); background: var(--panel); border-color: var(--border); }
+  #code-pane #pv-share[hidden] { display: none; }
+  .cm-share { align-self: center; display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: 100%; padding: 10px 14px; border: 1px solid var(--border); background: var(--panel); border-radius: 10px; text-align: center; font: 400 12px/1.4 var(--sans); color: var(--ink-2); }
+  .cm-share b { font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+  .cm-share .at { font: 400 11px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+  .cm-share .sb { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+  #code-pane .cm-share button { font-size: 12px; color: var(--ink-2); }
+  #code-pane .cm-share button.ok { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #code-pane .pv-view.pv-full { position: fixed; inset: 0; z-index: 1000; background: #fff; }   /* #chatpane is a container (contains fixed boxes): without the Fullscreen API this fills the pane */
+  #code-pane .pv-full-x { position: absolute; top: max(10px, env(safe-area-inset-top)); right: max(10px, env(safe-area-inset-right)); z-index: 2; display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border-radius: 50%; border: 1px solid var(--border); background: var(--panel); color: var(--ink-2); box-shadow: 0 2px 8px rgba(20,22,29,.15); opacity: .85; }
+  #code-pane .pv-full-x:hover { opacity: 1; color: var(--text); }
+  @media (max-width: 640px) { #code-pane #pv-share { width: 30px; height: 30px; padding: 0; justify-content: center; } #code-pane #pv-share .l { display: none; } }
   #pv-frame-wrap { position: relative; height: 380px; background: #fff; overflow: hidden; }
   /* the edit overlay: while the agent edits a served app, the preview frosts over with a small pill (room/code-ui.js editWin) */
   .ew { position: absolute; inset: 0; z-index: 3; display: grid; place-items: center; background: rgba(250,250,247,.55); -webkit-backdrop-filter: blur(3px) saturate(.9); backdrop-filter: blur(3px) saturate(.9); animation: ewin .25s var(--ease); }
@@ -1060,15 +1358,16 @@
   #ed { flex: 1; min-height: 220px; overflow: auto; background: var(--panel); scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
   #ed[hidden] { display: none; }
   .ed-in { display: grid; grid-template-columns: auto minmax(0, 1fr); min-width: max-content; min-height: 100%; }
-  #ed-ln, #ed-hl, #ed-text { font: 400 12px/1.7 var(--mono); letter-spacing: 0; font-variant-ligatures: none; tab-size: 2; -moz-tab-size: 2; }
+  #ed-ln, #ed-hl, #ed-text, .ed-mirror { font: 400 12px/1.7 var(--mono); letter-spacing: 0; font-variant-ligatures: none; tab-size: 2; -moz-tab-size: 2; }
   #ed-ln { position: sticky; left: 0; z-index: 1; padding: 14px 12px 40px 12px; min-width: 46px; text-align: right; white-space: pre; color: var(--faint); background: var(--panel-3); box-shadow: 1px 0 0 var(--rule-2); user-select: none; }
   .ed-code { position: relative; min-width: 0; }
-  #ed-hl, #ed-text { margin: 0; padding: 14px 24px 40px 16px; white-space: pre; word-wrap: normal; overflow-wrap: normal; border: 0; }
+  #ed-hl, #ed-text, .ed-mirror { margin: 0; padding: 14px 24px 40px 16px; white-space: pre; word-wrap: normal; overflow-wrap: normal; border: 0; }
   #ed-hl { min-height: 100%; color: var(--text); pointer-events: none; }
   #ed-text { position: absolute; inset: 0; width: 100%; height: 100%; resize: none; overflow: hidden; background: transparent; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--accent); border-radius: 0; outline: none; box-shadow: none; }
   #ed-text::selection { background: rgba(42,69,224,.18); -webkit-text-fill-color: transparent; }
   #ed-text:focus { box-shadow: none; }
   #ed-text[readonly] { caret-color: transparent; }
+  .ed-mirror { display: none; }
   /* token colours: the editor and the edit window over the preview (no orange: numbers are indigo) */
   /* syntax colours: the editor, the code the agent is writing, and its diffs */
   :is(#ed-hl, .cm-live .code, .cm-diff .r) :is(.t-k, .t-t) { color: var(--accent-hover); }
@@ -1170,7 +1469,7 @@
     body.in-room #hdr-sum { order: 11; font-size: 12px; }
     .pchip { height: 28px; padding: 0 9px; gap: 6px; }
     .pchip .pname { max-width: 96px; }
-    #compute-open { width: 36px; height: 36px; }
+    #compute-open { height: 36px; padding: 0 11px 0 10px; gap: 7px; }
     #share-btn { padding: 0 12px; }
     /* phones: the GitHub link in the first row, before Invite */
     body.in-room #gh-link { order: 1; }
@@ -1188,7 +1487,7 @@
     .ap-side { border-left: 0; border-top: 1px solid var(--rule-2); }
     .ap-side > section { padding: 16px; }
     .ap-h { padding: 18px 16px 4px; }
-    .ap-h b { font-size: 22px; }
+    .ap-h h2 { font-size: 22px; }
     #ai-head { padding: 8px 10px 12px; }
     .rung { height: 46px; font-size: 13px; padding: 0 12px 0 10px; gap: 8px; }
     #ai-start { height: 46px; }
@@ -1216,7 +1515,7 @@
     .cs-room { padding-left: 10px; font-size: 13px; }
   }
   @media (pointer: coarse) {
-    input, select, textarea, #ai-prompt, #code-prompt, #ed-text, #ed-hl, #ed-ln, #code-pane select, #code-pane input[type="text"] { font-size: 16px; }
+    input, select, textarea, #ai-prompt, #code-prompt, #ed-text, #ed-hl, #ed-ln, .ed-mirror, #code-pane select, #code-pane input[type="text"] { font-size: 16px; }
     :is(.pchip, #band-toggle, .copy-ans, #menu-close, #name-shuffle, #share-close, #code-auto-l, #code-newtask, #pv-reload) { position: relative; }
     :is(.pchip, #band-toggle, .copy-ans, #menu-close, #name-shuffle, #share-close, #code-auto-l, #code-newtask, #pv-reload)::before { content: ""; position: absolute; inset: -8px; }
     #name-shuffle, #share-close { position: absolute; }
@@ -1226,6 +1525,9 @@
     body.in-room #room-badge::before { display: none; }
     body.in-room #room-badge { padding: 0 6px 0 8px; }
   }
+  /* a first row too narrow for "Serve API" (measured: at 421px, with "Room" back beside the code, it pushed settings to a second row):
+     "API" beside the mark, its name still "Serve API" */
+  @media (max-width: 480px) { #compute-open .lw { display: none; } }
   @media (max-width: 370px) {
     body.in-room #hdr-sum { width: 0; padding: 0; font-size: 0; }   /* no total; its fade still ends the chip row */
     #share-btn .lbl { display: none; }
@@ -1257,12 +1559,9 @@
     .cm-diff .r { white-space: pre-wrap; overflow-wrap: anywhere; }
   }
   @media (max-width: 380px) { .cs-room .cs-n { display: none; } }
-  /* the code boxes, all four filled: no caret waiting for a fifth; focused, only the last box (the
-     one Backspace edits) keeps the ring */
-  .code-slots.full #code-input { caret-color: transparent; }
+  /* the code boxes, all six filled: no caret waiting for a seventh; focused, only the last box (the
+     one Backspace edits) keeps the ring (codeReady marks it .cur) */
   .code-slots.full i { background: var(--panel); border-color: var(--border-2); }
-  .code-slots.full:focus-within i { border-color: var(--border-2); box-shadow: none; }
-  .code-slots.full:focus-within i:nth-child(4) { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 
   /* ---- phones: an even room bar, bottom sheets, a composer that stays in reach ---- */
   @media (max-width: 820px) {
@@ -1290,10 +1589,14 @@
     body.in-room:not(:has(#ai-panel.online)) #toasts { bottom: calc(20px + env(safe-area-inset-bottom)); }
     /* this device on the join card with no GPU: the line sits under the name, not under its label */
     #join-pledge.no-gpu .jp-ask { padding-left: 96px; }
-    /* ---- Code on a phone: one view at a time (Agent, Preview, Files) and a tab bar at the bottom
-       (room/code-ui.js sets data-ptab; the desktop columns are untouched) ---- */
+  }
+  /* ---- Code on a phone, upright or in landscape (a short touch screen, however wide): one view at
+     a time (Agent, Preview, Files) and a tab bar at the bottom (room/code-ui.js sets data-ptab and
+     matches the same query; the desktop columns are untouched) ---- */
+  @media (max-width: 640px), (max-height: 500px) and (pointer: coarse) {
     #chatpane.code-mode #code-pane { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; overflow: hidden; padding-bottom: var(--kb, 0px); }
-    #chatpane.code-mode #code-pane > :is(#code-agent, #code-out, #code-files) { display: none; grid-row: 1; grid-column: 1; min-height: 0; max-height: none; border: 0; order: 0; }
+    #chatpane.code-mode #code-pane > :is(#code-agent, #code-out, #code-files) { display: none; grid-row: 1; grid-column: 1; min-height: 0; max-height: none; width: auto; max-width: none; border: 0; order: 0; }
+    #code-pane #code-grip { display: none; }   /* the desktop columns' resize handle, when a landscape phone is wide enough for them */
     #code-pane[data-ptab="agent"] > #code-agent,
     #code-pane[data-ptab="preview"] > #code-out,
     #code-pane[data-ptab="files"]:not(.ed-open) > #code-files,
@@ -1307,6 +1610,7 @@
     #pv-state { margin-left: 4px; }
     /* the agent: its log scrolls, the prompt stays at the bottom */
     #chatpane.code-mode .ag-h { display: none; }   /* the tab bar names the view, the band the model: 40px more for the log */
+    #chatpane.code-mode #code-agent { overflow: hidden; }   /* on a short screen only the log gives up height, never the prompt */
     #chatpane.code-mode #code-log { flex: 1; min-height: 0; max-height: none; overflow-y: auto; overscroll-behavior: contain; padding-bottom: 12px; -webkit-mask-image: linear-gradient(transparent, #000 16px); mask-image: linear-gradient(transparent, #000 16px); }
     #chatpane.code-mode #code-row { margin: 6px 10px 10px; }
     #chatpane.code-mode .cm-jump { margin-top: -44px; }
@@ -1322,10 +1626,16 @@
     #chatpane.code-mode #code-files { padding: 12px 10px 8px; }
     #chatpane.code-mode #code-tree { flex: 1; min-height: 0; }
     #code-pane #code-tree .f { height: 44px; font-size: 14px; }
+    #code-pane #code-dl { min-height: 36px; font-size: 12px; }
+    #code-pane #code-dl-menu button { min-height: 44px; justify-content: center; font-size: 14px; }
     #code-tree .d { height: 36px; }
     #code-pane #code-open { display: none; }
     #code-pane #ed-back { display: grid; place-items: center; flex: none; width: 40px; height: 40px; margin-left: -8px; padding: 0; border: 0; background: transparent; color: var(--ink-2); }
-    #ed-bar { height: 52px; padding-left: 10px; }
+    #ed-bar { height: 52px; padding-left: 10px; padding-right: 16px; }
+    /* long lines wrap (room/code-ui.js numbers the file's lines in the gutter, measured on .ed-mirror) */
+    #code-pane .ed-in { min-width: 0; }
+    #ed-hl, #ed-text, .ed-mirror { white-space: pre-wrap; overflow-wrap: break-word; word-wrap: break-word; }
+    .ed-mirror { display: block; position: absolute; top: 0; left: 0; right: 0; visibility: hidden; pointer-events: none; }
     /* the tab bar */
     #code-pane #code-tabs { display: flex; grid-row: 2; grid-column: 1; height: calc(56px + env(safe-area-inset-bottom)); padding: 0 8px env(safe-area-inset-bottom); background: var(--panel-3); border-top: 1px solid var(--rule-2); }
     #code-pane #code-tabs button { position: relative; flex: 1 1 0; min-width: 0; height: 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--muted); font: 500 12px/1 var(--sans); letter-spacing: -.005em; }
@@ -1345,6 +1655,13 @@
     /* the preview's address gets the room ("sandbox" is a tooltip with no hover here) */
     #pv-sandbox { display: none; }
     #pv-bar { gap: 4px; }
+    /* two ports or more: their tabs get a row of their own, thumb-sized, with the stop button at the
+       far end of each tab, so the address keeps the row below */
+    #pv-bar:has(.pv-tabw + .pv-tabw) { flex-wrap: wrap; height: auto; row-gap: 6px; padding-top: 6px; padding-bottom: 6px; }
+    #pv-bar:has(.pv-tabw + .pv-tabw) #pv-tabs { order: -2; flex: 1 1 100%; display: flex; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+    #pv-tabs .pv-tabw { flex: 1 0 128px; min-width: 0; }
+    #code-pane .pv-tab { flex: 1; min-width: 0; height: 36px; padding: 0 12px; text-align: left; font-size: 13px; }
+    #code-pane .pv-x { width: 36px; height: 36px; margin-right: 0; }
   }
   @media (max-width: 820px) and (pointer: coarse) {
     /* thumb-sized: the composers' buttons, the output tabs, the project and console buttons */
@@ -1356,6 +1673,27 @@
     #ed-save kbd { display: none; }
     .seg button, .seg.chips button { height: 36px; }
     #mode-bar button, #mode-bar::before { height: 36px; }   /* Chat | Code, the pill under it too */
+  }
+  /* ---- short screens (a phone in landscape): one header row with Chat | Code in it (room.js moves
+     the switch), a lower tab bar, so the pane keeps most of the height ---- */
+  @media (max-width: 820px) and (max-height: 500px) and (pointer: coarse) {
+    body.in-room header { flex-wrap: nowrap; }
+    body.in-room :is(.hbrk, #peers) { display: none; }   /* the devices' row; the total stays, the devices are a tap away in Room settings */
+    body.in-room #hdr-sum { order: 0; }
+  }
+  @media (max-width: 640px) and (max-height: 500px) and (pointer: coarse) {
+    /* the narrowest (568px, an iPhone SE held sideways): the one row goes without the total and
+       Invite's label, as on the narrowest upright phones, or it outgrows the screen and the page zooms out */
+    body.in-room #hdr-sum { width: 0; padding: 0; font-size: 0; }
+    #share-btn .lbl { display: none; }
+    #share-btn { width: 36px; padding: 0; justify-content: center; }
+  }
+  @media (max-height: 500px) and (pointer: coarse) {
+    #chat-log { display: none; }   /* the room's event log (dev), as on phones held upright */
+    header #mode-bar button, header #mode-bar::before { width: 64px; }
+    header #mode-bar:has(#mode-code[aria-selected="true"])::before { transform: translateX(64px); }
+    #code-pane #code-tabs { height: calc(44px + env(safe-area-inset-bottom)); }
+    #code-pane #code-tabs button { height: 44px; flex-direction: row; gap: 8px; }
   }
   @media (max-width: 400px) { .seg button { flex: 1 1 auto; padding: 0 6px; } .ms { padding-left: 16px; padding-right: 16px; } #sm-ctx { font-size: 11px; letter-spacing: -.02em; } }   /* '123k / 128k' inside its quarter of the band */
   @media (prefers-reduced-motion: reduce) {
@@ -1374,12 +1712,19 @@
   <span class="hbrk" aria-hidden="true"></span>
   <span id="hdr-sum"></span>
   <button id="share-btn" class="hbtn" type="button" title="Invite a device: a link, a QR code or the room code"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span class="lbl">Invite</span></button>
-  <button id="compute-open" class="hbtn tip-l" type="button" hidden aria-label="This device" data-tip="This device"><svg class="mk" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle class="lit" cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg></button>
+  <button id="compute-open" class="hbtn tip-l" type="button" hidden aria-label="Serve API" aria-haspopup="dialog" aria-controls="compute-screen" data-tip="Use this room from your own tools"><svg class="mk" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle class="lit" cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><span class="lbl"><span class="lw">Serve </span>API</span><i class="api-dot" aria-hidden="true"></i></button>
   <details id="room-menu">
     <summary aria-label="Room settings" data-tip="Room settings" class="tip-l"><svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 6h8M15 6h2M3 14h2M9 14h8"/><circle cx="13" cy="6" r="2"/><circle cx="7" cy="14" r="2"/></svg></summary>
     <div class="menu-pop" role="dialog" aria-labelledby="mp-t">
       <div class="mp-head"><div><p class="mp-t" id="mp-t">Room settings</p><div id="cluster-bar"><b id="cluster-summary">1 device</b> <span class="sr-only">(<span id="peers-n">1</span>)</span></div></div><button class="mp-x" id="menu-close" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button></div>
       <div id="host-controls" hidden>
+        <section class="ms" aria-labelledby="ms-join">
+          <h3 id="ms-join">Joining</h3>
+          <div class="set set-row">
+            <div class="set-l"><b id="l-askjoin">Ask before new devices join</b><span id="d-askjoin">A device that types the room code waits until you allow it. Your invite link and QR code let a device in without asking.</span></div>
+            <label class="switch"><input type="checkbox" id="ask-join" role="switch" aria-labelledby="l-askjoin" aria-describedby="d-askjoin" checked><i aria-hidden="true"></i></label>
+          </div>
+        </section>
         <section class="ms" aria-labelledby="ms-conv">
           <h3 id="ms-conv">Conversation</h3>
           <div class="set">
@@ -1416,7 +1761,11 @@
           <div class="set">
             <div class="set-l"><b id="l-split">Layer split</b><span class="set-help" data-help="ai-split"></span></div>
             <div class="seg" data-for="ai-split" role="radiogroup" aria-labelledby="l-split"></div>
-            <select id="ai-split" class="seg-src" aria-labelledby="l-split" tabindex="-1"><option value="memory">by memory (every device holds some)</option><option value="speed">for speed (fastest devices, fewest hops)</option></select>
+            <select id="ai-split" class="seg-src" aria-labelledby="l-split" tabindex="-1"><option value="memory">by memory (every device holds some)</option><option value="speed" selected>for speed (fastest devices, fewest hops)</option></select>
+          </div>
+          <div class="set set-row">
+            <div class="set-l"><b id="l-autoredeal">Re-deal on its own <span class="exp">experimental</span></b><span>When a device drops and is not back within a minute, deal its layers to the devices still here; an answer or Code run in progress carries on.</span></div>
+            <label class="switch"><input type="checkbox" id="ai-autoredeal" role="switch" aria-labelledby="l-autoredeal" checked><i aria-hidden="true"></i></label>
           </div>
         </section>
       </div>
@@ -1425,8 +1774,10 @@
         <div class="menu-acts">
           <button id="export-chat" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7M5 6.5l3 3 3-3M3 11.5v2h10v-2"/></svg></span>Save the chat<small>The conversation as a Markdown file</small></button>
           <button id="card-btn" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M2.5 11l3.5-3.5 2.5 2.5 2-2 3 3"/><circle cx="10.8" cy="5.9" r=".9"/></svg></span>Room card<small>A picture of this room's devices and speed</small></button>
+          <a id="docs-link" href="/docs" target="_blank" rel="noopener"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2.5h7.5L13 5v8.5H3z"/><path d="M5.5 7.5h5M5.5 10h5"/></svg></span>Docs<small>How rooms, the Serve API and Code mode work (new tab)</small></a>
           <span id="cache-line"><a href="#" id="cache-clear"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.7 9h6.6l.7-9"/></svg></span>Clear cached weights<small>Frees this device's disk; the next start downloads again</small></a></span>
         </div>
+        <ul id="cache-models" aria-label="Cached models" hidden></ul>
         <div id="awake" class="side-hint"></div>
         <button id="add-virtual" class="dev-only" type="button" title="add a device that runs in a frame on this computer, to see the room work before friends join">+ Add a virtual device</button>
         <div id="virtual" hidden></div>
@@ -1435,14 +1786,21 @@
   </details>
   <a id="gh-link" class="gh-link" href="https://github.com/Nehanth/pooled" target="_blank" rel="noopener" aria-label="pooled on GitHub" title="GitHub"><svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
 </header>
+<section id="join-reqs" aria-labelledby="jr-line" aria-describedby="jr-sub" hidden>
+  <span class="ic" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.5" cy="5.5" r="2.5"/><path d="M2 13.5c.5-2.4 2.3-3.8 4.5-3.8 1.1 0 2.1.3 2.9 1M12.5 8.5v5M10 11h5"/></svg></span>
+  <h2 id="jr-line">A device wants to join</h2>
+  <p id="jr-sub">It typed the room code. Once in, it can hold layers and see the chat.</p>
+  <div class="jr-acts"><button id="jr-allow" class="primary" type="button">Allow</button><button id="jr-deny" type="button">Deny</button><span id="jr-more"></span></div>
+</section>
+<div id="jr-live" class="sr-only" aria-live="assertive"></div>
 
-<div id="join-screen">
+<main id="join-screen">
   <h1>Start a room, <span>or join one.</span></h1>
   <p class="lede">Each device in a room shares some memory, and together they run one open AI model in your browser tabs.</p>
   <div class="jpanel">
     <div class="jd" role="group" aria-label="This device">
       <label class="jd-name"><span class="jd-l">This device</span><span class="name-box"><input id="name-input" placeholder="Name, e.g. laptop" maxlength="20" autocomplete="off" spellcheck="false"><button id="name-shuffle" type="button" aria-label="Pick another name" data-tip="Another name"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 4.5h2.5c3 0 4 7 7 7H14M12 9.5l2 2-2 2M2 11.5h2.5c1.2 0 2-1 2.6-2.2M9.3 6.5c.6-1.1 1.3-2 2.2-2H14M12 2.5l2 2-2 2"/></svg></button></span></label>
-      <div id="join-pledge"><span class="jd-l">Memory</span><span class="ap-step jp-step"><button class="step" id="gb-minus" type="button" aria-label="Less memory">&minus;</button><input id="join-gb" type="number" min="1" max="64" step="1" value="1" inputmode="numeric" aria-label="Gigabytes of memory to share"><span class="u">GB</span><button class="step" id="gb-plus" type="button" aria-label="More memory">+</button></span><span class="jp-ask" data-tip="This device can ask but can't hold model layers">Joins to ask</span></div>
+      <div id="join-pledge"><span class="jd-l">Memory</span><span class="ap-step jp-step"><button class="step" id="gb-minus" type="button" aria-label="Less memory">&minus;</button><input id="join-gb" type="number" min="1" max="64" step="1" value="1" inputmode="numeric" aria-label="Gigabytes of memory to share"><span class="u">GB</span><button class="step" id="gb-plus" type="button" aria-label="More memory">+</button></span><span class="jp-ask" data-tip="No WebGPU here, so it gives no memory: it joins to chat">Chat only, no memory to give</span></div>
     </div>
     <div class="jcards">
       <section class="jc" aria-labelledby="jc-start">
@@ -1452,7 +1810,8 @@
       </section>
       <section class="jc" aria-labelledby="jc-join">
         <h2 id="jc-join">Have a code?</h2>
-        <div class="code-slots"><i></i><i></i><i></i><i></i><input id="code-input" placeholder="" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Room code, four characters" enterkeyhint="go"></div>
+        <div class="code-slots"><i></i><i></i><i></i><b aria-hidden="true"></b><i></i><i></i><i></i><input id="code-input" placeholder="" maxlength="12" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Room code, six characters" aria-describedby="code-hint" enterkeyhint="go"></div>
+        <span id="code-hint" class="sr-only">Older rooms have four. You can also paste an invite link.</span>
         <button id="join-btn" type="button">Join</button>
       </section>
     </div>
@@ -1460,11 +1819,26 @@
   <div id="join-wait" hidden><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><p id="jw-t">Joining the room</p></div>
   <div id="join-gpu" hidden><p><i aria-hidden="true"></i><span id="join-gpu-t"></span></p><details><summary>Details</summary><p id="join-gpu-d"></p></details></div>
   <div id="join-status" role="status" aria-live="polite"></div>
-  <p class="jfoot">Works best in Chrome or Edge. Devices without WebGPU can still join and ask.</p>
-</div>
+  <button id="jw-cancel" type="button" hidden>Cancel</button>
+  <p class="jfoot">Runs in Chrome or Edge, or Safari 26, on a laptop or desktop. A phone alone can only chat. The smallest model is at most a 1.8 GB download.</p>
+  <details id="join-net">
+    <summary>Network</summary>
+    <div class="jn-body">
+      <p class="jn-help">Can't connect from this network? A relay (TURN) server carries the traffic when two devices can't reach each other directly (work networks that block UDP). When this site has one set up, rooms use it by themselves; here you can set your own instead (coturn, for example, or a provider's). Saved in this browser only; join links never include it.</p>
+      <div class="jn-row">
+        <input id="turn-url" placeholder="turn:relay.example.org:3478" autocomplete="off" spellcheck="false" aria-label="Relay server URL">
+        <input id="turn-user" placeholder="Username" autocomplete="off" spellcheck="false" aria-label="Relay username">
+        <input id="turn-cred" type="password" placeholder="Password" autocomplete="off" aria-label="Relay password">
+      </div>
+      <label class="jn-chk"><input id="turn-force" type="checkbox"> Always go through the relay (the other devices never see this device's IP address)</label>
+      <div class="jn-acts"><button id="turn-save" type="button">Save</button><button id="turn-clear" type="button">Remove</button><span id="turn-note" role="status" aria-live="polite"></span></div>
+    </div>
+  </details>
+</main>
 
 <div id="room-screen">
   <main id="chatpane">
+    <h1 class="sr-only" id="room-h">Room</h1>
     <div id="topline">
       <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
       <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div></div>
@@ -1473,7 +1847,7 @@
     <div id="ai-empty"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><span id="ai-empty-t">Pick a model and press Start</span></div>
     <div id="ai-panel">
       <div class="ap-main">
-        <p class="ap-h"><b>Pick a model</b><span>Anyone in the room can start it.</span></p>
+        <div class="ap-h"><h2>Pick a model</h2><span>Anyone in the room can start it.</span></div>
         <div id="ai-head">
           <span id="ai-title">MODEL</span>
           <select id="ai-model" aria-label="Model">
@@ -1485,10 +1859,14 @@
             <div id="need-bar"><div id="need-fill"></div></div>
             <div id="need-text"></div>
           </div>
-          <div id="ai-ladder" aria-label="what this room can run"></div>
+          <div id="ai-ladder" role="radiogroup" aria-label="Model"></div>
           <span id="ai-status"></span>
-          <p class="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
+          <p class="ap-note" id="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
           <button id="ai-start" class="primary">Start the model</button>
+          <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
+          <p id="ai-short" role="status" hidden></p>
+          <p id="ai-why" hidden>No device in this room can run a model: none has WebGPU. Join from a laptop or desktop in Chrome or Edge (or Safari 26) to start one.</p>
+          <p id="start-why" class="sr-only"></p>
           <div id="redeal-why" hidden></div>
           <button id="ai-redeal" type="button" hidden>Re-deal the layers</button>
         </div>
@@ -1500,22 +1878,25 @@
       </div>
       <div class="ap-side">
         <section class="ap-pool" aria-label="The room's memory">
-          <p class="ap-k"><span>The room pools</span><b id="ap-total">0 GB</b></p>
+          <h3 class="ap-k"><span>The room pools</span><b id="ap-total">0 GB</b></h3>
           <div id="ap-meter" aria-hidden="true"><div class="apm-fill"></div><div class="apm-ticks"></div></div>
           <p id="ap-need" hidden></p>
           <ul id="ap-devs" aria-label="What each device gives"></ul>
         </section>
         <section class="ap-me" id="ap-me" aria-label="This device">
-          <p class="ap-k"><span>This device gives</span></p>
+          <h3 class="ap-k"><span>This device gives</span></h3>
           <div class="ap-step" id="ap-step"><button class="step" id="ap-minus" type="button" aria-label="Less memory">&minus;</button><input id="ap-gb" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Memory this device gives, in GB" value="1"><span class="u">GB</span><button class="step" id="ap-plus" type="button" aria-label="More memory">+</button></div>
+          <p class="ap-me-hint" id="ap-me-hint" hidden></p>
+          <p class="ap-covers" id="ap-covers">A pledge is a promise: this device never holds more. It covers the layers it holds and their context memory, and on the device that hosts the model also the embedding and output head.</p>
+          <p class="ap-no" id="ap-cap" hidden></p>
           <p class="ap-no" id="ap-no" hidden>This browser can't use its graphics chip, so this device can chat but not help run the model.</p>
         </section>
         <section class="ap-room" id="side-room" aria-label="Invite more devices">
           <div id="ap-qr" aria-hidden="true"></div>
           <div class="ap-inv">
-            <p class="ap-k"><span>Invite more devices</span></p>
+            <h3 class="ap-k"><span>Invite more devices</span></h3>
             <p class="ap-code"><span id="side-code" title="Invite a device">----</span></p>
-            <p class="side-hint">Scan it, or type the code on another device. More devices fit bigger models.</p>
+            <p class="side-hint">Scan it, or type the code on another device. Each device adds the memory it gives.</p>
             <div class="ap-btns"><button type="button" id="ap-copy">Copy link</button><button type="button" data-invite>Full-size QR</button></div>
           </div>
         </section>
@@ -1527,7 +1908,7 @@
       <div id="lc-strip" aria-hidden="true"></div>
       <p id="lc-status" aria-live="polite"></p>
     </div>
-    <div id="ai-output"></div>
+    <div id="ai-output" role="log" aria-live="polite" aria-label="Conversation"></div>
     <div id="chat-tools" hidden>
       <button id="new-chat" type="button" hidden title="Forget the conversation">New chat</button>
       <button id="continue-btn" type="button" hidden title="The answer hit the length cap: keep going">Continue<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 6h8M6.5 2.5 10 6l-3.5 3.5"/></svg></button>
@@ -1537,7 +1918,7 @@
       <span id="queue-note"></span>
       <span id="ctx-meter"></span>
     </div>
-    <div id="ai-row"><textarea id="ai-prompt" rows="1" placeholder="Message the room" enterkeyhint="send"></textarea><button id="ai-send" class="primary">Send</button></div>
+    <div id="ai-row"><textarea id="ai-prompt" rows="1" aria-label="Message the room" placeholder="Message the room" enterkeyhint="send"></textarea><button id="ai-send" class="primary">Send</button></div>
     <section id="code-pane" aria-label="code mode">
       <aside id="code-files" aria-label="files">
         <div id="code-project" hidden>
@@ -1545,10 +1926,16 @@
           <select id="code-proj-select" aria-label="project"></select>
           <button id="code-new" type="button">New</button>
           <input id="code-new-name" type="text" placeholder="Project name" maxlength="40" hidden>
+          <select id="code-new-tpl" aria-label="start from" title="Start from a template, or an empty project" hidden></select>
           <button id="code-open" type="button" hidden>Open folder…</button>
           <span id="code-proj-kind"></span>
         </div>
-        <p class="fh"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 3.5h4l1.2 1.3h5.8v6.7h-11z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>Files</p>
+        <p class="fh"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 3.5h4l1.2 1.3h5.8v6.7h-11z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>Files<button id="code-dl" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="code-dl-menu" title="Download the project"><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 1.5v6.5M3.2 5.4 6 8.2l2.8-2.8M2 10.5h8"/></svg>Download</button></p>
+        <div id="code-dl-menu" hidden>
+          <button type="button" data-dl="zip">Project <span>.zip · every file</span></button>
+          <button type="button" data-dl="html">One HTML file <span>the app, ready to open</span></button>
+          <p id="code-dl-note" role="status" aria-live="polite"></p>
+        </div>
         <div id="code-tree"><div class="none">No files yet</div></div>
       </aside>
       <div id="code-agent">
@@ -1562,7 +1949,7 @@
           <button id="code-newtask" type="button" title="Forget the agent's conversation; files and previews stay">New task</button>
           <span id="code-ctx"></span>
         </div>
-        <div id="code-row"><textarea id="code-prompt" rows="1" placeholder="Ask the agent to build or change something" enterkeyhint="send"></textarea><button id="code-send" class="primary" type="button">Send</button><button id="code-stop" type="button" hidden>Stop</button></div>
+        <div id="code-row"><textarea id="code-prompt" rows="1" aria-label="Ask the agent to build or change something" placeholder="Ask the agent to build or change something" enterkeyhint="send"></textarea><button id="code-send" class="primary" type="button">Send</button><button id="code-stop" type="button" hidden>Stop</button></div>
       </div>
       <div id="code-out">
         <div id="code-grip" role="separator" aria-orientation="vertical" aria-label="Resize the preview (double-click: automatic size)" tabindex="0"></div>
@@ -1593,20 +1980,20 @@
 </div>
 
 <div id="share" class="overlay" hidden>
-  <div class="sheet invite" role="dialog" aria-labelledby="share-h">
+  <div class="sheet invite" role="dialog" aria-modal="true" aria-labelledby="share-h">
     <button id="share-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
     <h2 id="share-h">Invite a device</h2>
-    <div class="k">Open the link or scan the code on another device. It joins this room and adds its memory.</div>
+    <div class="k" id="share-k">Open the link or scan the code on another device. It joins this room and adds its memory.</div>
     <div id="share-qr"></div>
     <p class="scan">On your phone? Scan with the camera app.</p>
-    <div class="or">or type the room code</div>
+    <div class="or" id="share-or">or type the room code</div>
     <div id="share-code"></div>
     <div class="linkrow"><div id="share-url"></div><button id="share-copy" type="button">Copy link</button></div>
     <div class="row"><button id="share-native" type="button" hidden>Share…</button></div>
   </div>
 </div>
 <div id="card" class="overlay" hidden>
-  <div class="sheet wide" role="dialog" aria-labelledby="card-h">
+  <div class="sheet wide" role="dialog" aria-modal="true" aria-labelledby="card-h">
     <button id="card-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
     <h2 id="card-h">Room card</h2>
     <div class="k">A picture of this room's devices and speed, to keep or share.</div>
@@ -1615,30 +2002,112 @@
   </div>
 </div>
 <div id="room-over" class="overlay" hidden>
-  <div class="sheet" role="alertdialog" aria-labelledby="room-over-h">
+  <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="room-over-h">
     <button id="room-over-close" class="x" type="button" aria-label="Close"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 3l8 8M11 3l-8 8"/></svg></button>
     <h2 id="room-over-h">Room over</h2>
     <div class="k" id="room-over-why"></div>
     <div class="row"><button id="room-over-new" type="button" class="primary">Start a new room</button></div>
   </div>
 </div>
-<div id="compute-screen" role="dialog" aria-label="This device's screen" data-phase="idle" hidden>
+<div id="leave" class="overlay" hidden>
+  <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="leave-h" aria-describedby="leave-why">
+    <h2 id="leave-h">Leave the room?</h2>
+    <div class="k" id="leave-why"></div>
+    <div class="row"><button id="leave-stay" type="button" class="primary">Stay</button><button id="leave-go" type="button">Leave</button></div>
+  </div>
+</div>
+<div id="compute-screen" role="dialog" aria-modal="true" aria-label="Serve API" data-phase="idle" hidden>
   <div class="cs-top">
     <span class="cs-brand"><svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8"/><circle cx="10.2" cy="3.4" r="1.99"/><circle cx="18.5" cy="3.4" r="2.38"/><circle cx="3.4" cy="10.2" r="1.99"/><circle cx="10.2" cy="10.2" r="2.38"/><circle cx="18.5" cy="10.2" r="2.94"/><circle cx="3.4" cy="18.5" r="2.38"/><circle cx="10.2" cy="18.5" r="2.94"/><circle cx="18.5" cy="18.5" r="3.9" fill="#7C8FFF"/></svg><span>pooled</span></span>
     <span class="cs-room"><span class="cs-live" aria-hidden="true"></span>Room <b id="cs-code">----</b><span class="cs-n">&middot; <span id="cs-devs">1 device</span></span></span>
     <button id="compute-exit" type="button">Back to the room</button>
   </div>
-  <div class="cs-stage"><canvas id="cs-flow" aria-hidden="true"></canvas><span class="cs-ring" id="cs-ring" aria-hidden="true"></span><svg id="cs-logo" viewBox="0 0 24 24" aria-hidden="true"></svg></div>
-  <div class="cs-text" aria-live="polite">
-    <h1 id="cs-title">Standing by</h1>
-    <p id="cs-sub"></p>
-    <p id="cs-live" hidden><span class="cs-hopk"><i class="cs-hop" aria-hidden="true"></i>hop</span><span><b id="cs-rate">0</b> tok/s</span><span><b id="cs-tok">0</b> tokens here</span><span><b id="cs-ms">-</b> per hop</span></p>
-    <div id="cs-strip" aria-hidden="true"></div>
+  <div class="cs-body">
+    <div class="cs-dev">
+      <div class="cs-stage"><canvas id="cs-flow" aria-hidden="true"></canvas><span class="cs-ring" id="cs-ring" aria-hidden="true"></span><svg id="cs-logo" viewBox="0 0 24 24" aria-hidden="true"></svg></div>
+      <div class="cs-text">
+        <div class="cs-say" aria-live="polite"><h1 id="cs-title">Standing by</h1><p id="cs-sub"></p></div>
+        <p id="cs-live" hidden><span class="cs-hopk"><i class="cs-hop" aria-hidden="true"></i>hop</span><span><b id="cs-rate">0</b> tok/s</span><span><b id="cs-tok">0</b> tokens here</span><span><b id="cs-ms">-</b> per hop</span></p>
+        <div id="cs-strip" aria-hidden="true"></div>
+        <p id="cs-api" hidden><i aria-hidden="true"></i><span id="cs-api-t"></span></p>
+      </div>
+      <div class="cs-foot">
+        <ul id="cs-notes" aria-live="polite" hidden></ul>
+        <button id="cs-new" type="button" hidden>Start a new room</button>
+        <p>Keep this screen on, plugged in and in front.</p>
+      </div>
+    </div>
+    <section id="api-panel" class="cs-api" aria-labelledby="api-h" aria-describedby="api-status api-sub">
+      <div class="api-head">
+        <h2 id="api-h">Serve API</h2>
+        <p class="api-lede">Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer.</p>
+        <p id="api-status" class="api-status"><i aria-hidden="true"></i><span>Waiting for a client to connect</span></p>
+        <p id="api-sub" class="api-sub">Run step 1. Your tool shows up here when it connects.</p>
+        <p id="api-live" class="sr-only" aria-live="polite"></p>
+      </div>
+      <section id="api-clients-wrap" class="api-s" hidden>
+        <h3>Connected now</h3>
+        <ul id="api-clients"></ul>
+      </section>
+      <details id="api-how" class="api-how flat" open>
+        <summary><span>How to connect</span><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5l3 3 3-3"/></svg></summary>
+        <section class="api-s api-step one">
+          <h3><i class="api-n" aria-hidden="true"><span>1</span><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5.3l2 2 4-4.6"/></svg></i><span class="sr-only">Step 1: </span>Run this on your computer</h3>
+          <div class="linkrow"><span class="api-pr" aria-hidden="true">$</span><span class="api-cmd-w"><code id="api-cmd"></code></span><button id="api-copy" type="button">Copy</button></div>
+        </section>
+        <section class="api-s api-step">
+          <h3><i class="api-n" aria-hidden="true"><span>2</span></i><span class="sr-only">Step 2: </span>Point any OpenAI or Anthropic tool here</h3>
+          <div class="api-urls">
+            <div class="api-url"><span>OpenAI</span><code>http://127.0.0.1:8080/v1</code><button type="button" class="icon-act" data-copy="http://127.0.0.1:8080/v1" data-what="OpenAI URL" aria-label="Copy the OpenAI URL" title="Copy"></button></div>
+            <div class="api-url"><span>Anthropic</span><code>http://127.0.0.1:8080</code><button type="button" class="icon-act" data-copy="http://127.0.0.1:8080" data-what="Anthropic URL" aria-label="Copy the Anthropic URL" title="Copy"></button></div>
+          </div>
+          <p class="api-hint">Any API key works. In Continue or Open WebUI (Settings, Connections), add an OpenAI connection with the OpenAI URL. Used <code>--port</code>? Change 8080.</p>
+        </section>
+        <section class="api-s api-step">
+          <h3><i class="api-n" aria-hidden="true"><span>3</span></i><span class="sr-only">Step 3: </span>Try it</h3>
+          <div class="api-ex">
+            <div class="api-try">
+              <div class="api-tabs" role="tablist" aria-label="Example">
+                <button type="button" role="tab" id="api-t-curl" aria-controls="api-code" aria-selected="true">curl</button>
+                <button type="button" role="tab" id="api-t-py" aria-controls="api-code" aria-selected="false" tabindex="-1">Python</button>
+                <button type="button" role="tab" id="api-t-js" aria-controls="api-code" aria-selected="false" tabindex="-1">JS</button>
+                <button type="button" role="tab" id="api-t-anth" aria-controls="api-code" aria-selected="false" tabindex="-1">Anthropic</button>
+              </div>
+              <button type="button" id="api-code-copy" class="icon-act" data-what="example" aria-label="Copy the example" title="Copy"></button>
+            </div>
+            <div class="api-code-w"><pre id="api-code" role="tabpanel" aria-labelledby="api-t-curl" tabindex="0"></pre></div>
+            <p id="api-ex-hint" class="api-ex-hint"></p>
+          </div>
+        </section>
+      </details>
+      <div class="api-foot">
+        <label id="api-allow-row" class="api-set" hidden><span><b id="api-allow-t">Allow API clients</b><small id="api-allow-d">Off disconnects every client and refuses new ones.</small></span><span class="switch"><input type="checkbox" id="api-allow" role="switch" aria-labelledby="api-allow-t" aria-describedby="api-allow-d" checked><i aria-hidden="true"></i></span></label>
+        <p class="api-note">Needs Node 22 or newer. Requests use this room's GPUs and show in the chat under the room's visibility setting.</p>
+      </div>
+    </section>
   </div>
-  <p class="cs-foot">Keep this screen on.</p>
 </div>
+<div id="signal-note" role="status" aria-live="polite" hidden></div>
 <div id="toasts" role="status" aria-live="polite"></div>
-<script src="/site/js/sparkle.js"></script>
+<script defer src="/site/js/sparkle.js"></script>
+<script>
+// Start a room and Join show before room.js (a module that imports the whole engine) is wired. A tap in
+// that window used to do nothing; keep it, show the wait state at once, and room.js runs it on load.
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  function keep(kind, text) {
+    if (window.pooledWired || window.pooledEarly) return;
+    window.pooledEarly = kind;
+    $("join-screen").classList.add("waiting"); $("join-wait").hidden = false; $("jw-t").textContent = text;
+  }
+  $("create-btn").addEventListener("click", function () { keep("create", "Opening your room"); });
+  $("join-btn").addEventListener("click", function () {
+    var c = $("code-input").value.trim();
+    c = c.toUpperCase();
+    if (/^([A-Z0-9]{4}|[A-Z0-9]{6})$/.test(c)) keep("join", "Joining room " + (c.length === 6 ? c.slice(0, 3) + "-" + c.slice(3) : c));
+  });
+})();
+</script>
 <script type="module" src="/room.js"></script>
 </body>
 </html>
