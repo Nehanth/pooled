@@ -8,6 +8,8 @@ room or join one. Other devices join over WebRTC: another machine with this plug
 or phone on pooled.run. Together they run a model none of them can run alone (the 35B MoE needs
 about 22.5 GB across the room; tested on a Spark + a 36 GB Mac, and with an iPhone added).
 
+Overview, setup on Linux and macOS, results and limits: [docs/openclaw.md](../../docs/openclaw.md).
+
 Status: proof of concept, not published. Tested with OpenClaw 2026.9.6 and 2026.9.7 (Linux GB10 and
 macOS 27 on an M5 Max). It runs from a Pooled
 checkout (it imports `packages/room-node`, `room/`, `harness/` and `cli/lib/` by relative path).

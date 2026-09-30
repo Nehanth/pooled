@@ -14,7 +14,7 @@ Status: proof of concept, not published to npm. It runs from a Pooled checkout (
 ## Install
 
 ```sh
-cd packages/room-node && npm install     # webgpu 0.6.1 (Dawn), node-datachannel 0.33.4, peerjs 1.5.4
+cd packages/room-node && npm install --omit=dev     # webgpu 0.6.1 (Dawn), node-datachannel 0.33.4, peerjs 1.5.4
 ```
 
 Needs Node 22 or newer. The `webgpu` package ships prebuilt Dawn for Linux (Vulkan), Windows (D3D12)
@@ -50,6 +50,8 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 | `signal` | a PeerServer `host:port`; default the PeerJS cloud server pooled.run uses |
 | `name` | this device's name in the room |
 | `flags` | engine switches, as the room page's `?query` (`engine/preset.js`) |
+| `visibility` | who sees the answers on the room's screens (`room/visibility.js`): `all` (the room page's default), `asker` (only the asker; other screens get the "answering…" stand-in) or `host`. Set once; newcomers are told the mode |
+| `allowApi` | answer API asks from devices that joined as API clients (`pooled serve`, another OpenClaw in join mode); default true, `false` refuses them |
 | `autoRedeal` | re-deal without a device that does not come back within 60 s (default true) |
 | `gbps` | pin the GPU copy speed the room uses to pick the model host (default: measured) |
 | `log` | `(line) => {}`; default: the `log` event |
@@ -72,7 +74,7 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 - `request(body, handler, { rid })`: the raw API ask, the same `ai-ask` body `pooled serve` sends
   (`cli/lib/common.js` askBody); `handler` gets the same room messages a `Bridge.ask` handler gets.
   Returns `{ rid, stop() }`. `hostMeta` is what the host's hello says (`{ api: 2, ctx }`).
-- `redeal(why)`, `close()`. Events: `log`, `members`, `online`, `degraded`, `loaded`, `progress`,
+- `redeal(why)`, `close()` (closes every link without counting them as departures, stops the re-deal timer, frees the engine and GPU). Events: `log`, `members`, `online`, `degraded`, `loaded`, `progress`,
   `hostgone`, `back`, `chat`, `chatanswer`, `answer`.
 
 ## From the command line
