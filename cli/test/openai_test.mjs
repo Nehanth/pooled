@@ -329,3 +329,20 @@ test("chat: the host is not trusted with calls: arguments that are not a JSON ob
   assert.equal((await t.req({ messages: [user("q")], tools: [WEATHER, TIME], tool_choice: { type: "function", function: { name: "get_time" } } })).status, 200);
   await t.close();
 });
+
+test("chat: the bridge log gives a tool-call turn's real finish reason", async () => {
+  const t = await start();
+  try {
+    t.bridge.onAsk = room(TWO_CALLS);
+    const r = await t.req({ messages: [user("q")], tools: [WEATHER, TIME] });
+    assert.equal(r.status, 200, r.body);
+    assert.match(t.logs.find((l) => l.includes("40 prompt + 30 tokens")), /40 prompt \+ 30 tokens, tool_calls, 2 calls, 32 reused$/);
+    // a named tool_choice ends with "stop", as its finish_reason does
+    const one = TWO_CALLS.filter((m) => m.t !== "ai-call" || m.i === 0).map((m) => (m.t === "ai-gendone" ? { ...m, usage: { in: 41, out: 20 }, calls: m.calls.slice(0, 1) } : m));
+    t.bridge.onAsk = room(one);
+    const n = await t.req({ messages: [user("q")], tools: [WEATHER, TIME], tool_choice: { type: "function", function: { name: "get_weather" } } });
+    assert.equal(n.status, 200, n.body);
+    assert.equal(JSON.parse(n.body).choices[0].finish_reason, "stop", n.body);
+    assert.match(t.logs.find((l) => l.includes("41 prompt + 20 tokens")), /tokens, stop, 1 call, 32 reused$/);
+  } finally { await t.close(); }
+});

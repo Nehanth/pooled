@@ -46,15 +46,31 @@ export const MAX_SEQ_LONG = 8192;
 // These hybrids keep a KV cache only on their full-attention layers (1 in 4), and the DeltaNet
 // layers hold a fixed-size state, so context is cheap in memory: f16 K+V is 64 KB per position
 // for the 27B (16 attention layers, 4 KV heads x 256) and 20 KB for the 35B MoE (10 layers,
-// 2 KV heads x 256). 16k on the 27B = 1 GB, 32k on the MoE = 0.64 GB, spread over the devices
-// holding those layers. The caps keep one layer's K or V buffer at or under 64 MB (the WebGPU
-// default binding limit is 128 MB); the practical limit is prefill speed, not memory.
+// 2 KV heads x 256). 32k on the MoE = 0.64 GB, 128k = 2.5 GB, spread over the devices holding
+// those layers. One layer's K (or V) is one GPU buffer bound whole: 128 MiB for the MoE at 131072
+// positions in f16, exactly the binding size every WebGPU device supports (so no device limits the
+// MoE); the 27B needs 256 MiB at 131072 in f16 (128 MiB in int8), which the room only asks for
+// when every device can bind it (ctxForBinding); its cap stays at 64K (128 MiB) until 128K is
+// checked on it. The practical limit is prefill speed, not memory
+// (docs/long-context-and-sessions.md: needle and speed at 32K..128K).
 export const CTX = {
-  "qwen3.8-27b": { def: 16384, max: 32768 },
-  "qwen3.6-35b-moe": { def: 32768, max: 65536 },
+  "qwen3.8-27b": { def: 16384, max: 65536 },
+  "qwen3.6-35b-moe": { def: 32768, max: 131072 },
   // the dense engine keeps an f32 KV cache (~224 KB per position on the 1.7B, 1.8 GB at 8k); 2k was
   // too small for Code mode, whose prompt alone is ~620 tokens (checked exact at 8k: tests pass)
   "qwen3-1.7b": { def: 8192, max: 16384 },
+};
+// WebGPU's default maxStorageBufferBindingSize: what a device binds when it reports nothing
+export const WEBGPU_MIN_BIND = 128 * 2 ** 20;
+// bytes of one attention layer's K (or V) cache buffer at ctx positions: kvDim x 1 (int8) or 2 (f16)
+export const kvLayerBufBytes = (meta, ctx, kv = "f16") =>
+  ctx * (meta["qwen35.attention.head_count_kv"] || 0) * (meta["qwen35.attention.key_length"] || 0) * (kv === "q8" ? 1 : 2);
+// The longest context (<= ctx, a multiple of 256) whose per-layer K/V buffer fits bindBytes, the
+// smallest binding limit among a room's devices (a device that reports none counts as WebGPU's 128 MiB).
+export const ctxForBinding = (meta, ctx, kv = "f16", bindBytes = WEBGPU_MIN_BIND) => {
+  const per = kvLayerBufBytes(meta, 1, kv);
+  if (!per) return ctx;
+  return Math.min(ctx, Math.floor(Math.max(bindBytes, WEBGPU_MIN_BIND) / per / 256) * 256);
 };
 export const maxSeqFor = (model, ask = 0) => {
   const c = CTX[model];

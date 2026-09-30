@@ -29,7 +29,7 @@ Onboarding offers **Pooled (run a model across your devices)** with two choices:
 It writes:
 
 - `models.providers.pooled`: one catalog model, `pooled/<model>` (or `pooled/room` when joining),
-  with the room's context (1.7B 16k, 27B 32k, MoE 64k: `room/models.js` CTX) and no API key;
+  with the room's context (1.7B 16k, 27B 64k, MoE 128k: `room/models.js` CTX) and no API key;
 - `plugins.entries.pooled.config`: `{ mode, code, model, pledgeGB, minDevices }`;
 - the default model, and for the 1.7B a file-tools-only profile (a small model cannot follow
   OpenClaw's whole tool catalog).

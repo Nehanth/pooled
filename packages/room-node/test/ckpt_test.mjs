@@ -177,10 +177,22 @@ test("host with a chain: saves and loads ride the next frame, drops go out two p
   assert.equal(n.ckptSave(), null, "no save may ride with DROP_ALL");
 });
 
-test("nodeCtxFor: 64k for the MoE, 32k for the 27B, the room default for the dense 1.7B; an ask wins", () => {
-  assert.equal(nodeCtxFor("qwen3.6-35b-moe"), 65536);
-  assert.equal(nodeCtxFor("qwen3.8-27b"), 32768);
+test("nodeCtxFor: the model's cap for the MoE (128k) and the 27B (64k), the room default for the dense 1.7B; an ask wins", () => {
+  assert.equal(nodeCtxFor("qwen3.6-35b-moe"), 131072);
+  assert.equal(nodeCtxFor("qwen3.8-27b"), 65536);
   assert.equal(nodeCtxFor("qwen3-1.7b"), 8192);
   assert.equal(nodeCtxFor("qwen3.6-35b-moe", 16384), 16384);
   assert.equal(nodeCtxFor("qwen3-1.7b", 16384), 16384);
+});
+
+test("ctxForDevices: the smallest binding limit in the room holds the context; no report counts as 128 MiB", () => {
+  const moe = { "qwen35.attention.head_count_kv": 2, "qwen35.attention.key_length": 256 };
+  const wide = { "qwen35.attention.head_count_kv": 4, "qwen35.attention.key_length": 256 };
+  const big = { maxBindMB: 4096 }, phone = { maxBindMB: 256 };
+  assert.equal(RoomNode.ctxForDevices(moe, 131072, "f16", [big, big]), 131072);
+  assert.equal(RoomNode.ctxForDevices(moe, 131072, "f16", [big, {}]), 131072, "the MoE's 128k layer is exactly 128 MiB");
+  assert.equal(RoomNode.ctxForDevices(wide, 131072, "f16", [big, big]), 131072);
+  assert.equal(RoomNode.ctxForDevices(wide, 131072, "f16", [big, {}]), 65536);
+  assert.equal(RoomNode.ctxForDevices(wide, 131072, "f16", [big, phone]), 131072);
+  assert.equal(RoomNode.ctxForDevices(wide, 131072, "q8", [big, undefined]), 131072);
 });

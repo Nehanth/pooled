@@ -24,7 +24,7 @@ import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecode
 import { tokenTexts } from "./harness/model-common.js";
 import { PrefixIndex, pinSplit } from "./harness/prefix.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvModeFor, kvForLoad } from "./room/models.js";
+import { MODELS, NEED_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -150,6 +150,9 @@ async function probeGPU() {
         const info = a.info || {};
         meta.gpu = [...new Set([info.vendor, info.architecture || info.device].filter(Boolean))].join(" ") || "GPU";
         meta.maxBufGB = +(a.limits.maxBufferSize / 2 ** 30).toFixed(1);
+        // the largest buffer this device can bind (what aiLoadShardIn asks for; phones capped at 256 MB):
+        // the host keeps the room's context within every device's limit (room/models.js ctxForBinding)
+        meta.maxBindMB = Math.floor(Math.min(a.limits.maxStorageBufferBindingSize, a.limits.maxBufferSize, meta.ua === "iPhone" || meta.ua === "Android" ? 256 * 2 ** 20 : Infinity) / 2 ** 20);
         // browsers hide real GPU memory (fingerprinting). Default to the
         // conservative per-buffer limit; the user can opt in to a real
         // measurement (see measureBudgetGB) which replaces this estimate.
@@ -2513,7 +2516,7 @@ async function aiStart(modelArg) {
     const modelKey = $("ai-model").value;
     const M = MODELS[modelKey];
     // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every device builds its engine with it
-    const ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
+    let ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
     const ROOM_KV = kvModeFor(modelKey, KV_ASK);   // KV cache format for every device: f16, or int8 with ?kv=q8
     // devices without WebGPU join as ask-only guests: they get the chat, not layers
     // (a device whose tab was killed twice while loading its layers stays a guest: aiLoadDeath)
@@ -2528,6 +2531,11 @@ async function aiStart(modelArg) {
       aiStatus("reading model index… (11 MB)");
       ai.G = await fetchGGUFHeader(M.gguf);
       ai.GModel = modelKey;
+      // one attention layer's K (or V) cache is a single GPU buffer: hold the context to what the
+      // smallest binding limit in the room fits (a device from before maxBindMB counts as WebGPU's 128 MiB)
+      const bindMin = Math.min(...[myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)].map((m) => (m?.maxBindMB || 128) * 2 ** 20));
+      const fitCtx = ctxForBinding(ai.G.meta, ROOM_CTX, ROOM_KV, bindMin);
+      if (fitCtx < ROOM_CTX) { log("room", `context ${ROOM_CTX} needs bigger GPU buffers than a device here allows: using ${fitCtx}`); ROOM_CTX = fitCtx; }
       L = ai.G.meta["qwen35.block_count"] - (ai.G.meta["qwen35.nextn_predict_layers"] || 0);
       layerBytes = qwen35ShardBytes(ai.G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4
         + ROOM_CTX * kvBytesPerLayerPos(ai.G.meta, ROOM_KV);   // the attention layers' KV cache at this room's context

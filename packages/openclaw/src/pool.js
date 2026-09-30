@@ -15,7 +15,7 @@ import { MODELS, NEED_GB, CTX, maxSeqFor } from "../../../room/models.js";
 const KEY = Symbol.for("pooled.openclaw.room");
 export const ROOM_ORIGIN = "https://pooled.run";
 // what onboarding offers (room/models.js PICKER), with the context the plugin asks for: the model's
-// largest room context (room/models.js CTX; the MoE's 64k, OpenClaw's prompts alone are 8-12k)
+// largest room context (room/models.js CTX; the MoE's 128k, OpenClaw's prompts alone are 8-12k)
 export const MODEL_CHOICES = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 export const modelInfo = (key) => ({
   name: String(MODELS[key]?.label || key).split("·")[0].trim(),

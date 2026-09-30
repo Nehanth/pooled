@@ -42,7 +42,7 @@ import { loadShard } from "./shard.js";
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { packWire, unpackWire, badF32 } from "../../room/wire.js";
 import { planSplit, phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
-import { MODELS, CTX, maxSeqFor, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM } from "../../room/models.js";
+import { MODELS, CTX, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints } from "./ckpt.js";
 import { isPrefix } from "../../harness/prefix.js";
 import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "../../room/conversation.js";
@@ -70,7 +70,7 @@ const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
   "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-load", "ai-share", "ai-wake"]);
 // The context a node opens a room with: what was asked (clamped by room/models.js), else the largest
-// the model allows for the qwen35 models (64k on the MoE, 32k on the 27B: an agent's prompt alone is
+// the model allows for the qwen35 models (128k on the MoE, 64k on the 27B: an agent's prompt alone is
 // 8-12k tokens, and their KV cache is small), else the room's default (the dense 1.7B keeps an f32 cache).
 export const nodeCtxFor = (model, ask = 0) => (ask > 0 || MODELS[model]?.kind !== "qwen35" || !CTX[model] ? maxSeqFor(model, ask) : CTX[model].max);
 export const cleanName = (s, id) => String(s ?? id).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(id).slice(0, 8);
@@ -493,6 +493,12 @@ export class RoomNode extends EventEmitter {
   // the devices the host deals layers to, and the plan (layer ranges by memory) for them:
   // pure, so it can be unit tested. peers: [{ id, name, meta }] (GPU devices, not API clients).
   // -> { chain: [id], ranges: [[lo, hi)], assigned, leftOut: [id] }; ranges[0] is this device's.
+  // The room's context after every device's binding limit (meta.maxBindMB; a device that reports none,
+  // e.g. an older tab, counts as WebGPU's 128 MiB): room/models.js ctxForBinding.
+  static ctxForDevices(ggufMeta, ctx, kv, metas) {
+    const bind = Math.min(...metas.map((m) => (m?.maxBindMB || 128) * 2 ** 20));
+    return ctxForBinding(ggufMeta, ctx, kv, bind);
+  }
   static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map() }) {
     const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name)) * 2 ** 30;
     let chain = peers.map((p) => p.id);
@@ -522,13 +528,18 @@ export class RoomNode extends EventEmitter {
     // slots); what each worker applies comes with its ai-ready, which may arrive before this device's load ends
     ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map();
     ai.relinks = new Map(); ai.gone = new Set(); ai.plan = new Map(); ai.lapStat = null;
-    const ctx = nodeCtxFor(modelKey, this.ctxAsk), kv = kvModeFor(modelKey, null);
+    let ctx = nodeCtxFor(modelKey, this.ctxAsk);
+    const kv = kvModeFor(modelKey, null);
     ai.apiCache = new AnswerCache(8); ai.apiTurns.clear(); ai.apiEnc.clear(); ai.apiProf = null; ai.apiTT = null; ai.bounds.clear();
     const src = openModel(modelKey, { modelDir: this.modelDir });
     let L, layerBytes, embedBytes;
     try {
       if (M.kind === "qwen35") {
         const G = await src.header(false);
+        // one attention layer's K (or V) cache is a single GPU buffer: hold the context to what the
+        // smallest binding limit among this room's devices fits (room.js aiStart does the same)
+        const fit = RoomNode.ctxForDevices(G.meta, ctx, kv, [this.meta, ...this.gpuPeers().map((id) => this.conns.get(id)?.meta)]);
+        if (fit < ctx) { this.log(`context ${ctx} needs bigger GPU buffers than a device here allows: using ${fit}`); ctx = fit; }
         L = G.meta["qwen35.block_count"] - (G.meta["qwen35.nextn_predict_layers"] || 0);
         layerBytes = qwen35ShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4 + ctx * kvBytesPerLayerPos(G.meta, kv);
         embedBytes = (G.tensors[GGML_EMBED]?.byteLength || 0) + (G.tensors[GGML_OUTPUT]?.byteLength || 0) + qwen35MtpBytes(G);

@@ -204,9 +204,9 @@ test("settings: plugin config, overridden by POOLED_* env", () => {
   assert.equal(roomLink("ABCD", "127.0.0.1:9000"), "https://pooled.run/room/ABCD?signal=127.0.0.1%3A9000");
 });
 
-test("models: onboarding offers the room's models with their largest context (the MoE: 64k)", () => {
+test("models: onboarding offers the room's models with their largest context (the MoE: 128k)", () => {
   assert.deepEqual(MODEL_CHOICES, ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"]);
-  assert.deepEqual(modelInfo("qwen3.6-35b-moe"), { name: "Qwen3.6 35B MoE", needGB: 22.5, ctx: 65536 });
+  assert.deepEqual(modelInfo("qwen3.6-35b-moe"), { name: "Qwen3.6 35B MoE", needGB: 22.5, ctx: 131072 });
   assert.equal(modelInfo("qwen3-1.7b").ctx, 16384);
 });
 
@@ -214,7 +214,7 @@ test("onboarding: a host config puts one model in the catalog, turns the plugin 
   const s = { mode: "host", code: "K7QX", model: "qwen3.6-35b-moe", pledgeGB: 12, minDevices: 2 };
   const pc = providerConfig(s);
   assert.equal(pc.models.length, 1);
-  assert.deepEqual([pc.models[0].id, pc.models[0].contextWindow, pc.models[0].reasoning, pc.authHeader], ["qwen3.6-35b-moe", 65536, true, false]);
+  assert.deepEqual([pc.models[0].id, pc.models[0].contextWindow, pc.models[0].reasoning, pc.authHeader], ["qwen3.6-35b-moe", 131072, true, false]);
   assert.equal(providerConfig({ ...s, ctx: 20000 }).models[0].contextWindow, 19968);
   const cfg = applyToConfig({ agents: { defaults: { model: { primary: "openai/gpt" } } } }, s);
   assert.equal(cfg.agents.defaults.model.primary, "pooled/qwen3.6-35b-moe");

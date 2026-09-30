@@ -46,6 +46,9 @@ export async function probeMeta(pledgeGB, { gbps = null } = {}) {
     meta.gpu = [...new Set([info.vendor, info.architecture || info.device].filter(Boolean))].join(" ") || "GPU";
     meta.maxBufGB = +(a.limits.maxBufferSize / 2 ** 30).toFixed(1);
     meta.budgetGB = meta.maxBufGB;
+    // the largest buffer this device can bind (shard.js asks for the adapter's limit): the host keeps
+    // the room's context within every device's limit (room/models.js ctxForBinding)
+    meta.maxBindMB = Math.floor(Math.min(a.limits.maxStorageBufferBindingSize, a.limits.maxBufferSize) / 2 ** 20);
     meta.gbps = gbps != null ? Math.max(0, +gbps || 0) : await measureCopyGBps(a);
   }
   meta.phone = false;
