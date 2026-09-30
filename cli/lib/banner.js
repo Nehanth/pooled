@@ -8,10 +8,10 @@ export const roomCtx = (bridge) => { const c = +bridge.hostMeta?.ctx; return Num
 export const roomLabel = (bridge) => (bridge.ready ? `${bridge.modelLabel || bridge.model}${roomCtx(bridge) ? ` · ${roomCtx(bridge)} tokens of context` : ""}` : "model not ready yet");
 
 // the settings block for the room as it is now, or null (model not ready, or no context known)
-export function settingsFor(bridge, port) {
+export function settingsFor(bridge, port, { token = false } = {}) {
   const ctx = bridge.ready ? roomCtx(bridge) : null;
   if (!ctx) return null;
-  return agentSettings(ctx, port, { model: bridge.model ? `pooled/${bridge.model}` : null, label: bridge.modelLabel || bridge.model }).join("\n").trimEnd();
+  return agentSettings(ctx, port, { model: bridge.model ? `pooled/${bridge.model}` : null, label: bridge.modelLabel || bridge.model, token: !!token }).join("\n").trimEnd();
 }
 
 // print the banner, then follow the room: when the model becomes ready (or its context changes)
@@ -22,14 +22,14 @@ export function showRoom(bridge, { code, port, token, print, log }) {
   Anthropic  http://127.0.0.1:${port}            (ANTHROPIC_BASE_URL: messages)
   bound to 127.0.0.1 only · ${token ? "token required" : "no token (set POOLED_TOKEN to require one)"}
   prompts go to the room's host and may be shown to everyone in the room`);
-  let shown = settingsFor(bridge, port);
+  let shown = settingsFor(bridge, port, { token });
   if (shown) print("\n" + shown);
   let wasReady = bridge.ready;
   const onState = () => {
     if (bridge.ready && !wasReady) log(`the room's model is ready: ${roomLabel(bridge)}`);
     else if (!bridge.ready && wasReady && !bridge.kicked) log("the room's model is not ready (a device left or the host is re-dealing)");
     wasReady = bridge.ready;
-    const now = settingsFor(bridge, port);
+    const now = settingsFor(bridge, port, { token });
     if (now && now !== shown) print("\n" + now);
     if (now) shown = now;
     if (bridge.kicked) log(`disconnected by the host: ${bridge.kicked}; requests now get 503`, "error");

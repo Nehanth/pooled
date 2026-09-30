@@ -2,7 +2,7 @@
 // what the flags did not say (model, pledge), shows the room live (devices, pledges, who waits to
 // join, whether the pledges hold the model), starts it, and offers chat right there.
 import os from "node:os";
-import { hostable, memoryRule, fmtCode } from "./lend.js";
+import { hostable, memoryRule, fmtCode, ctxNote } from "./lend.js";
 import { modelState } from "./cache.js";
 import { initialState, reduce, render, roomFitNow, modelRows, recommendModel, pledgeDefaults, devicesFrom, autoStart, colors, modelNeedGB, pullDone } from "./hostui.js";
 import { liveRegion, keysOf, colorOn } from "./tui.js";
@@ -126,12 +126,14 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
     await closeSoon(node);   // the room is told it is over at once; closing the links may take longer
     process.exit(code);
   }
+  // --ctx above what the chosen model takes: say what it gets instead of lowering it silently
+  const sayCtx = (key) => { const n = ctxNote(rn, key, opts.ctx); if (n) log(`--ctx ${opts.ctx}: ${n}`, { keep: true }); };
   const run = (fx) => {
     for (const f of fx) {
       if (f.do === "quit") bye(0);
       else if (f.do === "pull") doPull(f.key);
       else if (f.do === "stream") log(`${f.key}: not downloading; each start streams this computer's layers from Hugging Face`);
-      else if (f.do === "model") { if (!node.ai.engine) node.ai.model = f.key; S.rows = rowsFor(); }
+      else if (f.do === "model") { if (!node.ai.engine) node.ai.model = f.key; S.rows = rowsFor(); sayCtx(f.key); }
       else if (f.do === "pledge") { node.setPledge(f.gb); S.rows = rowsFor(); }
       else if (f.do === "start" || f.do === "redeal") doStart();
       else if (f.do === "allow") node.allowJoin(f.id)?.catch?.((e) => log(`couldn't let it in: ${e.message}`));
@@ -186,6 +188,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   function stopKeys() { process.stdin.off("data", onData); try { process.stdin.setRawMode(false); } catch {} process.stdin.pause(); }
   process.on("SIGINT", () => { if (!chatting) bye(0); });   // (in the chat, Ctrl-C stops an answer)
   process.on("SIGTERM", () => bye(0));
+  if (opts.modelGiven) sayCtx(opts.model);
   if (S.dl.state === "running") doPull(S.dl.key);
   startKeys();
   setInterval(() => { spinAt++; refresh(); }, 80).unref?.();

@@ -300,3 +300,16 @@ test("leaving: a room node whose close hangs (a link dialed to a gone host) stil
   await closeSoon({ close: async () => { throw new Error("already closed"); } });
   await closeSoon(null);
 });
+
+test("--ctx above the model's most: pooled host says what it gets instead of lowering it silently", async () => {
+  const { ctxNote } = await import("../lib/lend.js");
+  const { MODELS } = await import("../../room/models.js");
+  const { nodeCtxFor } = await import("../../packages/room-node/roomnode.js");
+  const rn = { MODELS, nodeCtxFor };
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 32768), "the 1.7B's context is 16384; using that");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 16384), "");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 8000), "", "rounding to 256 tokens is not worth a line");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 0), "", "no --ctx");
+  assert.equal(ctxNote(rn, "qwen3.6-35b-moe", 32768), "");
+  assert.match(ctxNote(rn, "qwen3.8-27b", 262144), /^the 27B's context is 65536; using that$/);
+});

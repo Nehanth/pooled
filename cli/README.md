@@ -12,7 +12,7 @@ pooled serve · room 4TKG9P · Qwen3.6 35B MoE · Q4 · 32768 tokens of context
 
 For this room's 32768-token context:
   Codex        model_context_window = 32768, model_auto_compact_token_limit = 26214  (~/.codex/config.toml)
-  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:8080 CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled
+  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=pooled CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled
   opencode     OPENCODE_DISABLE_CLAUDE_CODE=1 opencode, with this opencode.json:
     {"provider":{"pooled":{"npm":"@ai-sdk/openai-compatible","name":"Pooled room","options":{"baseURL":"http://127.0.0.1:8080/v1","apiKey":"x"},"models":{"pooled/qwen3.6-35b-moe":{"name":"Qwen3.6 35B MoE · Q4","tool_call":true,"limit":{"context":32768,"output":8192}}}}},"model":"pooled/pooled/qwen3.6-35b-moe"}
 ```

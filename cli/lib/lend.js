@@ -204,6 +204,15 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
   return out;
 }
 // the models a node can host (the loaders in packages/room-node/source.js)
+// --ctx above what the model takes: the room node lowers it (room/models.js maxSeqFor); say so.
+// rn: { MODELS, nodeCtxFor } (the room node) -> "the 1.7B's context is 16384; using that" | ""
+export function ctxNote(rn, model, ask) {
+  if (!(ask > 0) || !rn?.MODELS?.[model] || !rn.nodeCtxFor) return "";
+  const got = rn.nodeCtxFor(model, ask);
+  if (!(got > 0) || got > ask - 256) return "";   // (a context is rounded to 256 tokens)
+  const name = rn.MODELS[model].label.split("·")[0].trim().replace(/^Qwen[\d.]*\s+/, "");
+  return `the ${name}'s context is ${got}; using that`;
+}
 export const hostable = (models) => Object.keys(models).filter((k) => models[k].kind === "gguf" || models[k].kind === "qwen35");
 
 // ---------------- the memory rule ----------------

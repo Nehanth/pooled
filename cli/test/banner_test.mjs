@@ -35,6 +35,9 @@ test("banner: when the model becomes ready, the settings for its context are pri
   assert.match(s, /For this room's 65536-token context:/);
   assert.match(s, /model_context_window = 65536, model_auto_compact_token_limit = 52428/);
   assert.match(s, /CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536 CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384/);
+  // the README's recipe: Claude Code needs some API key, or it asks to log in
+  assert.match(s, /Claude Code  ANTHROPIC_BASE_URL=http:\/\/127\.0\.0\.1:8081 ANTHROPIC_API_KEY=pooled CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536/);
+  assert.match(settingsFor(b, 8081, { token: true }), /ANTHROPIC_API_KEY="\$POOLED_TOKEN" /, "with a token, the token");
   assert.doesNotMatch(s, /2048/);
   const json = JSON.parse(s.split("\n").find((l) => l.trim().startsWith("{")));
   assert.deepEqual(json, opencodeConfig(65536, 8081, "pooled/qwen36", "Qwen3.6 35B MoE"));
