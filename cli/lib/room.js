@@ -60,9 +60,11 @@ export function signalOpts(signal) {
 }
 
 export class Bridge extends EventEmitter {
-  constructor({ code, signal = null, name, client, log = () => {} }) {
+  // Peer: a PeerJS class already set up in this process (@pooled/room-node's), so one process never
+  // loads two WebRTC stacks; default: load node-datachannel + peerjs here
+  constructor({ code, signal = null, name, client, log = () => {}, Peer = null }) {
     super();
-    this.code = code; this.signal = signal; this.name = name; this.client = client; this.log = log;
+    this.code = code; this.signal = signal; this.name = name; this.client = client; this.log = log; this.PeerClass = Peer;
     this.peer = null; this.conn = null;
     this.hostMeta = null; this.hostName = null;
     this.connected = false;     // a link to the host is open and it said hello
@@ -79,7 +81,7 @@ export class Bridge extends EventEmitter {
   }
   // -> resolves once the host said hello with meta.api; rejects with a message for the user
   async connect() {
-    const Peer = await loadPeer();
+    const Peer = this.PeerClass || await loadPeer();
     return new Promise((resolve, reject) => {
       let settled = false;
       const fail = (msg) => { if (settled) return; settled = true; clearTimeout(timer); this.destroy(); reject(new Error(msg)); };

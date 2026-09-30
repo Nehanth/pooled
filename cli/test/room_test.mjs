@@ -60,3 +60,15 @@ test("ai-call messages reach the ask they belong to; a v2 body goes out as api 2
   b.onData({ t: "ai-call", rid: "r1", i: 0, a: "late" });
   assert.deepEqual(got, ["ai-call", "ai-gendone"], "routed by rid; nothing after the end");
 });
+
+test("a Peer class passed in is used instead of loading a second WebRTC stack (@pooled/room-node's)", async () => {
+  const made = [];
+  class FakePeer {
+    constructor(id, opts) { made.push(opts); this.h = {}; setTimeout(() => this.h.error?.({ type: "peer-unavailable" }), 0); }
+    on(ev, f) { this.h[ev] = f; }
+    destroy() {}
+  }
+  const b = new Bridge({ code: "ABCD", name: "t", client: "c", Peer: FakePeer });
+  await assert.rejects(b.connect(), /no room ABCD/);
+  assert.equal(made.length, 1);
+});

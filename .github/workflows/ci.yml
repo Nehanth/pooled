@@ -23,7 +23,7 @@ jobs:
         with: { node-version: 22 }
       - name: Syntax check (engine, room, harness, site, tests incl. unit and e2e, benchmarks, scripts)
         run: |
-          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js scripts/*.mjs; do node --check "$f"; done
+          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js scripts/*.mjs packages/*/*.js packages/*/src/*.js packages/*/test/*.mjs; do node --check "$f"; done
       - name: Unit tests (no GPU)
         id: unit
         # the unit tests import node: builtins via tests/weight_cache.js; without npm ci there is no local
@@ -33,6 +33,8 @@ jobs:
         run: deno test --parallel --allow-read --junit-path=unit-report.xml tests/unit
       - name: pooled serve HTTP bridge (Node, a stand-in room)
         run: node --test cli/test/*_test.mjs
+      - name: Room node and OpenClaw plugin (Node, no GPU, stand-in links and room)
+        run: node --test packages/room-node/test/*_test.mjs packages/openclaw/test/*_test.mjs
       - name: Kernel generator sanity
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: deno run --allow-read tests/unit/generator_smoke.js
