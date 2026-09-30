@@ -214,6 +214,7 @@ export const fmtGb = (x) => (Math.round(x * 10) / 10).toString();
 export function formatStatus(s, width = 0) {
   const phase = {
     connecting: "connecting", waiting: s.hosting ? "waiting for devices" : "waiting for the host to deal layers",
+    guest: "in the room without layers (the host re-deals to include this device)",
     loading: `loading layers${s.pct != null ? ` ${s.pct}%` : ""}`, online: "online", answering: "answering",
     degraded: "a device left: waiting for it", hostgone: "lost the host: knocking", rejoining: `rejoining${s.tries ? ` (try ${s.tries})` : ""}`,
     leaving: "leaving",
@@ -227,6 +228,16 @@ export function formatStatus(s, width = 0) {
   if (s.signaling === false) parts.push("signaling down (links still up)");
   const line = parts.join(" · ");
   return width > 0 && line.length > width ? line.slice(0, Math.max(1, width - 1)) + "…" : line;
+}
+
+// passes run here since the start: the node's own counters restart with a re-deal or a new node
+export function passCounter() {
+  let base = 0, last = 0, of = null;
+  return (node, n) => {
+    if (node !== of || n < last) { base += last; last = 0; of = node; }
+    last = n;
+    return base + n;
+  };
 }
 
 // tok/s from a host's answer stats ("48 tok · 21.3 tok/s · 2 devices · ...") -> number | null

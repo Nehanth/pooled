@@ -2,7 +2,7 @@
 // status line, error messages, and loading Dawn lazily (cli/lib/lend.js, cli/lib/dawn.js).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseLendArgs, parseGb, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, explainError,
+import { parseLendArgs, parseGb, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, passCounter, explainError,
   versionAdvice, versionFromBye, hostable, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB } from "../lib/lend.js";
 import { dawnLoader, dawnPackages, DAWN_VERSION } from "../lib/dawn.js";
 
@@ -143,8 +143,16 @@ test("formatStatus: room, phase, devices, layers, tok/s, passes", () => {
   assert.match(formatStatus({ code: "K7QX", phase: "rejoining", tries: 3, passes: 0 }), /rejoining \(try 3\)/);
   assert.match(formatStatus({ code: "K7QX", phase: "online", signaling: false, passes: 0 }), /signaling down \(links still up\)$/);
   assert.match(formatStatus({ code: "K7QX", phase: "hostgone", passes: 0 }), /lost the host: knocking/);
+  assert.match(formatStatus({ code: "K7QX", phase: "guest", devices: 3, passes: 0 }), /without layers \(the host re-deals to include this device\)/);
   const narrow = formatStatus({ code: "K7QX", phase: "online", devices: 3, range: [20, 40], model: "qwen3.6-35b-moe", tps: 24, passes: 5 }, 30);
   assert.equal(narrow.length, 30); assert.ok(narrow.endsWith("…"));
+});
+
+test("passCounter keeps counting over a re-deal (the node's counter restarts) and a new node", () => {
+  const c = passCounter(), a = {}, b = {};
+  assert.equal(c(a, 0), 0); assert.equal(c(a, 36), 36);
+  assert.equal(c(a, 0), 36); assert.equal(c(a, 16), 52);
+  assert.equal(c(b, 5), 57);
 });
 
 test("tpsFromStats reads the host's answer stats", () => {

@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import { parseLendArgs, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
-  hostable, fmtGb, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
+  hostable, fmtGb, passCounter, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
 import { dawnLoader } from "./dawn.js";
 import { cleanText } from "./common.js";
 
@@ -67,7 +67,11 @@ function makeOut({ jsonLog, quiet }) {
   return {
     tty,
     log: (msg, level = "info") => { if (!quiet || level === "error") line(msg, level); },
-    print: (text) => { clear(); process.stderr.write(text + "\n"); draw(); },
+    print: (text) => {
+      if (jsonLog) { process.stderr.write(JSON.stringify({ t: new Date().toISOString(), level: "info", msg: String(text).replace(/\n\s*/g, " | ") }) + "\n"); return; }
+      clear(); process.stderr.write(text + "\n"); draw();
+    },
+    hint: (text) => { if (jsonLog) process.stderr.write(JSON.stringify({ t: new Date().toISOString(), level: "hint", msg: text }) + "\n"); else process.stderr.write(`  ${text}\n`); },
     status(s) {
       if (jsonLog) { process.stderr.write(JSON.stringify({ t: new Date().toISOString(), level: "status", ...s }) + "\n"); return; }
       const text = formatStatus(s, tty ? (process.stderr.columns || 100) - 1 : 0);
@@ -82,7 +86,7 @@ function fail(out, err, ctx) {
   const x = explainError(err, ctx);
   out.done();
   out.log(`pooled: ${x.message}`, "error");
-  if (x.hint) process.stderr.write(`  ${x.hint}\n`);
+  if (x.hint) out.hint(x.hint);
   if (process.env.POOLED_DEBUG && err?.stack) process.stderr.write(err.stack + "\n");
   return x.code;
 }
@@ -95,14 +99,16 @@ async function prepare(opts, out) {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw Object.assign(new Error("no WebGPU adapter"), { type: "no-adapter" });
   const info = adapter.info || {};
-  const adapterName = [...new Set([info.vendor, info.architecture, info.device, info.description].filter(Boolean))].join(" ") || "GPU";
+  const adapterName = [...new Set([info.vendor, info.architecture || info.device].filter(Boolean))].join(" ") || "GPU";
   const mem = detectMemory({
     run: (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }),
     read: (p) => readFileSync(p, "utf8"), totalmem: os.totalmem, freemem: os.freemem,
   });
   let rule = memoryRule(mem, opts.gb, { maxBufGB: adapter.limits.maxBufferSize / 2 ** 30 });
   if (rule.low) throw Object.assign(new Error(rule.why), { type: "low-memory" });
-  if (opts.check && !opts.gb?.gb) {
+  // a discrete GPU's own memory: allocate it for a moment to make sure it is there. Not on unified
+  // memory: the OS's numbers are the memory itself there, and touching 64 GB of it takes ~20 s (GB10)
+  if (opts.check && !opts.gb?.gb && mem.kind === "discrete") {
     const t0 = Date.now();
     const got = await testAlloc(rule.gb).catch(() => null);
     if (Date.now() - t0 > 3000) out.log(`test allocation of ${rule.gb} GB took ${((Date.now() - t0) / 1000).toFixed(1)} s`);
@@ -113,7 +119,7 @@ async function prepare(opts, out) {
 }
 
 function header(out, { title, adapterName, mem, rule }) {
-  const gpu = mem.kind === "discrete" ? `${mem.name} · ${fmtGb(mem.totalGB)} GB` : mem.kind === "unified" ? `${adapterName} · ${fmtGb(mem.totalGB)} GB unified memory` : adapterName;
+  const gpu = mem.kind === "discrete" ? `${mem.name} · ${fmtGb(mem.totalGB)} GB` : mem.kind === "unified" ? `${mem.name || adapterName} · ${fmtGb(mem.totalGB)} GB unified memory` : adapterName;
   out.print(`${title}
   GPU      ${gpu}
   lending  ${rule.gb} GB  (${rule.why}${rule.why.startsWith("--gb") || rule.why.includes("--gb sets it") ? "" : "; --gb to change"})
@@ -126,17 +132,18 @@ async function runJoin(opts, out) {
   let code = opts.code;
   const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
   header(out, { title: `pooled join · room ${code}`, adapterName, mem, rule });
+  const passes = passCounter();
   const S = { code, phase: "connecting", devices: null, range: null, model: null, tps: null, passes: 0, pct: null, tries: 0, signaling: true, answering: false };
   let node = null, leaving = false, ended = null, rejoinP = null;
-  const finish = (x) => { if (!ended) { ended = x; wake(); } };
+  const finish = (x) => { if (!ended) { ended = x; wake(x); } };
   let wake = () => {};
   const endP = new Promise((r) => { wake = r; });
   let hostGone = false;
   const tick = () => {
     if (node && S.phase !== "rejoining" && S.phase !== "leaving" && S.phase !== "connecting") {
       const st = node.status();
-      S.devices = st.devices.length || null; S.range = st.range; S.model = st.model; S.passes = st.passes; S.signaling = st.signaling;
-      S.phase = hostGone ? "hostgone" : st.loading ? "loading" : st.degraded ? "degraded" : st.online ? (S.answering ? "answering" : "online") : "waiting";
+      S.devices = st.devices.length || null; S.range = st.range; S.model = st.model; S.passes = passes(node, st.passes); S.signaling = st.signaling;
+      S.phase = hostGone ? "hostgone" : st.loading ? "loading" : st.degraded ? "degraded" : st.online ? (!st.range ? "guest" : S.answering ? "answering" : "online") : "waiting";
     }
     out.status(S);
   };
@@ -162,10 +169,10 @@ async function runJoin(opts, out) {
   // the host did not come back within a minute: start over (join again) with backoff, for --wait
   const rejoin = async () => {
     const old = node; node = null;
-    S.phase = "rejoining"; S.range = null; S.tries = 0;
+    S.phase = "rejoining"; S.range = null; S.tries = 0; S.devices = null; S.signaling = true; S.answering = false;
     await old?.close().catch(() => {});
     const t0 = Date.now();
-    out.log(`the host did not come back; rejoining room ${code} for up to ${Math.round(opts.waitMs / 60000)} min`);
+    out.log(`trying to join room ${code} again for up to ${Math.round(opts.waitMs / 60000)} min`);
     while (!leaving && !ended && Date.now() - t0 < opts.waitMs) {
       await new Promise((r) => setTimeout(r, rn.reconnectDelay(S.tries)));
       if (leaving || ended) return;
@@ -216,6 +223,7 @@ async function runHost(opts, out) {
   header(out, { title: `pooled host · room ${code} · ${rn.MODELS[opts.model].label}`, adapterName, mem, rule });
   out.print(`  join     ${ROOM_URL}${code}   or   pooled join ${code}
   ask      on the room page, or from your own tools: pooled serve ${code}`);
+  const passes = passCounter();
   const S = { code, hosting: true, phase: "waiting", devices: 1, range: null, embed: true, model: opts.model, tps: null, passes: 0, signaling: true };
   let leaving = false, solo = 0, starting = null;
   node.on("prefill", (x) => { if (x.count && x.tDecode) S.tps = x.count / (x.tDecode / 1000); if (!node.ai.chain.length) solo += x.count + (x.prefilled ? 1 : 0); });
@@ -223,14 +231,15 @@ async function runHost(opts, out) {
   node.on("version", (v) => out.log(`${v.name || "a device"} can't join: ${v.theirs > rn.PROTOCOL ? `it runs a newer Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL}); update this one: npx @pooled/cli@latest host` : `it runs an older Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL}); it should reload`}`));
   const tick = () => {
     const st = node.status();
-    S.devices = st.devices.length; S.range = st.range; S.passes = st.passes + solo; S.signaling = st.signaling;
-    if (!leaving) S.phase = st.loading || starting ? (st.online ? "online" : "loading") : st.degraded ? "degraded" : st.online ? (node.ai.busy ? "answering" : "online") : "waiting";
+    S.devices = st.devices.length; S.range = st.range; S.passes = passes(node, st.passes) + solo; S.signaling = st.signaling;
+    if (!leaving) S.phase = st.loading || (node.ai.starting && !st.online) ? "loading" : st.degraded ? "degraded" : st.online ? (node.ai.busy ? "answering" : "online") : "waiting";
     out.status(S);
   };
   const deal = () => {
     if (starting || leaving) return;
     const again = !!node.ai.engine;
-    out.log(again ? "re-dealing the layers over the devices in the room" : `dealing the layers over ${node.gpuPeers().length + 1} device(s)`);
+    if (again) out.log("re-dealing the layers over the devices in the room");
+    else if (!(opts.devices > node.gpuPeers().length + 1)) out.log(`dealing the layers over ${node.gpuPeers().length + 1} device(s)`);
     starting = (again ? node.redeal() : node.start(opts.model, { minDevices: opts.devices || 1 }))
       .then(() => out.log(`room online: ${node.status().split?.join(" · ") || "ready"}`))
       .catch((e) => { const x = explainError(e, { code, cmd: "host" }); out.log(`couldn't start: ${x.message}${x.hint ? ` ${x.hint}` : ""}`, "error"); if (!out.tty) bye(false, 1); })

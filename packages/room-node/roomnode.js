@@ -56,7 +56,7 @@ import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS,
 import { pledgeGB, afterLoadDeath } from "../../room/pledge.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes } from "../../engine/gguf.js";
 import { guardChunks } from "../../cli/lib/room.js";
-import { parseServer, openPeer, reconnectDelay } from "../../room/signal.js";
+import { parseServer, openPeer, reconnectDelay, FALLBACK_ERRORS } from "../../room/signal.js";
 import { withDefaults, finishRequest, askBody, needsV2, ApiError } from "../../cli/lib/common.js";
 import { chatRecipients } from "../../room/visibility.js";
 import { Ask, Collector } from "../../cli/lib/answer.js";
@@ -132,7 +132,8 @@ export class RoomNode extends EventEmitter {
       throw e;
     }
     this.peer = got.peer; this.server = got.server;
-    this.peer.on("error", (err) => { if (err.type !== "peer-unavailable") this.log(`peer error: ${err.type || err.message}`); });
+    // (a lost signaling server is watchSignaling's to report)
+    this.peer.on("error", (err) => { if (err.type !== "peer-unavailable" && !FALLBACK_ERRORS.has(err.type)) this.log(`peer error: ${err.type || err.message}`); });
     this.watchSignaling();
     this.peer.on("connection", (conn) => this.accept(conn));
     this.pingTimer = setInterval(() => this.pingTick(), PING_MS);
@@ -146,9 +147,12 @@ export class RoomNode extends EventEmitter {
     this.signalDown = false;
     const again = () => {
       timer = null;
-      if (this.closing || p !== this.peer || p.destroyed || !p.disconnected) return;
+      if (this.closing || p !== this.peer || p.destroyed || p.open) return;
+      // still connecting from the last try: under Node a refused WebSocket never closes, so PeerJS
+      // would wait on it forever ("still trying to make the initial connection"); drop it first
+      if (!p.disconnected) { try { p.disconnect(); } catch {} }
       try { p.reconnect(); } catch {}
-      timer = setTimeout(again, reconnectDelay(tries++)); timer.unref?.();
+      if (!timer) { timer = setTimeout(again, reconnectDelay(tries++)); timer.unref?.(); }
     };
     p.on("disconnected", () => {
       if (this.closing || p !== this.peer || p.destroyed) return;

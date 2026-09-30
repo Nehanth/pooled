@@ -243,14 +243,14 @@ Once a stream has started, an error comes as an error chunk (OpenAI, no `[DONE]`
 ```
 $ pooled join K7QX
 pooled join · room K7QX
-  GPU      NVIDIA GB10 · 121 GB unified memory
-  lending  64 GB  (121 GB of unified memory, less 42.4 GB kept for the system, capped at 64 GB per device; --gb to change)
+  GPU      NVIDIA GB10 · 121.7 GB unified memory
+  lending  64 GB  (121.7 GB of unified memory, less 42.6 GB kept for the system, capped at 64 GB per device; --gb to change)
   anyone with the room code can use what this computer lends while it is in the room
   Ctrl-C leaves the room and frees the GPU
 room K7QX · online · 3 devices · layers 20-39 of qwen3.6-35b-moe · 24.1 tok/s · 1204 passes
 ```
 
-- **How much it lends.** WebGPU does not say how much memory a GPU has, so `pooled` asks the OS: `nvidia-smi` for NVIDIA cards, sysfs for AMD on Linux, the system's memory on Apple silicon and on GPUs that share it (GB10). A discrete GPU lends its free memory less 1.5 GB; unified memory lends the total less max(8 GB, 35%) (on Linux, never more than is free right now, less 2 GB); at most 64 GB per device. It then allocates that much on the GPU for a moment to make sure it is there (`--no-check` skips this). `--gb N` sets it, `--gb max` keeps only a small margin. When the memory can't be read it lends half of the GPU's largest buffer and says so.
+- **How much it lends.** WebGPU does not say how much memory a GPU has, so `pooled` asks the OS: `nvidia-smi` for NVIDIA cards, sysfs for AMD on Linux, the system's memory on Apple silicon and on GPUs that share it (GB10). A discrete GPU lends its free memory less 1.5 GB; unified memory lends the total less max(8 GB, 35%) (on Linux, never more than is free right now, less 2 GB); at most 64 GB per device. On a discrete GPU it then allocates that much for a moment to make sure it is there (`--no-check` skips this; unified memory skips it, since the OS's numbers are the memory itself and touching 64 GB of it takes about 20 s). `--gb N` sets it, `--gb max` keeps only a small margin. When the memory can't be read it lends half of the GPU's largest buffer and says so.
 - **The status line** shows the room, what is happening (waiting for the host to deal layers, loading, online, answering, a device left, rejoining), the devices in the room, the layers this computer holds, the room's speed on its last answer and how many passes ran here. Without a terminal (or with `--json-log`) it prints a line when that changes, and once a minute.
 - **When the link drops.** A lost signaling server does not stop the room (the links are direct); `pooled` reconnects to it with backoff (2, 4, 8, 16, 30 s), as the room page does, and tries the next server in a `--signal` list when one is down. When the link to the host drops it knocks for a minute and the host puts it back in its slot, with its layers still loaded. If the host does not come back, it joins the room again from scratch for `--wait` minutes (10 by default), then stops.
 - **Errors** say what to do: no WebGPU adapter (Dawn needs Metal on macOS 26+, Vulkan on Linux, D3D12 on Windows), not enough GPU memory, no room with that code, the signaling server can't be reached, and a host on another protocol version (update with `npx @pooled/cli@latest`, or ask the host to reload).
