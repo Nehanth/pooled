@@ -50,7 +50,7 @@ import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from 
 import { pickSampler } from "../../room/sampling.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, helloMeta, pieceDecoder, API_LIMITS, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "../../room/api.js";
 import { tokenTexts } from "../../harness/model-common.js";
-import { uniqueName, PING_MS, lastHeard, isSilentGone, lapTimeout, quietNamesake, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
+import { uniqueName, PING_MS, lastHeard, isSilentGone, lapTimeout, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
 import { lookupDrafts } from "../../room/lookup.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
 import { pledgeGB, afterLoadDeath } from "../../room/pledge.js";
@@ -292,15 +292,16 @@ export class RoomNode extends EventEmitter {
           this.emit("version", { theirs: d.v, theyHost: !this.isHost && from === PREFIX + this.code, name: cleanName(d.name, from) });
           return;
         }
-        // the name is held by a device that has been quiet for a second (a `pooled join` killed and
-        // started again, a reloaded tab, before the old link times out): ping it and decide in a
-        // moment, as room.js does; a namesake that stays silent is dropped, and this device takes
-        // its name and its slot
+        // the name is held by another link (a `pooled join` killed and started again, a reloaded
+        // tab, before the old link times out): ping it and decide in a moment, as room.js does for a
+        // namesake quiet for a second; a namesake that stays silent is dropped, and this device takes
+        // its name and its slot. Any namesake is pinged, not only a quiet one: a process started
+        // again at once comes back while its old link was still heard less than a second ago
         if (this.isHost && !d.back) {
           const heardOf = (id) => lastHeard(this.conns.get(id));
           const name = cleanName(d.name, from);
           if (!this.probedHellos.has(d)) {
-            const quiet = quietNamesake(name, from, this.roster, heardOf, performance.now());
+            const quiet = [...this.roster].find(([id, m]) => id !== from && m.name === name)?.[0];
             if (quiet) {
               const since = performance.now();
               this.sendTo(quiet, { t: "ping", ts: since });
@@ -336,8 +337,13 @@ export class RoomNode extends EventEmitter {
           this.broadcastRoster();
           if (this.visibility !== "all") this.sendTo(from, { t: "ai-visibility", mode: this.visibility });
           if (this.hosting() && !this.loadDeath(from, d)) this.rejoin(from, d.name);
-          // a newcomer while the room is online is an ask-only guest (aiWelcome)
-          if (this.ai.online && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-ready-all", model: this.ai.model, label: MODELS[this.ai.model]?.label, ctx: this.ctxMax() });
+          // a newcomer while the room is online is an ask-only guest (aiWelcome). The layer map first:
+          // a device back after the room re-dealt without it (away past the grace, it missed that
+          // deal's ai-layers) still holds its old layers, and frees them when it is not in the map
+          if (this.ai.online && !this.ai.chain.includes(from)) {
+            if (this.ai.layersByName) this.sendTo(from, { t: "ai-layers", by: this.ai.layersByName });
+            this.sendTo(from, { t: "ai-ready-all", model: this.ai.model, label: MODELS[this.ai.model]?.label, ctx: this.ctxMax() });
+          }
           this.log(`${d.meta?.api ? "API client " : ""}${d.name} ${d.back ? "came back" : "joined"}${d.meta?.webgpu ? ` (${d.meta.gpu}, ${d.meta.contribGB} GB)` : ""}`);
         } else if (from === PREFIX + this.code) this.hostName = d.name;
         this.emit("members");

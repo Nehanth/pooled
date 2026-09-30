@@ -211,10 +211,11 @@ export const fmtGb = (x) => (Math.round(x * 10) / 10).toString();
 
 // ---------------- the status line ----------------
 // s: { code, phase, devices, range: [lo, hi) | null, model, tps, passes, pct, tries, host, signaling, hosting }
-// phases: connecting | waiting | loading | online | answering | degraded | hostgone | rejoining | leaving
+// phases: connecting | waiting | ready | loading | online | answering | degraded | hostgone | rejoining | leaving
 export function formatStatus(s, width = 0) {
   const phase = {
     connecting: "connecting", waiting: s.hosting ? "waiting for devices" : "waiting for the host to deal layers",
+    ready: "layers loaded: waiting for the rest of the room",
     guest: "in the room without layers (the host re-deals to include this device)",
     loading: `loading layers${s.pct != null ? ` ${s.pct}%` : ""}`, online: "online", answering: "answering",
     degraded: "a device left: waiting for it", hostgone: "lost the host: knocking", rejoining: `rejoining${s.tries ? ` (try ${s.tries})` : ""}`,

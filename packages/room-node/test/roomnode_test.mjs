@@ -125,7 +125,7 @@ test("host: a chain device that leaves degrades the room; back under its name it
   assert.ok(msgs(n, "b2", "ai-ready-all").length === 1);
 });
 
-test("host: a device started again under its name (no back) takes its old slot once the old link stays silent", async () => {
+test("host: a device started again under its name (no back) takes its old slot once the old link stays silent after a ping", async () => {
   const n = fakeNode();
   n.autoRedeal = false;
   n.addPeer("a", "mac"); n.roster.set("a", { name: "mac", meta: { webgpu: true, contribGB: 4 } });
@@ -133,7 +133,7 @@ test("host: a device started again under its name (no back) takes its old slot o
   n.ai.plan = new Map([["mac", { msg: { t: "ai-load", v: PROTOCOL, model: "qwen3-1.7b", range: [10, 28], ctx: 4096, kv: "f16", next: "host", host: n.peer.id } }]]);
   n.ai.engine = { maxSeq: 4096 }; n.ai.cfg = { num_hidden_layers: 28 }; n.ai.model = "qwen3-1.7b";
   n.ai.readyPeers = new Set(["a"]); n.ai.online = true;
-  n.conns.get("a").seen = performance.now() - 5000;   // killed 5 s ago; its link has not timed out yet
+  n.conns.get("a").seen = performance.now();   // killed just now and started again at once: heard <1 s ago
   n.addPeer("a2", "mac");
   n.onData("a2", { t: "hello", name: "mac", v: PROTOCOL, meta: { webgpu: true, contribGB: 4 } });
   assert.equal(msgs(n, "a", "ping").length, 1, "the quiet namesake is pinged first");
@@ -153,6 +153,22 @@ test("host: a device started again under its name (no back) takes its old slot o
   await new Promise((r) => setTimeout(r, 1700));
   assert.ok(m.conns.has("x"));
   assert.equal(m.roster.get("x2")?.name, "laptop 2");
+});
+
+test("host: a device that joins an online room gets the layer map, so an old worker left out of the deal frees its layers", () => {
+  const n = fakeNode();
+  n.ai.chain = []; n.ai.chainNames = []; n.ai.plan = new Map();
+  n.ai.engine = { maxSeq: 4096 }; n.ai.cfg = { num_hidden_layers: 40 }; n.ai.model = "qwen3.6-35b-moe";
+  n.ai.readyPeers = new Set(); n.ai.online = true; n.ai.layersByName = { host: "0–39" };
+  n.addPeer("m2", "mac");
+  n.onData("m2", { t: "hello", name: "mac", v: PROTOCOL, back: 1, meta: { webgpu: true, contribGB: 23 } });
+  const sent = (n.sent.m2 || []).map((m) => m.t);
+  assert.ok(sent.indexOf("ai-layers") >= 0 && sent.indexOf("ai-layers") < sent.indexOf("ai-ready-all"), sent.join(","));
+  // the worker side: not in the map -> its layers are freed and it is a guest
+  const w = fakeNode({ host: false, name: "mac" });
+  w.ai.hostId = "pooled-room-TEST"; w.ai.role = "worker"; w.ai.range = [20, 40]; let destroyed = false; w.ai.device = { destroy() { destroyed = true; } };
+  w.aiOnData("pooled-room-TEST", { t: "ai-layers", by: { host: "0–39" } });
+  assert.equal(w.ai.role, "guest"); assert.equal(w.ai.range, null); assert.ok(destroyed);
 });
 
 test("host: ai-linklost from a chain worker fails the laps in flight", () => {

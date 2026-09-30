@@ -143,7 +143,7 @@ async function runJoin(opts, out) {
     if (node && S.phase !== "rejoining" && S.phase !== "leaving" && S.phase !== "connecting") {
       const st = node.status();
       S.devices = st.devices.length || null; S.range = st.range; S.model = st.model; S.passes = passes(node, st.passes); S.signaling = st.signaling;
-      S.phase = hostGone ? "hostgone" : st.loading ? "loading" : st.degraded ? "degraded" : st.online ? (!st.range ? "guest" : S.answering ? "answering" : "online") : "waiting";
+      S.phase = hostGone ? "hostgone" : st.loading ? "loading" : st.degraded ? "degraded" : st.online ? (!st.range ? "guest" : S.answering ? "answering" : "online") : st.range ? "ready" : "waiting";
     }
     out.status(S);
   };
@@ -243,14 +243,14 @@ async function runHost(opts, out) {
     if (opts.devices > 1 && !starting && !leaving && st.online && !node.ai.busy && !node.ai.starting
       && node.ai.chain.length + 1 < opts.devices && peers.length + 1 >= opts.devices
       && peers.some((id) => !node.ai.chain.includes(id) && !dealtWith.has(id))) {
-      out.log(`${peers.length + 1} devices in the room again: re-dealing the layers`);
-      deal();
+      out.log(`${peers.length + 1} devices in the room again`);
+      deal(true);
     }
   };
-  const deal = () => {
+  const deal = (auto = false) => {
     if (starting || leaving) return;
     const again = !!node.ai.engine;
-    if (again) out.log("re-dealing the layers over the devices in the room");
+    if (again && !auto) out.log("re-dealing the layers over the devices in the room");
     else if (!(opts.devices > node.gpuPeers().length + 1)) out.log(`dealing the layers over ${node.gpuPeers().length + 1} device(s)`);
     starting = (again ? node.redeal() : node.start(opts.model, { minDevices: opts.devices || 1 }))
       .then(() => { dealtWith = new Set(node.gpuPeers()); out.log(`room online: ${node.status().split?.join(" · ") || "ready"}`); })

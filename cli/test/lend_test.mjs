@@ -136,6 +136,7 @@ test("formatStatus: room, phase, devices, layers, tok/s, passes", () => {
   assert.equal(formatStatus({ code: "K7QX", phase: "online", devices: 3, range: [20, 40], model: "qwen3.6-35b-moe", tps: 24.06, passes: 1204 }),
     "room K7QX · online · 3 devices · layers 20-39 of qwen3.6-35b-moe · 24.1 tok/s · 1204 passes");
   assert.equal(formatStatus({ code: "K7QX", phase: "waiting", devices: 1, passes: 0 }), "room K7QX · waiting for the host to deal layers · 1 device · 0 passes");
+  assert.equal(formatStatus({ code: "K7QX", phase: "ready", devices: 2, range: [20, 40], model: "qwen3.6-35b-moe", passes: 0 }), "room K7QX · layers loaded: waiting for the rest of the room · 2 devices · layers 20-39 of qwen3.6-35b-moe · 0 passes");
   assert.equal(formatStatus({ code: "K7QX", phase: "waiting", hosting: true, devices: 1, model: "qwen3-1.7b", passes: 1 }), "room K7QX · waiting for devices · 1 device · qwen3-1.7b · 1 pass");
   assert.equal(formatStatus({ code: "K7QX", phase: "loading", pct: 45, devices: 2, passes: 0 }), "room K7QX · loading layers 45% · 2 devices · 0 passes");
   assert.equal(formatStatus({ code: "K7QX", phase: "online", hosting: true, embed: true, devices: 2, range: [0, 14], model: "qwen3-1.7b", passes: 9 }),
