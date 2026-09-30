@@ -386,7 +386,7 @@ async function runHost(opts, out, prepared = null) {
     }
   }
   const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name, signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
-    gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log: (m) => out.log(m), ...(opts.roomCode ? { code: opts.roomCode } : {}) });
+    gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log: (m) => out.log(m), split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   const code = node.code;
   // the invite link: its #k= key lets a device in without asking (a room node from before the gate has none)
   const link = `${ROOM_URL}${code}${node.inviteFragment || ""}`;

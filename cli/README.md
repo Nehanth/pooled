@@ -358,6 +358,7 @@ Every step has a flag, and a flag given skips its question, so `pooled host qwen
 | `--deny-unknown` | no lobby: a device with the code alone is turned away (the invite link still works) |
 | `--chat` | chat here once the room is online |
 | `--name <s>` | how the room shows this computer (default: `node-` and 3 letters from the hostname) |
+| `--split <speed\|spread>` | how the layers spread: `speed` (fastest first, the default, as the room page) or `spread` (across all devices by what each lends, even when one could hold the model); `s` toggles it in the screen, which shows what each device would hold |
 
 Without a terminal (a script, a service, `--json-log`) nothing is asked: the model defaults to `qwen3-1.7b`, the pledge to the memory rule below, a model that is not downloaded is pulled first (`--no-pull` streams instead), and the room starts once the pledges fit (`--wait N`: and N devices are in).
 

@@ -80,6 +80,8 @@ export const HELP_HOST = `Usage
     --deny-unknown         turn away devices that come with the code alone (the link still works)
     --chat                 chat here once the room is online
     --name <s>             how the room shows this computer
+    --split <speed|spread> speed: the fastest devices first (default); spread: across all
+                           devices by what each lends, even when one could hold the model
 
   pooled host qwen3.6-35b-moe --gb 64 --start --yes runs with no questions at all. Without a
   terminal, the defaults are qwen3-1.7b, the memory rule and --start.
@@ -101,6 +103,16 @@ More options
 `;
 
 export class UsageError extends Error {}
+
+// --split: how the layers spread over the room, as the room page's "Layer split": "speed" (fastest
+// first, the default) or "memory" (across all devices by what each lends). Friendly names too.
+export function splitModeOf(v) {
+  if (v == null) return "speed";
+  const k = String(v).trim().toLowerCase();
+  if (["speed", "fastest", "fast", "fastest-first"].includes(k)) return "speed";
+  if (["spread", "memory", "all", "even", "across", "share"].includes(k)) return "memory";
+  throw new UsageError(`--split is "speed" (fastest first) or "spread" (across all devices), not "${v}"`);
+}
 export { needsRoom };
 
 // --gb: a positive number of GB, or "max" -> { gb } | { max: true } | null (not given)
@@ -119,7 +131,7 @@ const COMMON = {
   "no-pull": { type: "boolean" }, help: { type: "boolean", short: "h" },
 };
 const HOST_OPTS = { model: { type: "string" }, devices: { type: "string" }, wait: { type: "string" }, code: { type: "string" }, ctx: { type: "string" },
-  "allow-all": { type: "boolean" }, "deny-unknown": { type: "boolean" }, start: { type: "boolean" }, chat: { type: "boolean" },
+  "allow-all": { type: "boolean" }, "deny-unknown": { type: "boolean" }, start: { type: "boolean" }, chat: { type: "boolean" }, split: { type: "string" },
   yes: { type: "boolean", short: "y" } };
 
 // argv after the command word -> options, or throws UsageError. models: MODELS (room/models.js) for
@@ -168,6 +180,7 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
     out.denyUnknown = !!o["deny-unknown"];
     if (out.allowAll && out.denyUnknown) throw new UsageError("--allow-all and --deny-unknown say opposite things: pick one");
     out.start = !!o.start; out.chat = !!o.chat; out.yes = !!o.yes;
+    out.split = splitModeOf(o.split);
     out.gbGiven = o.gb != null;
     // --wait N (and its older name --devices N): deal once N devices (this one included) are in
     for (const [flag, v] of [["--devices", o.devices], ["--wait", o.wait]]) {

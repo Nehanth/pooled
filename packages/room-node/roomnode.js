@@ -42,7 +42,7 @@ import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { packWire, unpackWire, badF32 } from "../../room/wire.js";
-import { planSplit, phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
+import { planSplit, planForSpeed, phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
 import { MODELS, CTX, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { isPrefix } from "../../harness/prefix.js";
@@ -90,8 +90,13 @@ export class RoomNode extends EventEmitter {
   // whoever asked; an agent host uses "asker" so its prompts and answers stay off other devices'
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
-    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null } = {}) {
+    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory" } = {}) {
     super();
+    // split: how a deal spreads the layers, as the room page's "Layer split" (room.js ai-split):
+    // "memory" = over every device in proportion to what it lends (this node's default so far);
+    // "speed" = the fastest devices first, each up to what it lends, the rest not needed (room/plan.js
+    // planForSpeed; until answers are measured: the host first, then the biggest). setSplit() changes it.
+    this.splitMode = split === "speed" ? "speed" : "memory";
     // beforeLoad(modelKey): awaited before a dealt shard opens the model (pooled join finishes pulling
     // it to disk there); a throw fails that load like any other load error
     this.beforeLoad = typeof beforeLoad === "function" ? beforeLoad : null;
@@ -649,7 +654,8 @@ export class RoomNode extends EventEmitter {
     const bind = Math.min(...metas.map((m) => (m?.maxBindMB || 128) * 2 ** 20));
     return ctxForBinding(ggufMeta, ctx, kv, bind);
   }
-  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map() }) {
+  setSplit(mode) { this.splitMode = mode === "speed" ? "speed" : "memory"; }
+  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory" }) {
     const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name)) * 2 ** 30;
     let chain = peers.map((p) => p.id);
     let caps = [Math.max(pledgeOf(self.meta, self.name) - embedBytes, layerBytes / 2), ...peers.map((p) => Math.max(pledgeOf(p.meta, p.name), layerBytes / 2))];
@@ -657,7 +663,19 @@ export class RoomNode extends EventEmitter {
     const out = phonesToLeaveOut(L, caps.map((c) => c / layerBytes), [false, ...peers.map((p) => isPhoneMeta(p.meta))]);
     const leftOut = out.map((i) => chain[i - 1]);
     if (out.length) { chain = chain.filter((id) => !leftOut.includes(id)); caps = caps.filter((_, i) => !out.includes(i)); }
-    const { assigned, ranges } = planSplit(L, caps);
+    let { assigned, ranges } = planSplit(L, caps);
+    if (mode === "speed") {
+      // fill the host first, then the biggest devices, each up to its pledge (in whole layers); a device
+      // not needed joins without layers. Short (the pledges hold less than L in whole layers): by memory
+      const sp = planForSpeed(L, caps.map((c) => c / layerBytes), [], caps.map(() => false));
+      if (!sp.short) {
+        const used = sp.used.filter((i) => i > 0);
+        leftOut.push(...chain.filter((_, k) => !used.includes(k + 1)));
+        chain = used.map((i) => chain[i - 1]);
+        assigned = sp.used.map((i) => sp.assigned[i]); ranges = sp.used.map((i) => sp.ranges[i]);
+        caps = sp.used.map((i) => caps[i]);
+      }
+    }
     return { chain, ranges, assigned, leftOut, needGB: (L * layerBytes + embedBytes) / 2 ** 30, haveGB: caps.reduce((s, c) => s + c, embedBytes) / 2 ** 30 };
   }
   async _start(modelKey, { minDevices = 1, waitMs = 0, redeal = false } = {}) {
@@ -703,11 +721,11 @@ export class RoomNode extends EventEmitter {
     const nameOf = (id) => this.conns.get(id)?.name || id;
     ai.dealtPeers = new Set(this.gpuPeers());   // every device this deal saw, left out or not (for a --devices host's re-deal)
     const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: this.conns.get(id)?.meta }));
-    const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap });
+    const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode });
     const { ranges, assigned } = plan;
     ai.chain = plan.chain; ai.chainNames = ai.chain.map(nameOf); ai.layerGB = layerBytes / 2 ** 30;
     ai.layersN = Object.fromEntries([[this.name, assigned[0]], ...ai.chain.map((id, i) => [nameOf(id), assigned[i + 1]])]);
-    if (plan.leftOut.length) this.log(`${plan.leftOut.map(nameOf).join(", ")} ask without holding layers: the computers hold the whole model`);
+    if (plan.leftOut.length) this.log(`${plan.leftOut.map(nameOf).join(", ")} ask without holding layers: the other devices hold the whole model${this.splitMode === "speed" ? " (split: fastest first)" : ""}`);
     if (plan.needGB > plan.haveGB * 1.15) this.log(`this model needs ~${plan.needGB.toFixed(1)} GB but the room pledged ~${plan.haveGB.toFixed(1)} GB: it may not fit`);
     ai.layersByName = Object.fromEntries([[this.name, `${ranges[0][0]}–${ranges[0][1] - 1}`], ...ai.chain.map((id, i) => [nameOf(id), `${ranges[i + 1][0]}–${ranges[i + 1][1] - 1}`])]);
     this.log(`${M.label}: layer split ${[`${this.name} ${assigned[0]}+embed`, ...ai.chain.map((id, i) => `${nameOf(id)} ${assigned[i + 1]}`)].join(" · ")}`);

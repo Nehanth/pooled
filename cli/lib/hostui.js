@@ -94,7 +94,7 @@ export function initialState({ rows, model = null, pledge, fixedPledge = false, 
   const s = {
     step: "pick", rows, model, sel: 0, pledge: { ...pledge, typed: "" }, fixed: { model: !!model, pledge: !!fixedPledge },
     devices: [], lobby: [], dl: { key: null, state: "none", done: 0, total: 0, bps: null, error: null },
-    fit: null, flags: { start: !!flags.start, wait: flags.wait || 0, chat: !!flags.chat }, notice: "", split: null, code, link, yes, noPull,
+    fit: null, flags: { start: !!flags.start, wait: flags.wait || 0, chat: !!flags.chat }, notice: "", split: null, splitMode: flags.split === "memory" ? "memory" : "speed", code, link, yes, noPull,
   };
   const rec = model || recommendModel(rows);
   s.sel = Math.max(0, rows.findIndex((r) => r.key === rec));
@@ -189,6 +189,7 @@ export function reduce(s, key) {
       if (k === "m") { t.step = "pick"; t.sel = Math.max(0, t.rows.findIndex((r) => r.key === t.model)); }
       else if (k === "p" || k === "l") { t.step = "pledge"; t.pledge = { ...t.pledge, typed: "" }; }
       else if (k === "i") fx.push({ do: "copy" });
+      else if (k === "s") { t.splitMode = t.splitMode === "memory" ? "speed" : "memory"; fx.push({ do: "split", mode: t.splitMode }); }
       else if (k === "a" && t.lobby.length) fx.push({ do: "allow", id: t.lobby[0].id });
       else if (k === "d" && t.lobby.length) fx.push({ do: "deny", id: t.lobby[0].id });
       else if (k === "enter") {
@@ -206,6 +207,7 @@ export function reduce(s, key) {
     case "online": {
       if (k === "c") fx.push({ do: "chat" });
       else if (k === "i") fx.push({ do: "copy" });
+      else if (k === "s") { t.splitMode = t.splitMode === "memory" ? "speed" : "memory"; fx.push({ do: "split", mode: t.splitMode }); t.notice = "r rebalances the room with the new split"; }
       else if (k === "enter" || k === "r") fx.push({ do: "redeal" });
       else if (k === "a" && t.lobby.length) fx.push({ do: "allow", id: t.lobby[0].id });
       else if (k === "d" && t.lobby.length) fx.push({ do: "deny", id: t.lobby[0].id });
@@ -288,12 +290,30 @@ function statusText(s, S, { lib, spin, now }) {
   return name + tail(S.ink3("waiting for devices"));
 }
 
+// What Start would deal, as the room page does it (room/plan.js dealRoom): device index (host first,
+// devices that lend) -> [lo, hi) | null (not needed). null when it can't be worked out (no fit yet).
+export function dealPreview(s, lib) {
+  if (!s.model || !s.fit?.fits || !lib?.dealRoom || !lib.roomBytes) return null;
+  const rb = lib.roomBytes(s.model, lib.nodeCtxFor(s.model, s.ctxAsk || 0), "f16");
+  if (!rb) return null;
+  const gpu = s.devices.filter((d) => d.gb > 0);
+  const deal = lib.dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges: gpu.map((d) => d.gb * GiB),
+    mode: s.splitMode === "memory" ? "memory" : "speed", phone: gpu.map((d) => d.kind === "phone") });
+  if (!deal?.used?.length) return null;
+  const out = new Map();
+  gpu.forEach((d, i) => { const k = deal.used.indexOf(i); out.set(d, k >= 0 ? deal.ranges[k] : null); });
+  return out;
+}
+// one device holds the model by its own pledge: spreading it is a choice, not a need
+const onePledgeHolds = (s, lib) => !!(lib && s.model && s.devices.some((d) => d.gb > 0 && roomFitNow(lib, { model: s.model, devices: [{ name: d.name, meta: { ...d.meta, webgpu: true, contribGB: d.gb } }] }).fits));
+
 // the table of devices: DEVICE, GPU (70 columns and up), LENDS or LAYERS, and a state
-function deviceTable(s, S, { W, online }) {
+function deviceTable(s, S, { W, online, preview = null }) {
   const wide = W >= 69;
   const cols = [{ h: "DEVICE", w: 12 }];
   if (wide) cols.push({ h: "GPU", w: 14 });
   cols.push(online ? { h: "LAYERS", w: 6 } : { h: "LENDS", w: 5, align: "r" });
+  if (preview) cols.push({ h: "HOLDS", w: 6 });
   cols.push({ h: "", w: 20 });
   const cut = (x, n) => (width(x) > n ? [...x].slice(0, n - 1).join("") + "…" : x);
   const rows = s.devices.map((d) => {
@@ -304,7 +324,12 @@ function deviceTable(s, S, { W, online }) {
     const state = d.self ? S.ink3("this computer") : chatOnly ? S.ink3("chat only") : online ? "" : S.ink3("joined");
     const r = [name];
     if (wide) r.push(chatOnly ? S.ink3(gpuName || d.kind) : gpuName);
-    r.push(mid, state);
+    r.push(mid);
+    if (preview) {
+      const rg = preview.get(d);
+      r.push(rg ? `${rg[0]}${S.g.dash}${rg[1] - 1}` : S.ink3(S.g.none));
+      r.push(rg === null && !chatOnly ? S.ink3(d.self ? "this computer · not needed" : "not needed") : state);
+    } else r.push(state);
     return r;
   });
   // who waits in the lobby: table rows too; keys on the first only
@@ -312,7 +337,9 @@ function deviceTable(s, S, { W, online }) {
     const who = String(l.line || "").replace(/ wants to join.*$/, "");
     const r = [cut(who, 12)];
     if (wide) r.push(S.ink3(cut(String(l.line || "").match(/\(([^)]*)\)/)?.[1] || "", 14)));
-    r.push("", S.acc("wants to join") + (i === 0 ? "  " + S.ink2("a") + S.ink3(" allow  ") + S.ink2("d") + S.ink3(" deny") : ""));
+    r.push("");
+    if (preview) r.push("");
+    r.push(S.acc("wants to join") + (i === 0 ? "  " + S.ink2("a") + S.ink3(" allow  ") + S.ink2("d") + S.ink3(" deny") : ""));
     rows.push(r);
   });
   const out = table(S, cols, rows);
@@ -410,7 +437,7 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
       return [d.self ? S.bold(d.name) : d.name, range, S.bar(pct / 100, 20) + "  " + padStart(`${Math.round(pct)}%`, 4) + (d.self && s.load?.total ? "  " + S.ink3(loadNote(s.load)) : "")];
     }));
     push(...out);
-  } else push(...deviceTable(s, S, { W, online }));
+  } else push(...deviceTable(s, S, { W, online, preview: s.step === "room" ? dealPreview(s, lib) : null }));
   blank();
 
   if (!online && s.step === "room") {
@@ -423,11 +450,13 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
       push(label(S, "memory") + S.bar(Math.min(1, have / need), W < 69 ? 12 : 20) + "  " + `${have} GB lent` + S.ink3(` · ${need} GB needed`));
     }
     const gpuN = s.devices.filter((x) => x.gb > 0).length;
+    if (gpuN > 1) push(label(S, "split") + (s.splitMode === "memory" ? "across all devices" : "fastest first") + S.ink3(" · s changes it"));
     if (s.code && (!s.fit?.fits || gpuN <= 1)) push(label(S, "invite") + S.bold(`pooled join ${fmtCode(s.code)}`) + S.ink3(" on the other computer"));
     const notes = [];
     if (s.fit && !s.fit.fits) notes.push(`Needs ${Math.max(1, Math.round(s.fit.shortGB))} GB more: one more device, or press l to lend more.`);
     const self = s.devices.find((x) => x.self);
     notes.push(...splitLines(splitAdvice(s, lib), { model: lbl(s.model), selfName: self?.name, gb: s.pledge.gb }));
+    if (s.splitMode === "memory" && gpuN > 1 && s.fit?.fits && onePledgeHolds(s, lib)) notes.push("Spreading over the network is slower per token; it uses less memory on each device.");
     if (notes.length) { blank(); for (const n of notes) for (const l of wrap(n, W - 2)) push(I + S.ink3(l)); }
   }
   if (online) {
@@ -447,7 +476,7 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
   if (s.step === "room") {
     const ok = canStart(s).ok;
     push(I + S.keys(W < 69 ? [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["q", "quit"]]
-      : [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["m", "model"], ["l", "lend"], ["q", "quit"]]));
+      : [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["m", "model"], ["l", "lend"], ...(s.devices.filter((x) => x.gb > 0).length > 1 ? [["s", "split"]] : []), ["q", "quit"]]));
   } else if (s.step === "starting") push(I + S.keys([["q", "cancel and close the room"]]));
   else push(I + S.keys([["c", "chat here", "primary"], ["i", "copy invite"], ["r", "rebalance"], ["q", "close room"]]));
   return L.map((l) => clip(l.replace(/ +$/, ""), W));

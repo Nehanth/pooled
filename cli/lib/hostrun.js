@@ -17,7 +17,7 @@ const ROOM_URL = "https://pooled.run/r/";
 export async function runHostInteractive(opts, { prepared, version = "" }) {
   const { rn, loader, rule, mem } = prepared;
   const lib = { MODELS: rn.MODELS, FILES: rn.FILES, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote,
-    shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor };
+    shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, dealRoom: rn.dealRoom };
   const dir = opts.modelDir;
   const keys = hostable(rn.MODELS);
   const pulled = new Set(keys.filter((k) => modelState(dir, k, rn.MODELS, rn.FILES, rn.LOCAL).pulled));
@@ -50,7 +50,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
 
   region.render(["", `  ${ST.spin(0)} opening a room on this computer…`]);
   const node = await rn.createRoom({ model: model0, pledgeGB: pledge0, name: opts.name, signal: opts.signal, modelDir: dir, ctx: opts.ctx || 0,
-    gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
+    gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log, split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   node.setPledge(pledge0);
   const code = node.code;
   const link = `${ROOM_URL}${code}${node.inviteFragment || ""}`;
@@ -60,9 +60,9 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   const home = dir.startsWith(os.homedir()) ? "~" + dir.slice(os.homedir().length) : dir;
 
   S = initialState({ rows: rows0, model: opts.modelGiven ? opts.model : null, pledge: { gb: pledge0, max: Math.max(pd.max, pledge0), totalGB: pd.totalGB },
-    fixedPledge: opts.gbGiven, flags: { start: opts.start, wait: opts.devices || 0, chat: opts.chat }, pulled, code, link: "", yes: opts.yes, noPull: opts.noPull });
+    fixedPledge: opts.gbGiven, flags: { start: opts.start, wait: opts.devices || 0, chat: opts.chat, split: opts.split }, pulled, code, link: "", yes: opts.yes, noPull: opts.noPull });
   S.pledgeDone = opts.gbGiven;
-  S.gpu = gpu; S.modelsDir = home;
+  S.gpu = gpu; S.modelsDir = home; S.ctxAsk = opts.ctx || 0;
   S.gate = opts.allowAll ? "allow-all" : opts.denyUnknown ? "deny-unknown" : "ask";
 
   // ---- effects
@@ -136,6 +136,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
       else if (f.do === "allow") node.allowJoin(f.id)?.catch?.((e) => log(`couldn't let it in: ${e.message}`));
       else if (f.do === "deny") node.denyJoin(f.id);
       else if (f.do === "chat") doChat();
+      else if (f.do === "split") { node.setSplit(f.mode); log(`split: ${f.mode === "memory" ? "across all devices" : "fastest first"}`); }
       else if (f.do === "copy") {
         // OSC 52: the terminal puts the link on the clipboard (over ssh too, where the terminal allows it)
         process.stderr.write(`\x1b]52;c;${Buffer.from(link).toString("base64")}\x07`);
