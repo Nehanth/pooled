@@ -1,0 +1,110 @@
+---
+title: Code mode
+eyebrow: Code mode
+description: Switch a room to Code and ask for an app. The room's model writes the files, runs them in a sandboxed preview, reads its own errors and fixes them.
+sidebar:
+  label: Overview
+  order: 1
+---
+{/*
+  Sources (origin/main 40bb0fa):
+  - README.md "Code mode"; SECURITY.md "Code mode"
+  - room/code.js header (who may do what, one shared session on the model host), request() / pump()
+    (QUEUE_MAX 6, two per member, ASK_MAX 4000, first request creates a project named by projectName()),
+    useProject() (auto-approve on for browser projects, off for folders), newTask(), save() (session + ports)
+  - harness/projects.js (kinds "opfs" and "folder", IndexedDB metadata, showDirectoryPicker = Chrome/Edge desktop)
+  - harness/workspace.js (secretPath, riskyPath, SKIP_DIRS); harness/code-prompt.js (CODE_SYSTEM)
+  - p2p.html: mode bar Chat/Code, #code-new "New", #code-open "Open folder…", "Auto-approve edits", "New task",
+    phone tabs Agent / Preview / Files; "Who sees the chat" options
+  - room.js line ~3856 ("the host's agent is working, try again when it is done")
+  - CHANGELOG.md: "Anyone in a room can drive Code", "Code on phones as Agent / Preview / Files tabs"
+*/}
+
+import { Steps, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+Code mode turns a room into a small coding agent. You ask for something, like "build a tetris game". The room's model writes the files, serves them on a virtual port (`:5173`), runs the page in a sandboxed preview, reads its console errors and fixes them. Everyone in the room sees the files and can run the same preview on their own screen.
+
+It builds static web apps: HTML, CSS and JavaScript modules. There is no shell and no server code.
+
+## Build your first app
+
+<Steps>
+
+1. **Start a model in a room.** Open [pooled.run/room](https://pooled.run/room), pick a model and press Start. The Chat / Code switch is there from the moment you join, but **Code** stays off until the model is running.
+
+2. **Switch to Code.** Press **Code** in the header.
+
+3. **Ask for something.** Type a request in the box at the bottom, for example `build a snake game`, and press **Send**. If no project is open, the first request creates one and names it from your words ("snake").
+
+4. **Watch it work.** Each step shows in the timeline: what the model says, each tool call as a card, and a diff for every file it writes. When it serves the page, the preview opens on the right.
+
+5. **Ask for changes.** Send follow-ups in the same box, like `make the snake faster every 5 points`. The agent remembers the conversation until you press **New task**.
+
+</Steps>
+
+:::tip[Start from a template]
+Small models do much better changing an app that already runs than writing one from nothing. Press **New**, pick **Start from: Game** (or Dashboard, Form app, Landing page) and ask for a change. See [Templates](/docs/code/templates).
+:::
+
+## Where the files live
+
+A project lives on the device that runs the model (the room's host). There are two kinds.
+
+| Kind | Where | Edits |
+|---|---|---|
+| **Saved in this browser** | A scratch folder in the host browser's private file system. Nothing leaves the browser. | Applied straight away, with a diff on each card. The **Auto-approve edits** box is on by default. |
+| **Folder on disk** | A real folder the host picks with **Open folder…** (Chrome and Edge on desktop). | Every edit shows a diff and waits for approval. Auto-approve starts off. |
+
+Pick a project from the menu above the file list, or press **New** to make one. Each project keeps its own agent conversation and its served ports, so reopening it brings both back.
+
+### Approving edits
+
+When an edit needs approval, its card shows the diff and three buttons:
+
+- **Approve** applies this edit.
+- **Reject…** asks why (optional). The agent reads your reason and tries something else.
+- **Allow edits for this task** applies this edit and every other one until the request ends.
+
+The person who sent the request can answer, and so can the host.
+
+:::caution[Files that can run commands always ask]
+In a folder on disk, some files always ask, even with auto-approve on or **Allow edits for this task**: files like `package.json`, `Makefile`, `Dockerfile`, `pyproject.toml` or shell scripts. A write to one of these could run commands on the host's machine later, so the card carries a warning and has no **Allow edits for this task** button. Hidden paths (`.git`, `.env`, `.github`...) are off limits altogether, see below.
+:::
+
+In a folder on disk, the agent cannot see hidden files or key files at all: dot folders, `*.pem`, `*.key`, `id_rsa`, `credentials.json`, `secrets.yaml` and similar. It also skips `node_modules`, `dist`, `build`, `.venv` and other build folders.
+
+## Who can use Code
+
+Anyone in the room can send requests, like in Chat, as long as **Who sees the chat** (Room settings) is set to everyone in the room. With "only me" or "only whoever asked", Code belongs to the host and other devices see nothing of it.
+
+- Requests run one at a time on the host. Up to 6 wait in the queue, at most 2 from each person. Each request shows the asker's name.
+- The asker or the host can press **Stop** or answer an approval.
+- Only the host can open a folder from disk, send requests while one is open, or save a file in the editor. What the agent reads from that folder stays on the host; other devices see only a line count.
+- **New task** clears the agent's conversation. Files and previews stay.
+
+While the agent works, the room is busy for its whole run. A Chat question asked meanwhile waits and runs after it.
+
+## On a phone
+
+A phone gets Code as three tabs at the bottom: **Agent**, **Preview** and **Files**. The prompt sits above the keyboard, and an approval waits right above the prompt so it can't be missed. Previews from other devices run on their own.
+
+## Editing by hand
+
+The host can open any file from the **Files** list, edit it and save. A served preview reloads by itself, the timeline gets a line saying who edited what, and the agent is told to read those files again before its next change.
+
+## What the agent can and cannot touch
+
+- It works only inside the project folder. Paths can't climb out of it with `..`.
+- Its app runs in a sandboxed frame with no access to the room's page, storage, cookies or cached weights, and no network except two script CDNs and Google Fonts. See [Previews](/docs/code/previews).
+- Nothing runs on a server. The model runs on the room's devices and the files stay on the host.
+
+The full threat model is in [Security model](/docs/internals/security).
+
+## Next
+
+<CardGrid>
+  <LinkCard title="The agent" href="/docs/code/agent" description="Its tools, how a request runs and why it stops." />
+  <LinkCard title="Previews" href="/docs/code/previews" description="The virtual localhost, the sandbox and the console." />
+  <LinkCard title="Share and download" href="/docs/code/share" description="Keep what you built or send it to the room." />
+  <LinkCard title="Templates" href="/docs/code/templates" description="Four starter apps that already run." />
+</CardGrid>

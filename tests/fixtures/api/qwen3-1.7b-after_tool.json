@@ -1,0 +1,159 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs: greedy, unconstrained llama.cpp output for this request as the room renders it.",
+ "model": "qwen3-1.7b",
+ "case": "after_tool",
+ "profile": {
+  "style": "json",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": false,
+  "thinkRule": "afterQueryNonEmpty",
+  "trim": false,
+  "known": true
+ },
+ "thinking": false,
+ "maxTokens": 80,
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "What's the weather in Paris right now?"
+   },
+   {
+    "role": "assistant",
+    "text": "",
+    "calls": [
+     {
+      "name": "get_weather",
+      "args": {
+       "city": "Paris"
+      }
+     }
+    ]
+   },
+   {
+    "role": "tool",
+    "text": "{\"temp\": 18, \"sky\": \"cloudy\"}"
+   }
+  ]
+ },
+ "stop": "eos",
+ "promptTokens": 429,
+ "ids": [
+  785,
+  1482,
+  9104,
+  304,
+  12095,
+  374,
+  220,
+  16,
+  23,
+  30937,
+  448,
+  29514,
+  13,
+  151645
+ ],
+ "texts": [
+  "The",
+  " current",
+  " weather",
+  " in",
+  " Paris",
+  " is",
+  " ",
+  "1",
+  "8",
+  "°C",
+  " with",
+  " clouds",
+  ".",
+  "<|im_end|>"
+ ],
+ "text": "The current weather in Paris is 18°C with clouds.<|im_end|>"
+}

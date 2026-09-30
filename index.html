@@ -12,21 +12,22 @@
 <meta property="og:title" content="pooled: pool your devices, run AI together">
 <meta property="og:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
 <meta property="og:url" content="https://pooled.run/">
-<meta property="og:image" content="https://pooled.run/site/og.png">
+<meta property="og:image" content="https://pooled.run/site/og.png?v=2">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="The Pooled demo: a Tetris game an agent wrote, on a model pooled across three devices">
+<meta property="og:image:alt" content="pooled: Pool your devices. Run AI together. Below, the demo: a Tetris game an agent wrote, on a model pooled across three devices">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="pooled: pool your devices, run AI together">
 <meta name="twitter:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
-<meta name="twitter:image" content="https://pooled.run/site/og.png">
-<meta name="twitter:image:alt" content="The Pooled demo: a Tetris game an agent wrote, on a model pooled across three devices">
+<meta name="twitter:image" content="https://pooled.run/site/og.png?v=2">
+<meta name="twitter:image:alt" content="pooled: Pool your devices. Run AI together. Below, the demo: a Tetris game an agent wrote, on a model pooled across three devices">
 <meta name="theme-color" content="#F6F5F1">
 <link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=3">
 <link rel="manifest" href="/site.webmanifest?v=2">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Funnel+Display:wght@400;500&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
+<link rel="preload" href="/site/fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/site/fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/site/fonts/funnel-display-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/site/css/fonts.css">
 <link rel="stylesheet" href="/site/css/tokens.css">
 <link rel="stylesheet" href="/site/css/site.css">
 <script src="/site/js/boot.js"></script>
@@ -57,6 +58,7 @@
       <span class="wm">pooled</span>
     </a>
     <div class="right">
+      <a class="nav-link" href="/docs">Docs</a>
       <a class="gh-link" href="https://github.com/Nehanth/pooled" aria-label="pooled on GitHub" title="GitHub"><svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
       <a class="btn btn-blue btn-sm" href="/room">Start a room</a>
     </div>
@@ -72,7 +74,8 @@
     </div>
   </header>
 
-  <section class="stage" aria-label="How a room works">
+  <section class="stage" aria-labelledby="stage-h">
+    <h2 class="sr-only" id="stage-h">How a room works</h2>
     <div class="wrap">
       <div class="demo" id="demo" data-scene="tabs" data-mode="chat">
 
@@ -85,7 +88,7 @@
         <div class="win" id="win" role="tabpanel" aria-labelledby="mChat">
           <!-- the room: its code, and every device in it -->
           <div class="hd">
-            <span class="hd-room"><svg class="mark" width="16" height="16" aria-hidden="true"><use href="#i-mark"/></svg><span class="hd-k">Room</span><b class="hd-code" id="hdCode" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></b></span>
+            <span class="hd-room"><svg class="mark" width="16" height="16" aria-hidden="true"><use href="#i-mark"/></svg><span class="hd-k">Room</span><b class="hd-code" id="hdCode" role="img" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></b></span>
             <ul class="chips" id="chips" aria-label="Devices in the room">
               <li class="chip c0"><svg width="14" height="14" aria-hidden="true"><use href="#i-laptop"/></svg><span class="cn" data-name="0">fox</span><span class="cg">10 GB</span><span class="cst"></span></li>
               <li class="chip c1"><svg width="14" height="14" aria-hidden="true"><use href="#i-desk"/></svg><span class="cn" data-name="1">heron</span><span class="cg">12 GB</span><span class="cst"></span></li>
@@ -117,7 +120,7 @@
                       </div>
                       <div class="mpost">
                         <p class="mk">Room code</p>
-                        <p class="mcode" id="aCode" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></p>
+                        <p class="mcode" id="aCode" role="img" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></p>
                         <p class="mwait"><span class="live" aria-hidden="true"></span>Waiting for your other devices</p>
                         <p class="mjoined"><svg width="12" height="12" aria-hidden="true"><use href="#i-check"/></svg><span><span data-name="1">heron</span> joined</span></p>
                       </div>
@@ -135,7 +138,7 @@
                         <h3>Have a code?</h3>
                         <p class="nm-k">This device</p>
                         <span class="devname" id="nmB"><span class="nm-v" data-name="1">heron</span><span class="shuf" aria-hidden="true"><svg width="14" height="14"><use href="#i-shuffle"/></svg></span></span>
-                        <div class="slots" aria-label="Code typed: K7QX"><i>K</i><i>7</i><i>Q</i><i>X</i></div>
+                        <div class="slots" role="img" aria-label="Code typed: K7QX"><i>K</i><i>7</i><i>Q</i><i>X</i></div>
                         <span class="mbtn" id="bBtn">Join</span>
                         <p class="mok"><svg width="12" height="12" aria-hidden="true"><use href="#i-check"/></svg>Joined room K7QX</p>
                       </div>
@@ -270,7 +273,7 @@
               <div class="pvcol" id="pvcol">
                 <div class="pv" id="pv">
                   <div class="pv-h" aria-hidden="true"><span class="pv-tabs"><span class="on">Preview</span><span>Editor</span></span></div>
-                  <div class="pv-bar"><svg class="pv-rl" width="12" height="12" aria-hidden="true"><use href="#i-reload"/></svg><span class="pv-addr"><svg width="10" height="10" aria-hidden="true"><use href="#i-lock"/></svg><span class="host">localhost:5173</span><span class="pth">/index.html</span></span><span class="pv-rev" id="pvRev">rev 1</span><span class="pv-sb">sandbox</span><span class="pv-open">Open <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 7l4-4M3.5 3H7v3.5"/></svg></span><button type="button" class="pv-back" id="pvBack">Back to the demo</button><span class="br-load" aria-hidden="true"><i id="brLoad"></i></span></div>
+                  <div class="pv-bar"><svg class="pv-rl" width="12" height="12" aria-hidden="true"><use href="#i-reload"/></svg><span class="pv-addr"><svg width="10" height="10" aria-hidden="true"><use href="#i-lock"/></svg><span class="host">sandbox:5173</span><span class="pth">/index.html</span></span><span class="pv-rev" id="pvRev">rev 1</span><span class="pv-sb">sandbox</span><span class="pv-open">Open <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 7l4-4M3.5 3H7v3.5"/></svg></span><button type="button" class="pv-back" id="pvBack">Back to the demo</button><span class="br-load" aria-hidden="true"><i id="brLoad"></i></span></div>
                   <div class="pv-frame" id="pvFrame">
                     <div class="app" id="app">
                       <div class="game" id="game" tabindex="0" role="application" aria-label="The Tetris game the agent wrote, playing itself. Play it with the arrow keys and space; Escape hands it back.">
@@ -308,6 +311,7 @@
             <li><button type="button" data-step="6" tabindex="-1"><i></i><span class="lbl">It writes the files and serves them on :5173</span></button></li>
             <li><button type="button" data-step="7" tabindex="-1"><i></i><span class="lbl">Ask for a change. It edits the code and reloads.</span></button></li>
           </ol>
+          <button class="replay" id="pause" type="button" aria-label="Pause the demo" title="Pause"><svg class="i-pause" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg><svg class="i-play" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.2v9.6L12.5 8z"/></svg></button>
           <button class="replay" id="replay" type="button" aria-label="Replay from the start" title="Replay"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v3h3"/></svg></button>
         </div>
       </div>
@@ -334,11 +338,11 @@
   </div>
 </footer>
 
-<script src="/site/js/swarm.js"></script>
-<script src="/site/js/apps.js"></script>
-<script src="/site/js/hl.js"></script>
-<script src="/site/js/stars.js"></script>
-<script src="/site/js/sparkle.js"></script>
-<script src="/site/js/demo.js"></script>
+<script defer src="/site/js/swarm.js"></script>
+<script defer src="/site/js/apps.js"></script>
+<script defer src="/site/js/hl.js"></script>
+<script defer src="/site/js/stars.js"></script>
+<script defer src="/site/js/sparkle.js"></script>
+<script defer src="/site/js/demo.js"></script>
 </body>
 </html>

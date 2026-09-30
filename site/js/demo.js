@@ -7,8 +7,8 @@
    every device, once per word. The answer ends "It can chat, or write code." and, a second later, the Code tab is pressed.
    Code: the visitor asks for an app (a different one each loop: Tetris, 2048, a space shooter, Snake,
    Breakout); the files appear as the agent writes them; it serves the app on :5173 and the preview opens
-   on it, running; then a change request, an edit, a reload, and the changed app plays for a moment (with
-   an offer to take it over) before the story starts again from the room.
+   on it, running; then a change request, an edit, a reload, and the changed app plays for a moment before
+   the story starts again from the room. Whenever the app is on screen, a click or a key takes it over.
    The parts worth following (the joining, the lending, the layer split, the first answer) run slower than
    the rest.
    The HTML holds the finished state (readable without JS). This script rewinds and replays it. */
@@ -532,8 +532,9 @@
     [S1 + 1.45, () => press(bBtn, 260)],
     [S1 + 1.65, () => { tabB.classList.add("done"); tabA.classList.add("met"); setDevices(2, true); }],
     [S1 + 2.1, () => flag("merge", true)],
+    // the pool card fades in while the tabs fold away (a crossfade), so the window is never blank between steps 2 and 3
+    [S1 + 2.25, () => { scene("pool"); card.dataset.face = "pool"; }],
     // 3: now they are in, each lends memory: this laptop turns its amount up, the desktop sends its share
-    [S2, () => { scene("pool"); card.dataset.face = "pool"; }],
     ...Array.from({ length: LEND[0] }, (_, i) => [LEND0 + i * LENDI, () => { press(lendPlus, 100); lend(0, i + 1, i === LEND[0] - 1); }]),
     [CALM, () => lend(1, LEND[1], true)],
     // a friend's phone joins (its chip, its row), then adds its share: now the 35B model fits
@@ -570,7 +571,7 @@
     [c(SERVED), () => { setRun("c-t3", false); app.classList.remove("blank"); openPreview(); reload(); runGame(.6, false); }],
     [c(SERVED + .15), () => reveal(tool("c-s2"), .035)],
     [c(SERVED + .6), () => { tool("c-st2"); codeComposer.classList.remove("run"); }],
-    // 8: a change, an edit, a reload: the app, with the change, for a moment, and an offer to play it.
+    // 8: a change, an edit, a reload: the app, with the change, for a moment.
     //    (on a phone the preview covers the agent, so it steps aside while the change is asked for and made)
     [c(CHANGE), () => { flag("app-on", false); codeComposer.classList.add("hot"); }],
     [c(CHANGE + 1.25), () => { codeTyped.textContent = ""; codeComposer.classList.remove("hot"); codeComposer.classList.add("run"); tool("c-q2"); }],
@@ -579,10 +580,9 @@
     [c(CHANGE + 1.9), () => { liveEnd(); fileState("game.js", "mod"); tool("c-t4"); }],
     // the reload happens under the frost; the frost lifts as the changed app comes up (no dark flash between)
     [c(RELOAD), () => { pvRev.textContent = "rev 2"; app.classList.add("blank"); openPreview(); reload(); }],
-    [GAME, () => { flag("editing", false); app.classList.remove("blank"); runGame(.6, true); ask(true); }],
+    [GAME, () => { flag("editing", false); app.classList.remove("blank"); runGame(.6, true); }],
     [GAME + .25, () => reveal(tool("c-s3"), .035)],
     [GAME + .9, () => { tool("c-st3"); codeComposer.classList.remove("run"); }],
-    [GAME + 1.5 * SPEED, () => ask(false)],
   ].sort((a, b) => a[0] - b[0]);
   let EV = EVENTS();
 
@@ -618,7 +618,7 @@
   const LOGKEYS = ["c-q", "c-s1", "c-t0", "c-t1", "c-t2", "c-t3", "c-s2", "c-st2", "c-q2", "c-t4", "c-s3", "c-st3"];
   tl.reset = () => {
     tl.t = 0; tl.fired = 0; tl.done = false; streams = []; writing = null;
-    scene("tabs"); mode("chat"); ["merge", "served", "app-on", "ask", "done", "editing"].forEach(k => flag(k, false));
+    scene("tabs"); mode("chat"); ["merge", "served", "app-on", "done", "editing"].forEach(k => flag(k, false));
     codeComposer.classList.remove("run"); pvRev.textContent = "rev 1";
     tabA.classList.remove("done", "met"); tabB.classList.remove("done"); tabB.classList.add("idle"); letters(0);
     nmA.classList.remove("fresh"); nmB.classList.remove("fresh");
@@ -642,7 +642,7 @@
   };
   tl.final = () => {
     streams = []; writing = null; tl.done = true; tl.t = END; tl.fired = EV.length;
-    scene("code"); mode("code"); flag("merge", true); flag("served", true); flag("app-on", true); flag("ask", false); flag("done", true);
+    scene("code"); mode("code"); flag("merge", true); flag("served", true); flag("app-on", true); flag("done", true);
     flag("editing", false); codeComposer.classList.remove("run"); pvRev.textContent = "rev 2";
     tabA.classList.add("done", "met"); tabB.classList.add("done"); tabB.classList.remove("idle"); letters(4); setSlots(4, -1);
     setDevices(3); joining = -1; lent = LEND.slice(); rungHover(-1); rungSelect(2); card.dataset.face = "pick";
@@ -650,6 +650,7 @@
     words = -1; flowing = true; coding = false; flow(END);
     bdTok.textContent = WORDS.length + Math.floor((GAME + .6 - C) / .12);   // the Code run's tokens too, about where the live run ends (flow() counts the chat's only)
     demo.querySelectorAll("[data-at]").forEach(el => el.classList.remove("pending", "enter"));
+    LOGKEYS.forEach(k => log.append(at(k)));   // in story order: a partly played run has moved the ones it showed to the end
     saysText.forEach((txt, el) => { const s = el.querySelector(".say"); if (s) { s.textContent = txt; s.classList.remove("cursor"); } });
     chatTyped.textContent = ""; codeTyped.textContent = ""; chatComposer.classList.remove("hot"); codeComposer.classList.remove("hot");
     Object.keys(fItems).forEach(n => fileState(n, "done", lineOut[n])); fileState("game.js", "mod", lineOut.edit);
@@ -673,8 +674,8 @@
   };
 
   /* ---------- driver: one rAF, only while the window is on screen, the page is visible and nobody is playing ---------- */
-  let raf = 0, last = 0, visible = false, frozen = false, playing = false;
-  const needs = () => !frozen && !playing && visible && !document.hidden && tl.started && !tl.done;
+  let raf = 0, last = 0, visible = false, frozen = false, playing = false, paused = false;
+  const needs = () => !paused && !frozen && !playing && visible && !document.hidden && tl.started && !tl.done;
   function loop(now) {
     if (sbT.getAttribute("aria-live") !== "off") sbT.setAttribute("aria-live", "off");
     const dt = last ? Math.min(.1, (now - last) / 1000) : .016; last = now;
@@ -698,8 +699,22 @@
     while (tl.t < s - 1e-6) tl.advance(Math.min(1 / 30, s - tl.t));
     inst.draw(); wake();
   };
+  // Pause / Play (WCAG 2.2.2): holds the story, the self-playing game, the demo's CSS animations and the
+  // swarm canvases. Replay or a step dot plays again. Reduced motion has nothing moving, so no button.
+  const pauseBtn = $("pause");
+  const setPaused = on => {
+    paused = on;
+    demo.classList.toggle("paused", on); pauseBtn.classList.toggle("paused", on);
+    pauseBtn.setAttribute("aria-label", on ? "Play the demo" : "Pause the demo"); pauseBtn.title = on ? "Play" : "Pause";
+    [window.__swarm, window.__swarm2].forEach(s => s && "paused" in s && (s.paused = on));
+    if (on) { stopPlay(true); halt(); if (inst && !inst.human) inst.stop(); }
+    else { if (inst && !inst.human && demo.classList.contains("app-on")) inst.start(); wake(); }
+  };
+  if (RM) pauseBtn.hidden = true;
+  pauseBtn.addEventListener("click", () => setPaused(!paused));
   // the caption is announced when the visitor moves to a step, not on every step the autoplay reaches
   const goStep = k => {
+    if (paused) setPaused(false);
     sbT.setAttribute("aria-live", "polite");
     if (RM) {
       if (k >= STEPS.length - 1) { stopPlay(true); tl.final(); return; }
@@ -719,18 +734,23 @@
     const b = e.key === "ArrowLeft" ? mChat : mCode; b.focus(); b.click();
   });
 
-  /* ---------- the app: it plays itself; for a moment (or once the story is over) the visitor can take it over.
-     Then the story waits, the keys (or, on a touch screen, the pad) play it, and leaving it lets the story go on ---------- */
+  /* ---------- the app: it plays itself; whenever it is served and on screen (not frosted over for an edit) the
+     visitor can take it over. Then the story waits, the keys (or, on a touch screen, the pad) play it, and leaving
+     it lets the story go on ---------- */
   const pvBack = $("pvBack"), pad = $("pad"), pv = $("pv");
   const COARSE = matchMedia("(pointer: coarse)");
   let lastPointer = "";
   const touchy = () => lastPointer ? lastPointer !== "mouse" : COARSE.matches;
-  const ask = on => flag("ask", on);   // (no "Click to play" offer any more; clicking the game still plays it)
-  const canPlay = () => demo.classList.contains("served") && demo.classList.contains("app-on") && (demo.classList.contains("ask") || tl.done);
+  // (the pointer cursor follows the same rule: .demo.served.app-on:not(.editing) .game)
+  const canPlay = () => demo.classList.contains("served") && demo.classList.contains("app-on") && !demo.classList.contains("editing");
   const startPlay = () => {
     if (playing || !canPlay()) return false;
+    // the agent's turn finishes first (the whole reply, its numbers, Send again, the band back to Ready), so the
+    // story waits on a settled pane rather than mid-sentence for as long as the visitor plays
+    const end = tl.t < c(SERVED + .6) ? c(SERVED + .6) : tl.t >= GAME && tl.t < GAME + .9 ? GAME + .9 : 0;
+    while (tl.t < end + 1e-3) tl.advance(Math.min(1 / 30, end + 1e-3 - tl.t));
     playing = true; halt();
-    flag("playing", true); flag("touch", touchy()); flag("ask", false);
+    flag("playing", true); flag("touch", touchy());
     inst.play(); inst.v2(true); inst.start();
     game.focus({ preventScroll: true });
     return true;
@@ -740,15 +760,17 @@
     playing = false; flag("playing", false); flag("touch", false);
     pad.querySelectorAll(".on").forEach(b => b.classList.remove("on"));
     inst.auto(); inst.reset(11); inst.v2(true); inst.warm(WARM_S[APP]);
-    if (!RM) inst.start();
+    if (!RM && !paused) inst.start();
     if (!quiet && document.activeElement === game) game.blur();
     wake();
   }
   pvBack.addEventListener("click", () => stopPlay());
   game.addEventListener("pointerdown", e => { lastPointer = e.pointerType; if (!playing) startPlay(); });
+  // only a game key (or Enter) takes it over: Tab passing through, shortcuts and modifiers leave the story alone
+  const PLAY_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", " ", "Enter"]);
   game.addEventListener("keydown", e => {
     if (e.key === "Escape") { stopPlay(); return; }
-    if (!playing && !startPlay()) return;
+    if (!playing && !(PLAY_KEYS.has(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey && startPlay())) return;
     if (inst.key(e, true)) e.preventDefault();
   });
   game.addEventListener("keyup", e => { if (playing) inst.key(e, false); });
@@ -774,10 +796,17 @@
     fitW = w; fitH = h;
     const b = bodyEl.getBoundingClientRect(), s = stepbar.getBoundingClientRect();
     const top = b.top + scrollY, below = s.bottom - b.bottom, phone = w <= 640;
-    const px = Math.round(Math.min(phone ? 520 : 580, Math.max(300, h - top - below - (phone ? 10 : 16))));
+    const px = Math.round(Math.min(phone ? 520 : 580, Math.max(phone ? 280 : 300, h - top - below - (phone ? 10 : 16))));
     document.documentElement.style.setProperty("--body-h", px + "px");
     geo = null;
   };
+  // the load card keeps to the stage: on a short one it scales down whole, so its title and status line never clip
+  const ldc = $("ldc");
+  const fitLdc = () => {
+    const h = ldc.offsetHeight, room = bodyEl.clientHeight - 16;
+    ldc.style.setProperty("--ldc-k", h > room && room > 0 ? (room / h).toFixed(3) : "1");
+  };
+  if (window.ResizeObserver) { const ro = new ResizeObserver(fitLdc); ro.observe(ldc); ro.observe(bodyEl); }
   fit(true);
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => fit(true));
   addEventListener("resize", () => { fit(); geo = null; if (demo.dataset.scene === "chat") { measure(); if (aLi.style.minHeight) reserve(); } });

@@ -8,6 +8,12 @@
 //   --verbose       print page errors (the apps' own, expected ones included)
 //   --port 18995
 //   --engine-opts '<JSON>'  extra engine options (A/B), e.g. '{"attnPrefillTile":false,"moeGroupPrefill":0,"prefillUbatch":0}'
+// Code mode's settings (the Code mode eval, docs/design/harness-core.md):
+//   --codemode      Code mode's model settings: the template's call style, maxNew 8192, greedy JSON / focused XML
+//   --dense <dir>   a Qwen3 dense model dir (config.json, tokenizer.json, model.gguf) instead of --weights
+//   --hcore 0|1     the model path: 1 = the serve v2 core in process (harness/core-model.js), 0 = legacy
+//   --sampling <preset>  override the sampler (room/sampling.js)
+//   --label <name>  names the results file and directory (default: the model kind)
 // Writes tests/eval/results/<stamp>-<model>.jsonl (one record per task run) and a directory of
 // the same name with one trajectory JSON per task run (the full conversation and final files).
 // Exit code: non-zero when a mock run or a self-test fails. Needs playwright on NODE_PATH.
@@ -22,15 +28,17 @@ const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const MODEL = arg("model", "mock"), PORT = +arg("port", 18995), REPEAT = +arg("repeat", 1);
 if (!["mock", "engine"].includes(MODEL)) { console.error("--model mock|engine (a room runs from Code mode: p2p.html?eval=all)"); process.exit(2); }
 const weights = arg("weights", null);
-if (MODEL === "engine" && !weights) { console.error("--model engine needs --weights <file.gguf>"); process.exit(2); }
+const dense = arg("dense", null);   // a Qwen3 dense model dir (config.json, tokenizer.json, model.gguf)
+if (MODEL === "engine" && !weights && !dense) { console.error("--model engine needs --weights <file.gguf>"); process.exit(2); }
 
-const srv = serveRepo(PORT, weights ? { "/__m.gguf": path.resolve(weights) } : {});
+const srv = serveRepo(PORT, dense ? { "/__m.gguf": path.resolve(dense, "model.gguf"), "/__cfg.json": path.resolve(dense, "config.json"), "/__tok.json": path.resolve(dense, "tokenizer.json") }
+  : weights ? { "/__m.gguf": path.resolve(weights) } : {});
 const { chromium } = await loadPlaywright();
 const browser = await chromium.launch({ executablePath: chromiumPath(), headless: !flag("headed"),
   // --site-per-process as in desktop Chrome: the preview relay and the probe run in their own process
   args: [...(MODEL === "engine" ? GPU_ARGS : ["--no-sandbox"]), "--site-per-process"] });
 const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-const outDir = path.join(ROOT, "tests/eval/results", `${stamp}-${MODEL}`);
+const outDir = path.join(ROOT, "tests/eval/results", `${stamp}-${arg("label", MODEL)}`);
 fs.mkdirSync(outDir, { recursive: true });
 const jsonl = outDir + ".jsonl";
 let code = 0;
@@ -43,7 +51,7 @@ try {
   });
   const page = await ctx.newPage();
   if (flag("verbose")) page.on("pageerror", (e) => console.error("page error:", String(e).slice(0, 300)));   // the apps' own errors show here too
-  await page.goto(`http://127.0.0.1:${PORT}/tests/eval/eval.html?model=${MODEL}${arg("ctx", "") ? "&ctx=" + arg("ctx") : ""}${arg("engine-opts", "") ? "&opts=" + encodeURIComponent(arg("engine-opts")) : ""}`);
+  await page.goto(`http://127.0.0.1:${PORT}/tests/eval/eval.html?model=${MODEL}${arg("ctx", "") ? "&ctx=" + arg("ctx") : ""}${dense ? "&dense=1" : ""}${flag("codemode") ? "&codemode=1" : ""}${arg("hcore", "") ? "&hcore=" + arg("hcore") : ""}${arg("sampling", "") ? "&sampling=" + arg("sampling") : ""}${arg("engine-opts", "") ? "&opts=" + encodeURIComponent(arg("engine-opts")) : ""}`);
   await page.waitForFunction(() => window.__eval, null, { timeout: 30000 });
   await page.evaluate(() => window.__eval.init());
   if (MODEL === "engine") console.log("engine:", JSON.stringify(await page.evaluate(() => window.__engineInfo)));
@@ -64,7 +72,7 @@ try {
 
   const recs = [];
   const pad = (s, n) => String(s).padEnd(n);
-  console.log(`${pad("task", 12)} ${pad("ok", 4)} ${pad("reason", 8)} ${pad("steps", 5)} ${pad("calls", 5)} ${pad("prefill", 8)} ${pad("gen", 7)} ${pad("ctx", 6)} ${pad("s", 6)} cards`);
+  console.log(`${pad("task", 12)} ${pad("ok", 4)} ${pad("reason", 8)} ${pad("steps", 5)} ${pad("calls", 5)} ${pad("prefill", 8)} ${pad("reused", 8)} ${pad("gen", 7)} ${pad("ctx", 6)} ${pad("s", 6)} cards`);
   for (let k = 0; k < REPEAT; k++) {
     for (const id of ids) {
       const { rec, trajectory } = await page.evaluate((i) => window.__eval.task(i), id);
@@ -73,7 +81,7 @@ try {
       fs.appendFileSync(jsonl, JSON.stringify(rec) + "\n");
       fs.writeFileSync(path.join(outDir, `${id}${REPEAT > 1 ? "-" + k : ""}.json`), JSON.stringify(trajectory, null, 1));
       const cards = Object.entries(rec.cards).map(([c, n]) => `${c}×${n}`).join(" ");
-      console.log(`${pad(id, 12)} ${pad(rec.ok ? "PASS" : "FAIL", 4)} ${pad(rec.reason, 8)} ${pad(rec.steps, 5)} ${pad(rec.calls, 5)} ${pad(rec.prompt, 8)} ${pad(rec.generated, 7)} ${pad(rec.ctx, 6)} ${pad((rec.ms / 1000).toFixed(1), 6)} ${cards}`);
+      console.log(`${pad(id, 12)} ${pad(rec.ok ? "PASS" : "FAIL", 4)} ${pad(rec.reason, 8)} ${pad(rec.steps, 5)} ${pad(rec.calls, 5)} ${pad(rec.prompt, 8)} ${pad(rec.reused, 8)} ${pad(rec.generated, 7)} ${pad(rec.ctx, 6)} ${pad((rec.ms / 1000).toFixed(1), 6)} ${cards}`);
       if (!rec.ok) console.log("    " + rec.check.split("\n").slice(0, 6).join("\n    "));
     }
   }

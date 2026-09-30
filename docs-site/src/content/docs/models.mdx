@@ -1,0 +1,79 @@
+---
+title: Which models fit
+eyebrow: Getting started
+description: The three models in the room's picker, how much memory each needs across the room, how much context they have and how fast they run.
+sidebar:
+  label: Which models fit
+  order: 4
+---
+{/*
+Sources (for the fact-checker):
+- room/models.js: PICKER, NEED_GB (4.0 / 17.0 / 22.5), FILE_GB (1.83 / 16.06 / 20.84), CTX (1.7B 8192/16384, 27B 16384/32768, MoE 32768/65536), maxSeqFor() (?ctx= rounded to 256, at least 2048, at most max), kvModeFor() (?kv=q8 only for qwen35 models, ~56% of f16), KV sizes in the CTX comment
+- room/plan.js: bestFit() (picker preselects the biggest model that fits until you pick one; room.js updateNeed modelTouched)
+- README.md: models table, "Performance" (GB10 numbers, across-devices table)
+- CHANGELOG.md Unreleased: M5 Max Chrome MoE 86.1 -> 90.9 tok/s plain
+- docs/bench-log.md "2026-09-28: device matrix": 1.7B GB10 alone 49-51 tok/s plain; GB10 + iPhone 25.6-29.0; 1.7B has no draft head
+- cli/README.md "Claude Code": its prompt is 15-20k tokens; use the MoE or 27B
+- room.js metaPromise: a computer can give up to 64 GB (room/pledge.js DESK_MAX_GB)
+*/}
+
+The room's picker offers three models. Pick by how much memory the room pools, which is shown in the header as `N GB pooled`.
+
+| Model | The room needs | Whole file | Context (default, max) | Good for |
+|---|---|---|---|---|
+| Qwen3 1.7B (Q8_0) | 4 GB | 1.83 GB | 8K, up to 16K | one laptop, or a room of phones and light laptops |
+| Qwen3.8 27B (Q4_0) | 17 GB | 16.06 GB | 16K, up to 32K | rooms with 17 to 22 GB |
+| Qwen3.6 35B MoE (Q4_0) | 22.5 GB | 20.84 GB | 32K, up to 64K | the best choice once the room has 22.5 GB |
+
+The picker shows each model's need next to what the room has, and preselects the biggest model that fits. A model the room is short for shows how many GB are missing.
+
+## Choose by the devices you have
+
+- **One laptop.** Run Qwen3 1.7B. A computer gives at least 4 GB by default when its GPU allows it, which is enough.
+- **Two or three laptops, or a desktop with a big GPU.** Add up what each device gives. At 17 GB you can run the 27B, and at 22.5 GB the MoE.
+- **Phones.** A phone gives at most 0.5 to 2 GB, so phones add little memory. They are best for asking questions. See [Phones and tablets](/docs/phones).
+
+:::tip[The MoE is faster than the 27B]
+Qwen3.6 35B MoE is the bigger file, but each token uses only 8 of its 256 experts, about 3B parameters. It decodes several times faster than the 27B. If the room has 22.5 GB, pick the MoE.
+:::
+
+Only give memory the device really has free. Browsers do not tell the page how much GPU memory a device has, so Pooled starts from a safe estimate. A computer can give up to 64 GB. On a Mac, the GPU shares memory with everything else that is open.
+
+## How fast
+
+These numbers use greedy decoding. "Speculative" uses the model's own draft layer to guess several tokens at once and keeps only the ones the full model agrees with, so the answer is the same.
+
+**One device, Chrome:**
+
+| Model | Device | Plain | Speculative |
+|---|---|---|---|
+| Qwen3.6 35B MoE | NVIDIA GB10 (DGX Spark) | 40–46 tok/s | 65–84 tok/s |
+| Qwen3.6 35B MoE | Apple M5 Max | about 91 tok/s | — |
+| Qwen3.8 27B | NVIDIA GB10 | 10.1–10.8 tok/s | 20–27 tok/s |
+| Qwen3 1.7B | NVIDIA GB10 | 49–51 tok/s | no draft layer |
+
+**Across devices.** Every device the answer passes through adds its network delay to every token. On a GB10 with emulated delay, the MoE on two devices ran at 27.9 tok/s plain at 0 ms and 12.9 tok/s at 20 ms one-way; speculative decoding raised the 20 ms case to 20.6 tok/s. Qwen3 1.7B on a GB10 with an iPhone holding one of its layers ran at 25.6–29 tok/s over home Wi-Fi, against 47–51 tok/s once the phone only asked (the default now).
+
+See [Benchmarks](/docs/internals/benchmarks) for the full tables and how they were measured.
+
+## Context
+
+Context is the prompt and the answer together, in tokens. Each model opens with its default. To ask for more, add `?ctx=` to the room's address on the device that will host, before you press Start. For example, 64K on the MoE:
+
+```text
+https://pooled.run/room?ctx=65536
+```
+
+The value is rounded to a multiple of 256, and never goes below 2048. Longer context costs little memory on the 27B and the MoE (16K on the 27B is about 1 GB across the room, 32K on the MoE about 0.64 GB). What limits it in practice is how long a long prompt takes to read.
+
+`?kv=q8` stores the 27B's and the MoE's attention cache in 8-bit, at about 56% of the memory. The host decides for the whole room.
+
+## Which model for which job
+
+| Job | Model |
+|---|---|
+| Quick chat on one laptop | Qwen3 1.7B |
+| Code mode | the MoE if the room has the memory; the 1.7B works for small apps |
+| Claude Code or Codex CLI through the [Serve API](/docs/serve) | the MoE (32K by default, up to 64K) or the 27B. Claude Code's own prompt is 15–20K tokens, which leaves the 1.7B almost no room. |
+
+More about each model and how to add one: [Models reference](/docs/reference/models).

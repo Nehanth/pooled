@@ -16,3 +16,13 @@ CITATION.cff
 AUTHORS
 LICENSE
 serve.json
+cli
+# The docs site (/docs) is built on Vercel from docs-site/ (see vercel.json buildCommand).
+# Re-include its sources, which the rules above (*.md, package.json) would drop, and the
+# CHANGELOG.md its changelog page imports. build-vercel.mjs keeps them out of the served site.
+!docs-site/**
+!CHANGELOG.md
+docs-site/node_modules
+docs-site/dist
+docs-site/.astro
+/dist

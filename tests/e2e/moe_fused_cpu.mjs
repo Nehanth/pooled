@@ -3,8 +3,9 @@
 //   npm i --prefix /tmp/wr wgsl_reflect
 //   WGSL_REFLECT=/tmp/wr/node_modules/wgsl_reflect/wgsl_reflect.module.js node tests/e2e/moe_fused_cpu.mjs
 // Checks, on small random Q4_0 / Q8_0 experts:
-//   1. moe_route gives the same ids and weights as moe_router (rank top-K == K argmax rounds), and
-//      writes sigmoid(shared-gate logit) to slot K
+//   1. moe_route gives the same ids as moe_router (rank top-K == K argmax rounds) and the same weights up to
+//      rounding (softmax over the K picked logits vs the renormalized full softmax), and writes
+//      sigmoid(shared-gate logit) to slot K
 //   2. route -> gus -> dnc equals the unfused chain moe_router -> moe_gu -> moe_dn (routed slots),
 //      moe_gu / moe_dn over the shared expert as a 1-expert stack, then moe_combine: the same values
 //      (per-slot terms, reductions and combine order are the same code), for every format pair and R
@@ -85,12 +86,14 @@ for (const [gf, sgf, df, sdf, R, sDim, lay] of [["q4", "q8", "q4", "q8", 2, 32, 
   run(code, "moe_router", [C, 1, 1], [lgR, selR, wR, MOE([0, 0, K, nExp, nExp, 0, 1, 0])]);
   let routeOk = true;
   for (let c = 0; c < C; c++) for (let k = 0; k < K; k++)
-    if (selR[c * K + k] !== all.sel[c * KS + k] || !Object.is(wR[c * K + k], all.w[c * KS + k])) routeOk = false;
+    if (selR[c * K + k] !== all.sel[c * KS + k] || !(Math.abs(wR[c * K + k] - all.w[c * KS + k]) <= 1e-6 * Math.abs(wR[c * K + k]) + 1e-9)) routeOk = false;
   for (let c = 0; c < C; c++) if (!Object.is(all.w[c * KS + K], Math.fround(1 / (1 + Math.exp(-logits[c * (nExp + 1) + nExp]))))) {
     // the interpreter's exp may round differently from Math.exp: compare loosely
     if (Math.abs(all.w[c * KS + K] - 1 / (1 + Math.exp(-logits[c * (nExp + 1) + nExp]))) > 1e-6) routeOk = false;
   }
-  check(`moe_route == moe_router (ids, weights), shared gate in slot K`, routeOk, `sel ${Array.from(all.sel.subarray(0, KS))}`);
+  // (moe_route's renormalized weights are a softmax over the K picked logits, moe_router's the renormalized full
+  // softmax: the same math, last bits apart; the chain check below feeds moe_combine moe_route's weights)
+  check(`moe_route == moe_router (ids; weights within 1e-6), shared gate in slot K`, routeOk, `sel ${Array.from(all.sel.subarray(0, KS))}`);
   const hR = new Float32Array(C * K * ei), yR = new Float32Array(C * K * dim);
   run(code, `moe_gu_${gf}`, [Math.ceil(ei / 4), C * K, 1], [Wg.qs, Wg.sc, Wu.qs, Wu.sc, x, hR, selR, MOE([ei, dim, K, nExp, dim, ei, 0, 0])]);
   run(code, `moe_dn_${df}`, [Math.ceil(dim / 4), C * K, 1], [Wd.qs, Wd.sc, hR, yR, selR, MOE([dim, ei, K, nExp, ei, dim, 0, 0])]);
@@ -99,7 +102,8 @@ for (const [gf, sgf, df, sdf, R, sDim, lay] of [["q4", "q8", "q4", "q8", 2, 32, 
   run(code, `moe_dn_${sdf}`, [Math.ceil(dim / 4), C, 1], [Sd.qs, Sd.sc, hS, yS, sel0, MOE([dim, sDim, 1, 1, sDim, dim, 0, 0])]);
   const sg = new Float32Array(C); for (let c = 0; c < C; c++) sg[c] = logits[c * (nExp + 1) + nExp];
   const xu = x0.slice();
-  run(code, "moe_combine", [Math.ceil(dim / 64), C, 1], [xu, yR, wR, yS, sg, MOE([dim, 0, K, dim, dim, dim, 1, 1])]);
+  const wF = new Float32Array(C * K); for (let c = 0; c < C; c++) wF.set(all.w.subarray(c * KS, c * KS + K), c * K);
+  run(code, "moe_combine", [Math.ceil(dim / 64), C, 1], [xu, yR, wF, yS, sg, MOE([dim, 0, K, dim, dim, dim, 1, 1])]);
   let maxD = 0; for (let i = 0; i < xu.length; i++) maxD = Math.max(maxD, Math.abs(xu[i] - all.xo[i]));
   if (!layout) check(`fused chain == unfused chain (router, gu, dn, shared as a 1-expert stack, combine)`, same(xu, all.xo), `max |diff| ${maxD.toExponential(2)}`);
 

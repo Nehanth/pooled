@@ -1,0 +1,120 @@
+---
+title: How layers are split
+eyebrow: Rooms
+description: When a room starts a model, one device becomes the model host and deals the layers. For speed (the default) fills the fastest devices first. By memory gives every computer a share.
+sidebar:
+  label: How layers are split
+  order: 1
+---
+{/* Sources (origin/main 40bb0fa):
+    room/plan.js (planForSpeed, PHONE_COST = 20, planSplit, phonesToLeaveOut, pickModelHost, SPEED_EDGE = 1.5),
+    room/gpuspeed.js (measureCopyGBps: 64 MB copy, best of 5 passes),
+    room.js aiStart (~L2513-2600: caps = pledge minus embed/head/draft on the host; ?split, ?phonelayers, ?ctx, ?kv
+    read on the device that deals; host is never a weight source), room.js biggestPeerId/aiStartAnywhere (~L2482),
+    room.js noteSpeeds (~L3428: ms per layer from verify laps, EMA), room.js SEG_HELP "ai-split" (~L4502),
+    room.js ai-split change handler (~L4470: Re-deal button text).
+    PR #233 (For speed default, phones, results table), PR #257 (faster GPU hosts, numbers), CHANGELOG [Unreleased],
+    README "Across devices" (3.5-4 ms per extra device at 0 ms).
+    Example deals below were computed by running room/plan.js with node. */}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+A model is a stack of layers: 64 on Qwen 3.8 27B, 40 on Qwen 3.6 35B MoE. When someone presses **Start**, one device becomes the **model host** and deals those layers out. Each device that gets layers holds one contiguous range and runs it on its own GPU.
+
+There are two ways to deal them:
+
+| Mode | What it does | When to use it |
+|---|---|---|
+| **For speed** (default) | Fills the fastest devices first, each up to the memory it lends. Devices that aren't needed join to ask. | Almost always. Fewer devices means fewer network hops per token. |
+| **By memory** | Every computer gets layers in proportion to the memory it lends. | When you want every computer to take part, or to compare with older runs. |
+
+## Pick a mode
+
+In the room, open **Room settings** (the sliders icon), then **Model → Layer split**. The change applies the next time the layers are dealt, so the room shows a **Re-deal the layers** button. Cached layers reload in seconds.
+
+You can also pick a mode when the page loads:
+
+```text
+https://pooled.run/room?split=memory
+https://pooled.run/room?split=speed
+```
+
+:::note
+The split is read on the device that deals the layers, which is the model host. If another device ends up hosting (see below), set `?split=` on that device's page.
+:::
+
+## Which device is the model host
+
+The model host holds the embedding, the output head and the draft layer, samples every token and runs the Code agent. So it should be the strongest device, whoever pressed Start. The room picks it in this order:
+
+1. A device with WebGPU.
+2. A computer before a phone.
+3. The most memory lent.
+4. Then the lowest device id, so every screen picks the same one.
+
+Then GPU speed can change the pick. Each device times a GPU memory copy when the page loads (a 64 MB copy, best of 5 passes). A device of the same kind hosts instead when it copies memory at least **1.5×** as fast as the memory pick and lends at least half as much memory. Two tabs on the same GPU, or two identical machines, keep the pick by memory.
+
+In a DGX Spark (GB10) + M5 Max room, the Mac copies at about 390 GB/s and the GB10 at about 190, so the Mac hosts. That made the MoE's speculative decoding 20–39% faster and plain decoding 9–11% faster (PR #257).
+
+The device that created the room still introduces new devices. Only the model work moves.
+
+## For speed
+
+A token visits every device that holds layers, in order, and comes back to the host. Each device adds its compute time for its layers plus one network hop. So For speed:
+
+- orders devices by measured milliseconds per layer, fastest first;
+- gives each one as many layers as its memory holds, until the model is dealt;
+- leaves the rest out. They stay in the room and can ask questions.
+
+The host always keeps at least one layer.
+
+**Before the first answer**, nothing is measured yet. Then fewer hops win: the host and the biggest computers fill first. An unmeasured phone counts as **20× slower** than an unmeasured computer, so a phone only gets the layers the computers can't hold. One phone layer costs as much as 15–25 layers on a GB10 in a real room, because the phone's GPU clocks down while it waits for its turn.
+
+**After an answer**, the host knows each device's milliseconds per layer. Re-deal to use them. The Re-deal button says "re-deal to put the layers on the fastest devices (measured on the answers so far)".
+
+If the devices together can't hold the model, the leftover layers are spread over every device in proportion to what it lends.
+
+## By memory
+
+Every computer gets layers in proportion to what it lends, and at least one. Phones get no layers while the computers can hold the whole model. They join as ask-only guests. Add `?phonelayers=1` to deal phones layers anyway.
+
+## Examples
+
+These deals come from running the room's own planner on a 40-layer model (the 35B MoE). "Holds" is how many layers fit in the memory each device lends.
+
+<Tabs syncKey="split">
+<TabItem label="For speed">
+
+| Room | Host | Desktop | Phone |
+|---|---|---|---|
+| Host holds 30, desktop 30, phone 2, nothing measured yet | layers 1–30 | layers 31–40 | asks only |
+| Same room, desktop measured 2× faster per layer than the host | layers 1–10 | layers 11–40 | asks only |
+| Host holds 20, desktop 15, phone 2 (the computers can't hold 40) | layers 1–22 | layers 23–38 | layers 39–40 |
+
+</TabItem>
+<TabItem label="By memory">
+
+| Room | Host | Desktop | Phone |
+|---|---|---|---|
+| Host holds 30, desktop 30, phone 2 | layers 1–20 | layers 21–40 | asks only |
+| Same room with `?phonelayers=1` | layers 1–20 | layers 21–39 | layer 40 |
+
+</TabItem>
+</Tabs>
+
+## What it changes
+
+Qwen 3.6 35B MoE, 128 tokens, exact sampling, home Wi-Fi (PR #233):
+
+| Room | Plain tok/s | Speculative tok/s |
+|---|---|---|
+| GB10 alone | 35–40 | 45–65 |
+| GB10 + iPhone, the phone holds 1 layer | 15–25 | 25–39 |
+| GB10 + iPhone, the phone asks only | 36–41 | 45–67 |
+| GB10 + M5 Max | 28–33 | 26–57 |
+
+A room is not faster than its fastest device. It runs models that don't fit on one device. Each extra device in the chain costs about 3.5–4 ms per token even on a perfect network, plus its network latency. See [Bad networks](/docs/rooms/networks).
+
+## Memory counted per layer
+
+A layer's size includes its share of the KV cache at the room's context length. A longer context (`?ctx=`) makes each layer bigger, so fewer fit on each device. An int8 KV cache (`?kv=q8`) makes it smaller. The host's own share is what it lends minus the embedding, the output head and the draft layer. See [URL options](/docs/reference/url-options).

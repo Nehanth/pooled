@@ -1,0 +1,91 @@
+---
+title: Start a room
+eyebrow: Getting started
+description: Open a room on one laptop, pick a model and ask your first question. One laptop is enough for the smallest model.
+sidebar:
+  label: Start a room
+  order: 2
+---
+import { Steps } from '@astrojs/starlight/components';
+
+{/*
+Sources (for the fact-checker):
+- p2p.html: join screen labels ("This device", "Memory", "Start a room", "Have a code?", "Join"), "Pick a model", "Start the model", "Give 4 GB from this device", "This device gives", join footer text
+- room.js: updateNeed() (need text, "Give N GB", download note), metaPromise (default pledge: half of maxBufferSize, at least min(4 GB, budget) on a computer), start() (6-character code via randomCode()), aiStartAnywhere()/biggestPeerId() (anyone can press Start; model host picked by room/plan.js pickModelHost)
+- room/models.js: NEED_GB, FILE_GB (1.83 / 16.06 / 20.84 GB)
+- PR #245 (first run: one laptop gives 4 GB; Start says what it downloads; 1.7B loaded in 35 s on the Spark incl. cold kernel tuning)
+- docs/bench-log.md "2026-09-28: device matrix" (MoE on GB10 alone: host online after 163-168 s)
+- p2p.html #ai-length options (150 / 400 / 1200 tokens)
+- room/joingate.js (CODE_LEN = 6, formatCode "4TK-G9P", invite key #k=), p2p.html #join-reqs (Allow / Deny), Room settings → Joining; CHANGELOG #268 entry
+*/}
+
+You need one laptop or desktop with Chrome, Edge or Safari 26. That is enough to run the smallest model on its own. Add more devices later to run bigger ones.
+
+<Steps>
+
+1. **Open [pooled.run/room](https://pooled.run/room).**
+
+   The page checks this browser first. If it can't use the GPU, it says so and names the fix. See [Browsers and requirements](/docs/browsers).
+
+2. **Name this device and set its memory.**
+
+   The name is what other people in the room see, for example `laptop`. **Memory** is how many GB this device gives the room. A computer starts at half of what its GPU reports it can hold, and at least 4 GB when the GPU allows it, which is what the smallest model needs. You can change it later.
+
+3. **Press Start a room.**
+
+   You get a six-character room code, shown as `4TK-G9P`. It shows in the header. Other devices use it to join.
+
+   A device with your invite link or QR code comes in at once. A device that types the code alone waits until you press **Allow** or **Deny**. See [Invite devices](/docs/invite).
+
+4. **Pick a model.**
+
+   Each row shows what the model needs and whether the room has enough. The line under the meter reads, for example, `Needs 4 GB. The room has 4 GB.`
+
+   If the room is short, **Start the model** stays off. Either raise **This device gives**, press **Give N GB from this device**, or [invite another device](/docs/invite).
+
+5. **Press Start the model.**
+
+   The note above the button says what this device will download, for example "Start downloads the whole 1.8 GB model to this device, once." With more devices, each one downloads only its share.
+
+6. **Ask something.**
+
+   Type in **Message the room** and press **Send**. The answer streams in word by word.
+
+   {/* TODO(fact-check): the draft said "On a laptop and phone running Qwen3 1.7B, the first word came in about 0.4 s". No source on origin/main 40bb0fa or in merged PRs; removed until measured. */}
+
+</Steps>
+
+## How long the first start takes
+
+The first start downloads the weights and tunes the GPU kernels for this device. Later starts read the weights from the browser's cache.
+
+| Model | Whole file | Example first load |
+|---|---|---|
+| Qwen3 1.7B | 1.83 GB | 35 s on a DGX Spark, including kernel tuning |
+| Qwen3.8 27B | 16.06 GB | depends on your connection |
+| Qwen3.6 35B MoE | 20.84 GB | about 2 min 45 s on a DGX Spark alone |
+
+In a room of several devices, each device fetches about its share of the file, so each download is smaller.
+
+:::tip
+Keep the room's tab in front and the laptop plugged in while the model runs. A tab in the background can stall, and the screen going to sleep stops the device from serving.
+:::
+
+## Who can press Start
+
+Anyone in the room can pick a model and press Start. The room then chooses the host for you: a computer before a phone, and among computers the one whose GPU moves memory clearly faster, or else the one that gives the most memory. The host deals the layers out to the devices.
+
+## After the model is running
+
+- **Chat**: everyone in the room can ask. Questions wait in one queue and run one at a time.
+- **Code**: switch to **Code** above the chat to have the model build a small app. See [Code mode](/docs/code).
+- **Serve API**: the black **Serve API** button in the header opens the command to use this room from your own tools. See [Serve API](/docs/serve).
+- **Room settings** (the sliders icon): the device that opened the room sets who sees the chat, answer length (short 150 tokens, normal 400, long 1200), thinking, answer style, wording, the layer split and **Re-deal on its own**. Every device gets **Save the chat**, **Room card** and **Clear cached weights**. See [Room settings](/docs/rooms/settings).
+
+## Leaving
+
+Click the Pooled logo to leave. If you opened the room, leaving ends it for everyone else. If you are another device, the room has to re-deal your layers, and you can join again with the same code.
+
+:::note
+Reloading the tab does not end the room. A host that reloads within a minute goes back into its room while the other devices wait for it, and a device that reloads rejoins under the same name. See [Device drops and recovery](/docs/rooms/recovery).
+:::

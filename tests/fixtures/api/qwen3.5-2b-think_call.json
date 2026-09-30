@@ -1,0 +1,307 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs: greedy, unconstrained llama.cpp output for this request as the room renders it.",
+ "model": "qwen3.5-2b",
+ "case": "think_call",
+ "profile": {
+  "style": "xml",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": true,
+  "thinkRule": "afterQuery",
+  "trim": true,
+  "known": true
+ },
+ "thinking": true,
+ "maxTokens": 400,
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "What's the weather in Rome?"
+   }
+  ]
+ },
+ "stop": "eos",
+ "promptTokens": 498,
+ "ids": [
+  760,
+  1156,
+  369,
+  9859,
+  883,
+  279,
+  8831,
+  303,
+  21047,
+  13,
+  353,
+  1144,
+  310,
+  958,
+  279,
+  615,
+  67017,
+  709,
+  310,
+  615,
+  411,
+  1928,
+  13,
+  561,
+  709,
+  7225,
+  264,
+  3177,
+  5555,
+  11,
+  321,
+  279,
+  1156,
+  5024,
+  21047,
+  13,
+  353,
+  1220,
+  1048,
+  1716,
+  413,
+  1017,
+  579,
+  264,
+  4821,
+  5555,
+  11,
+  694,
+  2394,
+  279,
+  1156,
+  3105,
+  914,
+  13441,
+  11,
+  353,
+  3172,
+  5106,
+  424,
+  680,
+  318,
+  275,
+  579,
+  524,
+  2483,
+  553,
+  198,
+  248069,
+  271,
+  248058,
+  198,
+  27,
+  1628,
+  27362,
+  67017,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  8656,
+  29,
+  198,
+  49,
+  617,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  510,
+  1628,
+  29,
+  198,
+  248059,
+  248046
+ ],
+ "texts": [
+  "The",
+  " user",
+  " is",
+  " asking",
+  " about",
+  " the",
+  " weather",
+  " in",
+  " Rome",
+  ".",
+  " I",
+  " need",
+  " to",
+  " use",
+  " the",
+  " get",
+  "_weather",
+  " function",
+  " to",
+  " get",
+  " this",
+  " information",
+  ".",
+  " The",
+  " function",
+  " requires",
+  " a",
+  " city",
+  " parameter",
+  ",",
+  " and",
+  " the",
+  " user",
+  " specified",
+  " Rome",
+  ".",
+  " I",
+  " should",
+  " also",
+  " check",
+  " if",
+  " there",
+  "'s",
+  " a",
+  " unit",
+  " parameter",
+  ",",
+  " but",
+  " since",
+  " the",
+  " user",
+  " didn",
+  "'t",
+  " specify",
+  ",",
+  " I",
+  "'ll",
+  " leave",
+  " it",
+  " out",
+  " (",
+  "it",
+  "'s",
+  " not",
+  " required",
+  ").",
+  "\n",
+  "</think>",
+  "\n\n",
+  "<tool_call>",
+  "\n",
+  "<",
+  "function",
+  "=get",
+  "_weather",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "city",
+  ">",
+  "\n",
+  "R",
+  "ome",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "</",
+  "function",
+  ">",
+  "\n",
+  "</tool_call>",
+  "<|im_end|>"
+ ],
+ "text": "The user is asking about the weather in Rome. I need to use the get_weather function to get this information. The function requires a city parameter, and the user specified Rome. I should also check if there's a unit parameter, but since the user didn't specify, I'll leave it out (it's not required).\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nRome\n</parameter>\n</function>\n</tool_call><|im_end|>"
+}

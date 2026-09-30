@@ -1,0 +1,750 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs --grammar: the host's v2 pipeline (grammar, parser, ai-call) over greedy llama.cpp top-64 candidates.",
+ "model": "qwen3-1.7b",
+ "case": "none",
+ "grammar": true,
+ "profile": {
+  "style": "json",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": false,
+  "thinkRule": "afterQueryNonEmpty",
+  "trim": false,
+  "known": true
+ },
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "What's the weather in Paris right now?"
+   }
+  ]
+ },
+ "params": {
+  "thinking": false,
+  "toolChoice": "none"
+ },
+ "maxTokens": 80,
+ "promptTokens": 21,
+ "ids": [
+  40,
+  1513,
+  944,
+  614,
+  1931,
+  7246,
+  821,
+  11,
+  714,
+  498,
+  646,
+  1779,
+  279,
+  1482,
+  9104,
+  304,
+  12095,
+  1667,
+  264,
+  9104,
+  2473,
+  1075,
+  22629,
+  905,
+  11,
+  11429,
+  84,
+  28981,
+  11,
+  476,
+  279,
+  3946,
+  12095,
+  9104,
+  3910,
+  13,
+  1634,
+  315,
+  847,
+  1537,
+  2647,
+  304,
+  4124,
+  220,
+  17,
+  15,
+  17,
+  19,
+  11,
+  279,
+  9104,
+  304,
+  12095,
+  374,
+  8789,
+  23034,
+  323,
+  23795,
+  11,
+  448,
+  19879,
+  23994,
+  504,
+  220,
+  16,
+  15,
+  30937,
+  311,
+  220,
+  17,
+  15,
+  30937,
+  320,
+  20,
+  15,
+  58472,
+  311,
+  220,
+  21,
+  23
+ ],
+ "texts": [
+  "I",
+  " don",
+  "'t",
+  " have",
+  " real",
+  "-time",
+  " data",
+  ",",
+  " but",
+  " you",
+  " can",
+  " check",
+  " the",
+  " current",
+  " weather",
+  " in",
+  " Paris",
+  " using",
+  " a",
+  " weather",
+  " service",
+  " like",
+  " Weather",
+  ".com",
+  ",",
+  " Acc",
+  "u",
+  "Weather",
+  ",",
+  " or",
+  " the",
+  " official",
+  " Paris",
+  " weather",
+  " website",
+  ".",
+  " As",
+  " of",
+  " my",
+  " last",
+  " update",
+  " in",
+  " early",
+  " ",
+  "2",
+  "0",
+  "2",
+  "4",
+  ",",
+  " the",
+  " weather",
+  " in",
+  " Paris",
+  " is",
+  " generally",
+  " mild",
+  " and",
+  " pleasant",
+  ",",
+  " with",
+  " temperatures",
+  " ranging",
+  " from",
+  " ",
+  "1",
+  "0",
+  "°C",
+  " to",
+  " ",
+  "2",
+  "0",
+  "°C",
+  " (",
+  "5",
+  "0",
+  "°F",
+  " to",
+  " ",
+  "6",
+  "8"
+ ],
+ "text": "I don't have real-time data, but you can check the current weather in Paris using a weather service like Weather.com, AccuWeather, or the official Paris weather website. As of my last update in early 2024, the weather in Paris is generally mild and pleasant, with temperatures ranging from 10°C to 20°C (50°F to 68",
+ "fellBack": 0,
+ "sent": [
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "I",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " don",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "'t",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " have",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " real",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "-time",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " data",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " but",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " you",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " can",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " check",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " current",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " in",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Paris",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " using",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " a",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " service",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " like",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".com",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Acc",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "u",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " or",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " official",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Paris",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " website",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " As",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " of",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " my",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " last",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " update",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " in",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " early",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " 2",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "0",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "2",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "4",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " in",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Paris",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " is",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " generally",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " mild",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " and",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " pleasant",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " with",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " temperatures",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " ranging",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " from",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " 1",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "0",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "°C",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " to",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " 2",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "0",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "°C",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " (",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "5",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "0",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "°F",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " to",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " 6",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "8",
+   "d": 0
+  }
+ ],
+ "result": {
+  "reason": "max",
+  "calls": [],
+  "open": null,
+  "text": "I don't have real-time data, but you can check the current weather in Paris using a weather service like Weather.com, AccuWeather, or the official Paris weather website. As of my last update in early 2024, the weather in Paris is generally mild and pleasant, with temperatures ranging from 10°C to 20°C (50°F to 68",
+  "think": "",
+  "usage": {
+   "in": 21,
+   "out": 80,
+   "think": 0
+  },
+  "err": null
+ }
+}

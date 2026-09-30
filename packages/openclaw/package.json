@@ -1,0 +1,34 @@
+{
+  "name": "@pooled/openclaw",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw provider plugin: pick Pooled and this machine becomes a device in a Pooled room, running part of the model on its own GPU.",
+  "homepage": "https://pooled.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nehanth/pooled.git",
+    "directory": "packages/openclaw"
+  },
+  "license": "MIT",
+  "author": "Nehanth Narendrula",
+  "type": "module",
+  "main": "./index.js",
+  "scripts": {
+    "test": "node --test test/*_test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.9.6"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": { "optional": true }
+  },
+  "openclaw": {
+    "extensions": ["./index.js"],
+    "providers": ["pooled"],
+    "compat": { "pluginApi": ">=2026.9.6", "minGatewayVersion": "2026.9.6" },
+    "build": { "openclawVersion": "2026.9.6", "pluginSdkVersion": "2026.9.6" }
+  }
+}

@@ -1,0 +1,225 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs: greedy, unconstrained llama.cpp output for this request as the room renders it.",
+ "model": "qwen3-1.7b",
+ "case": "parallel",
+ "profile": {
+  "style": "json",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": false,
+  "thinkRule": "afterQueryNonEmpty",
+  "trim": false,
+  "known": true
+ },
+ "thinking": false,
+ "maxTokens": 200,
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "What's the weather in Paris and in Tokyo? Call the tool once per city, both at once."
+   }
+  ]
+ },
+ "stop": "eos",
+ "promptTokens": 395,
+ "ids": [
+  151657,
+  198,
+  4913,
+  606,
+  788,
+  330,
+  455,
+  69364,
+  497,
+  330,
+  16370,
+  788,
+  5212,
+  8926,
+  788,
+  330,
+  59604,
+  497,
+  330,
+  3843,
+  788,
+  330,
+  66,
+  40247,
+  95642,
+  151658,
+  198,
+  151657,
+  198,
+  4913,
+  606,
+  788,
+  330,
+  455,
+  69364,
+  497,
+  330,
+  16370,
+  788,
+  5212,
+  8926,
+  788,
+  330,
+  52854,
+  16032,
+  497,
+  330,
+  3843,
+  788,
+  330,
+  66,
+  40247,
+  95642,
+  151658,
+  151645
+ ],
+ "texts": [
+  "<tool_call>",
+  "\n",
+  "{\"",
+  "name",
+  "\":",
+  " \"",
+  "get",
+  "_weather",
+  "\",",
+  " \"",
+  "arguments",
+  "\":",
+  " {\"",
+  "city",
+  "\":",
+  " \"",
+  "Paris",
+  "\",",
+  " \"",
+  "unit",
+  "\":",
+  " \"",
+  "c",
+  "elsius",
+  "\"}}\n",
+  "</tool_call>",
+  "\n",
+  "<tool_call>",
+  "\n",
+  "{\"",
+  "name",
+  "\":",
+  " \"",
+  "get",
+  "_weather",
+  "\",",
+  " \"",
+  "arguments",
+  "\":",
+  " {\"",
+  "city",
+  "\":",
+  " \"",
+  "Tok",
+  "yo",
+  "\",",
+  " \"",
+  "unit",
+  "\":",
+  " \"",
+  "c",
+  "elsius",
+  "\"}}\n",
+  "</tool_call>",
+  "<|im_end|>"
+ ],
+ "text": "<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"unit\": \"celsius\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Tokyo\", \"unit\": \"celsius\"}}\n</tool_call><|im_end|>"
+}

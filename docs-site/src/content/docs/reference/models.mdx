@@ -1,0 +1,92 @@
+---
+title: Models reference
+eyebrow: Reference
+description: The models a room can run, where their weights come from, how much memory they need and how much context they get.
+sidebar:
+  label: Models
+  order: 5
+---
+{/*
+Sources (origin/main 40bb0fa):
+- room/models.js: NEED_GB, FILE_GB, PICKER, MODELS (labels, URLs, kinds), MAX_SEQ 2048, MAX_SEQ_LONG 8192, CTX, maxSeqFor, kvModeFor,
+  KV bytes per position (27B 64 KB f16, MoE 20 KB), MAX_NEW 400, MAX_NEW_THINKING 1200, MIN_ROOM 32
+- room.js:3458 ANSWER_LEN { short: 150, normal: MAX_NEW, long: 1200 }
+- docs/models.md (engines, layer layout, local test layout, adding a model), README.md Models table
+- MoE 40 layers: docs/bench-log.md ("35B-A3B MoE (40 layers"); 10 attention layers from room/models.js comment
+- 27B 64 layers (48 DeltaNet + 16 attention): docs/models.md
+*/}
+
+Pooled ships no weights. Each device downloads only its share of the layers, by HTTP range request, straight from public Hugging Face repositories. Weights can also come from another device in the room that already has them.
+
+## In the room's picker
+
+| Model | Quantization | File | Memory the room needs | Context (default / max) |
+|---|---|---|---|---|
+| Qwen3 1.7B | Q8_0 | 1.83 GB | 4.0 GB | 8192 / 16384 |
+| Qwen 3.8 27B | Q4_0 | 16.06 GB | 17.0 GB | 16384 / 32768 |
+| Qwen 3.6 35B MoE (35B-A3B) | Q4_0 | 20.84 GB | 22.5 GB | 32768 / 65536 |
+
+"Memory the room needs" is the total across all devices. It is split across the devices by what each one lends. Raise the context with [`?ctx=`](/docs/reference/url-options#context-per-model).
+
+### What each one is
+
+- **Qwen3 1.7B.** A small dense model, for rooms of phones and light laptops. 28 layers. Its KV cache is f32, about 224 KB per token, so 8k of context is about 1.8 GB. Codex runs on it; Claude Code does not fit, since its prompt alone is about 15k of the 16k.
+- **Qwen 3.8 27B.** A hybrid: 64 layers, 48 Gated DeltaNet and 16 attention. It has a built-in draft layer (MTP) for speculative decoding. Only the attention layers keep a KV cache, 64 KB per token in f16, so 16k of context is about 1 GB.
+- **Qwen 3.6 35B MoE.** The same hybrid layout with 40 layers and 256 experts, 8 active per token (about 3B of the 35B), so it decodes several times faster than the 27B. Its KV cache is 20 KB per token in f16, so 32k is about 0.64 GB. This is the model to use for coding agents.
+
+## Weights
+
+| Model | Hugging Face file |
+|---|---|
+| Qwen3 1.7B | [`Qwen/Qwen3-1.7B-GGUF`](https://huggingface.co/Qwen/Qwen3-1.7B-GGUF) `Qwen3-1.7B-Q8_0.gguf` |
+| Qwen 3.8 27B | [`unsloth/Qwen3.8-27B-GGUF`](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) `Qwen3.8-27B-Q4_0.gguf` |
+| Qwen 3.6 35B MoE | [`bartowski/Qwen_Qwen3.6-35B-A3B-GGUF`](https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF) `Qwen_Qwen3.6-35B-A3B-Q4_0.gguf` |
+
+The Qwen3 dense models also fetch `config.json` and `tokenizer.json` from the matching `Qwen/Qwen3-*` repository. The 27B and the MoE read everything from the GGUF.
+
+## Answer length
+
+| Setting | Tokens |
+|---|---|
+| Short | 150 |
+| Normal | 400 |
+| Long | 1200 |
+| With thinking on | 1200, shared by the think block and the answer |
+
+A prompt must leave at least 32 tokens for the answer. Generation stops before the KV cache would overflow. The [Serve API](/docs/serve) has its own limits: 16384 output tokens by default, capped by the room's context.
+
+## KV cache format
+
+The KV cache is f16 by default. With [`?kv=q8`](/docs/reference/url-options) on the host, the 27B and the MoE keep it as int8, about 56% of f16's memory. The host picks the format and sends it to every device, so all devices in a room match. Other models ignore it.
+
+## Models for tests and development
+
+These stay in `room/models.js` for tests. The picker shows them with [`?dev=1`](/docs/reference/url-options#page-and-test-modes).
+
+| Model | Format | Engine | Memory | Context |
+|---|---|---|---|---|
+| Qwen3 0.6B | GGUF Q8_0 | `DenseEngine` | 0.8 GB | 2048 |
+| Qwen3 4B | GGUF Q8_0 | `DenseEngine` | 4.6 GB | 2048 |
+| SmolLM2 135M | safetensors bf16 | `DenseEngine` | 0.6 GB | 2048 |
+
+Qwen3 0.6B is the golden-test model. Qwen3.5-122B-A10B MoE runs in the engine and its tests but is not in the room.
+
+## Engines
+
+| Engine | Models |
+|---|---|
+| `Qwen35Engine` | Qwen 3.8 27B, Qwen 3.6 35B MoE (`qwen35moe`), Qwen3.5-122B-A10B |
+| `DenseEngine` | Qwen3 0.6B, 1.7B, 4B, SmolLM2 135M |
+
+Both are Pooled's own WebGPU engines with WGSL kernels. See [Engine and kernels](/docs/internals/engine).
+
+## Adding a model
+
+Architectures with the same hybrid layout as Qwen 3.5, 3.6 and 3.8 (for example Qwen 3.5 2B or 9B) need only entries in `room/models.js`.
+
+1. Check that the GGUF's tensor names and shapes match one of the two engines. `engine/gguf.js` has the name maps.
+2. Add the model to `room/models.js`: `MODELS` (URLs), `NEED_GB`, and `CTX` if its context should differ from the default. Add it to `PICKER` and `FILE_GB` to offer it in the room.
+3. Generate a golden with the reference implementation in `tests/reference/` and add a test.
+4. Record its tok/s in `docs/bench-log.md`.
+
+See [Adding a model](/docs/contributing/models) for the full walk-through.

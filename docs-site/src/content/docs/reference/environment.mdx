@@ -1,0 +1,151 @@
+---
+title: Environment and globals
+eyebrow: Reference
+description: Environment variables for pooled serve, the site's TURN relay and the test scripts, and the page globals a self-hosted deployment can set.
+sidebar:
+  label: Environment and globals
+  order: 3
+---
+{/*
+Sources (origin/main 40bb0fa):
+- cli/bin/pooled.js: POOLED_TOKEN (trimmed; empty = exit 2; --token-file wins over it, it wins over --token), POOLED_KEEPALIVE_MS (tests; 10 s otherwise)
+- room/signal.js header comment + serverList (window.POOLED_SIGNAL_SERVERS: strings or {host, port, path, secure, key}; default ["cloud"])
+- docs/self-host-signaling.md "Point rooms at it" (the <script> example)
+- room/ice.js header comment + iceConfig (window.TURN_SERVERS: RTCIceServer array appended after STUN and the URL/saved relay; STUN stun.l.google.com:19302, stun1)
+- harness/preview-frame.js relayUrl / previewEntry / relayProblem (preview-origin meta: host=origin list, https, not same site)
+- p2p.html:17 <meta name="preview-origin" content="">
+- room.js:848 window.pooledDebug (swarmDebug alias)
+- origin/main 74744ac (PR #264): api/turn.mjs (TURN_KEY_ID + TURN_KEY_API_TOKEN, TURN_SECRET + TURN_HOST/TURN_URLS, TURN_TTL,
+  TURN_RATE, TURN_ALLOWED_ORIGINS; 204 when unset), docs/rooms-at-work.md, room.js window.pooledNet and
+  window.POOLED_TURN_ENDPOINT, room/ice.js wantDefaultRelay (window.TURN_SERVERS or a relay you set: /api/turn not asked)
+- tests/run.sh (WEIGHT_CACHE default ~/.cache/swarmllm-weights, STRICT=1), tests/weight_cache.js (WEIGHT_CACHE_VERIFY), docs/testing-fast.md (WEIGHT_CACHE_PRUNE)
+- tests/load_model.js:30-35 ROOM_FLAGS; benchmarks/bench.js header (MODEL=qwen|q38, TOKENS default 32)
+- tests/bench_ctx.js header (MODEL=moe|27b, FILLS, CTX, KV=f16|q8, HW, DATE), PR #252
+*/}
+
+## pooled serve
+
+| Variable | What it does |
+|---|---|
+| `POOLED_TOKEN` | Requires this token on every request, as `Authorization: Bearer <t>` or `x-api-key: <t>`. Kept out of the process list, unlike `--token`. `--token-file` wins over it. An empty value is an error. |
+| `POOLED_KEEPALIVE_MS` | How often a waiting stream gets a keep-alive. For tests; the default is 10 s. |
+
+The client tools read their own variables. These are the ones the banner prints:
+
+| Variable | Tool | Value |
+|---|---|---|
+| `OPENAI_BASE_URL` | OpenAI SDKs and tools | `http://127.0.0.1:8080/v1` |
+| `ANTHROPIC_BASE_URL` | Anthropic SDKs, Claude Code | `http://127.0.0.1:8080` |
+| `CLAUDE_CODE_MAX_CONTEXT_TOKENS` | Claude Code | the room's context |
+| `CLAUDE_CODE_MAX_OUTPUT_TOKENS` | Claude Code | a quarter of the context, at least 1024 and at most 32000 |
+| `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Claude Code | `1` |
+| `OPENCODE_DISABLE_CLAUDE_CODE` | opencode | `1` |
+
+See [Serve API recipes](/docs/serve/recipes) for why each one matters.
+
+## TURN relay (/api/turn)
+
+Set in the Vercel project (**Settings → Environment Variables**, for Production and Preview) for `api/turn.mjs`, the function that gives each room short-lived relay credentials. pooled.run sets the Cloudflare pair. With neither provider set, `POST /api/turn` answers `204` and rooms use direct links only. Environment variables reach only new deployments, so redeploy after changing them.
+
+| Variable | What it does |
+|---|---|
+| `TURN_KEY_ID` | Cloudflare Realtime TURN: the key's Turn Token ID. Needs `TURN_KEY_API_TOKEN`. |
+| `TURN_KEY_API_TOKEN` | Cloudflare: the key's API Token. Mark it Sensitive. |
+| `TURN_SECRET` | coturn in `use-auth-secret` mode: its `static-auth-secret`. Needs `TURN_HOST` or `TURN_URLS`. |
+| `TURN_HOST` | coturn: the relay's host name. Hands out `turn:HOST:3478` over UDP and TCP and `turns:HOST:443`. |
+| `TURN_URLS` | coturn: your own comma-separated `turn:` / `turns:` URLs, instead of `TURN_HOST`. |
+| `TURN_TTL` | Credential lifetime in seconds, 600 to 86400. Default 21600 (6 h). |
+| `TURN_RATE` | Credential requests per minute per IP, per function instance. Default 10. |
+| `TURN_ALLOWED_ORIGINS` | Other origins allowed to ask, comma-separated; `*` matches within one host label. The deployment's own origin is always allowed. |
+
+If both providers are set, Cloudflare wins. Model weights never go over the relay; only token traffic does. Setup, abuse and cost: [TURN relay](/docs/self-host/turn#the-sites-relay-apiturn).
+
+## Page globals for self-hosting
+
+A deployment of the site can set these in `p2p.html`, before `room.js` loads. The public site at pooled.run sets none of them.
+
+### window.POOLED_SIGNAL_SERVERS
+
+An ordered list of signaling servers. The room tries them in order and keeps the first that answers.
+
+```html
+<script>window.POOLED_SIGNAL_SERVERS = ["wss://signal.example.com", "cloud"];</script>
+```
+
+- Entries are the same forms as `?signal=`: `cloud`, `host`, `host:port`, `host:port/path`, or a `wss://`, `ws://`, `https://` or `http://` URL.
+- Entries can also be objects: `{ host, port, path, secure, key }`. Set `key` if your PeerServer runs with a non-default `--key`.
+- Without it, rooms use `["cloud"]`, the public PeerJS server.
+- `?signal=` in the page URL wins over this list.
+
+See [Signaling servers](/docs/self-host/signaling) for running your own.
+
+### window.TURN_SERVERS
+
+An array of `RTCIceServer` objects, added to every WebRTC connection after the public STUN servers.
+
+```html
+<script>
+  window.TURN_SERVERS = [
+    { urls: "turn:relay.example.org:3478", username: "pooled", credential: "SECRET" },
+  ];
+</script>
+```
+
+:::caution
+Anything in the page is public. Credentials here can be read by anyone who opens the site. Use short-lived credentials from your TURN server, or have each person enter a relay in the room's **Network** box instead.
+:::
+
+A relay from `?turn=` or the saved **Network** setting is used as well. When either this or one of those is set, the page doesn't ask `/api/turn` for the site's relay. `?relay=1`, or **Always go through the relay** in the Network box, makes every connection use a relay only.
+
+### window.POOLED_TURN_ENDPOINT
+
+Where the page asks for the site's relay. Default `/api/turn`. On `localhost` the page asks only with `?turnapi=1`.
+
+### preview-origin meta
+
+Code mode runs previews in a sandbox. For `run_js` to work, previews must load from a second deployment on a different site, so a loop in a preview cannot freeze the room.
+
+```html
+<meta name="preview-origin" content="https://pooled-preview.example.net">
+```
+
+- The value is a list separated by spaces or commas. `host=origin` entries apply to one page host, and a bare origin applies to any other host. One page can then serve production and staging:
+  ```text
+  pooled.run=https://pooled-preview.vercel.app pooled-dev.vercel.app=https://pooled-preview-dev.vercel.app
+  ```
+- The origin must be `https`. Plain `http` works only on loopback, from an `http` page.
+- An origin on the same site as the page (the same host, a subdomain or a sibling) is ignored with one console warning, because it would share the room's process.
+- Empty, as in the repo's `p2p.html`: previews run in local mode, without `run_js`. On `localhost` and `127.0.0.1` the other loopback name is used automatically.
+
+## Browser console
+
+| Function | What it shows |
+|---|---|
+| `pooledDebug()` | Each peer link's state: open channels, frames sent and received, keep-alives, duplicates, skipped frames, and whether it goes direct or through a relay (`path`, and `via`: `udp`, `tcp` or `tls`). `swarmDebug()` still works. |
+| `pooledNet()` | This tab's relay (`relay`, and `from`: `yours`, `site` or `default` for `/api/turn`) and whether UDP gets out of this network (`udp`). |
+
+## Tests and benchmarks
+
+These are for working on Pooled itself. See [Testing](/docs/contributing/testing).
+
+| Variable | Used by | What it does |
+|---|---|---|
+| `WEIGHT_CACHE` | Deno tests and benchmarks (`tests/weight_cache.js`) | Where the converted-weights cache lives. Default `~/.cache/swarmllm-weights`. `0` or `off` turns it off. |
+| `WEIGHT_CACHE_VERIFY` | same | `1` also checks each entry's checksum, at about 1.5x the warm load time. |
+| `WEIGHT_CACHE_PRUNE` | same | `1` deletes cache directories from older loader versions. |
+| `ROOM_FLAGS` | Deno tests and benchmarks | The room's URL switches as a query string, for example `ROOM_FLAGS="kv=q8"` or `"fuse=0"`. Unset: exactly what the room runs. See [URL options](/docs/reference/url-options). |
+| `STRICT` | `tests/run.sh` | `1` also fails a test that prints `SKIP`. |
+| `MODEL` | `benchmarks/bench.js` | `qwen` (Qwen3 0.6B, the default) or `q38` (Qwen 3.8 27B). |
+| `TOKENS` | benchmarks | Decode tokens to time. Default 32. |
+| `MODEL` | `tests/bench_ctx.js` | `moe` (the default) or `27b`. |
+| `FILLS`, `CTX` | `tests/bench_ctx.js` | Context fills to time (default 1K, 8K, 32K) and the engine's context in tokens (default: the room's default, raised to hold the largest fill). |
+| `KV` | `tests/bench_ctx.js` | `f16` (the default) or `q8`, the same as the room's `?kv=q8`. |
+| `HW`, `DATE` | `tests/bench_ctx.js` | Labels for the bench-log rows it prints, for example `HW="GB10" DATE="Sep 29"`. |
+
+```bash
+WEIGHT_CACHE=0 tests/run.sh q38
+cd tests && MODEL=moe KV=q8 HW="GB10" DATE="Sep 29" \
+  deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights bench_ctx.js
+```
+
+The engine test scripts read many more kernel-tuning variables (`BCOLS`, `MOE_FUSE`, `PREFILL_UBATCH` and others). Each script lists its own in its header comment.

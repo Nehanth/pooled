@@ -27,18 +27,30 @@ import { PreviewServer } from "../harness/preview.js";
 import { previewTools } from "../harness/preview-tools.js";
 import { runJsTool, runJsAvailable } from "../harness/run-js.js";
 import { mountPreview, openPreviewTab } from "../harness/preview-frame.js";
+import { downloadApp } from "../harness/app-export.js";
 import { PreviewPublisher, PreviewSubscriber } from "../harness/preview-sync.js";
 import { lineDiff } from "../harness/diff.js";
 import { listProjects, createProject, openProject, openFolder, canOpenFolder, saveSession, loadSession, slugify } from "../harness/projects.js";
 import { roomModel } from "../harness/room-model.js";
+import { coreModel, scriptedCore } from "../harness/core-model.js";
 import { detectStyle } from "../harness/tools.js";
+import { templateProfile } from "./conversation.js";
 import { normPath, riskyPath } from "../harness/workspace.js";
 import { CODE_SYSTEM } from "../harness/code-prompt.js";
+import { codeExport } from "./code-export.js";
+import { TEMPLATES, templateById, applyTemplate } from "../harness/templates.js";
 
 const $ = (id) => document.getElementById(id);
 const str = (v, n) => String(v ?? "").slice(0, n);
 const cap = (s, n) => (s.length > n ? s.slice(0, n) + `\n…(${s.length - n} chars cut)` : s);
 const HIST = 50, TOK_MS = 50, EDGE = 50;
+// ?hcore=1: the agent's model calls go through the serve v2 core in process (harness/core-model.js:
+// the template's tool prompt, the strict call grammar, CallStream); ?hcore=0: Code's own prompt,
+// parser and lenient grammar (harness/room-model.js). Read once per page load. The default follows
+// the Code mode eval (docs/design/harness-core.md): hcore stays opt-in until it matches or beats
+// the legacy path there.
+export const HCORE_DEFAULT = false;
+const HCORE = (() => { try { const v = new URLSearchParams(location.search).get("hcore"); return v == null ? HCORE_DEFAULT : v !== "0"; } catch { return HCORE_DEFAULT; } })();
 const QUEUE_MAX = 6, ASK_MAX = 4000;   // requests waiting on the host (two per member), a request's length
 // tools whose results are the project's own content: for a folder on disk they stay on the host
 const READS = new Set(["read_file", "search", "list_dir"]);
@@ -97,6 +109,7 @@ export async function initCode(api, { mock = null } = {}) {
 
   // ================================================================ host
   let project = null, server = null, publisher = null, tools = [], agent = null, agentSrc = null, agentStyle = null, model = null;
+  let offPorts = () => {};   // unsubscribes portUpdate from the project's preview server
   let sessionJson = null, hist = [], tree = [], running = false, ctrl = null, allowTask = false;
   let userAuto = null;   // the user's own tick of "auto-approve edits", kept across projects
   let mid = "", toolN = 0;
@@ -197,12 +210,13 @@ export async function initCode(api, { mock = null } = {}) {
   function closeProject({ keepQueue = false } = {}) {
     if (running) ctrl?.abort();
     if (!keepQueue) for (const q of queue.splice(0)) tell(q.from, "the project changed: your queued request was dropped", true);
+    offPorts(); offPorts = () => {};   // closing stops the ports, which is not the user stopping them (they stay in the session)
     server?.close(); publisher?.close();   // in this order: the server's stops reach the members (ai-pv-stop) before the publisher unsubscribes
     for (const port of [...ui.ports.keys()]) ui.dropPort(port);
     project = server = publisher = agent = model = null; agentSrc = null; tools = [];
   }
   // keepAuto: the project pump() made for the first request keeps the box as the user left it
-  async function useProject(p, { keepAuto = false } = {}) {
+  async function useProject(p, { keepAuto = false, template = null } = {}) {
     if (!p) return;
     closeProject({ keepQueue: keepAuto });
     project = p;
@@ -210,7 +224,7 @@ export async function initCode(api, { mock = null } = {}) {
     // run_js only when the snippet runs on the isolated preview host (a loop there cannot freeze the room)
     tools = [...codingTools(p.ws, { server }), ...previewTools(server), ...(runJsAvailable() ? [runJsTool(server)] : [])];
     publisher = new PreviewPublisher(server, { send: api.send, broadcast: api.broadcast, channel: api.channel });
-    server.onUpdate(portUpdate);
+    offPorts = server.onUpdate(portUpdate);
     const saved = await loadSession(p.id).catch(() => null);
     sessionJson = saved?.agent || null;
     hist = Array.isArray(saved?.hist) ? saved.hist : [];
@@ -219,16 +233,28 @@ export async function initCode(api, { mock = null } = {}) {
     if (!keepAuto || p.kind === "folder") $("code-auto").checked = p.kind === "opfs" && userAuto !== false;
     ui.clear();
     for (const m of hist) ui.apply(m);
-    if (!hist.length) ui.placeholder(`project <b>${escapeHTML(p.name)}</b> is empty<br>ask for something to build`);
+    if (!hist.length) {
+      ui.placeholder(template
+        ? `project <b>${escapeHTML(p.name)}</b> starts from the ${escapeHTML(template.label)} template: it runs in Preview<br>ask for a change, like “${escapeHTML(template.next)}”`
+        : `project <b>${escapeHTML(p.name)}</b> is empty<br>ask for something to build`);
+    }
     await sendFiles();
     api.broadcast({ t: "ai-code-history", sid, items: hist.slice(-HIST), tree });
     refreshProjects();
     ctxMeter();
+    // the ports this project had served come back (#176); one whose folder or page is gone stays off
+    const srv = server;
+    for (const s of Array.isArray(saved?.ports) ? saved.ports : []) {
+      if (server !== srv) break;
+      try { await srv.serve({ dir: str(s.dir, 300), port: s.port, entry: str(s.entry, 300) }); } catch (e) { localNote(`:${s.port} not served again: ${e.message}`, true); }
+    }
   }
   const escapeHTML = (s) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
   function portUpdate(u) {
-    if (u.stopped) { ui.dropPort(u.port); return; }
+    // a port served or stopped goes into the session (a run saves it when it ends)
+    if (u.stopped) { ui.dropPort(u.port); if (!running) save(); return; }
     if (ui.ports.has(u.port)) return;   // the mounted frame follows its own updates
+    if (!running) save();
     const port = u.port, src = server;
     ui.portTab(port, { closable: true, mount: (el) => mountPreview(el, src, port, { onLog: (e) => ui.logRow(port, e), onStatus: (s) => ui.status(port, s) }) });
     ui.activate(port);
@@ -241,6 +267,71 @@ export async function initCode(api, { mock = null } = {}) {
     else P?.mount.reload();
   });
   ui.onOpen((port, path) => { openPreviewTab(isHost() ? server : sub, port, path); });
+  // Download (Files heading): the host's project, or the preview on screen
+  codeExport({
+    project: () => (isHost() && project ? { name: project.name, ws: project.ws } : null),
+    preview: () => {
+      const port = ui.activePort, snap = port != null ? (isHost() ? server : sub)?.snapshot(port) : null;
+      return snap ? { snap, port, path: ui.ports.get(port)?.path || null } : null;
+    },
+    name: () => peerProj.list.find((p) => p.id === peerProj.cur)?.name || "",
+  });
+
+  // ---- Share with the room: whoever can drive asks, the host sends ai-code-share through emit (the
+  // timeline, the history for late joiners, everyone Code reaches). No new trust: every device
+  // builds the download from its own copy of the preview (a peer's is PreviewSubscriber's,
+  // hash-checked against the ai-pv manifest), and the file runs sandboxed like a preview
+  // (harness/app-export.js). Each device keeps the shared rev's snapshot, so Download gives that
+  // rev after the agent moves on; the SHARE_KEEP newest.
+  const SHARE_KEEP = 3;
+  const shares = new Map();        // "port:rev" -> snapshot
+  const sharePending = new Set();  // "port:rev" shared before this peer had that rev
+  let shareHook = null, shareAt = 0;
+  const pvSource = () => (isHost() ? server : sub);
+  function keepShare(port, rev) {
+    const k = `${port}:${rev}`, s = pvSource()?.snapshot(port);
+    if (!s || s.rev !== rev) {
+      if (!isHost() && !(s && s.rev > rev)) { sharePending.add(k); if (sharePending.size > 20) sharePending.delete(sharePending.values().next().value); }
+      if (!isHost() && sub && !shareHook) shareHook = sub.onUpdate((u) => { if (!u.stopped && sharePending.delete(`${u.port}:${u.rev}`)) keepShare(u.port, u.rev); });
+      return false;
+    }
+    shares.delete(k); shares.set(k, s);
+    while (shares.size > SHARE_KEEP) shares.delete(shares.keys().next().value);
+    return true;
+  }
+  function shareNow(port, by) {
+    const s = server?.snapshot(port);
+    if (!isHost() || !s) return false;
+    if (shares.has(`${s.port}:${s.rev}`) || Date.now() - shareAt < 1500) return false;   // shared already, or a double click
+    shareAt = Date.now();
+    keepShare(s.port, s.rev);
+    emit({ t: "ai-code-share", mid, port: s.port, rev: s.rev, name: str(project?.name || "app", 60), by: str(by || "the host", 60) });
+    return true;
+  }
+  ui.onShare((port) => {
+    if (isHost()) { if (!shareNow(port, api.name?.())) localNote("already shared with the room"); return; }
+    if (!shared()) return;
+    askHost({ t: "ai-code-share-ask", port: +port });
+  });
+  api.on("ai-code-share-ask", (from, d) => {
+    if (!isHost() || !shared()) return;
+    const port = Number(d?.port);
+    if (!Number.isInteger(port) || !server?.snapshot(port)) return;
+    if (!shareNow(port, api.nameOf?.(from) || "a member")) tell(from, "already shared with the room");
+  });
+  ui.onShareAct((kind, d) => {
+    const cur = pvSource()?.snapshot(d.port);
+    if (kind === "full") {
+      if (!ui.full(d.port)) localNote(`:${d.port} is no longer served here${shares.has(`${d.port}:${d.rev}`) ? ": Download still has it" : ""}`, true);
+      return;
+    }
+    let snap = shares.get(`${d.port}:${d.rev}`) || (cur?.rev === d.rev ? cur : null);
+    if (!snap && cur && cur.rev > d.rev) { snap = cur; localNote(`rev ${d.rev} is gone from this device: downloaded rev ${cur.rev}, the latest`); }
+    if (!snap) { localNote(cur ? `rev ${d.rev} is still on its way to this device: try again in a moment` : `:${d.port} is no longer served, and this device did not keep rev ${d.rev}`, true); return; }
+    downloadApp(snap, { name: d.name || "app", rev: snap.rev })
+      .then((how) => { if (how === "blocked") localNote("the browser wanted a fresh tap: press Download again"); })
+      .catch((err) => localNote("could not build the download: " + err.message, true));
+  });
   // the Files view: the host opens a file to edit it (a very long one read-only); a peer sees the
   // files of a served preview, read-only
   const EDIT_MAX = 300000;
@@ -287,21 +378,44 @@ export async function initCode(api, { mock = null } = {}) {
     if (running) { e.target.value = project?.id || ""; busyNote(); return; }
     try { await useProject(await openProject(id)); } catch (err) { localNote(err.message, true); refreshProjects(); }
   });
-  const newName = $("code-new-name");
+  // New: a name, and what to start from (empty, or a starter template, harness/templates.js)
+  const newName = $("code-new-name"), newTpl = $("code-new-tpl");
+  newTpl.replaceChildren(new Option("Empty project", ""), ...TEMPLATES.map((t) => Object.assign(new Option(`Start from: ${t.label}`, t.id), { title: t.blurb })));
+  const newForm = (on) => { newName.hidden = newTpl.hidden = !on; $("code-proj-select").hidden = on; };
   $("code-new").addEventListener("click", () => {
     if (running) { busyNote(); return; }
     const on = newName.hidden;
-    newName.hidden = !on; $("code-proj-select").hidden = on;
-    if (on) { newName.value = ""; newName.focus(); }
+    newForm(on);
+    if (on) { newName.value = ""; newTpl.value = ""; newName.focus(); }
   });
+  // a template fills an empty name, or one it filled itself (so picking another one renames it)
+  newTpl.addEventListener("change", () => {
+    const t = templateById(newTpl.value), cur = newName.value.trim();
+    if (t && (!cur || TEMPLATES.some((x) => x.label === cur))) newName.value = t.label;
+    newName.focus();
+  });
+  newTpl.addEventListener("keydown", (e) => { if (e.key === "Escape") newForm(false); });
   newName.addEventListener("keydown", async (e) => {
-    if (e.key === "Escape") { newName.hidden = true; $("code-proj-select").hidden = false; return; }
+    if (e.key === "Escape") { newForm(false); return; }
     if (e.key !== "Enter" || !newName.value.trim()) return;
-    const name = newName.value.trim().slice(0, 40);
-    newName.hidden = true; $("code-proj-select").hidden = false;
-    if (!isHost()) { askHost({ t: "ai-code-cmd", cmd: "new", name }); return; }
-    try { await useProject(await createProject(name)); } catch (err) { localNote("could not create the project: " + err.message, true); }
+    const name = newName.value.trim().slice(0, 40), tpl = newTpl.value;
+    newForm(false);
+    if (!isHost()) { askHost({ t: "ai-code-cmd", cmd: "new", name, tpl }); return; }
+    try { await newProject(name, tpl); } catch (err) { localNote("could not create the project: " + err.message, true); }
   });
+  // a project from a template has its files before useProject lists them, and is served straight
+  // away so it shows running in Preview; the prompt box gets a first change to ask for
+  async function newProject(name, tplId, { suggest = true } = {}) {
+    const p = await createProject(name), t = templateById(tplId);
+    if (t) await applyTemplate(p.ws, t.id);
+    await useProject(p, { template: t });
+    if (t && project === p) {
+      await server.serve({});
+      const box = $("code-prompt");
+      if (suggest && !box.value.trim()) { box.value = t.next; grow(); }
+    }
+    return t;
+  }
   $("code-open").dataset.can = canOpenFolder() ? "1" : "";
   $("code-open").addEventListener("click", async () => {
     if (!isHost()) return;
@@ -330,7 +444,8 @@ export async function initCode(api, { mock = null } = {}) {
   function localNote(text, err = false) { ui.apply({ t: "ai-code-note", text, err }); }
   function save() {
     if (!project) return;
-    saveSession(project.id, { v: 1, agent: agent ? agent.toJSON() : sessionJson, hist: hist.slice(-4 * HIST) }).catch((e) => console.warn("code session not saved", e));
+    const ports = server ? server.ports().map(({ port, dir, entry }) => ({ port, dir, entry })) : [];
+    saveSession(project.id, { v: 1, agent: agent ? agent.toJSON() : sessionJson, hist: hist.slice(-4 * HIST), ports }).catch((e) => console.warn("code session not saved", e));
   }
   function ctxMeter() {
     if (!agent || !model?.count) { ui.ctx(0); return; }   // a scripted model has no token count to show
@@ -341,19 +456,31 @@ export async function initCode(api, { mock = null } = {}) {
   }
 
   // ---- the agent
+  // the core path needs a template with a tool-call format; a model without one keeps Code's own
+  const coreOk = () => { if (mock?.model) return true; const p = api.profile?.() || templateProfile(api.chatTemplate(), api.tok()); return !!p?.tools; };
   function ensureAgent() {
-    // rebuilt when the model's tool format changes too (a re-deal to another model)
-    const style = mock?.model ? "xml" : detectStyle(api.chatTemplate());
+    // rebuilt when the model's tool format changes too (a re-deal to another model), and when the path does
+    const hcore = HCORE && coreOk();
+    const style = mock?.model ? "xml" : hcore ? (api.profile?.() || templateProfile(api.chatTemplate(), api.tok())).style : detectStyle(api.chatTemplate());
     const src = mock?.model || "room";
-    if (agent && agentSrc === src && agentStyle === style) return;
-    model = mock?.model ? (typeof mock.model === "function" ? { generate: mock.model } : mock.model) : roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" });
+    if (agent && agentSrc === src && agentStyle === style + (hcore ? ":core" : "")) return;
     const json = agent ? agent.toJSON() : sessionJson;
-    agent = Agent.from(json, {
-      generate: model.generate, tools, style, system: CODE_SYSTEM, maxSteps: 30, approve, onEvent,
-      budget: model.budget || Infinity, count: model.count || null,
-      usage: model.stats ? () => model.stats.last : null, idsFor: model.idsFor || null, adopt: model.adopt || null, idsTag: model.idsTag || null,
-    });
-    agentSrc = src; agentStyle = style;
+    if (hcore) {
+      const gen = mock?.model ? (typeof mock.model === "function" ? mock.model : mock.model.generate) : null;
+      model = mock?.model ? scriptedCore(gen, { style }) : coreModel(api, { maxNew: 8192 });
+      agent = Agent.from(json, {
+        model, tools, system: CODE_SYSTEM, maxSteps: 30, approve, onEvent,
+        budget: model.budget || Infinity, count: model.count || null, usage: () => model.stats.last,
+      });
+    } else {
+      model = mock?.model ? (typeof mock.model === "function" ? { generate: mock.model } : mock.model) : roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" });
+      agent = Agent.from(json, {
+        generate: model.generate, tools, style, system: CODE_SYSTEM, maxSteps: 30, approve, onEvent,
+        budget: model.budget || Infinity, count: model.count || null,
+        usage: model.stats ? () => model.stats.last : null, idsFor: model.idsFor || null, adopt: model.adopt || null, idsTag: model.idsTag || null,
+      });
+    }
+    agentSrc = src; agentStyle = style + (hcore ? ":core" : "");
   }
   async function approve(call, info) {
     const i = callIdx.get(call);
@@ -405,7 +532,7 @@ export async function initCode(api, { mock = null } = {}) {
         break;
       case "usage": ctxMeter(); break;
       case "limit": note(`stopped after ${e.steps} steps`); break;
-      case "stuck": note("stopped: the same tool call failed three times in a row" + (api.peers().length ? ". With other devices in the room, the split model may be producing bad output: try it on one device, or re-deal" : ". Try rephrasing the request, or a bigger model"), true); break;
+      case "stuck": note("stopped: " + (e.why?.replace(/[.…]+$/, "") || "the same tool call failed three times in a row") + (api.peers().length ? ". With other devices in the room, the split model may be producing bad output: try it on one device, or re-deal" : ". Try rephrasing the request, or a bigger model"), true); break;
     }
   }
   function stats(r, t0, gen0) {
@@ -513,13 +640,14 @@ export async function initCode(api, { mock = null } = {}) {
       catch { throw new Error("the eval suite is not deployed here (run it from a local checkout)"); }
       const tasks = !spec || spec === "all" ? TASKS : spec.split(",").map((id) => byId(id.trim())).filter(Boolean);
       const style = detectStyle(api.chatTemplate());
-      localNote(`eval: ${tasks.length} task${tasks.length === 1 ? "" : "s"} on ${api.peers().length + 1} device(s)`);
+      const hcore = HCORE && coreOk();
+      localNote(`eval: ${tasks.length} task${tasks.length === 1 ? "" : "s"} on ${api.peers().length + 1} device(s)${hcore ? " · core path" : ""}`);
       const recs = await S.runSuite(tasks, {
         model: "room", signal: ctrl.signal, root: document.body,
-        makeModel: ({ tools }) => ({ ...roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" }), style }),
+        makeModel: ({ tools }) => (hcore ? coreModel(api, { maxNew: 8192 }) : { ...roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" }), style }),
         onResult: ({ rec, trajectory }) => {
           lines.push(JSON.stringify(rec), JSON.stringify({ trajectory }));
-          localNote(`${rec.ok ? "PASS" : "FAIL"} ${rec.id} · ${rec.reason} · ${rec.steps} steps · ${rec.generated} tok · ${(rec.ms / 1000).toFixed(0)} s`, !rec.ok);
+          localNote(`${rec.ok ? "PASS" : "FAIL"} ${rec.id} · ${rec.reason} · ${rec.steps} steps · ${rec.prompt} prefilled / ${rec.reused} reused · ${rec.generated} tok · ${(rec.ms / 1000).toFixed(0)} s`, !rec.ok);
         },
       });
       localNote(S.summary(recs));
@@ -597,8 +725,8 @@ export async function initCode(api, { mock = null } = {}) {
       } else if (d.cmd === "new") {
         const name = str(d.name, 40).replace(/[\u0000-\u001f\u007f]/g, "").trim();
         if (!name) return;
-        await useProject(await createProject(name));
-        note(`${who} started the project ${name}`);
+        const t = await newProject(name, str(d.tpl, 40), { suggest: false });
+        note(`${who} started the project ${name}${t ? ` from the ${t.label} template` : ""}`);
       }
     } catch (err) { tell(from, err.message, true); }
   });
@@ -654,6 +782,11 @@ export async function initCode(api, { mock = null } = {}) {
     if ("n" in d) o.n = d.n >>> 0;
     if (d.reset) o.reset = true;
     if (d.end) o.end = true;
+    if (d.t === "ai-code-share") {
+      const port = Number(d.port);
+      o.port = Number.isInteger(port) && port >= 1024 && port <= 65535 ? port : 0;
+      o.rev = d.rev >>> 0; o.name = str(d.name, 60); o.by = str(d.by, 60);
+    }
     if (d.diff && typeof d.diff === "object") {
       const x = d.diff;
       const lines = (a) => (Array.isArray(a) ? a.slice(0, 50).map((t) => str(t, 200)) : null);
@@ -683,6 +816,7 @@ export async function initCode(api, { mock = null } = {}) {
     setChrome();
     ui.poke();
     const m = clean(d);
+    if (m.t === "ai-code-share") { if (!m.port || !m.rev) return; keepShare(m.port, m.rev); }
     if (m.t === "ai-code-start" && m.sid && m.sid !== sid) { sid = m.sid; }
     // an answered approval: this screen's buttons go (whoever answered)
     if (m.t === "ai-code-tool" && m.state && m.state !== "pending") ui.cancelAsk(m.mid, m.i);
@@ -698,7 +832,7 @@ export async function initCode(api, { mock = null } = {}) {
       });
     }
   };
-  for (const t of ["ai-code-start", "ai-code-tok", "ai-code-live", "ai-code-tool", "ai-code-note", "ai-code-done"]) api.on(t, (from, d) => peerMsg(d));
+  for (const t of ["ai-code-start", "ai-code-tok", "ai-code-live", "ai-code-tool", "ai-code-note", "ai-code-done", "ai-code-share"]) api.on(t, (from, d) => peerMsg(d));
   api.on("ai-code-files", (from, d) => { if (!isHost() && Array.isArray(d.tree)) ui.tree(d.tree.slice(0, 500).map((p) => str(p, 300))); });
   api.on("ai-code-history", (from, d) => {
     if (isHost()) return;
@@ -706,7 +840,11 @@ export async function initCode(api, { mock = null } = {}) {
     sid = str(d.sid, 40);
     ui.clear();
     peerRun = null;
-    for (const it of (Array.isArray(d.items) ? d.items : []).slice(-HIST)) if (it && typeof it === "object") { const m = clean(it); track(m); ui.apply(m); }
+    for (const it of (Array.isArray(d.items) ? d.items : []).slice(-HIST)) if (it && typeof it === "object") {
+      const m = clean(it);
+      if (m.t === "ai-code-share") { if (!m.port || !m.rev) continue; keepShare(m.port, m.rev); }
+      track(m); ui.apply(m);
+    }
     // a run cut from the history's window is still going: the host says whose it is
     if (d.run && typeof d.run === "object") peerRun = { mid: str(d.run.mid, 40), from: str(d.run.from, 80) };
     if (!$("code-log").children.length) placeholderFor(false);
@@ -745,13 +883,16 @@ export async function initCode(api, { mock = null } = {}) {
     ui.setHost(host, { canDrive: host || (shared() && peerProj.kind !== "folder") });
     driverNote();
   }
+  // an example the room's model can build on a first try: the default room runs the 1.7B, which a
+  // tetris game sets up to fail; the bigger models get the game
+  const example = () => /^qwen3-(0\.6b|1\.7b)$|^smollm/.test(api.model?.() || "") ? "a tip calculator" : "a tetris game";
   function placeholderFor(host) {
     if (host) {
       ui.placeholder(api.ready()
-        ? "<b>Code mode</b>: the room's model writes a web app, serves it on a port and fixes its own errors.<br>Ask for something to build, like “a tetris game”."
+        ? `<b>Code mode</b>: the room's model writes a web app, serves it on a port and fixes its own errors.<br>Ask for something to build, like “${example()}”.`
         : "<b>Code mode</b> runs on the room's model.<br>Pick a model in Chat and press Start, then ask for something to build.");
     } else ui.placeholder(shared()
-      ? `<b>Code mode</b>: ask for something to build, like “a tetris game”.<br>The agent runs on ${escapeHTML(hostName())}'s device; everyone in the room sees it work, live`
+      ? `<b>Code mode</b>: ask for something to build, like “${example()}”.<br>The agent runs on ${escapeHTML(hostName())}'s device; everyone in the room sees it work, live`
       : `only ${escapeHTML(hostName())} uses Code in this room`);
   }
   function entered() {
@@ -773,7 +914,8 @@ export async function initCode(api, { mock = null } = {}) {
     setChrome();
     if (!host && running) ctrl?.abort();
     // a device left mid-run: the next step would wait out the lap timeouts, so stop here
-    else if (running && !api.ready() && !ctrl?.signal.aborted) { note("a device left: stopped · re-deal the layers, then send again", true); ctrl?.abort(); }
+    // (unless the room is recovering: the run waits for the device, or a re-deal, and carries on)
+    else if (running && !api.ready() && !api.recovering?.() && !ctrl?.signal.aborted) { note("a device left: stopped · re-deal the layers, then send again", true); ctrl?.abort(); }
   });
   setChrome();
   return { show: (m) => ui.show(m), ctx: (used, max) => ui.ctx(used, max) };

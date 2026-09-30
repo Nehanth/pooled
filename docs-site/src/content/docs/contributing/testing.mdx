@@ -1,0 +1,146 @@
+---
+title: Testing
+eyebrow: Contributing
+description: Which tests run on any machine, which need a GPU and model files, and what CI checks.
+sidebar:
+  label: Testing
+  order: 2
+---
+
+{/*
+Sources (origin/main 40bb0fa):
+- package.json scripts (test, check, test:gpu, test:q38, test:q38once, test:cache, test:all, test:runsh, e2e, e2e:code)
+- tests/run.sh header (quick | q38 | q38once | all | extra | selftest; STRICT=1; FAIL-on-exit-0 rule from #241)
+- CONTRIBUTING.md (setup, models/ layout, no-GPU tests, --port / --signal-port)
+- README.md "Tests"; docs/agents.md (27B loads in ~2 minutes, one GPU job at a time)
+- docs/models.md (models/ layout)
+- docs/testing-fast.md (converted-weights cache ~/.cache/swarmllm-weights, WEIGHT_CACHE, q38once ~1 min warm,
+  two-machine xroom*, iPhone rig, room_resume)
+- .github/workflows/ci.yml (check job: syntax, unit, serve bridge, generator smoke, report check, run.sh selftest;
+  browser job: preview_browser.mjs, continue-on-error)
+- tests/e2e/room_chaos.mjs, room_drop.mjs, room_latency.mjs, serve.mjs, signal_fallback.mjs headers
+- PRs #228, #237, #241
+*/}
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+There are three kinds of test. Unit tests run anywhere. Browser tests run in headless Chromium on SwiftShader, a software GPU, so they need no real GPU either. GPU tests need WebGPU in Deno and the model files.
+
+Start with the first two. They cover most room, Code mode and Serve API changes.
+
+## No GPU needed
+
+```bash
+npm test                                   # unit tests (Deno), 84 test files in tests/unit
+npm run check                              # type-check the engine, syntax-check everything else
+tests/run.sh selftest                      # proves the GPU runner fails on a printed FAIL
+```
+
+The browser tests need `npm install` first, for Playwright and the `peer` signaling server:
+
+```bash
+npm run e2e:code                           # Code mode end to end: two tabs, a real room, a scripted model builds and fixes Tetris
+node tests/e2e/preview_browser.mjs         # the Code mode preview sandbox
+node tests/e2e/room_synth.mjs              # the real engine and room on a tiny synthetic model
+node tests/e2e/signal_fallback.mjs         # signaling fallback: cloud down, one server down, all down, a drop mid-room
+```
+
+`harness_tetris.mjs` (behind `e2e:code`) and `room_synth.mjs` take `--port` and `--signal-port` when the default ports are busy.
+
+The Serve API bridge has its own Node tests:
+
+```bash
+npm ci --prefix cli
+node --test cli/test/*_test.mjs            # drives the bridge with the official openai and anthropic SDKs
+```
+
+## With a GPU
+
+You need a GPU with WebGPU and [Deno 2](https://deno.com). Put the model files under `models/` (it is git-ignored):
+
+```
+models/
+  qwen/    model.gguf (Qwen3 0.6B Q8_0), model-q4.gguf, tokenizer.json, config.json
+  qwen17/  model.gguf, tokenizer.json, config.json        # Qwen3 1.7B, Code mode's small model
+  q38/     model.gguf (Qwen 3.8 27B Q4_0)
+  q36moe/  Qwen_Qwen3.6-35B-A3B-Q4_0.gguf                 # for tests/test_moe.js
+  model/   SmolLM2-135M: model.safetensors, tokenizer.json, config.json
+```
+
+Run the suites through `tests/run.sh`:
+
+| Command | What it runs | Needs |
+|---|---|---|
+| `npm run test:gpu` (`run.sh quick`) | Golden tests on Qwen3 0.6B and SmolLM, streams, batching, splits | The small models. About a minute. |
+| `npm run test:q38` (`run.sh q38`) | The 27B suites, including speculative decoding equal to plain, one process per file | About 16 GB of GPU memory. The reference run before you land. |
+| `npm run test:q38once` | The same 27B checks in one process with one weight upload | About a minute once the cache is warm. |
+| `tests/run.sh extra` | MoE, sharding, splits, the full 27B: GPU tests no other suite covers | The MoE and 27B files. |
+| `npm run test:all` | `quick` plus `q38` | |
+
+A test fails if it exits nonzero **or** prints `FAIL` or `FAILED`, even when it exits 0. Set `STRICT=1` to also fail on a printed `SKIP`. Set `ONLY=test_mtp,test_ctx` to run a subset of `q38once`.
+
+To run one test on its own:
+
+```bash
+cd tests && deno run --unstable-webgpu --allow-read --allow-env test_qwen.js
+```
+
+### The converted-weights cache
+
+Loading the 27B means reading and converting a 15 GB file, which used to take about 45 seconds of CPU per test. The 27B and MoE tests now keep the converted tensors in `~/.cache/swarmllm-weights`, and a warm load takes about 4 to 9 seconds. The cache takes about 16 GB for the 27B and 20 GB for the MoE, on top of the GGUFs.
+
+| Variable | Effect |
+|---|---|
+| `WEIGHT_CACHE=0` | Turn the cache off. |
+| `WEIGHT_CACHE=<dir>` | Keep the cache somewhere else. |
+| `WEIGHT_CACHE_VERIFY=1` | Also check each entry's checksum (about 1.5 times the warm load time). |
+| `WEIGHT_CACHE_PRUNE=1` | Delete directories left over from older loader versions. |
+
+Any edit to `engine/gguf.js` starts a new cache directory, so you never read stale conversions. `npm run test:cache` checks that the cache gives byte-identical tensors for every quantization type.
+
+<Aside type="caution">
+Never run two GPU jobs at once: tests, benchmarks or a CUDA build. They share memory bandwidth, and every number becomes meaningless. If the GPU is busy, stick to the no-GPU tests.
+</Aside>
+
+## Rooms on one machine
+
+These form real rooms, with real WebRTC and PeerJS signaling, between headless Chromium tabs on your machine. They need a GPU and are only run by hand.
+
+| Command | What it checks |
+|---|---|
+| `npm run e2e -- --phone` | A host, a worker and a phone-shaped tab (mobile user agent, 4x CPU throttle). Reports stats, wire counters and console errors. `--wire off\|slice\|stripeN` picks the transport. |
+| `node tests/e2e/room_chaos.mjs --devices 3 --plan net` | Latency, packet loss and freezes, through a userland packet shaper (no root). Other plans: `death`, `signal`, `join`, `turn`. |
+| `node tests/e2e/room_drop.mjs --devices 3` | A device that goes silent mid-answer is noticed in 3 to 5 s. A bad but working network is never mistaken for a dead device. |
+| `node tests/e2e/room_resume.mjs` | Locks, reloads or kills a device mid-answer. The answer must finish with the same text as an uninterrupted one. |
+| `node tests/e2e/room_latency.mjs --model qwen3.6-35b-moe --devices 2 --lat 0,5,20` | Decode speed and time to first token against emulated one-way latency. |
+| `node tests/e2e/serve.mjs` | `pooled serve` against a real room running Qwen3 1.7B, with the official SDKs. `--codex` and `--claude` also run one real agent turn. |
+
+## Real devices
+
+For rooms across two machines, or with a real iPhone, see the rigs in [`docs/testing-fast.md`](https://github.com/Nehanth/pooled/blob/main/docs/testing-fast.md):
+
+- `tests/e2e/xroom_pair.sh` runs a room with one headless browser on each of two machines, and `xroom_report.mjs` splits every lap into compute and wire time.
+- `tests/e2e/xroom_phone.mjs` drives Safari on a USB-attached iPhone over WebDriver. `xroom_cluster.sh` combines any of this machine, another machine and the phone.
+- `tests/e2e/resume_phone.mjs` backgrounds or reloads Safari on the phone mid-answer.
+
+The phone must open an `https` page, such as pooled.run or a branch's Vercel preview. All devices must run the same commit.
+
+## What CI runs
+
+Every pull request and every push to `main` runs two jobs on GitHub's Ubuntu runners:
+
+<Tabs>
+<TabItem label="check">
+1. `node --check` on every engine, room, harness, site, test, benchmark and script file.
+2. The unit tests, `deno test --parallel --allow-read tests/unit`, with a JUnit report.
+3. The `pooled serve` bridge tests (`node --test cli/test/*_test.mjs`).
+4. A sanity check of the kernel generator (`tests/unit/generator_smoke.js`).
+5. `scripts/check-test-report.mjs`, which fails the run on zero tests, or on a skipped test that isn't on its allowed list.
+6. `tests/run.sh selftest`.
+</TabItem>
+<TabItem label="browser (optional)">
+Installs Playwright's Chromium and runs `tests/e2e/preview_browser.mjs`. It is allowed to fail until it has a track record in CI.
+</TabItem>
+</Tabs>
+
+CI has no GPU. GPU tests run on the maintainer's hardware before merge, so in your PR say which ones you ran, and on which GPU.

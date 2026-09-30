@@ -1,0 +1,97 @@
+<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>layer profile</title><pre id="log"></pre>
+<script type="module">
+// A room worker's slice on this device, profiled: layers [lo, hi) of a Qwen 3.5/3.6 GGUF, no embedding
+// or head, built the way room.js builds a worker's engine (autotuned GEMV shape, 16 batch columns, the
+// phone's 256 MB buffer cap with ?phone=1), then timed on random hiddens: a plain lap (runHidden, one
+// column) and a speculative verify lap (runHiddenBatch, ?cols=4 columns, with the per-column snapshot),
+// each as wall time per call, GPU time per submit, and a per-kernel split (every dispatch in its own
+// timestamped pass, tests/prof/gpuprof.js "kernel" mode; its sum is larger than the submit's GPU time).
+// Runs anywhere with WebGPU; tests/bench/layer_prof.mjs drives it on an iPhone (Safari over WebDriver)
+// or in Chrome. ?model=<url of the .gguf, Range requests> &lo=39&hi=40 &n=40 (calls per measurement)
+// &cols=4 &phone=1 &gaps=0,20,40 (also time the plain lap with that many ms idle before each call, as in a
+// room where the device waits for the rest of the lap: a GPU that clocks down when idle shows it)
+// &warm=10,20 (also time each gap with room/gpuwake.js spinning for the last W ms of it, as a room
+// worker does between the host's ai-wake and the frame). Result in window.RESULT.
+import { Qwen35Engine } from "../../engine/qwen35.js";
+import { autotuneCoop } from "../../engine/autotune.js";
+import { parseGGUFHeader, qwen35Weights, streamEntryToGPU } from "../../engine/gguf.js";
+import { installProf, bySum, r2, table } from "../prof/gpuprof.js";
+import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
+import { GpuWaker } from "../../room/gpuwake.js";
+const q = new URLSearchParams(location.search), MODEL = q.get("model");
+const LO = +(q.get("lo") || 0), HI = +(q.get("hi") || LO + 1), N = +(q.get("n") || 40), COLS = +(q.get("cols") || 4), PHONE = q.get("phone") === "1";
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+const readAt = async (off, len) => { const r = await fetch(MODEL, { headers: { Range: `bytes=${off}-${off + len - 1}` } }); if (!r.ok) throw new Error("fetch " + r.status); return new Uint8Array(await r.arrayBuffer()); };
+const med = (a) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+window.LOG = () => document.getElementById("log").textContent;
+try {
+  const ad = await navigator.gpu.requestAdapter();
+  const feats = ad.features.has("timestamp-query") ? ["timestamp-query"] : [];
+  const cap = (x) => (PHONE ? Math.min(x, 256 * 2 ** 20) : x);
+  const device = await ad.requestDevice({ requiredFeatures: feats, requiredLimits: { maxBufferSize: cap(ad.limits.maxBufferSize), maxStorageBufferBindingSize: cap(ad.limits.maxStorageBufferBindingSize) } });
+  device.addEventListener?.("uncapturederror", (e) => log("GPU error: " + e.error?.message));
+  const tune = await autotuneCoop(device).catch(() => ({ wg: 256, rows: 4 }));
+  log(`adapter ${ad.info?.vendor} ${ad.info?.architecture || ""} · subgroups ${ad.features.has("subgroups")} · f16 ${ad.features.has("shader-f16")} · timestamps ${feats.length > 0} · autotune WG=${tune.wg} ROWS=${tune.rows}`);
+  let hb = 16 << 20;
+  let head = await readAt(0, hb), G;
+  for (;;) { try { G = parseGGUFHeader(head.buffer); break; } catch (e) { if (hb >= 256 << 20) throw e; hb *= 2; head = await readAt(0, hb); } }
+  G.streamEntry = (info) => streamEntryToGPU(device, info, (i) => fetch(MODEL, { headers: { Range: `bytes=${i.byteOffset}-${i.byteOffset + i.byteLength - 1}` } }));
+  const t0 = performance.now();
+  const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: LO, hi: HI, hasEmbed: false, hasHead: false, mtp: false });
+  // the room's settings (engine/preset.js), with the room's own ?flags (?moefuse=0, ?fuse=0, ?kv=q8, ...)
+  const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [LO, HI], hasEmbed: false, hasHead: false, maxSeq: 4096,
+    coopWG: tune.wg, coopRows: tune.rows, ...roomQwen35Options(q) }), q);
+  const dim = eng.dims.dim;
+  log(`layers ${LO}-${HI - 1} (${HI - LO}) loaded in ${((performance.now() - t0) / 1000).toFixed(1)} s, dim ${dim}, moe ${!!eng.moe || !!eng.moeFuse}`);
+  const rnd = (n) => { const x = new Float32Array(n); for (let i = 0; i < n; i++) x[i] = (Math.random() - 0.5) * 0.5; return x; };
+  const x1 = rnd(dim), xb = rnd(dim * COLS);
+  if (!eng.B) eng._initBatch?.();
+  let pos = 0;
+  const plain = async () => { const t = performance.now(); await eng.runHidden(x1, pos++); return performance.now() - t; };
+  const block = async () => { const t = performance.now(); await eng.runHiddenBatch(xb, pos, { base: 0, total: COLS }); pos += COLS; return performance.now() - t; };
+  for (let i = 0; i < 6; i++) { await plain(); await block(); }
+  const out = { lo: LO, hi: HI, layers: HI - LO, tune, ua: navigator.userAgent, adapter: ad.info?.vendor, subgroups: ad.features.has("subgroups") };
+  const P = installProf(device, eng, { mode: "submit" });
+  for (const [name, fn] of [["plain", plain], ["block" + COLS, block]]) {
+    const wall = []; for (let i = 0; i < N; i++) wall.push(await fn());
+    P.start(); for (let i = 0; i < N; i++) await fn(); P.stop(); await P.resolve();
+    const gpu = P.subs.filter((s) => s.gpu > 0).map((s) => s.gpu), maps = P.maps.map((m) => m.t1 - m.t0);
+    out[name] = { wallMs: r2(med(wall)), wallP95: r2([...wall].sort((a, b) => a - b)[Math.floor(0.95 * wall.length)]), gpuMsPerCall: r2(gpu.reduce((a, b) => a + b, 0) / N), submitsPerCall: r2(P.subs.length / N), mapWaitMs: r2(maps.reduce((a, b) => a + b, 0) / N), perLayerGpuMs: r2(gpu.reduce((a, b) => a + b, 0) / N / (HI - LO)) };
+    log(`${name}: wall ${out[name].wallMs} ms (p95 ${out[name].wallP95}), GPU ${out[name].gpuMsPerCall} ms/call = ${out[name].perLayerGpuMs} ms/layer, ${out[name].submitsPerCall} submits, map wait ${out[name].mapWaitMs} ms`);
+    if (P.mode === "none" && !feats.length) continue;
+    P.mode = "kernel"; P.start(); for (let i = 0; i < Math.min(N, 20); i++) await fn(); P.stop(); await P.resolve(); P.mode = "submit";
+    const K = Math.min(N, 20), all = P.subs.flatMap((s) => s.kern), total = all.reduce((a, k) => a + k.ms, 0);
+    const cats = Object.entries(bySum(all, (k) => k.cat, (k) => k.ms)).map(([c, o]) => ({ category: c, ms: r2(o.ms / K), dispatches: r2(o.n / K), pct: r2(100 * o.ms / total) })).sort((a, b) => b.ms - a.ms);
+    const pipes = Object.entries(bySum(all, (k) => k.name, (k) => k.ms)).map(([p, o]) => ({ pipe: p, ms: r2(o.ms / K), n: r2(o.n / K), usEach: r2(1000 * o.ms / o.n) })).sort((a, b) => b.ms - a.ms).slice(0, 20);
+    out[name].kernels = { totalMs: r2(total / K), dispatches: r2(all.length / K), cats, pipes };
+    log(`${name} kernels: ${r2(total / K)} ms over ${r2(all.length / K)} dispatches\n` + table(cats, ["category", "ms", "dispatches", "pct"]) + "\n" + table(pipes, ["pipe", "ms", "n", "usEach"]));
+  }
+  const gaps = (q.get("gaps") || "").split(",").filter((x) => x !== "").map(Number);
+  out.gaps = [];
+  for (const g of gaps) {
+    const w = [], w2 = [];
+    for (let i = 0; i < N; i++) { await new Promise((r) => setTimeout(r, g)); w.push(await plain()); }
+    for (let i = 0; i < Math.min(N, 20); i++) { await new Promise((r) => setTimeout(r, g)); w2.push(await block()); }
+    out.gaps.push({ gapMs: g, plainWall: r2(med(w)), plainP95: r2([...w].sort((a, b) => a - b)[Math.floor(0.95 * w.length)]), blockWall: r2(med(w2)) });
+    log(`idle ${g} ms before each call: plain wall ${r2(med(w))} ms (p95 ${out.gaps.at(-1).plainP95}), block${COLS} wall ${r2(med(w2))} ms`);
+  }
+  const warms = (q.get("warm") || "").split(",").filter((x) => x !== "").map(Number);
+  const waker = warms.length ? new GpuWaker(device) : null;
+  const gapWarm = async (g, W) => {
+    await new Promise((r) => setTimeout(r, g - W));
+    waker.wake(W + 50);
+    await new Promise((r) => setTimeout(r, W));
+    waker.stop();
+  };
+  for (const g of gaps) for (const W of warms) {
+    if (W > g || !W) continue;
+    const w = [], w2 = [], s0 = waker.stats.submits;
+    for (let i = 0; i < N; i++) { await gapWarm(g, W); w.push(await plain()); }
+    for (let i = 0; i < Math.min(N, 20); i++) { await gapWarm(g, W); w2.push(await block()); }
+    const subs = r2((waker.stats.submits - s0) / (N + Math.min(N, 20)));
+    out.gaps.push({ gapMs: g, warmMs: W, plainWall: r2(med(w)), plainP95: r2([...w].sort((a, b) => a - b)[Math.floor(0.95 * w.length)]), blockWall: r2(med(w2)), wakeSubmits: subs });
+    log(`idle ${g} ms, the last ${W} warm (${subs} wake submits): plain wall ${r2(med(w))} ms (p95 ${out.gaps.at(-1).plainP95}), block${COLS} wall ${r2(med(w2))} ms`);
+  }
+  window.RESULT = out;
+} catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; }
+</script>

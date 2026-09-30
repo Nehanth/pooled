@@ -1,0 +1,32 @@
+{
+  "name": "@pooled/room-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Pooled room device in Node.js: Pooled's WebGPU engine on Dawn and the room protocol over WebRTC, no browser.",
+  "homepage": "https://pooled.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nehanth/pooled.git",
+    "directory": "packages/room-node"
+  },
+  "license": "MIT",
+  "author": "Nehanth Narendrula",
+  "type": "module",
+  "main": "./index.js",
+  "exports": { ".": "./index.js" },
+  "scripts": {
+    "test": "node --test test/*_test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "node-datachannel": "0.33.4",
+    "peerjs": "1.5.4",
+    "webgpu": "0.6.1"
+  },
+  "devDependencies": {
+    "peer": "^1.0.2",
+    "playwright-core": "1.63.0"
+  }
+}
