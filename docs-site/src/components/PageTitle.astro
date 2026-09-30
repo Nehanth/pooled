@@ -5,6 +5,7 @@ const PAGE_TITLE_ID = '_top'; // Starlight's skip-link target (not exported)
 const route = Astro.locals.starlightRoute;
 const { title, description, eyebrow } = route.entry.data as any;
 const body = route.entry.body ?? '';
+const isNotFound = route.entry.id === '404';
 const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim()}\n`;
 ---
 
@@ -12,17 +13,26 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 	{eyebrow && <p class="p-eyebrow">{eyebrow}</p>}
 	<div class="p-title-row">
 		<h1 id={PAGE_TITLE_ID}>{title}</h1>
+		{!isNotFound && (
 		<button class="p-copy print:hidden" data-pagefind-ignore type="button" data-md={md} aria-label="Copy this page as Markdown">
 			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
 				<rect x="5.5" y="5.5" width="8" height="8" rx="1.8" /><path d="M10.5 5.5V4.3a1.8 1.8 0 0 0-1.8-1.8H4.3a1.8 1.8 0 0 0-1.8 1.8v4.4a1.8 1.8 0 0 0 1.8 1.8h1.2" />
 			</svg>
 			<span>Copy page</span>
 		</button>
+		)}
 	</div>
 	{description && <p class="p-lede">{description}</p>}
 </div>
 
 <script>
+	// Table cells carry their column name, so phones can show rows as stacked records.
+	document.querySelectorAll<HTMLTableElement>('.sl-markdown-content table').forEach((t) => {
+		const heads = [...t.querySelectorAll('thead th')].map((th) => th.textContent?.trim() || '');
+		t.querySelectorAll('tbody tr').forEach((tr) => {
+			[...tr.children].forEach((td, i) => heads[i] && td.setAttribute('data-label', heads[i]));
+		});
+	});
 	document.querySelectorAll<HTMLButtonElement>('.p-copy').forEach((btn) => {
 		btn.addEventListener('click', async () => {
 			const label = btn.querySelector('span')!;
@@ -38,26 +48,34 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 </script>
 
 <style>
-	.p-title { margin-top: 8px; }
+	/* Masthead: caption, a large Funnel Display title, a lede set a step lighter, then a hairline. */
+	.p-title {
+		margin-top: 0;
+		padding-bottom: 36px;
+		margin-bottom: 0;
+		border-bottom: 1px solid var(--p-rule);
+	}
 	.p-eyebrow {
-		margin: 0 0 6px;
+		margin: 0 0 14px;
 		font: 500 13px/1.4 var(--__sl-font);
-		color: var(--p-blue-text);
+		color: var(--p-ink-4);
+		letter-spacing: 0;
 	}
 	.p-title-row {
 		display: flex;
 		align-items: flex-start;
 		justify-content: space-between;
-		gap: 16px;
+		gap: 24px;
 	}
 	h1 {
 		margin: 0;
 		font-family: var(--p-display);
 		font-weight: 400;
-		font-size: 36px;
-		line-height: 1.1;
-		letter-spacing: -0.025em;
+		font-size: 46px;
+		line-height: 1.04;
+		letter-spacing: -0.032em;
 		color: var(--p-ink);
+		text-wrap: balance;
 	}
 	.p-copy {
 		flex: 0 0 auto;
@@ -65,30 +83,35 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 		align-items: center;
 		gap: 6px;
 		height: 32px;
-		margin-top: 2px;
-		padding: 0 12px;
+		margin-top: 8px;
+		padding: 0 11px;
 		border: 0;
 		border-radius: 8px;
 		background: var(--p-card);
 		box-shadow: inset 0 0 0 1px var(--p-rule-3);
-		color: var(--p-ink-2);
+		color: var(--p-ink-3);
 		font: 500 13px/1 var(--__sl-font);
 		cursor: pointer;
-		transition: background-color 0.15s var(--p-ease), box-shadow 0.15s var(--p-ease), transform 0.12s var(--p-ease);
+		transition: background-color 0.15s var(--p-ease), box-shadow 0.15s var(--p-ease), color 0.15s var(--p-ease), transform 0.12s var(--p-ease);
 	}
-	.p-copy:hover { background: var(--p-bg-2); box-shadow: inset 0 0 0 1px var(--p-ink-3); color: var(--p-ink); }
+	.p-copy:hover { box-shadow: inset 0 0 0 1px var(--p-control); color: var(--p-ink); }
 	.p-copy:active { transform: scale(0.98); }
 	.p-copy:focus-visible { outline: 2px solid var(--p-blue); outline-offset: 2px; }
 	.p-lede {
-		margin: 14px 0 0;
-		font-size: 17px;
-		line-height: 1.6;
-		color: var(--p-ink-2);
+		max-width: 34em;
+		margin: 18px 0 0;
+		font-size: 19px;
+		line-height: 1.55;
+		letter-spacing: -0.008em;
+		color: var(--p-ink-3);
 		text-wrap: pretty;
 	}
 	@media (max-width: 50rem) {
-		h1 { font-size: 30px; }
+		.p-title { padding-bottom: 24px; }
+		.p-eyebrow { margin-bottom: 10px; }
+		h1 { font-size: 34px; line-height: 1.08; }
+		.p-lede { font-size: 17px; margin-top: 12px; }
 		.p-copy span { display: none; }
-		.p-copy { width: 34px; padding: 0; justify-content: center; }
+		.p-copy { width: 40px; height: 40px; margin-top: -2px; padding: 0; justify-content: center; }
 	}
 </style>

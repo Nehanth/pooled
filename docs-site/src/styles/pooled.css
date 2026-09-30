@@ -1,67 +1,82 @@
-/* Pooled brand on Starlight. Values are the tokens in site/css/tokens.css (docs/design/language.md);
+/* Pooled docs on Starlight. Values are the tokens in site/css/tokens.css (docs/design/language.md);
    --p-* are the page's own names so the dark palette can swap them in one place.
-   Unlayered, so these win over Starlight's @layer starlight.* rules. */
+   Unlayered, so these win over Starlight's @layer starlight.* rules.
+
+   Direction: editorial. It wins through type and space: a Funnel Display title and section heads
+   (as on pooled.run), Geist body at a 68ch measure, white cards on warm paper, 1px hairlines,
+   one blue used only for links and focus. No icons, badges or colour chips. */
 
 :root {
 	/* light (the Pooled palette) */
-	--p-bg: #FBFAF7;          /* --bg-2: near-white warm paper */
-	--p-bg-2: #F6F5F1;        /* --bg */
-	--p-bg-3: #EFEDE7;        /* --bg-3: well, current-page pill */
-	--p-card: #FFFFFF;        /* --white */
+	--p-bg: #F6F5F1;          /* --bg: the landing's paper */
+	--p-bg-2: #FBFAF7;        /* --bg-2 */
+	--p-bg-3: #EFEDE7;        /* --bg-3 */
+	--p-card: #FFFFFF;        /* --white: cards, code, asides */
 	--p-code-bg: #FFFFFF;
 	--p-ink: #14161D;
 	--p-ink-2: #4B4E58;
 	--p-ink-3: #5E616B;
 	--p-ink-4: #6B6E78;
+	--p-strong: #14161D;
 	--p-rule: #E4E2DA;
 	--p-rule-2: #ECEAE3;
 	--p-rule-3: #D6D3C9;
+	--p-control: #CFCBC0;     /* borders that mark a control (search, buttons) */
 	--p-blue: #2A45E0;
 	--p-blue-text: #2239C8;
 	--p-blue-soft: #EAEDFE;
 	--p-blue-400: #7C8FFF;
 	--p-on-ink: #FFFFFF;
-	--p-header: rgba(251, 250, 247, 0.85);
+	--p-btn: #14161D;
+	--p-btn-ink: #FFFFFF;
+	--p-btn-edge: transparent;
 	--p-ease: cubic-bezier(.2, .7, .2, 1);
 	--p-display: "Funnel Display", "Funnel Display Fallback", "Geist", ui-sans-serif, system-ui, sans-serif;
+	--p-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, "SF Mono", Menlo, monospace;
 
 	--sl-font: "Geist", "Geist Fallback";
 	--sl-font-mono: "Geist Mono", "Geist Mono Fallback";
 	--sl-nav-height: 4rem;
-	--sl-nav-pad-x: 2rem;
-	--sl-sidebar-width: 18rem;
-	--sl-sidebar-pad-x: 2rem;
-	--sl-content-width: 43rem; /* ~690px, as the reference */
-	--sl-content-pad-x: 2rem;
+	--sl-nav-pad-x: 1.5rem;
+	--sl-sidebar-width: 17.5rem;
+	--sl-sidebar-pad-x: 0.875rem;
+	--sl-content-width: 44rem; /* ~700px column, ~68 characters of body text */
+	--sl-content-pad-x: 3rem;
 	--sl-text-body: 16px;
 	--sl-line-height: 1.7;
-	--sl-text-h2: 24px;
-	--sl-text-h3: 19px;
-	--sl-text-h4: 17px;
+	--sl-line-height-headings: 1.25;
+	--sl-text-h2: 28px;
+	--sl-text-h3: 18px;
+	--sl-text-h4: 15px;
 	--sl-text-code: 13px;
 	--sl-text-code-sm: 12px;
 }
 
-/* dark: built from the dark surfaces the product already has (#0B0D14 Code pill, --on-game ink, favicon's #7F93FF) */
+/* dark: built from the dark surfaces the product already has (#0B0D14 Code pill, --on-game ink, favicon's #7F93FF).
+   Headings are the brightest thing; body, lede and captions step down from there. */
 :root[data-theme='dark'] {
 	--p-bg: #0B0D14;
 	--p-bg-2: #10131C;
 	--p-bg-3: #1A1E2A;
-	--p-card: #11141D;
+	--p-card: #10131C;
 	--p-code-bg: #10131C;
 	--p-ink: #EEF0F6;
-	--p-ink-2: #C3C8D6;
-	--p-ink-3: #A9B0C4;
+	--p-ink-2: #B3B9CA;
+	--p-ink-3: #9AA1B5;
 	--p-ink-4: #8C93A8;
+	--p-strong: #DDE1EA;
 	--p-rule: #232838;
 	--p-rule-2: #1C2030;
 	--p-rule-3: #2E3446;
+	--p-control: #3A4156;
 	--p-blue: #7F93FF;
 	--p-blue-text: #9AABFF;
 	--p-blue-soft: #1A2250;
 	--p-blue-400: #7C8FFF;
 	--p-on-ink: #0B0D14;
-	--p-header: rgba(11, 13, 20, 0.85);
+	--p-btn: #1A1E2A;
+	--p-btn-ink: #EEF0F6;
+	--p-btn-edge: #2E3446;
 }
 
 /* Map onto Starlight's scale (in light mode "white" is the darkest ink, "black" the page). */
@@ -84,251 +99,514 @@
 	--sl-color-text-accent: var(--p-blue-text);
 	--sl-color-text-invert: var(--p-on-ink);
 	--sl-color-bg: var(--p-bg);
-	--sl-color-bg-nav: var(--p-header);
+	--sl-color-bg-nav: var(--p-bg);
 	--sl-color-bg-sidebar: var(--p-bg);
-	--sl-color-bg-inline-code: var(--p-bg-3);
+	--sl-color-bg-inline-code: var(--p-card);
 	--sl-color-bg-accent: var(--p-blue);
 	--sl-color-hairline: var(--p-rule-2);
 	--sl-color-hairline-light: var(--p-rule-2);
 	--sl-color-hairline-shade: var(--p-rule);
-	--sl-color-backdrop-overlay: rgba(20, 22, 29, 0.32);
-	--sl-shadow-lg: 0 1px 2px rgba(20, 22, 29, .05), 0 24px 60px -20px rgba(20, 22, 29, .32);
+	--sl-color-backdrop-overlay: rgba(20, 22, 29, 0.18);
+	--sl-shadow-sm: none;
+	--sl-shadow-md: none;
+	--sl-shadow-lg: 0 1px 2px rgba(20, 22, 29, .05), 0 24px 60px -20px rgba(20, 22, 29, .28);
 }
 
-body { background: var(--p-bg); color: var(--p-ink-2); -webkit-font-smoothing: antialiased; }
+body { background: var(--p-bg); color: var(--p-ink-2); -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 ::selection { background: var(--p-blue-soft); }
 
-/* ---------- top bar ---------- */
-.page > header.header {
-	border-bottom: 1px solid var(--p-rule-2);
-	backdrop-filter: saturate(1.4) blur(10px);
-	-webkit-backdrop-filter: saturate(1.4) blur(10px);
+/* one focus ring everywhere */
+:where(a, button, summary, select, input, [tabindex]):focus-visible {
+	outline: 2px solid var(--p-blue);
+	outline-offset: 2px;
+	border-radius: 6px;
 }
-.site-title img { height: 22px; }
 
-/* search trigger: a white pill-ish field with the Ctrl K hint, as the reference */
+/* ======================================================================
+   Header: solid paper, one hairline. Wordmark | Docs, search aligned to the column.
+   ====================================================================== */
+header.header {
+	background: var(--p-bg);
+	border-bottom: 1px solid var(--p-rule-2);
+	padding-block: 0;
+}
+.site-title img { height: 21px; }
+
 site-search button[data-open-modal] {
 	width: 100%;
-	max-width: 22rem;
-	height: 36px;
+	max-width: 19rem;
+	height: 34px;
 	border: 0;
-	border-radius: 12px;
+	border-radius: 8px;
 	background: var(--p-card);
-	box-shadow: inset 0 0 0 1px var(--p-rule);
+	box-shadow: inset 0 0 0 1px var(--p-rule-3);
 	color: var(--p-ink-4);
 	font-size: 14px;
-	padding-inline: 12px 8px;
-	transition: box-shadow .15s var(--p-ease);
+	padding-inline: 11px 8px;
+	transition: box-shadow .15s var(--p-ease), color .15s var(--p-ease);
 }
-site-search button[data-open-modal]:hover { box-shadow: inset 0 0 0 1px var(--p-rule-3); color: var(--p-ink-3); }
+site-search button[data-open-modal]:hover { box-shadow: inset 0 0 0 1px var(--p-control); color: var(--p-ink-3); }
 site-search button[data-open-modal] > kbd { background: transparent; border: 0; font-family: var(--__sl-font); font-size: 12px; color: var(--p-ink-4); gap: 3px; }
 site-search button[data-open-modal] > kbd kbd { font-weight: 500; }
 @media (min-width: 50rem) {
-	site-search { width: 100%; display: flex; justify-content: center; }
-	site-search button[data-open-modal] { min-width: 20rem; }
+	site-search { width: 100%; display: flex; justify-content: flex-start; }
+	site-search button[data-open-modal] { min-width: 17rem; }
 }
 @media (max-width: 50rem) {
-	site-search button[data-open-modal] { width: 36px; padding: 0; justify-content: center; box-shadow: none; background: transparent; color: var(--p-ink-2); }
+	site-search button[data-open-modal] { width: 40px; height: 40px; padding: 0; justify-content: center; box-shadow: none; background: transparent; color: var(--p-ink-2); }
+	site-search button[data-open-modal]:hover { background: var(--p-bg-3); box-shadow: none; }
 }
-site-search dialog { border-radius: 16px; border: 1px solid var(--p-rule); background: var(--p-card); }
 
-/* theme select + GitHub: quiet 34px controls */
-starlight-theme-select label { color: var(--p-ink-3); }
-starlight-theme-select select { font-size: 13px; color: var(--p-ink-2); }
-.p-icons a.sl-flex { color: var(--p-ink-3); padding: 7px; border-radius: 8px; }
+/* theme select + GitHub: quiet icon controls */
+.p-icons a.sl-flex { color: var(--p-ink-3); padding: 8px; border-radius: 8px; }
 .p-icons a.sl-flex:hover { color: var(--p-ink); background: var(--p-bg-3); }
+.p-icons starlight-theme-select label { position: relative; width: 34px; height: 34px; justify-content: center; border-radius: 8px; color: var(--p-ink-3); }
+.p-icons starlight-theme-select label:hover { background: var(--p-bg-3); color: var(--p-ink); }
+.p-icons starlight-theme-select select { position: absolute; inset: 0; width: 100%; margin: 0; padding: 0; opacity: 0; cursor: pointer; }
+.p-icons starlight-theme-select .caret { display: none; }
+.p-icons starlight-theme-select label .label-icon { position: static; transform: none; font-size: 16px; }
 
-/* ---------- sidebar ---------- */
-.sidebar-pane { border-inline-end: 0; }
-.sidebar-content { padding-top: 28px; }
-.sidebar-content .top-level > li + li { margin-top: 22px; }
-.sidebar-content summary { padding: 0 12px 8px; cursor: default; }
-.sidebar-content summary .caret { display: none; }
-.sidebar-content .group-label .large {
-	font-size: 14px;
-	font-weight: 600;
-	color: var(--p-ink);
-	letter-spacing: -.005em;
+/* mobile menu button: a flat 40px square like the search icon beside it (no disc, no shadow) */
+:root { --sl-menu-button-size: 2.5rem; }
+button.sl-menu-button,
+:root[data-theme] button.sl-menu-button,
+:root[data-theme] button.sl-menu-button:has(~ :popover-open) {
+	border-radius: 8px;
+	padding: 0;
+	justify-content: center;
+	align-items: center;
+	background: var(--p-bg);
+	color: var(--p-ink-2);
+	box-shadow: none;
+	font-size: 20px;
 }
+button.sl-menu-button:hover { background: var(--p-bg-3) !important; color: var(--p-ink); }
+button.sl-menu-button svg { width: 20px; height: 20px; }
+
+/* ======================================================================
+   Sidebar: 30px rows, small caption group labels, contributor sections set apart.
+   ====================================================================== */
+.sidebar-pane { border-inline-end: 0; }
+.sidebar-content { padding-top: 28px; padding-bottom: 48px; }
+.sidebar-content .top-level > li + li { margin-top: 26px; }
 .sidebar-content ul ul li { border-inline-start: 0; margin-inline-start: 0; padding-inline-start: 0; }
-.sidebar-content ul ul li + li { margin-top: 2px; }
+.sidebar-content ul ul li + li { margin-top: 1px; }
+
+.sidebar-content summary { padding: 0 10px 6px; align-items: center; }
+.sidebar-content .group-label .large {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--p-ink-4);
+	letter-spacing: .01em;
+}
+/* the four main groups are always open: not toggles */
+.sidebar-content .top-level > li:nth-child(-n+4) > details > summary { pointer-events: none; }
+.sidebar-content .top-level > li:nth-child(-n+4) > details > summary .caret { display: none; }
+/* collapsible groups: a small chevron that turns on open */
+.sidebar-content summary { cursor: pointer; }
+.sidebar-content summary .caret {
+	width: 14px;
+	height: 14px;
+	color: var(--p-ink-4);
+	transition: transform .15s var(--p-ease);
+}
+/* contributor sections sit under a hairline, apart from the user docs */
+.sidebar-content .top-level > li:nth-child(5) {
+	margin-top: 28px;
+	padding-top: 24px;
+	border-top: 1px solid var(--p-rule-2);
+}
+.sidebar-content .top-level > li:nth-child(n+6) { margin-top: 2px; }
+.sidebar-content .top-level > li:nth-child(n+5) > details > summary { padding-block: 5px; border-radius: 8px; }
+.sidebar-content .top-level > li:nth-child(n+5) > details > summary:hover { background: var(--p-bg-3); }
+.sidebar-content .top-level > li:nth-child(n+5) > details > summary .group-label .large { font-size: 14px; font-weight: 400; color: var(--p-ink-2); letter-spacing: 0; }
+.sidebar-content .top-level > li:nth-child(n+5) > details[open] > summary { margin-bottom: 2px; }
+
+/* nested groups inside a section read as items, not headings */
+.sidebar-content ul ul details > summary { padding: 5px 10px; border-radius: 8px; }
+.sidebar-content ul ul details > summary:hover { background: var(--p-bg-3); }
+.sidebar-content ul ul details > summary .group-label .large { font-size: 14px; font-weight: 400; color: var(--p-ink-2); letter-spacing: 0; }
+.sidebar-content ul ul details ul { margin-inline-start: 10px; padding-inline-start: 0; border-inline-start: 1px solid var(--p-rule-2); }
+.sidebar-content ul ul details ul li a { margin-inline-start: 4px; }
+
 .sidebar-content a {
+	display: flex;
+	align-items: center;
+	gap: 8px;
 	font-size: 14px;
 	color: var(--p-ink-2);
-	padding: 8px 12px;
+	padding: 5px 10px;
 	border-radius: 8px;
-	line-height: 1.3;
+	line-height: 1.4;
 	transition: background-color .15s var(--p-ease), color .15s var(--p-ease);
 }
-.sidebar-content a:hover { color: var(--p-ink); background: var(--p-bg-2); }
+.sidebar-content a > span:first-child { min-width: 0; }
+.sidebar-content a:hover { color: var(--p-ink); background: var(--p-bg-3); }
 .sidebar-content a[aria-current='page'],
 .sidebar-content a[aria-current='page']:hover,
 .sidebar-content a[aria-current='page']:focus {
-	background: var(--p-bg-3);
+	background: var(--p-card);
+	box-shadow: inset 0 0 0 1px var(--p-rule);
 	color: var(--p-ink);
 	font-weight: 500;
 }
 
-/* ---------- content ---------- */
-.content-panel { border-top: 0; padding-top: 40px; }
-.content-panel + .content-panel { border-top: 1px solid var(--p-rule-2); padding-top: 24px; }
-.sl-markdown-content { font-size: 16px; line-height: 1.7; color: var(--p-ink-2); }
-.sl-markdown-content :is(h2, h3, h4) {
-	color: var(--p-ink);
-	font-family: var(--__sl-font);
-	font-weight: 600;
-	letter-spacing: -.015em;
-	line-height: 1.3;
+/* "Preview" and other badges: a quiet word, never a chip */
+.sl-badge {
+	background: transparent !important;
+	border: 0 !important;
+	color: var(--p-ink-4) !important;
+	font-family: inherit !important;
+	font-size: 12px !important;
+	font-weight: 400 !important;
+	padding: 0 !important;
+	white-space: nowrap;
 }
-.sl-markdown-content h2 { font-size: 24px; margin-top: 2.6rem; }
-.sl-markdown-content h3 { font-size: 19px; margin-top: 2rem; }
-.sl-markdown-content :is(h2, h3) + * { margin-top: 0.9rem; }
+
+/* ======================================================================
+   Content column and type
+   ====================================================================== */
+.content-panel { border-top: 0; padding-top: 56px; }
+.content-panel + .content-panel { border-top: 0; padding-top: 0; }
+.sl-markdown-content { font-size: 16px; line-height: 1.7; color: var(--p-ink-2); }
+.sl-markdown-content > :first-child { margin-top: 0; }
+
+/* H2: Funnel Display, as every section head on pooled.run (--d-md). H3/H4: Geist 600. */
+.sl-markdown-content :is(h2, h3, h4) { color: var(--p-ink); text-wrap: balance; }
+.sl-markdown-content h2 {
+	font: 400 28px/1.15 var(--p-display);
+	letter-spacing: -.022em;
+	margin-top: 3.25rem;
+}
+.sl-markdown-content h3 {
+	font: 600 18px/1.35 var(--__sl-font);
+	letter-spacing: -.012em;
+	margin-top: 2.5rem;
+}
+.sl-markdown-content h4 {
+	font: 600 15px/1.4 var(--__sl-font);
+	letter-spacing: -.005em;
+	margin-top: 2rem;
+}
+.sl-markdown-content .sl-heading-wrapper { line-height: 1.25; }
+.sl-markdown-content .sl-heading-wrapper.level-h2 { margin-top: 3.25rem; }
+.sl-markdown-content .sl-heading-wrapper.level-h3 { margin-top: 2.5rem; }
+.sl-markdown-content .sl-heading-wrapper.level-h2 + .sl-heading-wrapper.level-h3 { margin-top: 1.25rem; }
+.sl-markdown-content :is(h2, h3, h4, .sl-heading-wrapper) + * { margin-top: 0.85rem; }
+.sl-markdown-content :is(h2, .sl-heading-wrapper.level-h2) + * { margin-top: 1rem; }
+.sl-markdown-content :is(p, ul, ol) + :is(p, ul, ol) { margin-top: 1rem; }
+.sl-markdown-content :is(ul, ol):not([role='tablist'], .sl-steps) { padding-inline-start: 1.35rem; }
+.sl-markdown-content :is(ul, ol):not([role='tablist'], .sl-steps) > li + li { margin-top: .35rem; }
+.sl-markdown-content li::marker { color: var(--p-ink-4); }
+
+/* anchor links: small and quiet, only on hover or focus */
+.sl-anchor-link { opacity: 0; transition: opacity .15s var(--p-ease); }
+.sl-anchor-link .sl-anchor-icon { color: var(--p-ink-4); }
+.sl-heading-wrapper:hover .sl-anchor-link, .sl-anchor-link:focus-visible { opacity: 1; }
+@media (hover: none) { .sl-anchor-link { display: none; } }
+
+/* links: body weight, ink, a thin blue underline that fills in on hover */
 .sl-markdown-content a:not(:where(.not-content *)) {
 	color: var(--p-ink);
+	font-weight: inherit;
 	text-decoration: underline;
-	text-decoration-color: var(--p-blue);
-	text-decoration-thickness: 1.5px;
-	text-underline-offset: 3px;
-	font-weight: 500;
+	text-decoration-color: color-mix(in srgb, var(--p-blue) 42%, transparent);
+	text-decoration-thickness: 1px;
+	text-underline-offset: 3.5px;
+	transition: color .15s var(--p-ease), text-decoration-color .15s var(--p-ease);
 }
-.sl-markdown-content a:not(:where(.not-content *)):hover { color: var(--p-blue-text); }
-.sl-markdown-content strong { color: var(--p-ink); font-weight: 600; }
+.sl-markdown-content a:not(:where(.not-content *)):hover { color: var(--p-blue-text); text-decoration-color: var(--p-blue); }
+.sl-markdown-content strong { color: var(--p-strong); font-weight: 600; }
+
+/* inline code: a small white chip with a hairline; keeps its shape when it wraps */
 .sl-markdown-content :not(pre) > code {
-	font-size: 0.84em;
-	padding: 0.15em 0.4em;
-	border-radius: 4px;
-	background: var(--p-bg-3);
+	font-family: var(--p-mono);
+	font-size: 0.85em;
+	padding: 0.12em 0.32em;
+	border-radius: 5px;
+	background: var(--p-card);
+	box-shadow: inset 0 0 0 1px var(--p-rule);
 	color: var(--p-ink);
 	border: 0;
+	-webkit-box-decoration-break: clone;
+	box-decoration-break: clone;
+	overflow-wrap: anywhere;
 }
-.sl-markdown-content table { font-size: 14px; }
-.sl-markdown-content :is(th, td) { border-bottom: 1px solid var(--p-rule-2); padding: 10px 12px; }
-.sl-markdown-content th { color: var(--p-ink); font-weight: 600; background: transparent; }
-.sl-markdown-content tr:nth-child(2n) { background: transparent; }
-.sl-markdown-content hr { border-color: var(--p-rule-2); }
-.sl-markdown-content .expressive-code { margin-block: 1.4rem; }
+:root[data-theme='dark'] .sl-markdown-content :not(pre) > code { background: var(--p-bg-3); box-shadow: inset 0 0 0 1px var(--p-rule-3); }
+.sl-markdown-content a > code { color: inherit; }
 
-/* asides (note/tip): quiet card with a blue edge, never yellow */
-.starlight-aside {
+.sl-markdown-content hr { border: 0; border-top: 1px solid var(--p-rule); margin-block: 3rem; }
+
+/* ---------- tables: full width, flush left, caption-sized headers ---------- */
+.sl-markdown-content table {
+	font-size: 14px;
+	line-height: 1.5;
+	border-collapse: collapse;
+	margin-top: 1.25rem;
+}
+@media (min-width: 50rem) {
+	.sl-markdown-content table { display: table; width: 100%; }
+}
+.sl-markdown-content :is(th, td) {
+	border: 0;
+	border-bottom: 1px solid var(--p-rule-2);
+	padding: 11px 20px 11px 0;
+	vertical-align: top;
+	background: transparent;
+}
+.sl-markdown-content :is(th, td):last-child { padding-inline-end: 0; }
+.sl-markdown-content th {
+	font-size: 12px;
+	font-weight: 500;
+	color: var(--p-ink-4);
+	letter-spacing: .01em;
+	text-align: start;
+	padding-block: 0 9px;
+	border-bottom: 1px solid var(--p-rule);
+}
+.sl-markdown-content td { color: var(--p-ink-2); }
+.sl-markdown-content td:first-child { color: var(--p-ink); }
+.sl-markdown-content td:first-child code,
+.sl-markdown-content table:has(th:nth-child(4)) td:not(:last-child) { white-space: nowrap; }
+.sl-markdown-content td code { overflow-wrap: normal; }
+.sl-markdown-content td:last-child code { overflow-wrap: anywhere; white-space: normal; }
+.sl-markdown-content tr:nth-child(2n) { background: transparent; }
+
+/* ---------- Steps: plain mono numbers on a hairline ---------- */
+.sl-markdown-content .sl-steps { --bullet-size: 1.7rem; margin-top: 1.5rem; }
+.sl-markdown-content .sl-steps > li { padding-inline-start: 2.75rem; padding-bottom: 1.75rem; }
+.sl-markdown-content .sl-steps > li > :is(:first-child, :last-child) { margin-bottom: 0; }
+.sl-markdown-content .sl-steps > li:last-child { padding-bottom: 1px; }
+.sl-markdown-content .sl-steps > li::before {
+	content: counter(steps-counter, decimal-leading-zero);
+	font: 500 12px/var(--bullet-size) var(--p-mono);
+	letter-spacing: .02em;
+	color: var(--p-ink-3);
+	background: var(--p-bg);
+	box-shadow: inset 0 0 0 1px var(--p-rule-3);
+}
+.sl-markdown-content .sl-steps > li::after { background: var(--p-rule); bottom: 2px; }
+.sl-markdown-content .sl-steps > li > p:first-child { color: var(--p-ink); }
+.sl-markdown-content .sl-steps > li > p:first-child + * { margin-top: 0.3rem; }
+.sl-markdown-content .sl-steps > li > * + * { margin-top: 0.75rem; }
+
+/* ---------- Cards and link cards: one style, the same as code and asides ---------- */
+.card-grid { gap: 12px !important; }
+.card {
 	border: 1px solid var(--p-rule);
-	border-inline-start: 1px solid var(--p-rule);
 	border-radius: 12px;
 	background: var(--p-card);
-	padding: 14px 16px;
+	padding: 20px 22px;
+	gap: 6px;
 }
-.starlight-aside--note, .starlight-aside--tip { --sl-color-asides-text-accent: var(--p-blue-text); --sl-color-asides-border: var(--p-blue); }
-.starlight-aside--caution { --sl-color-asides-text-accent: var(--p-blue-text); }
-.starlight-aside__title { font-size: 14px; font-weight: 600; }
-.starlight-aside__content { font-size: 15px; }
+.card .icon { display: none; }
+.card .title { font: 600 16px/1.35 var(--__sl-font); letter-spacing: -.01em; color: var(--p-ink); }
+.card .body { font-size: 15px; line-height: 1.6; color: var(--p-ink-3); }
+.card .body > * + * { margin-top: .5rem; }
+.sl-link-card {
+	grid-template-columns: 1fr;
+	border: 1px solid var(--p-rule);
+	border-radius: 12px;
+	background: var(--p-card);
+	padding: 18px 22px;
+	transition: border-color .15s var(--p-ease);
+}
+.sl-link-card svg { display: none; }
+.sl-link-card:hover { background: var(--p-card); border-color: var(--p-control); }
+.sl-link-card .stack { gap: 4px; }
+.sl-link-card .title { font: 600 16px/1.35 var(--__sl-font); letter-spacing: -.01em; color: var(--p-ink); text-decoration: none; }
+.sl-link-card .description { font-size: 15px; line-height: 1.55; color: var(--p-ink-3); }
 
-/* pagination cards and edit link */
+/* ---------- Asides: quiet white note, ink title, no icon ---------- */
+.starlight-aside {
+	border: 1px solid var(--p-rule);
+	border-radius: 12px;
+	background: var(--p-card);
+	padding: 16px 20px;
+	margin-top: 1.5rem;
+}
+.starlight-aside__icon { display: none; }
+.starlight-aside__title {
+	gap: 0;
+	font-size: 14px;
+	font-weight: 600;
+	color: var(--p-ink);
+	margin-bottom: 4px;
+}
+.starlight-aside--caution .starlight-aside__title { color: var(--p-ink); }
+.starlight-aside__content { font-size: 15px; line-height: 1.65; color: var(--p-ink-2); }
+.starlight-aside--caution { border-color: var(--p-rule-3); }
+
+/* ---------- Tabs: small labels sitting on the code block ---------- */
+starlight-tabs [role='tablist'] { border-bottom: 1px solid var(--p-rule); gap: 20px; padding: 0 !important; margin: 0; }
+starlight-tabs .tab { margin: 0 !important; }
+starlight-tabs .tab > [role='tab'] {
+	padding: 8px 0;
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--p-ink-4);
+	box-shadow: none;
+	border-bottom: 1.5px solid transparent;
+	margin-bottom: -1px;
+}
+starlight-tabs .tab > [role='tab']:hover { color: var(--p-ink); }
+starlight-tabs .tab [role='tab'][aria-selected='true'] { color: var(--p-ink); font-weight: 500; border-bottom-color: var(--p-ink); }
+starlight-tabs .tablist-wrapper ~ [role='tabpanel'] { margin-top: 12px; }
+starlight-tabs [role='tabpanel'] > .expressive-code:first-child { margin-top: 0; }
+
+/* ---------- Code blocks ---------- */
+.sl-markdown-content .expressive-code { margin-block: 1.5rem; }
+.expressive-code .frame { box-shadow: none; }
+.expressive-code .frame.has-title .header,
+.expressive-code .frame .header { border-bottom: 1px solid var(--p-rule-2); }
+.expressive-code .frame .header .title { font: 500 12px/1 var(--p-mono); color: var(--p-ink-3); }
+/* copy button: a solid square over the code, so text never runs through the icon */
+.expressive-code .copy button {
+	width: 30px !important;
+	height: 30px !important;
+	opacity: 1;
+	border-radius: 7px;
+	color: var(--p-ink-4);
+}
+.expressive-code .copy button::before { opacity: 1 !important; }
+.expressive-code .copy button:hover { color: var(--p-ink); }
+
+/* ---------- pagination and edit link: plain text, no arrows or pencil ---------- */
+footer.sl-flex { margin-top: 4rem; padding-top: 2rem; border-top: 1px solid var(--p-rule-2); gap: 1.5rem; padding-bottom: 3rem; }
+.meta { margin-top: 0; }
+footer.sl-flex:not(:has(a)) { border-top: 0; margin-top: 0; }
+.meta svg { display: none; }
+.meta a { color: var(--p-ink-4); font-size: 13px; text-decoration: none; padding: 0; }
+.meta a:hover { color: var(--p-ink); }
+.pagination-links { gap: 12px; }
 .pagination-links a {
 	border: 1px solid var(--p-rule);
 	border-radius: 12px;
 	background: var(--p-card);
 	box-shadow: none;
-	color: var(--p-ink-3);
-}
-.pagination-links a:hover { border-color: var(--p-rule-3); }
-.pagination-links .link-title { color: var(--p-ink); font-size: 16px; font-weight: 500; }
-.meta a { color: var(--p-ink-3); font-size: 13px; }
-
-/* ---------- right TOC ---------- */
-.right-sidebar { border-inline-start: 0; }
-.right-sidebar-panel { padding-top: 40px; }
-.right-sidebar-panel h2 {
+	color: var(--p-ink-4);
 	font-size: 13px;
+	padding: 16px 20px;
+	line-height: 1.5;
+	transition: border-color .15s var(--p-ease);
+}
+.pagination-links a svg { display: none; }
+.pagination-links a:hover { border-color: var(--p-control); }
+.pagination-links .link-title { display: inline-block; margin-top: 2px; color: var(--p-ink); font: 500 16px/1.3 var(--__sl-font); letter-spacing: -.01em; }
+
+/* ======================================================================
+   Right TOC: caption label, H3s smaller on a hairline
+   ====================================================================== */
+.right-sidebar { border-inline-start: 0; }
+.right-sidebar-panel { padding-top: 56px; padding-inline: 1rem 1.5rem; }
+.right-sidebar-panel h2 {
+	font-size: 12px;
 	font-weight: 500;
-	color: var(--p-ink);
-	margin-bottom: 8px;
-	display: flex;
-	align-items: center;
-	gap: 8px;
+	color: var(--p-ink-4);
+	letter-spacing: .01em;
+	margin-bottom: 10px;
 }
-.right-sidebar-panel h2::before {
-	content: '';
-	width: 14px;
-	height: 10px;
-	background: linear-gradient(currentColor, currentColor) 0 0 / 14px 1.4px no-repeat,
-		linear-gradient(currentColor, currentColor) 0 50% / 10px 1.4px no-repeat,
-		linear-gradient(currentColor, currentColor) 0 100% / 12px 1.4px no-repeat;
-	opacity: .8;
-}
-starlight-toc a { font-size: 13px; color: var(--p-ink-3); padding-block: 5px; line-height: 1.4; }
+starlight-toc ul { padding: 0; }
+starlight-toc a { font-size: 13px; color: var(--p-ink-3); padding-block: 4px; line-height: 1.45; padding-inline-start: 0 !important; transition: color .15s var(--p-ease); }
+starlight-toc ul ul { margin: 2px 0 4px; border-inline-start: 1px solid var(--p-rule); padding-inline-start: 10px; }
+starlight-toc ul ul a { font-size: 12.5px; color: var(--p-ink-4); padding-block: 3px; }
 starlight-toc a:hover { color: var(--p-ink); }
 starlight-toc a[aria-current='true'],
-starlight-toc a[aria-current='true']:hover { color: var(--p-ink); font-weight: 600; }
+starlight-toc a[aria-current='true']:hover { color: var(--p-ink); font-weight: 500; }
 
-/* mobile "On this page" bar */
-mobile-starlight-toc nav { border-bottom: 1px solid var(--p-rule-2); background: var(--p-header); }
-mobile-starlight-toc summary { font-size: 13px; }
-
-/* ---------- code blocks: thin rounded border, white card, copy button ---------- */
-.expressive-code .frame { box-shadow: none; }
-.expressive-code .frame .header { border-bottom: 1px solid var(--p-rule-2); }
-.expressive-code .copy button { opacity: .75; }
-
-@media (prefers-reduced-motion: reduce) {
-	*, *::before, *::after { transition: none !important; animation: none !important; }
+/* mobile "On this page": a plain row, not a pill */
+mobile-starlight-toc nav { border-bottom: 1px solid var(--p-rule-2); background: var(--p-bg); }
+mobile-starlight-toc summary { font-size: 13px; padding-block: 10px !important; }
+mobile-starlight-toc .toggle {
+	border: 0 !important;
+	background: transparent !important;
+	padding-inline: 0 !important;
+	color: var(--p-ink-4) !important;
+	gap: 6px;
 }
+mobile-starlight-toc .toggle svg { transform: rotate(90deg); color: var(--p-ink-4); width: 14px; height: 14px; }
+mobile-starlight-toc details[open] .toggle svg { transform: rotate(-90deg); }
+mobile-starlight-toc .display-current { color: var(--p-ink); font-weight: 500; }
+mobile-starlight-toc .dropdown { border-radius: 12px; border: 1px solid var(--p-rule); background: var(--p-card); box-shadow: var(--sl-shadow-lg); }
 
-/* ---------- iteration 2 ---------- */
-/* no divider between the title block and the body (the reference has none) */
-.content-panel + .content-panel { border-top: 0; padding-top: 8px; }
-
-/* theme select: icon only (the select sits invisibly over the icon, so it stays a real <select>) */
-starlight-theme-select label { position: relative; width: 34px; height: 34px; justify-content: center; border-radius: 8px; }
-starlight-theme-select label:hover { background: var(--p-bg-3); color: var(--p-ink); }
-starlight-theme-select select { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; }
-starlight-theme-select .caret { display: none; }
-starlight-theme-select label .label-icon { position: static; transform: none; font-size: 16px; }
-starlight-theme-select select { margin: 0; padding: 0; }
-.mobile-preferences starlight-theme-select label { width: auto; }
-.mobile-preferences starlight-theme-select select { position: static; opacity: 1; }
-.mobile-preferences starlight-theme-select .caret { display: block; }
-
-/* Pagefind search dialog in the Pooled palette */
+/* ======================================================================
+   Search dialog in the Pooled palette
+   ====================================================================== */
+site-search dialog { border-radius: 14px; border: 1px solid var(--p-rule); background: var(--p-card); }
 site-search {
-	--pagefind-ui-scale: .85;
-	--pagefind-ui-primary: var(--p-blue);
+	--pagefind-ui-scale: .8;
+	--pagefind-ui-primary: var(--p-ink);
 	--pagefind-ui-text: var(--p-ink);
 	--pagefind-ui-background: var(--p-card);
 	--pagefind-ui-border: var(--p-rule);
 	--pagefind-ui-tag: var(--p-bg-3);
 	--pagefind-ui-border-width: 1px;
-	--pagefind-ui-border-radius: 12px;
+	--pagefind-ui-border-radius: 10px;
 	--pagefind-ui-font: var(--__sl-font);
 }
-site-search .pagefind-ui__search-input { background: var(--p-bg-2); }
-site-search .pagefind-ui__search-input:focus { outline: 0; box-shadow: 0 0 0 3px var(--p-blue-soft); border-color: var(--p-blue); }
-site-search .pagefind-ui__result-link { color: var(--p-ink); }
-site-search .pagefind-ui__result-excerpt { color: var(--p-ink-3); }
-site-search mark { background: transparent; color: var(--p-blue-text); font-weight: 600; }
+site-search .pagefind-ui__search-input { background: var(--p-bg-2); font-weight: 400 !important; }
+site-search .pagefind-ui__search-input:focus { outline: 0; border-color: var(--p-blue); box-shadow: 0 0 0 3px color-mix(in srgb, var(--p-blue) 30%, transparent); }
+#starlight__search .pagefind-ui__search-clear::before { background-color: var(--p-ink-4); }
+site-search button[data-close-modal] { color: var(--p-ink-2); }
+dialog::backdrop { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; background-color: rgba(20, 22, 29, .18); }
+:root[data-theme='dark'] dialog::backdrop { background-color: rgba(0, 0, 0, .5); }
+/* results: plain rows on the white sheet, a hairline between pages, sub-results indented on a rule */
+#starlight__search .pagefind-ui__results > * + * { margin-top: 0; }
+#starlight__search .pagefind-ui__result { padding: 14px 0; border-bottom: 1px solid var(--p-rule-2); }
+#starlight__search .pagefind-ui__result-inner > .pagefind-ui__result-title::before,
+#starlight__search .pagefind-ui__result-nested::before { display: none; }
+#starlight__search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)),
+#starlight__search .pagefind-ui__result-nested { background: transparent; border-radius: 8px; }
+#starlight__search .pagefind-ui__result-inner > .pagefind-ui__result-title { padding: 6px 10px; }
+#starlight__search .pagefind-ui__result-nested { padding: 6px 10px 6px 12px; margin-inline-start: 10px; border-radius: 0 8px 8px 0; box-shadow: inset 1px 0 0 var(--p-rule); }
+#starlight__search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)):is(:hover, :focus-within),
+#starlight__search .pagefind-ui__result-nested:is(:hover, :focus-within) { outline: 0; background: var(--p-bg-2); }
+#starlight__search .pagefind-ui__result-link { --pagefind-ui-text: var(--p-ink); font-weight: 600; font-size: 15px; }
+#starlight__search .pagefind-ui__result-nested .pagefind-ui__result-link { font-size: 14px; font-weight: 500; }
+#starlight__search .pagefind-ui__result-excerpt { color: var(--p-ink-3); font-size: 13px; margin-top: 2px; }
+#starlight__search mark { background: transparent; color: var(--p-ink); font-weight: 600; }
+#starlight__search .pagefind-ui__message { color: var(--p-ink-4); font-weight: 400; font-size: 13px; }
+#starlight__search .pagefind-ui__button { border-radius: 8px; font-size: 13px; font-weight: 500; color: var(--p-ink-2); }
 
-/* phone: 16px gutters */
+/* ======================================================================
+   Tablet and phone
+   ====================================================================== */
+@media (min-width: 50rem) and (max-width: 72rem) {
+	:root { --sl-sidebar-width: 15rem; --sl-content-pad-x: 2rem; }
+	site-search button[data-open-modal] { min-width: 12rem; max-width: 16rem; }
+}
 @media (max-width: 50rem) {
-	:root { --sl-content-pad-x: 1rem; --sl-nav-pad-x: 1rem; --sl-nav-height: 3.5rem; }
-	.content-panel { padding-top: 24px; }
-	.sl-markdown-content h2 { font-size: 22px; }
+	:root { --sl-content-pad-x: 1rem; --sl-nav-pad-x: 1rem; --sl-nav-height: 3.5rem; --sl-sidebar-pad-x: 6px; }
+	.content-panel { padding-top: 28px; }
+	.sl-markdown-content h2 { font-size: 24px; }
+	.sl-markdown-content h3 { font-size: 17px; }
+	.sl-markdown-content .sl-heading-wrapper.level-h2 { margin-top: 3rem; }
+	.sidebar-content { padding-top: 16px; }
+	.sidebar-content a, .sidebar-content summary { font-size: 15px; }
+	.sidebar-content a { padding-block: 8px; }
+	.sidebar-content .group-label .large { font-size: 12px; }
+	.meta a { display: inline-block; padding-block: 12px; }
+	/* tables become stacked rows: the first cell as the name, the middle cells as a labelled
+	   caption line (labels come from the header, set by PageTitle's script), the last as the text */
+	.sl-markdown-content table, .sl-markdown-content tbody, .sl-markdown-content tr { display: block; width: 100%; }
+	.sl-markdown-content table { overflow: visible; }
+	.sl-markdown-content thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+	.sl-markdown-content tr { padding: 14px 0; border-bottom: 1px solid var(--p-rule-2); }
+	.sl-markdown-content tr:first-child { border-top: 1px solid var(--p-rule); }
+	.sl-markdown-content :is(th, td) { display: block; border: 0; padding: 0; white-space: normal !important; }
+	.sl-markdown-content td:first-child { font-weight: 500; color: var(--p-ink); }
+	.sl-markdown-content td + td { margin-top: 4px; }
+	.sl-markdown-content td:not(:first-child):not(:last-child) { display: inline-block; margin: 6px 16px 0 0; font-size: 13px; color: var(--p-ink-3); }
+	.sl-markdown-content td:not(:first-child):not(:last-child)[data-label]::before { content: attr(data-label) ": "; color: var(--p-ink-4); }
+	.sl-markdown-content td:last-child:not(:first-child) { margin-top: 6px; }
+	.sl-markdown-content td:last-child code { overflow-wrap: anywhere; }
+	.card-grid { gap: 10px !important; }
+	.mobile-preferences { border-top: 1px solid var(--p-rule-2); align-items: center; }
 }
 
-/* ---------- plain, no decorative symbols ---------- */
-/* asides: a title and a blue edge, no rocket / triangle / pencil icons */
-.starlight-aside__icon { display: none; }
-.starlight-aside__title { gap: 0; }
-/* link cards: the title is the link; no arrow */
-.sl-link-card svg { display: none; }
-.sl-link-card { grid-template-columns: 1fr; }
-/* card icons are gone from the markup; keep the title flush left if a theme adds one */
-.card .icon { display: none; }
-/* sidebar / title badges ("Preview"): quiet grey text instead of a yellow chip */
-.sl-badge {
-	background: transparent !important;
-	border: 1px solid var(--p-rule) !important;
-	color: var(--p-ink-3) !important;
-	font-family: inherit !important;
-	font-size: 11px !important;
-	font-weight: 500;
-	padding: 0 6px !important;
-	border-radius: 6px !important;
+@media (prefers-reduced-motion: reduce) {
+	*, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* the link card is the link: no underline on its title */
+.sl-markdown-content .sl-link-card a:not(:where(.not-content *)) { text-decoration: none; color: var(--p-ink); }
