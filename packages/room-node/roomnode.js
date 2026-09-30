@@ -1468,10 +1468,10 @@ export function eventEncoder(push) {
 // caller without a way to answer join requests (the OpenClaw plugin) keeps a room anyone with the code
 // joins, as before. ask (with the gate): hold new devices until allowJoin() (default), false to let
 // anyone with the code in; a device with the room's invite key (node.inviteFragment) is let in either way
-export async function createRoom({ model = "qwen3-1.7b", pledgeGB, code = randomCode(CODE_LEN), ask = true, gate = false, ...opts } = {}) {
+export async function createRoom({ model = "qwen3-1.7b", pledgeGB, code = randomCode(CODE_LEN), ask = true, gate = false, gateState = null, ...opts } = {}) {
   const node = new RoomNode({ pledgeGB, ...opts });
   node.isHost = true; node.code = code; node.ai.model = model; node.ai.role = "host";
-  if (gate) node.gate = hostGate({ ask });
+  if (gate) node.gate = hostGate({ ask, saved: gateState });   // gateState: gate.js saveGate() from an earlier run
   await node.open(PREFIX + code);
   return node;
 }

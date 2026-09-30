@@ -12,15 +12,20 @@
 // the invite key from its link and the pass from an earlier admit; key and pass go only to the host.
 // A host from before the gate (no gate: 1 in its hello) lets it in at once, as before.
 import { makeGate, decide, enqueue, allow, deny, withdraw, requestLine, validKey, keyFragment,
-  randomCode, formatCode, parseCode, CODE_LEN, OLD_TAB_TEXT } from "../../room/joingate.js";
+  randomCode, formatCode, parseCode, CODE_LEN, OLD_TAB_TEXT, saveGate } from "../../room/joingate.js";
 
-export { keyFragment, formatCode, parseCode, randomCode, CODE_LEN, validKey };
+export { keyFragment, formatCode, parseCode, randomCode, CODE_LEN, validKey, saveGate };
 const LOBBY_BUF = 64;
 
 // ---------------- host ----------------
 // the host's gate: ask = hold new devices until allowed (pooled host's default); key: the room's
-// invite key (a new random one by default)
-export function hostGate({ ask = true, key = null } = {}) { return makeGate({ ask, key }); }
+// invite key (a new random one by default); saved: a gate kept from before (saveGate: its invite key
+// and the passes it gave out), so a host that restarts keeps its links and lets its devices back in.
+// ask is the host's current setting, not the saved one
+export function hostGate({ ask = true, key = null, saved = null } = {}) {
+  if (saved && typeof saved === "object") return makeGate({ ask, key: key || saved.key, passes: saved.passes });
+  return makeGate({ ask, key });
+}
 
 // what a host's hello adds (docs/protocol.md): this host holds new devices at the gate
 export const gateHelloFields = (g) => (g ? { gate: 1, ask: g.ask ? 1 : 0 } : {});
