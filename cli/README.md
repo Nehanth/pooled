@@ -3,8 +3,8 @@
 `pooled serve` turns a [Pooled](https://pooled.run) room into a local OpenAI and Anthropic compatible endpoint. Any tool that talks to Chat Completions, Responses or Messages through a base URL (coding agents such as Codex CLI, Claude Code and opencode included, with their tool calls) then runs on the room's model: the model is split across the phones and laptops in the room, and this command only relays requests.
 
 ```
-$ npx @pooled/cli serve ABCD
-pooled serve · room ABCD · Qwen3.6 35B MoE · Q4 · 32768 tokens of context
+$ npx @pooled/cli serve "https://pooled.run/r/4TKG9P#k=…"
+pooled serve · room 4TKG9P · Qwen3.6 35B MoE · Q4 · 32768 tokens of context
   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
   bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
@@ -20,6 +20,8 @@ For this room's 32768-token context:
 The settings appear once the room's model is ready (if the host has not started it yet, the bridge prints them when it is).
 
 Requirements: Node 22 or newer. No GPU is needed on this machine. The room's host page must be open, and the room's model started for requests to be answered (until then they get `503` with `Retry-After: 5`).
+
+**Getting in.** Give it the room's invite link (Invite in the room, or the Serve API page), in quotes: the link carries the room's invite key after `#k=`, and the host lets a client with it in at once. With the code alone (`serve 4TK-G9P`), a host that asks before new devices join (the default) sees "pooled serve … wants to join (API client)" and the client waits until the host presses Allow. Either way the host's **Allow API clients** switch must be on. The host gives the client a pass when it lets it in, so reconnecting after the host page reloads doesn't ask again. Codes of older rooms (four characters) still work.
 
 In the room, the black **Serve API** button in the header opens the Serve API page: this command with the room's code, the base URLs, examples, and who is connected.
 
@@ -55,7 +57,7 @@ Everything a tool sends goes to the room's host, a browser tab on someone's devi
 
 - The host's screen shows every API request: the last user message (up to 2000 characters) and the answer.
 - Other people in the room see the same unless the host sets the room's answers to **Only me** or **Whoever asked**.
-- If the host's page closes, the bridge knocks on the room's code for a minute in case the page reloads. The room code is the only name involved, so a page that opens a room with that code within the minute would receive the next requests. Stop the bridge (Ctrl-C) when the room ends.
+- If the host's page closes, the bridge knocks on the room's code for a minute in case the page reloads. The room code is the only name involved, so a page that opens a room with that code within the minute would receive the next requests (it would not know the bridge's pass, so it could only take it in as a new client). Stop the bridge (Ctrl-C) when the room ends.
 
 ## APIs
 
@@ -238,7 +240,7 @@ Once a stream has started, an error comes as an error chunk (OpenAI, no `[DONE]`
 
 ```bash
 cd cli && npm install
-node bin/pooled.js serve ABCD --signal 127.0.0.1:9000   # against a room page opened with ?signal=127.0.0.1:9000
+node bin/pooled.js serve 4TKG9P --signal 127.0.0.1:9000   # against a room page opened with ?signal=127.0.0.1:9000
 ```
 
 Unit tests (`tests/unit/serve_*_test.js`, Deno) cover the request mapping and the byte-exact streams; `tests/e2e/serve.mjs` runs a real room with Qwen3 1.7B in headless Chromium and checks both APIs end to end, with the official SDKs. Design: [docs/design/serve.md](../docs/design/serve.md).

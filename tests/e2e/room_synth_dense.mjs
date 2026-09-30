@@ -153,15 +153,15 @@ async function session(browser, modelBytes, peerjsJs, nDev, label) {
   const status = (p) => p.evaluate(() => [document.getElementById("ai-status")?.textContent, document.getElementById("ldg-sub")?.textContent].join(" | "));
   const pledges = pledgesFor(nDev);
   const out = { label, devices: nDev, rounds: [], errors: errs };
-  const base = `http://127.0.0.1:${PORT}/p2p.html?split=memory&signal=127.0.0.1:${SIGNAL_PORT}`;
+  const base = `http://127.0.0.1:${PORT}/p2p.html?ask=0&split=memory&signal=127.0.0.1:${SIGNAL_PORT}`;
   const maxNewQ = arg("max-new", ""); const baseQ = (maxNewQ ? `&maxnew=${maxNewQ}` : "") + (arg("netlag") ? `&netlag=${arg("netlag")}` : "") + (arg("query") ? `&${arg("query")}` : "");
   try {
     for (const p of Object.values(tabs)) await p.goto(base + baseQ);
     for (const p of Object.values(tabs)) await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
     for (const [i, n] of names.entries()) { await tabs[n].fill("#name-input", n + "-e2e"); await tabs[n].fill("#join-gb", pledges[i] || "5"); }
     await tabs.host.click("#create-btn");
-    await tabs.host.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
-    const code = (await tabs.host.textContent("#room-badge")).trim().match(/[A-Z0-9]{4}/)[0];
+    await tabs.host.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
+    const code = (await tabs.host.textContent("#room-badge")).trim().replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
     log(`[${label}] room ${code}, pledges ${pledges.slice(0, nDev).join("+")} GB`);
     for (const n of names.slice(1)) { await tabs[n].fill("#code-input", code); await tabs[n].click("#join-btn"); await tabs[n].waitForTimeout(200); }
     for (const p of Object.values(tabs)) await p.waitForFunction((k) => document.querySelectorAll(".peer-card").length >= k, nDev, { timeout: 60000 });

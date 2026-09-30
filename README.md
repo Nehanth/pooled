@@ -62,8 +62,8 @@ Design: [docs/design/harness-app.md](docs/design/harness-app.md). What the agent
 A room can serve its model to anything that speaks the OpenAI Chat Completions, OpenAI Responses or Anthropic Messages API, tool calling included: coding agents (Codex CLI, Claude Code, opencode), Continue, Open WebUI, LiteLLM, the `openai` and `anthropic` SDKs, curl. In a room, the black **Serve API** button in the header opens the Serve API page with the command for that room; run it on your own computer (Node 22 or newer, no GPU needed there):
 
 ```bash
-npx @pooled/cli serve ABCD
-# pooled serve · room ABCD · Qwen3.6 35B MoE · Q4 · 32768 tokens of context
+npx @pooled/cli serve "https://pooled.run/r/4TKG9P#k=…"   # the room's invite link, or its code
+# pooled serve · room 4TKG9P · Qwen3.6 35B MoE · Q4 · 32768 tokens of context
 #   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
 #   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
 

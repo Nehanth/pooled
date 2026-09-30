@@ -186,7 +186,7 @@ async function launch(name, i) {
   tabs[name] = p;
   return p;
 }
-const url = (name) => `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${sig[name].port}&maxnew=${MAXNEW}&peerweights=0${QUERY ? "&" + QUERY : ""}`;
+const url = (name) => `http://127.0.0.1:${PORT}/p2p.html?ask=0&signal=127.0.0.1:${sig[name].port}&maxnew=${MAXNEW}&peerweights=0${QUERY ? "&" + QUERY : ""}`;
 
 // what a screen shows, in a few fields
 const snap = (p) => Promise.race([sleep(2000).then(() => ({ err: "snapshot timed out" })), snap1(p)]);
@@ -212,8 +212,8 @@ async function setupRoom(names) {
   for (const [i, n] of names.entries()) { await tabs[n].fill("#name-input", n); await tabs[n].fill("#join-gb", GB(i)); }
   const host = tabs[names[0]];
   await host.click("#create-btn");
-  await host.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
-  const code = (await host.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+  await host.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
+  const code = (await host.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
   for (const n of names.slice(1)) { await tabs[n].fill("#code-input", code); await tabs[n].click("#join-btn"); await tabs[n].waitForTimeout(200); }
   for (const n of names) await tabs[n].waitForFunction((k) => document.querySelectorAll(".peer-card").length >= k, names.length, { timeout: 60000 });
   return code;

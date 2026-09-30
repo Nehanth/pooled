@@ -63,7 +63,7 @@ const srv = http.createServer((q, r) => {
   r.setHeader("content-type", MIME[path.extname(p)] || "application/octet-stream"); fs.createReadStream(p).pipe(r);
 }).listen(PORT, "127.0.0.1");
 // every device holds layers: split by memory, and phones too even when the computers could hold the model (#233)
-const BASE = (URL0 ? URL0 + (URL0.includes("?") ? "&" : "?") + "dev=1" : `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}`) + "&split=memory&phonelayers=1";
+const BASE = (URL0 ? URL0 + (URL0.includes("?") ? "&" : "?") + "dev=1" : `http://127.0.0.1:${PORT}/p2p.html?ask=0&signal=127.0.0.1:${SIGNAL_PORT}`) + "&split=memory&phonelayers=1&ask=0";
 const peerServer = URL0 ? null : spawn(path.join(ROOT, "node_modules/.bin/peerjs"), ["--port", String(SIGNAL_PORT), "--path", "/"], { stdio: "ignore" });
 if (peerServer) await new Promise((r) => setTimeout(r, 1500));
 const tlsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-resume-"));
@@ -206,8 +206,8 @@ try {
   for (const p of Object.values(tabs)) await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   for (const [n, p] of Object.entries(tabs)) { await p.fill("#name-input", n + "-rs"); await p.fill("#join-gb", GBS[n === "host" ? 0 : n === "worker" ? 1 : 2]); }
   await tabs.host.click("#create-btn");
-  await tabs.host.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
-  const code = (await tabs.host.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+  await tabs.host.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
+  const code = (await tabs.host.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
   out.code = code; log("room", code);
   if (CODE_OUT) fs.writeFileSync(CODE_OUT, code);
   for (const n of ["worker", "phone"].filter((k) => tabs[k])) { await tabs[n].fill("#code-input", code); await tabs[n].click("#join-btn"); await tabs[n].waitForTimeout(200); }

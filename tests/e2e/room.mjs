@@ -45,7 +45,7 @@ const srv = http.createServer((q, r) => {
   if (!p.startsWith(ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { r.statusCode = 404; r.end(); return; }
   r.setHeader("content-type", MIME[path.extname(p)] || "application/octet-stream"); fs.createReadStream(p).pipe(r);
 }).listen(PORT, "127.0.0.1");
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?split=memory&wire=${WIRE}` + (CLOUD ? "" : `&signal=127.0.0.1:${SIGNAL_PORT}`);
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?ask=0&split=memory&wire=${WIRE}` + (CLOUD ? "" : `&signal=127.0.0.1:${SIGNAL_PORT}`);
 import { spawn } from "child_process";
 let peerServer = null;
 if (!CLOUD) {
@@ -111,8 +111,8 @@ try {
   for (const [name, p] of Object.entries(tabs)) { await p.fill("#name-input", name + "-e2e"); await p.fill("#join-gb", name === "host" ? HOST_GB : name.startsWith("phone") ? "0.5" : "1"); }
   if (PHONE) log("phone tabs:", PHONES, "iPhone UA:", await Object.values(tabs).filter((_, i) => i === Object.keys(tabs).findIndex((k) => k.startsWith("phone")))[0].evaluate(() => navigator.userAgent.includes("iPhone")));
   await tabs.host.click("#create-btn");
-  await tabs.host.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
-  const code = (await tabs.host.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+  await tabs.host.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
+  const code = (await tabs.host.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
   log("room", code);
   for (const name of Object.keys(tabs).filter((k) => k !== "host")) { await tabs[name].fill("#code-input", code); await tabs[name].click("#join-btn"); await tabs[name].waitForTimeout(150); }
   const N = Object.keys(tabs).length;

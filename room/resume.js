@@ -114,5 +114,7 @@ export function guestResume(saved, { now = Date.now(), linkCode = null } = {}) {
   if (!saved || typeof saved !== "object" || !saved.code || !saved.name) return null;
   if (!(now - saved.t < GUEST_TTL_MS)) return null;
   if (linkCode && linkCode !== saved.code) return null;
-  return { code: String(saved.code), name: String(saved.name).slice(0, 40), gb: +saved.gb > 0 ? +saved.gb : null };
+  // the pass the host gave this tab (room/joingate.js): it lets the tab back in without asking the host
+  const pass = typeof saved.pass === "string" && /^[A-Za-z0-9_-]{22,64}$/.test(saved.pass) ? saved.pass : null;
+  return { code: String(saved.code), name: String(saved.name).slice(0, 40), gb: +saved.gb > 0 ? +saved.gb : null, ...(pass ? { pass } : {}) };
 }

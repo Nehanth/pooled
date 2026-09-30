@@ -116,14 +116,14 @@ try {
       window.__shares.push({ name: f.name, type: f.type, b64: btoa(String.fromCharCode(...new Uint8Array(await f.arrayBuffer()))) });
     };
   });
-  const base = `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIGNAL_PORT}&dev=0`;
+  const base = `http://127.0.0.1:${PORT}/p2p.html?ask=0&signal=127.0.0.1:${SIGNAL_PORT}&dev=0`;
   await host.goto(base + "&mock=code"); await guest.goto(base);
   for (const [p, n] of [[host, "host"], [guest, "guest"]]) {
     await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 30000 });
     await p.fill("#name-input", n);
   }
   await host.click("#create-btn");
-  await host.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
+  await host.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
   const room = (await host.textContent("#room-badge")).trim();
   await guest.fill("#code-input", room); await guest.tap("#join-btn");
   for (const p of [host, guest]) await p.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 30000 });
