@@ -128,7 +128,7 @@ Deno.test("Ask: an open call, and the final arguments win over streamed ones tha
 });
 Deno.test("Ask: the room is checked: undeclared tools, calls out of order, floods, a host that fell back to v1", () => {
   const bad = (msgs, re, m, o) => { const r = run(msgs, o); ok(r.out?.error && re.test(r.out.error.message), m + ": " + JSON.stringify(r.out)); };
-  bad([GS, { t: "ai-call", i: 0, name: "nope" }], /not a declared tool/, "undeclared");
+  bad([GS, { t: "ai-call", i: 0, name: "nope" }], /not a tool this request allows/, "undeclared");
   bad([GS, { t: "ai-call", i: 1, name: "f" }], /out of order/, "order");
   bad([GS, { t: "ai-call", i: 0, a: "{}" }], /not open/, "args first");
   bad([GS, { t: "ai-call", i: 99, name: "f" }], /out of range/, "index");

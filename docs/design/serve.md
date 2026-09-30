@@ -184,7 +184,7 @@ and the label is shown to the room.
 
 | Input | Mapping |
 |---|---|
-| `max_tokens` (OpenAI: also `max_completion_tokens`) | `min(request, room context left)`. Default when absent (OpenAI only; Anthropic requires it): 1024. The host caps it at `ctxMax - promptTokens` and reports `length` / `max_tokens` when it hits that |
+| `max_tokens` (OpenAI: also `max_completion_tokens`) | `min(request, room context left)`. Default when absent (Chat Completions and Responses; Anthropic requires it): 16384 (was 1024 in v1, which cut long tool calls; see 15). Above 65536: capped, never refused, on every API. The host caps it at `ctxMax - promptTokens` and reports `length` / `max_tokens` when it hits that |
 | `temperature` | `0` → greedy (`exact`). `> 0` → top-k sampling at that temperature. OpenAI accepts 0..2, Anthropic 0..1 (400 outside). Absent → the room's sampling preset |
 | `top_k` (Anthropic; also accepted as an OpenAI extension) | clamped to 1..64 (`engine/topk.js` `TOPK_MAX`, so GPU sampling keeps working). Absent → 40, the creative preset's |
 | `top_p` | accepted and ignored (the sampler has no nucleus cut; noted in the README). `seed`, `presence_penalty`, `frequency_penalty` = 0, `logit_bias` = {} likewise accepted; non-default penalties or bias → 400 |
@@ -368,7 +368,10 @@ adaptive thinking with the display omitted, `output_config.effort`, `context_man
 `cache_control` everywhere) map without a 400 (`cli/test/fixtures/claude_code_messages.json`). Its
 prompt is ~20 k tokens before any history, so the room needs a large context (the MoE with
 `?ctx=65536`). `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps its side requests (titles, …)
-from interleaving with the agent's and resetting the room's cached sequence.
+from interleaving with the agent's and resetting the room's cached sequence, and
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=<the room's context>` tells it the window of a model it does not
+know, so it compacts before the room refuses a prompt; `pooled serve` prints both with the room's
+context (section 15).
 
 GPU (`tests/e2e/serve_messages.mjs`, a real host room, the CLI's HTTP server and the Anthropic SDK;
 2026-09-29 on the Spark, `?ctx=65536`): 14 of 14 checks on Qwen3 1.7B and on Qwen3.6 35B MoE
@@ -510,7 +513,7 @@ do. The host's Stop button stops an API answer like any other.
 | generations in the room | 1 at a time; the chat, Code and API share one lock | host |
 | room queue | 10 total, 2 per device (unchanged) | host |
 | bridge in-flight | 1; local FIFO `--max-queue` 8, then 429 / 529 | bridge |
-| `max_tokens` | default 1024 (OpenAI), capped by the context left | bridge + host |
+| `max_tokens` | default 16384 (Chat Completions, Responses), above 65536 capped; always capped by the context left | bridge + host |
 | prompt | context − 32 tokens, else 400; ≤ 200 messages, ≤ 400 k chars, body ≤ 1 MB | both |
 | `stop` | ≤ 4 strings, ≤ 64 chars each | both |
 | idle stream | keep-alive every 10 s while queued | bridge |
@@ -688,7 +691,8 @@ cache (32 MB) keeps agents' long histories from being re-tokenized every step.
 | the ask as sent to the room | 3.5 MB of JSON (PeerJS drops a message it cannot rebuild, ~4 MB) | CLI 413 |
 | text | 1.5 M chars; early 400 when over 8 × the host's context | CLI and host |
 | messages | 1000 | CLI and host |
-| tools | 128; names `[A-Za-z0-9_.:-]{1,128}`, unique; schema ≤ 32 k chars; XML parameter names without `<`, `>`, line breaks | CLI and host |
+| tools | 1024 (was 128: Claude Code with MCP servers sends all of its tools, nothing deferred); names `[A-Za-z0-9_.:-]{1,128}`, unique; schema ≤ 32 k chars; XML parameter names without `<`, `>`, line breaks | CLI and host |
+| grammar | ≤ 10000 nodes for all the tools and the format together (checked when the ask arrives, the same count `GrammarConstraint` builds); ≤ 200000 subschema expansions per request (`SCHEMA_CAPS.work`, subschemas memoized by object and `$ref` depth); ≤ 200 levels of nesting of any kind (`SCHEMA_CAPS.stack`: values, `anyOf`, `allOf`, `$ref`) | host |
 | calls | 16 per answer (grammar), 64 accepted from the host | host, CLI |
 | mask cache / encode cache / exact-id cache | 64 MB / 32 MB / 512 answers, 2 M ids | host |
 
@@ -731,8 +735,9 @@ values 400); absent, `chat_template_kwargs.enable_thinking` decides · `max_comp
 before the first other message are the system prompt; later ones fold into the user turn before
 them (`normalizeMessages`), where v1 joined them all into the system prompt. Ignored: `seed`,
 `store`, `metadata`, `user`, `safety_identifier`, `prompt_cache_key`, `service_tier`, `verbosity`,
-`top_p`. 400: `custom` tools and calls, `functions` / `function_call` / `role: "function"`, `n > 1`,
-logprobs, audio, `prediction`, `web_search_options`, non-text user content, an assistant message
+`top_p`. Image and file parts in user, system and assistant messages become a short note, as in
+tool results (section 15). 400: `custom` tools and calls, `functions` / `function_call` / `role:
+"function"`, `n > 1`, logprobs, audio, `prediction`, `web_search_options`, an assistant message
 last. `tool_choice` errors use vLLM's messages ("When using `tool_choice`, `tools` must be set.",
 "The tool specified in `tool_choice` does not match any of the specified `tools`").
 
@@ -768,8 +773,9 @@ over the summary text), `item_reference` · `instructions` (not inherited throug
 `json_schema` · `reasoning.effort` (absent or `none` = off) · `include:
 ["reasoning.encrypted_content"]` · `previous_response_id`, `store`, `metadata`. Hosted tools
 (`web_search`, which Codex always sends) and items of tools that ran elsewhere are skipped with one
-warning per client. 400: custom tools, hosted `tool_choice`, images in user input (inside a function
-output they become a note), unknown item types, `background`, `conversation`, `prompt`, logprobs, an
+warning per client. Custom (free-form) tools, images and files: see section 15. 400: hosted
+`tool_choice`, an `allowed_tools` entry of an unknown type or a function entry without a flat `name`,
+unknown item types, `background`, `conversation`, `prompt`, logprobs, an
 unknown previous id (code `previous_response_not_found`).
 
 **Output.** The full response object with usage (`input_tokens_details.cached_tokens`,
@@ -781,8 +787,10 @@ sends one; the room's context caps it).
 **Stream.** `response.created` … `response.completed` / `.incomplete` / `.failed`, `sequence_number`
 strictly increasing, ids minted once so the stream, the final object and the store agree. Reasoning
 streams as `response.content_part.*` with a `reasoning_text` part (the openai SDK's `finalResponse()`
-only builds reasoning from those; vLLM's `reasoning_part.*` makes it throw). A call cut short gets no
-`output_item.done`, so an agent does not run half-written arguments.
+only builds reasoning from those; vLLM's `reasoning_part.*` makes it throw). A call cut short gets
+its `output_item.done` with `status: "incomplete"` and no `function_call_arguments.done`, as every
+added item is closed in OpenAI's stream (Codex builds items from `output_item.done` and does not run
+an incomplete call). Keep-alives are events (section 15).
 
 **Store.** In memory: up to 256 responses and 64 MB, dropped an hour after last use, least recently
 used first. Backs `previous_response_id`, `item_reference`, GET / DELETE `/v1/responses/{id}` and GET
@@ -805,8 +813,79 @@ caches reused), `tool_choice` required / named (`any` / `tool` on Messages), Res
 independent validator on each API, and with `--codex` / `--claude` one real agent turn each.
 
 On the Spark (2026-09-29, `--query ctx=65536 --codex --claude`): Qwen3.6 35B MoE 81 of 81, Qwen3 1.7B
-81 of 81. Codex CLI 0.104 ran `cat a.txt` through `exec_command` and quoted it (MoE 20 s, 1.7B 55 s;
+81 of 81. (The 1.7B's context is capped at 16384, `room/models.js` `CTX`, so its run was at 16384,
+not 65536; the Messages-branch run above likewise. Claude Code's prompt used ~15.3 k of those
+16352 tokens.) Codex CLI 0.104 ran `cat a.txt` through `exec_command` and quoted it (MoE 20 s, 1.7B 55 s;
 on the Responses branch's own run the 1.7B had described the command instead of calling it, so the
 1.7B is not reliable for Codex). Claude Code 2.1.285 read the file with Read and answered the word
 (MoE 61 s, 4 turns; 1.7B 330 s, 2 turns), each step after the first reusing the ~15 k-token prompt.
 Before the grammar fix the MoE wrote 4 items for `maxItems: 3` on all three APIs (78 of 81).
+
+## 15. Review fixes (three reviews of `feat/serve-full-api` at fdeab65)
+
+A spec review (raw HTTP, openai 5.23 and @anthropic-ai/sdk 0.60 against a stand-in room), a client
+review (Codex CLI 0.104 and Claude Code 2.1.285 against a scripted room) and a safety review. What
+changed, and why:
+
+- **Chat Completions' default `max_tokens` is 16384** (was 1024), as Responses: OpenAI, vLLM,
+  llama.cpp and SGLang bound the answer by the context left, and clients such as aider, LangChain and
+  the SDK defaults send none; at 1024 a file-writing call was cut and the non-stream reply dropped
+  it, leaving no text and no call.
+- **`max_tokens` / `max_completion_tokens` / `max_output_tokens` above 65536 are capped**, not a 400,
+  on Chat and Responses as already on Messages (agents send their own model's output limit).
+  Responses echoes the client's value.
+- **Images and files in any message become a note** (`[image omitted: this model reads text only]`,
+  logged once), as they already did inside tool results: one pasted screenshot, or Codex's
+  `view_image`, stayed in the history and turned every later request into a 400. Audio and other
+  kinds still get a 400.
+- **Responses custom (free-form) tools** (Codex's `apply_patch` with a GPT-5 model name): each is a
+  function tool with one string parameter `input` (a `grammar` format's definition goes into the
+  description; it is not enforced); its calls go out as `custom_tool_call {call_id, name, input}` items
+  (streamed: `output_item.added`, then `custom_tool_call_input.delta` / `.done` with the whole input
+  when the call ends, then `output_item.done`), `custom_tool_call` / `custom_tool_call_output` input
+  items go back in as a call and its result, and `tool_choice {type: "custom", name}` names one. Chat
+  Completions custom tools are still a 400.
+- **Responses keep-alives are events**: `response.created` while the request waits, then
+  `response.in_progress`. Codex's `stream_idle_timeout_ms` (300 s) restarts only on events, and a
+  queue wait or a long prefill on a room of phones can be longer; it then retried and prefilled again.
+- **Responses `allowed_tools`**: a function entry without a flat `name` (the Chat shape) or an entry
+  of an unknown type is a 400; before, it was skipped and the choice silently became `none`.
+- **The stream's cut call is closed** with `output_item.done` (`status: "incomplete"`).
+- **More tools**: 1024 on both sides (Claude Code with a 150-tool MCP server sent 173 and got a 400 at
+  128). v2 is not released yet, so no host enforces 128: no negotiation needed.
+- **The context is shown**: the banner, `/health` (`ctx`) and `/v1/models` (`max_model_len`, as vLLM)
+  carry the host's context, and the banner prints the Codex (`model_context_window`,
+  `model_auto_compact_token_limit` = 0.8 × ctx) and Claude Code (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`,
+  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`) settings for it. The README no longer asks for a 64 k
+  context the 1.7B and 27B cannot have.
+- **The host is never left busy** (safety): tool schemas that each fit but together pass the grammar's
+  10000 nodes made `GrammarConstraint` throw outside `apiRun2`'s try, with `ai.busy` set, locking the
+  room for everyone until a reload. Now the host counts the whole grammar when the ask arrives
+  (`grammarNodeCount`, `ai-busy bad`), `apiRun2` builds the grammar inside its try (reason `error`),
+  and `apiGenerate` runs in try / finally (a failed `ai-gendone`, then the lock, Stop and queue
+  released).
+- **Schemas cannot freeze or crash the host** (safety): `$ref` branches pointing back at the same
+  definition were expanded k^6 times (a 1390-character schema, ~40 minutes on the host's main thread)
+  and a self-referencing `allOf` or 1500 nested `anyOf` overflowed the stack, uncaught. Subschemas are
+  memoized by (object, `$ref` depth), `allOf` counts its `$ref`s, nesting of any kind is capped, a work
+  budget is shared by a request's schemas, `stringCapable` / `schemaTypes` answer conservatively past
+  the same caps, and `validateApiAsk` turns any exception into a bad request.
+- **Rendering long prompts** no longer uses `push(...ids)` (a RangeError past ~100 k ids).
+- **The bridge checks calls more** (safety): a complete call's arguments must parse as a JSON object,
+  and a call must be to a tool the ask's `toolChoice` / `allowed` permits; else 500 "the room did not
+  follow the protocol".
+- **Warnings** (safety): one bounded, process-wide warn-once (`common.warnOnce`) with every key and
+  message passed through `cleanText`; the Messages adapter's unbounded set (130 MB from 20 requests of
+  unique block types) and raw client text in the terminal (escape sequences) are gone, and so is the
+  raw text in the "arguments are not a JSON object" log line.
+
+Not changed: a `tool_use` cut by `max_tokens` is streamed as a partial block but left out of the
+non-stream Messages reply (either way `stop_reason` is `max_tokens`); openai-node's
+`responses.stream().finalResponse()` reports `in_progress` after `response.incomplete` (the SDK takes
+the final object only from `response.completed`); the Anthropic `ping` before `message_start` is
+harmless (checked with Claude Code and the SDK).
+
+Tests: `cli/test` (60), `tests/unit` (781 + 3 ignored), and the reviewers' repros rerun against the
+fix (Codex: a 3 s idle timeout with the room silent 8 s, `view_image`, `gpt-5-codex` applying a patch
+through the custom `apply_patch`; Claude Code with 150 MCP tools).
+

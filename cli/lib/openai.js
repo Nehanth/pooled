@@ -1,7 +1,7 @@
 // The OpenAI Chat Completions API (docs/design/serve.md 4 and 12): request validation and mapping
 // onto the internal request (tools, tool_choice, tool results, reasoning in history, response_format,
 // reasoning_effort), the response body, stream chunks (tool_calls deltas included) and errors.
-import { ApiError, bad, TEXT_MSG, LIMITS, EFFORTS, parseStop, checkInt, checkNum, withDefaults, ids, normTool, parseArgs, toolText, outcome } from "./common.js";
+import { ApiError, bad, TEXT_MSG, LIMITS, EFFORTS, parseStop, checkInt, checkNum, capTokens, withDefaults, ids, normTool, parseArgs, toolText, nonTextPart, outcome } from "./common.js";
 
 const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, method: 405, toolarge: 413, busy: 429, unavailable: 503, timeout: 504, server: 500 };
 const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "invalid_request_error", forbidden: "permission_error", notfound: "invalid_request_error", method: "invalid_request_error", toolarge: "invalid_request_error", busy: "rate_limit_exceeded", unavailable: "server_error", timeout: "server_error", server: "server_error" };
@@ -15,15 +15,17 @@ export function openaiError(e) {
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
 const NAMED = 'Correct usage: `{"type": "function", "function": {"name": "my_function"}}`';
 
-// user / system text: a string, or a list of parts of which only text is accepted (an assistant's
-// refusal parts are dropped)
-function textOf(content, i) {
+// message text: a string, or a list of parts. Text is kept; an assistant's refusal parts are
+// dropped; an image or a file becomes a short note (common.nonTextPart); anything else (audio) is a 400
+function textOf(content, i, log) {
   if (content == null) return "";
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) throw bad(`messages[${i}].content must be a string or a list of parts`, `messages[${i}].content`);
   return content.map((p, j) => {
     if (p?.type === "text" && typeof p.text === "string") return p.text;
     if (p?.type === "refusal") return "";
+    const note = nonTextPart(p?.type, log, "chat");
+    if (note != null) return note;
     throw bad(`${TEXT_MSG} (messages[${i}].content[${j}] is ${JSON.stringify(p?.type ?? typeof p)})`, `messages[${i}].content`);
   }).join("");
 }
@@ -104,17 +106,17 @@ function parseEffort(b) {
 }
 
 // one message -> Msg (or null for an empty system message)
-function parseMessage(m, i, warn) {
+function parseMessage(m, i, warn, log) {
   const p = `messages[${i}]`;
   if (!isObj(m)) throw bad(`${p} must be an object`, p);
   switch (m.role) {
     case "system": case "developer":
-      return { role: "system", text: textOf(m.content, i) };
+      return { role: "system", text: textOf(m.content, i, log) };
     case "user":
-      return { role: "user", text: textOf(m.content, i) };
+      return { role: "user", text: textOf(m.content, i, log) };
     case "assistant": {
       if (m.function_call != null) throw bad(`${p}.function_call is deprecated and not supported; use tool_calls`, `${p}.function_call`);
-      const out = { role: "assistant", text: textOf(m.content, i) };
+      const out = { role: "assistant", text: textOf(m.content, i, log) };
       const r = typeof m.reasoning_content === "string" ? m.reasoning_content : typeof m.reasoning === "string" ? m.reasoning : "";
       if (r) out.reasoning = r;
       if (m.tool_calls != null) {
@@ -147,7 +149,7 @@ function parseMessage(m, i, warn) {
 
 // body (parsed JSON) -> the internal request (docs/design/serve.md 4.1; normalized later by
 // common.finishRequest). Warnings (arguments that are not a JSON object) go to req.extra.warnings.
-export function parseOpenAI(b) {
+export function parseOpenAI(b, { log = () => {} } = {}) {
   if (!isObj(b)) throw bad("the body must be a JSON object");
   if (!Array.isArray(b.messages)) throw bad("messages is required", "messages");
   // still unsupported (docs/design/serve.md D14)
@@ -168,8 +170,9 @@ export function parseOpenAI(b) {
   const warnings = [];
   const warn = (w) => { if (!warnings.includes(w)) warnings.push(w); };
   // an empty system message adds nothing (and folded mid-conversation it would add a blank line)
-  const messages = b.messages.map((m, i) => parseMessage(m, i, warn)).filter((m) => m.role !== "system" || m.text);
-  const mt = checkInt(b.max_completion_tokens ?? b.max_tokens, 1, LIMITS.maxTokens, b.max_completion_tokens != null ? "max_completion_tokens" : "max_tokens");
+  const messages = b.messages.map((m, i) => parseMessage(m, i, warn, log)).filter((m) => m.role !== "system" || m.text);
+  // above LIMITS.maxTokens: capped, as on the Messages side (clients send their model's output limit)
+  const mt = capTokens(b.max_completion_tokens ?? b.max_tokens, b.max_completion_tokens != null ? "max_completion_tokens" : "max_tokens");
   const temperature = checkNum(b.temperature, 0, 2, "temperature");
   const tk = b.top_k == null ? null : checkInt(b.top_k, 1, 1e9, "top_k");
   const { thinking, effort } = parseEffort(b);
@@ -235,8 +238,9 @@ export class OpenAIStream {
   keepAlive(ahead) { return ahead == null ? ": keep-alive\n\n" : `: queued, ${ahead} ahead\n\n`; }
 }
 
-export function openaiModels(model, created) {
-  return { object: "list", data: model ? [{ id: model, object: "model", created, owned_by: "pooled" }] : [] };
+// ctx: the room's context size when the host said it (max_model_len, as vLLM lists it)
+export function openaiModels(model, created, ctx = null) {
+  return { object: "list", data: model ? [{ id: model, object: "model", created, owned_by: "pooled", ...(ctx > 0 ? { max_model_len: ctx } : {}) }] : [] };
 }
 
 // ---- the adapter (docs/design/serve.md 11): an Encoder writing the stream above ----
@@ -256,7 +260,7 @@ export const adapter = {
   api: "openai",
   label: "chat",
   routes: [{ method: "POST", path: "/v1/chat/completions" }],
-  parse: (body) => parseOpenAI(body),
+  parse: (body, headers, ctx) => parseOpenAI(body, ctx),
   idFor: () => () => ids.call(),
   encoder: (req, sse, meta) => new OpenAIEncoder(req, sse, meta),
   final: (a, req) => openaiResponse(a, req),

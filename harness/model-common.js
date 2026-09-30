@@ -175,11 +175,11 @@ export function encodeTurn(tok, text) {
   const re = new RegExp(tags.map((t) => t.replace(/[/]/g, "\\/")).join("|"), "g");
   let at = 0;
   for (const m of text.matchAll(re)) {
-    if (m.index > at) ids.push(...tok.encode(text.slice(at, m.index)));
+    if (m.index > at) for (const x of tok.encode(text.slice(at, m.index))) ids.push(x);
     ids.push(tok.vocab[m[0]]);
     at = m.index + m[0].length;
   }
-  if (at < text.length) ids.push(...tok.encode(text.slice(at)));
+  if (at < text.length) for (const x of tok.encode(text.slice(at))) ids.push(x);
   return ids;
 }
 

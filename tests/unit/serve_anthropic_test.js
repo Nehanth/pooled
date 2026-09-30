@@ -2,7 +2,7 @@
 // byte-exact event stream for fixed answers (plain, thinking, tool calls, stop sequence, error).
 // The same endpoint through the HTTP server and the Anthropic SDK: cli/test/anthropic_test.mjs.
 import { parseAnthropic, anthropicResponse, AnthropicStream, anthropicError, anthropicModels, stopReason, usageOf } from "../../cli/lib/anthropic.js";
-import { ApiError, blob } from "../../cli/lib/common.js";
+import { ApiError, blob, IMAGE_PLACEHOLDER, FILE_PLACEHOLDER } from "../../cli/lib/common.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ":\n" + ja + "\n!=\n" + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -29,8 +29,9 @@ Deno.test("anthropic: required fields, ranges and unsupported features", () => {
   throws400({ model: "m", messages: [{ role: "user", content: "q" }] }, /max_tokens: Field required/, "max_tokens");
   throws400(req({ max_tokens: 0 }), /max_tokens/, "max_tokens 0");
   throws400(req({ temperature: 1.5 }), /temperature/, "temperature is 0..1 here");
-  throws400(req({ messages: [{ role: "user", content: [{ type: "image", source: {} }] }] }), /only text content is supported/, "image");
-  throws400(req({ messages: [{ role: "user", content: [{ type: "document", source: {} }] }] }), /only text content/, "document");
+  // images and documents become a note (a pasted screenshot must not break every later request)
+  eq(parseAnthropic(req({ messages: [{ role: "user", content: [{ type: "image", source: {} }, { type: "document", source: {} }] }] })).messages[0].text, IMAGE_PLACEHOLDER + FILE_PLACEHOLDER, "image, document");
+  throws400(req({ messages: [{ role: "user", content: [{ type: "search_result", source: "s", title: "t", content: [] }] }] }), /only text content/, "search_result");
   throws400(req({ stop_sequences: ["x".repeat(65)] }), /1 to 64/, "stop length");
   throws400(req({ thinking: { type: "sometimes" } }), /thinking.type/, "thinking");
   throws400(req({ tool_choice: { type: "tool" } }), /tool_choice.name/, "named choice without a name");

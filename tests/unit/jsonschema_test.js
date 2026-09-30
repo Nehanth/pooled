@@ -77,3 +77,25 @@ Deno.test("jsonschema: string-capable (XML values written raw) and the types for
   eq([...schemaTypes({ enum: ["a", 1, 1.5, null, true] })], ["string", "integer", "number", "null", "boolean"]);
   eq(schemaTypes({ description: "anything" }), null);
 });
+Deno.test("jsonschema: $ref branches are memoized, work and nesting are capped, a self-referencing allOf ends", () => {
+  const mk = (k) => ({ $defs: { a: { anyOf: Array.from({ length: k }, () => ({ $ref: "#/$defs/a" })) } }, type: "object", properties: { x: { $ref: "#/$defs/a" } } });
+  const t0 = Date.now();
+  compileSchema(mk(64));
+  ok(Date.now() - t0 < 1000, "k=64 in " + (Date.now() - t0) + " ms (was k^6 expansions)");
+  let deep = { type: "string" }; for (let i = 0; i < 1500; i++) deep = { anyOf: [deep] };
+  throwsSchema(() => compileSchema(deep), /nests deeper/, "nested anyOf counts as nesting");
+  let all = { type: "string" }; for (let i = 0; i < 1500; i++) all = { allOf: [all] };
+  throwsSchema(() => compileSchema(all), /nests deeper/, "nested allOf too");
+  ok(compileSchema({ $defs: { a: { allOf: [{ $ref: "#/$defs/a" }] } }, $ref: "#/$defs/a" }).nodes.length >= 1, "self-referencing allOf");
+  // one budget shared by several schemas
+  const work = { left: 10 };
+  throwsSchema(() => { for (let i = 0; i < 5; i++) compileSchema({ type: "object", properties: { a: { type: "string" }, b: { type: "integer" }, c: { type: "array", items: { type: "string" } } } }, { work }); }, /too complex/, "shared work budget");
+  ok(SCHEMA_CAPS.work > 0 && SCHEMA_CAPS.stack > SCHEMA_CAPS.depth, "caps");
+  // stringCapable / schemaTypes stay bounded and answer conservatively past the caps
+  const p = mk(64);
+  const t1 = Date.now();
+  eq([stringCapable(p.properties.x, p), schemaTypes(p.properties.x, p)], ["some", null]);
+  ok(Date.now() - t1 < 1000, "bounded");
+  eq([stringCapable(deep), schemaTypes(deep)], ["some", null], "past the nesting cap: unknown");
+  eq([stringCapable({ anyOf: [{ type: "string" }] }), [...schemaTypes({ anyOf: [{ type: "integer" }] })]], ["only", ["integer"]], "normal schemas unchanged");
+});

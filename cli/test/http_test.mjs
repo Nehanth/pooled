@@ -263,3 +263,31 @@ test("keep-alives while the room is silent mid-stream, not only while waiting", 
   assert.match(s.body, /call 0 call_0 f\n(ka\n)+args 0 \{\}/, s.body);
   await t.close();
 });
+
+test("the room's context: in /health, /v1/models (max_model_len) and the banner, with settings for Codex and Claude Code", async () => {
+  const t = await start();
+  t.bridge.hostMeta = { api: 2, ctx: 16384 };
+  assert.equal(JSON.parse((await t.req("GET", "/health")).body).ctx, 16384);
+  assert.equal(JSON.parse((await t.req("GET", "/v1/models")).body).data[0].max_model_len, 16384);
+  const banner = (await t.req("GET", "/")).body;
+  assert.match(banner, /16384 tokens of context/);
+  assert.match(banner, /model_context_window = 16384, model_auto_compact_token_limit = 13107/);
+  assert.match(banner, /CLAUDE_CODE_MAX_CONTEXT_TOKENS=16384 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1/);
+  t.bridge.hostMeta = { api: 1 };
+  assert.equal(JSON.parse((await t.req("GET", "/health")).body).ctx, null, "an older host does not say");
+  assert.equal(JSON.parse((await t.req("GET", "/v1/models")).body).data[0].max_model_len, undefined);
+  await t.close();
+});
+
+test("warnings carry no client control characters and stay bounded (a client cannot write to the terminal or grow memory)", async () => {
+  const t = await start();
+  t.bridge.onAsk = answer();
+  const evil = "\u001b]0;pwned\u0007\u001b[2J_tool_result";
+  const blocks = Array.from({ length: 1500 }, (_, i) => ({ type: `x${i}_tool_result` }));
+  const r = await t.req("POST", "/v1/messages", { body: msgBody({ messages: [{ role: "user", content: "q" }, { role: "assistant", content: [{ type: evil }, ...blocks, { type: "text", text: "a" }] }, { role: "user", content: "again" }] }) });
+  assert.equal(r.status, 200, r.body);
+  assert.ok(t.logs.length >= 1000);
+  for (const l of t.logs) assert.doesNotMatch(l, /[\u0000-\u001f]/, JSON.stringify(l));
+  assert.ok(t.logs.some((l) => l.includes("]0;pwned[2J_tool_result")));
+  await t.close();
+});

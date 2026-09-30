@@ -25,7 +25,7 @@
 //   C.mask(logits) -> logits;  C.push(tokenText);  C.setText(answerSoFar)  (base for push)
 // tokenText(id) is the decoded text of that one token; stops are the end-of-turn ids.
 
-import { compileSchema, stringCapable, SchemaError, SCHEMA_CAPS } from "./jsonschema.js";
+import { compileSchema, stringCapable, SchemaError, SCHEMA_CAPS, schemaWork } from "./jsonschema.js";
 
 const OPEN = "<tool_call>", THINK_END = "</think>", CLOSE_P = "</parameter>";
 const FORBID = new Set(["<tool_call>", "</tool_call>", "\n<function=", "\n</function>", "\n<parameter="]);
@@ -347,6 +347,17 @@ function appendTable(dst, { nodes, root }) {
   return root + off;
 }
 
+// The size of the grammar table GrammarConstraint would build for these tools and format, without a
+// vocabulary: what a host checks before it takes a request (the per-schema check alone lets several
+// schemas add up past caps.nodes, which the constructor refuses mid-answer). Throws SchemaError.
+export function grammarNodeCount(tools, { style = "json", format = null, caps = SCHEMA_CAPS } = {}) {
+  const g = Object.create(GrammarConstraint.prototype);
+  g.nodes = []; g.fns = new Map(); g.style = style === "json" ? "json" : "xml"; g.work = schemaWork(caps);
+  for (const t of tools || []) g._addTool(t, caps);
+  if (format) appendTable(g.nodes, compileSchema(format.type === "schema" ? format.schema : { type: "object" }, { caps, work: g.work }));
+  return g.nodes.length;
+}
+
 const WS = (c) => c === " " || c === "\n";
 const DIG = (c) => c >= "0" && c <= "9";
 const HEX = (c) => DIG(c) || (c >= "a" && c <= "f") || (c >= "A" && c <= "F");
@@ -370,6 +381,7 @@ export class GrammarConstraint {
     this.mode = this.named ? "named" : ["auto", "none", "required"].includes(mode) ? mode : "auto";
     this.nodes = [];
     this.fns = new Map();
+    this.work = schemaWork(caps);   // one budget for all the schemas (jsonschema.js SCHEMA_CAPS.work)
     for (const t of tools) this._addTool(t, caps);
     let names = [...this.fns.keys()];
     if (allowed) names = names.filter((n) => allowed.includes(n));
@@ -380,7 +392,7 @@ export class GrammarConstraint {
     this.fmtRoot = null;
     if (format) {
       const schema = format.type === "schema" ? format.schema : { type: "object" };
-      this.fmtRoot = appendTable(this.nodes, compileSchema(schema, { caps }));
+      this.fmtRoot = appendTable(this.nodes, compileSchema(schema, { caps, work: this.work }));
     }
     if (this.nodes.length > caps.nodes) throw new SchemaError(`the tool schemas are too large together (more than ${caps.nodes} nodes)`);
     // what the answer starts with (after the reasoning)
@@ -408,7 +420,7 @@ export class GrammarConstraint {
     const req = new Set(Array.isArray(params.required) ? params.required : []);
     f.req = names.map((n) => (req.has(n) ? "1" : "0")).join("");
     if (this.style === "json") {
-      f.args = appendTable(this.nodes, compileSchema(params, { caps }));
+      f.args = appendTable(this.nodes, compileSchema(params, { caps, work: this.work }));
     } else {
       names.forEach((n, i) => {
         const s = props[n];
@@ -418,7 +430,7 @@ export class GrammarConstraint {
           const vals = s && Array.isArray(s.enum) ? s.enum : s && s.const !== undefined ? [s.const] : null;
           if (vals && vals.every((v) => typeof v === "string") && vals.length <= caps.enum && vals.every((v) => !/<\/parameter>|\n<(?:parameter=|\/function>)/.test(v))) { kind = "e"; en = [...new Set(vals)]; }
         } else if (sc === "none") {
-          kind = "j"; node = appendTable(this.nodes, compileSchema(s, { caps, doc: params }));
+          kind = "j"; node = appendTable(this.nodes, compileSchema(s, { caps, doc: params, work: this.work }));
         }
         f.kinds[i] = kind; f.nodes[i] = node; f.enums[i] = en;
       });

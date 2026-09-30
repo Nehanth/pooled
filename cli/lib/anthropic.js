@@ -2,7 +2,7 @@
 // bodies, stream events and errors (docs/design/serve.md section 4, "Anthropic"): tools, tool_use /
 // tool_result blocks, tool_choice, thinking (with the reasoning carried in the signature), system
 // as a string or blocks, and the usage split Claude Code counts its context with.
-import { ApiError, bad, TEXT_MSG, LIMITS, EFFORTS, parseStop, checkInt, checkNum, withDefaults, ids, blob, normTool, parseArgs, toolText, outcome } from "./common.js";
+import { ApiError, bad, TEXT_MSG, LIMITS, EFFORTS, parseStop, checkInt, checkNum, capTokens, withDefaults, ids, blob, normTool, parseArgs, toolText, nonTextPart, outcome, warnOnce, cleanText } from "./common.js";
 
 const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, method: 405, toolarge: 413, busy: 529, unavailable: 529, timeout: 504, server: 500 };
 const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "authentication_error", forbidden: "permission_error", notfound: "not_found_error", method: "invalid_request_error", toolarge: "request_too_large", busy: "overloaded_error", unavailable: "overloaded_error", timeout: "timeout_error", server: "api_error" };
@@ -20,9 +20,7 @@ const hostedBlock = (t) => t === "server_tool_use" || t === "mcp_tool_use" || t 
 // the per-request header Claude Code puts first in the system blocks: it changes every request, so
 // keeping it would make every prompt differ from its first token and defeat the room's caches
 const BILLING = "x-anthropic-billing-header:";
-// warnings once per process and kind (an agent sends the same request shape every step)
-const warned = new Set();
-const warnOnce = (log, key, msg) => { if (!warned.has(key)) { warned.add(key); log(msg); } };
+// warnings once per process and kind: common.warnOnce (bounded, and the client's text cleaned)
 
 const typeOf = (p) => JSON.stringify(p?.type ?? typeof p);
 
@@ -36,12 +34,14 @@ function systemText(s) {
   }).join("");
 }
 
-// a user or system message's text (images and documents: this model reads text only)
-function plainText(content, where) {
+// a system message's text (images and documents become a note: this model reads text only)
+function plainText(content, where, log) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) throw bad(`${where}: must be a string or a list of content blocks`);
   return content.map((p, j) => {
     if (p?.type === "text" && typeof p.text === "string") return p.text;
+    const note = nonTextPart(p?.type, log, "messages");
+    if (note != null) return note;
     throw bad(`${TEXT_MSG} (${where}.${j} is ${typeOf(p)})`);
   }).join("");
 }
@@ -65,7 +65,7 @@ function assistantMsg(content, where, log) {
       if (typeof p.name !== "string" || !p.name) throw bad(`${where}.${j}.name: Field required`);
       if (typeof p.id !== "string" || !p.id) throw bad(`${where}.${j}.id: Field required`);
       calls.push({ id: p.id, name: p.name, args: parseArgs(p.input, log) });
-    } else if (hostedBlock(t)) warnOnce(log, "block " + t, `messages: ${t} blocks (Anthropic's server tools) are left out of the conversation`);
+    } else if (hostedBlock(t)) warnOnce(log, "block " + t, `messages: ${cleanText(t, 60)} blocks (Anthropic's server tools) are left out of the conversation`);
     else throw bad(`${where}.${j}: unsupported content block ${typeOf(p)} in an assistant message`);
   });
   const m = { role: "assistant", text };
@@ -88,8 +88,9 @@ function userMsgs(content, where, log) {
       if (typeof p.tool_use_id !== "string" || !p.tool_use_id) throw bad(`${where}.${j}.tool_use_id: Field required`);
       // is_error: the result is the error's text, as the model reads it either way
       tools.push({ role: "tool", id: p.tool_use_id, text: toolText(p.content, `${where}.${j}.content`) });
-    } else if (t === "image" || t === "document" || t === "search_result" || t === "container_upload") throw bad(`${TEXT_MSG} (${where}.${j} is ${typeOf(p)})`);
-    else if (hostedBlock(t) || t === "server_tool_use") warnOnce(log, "block " + t, `messages: ${t} blocks (Anthropic's server tools) are left out of the conversation`);
+    } else if (t === "image" || t === "document") { text += nonTextPart(t, log, "messages"); hasText = true; }   // a note: a pasted screenshot must not break every later request
+    else if (t === "search_result" || t === "container_upload") throw bad(`${TEXT_MSG} (${where}.${j} is ${typeOf(p)})`);
+    else if (hostedBlock(t) || t === "server_tool_use") warnOnce(log, "block " + t, `messages: ${cleanText(t, 60)} blocks (Anthropic's server tools) are left out of the conversation`);
     else throw bad(`${where}.${j}: unsupported content block ${typeOf(p)} in a user message`);
   });
   if (!tools.length) return [{ role: "user", text }];
@@ -104,7 +105,7 @@ function parseTools(list, log) {
     if (!t || typeof t !== "object") throw bad(`tools.${j}: must be an object`);
     if (t.type != null && t.type !== "custom") {
       if (typeof t.type === "string" && (HOSTED_TOOL.test(t.type) || /_\d{8}$/.test(t.type))) {
-        warnOnce(log, "tool " + t.type, `tools: ${t.type} is one of Anthropic's own tools; the room's model does not get it`);
+        warnOnce(log, "tool " + t.type, `tools: ${cleanText(t.type, 60)} is one of Anthropic's own tools; the room's model does not get it`);
         return;
       }
       throw bad(`tools.${j}.type: unsupported tool type ${JSON.stringify(t.type)}`);
@@ -152,12 +153,12 @@ export function parseAnthropic(b, { log = () => {} } = {}) {
     const where = `messages.${i}.content`;
     if (m.role === "user") messages.push(...userMsgs(m.content, where, log));
     else if (m.role === "assistant") messages.push(assistantMsg(m.content, where, log));
-    else if (m.role === "system") messages.push({ role: "system", text: plainText(m.content, where) });   // mid-conversation (Claude Code): folded by normalizeMessages
+    else if (m.role === "system") messages.push({ role: "system", text: plainText(m.content, where, log) });   // mid-conversation (Claude Code): folded by normalizeMessages
     else throw bad(`messages.${i}.role: must be user or assistant`);
   });
   // max_tokens past what the room ever writes is capped, not refused: agents send their model's
   // output limit (32000, 64000, 128000) whatever model sits behind the base URL
-  const maxTokens = Math.min(checkInt(b.max_tokens, 1, Number.MAX_SAFE_INTEGER, "max_tokens"), LIMITS.maxTokens);
+  const maxTokens = capTokens(b.max_tokens, "max_tokens");
   const temperature = checkNum(b.temperature, 0, 1, "temperature");
   checkNum(b.top_p, 0, 1, "top_p");   // accepted, ignored
   const tk = b.top_k == null ? null : checkInt(b.top_k, 1, 1e9, "top_k");

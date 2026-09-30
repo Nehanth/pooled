@@ -11,9 +11,9 @@
 import { buildIds, specials, renderApi, headerTail } from "./conversation.js";
 import { makeSampler } from "./sampling.js";
 import { CallStream } from "../harness/tools.js";
-import { compileSchema, SchemaError } from "../harness/jsonschema.js";
+import { compileSchema, SchemaError, SCHEMA_CAPS, schemaWork } from "../harness/jsonschema.js";
 import { constrainedSampler, tokenTexts } from "../harness/model-common.js";
-import { hash64 } from "../harness/constrain.js";
+import { hash64, grammarNodeCount } from "../harness/constrain.js";
 
 export const API_LIMITS = {
   messages: 200,        // per request
@@ -33,7 +33,11 @@ const clean = (s, n) => String(s ?? "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, 
 export function validateApiAsk(d, opts = {}) {
   const bad = (err) => ({ err, code: "bad" });
   if (!d || typeof d !== "object") return bad("empty request");
-  if (d.api === 2) return validateApiAskV2(d, opts);
+  if (d.api === 2) {
+    // nothing a request holds may throw past here (the caller has no catch): a schema that breaks
+    // the compiler in a way it does not name is still just a bad request
+    try { return validateApiAskV2(d, opts); } catch (e) { return bad(`the request could not be checked: ${String(e?.message || e).slice(0, 200)}`); }
+  }
   const rid = typeof d.rid === "string" ? d.rid : "";
   if (!/^[A-Za-z0-9_-]{1,32}$/.test(rid)) return bad("bad request id");
   const system = d.system == null ? "" : d.system;
@@ -316,7 +320,9 @@ export function withStyle(settings, style) {
 // and ai-gendone {calls, open, usage.think}.
 // ============================================================================================
 export const API2_LIMITS = {
-  messages: 1000, chars: 1500000, tools: 128, schemaChars: 32000, calls: 64, maxCalls: 128,
+  // tools: agents send every tool they have (Claude Code with MCP servers: hundreds); the real cost is
+  // bounded by chars, the ask's size on the wire and the grammar's node cap
+  messages: 1000, chars: 1500000, tools: 1024, schemaChars: 32000, calls: 64, maxCalls: 128,
   name: /^[A-Za-z0-9_.:-]{1,128}$/, xmlParam: /^[^<>\n\r]{1,128}$/,
 };
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
@@ -332,6 +338,7 @@ function validateApiAskV2(d, { profile = null } = {}) {
   if (!Array.isArray(d.messages) || !d.messages.length) return bad("messages must be a non-empty list");
   if (d.messages.length > API2_LIMITS.messages) return bad(`at most ${API2_LIMITS.messages} messages`);
   let chars = system.length;
+  const work = schemaWork();   // one budget for every schema in the request
   // tools
   let tools = null;
   if (d.tools != null) {
@@ -351,7 +358,7 @@ function validateApiAskV2(d, { profile = null } = {}) {
       if (profile?.style === "xml" && params.properties && typeof params.properties === "object") {
         for (const k of Object.keys(params.properties)) if (!API2_LIMITS.xmlParam.test(k)) return bad(`tool ${t.name}: parameter name ${JSON.stringify(k.slice(0, 40))} cannot be written by this model (no <, >, line breaks; 1 to 128 characters)`);
       }
-      try { compileSchema(params); } catch (e) { if (e instanceof SchemaError) return bad(`tool ${t.name}: ${e.message}`); throw e; }
+      try { compileSchema(params, { work }); } catch (e) { if (e instanceof SchemaError) return bad(`tool ${t.name}: ${e.message}`); throw e; }
       chars += n + t.name.length + (t.description || "").length;
       tools.push({ name: t.name, description: t.description || "", parameters: params });
     }
@@ -414,12 +421,20 @@ function validateApiAskV2(d, { profile = null } = {}) {
     else if (f?.type === "schema" && f.schema && typeof f.schema === "object" && !Array.isArray(f.schema)) {
       const n = JSON.stringify(f.schema).length;
       if (n > API2_LIMITS.schemaChars) return bad(`the response format schema is ${n} characters; at most ${API2_LIMITS.schemaChars}`);
-      try { compileSchema(f.schema); } catch (e) { if (e instanceof SchemaError) return bad(`response format: ${e.message}`); throw e; }
+      try { compileSchema(f.schema, { work }); } catch (e) { if (e instanceof SchemaError) return bad(`response format: ${e.message}`); throw e; }
       format = { type: "schema", schema: f.schema, ...(typeof f.name === "string" ? { name: f.name.slice(0, 64) } : {}) };
     } else return bad("format must be {type: json} or {type: schema, schema}");
   }
   let effort = null;
   if (p.effort != null) { if (!EFFORTS.includes(p.effort)) return bad(`effort must be one of ${EFFORTS.join(", ")}`); effort = p.effort; }
+  // the whole grammar, as the answer will build it: each schema fits on its own, but together they
+  // must too (GrammarConstraint refuses more than SCHEMA_CAPS.nodes)
+  if (tools || format) {
+    let n;
+    try { n = grammarNodeCount(tools || [], { style: profile?.style ?? "json", format }); }
+    catch (e) { if (e instanceof SchemaError) return bad(`tools: ${e.message}`); throw e; }
+    if (n > SCHEMA_CAPS.nodes) return bad(`the tool schemas are too large together (${n} grammar nodes; at most ${SCHEMA_CAPS.nodes})`);
+  }
   return { req: { api: 2, rid, system, messages, tools, params: { ...params, toolChoice, allowed, parallel, maxCalls, format, effort } } };
 }
 
@@ -525,11 +540,19 @@ export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () =
     if (!tok.__vocabSize) { let n = 0; for (const v of Object.values(V)) if (v >= n) n = v + 1; tok.__vocabSize = n; }
     vocabSize = tok.__vocabSize;
   }
-  const cs = grammar
-    ? constrainedSampler(base, tools, { tokenText: tt || tokenTexts(tok), vocabSize, style, stops: [...stopIds], thinking, thinkInPrompt: !!profile.thinkInPrompt,
-      mode, allowed: P.allowed, maxCalls: P.maxCalls, parallel: P.parallel, format: P.format,
-      tags: Object.fromEntries(["<tool_call>", "</tool_call>", "<think>", "</think>", "<tool_response>", "</tool_response>"].map((t) => [t, V[t]])) })
-    : constrainedSampler(base, null, {});
+  // building the grammar can still fail (the host checked its size, but a failure here must end this
+  // answer as an error, never leave the room busy)
+  let cs;
+  try {
+    cs = grammar
+      ? constrainedSampler(base, tools, { tokenText: tt || tokenTexts(tok), vocabSize, style, stops: [...stopIds], thinking, thinkInPrompt: !!profile.thinkInPrompt,
+        mode, allowed: P.allowed, maxCalls: P.maxCalls, parallel: P.parallel, format: P.format,
+        tags: Object.fromEntries(["<tool_call>", "</tool_call>", "<think>", "</think>", "<tool_response>", "</tool_response>"].map((t) => [t, V[t]])) })
+      : constrainedSampler(base, null, {});
+  } catch (e) {
+    return { reason: "error", stopSeq: null, usage: { in: ids.length, out: 0, think: 0 }, text: "", think: "", calls: [], open: null, reused: 0, stats: "",
+      err: `could not build the tool-call grammar: ${String(e?.message || e).slice(0, 200)}` };
+  }
   const C = cs.constraint;
   const forcing = !!C?.forcing;
   const names = typeof mode === "object" ? [mode.name] : P.allowed || tools.map((t) => t.name);

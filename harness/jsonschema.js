@@ -20,9 +20,15 @@
 //   { k: "num" } | { k: "int" } | { k: "bool" } | { k: "null" }
 //   { k: "lit", texts: [jsonText] }                non-string enum / const values, written compactly
 //   { k: "u", str, num, bool, null, obj, arr, lits }  a union, one branch per first character class
-// Everything is capped (a request's schema must not stall everyone's room): SCHEMA_CAPS.
+// Everything is capped (a request's schema must not stall everyone's room): SCHEMA_CAPS. Besides the
+// size of the table: work (subschemas visited, shared by every schema of one request: $ref branches
+// that point back at the same definition would otherwise be expanded k^refDepth times) and stack
+// (nesting of any kind: values, anyOf / allOf, $ref), so no schema can freeze the host tab or
+// overflow its stack. Subschemas are also memoized by (object, $ref depth).
 
-export const SCHEMA_CAPS = { nodes: 10000, enum: 1000, anyOf: 64, allOf: 16, depth: 32, refDepth: 6 };
+export const SCHEMA_CAPS = { nodes: 10000, enum: 1000, anyOf: 64, allOf: 16, depth: 32, refDepth: 6, work: 200000, stack: 200 };
+// a work budget to share between several compileSchema calls (one request's tools and format)
+export const schemaWork = (caps = SCHEMA_CAPS) => ({ left: caps.work ?? SCHEMA_CAPS.work });
 
 export class SchemaError extends Error {
   constructor(message) { super(message); this.name = "SchemaError"; }
@@ -32,8 +38,12 @@ const TYPES = new Set(["object", "array", "string", "number", "integer", "boolea
 
 // schema -> { nodes, root }. Throws SchemaError past a cap or on an unresolvable $ref.
 // doc: the document $refs resolve in (a tool's whole parameters schema, when compiling one parameter)
-export function compileSchema(schema, { caps = SCHEMA_CAPS, doc = null } = {}) {
+export function compileSchema(schema, { caps = SCHEMA_CAPS, doc = null, work = null } = {}) {
   const nodes = [];
+  const budget = work || schemaWork(caps);
+  const maxStack = caps.stack ?? SCHEMA_CAPS.stack;
+  let stack = 0;
+  const seen = new WeakMap();   // schema object -> Map(refs -> id)
   const ANY = add({ k: "any" });
   const memo = new Map();   // canonical node JSON -> id (dedupe, so the table stays small)
   function add(n) {
@@ -63,11 +73,22 @@ export function compileSchema(schema, { caps = SCHEMA_CAPS, doc = null } = {}) {
     return cur;
   }
 
-  // s -> node id. depth: nesting of values; refs: $ref expansions on this path
+  // s -> node id. depth: nesting of values; refs: $ref expansions on this path. The result depends
+  // on (s, refs) only (depth just bounds it), so it is memoized by those.
   function node(s, depth, refs) {
     if (depth > caps.depth) throw new SchemaError(`the schema nests deeper than ${caps.depth} levels`);
     if (s === true || s == null) return ANY;
     if (s === false || typeof s !== "object" || Array.isArray(s)) return ANY;
+    const byRefs = seen.get(s);
+    if (byRefs?.has(refs)) return byRefs.get(refs);
+    if (--budget.left < 0) throw new SchemaError("the schema is too complex (too many subschemas to expand)");
+    if (++stack > maxStack) throw new SchemaError(`the schema nests deeper than ${maxStack} levels (counting anyOf, allOf and $ref)`);
+    let id;
+    try { id = node1(s, depth, refs); } finally { stack--; }
+    if (byRefs) byRefs.set(refs, id); else seen.set(s, new Map([[refs, id]]));
+    return id;
+  }
+  function node1(s, depth, refs) {
     if (s.$ref !== undefined) {
       if (refs >= caps.refDepth) return ANY;   // recursive: any JSON value below this depth
       const target = resolve(s.$ref);
@@ -78,8 +99,17 @@ export function compileSchema(schema, { caps = SCHEMA_CAPS, doc = null } = {}) {
     if (Array.isArray(s.allOf) && s.allOf.length) {
       if (s.allOf.length > caps.allOf) throw new SchemaError(`allOf has more than ${caps.allOf} parts`);
       const { allOf, ...rest } = s;
-      const parts = allOf.map((p) => (p && typeof p === "object" && p.$ref !== undefined && refs < caps.refDepth ? resolve(p.$ref) : p));
-      return node(mergeAll([rest, ...parts]), depth, refs);
+      // a part that is a $ref counts as one expansion (a self-referencing allOf ends at refDepth)
+      let expanded = false;
+      const parts = allOf.map((p) => {
+        if (p && typeof p === "object" && p.$ref !== undefined) {
+          if (refs >= caps.refDepth) return true;
+          expanded = true;
+          return resolve(p.$ref);
+        }
+        return p;
+      });
+      return node(mergeAll([rest, ...parts]), depth, expanded ? refs + 1 : refs);
     }
     const alts = s.anyOf ?? s.oneOf;
     if (Array.isArray(alts) && alts.length) {
@@ -238,20 +268,28 @@ function mergeAll(parts) {
 // Can a value of this schema be a string? ("string-capable": XML parameters of such a schema are
 // written raw, without quotes.) -> "only" (nothing but strings), "some" (strings and other types),
 // or "none".
-export function stringCapable(schema, root = schema, refs = 0) {
+// Past the work budget or the nesting cap the answer is the safe "some" (both are far beyond a real
+// schema; see SCHEMA_CAPS).
+const refTarget = (root, ref) => {
+  let cur = root;
+  for (const part of String(ref).slice(1).split("/").filter(Boolean)) cur = cur?.[decodeURIComponent(part.replace(/~1/g, "/").replace(/~0/g, "~"))];
+  return cur;
+};
+export function stringCapable(schema, root = schema, refs = 0, budget = { left: SCHEMA_CAPS.work, depth: 0 }) {
   if (!schema || typeof schema !== "object") return "some";   // no schema: anything
+  if (--budget.left < 0 || budget.depth > SCHEMA_CAPS.stack) return "some";
+  budget.depth++;
+  try { return stringCapable1(schema, root, refs, budget); } finally { budget.depth--; }
+}
+function stringCapable1(schema, root, refs, budget) {
   if (schema.$ref !== undefined) {
     if (refs >= SCHEMA_CAPS.refDepth) return "some";
-    try {
-      let cur = root;
-      for (const part of String(schema.$ref).slice(1).split("/").filter(Boolean)) cur = cur?.[decodeURIComponent(part.replace(/~1/g, "/").replace(/~0/g, "~"))];
-      return stringCapable(cur, root, refs + 1);
-    } catch { return "some"; }
+    try { return stringCapable(refTarget(root, schema.$ref), root, refs + 1, budget); } catch { return "some"; }
   }
   const alts = schema.anyOf ?? schema.oneOf;
-  if (Array.isArray(alts) && alts.length) return combine(alts.map((a) => stringCapable(a, root, refs)).concat(schema.nullable === true ? ["none"] : []));
+  if (Array.isArray(alts) && alts.length) return combine(alts.map((a) => stringCapable(a, root, refs, budget)).concat(schema.nullable === true ? ["none"] : []));
   if (Array.isArray(schema.allOf) && schema.allOf.length) {
-    const r = schema.allOf.map((a) => stringCapable(a, root, refs));
+    const r = schema.allOf.map((a) => stringCapable(a, root, refs, budget));
     return r.includes("none") ? "none" : r.includes("only") ? "only" : "some";
   }
   if (schema.const !== undefined) return typeof schema.const === "string" ? (schema.nullable === true ? "some" : "only") : "none";
@@ -272,20 +310,26 @@ function combine(rs) {
 }
 
 // The types a schema allows, for coercing an XML parameter's text (null means: unknown, anything)
-export function schemaTypes(schema, root = schema, refs = 0) {
+// (past the work budget or the nesting cap: null, unknown)
+export function schemaTypes(schema, root = schema, refs = 0, budget = { left: SCHEMA_CAPS.work, depth: 0 }) {
   if (!schema || typeof schema !== "object") return null;
+  if (--budget.left < 0 || budget.depth > SCHEMA_CAPS.stack) return null;
+  budget.depth++;
+  try { return schemaTypes1(schema, root, refs, budget); } finally { budget.depth--; }
+}
+function schemaTypes1(schema, root, refs, budget) {
   if (schema.$ref !== undefined) {
     if (refs >= SCHEMA_CAPS.refDepth) return null;
-    let cur = root;
-    try { for (const part of String(schema.$ref).slice(1).split("/").filter(Boolean)) cur = cur?.[decodeURIComponent(part.replace(/~1/g, "/").replace(/~0/g, "~"))]; } catch { return null; }
-    return schemaTypes(cur, root, refs + 1);
+    let cur;
+    try { cur = refTarget(root, schema.$ref); } catch { return null; }
+    return schemaTypes(cur, root, refs + 1, budget);
   }
   const out = new Set();
   const alts = schema.anyOf ?? schema.oneOf;
   if (Array.isArray(alts) && alts.length) {
-    for (const a of alts) { const t = schemaTypes(a, root, refs); if (!t) return null; t.forEach((x) => out.add(x)); }
+    for (const a of alts) { const t = schemaTypes(a, root, refs, budget); if (!t) return null; t.forEach((x) => out.add(x)); }
   } else if (Array.isArray(schema.allOf) && schema.allOf.length) {
-    return schemaTypes(schema.allOf[0], root, refs);
+    return schemaTypes(schema.allOf[0], root, refs, budget);
   } else if (schema.const !== undefined || (Array.isArray(schema.enum) && schema.enum.length)) {
     for (const v of schema.const !== undefined ? [schema.const] : schema.enum) out.add(v === null ? "null" : Array.isArray(v) ? "array" : typeof v === "number" ? (Number.isInteger(v) ? "integer" : "number") : typeof v);
   } else if (schema.type !== undefined) {

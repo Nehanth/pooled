@@ -18,7 +18,9 @@
 // after the first; stop sequences on both APIs; Chat Completions tool calls (whole, streamed, results, named, parallel off,
 // JSON schema); the same weather round trip on the Responses API (streamed call through the SDK,
 // previous_response_id with the output, json_schema, tool_choice required / named) and on Messages
-// (tool_use, streamed input_json_delta, tool_result, tool_choice any / tool, output_format); custom tools -> 400, Origin -> 403, --token -> 401; the SDKs
+// (tool_use, streamed input_json_delta, tool_result, tool_choice any / tool, output_format); a Responses
+// custom tool; Chat custom tools -> 400; an image -> a note; tool schemas too large together -> 400 from
+// the host, and the room still answers; the context in /health and /v1/models; Origin -> 403, --token -> 401; the SDKs
 // parse both APIs; a client that goes away mid-stream frees the room; the host's card says API
 // client; the host's Disconnect ends the bridge's link and it answers 503 without reconnecting.
 // Prints one JSON line with every check; exit code 0 only when all passed.
@@ -277,8 +279,24 @@ try {
     const t = await post("/v1/chat/completions", { model: "x", messages: [{ role: "user", content: "hi" }], tools: [{ type: "custom", custom: { name: "f" } }] });
     const tj = await t.json();
     check("OpenAI custom tools: 400 with the message", t.status === 400 && /custom tools are not supported/.test(tj.error?.message), JSON.stringify(tj));
-    const at = await post("/v1/messages", { model: "x", max_tokens: 5, messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "" } }] }] });
-    check("Anthropic image: 400 invalid_request_error", at.status === 400 && (await at.json()).error?.type === "invalid_request_error");
+    // an image in a user turn becomes a note (a pasted screenshot must not break every later request)
+    const at = await post("/v1/messages", { model: "x", max_tokens: 5, messages: [{ role: "user", content: [{ type: "text", text: "What is this?" }, { type: "image", source: { type: "base64", media_type: "image/png", data: "" } }] }] });
+    check("Anthropic image: answered, with a note in its place", at.status === 200 && (await at.json()).type === "message");
+    // max_tokens past 65536 is capped on every API; no max_tokens on Chat means 16384
+    const big = await post("/v1/chat/completions", { model: "x", max_tokens: 100000, messages: [{ role: "user", content: "Say hi." }] });
+    check("OpenAI max_tokens 100000: capped, answered", big.status === 200, big.status);
+    // tool schemas that fit one by one but not together: the host refuses them up front, and the room
+    // is not left busy
+    const props = {}; for (let i = 0; i < 1800; i++) props[i.toString(36)] = { items: 1 };
+    const huge = await post("/v1/chat/completions", { model: "x", max_tokens: 5, messages: [{ role: "user", content: "hi" }],
+      tools: Array.from({ length: 6 }, (_, i) => ({ type: "function", function: { name: "t" + i, parameters: { type: "object", properties: props } } })) });
+    const hj = await huge.json();
+    check("tool schemas too large together: 400 from the host", huge.status === 400 && /too large together/.test(hj.error?.message), JSON.stringify(hj).slice(0, 200));
+    const after = await post("/v1/chat/completions", { model: "x", max_tokens: 5, messages: [{ role: "user", content: "hi" }] });
+    check("… and the room answers the next request", after.status === 200, after.status);
+    const hl = await (await fetch(BASE + "/health")).json();
+    const ml = await (await fetch(BASE + "/v1/models")).json();
+    check("the room's context: /health ctx and /v1/models max_model_len", hl.ctx > 0 && ml.data?.[0]?.max_model_len === hl.ctx, JSON.stringify({ ctx: hl.ctx, m: ml.data?.[0] }));
     const o = await fetch(BASE + "/v1/models", { headers: { origin: "https://evil.example" } });
     check("a request with an Origin: 403", o.status === 403);
     const h = await new Promise((res) => http.get({ host: "127.0.0.1", port: P, path: "/v1/models", headers: { host: "evil.example" } }, (r) => { r.resume(); res(r.statusCode); }));
@@ -424,6 +442,12 @@ try {
     check("responses tools: a named tool_choice calls that tool", nc.length >= 1 && nc.every((o) => o.name === "get_time"), JSON.stringify(named.output));
     const js = await oa.responses.create({ model: "x", input: JQ, temperature: 0, max_output_tokens: 300, text: { format: { type: "json_schema", name: "city", strict: true, schema: SCHEMA } } });
     check("responses tools: text.format json_schema validates", validates(SCHEMA, parsesTo(js.output_text)), js.output_text);
+    // a custom (free-form) tool, as Codex declares apply_patch with a GPT-5 model name: one raw string in,
+    // a custom_tool_call item out
+    const SH = { type: "custom", name: "run_shell", description: "Run one shell command line (the raw command, nothing else)" };
+    const cu = await oa.responses.create({ model: "x", input: "List the files in the current directory.", tools: [SH], tool_choice: { type: "custom", name: "run_shell" }, temperature: 0, max_output_tokens: 200 });
+    const cc = cu.output.find((o) => o.type === "custom_tool_call");
+    check("responses tools: a custom tool gives a custom_tool_call with a raw string input", cu.status === "completed" && cc?.name === "run_shell" && typeof cc.input === "string" && cc.input.trim().length > 0 && /^ctc_/.test(cc.id), JSON.stringify(cu.output));
   });
 
   // Anthropic Messages (/v1/messages)
@@ -461,7 +485,7 @@ try {
   if (flag("codex")) await soft("codex", async () => {
     const { runCodex, summarize } = await import("./agents/codex.mjs");
     const t = Date.now();
-    const run = await runCodex({ base: BASE, prompt: "Run `cat a.txt` and tell me what it says.", files: { "a.txt": "hello from a.txt\n" }, codex: arg("codex-bin", "codex"), contextWindow: CTX || 32768, timeoutMs: 1800000 });
+    const run = await runCodex({ base: BASE, prompt: "Run `cat a.txt` and tell me what it says.", files: { "a.txt": "hello from a.txt\n" }, codex: arg("codex-bin", "codex"), contextWindow: (await (await fetch(BASE + "/health")).json()).ctx || CTX || 32768, timeoutMs: 1800000 });
     const s = summarize(run);
     log("codex:", JSON.stringify({ code: run.code, commands: s.commands, answer: s.answer, failed: s.failed, s: (Date.now() - t) / 1000 }));
     check("Codex CLI: ran cat a.txt through exec_command", s.commands.some((c) => /a\.txt/.test(c.command) && /hello from a\.txt/.test(c.output || "")), JSON.stringify({ code: run.code, s, err: run.stderr.slice(-300) }));
@@ -471,10 +495,13 @@ try {
     const work = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-cc-work-")), cfg = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-cc-cfg-"));
     const word = "lighthouse-" + Math.random().toString(36).slice(2, 7);
     fs.writeFileSync(path.join(work, "notes.txt"), `The secret word is ${word}.\n`);
+    const roomCtx = (await (await fetch(BASE + "/health")).json()).ctx || CTX || 32768;
     const t = Date.now();
     const out = await new Promise((resolve) => {
       const p = spawn(arg("claude-bin", "claude"), ["-p", "Read notes.txt and tell me the secret word in it.", "--model", "pooled", "--allowedTools", "Read", "--output-format", "json"], { cwd: work,
-        env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CLAUDE|ANTHROPIC_)/.test(k))), CLAUDE_CONFIG_DIR: cfg, ANTHROPIC_BASE_URL: BASE, ANTHROPIC_API_KEY: "pooled", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1" } });
+        env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CLAUDE|ANTHROPIC_)/.test(k))), CLAUDE_CONFIG_DIR: cfg, ANTHROPIC_BASE_URL: BASE, ANTHROPIC_API_KEY: "pooled", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+          // the room's real window (Claude Code does not know a model called pooled; the banner prints this)
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(roomCtx) } });
       let s = ""; p.stdout.on("data", (c) => (s += c)); p.stderr.on("data", (c) => (s += c));
       const kill = setTimeout(() => p.kill(), 1800000);
       p.on("close", () => { clearTimeout(kill); resolve(s); });

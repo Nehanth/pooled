@@ -3987,62 +3987,75 @@ async function apiGenerate({ api: req, name, from }) {
   ai.askerId = from;
   ai.lastWasApi = true;
   const run = ai.apiRun = { rid, from, ac: new AbortController() };
-  apiPanel();
-  setBusyUI(true, true);
-  setAfterAnswer(false, false);
-  // the screens: the room's visibility applies as for any guest, except that the asker (the bridge)
-  // gets its own full stream below, never a stand-in; under "asker" only the host's screen shows it
-  const { full, hidden } = chatRecipients(ai.visibility || "all", from, [...conns.keys()]);
-  const toScreens = (msg) => {
-    for (const id of full) if (id !== from) sendTo(id, msg);
-    if (msg.t !== "ai-token") for (const id of hidden) if (id !== from) sendTo(id, { t: msg.t, name: msg.name, stats: msg.stats, asker: msg.asker, ctx: msg.ctx, api: 1, hidden: true });
-  };
-  const label = `${name} · ${client} (API)`;
-  // the question the screens show: the last real user message (not tool results)
-  const q = v2 ? [...req.messages].reverse().find((m) => m.role === "user" && !m.aside) : null;
-  const last = v2 ? (q ? q.text : "(tool results)") : req.messages[req.messages.length - 1].text;
-  const shown = last.length > API_LIMITS.shown ? last.slice(0, API_LIMITS.shown) + "…" : last;
-  chatUser(label, shown);
-  const mid = ai.msgSeq = (ai.msgSeq || 0) + 1;
-  chatBotStart(mid);
-  toScreens({ t: "ai-genstart", name: label, text: shown, asker: from, cont: 0, mid, api: 1 });
-  sendTo(from, { t: "ai-genstart", rid, api: v2 ? 2 : 1, client, promptTokens: prompt.ids.length, model: ai.model, name: label, asker: from, mid, ...(v2 ? { style: prompt.profile.style } : {}) });
-  let raw = "";
-  const screen = (piece, d) => { raw += piece; chatBotPiece(piece, d); toScreens({ t: "ai-token", text: piece, d: d || 0 }); };
-  const gen = (ids, o) => roomGenerate(ids, { ...o, maxNew: MAXNEW_PARAM ? Math.min(MAXNEW_PARAM, o.maxNew) : o.maxNew, onStatus: aiStatus });
-  const res = v2
-    ? await apiRun2({
-      tok: ai.tok, req, prompt, cache: ai.apiTurns, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
-      tt: apiTokenTexts(), log: (m) => log("api", m),
-      // the system prompt + tools, when long, is kept as the room's pinned checkpoint (tagged, so two
-      // clients with different tools do not keep replacing each other's)
-      generate: (ids, o) => gen(ids, { ...o, ...(prompt.systemLen >= 2048 ? { pin: prompt.systemLen, pinTag: pinTagOf(ids, prompt.systemLen) } : {}) }),
-      send: (msg) => { sendTo(from, msg); apiScreenMsg(msg, screen); },
-    })
-    : await apiRun({
-      tok: ai.tok, req, prompt, cache: ai.apiCache, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
-      generate: gen,
-      send: (msg) => sendTo(from, msg),
-      onPiece: screen,
-    });
-  if (res.err) aiStatus("generation failed: " + res.err);
-  const stats = (res.err ? "failed: " + res.err : res.stats) + " · via API · not part of this chat's memory";
-  const ctx = { used: ai.fed ? ai.pos : 0, max: ctxMax() };
-  chatBotEnd(res.err && !raw ? "⚠ " + res.err : null, stats);
-  toScreens({ t: "ai-gendone", stats, ctx, failed: res.err ? 1 : 0, capped: 0, api: 1 });
-  sendTo(from, { t: "ai-gendone", rid, api: v2 ? 2 : 1, reason: res.reason, stopSeq: res.stopSeq || undefined, usage: res.usage, reused: res.reused, stats, ctx, failed: res.err ? 1 : 0, err: res.err || undefined,
-    ...(v2 ? { calls: res.calls, ...(res.open ? { open: res.open } : {}) } : {}) });
-  ai.transcript.push({ name: label, text: shown, reply: raw, stats, mid, api: 1 });
-  if (ai.transcript.length > 50) ai.transcript.shift();
-  const c = ai.apis.get(from); if (c) c.answered++;
-  apiPanel();
-  setCtx(ctx.used, ctx.max);
-  if (!res.err) aiStatus(`ready — API answer for ${name}: ${res.usage.in} prompt tok${res.reused ? ` (${res.reused} reused)` : ""}, ${res.stats}`);
-  ai.busy = false;
-  ai.abort = false;
-  if (ai.apiRun === run) ai.apiRun = null;
-  setBusyUI(false);
-  setTimeout(nextQueued, 0);
+  // whatever throws in here, the room must not stay busy: the asker gets a failed gendone and the
+  // lock, the Stop button and the queue are released
+  let answered = false, toScreens = () => {};
+  try {
+    apiPanel();
+    setBusyUI(true, true);
+    setAfterAnswer(false, false);
+    // the screens: the room's visibility applies as for any guest, except that the asker (the bridge)
+    // gets its own full stream below, never a stand-in; under "asker" only the host's screen shows it
+    const { full, hidden } = chatRecipients(ai.visibility || "all", from, [...conns.keys()]);
+    toScreens = (msg) => {
+      for (const id of full) if (id !== from) sendTo(id, msg);
+      if (msg.t !== "ai-token") for (const id of hidden) if (id !== from) sendTo(id, { t: msg.t, name: msg.name, stats: msg.stats, asker: msg.asker, ctx: msg.ctx, api: 1, hidden: true });
+    };
+    const label = `${name} · ${client} (API)`;
+    // the question the screens show: the last real user message (not tool results)
+    const q = v2 ? [...req.messages].reverse().find((m) => m.role === "user" && !m.aside) : null;
+    const last = v2 ? (q ? q.text : "(tool results)") : req.messages[req.messages.length - 1].text;
+    const shown = last.length > API_LIMITS.shown ? last.slice(0, API_LIMITS.shown) + "…" : last;
+    chatUser(label, shown);
+    const mid = ai.msgSeq = (ai.msgSeq || 0) + 1;
+    chatBotStart(mid);
+    toScreens({ t: "ai-genstart", name: label, text: shown, asker: from, cont: 0, mid, api: 1 });
+    sendTo(from, { t: "ai-genstart", rid, api: v2 ? 2 : 1, client, promptTokens: prompt.ids.length, model: ai.model, name: label, asker: from, mid, ...(v2 ? { style: prompt.profile.style } : {}) });
+    let raw = "";
+    const screen = (piece, d) => { raw += piece; chatBotPiece(piece, d); toScreens({ t: "ai-token", text: piece, d: d || 0 }); };
+    const gen = (ids, o) => roomGenerate(ids, { ...o, maxNew: MAXNEW_PARAM ? Math.min(MAXNEW_PARAM, o.maxNew) : o.maxNew, onStatus: aiStatus });
+    const res = v2
+      ? await apiRun2({
+        tok: ai.tok, req, prompt, cache: ai.apiTurns, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
+        tt: apiTokenTexts(), log: (m) => log("api", m),
+        // the system prompt + tools, when long, is kept as the room's pinned checkpoint (tagged, so two
+        // clients with different tools do not keep replacing each other's)
+        generate: (ids, o) => gen(ids, { ...o, ...(prompt.systemLen >= 2048 ? { pin: prompt.systemLen, pinTag: pinTagOf(ids, prompt.systemLen) } : {}) }),
+        send: (msg) => { sendTo(from, msg); apiScreenMsg(msg, screen); },
+      })
+      : await apiRun({
+        tok: ai.tok, req, prompt, cache: ai.apiCache, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
+        generate: gen,
+        send: (msg) => sendTo(from, msg),
+        onPiece: screen,
+      });
+    if (res.err) aiStatus("generation failed: " + res.err);
+    const stats = (res.err ? "failed: " + res.err : res.stats) + " · via API · not part of this chat's memory";
+    const ctx = { used: ai.fed ? ai.pos : 0, max: ctxMax() };
+    chatBotEnd(res.err && !raw ? "⚠ " + res.err : null, stats);
+    toScreens({ t: "ai-gendone", stats, ctx, failed: res.err ? 1 : 0, capped: 0, api: 1 });
+    sendTo(from, { t: "ai-gendone", rid, api: v2 ? 2 : 1, reason: res.reason, stopSeq: res.stopSeq || undefined, usage: res.usage, reused: res.reused, stats, ctx, failed: res.err ? 1 : 0, err: res.err || undefined,
+      ...(v2 ? { calls: res.calls, ...(res.open ? { open: res.open } : {}) } : {}) });
+    answered = true;
+    ai.transcript.push({ name: label, text: shown, reply: raw, stats, mid, api: 1 });
+    if (ai.transcript.length > 50) ai.transcript.shift();
+    const c = ai.apis.get(from); if (c) c.answered++;
+    apiPanel();
+    setCtx(ctx.used, ctx.max);
+    if (!res.err) aiStatus(`ready — API answer for ${name}: ${res.usage.in} prompt tok${res.reused ? ` (${res.reused} reused)` : ""}, ${res.stats}`);
+  } catch (e) {
+    const err = String(e?.message || e).slice(0, 300);
+    log("api", `API answer failed: ${err}`);
+    aiStatus("generation failed: " + err);
+    if (!answered) sendTo(from, { t: "ai-gendone", rid, api: v2 ? 2 : 1, reason: "error", usage: { in: 0, out: 0 }, failed: 1, err });
+    try { chatBotEnd("⚠ " + err, "failed · via API"); toScreens({ t: "ai-gendone", stats: "failed · via API", ctx: { used: ai.fed ? ai.pos : 0, max: ctxMax() }, failed: 1, capped: 0, api: 1 }); } catch {}
+  } finally {
+    ai.busy = false;
+    ai.abort = false;
+    if (ai.apiRun === run) ai.apiRun = null;
+    setBusyUI(false);
+    setTimeout(nextQueued, 0);
+  }
   if (ai.degraded) showRedeal(true);
 }
 

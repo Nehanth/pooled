@@ -17,7 +17,7 @@ Deno.test("openai: a plain request maps to the internal request with defaults", 
   const r = fin({ model: "anything", messages: [msg("be brief", "system"), msg("hi")] });
   eq(r, withDefaults({ api: "openai", stream: false, includeUsage: false, system: "be brief", messages: [{ role: "user", text: "hi" }],
     tools: null, toolChoice: "auto", allowed: null, parallel: true, format: null, thinking: false, effort: null,
-    maxTokens: 1024, temperature: null, topK: null, stop: [], extra: {} }));
+    maxTokens: 16384, temperature: null, topK: null, stop: [], extra: {} }));
 });
 Deno.test("openai: leading system / developer messages are the system prompt; later ones fold into the user turn before; same roles merge", () => {
   const r = fin({ messages: [msg("a", "system"), msg("q1"), msg([{ type: "text", text: "q" }, { type: "text", text: "2" }]), msg("x", "developer"), msg("ans", "assistant"), msg("q3")],
@@ -45,7 +45,8 @@ Deno.test("openai: unsupported features are a clear 400", () => {
   for (const tc of ["auto", "none"]) eq(parseOpenAI({ messages: [msg("q")], tool_choice: tc, tools: [] }).messages.length, 1, `tool_choice ${tc} with no tools is fine`);
   throws400({ messages: [msg("q"), { role: "function", content: "r", name: "x" }] }, /deprecated/, "function role");
   throws400({ messages: [msg("q")], functions: [{ name: "f" }] }, /deprecated/, "functions");
-  throws400({ messages: [msg([{ type: "image_url", image_url: { url: "data:" } }])] }, /only text content is supported/, "image");
+  eq(parseOpenAI({ messages: [msg([{ type: "image_url", image_url: { url: "data:" } }])] }).messages[0].text, "[image omitted: this model reads text only]", "image: a note");
+  throws400({ messages: [msg([{ type: "input_audio", input_audio: {} }])] }, /only text content is supported/, "audio");
   throws400({ messages: [msg("q")], n: 2 }, /n must be 1/, "n");
   throws400({ messages: [msg("q")], logprobs: true }, /logprobs/, "logprobs");
   throws400({ messages: [msg("q")], response_format: { type: "json_schema", json_schema: { name: "x" } } }, /schema is required/, "json_schema");

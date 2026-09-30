@@ -55,7 +55,7 @@ const room = (script, { reason = "stop", usage = { in: 20, out: 9, think: 3 }, r
 // ids and times vary: replace each with a stable name by first appearance
 function norm(s) {
   const seen = new Map();
-  return s.replace(/\b(resp|msg|rs|fc|call)_[0-9A-Za-z]{24}\b/g, (id, p) => {
+  return s.replace(/\b(resp|msg|rs|fc|ctc|call)_[0-9A-Za-z]{24}\b/g, (id, p) => {
     if (!seen.has(id)) seen.set(id, `${p}_${[...seen.keys()].filter((k) => k.startsWith(p + "_")).length + 1}`);
     return seen.get(id);
   }).replace(/"created_at":\d+/g, '"created_at":0');
@@ -265,7 +265,9 @@ test("cut at max_output_tokens: incomplete, with an open call as an incomplete i
   t.bridge.onAsk = room(script, { reason: "max" });
   const s = events(norm((await t.post({ input: "w?", tools: [WEATHER], max_output_tokens: 8, stream: true })).body));
   assert.deepEqual(s.map((e) => e.event).slice(2), ["response.output_item.added", "response.content_part.added", "response.output_text.delta", "response.output_text.done",
-    "response.content_part.done", "response.output_item.done", "response.output_item.added", "response.function_call_arguments.delta", "response.incomplete"]);
+    "response.content_part.done", "response.output_item.done", "response.output_item.added", "response.function_call_arguments.delta", "response.output_item.done", "response.incomplete"]);
+  // every added item gets its done: the cut call's is incomplete (no arguments.done for it)
+  assert.deepEqual(s.at(-2).data.item, { id: "fc_1", type: "function_call", status: "incomplete", arguments: '{"city": "Pa', call_id: "call_1", name: "get_weather" });
   const end = s.at(-1).data.response;
   assert.equal(end.status, "incomplete");
   assert.deepEqual(end.output[1], { id: "fc_1", type: "function_call", status: "incomplete", arguments: '{"city": "Pa', call_id: "call_1", name: "get_weather" });
@@ -311,16 +313,24 @@ test("request mapping: tool_choice, text.format, effort, max_tool_calls", async 
   assert.equal(off.thinking, false); assert.equal(off.effort, undefined);
   assert.equal((await params({ reasoning: { effort: "xhigh" } })).effort, "xhigh");
   assert.equal((await params({})).maxTokens, 16384, "no max_output_tokens: the Responses default");
+  // past what the room ever writes: capped, not refused (the echo keeps the client's value)
+  const big = await t.post({ input: "x", max_output_tokens: 128000 });
+  assert.equal(big.status, 200, big.body);
+  assert.equal(t.bridge.asks.at(-1).params.maxTokens, 65536);
+  assert.equal(JSON.parse(big.body).max_output_tokens, 128000);
   await t.close();
 });
 
-test("refused with 400: hosted choices, custom tools, images, unknown items, background, logprobs, bad effort", async () => {
+test("refused with 400: hosted choices, malformed allowed_tools, unknown items, background, logprobs, bad effort", async () => {
   const t = await start();
   t.bridge.onAsk = room([["text", "x"]]);
   const cases = [
     [{ input: "x", tools: [WEATHER], tool_choice: { type: "web_search_preview" } }, "tool_choice", /not supported/],
-    [{ input: "x", tools: [{ type: "custom", name: "apply_patch" }] }, "tools[0]", /custom/],
-    [{ input: [{ role: "user", content: [{ type: "input_image", image_url: "data:x" }] }] }, "input[0].content", /only text content/],
+    // the Chat shape of an allowed tool ({function: {name}}) must not silently turn tools off
+    [{ input: "x", tools: [WEATHER], tool_choice: { type: "allowed_tools", mode: "auto", tools: [{ type: "function", function: { name: "get_weather" } }] } }, "tool_choice", /name is required/],
+    [{ input: "x", tools: [WEATHER], tool_choice: { type: "allowed_tools", mode: "auto", tools: [{ type: "gizmo" }] } }, "tool_choice", /unknown tool type/],
+    [{ input: "x", tools: [WEATHER], tool_choice: { type: "custom", name: "get_weather" } }, "tool_choice", /not a custom tool/],
+    [{ input: [{ role: "user", content: [{ type: "input_audio" }] }] }, "input[0].content", /only text content/],
     [{ input: [{ type: "frobnicate" }] }, "input[0].type", /not supported/],
     [{ input: "x", background: true }, "background", /background/],
     [{ input: "x", include: ["message.output_text.logprobs"] }, "include", /logprobs/],
@@ -340,7 +350,10 @@ test("refused with 400: hosted choices, custom tools, images, unknown items, bac
     assert.equal(e.param, param, JSON.stringify(body));
     assert.match(e.message, re);
   }
-  // function outputs with images keep a placeholder instead
+  // images in user input (Codex's view_image, a pasted screenshot) and in function outputs: a note
+  const im = await t.post({ input: [{ role: "user", content: [{ type: "input_text", text: "this: " }, { type: "input_image", image_url: "data:x" }, { type: "input_file", file_id: "f" }] }] });
+  assert.equal(im.status, 200, im.body);
+  assert.equal(t.bridge.asks.at(-1).messages[0].text, "this: [image omitted: this model reads text only][file omitted: this model reads text only]");
   const ok = await t.post({ input: [{ role: "user", content: "look" }, { type: "function_call", call_id: "c1", name: "get_weather", arguments: "{}" },
     { type: "function_call_output", call_id: "c1", output: [{ type: "input_text", text: "see: " }, { type: "input_image", image_url: "data:x" }] }], tools: [WEATHER] });
   assert.equal(ok.status, 200, ok.body);
@@ -400,4 +413,48 @@ test("the adapter exposes its store (bounded, per process)", () => {
   assert.equal(typeof adapter.store.get, "function");
   assert.equal(adapter.store.max, 256);
   assert.equal(adapter.store.maxBytes, 64 << 20);
+});
+
+test("custom (free-form) tools: a function with one string argument to the room, custom_tool_call items out (whole and streamed), and back in", async () => {
+  const t = await start();
+  const PATCH = { type: "custom", name: "apply_patch", description: "Apply a patch", format: { type: "grammar", syntax: "lark", definition: "start: /.+/" } };
+  t.bridge.onAsk = room([["text", "Patching."], ["call", "apply_patch", ['{"input": "*** Begin', ' Patch\\n*** End Patch"}']]]);
+  const r = await t.post({ input: "fix it", tools: [PATCH, WEATHER] });
+  assert.equal(r.status, 200, r.body);
+  const tool = t.bridge.asks[0].tools[0];
+  assert.equal(tool.name, "apply_patch");
+  assert.deepEqual(tool.parameters.required, ["input"]);
+  assert.match(tool.description, /Apply a patch[\s\S]*lark grammar:\nstart: \/\.\+\//);
+  const body = JSON.parse(norm(r.body));
+  assert.deepEqual(body.output[1], { id: "ctc_1", type: "custom_tool_call", status: "completed", call_id: "call_1", name: "apply_patch", input: "*** Begin Patch\n*** End Patch" });
+  assert.deepEqual(body.tools[0], { type: "custom", name: "apply_patch", description: "Apply a patch", format: PATCH.format });
+  // streamed: the input goes out whole when the call ends
+  t.bridge.onAsk = room([["call", "apply_patch", ['{"input": "a', 'b"}']]]);
+  const s = events(norm((await t.post({ input: "fix it", tools: [PATCH], stream: true })).body));
+  assert.deepEqual(s.map((e) => e.event).slice(2), ["response.output_item.added", "response.custom_tool_call_input.delta", "response.custom_tool_call_input.done", "response.output_item.done", "response.completed"]);
+  assert.deepEqual(s[2].data.item, { id: "ctc_1", type: "custom_tool_call", status: "in_progress", call_id: "call_1", name: "apply_patch", input: "" });
+  assert.equal(s[4].data.input, "ab");
+  assert.deepEqual(s.at(-1).data.response.output, [{ id: "ctc_1", type: "custom_tool_call", status: "completed", call_id: "call_1", name: "apply_patch", input: "ab" }]);
+  // the call and its output in the next request's input (Codex resends the history)
+  t.bridge.onAsk = room([["text", "Done."]]);
+  const back = await t.post({ tools: [PATCH], tool_choice: { type: "custom", name: "apply_patch" }, input: [{ role: "user", content: "fix it" }, { type: "custom_tool_call", call_id: "c9", name: "apply_patch", input: "ab" },
+    { type: "custom_tool_call_output", call_id: "c9", output: "Success" }] });
+  assert.equal(back.status, 200, back.body);
+  const ask = t.bridge.asks.at(-1);
+  assert.deepEqual(ask.messages.slice(1), [{ role: "assistant", text: "", calls: [{ name: "apply_patch", args: { input: "ab" } }] }, { role: "tool", text: "Success" }]);
+  assert.deepEqual(ask.params.toolChoice, { name: "apply_patch" });
+  await t.close();
+});
+
+test("keep-alives are real events (Codex's idle timer ignores SSE comments): response.created while queued, then response.in_progress", async () => {
+  const t = await start({ keepAliveMs: 40 });
+  t.bridge.onAsk = (rid, h) => setTimeout(() => room([["text", "late"]])(rid, h), 150);
+  const s = events((await t.post({ input: "x", stream: true })).body);
+  const names = s.map((e) => e.event);
+  assert.equal(names[0], "response.created");
+  assert.ok(names.filter((n) => n === "response.in_progress").length >= 2, names.join(" "));
+  assert.equal(names.at(-1), "response.completed");
+  assert.equal(names.filter((n) => n === "response.created").length, 1);
+  assert.deepEqual(s.map((e) => e.data.sequence_number), s.map((_, i) => i));
+  await t.close();
 });

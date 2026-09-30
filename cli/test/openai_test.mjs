@@ -217,7 +217,7 @@ test("chat: unsupported or malformed requests are a clear 400 in OpenAI's shape"
     [{ messages: [{ role: "assistant", content: "x", function_call: { name: "f" } }, user("q")] }, "messages[0].function_call", /deprecated/],
     [{ messages: [{ role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: {} }] }, user("q")] }, "messages[0].tool_calls[0].function.name", /name is required/],
     [{ messages: [user("q"), { role: "assistant", content: "prefill" }] }, "messages", /last message must be from the user or a tool result/],
-    [{ messages: [user([{ type: "image_url", image_url: { url: "data:" } }])] }, "messages[0].content", /only text content/],
+    [{ messages: [user([{ type: "input_audio", input_audio: { data: "", format: "wav" } }])] }, "messages[0].content", /only text content/],
     [{ response_format: { type: "json_schema", json_schema: { name: "x" } } }, "response_format.json_schema.schema", /schema is required/],
     [{ response_format: { type: "yaml" } }, "response_format.type", /json_object or json_schema/],
     [{ reasoning_effort: "extreme" }, "reasoning_effort", /must be one of none, minimal, low, medium, high, xhigh, max/],
@@ -261,7 +261,7 @@ test("chat: an older host: plain chat still works as v1, tools and JSON mode are
   t.bridge.onAsk = (rid, h) => setImmediate(() => { h({ t: "ai-genstart", rid, promptTokens: 3 }); h({ t: "ai-token", rid, text: "hi" }); h({ t: "ai-gendone", rid, reason: "stop", usage: { in: 3, out: 1 } }); });
   const p = await t.req({ messages: [{ role: "system", content: "s" }, user("q")], reasoning_effort: "medium" });
   assert.equal(p.status, 200);
-  assert.deepEqual(wire(t.bridge.asks[0]), { system: "s", messages: [{ role: "user", text: "q" }], params: { maxTokens: 1024, stop: [], thinking: true, client: "API" } });
+  assert.deepEqual(wire(t.bridge.asks[0]), { system: "s", messages: [{ role: "user", text: "q" }], params: { maxTokens: 16384, stop: [], thinking: true, client: "API" } });
   for (const over of [{ tools: [WEATHER] }, { response_format: { type: "json_object" } }]) {
     const r = await t.req({ messages: [user("q")], ...over });
     assert.equal(r.status, 400);
@@ -287,5 +287,45 @@ test("chat: the OpenAI SDK's runTools loop (streamed): calls, its tool results b
     { role: "assistant", text: "Checking.", calls: [{ name: "get_weather", args: { city: "Paris" } }, { name: "get_time", args: { city: "Tokyo" } }], reasoning: "Two cities." },
     { role: "tool", text: "sunny" }, { role: "tool", text: "09:00" },
   ]);
+  await t.close();
+});
+
+test("chat: no max_tokens means 16384 (a long call is not cut at 1024); a larger one is capped, not refused; images become a note", async () => {
+  const t = await start();
+  const one = [{ t: "ai-genstart", promptTokens: 5 }, { t: "ai-token", text: "ok" }, { t: "ai-gendone", reason: "stop", usage: { in: 5, out: 1 } }];
+  t.bridge.onAsk = room(one);
+  assert.equal((await t.req({ messages: [user("q")], tools: [WEATHER] })).status, 200);
+  assert.equal(t.bridge.asks.at(-1).params.maxTokens, 16384);
+  for (const over of [{ max_tokens: 100000 }, { max_completion_tokens: 128000 }]) {
+    t.bridge.onAsk = room(one);
+    const r = await t.req({ messages: [user("q")], ...over });
+    assert.equal(r.status, 200, r.body);
+    assert.equal(t.bridge.asks.at(-1).params.maxTokens, 65536);
+  }
+  t.bridge.onAsk = room(one);
+  const im = await t.req({ messages: [user([{ type: "text", text: "what is this? " }, { type: "image_url", image_url: { url: "data:" } }])] });
+  assert.equal(im.status, 200, im.body);
+  assert.equal(t.bridge.asks.at(-1).messages[0].text, "what is this? [image omitted: this model reads text only]");
+  await t.close();
+});
+
+test("chat: the host is not trusted with calls: arguments that are not a JSON object, or a call the tool_choice rules out, end the request", async () => {
+  const t = await start();
+  const answer = (name, args) => [{ t: "ai-genstart", promptTokens: 5 }, { t: "ai-call", i: 0, name }, { t: "ai-call", i: 0, a: args }, { t: "ai-call", i: 0, end: 1 },
+    { t: "ai-gendone", reason: "stop", usage: { in: 5, out: 3 }, calls: [{ name, args }] }];
+  const cases = [
+    [{ tools: [WEATHER] }, "get_weather", "not json", /not a JSON object/],
+    [{ tools: [WEATHER], tool_choice: "none" }, "get_weather", "{}", /not a tool this request allows/],
+    [{ tools: [WEATHER, TIME], tool_choice: { type: "function", function: { name: "get_time" } } }, "get_weather", "{}", /not a tool this request allows/],
+    [{ tools: [WEATHER, TIME], tool_choice: { type: "allowed_tools", allowed_tools: { mode: "auto", tools: [{ type: "function", function: { name: "get_time" } }] } } }, "get_weather", "{}", /not a tool this request allows/],
+  ];
+  for (const [over, name, args, re] of cases) {
+    t.bridge.onAsk = room(answer(name, args));
+    const r = await t.req({ messages: [user("q")], ...over });
+    assert.equal(r.status, 500, JSON.stringify(over) + r.body);
+    assert.match(JSON.parse(r.body).error.message, re);
+  }
+  t.bridge.onAsk = room(answer("get_time", '{"city": "Oslo"}'));
+  assert.equal((await t.req({ messages: [user("q")], tools: [WEATHER, TIME], tool_choice: { type: "function", function: { name: "get_time" } } })).status, 200);
   await t.close();
 });

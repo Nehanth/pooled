@@ -8,7 +8,7 @@ import fs from "node:fs";
 import { EventEmitter } from "node:events";
 import { createServer } from "../lib/http.js";
 import { parseAnthropic } from "../lib/anthropic.js";
-import { finishRequest, askBody, blob, ApiError, IMAGE_PLACEHOLDER } from "../lib/common.js";
+import { finishRequest, askBody, blob, ApiError, IMAGE_PLACEHOLDER, FILE_PLACEHOLDER } from "../lib/common.js";
 
 class FakeBridge extends EventEmitter {
   constructor() { super(); this.code = "ABCD"; this.connected = true; this.ready = true; this.model = "qwen36"; this.hostMeta = { api: 2, ctx: 65536 }; this.onAsk = null; this.stopped = []; this.asks = []; }
@@ -81,7 +81,7 @@ test("Claude Code's captured requests map without a 400: billing header out, too
   assert.deepEqual(logs, []);
 });
 
-const P = (b) => parseAnthropic({ model: "m", max_tokens: 100, ...b });
+const P = (b, ctx) => parseAnthropic({ model: "m", max_tokens: 100, ...b }, ctx);
 const throws = (f, re, m) => assert.throws(f, (e) => e instanceof ApiError && e.kind === "bad" && re.test(e.message), m);
 
 test("tool_choice, disable_parallel_tool_use, output_config and thinking map onto the internal request", () => {
@@ -106,7 +106,7 @@ test("tool_choice, disable_parallel_tool_use, output_config and thinking map ont
   throws(() => finishRequest(P({ messages: msgs, tools: [WEATHER], tool_choice: { type: "tool", name: "nope" } }), { hostMeta: { api: 2 } }), /nope is not in tools/, "unknown name");
 });
 
-test("Anthropic's own tools and their blocks are skipped with one warning; images refused in user turns, a placeholder in tool results", () => {
+test("Anthropic's own tools and their blocks are skipped with one warning; images and documents become a note, in user turns and tool results", () => {
   const logs = [];
   const log = (m) => logs.push(m);
   const b = { messages: [
@@ -120,7 +120,13 @@ test("Anthropic's own tools and their blocks are skipped with one warning; image
   assert.deepEqual(r.messages[1], { role: "assistant", text: "found" });
   assert.equal(logs.length, 4, "one warning per kind, once per process: " + logs.join(" | "));
   assert.equal(parseAnthropic({ model: "m", max_tokens: 10, tools: [{ type: "web_search_20250305", name: "web_search" }], messages: [{ role: "user", content: "q" }] }).tools, null);
-  throws(() => P({ messages: [{ role: "user", content: [{ type: "image", source: {} }] }] }), /only text content/, "image");
+  // an image in a user turn is a note too (a pasted screenshot stays in the history), logged once
+  const n0 = logs.length;
+  const im = P({ messages: [{ role: "user", content: [{ type: "text", text: "what is this? " }, { type: "image", source: {} }, { type: "document", source: {} }] }] }, { log });
+  assert.deepEqual(im.messages, [{ role: "user", text: "what is this? " + IMAGE_PLACEHOLDER + FILE_PLACEHOLDER }]);
+  P({ messages: [{ role: "user", content: [{ type: "image", source: {} }] }] }, { log });
+  assert.equal(logs.length - n0, 2, "one note per kind: " + logs.slice(n0).join(" | "));
+  throws(() => P({ messages: [{ role: "user", content: [{ type: "search_result", source: "x", title: "t", content: [] }] }] }), /only text content/, "search_result");
   const t = P({ messages: [{ role: "user", content: "q" }, { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Read", input: {} }] },
     { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", is_error: true, content: [{ type: "text", text: "see:" }, { type: "image", source: {} }] }] }] });
   assert.deepEqual(t.messages[2], { role: "tool", id: "t1", text: "see:" + IMAGE_PLACEHOLDER });

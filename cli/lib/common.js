@@ -13,10 +13,17 @@ export const LIMITS = {
   totalChars: 1500000,    // total text
   messages: 200,          // (v1 parsers)
   totalMessages: 1000,
-  tools: 128, schemaChars: 32000, calls: 64, maxCalls: 128,
+  // tools: agents send all of theirs (Claude Code with MCP servers: hundreds); chars, askBytes and the
+  // host's grammar cap bound the real cost
+  tools: 1024, schemaChars: 32000, calls: 64, maxCalls: 128,
   toolName: /^[A-Za-z0-9_.:-]{1,128}$/,
   stops: 4, stopLen: 64,
-  defaultMaxTokens: 1024,
+  // output tokens when the client names none, on every API that allows that (Chat Completions,
+  // Responses): the room's context bounds the answer anyway, as OpenAI / vLLM / llama.cpp bound it by
+  // the context left. (1024 cut long tool calls, a file write, and dropped them.)
+  defaultMaxTokens: 16384,
+  // the most one answer may ask for; a larger max_tokens is capped to it, never refused (agents send
+  // their own model's output limit, whatever model sits behind the base URL)
   maxTokens: 65536,
   topK: 64,               // engine/topk.js TOPK_MAX
   client: 40,
@@ -69,6 +76,11 @@ export function checkInt(v, lo, hi, param) {
   if (typeof v !== "number" || !Number.isInteger(v) || v < lo || v > hi) throw bad(`${param} must be an integer from ${lo} to ${hi}`, param);
   return v;
 }
+// max_tokens and its kin: a positive integer; above LIMITS.maxTokens capped, not refused
+export function capTokens(v, param) {
+  const n = checkInt(v, 1, Number.MAX_SAFE_INTEGER, param);
+  return n == null ? null : Math.min(n, LIMITS.maxTokens);
+}
 export function checkNum(v, lo, hi, param) {
   if (v == null) return null;
   if (typeof v !== "number" || !Number.isFinite(v) || v < lo || v > hi) throw bad(`${param} must be a number from ${lo} to ${hi}`, param);
@@ -106,6 +118,34 @@ export const newRid = () => (Date.now() % 1e8).toString(36) + (seq++).toString(3
 export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 export const OLD_HOST_MSG = "the room's host runs an older Pooled without tool calling (reload the host page)";
 export const IMAGE_PLACEHOLDER = "[image omitted: this model reads text only]";
+export const FILE_PLACEHOLDER = "[file omitted: this model reads text only]";
+
+// Warnings once per process and kind (an agent sends the same request shape every step). The key and
+// the message may carry client text: both are cleaned (no control characters: a client must not be
+// able to write escape sequences to the terminal) and short, and the set is bounded.
+const warned = new Set();
+export function warnOnce(log, key, msg) {
+  key = cleanText(key, 80);
+  if (warned.has(key)) return;
+  if (warned.size >= 1000) warned.clear();
+  warned.add(key);
+  log(cleanText(msg, 300));
+}
+
+// A content part that is not text, in a user or system message: an image or a file becomes a short
+// note (logged once), so a client whose history holds a pasted screenshot keeps working (Codex's
+// view_image, Claude Code, Open WebUI attachments). -> the note, or null for any other part.
+export function nonTextPart(type, log = () => {}, api = "") {
+  if (type === "image" || type === "image_url" || type === "input_image") {
+    warnOnce(log, `${api}:image`, `${api ? api + ": " : ""}images in the conversation are replaced by a note (the room's model reads text only)`);
+    return IMAGE_PLACEHOLDER;
+  }
+  if (type === "document" || type === "file" || type === "input_file") {
+    warnOnce(log, `${api}:file`, `${api ? api + ": " : ""}files in the conversation are replaced by a note (the room's model reads text only)`);
+    return FILE_PLACEHOLDER;
+  }
+  return null;
+}
 
 // every field an adapter may leave out, at its default
 export function withDefaults(r) {
@@ -188,7 +228,7 @@ export function parseArgs(str, log = () => {}) {
   if (typeof str === "string") {
     try { const v = JSON.parse(str); if (v && typeof v === "object" && !Array.isArray(v)) return v; } catch { /* below */ }
   }
-  log(`a tool call's arguments are not a JSON object; sent to the model as {}: ${String(typeof str === "string" ? str : JSON.stringify(str)).slice(0, 80)}`);
+  log(`a tool call's arguments are not a JSON object; sent to the model as {}: ${cleanText(typeof str === "string" ? str : JSON.stringify(str), 80)}`);
   return {};
 }
 // a tool result's content: a string, or parts; text is kept, images (and files) become a note
@@ -204,7 +244,7 @@ export function toolText(content, param = "content") {
     const t = p?.type;
     if ((t === "text" || t === "input_text" || t === "output_text") && typeof p.text === "string") return p.text;
     if (t === "image" || t === "image_url" || t === "input_image") return IMAGE_PLACEHOLDER;
-    if (t === "document" || t === "file" || t === "input_file") return "[file omitted: this model reads text only]";
+    if (t === "document" || t === "file" || t === "input_file") return FILE_PLACEHOLDER;
     if (typeof p?.text === "string") return p.text;
     return "";
   }).join("");

@@ -8,17 +8,20 @@
 // content[] (reasoning_text); with include: ["reasoning.encrypted_content"] they also carry
 // encrypted_content = "pooled1." + base64url(text), which, sent back, restores the reasoning exactly
 // (it is not encryption: the same user holds both ends).
-import { ApiError, bad, LIMITS, TEXT_MSG, checkInt, checkNum, checkFormat, withDefaults, ids, id24, normTool, parseArgs, toolText, blob, outcome, clientFromUA, cleanText, EFFORTS } from "./common.js";
+import { ApiError, bad, LIMITS, TEXT_MSG, checkInt, checkNum, capTokens, checkFormat, withDefaults, ids, id24, normTool, parseArgs, toolText, nonTextPart, blob, outcome, clientFromUA, cleanText, EFFORTS, warnOnce } from "./common.js";
 import { openaiError } from "./openai.js";
 import { sseSequence, sseComment } from "./sse.js";
 import { ResponseStore } from "./store.js";
 
 // max_output_tokens when the client sends none (Codex never does): the room's context bounds it anyway
-export const DEFAULT_MAX_OUTPUT = 16384;
+export const DEFAULT_MAX_OUTPUT = LIMITS.defaultMaxTokens;
 
 // items a session resumed from OpenAI's own service may hold: calls of tools that ran there. The
 // model here cannot see them; they are dropped with a warning, never a 400
-const HOSTED_ITEM = /^(web_search_call|file_search_call|local_shell_call(_output)?|shell_call(_output)?|apply_patch_call(_output)?|code_interpreter_call|image_generation_call|mcp_[a-z_]+|computer_call(_output)?|custom_tool_call(_output)?|tool_search_call|tool_search_output)$/;
+const HOSTED_ITEM = /^(web_search_call|file_search_call|local_shell_call(_output)?|shell_call(_output)?|apply_patch_call(_output)?|code_interpreter_call|image_generation_call|mcp_[a-z_]+|computer_call(_output)?|tool_search_call|tool_search_output)$/;
+
+// the hosted tool types (they run on OpenAI's side; none runs here)
+const HOSTED_TOOL = /^(web_search|file_search|code_interpreter|image_generation|mcp|computer(_use)?|local_shell|shell|apply_patch|tool_search)(_[a-z0-9_]+)?$/;
 
 // errors in OpenAI's shape; a code of our own where the API has one (previous_response_not_found)
 export function responsesError(e) {
@@ -28,17 +31,28 @@ export function responsesError(e) {
 }
 const notFound = (id) => new ApiError("notfound", `Response with id '${cleanText(id, 80)}' not found.`);
 
-// warnings once per client and kind (Codex sends web_search on every request)
-const warned = new Set();
-function warnOnce(log, key, msg) {
-  if (warned.has(key)) return;
-  if (warned.size > 1000) warned.clear();
-  warned.add(key);
-  log(msg);
+// Custom (free-form) tools: the model writes one raw string (Codex's apply_patch, with a GPT-5 model
+// name). Each becomes a function tool with a single string parameter, `input`; its calls go back out as
+// custom_tool_call items with that string. The grammar a custom tool may name (lark, regex) is shown
+// to the model in the description, not enforced.
+const CUSTOM_PARAMS = { type: "object", properties: { input: { type: "string", description: "the tool's raw input" } }, required: ["input"], additionalProperties: false };
+function customTool(t, p) {
+  if (typeof t.name !== "string") throw bad(`${p}.name is required`, `${p}.name`);
+  if (t.description != null && typeof t.description !== "string") throw bad(`${p}.description must be a string`, `${p}.description`);
+  const f = t.format;
+  let desc = t.description || "";
+  if (f != null && f.type === "grammar" && typeof f.definition === "string") desc += `${desc ? "\n\n" : ""}The input follows this ${cleanText(f.syntax, 20) || ""} grammar:\n${f.definition}`;
+  desc += `${desc ? "\n\n" : ""}Put the whole raw input in the input argument.`;
+  return normTool({ name: t.name, description: desc, parameters: CUSTOM_PARAMS }, p);
+}
+// a custom call's input from the function arguments the room wrote ({"input": "..."})
+function customInput(args) {
+  try { const v = JSON.parse(args); if (v && typeof v.input === "string") return v.input; } catch { /* below */ }
+  return typeof args === "string" ? args : "";
 }
 
-// a message's content: a string or parts; text only
-function contentText(content, p) {
+// a message's content: a string or parts; text kept, images and files a short note (common.nonTextPart)
+function contentText(content, p, log = () => {}) {
   if (content == null) return "";
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) throw bad(`${p}.content must be a string or a list of parts`, `${p}.content`);
@@ -46,6 +60,8 @@ function contentText(content, p) {
     const t = c?.type;
     if ((t === "input_text" || t === "output_text" || t === "text") && typeof c.text === "string") return c.text;
     if (t === "refusal") return typeof c.refusal === "string" ? c.refusal : "";
+    const note = nonTextPart(t, log, "responses");
+    if (note != null) return note;
     throw bad(`${TEXT_MSG} (${p}.content[${j}] is ${JSON.stringify(t ?? typeof c)})`, `${p}.content`);
   }).join("");
 }
@@ -65,7 +81,8 @@ function reasoningText(it) {
 function listed(it) {
   if (typeof it.id === "string" && it.id) return it;
   const t = it.type ?? "message";
-  const id = t === "message" ? ids.msg() : t === "function_call" ? ids.fc() : t === "reasoning" ? ids.rs() : id24(t === "function_call_output" ? "fco_" : "item_");
+  const id = t === "message" ? ids.msg() : t === "function_call" ? ids.fc() : t === "custom_tool_call" ? id24("ctc_") : t === "reasoning" ? ids.rs()
+    : id24(t === "function_call_output" ? "fco_" : t === "custom_tool_call_output" ? "ctco_" : "item_");
   return { id, ...(it.type ? {} : { type: "message" }), ...it };
 }
 
@@ -90,7 +107,7 @@ function parseInput(input, { store, log, client }) {
     const type = it.type ?? (it.role != null ? "message" : undefined);
     switch (type) {
       case "message": {
-        const text = contentText(it.content, p);
+        const text = contentText(it.content, p, log);
         if (it.role === "user") msgs.push({ role: "user", text });
         else if (it.role === "system" || it.role === "developer") msgs.push({ role: "system", text });
         else if (it.role === "assistant") assistant({ role: "assistant", text });
@@ -103,6 +120,14 @@ function parseInput(input, { store, log, client }) {
         assistant({ role: "assistant", text: "", calls: [{ id: it.call_id, name: it.name, args: parseArgs(it.arguments, log) }] });
         return;
       }
+      case "custom_tool_call": {
+        if (typeof it.name !== "string" || !LIMITS.toolName.test(it.name)) throw bad(`${p}.name must be a tool name`, `${p}.name`);
+        if (typeof it.call_id !== "string" || !it.call_id) throw bad(`${p}.call_id is required`, `${p}.call_id`);
+        if (it.input != null && typeof it.input !== "string") throw bad(`${p}.input must be a string`, `${p}.input`);
+        assistant({ role: "assistant", text: "", calls: [{ id: it.call_id, name: it.name, args: { input: it.input ?? "" } }] });
+        return;
+      }
+      case "custom_tool_call_output":
       case "function_call_output": {
         if (typeof it.call_id !== "string" || !it.call_id) throw bad(`${p}.call_id is required`, `${p}.call_id`);
         msgs.push({ role: "tool", text: toolText(it.output, `${p}.output`), id: it.call_id });
@@ -129,6 +154,7 @@ export function outputMessages(output) {
     if (it.type === "reasoning") { const r = reasoningText(it); if (r) reasoning = reasoning ? reasoning + "\n\n" + r : r; }
     else if (it.type === "message") text += contentText(it.content, "output");
     else if (it.type === "function_call" && it.status !== "incomplete") calls.push({ id: it.call_id, name: it.name, args: parseArgs(it.arguments) });
+    else if (it.type === "custom_tool_call" && it.status !== "incomplete") calls.push({ id: it.call_id, name: it.name, args: { input: it.input ?? "" } });
   }
   if (!text && !calls.length && !reasoning) return [];
   return [{ role: "assistant", text, ...(calls.length ? { calls } : {}), ...(reasoning ? { reasoning } : {}) }];
@@ -171,7 +197,7 @@ export function parseResponses(b, headers = {}, { log = () => {}, store }) {
 
   // tools: function tools; the hosted ones (web_search, file_search, …) cannot run here and are skipped
   let tools = null;
-  const echoTools = [];
+  const echoTools = [], custom = new Set();
   if (b.tools != null) {
     if (!Array.isArray(b.tools)) throw bad("tools must be a list", "tools");
     tools = [];
@@ -180,8 +206,11 @@ export function parseResponses(b, headers = {}, { log = () => {}, store }) {
       if (t.type === "function") {
         tools.push(normTool({ name: t.name, description: t.description, parameters: t.parameters }, `tools[${i}]`));
         echoTools.push({ type: "function", name: t.name, description: t.description ?? null, parameters: t.parameters ?? null, strict: t.strict ?? true });
-      } else if (t.type === "custom") throw bad("custom (free-form) tools are not supported by pooled serve: use function tools", `tools[${i}]`);
-      else warnOnce(log, `${client}:tool:${t.type}`, `responses (${client}): skipped the hosted tool ${cleanText(t.type, 40)} (pooled serve runs function tools only)`);
+      } else if (t.type === "custom") {
+        tools.push(customTool(t, `tools[${i}]`));
+        custom.add(t.name);
+        echoTools.push({ type: "custom", name: t.name, description: t.description ?? null, ...(t.format != null ? { format: t.format } : {}) });
+      } else warnOnce(log, `${client}:tool:${t.type}`, `responses (${client}): skipped the hosted tool ${cleanText(t.type, 40)} (pooled serve runs function tools only)`);
     });
   }
 
@@ -189,19 +218,27 @@ export function parseResponses(b, headers = {}, { log = () => {}, store }) {
   const tc = b.tool_choice;
   if (tc == null || tc === "auto") { /* default */ }
   else if (tc === "none" || tc === "required") toolChoice = tc;
-  else if (tc && typeof tc === "object" && tc.type === "function") {
+  else if (tc && typeof tc === "object" && (tc.type === "function" || tc.type === "custom")) {
     if (typeof tc.name !== "string") throw bad("tool_choice.name is required", "tool_choice");
+    if (tc.type === "custom" && !custom.has(tc.name)) throw bad(`tool_choice: ${cleanText(tc.name, 60)} is not a custom tool in tools`, "tool_choice");
     toolChoice = { name: tc.name };
   } else if (tc && typeof tc === "object" && tc.type === "allowed_tools") {
     const at = tc.allowed_tools && typeof tc.allowed_tools === "object" ? tc.allowed_tools : tc;
     const mode = at.mode ?? "auto";
     if (mode !== "auto" && mode !== "required") throw bad("tool_choice.mode must be auto or required", "tool_choice");
     if (!Array.isArray(at.tools)) throw bad("tool_choice.tools must be a list", "tool_choice");
+    // each entry: a function or custom tool by name, or a hosted tool (none of which runs here). A
+    // function entry without a flat name (the Chat shape, {function: {name}}) or an unknown type is a
+    // 400, never silently "no tools"
     const names = [];
-    for (const t of at.tools) {
-      if (t?.type === "function" && typeof t.name === "string") names.push(t.name);
-      else if (t?.type === "custom") throw bad("custom tools are not supported by pooled serve", "tool_choice");
-    }
+    at.tools.forEach((t, j) => {
+      const q = `tool_choice.tools[${j}]`;
+      if (!t || typeof t !== "object" || typeof t.type !== "string") throw bad(`${q} must be an object with a type`, "tool_choice");
+      if (t.type === "function" || t.type === "custom") {
+        if (typeof t.name !== "string" || !t.name) throw bad(`${q}.name is required (the Responses shape: {"type": "${t.type}", "name": "..."})`, "tool_choice");
+        names.push(t.name);
+      } else if (!HOSTED_TOOL.test(t.type)) throw bad(`${q}: unknown tool type ${JSON.stringify(cleanText(t.type, 40))}`, "tool_choice");
+    });
     if (names.length) { toolChoice = mode; allowed = names; }
     else if (mode === "required") throw bad("tool_choice: no function tool is allowed, so none can be required", "tool_choice");
     else toolChoice = "none";   // only hosted tools allowed: none of them runs here
@@ -227,7 +264,8 @@ export function parseResponses(b, headers = {}, { log = () => {}, store }) {
     else throw bad(`reasoning.effort must be one of none, minimal, ${EFFORTS.join(", ")}`, "reasoning.effort");
   }
 
-  const mt = checkInt(b.max_output_tokens, 1, LIMITS.maxTokens, "max_output_tokens");
+  // above LIMITS.maxTokens: capped, as on the Messages side (the echo keeps the client's value)
+  const mt = capTokens(b.max_output_tokens, "max_output_tokens");
   const temperature = checkNum(b.temperature, 0, 2, "temperature");
   checkNum(b.top_p, 0, 1, "top_p");   // accepted, ignored: the sampler has no nucleus cut
   const tk = b.top_k == null ? null : checkInt(b.top_k, 1, 1e9, "top_k");
@@ -254,10 +292,11 @@ export function parseResponses(b, headers = {}, { log = () => {}, store }) {
       encrypted: include.has("reasoning.encrypted_content"),
       history: messages,     // as parsed (before normalization): what a later previous_response_id continues
       inputItems,
-      fc: new Map(),         // call_id -> fc_ item id
+      fc: new Map(),         // call_id -> fc_ / ctc_ item id
+      custom,                // names of the custom tools (their calls go out as custom_tool_call)
       echo: {
         instructions: b.instructions ?? null,
-        max_output_tokens: mt ?? null,
+        max_output_tokens: b.max_output_tokens ?? null,
         max_tool_calls: maxCalls ?? null,
         reasoning: { effort: b.reasoning?.effort ?? null, summary: b.reasoning?.summary ?? null },
         temperature: temperature ?? 1,
@@ -274,15 +313,21 @@ export function parseResponses(b, headers = {}, { log = () => {}, store }) {
 }
 
 // ---- output ----
-const fcId = (req, callId) => {
+const isCustom = (req, name) => !!req.extra.custom?.has(name);
+// a call's item id, minted once per call_id (so stream, final and store agree): fc_ for a function
+// call, ctc_ for a custom tool's
+const fcId = (req, callId, name) => {
   let id = req.extra.fc.get(callId);
-  if (!id) { id = ids.fc(); req.extra.fc.set(callId, id); }
+  if (!id) { id = isCustom(req, name) ? id24("ctc_") : ids.fc(); req.extra.fc.set(callId, id); }
   return id;
 };
 const outputText = (text) => ({ type: "output_text", text, annotations: [], logprobs: [] });
 const reasoningItem = (req, id, text) => ({ id, type: "reasoning", summary: [], content: [{ type: "reasoning_text", text }], ...(req.extra.encrypted ? { encrypted_content: blob.encode(text) } : {}) });
 const messageItem = (id, text, status) => ({ id, type: "message", status, role: "assistant", content: [outputText(text)] });
-const callItem = (req, callId, name, args, status) => ({ id: fcId(req, callId), type: "function_call", status, arguments: args, call_id: callId, name });
+// a call as its output item: function_call { arguments }, or for a custom tool custom_tool_call { input }
+const callItem = (req, callId, name, args, status) => (isCustom(req, name)
+  ? { id: fcId(req, callId, name), type: "custom_tool_call", status, call_id: callId, name, input: customInput(args) }
+  : { id: fcId(req, callId, name), type: "function_call", status, arguments: args, call_id: callId, name });
 const usageOf = (a) => ({ input_tokens: a.usage.in, input_tokens_details: { cached_tokens: a.reused || 0 }, output_tokens: a.usage.out,
   output_tokens_details: { reasoning_tokens: a.usage.think || 0 }, total_tokens: a.usage.in + a.usage.out });
 const isIncomplete = (a, req) => { const o = outcome(a, req); return o === "length" || o === "ctx"; };
@@ -380,24 +425,33 @@ export class ResponsesEncoder {
     this.emit("response.output_text.delta", { item_id: this.cur.item.id, output_index: this.cur.index, content_index: 0, delta: t, logprobs: [] });
   }
   callStart(i, id, name) {
-    this.open("call", callItem(this.req, id, name, "", "in_progress"), { i, callId: id, name });
+    this.open("call", callItem(this.req, id, name, isCustom(this.req, name) ? '{"input":""}' : "", "in_progress"), { i, callId: id, name, custom: isCustom(this.req, name) });
   }
+  // a custom call's input is a string inside the JSON arguments: it goes out whole when the call ends
   callArgs(i, frag) {
     const x = this.items.find((y) => y.kind === "call" && y.i === i);
     if (!x || x.closed) return;
     x.text += frag;
-    this.emit("response.function_call_arguments.delta", { item_id: x.item.id, output_index: x.index, delta: frag });
+    if (!x.custom) this.emit("response.function_call_arguments.delta", { item_id: x.item.id, output_index: x.index, delta: frag });
   }
   callEnd(i, args) {
     const x = this.items.find((y) => y.kind === "call" && y.i === i);
     if (!x || x.closed) return;
     this.endCall(x, typeof args === "string" ? args : x.text);
   }
-  endCall(x, args) {
+  // status "incomplete": the call the answer was cut inside (max_output_tokens); its item still gets
+  // its output_item.done, as every added item does, but no arguments / input done event
+  endCall(x, args, status = "completed") {
     x.closed = true;
     x.text = args;
-    x.final = callItem(this.req, x.callId, x.name, args, "completed");
-    this.emit("response.function_call_arguments.done", { item_id: x.item.id, output_index: x.index, name: x.name, arguments: args });
+    x.final = callItem(this.req, x.callId, x.name, args, status);
+    if (status === "completed") {
+      if (x.custom) {
+        const input = customInput(args);
+        this.emit("response.custom_tool_call_input.delta", { item_id: x.item.id, output_index: x.index, delta: input });
+        this.emit("response.custom_tool_call_input.done", { item_id: x.item.id, output_index: x.index, input });
+      } else this.emit("response.function_call_arguments.done", { item_id: x.item.id, output_index: x.index, name: x.name, arguments: args });
+    }
     this.emit("response.output_item.done", { output_index: x.index, item: x.final });
     if (this.cur === x) this.cur = null;
   }
@@ -408,15 +462,17 @@ export class ResponsesEncoder {
     const openId = a.open?.id ?? null;
     this.ws = "";
     // the open reasoning / message ends here; a call the room ended without its end message ends with
-    // the final arguments; the call the answer was cut inside stays open (it is incomplete)
+    // the final arguments; the call the answer was cut inside ends as incomplete
     if (this.cur && this.cur.kind !== "call") this.close(inc ? "incomplete" : "completed");
     for (const x of this.items) if (x.kind === "call" && !x.closed && x.callId !== openId && final.has(x.callId)) this.endCall(x, final.get(x.callId).args);
+    for (const x of this.items) if (x.kind === "call" && !x.closed && x.callId === openId) this.endCall(x, x.text, "incomplete");
     // calls only the final message had (never streamed)
     const streamed = new Set(this.items.filter((x) => x.kind === "call").map((x) => x.callId));
     for (const c of a.calls) {
       if (streamed.has(c.id)) continue;
-      const x = this.open("call", callItem(this.req, c.id, c.name, "", "in_progress"), { i: -1, callId: c.id, name: c.name });
-      this.emit("response.function_call_arguments.delta", { item_id: x.item.id, output_index: x.index, delta: c.args });
+      const custom = isCustom(this.req, c.name);
+      const x = this.open("call", callItem(this.req, c.id, c.name, custom ? '{"input":""}' : "", "in_progress"), { i: -1, callId: c.id, name: c.name, custom });
+      if (!custom) this.emit("response.function_call_arguments.delta", { item_id: x.item.id, output_index: x.index, delta: c.args });
       this.endCall(x, c.args);
     }
     // the final output: what was streamed, with the final arguments; calls the answer does not have are left out
@@ -436,7 +492,13 @@ export class ResponsesEncoder {
     const output = this.items.filter((x) => x.closed && x.final).map((x) => x.final);
     this.emit("response.failed", { response: responseObject(this.req, this.meta, { status: "failed", output, error: { code: body.error.code || "server_error", message: body.error.message } }) });
   }
-  keepAlive(ahead) { this.sse.write(sseComment(ahead == null ? "keep-alive" : `queued, ${ahead} ahead`)); }
+  // Real events, not SSE comments: Codex's stream_idle_timeout_ms (300 s) restarts only on an event,
+  // and a queue wait or a long prefill can be longer. Before the room starts: response.created (the
+  // status is committed from here on; errors become response.failed); after: response.in_progress.
+  keepAlive() {
+    if (!this.started) { this.start(); return; }
+    this.emit("response.in_progress", { response: responseObject(this.req, this.meta) });
+  }
 }
 
 // ---- stored responses ----
@@ -488,8 +550,9 @@ export function makeAdapter({ store = new ResponseStore() } = {}) {
       { method: "GET", path: /^\/v1\/responses\/[^/]+\/input_items$/, handler: inputItems },
     ],
     parse: (body, headers, { log } = {}) => parseResponses(body, headers, { log, store }),
-    // call i's call_id; its fc_ item id is minted alongside, so stream, final and store agree
-    idFor: (req) => () => { const id = ids.call(); fcId(req, id); return id; },
+    // call i's call_id; its item id (fc_ / ctc_) is minted on first use and kept, so stream, final
+    // and store agree
+    idFor: () => () => ids.call(),
     encoder: (req, sse, meta) => new ResponsesEncoder(req, sse, meta),
     final: (a, req) => responsesFinal(a, req),
     after: (a, req) => storeIt(store, a, req),

@@ -54,7 +54,7 @@ if (o.help || !pos.length || pos[0] === "help") { console.log(HELP); process.exi
 if (pos[0] !== "serve") { console.error(`pooled: unknown command ${pos[0]}\n\n${HELP}`); process.exit(2); }
 
 const { Bridge, roomCodeFrom } = await import("../lib/room.js");
-const { createServer } = await import("../lib/http.js");
+const { createServer, agentSettings } = await import("../lib/http.js");
 const { cleanLabel, cleanText } = await import("../lib/common.js");
 
 const code = roomCodeFrom(pos[1]);
@@ -104,18 +104,20 @@ catch (e) { console.error(`pooled: ${e.message}`); api.server.close(); process.e
 
 // the host's ai-ready-all follows its hello: give it a moment, so the banner can name the model
 if (!bridge.ready) await new Promise((r) => { const t = setTimeout(r, 1500); bridge.once("state", () => { if (bridge.ready) { clearTimeout(t); r(); } }); });
-const label = () => (bridge.ready ? `${bridge.modelLabel || bridge.model}` : "model not ready yet");
+const ctxOf = () => { const c = +bridge.hostMeta?.ctx; return Number.isInteger(c) && c > 0 ? c : null; };
+const label = () => (bridge.ready ? `${bridge.modelLabel || bridge.model}${ctxOf() ? ` · ${ctxOf()} tokens of context` : ""}` : "model not ready yet");
 const print = (s) => { if (!o.quiet) console.log(s); };
 print(`pooled serve · room ${code} · ${label()}
   OpenAI     http://127.0.0.1:${bound}/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
   Anthropic  http://127.0.0.1:${bound}            (ANTHROPIC_BASE_URL: messages)
   bound to 127.0.0.1 only · ${token ? "token required" : "no token (set POOLED_TOKEN to require one)"}
   prompts go to the room's host and may be shown to everyone in the room`);
+if (ctxOf()) print("\n" + agentSettings(ctxOf(), bound).join("\n").trimEnd());
 if (o["json-log"]) log(JSON.stringify({ ready: bridge.ready, port: bound, room: code }));
 
 let wasReady = bridge.ready;
 bridge.on("state", () => {
-  if (bridge.ready && !wasReady) log(`the room's model is ready: ${bridge.modelLabel || bridge.model}`);
+  if (bridge.ready && !wasReady) log(`the room's model is ready: ${label()}`);
   else if (!bridge.ready && wasReady && !bridge.kicked) log("the room's model is not ready (a device left or the host is re-dealing)");
   wasReady = bridge.ready;
   if (bridge.kicked) log(`disconnected by the host: ${bridge.kicked}; requests now get 503`, "error");

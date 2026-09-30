@@ -28,6 +28,15 @@ const EXTRA = [];
 export function register(method, path, handler) { EXTRA.push({ method, path, handler }); }
 const matches = (route, path) => (typeof route.path === "string" ? route.path === path : route.path.test(path));
 
+// Settings for the coding agents, from the room's context: neither knows the size of a model it has
+// never heard of, so without these it never compacts before the room refuses a prompt that is too long
+export function agentSettings(ctx, port) {
+  if (!ctx) return [];
+  return [`For this room's ${ctx}-token context:`,
+    `  Codex        model_context_window = ${ctx}, model_auto_compact_token_limit = ${Math.floor(ctx * 0.8)}  (~/.codex/config.toml)`,
+    `  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:${port} CLAUDE_CODE_MAX_CONTEXT_TOKENS=${ctx} CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled`, ""];
+}
+
 export function createServer({ bridge, port, token = null, maxQueue = 8, log = () => {}, version = "", keepAliveMs = KEEPALIVE_MS, idleMs = IDLE_MS, hostQueuedMs = HOST_QUEUED_MS }) {
   const queue = [];          // jobs waiting here, oldest first
   let active = null;         // the job the room is working on
@@ -35,6 +44,8 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
   let bound = port;          // the port actually listened on (port 0 in tests picks a free one)
 
   const modelId = () => (bridge.model ? `pooled/${bridge.model}` : null);
+  // the room's context in tokens, when the host said it (a v2 host: hello meta / ai-ready-all)
+  const ctxOf = () => { const c = +bridge.hostMeta?.ctx; return Number.isInteger(c) && c > 0 ? c : null; };
   const modelLabel = () => `${bridge.modelLabel || bridge.model || "model"} (Pooled room ${bridge.code})`;
   // why a request cannot be served now, as an ApiError, or null
   const unavailable = () => {
@@ -213,18 +224,19 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
       const want = decodeURIComponent(rest);
       if (!id || want !== id) throw new ApiError("notfound", `model ${want} not found (this room serves ${id || "no model yet"})`);
       if (anthropicShape) json(res, 200, anthropicModels(id, modelLabel(), (bridge.readySince || 0) * 1000).data[0]);
-      else json(res, 200, openaiModels(id, bridge.readySince || 0).data[0]);
+      else json(res, 200, openaiModels(id, bridge.readySince || 0, ctxOf()).data[0]);
       return;
     }
     if (anthropicShape) json(res, 200, anthropicModels(bridge.ready ? id : null, modelLabel(), (bridge.readySince || 0) * 1000));
-    else json(res, 200, openaiModels(bridge.ready ? id : null, bridge.readySince || 0));
+    else json(res, 200, openaiModels(bridge.ready ? id : null, bridge.readySince || 0, ctxOf()));
   }
 
   function banner() {
-    return [`pooled serve ${version} · room ${bridge.code} · ${bridge.ready ? modelLabel() : "model not ready yet"}`, "",
+    const ctx = ctxOf();
+    return [`pooled serve ${version} · room ${bridge.code} · ${bridge.ready ? modelLabel() : "model not ready yet"}${ctx ? ` · ${ctx} tokens of context` : ""}`, "",
       `OpenAI     http://127.0.0.1:${bound}/v1        POST /v1/chat/completions, POST /v1/responses, GET /v1/models`,
       `Anthropic  http://127.0.0.1:${bound}           POST /v1/messages`,
-      `Health     http://127.0.0.1:${bound}/health`, ""].join("\n");
+      `Health     http://127.0.0.1:${bound}/health`, "", ...agentSettings(ctx, bound)].join("\n");
   }
 
   // which adapter's error shape a path gets
@@ -258,7 +270,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
         // with --token, a caller without it learns only that something is up: the room code alone
         // would let it join the room directly, around the token
         if (!authorized(req)) { json(res, 200, { ok: true }); return; }
-        json(res, 200, { ok: true, room: bridge.code, connected: bridge.connected, ready: bridge.ready, model: modelId(), queue: queue.length + (active ? 1 : 0), served: served.n, ...(bridge.kicked ? { closed: bridge.kicked } : {}) });
+        json(res, 200, { ok: true, room: bridge.code, connected: bridge.connected, ready: bridge.ready, model: modelId(), ctx: ctxOf(), queue: queue.length + (active ? 1 : 0), served: served.n, ...(bridge.kicked ? { closed: bridge.kicked } : {}) });
         return;
       }
       if (!authorized(req)) throw new ApiError("auth", keyOf(req) ? "invalid API key" : "missing API key: this pooled serve was started with a token");
@@ -299,6 +311,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
   return {
     server,
     closeAll,
+    banner,
     listen: () => new Promise((resolve, reject) => {
       server.once("error", reject);
       server.listen(port, "127.0.0.1", () => { server.off("error", reject); bound = server.address().port; resolve(bound); });

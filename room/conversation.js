@@ -41,11 +41,13 @@ export function buildIds(tok, { system = "", turns, thinking = false }) {
   const closeThink = !thinking && S.think !== undefined && S.thinkEnd !== undefined
     ? [S.think, ...tok.encode("\n\n"), S.thinkEnd, ...tok.encode("\n\n")] : [];
   const ids = [];
-  if (system) ids.push(S.imStart, ...tok.encode("system\n" + system), S.imEnd, ...nl);
+  // loops, not push(...): a long text is more ids than the engine takes as arguments (RangeError)
+  const add = (a) => { for (const x of a) ids.push(x); };
+  if (system) { ids.push(S.imStart); add(tok.encode("system\n" + system)); ids.push(S.imEnd, ...nl); }
   for (const t of turns) {
-    if (t.role === "user") ids.push(S.imStart, ...tok.encode("user\n" + t.text), S.imEnd, ...nl, S.imStart, ...tok.encode("assistant\n"), ...closeThink);
-    else if (t.open) ids.push(...t.ids);   // an answer being continued: left open, no end token
-    else ids.push(...t.ids, S.imEnd, ...nl);
+    if (t.role === "user") { ids.push(S.imStart); add(tok.encode("user\n" + t.text)); ids.push(S.imEnd, ...nl, S.imStart, ...tok.encode("assistant\n"), ...closeThink); }
+    else if (t.open) { for (const x of t.ids) ids.push(x); }   // an answer being continued: left open, no end token
+    else { for (const x of t.ids) ids.push(x); ids.push(S.imEnd, ...nl); }
   }
   if (ids.some((t) => !Number.isInteger(t)))
     throw new Error("tokenizer produced an invalid token id (special tokens missing) — " + JSON.stringify(ids.slice(0, 6)));
@@ -153,7 +155,9 @@ export function renderApi(tok, req, profile, { encode = (s) => tok.encode(s), tu
   const T = { call: sp("<tool_call>"), callEnd: sp("</tool_call>"), resp: sp("<tool_response>"), respEnd: sp("</tool_response>") };
   const out = [];
   let run = "";
-  const flush = () => { if (run) { out.push(...encode(run)); run = ""; } };
+  // a loop, not push(...): a long request's text is hundreds of thousands of ids, past the engine's
+  // argument limit (RangeError)
+  const flush = () => { if (run) { for (const x of encode(run)) out.push(x); run = ""; } };
   const text = (s) => { run += s; };
   const ids = (a) => { flush(); for (const x of a) out.push(x); };
   const tag = (id, textForm) => { if (id == null) text(textForm); else ids([id]); };

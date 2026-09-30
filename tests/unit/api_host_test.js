@@ -605,3 +605,42 @@ Deno.test("api v2: thinking on but the model opened no block: the cached answer 
   eq(p2.exact, 1);
   ok(r1.tok.decode(p2.ids).includes('<tool_call>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n</tool_call>'), "the call is still there");
 });
+
+Deno.test("api v2: schemas that fit one by one but not together are refused before the answer starts", () => {
+  const props = {}; for (let i = 0; i < 1800; i++) props[i.toString(36)] = { items: 1 };
+  const tools = Array.from({ length: 6 }, (_, i) => ({ name: "t" + i, parameters: { type: "object", properties: props } }));
+  for (const m of MODELS) {
+    const v = validateApiAsk(ask2({ tools }), { profile: PROF[m] });
+    ok(v.err && /too large together/.test(v.err), m + ": " + JSON.stringify(v));
+  }
+  ok(!validateApiAsk(ask2({ tools: tools.slice(0, 2) }), { profile: PROF["qwen3-1.7b"] }).err, "two of them fit");
+  ok(API2_LIMITS.tools >= 1024, "agents with MCP servers send hundreds of tools");
+  ok(!validateApiAsk(ask2({ tools: Array.from({ length: 300 }, (_, i) => ({ name: "f" + i, parameters: { type: "object", properties: { a: { type: "string" } } } })) }), { profile: PROF["qwen3.6-35b-moe"] }).err, "300 small tools");
+});
+Deno.test("api v2: a schema that would stall or overflow the host is a bad request, never a throw", () => {
+  const mk = (k) => ({ $defs: { a: { anyOf: Array.from({ length: k }, () => ({ $ref: "#/$defs/a" })) } }, type: "object", properties: { x: { $ref: "#/$defs/a" } } });
+  let deep = { type: "string" }; for (let i = 0; i < 1500; i++) deep = { anyOf: [deep] };
+  for (const m of MODELS) {
+    const t0 = Date.now();
+    const v = validateApiAsk(ask2({ tools: [{ name: "f", parameters: mk(64) }] }), { profile: PROF[m] });
+    ok(Date.now() - t0 < 2000, m + ": k=64 took " + (Date.now() - t0) + " ms");
+    void v;
+    const d = validateApiAsk(ask2({ tools: [{ name: "f", parameters: { type: "object", properties: { x: deep } } }] }), { profile: PROF[m] });
+    ok(d.err && /nests deeper/.test(d.err), m + ": deep anyOf " + JSON.stringify(d).slice(0, 200));
+  }
+  const self = validateApiAsk(ask2({ tools: null, params: { format: { type: "schema", schema: { $defs: { a: { allOf: [{ $ref: "#/$defs/a" }] } }, $ref: "#/$defs/a" } } } }));
+  ok(self.req || self.err, "a self-referencing allOf ends (at the $ref depth)");
+  // anything else that throws while checking is still an answer
+  const v = validateApiAsk({ api: 2, rid: "r", messages: [{ role: "user", text: "q" }], tools: [{ name: "f", get parameters() { throw new Error("boom"); } }] });
+  ok(v.err && v.code === "bad" && /could not be checked: boom/.test(v.err), JSON.stringify(v));
+});
+Deno.test("api v2: a grammar that cannot be built ends the answer as an error (the room is not left busy)", async () => {
+  const props = {}; for (let i = 0; i < 1800; i++) props[i.toString(36)] = { items: 1 };
+  const req = { api: 2, rid: "r", system: "", messages: [{ role: "user", text: "q" }], tools: Array.from({ length: 6 }, (_, i) => ({ name: "t" + i, description: "", parameters: { type: "object", properties: props } })),
+    params: { maxTokens: 10, toolChoice: "auto", allowed: null, parallel: true, maxCalls: null, format: null, effort: null, stop: [], thinking: false } };
+  const prompt = apiPrompt2(BT, req, 1 << 20, { profile: PROF["qwen3-1.7b"] });
+  let generated = 0;
+  const res = await apiRun2({ tok: BT, req, prompt, generate: async () => { generated++; return { reason: "stop" }; }, send: () => {}, fallback: makeSampler({ temp: 0 }), ctxMax: 1 << 20 });
+  eq([res.reason, generated], ["error", 0]);
+  ok(/too large together/.test(res.err), res.err);
+});

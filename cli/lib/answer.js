@@ -20,6 +20,8 @@ export const TOKEN_SLACK = 16;             // messages allowed past max_tokens b
 export const MAX_CALLS = 64;               // calls accepted in one answer
 const REASONS = new Set(["stop", "stop_seq", "max", "ctx", "abort", "error"]);
 const count = (x) => Math.max(0, Math.floor(+x) || 0);
+// a finished call's arguments: a JSON object (clients JSON.parse them)
+const isArgs = (s) => { try { const v = JSON.parse(s); return !!v && typeof v === "object" && !Array.isArray(v); } catch { return false; } };
 
 // Builds the Answer; the non-stream path renders it with adapter.final(answer, req)
 export class Collector {
@@ -49,7 +51,10 @@ export class Ask {
     this.state = "asked";
     this.promptTokens = 0; this.tokens = 0; this.thinkChars = 0; this.textChars = 0;
     this.calls = [];   // [{ id, name, args, done }]
-    this.names = new Set((req.tools || []).map((t) => t.name));
+    // the tools a call may name: none under tool_choice none, the named one, else the allowed ones
+    const tc = req.toolChoice;
+    this.names = new Set(tc === "none" ? [] : tc && typeof tc === "object" ? [tc.name]
+      : (req.tools || []).map((t) => t.name).filter((n) => !req.allowed || req.allowed.includes(n)));
   }
   each(f) { for (const e of this.enc) f(e); }
   // the room went past what was asked: stop there, as a finished answer cut at max_tokens (v1's rule)
@@ -85,7 +90,7 @@ export class Ask {
         if (!Number.isInteger(i) || i < 0 || i >= MAX_CALLS) return this.bad("a call index out of range");
         if (d.name != null) {
           if (i !== this.calls.length || typeof d.name !== "string") return this.bad("calls out of order");
-          if (!this.names.has(d.name)) return this.bad(`a call to ${cleanText(d.name, 60)}, which is not a declared tool`);
+          if (!this.names.has(d.name)) return this.bad(`a call to ${cleanText(d.name, 60)}, which is not a tool this request allows`);
           const id = this.idFor(i);
           this.calls.push({ id, name: d.name, args: "", done: false });
           this.each((e) => e.callStart(i, id, d.name));
@@ -101,7 +106,10 @@ export class Ask {
           this.each((e) => e.callArgs(i, d.a));
           return null;
         }
-        if (d.end) { c.done = true; this.each((e) => e.callEnd(i, c.args)); }
+        if (d.end) {
+          if (!isArgs(c.args)) return this.bad(`call ${i}'s arguments are not a JSON object`);
+          c.done = true; this.each((e) => e.callEnd(i, c.args));
+        }
         return null;
       }
       case "ai-gendone": {
@@ -126,7 +134,7 @@ export class Ask {
       const got = [];
       for (let i = 0; i < Math.min(calls.length, MAX_CALLS); i++) {
         const c = calls[i];
-        if (!c || typeof c.name !== "string" || typeof c.args !== "string" || c.args.length > ANSWER_CHARS || !this.names.has(c.name)) return this.bad("bad calls in the answer");
+        if (!c || typeof c.name !== "string" || typeof c.args !== "string" || c.args.length > ANSWER_CHARS || !this.names.has(c.name) || !isArgs(c.args)) return this.bad("bad calls in the answer");
         const s = this.calls[i];
         if (s && s.done && s.name === c.name && s.args !== c.args) this.log(`${this.label}: call ${i} (${c.name}): the streamed arguments differ from the final ones; the final ones count`);
         got.push({ id: s?.name === c.name ? s.id : this.idFor(i), name: c.name, args: c.args });
