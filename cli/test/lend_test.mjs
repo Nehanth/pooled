@@ -27,7 +27,8 @@ test("join: a code or a link, and the defaults", () => {
 
 test("join: bad arguments are usage errors that say what is wrong", () => {
   const bad = (argv, re) => assert.throws(() => parseLendArgs("join", argv), (e) => e instanceof UsageError && re.test(e.message), argv.join(" "));
-  bad([], /give a room code/);
+  assert.equal(parseLendArgs("join", []).code, null);   // no code: a terminal asks for it, a script gets the usage error
+  assert.equal(parseLendArgs("join", []).askCode, true);
   bad(["not a code!"], /not "not a code!"/);
   bad(["ABCD", "EFGH"], /one room code/);
   bad(["ABCD", "--gb", "lots"], /--gb must be a number/);
@@ -54,7 +55,9 @@ test("host: model, devices, code, ctx", () => {
   bad(["--devices", "2.5"], /--devices/);
   bad(["--code", "IL01"], /without I, L, O, U, 0 or 1/);
   bad(["--ctx", "12"], /--ctx/);
-  bad(["ABCD"], /takes no room code/);
+  bad(["ABCD"], /unknown model "ABCD"/);   // the positional is the model now
+  bad(["qwen3-1.7b", "--model", "qwen3.6-35b-moe"], /two models/);
+  bad(["qwen3-1.7b", "extra"], /one model/);
   assert.deepEqual(hostable(MODELS), ["qwen3-1.7b", "qwen3.6-35b-moe"]);
 });
 

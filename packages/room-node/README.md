@@ -49,7 +49,7 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 | `pledgeGB` | GPU memory this device lends; default half its largest buffer (1 to 64) |
 | `ctx` | context to ask for, clamped by `room/models.js` CTX (1.7B 16k, 27B 64k, MoE 128k); default the largest for the qwen35 models (MoE 128k, 27B 64k) and the room default (8k) for the 1.7B, then lowered to what the smallest GPU binding limit in the room holds (`maxBindMB` in each hello; none counts as 128 MiB). Every device gets it with its `ai-load` |
 | `ckpt` | the host's checkpoints (`ckpt.js`): `{ answers, pins, minPin, turns }` (default 4 answer and turn checkpoints, 4 pinned prefixes, pin a fixed start of 1024+ tokens, turn checkpoints on), or `false` for none |
-| `modelDir` | local model files, in the layout of `source.js` LOCAL (`qwen17/model.gguf`, `q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`, ...); else HTTP range reads of the model's URL, as the page makes |
+| `modelDir` | local model files: `<model key>/<file name>` as `pooled pull` keeps them (`qwen3-1.7b/Qwen3-1.7B-Q8_0.gguf`), or the layout of `source.js` LOCAL (`qwen17/model.gguf`, `q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`, ...); else HTTP range reads of the model's URL, as the page makes |
 | `signal` | a PeerServer `host:port` (TLS only on port 443), or `room/signal.js` specs as a comma list (`wss://host/path,cloud`): the first that answers is used, the next when one is down; default the PeerJS cloud server pooled.run uses. A signaling server that drops later is reconnected with backoff (the `signaling` event) |
 | `setup` | `setupNode` options: `webgpu` (an async loader returning `{ create, globals }`, for a caller that resolves Dawn from its own install, as `pooled join` does), `dawnFlags` |
 | `name` | this device's name in the room |

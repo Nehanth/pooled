@@ -13,15 +13,21 @@ export const LINUX_AVAIL_SLACK_GB = 2;  // unified memory on Linux: never more t
 export const UPDATE_HINT = "npx @pooled/cli@latest";
 
 export const HELP_JOIN = `Usage
-  pooled join <ROOM CODE | "room link"> [options]
+  pooled join [ROOM CODE | "room link"] [options]
 
   Lends this computer's GPU to a Pooled room: the room's host deals this device some of the
   model's layers, and they run here until you press Ctrl-C (which leaves the room and frees the GPU).
   Needs a GPU that Dawn can use (Metal on macOS 26+, Vulkan on Linux, D3D12 on Windows).
 
+  In a terminal, pooled join alone asks for the code or link, shows the host's model and asks how
+  much to lend. A flag skips its question.
+
   Getting in: with the room's invite link (in quotes: "https://pooled.run/r/4TKG9P#k=..."), the
   host lets this computer in at once. With the code alone (4TK-G9P), a host that asks before new
   devices join sees "<name> wants to join" and this waits until it presses Allow.
+
+  The layers come from ~/.pooled/models when the host's model is there (pooled pull <model>),
+  else each start streams this device's layers from Hugging Face.
 
 Options
   --gb <n|max>      how much memory to lend, in GB. Default: the memory rule, printed at start:
@@ -32,7 +38,7 @@ Options
                     computer's hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
                     default: the PeerJS cloud pooled.run uses)
-  --models <dir>    read the weights from local files instead of downloading them
+  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
   --no-check        skip the test allocation that confirms the memory is there
   --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
                     (default 10); only a host of the same name: a room code can be reused by a
@@ -48,39 +54,48 @@ Options
 `;
 
 export const HELP_HOST = `Usage
-  pooled host [options]
+  pooled host [model] [options]
 
   Opens a new Pooled room on this computer, which holds the embedding, the head and its share of the
   layers. Other devices join with the invite link it prints (a browser tab, a phone, pooled join) or
-  with the code. In a terminal, press Enter to deal the layers over the devices in the room, and
-  Enter again to re-deal after more join. Ask from the room page, from the terminal with
-  pooled chat, or from your own tools with pooled serve.
+  with the code.
 
-  Who gets in: a device with the invite link (its #k= key) comes in at once. One with the code
-  alone waits until you let it in: in a terminal, press a to allow the oldest request, d to deny
-  it. Without a terminal it waits for good (give it the link), unless you pass --allow-all.
+  In a terminal, the room opens at once (its code and invite link at the top), then pooled host asks
+  for what the flags did not say: the model (with what each needs and whether it is downloaded) and
+  how much this computer lends. The room panel lists every device and its pledge, who waits to join
+  (press a to allow, d to deny), and whether the pledges hold the model; Enter starts once they do. When the
+  room is online, c chats with it right there. Without a terminal, give the choices as flags.
 
-Options
-  --model <key>     the model (default qwen3-1.7b; --model list prints them)
-  --gb <n|max>      how much memory to lend, as pooled join (default: the memory rule)
-  --devices <n>     deal the layers as soon as n devices (this one included) are in the room,
-                    and again when the room went on without one and n are back; the default
-                    without a terminal is 1 (start at once)
+  Every step has a flag; a flag given skips its question:
+
+    [model] / --model <m>  the model (a part of the name works: 35b); skips the picker
+    --gb <n|max>           how much this computer lends; skips the pledge question
+    -y, --yes              download the model without asking when it is not on this computer
+    --no-pull              don't download: stream this computer's layers from Hugging Face
+    --start                start as soon as the room's pledges hold the model
+    --wait <n>             start once n devices (this one included) are in and the pledges fit
+    --allow-all            let in anyone with the code, without asking
+    --deny-unknown         turn away devices that come with the code alone (the link still works)
+    --chat                 chat here once the room is online
+    --name <s>             how the room shows this computer
+
+  pooled host qwen3.6-35b-moe --gb 64 --start --yes runs with no questions at all. Without a
+  terminal, the defaults are qwen3-1.7b, the memory rule and --start.
+
+More options
   --code <CODE>     the room code to use (default: a random one of six characters)
-  --allow-all       let in anyone with the room code, without asking (the invite link is not
-                    needed; also lets in room pages from before the gate)
   --ctx <n>         the context to ask for, in tokens (default: the model's room default)
-  --name <s>        how the room shows this device
+  --devices <n>     the same as --wait (its older name)
   --signal <spec>   PeerJS signaling server(s), as pooled join
-  --models <dir>    read the weights from local files instead of downloading them
+  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
   --no-check        skip the test allocation that confirms the memory is there
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
   -h, --help        this help
 
+  pooled host --model list prints the models.
   Every device that holds layers sees the hidden states of what is asked in the room (they carry
-  the prompts and answers), and whoever is in can ask. Share the invite link only with people you
-  trust, and let in only devices you know.
+  the prompts and answers), and whoever is in can ask. Share the invite link only with people you trust, and let in only devices you know.
 `;
 
 export class UsageError extends Error {}
@@ -99,13 +114,16 @@ const COMMON = {
   gb: { type: "string" }, name: { type: "string" }, signal: { type: "string" }, models: { type: "string" },
   "no-check": { type: "boolean" }, "json-log": { type: "boolean" }, quiet: { type: "boolean" }, help: { type: "boolean", short: "h" },
 };
+const HOST_OPTS = { model: { type: "string" }, devices: { type: "string" }, wait: { type: "string" }, code: { type: "string" }, ctx: { type: "string" },
+  "allow-all": { type: "boolean" }, "deny-unknown": { type: "boolean" }, start: { type: "boolean" }, chat: { type: "boolean" },
+  yes: { type: "boolean", short: "y" }, "no-pull": { type: "boolean" } };
 
 // argv after the command word -> options, or throws UsageError. models: MODELS (room/models.js) for
 // checking --model; left out, any key passes (the runner checks it again)
 export function parseLendArgs(cmd, argv, { models = null } = {}) {
   const options = cmd === "join"
     ? { ...COMMON, wait: { type: "string" } }
-    : { ...COMMON, model: { type: "string" }, devices: { type: "string" }, code: { type: "string" }, ctx: { type: "string" }, "allow-all": { type: "boolean" } };
+    : { ...COMMON, ...HOST_OPTS };
   let r;
   try { r = parseArgs({ args: argv, options, allowPositionals: true, strict: true }); }
   catch (e) { throw new UsageError(e.message.replace(/^.*?: /, "")); }
@@ -117,21 +135,41 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
   if (cmd === "join") {
     if (pos.length > 1) throw new UsageError(`one room code, not ${pos.length}: ${pos.join(" ")}`);
     const code = roomCodeFrom(pos[0]);
-    if (!code) throw new UsageError(`give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link${pos[0] ? `, not "${pos[0]}"` : ""}`);
-    out.code = code;
-    out.key = roomKeyFrom(pos[0]);   // the invite link's #k=: in without the host's Allow
+    // no code at all: a terminal asks for it (lendrun), a script gets this same error there
+    if (!pos.length) { out.code = null; out.key = null; out.askCode = true; }
+    else if (!code) throw new UsageError(`give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link${pos[0] ? `, not "${pos[0]}"` : ""}`);
+    if (pos.length) {
+      out.code = code;
+      out.key = roomKeyFrom(pos[0]);   // the invite link's #k=: in without the host's Allow
+    }
     const wait = o.wait == null ? 10 : Number(o.wait);
     if (!Number.isFinite(wait) || wait < 0) throw new UsageError("--wait must be a number of minutes");
     out.waitMs = wait * 60000;
   } else {
-    if (pos.length) throw new UsageError(`pooled host takes no room code (it makes one; --code picks it): "${pos[0]}"`);
-    out.model = o.model || "qwen3-1.7b";
+    // pooled host <model> or --model <model>: a key, or a part of one that names one ("35b")
+    if (pos.length > 1) throw new UsageError(`one model, not ${pos.length}: ${pos.join(" ")} (pooled host makes the room code; --code picks it)`);
+    if (pos.length && o.model && pos[0] !== o.model) throw new UsageError(`two models: "${pos[0]}" and --model ${o.model}`);
+    let given = pos[0] || o.model || null;
+    if (given && given !== "list" && models) {
+      const keys = hostable(models);
+      if (!keys.includes(given)) {
+        const hits = keys.filter((k) => k.includes(String(given).toLowerCase()));
+        if (hits.length === 1) given = hits[0];
+        else throw new UsageError(`unknown model "${given}"; one of: ${keys.join(", ")}`);
+      }
+    }
+    out.model = given || "qwen3-1.7b";
+    out.modelGiven = !!given;
     out.allowAll = !!o["allow-all"];
-    if (out.model !== "list" && models && !hostable(models).includes(out.model))
-      throw new UsageError(`unknown model "${out.model}"; one of: ${hostable(models).join(", ")}`);
-    if (o.devices != null) {
-      const n = Number(o.devices);
-      if (!Number.isInteger(n) || n < 1 || n > 64) throw new UsageError("--devices must be a whole number from 1 to 64");
+    out.denyUnknown = !!o["deny-unknown"];
+    if (out.allowAll && out.denyUnknown) throw new UsageError("--allow-all and --deny-unknown say opposite things: pick one");
+    out.start = !!o.start; out.chat = !!o.chat; out.yes = !!o.yes; out.noPull = !!o["no-pull"];
+    out.gbGiven = o.gb != null;
+    // --wait N (and its older name --devices N): deal once N devices (this one included) are in
+    for (const [flag, v] of [["--devices", o.devices], ["--wait", o.wait]]) {
+      if (v == null) continue;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1 || n > 64) throw new UsageError(`${flag} must be a whole number from 1 to 64`);
       out.devices = n;
     }
     if (o.code != null) {

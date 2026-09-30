@@ -194,7 +194,8 @@ export class RoomNode extends EventEmitter {
       conn.send(this.helloMsg());
     });
   }
-  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax() } : this.meta, v: PROTOCOL, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
+  // (a host's meta names the model it will run, so a device joining before Start can say which)
+  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax(), ...(this.ai.model ? { model: this.ai.model } : {}) } : this.meta, v: PROTOCOL, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
   attachStripe(e, conn) { attachWire(e.link, conn, (m) => this.onData(conn.peer, m)); e.stripes.push(conn); }
   // host: the room's invite link fragment (#k=...), and Allow / Deny for a device in the lobby
   get inviteFragment() { return keyFragment(this.gate?.key); }
@@ -697,8 +698,10 @@ export class RoomNode extends EventEmitter {
       if (!keep) {
         this.freeLayers("host");
         ai.loadingShard = true;
+        let lastPct = -1;
         const r = await loadShard({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log,
-          onGpuError: (m) => this.log("GPU error: " + m) });
+          onGpuError: (m) => this.log("GPU error: " + m),
+          onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
         Object.assign(ai, { engine: r.engine, device: r.device, tok: r.tok, cfg: r.cfg, range: ranges[0], role: "host" });
         ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv };
       }
@@ -726,6 +729,16 @@ export class RoomNode extends EventEmitter {
     return p;
   }
   hosting() { return this.isHost || !!this.modelHost; }
+  // lend another amount (GB), as the room page's stepper does: a device tells its host ("pledge"), a
+  // host tells the room; the next deal uses it
+  setPledge(gb) {
+    const v = Math.min(64, Math.max(0.5, +gb || 0));
+    this.pledgeGB = v;
+    if (this.meta) this.meta.contribGB = v;
+    if (this.isHost) { this.broadcast({ t: "pledge", gb: v }); this.emit("members"); }
+    else if (this.ai.hostId && this.conns.has(this.ai.hostId)) this.sendTo(this.ai.hostId, { t: "pledge", gb: v });
+    return v;
+  }
   ctxMax() { return this.ai.engine?.maxSeq || nodeCtxFor(this.ai.model || "qwen3-1.7b", this.ctxAsk); }
   // v2 asks (tools): the loaded model's template profile and token texts (room.js apiProfile / apiTokenTexts)
   apiProfile() { const ai = this.ai; return ai.apiProf ||= templateProfile(ai.tok?.chatTemplate || "", ai.tok); }

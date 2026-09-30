@@ -19,7 +19,9 @@ function busyText(d) {
   return why || "the room cannot answer now";
 }
 
-export async function chatMain(argv, { version = "" } = {}) {
+// embedded: run inside pooled host (its room screen comes back after /exit): leaving resolves instead
+// of ending the process, and Peer is the host's own WebRTC stack (one per process)
+export async function chatMain(argv, { version = "", embedded = false, Peer = null } = {}) {
   let opts;
   try { opts = parseChatArgs(argv); }
   catch (e) {
@@ -56,7 +58,7 @@ export async function chatMain(argv, { version = "" } = {}) {
   const log = (m) => { clearSpin(); say(edim(`· ${cleanText(m, 400).replace("start pooled serve with", "start pooled chat with")}`)); };
   const tag = Math.random().toString(36).slice(2, 6).padEnd(4, "0");
   const bridge = new Bridge({ code: opts.code, key: opts.key, signal: opts.signal, name: opts.name || `pooled chat ${tag}`,
-    client: `pooled-chat/${version}`, log });
+    client: `pooled-chat/${version}`, log, Peer });
 
   // a spinner on stderr while nothing is on screen yet (joining, waiting for the model, the prompt being read)
   let spinLabel = "", spinAt = 0;
@@ -71,17 +73,19 @@ export async function chatMain(argv, { version = "" } = {}) {
     process.stderr.write("\r\x1b[K");
   }
 
-  let leaving = false, current = null, rl = null;
+  let leaving = false, current = null, rl = null, left = null;
+  const leftP = new Promise((r) => { left = r; });
   const leave = async (code = 0) => {
-    if (leaving) process.exit(code);
+    if (leaving) { if (embedded) return; process.exit(code); }
     leaving = true;
     clearSpin();
     try { rl?.close(); } catch {}
     await bridge.leave().catch(() => {});
     await new Promise((r) => process.stdout.write("", r));
+    if (embedded) { process.off("SIGINT", onInt); left(code); return; }
     process.exit(code);
   };
-  process.on("SIGTERM", () => leave(0));
+  if (!embedded) process.on("SIGTERM", () => leave(0));
   // Ctrl-C: stops the answer being written; otherwise leaves (readline sends its own below)
   const onInt = () => { if (current) current.stop(); else leave(interactive ? 0 : 130); };
   process.on("SIGINT", onInt);
@@ -213,5 +217,5 @@ export async function chatMain(argv, { version = "" } = {}) {
     if (!leaving) rl.prompt();
   });
   rl.prompt();
-  return new Promise(() => {});   // until leave()
+  return embedded ? leftP : new Promise(() => {});   // until leave()
 }

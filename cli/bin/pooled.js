@@ -18,19 +18,31 @@ if (cmd0 === "chat") {
   await new Promise((r) => process.stdout.write("", r));   // a piped answer is all out before the exit
   process.exit(status);
 }
+if (["pull", "download", "list", "ls", "rm", "remove"].includes(cmd0)) {
+  const { pullMain } = await import("../lib/pullrun.js");
+  const { loadRoomNode } = await import("../lib/lendrun.js");
+  process.exit(await pullMain(cmd0, process.argv.slice(3), { loadRoomNode }));
+}
 if (cmd0 === "join" || cmd0 === "host") {
   const { lendMain } = await import("../lib/lendrun.js");
-  process.exitCode = await lendMain(cmd0, process.argv.slice(3));
+  process.exitCode = await lendMain(cmd0, process.argv.slice(3), { version: VERSION });
   if (process.exitCode !== 0) process.exit(process.exitCode);
   process.exit(0);
 }
 const HELP = `pooled ${VERSION}: use a Pooled room from your own tools
 
 Usage
-  pooled serve <ROOM CODE | room link> [options]
+  pooled host  [model] [options]                   open a room on this computer (host --help)
+  pooled join  [ROOM CODE | room link] [options]   lend this computer's GPU to a room (join --help)
   pooled chat  <ROOM CODE | room link> [prompt]    talk to the room's model here (chat --help)
-  pooled join  <ROOM CODE | room link> [options]   lend this computer's GPU to a room (join --help)
-  pooled host  [--model <key>] [options]           open a room on this computer (host --help)
+  pooled serve <ROOM CODE | room link> [options]   the room as a local OpenAI / Anthropic API
+
+  pooled pull <model>    download a model (alias: download), so host and join start from disk
+  pooled list            downloaded models, and the ones that are not (alias: ls)
+  pooled rm <model>      delete a downloaded model
+
+  Start here: pooled host (in a terminal it asks for the model and how much to lend, and shows
+  the room as devices join). pooled pull --help: where models are kept.
 
 pooled serve
 

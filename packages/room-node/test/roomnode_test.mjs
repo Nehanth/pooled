@@ -346,3 +346,25 @@ test("nodeServers: --signal's old host:port form keeps its meaning, room/signal.
   assert.equal(list[0].opts.path, "/pooled/");
   assert.throws(() => nodeServers("bad host!"), /no usable server/);
 });
+
+test("setPledge: a host tells the room, a device tells its host; the host's hello names its model", () => {
+  const h = fakeNode();
+  h.addPeer("p1", "mac");
+  h.ai.model = "qwen3-1.7b";
+  assert.equal(h.helloMsg().meta.model, "qwen3-1.7b");
+  assert.equal(h.setPledge(12), 12);
+  assert.equal(h.meta.contribGB, 12);
+  assert.deepEqual(msgs(h, "p1", "pledge"), [{ t: "pledge", gb: 12 }]);
+  assert.equal(h.setPledge(500), 64, "at most 64 GB per device");
+  const d = fakeNode({ host: false, name: "node-abc" });
+  d.ai.hostId = "pooled-room-TEST";
+  d.addPeer("pooled-room-TEST", "host");
+  d.setPledge(6);
+  assert.deepEqual(msgs(d, "pooled-room-TEST", "pledge"), [{ t: "pledge", gb: 6 }]);
+  assert.equal(d.helloMsg().meta.contribGB, 6);
+  assert.equal(d.helloMsg().meta.model, undefined, "a device's hello does not name a model");
+  // the host takes a device's new pledge for the next deal
+  h.roster.set("p1", { name: "mac", meta: { webgpu: true, contribGB: 4 } });
+  h.onData("p1", { t: "pledge", gb: 9 });
+  assert.equal(h.conns.get("p1").meta.contribGB, 9);
+});

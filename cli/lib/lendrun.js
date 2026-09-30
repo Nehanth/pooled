@@ -8,12 +8,17 @@ import { parseLendArgs, detectMemory, memoryRule, afterCheck, formatStatus, tpsF
   hostable, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
 import { dawnLoader } from "./dawn.js";
 import { cleanText } from "./common.js";
+import { roomCodeFrom, roomKeyFrom } from "./room.js";
+import { modelsDir, modelState, fmtBytes, resolveModel } from "./cache.js";
+import { roomFitNow, devicesFrom } from "./hostui.js";
+import { askLine, colorOn, keysOf as KEYS } from "./tui.js";
+import * as HOSTUI from "./hostui.js";
 
 const ROOM_URL = "https://pooled.run/r/";
 
 // the room node: the bundle built into dist/ (npm run build; what the npm package ships), else the
 // package in a Pooled checkout
-async function loadRoomNode() {
+export async function loadRoomNode() {
   const tries = [new URL("../dist/room-node.js", import.meta.url), new URL("../../packages/room-node/index.js", import.meta.url)];
   let last = null;
   for (const u of tries) {
@@ -92,7 +97,7 @@ function fail(out, err, ctx) {
 }
 
 // GPU + memory, before anything joins: -> { rn, pledge, rule, adapterName }
-async function prepare(opts, out) {
+export async function prepare(opts, out) {
   const rn = await loadRoomNode();
   const loader = dawnLoader(opts.cmd);
   await rn.setupNode({ webgpu: loader });
@@ -129,6 +134,31 @@ function header(out, { title, adapterName, mem, rule, hosting = false }) {
   Ctrl-C leaves the room and frees the GPU`);
 }
 
+// one line to pick a number of GB: ←/→ (or ↑/↓) step by 1, digits type it, Enter takes it -> GB | null (Ctrl-C)
+function pledgePrompt({ def, max, totalGB }) {
+  const { colors } = HOSTUI;
+  const c = colors(colorOn(process.stderr));
+  let gb = def, typed = "";
+  const draw = () => process.stderr.write(`\r\x1b[K  ${c.bold("lend")}     ${c.cyan("◀")} ${typed ? typed + c.dim("_") : c.bold(String(gb))} GB ${c.cyan("▶")}  ${c.dim(`${totalGB ? `of ${Math.round(totalGB)} GB here, ` : ""}at most ${max} · ←/→ or type, Enter`)}`);
+  return new Promise((resolve) => {
+    const done = (v) => { process.stdin.off("data", on); try { process.stdin.setRawMode(false); } catch {} process.stdin.pause(); process.stderr.write("\n"); resolve(v); };
+    const on = (b) => {
+      for (const k of KEYS(b)) {
+        if (k === "ctrl-c") return done(null);
+        if (k === "left" || k === "down") { gb = Math.max(1, (typed ? +typed : gb) - 1); typed = ""; }
+        else if (k === "right" || k === "up") { gb = Math.min(max, (typed ? +typed : gb) + 1); typed = ""; }
+        else if (/^[0-9]$/.test(k) && typed.length < 3) typed += k;
+        else if (k === "backspace") typed = typed.slice(0, -1);
+        else if (k === "enter") { if (typed) gb = Math.max(1, Math.min(max, +typed)); return done(gb); }
+      }
+      draw();
+    };
+    try { process.stdin.setRawMode(true); } catch {}
+    process.stdin.resume(); process.stdin.on("data", on);
+    draw();
+  });
+}
+
 // ---------------- pooled join ----------------
 async function runJoin(opts, out) {
   let code = opts.code;
@@ -144,8 +174,9 @@ async function runJoin(opts, out) {
   const finish = (x) => { if (!ended) { ended = x; wake(x); } };
   let wake = () => {};
   const endP = new Promise((r) => { wake = r; });
-  let hostGone = false;
+  let hostGone = false, hinted = false, prompting = false;
   const tick = () => {
+    if (prompting) return;
     if (node && S.phase !== "rejoining" && S.phase !== "leaving" && S.phase !== "connecting") {
       const st = node.status();
       S.devices = st.devices.length || null; S.range = st.range; S.model = st.model; S.passes = passes(node, st.passes); S.signaling = st.signaling;
@@ -157,7 +188,11 @@ async function runJoin(opts, out) {
     expectHost: hostName, key: opts.key, pass, log: (m) => out.log(m) });
   const attach = (n) => {
     n.on("loadprogress", (pct) => { S.pct = pct; });
-    n.on("loaded", (x) => { S.pct = null; out.log(`holding layers ${x.range[0]}-${x.range[1] - 1} of ${x.model} (loaded in ${x.s.toFixed(1)} s)`); });
+    n.on("loaded", (x) => {
+      S.pct = null; out.log(`holding layers ${x.range[0]}-${x.range[1] - 1} of ${x.model} (loaded in ${x.s.toFixed(1)} s)`);
+      // streamed from Hugging Face: say once how to make the next join start from disk
+      if (!hinted && !modelState(opts.modelDir, x.model, rn.MODELS, rn.FILES, rn.LOCAL).pulled) { hinted = true; out.hint(`pooled pull ${x.model} makes the next join start faster (it reads the layers from disk)`); }
+    });
     n.on("hostgone", () => { hostGone = true; S.answering = false; });
     n.on("lobby", () => { tick(); });
     n.on("admitted", () => { if (n.pass) pass = n.pass; tick(); });
@@ -215,6 +250,19 @@ async function runJoin(opts, out) {
   attach(node);
   S.phase = "waiting";
   out.log(`reached room ${fmtCode(code)} as ${node.name}${node.server && node.server.spec !== "cloud" ? ` (signaling: ${node.server.label})` : ""}`);
+  // a terminal and no --gb: say what the host runs and ask how much to lend (the host deals by it)
+  if (opts.interactive && !opts.gb) {
+    prompting = true; out.done();
+    await new Promise((r) => setTimeout(r, 400));   // the host's hello (its name and model) comes right after the link opens
+    const hm = node.conns.get(node.ai.hostId)?.meta || {};
+    const hostModel = hm.model && rn.MODELS[hm.model] ? hm.model : null;
+    const cached = hostModel && modelState(opts.modelDir, hostModel, rn.MODELS, rn.FILES, rn.LOCAL).pulled;
+    out.print(`  host     ${node.hostName || "?"}${hostModel ? ` · ${rn.MODELS[hostModel].label}${cached ? " (downloaded here: loads from disk)" : ""}` : ""}`);
+    const gb = await pledgePrompt({ def: rule.gb, max: Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb), totalGB: mem.totalGB });
+    if (gb != null && gb !== rule.gb) { node.setPledge(gb); out.log(`lending ${gb} GB`); }
+    else if (gb == null) { prompting = false; await bye(true); }
+    prompting = false;
+  }
   const timer = setInterval(tick, 1000);
   // plain (non-TTY) output: a status line when the phase changes, and once a minute while it runs
   if (!out.tty) {
@@ -231,9 +279,25 @@ async function runJoin(opts, out) {
 }
 
 // ---------------- pooled host ----------------
-async function runHost(opts, out) {
-  const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
+async function runHost(opts, out, prepared = null) {
+  const { rn, loader, rule, adapterName, mem } = prepared || await prepare(opts, out);
   if (!hostable(rn.MODELS).includes(opts.model)) throw new UsageError(`unknown model "${opts.model}"; one of: ${hostable(rn.MODELS).join(", ")}`);
+  // not on this computer: download it first (--no-pull streams this computer's layers instead)
+  if (!modelState(opts.modelDir, opts.model, rn.MODELS, rn.FILES, rn.LOCAL).pulled) {
+    if (opts.noPull) out.log(`${opts.model} is not downloaded: streaming this computer's layers from Hugging Face (--no-pull)`);
+    else {
+      const { pullWithProgress } = await import("./pullrun.js");
+      out.log(`${opts.model} is not downloaded: pulling it (${fmtBytes(rn.FILES?.[opts.model]?.bytes)}) into ${opts.modelDir}; --no-pull streams instead`);
+      const ac = new AbortController();
+      const onInt = () => ac.abort();
+      process.on("SIGINT", onInt);
+      const r = await pullWithProgress(rn, opts.model, opts.modelDir, { signal: ac.signal, quiet: opts.jsonLog });
+      process.off("SIGINT", onInt);
+      if (r.aborted) { out.log(`download paused: pooled pull ${opts.model} resumes it`); return 130; }
+      if (!r.ok) throw r.error;
+      out.log(`${opts.model} downloaded`);
+    }
+  }
   const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name, signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log: (m) => out.log(m), ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   const code = node.code;
@@ -312,12 +376,26 @@ async function runHost(opts, out) {
       else if ((k === "\r" || k === "\n") && !opts.devices) deal();
     });
   }
-  if (tty && !opts.devices) out.log("waiting for devices: press Enter to deal the layers (Enter again re-deals after more join), q to quit");
-  else {
-    if (opts.devices > 1) out.log(`waiting for ${opts.devices} devices (this one included), then dealing the layers`);
-    deal();
-  }
-  const timer = setInterval(tick, 1000);
+  // --deny-unknown: a device with the code alone is turned away (the invite link still lets it in)
+  if (opts.denyUnknown) node.on("joinrequest", (r) => { node.denyJoin(r.id); });
+  // deal by itself (no terminal, --start, --wait N) once N devices are in and their pledges hold the
+  // model, by the room page's math (room/plan.js roomFit); a terminal otherwise waits for Enter
+  const auto = !tty || opts.start || opts.devices > 0;
+  const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy,
+    gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor };
+  let lastWhy = "";
+  const maybeDeal = () => {
+    if (!auto || starting || leaving || node.ai.engine || node.ai.starting) return;
+    const devs = devicesFrom(node, lib).filter((d) => d.gb != null);
+    const f = roomFitNow(lib, { model: opts.model, devices: devs, ctxAsk: opts.ctx || 0 });
+    const want = opts.devices || 1;
+    const why = devs.length < want ? `waiting for ${want} devices (this one included; ${devs.length} in)` : !f.fits ? `${f.note} Waiting for devices.` : "";
+    if (!why) { deal(); return; }
+    if (why !== lastWhy) { lastWhy = why; out.log(why); }
+  };
+  if (!auto) out.log("waiting for devices: press Enter to deal the layers (Enter again re-deals after more join), q to quit");
+  maybeDeal();
+  const timer = setInterval(() => { maybeDeal(); tick(); }, 1000);
   if (!out.tty) {
     let last = "", lastAt = 0;
     const plain = out.status; out.status = (s) => { const k = `${s.phase}|${s.devices}|${s.range}`; if (k !== last || Date.now() - lastAt > 60000) { last = k; lastAt = Date.now(); plain(s); } };
@@ -327,7 +405,7 @@ async function runHost(opts, out) {
 }
 
 // argv after "join" / "host" -> exit status
-export async function lendMain(cmd, argv) {
+export async function lendMain(cmd, argv, { version = "" } = {}) {
   let opts;
   try { opts = parseLendArgs(cmd, argv); }
   catch (e) {
@@ -342,8 +420,40 @@ export async function lendMain(cmd, argv) {
     for (const k of hostable(rn.MODELS)) process.stdout.write(`${k.padEnd(18)} ${rn.MODELS[k].label}\n`);
     return 0;
   }
+  // pooled host 35b: a part of a model's name picks it (the list comes with the room node)
+  if (cmd === "host" && opts.modelGiven && opts.model !== "list") {
+    const rn = await loadRoomNode().catch(() => null);
+    const keys = rn ? hostable(rn.MODELS) : null;
+    if (keys && !keys.includes(opts.model)) {
+      const m = resolveModel(opts.model, keys);
+      if (m.error) { process.stderr.write(`pooled host: ${m.error}; one of: ${keys.join(", ")}\n`); return 2; }
+      opts.model = m.key;
+    }
+  }
+  opts.modelDir = modelsDir({ flag: opts.modelDir });
+  // a terminal on both ends and no --json-log: the interactive screens (a flag given skips its question)
+  opts.interactive = !!process.stdin.isTTY && !!process.stderr.isTTY && !opts.jsonLog;
+  if (cmd === "join" && !opts.code) {
+    const bad = `pooled join: give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link`;
+    if (!opts.interactive) { process.stderr.write(`${bad}\n\n${HELP_JOIN}`); return 2; }
+    for (;;) {
+      const a = await askLine("Room code or invite link: ");
+      if (a == null) return 130;
+      const code = roomCodeFrom(a.trim());
+      if (code) { opts.code = code; opts.key = roomKeyFrom(a.trim()); break; }
+      if (a.trim()) process.stderr.write(`  "${cleanText(a.trim(), 60)}" is not a room code (like 4TK-G9P) or a room link\n`);
+    }
+  }
   const out = makeOut(opts);
-  try { return cmd === "join" ? await runJoin(opts, out) : await runHost(opts, out); }
+  try {
+    if (cmd === "join") return await runJoin(opts, out);
+    if (opts.interactive) {
+      const prepared = await prepare(opts, out);
+      const { runHostInteractive } = await import("./hostrun.js");
+      return await runHostInteractive(opts, { prepared, version });
+    }
+    return await runHost(opts, out);
+  }
   catch (e) {
     if (e instanceof UsageError) { out.done(); process.stderr.write(`pooled ${cmd}: ${e.message}\n`); return 2; }
     return fail(out, e, { code: opts.code || opts.roomCode || "", cmd });
