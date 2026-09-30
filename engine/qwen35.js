@@ -11,7 +11,7 @@ import { coopWGSL, probeUnpack } from "./wgsl/coop.js";
 import { WGSL2 } from "./wgsl/qwen35.js";
 import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout, normRouterKernel } from "./wgsl/moe.js";
 import { attnTileWGSL, attnTileConfig } from "./wgsl/attn_tile.js";
-import { attnDecWGSL, attnDecConfig, decSplits } from "./wgsl/attn_dec.js";
+import { attnDecWGSL, attnDecConfig, decSplits, DEC_CQ } from "./wgsl/attn_dec.js";
 import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows } from "./wgsl/moe_group.js";
 import { f16ToF32, f32ToF16 } from "./gguf.js";
 import { TOPK_MAX, topkK, readCands } from "./topk.js";
@@ -1312,7 +1312,7 @@ export class Qwen35Engine {
           this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / (this.kvQ8 ? 32 : 2) / 64), 1, 1);
           if (this.attnDecode === "v2" && L.bgDec) {
             this._dxyz(p, "attn_dec", L.bgDec, decSplits(seqLen, this.adCfg.S), 1, D.nKV);
-            this._dxyz(p, "attn_dec_combine", L.bgDecC, D.nH, 1, 1);
+            this._dxyz(p, "attn_dec_combine", L.bgDecC, D.nH * DEC_CQ, 1, 1);
           } else {
             this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
             this._dxyz(p, "attn_combine", L.bgCombine, D.nH, 1, 1);
@@ -1947,7 +1947,7 @@ export class Qwen35Engine {
         let ns = 1;
         for (let c = 0; c < nCols; c++) ns = Math.max(ns, decSplits(basePos + c + 1, this.adCfg.S));
         this._dMC(p, "attn_dec", M.dec, ns * 256, 256, nCols, D.nKV);
-        this._dMC(p, "attn_dec_combine", M.decC, D.nH * 256, 256, nCols);
+        this._dMC(p, "attn_dec_combine", M.decC, D.nH * DEC_CQ * 256, 256, nCols);
       } else {
         if (this.attnTile && M.flashT2 && nCols > 1) this._dMC(p, "attn_flash_t2", M.flashT2, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, Math.ceil(nCols / 2), D.nKV);
         else this._dMC(p, this.faPipe, M.flash, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, nCols, D.nKV);

@@ -38,7 +38,11 @@ export function attnDecConfig({ hd, G, nKV, splits = 0, kvQ8 = false }) {
 export const decSplitLen = (s, S) => Math.max(64, Math.ceil(Math.ceil(s / S) / 64) * 64);
 export const decSplits = (s, S) => Math.ceil(s / decSplitLen(s, S));
 
-export function attnDecWGSL({ HD, G }) {
+// combine: workgroups per head (dim slices); each has DEC_CQ slices of HD / DEC_CQ dims
+export const DEC_CQ = 4;
+
+export function attnDecWGSL({ HD, G, S }) {
+  const CQ = DEC_CQ, CD = HD / CQ, CG = 256 / (CD / 4);   // slices, dims per slice, split groups
   const H = [...Array(G).keys()];
   const QV = HD / 4;                 // vec4s of q per head
   const RED = Math.max(G * QV, 512); // q (G heads) then the 8 row groups' partial outputs (8 x 64 vec4)
@@ -180,27 +184,50 @@ fn attn_dec(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
   }
 }
 
-@group(1) @binding(0) var<storage, read> adc_o: array<f32>;
+@group(1) @binding(0) var<storage, read> adc_o: array<vec4<f32>>;
 @group(1) @binding(1) var<storage, read> adc_ml: array<f32>;
 @group(1) @binding(2) var<storage, read_write> adc_out: array<f32>;
 @group(1) @binding(3) var<uniform> adc: FD;
+var<workgroup> adc_w: array<f32, ${S}>;      // per-split weight exp(m_s - M)
+var<workgroup> adc_r: array<f32, 256>;       // reductions
+var<workgroup> adc_p: array<vec4<f32>, 256>; // split groups' partial outputs
+// one workgroup per (head, ${HD / CD}-dim slice, column); every split read in parallel: the maximum and the
+// weighted sum of l by fixed-order tree reductions, then ${CG} split groups (16 threads x vec4 = ${CD} dims each)
+// over strided splits, summed in group order. Deterministic; depends only on the column's own position.
 @compute @workgroup_size(256)
 fn attn_dec_combine(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let qh = wg.x; let col = wg.y; let i = lid.x;
-  if (qh >= cfg.nH || i >= ${HD}u) { return; }
+  let qh = wg.x / ${CQ}u; let dq = wg.x % ${CQ}u; let col = wg.y; let tid = lid.x;
+  if (qh >= cfg.nH) { return; }
   let seqLen = frame.seqLen + col;
   let SL = fd_split(seqLen, adc.S);
   let ns = (seqLen + SL - 1u) / SL;
   let b0 = (col * cfg.nH + qh) * adc.slots;
-  var M: f32 = -3.0e38;
-  for (var s: u32 = 0u; s < ns; s++) { M = max(M, adc_ml[(b0 + s) * 2u]); }
-  var L: f32 = 0.0; var O: f32 = 0.0;
-  for (var s: u32 = 0u; s < ns; s++) {
-    let w = exp(adc_ml[(b0 + s) * 2u] - M);
-    L += adc_ml[(b0 + s) * 2u + 1u] * w;
-    O += adc_o[(b0 + s) * ${HD}u + i] * w;
+  var lm: f32 = -3.0e38;
+  for (var s: u32 = tid; s < ns; s += 256u) { lm = max(lm, adc_ml[(b0 + s) * 2u]); }
+  adc_r[tid] = lm;
+  workgroupBarrier();
+  for (var k: u32 = 128u; k > 0u; k >>= 1u) { if (tid < k) { adc_r[tid] = max(adc_r[tid], adc_r[tid + k]); } workgroupBarrier(); }
+  let M = adc_r[0];
+  workgroupBarrier();
+  var ll: f32 = 0.0;
+  for (var s: u32 = tid; s < ns; s += 256u) { let w = exp(adc_ml[(b0 + s) * 2u] - M); adc_w[s] = w; ll += adc_ml[(b0 + s) * 2u + 1u] * w; }
+  adc_r[tid] = ll;
+  workgroupBarrier();
+  for (var k: u32 = 128u; k > 0u; k >>= 1u) { if (tid < k) { adc_r[tid] = adc_r[tid] + adc_r[tid + k]; } workgroupBarrier(); }
+  let L = adc_r[0];
+  let lane = tid & ${CD / 4 - 1}u; let grp = tid / ${CD / 4}u;
+  let vi = dq * ${CD / 4}u + lane;      // vec4 index within the head
+  var o = vec4<f32>(0.0);
+  for (var s: u32 = grp; s < ns; s += ${CG}u) { o += adc_o[(b0 + s) * ${HD / 4}u + vi] * adc_w[s]; }
+  adc_p[tid] = o;
+  workgroupBarrier();
+  if (tid < ${CD / 4}u) {
+    var t = adc_p[tid];
+    for (var i: u32 = 1u; i < ${CG}u; i++) { t += adc_p[i * ${CD / 4}u + tid]; }
+    let ob = col * adc.s1 + qh * ${HD}u + 4u * (dq * ${CD / 4}u + tid);
+    let r = t / L;
+    adc_out[ob] = r.x; adc_out[ob + 1u] = r.y; adc_out[ob + 2u] = r.z; adc_out[ob + 3u] = r.w;
   }
-  adc_out[col * adc.s1 + qh * ${HD}u + i] = O / L;
 }
 `;
 }

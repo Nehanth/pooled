@@ -5,7 +5,7 @@
 //     same position (what spec == plain needs)
 //   - splits: each column uses decSplits() workgroups; slots past that are never written
 //   cd tests && deno run --unstable-webgpu --allow-read test_attn_dec.js
-import { attnDecWGSL, attnDecConfig, decSplits, decSplitLen } from "../engine/wgsl/attn_dec.js";
+import { attnDecWGSL, attnDecConfig, decSplits, decSplitLen, DEC_CQ } from "../engine/wgsl/attn_dec.js";
 
 const ad = await navigator.gpu.requestAdapter();
 const device = await ad.requestDevice({ requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize } });
@@ -65,7 +65,7 @@ async function run({ nH, nKV, maxSeq, cases }) {
     let ns = 1; for (let c = 0; c < nc; c++) ns = Math.max(ns, decSplits(pos + c + 1, cfg.S));
     const e = device.createCommandEncoder(), p = e.beginComputePass();
     p.setPipeline(pDec); p.setBindGroup(0, g0d); p.setBindGroup(1, g1d); p.dispatchWorkgroups(ns, nc, nKV);
-    p.setPipeline(pComb); p.setBindGroup(0, g0c); p.setBindGroup(1, g1c); p.dispatchWorkgroups(nH, nc, 1);
+    p.setPipeline(pComb); p.setBindGroup(0, g0c); p.setBindGroup(1, g1c); p.dispatchWorkgroups(nH * DEC_CQ, nc, 1);
     p.end(); device.queue.submit([e.finish()]);
     return await read(outBuf, nc * qDim);
   }
