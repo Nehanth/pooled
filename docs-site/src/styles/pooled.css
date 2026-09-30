@@ -231,7 +231,11 @@ site-search button[data-open-modal] > kbd kbd { font-weight: 400; }
 .sidebar-content a:has(.sl-badge) { white-space: nowrap; }
 .sidebar-content a:has(.sl-badge) > span:first-child { overflow: hidden; text-overflow: ellipsis; }
 
-/* The first four groups are always open: plain labels, not toggles. */
+/* The first four groups are always open: plain labels, not toggles.
+   NOTE: these rules (and the nth-child(n + 5) / nth-child(5) ones below) key on position. They match the
+   sidebar in astro.config.mjs, where the four groups without `collapsed: true` come first. Starlight gives a
+   group no class or attribute to say it was configured collapsed, so if a group is added, removed or
+   reordered above "Self-hosting", change the 4 / 5 here to match. */
 .sidebar-content .top-level > li:nth-child(-n + 4) > details > summary { pointer-events: none; cursor: default; }
 .sidebar-content .top-level > li:nth-child(-n + 4) > details > summary .caret { display: none; }
 /* The rest (and nested groups) open and close: a small quiet chevron, turned down when open. */
@@ -397,7 +401,7 @@ site-search button[data-open-modal] > kbd kbd { font-weight: 400; }
 .sl-markdown-content hr { border: 0; border-top: 1px solid var(--p-rule); margin-block: 2.5rem; }
 .sl-markdown-content .expressive-code { margin-block: 1.25rem; }
 
-/* ---------- asides: a white card, 1px rule, a blue title; never yellow ---------- */
+/* ---------- asides: a white card, 1px rule, an ink title; never yellow, never blue ---------- */
 .starlight-aside {
 	border: 1px solid var(--p-rule);
 	border-inline-start: 1px solid var(--p-rule);
@@ -406,13 +410,12 @@ site-search button[data-open-modal] > kbd kbd { font-weight: 400; }
 	padding: 14px 18px 15px;
 }
 .starlight-aside--note, .starlight-aside--tip, .starlight-aside--caution {
-	--sl-color-asides-text-accent: var(--p-blue-text);
+	--sl-color-asides-text-accent: var(--p-ink);
 	--sl-color-asides-border: var(--p-rule);
 }
-.starlight-aside--danger { --sl-color-asides-text-accent: #B42318; --sl-color-asides-border: var(--p-rule); }
-:root[data-theme='dark'] .starlight-aside--danger { --sl-color-asides-text-accent: #F28B82; }
+.starlight-aside--danger { --sl-color-asides-text-accent: var(--p-ink); --sl-color-asides-border: var(--p-rule-3); }
 .starlight-aside__icon { display: none; }
-.starlight-aside__title { gap: 0; font-size: 14px; font-weight: 600; line-height: 1.4; }
+.starlight-aside__title { gap: 0; font-size: 14px; font-weight: 600; line-height: 1.4; color: var(--p-ink); }
 .starlight-aside__content { font-size: 15px; line-height: 1.65; color: var(--p-ink-2); margin-top: 4px; }
 
 /* ---------- cards: one card style (the room's white card) ---------- */
@@ -614,7 +617,7 @@ site-search {
 	--pagefind-ui-font: var(--__sl-font);
 }
 site-search .pagefind-ui__search-input { background: var(--p-card); box-shadow: inset 0 0 0 1px var(--p-rule-3); border: 0; font-weight: 400; }
-site-search .pagefind-ui__search-input:focus { outline: 0; box-shadow: inset 0 0 0 1px var(--p-blue), 0 0 0 3px color-mix(in srgb, var(--p-blue) 22%, transparent); }
+site-search .pagefind-ui__search-input:focus { outline: 0; box-shadow: inset 0 0 0 1px var(--p-ink-4); }
 site-search .pagefind-ui__search-input::placeholder { color: var(--p-ink-4); opacity: 1; }
 site-search .pagefind-ui__search-clear::before { background-color: var(--p-ink-4) !important; }
 site-search .pagefind-ui__search-clear:hover::before { background-color: var(--p-ink) !important; }
@@ -625,18 +628,12 @@ site-search .pagefind-ui__message { color: var(--p-ink-4); font-size: 13px; font
 #starlight__search .pagefind-ui__result { padding-block: 8px; }
 #starlight__search .pagefind-ui__result-inner > .pagefind-ui__result-title::before,
 #starlight__search .pagefind-ui__result-nested::before { display: none; }
+#starlight__search .pagefind-ui__result-nested { border: 0; }
 #starlight__search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)),
 #starlight__search .pagefind-ui__result-nested { background: transparent; border-radius: 8px; }
 #starlight__search .pagefind-ui__result-inner > .pagefind-ui__result-title { padding: 8px 12px 6px; font-size: 15px; }
 #starlight__search .pagefind-ui__result-nested { padding: 6px 12px 7px 24px; }
-#starlight__search .pagefind-ui__result-nested::after {
-	content: '';
-	position: absolute;
-	inset-block: 4px;
-	inset-inline-start: 12px;
-	width: 1px;
-	background: var(--p-rule);
-}
+#starlight__search .pagefind-ui__result-nested::after { display: none; }
 #starlight__search .pagefind-ui__result-title:not(:where(.pagefind-ui__result-nested *)):is(:hover, :focus-within),
 #starlight__search .pagefind-ui__result-nested:is(:hover, :focus-within) { outline: 0; background: var(--p-hover); }
 #starlight__search .pagefind-ui__result-link { color: var(--p-ink); font-weight: 600; }
@@ -670,20 +667,22 @@ site-search button[data-close-modal] { color: var(--p-ink-2); font-size: 14px; }
 	.sidebar-content ul ul details > summary { padding-block: 9px; }
 	.sidebar-content .top-level > li:nth-child(n + 5) > details > summary .large,
 	.sidebar-content ul ul details > summary .group-label .large { font-size: 15px; }
-	/* tables scroll sideways */
+	/* short tables scroll sideways if they must */
 	.sl-markdown-content table { display: block; overflow-x: auto; }
-	/* reference tables (four columns and more) stack: the option, then the short columns as one grey
-	   line, then the description */
-	.sl-markdown-content table:has(th:nth-child(4)) { display: block; overflow: visible; }
-	.sl-markdown-content table:has(th:nth-child(4)) thead { display: none; }
-	.sl-markdown-content table:has(th:nth-child(4)) :is(tbody, tr) { display: block; }
-	.sl-markdown-content table:has(th:nth-child(4)) tr { padding: 12px 0 13px; border-bottom: 1px solid var(--p-rule); }
-	.sl-markdown-content table:has(th:nth-child(4)) tr:first-child { border-top: 1px solid var(--p-rule-3); }
-	.sl-markdown-content table:has(th:nth-child(4)) td { display: inline; padding: 0; border: 0; white-space: normal; }
-	.sl-markdown-content table:has(th:nth-child(4)) td:first-child { display: block; margin-bottom: 4px; }
-	.sl-markdown-content table:has(th:nth-child(4)) td:not(:first-child, :last-child) { font-size: 13px; color: var(--p-ink-4); }
-	.sl-markdown-content table:has(th:nth-child(4)) td:not(:first-child, :last-child, :nth-last-child(2))::after { content: '  ·  '; white-space: pre; }
-	.sl-markdown-content table:has(th:nth-child(4)) td:last-child { display: block; margin-top: 4px; }
+	/* reference tables (four columns and more) and tables of long text (.p-stack, set by PageTitle's
+	   script) stack: the first cell as the name, the middle cells as one labelled line ("Default: speed"),
+	   then the last cell as the text */
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) { display: block; overflow: visible; }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) thead { display: none; }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) tbody { display: block; }
+	/* flex, so the whitespace between cells doesn't add an empty line */
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) tr { display: flex; flex-wrap: wrap; align-items: baseline; margin: 0; padding: 12px 0 13px; border-bottom: 1px solid var(--p-rule); }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) tr:first-child { border-top: 1px solid var(--p-rule-3); }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td { display: inline; margin: 0; padding: 0; border: 0; white-space: normal; }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td:first-child { display: block; flex: 0 0 100%; margin-bottom: 4px; font-weight: 500; }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td:not(:first-child, :last-child) { font-size: 13px; color: var(--p-ink-2); margin-inline-end: 16px; }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td:not(:first-child, :last-child)[data-label]::before { content: attr(data-label) ": "; color: var(--p-ink-4); }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td:last-child { display: block; flex: 0 0 100%; margin-top: 2px; }
 	.sl-markdown-content :is(th, td) { padding-inline-end: 14px; }
 	.meta a { display: inline-flex; align-items: center; min-height: 44px; }
 	footer.sl-flex { margin-top: 3rem; }

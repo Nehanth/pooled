@@ -24,6 +24,15 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 </div>
 
 <script>
+	// Table cells carry their column name, so phones can label the stacked reference rows ("Default: speed").
+	// Tables of long text (a sentence in a cell) are marked to stack on phones too, instead of scrolling.
+	document.querySelectorAll<HTMLTableElement>('.sl-markdown-content table').forEach((t) => {
+		const heads = [...t.querySelectorAll('thead th')].map((th) => th.textContent?.trim() || '');
+		if ([...t.querySelectorAll('td')].some((td) => (td.textContent || '').trim().length > 44)) t.classList.add('p-stack');
+		t.querySelectorAll('tbody tr').forEach((tr) => {
+			[...tr.children].forEach((td, i) => heads[i] && td.setAttribute('data-label', heads[i]));
+		});
+	});
 	document.querySelectorAll<HTMLButtonElement>('.p-copy').forEach((btn) => {
 		btn.addEventListener('click', async () => {
 			const label = btn.querySelector('span')!;
@@ -39,15 +48,13 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 </script>
 
 <style>
-	.p-title { margin-top: 4px; }
-	/* the section, for phones, where the sidebar is hidden; on wider screens the sidebar already says it */
+	/* the masthead ends on a hairline, a calm break before the body */
+	.p-title { margin-top: 4px; padding-bottom: 28px; border-bottom: 1px solid var(--p-rule); }
+	/* the section the page is in, small and grey above the title */
 	.p-eyebrow {
-		margin: 0 0 8px;
+		margin: 0 0 10px;
 		font: 500 13px/1.4 var(--__sl-font);
 		color: var(--p-ink-4);
-	}
-	@media (min-width: 50rem) {
-		.p-eyebrow { display: none; }
 	}
 	.p-title-row {
 		display: flex;
@@ -98,6 +105,8 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 	}
 	@media (max-width: 50rem) {
 		h1 { font-size: 32px; }
+		.p-title { padding-bottom: 22px; }
+		.p-eyebrow { margin-bottom: 8px; }
 		.p-lede { font-size: 17px; margin-top: 10px; }
 		.p-copy span { display: none; }
 		.p-copy { width: 40px; height: 40px; margin-top: -2px; padding: 0; justify-content: center; }

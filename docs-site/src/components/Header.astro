@@ -1,7 +1,7 @@
 ---
 // Pooled docs header, built like the product's own nav (index.html .nav, p2p.html header): the mark and
 // wordmark, "Docs" after a hairline, search (Ctrl K, Pagefind, fully static) at the content column,
-// then GitHub, a light/dark switch and the landing's blue "Start a room" button. Replaces Starlight's Header.
+// then GitHub, a light/dark switch (its icon is the current mode) and the landing's blue "Start a room" button. Replaces Starlight's Header.
 import Search from 'virtual:starlight/components/Search';
 import SiteTitle from 'virtual:starlight/components/SiteTitle';
 import SocialIcons from 'virtual:starlight/components/SocialIcons';
@@ -104,9 +104,9 @@ import SocialIcons from 'virtual:starlight/components/SocialIcons';
 		cursor: pointer;
 	}
 	.p-theme:hover { color: var(--p-ink); background: var(--p-hover); }
-	.p-theme .i-sun { display: none; }
-	:global(:root[data-theme='dark']) .p-theme .i-sun { display: block; }
-	:global(:root[data-theme='dark']) .p-theme .i-moon { display: none; }
+	.p-theme .i-moon { display: none; }
+	:global(:root[data-theme='dark']) .p-theme .i-moon { display: block; }
+	:global(:root[data-theme='dark']) .p-theme .i-sun { display: none; }
 	/* the landing's .btn.btn-blue.btn-sm */
 	.p-open {
 		display: inline-flex;
@@ -121,18 +121,15 @@ import SocialIcons from 'virtual:starlight/components/SocialIcons';
 		letter-spacing: -0.006em;
 		text-decoration: none;
 		white-space: nowrap;
-		box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 6px 16px -8px rgba(42, 69, 224, 0.7);
 		transition: background-color 0.16s var(--p-ease), transform 0.16s var(--p-ease);
 	}
 	.p-open:hover { background: var(--p-blue-btn-hover); color: #fff; }
 	.p-open:active { transform: scale(0.98); }
 	@media (max-width: 50rem) {
-		.p-docs-tag { margin-inline-start: 10px; padding-inline-start: 10px; font-size: 14px; }
+		/* phones: just the wordmark, search, the button and the menu */
+		.p-docs-tag { display: none; }
 		.p-open { height: 36px; padding: 0 12px; font-size: 13px; margin-inline-start: 0; }
 		.p-search { flex: 0 0 auto; margin-inline-start: auto; }
 		.p-right { margin-inline-start: 0; }
-	}
-	@media (max-width: 23rem) {
-		.p-docs-tag { display: none; }
 	}
 </style>
