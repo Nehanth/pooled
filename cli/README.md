@@ -53,14 +53,22 @@ Everything a tool sends goes to the room's host, a browser tab on someone's devi
 
 | Endpoint | |
 |---|---|
-| `POST /v1/chat/completions` | OpenAI chat completions, streaming (`stream: true`, `stream_options.include_usage`) and not |
+| `POST /v1/chat/completions` | OpenAI Chat Completions with tool calls and JSON mode, streaming (`stream: true`, `stream_options.include_usage`) and not |
 | `POST /v1/messages` | Anthropic Messages, streaming and not |
 | `GET /v1/models`, `GET /v1/models/{id}` | the room's model, `pooled/<model>` (Anthropic's shape when the request has `anthropic-version` or `x-api-key`) |
 | `GET /health` | `{ok, room, connected, ready, model, queue, served}` for scripts; with a token set and not given, only `{ok: true}` |
 
 Parameters: `max_tokens` / `max_completion_tokens` (default 1024 for OpenAI, capped by the room's context), `temperature` (0 is greedy; OpenAI 0 to 2, Anthropic 0 to 1; absent uses the room's setting), `top_k` (1 to 64, default 40), `stop` / `stop_sequences` (up to 4), thinking (OpenAI `reasoning_effort` other than `none` / `minimal`, returned as `reasoning_content`; Anthropic `thinking: {type: "enabled", budget_tokens}`; once the reasoning reaches `budget_tokens` the think block is closed and the rest of `max_tokens` goes to the answer). `model` can be any string. `top_p` and `seed` are accepted and ignored. `usage.prompt_tokens_details.cached_tokens` (OpenAI) and `usage.cache_read_input_tokens` (Anthropic) report the prompt tokens the room already held.
 
-Not in v1 (each a clear `400`): tool calls / function calling, images and other non-text content, `n > 1`, logprobs, JSON mode, an assistant message last (prefill). `/v1/embeddings`, `/v1/completions`, `/v1/responses` and `/v1/messages/count_tokens` are `404`.
+Chat Completions tools and structured output (the room's host must run a Pooled with tool calling; an older one answers these with a `400` asking to reload the host page):
+
+- `tools` (function tools; `strict` is accepted and always holds: every call is constrained to its schema), `tool_choice` (`auto`, `none`, `required`, `{"type": "function", "function": {"name"}}`, `{"type": "allowed_tools", ...}`), `parallel_tool_calls`. Calls come back as `message.tool_calls` with `finish_reason: "tool_calls"` (`"stop"` for a named `tool_choice`, as OpenAI), streamed as `delta.tool_calls` (the name first, then argument fragments). Send them back as an assistant message with `tool_calls` and one `role: "tool"` message per result (`tool_call_id`); `reasoning_content` on that assistant message is fed back to the model.
+- `response_format`: `json_object` and `json_schema` are constrained. Types, required keys, enums and structure are guaranteed; string and number bounds and `pattern` are not.
+- `reasoning_effort`: `none` / `minimal` turn thinking off, `low` to `max` on (Qwen3.8 uses the level; the others think the same way at any level). `chat_template_kwargs.enable_thinking` works too when `reasoning_effort` is absent.
+- A call cut by `max_tokens` is left out of a whole answer; streamed, its name and partial arguments already went out, and `finish_reason: "length"` says so.
+- A string argument containing a line `</parameter>` ends there (Qwen3.5+ call format).
+
+Still a clear `400`: `custom` tools, the deprecated `functions` / `function_call` and `role: "function"`, images and other non-text content in user messages (inside a tool result an image becomes a short note), `n > 1`, logprobs, `prediction`, `web_search_options`, audio, an assistant message last (prefill). `/v1/embeddings`, `/v1/completions` (the legacy API: use `/v1/chat/completions`), `/v1/responses` and `/v1/messages/count_tokens` are `404`.
 
 ## Tools
 

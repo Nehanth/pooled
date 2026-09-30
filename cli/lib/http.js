@@ -170,6 +170,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     // the label the room shows: the client program from User-Agent, never the request's user /
     // metadata.user_id (often an account or session id)
     r.client = clientFromUA(req.headers["user-agent"]) || "API";
+    for (const w of r.extra?.warnings || []) log(`${adapter.label || adapter.api} (${r.client}): ${w}`);
     if (adapter.prepare) r = await adapter.prepare(r);
     const why = unavailable();
     if (why) throw why;

@@ -1,7 +1,7 @@
 // cli/lib/openai.js: `pooled serve`'s OpenAI chat completions mapping. Request validation and the
 // byte-exact stream for a fixed room message sequence (ai-genstart, ai-token x N, ai-gendone).
 import { parseOpenAI, openaiResponse, OpenAIStream, openaiError, openaiModels, finishReason } from "../../cli/lib/openai.js";
-import { ApiError, clientFromUA } from "../../cli/lib/common.js";
+import { ApiError, clientFromUA, finishRequest, withDefaults } from "../../cli/lib/common.js";
 import { sseData, sseEvent, sseComment } from "../../cli/lib/sse.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ":\n" + ja + "\n!=\n" + jb); };
@@ -12,42 +12,57 @@ const throws400 = (b, re, m) => {
 };
 const msg = (content, role = "user") => ({ role, content });
 
+const fin = (b) => finishRequest(parseOpenAI(b), { hostMeta: { api: 2 } });
 Deno.test("openai: a plain request maps to the internal request with defaults", () => {
-  const r = parseOpenAI({ model: "anything", messages: [msg("be brief", "system"), msg("hi")] });
-  eq(r, { api: "openai", stream: false, includeUsage: false, system: "be brief", messages: [{ role: "user", text: "hi" }],
-    maxTokens: 1024, temperature: null, topK: null, stop: [], thinking: false });
+  const r = fin({ model: "anything", messages: [msg("be brief", "system"), msg("hi")] });
+  eq(r, withDefaults({ api: "openai", stream: false, includeUsage: false, system: "be brief", messages: [{ role: "user", text: "hi" }],
+    tools: null, toolChoice: "auto", allowed: null, parallel: true, format: null, thinking: false, effort: null,
+    maxTokens: 1024, temperature: null, topK: null, stop: [], extra: {} }));
 });
-Deno.test("openai: system and developer messages anywhere join the system prompt; same roles merge", () => {
-  const r = parseOpenAI({ messages: [msg("a", "system"), msg("q1"), msg([{ type: "text", text: "q" }, { type: "text", text: "2" }]), msg("x", "developer"), msg("ans", "assistant"), msg("q3")],
+Deno.test("openai: leading system / developer messages are the system prompt; later ones fold into the user turn before; same roles merge", () => {
+  const r = fin({ messages: [msg("a", "system"), msg("q1"), msg([{ type: "text", text: "q" }, { type: "text", text: "2" }]), msg("x", "developer"), msg("ans", "assistant"), msg("q3")],
     max_completion_tokens: 7, temperature: 0, top_k: 500, stop: "\n", reasoning_effort: "high", user: "alice", stream: true, stream_options: { include_usage: true } });
-  eq(r.system, "a\n\nx");
-  eq(r.messages, [{ role: "user", text: "q1\n\nq2" }, { role: "assistant", text: "ans" }, { role: "user", text: "q3" }]);
-  eq([r.maxTokens, r.temperature, r.topK, r.stop, r.thinking, r.client, r.stream, r.includeUsage], [7, 0, 64, ["\n"], true, undefined, true, true], "user is not the label");
+  eq(r.system, "a");
+  eq(r.messages, [{ role: "user", text: "q1\n\nq2\n\nx" }, { role: "assistant", text: "ans" }, { role: "user", text: "q3" }]);
+  eq([r.maxTokens, r.temperature, r.topK, r.stop, r.thinking, r.effort, r.client, r.stream, r.includeUsage], [7, 0, 64, ["\n"], true, "high", "", true, true], "user is not the label");
   eq(parseOpenAI({ messages: [msg("q")], reasoning_effort: "minimal" }).thinking, false);
+  eq(parseOpenAI({ messages: [msg("q")], stream_options: { include_usage: true } }).includeUsage, false, "include_usage only with stream");
+});
+Deno.test("openai: tools, tool_choice, tool history, response_format", () => {
+  const f = { type: "function", function: { name: "f", parameters: { type: "object", properties: { a: { type: "string" } } } } };
+  const r = fin({ messages: [msg("q"), { role: "assistant", content: null, reasoning: "hm", tool_calls: [{ id: "c1", type: "function", function: { name: "f", arguments: '{"a":"x"}' } }] },
+    { role: "tool", tool_call_id: "c1", content: "res" }], tools: [f, { type: "function", function: { name: "g" } }], tool_choice: { type: "function", function: { name: "g" } }, parallel_tool_calls: false,
+    response_format: { type: "json_object" } });
+  eq(r.tools, [{ name: "f", description: "", parameters: f.function.parameters }, { name: "g", description: "", parameters: { type: "object", properties: {} } }]);
+  eq([r.toolChoice, r.parallel, r.format], [{ name: "g" }, false, { type: "json" }]);
+  eq(r.messages, [{ role: "user", text: "q" }, { role: "assistant", text: "", reasoning: "hm", calls: [{ id: "c1", name: "f", args: { a: "x" } }] }, { role: "tool", text: "res", id: "c1" }]);
+  eq(parseOpenAI({ messages: [msg("q")], tools: [f], tool_choice: { type: "allowed_tools", allowed_tools: { mode: "auto", tools: [{ type: "function", function: { name: "f" } }] } } }).allowed, ["f"]);
 });
 Deno.test("openai: unsupported features are a clear 400", () => {
-  throws400({ messages: [msg("q")], tools: [{ type: "function", function: { name: "f" } }] }, /tool calls are not supported by pooled serve yet \(v1 is chat only\)/, "tools");
-  throws400({ messages: [msg("q")], tool_choice: "required" }, /tool calls/, "tool_choice");
-  throws400({ messages: [msg("q")], tool_choice: { type: "function", function: { name: "f" } } }, /tool calls/, "tool_choice object");
+  throws400({ messages: [msg("q")], tools: [{ type: "custom", custom: { name: "f" } }] }, /custom tools are not supported/, "custom tool");
+  throws400({ messages: [msg("q")], tool_choice: "required" }, /`tools` must be set/, "tool_choice");
+  throws400({ messages: [msg("q")], tool_choice: { type: "function", function: { name: "f" } } }, /`tools` must be set/, "tool_choice object");
   for (const tc of ["auto", "none"]) eq(parseOpenAI({ messages: [msg("q")], tool_choice: tc, tools: [] }).messages.length, 1, `tool_choice ${tc} with no tools is fine`);
-  throws400({ messages: [msg("q"), { role: "tool", content: "r", tool_call_id: "x" }] }, /tool calls/, "tool role");
-  throws400({ messages: [{ role: "assistant", content: null, tool_calls: [{ id: "x" }] }, msg("q")] }, /tool calls/, "tool_calls");
+  throws400({ messages: [msg("q"), { role: "function", content: "r", name: "x" }] }, /deprecated/, "function role");
+  throws400({ messages: [msg("q")], functions: [{ name: "f" }] }, /deprecated/, "functions");
   throws400({ messages: [msg([{ type: "image_url", image_url: { url: "data:" } }])] }, /only text content is supported/, "image");
   throws400({ messages: [msg("q")], n: 2 }, /n must be 1/, "n");
   throws400({ messages: [msg("q")], logprobs: true }, /logprobs/, "logprobs");
-  throws400({ messages: [msg("q")], response_format: { type: "json_object" } }, /JSON mode is not supported yet/, "json");
+  throws400({ messages: [msg("q")], response_format: { type: "json_schema", json_schema: { name: "x" } } }, /schema is required/, "json_schema");
+  throws400({ messages: [msg("q")], reasoning_effort: "huge" }, /reasoning_effort/, "effort");
   throws400({ messages: [msg("q")], presence_penalty: 0.5 }, /presence_penalty/, "penalty");
   throws400({ messages: [msg("q")], logit_bias: { 1: 2 } }, /logit_bias/, "bias");
   throws400({ messages: [msg("q")], temperature: 2.5 }, /temperature/, "temperature");
   throws400({ messages: [msg("q")], max_tokens: 0 }, /max_tokens/, "max_tokens");
   throws400({ messages: [msg("q")], stop: ["a", "b", "c", "d", "e"] }, /at most 4/, "stops");
-  throws400({ messages: [msg("q"), msg("prefill", "assistant")] }, /last message must be from the user/, "prefill");
-  throws400({ messages: [msg("s", "system")] }, /at least one user message/, "no user");
   throws400({ messages: [{ role: "robot", content: "x" }] }, /role/, "role");
   throws400({}, /messages is required/, "no messages");
-  throws400({ messages: [msg("x".repeat(400001))] }, /at most 400000/, "size");
+  const finThrows = (b, re, m) => { try { fin(b); } catch (e) { ok(e.kind === "bad" && re.test(e.message), m + ": " + e.message); return; } throw new Error(m + ": no error"); };
+  finThrows({ messages: [msg("q"), msg("prefill", "assistant")] }, /last message must be from the user or a tool result/, "prefill");
+  finThrows({ messages: [msg("s", "system")] }, /at least one user message/, "no user");
+  finThrows({ messages: [msg("x".repeat(1500001))] }, /at most 1500000/, "size");
   // accepted and ignored
-  parseOpenAI({ messages: [msg("q")], top_p: 0.9, seed: 1, presence_penalty: 0, frequency_penalty: 0, logit_bias: {}, response_format: { type: "text" }, tool_choice: "none" });
+  parseOpenAI({ messages: [msg("q")], top_p: 0.9, seed: 1, presence_penalty: 0, frequency_penalty: 0, logit_bias: {}, response_format: { type: "text" }, tool_choice: "none", store: true, metadata: {}, service_tier: "auto" });
 });
 
 // the room's messages for one answer, as the bridge receives them
@@ -57,7 +72,7 @@ const ROOM = [
   { t: "ai-gendone", rid: "r7", reason: "stop", usage: { in: 12, out: 2 } },
 ];
 const BASE = '{"id":"chatcmpl-r7","object":"chat.completion.chunk","created":1790000000,"model":"pooled/qwen3-1.7b","system_fingerprint":null,';
-const play = (s, room) => room.map((d) => d.t === "ai-genstart" ? s.start() : d.t === "ai-token" ? s.token(d.text, !!d.th) : s.done({ reason: d.reason, usage: d.usage, reused: d.reused || 0 })).join("");
+const play = (s, room) => room.map((d) => d.t === "ai-genstart" ? s.start() : d.t === "ai-token" ? s.token(d.text, !!d.th) : s.done({ reason: d.reason, calls: [], usage: { think: 0, ...d.usage }, reused: d.reused || 0 })).join("");
 
 Deno.test("openai: the stream, byte for byte", () => {
   const s = new OpenAIStream({ id: "r7", created: 1790000000, model: "pooled/qwen3-1.7b", includeUsage: false });
@@ -86,12 +101,17 @@ Deno.test("openai: an error after the headers is a data line without [DONE]; kee
   eq(s.keepAlive(2), ": queued, 2 ahead\n\n");
 });
 Deno.test("openai: non-stream response and finish reasons", () => {
-  const r = openaiResponse({ id: "r7", created: 1790000000, model: "pooled/qwen3-1.7b", text: "Hello", think: "", reason: "stop_seq", usage: { in: 12, out: 2 } });
+  const r = openaiResponse({ id: "r7", created: 1790000000, model: "pooled/qwen3-1.7b", text: "Hello", think: "", calls: [], reason: "stop_seq", usage: { in: 12, out: 2, think: 0 } });
   eq(r, { id: "chatcmpl-r7", object: "chat.completion", created: 1790000000, model: "pooled/qwen3-1.7b", system_fingerprint: null,
     choices: [{ index: 0, message: { role: "assistant", content: "Hello", refusal: null }, logprobs: null, finish_reason: "stop" }],
     usage: { prompt_tokens: 12, completion_tokens: 2, total_tokens: 14 } });
-  eq(openaiResponse({ id: "a", created: 0, model: "m", text: "x", think: "t", reason: "stop", usage: { in: 1, out: 1 } }).choices[0].message.reasoning_content, "t");
-  eq(["stop", "stop_seq", "max", "ctx"].map(finishReason), ["stop", "stop", "length", "length"]);
+  const t = openaiResponse({ id: "a", created: 0, model: "m", text: "x", think: "t", calls: [], reason: "stop", usage: { in: 1, out: 1, think: 1 } }, { thinking: true });
+  eq(t.choices[0].message.reasoning_content, "t");
+  eq(t.usage.completion_tokens_details, { reasoning_tokens: 1 });
+  const c = openaiResponse({ id: "a", created: 0, model: "m", text: "", think: "", calls: [{ id: "call_1", name: "f", args: "{}" }], reason: "stop", usage: { in: 1, out: 1, think: 0 } }, { toolChoice: "auto" });
+  eq(c.choices[0].message, { role: "assistant", content: null, refusal: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "f", arguments: "{}" } }] });
+  eq(c.choices[0].finish_reason, "tool_calls");
+  eq(["tool", "stop", "stop_seq", "length", "ctx"].map(finishReason), ["tool_calls", "stop", "stop", "length", "length"]);
 });
 Deno.test("openai: error shapes and statuses", () => {
   const e = (kind, m, o) => openaiError(new ApiError(kind, m, o));

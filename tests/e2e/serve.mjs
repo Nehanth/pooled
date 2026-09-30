@@ -9,7 +9,8 @@
 // Checks, in order: /v1/models in both shapes; OpenAI non-stream and stream; Anthropic non-stream and
 // stream (event order); temperature 0 twice gives the same text; turn 2 resending turn 1 reuses the
 // room's caches (cached_tokens > 0); a second concurrent request queues (keep-alives) and completes
-// after the first; stop sequences on both APIs; tools -> 400, Origin -> 403, --token -> 401; the SDKs
+// after the first; stop sequences on both APIs; Chat Completions tool calls (whole, streamed, results, named, parallel off,
+// JSON schema); custom tools -> 400, Origin -> 403, --token -> 401; the SDKs
 // parse both APIs; a client that goes away mid-stream frees the room; the host's card says API
 // client; the host's Disconnect ends the bridge's link and it answers 503 without reconnecting.
 // Prints one JSON line with every check; exit code 0 only when all passed.
@@ -256,9 +257,9 @@ try {
   });
 
   await soft("errors", async () => {
-    const t = await post("/v1/chat/completions", { model: "x", messages: [{ role: "user", content: "hi" }], tools: [{ type: "function", function: { name: "f", parameters: {} } }] });
+    const t = await post("/v1/chat/completions", { model: "x", messages: [{ role: "user", content: "hi" }], tools: [{ type: "custom", custom: { name: "f" } }] });
     const tj = await t.json();
-    check("tools: 400 with the message", t.status === 400 && /tool calls are not supported by pooled serve yet/.test(tj.error?.message), JSON.stringify(tj));
+    check("OpenAI custom tools: 400 with the message", t.status === 400 && /custom tools are not supported/.test(tj.error?.message), JSON.stringify(tj));
     const at = await post("/v1/messages", { model: "x", max_tokens: 5, messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "" } }] }] });
     check("Anthropic image: 400 invalid_request_error", at.status === 400 && (await at.json()).error?.type === "invalid_request_error");
     const o = await fetch(BASE + "/v1/models", { headers: { origin: "https://evil.example" } });
@@ -311,6 +312,33 @@ try {
     const st = an.messages.stream({ model: "claude-x", max_tokens: 40, temperature: 0, messages: [{ role: "user", content: Q }] });
     const fm = await st.finalMessage();
     check("anthropic SDK: stream finalMessage", /paris/i.test(fm.content.map((b) => b.text || "").join("")) && fm.usage.output_tokens > 0, JSON.stringify(fm));
+  });
+
+  // Chat Completions with tools (docs/design/serve.md 6): a call, whole and streamed through the SDK,
+  // the tool result back, a named choice, parallel off, JSON schema
+  await soft("chat tools", async () => {
+    const req = createRequire(path.join(CLI, "package.json"));
+    const OpenAI = (await import(req.resolve("openai"))).default;
+    const oa = new OpenAI({ baseURL: BASE + "/v1", apiKey: "anything" });
+    const W = { type: "function", function: { name: "get_weather", description: "Current weather for a city", parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } };
+    const T = { type: "function", function: { name: "get_time", description: "Local time in a city", parameters: { type: "object", properties: { city: { type: "string" } }, required: ["city"] } } };
+    const q = [{ role: "user", content: "What is the weather in Paris? Use the tool." }];
+    const c = await oa.chat.completions.create({ model: "x", messages: q, tools: [W], temperature: 0, max_tokens: 200 });
+    const tc = c.choices[0].message.tool_calls || [];
+    check("chat tools: a call, finish_reason tool_calls", c.choices[0].finish_reason === "tool_calls" && tc[0]?.function.name === "get_weather" && /paris/i.test(JSON.parse(tc[0].function.arguments).city) && /^call_[0-9A-Za-z]{24}$/.test(tc[0].id), JSON.stringify(c.choices[0]));
+    const st = await oa.chat.completions.stream({ model: "x", messages: q, tools: [W], temperature: 0, max_tokens: 200, stream_options: { include_usage: true } }).finalChatCompletion();
+    check("chat tools: streamed calls accumulate to the same arguments", st.choices[0].message.tool_calls?.[0]?.function.arguments === tc[0]?.function.arguments && st.usage?.total_tokens > 0, JSON.stringify(st.choices[0]));
+    const f = await oa.chat.completions.create({ model: "x", temperature: 0, max_tokens: 200, tools: [W],
+      messages: [...q, c.choices[0].message, { role: "tool", tool_call_id: tc[0]?.id, content: "18 C and sunny" }] });
+    check("chat tools: the tool result is used, prompt reused", f.choices[0].finish_reason === "stop" && /18|sunny/i.test(f.choices[0].message.content) && (f.usage.prompt_tokens_details?.cached_tokens || 0) > 0, JSON.stringify(f));
+    const n = await oa.chat.completions.create({ model: "x", messages: [{ role: "user", content: "Hi there" }], tools: [W, T], tool_choice: { type: "function", function: { name: "get_time" } }, temperature: 0, max_tokens: 200 });
+    check("chat tools: a named tool_choice forces that tool (finish_reason stop)", n.choices[0].message.tool_calls?.[0]?.function.name === "get_time" && n.choices[0].finish_reason === "stop", JSON.stringify(n.choices[0]));
+    const p = await oa.chat.completions.create({ model: "x", messages: [{ role: "user", content: "Weather and time in Paris and in Tokyo? Use the tools." }], tools: [W, T], tool_choice: "required", parallel_tool_calls: false, temperature: 0, max_tokens: 300 });
+    check("chat tools: required + parallel_tool_calls false gives exactly one call", p.choices[0].message.tool_calls?.length === 1, JSON.stringify(p.choices[0]));
+    const j = await oa.chat.completions.create({ model: "x", messages: [{ role: "user", content: "Give the capital of France." }], temperature: 0, max_tokens: 200,
+      response_format: { type: "json_schema", json_schema: { name: "capital", schema: { type: "object", properties: { capital: { type: "string" } }, required: ["capital"], additionalProperties: false } } } });
+    let jv = null; try { jv = JSON.parse(j.choices[0].message.content); } catch { /* checked below */ }
+    check("chat tools: json_schema answer parses and has the key", typeof jv?.capital === "string", JSON.stringify(j.choices[0]));
   });
 
   await soft("client gone", async () => {

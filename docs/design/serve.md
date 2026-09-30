@@ -643,3 +643,47 @@ endpoints, now v2 asks underneath) passes all 57 checks.
 
 Recordings: `node tests/e2e/serve_record.mjs --llama URL --model M --gguf F [--grammar]` against a
 llama.cpp server (CPU is fine) writes `tests/fixtures/api/<model>-[g-]<case>.json`.
+
+## 12. Chat Completions on v2 (`cli/lib/openai.js`)
+
+Built on `feat/serve-chat` over the v2 core. It replaces the "tools" and "other content" rows of the
+table in section 4 for `/v1/chat/completions`; the other rows hold as written.
+
+**Request.** `tools` (function tools; a missing `parameters` is `{type: "object", properties: {}}`;
+`strict` accepted, always true in effect; an empty list means no tools) · `tool_choice` `auto` /
+`none` / `required` / `{type: "function", function: {name}}` (the flat `{type: "function", name}`
+too) / `{type: "allowed_tools", allowed_tools: {mode, tools}}` → `allowed` · `parallel_tool_calls`
+· assistant messages with `tool_calls` (arguments that are not a JSON object go as `{}`, logged)
+and `reasoning_content` or `reasoning` (fed back as that turn's reasoning) · `role: "tool"`
+messages with `tool_call_id` (text parts joined; an image part becomes a note), put back in the
+calls' order · `response_format` `json_object` → `{type: "json"}`, `json_schema` → `{type:
+"schema"}` · `reasoning_effort` `none` / `minimal` → off, `low` … `max` → on with that effort (other
+values 400); absent, `chat_template_kwargs.enable_thinking` decides · `max_completion_tokens` over
+`max_tokens` · `stream_options.include_usage` only with `stream`. System and developer messages
+before the first other message are the system prompt; later ones fold into the user turn before
+them (`normalizeMessages`), where v1 joined them all into the system prompt. Ignored: `seed`,
+`store`, `metadata`, `user`, `safety_identifier`, `prompt_cache_key`, `service_tier`, `verbosity`,
+`top_p`. 400: `custom` tools and calls, `functions` / `function_call` / `role: "function"`, `n > 1`,
+logprobs, audio, `prediction`, `web_search_options`, non-text user content, an assistant message
+last. `tool_choice` errors use vLLM's messages ("When using `tool_choice`, `tools` must be set.",
+"The tool specified in `tool_choice` does not match any of the specified `tools`").
+
+**Response.** `message = {role, content, refusal: null, reasoning_content?, tool_calls?}`;
+`content: null` when there are calls and no text; `tool_calls[i] = {id: "call_<24>", type:
+"function", function: {name, arguments}}`; `finish_reason` from `common.outcome`: `tool_calls`,
+`stop` (also for a named `tool_choice`, as OpenAI and vLLM), `length` (`max_tokens` or the context);
+a call cut by `max_tokens` is left out. `usage` adds `completion_tokens_details.reasoning_tokens`
+when thinking was on and `prompt_tokens_details.cached_tokens` when the room reused its caches.
+
+**Stream.** The role chunk, then one chunk per room message: `reasoning_content`, `content`, a call's
+opening `{tool_calls: [{index, id, type: "function", function: {name, arguments: ""}}]}`, its
+argument fragments `{tool_calls: [{index, function: {arguments}}]}` (they join to the final
+arguments exactly), the finish chunk, the usage chunk with `include_usage`, `[DONE]`. A call cut by
+`max_tokens` has already streamed its name and partial arguments; `finish_reason: "length"` says so.
+
+**Tests.** `cli/test/openai_test.mjs` (the ask the room gets for a full agent request, the whole and
+streamed wire format byte for byte, the OpenAI SDK's `stream().finalChatCompletion()` and a streamed
+`runTools` loop, every 400, an older host) and `tests/unit/serve_openai_test.js`. On the Spark GPU
+(2026-09-29, Qwen3 1.7B) `tests/e2e/serve.mjs` passes all 63 checks, the 6 "chat tools" ones included
+(a call, streamed arguments equal to whole ones, the tool result used with the prompt reused, a
+named choice, required with parallel off giving one call, a JSON schema answer).
