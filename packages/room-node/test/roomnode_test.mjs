@@ -266,3 +266,15 @@ test("API asks: only from a device that joined as an API client, and only while 
   n.apiAsk("cli", { t: "ai-ask", api: 1, rid: "r2", system: "", messages: [{ role: "user", text: "hi" }], params: {} });
   assert.equal(msgs(n, "cli", "ai-busy")[0].code, "off");
 });
+
+test("nodeServers: --signal's old host:port form keeps its meaning, room/signal.js specs and lists work too", async () => {
+  const { nodeServers } = await import("../roomnode.js");
+  assert.deepEqual(nodeServers(null).map((s) => s.spec), ["cloud"]);
+  const local = nodeServers("127.0.0.1:9000")[0].opts;
+  assert.deepEqual(local, { host: "127.0.0.1", port: 9000, path: "/", secure: false });   // as cli/lib/room.js signalOpts
+  assert.equal(nodeServers("sig.example.com:443")[0].opts.secure, true);
+  const list = nodeServers("wss://sig.example.com/pooled, cloud, cloud");
+  assert.deepEqual(list.map((s) => s.label), ["sig.example.com", "0.peerjs.com"]);
+  assert.equal(list[0].opts.path, "/pooled/");
+  assert.throws(() => nodeServers("bad host!"), /no usable server/);
+});

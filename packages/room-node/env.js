@@ -10,11 +10,13 @@ let ready = null;
 export let Peer = null;
 export const runtime = { gpu: null, rtc: null };
 
-export function setupNode({ dawnFlags = (process.env.DAWN_OPTS || "").split(" ").filter(Boolean) } = {}) {
+// webgpu: an async loader for Dawn ({ create, globals }), for a caller that resolves it from its own
+// install (the pooled CLI: an optional package); default the npm "webgpu" package next to this one
+export function setupNode({ dawnFlags = (process.env.DAWN_OPTS || "").split(" ").filter(Boolean), webgpu = () => import("webgpu") } = {}) {
   return ready ||= (async () => {
     // --- WebGPU (Dawn). Node 21+ already has a navigator object; add gpu to it.
     if (!globalThis.navigator?.gpu) {
-      const { create, globals } = await import("webgpu");
+      const { create, globals } = await webgpu();
       Object.assign(globalThis, globals);   // GPUBufferUsage, GPUMapMode, GPUShaderStage ...
       const gpu = create(dawnFlags);
       if (globalThis.navigator) Object.defineProperty(globalThis.navigator, "gpu", { value: gpu, configurable: true });

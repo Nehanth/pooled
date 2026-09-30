@@ -9,6 +9,9 @@
 //     if (ev.type === "token") process.stdout.write(ev.text);
 //   }
 //   const node = await joinRoom("ABCD", { pledgeGB: 24 });   // hold layers in someone else's room
-export { createRoom, joinRoom, RoomNode, PREFIX, toApiRequest, eventEncoder } from "./roomnode.js";
+export { createRoom, joinRoom, RoomNode, PREFIX, toApiRequest, eventEncoder, nodeServers } from "./roomnode.js";
+export { PROTOCOL } from "../../room/transport.js";
+export { reconnectDelay } from "../../room/signal.js";
+export { MODELS } from "../../room/models.js";
 export { setupNode, runtime, probeMeta } from "./env.js";
 export { openModel, LOCAL } from "./source.js";

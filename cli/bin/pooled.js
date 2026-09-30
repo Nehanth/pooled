@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // pooled serve <ROOM CODE>: a Pooled room as a local OpenAI and Anthropic compatible endpoint.
 // docs/design/serve.md; cli/README.md for setting up tools.
+// pooled join <CODE> / pooled host: lend this computer's GPU to a room (cli/lib/lendrun.js).
 import { parseArgs } from "node:util";
 import { readFileSync } from "node:fs";
 
@@ -8,10 +9,23 @@ const major = +process.versions.node.split(".")[0];
 if (major < 22) { console.error("pooled needs Node 22 or newer"); process.exit(1); }
 
 const VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+
+// join / host: their own options and help (lend.js); serve below is unchanged
+const cmd0 = process.argv[2];
+if (cmd0 === "join" || cmd0 === "host") {
+  const { lendMain } = await import("../lib/lendrun.js");
+  process.exitCode = await lendMain(cmd0, process.argv.slice(3));
+  if (process.exitCode !== 0) process.exit(process.exitCode);
+  process.exit(0);
+}
 const HELP = `pooled ${VERSION}: use a Pooled room from your own tools
 
 Usage
   pooled serve <ROOM CODE | room link> [options]
+  pooled join  <ROOM CODE | room link> [options]   lend this computer's GPU to a room (join --help)
+  pooled host  [--model <key>] [options]           open a room on this computer (host --help)
+
+pooled serve
 
   Joins the room as an API client (no layers, no GPU needed here) and serves its model on
   127.0.0.1 as an OpenAI (Chat Completions and Responses) and an Anthropic (Messages)
