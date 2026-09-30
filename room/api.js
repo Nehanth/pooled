@@ -8,8 +8,12 @@
 // An API request never reads or writes the room's chat conversation (ai.conv): the client owns its
 // history and resends all of it every time, so the host renders it and runs roomGenerate on the
 // ids, exactly as Code mode does.
-import { buildIds, specials } from "./conversation.js";
+import { buildIds, specials, renderApi, headerTail } from "./conversation.js";
 import { makeSampler } from "./sampling.js";
+import { CallStream } from "../harness/tools.js";
+import { compileSchema, SchemaError } from "../harness/jsonschema.js";
+import { constrainedSampler, tokenTexts } from "../harness/model-common.js";
+import { hash64 } from "../harness/constrain.js";
 
 export const API_LIMITS = {
   messages: 200,        // per request
@@ -26,9 +30,10 @@ const clean = (s, n) => String(s ?? "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, 
 
 // -> { req } (normalized) or { err, code: "bad" }. Everything that comes off the wire is checked here;
 // the bridge validates the HTTP request more precisely, this is the host's own guard.
-export function validateApiAsk(d) {
+export function validateApiAsk(d, opts = {}) {
   const bad = (err) => ({ err, code: "bad" });
   if (!d || typeof d !== "object") return bad("empty request");
+  if (d.api === 2) return validateApiAskV2(d, opts);
   const rid = typeof d.rid === "string" ? d.rid : "";
   if (!/^[A-Za-z0-9_-]{1,32}$/.test(rid)) return bad("bad request id");
   const system = d.system == null ? "" : d.system;
@@ -123,9 +128,15 @@ export class StopMatcher {
 // The think block, streaming: with thinking on, Qwen3 answers "<think>\n…\n</think>\n\n answer".
 // push(piece) -> [{ th, text }]: th true for the reasoning, false for the answer; the tags and the
 // whitespace around them are dropped. With thinking off everything is answer.
-const OPEN = "<think>", CLOSE = "</think>";
+// inPrompt: the prompt already opened the block (Qwen3.5+ templates end the generation header with
+// "<think>\n"), so the answer starts inside it. callCloses: a "<tool_call>" inside the block ends it
+// (XML-style models open calls there); the tag stays in the answer.
+const OPEN = "<think>", CLOSE = "</think>", CALL = "<tool_call>";
 export class ThinkSplit {
-  constructor(on) { this.state = on ? "start" : "answer"; this.buf = ""; this.fresh = true; }
+  constructor(on, { inPrompt = false, callCloses = false } = {}) {
+    this.state = !on ? "answer" : inPrompt ? "think" : "start"; this.buf = ""; this.fresh = true; this.callCloses = callCloses;
+    this.ended = false;   // the block closed (by </think> or a call)
+  }
   push(piece) {
     const out = [];
     const emit = (th, text) => { if (text) out.push({ th, text }); };
@@ -140,10 +151,11 @@ export class ThinkSplit {
       }
       if (this.state === "think") {
         if (this.fresh) { this.buf = this.buf.replace(/^\s+/, ""); if (!this.buf) return out; this.fresh = false; }
-        const i = this.buf.indexOf(CLOSE);
-        if (i >= 0) { emit(true, this.buf.slice(0, i).replace(/\s+$/, "")); this.buf = this.buf.slice(i + CLOSE.length); this.state = "gap"; continue; }
+        const i = this.buf.indexOf(CLOSE), c = this.callCloses ? this.buf.indexOf(CALL) : -1;
+        if (c >= 0 && (i < 0 || c < i)) { emit(true, this.buf.slice(0, c).replace(/\s+$/, "")); this.buf = this.buf.slice(c); this.state = "answer"; this.ended = true; continue; }
+        if (i >= 0) { emit(true, this.buf.slice(0, i).replace(/\s+$/, "")); this.buf = this.buf.slice(i + CLOSE.length); this.state = "gap"; this.ended = true; continue; }
         let hold = 0;
-        for (let L = Math.min(this.buf.length, CLOSE.length - 1); L > 0; L--) if (CLOSE.startsWith(this.buf.slice(-L))) { hold = L; break; }
+        for (const tag of this.callCloses ? [CLOSE, CALL] : [CLOSE]) for (let L = Math.min(this.buf.length, tag.length - 1); L > hold; L--) if (tag.startsWith(this.buf.slice(-L))) { hold = L; break; }
         // trailing whitespace is held too: the think text ends right before "</think>"
         const keep = this.buf.length - hold, body = this.buf.slice(0, keep), ws = /\s*$/.exec(body)[0].length;
         emit(true, body.slice(0, body.length - ws));
@@ -287,7 +299,7 @@ export async function apiRun({ tok, req, prompt, generate, send, onPiece = () =>
 export function helloMeta(meta, isHost) {
   if (!meta?.api) return meta;
   if (isHost) return { api: 1, webgpu: false, ua: "API", client: String(meta.client ?? "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").slice(0, 40) };
-  const { api, ...rest } = meta;
+  const { api, ctx, ...rest } = meta;   // (ctx: the context size the host tells API clients, v2)
   return rest;
 }
 
@@ -295,4 +307,332 @@ export function helloMeta(meta, isHost) {
 // controls, everything else (apiAllow and any later setting) is kept.
 export function withStyle(settings, style) {
   return { ...settings, persona: style.persona, sampling: style.sampling, thinking: !!style.thinking, length: style.length };
+}
+
+// ============================================================================================
+// v2 asks: tools, tool calls, structured output, reasoning in history (docs/design/serve.md
+// sections 4-5; docs/protocol.md "API clients"). `ai-ask {api: 2, rid, system, messages, tools,
+// params}`; the host answers with ai-token (content and reasoning), ai-call (tool calls, streamed)
+// and ai-gendone {calls, open, usage.think}.
+// ============================================================================================
+export const API2_LIMITS = {
+  messages: 1000, chars: 1500000, tools: 128, schemaChars: 32000, calls: 64, maxCalls: 128,
+  name: /^[A-Za-z0-9_.:-]{1,128}$/, xmlParam: /^[^<>\n\r]{1,128}$/,
+};
+export const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+// -> { req } or { err, code: "bad" }. profile: the loaded model's template profile (room/conversation.js
+// templateProfile); XML-style models need parameter names that fit in <parameter=NAME>.
+function validateApiAskV2(d, { profile = null } = {}) {
+  const bad = (err) => ({ err, code: "bad" });
+  const rid = typeof d.rid === "string" ? d.rid : "";
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(rid)) return bad("bad request id");
+  const system = d.system == null ? "" : d.system;
+  if (typeof system !== "string") return bad("system must be text");
+  if (!Array.isArray(d.messages) || !d.messages.length) return bad("messages must be a non-empty list");
+  if (d.messages.length > API2_LIMITS.messages) return bad(`at most ${API2_LIMITS.messages} messages`);
+  let chars = system.length;
+  // tools
+  let tools = null;
+  if (d.tools != null) {
+    if (!Array.isArray(d.tools)) return bad("tools must be a list");
+    if (d.tools.length > API2_LIMITS.tools) return bad(`at most ${API2_LIMITS.tools} tools`);
+    const seen = new Set();
+    tools = [];
+    for (const t of d.tools) {
+      if (!t || typeof t.name !== "string" || !API2_LIMITS.name.test(t.name)) return bad(`tool names must match ${API2_LIMITS.name.source}`);
+      if (seen.has(t.name)) return bad(`tool ${t.name} is declared twice`);
+      seen.add(t.name);
+      if (t.description != null && typeof t.description !== "string") return bad(`tool ${t.name}: description must be text`);
+      const params = t.parameters == null ? { type: "object", properties: {} } : t.parameters;
+      if (!params || typeof params !== "object" || Array.isArray(params)) return bad(`tool ${t.name}: parameters must be a JSON schema object`);
+      const n = JSON.stringify(params).length;
+      if (n > API2_LIMITS.schemaChars) return bad(`tool ${t.name}: its schema is ${n} characters; at most ${API2_LIMITS.schemaChars}`);
+      if (profile?.style === "xml" && params.properties && typeof params.properties === "object") {
+        for (const k of Object.keys(params.properties)) if (!API2_LIMITS.xmlParam.test(k)) return bad(`tool ${t.name}: parameter name ${JSON.stringify(k.slice(0, 40))} cannot be written by this model (no <, >, line breaks; 1 to 128 characters)`);
+      }
+      try { compileSchema(params); } catch (e) { if (e instanceof SchemaError) return bad(`tool ${t.name}: ${e.message}`); throw e; }
+      chars += n + t.name.length + (t.description || "").length;
+      tools.push({ name: t.name, description: t.description || "", parameters: params });
+    }
+    if (!tools.length) tools = null;
+  }
+  const names = new Set((tools || []).map((t) => t.name));
+  // messages
+  const messages = [];
+  for (const m of d.messages) {
+    if (!m || typeof m !== "object" || typeof m.text !== "string") return bad("each message needs a role and text");
+    chars += m.text.length;
+    if (m.role === "user") messages.push(m.aside ? { role: "user", text: m.text, aside: true } : { role: "user", text: m.text });
+    else if (m.role === "tool") messages.push({ role: "tool", text: m.text });
+    else if (m.role === "assistant") {
+      const a = { role: "assistant", text: m.text };
+      if (m.reasoning != null) { if (typeof m.reasoning !== "string") return bad("reasoning must be text"); a.reasoning = m.reasoning; chars += m.reasoning.length; }
+      if (m.calls != null) {
+        if (!Array.isArray(m.calls) || m.calls.length > API2_LIMITS.calls) return bad(`calls: a list of at most ${API2_LIMITS.calls}`);
+        a.calls = [];
+        for (const c of m.calls) {
+          if (!c || typeof c.name !== "string" || !c.name || c.name.length > 128) return bad("each call needs a name");
+          const args = c.args == null ? {} : c.args;
+          if (typeof args !== "object" || Array.isArray(args)) return bad("call arguments must be an object");
+          chars += c.name.length + JSON.stringify(args).length;
+          a.calls.push({ name: c.name, args });
+        }
+      }
+      messages.push(a);
+    } else return bad("each message needs role user, assistant or tool");
+  }
+  if (chars > API2_LIMITS.chars) return bad(`the request is ${chars} characters; at most ${API2_LIMITS.chars}`);
+  const last = messages[messages.length - 1];
+  if (last.role !== "user" && last.role !== "tool") return bad("the last message must be from the user or a tool result");
+  const usesTools = !!tools || messages.some((m) => m.role === "tool" || m.calls?.length);
+  if (usesTools && profile && !profile.tools) return bad("the room's model has no tool-call format");
+  // params: v1's, plus the tool and format ones
+  const p = d.params && typeof d.params === "object" ? d.params : {};
+  const v1 = validateApiAsk({ api: 1, rid, system: "", messages: [{ role: "user", text: "" }], params: { ...p, stop: p.stop } });
+  if (v1.err) return v1;
+  const params = { ...v1.req.params };
+  let toolChoice = p.toolChoice == null ? "auto" : p.toolChoice;
+  if (typeof toolChoice === "object") {
+    if (!toolChoice || typeof toolChoice.name !== "string") return bad("toolChoice must be auto, none, required or {name}");
+    if (!names.has(toolChoice.name)) return bad(`toolChoice names ${toolChoice.name}, which is not a declared tool`);
+    toolChoice = { name: toolChoice.name };
+  } else if (!["auto", "none", "required"].includes(toolChoice)) return bad("toolChoice must be auto, none, required or {name}");
+  if ((toolChoice === "required" || typeof toolChoice === "object") && !tools) return bad("toolChoice needs tools");
+  let allowed = null;
+  if (p.allowed != null) {
+    if (!Array.isArray(p.allowed) || p.allowed.some((n) => typeof n !== "string" || !names.has(n))) return bad("allowed must list declared tool names");
+    allowed = [...new Set(p.allowed)];
+  }
+  const parallel = p.parallel !== false;
+  let maxCalls = null;
+  if (p.maxCalls != null) { maxCalls = Math.floor(+p.maxCalls); if (!(maxCalls >= 1 && maxCalls <= API2_LIMITS.maxCalls)) return bad("maxCalls out of range"); }
+  let format = null;
+  if (p.format != null) {
+    const f = p.format;
+    if (f?.type === "json") format = { type: "json" };
+    else if (f?.type === "schema" && f.schema && typeof f.schema === "object" && !Array.isArray(f.schema)) {
+      const n = JSON.stringify(f.schema).length;
+      if (n > API2_LIMITS.schemaChars) return bad(`the response format schema is ${n} characters; at most ${API2_LIMITS.schemaChars}`);
+      try { compileSchema(f.schema); } catch (e) { if (e instanceof SchemaError) return bad(`response format: ${e.message}`); throw e; }
+      format = { type: "schema", schema: f.schema, ...(typeof f.name === "string" ? { name: f.name.slice(0, 64) } : {}) };
+    } else return bad("format must be {type: json} or {type: schema, schema}");
+  }
+  let effort = null;
+  if (p.effort != null) { if (!EFFORTS.includes(p.effort)) return bad(`effort must be one of ${EFFORTS.join(", ")}`); effort = p.effort; }
+  return { req: { api: 2, rid, system, messages, tools, params: { ...params, toolChoice, allowed, parallel, maxCalls, format, effort } } };
+}
+
+// tok.encode in front of an LRU by bytes: an agent's every step resends the whole history, and the
+// host tab would otherwise run JS BPE over all of it each time. Keyed by the text itself.
+export class EncodeCache {
+  constructor(budget = 32 << 20, min = 64) { this.budget = budget; this.min = min; this.bytes = 0; this.m = new Map(); }
+  encode(tok, text) {
+    if (text.length < this.min) return tok.encode(text);
+    if (this.tok !== tok) { this.m.clear(); this.bytes = 0; this.tok = tok; }
+    const hit = this.m.get(text);
+    if (hit) { this.m.delete(text); this.m.set(text, hit); return hit; }
+    const ids = tok.encode(text);
+    const cost = text.length * 2 + ids.length * 4;
+    if (cost > this.budget / 4) return ids;
+    this.m.set(text, ids); this.bytes += cost;
+    while (this.bytes > this.budget && this.m.size) { const [k, v] = this.m.entries().next().value; this.m.delete(k); this.bytes -= k.length * 2 + v.length * 4; }
+    return ids;
+  }
+  clear() { this.m.clear(); this.bytes = 0; }
+}
+
+// The canonical form of an answer, as the client will send it back: its content (trimmed) and each
+// call's name and arguments (keys sorted); call ids and reasoning are left out.
+const sortKeys = (v) => (Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, sortKeys(v[k])])) : v);
+export function canonAnswer(text, calls) {
+  return String(text || "").trim() + "\u0000" + (calls || []).map((c) => c.name + "\u0001" + JSON.stringify(sortKeys(typeof c.args === "string" ? safeParse(c.args) : c.args ?? {}))).join("\u0002");
+}
+const safeParse = (s) => { try { return JSON.parse(s); } catch { return {}; } };
+// hash of the history before each message: h[j] covers system, the tool set and messages[0..j)
+export function historyHashes(req) {
+  const h = [hash64("s\u0000" + (req.system || "") + "\u0000" + JSON.stringify(req.tools || null))];
+  for (const m of req.messages) {
+    const c = m.role === "assistant" ? "a\u0000" + canonAnswer(m.text, m.calls) : (m.role === "tool" ? "t" : m.aside ? "x" : "u") + "\u0000" + m.text;
+    h.push(hash64(h[h.length - 1] + "\u0003" + c));
+  }
+  return h;
+}
+
+// The exact ids each recent API answer was sampled as, so a client's next step replays them instead
+// of re-tokenizing its text (which would change the prompt and cost a full re-prefill). Keyed by
+// (model, hash of the history before the answer, canonical answer): the same answer text in two
+// conversations never crosses over. Value: { ids (after "assistant\n", the header's think part
+// included), thinkEnd (where the content starts), reasoningHash, reasoned }. A client that sends
+// reasoning back hits only when it is the same reasoning. Bounded by entries and total ids;
+// cleared when the room loads another model.
+export class TurnCache {
+  constructor({ entries = 512, ids = 2000000 } = {}) { this.max = entries; this.maxIds = ids; this.n = 0; this.m = new Map(); }
+  put(key, v) {
+    if (!v?.ids?.length) return;
+    const old = this.m.get(key);
+    if (old) { this.n -= old.ids.length; this.m.delete(key); }
+    const val = { ...v, ids: Int32Array.from(v.ids) };
+    this.m.set(key, val); this.n += val.ids.length;
+    while ((this.m.size > this.max || this.n > this.maxIds) && this.m.size) { const [k, x] = this.m.entries().next().value; this.m.delete(k); this.n -= x.ids.length; }
+  }
+  get(key, reasoning = "") {
+    const v = this.m.get(key);
+    if (!v) return null;
+    const r = String(reasoning || "").trim();
+    if (r && v.reasoningHash !== hash64(r)) return null;
+    this.m.delete(key); this.m.set(key, v);
+    return v;
+  }
+  clear() { this.m.clear(); this.n = 0; }
+  get size() { return this.m.size; }
+}
+
+// Render a v2 ask to ids and check the context.
+// -> { ids, thinking, exact, S, profile, systemLen, histKey } or { err, code: "ctx", n, max }
+export function apiPrompt2(tok, req, ctxMax, { profile, cache = null, encoder = null, model = "" }) {
+  const S = specials(tok);
+  const thinking = !!req.params.thinking && S.think !== undefined;
+  const h = historyHashes(req);
+  const turnIds = cache ? (j, m) => cache.get(model + "|" + h[j] + "|" + canonAnswer(m.text, m.calls), m.reasoning) : () => null;
+  const encode = encoder ? (s) => encoder.encode(tok, s) : (s) => tok.encode(s);
+  const { ids, systemLen, exact } = renderApi(tok, req, profile, { encode, turnIds, thinking });
+  const max = ctxMax - API_LIMITS.reserve;
+  if (ids.length > max) return { err: `prompt is too long: ${ids.length} tokens > ${max} maximum`, code: "ctx", n: ids.length, max };
+  return { ids, thinking, exact, S, profile, systemLen, histKey: model + "|" + h[h.length - 1] + "|" };
+}
+
+export const GARBAGE_MSG = "the room's output did not follow the tool-call format (the engine looks unhealthy)";
+
+// Answer one v2 ask. As apiRun, plus: the tool-call grammar on the sampler (harness/constrain.js),
+// call parsing and streaming (harness/tools.js CallStream) with ai-call messages, stop strings on
+// content only, a default think budget in the forcing modes, and the exact-id cache.
+//   tt / vocabSize: token texts and vocabulary size for the grammar (harness/model-common.js tokenTexts)
+// -> { reason, stopSeq, usage: {in, out, think}, text, think, calls: [{name, args}], open, reused, stats, err }
+export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () => {}, cache, fallback, ctxMax, signal, tt = null, vocabSize = 0, log = () => {} }) {
+  const { ids, thinking, S, profile } = prompt;
+  const P = req.params, rid = req.rid;
+  const tools = req.tools || [];
+  const mode = P.toolChoice ?? "auto";
+  const style = profile.style;
+  const V = tok.vocab || {};
+  const respId = V["<tool_response>"];
+  const stopIds = new Set([S.imEnd, S.eot, respId].filter(Number.isInteger));
+  const base = apiSampler(P, fallback);
+  // the grammar: whenever there are tools (any mode) or a format
+  const grammar = tools.length || P.format;
+  if (grammar && !vocabSize) for (const v of Object.values(V)) if (v >= vocabSize) vocabSize = v + 1;
+  const cs = grammar
+    ? constrainedSampler(base, tools, { tokenText: tt || tokenTexts(tok), vocabSize, style, stops: [...stopIds], thinking, thinkInPrompt: !!profile.thinkInPrompt,
+      mode, allowed: P.allowed, maxCalls: P.maxCalls, parallel: P.parallel, format: P.format,
+      tags: Object.fromEntries(["<tool_call>", "</tool_call>", "<think>", "</think>", "<tool_response>", "</tool_response>"].map((t) => [t, V[t]])) })
+    : constrainedSampler(base, null, {});
+  const C = cs.constraint;
+  const forcing = !!C?.forcing;
+  const names = typeof mode === "object" ? [mode.name] : P.allowed || tools.map((t) => t.name);
+  const split = new ThinkSplit(thinking, { inPrompt: !!profile.thinkInPrompt, callCloses: style === "xml" && mode !== "none" && tools.length > 0 });
+  const calls = new CallStream({ style, tools, allowed: mode === "none" ? [] : names, constrained: !!C });
+  const stopper = new StopMatcher(P.stop);
+  let ac = new AbortController();
+  const onAbort = () => ac.abort();
+  signal?.addEventListener?.("abort", onAbort);
+  const seq = [];   // every id after the prompt, as the caches hold them (the budget's injected close included)
+  const pieces = pieceDecoder(tok);
+  // gv: the grammar's view of the answer so far (each token's C.tt: a tag token is one symbol)
+  let raw = "", gv = "", text = "", think = "", count = 0, thinkCount = 0, garbage = false, mismatch = false;
+  const onEvents = (evs, d) => {
+    for (const e of evs) {
+      if (stopper.hit) return;
+      if (e.t === "text") {
+        const out = stopper.push(e.text);
+        if (out) { text += out; send({ t: "ai-token", rid, text: out, d }); }
+        if (stopper.hit) { ac.abort(); return; }
+      } else if (e.t === "call") send({ t: "ai-call", rid, i: e.i, name: e.name });
+      else if (e.t === "args") send({ t: "ai-call", rid, i: e.i, a: e.a });
+      else if (e.t === "end") { if (e.mismatch) { mismatch = true; log(`call ${e.i} (${calls.calls[e.i]?.name}): the streamed arguments differ from the parsed ones`); } send({ t: "ai-call", rid, i: e.i, end: 1 }); }
+    }
+  };
+  const feed = (piece, d) => {
+    raw += piece;
+    for (const p of split.push(piece)) {
+      if (p.th) { think += p.text; send({ t: "ai-token", rid, text: p.text, d, th: 1 }); continue; }
+      onEvents(calls.push(p.text), d);
+      if (stopper.hit) return;
+    }
+  };
+  const budget = thinking && S.thinkEnd !== undefined ? (P.thinkBudget || (forcing ? Math.min(Math.floor(P.maxTokens / 2), 4096) : 0)) : 0;
+  let overBudget = false;
+  const inThink = () => thinking && !split.ended && split.state !== "answer" && split.state !== "gap";
+  const onToken = (id, drafted) => {
+    if (stopper.hit || overBudget || garbage) return;
+    count++;
+    if (inThink()) thinkCount++;
+    seq.push(id);
+    cs.keep(1);
+    if (C) { gv += C.tt(id); cs.setText(gv); }
+    const piece = pieces.push(id);
+    if (piece) { onPiece(piece, drafted); feed(piece, drafted || 0); }
+    if (cs.garbage) { garbage = true; ac.abort(); return; }
+    if (budget && count >= budget && count < P.maxTokens && inThink()) { overBudget = true; ac.abort(); }
+  };
+  let r = null, err = null;
+  try {
+    r = await generate(ids, { stop: stopIds, maxNew: Math.max(1, Math.min(P.maxTokens, ctxMax - ids.length)), sample: cs.sample, signal: ac.signal, onToken });
+    if (overBudget && r.reason === "abort" && !signal?.aborted) {
+      // the reasoning used its budget: close the block and go on from the same ids (the grammar
+      // reads the close like sampled text, so a forcing mode engages right after it)
+      const close = [...tok.encode("\n"), S.thinkEnd, ...tok.encode("\n\n")];
+      const held = pieces.flush();
+      if (held) { onPiece(held, 0); feed(held, 0); }
+      const closeText = tok.decode(close);
+      onPiece(closeText, 0); feed(closeText, 0);
+      if (C) { for (const x of close) gv += C.tt(x); cs.setText(gv); }
+      seq.push(...close);
+      const ids2 = [...ids, ...seq];
+      const left = Math.min(P.maxTokens - count, ctxMax - ids2.length);
+      if (left > 0) {
+        overBudget = false;
+        ac = new AbortController();
+        if (signal?.aborted) ac.abort();
+        const r2 = await generate(ids2, { stop: stopIds, maxNew: left, sample: cs.sample, signal: ac.signal, onToken });
+        r = { ...r2, reused: r.reused || 0 };
+      } else r = { ...r, reason: ctxMax - ids2.length <= 0 ? "ctx" : "max" };
+    }
+  } catch (e) { err = e; }
+  signal?.removeEventListener?.("abort", onAbort);
+  if (!stopper.hit && !garbage) {
+    const last = pieces.flush();
+    if (last) { onPiece(last, 0); feed(last, 0); }
+  }
+  if (!stopper.hit) {
+    for (const p of split.flush()) {
+      if (p.th) { think += p.text; send({ t: "ai-token", rid, text: p.text, d: 0, th: 1 }); }
+      else onEvents(calls.push(p.text), 0);
+    }
+    if (!stopper.hit) onEvents(calls.end(), 0);
+    const rest = stopper.flush();
+    if (rest) { text += rest; send({ t: "ai-token", rid, text: rest, d: 0 }); }
+  }
+  let reason;
+  if (err || garbage) reason = "error";
+  else if (stopper.hit) reason = "stop_seq";
+  else if (r.reason === "abort") reason = "abort";
+  else reason = r.reason === "ctx" ? "ctx" : r.reason === "max" ? "max" : "stop";
+  const done = calls.calls.map((c) => ({ name: c.name, args: c.args }));
+  const open = !stopper.hit && calls.open ? { i: calls.open.i, name: calls.open.name } : null;
+  if (C?.broken) log("the answer left the tool-call grammar (a bug): parsed as it came");
+  // exact-id reuse: an answer that ended on an end token (or the grammar's end), nothing cut or held
+  if (cache && reason === "stop" && !open && !mismatch && (text.trim() || done.length)) {
+    const tail = headerTail(tok, S, profile, thinking);
+    let thinkEnd = tail.length;
+    if (thinking) {
+      let k = seq.lastIndexOf(S.thinkEnd);
+      if (k >= 0) { k++; while (k < seq.length && !tok.decode([seq[k]]).trim()) k++; }
+      else { k = seq.indexOf(V["<tool_call>"]); if (k < 0) k = seq.length; }
+      thinkEnd = tail.length + k;
+    }
+    cache.put(prompt.histKey + canonAnswer(text, done), { ids: [...tail, ...seq], thinkEnd, reasoned: !!think.trim(), reasoningHash: think.trim() ? hash64(think.trim()) : "" });
+  }
+  return { reason, stopSeq: stopper.hit, usage: { in: ids.length, out: count, think: thinkCount }, text, think, calls: done, open,
+    reused: r?.reused || 0, stats: r?.stats || "", err: garbage ? GARBAGE_MSG : err ? String(err.message || err) : null };
 }

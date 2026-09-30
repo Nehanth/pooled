@@ -1,6 +1,8 @@
 # `pooled serve`: the room as a local OpenAI and Anthropic endpoint
 
-Status: design, branch `feat/serve`. Roadmap item 04. Scope: a new `cli/` package, a small host-side
+Status: v1 built (chat only). v2 (tools, structured output, reasoning in history; OpenAI Chat
+Completions, OpenAI Responses and Anthropic Messages, no legacy `/v1/completions`) in progress: its
+shared core is section 11; the endpoint mappings land with each endpoint. Roadmap item 04. Scope: a new `cli/` package, a small host-side
 addition in `room.js` + a new DOM-free `room/api.js`, a panel in `p2p.html`, `docs/protocol.md`.
 Nothing in `engine/`. No `PROTOCOL` bump.
 
@@ -29,6 +31,7 @@ browser tab cannot accept inbound HTTP, so a small Node process joins the room a
 | 3 | Protocol | `ai-ask` gains `api: 1, rid, messages, params`; `ai-genstart` / `ai-token` / `ai-gendone` / `ai-busy` / `ai-queued` / `ai-stop` gain `rid`; the host advertises `meta.api: 1` in its `hello`. Old peers ignore the new fields, so `PROTOCOL` stays 4 |
 | 4 | Room side | "API client *name* joined" in the log and chat; a card marked API; host can disconnect it (`bye`); an **API** panel in the room menu with the command for this room; API asks follow `ai-visibility` like any guest's, except that the asking bridge always gets the full stream |
 | 5 | Limits | One generation at a time through the room's existing queue (the bridge keeps one request in flight and queues the rest locally); `max_tokens`, `stop`, `temperature`, `top_k` mapped onto the room's sampler; tools, images, `n > 1`, JSON mode: a clear 400 in v1 |
+| 6 | v2 (section 11) | One pipeline, thin adapters: each API parses into one internal request; one new ask, `ai-ask {api: 2}`, negotiated (no `PROTOCOL` bump). The host does everything that needs the model (template profile, structural ids, the tool-call grammar, parsing calls out of the answer, the exact-id cache); the CLI does everything about HTTP |
 
 ## 2. The Node WebRTC stack
 
@@ -490,8 +493,146 @@ legacy `/v1/completions` (404), `/v1/responses` (404), `count_tokens`.
 - **Port 8080** is the default asked for, and also what `npm run serve` uses for the site in this
   repo and what many dev servers pick. The clear "port busy" message covers it; 11435 (roadmap 04's
   first sketch) is the alternative if collisions show up in practice.
-- **Tool calls** (v2): Qwen3 emits `<tool_call>` JSON the harness already parses (`harness/`);
-  mapping that to OpenAI `tool_calls` / Anthropic `tool_use` is mostly formatting, but the chat
-  template must then render tools, which `buildIds` does not do yet.
+- **Tool calls**: resolved by v2, section 11.
+- **Default thinking when a client says nothing** (Codex `reasoning: null`, opencode): off, as v1;
+  a `pooled serve --reasoning` flag if agents want it on.
+- **`count_tokens`** (`/v1/messages/count_tokens`, `/v1/responses/input_tokens`): needs a render-only
+  ask on the host; added if Claude Code's compaction needs it.
+- **Several pinned checkpoints**: two agents in one room each want their system prompt + tools pinned;
+  v2 keeps one pin and does not replace a pin another client used in the last 10 minutes.
 - **Several API clients** each hold one in-flight request, so N bridges can take up to N of the 10
   queue slots. Fine for v1; a per-room API share could come with roadmap 07.
+
+## 11. v2: the shared core (tools, structured output, reasoning)
+
+Built on `feat/serve-tools-core`. The endpoint mappings (Chat Completions, Messages, Responses) sit
+on top of it, each in its own adapter file, and are documented with them.
+
+### 11.1 The pipeline
+
+```
+ HTTP ─ adapter.parse ─► InternalReq ─ common.finishRequest ─ http.js queue ─ ai-ask {api: 2} ─►  host: validateApiAsk (v2)
+                                                                                                  apiPrompt2: templateProfile + renderApi
+                                                                                                  apiRun2: grammar sampler → roomGenerate
+   ◄── adapter.encoder (SSE) / adapter.final (JSON) ◄── answer.js Ask ◄── ai-token / ai-call / ai-gendone ◄┘
+       ThinkSplit → CallStream → StopMatcher
+```
+
+- **CLI** (`cli/lib/`): `common.js` (the internal request, `normalizeMessages`, `finishRequest`,
+  `needsV2`, `askBody`, `outcome`, ids, the `pooled1.` reasoning blob, limits), `answer.js` (the
+  bridge's checks and the `Encoder` / `Collector` contract), `http.js` (routing to the adapters in
+  `ADAPTERS`, keep-alives on any 10 s of silence, the 413 caps, negotiation), `room.js` (`hostApi`,
+  `ai-call` routing, the host's `ctx`). `openai.js` / `anthropic.js` are today's behavior on the
+  adapter contract; `responses.js` is a stub (404 "not built yet").
+- **Host** (`room/api.js`, `room/conversation.js`, `harness/`): below.
+
+### 11.2 Template profiles and structural rendering (`room/conversation.js`)
+
+`templateProfile(chatTemplate)` reads what the model's GGUF template does, once per loaded model:
+`style` (`json` Hermes calls for Qwen3; `xml` `<function=…><parameter=…>` for Qwen3.5+), whether the
+generation prompt opens the think block itself (`thinkInPrompt`: Qwen3.6 / 3.8 yes, Qwen3 no),
+which past turns keep their think block (`thinkRule`: `all` for Qwen3.8, `afterQuery` for Qwen3.6,
+`afterQueryNonEmpty` for Qwen3), the Qwen3.8 reasoning-effort sentence, and whether text is
+trimmed. Nothing is keyed on a model name; a model with no template in hand (the 1.7B loads a
+`tokenizer.json`) gets Qwen3's rules.
+
+`renderApi` renders the conversation as the template does, **structurally**: every tag the template
+writes (`<|im_start|>`, `<|im_end|>`, `<think>`, `</think>`, `<tool_call>`, `</tool_call>`,
+`<tool_response>`, `</tool_response>`) is its special id, including the tags in the template's own
+tool instructions, while every client string (system text, messages, tool results, reasoning,
+arguments, the tool JSON) goes through plain `tok.encode`, so no client text can become a special
+token. Tools are listed with Python's `json.dumps` separators (`pyJSON`), past calls rendered as the
+template renders them. Tested byte for byte against the three GGUF templates rendered by jinja2
+(`tests/fixtures/api/render.json`, 66 cases).
+
+Rendering the tags in the tool instructions as special tokens matters in practice: with them
+spelled out in text, Qwen3 1.7B, Qwen3.5 2B and Qwen3.6 35B all wrote `<tool_call>` back as text
+pieces, the 1.7B skipped the tool, and both Qwen3.5+ models broke parallel calls
+(`</function>` followed by more parameters); with the special tokens all three called correctly
+(llama.cpp recordings, `tests/e2e/serve_record.mjs`).
+
+Deviations from the templates, each deliberate: mid-conversation system messages fold into the
+user turn before them (Qwen3.6 / 3.8 raise on them; Claude Code sends them); text sent along with
+tool results is its own user turn but not a new query (`aside`); `tool_choice: "none"` leaves the
+tools out of the prompt (with them listed, Qwen3.6 wrote call markup in any spelling the grammar
+had not banned, e.g. `<tool.call>`); and a Qwen3 answer sampled after the pre-closed empty think
+block keeps that block in the next prompt, so the prompt stays an extension of the last one.
+
+### 11.3 The grammar (`harness/constrain.js` `GrammarConstraint`, `harness/jsonschema.js`)
+
+Every v2 answer with tools or a format is sampled under a grammar over the whole answer: free
+reasoning; then, by mode, free text with calls (`auto`; after `</tool_call>` only whitespace,
+another call or the end), no calls (`none`), a call first (`required`, named), or a JSON value
+(`format`, or a call or the value for `auto` + format). Calls follow the model's format with
+declared names (narrowed by `allowed`), each parameter once, required ones before `</function>`,
+typed values (string-capable values raw, string enums unquoted, everything else a JSON value of its
+schema). After the allowed number of calls only the end token is left. The JSON subset: types,
+`properties`, `required`, `additionalProperties`, `items` / `prefixItems`, `enum` / `const`,
+`anyOf` / `oneOf`, `allOf` (objects), `nullable`, local `$ref`; bounds and patterns are accepted,
+not enforced. Whitespace: one space, or a newline and indentation. Schemas are capped (10 k nodes,
+enum 1 k, anyOf 64, allOf 16, depth 32).
+
+Tags that are special tokens are atomic symbols in the grammar: structure can only be written with
+the real token, never spelled out. XML models may open a call inside the reasoning (it closes it);
+for Qwen3 a call-like draft inside the reasoning stays reasoning. In the forcing modes the end token
+is banned in the reasoning and it gets a default budget of min(max_tokens / 2, 4096) tokens, after
+which the host closes the block and the grammar engages.
+
+Masks are cached per grammar state in one LRU per tokenizer (64 MB). Before scanning the vocabulary
+for a new state, the mask checks the model's top 64 candidates: when enough of them are allowed for
+the sampler's top-k, masking only those is exact (tested against the full mask on 10,000 random
+logit vectors), so most steps never scan. The garbage guard counts forced tokens only where the text
+is the model's own choice (a value's contents), plus NaN logits and a vanishing allowed probability.
+
+Recorded with llama.cpp's top-64 candidates through the host's whole pipeline, all modes work on
+Qwen3 1.7B and Qwen3.6 35B: parallel calls, typed and nested arguments, `required`, named, `none`,
+one call when parallel is off, JSON schema, reasoning then calls (`-g-` fixtures).
+
+### 11.4 Parsing and streaming (`harness/tools.js` `CallStream`, `room/api.js` `apiRun2`)
+
+The answer runs through `ThinkSplit` (reasoning → `ai-token {th}`), then `CallStream` (content →
+`StopMatcher` → `ai-token`; calls → `ai-call {name}`, `{a}`, `{end}`). A call's name goes out once
+complete and declared; its argument fragments concatenate exactly to its final arguments: string
+values stream as JSON strings as they are written, arrays and objects as their JSON text, values
+that need coercion (numbers, booleans, null, unions) at `</parameter>`. Stop strings apply to
+content only. `<tool_response>` ends the answer. An answer cut inside a call reports it as `open`.
+Without a grammar (never on the v2 path) a body in another shape is parsed whole at `</tool_call>`,
+and one that does not parse becomes content.
+
+Known limit: a string value containing `\n</parameter>` ends there (no lookahead).
+
+### 11.5 The exact-id cache (`room/api.js` `TurnCache`)
+
+Keyed by (model, hash of the history before the answer, the answer's canonical form: trimmed
+content and each call's name and sorted arguments); the value is the ids after `assistant\n` as the
+caches hold them (the header's think part, the reasoning, the injected budget close). 512 answers,
+2 M ids, cleared when a model loads. A client that sends reasoning back hits only with the same
+reasoning. With it, step k+1's prompt is step k's prompt, its answer and the new tool results, so
+the room prefills only those (tested on the recordings, thinking on and off). A host-side encode
+cache (32 MB) keeps agents' long histories from being re-tokenized every step.
+
+### 11.6 Limits (v2)
+
+| Limit | Value | Where |
+|---|---|---|
+| body | 4 MB | CLI 413 |
+| the ask as sent to the room | 3.5 MB of JSON (PeerJS drops a message it cannot rebuild, ~4 MB) | CLI 413 |
+| text | 1.5 M chars; early 400 when over 8 × the host's context | CLI and host |
+| messages | 1000 | CLI and host |
+| tools | 128; names `[A-Za-z0-9_.:-]{1,128}`, unique; schema ≤ 32 k chars; XML parameter names without `<`, `>`, line breaks | CLI and host |
+| calls | 16 per answer (grammar), 64 accepted from the host | host, CLI |
+| mask cache / encode cache / exact-id cache | 64 MB / 32 MB / 512 answers, 2 M ids | host |
+
+### 11.7 Tests
+
+Unit (Deno): `jsonschema_test.js`; `constrain_test.js` (modes, typed values, whitespace, caps, the
+LRU, the fast path, the garbage guard, on top of Code mode's cases); `tools_test.js` (pyJSON,
+coercion, `CallStream` at every split point); `api_host_test.js` (v2 validation, profiles, renderApi
+against the templates, injection, every recording replayed through `apiRun2`, the grammar accepting
+every token of the well-formed recordings and stopping the malformed ones, prefix reuse through the
+cache); `serve_common_test.js` (normalization including Claude Code's system-message shapes, the
+caps, the ask bodies, the bridge's checks). CLI (`node --test`): negotiation, v2 calls through an
+adapter, the old-host 400, the 413 caps, keep-alives mid-stream.
+
+Recordings: `node tests/e2e/serve_record.mjs --llama URL --model M --gguf F [--grammar]` against a
+llama.cpp server (CPU is fine) writes `tests/fixtures/api/<model>-[g-]<case>.json`.

@@ -30,8 +30,11 @@ export function tokenTexts(tok) {
 // turns on when one call forces GARBAGE.abs tokens, or GARBAGE.min and more than GARBAGE.ratio of
 // its tokens: the caller should end the answer there and run none of its calls.
 // Without tools it is the base sampler.
-export const GARBAGE = { abs: 16, min: 6, ratio: 0.2 };
-export function constrainedSampler(base, tools, { tokenText, vocabSize, style = "xml", stops = [], thinking = false }) {
+export const GARBAGE = { abs: 16, min: 6, ratio: 0.2, lowMass: 1e-4, lowRun: 8 };
+export function constrainedSampler(base, tools, opts = {}) {
+  const { tokenText, vocabSize, style = "xml", stops = [], thinking = false } = opts;
+  // API asks (mode / format given): the strict grammar over the whole answer
+  if (opts.mode !== undefined || opts.format != null) return strictSampler(base, tools || [], opts);
   if (!tools?.length) return { sample: base, setText() {}, keep() {}, constraint: null, forced: 0, garbage: false };
   const C = new ToolCallConstraint(tools, { vocabSize, tokenText, style, stops, thinking });
   let cols = [], kept = false, callF = 0, callN = 0, lastIn = false;
@@ -59,6 +62,53 @@ export function constrainedSampler(base, tools, { tokenText, vocabSize, style = 
     },
     setText(t) {
       if (!t) { w.forced = 0; w.garbage = false; cols = []; kept = false; callF = callN = 0; lastIn = false; }
+      C.setText(t);
+    },
+    constraint: C,
+  };
+  return w;
+}
+
+// The strict grammar (harness/constrain.js GrammarConstraint) as a sampler wrapper, for API asks.
+// The garbage guard counts forced positions only where the text is the model's own choice (a
+// value's contents, number digits: forced literals, names, keys and closers are expected), per call
+// (or per format value): GARBAGE.abs, or GARBAGE.min and more than GARBAGE.ratio of those positions.
+// Also garbage: NaN / +Infinity logits, or the allowed share of the probability under
+// GARBAGE.lowMass for GARBAGE.lowRun forced positions in a row there. The mask sees the sampler's
+// top-k (k = 1 when greedy), so the candidate fast path stays exact. setText() takes the grammar's
+// view of the answer so far: each emitted token's C.tt(id) (a tag token's symbol, not its text).
+function strictSampler(base, tools, opts) {
+  const { tokenText, vocabSize, style = "xml", stops = [], thinking = false, thinkInPrompt = false, mode = "auto", allowed = null, maxCalls = null, parallel = true, format = null, tags = null } = opts;
+  const C = new ToolCallConstraint(tools, { vocabSize, tokenText, style, stops, thinking, thinkInPrompt, mode, allowed, maxCalls, parallel, format, tags });
+  const k = base.gpu ? (base.gpu.kind === "greedy" ? 1 : base.gpu.k || 64) : 64;
+  let cols = [], kept = false, runF = 0, runN = 0, low = 0, lastIn = false;
+  const w = {
+    forced: 0, garbage: false,
+    sample(lg) {
+      if (kept) { cols = []; kept = false; }
+      const inValue = C.inCall || (C.state.k === "J");
+      C.mask(lg, k);
+      cols.push({ f: C.forced, free: C.free, bad: C.bad, mass: C.mass, inValue });
+      const t = base(lg);
+      if (!C.stops.has(t)) C.push(C.tt(t));   // an end token is not text; a tag token is its symbol
+      return t;
+    },
+    keep(n = 1) {
+      kept = true;
+      for (let i = 0; i < n && cols.length; i++) {
+        const c = cols.shift();
+        if (c.f) w.forced++;
+        if (c.bad) w.garbage = true;
+        if (!c.inValue) { lastIn = false; continue; }
+        if (!lastIn) { runF = 0; runN = 0; low = 0; lastIn = true; }
+        if (!c.free) continue;
+        runN++;
+        if (c.f) { runF++; low = c.mass < GARBAGE.lowMass ? low + 1 : 0; } else low = 0;
+        if (runF >= GARBAGE.abs || (runF >= GARBAGE.min && runF > GARBAGE.ratio * runN) || low >= GARBAGE.lowRun) w.garbage = true;
+      }
+    },
+    setText(t) {
+      if (!t) { w.forced = 0; w.garbage = false; cols = []; kept = false; runF = runN = low = 0; lastIn = false; }
       C.setText(t);
     },
     constraint: C,

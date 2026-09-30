@@ -1,0 +1,3652 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs --grammar: the host's v2 pipeline (grammar, parser, ai-call) over greedy llama.cpp top-64 candidates.",
+ "model": "qwen3.6-35b-moe",
+ "case": "think_parallel",
+ "grammar": true,
+ "profile": {
+  "style": "xml",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": true,
+  "thinkRule": "afterQuery",
+  "trim": true,
+  "known": true
+ },
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "What's the weather in Paris and in Tokyo?"
+   }
+  ]
+ },
+ "params": {
+  "thinking": true
+ },
+ "maxTokens": 600,
+ "promptTokens": 501,
+ "ids": [
+  90700,
+  8340,
+  25,
+  198,
+  16,
+  13,
+  220,
+  2972,
+  27382,
+  1386,
+  2570,
+  5952,
+  92217,
+  561,
+  1156,
+  6587,
+  310,
+  1366,
+  279,
+  1428,
+  8831,
+  303,
+  1330,
+  9432,
+  25,
+  11751,
+  321,
+  25358,
+  13,
+  198,
+  17,
+  13,
+  220,
+  2972,
+  27382,
+  1386,
+  15661,
+  13455,
+  92217,
+  1510,
+  447,
+  67017,
+  42063,
+  11,
+  4821,
+  44646,
+  369,
+  2420,
+  13,
+  198,
+  18,
+  13,
+  220,
+  2972,
+  35,
+  23544,
+  13131,
+  92217,
+  198,
+  256,
+  471,
+  4170,
+  220,
+  16,
+  25,
+  328,
+  57590,
+  1,
+  198,
+  256,
+  471,
+  4170,
+  220,
+  17,
+  25,
+  328,
+  51076,
+  15560,
+  1,
+  198,
+  256,
+  471,
+  7703,
+  25,
+  2717,
+  5024,
+  11,
+  1581,
+  310,
+  272,
+  38915,
+  466,
+  281,
+  46311,
+  13,
+  353,
+  3172,
+  958,
+  272,
+  38915,
+  430,
+  1581,
+  11,
+  466,
+  1066,
+  49325,
+  424,
+  2394,
+  424,
+  579,
+  9801,
+  13,
+  198,
+  19,
+  13,
+  220,
+  2972,
+  16668,
+  13086,
+  38795,
+  92217,
+  6920,
+  1510,
+  447,
+  67017,
+  63,
+  10598,
+  11,
+  2957,
+  364,
+  11751,
+  321,
+  2957,
+  364,
+  25358,
+  13,
+  198,
+  256,
+  471,
+  1510,
+  447,
+  67017,
+  42063,
+  420,
+  57590,
+  871,
+  63,
+  198,
+  256,
+  471,
+  1510,
+  447,
+  67017,
+  42063,
+  420,
+  51076,
+  15560,
+  871,
+  63,
+  198,
+  20,
+  13,
+  220,
+  2972,
+  7188,
+  17560,
+  92217,
+  45247,
+  279,
+  2961,
+  321,
+  2945,
+  1070,
+  9077,
+  310,
+  279,
+  1156,
+  13,
+  198,
+  256,
+  471,
+  13428,
+  364,
+  5224,
+  2468,
+  13,
+  198,
+  256,
+  471,
+  14606,
+  1965,
+  13,
+  169286,
+  198,
+  256,
+  471,
+  39424,
+  13,
+  695,
+  256,
+  471,
+  348,
+  11748,
+  7415,
+  269,
+  29377,
+  14,
+  60239,
+  2261,
+  3272,
+  77340,
+  561,
+  5224,
+  7044,
+  2640,
+  1510,
+  3715,
+  63,
+  369,
+  9801,
+  13,
+  353,
+  668,
+  1066,
+  1440,
+  279,
+  3177,
+  4874,
+  13,
+  198,
+  256,
+  471,
+  6558,
+  579,
+  1236,
+  279,
+  6526,
+  13,
+  695,
+  256,
+  471,
+  1510,
+  447,
+  67017,
+  42063,
+  420,
+  57590,
+  871,
+  63,
+  198,
+  256,
+  471,
+  1510,
+  447,
+  67017,
+  42063,
+  420,
+  51076,
+  15560,
+  871,
+  63,
+  198,
+  256,
+  471,
+  29965,
+  13,
+  695,
+  256,
+  471,
+  8984,
+  8798,
+  5224,
+  10485,
+  13,
+  169286,
+  198,
+  256,
+  471,
+  39424,
+  13,
+  695,
+  256,
+  471,
+  498,
+  7494,
+  6920,
+  22738,
+  60,
+  1411,
+  1510,
+  447,
+  67017,
+  63,
+  830,
+  17,
+  13,
+  695,
+  256,
+  471,
+  498,
+  13784,
+  364,
+  1965,
+  60,
+  1411,
+  318,
+  13624,
+  7511,
+  303,
+  1727,
+  2923,
+  11,
+  694,
+  353,
+  668,
+  6707,
+  279,
+  6526,
+  1381,
+  8,
+  198,
+  256,
+  471,
+  32645,
+  11,
+  353,
+  668,
+  1066,
+  6707,
+  279,
+  5224,
+  6526,
+  1381,
+  13,
+  695,
+  256,
+  471,
+  1510,
+  447,
+  67017,
+  42063,
+  420,
+  57590,
+  871,
+  63,
+  198,
+  256,
+  471,
+  1510,
+  447,
+  67017,
+  42063,
+  420,
+  51076,
+  15560,
+  871,
+  63,
+  198,
+  256,
+  471,
+  26472,
+  13,
+  695,
+  256,
+  471,
+  348,
+  11748,
+  7415,
+  269,
+  29377,
+  14,
+  8839,
+  77340,
+  353,
+  1220,
+  1236,
+  2617,
+  279,
+  3177,
+  4874,
+  513,
+  4581,
+  8796,
+  13,
+  328,
+  57590,
+  487,
+  328,
+  51076,
+  15560,
+  3158,
+  1942,
+  1603,
+  13,
+  695,
+  256,
+  471,
+  39424,
+  13,
+  695,
+  256,
+  471,
+  498,
+  4935,
+  22738,
+  60,
+  1411,
+  13086,
+  6526,
+  13,
+  695,
+  256,
+  471,
+  12492,
+  16936,
+  4653,
+  198,
+  248069,
+  271,
+  248058,
+  198,
+  27,
+  1628,
+  27362,
+  67017,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  8656,
+  29,
+  198,
+  57590,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  510,
+  1628,
+  29,
+  198,
+  248059,
+  198,
+  248058,
+  198,
+  27,
+  1628,
+  27362,
+  67017,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  8656,
+  29,
+  198,
+  51076,
+  15560,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  510,
+  1628,
+  29,
+  198,
+  248059
+ ],
+ "texts": [
+  "Thinking",
+  " Process",
+  ":",
+  "\n",
+  "1",
+  ".",
+  " ",
+  " **",
+  "Ident",
+  "ify",
+  " User",
+  " Request",
+  "**:",
+  " The",
+  " user",
+  " wants",
+  " to",
+  " know",
+  " the",
+  " current",
+  " weather",
+  " in",
+  " two",
+  " cities",
+  ":",
+  " Paris",
+  " and",
+  " Tokyo",
+  ".",
+  "\n",
+  "2",
+  ".",
+  " ",
+  " **",
+  "Ident",
+  "ify",
+  " Available",
+  " Tools",
+  "**:",
+  " `",
+  "get",
+  "_weather",
+  "(city",
+  ",",
+  " unit",
+  ")`",
+  " is",
+  " available",
+  ".",
+  "\n",
+  "3",
+  ".",
+  " ",
+  " **",
+  "D",
+  "etermine",
+  " Parameters",
+  "**:",
+  "\n",
+  "  ",
+  " -",
+  " City",
+  " ",
+  "1",
+  ":",
+  " \"",
+  "Paris",
+  "\"",
+  "\n",
+  "  ",
+  " -",
+  " City",
+  " ",
+  "2",
+  ":",
+  " \"",
+  "Tok",
+  "yo",
+  "\"",
+  "\n",
+  "  ",
+  " -",
+  " Unit",
+  ":",
+  " Not",
+  " specified",
+  ",",
+  " default",
+  " to",
+  " c",
+  "elsius",
+  " or",
+  " f",
+  "ahrenheit",
+  ".",
+  " I",
+  "'ll",
+  " use",
+  " c",
+  "elsius",
+  " as",
+  " default",
+  ",",
+  " or",
+  " just",
+  " omit",
+  " it",
+  " since",
+  " it",
+  "'s",
+  " optional",
+  ".",
+  "\n",
+  "4",
+  ".",
+  " ",
+  " **",
+  "Execute",
+  " Tool",
+  " Calls",
+  "**:",
+  " Call",
+  " `",
+  "get",
+  "_weather",
+  "`",
+  " twice",
+  ",",
+  " once",
+  " for",
+  " Paris",
+  " and",
+  " once",
+  " for",
+  " Tokyo",
+  ".",
+  "\n",
+  "  ",
+  " -",
+  " `",
+  "get",
+  "_weather",
+  "(city",
+  "=\"",
+  "Paris",
+  "\")",
+  "`",
+  "\n",
+  "  ",
+  " -",
+  " `",
+  "get",
+  "_weather",
+  "(city",
+  "=\"",
+  "Tok",
+  "yo",
+  "\")",
+  "`",
+  "\n",
+  "5",
+  ".",
+  " ",
+  " **",
+  "Process",
+  " Results",
+  "**:",
+  " Combine",
+  " the",
+  " results",
+  " and",
+  " present",
+  " them",
+  " clearly",
+  " to",
+  " the",
+  " user",
+  ".",
+  "\n",
+  "  ",
+  " -",
+  " Wait",
+  " for",
+  " tool",
+  " output",
+  ".",
+  "\n",
+  "  ",
+  " -",
+  " Format",
+  " response",
+  ".",
+  "✅",
+  "\n",
+  "  ",
+  " -",
+  " Proceed",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " *",
+  "Self",
+  "-C",
+  "or",
+  "rection",
+  "/",
+  "Verification",
+  " during",
+  " thought",
+  "*:",
+  " The",
+  " tool",
+  " definition",
+  " says",
+  " `",
+  "unit",
+  "`",
+  " is",
+  " optional",
+  ".",
+  " I",
+  " will",
+  " just",
+  " pass",
+  " the",
+  " city",
+  " names",
+  ".",
+  "\n",
+  "  ",
+  " -",
+  " Let",
+  "'s",
+  " make",
+  " the",
+  " calls",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " `",
+  "get",
+  "_weather",
+  "(city",
+  "=\"",
+  "Paris",
+  "\")",
+  "`",
+  "\n",
+  "  ",
+  " -",
+  " `",
+  "get",
+  "_weather",
+  "(city",
+  "=\"",
+  "Tok",
+  "yo",
+  "\")",
+  "`",
+  "\n",
+  "  ",
+  " -",
+  " Ready",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " Output",
+  " matches",
+  " tool",
+  " schema",
+  ".",
+  "✅",
+  "\n",
+  "  ",
+  " -",
+  " Proceed",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " [",
+  "Tool",
+  " Call",
+  " Generation",
+  "]",
+  " ->",
+  " `",
+  "get",
+  "_weather",
+  "`",
+  " x",
+  "2",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " [",
+  "Wait",
+  " for",
+  " response",
+  "]",
+  " ->",
+  " (",
+  "Sim",
+  "ulated",
+  " in",
+  " next",
+  " step",
+  ",",
+  " but",
+  " I",
+  " will",
+  " generate",
+  " the",
+  " calls",
+  " now",
+  ")",
+  "\n",
+  "  ",
+  " -",
+  " Actually",
+  ",",
+  " I",
+  " will",
+  " just",
+  " generate",
+  " the",
+  " tool",
+  " calls",
+  " now",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " `",
+  "get",
+  "_weather",
+  "(city",
+  "=\"",
+  "Paris",
+  "\")",
+  "`",
+  "\n",
+  "  ",
+  " -",
+  " `",
+  "get",
+  "_weather",
+  "(city",
+  "=\"",
+  "Tok",
+  "yo",
+  "\")",
+  "`",
+  "\n",
+  "  ",
+  " -",
+  " Done",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " *",
+  "Self",
+  "-C",
+  "or",
+  "rection",
+  "/",
+  "Note",
+  "*:",
+  " I",
+  " should",
+  " make",
+  " sure",
+  " the",
+  " city",
+  " names",
+  " are",
+  " exact",
+  " strings",
+  ".",
+  " \"",
+  "Paris",
+  "\",",
+  " \"",
+  "Tok",
+  "yo",
+  "\".",
+  " All",
+  " good",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " Proceed",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " [",
+  "Output",
+  " Generation",
+  "]",
+  " ->",
+  " Tool",
+  " calls",
+  ".",
+  " \n",
+  "  ",
+  " -",
+  " *(",
+  "Done",
+  ")*",
+  "\n",
+  "</think>",
+  "\n\n",
+  "<tool_call>",
+  "\n",
+  "<",
+  "function",
+  "=get",
+  "_weather",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "city",
+  ">",
+  "\n",
+  "Paris",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "</",
+  "function",
+  ">",
+  "\n",
+  "</tool_call>",
+  "\n",
+  "<tool_call>",
+  "\n",
+  "<",
+  "function",
+  "=get",
+  "_weather",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "city",
+  ">",
+  "\n",
+  "Tok",
+  "yo",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "</",
+  "function",
+  ">",
+  "\n",
+  "</tool_call>"
+ ],
+ "text": "Thinking Process:\n1.  **Identify User Request**: The user wants to know the current weather in two cities: Paris and Tokyo.\n2.  **Identify Available Tools**: `get_weather(city, unit)` is available.\n3.  **Determine Parameters**:\n   - City 1: \"Paris\"\n   - City 2: \"Tokyo\"\n   - Unit: Not specified, default to celsius or fahrenheit. I'll use celsius as default, or just omit it since it's optional.\n4.  **Execute Tool Calls**: Call `get_weather` twice, once for Paris and once for Tokyo.\n   - `get_weather(city=\"Paris\")`\n   - `get_weather(city=\"Tokyo\")`\n5.  **Process Results**: Combine the results and present them clearly to the user.\n   - Wait for tool output.\n   - Format response.✅\n   - Proceed. \n   - *Self-Correction/Verification during thought*: The tool definition says `unit` is optional. I will just pass the city names.\n   - Let's make the calls. \n   - `get_weather(city=\"Paris\")`\n   - `get_weather(city=\"Tokyo\")`\n   - Ready. \n   - Output matches tool schema.✅\n   - Proceed. \n   - [Tool Call Generation] -> `get_weather` x2. \n   - [Wait for response] -> (Simulated in next step, but I will generate the calls now)\n   - Actually, I will just generate the tool calls now. \n   - `get_weather(city=\"Paris\")`\n   - `get_weather(city=\"Tokyo\")`\n   - Done. \n   - *Self-Correction/Note*: I should make sure the city names are exact strings. \"Paris\", \"Tokyo\". All good. \n   - Proceed. \n   - [Output Generation] -> Tool calls. \n   - *(Done)*\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=city>\nTokyo\n</parameter>\n</function>\n</tool_call>",
+ "fellBack": 0,
+ "sent": [
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Thinking",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Process",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ":",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n1",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "  **",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Ident",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "ify",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " User",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Request",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "**:",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " The",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " user",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " wants",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " to",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " know",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " current",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " in",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " two",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " cities",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ":",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Paris",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " and",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Tokyo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n2",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "  **",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Ident",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "ify",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Available",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Tools",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "**:",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "(city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " unit",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ")`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " is",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " available",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n3",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "  **",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "D",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "etermine",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Parameters",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "**:",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " City",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " 1",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ":",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Paris",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " City",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " 2",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ":",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Tok",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "yo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Unit",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ":",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Not",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " specified",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " default",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " to",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " c",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "elsius",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " or",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " f",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "ahrenheit",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " I",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "'ll",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " use",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " c",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "elsius",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " as",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " default",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " or",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " just",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " omit",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " it",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " since",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " it",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "'s",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " optional",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n4",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "  **",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Execute",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Tool",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Calls",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "**:",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Call",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " twice",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " once",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " for",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Paris",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " and",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " once",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " for",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Tokyo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "(city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "=\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Paris",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\")",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "(city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "=\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Tok",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "yo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\")",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n5",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "  **",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Process",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Results",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "**:",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Combine",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " results",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " and",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " present",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " them",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " clearly",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " to",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " user",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Wait",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " for",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " tool",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " output",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Format",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " response",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "✅",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Proceed",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " *",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Self",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "-C",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "or",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "rection",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "/",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Verification",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " during",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " thought",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "*:",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " The",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " tool",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " definition",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " says",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "unit",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " is",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " optional",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " I",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " will",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " just",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " pass",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " names",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Let",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "'s",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " make",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " calls",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "(city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "=\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Paris",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\")",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "(city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "=\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Tok",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "yo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\")",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Ready",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Output",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " matches",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " tool",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " schema",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "✅",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Proceed",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " [",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Tool",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Call",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Generation",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "]",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " ->",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " x",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "2",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " [",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Wait",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " for",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " response",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "]",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " ->",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " (",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Sim",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "ulated",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " in",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " next",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " step",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " but",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " I",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " will",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " generate",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " calls",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " now",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ")",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Actually",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " I",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " will",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " just",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " generate",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " tool",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " calls",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " now",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "(city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "=\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Paris",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\")",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " `",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "(city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "=\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Tok",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "yo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\")",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "`",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Done",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " *",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Self",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "-C",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "or",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "rection",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "/",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Note",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "*:",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " I",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " should",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " make",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " sure",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " names",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " are",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " exact",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " strings",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Paris",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Tok",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "yo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " All",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " good",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Proceed",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " [",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Output",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Generation",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "]",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " ->",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Tool",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " calls",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \n   -",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " *(",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Done",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ")*",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "name": "get_weather"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "{\"city\": "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "Paris"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "}"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "end": 1
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 1,
+   "name": "get_weather"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 1,
+   "a": "{\"city\": "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 1,
+   "a": "\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 1,
+   "a": "Tok"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 1,
+   "a": "yo"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 1,
+   "a": "\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 1,
+   "a": "}"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 1,
+   "end": 1
+  }
+ ],
+ "result": {
+  "reason": "stop",
+  "calls": [
+   {
+    "name": "get_weather",
+    "args": "{\"city\": \"Paris\"}"
+   },
+   {
+    "name": "get_weather",
+    "args": "{\"city\": \"Tokyo\"}"
+   }
+  ],
+  "open": null,
+  "text": "",
+  "think": "Thinking Process:\n1.  **Identify User Request**: The user wants to know the current weather in two cities: Paris and Tokyo.\n2.  **Identify Available Tools**: `get_weather(city, unit)` is available.\n3.  **Determine Parameters**:\n   - City 1: \"Paris\"\n   - City 2: \"Tokyo\"\n   - Unit: Not specified, default to celsius or fahrenheit. I'll use celsius as default, or just omit it since it's optional.\n4.  **Execute Tool Calls**: Call `get_weather` twice, once for Paris and once for Tokyo.\n   - `get_weather(city=\"Paris\")`\n   - `get_weather(city=\"Tokyo\")`\n5.  **Process Results**: Combine the results and present them clearly to the user.\n   - Wait for tool output.\n   - Format response.✅\n   - Proceed. \n   - *Self-Correction/Verification during thought*: The tool definition says `unit` is optional. I will just pass the city names.\n   - Let's make the calls. \n   - `get_weather(city=\"Paris\")`\n   - `get_weather(city=\"Tokyo\")`\n   - Ready. \n   - Output matches tool schema.✅\n   - Proceed. \n   - [Tool Call Generation] -> `get_weather` x2. \n   - [Wait for response] -> (Simulated in next step, but I will generate the calls now)\n   - Actually, I will just generate the tool calls now. \n   - `get_weather(city=\"Paris\")`\n   - `get_weather(city=\"Tokyo\")`\n   - Done. \n   - *Self-Correction/Note*: I should make sure the city names are exact strings. \"Paris\", \"Tokyo\". All good. \n   - Proceed. \n   - [Output Generation] -> Tool calls. \n   - *(Done)*",
+  "usage": {
+   "in": 501,
+   "out": 471,
+   "think": 418
+  },
+  "err": null
+ }
+}

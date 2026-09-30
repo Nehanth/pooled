@@ -1,0 +1,4580 @@
+{
+ "note": "Our internal requests (cli/lib/common.js normalized) and the prompt text each GGUF chat template renders for them (jinja2, as transformers' apply_chat_template; made by the Pooled repo's fixture script from the templates in templates/).",
+ "cases": [
+  {
+   "model": "qwen3-1.7b",
+   "name": "plain-nothink",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "plain-nothink",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "plain-nothink",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "plain-think",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "plain-think",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "plain-think",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "plain-think-low",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "low"
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "plain-think-low",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "low"
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.\n\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "plain-think-low",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "low"
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "plain-think-medium",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "medium"
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "plain-think-medium",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "medium"
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "plain-think-medium",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "medium"
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "plain-think-high",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "high"
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "plain-think-high",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "high"
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "plain-think-high",
+   "req": {
+    "system": "You are terse.",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "high"
+    }
+   },
+   "text": "<|im_start|>system\nYou are terse.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "plain2-nothink",
+   "req": {
+    "system": "",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     },
+     {
+      "role": "assistant",
+      "text": "Hello!"
+     },
+     {
+      "role": "user",
+      "text": "Bye"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello!<|im_end|>\n<|im_start|>user\nBye<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "plain2-nothink",
+   "req": {
+    "system": "",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     },
+     {
+      "role": "assistant",
+      "text": "Hello!"
+     },
+     {
+      "role": "user",
+      "text": "Bye"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nHello!<|im_end|>\n<|im_start|>user\nBye<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "plain2-nothink",
+   "req": {
+    "system": "",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     },
+     {
+      "role": "assistant",
+      "text": "Hello!"
+     },
+     {
+      "role": "user",
+      "text": "Bye"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello!<|im_end|>\n<|im_start|>user\nBye<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "plain2-think",
+   "req": {
+    "system": "",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     },
+     {
+      "role": "assistant",
+      "text": "Hello!"
+     },
+     {
+      "role": "user",
+      "text": "Bye"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello!<|im_end|>\n<|im_start|>user\nBye<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "plain2-think",
+   "req": {
+    "system": "",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     },
+     {
+      "role": "assistant",
+      "text": "Hello!"
+     },
+     {
+      "role": "user",
+      "text": "Bye"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>\n<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nHello!<|im_end|>\n<|im_start|>user\nBye<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "plain2-think",
+   "req": {
+    "system": "",
+    "tools": null,
+    "messages": [
+     {
+      "role": "user",
+      "text": "Hi"
+     },
+     {
+      "role": "assistant",
+      "text": "Hello!"
+     },
+     {
+      "role": "user",
+      "text": "Bye"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>user\nHi<|im_end|>\n<|im_start|>assistant\nHello!<|im_end|>\n<|im_start|>user\nBye<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "tools1-nothink",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "tools1-nothink",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "tools1-nothink",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "tools1-think",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "tools1-think",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "tools1-think",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "tools1-think-low",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "low"
+    }
+   },
+   "text": "<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "tools1-think-low",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "low"
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to low. Keep your thinking brief and focused, moving directly to the conclusion without unnecessary elaboration.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "tools1-think-low",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "low"
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "tools1-think-medium",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "medium"
+    }
+   },
+   "text": "<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "tools1-think-medium",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "medium"
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "tools1-think-medium",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "medium"
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "tools1-think-high",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "high"
+    }
+   },
+   "text": "<|im_start|>system\nYou are a helpful assistant.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "tools1-think-high",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "high"
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "tools1-think-high",
+   "req": {
+    "system": "You are a helpful assistant.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": "high"
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "tools1nosys-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "tools1nosys-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "tools1nosys-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "tools1nosys-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "tools1nosys-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "tools1nosys-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Paris?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "loop-nothink",
+   "req": {
+    "system": "Be brief.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris and Tokyo, then search news."
+     },
+     {
+      "role": "assistant",
+      "text": "Let me check.",
+      "reasoning": "User wants weather for two cities.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Paris",
+         "unit": "c"
+        }
+       },
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Tokyo",
+         "days": 3
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "18C, cloudy"
+     },
+     {
+      "role": "tool",
+      "text": "22C, sunny"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Now search.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "news \"today\"",
+         "filters": {
+          "a": 1,
+          "b": [
+           true,
+           null
+          ],
+          "ü": "é"
+         },
+         "limit": 5,
+         "tags": [
+          "a",
+          "b"
+         ],
+         "exact": false
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "[]"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nBe brief.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris and Tokyo, then search news.<|im_end|>\n<|im_start|>assistant\n<think>\nUser wants weather for two cities.\n</think>\n\nLet me check.\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"unit\": \"c\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Tokyo\", \"days\": 3}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n18C, cloudy\n</tool_response>\n<tool_response>\n22C, sunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nNow search.\n</think>\n\n<tool_call>\n{\"name\": \"search\", \"arguments\": {\"query\": \"news \\\"today\\\"\", \"filters\": {\"a\": 1, \"b\": [true, null], \"ü\": \"é\"}, \"limit\": 5, \"tags\": [\"a\", \"b\"], \"exact\": false}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n[]\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "loop-nothink",
+   "req": {
+    "system": "Be brief.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris and Tokyo, then search news."
+     },
+     {
+      "role": "assistant",
+      "text": "Let me check.",
+      "reasoning": "User wants weather for two cities.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Paris",
+         "unit": "c"
+        }
+       },
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Tokyo",
+         "days": 3
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "18C, cloudy"
+     },
+     {
+      "role": "tool",
+      "text": "22C, sunny"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Now search.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "news \"today\"",
+         "filters": {
+          "a": 1,
+          "b": [
+           true,
+           null
+          ],
+          "ü": "é"
+         },
+         "limit": 5,
+         "tags": [
+          "a",
+          "b"
+         ],
+         "exact": false
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "[]"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nBe brief.<|im_end|>\n<|im_start|>user\nWeather in Paris and Tokyo, then search news.<|im_end|>\n<|im_start|>assistant\n<think>\nUser wants weather for two cities.\n</think>\n\nLet me check.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=unit>\nc\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=city>\nTokyo\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n18C, cloudy\n</tool_response>\n<tool_response>\n22C, sunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nNow search.\n</think>\n\n<tool_call>\n<function=search>\n<parameter=query>\nnews \"today\"\n</parameter>\n<parameter=filters>\n{\"a\": 1, \"b\": [true, null], \"ü\": \"é\"}\n</parameter>\n<parameter=limit>\n5\n</parameter>\n<parameter=tags>\n[\"a\", \"b\"]\n</parameter>\n<parameter=exact>\nfalse\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n[]\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "loop-nothink",
+   "req": {
+    "system": "Be brief.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris and Tokyo, then search news."
+     },
+     {
+      "role": "assistant",
+      "text": "Let me check.",
+      "reasoning": "User wants weather for two cities.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Paris",
+         "unit": "c"
+        }
+       },
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Tokyo",
+         "days": 3
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "18C, cloudy"
+     },
+     {
+      "role": "tool",
+      "text": "22C, sunny"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Now search.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "news \"today\"",
+         "filters": {
+          "a": 1,
+          "b": [
+           true,
+           null
+          ],
+          "ü": "é"
+         },
+         "limit": 5,
+         "tags": [
+          "a",
+          "b"
+         ],
+         "exact": false
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "[]"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nBe brief.<|im_end|>\n<|im_start|>user\nWeather in Paris and Tokyo, then search news.<|im_end|>\n<|im_start|>assistant\n<think>\nUser wants weather for two cities.\n</think>\n\nLet me check.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=unit>\nc\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=city>\nTokyo\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n18C, cloudy\n</tool_response>\n<tool_response>\n22C, sunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nNow search.\n</think>\n\n<tool_call>\n<function=search>\n<parameter=query>\nnews \"today\"\n</parameter>\n<parameter=filters>\n{\"a\": 1, \"b\": [true, null], \"ü\": \"é\"}\n</parameter>\n<parameter=limit>\n5\n</parameter>\n<parameter=tags>\n[\"a\", \"b\"]\n</parameter>\n<parameter=exact>\nfalse\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n[]\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "loop-think",
+   "req": {
+    "system": "Be brief.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris and Tokyo, then search news."
+     },
+     {
+      "role": "assistant",
+      "text": "Let me check.",
+      "reasoning": "User wants weather for two cities.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Paris",
+         "unit": "c"
+        }
+       },
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Tokyo",
+         "days": 3
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "18C, cloudy"
+     },
+     {
+      "role": "tool",
+      "text": "22C, sunny"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Now search.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "news \"today\"",
+         "filters": {
+          "a": 1,
+          "b": [
+           true,
+           null
+          ],
+          "ü": "é"
+         },
+         "limit": 5,
+         "tags": [
+          "a",
+          "b"
+         ],
+         "exact": false
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "[]"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nBe brief.\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Paris and Tokyo, then search news.<|im_end|>\n<|im_start|>assistant\n<think>\nUser wants weather for two cities.\n</think>\n\nLet me check.\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Paris\", \"unit\": \"c\"}}\n</tool_call>\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Tokyo\", \"days\": 3}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n18C, cloudy\n</tool_response>\n<tool_response>\n22C, sunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nNow search.\n</think>\n\n<tool_call>\n{\"name\": \"search\", \"arguments\": {\"query\": \"news \\\"today\\\"\", \"filters\": {\"a\": 1, \"b\": [true, null], \"ü\": \"é\"}, \"limit\": 5, \"tags\": [\"a\", \"b\"], \"exact\": false}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n[]\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "loop-think",
+   "req": {
+    "system": "Be brief.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris and Tokyo, then search news."
+     },
+     {
+      "role": "assistant",
+      "text": "Let me check.",
+      "reasoning": "User wants weather for two cities.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Paris",
+         "unit": "c"
+        }
+       },
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Tokyo",
+         "days": 3
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "18C, cloudy"
+     },
+     {
+      "role": "tool",
+      "text": "22C, sunny"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Now search.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "news \"today\"",
+         "filters": {
+          "a": 1,
+          "b": [
+           true,
+           null
+          ],
+          "ü": "é"
+         },
+         "limit": 5,
+         "tags": [
+          "a",
+          "b"
+         ],
+         "exact": false
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "[]"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nBe brief.<|im_end|>\n<|im_start|>user\nWeather in Paris and Tokyo, then search news.<|im_end|>\n<|im_start|>assistant\n<think>\nUser wants weather for two cities.\n</think>\n\nLet me check.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=unit>\nc\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=city>\nTokyo\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n18C, cloudy\n</tool_response>\n<tool_response>\n22C, sunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nNow search.\n</think>\n\n<tool_call>\n<function=search>\n<parameter=query>\nnews \"today\"\n</parameter>\n<parameter=filters>\n{\"a\": 1, \"b\": [true, null], \"ü\": \"é\"}\n</parameter>\n<parameter=limit>\n5\n</parameter>\n<parameter=tags>\n[\"a\", \"b\"]\n</parameter>\n<parameter=exact>\nfalse\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n[]\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "loop-think",
+   "req": {
+    "system": "Be brief.",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Paris and Tokyo, then search news."
+     },
+     {
+      "role": "assistant",
+      "text": "Let me check.",
+      "reasoning": "User wants weather for two cities.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Paris",
+         "unit": "c"
+        }
+       },
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Tokyo",
+         "days": 3
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "18C, cloudy"
+     },
+     {
+      "role": "tool",
+      "text": "22C, sunny"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Now search.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "news \"today\"",
+         "filters": {
+          "a": 1,
+          "b": [
+           true,
+           null
+          ],
+          "ü": "é"
+         },
+         "limit": 5,
+         "tags": [
+          "a",
+          "b"
+         ],
+         "exact": false
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "[]"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>\n\nBe brief.<|im_end|>\n<|im_start|>user\nWeather in Paris and Tokyo, then search news.<|im_end|>\n<|im_start|>assistant\n<think>\nUser wants weather for two cities.\n</think>\n\nLet me check.\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nParis\n</parameter>\n<parameter=unit>\nc\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=get_weather>\n<parameter=city>\nTokyo\n</parameter>\n<parameter=days>\n3\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n18C, cloudy\n</tool_response>\n<tool_response>\n22C, sunny\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nNow search.\n</think>\n\n<tool_call>\n<function=search>\n<parameter=query>\nnews \"today\"\n</parameter>\n<parameter=filters>\n{\"a\": 1, \"b\": [true, null], \"ü\": \"é\"}\n</parameter>\n<parameter=limit>\n5\n</parameter>\n<parameter=tags>\n[\"a\", \"b\"]\n</parameter>\n<parameter=exact>\nfalse\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n[]\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "newquery-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Zürich?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Need the tool.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Zürich"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "12C"
+     },
+     {
+      "role": "assistant",
+      "text": "It is 12C in Zürich.",
+      "reasoning": "Answer it."
+     },
+     {
+      "role": "user",
+      "text": "And Bern?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Zürich?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Zürich\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n12C\n</tool_response><|im_end|>\n<|im_start|>assistant\nIt is 12C in Zürich.<|im_end|>\n<|im_start|>user\nAnd Bern?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "newquery-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Zürich?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Need the tool.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Zürich"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "12C"
+     },
+     {
+      "role": "assistant",
+      "text": "It is 12C in Zürich.",
+      "reasoning": "Answer it."
+     },
+     {
+      "role": "user",
+      "text": "And Bern?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Zürich?<|im_end|>\n<|im_start|>assistant\n<think>\nNeed the tool.\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nZürich\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n12C\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nAnswer it.\n</think>\n\nIt is 12C in Zürich.<|im_end|>\n<|im_start|>user\nAnd Bern?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "newquery-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Zürich?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Need the tool.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Zürich"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "12C"
+     },
+     {
+      "role": "assistant",
+      "text": "It is 12C in Zürich.",
+      "reasoning": "Answer it."
+     },
+     {
+      "role": "user",
+      "text": "And Bern?"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Zürich?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=get_weather>\n<parameter=city>\nZürich\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n12C\n</tool_response><|im_end|>\n<|im_start|>assistant\nIt is 12C in Zürich.<|im_end|>\n<|im_start|>user\nAnd Bern?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "newquery-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Zürich?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Need the tool.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Zürich"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "12C"
+     },
+     {
+      "role": "assistant",
+      "text": "It is 12C in Zürich.",
+      "reasoning": "Answer it."
+     },
+     {
+      "role": "user",
+      "text": "And Bern?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Zürich?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Zürich\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n12C\n</tool_response><|im_end|>\n<|im_start|>assistant\nIt is 12C in Zürich.<|im_end|>\n<|im_start|>user\nAnd Bern?<|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "newquery-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Zürich?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Need the tool.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Zürich"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "12C"
+     },
+     {
+      "role": "assistant",
+      "text": "It is 12C in Zürich.",
+      "reasoning": "Answer it."
+     },
+     {
+      "role": "user",
+      "text": "And Bern?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Zürich?<|im_end|>\n<|im_start|>assistant\n<think>\nNeed the tool.\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nZürich\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n12C\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\nAnswer it.\n</think>\n\nIt is 12C in Zürich.<|im_end|>\n<|im_start|>user\nAnd Bern?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "newquery-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Zürich?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "reasoning": "Need the tool.",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Zürich"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "12C"
+     },
+     {
+      "role": "assistant",
+      "text": "It is 12C in Zürich.",
+      "reasoning": "Answer it."
+     },
+     {
+      "role": "user",
+      "text": "And Bern?"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Zürich?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n<function=get_weather>\n<parameter=city>\nZürich\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n12C\n</tool_response><|im_end|>\n<|im_start|>assistant\nIt is 12C in Zürich.<|im_end|>\n<|im_start|>user\nAnd Bern?<|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "noreason-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Oslo?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Oslo"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "3C"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Oslo\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n3C\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "noreason-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Oslo?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Oslo"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "3C"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n3C\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "noreason-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Oslo?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Oslo"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "3C"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n3C\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "noreason-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Oslo?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Oslo"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "3C"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Oslo\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n3C\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "noreason-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Oslo?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Oslo"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "3C"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n3C\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "noreason-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Weather in Oslo?"
+     },
+     {
+      "role": "assistant",
+      "text": "",
+      "calls": [
+       {
+        "name": "get_weather",
+        "args": {
+         "city": "Oslo"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "3C"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nWeather in Oslo?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n<tool_call>\n<function=get_weather>\n<parameter=city>\nOslo\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\n3C\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "multiline-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Search this"
+     },
+     {
+      "role": "assistant",
+      "text": "Sure.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "line one\nline two"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "ok"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nSearch this<|im_end|>\n<|im_start|>assistant\nSure.\n<tool_call>\n{\"name\": \"search\", \"arguments\": {\"query\": \"line one\\nline two\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "multiline-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Search this"
+     },
+     {
+      "role": "assistant",
+      "text": "Sure.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "line one\nline two"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "ok"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nSearch this<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nSure.\n\n<tool_call>\n<function=search>\n<parameter=query>\nline one\nline two\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "multiline-nothink",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Search this"
+     },
+     {
+      "role": "assistant",
+      "text": "Sure.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "line one\nline two"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "ok"
+     }
+    ],
+    "params": {
+     "thinking": false,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nSearch this<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nSure.\n\n<tool_call>\n<function=search>\n<parameter=query>\nline one\nline two\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+  },
+  {
+   "model": "qwen3-1.7b",
+   "name": "multiline-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Search this"
+     },
+     {
+      "role": "assistant",
+      "text": "Sure.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "line one\nline two"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "ok"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n<|im_start|>user\nSearch this<|im_end|>\n<|im_start|>assistant\nSure.\n<tool_call>\n{\"name\": \"search\", \"arguments\": {\"query\": \"line one\\nline two\"}}\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n"
+  },
+  {
+   "model": "qwen3.8-27b",
+   "name": "multiline-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Search this"
+     },
+     {
+      "role": "assistant",
+      "text": "Sure.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "line one\nline two"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "ok"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\nReasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.\n\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nSearch this<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nSure.\n\n<tool_call>\n<function=search>\n<parameter=query>\nline one\nline two\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  },
+  {
+   "model": "qwen3.6-35b-moe",
+   "name": "multiline-think",
+   "req": {
+    "system": "",
+    "tools": [
+     {
+      "name": "get_weather",
+      "description": "Get the current weather in a city.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "c",
+          "f"
+         ]
+        },
+        "days": {
+         "type": "integer"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     },
+     {
+      "name": "search",
+      "description": "Search the web; returns ‘results’.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string"
+        },
+        "filters": {
+         "type": "object"
+        },
+        "limit": {
+         "type": "integer"
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "exact": {
+         "type": "boolean"
+        }
+       },
+       "required": [
+        "query"
+       ]
+      }
+     }
+    ],
+    "messages": [
+     {
+      "role": "user",
+      "text": "Search this"
+     },
+     {
+      "role": "assistant",
+      "text": "Sure.",
+      "calls": [
+       {
+        "name": "search",
+        "args": {
+         "query": "line one\nline two"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "text": "ok"
+     }
+    ],
+    "params": {
+     "thinking": true,
+     "effort": null
+    }
+   },
+   "text": "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"get_weather\", \"description\": \"Get the current weather in a city.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"city\": {\"type\": \"string\", \"description\": \"City name\"}, \"unit\": {\"type\": \"string\", \"enum\": [\"c\", \"f\"]}, \"days\": {\"type\": \"integer\"}}, \"required\": [\"city\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"search\", \"description\": \"Search the web; returns ‘results’.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"filters\": {\"type\": \"object\"}, \"limit\": {\"type\": \"integer\"}, \"tags\": {\"type\": \"array\", \"items\": {\"type\": \"string\"}}, \"exact\": {\"type\": \"boolean\"}}, \"required\": [\"query\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT><|im_end|>\n<|im_start|>user\nSearch this<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nSure.\n\n<tool_call>\n<function=search>\n<parameter=query>\nline one\nline two\n</parameter>\n</function>\n</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>\nok\n</tool_response><|im_end|>\n<|im_start|>assistant\n<think>\n"
+  }
+ ]
+}

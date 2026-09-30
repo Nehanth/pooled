@@ -32,3 +32,31 @@ test("chunked messages from the host are rebuilt only within limits", () => {
   conn._handleChunk({ __peerData: 1, total: 3, n: 1, data: [] });
   assert.equal(seen.at(-1), 1, "one already started goes on");
 });
+
+test("the host's API version and context size: hello meta, then ai-ready-all keeps ctx current", () => {
+  const b = new Bridge({ code: "ABCD", name: "t", client: "c" });
+  assert.equal(b.hostApi, 1, "no hello yet: plain asks only");
+  b.hostMeta = { api: 2, ctx: 8192 };
+  assert.equal(b.hostApi, 2);
+  b.onData({ t: "ai-ready-all", model: "m", label: "M", ctx: 65536 });
+  assert.equal(b.hostMeta.ctx, 65536);
+  b.onData({ t: "ai-ready-all", model: "m", label: "M", ctx: "lots" });
+  assert.equal(b.hostMeta.ctx, 65536, "only a positive integer");
+  b.hostMeta = { api: true };
+  assert.equal(b.hostApi, 1, "an old bridge's truthy api is 1");
+});
+
+test("ai-call messages reach the ask they belong to; a v2 body goes out as api 2", () => {
+  const b = new Bridge({ code: "ABCD", name: "t", client: "c" });
+  const sent = [], got = [];
+  b.conn = { open: true, send: (m) => sent.push(m) };
+  assert.ok(b.ask("r1", { api: 2, system: "", messages: [], params: {} }, (d) => got.push(d.t)));
+  assert.equal(sent[0].api, 2, "the body's api wins over the default 1");
+  assert.ok(b.ask("r2", { system: "", messages: [], params: {} }, () => {}));
+  assert.equal(sent[1].api, 1);
+  b.onData({ t: "ai-call", rid: "r1", i: 0, name: "f" });
+  b.onData({ t: "ai-call", rid: "zz", i: 0, name: "f" });
+  b.onData({ t: "ai-gendone", rid: "r1" });
+  b.onData({ t: "ai-call", rid: "r1", i: 0, a: "late" });
+  assert.deepEqual(got, ["ai-call", "ai-gendone"], "routed by rid; nothing after the end");
+});

@@ -1,6 +1,6 @@
 // The OpenAI chat completions API: request validation and mapping onto the internal request,
 // response bodies, stream chunks and errors (docs/design/serve.md section 4).
-import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages } from "./common.js";
+import { ApiError, bad, TOOLS_MSG, TEXT_MSG, LIMITS, parseStop, checkInt, checkNum, finishMessages, withDefaults, ids } from "./common.js";
 
 const STATUS = { bad: 400, ctx: 400, auth: 401, forbidden: 403, notfound: 404, method: 405, toolarge: 413, busy: 429, unavailable: 503, timeout: 504, server: 500 };
 const TYPE = { bad: "invalid_request_error", ctx: "invalid_request_error", auth: "invalid_request_error", forbidden: "permission_error", notfound: "invalid_request_error", method: "invalid_request_error", toolarge: "invalid_request_error", busy: "rate_limit_exceeded", unavailable: "server_error", timeout: "server_error", server: "server_error" };
@@ -97,3 +97,30 @@ export class OpenAIStream {
 export function openaiModels(model, created) {
   return { object: "list", data: model ? [{ id: model, object: "model", created, owned_by: "pooled" }] : [] };
 }
+
+// ---- the adapter (docs/design/serve.md 11, "Interfaces frozen by CORE"): today's behavior on the
+// shared pipeline. Chat Completions' tools, JSON mode and reasoning in history come with the
+// endpoint's own change (section 6); until then parse() still refuses them.
+class OpenAIEncoder {
+  constructor(req, sse, meta) { this.sse = sse; this.s = new OpenAIStream({ id: meta.id, created: meta.created, model: meta.model, includeUsage: req.includeUsage }); }
+  start() { this.sse.write(this.s.start()); }
+  think(t) { this.sse.write(this.s.token(t, true)); }
+  text(t) { this.sse.write(this.s.token(t, false)); }
+  callStart() {}
+  callArgs() {}
+  callEnd() {}
+  done(a) { this.sse.write(this.s.done({ reason: a.reason, usage: a.usage, reused: a.reused })); }
+  error(e) { this.sse.write(this.s.error(e)); }
+  keepAlive(ahead) { this.sse.write(ahead == null ? ": keep-alive\n\n" : this.s.keepAlive(ahead)); }
+}
+export const adapter = {
+  api: "openai",
+  label: "chat",
+  routes: [{ method: "POST", path: "/v1/chat/completions" }],
+  parse: (body) => withDefaults(parseOpenAI(body)),
+  idFor: () => () => ids.call(),
+  encoder: (req, sse, meta) => new OpenAIEncoder(req, sse, meta),
+  final: (a) => openaiResponse({ id: a.id, created: a.created, model: a.model, text: a.text, think: a.think, reason: a.reason, usage: a.usage, reused: a.reused }),
+  error: openaiError,
+  streamError: (e) => `data: ${JSON.stringify(openaiError(e).body)}\n\n`,
+};

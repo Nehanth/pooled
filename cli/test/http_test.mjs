@@ -167,3 +167,99 @@ test("a room that floods tokens, sends non-text or odd usage cannot blow up the 
   assert.deepEqual(m.usage, { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 12 });
   await t.close();
 });
+
+// ---- v2 (docs/design/serve.md 4): negotiation, calls through an adapter, limits, keep-alives ----
+import { ADAPTERS } from "../lib/http.js";
+import { withDefaults } from "../lib/common.js";
+
+// a test adapter whose requests carry tools (the real endpoints add them in their own change)
+const calls = [];
+ADAPTERS.push({
+  api: "test", label: "test",
+  routes: [{ method: "POST", path: "/test/tools" }],
+  parse: (b) => withDefaults({ api: "test", stream: !!b.stream, maxTokens: 50, messages: [{ role: "user", text: String(b.q || "hi") }],
+    tools: b.tools === false ? null : [{ name: "f", description: "", parameters: { type: "object" } }], toolChoice: b.required ? "required" : "auto" }),
+  idFor: () => (i) => `call_${i}`,
+  encoder: (req, sse) => ({ start: () => sse.write("start\n"), think() {}, text: (t) => sse.write(`text ${t}\n`), callStart: (i, id, n) => sse.write(`call ${i} ${id} ${n}\n`),
+    callArgs: (i, a) => sse.write(`args ${i} ${a}\n`), callEnd: (i, a) => sse.write(`end ${i} ${a}\n`), done: (a) => sse.write(`done ${a.reason} ${a.calls.length}\n`),
+    error: (e) => sse.write(`error ${e.message}\n`), keepAlive: (ahead) => sse.write(ahead == null ? "ka\n" : `queued ${ahead}\n`) }),
+  final: (a) => ({ text: a.text, calls: a.calls, open: a.open, reason: a.reason }),
+  after: (a) => calls.push(a.calls.length),
+  error: (e) => ({ status: e.kind === "bad" ? 400 : e.kind === "toolarge" ? 413 : 500, body: { error: e.message } }),
+  streamError: (e) => `error ${e.message}\n`,
+});
+const v2answer = (rid, h, body) => setImmediate(() => {
+  h({ t: "ai-genstart", rid, promptTokens: 5, api: body.api === 2 ? 2 : undefined });
+  h({ t: "ai-token", rid, text: "ok" });
+  h({ t: "ai-call", rid, i: 0, name: "f" });
+  h({ t: "ai-call", rid, i: 0, a: '{"x": 1}' });
+  h({ t: "ai-call", rid, i: 0, end: 1 });
+  h({ t: "ai-gendone", rid, api: 2, reason: "stop", usage: { in: 5, out: 3 }, calls: [{ name: "f", args: '{"x": 1}' }] });
+});
+
+test("a v2 host gets v2 asks; tools come back as calls, streamed and whole", async () => {
+  const t = await start();
+  t.bridge.hostMeta = { api: 2, ctx: 4096 };
+  let body = null;
+  t.bridge.onAsk = (rid, h, b) => { body = b; v2answer(rid, h, b); };
+  const r = await t.req("POST", "/test/tools", { body: { q: "weather" } });
+  assert.equal(r.status, 200, r.body);
+  assert.deepEqual(JSON.parse(r.body), { text: "ok", calls: [{ id: "call_0", name: "f", args: '{"x": 1}' }], open: null, reason: "stop" });
+  assert.equal(body.api, 2);
+  assert.deepEqual(body.tools, [{ name: "f", description: "", parameters: { type: "object" } }]);
+  const s = await t.req("POST", "/test/tools", { body: { stream: true } });
+  assert.equal(s.body, 'start\ntext ok\ncall 0 call_0 f\nargs 0 {"x": 1}\nend 0 {"x": 1}\ndone stop 1\n');
+  // plain chat to a v2 host is a v2 ask too
+  t.bridge.onAsk = (rid, h, b) => { body = b; answer("ok", { api: 2 })(rid, (d) => h(d.t === "ai-genstart" ? { ...d, api: 2 } : d)); };
+  assert.equal((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).status, 200);
+  assert.equal(body.api, 2);
+  await t.close();
+});
+
+test("an old host: plain requests as v1, tools refused with a clear 400; a host that drops to v1 mid-way is a 500", async () => {
+  const t = await start();
+  t.bridge.hostMeta = { api: 1 };
+  let body = null;
+  t.bridge.onAsk = (rid, h, b) => { body = b; answer()(rid, h); };
+  assert.equal((await t.req("POST", "/v1/chat/completions", { body: chatBody() })).status, 200);
+  assert.equal(body.api, undefined, "a v1 body");
+  const r = await t.req("POST", "/test/tools", { body: {} });
+  assert.equal(r.status, 400);
+  assert.match(JSON.parse(r.body).error, /older Pooled without tool calling/);
+  t.bridge.hostMeta = { api: 2 };
+  t.bridge.onAsk = (rid, h) => setImmediate(() => h({ t: "ai-genstart", rid, promptTokens: 1 }));   // no api: 2 in genstart
+  const g = await t.req("POST", "/test/tools", { body: {} });
+  assert.equal(g.status, 500);
+  assert.match(JSON.parse(g.body).error, /changed to an older Pooled; retry/);
+  assert.equal(t.bridge.stopped.length, 1, "and the room is told to stop");
+  await t.close();
+});
+
+test("the legacy completions API is a 404 that points at chat completions; oversized bodies and asks are 413", async () => {
+  const t = await start();
+  const c = await t.req("POST", "/v1/completions", { body: { prompt: "x" } });
+  assert.equal(c.status, 404);
+  assert.match(JSON.parse(c.body).error.message, /legacy completions API is not served; use POST \/v1\/chat\/completions/);
+  const r = await t.req("POST", "/v1/responses", { body: {} });
+  assert.equal(r.status, 404, "Responses: not built yet");
+  assert.match(JSON.parse(r.body).error.message, /not built yet/);
+  const huge = await t.req("POST", "/v1/chat/completions", { body: "x".repeat((4 << 20) + 10) });
+  assert.equal(huge.status, 413);
+  t.bridge.hostMeta = { api: 2 };
+  const bytes = await t.req("POST", "/test/tools", { body: { q: "€".repeat(1250000) } });
+  assert.equal(bytes.status, 413, "under the body cap, over what the room can take in one message");
+  await t.close();
+});
+
+test("keep-alives while the room is silent mid-stream, not only while waiting", async () => {
+  const t = await start({ keepAliveMs: 60 });
+  t.bridge.hostMeta = { api: 2 };
+  t.bridge.onAsk = (rid, h, b) => setImmediate(() => {
+    h({ t: "ai-genstart", rid, promptTokens: 5, api: 2 });
+    h({ t: "ai-call", rid, i: 0, name: "f" });
+    setTimeout(() => { h({ t: "ai-call", rid, i: 0, a: "{}" }); h({ t: "ai-call", rid, i: 0, end: 1 }); h({ t: "ai-gendone", rid, reason: "stop", usage: { in: 5, out: 1 }, calls: [{ name: "f", args: "{}" }] }); }, 250);
+  });
+  const s = await t.req("POST", "/test/tools", { body: { stream: true } });
+  assert.match(s.body, /call 0 call_0 f\n(ka\n)+args 0 \{\}/, s.body);
+  await t.close();
+});

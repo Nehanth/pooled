@@ -18,6 +18,7 @@ export class SSEWriter {
     this.res = res;
     this.started = false;
     this.closed = false;
+    this.last = Date.now();   // when a byte last went out (for keep-alives on silence)
     res.on("close", () => { this.closed = true; });
   }
   start() {
@@ -30,6 +31,7 @@ export class SSEWriter {
     if (!chunk || this.closed) return;
     this.start();
     this.res.write(chunk);
+    this.last = Date.now();
   }
   end(chunk) {
     if (this.closed) return;
@@ -38,4 +40,13 @@ export class SSEWriter {
     this.res.end();
     this.closed = true;
   }
+}
+
+// Events with a strictly increasing sequence_number (the Responses API's stream):
+//   const ev = sseSequence(); ev("response.created", { response }) -> 'event: response.created\ndata: {"type":...,"sequence_number":0,...}'
+export function sseSequence(start = 0) {
+  let n = start;
+  const ev = (type, obj = {}) => sseEvent(type, { type, sequence_number: n++, ...obj });
+  ev.next = () => n;
+  return ev;
 }
