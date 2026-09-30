@@ -265,6 +265,18 @@ export class Qwen35Engine {
     // kvQ8: int8 K/V with one scale per 32 values (~56% of f16's memory: 36 KB per token for the
     // whole 27B), for 32K+ contexts. Off by default: it changes the numerics (tests/e2e/flash_synth.mjs --q8).
     this.kvQ8 = this.flash && kvQ8 === true && hd % 32 === 0;
+    // Each attention layer keeps K and V in one buffer each, bound whole, so maxSeq x kvDim x (1 | 2 | 4
+    // bytes) must fit the device's binding limit. Every WebGPU device binds 128 MiB: the MoE's 131072
+    // positions in f16 (kvDim 512) exactly, the 27B's 65536 in f16 or 131072 in int8 (kvDim 1024).
+    // Beyond that it needs a device created with the adapter's higher limit (room.js, tests/load_model.js);
+    // the room clamps its context to what every device can bind (room/models.js ctxForBinding).
+    // Failing here beats a lost device or invalid bind groups at the first attention layer.
+    this.kvBufBytes = maxSeq * kvDim * (this.kvQ8 ? 1 : this.flash ? 2 : 4);
+    if ([...(weights.layers || []), weights.mtp?.layer].some((L) => L?.isFull)) {
+      const lim = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
+      if (this.kvBufBytes > lim)
+        throw new Error(`context ${maxSeq} needs a ${(this.kvBufBytes / 2 ** 20).toFixed(0)} MiB KV buffer per attention layer; this GPU device binds at most ${(lim / 2 ** 20).toFixed(0)} MiB (ask for a shorter context, or int8 KV)`);
+    }
     this.ksPipe = this.kvQ8 ? "kv_store_q8" : "kv_store";
     this.faPipe = this.kvQ8 ? "attn_flash_q8" : "attn_flash";
     // two columns per workgroup in batched passes (attn_flash_t2): K/V read once per pair, same bits
