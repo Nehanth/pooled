@@ -1473,3 +1473,42 @@ fewer passes (~11 µs each), under 0.1 ms on the M5 Max: Metal launches are chea
 on 2026-09-28) and the Mac's MoE gap to MLX is inside the kernels, not between them. Below the 5% bar on both
 machines, so `layerFuse` stays opt-in. Stacked with perf/decode-moe-bandwidth (orthogonal kernels) the GB10 MoE
 gain would be expected around +7-8%; not measured together.
+
+## 2026-09-30: layerFuse on by default for NVIDIA, Apple and Deno (branch perf/kn-layer-fusion)
+
+The 2026-09-29 layer fusions above, merged with main (#246's `dn_nba` and `moe_nrt` now run next to them) and
+turned on by default: `layerFuse` "auto" (the default) is on when the adapter vendor is NVIDIA or Apple, or when
+there is no adapter info (Deno), and off on everything else until someone measures it there. `?layerfuse=0|1`
+(engine/preset.js) or `layerFuse: false` turns it off or on. Every flag keeps the bits, so rooms may mix devices
+with it on and off.
+
+The Chrome numbers from separate tab loads were not usable tonight: three other worktrees' Deno jobs were on
+the GB10 during the runs (nvidia-smi), and plain MoE decode swung between 15 and 52 tok/s in both arms. The
+numbers below come from a new in-process A/B that flips `engine.layerFuse` at runtime in alternating blocks after
+the same prompt, so both arms share the load and any contention: `tests/bench/lf_ab.js` (Deno, 8 rounds x 24
+tokens) and `bench.html?lfab=R` (Chrome, R rounds x 40 tokens). Both check that the two arms give the same tokens.
+
+| | off | on | gain |
+|---|---|---|---|
+| GB10 Deno MoE (8 blocks each, median ms/token) | 30.77 | 29.46 | +4.5% (every on block faster than every off block) |
+| GB10 Deno 27B | 101.89 | 100.70 | +1.2% |
+| GB10 Chrome 27B (2 tabs x 8 blocks, median tok/s) | 11.09 / 11.09 | 11.15 / 11.21 | +0.5% / +1.0% |
+| GB10 Chrome MoE, 4 tabs (8, 8, 12, 12 blocks), all contended (quiet GB10: ~52 tok/s) | 19.0 / 43.2 / 16.0 / 12.8 | 20.1 / 47.9 / 17.0 / 13.2 | +5.7% / +10.9% / +6.0% / +3.1%, tokens identical |
+| GB10 Chrome MoE, only the quiet blocks of tab 2 (3 pairs at 52-55 tok/s) | 52.3 / 52.9 / 53.4 | 54.7 / 53.0 / 54.2 | +4.6% / +0.2% / +1.5% |
+| M5 Max Chrome MoE (2 tabs x 8 blocks) | 90.29 / 90.78 | 92.09 / 92.28 | +2.0% / +1.7% (every on block faster) |
+| M5 Max Chrome 27B | 21.10 / 21.07 | 21.34 / 21.29 | +1.1% / +1.0% (every on block faster) |
+
+Every GB10 Chrome MoE tab's median favoured on, but the GB10 was never quiet enough tonight for a clean Chrome MoE figure.
+The 2026-09-29 quiet run (+3.6%) and the quiet tail above (~+2%) are the numbers to trust. The M5 Max, which had no
+contention, gains 1-2% in Chrome and has every on block faster than every off block.
+
+Correctness, GB10 (Deno): `test_q38_bits` with `LAYER_FUSE=0` and default (on) give the same hashes: 4cac59d8 / a67b7bcd, and
+`ATTN_PREFILL_TILE=0` 4f70a9ca / 5eb28e41 both ways. These are not the old 8a532ef5 / 85b12667 references: main moved them
+before this branch, and `LAYER_FUSE=0` is main's code path. Spec == plain and GPU sampling == logits in both.
+`test_moe` MATCH llama.cpp 3/3, spec == plain 3/3, head check 0 mismatches (on and off). `test_moe_split` PASS (split == solo,
+spec == plain). `fusion_synth.mjs` on the real GPU (`E2E_GPU=real`): every layerFuse row 0 logits differ. Its `attn_glue` row
+fails on a real GPU with or without this branch, which the file's own comment already says. `test_prefill_opts` 27B PASS. MoE:
+700 tokens relDiff 2.44e-2 over the 2e-2 tolerance, with identical numbers under `LAYER_FUSE=0` and `LAYER_FUSE=1`, so it
+comes from main (routing near-ties, see the note in the test) and not from this branch. Argmax, greedy and spec == plain are
+unchanged. M5 Max (Deno): `test_q38_bits ATTN_PREFILL_TILE=0` e3903fe5 / 8742688e for both off and on. Unit tests 942/942,
+`npm run check` clean.
