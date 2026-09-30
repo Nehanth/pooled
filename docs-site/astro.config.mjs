@@ -1,6 +1,21 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { readFile, writeFile } from 'node:fs/promises';
+
+// CHANGELOG.md is imported into reference/changelog and links repo files relatively (docs/protocol.md).
+// On the site those resolve under /docs/reference/changelog/ and 404, so after the build they point at
+// GitHub instead. (A rehype plugin can't do it: markdown.rehypePlugins needs the old unified processor.)
+const repoLinks = {
+	name: 'pooled-changelog-repo-links',
+	hooks: {
+		'astro:build:done': async ({ dir }) => {
+			const file = new URL('reference/changelog/index.html', dir);
+			const html = await readFile(file, 'utf8');
+			await writeFile(file, html.replace(/href="((?:docs|tests|scripts|cli|room|engine|packages)\/[^"]+)"/g, 'href="https://github.com/Nehanth/pooled/blob/main/$1"'));
+		},
+	},
+};
 
 // Served by the main Vercel project at https://pooled.run/docs (static files, no hosted service).
 export default defineConfig({
@@ -26,6 +41,7 @@ export default defineConfig({
 		'/serve/recipes/curl': '/docs/serve/recipes#curl',
 	},
 	integrations: [
+		repoLinks,
 		starlight({
 			title: 'Pooled docs',
 			description: 'Peer-to-peer LLM inference in the browser. Pool your devices to run big open models.',
