@@ -16,6 +16,10 @@
 //      HOST_TUNE / WORKER_TUNE=WG,ROWS  (per-device cooperative GEMV tuning, as autotune picks it)
 //      CKPT=0 (skip the checkpoint-after-rollback check)  CKPT_OLD=1 (also run it with the pre-fix protocol)
 //      WIRE=f16|f32  MOE_FUSE=0  SPECFUSE=0  DRAFTCHAIN=0  SOLO=0 (skip the solo engine)
+//      HOSTFUSE=0: the host's share of a lap as separate submits (default: the room's one-submit
+//      paths, headAhead for split plain with one undone pick per answer, _hostTrunkFused for split spec)
+//      BENCH=R: after the checks, R alternating rounds of split plain / split spec decode per case with
+//      the host's one-submit paths off and on (same process, same GPU queue: no network), tokens/s
 //      OPTS=0: tiled prefill attention, wide prefill GEMM and expert-grouped MoE prefill off (default: engine defaults)
 //      SYNTH=1: a synthetic file (tests/e2e/synth.mjs --moe), prompts are token ids
 // CPU-only check with a synthetic model (lavapipe):
@@ -26,6 +30,8 @@ import { Qwen35Engine } from "../engine/qwen35.js";
 import { makeTokenizer, argmax } from "../engine/engine.js";
 import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, f32ToF16, f16ToF32 } from "../engine/gguf.js";
 import { lookupDrafts } from "../room/lookup.js";
+import { roomQwen35Options, applyRoomFlags } from "../engine/preset.js";
+import { roomFlags } from "./load_model.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
 const N = +env("TOKENS", 64), NC = +env("NC", 16), SYNTH = env("SYNTH", "0") === "1";
@@ -43,15 +49,14 @@ const G = parseGGUFHeader((await readAt(0, 64 << 20)).buffer);
 const nBlk = G.meta["qwen35.block_count"], nextn = G.meta["qwen35.nextn_predict_layers"] || 0, L = nBlk - nextn;
 const bytesOf = (i) => readAt(i.byteOffset, i.byteLength);
 const vocabRows = G.tensors["token_embd.weight"].shape[0];
-// the room's engine options (room.js aiLoadShard)
-const common = { device, meta: G.meta, maxSeq: CTX, batchCols: NC, coopRowsB: 1, vocab: vocabRows,
-  draftVocab: SYNTH ? 0 : 65536, draftChain: env("DRAFTCHAIN", "1") !== "0", specFuse: env("SPECFUSE", "1") !== "0",
-  moeFuse: env("MOE_FUSE", "1") !== "0",
+// the room's engine options (engine/preset.js, what room.js aiLoadShard passes); the env knobs below are
+// the room's ?flags (DRAFTCHAIN=0 is ?draftchain=0 ...), and ROOM_FLAGS takes any other
+const flags = roomFlags({ ...(SYNTH ? { draftvocab: "0" } : {}), draftchain: env("DRAFTCHAIN", "1"), specfuse: env("SPECFUSE", "1"), moefuse: env("MOE_FUSE", "1"), hostfuse: env("HOSTFUSE", "1") });
+const common = { device, meta: G.meta, maxSeq: CTX, vocab: vocabRows, ...roomQwen35Options(flags), batchCols: NC, coopRowsB: 1,
   // the prefill options come from the engine defaults, as in room.js (tiled prefill attention on every
   // device; wide GEMM + expert-grouped MoE on the device that holds the embedding, used by solo
   // prefillTokens only: the split prefill runs 16-column frames). OPTS=0: all three off everywhere (A/B).
   ...(env("OPTS", "") === "0" ? { attnPrefillTile: false, moeGroupPrefill: 0, prefillUbatch: 0 } : {}) };
-const roomFlags = (e) => { e.mtpBatchFill = true; e.mtpBatchRefill = true; e.mtpPreDraft = true; return e; };
 // per-device kernel tuning (room.js autotuneCoop picks these per GPU): WG,ROWS for the worker,
 // e.g. WORKER_TUNE=64,8 to stand in for a phone whose autotune differs from the host's
 const tune = (v) => v ? (([wg, rows]) => ({ coopWG: wg, coopRows: rows }))(v.split(",").map(Number)) : {};
@@ -59,7 +64,7 @@ const mk = async (lo, hi, hasEmbed, hasHead) => {
   const t0 = performance.now();
   const weights = await qwen35Weights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp: hasHead });
   const t = lo > 0 ? tune(env("WORKER_TUNE", "")) : hasEmbed && hi < L ? tune(env("HOST_TUNE", "")) : {};
-  const e = roomFlags(await Qwen35Engine.create({ ...common, ...t, weights, layerRange: [lo, hi], hasEmbed, hasHead }));
+  const e = applyRoomFlags(await Qwen35Engine.create({ ...common, ...t, weights, layerRange: [lo, hi], hasEmbed, hasHead }), flags);
   console.log(`  engine [${lo},${hi})${hasEmbed ? " +embed" : ""}${hasHead ? " +head" : ""}${e.mtp ? " +mtp" : ""}: moeFuse ${e.moeFuse}, attnPrefillTile ${e.attnPrefillTile}, moeGroupPrefill ${e.moeGrpU || "off"}, prefillUbatch ${e.ubatch || "off"}, ${((performance.now() - t0) / 1000).toFixed(0)} s`);
   return e;
 };
@@ -210,14 +215,27 @@ async function splitPlain(host, worker, prompt) {
   const C = chain(host, worker);
   let { logits, pos } = await splitPrefill(host, C, prompt);
   const gen = [argmax(logits)], margins = [margin(logits)];
+  const t0 = performance.now();
+  const ahead = host.hostFuse && host.canHeadAhead();
+  let h1 = null;
   while (gen.length < N) {   // aiPipeToken: one token per lap
-    const h1 = await host.embedRun(gen[gen.length - 1], pos);
+    h1 ||= await host.embedRun(gen[gen.length - 1], pos);
     const h = await C.workerOne(wire(h1), pos);
     pos++;
+    h1 = null;
+    if (ahead && gen.length + 1 < N) {
+      // room.js plain loop (hostFuse): this lap's head and the next token's host layers in one submit
+      const r = await host.headAhead(h, pos, { kind: "greedy" });
+      gen.push(r.cands.ids[0]); margins.push(0);
+      // once per answer, undo the step as a stop token would and take the separate path instead
+      if (gen.length === 8 || !r.h) { host.dropAhead(); continue; }
+      host.keepAhead(); h1 = r.h;
+      continue;
+    }
     logits = await host.headFromHidden(h);
     gen.push(argmax(logits)); margins.push(margin(logits));
   }
-  return { gen, margins };
+  return { gen, margins, ms: performance.now() - t0 };
 }
 async function splitSpec(host, worker, prompt) {
   host.reset(); worker.reset(); host.mtpFill = true; host.mtp.stats = { drafts: 0, accepted: 0 };
@@ -227,9 +245,10 @@ async function splitSpec(host, worker, prompt) {
   const rejects = { n: 0 };
   const spec = {
     rejects,
-    runTrunk: async (tokens, p) => {
-      const n = tokens.length, dim = host.dims.dim, hb = new Float32Array(n * dim);
-      for (let c = 0; c < n; c += NC) {
+    preTrunk: true,   // room.js: the host's layers may already have run with the drafts (hostFuse)
+    runTrunk: async (tokens, p, pre) => {
+      const n = tokens.length, dim = host.dims.dim, hb = pre?.hs || new Float32Array(n * dim);
+      if (!pre) for (let c = 0; c < n; c += NC) {
         const m = Math.min(NC, n - c);
         hb.set(await host.embedRunBatch(tokens.slice(c, c + m), p + c, { base: c, total: n }), c * dim);
       }
@@ -237,8 +256,9 @@ async function splitSpec(host, worker, prompt) {
     },
     onReject: async (k) => { C.pendingRb = k; rejects.n++; },
   };
+  const t0 = performance.now();
   const r = await specLoop(host, argmax(logits), prompt, spec);
-  return { ...r, stats: host.mtp.stats };
+  return { ...r, stats: host.mtp.stats, ms: performance.now() - t0 };
 }
 
 // greedy runs keep going past <|im_end|>; what comes after the first end token is not an answer
@@ -346,6 +366,20 @@ for (const S of splits) {
       // off the rails: a divergence on a clear top-1 (margin > 1 logit) is a failure
       if (d >= 0 && ref[name].margins[d] > 1) { fail++; console.log(`  FAIL: split diverges from solo on a clear token (margin ${ref[name].margins[d].toFixed(3)})`); }
     }
+  }
+  const R = +env("BENCH", "0");
+  if (R) for (const [name, prompt] of CASES) {
+    const t = { plain: { off: [], on: [] }, spec: { off: [], on: [] } };
+    const fuse0 = host.hostFuse;
+    for (let r = 0; r < R; r++) for (const on of r % 2 ? [true, false] : [false, true]) {
+      host.hostFuse = on;
+      const p = await splitPlain(host, worker, prompt), s2 = await splitSpec(host, worker, prompt);
+      if (firstDiff(p.gen, s2.gen) >= 0) { fail++; console.log(`  FAIL: bench ${name} hostFuse ${on}: spec != plain`); }
+      t.plain[on ? "on" : "off"].push((N - 1) / (p.ms / 1000)); t.spec[on ? "on" : "off"].push((N - 1) / (s2.ms / 1000));
+    }
+    host.hostFuse = fuse0;
+    const med = (a) => [...a].sort((x, y) => x - y)[a.length >> 1], f = (a) => a.map((x) => x.toFixed(1)).join(" ");
+    for (const m of ["plain", "spec"]) console.log(`[bench split ${S}] ${name} ${m}: hostFuse off ${f(t[m].off)} (median ${med(t[m].off).toFixed(1)}) · on ${f(t[m].on)} (median ${med(t[m].on).toFixed(1)}) tok/s: ${((med(t[m].on) / med(t[m].off) - 1) * 100).toFixed(1)}%`);
   }
 }
 console.log(`largest |activation| on the wire: ${wireMax.toFixed(1)}; GPU errors: ${gpuErrs.length}`);

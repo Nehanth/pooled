@@ -1,0 +1,69 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs: greedy, unconstrained llama.cpp output for this request as the room renders it.",
+ "model": "qwen3-1.7b",
+ "case": "json_schema",
+ "profile": {
+  "style": "json",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": false,
+  "thinkRule": "afterQueryNonEmpty",
+  "trim": false,
+  "known": true
+ },
+ "thinking": false,
+ "maxTokens": 60,
+ "req": {
+  "system": "Reply with only a JSON object: {\"city\": string, \"population_millions\": number}.",
+  "tools": null,
+  "messages": [
+   {
+    "role": "user",
+    "text": "Largest city in Japan?"
+   }
+  ]
+ },
+ "stop": "eos",
+ "promptTokens": 42,
+ "ids": [
+  4913,
+  8926,
+  788,
+  330,
+  52854,
+  16032,
+  497,
+  330,
+  44441,
+  717,
+  90287,
+  788,
+  220,
+  18,
+  13,
+  20,
+  92,
+  151645
+ ],
+ "texts": [
+  "{\"",
+  "city",
+  "\":",
+  " \"",
+  "Tok",
+  "yo",
+  "\",",
+  " \"",
+  "population",
+  "_m",
+  "illions",
+  "\":",
+  " ",
+  "3",
+  ".",
+  "5",
+  "}",
+  "<|im_end|>"
+ ],
+ "text": "{\"city\": \"Tokyo\", \"population_millions\": 3.5}<|im_end|>"
+}

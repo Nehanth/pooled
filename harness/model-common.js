@@ -4,6 +4,15 @@
 // from an assistant turn's text to the exact ids it was sampled as. DOM-free.
 import { ToolCallConstraint } from "./constrain.js";
 
+// The conversation no longer fits the context: both adapters throw it before asking the model, and
+// the agent ends the request with reason "context" (harness/agent.js).
+export class ContextFull extends Error {
+  constructor(n, max) {
+    super(`the conversation is ${n} tokens and the context is ${max}: start a new task (the files are kept)`);
+    this.name = "ContextFull"; this.tokens = n; this.max = max;
+  }
+}
+
 // id -> decoded text of that one token, cached (the constraint scans the vocabulary with it)
 export function tokenTexts(tok) {
   const texts = [];
@@ -21,8 +30,11 @@ export function tokenTexts(tok) {
 // turns on when one call forces GARBAGE.abs tokens, or GARBAGE.min and more than GARBAGE.ratio of
 // its tokens: the caller should end the answer there and run none of its calls.
 // Without tools it is the base sampler.
-export const GARBAGE = { abs: 16, min: 6, ratio: 0.2 };
-export function constrainedSampler(base, tools, { tokenText, vocabSize, style = "xml", stops = [], thinking = false }) {
+export const GARBAGE = { abs: 16, min: 6, ratio: 0.2, lowMass: 1e-4, lowRun: 8 };
+export function constrainedSampler(base, tools, opts = {}) {
+  const { tokenText, vocabSize, style = "xml", stops = [], thinking = false } = opts;
+  // API asks (mode / format given): the strict grammar over the whole answer
+  if (opts.mode !== undefined || opts.format != null) return strictSampler(base, tools || [], opts);
   if (!tools?.length) return { sample: base, setText() {}, keep() {}, constraint: null, forced: 0, garbage: false };
   const C = new ToolCallConstraint(tools, { vocabSize, tokenText, style, stops, thinking });
   let cols = [], kept = false, callF = 0, callN = 0, lastIn = false;
@@ -50,6 +62,64 @@ export function constrainedSampler(base, tools, { tokenText, vocabSize, style = 
     },
     setText(t) {
       if (!t) { w.forced = 0; w.garbage = false; cols = []; kept = false; callF = callN = 0; lastIn = false; }
+      C.setText(t);
+    },
+    constraint: C,
+  };
+  return w;
+}
+
+// The strict grammar (harness/constrain.js GrammarConstraint) as a sampler wrapper, for API asks.
+// The garbage guard counts forced positions only where the text is the model's own choice (a
+// value's contents, number digits: forced literals, names, keys and closers are expected), per call
+// (or per format value): GARBAGE.abs, or GARBAGE.min and more than GARBAGE.ratio of those positions.
+// Also garbage: NaN / +Infinity logits, or the allowed share of the probability under
+// GARBAGE.lowMass for GARBAGE.lowRun forced positions in a row there. The mask sees the sampler's
+// top-k (k = 1 when greedy), so the candidate fast path stays exact. setText() takes the grammar's
+// view of the answer so far: each emitted token's C.tt(id) (a tag token's symbol, not its text).
+// forcedFree: the forced positions among the model's own choices only (what `forced` counts minus
+// the grammar's literals: Code mode's "the call format forced N tokens" note reads this).
+// garbage: "mass" (Code mode) turns only on for an engine fault (NaN / +Infinity logits, or the low
+// allowed-mass run), never on a model that keeps preferring something the grammar forbids inside a
+// long value; the default also counts GARBAGE.abs / GARBAGE.ratio forced positions.
+function strictSampler(base, tools, opts) {
+  const { tokenText, vocabSize, style = "xml", stops = [], thinking = false, thinkInPrompt = false, mode = "auto", allowed = null, maxCalls = null, parallel = true, format = null, tags = null, garbage: rule = "count" } = opts;
+  const C = new ToolCallConstraint(tools, { vocabSize, tokenText, style, stops, thinking, thinkInPrompt, mode, allowed, maxCalls, parallel, format, tags });
+  const k = base.gpu ? (base.gpu.kind === "greedy" ? 1 : base.gpu.k || 64) : 64;
+  let cols = [], kept = false, ended = false, runF = 0, runN = 0, low = 0, lastIn = false;
+  const w = {
+    forced: 0, forcedFree: 0, garbage: false,
+    sample(lg) {
+      if (kept) { cols = []; kept = false; ended = false; }
+      // past an end token in one speculative verify: those columns are never emitted, only written
+      // to the caches, so they take the model's own choice (the template's "\n<|im_start|>" that the
+      // next prompt holds), not the grammar's view from before the end (which bans <|im_start|> and
+      // lets a drafted <|endoftext|> through: the next prompt then misses the cached prefix)
+      if (ended) { cols.push({ f: false, free: false, bad: false, mass: 1, inValue: false }); return base(lg); }
+      const inValue = C.inCall || (C.state.k === "J");
+      C.mask(lg, k);
+      cols.push({ f: C.forced, free: C.free, bad: C.bad, mass: C.mass, inValue });
+      const t = base(lg);
+      if (C.stops.has(t)) ended = true;   // an end token is not text
+      else C.push(C.tt(t));               // a tag token is its symbol
+      return t;
+    },
+    keep(n = 1) {
+      kept = true;
+      for (let i = 0; i < n && cols.length; i++) {
+        const c = cols.shift();
+        if (c.f) w.forced++;
+        if (c.bad) w.garbage = true;
+        if (!c.inValue) { lastIn = false; continue; }
+        if (!lastIn) { runF = 0; runN = 0; low = 0; lastIn = true; }
+        if (!c.free) continue;
+        runN++;
+        if (c.f) { runF++; w.forcedFree++; low = c.mass < GARBAGE.lowMass ? low + 1 : 0; } else low = 0;
+        if (low >= GARBAGE.lowRun || (rule !== "mass" && (runF >= GARBAGE.abs || (runF >= GARBAGE.min && runF > GARBAGE.ratio * runN)))) w.garbage = true;
+      }
+    },
+    setText(t) {
+      if (!t) { w.forced = 0; w.forcedFree = 0; w.garbage = false; cols = []; kept = false; ended = false; runF = runN = low = 0; lastIn = false; }
       C.setText(t);
     },
     constraint: C,
@@ -116,11 +186,11 @@ export function encodeTurn(tok, text) {
   const re = new RegExp(tags.map((t) => t.replace(/[/]/g, "\\/")).join("|"), "g");
   let at = 0;
   for (const m of text.matchAll(re)) {
-    if (m.index > at) ids.push(...tok.encode(text.slice(at, m.index)));
+    if (m.index > at) for (const x of tok.encode(text.slice(at, m.index))) ids.push(x);
     ids.push(tok.vocab[m[0]]);
     at = m.index + m[0].length;
   }
-  if (at < text.length) ids.push(...tok.encode(text.slice(at)));
+  if (at < text.length) for (const x of tok.encode(text.slice(at))) ids.push(x);
   return ids;
 }
 

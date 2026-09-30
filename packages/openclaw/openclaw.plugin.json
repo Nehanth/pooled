@@ -1,0 +1,44 @@
+{
+  "id": "pooled",
+  "name": "Pooled",
+  "description": "Run a model across your own devices: this machine joins a Pooled room (WebGPU + WebRTC) and holds part of the model.",
+  "categories": ["models"],
+  "activation": { "onStartup": true },
+  "providers": ["pooled"],
+  "syntheticAuthRefs": ["pooled"],
+  "nonSecretAuthMarkers": ["pooled-local"],
+  "autoEnableWhenConfiguredProviders": ["pooled"],
+  "modelPricing": { "providers": { "pooled": { "external": false } } },
+  "setup": { "providers": [{ "id": "pooled", "authMethods": ["room"] }] },
+  "providerAuthChoices": [
+    {
+      "provider": "pooled",
+      "method": "room",
+      "choiceId": "pooled",
+      "choiceLabel": "Pooled (run a model across your devices)",
+      "choiceHint": "Start a room on this device or join one; your Macs, PCs and phones share the model",
+      "groupId": "pooled",
+      "groupLabel": "Pooled",
+      "groupHint": "Your own devices, no API key",
+      "onboardingFeatured": true
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mode": { "type": "string", "enum": ["host", "join"] },
+      "code": { "type": "string", "pattern": "^[A-HJKMNP-TV-Za-hjkmnp-tv-z2-9]{4,6}$" },
+      "allowApiClients": { "type": "boolean" },
+      "model": { "type": "string" },
+      "pledgeGB": { "type": "number" },
+      "minDevices": { "type": "number" },
+      "waitSeconds": { "type": "number" },
+      "ctx": { "type": "number" },
+      "signal": { "type": "string" },
+      "modelDir": { "type": "string" },
+      "name": { "type": "string" },
+      "page": { "type": "string" }
+    }
+  }
+}

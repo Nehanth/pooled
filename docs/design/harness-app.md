@@ -20,6 +20,9 @@ F. context budget, G. tests, H. work split and interfaces, then risks.
 
 ## A. Room model adapter
 
+With `?hcore=1` the agent's model calls go through `pooled serve`'s v2 core instead of the adapters
+below (the template's tool prompt, the strict grammar, `CallStream`): see [harness-core.md](harness-core.md).
+
 ### A.1 The problem
 
 `harness/agent.js` needs `generate({ system, turns, signal }) -> async iterable of text deltas`.
@@ -499,15 +502,19 @@ announces a session (`ai-code-start` or `ai-pv`), with a dot when something new 
 
 **`#code-pane`** (host): two columns over 900 px, stacked below.
 
-Phones (640 px and narrower) show one view at a time, picked from `#code-tabs`, a tab bar at the
-bottom (`role="tablist"`, 56 px plus the safe area): **Agent** (the log, the prompt at the bottom;
+Phones (640 px and narrower, and short touch screens, `(max-height: 500px) and (pointer: coarse)`:
+a phone in landscape, however wide) show one view at a time, picked from `#code-tabs`, a tab bar at
+the bottom (`role="tablist"`, 56 px plus the safe area, 44 px on a short screen): **Agent** (the log, the prompt at the bottom;
 an approval waits in `#code-dock` above the prompt), **Preview** (the app at full height with its
 address bar) and **Files** (project and tree; a file opens the editor full screen with a back arrow).
 A dot on a tab: Agent pulses while the agent works and holds a dot while an approval waits, Preview
 gets one for a new revision served while elsewhere. The first app served in a session opens
 Preview. The tab is kept per session (`sessionStorage`); guests get the same layout. While typing,
 the tab bar steps aside and the prompt sits on the keyboard (`--kb` where the browser does not
-resize the page).
+resize the page). On a short screen Chat | Code moves into the header row and the devices' chip row
+goes, so the pane keeps the height. The editor soft-wraps long lines on phones; the gutter numbers
+the file's lines, with blank rows beside wrapped ones. Two served ports or more get a row of
+port tabs of their own above the address.
 
 - Left, the agent:
   - `#code-project`: project select, `New`, `Open folder…`, project name. Host only.
@@ -538,8 +545,9 @@ one shared agent session per room, run on the model host. A member's request goe
 `ai-code-ask` and queues (six at most, two per member) behind the current run; its bubble carries
 the member's name. The member who asked, or the host, answers its approvals (`ai-code-approve`)
 and can stop it (`ai-code-stop`); others see "waiting for <name> to approve". Any member can start
-a new task, open or create a project saved in the host's browser, or tick auto-approve
-(`ai-code-cmd`); `ai-code-projects` mirrors the host's project list and `ai-code-sync` asks for the
+a new task, open or create a project saved in the host's browser (empty, or from a starter
+template in harness/templates.js: `{cmd: "new", name, tpl}`, the host checks `tpl` against its
+list), or tick auto-approve (`ai-code-cmd`); `ai-code-projects` mirrors the host's project list and `ai-code-sync` asks for the
 session on opening Code. The host alone opens a folder from disk, saves in the editor, and drives
 a folder project (what the agent reads there would reach the asker's screen). With "Only me" or
 "Whoever asked", Code stays the host's. A line above the log says where the agent runs and where

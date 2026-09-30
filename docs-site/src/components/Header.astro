@@ -1,0 +1,100 @@
+---
+// Pooled docs header: wordmark + "Docs", search (Ctrl K, Pagefind, fully static), GitHub,
+// theme, and the black "Open Pooled" button. Replaces Starlight's Header.
+import Search from 'virtual:starlight/components/Search';
+import SiteTitle from 'virtual:starlight/components/SiteTitle';
+import SocialIcons from 'virtual:starlight/components/SocialIcons';
+import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
+---
+
+<div class="p-header">
+	<div class="p-brand">
+		<SiteTitle />
+		<span class="p-docs-tag">Docs</span>
+	</div>
+	<div class="p-search print:hidden">
+		<Search />
+	</div>
+	<div class="p-right print:hidden">
+		<div class="sl-hidden md:sl-flex p-icons">
+			<SocialIcons />
+			<ThemeSelect />
+		</div>
+		<a class="p-open" href="/room">
+			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+				<circle cx="2.6" cy="2.6" r="1.9" /><circle cx="8" cy="2.6" r="2.05" /><circle cx="13.4" cy="2.6" r="2.25" />
+				<circle cx="2.6" cy="8" r="2.05" /><circle cx="8" cy="8" r="2.25" /><circle cx="13.4" cy="8" r="2.45" />
+				<circle cx="2.6" cy="13.4" r="2.25" /><circle cx="8" cy="13.4" r="2.45" /><circle class="lit" cx="13.4" cy="13.4" r="2.7" />
+			</svg>
+			<span>Open Pooled</span>
+		</a>
+	</div>
+</div>
+
+<style>
+	.p-header {
+		display: flex;
+		align-items: center;
+		gap: 16px;
+		height: 100%;
+	}
+	.p-brand {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		min-width: 0;
+		flex: 0 0 auto;
+	}
+	@media (min-width: 50rem) {
+		.p-brand { width: calc(var(--sl-sidebar-width) - 2 * var(--sl-nav-pad-x)); }
+	}
+	.p-docs-tag {
+		font: 500 12px/1 var(--__sl-font);
+		color: var(--p-ink-3);
+		padding: 4px 8px;
+		border-radius: 999px;
+		box-shadow: inset 0 0 0 1px var(--p-rule);
+	}
+	.p-search {
+		flex: 1 1 auto;
+		display: flex;
+		justify-content: center;
+		min-width: 0;
+	}
+	.p-right {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		margin-inline-start: auto;
+	}
+	.p-icons {
+		align-items: center;
+		gap: 12px;
+	}
+	.p-open {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		height: 34px;
+		padding: 0 14px;
+		border-radius: 8px;
+		background: var(--p-ink);
+		color: var(--p-on-ink);
+		font: 500 13px/1 var(--__sl-font);
+		text-decoration: none;
+		white-space: nowrap;
+		transition: background-color 0.15s var(--p-ease), transform 0.12s var(--p-ease);
+	}
+	.p-open:hover { background: color-mix(in srgb, var(--p-ink) 86%, var(--p-blue)); color: var(--p-on-ink); }
+	.p-open:active { transform: scale(0.98); }
+	.p-open:focus-visible { outline: 2px solid var(--p-blue); outline-offset: 2px; }
+	.p-open svg circle { fill: currentColor; }
+	.p-open svg .lit { fill: var(--p-blue-400); }
+	@media (max-width: 50rem) {
+		.p-docs-tag { display: none; }
+		.p-open { height: 36px; padding: 0 12px; }
+		.p-open span { font-size: 13px; }
+		.p-search { flex: 0 0 auto; margin-inline-start: auto; }
+		.p-right { margin-inline-start: 0; }
+	}
+</style>

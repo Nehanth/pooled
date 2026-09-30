@@ -159,3 +159,15 @@ Deno.test("importmap entries and new Worker literals are rewritten", () => {
   ok(/"lib":"data:text\/javascript/.test(html) && html.includes('"cdn":"https://cdn.jsdelivr.net/npm/x"'));
   ok(/new Worker\("data:text\/javascript/.test(html));
 });
+
+Deno.test("C.at maps a document line:col back to the page's own (#164)", () => {
+  for (const page of [`<p>x</p><script>console.error("a")</script>`, `<!doctype html>\n<html>\n<body>\n<script>console.error("a")</script>`, `<!DOCTYPE html><script>console.error("a")</script>`]) {
+    const { html } = buildPreviewDoc(snap({ "index.html": page }));
+    const A = JSON.parse(/\)\((\{"nonce".*?\})\);<\/script>/.exec(html)[1]).at;
+    const pos = (s, i) => { const b = s.slice(0, i); return [b.split("\n").length, i - b.lastIndexOf("\n")]; };
+    const [dl, dc] = pos(html, html.lastIndexOf("console.error")), want = pos(page, page.indexOf("console.error"));
+    ok(dl >= A.line + A.lines, "the page's markup comes after the capture script");
+    const d = dl - A.lines;
+    eq([d, d === A.line ? dc - A.cols : dc], want, page);
+  }
+});

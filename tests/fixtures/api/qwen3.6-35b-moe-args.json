@@ -1,0 +1,305 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs: greedy, unconstrained llama.cpp output for this request as the room renders it.",
+ "model": "qwen3.6-35b-moe",
+ "case": "args",
+ "profile": {
+  "style": "xml",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": true,
+  "thinkRule": "afterQuery",
+  "trim": true,
+  "known": true
+ },
+ "thinking": false,
+ "maxTokens": 240,
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "Search the web for \"rust async runtimes\": at most 3 results, tags web and news, exact match, only site docs.rs from year 2024."
+   }
+  ]
+ },
+ "stop": "eos",
+ "promptTokens": 529,
+ "ids": [
+  248058,
+  198,
+  27,
+  1628,
+  93260,
+  29,
+  198,
+  27,
+  15704,
+  76478,
+  29,
+  198,
+  34602,
+  3203,
+  1542,
+  14695,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  9226,
+  29,
+  198,
+  18,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  13679,
+  29,
+  198,
+  1143,
+  2817,
+  487,
+  328,
+  9689,
+  1293,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  28,
+  44839,
+  29,
+  198,
+  2434,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  27,
+  15704,
+  17572,
+  8349,
+  29,
+  198,
+  4754,
+  9233,
+  763,
+  328,
+  13715,
+  24822,
+  487,
+  328,
+  3056,
+  763,
+  220,
+  17,
+  15,
+  17,
+  19,
+  92,
+  198,
+  510,
+  15704,
+  29,
+  198,
+  510,
+  1628,
+  29,
+  198,
+  248059,
+  248046
+ ],
+ "texts": [
+  "<tool_call>",
+  "\n",
+  "<",
+  "function",
+  "=search",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=query",
+  ">",
+  "\n",
+  "rust",
+  " async",
+  " run",
+  "times",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "limit",
+  ">",
+  "\n",
+  "3",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "tags",
+  ">",
+  "\n",
+  "[\"",
+  "web",
+  "\",",
+  " \"",
+  "news",
+  "\"]",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=",
+  "exact",
+  ">",
+  "\n",
+  "True",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "<",
+  "parameter",
+  "=f",
+  "ilters",
+  ">",
+  "\n",
+  "{\"",
+  "site",
+  "\":",
+  " \"",
+  "docs",
+  ".rs",
+  "\",",
+  " \"",
+  "year",
+  "\":",
+  " ",
+  "2",
+  "0",
+  "2",
+  "4",
+  "}",
+  "\n",
+  "</",
+  "parameter",
+  ">",
+  "\n",
+  "</",
+  "function",
+  ">",
+  "\n",
+  "</tool_call>",
+  "<|im_end|>"
+ ],
+ "text": "<tool_call>\n<function=search>\n<parameter=query>\nrust async runtimes\n</parameter>\n<parameter=limit>\n3\n</parameter>\n<parameter=tags>\n[\"web\", \"news\"]\n</parameter>\n<parameter=exact>\nTrue\n</parameter>\n<parameter=filters>\n{\"site\": \"docs.rs\", \"year\": 2024}\n</parameter>\n</function>\n</tool_call><|im_end|>"
+}

@@ -51,13 +51,15 @@ wrong solution, or the unfixed seed; a list for several) must fail its check, so
 
 ```
 { id, model, ok, reason: done|limit|stuck|context|stopped|error, check (the probe's report),
-  steps, calls, cards: {id: n}, forced, prompt (tokens prefilled), reused, generated,
-  ctx (the agent's estimate of the conversation at the end), ms, firstMs, run }
+  steps, calls, cards: {id: n}, forced, prompt (tokens prefilled), reused (tokens the caches
+  already held), generated, compactions, ctx (the agent's estimate of the conversation at the
+  end), ms, firstMs, run }
 ```
 
 and `tests/eval/results/<stamp>-<model>/<id>.json`, the task's full trajectory (system prompt,
 every turn, the final files) for reading failures. The summary line reads
-`success 10/12 (83 %) · steps 7.4 · prefilled 41k · generated 18k · ctx 5.2k/task · 612 s`.
+`success 10/12 (83 %) · steps 7.4 · prefilled 41k · reused 310k · generated 18k · ctx 5.2k/task · 612 s`.
+Each task's line shows its own prefilled and reused counts too.
 `forced` is the sum over steps of kept tokens the call grammar forced (a healthy model: ~0);
 with the mock model the token columns are 0 and only `ctx` (estimated) moves.
 

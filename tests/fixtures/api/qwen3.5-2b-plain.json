@@ -1,0 +1,51 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs: greedy, unconstrained llama.cpp output for this request as the room renders it.",
+ "model": "qwen3.5-2b",
+ "case": "plain",
+ "profile": {
+  "style": "xml",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": true,
+  "thinkRule": "afterQuery",
+  "trim": true,
+  "known": true
+ },
+ "thinking": false,
+ "maxTokens": 60,
+ "req": {
+  "system": "",
+  "tools": null,
+  "messages": [
+   {
+    "role": "user",
+    "text": "What is 2+2? Answer in one short sentence."
+   }
+  ]
+ },
+ "stop": "eos",
+ "promptTokens": 25,
+ "ids": [
+  17,
+  5346,
+  220,
+  17,
+  16327,
+  220,
+  19,
+  13,
+  248046
+ ],
+ "texts": [
+  "2",
+  " plus",
+  " ",
+  "2",
+  " equals",
+  " ",
+  "4",
+  ".",
+  "<|im_end|>"
+ ],
+ "text": "2 plus 2 equals 4.<|im_end|>"
+}

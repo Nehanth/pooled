@@ -1,0 +1,115 @@
+---
+title: Run it locally
+eyebrow: Self-hosting
+description: Serve a checkout of Pooled from your own machine, with an optional local signaling server.
+sidebar:
+  label: Run it locally
+  order: 3
+---
+
+{/*
+  Sources (origin/main 40bb0fa):
+  - README.md "Run it locally" (npx -y serve -l 8080 ., serve.json rewrites, keep in step with vercel.json)
+  - serve.json (the two rewrites)
+  - package.json: "serve": "npx -y serve -l 8080 ."; devDependencies peer ^1.0.2, playwright 1.49.1
+  - CONTRIBUTING.md Coding guidelines: no build step; ES modules + absolute /site/... paths, so file:// does not work
+  - docs/self-host-signaling.md: local dev example ?signal=127.0.0.1:9000
+  - docs/testing-fast.md "Why the phone needs its own rig": iOS Safari WebGPU needs a secure context; https page can't reach ws://
+  - harness/preview-frame.js relayUrl(): localhost <-> 127.0.0.1 used as the Code mode preview's second site
+  - RELEASE.md "Old domain": browser caches are per site
+  - p2p.html: PeerJS from cdn.jsdelivr.net (peerjs@1.5.4); room/models.js: weights from huggingface.co
+*/}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Pooled is a static site: plain HTML and JavaScript modules, with no build step. Any static server works, as long as it applies two rewrites.
+
+## Serve a checkout
+
+```sh
+git clone https://github.com/Nehanth/pooled && cd pooled
+npx -y serve -l 8080 .
+```
+
+Open [http://localhost:8080/room](http://localhost:8080/room). `npm run serve` runs the same command.
+
+`serve` reads `serve.json` for the rewrites:
+
+```json title="serve.json"
+{
+  "rewrites": [
+    { "source": "/room", "destination": "/p2p.html" },
+    { "source": "/r/:code", "destination": "/p2p.html" }
+  ]
+}
+```
+
+Production uses the same two rewrites in `vercel.json`, so keep the two files in step.
+
+:::caution[Don't open the HTML files directly]
+Opening `p2p.html` from disk (`file://`) doesn't work. The room loads ES modules, and the landing page uses absolute `/site/...` paths. Serve the repository root.
+:::
+
+### Using another server
+
+If you use nginx, Caddy or something else, map `/room` and `/r/<code>` to `/p2p.html`. For example, with Caddy:
+
+```text title="Caddyfile"
+:8080 {
+  root * /path/to/pooled
+  rewrite /room /p2p.html
+  rewrite /r/* /p2p.html
+  file_server
+}
+```
+
+## Signaling
+
+A local checkout uses the public PeerJS server by default, the same as pooled.run. That works from localhost. To keep everything on your machine, run a local PeerServer and point the room at it:
+
+```sh
+npx peer --port 9000 --path /
+```
+
+```text
+http://localhost:8080/room?signal=127.0.0.1:9000
+```
+
+The page is plain http, so a bare `host:port` uses `ws://`. A URL with `?signal=` opens the room in dev mode; add `&dev=0` if you don't want that. Every device in the room must use the same server. See [Signaling servers](/docs/self-host/signaling) for the details.
+
+## What still comes from the internet
+
+Serving the site yourself doesn't make it fully offline. The room page still loads:
+
+- **PeerJS** from `cdn.jsdelivr.net` (`peerjs@1.5.4`).
+- **Model files** from Hugging Face, unless another device in the room already has the layers.
+- **STUN** from Google's public STUN servers, to find each device's public address.
+
+Browser caches are per site. Weights downloaded on pooled.run are downloaded again the first time a device opens your own origin (and `localhost` and `127.0.0.1` count as different sites).
+
+## Other devices on your network
+
+WebGPU needs a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts). `http://localhost` and `http://127.0.0.1` count as secure, but `http://192.168.1.20:8080` on another device does not. On a plain-http LAN address the page loads but gets no GPU, so the device can only join as an ask-only guest. iOS Safari is strict about this.
+
+<Tabs>
+  <TabItem label="Serve over https">
+    Serve the checkout over https with a certificate the devices trust, for example Caddy with a real domain name. Then run the signaling server behind TLS too: an https page can only open `wss://`. See [Put it behind TLS](/docs/self-host/signaling#put-it-behind-tls).
+  </TabItem>
+  <TabItem label="Mix with pooled.run">
+    Keep the computers on their own checkout at `http://127.0.0.1:8080/room`, and open `https://pooled.run/room` on phones. Use the public PeerJS server on every device (don't add `?signal=`), so they all meet on the same server.
+
+    The two pages must speak the same room protocol. In practice, run the same commit that pooled.run is on (`main`). A mismatch is shown on both screens, with which side should reload.
+  </TabItem>
+  <TabItem label="Chrome flag (testing only)">
+    On Chrome for desktop and Android, `chrome://flags/#unsafely-treat-insecure-origin-as-secure` lets you list `http://192.168.1.20:8080` as secure. Use it only on test devices.
+  </TabItem>
+</Tabs>
+
+## Code mode previews
+
+Code mode runs the agent's app on a second site, so a runaway app can't freeze the room. Locally it uses the other loopback name for that: a page on `localhost` runs previews on `127.0.0.1`, and the other way round. Nothing to set up. On a LAN address there is no second site, so previews run in the room's own tab and the agent's `run_js` tool is off.
+
+## Next steps
+
+- Run the tests: see [Testing](/docs/contributing/testing). Many of them need no GPU.
+- Deploy your copy: see [Deploying the site](/docs/self-host/deploy).

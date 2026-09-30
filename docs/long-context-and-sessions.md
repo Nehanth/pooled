@@ -31,10 +31,27 @@ each has a switch for A/B timing on real hardware.
 - Switch: `Qwen35Engine.create({ attnFlash: false })` restores the f32 path.
 - int8 KV (`kvQ8: true`, room `?kv=q8`): one f32 scale per 32 values, `kv_store_q8` /
   `attn_flash_q8` from the same template as the f16 kernel. 36 KB per token for the whole 27B.
-  Opt-in until someone checks long-document quality on the real model.
+  Opt-in. The room host's `?kv=` decides for every device (sent with `ai-load`), and the layer
+  deal counts int8 bytes. Timed on GB10 with the 35B MoE (bench log, 2026-09-29): the same 32
+  greedy tokens as f16 at 1K, 8K and 32K and 0.35 GB of KV instead of 0.63 GB, but a 32K prompt
+  prefills 3.5x slower, because tiled prefill attention is off with int8 KV. It stays off by
+  default until tiled prefill attention supports it.
 - Any `maxSeq` works; the split length grows past 32K so a head never has more than 128 splits.
   Memory at 32K: 2.1 GB of KV for the whole model in f16, 1.2 GB in int8 (q4 KV is not
   recommended: it hurts long documents and tool calls, research §3).
+- 128K on the 35B MoE (`?ctx=131072`): each attention layer keeps K and V in one buffer each,
+  bound whole, so the limit is the device's storage binding size, not memory. The MoE's K (or V)
+  at 131072 positions in f16 is 2 KV heads x 256 x 2 bytes x 131072 = exactly 128 MiB, the binding
+  size every WebGPU device supports (the MoE's stacked expert tensors already need more than that).
+  The 27B is twice as wide: 256 MiB at 128K in f16, 128 MiB at 64K or at 128K in int8. The engine
+  throws a readable error at create when a device cannot bind its KV buffer
+  (`tests/unit/kv_bind_limit_test.js`), and the room host holds the context to what the smallest
+  binding limit among its devices fits (`ctxForBinding` in `room/models.js`; each device reports
+  `maxBindMB`, and a device that reports nothing counts as WebGPU's 128 MiB). The 27B's cap is 64K
+  (128 MiB per buffer): its needle passes there; 128K on it is not checked yet. Splitting a layer's
+  cache over several buffers was not needed; it would only matter for the 27B past 64K on a device
+  that binds less than 256 MiB. Needle retrieval and speed at 32K..128K:
+  `tests/needle_ctx.js` and docs/bench-log.md (2026-09-30).
 
 ## Sessions: save, restore, rewind, share a prefix
 
@@ -70,6 +87,45 @@ answer (`ld` key on the first frame) and prefills only what is new; the status l
 a re-deal or a failed answer clears them. Order on a device: rollback, save, drop, reset, load.
 `tests/e2e/room_synth.mjs --regen --expect-reuse` checks that a regenerate over 3 devices resumes
 from a checkpoint and repeats the greedy answer. `?ckpt=0` turns it off.
+
+Each device also keeps a copy of its part on disk (OPFS, `room/ckpt-store.js`), so a reload does not
+lose it. No new message: a device writes its copy when it applies `sv` and removes
+it on `dp`. The host writes its own copy only once the `sv` has gone out on a frame, with the
+checkpoint's token ids in the header, so it never indexes a slot the chain did not save. A copy is
+named by room code, slot and a hash of the model and the engine's `stateSignature()` (layers, KV
+format), and the header repeats them; a copy for other layers or another model, or in another file
+format version, reads as missing. A new copy of a slot removes the old one first, so a failed write
+(out of quota: the oldest copies of other rooms go first and the write is tried once more) leaves
+the slot missing, never stale.
+
+- A worker that reloads reads its copies back into GPU slots before it says it is ready. The host
+  keeps the checkpoints whose save went out before the worker left and forgets the one still
+  pending, so the next question resumes from the last answer the chain saved.
+- A host that reloads resumes its room (the conversation is in localStorage, with the slot
+  counter), reads its copies and their token ids back, and every device reads its own when the
+  layers are dealt again. Slot numbers go on from the saved counter, so an old copy on a device is
+  never taken for a new one.
+- A device that loads its layers lists the slots it read back in its `ai-ready`, and the host
+  forgets every checkpoint that device lacks (its copy never reached the disk, or the disk was
+  full), so it never asks the chain to load a slot a device does not hold; the next question then
+  resumes from an older checkpoint or prefills.
+- When a device of the chain leaves, the host keeps its checkpoints (the other devices still hold
+  them); a re-deal clears them and every device reads its copies back.
+- The pinned system prompt checkpoint (below) goes to disk with `pin` in its header; a host that
+  reloads indexes it pinned again (besides its newest `?ckpt=N` answer checkpoints), so answer saves
+  still never evict it, and a worker reads back one more copy for it. A pinned one replaced by a new
+  system prompt, or an answer checkpoint promoted to pinned, loses its disk copy like any dropped slot.
+- `?ckptdisk=0` keeps checkpoints on the GPU only.
+
+Code mode also pins the system prompt + tools (issue #73): `roomModel` passes its length as `pin`,
+and when the caches do not hold it yet `roomGenerate` prefills up to there, saves a pinned
+checkpoint (`ckptSave(true)`, riding the next frame like any save), then prefills the rest. The
+pinned one is not counted in `?ckpt=N` and is never evicted by answer saves; a new system prompt
+replaces it everywhere. When compaction rewrites old turns, the next step resumes there and
+prefills only what follows. `engineModel` does the same on one engine with a GPU slot
+(`pin: false` turns it off). Tests: `tests/unit/room_ckpt_test.js` ("pin: ..." scenarios, host and
+workers in sync), `tests/unit/kv_reuse_test.js` (a 22-step session with compactions: every step
+reuses everything the engine held, or the system prompt after a compaction).
 
 ### Several sessions on one engine
 
@@ -132,7 +188,9 @@ Unit tests: `tests/unit/tools_test.js`, `constrain_test.js`, `prefix_test.js`.
   every position a speculative step checks too, so a call can only name declared tools and
   parameters.
 - `Agent({ budget, count })`: past the token budget the oldest tool outputs are cut to a stub
-  (oldest first, never the latest, down to 75% so it does not cut every step).
+  (oldest first, never the latest two, down to 60% so it does not cut every step). The stub
+  (`stubResults`) and the fold line depend only on the turn, so a compacted turn renders the same
+  on every later step; the `compacted` event's `at` is the first turn that changed.
 
 Tests: `tests/unit/agent_test.js` (tools and loop with a scripted model),
 `tests/e2e/agent_synth.mjs` (follow-up turns reuse the prefix and match a fresh engine; spec ==
@@ -179,9 +237,10 @@ each chosen expert once per token today), timing on real hardware.
 ## Next
 
 1. Time it on two Macs and a GB10: decode tok/s at 1K / 8K context, prefill tok/s, `?fuse=0`.
-2. Persist room checkpoints to OPFS on every device (the engine and store are there; the room
-   keeps them on the GPU today), so a session survives a reload.
-3. Stable prompt rendering for agents: never drop old turns (it breaks reuse); compact instead.
+2. Room checkpoints on disk (landed, above): time a reload of one device on real hardware, and
+   stream the copy part by part (today a device reads its whole part into memory to write it).
+3. Stable prompt rendering for agents: done in part (#73: compaction is stable and the system
+   prompt stays cached); a compaction still prefills everything after the system prompt once.
 4. Several sessions at once: per-session KV / state slots batched through one pass (design:
    research/tabby-next-2026-09.md §2).
 5. Pipelined speculative windows across devices (Mesh-LLM keeps several verifies in flight;

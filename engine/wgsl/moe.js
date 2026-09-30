@@ -193,7 +193,8 @@ ${Array.from({ length: n }, (_, r) => `      ${red}[${r * WG}u + t] += ${red}[${
     }
     workgroupBarrier();
   }`;
-// Per layer and column: router GEMV (the shared-expert gate row appended as row nExp, one launch),
+// Per layer and column: router GEMV (the shared-expert gate row appended as row nExp, one launch; with moe_nrt it
+// also does the post-attention RMSNorm, normRouterKernel below),
 // moe_route (softmax, top-K, sigmoid of the shared gate), moe_gus (K routed slots + the shared expert as
 // slot K, gate/up + SiLU), moe_dnc (down for all K + 1 slots, combine and residual add in one epilogue).
 // Slot K reads the shared expert's own weights, which may be in another format than the routed experts
@@ -223,14 +224,22 @@ function termOff(fmt, Q, qo, SC, so, X, er, xc, nb = "nb", b = "b", O = FOPS) {
   return termW(fmt, scOff(SC, so, er, nb, b), ...wOff(fmt, Q, qo, er, nb, b), X, xc, b, O);
 }
 
-// Router: same softmax as moe_router (max and sum trees, same order), then top-K by rank: thread i counts
+// Router. With norm (renormalized top-K weights: Qwen3.5 / 3.6), the experts are ranked by their logits and the
+// weights are a softmax over the K picked logits alone, exp(l_k - l_0) / sum_j exp(l_j - l_0): the full softmax's
+// sum cancels in the renormalization, so this is the same math as llama.cpp's softmax -> top-K -> renormalize without
+// the two 256-wide trees (the probabilities order the experts as the logits do; only exp() rounding ties could
+// differ). The weights' last bits differ from moe_router's; every pass width runs this kernel, so spec == plain.
+// Without norm: the same softmax as moe_router (max and sum trees, same order), then top-K by rank: thread i counts
 // the experts ordered before it, (p_j > p_i) or (p_j == p_i and j < i), and writes itself to that slot if
 // it is below K. That is exactly the order of moe_router's K argmax rounds (ties to the lower index), so
 // the ids and weights are the same bits, without the 8 x 8 barrier rounds. Slot K gets the shared gate
 // sigmoid(logit[nExp]) with moe_combine's expression.
-// The rank loop reads the probabilities 4 per load from a vec4 copy (rt_q, padded with -1: below every
-// probability), and a thread stops counting once its rank reaches K (it is not picked either way).
-// Both leave every id and weight bit unchanged.
+// The rank is counted among candidates only: split the experts into K groups, T = the smallest group maximum.
+// At least K experts (the K maxima) are >= T, so every top-K expert is, and so is every expert ordered before
+// one of them (greater, or equal with a lower index): a candidate's rank among the candidates is its rank among
+// all experts, exactly, below K. Typically a dozen candidates instead of nExp comparisons per thread (the rank
+// loop was most of this one-workgroup kernel's time). Thread g < K scans group g twice (its maximum, then its
+// candidates into its own list, no atomics); the count is an integer sum, so every id and weight bit is unchanged.
 export function routeKernel(K) {
   const KS = K + 1;
   return `
@@ -239,7 +248,9 @@ export function routeKernel(K) {
 @group(1) @binding(2) var<storage, read_write> rt_w: array<f32>;
 @group(1) @binding(3) var<uniform> rt_s: MOEF;
 var<workgroup> rt_p: array<f32, 1024>;
-var<workgroup> rt_q: array<vec4<f32>, 256>;
+var<workgroup> rt_gm: array<f32, ${K}>;
+var<workgroup> rt_cd: array<u32, ${1024 + K}>;
+var<workgroup> rt_nc: array<u32, ${K}>;
 var<workgroup> rt_v: array<f32, 256>;
 var<workgroup> rt_ki: array<u32, ${K}>;
 var<workgroup> rt_kv: array<f32, ${K}>;
@@ -248,41 +259,55 @@ fn moe_route(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id)
   let col = wg.x; let t = lid.x; let n = rt_s.nExp;
   let lb = col * rt_s.xs;
   if (t < ${K}u) { rt_ki[t] = 0u; rt_kv[t] = 0.0; }
-  var m: f32 = -3.0e38;
-  for (var i: u32 = t; i < n; i += 256u) { m = max(m, rt_l[lb + i]); }
-  rt_v[t] = m;
+  if (rt_s.norm == 1u) {   // renormalized: rank the logits themselves (no softmax over all nExp)
+    for (var i: u32 = t; i < n; i += 256u) { rt_p[i] = rt_l[lb + i]; }
+    workgroupBarrier();
+  } else {
+    var m: f32 = -3.0e38;
+    for (var i: u32 = t; i < n; i += 256u) { m = max(m, rt_l[lb + i]); }
+    rt_v[t] = m;
+    workgroupBarrier();
+    for (var st: u32 = 128u; st > 0u; st >>= 1u) { if (t < st) { rt_v[t] = max(rt_v[t], rt_v[t + st]); } workgroupBarrier(); }
+    let mx = rt_v[0];
+    workgroupBarrier();
+    var s: f32 = 0.0;
+    for (var i: u32 = t; i < n; i += 256u) { let p = exp(rt_l[lb + i] - mx); rt_p[i] = p; s += p; }
+    rt_v[t] = s;
+    workgroupBarrier();
+    for (var st: u32 = 128u; st > 0u; st >>= 1u) { if (t < st) { rt_v[t] += rt_v[t + st]; } workgroupBarrier(); }
+    let inv = 1.0 / rt_v[0];
+    for (var i: u32 = t; i < n; i += 256u) { rt_p[i] = rt_p[i] * inv; }
+    workgroupBarrier();
+  }
+  let gs = (n + ${K - 1}u) / ${K}u;
+  if (t < ${K}u) {
+    var gm: f32 = -3.0e38;
+    for (var j: u32 = t * gs; j < min(t * gs + gs, n); j++) { gm = max(gm, rt_p[j]); }
+    rt_gm[t] = gm;
+  }
   workgroupBarrier();
-  for (var st: u32 = 128u; st > 0u; st >>= 1u) { if (t < st) { rt_v[t] = max(rt_v[t], rt_v[t + st]); } workgroupBarrier(); }
-  let mx = rt_v[0];
-  workgroupBarrier();
-  var s: f32 = 0.0;
-  for (var i: u32 = t; i < n; i += 256u) { let p = exp(rt_l[lb + i] - mx); rt_p[i] = p; s += p; }
-  rt_v[t] = s;
-  workgroupBarrier();
-  for (var st: u32 = 128u; st > 0u; st >>= 1u) { if (t < st) { rt_v[t] += rt_v[t + st]; } workgroupBarrier(); }
-  let inv = 1.0 / rt_v[0];
-  for (var i: u32 = t; i < n; i += 256u) { rt_p[i] = rt_p[i] * inv; }
-  workgroupBarrier();
-  let n4 = (n + 3u) >> 2u;
-  for (var i: u32 = t; i < n4; i += 256u) {
-    let j = i * 4u;
-    rt_q[i] = vec4<f32>(rt_p[j], select(-1.0, rt_p[min(j + 1u, 1023u)], j + 1u < n), select(-1.0, rt_p[min(j + 2u, 1023u)], j + 2u < n),
-      select(-1.0, rt_p[min(j + 3u, 1023u)], j + 3u < n));
+  var th: f32 = rt_gm[0];
+  for (var k: u32 = 1u; k < ${K}u; k++) { th = min(th, rt_gm[k]); }
+  if (t < ${K}u) {
+    var c: u32 = 0u;
+    for (var j: u32 = t * gs; j < min(t * gs + gs, n); j++) { if (rt_p[j] >= th) { rt_cd[t * gs + c] = j; c++; } }
+    rt_nc[t] = c;
   }
   workgroupBarrier();
   for (var i: u32 = t; i < n; i += 256u) {
     let p = rt_p[i];
-    var r: u32 = 0u;
-    for (var j4: u32 = 0u; j4 < n4; j4++) {
-      let q = rt_q[j4]; let j = j4 * 4u;
-      r += select(0u, 1u, q.x > p || (q.x == p && j < i)) + select(0u, 1u, q.y > p || (q.y == p && j + 1u < i))
-         + select(0u, 1u, q.z > p || (q.z == p && j + 2u < i)) + select(0u, 1u, q.w > p || (q.w == p && j + 3u < i));
-      if (r >= ${K}u) { break; }
+    if (p >= th) {
+      var r: u32 = 0u;
+      for (var g: u32 = 0u; g < ${K}u; g++) {
+        for (var c: u32 = 0u; c < rt_nc[g]; c++) { let j = rt_cd[g * gs + c]; let q = rt_p[j]; r += select(0u, 1u, q > p || (q == p && j < i)); }
+      }
+      if (r < ${K}u && p == p) { rt_ki[r] = i; rt_kv[r] = p; }
     }
-    if (r < ${K}u && p == p) { rt_ki[r] = i; rt_kv[r] = p; }
   }
   workgroupBarrier();
   if (t == 0u) {
+    // norm: w_k = exp(l_k - l_top) / sum over the K picked (the softmax's full sum cancels in the renormalization)
+    if (rt_s.norm == 1u) { let l0 = rt_kv[0]; for (var k: u32 = 0u; k < ${K}u; k++) { rt_kv[k] = exp(rt_kv[k] - l0); } }
     var tot: f32 = 0.0;
     for (var k: u32 = 0u; k < ${K}u; k++) { tot += rt_kv[k]; }
     for (var k: u32 = 0u; k < ${K}u; k++) {
@@ -560,15 +585,61 @@ ${groupTree(WG, TPR, KS * R, `${P}_red`)}
 }`;
 }
 
+// Post-attention RMSNorm + router GEMV in one launch (engine option moeNormRouter, on by default with the fused FFN):
+// moe_nrt replaces the rmsnorm launch and the [nExp + 1]-row router GEMV (2 launches per MoE layer -> 1). Each
+// workgroup (ROWS router rows, one column: wg.y) streams x, the norm weight w and its rows once: sum(x * x) and
+// W_r . (x * w) in the same loop, both reduced in one tree, then logit_r = inv * (W_r . (x * w)) with
+// inv = inverseSqrt(sum / dim + eps); workgroup x 0 also writes xn = (x * inv) * w for moe_gus. The router is kept
+// as BF16 when the file's router is exactly BF16 (the loader widens it to f32 exactly): half the router bytes, the
+// same values. The sums are in this kernel's order (not rmsnorm's and matvec_coop's), in every pass width alike:
+// decode, verify and prefill all run moe_nrt, so spec == plain holds; the MoE goldens are llama.cpp text.
+// Uniform NRT: dim, dOut (nExp + 1), xs (x column stride), ls (logits column stride), xns (xn column stride).
+// name / P: entry point and binding prefix (dn_nba: the same kernel for a DeltaNet layer's input norm and its merged
+// beta / alpha GEMV, engine option dnNormBA); struct: false when an earlier instance already declared NRT.
+export function normRouterKernel({ ROWS = 4, bf16 = true, WG = 256, name = "moe_nrt", P = "nrt", struct = true } = {}) {
+  const rows = (f, sep = "\n") => Array.from({ length: ROWS }, (_, r) => f(r)).join(sep);
+  const wv = (r) => bf16 ? `let q${r} = ${P}_W[er${r} + c]; let w${r} = vec4<f32>(bitcast<f32>(q${r}.x << 16u), bitcast<f32>(q${r}.x & 0xffff0000u), bitcast<f32>(q${r}.y << 16u), bitcast<f32>(q${r}.y & 0xffff0000u));`
+    : `let w${r} = ${P}_W[er${r} + c];`;
+  return `
+${struct ? "struct NRT { dim: u32, dOut: u32, xs: u32, ls: u32, xns: u32, p0: u32, p1: u32, p2: u32 };\n" : ""}@group(1) @binding(0) var<storage, read> ${P}_x: array<f32>;
+@group(1) @binding(1) var<storage, read> ${P}_nw: array<f32>;
+@group(1) @binding(2) var<storage, read> ${P}_W: array<${bf16 ? "vec2<u32>" : "vec4<f32>"}>;
+@group(1) @binding(3) var<storage, read_write> ${P}_xn: array<f32>;
+@group(1) @binding(4) var<storage, read_write> ${P}_lg: array<f32>;
+@group(1) @binding(5) var<uniform> ${P}_s: NRT;
+var<workgroup> ${P}_red: array<f32, ${(ROWS + 1) * WG}>;
+@compute @workgroup_size(${WG})
+fn ${name}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = lid.x; let col = wg.y; let n = ${P}_s.dim; let xo = col * ${P}_s.xs; let d4 = n / 4u; let row0 = wg.x * ${ROWS}u;
+  var ss: f32 = 0.0;
+${rows((r) => `  var a${r}: f32 = 0.0; let er${r} = min(row0 + ${r}u, ${P}_s.dOut - 1u) * d4;`)}
+  for (var c: u32 = t; c < d4; c += ${WG}u) {
+    let j = c * 4u;
+    let x4 = vec4<f32>(${P}_x[xo + j], ${P}_x[xo + j + 1u], ${P}_x[xo + j + 2u], ${P}_x[xo + j + 3u]);
+    let xw = x4 * vec4<f32>(${P}_nw[j], ${P}_nw[j + 1u], ${P}_nw[j + 2u], ${P}_nw[j + 3u]);
+    ss += dot(x4, x4);
+${rows((r) => `    ${wv(r)} a${r} += dot(w${r}, xw);`)}
+  }
+  ${P}_red[t] = ss;
+${rows((r) => `  ${P}_red[${(r + 1) * WG}u + t] = a${r};`)}
+${tree(WG, ROWS + 1, `${P}_red`)}
+  let inv = inverseSqrt(${P}_red[0] / f32(n) + cfg.eps);
+  if (t < ${ROWS}u) { let row = row0 + t; if (row < ${P}_s.dOut) { ${P}_lg[col * ${P}_s.ls + row] = ${P}_red[(t + 1u) * ${WG}u] * inv; } }
+  if (wg.x == 0u) { for (var j: u32 = t; j < n; j += ${WG}u) { ${P}_xn[col * ${P}_s.xns + j] = ${P}_x[xo + j] * inv * ${P}_nw[j]; } }
+}`;
+}
+
 // The fused kernels for one engine: K (top-k), R (output rows per legacy moe_dnc workgroup), the
 // (routed, shared) format pairs the model's layers need for gate/up and for down, and layout
 // (moeFusedLayout(...): null = the legacy kernels, else the wide ones).
-export function moeFusedWGSL({ K, R = 2, gu = [], dn = [], layout = null }) {
+// nrt: null or { ROWS, bf16 } (moe_nrt, normRouterKernel).
+export function moeFusedWGSL({ K, R = 2, gu = [], dn = [], layout = null, nrt = null }) {
   if (!(K >= 1 && K <= 16) || ![1, 2, 4].includes(R)) throw new Error(`moeFusedWGSL: K ${K}, R ${R}`);
   return /* wgsl */ `
 // ---------------- fused mixture of experts (engine/wgsl/moe.js moeFusedWGSL) ----------------
 struct MOEF { dOut: u32, dIn: u32, sDim: u32, nExp: u32, xs: u32, ys: u32, norm: u32, shOff: u32, oUq: u32, oGs: u32, oUs: u32, pad: u32 };
 ${routeKernel(K)}
+${nrt ? normRouterKernel(nrt) : ""}
 ${gu.map(([f, s]) => layout ? gusKernelWide(f, s, K, layout.gu) : gusKernel(f, s, K)).join("\n")}
 ${dn.map(([f, s]) => layout ? dncKernelWide(f, s, K, layout.dn) : dncKernel(f, s, K, R)).join("\n")}
 `;

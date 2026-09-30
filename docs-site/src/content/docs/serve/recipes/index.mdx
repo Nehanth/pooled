@@ -1,0 +1,108 @@
+---
+title: Client recipes
+eyebrow: Serve API
+description: Setup for the tools people point at a room. Every recipe uses the same two base URLs. The coding agents also need to know the room's context size.
+sidebar:
+  label: Overview
+  order: 0
+---
+{/*
+Sources (origin/main 40bb0fa):
+- cli/README.md (top banner, Options, Tools: every recipe)
+- cli/lib/http.js: claudeOutput = max(1024, min(32000, floor(ctx/4))); opencodeOutput = min(8192, claudeOutput);
+  Codex compact limit = floor(ctx * 0.8); agentSettings() prints the banner lines
+- room/models.js CTX: qwen3-1.7b 8192/16384, qwen3.8-27b 16384/32768, qwen3.6-35b-moe 32768/65536
+- room.js:2516 ROOM_CTX = maxSeqFor(model, ?ctx=) on the host page
+- docs/design/serve.md section 14/15 (tested client versions)
+Table values computed from those formulas; cross-checked against cli/test/banner_test.mjs (65536 -> 52428, 16384)
+and cli/test/http_test.mjs (16384 -> 13107, 4096).
+Fact-checked against origin/main 40bb0fa on 2026-09-30.
+TODO: npm latest is @pooled/cli 0.2.0 (checked 2026-09-30). 0.2.0 prints only the Codex and Claude Code lines,
+and can print them for a stale 2048-token context when it joins before the model starts (fixed in 0.2.1, #261).
+Remove the 0.2.1 note below once 0.2.1 is published.
+*/}
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Each recipe assumes the bridge is running on your computer:
+
+```bash
+npx @pooled/cli serve ABCD
+```
+
+Replace `ABCD` with your room's code. The bridge needs Node 22 or newer and no GPU. See the [Serve API quickstart](/docs/serve) for what it does.
+
+## The two base URLs
+
+| API | Base URL | Used by |
+|---|---|---|
+| OpenAI (Chat Completions, Responses) | `http://127.0.0.1:8080/v1` | Codex CLI, opencode, Continue, Open WebUI, LiteLLM, the `openai` SDK |
+| Anthropic (Messages) | `http://127.0.0.1:8080` | Claude Code, the `anthropic` SDK |
+
+The Anthropic URL has no `/v1`: the SDKs and Claude Code add it themselves.
+
+`model` can be any string. The recipes use `pooled`. The room always answers with its own model, and `GET /v1/models` lists it as `pooled/<model>`, for example `pooled/qwen3.6-35b-moe`.
+
+## API keys
+
+Without a token, the bridge accepts any API key. Some tools refuse to start without one, so the recipes pass `pooled` or `x`.
+
+If you start the bridge with a token (`POOLED_TOKEN`, `--token-file` or `--token`), every tool must send that token as its API key. It goes in `Authorization: Bearer <token>` or `x-api-key: <token>`, which is what the SDKs and tools do with the key you give them. See [CLI options and security](/docs/serve/options).
+
+## Context settings for coding agents
+
+Codex CLI, Claude Code and opencode do not know the size of a model called `pooled`. If you do not tell them the room's context, they never compact the conversation. The room then refuses the first prompt that is too long.
+
+The bridge prints the right settings for your room once the room's model is ready (the opencode lines need `@pooled/cli` 0.2.1 or newer):
+
+```text
+For this room's 32768-token context:
+  Codex        model_context_window = 32768, model_auto_compact_token_limit = 26214  (~/.codex/config.toml)
+  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:8080 CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled
+  opencode     OPENCODE_DISABLE_CLAUDE_CODE=1 opencode, with this opencode.json:
+    {"provider":{"pooled":{ ... }}}
+```
+
+`GET /health` also returns the context as `ctx`. If you would rather work it out yourself, these are the values for each model:
+
+| Room | Context | Codex compact limit | Claude Code output | opencode output |
+|---|---|---|---|---|
+| Qwen3 1.7B (default) | 8192 | 6553 | 2048 | 2048 |
+| Qwen3 1.7B (`?ctx=16384`) | 16384 | 13107 | 4096 | 4096 |
+| Qwen3.8 27B (default) | 16384 | 13107 | 4096 | 4096 |
+| Qwen3.8 27B (`?ctx=32768`) | 32768 | 26214 | 8192 | 8192 |
+| Qwen3.6 35B MoE (default) | 32768 | 26214 | 8192 | 8192 |
+| Qwen3.6 35B MoE (`?ctx=65536`) | 65536 | 52428 | 16384 | 8192 |
+
+The rules behind the table:
+
+- **Codex compact limit** is 0.8 of the context.
+- **Claude Code output** is a quarter of the context, at most 32000.
+- **opencode output** is a quarter of the context, at most 8192.
+
+The host sets the room's context. They add `?ctx=` to the address of the room page before they start the model, for example `https://pooled.run/room?ctx=65536`. A room cannot go above its model's maximum.
+
+<Aside type="tip" title="Use a big room for coding agents">
+Codex and Claude Code send a system prompt of 15,000 to 20,000 tokens before any history. Use the Qwen3.6 35B MoE (32K by default, up to 64K) or the Qwen3.8 27B at 32K. The 1.7B is capped at 16K, which leaves almost nothing after that prompt, and it often describes a command instead of calling the tool.
+</Aside>
+
+## Recipes
+
+- [Codex CLI](/docs/serve/recipes/codex): Responses API, `~/.codex/config.toml`.
+- [Claude Code](/docs/serve/recipes/claude-code): Messages API, environment variables.
+- [opencode](/docs/serve/recipes/opencode): Chat Completions, `opencode.json`.
+- [Continue](/docs/serve/recipes/continue): Chat Completions, `~/.continue/config.yaml`.
+- [Open WebUI](/docs/serve/recipes/open-webui): a connection in Settings.
+- [OpenAI and Anthropic SDKs](/docs/serve/recipes/sdks): Python and JavaScript.
+- [LiteLLM](/docs/serve/recipes/litellm): a `model_list` entry.
+- [curl](/docs/serve/recipes/curl): raw requests to every endpoint.
+
+## Before you point a tool at a room
+
+<Aside type="caution" title="The room sees your prompts">
+Everything a tool sends goes to the room's host, a browser tab on someone else's device, and the other devices compute on it. Coding agents send file contents and sometimes secrets. Point them only at a room you trust, and stop the bridge (Ctrl-C) when the room ends. See [Privacy](/docs/privacy).
+</Aside>
+
+- One answer is generated at a time. The room's chat, Code mode and every API client share one queue, so a tool may wait behind someone else.
+- Every token takes a trip through each device that holds layers. A long first prompt can take a while to process, longer on a room of phones.
+- The first prompt of a session is the slow one. Later steps reuse the room's caches and only process the new part.

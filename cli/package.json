@@ -1,0 +1,36 @@
+{
+  "name": "@pooled/cli",
+  "version": "0.2.1",
+  "description": "Serve a Pooled room as a local OpenAI and Anthropic compatible endpoint: pooled serve <ROOM CODE>.",
+  "homepage": "https://pooled.run",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nehanth/pooled.git",
+    "directory": "cli"
+  },
+  "license": "MIT",
+  "author": "Nehanth Narendrula",
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*_test.mjs"
+  },
+  "bin": {
+    "pooled": "bin/pooled.js"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "node-datachannel": "0.33.4",
+    "peerjs": "1.5.4"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.60.0",
+    "openai": "^5.0.0"
+  }
+}

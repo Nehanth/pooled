@@ -1,0 +1,726 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs --grammar: the host's v2 pipeline (grammar, parser, ai-call) over greedy llama.cpp top-64 candidates.",
+ "model": "qwen3.6-35b-moe",
+ "case": "none",
+ "grammar": true,
+ "profile": {
+  "style": "xml",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": true,
+  "thinkRule": "afterQuery",
+  "trim": true,
+  "known": true
+ },
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "What's the weather in Paris right now?"
+   }
+  ]
+ },
+ "params": {
+  "thinking": false,
+  "toolChoice": "none"
+ },
+ "maxTokens": 80,
+ "promptTokens": 21,
+ "ids": [
+  40,
+  635,
+  524,
+  599,
+  2528,
+  310,
+  1865,
+  7019,
+  795,
+  11,
+  748,
+  353,
+  4021,
+  3184,
+  488,
+  279,
+  4581,
+  8831,
+  303,
+  11751,
+  1245,
+  1381,
+  13,
+  271,
+  1206,
+  615,
+  279,
+  1379,
+  12995,
+  321,
+  685,
+  4534,
+  17864,
+  1928,
+  11,
+  4338,
+  1716,
+  264,
+  14294,
+  8831,
+  2393,
+  1680,
+  430,
+  25,
+  198,
+  9,
+  256,
+  2972,
+  44,
+  37500,
+  78,
+  7049,
+  32977,
+  332,
+  318,
+  1719,
+  3813,
+  8323,
+  39686,
+  5551,
+  2393,
+  8,
+  198,
+  9,
+  256,
+  2972,
+  14182,
+  84,
+  28034,
+  332,
+  198,
+  9,
+  256,
+  2972,
+  760,
+  21926,
+  13047,
+  332,
+  198,
+  9
+ ],
+ "texts": [
+  "I",
+  " do",
+  " not",
+  " have",
+  " access",
+  " to",
+  " real",
+  "-time",
+  " data",
+  ",",
+  " so",
+  " I",
+  " cannot",
+  " tell",
+  " you",
+  " the",
+  " exact",
+  " weather",
+  " in",
+  " Paris",
+  " right",
+  " now",
+  ".",
+  "\n\n",
+  "To",
+  " get",
+  " the",
+  " most",
+  " accurate",
+  " and",
+  " up",
+  "-to",
+  "-date",
+  " information",
+  ",",
+  " please",
+  " check",
+  " a",
+  " reliable",
+  " weather",
+  " service",
+  " such",
+  " as",
+  ":",
+  "\n",
+  "*",
+  "  ",
+  " **",
+  "M",
+  "été",
+  "o",
+  "-F",
+  "rance",
+  "**",
+  " (",
+  "the",
+  " official",
+  " French",
+  " meteor",
+  "ological",
+  " service",
+  ")",
+  "\n",
+  "*",
+  "  ",
+  " **",
+  "Acc",
+  "u",
+  "Weather",
+  "**",
+  "\n",
+  "*",
+  "  ",
+  " **",
+  "The",
+  " Weather",
+  " Channel",
+  "**",
+  "\n",
+  "*"
+ ],
+ "text": "I do not have access to real-time data, so I cannot tell you the exact weather in Paris right now.\n\nTo get the most accurate and up-to-date information, please check a reliable weather service such as:\n*   **Météo-France** (the official French meteorological service)\n*   **AccuWeather**\n*   **The Weather Channel**\n*",
+ "fellBack": 0,
+ "sent": [
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "I",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " do",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " not",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " have",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " access",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " to",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " real",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "-time",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " data",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " so",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " I",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " cannot",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " tell",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " you",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " exact",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " in",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Paris",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " right",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " now",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n\nTo",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " get",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " most",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " accurate",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " and",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " up",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "-to",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "-date",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " information",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " please",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " check",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " a",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " reliable",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " service",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " such",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " as",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ":",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n*",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "   **",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "M",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "été",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "o",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "-F",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "rance",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "**",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " (",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "the",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " official",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " French",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " meteor",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "ological",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " service",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ")",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n*",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "   **",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Acc",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "u",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "**",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n*",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "   **",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "The",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Weather",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Channel",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "**",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n*",
+   "d": 0
+  }
+ ],
+ "result": {
+  "reason": "max",
+  "calls": [],
+  "open": null,
+  "text": "I do not have access to real-time data, so I cannot tell you the exact weather in Paris right now.\n\nTo get the most accurate and up-to-date information, please check a reliable weather service such as:\n*   **Météo-France** (the official French meteorological service)\n*   **AccuWeather**\n*   **The Weather Channel**\n*",
+  "think": "",
+  "usage": {
+   "in": 21,
+   "out": 80,
+   "think": 0
+  },
+  "err": null
+ }
+}

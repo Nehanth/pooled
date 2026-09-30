@@ -1,0 +1,289 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs --grammar: the host's v2 pipeline (grammar, parser, ai-call) over greedy llama.cpp top-64 candidates.",
+ "model": "qwen3-1.7b",
+ "case": "named",
+ "grammar": true,
+ "profile": {
+  "style": "json",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": false,
+  "thinkRule": "afterQueryNonEmpty",
+  "trim": false,
+  "known": true
+ },
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "What's the weather in Paris?"
+   }
+  ]
+ },
+ "params": {
+  "thinking": false,
+  "toolChoice": {
+   "name": "search"
+  }
+ },
+ "maxTokens": 120,
+ "promptTokens": 381,
+ "ids": [
+  151657,
+  198,
+  4913,
+  606,
+  788,
+  330,
+  1836,
+  497,
+  330,
+  16370,
+  788,
+  5212,
+  1631,
+  788,
+  330,
+  15206,
+  304,
+  12095,
+  497,
+  330,
+  9506,
+  788,
+  220,
+  20,
+  11248,
+  151658
+ ],
+ "texts": [
+  "<tool_call>",
+  "\n",
+  "{\"",
+  "name",
+  "\":",
+  " \"",
+  "search",
+  "\",",
+  " \"",
+  "arguments",
+  "\":",
+  " {\"",
+  "query",
+  "\":",
+  " \"",
+  "weather",
+  " in",
+  " Paris",
+  "\",",
+  " \"",
+  "limit",
+  "\":",
+  " ",
+  "5",
+  "}}\n",
+  "</tool_call>"
+ ],
+ "text": "<tool_call>\n{\"name\": \"search\", \"arguments\": {\"query\": \"weather in Paris\", \"limit\": 5}}\n</tool_call>",
+ "fellBack": 0,
+ "sent": [
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "name": "search"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "{\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "query"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\":"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " \""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "weather"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " in"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " Paris"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\","
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " \""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "limit"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\":"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " "
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "5"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "}"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "end": 1
+  }
+ ],
+ "result": {
+  "reason": "stop",
+  "calls": [
+   {
+    "name": "search",
+    "args": "{\"query\": \"weather in Paris\", \"limit\": 5}"
+   }
+  ],
+  "open": null,
+  "text": "",
+  "think": "",
+  "usage": {
+   "in": 381,
+   "out": 26,
+   "think": 0
+  },
+  "err": null
+ }
+}

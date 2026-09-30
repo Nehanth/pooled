@@ -1,0 +1,91 @@
+---
+title: Share and download
+eyebrow: Code mode
+description: Save a project as a .zip, save the app as one HTML file that runs anywhere, or share it with everyone in the room.
+sidebar:
+  label: Share and download
+  order: 4
+---
+{/*
+  Sources (origin/main 40bb0fa):
+  - room/code-export.js (header: host vs member; menu labels; notes "Packing the files…", "Saved <name> · size · N files",
+    "N hidden or secret files left out", "missing: ...", "tap Save"; html falls back to index.html, "no .html page in the project yet")
+  - harness/export.js (header; projectFiles maxFiles 5000 / maxBytes 256 MB, secretPath + SKIP_DIRS left out; fileBase();
+    saveBlob(): share sheet on touch screens, "blocked" after ~1 s on Safari; zip without zip64, 4 GB)
+  - harness/app-export.js (appPage, appFileName "<name>-rev<N>.html", downloadApp)
+  - harness/workspace.js (secretPath, SKIP_DIRS)
+  - room/code.js lines ~271-325 (shareNow, SHARE_KEEP 3, "already shared with the room", ai-code-share-ask only when shared(),
+    onShareAct texts: "rev N is gone from this device: downloaded rev M, the latest", "still on its way")
+  - room/code-ui.js shareCard() ("<by> shared <name> with the room :port · rev N", Download, Open full screen),
+    shareBtn (title "Share with the room: every device gets a Download button for this app"; shown only with a rev and when you can drive)
+  - p2p.html #code-dl, #code-dl-menu ("Project .zip · every file", "One HTML file the app, ready to open")
+  - docs/protocol.md Code mode table (ai-code-share, ai-code-share-ask); PR #240
+*/}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+There are two ways to keep what the agent built: **Download** on the Files heading, and **Share** in the preview bar.
+
+## Download
+
+Press **Download** above the file list. It offers two things:
+
+| Option | What you get |
+|---|---|
+| **Project** `.zip` | Every file of the project, in a folder named after it. |
+| **One HTML file** | The app in a single `.html` file you can open by double-clicking. |
+
+What you can download depends on your screen:
+
+<Tabs>
+<TabItem label="The host">
+
+- **Project .zip** holds the project's files. Hidden files (`.env`, `.git`...), key files (`*.pem`, `id_rsa`, `credentials.json`...) and build folders (`node_modules`, `dist`...) are left out; the note under the menu says how many.
+- **One HTML file** is the page on screen in Preview. If nothing is served, it is the project's `index.html`. A project with no `.html` page can't be saved this way.
+
+</TabItem>
+<TabItem label="Other devices">
+
+- The host's project stays on the host, so you get **the files of the preview on screen**: the menu says `.zip · the files of :5173`.
+- **One HTML file** is the page on screen in Preview.
+
+</TabItem>
+</Tabs>
+
+File names come from the project name: `snake game` becomes `snake-game.zip` or `snake-game.html`.
+
+When it's done, the note says what was saved, for example `Saved snake.zip · 6.2 KB · 3 files`. If the page refers to files that aren't in the project, the note lists them as `missing:`.
+
+### On a phone
+
+Phones and tablets get the share sheet (Save to Files, AirDrop, a messenger) when it accepts files. Otherwise the file downloads. If building the file took long enough that the browser no longer allows the share sheet (Safari allows about a second after a tap), a **Save** button appears. Tap it to save the same file.
+
+## The one-HTML file is still sandboxed
+
+The app is the model's code, so the file keeps it in the same box as the preview. The `.html` file has no script of its own. It holds one `sandbox="allow-scripts"` frame with the preview document inside it, every project file inlined, under the same content security policy.
+
+Opened from your disk, the app runs in an opaque origin. It can't read the folder the file sits in, cookies or storage, and it can't reach the network beyond the two script CDNs and Google Fonts. The file holds nothing about the room.
+
+The same limits as the preview apply: `localStorage` lasts only until the page reloads, and form submits don't fire. See [Previews](/docs/code/previews#what-an-app-can-do-in-the-sandbox).
+
+## Share with the room
+
+**Share** sits next to **Open** in the preview bar. It shows once the port has loaded, for anyone who can send requests to the agent. The host shares directly; on another device, the request goes to the host, which shares it in your name.
+
+Every device in the room then gets a card in its timeline:
+
+```text
+Maya shared snake with the room   :5173 · rev 4
+[Download]  [Open full screen]
+```
+
+- **Download** saves that rev as one HTML file, named like `snake-rev4.html`.
+- **Open full screen** shows the device's own preview of that port full screen.
+
+Each device builds the download from its own copy of the preview, which it already checked file by file against the host's hashes. Nothing new is sent. Each device keeps the 3 most recent shared revs, so Download still gives the shared version after the agent moves on. If that rev is gone, it downloads the latest and says so.
+
+The card stays in the timeline, so a device that joins later sees it too. Sharing the same rev twice only says `already shared with the room`.
+
+:::note
+Share and Download on other devices need Code to be shared with the room: **Who sees the chat** set to everyone in the room. See [Who can use Code](/docs/code#who-can-use-code).
+:::

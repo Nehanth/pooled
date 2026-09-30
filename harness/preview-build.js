@@ -147,7 +147,17 @@ function capture(C) {
   const OR = B.replace(/^(\w+:\/\/[^/]+).*$/, "$1/");
   const name = (u) => (!u ? "" : u.startsWith("data:") ? C.keys[key(u)] || "(inline)" : u === "about:srcdoc" || u === SELF ? C.path
     : u.startsWith(B) ? u.slice(B.length) : u.startsWith(OR) ? u.slice(OR.length) : u);
-  const clean = (s) => String(s).replace(/data:[\w/+.-]+(?:;[\w=.-]+)*,[A-Za-z0-9+/=]+/g, name).replace(/about:srcdoc/g, C.path).split(SELF).join(C.path).split(B).join("");
+  // a line:col in the page itself counts in the document, which has this script ahead of the
+  // page's markup: give it back in the page's own lines (C.at, from the build). A location inside
+  // this script is left as it is.
+  const at = (line, col) => {
+    const A = C.at, d = line - A.lines;
+    if (!A.lines || line < A.line + A.lines) return [line, col];
+    return [d, d === A.line ? Math.max(1, col - A.cols) : col];
+  };
+  const isPage = (u) => u === SELF || u === "about:srcdoc";
+  const pageAt = (s, u) => s.split(u).map((p, i) => (i ? p.replace(/^:(\d+):(\d+)/, (_, l, c) => ":" + at(+l, +c).join(":")) : p)).join(C.path);
+  const clean = (s) => pageAt(pageAt(String(s).replace(/data:[\w/+.-]+(?:;[\w=.-]+)*,[A-Za-z0-9+/=]+/g, name), "about:srcdoc"), SELF).split(B).join("");
   // WebRTC's STUN traffic is outside the CSP's connect-src: no peer connections from the app
   for (const k of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel"]) { try { Object.defineProperty(window, k, { value: undefined, configurable: false }); } catch {} }
   const O = {};
@@ -161,6 +171,7 @@ function capture(C) {
     }
     if (++n > 200) { dropped++; return; }
     text = clean(text);
+    if (isPage(src)) [line, col] = at(line, col);
     send({ t: "log", level, text: text.length > 1000 ? text.slice(0, 1000) + "…" : text, src: name(src), line, col, ms: Math.round(now) });
   };
   const fmt = (a) => a.map((x) => {
@@ -409,13 +420,17 @@ export function buildPreviewDoc(snapshot, { path, nonce = "" } = {}) {
   const keys = {}, assets = {};
   for (const [u, p] of Object.entries(urlToPath)) keys[urlKey(u)] = p;
   for (const p of files.keys()) if (!/\.html?$/i.test(p)) assets[p] = asset(p);
-  const C = { nonce, path: page, keys, assets, missing: [...missing], warnings };
+  const C = { nonce, path: page, keys, assets, missing: [...missing], warnings, at: null };
   // a page without a viewport meta gets one, so it lays out at the device's width when shown on
   // its own (open in a tab); inside the frame, the frame's size is the viewport either way
   const vp = /<meta\b[^>]*\bname\s*=\s*["']?viewport\b/i.test(html) ? "" : `<meta name="viewport" content="width=device-width, initial-scale=1">`;
-  const head = `<meta http-equiv="Content-Security-Policy" content="${CSP}"><script>(${CAPTURE_SOURCE})(${scriptJson(C)});</script>${vp}`;
-  const dt = /^\s*<!doctype[^>]*>/i.exec(html);
-  html = dt ? dt[0] + head + html.slice(dt[0].length) : head + html;
+  const dt = /^\s*<!doctype[^>]*>/i.exec(html), pre = dt ? dt[0] : "";
+  // where the head lands, so the frame can map document lines back to the page's (#164). The head
+  // ends with a line break, so the page's text after the doctype starts a line of its own: the
+  // head adds `lines` lines from the page's line `line` on, and on that line moves the text `cols`
+  C.at = { lines: CAPTURE_SOURCE.split("\n").length, line: pre.split("\n").length, cols: -(pre.length - pre.lastIndexOf("\n") - 1) };
+  const head = `<meta http-equiv="Content-Security-Policy" content="${CSP}"><script>(${CAPTURE_SOURCE})(${scriptJson(C)});</script>${vp}\n`;
+  html = pre + head + html.slice(pre.length);
   return { html, missing: [...missing], warnings, urlToPath };
 }
 
