@@ -227,9 +227,13 @@ site-search button[data-open-modal] > kbd kbd { font-weight: 400; }
 	font-weight: 500;
 }
 .sidebar-content a > span { min-width: 0; }
-.sidebar-content a .sl-badge { flex: none; }
-.sidebar-content a:has(.sl-badge) { white-space: nowrap; }
-.sidebar-content a:has(.sl-badge) > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+/* a label with a badge ("Rooms from the terminal Preview") stays on one line where the sidebar has room for
+   it (it runs a few px into the link's own padding) and wraps in the narrower laptop sidebar instead of
+   running past its edge */
+.sidebar-content a .sl-badge { white-space: nowrap; }
+@media (min-width: 72rem) {
+	.sidebar-content a:has(.sl-badge) { white-space: nowrap; }
+}
 
 /* The first four groups are always open: plain labels, not toggles.
    NOTE: these rules (and the nth-child(n + 5) / nth-child(5) ones below) key on position. They match the
@@ -325,7 +329,13 @@ site-search button[data-open-modal] > kbd kbd { font-weight: 400; }
 .sl-markdown-content :is(h3, h4, .sl-heading-wrapper.level-h3, .sl-heading-wrapper.level-h4) + * { margin-top: .5rem; }
 .sl-markdown-content :is(h2, .sl-heading-wrapper.level-h2) + :is(h3, .sl-heading-wrapper.level-h3) { margin-top: 1.4rem; }
 .sl-heading-wrapper { line-height: 1.25; }
+/* the wrapper's own line box matches its h2 (display face, 26px), so a heading that wraps keeps tight lines */
+.sl-markdown-content .sl-heading-wrapper.level-h2 { font: 400 26px/1.15 var(--p-display); }
 .sl-anchor-link { color: var(--p-ink-4); }
+/* top-aligned, so the link glyph at the end of a wrapped heading does not open a gap above the last line;
+   the display face sits high in its line box, so the h2 glyph is lifted to the middle of the letters */
+.sl-markdown-content .sl-heading-wrapper.level-h2 .sl-anchor-link { vertical-align: top; }
+.sl-markdown-content .sl-heading-wrapper.level-h2 .sl-anchor-icon > svg { transform: translateY(-.4em); }
 .sl-anchor-icon { opacity: .7; }
 /* on touch screens the anchor glyph is always shown; the TOC links the headings instead */
 @media (hover: none) {
@@ -363,6 +373,7 @@ site-search button[data-open-modal] > kbd kbd { font-weight: 400; }
 }
 :root[data-theme='dark'] .sl-markdown-content :not(pre) > code { background: var(--p-code-bg); box-shadow: inset 0 0 0 1px var(--p-rule-3); }
 .sl-markdown-content a code { color: inherit; }
+.sl-markdown-content code.p-nw { white-space: nowrap; }
 
 /* tables: full width, flush left, small caption-style headers */
 .sl-markdown-content table {
@@ -393,11 +404,19 @@ site-search button[data-open-modal] > kbd kbd { font-weight: 400; }
 .sl-markdown-content td { color: var(--p-ink-2); }
 .sl-markdown-content td:first-child { color: var(--p-ink); }
 .sl-markdown-content tr:nth-child(2n) { background: transparent; }
-.sl-markdown-content td:first-child code,
-.sl-markdown-content td:first-child:has(> code:only-child) { white-space: nowrap; }
+.sl-markdown-content td:first-child code { white-space: nowrap; }
 .sl-markdown-content td code { word-break: normal; overflow-wrap: anywhere; }
-/* reference tables (four columns and more): the short columns never wrap, the last one takes the rest */
-.sl-markdown-content table:has(th:nth-child(4)) :is(th, td):not(:last-child) { white-space: nowrap; }
+@media (min-width: 50rem) {
+	/* wide screens: long code breaks between words where it can (`disable_parallel_tool_use:` stays whole) */
+	.sl-markdown-content td code { overflow-wrap: break-word; }
+}
+/* reference tables (.p-ref: four columns and more, short names and values, set by PageTitle's script):
+   the short columns never wrap, the last one takes the rest */
+.sl-markdown-content table.p-ref :is(th, td):not(:last-child) { white-space: nowrap; }
+/* every table sits in a .p-table box (PageTitle's script) that scrolls sideways if the table is wider
+   than the column, so a wide matrix never pushes the page sideways */
+.sl-markdown-content .p-table { overflow-x: auto; }
+.sl-markdown-content .p-table > table { margin: 0; }
 .sl-markdown-content hr { border: 0; border-top: 1px solid var(--p-rule); margin-block: 2.5rem; }
 .sl-markdown-content .expressive-code { margin-block: 1.25rem; }
 
@@ -654,7 +673,8 @@ site-search button[data-close-modal] { color: var(--p-ink-2); font-size: 14px; }
 	header.header, mobile-starlight-toc nav { background: var(--p-bg); }
 	.content-panel { padding-top: 24px; }
 	.content-panel + .content-panel { padding-top: 20px; }
-	.sl-markdown-content h2 { font-size: 23px; }
+	.sl-markdown-content h2,
+	.sl-markdown-content .sl-heading-wrapper.level-h2 { font-size: 23px; }
 	.sl-markdown-content h3 { font-size: 16.5px; }
 	.sl-markdown-content :is(h2, .sl-heading-wrapper.level-h2):not(:first-child) { margin-top: 2.4rem; }
 	/* the menu: text lines up with the logo at 16px */
@@ -679,10 +699,13 @@ site-search button[data-close-modal] { color: var(--p-ink-2); font-size: 14px; }
 	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) tr { display: flex; flex-wrap: wrap; align-items: baseline; margin: 0; padding: 12px 0 13px; border-bottom: 1px solid var(--p-rule); }
 	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) tr:first-child { border-top: 1px solid var(--p-rule-3); }
 	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td { display: inline; margin: 0; padding: 0; border: 0; white-space: normal; }
+	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td code:not(.p-nw) { white-space: normal; overflow-wrap: anywhere; }
 	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td:first-child { display: block; flex: 0 0 100%; margin-bottom: 4px; font-weight: 500; }
 	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td:not(:first-child, :last-child) { font-size: 13px; color: var(--p-ink-2); margin-inline-end: 16px; }
 	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td:not(:first-child, :last-child)[data-label]::before { content: attr(data-label) ": "; color: var(--p-ink-4); }
 	.sl-markdown-content table:is(:has(th:nth-child(4)), .p-stack) td:last-child { display: block; flex: 0 0 100%; margin-top: 2px; }
+	.sl-markdown-content table.p-label-last td:last-child[data-label] { font-size: 13px; color: var(--p-ink-2); margin-top: 0; }
+	.sl-markdown-content table.p-label-last td:last-child[data-label]::before { content: attr(data-label) ": "; color: var(--p-ink-4); }
 	.sl-markdown-content :is(th, td) { padding-inline-end: 14px; }
 	.meta a { display: inline-flex; align-items: center; min-height: 44px; }
 	footer.sl-flex { margin-top: 3rem; }

@@ -29,9 +29,24 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 	document.querySelectorAll<HTMLTableElement>('.sl-markdown-content table').forEach((t) => {
 		const heads = [...t.querySelectorAll('thead th')].map((th) => th.textContent?.trim() || '');
 		if ([...t.querySelectorAll('td')].some((td) => (td.textContent || '').trim().length > 44)) t.classList.add('p-stack');
+		// reference tables (name, default, scope, description): the columns before the last are short, so they
+		// can stay on one line; a matrix of long values (API shapes side by side) is left to wrap
+		const rows = [...t.querySelectorAll('tr')];
+		if (heads.length >= 4 && rows.every((tr) => [...tr.children].slice(0, -1).every((c) => (c.textContent || '').trim().length <= 28))) t.classList.add('p-ref');
+		// a matrix whose last column is short values too (comparison tables): phones label that cell as well
+		const last = rows.slice(1).map((tr) => (tr.lastElementChild?.textContent || '').trim().length);
+		if (t.classList.contains('p-stack') && last.length && last.reduce((a, b) => a + b, 0) / last.length <= 32) t.classList.add('p-label-last');
+		const box = document.createElement('div');
+		box.className = 'p-table';
+		t.replaceWith(box);
+		box.append(t);
 		t.querySelectorAll('tbody tr').forEach((tr) => {
 			[...tr.children].forEach((td, i) => heads[i] && td.setAttribute('data-label', heads[i]));
 		});
+	});
+	// short inline code never breaks inside (`?ka=N`, not `?` then `ka=N`); long code still wraps
+	document.querySelectorAll<HTMLElement>('.sl-markdown-content :not(pre) > code').forEach((c) => {
+		if ((c.textContent || '').length <= 22) c.classList.add('p-nw');
 	});
 	document.querySelectorAll<HTMLButtonElement>('.p-copy').forEach((btn) => {
 		btn.addEventListener('click', async () => {
