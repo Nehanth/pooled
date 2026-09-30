@@ -59,12 +59,12 @@ const PAGE_STATE = () => {
   const $ = (id) => document.getElementById(id);
   const bots = document.querySelectorAll(".m.bot");
   const last = bots[bots.length - 1];
-  const ind = $("awake-ind");
+  const aw = window.pooledAwake?.();
   return {
     joined: document.body.classList.contains("in-room"), online: !!$("ai-panel")?.classList.contains("online"),
     status: $("ai-status")?.textContent || "", joinStatus: $("join-status")?.textContent || "", over: $("room-over") && !$("room-over").hidden ? $("room-over-h")?.textContent : "",
     answers: bots.length, lastChars: last?.querySelector(".bubble")?.textContent.length || 0, lastEnded: !!last?.querySelector(".stats"),
-    lastStats: last?.querySelector(".stats")?.textContent || "", awake: ind ? (ind.hidden ? "hidden" : ind.className || "shown") : "none",
+    lastStats: last?.querySelector(".stats")?.textContent || "", awake: aw ? (aw.holds ? (aw.awake ? "ok" : "warn") : "hidden") : "none",
     visible: document.visibilityState, log: [...document.querySelectorAll("#chat-log div")].slice(-4).map((d) => d.textContent.slice(0, 160)),
     links: (window.pooledDebug?.() || []).map((x) => `${x.name}:${x.chans}`).join(" "),
   };

@@ -40,9 +40,17 @@ export function lendStatus(s) {
   const has = s.lo != null && s.hi != null && s.hi > s.lo;   // an empty range (lo == hi) holds nothing
   const model = s.model || "the model";
   // "Layers 1–20 · 2.4 GB · Qwen": which layers, and how much of the model's weights they are
-  const held = has ? `Layers ${s.lo + 1}–${s.hi}${s.bytes ? " · " + gb(s.bytes) : ""} · ${model}` : "";
+  // (with the host's deal: "2.9 of 3 GB", what the device holds against what it pledged)
+  const mem = s.held != null && s.pledge ? `${(+s.held).toFixed(1)} of ${+(+s.pledge).toFixed(1)} GB` : s.bytes ? gb(s.bytes) : "";
+  const held = has ? `Layers ${s.lo + 1}–${s.hi}${mem ? " · " + mem : ""} · ${model}` : "";
   // while it works too: the hop dot and the numbers show the passes (between answers it stays "Serving")
   if (s.phase === "serving" && has) return { title: "Serving", sub: held };
+  // holds no layers, and the host said why: this screen must not look broken
+  if (!has && s.out && s.phase !== "idle") {
+    if (s.out === "late") return { title: "Waiting for a re-deal", sub: `This device joined after the start. It gets layers of ${model} when the room re-deals; it can ask meanwhile.` };
+    if (s.out === "small") return { title: "Not holding layers", sub: `What this device lends is less than one layer of ${model}. Lend more and re-deal to help run it.` };
+    return { title: "Not needed", sub: s.phone ? `The computers hold ${model}, so this phone stays free: it can still ask.` : `The other devices hold ${model}, so this one stays free: it can still ask.` };
+  }
   if (s.phase === "loading") return { title: s.pct != null ? `Loading ${Math.round(s.pct)}%` : "Loading", sub: has ? held : model };
   if (s.phase === "serving") return { title: "Not holding layers", sub: `The other devices run ${model}` };
   return { title: "Standing by", sub: "Waiting for the room to start a model" };

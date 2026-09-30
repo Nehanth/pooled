@@ -271,10 +271,6 @@
   .side-hint { font-size: 12px; color: var(--muted); }
   #awake:empty { display: none; }
   /* the screen-awake mark in the header: shown while this device holds layers (ok: the screen stays on; warn: it may sleep) */
-  #awake-ind { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--muted); position: relative; }
-  #awake-ind[hidden] { display: none; }
-  #awake-ind.ok { color: var(--accent); }
-  #awake-ind.warn { color: var(--warn-text); background: color-mix(in srgb, var(--warn) 14%, transparent); }
   .set-l .exp { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 999px; font: 500 10px/1.4 var(--sans); letter-spacing: .02em; text-transform: uppercase; color: var(--warn-text); background: color-mix(in srgb, var(--warn) 14%, transparent); vertical-align: 1px; }
   .menu-acts { display: flex; flex-direction: column; gap: 2px; margin: 0 -8px; }
   .menu-acts button, .menu-acts a { display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 12px; align-items: center; width: 100%; padding: 8px; border: 0; border-radius: 12px; background: transparent; text-align: left; text-decoration: none; color: var(--text); font: 500 14px/1.25 var(--sans); cursor: pointer; }
@@ -614,6 +610,10 @@
   /* this device: lend N GB */
   .ap-me { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .ap-me-hint { flex-basis: 100%; font-size: 12px; color: var(--accent); }
+  .ap-covers { flex-basis: 100%; font-size: 12px; line-height: 1.4; color: var(--muted); }
+  #ai-short { margin: 8px 2px 0; font-size: 12px; line-height: 1.45; color: var(--ink-2); }
+  #ai-panel.online #ai-short, #ai-panel.online .ap-covers { display: none; }
+  .pheld { margin-top: 6px; font-size: 12px; color: var(--muted); }
   .ap-step { display: inline-flex; align-items: center; gap: 4px; padding: 3px; border: 1px solid var(--border-2); border-radius: 12px; background: var(--panel); }
   .ap-step .step { width: 34px; height: 34px; padding: 0; border: 0; border-radius: 8px; font: 400 17px/1 var(--sans); color: var(--ink-2); background: transparent; display: grid; place-items: center; }
   .ap-step .step:hover:not(:disabled) { background: var(--panel-2); color: var(--text); }
@@ -1712,7 +1712,6 @@
   <span class="hbrk" aria-hidden="true"></span>
   <span id="hdr-sum"></span>
   <button id="share-btn" class="hbtn" type="button" title="Invite a device: a link, a QR code or the room code"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span class="lbl">Invite</span></button>
-  <span id="awake-ind" class="tip-l" hidden role="status" aria-label="Screen stays on" data-tip="Screen stays on"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="2.6"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1"/></svg></span>
   <button id="compute-open" class="hbtn tip-l" type="button" hidden aria-label="Serve API" aria-haspopup="dialog" aria-controls="compute-screen" data-tip="Use this room from your own tools"><svg class="mk" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle class="lit" cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><span class="lbl"><span class="lw">Serve </span>API</span><i class="api-dot" aria-hidden="true"></i></button>
   <details id="room-menu">
     <summary aria-label="Room settings" data-tip="Room settings" class="tip-l"><svg width="17" height="17" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><path d="M3 6h8M15 6h2M3 14h2M9 14h8"/><circle cx="13" cy="6" r="2"/><circle cx="7" cy="14" r="2"/></svg></summary>
@@ -1824,7 +1823,7 @@
   <details id="join-net">
     <summary>Network</summary>
     <div class="jn-body">
-      <p class="jn-help">Can't connect from this network? A relay (TURN) server carries the traffic when two devices can't reach each other directly. Pooled doesn't run one: use your own (coturn, for example) or a provider's. Saved in this browser only; join links never include it.</p>
+      <p class="jn-help">Can't connect from this network? A relay (TURN) server carries the traffic when two devices can't reach each other directly (work networks that block UDP). When this site has one set up, rooms use it by themselves; here you can set your own instead (coturn, for example, or a provider's). Saved in this browser only; join links never include it.</p>
       <div class="jn-row">
         <input id="turn-url" placeholder="turn:relay.example.org:3478" autocomplete="off" spellcheck="false" aria-label="Relay server URL">
         <input id="turn-user" placeholder="Username" autocomplete="off" spellcheck="false" aria-label="Relay username">
@@ -1864,6 +1863,7 @@
           <p class="ap-note" id="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
           <button id="ai-start" class="primary">Start the model</button>
           <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
+          <p id="ai-short" role="status" hidden></p>
           <p id="ai-why" hidden>No device in this room can run a model: none has WebGPU. Join from a laptop or desktop in Chrome or Edge (or Safari 26) to start one.</p>
           <p id="start-why" class="sr-only"></p>
           <div id="redeal-why" hidden></div>
@@ -1886,6 +1886,7 @@
           <h3 class="ap-k"><span>This device gives</span></h3>
           <div class="ap-step" id="ap-step"><button class="step" id="ap-minus" type="button" aria-label="Less memory">&minus;</button><input id="ap-gb" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Memory this device gives, in GB" value="1"><span class="u">GB</span><button class="step" id="ap-plus" type="button" aria-label="More memory">+</button></div>
           <p class="ap-me-hint" id="ap-me-hint" hidden></p>
+          <p class="ap-covers" id="ap-covers">A pledge is a promise: this device never holds more. It covers the layers it holds and their context memory, and on the device that hosts the model also the embedding and output head.</p>
           <p class="ap-no" id="ap-cap" hidden></p>
           <p class="ap-no" id="ap-no" hidden>This browser can't use its graphics chip, so this device can chat but not help run the model.</p>
         </section>

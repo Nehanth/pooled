@@ -221,7 +221,7 @@ try {
   log("online:", await st(tabs.host));
   out.split = (await roomLog(tabs.host)).filter((t) => /layer split/.test(t)).slice(-1)[0] || "";
   log(out.split);
-  out.awake = await Promise.all(Object.values(tabs).map((p) => p.evaluate(() => { const e = document.getElementById("awake-ind"); return e ? { shown: !e.hidden, cls: e.className } : null; })));
+  out.awake = await Promise.all(Object.values(tabs).map((p) => p.evaluate(() => { const a = window.pooledAwake?.(); return a ? { shown: a.holds, cls: a.awake ? "ok" : "warn" } : null; })));
 
   // the reference: an answer nobody interrupts
   await ask();
