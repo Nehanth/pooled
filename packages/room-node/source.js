@@ -1,5 +1,5 @@
-// Where a room node reads a model's bytes: a local copy of the room's GGUF when it has one (the
-// file name of room/models.js's URL looked up in modelDir), else HTTP range requests to that URL,
+// Where a room node reads a model's bytes: a local copy of the room's GGUF when it has one (in
+// modelDir: <model key>/<file name> as `pooled pull` keeps it, or the LOCAL layout below), else HTTP range requests to that URL,
 // the same requests the room page makes. The room page's weight caches, peer-to-peer weight
 // transfer and download pacing are browser features left out of this prototype.
 import fs from "node:fs";
@@ -19,8 +19,8 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
   const M = MODELS[modelKey];
   if (!M || (M.kind !== "gguf" && M.kind !== "qwen35")) throw new Error(`unsupported model ${modelKey}`);
   const base = M.gguf.split("/").pop();
-  const file = modelDir && LOCAL[base] ? path.join(modelDir, LOCAL[base]) : null;
-  const local = file && fs.existsSync(file) ? file : null;
+  // `pooled pull`'s layout (<dir>/<model key>/<file>, cli/lib/cache.js) first, then the test layout
+  const local = modelDir ? [path.join(modelDir, modelKey, base), LOCAL[base] && path.join(modelDir, LOCAL[base])].find((f) => f && fs.existsSync(f)) || null : null;
   let fh = null;
   const readAt = local
     ? async (off, len) => {

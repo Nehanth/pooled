@@ -1,7 +1,7 @@
 ---
 title: Rooms from the terminal
 eyebrow: Preview
-description: pooled host opens a room on this computer, pooled join lends its GPU to a room, and pooled chat talks to a room's model. No browser needed. A preview, not on npm yet.
+description: pooled pull downloads a model, pooled host opens a room on this computer, pooled join lends its GPU to a room, and pooled chat talks to a room's model. No browser needed. A preview, not on npm yet.
 sidebar:
   label: Rooms from the terminal
   order: 1
@@ -24,20 +24,23 @@ Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gat
 - PR #270 body: transcripts (its "until #268 is deployed … only with --allow-all" note is out of date: #268 is merged)
 - room/joingate.js on main (#268): the room page sends join: 1, waits in the lobby, takes #k= keys; CHANGELOG #268 entry
 - npm view @pooled/cli version = 0.2.0 (serve only); webgpu 0.6.1; cli/package.json 0.2.1, engines node >=22
+- pooled pull / list / rm, the interactive host and join (cli/lib/cache.js, pullrun.js, hostui.js, hostrun.js; transcripts from
+  pty runs on the Spark 2026-09-30)
 TODO(verify): the npx lines are what the README says users will run once published; not runnable until then.
 */}
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 :::caution[Preview: not on npm yet]
-`pooled host`, `pooled join` and `pooled chat` are in [PR #270](https://github.com/Nehanth/pooled/pull/270), not in a release. The `@pooled/cli` on npm (0.2.0) has only `serve`. The commands on this page are the ones you will run once it is published. Until then, run them from a checkout of that branch as `node cli/bin/pooled.js …` (see [From a checkout](#from-a-checkout)).
+`pooled pull`, `pooled host`, `pooled join` and `pooled chat` are in [PR #270](https://github.com/Nehanth/pooled/pull/270), not in a release. The `@pooled/cli` on npm (0.2.0) has only `serve`. The commands on this page are the ones you will run once it is published. Until then, run them from a checkout of that branch as `node cli/bin/pooled.js …` (see [From a checkout](#from-a-checkout)).
 :::
 
-Three commands put a room in your terminal:
+A few commands put a room in your terminal:
 
 | Command | What it does | Needs a GPU |
 |---|---|---|
-| `pooled host` | Opens a new room on this computer. It holds the embedding, the output head and its share of the layers, and prints the invite link. | Yes |
+| `pooled pull` | Downloads a model to `~/.pooled/models`, like `ollama pull`, so host and join start from disk. `pooled list` and `pooled rm` manage them. | No |
+| `pooled host` | Opens a new room on this computer, asks for the model and how much to lend, and shows the room live as devices join. It holds the embedding, the output head and its share of the layers. | Yes |
 | `pooled join` | Lends this computer's GPU to a room. The host deals it some layers, the way it deals a browser tab some. | Yes |
 | `pooled chat` | Talks to a room's model, like `ollama run`. Joins as an ask-only client with no layers. | No |
 
@@ -80,6 +83,42 @@ pooled join 4TK-G9P
 
 Phones join from the room page, not from the terminal. See [Phones and tablets](/docs/phones).
 
+## pooled pull
+
+```bash
+npx @pooled/cli pull qwen3.6-35b-moe
+```
+
+```text
+$ pooled pull qwen3.6-35b-moe
+pulling qwen3.6-35b-moe (Qwen3.6 35B MoE · Q4): 19.4 GB into ~/.pooled/models/qwen3.6-35b-moe
+▕███████████░░░░░░░░░░░░░░░░░░▏  37%  7.2 GB / 19.4 GB  106 MB/s  ETA 1m58s
+✓ qwen3.6-35b-moe is ready (19.4 GB): pooled host qwen3.6-35b-moe
+```
+
+The files go to `~/.pooled/models/<model>` (`--models <dir>` or `POOLED_MODELS` picks another place). Ctrl-C leaves a `.part` file, and `pooled pull` again resumes it where it stopped. Every file is checked against its exact size and SHA-256 before it is used. `pooled download` is the same command; a part of a name works (`pooled pull 35b`).
+
+`pooled list` (or `ls`) shows the models on this computer and the ones that are not downloaded, with any download that stopped half way. `pooled rm <model>` deletes one.
+
+`pooled host` and `pooled join` read the model from there when it is pulled. When it is not, `pooled host` offers to download it, and `pooled join` streams only its own layers from Hugging Face, as before.
+
+### pooled pull --help
+
+```text
+Usage
+  pooled pull <model>      download a model, so pooled host and pooled join start from disk
+  pooled list              the models on this computer, and the ones not downloaded yet
+  pooled rm <model>        delete a downloaded model
+
+  The files go to ~/.pooled/models/<model> (--models <dir> or POOLED_MODELS picks another place).
+  A download resumes where it stopped: Ctrl-C, then pooled pull again. Each file is checked
+  against its size and SHA-256 before it is used. <model> may be part of a name ("35b", "1.7b").
+
+Options
+  --models <dir>   where the models are kept
+  -h, --help       this help
+```
+
 ## pooled join
 
 ```bash
@@ -102,6 +141,8 @@ pooled join · room HJQ-N44
 13:06:55 holding layers 14-27 of qwen3-1.7b (loaded in 3.5 s)
 room HJQ-N44 · online · 2 devices · layers 14-27 of qwen3-1.7b · 56.4 tok/s · 390 passes
 ```
+
+In a terminal, `pooled join` alone asks for the code or link, then shows the host and its model and asks how much to lend (←/→ or type a number, Enter). `--gb` skips that question, so `pooled join "<link>" --gb 8` asks nothing. When the layers came from Hugging Face rather than from disk, it says once that `pooled pull <model>` makes the next join start faster.
 
 The room's host picks the model, from Pooled's own list, and how many layers this computer holds. A host can't make it download anything else.
 
@@ -160,15 +201,21 @@ Ctrl-C leaves the room and frees the GPU. It exited in about a second in testing
 
 ```text
 Usage
-  pooled join <ROOM CODE | "room link"> [options]
+  pooled join [ROOM CODE | "room link"] [options]
 
   Lends this computer's GPU to a Pooled room: the room's host deals this device some of the
   model's layers, and they run here until you press Ctrl-C (which leaves the room and frees the GPU).
   Needs a GPU that Dawn can use (Metal on macOS 26+, Vulkan on Linux, D3D12 on Windows).
 
+  In a terminal, pooled join alone asks for the code or link, shows the host's model and asks how
+  much to lend. A flag skips its question.
+
   Getting in: with the room's invite link (in quotes: "https://pooled.run/r/4TKG9P#k=..."), the
   host lets this computer in at once. With the code alone (4TK-G9P), a host that asks before new
   devices join sees "<name> wants to join" and this waits until it presses Allow.
+
+  The layers come from ~/.pooled/models when the host's model is there (pooled pull <model>),
+  else each start streams this device's layers from Hugging Face.
 
 Options
   --gb <n|max>      how much memory to lend, in GB. Default: the memory rule, printed at start:
@@ -179,7 +226,7 @@ Options
                     computer's hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
                     default: the PeerJS cloud pooled.run uses)
-  --models <dir>    read the weights from local files instead of downloading them
+  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
   --no-check        skip the test allocation that confirms the memory is there
   --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
                     (default 10); only a host of the same name: a room code can be reused by a
@@ -197,27 +244,73 @@ Options
 ## pooled host
 
 ```bash
-npx -p @pooled/cli -p webgpu@0.6.1 pooled host --model qwen3.6-35b-moe
+npx -p @pooled/cli -p webgpu@0.6.1 pooled host
 ```
+
+In a terminal the room opens at once, with its code and invite link at the top, so devices can join while you choose. Then `pooled host` asks only for what you did not give as flags:
+
+1. **The model.** A list with what each model needs over the whole room, whether it is downloaded (or how big the download is), and the one this GPU holds alone preselected. Use ↑/↓ and Enter. A model that is not downloaded downloads right there, with its progress in the screen, while devices join.
+2. **How much this computer lends.** Half the GPU's memory by default, as on the room page. Use ←/→ or type a number, then Enter.
+3. **The room**, redrawn in place: every device with its kind and pledge, who waits to join, and whether the pledges hold the model.
 
 ```text
-$ pooled host --model qwen3-1.7b --devices 2
-pooled host · room HJQ-N44 · Qwen3 1.7B · Q8
-  GPU      NVIDIA GB10 · 121.7 GB unified memory
-  lending  8 GB  (--gb 8)
-  every device holding layers sees the hidden states of what is asked here (they carry the prompts
-  and answers), and whoever is in can ask: share the invite link only with people you trust
-  Ctrl-C leaves the room and frees the GPU
-  invite   https://pooled.run/r/HJQN44#k=…
-  join     pooled join "https://pooled.run/r/HJQN44#k=…"
-  chat     pooled chat "https://pooled.run/r/HJQN44#k=…"      (your own tools: pooled serve "…")
-  with the code HJQ-N44 alone, a device waits until you let it in (a allows, d denies)
-13:06:50 spark-join wants to join (computer, 8 GB): press a to let it in, d to turn it away
-13:06:52 spark-join was let in
-13:06:56 room online: spark-host 0-13 · spark-join 14-27
+pooled host · room FEA-Q38 · Qwen3 1.7B
+invite  https://pooled.run/r/FEAQ38#k=…
+────────────────────────────────────────────────────────────────────────
+model   Qwen3 1.7B  ✓ downloaded   m: change
+lending 2 GB of 122 GB   p: change
+
+Devices (1)
+  ● spark-host         this computer  2 GB
+
+Waiting to join (1)
+  ? spark-join2 wants to join (computer, 64 GB)   a: allow  d: deny
+
+room    ███████████░░░░░░░░░ 2 GB pledged, Qwen3 1.7B needs 3.8 GB
+This room is 1.8 GB short for Qwen3 1.7B: add a device or raise a pledge: spark-host could give
+1.8 GB more.
+
+Enter: start (when the room fits)  ·  m: model  ·  p: pledge  ·  q: quit
 ```
 
-Send the **invite** line to the devices you want in: a browser tab, a phone, or another computer with `pooled join`. Then ask from the room page, from the terminal with [`pooled chat`](#pooled-chat), or from your own tools with [`pooled serve`](/docs/serve).
+The fit is the room page's own math, so the terminal says "short" exactly when the room page would. Start stays off until the pledges fit and the download is done. Press **a** to let a waiting device in, **d** to turn it away, **m** or **p** to change the model or the pledge. When it fits, **Enter** starts: each device's load progress, then "online" with the layer split.
+
+```text
+Devices (2)
+  ● spark-host         this computer  2 GB     layers 0–5
+  ● spark-join2        CLI            6 GB     layers 6–27
+
+● online  spark-host 0-5 · spark-join2 6-27
+
+c: chat here  ·  Enter: re-deal  ·  q: quit
+```
+
+Press **c** to chat with the room right there (the same chat as [`pooled chat`](#pooled-chat); `/exit` goes back to the room screen), so you don't need a second terminal. **Enter** re-deals after more devices join. **q** or Ctrl-C closes the room.
+
+Send the **invite** line to the devices you want in: a browser tab, a phone, or another computer with `pooled join`. Browser tabs and phones join a `pooled host` room like any other device: with the invite link at once, with the code alone after you press **a**. See [Who gets in](#who-gets-in).
+
+### Flags skip the questions
+
+Every step has a flag. A flag you give skips its question, so this asks nothing at all:
+
+```bash
+pooled host qwen3.6-35b-moe --gb 64 --start --yes
+```
+
+| Flag | Skips or does |
+|---|---|
+| `[model]`, `--model <m>` | The model picker. A part of the name works: `35b`. |
+| `--gb <n\|max>` | The pledge question. |
+| `-y`, `--yes` | Downloads a model that is not on this computer without asking. |
+| `--no-pull` | Doesn't download: this computer streams its layers from Hugging Face on every start. |
+| `--start` | Starts as soon as the pledges hold the model. |
+| `--wait <n>` | Starts once n devices (this one included) are in and the pledges fit. |
+| `--allow-all` | No lobby: anyone with the code comes in. |
+| `--deny-unknown` | No lobby: a device with the code alone is turned away. The invite link still works. |
+| `--chat` | Opens the chat once the room is online. |
+| `--name <s>` | How the room shows this computer. |
+
+Without a terminal (a script or a service) nothing is asked: the model is `qwen3-1.7b` unless you give one, the pledge follows [How much it lends](#how-much-it-lends), a model that is not downloaded is pulled first, and the room starts once the pledges fit. How much it lends and Ctrl-C work as for `pooled join`. When the host leaves, the room is over for every device.
 
 **Models.** `--model list` prints the keys:
 
@@ -229,49 +322,52 @@ qwen3.8-27b        Qwen3.8 27B · Q4
 qwen3.6-35b-moe    Qwen3.6 35B MoE · Q4
 ```
 
-**Dealing the layers.** In a terminal, press **Enter** to deal the layers over the devices in the room, and Enter again to re-deal after more join. **q** or Ctrl-C leaves. With `--devices 3`, it deals as soon as three devices (this one included) are in, and deals again by itself when the room went on without a device and three are back. Without a terminal, `--devices` defaults to 1: it starts at once.
-
-How much it lends, the status line and Ctrl-C work as for `pooled join`. When the host leaves, the room is over for every device.
-
-Browser tabs and phones join a `pooled host` room like any other device: with the invite link at once, with the code alone after you press **a**. See [Who gets in](#who-gets-in).
-
 ### pooled host --help
 
 ```text
 Usage
-  pooled host [options]
+  pooled host [model] [options]
 
   Opens a new Pooled room on this computer, which holds the embedding, the head and its share of the
   layers. Other devices join with the invite link it prints (a browser tab, a phone, pooled join) or
-  with the code. In a terminal, press Enter to deal the layers over the devices in the room, and
-  Enter again to re-deal after more join. Ask from the room page, from the terminal with
-  pooled chat, or from your own tools with pooled serve.
+  with the code.
 
-  Who gets in: a device with the invite link (its #k= key) comes in at once. One with the code
-  alone waits until you let it in: in a terminal, press a to allow the oldest request, d to deny
-  it. Without a terminal it waits for good (give it the link), unless you pass --allow-all.
+  In a terminal, the room opens at once (its code and invite link at the top), then pooled host asks
+  for what the flags did not say: the model (with what each needs and whether it is downloaded) and
+  how much this computer lends. The room panel lists every device and its pledge, who waits to join
+  (press a to allow, d to deny), and whether the pledges hold the model; Enter starts once they do. When the
+  room is online, c chats with it right there. Without a terminal, give the choices as flags.
 
-Options
-  --model <key>     the model (default qwen3-1.7b; --model list prints them)
-  --gb <n|max>      how much memory to lend, as pooled join (default: the memory rule)
-  --devices <n>     deal the layers as soon as n devices (this one included) are in the room,
-                    and again when the room went on without one and n are back; the default
-                    without a terminal is 1 (start at once)
+  Every step has a flag; a flag given skips its question:
+
+    [model] / --model <m>  the model (a part of the name works: 35b); skips the picker
+    --gb <n|max>           how much this computer lends; skips the pledge question
+    -y, --yes              download the model without asking when it is not on this computer
+    --no-pull              don't download: stream this computer's layers from Hugging Face
+    --start                start as soon as the room's pledges hold the model
+    --wait <n>             start once n devices (this one included) are in and the pledges fit
+    --allow-all            let in anyone with the code, without asking
+    --deny-unknown         turn away devices that come with the code alone (the link still works)
+    --chat                 chat here once the room is online
+    --name <s>             how the room shows this computer
+
+  pooled host qwen3.6-35b-moe --gb 64 --start --yes runs with no questions at all. Without a
+  terminal, the defaults are qwen3-1.7b, the memory rule and --start.
+
+More options
   --code <CODE>     the room code to use (default: a random one of six characters)
-  --allow-all       let in anyone with the room code, without asking (the invite link is not
-                    needed; also lets in room pages from before the gate)
   --ctx <n>         the context to ask for, in tokens (default: the model's room default)
-  --name <s>        how the room shows this device
+  --devices <n>     the same as --wait (its older name)
   --signal <spec>   PeerJS signaling server(s), as pooled join
-  --models <dir>    read the weights from local files instead of downloading them
+  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
   --no-check        skip the test allocation that confirms the memory is there
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
   -h, --help        this help
 
+  pooled host --model list prints the models.
   Every device that holds layers sees the hidden states of what is asked in the room (they carry
-  the prompts and answers), and whoever is in can ask. Share the invite link only with people you
-  trust, and let in only devices you know.
+  the prompts and answers), and whoever is in can ask. Share the invite link only with people you trust, and let in only devices you know.
 ```
 
 ## pooled chat

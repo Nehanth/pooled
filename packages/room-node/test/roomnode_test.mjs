@@ -125,6 +125,74 @@ test("host: a chain device that leaves degrades the room; back under its name it
   assert.ok(msgs(n, "b2", "ai-ready-all").length === 1);
 });
 
+test("host: a device started again under its name (no back) takes its old slot once the old link stays silent after a ping", async () => {
+  const n = fakeNode();
+  n.autoRedeal = false;
+  n.addPeer("a", "mac"); n.roster.set("a", { name: "mac", meta: { webgpu: true, contribGB: 4 } });
+  n.ai.chain = ["a"]; n.ai.chainNames = ["mac"];
+  n.ai.plan = new Map([["mac", { msg: { t: "ai-load", v: PROTOCOL, model: "qwen3-1.7b", range: [10, 28], ctx: 4096, kv: "f16", next: "host", host: n.peer.id } }]]);
+  n.ai.engine = { maxSeq: 4096 }; n.ai.cfg = { num_hidden_layers: 28 }; n.ai.model = "qwen3-1.7b";
+  n.ai.readyPeers = new Set(["a"]); n.ai.online = true;
+  n.conns.get("a").seen = performance.now();   // killed just now and started again at once: heard <1 s ago
+  n.addPeer("a2", "mac");
+  n.onData("a2", { t: "hello", name: "mac", v: PROTOCOL, meta: { webgpu: true, contribGB: 4 } });
+  assert.equal(msgs(n, "a", "ping").length, 1, "the quiet namesake is pinged first");
+  assert.ok(!n.roster.has("a2"), "the hello waits for the probe");
+  await new Promise((r) => setTimeout(r, 1700));
+  assert.ok(!n.conns.has("a") && !n.roster.has("a"), "the silent old link is dropped");
+  assert.equal(n.roster.get("a2")?.name, "mac", "the new link keeps the name");
+  assert.deepEqual(n.ai.chain, ["a2"]);
+  assert.deepEqual(msgs(n, "a2", "ai-load")[0].range, [10, 28], "and is re-seated in its slot");
+  // a namesake that answers the ping is alive: the newcomer gets another name
+  const m = fakeNode();
+  m.addPeer("x", "laptop"); m.roster.set("x", { name: "laptop", meta: { webgpu: true, contribGB: 4 } });
+  m.conns.get("x").seen = performance.now() - 5000;
+  m.addPeer("x2", "laptop");
+  m.onData("x2", { t: "hello", name: "laptop", v: PROTOCOL, meta: { webgpu: true, contribGB: 4 } });
+  m.onData("x", { t: "pong", ts: 0 });
+  await new Promise((r) => setTimeout(r, 1700));
+  assert.ok(m.conns.has("x"));
+  assert.equal(m.roster.get("x2")?.name, "laptop 2");
+});
+
+test("host: a device that joins an online room gets the layer map, so an old worker left out of the deal frees its layers", () => {
+  const n = fakeNode();
+  n.ai.chain = []; n.ai.chainNames = []; n.ai.plan = new Map();
+  n.ai.engine = { maxSeq: 4096 }; n.ai.cfg = { num_hidden_layers: 40 }; n.ai.model = "qwen3.6-35b-moe";
+  n.ai.readyPeers = new Set(); n.ai.online = true; n.ai.layersByName = { host: "0–39" };
+  n.addPeer("m2", "mac");
+  n.onData("m2", { t: "hello", name: "mac", v: PROTOCOL, back: 1, meta: { webgpu: true, contribGB: 23 } });
+  const sent = (n.sent.m2 || []).map((m) => m.t);
+  assert.ok(sent.indexOf("ai-layers") >= 0 && sent.indexOf("ai-layers") < sent.indexOf("ai-ready-all"), sent.join(","));
+  // the worker side: not in the map -> its layers are freed and it is a guest
+  const w = fakeNode({ host: false, name: "mac" });
+  w.ai.hostId = "pooled-room-TEST"; w.ai.role = "worker"; w.ai.range = [20, 40]; let destroyed = false; w.ai.device = { destroy() { destroyed = true; } };
+  w.aiOnData("pooled-room-TEST", { t: "ai-layers", by: { host: "0–39" } });
+  assert.equal(w.ai.role, "guest"); assert.equal(w.ai.range, null); assert.ok(destroyed);
+});
+
+test("worker: a host of another name under the same code is another room: it leaves before hearing anything else", () => {
+  // a rejoin that expects its old host
+  const w = fakeNode({ host: false, name: "mac" });
+  w.expectHost = "host-ab";
+  let other = null; w.on("otherhost", (x) => { other = x; });
+  w.addPeer("pooled-room-TEST", "pooled-room-TEST");
+  w.onData("pooled-room-TEST", { t: "hello", name: "stranger", v: PROTOCOL, meta: { api: 2 } });
+  assert.deepEqual(other, { was: "host-ab", now: "stranger" });
+  assert.ok(!w.conns.has("pooled-room-TEST"), "the link to it is closed");
+  w.onData("pooled-room-TEST", { t: "ai-load", v: PROTOCOL, model: "qwen3-1.7b", range: [0, 28], next: "host" });
+  assert.equal(w.ai.role, null, "and an ai-load from it is ignored");
+  // knocking after the host link dropped: the name heard before is the one expected
+  const k = fakeNode({ host: false, name: "mac" });
+  k.addPeer("pooled-room-TEST", "pooled-room-TEST");
+  k.onData("pooled-room-TEST", { t: "hello", name: "host-ab", v: PROTOCOL, meta: { api: 2 } });
+  assert.equal(k.hostName, "host-ab"); assert.ok(!k.otherHost);
+  k.onData("pooled-room-TEST", { t: "hello", name: "host-ab", v: PROTOCOL, meta: { api: 2 }, back: 1 });
+  assert.ok(!k.otherHost, "the same host back is fine");
+  k.onData("pooled-room-TEST", { t: "hello", name: "host-zz", v: PROTOCOL, meta: { api: 2 } });
+  assert.equal(k.otherHost?.now, "host-zz");
+});
+
 test("host: ai-linklost from a chain worker fails the laps in flight", () => {
   const n = fakeNode();
   n.addPeer("a", "mac"); n.ai.chain = ["a"]; n.ai.fed = [1, 2];
@@ -265,4 +333,38 @@ test("API asks: only from a device that joined as an API client, and only while 
   n.allowApi = false;
   n.apiAsk("cli", { t: "ai-ask", api: 1, rid: "r2", system: "", messages: [{ role: "user", text: "hi" }], params: {} });
   assert.equal(msgs(n, "cli", "ai-busy")[0].code, "off");
+});
+
+test("nodeServers: --signal's old host:port form keeps its meaning, room/signal.js specs and lists work too", async () => {
+  const { nodeServers } = await import("../roomnode.js");
+  assert.deepEqual(nodeServers(null).map((s) => s.spec), ["cloud"]);
+  const local = nodeServers("127.0.0.1:9000")[0].opts;
+  assert.deepEqual(local, { host: "127.0.0.1", port: 9000, path: "/", secure: false });   // as cli/lib/room.js signalOpts
+  assert.equal(nodeServers("sig.example.com:443")[0].opts.secure, true);
+  const list = nodeServers("wss://sig.example.com/pooled, cloud, cloud");
+  assert.deepEqual(list.map((s) => s.label), ["sig.example.com", "0.peerjs.com"]);
+  assert.equal(list[0].opts.path, "/pooled/");
+  assert.throws(() => nodeServers("bad host!"), /no usable server/);
+});
+
+test("setPledge: a host tells the room, a device tells its host; the host's hello names its model", () => {
+  const h = fakeNode();
+  h.addPeer("p1", "mac");
+  h.ai.model = "qwen3-1.7b";
+  assert.equal(h.helloMsg().meta.model, "qwen3-1.7b");
+  assert.equal(h.setPledge(12), 12);
+  assert.equal(h.meta.contribGB, 12);
+  assert.deepEqual(msgs(h, "p1", "pledge"), [{ t: "pledge", gb: 12 }]);
+  assert.equal(h.setPledge(500), 64, "at most 64 GB per device");
+  const d = fakeNode({ host: false, name: "node-abc" });
+  d.ai.hostId = "pooled-room-TEST";
+  d.addPeer("pooled-room-TEST", "host");
+  d.setPledge(6);
+  assert.deepEqual(msgs(d, "pooled-room-TEST", "pledge"), [{ t: "pledge", gb: 6 }]);
+  assert.equal(d.helloMsg().meta.contribGB, 6);
+  assert.equal(d.helloMsg().meta.model, undefined, "a device's hello does not name a model");
+  // the host takes a device's new pledge for the next deal
+  h.roster.set("p1", { name: "mac", meta: { webgpu: true, contribGB: 4 } });
+  h.onData("p1", { t: "pledge", gb: 9 });
+  assert.equal(h.conns.get("p1").meta.contribGB, 9);
 });
