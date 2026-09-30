@@ -122,9 +122,14 @@ export class RoomNode extends EventEmitter {
     // the first signaling server that answers (room/signal.js openPeer: a server that is down or
     // unreachable hands over to the next; a taken code or a bad id is an answer, not an outage)
     const servers = nodeServers(this.signal);
+    // take connections from the moment the Peer exists: the signaling server can hand one over in the
+    // same read as "open" (a device knocking or rejoining while this host starts), before the await
+    // below returns, and PeerJS drops a connection event nobody listens to
+    const Base = env.Peer, node = this;
+    const PeerWithAccept = function (pid, o) { const p = new Base(pid, o); p.on("connection", (conn) => { if (!p.destroyed) node.accept(conn); }); return p; };
     let got;
     try {
-      got = await openPeer(env.Peer, id, { debug: 0, config: ICE }, servers, {
+      got = await openPeer(PeerWithAccept, id, { debug: 0, config: ICE }, servers, {
         onTry: (s, i, err) => { if (err) this.log(`signaling: ${servers[i - 1].label} failed (${err.type || err.message}); trying ${s.label}`); },
       });
     } catch (err) {
@@ -136,7 +141,6 @@ export class RoomNode extends EventEmitter {
     // (a lost signaling server is watchSignaling's to report)
     this.peer.on("error", (err) => { if (err.type !== "peer-unavailable" && !FALLBACK_ERRORS.has(err.type)) this.log(`peer error: ${err.type || err.message}`); });
     this.watchSignaling();
-    this.peer.on("connection", (conn) => this.accept(conn));
     this.pingTimer = setInterval(() => this.pingTick(), PING_MS);
   }
   // the signaling server dropped (the cloud restarts, the network blips): links already open keep
