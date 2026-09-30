@@ -311,3 +311,24 @@ site-search mark { background: transparent; color: var(--p-blue-text); font-weig
 	.content-panel { padding-top: 24px; }
 	.sl-markdown-content h2 { font-size: 22px; }
 }
+
+/* ---------- plain, no decorative symbols ---------- */
+/* asides: a title and a blue edge, no rocket / triangle / pencil icons */
+.starlight-aside__icon { display: none; }
+.starlight-aside__title { gap: 0; }
+/* link cards: the title is the link; no arrow */
+.sl-link-card svg { display: none; }
+.sl-link-card { grid-template-columns: 1fr; }
+/* card icons are gone from the markup; keep the title flush left if a theme adds one */
+.card .icon { display: none; }
+/* sidebar / title badges ("Preview"): quiet grey text instead of a yellow chip */
+.sl-badge {
+	background: transparent !important;
+	border: 1px solid var(--p-rule) !important;
+	color: var(--p-ink-3) !important;
+	font-family: inherit !important;
+	font-size: 11px !important;
+	font-weight: 500;
+	padding: 0 6px !important;
+	border-radius: 6px !important;
+}
