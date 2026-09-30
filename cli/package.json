@@ -1,6 +1,6 @@
 {
   "name": "@pooled/cli",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Use a Pooled room from the command line: pooled serve <ROOM CODE> (a local OpenAI and Anthropic compatible endpoint), pooled chat <ROOM CODE> (talk to its model), pooled join <ROOM CODE> and pooled host (lend this computer's GPU).",
   "homepage": "https://pooled.run",
   "repository": {
@@ -32,13 +32,8 @@
     "node-datachannel": "0.33.4",
     "peerjs": "1.5.4"
   },
-  "peerDependencies": {
+  "optionalDependencies": {
     "webgpu": "0.6.1"
-  },
-  "peerDependenciesMeta": {
-    "webgpu": {
-      "optional": true
-    }
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "^0.60.0",
