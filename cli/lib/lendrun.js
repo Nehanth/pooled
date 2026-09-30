@@ -264,7 +264,7 @@ async function runJoin(opts, out) {
     else if (!r.aborted) out.log(`download failed (${cleanText(r.error?.message || "", 200)}): streaming the layers from Hugging Face instead; pooled pull ${key} resumes it`, "error");
     tick();
   };
-  const joinOnce = () => rn.joinRoom(code, { pledgeGB: rule.gb, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
+  const joinOnce = () => rn.joinRoom(code, { pledgeGB: lendGB, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
     expectHost: hostName, key: opts.key, pass, log: (m) => out.log(m), beforeLoad: ensurePulled });
   const attach = (n) => {
     n.on("loadprogress", (pct) => { S.pct = pct; });
@@ -318,6 +318,20 @@ async function runJoin(opts, out) {
     }
     if (!leaving) finish({ type: "room-over" });
   };
+  // a terminal and no --gb: ask how much to lend before knocking, so the host's "wants to join"
+  // line (and its Allow prompt) shows the amount this device really lends, not the default
+  let lendGB = rule.gb;
+  if ((opts.interactive || opts.lines) && !opts.gb) {
+    prompting = true; out.done();
+    out.print(`  room     ${fmtCode(code)}`);
+    const max = Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb);
+    const gb = opts.interactive ? await pledgePrompt({ def: rule.gb, max, totalGB: mem.totalGB }) : await pledgeLine({ def: rule.gb, max });
+    if (gb == null) { out.done(); return 130; }
+    lendGB = gb; S.you.gb = gb;
+    if (gb !== rule.gb) out.log(`lending ${gb} GB`);
+    prompting = false;
+  }
+  pledged = Promise.resolve();
   const bye = async (sig) => {
     if (leaving) { out.done(); process.exit(130); }
     leaving = true; S.phase = "leaving"; tick();
@@ -334,23 +348,9 @@ async function runJoin(opts, out) {
   S.phase = "waiting";
   out.log(`reached room ${fmtCode(code)} as ${node.name}${node.server && node.server.spec !== "cloud" ? ` (signaling: ${node.server.label})` : ""}`);
   // the host's hello (its name and model) comes right after the link opens
-  let donePledge = () => {};
-  pledged = new Promise((r) => { donePledge = r; });
   await new Promise((r) => setTimeout(r, 400));
   const hm = node.conns.get(node.ai.hostId)?.meta || {};
   const hostModel = hm.model && rn.MODELS[hm.model] ? hm.model : null;
-  // a terminal and no --gb: say what the host runs and ask how much to lend (the host deals by it)
-  if ((opts.interactive || opts.lines) && !opts.gb) {
-    prompting = true; out.done();
-    const cached = hostModel && modelState(opts.modelDir, hostModel, rn.MODELS, rn.FILES, rn.LOCAL).pulled;
-    out.print(`  host     ${node.hostName || "?"}${hostModel ? ` · ${rn.MODELS[hostModel].label}${cached ? " (downloaded here: loads from disk)" : ""}` : ""}`);
-    const max = Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb);
-    const gb = opts.interactive ? await pledgePrompt({ def: rule.gb, max, totalGB: mem.totalGB }) : await pledgeLine({ def: rule.gb, max });
-    if (gb != null && gb !== rule.gb) { node.setPledge(gb); out.log(`lending ${gb} GB`); }
-    else if (gb == null) { prompting = false; await bye(true); }
-    prompting = false;
-  }
-  donePledge();
   // q leaves (Ctrl-C too): raw keys once the questions are done
   if (out.tty && process.stdin.isTTY) {
     try { process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.on("data", (b) => { for (const k of KEYS(b)) if (k === "q" || k === "ctrl-c") bye(true); }); } catch {}
