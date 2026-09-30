@@ -521,7 +521,10 @@ export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () =
   const base = apiSampler(P, fallback);
   // the grammar: whenever there are tools (any mode) or a format
   const grammar = tools.length || P.format;
-  if (grammar && !vocabSize) for (const v of Object.values(V)) if (v >= vocabSize) vocabSize = v + 1;
+  if (grammar && !vocabSize) {
+    if (!tok.__vocabSize) { let n = 0; for (const v of Object.values(V)) if (v >= n) n = v + 1; tok.__vocabSize = n; }
+    vocabSize = tok.__vocabSize;
+  }
   const cs = grammar
     ? constrainedSampler(base, tools, { tokenText: tt || tokenTexts(tok), vocabSize, style, stops: [...stopIds], thinking, thinkInPrompt: !!profile.thinkInPrompt,
       mode, allowed: P.allowed, maxCalls: P.maxCalls, parallel: P.parallel, format: P.format,
@@ -628,7 +631,8 @@ export async function apiRun2({ tok, req, prompt, generate, send, onPiece = () =
     if (thinking) {
       let k = seq.lastIndexOf(S.thinkEnd);
       if (k >= 0) { k++; while (k < seq.length && !tok.decode([seq[k]]).trim()) k++; }
-      else { k = seq.indexOf(V["<tool_call>"]); if (k < 0) k = seq.length; }
+      else if (!profile.thinkInPrompt && !think.trim()) k = 0;   // the model did not open a block at all
+      else { k = seq.indexOf(V["<tool_call>"]); if (k < 0) k = seq.length; }   // closed by a call (XML) 
       thinkEnd = tail.length + k;
     }
     cache.put(prompt.histKey + canonAnswer(text, done), { ids: [...tail, ...seq], thinkEnd, reasoned: !!think.trim(), reasoningHash: think.trim() ? hash64(think.trim()) : "" });

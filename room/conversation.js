@@ -206,10 +206,14 @@ export function renderApi(tok, req, profile, { encode = (s) => tok.encode(s), tu
     ids([S.imStart]); flush(); out.push(...tok.encode("assistant\n"));
     const reasoning = String(m.reasoning || "");
     const hit = turnIds(j, m);
-    // afterQueryNonEmpty (Qwen3) drops an empty block; an answer sampled after the pre-closed empty
-    // block (thinking off) keeps it here: that is what the model saw, and it keeps this prompt an
-    // extension of the last one (the caches then reuse everything; dropping it re-prefills it all)
-    const block = profile.thinkRule === "all" || (j > lastQuery && (profile.thinkRule === "afterQuery" || !!reasoning.trim() || !!hit?.reasoned || (!!hit && hit.thinkEnd > 0)));
+    const reasoned = !!reasoning.trim() || !!hit?.reasoned;
+    // Thinking off: every turn without reasoning keeps the pre-closed empty block it was sampled
+    // after (as buildIds, and v1, render it). The templates drop it before the last query (Qwen3
+    // everywhere); keeping it is what the model saw and keeps each prompt an extension of the last,
+    // so the room's caches reuse the whole conversation instead of re-prefilling it. With thinking
+    // on, each template's rule; a Qwen3 answer sampled after the empty block keeps it after the query.
+    const block = !thinking && !reasoned ? true
+      : profile.thinkRule === "all" || (j > lastQuery && (profile.thinkRule === "afterQuery" || reasoned || (!!hit && hit.thinkEnd > 0)));
     if (hit) {
       // the exact ids it was sampled as (header tail included): with the block, or from the content on
       exact++;

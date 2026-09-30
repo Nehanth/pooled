@@ -555,8 +555,9 @@ Deviations from the templates, each deliberate: mid-conversation system messages
 user turn before them (Qwen3.6 / 3.8 raise on them; Claude Code sends them); text sent along with
 tool results is its own user turn but not a new query (`aside`); `tool_choice: "none"` leaves the
 tools out of the prompt (with them listed, Qwen3.6 wrote call markup in any spelling the grammar
-had not banned, e.g. `<tool.call>`); and a Qwen3 answer sampled after the pre-closed empty think
-block keeps that block in the next prompt, so the prompt stays an extension of the last one.
+had not banned, e.g. `<tool.call>`); and with thinking off every past answer keeps the pre-closed
+empty think block it was sampled after (as v1's `buildIds`; Qwen3 and Qwen3.6 drop it before the last
+query), so each prompt stays an extension of the last one and the room's caches reuse it all.
 
 ### 11.3 The grammar (`harness/constrain.js` `GrammarConstraint`, `harness/jsonschema.js`)
 
