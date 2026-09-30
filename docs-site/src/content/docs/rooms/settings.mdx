@@ -1,0 +1,126 @@
+---
+title: Room settings
+eyebrow: Rooms
+description: Every setting in the Room settings menu, what it changes and its default, plus the room options that live on the Serve API page and in the page URL.
+sidebar:
+  label: Room settings
+  order: 7
+---
+{/* Sources (origin/main 40bb0fa):
+    p2p.html #room-menu (~L1691-1745: sections Conversation / Model / Room, labels, "Re-deal on its own" text, Room actions and their
+    sub-lines), room.js SEG_LABEL / SEG_HELP (~L4491-4503, exact help sentences), room.js ai.settings defaults (~L1982: persona default,
+    sampling creative, thinking false, length normal, apiAllow true), ai.visibility "all", room/sampling.js SAMPLING (t 0.8 / top-k 40,
+    t 0.4 / top-k 20, greedy), room.js ANSWER_LEN and cap (~L3797: thinking uses MAX_NEW_THINKING = 1200), room/models.js
+    (MAX_NEW 400, MAX_NEW_THINKING 1200, CTX, maxSeqFor rounding to 256 and min 2048, kvModeFor), room.js ~L581 (host-controls shown
+    when isHost), ~L4241-4247 (style toast "answers now: …"), ~L4012 saveHost (settings and split saved for resume),
+    room/visibility.js, p2p.html #api-allow, PR #234, PR #245, CHANGELOG [Unreleased].
+    PR #268 (merged): p2p.html #host-controls "Joining" section, #ask-join (checked by default) and its help text; room/joingate.js. */}
+
+Open **Room settings** with the sliders icon at the right of the room's header. On a phone it rises from the bottom as a sheet. The top of it shows how many devices are in the room.
+
+The **Joining**, **Conversation** and **Model** sections show only on the screen of the device that created the room. Everyone sees the **Room** section.
+
+## Joining
+
+### Ask before new devices join
+
+On by default. A device that types the room code waits until you press **Allow**. Your invite link and QR code let a device in without asking. Off, anyone with the code joins. See [Invite devices](/docs/invite#who-gets-in).
+
+## Conversation
+
+### Who sees the chat
+
+| Option | What it does |
+|---|---|
+| **Everyone** (default) | Everyone in the room sees the questions and the answers. |
+| **Only me** | Only this device sees the text. Every device still helps write it. |
+| **Whoever asked** | Each answer goes to whoever asked it. Every device still helps write it. |
+
+This decides which screens get the text, not who computes it. The devices that hold layers still process hidden states for every answer, and those are not private against a determined peer. See [Privacy](/docs/privacy). API requests from `pooled serve` follow this setting too.
+
+### Answer length
+
+| Option | Longest answer |
+|---|---|
+| **Short** | About a paragraph at most (150 tokens). |
+| **Normal** (default) | A few paragraphs (400 tokens). |
+| **Long** | Room for long answers and code (1,200 tokens). |
+
+A capped answer can be continued with **Continue**.
+
+### Think before answering
+
+Off by default. On, the model reasons before it answers: slower, more careful. The reasoning comes out of a 1,200-token budget shared with the answer.
+
+## Model
+
+Changes to answer style and wording apply from the next question. Every screen shows a short notice, for example "answers now: concise".
+
+### Answer style
+
+A voice for every answer: **Plain** (default), **Concise**, **Like I'm five**, **Pirate**, **Haiku** or **The room speaks**.
+
+### Wording
+
+| Option | Sampling | What it does |
+|---|---|---|
+| **Creative** (default) | temperature 0.8, top-k 40 | Varied wording: ask twice, get two different answers. |
+| **Focused** | temperature 0.4, top-k 20 | Steadier wording, fewer surprises. |
+| **Exact** | greedy | Always the likeliest word: the same question gets the same answer, on any room shape. |
+
+### Layer split
+
+| Option | What it does |
+|---|---|
+| **For speed** (default) | The fastest devices hold the layers, with the fewest hops; the rest join to ask. Before the first answer measures them, computers go before phones. |
+| **By memory** | Every computer holds layers, sized by the memory it gives. A phone holds layers only when the computers can't fit the model. |
+
+It takes effect when the layers are dealt again, so changing it shows a **Re-deal the layers** button. Details: [How layers are split](/docs/rooms/split).
+
+### Re-deal on its own
+
+Experimental, on by default. When a device drops and is not back within a minute, the host deals its layers to the devices still here. An answer or Code run in progress carries on. Off, the room waits for the device or for you to press Re-deal. See [Device drops and recovery](/docs/rooms/recovery).
+
+## Room
+
+| Action | What it does |
+|---|---|
+| **Save the chat** | Downloads the conversation as a Markdown file. |
+| **Room card** | A picture of this room's devices and speed, to save or share. |
+| **Clear cached weights** | Frees this device's disk. Press twice. The next Start downloads again. |
+| Cached models list | One row per cached model with its size and a **Delete** button, so you can remove one model and keep the others. Hidden on phones, which don't cache weights. |
+
+Below that, a line says whether this device is keeping its screen awake. More in [Downloads and caching](/docs/rooms/downloads#see-and-delete-cached-models).
+
+## Settings in other places
+
+| Setting | Where | Default |
+|---|---|---|
+| Memory this device lends | The **Memory** stepper on the join screen (and in the room) | On a computer, half of what the browser says the GPU can use, and at least 4 GB when the GPU allows that. iPhone and iPad 0.5 GB (at most 1 GB). Android 0.5 GB (at most 0.5 to 2 GB, depending on the phone's RAM). |
+| **Allow API clients** | Footer of the [Serve API page](/docs/rooms/serve-api-page#host-controls), host only | On |
+| Relay (TURN) | The **Network** box under the join form | None. See [Bad networks](/docs/rooms/networks#use-a-turn-relay). |
+
+The host's settings are saved with the room. A host that reloads and resumes the room gets them back.
+
+## Page URL options for rooms
+
+Some choices are made when the page loads. Add them to the room URL, for example `https://pooled.run/room?ctx=65536`. They are read on the device that deals the layers, which is the model host.
+
+| Option | What it does | Default |
+|---|---|---|
+| `?split=speed` / `?split=memory` | Picks the layer split. | `speed` |
+| `?ctx=N` | Context length in tokens, rounded to a multiple of 256, at least 2,048, up to the model's maximum. | 27B: 16,384 (max 32,768). MoE: 32,768 (max 65,536). 1.7B: 8,192 (max 16,384). |
+| `?kv=q8` | Keeps the KV cache in int8, about 56% of the memory of f16. 27B and MoE only. | f16 |
+| `?phonelayers=1` | By memory: deal phones layers even when the computers can hold the model. | off |
+
+A longer context uses more memory on the devices that hold attention layers, and makes long prompts slower to read. All options, including device-level ones like `?ka=0` and `?wake=0`, are in [URL options](/docs/reference/url-options).
+
+{/* TODO(fact-check, origin/main 40bb0fa): when another device hosts the model (pickModelHost), the creator's
+    menu settings do not reach it either. aiStartAnywhere sends ai-start-req with only {model, boss, by}, so the
+    model host deals with its own #ai-split, and the ai-style handler on other devices only shows a toast, so the
+    model host keeps its default answer style, wording, length and thinking (room.js ~L2487, ~L4069, ~L4246,
+    ~L4483). Looks like a bug; the caution below only covers the URL options. Fix the code or widen the caution. */}
+
+:::caution
+`?ctx=`, `?kv=` and `?split=` take effect on the model host's page. The model host is not always the device that created the room: a device with a clearly faster GPU hosts instead. If a setting seems ignored, check which device is hosting (its device screen says "Serving" with the first layers) and put the option on that device's URL.
+:::

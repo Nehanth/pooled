@@ -1,0 +1,129 @@
+---
+title: Responses
+eyebrow: Serve API
+description: POST /v1/responses, the OpenAI API Codex CLI uses. Input items, function and custom tools, previous_response_id and the full event stream.
+sidebar:
+  label: Responses
+  order: 4
+---
+{/* Sources (origin/main 40bb0fa): cli/README.md (APIs, Responses bullets), cli/lib/responses.js (parseInput,
+    parseResponses: store default true, reasoning.effort, max_tool_calls 1..128, top_p accepted/ignored, keepAlive),
+    cli/lib/store.js (STORE_LIMITS 256 / 64 MB / 1 h), cli/lib/common.js (LIMITS), docs/design/serve.md §13, §15. */}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Base URL: `http://127.0.0.1:8080/v1`. It runs on the same machinery as [Chat Completions](/docs/serve/chat-completions): same model, same tool calling, same limits.
+
+<Tabs syncKey="lang">
+<TabItem label="curl">
+
+```bash
+curl http://127.0.0.1:8080/v1/responses -H 'content-type: application/json' -d '{
+  "model": "pooled",
+  "instructions": "Answer in one sentence.",
+  "input": "What is a KV cache?"
+}'
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+r = client.responses.create(model="pooled", input="What is a KV cache?")
+print(r.output_text)
+
+# Continue from the stored response
+r2 = client.responses.create(model="pooled", previous_response_id=r.id, input="Shorter.")
+print(r2.output_text)
+```
+
+</TabItem>
+<TabItem label="JavaScript">
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "http://127.0.0.1:8080/v1", apiKey: "pooled" });
+const stream = client.responses.stream({ model: "pooled", input: "What is a KV cache?" });
+for await (const ev of stream) if (ev.type === "response.output_text.delta") process.stdout.write(ev.delta);
+```
+
+</TabItem>
+</Tabs>
+
+## Input
+
+`input` is a string or a list of items:
+
+- messages with role `user`, `assistant`, `system` or `developer`
+- `function_call` and `function_call_output`
+- `custom_tool_call` and `custom_tool_call_output`
+- `reasoning`: when `encrypted_content` holds a `pooled1.` value from this bridge, the room gets back its exact reasoning
+- `item_reference`: an item of a response this bridge stored
+
+`instructions` is the system prompt. As with OpenAI, it is not carried over through `previous_response_id`.
+
+## Parameters
+
+| Parameter | Behavior |
+|---|---|
+| `max_output_tokens` | Default 16384. Above 65536 is capped. Always capped by the context left. |
+| `temperature`, `top_k` | As in [Chat Completions](/docs/serve/chat-completions#parameters). |
+| `reasoning.effort` | Absent, `none` or `minimal`: thinking off. `low` to `max`: on. |
+| `include: ["reasoning.encrypted_content"]` | Returns reasoning items you can send back exactly. |
+| `tools`, `tool_choice`, `parallel_tool_calls`, `max_tool_calls` | Function and custom tools. `max_tool_calls` is 1 to 128; the room writes at most 16 calls per answer either way. See [Tool calling](/docs/serve/tools). |
+| `text.format` | `json_object` or `json_schema`. See [Structured output](/docs/serve/structured-output). |
+| `previous_response_id`, `store` | See below. |
+| `top_p`, `metadata` | Accepted. `top_p` is ignored. |
+
+## Stored responses and `previous_response_id`
+
+With `store` (default `true`), the bridge keeps each response in memory. `previous_response_id` then continues from it, so you send only the new input.
+
+- Up to 256 responses or 64 MB, whichever comes first. The least recently used goes first.
+- Each is dropped an hour after its last use.
+- Memory only: restarting the bridge forgets them.
+- An unknown id is a `400` with code `previous_response_not_found`.
+
+Stored responses also back these endpoints:
+
+```text
+GET    /v1/responses/{id}
+DELETE /v1/responses/{id}
+GET    /v1/responses/{id}/input_items
+```
+
+## Output
+
+Output items come in the order they were generated: reasoning, then the message, then calls. `status` is `completed`, or `incomplete` when the answer hit `max_output_tokens` or the context. A call cut short that way is an incomplete `function_call` item.
+
+`usage` has `input_tokens_details.cached_tokens` (prompt tokens the room already held) and `output_tokens_details.reasoning_tokens`.
+
+## Streaming
+
+A stream is the full Responses event sequence, each event with an increasing `sequence_number`: `response.created`, `response.in_progress`, the output item, content part and delta events, and finally `response.completed`, `response.incomplete` or `response.failed`.
+
+While the request waits in the queue or the room prefills, the bridge repeats `response.in_progress` every 10 s. These are real events, not SSE comments. Clients such as Codex reset their idle timer only on events.
+
+Reasoning streams as a `reasoning` item with a `reasoning_text` content part: `response.reasoning_text.delta` events, then `response.reasoning_text.done`.
+
+## Skipped and refused
+
+Skipped, with one logged warning per client:
+
+- hosted tools such as `web_search` (Codex always sends it)
+- items from tools that ran elsewhere
+
+A `400`:
+
+- a hosted tool in `tool_choice`
+- a malformed `allowed_tools` entry
+- `background`, `conversation`, `prompt`
+- logprobs
+- unknown item types
+- `GET /v1/responses/{id}?stream=true`
+
+`/v1/responses/input_tokens` and `/v1/responses/compact` are `404`.

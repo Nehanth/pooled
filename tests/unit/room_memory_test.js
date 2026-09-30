@@ -4,6 +4,7 @@
 // The room.js pieces are the real functions, cut out of its source by room_src.js.
 import { pledgeRule, pledgeGB, afterLoadDeath, IOS_MAX_GB } from "../../room/pledge.js";
 import { roomFns } from "./room_src.js";
+import { weightsOverLink } from "../../room/ice.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -79,7 +80,7 @@ Deno.test("clearPrefetch: prefetched bodies nobody read are cancelled", async ()
 // ---- weights from a device in the room ----
 // Two ends wired back to back: the requester's peerGet/onWeightPart and the server's
 // serveWeight/onWeightAck, with the server's cache holding one range.
-function wire({ data, win, part = 64 * 1024, dropAfter = Infinity }) {
+function wire({ data, win, part = 64 * 1024, dropAfter = Infinity, path = "direct", relayOn = false }) {
   const toServer = [], toClient = [];
   let clientF, serverF;
   const server = { ai: {}, conns: new Map(), wServes: new Map() };
@@ -95,6 +96,7 @@ function wire({ data, win, part = 64 * 1024, dropAfter = Infinity }) {
   clientF = roomFns(["peerGet", "onWeightPart"], {
     ai: client.ai, wGets: client.wGets, wSeq: 0, W_WIN: win, peer: { id: "C" },
     ensureLink: async () => true, sendTo: (to, m) => toServer.push(m),
+    pathOf: async () => path, weightsOverLink, relayOn,
   });
   // deliver messages in order, one hop per tick, like a data channel
   let stop = false;
@@ -108,7 +110,7 @@ function wire({ data, win, part = 64 * 1024, dropAfter = Infinity }) {
       await tick();
     }
   })();
-  return { clientF, client, server, stop: () => { stop = true; return pump; } };
+  return { clientF, client, server, toServer, stop: () => { stop = true; return pump; } };
 }
 const range = (n) => { const d = new Uint8Array(n); for (let i = 0; i < n; i++) d[i] = (i * 31 + (i >> 9)) & 255; return d; };
 
@@ -200,4 +202,39 @@ Deno.test("aiAutoRedeal: waits for the host's own layers, then re-deals", () => 
   h.ai.loadingShard = false;
   h.f.aiAutoRedeal("why");
   eq(h.redeals.length, 1); ok(!h.ai.redealPending, "done");
+});
+
+Deno.test("peerGet: never over a relayed link (the relay's owner pays per GB): it asks nothing and the loader uses the network", async () => {
+  for (const [path, relayOn] of [["relay", true], [null, true]]) {
+    const w = wire({ data: range(1000), win: 8 * 2 ** 20, path, relayOn });
+    let err = null;
+    try { await w.clientF.peerGet("S", "u", 0, 999); } catch (e) { err = e; }
+    await w.stop();
+    if (!err || !err.relayed) throw new Error(`${path}: expected a relayed refusal, got ${err}`);
+    if (w.toServer.some((m) => m.t === "ai-wget")) throw new Error("asked the source anyway");
+  }
+  // direct, or no relay at all (the path can only be direct): weights flow as before
+  for (const [path, relayOn] of [["direct", true], [null, false]]) {
+    const w = wire({ data: range(1000), win: 8 * 2 ** 20, path, relayOn });
+    const body = await w.clientF.peerGet("S", "u", 0, 999);
+    const got = new Uint8Array(await new Response(body).arrayBuffer());
+    await w.stop();
+    if (got.length !== 1000) throw new Error(`${path}/${relayOn}: got ${got.length} bytes`);
+  }
+});
+
+Deno.test("answerWget: the serving side says miss over a relayed link, serves over a direct one", async () => {
+  const run = async (path, relayOn, PEER_WEIGHTS = true) => {
+    const sent = [], served = [];
+    const f = roomFns(["answerWget"], { PEER_WEIGHTS, relayOn, weightsOverLink, pathOf: async () => path,
+      sendTo: (to, m) => sent.push(m), serveWeight: (from, d) => served.push(d.id) });
+    await f.answerWget("C", { id: "r1", url: "u", lo: 0, hi: 9 });
+    return { sent, served };
+  };
+  const eqj = (a, b, m) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${m}: ${JSON.stringify(a)}`); };
+  eqj(await run("relay", true), { sent: [{ t: "ai-wpart", id: "r1", miss: 1 }], served: [] }, "relay");
+  eqj(await run(null, true), { sent: [{ t: "ai-wpart", id: "r1", miss: 1 }], served: [] }, "unknown path with a relay");
+  eqj(await run("direct", true), { sent: [], served: ["r1"] }, "direct");
+  eqj(await run(null, false), { sent: [], served: ["r1"] }, "no relay configured");
+  eqj(await run("direct", false, false), { sent: [{ t: "ai-wpart", id: "r1", miss: 1 }], served: [] }, "peerweights=0");
 });

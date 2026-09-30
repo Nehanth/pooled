@@ -1,0 +1,98 @@
+---
+title: opencode
+eyebrow: Serve API · Recipes
+description: Run opencode on a room as an OpenAI-compatible provider. The bridge prints a ready-to-paste opencode.json for your room.
+sidebar:
+  label: opencode
+  order: 3
+---
+{/*
+Sources (origin/main 40bb0fa, PR #261):
+- cli/README.md "opencode" (config, OPENCODE_DISABLE_CLAUDE_CODE, --title / small_model, test results)
+- cli/lib/http.js opencodeConfig(): provider "pooled", npm @ai-sdk/openai-compatible, apiKey "x",
+  model key = /v1/models id ("pooled/<model>"), top-level model = "pooled/" + that id,
+  limit.output = min(8192, max(1024, min(32000, floor(ctx/4))))
+- PR #261: checked against https://opencode.ai/config.json (limit needs context and output); @pooled/cli 0.2.1 (not yet on npm; npm latest is 0.2.0)
+TODO: npm latest is still 0.2.0 (checked 2026-09-30), which prints no opencode line; drop the 0.2.1 aside once 0.2.1 is published.
+- Tested: opencode 1.18.33 on the Qwen3.6 35B MoE room, ~7.2k-token prompts, 45-50 tok/s, 97-99% of follow-up prompts reused
+*/}
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+<Steps>
+
+1. Start the bridge for your room:
+
+   ```bash
+   npx @pooled/cli serve ABCD
+   ```
+
+   When the room's model is ready, the banner prints an `opencode.json` on one line, with your room's model and context filled in.
+
+   <Aside type="note">The opencode line is new in `@pooled/cli` 0.2.1. If your banner has none, run `npx @pooled/cli@latest serve ABCD`, or copy the config below and fill in your room's values.</Aside>
+
+2. Save it as `opencode.json` in your project, or in `~/.config/opencode/opencode.json` for every project. Formatted, with the optional `$schema` line added, for a Qwen3.6 35B MoE room with a 32768-token context, it looks like this:
+
+   ```json title="opencode.json"
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "provider": {
+       "pooled": {
+         "npm": "@ai-sdk/openai-compatible",
+         "name": "Pooled room",
+         "options": { "baseURL": "http://127.0.0.1:8080/v1", "apiKey": "x" },
+         "models": {
+           "pooled/qwen3.6-35b-moe": {
+             "name": "Qwen3.6 35B MoE · Q4",
+             "tool_call": true,
+             "limit": { "context": 32768, "output": 8192 }
+           }
+         }
+       }
+     },
+     "model": "pooled/pooled/qwen3.6-35b-moe"
+   }
+   ```
+
+3. Run opencode in your project:
+
+   ```bash
+   OPENCODE_DISABLE_CLAUDE_CODE=1 opencode
+   ```
+
+</Steps>
+
+## What the config means
+
+- **`provider.pooled`** is a custom provider that uses the OpenAI-compatible adapter against the bridge's `/v1` URL.
+- **`apiKey`** can be anything without a token. With `POOLED_TOKEN` set on the bridge, put the token here.
+- **The model key** (`pooled/qwen3.6-35b-moe`) is the id `GET /v1/models` returns for the room. The top-level `model` is the provider name plus that id, which is why `pooled` appears twice.
+- **`tool_call: true`** tells opencode the model can call tools. Every call the room makes is constrained to the tool's schema, so calls always parse.
+- **`limit.context`** is the room's context. It makes opencode compact before the room refuses a prompt that is too long.
+- **`limit.output`** is a quarter of the context, at most 8192.
+
+For other models, change the model key, its `name` and the limits. The bridge's banner always has the right values, and [Context settings](/docs/serve/recipes#context-settings-for-coding-agents) lists them for each model.
+
+## Keep prompts short and the queue clear
+
+<Aside type="tip" title="Set OPENCODE_DISABLE_CLAUDE_CODE=1">
+Otherwise opencode loads `~/.claude/CLAUDE.md` and every skill in `~/.claude/skills` into its system prompt. That can add 10,000 tokens or more to every prompt the room has to process.
+</Aside>
+
+At the start of each session, opencode sends an extra request to write a title. In a room it queues ahead of the agent's first step. To skip it, do one of these:
+
+- Pass `--title` when you use `opencode run`:
+
+  ```bash
+  OPENCODE_DISABLE_CLAUDE_CODE=1 opencode run --title "fix tests" "make the failing test pass"
+  ```
+
+- Set a `small_model` in `opencode.json`, so the title request goes to another model instead of the room.
+
+## What to expect
+
+<Aside type="note">
+Tested with opencode 1.18.33 on a Qwen3.6 35B MoE room. It read and edited files, ran the tests and finished multi-step tasks. Prompts were about 7,200 tokens, output ran at 45 to 50 tokens per second, and 97 to 99% of each follow-up prompt was reused from the room's caches.
+</Aside>
+
+opencode's prompt is smaller than Codex's or Claude Code's, but a long context still helps. The Qwen3.6 35B MoE is the best fit. The Qwen3 1.7B is not reliable at calling tools under an agent's prompt.

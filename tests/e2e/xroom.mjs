@@ -170,7 +170,7 @@ if (ROLE === "host" && !CLOUD && arg("signal-server", "1") !== "0") {   // a sol
   peerServer = spawn(arg("peerjs", path.join(ROOT, "node_modules/.bin/peerjs")), ["--port", String(SIG_PORT), "--path", "/", "--host", "0.0.0.0"], { stdio: "ignore" });
   await new Promise((r) => setTimeout(r, 1500));
 }
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?${CLOUD ? "" : `signal=${SIGNAL}&`}maxnew=${MAXNEW}&peerweights=0&dev=1&split=${SPLIT_MODE}` +
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?ask=0&${CLOUD ? "" : `signal=${SIGNAL}&`}maxnew=${MAXNEW}&peerweights=0&dev=1&split=${SPLIT_MODE}` +
   (ROLE === "host" && !SOLO && !SPEEDPICK ? "&gbps=0" : "") + (QUERY ? "&" + QUERY : "");
 const mac = process.platform === "darwin";
 const ARGS = [...(mac ? [] : ["--no-sandbox", "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"]),
@@ -242,7 +242,7 @@ try {
     let code = arg("code");
     if (!code) log("waiting for the room code in", arg("codefile"));
     for (const tEnd = Date.now() + 30 * 60e3; !code && Date.now() < tEnd; await p.waitForTimeout(1000)) {
-      try { code = (fs.readFileSync(arg("codefile"), "utf8").match(/[A-Z0-9]{4}/) || [])[0]; } catch {}
+      try { code = (fs.readFileSync(arg("codefile"), "utf8").replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/) || [])[0]; } catch {}
       if (!code && !arg("codefile")) throw new Error("--code or --codefile");
     }
     if (!code) throw new Error("no room code in " + arg("codefile"));
@@ -269,8 +269,8 @@ try {
     await finish(0);
   }
   await p.click("#create-btn");
-  await p.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
-  const code = (await p.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+  await p.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
+  const code = (await p.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
   if (!SOLO) {
     console.log("CODE " + code);
     if (arg("codefile")) fs.writeFileSync(arg("codefile"), code);

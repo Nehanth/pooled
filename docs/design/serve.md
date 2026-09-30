@@ -597,6 +597,10 @@ on top of it, each in its own adapter file, and are documented with them.
   `ai-call` routing, the host's `ctx`). `openai.js` / `anthropic.js` are today's behavior on the
   adapter contract; `responses.js` is a stub (404 "not built yet").
 - **Host** (`room/api.js`, `room/conversation.js`, `harness/`): below.
+- **Code mode** (in process, no HTTP, opt in with `?hcore=1`): `harness/core-model.js` builds the
+  same v2 ask from the agent's turns and runs it through `apiPrompt2` / `apiRun2` on the room's
+  `roomApi.generate` or one engine (`harness/engine-gen.js`), so Code mode and API clients share
+  the tool prompt, the grammar, `CallStream` and the think split ([harness-core.md](harness-core.md)).
 
 ### 11.2 Template profiles and structural rendering (`room/conversation.js`)
 

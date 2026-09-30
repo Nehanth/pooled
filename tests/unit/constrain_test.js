@@ -399,3 +399,19 @@ Deno.test("strict sampler: the garbage guard counts forced values only; a named 
   cs.sample(nan); cs.keep(1);
   ok(cs.garbage, "NaN logits are garbage at once");
 });
+
+Deno.test("strict sampler: past an end token in one verify, the columns are the model's own (the cache keeps the template's next turn)", () => {
+  const argmaxS = (lg) => { let b = 0; for (let i = 1; i < lg.length; i++) if (lg[i] > lg[b]) b = i; return b; };
+  argmaxS.gpu = { kind: "greedy" };
+  const cs = constrainedSampler(argmaxS, APITOOLS, { tokenText: jt, vocabSize: JV.length, stops: [JSTOP], style: "xml", mode: "auto" });
+  const want = (w) => { const lg = new Float32Array(JV.length).fill(0); lg[JV.indexOf(w)] = 9; return lg; };
+  cs.setText("");
+  cs.setText("<tool_call>\n<function=noop>\n</function>\n</tool_call>");
+  ok(cs.constraint.allowed() && !maskHas(cs.constraint.allowed(), JV.indexOf("hello world")), "after </tool_call> prose is banned");
+  // one speculative verify: the end, then a drafted column the grammar would ban
+  eq(cs.sample(want("<|im_end|>")), JSTOP, "the end is sampled");
+  eq(cs.sample(want("hello world")), JV.indexOf("hello world"), "a column past the end takes the model's choice");
+  cs.keep(1);
+  // the next step is masked again
+  ok(cs.sample(want("hello world")) !== JV.indexOf("hello world"), "the next step is masked again");
+});

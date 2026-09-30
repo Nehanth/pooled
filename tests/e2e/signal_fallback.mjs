@@ -65,7 +65,7 @@ async function browserWith(rules) {
   browsers.push(b);
   return b;
 }
-async function tab(browser, list, url = `http://127.0.0.1:${PORT}/p2p.html`) {
+async function tab(browser, list, url = `http://127.0.0.1:${PORT}/p2p.html?ask=0`) {
   const ctx = await browser.newContext({ userAgent: UA });
   if (list) await ctx.addInitScript((l) => { window.POOLED_SIGNAL_SERVERS = l; }, list);
   const p = await ctx.newPage();
@@ -82,8 +82,8 @@ const cards = (p) => p.evaluate(() => document.querySelectorAll(".peer-card").le
 const status = (p) => p.evaluate(() => document.getElementById("join-status").textContent);
 async function create(p) {
   await p.click("#create-btn");
-  await p.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code")?.textContent || ""), null, { timeout: 60000 });
-  return (await p.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+  await p.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("side-code")?.textContent || ""), null, { timeout: 60000 });
+  return (await p.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
 }
 async function join(p, code) { await p.fill("#code-input", code); await p.click("#join-btn"); }
 async function inviteLink(p) {
@@ -117,7 +117,7 @@ try {
   check("1 host sees all three", await waitCards(host, 3, 10000));
 
   // ---- 0: the old ?signal=host:port form, and a slow (not dead) first server is kept ----
-  const legacy = await tab(noCloud, null, `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SA}`);
+  const legacy = await tab(noCloud, null, `http://127.0.0.1:${PORT}/p2p.html?ask=0&signal=127.0.0.1:${SA}`);
   await create(legacy);
   check("0 ?signal=host:port still works", await inRoom(legacy));
   const slowTab = await tab(noCloud, [`ws://127.0.0.1:${SLOW}`, `ws://127.0.0.1:${SB}/pooled`]);
@@ -144,7 +144,7 @@ try {
   check("3 cloud unreachable: join screen says so", ok3 && /signaling server/.test(s3) && !(await inRoom(d1)), `${((Date.now() - t) / 1000).toFixed(1)} s: ${s3}`);
   check("3 buttons usable again", !(await d1.isDisabled("#create-btn")) && !(await d1.isDisabled("#join-btn")));
   check("3 links the self-host doc", await d1.evaluate(() => !!document.querySelector("#join-status a[href*='self-host-signaling']")));
-  const d2 = await tab(noCloud, null, `http://127.0.0.1:${PORT}/p2p.html?signal=${encodeURIComponent(HOLEURL)}`);
+  const d2 = await tab(noCloud, null, `http://127.0.0.1:${PORT}/p2p.html?ask=0&signal=${encodeURIComponent(HOLEURL)}`);
   t = Date.now(); await join(d2, "ZZZZ");
   const ok3b = await d2.waitForFunction(() => document.getElementById("join-status").classList.contains("signal-down"), null, { timeout: 40000 }).then(() => true, () => false);
   check("3 ?signal= black hole (joiner): times out (20 s, the last server) and says so, no fallback to the cloud", ok3b && (await status(d2)).includes(`127.0.0.1:${HOLE}`), `${((Date.now() - t) / 1000).toFixed(1)} s`);

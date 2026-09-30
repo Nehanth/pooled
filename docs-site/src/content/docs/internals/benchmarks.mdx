@@ -1,0 +1,161 @@
+---
+title: Benchmarks
+description: Measured speed on one device, across devices with added latency, on real machines and phones, and on bad networks, with the commands to reproduce each number.
+eyebrow: How it works
+sidebar:
+  label: Benchmarks
+  order: 5
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+
+Every number here uses greedy decoding, and the output matches plain one-device decoding unless a note says otherwise. The full history, with commits, caveats and the failures, is in the [bench log](https://github.com/Nehanth/pooled/blob/main/docs/bench-log.md) on GitHub.
+
+Room numbers are only comparable on the same prompt. Most rows use `japan`, a 160-token travel itinerary request (about 172 tokens with the chat template), or `twosum`, a short coding prompt that drafts well.
+
+:::note[Plain and speculative]
+"Plain" is one token per lap. "Speculative" (spec) uses the model's own draft layer and checks several tokens per lap. Both give the same text.
+:::
+
+## One device
+
+NVIDIA GB10 (DGX Spark), Chrome, 2026-09-26, coding prompts.
+
+| Model | Plain decode | Speculative decode | llama.cpp CUDA, same file, same machine |
+|---|---|---|---|
+| Qwen 3.6 35B MoE | 40–46 tok/s | 65–84 tok/s | 85.5 tok/s decode, 2,520 tok/s prefill |
+| Qwen 3.8 27B | 10.1–10.8 tok/s | 20–27 tok/s | 13.8 tok/s decode |
+
+Native llama.cpp is still ahead on plain decode: about 2× on the MoE and 1.3× on the 27B. Speculative decoding closes most of that on code, where 70 to 85% of drafts are accepted.
+
+**Prefill is the biggest gap.** The first token of a 172-token prompt takes about 1.0 s on the MoE and 2.5 s on the 27B, against roughly 0.07 s and 0.5 s native.
+
+On an Apple M5 Max (Chrome, Metal), the MoE decodes at 80 to 90 tok/s plain and up to about 150 tok/s speculative on code.
+
+## Across devices
+
+<Tabs>
+<TabItem label="Emulated latency">
+
+Same GB10, 2026-09-27. Each device is its own headless Chromium with real WebRTC over loopback. Every frame of model data is held back by the stated one-way delay. `japan` prompt, 128-token answers, mean of two. Decode tok/s, plain / speculative:
+
+| Model | Devices | 0 ms | 5 ms | 20 ms | 50 ms | Time to first token |
+|---|---|---|---|---|---|---|
+| 35B MoE | 1 | 32.5 / 44.2 | | | | 1.04 s |
+| 35B MoE | 2 | 27.9 / 32.7 | 21.1 / 27.9 | 12.9 / 20.6 | 7.2 / 13.5 | 1.10 s |
+| 35B MoE | 3 | 24.8 / 33.3 | 17.7 / 26.9 | 9.9 / 17.5 | 5.2 / 10.8 | 1.14 s |
+| 27B | 1 | 9.2 / 14.6 | | | | 2.57 s |
+| 27B | 2 | 8.6 / 11.9 | 7.8 / 10.9 | 6.3 / 9.3 | 4.6 / 7.6 | 2.52 s |
+| 27B | 3 | 8.4 / 11.0 | 7.3 / 10.2 | 5.5 / 8.6 | 3.7 / 6.6 | 2.53 s |
+
+What this shows:
+
+- **Plain decode pays the latency once per device per token.** A token goes from the host through every worker and back, so three devices at 50 ms add about 150 ms to every token.
+- **Speculative decoding keeps a room usable.** At 20 to 50 ms it is 1.6 to 2.1× plain on the MoE and 1.5 to 1.8× on the 27B.
+- **Time to first token barely moves** (at most +0.03 s at 50 ms), because the prompt goes out in pipelined 16-token frames.
+- **Each extra device costs about 3.5 to 4 ms per token** even at 0 ms, to read back, pack and upload the hidden state.
+
+:::caution[What loopback hides]
+Loopback has no bandwidth limit, loss or jitter. All devices share one GPU, so their compute never overlaps, which makes the 0 ms rows pessimistic compared with separate machines.
+:::
+
+</TabItem>
+<TabItem label="Real machines">
+
+GB10 and Apple M5 Max over home Wi-Fi, Qwen 3.6 35B MoE split 20 / 20 layers, 128 tokens, medians.
+
+| Room | Plain `japan` | Plain `twosum` | Spec `japan` | Spec `twosum` |
+|---|---|---|---|---|
+| GB10 alone | 35–37 | 40–43 | 46–48 | 64–68 |
+| GB10 hosts, M5 Max holds 20 layers | 29.0 | 31.3 | 34.0 | 51.5 |
+| M5 Max hosts, GB10 holds 20 layers | 31.6 | 34.9 | 47.4 | 61.8 |
+
+Moving layers to the faster Mac while the GB10 hosts changed little. Moving the **host role** to the Mac is what paid: the head, sampler, drafts and rollback all run on every token's critical path. Rooms now pick the host by measured GPU speed ([Architecture](/docs/internals/architecture#which-device-hosts)).
+
+On the 27B split 31 / 33 over the same two machines, speculative `twosum` went from 18.2 to 21.6 tok/s when the Mac hosted.
+
+A plain token on this pair (GB10 host with 20 layers → M5 Max 20 layers → back, with the GB10 hosting) took about 36 ms at the median when traced, of which about 8.6 ms was the wire for both hops.
+
+</TabItem>
+<TabItem label="Phones">
+
+GB10 + iPhone 14 Pro Max over home Wi-Fi, Qwen 3.6 35B MoE, 128 tokens.
+
+| Room | Plain `japan` | Plain `twosum` | Spec `japan` | Spec `twosum` |
+|---|---|---|---|---|
+| GB10 alone | 35.4–37.0 | 39.8–40.2 | 45.5–47.5 | 63.1–64.9 |
+| Phone holds 1 layer (before #233) | 14.7–21.7 | 19.4–25.4 | 25.0–28.7 | 24.7–38.6 |
+| Phone only asks (now, when the computers can hold the model) | 35.8–37.4 | 39.7–41.4 | 45.3–46.8 | 62.4–67.2 |
+
+**Why the phone slows the room when it holds layers.** One MoE layer takes an iPhone about 3 to 5 ms back to back, but 7 to 12 ms inside a room. The phone idles 35 to 40 ms of every lap waiting for the host, and its GPU clocks down in that gap. One phone layer costs as much time as 15 to 25 GB10 layers, plus two Wi-Fi hops, for 1/40 of the model. So rooms now give a phone layers only when the computers can't hold the model, and a phone worker keeps its GPU busy with a small dummy kernel while its frame is on the way.
+
+When a phone is needed, it still works: a GB10 with a 22 GB pledge plus an iPhone holding 2 MoE layers ran at about 20 to 25 tok/s on `twosum`, with the same answer every time.
+
+The iPhone's page is capped at 0.5 GB of layers by default and 1 GB at most. Safari's page process has a 1,536 MB soft limit that WebGPU buffers count against. See [Phones and tablets](/docs/phones).
+
+</TabItem>
+</Tabs>
+
+## Bad networks
+
+Three headless Chromium tabs on one GB10, Qwen3 1.7B split so all three hold layers, 96 tokens. Every WebRTC packet goes through a userland UDP shaper. "Before" is main before [#259](https://github.com/Nehanth/pooled/pull/259); "now" is main since.
+
+| Scenario | Before | Now |
+|---|---|---|
+| Round trip 50 / 150 / 300 ms | 7.5 / 3.5 / 1.9 tok/s | 8.8 / 3.6 / 2.0 tok/s |
+| 1% / 5% / 15% packet loss (50 ms round trip) | 6.0 / 4.4 / 1.4 tok/s | 8.1 / 7.3 / 4.1 tok/s |
+| One guest or every device frozen for 2 to 12 s | Answer completes, same text | Answer completes, same text |
+| One guest frozen for 20 s | Fails at 17 s; re-deal; next answer OK | Fails at 16 s; re-deal; next answer OK |
+| A guest's network dies mid-answer | Fails at 16.8 s with no notice | "stopped responding" at 3.6–5 s; fails at 15.4 s |
+| New device joins after a 5 s or 30 s signaling outage | "No room with that code" | Joins in 0.25 s |
+| No direct path, TURN relay configured | Join times out | All links on the relay, 33 tok/s |
+
+Still open: a re-deal while signaling is down fails, and an answer caught in a freeze longer than about 15 s is not retried automatically.
+
+## Long context
+
+35B MoE on a GB10 (Deno), prefill tok/s for the tokens added to reach each fill:
+
+| KV format | 1K | 8K | 32K | KV memory |
+|---|---|---|---|---|
+| f16 (default) | 136.6 | 116 | 125.5 | 0.63 GB |
+| int8 (`?kv=q8`) | 126.1 | 94.7 | 36.2 | 0.35 GB |
+
+Both give the same greedy tokens. Why int8 stays off: [Long context and sessions](/docs/internals/sessions#why-int8-kv-is-off-by-default).
+
+## Reproduce
+
+Each harness prints the rows it measured. The GPU ones need a WebGPU GPU and the model files; see [Testing](/docs/contributing/testing) for where models go.
+
+```sh title="Rooms with emulated latency (one machine, several headless Chromium tabs)"
+node tests/e2e/room_latency.mjs --model qwen3.6-35b-moe --devices 2 --lat 0,5,20 --maxnew 128
+```
+
+```sh title="Bad networks: latency, loss, freezes, deaths, signaling, TURN"
+node tests/e2e/room_chaos.mjs --model qwen3-1.7b --devices 3 --plan net
+node tests/e2e/room_chaos.mjs --devices 3 --plan death
+node tests/e2e/room_chaos.mjs --devices 3 --plan turn
+node tests/e2e/room_drop.mjs --devices 3
+```
+
+```sh title="One device in Chrome, real GPU"
+node tests/bench/chrome_bench.mjs <model path under repo> 40
+```
+
+```sh title="Long context, f16 then int8"
+cd tests
+MODEL=moe KV=f16 deno run --unstable-webgpu --allow-read --allow-env \
+  --allow-write=$HOME/.cache/swarmllm-weights bench_ctx.js > f16.log
+MODEL=moe KV=q8 deno run --unstable-webgpu --allow-read --allow-env \
+  --allow-write=$HOME/.cache/swarmllm-weights bench_ctx.js > q8.log
+deno run --allow-read bench_ctx_compare.js f16.log q8.log
+```
+
+```sh title="Where the time goes, by kernel family"
+deno run --unstable-webgpu --allow-read --allow-env benchmarks/bench_breakdown.js
+```
+
+:::tip[Numbers from your hardware]
+Benchmark reports from devices we don't have are especially welcome. Open an issue with the [benchmark report template](https://github.com/Nehanth/pooled/issues/new?template=020-benchmark-report.yml) and name the prompt you used. [Benchmarking](/docs/contributing/benchmarks) has the details.
+:::

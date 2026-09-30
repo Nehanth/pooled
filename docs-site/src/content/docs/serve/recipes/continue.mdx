@@ -1,0 +1,39 @@
+---
+title: Continue
+eyebrow: Serve API · Recipes
+description: Use a room as a chat and edit model in the Continue extension for VS Code and JetBrains.
+sidebar:
+  label: Continue
+  order: 4
+---
+{/*
+Sources (origin/main 40bb0fa):
+- cli/README.md "Continue" (config.yaml, autocomplete note)
+- docs/design/serve.md: "tools like Continue insist on a non-empty key"; the room labels a client from User-Agent (Continue)
+*/}
+
+import { Aside } from '@astrojs/starlight/components';
+
+Start the bridge with `npx @pooled/cli serve ABCD`, then add the room to `~/.continue/config.yaml`:
+
+```yaml title="~/.continue/config.yaml"
+models:
+  - name: Pooled room
+    provider: openai
+    model: pooled
+    apiBase: http://127.0.0.1:8080/v1
+    apiKey: pooled
+    roles: [chat, edit]
+```
+
+Pick **Pooled room** in Continue's model menu.
+
+- **`provider: openai`** makes Continue use Chat Completions against `apiBase`.
+- **`apiKey`** must not be empty. Continue refuses an empty key. Any value works unless the bridge has a token, in which case use the token.
+- **`model`** can be any string. The room answers with its own model.
+
+In the room, Continue's requests show in the chat marked "via API", under the room's visibility setting.
+
+<Aside type="caution" title="Leave autocomplete to a local model">
+Autocomplete needs a small, fast model on your own machine. Every answer from a room goes through each device that holds layers, which is too slow for completions as you type. Keep the room to the `chat` and `edit` roles.
+</Aside>
