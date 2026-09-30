@@ -1,0 +1,176 @@
+---
+title: OpenAI and Anthropic SDKs
+eyebrow: Serve API · Recipes
+description: Call a room from your own code with the official openai and anthropic SDKs, in Python or JavaScript. Change the base URL and nothing else.
+sidebar:
+  label: OpenAI and Anthropic SDKs
+  order: 6
+---
+{/*
+Sources (origin/main 40bb0fa):
+- cli/README.md "OpenAI SDK" (Python chat, JS streaming) and "Anthropic SDK" (Python)
+- cli/README.md top banner: OPENAI_BASE_URL / ANTHROPIC_BASE_URL hints
+- cli/README.md APIs: tools, response_format, reasoning_content, cached_tokens / cache_read_input_tokens
+- cli/README.md "Development": tests/e2e/serve.mjs checks both APIs with the official SDKs;
+  docs/design/serve.md section 15: reviewed with openai 5.23 and @anthropic-ai/sdk 0.60
+NOT in the repo's README (written from the SDKs' public APIs, should be run once before publishing):
+the Responses example, the Anthropic JS example, the env-var tab, the tool-call example.
+TODO: run those four once against a room before publishing.
+tests/e2e/serve.mjs uses the JavaScript SDKs (openai, @anthropic-ai/sdk) only.
+*/}
+
+import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+
+Start the bridge with `npx @pooled/cli serve ABCD`. Then point the SDK at it:
+
+- **OpenAI SDK:** `base_url` is `http://127.0.0.1:8080/v1`.
+- **Anthropic SDK:** `base_url` is `http://127.0.0.1:8080`, with no `/v1`.
+
+The API key can be any string, unless the bridge has a token. Then pass the token as the key.
+
+## OpenAI SDK
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+    ```bash
+    pip install openai
+    ```
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+    r = client.chat.completions.create(
+        model="pooled",
+        messages=[{"role": "user", "content": "Hi"}],
+    )
+    print(r.choices[0].message.content)
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```bash
+    npm install openai
+    ```
+
+    ```js
+    import OpenAI from "openai";
+
+    const client = new OpenAI({ baseURL: "http://127.0.0.1:8080/v1", apiKey: "pooled" });
+    const stream = await client.chat.completions.create({
+      model: "pooled",
+      messages: [{ role: "user", content: "Hi" }],
+      stream: true,
+    });
+    for await (const chunk of stream) process.stdout.write(chunk.choices[0]?.delta?.content || "");
+    ```
+  </TabItem>
+  <TabItem label="Environment">
+    The OpenAI SDKs read the base URL and key from the environment, so existing code can run on a room unchanged:
+
+    ```bash
+    export OPENAI_BASE_URL=http://127.0.0.1:8080/v1
+    export OPENAI_API_KEY=pooled
+    python your_script.py
+    ```
+  </TabItem>
+</Tabs>
+
+### Responses API
+
+The same client works with the Responses API:
+
+```python
+r = client.responses.create(model="pooled", input="Hi")
+print(r.output_text)
+```
+
+Responses are kept by the bridge, in memory, so `previous_response_id` works for as long as the bridge runs (up to 256 responses or 64 MB, each kept for an hour after last use). See [Responses](/docs/serve/responses).
+
+### Tool calls
+
+Tools work as with OpenAI. Every call the room makes is constrained to the tool's schema, so the arguments always parse:
+
+```python
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Current weather for a city",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        },
+    },
+}]
+r = client.chat.completions.create(
+    model="pooled",
+    messages=[{"role": "user", "content": "Weather in Paris?"}],
+    tools=tools,
+)
+call = r.choices[0].message.tool_calls[0]
+print(call.function.name, call.function.arguments)
+```
+
+Send each result back as a `role: "tool"` message with its `tool_call_id`. See [Tool calling](/docs/serve/tools) and [Structured output](/docs/serve/structured-output).
+
+## Anthropic SDK
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+    ```bash
+    pip install anthropic
+    ```
+
+    ```python
+    import anthropic
+
+    client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="pooled")
+    m = client.messages.create(
+        model="pooled",
+        max_tokens=500,
+        messages=[{"role": "user", "content": "Hi"}],
+    )
+    print(m.content[0].text)
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```bash
+    npm install @anthropic-ai/sdk
+    ```
+
+    ```js
+    import Anthropic from "@anthropic-ai/sdk";
+
+    const client = new Anthropic({ baseURL: "http://127.0.0.1:8080", apiKey: "pooled" });
+    const m = await client.messages.create({
+      model: "pooled",
+      max_tokens: 500,
+      messages: [{ role: "user", content: "Hi" }],
+    });
+    console.log(m.content[0].text);
+    ```
+  </TabItem>
+  <TabItem label="Environment">
+    ```bash
+    export ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+    export ANTHROPIC_API_KEY=pooled
+    python your_script.py
+    ```
+  </TabItem>
+</Tabs>
+
+Tools, `tool_choice` and extended thinking work. See [Anthropic Messages](/docs/serve/messages).
+
+## Good to know
+
+- `model` can be any string. The response carries the room's model id, for example `pooled/qwen3.6-35b-moe`.
+- With no `max_tokens`, Chat Completions and Responses allow up to 16384 tokens. Anything above 65536 is capped, not refused, and the room's context always caps it.
+- `usage.prompt_tokens_details.cached_tokens` (OpenAI) and `usage.cache_read_input_tokens` (Anthropic) report how much of the prompt the room already had. When you resend the room's previous answer unchanged, only the new turn is processed.
+- Only one answer is generated at a time. If you send requests in parallel, they wait in a queue (8 by default). Past that you get `429` (OpenAI) or `529` (Anthropic), and both SDKs retry them.
+
+<Aside type="caution">
+Requests fail with `503` (OpenAI) or `529` (Anthropic) until the host has started the room's model. Check `ready` in `GET /health` before a batch job.
+</Aside>
+
+The SDKs are covered by the project's end-to-end tests, which run a real room and call both APIs through the official JavaScript SDKs.

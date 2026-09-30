@@ -2,6 +2,35 @@
 
 export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 4.0, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "smollm-135m": 0.6 };
 
+// What the model host holds besides its layers, in bytes, from the file's own tensor sizes: the
+// embedding stays in JS memory for row lookups, the output head goes to the GPU (the embedding again
+// when the two are tied), and the Qwen 3.5/3.8 engines add the draft (MTP) block and, for the
+// one-submit draft chain, a GPU copy of the embedding table (engine/qwen35.js). This is what the
+// host's pledge pays for before its layers (room/plan.js layerCaps).
+export function hostHeldBytes(kind, { embed = 0, out = 0, mtp = 0 } = {}) {
+  const held = embed + (out || embed);
+  return kind === "qwen35" ? held + mtp + (mtp ? embed : 0) : held;
+}
+// K+V bytes per layer and position for a dense (Qwen3) room: the dense engine keeps its KV cache in
+// f32 (engine/dense.js), one K and one V row of kvDim per position
+export const denseKvBytesPerLayerPos = (kvDim) => 2 * kvDim * 4;
+
+// Each picker model's shape, from its GGUF header (the host reads the same numbers from the file at
+// Start, so these only let the picker say before Start whether the room's pledges hold the model):
+// L layers; layer = one layer's weights (the largest group's average for the hybrids); kvPos = K+V
+// bytes per layer and position by KV format; embed / out / mtp: the host-only tensors.
+export const SHAPE = {
+  "qwen3-1.7b": { kind: "gguf", L: 28, layer: 53494784, kvPos: { f16: denseKvBytesPerLayerPos(1024) }, embed: 330612736, out: 0, mtp: 0 },
+  "qwen3.8-27b": { kind: "qwen35", L: 64, layer: 223970464, kvPos: { f16: 1024, q8: 576 }, embed: 715161600, out: 1042944000, mtp: 265197568 },
+  "qwen3.6-35b-moe": { kind: "qwen35", L: 40, layer: 498197568, kvPos: { f16: 512, q8: 288 }, embed: 286064640, out: 417177600, mtp: 897955840 },
+};
+// { L, layerBytes, hostBytes } for a room running `model` at `ctx` positions with `kv` format, or
+// null for a model without a SHAPE (the picker then falls back to NEED_GB)
+export function roomBytes(model, ctx, kv = "f16") {
+  const s = SHAPE[model]; if (!s) return null;
+  return { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s) };
+}
+
 // The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
 // each device downloads about its share of the layers, so the picker can say what this device will fetch.
 export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84 };
@@ -46,15 +75,31 @@ export const MAX_SEQ_LONG = 8192;
 // These hybrids keep a KV cache only on their full-attention layers (1 in 4), and the DeltaNet
 // layers hold a fixed-size state, so context is cheap in memory: f16 K+V is 64 KB per position
 // for the 27B (16 attention layers, 4 KV heads x 256) and 20 KB for the 35B MoE (10 layers,
-// 2 KV heads x 256). 16k on the 27B = 1 GB, 32k on the MoE = 0.64 GB, spread over the devices
-// holding those layers. The caps keep one layer's K or V buffer at or under 64 MB (the WebGPU
-// default binding limit is 128 MB); the practical limit is prefill speed, not memory.
+// 2 KV heads x 256). 32k on the MoE = 0.64 GB, 128k = 2.5 GB, spread over the devices holding
+// those layers. One layer's K (or V) is one GPU buffer bound whole: 128 MiB for the MoE at 131072
+// positions in f16, exactly the binding size every WebGPU device supports (so no device limits the
+// MoE); the 27B needs 256 MiB at 131072 in f16 (128 MiB in int8), which the room only asks for
+// when every device can bind it (ctxForBinding); its cap stays at 64K (128 MiB) until 128K is
+// checked on it. The practical limit is prefill speed, not memory
+// (docs/long-context-and-sessions.md: needle and speed at 32K..128K).
 export const CTX = {
-  "qwen3.8-27b": { def: 16384, max: 32768 },
-  "qwen3.6-35b-moe": { def: 32768, max: 65536 },
+  "qwen3.8-27b": { def: 16384, max: 65536 },
+  "qwen3.6-35b-moe": { def: 32768, max: 131072 },
   // the dense engine keeps an f32 KV cache (~224 KB per position on the 1.7B, 1.8 GB at 8k); 2k was
   // too small for Code mode, whose prompt alone is ~620 tokens (checked exact at 8k: tests pass)
   "qwen3-1.7b": { def: 8192, max: 16384 },
+};
+// WebGPU's default maxStorageBufferBindingSize: what a device binds when it reports nothing
+export const WEBGPU_MIN_BIND = 128 * 2 ** 20;
+// bytes of one attention layer's K (or V) cache buffer at ctx positions: kvDim x 1 (int8) or 2 (f16)
+export const kvLayerBufBytes = (meta, ctx, kv = "f16") =>
+  ctx * (meta["qwen35.attention.head_count_kv"] || 0) * (meta["qwen35.attention.key_length"] || 0) * (kv === "q8" ? 1 : 2);
+// The longest context (<= ctx, a multiple of 256) whose per-layer K/V buffer fits bindBytes, the
+// smallest binding limit among a room's devices (a device that reports none counts as WebGPU's 128 MiB).
+export const ctxForBinding = (meta, ctx, kv = "f16", bindBytes = WEBGPU_MIN_BIND) => {
+  const per = kvLayerBufBytes(meta, 1, kv);
+  if (!per) return ctx;
+  return Math.min(ctx, Math.floor(Math.max(bindBytes, WEBGPU_MIN_BIND) / per / 256) * 256);
 };
 export const maxSeqFor = (model, ask = 0) => {
   const c = CTX[model];

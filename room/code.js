@@ -32,7 +32,9 @@ import { PreviewPublisher, PreviewSubscriber } from "../harness/preview-sync.js"
 import { lineDiff } from "../harness/diff.js";
 import { listProjects, createProject, openProject, openFolder, canOpenFolder, saveSession, loadSession, slugify } from "../harness/projects.js";
 import { roomModel } from "../harness/room-model.js";
+import { coreModel, scriptedCore } from "../harness/core-model.js";
 import { detectStyle } from "../harness/tools.js";
+import { templateProfile } from "./conversation.js";
 import { normPath, riskyPath } from "../harness/workspace.js";
 import { CODE_SYSTEM } from "../harness/code-prompt.js";
 import { codeExport } from "./code-export.js";
@@ -42,6 +44,13 @@ const $ = (id) => document.getElementById(id);
 const str = (v, n) => String(v ?? "").slice(0, n);
 const cap = (s, n) => (s.length > n ? s.slice(0, n) + `\n…(${s.length - n} chars cut)` : s);
 const HIST = 50, TOK_MS = 50, EDGE = 50;
+// ?hcore=1: the agent's model calls go through the serve v2 core in process (harness/core-model.js:
+// the template's tool prompt, the strict call grammar, CallStream); ?hcore=0: Code's own prompt,
+// parser and lenient grammar (harness/room-model.js). Read once per page load. The default follows
+// the Code mode eval (docs/design/harness-core.md): hcore stays opt-in until it matches or beats
+// the legacy path there.
+export const HCORE_DEFAULT = false;
+const HCORE = (() => { try { const v = new URLSearchParams(location.search).get("hcore"); return v == null ? HCORE_DEFAULT : v !== "0"; } catch { return HCORE_DEFAULT; } })();
 const QUEUE_MAX = 6, ASK_MAX = 4000;   // requests waiting on the host (two per member), a request's length
 // tools whose results are the project's own content: for a folder on disk they stay on the host
 const READS = new Set(["read_file", "search", "list_dir"]);
@@ -447,19 +456,31 @@ export async function initCode(api, { mock = null } = {}) {
   }
 
   // ---- the agent
+  // the core path needs a template with a tool-call format; a model without one keeps Code's own
+  const coreOk = () => { if (mock?.model) return true; const p = api.profile?.() || templateProfile(api.chatTemplate(), api.tok()); return !!p?.tools; };
   function ensureAgent() {
-    // rebuilt when the model's tool format changes too (a re-deal to another model)
-    const style = mock?.model ? "xml" : detectStyle(api.chatTemplate());
+    // rebuilt when the model's tool format changes too (a re-deal to another model), and when the path does
+    const hcore = HCORE && coreOk();
+    const style = mock?.model ? "xml" : hcore ? (api.profile?.() || templateProfile(api.chatTemplate(), api.tok())).style : detectStyle(api.chatTemplate());
     const src = mock?.model || "room";
-    if (agent && agentSrc === src && agentStyle === style) return;
-    model = mock?.model ? (typeof mock.model === "function" ? { generate: mock.model } : mock.model) : roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" });
+    if (agent && agentSrc === src && agentStyle === style + (hcore ? ":core" : "")) return;
     const json = agent ? agent.toJSON() : sessionJson;
-    agent = Agent.from(json, {
-      generate: model.generate, tools, style, system: CODE_SYSTEM, maxSteps: 30, approve, onEvent,
-      budget: model.budget || Infinity, count: model.count || null,
-      usage: model.stats ? () => model.stats.last : null, idsFor: model.idsFor || null, adopt: model.adopt || null, idsTag: model.idsTag || null,
-    });
-    agentSrc = src; agentStyle = style;
+    if (hcore) {
+      const gen = mock?.model ? (typeof mock.model === "function" ? mock.model : mock.model.generate) : null;
+      model = mock?.model ? scriptedCore(gen, { style }) : coreModel(api, { maxNew: 8192 });
+      agent = Agent.from(json, {
+        model, tools, system: CODE_SYSTEM, maxSteps: 30, approve, onEvent,
+        budget: model.budget || Infinity, count: model.count || null, usage: () => model.stats.last,
+      });
+    } else {
+      model = mock?.model ? (typeof mock.model === "function" ? { generate: mock.model } : mock.model) : roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" });
+      agent = Agent.from(json, {
+        generate: model.generate, tools, style, system: CODE_SYSTEM, maxSteps: 30, approve, onEvent,
+        budget: model.budget || Infinity, count: model.count || null,
+        usage: model.stats ? () => model.stats.last : null, idsFor: model.idsFor || null, adopt: model.adopt || null, idsTag: model.idsTag || null,
+      });
+    }
+    agentSrc = src; agentStyle = style + (hcore ? ":core" : "");
   }
   async function approve(call, info) {
     const i = callIdx.get(call);
@@ -619,10 +640,11 @@ export async function initCode(api, { mock = null } = {}) {
       catch { throw new Error("the eval suite is not deployed here (run it from a local checkout)"); }
       const tasks = !spec || spec === "all" ? TASKS : spec.split(",").map((id) => byId(id.trim())).filter(Boolean);
       const style = detectStyle(api.chatTemplate());
-      localNote(`eval: ${tasks.length} task${tasks.length === 1 ? "" : "s"} on ${api.peers().length + 1} device(s)`);
+      const hcore = HCORE && coreOk();
+      localNote(`eval: ${tasks.length} task${tasks.length === 1 ? "" : "s"} on ${api.peers().length + 1} device(s)${hcore ? " · core path" : ""}`);
       const recs = await S.runSuite(tasks, {
         model: "room", signal: ctrl.signal, root: document.body,
-        makeModel: ({ tools }) => ({ ...roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" }), style }),
+        makeModel: ({ tools }) => (hcore ? coreModel(api, { maxNew: 8192 }) : { ...roomModel(api, { tools, style, maxNew: 8192, sampling: style === "json" ? "exact" : "focused" }), style }),
         onResult: ({ rec, trajectory }) => {
           lines.push(JSON.stringify(rec), JSON.stringify({ trajectory }));
           localNote(`${rec.ok ? "PASS" : "FAIL"} ${rec.id} · ${rec.reason} · ${rec.steps} steps · ${rec.prompt} prefilled / ${rec.reused} reused · ${rec.generated} tok · ${(rec.ms / 1000).toFixed(0)} s`, !rec.ok);
@@ -892,7 +914,8 @@ export async function initCode(api, { mock = null } = {}) {
     setChrome();
     if (!host && running) ctrl?.abort();
     // a device left mid-run: the next step would wait out the lap timeouts, so stop here
-    else if (running && !api.ready() && !ctrl?.signal.aborted) { note("a device left: stopped · re-deal the layers, then send again", true); ctrl?.abort(); }
+    // (unless the room is recovering: the run waits for the device, or a re-deal, and carries on)
+    else if (running && !api.ready() && !api.recovering?.() && !ctrl?.signal.aborted) { note("a device left: stopped · re-deal the layers, then send again", true); ctrl?.abort(); }
   });
   setChrome();
   return { show: (m) => ui.show(m), ctx: (used, max) => ui.ctx(used, max) };

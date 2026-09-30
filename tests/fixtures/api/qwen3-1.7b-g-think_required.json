@@ -1,0 +1,918 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs --grammar: the host's v2 pipeline (grammar, parser, ai-call) over greedy llama.cpp top-64 candidates.",
+ "model": "qwen3-1.7b",
+ "case": "think_required",
+ "grammar": true,
+ "profile": {
+  "style": "json",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": false,
+  "thinkRule": "afterQueryNonEmpty",
+  "trim": false,
+  "known": true
+ },
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "Is it cold in Oslo today?"
+   }
+  ]
+ },
+ "params": {
+  "thinking": true,
+  "toolChoice": "required"
+ },
+ "maxTokens": 700,
+ "promptTokens": 377,
+ "ids": [
+  151667,
+  198,
+  32313,
+  11,
+  279,
+  1196,
+  374,
+  10161,
+  421,
+  432,
+  594,
+  9255,
+  304,
+  57858,
+  3351,
+  13,
+  358,
+  1184,
+  311,
+  1779,
+  279,
+  9104,
+  1052,
+  13,
+  576,
+  2500,
+  5746,
+  2924,
+  633,
+  69364,
+  11,
+  892,
+  7460,
+  279,
+  3283,
+  323,
+  4982,
+  13,
+  576,
+  1196,
+  3207,
+  944,
+  13837,
+  279,
+  4982,
+  11,
+  773,
+  358,
+  1265,
+  1638,
+  311,
+  272,
+  40247,
+  13,
+  6771,
+  752,
+  1618,
+  633,
+  69364,
+  448,
+  3283,
+  330,
+  28867,
+  385,
+  1,
+  323,
+  4982,
+  330,
+  66,
+  40247,
+  22956,
+  151668,
+  271,
+  151657,
+  198,
+  4913,
+  606,
+  788,
+  330,
+  455,
+  69364,
+  497,
+  330,
+  16370,
+  788,
+  5212,
+  8926,
+  788,
+  330,
+  28867,
+  385,
+  497,
+  330,
+  3843,
+  788,
+  330,
+  66,
+  40247,
+  95642,
+  151658
+ ],
+ "texts": [
+  "<think>",
+  "\n",
+  "Okay",
+  ",",
+  " the",
+  " user",
+  " is",
+  " asking",
+  " if",
+  " it",
+  "'s",
+  " cold",
+  " in",
+  " Oslo",
+  " today",
+  ".",
+  " I",
+  " need",
+  " to",
+  " check",
+  " the",
+  " weather",
+  " there",
+  ".",
+  " The",
+  " available",
+  " functions",
+  " include",
+  " get",
+  "_weather",
+  ",",
+  " which",
+  " requires",
+  " the",
+  " city",
+  " and",
+  " unit",
+  ".",
+  " The",
+  " user",
+  " didn",
+  "'t",
+  " specify",
+  " the",
+  " unit",
+  ",",
+  " so",
+  " I",
+  " should",
+  " default",
+  " to",
+  " c",
+  "elsius",
+  ".",
+  " Let",
+  " me",
+  " call",
+  " get",
+  "_weather",
+  " with",
+  " city",
+  " \"",
+  "Os",
+  "lo",
+  "\"",
+  " and",
+  " unit",
+  " \"",
+  "c",
+  "elsius",
+  "\".\n",
+  "</think>",
+  "\n\n",
+  "<tool_call>",
+  "\n",
+  "{\"",
+  "name",
+  "\":",
+  " \"",
+  "get",
+  "_weather",
+  "\",",
+  " \"",
+  "arguments",
+  "\":",
+  " {\"",
+  "city",
+  "\":",
+  " \"",
+  "Os",
+  "lo",
+  "\",",
+  " \"",
+  "unit",
+  "\":",
+  " \"",
+  "c",
+  "elsius",
+  "\"}}\n",
+  "</tool_call>"
+ ],
+ "text": "<think>\nOkay, the user is asking if it's cold in Oslo today. I need to check the weather there. The available functions include get_weather, which requires the city and unit. The user didn't specify the unit, so I should default to celsius. Let me call get_weather with city \"Oslo\" and unit \"celsius\".\n</think>\n\n<tool_call>\n{\"name\": \"get_weather\", \"arguments\": {\"city\": \"Oslo\", \"unit\": \"celsius\"}}\n</tool_call>",
+ "fellBack": 0,
+ "sent": [
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Okay",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " user",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " is",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " asking",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " if",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " it",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "'s",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " cold",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " in",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Oslo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " today",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " I",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " need",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " to",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " check",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " there",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " The",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " available",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " functions",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " include",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " which",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " requires",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " and",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " unit",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " The",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " user",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " didn",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "'t",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " specify",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " the",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " unit",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " so",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " I",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " should",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " default",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " to",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " c",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "elsius",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " Let",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " me",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " call",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " get",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_weather",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " with",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " city",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Os",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "lo",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " and",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " unit",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \"",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "c",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "elsius",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\".",
+   "d": 0,
+   "th": 1
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "name": "get_weather"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "{\""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "city"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\":"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " \""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "Os"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "lo"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\","
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " \""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "unit"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\":"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": " \""
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "c"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "elsius"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "a": "\"}"
+  },
+  {
+   "t": "ai-call",
+   "rid": "rec",
+   "i": 0,
+   "end": 1
+  }
+ ],
+ "result": {
+  "reason": "stop",
+  "calls": [
+   {
+    "name": "get_weather",
+    "args": "{\"city\": \"Oslo\", \"unit\": \"celsius\"}"
+   }
+  ],
+  "open": null,
+  "text": "",
+  "think": "Okay, the user is asking if it's cold in Oslo today. I need to check the weather there. The available functions include get_weather, which requires the city and unit. The user didn't specify the unit, so I should default to celsius. Let me call get_weather with city \"Oslo\" and unit \"celsius\".",
+  "usage": {
+   "in": 377,
+   "out": 100,
+   "think": 72
+  },
+  "err": null
+ }
+}

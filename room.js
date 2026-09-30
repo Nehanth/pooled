@@ -20,10 +20,11 @@ import { WIRE_F16, badF32, f32ToB64, packF16, unpackF16, asU16, packWire, unpack
 import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
-import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle } from "./room/api.js";
+import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
+import { tokenTexts } from "./harness/model-common.js";
 import { PrefixIndex, pinSplit } from "./harness/prefix.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvModeFor, kvForLoad } from "./room/models.js";
+import { MODELS, NEED_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -34,32 +35,64 @@ const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("
 // back instead of the room prefilling the whole conversation again. ?ckptdisk=0: GPU copies only.
 const ckptDisk = CKPT_MAX && new URLSearchParams(location.search).get("ckptdisk") !== "0" && globalThis.navigator?.storage?.getDirectory
   ? new CkptStore() : null;
-import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DROP_ALL } from "./room/transport.js";
+import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DROP_ALL, DUP_SLICES } from "./room/transport.js";
 import { peerErrorText, peerErrorLoud, FetchError, joinStep, versionMismatch } from "./room/errors.js";
-import { PERSONAS, specials, fitContext, reusablePrefix } from "./room/conversation.js";
-import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS } from "./room/liveness.js";
+import { turnFrom, iceConfig, shareQuery, linkPath, linkRelayProtocol, normTurn, TURN_KEY, wantDefaultRelay, fetchRelay, markAuto, swapRelayServers, refreshInMs, isRelayServer, weightsOverLink, probeUdp, networkAdvice, WORK_DOCS } from "./room/ice.js";
+import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "./room/conversation.js";
+import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS,
+  makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, lapTimeout, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
-import { planSplit, planForSpeed, phonesToLeaveOut, isPhoneMeta, ladder, bestFit, codeFromLocation, pickModelHost } from "./room/plan.js";
+import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp } from "./room/plan.js";
+import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { lookupDrafts } from "./room/lookup.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
+import { pledgeRule, pledgeGB, afterLoadDeath } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
+import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 import { attachBrowserWeightCache, convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
+import { resumableGenerate, waitForRoom, linkSilent, backFromAway, sameShard, guestResume, GUEST_KEY, REJOIN_GRACE_MS, LINK_SILENT_MS } from "./room/resume.js";
+import { GpuWaker } from "./room/gpuwake.js";
+import { randomCode, parseCode, formatCode, keyFromHash, keyFragment, validKey, makeGate, restoreGate, saveGate, decide as gateDecide,
+  enqueue as gateEnqueue, allow as gateAllow, deny as gateDeny, withdraw as gateWithdraw, requestLine, DENIED_TEXT } from "./room/joingate.js";
 
 // Hidden-state transport (room/transport.js). ?wire=off falls back to PeerJS messages;
 // ?wire=slice uses one sliced channel; ?wire=stripeN spreads slices over N peer connections.
 const WIRE = (new URLSearchParams(location.search).get("wire") || "stripe4").toLowerCase();
 const WIRE_STRIPES = WIRE === "off" ? 0 : WIRE.startsWith("stripe") ? Math.max(1, Math.min(8, parseInt(WIRE.slice(6), 10) || 1)) : 1;
+// frames of up to this many slices go out twice, on two associations (a lost packet then costs
+// nothing); ?wiredup=0 turns it off
+const WIRE_DUP = (() => { const v = parseInt(new URLSearchParams(location.search).get("wiredup"), 10); return v >= 0 ? Math.min(v, 64) : DUP_SLICES; })();
 // ?ka=ms: keep-alive period on a wire link while frames flow (keeps a phone's Wi-Fi out of power
 // save between laps; room/transport.js), ?ka=0 turns it off
 { const ka = new URLSearchParams(location.search).get("ka"); if (ka != null) setKeepalive(parseInt(ka, 10) || 0); }
-// Signaling: ?signal=host:port points PeerJS at our own PeerServer (the emulator and big
-// rooms use one); default is the public PeerJS cloud.
+// Signaling (room/signal.js): the public PeerJS cloud by default; a deployment can list fallbacks in
+// window.POOLED_SIGNAL_SERVERS, tried in order when one is down; ?signal=host:port (or a comma list)
+// wins over both (the emulator and big rooms point it at our own PeerServer). See
+// docs/self-host-signaling.md.
 const SIGNAL = new URLSearchParams(location.search).get("signal");
-const SIGNAL_OPTS = SIGNAL ? (() => { const [host, port] = SIGNAL.split(":"); return { host, port: +port || 443, path: "/", secure: location.protocol === "https:" }; })() : {};
+// GPU wake (room/gpuwake.js): a phone worker asks the host (hello meta `wake`) for an `ai-wake` at
+// the start of every decode lap and keeps its GPU busy until the frame arrives, so its layers do not
+// run on a clocked-down GPU. ?wake=0 turns it off on this device (as a worker it does not ask, as the
+// host it sends none); ?wake=1 asks for it on any device; ?wake=keep also spins from the moment this
+// worker sends its own frame on (no host signal needed). ?wakems caps one spin (default 50 ms).
+const WAKE = new URLSearchParams(location.search).get("wake") || "";
+const WAKE_MAX_MS = Math.max(1, parseInt(new URLSearchParams(location.search).get("wakems"), 10) || 50);
+const PAGE_SECURE = location.protocol === "https:";
+const SIGNALS = serverList({ query: SIGNAL, configured: window.POOLED_SIGNAL_SERVERS, pageSecure: PAGE_SECURE });
+// what a page with no ?signal= would try first: the invite link names the server only when it differs
+const SIGNAL_FIRST = serverList({ configured: window.POOLED_SIGNAL_SERVERS, pageSecure: PAGE_SECURE })[0].spec;
+let signalServer = null;   // the server this tab registered on ({ spec, label, opts })
+// the relay this tab uses, and what the network allows (room/ice.js; see keepRelayFresh)
+let relayOn = false;     // a TURN server is in this tab's ICE configuration
+let relayFrom = null;    // "yours" (?turn= / Network box), "site" (window.TURN_SERVERS), "default" (/api/turn)
+let udpProbe = null;     // probeUdp(): { udpOut, host } or null
+let udpSeen = null;      // its answer, once in
+let relayTimer = null;
+let relayGot = null;     // the site's relay as last fetched: { relay, at } (defaultRelay)
 
 // Topology: every device keeps ONE link to the host (control, roster, tokens). Data links
 // between chain neighbours open when the layers are dealt (ensureLink), so a room of N
@@ -96,6 +129,23 @@ const rand = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)))
 let peer = null;          // my PeerJS peer
 let isHost = false;
 let roomCode = null;
+// Joining (room/joingate.js). Host: the gate (invite key, passes, Ask before new devices join) and the
+// links waiting in its lobby. Guest: the invite key from the link it opened, the pass the host gave it,
+// and where it is in getting in ("wait": linked, the host hasn't answered; "lobby": the host is asked;
+// "in"; "out": refused, no knocking).
+let gate = null;
+const lobbyConns = new Map();   // host: peer id -> { conn, hello, buf, stripes }
+let joinKey = "", myPass = "", admission = null, afterAdmit = null;
+// The breadcrumb the previous page of this tab left (room.js crumb): what it was doing when it was
+// last heard from, so a tab iOS killed can say so when it rejoins. Read once per page load, and its
+// "loading" mark consumed at once, so one kill is reported once (not again on a later reconnect).
+const diedCrumb = (() => {
+  try {
+    const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null");
+    if (c?.loading) localStorage.setItem("pooled-crumb", JSON.stringify({ ...c, loading: undefined }));
+    return c && Date.now() - c.t < 10 * 60 * 1000 ? c : null;
+  } catch { return null; }
+})();
 let myName = null;
 let myMeta = {};
 // conns: peerId -> { conn, name, meta, rtt, mbps, card }
@@ -116,11 +166,18 @@ async function probeGPU() {
         const info = a.info || {};
         meta.gpu = [...new Set([info.vendor, info.architecture || info.device].filter(Boolean))].join(" ") || "GPU";
         meta.maxBufGB = +(a.limits.maxBufferSize / 2 ** 30).toFixed(1);
+        // the largest buffer this device can bind (what aiLoadShardIn asks for; phones capped at 256 MB):
+        // the host keeps the room's context within every device's limit (room/models.js ctxForBinding)
+        meta.maxBindMB = Math.floor(Math.min(a.limits.maxStorageBufferBindingSize, a.limits.maxBufferSize, meta.ua === "iPhone" || meta.ua === "Android" ? 256 * 2 ** 20 : Infinity) / 2 ** 20);
         // browsers hide real GPU memory (fingerprinting). Default to the
         // conservative per-buffer limit; the user can opt in to a real
         // measurement (see measureBudgetGB) which replaces this estimate.
         meta.budgetGB = meta.maxBufGB;
         meta.canMeasure = meta.ua !== "iPhone" && meta.ua !== "Android";
+        // how fast this GPU moves memory (room/gpuspeed.js), which picks the model host among
+        // computers; phones skip it (they never host over a computer). ?gbps=N pins it, 0 = unknown
+        const pin = new URLSearchParams(location.search).get("gbps");
+        meta.gbps = pin !== null ? Math.max(0, +pin || 0) : meta.canMeasure ? await measureCopyGBps(a) : 0;
       }
     } catch {}
   }
@@ -169,16 +226,28 @@ preflight().then((v) => {
 });
 // the least any model in the picker needs (the 1.7B's 4 GB)
 const SMALLEST_NEED = Math.min(...PICKER.map((k) => NEED_GB[k]));
-// probe once at load; fill the contribution selector
+// probe once at load; fill the contribution selector, unless an amount was already chosen there
+// (typed, stepped or filled in while the probe ran: it takes up to ~0.5 s with the copy timing)
+let joinGbChosen = false;
+for (const [id, ev] of [["join-gb", "input"], ["gb-minus", "click"], ["gb-plus", "click"]]) $(id).addEventListener(ev, () => { joinGbChosen = true; });
 const metaPromise = (async () => {
   const m = await probeGPU();
   if (m.webgpu && m.budgetGB) m.contribGB = Math.max(0.2, Math.round(m.budgetGB * 0.5 * 10) / 10);
   m.phone = m.ua === "iPhone" || m.ua === "Android";
-  if (m.phone) { m.contribGB = 0.5; $("join-gb").min = "0.5"; $("join-gb").step = "0.5"; }
+  if (m.webgpu && WAKE !== "0" && (m.phone || WAKE === "1" || WAKE === "keep")) m.wake = 1;
+  // phones and tablets lend at most what their browser tab survives (room/pledge.js, #207)
+  const rule = pledgeRule(m.ua, navigator.deviceMemory);
+  if (rule.capped) {
+    m.pledgeMax = rule.max;
+    m.contribGB = rule.def;
+    $("join-gb").min = String(rule.min); $("join-gb").step = String(rule.step); $("join-gb").max = String(rule.max);
+    $("join-gb").title = rule.why;
+    if (m.webgpu) { $("ap-cap").textContent = rule.why; $("ap-cap").hidden = false; }
+  }
   // a laptop gives at least what the smallest model needs, when its probe allows, so one laptop can
   // run the 1.7B alone (half of maxBufferSize is 2 GB on a typical laptop, and 2 GB runs nothing)
   else if (m.contribGB) m.contribGB = Math.max(1, Math.round(m.contribGB), Math.min(SMALLEST_NEED, Math.floor(m.budgetGB)));
-  if (m.contribGB) $("join-gb").value = m.contribGB;
+  if (m.contribGB && !joinGbChosen) $("join-gb").value = m.contribGB;
   return m;
 })();
 
@@ -263,6 +332,7 @@ function peerCard(id, name, meta, self) {
     <div class="pop" hidden>
       <div class="pop-h"><span class="pic2">${iconFor(meta)}</span><span class="pn"></span><span class="pst"></span></div>
       <div class="peer-sub"><span class="pkind"></span><span aria-hidden="true">\u00b7</span><span class="buf">-</span><span class="play"></span></div>
+      <div class="pheld" hidden></div>
       <div class="peer-gpu dev-only"></div>
       <div class="peer-stats dev-only">
         <span>rtt <b class="rtt">-</b></span>
@@ -274,6 +344,7 @@ function peerCard(id, name, meta, self) {
   paintCard(card, name, meta, self);
   $("peers").appendChild(card);
   if (devSlots.size) orderCards();
+  if (ai.heldGB || ai.outWhy) paintHeld();
   card.querySelector(".pchip").addEventListener("click", (e) => { e.stopPropagation(); chipPop(card); });
   if (!self) card.querySelector(".bw-btn").addEventListener("click", () => bwTest(id));
   card.querySelector(".api-kick")?.addEventListener("click", () => { chipPop(null); apiKick(id); });
@@ -299,7 +370,6 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   chipPop(null); $("room-menu").open = false;
   if (!$("share").hidden) closeShare();
-  if ($("api-sheet") && !$("api-sheet").hidden) closeApi();
   if (!$("card").hidden) closeCard();
   if (!$("leave").hidden) closeLeave();
 });
@@ -371,18 +441,47 @@ function addModelOption(key) {
 if (DEV) Object.keys(MODELS).forEach(addModelOption);
 // set the picker to a model, adding it when another device started one the picker does not list
 function setModelValue(key) { if (!MODELS[key]) return; addModelOption(key); $("ai-model").value = key; }
-function renderLadder(pledged) {
+// How much more a device could still lend: its kind's cap (phones), the cap it reported itself and
+// what its memory probe allows, less what it lends now
+function spareGBOf(meta) {
+  const rule = pledgeRule(meta?.ua, NaN);
+  const ceil = Math.min(rule.capped ? rule.max : 64, meta?.pledgeMax || 64, meta?.budgetGB ? Math.max(SMALLEST_NEED, Math.floor(meta.budgetGB)) : 64);
+  return Math.max(0, +(ceil - pledgeGB(meta)).toFixed(1));
+}
+// Whether this room's pledges hold `key` the way the host will deal it (room/plan.js roomFit): each
+// device's pledge (held to its kind's cap) in whole layers with their KV cache at the room's context,
+// the model host's (room/plan.js pickModelHost) less the embedding and the head. null for a model
+// without a SHAPE (room/models.js) or a room with no device that can hold layers.
+function roomFitFor(key) {
+  const devs = [{ id: peer?.id || "self", name: myName, meta: myMeta }, ...[...members].map(([id, m]) => ({ id, name: m.name || "device", meta: m.meta || {} }))]
+    .filter((d) => d.meta?.webgpu && !d.meta?.api);
+  const q = new URLSearchParams(location.search);
+  const rb = roomBytes(key, maxSeqFor(key, +q.get("ctx") || 0), kvModeFor(key, roomQwen35Options(location.search).kvQ8 ? "q8" : null));
+  if (!devs.length || !rb) return null;
+  const hid = pickModelHost(devs);
+  devs.sort((a, b) => (b.id === hid) - (a.id === hid));
+  const fit = roomFit(rb.L, devs.map((d) => pledgeGB(d.meta) * 2 ** 30), rb.layerBytes, rb.hostBytes), spare = devs.map((d) => spareGBOf(d.meta));
+  return { fit, devs, shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare) };
+}
+// the ladder with each row's fit from the real deal where the model has a SHAPE (NEED_GB otherwise)
+function fitLadder(pledged) {
+  return ladder(PICK_NEED, pledged).map((x) => {
+    const f = roomFitFor(x.key);
+    return f ? { ...x, ok: f.fit.fits, short: f.shortGB, f } : x;
+  });
+}
+function renderLadder(pledged, rows = fitLadder(pledged)) {
   const el = $("ai-ladder"); if (!el) return;
   const none = !(pledged > 0);
   // a radio group: one tab stop (the picked row), arrows move the pick. The rows are re-rendered
   // on every change, so the focus follows the picked row when it was in the group.
   const had = el.contains(document.activeElement);
-  el.innerHTML = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + ladder(PICK_NEED, pledged).map((x) => {
+  el.innerHTML = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + rows.map((x) => {
     const gb = `<span class="nd">${NEED_GB[x.key] ?? ""} GB</span>`;
-    const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">needs ${x.short} GB more</span>`;
+    const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">${x.short} GB short</span>`;
     // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
     const sel = !none && x.key === $("ai-model").value;
-    return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${x.ok ? "" : ` title="${giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
+    return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${x.ok ? "" : ` title="${esc(x.f?.note || (giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"))}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
   if (!el.querySelector(".rung.sel")) el.querySelector(".rung")?.setAttribute("tabindex", "0");
   if (had) el.querySelector('.rung[tabindex="0"]')?.focus({ preventScroll: true });
@@ -401,24 +500,37 @@ $("ai-ladder").addEventListener("keydown", (e) => {
 function giveFor(short) {
   if (!(short > 0) || !myMeta.webgpu || myMeta.phone) return 0;
   const v = Math.ceil((myMeta.contribGB + short) * 10 - 1e-6) / 10;
-  const cap = Math.min(64, Math.max(SMALLEST_NEED, Math.floor(myMeta.budgetGB || 0)));
+  const cap = Math.min(myMeta.pledgeMax || 64, Math.max(SMALLEST_NEED, Math.floor(myMeta.budgetGB || 0)));
   return v <= cap ? Math.ceil(v) : 0;
 }
 $("ai-give").addEventListener("click", (e) => lendGB(+e.currentTarget.dataset.gb));
 function updateNeed(pledged) {
-  if (!modelTouched && !ai.engine && !ai.busy && !$("ai-model").disabled) $("ai-model").value = bestFit(PICK_NEED, pledged);
-  renderLadder(pledged);
+  const rows = fitLadder(pledged);
+  if (!modelTouched && !ai.engine && !ai.busy && !$("ai-model").disabled) {
+    const fits = rows.filter((x) => x.ok);
+    $("ai-model").value = (fits.length ? fits[fits.length - 1] : rows[0]).key;
+  }
+  renderLadder(pledged, rows);
+  const row = rows.find((x) => x.key === $("ai-model").value);
   const need = NEED_GB[$("ai-model").value] || 1;
-  const ok = pledged >= need;
-  $("need-fill").style.width = Math.min(100, pledged / need * 100).toFixed(1) + "%";
+  // fits: every device's layers within its pledge, the host's with the embedding and the head
+  // (roomFitFor); a model without a SHAPE falls back to the sum of the pledges against NEED_GB
+  const ok = row ? row.ok : pledged >= need;
+  const shortGB = row ? row.short : Math.max(0, +(need - pledged).toFixed(1));
+  const note = row?.f?.note || (ok ? "" : `This room is ${shortGB} GB short for ${shortName($("ai-model").value)}. Add a device or raise a pledge.`);
+  $("need-fill").style.width = Math.min(100, ok ? 100 : pledged / (pledged + shortGB) * 100).toFixed(1) + "%";
   const has = +pledged.toFixed(1);
   $("need-text").textContent = ok
     ? `Needs ${need} GB. The room has ${has} GB.`
-    : `Needs ${need} GB. The room has ${has} GB, ${(need - pledged).toFixed(1)} GB short.`;
+    : `Needs ${need} GB. The room has ${has} GB, ${shortGB} GB short.`;
   $("ai-need").classList.toggle("ok", ok);
   if (!ai.busy && !ai.engine) $("ai-start").disabled = !ok;
+  // short: say by how much and who could give more, right under Start
+  $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine;
+  $("ai-short").textContent = note;
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
-  const give = giveFor(need - pledged);
+  const meI = row?.f ? row.f.devs.findIndex((d) => d.meta === myMeta) : -1;
+  const give = giveFor(meI >= 0 && row.f.fit.raise[meI] < Infinity ? gbUp(row.f.fit.raise[meI]) : row?.f ? 0 : need - pledged);
   $("ai-give").hidden = ok || !give || ai.busy || !!ai.engine;
   // what pressing Start costs this device: about its share of the weights file (layers are dealt by
   // memory given), so a phone on mobile data sees ~0.2 GB and a laptop alone the whole file
@@ -438,7 +550,7 @@ function updateNeed(pledged) {
   if (give) { $("ai-give").textContent = `Give ${give} GB from this device`; $("ai-give").dataset.gb = give; }
   // why Start is off, for screen readers (sighted users see it in the rows and the pool card)
   $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
-    : `${shortName($("ai-model").value)} needs ${need} GB and the room has ${has} GB, ${+(need - pledged).toFixed(1)} GB short. Invite a device or give more memory.`;
+    : note;
   if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
@@ -475,31 +587,38 @@ function renderPool(pledged) {
   meter.querySelector(".apm-fill").innerHTML = devs.map((d) => `<i style="--sw:${devColor(d.name)};width:${(d.meta.contribGB / top * 100).toFixed(2)}%" title="${esc(String(d.name))}: ${d.meta.contribGB} GB"></i>`).join("");
   // a tick where each model starts to fit; the picked one says what it needs
   const sel = $("ai-model").value;
-  meter.querySelector(".apm-ticks").innerHTML = needs.map(([k, gb]) => `<span class="${pledged >= gb ? "ok" : ""}${k === sel ? " sel" : ""}${gb / top > 0.6 ? " r" : gb / top < 0.3 ? " l" : ""}" style="left:${(gb / top * 100).toFixed(2)}%" title="${esc(shortName(k))} needs ${gb} GB"></span>`).join("");
+  const fitsK = (k, gb) => { const f = roomFitFor(k); return f ? f.fit.fits : pledged >= gb; };
+  meter.querySelector(".apm-ticks").innerHTML = needs.map(([k, gb]) => `<span class="${fitsK(k, gb) ? "ok" : ""}${k === sel ? " sel" : ""}${gb / top > 0.6 ? " r" : gb / top < 0.3 ? " l" : ""}" style="left:${(gb / top * 100).toFixed(2)}%" title="${esc(shortName(k))} needs ${gb} GB"></span>`).join("");
   // what the selected model needs, as its own line under the meter (not a label hanging off its tick)
   const selNeed = needs.find(([k]) => k === sel);
   $("ap-need").hidden = !selNeed;
-  if (selNeed) { const [k, gb] = selNeed, short = gb - pledged; $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b><span>${short > 0 ? `${+short.toFixed(1)} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0); }
+  if (selNeed) {
+    const [k, gb] = selNeed, f = roomFitFor(k), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
+    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b><span>${short > 0 ? `${short} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0);
+  }
   $("ap-devs").innerHTML = devs.map((d) => `<li style="--sw:${devColor(d.name)}"><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB</b></li>`).join("")
     || '<li class="none">No device with WebGPU yet</li>';
   devsEdge();
   const can = !!myMeta.webgpu;
   $("ap-step").hidden = !can; $("ap-no").hidden = can;
-  if (can) { if (document.activeElement !== $("ap-gb")) $("ap-gb").value = myMeta.contribGB; $("ap-minus").disabled = myMeta.contribGB <= lendMin(); $("ap-plus").disabled = myMeta.contribGB >= 64; }
+  if (can) { if (document.activeElement !== $("ap-gb")) $("ap-gb").value = myMeta.contribGB; $("ap-minus").disabled = myMeta.contribGB <= lendMin(); $("ap-plus").disabled = myMeta.contribGB >= lendMax(); }
 }
-const lendMin = () => (myMeta.phone ? 0.5 : 1);
-function selfSteps(card) { const s = card.querySelectorAll(".gbstep .step"); if (s.length) { s[0].disabled = myMeta.contribGB <= lendMin(); s[1].disabled = myMeta.contribGB >= 64; } }
+const lendRule = () => pledgeRule(myMeta.ua, navigator.deviceMemory);
+const lendMin = () => (myMeta.phone ? 0.5 : lendRule().min);
+const lendMax = () => myMeta.pledgeMax || 64;
+const lendStep = () => (myMeta.phone ? 0.5 : lendRule().step);
+function selfSteps(card) { const s = card.querySelectorAll(".gbstep .step"); if (s.length) { s[0].disabled = myMeta.contribGB <= lendMin(); s[1].disabled = myMeta.contribGB >= lendMax(); } }
 // lend a different amount: this device's card, the room's total, and every other device hear it
 function lendGB(v) {
-  v = Math.round(Math.min(64, Math.max(lendMin(), v)) * 10) / 10;
+  v = Math.round(Math.min(lendMax(), Math.max(lendMin(), v)) * 10) / 10;
   if (!myMeta.webgpu || v === myMeta.contribGB) return;
   myMeta.contribGB = v;
   const selfCard = document.querySelector(".peer-card.self");
   if (selfCard) { setLends(selfCard, v); selfSteps(selfCard); }
   updateCluster(); broadcastAll({ t: "pledge", gb: v });
 }
-$("ap-minus").addEventListener("click", () => lendGB(myMeta.contribGB - (myMeta.phone ? 0.5 : 1)));
-$("ap-plus").addEventListener("click", () => lendGB(myMeta.contribGB + (myMeta.phone ? 0.5 : 1)));
+$("ap-minus").addEventListener("click", () => lendGB(myMeta.contribGB - lendStep()));
+$("ap-plus").addEventListener("click", () => lendGB(myMeta.contribGB + lendStep()));
 // or type the amount: applied on Enter or on leaving the box, clamped like the steps (and shown back as applied)
 function typedGB() {
   const el = $("ap-gb"), v = parseFloat(String(el.value).replace(",", "."));
@@ -519,9 +638,10 @@ function enterRoom() {
   document.body.classList.add("in-room");
   roomSince = performance.now();
   $("compute-open").hidden = false;
-  $("room-badge").textContent = roomCode;
-  $("room-h").textContent = `Room ${roomCode}`;
-  $("side-code").textContent = roomCode;
+  $("room-badge").textContent = formatCode(roomCode);
+  $("room-badge").setAttribute("aria-label", `Room ${spokenCode(roomCode)}: invite a device`);
+  $("room-h").textContent = `Room ${formatCode(roomCode)}`;
+  $("side-code").textContent = formatCode(roomCode);
   $("side-code").addEventListener("click", openShare);
   $("ap-qr").innerHTML = qrSVG(roomLink(), { size: 112 });
   // Chat | Code shows from the lobby on, so a visitor who came for Code sees where it is; Code stays
@@ -530,7 +650,7 @@ function enterRoom() {
   $("mode-bar").hidden = false; codeGate();
   peerCard("self", myName, myMeta, true);
   updateCluster();
-  log("room", `${roomCode}: type this code on your other devices`);
+  log("room", `${formatCode(roomCode)}: type this code on your other devices${isHost && gate?.ask ? " (you let each new device in), or open the invite link (no asking)" : ""}`);
   $("ai-panel").style.display = "flex";
   aiStatus("");
   emptyText("Pick a model and press Start. Anyone in the room can.");
@@ -546,47 +666,225 @@ function selfStepper() {
     buf.classList.add("gbstep");
     buf.innerHTML = '<button class="step" type="button" data-d="-1" aria-label="Less memory">\u2212</button><span class="bv"></span><button class="step" type="button" data-d="1" aria-label="More memory">+</button>';
     buf.querySelector(".bv").textContent = text;
-    buf.addEventListener("click", (e) => { const b = e.target.closest(".step"); if (b) lendGB(myMeta.contribGB + +b.dataset.d * (myMeta.phone ? 0.5 : 1)); });
+    buf.addEventListener("click", (e) => { const b = e.target.closest(".step"); if (b) lendGB(myMeta.contribGB + +b.dataset.d * lendStep()); });
   }
   selfSteps(selfCard);
 }
 
 // --- connection wiring ---
 function wire(conn, name, meta, initiator = false) {
-  const entry = { conn, name: name || conn.peer, meta: meta || {}, rtt: null, card: null, link: makeLink(), stripes: [], seen: performance.now() };
+  const entry = { conn, name: name || conn.peer, meta: meta || {}, rtt: null, card: null, link: makeLink({ dup: WIRE_DUP }), stripes: [], seen: performance.now(), path: null, initiator };
+  const prev = conns.get(conn.peer);
   conns.set(conn.peer, entry);
+  if (prev && prev.conn !== conn) retire(prev);   // a new link to a device we already had one to
+  watchLink(conn, () => linkDied(entry));
   if (WIRE_STRIPES > 0) {
     attachWire(entry.link, conn, (m) => onData(conn.peer, m));
     // extra associations for striping: the side that dialed opens them, the other side accepts
     // them in peer.on("connection") by label and attaches its end of the wire channel
-    if (initiator) for (let i = 1; i < WIRE_STRIPES; i++) {
-      const sc = peer.connect(conn.peer, { reliable: true, label: "stripe" });
-      sc.on("open", () => { attachWire(entry.link, sc, (m) => onData(conn.peer, m)); });
-      sc.on("error", () => {});
-      entry.stripes.push(sc);
-    }
+    if (initiator) for (let i = 1; i < WIRE_STRIPES; i++) dialStripe(entry, conn.peer);
   }
+  notePath(entry);
 
   conn.on("data", (d) => onData(conn.peer, d));
-  conn.on("close", () => {
+  let done = false;   // once per link: a dropLink and PeerJS's own close later
+  const onClose = () => {
     const e = conns.get(conn.peer);
+    if (done) return;
     if (e && e.conn !== conn) return;   // an older link to the same device
     if (!e && isHost && !roster.has(conn.peer)) return;   // already dropped (dropStaleNamesake)
+    done = true;
     peerGone(conn.peer, e);
-  });
+  };
+  conn.on("close", onClose);
+  entry.drop = onClose;   // dropLink: the close handling at once, even when PeerJS never emits "close"
   conn.on("error", () => {});
   return entry;
 }
+// Close a link that stopped carrying anything (a locked phone, a tab iOS suspended): the data channel
+// itself only says so when ICE gives up, ~30 s later, or never. Runs the close handling at once even
+// when PeerJS does not emit "close" for a channel that is already dead.
+function dropLink(id, why) {
+  const e = conns.get(id);
+  if (!e) return;
+  log("room", `${e.name || id}: ${why}`);
+  try { e.conn.close(); } catch {}
+  for (const sc of e.stripes || []) { try { sc.close(); } catch {} }
+  if (conns.get(id) === e) e.drop();
+}
+// a link that is not usable any more: closed, its channel not open, or silent too long
+function linkDead(e, limit = LINK_SILENT_MS) {
+  if (!e) return true;
+  const dc = e.conn?.dataChannel;
+  if (e.conn && e.conn.open === false) return true;
+  if (dc && (dc.readyState === "closed" || dc.readyState === "closing")) return true;
+  return linkSilent(Math.max(lastHeard(e), visibleSince), performance.now(), limit);
+}
+// When this tab is visible: the time it last became visible (silence while it was hidden is not
+// the other side's fault: its own timers and data were frozen); when it went hidden.
+// (performance.now(), the clock of e.seen and the ping loop)
+let visibleSince = performance.now(), hiddenAt = null;
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") { hiddenAt = performance.now(); return; }
+  const away = backFromAway(hiddenAt, performance.now());
+  visibleSince = performance.now(); hiddenAt = null;
+  if (!away || !peer) return;
+  // back from a lock or the background: the signaling link is probably gone, and the data links may be
+  // too. Reconnect the first now; give the others a few pings' time to show they are alive.
+  signalBack();
+  const back = visibleSince;
+  setTimeout(() => {
+    for (const [id, e] of [...conns]) if (lastHeard(e) < back) dropLink(id, "no answer after this screen came back: reconnecting");
+  }, 8000);
+});
+// the signaling server link (PeerJS's websocket): iOS closes it when the screen locks. Without it this
+// device can't open new links (to the host after a lock, or to a new chain neighbour).
+function signalBack() {
+  if (peer && peer.disconnected && !peer.destroyed) { try { peer.reconnect(); } catch {} }
+}
+
+// --- dead links ---
+// A network that stops passing packets for longer than ICE's write timeout (~15 s: a frozen
+// Wi-Fi, a laptop lid, a phone switching networks) kills the link's candidate pairs for good:
+// Chrome reports connectionState "failed", but iceConnectionState stays "disconnected", SCTP
+// still says "connected" and every data channel stays "open", so PeerJS never closes the
+// connection. Nothing sent on it arrives again, and without this the room would wait on it
+// forever (every answer timing out). So a failed link is replaced: the side that dialed it dials
+// a new one to the same device (same peer id, same layers, a fresh wire); the other side waits
+// RELINK_WAIT_MS for that, then closes the link (the device left, as before).
+const RELINK_WAIT_MS = 45000;
+function watchLink(conn, onDead) {
+  const pc = conn.peerConnection;
+  if (!pc) return;
+  let fired = false;
+  const check = () => {
+    if (fired || !conn.open) return;
+    if (pc.connectionState === "failed" || pc.iceConnectionState === "failed") { fired = true; onDead(); }
+  };
+  pc.addEventListener("connectionstatechange", check);
+  pc.addEventListener("iceconnectionstatechange", check);
+}
+function linkDied(entry) {
+  const id = entry.conn.peer;
+  if (conns.get(id) !== entry) return;
+  log("room", `the link to ${entry.name} went down (no packets for too long)${entry.initiator ? "; reconnecting" : ""}`);
+  chainLinkLost(id, entry.name);
+  linkState(id, entry.name, false);
+  if (!entry.initiator) {
+    setTimeout(() => { if (conns.get(id) === entry) { log("room", `${entry.name} did not reconnect`); try { entry.conn.close(); } catch {} } }, RELINK_WAIT_MS);
+    return;
+  }
+  relink(entry, id, 0);
+}
+// dial a replacement link; wire() swaps it in and retires the dead one
+function relink(entry, id, tries) {
+  if (conns.get(id) !== entry || !peer || peer.destroyed) return;
+  if (tries >= 8) { log("room", `could not reconnect to ${entry.name}`); try { entry.conn.close(); } catch {} return; }
+  const c = peer.connect(id, { reliable: true });
+  // PeerJS returns nothing while it is cut off from the signaling server: try again later
+  if (!c) { setTimeout(() => relink(entry, id, tries + 1), 2000 * Math.min(tries + 1, 4)); return; }
+  let done = false;
+  const retry = () => { if (done) return; done = true; try { c.close(); } catch {} setTimeout(() => relink(entry, id, tries + 1), 2000 * Math.min(tries + 1, 4)); };
+  const to = setTimeout(retry, 20000);
+  c.on("open", () => {
+    if (done) return;
+    done = true; clearTimeout(to);
+    if (conns.get(id) !== entry) { try { c.close(); } catch {} return; }
+    wire(c, entry.name, entry.meta, true);
+    c.send(helloFor(id, { back: 1 }));
+    log("room", `reconnected to ${entry.name}`);
+  });
+  c.on("error", () => {});
+  c.on("close", retry);
+}
+// a replaced link: close it and its stripes quietly (its close handlers see it is not current)
+function retire(old) {
+  for (const s of old.stripes) try { s.close(); } catch {}
+  try { old.conn.close(); } catch {}
+  chainLinkLost(old.conn.peer, old.name);
+  linkState(old.conn.peer, old.name, true);
+}
+// Host: links in the chain that are down and being replaced, "reporter|peer" -> { name, at }. A
+// question waits for them (up to RELINK_WAIT_MS) instead of sending frames into a dead link.
+// Workers report their own links with ai-linklost {up}.
+const linksDown = new Map();
+function linkState(id, name, up) {
+  if (ai.role === "worker") { const h = ai.hostId || PREFIX + roomCode; if (id !== h) sendTo(h, { t: "ai-linklost", name: String(name || ""), up: up ? 1 : 0 }); return; }
+  if (ai.role !== "host" || (!up && !ai.chain?.includes(id))) return;
+  noteLink(peer.id + "|" + id, name, up);
+}
+function noteLink(key, name, up) {
+  if (up) linksDown.delete(key); else linksDown.set(key, { name, at: performance.now() });
+}
+async function linksUp() {
+  const live = () => { for (const [k, v] of linksDown) if (performance.now() - v.at > RELINK_WAIT_MS + 5000) linksDown.delete(k); return [...linksDown.values()]; };
+  const t0 = performance.now();
+  for (let d = live(); d.length && performance.now() - t0 < RELINK_WAIT_MS; d = live()) {
+    aiStatus(`reconnecting to ${[...new Set(d.map((x) => x.name))].join(", ")}…`);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+// host: frames in flight on a lost link are gone, so a lap waiting on them fails now instead of
+// timing out, and the next question prefills from scratch
+// (a worker whose link to another device dropped tells the host with ai-linklost, see linkState)
+function chainLinkLost(id, name) {
+  if (ai.role !== "host" || !ai.engine || !ai.chain?.includes(id)) return;
+  if (!ai.waiters.size && ai.fed == null) return;
+  failWaiters(new Error(`the link to ${name || "a device"} dropped; ask again`));
+  ai.fed = null; ckptClear(true);
+}
+
+// One extra association for the wire. A stripe can fail on its own on a bad network (its ICE
+// times out while the main link survives): the dialing side opens a new one a few times, so the
+// link does not stay on fewer associations for the rest of the session.
+function dialStripe(entry, id, tries = 0) {
+  const sc = peer.connect(id, { reliable: true, label: "stripe" });
+  if (!sc) { if (tries < 4) setTimeout(() => { if (conns.get(id) === entry && entry.conn.open) dialStripe(entry, id, tries + 1); }, 2000 * (tries + 1)); return; }
+  let opened = false;
+  sc.on("open", () => { opened = true; attachWire(entry.link, sc, (m) => onData(id, m)); watchLink(sc, () => sc.close()); });
+  sc.on("error", () => {});
+  sc.on("close", () => {
+    entry.stripes = entry.stripes.filter((c) => c !== sc);
+    if (conns.get(id) !== entry || !peer || peer.destroyed || tries >= 4) return;
+    setTimeout(() => { if (conns.get(id) === entry && entry.conn.open) dialStripe(entry, id, opened ? 0 : tries + 1); }, 2000 * (tries + 1));
+  });
+  entry.stripes.push(sc);
+}
+// direct or through the TURN relay: read once the link has settled, logged, and shown in pooledDebug()
+function notePath(entry) {
+  setTimeout(async () => {
+    if (conns.get(entry.conn.peer) !== entry) return;
+    await pathOf(entry.conn.peer);
+    if (entry.path === "relay") log("room", `link to ${entry.name} goes through the relay (TURN${entry.via ? " over " + entry.via.toUpperCase() : ""})${PEER_WEIGHTS ? "; model weights never go over it" : ""}`);
+  }, 3000);
+}
+// this link's path now ("direct", "relay", or null before ICE picked one), read from its stats
+async function pathOf(id) {
+  const e = conns.get(id), pc = e?.conn?.peerConnection;
+  if (!e) return null;
+  if (e.path) return e.path;
+  try { const st = pc ? await pc.getStats() : null; e.path = linkPath(st); e.via = linkRelayProtocol(st); } catch {}
+  return e.path;
+}
 
 // a link is gone (closed, or dropped as silent): on the host the device left; workers wait for the roster
+// (e.dead: it was dropped for silence, "stopped responding")
 function peerGone(id, e) {
   conns.delete(id);
+  hbForget(liveness, id);
+  // links to or from it that were down and being replaced: nothing will replace them now, so a
+  // question must not wait for them (linksUp)
+  for (const [k, v] of linksDown) if (k.endsWith("|" + id) || k.startsWith(id + "|") || (e?.name && v.name === e.name)) linksDown.delete(k);
   if (isHost) {
     dropCard(id); members.delete(id); roster.delete(id); broadcastRoster();
-    log("room", `${e?.meta?.api ? "API client " : ""}${e?.name || id} left`);
+    const verb = e?.dead ? "stopped responding" : "left";
+    log("room", `${e?.meta?.api ? "API client " : ""}${e?.name || id} ${verb}`);
     apiPeerGone(id);
-    aiPeerLeft(id, e?.name);
-  } else if (id === PREFIX + roomCode) { log("room", "lost the link to the host"); hostGone(); }
+    aiPeerLeft(id, e?.name, verb);
+  } else if (id === PREFIX + roomCode) {
+    if (admission === "wait" || admission === "lobby") refused("Lost the link to the room's host before it let this device in. Try again.");
+    else if (admission !== "out") { log("room", "lost the link to the host"); hostGone(); }
+  }
   updateCluster();
 }
 
@@ -611,6 +909,7 @@ function ensureCard(id, name, meta) {
 function dropCard(id) { const c = cards.get(id); if (c) { c.remove(); cards.delete(id); presence(c.dataset.name || id, false); } }
 // open a data link to a chain neighbour if we do not have one yet; resolves when it is up
 function ensureLink(id, timeoutMs = 60000) {
+  if (id && conns.has(id) && linkDead(conns.get(id))) dropLink(id, "stale link replaced");
   if (!id || id === "host" || conns.has(id)) return Promise.resolve(true);
   if (!ensureLink.pending.has(id)) { ensureLink.pending.add(id); meshConnect(id); }
   return new Promise((res) => {
@@ -625,7 +924,7 @@ ensureLink.pending = new Set();
 
 function sendTo(id, obj) { conns.get(id)?.conn.send(obj); }
 // debug: per-peer wire state (channels open, frames sent/received) — `pooledDebug()` in the console (`swarmDebug()` still works)
-window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0, ka: e.link?.kaSent ?? 0 }));
+window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0, ka: e.link?.kaSent ?? 0, dups: e.link?.dups ?? 0, skipped: e.link?.skipped ?? 0, path: e.path, via: e.via || null }));
 // activations go over the sliced wire channel when it is up, else as a normal message
 // ?netlag=ms delays every activation frame this device sends, to emulate a slow link in tests
 // (equal delays keep send order)
@@ -645,6 +944,7 @@ function broadcastAll(obj) { for (const [id] of conns) sendTo(id, obj); }
 const bwRecv = new Map(); // fromId -> {bytes, t0}
 
 function onData(from, d) {
+  const seenE = conns.get(from); if (seenE) seenE.seen = performance.now();   // any message counts as a sign of life (the ping loop drops silent links)
   // binary chunk = bandwidth test payload
   if (d instanceof ArrayBuffer || ArrayBuffer.isView(d)) {
     const st = bwRecv.get(from);
@@ -652,13 +952,18 @@ function onData(from, d) {
     return;
   }
   const e = conns.get(from);
-  if (e) e.seen = performance.now();   // any message counts as a sign of life (the ping loop drops silent links)
   if (!d || typeof d.t !== "string") return;
   if (d.t.startsWith("ai-")) { aiOnData(from, d); return; }
   switch (d.t) {
     case "hello":
       // one protocol per room: a tab from an older or newer deploy is told to reload
       if (d.v !== PROTOCOL) { versionRefused(from, d); break; }
+      // the host's hello: one from before the gate (no gate: 1) lets every device in, so go in now
+      if (!isHost && from === PREFIX + roomCode) {
+        if (e) e.hostHello = true;
+        hostAsks = !!d.gate && !!d.ask;
+        if (!d.gate && admission === "wait") guestIn();
+      }
       versionSeen.delete(from);   // back on the same version (a reload): its bye counts again
       // a peer picks its own name: keep it a short plain string (it is also escaped wherever it is shown)
       d.name = String(d.name ?? from).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(from).slice(0, 8);
@@ -685,7 +990,7 @@ function onData(from, d) {
       ensureCard(from, d.name, d.meta);
       if (isHost) {
         roster.set(from, { name: d.name, meta: d.meta }); broadcastRoster();
-        aiRejoin(from, d.name);
+        if (!aiLoadDeath(from, d)) aiRejoin(from, d.name);
         if (d.died?.during && d.died.ago > 2) log("room", `${d.name} came back: its tab was killed ${d.died.ago} s ago while ${d.died.during}. Phones kill background tabs; keep the screen on.`);
         if (ai.visibility !== "all") sendTo(from, { t: "ai-visibility", mode: ai.visibility });
         if (!d.back) aiWelcome(from); else offerRedealForNewcomers();
@@ -695,7 +1000,20 @@ function onData(from, d) {
     case "leaving":   // the tab is closing: treat the link as gone now instead of waiting for ICE to time out
       conns.get(from)?.conn.close();
       break;
+    case "admit":   // the host let this device in: keep the pass it gave, for coming back
+      if (isHost || from !== PREFIX + roomCode) break;
+      if (validKey(d.pass)) { myPass = d.pass; keepPass(roomCode, myPass); }
+      if (admission !== "in") { if (admission === "lobby") toast("The host let you in"); guestIn(); }
+      else if (!$("room-over").hidden && $("room-over-h").textContent === "Waiting for the host") $("room-over").hidden = true;
+      break;
+    case "lobby":   // the host was asked: wait for Allow or Deny
+      if (isHost || from !== PREFIX + roomCode) break;
+      inLobby();
+      break;
     case "bye":
+      // the host said no (Deny, a full lobby, a tab too old to wait) before this device got in: back
+      // to the join screen with its reason, and no knocking on the host again
+      if (!isHost && from === PREFIX + roomCode && admission !== "in") { refused(d.reason); break; }
       if (versionSeen.has(from)) break;   // a version mismatch this tab already explained in its own words
       toast(d.reason);
       log("room", d.reason);
@@ -731,6 +1049,7 @@ function onData(from, d) {
     case "pong": {
       e.missed = 0;
       e.rtt = Math.round(performance.now() - d.ts);
+      if (Number.isFinite(d.ts)) e.pongFor = Math.max(e.pongFor || 0, d.ts);   // drop detection: a ping sent then was answered
       if (e.card) e.card.querySelector(".rtt").textContent = e.rtt + " ms";
       break;
     }
@@ -772,6 +1091,202 @@ function versionRefused(from, d) {
   if (theyHost) { $("room-over").hidden = false; $("room-over-h").textContent = "Different version"; $("room-over-why").textContent = local; }
 }
 
+// ---- joining: the guest's side (room/joingate.js; docs/protocol.md "Joining a room") ----
+let hostAsks = false;   // guest: the host asks before new devices join (its hello), for the Invite sheet
+function guestIn() {
+  if (admission === "in" || admission === "out") return;
+  admission = "in";
+  joinWait(false);
+  $("jw-cancel").hidden = true;
+  const f = afterAdmit; afterAdmit = null;
+  f?.();
+}
+// the host has been asked about this device: the waiting screen (or, for a device already in the room
+// whose link came back without a pass the host knows, the room's own card)
+function inLobby() {
+  if (admission === "in") {
+    $("room-over").hidden = false;
+    $("room-over-h").textContent = "Waiting for the host";
+    $("room-over-why").textContent = "This device's link to the room came back, and the host has to let it in again.";
+    return;
+  }
+  if (admission !== "wait") return;
+  admission = "lobby";
+  joinWait(true, "Waiting for the host to let you in");
+  $("join-status").textContent = `The host of room ${formatCode(roomCode)} sees \u201c${myName} wants to join\u201d.`;
+  $("jw-cancel").hidden = false;
+}
+// the host said no, or went away, before this device got in
+function refused(reason) {
+  admission = "out";
+  $("jw-cancel").hidden = true;
+  const p = peer; peer = null;
+  try { p?.destroy(); } catch {}
+  conns.clear();
+  joinFailed(String(reason || DENIED_TEXT).slice(0, 300));
+  $("join-status").classList.add("refused");
+}
+// passes this tab was given, per room code (sessionStorage: this tab only; not a virtual device's frame)
+const PASS_KEY = "pooled-passes";
+function storedPass(code) {
+  if (VQ.get("embed")) return "";
+  try { const p = JSON.parse(sessionStorage.getItem(PASS_KEY) || "{}")[code]; return validKey(p) ? p : ""; } catch { return ""; }
+}
+function keepPass(code, pass) {
+  if (VQ.get("embed")) return;
+  try {
+    const all = JSON.parse(sessionStorage.getItem(PASS_KEY) || "{}");
+    all[code] = pass;
+    sessionStorage.setItem(PASS_KEY, JSON.stringify(Object.fromEntries(Object.entries(all).slice(-8))));
+  } catch {}
+}
+
+// ---- joining: the host's side ----
+// Ask before new devices join, on by default (?ask=0 turns it off for this room: the e2e tests that
+// join by typed code or ?code= links)
+const ASK_DEFAULT = new URLSearchParams(location.search).get("ask") !== "0";
+const LOBBY_BUF = 64;   // messages a link may send between its hello and the host's answer
+// A link the host did not open: it says hello, and the gate decides. Until it is let in the link is
+// not in `conns`, so nothing the room sends (roster, chat, layers, pings) reaches it and nothing it
+// sends reaches the room; it only gets its pongs. Messages after its hello wait (up to LOBBY_BUF)
+// and are handled once it is in.
+function gateConn(conn) {
+  const id = conn.peer;
+  const L = { conn, hello: null, buf: [], stripes: [] };
+  const prev = lobbyConns.get(id);
+  if (prev && prev.conn !== conn) { try { prev.conn.close(); } catch {} }
+  lobbyConns.set(id, L);
+  const onMsg = (d) => {
+    if (!d || typeof d.t !== "string") return;   // binary (bandwidth tests): not from a device in the lobby
+    if (d.t === "ping") { try { conn.send({ t: "pong", ts: d.ts }); } catch {} return; }
+    if (d.t === "leaving") { try { conn.close(); } catch {} return; }
+    if (L.hello) { if (L.buf.length < LOBBY_BUF) L.buf.push(d); return; }
+    if (d.t !== "hello") return;
+    L.hello = d;
+    gateHello(L, d).catch((err) => { console.warn("gate", err); gateRefuse(L, "The host couldn't check this device. Try again."); });
+  };
+  L.onMsg = onMsg;
+  conn.on("data", onMsg);
+  conn.on("close", () => {
+    if (lobbyConns.get(id) !== L) return;
+    lobbyConns.delete(id);
+    for (const s of L.stripes) try { s.close(); } catch {}
+    if (gate && gateWithdraw(gate, id)) { log("room", `${cleanName(L.hello?.name, id)} stopped waiting to join`); joinRequests(); }
+  });
+  conn.on("error", () => {});
+}
+const cleanName = (n, id) => String(n ?? id).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(id).slice(0, 8);
+async function gateHello(L, d) {
+  const id = L.conn.peer;
+  const name = cleanName(d.name, id);
+  if (d.v !== PROTOCOL) {   // told which side should reload, as on any link (versionRefused)
+    const { local, remote } = versionMismatch({ mine: PROTOCOL, theirs: d.v, name, theyHost: false, me: myName, iAmHost: true });
+    toast(local, { kind: "error" }); log("room", local);
+    gateRefuse(L, remote);
+    return;
+  }
+  const meta = helloMeta(d.meta, true);
+  // API clients: the Allow API clients switch comes first (no point asking about one it would refuse)
+  if (meta?.api && !ai.settings.apiAllow) { gateRefuse(L, "the host does not allow API clients in this room"); return; }
+  const r = await gateDecide(gate, id, d);
+  if (lobbyConns.get(id) !== L) return;   // it left, or a newer link from it took over, while the hash ran
+  if (r.kind === "admit") { gateAdmit(L, r.pass, r.via); return; }
+  if (r.kind === "refuse") {
+    const why = meta?.api && !d.join ? "This room's host asks before new devices join, and this pooled serve is older. Update it (npx @pooled/cli@latest) and start it with the room's invite link." : r.reason;
+    if (!d.join) log("room", `${name} runs an older Pooled that can't wait to be let in: told it to reload`);
+    gateRefuse(L, why);
+    return;
+  }
+  // ask the host
+  gateEnqueue(gate, id, name, meta);
+  try { L.conn.send({ t: "lobby" }); } catch {}
+  log("room", `${name} is waiting to join`);
+  joinRequests(true);
+}
+// into the room: the link becomes a room link (wire), then its hello and whatever it sent meanwhile
+function gateAdmit(L, pass, via) {
+  const id = L.conn.peer;
+  lobbyConns.delete(id);
+  L.conn.off("data", L.onMsg);
+  const entry = wire(L.conn);
+  for (const sc of L.stripes) {
+    if (!sc.open) continue;
+    attachWire(entry.link, sc, (m) => onData(id, m)); entry.stripes.push(sc);
+    sc.on("close", () => { entry.stripes = entry.stripes.filter((c) => c !== sc); });
+    watchLink(sc, () => sc.close());
+  }
+  try { L.conn.send({ t: "admit", ...(pass ? { pass } : {}) }); } catch {}
+  if (via === "key") log("room", `${cleanName(L.hello?.name, id)} came in with the invite link`);
+  onData(id, L.hello);
+  for (const m of L.buf) onData(id, m);
+  saveHost();
+}
+function gateRefuse(L, reason) {
+  const id = L.conn.peer;
+  if (lobbyConns.get(id) === L) lobbyConns.delete(id);
+  try { L.conn.send({ t: "bye", reason }); } catch {}
+  setTimeout(() => { try { L.conn.close(); } catch {} }, 400);   // after the bye is out
+}
+// the host's answer to a request (the Allow / Deny prompt)
+async function answerJoin(id, yes) {
+  const L = lobbyConns.get(id);
+  if (yes) {
+    const r = await gateAllow(gate, id);
+    if (!r) return;
+    if (L && lobbyConns.get(id) === L) { log("room", `let ${r.req.name} in`); gateAdmit(L, r.pass, "allowed"); }
+  } else {
+    const r = gateDeny(gate, id);
+    if (r) log("room", `did not let ${r.name} in`);
+    if (L) gateRefuse(L, DENIED_TEXT);
+  }
+  joinRequests();
+}
+
+// The host's prompt: the oldest request, Allow / Deny, and how many more wait. It never takes focus by
+// itself (the host may be typing a question); a screen reader hears each new request at once, and Tab
+// reaches the prompt right after the header. Answering one with the keyboard puts focus on the next
+// one's Allow, and after the last back where it was before.
+let jrShown = null, jrReturn = null;
+function joinRequests(announce = false) {
+  const box = $("join-reqs");
+  const q = gate ? gate.lobby : [];
+  const head = q[0];
+  if (!head) {
+    const hadFocus = box.contains(document.activeElement);
+    box.hidden = true; jrShown = null;
+    if (hadFocus) { const back = jrReturn; jrReturn = null; (back?.isConnected ? back : $("share-btn"))?.focus({ preventScroll: true }); }
+    return;
+  }
+  const line = requestLine(head.name, head.meta);
+  const changed = jrShown !== head.id;
+  const hadFocus = box.contains(document.activeElement);
+  jrShown = head.id;
+  $("jr-line").textContent = line;
+  $("jr-sub").textContent = head.meta?.api ? "An API client (pooled serve) that typed the room code. Once in, it can ask the model and see the chat."
+    : "It typed the room code. Once in, it can hold layers and see the chat.";
+  $("jr-more").textContent = q.length > 1 ? `${q.length - 1} more waiting` : "";
+  box.hidden = false;
+  if (changed && hadFocus) $("jr-allow").focus({ preventScroll: true });
+  if (announce) {
+    const n = q.length;
+    $("jr-live").textContent = "";
+    setTimeout(() => { $("jr-live").textContent = `${requestLine(q[n - 1].name, q[n - 1].meta)}. Allow or Deny it under the header${n > 1 ? `; ${n} requests waiting` : ""}.`; }, 50);
+    if (document.visibilityState === "hidden") toast(requestLine(q[n - 1].name, q[n - 1].meta));
+  }
+}
+$("join-reqs").addEventListener("focusin", (e) => { if (!jrReturn && e.relatedTarget && !$("join-reqs").contains(e.relatedTarget)) jrReturn = e.relatedTarget; });
+$("jr-allow").addEventListener("click", () => { if (jrShown) answerJoin(jrShown, true); });
+$("jr-deny").addEventListener("click", () => { if (jrShown) answerJoin(jrShown, false); });
+// Room settings: Ask before new devices join (the host's gate; saved with the room)
+function askSwitch() { if ($("ask-join")) $("ask-join").checked = !!gate?.ask; }
+$("ask-join")?.addEventListener("change", (e) => {
+  if (!gate) return;
+  gate.ask = e.target.checked;
+  toast(gate.ask ? "New devices wait until you let them in" : "Anyone with the room code can join now");
+  log("room", gate.ask ? "asking before new devices join" : "not asking before new devices join: the room code is enough");
+  saveHost();
+});
+
 // the host: a device asking for the name of a quiet one is pinged first (room/liveness.js); if the
 // quiet one did not answer by the time the hello is looked at again, its old link is dropped
 const probedHellos = new WeakMap();   // hello message -> when its namesake was pinged
@@ -806,8 +1321,20 @@ function meshConnect(targetId) {
   const conn = peer.connect(targetId, { reliable: true });
   conn.on("open", () => {
     wire(conn, undefined, undefined, true);
-    conn.send({ t: "hello", name: myName, meta: myMeta, v: PROTOCOL });
+    conn.send(helloFor(targetId));
   });
+}
+// the hello this device sends on a link it opened. To the host it also says it can wait in the
+// lobby (join: 1) and shows what gets it in: its pass, and the invite key from the link it came by.
+// Never to anyone else: another device must not learn them.
+function helloFor(id, extra = {}) {
+  const h = { t: "hello", name: myName, meta: myMeta, v: PROTOCOL, ...extra };
+  if (!isHost && id === PREFIX + roomCode) {
+    h.join = 1;
+    if (myPass) h.pass = myPass;
+    if (joinKey) h.key = joinKey;
+  }
+  return h;
 }
 
 async function bwTest(id) {
@@ -857,13 +1384,73 @@ setInterval(() => {
     const heard = lastHeard(e);
     if (isSilentGone({ now, heard, toHost: id === PREFIX + roomCode, phone: isPhoneMeta(e.meta), loading })) {
       log("room", `${e.name || id} stopped answering for ${Math.round((now - heard) / 1000)} s: dropping it`);
+      e.dead = true;
       try { e.conn.close(); } catch {}
     }
   }
   broadcastAll({ t: "ping", ts: now });
 }, PING_MS);
 
-const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
+// --- drop detection (room/liveness.js) ---
+// While an answer runs, the host pings every device in the chain twice a second and treats
+// anything it hears from one (a pong, any message, any wire slice) as a sign of life. A device
+// silent past deadAfter(rtt) (3.5-5 s) is held: the host says so at once, the answer waits
+// for it (Stop gives up) and a new question waits for it. A frozen device that comes back finishes
+// the answer and keeps its place and layers (no re-deal); a link ICE gives up on (~15 s) fails the
+// answer (chainLinkLost) and is redialed; a device that stays silent is dropped by the ping loop
+// above (SILENT_MS, longer for a phone), which puts the room in the degraded / re-deal state.
+// ?hb=0 turns it off.
+const liveness = makeLiveness();
+const HB_ON = new URLSearchParams(location.search).get("hb") !== "0";
+let hbLast = 0;
+function hbLoop() {
+  const now = performance.now();
+  const stalled = hbLast && now - hbLast > STALL_MS;   // this tab did not run: its inbox is stale
+  hbLast = now;
+  if (isHost && !stalled) hbSuspects(now);
+  const on = HB_ON && isHost && ai.role === "host" && (ai.busy === "gen" || ai.busy === "code") && ai.chain.length > 0 && !ai.degraded;
+  if (!on) { hbDisarm(liveness); hbTick(liveness, now, []); return; }
+  hbArm(liveness, now);
+  const ids = ai.chain.filter((id) => conns.has(id));
+  for (const id of ids) hbHeard(liveness, id, Math.max(0, lastHeard(conns.get(id))));
+  const r = hbTick(liveness, now, ids, (id) => conns.get(id)?.rtt);
+  if (r.ping) for (const id of ids) sendTo(id, { t: "ping", ts: now });
+  for (const { id, silentMs, limitMs } of r.dead) {
+    const e = conns.get(id);
+    if (!e || e.suspect) continue;
+    e.suspect = { since: now - silentMs };
+    console.warn(`[room] ${e.name} silent ${silentMs} ms (limit ${limitMs} ms, rtt ${e.rtt ?? "?"} ms): holding the answer for it`);
+    log("room", `${e.name} stopped responding; waiting for it`);
+    noteLink(peer.id + "|" + id, e.name, false);   // a new question waits for it (linksUp)
+    // the answer is held, not failed: frames on a frozen link are late, not lost, and a device that
+    // comes back finishes it. Stop gives up now; a link ICE gives up on fails it (chainLinkLost).
+    aiStatus(`${e.name} stopped responding; waiting for it (Stop gives up)…`);
+    toast(`${e.name} stopped responding; waiting for it`);
+  }
+}
+// held devices: back once they answer a ping again. One that stays silent is dropped by the ping
+// loop above (SILENT_MS for a computer, longer for a phone), which takes the departure path.
+function hbSuspects(now) {
+  for (const [id, e] of conns) {
+    if (!e.suspect) continue;
+    // back only on a round trip: a pong to a ping sent after the silence began (a late packet
+    // still draining from before the freeze does not count)
+    if (now - (e.suspect.pinged || 0) >= 500) { e.suspect.pinged = now; sendTo(id, { t: "ping", ts: now }); }
+    if (suspectBack(e.pongFor || 0, e.suspect.since)) {
+      e.suspect = null;
+      noteLink(peer.id + "|" + id, e.name, true);
+      log("room", `${e.name} is responding again`);
+      toast(`${e.name} is back`);
+    }
+  }
+}
+setInterval(hbLoop, 250);
+// tests: the longest silence seen per chain device while answering, and the limits in force
+window.pooledLiveness = () => ({ armed: liveness.armed,
+  maxSilence: Object.fromEntries([...liveness.maxSilence].map(([id, ms]) => [conns.get(id)?.name || id, Math.round(ms)])),
+  limit: Object.fromEntries([...liveness.maxSilence.keys()].map((id) => [conns.get(id)?.name || id, deadAfter(conns.get(id)?.rtt)])) });
+
+const stepGB = (d) => { const i = $("join-gb"); const lo = parseFloat(i.min) || 1; const st = parseFloat(i.step) || 1; i.value = Math.min(parseFloat(i.max) || 64, Math.max(lo, (parseFloat(i.value) || lo) + d * st)); };
 $("gb-minus").addEventListener("click", () => stepGB(-1));
 $("gb-plus").addEventListener("click", () => stepGB(1));
 // a typed amount is clamped like the steps once the box is left (100 becomes 64, -5 the minimum)
@@ -889,99 +1476,204 @@ function joinWait(on, text = "") {
   $("join-screen").classList.toggle("waiting", !!on);
   $("join-wait").hidden = !on;
   if (text) {
-    const m = /^(.*room )([A-Z0-9]{4,6})(.*)$/.exec(text), el = $("jw-t");
+    const m = /^(.*room )([A-Z0-9]{3}-[A-Z0-9]{3}|[A-Z0-9]{4,6})(.*)$/.exec(text), el = $("jw-t");
     if (m) { const b = document.createElement("b"); b.textContent = m[2]; el.replaceChildren(m[1], b, m[3]); } else el.textContent = text;
   }
 }
+// --- network: the optional TURN relay (room/ice.js) ---
+function storedTurn() { try { return localStorage.getItem(TURN_KEY); } catch { return null; } }
+function turnConfig() { return turnFrom(new URLSearchParams(location.search), storedTurn()); }
+function turnForm() {
+  const t = turnConfig();
+  const note = (text) => { $("turn-note").textContent = text; };
+  if (t?.from === "url") note("set by this page's link (?turn=)");
+  else if (t?.urls?.length) note("relay saved");
+  let saved = null; try { saved = JSON.parse(storedTurn() || "null"); } catch {}
+  if (saved) { $("turn-url").value = [].concat(saved.urls || []).join(", "); $("turn-user").value = saved.username || ""; $("turn-cred").value = saved.credential || ""; $("turn-force").checked = !!saved.force; }
+  $("turn-save").addEventListener("click", () => {
+    const n = normTurn({ urls: $("turn-url").value, username: $("turn-user").value.trim(), credential: $("turn-cred").value, force: $("turn-force").checked });
+    if (!n || !n.urls.length) { note(n?.bad ? `not a relay URL: ${n.bad[0]} (want turn:host:port or turns:host:port)` : "enter the relay's URL first"); return; }
+    try { localStorage.setItem(TURN_KEY, JSON.stringify({ urls: n.urls, username: n.username, credential: n.credential, force: n.force })); } catch { note("this browser won't save it (private window?)"); return; }
+    note(n.bad ? `saved; ignored ${n.bad.join(", ")}` : "saved");
+  });
+  $("turn-clear").addEventListener("click", () => {
+    try { localStorage.removeItem(TURN_KEY); } catch {}
+    for (const id of ["turn-url", "turn-user", "turn-cred"]) $(id).value = "";
+    $("turn-force").checked = false;
+    note("removed");
+  });
+}
+if ($("join-net")) turnForm();
+
 function joinFailed(text) {
   joinWait(false);
+  $("join-status").classList.remove("signal-down");
   $("join-status").textContent = text;
   $("create-btn").disabled = $("join-btn").disabled = false;
   // on a phone the status line sits below the fold: bring it to where the user is looking
   $("join-status").scrollIntoView({ block: "center", behavior: "smooth" });
 }
 // --- join / create ---
-async function start(create, resume = null) {
+// from: where in the server list to start (a joiner that found no room on one server tries the next)
+async function start(create, resume = null, from = 0) {
+  if (resume?.guest) { $("name-input").value = resume.name; if (resume.gb) $("join-gb").value = resume.gb; }
   myName = resume?.name || $("name-input").value.trim() || (create ? "host" : "peer") + "-" + rand(2);
   if (!VQ.get("embed")) try { sessionStorage.setItem(NAME_KEY, myName); } catch {}   // a virtual device's iframe shares the tab's storage
-  const code = resume?.code || (create ? rand(4) : $("code-input").value.trim().toUpperCase());
+  const code = resume?.code || (create ? randomCode() : parseCode($("code-input").value));
   if (!code) { $("join-status").textContent = "Enter a room code"; return; }
+  // what gets this device in: the invite key when it came by that room's link (or pasted it), and
+  // the pass the host gave this tab before (a reload, or joining again after the room was over)
+  if (!create) {
+    joinKey = code === linkCode && linkKey ? linkKey : code === pastedLink.code ? pastedLink.key : "";
+    myPass = resume?.pass || storedPass(code);
+    admission = "wait";
+  }
   $("create-btn").disabled = $("join-btn").disabled = true;
-  joinWait(true, create ? (resume ? `Opening room ${code} again` : "Opening your room") : `Joining room ${code}`);
+  joinWait(true, create ? (resume ? `Opening room ${formatCode(code)} again` : "Opening your room") : `Joining room ${formatCode(code)}`);
+  $("join-status").classList.remove("signal-down");
   $("join-status").textContent = "Connecting…";
   myMeta = await metaPromise;
   const gbIn = parseFloat($("join-gb").value);
-  myMeta.contribGB = Math.min(64, Math.max(myMeta.phone ? 0.5 : 1, gbIn > 0 ? gbIn : (myMeta.contribGB || 1)));
+  myMeta.contribGB = Math.min(lendMax(), Math.max(lendMin(), gbIn > 0 ? gbIn : (myMeta.contribGB || 1)));
+  // killed while loading layers last time (the breadcrumb below): come back with the smallest share
+  if (myMeta.pledgeMax && diedCrumb?.loading) myMeta.contribGB = lendMin();
 
-  // STUN for hole-punching; TURN as fallback for symmetric NAT / CGNAT peers.
-  // ICE prefers direct candidates, so TURN only carries traffic when a direct
-  // path is impossible.
-  const ICE = {
-    iceServers: [
-      { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
-      // TURN fallback for symmetric-NAT peers goes here (needs credentials —
-      // see TURN_CREDS below); without it, strict-NAT peers can't join.
-      ...(window.TURN_SERVERS || []),
-    ],
-  };
+  // STUN for hole-punching; a TURN relay when there is one (room/ice.js: ?turn=, the Network box
+  // under the join form, window.TURN_SERVERS, else the site's default relay from /api/turn with
+  // credentials that expire). ICE prefers direct candidates, so the relay only carries traffic when
+  // a direct path is impossible (a work network that blocks UDP), or when ?relay=1 forces it.
+  const turn = turnConfig();
+  if (turn?.bad) log("room", `ignored relay URL${turn.bad.length > 1 ? "s" : ""} ${turn.bad.join(", ")} (want turn:host:port or turns:host:port)`);
+  const extra = Array.isArray(window.TURN_SERVERS) ? window.TURN_SERVERS : [];
+  const params = new URLSearchParams(location.search);
+  // is UDP getting out of this network? (answers in a few seconds; used to explain a failed join)
+  udpProbe = probeUdp(window.RTCPeerConnection);
+  const auto = wantDefaultRelay(params, location.hostname, turn, extra) ? await defaultRelay() : null;
+  const ICE = iceConfig(turn, [...extra, ...markAuto(auto?.iceServers)], { force: params.get("relay") === "1" });
+  relayFrom = turn?.urls?.length ? "yours" : extra.length ? "site" : auto ? "default" : null;
+  relayOn = ICE.iceServers.some(isRelayServer);
+  if (auto) keepRelayFresh(ICE, auto.ttl);
   // PeerJS is a deferred script from cdn.jsdelivr.net (p2p.html): without it the page still renders, so say why nothing connects
   if (typeof Peer !== "function") { joinFailed("couldn't load the connection library from cdn.jsdelivr.net (offline, or blocked by an extension or network). Reload to try again"); return; }
-  // host claims the well-known id for the code; joiners get random ids
-  peer = new Peer(create ? PREFIX + code : undefined, { debug: 1, config: ICE, ...SIGNAL_OPTS });
+  // a host coming back after a reload goes to the server its room was on first: its guests are there
+  let servers = SIGNALS;
+  const was = resume?.signal && !SIGNAL ? parseServer(resume.signal, PAGE_SECURE) : null;
+  if (was) servers = [was, ...SIGNALS.filter((x) => x.spec !== was.spec)];
+  // host claims the well-known id for the code; joiners get random ids. The first server that answers
+  // wins; one that is down or unreachable hands over to the next (room/signal.js).
+  let got;
+  try {
+    got = await openPeer(Peer, create ? PREFIX + code : undefined, { debug: 1, config: ICE }, servers, {
+      from,
+      onTry: (s, i, err) => {
+        $("join-status").textContent = err ? `${servers[i - 1].label} isn’t answering; trying ${s.label}…` : servers.length > 1 || from ? `Connecting to ${s.label}…` : "Connecting…";
+        if (err) log("room", `signaling: ${servers[i - 1].label} failed (${err.type || err.message}); trying ${s.label}`);
+      },
+    });
+  } catch (err) {
+    // resuming: the old tab's id is still registered until the signaling server notices it left
+    if (resume && err.type === "unavailable-id" && (resume.tries = (resume.tries || 0) + 1) < 30) {
+      $("join-status").textContent = `waiting for room ${code} to be free again (the old tab is still registered)…`;
+      setTimeout(() => start(true, resume), 3000);
+      return;
+    }
+    if (err.type === "signaling-down") { signalingDown(err.tried); return; }
+    joinFailed(err.type === "unavailable-id" ? "that code is already hosting a room: press Join instead"
+      : "error: " + (err.type || err.message));
+    return;
+  }
+  peer = got.peer;
+  signalServer = got.server;
+  if (got.index > 0 || from) log("room", `signaling on ${signalServer.label}`);
+  watchSignaling(peer);
+  networkNote(create);
 
-  peer.on("open", () => {
-    isHost = create;
-    roomCode = code;
-    if (create) { enterRoom(); if (resume) resumeHost(resume); return; }
+  isHost = create;
+  roomCode = code;
+  // the host's gate: a reloaded host keeps its invite key (links already shared keep working), the
+  // passes it gave out and the Ask setting; a room saved by an older build gets a new one
+  if (create) { gate = resume ? restoreGate(resume.gate, { ask: ASK_DEFAULT }) : makeGate({ ask: ASK_DEFAULT }); askSwitch(); }
+  let joinTimer = null;
+  if (create) { enterRoom(); if (resume) resumeHost(resume); }
+  else {
     // joiner: connect to host
     $("join-status").textContent = "Reaching the other devices…";
     const conn = peer.connect(PREFIX + code, { reliable: true });
     // "still connecting" after a few seconds; more time while the two devices are still finding a path
     const t0 = performance.now(), me = peer;
-    const timeout = setInterval(() => {
+    joinTimer = setInterval(() => {
       // failed already (peer.on("error")), or a newer Join press owns the screen now
-      if (peer !== me || !$("join-btn").disabled) { clearInterval(timeout); return; }
-      const step = joinStep(performance.now() - t0, conn.peerConnection?.iceConnectionState);
-      if (step.fail) { clearInterval(timeout); try { conn.close(); } catch {} joinFailed(step.fail); }   // closed, so a late open can't pull a failed join into the room
-      else if (step.status) $("join-status").textContent = step.status;
+      if (peer !== me || !$("join-btn").disabled) { clearInterval(joinTimer); return; }
+      const pc = conn.peerConnection, ice = pc?.iceConnectionState;
+      const step = joinStep(performance.now() - t0, ice);
+      if (step.fail) {
+        clearInterval(joinTimer);
+        try { conn.close(); } catch {}   // closed, so a late open can't pull a failed join into the room
+        // the host answered (or ICE got as far as checking): the room exists, the path is what failed,
+        // and a relay (TURN) server gets around that (room/ice.js)
+        const found = !!pc?.remoteDescription || ice === "checking" || ice === "failed" || ice === "disconnected";
+        joinFailed(!found ? step.fail : pathFailText(relayOn, relayFrom, udpSeen));
+        if (found) docsLink();
+        if (found && $("join-net")) $("join-net").open = true;
+      } else if (step.status) $("join-status").textContent = step.status;
     }, 1000);
     conn.on("open", () => {
-      clearInterval(timeout);
+      clearInterval(joinTimer);
       wire(conn, "host", undefined, true);
       let died = null;
-      if (!VQ.get("embed")) try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c && Date.now() - c.t < 10 * 60 * 1000) died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000) }; } catch {}
-      conn.send({ t: "hello", name: myName, meta: myMeta, died, v: PROTOCOL });
-      // put the room in the address bar (a typed code never was), so a reload joins it again like a link,
-      // under the same name: the host re-seats a device's layers by name (aiRejoin)
-      if (!VQ.get("embed")) try { history.replaceState(history.state, "", roomLink()); } catch {}
-      enterRoom();
+      if (!VQ.get("embed") && diedCrumb) { const c = diedCrumb; died = { during: c.s, ago: Math.round((Date.now() - c.t) / 1000), at: c.t, loading: !!c.loading }; }
+      conn.send(helloFor(conn.peer, { died, ...(resume?.guest ? { back: 1 } : {}) }));
+      // into the room once the host lets this device in (admit), or at once when its hello shows a host
+      // from before the gate (guestIn); until then the host holds it in its lobby (the waiting screen)
+      $("join-status").textContent = "Waiting for the host…";
+      admission = "wait";
+      afterAdmit = () => {
+        // put the room in the address bar (a typed code never was), so a reload joins it again like a link,
+        // under the same name: the host re-seats a device's layers by name (aiRejoin). Without the key:
+        // this tab has its pass now, and the address bar is no place for a secret
+        if (!VQ.get("embed")) try { history.replaceState(history.state, "", roomLink()); } catch {}
+        enterRoom();
+        saveGuest();
+        if (resume?.guest) {
+          const what = died ? `This tab was reloaded ${died.ago} s ago while ${died.during.slice(0, 80)}${myMeta?.phone ? " (iOS reloads a page that uses too much memory, or one left in the background)" : ""}.` : "This tab was reloaded.";
+          toast(`${what} Back in room ${formatCode(code)}.`);
+          log("room", `${what} Rejoined room ${code} as ${myName}; the host puts this device back in its slot.`);
+        }
+      };
+      // a host that never says hello at all: go in as before rather than wait forever
+      setTimeout(() => { if (admission === "wait" && peer === me && !conns.get(conn.peer)?.hostHello) guestIn(); }, 15000);
     });
-  });
+  }
 
   peer.on("connection", (conn) => {
     conn.on("open", () => {
       if (conn.label === "stripe") {   // extra association for the hidden-state wire, not a new peer
+        // (the host: one from a device still in its lobby waits there, and is attached when it is let in)
+        const L = isHost && lobbyConns.get(conn.peer);
+        if (L) { L.stripes.push(conn); return; }
         const e = conns.get(conn.peer);
-        if (e) { attachWire(e.link, conn, (m) => onData(conn.peer, m)); e.stripes.push(conn); }
+        if (e) {
+          attachWire(e.link, conn, (m) => onData(conn.peer, m)); e.stripes.push(conn);
+          conn.on("close", () => { e.stripes = e.stripes.filter((c) => c !== conn); });
+          watchLink(conn, () => conn.close());   // the dialing side opens a new one
+        }
         return;
       }
-      wire(conn);
+      // the host: a new link waits at the gate (its hello decides) instead of joining the room at once
+      if (isHost) gateConn(conn); else wire(conn);
       // the host says it answers API clients (docs/protocol.md "API clients"); not part of myMeta,
       // which the roster shows everyone
-      conn.send({ t: "hello", name: myName, meta: isHost ? { ...myMeta, api: 1 } : myMeta, v: PROTOCOL });
+      // api: 2 = it also answers v2 asks (tools, structured output); ctx: its context size now
+      // gate: 1 = this host holds new devices until it lets them in (admit / lobby); ask: whether it asks
+      conn.send({ t: "hello", name: myName, meta: isHost ? { ...myMeta, api: 2, ctx: ctxMax() } : myMeta, v: PROTOCOL,
+        ...(isHost ? { gate: 1, ask: gate?.ask ? 1 : 0 } : {}) });
     });
   });
 
   peer.on("error", (err) => {
-    // resuming: the old tab's id is still registered until the signaling server notices it left
-    if (resume && err.type === "unavailable-id" && (resume.tries = (resume.tries || 0) + 1) < 30) {
-      $("join-status").textContent = `waiting for room ${code} to be free again (the old tab is still registered)…`;
-      try { peer.destroy(); } catch {}
-      peer = null;
-      setTimeout(() => start(true, resume), 3000);
-      return;
-    }
     if ($("room-screen").style.display === "flex") {   // in the room already: not a join failure
+      // losing the signaling server is shown by watchSignaling, which reconnects; the room keeps going
+      if (FALLBACK_ERRORS.has(err.type)) { console.warn("signaling", err.type); return; }
       // a link to a device that left (the 3 s host-return retries, a chain neighbour): those callers
       // say what it means themselves, and a line per retry would flood the log
       if (err.type === "peer-unavailable") { console.warn("peer", err.message); return; }
@@ -992,11 +1684,117 @@ async function start(create, resume = null) {
       if (peerErrorLoud(err.type)) toast(text, { kind: "error" });
       return;
     }
-    joinFailed(peerErrorText(err.type));
+    // no such room on this server: the host may have fallen back to a later one in the list
+    if (!create && err.type === "peer-unavailable" && got.index + 1 < servers.length) {
+      clearInterval(joinTimer);
+      const next = servers[got.index + 1];
+      log("room", `no room ${code} on ${signalServer.label}; looking on ${next.label}`);
+      const p = peer; peer = null; try { p.destroy(); } catch {}
+      start(false, null, got.index + 1);
+      return;
+    }
+    clearInterval(joinTimer);
+    joinFailed(FALLBACK_ERRORS.has(err.type) ? `Lost the signaling server (${signalServer.label}) while joining. Try again.` : peerErrorText(err.type));
   });
 }
 
 const peerErrorShown = { text: "", t: 0 };
+
+// --- the relay this tab uses, and what the network allows (room/ice.js) ---
+// the default relay's credentials expire: fetch new ones before they do, so links made later in a
+// long session (a device joining, a chain relink, a stripe) still authenticate. Links already up
+// keep their allocation.
+// the site's relay (/api/turn), reused while less than half its lifetime has passed: start() runs
+// again on a resume retry (every 3 s) or a fallback to the next signaling server
+async function askRelay() {
+  const relay = await fetchRelay(window.fetch?.bind(window), window.POOLED_TURN_ENDPOINT || undefined);
+  if (relay) relayGot = { relay, at: performance.now() };
+  return relay;
+}
+async function defaultRelay() {
+  if (relayGot && performance.now() - relayGot.at < relayGot.relay.ttl * 500) return relayGot.relay;
+  return askRelay();
+}
+function keepRelayFresh(cfg, ttl) {
+  clearTimeout(relayTimer);
+  relayTimer = setTimeout(async () => {
+    const fresh = await askRelay();
+    if (fresh) swapRelayServers(cfg, fresh.iceServers);
+    keepRelayFresh(cfg, fresh ? fresh.ttl : ttl / 4);   // failed: try again sooner
+  }, refreshInMs(ttl));
+}
+// why a join that found the room still failed, from what this tab knows about its network
+function pathFailText(relay, from, udp) {
+  const blocked = udp && !udp.udpOut;
+  if (relay && from === "yours") return "Found the room, but could not connect, not even through the relay (TURN) server. Check its address and password under Network, or try another network.";
+  if (relay) return "Found the room, but could not connect, not even through the relay (TURN) server. This network may block it too (some work networks only let web traffic out). Try another network, or set up your own relay under Network.";
+  return blocked
+    ? "Found the room, but this network blocks direct (UDP) connections and there is no relay (TURN) server to go around it. Add one under Network below, or try another network (a phone hotspot works)."
+    : "Found the room, but these two devices can't reach each other (a strict firewall or mobile network on one side). A relay (TURN) server gets around that: add one under Network below. Or put both on the same Wi-Fi, or try another network.";
+}
+// a "Rooms at work" link after the join status text
+function docsLink() {
+  const a = document.createElement("a");
+  a.href = WORK_DOCS; a.target = "_blank"; a.rel = "noopener";
+  a.textContent = " Rooms at work";
+  $("join-status").append(" See", a, ".");
+}
+// debug / tests: what this tab knows about its network (`pooledNet()` in the console)
+window.pooledNet = () => ({ relay: relayOn, from: relayFrom, udp: udpSeen });
+// once the probe answers: say which relay this tab has, and warn when the network looks closed
+function networkNote(host) {
+  if (relayOn) log("room", relayFrom === "default" ? "relay (TURN) ready: links go direct when they can, through the relay when a network blocks that" : "relay (TURN) set: links go direct when they can, through the relay when they can't");
+  Promise.resolve(udpProbe).then((u) => {
+    udpSeen = u;
+    const adv = networkAdvice(u, relayOn);
+    if (!adv) return;
+    log("room", adv.text + (adv.level === "warn" ? ` (${WORK_DOCS})` : ""));
+    if (adv.level === "warn" && host) toast(adv.text, { kind: "error" });
+  }).catch(() => {});
+}
+
+// No signaling server answered: say what that means (the room can't be found or opened, a running
+// room would be fine) and what to do, on the join screen.
+function signalingDown(tried) {
+  const names = tried.filter((x, i) => tried.indexOf(x) === i).join(", ");
+  joinFailed(`Can’t reach the signaling server${tried.length > 1 ? "s" : ""} (${names}). Devices use ${tried.length > 1 ? "them" : "it"} only to find each other, and ${tried.length > 1 ? "they" : "it"} may be down or blocked on this network. Rooms already running are not affected. Try again in a minute, or `);
+  const a = document.createElement("a");
+  a.href = "https://github.com/Nehanth/pooled/blob/main/docs/self-host-signaling.md";
+  a.target = "_blank"; a.rel = "noopener";
+  a.textContent = "run your own signaling server";
+  $("join-status").append(a, ".");
+  $("join-status").classList.add("signal-down");
+}
+
+// In a room, the signaling server can drop (the cloud restarts, the network blips). The links already
+// open are direct and keep working; only new devices can't find the room. Say so and reconnect with
+// backoff (PeerJS keeps our id: reconnect() re-registers it) until the server is back.
+function watchSignaling(p) {
+  let tries = 0, timer = null;
+  const again = () => {
+    timer = null;
+    if (p !== peer || p.destroyed || !p.disconnected) return;
+    try { p.reconnect(); } catch {}
+    timer = setTimeout(again, reconnectDelay(tries++));
+  };
+  p.on("disconnected", () => {
+    if (p !== peer || p.destroyed) return;
+    signalNote(true);
+    if (!timer) timer = setTimeout(again, reconnectDelay(tries++));
+  });
+  p.on("open", () => {
+    clearTimeout(timer); timer = null; tries = 0;
+    if (p === peer && signalNote.on) { signalNote(false); toast("signaling is back: new devices can join again"); }
+  });
+}
+function signalNote(on) {
+  signalNote.on = on;
+  const el = $("signal-note");
+  if (!el) return;
+  el.hidden = !on;
+  if (on) el.textContent = `Lost the signaling server (${signalServer?.label || "PeerJS"}). The devices here keep working; new devices can’t join until it’s back. Reconnecting…`;
+}
+
 let wakeLock = null, awakeVideo = null;
 let awakeMode = null;
 let overClosed = false;   // the Room over card was closed with the room still over (see roomOver)   // how this screen stays on: "lock" (the Wake Lock API), "video", "none"; null before the first try
@@ -1029,6 +1827,11 @@ async function keepAwake() {
   }
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") { keepAwake(); document.title = "pooled \u00b7 room"; } });
+// Whether this device is kept awake while it holds layers (Wake Lock, or the silent video on older
+// iOS). No header icon (the owner found it noise); the lend screen and the side hint still warn
+// when the screen may sleep. window.pooledAwake() is for tests and debugging.
+function holdsLayers() { return !!ai.engine && (ai.role === "host" || ai.role === "worker"); }
+window.pooledAwake = () => ({ holds: holdsLayers(), awake: !!wakeLock || !!(awakeVideo && !awakeVideo.paused) });
 document.addEventListener("touchstart", keepAwake, { passive: true });
 // Lend this device: this device as a full screen that shows its layers and the passes going through it
 function computeState() {
@@ -1049,6 +1852,10 @@ function computeState() {
     bytes: ai.range || mineDeal ? ai.shardBytes || 0 : 0,   // this device's share of the weights, once its load has started
     awake: awakeMode, ios: myMeta?.ua === "iPhone" || myMeta?.ua === "iPad",
     over: roomOver(),
+    // why this device holds no layers (the host's deal: not needed, a pledge under one layer, or it
+    // joined after the start), and what it holds of what it pledged
+    out: ai.outWhy?.[myName] || null, phone: !!myMeta?.phone || isPhoneMeta(myMeta),
+    held: ai.heldGB?.[myName] ?? null, pledge: myMeta?.webgpu ? pledgeGB(myMeta) : null,
   };
 }
 // the room ended, or the host is gone and may come back: the Room over card says which. Closing the
@@ -1060,37 +1867,65 @@ function roomOver() {
   return overClosed ? card : null;
 }
 $("room-over-close").addEventListener("click", () => { overClosed = true; });
-const compute = computeScreen({ state: computeState, keepAwake, newRoom: () => $("room-over-new").click() });
+// Serve API: the header's black button opens the dark page, this device's layers and passes beside
+// the endpoint and how to connect (the API half is apiPanel's, below)
+const compute = computeScreen({ state: computeState, keepAwake, newRoom: () => $("room-over-new").click(), onShow: apiShown });
 $("compute-open").addEventListener("click", () => compute.open());
-// the header's dots button says whether this device is working: "on" while it holds layers
+// the button's mark says whether this device is working ("on" while it holds layers: the dots breathe),
+// its tooltip which layers; its name stays "Serve API"
 function deviceMark() {
   const s = computeState(), b = $("compute-open");
   const on = s.lo != null && s.hi != null && s.hi > s.lo && s.phase !== "idle";   // lo == hi holds nothing
-  const tip = on ? (s.phase === "loading" ? `This device \u00b7 loading layers ${s.lo + 1}\u2013${s.hi}` : `This device \u00b7 holds layers ${s.lo + 1}\u2013${s.hi}`) : "This device";
+  const tip = on ? (s.phase === "loading" ? `This device is loading layers ${s.lo + 1}\u2013${s.hi}` : `This device holds layers ${s.lo + 1}\u2013${s.hi}`) : "Use this room from your own tools";
   if (b.dataset.tip === tip && b.classList.contains("on") === on) return;
   b.classList.toggle("on", on);
   b.dataset.tip = tip;
-  b.setAttribute("aria-label", tip.replace(" \u00b7 ", ": "));
 }
 setInterval(deviceMark, 1000);
 $("create-btn").addEventListener("click", () => { keepAwake(); start(true); });
-// (auto-rejoin removed: the user prefers to see what happened)
+// A guest tab that reloads (the user, or iOS after killing it for memory) walks back into its room under
+// the same name, so the host puts it back in its slot (aiRejoin); the tab says what happened.
+function saveGuest() {
+  if (isHost || !roomCode) return;
+  if (admission !== "in") return;   // only a device the host let in comes back by itself
+  try { sessionStorage.setItem(GUEST_KEY, JSON.stringify({ code: roomCode, name: myName, gb: myMeta?.contribGB, pass: myPass || undefined, t: Date.now() })); } catch {}
+}
+setInterval(() => { if (peer && !isHost && roomCode && document.visibilityState === "visible") saveGuest(); }, 10000);
+addEventListener("pagehide", saveGuest);
 // Join only with a whole code: the greyed button and Enter in a short code do nothing but put the cursor back
-const codeOk = () => /^[A-Z0-9]{4,6}$/i.test($("code-input").value.trim());
+// a whole code: six characters, or four (rooms opened before codes had six, and their links)
+const codeOk = () => !!parseCode($("code-input").value);
 $("join-btn").addEventListener("click", () => { if (!codeOk()) { $("code-input").focus(); return; } keepAwake(); start(false); });
 $("code-input").addEventListener("keydown", (e) => { if (e.key === "Enter" && codeOk()) start(false); });
+// six boxes in two groups of three behind one input: the boxes show its characters, the box the next
+// one goes in has the ring (the input's own text and caret are invisible)
 const codeReady = () => {
+  const v = $("code-input").value, box = $("code-input").parentElement, slots = box.querySelectorAll("i");
+  slots.forEach((el, i) => { el.textContent = v[i] || ""; el.classList.toggle("on", i < v.length); el.classList.toggle("cur", i === Math.min(v.length, slots.length - 1)); });
   $("join-btn").classList.toggle("ready", codeOk());
-  $("code-input").parentElement.classList.toggle("full", $("code-input").value.length >= 4);
+  box.classList.toggle("full", v.length >= slots.length);
 };
-// four boxes, four characters: letters and digits only; the fourth one hands off to Join (on a
-// phone that also closes the keyboard), so no box waits for a fifth
+// letters and digits of the room alphabet only (no I, L, O, U, 0 or 1: no code has them); the sixth
+// hands off to Join (on a phone that also closes the keyboard), so no box waits for a seventh
 $("code-input").addEventListener("input", (e) => {
-  const el = e.target, v = el.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 4);
+  const el = e.target, v = el.value.toUpperCase().replace(/[^A-HJKMNP-TV-Z2-9]/g, "").slice(0, 6);
   if (el.value !== v) el.value = v;
   codeReady();
-  if (v.length === 4 && e.isTrusted && document.activeElement === el) { $("join-btn").focus(); el.parentElement.scrollIntoView({ block: "nearest" }); }
+  if (v.length === 6 && e.isTrusted && document.activeElement === el) { $("join-btn").focus(); el.parentElement.scrollIntoView({ block: "nearest" }); }
   else codeInView();
+});
+// a pasted invite link (or code with its dash): the code fills the boxes, and the link's key goes with the join
+$("code-input").addEventListener("paste", (e) => {
+  const text = (e.clipboardData?.getData("text") || "").trim();
+  let code = "", key = "";
+  if (/^https?:\/\//i.test(text)) {
+    try { const u = new URL(text); code = codeFromLocation(u.pathname, u.search, u.hash); key = keyFromHash(u.hash); } catch {}
+  } else code = parseCode(text);
+  if (!code) return;
+  e.preventDefault();
+  $("code-input").value = code;
+  if (key) { pastedLink.code = code; pastedLink.key = key; }
+  $("code-input").dispatchEvent(new Event("input"));
 });
 // a phone's keyboard shrinks the screen after the boxes took focus: keep the four boxes whole in view,
 // not half under the header or the keyboard (the input is an overlay the browser scrolls to by its caret)
@@ -1105,10 +1940,10 @@ function addVirtual() {
   if (!roomCode) return;
   const q = new URLSearchParams(location.search);
   q.set("code", roomCode); q.set("vname", `virtual-${++virtualN}`); q.set("vgb", "2"); q.set("embed", "1");
-  const path = location.pathname.startsWith("/r/") ? "/room" : location.pathname;
+  const path = (location.pathname.startsWith("/r/") ? "/room" : location.pathname) + "?" + q + (isHost ? keyFragment(gate?.key) : "");   // this computer's own devices: the key, no asking
   const box = document.createElement("div");
   box.className = "vdev";
-  box.innerHTML = `<iframe title="virtual device ${virtualN}" src="${esc(path + "?" + q)}" allow="clipboard-write"></iframe><button type="button" title="close this virtual device">\u00d7</button>`;
+  box.innerHTML = `<iframe title="virtual device ${virtualN}" src="${esc(path)}" allow="clipboard-write"></iframe><button type="button" title="close this virtual device">\u00d7</button>`;
   box.querySelector("button").addEventListener("click", () => box.remove());
   $("virtual").appendChild(box);
   $("virtual").hidden = false;
@@ -1120,20 +1955,40 @@ $("add-virtual").addEventListener("click", addVirtual);
 // elsewhere (a local static server, the emulator), the link keeps this page's path and query
 // (signal=, wire=) and adds ?code=.
 function roomLink() {
-  if (location.pathname === "/room" || location.pathname.startsWith("/r/")) return `${location.origin}/r/${roomCode}`;
-  const q = new URLSearchParams(location.search); q.set("code", roomCode);
-  return `${location.origin}${location.pathname}?${q}`;
+  // a room on anything but the page's usual first server: the link names it, so joiners look there
+  if (location.pathname === "/room" || location.pathname.startsWith("/r/")) {
+    // (dev=0: a signal= link would otherwise open the page in dev mode, see p2p.html)
+    const sig = signalServer && signalServer.spec !== SIGNAL_FIRST ? "?signal=" + encodeURIComponent(signalServer.spec) + (DEV ? "" : "&dev=0") : "";
+    return `${location.origin}/r/${roomCode}${sig}${inviteKey()}`;
+  }
+  const q = shareQuery(location.search); q.set("code", roomCode); q.delete("ask");   // never a relay password in a link
+  if (signalServer && (q.has("signal") || signalServer.spec !== SIGNAL_FIRST)) {
+    if (!q.has("signal") && !DEV) q.set("dev", "0");
+    q.set("signal", signalServer.spec);
+  }
+  return `${location.origin}${location.pathname}?${q}${inviteKey()}`;
 }
+// the host's links carry the invite key (a device that opens one is let in without asking); a guest's
+// don't: it doesn't know the key, and the host is asked about whoever it invites
+function inviteKey() { return isHost && gate ? keyFragment(gate.key) : ""; }
+// a code for a screen reader, one character at a time ("4 T K, G 9 P")
+function spokenCode(c) { return formatCode(c).split("-").map((g) => g.split("").join(" ")).join(", "); }
 function copyRoomLink() {
   const url = roomLink();
-  if (!navigator.clipboard) { toast("room code: " + roomCode); return; }
-  navigator.clipboard.writeText(url).then(() => toast("join link copied")).catch(() => { navigator.clipboard.writeText(roomCode); toast("room code copied"); });
+  if (!navigator.clipboard) { toast("room code: " + formatCode(roomCode)); return; }
+  navigator.clipboard.writeText(url).then(() => toast("join link copied")).catch(() => { navigator.clipboard.writeText(formatCode(roomCode)); toast("room code copied"); });
 }
 function openShare() {
   const url = roomLink();
   $("share-qr").innerHTML = qrSVG(url, { size: 220 });
   $("share-url").textContent = url;
-  $("share-code").textContent = roomCode;
+  $("share-code").textContent = formatCode(roomCode);
+  $("share-code").setAttribute("aria-label", `Room code ${spokenCode(roomCode)}`);
+  // who needs the host's OK: a typed code does (when the host asks), the link doesn't
+  const asks = isHost ? !!gate?.ask : hostAsks;
+  $("share-or").textContent = asks ? (isHost ? "or type the room code (you let the device in)" : "or type the room code (the host lets the device in)") : "or type the room code";
+  $("share-k").textContent = isHost || !asks ? "Open the link or scan the code on another device. It joins this room and adds its memory."
+    : "Open the link or scan the code on another device. The host lets it in, then it adds its memory.";
   $("share-native").hidden = !navigator.share;
   $("share").hidden = false;
   $("share-close").focus({ preventScroll: true });
@@ -1147,8 +2002,6 @@ const overlays = [...document.querySelectorAll(".overlay")];
 let modalReturn = null;   // what had focus before an overlay that opened on its own took it
 function syncModal() {
   const open = overlays.some((o) => !o.hidden);
-  // Serve API is a popover, not an overlay: it closes when one opens over the page (Host reconnecting, Room over)
-  if (open) closeApi(false);
   for (const el of document.querySelectorAll("body > header, #join-screen, #room-screen")) el.inert = open;
   // the compute screen (a lending device's screen) sits above the overlays: while it is up, they wait
   // underneath, out of the Tab order, and take focus only once it closes
@@ -1175,7 +2028,7 @@ $("share-close").addEventListener("click", closeShare);
 $("share").addEventListener("click", (e) => { if (e.target === $("share")) closeShare(); });
 $("room-over-close").addEventListener("click", () => { $("room-over").hidden = true; });
 $("share-copy").addEventListener("click", copyRoomLink);
-$("share-native").addEventListener("click", () => navigator.share?.({ title: "Join my Pooled room", text: `Room ${roomCode}: add this device to the AI model we run together`, url: roomLink() }).catch(() => {}));
+$("share-native").addEventListener("click", () => navigator.share?.({ title: "Join my Pooled room", text: `Room ${formatCode(roomCode)}: add this device to the AI model we run together`, url: roomLink() }).catch(() => {}));
 // the logo leads home. In a room it asks first: it sits in the thumb's corner on a phone, and
 // leaving ends the room for everyone (the host) or takes this device's layers with it
 const logoLink = document.querySelector(".logo a");
@@ -1183,10 +2036,10 @@ logoLink.addEventListener("click", (e) => {
   if (!document.body.classList.contains("in-room")) return;
   if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;   // a new tab or window keeps the room open: no need to ask
   e.preventDefault();
-  $("leave-h").textContent = `Leave room ${roomCode}?`;
+  $("leave-h").textContent = `Leave room ${formatCode(roomCode)}?`;
   $("leave-why").textContent = isHost
     ? (conns.size ? "The room ends for the other devices: this tab holds the conversation and the model's first and last layers." : "The room and its model close.")
-    : `If this device holds some of the model's layers, the room has to re-deal them. You can join again with the code ${roomCode}.`;
+    : `If this device holds some of the model's layers, the room has to re-deal them. You can join again with the code ${formatCode(roomCode)}.`;
   $("leave").hidden = false;
   $("leave-stay").focus({ preventScroll: true });
 });
@@ -1195,6 +2048,8 @@ function closeLeave() { $("leave").hidden = true; syncModal(); focusBack(logoLin
 $("leave-stay").addEventListener("click", closeLeave);
 $("leave").addEventListener("click", (e) => { if (e.target === $("leave")) closeLeave(); });
 $("leave-go").addEventListener("click", () => { location.href = logoLink.href; });
+// waiting for the host to let this device in: give up, back to an empty join screen (the host's prompt goes)
+$("jw-cancel").addEventListener("click", () => { try { broadcastAll({ t: "leaving" }); } catch {} location.href = location.pathname.startsWith("/r/") ? "/room" : location.pathname; });
 $("room-over-new").addEventListener("click", () => { location.href = location.pathname.startsWith("/r/") ? "/room" : location.pathname.replace(/\?.*$/, ""); });
 // A host that reloads its tab goes straight back into its room (no note on the join screen): only on a
 // real reload of this tab, and only while the guests are still waiting for it (HOST_WAIT_MS).
@@ -1202,17 +2057,28 @@ const reloaded = (() => { try { return performance.getEntriesByType("navigation"
 const backAsHost = reloaded ? savedHost() : null;
 // a link with a room code fills it in and joins once the GPU probe is done
 const linkCode = codeFromLocation(location.pathname, location.search, location.hash);
+// and the invite key in its fragment (#k=, never sent to a server): the host lets this device in without asking
+const linkKey = linkCode ? keyFromHash(location.hash) : "";
+// an invite link pasted into the code boxes: its code fills them, its key goes with the join
+const pastedLink = { code: "", key: "" };
 // a virtual device (an iframe the host added, see addVirtual): its name, pledge and a compact page
 const VQ = new URLSearchParams(location.search);
 if (VQ.get("embed") === "1") document.documentElement.classList.add("embed");
 if (VQ.get("vname")) $("name-input").value = VQ.get("vname").slice(0, 20);
 else try { const n = sessionStorage.getItem(NAME_KEY); if (n) $("name-input").value = n; } catch {}   // this tab's name from before a reload
-if (+VQ.get("vgb") > 0) $("join-gb").value = +VQ.get("vgb");
+if (+VQ.get("vgb") > 0) { $("join-gb").value = +VQ.get("vgb"); joinGbChosen = true; }
+let backAsGuest = null;
+try { backAsGuest = reloaded && !VQ.get("embed") ? guestResume(JSON.parse(sessionStorage.getItem(GUEST_KEY) || "null"), { linkCode }) : null; } catch {}
 if (backAsHost && Date.now() - backAsHost.t < 60000 && !(linkCode && linkCode !== backAsHost.code)) {
   metaPromise.then(() => { if (!peer) start(true, backAsHost); });
+} else if (backAsGuest) {
+  $("code-input").value = backAsGuest.code; codeReady();
+  joinWait(true, `Joining room ${formatCode(backAsGuest.code)} again`);
+  $("join-status").textContent = "This tab was reloaded: rejoining\u2026";
+  metaPromise.then(() => { if (!peer) start(false, { ...backAsGuest, guest: true }); });
 } else if (linkCode) {
   $("code-input").value = linkCode; codeReady();
-  joinWait(true, `Joining room ${linkCode}`);
+  joinWait(true, `Joining room ${formatCode(linkCode)}`);
   $("join-status").textContent = "Checking this device\u2026";
   metaPromise.then(() => { if (!peer) start(false); });
 } else if (window.pooledEarly) {
@@ -1256,28 +2122,39 @@ async function rangeFetch(url, lo, hi, noCache = false) {
   const src = !noCache && ai.wsrc?.url === url ? ai.wsrc.map.get(lo + "-" + hi) : null;
   if (src) {
     try {
-      const buf = await peerGet(src, url, lo, hi);
-      ai.peerBytes = (ai.peerBytes || 0) + buf.byteLength;
-      const resp = new Response(buf, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(buf.byteLength) } });
-      if (c && !myMeta?.phone) c.put(key, resp.clone()).catch(() => {});
+      // streamed: the parts go to the reader as they arrive, with flow control (peerGet), so a
+      // phone never holds a whole 150 MB range in JS (#207). A failure after this point surfaces
+      // in the reader, marked retryNet: the loaders then fetch the range from the network.
+      const body = await peerGet(src, url, lo, hi);
+      const resp = new Response(body, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(hi - lo + 1) } });
+      if (c && !myMeta?.phone) storeRange(c, key, resp.clone(), hi - lo + 1);
       return resp;
-    } catch (err) { crumb(`peer weights from ${conns.get(src)?.name || src} failed (${err.message}); using the network`); ai.wsrc.map.delete(lo + "-" + hi); }
+    } catch (err) {
+      crumb(`peer weights from ${conns.get(src)?.name || src} failed (${err.message}); using the network`);
+      // relayed: nothing else from that device either (one check, not one per range)
+      if (err.relayed) { for (const [k, v] of ai.wsrc.map) if (v === src) ai.wsrc.map.delete(k); }
+      else ai.wsrc.map.delete(lo + "-" + hi);
+    }
   }
   ai.netBytes = (ai.netBytes || 0) + (hi - lo + 1);
   let r;
   try { r = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } }); }
   catch { throw new FetchError(0, url); }   // offline, CORS or a blocked host: no status to go on
   if (r.status !== 206) throw new FetchError(r.status, url);
-  if (c && !myMeta?.phone) {   // phones skip the store (no spare RAM for the copy); Cache API refuses 206s, so store as a plain 200
-    try {
-      // buffer the copy fully first, so a complete body is the only thing that ever gets stored
-      r.clone().arrayBuffer().then((buf) => {
-        if (buf.byteLength !== hi - lo + 1) return;
-        return c.put(key, new Response(buf, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(buf.byteLength) } }));
-      }).then(() => { ai.cachedBytes = (ai.cachedBytes || 0) + (hi - lo + 1); }, () => {});
-    } catch {}
-  }
+  // phones skip the store (no spare RAM for the copy); Cache API refuses 206s, so store as a plain 200
+  if (c && !myMeta?.phone) storeRange(c, key, r.clone(), hi - lo + 1);
   return r;
+}
+// Store a range in the weight cache as it streams (no whole-range copy in JS). A body that errors
+// makes put() fail and nothing is stored; one that ends short is stored but never trusted: every
+// read checks the length (rangeFetch below keys on x-swarm-len, the loaders on the bytes they got).
+function storeRange(c, key, r, len) {
+  try {
+    let got = 0;
+    const counted = r.body.pipeThrough(new TransformStream({ transform(ch, ctl) { got += ch.byteLength; ctl.enqueue(ch); } }));
+    c.put(key, new Response(counted, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(len) } }))
+      .then(() => { if (got !== len) return c.delete(key); ai.cachedBytes = (ai.cachedBytes || 0) + len; }, () => {});
+  } catch {}
 }
 // ---- weights from the room: devices share the ranges they have cached ----
 // Inventory: the "lo-hi" byte ranges of `url` this device has cached (phones cache nothing).
@@ -1304,48 +2181,121 @@ function weightSources(url, inv) {
   for (const [id, have] of Object.entries(inv || {})) if (id !== peer.id) for (const k of have || []) if (!map.has(k)) map.set(k, id);
   return { url, map };
 }
-const wGets = new Map();   // request id -> { buf, got, res, rej, timer }
+// A range from a device in the room, streamed with flow control: the requester says how much it
+// lets the sender run ahead (win) and acks what its reader has taken; the sender waits for the acks.
+// Before this, the whole range (up to 160 MB for a MoE expert tensor) was collected in one JS buffer
+// on the phone, and a prefetched range kept a second one alive: that killed iPhone tabs (#207).
+const W_PART = 64 * 1024;
+const W_WIN = 8 * 2 ** 20;
+const wGets = new Map();   // request id -> { ctl, got, len, acked, timer, first, fail, body }
 let wSeq = 0;
+// -> a ReadableStream of the range, once its first part is here (rejects on a miss or a silent source)
 async function peerGet(src, url, lo, hi) {
   if (!(await ensureLink(src, 10000))) throw new Error("no link");
+  // a relayed link costs the relay's owner per GB: weights come from the network instead (room/ice.js)
+  if (!weightsOverLink(await pathOf(src), relayOn)) { const e = new Error("the link goes through the relay"); e.relayed = true; throw e; }
   const len = hi - lo + 1, id = `${peer.id}:${++wSeq}`;
   return new Promise((res, rej) => {
-    const w = { buf: new Uint8Array(len), got: 0, res, rej, timer: null };
-    const idle = () => { clearTimeout(w.timer); w.timer = setTimeout(() => { wGets.delete(id); rej(new Error("stalled")); }, 15000); };
-    w.idle = idle; idle();
+    const w = { got: 0, len, acked: 0, timer: null, ctl: null, first: { res, rej } };
+    const fail = (err) => {
+      clearTimeout(w.timer); wGets.delete(id);
+      sendTo(src, { t: "ai-wack", id, cancel: 1 });
+      err.retryNet = true;   // the loaders fetch the range from the network instead
+      if (w.first) { w.first.rej(err); w.first = null; } else try { w.ctl.error(err); } catch {}
+    };
+    w.fail = fail;
+    // Called by the stream after every read and every enqueue while there is room in the queue
+    // (it returns at once, so it never blocks a later call). Acks what the reader took; with the
+    // queue empty it acks everything, so the sender is never held back while the reader waits.
+    // Silence counts only while the reader waits on an empty queue (a prefetched range may sit
+    // unread for a while, and that is fine).
+    const pull = () => {
+      const queued = Math.max(0, W_WIN - w.ctl.desiredSize);
+      const taken = w.got - queued;
+      if (taken > w.acked && (taken - w.acked >= W_WIN / 4 || !queued)) { w.acked = taken; sendTo(src, { t: "ai-wack", id, got: taken }); }
+      clearTimeout(w.timer);
+      if (!queued && w.got < w.len) w.timer = setTimeout(() => fail(new Error("stalled")), 15000);
+    };
+    const body = new ReadableStream({
+      start(ctl) { w.ctl = ctl; },
+      pull,
+      cancel() { clearTimeout(w.timer); wGets.delete(id); sendTo(src, { t: "ai-wack", id, cancel: 1 }); },
+    }, new ByteLengthQueuingStrategy({ highWaterMark: W_WIN }));
+    w.body = body;
     wGets.set(id, w);
-    sendTo(src, { t: "ai-wget", id, url, lo, hi });
+    sendTo(src, { t: "ai-wget", id, url, lo, hi, win: W_WIN });
   });
 }
 function onWeightPart(d) {
   const w = wGets.get(d.id); if (!w) return;
-  if (d.miss) { clearTimeout(w.timer); wGets.delete(d.id); w.rej(new Error("not cached there")); return; }
+  if (d.miss) { w.fail(new Error("not cached there")); return; }
   if (d.data) {
     const part = d.data instanceof Uint8Array ? d.data : new Uint8Array(d.data);
-    if (d.off >= 0 && d.off + part.length <= w.buf.length) { w.buf.set(part, d.off); w.got += part.length; }
-    w.idle();
+    if (d.off !== w.got || w.got + part.length > w.len) { w.fail(new Error(`part out of order at ${d.off}/${w.got}`)); return; }
+    w.got += part.length;
+    ai.peerBytes = (ai.peerBytes || 0) + part.length;
+    clearTimeout(w.timer);
+    w.ctl.enqueue(part);
+    if (w.first) { w.first.res(w.body); w.first = null; }
   }
   if (d.done) {
+    if (w.got !== w.len) { w.fail(new Error(`short: ${w.got}/${w.len}`)); return; }
     clearTimeout(w.timer); wGets.delete(d.id);
-    if (w.got === w.buf.length) w.res(w.buf.buffer); else w.rej(new Error(`short: ${w.got}/${w.buf.length}`));
+    if (w.first) { w.first.res(w.body); w.first = null; }
+    w.ctl.close();
   }
 }
-// serve a cached range to a device in the room, 64 KB at a time, minding the channel's buffer
+// serve a cached range to a device in the room, 64 KB at a time, straight from the cache's body
+// stream (not the whole range in memory), minding the channel's buffer and the requester's window
+const wServes = new Map();   // request id -> { acked, cancel, wake }
+function onWeightAck(d) {
+  const s = wServes.get(d.id); if (!s) return;
+  if (d.cancel) s.cancel = true; else s.acked = Math.max(s.acked, +d.got || 0);
+  const wake = s.wake; s.wake = null; wake?.();
+}
+// a device asks for a range: serve it, or say "miss" (it then uses the network): with peer weights
+// off, or over a relayed link, which the serving side refuses too (an older tab asks without checking)
+async function answerWget(from, d) {
+  if (!PEER_WEIGHTS || !weightsOverLink(await pathOf(from), relayOn)) { sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return; }
+  return serveWeight(from, d);
+}
 async function serveWeight(from, d) {
   const e = conns.get(from); if (!e) return;
   const c = await getWeightCache();
   const hit = c && Number.isInteger(d.lo) && Number.isInteger(d.hi) ? await c.match(cacheKey(d.url, d.lo, d.hi)).catch(() => null) : null;
-  if (!hit || hit.headers.get("x-swarm-len") !== String(d.hi - d.lo + 1)) { sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return; }
-  const buf = new Uint8Array(await hit.arrayBuffer());
-  const CH = 64 * 1024;
-  for (let off = 0; off < buf.length; off += CH) {
-    if (!conns.has(from)) return;
-    e.conn.send({ t: "ai-wpart", id: d.id, off, data: buf.subarray(off, Math.min(buf.length, off + CH)) });
-    while (e.conn.dataChannel && e.conn.dataChannel.bufferedAmount > 4 * 2 ** 20) await new Promise((r) => setTimeout(r, 10));
-  }
-  sendTo(from, { t: "ai-wpart", id: d.id, done: 1 });
-  ai.servedBytes = (ai.servedBytes || 0) + buf.length;
+  const len = d.hi - d.lo + 1;
+  if (!hit || hit.headers.get("x-swarm-len") !== String(len)) { sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return; }
+  const win = +d.win > 0 ? +d.win : Infinity;   // (a requester from before flow control sends no window)
+  const s = { acked: 0, cancel: false, wake: null };
+  wServes.set(d.id, s);
+  const reader = hit.body.getReader();
+  try {
+    let off = 0, pend = new Uint8Array(0);
+    for (;;) {
+      const { value, done } = await reader.read();
+      let buf = done ? pend : pend.length ? concat(pend, value) : value;
+      let o = 0;
+      while (buf.length - o >= W_PART || (done && o < buf.length)) {
+        while (off - s.acked >= win && !s.cancel && conns.has(from)) {
+          const t0 = Date.now();
+          await new Promise((r) => { s.wake = r; setTimeout(r, 1000); });
+          if (Date.now() - t0 >= 1000 && off - s.acked >= win) s.idle = (s.idle || 0) + 1; else s.idle = 0;
+          if (s.idle > 120) return;   // the requester stopped reading for 2 minutes: give up on it
+        }
+        if (s.cancel || !conns.has(from)) return;
+        const n = Math.min(W_PART, buf.length - o);
+        e.conn.send({ t: "ai-wpart", id: d.id, off, data: buf.subarray(o, o + n) });
+        o += n; off += n;
+        while (e.conn.dataChannel && e.conn.dataChannel.bufferedAmount > 4 * 2 ** 20) await new Promise((r) => setTimeout(r, 10));
+      }
+      pend = buf.subarray(o);
+      if (done) break;
+    }
+    sendTo(from, { t: "ai-wpart", id: d.id, done: 1 });
+    ai.servedBytes = (ai.servedBytes || 0) + off;
+  } finally { wServes.delete(d.id); reader.cancel().catch(() => {}); }
 }
+const concat = (a, b) => { const m = new Uint8Array(a.length + b.length); m.set(a); m.set(b, a.length); return m; };
 
 // ---- converted weights on disk (room/convertedcache.js, OPFS): a second load of the same layers skips
 // the CPU conversion (K-quant -> Q8, BF16/Q5_0 -> f32, the embedding's repack). Keyed by model URL,
@@ -1379,7 +2329,7 @@ let pacerHook = null;
 const streamWithRetry = (url, streamOpts) => async (info) => {
   try { return await streamEntryToGPU(ai.device, info, openRangeOf(url), streamOpts); }
   catch (e) {
-    if (!/short tensor/.test(String(e))) throw e;
+    if (!/short tensor/.test(String(e)) && !e?.retryNet) throw e;   // (retryNet: a room device stopped sending it)
     const c = await getWeightCache();
     if (c) c.delete(cacheKey(url, info.byteOffset, info.byteOffset + info.byteLength - 1)).catch(() => {});
     return streamEntryToGPU(ai.device, info, (i) => rangeFetch(url, i.byteOffset, i.byteOffset + i.byteLength - 1, true), streamOpts);
@@ -1391,21 +2341,31 @@ const streamWithRetry = (url, streamOpts) => async (info) => {
 // several are in flight at once. Phones keep one: every buffered body is RAM they do not have.
 // ?prefetch=N overrides (0 = off, for A/B).
 const PREFETCH_Q = new URLSearchParams(location.search).get("prefetch");
-const prefetcher = { url: null, list: [], at: new Map(), pending: new Map() };
+// The loader asks for tensors in model order, not file order, so "the next one in the file" is often
+// one it already has: those are never fetched again (taken). Fetching them anyway was ~450 MB of
+// unread downloads per MoE layer, and on an iPhone they piled up in Safari's networking process
+// until iOS killed it and the page with it (#207, measured with memprobe.html ?pfdedupe).
+const prefetcher = { url: null, list: [], at: new Map(), pending: new Map(), taken: new Set() };
 function planPrefetch(url, infos) {
+  clearPrefetch();
   prefetcher.url = url;
   prefetcher.list = infos.filter(Boolean).sort((a, b) => a.byteOffset - b.byteOffset);
   prefetcher.at = new Map(prefetcher.list.map((x, i) => [x.byteOffset, i]));
-  prefetcher.pending = new Map();
+}
+// drop what nobody will read: cancel the bodies so the browser lets go of them now
+function clearPrefetch() {
+  for (const p of prefetcher.pending.values()) p.then((r) => r.body?.cancel?.()).catch(() => {});
+  prefetcher.pending = new Map(); prefetcher.taken = new Set(); prefetcher.url = null;
 }
 function rangeOf(url, info) {
   const lo = info.byteOffset, hi = info.byteOffset + info.byteLength - 1;
   if (url !== prefetcher.url) return rangeFetch(url, lo, hi);
   const ahead = PREFETCH_Q != null ? Math.max(0, parseInt(PREFETCH_Q, 10) || 0) : myMeta?.phone ? 1 : 4;
   const i = prefetcher.at.get(lo);
+  prefetcher.taken.add(lo);
   if (i !== undefined) for (let k = i + 1; k <= i + ahead && k < prefetcher.list.length; k++) {
     const n = prefetcher.list[k];
-    if (!prefetcher.pending.has(n.byteOffset)) {
+    if (!prefetcher.pending.has(n.byteOffset) && !prefetcher.taken.has(n.byteOffset)) {
       const p = rangeFetch(url, n.byteOffset, n.byteOffset + n.byteLength - 1);
       p.catch(() => {});
       prefetcher.pending.set(n.byteOffset, p);
@@ -1426,7 +2386,7 @@ const rangeBytesOf = (url) => async (info) => {
   if (pacerHook) await pacerHook();
   crumb("fetching " + info.name + " (" + (info.byteLength / 2 ** 20).toFixed(0) + " MB)");
   let r = await rangeOf(url, info);
-  let bytes = new Uint8Array(await r.arrayBuffer());
+  let bytes = await r.arrayBuffer().then((b) => new Uint8Array(b), (e) => { if (e?.retryNet) return new Uint8Array(0); throw e; });
   if (bytes.length !== info.byteLength) {
     r = await rangeFetch(url, info.byteOffset, info.byteOffset + info.byteLength - 1, true);
     bytes = new Uint8Array(await r.arrayBuffer());
@@ -1443,6 +2403,7 @@ let ai = {
   chain: [],             // host: worker peer ids in pipeline order
   next: null,            // worker: peer id to forward hidden to, or "host"
   readyPeers: new Set(),
+  relinks: new Map(),    // host: device id -> deadline, while the device before it opens a fresh link to it (aiRejoin)
   pos: 0,
   waiters: new Map(),    // host: lap key (pos, or "b" + basePos) -> { res, rej } for a frame on its way round the chain
   busy: false,
@@ -1455,17 +2416,24 @@ let ai = {
   settings: { persona: "default", sampling: "creative", thinking: false, length: "normal", apiAllow: true },
   apis: new Map(),       // host: API clients (`pooled serve`): peer id -> { name, client, answered }
   apiKicked: new Set(),  // host: API clients disconnected this session (a reconnect is refused)
-  apiCache: new AnswerCache(8),   // host: text -> sampled ids of recent API answers (room/api.js)
+  apiCache: new AnswerCache(8),   // host: text -> sampled ids of recent API answers (room/api.js), v1 asks
+  apiTurns: new TurnCache(),      // host: (history, answer) -> sampled ids of recent API answers, v2 asks
+  apiEnc: new EncodeCache(),      // host: text -> ids, for rendering v2 asks (clients resend their whole history)
+  apiProf: null,                  // host: the loaded model's template profile (room/conversation.js), for v2 asks
   apiRun: null,          // host: the API request being answered { rid, from, ac }
   transcript: [],        // host: [{ name, text, reply, stats }] for devices that join later
   teleBy: new Map(),     // host: worker id -> compute ms per frame kind, from ai-tele
   msPerLayer: new Map(), // host: device name -> measured verify compute per layer (the speed split uses it)
   q: Promise.resolve(),  // worker: frames run strictly one after another, in arrival order
+  recovering: null,      // host: a run is waiting for a dropped device to come back or a re-deal ({ kind, since })
+  held: null,            // worker: { model, range, ctx } of the layers this engine holds (a device back from a lock keeps them)
 };
 
 function aiStatus(s) { $("ai-status").textContent = s; crumb(s); if ($("load-card").classList.contains("on") && !lcBytes) lcStatus(null, s); }
 // breadcrumb: if iOS kills the tab, the reloaded page can say where it died
-function crumb(s) { try { localStorage.setItem("pooled-crumb", JSON.stringify({ s, t: Date.now(), mem: performance.memory?.usedJSHeapSize })); } catch {} }
+// loading: this tab was loading its layers (a kill then means the share was too big for it, #207)
+var crumbLoading = false;   // var: crumb can run before the rest of the module is initialised
+function crumb(s) { try { localStorage.setItem("pooled-crumb", JSON.stringify({ s, t: Date.now(), mem: performance.memory?.usedJSHeapSize, loading: crumbLoading || undefined })); } catch {} }
 // (crumb is kept in localStorage for debugging, not shown on the join screen)
 function aiLoading(show, title) {
   $("ai-loading").style.display = show ? "block" : "none";
@@ -1689,7 +2657,7 @@ function openCard() {
   const nodes = lastMap?.nodes?.length ? lastMap.nodes : [{ name: myName, layers: "", host: 1 }];
   const tps = bestTps || lastMap?.st?.tps || lastSoloTps || 0;
   drawCard($("card-canvas"), { model: (MODELS[ai.model || $("ai-model").value]?.label || "").split("\u00b7")[0].trim(),
-    code: roomCode, nodes, tps, acc: lastMap?.st?.acc, lap: lastMap?.st?.lap, date: new Date().toISOString().slice(0, 10) });
+    code: formatCode(roomCode), nodes, tps, acc: lastMap?.st?.acc, lap: lastMap?.st?.lap, date: new Date().toISOString().slice(0, 10) });
   $("card").hidden = false;
   $("card-close").focus({ preventScroll: true });
 }
@@ -1709,7 +2677,7 @@ $("card-share").addEventListener("click", async () => {
 });
 let lastSoloTps = 0;
 function exportChat() {
-  const lines = [`# Pooled room ${roomCode || ""}`, "", `_${new Date().toISOString().slice(0, 16).replace("T", " ")} · ${MODELS[ai.model || $("ai-model").value]?.label || ""}_`, ""];
+  const lines = [`# Pooled room ${formatCode(roomCode || "")}`, "", `_${new Date().toISOString().slice(0, 16).replace("T", " ")} · ${MODELS[ai.model || $("ai-model").value]?.label || ""}_`, ""];
   for (const m of document.querySelectorAll("#ai-output .m")) {
     if (m.classList.contains("user")) lines.push(`**${m.dataset.name || "?"}:** ${m.dataset.text || ""}`, "");
     else if (m.pieces) {
@@ -1754,7 +2722,17 @@ function setCtx(used, max) {
   el.classList.toggle("warn", used > max * 0.8);
 }
 
-async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, KV_ASK)) {
+// the breadcrumbs written while this runs say "loading": if iOS kills the tab now, the host learns
+// from the hello after the reload that this share was too big for it (aiLoadDeath)
+async function aiLoadShard(...args) {
+  crumbLoading = true;
+  try { return await aiLoadShardIn(...args); }
+  finally {
+    crumbLoading = false;
+    try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c?.loading) { delete c.loading; localStorage.setItem("pooled-crumb", JSON.stringify(c)); } } catch {}
+  }
+}
+async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, KV_ASK)) {
   const M = MODELS[modelKey];
   ai.shardBytes = 0;   // until this load's first progress says how big the new range is
   aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
@@ -1762,7 +2740,8 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   mascot("Grabbing my slice of the model… hang tight.");
   // a previous attempt in this tab still owns its weights: release them first, or the
   // second load doubles GPU memory and every buffer after the limit comes back invalid
-  if (ai.device) { try { ai.device.destroy(); } catch {} ai.device = null; ai.engine = null; }
+  if (ai.device) { try { ai.waker?.destroy(); ai.device.destroy(); } catch {} ai.device = null; ai.engine = null; }
+  ai.held = null; ai.waker = null;
   ai.firstGpuError = null;
   ai.peerBytes = 0; ai.netBytes = 0; cacheHits = 0;   // per load: a count left from an earlier load in this tab mislabels the status
   if (!Qwen35Engine) { aiStatus("loading the inference engine\u2026"); await loadEngine(); }
@@ -1802,7 +2781,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
   const streamOpts = { pace: isPhone ? 300 : 0, staging: isPhone ? 2 * 2 ** 20 : 8 * 2 ** 20 };
   if (M.cfg) {
     ai.cfg = await (await fetch(M.cfg)).json();
-    if (hasEmbed || hasHead) ai.tok = makeTokenizer(await (await fetch(M.tok)).json());
+    if (hasEmbed || hasHead) { ai.tok = makeTokenizer(await (await fetch(M.tok)).json()); apiModelLoaded(); }
   }
 
   const onProg = (done, total) => {
@@ -1856,6 +2835,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       // the model's own chat template: Code mode picks the tool-call format from it (Qwen 3.5+ use
       // XML <function=...> calls, with the full call grammar); without it every model got JSON
       ai.tok.chatTemplate = G.meta["tokenizer.chat_template"] || "";
+      apiModelLoaded();
     }
     // the host also loads the model's multi-token-prediction block: it drafts
     // tokens that the trunk then verifies in one batched pass (same output, faster)
@@ -1921,7 +2901,7 @@ async function aiLoadShard(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(m
       layerRange: range, hasEmbed, hasHead, maxSeq: MAX_SEQ,
     });
   }
-  prefetcher.pending.clear(); prefetcher.url = null;
+  clearPrefetch();
   if (ai.peerBytes) log("room", `${myName}: ${(ai.peerBytes / 2 ** 20).toFixed(1)} MB of weights came from devices in the room, ${((ai.netBytes || 0) / 2 ** 20).toFixed(1)} MB from the network`);
   // batched draft-cache fill and refill, next step's first draft in the verify's pass (engine/preset.js)
   applyRoomFlags(ai.engine, location.search);
@@ -1949,6 +2929,10 @@ function aiStartAnywhere() {
   aiStatus(`asked ${conns.get(boss)?.name || "the biggest device"} to start ${MODELS[model].label.split("·")[0].trim()}…`);
   broadcastAll({ t: "ai-start-req", model, boss, by: myName });
 }
+// why a start stops when the room's pledges cannot hold the model (room/plan.js shortNote)
+function shortWhy(M, fit, names, metas) {
+  return shortNote(M.label.split("\u00b7")[0].trim(), fit, names, metas.map(spareGBOf));
+}
 async function aiStart(modelArg) {
   if (ai.engine || ai.busy) return;
   ai.busy = true;
@@ -1961,14 +2945,17 @@ async function aiStart(modelArg) {
     ai.startFailed = null;
     ai.readyPeers = new Set();
     ai.ckptHeld = new Map();
+    ai.relinks = new Map();
     ai.teleBy = new Map();
+    ai.lapStat = null;                        // a new chain: lap timeouts start from the fixed fallbacks again
     const modelKey = $("ai-model").value;
     const M = MODELS[modelKey];
     // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every device builds its engine with it
-    const ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
+    let ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
     const ROOM_KV = kvModeFor(modelKey, KV_ASK);   // KV cache format for every device: f16, or int8 with ?kv=q8
     // devices without WebGPU join as ask-only guests: they get the chat, not layers
-    ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu).sort();
+    // (a device whose tab was killed twice while loading its layers stays a guest: aiLoadDeath)
+    ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && conns.get(id)?.conn?.open !== false && !ai.dropped?.has(conns.get(id)?.name)).sort();
     ai.leftOut = new Set();
     ai.plan = new Map();                      // name -> load message, so a reloaded device can be re-seated
     ai.gone = new Set();                      // chain ids whose link closed (aiPeerLeft), for a same-id rejoin
@@ -1979,10 +2966,15 @@ async function aiStart(modelArg) {
       aiStatus("reading model index… (11 MB)");
       ai.G = await fetchGGUFHeader(M.gguf);
       ai.GModel = modelKey;
+      // one attention layer's K (or V) cache is a single GPU buffer: hold the context to what the
+      // smallest binding limit in the room fits (a device from before maxBindMB counts as WebGPU's 128 MiB)
+      const bindMin = Math.min(...[myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)].map((m) => (m?.maxBindMB || 128) * 2 ** 20));
+      const fitCtx = ctxForBinding(ai.G.meta, ROOM_CTX, ROOM_KV, bindMin);
+      if (fitCtx < ROOM_CTX) { log("room", `context ${ROOM_CTX} needs bigger GPU buffers than a device here allows: using ${fitCtx}`); ROOM_CTX = fitCtx; }
       L = ai.G.meta["qwen35.block_count"] - (ai.G.meta["qwen35.nextn_predict_layers"] || 0);
       layerBytes = qwen35ShardBytes(ai.G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4
         + ROOM_CTX * kvBytesPerLayerPos(ai.G.meta, ROOM_KV);   // the attention layers' KV cache at this room's context
-      embedBytes = (ai.G.tensors[GGML_EMBED]?.byteLength || 0) + (ai.G.tensors[GGML_OUTPUT]?.byteLength || 0) + qwen35MtpBytes(ai.G);
+      embedBytes = hostHeldBytes("qwen35", { embed: ai.G.tensors[GGML_EMBED]?.byteLength || 0, out: ai.G.tensors[GGML_OUTPUT]?.byteLength || 0, mtp: qwen35MtpBytes(ai.G) });
     } else {
       cfg = await (await fetch(M.cfg)).json();
       L = cfg.num_hidden_layers;
@@ -1993,52 +2985,44 @@ async function aiStart(modelArg) {
       aiStatus("reading model index…");
       ai.G = await fetchGGUFHeader(M.gguf, false);
       ai.GModel = modelKey;
+      // one layer's weights plus its f32 KV cache at this room's context (engine/dense.js: 64 MB a
+      // layer for the 1.7B at 8k, more than its weights), and what the host holds besides its layers
+      const kvDim = cfg.num_key_value_heads * (cfg.head_dim || cfg.hidden_size / cfg.num_attention_heads);
       layerBytes = Object.values(ggmlLayerNames(0))
-        .reduce((s, nm) => s + (ai.G.tensors[nm]?.byteLength || 0), 0);
-      embedBytes = (ai.G.tensors[GGML_EMBED]?.byteLength || 0) + (ai.G.tensors[GGML_OUTPUT]?.byteLength || 0);
+        .reduce((s, nm) => s + (ai.G.tensors[nm]?.byteLength || 0), 0) + ROOM_CTX * denseKvBytesPerLayerPos(kvDim);
+      embedBytes = hostHeldBytes("gguf", { embed: ai.G.tensors[GGML_EMBED]?.byteLength || 0, out: ai.G.tensors[GGML_OUTPUT]?.byteLength || 0 });
     } else if (M.kind === "safetensors") {
       const d = cfg.hidden_size;
       const kvDim = cfg.num_key_value_heads * ((cfg.head_dim || d / cfg.num_attention_heads));
-      layerBytes = (2 * d * d + 2 * kvDim * d + 3 * cfg.intermediate_size * d) * 4;
+      layerBytes = (2 * d * d + 2 * kvDim * d + 3 * cfg.intermediate_size * d) * 4 + ROOM_CTX * denseKvBytesPerLayerPos(kvDim);
       embedBytes = cfg.vocab_size * d * 4;
     }
-    const pledgeOf = (m) => ((m?.contribGB ?? (m?.maxBufGB ? m.maxBufGB * 0.5 : 0.5))) * 2 ** 30;
-    let caps = [Math.max(pledgeOf(myMeta) - embedBytes, layerBytes / 2),
-      ...ai.chain.map((id) => Math.max(pledgeOf(conns.get(id)?.meta), layerBytes / 2))];
-    let assigned, ranges;
-    if ($("ai-split").value === "speed") {
-      // fastest devices first (measured ms per layer from earlier answers), fewest hops; devices
-      // that are not needed stay in the room as ask-only guests
-      const nameOf = (id) => conns.get(id)?.name || id;
-      const sp = planForSpeed(L, caps.map((c) => Math.floor(c / layerBytes)), [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
-        [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))]);
-      const keep = sp.used.filter((i) => i > 0).map((i) => i - 1);
-      ai.leftOut = new Set(ai.chain.filter((_, i) => !keep.includes(i)));
-      ai.chain = keep.map((i) => ai.chain[i]);
-      ai.chainNames = ai.chain.map(nameOf);
-      assigned = sp.used.map((i) => sp.assigned[i]);
-      ranges = sp.used.map((i) => sp.ranges[i]);
-      caps = sp.used.map((i) => caps[i]);
-    } else {
-      // by memory, but phones hold layers only when the computers cannot hold the model
-      // (room/plan.js phonesToLeaveOut); ?phonelayers=1 deals them layers anyway
-      const nameOf = (id) => conns.get(id)?.name || id;
-      const out = PHONE_LAYERS ? [] : phonesToLeaveOut(L, caps.map((c) => c / layerBytes), [false, ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))]);
-      if (out.length) {
-        ai.leftOut = new Set(out.map((i) => ai.chain[i - 1]));
-        ai.chain = ai.chain.filter((id) => !ai.leftOut.has(id));
-        ai.chainNames = ai.chain.map(nameOf);
-        caps = caps.filter((_, i) => !out.includes(i));
-        log("room", `${[...ai.leftOut].map(nameOf).join(", ")} ask${ai.leftOut.size > 1 ? "" : "s"} without holding layers: the computers hold the whole model, and a phone's layer would slow every token`);
-      }
-      ({ assigned, ranges } = planSplit(L, caps));
-    }
-    ai.layersN = Object.fromEntries([[myName, assigned[0]], ...ai.chain.map((id, i) => [conns.get(id)?.name || id, assigned[i + 1]])]);
-
-    const needGB = (L * layerBytes + embedBytes) / 2 ** 30;
-    const haveGB = caps.reduce((s, c) => s + c, embedBytes) / 2 ** 30;
-    if (needGB > haveGB * 1.15)
-      log("room", `⚠ this model needs ~${needGB.toFixed(1)} GB but the room pledged ~${haveGB.toFixed(1)} GB — it may not fit`);
+    // what each device lends, held to its kind's cap (phones: room/pledge.js) and to a share this host
+    // lowered after the device's tab was killed while loading (aiLoadDeath). A pledge is a promise:
+    // no device is dealt more layers than fit in it (the host's also pays for the embedding, the
+    // head and the draft block), and a room whose pledges can't hold the model does not start.
+    ai.shareCap ??= new Map();
+    const nameOf = (id) => conns.get(id)?.name || id;
+    const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name)) * 2 ** 30;
+    const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
+    ai.layerGB = layerBytes / 2 ** 30;
+    // fastest devices first (measured ms per layer from earlier answers), fewest hops, or by memory;
+    // either way devices that are not needed (phones while the computers hold the model) and devices
+    // whose pledge is under one layer stay in the room as ask-only guests (room/plan.js dealRoom)
+    const deal = dealRoom({ L, layerBytes, hostBytes: embedBytes, pledges, mode: $("ai-split").value === "speed" ? "speed" : "memory",
+      ms: [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
+      phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS });
+    if (!deal.fit.fits || !deal.used.length) throw new Error(shortWhy(M, deal.fit, [myName, ...ai.chain.map(nameOf)], [myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)]));
+    ai.outWhy = Object.fromEntries(Object.entries(deal.out).map(([i, why]) => [nameOf(ai.chain[i - 1]), why]));
+    for (const i of Object.keys(deal.out)) ai.leftOut.add(ai.chain[i - 1]);
+    if (Object.keys(deal.out).length) log("room", `${Object.keys(ai.outWhy).join(", ")} ask${Object.keys(ai.outWhy).length > 1 ? "" : "s"} without holding layers (${[...new Set(Object.values(ai.outWhy))].map((w) => w === "small" ? "a pledge under one layer" : "the others hold the whole model").join("; ")})`);
+    ai.chain = deal.used.slice(1).map((i) => ai.chain[i - 1]);
+    ai.chainNames = ai.chain.map(nameOf);
+    const { assigned, ranges } = deal;
+    ai.layersN = Object.fromEntries([[myName, assigned[0]], ...ai.chain.map((id, i) => [nameOf(id), assigned[i + 1]])]);
+    // what each device holds of its pledge (the host's includes the embedding and the head)
+    ai.heldGB = Object.fromEntries([myName, ...ai.chainNames].map((nm, k) => [nm, deal.held[k] / 2 ** 30]));
+    log("room", `memory per device (of its pledge): ${deal.used.map((i, k) => `${[myName, ...ai.chain.map(nameOf)][k]} ${(deal.held[k] / 2 ** 30).toFixed(2)} of ${(pledges[i] / 2 ** 30).toFixed(1)} GB`).join(" · ")}`);
 
     ai.deferred = [];
     // what every device already has cached, so each one can take its missing ranges from the room.
@@ -2057,13 +3041,15 @@ async function aiStart(modelArg) {
       sendTo(id, msg);
     });
     ai.layersByName = Object.fromEntries([[myName, `${ranges[0][0]}–${ranges[0][1] - 1}`], ...ai.chain.map((id, i) => [conns.get(id)?.name || id, `${ranges[i + 1][0]}–${ranges[i + 1][1] - 1}`])]);
-    broadcastAll({ t: "ai-layers", by: ai.layersByName });
+    broadcastAll({ t: "ai-layers", by: ai.layersByName, held: ai.heldGB, out: ai.outWhy });
+    paintHeld();
     const splitDesc = [`you ${assigned[0]}+embed`, ...ai.chain.map((id, i) =>
       `${conns.get(id)?.name || id} ${assigned[i + 1]}`)].join(" · ");
     log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}${ROOM_KV === "q8" ? ", int8 KV" : ""}: ${splitDesc}`);
     ai.loadingShard = true;
     try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); } finally { ai.loadingShard = false; }
     if (ai.startFailed) throw new Error(ai.startFailed);   // a device failed to load its layers while this one loaded
+    if (ai.redealPending) { ai.busy = false; aiAutoRedeal(ai.redealWhy); return; }   // a device died while loading: deal again
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
     aiStatus(n === 1
       ? `solo: all ${L} layers local — ready`
@@ -2089,6 +3075,7 @@ function aiStartStopped(why) {
   aiLoading(false);
   ai.engine = null;
   ai.chain = []; ai.chainNames = []; ai.plan = null;   // nothing to re-seat or re-deal
+  ai.heldGB = null; ai.outWhy = {}; paintHeld();
   failWaiters(new Error(why));
   $("ai-panel").classList.remove("online");
   aiStatus("failed: " + why);
@@ -2116,8 +3103,9 @@ function workerStopped() {
 // Deal the layers again over whoever is in the room now: after a device left (the room is
 // degraded) or to bring in devices that joined after the start. Cached ranges reload in seconds;
 // the conversation is kept and re-prefilled on the next question.
-async function aiRedeal() {
-  if (ai.role !== "host" || ai.busy === "gen" || ai.busy === "code") return;
+async function aiRedeal(force = false) {
+  if (ai.role !== "host" || (!force && (ai.busy === "gen" || ai.busy === "code"))) return;
+  clearTimeout(ai.idleRedeal);
   if (ai.loadingShard) { toast("wait for this device's layers to finish loading, then re-deal"); return; }
   $("chat-tools").hidden = true;
   const model = ai.model || $("ai-model").value;
@@ -2143,19 +3131,44 @@ function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.m
 function offerRedealForNewcomers() {
   if (ai.role !== "host" || !ai.engine || ai.degraded) return;
   const spare = sparePeers();
-  if (spare.length) showRedeal(true, `${spare.map((id) => conns.get(id)?.name || id).join(", ")} joined after the start; re-deal to give ${spare.length > 1 ? "them" : "it"} layers`);
+  if (spare.length) showRedeal(true, `${spare.map((id) => conns.get(id)?.name || id).join(", ")} joined after the start and ${spare.length > 1 ? "wait" : "waits"} for a re-deal: re-deal to give ${spare.length > 1 ? "them" : "it"} layers`);
+  // every screen says who waits for a re-deal (their cards, and their own Lend screen)
+  if (spare.length) { ai.outWhy = outNow(); paintHeld(); broadcastAll({ t: "ai-out", out: ai.outWhy }); }
+}
+// why each device with a GPU holds no layers, by name: "unneeded" (the others hold the model),
+// "small" (its pledge is under one layer), "late" (it joined after the start and waits for a re-deal)
+function outNow() {
+  const out = { ...(ai.outWhy || {}) };
+  for (const id of sparePeers()) out[conns.get(id)?.name || id] = "late";
+  return out;
+}
+// the device cards: what each holds of its pledge, or why it holds nothing
+const OUT_TEXT = { unneeded: "not needed: the others hold the model", small: "pledge under one layer", late: "joined after the start: waits for a re-deal" };
+function paintHeld() {
+  for (const card of document.querySelectorAll("#peers .peer-card")) {
+    const nm = card.dataset.name, why = ai.outWhy?.[nm], held = ai.heldGB?.[nm];
+    const el = card.querySelector(".pheld"); if (!el) continue;
+    const meta = nm === myName ? myMeta : [...members.values()].find((m) => m.name === nm)?.meta;
+    el.textContent = why === "unneeded" && isPhoneMeta(meta) ? "not needed: the computers hold the model"
+      : why ? OUT_TEXT[why] || "" : held != null ? `uses ${held.toFixed(1)} of ${+pledgeGB(meta).toFixed(1)} GB pledged` : "";
+    el.hidden = !el.textContent;
+  }
 }
 
 // a device in the chain left: every lap in flight fails now instead of timing out, and the room
 // waits for a re-deal
-function aiPeerLeft(id, name) {
+function aiPeerLeft(id, name, verb = "left") {
   if (ai.role !== "host") return;
   if (!ai.chain.includes(id)) { offerRedealForNewcomers(); if (!sparePeers().length && !ai.degraded) showRedeal(false); return; }
   const layers = ai.layersByName?.[name];
-  const why = `${name || "a device"} left${layers ? ` (layers ${layers})` : ""}`;
+  const why = `${name || "a device"} ${verb}${layers ? ` (layers ${layers})` : ""}`;
   ai.degraded = true;
   ai.readyPeers.delete(id);
   ai.gone.add(id);   // it may come back under the same peer id (the ping loop dropped a live but stalled tab): aiRejoin
+  // an answer or a Code run holds the room: it waits for the device (or a re-deal) and carries on
+  // (roomGenerate's recovery); marked here, before codeRoleChanged, so Code does not stop the run
+  const running = ai.busy === "gen" || ai.busy === "code";
+  if (running && !ai.recovering) ai.recovering = { kind: ai.busy, since: Date.now(), pending: true };
   // left before the room came online: drop the load card so the panel's Re-deal button shows
   // (while this device still loads, aiStart does it once its layers are in)
   if (!ai.loadingShard && !$("ai-panel").classList.contains("online")) aiLoading(false);
@@ -2164,20 +3177,75 @@ function aiPeerLeft(id, name) {
   ai.fed = null; if (!ckptDisk) ckptClear();
   failWaiters(new Error(why));
   $("ai-row").style.display = ai.engine ? "flex" : "none";
-  aiStatus(`${why}: re-deal the layers to keep going`);
-  showRedeal(true, `${why}. Re-deal to split the model over the devices still here; cached layers reload in seconds.`);
-  broadcastAll({ t: "ai-degraded", why });
+  const auto = autoRedealOn(), secs = Math.round(REJOIN_GRACE_MS / 1000);
+  aiStatus(running ? `${why}: waiting for it to come back, then this ${ai.busy === "code" ? "Code run" : "answer"} carries on` : `${why}: waiting for it to come back${auto ? ` (re-dealing without it in ${secs} s)` : ""}, or re-deal the layers`);
+  showRedeal(true, `${why}. It goes back into its slot if it returns${auto ? `; otherwise the layers are dealt again over the devices still here in ${secs} s (experimental)` : ""}. Or re-deal now: cached layers reload in seconds.`);
+  broadcastAll({ t: "ai-degraded", why: `${why}: waiting for it to come back` });
   codeRoleChanged();
+  // idle room: re-deal on its own after the grace period (a run in progress does this in roomRecover)
+  clearTimeout(ai.idleRedeal);
+  if (auto && !running) ai.idleRedeal = setTimeout(() => {
+    if (ai.role !== "host" || !ai.degraded || ai.busy || ai.recovering || ai.loadingShard || !autoRedealOn() || !missingNames().length) return;
+    log("room", `${missingNames().join(", ")} did not come back in ${secs} s: re-dealing the layers (experimental auto re-deal)`);
+    aiRedeal();
+  }, REJOIN_GRACE_MS);
 }
+// chain devices that are not in the room now (by name, for the screen)
+function missingNames() { return ai.chain.map((id, i) => (conns.has(id) ? null : ai.chainNames?.[i] || id)).filter(Boolean); }
+// the host's setting: re-deal on its own when a device does not come back (experimental; default on)
+function autoRedealOn() { return $("ai-autoredeal")?.checked !== false; }
 
 // a newcomer while the room is online gets the chat as a guest, and the conversation so far
 function aiWelcome(id) {
   if (ai.role !== "host" || !ai.engine || ai.readyPeers.size < ai.chain.length || ai.chain.includes(id)) return;
-  sendTo(id, { t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label });
+  sendTo(id, { t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax(), out: outNow() });
   if (ai.visibility === "all" && ai.transcript.length) sendTo(id, { t: "ai-history", items: ai.transcript.slice(-20) });
   offerRedealForNewcomers();
 }
 
+// A device in the chain comes back from a tab that was killed while it loaded its layers (the
+// "loading" breadcrumb in its hello: iOS closes a Safari tab that goes over its memory budget, #207).
+// Putting it back in its slot would load the same layers and get it killed again, so the room is
+// re-dealt: with a smaller share for it, or without it (it stays as a guest that can ask) when it
+// was down to one layer already or was killed twice (room/pledge.js afterLoadDeath).
+// Returns true when it handled the device (aiRejoin must not re-seat it).
+function aiLoadDeath(newId, d) {
+  const name = d.name;
+  if (ai.role !== "host" || !d.died?.loading || !ai.plan?.has(name) || !ai.chainNames?.includes(name)) return false;
+  ai.loadDeaths ??= new Map(); ai.shareCap ??= new Map(); ai.dropped ??= new Set(); ai.deathsSeen ??= new Set();
+  // the same kill again (the device's hello on another link, or a reconnect): already handled
+  const kill = name + "@" + (d.died.at ?? d.died.ago);
+  if (ai.deathsSeen.has(kill)) return true;
+  ai.deathsSeen.add(kill);
+  const deaths = (ai.loadDeaths.get(name) || 0) + 1;
+  ai.loadDeaths.set(name, deaths);
+  const meta = conns.get(newId)?.meta;
+  const r = afterLoadDeath({ layers: ai.layersN?.[name] || 1, layerGB: ai.layerGB || 0.5, gb: pledgeGB(meta, ai.shareCap.get(name)), deaths });
+  let why;
+  if (r.drop) {
+    ai.dropped.add(name);
+    why = `${name}'s browser closed its tab while it loaded its layers${deaths > 1 ? " again" : ""}: re-dealing without it (it can still ask)`;
+    sendTo(newId, { t: "ai-share", drop: true, why: "This device's browser closed the tab while it loaded its layers, so the room runs without it. You can still ask questions." });
+  } else {
+    ai.shareCap.set(name, r.gb);
+    why = `${name}'s browser closed its tab while it loaded its layers: re-dealing with a smaller share for it (${r.gb} GB)`;
+    sendTo(newId, { t: "ai-share", gb: r.gb, why: `This device's browser closed the tab while it loaded its layers, so it now holds less of the model (${r.gb} GB).` });
+  }
+  log("room", why);
+  sysNote(why);
+  // the link from before the reload may not have timed out yet: close it, so the re-deal can't pick it
+  for (const [id, e] of conns) if (id !== newId && e.name === name) try { e.conn.close(); } catch {}
+  aiAutoRedeal(why);
+  return true;
+}
+// re-deal on its own (after a load death); waits for this device's own layers when they are still loading
+function aiAutoRedeal(why) {
+  if (ai.role !== "host") return;
+  if (ai.loadingShard || ai.busy === "gen" || ai.busy === "code") { ai.redealWhy = why; ai.redealPending = true; return; }
+  ai.redealPending = false;
+  aiStatus(why);
+  setTimeout(() => aiRedeal(), 500);   // after the old link's close has run
+}
 // a device that left comes back to its slot: a reloaded tab with a new peer id, or a tab the ping loop
 // dropped while it was stalled (suspended, a long task), which reconnects under the same peer id
 function aiRejoin(newId, name) {
@@ -2189,22 +3257,31 @@ function aiRejoin(newId, name) {
   ai.chain[i] = newId;
   ai.readyPeers.delete(oldId);
   ai.gone.delete(oldId); ai.gone.delete(newId);
+  clearTimeout(ai.idleRedeal);
   const { msg } = ai.plan.get(name);
   const fresh = { ...msg, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: peer.id };
-  if (i > 0) sendTo(ai.chain[i - 1], { t: "ai-next", next: newId });
+  // the device before it opens a fresh link and says so (ai-linked): until then the chain is not whole,
+  // even with every device ready (the first frames of a resumed answer would go down the dead link)
+  if (i > 0) { sendTo(ai.chain[i - 1], { t: "ai-next", next: newId, relink: 1 }); ai.relinks.set(newId, Date.now() + RELINK_MS); setTimeout(aiMaybeReady, RELINK_MS + 100); }
   sendTo(newId, fresh);
   ai.fed = null; ckptRejoin();              // its fresh engine holds only what it reads back from disk
-  log("room", `${name} came back — reloading its layers`);
-  aiStatus(`${name} reconnected, reloading its layers…`);
+  log("room", `${name} came back into its slot`);
+  aiStatus(`${name} reconnected, getting its layers back…`);
   $("ai-row").style.display = ai.readyPeers.size >= ai.chain.length ? "flex" : "none";
+}
+const RELINK_MS = 15000;   // how long the host waits for an ai-linked (an older device never sends one)
+function relinking() {
+  for (const [id, until] of ai.relinks) if (Date.now() > until || !ai.chain.includes(id)) ai.relinks.delete(id);
+  return ai.relinks.size > 0;
 }
 function aiMaybeReady() {
   if (ai.role !== "host" || !ai.engine || ai.ckptRestoring) return;   // (aiStart calls it again once the restore is done)
   ckptPrune();
-  if (ai.readyPeers.size < ai.chain.length) return;
+  if (ai.readyPeers.size < ai.chain.length || relinking()) return;
   const n = ai.chain.length + 1;
   ai.degraded = false;
-  ai.busy = false;
+  clearTimeout(ai.idleRedeal);
+  if (!ai.recovering) ai.busy = false;   // a run waiting in roomRecover keeps the room's lock
   showRedeal(false);
   aiStatus(`cluster online · ${n} device${n > 1 ? "s" : ""}, ${ai.cfg.num_hidden_layers} layers split ${n} ways`);
   clearInterval(ai.progTimer);
@@ -2218,11 +3295,12 @@ function aiMaybeReady() {
   emptyText("The model is ready. Ask anything.");
   sysNote(`Model ready on ${n} device${n > 1 ? "s" : ""}`);
   if (!matchMedia("(pointer: coarse)").matches) $("ai-prompt").focus();   // touch: the keyboard opens when the user taps the prompt
-  broadcastAll({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label });
+  broadcastAll({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax(), out: outNow() });
   pushMap(0, null, false, true);
   offerRedealForNewcomers();
-  setTimeout(nextQueued, 0);
+  if (!ai.recovering) setTimeout(nextQueued, 0);
   saveHost();
+  keepAwake();
   mascot("Cluster online! Ask anything. Everyone in the room can.");
   codeRoleChanged();
 }
@@ -2239,6 +3317,8 @@ function lapWait(key, ms, what) {
     });
   });
 }
+// the slowest round trip to a device in the chain (pongs), for lap timeouts
+function chainRtt() { return Math.max(0, ...ai.chain.map((id) => conns.get(id)?.rtt || 0)); }
 function failWaiters(err) { for (const [k, w] of ai.waiters) { ai.waiters.delete(k); w.rej(err); } }
 function lapDone(key, h) { const w = ai.waiters.get(key); if (w) { ai.waiters.delete(key); w.res(h); } }
 // send a frame to the first device of the chain; a pending reset or rollback rides with it,
@@ -2252,6 +3332,13 @@ function sendChain(msg) {
   // does the host's own copy go to disk (a reloaded host must not index a slot no worker saved)
   const saved = ctl.sv != null && ai.ckpt?.items.find((x) => x.key === ctl.sv);
   if (saved) ckptPersist(ctl.sv, saved.ids, saved.pin);
+}
+// a decode lap starts: the workers that asked for it (a phone) wake their GPU now, so it is clocked
+// up when this lap's frame reaches them (room/gpuwake.js). A hint only: a worker that misses it or
+// gets it late is just slower, and it is ignored once its frame has arrived.
+function wakeChain(pos) {
+  if (WAKE === "0" || !ai.chain.length) return;
+  for (const id of ai.chain) if (conns.get(id)?.meta?.wake) sendTo(id, { t: "ai-wake", pos });
 }
 // forget the conversation state on every device: here now, on the chain with the next frame
 function resetState() {
@@ -2277,8 +3364,11 @@ function ckptClear(tellChain = false) {   // engines rebuilt or in an unknown st
 }
 // pin: this save is the system prompt + tools (Code mode, issue #73). It is kept apart from the
 // CKPT_MAX answer checkpoints, never evicted by them, and replaces the previous pinned one.
+// the engine keeps checkpoints here: the qwen35 engine (the dense one has GPU slots too, for the room
+// node, and says hostCkpt: false, so a browser host keeps to the qwen35 engine as before)
+function ckptEngine() { return !!ai.engine?.saveSlot && ai.engine.hostCkpt !== false; }
 function ckptSave(pin = false) {
-  if (!CKPT_MAX || !ai.fed?.length || !ai.engine?.saveSlot) return;
+  if (!CKPT_MAX || !ai.fed?.length || !ckptEngine()) return;
   if (!ai.ckpt) ckptClear();
   // a worker applies sv before dp, so a save riding with DROP_ALL would be gone at once on every
   // worker: skip it (the host would otherwise index a slot the chain does not have)
@@ -2426,6 +3516,8 @@ const PHONE_LAYERS = new URLSearchParams(location.search).get("phonelayers") ===
 { const sp = new URLSearchParams(location.search).get("split"); if (sp === "memory" || sp === "speed") $("ai-split").value = sp; }
 const MTP_BATCH = roomEngineFlags(location.search).mtpBatchFill;   // ?mtpbatch=0: one draft-cache row per submit, for A/B
 const KV_ASK = roomQwen35Options(location.search).kvQ8 ? "q8" : null;   // ?kv=q8 (engine/preset.js): int8 KV cache, host only; see aiLoadShard
+// the host's share of each lap in one submit (engine hostFuse, engine/preset.js); ?hostfuse=0 for A/B, same output
+const HOST_FUSE = roomQwen35Options(location.search).hostFuse;
 function fillDrafts(h, ids, i0, basePos, n) {
   if (!FILL_DRAFTS || !ai.engine?.mtp) return;
   const dim = ai.engine.dims.dim, E = ai.engine;
@@ -2447,7 +3539,11 @@ function fillDrafts(h, ids, i0, basePos, n) {
 // fillNext: the prompt token after this one, to fill the draft cache with this position's hidden.
 // desc: GPU sampling descriptor (engine.gpuDescFor(sample)): returns the sampler's candidates
 // { ids, vals, bad } instead of the logits (the sampler reads either).
-async function aiPipeToken(id, needLogits = true, fillNext, desc = null) {
+// ahead (plain decoding in a chain, see roomGenerate): { h, t0, defer, onSent }. h: the host's
+// layers for id already ran (engine.headAhead, started at t0), so the lap starts with the send;
+// onSent: runs while the other devices work; defer: returns null without running the head (the
+// next headAhead runs it in the same submit as the next token's layers).
+async function aiPipeToken(id, needLogits = true, fillNext, desc = null, ahead = null) {
   const pos = ai.pos;
   if (!ai.chain.length && !needLogits) {
     // solo prefill: layers only, no head, no readback; sync every 8 tokens
@@ -2457,13 +3553,15 @@ async function aiPipeToken(id, needLogits = true, fillNext, desc = null) {
     ai.pos++; ai.fed?.push(id);
     return null;
   }
-  const tHost = performance.now();
-  let h = await ai.engine.embedRun(id, pos);
+  const tHost = ahead?.t0 ?? performance.now();
+  if (needLogits) wakeChain(pos);
+  let h = ahead?.h || await ai.engine.embedRun(id, pos);
   if (badF32(h)) throw new Error(`NaN after HOST layers (pos ${pos}) — host GPU kernel issue`);
   if (ai.chain.length) {
     const hostMs = performance.now() - tHost;
-    const returned = lapWait(pos, 30000, "token");
+    const returned = lapWait(pos, lapTimeout(ai.lapStat, 30000, chainRtt()), "token");
     sendChain({ t: "ai-hidden", pos, ...packWire(h) });
+    ahead?.onSent?.();
     h = await returned;
     if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos}) — check peer status lines`);
     noteLap(performance.now() - tHost, hostMs);
@@ -2471,7 +3569,7 @@ async function aiPipeToken(id, needLogits = true, fillNext, desc = null) {
     if (!needLogits && fillNext !== undefined) fillDrafts(h, [id, fillNext], 0, pos, 1);
   } // solo mode: engine holds every layer, embedRun already produced the final hidden
   ai.pos++; ai.fed?.push(id);
-  if (!needLogits) return null;   // prefill: skip the head entirely
+  if (!needLogits || ahead?.defer) return null;   // prefill: skip the head entirely
   if (desc) {
     const c = await ai.engine.headFromHiddenIds(h, desc);
     if (c.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
@@ -2575,8 +3673,9 @@ async function aiPrefill(ids, { aborted = () => ai.abort, onStatus = aiStatus, d
 // Workers report their compute per frame kind (ai-tele); the host times each lap, so what is left
 // is the wire. The map shows the chain, what each device holds and how long its part takes.
 function noteLap(lapMs, hostMs) {
-  const L = ai.lapStat ||= { lap: 0, host: 0, n: 0 };
+  const L = ai.lapStat ||= { lap: 0, host: 0, n: 0, max: 0 };
   L.lap = L.n ? 0.7 * L.lap + 0.3 * lapMs : lapMs;
+  L.max = Math.max(lapMs, 0.98 * (L.max || 0));   // the slowest recent lap, fading over ~50 laps (lap timeouts)
   L.host = L.n ? 0.7 * L.host + 0.3 * hostMs : hostMs;
   L.n++;
 }
@@ -2721,13 +3820,10 @@ bandFold(bandFolded());
 new MutationObserver(() => bandFold(bandFolded())).observe($("chatpane"), { attributes: true, attributeFilter: ["class"] });
 // Chat | Code sits in the room bar at 820px and wider and on short touch screens (a phone in
 // landscape, where its own strip costs too much height); in its own strip on phones held upright.
-// Serve API rides right after it and shows whenever it does.
 {
   const home = document.querySelector(".mode-row"), wide = matchMedia("(min-width: 821px), (max-height: 500px) and (pointer: coarse)");
-  const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); b.after($("api-open")); };
-  place(); wide.addEventListener("change", () => { place(); apiPlace(); });
-  const sync = () => { $("api-open").hidden = $("mode-bar").hidden; if ($("api-open").hidden) closeApi(false); };
-  sync(); new MutationObserver(sync).observe($("mode-bar"), { attributes: true, attributeFilter: ["hidden"] });
+  const place = () => { const b = $("mode-bar"); if (wide.matches) { if (b.parentNode !== $("room-badge").parentNode) $("room-badge").after(b); } else if (b.parentNode !== home) home.append(b); };
+  place(); wide.addEventListener("change", place);
 }
 // phones: the chat stays on the newest message when the screen shrinks (the keyboard opens), if
 // the reader was at the bottom; while typing, the header chips, the band and Chat | Code step aside
@@ -2829,10 +3925,67 @@ const MAXNEW_PARAM = Math.max(0, parseInt(new URLSearchParams(location.search).g
 //   signal                AbortSignal; ai.abort (the Stop button) works too
 // -> { tokens, reason: "stop"|"max"|"ctx"|"abort", reused, prefilled, count, tps, acc, copied,
 //      tPre, tDecode, preFrames, stats }
+//
+// A device in the chain that drops mid-answer does not fail it: roomRecover waits for the device to
+// come back into its slot (or re-deals without it, experimental) and the answer carries on from the
+// last emitted token (room/resume.js). -> the result also says how many times it `resumed`.
+async function roomGenerate(ids, opts = {}) {
+  const kind = ai.busy;   // "gen" (chat) or "code": the lock the caller holds, kept through a recovery
+  const aborted = () => ai.abort || !!opts.signal?.aborted;
+  const status = opts.onStatus || (() => {});
+  try {
+    return await resumableGenerate(roomGenerateOnce, ids, { maxNew: MAX_NEW, ...opts }, {
+      aborted,
+      recover: ({ err }) => roomRecover(err, kind, status, aborted),
+      onResume: ({ emitted }) => {
+        const s = emitted ? `the room is whole again: carrying on after ${emitted} token${emitted === 1 ? "" : "s"}` : "the room is whole again: starting over";
+        status(s); aiStatus(s); log("room", s); toast(s);
+      },
+    }).then((r) => (r.resumed ? { ...r, stats: r.stats + ` · carried on after ${r.resumed > 1 ? r.resumed + " drops" : "a device dropped"}` } : r));
+  } finally {
+    if (ai.recovering?.pending) ai.recovering = null;
+  }
+}
+// Wait until the room can generate again after a chain device dropped: it comes back into its slot
+// (aiRejoin, then its ai-ready), or after REJOIN_GRACE_MS the layers are re-dealt over the devices
+// still here (when the host's "re-deal on its own" is on). The caller's lock (ai.busy) is held
+// throughout, so no queued question or Code request slips in between.
+async function roomRecover(err, kind, status, aborted) {
+  if (ai.role !== "host") throw err;
+  ai.recovering = { kind, since: Date.now() };
+  const why = err?.message || "a device left";
+  log("room", `the ${kind === "code" ? "Code run" : "answer"} is waiting: ${why}`);
+  toast(`${why}: waiting for the room to be whole again, then this ${kind === "code" ? "Code run" : "answer"} carries on`);
+  const say = (s) => { status(s); aiStatus(s); };
+  try {
+    await waitForRoom({
+      ready: () => !!ai.engine && !ai.degraded && !ai.loadingShard && ai.readyPeers.size >= ai.chain.length && ai.chain.every((id) => conns.has(id)) && !relinking(),
+      gone: missingNames,
+      redeal: async () => {
+        log("room", `${missingNames().join(", ")} did not come back in ${Math.round(REJOIN_GRACE_MS / 1000)} s: re-dealing the layers (experimental auto re-deal)`);
+        await aiRedeal(true);
+        if (!ai.engine) throw new Error("the automatic re-deal failed: " + ($("ai-status").textContent || "no model"));
+      },
+      autoRedeal: autoRedealOn,
+      status: say,
+      aborted,
+    });
+  } finally {
+    ai.recovering = null;
+    // the lock stays with the run (aiStart and aiMaybeReady may have touched it during a re-deal)
+    ai.busy = kind;
+    if (kind === "code") lockKind = kind;
+    setBusyUI(true, true);
+  }
+}
 // pin: the length of the prompt's fixed start (Code mode: the system prompt + tools). When the
 // caches do not hold it yet, the prefill pauses there and saves a pinned checkpoint on every
 // device, so a later prompt that changes after it (a compacted agent conversation) resumes there.
-async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(ai.settings.sampling), signal, onStatus = () => {}, pin = 0 } = {}) {
+// pinTag: whose fixed start it is (API asks: a hash of it; Code mode: none). A pinned checkpoint
+// another tag used in the last PIN_KEEP_MS is not replaced (two agents in one room would otherwise
+// keep evicting each other's system prompt): the new request just runs without pinning.
+const PIN_KEEP_MS = 600000;
+async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(ai.settings.sampling), signal, onStatus = () => {}, pin = 0, pinTag = "" } = {}) {
   if (!ai.engine) throw new Error("the model is not loaded");
   // a device in the chain is gone: its frames would go nowhere and wait out the lap timeouts
   if (ai.degraded) throw new Error("a device left: re-deal the layers first");
@@ -2868,14 +4021,18 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
     // positions, so the answer is the same; the head's logits after the first part are unused)
     // Stopped during the first part: nothing more is sent, and the end-of-answer save below keeps
     // what the caches hold, as for any stop during a prefill.
-    const cut = CKPT_MAX && ai.engine.saveSlot ? pinSplit(reused, pin, ids.length) : 0;
+    const pinned = ai.ckpt?.pinned?.()[0];
+    const tag = pinTag || "code";
+    if (pinned && ai.pinInfo && reused >= pinned.ids.length && pinned.ids.length <= ids.length && pinned.ids.every((t, i) => t === ids[i])) ai.pinInfo.hitAt = performance.now();
+    if (pin && pinned && ai.pinInfo && ai.pinInfo.tag !== tag && performance.now() - ai.pinInfo.hitAt < PIN_KEEP_MS) pin = 0;
+    const cut = CKPT_MAX && ckptEngine() ? pinSplit(reused, pin, ids.length) : 0;
     let logits = null;
     if (!cut) logits = rest.length ? await aiPrefill(rest, { aborted, onStatus, desc }) : null;
     else {
       const part = await aiPrefill(ids.slice(reused, cut), { aborted, onStatus, desc });
       // the whole fixed start is in the caches (also when Stop came during its last lap): pin it,
       // or the next request, which reuses it from the plain end save, would never pin it
-      if (ai.fed?.length === cut) ckptSave(true);
+      if (ai.fed?.length === cut) { ckptSave(true); ai.pinInfo = { tag, hitAt: performance.now() }; }
       if (part && !aborted()) logits = await aiPrefill(ids.slice(cut), { aborted, onStatus, desc });
     }
     tPre = performance.now() - t0Pre;
@@ -2896,17 +4053,19 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
       // speculative decoding: the model's own draft head proposes up to K tokens,
       // one batched trunk pass verifies them (byte-identical to plain decoding)
       const spec = ai.chain.length ? {
-        runTrunk: async (tokens, pos) => {
-          const tLap = performance.now();
+        // pre: { hs, t0 } when the engine already ran the host's layers with the drafts (hostFuse)
+        runTrunk: async (tokens, pos, pre = null) => {
+          const tLap = pre?.t0 ?? performance.now();
+          wakeChain(pos);
           const n = tokens.length, hdim = ai.engine.dims.dim, NC = ai.engine.NC || 4;
-          const hb = new Float32Array(n * hdim);
-          for (let c = 0; c < n; c += NC) {
+          const hb = pre?.hs || new Float32Array(n * hdim);
+          if (!pre) for (let c = 0; c < n; c += NC) {
             const m = Math.min(NC, n - c);
             hb.set(await ai.engine.embedRunBatch(tokens.slice(c, c + m), pos + c, { base: c, total: n }), c * hdim);
           }
           if (badF32(hb)) throw new Error(`NaN after HOST layers (pos ${pos})`);
           const hostMs = performance.now() - tLap;
-          const returned = lapWait("b" + pos, 90000, "verify");
+          const returned = lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, chainRtt()), "verify");
           sendChain({ t: "ai-hidden-b", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb) });
           const h = await returned;
           if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos})`);
@@ -2915,6 +4074,7 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
         },
         // the rollback rides on the next frame (sendChain), strictly before it on every device
         onReject: async (k) => { ai.pendingCtl = { rb: k }; },
+        preTrunk: true,
       } : {};
       if (ai.chain.length && ai.lastHidden && first == null) ai.engine.setHidden(ai.lastHidden);
       ai.engine.pos = ai.pos;
@@ -2988,17 +4148,45 @@ async function roomGenerate(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, s
     } else {
       // plain decoding. An end token is not piped through the chain: the next turn's template
       // writes <|im_end|> itself, so both paths leave the caches holding exactly prompt + answer
-      for (let i = 0; i < maxNew && !aborted(); i++) {
-        const next = i === 0 && first != null ? first : sample(logits);
-        if (eos(next)) break;
-        emit(next, false);
-        if (ai.pos >= ctxMax() - 1) { capped = true; break; }   // no position left for another token
-        logits = await aiPipeToken(next, true, undefined, desc);
-        if (ai.chain.length) pushMap(count / ((performance.now() - t0) / 1000), null, true);
-      }
+      // ahead (greedy GPU sampling in a chain, HOST_FUSE): from the second lap on, the head of the
+      // hidden the chain returned and the host's layers on its pick are one submit (engine
+      // headAhead), the hidden goes out before the token is shown, and a pick that is not piped (a
+      // stop token, the cap, an abort) has its layers undone (dropAhead)
+      const ahead = HOST_FUSE && ai.chain.length > 0 && desc?.kind === "greedy" && !!ai.engine.canHeadAhead?.();
+      let deferred = false;   // ahead: the head of ai.lastHidden has not run yet
+      try {
+        for (let i = 0; i < maxNew && !aborted(); i++) {
+          let next, pre = null;
+          const tLap = performance.now();
+          if (i === 0 && first != null) next = first;
+          else if (!deferred) next = sample(logits);
+          else {
+            const r = await ai.engine.headAhead(ai.lastHidden, ai.pos, desc);
+            if (r.cands.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
+            logits = r.cands; deferred = false;
+            next = sample(r.cands);
+            if (r.h && next === r.cands.ids[0]) pre = r.h;
+          }
+          if (eos(next)) break;
+          if (ai.pos >= ctxMax() - 1) { emit(next, false); capped = true; break; }   // no position left for another token
+          if (ahead) {
+            if (pre) ai.engine.keepAhead(); else ai.engine.dropAhead();
+            logits = null; deferred = true;
+            await aiPipeToken(next, true, undefined, desc, { h: pre, t0: tLap, defer: true, onSent: () => emit(next, false) });
+          } else {
+            emit(next, false);
+            logits = await aiPipeToken(next, true, undefined, desc);
+          }
+          if (ai.chain.length) pushMap(count / ((performance.now() - t0) / 1000), null, true);
+        }
+      } finally { if (ahead) ai.engine.dropAhead(); }   // a pick that was not piped: its layers undone
       if (count >= maxNew) {
         capped = true;
         // for Continue: the chosen id (sample reads logits or GPU candidates alike)
+        if (deferred && !aborted() && ai.pos < ctxMax() - 1) {
+          logits = await ai.engine.headFromHiddenIds(ai.lastHidden, desc);
+          if (logits.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
+        }
         if (logits && !aborted() && ai.pos < ctxMax() - 1) ai.pending = { next: sample(logits), at: ai.pos };
       }
     }
@@ -3058,6 +4246,7 @@ async function aiGenerate(textArg, who, askerId = peer.id, mode = "ask") {
   const answer = [];          // sampled ids of this answer, verbatim, for the next turn's history
   let reply = "", failed = null, stats = "", capped = false, dropped = 0, r = null, inGen = false;
   try {
+    await linksUp();   // a link in the chain is being replaced: frames sent now would be lost
     // the conversation with this question, trimmed to fit
     const fit = fitContext(ai.tok, { system: persona.system, turns: cont ? [...ai.conv.turns.slice(0, -1), { ...lastTurn, open: true }] : [...ai.conv.turns, { role: "user", text, name: asker }], thinking }, ctxMax(), MIN_ROOM);
     dropped = fit.dropped;
@@ -3103,6 +4292,7 @@ async function aiGenerate(textArg, who, askerId = peer.id, mode = "ask") {
   saveHost();
   if (!failed) aiStatus(`ready — prefill ${r.prefilled} tok in ${(r.tPre / 1000).toFixed(1)}s${ai.chain.length ? ` / ${r.preFrames} frame${r.preFrames === 1 ? "" : "s"}` : ""}${r.reused ? ` (${r.reused} reused)` : ""}, ${stats}`);
   mascot("Done. Anyone in the room can ask the next one.");
+  if (ai.recovering?.pending) ai.recovering = null;
   ai.busy = false;
   ai.abort = false;
   setBusyUI(false);
@@ -3198,6 +4388,7 @@ async function workerFrame(d) {
     const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };
     if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
     else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
+    if (d.spec) keepWarm(d.basePos);
   } else {
     // one token: run my layers, forward along the chain
     const hin = unpackWire(d);
@@ -3209,24 +4400,35 @@ async function workerFrame(d) {
     const msg = { pos: d.pos, ...packWire(h) };
     if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
     else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
+    keepWarm(d.pos);
     if (d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
   }
 }
+
+// GPU wake on a worker (room/gpuwake.js): spin until the next frame arrives (aiOnData stops it)
+function gpuWake() {
+  if (!ai.engine || !ai.device || !myMeta.wake) return;
+  try { (ai.waker ||= new GpuWaker(ai.device)).wake(WAKE_MAX_MS); } catch { myMeta.wake = 0; }
+}
+// ?wake=keep: also spin from the moment this worker has sent frame `p` on, unless the next one is already here
+function keepWarm(p) { if (WAKE === "keep" && ai.lastFramePos === p) gpuWake(); }
 
 // the host's tab closed: the room is over for everyone else
 // A host tab that reloads can resume the room (it keeps the conversation in localStorage), so the
 // others wait a minute and keep knocking before calling the room over.
 const HOST_WAIT_MS = 60000;
 function hostGone() {
-  if (ai.role === "host") return;
+  if (ai.role === "host" || admission === "out") return;
   failWaiters(new Error("the host left"));
   codeRoleChanged();
   $("ai-row").style.display = "none";
+  // this device was the one away (screen locked, Safari in the background) if it came back just now
+  const wasAway = performance.now() - visibleSince < 20000;
   $("room-over").hidden = false;
-  $("room-over-h").textContent = "Host reconnecting";
-  $("room-over-why").textContent = "The host's tab closed. Waiting a minute in case it comes back…";
+  $("room-over-h").textContent = wasAway ? "Reconnecting" : "Host reconnecting";
+  $("room-over-why").textContent = wasAway ? "This screen was locked or in the background, so the room lost its link to this device. Reconnecting; its layers come back into their slot…" : "The host's tab closed. Waiting a minute in case it comes back…";
   const was = $("ai-status").textContent;
-  aiStatus("the host left; waiting for it to come back…");
+  aiStatus(wasAway ? "reconnecting to the room…" : "the host left; waiting for it to come back…");
   const t0 = Date.now();
   clearInterval(hostGone.timer);
   hostGone.timer = setInterval(() => {
@@ -3240,17 +4442,20 @@ function hostGone() {
       mascot("The host left. Start a new room?");
       return;
     }
+    signalBack();   // a new link needs the signaling server
+    if (peer.disconnected) return;
     const conn = peer.connect(PREFIX + roomCode, { reliable: true });
     conn.on("open", () => {
       if (conns.has(PREFIX + roomCode)) { try { conn.close(); } catch {} return; }
       clearInterval(hostGone.timer);
       wire(conn, "host", undefined, true);
-      conn.send({ t: "hello", name: myName, meta: myMeta, v: PROTOCOL, back: 1 });
+      conn.send(helloFor(conn.peer, { back: 1 }));
       ai.hostId = PREFIX + roomCode;
       $("room-over").hidden = true;
       // layers to deal only if a model was running; otherwise the card goes back to what it said
-      aiStatus(ai.role ? "the host is back; waiting for it to deal the layers…" : was);
-      toast("the host is back");
+      aiStatus(wasAway ? (ai.engine ? "back in the room; rejoining the chain…" : "back in the room") : ai.role ? "the host is back; waiting for it to deal the layers…" : was);
+      toast(wasAway ? "back in the room" : "the host is back");
+      saveGuest();
     });
     conn.on("error", () => {});
   }, 3000);
@@ -3260,8 +4465,9 @@ function hostGone() {
 function saveHost() {
   if (!isHost || !roomCode) return;   // from the moment the room exists, not only once a model runs
   try {
-    localStorage.setItem(HOST_KEY, JSON.stringify({ code: roomCode, name: myName, model: ai.model || null, turns: ai.conv.turns,
-      transcript: ai.transcript.filter((t) => !t.api).slice(-20), settings: ai.settings, peers: ai.chainNames || [], split: $("ai-split").value, ckptN: ai.ckptN || 0, t: Date.now() }));
+    localStorage.setItem(HOST_KEY, JSON.stringify({ code: roomCode, name: myName, signal: signalServer?.spec || null, model: ai.model || null, turns: ai.conv.turns,
+      transcript: ai.transcript.filter((t) => !t.api).slice(-20), settings: ai.settings, peers: ai.chainNames || [], split: $("ai-split").value, ckptN: ai.ckptN || 0,
+      gate: gate ? saveGate(gate) : null, t: Date.now() }));
   } catch {}
 }
 addEventListener("pagehide", saveHost);   // stamp the saved room as the tab unloads, so a reload can go straight back in
@@ -3299,7 +4505,7 @@ function resumeHost(r) {
 // room's layers, chat or state), and the host ignores them altogether.
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
-  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed"]);
+  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-share", "ai-wake", "ai-out"]);
 async function aiOnData(from, d) {
   if (d.t.startsWith("ai-code") || d.t.startsWith("ai-pv")) { codeOnData(from, d); return; }
   const e = conns.get(from);
@@ -3326,14 +4532,31 @@ async function aiOnData(from, d) {
       if (d.boss === peer.id) { toast(`${d.by} started ${MODELS[d.model]?.label.split("·")[0].trim()}`); aiStart(d.model); }
       else aiStatus(`${d.by} started the model…`);
       break;
-    case "ai-next": ai.next = d.next; ensureLink(d.next); break;
+    case "ai-next":
+      // relink: the device after this one came back under the same id; the old link to it is dead
+      if (d.relink && conns.has(d.next)) dropLink(d.next, "came back: opening a fresh link");
+      ai.next = d.next;
+      ensureLink(d.next).then((ok) => { if (d.relink) sendTo(ai.hostId || from, { t: "ai-linked", next: d.next, ok }); });
+      break;
+    case "ai-linked":   // worker -> host: its fresh link to a device that came back is up
+      if (ai.role !== "host" || !ai.chain.includes(from)) break;
+      ai.relinks.delete(d.next);
+      aiMaybeReady();
+      break;
     case "ai-layers":
       ai.layersByName = d.by; loadCardRender();
+      ai.heldGB = d.held && typeof d.held === "object" ? d.held : null;
+      ai.outWhy = d.out && typeof d.out === "object" ? d.out : {};
+      paintHeld();
       if (ai.role === "worker" && !d.by[myName]) {   // not in this deal: ask-only guest, GPU memory freed
-        ai.role = "guest"; ai.range = null; ai.engine = null;
+        ai.role = "guest"; ai.range = null; ai.engine = null; ai.held = null;
         try { ai.device?.destroy(); } catch {}
         ai.device = null;
       }
+      break;
+    case "ai-out":   // the host: why devices hold no layers (a newcomer waits for a re-deal)
+      ai.outWhy = d.out && typeof d.out === "object" ? d.out : {};
+      paintHeld();
       break;
     case "ai-reset":   // the host started a new chat
       clearChat();
@@ -3349,6 +4572,22 @@ async function aiOnData(from, d) {
       $("ldg-sub").textContent = `${d.by} is re-dealing the layers over the devices in the room`;
       aiStatus(`${d.by} is re-dealing the layers…`);
       break;
+    case "ai-share":   // the host lowered this device's share (or left it out) after its tab was killed while loading
+      if (!d.drop && d.gb > 0) {
+        myMeta.contribGB = Math.max(0.1, Math.min(myMeta.contribGB || d.gb, d.gb));
+        const selfCard = document.querySelector(".peer-card.self");
+        if (selfCard) { setLends(selfCard, myMeta.contribGB); selfSteps(selfCard); }
+        updateCluster();
+      }
+      log("room", d.why); toast(d.why); aiStatus(d.why);
+      break;
+    case "ai-linklost": {   // a worker's link to another device in the chain dropped (up: 0, it is being replaced) or is back (up: 1)
+      if (ai.role !== "host" || !ai.chain.includes(from)) break;
+      const nm = String(d.name || "").replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").slice(0, 40);
+      if (d.up || !ai.chainNames?.includes(nm)) noteLink(from + "|" + nm, nm, true);
+      else { noteLink(from + "|" + nm, nm, false); chainLinkLost(from, nm); }
+      break;
+    }
     case "ai-degraded":
       aiStatus(`${d.why} — waiting for the host to re-deal the layers`);
       toast(d.why);
@@ -3369,18 +4608,30 @@ async function aiOnData(from, d) {
       ai.startFailed = null;
       ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;
       ensureLink(d.next);   // open the link to my chain neighbour while the weights download
+      // back in my slot after a lock or a lost link, with the same layers still on the GPU: no reload
+      const keep = ai.engine && sameShard(ai.held, d) && ai.held.kv === kvForLoad(d.model, d.kv, KV_ASK);
       try {
-        ai.loadingShard = true; ai.loadKey = loadKey;
-        // d.kv: the host's KV format (a host without it: this device's own ?kv=, as before)
-        try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model), kvForLoad(d.model, d.kv, KV_ASK)); } finally { ai.loadingShard = false; }
-        if (ai.startFailed) throw new Error(ai.startFailed);
+        if (keep) {
+          ai.q = Promise.resolve(); ai.loadKey = loadKey;
+          try { ai.engine.reset?.(); ai.engine.dropAllSlots?.(); } catch {}
+          log("room", `back in the room: layers ${d.range[0]}–${d.range[1] - 1} are still loaded, no download`);
+        } else {
+          ai.loadingShard = true; ai.loadKey = loadKey;
+          // d.kv: the host's KV format (a host without it: this device's own ?kv=, as before)
+          try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model), kvForLoad(d.model, d.kv, KV_ASK)); } finally { ai.loadingShard = false; }
+          if (ai.startFailed) throw new Error(ai.startFailed);
+          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv: kvForLoad(d.model, d.kv, KV_ASK) };
+        }
+        keepAwake();
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
         const slots = await ckptRestore();   // this device's part of the room's checkpoints, if it saved any before a reload
         aiStatus(`layers ${d.range[0]}–${d.range[1] - 1} ready · syncing with the room…`);
         $("ldg-title").textContent = `layers ${d.range[0]}–${d.range[1] - 1} ready`;   // the card stays up as it is (Starting) until ai-ready-all
         $("ldg-sub").textContent = "syncing with the rest of the room";
         $("ldg-fill").style.width = "100%";
-        sendTo(ai.hostId, { t: "ai-ready", slots });   // the host forgets the checkpoints not in slots
+        // slots: the host forgets the checkpoints not in them; ckpt: this device applies sv / ld / dp
+        // (a room node hosting a dense model checks it: tabs from before the dense engine had slots ignore them)
+        sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0 });
       } catch (err) {
         if (onLoadError(ai.startFailed) === "stopped") { workerStopped(); break; }   // the host stopped the start (ai-start-failed): this load stopped with it
         aiLoading(false);
@@ -3393,6 +4644,7 @@ async function aiOnData(from, d) {
       break;
     }
     case "ai-start-failed":   // the host stopped the start: back to the picker, and a load still running here stops (the pacer)
+      ai.heldGB = null; ai.outWhy = {}; paintHeld();
       ai.startFailed = d.why || "the start was stopped";
       if (freeOnStartFailed(ai.loadingShard)) workerStopped();   // (a load in flight stops at its next tensor, and its catch does this)
       aiLoading(false);
@@ -3433,12 +4685,19 @@ async function aiOnData(from, d) {
     case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0 }); } break;
     case "ai-inv-req": cachedRanges(d.url).then((have) => sendTo(from, { t: "ai-inv", url: d.url, have })); break;
     case "ai-inv": if (ai.invWait && ai.invWait.url === d.url && Array.isArray(d.have)) ai.invWait.inv[from] = d.have.slice(0, 20000); break;
-    case "ai-wget": if (PEER_WEIGHTS) serveWeight(from, d); else sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); break;
+    case "ai-wget": answerWget(from, d); break;
     case "ai-wpart": onWeightPart(d); break;
+    case "ai-wack": onWeightAck(d); break;
     case "ai-map": renderMap(d.nodes, d.st, d.live); break;
+    case "ai-wake":
+      // the frame of this lap may have overtaken its wake (they ride different channels)
+      if (ai.role === "worker" && d.pos > (ai.lastFramePos ?? -1)) gpuWake();
+      break;
     case "ai-hidden-b":
     case "ai-hidden":
       if (ai.role !== "worker") break;
+      ai.waker?.stop();
+      ai.lastFramePos = d.t === "ai-hidden" ? d.pos : d.basePos;
       ai.q = ai.q.then(() => workerFrame(d)).catch((err) => {
         aiStatus("⚠ " + err.message);
         sendTo(ai.hostId, { t: "ai-error", message: err.message });
@@ -3491,6 +4750,7 @@ async function aiOnData(from, d) {
       break;
     case "ai-ready-all":
       aiLoading(false);
+      if (d.out && typeof d.out === "object") { ai.outWhy = d.out; paintHeld(); }
       $("ai-panel").classList.add("online");
       if (ai.role !== "host" && ai.role !== "worker") ai.role = "guest";
       if (ai.role !== "host") ai.hostId = from;
@@ -3550,6 +4810,7 @@ function roomLock(kind = "code") {
   return true;
 }
 function roomUnlock() {
+  if (ai.recovering?.pending) ai.recovering = null;   // the run ended before it needed the room again
   if (!lockKind || ai.busy !== lockKind) return;
   ai.busy = false; ai.abort = false; lockKind = null;
   setBusyUI(false);
@@ -3637,6 +4898,12 @@ const roomApi = {
   chatTemplate: () => ai.tok?.chatTemplate || ai.G?.meta?.["tokenizer.chat_template"] || "",
   maxSeq: () => ctxMax(),
   generate: roomGenerate,
+  // Code mode on the serve v2 core (harness/core-model.js): the same template profile and token
+  // texts the API path uses (one mask cache for both), and which model the cached ids belong to
+  profile: () => (ai.tok ? apiProfile() : null),
+  tokenTexts: () => apiTokenTexts(),
+  modelKey: () => ai.model || "",
+  recovering: () => !!ai.recovering,   // a device dropped mid-run: the run waits for it (or a re-deal) and carries on
   lock: roomLock, unlock: roomUnlock,
   busy: () => ai.busy,
   // ai.abort ends the step in flight after its lap; code.js aborts its run's controller in onStop
@@ -3665,7 +4932,14 @@ const roomApi = {
 if (MOCK) window.__pooledMock = { model: null, api: roomApi };
 
 $("ai-start").addEventListener("click", aiStartAnywhere);
-$("ai-redeal").addEventListener("click", aiRedeal);
+$("ai-redeal").addEventListener("click", () => aiRedeal());
+// auto re-deal (experimental): the host's choice, remembered on this device
+try { if (localStorage.getItem("pooled-autoredeal") === "off") $("ai-autoredeal").checked = false; } catch {}
+$("ai-autoredeal").addEventListener("change", (e) => {
+  try { localStorage.setItem("pooled-autoredeal", e.target.checked ? "on" : "off"); } catch {}
+  if (!e.target.checked) clearTimeout(ai.idleRedeal);
+  toast(e.target.checked ? "re-deals on its own when a device does not come back (experimental)" : "waits for a dropped device, or for you to re-deal");
+});
 $("ai-split").addEventListener("change", () => {
   if (ai.role === "host" && ai.engine) showRedeal(true, $("ai-split").value === "speed" ? "re-deal to put the layers on the fastest devices (measured on the answers so far)" : "re-deal to split by memory again");
 });
@@ -3887,7 +5161,7 @@ function apiAsk(from, d) {
   const busy = (why, code, extra = {}) => sendTo(from, { t: "ai-busy", why, rid, code, ...extra });
   if (!ai.apis.has(from)) return busy("this device did not join as an API client", "bad");
   if (!ai.settings.apiAllow) return busy("the host does not allow API clients in this room", "off");
-  const v = validateApiAsk(d);
+  const v = validateApiAsk(d, { profile: d.api === 2 && ai.tok ? apiProfile() : null });
   if (v.err) return busy(v.err, v.code);
   // the program behind the bridge (its User-Agent, read by cli/lib/http.js: Continue, OpenAI/Python...), for the Serve API panel
   const tool = v.req.params.client !== "API" ? v.req.params.client : null, known = ai.apis.get(from);
@@ -3921,8 +5195,9 @@ async function apiGenerate({ api: req, name, from }) {
   if (!conns.has(from) || !ai.apis.has(from)) { setTimeout(nextQueued, 0); return; }   // left while it waited
   if (ai.busy || !ai.engine) { (ai.queue ||= []).unshift({ api: req, name, from }); return; }
   if (ai.degraded) { sendTo(from, { t: "ai-busy", rid, code: "degraded", why: "a device left the room; the host has to re-deal the layers first" }); return; }
+  const v2 = req.api === 2;
   let prompt;
-  try { prompt = apiPrompt(ai.tok, req, ctxMax(), ai.apiCache); }
+  try { prompt = v2 ? apiPrompt2(ai.tok, req, ctxMax(), { profile: apiProfile(), cache: ai.apiTurns, encoder: ai.apiEnc, model: ai.model || "" }) : apiPrompt(ai.tok, req, ctxMax(), ai.apiCache); }
   catch (err) { prompt = { err: err.message, code: "bad" }; }
   if (prompt.err) { sendTo(from, { t: "ai-busy", rid, code: prompt.code, why: prompt.err, n: prompt.n, max: prompt.max }); setTimeout(nextQueued, 0); return; }
   const client = req.params.client;
@@ -3931,54 +5206,117 @@ async function apiGenerate({ api: req, name, from }) {
   ai.askerId = from;
   ai.lastWasApi = true;
   const run = ai.apiRun = { rid, from, ac: new AbortController() };
-  apiPanel();
-  setBusyUI(true, true);
-  setAfterAnswer(false, false);
-  // the screens: the room's visibility applies as for any guest, except that the asker (the bridge)
-  // gets its own full stream below, never a stand-in; under "asker" only the host's screen shows it
-  const { full, hidden } = chatRecipients(ai.visibility || "all", from, [...conns.keys()]);
-  const toScreens = (msg) => {
-    for (const id of full) if (id !== from) sendTo(id, msg);
-    if (msg.t !== "ai-token") for (const id of hidden) if (id !== from) sendTo(id, { t: msg.t, name: msg.name, stats: msg.stats, asker: msg.asker, ctx: msg.ctx, api: 1, hidden: true });
-  };
-  const label = `${name} · ${client} (API)`;
-  const last = req.messages[req.messages.length - 1].text;
-  const shown = last.length > API_LIMITS.shown ? last.slice(0, API_LIMITS.shown) + "…" : last;
-  chatUser(label, shown);
-  const mid = ai.msgSeq = (ai.msgSeq || 0) + 1;
-  chatBotStart(mid);
-  toScreens({ t: "ai-genstart", name: label, text: shown, asker: from, cont: 0, mid, api: 1 });
-  sendTo(from, { t: "ai-genstart", rid, api: 1, client, promptTokens: prompt.ids.length, model: ai.model, name: label, asker: from, mid });
-  let raw = "";
-  const res = await apiRun({
-    tok: ai.tok, req, prompt, cache: ai.apiCache, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
-    generate: (ids, o) => roomGenerate(ids, { ...o, maxNew: MAXNEW_PARAM ? Math.min(MAXNEW_PARAM, o.maxNew) : o.maxNew, onStatus: aiStatus }),
-    send: (msg) => sendTo(from, msg),
-    onPiece: (piece, d) => { raw += piece; chatBotPiece(piece, d); toScreens({ t: "ai-token", text: piece, d: d || 0 }); },
-  });
-  if (res.err) aiStatus("generation failed: " + res.err);
-  const stats = (res.err ? "failed: " + res.err : res.stats) + " · via API · not part of this chat's memory";
-  const ctx = { used: ai.fed ? ai.pos : 0, max: ctxMax() };
-  chatBotEnd(res.err && !raw ? "⚠ " + res.err : null, stats);
-  toScreens({ t: "ai-gendone", stats, ctx, failed: res.err ? 1 : 0, capped: 0, api: 1 });
-  sendTo(from, { t: "ai-gendone", rid, api: 1, reason: res.reason, stopSeq: res.stopSeq || undefined, usage: res.usage, reused: res.reused, stats, ctx, failed: res.err ? 1 : 0, err: res.err || undefined });
-  ai.transcript.push({ name: label, text: shown, reply: raw, stats, mid, api: 1 });
-  if (ai.transcript.length > 50) ai.transcript.shift();
-  const c = ai.apis.get(from); if (c) c.answered++;
-  apiPanel();
-  setCtx(ctx.used, ctx.max);
-  if (!res.err) aiStatus(`ready — API answer for ${name}: ${res.usage.in} prompt tok${res.reused ? ` (${res.reused} reused)` : ""}, ${res.stats}`);
-  ai.busy = false;
-  ai.abort = false;
-  if (ai.apiRun === run) ai.apiRun = null;
-  setBusyUI(false);
-  setTimeout(nextQueued, 0);
+  // whatever throws in here, the room must not stay busy: the asker gets a failed gendone and the
+  // lock, the Stop button and the queue are released
+  let answered = false, toScreens = () => {};
+  try {
+    apiPanel();
+    setBusyUI(true, true);
+    setAfterAnswer(false, false);
+    // the screens: the room's visibility applies as for any guest, except that the asker (the bridge)
+    // gets its own full stream below, never a stand-in; under "asker" only the host's screen shows it
+    const { full, hidden } = chatRecipients(ai.visibility || "all", from, [...conns.keys()]);
+    toScreens = (msg) => {
+      for (const id of full) if (id !== from) sendTo(id, msg);
+      if (msg.t !== "ai-token") for (const id of hidden) if (id !== from) sendTo(id, { t: msg.t, name: msg.name, stats: msg.stats, asker: msg.asker, ctx: msg.ctx, api: 1, hidden: true });
+    };
+    const label = `${name} · ${client} (API)`;
+    // the question the screens show: the last real user message (not tool results)
+    const q = v2 ? [...req.messages].reverse().find((m) => m.role === "user" && !m.aside) : null;
+    const last = v2 ? (q ? q.text : "(tool results)") : req.messages[req.messages.length - 1].text;
+    const shown = last.length > API_LIMITS.shown ? last.slice(0, API_LIMITS.shown) + "…" : last;
+    chatUser(label, shown);
+    const mid = ai.msgSeq = (ai.msgSeq || 0) + 1;
+    chatBotStart(mid);
+    toScreens({ t: "ai-genstart", name: label, text: shown, asker: from, cont: 0, mid, api: 1 });
+    sendTo(from, { t: "ai-genstart", rid, api: v2 ? 2 : 1, client, promptTokens: prompt.ids.length, model: ai.model, name: label, asker: from, mid, ...(v2 ? { style: prompt.profile.style } : {}) });
+    let raw = "";
+    const screen = (piece, d) => { raw += piece; chatBotPiece(piece, d); toScreens({ t: "ai-token", text: piece, d: d || 0 }); };
+    const gen = (ids, o) => roomGenerate(ids, { ...o, maxNew: MAXNEW_PARAM ? Math.min(MAXNEW_PARAM, o.maxNew) : o.maxNew, onStatus: aiStatus });
+    const res = v2
+      ? await apiRun2({
+        tok: ai.tok, req, prompt, cache: ai.apiTurns, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
+        tt: apiTokenTexts(), log: (m) => log("api", m),
+        // the system prompt + tools, when long, is kept as the room's pinned checkpoint (tagged, so two
+        // clients with different tools do not keep replacing each other's)
+        generate: (ids, o) => gen(ids, { ...o, ...(prompt.systemLen >= 2048 ? { pin: prompt.systemLen, pinTag: pinTagOf(ids, prompt.systemLen) } : {}) }),
+        send: (msg) => { sendTo(from, msg); apiScreenMsg(msg, screen); },
+      })
+      : await apiRun({
+        tok: ai.tok, req, prompt, cache: ai.apiCache, ctxMax: ctxMax(), fallback: pickSampler(ai.settings.sampling), signal: run.ac.signal,
+        generate: gen,
+        send: (msg) => sendTo(from, msg),
+        onPiece: screen,
+      });
+    if (res.err) aiStatus("generation failed: " + res.err);
+    const stats = (res.err ? "failed: " + res.err : res.stats) + " · via API · not part of this chat's memory";
+    const ctx = { used: ai.fed ? ai.pos : 0, max: ctxMax() };
+    chatBotEnd(res.err && !raw ? "⚠ " + res.err : null, stats);
+    toScreens({ t: "ai-gendone", stats, ctx, failed: res.err ? 1 : 0, capped: 0, api: 1 });
+    sendTo(from, { t: "ai-gendone", rid, api: v2 ? 2 : 1, reason: res.reason, stopSeq: res.stopSeq || undefined, usage: res.usage, reused: res.reused, stats, ctx, failed: res.err ? 1 : 0, err: res.err || undefined,
+      ...(v2 ? { calls: res.calls, ...(res.open ? { open: res.open } : {}) } : {}) });
+    answered = true;
+    ai.transcript.push({ name: label, text: shown, reply: raw, stats, mid, api: 1 });
+    if (ai.transcript.length > 50) ai.transcript.shift();
+    const c = ai.apis.get(from); if (c) c.answered++;
+    apiPanel();
+    setCtx(ctx.used, ctx.max);
+    if (!res.err) aiStatus(`ready — API answer for ${name}: ${res.usage.in} prompt tok${res.reused ? ` (${res.reused} reused)` : ""}, ${res.stats}`);
+  } catch (e) {
+    const err = String(e?.message || e).slice(0, 300);
+    log("api", `API answer failed: ${err}`);
+    aiStatus("generation failed: " + err);
+    if (!answered) sendTo(from, { t: "ai-gendone", rid, api: v2 ? 2 : 1, reason: "error", usage: { in: 0, out: 0 }, failed: 1, err });
+    try { chatBotEnd("⚠ " + err, "failed · via API"); toScreens({ t: "ai-gendone", stats: "failed · via API", ctx: { used: ai.fed ? ai.pos : 0, max: ctxMax() }, failed: 1, capped: 0, api: 1 }); } catch {}
+  } finally {
+    ai.busy = false;
+    ai.abort = false;
+    if (ai.apiRun === run) ai.apiRun = null;
+    setBusyUI(false);
+    setTimeout(nextQueued, 0);
+  }
   if (ai.degraded) showRedeal(true);
 }
 
-// Serve API (the button next to Chat | Code): a popover under it (a sheet from the bottom on phones) with the
-// command that serves this room on the user's own computer, its two base URLs, short examples, who is
-// connected now (the host can Disconnect each), and the host's switch for API clients
+// v2 asks: the loaded model's template profile (tool format, thinking rules), computed once per model
+function apiProfile() {
+  if (!ai.apiProf) {
+    ai.apiProf = templateProfile(roomApi.chatTemplate(), ai.tok);
+    if (!ai.apiProf.known) log("api", "this model's chat template keeps reasoning in an unrecognized way: past reasoning follows the last user query");
+  }
+  return ai.apiProf;
+}
+let apiTT = null, apiTTFor = null;
+function apiTokenTexts() { if (apiTTFor !== ai.tok) { apiTT = tokenTexts(ai.tok); apiTTFor = ai.tok; } return apiTT; }
+// a model was loaded: every cached id and the profile belong to the old one
+function apiModelLoaded() {
+  ai.apiCache = new AnswerCache(8);
+  ai.apiTurns.clear();
+  ai.apiEnc.clear();
+  ai.apiProf = null;
+}
+function pinTagOf(ids, n) { let h = 0; for (let i = 0; i < n; i++) h = (Math.imul(h, 31) + ids[i]) | 0; return n + ":" + (h >>> 0).toString(36); }
+// what a v2 answer looks like on the room's screens: reasoning in a think block (as the chat renders
+// raw answers), content as it is, a tool call as one compact line "→ name(args…)" (200 characters at most)
+function apiScreenMsg(msg, screen) {
+  const st = apiScreenMsg.st && apiScreenMsg.st.rid === msg.rid ? apiScreenMsg.st : (apiScreenMsg.st = { rid: msg.rid, think: false, n: 0 });
+  if (msg.t === "ai-token") {
+    if (msg.th) { if (!st.think) { st.think = true; screen("<think>\n", 0); } screen(msg.text, msg.d); return; }
+    if (st.think) { st.think = false; screen("\n</think>\n\n", 0); }
+    screen(msg.text, msg.d);
+  } else if (msg.t === "ai-call") {
+    if (st.think) { st.think = false; screen("\n</think>\n\n", 0); }
+    if (msg.name != null) { st.n = 0; screen(`\n→ ${msg.name}(`, 0); }
+    else if (msg.a != null) {
+      const room = 200 - st.n;
+      if (room > 0) { const a = msg.a.slice(0, room); st.n += a.length; screen(a + (msg.a.length > room ? "…" : ""), 0); }
+    } else if (msg.end) screen(")\n", 0);
+  }
+}
+
+// Serve API (the header's black button, the dark page's API half): the command that serves this room on
+// the user's own computer, its two base URLs, short examples, who is connected now (the host can
+// Disconnect each), and the host's switch for API clients
 const API_BASE = "http://127.0.0.1:8080";
 const API_EXAMPLES = {
   curl: `curl ${API_BASE}/v1/chat/completions \\
@@ -4015,8 +5353,11 @@ const API_EX_HINTS = {
   anth: 'The same room through the Messages API. <code>stream=True</code> streams.',
 };
 let apiTab = "curl";
+// the host's command carries the invite link (its key lets the client in without asking); a guest's has
+// the code, and the host is asked
 function apiCommand() {
-  return `npx @pooled/cli serve ${roomCode || "CODE"}${SIGNAL ? ` --signal ${SIGNAL}` : ""}`;
+  const room = isHost && roomCode && gate ? `"${roomLink()}"` : formatCode(roomCode || "") || "CODE";
+  return `npx @pooled/cli serve ${room}${SIGNAL ? ` --signal ${SIGNAL}` : ""}`;
 }
 // the API clients in this room: the host's own map (with how many answers each got), or the roster's
 function apiClients() {
@@ -4051,12 +5392,14 @@ function apiSay(t) {
 let apiSeen = null;   // the client ids the panel last showed, to announce who came and went
 // an API client by what the person knows: the tool (from its User-Agent) once it has asked, else the bridge's name
 const apiLabel = (c) => c.tool || c.name;
+// where focus goes when the control it was on goes away: the command's Copy, or with the steps
+// folded "How to connect", or Back
+const apiHome = () => [$("api-copy"), $("api-how").querySelector("summary"), $("compute-exit")].find((el) => el.getClientRects().length);
 function apiPanel() {
-  if (!$("api-sheet")) return;
+  if (!$("api-panel")) return;
   const list = apiClients(), running = isHost && ai.apiRun && ai.apis.get(ai.apiRun.from);
-  $("api-open").classList.toggle("live", list.length > 0);
-  $("api-open").title = list.length ? `Serve API: ${list.length} API client${list.length > 1 ? "s" : ""} connected` : "Use this room from your own tools: an OpenAI and Anthropic endpoint on your computer";
-  if ($("api-sheet").hidden) return;
+  $("compute-open").classList.toggle("live", list.length > 0);
+  if (!compute.isOpen) return;
   if ($("api-cmd").textContent !== apiCommand()) { $("api-cmd").textContent = apiCommand(); apiFade(); }
   const st = $("api-status"), off = isHost && !ai.settings.apiAllow;
   st.className = "api-status " + (off ? "off" : list.length ? "live" : "wait");
@@ -4067,9 +5410,24 @@ function apiPanel() {
     : "Waiting for a client to connect";
   $("api-sub").textContent = off ? "Turn on Allow API clients below to let tools in."
     : list.length ? "" : "Run step 1. Your tool shows up here when it connects.";
+  // beside this device's layers and passes: what the room is serving ("Serving Continue via API · 12 requests answered")
+  const answered = isHost ? list.reduce((t, [, c]) => t + (c.answered || 0), 0) : null;
+  $("cs-api").hidden = !list.length;
+  if (list.length) {
+    const who = list.length === 1 ? apiLabel(list[0][1]) : `${list.length} API clients`;
+    const t = $("cs-api-t");
+    t.replaceChildren(running ? "Answering " : "Serving ", Object.assign(document.createElement("b"), { textContent: who }), " via API");
+    if (answered != null) { const n = document.createElement("span"); n.className = "n"; n.textContent = answered; t.append(" · ", n, ` request${answered === 1 ? "" : "s"} answered`); }
+  }
   // step 1 done: the host sees a tick on it while a client is connected
-  $("api-sheet").querySelector(".api-pop").classList.toggle("done", isHost && list.length > 0);
+  $("api-panel").classList.toggle("done", isHost && list.length > 0);
   $("api-clients-wrap").hidden = !list.length;
+  // with a client connected the serving view leads and the steps fold under "How to connect" (once, as it
+  // connects: the reader can open them again; never shut under the focus)
+  const how = $("api-how"), was = how.classList.contains("flat");
+  how.classList.toggle("flat", !list.length);
+  if (!list.length) how.open = true;
+  else if (was && !how.contains(document.activeElement)) how.open = false;
   const ids = list.map(([id]) => id);
   if (apiSeen) {
     const came = list.filter(([id]) => !apiSeen.includes(id)), went = apiSeen.length - (ids.length - came.length);
@@ -4077,74 +5435,46 @@ function apiPanel() {
     else if (went > 0) apiSay(list.length ? `An API client left. ${list.length} connected` : "The API client left. Waiting for a client");
   }
   apiSeen = ids;
-  // the list is rebuilt: a focused Disconnect gets its focus back on the new button (or Copy, if that client left)
+  // the list is rebuilt: a focused Disconnect gets its focus back on the new button (or a steady control, if that client left)
   const had = $("api-clients").contains(document.activeElement) ? document.activeElement.dataset.id || "" : null;
   $("api-clients").replaceChildren(...list.map(([id, c]) => {
     const li = document.createElement("li");
     li.innerHTML = `<span class="ic">${ICONS.api}</span><span class="nm"><b></b><small></small></span>`;
     li.querySelector("b").textContent = apiLabel(c);
-    // "via pooled serve kqzt · 3 answered": each part kept whole, mono only for the number
-    const parts = [c.tool ? `via ${c.name}` : c.client || "API client"].map((t) => { const e = document.createElement("span"); e.textContent = t; return e; });
-    if (isHost) { const e = document.createElement("span"); e.innerHTML = `<span class="n"></span> answered`; e.firstChild.textContent = c.answered; parts.push(e); }
+    // one line: "curl · 3 answered" (the count on the host, which has it); the bridge's own name and
+    // user agent only in the tooltip, they mean nothing to most people
     const sm = li.querySelector("small");
-    // the dot rides on the part before it, so a wrapped line never starts or ends on a bare dot
-    parts.forEach((e, i) => { if (i < parts.length - 1) e.append("\u00a0·"); sm.append(e); });
-    sm.title = [c.name, c.client].filter(Boolean).join(" · ");
+    if (isHost) { sm.innerHTML = `· <span class="n"></span> answered`; sm.querySelector(".n").textContent = c.answered; } else sm.remove();
+    li.querySelector(".nm").title = [c.name, c.client].filter(Boolean).join(" · ");
     if (isHost) {
       const b = document.createElement("button");
       b.type = "button"; b.textContent = "Disconnect"; b.dataset.id = id; b.setAttribute("aria-label", `Disconnect ${apiLabel(c)}`);
-      b.addEventListener("click", () => { apiKick(id); if (!$("api-sheet").contains(document.activeElement)) $("api-copy").focus({ preventScroll: true }); });
+      b.addEventListener("click", () => { apiKick(id); if (!$("compute-screen").contains(document.activeElement)) apiHome()?.focus({ preventScroll: true }); });
       li.appendChild(b);
     }
     return li;
   }));
-  if (had != null) (had && [...$("api-clients").querySelectorAll("button")].find((b) => b.dataset.id === had) || $("api-copy")).focus({ preventScroll: true });
+  if (had != null) (had && [...$("api-clients").querySelectorAll("button")].find((b) => b.dataset.id === had) || apiHome())?.focus({ preventScroll: true });
   if ($("api-allow")) { $("api-allow").checked = !!ai.settings.apiAllow; $("api-allow-row").hidden = !isHost; }
 }
-// desktop: under the button, its left edge a little left of the button's, kept on screen; the caret
-// on the button's centre and the popover growing from there. Phones: CSS makes it a bottom sheet
-const apiSheetMQ = matchMedia("(max-width: 640px)");
-function apiPlace() {
-  if ($("api-sheet").hidden || apiSheetMQ.matches) return;
-  const r = $("api-open").getBoundingClientRect(), pop = $("api-sheet").querySelector(".api-pop");
-  if (!r.width) { closeApi(false); return; }   // the button went away (the room ended, the switch hid)
-  const w = pop.offsetWidth, left = Math.max(12, Math.min(r.left - 12, innerWidth - w - 12)), top = r.bottom + 10, cx = r.left + r.width / 2;
-  Object.assign(pop.style, { left: left + "px", top: top + "px", maxHeight: `calc(100dvh - ${top + 16}px)` });
-  pop.style.setProperty("--cx", cx - left + "px");
-  Object.assign($("api-sheet").querySelector(".api-caret").style, { left: cx + "px", top: top + "px" });
-}
-function openApi() {
+// the dark page opened (or closed): the API half starts from what is true now, and announces only what changes after
+function apiShown(open) {
+  apiSeen = null;
+  if (!open || !$("api-panel")) return;
   $("room-menu").open = false; chipPop(null);
-  $("api-sheet").hidden = false;
-  $("api-open").setAttribute("aria-expanded", "true");
-  $("api-sheet").querySelector(".api-pop").setAttribute("aria-modal", String(apiSheetMQ.matches));
-  apiShowTab(apiTab); apiPanel(); apiPlace();
-  $("api-copy").focus({ preventScroll: true });
+  apiShowTab(apiTab); apiPanel(); requestAnimationFrame(apiFade);
 }
-// back = return focus to the button (Esc, the close button, the scrim); a click elsewhere keeps its own focus
-function closeApi(back = true) {
-  if ($("api-sheet").hidden) return;
-  const inside = $("api-sheet").contains(document.activeElement);
-  $("api-sheet").hidden = true; apiSeen = null;
-  $("api-open").setAttribute("aria-expanded", "false");
-  if ((back || inside) && !$("api-open").hidden && $("api-open").offsetParent) $("api-open").focus({ preventScroll: true });
-}
-if ($("api-sheet")) {
-  for (const b of $("api-sheet").querySelectorAll(".icon-act")) b.innerHTML = COPY_SVG;
+if ($("api-panel")) {
+  for (const b of $("api-panel").querySelectorAll(".icon-act")) b.innerHTML = COPY_SVG;
   $("api-code-copy").insertAdjacentHTML("beforeend", '<span class="lb">Copy</span>');
   $("api-code").addEventListener("scroll", apiFade, { passive: true });
   $("api-cmd").addEventListener("scroll", apiFade, { passive: true });
-  $("api-open").addEventListener("click", () => $("api-sheet").hidden ? openApi() : closeApi());
-  $("api-close").addEventListener("click", () => closeApi());
-  $("api-sheet").addEventListener("click", (e) => { if (e.target === $("api-sheet")) closeApi(); });   // the phone sheet's scrim
-  document.addEventListener("pointerdown", (e) => { if (!$("api-sheet").hidden && !apiSheetMQ.matches && !e.target.closest?.("#api-sheet, #api-open")) closeApi(false); });
-  addEventListener("resize", () => { apiPlace(); if (!$("api-sheet").hidden) apiFade(); });
-  addEventListener("scroll", apiPlace, true);
-  apiSheetMQ.addEventListener("change", () => closeApi(false));
+  addEventListener("resize", () => { if (compute.isOpen) apiFade(); });
+  $("api-how").addEventListener("toggle", () => { if ($("api-how").open) apiFade(); });
   $("api-copy").addEventListener("click", () => copyText(apiCommand(), "command"));
-  for (const b of $("api-sheet").querySelectorAll(".api-url .icon-act")) b.addEventListener("click", () => copyText(b.dataset.copy, b.dataset.what, b).then((ok) => ok && apiSay(`${b.dataset.what} copied`)));
+  for (const b of $("api-panel").querySelectorAll(".api-url .icon-act")) b.addEventListener("click", () => copyText(b.dataset.copy, b.dataset.what, b).then((ok) => ok && apiSay(`${b.dataset.what} copied`)));
   $("api-code-copy").addEventListener("click", (e) => copyText(API_EXAMPLES[apiTab], "example", e.currentTarget).then((ok) => ok && apiSay("Example copied")));
-  const tabs = [...$("api-sheet").querySelectorAll(".api-tabs [role=tab]")];
+  const tabs = [...$("api-panel").querySelectorAll(".api-tabs [role=tab]")];
   for (const b of tabs) {
     b.addEventListener("click", () => apiShowTab(b.id.slice(6)));
     b.addEventListener("keydown", (e) => {
@@ -4154,14 +5484,6 @@ if ($("api-sheet")) {
       const t = tabs[(j + tabs.length) % tabs.length]; apiShowTab(t.id.slice(6)); t.focus();
     });
   }
-  // Tab stays inside while it is open
-  $("api-sheet").addEventListener("keydown", (e) => {
-    if (e.key !== "Tab") return;
-    const f = [...$("api-sheet").querySelectorAll("button, input, pre[tabindex], [tabindex='0']")].filter((el) => !el.closest("[hidden]") && el.tabIndex >= 0 && el.offsetParent);
-    const first = f[0], last = f[f.length - 1];
-    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
-    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
-  });
   $("api-allow").addEventListener("change", (e) => {
     ai.settings.apiAllow = e.target.checked;
     if (!ai.settings.apiAllow) for (const id of [...ai.apis.keys()]) apiKick(id, "the host does not allow API clients in this room");
@@ -4294,6 +5616,17 @@ if (new URLSearchParams(location.search).get("sim") === "1" && ["127.0.0.1", "lo
     pulse(n = 1) { for (let i = 0; i < n; i++) setTimeout(() => { pulseAt = 0; mapPulse(); }, i * 250); },
     idle() { $("ai-panel").classList.remove("online", "loading"); ai.range = null; },
     compute(on) { on ? compute.open() : compute.close(); },
+    // Serve API: made-up API clients, e.g. apis([{ tool: "Continue", answered: 12 }]); [] for none.
+    // The host keeps them in its own map; as a guest (guest()) they are in the roster
+    apis(list = [{ tool: "Continue", answered: 12 }]) {
+      for (const k of [...ai.apis.keys(), ...members.keys()]) if (k.startsWith("sim-api-")) { ai.apis.delete(k); members.delete(k); }
+      list.forEach((c, i) => {
+        const e = { name: `pooled serve ${String(roomCode).toLowerCase()}`, client: c.client || "OpenAI API", answered: c.answered || 0, tool: c.tool };
+        if (isHost) ai.apis.set(`sim-api-${i}`, e); else members.set(`sim-api-${i}`, { name: e.name, meta: { api: 1, client: e.client } });
+      });
+      apiPanel();
+    },
+    guest() { isHost = false; apiPanel(); },
     passes(on) {
       clearInterval(passTimer); passTimer = 0;
       if (on) passTimer = setInterval(() => compute.pass(1, 14 + Math.random() * 8), 90);

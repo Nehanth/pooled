@@ -43,8 +43,8 @@ Models in the room today:
 
 | Model | Size | Notes |
 |---|---|---|
-| Qwen 3.8 27B | Q4_0, needs ~17 GB across the room | hybrid Gated DeltaNet + attention, built-in draft layer for speculative decoding, 16K context (up to 32K) |
-| Qwen 3.6 35B MoE | Q4_0, needs ~22.5 GB across the room | 256 experts, 8 active per token, so it decodes several times faster than the 27B; 32K context (up to 64K) |
+| Qwen 3.8 27B | Q4_0, needs ~17 GB across the room | hybrid Gated DeltaNet + attention, built-in draft layer for speculative decoding, 16K context (up to 64K) |
+| Qwen 3.6 35B MoE | Q4_0, needs ~22.5 GB across the room | 256 experts, 8 active per token, so it decodes several times faster than the 27B; 32K context (up to 128K) |
 | Qwen3 1.7B | Q8_0, needs ~4 GB across the room | small and quick, for rooms of phones and light laptops; 8K context |
 
 Every device downloads only its own layers, from Hugging Face or from another device in the room that already has them, and keeps them cached for next time. If a device leaves, the room says so and the host deals its layers out again with one click. Speculative decoding, batched prefill and every kernel trick are checked by golden tests, so the speculative stream is the same as plain decoding.
@@ -59,19 +59,23 @@ Design: [docs/design/harness-app.md](docs/design/harness-app.md). What the agent
 
 ## Use Pooled from your tools
 
-A room can serve its model to anything that speaks the OpenAI or the Anthropic API (Continue, Open WebUI, LiteLLM, the `openai` and `anthropic` SDKs, curl). In a room, the **Serve API** button next to Chat and Code shows the command for that room; run it on your own computer (Node 22 or newer, no GPU needed there):
+A room can serve its model to anything that speaks the OpenAI Chat Completions, OpenAI Responses or Anthropic Messages API, tool calling included: coding agents (Codex CLI, Claude Code, opencode), Continue, Open WebUI, LiteLLM, the `openai` and `anthropic` SDKs, curl. In a room, the black **Serve API** button in the header opens the Serve API page with the command for that room; run it on your own computer (Node 22 or newer, no GPU needed there):
 
 ```bash
-npx @pooled/cli serve ABCD
-# pooled serve · room ABCD · Qwen3.6 35B MoE · Q4
-#   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
-#   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
+npx @pooled/cli serve "https://pooled.run/r/4TKG9P#k=…"   # the room's invite link, or its code
+# pooled serve · room 4TKG9P · Qwen3.6 35B MoE · Q4 · 32768 tokens of context
+#   OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
+#   Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
 
 curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model": "pooled", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
 ```
 
-The bridge joins the room as an API client with no layers, so requests run on the room's GPUs, one at a time in the room's queue, and show in the chat under the room's visibility setting. It listens on 127.0.0.1 only; `POOLED_TOKEN` makes it require a key. Prompts go to the room's host and, unless the host limits who sees answers, to everyone in the room: see [who sees your prompts](cli/README.md#who-sees-your-prompts). v1 is chat only: no tool calls, images or JSON mode (they get a clear 400). Setup for each tool: [cli/README.md](cli/README.md). Design: [docs/design/serve.md](docs/design/serve.md).
+The bridge joins the room as an API client with no layers, so requests run on the room's GPUs, one at a time in the room's queue, and show in the chat under the room's visibility setting. It listens on 127.0.0.1 only; `POOLED_TOKEN` makes it require a key. Prompts go to the room's host and, unless the host limits who sees answers, to everyone in the room: see [who sees your prompts](cli/README.md#who-sees-your-prompts). Tool calls (streamed, parallel, every `tool_choice` form), tool results, JSON mode and JSON schemas, reasoning and Responses' `previous_response_id` work on all three APIs; every call and structured answer is grammar-constrained to its schema, so calls always parse, even from the 1.7B. The room's host must run a Pooled with tool calling (older hosts answer tools with a 400 asking to reload). Images become a note (the models read text only); the legacy `/v1/completions` is not served. Setup for each tool, including the context settings Codex, Claude Code and opencode need: [cli/README.md](cli/README.md). Design: [docs/design/serve.md](docs/design/serve.md).
+
+## Rooms at work
+
+Work networks often block the direct (UDP) connections rooms use. When the site has a relay set up, rooms fall back to it by themselves, over TCP or TLS on port 443. Links still go direct when they can, and model weights never go through the relay. Setup for the site's owner (a Cloudflare TURN key or your own coturn, set in the Vercel environment): [docs/rooms-at-work.md](docs/rooms-at-work.md).
 
 ## Run it locally
 

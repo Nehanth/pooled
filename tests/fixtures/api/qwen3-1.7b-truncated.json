@@ -1,0 +1,195 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs: greedy, unconstrained llama.cpp output for this request as the room renders it.",
+ "model": "qwen3-1.7b",
+ "case": "truncated",
+ "profile": {
+  "style": "json",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": false,
+  "thinkRule": "afterQueryNonEmpty",
+  "trim": false,
+  "known": true
+ },
+ "thinking": false,
+ "maxTokens": 40,
+ "req": {
+  "system": "",
+  "tools": [
+   {
+    "name": "get_weather",
+    "description": "Get the current weather in a city.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "city": {
+       "type": "string",
+       "description": "City name"
+      },
+      "unit": {
+       "type": "string",
+       "enum": [
+        "celsius",
+        "fahrenheit"
+       ]
+      }
+     },
+     "required": [
+      "city"
+     ]
+    }
+   },
+   {
+    "name": "search",
+    "description": "Search the web.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "query": {
+       "type": "string"
+      },
+      "limit": {
+       "type": "integer",
+       "description": "How many results"
+      },
+      "tags": {
+       "type": "array",
+       "items": {
+        "type": "string"
+       }
+      },
+      "exact": {
+       "type": "boolean"
+      },
+      "filters": {
+       "type": "object",
+       "properties": {
+        "site": {
+         "type": "string"
+        },
+        "year": {
+         "type": "integer"
+        }
+       }
+      }
+     },
+     "required": [
+      "query"
+     ]
+    }
+   },
+   {
+    "name": "write_file",
+    "description": "Write a text file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ]
+    }
+   }
+  ],
+  "messages": [
+   {
+    "role": "user",
+    "text": "Create notes.txt containing a 10-line poem about the sea, using the write_file tool."
+   }
+  ]
+ },
+ "stop": "limit",
+ "promptTokens": 394,
+ "ids": [
+  151657,
+  198,
+  4913,
+  606,
+  788,
+  330,
+  4934,
+  2458,
+  497,
+  330,
+  16370,
+  788,
+  5212,
+  2343,
+  788,
+  330,
+  18286,
+  3909,
+  497,
+  330,
+  1796,
+  788,
+  330,
+  785,
+  9396,
+  374,
+  12767,
+  323,
+  5538,
+  26266,
+  77,
+  36120,
+  16876,
+  9920,
+  2348,
+  279,
+  30184,
+  26266,
+  77,
+  32
+ ],
+ "texts": [
+  "<tool_call>",
+  "\n",
+  "{\"",
+  "name",
+  "\":",
+  " \"",
+  "write",
+  "_file",
+  "\",",
+  " \"",
+  "arguments",
+  "\":",
+  " {\"",
+  "path",
+  "\":",
+  " \"",
+  "notes",
+  ".txt",
+  "\",",
+  " \"",
+  "content",
+  "\":",
+  " \"",
+  "The",
+  " sea",
+  " is",
+  " vast",
+  " and",
+  " deep",
+  ",\\",
+  "n",
+  "Its",
+  " waves",
+  " crash",
+  " against",
+  " the",
+  " shore",
+  ",\\",
+  "n",
+  "A"
+ ],
+ "text": "<tool_call>\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"notes.txt\", \"content\": \"The sea is vast and deep,\\nIts waves crash against the shore,\\nA"
+}

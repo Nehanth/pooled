@@ -1,0 +1,234 @@
+{
+ "note": "Recorded by tests/e2e/serve_record.mjs --grammar: the host's v2 pipeline (grammar, parser, ai-call) over greedy llama.cpp top-64 candidates.",
+ "model": "qwen3.6-35b-moe",
+ "case": "json_schema",
+ "grammar": true,
+ "profile": {
+  "style": "xml",
+  "tools": true,
+  "effortLine": false,
+  "thinkInPrompt": true,
+  "thinkRule": "afterQuery",
+  "trim": true,
+  "known": true
+ },
+ "req": {
+  "system": "",
+  "tools": null,
+  "messages": [
+   {
+    "role": "user",
+    "text": "Largest city in Japan, and its population in millions?"
+   }
+  ]
+ },
+ "params": {
+  "thinking": false,
+  "format": {
+   "type": "schema",
+   "schema": {
+    "type": "object",
+    "properties": {
+     "city": {
+      "type": "string"
+     },
+     "population_millions": {
+      "type": "number"
+     }
+    },
+    "required": [
+     "city",
+     "population_millions"
+    ],
+    "additionalProperties": false
+   }
+  }
+ },
+ "maxTokens": 80,
+ "promptTokens": 24,
+ "ids": [
+  90,
+  198,
+  220,
+  328,
+  42964,
+  697,
+  87181,
+  763,
+  220,
+  16,
+  19,
+  13,
+  15,
+  11,
+  198,
+  220,
+  328,
+  8656,
+  763,
+  328,
+  51076,
+  15560,
+  1,
+  198,
+  92
+ ],
+ "texts": [
+  "{",
+  "\n",
+  " ",
+  " \"",
+  "population",
+  "_m",
+  "illions",
+  "\":",
+  " ",
+  "1",
+  "4",
+  ".",
+  "0",
+  ",",
+  "\n",
+  " ",
+  " \"",
+  "city",
+  "\":",
+  " \"",
+  "Tok",
+  "yo",
+  "\"",
+  "\n",
+  "}"
+ ],
+ "text": "{\n  \"population_millions\": 14.0,\n  \"city\": \"Tokyo\"\n}",
+ "fellBack": 1,
+ "sent": [
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "{",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n  \"",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "population",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "_m",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "illions",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\":",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " 1",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "4",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ".",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "0",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": ",",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n  \"",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "city",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\":",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": " \"",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "Tok",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "yo",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\"",
+   "d": 0
+  },
+  {
+   "t": "ai-token",
+   "rid": "rec",
+   "text": "\n}",
+   "d": 0
+  }
+ ],
+ "result": {
+  "reason": "stop",
+  "calls": [],
+  "open": null,
+  "text": "{\n  \"population_millions\": 14.0,\n  \"city\": \"Tokyo\"\n}",
+  "think": "",
+  "usage": {
+   "in": 24,
+   "out": 25,
+   "think": 0
+  },
+  "err": null
+ }
+}

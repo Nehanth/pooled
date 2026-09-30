@@ -83,6 +83,48 @@ End-to-end on the GB10 (two headless Chromium tabs, real PeerJS signaling and We
 
 Topology change (host link + on-demand chain links instead of a full mesh) and `--devices N` in the emulator, GB10, 27B, `japan` prompt, local signaling, loopback: 3 devices online in 3.0 min, prefill 4.5 s, decode 10.4 tok/s; 16 devices (8 phone-shaped, 64 layers dealt 18+embed / 4-5 per worker / 2 per phone) online in 2.3 min, prefill 8.3 / 7.2 s, decode 3.8 / 4.7 tok/s, every device holding one host link and two chain links, no errors. The decode drop on a zero-latency network is per-hop processing (unpack, upload, readback, pack), about 15 ms per hop, now a measured target. 64 tabs in one Chromium fail at `vkCreateDevice` (one GPU process, driver device cap); not a room limit.
 
+## 2026-09-30: 128K context on the 35B MoE (branch perf/kv-128k), GB10 Deno
+
+`cd tests && MODEL=moe CTX=131072 LENS=32k,64k,96k,127k DEPTHS=0.5,0.25,0.75,0.5 deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights needle_ctx.js`.
+Needle in a haystack: a fresh prompt of this repo's docs and source with one sentence holding a random passphrase at the given depth, then a question; greedy answer. maxSeq 131072 (2.5 GB of f16 KV for the whole MoE). Prefill is the whole prompt from an empty cache; decode is 32 tokens with that prompt in the cache.
+
+| Model | KV | Prompt | Needle depth | Needle | Prefill tok/s (time) | Decode tok/s |
+|---|---|---|---|---|---|---|
+| moe | f16 | 32.7K | 0.5 | found | 294.3 (1.9 min) | 15.89 |
+| moe | f16 | 65.5K | 0.25 | found | 220.6 (4.9 min) | 14.43 |
+| moe | f16 | 98.3K | 0.75 | found | 177.7 (9.2 min) | 12.49 |
+| moe | f16 | 130K | 0.5 | found | 149.6 (14.5 min) | 9.39 |
+| moe | q8 | 130K | 0.5 | found | 34.2 (63 min) | 9.87 |
+| 27b | f16 | 65.5K | 0.5 | found | 52.9 (20.6 min) | 5.07 |
+
+bench_ctx.js at CTX=131072, fills 32K / 64K / 96K / 127K (prefill tok/s is for the 32K tokens added to reach each fill; a headless Chromium job from another run shared the GPU for part of it, so read the speeds as a floor):
+
+| Date | Model | Hardware | KV | Context | Prefill tok/s | Plain decode tok/s | Spec decode tok/s | Spec = plain |
+|---|---|---|---|---|---|---|---|---|
+| Sep 30 | moe | GB10 (Deno) | f16 | 32K | 134.2 | 11.2 | 15.7 (24/30) | yes |
+| Sep 30 | moe | GB10 (Deno) | f16 | 64K | 77.2 | 10.02 | 10.69 (22/30) | yes |
+| Sep 30 | moe | GB10 (Deno) | f16 | 96K | 57.4 | 9.19 | 6.26 (18/39) | yes |
+| Sep 30 | moe | GB10 (Deno) | f16 | 127K | 43.8 | 6.55 | 5.64 (20/33) | yes |
+
+- No NaN and no GPU error at any length; speculative decoding identical to plain at every fill.
+- 128K works but a cold 128K prompt takes ~15 min to prefill on the GB10 (f16). It is useful for sessions that reuse
+  checkpoints (pinned system prompt, per-turn checkpoints), not for pasting a 128K document into a fresh room.
+- int8 KV at 128K: correct, same decode speed, 4.3x slower prefill (tiled prefill attention is off with int8).
+- The 27B at 128K (f16: 256 MiB per K/V buffer, 8 GB of KV) was not run to the end: its 64K run took 20.6 min and the
+  128K prefill was stopped to free the GPU. Its cap moves from 32K to 64K (128 MiB per buffer, fits every device).
+- tests/test_moe.js (3/3 MATCH llama.cpp, spec == plain) and tests/run.sh quick pass on this branch.
+
+## 2026-09-29: phone memory while loading (#207, branch fix/i207-memory)
+
+The iPhone 14 Pro Max probe (memprobe.html, PR #244) found Safari's page process gets a 1536 MB soft limit (WebGPU buffers count against it), the networking process 840 MB, and that the page died on 3-layer MoE loads because the prefetcher re-fetched tensors the loader already had (~450 MB of unread bodies per MoE layer, piling up in the networking process). This branch: phone pledges capped (iPhone/iPad 0.5 GB default, 1 GB max; Android by `navigator.deviceMemory`), no duplicate prefetches (unread ones cancelled), ranges from room devices streamed with an 8 MB flow-control window instead of whole-range JS buffers, Q4_1/Q5_0/Q5_K/Q6_K requantized to Q8 a few rows at a time on the way to the GPU (bit-identical: `tests/test_stream_requant.js` on both models, 160 MB MoE expert tensors included), and a phone killed while loading gets a smaller share or is left out by an automatic re-deal.
+
+| Test | Before (main) | After (branch) | Notes |
+|---|---|---|---|
+| Spark loopback room, 27B, host + worker + iPhone-UA tab joining late (`tests/e2e/room_phone_mem.mjs --no-kill`), phone dealt 2 layers from the worker's cache | renderer peak 546 / 505 MB; 568 MB fetched from the room | renderer peak **307 MB**; 423 MB fetched from the room | same split both runs (host 58 + embed, worker 4, phone 2); peak = resident size of the phone browser's renderer, sampled every 200 ms. Answers identical to host+worker. |
+| Same, phone's layers from the network | | renderer 328 MB, network service 106 MB | |
+| Same, phone tab killed while loading, twice (`room_phone_mem.mjs`) | host reloads the same layers into it | 1st kill: re-dealt with 0.22 GB for it; 2nd: re-dealt without it; room online both times, same answer | |
+| Real iPhone 14 Pro Max in a room with the Spark (public signaling, branch preview, 1 GB pledge), one load each | | MoE 1 layer ×1, MoE 2 layers ×3, 27B 4 layers ×2: every load online in 119–146 s, no WebKit kill of the room's page in the phone's syslog (two `long-idle-exit` kills of earlier sessions' idle tabs) | with the cap a phone can't be dealt 3 MoE layers any more (a 22 GB host pledge is the smallest that starts the MoE; the phone then gets 2); decode 22–24 tok/s MoE, 7.4 tok/s 27B |
+
 ## 2026-09-26: Qwen3.6-35B-A3B MoE on real hardware (GB10), expert kernels rebuilt
 
 File: bartowski `Qwen_Qwen3.6-35B-A3B-Q4_0.gguf` (shared experts Q5_0 → Q8 on load, routers BF16 → f32 exact).
@@ -1171,3 +1213,204 @@ the three changes apply there too (they do not depend on the fused expert layout
 - KV cache: 0.63 GB f16, 0.35 GB int8 at this maxSeq.
 - Not yet run: the 27B at 1K / 8K / 32K (f16 and int8), and repeated decode runs to average out the noise.
 - int8 KV decision for now: keep it off by default. It saves memory and keeps the tokens, but a 32K prompt takes 3.5x as long to prefill. Revisit once tiled prefill attention supports int8 KV.
+
+## 2026-09-28: the room host's share of a lap in one submit (branch perf/room-host-one-submit, `hostFuse`)
+
+Change: a chain host used to run its share of each lap as separate GPU round trips (submit, map, read back).
+Plain greedy decoding took 3 submits and 2 maps per token; a speculative step took 7 and 5. Now:
+- **Plain** (greedy, GPU sampling, in a chain): the head of the hidden the chain returned, the GPU gather of
+  its pick and the host's layers on it run as one command buffer with one readback (`engine.headAhead`).
+  The hidden goes out before the token is shown. The recurrent state is saved in the same buffer and put
+  back (`dropAhead`) when the pick is not piped (a stop token, the cap, an abort).
+- **Speculative, draft chain on**: the draft chain, the drafts' embeddings gathered into the verify columns
+  and the host's layers run in one submit (`_hostTrunkFused`).
+- Same kernels, same inputs, same order, so the same bits. `?hostfuse=0` restores the old path for A/B.
+
+The prose prompt (`japan`) does not take the speculative fused path. The reduced-vocabulary draft head
+misses more than 5% there, so `draftVocabAuto` turns the draft chain off, and those steps run the
+unchanged per-token drafting on both sides of the A/B. Its spec numbers below are the same code twice
+(noise). Solo never reaches either path (both need a chain).
+
+MoE, GB10 host (20 layers + embed/head) + M5 Max guest (20 layers), LAN Wi-Fi (IPv6 host candidates),
+exact sampling, 128 tokens. `tests/e2e/xroom_pair.sh -- --model qwen3.6-35b-moe --gb 13 --prompts
+japan,twosum --rounds 2|3 [--query hostfuse=0]`, sessions alternated off/on. Untraced rounds, tok/s median
+(n = rounds):
+
+| | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| off, 4 sessions (n=8) | 28.1 | 28.6 | 34.1 (41%) | 51.7 (67%) |
+| **on**, 4 sessions (n=8) | **29.9 (+6.8%)** | **31.9 (+11%)** | 34.1 (same path) | **54.0 (+4.5%)** |
+| off, GEMV shape 64/4 pinned on both ends (`--tune 64,4`, `--guest-tune 64,4`; n=2) | 27.0 | 30.4 | 35.7 | 50.5 |
+| **on**, same pin (n=4) | **30.9** | **32.6** | 34.6 (same path) | **54.0** |
+| off, `--fixk 3` (n=4) | | | 36.6 (49%) | 58.2 (80%) |
+| **on**, `--fixk 3` (n=4) | | | 38.0 (same path) | 58.8 (+1%, noise) |
+
+The spread inside a cell is 5-10 tok/s and follows ping spikes on the Wi-Fi (off: plain twosum 23.2-33.1;
+on: 24.0-35.6). The traced rounds are the cleaner comparison. Medians over the laps, GB10 clock,
+`xroom_report.mjs`:
+
+| traced round | off (2 sessions) | on (2 sessions) |
+|---|---|---|
+| plain japan, one token | 33.3 / 34.2 ms: layers 11.8 + head 4.2, 3 submits, 2 maps | **31.5 / 31.9 ms**: head + layers 15.2, 1 submit, 1 map |
+| plain twosum, one token | 31.2 / 32.4 ms | **28.5 / 28.5 ms** |
+| plain, send -> hidden back | 15.1-16.0 ms | 15.0-16.2 ms (unchanged: the Mac and the wire) |
+| spec twosum, drafting + host layers | 24.0 / 22.9 ms (2 submits, 2 maps) | **21.2 / 21.1 ms** (1 submit, 1 map) |
+
+So it saves about 2-3 ms of a ~33 ms plain token and about 2 ms of a ~50-55 ms spec step. That is less than
+the 4-5 ms estimated up front: the GPU work itself does not shrink (head + layers 12.3 ms of GPU), only the
+extra sync and the idle gap between submits go away.
+
+In process on the GB10 (`BENCH=2 tests/test_moe_split.js`, split at 20, same process, off / on medians):
+plain +7 to +24% over five prompts, spec -7% (bash, 22 tokens) to +14%.
+
+One device (`xroom.mjs --solo`, GB10, 4 rounds per cell, off / on): plain japan 35.7 / 35.5, plain twosum
+41.9 / 41.3, spec japan 47.8 / 47.4, spec twosum 67.8 / 66.6. Same code path, so this is noise; the answers
+are identical.
+
+Correctness:
+- `test_moe_split` passes with both paths: split == solo, spec == plain, and checkpoint/resume with a
+  pending rollback.
+- 27B `test_q38_bits` with `ATTN_PREFILL_TILE=0`: BITS 85b12667 / eba0b8d5 on the GB10 and b72e4d1f /
+  ac403b4e on the Mac, unchanged.
+- In the two-machine room every round of a cell gave the same answer, on and off.
+
+The one outlier is plain `japan`: 8e29cc8d in 7 of 8 unpinned sessions, and 44efa784 (the spec answer) in
+one "off" session. That session is the only one where both ends' autotune picked the 64/4 GEMV shape. With
+64/4 pinned on both ends, plain == spec == 44efa784 in every round, on and off. So the plain != spec seen
+in the first two-machine sessions comes from the cooperative GEMV shape the load-time autotune picks. It
+predates this change and is not caused by it. The next thing to chase is which device's plain (one-column)
+GEMV shape changes the bits against its batched verify.
+
+## 2026-09-28: which device hosts, and where the split falls (branch perf/room-placement)
+
+Same harness and machines as above, over the home LAN (Wi-Fi on both ends; Tailscale to the Mac was down).
+MoE (Qwen3.6-35B-A3B Q4_0) and the 27B, exact sampling, 128 tokens, `japan` and `twosum`, 2 untraced rounds
+per mode and prompt, each config run in 2 sessions interleaved with the others (so 4 samples per cell). The
+link was bad all evening: ping averages 15-150 ms with peaks of 100-440 ms (p50 during a round 3.5-6 ms, p90
+often 20-300 ms), so single rounds swing by 30%+ and only medians are quoted.
+
+**The question.** A spec step spends about 60% of its time on the host (embedding, 20 layers, head, drafting,
+rollback and refill), and the M5 Max moves memory about twice as fast as the GB10. Does it help to give the
+Mac more layers (split by speed), or to make the Mac the host?
+
+### MoE, split point and host (origin/perf/room-harness b25aa6a, `--split` and `--here guest`), median tok/s
+
+| config | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| GB10 hosts, 20 / 20 (pledge) | 29.0 | 31.3 | 34.0 | 51.5 |
+| GB10 hosts 16, Mac 24 | 29.9 | 30.6 | 36.6 | 47.3 |
+| GB10 hosts 12, Mac 28 | 29.4 | 33.2 | 39.1 | 41.8 |
+| **Mac hosts, 20 / 20** | **31.6** (+9%) | **34.9** (+11%) | **47.4** (+39%) | **61.8** (+20%) |
+| Mac hosts 16, GB10 24 | 30.3 | 32.2 | 45.0 | 58.5 |
+| Mac hosts 24, GB10 16 | 32.9 | 35.3 | 49.4 | 63.3 |
+
+Moving layers to the Mac while the GB10 hosts is within noise (the Mac's layers overlap nothing; they are
+simply 2x cheaper per layer, a few ms a lap). Moving the **host role** is what pays: the head, the sampler,
+the draft block and the rollback/refill all run on the faster memory, and they sit on every token's
+critical path. Mac-host 24/16 is a little ahead of 20/20 (+1-4%, within noise).
+
+### The change: pick the model host by GPU speed
+
+`room/gpuspeed.js` times a 64 MB buffer copy at page load (8 copies, best of 5 passes, its own device,
+destroyed afterwards); the result travels in the device's `hello` meta as `gbps` (old tabs don't send it,
+and a missing value leaves the pick by memory, so no protocol bump). `pickModelHost` still starts from the
+device that lends the most memory, then hands the host role to a device of the same kind that copies at
+least 1.5x faster and lends at least half as much memory (a phone never beats a computer). Measured in the
+same headless browsers as the rooms, 6 page loads each: **GB10 185-199 GB/s** (one outlier 106), 274-454 ms
+for the probe including device creation; **M5 Max 370-398 GB/s**, 11-33 ms. The ratio is about 2.0, so the Mac
+hosts even when it lends less (12 GB against 13). `?gbps=N` pins the value (0 = unknown).
+
+Checked in a real room (`xroom.mjs --speedpick`): the GB10 pressed Start and the Mac took the model host
+(Mac layers 1-18 + embed/head, GB10 serving 19-40, the split by pledge), online in 63 s. The harness pins
+its host page (`?gbps=0`) so `--here host|guest` still means what it says.
+
+Same code, pinned both ways (2 sessions; the second batch had ping p90 up to 300 ms, so plain is noise):
+
+| | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| MoE, GB10 hosts -> Mac hosts, all 8 samples | 25.4 -> 26.5 (+4%) | 28.4 -> 32.2 (+13%) | 30.7 -> 39.4 (+28%) | 45.3 -> 55.4 (+22%) |
+| 27B (31 / 33 layers), 4 samples | 9.4 -> 9.6 (+2%, noise) | 9.3 -> 9.0 (-4%, stalls) | 10.8 -> 12.6 (+17%) | 18.2 -> 21.6 (+19%) |
+
+The 27B across two machines is new: GB10-hosted spec twosum 18.2 matches the GB10 two-tab loopback (18.3);
+Mac-hosted 21.6 beats it. One GB10 alone, `--solo`, 2 runs each, before -> after the change (the probe runs at
+load), range over 4 rounds: plain japan 34.9-35.9 -> 35.9-37.2, plain twosum 40.1-41.5 -> 40.4-43.4, spec japan 45.7-47.8 -> 46.0-47.7 (59%), spec twosum 64.0-68.1 -> 65.1-67.8
+(80%): unchanged within noise, same answers (a0e7f9bd / 1df98ce0), spec == plain.
+
+### Correctness
+
+- `twosum`: one answer (1df98ce0…) in every config, split, host direction, mode, session and the solo runs.
+- 27B: `japan` 94b0f2de… and `twosum` 1df98ce0… in every round, both directions, plain == spec.
+- MoE `japan` depends on where the split falls, on either host: 16/24 (either host) gives the one-device
+  answer a0e7f9bd; 24/16 and 12/28 give 3f42e6… (from character 359); 20/20 gives 8e29cc… or 44efa7… (from
+  character 128, "local vibes"), and those two split at character 350 (`the "herd."` vs `the "herd" where
+  possible.`), a near tie that lands either way by session and by mode, on the old code as on the new (GB10
+  hosting, base code: plain 8e29cc / spec 44efa7 in one session, both 44efa7 in the next; Mac hosting, new
+  code: both 8e29cc in both sessions). The Vulkan + Metal split with an f16 wire moves a close argmax; the
+  host change changes no split's arithmetic. Open, as before.
+- No engine change (27B bit goldens not rerun). Unit tests: 245 passed, 0 failed.
+
+## 2026-09-29: iPhones in rooms, combined branch (fix/iphone-rooms: memory + resume + GPU wake, #207)
+
+Spark (GB10) and iPhone 14 Pro Max (iOS 26.6.2), public signaling, the phone on the branch preview, 1 GB pledge, host 22 GB with `?phonelayers=1`, Qwen 3.6 35B MoE, `twosum`, 48 tokens, 2 answers per run (`xroom.mjs` + `xroom_phone.mjs`):
+
+| Run | Split | Phone online after | Decode tok/s (answer 1 / 2) | Answer |
+|---|---|---|---|---|
+| m1 | host 38+embed, iPhone 2 (layers 39-40, 917 MB from the network) | 125 s | 23.6 / 20.2 | 6e01f17d both |
+| m2 | same | died at 82% of its download | | the page vanished with no jetsam entry and no crash report while the USB link (WebDriver and syslog) dropped at the same second |
+| m4 | same | 129 s | 25.4 / 21.7 | 6e01f17d both |
+| m5 | same | 121 s | 25.3 / 19.6 | 6e01f17d both |
+
+Recovery with the real phone (`room_resume.mjs --url --external iphone` + `resume_phone.mjs`, Qwen3 0.6B, host + worker tabs on the Spark, phone 4 layers): Safari in the background 30 s: the answer finished in 58 s with the same text and no drop (the link survived, main's liveness keeps a silent phone 60 s); reload: back in its slot, same text, 52 s. The same with the MoE (host 22, worker 1, phone 1 GB) was tried twice; both times the Spark's host browser closed (once mid-answer, once mid-load) as other GPU jobs started on the Spark, so it is not measured.
+
+Spark loopback: `room_resume.mjs` lock 20 s (answered in 25 s, link kept), reload (35 s, carried on), kill (72 s, re-dealt after 60 s), all the same text; `room_phone_mem.mjs` phone tab peak 311 MB (423 MB from the worker) and 364 MB (mostly from the network), killed twice while loading: 0.25 GB share, then re-dealt without it, room online with the same answer each time.
+
+## 2026-09-29: rooms on bad networks, origin/main vs fix/network-resilience (GB10)
+
+Branch fix/network-resilience = fix/net-signaling + fix/net-drop + fix/net-lossy, merged with origin/main
+5af2f66 (which added the keep-alive and the 15 s silent-link drop in the meantime). Same harness for both
+columns: `tests/e2e/room_chaos.mjs --root <checkout>` (3 headless Chromium tabs on one GB10, Qwen3 1.7B Q8
+split by memory so all three hold layers, 96 new tokens, local PeerServer, every WebRTC packet through the
+userland UDP shaper; `join` uses 2 tabs and no model). Base = origin/main 5af2f66. One run per cell;
+"identical" = same text as that run's LAN baseline. After a failed answer the harness waits until the room
+shows it is ready (re-dealing if it offers that), then asks again.
+
+| Plan / scenario | origin/main | fix/network-resilience |
+|---|---|---|
+| RTT 50 / 150 / 300 ms | 7.5 / 3.5 / 1.9 tok/s, identical | 8.8 / 3.6 / 2.0 tok/s, identical |
+| 1% loss, RTT 50 ms | 6.0 tok/s | 8.1 tok/s |
+| 5% loss, RTT 50 ms | 4.4 tok/s | 7.3 tok/s |
+| 15% loss, RTT 50 ms | 1.4 tok/s (11.5 s stall) | 4.1 tok/s (2.3 s stall) |
+| 2 / 5 / 12 s freeze of one guest, 2 / 8 s of every device | complete, identical | complete, identical |
+| 20 s freeze of one guest | fails at 17 s ("guest1 left"); re-deal, next answer identical on 2 devices | fails at 16 s ("the link to guest1 dropped; ask again"); re-deal, next answer identical on 2 devices |
+| guest's network dies while idle | dropped after 17 s; re-deal 12 s; next answer OK | dropped after 16 s; re-deal 10.5 s; next answer OK |
+| guest's network dies mid-answer | fails at 16.8 s ("guest1 left") | host shows "guest1 stopped responding; waiting for it (Stop gives up)" at 3.6-5 s; fails at 15.4 s |
+| signaling down mid-answer, then the next answer | both identical | both identical |
+| new device joins while signaling is down | "Can't reach the room server. Check your internet connection…" | "Can't reach the signaling server (…). … Rooms already running are not affected" + a self-host link |
+| new device joins right after signaling is back | "No room with that code" (the host's registration is not back) | joins in 0.7 s |
+| signaling blip of 5 s / 30 s, then a new device joins | "No room with that code" | joins in 0.25 s |
+| host or guest opens the page with signaling refused | "Can't reach the room server…" | "Can't reach the signaling server…" |
+| host or guest opens with signaling blackholed | "Connecting…" until the server is back | "Can't reach the signaling server…" after 20 s, buttons usable again |
+| signaling down, a device leaves, re-deal | fails (new links need signaling) | fails the same way |
+| no direct path, no relay | "No room with that code" (the room exists) | "Found the room, but these two devices can't reach each other… A relay (TURN) server gets around that", Network box opens |
+| no direct path, TURN relay (`?turn=`) | no relay support: the join times out | all 4 links on the relay, 33.1 tok/s relay-only |
+
+Drop detection (`tests/e2e/room_drop.mjs --devices 3`, 161 tokens, all 16 checks pass): RTT 300 ms + 5% loss
+and RTT 600 ms + 5% loss finish identical with nobody flagged (longest silence 0.9 s against a 3.9 s limit and
+1.6 s against 4.8 s). A dead middle / last device is flagged in 5.1 / 3.9 s, the answer fails at 15-17 s
+(the link fails or the silent-link drop fires), the re-deal is offered at once and the room answers again.
+Signaling fallback (`tests/e2e/signal_fallback.mjs`, no GPU): 19 of 19.
+
+How the three branches changed when merged:
+- Drop detection no longer fails the answer 3.5-5 s into a silence. As first merged it did, and a first matrix
+  run showed it failing 5, 8 and 12 s freezes that origin/main finishes. It now flags the device, holds the
+  answer (Stop gives up) and makes a new question wait; the device counts as back only after it answers a
+  ping sent after the silence began. Dropping a silent device is left to main's ping loop (15 s for a computer,
+  60 s for a phone).
+- Main's 15 s silent-link drop fires before ICE gives up (~15-17 s), so fix/net-lossy's redial of a dead link
+  no longer brings back a computer frozen for 20 s: it is dropped and rejoins through the re-deal, as on main.
+  The redial still applies to phones (60 s) and to links that fail while packets still flow.
+- The decode lap-timeout floor from fix/net-drop went from 15 s to 25 s: a 12 s freeze left a 15 s gap between
+  two tokens in the first run.
+
+Still open: a re-deal while signaling is down still fails, and an answer caught in a freeze longer than
+~15 s isn't retried automatically.

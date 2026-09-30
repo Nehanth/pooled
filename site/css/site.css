@@ -61,6 +61,8 @@ ol,ul{list-style:none}
 .nav .btn-sm{height:36px;padding-top:0;padding-bottom:0}
 
 /* header GitHub link: the mark only */
+.nav-link{display:inline-flex;align-items:center;height:36px;padding:0 10px;border-radius:8px;color:var(--ink-2);font:500 14px/1 var(--sans);text-decoration:none}
+.nav-link:hover{color:var(--ink);background:var(--bg-2)}
 .gh-link{display:inline-grid;place-items:center;width:36px;height:36px;border-radius:8px;color:var(--ink-2)}
 .gh-link:hover{color:var(--ink);background:var(--bg-2)}
 

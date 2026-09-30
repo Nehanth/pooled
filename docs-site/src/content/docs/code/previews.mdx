@@ -1,0 +1,116 @@
+---
+title: Previews
+eyebrow: Code mode
+description: How the agent's app runs on a virtual localhost, what the sandbox allows, how the console reaches the agent, and how other devices run the same preview.
+sidebar:
+  label: Previews
+  order: 3
+---
+{/*
+  Sources (origin/main 40bb0fa):
+  - harness/preview.js (DEFAULT_PORT 5173, ports 1024-65535, limits 400 files / 2 MB per file / 8 MB total,
+    dot folders and SKIP_DIRS skipped, 250 ms re-snapshot after a write, serve() error texts)
+  - harness/preview-build.js (header: everything inlined as data: URLs; limits: computed import specifiers,
+    new URL(x, import.meta.url); CSP; capture script: fetch / XHR / src shims for project files, "404 <path>"
+    errors, in-memory localStorage/sessionStorage, alert/confirm/prompt logged; relative links rebuild the doc)
+  - harness/preview-frame.js (header: relay vs local mode, HANG_MS 3000, blob: URL in local mode, navigation
+    guard MAX_NAV 3 and its log texts, fit/scale rules, openPreviewTab, relayUrl() incl. localhost <-> 127.0.0.1)
+  - harness/preview-tools.js (serve waits 2 s, errors first then warnings, folds repeats, "first error:" line)
+  - harness/preview-sync.js (content addressed blobs, 64 KB chunks, peer re-checks limits, paths and hashes)
+  - harness/run-js.js (run_js only with a relay; TIMEOUT_MS 3000; formatRun nohost text)
+  - room/code-ui.js line ~790 (sandbox tip texts), ~793 (states), pv-to-agent; p2p.html pv-* controls
+    ("sandbox", Reload, Open, Clear, "Send to agent"), meta preview-origin content="" (empty on main)
+  - room/code.js line ~432 ("Fix the errors in the preview console"), line ~746 (peers autorun: true)
+  - SECURITY.md Code mode; roadmap/29-code-mode-preview-origin.md; PRs #247, #248
+  - CHANGELOG.md: "Code previews fit their box", "other devices' previews run by themselves"
+*/}
+
+When the agent calls `serve`, the project's files are served on a virtual port, `:5173` by default. Nothing binds a real port. The preview pane shows a tab per port, with an address line like `sandbox:5173/index.html`, and runs the page in a sandboxed frame.
+
+## The preview bar
+
+| Control | What it does |
+|---|---|
+| Port tabs (`:5173`) | One per served port. The host can close one to stop serving it. |
+| State | `rev 3` when loaded, `loading…`, `stopped` or `hung`. |
+| **sandbox** | Hover to see where the app runs: in a frame in this tab, or on a separate site in a process of its own. |
+| Reload | Loads the current files again. |
+| **Open** | Opens the app full size in a new tab, still sandboxed. |
+| **Share** | Sends the app to everyone in the room. See [Share and download](/docs/code/share). |
+
+## Live reload
+
+When the agent (or you) writes a file under a served folder, the port takes a new snapshot 250 ms after the last write and the preview reloads. Each snapshot is a new `rev`. After a write, the tool result tells the agent which rev is now served, so it checks the logs instead of serving again.
+
+A served folder may hold up to 400 files, 2 MB per file and 8 MB in all. Dot folders, `node_modules`, `dist`, `build` and similar folders are skipped. Over a limit, `serve` fails with a message the agent can act on.
+
+## The console
+
+The preview's console output and uncaught errors are collected for each port. They show in the console panel under the preview, and the agent reads them:
+
+- `serve` waits up to 2 seconds for the page to load, then returns how long it took and the first errors, errors before warnings. Repeats of the same line fold into one, with a count.
+- `preview_logs` returns what was printed since a cursor. If the page's first error has scrolled out of view, it adds a `first error:` line, since the first error is usually the cause.
+
+A file the page asks for that is not in the project shows as an error, like `404 sprites.png (referenced but not in the project)`.
+
+When the console has errors, **Send to agent** puts "Fix the errors in the preview console" in the prompt box.
+
+## What an app can do in the sandbox
+
+The app is the model's code, so it runs as untrusted code:
+
+- The frame has `sandbox="allow-scripts"` and nothing else. It gets an opaque origin: no access to the room's page, storage, cookies or cached weights. No popups, no top-level navigation, no forms, no camera or microphone.
+- A content security policy blocks the network, except scripts from `cdn.jsdelivr.net` and `cdnjs.cloudflare.com`, and stylesheets and fonts from Google Fonts. The agent can load a library from those CDNs.
+- Messages from the frame are shown as plain text.
+
+Inside that box, the preview does its best to behave like a normal local server:
+
+- Every file the page uses (scripts, ES module imports, stylesheets, images, fonts, media) is inlined into one document, so relative paths work.
+- `fetch()` and `XMLHttpRequest` of a project file by relative path return that file.
+- `localStorage` and `sessionStorage` work, but in memory only: they are empty again after each reload.
+- `alert()` is logged instead of shown. `confirm()` answers false and `prompt()` answers null, and both are logged.
+- A relative link to another page of the project loads that page.
+- An app laid out wider or taller than the pane (a 300×600 game board and a side panel, on a phone) is scaled down to fit. Clicks, touches and keys still reach it. Apps that already fit are untouched.
+
+:::caution[What does not work]
+- A `<form>` submit never fires, because the frame has no `allow-forms`. Use a button's click and the Enter key instead.
+- Import paths built at run time and `new URL(x, import.meta.url)` are not rewritten. They fail with a console error the agent can read.
+- A page that keeps navigating itself away (`location.href = ...`, a meta refresh) is put back on the current rev, and stopped after 3 tries.
+:::
+
+## Previews on other devices
+
+Everyone in the room who can see Code runs the same preview on their own screen, in the same sandbox. The host sends each port's file list and each device fetches only the files it doesn't hold yet, in 64 KB chunks. Files are addressed by a hash of their content (a SHA-256 prefix), so after a reload only the changed files travel.
+
+A device trusts nothing it receives: it checks the file limits, the paths and every hash again before it runs anything. Previews on other devices start by themselves.
+
+## A separate site for previews
+
+Where the preview runs decides how much a bad app can hurt the room.
+
+| | Same tab (pooled.run today) | Separate site |
+|---|---|---|
+| Where | A frame in the room's tab, as a `blob:` page | A relay page on another registrable domain, in its own process |
+| An app that loops forever | Can freeze the room's tab | Only its own process hangs. After 3 s with no heartbeat, the frame is removed and marked `hung`; the room keeps working |
+| `run_js` | Off | On |
+| Sandbox tip | "Runs in a sandboxed frame in this tab." | "Runs in a sandboxed frame on a separate site, in a process of its own." |
+
+The room page points at the preview site with a meta tag. For example:
+
+```html
+<meta name="preview-origin" content="pooled.run=https://pooled-preview.vercel.app pooled-dev.vercel.app=https://pooled-preview.vercel.app">
+```
+
+The value is one origin, or `host=origin` entries so one page can send production and staging to different preview sites. The page checks it before using it. A value on the page's own site (the same host, a subdomain or a sibling), plain `http` (allowed only for `localhost` or `127.0.0.1`, from an `http` page), or anything that is not an http(s) URL is ignored with one console warning, and the preview stays in the tab. A subdomain would share the room's process, so it could not isolate anything.
+
+:::note[Not on pooled.run yet]
+The code is in place, but the `preview-origin` meta on pooled.run is still empty, so previews there run in the room's tab and `run_js` is off. Setting up the second site is covered in [Deploying the site](/docs/self-host/deploy). On `localhost`, the page uses `127.0.0.1` as its preview site (and the reverse), so both work in local development.
+:::
+
+If the preview site doesn't answer, the preview falls back to running in the tab and logs "the isolated preview host did not answer; running the preview in this tab".
+
+## run_js
+
+`run_js` lets the agent check logic, not only "no console errors". It runs a JS module in a fresh hidden sandbox, next to a page of the project if one is given, and returns what it printed. For example, "does `clearLines()` drop a full row?". It can import project files, use top-level `await`, and runs for up to 3 seconds.
+
+It always runs on the separate preview site, never in the room's tab, so `while (true) {}` cannot freeze the room. Without a preview site, the agent is not offered the tool at all.

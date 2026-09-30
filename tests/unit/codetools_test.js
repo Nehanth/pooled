@@ -6,7 +6,9 @@ import { previewTools } from "../../harness/preview-tools.js";
 import { runJsTool } from "../../harness/run-js.js";
 import { CARDS } from "../../harness/cards.js";
 import { PreviewServer } from "../../harness/preview.js";
-import { toolsSystemPrompt } from "../../harness/tools.js";
+import { toolsSystemPrompt, toolsSystemPromptExact } from "../../harness/tools.js";
+import { compileSchema, SCHEMA_CAPS } from "../../harness/jsonschema.js";
+import { grammarNodeCount, GrammarConstraint } from "../../harness/constrain.js";
 import { lineDiff } from "../../harness/diff.js";
 import { CODE_SYSTEM } from "../../harness/code-prompt.js";
 
@@ -106,6 +108,31 @@ Deno.test("prompt size: the 8 code tools in the xml block plus the Code system p
   console.log(`system prompt + tool block: ${p.length} chars`);
   ok(p.length <= 3700, `system prompt + tool block is ${p.length} chars`);
   for (const [id, t] of Object.entries(CARDS)) ok(t.length <= 245, `card ${id} is ${t.length} chars (~70 tokens max)`);
+  s.close();
+});
+
+// Code mode's core path (harness/core-model.js, ?hcore=1): the template's own tool block, and the strict
+// grammar, which enforces `required` and every declared type while the model writes a call
+Deno.test("hcore: the template-worded system text stays under 3,900 chars; every tool compiles into the strict grammar under both call styles", () => {
+  const ws = watch(new MemoryWorkspace()), s = new PreviewServer(ws);
+  const tools = [...codingTools(ws, { server: s }), ...previewTools(s), runJsTool(s)].map(({ name, description, parameters }) => ({ name, description, parameters }));
+  for (const style of ["xml", "json"]) {
+    const p = toolsSystemPromptExact(tools, { style, system: CODE_SYSTEM });
+    ok(p.length <= 3900, `${style}: the system turn is ${p.length} chars`);
+    ok(p.includes(CODE_SYSTEM), style + ": Code's own system text is in it");
+    for (const t of tools) compileSchema(t.parameters);
+    const n = grammarNodeCount(tools, { style });
+    ok(n > 0 && n < SCHEMA_CAPS.nodes, `${style}: ${n} grammar nodes`);
+    new GrammarConstraint(tools, { vocabSize: 8, tokenText: () => "", style, mode: "auto", maskCache: new Map() });
+  }
+  s.close();
+});
+Deno.test("hcore: required parameters are declared as the tools need them (the grammar enforces them)", () => {
+  const ws = watch(new MemoryWorkspace()), s = new PreviewServer(ws);
+  const req = Object.fromEntries([...codingTools(ws, { server: s }), ...previewTools(s), runJsTool(s)].map((t) => [t.name, t.parameters.required || []]));
+  eq(req, { list_dir: [], read_file: ["path"], search: ["pattern"], edit_file: ["path", "old", "new"], write_file: ["path", "content"], serve: [], preview_logs: [], run_js: ["code"] });
+  // every required name is a declared property, and write_file's append stays optional
+  for (const t of [...codingTools(ws, { server: s }), ...previewTools(s), runJsTool(s)]) for (const r of t.parameters.required || []) ok(r in t.parameters.properties, `${t.name}.${r}`);
   s.close();
 });
 

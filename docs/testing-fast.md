@@ -135,7 +135,7 @@ only (two GPUs).
 
 | file | what it does |
 |---|---|
-| `tests/e2e/xroom.mjs` | One end of the room (`--role host` or `--role guest`). The host creates the room, prints `CODE XXXX`, waits for the guest, loads the model, then for every mode (`plain,spec`), prompt (`japan`, `twosum`) and round asks with the `exact` preset and records prefill, decode tok/s, acceptance, TTFT, the peer-card ping, the answer's sha-256 and the selected ICE candidate pair with Chrome's STUN round trip. `--solo`: no guest (the one-device reference on the same page path). `--trace-rounds 2,5`: those rounds are traced on both ends (see below). |
+| `tests/e2e/xroom.mjs` | One end of the room (`--role host` or `--role guest`). The host creates the room, prints `CODE XXXX`, waits for the guest, loads the model, then for every mode (`plain,spec`), prompt (`japan`, `twosum`) and round asks with the `exact` preset and records prefill, decode tok/s, acceptance, TTFT, the peer-card ping, the answer's sha-256 and the selected ICE candidate pair with Chrome's STUN round trip. `--solo`: no guest (the one-device reference on the same page path). `--trace-rounds 2,5`: those rounds are traced on both ends (see below). The host page is the model host: it pins its own GPU speed to unknown (`?gbps=0`), so the room picks by memory and its larger pledge (`--gb 13` against 12) wins. The harness pins the layer split by memory (`?split=memory`; `--split speed` for the room's default). `--split 16,24`: layers per device, host first. `--speedpick`: no pin; the room picks the model host by GPU speed as for a user, and the run records who took it and whether the room came online (no questions asked). |
 | `tests/e2e/xroom_pair.sh` | Drives both ends from one machine: copies the checkout to the other machine, takes its GPU lock, starts the host (here or there: `--here host|guest`), starts the guest with the host's code, waits for the result, fetches the guest's trace, releases the lock, pings the other machine before and after. Machine-specific commands come from the environment (`XROOM_REMOTE`, `XROOM_SYNC`, `XROOM_LOCAL_IP`, `XROOM_LOCK`, `XROOM_GPURUN`, ...; see its header). |
 | `tests/e2e/xroom_report.mjs` | Tables from a traced run: aligns the two machines' clocks from the frames themselves (forward and backward delay of every lap), then every lap split as `room_prof_report.mjs` does, plus the wire per frame size (forward + backward needs no clock) against the ping. |
 | `tests/e2e/xwire_lab.mjs` | CPU only: one frame out and back over the real link, by size (4 to 80 KB) and by how it is sent (the room's sliced/striped wire, one stripe, unordered, one raw message, PeerJS `send`, the JSON ping). |
@@ -151,6 +151,9 @@ tests/e2e/xroom_pair.sh --out /tmp/xr-moe -- --model qwen3.6-35b-moe --gb 13 --p
 cat /tmp/xr-moe/report.txt
 # the same with the host on the other machine
 tests/e2e/xroom_pair.sh --here guest --out /tmp/xr-moe-r -- --model qwen3.6-35b-moe --gb 13 --prompts japan,twosum --rounds 3 --trace-rounds 2,5,8,11
+# pin the cooperative GEMV shape on both ends (the load-time autotune can pick differently per run, and
+# the shape can change a plain answer's bits; see bench-log 2026-09-28, hostFuse); A/B a room option
+tests/e2e/xroom_pair.sh --guest-tune 64,4 --out /tmp/xr-pin -- --model qwen3.6-35b-moe --gb 13 --tune 64,4 --query hostfuse=0
 # wire lab: B on the other machine first, then A here
 node tests/e2e/xwire_lab.mjs --role b --signal <this machine>:9000     # on the other machine
 node tests/e2e/xwire_lab.mjs --role a --out /tmp/xwire.json
@@ -233,3 +236,23 @@ phone and back plus the phone's own layer, which is the thing to measure next (x
 per-lap split needs the phone page traced, which it is not yet). Spec rounds vary most (21.5 to 35.6)
 because acceptance and the draft length the room picks depend on measured timing. Runs were a few
 minutes each with the phone cool; no throttling was seen at this length, and none was looked for.
+
+## Rooms: a device that drops out (#207)
+
+`tests/e2e/room_resume.mjs` (loopback, Spark: host, desktop worker and a phone-shaped tab in headless Chromium, real WebRTC) interrupts an answer mid-stream and checks it finishes with the uninterrupted text. `lock` hides the tab, closes its signaling socket and pauses its JS in the debugger for 20 s (Chromium ignores a freeze on a visible page); `reload`; `kill` (closed for good: the experimental auto re-deal after 60 s). `--scenarios code --model qwen3-1.7b` does the same to a Code run mid-step (`--code-action lock|reload`).
+
+`tests/e2e/resume_phone.mjs` drives the real iPhone over WebDriver against `room_resume.mjs --url <preview>/room --external iphone`: `background` switches Safari to another tab for 30 s (the closest WebDriver gets to a lock: iOS stops the page's WebRTC), `reload` reloads the room's tab. A real screen lock needs a person.
+
+Results, 2026-09-29 (Qwen3 0.6B split 3 ways; the iPhone 14 Pro Max over the branch preview, host and worker on the Spark):
+
+| Where | Interrupt | Back in | Result |
+|---|---|---|---|
+| loopback | lock 20 s | 26 s | same text, the tab back in its slot with its layers |
+| loopback | reload | 18 s | same text, rejoined under its name, layers reloaded |
+| loopback | kill | 103 s | auto re-deal after 60 s over 2 devices; shown text kept, answer ran to the end |
+| loopback, 1.7B | Code run, lock 20 s | 39 s | run waited, carried on inside its step, wrote index.html + style.css, no stop note |
+| loopback, 1.7B | Code run, reload | 52 s | same |
+| iPhone | Safari in the background 30 s | 67 s | host dropped the silent link after 12 s, the phone reconnected by itself, layers still loaded (no download), same text |
+| iPhone | reload | 53 s | rejoined its slot from sessionStorage with the crumb shown, same text |
+
+Before the `ai-linked` handshake the first batch prefill after a phone came back timed out once (the device before it was still opening its fresh link): the answer recovered twice and took 165 s instead of 67 s.

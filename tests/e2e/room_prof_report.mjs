@@ -29,11 +29,14 @@ for (const run of J.runs || []) {
   const gpuIn = (n, a, b) => { const s = T[n].gp.subs.filter((x) => x.t >= a && x.t <= b); return { n: s.length, gpu: s.reduce((x, y) => x + (y.gpu || 0), 0), first: s[0]?.t, last: s.at(-1)?.t }; };
   const mapsIn = (n, a, b) => T[n].gp.maps.filter((m) => m.t0 >= a && m.t0 <= b);
   const laps = [];
-  for (const [key, [t0, cols]] of Object.entries(ev.host["h.lap0"] || {})) {
+  for (const [key, [lap0, cols]] of Object.entries(ev.host["h.lap0"] || {})) {
     const [kind, ps] = key.split("|"), pos = +ps, rk = kind === "ai-hidden" ? "ai-hiddenret" : "ai-hiddenret-b";
     const h = (e, k = kind) => get("host", e, k, pos);
     const ret = h("h.ret"); if (!ret) continue;
-    const L = { kind, pos, cols: cols || 1, lap: ret - t0 };
+    // hostFuse (engine headAhead): the head of the previous hidden and this token's layers ran as one
+    // submit before the lap (h.fuse0 -> h.fuse1), so the host's compute starts there and has no head of its own
+    const fused = kind === "ai-hidden" && h("h.fuse0") != null, t0 = fused ? h("h.fuse0") : lap0;
+    const L = { kind, pos, cols: cols || 1, lap: ret - t0, fused };
     const hc = gpuIn("host", t0, h("h.emb1"));
     L.hostCompute = h("h.emb1") - t0; L.hostGpu = hc.gpu; L.hostSubmits = hc.n; L.hostEncode = hc.first ? hc.first - t0 : null;
     L.hostPack = h("h.pack1") - h("h.emb1"); L.hostSend = h("send1") - h("send0");
@@ -60,7 +63,7 @@ for (const run of J.runs || []) {
     laps.push(L);
   }
   laps.sort((a, b) => a.pos - b.pos);
-  const dec = run.mode === "plain" ? laps.filter((l) => l.head != null) : laps.filter((l) => l.kind === "ai-hidden-b");
+  const dec = run.mode === "plain" ? laps.filter((l) => l.head != null || l.fused) : laps.filter((l) => l.kind === "ai-hidden-b");
   const R = { mode: run.mode, status: run.status, crumb: run.crumb, laps: dec.length };
   // lap segments
   const seg = (f) => ({ median: r2(med(dec.map(f))), mean: r2(mean(dec.map(f))) });
@@ -156,7 +159,7 @@ function extend(R, dec, T, ev, get, gpuIn, mapsIn, mode) {
     const pairs = dec.slice(0, -1).map((l, i) => ({ l, nx: dec[i + 1] })).filter(({ l, nx }) => nx.pos === l.pos + 1);
     R.hostPerToken = phases([
       ["token (lap start -> next lap start)", () => pairs.map(({ l, nx }) => span(lap0(l), lap0(nx))).filter(Boolean)],
-      ["host: embed + its layers + readback", () => dec.map((l) => span(l.t0, l.tHostDone)).filter(Boolean)],
+      ["host: embed + its layers + readback (hostFuse: + the previous head)", () => dec.map((l) => span(l.t0, l.tHostDone)).filter(Boolean)],
       ["host: pack + send + wait for the chain", () => dec.map((l) => span(l.tHostDone, l.tRet)).filter(Boolean)],
       ["host: head (upload, norm, LM head, top-k, map)", () => dec.map((l) => span(get("host", "h.head0", "ai-hidden", l.pos), get("host", "h.head1", "ai-hidden", l.pos))).filter(Boolean)],
       ["host: sampling + emit + UI (head done -> next lap)", () => pairs.map(({ l, nx }) => span(get("host", "h.head1", "ai-hidden", l.pos), lap0(nx))).filter(Boolean)],

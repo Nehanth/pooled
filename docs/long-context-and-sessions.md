@@ -39,6 +39,19 @@ each has a switch for A/B timing on real hardware.
 - Any `maxSeq` works; the split length grows past 32K so a head never has more than 128 splits.
   Memory at 32K: 2.1 GB of KV for the whole model in f16, 1.2 GB in int8 (q4 KV is not
   recommended: it hurts long documents and tool calls, research §3).
+- 128K on the 35B MoE (`?ctx=131072`): each attention layer keeps K and V in one buffer each,
+  bound whole, so the limit is the device's storage binding size, not memory. The MoE's K (or V)
+  at 131072 positions in f16 is 2 KV heads x 256 x 2 bytes x 131072 = exactly 128 MiB, the binding
+  size every WebGPU device supports (the MoE's stacked expert tensors already need more than that).
+  The 27B is twice as wide: 256 MiB at 128K in f16, 128 MiB at 64K or at 128K in int8. The engine
+  throws a readable error at create when a device cannot bind its KV buffer
+  (`tests/unit/kv_bind_limit_test.js`), and the room host holds the context to what the smallest
+  binding limit among its devices fits (`ctxForBinding` in `room/models.js`; each device reports
+  `maxBindMB`, and a device that reports nothing counts as WebGPU's 128 MiB). The 27B's cap is 64K
+  (128 MiB per buffer): its needle passes there; 128K on it is not checked yet. Splitting a layer's
+  cache over several buffers was not needed; it would only matter for the 27B past 64K on a device
+  that binds less than 256 MiB. Needle retrieval and speed at 32K..128K:
+  `tests/needle_ctx.js` and docs/bench-log.md (2026-09-30).
 
 ## Sessions: save, restore, rewind, share a prefix
 

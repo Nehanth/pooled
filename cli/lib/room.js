@@ -40,15 +40,25 @@ async function loadPeer() {
   return PeerClass;
 }
 
-// "ABCD", "abcd", "https://pooled.run/r/ABCD", "…/room?code=ABCD", "…#ABCD" -> "ABCD" (or null)
+// "4TK-G9P", "4tkg9p", "ABCD" (rooms from before six-character codes), "https://pooled.run/r/4TKG9P#k=…",
+// "…/room?code=4TKG9P", "…#ABCD" -> "4TKG9P" (or null)
 export function roomCodeFrom(s) {
   s = String(s || "").trim();
-  const ok = (c) => (/^[A-Z0-9]{4,6}$/i.test(c || "") ? c.toUpperCase() : null);
+  const ok = (c) => { c = String(c || "").replace(/-/g, "").toUpperCase(); return /^[A-Z0-9]{4}$|^[A-Z0-9]{6}$/.test(c) ? c : null; };
   if (ok(s)) return ok(s);
   try {
     const u = new URL(s);
     return ok(u.searchParams.get("code")) || ok(u.pathname.split("/").filter(Boolean).pop()) || ok(u.hash.slice(1));
   } catch { return null; }
+}
+// the invite key in a room link's fragment ("…/r/4TKG9P#k=…"): the host lets a client that has it in
+// without asking (room/joingate.js). null when there is none
+export function roomKeyFrom(s) {
+  try {
+    const h = new URL(String(s || "").trim()).hash.replace(/^#/, "");
+    for (const part of h.split("&")) { const [k, v] = part.split("="); if (k === "k" && /^[A-Za-z0-9_-]{22,64}$/.test(v || "")) return v; }
+  } catch {}
+  return null;
 }
 
 // "host:port" -> PeerJS server options; none -> the PeerJS cloud (what the room page uses by default)
@@ -60,9 +70,12 @@ export function signalOpts(signal) {
 }
 
 export class Bridge extends EventEmitter {
-  constructor({ code, signal = null, name, client, log = () => {} }) {
+  constructor({ code, key = null, signal = null, name, client, log = () => {}, Peer = null }) {
     super();
-    this.code = code; this.signal = signal; this.name = name; this.client = client; this.log = log;
+    this.code = code; this.signal = signal; this.name = name; this.client = client; this.log = log; this.PeerClass = Peer;
+    this.key = key;             // the room's invite key, from its link: in without the host's Allow
+    this.pass = null;           // what the host gave us once it let us in: back in after a reconnect
+    this.waiting = false;       // in the host's lobby: it was asked to let us in
     this.peer = null; this.conn = null;
     this.hostMeta = null; this.hostName = null;
     this.connected = false;     // a link to the host is open and it said hello
@@ -73,17 +86,24 @@ export class Bridge extends EventEmitter {
     this.reqs = new Map();      // rid -> handlers
     this.closing = false;
   }
+  // join: 1 = this client can wait in the host's lobby (a host that asks before devices join holds it
+  // until the host allows it); key / pass: what lets it in without asking
   helloMsg(back) {
-    return { t: "hello", name: this.name, v: PROTOCOL, ...(back ? { back: 1 } : {}),
+    return { t: "hello", name: this.name, v: PROTOCOL, join: 1, ...(back ? { back: 1 } : {}),
+      ...(this.pass ? { pass: this.pass } : {}), ...(this.key ? { key: this.key } : {}),
       meta: { api: 1, client: this.client, webgpu: false, ua: "API" } };
   }
   // -> resolves once the host said hello with meta.api; rejects with a message for the user
   async connect() {
-    const Peer = await loadPeer();
+    const Peer = this.PeerClass || await loadPeer();
     return new Promise((resolve, reject) => {
       let settled = false;
       const fail = (msg) => { if (settled) return; settled = true; clearTimeout(timer); this.destroy(); reject(new Error(msg)); };
-      const timer = setTimeout(() => fail(`no room ${this.code} (is the host page open?)`), JOIN_MS);
+      let timer = setTimeout(() => fail(`no room ${this.code} (is the host page open?)`), JOIN_MS);
+      // held in the host's lobby: no join timeout while the host decides (Ctrl-C gives up)
+      this.once("lobby", () => { clearTimeout(timer); timer = null; });
+      // turned away before we got in (Deny, API clients off, a full lobby, an older client)
+      this.once("refused", (why) => fail(`the host of room ${this.code} said: ${why}`));
       this.peer = new Peer(undefined, { debug: 0, config: ICE, ...signalOpts(this.signal) });
       this.peer.on("error", (err) => {
         if (!settled) {
@@ -111,7 +131,14 @@ export class Bridge extends EventEmitter {
   dial(back, onHello) {
     const conn = this.peer.connect(PREFIX + this.code, { reliable: true });
     guardChunks(conn);
-    let greeted = false;
+    let greeted = null, admitted = false;
+    // in: the host said hello and (a host with the gate) let us in
+    const inRoom = () => {
+      if (!greeted || !admitted || this.connected) return;
+      this.connected = true; this.gone = null; this.waiting = false;
+      onHello?.(greeted);
+      this.emit("state");
+    };
     conn.on("open", () => {
       if (this.conn && this.conn !== conn && this.conn.open) { try { conn.close(); } catch {} return; }
       this.conn = conn;
@@ -120,13 +147,34 @@ export class Bridge extends EventEmitter {
     conn.on("data", (d) => {
       if (!d || typeof d.t !== "string") return;
       if (d.t === "hello" && !greeted) {
-        greeted = true;
+        greeted = d;
         this.hostMeta = d.meta || {}; this.hostName = cleanText(d.name, 40);
-        this.connected = true; this.gone = null;
-        onHello?.(d);
+        if (!d.gate) admitted = true;   // a host from before the gate lets everyone in
+        inRoom();
+        return;
+      }
+      if (d.t === "admit" && !admitted) {
+        if (typeof d.pass === "string" && /^[A-Za-z0-9_-]{22,64}$/.test(d.pass)) this.pass = d.pass;
+        if (this.waiting) this.log("the host let this client in");
+        admitted = true;
+        inRoom();
+        return;
+      }
+      if (d.t === "lobby" && !admitted) {
+        if (!this.waiting) this.log(`waiting for the host of room ${this.code} to let this client in (start pooled serve with the room's invite link to skip this)`);
+        this.waiting = true;
+        this.emit("lobby");
         this.emit("state");
         return;
       }
+      if (d.t === "bye" && !admitted) {
+        this.kicked = cleanText(d.reason, 300) || "the host closed the link";
+        this.waiting = false;
+        this.emit("refused", this.kicked);
+        this.emit("state");
+        return;
+      }
+      if (!admitted) return;   // nothing from the room until we are in (the host sends nothing anyway)
       this.onData(d);
     });
     conn.on("close", () => { if (this.conn === conn) this.lost("lost the link to the host"); });
@@ -148,13 +196,15 @@ export class Bridge extends EventEmitter {
         this.model = cleanText(d.model, 80).replace(/[^\w.:+\-\/]/g, "") || this.model;
         this.modelLabel = cleanText(d.label, 80) || this.modelLabel;
         this.readySince ??= Math.floor(Date.now() / 1000);
+        // a v2 host says its context size (it changes with the model): the early context check uses it
+        if (this.hostMeta && Number.isInteger(d.ctx) && d.ctx > 0) this.hostMeta.ctx = d.ctx;
         this.emit("state");
         return;
       case "ai-degraded": case "ai-redeal":
         this.ready = false;
         this.emit("state");
         return;
-      case "ai-queued": case "ai-genstart": case "ai-token": case "ai-gendone": case "ai-busy": {
+      case "ai-queued": case "ai-genstart": case "ai-token": case "ai-call": case "ai-gendone": case "ai-busy": {
         if (d.rid == null) return;   // the room's chat, not ours
         const h = this.reqs.get(String(d.rid));
         if (!h) return;
@@ -165,7 +215,10 @@ export class Bridge extends EventEmitter {
     }
   }
   send(msg) { try { if (this.conn?.open) { this.conn.send(msg); return true; } } catch {} return false; }
-  // an ask: handler(msg) gets ai-queued / ai-genstart / ai-token / ai-gendone / ai-busy for this rid
+  // what the host answers: 2 = v2 asks too (tools, formats; hello meta.api), 1 = plain ones only
+  get hostApi() { return Math.max(1, Math.floor(+this.hostMeta?.api) || 1); }
+  // an ask: handler(msg) gets ai-queued / ai-genstart / ai-token / ai-call / ai-gendone / ai-busy
+  // for this rid. body: common.askBody(req, v2) (a v2 body carries api: 2; send one only when hostApi >= 2)
   ask(rid, body, handler) {
     this.reqs.set(rid, handler);
     if (!this.send({ t: "ai-ask", api: 1, rid, ...body })) { this.reqs.delete(rid); return false; }

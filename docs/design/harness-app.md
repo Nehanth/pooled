@@ -20,6 +20,9 @@ F. context budget, G. tests, H. work split and interfaces, then risks.
 
 ## A. Room model adapter
 
+With `?hcore=1` the agent's model calls go through `pooled serve`'s v2 core instead of the adapters
+below (the template's tool prompt, the strict grammar, `CallStream`): see [harness-core.md](harness-core.md).
+
 ### A.1 The problem
 
 `harness/agent.js` needs `generate({ system, turns, signal }) -> async iterable of text deltas`.

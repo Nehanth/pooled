@@ -18,3 +18,8 @@ presentation/
 
 # eval suite output
 tests/eval/results/
+
+# docs site build output
+dist/
+docs-site/dist/
+docs-site/.astro/

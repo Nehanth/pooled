@@ -4,9 +4,9 @@ How the room page (`p2p.html` + `room.js`) and the site look, written down so ch
 
 ## 0. Facts first
 
-1. **There is no dark theme.** `:root` sets `color-scheme: light` and nothing reads `prefers-color-scheme` or a `data-theme` attribute. The only dark surfaces are deliberate and fixed: the Code pill `#0B0D14`, the "this device" button (`--ink`), toasts and tooltips (`--text` background, white text), and the compute screen (`#000`, `--game`, `--on-game`). Don't add a dark theme to one panel; a dark theme would have to cover the whole page.
-2. **Header alignment.** In the room bar (>=821px) everything in the row is 34px tall and shares one vertical centre. `#mode-bar` (Chat | Code) is 28px buttons + 3px padding. Its neighbours (`#api-open`) take the same outer height in every place the switch sits: 34 in the header, 38 in the phone strip, 42 on coarse-pointer phones.
-3. **Examples to copy from:** Invite (`.sheet.invite`, a centred sheet with one hero object), Room settings (`.menu-pop`, a left-aligned sectioned panel), Serve API (`#api-sheet`, an anchored popover with numbered steps that becomes a bottom sheet on phones).
+1. **There is no dark theme.** `:root` sets `color-scheme: light` and nothing reads `prefers-color-scheme` or a `data-theme` attribute. The only dark surfaces are deliberate and fixed: the Code pill `#0B0D14`, the Serve API button (`--ink`), toasts and tooltips (`--text` background, white text), and the Serve API page (`#compute-screen`: `#000`, `--on-game`, `--on-game-2`, and its own `--cs-*` tints of `--on-game` over black). Don't add a dark theme to one panel; a dark theme would have to cover the whole page.
+2. **Header alignment.** In the room bar (>=821px) everything in the row is 34px tall and shares one vertical centre. `#mode-bar` (Chat | Code) is 28px buttons + 3px padding. Anything placed beside it takes the same outer height in every place the switch sits: 34 in the header, 38 in the phone strip, 42 on coarse-pointer phones.
+3. **Examples to copy from:** Invite (`.sheet.invite`, a centred sheet with one hero object), Room settings (`.menu-pop`, a left-aligned sectioned panel), Serve API (`#api-panel` on the dark `#compute-screen`: numbered steps, copyable rows and code tabs, folded under "How to connect" once a client is connected).
 
 ## 1. Tokens (use names, never raw colours)
 
@@ -74,7 +74,7 @@ Code selected: pill #0B0D14, glow 0 0 16px -3px rgba(110,134,255,.6), word #fff,
 Sizes: phone strip W=84 H=32 (outer 38). **Header W=68 (`--mw`) H=28 (outer 34), 13px.** Coarse phones H=36 (outer 42). The outer radius (12) = inner radius (8) + padding (3) + 1. Keep that relationship.
 
 ### 3.2 Header controls (room bar, 56px tall, bg `--panel-3`, bottom `1px --rule-2`)
-- Order: logo, `|` rule, Room CODE (`#room-badge`: 13px mono .14em tracking, "Room" in sans muted, left border `--rule-2`, height 32), Chat|Code (34), device chips (`.pchip` 30px, radius 8, `--border`, self chip border `--blue-200`), spacer, `#hdr-sum` (12px mono), Invite (primary, 34px), this device (34px black square), settings (34px), GitHub (36px).
+- Order: logo, `|` rule, Room CODE (`#room-badge`: 13px mono .14em tracking, "Room" in sans muted, left border `--rule-2`, height 32), Chat|Code (34), device chips (`.pchip` 30px, radius 8, `--border`, self chip border `--blue-200`), spacer, `#hdr-sum` (12px mono), Invite (primary, 34px), Serve API (`#compute-open`: black `--ink`, the dots mark + "Serve API", 34px; "API" at 480px and below, 36px on phones), settings (34px), GitHub (36px).
 - `.hbtn` secondary: `height:34px; padding:0 12px; radius 8; font 500 13px; bg --panel; box-shadow inset 0 0 0 1px var(--border-2)`, hover `bg --panel-3` with `inset … var(--muted)`.
 - Icon buttons: 34x34, radius 8, transparent, colour `--ink-2`, hover `--panel-2`. They get a tooltip through `data-tip` (dark `--text` bubble, 12px, radius 8).
 - **Rule: every control in one header row has height 34 (desktop) / 36 (<=820px). Anything next to `#mode-bar` in the header matches its 34px outer height and its vertical centre.** Gap between header groups is 12 (the header's `gap`). The mode-bar has `margin-left:4px`; a neighbour uses 8px max, or the header gap alone.
@@ -113,8 +113,8 @@ Code blocks (chat `pre`): mono 12px, `bg --panel-3`, `1px --rule-2`, radius 12, 
 
 Do:
 - Match neighbours exactly: same height, same vertical centre, same radius family (12 outer / 8 inner). In the header, 34px.
-- A control next to a segmented switch is either (a) a quiet secondary control (`.hbtn`-like, same outer height and radius as the switch, apart by the header gap), or (b) part of the switch family with the full pill logic. Never a pill-less well that looks like a dead segment (see `#api-open`).
-- Put "the one action" first and make it big (a command in a linkrow with the primary Copy). Then reference info as copyable mono rows (each with a quiet copy icon), examples in a scrolling code block, host-only settings in a footer on `--panel-3` apart from the steps, then a 12px muted note. The Serve API popover (`#api-sheet`) is the worked example.
+- A control next to a segmented switch is either (a) a quiet secondary control (`.hbtn`-like, same outer height and radius as the switch, apart by the header gap), or (b) part of the switch family with the full pill logic. Never a pill-less well that looks like a dead segment.
+- Put "the one action" first and make it big (a command in a linkrow with the primary Copy). Then reference info as copyable mono rows (each with a quiet copy icon), examples in a scrolling code block, host-only settings in a quiet footer apart from the steps, then a 12px muted note. The Serve API half of the dark page (`#api-panel`) is the worked example.
 - Left-align dense content (endpoints, code). Centre only a short title and lede, and pick one per sheet.
 - Use `--display` only for the sheet title (22 in a panel head, 26 in a sheet).
 - Use mono for codes, URLs, ports, commands and numbers only. Labels stay in Geist.
@@ -125,7 +125,7 @@ Do:
 Don't:
 - Don't use raw hex for new things, yellow or amber for attention, or a second accent colour. Don't use gradients except the existing glow and fades.
 - Don't use shadows heavier than the sheet ladder, drop shadows on flat wells, or 2px borders.
-- Don't make a panel look like a third room mode next to Chat | Code (Serve API opens a popover, per `serve.md`).
+- Don't make a panel look like a third room mode next to Chat | Code (Serve API lives on its own dark page, opened from the header, per `serve.md`).
 - Don't use uppercase tracked labels (the room uses 13px `--ink-3` section heads).
 - Don't wrap commands mid-token (`completion` / `s`): code scrolls sideways.
 - Don't add a dark mode to the panel alone.
@@ -143,7 +143,7 @@ Don't:
 
 ## 6. Checklist for a UI change
 
-1. Header at 1280: controls next to `#mode-bar` (e.g. `#api-open`) have the same `getBoundingClientRect()` `top` and `height` (34).
+1. Header at 1280: controls in the room bar (e.g. `#compute-open`, `#share-btn`) have the same `getBoundingClientRect()` `top` and `height` (34).
 2. Phone at 390: the same in `.mode-row` (38, or 42 on coarse pointers). Sheets are bottom sheets and nothing overflows (`document.documentElement.scrollWidth === 390`).
 3. Keyboard: Tab reaches the button, Enter opens, focus is inside, Tab stays inside, Esc closes, focus is back on the button.
 4. Tokens only (grep the diff for `#[0-9a-f]{3,6}` outside the allowed list).

@@ -1,6 +1,10 @@
 {
   "framework": null,
+  "installCommand": "npm ci --prefix docs-site",
+  "buildCommand": "npm --prefix docs-site run build && node docs-site/build-vercel.mjs",
+  "outputDirectory": "dist",
   "trailingSlash": false,
+  "functions": { "api/turn.mjs": { "maxDuration": 10 } },
   "ignoreCommand": "if [ \"$VERCEL_ENV\" = production ]; then exit 1; fi; case \"$VERCEL_GIT_COMMIT_MESSAGE\" in *\"[preview]\"*) exit 1;; esac; exit 0",
   "rewrites": [
     { "source": "/room", "destination": "/p2p.html" },
@@ -25,6 +29,7 @@
     { "source": "/(engine|room|harness)/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
     { "source": "/room.js", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
     { "source": "/site/fonts/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] },
+    { "source": "/docs/_astro/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] },
     { "source": "/harness/preview-relay.html", "headers": [
       { "key": "Content-Security-Policy", "value": "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' data: blob: https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'unsafe-inline' data: https://fonts.googleapis.com; font-src data: https://fonts.gstatic.com; img-src data: blob:; media-src data: blob:; connect-src data: blob:; worker-src blob: data:; form-action 'none'; frame-ancestors https://pooled.run https://pooled-dev.vercel.app http://localhost:* http://127.0.0.1:*" },
       { "key": "Referrer-Policy", "value": "no-referrer" },

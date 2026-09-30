@@ -1,14 +1,17 @@
 # `pooled serve`: the room as a local OpenAI and Anthropic endpoint
 
-Status: design, branch `feat/serve`. Roadmap item 04. Scope: a new `cli/` package, a small host-side
+Status: v1 built (chat only). v2 built on `feat/serve-full-api` (tools, structured output, reasoning
+in history; OpenAI Chat Completions, OpenAI Responses and Anthropic Messages, no legacy
+`/v1/completions`): the shared core is section 11, Chat Completions section 12, Messages section 4,
+Responses section 13, the combined GPU run section 14. Roadmap item 04. Scope: a new `cli/` package, a small host-side
 addition in `room.js` + a new DOM-free `room/api.js`, a panel in `p2p.html`, `docs/protocol.md`.
 Nothing in `engine/`. No `PROTOCOL` bump.
 
 ```
 $ npx @pooled/cli serve ABCD
 pooled serve · room ABCD · Qwen3.6 35B MoE · Q4 (3 devices)
-  OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
-  Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
+  OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
+  Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
   bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
   prompts go to the room's host and may be shown to everyone in the room
 ```
@@ -29,6 +32,7 @@ browser tab cannot accept inbound HTTP, so a small Node process joins the room a
 | 3 | Protocol | `ai-ask` gains `api: 1, rid, messages, params`; `ai-genstart` / `ai-token` / `ai-gendone` / `ai-busy` / `ai-queued` / `ai-stop` gain `rid`; the host advertises `meta.api: 1` in its `hello`. Old peers ignore the new fields, so `PROTOCOL` stays 4 |
 | 4 | Room side | "API client *name* joined" in the log and chat; a card marked API; host can disconnect it (`bye`); an **API** panel in the room menu with the command for this room; API asks follow `ai-visibility` like any guest's, except that the asking bridge always gets the full stream |
 | 5 | Limits | One generation at a time through the room's existing queue (the bridge keeps one request in flight and queues the rest locally); `max_tokens`, `stop`, `temperature`, `top_k` mapped onto the room's sampler; tools, images, `n > 1`, JSON mode: a clear 400 in v1 |
+| 6 | v2 (section 11) | One pipeline, thin adapters: each API parses into one internal request; one new ask, `ai-ask {api: 2}`, negotiated (no `PROTOCOL` bump). The host does everything that needs the model (template profile, structural ids, the tool-call grammar, parsing calls out of the answer, the exact-id cache); the CLI does everything about HTTP |
 
 ## 2. The Node WebRTC stack
 
@@ -180,7 +184,7 @@ and the label is shown to the room.
 
 | Input | Mapping |
 |---|---|
-| `max_tokens` (OpenAI: also `max_completion_tokens`) | `min(request, room context left)`. Default when absent (OpenAI only; Anthropic requires it): 1024. The host caps it at `ctxMax - promptTokens` and reports `length` / `max_tokens` when it hits that |
+| `max_tokens` (OpenAI: also `max_completion_tokens`) | `min(request, room context left)`. Default when absent (Chat Completions and Responses; Anthropic requires it): 16384 (was 1024 in v1, which cut long tool calls; see 15). Above 65536: capped, never refused, on every API. The host caps it at `ctxMax - promptTokens` and reports `length` / `max_tokens` when it hits that |
 | `temperature` | `0` → greedy (`exact`). `> 0` → top-k sampling at that temperature. OpenAI accepts 0..2, Anthropic 0..1 (400 outside). Absent → the room's sampling preset |
 | `top_k` (Anthropic; also accepted as an OpenAI extension) | clamped to 1..64 (`engine/topk.js` `TOPK_MAX`, so GPU sampling keeps working). Absent → 40, the creative preset's |
 | `top_p` | accepted and ignored (the sampler has no nucleus cut; noted in the README). `seed`, `presence_penalty`, `frequency_penalty` = 0, `logit_bias` = {} likewise accepted; non-default penalties or bias → 400 |
@@ -258,63 +262,134 @@ Empty `data` before the room's model is ready. `GET /v1/models/{id}` returns the
 
 ### Anthropic: `POST /v1/messages`
 
-Required: `model`, `max_tokens`, `messages`. `anthropic-version` is accepted and not enforced.
-Non-stream response:
+Required: `model`, `max_tokens`, `messages`. `anthropic-version`, `anthropic-beta` and `?beta=true`
+are accepted and not enforced. Built on the v2 core (section 11); `cli/lib/anthropic.js`.
+
+**Request mapping** (onto the internal request, 11.1):
+
+- `system`: a string or text blocks (joined; `cache_control` ignored). A block starting
+  `x-anthropic-billing-header:` (Claude Code's first block, different on every request) is dropped,
+  or no two prompts would share a first token and the room's caches would never hit.
+  `role: "system"` inside `messages` (Claude Code's mid-conversation environment note) folds into
+  the user turn before it (`normalizeMessages`).
+- `tools`: `{name, description?, input_schema, cache_control?, strict?}` with `type` absent or
+  `custom`. Anthropic's own tools (`web_search_*`, `web_fetch_*`, `code_execution_*`, `computer_*`,
+  `bash_*`, `text_editor_*`, `memory_*`, `advisor_*`, `tool_search_tool_*`, any `…_YYYYMMDD` type)
+  are skipped with one logged warning, never a 400; another `type` is a 400.
+- `tool_choice`: `auto`; `any` → required; `{type: "tool", name}` → that tool; `none`;
+  `disable_parallel_tool_use: true` → one call at most.
+- Assistant blocks: `text`; `tool_use {id, name, input}` → calls; `thinking` → the turn's
+  reasoning: a `pooled1.` signature (ours) is decoded and is the reasoning, else the visible
+  `thinking` text; `redacted_thinking` ignored. User blocks: `text`; `tool_result {tool_use_id,
+  content, is_error?}` → a tool result (text parts joined; an image inside becomes
+  `[image omitted: this model reads text only]`); text sent along with tool results is an aside
+  (its own turn, not a new question). `image` / `document` as user content: 400. Server-tool blocks
+  (`server_tool_use`, `web_search_tool_result`, …) in the history are dropped with a warning.
+- `thinking`: `enabled` (+ `budget_tokens`, used when below `max_tokens`), `adaptive` (on, no
+  budget), `disabled`; `display: "omitted"` sends the thinking block empty (the signature still
+  carries the reasoning). `output_config.effort` (`low` … `max`) → the reasoning effort;
+  `output_config.format` / `output_format` `{type: "json_schema", schema}` → a JSON-schema answer.
+- `max_tokens` above 65536 is capped, not refused (agents send their model's output limit).
+  `temperature` 0 to 1, `top_k`, `stop_sequences` (4 × 64). Ignored: `metadata`,
+  `context_management`, `service_tier`, `container`, `top_p`. `mcp_servers` non-empty: 400.
+
+**Non-stream response:**
 
 ```json
 { "id": "msg_<rid>", "type": "message", "role": "assistant", "model": "pooled/qwen3.6-35b-moe",
-  "content": [{ "type": "text", "text": "…" }],
-  "stop_reason": "end_turn", "stop_sequence": null,
-  "usage": { "input_tokens": 812, "output_tokens": 143 } }
+  "content": [
+    { "type": "thinking", "thinking": "…", "signature": "pooled1.<base64url of the reasoning>" },
+    { "type": "text", "text": "Let me check." },
+    { "type": "tool_use", "id": "toolu_<24>", "name": "get_weather", "input": { "city": "Paris" } } ],
+  "stop_reason": "tool_use", "stop_sequence": null,
+  "usage": { "input_tokens": 50, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 850, "output_tokens": 12 } }
 ```
 
-With thinking on, a `{"type": "thinking", "thinking": "…", "signature": ""}` block comes before
-the text block (the signature is empty: there is nothing to verify against; the official SDKs do
-not check it client-side).
+The thinking block is there when thinking is on (or the model reasoned anyway); its signature is
+`"pooled1." + base64url(utf-8 reasoning)`, always, so a client that sends the block back (Claude
+Code does, also with the display omitted) gives the room its exact reasoning back without any
+state here. It is not a secret: the same user holds both ends. The text block is left out when it
+is empty and there are calls; a call cut off by `max_tokens` is left out.
 
-Stream: `event: <type>\ndata: <json>\n\n`, in exactly this order:
+`stop_reason`: `tool_use` (the answer ended with calls, whatever the `tool_choice`), `end_turn`,
+`stop_sequence` (with `stop_sequence` set to the one that matched), `max_tokens`,
+`model_context_window_exceeded` (the context is full). When the host presses Stop the request ends
+as an error (529, or an `error` event and no `message_stop`).
+
+Usage: `input_tokens` = prompt tokens − the tokens the room already held, which are
+`cache_read_input_tokens`; `cache_creation_input_tokens` is 0. Claude Code adds the three up for
+its context size, so counting the cached tokens in `input_tokens` too would make it compact early.
+
+**Stream:** `event: <type>\ndata: <json>\n\n`. `message_start` when the host's `ai-genstart`
+arrives (all prompt tokens as `input_tokens`: the cache split is known only at the end), the
+thinking block's `content_block_start` right away when thinking is on, `ping`; then each block in
+the order the answer writes it, one at a time, `index` counting up: `content_block_start`, its
+deltas, `content_block_stop`. Deltas: `thinking_delta` (not with the display omitted) then a
+`signature_delta` with the reasoning blob before the thinking block stops; `text_delta`; for a
+call, `content_block_start {type: "tool_use", id, name, input: {}}` once the name is complete and
+declared, then `input_json_delta {partial_json}` fragments that join exactly into the call's
+arguments. Last, `message_delta {delta: {stop_reason, stop_sequence}, usage}` with the final usage
+(the SDKs and Claude Code take `input_tokens` and `cache_read_input_tokens` from it) and
+`message_stop`. An answer with neither text nor calls still gets an empty text block. A call cut
+off by `max_tokens` has its block closed as it is, then `stop_reason: "max_tokens"`. While queued:
+`event: ping` every 10 s, also on any 10 s of silence mid-stream. Failure mid-stream:
+`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"…"}}`, close.
 
 ```
 event: message_start
-data: {"type":"message_start","message":{"id":"msg_r7","type":"message","role":"assistant","model":"pooled/qwen3.6-35b-moe","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":812,"output_tokens":0}}}
-
-event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+data: {"type":"message_start","message":{"id":"msg_r7","type":"message","role":"assistant","model":"pooled/qwen3.6-35b-moe","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":900,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}
 
 event: ping
 data: {"type":"ping"}
 
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_…","name":"get_weather","input":{}}}
+
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\": \""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"Paris\"}"}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":143}}
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":850,"output_tokens":12}}
 
 event: message_stop
 data: {"type":"message_stop"}
 
 ```
 
-- `message_start` is sent when the host's `ai-genstart` arrives (it carries the prompt token
-  count, so `input_tokens` is exact). While queued: `event: ping` every 10 s.
-- Thinking on: block 0 is `{"type": "thinking", "thinking": ""}` with `thinking_delta` deltas, a
-  `signature_delta` with `""`, `content_block_stop`; then the text block at index 1.
-- Failure mid-stream: `event: error\ndata: {"type":"error","error":{"type":"api_error","message":"…"}}`, close.
+**Claude Code** (`ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=pooled`): its
+requests (captured from 2.1.285: 23 tools, three system blocks, a mid-conversation system message,
+adaptive thinking with the display omitted, `output_config.effort`, `context_management`,
+`cache_control` everywhere) map without a 400 (`cli/test/fixtures/claude_code_messages.json`). Its
+prompt is ~20 k tokens before any history, so the room needs a large context (the MoE with
+`?ctx=65536`). `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps its side requests (titles, …)
+from interleaving with the agent's and resetting the room's cached sequence, and
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS=<the room's context>` tells it the window of a model it does not
+know, so it compacts before the room refuses a prompt, and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (a
+quarter of the context, at most 32000) keeps it from reserving 32000 output tokens of a small window
+and refusing its own prompt; `pooled serve` prints both with the room's
+context (section 15).
 
-`stop_reason`: `end_turn` (end token), `stop_sequence` (with `stop_sequence` set to the one that
-matched), `max_tokens`, `model_context_window_exceeded` (the context is full). When the host
-presses Stop the request ends as an error (529, or an `error` event and no `message_stop`).
+GPU (`tests/e2e/serve_messages.mjs`, a real host room, the CLI's HTTP server and the Anthropic SDK;
+2026-09-29 on the Spark, `?ctx=65536`): 14 of 14 checks on Qwen3 1.7B and on Qwen3.6 35B MoE
+(tool_use non-stream and streamed, a tool_result follow-up reusing the caches, `any`, a named tool,
+`none`, `disable_parallel_tool_use`, omitted thinking whose signature brings the reasoning back
+with the prefix reused, stop sequences, and a real Claude Code 2.1.285 `claude -p` run that reads a
+file with Read and answers with its contents: 53 s on the MoE, 366 s on the 1.7B; its second step
+reused 15230 of ~15.2 k prompt tokens on the MoE, 15551 of 15601 on the 1.7B).
 
 ### Anthropic: `GET /v1/models`
 
 When the request carries `anthropic-version` (or `x-api-key`), `/v1/models` answers in
 Anthropic's shape: `{"data": [{"type": "model", "id": "pooled/qwen3.6-35b-moe", "display_name": "Qwen3.6 35B MoE · Q4 (Pooled room ABCD)", "created_at": "<ISO>"}], "has_more": false, "first_id": "pooled/qwen3.6-35b-moe", "last_id": "pooled/qwen3.6-35b-moe"}`.
 
-`POST /v1/messages/count_tokens` → 404 `not_found_error` in v1 (it would need a host round trip;
-it is listed as a follow-up because Claude Code calls it, although Claude Code also needs tools).
+`POST /v1/messages/count_tokens` → 404 `not_found_error` (it would need a render-only round trip to
+the host, section 10). Claude Code's `-p` and agent loop run without it.
 
 ### Also
 
@@ -423,8 +498,10 @@ do. The host's Stop button stops an API answer like any other.
   - "Connected API clients": name, client label, requests answered, with Disconnect on the host;
   - one sentence: "Runs on your computer; requests use this room's GPUs and appear in the chat
     under the room's visibility setting."
-  A panel in the room menu, not a third tab next to Chat | Code: it is set up once and has no live
-  content worth a tab. It uses the existing sheet styles (share sheet) and `textContent` only.
+  Not a third tab next to Chat | Code: it is set up once and has no live content worth a tab. As
+  built, it is the API half of the dark Serve API page (`#compute-screen`, opened by the black
+  **Serve API** button in the room's header), beside this device's layers and passes; with a client
+  connected the steps fold under "How to connect". `textContent` only.
 - **Chat.** An API request appears as a normal exchange: the asker line reads
   "*name* · *client* (API)", the text is the last user message (2,000 chars, "…"), and the note
   "via API · not part of this chat's memory". It follows `ai-visibility`: `all` → everyone sees it;
@@ -438,7 +515,7 @@ do. The host's Stop button stops an API answer like any other.
 | generations in the room | 1 at a time; the chat, Code and API share one lock | host |
 | room queue | 10 total, 2 per device (unchanged) | host |
 | bridge in-flight | 1; local FIFO `--max-queue` 8, then 429 / 529 | bridge |
-| `max_tokens` | default 1024 (OpenAI), capped by the context left | bridge + host |
+| `max_tokens` | default 16384 (Chat Completions, Responses), above 65536 capped; always capped by the context left | bridge + host |
 | prompt | context − 32 tokens, else 400; ≤ 200 messages, ≤ 400 k chars, body ≤ 1 MB | both |
 | `stop` | ≤ 4 strings, ≤ 64 chars each | both |
 | idle stream | keep-alive every 10 s while queued | bridge |
@@ -488,8 +565,349 @@ legacy `/v1/completions` (404), `/v1/responses` (404), `count_tokens`.
 - **Port 8080** is the default asked for, and also what `npm run serve` uses for the site in this
   repo and what many dev servers pick. The clear "port busy" message covers it; 11435 (roadmap 04's
   first sketch) is the alternative if collisions show up in practice.
-- **Tool calls** (v2): Qwen3 emits `<tool_call>` JSON the harness already parses (`harness/`);
-  mapping that to OpenAI `tool_calls` / Anthropic `tool_use` is mostly formatting, but the chat
-  template must then render tools, which `buildIds` does not do yet.
+- **Tool calls**: resolved by v2, section 11.
+- **Default thinking when a client says nothing** (Codex `reasoning: null`, opencode): off, as v1;
+  a `pooled serve --reasoning` flag if agents want it on.
+- **`count_tokens`** (`/v1/messages/count_tokens`, `/v1/responses/input_tokens`): needs a render-only
+  ask on the host; added if Claude Code's compaction needs it.
+- **Several pinned checkpoints**: two agents in one room each want their system prompt + tools pinned;
+  v2 keeps one pin and does not replace a pin another client used in the last 10 minutes.
 - **Several API clients** each hold one in-flight request, so N bridges can take up to N of the 10
   queue slots. Fine for v1; a per-room API share could come with roadmap 07.
+
+## 11. v2: the shared core (tools, structured output, reasoning)
+
+Built on `feat/serve-tools-core`. The endpoint mappings (Chat Completions, Messages, Responses) sit
+on top of it, each in its own adapter file, and are documented with them.
+
+### 11.1 The pipeline
+
+```
+ HTTP ─ adapter.parse ─► InternalReq ─ common.finishRequest ─ http.js queue ─ ai-ask {api: 2} ─►  host: validateApiAsk (v2)
+                                                                                                  apiPrompt2: templateProfile + renderApi
+                                                                                                  apiRun2: grammar sampler → roomGenerate
+   ◄── adapter.encoder (SSE) / adapter.final (JSON) ◄── answer.js Ask ◄── ai-token / ai-call / ai-gendone ◄┘
+       ThinkSplit → CallStream → StopMatcher
+```
+
+- **CLI** (`cli/lib/`): `common.js` (the internal request, `normalizeMessages`, `finishRequest`,
+  `needsV2`, `askBody`, `outcome`, ids, the `pooled1.` reasoning blob, limits), `answer.js` (the
+  bridge's checks and the `Encoder` / `Collector` contract), `http.js` (routing to the adapters in
+  `ADAPTERS`, keep-alives on any 10 s of silence, the 413 caps, negotiation), `room.js` (`hostApi`,
+  `ai-call` routing, the host's `ctx`). `openai.js` / `anthropic.js` are today's behavior on the
+  adapter contract; `responses.js` is a stub (404 "not built yet").
+- **Host** (`room/api.js`, `room/conversation.js`, `harness/`): below.
+- **Code mode** (in process, no HTTP, opt in with `?hcore=1`): `harness/core-model.js` builds the
+  same v2 ask from the agent's turns and runs it through `apiPrompt2` / `apiRun2` on the room's
+  `roomApi.generate` or one engine (`harness/engine-gen.js`), so Code mode and API clients share
+  the tool prompt, the grammar, `CallStream` and the think split ([harness-core.md](harness-core.md)).
+
+### 11.2 Template profiles and structural rendering (`room/conversation.js`)
+
+`templateProfile(chatTemplate)` reads what the model's GGUF template does, once per loaded model:
+`style` (`json` Hermes calls for Qwen3; `xml` `<function=…><parameter=…>` for Qwen3.5+), whether the
+generation prompt opens the think block itself (`thinkInPrompt`: Qwen3.6 / 3.8 yes, Qwen3 no),
+which past turns keep their think block (`thinkRule`: `all` for Qwen3.8, `afterQuery` for Qwen3.6,
+`afterQueryNonEmpty` for Qwen3), the Qwen3.8 reasoning-effort sentence, and whether text is
+trimmed. Nothing is keyed on a model name; a model with no template in hand (the 1.7B loads a
+`tokenizer.json`) gets Qwen3's rules.
+
+`renderApi` renders the conversation as the template does, **structurally**: every tag the template
+writes (`<|im_start|>`, `<|im_end|>`, `<think>`, `</think>`, `<tool_call>`, `</tool_call>`,
+`<tool_response>`, `</tool_response>`) is its special id, including the tags in the template's own
+tool instructions, while every client string (system text, messages, tool results, reasoning,
+arguments, the tool JSON) goes through plain `tok.encode`, so no client text can become a special
+token. Tools are listed with Python's `json.dumps` separators (`pyJSON`), past calls rendered as the
+template renders them. Tested byte for byte against the three GGUF templates rendered by jinja2
+(`tests/fixtures/api/render.json`, 66 cases).
+
+Rendering the tags in the tool instructions as special tokens matters in practice: with them
+spelled out in text, Qwen3 1.7B, Qwen3.5 2B and Qwen3.6 35B all wrote `<tool_call>` back as text
+pieces, the 1.7B skipped the tool, and both Qwen3.5+ models broke parallel calls
+(`</function>` followed by more parameters); with the special tokens all three called correctly
+(llama.cpp recordings, `tests/e2e/serve_record.mjs`).
+
+Deviations from the templates, each deliberate: mid-conversation system messages fold into the
+user turn before them (Qwen3.6 / 3.8 raise on them; Claude Code sends them); text sent along with
+tool results is its own user turn but not a new query (`aside`); `tool_choice: "none"` leaves the
+tools out of the prompt (with them listed, Qwen3.6 wrote call markup in any spelling the grammar
+had not banned, e.g. `<tool.call>`); and with thinking off every past answer keeps the pre-closed
+empty think block it was sampled after (as v1's `buildIds`; Qwen3 and Qwen3.6 drop it before the last
+query), so each prompt stays an extension of the last one and the room's caches reuse it all.
+
+### 11.3 The grammar (`harness/constrain.js` `GrammarConstraint`, `harness/jsonschema.js`)
+
+Every v2 answer with tools or a format is sampled under a grammar over the whole answer: free
+reasoning; then, by mode, free text with calls (`auto`; after `</tool_call>` only whitespace,
+another call or the end), no calls (`none`), a call first (`required`, named), or a JSON value
+(`format`, or a call or the value for `auto` + format). Calls follow the model's format with
+declared names (narrowed by `allowed`), each parameter once, required ones before `</function>`,
+typed values (string-capable values raw, string enums unquoted, everything else a JSON value of its
+schema). After the allowed number of calls only the end token is left. The JSON subset: types,
+`properties`, `required`, `additionalProperties`, `items` / `prefixItems`, `enum` / `const`,
+`anyOf` / `oneOf`, `allOf` (objects), `nullable`, local `$ref`, `minItems` / `maxItems` (added in
+the integration: the MoE wrote 4 items for `maxItems: 3`); string and number bounds and patterns
+are accepted, not enforced. Whitespace: one space, or a newline and indentation. Schemas are capped (10 k nodes,
+enum 1 k, anyOf 64, allOf 16, depth 32).
+
+Tags that are special tokens are atomic symbols in the grammar: structure can only be written with
+the real token, never spelled out. XML models may open a call inside the reasoning (it closes it);
+for Qwen3 a call-like draft inside the reasoning stays reasoning. In the forcing modes the end token
+is banned in the reasoning and it gets a default budget of min(max_tokens / 2, 4096) tokens, after
+which the host closes the block and the grammar engages.
+
+Masks are cached per grammar state in one LRU per tokenizer (64 MB). Before scanning the vocabulary
+for a new state, the mask checks the model's top 64 candidates: when enough of them are allowed for
+the sampler's top-k, masking only those is exact (tested against the full mask on 10,000 random
+logit vectors), so most steps never scan. The garbage guard counts forced tokens only where the text
+is the model's own choice (a value's contents), plus NaN logits and a vanishing allowed probability.
+
+Recorded with llama.cpp's top-64 candidates through the host's whole pipeline, all modes work on
+Qwen3 1.7B and Qwen3.6 35B: parallel calls, typed and nested arguments, `required`, named, `none`,
+one call when parallel is off, JSON schema, reasoning then calls (`-g-` fixtures).
+
+### 11.4 Parsing and streaming (`harness/tools.js` `CallStream`, `room/api.js` `apiRun2`)
+
+The answer runs through `ThinkSplit` (reasoning → `ai-token {th}`), then `CallStream` (content →
+`StopMatcher` → `ai-token`; calls → `ai-call {name}`, `{a}`, `{end}`). A call's name goes out once
+complete and declared; its argument fragments concatenate exactly to its final arguments: string
+values stream as JSON strings as they are written, arrays and objects as their JSON text, values
+that need coercion (numbers, booleans, null, unions) at `</parameter>`. Stop strings apply to
+content only. `<tool_response>` ends the answer. An answer cut inside a call reports it as `open`.
+Without a grammar (never on the v2 path) a body in another shape is parsed whole at `</tool_call>`,
+and one that does not parse becomes content.
+
+Known limit: a string value containing `\n</parameter>` ends there (no lookahead).
+
+### 11.5 The exact-id cache (`room/api.js` `TurnCache`)
+
+Keyed by (model, hash of the history before the answer, the answer's canonical form: trimmed
+content and each call's name and sorted arguments); the value is the ids after `assistant\n` as the
+caches hold them (the header's think part, the reasoning, the injected budget close). 512 answers,
+2 M ids, cleared when a model loads. A client that sends reasoning back hits only with the same
+reasoning. With it, step k+1's prompt is step k's prompt, its answer and the new tool results, so
+the room prefills only those (tested on the recordings, thinking on and off). A host-side encode
+cache (32 MB) keeps agents' long histories from being re-tokenized every step.
+
+### 11.6 Limits (v2)
+
+| Limit | Value | Where |
+|---|---|---|
+| body | 4 MB | CLI 413 |
+| the ask as sent to the room | 3.5 MB of JSON (PeerJS drops a message it cannot rebuild, ~4 MB) | CLI 413 |
+| text | 1.5 M chars; early 400 when over 8 × the host's context | CLI and host |
+| messages | 1000 | CLI and host |
+| tools | 1024 (was 128: Claude Code with MCP servers sends all of its tools, nothing deferred); names `[A-Za-z0-9_.:-]{1,128}`, unique; schema ≤ 32 k chars; XML parameter names without `<`, `>`, line breaks | CLI and host |
+| grammar | ≤ 10000 nodes for all the tools and the format together (checked when the ask arrives, the same count `GrammarConstraint` builds); ≤ 200000 subschema expansions per request (`SCHEMA_CAPS.work`, subschemas memoized by object and `$ref` depth); ≤ 200 levels of nesting of any kind (`SCHEMA_CAPS.stack`: values, `anyOf`, `allOf`, `$ref`) | host |
+| calls | 16 per answer (grammar), 64 accepted from the host | host, CLI |
+| mask cache / encode cache / exact-id cache | 64 MB / 32 MB / 512 answers, 2 M ids | host |
+
+### 11.7 Tests
+
+Unit (Deno): `jsonschema_test.js`; `constrain_test.js` (modes, typed values, whitespace, caps, the
+LRU, the fast path, the garbage guard, on top of Code mode's cases); `tools_test.js` (pyJSON,
+coercion, `CallStream` at every split point); `api_host_test.js` (v2 validation, profiles, renderApi
+against the templates, injection, every recording replayed through `apiRun2`, the grammar accepting
+every token of the well-formed recordings and stopping the malformed ones, prefix reuse through the
+cache); `serve_common_test.js` (normalization including Claude Code's system-message shapes, the
+caps, the ask bodies, the bridge's checks). CLI (`node --test`): negotiation, v2 calls through an
+adapter, the old-host 400, the 413 caps, keep-alives mid-stream.
+
+GPU (`tests/e2e/serve_v2_smoke.mjs`, a real host room through the CLI's Bridge; 2026-09-29 on the
+Spark): 17 of 17 checks on Qwen3 1.7B and on Qwen3.6 35B MoE (v1 ask unchanged, v2 plain, auto call,
+tool-result follow-up reusing the caches, parallel, parallel off, required, named, none, JSON schema,
+reasoning then a call, an older CLI's v1 asks, a bad named tool refused). `tests/e2e/serve.mjs` (v1
+endpoints, now v2 asks underneath) passes all 57 checks.
+
+Recordings: `node tests/e2e/serve_record.mjs --llama URL --model M --gguf F [--grammar]` against a
+llama.cpp server (CPU is fine) writes `tests/fixtures/api/<model>-[g-]<case>.json`.
+
+## 12. Chat Completions on v2 (`cli/lib/openai.js`)
+
+Built on `feat/serve-chat` over the v2 core. It replaces the "tools" and "other content" rows of the
+table in section 4 for `/v1/chat/completions`; the other rows hold as written.
+
+**Request.** `tools` (function tools; a missing `parameters` is `{type: "object", properties: {}}`;
+`strict` accepted, always true in effect; an empty list means no tools) · `tool_choice` `auto` /
+`none` / `required` / `{type: "function", function: {name}}` (the flat `{type: "function", name}`
+too) / `{type: "allowed_tools", allowed_tools: {mode, tools}}` → `allowed` · `parallel_tool_calls`
+· assistant messages with `tool_calls` (arguments that are not a JSON object go as `{}`, logged)
+and `reasoning_content` or `reasoning` (fed back as that turn's reasoning) · `role: "tool"`
+messages with `tool_call_id` (text parts joined; an image part becomes a note), put back in the
+calls' order · `response_format` `json_object` → `{type: "json"}`, `json_schema` → `{type:
+"schema"}` · `reasoning_effort` `none` / `minimal` → off, `low` … `max` → on with that effort (other
+values 400); absent, `chat_template_kwargs.enable_thinking` decides · `max_completion_tokens` over
+`max_tokens` · `stream_options.include_usage` only with `stream`. System and developer messages
+before the first other message are the system prompt; later ones fold into the user turn before
+them (`normalizeMessages`), where v1 joined them all into the system prompt. Ignored: `seed`,
+`store`, `metadata`, `user`, `safety_identifier`, `prompt_cache_key`, `service_tier`, `verbosity`,
+`top_p`. Image and file parts in user, system and assistant messages become a short note, as in
+tool results (section 15). 400: `custom` tools and calls, `functions` / `function_call` / `role:
+"function"`, `n > 1`, logprobs, audio, `prediction`, `web_search_options`, an assistant message
+last. `tool_choice` errors use vLLM's messages ("When using `tool_choice`, `tools` must be set.",
+"The tool specified in `tool_choice` does not match any of the specified `tools`").
+
+**Response.** `message = {role, content, refusal: null, reasoning_content?, tool_calls?}`;
+`content: null` when there are calls and no text; `tool_calls[i] = {id: "call_<24>", type:
+"function", function: {name, arguments}}`; `finish_reason` from `common.outcome`: `tool_calls`,
+`stop` (also for a named `tool_choice`, as OpenAI and vLLM), `length` (`max_tokens` or the context);
+a call cut by `max_tokens` is left out. `usage` adds `completion_tokens_details.reasoning_tokens`
+when thinking was on and `prompt_tokens_details.cached_tokens` when the room reused its caches.
+
+**Stream.** The role chunk, then one chunk per room message: `reasoning_content`, `content`, a call's
+opening `{tool_calls: [{index, id, type: "function", function: {name, arguments: ""}}]}`, its
+argument fragments `{tool_calls: [{index, function: {arguments}}]}` (they join to the final
+arguments exactly), the finish chunk, the usage chunk with `include_usage`, `[DONE]`. A call cut by
+`max_tokens` has already streamed its name and partial arguments; `finish_reason: "length"` says so.
+
+**Tests.** `cli/test/openai_test.mjs` (the ask the room gets for a full agent request, the whole and
+streamed wire format byte for byte, the OpenAI SDK's `stream().finalChatCompletion()` and a streamed
+`runTools` loop, every 400, an older host) and `tests/unit/serve_openai_test.js`. On the Spark GPU
+(2026-09-29, Qwen3 1.7B) `tests/e2e/serve.mjs` passes all 63 checks, the 6 "chat tools" ones included
+(a call, streamed arguments equal to whole ones, the tool result used with the prompt reused, a
+named choice, required with parallel off giving one call, a JSON schema answer).
+
+## 13. Responses on v2 (`cli/lib/responses.js`, `cli/lib/store.js`)
+
+Built on `feat/serve-responses` over the v2 core.
+
+**Request.** `input` as a string or items: messages (user, assistant, system, developer),
+`function_call`, `function_call_output`, `reasoning` (a `pooled1.` blob in `encrypted_content` wins
+over the summary text), `item_reference` · `instructions` (not inherited through
+`previous_response_id`, as OpenAI) · function `tools`, every `tool_choice` form including
+`allowed_tools`, `parallel_tool_calls`, `max_tool_calls` · `text.format` `json_object` /
+`json_schema` · `reasoning.effort` (absent or `none` = off) · `include:
+["reasoning.encrypted_content"]` · `previous_response_id`, `store`, `metadata`. Hosted tools
+(`web_search`, which Codex always sends) and items of tools that ran elsewhere are skipped with one
+warning per client. Custom (free-form) tools, images and files: see section 15. 400: hosted
+`tool_choice`, an `allowed_tools` entry of an unknown type or a function entry without a flat `name`,
+unknown item types, `background`, `conversation`, `prompt`, logprobs, an
+unknown previous id (code `previous_response_not_found`).
+
+**Output.** The full response object with usage (`input_tokens_details.cached_tokens`,
+`output_tokens_details.reasoning_tokens`); items in generation order (reasoning, message, function
+calls); `status` `completed`, or `incomplete` with `max_output_tokens` (a call cut short becomes an
+incomplete `function_call` item). Without `max_output_tokens` the default is 16384 (Codex never
+sends one; the room's context caps it).
+
+**Stream.** `response.created` … `response.completed` / `.incomplete` / `.failed`, `sequence_number`
+strictly increasing, ids minted once so the stream, the final object and the store agree. Reasoning
+streams as `response.content_part.*` with a `reasoning_text` part (the openai SDK's `finalResponse()`
+only builds reasoning from those; vLLM's `reasoning_part.*` makes it throw). A call cut short gets
+its `output_item.done` with `status: "incomplete"` and no `function_call_arguments.done`, as every
+added item is closed in OpenAI's stream (Codex builds items from `output_item.done` and does not run
+an incomplete call). Keep-alives are events (section 15).
+
+**Store.** In memory: up to 256 responses and 64 MB, dropped an hour after last use, least recently
+used first. Backs `previous_response_id`, `item_reference`, GET / DELETE `/v1/responses/{id}` and GET
+`/v1/responses/{id}/input_items`. `/v1/responses/input_tokens` and `/compact` are 404.
+
+**Tests.** `cli/test/responses_test.mjs` (wire fixtures, the openai SDK's create / stream /
+finalResponse / chain / retrieve / delete), `cli/test/responses_store_test.mjs`,
+`tests/e2e/agents/codex.mjs --mock` (the real Codex CLI against a scripted room, no GPU) and
+`tests/e2e/serve_responses.mjs` (GPU: MoE 21 of 21 with a Codex run; 1.7B 19 of 21, the model not
+calling `exec_command` under Codex's prompt).
+
+## 14. The three APIs together (`feat/serve-full-api`)
+
+The core, Chat Completions, Responses and Messages branches merged without conflicts. The
+integration adds the README / banner for all three, `minItems` / `maxItems` in the grammar (11.3) and
+extends `tests/e2e/serve.mjs` so one run covers tools on every API through the official SDKs: the
+weather round trip (call, streamed call equal to the whole one, result sent back and used, the room's
+caches reused), `tool_choice` required / named (`any` / `tool` on Messages), Responses
+`previous_response_id`, a JSON schema answer (nested object, enum, bounded array) checked by an
+independent validator on each API, and with `--codex` / `--claude` one real agent turn each.
+
+On the Spark (2026-09-29, `--query ctx=65536 --codex --claude`): Qwen3.6 35B MoE 81 of 81, Qwen3 1.7B
+81 of 81. (The 1.7B's context is capped at 16384, `room/models.js` `CTX`, so its run was at 16384,
+not 65536; the Messages-branch run above likewise. Claude Code's prompt used ~15.3 k of those
+16352 tokens.) Codex CLI 0.104 ran `cat a.txt` through `exec_command` and quoted it (MoE 20 s, 1.7B 55 s;
+on the Responses branch's own run the 1.7B had described the command instead of calling it, so the
+1.7B is not reliable for Codex). Claude Code 2.1.285 read the file with Read and answered the word
+(MoE 61 s, 4 turns; 1.7B 330 s, 2 turns), each step after the first reusing the ~15 k-token prompt.
+Before the grammar fix the MoE wrote 4 items for `maxItems: 3` on all three APIs (78 of 81).
+
+## 15. Review fixes (three reviews of `feat/serve-full-api` at fdeab65)
+
+A spec review (raw HTTP, openai 5.23 and @anthropic-ai/sdk 0.60 against a stand-in room), a client
+review (Codex CLI 0.104 and Claude Code 2.1.285 against a scripted room) and a safety review. What
+changed, and why:
+
+- **Chat Completions' default `max_tokens` is 16384** (was 1024), as Responses: OpenAI, vLLM,
+  llama.cpp and SGLang bound the answer by the context left, and clients such as aider, LangChain and
+  the SDK defaults send none; at 1024 a file-writing call was cut and the non-stream reply dropped
+  it, leaving no text and no call.
+- **`max_tokens` / `max_completion_tokens` / `max_output_tokens` above 65536 are capped**, not a 400,
+  on Chat and Responses as already on Messages (agents send their own model's output limit).
+  Responses echoes the client's value.
+- **Images and files in any message become a note** (`[image omitted: this model reads text only]`,
+  logged once), as they already did inside tool results: one pasted screenshot, or Codex's
+  `view_image`, stayed in the history and turned every later request into a 400. Audio and other
+  kinds still get a 400.
+- **Responses custom (free-form) tools** (Codex's `apply_patch` with a GPT-5 model name): each is a
+  function tool with one string parameter `input` (a `grammar` format's definition goes into the
+  description; it is not enforced); its calls go out as `custom_tool_call {call_id, name, input}` items
+  (streamed: `output_item.added`, then `custom_tool_call_input.delta` / `.done` with the whole input
+  when the call ends, then `output_item.done`), `custom_tool_call` / `custom_tool_call_output` input
+  items go back in as a call and its result, and `tool_choice {type: "custom", name}` names one. Chat
+  Completions custom tools are still a 400.
+- **Responses keep-alives are events**: `response.created` while the request waits, then
+  `response.in_progress`. Codex's `stream_idle_timeout_ms` (300 s) restarts only on events, and a
+  queue wait or a long prefill on a room of phones can be longer; it then retried and prefilled again.
+- **Responses `allowed_tools`**: a function entry without a flat `name` (the Chat shape) or an entry
+  of an unknown type is a 400; before, it was skipped and the choice silently became `none`.
+- **The stream's cut call is closed** with `output_item.done` (`status: "incomplete"`).
+- **More tools**: 1024 on both sides (Claude Code with a 150-tool MCP server sent 173 and got a 400 at
+  128). v2 is not released yet, so no host enforces 128: no negotiation needed.
+- **The context is shown**: the banner, `/health` (`ctx`) and `/v1/models` (`max_model_len`, as vLLM)
+  carry the host's context, and the banner prints the Codex (`model_context_window`,
+  `model_auto_compact_token_limit` = 0.8 × ctx) and Claude Code (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`,
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS` = ctx / 4 up to 32000, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`)
+  settings for it. The output limit matters: with the window alone at 16 k or 24 k, Claude Code
+  2.1.285 keeps 32000 output tokens free and answers "Prompt is too long" without sending anything
+  (found in the GPU run; checked against a scripted room from 8 k to 64 k). The README no longer asks for a 64 k
+  context the 1.7B and 27B cannot have.
+- **The host is never left busy** (safety): tool schemas that each fit but together pass the grammar's
+  10000 nodes made `GrammarConstraint` throw outside `apiRun2`'s try, with `ai.busy` set, locking the
+  room for everyone until a reload. Now the host counts the whole grammar when the ask arrives
+  (`grammarNodeCount`, `ai-busy bad`), `apiRun2` builds the grammar inside its try (reason `error`),
+  and `apiGenerate` runs in try / finally (a failed `ai-gendone`, then the lock, Stop and queue
+  released).
+- **Schemas cannot freeze or crash the host** (safety): `$ref` branches pointing back at the same
+  definition were expanded k^6 times (a 1390-character schema, ~40 minutes on the host's main thread)
+  and a self-referencing `allOf` or 1500 nested `anyOf` overflowed the stack, uncaught. Subschemas are
+  memoized by (object, `$ref` depth), `allOf` counts its `$ref`s, nesting of any kind is capped, a work
+  budget is shared by a request's schemas, `stringCapable` / `schemaTypes` answer conservatively past
+  the same caps, and `validateApiAsk` turns any exception into a bad request.
+- **Rendering long prompts** no longer uses `push(...ids)` (a RangeError past ~100 k ids).
+- **The bridge checks calls more** (safety): a complete call's arguments must parse as a JSON object,
+  and a call must be to a tool the ask's `toolChoice` / `allowed` permits; else 500 "the room did not
+  follow the protocol".
+- **Warnings** (safety): one bounded, process-wide warn-once (`common.warnOnce`) with every key and
+  message passed through `cleanText`; the Messages adapter's unbounded set (130 MB from 20 requests of
+  unique block types) and raw client text in the terminal (escape sequences) are gone, and so is the
+  raw text in the "arguments are not a JSON object" log line.
+
+Not changed: a `tool_use` cut by `max_tokens` is streamed as a partial block but left out of the
+non-stream Messages reply (either way `stop_reason` is `max_tokens`); openai-node's
+`responses.stream().finalResponse()` reports `in_progress` after `response.incomplete` (the SDK takes
+the final object only from `response.completed`); the Anthropic `ping` before `message_start` is
+harmless (checked with Claude Code and the SDK).
+
+Tests: `cli/test` (60), `tests/unit` (781 + 3 ignored), `tests/e2e/agents/codex.mjs --mock` (8 of
+8), and the reviewers' repros rerun against the fix (Codex: a 3 s idle timeout with the room silent
+8 s, `view_image`, `gpt-5-codex` applying a patch through the custom `apply_patch`; Claude Code with
+150 MCP tools, 173 tools reaching the room).
+
+GPU (the Spark, 2026-09-29, `tests/e2e/serve.mjs --model qwen3-1.7b --query ctx=16384 --codex
+--claude`): 85 of 86. New checks passed: an image answered with a note, `max_tokens: 100000` capped,
+tool schemas too large together refused by the host with the room answering the next request, the
+context in `/health` and `/v1/models`, and a Responses custom tool giving a `custom_tool_call`. Codex
+CLI ran `cat a.txt` and quoted it (51 s). The one failure is Claude Code on the 1.7B: now told the
+real 16 k window, it sent its first step (14964 prompt tokens, a Read call), the next step was 16713
+tokens (400 "prompt is too long"), and the 1.7B's compaction summary came back empty. Before the fix
+the same run passed only because Claude Code believed it had 200 k and the 1.7B's answers happened to
+stay short; the 1.7B's context is simply too small for Claude Code (cli/README.md says so). A first
+run of the new schema check sent 186 k characters and was stopped by the bridge's early context
+check on the 16 k room; the check now uses a denser schema (115 k characters, 10568 nodes).
+

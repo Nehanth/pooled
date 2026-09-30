@@ -45,7 +45,7 @@ class FakeEngine {
   async runHiddenBatch(xs, base) { this.run(Array.from(xs), base); return Float32Array.from(xs); }
 }
 
-const HOST_FNS = ["sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin"];
+const HOST_FNS = ["ckptEngine", "sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin"];
 
 // the host's functions over a stub ai; sent frames land in `out`. disk: a CkptStore (null: GPU only)
 function host({ chain = ["w0"], ckptMax = 2, fed = [], engine = new FakeEngine(), out = [], disk = null, room = "ROOM", model = "m" } = {}) {
@@ -65,7 +65,7 @@ function worker({ next = "host", engine = new FakeEngine(), send = () => {}, dis
     unpackWire: (d) => Float32Array.from(d.x),
     packWire: (h) => ({ x: Array.from(h) }),
     badF32: () => false,
-    aiStatus: () => {}, sendTo: () => {}, teleNote: () => {}, compute: { pass() {} },
+    aiStatus: () => {}, sendTo: () => {}, teleNote: () => {}, compute: { pass() {} }, keepWarm: () => {},
     sendHidden: send,
   });
   return { ai, engine, workerFrame, ckptRestore };

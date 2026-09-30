@@ -1,0 +1,99 @@
+---
+title: Device drops and recovery
+eyebrow: Rooms
+description: What the room does when a device freezes, locks, reloads or leaves, how long it waits, and when it deals the layers again. Answers carry on from the last token shown.
+sidebar:
+  label: Device drops and recovery
+  order: 5
+---
+{/* Sources (origin/main 40bb0fa):
+    room/liveness.js (PING_MS 2500; SILENT_MS 15000 computer, PHONE_SILENT_MS 60000, HOST_SILENT_MS 30000, never while loading;
+    deadAfter = clamp(3 s + 3 x RTT, 3.5 s, 5 s); NAME_PROBE_MS 1500; LAP_MIN_MS 25000),
+    room/resume.js (REJOIN_GRACE_MS 60000, RECOVER_MAX_MS 6 min, maxTries 4, backFromAway 3 s, GUEST_TTL_MS 10 min, sameShard),
+    room/pledge.js afterLoadDeath (half share, at least one layer; second kill or one layer -> without it),
+    room.js (~L1118-1138 "stopped responding; waiting for it (Stop gives up)", "is back"; ~L660-668 back from away: signaling
+    reconnect, links silent 8 s later dropped; RELINK_WAIT_MS 45000; ~L2715-2737 degraded text, auto re-deal after 60 s idle;
+    ~L4017 resume offer 15 min; wake lock ~L1406), p2p.html "Re-deal on its own" text, #ai-redeal "Re-deal the layers".
+    docs/protocol.md (Dead links, Drop detection, Resuming a room: waits up to 25 s, knocks every 3 s for a minute;
+    A device that drops out), PR #259 (chaos table: notice at 3.6-5 s), PR #258 (iPhone 30 s background, reload results; wake lock),
+    PR #242 + CHANGELOG (checkpoints on disk, 4 GiB budget, ?ckptdisk=0), room/compute.js lendStatus ("Host reconnecting"). */}
+
+import { Steps } from '@astrojs/starlight/components';
+
+Every token passes through every device that holds layers. So when one of them freezes or leaves, the room has to wait for it or deal its layers to someone else. Pooled tries to wait first, because a device that comes back keeps its layers and nothing has to reload.
+
+## What happens, in order
+
+{/* TODO(fact-check): "(layers 20–39)" is quoted as the code prints it. ai.layersByName (room.js aiStart) is
+    0-based, while the device screen and the Serve API button tooltip (room/compute.js lendStatus, room.js ~L1494)
+    are 1-based ("Layers 21–40"). The same layers read differently in two places; worth making the code consistent. */}
+
+This is what the host's screen shows when a device in the chain goes quiet in the middle of an answer.
+
+| After | What happens | What you see |
+|---|---|---|
+| 3.5–5 s | The host notices the silence (the limit grows with the device's round-trip time). The answer is held, not failed, and new questions wait. | "laptop stopped responding; waiting for it (Stop gives up)" |
+| Any time it answers again | It finishes the answer and keeps its place and layers. No re-deal. | "laptop is back" |
+| 15 s (computer) or 60 s (phone) | The device is dropped from the room, as if it had left. Every lap in flight fails and the room waits for it to come back into its slot. | "laptop stopped responding (layers 20–39): waiting for it to come back, then this answer carries on", and a **Re-deal the layers** button. In an idle room: "…waiting for it to come back (re-dealing without it in 60 s), or re-deal the layers". |
+| 60 s after the drop | With **Re-deal on its own** on (the default), the host deals the layers over the devices still here. | In the room log: "laptop did not come back in 60 s: re-dealing the layers (experimental auto re-deal)" |
+
+A device that is still loading its layers is never dropped for silence. Its tab can block for seconds while it converts weights.
+
+The answer, or the Code run, does not start over. When the room is whole again, the host runs the same generation from where it stopped: the prompt plus every token already shown. Nothing on screen changes, and with **Exact** wording the text is the same as if nothing had happened. A run can recover this way up to 3 times.
+
+:::tip[Re-deal now instead of waiting]
+Press **Re-deal the layers** to skip the wait. Devices that still have their layers cached reload them in seconds, and the conversation is kept.
+:::
+
+### With Re-deal on its own turned off
+
+The room waits for the device, or for you to press Re-deal. An answer that is waiting gives up after 6 minutes. Turn it on or off in **Room settings → Model → Re-deal on its own**.
+
+### A link that fails but the device is alive
+
+If a network stays silent for about 15 s, the browser can give up on a connection for good even though both devices are fine. The room redials that link with the same layers. The answer in flight fails at once with "ask again", and the next question starts clean. If the redial doesn't happen, the other side closes the link after 45 s.
+
+## Phones that lock or go to the background
+
+A locked iPhone, or Safari in the background, stops running the page. The room gives phones longer before it drops them (60 s instead of 15 s).
+
+- **Keep the screen on.** Every device that holds layers asks the browser to keep its screen awake. If it can't, the device screen tells you to set Auto-Lock to Never.
+- **Coming back.** A phone that was away for 3 s or more reconnects by itself. If its slot didn't change, it keeps its layers and skips the download.
+
+On an iPhone with 30 s in the background, the answer finished with the same text and the link survived.
+
+## Reloads
+
+**A device reloads.** It rejoins the room by itself under the same name, within 10 minutes, and the host puts it back into its old slot. Pooled keeps a copy of each device's part of the conversation's checkpoints on disk, so the next question resumes from the last saved answer instead of reading the whole conversation again.
+
+**The host reloads.** The page offers to resume the room for 15 minutes. It takes the same room code back, restores the conversation and waits up to 25 s for the devices that held layers, then deals again.
+
+**The host's tab closes.** The other devices keep knocking for a minute ("Host reconnecting"). If it doesn't come back, the room is over and each screen offers to start a new one.
+
+The disk copies use at most 4 GiB. `?ckptdisk=0` keeps checkpoints on the GPU only. More in [Long context and sessions](/docs/internals/sessions).
+
+## A tab killed while loading
+
+A phone can be killed by the browser while it loads its layers if it runs out of memory. When it comes back:
+
+<Steps>
+
+1. **First time:** the host deals again with about half the share for that device (at least one layer) and tells it why.
+2. **Second time,** or if it was already down to one layer: the host deals without it. The device stays in the room and can still ask.
+
+</Steps>
+
+To avoid it, lend less from phones. iPhones lend 0.5 GB by default and at most 1 GB. See [Phones and tablets](/docs/phones).
+
+## Two devices with the same name
+
+Names identify devices in a room. When a device joins with a name another device holds, and that other device has gone quiet, the host pings it for 1.5 s. If it doesn't answer, the host drops it and the newcomer takes the name and its layers back. That is usually the same device after a crash. If it answers, the newcomer gets a number ("laptop 2").
+
+## URL options
+
+| Option | Effect |
+|---|---|
+| `?ckptdisk=0` | Keep conversation checkpoints on the GPU only, not on disk. |
+| `?hb=0` | Turn off the host's mid-answer silence check. Developer option. |
+
+See [URL options](/docs/reference/url-options).

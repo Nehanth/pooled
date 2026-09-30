@@ -14,7 +14,12 @@ Usage
   pooled serve <ROOM CODE | room link> [options]
 
   Joins the room as an API client (no layers, no GPU needed here) and serves its model on
-  127.0.0.1 as an OpenAI and an Anthropic compatible endpoint.
+  127.0.0.1 as an OpenAI (Chat Completions and Responses) and an Anthropic (Messages)
+  compatible endpoint, tool calls included.
+
+  With the room's invite link (quote it: "https://pooled.run/r/4TKG9P#k=..."), the host lets
+  this client in at once. With the code alone, it waits until the host allows it (a host that
+  asks before new devices join) and the host's "Allow API clients" must be on either way.
 
 Options
   --port <n>        HTTP port (default 8080)
@@ -31,8 +36,9 @@ Options
   -h, --help        this help
 
 Then point a tool at it
-  OpenAI     OPENAI_BASE_URL=http://127.0.0.1:8080/v1   (any API key)
-  Anthropic  ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+  OpenAI     OPENAI_BASE_URL=http://127.0.0.1:8080/v1   (any API key; Codex: wire_api = "responses")
+  Anthropic  ANTHROPIC_BASE_URL=http://127.0.0.1:8080   (Claude Code too)
+  opencode   an @ai-sdk/openai-compatible provider (the banner prints one for the room)
 `;
 
 let opts;
@@ -52,12 +58,15 @@ if (o.version) { console.log(VERSION); process.exit(0); }
 if (o.help || !pos.length || pos[0] === "help") { console.log(HELP); process.exit(pos.length && pos[0] !== "help" ? 2 : 0); }
 if (pos[0] !== "serve") { console.error(`pooled: unknown command ${pos[0]}\n\n${HELP}`); process.exit(2); }
 
-const { Bridge, roomCodeFrom } = await import("../lib/room.js");
+const { Bridge, roomCodeFrom, roomKeyFrom } = await import("../lib/room.js");
 const { createServer } = await import("../lib/http.js");
+const { showRoom } = await import("../lib/banner.js");
 const { cleanLabel, cleanText } = await import("../lib/common.js");
 
 const code = roomCodeFrom(pos[1]);
-if (!code) { console.error(`pooled: give a room code (4 to 6 letters and digits) or a room link${pos[1] ? `, not "${pos[1]}"` : ""}`); process.exit(2); }
+if (!code) { console.error(`pooled: give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link${pos[1] ? `, not "${pos[1]}"` : ""}`); process.exit(2); }
+// the invite link's key (#k=…): the host lets this client in without asking. Quote the link in the shell
+const key = roomKeyFrom(pos[1]);
 const port = +o.port;
 if (!Number.isInteger(port) || port < 0 || port > 65535) { console.error("pooled: --port must be a port number"); process.exit(2); }
 const maxQueue = Math.max(0, parseInt(o["max-queue"], 10));
@@ -86,7 +95,7 @@ const log = (msg, level = "info") => {
 };
 // never the hostname by default: every guest in the room sees this name
 const tag = Math.random().toString(36).slice(2, 6).padEnd(4, "0");
-const bridge = new Bridge({ code, signal: o.signal || null, name: cleanLabel(o.name) || `pooled serve ${tag}`, client: `pooled-cli/${VERSION}`, log });
+const bridge = new Bridge({ code, key, signal: o.signal || null, name: cleanLabel(o.name) || `pooled serve ${tag}`, client: `pooled-cli/${VERSION}`, log });
 // POOLED_KEEPALIVE_MS: the queue keep-alive interval (tests; 10 s otherwise)
 const api = createServer({ bridge, port, token, maxQueue, log, version: VERSION, keepAliveMs: +process.env.POOLED_KEEPALIVE_MS || undefined });
 
@@ -103,22 +112,9 @@ catch (e) { console.error(`pooled: ${e.message}`); api.server.close(); process.e
 
 // the host's ai-ready-all follows its hello: give it a moment, so the banner can name the model
 if (!bridge.ready) await new Promise((r) => { const t = setTimeout(r, 1500); bridge.once("state", () => { if (bridge.ready) { clearTimeout(t); r(); } }); });
-const label = () => (bridge.ready ? `${bridge.modelLabel || bridge.model}` : "model not ready yet");
 const print = (s) => { if (!o.quiet) console.log(s); };
-print(`pooled serve · room ${code} · ${label()}
-  OpenAI     http://127.0.0.1:${bound}/v1         (OPENAI_BASE_URL, any API key)
-  Anthropic  http://127.0.0.1:${bound}            (ANTHROPIC_BASE_URL)
-  bound to 127.0.0.1 only · ${token ? "token required" : "no token (set POOLED_TOKEN to require one)"}
-  prompts go to the room's host and may be shown to everyone in the room`);
+showRoom(bridge, { code, port: bound, token, print, log });
 if (o["json-log"]) log(JSON.stringify({ ready: bridge.ready, port: bound, room: code }));
-
-let wasReady = bridge.ready;
-bridge.on("state", () => {
-  if (bridge.ready && !wasReady) log(`the room's model is ready: ${bridge.modelLabel || bridge.model}`);
-  else if (!bridge.ready && wasReady && !bridge.kicked) log("the room's model is not ready (a device left or the host is re-dealing)");
-  wasReady = bridge.ready;
-  if (bridge.kicked) log(`disconnected by the host: ${bridge.kicked}; requests now get 503`, "error");
-});
 
 let stopping = false;
 async function shutdown() {

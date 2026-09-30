@@ -1,0 +1,87 @@
+---
+title: Releases
+eyebrow: Contributing
+description: How changes reach pooled.run, how to get a preview of a branch, and how a release is cut.
+sidebar:
+  label: Releases
+  order: 5
+---
+
+{/*
+Sources (origin/main 40bb0fa):
+- RELEASE.md (deploy table, old domain, cutting a release; NOTE its "0.MINOR.PATCH" line is stale: v1.0.0 is tagged)
+- vercel.json (ignoreCommand: production always builds; others only with "[preview]"; swarmllm.ai / www redirects; /p2p.html -> /room)
+- PR #210 (opt-in previews, forks, branches cut before #210 keep building)
+- scripts/deploy-staging.sh (manual fallback, aliases pooled-dev.vercel.app)
+- git tags: v0.2.0, v1.0.0; package.json version 1.0.0; CITATION.cff version (0.2.0 on main, stale)
+- cli/package.json version 0.2.1 (npm registry shows 0.2.0 published); CHANGELOG.md [Unreleased]
+- docs/agents.md (Vercel refuses commits whose email isn't on GitHub; curl /room not /p2p.html)
+- docs/testing-fast.md (preview URL pattern pooled-git-<branch>-nehanths-projects.vercel.app)
+*/}
+
+import { Aside, Steps } from '@astrojs/starlight/components';
+
+Pooled deploys with Vercel's Git integration. The room and the landing page have no build step: Vercel serves those files as they are.
+
+## Where a push goes
+
+| Push to | Deploys to |
+|---|---|
+| `main` | Production, [pooled.run](https://pooled.run). Every merge to `main` is a production release. |
+| Any other branch | Nothing, unless the commit message contains `[preview]`. |
+| A commit with `[preview]` in its message | A public preview at `https://pooled-git-<branch>-nehanths-projects.vercel.app`. On a PR, a bot comments with the link. |
+
+The rule lives in `ignoreCommand` in `vercel.json`: production always builds, and anything else builds only when asked. The staging alias, `https://pooled-dev.vercel.app`, follows the `feat/engine-opt` branch, so a push there also needs `[preview]` to build.
+
+<Aside type="note">
+The first part of the preview host is the Vercel project's name, so the URL changes if the project is renamed. A pull request from a fork builds only with `[preview]` in its commit message, and a maintainer has to approve the deployment.
+</Aside>
+
+### Get a preview of your branch
+
+1. Put `[preview]` anywhere in a commit message and push.
+2. Wait for the bot's comment on the PR, or find the deployment in Vercel.
+3. Check the deployment's commit before you trust what it shows.
+4. Test the room at `/room`, not `/p2p.html`. `/p2p.html` redirects to `/room`.
+
+A preview is also how you test on a real iPhone. iOS gives WebGPU only to `https` pages, so the phone can't use a plain `http` checkout on your laptop's address.
+
+<Aside type="caution">
+Vercel refuses to deploy commits whose author email isn't on a GitHub account. Check `git config user.email` before you push.
+</Aside>
+
+## Cut a release
+
+Git tags mark milestones people can cite. The current release is `v1.0.0`.
+
+<Steps>
+
+1. All GPU tests pass on the maintainer's hardware (`npm run test:gpu`, `npm run test:q38`). The no-GPU checks pass too: `npm test`, `npm run e2e:code` and `node tests/e2e/preview_browser.mjs`.
+2. `docs/bench-log.md` has a row for every performance change since the last tag.
+3. In `CHANGELOG.md`, move *Unreleased* into a dated section. Bump `version` in `package.json` and `CITATION.cff`.
+4. Tag it and push the tag:
+
+   ```bash
+   git tag -a v1.1.0 -m "..." && git push --tags
+   ```
+
+5. Merge to `main`. Vercel deploys production. Use a manual `npx vercel deploy --prod` only in an emergency.
+
+</Steps>
+
+{/* TODO(fact-check): RELEASE.md on main still says versioning is `0.MINOR.PATCH` with protocol changes bumping MINOR; the post-1.0 policy isn't written down anywhere. Confirm with the maintainer. */}
+A change to the room protocol bumps the minor version. The protocol number itself is `PROTOCOL` in `room/transport.js`. Tabs on different protocol versions refuse each other with a message that says who should reload.
+
+### The CLI
+
+`@pooled/cli` (`pooled serve`) has its own version in `cli/package.json` and is published to npm separately from the site. Its changes still go into the main `CHANGELOG.md`.
+
+## Old links keep working
+
+`swarmllm.ai` and `www.swarmllm.ai` stay attached to the Vercel project. `vercel.json` sends every request on them to the same path on pooled.run with a permanent redirect, and the query string carries over. Old join links like `swarmllm.ai/r/ABCD?signal=...` therefore still work. `www.pooled.run` redirects to `pooled.run` the same way. Don't remove these rules: people have the old links saved.
+
+Browser storage is per site. A device that downloaded weights on swarmllm.ai downloads them again the first time it opens pooled.run.
+
+## When Vercel's Git integration is down
+
+`scripts/deploy-staging.sh` (`npm run deploy:staging`) deploys your working tree with the Vercel CLI and points `pooled-dev.vercel.app` at it. Use it only as a fallback.

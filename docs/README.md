@@ -10,6 +10,7 @@
 - [long-context-and-sessions.md](long-context-and-sessions.md): long context, sessions and checkpoints (roadmap 30).
 - [deltanet-prefill-spec.md](deltanet-prefill-spec.md): the spec for the register-resident DeltaNet kernels (`engine/wgsl/qwen35.js` points here).
 - [bench-log.md](bench-log.md): every performance change with hardware, commit and numbers.
+- [openclaw.md](openclaw.md): OpenClaw on Pooled, the gateway as a room device (proof of concept): setup, results, limits; per-task numbers in [openclaw-poc.md](openclaw-poc.md).
 - [agents.md](agents.md): rules for coding agents working in this repo.
 - [rename-pooled.md](rename-pooled.md): the plan for the rename from SwarmLLM to Pooled.
 - Roadmap: [../roadmap/](../roadmap/README.md).
