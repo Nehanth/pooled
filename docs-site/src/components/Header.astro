@@ -4,7 +4,6 @@
 import Search from 'virtual:starlight/components/Search';
 import SiteTitle from 'virtual:starlight/components/SiteTitle';
 import SocialIcons from 'virtual:starlight/components/SocialIcons';
-import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 ---
 
 <div class="p-header">
@@ -18,7 +17,14 @@ import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 	<div class="p-right print:hidden">
 		<div class="sl-hidden md:sl-flex p-icons">
 			<SocialIcons />
-			<ThemeSelect />
+			<button class="p-theme" type="button" aria-label="Switch between light and dark">
+				<svg class="p-sun" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
+					<circle cx="8" cy="8" r="2.8" /><path d="M8 1.5v1.3M8 13.2v1.3M1.5 8h1.3M13.2 8h1.3M3.4 3.4l.9.9M11.7 11.7l.9.9M3.4 12.6l.9-.9M11.7 4.3l.9-.9" />
+				</svg>
+				<svg class="p-moon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round">
+					<path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8Z" />
+				</svg>
+			</button>
 		</div>
 		<a class="p-open" href="/room">
 			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
@@ -30,6 +36,19 @@ import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 		</a>
 	</div>
 </div>
+
+<script>
+	// Light / dark only. The page follows the system until someone presses this; the choice is kept in
+	// Starlight's own key, so the phone menu's theme picker and the no-flash loader agree with it.
+	document.querySelectorAll<HTMLButtonElement>('.p-theme').forEach((btn) => {
+		btn.addEventListener('click', () => {
+			const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+			document.documentElement.dataset.theme = next;
+			try { localStorage.setItem('starlight-theme', next); } catch {}
+			document.querySelectorAll<HTMLSelectElement>('starlight-theme-select select').forEach((s) => (s.value = next));
+		});
+	});
+</script>
 
 <style>
 	.p-header {
@@ -46,19 +65,28 @@ import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 		flex: 0 0 auto;
 	}
 	@media (min-width: 50rem) {
-		.p-brand { width: calc(var(--sl-sidebar-width) - 2 * var(--sl-nav-pad-x)); }
+		.p-brand { width: calc(var(--sl-sidebar-width) + var(--sl-content-pad-x) - var(--sl-nav-pad-x) - 16px); }
 	}
+	/* "pooled | Docs": plain text after a hairline, no chip */
 	.p-docs-tag {
-		font: 500 12px/1 var(--__sl-font);
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+		font: 400 15px/1 var(--__sl-font);
 		color: var(--p-ink-3);
-		padding: 4px 8px;
-		border-radius: 999px;
-		box-shadow: inset 0 0 0 1px var(--p-rule);
+		letter-spacing: -0.005em;
 	}
+	.p-docs-tag::before {
+		content: '';
+		width: 1px;
+		height: 16px;
+		background: var(--p-rule-3);
+	}
+	/* search starts on the content column's left edge */
 	.p-search {
 		flex: 1 1 auto;
 		display: flex;
-		justify-content: center;
+		justify-content: flex-start;
 		min-width: 0;
 	}
 	.p-right {
@@ -69,8 +97,26 @@ import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 	}
 	.p-icons {
 		align-items: center;
-		gap: 12px;
+		gap: 2px;
 	}
+	.p-theme {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		width: 34px;
+		height: 34px;
+		padding: 0;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
+		color: var(--p-ink-3);
+		cursor: pointer;
+		transition: background-color 0.15s var(--p-ease), color 0.15s var(--p-ease);
+	}
+	.p-theme:hover { background: var(--p-bg-3); color: var(--p-ink); }
+	.p-theme .p-moon { display: none; }
+	:global(:root[data-theme='dark']) .p-theme .p-sun { display: none; }
+	:global(:root[data-theme='dark']) .p-theme .p-moon { display: block; }
 	.p-open {
 		display: inline-flex;
 		align-items: center;
@@ -88,11 +134,20 @@ import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 	.p-open:hover { background: color-mix(in srgb, var(--p-ink) 86%, var(--p-blue)); color: var(--p-on-ink); }
 	.p-open:active { transform: scale(0.98); }
 	.p-open:focus-visible { outline: 2px solid var(--p-blue); outline-offset: 2px; }
+	/* dark: a dark button with a hairline, like the landing's dark code pill; it should not glow */
+	:global(:root[data-theme='dark']) .p-open {
+		background: var(--p-bg-3);
+		color: var(--p-ink);
+		box-shadow: inset 0 0 0 1px var(--p-rule-3);
+	}
+	:global(:root[data-theme='dark']) .p-open:hover { background: #222736; }
 	.p-open svg circle { fill: currentColor; }
 	.p-open svg .lit { fill: var(--p-blue-400); }
 	@media (max-width: 50rem) {
 		.p-docs-tag { display: none; }
 		.p-open { height: 36px; padding: 0 12px; }
+		.p-header { gap: 4px; }
+		.p-right { gap: 4px; }
 		.p-open span { font-size: 13px; }
 		.p-search { flex: 0 0 auto; margin-inline-start: auto; }
 		.p-right { margin-inline-start: 0; }
