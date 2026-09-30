@@ -130,7 +130,7 @@ Non-interactive setup: `openclaw onboard --non-interactive --auth-choice pooled`
 
 The invite key and the passes are kept in `~/.openclaw/pooled/room.json` (mode 0600), never in `openclaw.json`.
 
-Room problems show in the OpenClaw chat as `Pooled: …`: waiting for the host to let this device in, waiting for devices, not enough memory, downloading, a device left while it held layers, the context is full, the host doesn't allow API clients, the host runs an older Pooled.
+Room problems show in the OpenClaw chat as `⚠️ Pooled: …`: waiting for the host to let this device in, waiting for devices, not enough memory, downloading, a device left while it held layers, the host doesn't allow API clients, the host runs an older Pooled. The model never sees them. When the conversation outgrows the room's context, OpenClaw compacts it and asks again.
 
 ## Results
 

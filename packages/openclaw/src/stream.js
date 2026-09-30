@@ -8,7 +8,7 @@
 // sdk: OpenClaw's { createAssistantMessageEventStream, createEmptyTransportUsage, failTransportStream }
 // (index.js passes the real ones from openclaw/plugin-sdk; the unit tests pass stand-ins).
 import { Ask, Collector } from "../../../cli/lib/answer.js";
-import { ids, outcome, ApiError } from "../../../cli/lib/common.js";
+import { ids, outcome, ApiError, OLD_HOST_MSG } from "../../../cli/lib/common.js";
 import { ensureRoom, roomSettings, transport, PooledError } from "./pool.js";
 import { toAsk, NOTICE } from "./convert.js";
 import { remember } from "./prewarm.js";
@@ -16,10 +16,11 @@ import { remember } from "./prewarm.js";
 let seq = 0;
 const newRid = () => "oc" + Date.now().toString(36) + (seq++).toString(36);
 
-// a refusal from the room (ai-busy, or a failed link) -> a message for the chat
+// a refusal from the room (ai-busy, or a failed link) -> a message for the chat. "ctx" stays an error
+// worded the way OpenClaw recognizes a context overflow, so it compacts the session and asks again
 export function busyMessage(ev, r) {
   switch (ev.code) {
-    case "ctx": return `the conversation is ${ev.n} tokens; Pooled room ${r.code}'s context holds ${ev.max}. Start a new session (/new) or compact it`;
+    case "ctx": return `context length exceeded: the conversation is ${ev.n} tokens; Pooled room ${r.code}'s context holds ${ev.max}. Start a new session (/new) or compact it`;
     case "loading": return `Pooled room ${r.code} is still loading the model; ask again in a moment`;
     case "degraded": return `a device left Pooled room ${r.code} while it held layers of the model; re-open ${r.link} on it, or wait for the room to re-deal the layers`;
     case "off": return `the host of Pooled room ${r.code} does not allow API clients: turn on "Allow API clients" in the room's Serve API panel`;
@@ -69,7 +70,7 @@ function openclawEncoder(stream, message) {
   };
 }
 
-const NOTICE_CODES = new Set(["setup", "noroom", "lobby", "denied", "waiting", "memory", "degraded", "downloading", "install", "start", "off", "queue", "loading"]);
+const NOTICE_CODES = new Set(["setup", "noroom", "lobby", "denied", "waiting", "memory", "degraded", "downloading", "install", "start", "off", "queue", "loading", "older"]);
 export const isNotice = (error, message, signal) => !signal?.aborted && error instanceof PooledError && NOTICE_CODES.has(error.code) &&
   !message.content.some((c) => c.type === "toolCall" || (c.type === "text" && c.text.trim()));
 function noticeTurn(stream, message, text) {
@@ -98,7 +99,12 @@ export function createPooledStream({ getPluginConfig, log = () => {}, sdk }) {
         r = await ensureRoom(s, (m) => log(m));
         const t = await transport(r, { signal });
         r.asked = true;   // (a warm-up after this would only queue behind real work)
-        const { req, v2, body } = toAsk(context, options, model, { hostMeta: t.hostMeta, log });
+        let asked;
+        try { asked = toAsk(context, options, model, { hostMeta: t.hostMeta, log }); }
+        catch (err) {   // an older host and tools: a notice (too long stays an error: OpenClaw compacts and asks again)
+          throw err instanceof ApiError && err.message.includes(OLD_HOST_MSG) ? new PooledError("older", err.message) : err;
+        }
+        const { req, v2, body } = asked;
         if (r.s.mode === "host" && r.s.prewarm) remember(body, r.s.model);   // the next gateway start warms up with it
         const enc = openclawEncoder(stream, message);
         const ask = new Ask({ req, v2, encoders: [new Collector(), enc], idFor: () => ids.call(), log, label: `room ${r.code}` });

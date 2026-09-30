@@ -171,7 +171,7 @@ for (const hosting of [true, false]) {
     assert.deepEqual(room.asks[1].messages.slice(1), [{ role: "assistant", text: "", calls: [{ name: "read", args: { path: "notes.txt" } }] }, { role: "tool", text: "The secret word is PELICAN-42." }]);
     const r3 = await run(fn, c1);
     assert.equal(r3.msg.stopReason, "error");
-    assert.match(r3.msg.errorMessage, /^Pooled: the conversation is 20000 tokens; .*16352/);
+    assert.match(r3.msg.errorMessage, /^Pooled: context length exceeded: the conversation is 20000 tokens; .*16352/);
   });
 }
 
@@ -191,7 +191,8 @@ test("stream: an older host gets no tools; the chat says why", async () => {
   const room = scriptedRoom({ hostMeta: { api: 1 }, script: [] });
   const fn = install(room, { mode: "join", code: "TEST", model: "qwen3-1.7b" });
   const r = await run(fn, { messages: [{ role: "user", content: "hi" }], tools: TOOLS });
-  assert.match(r.msg.errorMessage, /^Pooled: .*older Pooled/);
+  assert.equal(r.msg.stopReason, "stop");
+  assert.match(r.msg.content[0].text, /^⚠️ Pooled: .*older Pooled/);
   assert.equal(room.asks.length, 0);
 });
 

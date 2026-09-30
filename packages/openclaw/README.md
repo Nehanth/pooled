@@ -123,9 +123,10 @@ Files the plugin keeps in OpenClaw's state folder (`~/.openclaw/pooled/`, mode 0
 - A joined gateway asks the room's host over WebRTC (the `pooled serve` bridge). The bridge shows the
   host this device's pass, so the host sees one device, not two join requests.
 
-Room problems show in the chat as `Pooled: …`: waiting for the host to let this device in, waiting for
-devices, not enough memory, downloading, a device left while it held layers, the context is full, the
-host doesn't allow API clients, the host runs an older Pooled.
+Room problems show in the chat as `⚠️ Pooled: …`: waiting for the host to let this device in, waiting
+for devices, not enough memory, downloading, a device left while it held layers, the host doesn't allow
+API clients, the host runs an older Pooled. They are not part of the conversation the model sees. When
+the conversation outgrows the room's context, OpenClaw compacts it and asks again.
 
 ## Who can see and steer what
 
