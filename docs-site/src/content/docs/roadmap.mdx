@@ -1,0 +1,80 @@
+---
+title: Roadmap
+eyebrow: Contributing
+description: What is being worked on, how items are prioritized, and what shipped recently.
+sidebar:
+  label: Roadmap
+  order: 6
+---
+
+{/*
+Sources (origin/main 40bb0fa):
+- roadmap/README.md (priorities P0/P1/P2, areas, numbered design files, pinned issue #83; several items stale)
+- GitHub issue states checked 2026-09-30 (#59, #70, #73, #75, #76, #81 closed; #1, #69, #77 still open though shipped)
+- Merged PRs: #259 (TURN relay, signaling fallback -> #1, part of #15), #242 (disk checkpoints -> #69),
+  #243 (tokenizer -> #70), #251 (#73), #238 (#76), #250 (part of #77), #252 (part of #71; int8 KV stays off by default),
+  #239 (part of #74), #247/#248 (part of #75), #235 (first milestone of #16), #236 (#78), #234 (closes #59),
+  #241 (#81), #231/#260/#261 (pooled serve, #4), #258 (auto re-deal experimental, wake lock: #3, #44), #233
+*/}
+
+import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
+
+The roadmap lives in the repository, in [`roadmap/README.md`](https://github.com/Nehanth/pooled/blob/main/roadmap/README.md). It lists every planned item, grouped by the part of Pooled it touches: Kernels, Inference, Harness (Code mode), Loading, Networking, Room, UI, Infra, and Tests and benchmarks. Longer design notes sit next to it as numbered files, such as `roadmap/02-prefill-gemm.md`. The pinned [Roadmap: Pooled](https://github.com/Nehanth/pooled/issues/83) issue has the same list as a checklist.
+
+<CardGrid>
+  <LinkCard title="Roadmap" description="Every item with its priority, design note and issue." href="https://github.com/Nehanth/pooled/blob/main/roadmap/README.md" />
+  <LinkCard title="Pinned issue #83" description="The same list as a checklist on GitHub." href="https://github.com/Nehanth/pooled/issues/83" />
+</CardGrid>
+
+## Priorities
+
+| Priority | Meaning |
+|---|---|
+| **P0** | Now. Broken, wrong, or the biggest thing holding rooms back. |
+| **P1** | Next. Planned and ready to build. |
+| **P2** | Later, or needs a design note first. |
+
+A filed issue gets the `area:` label of its section. Design-note file names never change, because issues and links point at them.
+
+## Top of the list
+
+- **Prefill speed** (P0, [#2](https://github.com/Nehanth/pooled/issues/2)). Prefill is the biggest gap against native llama.cpp. On one GB10, the first token of a 172-token prompt takes about 1.0 s on the MoE, against about 0.07 s natively.
+- **Split MoE rooms that end answers mid-call** (P0, [#68](https://github.com/Nehanth/pooled/issues/68)). A two- or three-device MoE room must match a single device.
+- **Coop GEMV with 8 rows per workgroup** returns wrong values (P0, [#47](https://github.com/Nehanth/pooled/issues/47)).
+- **Hand the host role to another device** when the host leaves (P1, [#58](https://github.com/Nehanth/pooled/issues/58)).
+- **Pinned model revisions and weight hashes** (P1, [#19](https://github.com/Nehanth/pooled/issues/19)), so an upstream re-upload can't mix old and new ranges.
+
+## Shipped recently
+
+Some roadmap lines and issues haven't caught up with merged work yet. As of September 30, 2026:
+
+| Item | Status | Shipped in |
+|---|---|---|
+| TURN relay for strict NATs ([#1](https://github.com/Nehanth/pooled/issues/1)) | Done. Optional and off by default. | #259 |
+| Room checkpoints on disk, so a reload resumes ([#69](https://github.com/Nehanth/pooled/issues/69)) | Done. `?ckptdisk=0` turns it off. | #242 |
+| Tokenizer checked against llama.cpp ([#70](https://github.com/Nehanth/pooled/issues/70)) | Done. | #243 |
+| Prefix-cache reuse across Code mode turns ([#73](https://github.com/Nehanth/pooled/issues/73)) | Done. | #251 |
+| Harness fixes from the audit ([#76](https://github.com/Nehanth/pooled/issues/76)) | Done. | #238 |
+| Delete one cached model ([#59](https://github.com/Nehanth/pooled/issues/59)) | Done. | #234 |
+| GPU tests that print FAIL exit nonzero ([#81](https://github.com/Nehanth/pooled/issues/81)) | Done. | #241 |
+| `npx @pooled/cli serve`, a local OpenAI and Anthropic endpoint ([#4](https://github.com/Nehanth/pooled/issues/4)) | Done, with tool calling. | #231, #260, #261 |
+| Converted weights cached in the browser ([#77](https://github.com/Nehanth/pooled/issues/77)) | Done for the tensors converted on the CPU. | #250 |
+| Self-hosted signaling ([#15](https://github.com/Nehanth/pooled/issues/15)) | Partly. The server fallback list and `?signal=` shipped. Vendored PeerJS and a status canary are still open. | #259 |
+| Longer context ([#71](https://github.com/Nehanth/pooled/issues/71)) | Partly. Timed at 1K, 8K and 32K. int8 KV exists (`?kv=q8`) but stays off by default. | #252 |
+| Actionable errors ([#16](https://github.com/Nehanth/pooled/issues/16)) | Partly. Room errors say what to do. The diagnostic report button is still open. | #235 |
+| Code mode agent robustness ([#74](https://github.com/Nehanth/pooled/issues/74)) | Partly. More call formats, clearer loop stops, first error first. | #239 |
+| `run_js` in production ([#75](https://github.com/Nehanth/pooled/issues/75)) | Issue closed. `run_js` turns on only when the page's preview origin is on a second domain. pooled.run doesn't have one yet ([#79](https://github.com/Nehanth/pooled/issues/79)), so it stays off there. | #247, #248 |
+| Automatic re-deal ([#3](https://github.com/Nehanth/pooled/issues/3)) | Partly. **Re-deal on its own** is experimental and on by default. | #258 |
+| Lend this device ([#78](https://github.com/Nehanth/pooled/issues/78)), keep worker tabs alive ([#44](https://github.com/Nehanth/pooled/issues/44)) | Partly. Wake lock, warnings, and phones that come back after a reload or the background. | #236, #258 |
+
+<Aside type="note">
+The [changelog](/docs/reference/changelog) has the full list of what changed in each release.
+</Aside>
+
+## Pick something up
+
+1. Find an item in the roadmap and read its design note, if it has one.
+2. Comment on its issue before you start, so two people don't build the same thing.
+3. P2 items and anything that changes the protocol, the model output or what peers can see need a design note first. See [Contributing](/docs/contributing#changes-that-need-a-design-note-first).
+
+Benchmark reports from hardware we don't have help every item on the list. See [Benchmarking](/docs/contributing/benchmarks#report-numbers-from-your-hardware).

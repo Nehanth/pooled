@@ -1,0 +1,64 @@
+---
+title: Templates
+eyebrow: Code mode
+description: Start a project from a small app that already runs, so your first request is a change instead of a whole build.
+sidebar:
+  label: Templates
+  order: 5
+---
+{/*
+  Sources (origin/main 40bb0fa):
+  - harness/templates.js (header; TEMPLATES ids, labels, blurbs, `next` suggestions; file line counts checked by
+    importing the module: game 18/6/50, dashboard 21/11/37, form 25/12/37, landing 29/20/13 lines)
+  - room/code.js newProject() (template files written, then server.serve({}) on :5173, `next` put in an empty prompt box),
+    New form ("Empty project" / "Start from: <label>", a template fills an empty name or one it filled), placeholder text,
+    members can pick a template (ai-code-cmd new with tpl; the host accepts only ids from its own list)
+  - harness/code-prompt.js (~100 lines per write_file)
+  - PR #240 (why: small models do better editing a working app; not yet shown with a real model on a GPU)
+  - CHANGELOG.md: argfix eval, Qwen3 1.7B 8K context
+*/}
+
+import { Steps } from '@astrojs/starlight/components';
+
+A template is a small app that already runs. You start with working files and ask for a change, like "add a pricing section". Small models do much better editing a working file than writing a whole app from nothing, so a template is the best start on a small model like Qwen3 1.7B.
+
+## Start from a template
+
+<Steps>
+
+1. In Code, press **New** above the file list.
+
+2. Pick a template from the menu next to the name box, for example **Start from: Game**. It fills in the project name; type your own if you like.
+
+3. Press Enter. The project gets the template's files and is served on `:5173` straight away, so the app is running in Preview.
+
+4. On the host, the prompt box already holds a first change to try. Send it, or write your own. (A project started from another device gets no suggestion in the box: ask for a change yourself.)
+
+</Steps>
+
+Anyone who can send requests can start a project from a template. The host creates it.
+
+## The four templates
+
+| Template | What it is | Suggested first change |
+|---|---|---|
+| **Game** | Catch the falling stars on a canvas. Move the basket with the arrow keys, the mouse or a finger. Score and 3 lives. | Add a high score that stays after a reload |
+| **Dashboard** | Stat cards, a bar chart drawn on a canvas, and a table, all from one `DATA` array of six months. | Add a line for sign-ups to the chart |
+| **Form app** | A sign-up form that checks its fields and adds each entry to a saved list. | Add a phone number field and a search box over the list |
+| **Landing page** | A hero, three features and an email sign-up box, with a menu button on small screens. | Add a pricing section with three plans |
+
+Each one is three files: `index.html`, `style.css` and `app.js`, a single JS module. Every file is under 50 lines, well under the roughly 100 lines the agent writes at once. None of them uses the network.
+
+:::note[Saved data in the preview]
+The Form app and "a high score that stays after a reload" use `localStorage`. In the preview it lives in memory only, so it is empty again after the preview reloads. The code is right: it keeps its data once the project's files run outside the preview, for example the **Project .zip** on your own web server. The **One HTML file** download keeps the preview's in-memory storage, so it forgets too. See [Previews](/docs/code/previews#what-an-app-can-do-in-the-sandbox).
+:::
+
+## Built for the sandbox
+
+The templates avoid what the preview sandbox blocks. The Form app and Landing page have no `<form>` submit, since the frame has no `allow-forms` and a submit event never fires. A button click and the Enter key do the work instead. The Game stops the arrow keys and Space from scrolling the page while you play.
+
+If you ask the agent to add a form, the same rule applies: ask for a button that handles the click, not a submit.
+
+## Empty project
+
+**Empty project** is the default in the menu. The agent starts with no files and writes everything, in parts of about 100 lines per file. A bigger model and a bigger context help here: see [The agent](/docs/code/agent#context-and-compaction).

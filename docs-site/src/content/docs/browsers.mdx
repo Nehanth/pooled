@@ -1,0 +1,76 @@
+---
+title: Browsers and requirements
+eyebrow: Getting started
+description: Which browsers can hold part of the model, which can only chat, and how to turn WebGPU on where it is off.
+sidebar:
+  label: Browsers and requirements
+  order: 6
+---
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+{/*
+Sources (for the fact-checker):
+- docs/tech-stack.md "Runtime targets" (Chrome/Edge 113+ primary, Safari 26+ supported, Firefox untested)
+- room/preflight.js verdict(): every message and remedy quoted here (Linux Chrome flags, Firefox, Safari 26, Android Chrome 121+, secure page, blocklisted driver)
+- README.md "Browsers" (Chrome on macOS is the tested host; Safari on a Mac reloads the tab under memory pressure with most of the 27B, do not host from it). README's "iPhone holds a few layers" line is stale: see #233/#258, phones now ask unless needed.
+- p2p.html .jfoot ("Runs in Chrome or Edge, or Safari 26, on a laptop or desktop. A phone alone can only chat. The smallest model is at most a 1.8 GB download.")
+- p2p.html: PeerJS loads from cdn.jsdelivr.net (room.js joinFailed message)
+- cli/README.md / README "Use Pooled from your tools": Serve API needs Node 22+
+*/}
+
+Pooled runs in the browser on WebGPU. A device whose browser has WebGPU can hold part of the model. Any other device can still join the room to ask questions and read answers.
+
+## Supported browsers
+
+| Browser | Status |
+|---|---|
+| Chrome or Edge 113+ on a laptop or desktop | Holds layers. Chrome on macOS is the tested host. |
+| Safari 26+ on macOS, iPhone and iPad | Holds layers. Do not host a big model from Safari on a Mac (see below). |
+| Chrome 121+ on Android | Holds layers, within the [phone cap](/docs/phones). |
+| Chrome on Linux | WebGPU is off by default. Turn it on with two flags (below). Not tested. |
+| Firefox | No WebGPU here yet, so it joins to chat. Not tested. |
+| Anything without WebGPU | Joins as **Chat only, no memory to give**. |
+
+The room's page checks the browser as soon as it opens. If this device can't hold layers, the join screen says why in one sentence and shows the fix under **Details**.
+
+:::caution[Safari on a Mac]
+Safari on a Mac reloads the tab under memory pressure when it holds most of the 27B. Host from Chrome or Edge on a Mac instead. Safari is fine for a device that holds a smaller share.
+:::
+
+## Turn on WebGPU
+
+<Tabs>
+  <TabItem label="Chrome on Linux">
+    Open these two flags, set each to **Enabled**, then reload the room:
+
+    ```text
+    chrome://flags/#enable-unsafe-webgpu
+    chrome://flags/#enable-vulkan
+    ```
+  </TabItem>
+  <TabItem label="Safari">
+    WebGPU arrived in Safari 26. Update macOS or iOS to 26 or later, or use Chrome on the Mac.
+  </TabItem>
+  <TabItem label="Android">
+    Use Chrome 121 or later. If Chrome has WebGPU but offers no GPU on your phone, the driver may be blocklisted; a newer Chrome may help.
+  </TabItem>
+  <TabItem label="GPU not found">
+    If the browser has WebGPU but found no usable GPU, the driver may be blocklisted. Try `chrome://flags/#enable-unsafe-webgpu`, reload, or try another browser.
+  </TabItem>
+</Tabs>
+
+WebGPU also needs a secure page: `https://`, or `http://localhost` when you [run Pooled locally](/docs/self-host/local).
+
+## Device requirements
+
+- **To start a room and run a model:** a laptop or desktop. The smallest model needs 4 GB across the room, and one computer gives at least that by default when its GPU allows it.
+- **A phone alone can only chat.** Phones give at most 0.5 to 2 GB, less than any model needs.
+- **Disk:** each device caches the layers it downloads. The smallest model is at most a 1.8 GB download; the MoE file is 20.84 GB in total, split across the devices.
+- **Network:** the devices need to reach each other directly, or through a TURN relay. See [Bad networks](/docs/rooms/networks).
+- **The Serve API** runs `npx @pooled/cli` on your computer and needs Node 22 or newer. It needs no GPU.
+
+## What the page loads from elsewhere
+
+- **Model weights** from Hugging Face, or from another device in the room.
+- **The connection library (PeerJS)** from `cdn.jsdelivr.net`. If an extension or network blocks it, the room can't connect and says so.
+- **A signaling server** to introduce the devices. The public PeerJS server is the default; you can [run your own](/docs/self-host/signaling).

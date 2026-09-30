@@ -1,0 +1,149 @@
+---
+title: Structured output
+eyebrow: Serve API
+description: Ask for JSON, or JSON that fits a schema, on any of the three APIs. The room constrains the answer while it is written, so it always parses.
+sidebar:
+  label: Structured output
+  order: 7
+---
+{/* Sources (origin/main 40bb0fa): cli/README.md (response_format bullet: guaranteed vs not), docs/design/serve.md
+    §11.3 (JSON subset, caps 10 k nodes / enum 1 k / anyOf 64 / allOf 16 / depth 32, auto + format, forcing-mode
+    reasoning budget min(max_tokens / 2, 4096)), §14 (minItems / maxItems added), harness/jsonschema.js (SCHEMA_CAPS incl. refDepth 6 -> ANY),
+    cli/lib/responses.js (text.format json_object / json_schema), cli/lib/anthropic.js (output_config.format,
+    output_format). */}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The room samples the answer under a grammar built from your schema. The model cannot write a token that would break it, so the result always parses and has the shape you asked for.
+
+## Ask for it
+
+<Tabs syncKey="api">
+<TabItem label="Chat Completions">
+
+```python
+from openai import OpenAI
+import json
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+r = client.chat.completions.create(
+    model="pooled",
+    messages=[{"role": "user", "content": "Three facts about Paris."}],
+    response_format={
+        "type": "json_schema",
+        "json_schema": {
+            "name": "facts",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                    "facts": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3},
+                },
+                "required": ["city", "facts"],
+                "additionalProperties": False,
+            },
+        },
+    },
+)
+print(json.loads(r.choices[0].message.content))
+```
+
+</TabItem>
+<TabItem label="Responses">
+
+```python
+from openai import OpenAI
+import json
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+schema = {
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"},
+        "facts": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3},
+    },
+    "required": ["city", "facts"],
+    "additionalProperties": False,
+}
+
+r = client.responses.create(
+    model="pooled",
+    input="Three facts about Paris.",
+    text={"format": {"type": "json_schema", "name": "facts", "schema": schema}},
+)
+print(json.loads(r.output_text))
+```
+
+</TabItem>
+<TabItem label="Messages">
+
+```python
+import anthropic, json
+
+client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="pooled")
+schema = {
+    "type": "object",
+    "properties": {
+        "city": {"type": "string"},
+        "facts": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 3},
+    },
+    "required": ["city", "facts"],
+    "additionalProperties": False,
+}
+
+m = client.messages.create(
+    model="pooled",
+    max_tokens=1024,
+    messages=[{"role": "user", "content": "Three facts about Paris."}],
+    extra_body={"output_config": {"format": {"type": "json_schema", "schema": schema}}},
+)
+print(json.loads(m.content[-1].text))
+```
+
+</TabItem>
+</Tabs>
+
+| API | Field | Types |
+|---|---|---|
+| Chat Completions | `response_format` | `json_object`, `json_schema` |
+| Responses | `text.format` | `json_object`, `json_schema` |
+| Messages | `output_config.format` or `output_format` | `json_schema` |
+
+`json_object` gives any valid JSON object. `json_schema` gives JSON that fits the schema.
+
+## What is guaranteed
+
+| Guaranteed | Not guaranteed |
+|---|---|
+| Types, including `null` and `nullable` | `minLength`, `maxLength` |
+| `properties`, `required`, `additionalProperties` | `minimum`, `maximum` and other number bounds |
+| `items`, `prefixItems`, `minItems`, `maxItems` | `pattern`, `format`, `multipleOf`, `uniqueItems` |
+| `enum`, `const` | |
+| `anyOf`, `oneOf`, `allOf` (of objects) | |
+| Local `$ref` (a recursive one, past 6 levels, allows any JSON value) | |
+
+Keywords in the right column are accepted, so your schema does not need changes, but the answer may break them. Validate those yourself if they matter.
+
+## With tools
+
+You can send tools and a format together. With `tool_choice: "auto"`, the answer is either tool calls or the JSON value. With `"required"` or a named tool, it is calls.
+
+## With thinking
+
+With thinking on, the reasoning comes first, as free text. When the answer is forced (a format, `required` or a named tool), the reasoning gets a budget of half of `max_tokens`, at most 4096 tokens. After that the room closes the reasoning and the grammar takes over.
+
+## Schema size
+
+| Limit | Value |
+|---|---|
+| Grammar nodes, all tools and the format together | 10 000 |
+| One `enum` | 1000 values |
+| One `anyOf` | 64 branches |
+| One `allOf` | 16 parts |
+| Nesting depth | 32 |
+
+A schema over these limits is a `400`.
+
+:::note
+If the room's host runs an older Pooled without structured output, the request gets a `400` asking to reload the host page.
+:::

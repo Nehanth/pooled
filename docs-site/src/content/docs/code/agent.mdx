@@ -1,0 +1,169 @@
+---
+title: The agent
+eyebrow: Code mode
+description: The eight tools the agent uses, how one request runs step by step, how it keeps within the model's context, and why it stops.
+sidebar:
+  label: The agent
+  order: 2
+---
+{/*
+  Sources (origin/main 40bb0fa):
+  - harness/agent.js: header, run() (maxSteps, empty-answer nudge, repeat handling, clean-serve finish,
+    STUCK_AFTER 3, PAGE_ERR warn 3 / stop 5, CONTEXT_FULL text), capResult (maxResultChars 6000, 60% head),
+    _compact() (tiers 1-4, target 60% of budget, last 2 tool results kept), SERVED_OK
+  - room/code.js: ensureAgent() (maxSteps: 30, maxNew: 8192, sampling "exact" for json style, "focused" for xml),
+    onEvent() note texts ("older steps shortened...", "stopped after N steps", stuck note), stats() line, runOne()
+    (hand-edit notice)
+  - harness/room-model.js: thinking false, reserve = min(maxNew, maxSeq/4) + 64, budget = maxSeq - reserve,
+    TAG "<tool_response>" text stop, MARGIN 16, pin = system prompt length
+  - room/models.js CTX: 1.7B 8192 (max 16384), 27B 16384 (max 32768), MoE 32768 (max 65536)
+  - harness/codetools.js (list_dir, read_file, search, edit_file, write_file; MAX_LINES 200, MAX_CHARS 8000,
+    MAX_HITS 30, SEARCH_MS 2000, MAX_ENTRIES 200; fuzzy edit matching; fragment and unchanged-write guards)
+  - harness/preview-tools.js (serve, preview_logs; SERVE_LINES 8, LOG_LINES 40, LOG_CHARS 3000; waits 2 s)
+  - harness/run-js.js (run_js only with a relay, TIMEOUT_MS 3000)
+  - harness/code-prompt.js CODE_SYSTEM; harness/cards.js CARDS
+  - harness/tools.js header (json vs xml formats, detectStyle, near-miss formats); harness/constrain.js header
+  - harness/argfix.js header and ARG_ALIASES
+  - PRs #238 (repeat reads run again), #239 (call formats, warn-then-stop, same page error), #251 (pinned system prompt checkpoint)
+  - CHANGELOG.md: argfix eval "4/8 -> 7/8 tasks" on Qwen3 1.7B; "Code follow-ups printed their tool calls as text" fix
+*/}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The agent is a short loop. It asks the model what to do, runs the tools the model calls, gives back the results, and repeats until the model answers without calling a tool. It runs on the room's host, and every token comes from the model spread over the room's devices.
+
+## Tools
+
+| Tool | What it does | Limits |
+|---|---|---|
+| `list_dir` | Lists a folder (the project root by default). | 200 entries |
+| `read_file` | Reads a file with line numbers. | 200 lines or 8,000 characters per call; says where to read on |
+| `search` | Regex search over the project, or under a path. Returns `path:line: text`. | 30 hits; a pattern that runs over 2 s is refused |
+| `write_file` | Creates or replaces a file. `append: true` adds to its end. | Needs approval when edits ask first |
+| `edit_file` | Replaces `old` with `new`. `old` must match the file exactly, once. | Needs approval when edits ask first |
+| `serve` | Serves a folder on a preview port (default `5173`) and returns the page's first errors. | Waits up to 2 s for the page to load; shows up to 8 lines |
+| `preview_logs` | Console output of a served page since a cursor. | 40 lines or 3,000 characters, newest last |
+| `run_js` | Runs a JS module in the sandbox, next to a page, and returns what it printed. | 3 s. **Off on pooled.run for now**, see [Previews](/docs/code/previews#run_js) |
+
+Any single tool result is cut to 6,000 characters, keeping the start and the end, so one call never fills the context.
+
+The system prompt is kept tiny on purpose, because every token of it is computed across the whole room before the first answer. It says: the project is a folder with no shell; build static web apps; keep each `write_file` under about 100 lines and write longer files in parts with `append: true`; change files with `edit_file`; then serve and fix every error.
+
+## How a request runs
+
+1. Your request goes in as a user turn.
+2. The model answers. Its text streams into the timeline. When it starts a tool call, the call's card appears and fills in live.
+3. Each tool call runs. `write_file` and `edit_file` may wait for approval first (see [Approving edits](/docs/code#approving-edits)).
+4. The results go back to the model as the next turn, and it answers again.
+5. The request ends when the model replies without a tool call. A one-line summary closes it:
+
+```text
+6 steps · 11 tool calls · 2143 tok · 41.2 tok/s · 2 devices · 58.3 s
+```
+
+If it ended for any reason but "done", the reason is added at the end (`stopped`, `limit`, `context`, `stuck`, or `error` when the model itself failed).
+
+Thinking is off in Code mode: a think block would eat the answer's token budget. Each answer is capped at 8,192 tokens, and less when the context is nearly full.
+
+### Tool call formats
+
+Models in the Qwen family are trained on one of two call formats. The agent reads the model's own chat template and uses the one it was trained on.
+
+<Tabs>
+  <TabItem label="XML (27B, 35B MoE)">
+
+```xml
+<tool_call>
+<function=read_file>
+<parameter=path>
+index.html
+</parameter>
+</function>
+</tool_call>
+```
+
+  </TabItem>
+  <TabItem label="JSON (Qwen3 1.7B)">
+
+```json
+<tool_call>
+{"name": "read_file", "arguments": {"path": "index.html"}}
+</tool_call>
+```
+
+  </TabItem>
+</Tabs>
+
+Calls are kept well formed while they are sampled. Once the model opens `<tool_call>`, only tokens that keep the call valid are allowed: a declared tool name, that tool's parameters, and the closing tags once the required parameters are there. For the JSON format, only the tool name is held to the declared tools, and the model samples greedily so its JSON stays well formed.
+
+The parser also runs the near misses that open models write: a JSON code fence inside `<tool_call>`, JSON arguments inside `<function=NAME>`, the `<function name="x">`, `<parameter name="p">` and `<invoke name="x">` spellings, and several calls in one block.
+
+### Repairs for small models
+
+Before a call runs, its arguments are repaired when the intent is clear. A missing `path` is taken from `file`, `filename` or `file_path`; `content` from `contents`, `text` or `code`; `"true"` becomes `true`; `"./index.html"` becomes `index.html`; a content array is joined. A repair only fills a parameter the call left out, never overrides one it gave.
+
+The file tools add guards of their own:
+
+- `edit_file` tries an exact match first, then the same lines with smart quotes, dashes and odd spaces normalized, then ignoring indentation. If nothing matches, the error shows the closest lines.
+- `write_file` refuses to replace a whole HTML page with a fragment of one (no `<!doctype>` or `<html>`). It tells the model to use `edit_file` instead.
+- Writing a file with exactly the content it already has is reported as `unchanged`, with a note to serve it, fix something or finish.
+- An "append" that starts like the file itself replaces the file instead of doubling it.
+
+On the real Qwen3 1.7B, these repairs, together with the guards below and the clean finish after a good serve, took the eval suite from 4 of 8 tasks to 7 of 8.
+
+### Hints when a call goes wrong
+
+When a call fails, the agent can add one short hint to that call's result: the exact call format, how to write long files in parts, how to copy `old` for `edit_file`, or "fix one error at a time". A hint costs tokens only when something goes wrong, and each one is sent at most twice per request (the "fix one error at a time" hint once). The system prompt never changes, so its cached copy stays valid.
+
+## Why it stops
+
+| Reason | What happened | What to do |
+|---|---|---|
+| done | The model answered without a tool call. The agent also ends the request when a serve loaded with no errors and the next step changed nothing. | Ask for the next change. |
+| stopped | You (or the host) pressed **Stop** or Esc, or a device left mid-run. The model's partial answer is kept, and no call from it runs. | Send a new request (after a re-deal, if a device left). |
+| limit | 30 steps went by in one request. The timeline says `stopped after 30 steps`. | Send "continue", or split the task. |
+| stuck | The same call failed 3 steps in a row, or the page reported the same first error 5 times, each check after a change (4 changes that did not fix it). The note names the call and the error. | Rephrase, fix the file by hand, or try a bigger model. |
+| context | The conversation no longer fits, even after compaction. The note says `context full: start a new task (the files are kept)`. | Press **New task**. |
+
+One step before a stuck stop, the model gets a note saying what it keeps repeating, so it can change course. The same page error gets a note at the 3rd time and a stop at the 5th.
+
+An empty answer gets one nudge ("call a tool or say you are done"). A second empty answer ends the request.
+
+A read-only call repeated with nothing changed in between still runs, since a file might have been edited by hand. It counts as a repeat only when the result is the same. A repeated `write_file` or `edit_file` is not run twice.
+
+:::caution[Stuck in a room with several devices]
+If the agent gets stuck while the model is split over several devices, the stop note says so: the split model may be producing bad output. Try the same request with the model on one device, or re-deal the layers. If a step is stopped because too many tokens were forced by the call format, the room's engine is producing garbage: try again or reload the model.
+:::
+
+## Context and compaction
+
+The agent's conversation must fit the model's context, less room for the next answer. The space kept for the answer is the answer cap or a quarter of the context, whichever is smaller, plus 64 tokens.
+
+| Model | Default context | Conversation budget |
+|---|---|---|
+| Qwen3 1.7B | 8,192 | about 6,080 |
+| Qwen3.8 27B | 16,384 | about 12,220 |
+| Qwen3.6 35B MoE | 32,768 | about 24,510 |
+
+The meter next to **New task** shows how much of the context the conversation uses. A bigger `?ctx=` gives the agent more room; see [Which models fit](/docs/models).
+
+When the conversation grows past its budget, the agent shortens it to 60% of the budget, in this order:
+
+1. Old tool results (all but the last 2 steps) longer than 200 characters become one-line stubs: `(output of read_file game.js dropped; run it again if needed)`.
+2. Earlier finished requests fold into one line each, like `[earlier: wrote index.html, game.js; edited game.js; served :5173]`, plus their answer.
+3. The oldest earlier requests are dropped.
+4. If it still doesn't fit, the request ends with reason `context`.
+
+The current request is only ever stubbed, never folded. The timeline shows `older steps shortened to fit the context (before → after tokens)`.
+
+### The system prompt stays cached
+
+Between steps, the room reuses everything it has already computed, so step N+1 only processes the new tool results. Compaction rewrites the middle of the conversation, which would normally mean computing the whole prompt again.
+
+To avoid that, the first time the room processes the system prompt and tools, it saves a checkpoint right after them on every device. That checkpoint is pinned: answer checkpoints never push it out, and `?ckpt=N` does not count it. After a compaction, only what follows the system prompt is processed again. The tokens and their positions are the same, so the answers don't change. `?ckpt=0` turns checkpoints off, this one included.
+
+## Sessions
+
+Each project keeps its agent conversation, its timeline (the last 200 items) and its served ports in the host's browser. Reopening the project brings them back. The conversation keeps the exact tokens the model sampled, so a reopened session carries on without re-encoding them, unless the room now runs a different model.
+
+**New task** forgets the conversation. Files and previews stay.
