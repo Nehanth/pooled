@@ -10,7 +10,8 @@
 # --here guest: the host (embedding, head, sampler) runs on the other machine. The signaling server
 # always runs here, so the other machine only needs to reach this one.
 # Everything after -- goes to the host's xroom.mjs (--model, --gb, --rounds, --prompts, --modes,
-# --maxnew, --trace-rounds, --query ...); --guest-gb N sets the guest's pledge (default 12).
+# --maxnew, --trace-rounds, --query ...); --guest-gb N sets the guest's pledge (default 12);
+# --guest-tune WG,ROWS forces the guest's GEMV shape (xroom.mjs --tune; pass --tune after -- for the host's).
 #
 # The machine-specific parts come from the environment (nothing machine-specific lives in the repo):
 #   XROOM_REMOTE       required. Runs one shell command on the other machine: $XROOM_REMOTE '<cmd>'
@@ -33,13 +34,14 @@
 # guest.log, guest-trace.json (tracing only), ping.txt (before / after), ping_during.txt (every
 # 0.2 s through the run), and report.txt from xroom_report.mjs (the rounds; with tracing the splits).
 set -u
-HERE=host OUT="" SYNC=1 GUEST_GB=12
+HERE=host OUT="" SYNC=1 GUEST_GB=12 GUEST_TUNE=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --here) HERE=$2; shift 2 ;;
     --out) OUT=$2; shift 2 ;;
     --no-sync) SYNC=0; shift ;;
     --guest-gb) GUEST_GB=$2; shift 2 ;;
+    --guest-tune) GUEST_TUNE=(--tune "$2"); shift 2 ;;
     --) shift; break ;;
     *) echo "unknown option $1" >&2; exit 2 ;;
   esac
@@ -124,7 +126,7 @@ if [ "$HERE" = host ]; then
   CODE=$(wait_code "$OUT/host.out" "$HPID" 1200) || { log "the host printed no code"; tail -5 "$OUT/host.log" >&2; exit 1; }
   log "room $CODE; starting the guest"
   TR=""; [ "$tracing" = 1 ] && TR="--trace-out /tmp/$RUN-guest.json"
-  remote "cd ~/$RDIR && node tests/e2e/xroom.mjs --role guest --signal $XROOM_LOCAL_IP:$SIG_PORT --code $CODE --gb $GUEST_GB $TR --tag $RUN" > "$OUT/guest.out" 2> "$OUT/guest.log" &
+  remote "cd ~/$RDIR && node tests/e2e/xroom.mjs --role guest --signal $XROOM_LOCAL_IP:$SIG_PORT --code $CODE --gb $GUEST_GB ${GUEST_TUNE[*]} $TR --tag $RUN" > "$OUT/guest.out" 2> "$OUT/guest.log" &
   GPID=$!; PIDS+=("$GPID")
   wait_host
   log "host exited ($RC); waiting for the guest"
@@ -137,7 +139,7 @@ else
   # the guest starts first (through XROOM_GPURUN, which checks this machine's GPU before anything
   # of this run is on it) and waits for the host's code in a file
   TR=(); [ "$tracing" = 1 ] && TR=(--trace-out "$OUT/guest-trace.json")
-  $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role guest --signal "127.0.0.1:$SIG_PORT" --codefile "$OUT/code.txt" --gb "$GUEST_GB" "${TR[@]}" > "$OUT/guest.out" 2> "$OUT/guest.log" &
+  $GPURUN node "$ROOT/tests/e2e/xroom.mjs" --role guest --signal "127.0.0.1:$SIG_PORT" --codefile "$OUT/code.txt" --gb "$GUEST_GB" "${GUEST_TUNE[@]}" "${TR[@]}" > "$OUT/guest.out" 2> "$OUT/guest.log" &
   GPID=$!; PIDS+=("$GPID")
   for _ in $(seq 1 1200); do grep -q "waiting for the room code" "$OUT/guest.log" 2>/dev/null && break; kill -0 "$GPID" 2>/dev/null || break; sleep 1; done
   grep -q "waiting for the room code" "$OUT/guest.log" 2>/dev/null || { log "the guest did not start"; cat "$OUT/guest.out" >&2; exit 1; }

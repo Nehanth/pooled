@@ -15,7 +15,13 @@
 //   both : [--signal cloud] the public PeerJS server (the page's default; rooms with a phone, see
 //          tests/e2e/xroom_phone.mjs); host: [--peers N] wait for N devices, itself included (default 2)
 //   diagnostics (host): [--fixk K] every draft-head step drafts K (the room otherwise picks 3/5/7 by
-//          measured tok/s); [--tune WG,ROWS] forces the GEMV shape the load-time autotune would pick
+//          measured tok/s); [--split memory|speed] the room's layer split (default memory); [--split N,M] layers per device,
+//          host first; [--tune WG,ROWS] forces the GEMV shape the load-time autotune would pick
+//          [--speedpick] the room picks the model host by GPU speed as it would for a user (room/plan.js
+//          pickModelHost): records who took it at Start and whether the room came online, and asks nothing
+//
+// In a two-machine room the model host is this page: the host pins its own GPU speed to "unknown" (?gbps=0), so the room
+// picks by memory and the larger pledge (--gb 13 against the guest's 12) wins, on either machine.
 //
 // The host prints "CODE XXXX" (and writes it to --codefile) once the room exists, waits for the
 // guest, loads the model, then for every mode, prompt and round: new chat, ask, record prefill,
@@ -65,6 +71,15 @@ const TRACE_ROUNDS = new Set(String(arg("trace-rounds", "")).split(",").filter((
 const TRACE = ROLE === "host" ? TRACE_ROUNDS.size > 0 : !!arg("trace-out");
 const QUERY = arg("query", "");   // extra room URL parameters, "a=1&b=2"
 const FIXK = Math.max(0, Math.min(7, parseInt(arg("fixk", "0"), 10) || 0));
+// --split memory|speed: the room's layer split (?split=, pinned to "memory" by default so a run does
+// not depend on load-time layer timings). --split N,M,...: layers per device, host first then the
+// chain in order (must add up to the model's layer count); the placement diagnostic, dealt over the
+// split by memory
+const SPLIT_ARG = String(arg("split", "memory"));
+const SPLIT_MODE = /^(memory|speed)$/.test(SPLIT_ARG) ? SPLIT_ARG : "memory";
+const SPLIT = SPLIT_MODE === SPLIT_ARG ? null : SPLIT_ARG.split(",").map((x) => parseInt(x, 10));
+if (SPLIT && SPLIT.some((x) => !(x > 0))) throw new Error("--split memory|speed|N,M,... with every count > 0");
+const SPEEDPICK = flag("speedpick");
 const TUNE = arg("tune") ? arg("tune").split(",").map((x) => parseInt(x, 10)) : null;   // e.g. 64,4
 if (TUNE && !(TUNE.length === 2 && [64, 128, 256].includes(TUNE[0]) && [4, 8].includes(TUNE[1]))) throw new Error("--tune WG,ROWS with WG 64|128|256 and ROWS 4|8");
 const PROMPTS = {
@@ -98,6 +113,12 @@ function serveRoom(src) {
     : "  ai.tune = await autotuneCoop(ai.device).catch(() => ({ wg: 256, rows: 4 })); window.__xTune = ai.tune;");
   // --fixk K: every draft-head step in a room drafts K (the room otherwise picks 3, 5 or 7 by
   // measured tok/s, which depends on timing); the diagnostic for acceptance against a solo run (K = 3)
+  // --split: deal the given layer counts (the room checks nothing else about the plan)
+  // (SPLIT pins ?split=memory, so this is the split by memory's planSplit)
+  if (SPLIT) src = rep(src, "      ({ assigned, ranges } = planSplit(L, caps));\n", `      ({ assigned, ranges } = planSplit(L, caps));
+    { const f = ${JSON.stringify(SPLIT)}; if (f.length !== assigned.length || f.reduce((a, b) => a + b, 0) !== L) throw new Error("--split " + f + ": need " + assigned.length + " counts adding up to " + L);
+      assigned = f; let a = 0; ranges = f.map((x) => [a, a += x]); }
+`);
   if (FIXK) src = rep(src, "      const pickK = () => {\n", `      const pickK = () => { if (ai.chain.length) return ${FIXK};\n`);
   if (TRACE) {
     src = patchRoom(src);   // includes the __nospec switch
@@ -149,7 +170,8 @@ if (ROLE === "host" && !CLOUD && arg("signal-server", "1") !== "0") {   // a sol
   peerServer = spawn(arg("peerjs", path.join(ROOT, "node_modules/.bin/peerjs")), ["--port", String(SIG_PORT), "--path", "/", "--host", "0.0.0.0"], { stdio: "ignore" });
   await new Promise((r) => setTimeout(r, 1500));
 }
-const BASE = `http://127.0.0.1:${PORT}/p2p.html?${CLOUD ? "" : `signal=${SIGNAL}&`}maxnew=${MAXNEW}&peerweights=0&dev=1&split=${arg("split", "memory")}` + (QUERY ? "&" + QUERY : "");
+const BASE = `http://127.0.0.1:${PORT}/p2p.html?${CLOUD ? "" : `signal=${SIGNAL}&`}maxnew=${MAXNEW}&peerweights=0&dev=1&split=${SPLIT_MODE}` +
+  (ROLE === "host" && !SOLO && !SPEEDPICK ? "&gbps=0" : "") + (QUERY ? "&" + QUERY : "");
 const mac = process.platform === "darwin";
 const ARGS = [...(mac ? [] : ["--no-sandbox", "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"]),
   "--headless=new", "--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--disable-features=WebRtcHideLocalIpsWithMdns", "--js-flags=--max-old-space-size=65536",
@@ -259,6 +281,17 @@ try {
   await p.selectOption("#ai-model", MODEL);
   const tLoad = Date.now();
   await p.click("#ai-start");
+  if (SPEEDPICK) {
+    await p.waitForTimeout(500);
+    out.startStatus = await p.textContent("#ai-status");
+    log("start:", out.startStatus);
+    out.online = await p.waitForFunction(() => document.getElementById("ai-panel").classList.contains("online"), null, { timeout: 15 * 60e3, polling: 2000 }).then(() => true, () => false);
+    out.loadS = Math.round((Date.now() - tLoad) / 1000);
+    out.status = await p.textContent("#ai-status");
+    out.peers = (await snap()).peers;
+    log("online", out.online, "in", out.loadS, "s;", out.status);
+    await finish(0);
+  }
   const poll = setInterval(async () => { try { log(JSON.stringify(await snap()).slice(0, 400)); } catch {} }, 20000);
   await p.waitForFunction(() => document.getElementById("ai-panel").classList.contains("online") || /^failed:/.test(document.getElementById("ai-status").textContent), null, { timeout: 40 * 60e3, polling: 2000 });
   clearInterval(poll);

@@ -6,7 +6,7 @@ import { roomQwen35Options, roomEngineFlags, applyRoomFlags, ROOM_BATCH_COLS, RO
 const eq = (a, b, m) => { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(`${m}: ${x} != ${y}`); };
 const read = (p) => Deno.readTextFileSync(new URL("../../" + p, import.meta.url));
 
-const DEFAULTS = { batchCols: 16, coopRowsB: 1, draftVocab: 65536, draftVocabAuto: true, draftChain: true, specFuse: true,
+const DEFAULTS = { batchCols: 16, coopRowsB: 1, draftVocab: 65536, draftVocabAuto: true, draftChain: true, specFuse: true, hostFuse: true,
   kvQ8: false, moeFuse: true, moeDnRows: 1, gpuSample: true, argmaxWide: true };
 
 Deno.test("preset: the room's defaults with no flags, from every kind of flag source", () => {
@@ -19,6 +19,7 @@ Deno.test("preset: every room ?flag changes its option, the same from a string, 
   const cases = [
     ["draftvocab=0", { draftVocab: 0 }], ["draftvocab=32768", { draftVocab: 32768 }], ["draftvocab=junk", { draftVocab: 0 }],
     ["dvauto=0", { draftVocabAuto: false }], ["draftchain=0", { draftChain: false }], ["specfuse=0", { specFuse: false }],
+    ["hostfuse=0", { hostFuse: false }],
     ["kv=q8", { kvQ8: true }], ["kv=f16", {}], ["moefuse=0", { moeFuse: false }], ["moednrows=4", { moeDnRows: 4 }], ["moednrows=x", {}],
     ["gpusample=0", { gpuSample: false, argmaxWide: false }], ["gpusample=0&argmaxwide=1", { gpuSample: false, argmaxWide: true }],
     ["argmaxwide=0", { argmaxWide: false }], ["gpusample=1", {}], ["draftchain=1", {}],
