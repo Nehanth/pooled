@@ -13,13 +13,14 @@ Sources (for the fact-checker):
 - README.md: intro, "How it works", models table, "Code mode", "Use Pooled from your tools", "Privacy"
 - docs/tech-stack.md: tech table (WebGPU, WebRTC, GGUF, Cache API, hosting)
 - room/models.js: NEED_GB, CTX, PICKER
+- room/joingate.js: CODE_LEN = 6, formatCode ("4TK-G9P"); cli/lib/room.js roomCodeFrom (4 or 6 characters, dash optional)
 */}
 
 Your laptop, a friend's desktop and a phone each hold some of the model's layers. Together they run a model none of them could run alone, each on its own GPU in a browser tab.
 
 ## How a room works
 
-1. Someone opens [pooled.run/room](https://pooled.run/room) and starts a room. They get a four-character code.
+1. Someone opens [pooled.run/room](https://pooled.run/room) and starts a room. They get a six-character code, like `4TK-G9P`.
 2. Other devices join with the code, a link or a QR code. Each one says how much memory it gives the room.
 3. Anyone in the room picks a model and presses **Start the model**. The room deals the model's layers out to the devices.
 4. Each device downloads only its own layers and runs them on its own GPU through WebGPU.
@@ -57,7 +58,7 @@ See [Which models fit](/docs/models) to pick one for the devices you have.
     Switch the room to **Code** and ask for an app. The agent writes the files, runs them in a sandboxed preview, reads its own errors and fixes them.
   </Card>
   <Card title="Serve API" icon="setting">
-    Run `npx @pooled/cli serve ABCD` on your computer. Codex CLI, Claude Code, opencode, Continue, Open WebUI and the OpenAI and Anthropic SDKs then run on the room's model.
+    Run `npx @pooled/cli serve 4TKG9P` on your computer. Codex CLI, Claude Code, opencode, Continue, Open WebUI and the OpenAI and Anthropic SDKs then run on the room's model.
   </Card>
 </CardGrid>
 

@@ -13,11 +13,18 @@ sidebar:
     t 0.4 / top-k 20, greedy), room.js ANSWER_LEN and cap (~L3797: thinking uses MAX_NEW_THINKING = 1200), room/models.js
     (MAX_NEW 400, MAX_NEW_THINKING 1200, CTX, maxSeqFor rounding to 256 and min 2048, kvModeFor), room.js ~L581 (host-controls shown
     when isHost), ~L4241-4247 (style toast "answers now: …"), ~L4012 saveHost (settings and split saved for resume),
-    room/visibility.js, p2p.html #api-allow, PR #234, PR #245, CHANGELOG [Unreleased]. */}
+    room/visibility.js, p2p.html #api-allow, PR #234, PR #245, CHANGELOG [Unreleased].
+    PR #268 (merged): p2p.html #host-controls "Joining" section, #ask-join (checked by default) and its help text; room/joingate.js. */}
 
 Open **Room settings** with the sliders icon at the right of the room's header. On a phone it rises from the bottom as a sheet. The top of it shows how many devices are in the room.
 
-The **Conversation** and **Model** sections show only on the screen of the device that created the room. Everyone sees the **Room** section.
+The **Joining**, **Conversation** and **Model** sections show only on the screen of the device that created the room. Everyone sees the **Room** section.
+
+## Joining
+
+### Ask before new devices join
+
+On by default. A device that types the room code waits until you press **Allow**. Your invite link and QR code let a device in without asking. Off, anyone with the code joins. See [Invite devices](/docs/invite#who-gets-in).
 
 ## Conversation
 

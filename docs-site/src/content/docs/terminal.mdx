@@ -10,7 +10,7 @@ sidebar:
     variant: caution
 ---
 {/*
-Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the gate depends on #268):
+Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gate is PR #268, merged to main):
 - `node cli/bin/pooled.js host --help`, `join --help`, `chat --help`, `--help` (copied below as printed, 2026-09-30)
 - `node cli/bin/pooled.js host --model list` (the five model keys)
 - cli/lib/lend.js: HELP_JOIN, HELP_HOST, parseGb (at least 1, capped at 64), memoryRule (discrete: free less 1.5 GB;
@@ -21,7 +21,8 @@ Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the gate depends on
 - cli/README.md "Talk to a room: pooled chat" and "Lend a computer: pooled join / pooled host" (transcripts,
   reconnect backoff 2/4/8/16/30 s, knock for a minute, --wait 10 min, same-name host only, stable node- name,
   Dawn optional: npx -p @pooled/cli -p webgpu@0.6.1, "Who sees what", macOS 26+ / glibc 2.38+ / Windows untested)
-- PR #270 body: transcripts, "until #268 is deployed … browser tabs join a pooled host room only with --allow-all"
+- PR #270 body: transcripts (its "until #268 is deployed … only with --allow-all" note is out of date: #268 is merged)
+- room/joingate.js on main (#268): the room page sends join: 1, waits in the lobby, takes #k= keys; CHANGELOG #268 entry
 - npm view @pooled/cli version = 0.2.0 (serve only); webgpu 0.6.1; cli/package.json 0.2.1, engines node >=22
 TODO(verify): the npx lines are what the README says users will run once published; not runnable until then.
 */}
@@ -232,9 +233,7 @@ qwen3.6-35b-moe    Qwen3.6 35B MoE · Q4
 
 How much it lends, the status line and Ctrl-C work as for `pooled join`. When the host leaves, the room is over for every device.
 
-:::note[Browser tabs and a pooled host room, for now]
-Until the join gate in [PR #268](https://github.com/Nehanth/pooled/pull/268) is live on pooled.run, the room page can't wait in a lobby. A browser tab or phone gets into a `pooled host` room only when the host runs with `--allow-all`; otherwise it is told to reload. The invite link already opens the room (`/r/CODE` takes six characters today).
-:::
+Browser tabs and phones join a `pooled host` room like any other device: with the invite link at once, with the code alone after you press **a**. See [Who gets in](#who-gets-in).
 
 ### pooled host --help
 
@@ -369,9 +368,7 @@ Room codes are six characters, shown as `4TK-G9P` (you can type them with or wit
 - **Without a terminal**, `pooled host` asks nobody, so a device with the code alone waits until you give it the link. `--allow-all` lets in anyone with the code.
 - **A room page from before the gate** lets everyone in, as it always has. `pooled join` and `pooled chat` walk straight into such a room.
 
-:::note[Coming soon on the room page]
-Six-character codes and the **Allow / Deny** prompt on the room page come with [PR #268](https://github.com/Nehanth/pooled/pull/268), which isn't merged yet. Until then, rooms opened on pooled.run still use four-character codes and let in anyone with the code. See [Invite devices](/docs/invite).
-:::
+Rooms opened on pooled.run work the same way: the host presses **Allow** or **Deny** on the room page. See [Invite devices](/docs/invite#who-gets-in).
 
 ## Who sees what
 

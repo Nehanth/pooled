@@ -1,7 +1,7 @@
 ---
 title: Invite devices
 eyebrow: Getting started
-description: Add a phone, a second laptop or a friend's desktop to your room with a link, a QR code or the four-character room code.
+description: Add a phone, a second laptop or a friend's desktop to your room with a link, a QR code or the room code.
 sidebar:
   label: Invite devices
   order: 3
@@ -11,13 +11,13 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 {/*
 Sources (for the fact-checker):
 - p2p.html: header Invite button and room code badge, #share sheet ("Invite a device", QR, "or type the room code", Copy link, Share…), side panel "Invite more devices" (QR, Copy link, Full-size QR), join screen ("Have a code?", Join, "Chat only, no memory to give"), Network box (TURN)
-- room.js: roomLink() (pooled.run/r/<code>, adds ?signal= when the room is on another signaling server), share-native (navigator.share), start()/joinStep (status lines), leave dialog text, HOST_WAIT_MS = 60000
+- room.js: roomLink() (pooled.run/r/<code>, adds ?signal= when the room is on another signaling server, and #k=<key> on the host), inLobby() ("Waiting for the host to let you in"), refused(), inviteKey() (host only), requestLine()/deviceLabel() ("otter wants to join (Mac, 8 GB)"), share-native (navigator.share), start()/joinStep (status lines), leave dialog text, HOST_WAIT_MS = 60000
 - room/errors.js: joinStep() messages ("Still connecting…", "No room with that code…", "Found the room, but these two devices can't reach each other…")
 - room/compute.js: lendStatus() ("Standing by", "Loading N%", "Serving", "Not holding layers", "Room over", "Host reconnecting", "Layers 1–20 · 2.4 GB · model"), lendNotes() (background tab, screen sleep, battery)
 - PR #236 (Lend this device screen), PR #253/#256 (Serve API page holds it now)
 - room/plan.js codeFromLocation() (code alphabet without I, L, O, U, 0, 1; link auto-joins)
 - room/qr.js (QR code), docs/protocol.md (lifecycle)
-- PR #268 (open, not merged): 6-character codes shown 4TK-G9P, invite key #k=, lobby with Allow / Deny, Room settings → Joining → "Ask before new devices join" (on by default)
+- PR #268 (merged): room/joingate.js (CODE_LEN = 6, formatCode "4TK-G9P", parseCode takes 4 or 6 with or without the dash, invite key #k=, passes, DENIED_TEXT, FULL_TEXT, LOBBY_MAX = 8), p2p.html #join-reqs ("A device wants to join", Allow, Deny, "N more waiting"), Room settings → Joining → "Ask before new devices join" (on by default), #code-input (six boxes, "Older rooms have four. You can also paste an invite link."); CHANGELOG #268 entry
 - origin/main 74744ac (PR #264): the site's TURN relay (/api/turn), p2p.html #join-net text
 */}
 
@@ -28,19 +28,20 @@ Every device you add brings the memory it gives. More memory lets the room run a
 In the room, press **Invite** in the header, or click the room code next to the logo. The **Invite a device** sheet shows three ways in:
 
 - **A QR code.** On a phone, scan it with the camera app.
-- **The room code**, four characters, to type on the other device. Codes never use I, L, O, U, 0 or 1, so they are hard to misread.
-- **A link** like `https://pooled.run/r/K7QX`, with **Copy link**. On devices that support it, **Share…** opens the system share sheet.
-
-:::note[Coming soon (PR #268)]
-Room codes become six characters, shown as `4TK-G9P` (four-character codes of older rooms keep working), and the host decides who gets in:
-
-- A device with the **invite link** or QR code (it carries the room's key after `#k=`) comes in at once.
-- A device that types the **code alone** waits until the host presses **Allow** or **Deny** in a prompt under the header. **Room settings → Joining → Ask before new devices join** (on by default) turns this off.
-
-This is in [PR #268](https://github.com/Nehanth/pooled/pull/268), which isn't merged yet. Today codes are four characters and anyone with the code can join.
-:::
+- **The room code**, six characters shown as `4TK-G9P`, to type on the other device. Codes never use I, L, O, U, 0 or 1, so they are hard to misread. Rooms opened before six-character codes keep their four.
+- **A link** like `https://pooled.run/r/4TKG9P#k=…`, with **Copy link**. On devices that support it, **Share…** opens the system share sheet.
 
 The same QR code, code and **Copy link** button are also beside the model picker, under **Invite more devices**, with a **Full-size QR** button.
+
+## Who gets in
+
+The code finds the room. The host decides who gets in:
+
+- A device with the host's **invite link** or QR code comes in at once. Both carry the room's key after `#k=`. Browsers never send that part to a server. Only the host's link has the key: a link copied on another device in the room gets the same prompt as the code.
+- A device that types the **code alone** waits. The host sees a prompt under the header, for example `otter wants to join (Mac, 8 GB)`, and presses **Allow** or **Deny**. A denied device is told `The host didn't let this device in.`
+- A device the host let in comes back after a reload or a lock without asking again, also after the host reloads.
+
+To let anyone with the code in, turn off **Room settings → Joining → Ask before new devices join**. It is on by default.
 
 ## Join from the other device
 
@@ -49,7 +50,7 @@ The same QR code, code and **Copy link** button are also beside the model picker
     Open the link, or scan the QR code. The page checks the device and joins the room by itself, with a generated name and this device's default memory. Change the memory afterwards under **This device gives**.
   </TabItem>
   <TabItem label="Room code">
-    Open [pooled.run/room](https://pooled.run/room). Set the name and **Memory**, type the four characters under **Have a code?** and press **Join**.
+    Open [pooled.run/room](https://pooled.run/room). Set the name and **Memory**, type the code under **Have a code?** and press **Join**. The dash is optional, and you can paste an invite link instead.
   </TabItem>
 </Tabs>
 
@@ -59,7 +60,7 @@ A device without WebGPU shows **Chat only, no memory to give**. It can still joi
 
 ## While it connects
 
-The join screen says what it is doing: `Connecting…`, then `Reaching the other devices…`. If it takes longer, you see one of these:
+The join screen says what it is doing: `Connecting…`, then `Reaching the other devices…`. A device that joined with the code alone shows `Waiting for the host to let you in` until the host answers. If it takes longer, you see one of these:
 
 | Message | What to do |
 |---|---|

@@ -11,11 +11,12 @@ import { Steps } from '@astrojs/starlight/components';
 {/*
 Sources (for the fact-checker):
 - p2p.html: join screen labels ("This device", "Memory", "Start a room", "Have a code?", "Join"), "Pick a model", "Start the model", "Give 4 GB from this device", "This device gives", join footer text
-- room.js: updateNeed() (need text, "Give N GB", download note), metaPromise (default pledge: half of maxBufferSize, at least min(4 GB, budget) on a computer), start() (4-character code via rand(4)), aiStartAnywhere()/biggestPeerId() (anyone can press Start; model host picked by room/plan.js pickModelHost)
+- room.js: updateNeed() (need text, "Give N GB", download note), metaPromise (default pledge: half of maxBufferSize, at least min(4 GB, budget) on a computer), start() (6-character code via randomCode()), aiStartAnywhere()/biggestPeerId() (anyone can press Start; model host picked by room/plan.js pickModelHost)
 - room/models.js: NEED_GB, FILE_GB (1.83 / 16.06 / 20.84 GB)
 - PR #245 (first run: one laptop gives 4 GB; Start says what it downloads; 1.7B loaded in 35 s on the Spark incl. cold kernel tuning)
 - docs/bench-log.md "2026-09-28: device matrix" (MoE on GB10 alone: host online after 163-168 s)
 - p2p.html #ai-length options (150 / 400 / 1200 tokens)
+- room/joingate.js (CODE_LEN = 6, formatCode "4TK-G9P", invite key #k=), p2p.html #join-reqs (Allow / Deny), Room settings → Joining; CHANGELOG #268 entry
 */}
 
 You need one laptop or desktop with Chrome, Edge or Safari 26. That is enough to run the smallest model on its own. Add more devices later to run bigger ones.
@@ -32,11 +33,9 @@ You need one laptop or desktop with Chrome, Edge or Safari 26. That is enough to
 
 3. **Press Start a room.**
 
-   You get a four-character room code, for example `K7QX`. It shows in the header. Other devices use it to join.
+   You get a six-character room code, shown as `4TK-G9P`. It shows in the header. Other devices use it to join.
 
-   :::note[Coming soon (PR #268)]
-   Six-character codes, shown as `4TK-G9P`, and an **Allow / Deny** prompt for each device that joins with the code alone. A device with the invite link comes in at once. Not merged yet: see [PR #268](https://github.com/Nehanth/pooled/pull/268).
-   :::
+   A device with your invite link or QR code comes in at once. A device that types the code alone waits until you press **Allow** or **Deny**. See [Invite devices](/docs/invite).
 
 4. **Pick a model.**
 

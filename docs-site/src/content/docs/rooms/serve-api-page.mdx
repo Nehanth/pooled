@@ -17,7 +17,8 @@ sidebar:
     room.js API_EXAMPLES (~L4848, the snippets verbatim), api status texts (~L4929), apiCommand (~L4884: adds --signal when the page has ?signal=), API_EX_HINTS (~L4876).
     docs/design/serve.md §6 (Disconnect remembered for the session; Allow API clients default on, saved with the room;
     chat line "*name* · *client* (API)", "via API · not part of this chat's memory"), docs/protocol.md "API clients"
-    (bridge dropped after 6 missed pings, about 15 s). */}
+    (bridge dropped after 6 missed pings, about 15 s).
+    PR #268 (merged): an API client with the code alone waits for Allow like any device; the host's invite link lets it in. */}
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
@@ -143,7 +144,7 @@ Only the host sees these. Other devices see the list without the buttons.
 | **Disconnect** (next to a client) | Closes that client. The room refuses it if it tries to reconnect by itself this session. Restarting `pooled serve` gets back in. |
 | **Allow API clients** (footer, on by default) | Off disconnects every client and refuses new ones. The status then reads "API clients are off in this room". It is saved with the room, so it survives a host reload. |
 
-It is on by default because anyone with the room code can already join and ask. The bridge adds automation, not access.
+It is on by default because a client gets in the same way a device does: with the host's invite link, or after the host presses **Allow** (see [Invite devices](/docs/invite#who-gets-in)). The bridge adds automation, not access.
 
 ## Who sees API requests
 

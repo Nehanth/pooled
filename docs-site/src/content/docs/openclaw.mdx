@@ -17,6 +17,10 @@ Sources (feat/openclaw-pooled 4405d14, draft PR #266):
   "Who can see and steer what", known gaps)
 - `node packages/room-node/join.mjs --help`: usage: node join.mjs <CODE> [--gb N] [--name NAME] [--signal host:port] [--models DIR] [--state FILE]
 - PR #266 body (draft, "please don't merge it yet", nothing published, nothing sent to OpenClaw)
+- vercel.json rewrites: only /room and /r/:code reach the room page, so pooled.run answers 404 on /room/<CODE> (the link
+  the plugin prints); room/plan.js codeFromLocation reads /r/<CODE>
+- room/joingate.js (main, #268): decide() refuses a hello without join: 1 when the host asks before new devices
+  join (OLD_TAB_TEXT); room-node on 4405d14 sends no join, key or pass; parseCode takes 4 or 6 characters
 TODO(verify): OpenClaw install and onboarding were not re-run for this page (no GPU run here); commands copied from the branch docs.
 */}
 
@@ -31,7 +35,7 @@ This is a proof of concept in draft [PR #266](https://github.com/Nehanth/pooled/
 When you pick Pooled, the OpenClaw gateway itself becomes a device in a Pooled room. It holds its share of the model's layers on the local GPU and runs them with Pooled's own engine, on Dawn (npm `webgpu`) inside the gateway's Node process. Other devices join the same room and hold the rest:
 
 - another machine with the plugin, or with `packages/room-node/join.mjs` (no OpenClaw needed);
-- a browser tab or a phone on `https://pooled.run/room/<CODE>`.
+- a browser tab or a phone on `https://pooled.run/r/<CODE>`.
 
 So a model none of the devices can run alone serves the agent, with no API key and no cloud model.
 
@@ -98,7 +102,7 @@ Then follow the Linux steps.
 
 `openclaw onboard` offers **Pooled (run a model across your devices)** with two choices:
 
-- **Start a room on this device.** Pick the model (Qwen3 1.7B, Qwen3.8 27B or Qwen3.6 35B MoE; the MoE is the one for agent work), the GPU memory to lend and how many devices to wait for. It prints the code and `https://pooled.run/room/<CODE>`.
+- **Start a room on this device.** Pick the model (Qwen3 1.7B, Qwen3.8 27B or Qwen3.6 35B MoE; the MoE is the one for agent work), the GPU memory to lend and how many devices to wait for. It prints the code and a link. The link has the form `https://pooled.run/room/<CODE>`, which pooled.run doesn't serve: open `https://pooled.run/r/<CODE>` instead.
 - **Join a room.** Enter the code from the device that started it and the GB to lend.
 
 To lend a second machine's GPU without OpenClaw, from the same checkout:
@@ -107,10 +111,12 @@ To lend a second machine's GPU without OpenClaw, from the same checkout:
 node packages/room-node/join.mjs SPKA --gb 12 --name mac-studio
 ```
 
-Or open `https://pooled.run/room/SPKA` in Chrome or Safari.
+Or open `https://pooled.run/r/SPKA` in Chrome or Safari.
 
-:::note[Use four-character codes]
-When a browser tab or phone joins by typing the code, use a four-character code: the room page's code box keeps four. Onboarding makes four-character codes.
+:::note[Codes and joining]
+Onboarding makes four-character codes. The room page still takes them, in its code box or in a `/r/` link. A room the plugin starts lets in anyone with the code.
+
+**Join a room** and `join.mjs` don't know the room page's **Allow / Deny** yet. To bring them into a room started on pooled.run, turn off **Room settings → Joining → Ask before new devices join** first; otherwise the host turns them away.
 :::
 
 Non-interactive setup: `openclaw onboard --non-interactive --auth-choice pooled` with `POOLED_MODE` (`host` or `join`), `POOLED_CODE`, `POOLED_MODEL` and `POOLED_PLEDGE_GB`.
