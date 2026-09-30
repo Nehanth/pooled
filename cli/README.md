@@ -270,10 +270,10 @@ Anyone with the room code can join, and every device that holds layers computes 
 ```bash
 cd cli && npm install
 node bin/pooled.js serve ABCD --signal 127.0.0.1:9000   # against a room page opened with ?signal=127.0.0.1:9000
-npm run build && npm install --no-save webgpu@0.6.1    # join / host: the room node bundle (dist/) and Dawn
+npm run build && (cd ../packages/room-node && npm install)   # join / host: the room node bundle (dist/) and Dawn
 node bin/pooled.js join ABCD --signal 127.0.0.1:9000
 ```
 
-`npm run build` bundles `packages/room-node` (with `engine/`, `room/`, `harness/` and `cli/lib/`) into `dist/room-node.js` with esbuild; `npm pack` runs it. Without the bundle, `join` and `host` use `packages/room-node` from the checkout. `test/lend_test.mjs` covers argument parsing, the memory rule, the status line and the error messages.
+`npm run build` bundles `packages/room-node` (with `engine/`, `room/`, `harness/` and `cli/lib/`) into `dist/room-node.js` with esbuild; `npm pack` runs it. Without the bundle, `join` and `host` use `packages/room-node` from the checkout. In a checkout, Dawn comes from `packages/room-node`'s own `webgpu` dependency: npm 11 does not install an optional peer dependency into `cli/` (`npm install --no-save webgpu` there reports "up to date" and adds nothing). `test/lend_test.mjs` covers argument parsing, the memory rule, the status line and the error messages.
 
 Unit tests (`tests/unit/serve_*_test.js`, Deno) cover the request mapping and the byte-exact streams; `tests/e2e/serve.mjs` runs a real room with Qwen3 1.7B in headless Chromium and checks both APIs end to end, with the official SDKs. Design: [docs/design/serve.md](../docs/design/serve.md).

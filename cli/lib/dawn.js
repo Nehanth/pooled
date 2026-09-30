@@ -8,7 +8,11 @@
 //   2. webgpu: the upstream package, installed next to @pooled/cli
 //      (npm i -g @pooled/cli webgpu@0.6.1, or npx -p @pooled/cli -p webgpu@0.6.1 pooled join CODE).
 // Each is resolved from this package's own install, so a global install finds a global sibling.
+// In a Pooled checkout it is also looked up from packages/room-node, which depends on webgpu:
+// npm 11 won't add an optional peer dependency to cli/ itself (`npm install --no-save webgpu` in
+// cli/ is "up to date" and installs nothing), so (cd packages/room-node && npm install) is the way there.
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 export const DAWN_VERSION = "0.6.1";   // the webgpu release the engine is tested on (packages/room-node)
@@ -24,8 +28,18 @@ export function dawnMissing(cmd = "join", cause = null) {
 }
 
 // -> an async loader for setupNode({ webgpu }) that throws dawnMissing() when nothing is installed.
+// name -> path, or throws: from this package's install, then from a checkout's packages/room-node
+function defaultResolve(name) {
+  try { return createRequire(import.meta.url).resolve(name); }
+  catch (e) {
+    const rn = new URL("../../packages/room-node/package.json", import.meta.url);
+    if (!existsSync(rn)) throw e;
+    return createRequire(rn).resolve(name);
+  }
+}
+
 // resolve(name) -> path (or throws); injected for tests
-export function dawnLoader(cmd, { resolve = createRequire(import.meta.url).resolve, load = (p) => import(pathToFileURL(p).href) } = {}) {
+export function dawnLoader(cmd, { resolve = defaultResolve, load = (p) => import(pathToFileURL(p).href) } = {}) {
   return async () => {
     let lastErr = null;
     for (const name of dawnPackages()) {
