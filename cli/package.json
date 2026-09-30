@@ -1,6 +1,6 @@
 {
   "name": "@pooled/cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Serve a Pooled room as a local OpenAI and Anthropic compatible endpoint: pooled serve <ROOM CODE>.",
   "homepage": "https://pooled.run",
   "repository": {

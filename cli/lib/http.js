@@ -4,7 +4,7 @@
 // stream (answer.js). docs/design/serve.md sections 3, 4 and 11.
 import http from "node:http";
 import { timingSafeEqual, createHash } from "node:crypto";
-import { ApiError, bad, clientFromUA, newRid, LIMITS, cleanText, finishRequest, askBody, needsV2, OLD_HOST_MSG } from "./common.js";
+import { ApiError, bad, clientFromUA, newRid, LIMITS, cleanText, finishRequest, askBody, needsV2, OLD_HOST_MSG, outcome } from "./common.js";
 import { adapter as openai, openaiModels } from "./openai.js";
 import { adapter as anthropic, anthropicModels } from "./anthropic.js";
 import { adapter as responses } from "./responses.js";
@@ -34,11 +34,21 @@ const matches = (route, path) => (typeof route.path === "string" ? route.path ==
 // it refuses its own ~15 k prompt ("Prompt is too long") before sending anything. A quarter of the
 // room's context, at most its default, leaves the prompt room (checked with 2.1.285 at 8 k to 64 k).
 export const claudeOutput = (ctx) => Math.max(1024, Math.min(32000, Math.floor(ctx / 4)));
-export function agentSettings(ctx, port) {
+// opencode (@ai-sdk/openai-compatible) takes the context and an output limit per model: a quarter of
+// the context, at most 8192, as for Claude Code
+export const opencodeOutput = (ctx) => Math.min(8192, claudeOutput(ctx));
+// a whole opencode.json for the room: the provider, and the model picked (model: the /v1/models id)
+export function opencodeConfig(ctx, port, model = "pooled", label = model) {
+  return { provider: { pooled: { npm: "@ai-sdk/openai-compatible", name: "Pooled room", options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "x" },
+    models: { [model]: { name: label, tool_call: true, limit: { context: ctx, output: opencodeOutput(ctx) } } } } }, model: `pooled/${model}` };
+}
+export function agentSettings(ctx, port, { model, label } = {}) {
   if (!ctx) return [];
   return [`For this room's ${ctx}-token context:`,
     `  Codex        model_context_window = ${ctx}, model_auto_compact_token_limit = ${Math.floor(ctx * 0.8)}  (~/.codex/config.toml)`,
-    `  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:${port} CLAUDE_CODE_MAX_CONTEXT_TOKENS=${ctx} CLAUDE_CODE_MAX_OUTPUT_TOKENS=${claudeOutput(ctx)} CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled`, ""];
+    `  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:${port} CLAUDE_CODE_MAX_CONTEXT_TOKENS=${ctx} CLAUDE_CODE_MAX_OUTPUT_TOKENS=${claudeOutput(ctx)} CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled`,
+    `  opencode     OPENCODE_DISABLE_CLAUDE_CODE=1 opencode, with this opencode.json:`,
+    `    ${JSON.stringify(opencodeConfig(ctx, port, model || "pooled", label || model || "pooled"))}`, ""];
 }
 
 export function createServer({ bridge, port, token = null, maxQueue = 8, log = () => {}, version = "", keepAliveMs = KEEPALIVE_MS, idleMs = IDLE_MS, hostQueuedMs = HOST_QUEUED_MS }) {
@@ -144,7 +154,9 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
   // the answer is complete: the final events, or the whole response
   function complete(job, a) {
     served.n++;
-    log(`${job.label}: ${a.usage.in} prompt + ${a.usage.out} tokens, ${a.reason}${a.calls.length ? `, ${a.calls.length} call${a.calls.length > 1 ? "s" : ""}` : ""}${a.reused ? `, ${a.reused} reused` : ""}`);
+    // the finish reason the client sees: a turn that ends in calls is tool_calls, not the room's "stop"
+    const why = outcome(a, job.req) === "tool" ? "tool_calls" : a.reason;
+    log(`${job.label}: ${a.usage.in} prompt + ${a.usage.out} tokens, ${why}${a.calls.length ? `, ${a.calls.length} call${a.calls.length > 1 ? "s" : ""}` : ""}${a.reused ? `, ${a.reused} reused` : ""}`);
     if (job.stream) { job.enc.done(a); job.sse.end(); }
     else json(job.res, 200, job.adapter.final(a, job.req));
     try { job.adapter.after?.(a, job.req); } catch (e) { log(`${job.label}: ${e.message}`); }
@@ -240,7 +252,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     return [`pooled serve ${version} · room ${bridge.code} · ${bridge.ready ? modelLabel() : "model not ready yet"}${ctx ? ` · ${ctx} tokens of context` : ""}`, "",
       `OpenAI     http://127.0.0.1:${bound}/v1        POST /v1/chat/completions, POST /v1/responses, GET /v1/models`,
       `Anthropic  http://127.0.0.1:${bound}           POST /v1/messages`,
-      `Health     http://127.0.0.1:${bound}/health`, "", ...agentSettings(ctx, bound)].join("\n");
+      `Health     http://127.0.0.1:${bound}/health`, "", ...(bridge.ready ? agentSettings(ctx, bound, { model: modelId(), label: bridge.modelLabel || bridge.model }) : [])].join("\n");
   }
 
   // which adapter's error shape a path gets
