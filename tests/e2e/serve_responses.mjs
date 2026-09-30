@@ -12,6 +12,10 @@
 // encrypted_content restoring the reasoning; text.format json_schema; tool_choice required;
 // GET / DELETE of a stored response; Codex CLI reading a file with exec_command (agents/codex.mjs).
 // Prints one JSON line with every check; exit code 0 only when all passed.
+//
+// 2026-09-29 on the Spark (--query ctx=32768): Qwen3.6 35B MoE 21 of 21. Qwen3 1.7B 19 of 21: every
+// API check passes, but under Codex's long prompt the 1.7B says it will run the command instead of
+// calling exec_command (a model limit; use the MoE, or --no-codex, for the 1.7B).
 import { chromium } from "playwright";
 import http from "http";
 import https from "https";
