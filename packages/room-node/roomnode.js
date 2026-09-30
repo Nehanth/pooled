@@ -60,6 +60,8 @@ import { parseServer, openPeer, reconnectDelay, FALLBACK_ERRORS } from "../../ro
 import { withDefaults, finishRequest, askBody, needsV2, ApiError } from "../../cli/lib/common.js";
 import { chatRecipients } from "../../room/visibility.js";
 import { Ask, Collector } from "../../cli/lib/answer.js";
+import { hostGate, gateHelloFields, holdConn, allowJoin, denyJoin, waitingJoins, joinHelloFields, deviceGateMessage, onHostHello,
+  keyFragment, randomCode, CODE_LEN } from "./gate.js";
 
 export const PREFIX = "pooled-room-";
 const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
@@ -88,8 +90,13 @@ export class RoomNode extends EventEmitter {
   // whoever asked; an agent host uses "asker" so its prompts and answers stay off other devices'
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
-    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null } = {}) {
+    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null } = {}) {
     super();
+    // joining (gate.js, docs/protocol.md "Joining a room"). A device: the invite key from its link and the
+    // pass the host gave it; admission: null | "wait" | "lobby" | "in". A host: its gate (createRoom), and
+    // the links waiting in its lobby
+    this.key = key; this.pass = pass; this.admission = null;
+    this.gate = null; this.lobbyConns = new Map(); this.protocol = PROTOCOL;
     this.setup = setup;   // setupNode options (webgpu: a loader for Dawn, dawnFlags)
     // a worker: the host's name it will serve under this code (a rejoin after the room was over).
     // Room codes are short and reusable; a host of another name is another room, which this device
@@ -176,16 +183,24 @@ export class RoomNode extends EventEmitter {
   accept(conn) {
     guardChunks(conn);
     conn.on("open", () => {
+      // a host with a gate: a new link waits in the lobby until its hello lets it in (gate.js)
+      if (this.isHost && this.gate && holdConn(this, conn)) return;
       if (conn.label === "stripe") {   // extra association for the wire, not a new peer
         const e = this.conns.get(conn.peer);
-        if (e) { attachWire(e.link, conn, (m) => this.onData(conn.peer, m)); e.stripes.push(conn); }
+        if (e) this.attachStripe(e, conn);
         return;
       }
       this.wire(conn);
       conn.send(this.helloMsg());
     });
   }
-  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax() } : this.meta, v: PROTOCOL, ...extra }; }
+  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax() } : this.meta, v: PROTOCOL, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
+  attachStripe(e, conn) { attachWire(e.link, conn, (m) => this.onData(conn.peer, m)); e.stripes.push(conn); }
+  // host: the room's invite link fragment (#k=...), and Allow / Deny for a device in the lobby
+  get inviteFragment() { return keyFragment(this.gate?.key); }
+  allowJoin(id) { return allowJoin(this, id); }
+  denyJoin(id) { return denyJoin(this, id); }
+  waitingJoins() { return waitingJoins(this); }
   // a new link replaces any older one to the same peer id (a device that came back): the old one's
   // close handler sees it is not current and does nothing
   wire(conn, name, initiator = false) {
@@ -341,6 +356,7 @@ export class RoomNode extends EventEmitter {
             return;
           }
         }
+        if (!this.isHost && from === PREFIX + this.code) onHostHello(this, d);
         d.meta = helloMeta(d.meta, this.isHost);
         // a device coming back under its own name while its old link is still open but silent (a
         // phone back from a lock): the old link is dead, drop it now (room.js dropStaleNamesake)
@@ -371,6 +387,7 @@ export class RoomNode extends EventEmitter {
         return;
       }
       case "leaving": try { e?.conn.close(); } catch {} return;
+      case "lobby": case "admit": if (!this.isHost && from === PREFIX + this.code) deviceGateMessage(this, d); return;
       case "bye": this.log(`bye from ${e?.name || from}: ${d.reason}`); this.emit("bye", d.reason); return;
       case "roster":
         if (from !== PREFIX + this.code) return;
@@ -556,6 +573,7 @@ export class RoomNode extends EventEmitter {
     const ai = this.ai;
     this.failWaiters(new Error("the host left"));
     this.log("lost the link to the host");
+    this.admission = null;   // back in through the gate (with the pass it was given) when it knocks
     this.emit("hostgone");
     if (this.closing || this.knock || this.otherHost) return;
     const hostId = PREFIX + this.code, t0 = Date.now();
@@ -576,7 +594,7 @@ export class RoomNode extends EventEmitter {
         if (this.conns.has(hostId)) { try { conn.close(); } catch {} return; }
         clearInterval(this.knock); this.knock = null;
         this.wire(conn, "host", true);
-        conn.send(this.helloMsg({ back: 1 }));
+        conn.send(this.helloMsg({ back: 1, ...joinHelloFields(this) }));
         ai.hostId = hostId;
         this.log("back in the room");
         this.emit("back");
@@ -1384,8 +1402,10 @@ export class RoomNode extends EventEmitter {
     this.closing = true;
     clearInterval(this.pingTimer); clearInterval(this.knock); clearTimeout(this.ai.idleRedeal);
     try { this.broadcast({ t: "leaving" }); } catch {}
+    for (const L of this.lobbyConns.values()) try { L.conn.send({ t: "bye", reason: "the room closed" }); } catch {}
     await new Promise((r) => setTimeout(r, 200));
     try { this.peer?.destroy(); } catch {}
+    this.lobbyConns.clear();
     clearTimeout(this.ai.idleRedeal);
     this.failWaiters(new Error("the room closed"));
     this.ai.online = false; this.ai.chain = []; this.ai.ckpt = null;
@@ -1431,9 +1451,14 @@ export function eventEncoder(push) {
 }
 
 // Host a room on this machine. -> the RoomNode (room.code, room.start(), room.ask(), room.close())
-export async function createRoom({ model = "qwen3-1.7b", pledgeGB, code = randCode(4), ...opts } = {}) {
+// gate: hold links at the room page's gate (gate.js; pooled host turns it on). Off by default, so a
+// caller without a way to answer join requests (the OpenClaw plugin) keeps a room anyone with the code
+// joins, as before. ask (with the gate): hold new devices until allowJoin() (default), false to let
+// anyone with the code in; a device with the room's invite key (node.inviteFragment) is let in either way
+export async function createRoom({ model = "qwen3-1.7b", pledgeGB, code = randomCode(CODE_LEN), ask = true, gate = false, ...opts } = {}) {
   const node = new RoomNode({ pledgeGB, ...opts });
   node.isHost = true; node.code = code; node.ai.model = model; node.ai.role = "host";
+  if (gate) node.gate = hostGate({ ask });
   await node.open(PREFIX + code);
   return node;
 }
@@ -1457,7 +1482,7 @@ export async function joinRoom(code, { pledgeGB, joinMs = 20000, ...opts } = {})
       guardChunks(conn);
       conn.on("open", () => {
         node.wire(conn, "host", true);
-        conn.send(node.helloMsg());
+        conn.send(node.helloMsg(joinHelloFields(node)));
         clearTimeout(t); node.peer.off("error", onPeerErr); resolve();
       });
       conn.on("error", (e) => fail(e));

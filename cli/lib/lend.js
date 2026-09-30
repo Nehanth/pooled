@@ -2,7 +2,7 @@
 // argument parsing, how much memory to lend (the memory rule), the status line, and what an error
 // tells the person at the terminal. cli/lib/lendrun.js runs the room node with them.
 import { parseArgs } from "node:util";
-import { roomCodeFrom } from "./room.js";
+import { roomCodeFrom, roomKeyFrom } from "./room.js";
 import { cleanText } from "./common.js";
 
 export const DESK_MAX_GB = 64;          // room/pledge.js: the most one computer lends a room
@@ -13,11 +13,15 @@ export const LINUX_AVAIL_SLACK_GB = 2;  // unified memory on Linux: never more t
 export const UPDATE_HINT = "npx @pooled/cli@latest";
 
 export const HELP_JOIN = `Usage
-  pooled join <ROOM CODE | room link> [options]
+  pooled join <ROOM CODE | "room link"> [options]
 
   Lends this computer's GPU to a Pooled room: the room's host deals this device some of the
   model's layers, and they run here until you press Ctrl-C (which leaves the room and frees the GPU).
   Needs a GPU that Dawn can use (Metal on macOS 26+, Vulkan on Linux, D3D12 on Windows).
+
+  Getting in: with the room's invite link (in quotes: "https://pooled.run/r/4TKG9P#k=..."), the
+  host lets this computer in at once. With the code alone (4TK-G9P), a host that asks before new
+  devices join sees "<name> wants to join" and this waits until it presses Allow.
 
 Options
   --gb <n|max>      how much memory to lend, in GB. Default: the memory rule, printed at start:
@@ -34,21 +38,27 @@ Options
                     (default 10); only a host of the same name: a room code can be reused by a
                     new room, and pooled join never joins a room you did not name
 
-  Every device that holds layers computes on every prompt in the room: this computer sees the
-  hidden states of what is asked there (they carry the prompts and answers), and anyone with the
-  room code can use what it lends. Lend to rooms you trust.
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
   -h, --help        this help
+
+  Every device that holds layers computes on every prompt in the room: this computer sees the
+  hidden states of what is asked there (they carry the prompts and answers), and whoever the host
+  lets in can use what it lends. Lend to rooms you trust.
 `;
 
 export const HELP_HOST = `Usage
   pooled host [options]
 
   Opens a new Pooled room on this computer, which holds the embedding, the head and its share of the
-  layers. Other devices join with the code (a browser tab, a phone, or pooled join). In a terminal,
-  press Enter to deal the layers over the devices in the room, and Enter again to re-deal after more
-  join. Ask from the room page, or from your own tools with pooled serve <CODE>.
+  layers. Other devices join with the invite link it prints (a browser tab, a phone, pooled join) or
+  with the code. In a terminal, press Enter to deal the layers over the devices in the room, and
+  Enter again to re-deal after more join. Ask from the room page, from the terminal with
+  pooled chat, or from your own tools with pooled serve.
+
+  Who gets in: a device with the invite link (its #k= key) comes in at once. One with the code
+  alone waits until you let it in: in a terminal, press a to allow the oldest request, d to deny
+  it. Without a terminal it waits for good (give it the link), unless you pass --allow-all.
 
 Options
   --model <key>     the model (default qwen3-1.7b; --model list prints them)
@@ -56,7 +66,9 @@ Options
   --devices <n>     deal the layers as soon as n devices (this one included) are in the room,
                     and again when the room went on without one and n are back; the default
                     without a terminal is 1 (start at once)
-  --code <CODE>     the room code to use (default: a random one)
+  --code <CODE>     the room code to use (default: a random one of six characters)
+  --allow-all       let in anyone with the room code, without asking (the invite link is not
+                    needed; also lets in room pages from before the gate)
   --ctx <n>         the context to ask for, in tokens (default: the model's room default)
   --name <s>        how the room shows this device
   --signal <spec>   PeerJS signaling server(s), as pooled join
@@ -66,9 +78,9 @@ Options
   --quiet           only errors and the status line
   -h, --help        this help
 
-  Anyone with the room code can join, and every device that holds layers sees the hidden states
-  of what is asked in the room (they carry the prompts and answers). Share the code only with
-  devices you trust.
+  Every device that holds layers sees the hidden states of what is asked in the room (they carry
+  the prompts and answers), and whoever is in can ask. Share the invite link only with people you
+  trust, and let in only devices you know.
 `;
 
 export class UsageError extends Error {}
@@ -93,7 +105,7 @@ const COMMON = {
 export function parseLendArgs(cmd, argv, { models = null } = {}) {
   const options = cmd === "join"
     ? { ...COMMON, wait: { type: "string" } }
-    : { ...COMMON, model: { type: "string" }, devices: { type: "string" }, code: { type: "string" }, ctx: { type: "string" } };
+    : { ...COMMON, model: { type: "string" }, devices: { type: "string" }, code: { type: "string" }, ctx: { type: "string" }, "allow-all": { type: "boolean" } };
   let r;
   try { r = parseArgs({ args: argv, options, allowPositionals: true, strict: true }); }
   catch (e) { throw new UsageError(e.message.replace(/^.*?: /, "")); }
@@ -105,14 +117,16 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
   if (cmd === "join") {
     if (pos.length > 1) throw new UsageError(`one room code, not ${pos.length}: ${pos.join(" ")}`);
     const code = roomCodeFrom(pos[0]);
-    if (!code) throw new UsageError(`give a room code (4 to 6 letters and digits) or a room link${pos[0] ? `, not "${pos[0]}"` : ""}`);
+    if (!code) throw new UsageError(`give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link${pos[0] ? `, not "${pos[0]}"` : ""}`);
     out.code = code;
+    out.key = roomKeyFrom(pos[0]);   // the invite link's #k=: in without the host's Allow
     const wait = o.wait == null ? 10 : Number(o.wait);
     if (!Number.isFinite(wait) || wait < 0) throw new UsageError("--wait must be a number of minutes");
     out.waitMs = wait * 60000;
   } else {
     if (pos.length) throw new UsageError(`pooled host takes no room code (it makes one; --code picks it): "${pos[0]}"`);
     out.model = o.model || "qwen3-1.7b";
+    out.allowAll = !!o["allow-all"];
     if (out.model !== "list" && models && !hostable(models).includes(out.model))
       throw new UsageError(`unknown model "${out.model}"; one of: ${hostable(models).join(", ")}`);
     if (o.devices != null) {
@@ -121,9 +135,9 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
       out.devices = n;
     }
     if (o.code != null) {
-      const c = String(o.code).toUpperCase();
-      // room/plan.js codeFromLocation's alphabet: no I, L, O, U, 0, 1 (they read alike)
-      if (!/^[ABCDEFGHJKMNPQRSTVWXYZ2-9]{4,6}$/.test(c)) throw new UsageError("--code must be 4 to 6 letters and digits, without I, L, O, U, 0 or 1");
+      const c = String(o.code).toUpperCase().replace(/[\s-]/g, "");
+      // room/joingate.js's alphabet: no I, L, O, U, 0, 1 (they read alike); six characters, or four as older rooms
+      if (!/^[ABCDEFGHJKMNPQRSTVWXYZ2-9]{6}$|^[ABCDEFGHJKMNPQRSTVWXYZ2-9]{4}$/.test(c)) throw new UsageError("--code must be 6 (or 4) letters and digits, without I, L, O, U, 0 or 1");
       out.roomCode = c;
     }
     if (o.ctx != null) {
@@ -218,6 +232,8 @@ export function afterCheck(rule, gotGB) {
   return { ...rule, gb, why: `${rule.why}; the GPU gave only ${fmtGb(gotGB)} GB in a test allocation, so ${gb} GB` };
 }
 
+// a room code as people read it: six in two groups of three ("4TK-G9P"); four as they were
+export const fmtCode = (c) => (String(c || "").length === 6 ? `${c.slice(0, 3)}-${c.slice(3)}` : String(c || ""));
 export const fmtGb = (x) => (Math.round(x * 10) / 10).toString();
 
 // ---------------- the status line ----------------
@@ -225,18 +241,19 @@ export const fmtGb = (x) => (Math.round(x * 10) / 10).toString();
 // phases: connecting | waiting | ready | loading | online | answering | degraded | hostgone | rejoining | leaving
 export function formatStatus(s, width = 0) {
   const phase = {
-    connecting: "connecting", waiting: s.hosting ? "waiting for devices" : "waiting for the host to deal layers",
+    connecting: "connecting", lobby: "waiting for the host to let you in", waiting: s.hosting ? "waiting for devices" : "waiting for the host to deal layers",
     ready: "layers loaded: waiting for the rest of the room",
     guest: "in the room without layers (the host re-deals to include this device)",
     loading: `loading layers${s.pct != null ? ` ${s.pct}%` : ""}`, online: "online", answering: "answering",
     degraded: "a device left: waiting for it", hostgone: "lost the host: knocking", rejoining: `rejoining${s.tries ? ` (try ${s.tries})` : ""}`,
     leaving: "leaving",
   }[s.phase] || s.phase;
-  const parts = [`room ${s.code}`, phase];
+  const parts = [`room ${fmtCode(s.code)}`, phase];
   if (s.devices != null) parts.push(`${s.devices} device${s.devices === 1 ? "" : "s"}`);
   if (s.range) parts.push(`layers ${s.range[0]}-${s.range[1] - 1}${s.embed ? " + embed/head" : ""}${s.model ? ` of ${s.model}` : ""}`);
   else if (s.model && s.hosting) parts.push(s.model);
   if (s.tps != null) parts.push(`${s.tps.toFixed(1)} tok/s`);
+  if (s.lobby > 0) parts.push(`${s.lobby} waiting to join`);
   parts.push(`${s.passes || 0} pass${s.passes === 1 ? "" : "es"}`);
   if (s.signaling === false) parts.push("signaling down (links still up)");
   const line = parts.join(" · ");

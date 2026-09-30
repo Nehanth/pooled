@@ -260,3 +260,20 @@ test("autoRedeal: --devices re-deals when N are back, only for devices the last 
   assert.equal(autoRedeal(3, { ...base, chain: [], peers: ["mac"], dealt: new Set() }), false);
   assert.equal(autoRedeal(undefined, { ...base, chain: [], peers: ["mac"], dealt: new Set() }), false);
 });
+
+test("join security: a quoted invite link gives its key; six-character codes grouped or not; host --allow-all and --code 4TK-G9P", () => {
+  const KEY = "AbCdEfGhIjKlMnOpQrStUv";
+  const j = parseLendArgs("join", [`https://pooled.run/r/4TKG9P#k=${KEY}`]);
+  assert.equal(j.code, "4TKG9P"); assert.equal(j.key, KEY);
+  assert.equal(parseLendArgs("join", ["4tk-g9p"]).key, null);
+  assert.equal(parseLendArgs("join", ["4tk-g9p"]).code, "4TKG9P");
+  assert.throws(() => parseLendArgs("join", ["4TKG9"]), (e) => e instanceof UsageError && /six letters and digits like 4TK-G9P/.test(e.message));
+  const h = parseLendArgs("host", ["--allow-all", "--code", "4tk-g9p"], { models: MODELS });
+  assert.equal(h.allowAll, true); assert.equal(h.roomCode, "4TKG9P");
+  assert.equal(parseLendArgs("host", [], { models: MODELS }).allowAll, false);
+  assert.throws(() => parseLendArgs("host", ["--code", "4TKG9"], { models: MODELS }), UsageError);
+  assert.match(HELP_HOST, /--allow-all/); assert.match(HELP_HOST, /press a to allow/);
+  assert.match(HELP_JOIN, /invite link/);
+  assert.equal(formatStatus({ code: "4TKG9P", phase: "lobby", passes: 0 }), "room 4TK-G9P · waiting for the host to let you in · 0 passes");
+  assert.equal(formatStatus({ code: "4TKG9P", phase: "online", hosting: true, devices: 1, lobby: 2, passes: 0 }), "room 4TK-G9P · online · 1 device · 2 waiting to join · 0 passes");
+});

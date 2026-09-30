@@ -5,11 +5,11 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import { parseLendArgs, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
-  hostable, autoRedeal, fmtGb, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
+  hostable, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
 import { dawnLoader } from "./dawn.js";
 import { cleanText } from "./common.js";
 
-const ROOM_URL = "https://pooled.run/room/";
+const ROOM_URL = "https://pooled.run/r/";
 
 // the room node: the bundle built into dist/ (npm run build; what the npm package ships), else the
 // package in a Pooled checkout
@@ -124,8 +124,8 @@ function header(out, { title, adapterName, mem, rule, hosting = false }) {
   GPU      ${gpu}
   lending  ${rule.gb} GB  (${rule.why}${rule.why.startsWith("--gb") || rule.why.includes("--gb sets it") ? "" : "; --gb to change"})
   ${hosting
-    ? "anyone with the room code can join, and every device holding layers sees the hidden states of\n  what is asked here (they carry the prompts and answers): share the code only with devices you trust"
-    : "anyone with the room code can use what this computer lends, and it sees the room's hidden states\n  (they carry the prompts and answers): lend to rooms you trust"}
+    ? "every device holding layers sees the hidden states of what is asked here (they carry the prompts\n  and answers), and whoever is in can ask: share the invite link only with people you trust"
+    : "whoever the host lets in can use what this computer lends, and it sees the room's hidden states\n  (they carry the prompts and answers): lend to rooms you trust"}
   Ctrl-C leaves the room and frees the GPU`);
 }
 
@@ -136,7 +136,8 @@ async function runJoin(opts, out) {
   const name = opts.name || deviceName(os.hostname());
   let hostName = null;   // the host this run joined: a rejoin only goes back to a host of that name
   const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
-  header(out, { title: `pooled join · room ${code}`, adapterName, mem, rule });
+  header(out, { title: `pooled join · room ${fmtCode(code)}`, adapterName, mem, rule });
+  let pass = null;   // what the host gave this device when it let it in: back in without asking
   const passes = passCounter();
   const S = { code, phase: "connecting", devices: null, range: null, model: null, tps: null, passes: 0, pct: null, tries: 0, signaling: true, answering: false };
   let node = null, leaving = false, ended = null, rejoinP = null;
@@ -148,16 +149,18 @@ async function runJoin(opts, out) {
     if (node && S.phase !== "rejoining" && S.phase !== "leaving" && S.phase !== "connecting") {
       const st = node.status();
       S.devices = st.devices.length || null; S.range = st.range; S.model = st.model; S.passes = passes(node, st.passes); S.signaling = st.signaling;
-      S.phase = hostGone ? "hostgone" : st.loading ? "loading" : st.degraded ? "degraded" : st.online ? (!st.range ? "guest" : S.answering ? "answering" : "online") : st.range ? "ready" : "waiting";
+      S.phase = hostGone ? "hostgone" : node.admission === "lobby" ? "lobby" : st.loading ? "loading" : st.degraded ? "degraded" : st.online ? (!st.range ? "guest" : S.answering ? "answering" : "online") : st.range ? "ready" : "waiting";
     }
     out.status(S);
   };
   const joinOnce = () => rn.joinRoom(code, { pledgeGB: rule.gb, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
-    expectHost: hostName, log: (m) => out.log(m) });
+    expectHost: hostName, key: opts.key, pass, log: (m) => out.log(m) });
   const attach = (n) => {
     n.on("loadprogress", (pct) => { S.pct = pct; });
     n.on("loaded", (x) => { S.pct = null; out.log(`holding layers ${x.range[0]}-${x.range[1] - 1} of ${x.model} (loaded in ${x.s.toFixed(1)} s)`); });
     n.on("hostgone", () => { hostGone = true; S.answering = false; });
+    n.on("lobby", () => { tick(); });
+    n.on("admitted", () => { if (n.pass) pass = n.pass; tick(); });
     n.on("back", () => { hostGone = false; });
     n.on("signaling", (up) => { S.signaling = up; });
     n.on("chat", (d) => {
@@ -202,7 +205,7 @@ async function runJoin(opts, out) {
   const bye = async (sig) => {
     if (leaving) { out.done(); process.exit(130); }
     leaving = true; S.phase = "leaving"; tick();
-    out.log(`leaving room ${code} and freeing the GPU${sig ? " (again to quit at once)" : ""}`);
+    out.log(`leaving room ${fmtCode(code)} and freeing the GPU${sig ? " (again to quit at once)" : ""}`);
     try { await node?.close(); } catch {}
     out.done();
     process.exit(0);
@@ -211,7 +214,7 @@ async function runJoin(opts, out) {
   node = await joinOnce();
   attach(node);
   S.phase = "waiting";
-  out.log(`joined room ${code} as ${node.name}${node.server && node.server.spec !== "cloud" ? ` (signaling: ${node.server.label})` : ""}`);
+  out.log(`reached room ${fmtCode(code)} as ${node.name}${node.server && node.server.spec !== "cloud" ? ` (signaling: ${node.server.label})` : ""}`);
   const timer = setInterval(tick, 1000);
   // plain (non-TTY) output: a status line when the phase changes, and once a minute while it runs
   if (!out.tty) {
@@ -232,20 +235,24 @@ async function runHost(opts, out) {
   const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
   if (!hostable(rn.MODELS).includes(opts.model)) throw new UsageError(`unknown model "${opts.model}"; one of: ${hostable(rn.MODELS).join(", ")}`);
   const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name, signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
-    setup: { webgpu: loader }, log: (m) => out.log(m), ...(opts.roomCode ? { code: opts.roomCode } : {}) });
+    gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log: (m) => out.log(m), ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   const code = node.code;
-  header(out, { title: `pooled host · room ${code} · ${rn.MODELS[opts.model].label}`, adapterName, mem, rule, hosting: true });
-  out.print(`  join     ${ROOM_URL}${code}   or   pooled join ${code}
-  ask      on the room page, or from your own tools: pooled serve ${code}`);
+  // the invite link: its #k= key lets a device in without asking (a room node from before the gate has none)
+  const link = `${ROOM_URL}${code}${node.inviteFragment || ""}`;
+  header(out, { title: `pooled host · room ${fmtCode(code)} · ${rn.MODELS[opts.model].label}`, adapterName, mem, rule, hosting: true });
+  out.print(`  invite   ${link}
+  join     pooled join "${link}"
+  chat     pooled chat "${link}"      (your own tools: pooled serve "${link}")
+  ${opts.allowAll ? `--allow-all: anyone with the code ${fmtCode(code)} comes in without asking` : `with the code ${fmtCode(code)} alone, a device waits until you let it in${process.stdin.isTTY ? " (a allows, d denies)" : ""}`}`);
   const passes = passCounter();
-  const S = { code, hosting: true, phase: "waiting", devices: 1, range: null, embed: true, model: opts.model, tps: null, passes: 0, signaling: true };
+  const S = { code, hosting: true, lobby: 0, phase: "waiting", devices: 1, range: null, embed: true, model: opts.model, tps: null, passes: 0, signaling: true };
   let leaving = false, solo = 0, starting = null;
   node.on("prefill", (x) => { if (x.count && x.tDecode) S.tps = x.count / (x.tDecode / 1000); if (!node.ai.chain.length) solo += x.count + (x.prefilled ? 1 : 0); });
   node.on("signaling", (up) => { S.signaling = up; });
   node.on("version", (v) => out.log(`${v.name || "a device"} can't join: ${v.theirs > rn.PROTOCOL ? `it runs a newer Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL}); update this one: npx @pooled/cli@latest host` : `it runs an older Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL}); it should reload`}`));
   const tick = () => {
     const st = node.status();
-    S.devices = st.devices.length; S.range = st.range; S.passes = passes(node, st.passes) + solo; S.signaling = st.signaling;
+    S.devices = st.devices.length; S.range = st.range; S.lobby = node.waitingJoins().length; S.passes = passes(node, st.passes) + solo; S.signaling = st.signaling;
     if (!leaving) S.phase = st.loading || (node.ai.starting && !st.online) ? "loading" : st.degraded ? "degraded" : st.online ? (node.ai.busy ? "answering" : "online") : "waiting";
     out.status(S);
     // --devices N: the room went on with fewer (a device stayed away past the rejoin grace, and the
@@ -273,23 +280,40 @@ async function runHost(opts, out) {
   async function bye(sig, codeOut = 0) {
     if (leaving) { out.done(); process.exit(130); }
     leaving = true; exitCode = codeOut; S.phase = "leaving"; out.status(S);
-    out.log(`closing room ${code} and freeing the GPU${sig ? " (again to quit at once)" : ""}`);
+    out.log(`closing room ${fmtCode(code)} and freeing the GPU${sig ? " (again to quit at once)" : ""}`);
     try { await node.close(); } catch {}
     if (process.stdin.isTTY) { try { process.stdin.setRawMode(false); } catch {} }
     out.done();
     process.exit(exitCode);
   }
   process.on("SIGINT", () => bye(true)); process.on("SIGTERM", () => bye(false));
-  // a terminal: Enter deals (again), q or Ctrl-C leaves. Raw mode, so typing doesn't scribble over the status line
-  if (process.stdin.isTTY && !opts.devices) {
+  // who gets in: a device with the code alone waits in the lobby until the host answers (a / d here)
+  const tty = !!process.stdin.isTTY;
+  node.on("joinrequest", (r) => {
+    out.log(tty ? `${r.line}: press a to let it in, d to turn it away`
+      : `${r.line}: it waits (no terminal here to ask; give it the invite link, or start pooled host with --allow-all)`);
+  });
+  const answerJoin = async (yes) => {
+    const w = node.waitingJoins();
+    if (!w.length) { out.log("nobody is waiting to join"); return; }
+    const r = yes ? await node.allowJoin(w[0].id) : node.denyJoin(w[0].id);
+    // (the node logs who it let in or turned away)
+    if (r && w.length > 1) out.log(`${w.length - 1} more waiting: ${w[1].line} (a / d)`);
+  };
+  // a terminal: Enter deals (again), a / d answer a join request, q or Ctrl-C leaves. Raw mode, so
+  // typing doesn't scribble over the status line
+  if (tty) {
     process.stdin.setRawMode(true); process.stdin.resume();
     process.stdin.on("data", (b) => {
       const k = b.toString();
       if (k === "\u0003" || k === "q") bye(true);
-      else if (k === "\r" || k === "\n") deal();
+      else if (k === "a" || k === "A") answerJoin(true).catch((e) => out.log(`couldn't let it in: ${e.message}`, "error"));
+      else if (k === "d" || k === "D") answerJoin(false);
+      else if ((k === "\r" || k === "\n") && !opts.devices) deal();
     });
-    out.log("waiting for devices: press Enter to deal the layers (Enter again re-deals after more join), q to quit");
-  } else {
+  }
+  if (tty && !opts.devices) out.log("waiting for devices: press Enter to deal the layers (Enter again re-deals after more join), q to quit");
+  else {
     if (opts.devices > 1) out.log(`waiting for ${opts.devices} devices (this one included), then dealing the layers`);
     deal();
   }
