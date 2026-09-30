@@ -11,71 +11,55 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 {/*
 Sources (for the fact-checker):
 - README.md: intro, "How it works", models table, "Code mode", "Use Pooled from your tools", "Privacy"
-- docs/tech-stack.md: tech table (WebGPU, WebRTC, GGUF, Cache API, hosting)
-- room/models.js: NEED_GB, CTX, PICKER
-- room/joingate.js: CODE_LEN = 6, formatCode ("4TK-G9P"); cli/lib/room.js roomCodeFrom (4 or 6 characters, dash optional)
+- room/models.js: NEED_GB, PICKER
+- room/joingate.js: CODE_LEN = 6, formatCode ("4TK-G9P")
 */}
 
-Your laptop, a friend's desktop and a phone each hold some of the model's layers. Together they run a model none of them could run alone, each on its own GPU in a browser tab.
+Pooled runs one AI model across several devices at once. Your laptop, a friend's desktop and a phone each hold part of the model and run it on their own GPU, in a browser tab. Together they run a model none of them could run alone.
 
-## How a room works
+There is nothing to install and no account. The model runs on your devices, not on a server.
 
-1. Someone opens [pooled.run/room](https://pooled.run/room) and starts a room. They get a six-character code, like `4TK-G9P`.
-2. Other devices join with the code, a link or a QR code. Each one says how much memory it gives the room.
-3. Anyone in the room picks a model and presses **Start the model**. The room deals the model's layers out to the devices.
-4. Each device downloads only its own layers and runs them on its own GPU through WebGPU.
-5. For every token, a small hidden state (10 KB on the 27B, 4 KB on the MoE) passes from tab to tab over direct WebRTC connections. The host turns the result into the next word.
+## How it works in 30 seconds
 
-```text
-host      embed the last token → hidden state
-   ↓ a few KB over WebRTC
-laptop    layers 0–21           ─┐
-desktop   layers 22–42           ├─ each device runs its layers on its own GPU
-phone     layers 43–63          ─┘
-   ↓ back to the host
-host      final norm → LM head → sample → next token (and draft the ones after it)
-```
+1. One device opens [pooled.run/room](https://pooled.run/room) and starts a room. It gets a code like `4TK-G9P`.
+2. Other devices join with the code, a link or a QR code. Each one gives the room some memory.
+3. Someone picks a model and presses **Start the model**. Each device downloads only its part.
+4. Everyone in the room can ask the model questions.
 
-The **host** is the device that runs the model's first and last steps: it reads your message, holds the tokenizer and picks each word. The room picks it for you, usually the strongest computer.
+One laptop is enough for the smallest model. More devices let you run bigger ones:
 
-## Models
-
-| Model | Memory the room needs | Context |
-|---|---|---|
-| Qwen3 1.7B | about 4 GB | 8K, up to 16K |
-| Qwen3.8 27B | about 17 GB | 16K, up to 32K |
-| Qwen3.6 35B MoE | about 22.5 GB | 32K, up to 64K |
-
-See [Which models fit](/docs/models) to pick one for the devices you have.
+| Model | Memory the room needs |
+|---|---|
+| Qwen3 1.7B | 4 GB |
+| Qwen3.8 27B | 17 GB |
+| Qwen3.6 35B MoE | 22.5 GB |
 
 ## What you can do with a room
 
 <CardGrid>
   <Card title="Chat" icon="comment">
-    Ask the room's model anything. The host decides who sees the answers: everyone, only the host, or whoever asked.
+    Ask the room's model anything. See [Chat](/docs/chat).
   </Card>
   <Card title="Code mode" icon="seti:html">
-    Switch the room to **Code** and ask for an app. The agent writes the files, runs them in a sandboxed preview, reads its own errors and fixes them.
+    Ask for a small app. The model writes it and runs it in a preview. See [Code mode](/docs/code).
   </Card>
   <Card title="Serve API" icon="setting">
-    Run `npx @pooled/cli serve 4TKG9P` on your computer. Codex CLI, Claude Code, opencode, Continue, Open WebUI and the OpenAI and Anthropic SDKs then run on the room's model.
+    Use the room from Codex CLI, Claude Code, opencode or the OpenAI and Anthropic SDKs. See [Serve API](/docs/serve).
+  </Card>
+  <Card title="Terminal" icon="seti:shell">
+    Join or host a room from the command line. See [Terminal](/docs/terminal).
   </Card>
 </CardGrid>
 
-## What runs where
-
-- **The model runs on your devices.** Pooled uses its own WebGPU kernels, not WebLLM, MLC or llama.cpp.
-- **Weights come from Hugging Face**, or from another device in the room that already has them. Each device caches its layers in the browser, so the next start is faster.
-- **A signaling server only introduces the devices.** It carries no model traffic and never sees your messages. After that, devices talk to each other directly.
-- **The site is static files.** pooled.run serves the page; nothing runs on a server.
-
 :::caution[A room is a shared conversation]
-Everyone in a room can see what is asked, on purpose. The devices running layers work on hidden states, and those are not private against a determined peer. Run rooms with people you would share a document link with. See [Privacy](/docs/privacy).
+Everyone in a room can see what is asked, unless the host limits it. Run rooms with people you would share a document with. See [Privacy](/docs/privacy).
 :::
 
-## Next
+## Start here
 
 <CardGrid>
-  <LinkCard title="Start a room" href="/docs/start-a-room" description="Open a room on one laptop and run your first model." />
+  <LinkCard title="Start a room" href="/docs/start-a-room" description="Run your first model on one laptop." />
   <LinkCard title="Invite devices" href="/docs/invite" description="Add a phone, a second laptop or a friend's desktop." />
 </CardGrid>
+
+Curious how it works under the hood? See [Architecture](/docs/internals/architecture).

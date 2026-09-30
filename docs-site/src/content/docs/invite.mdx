@@ -6,95 +6,71 @@ sidebar:
   label: Invite devices
   order: 3
 ---
-import { Tabs, TabItem } from '@astrojs/starlight/components';
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
 {/*
 Sources (for the fact-checker):
-- p2p.html: header Invite button and room code badge, #share sheet ("Invite a device", QR, "or type the room code", Copy link, Share…), side panel "Invite more devices" (QR, Copy link, Full-size QR), join screen ("Have a code?", Join, "Chat only, no memory to give"), Network box (TURN)
-- room.js: roomLink() (pooled.run/r/<code>, adds ?signal= when the room is on another signaling server, and #k=<key> on the host), inLobby() ("Waiting for the host to let you in"), refused(), inviteKey() (host only), requestLine()/deviceLabel() ("otter wants to join (Mac, 8 GB)"), share-native (navigator.share), start()/joinStep (status lines), leave dialog text, HOST_WAIT_MS = 60000
-- room/errors.js: joinStep() messages ("Still connecting…", "No room with that code…", "Found the room, but these two devices can't reach each other…")
-- room/compute.js: lendStatus() ("Standing by", "Loading N%", "Serving", "Not holding layers", "Room over", "Host reconnecting", "Layers 1–20 · 2.4 GB · model"), lendNotes() (background tab, screen sleep, battery)
-- PR #236 (Lend this device screen), PR #253/#256 (Serve API page holds it now)
-- room/plan.js codeFromLocation() (code alphabet without I, L, O, U, 0, 1; link auto-joins)
-- room/qr.js (QR code), docs/protocol.md (lifecycle)
-- PR #268 (merged): room/joingate.js (CODE_LEN = 6, formatCode "4TK-G9P", parseCode takes 4 or 6 with or without the dash, invite key #k=, passes, DENIED_TEXT, FULL_TEXT, LOBBY_MAX = 8), p2p.html #join-reqs ("A device wants to join", Allow, Deny, "N more waiting"), Room settings → Joining → "Ask before new devices join" (on by default), #code-input (six boxes, "Older rooms have four. You can also paste an invite link."); CHANGELOG #268 entry
-- origin/main 74744ac (PR #264): the site's TURN relay (/api/turn), p2p.html #join-net text
+- p2p.html: header Invite button and room code badge, #share sheet ("Invite a device", QR, Copy link, Share…), side panel "Invite more devices", join screen ("Have a code?", Join, "Chat only, no memory to give")
+- room.js: roomLink() (pooled.run/r/<code>, #k=<key> on the host), inLobby() ("Waiting for the host to let you in"), requestLine() ("otter wants to join (Mac, 8 GB)")
+- room/joingate.js: CODE_LEN = 6, formatCode "4TK-G9P", parseCode (4 or 6, dash optional), invite key #k=, DENIED_TEXT; p2p.html #join-reqs (Allow, Deny); Room settings → Joining → "Ask before new devices join" (on by default)
+- room/plan.js codeFromLocation() (alphabet without I, L, O, U, 0, 1)
+- room/errors.js joinStep() messages
 */}
 
-Every device you add brings the memory it gives. More memory lets the room run a bigger model.
+Every device you add brings more memory, so the room can run a bigger model.
 
-## Send the invite
+<Steps>
 
-In the room, press **Invite** in the header, or click the room code next to the logo. The **Invite a device** sheet shows three ways in:
+1. **In the room, press Invite** in the header.
 
-- **A QR code.** On a phone, scan it with the camera app.
-- **The room code**, six characters shown as `4TK-G9P`, to type on the other device. Codes never use I, L, O, U, 0 or 1, so they are hard to misread. Rooms opened before six-character codes keep their four.
-- **A link** like `https://pooled.run/r/4TKG9P#k=…`, with **Copy link**. On devices that support it, **Share…** opens the system share sheet.
+   The **Invite a device** sheet shows a QR code, the room code (like `4TK-G9P`) and a **Copy link** button.
 
-The same QR code, code and **Copy link** button are also beside the model picker, under **Invite more devices**, with a **Full-size QR** button.
+2. **Open it on the other device.**
+
+   <Tabs>
+     <TabItem label="Link or QR">
+       Open the link, or scan the QR code with the phone's camera. The device joins by itself.
+     </TabItem>
+     <TabItem label="Room code">
+       Open [pooled.run/room](https://pooled.run/room), type the code under **Have a code?** and press **Join**. The dash is optional. The device then waits for you to let it in.
+     </TabItem>
+   </Tabs>
+
+3. **Let it in, if asked.**
+
+   A device that typed the code shows up as a prompt like `otter wants to join (Mac, 8 GB)`. Press **Allow** or **Deny**.
+
+</Steps>
+
+The new device's memory is added to the room. Check the header for how many GB the room pools, then [pick a model](/docs/models).
 
 ## Who gets in
 
-The code finds the room. The host decides who gets in:
+- **Your invite link or QR code** lets a device in at once. It carries a key that only the room's creator shares.
+- **The code alone** needs your OK. Denied devices see `The host didn't let this device in.`
+- A device you let in comes back after a reload without asking again.
 
-- A device with the host's **invite link** or QR code comes in at once. Both carry the room's key after `#k=`. Browsers never send that part to a server. Only the host's link has the key: a link copied on another device in the room gets the same prompt as the code.
-- A device that types the **code alone** waits. The host sees a prompt under the header, for example `otter wants to join (Mac, 8 GB)`, and presses **Allow** or **Deny**. A denied device is told `The host didn't let this device in.`
-- A device the host let in comes back after a reload or a lock without asking again, also after the host reloads.
+To let anyone with the code in, turn off **Room settings → Joining → Ask before new devices join**.
 
-To let anyone with the code in, turn off **Room settings → Joining → Ask before new devices join**. It is on by default.
+## Set how much a device gives
 
-## Join from the other device
+Each device sets its share under **Memory** on the join screen, or **This device gives** in the room. Phones can give only a little. See [Phones and tablets](/docs/phones).
 
-<Tabs>
-  <TabItem label="Link or QR">
-    Open the link, or scan the QR code. The page checks the device and joins the room by itself, with a generated name and this device's default memory. Change the memory afterwards under **This device gives**.
-  </TabItem>
-  <TabItem label="Room code">
-    Open [pooled.run/room](https://pooled.run/room). Set the name and **Memory**, type the code under **Have a code?** and press **Join**. The dash is optional, and you can paste an invite link instead.
-  </TabItem>
-</Tabs>
+A device without WebGPU joins as **Chat only, no memory to give**. It can still ask and read answers.
 
-**Memory** (on the join screen) and **This device gives** (in the room) set what this device gives the room. Phones and tablets have a cap. See [Phones and tablets](/docs/phones).
-
-A device without WebGPU shows **Chat only, no memory to give**. It can still join, ask questions and read the answers.
-
-## While it connects
-
-The join screen says what it is doing: `Connecting…`, then `Reaching the other devices…`. A device that joined with the code alone shows `Waiting for the host to let you in` until the host answers. If it takes longer, you see one of these:
+## If a device can't join
 
 | Message | What to do |
 |---|---|
 | `Still connecting…` | Wait a few more seconds. |
-| `No room with that code.` | Check the code, and that the page of whoever opened the room is still open. |
-| `Found the room, but these two devices can't reach each other` | A strict firewall or mobile network blocks the direct path, and no relay helped. Put both devices on the same Wi-Fi, try another network, or add a relay under **Network**. See [Rooms at work](/docs/rooms/at-work#when-it-still-fails). |
+| `No room with that code.` | Check the code, and that the room's creator still has the page open. |
+| `Found the room, but these two devices can't reach each other` | Put both devices on the same Wi-Fi or try another network. See [Networks and work Wi-Fi](/docs/rooms/networks). |
 
-pooled.run gives every room a TURN relay, so devices on work networks that block direct connections still get in. See [Rooms at work](/docs/rooms/at-work). The **Network** box under the join form takes a relay of your own instead. The setting is saved in this browser only and never goes into join links. See [TURN relay](/docs/self-host/turn).
+More in [Troubleshooting](/docs/troubleshooting#joining-a-room).
 
-## What a lending device shows
+## Details
 
-A device that gives memory can open the **Serve API** page from the header to see what it is doing:
-
-| Status | Meaning |
-|---|---|
-| **Standing by** | Waiting for the room to start a model. |
-| **Loading 42%** | Downloading and loading its layers. |
-| **Serving** | Holding layers, for example `Layers 1–20 · 2.4 GB · Qwen3.6 35B MoE`. |
-| **Not holding layers** | The other devices run the model, and this one joins to ask. |
-| **Host reconnecting** | The host's tab closed. The room waits a minute in case it comes back. |
-| **Room over** | The host left. Press **Start a new room** to lend this device again. |
-
-While it loads or holds layers, it also warns you about what can stop it:
-
-- the tab was in the background, where passes can stall;
-- the screen can go to sleep (set Auto-Lock to Never on an iPhone, or the screen timeout to its longest);
-- the device is not charging, or the battery is low.
-
-:::tip
-While this device holds layers, Pooled keeps its screen on. If the browser won't, the device screen says so, because a sleeping screen drops out of the room.
-:::
-
-## When a device leaves
-
-If a device that holds layers leaves or stops answering, the room says so and the host can deal its layers out again with one click (**Re-deal the layers**). With **Re-deal on its own** (on by default, experimental), the host does it by itself when the device is not back within a minute. A device that comes back after a reload rejoins under the same name. See [Device drops and recovery](/docs/rooms/recovery).
-
-Not every device gets layers. By default the room splits **For speed**: the fastest devices hold the layers and the rest join to ask. See [How layers are split](/docs/rooms/split).
+- Room codes never use I, L, O, U, 0 or 1, so they are hard to misread. Rooms opened before six-character codes keep their four.
+- The invite link looks like `https://pooled.run/r/4TKG9P#k=…`. The part after `#` never goes to a server. A link copied on another device in the room has no key, so it gets the same prompt as the code.
+- Not every device gets layers. By default the fastest devices run the model and the rest join to ask. See [How layers are split](/docs/rooms/split).
+- If a device that holds layers leaves, the room deals its layers out to the others. See [Device drops and recovery](/docs/rooms/recovery).
