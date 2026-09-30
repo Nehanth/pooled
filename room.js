@@ -4183,6 +4183,7 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
       // exact: same output as plain decoding). No drafts: a plain lap.
       const spec = chainSpec();
       const st0 = { ...(ai.engine.specStats || { drafts: 0, accepted: 0 }) };
+      const lapT = { v: 0, nv: 0, p: 0, np: 0, d: 0 };   // ms in verify laps / plain laps / drafting, for the crumb
       let next = first ?? sample(logits), done = false, pendTok = null;
       if (eos(next)) done = true; else emit(next, 0);
       while (!done && count < maxNew && !aborted()) {
@@ -4197,8 +4198,9 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
         // nothing to copy: the draft model's guesses, when there is one (?draft=)
         // (only when the measured lap is long enough for the drafts to pay: DraftModel.pickK)
         const dk = !lk.length && ai.draft && kMax > 0 ? ai.draft.pickK(ai.lapStat?.lap, Math.min(DRAFT_K, kMax)) : 0;
-        if (dk) { lk = await ai.draft.propose(ctxNow, dk); via = 1; }
+        if (dk) { const td = performance.now(); lk = await ai.draft.propose(ctxNow, dk); via = 1; lapT.d += performance.now() - td; }
         let toks;
+        const tStep = performance.now();
         if (lk.length) {
           ai.engine.pos = ai.pos;
           toks = await ai.engine.specStepDrafts(next, sample, lk, spec);
@@ -4208,10 +4210,12 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
           if (via === 2) copied += toks.length - 1;
           ai.lkFullD = via === 2 && toks.length === lk.length + 1;
           if (via === 1) ai.draft.note(lk.length, toks.length - 1);
+          lapT.v += performance.now() - tStep; lapT.nv++;
         } else {
           ai.lkFullD = false;
           const lg = await aiPipeToken(next, true, undefined, desc);
           toks = [sample(lg)];
+          lapT.p += performance.now() - tStep; lapT.np++;
         }
         for (let j = 0; j < toks.length; j++) {
           const tk = toks[j];
@@ -4227,7 +4231,7 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
       if (!done && count >= maxNew) capped = true;
       if (pendTok != null && !aborted()) ai.pending = { next: pendTok, at: ai.pos };
       const st = ai.engine.specStats;
-      if (st?.drafts) crumb(`dense spec: ${st.accepted}/${st.drafts} drafts accepted in ${st.steps} verify laps${ai.lapStat ? ` · lap ${Math.round(ai.lapStat.lap)}ms` : ""}`
+      if (st?.drafts) crumb(`dense spec: ${st.accepted - st0.accepted}/${st.drafts - st0.drafts} drafts accepted · ${lapT.nv} verify laps ${lapT.nv ? (lapT.v / lapT.nv).toFixed(1) : "-"} ms · ${lapT.np} plain laps ${lapT.np ? (lapT.p / lapT.np).toFixed(1) : "-"} ms · drafting ${Math.round(lapT.d)} ms`
         + (ai.draft ? ` · draft model: ${ai.draft.stats.drafted} drafted in ${ai.draft.stats.calls} calls, ${Math.round(ai.draft.stats.ms)} ms` : ""));
     } else {
       // plain decoding. An end token is not piped through the chain: the next turn's template
