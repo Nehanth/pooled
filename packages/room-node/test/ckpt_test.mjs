@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RoomNode, nodeCtxFor } from "../roomnode.js";
-import { CkptIndex, cacheBoundary, boundaryPin, pinPoints, cutPoints, commonPrefix, CACHE_MARKS } from "../ckpt.js";
+import { CkptIndex, cacheBoundary, boundaryPin, pinPoints, cutPoints, commonPrefix, CACHE_MARKS, turnPoint } from "../ckpt.js";
 import { DROP_ALL } from "../../../room/transport.js";
 import { renderApi, templateProfile } from "../../../room/conversation.js";
 
@@ -35,7 +35,7 @@ function soloHost(ckpt = {}) {
   return n;
 }
 const range = (a, n) => Array.from({ length: n }, (_, i) => a + i);
-const gen = (n, ids, pins = []) => n.generateOnce(ids, { stop: new Set([0]), maxNew: 6, sample: argmax, spec: false, pins });
+const gen = (n, ids, pins = [], turn = 0) => n.generateOnce(ids, { stop: new Set([0]), maxNew: 6, sample: argmax, spec: false, pins, turn });
 
 test("CkptIndex: pinned prefixes are never evicted by answers; each kind goes by last use", () => {
   const ix = new CkptIndex({ answers: 2, pins: 2 });
@@ -59,7 +59,7 @@ test("CkptIndex: pinned prefixes are never evicted by answers; each kind goes by
   save(range(300, 30), true);
   assert.ok(!ix.items.some((x) => x.pin && x.ids[0] === 100), "the oldest pin went");
   assert.equal(ix.best([...Q, 1]).key, qp.key);
-  assert.deepEqual(ix.hits, { pin: 1, answer: 1, miss: 0 });
+  assert.deepEqual(ix.hits, { pin: 1, turn: 0, answer: 1, miss: 0 });
   // slot numbers wrap in 1..65534
   ix.n = 65534; assert.equal(ix.nextKey(), 1);
 });
@@ -129,6 +129,47 @@ test("host: a pinned system prompt, answer checkpoints and other sessions give t
   assert.equal(next.from, "answer");
 });
 const a1len = (rs) => rs[0].tokens.length;
+
+test("turnPoint: the last user turn's <|im_start|>, past the system prompt and what the caches hold", () => {
+  const IM = 90, U = 91, A = 92;
+  const ids = [IM, 60, 1, 2, 3, 89, IM, U, 4, 5, 89, IM, A, 6, 89, IM, U, 7, 89, IM, A];
+  assert.equal(turnPoint(ids, { imStart: IM, user: U }), 15);
+  assert.equal(turnPoint(ids, { imStart: IM, user: U, systemLen: 15 }), 0, "not inside the system prompt");
+  assert.equal(turnPoint(ids, { imStart: IM, user: U, reused: 16 }), 0, "the caches hold it already");
+  assert.equal(turnPoint([IM, 60, 1, IM, A], { imStart: IM, user: U }), 0, "no user turn");
+  assert.equal(turnPoint(ids, { imStart: IM }), 0, "no user token");
+});
+
+test("host: an agent's tool loop resumes from the turn checkpoint when each call's last user turn is per-call context", async () => {
+  // OpenClaw: every call ends with a user turn of per-call context (X, then Y, ...) that the next
+  // call does not repeat, so the answer checkpoint is never a prefix; the turn checkpoint is
+  const IM = 90, U = 91, A = 92, E = 89;
+  const S = range(100, 40), Q = [IM, U, 1, 2, 3, E];
+  const X = [IM, U, 70, 71, 72, E, IM, A], Y = [IM, U, 73, 74, E, IM, A], Z = [IM, U, 75, 76, 77, E, IM, A];
+  const run = async (n) => {
+    const t = (ids) => turnPoint(ids, { imStart: IM, user: U, systemLen: 40 });
+    const p1 = [...S, ...Q, ...X];
+    const a1 = await gen(n, p1, [40], t(p1));
+    const h2 = [...S, ...Q, IM, A, ...a1.tokens, E, IM, U, 50, 51, E];   // the call and its tool result
+    const p2 = [...h2, ...Y];
+    const a2 = await gen(n, p2, [40], t(p2));
+    const p3 = [...h2, IM, A, ...a2.tokens, E, IM, U, 52, E, ...Z];
+    const a3 = await gen(n, p3, [40], t(p3));
+    return [a1, a2, a3];
+  };
+  const plain = await run(soloHost(false));
+  const cached = await run(soloHost({}));
+  assert.deepEqual(cached.map((r) => r.tokens), plain.map((r) => r.tokens), "the same answers");
+  assert.deepEqual(cached.map((r) => r.from), [null, "turn", "turn"]);
+  assert.equal(cached[1].prefilled, 2 + cached[0].tokens.length + 1 + 5 + Y.length, "only the answer, the tool result and the new context");
+  assert.equal(cached[2].prefilled, 2 + cached[1].tokens.length + 1 + 4 + Z.length);
+  // without turn checkpoints each call reads everything after the pinned system prompt again
+  const noTurn = soloHost({ turns: false });
+  const r = [];
+  { const p1 = [...S, ...Q, ...X]; r.push(await gen(noTurn, p1, [40]));
+    const p2 = [...S, ...Q, IM, A, ...r[0].tokens, E, IM, U, 50, 51, E, ...Y]; r.push(await gen(noTurn, p2, [40])); }
+  assert.equal(r[1].from, "pin");
+});
 
 test("host: no checkpoints with ckpt: false, or for a dense model when a chain device does not apply them", () => {
   const n = soloHost(false);

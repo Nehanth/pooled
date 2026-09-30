@@ -34,6 +34,7 @@
 //   left out: disk copies of checkpoints, host resume after a reload, the speed split, dead-link redial
 //     (ICE state watch), visibility modes other than "all", Code mode, reactions/typing, the room
 //     map, weight caches and peer weights (ai-wget answered "miss"), the bandwidth test.
+import fs from "node:fs";
 import { EventEmitter } from "node:events";
 import { setupNode, probeMeta } from "./env.js";
 import * as env from "./env.js";
@@ -43,7 +44,7 @@ import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "
 import { packWire, unpackWire, badF32 } from "../../room/wire.js";
 import { planSplit, phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
 import { MODELS, CTX, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM } from "../../room/models.js";
-import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints } from "./ckpt.js";
+import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { isPrefix } from "../../harness/prefix.js";
 import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "../../room/conversation.js";
 import { pickSampler } from "../../room/sampling.js";
@@ -747,7 +748,7 @@ export class RoomNode extends EventEmitter {
   // Save the state the caches hold (ai.fed) as a checkpoint on every device: pinned (a prompt's
   // fixed start) or an answer's end. The host saves now; the chain saves with the next frame (sv).
   // -> the slot number, or null when none was saved
-  ckptSave(pin = false) {
+  ckptSave(pin = false, turn = false) {
     const ai = this.ai, E = ai.engine;
     if (!this.ckptOn() || !ai.fed?.length) return null;
     ai.ckpt ||= new CkptIndex(this.ckptOpts);
@@ -768,7 +769,7 @@ export class RoomNode extends EventEmitter {
     if (ai.chain.length) ai.dropQ.push(...plan.drop);
     E.pos = ai.pos;
     E.saveSlot(plan.key);
-    ai.ckpt.commit(plan.key, ai.fed.slice(), pin, { xAt: ai.xAt === ai.pos });
+    ai.ckpt.commit(plan.key, ai.fed.slice(), pin, { xAt: ai.xAt === ai.pos, turn: !pin && turn });
     if (ai.chain.length) ai.pendingCtl = { ...ai.pendingCtl, sv: plan.key };
     return plan.key;
   }
@@ -783,7 +784,29 @@ export class RoomNode extends EventEmitter {
     ai.pos = x.ids.length; ai.fed = ids.slice(0, ai.pos);
     ai.xAt = x.xAt ? ai.pos : null;   // the draft head's hidden is in the slot only after a speculative answer
     if (ai.chain.length) { const { reset, ...rest } = ai.pendingCtl || {}; ai.pendingCtl = { ...rest, ld: x.key }; }
-    return { reused: ai.pos, from: x.pin ? "pin" : "answer" };
+    return { reused: ai.pos, from: x.pin ? "pin" : x.turn ? "turn" : "answer" };
+  }
+  // the id of "user" right after <|im_start|> (one token in the Qwen vocabularies), or null
+  userTok() {
+    const ai = this.ai;
+    if (ai.userTokFor !== ai.tok) { const e = ai.tok.encode("user"); ai.userTok = e.length === 1 ? e[0] : null; ai.userTokFor = ai.tok; }
+    return ai.userTok;
+  }
+  // POOLED_CKPT_DEBUG: where a prompt leaves each checkpoint (the text around the first differing token)
+  ckptDebug(req, prompt) {
+    const ai = this.ai, ids = prompt.ids;
+    const asst = req.messages.filter((m) => m.role === "assistant").length;
+    const lines = [`ckpt debug: prompt ${ids.length} tok, ${asst} assistant turns, exact ${prompt.exact ?? "?"}`];
+    for (const x of ai.ckpt.items) {
+      let n = 0; const m = Math.min(x.ids.length, ids.length);
+      while (n < m && x.ids[n] === ids[n]) n++;
+      const dec = (a) => JSON.stringify(ai.tok.decode(Array.from(a.slice(Math.max(0, n - 12), n + 12))));
+      lines.push(`  ${x.pin ? "pin" : "answer"} ${x.ids.length} tok: shares ${n}${n === x.ids.length ? " (prefix)" : `; ckpt ${dec(x.ids)} vs prompt ${dec(ids)}`}`);
+    }
+    this.log(lines.join("\n"));
+    if (process.env.POOLED_CKPT_DEBUG.endsWith(".jsonl")) {
+      try { fs.appendFileSync(process.env.POOLED_CKPT_DEBUG, JSON.stringify({ at: Date.now(), n: ids.length, exact: prompt.exact, messages: req.messages.map((m) => ({ role: m.role, text: String(m.text || "").slice(0, 400), textLen: String(m.text || "").length, calls: m.calls, reasoning: m.reasoning ? String(m.reasoning).slice(0, 200) : undefined, reasoningLen: m.reasoning?.length })) }) + "\n"); } catch {}
+    }
   }
   // the pinned points of a v2 prompt (ckpt.js pinPoints): its system prompt + tools, and an agent's
   // cache boundary (memoized per system text and tool set: it renders the prompt's start once more)
@@ -924,7 +947,7 @@ export class RoomNode extends EventEmitter {
   }
   // pins: where the prompt's fixed start ends (ckpt.js pinPoints); the prefill pauses there to save a
   // pinned checkpoint when the caches do not hold it yet
-  async generateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(this.ai.settings.sampling), signal, spec: useSpec = true, pins = [] } = {}) {
+  async generateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(this.ai.settings.sampling), signal, spec: useSpec = true, pins = [], turn = 0 } = {}) {
     const ai = this.ai, E = ai.engine;
     if (!E) throw new Error("the model is not loaded");
     if (ai.degraded) throw new Error("a device left: re-deal the layers first");
@@ -932,7 +955,7 @@ export class RoomNode extends EventEmitter {
     const aborted = () => !!signal?.aborted;
     const eos = (t) => stop.has(t);
     const tokens = [];
-    let count = 0, capped = false, acc = null, copied = 0, tPre = 0, tDecode = 0, reused = 0, prefilled = 0, from = null, pinned = 0;
+    let count = 0, capped = false, acc = null, copied = 0, tPre = 0, tDecode = 0, reused = 0, prefilled = 0, from = null, pinned = 0, turned = 0;
     const desc = E.gpuDescFor?.(sample) || null;
     try {
       reused = reusablePrefix(ai.fed, ids);
@@ -948,12 +971,14 @@ export class RoomNode extends EventEmitter {
       const t0Pre = performance.now(); ai.frames = 0;
       // the fixed start first, a pinned checkpoint at each of its pins, then the rest (the same tokens
       // at the same positions, so the answer is the same; the head's logits after each part are unused)
-      const cuts = this.ckptOn() ? cutPoints(reused, pins, ids.length) : [];
+      // and a turn checkpoint (not pinned) where the last user turn starts
+      const cuts = this.ckptOn() ? cutPoints(reused, turn ? [...pins, turn] : pins, ids.length) : [];
       let at = reused, logits = null;
       for (const c of cuts) {
         await this.prefill(ids.slice(at, c), { aborted, desc });
         if (aborted()) break;
-        if (ai.fed?.length === c && this.ckptSave(true) != null) pinned++;
+        const pin = pins.includes(c);
+        if (ai.fed?.length === c && this.ckptSave(pin, !pin) != null) { if (pin) pinned++; else turned++; }
         at = c;
       }
       if (!aborted() && at < ids.length) logits = await this.prefill(ids.slice(at), { aborted, desc });
@@ -1071,7 +1096,7 @@ export class RoomNode extends EventEmitter {
     const full = capped && ai.pos >= ctxMax - 2;
     const stats = `${count} tok · ${tps.toFixed(1)} tok/s · ${ai.chain.length + 1} device${ai.chain.length ? "s" : ""}`
       + (acc != null ? ` · ${Math.round(acc * 100)}% drafts accepted` : "") + (copied ? ` · ${copied} tok by lookup` : "")
-      + ` · prompt ${ids.length} tok: ${prefilled} read in ${(tPre / 1000).toFixed(1)} s` + (reused ? `, ${reused} from ${from === "pin" ? "a pinned checkpoint" : from === "answer" ? "an earlier answer" : "the caches"}` : "");
+      + ` · prompt ${ids.length} tok: ${prefilled} read in ${(tPre / 1000).toFixed(1)} s` + (reused ? `, ${reused} from ${from === "pin" ? "a pinned checkpoint" : from === "answer" ? "an earlier answer" : from === "turn" ? "an earlier turn" : "the caches"}` : "");
     const reason = aborted() ? "abort" : capped ? (full ? "ctx" : "max") : "stop";
     this.emit("prefill", { total: ids.length, reused, from, prefilled, pinned, tPre, tDecode, count });
     return { tokens, reason, reused, prefilled, from, pinned, count, tps, acc, copied, tPre, tDecode, stats, capped };
@@ -1172,7 +1197,11 @@ export class RoomNode extends EventEmitter {
       send({ t: "ai-genstart", rid, api: v2 ? 2 : 1, client: req.params.client, promptTokens: prompt.ids.length, model: ai.model, name: label, asker: from, mid, ...(v2 ? { style: prompt.profile.style } : {}) });
       // the system prompt + tools (and an agent's cache boundary in it), when long, are kept as pinned checkpoints
       const pins = v2 && this.ckptOn() ? this.pinsFor(req, prompt) : [];
-      const common = { tok: ai.tok, req, prompt, ctxMax: ai.engine.maxSeq, fallback: pickSampler(ai.settings.sampling), signal, generate: (ids, o) => this.generate(ids, { ...o, pins }) };
+      // and where its last user turn starts, for an agent's next call (ckpt.js turnPoint)
+      const turn = v2 && this.ckptOn() && this.ckptOpts.turns !== false
+        ? turnPoint(prompt.ids, { imStart: prompt.S?.imStart, user: this.userTok(), systemLen: prompt.systemLen || 0 }) : 0;
+      if (process.env.POOLED_CKPT_DEBUG && ai.ckpt?.size) this.ckptDebug(req, prompt);
+      const common = { tok: ai.tok, req, prompt, ctxMax: ai.engine.maxSeq, fallback: pickSampler(ai.settings.sampling), signal, generate: (ids, o) => this.generate(ids, { ...o, pins, turn }) };
       // the room's screens: v2 content and a compact line per tool call (room.js apiScreenMsg, simplified)
       const screen = (piece, d) => toScreens({ t: "ai-token", text: piece, d: d || 0 });
       const res = v2

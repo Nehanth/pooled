@@ -7,6 +7,8 @@
 //     cache boundary inside its system prompt, see cacheBoundary). Kept apart from the answer
 //     checkpoints and never evicted by them; up to `pins` of them, least recently used out first,
 //     so two agents (or two tool sets) sharing a room do not keep replacing each other's.
+//   - turn checkpoints: the state at the start of a prompt's last user turn (turnPoint), kept with
+//     the answer checkpoints. They are what an agent's tool loop resumes from.
 //   - answer checkpoints: the state after each answer, up to `answers`. Which one goes is by
 //     GreedyDual (Young / Cao-Irani): each has a value of the clock when it was last saved or used plus
 //     what it would cost to rebuild (its tokens past the longest pinned prefix of it); the lowest goes,
@@ -21,7 +23,7 @@ import { PrefixIndex, isPrefix } from "../../harness/prefix.js";
 import { renderApi } from "../../room/conversation.js";
 
 export const CKPT_DEFAULTS = {
-  answers: 3,       // answer checkpoints kept (the browser room's ?ckpt default is 2)
+  answers: 4,       // answer and turn checkpoints kept (the browser room's ?ckpt default is 2)
   pins: 4,          // pinned prefixes kept (two per agent: its cache boundary and its system prompt + tools)
   minPin: 1024,     // a fixed start shorter than this is not worth a checkpoint of its own
 };
@@ -63,6 +65,19 @@ export function pinPoints(prompt, { boundary = 0, minPin = CKPT_DEFAULTS.minPin 
   const n = prompt?.ids?.length || 0;
   return [...new Set([boundary, prompt?.systemLen || 0])].filter((p) => Number.isInteger(p) && p >= minPin && p < n).sort((a, b) => a - b);
 }
+// The turn point of a prompt: where its last user turn starts (the <|im_start|> of "user"), past
+// the system prompt. An agent's next call in a tool loop repeats everything before it and not what
+// follows: OpenClaw puts per-call context (<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>> ...) in the last
+// user turn and drops it from the history, so an answer checkpoint (whose tokens include that
+// block) is never a prefix of the next prompt. A checkpoint here is: the next call prefills only
+// the assistant turn and the tool results that came after it. -> a position, or 0
+export function turnPoint(ids, { imStart, user, systemLen = 0, reused = 0 } = {}) {
+  if (!ids?.length || !Number.isInteger(imStart) || !Number.isInteger(user)) return 0;
+  for (let i = ids.length - 2; i > 0; i--) {
+    if (ids[i] === imStart && ids[i + 1] === user) return i > systemLen && i > reused && i < ids.length - 1 ? i : 0;
+  }
+  return 0;
+}
 // Where a prefill pauses to save pinned checkpoints: the pins past what the caches already hold,
 // with at least one prompt token after each (the last one has to go through the head).
 export function cutPoints(reused, pins, total) {
@@ -77,7 +92,7 @@ export class CkptIndex {
     this.ix = new PrefixIndex(1 << 30);
     this.L = 0;       // GreedyDual's clock for the answer checkpoints
     this.n = 0;       // last slot number handed out (1..65534, they ride the frame header as u16)
-    this.hits = { pin: 0, answer: 0, miss: 0 };
+    this.hits = { pin: 0, turn: 0, answer: 0, miss: 0 };
   }
   get items() { return this.ix.items; }
   get size() { return this.ix.items.length; }
@@ -117,7 +132,7 @@ export class CkptIndex {
   best(ids, reused = 0) {
     const b = this.ix.best(ids);
     const x = b && b.n > reused ? this.find(b.key) : null;
-    if (x) { this.touch(x); this.hits[x.pin ? "pin" : "answer"]++; } else this.hits.miss++;
+    if (x) { this.touch(x); this.hits[x.pin ? "pin" : x.turn ? "turn" : "answer"]++; } else this.hits.miss++;
     return x;
   }
 }
