@@ -635,5 +635,11 @@ cache); `serve_common_test.js` (normalization including Claude Code's system-mes
 caps, the ask bodies, the bridge's checks). CLI (`node --test`): negotiation, v2 calls through an
 adapter, the old-host 400, the 413 caps, keep-alives mid-stream.
 
+GPU (`tests/e2e/serve_v2_smoke.mjs`, a real host room through the CLI's Bridge; 2026-09-29 on the
+Spark): 17 of 17 checks on Qwen3 1.7B and on Qwen3.6 35B MoE (v1 ask unchanged, v2 plain, auto call,
+tool-result follow-up reusing the caches, parallel, parallel off, required, named, none, JSON schema,
+reasoning then a call, an older CLI's v1 asks, a bad named tool refused). `tests/e2e/serve.mjs` (v1
+endpoints, now v2 asks underneath) passes all 57 checks.
+
 Recordings: `node tests/e2e/serve_record.mjs --llama URL --model M --gguf F [--grammar]` against a
 llama.cpp server (CPU is fine) writes `tests/fixtures/api/<model>-[g-]<case>.json`.
