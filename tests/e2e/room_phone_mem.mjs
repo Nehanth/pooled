@@ -158,6 +158,9 @@ try {
   if (!flag("no-kill")) {
     // C: the worker leaves; re-deal; the phone's tab is killed while it loads, twice
     await worker.close();
+    // the phone lends one step more, so the re-deal gives it a new range: a device dealt the slot it
+    // already holds keeps its layers and loads nothing (fix/i207-resume), and there would be no load to kill
+    await phone.evaluate(() => document.getElementById("ap-plus").click());
     await clickRedeal();
     for (const k of [1, 2]) {
       await phone.waitForFunction(() => { try { return !!JSON.parse(localStorage.getItem("pooled-crumb") || "null")?.loading; } catch { return false; } }, null, { timeout: 5 * 60e3, polling: 100 });
