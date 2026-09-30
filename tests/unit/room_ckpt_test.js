@@ -65,7 +65,7 @@ function worker({ next = "host", engine = new FakeEngine(), send = () => {}, dis
     unpackWire: (d) => Float32Array.from(d.x),
     packWire: (h) => ({ x: Array.from(h) }),
     badF32: () => false,
-    aiStatus: () => {}, sendTo: () => {}, teleNote: () => {}, compute: { pass() {} },
+    aiStatus: () => {}, sendTo: () => {}, teleNote: () => {}, compute: { pass() {} }, keepWarm: () => {},
     sendHidden: send,
   });
   return { ai, engine, workerFrame, ckptRestore };
