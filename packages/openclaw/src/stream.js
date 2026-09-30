@@ -89,6 +89,7 @@ export function createPooledStream({ getPluginConfig, log = () => {}, sdk }) {
         const answer = await new Promise((resolve, reject) => {
           const rid = newRid();
           let h = null;
+          if (signal?.aborted) { reject(Object.assign(new Error("aborted"), { name: "AbortError" })); return; }   // an abort event already fired never fires again
           const onAbort = () => h?.stop();
           signal?.addEventListener?.("abort", onAbort);
           const end = (fn) => { signal?.removeEventListener?.("abort", onAbort); fn(); };

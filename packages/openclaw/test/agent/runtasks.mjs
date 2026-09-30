@@ -39,7 +39,8 @@ for (const t of tasks) {
   fs.writeFileSync(`${OUT}/${t}.answer.txt`, text);
   const gl = fs.existsSync(GW) ? fs.readFileSync(GW).subarray(off).toString() : "";
   fs.writeFileSync(`${OUT}/${t}.gateway.log`, gl);
-  const calls = gl.split("\n").filter((l) => /\[pooled\] done in room/.test(l) && !l.includes("\x1b[")).map((l) => {
+  // one line per call: OpenClaw's logger line (timestamp first); POOLED_DEBUG's stderr copy of it is left out (analyze.mjs does the same)
+  const calls = gl.split("\n").filter((l) => /^\S+ \[pooled\] done in room/.test(l)).map((l) => {
     const m = /: (\w+), (\d+) prompt tokens \((\d+) reused\), (\d+) out, calls ([^;]*); (.*)$/.exec(l) || [];
     return { reason: m[1], prompt: +m[2], reused: +m[3], out: +m[4], calls: m[5], ...parseStats(m[6] || ""), raw: (m[6] || l).slice(0, 300) };
   });

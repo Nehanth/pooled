@@ -129,7 +129,7 @@ api). The link layer, dealing, laps, prefill, plain and speculative decode (with
   - a failed lap, a device leaving or coming back, or a re-deal drops every checkpoint (`dp` all).
 
 Left out for now: disk copies of checkpoints (a gateway restart starts cold), resuming a reloaded host,
-the speed split, dead-link redial (the ICE state watch), visibility modes, Code mode, the room map,
+the speed split, dead-link redial (the ICE state watch), changing the visibility while the room runs (it is set when the node is created: `visibility`), Code mode, the room map,
 weight caches and peer-to-peer weights, the bandwidth test.
 
 ## Tests

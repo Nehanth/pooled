@@ -28,7 +28,8 @@
     "additionalProperties": false,
     "properties": {
       "mode": { "type": "string", "enum": ["host", "join"] },
-      "code": { "type": "string", "pattern": "^[A-Za-z0-9]{4,6}$" },
+      "code": { "type": "string", "pattern": "^[A-HJKMNP-TV-Za-hjkmnp-tv-z2-9]{4,6}$" },
+      "allowApiClients": { "type": "boolean" },
       "model": { "type": "string" },
       "pledgeGB": { "type": "number" },
       "minDevices": { "type": "number" },

@@ -32,7 +32,7 @@
 //     ckptResume, sv / ld / dp on the frame header), with more slots: pinned system prompts and an
 //     agent's cache boundary, answer states kept by last use, one index for every session.
 //   left out: disk copies of checkpoints, host resume after a reload, the speed split, dead-link redial
-//     (ICE state watch), visibility modes other than "all", Code mode, reactions/typing, the room
+//     (ICE state watch), changing the visibility at run time (the constructor sets it), Code mode, reactions/typing, the room
 //     map, weight caches and peer weights (ai-wget answered "miss"), the bandwidth test.
 import fs from "node:fs";
 import { EventEmitter } from "node:events";
@@ -57,6 +57,7 @@ import { pledgeGB, afterLoadDeath } from "../../room/pledge.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes } from "../../engine/gguf.js";
 import { signalOpts, guardChunks } from "../../cli/lib/room.js";
 import { withDefaults, finishRequest, askBody, needsV2, ApiError } from "../../cli/lib/common.js";
+import { chatRecipients } from "../../room/visibility.js";
 import { Ask, Collector } from "../../cli/lib/answer.js";
 
 export const PREFIX = "pooled-room-";
@@ -81,10 +82,15 @@ export class RoomNode extends EventEmitter {
   // switches, engine/preset.js), stripes, log, selfTest, chatMaxNew, ctx (context to ask for; clamped
   // by room/models.js), gbps (pin the copy speed; default measured), autoRedeal (re-deal without a
   // device that does not come back in REJOIN_GRACE_MS; default on), ckpt (checkpoints on the host:
-  // { answers, pins, minPin } over ckpt.js CKPT_DEFAULTS, or false for none)
+  // { answers, pins, minPin } over ckpt.js CKPT_DEFAULTS, or false for none), visibility (who sees the
+  // answers on the room's screens, room/visibility.js: "all" as the room page's default, "asker": only
+  // whoever asked; an agent host uses "asker" so its prompts and answers stay off other devices'
+  // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
-    gbps = null, autoRedeal = true, ckpt = {} } = {}) {
+    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true } = {}) {
     super();
+    this.visibility = visibility === "asker" || visibility === "host" ? visibility : "all";
+    this.allowApi = allowApi !== false;
     this.ctxAsk = ctx;
     this.ckptOpts = ckpt === false ? null : { ...CKPT_DEFAULTS, ...(ckpt || {}) };
     this.chatMaxNew = chatMaxNew;
@@ -200,6 +206,7 @@ export class RoomNode extends EventEmitter {
   }
   peerGone(id, e) {
     this.conns.delete(id);
+    if (this.closing) return;   // close() tore the links down: not a departure (no degraded room, no re-deal)
     if (this.isHost) {
       this.roster.delete(id); this.broadcastRoster();
       this.log(`${e?.name || id} left`);
@@ -260,6 +267,7 @@ export class RoomNode extends EventEmitter {
           if (d.meta?.api) this.ai.apis.set(from, { name: d.name, client: d.meta.client });
           this.roster.set(from, { name: d.name, meta: d.meta });
           this.broadcastRoster();
+          if (this.visibility !== "all") this.sendTo(from, { t: "ai-visibility", mode: this.visibility });
           if (this.hosting() && !this.loadDeath(from, d)) this.rejoin(from, d.name);
           // a newcomer while the room is online is an ask-only guest (aiWelcome)
           if (this.ai.online && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-ready-all", model: this.ai.model, label: MODELS[this.ai.model]?.label, ctx: this.ctxMax() });
@@ -629,7 +637,7 @@ export class RoomNode extends EventEmitter {
   // come back into its slot, re-dealing without it after REJOIN_GRACE_MS when autoRedeal is on
   chainLeft(id, name, verb = "left") {
     const ai = this.ai;
-    if (!ai.chain.includes(id) || ai.gone.has(id)) return;
+    if (this.closing || !ai.chain.includes(id) || ai.gone.has(id)) return;
     const layers = ai.layersByName?.[name];
     const why = `${name} ${verb}${layers ? ` (layers ${layers})` : ""}`;
     if (ai.starting) { ai.startErr?.(new Error(why)); return; }
@@ -1169,8 +1177,11 @@ export class RoomNode extends EventEmitter {
     })();
   }
   apiAsk(from, d) {
-    const v = validateApiAsk(d, { profile: d.api === 2 && this.ai.tok ? this.apiProfile() : null });
     const rid = typeof d.rid === "string" ? d.rid.slice(0, API_LIMITS.rid) : "";
+    // as room.js apiAsk: only a device that joined as an API client, and only while the host allows them
+    if (!this.ai.apis.has(from)) { this.sendTo(from, { t: "ai-busy", rid, code: "bad", why: "this device did not join as an API client" }); return; }
+    if (!this.allowApi) { this.sendTo(from, { t: "ai-busy", rid, code: "off", why: "the host does not allow API clients in this room" }); return; }
+    const v = validateApiAsk(d, { profile: d.api === 2 && this.ai.tok ? this.apiProfile() : null });
     if (v.err) { this.sendTo(from, { t: "ai-busy", rid, code: v.code, why: v.err }); return; }
     const ac = new AbortController();
     this.ai.runs.set(from + ":" + rid, ac);
@@ -1187,7 +1198,14 @@ export class RoomNode extends EventEmitter {
         : apiPrompt(ai.tok, req, ai.engine.maxSeq, ai.apiCache);
     } catch (err) { prompt = { err: err.message, code: "bad" }; }
     if (prompt.err) { send({ t: "ai-busy", rid, code: prompt.code, why: prompt.err, n: prompt.n, max: prompt.max }); return; }
-    const toScreens = (msg) => this.broadcast(msg, (id, e) => id !== from && !e.meta?.api);
+    // the room's screens (not API clients, not the asker, which gets its own stream): the full message
+    // where the visibility allows the text, else the hidden stand-in (room.js apiGenerate)
+    const toScreens = (msg) => {
+      const ids = [...this.conns].filter(([id, e]) => id !== from && !e.meta?.api).map(([id]) => id);
+      const { full, hidden } = chatRecipients(this.visibility, from, ids);
+      for (const id of full) this.sendTo(id, msg);
+      if (msg.t !== "ai-token") for (const id of hidden) this.sendTo(id, { t: msg.t, name: msg.name, stats: msg.stats, asker: msg.asker, ctx: msg.ctx, api: 1, hidden: true });
+    };
     try {
       const label = `${name} · ${req.params.client} (API)`;
       const q = v2 ? [...req.messages].reverse().find((m) => m.role === "user" && !m.aside) : req.messages[req.messages.length - 1];
@@ -1232,7 +1250,11 @@ export class RoomNode extends EventEmitter {
       const sample = pickSampler(ai.settings.sampling), stopIds = new Set([S.imEnd, S.eot]);
       const mid = ai.msgSeq = (ai.msgSeq || 0) + 1;
       ai.askerId = askerId; ai.chatAbort = new AbortController();
-      const toAll = (m) => this.broadcast(m, (id, e) => !e.meta?.api);
+      const toAll = (m) => {
+        const { full, hidden } = chatRecipients(this.visibility, askerId, [...this.conns].filter(([, e]) => !e.meta?.api).map(([id]) => id));
+        for (const id of full) this.sendTo(id, m);
+        if (m.t !== "ai-token") for (const id of hidden) this.sendTo(id, { t: m.t, name: m.name, stats: m.stats, asker: m.asker, ctx: m.ctx, hidden: true });
+      };
       toAll({ t: "ai-genstart", name: who, text, asker: askerId, cont: 0, mid });
       const answer = [], pieces = pieceDecoder(ai.tok);
       let failed = null, r = null, reply = "";
@@ -1268,7 +1290,10 @@ export class RoomNode extends EventEmitter {
     try { this.broadcast({ t: "leaving" }); } catch {}
     await new Promise((r) => setTimeout(r, 200));
     try { this.peer?.destroy(); } catch {}
-    try { this.ai.device?.destroy(); } catch {}
+    clearTimeout(this.ai.idleRedeal);
+    this.failWaiters(new Error("the room closed"));
+    this.ai.online = false; this.ai.chain = []; this.ai.ckpt = null;
+    this.freeLayers(null);   // the engine, its checkpoint slots and the device (device.destroy frees every buffer)
   }
 }
 

@@ -1,13 +1,11 @@
 // Onboarding: the user picked Pooled. Start a room on this device (the code and link to open on the
 // other Mac / phone), or join one with its code. The choice is saved in plugins.entries.pooled.config;
 // the room itself runs in OpenClaw's gateway (the plugin's service), not in the wizard.
-import { MODEL_CHOICES, modelInfo, roomLink, roomSettings } from "./pool.js";
+import { MODEL_CHOICES, modelInfo, roomLink, roomSettings, CODE_ABC, CODE_RE } from "./pool.js";
 import { maxSeqFor } from "../../../room/models.js";
 
 export const PROVIDER = "pooled";
 export const AUTH_MARKER = "pooled-local";
-const CODE_ABC = "ABCDEFGHJKMNPQRSTVWXYZ23456789";   // room/plan.js codeFromLocation's alphabet
-const CODE_RE = /^[A-HJKMNP-TV-Z2-9]{4,6}$/;
 export const newCode = () => Array.from(crypto.getRandomValues(new Uint32Array(4)), (x) => CODE_ABC[x % CODE_ABC.length]).join("");
 
 // the catalog entry: one model, the room's. Native transport: the base URL is never called.
@@ -98,6 +96,7 @@ export function setupFromEnv(env = process.env) {
   const s = roomSettings({}, env);
   if (!s.mode) s.mode = "host";
   if (s.mode === "host" && !s.code) s.code = newCode();
+  if (s.mode === "host" && !CODE_RE.test(s.code)) throw new Error(`POOLED_CODE: ${s.code} is not a room code the room page opens (4 to 6 of ${CODE_ABC})`);
   if (s.mode === "join" && !CODE_RE.test(s.code || "")) throw new Error("POOLED_CODE: the room code to join (4 to 6 characters)");
   return s;
 }

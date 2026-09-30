@@ -6,7 +6,7 @@ Pooled room: it holds its share of the model's layers on the local GPU with Pool
 [@pooled/room-node](../room-node)). No browser tab, no `pooled serve`, no API key. It can start the
 room or join one. Other devices join over WebRTC: another machine with this plugin, or a browser tab
 or phone on pooled.run. Together they run a model none of them can run alone (the 35B MoE needs
-about 22.5 GB; two 16 GB Macs can hold it).
+about 22.5 GB across the room; tested on a Spark + a 36 GB Mac, and with an iPhone added).
 
 Status: proof of concept, not published. Tested with OpenClaw 2026.9.6 and 2026.9.7 (Linux GB10 and
 macOS 27 on an M5 Max). It runs from a Pooled
@@ -15,7 +15,7 @@ checkout (it imports `packages/room-node`, `room/`, `harness/` and `cli/lib/` by
 ## Set up
 
 ```sh
-cd packages/room-node && npm install                      # Dawn, node-datachannel, peerjs
+cd packages/room-node && npm install --omit=dev           # Dawn, node-datachannel, peerjs (~140 MB: the webgpu package ships Dawn for all five OS/arch pairs)
 openclaw plugins install --link --accept-capabilities --force "$PWD/packages/openclaw"
 openclaw onboard        # or: openclaw models auth login --provider pooled --set-default
 ```
@@ -58,6 +58,7 @@ Non-interactive: `openclaw onboard --non-interactive --auth-choice pooled` with 
 | `modelDir` | `POOLED_MODELS` | local model files (`packages/room-node/source.js` LOCAL layout) instead of downloads |
 | `name` | `POOLED_NAME` | this device's name in the room |
 | `page` | `POOLED_PAGE` | a room page other than pooled.run (local tests) |
+| `allowApiClients` | `POOLED_ALLOW_API` | host: answer API asks from other devices (another OpenClaw in join mode, `pooled serve`); default on, `false` keeps the GPU to this OpenClaw |
 
 ## How it works
 
@@ -81,6 +82,25 @@ Room problems show in the chat as `Pooled: ...`: waiting for devices (with the l
 memory (the pledges against what the model needs), a device left while it held layers (the room
 waits for it to come back, then re-deals), the context is full, the host does not allow API
 clients, the host runs an older Pooled without tool calling, no model running yet.
+
+## Who can see and steer what
+
+A room is open to anyone who has its code; there is no password and no approval step. Codes are 4 to 6
+characters on the public PeerJS server by default, and onboarding keeps a host's code across restarts.
+Use the plugin only in rooms of your own devices, and keep OpenClaw's approvals on for `exec` and writes.
+
+- **Screens.** A hosting gateway opens its room with visibility `asker`: the other devices' room pages
+  get "answering…" stand-ins, never OpenClaw's prompts, answers or tool calls.
+- **Devices holding layers see the conversation anyway.** Each one gets the hidden states of every
+  token, which carry the prompt (files OpenClaw read, tool results). A device holding layers can also
+  send back any hidden states it likes. That lets it choose the model's output, **including the tool
+  calls OpenClaw then runs on the gateway machine**. The call grammar only keeps the calls well formed.
+- **Join mode trusts the room's host with everything.** It sends OpenClaw's whole context to whoever
+  answers on `pooled-room-<CODE>`, and runs the tool calls it gets back. If the real host is down,
+  anyone can register that id on the public signaling server.
+- **Guests.** Any device in the room can ask its own chat questions, which queue with OpenClaw's
+  requests. An API client's `reused` token count shows how much of its prompt matched the host's
+  cached prefixes, so it can probe what the cache holds. Turn `allowApiClients` off to close that.
 
 ## Layout
 
@@ -106,3 +126,9 @@ clients, the host runs an older Pooled without tool calling, no model running ye
   The checkpoints live in GPU memory only, so a gateway restart starts cold again.
 - macOS needs 26 or newer for the `webgpu` package's Dawn build; Windows is untested.
 - Small models need the trimmed tool profile; the MoE is the model to use.
+- Join mode tells OpenClaw the room has a 32K context whatever the host runs (the catalog is written at
+  onboarding, before the host is reachable). A host with less context refuses longer prompts ("start a
+  new session"); a 128K host is cut to 32K by OpenClaw's compaction.
+- Checkpoints (up to 4 pinned + 4 answer/turn slots, each a copy of the KV rows so far) are not part of
+  the memory split. At long contexts they can take GBs across the room (a 50K-token slot is ~1 GB for
+  the MoE), and a phone holding an attention layer gets its share of that.

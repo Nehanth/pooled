@@ -44,6 +44,10 @@ export function roomSettings(pluginConfig = {}, env = process.env) {
     modelDir: env.POOLED_MODELS || c.modelDir || null,
     name: env.POOLED_NAME || c.name || null,
     page: env.POOLED_PAGE || c.page || null,   // a room page other than pooled.run (local tests)
+    // other devices' API clients may ask this gateway's room: another OpenClaw in "join" mode, `pooled
+    // serve`. On by default (the room page's default, and what a joined OpenClaw needs); false keeps this
+    // machine's GPU queue and checkpoint cache to this OpenClaw alone
+    allowApiClients: !/^(0|false|off|no)$/i.test(String(env.POOLED_ALLOW_API ?? c.allowApiClients ?? "")),
   };
 }
 
@@ -75,7 +79,10 @@ export function ensureRoom(settings, log = () => {}) {
   globalThis[KEY] = h;
   return h.ready;
 }
-export const keyOf = (s) => JSON.stringify([s.mode, s.code, s.model, s.pledgeGB, s.signal, s.ctx]);
+export const keyOf = (s) => JSON.stringify([s.mode, s.code, s.model, s.pledgeGB, s.signal, s.ctx, s.allowApiClients]);
+// the room page's code alphabet (room/plan.js codeFromLocation): a code outside it makes a room no tab can open
+export const CODE_ABC = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
+export const CODE_RE = /^[A-HJKMNP-TV-Z2-9]{4,6}$/;
 
 async function openRoom(s, log) {
   if (!s.mode) throw new PooledError("setup", "Pooled is not set up on this machine: run `openclaw onboard` (or `openclaw models auth login --provider pooled`) and pick Pooled");
@@ -84,7 +91,10 @@ async function openRoom(s, log) {
   const note = (m) => { r.events.push({ t: Date.now(), m }); if (r.events.length > 50) r.events.shift(); log(m); };
   const common = { pledgeGB: s.pledgeGB || undefined, signal: s.signal, modelDir: s.modelDir, name: s.name || undefined, log: note, ctx: s.ctx || modelInfo(s.model).ctx };
   if (s.mode === "host") {
-    r.node = await P.createRoom({ model: s.model, code: s.code || undefined, ...common });
+    if (s.code && !CODE_RE.test(s.code)) throw new PooledError("setup", `room code ${s.code} is not one the room page opens: 4 to 6 of ${CODE_ABC} (no I, L, O, U, 0 or 1)`);
+    // visibility "asker": the other devices' screens never show OpenClaw's prompts, answers or tool
+    // calls (they still compute them: every device holding layers sees the hidden states)
+    r.node = await P.createRoom({ model: s.model, code: s.code || undefined, visibility: "asker", allowApi: s.allowApiClients, ...common });
     r.code = r.node.code;
   } else if (s.mode === "join") {
     if (!s.code) throw new PooledError("setup", "no room code: run the Pooled setup again and enter the room code");

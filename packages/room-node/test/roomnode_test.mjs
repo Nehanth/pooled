@@ -220,3 +220,49 @@ test("eventEncoder maps the checked answer to ask() events", () => {
   assert.deepEqual(out.map((x) => x.type), ["start", "token", "token", "call", "call", "call"]);
   assert.equal(out[1].think, true);
 });
+
+test("close(): the links it tears down are not departures (no degraded room, no re-deal armed), and the GPU is freed", async () => {
+  const n = fakeNode();
+  let destroyed = 0, redeals = 0;
+  const conn = { handlers: {}, on(ev, f) { this.handlers[ev] = f; }, close() {}, send() {}, peer: "b" };
+  n.stripes = 0; n.wire(conn, "mac");
+  // PeerJS destroy() closes every connection, which fires their close handlers
+  n.peer.destroy = () => conn.handlers.close?.();
+  Object.assign(n.ai, { engine: { maxSeq: 1024 }, device: { destroy: () => destroyed++ }, online: true, chain: ["b"], chainNames: ["mac"], model: "qwen3-1.7b" });
+  n.redeal = async () => { redeals++; };
+  await n.close();
+  assert.equal(n.ai.degraded, false);
+  assert.equal(n.ai.idleRedeal, undefined);
+  assert.equal(redeals, 0);
+  assert.equal(n.ai.engine, null);
+  assert.equal(destroyed, 1);
+});
+
+test("visibility asker: an API answer reaches the asker only; the other screens get hidden stand-ins, and newcomers are told", async () => {
+  const fx = readFx("qwen3-1.7b-call.json");
+  const n = replayHost(fx);
+  n.visibility = "asker";
+  n.addPeer("tab", "phone", { webgpu: true, contribGB: 1 });
+  const evs = await collect(n.ask(fx.req.messages.map((m) => ({ role: m.role, content: m.text })), { tools: fx.req.tools, maxTokens: 200, temperature: 0 }));
+  assert.equal(evs.at(-1).reason, "stop");
+  const seen = n.sent.tab || [];
+  assert.equal(seen.filter((m) => m.t === "ai-token").length, 0);
+  assert.ok(seen.some((m) => m.t === "ai-genstart" && m.hidden && m.text === undefined));
+  assert.ok(seen.some((m) => m.t === "ai-gendone" && m.hidden));
+  // a device saying hello hears the mode
+  n.addPeer("new", "new");
+  n.onData("new", { t: "hello", name: "laptop", meta: { webgpu: true, contribGB: 4 }, v: PROTOCOL });
+  assert.deepEqual(msgs(n, "new", "ai-visibility"), [{ t: "ai-visibility", mode: "asker" }]);
+});
+
+test("API asks: only from a device that joined as an API client, and only while the host allows them", async () => {
+  const fx = readFx("qwen3-1.7b-call.json");
+  const n = replayHost(fx);
+  n.addPeer("tab", "tab");
+  n.apiAsk("tab", { t: "ai-ask", api: 1, rid: "r1", system: "", messages: [{ role: "user", text: "hi" }], params: {} });
+  assert.equal(msgs(n, "tab", "ai-busy")[0].code, "bad");
+  n.addPeer("cli", "cli", { api: 2 }); n.ai.apis.set("cli", { name: "cli" });
+  n.allowApi = false;
+  n.apiAsk("cli", { t: "ai-ask", api: 1, rid: "r2", system: "", messages: [{ role: "user", text: "hi" }], params: {} });
+  assert.equal(msgs(n, "cli", "ai-busy")[0].code, "off");
+});

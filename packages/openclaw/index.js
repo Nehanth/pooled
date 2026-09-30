@@ -22,7 +22,7 @@ export default definePluginEntry({
     if (process.env.POOLED_DEBUG) console.error(`[pooled] register mode=${api.registrationMode} pid=${process.pid}`);
     const log = (m) => { try { api.logger?.info?.(`[pooled] ${m}`); } catch {} if (process.env.POOLED_DEBUG) console.error(`[pooled] ${m}`); const r = current(); r?.ready?.then(writeState, () => {}); };
     const cfgOf = (config) => config?.plugins?.entries?.[PROVIDER]?.config || api.pluginConfig || {};
-    let lastConfig = null;
+    let lastConfig = null, tick = null;   // tick: the state file's writer while the service runs
     // the StreamFn and OpenClaw's stream helpers, loaded on the first model call
     const loadStream = async () => {
       const [{ createPooledStream }, llm, transport] = await Promise.all([import("./src/stream.js"),
@@ -71,10 +71,10 @@ export default definePluginEntry({
         lastConfig = ctx?.config || api.config || lastConfig;
         const r = await ensureRoom(s, log);
         writeState(r);
-        const tick = setInterval(() => writeState(r), 5000); tick.unref?.();
+        clearInterval(tick); tick = setInterval(() => writeState(r), 5000); tick.unref?.();
         if (r.node.hosting()) ensureOnline(r, { onWait: () => writeState(r) }).then(() => writeState(r), (err) => { log(`room not online yet: ${err.message}`); writeState(r); });
       },
-      stop: async () => { const h = current(); if (h) { const r = await h.ready.catch(() => null); await r?.close(); } },
+      stop: async () => { clearInterval(tick); tick = null; const h = current(); if (h) { const r = await h.ready.catch(() => null); await r?.close(); } },
     });
   },
 });
