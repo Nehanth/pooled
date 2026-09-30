@@ -710,6 +710,9 @@ function notePath(entry) {
 function peerGone(id, e) {
   conns.delete(id);
   hbForget(liveness, id);
+  // links to or from it that were down and being replaced: nothing will replace them now, so a
+  // question must not wait for them (linksUp)
+  for (const [k, v] of linksDown) if (k.endsWith("|" + id) || k.startsWith(id + "|") || (e?.name && v.name === e.name)) linksDown.delete(k);
   if (isHost) {
     dropCard(id); members.delete(id); roster.delete(id); broadcastRoster();
     const verb = e?.dead ? "stopped responding" : "left";
