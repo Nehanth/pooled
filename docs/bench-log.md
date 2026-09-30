@@ -1332,3 +1332,54 @@ Spark (GB10) and iPhone 14 Pro Max (iOS 26.6.2), public signaling, the phone on 
 Recovery with the real phone (`room_resume.mjs --url --external iphone` + `resume_phone.mjs`, Qwen3 0.6B, host + worker tabs on the Spark, phone 4 layers): Safari in the background 30 s: the answer finished in 58 s with the same text and no drop (the link survived, main's liveness keeps a silent phone 60 s); reload: back in its slot, same text, 52 s. The same with the MoE (host 22, worker 1, phone 1 GB) was tried twice; both times the Spark's host browser closed (once mid-answer, once mid-load) as other GPU jobs started on the Spark, so it is not measured.
 
 Spark loopback: `room_resume.mjs` lock 20 s (answered in 25 s, link kept), reload (35 s, carried on), kill (72 s, re-dealt after 60 s), all the same text; `room_phone_mem.mjs` phone tab peak 311 MB (423 MB from the worker) and 364 MB (mostly from the network), killed twice while loading: 0.25 GB share, then re-dealt without it, room online with the same answer each time.
+
+## 2026-09-29: rooms on bad networks, origin/main vs fix/network-resilience (GB10)
+
+Branch fix/network-resilience = fix/net-signaling + fix/net-drop + fix/net-lossy, merged with origin/main
+5af2f66 (which added the keep-alive and the 15 s silent-link drop in the meantime). Same harness for both
+columns: `tests/e2e/room_chaos.mjs --root <checkout>` (3 headless Chromium tabs on one GB10, Qwen3 1.7B Q8
+split by memory so all three hold layers, 96 new tokens, local PeerServer, every WebRTC packet through the
+userland UDP shaper; `join` uses 2 tabs and no model). Base = origin/main 5af2f66. One run per cell;
+"identical" = same text as that run's LAN baseline. After a failed answer the harness waits until the room
+shows it is ready (re-dealing if it offers that), then asks again.
+
+| Plan / scenario | origin/main | fix/network-resilience |
+|---|---|---|
+| RTT 50 / 150 / 300 ms | 7.5 / 3.5 / 1.9 tok/s, identical | 8.8 / 3.6 / 2.0 tok/s, identical |
+| 1% loss, RTT 50 ms | 6.0 tok/s | 8.1 tok/s |
+| 5% loss, RTT 50 ms | 4.4 tok/s | 7.3 tok/s |
+| 15% loss, RTT 50 ms | 1.4 tok/s (11.5 s stall) | 4.1 tok/s (2.3 s stall) |
+| 2 / 5 / 12 s freeze of one guest, 2 / 8 s of every device | complete, identical | complete, identical |
+| 20 s freeze of one guest | fails at 17 s ("guest1 left"); re-deal, next answer identical on 2 devices | fails at 16 s ("the link to guest1 dropped; ask again"); re-deal, next answer identical on 2 devices |
+| guest's network dies while idle | dropped after 17 s; re-deal 12 s; next answer OK | dropped after 16 s; re-deal 10.5 s; next answer OK |
+| guest's network dies mid-answer | fails at 16.8 s ("guest1 left") | host shows "guest1 stopped responding; waiting for it (Stop gives up)" at 3.6-5 s; fails at 15.4 s |
+| signaling down mid-answer, then the next answer | both identical | both identical |
+| new device joins while signaling is down | "Can't reach the room server. Check your internet connection…" | "Can't reach the signaling server (…). … Rooms already running are not affected" + a self-host link |
+| new device joins right after signaling is back | "No room with that code" (the host's registration is not back) | joins in 0.7 s |
+| signaling blip of 5 s / 30 s, then a new device joins | "No room with that code" | joins in 0.25 s |
+| host or guest opens the page with signaling refused | "Can't reach the room server…" | "Can't reach the signaling server…" |
+| host or guest opens with signaling blackholed | "Connecting…" until the server is back | "Can't reach the signaling server…" after 20 s, buttons usable again |
+| signaling down, a device leaves, re-deal | fails (new links need signaling) | fails the same way |
+| no direct path, no relay | "No room with that code" (the room exists) | "Found the room, but these two devices can't reach each other… A relay (TURN) server gets around that", Network box opens |
+| no direct path, TURN relay (`?turn=`) | no relay support: the join times out | all 4 links on the relay, 33.1 tok/s relay-only |
+
+Drop detection (`tests/e2e/room_drop.mjs --devices 3`, 161 tokens, all 16 checks pass): RTT 300 ms + 5% loss
+and RTT 600 ms + 5% loss finish identical with nobody flagged (longest silence 0.9 s against a 3.9 s limit and
+1.6 s against 4.8 s). A dead middle / last device is flagged in 5.1 / 3.9 s, the answer fails at 15-17 s
+(the link fails or the silent-link drop fires), the re-deal is offered at once and the room answers again.
+Signaling fallback (`tests/e2e/signal_fallback.mjs`, no GPU): 19 of 19.
+
+How the three branches changed when merged:
+- Drop detection no longer fails the answer 3.5-5 s into a silence. As first merged it did, and a first matrix
+  run showed it failing 5, 8 and 12 s freezes that origin/main finishes. It now flags the device, holds the
+  answer (Stop gives up) and makes a new question wait; the device counts as back only after it answers a
+  ping sent after the silence began. Dropping a silent device is left to main's ping loop (15 s for a computer,
+  60 s for a phone).
+- Main's 15 s silent-link drop fires before ICE gives up (~15-17 s), so fix/net-lossy's redial of a dead link
+  no longer brings back a computer frozen for 20 s: it is dropped and rejoins through the re-deal, as on main.
+  The redial still applies to phones (60 s) and to links that fail while packets still flow.
+- The decode lap-timeout floor from fix/net-drop went from 15 s to 25 s: a 12 s freeze left a 15 s gap between
+  two tokens in the first run.
+
+Still open: a re-deal while signaling is down still fails, and an answer caught in a freeze longer than
+~15 s isn't retried automatically.
