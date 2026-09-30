@@ -23,25 +23,25 @@ Sources (origin/main 40bb0fa):
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-Every performance claim in Pooled comes with the hardware and the commit that produced it. There are two ways to contribute numbers:
+Every speed claim in Pooled names the hardware and commit behind it. Two ways to contribute numbers:
 
-- **Reporting a device we don't have:** use the benchmark issue template. This is one of the most useful things you can send.
-- **A pull request that changes speed:** add a row to `docs/bench-log.md` with before and after numbers.
+- **A device we don't have:** send a benchmark report (no clone needed). One of the most useful things you can send.
+- **A PR that changes speed:** add a row to `docs/bench-log.md` with before and after.
 
 ## Report numbers from your hardware
 
-You don't need to clone anything. Open a room on [pooled.run](https://pooled.run/room), load a model, and ask one of the standard prompts below twice. Then [open a benchmark report](https://github.com/Nehanth/pooled/issues/new?template=020-benchmark-report.yml) with:
+Open a room on [pooled.run](https://pooled.run/room), load a model, ask one of the standard prompts below twice, then [open a benchmark report](https://github.com/Nehanth/pooled/issues/new?template=020-benchmark-report.yml) with:
 
 - **Hardware**, for example `MacBook Pro M4 Max 64 GB`, `RTX 4090` or `Pixel 9`;
 - **Browser or runtime, and its version**;
 - **Commit or site build**, for example `pooled.run on 2026-10-11`;
 - **Numbers:** the model, the room size, whether the devices were on the same network, prefill and decode tokens/s (plain and speculative if shown), and the breadcrumb line.
 
-Report the second answer or a later one. The first answer in a room is slower, because speculative decoding starts cautious.
+Report the second answer or later: the first is slower while speculative decoding warms up.
 
 ## Standard prompts
 
-Room numbers can only be compared when the prompt is the same. Use one of these, word for word, and name it in your report:
+Use one of these word for word, and name it:
 
 | Name | Tokens | Use it for |
 |---|---|---|
@@ -89,26 +89,20 @@ One machine, several headless Chromium tabs, with emulated network latency:
 node tests/e2e/room_latency.mjs --model qwen3.6-35b-moe --devices 2 --lat 0,5,20 --maxnew 128
 ```
 
-The latency is added in the page. It holds every hidden-state frame back for the given time, but it doesn't model bandwidth or packet loss. For real links, use `tests/e2e/xroom_pair.sh` across two machines (see [Testing](/docs/contributing/testing#real-devices)).
+The latency is added in the page and doesn't model bandwidth or loss. For real links, use `tests/e2e/xroom_pair.sh` across two machines (see [Testing](/docs/contributing/testing#real-devices)).
 </TabItem>
 </Tabs>
 
 <Aside type="tip">
-Profile by leaving kernel families out, not with GPU timestamp queries. Just turning timestamp queries on made everything about 3 times slower. A traced room round is useful for splitting time between compute and the wire, but don't quote its tokens/s.
+Profile by leaving kernel families out, not with GPU timestamp queries, which make everything about 3 times slower. Don't quote a traced room round's tokens/s.
 </Aside>
 
 ## Add a row to the bench log
 
-Any PR that claims a speed change adds a row to [`docs/bench-log.md`](https://github.com/Nehanth/pooled/blob/main/docs/bench-log.md), and neutral results count too. A row names:
+Any PR that claims a speed change (neutral results too) adds a row to [`docs/bench-log.md`](https://github.com/Nehanth/pooled/blob/main/docs/bench-log.md): date and change, commit, hardware and runtime, before and after, and anything that makes the numbers hard to compare.
 
-- the date and the change;
-- the commit;
-- the hardware and the runtime (Deno or Chrome, and the GPU);
-- the before and after numbers;
-- anything that makes the numbers hard to compare.
+Measured in a room on real devices? Also add a row to **Room benchmarks by PR**: "before" is `main` the same day, "after" the PR's preview; prefill from the status line, decode from the answer's footer.
 
-If you measured in a room on real devices, also add a row to the **Room benchmarks by PR** table. "Before" is production (`main`) on the same day, and "after" is the PR's preview URL. Prefill is the seconds the status line reports, and decode is the tokens/s in the answer's footer. Name the devices and the standard prompt.
-
-Output must stay bit-exact. A faster kernel counts only if the golden tests still pass and the speculative stream still equals plain decoding.
+Output must stay bit-exact: the golden tests pass and the speculative stream equals plain decoding.
 
 Summaries of the headline numbers are on [Benchmarks](/docs/internals/benchmarks).

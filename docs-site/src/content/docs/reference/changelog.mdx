@@ -10,7 +10,7 @@ sidebar:
 Sources (origin/main 40bb0fa):
 - CHANGELOG.md (release dates and one-line summaries: 1.0.0 2026-09-27, 0.2.0 2026-09-07, 0.1.0 2026-08-29)
 - git tags v0.2.0, v1.0.0
-- `npm view @pooled/cli version` -> 0.2.0 (2026-09-30); cli/package.json 0.2.1 (unreleased, CHANGELOG "Fixed": banner agent settings, opencode provider)
+- `npm view @pooled/cli version` -> 0.2.1 (2026-09-30), same as cli/package.json (6-character codes, #k= invite links, banner agent settings, opencode provider)
 - CHANGELOG.md Unreleased still says @pooled/cli is "not published yet": stale, this page says otherwise on purpose.
 BUILD NOTE: the full log below is imported from the repo's CHANGELOG.md, so this page never drifts from it. The path assumes
 this file lives at docs-site/src/content/docs/reference/changelog.mdx. .vercelignore excludes *.md today, so the Vercel build
@@ -19,7 +19,7 @@ must be allowed to see CHANGELOG.md (or a prebuild step must copy it into docs-s
 
 import { Content as FullChangelog } from '../../../../../CHANGELOG.md';
 
-Pooled has two things that get released: the site and room at [pooled.run](https://pooled.run), and the `@pooled/cli` package that provides `pooled serve`. The site deploys from `main`, so changes under **Unreleased** are usually already live.
+Two things get released: the site at [pooled.run](https://pooled.run), which deploys from `main` (so **Unreleased** changes are usually live), and the `@pooled/cli` package.
 
 ## Releases
 
@@ -33,21 +33,16 @@ Pooled was called SwarmLLM before September 2026. Entries from before the rename
 
 ### pooled serve
 
-| Version | Status |
-|---|---|
-| 0.2.0 | On npm as `@pooled/cli`. Chat Completions, Responses and Messages, with tool calling. |
-| 0.2.1 | In the repo, not yet on npm. The banner prints agent settings only once the model is ready, with the right context, and adds a ready-to-paste opencode provider. |
+`@pooled/cli` 0.2.1 is on npm: Chat Completions, Responses and Messages with tool calling, six-character room codes and `#k=` invite links.
 
 ```bash
-npx @pooled/cli@latest serve ABCD
+npx @pooled/cli@latest serve 4TKG9P
 ```
 
-:::note
-The full log below still says `@pooled/cli` is "not published yet". That line is out of date: 0.2.0 is on npm.
-:::
+The full log below still calls `@pooled/cli` "not published yet". That line is out of date.
 
 ## Full log
 
-The complete log, from `CHANGELOG.md` in the repository. It follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+From `CHANGELOG.md` in the repository.
 
 <FullChangelog />
