@@ -12,6 +12,7 @@ A Pooled room is a set of browsers that split one model's layers and pass the mo
 - **The room is a shared conversation.** Everyone in a room sees the questions asked and the answers streamed, on their own screen; that is the product, not a leak. The host alone holds the tokenizer, embedding table, LM head and sampler, so the devices running layers receive activations and never make sampling decisions. Nothing leaves the room.
 - **Each device loads only its own layers.** It fetches its layer range from the public model repository, or takes byte ranges another device in the room already has cached (see below).
 - **Transport encryption.** WebRTC data channels are encrypted with DTLS between the two browsers on each hop.
+- **The host decides who joins.** A room code (six characters, about 729 million of them) only finds the room. A device that types it waits until the host presses Allow; the host's invite link and QR code carry a random 128-bit key in the link's fragment (never sent to a server) that lets a device in without asking. A device the host let in gets a pass for coming back after a reload or a dropped link. Until it is in, a device gets nothing from the room: no layers, no chat, no roster. The host can turn asking off in Room settings (then the code is enough), and anyone holding the invite link can get in, so share it like a document link. Details: [docs/protocol.md](docs/protocol.md#joining-a-room).
 
 **What it cannot promise**
 

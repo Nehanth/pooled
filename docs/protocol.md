@@ -28,6 +28,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-linked {next, ok}` | worker → host | answer to `ai-next {relink}`: the fresh link to `next` is up (`ok`) or could not be opened. The host holds a waiting answer until it arrives (15 s at most), so the first frames after a device's return do not go down the dead link |
 | `ai-redeal {by, model}` | host → all | the host is dealing the layers again over the devices now in the room (after a departure, or to include late joiners); fresh `ai-load`s follow, cached ranges reload in seconds, the conversation is kept and re-prefilled on the next question |
 | `ai-ready-all {model}` to one device | host → newcomer | a device that joins an online room becomes an ask-only guest right away, followed by `ai-history {items}` (the last 20 exchanges) when the chat is visible to everyone |
+| `ai-layers {by, held?, out?}` / `ai-out {out}` | host → all | the deal: `by` each device's layer range by name; `held` the GB each holds of its pledge (the host's with the embedding and the head); `out` why a device with a GPU holds none, by name: `unneeded` (the others hold the model), `small` (its pledge is under one layer) or `late` (it joined after the start and waits for a re-deal; `ai-out` updates it, and `ai-ready-all` carries it too). Screens show it on the device cards and the Lend screen. Hints: devices that predate them ignore them (no `PROTOCOL` bump) |
 | `ai-style {persona, sampling, thinking}` | host → all | the host changed the answer style (screens show a toast); takes effect on the next question |
 | `ai-wake {pos}` | host → worker | a decode lap (a token at `pos`, or a verify from `basePos` `pos`) starts now: a worker that asked for it (hello `meta.wake`, phones by default) keeps its GPU busy with a dummy kernel until that frame arrives (at most 50 ms), so its layers run on a GPU that has not clocked down (room/gpuwake.js). A hint: ignored once the frame is there, and by devices that predate it (no `PROTOCOL` bump) |
 | `ai-tele {k}` | worker → host | compute ms per frame kind (`spec` verify, `one` single token, `pre` prefill), an EMA, at most every 700 ms |
@@ -68,17 +69,17 @@ Each device watches every link's `RTCPeerConnection`. When one fails:
 
 No PROTOCOL change: a peer that predates this sees an ordinary new connection from a device it knows (it already replaces the old entry), and ignores `ai-linklost`.
 
-## Connecting: STUN and an optional TURN relay
+## Connecting: STUN and a TURN relay
 
 Links are direct WebRTC connections. Every device uses public STUN servers to find its public address; that is enough on most home and office networks. When both sides are behind symmetric NAT or carrier-grade NAT, or a firewall blocks UDP, no direct path exists and the join fails after 15 s with "found the room, but the direct connection failed" (the Network box under the join form opens). A TURN relay fixes that: it forwards the traffic between the two devices.
 
-Pooled does not run a relay and ships no credentials; it is off by default. To use one (your own [coturn](https://github.com/coturn/coturn), or a provider's):
+No relay credentials ship in the page. A deployment can offer a default relay: when its owner sets a provider in the Vercel environment (Cloudflare Realtime TURN, or coturn with `use-auth-secret`), each device gets short-lived credentials from `POST /api/turn` (api/turn.mjs) as it opens or joins a room, and refreshes them at 3/4 of their lifetime. When the endpoint is not configured (204), missing (a static host) or slow (2.5 s), the room works as before. On `localhost` it is only asked with `?turnapi=1`; `?relay=0` skips it. Setup, abuse limits and costs: [rooms-at-work.md](rooms-at-work.md). A relay you set yourself wins over the default (and then `/api/turn` is not called):
 
 - **Network box** under the join form: relay URL (`turn:relay.example.org:3478`, `turns:` for TLS, comma-separate several), username and password. Saved in this browser only.
 - **URL**: `?turn=turn:relay.example.org:3478&turnuser=NAME&turncred=PASSWORD`. Overrides the saved setting.
 - **Self-hosted deployments**: define `window.TURN_SERVERS` (an `RTCIceServer` array) before `room.js` loads.
 
-ICE still prefers a direct path and only falls back to the relay when it has to. `?relay=1` (or "Always go through the relay") uses only the relay, so the other devices never see this device's IP address. Every device that cannot connect directly needs the relay configured; a device with an open network can reach a relayed one without it. Join links and QR codes never include `turn`, `turnuser`, `turncred` or `relay`. `pooledDebug()` shows each link's `path` (`direct` or `relay`), and the room log notes relayed links. A relay adds a hop to every token's round trip, so decode is slower through it than over a direct path. Tested with `node tests/e2e/room_chaos.mjs --plan turn` (a local test TURN server, `tests/e2e/turn_server.mjs`, with every direct candidate dropped).
+ICE still prefers a direct path and only falls back to the relay when it has to. `?relay=1` (or "Always go through the relay") uses only the relay, so the other devices never see this device's IP address. Every device that cannot connect directly needs the relay configured; a device with an open network can reach a relayed one without it. Join links and QR codes never include `turn`, `turnuser`, `turncred` or `relay`. `pooledDebug()` shows each link's `path` (`direct` or `relay`) and `via` (how this side reaches the relay: `udp`, `tcp` or `tls`), and the room log notes relayed links. Model weights never cross a relayed link (relayed bytes cost the relay's owner): a device whose link to a weight source is relayed, or not known to be direct while a relay is configured, fetches those ranges from the network instead, and a device asked for a range over a relayed link answers `ai-wpart {miss: 1}` (no protocol change: a miss already meant "use the network"). Each tab also probes whether UDP gets out (a STUN-only candidate gathering, `pooledNet()`); a failed join then says whether the network blocks UDP, and a host on such a network with no relay is warned that only devices on its own network can join. A relay adds a hop to every token's round trip, so decode is slower through it than over a direct path. Tested with `node tests/e2e/room_chaos.mjs --plan turn` (a local test TURN server, `tests/e2e/turn_server.mjs`, with every direct candidate dropped). The default relay is tested with `node tests/e2e/room_relay.mjs` (UDP disabled in Chromium, credentials from api/turn.mjs, a local coturn over TCP and TLS).
 
 ## Conversation state
 
@@ -89,9 +90,38 @@ The host owns the conversation: `{system, turns}` rendered to ChatML ids by `roo
 | Message | Direction | Meaning |
 |---|---|---|
 | `hello {name, meta, v, died?}` | both ways on every link | `v` is the protocol version; on a mismatch each side says which one is older and who should reload (room/errors.js), and sends that as `bye {reason}` for a tab too old to word it itself. `died {during, ago, loading?}` is a joiner's crumb from a tab that was killed (surfaced on the host); `loading` means it died while loading its layers, and the host then re-deals (`ai-share`) instead of loading the same layers into it again. `meta.pledgeMax` is the most the device may lend (phones: 1 GB on iOS, by `navigator.deviceMemory` on Android, room/pledge.js); the host also holds iPhone and iPad pledges to 1 GB itself |
+| `hello {…, join: 1, key?, pass?}` | device → host | see Joining a room: what lets it in, and that it can wait in the host's lobby |
 | `hello {…, back: 1}` | returning guest → host | a device reconnecting: to a host that resumed the room, after its own link dropped (a lock, the background), or from a reloaded tab that rejoined by itself. It keeps its transcript, so no `ai-history`; the host re-seats it in its old slot by name (`aiRejoin`) |
 | `leaving` | all → all | sent on `pagehide`; the receiver closes the link at once instead of waiting for ICE to notice (tens of seconds), so a departure mid-answer fails within a lap |
 | `ping {ts}` / `pong {ts}` | all → all / reply | every 2.5 s to every link (the RTT on each card); while an answer runs the host also pings each device in the chain every 500 ms (drop detection) |
+
+## Joining a room
+
+A room's code is six characters from a 30-letter alphabet with no I, L, O, U, 0 or 1 (`randomCode` in `room/joingate.js`: 30^6, about 729 million codes), shown in two groups of three (`4TK-G9P`) wherever people read it; the host's PeerJS id is `pooled-room-4TKG9P`, without the dash. Rooms opened before this had four characters: the join box, `/r/ABCD` links and `pooled serve ABCD` still take those.
+
+The code only finds the room. The host decides who gets in (the gate, `room/joingate.js`): a link the host did not open waits in its **lobby** until its `hello`, and the gate lets it in when it
+
+1. presents a **pass** (`hello.pass`) the host gave it before: a device the host already let in, coming back after a reload of its tab (#258), a lock, a dropped link (Dead links) or a namesake reconnect;
+2. presents the room's **invite key** (`hello.key`): a random 128-bit secret the host makes per room and puts in its invite links and QR code as a fragment, `/r/4TKG9P#k=<22 characters>` (`?code=4TKG9P#k=…` off pooled.run). Browsers never send a fragment to a server. The joiner strips it from its address bar once it is in;
+3. or the host presses **Allow** on the prompt "<name> wants to join (<device kind>, <GB>)";
+
+or when the host turned **Ask before new devices join** off (Room settings; on by default, `?ask=0` on the host's page starts with it off). The host compares SHA-256 hashes (`sameHash`, time independent of where they differ) and keeps passes only as hashes. The key, the passes and the setting are saved with the room (`saveHost`), so a host that reloads keeps its links working and lets its devices back in without asking. Passes live in the joiner's `sessionStorage` (`pooled-passes`, per tab; a new tab with a typed code asks again).
+
+Until it is let in, a link is not in the host's `conns`: nothing the room sends (roster, chat, `ai-*`, pings) reaches it and nothing it sends reaches the room. The host answers its `ping` with `pong` and keeps up to 64 messages it sends after its `hello`, handled once it is in. Only the host gates; devices learn each other's ids from the host's roster, so a device in the lobby knows no one else's id.
+
+| Message | Direction | Meaning |
+|---|---|---|
+| `hello {…, gate: 1, ask}` | host → any link it did not open | this host holds new devices at the gate; `ask`: it asks before letting a device in (the Invite sheet says so) |
+| `hello {…, join: 1, key?, pass?}` | device or API client → host | this device can wait in the lobby, and what may let it in. `key` and `pass` go only to the host, never to another device |
+| `lobby` | host → device | the host was asked: the device shows "Waiting for the host to let you in" (with Cancel) |
+| `admit {pass?}` | host → device | in: the roster, the room's state and everything else follow. `pass` (128 bits, base64url) is what lets it back in later; none for a device that came in with its pass, or an older one that can't keep it |
+| `bye {reason}` | host → device in the lobby | not let in: Deny ("The host didn't let this device in."), a lobby already holding 8 requests, "Allow API clients" off, or a tab too old to wait. The device goes back to the join screen with the reason and does not knock again |
+
+**Compatibility** (`PROTOCOL` stays 4). A new tab joining an **older host**: the host's `hello` has no `gate`, so the tab goes into the room at once, as before (and if no `hello` arrives at all within 15 s, it goes in too). An **older tab** joining a new host: its `hello` has no `join`, so with Ask on the host answers `bye` "This room's host asks before new devices join, and this tab runs an older Pooled that can't wait for that. Reload the page, then join again." (an older `pooled serve` is told to update); with Ask off it is let in as before. An older host resumed by a newer build (a saved room without a gate) gets a new key: the devices that come back are asked about once.
+
+**API clients** (`pooled serve`) go through the same gate as devices: once in, a client gets the roster and, under the room's visibility setting, the chat, and "Allow API clients" is on by default, so a code alone must not be enough. The Serve API page's command on the host carries the invite link (`pooled serve "https://pooled.run/r/4TKG9P#k=…"`): such a client is let in at once. With the code alone it waits in the lobby like a device (the host sees "pooled serve … wants to join (API client)"). "Allow API clients" is checked first: with it off, the client is refused before the host is asked.
+
+**Not covered here.** The headless room node (`pooled join`, not merged yet) must send `join: 1` with the key from its link, keep the pass from `admit`, and wait on `lobby` like `cli/lib/room.js` does. Workers don't gate links between themselves. Anyone the host lets in can still do what any device could before (see roadmap/17-security-sweep.md); the gate decides who that is.
 
 ## Drop detection
 

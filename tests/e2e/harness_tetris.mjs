@@ -195,7 +195,7 @@ try {
     p.on("console", (m) => { if (m.type() === "error" && !expected.test(m.text()) && !/Could not connect to peer/.test(m.text())) errs[n].push(m.text().slice(0, 300)); });
     p.on("pageerror", (e) => { if (!expected.test(String(e))) errs[n].push("pageerror: " + String(e).slice(0, 300)); });
   }
-  const base = `http://127.0.0.1:${PORT}/p2p.html?split=memory&signal=127.0.0.1:${SIGNAL_PORT}`;
+  const base = `http://127.0.0.1:${PORT}/p2p.html?ask=0&split=memory&signal=127.0.0.1:${SIGNAL_PORT}`;
   await host.goto(base + "&mock=code" + (arg("hcore", "") ? "&hcore=" + arg("hcore") : ""));
   await peer.goto(base);
   for (const [p, n] of [[host, "host"], [peer, "peer"]]) {
@@ -203,7 +203,7 @@ try {
     await p.fill("#name-input", n + "-e2e");
   }
   await host.click("#create-btn");
-  await host.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
+  await host.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
   const room = (await host.textContent("#room-badge")).trim();
   await peer.fill("#code-input", room);
   await peer.click("#join-btn");

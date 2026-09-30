@@ -23,7 +23,7 @@ jobs:
         with: { node-version: 22 }
       - name: Syntax check (engine, room, harness, site, tests incl. unit and e2e, benchmarks, scripts)
         run: |
-          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js scripts/*.mjs; do node --check "$f"; done
+          for f in api/*.mjs engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js scripts/*.mjs; do node --check "$f"; done
       - name: Unit tests (no GPU)
         id: unit
         # the unit tests import node: builtins via tests/weight_cache.js; without npm ci there is no local

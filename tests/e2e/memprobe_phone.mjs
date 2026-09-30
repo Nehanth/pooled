@@ -134,7 +134,7 @@ async function roomRun() {
   out.hook = await exec(HOOK, out.ballastMB);
   await exec((name, gb) => { for (const [id, v] of [["name-input", name], ["join-gb", gb]]) { const el = document.getElementById(id); el.value = v; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); } }, arg("name", "iphone"), out.gb);
   let code = arg("code");
-  for (const tEnd = Date.now() + 30 * 60e3; !code && Date.now() < tEnd; await sleep(1000)) { try { code = (fs.readFileSync(arg("codefile"), "utf8").match(/[A-Z0-9]{4}/) || [])[0]; } catch {} }
+  for (const tEnd = Date.now() + 30 * 60e3; !code && Date.now() < tEnd; await sleep(1000)) { try { code = (fs.readFileSync(arg("codefile"), "utf8").replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/) || [])[0]; } catch {} }
   if (!code) throw new Error("no room code");
   out.code = code;
   await exec((c) => { const el = document.getElementById("code-input"); el.value = c; el.dispatchEvent(new Event("input", { bubbles: true })); }, code);
