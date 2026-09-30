@@ -1,7 +1,7 @@
 ---
 title: Benchmarks
-description: Measured speed on one device, across devices with added latency, on real machines and phones, and on bad networks, with the commands to reproduce each number.
-eyebrow: How it works
+description: Measured speed on one device, across devices, with phones and on bad networks, first-load times, and the commands to reproduce each number.
+eyebrow: Internals
 sidebar:
   label: Benchmarks
   order: 5
@@ -9,6 +9,14 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
+{/*
+Sources (for the fact-checker):
+- docs/bench-log.md: "2026-09-28: device matrix" (1.7B GB10 49-51 tok/s plain; GB10 + iPhone 1.7B 25.6-29.0; MoE on GB10 alone online after 163-168 s), phone rows, bad-network rows, long-context rows
+- CHANGELOG.md Unreleased: M5 Max Chrome MoE 86.1 -> 90.9 tok/s plain
+- README.md "Performance"; PR #245 (1.7B loaded in 35 s on the Spark incl. cold kernel tuning); PR #233, #244, #258, #259 (phones, wake, bad networks)
+*/}
+
+How fast Pooled runs, measured. User pages quote a few of these numbers and link here.
 
 Every number here uses greedy decoding, and the output matches plain one-device decoding unless a note says otherwise. The full history, with commits, caveats and the failures, is in the [bench log](https://github.com/Nehanth/pooled/blob/main/docs/bench-log.md) on GitHub.
 
@@ -26,12 +34,13 @@ NVIDIA GB10 (DGX Spark), Chrome, 2026-09-26, coding prompts.
 |---|---|---|---|
 | Qwen 3.6 35B MoE | 40–46 tok/s | 65–84 tok/s | 85.5 tok/s decode, 2,520 tok/s prefill |
 | Qwen 3.8 27B | 10.1–10.8 tok/s | 20–27 tok/s | 13.8 tok/s decode |
+| Qwen3 1.7B | 49–51 tok/s | no draft layer | |
 
 Native llama.cpp is still ahead on plain decode: about 2× on the MoE and 1.3× on the 27B. Speculative decoding closes most of that on code, where 70 to 85% of drafts are accepted.
 
 **Prefill is the biggest gap.** The first token of a 172-token prompt takes about 1.0 s on the MoE and 2.5 s on the 27B, against roughly 0.07 s and 0.5 s native.
 
-On an Apple M5 Max (Chrome, Metal), the MoE decodes at 80 to 90 tok/s plain and up to about 150 tok/s speculative on code.
+On an Apple M5 Max (Chrome, Metal), the MoE decodes at about 91 tok/s plain (86.1 before the wider Apple MoE kernels) and up to about 150 tok/s speculative on code.
 
 ## Across devices
 
@@ -71,7 +80,7 @@ GB10 and Apple M5 Max over home Wi-Fi, Qwen 3.6 35B MoE split 20 / 20 layers, 12
 | GB10 hosts, M5 Max holds 20 layers | 29.0 | 31.3 | 34.0 | 51.5 |
 | M5 Max hosts, GB10 holds 20 layers | 31.6 | 34.9 | 47.4 | 61.8 |
 
-Moving layers to the faster Mac while the GB10 hosts changed little. Moving the **host role** to the Mac is what paid: the head, sampler, drafts and rollback all run on every token's critical path. Rooms now pick the host by measured GPU speed ([Architecture](/docs/internals/architecture#which-device-hosts)).
+Moving layers to the faster Mac while the GB10 hosts changed little. Moving the **host role** to the Mac is what paid: the head, sampler, drafts and rollback all run on every token's critical path. Rooms now pick the host by measured GPU speed ([How layers are split](/docs/rooms/split#which-device-is-the-model-host)).
 
 On the 27B split 31 / 33 over the same two machines, speculative `twosum` went from 18.2 to 21.6 tok/s when the Mac hosted.
 
@@ -85,21 +94,25 @@ GB10 + iPhone 14 Pro Max over home Wi-Fi, Qwen 3.6 35B MoE, 128 tokens.
 | Room | Plain `japan` | Plain `twosum` | Spec `japan` | Spec `twosum` |
 |---|---|---|---|---|
 | GB10 alone | 35.4–37.0 | 39.8–40.2 | 45.5–47.5 | 63.1–64.9 |
-| Phone holds 1 layer (before #233) | 14.7–21.7 | 19.4–25.4 | 25.0–28.7 | 24.7–38.6 |
+| Phone holds 1 layer (the old default) | 14.7–21.7 | 19.4–25.4 | 25.0–28.7 | 24.7–38.6 |
 | Phone only asks (now, when the computers can hold the model) | 35.8–37.4 | 39.7–41.4 | 45.3–46.8 | 62.4–67.2 |
 
 **Why the phone slows the room when it holds layers.** One MoE layer takes an iPhone about 3 to 5 ms back to back, but 7 to 12 ms inside a room. The phone idles 35 to 40 ms of every lap waiting for the host, and its GPU clocks down in that gap. One phone layer costs as much time as 15 to 25 GB10 layers, plus two Wi-Fi hops, for 1/40 of the model. So rooms now give a phone layers only when the computers can't hold the model, and a phone worker keeps its GPU busy with a small dummy kernel while its frame is on the way.
 
 When a phone is needed, it still works: a GB10 with a 22 GB pledge plus an iPhone holding 2 MoE layers ran at about 20 to 25 tok/s on `twosum`, with the same answer every time.
 
-The iPhone's page is capped at 0.5 GB of layers by default and 1 GB at most. Safari's page process has a 1,536 MB soft limit that WebGPU buffers count against. See [Phones and tablets](/docs/phones).
+On Qwen3 1.7B, a GB10 with an iPhone holding one layer ran at 25.6–29.0 tok/s over home Wi-Fi, against 47–51 tok/s once the phone only asked.
+
+**Phone GPU wake.** While a phone holds layers, the host tells it when each lap starts so its GPU stays clocked up (`?wake=0` turns it off). This made a GB10 and iPhone room 4.6% to 11.6% faster.
+
+**Why iPhone caps are low.** Safari's page process has a soft limit of about 1,536 MB that WebGPU buffers count against. On an iPhone 14 Pro Max (iOS 26.6), the tab was killed at 1,534 to 1,537 MB after a few loads in a row. So an iPhone gives 0.5 GB by default and 1 GB at most. See [Phones and tablets](/docs/phones).
 
 </TabItem>
 </Tabs>
 
 ## Bad networks
 
-Three headless Chromium tabs on one GB10, Qwen3 1.7B split so all three hold layers, 96 tokens. Every WebRTC packet goes through a userland UDP shaper. "Before" is main before [#259](https://github.com/Nehanth/pooled/pull/259); "now" is main since.
+Three headless Chromium tabs on one GB10, Qwen3 1.7B split so all three hold layers, 96 tokens. Every WebRTC packet goes through a userland UDP shaper. "Before" is main before the bad-network work landed ([#259](https://github.com/Nehanth/pooled/pull/259)); "now" is main since.
 
 | Scenario | Before | Now |
 |---|---|---|
@@ -112,6 +125,18 @@ Three headless Chromium tabs on one GB10, Qwen3 1.7B split so all three hold lay
 | No direct path, TURN relay configured | Join times out | All links on the relay, 33 tok/s |
 
 Still open: a re-deal while signaling is down fails, and an answer caught in a freeze longer than about 15 s is not retried automatically.
+
+## First load
+
+The first start downloads the weights and tunes the GPU kernels for the device. Later starts read the weights from the browser's cache.
+
+| Model | Whole file | First load |
+|---|---|---|
+| Qwen3 1.7B | 1.83 GB | 35 s on a DGX Spark alone, including kernel tuning |
+| Qwen3.8 27B | 16.06 GB | not measured; depends on the connection |
+| Qwen3.6 35B MoE | 20.84 GB | 163–168 s (about 2 min 45 s) on a DGX Spark alone |
+
+In a room, each device fetches about its share of the file.
 
 ## Long context
 
