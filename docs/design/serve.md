@@ -369,6 +369,14 @@ prompt is ~20 k tokens before any history, so the room needs a large context (th
 `?ctx=65536`). `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps its side requests (titles, …)
 from interleaving with the agent's and resetting the room's cached sequence.
 
+GPU (`tests/e2e/serve_messages.mjs`, a real host room, the CLI's HTTP server and the Anthropic SDK;
+2026-09-29 on the Spark, `?ctx=65536`): 14 of 14 checks on Qwen3 1.7B and on Qwen3.6 35B MoE
+(tool_use non-stream and streamed, a tool_result follow-up reusing the caches, `any`, a named tool,
+`none`, `disable_parallel_tool_use`, omitted thinking whose signature brings the reasoning back
+with the prefix reused, stop sequences, and a real Claude Code 2.1.285 `claude -p` run that reads a
+file with Read and answers with its contents: 53 s on the MoE, 366 s on the 1.7B; its second step
+reused 15230 of ~15.2 k prompt tokens on the MoE, 15551 of 15601 on the 1.7B).
+
 ### Anthropic: `GET /v1/models`
 
 When the request carries `anthropic-version` (or `x-api-key`), `/v1/models` answers in
