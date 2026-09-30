@@ -250,7 +250,7 @@ async function runHost(opts, out) {
   const deal = (auto = false) => {
     if (starting || leaving) return;
     const again = !!node.ai.engine;
-    if (again && !auto) out.log("re-dealing the layers over the devices in the room");
+    if (again) { if (!auto) out.log("re-dealing the layers over the devices in the room"); }
     else if (!(opts.devices > node.gpuPeers().length + 1)) out.log(`dealing the layers over ${node.gpuPeers().length + 1} device(s)`);
     starting = (again ? node.redeal() : node.start(opts.model, { minDevices: opts.devices || 1 }))
       .then(() => { dealtWith = new Set(node.gpuPeers()); out.log(`room online: ${node.status().split?.join(" · ") || "ready"}`); })

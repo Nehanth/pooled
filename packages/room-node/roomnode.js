@@ -340,10 +340,9 @@ export class RoomNode extends EventEmitter {
           // a newcomer while the room is online is an ask-only guest (aiWelcome). The layer map first:
           // a device back after the room re-dealt without it (away past the grace, it missed that
           // deal's ai-layers) still holds its old layers, and frees them when it is not in the map
-          if (this.ai.online && !this.ai.chain.includes(from)) {
-            if (this.ai.layersByName) this.sendTo(from, { t: "ai-layers", by: this.ai.layersByName });
-            this.sendTo(from, { t: "ai-ready-all", model: this.ai.model, label: MODELS[this.ai.model]?.label, ctx: this.ctxMax() });
-          }
+          // (also while a deal loads: it is the map of the deal in progress)
+          if (this.ai.layersByName && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-layers", by: this.ai.layersByName });
+          if (this.ai.online && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-ready-all", model: this.ai.model, label: MODELS[this.ai.model]?.label, ctx: this.ctxMax() });
           this.log(`${d.meta?.api ? "API client " : ""}${d.name} ${d.back ? "came back" : "joined"}${d.meta?.webgpu ? ` (${d.meta.gpu}, ${d.meta.contribGB} GB)` : ""}`);
         } else if (from === PREFIX + this.code) this.hostName = d.name;
         this.emit("members");
