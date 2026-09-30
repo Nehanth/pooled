@@ -1,7 +1,22 @@
 // pooled chat <CODE | link>: talk to a room's model from the terminal (cli/lib/chat.js has the parts
 // that are unit tested). It joins as an API client over the same Bridge as pooled serve (room.js:
 // the gate, v2 asks), streams each answer, and keeps the conversation for the next turn.
-import readline from "node:readline";
+import { repl } from "./repl.js";
+import { style, header } from "./style.js";
+
+// a writer that starts every line with two spaces (the chat's answers sit on the screen's grid)
+function indenter(pad = "  ") {
+  let atStart = true;
+  return (s) => {
+    let out = "";
+    for (const ch of String(s)) {
+      if (atStart && ch !== "\n") { out += pad; atStart = false; }
+      out += ch;
+      if (ch === "\n") atStart = true;
+    }
+    return out;
+  };
+}
 import { Bridge } from "./room.js";
 import { Ask, Collector } from "./answer.js";
 import { askBody, newRid, cleanText } from "./common.js";
@@ -26,13 +41,15 @@ export async function chatMain(argv, { version = "", embedded = false, Peer = nu
   try { opts = parseChatArgs(argv); }
   catch (e) {
     if (!(e instanceof UsageError)) throw e;
-    process.stderr.write(`pooled chat: ${e.message}\n\n${HELP_CHAT}`);
+    process.stderr.write((e.lines || [`pooled chat: ${e.message}`]).join("\n") + "\n");
     return 2;
   }
   if (opts.help) { process.stdout.write(HELP_CHAT); return 0; }
 
   const interactive = opts.prompt == null && !!process.stdin.isTTY;
-  const errTTY = !!process.stderr.isTTY;
+  const ST = style({ stream: process.stderr, env: opts.color ? process.env : { ...process.env, NO_COLOR: "1" } });
+  // a spinner redrawn in place: a terminal that takes escapes (not TERM=dumb)
+  const errTTY = !!process.stderr.isTTY && process.env.TERM !== "dumb";
   const color = opts.color && !!process.stdout.isTTY;
   const ecolor = opts.color && errTTY;
   const edim = (s) => (ecolor ? DIM + s + RESET : s);
@@ -65,7 +82,7 @@ export async function chatMain(argv, { version = "", embedded = false, Peer = nu
   function spin(label) {
     spinLabel = label;
     if (!errTTY || spinner) return;
-    spinner = setInterval(() => { process.stderr.write(`\r\x1b[K${edim(`${SPIN[spinAt++ % SPIN.length]} ${spinLabel}`)}`); }, 100);
+    spinner = setInterval(() => { process.stderr.write(`\r\x1b[K  ${ST.spin(spinAt++)} ${ST.ink3(spinLabel)}`); }, 80);
   }
   function clearSpin() {
     if (!spinner) return;
@@ -133,8 +150,10 @@ export async function chatMain(argv, { version = "", embedded = false, Peer = nu
     const rid = newRid();
     const collector = new Collector({ id: rid });
     let started = false;
+    // at the prompt, the answer is indented 2 like the rest of the screen (a script gets it as is)
+    const ind = interactive ? indenter() : (s) => s;
     const R = new Renderer({ color, showThinking: interactive,
-      write: (s) => { if (!started) { started = true; clearSpin(); } process.stdout.write(s); } });
+      write: (s) => { if (!started) { started = true; clearSpin(); if (interactive) process.stdout.write("\n"); } process.stdout.write(ind(s)); } });
     const ask = new Ask({ req, meta: { id: rid }, v2, encoders: [collector, R], log: () => {}, label: "chat" });
     spin("waiting for the room");
     const t0 = Date.now();
@@ -169,7 +188,12 @@ export async function chatMain(argv, { version = "", embedded = false, Peer = nu
     const tps = tokPerSec(stats, { tokens: R.tokens, tFirst: R.tFirst, tEnd: Date.now() });
     const usage = res.stopped ? { ...a.usage, out: R.tokens, in: R.promptTokens } : a.usage;
     const line = statusLine({ code: opts.code, model: model(), answer: { ...a, usage }, tps, stopped: !!res.stopped });
-    if (interactive) say(edim(line));
+    if (interactive) {
+      const first = R.tFirst && R.t0 ? ` · first token ${((R.tFirst - R.t0) / 1000).toFixed(1)}s` : "";
+      const out = usage?.out ?? R.tokens;
+      const reused = a.reused && usage?.in ? ` · ${a.reused} of ${usage.in} prompt tokens reused` : "";
+      process.stdout.write(`\n  ${ST.ink3(`${out} token${out === 1 ? "" : "s"}${res.stopped ? " (stopped)" : ""}${tps ? ` · ${Math.round(tps)} tok/s` : ""}${first}${reused}`)}\n\n`);
+    }
     else if (errTTY) say(edim(line));
     void t0;
     return res;
@@ -180,19 +204,14 @@ export async function chatMain(argv, { version = "", embedded = false, Peer = nu
     catch (e) { clearSpin(); await bridge.leave().catch(() => {}); return fail(e); }
   }
 
-  const hostBit = bridge.hostName ? ` · host ${bridge.hostName}` : "";
-  say(`pooled chat · room ${fmtCode(opts.code)} · ${model() || "no model started yet"}${hostBit}`);
-  say(edim("  type a message · /help for commands · Ctrl-C stops an answer · /exit or Ctrl-D leaves"));
-  rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: color ? "\x1b[1m>>>\x1b[0m " : ">>> ", terminal: true, historySize: 200 });
-  // readline takes Ctrl-C in raw mode: the same rule (stop the answer, else leave)
-  rl.on("SIGINT", () => {
-    if (current) { current.stop(); return; }
-    process.stdout.write("\n");
-    leave(0);
-  });
-  rl.on("close", () => { if (!leaving) { process.stdout.write("\n"); leave(0); } });
-  const queue = [];
-  let busy = false;
+  if (!embedded) {
+    const [name, ...rest] = String(model() || "no model started yet").split("·").map((x) => x.trim());
+    const ctx = +bridge.hostMeta?.ctx;
+    say(["", ...header(ST, process.stderr.columns || 80, [ST.bold("pooled chat"),
+      ST.pill(fmtCode(opts.code)) + "  " + name + ST.ink3([...rest, ctx > 0 ? `${Math.round(ctx / 1024)}k context` : ""].filter(Boolean).map((x) => ` · ${x}`).join("")),
+      ST.ink3(`${bridge.hostName ? `host ${bridge.hostName} · ` : ""}the host's devices see what you send`)]), ""].join("\n"));
+  }
+  say(`  ${ST.keys([["/", "commands"], ["ctrl-c", "stops an answer"], ["ctrl-d", "leaves"]])}\n`);
   const handle = async (line) => {
     const p = parseLine(line);
     if (!p) return;
@@ -208,14 +227,9 @@ export async function chatMain(argv, { version = "", embedded = false, Peer = nu
     try { await turn(p.text); }
     catch (e) { const x = explainChatError(e, { code: opts.code }); say(`pooled chat: ${x.message}`); if (x.hint) say(`  ${x.hint}`); }
   };
-  rl.on("line", async (line) => {
-    queue.push(line);
-    if (busy) return;
-    busy = true;
-    while (queue.length && !leaving) { await handle(queue.shift()); }
-    busy = false;
-    if (!leaving) rl.prompt();
-  });
-  rl.prompt();
+  // the prompt goes away while an answer streams, and comes back after its status line (lib/repl.js)
+  rl = repl({ prompt: `  ${ST.acc(ST.g.sel)} `, onLine: (line) => (leaving ? null : handle(line)),
+    onStop: () => { current?.stop(); },
+    onEnd: () => { if (!leaving) { process.stdout.write("\n"); leave(0); } } });
   return embedded ? leftP : new Promise(() => {});   // until leave()
 }

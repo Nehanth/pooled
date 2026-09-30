@@ -7,6 +7,7 @@ import { modelState } from "./cache.js";
 import { initialState, reduce, render, roomFitNow, modelRows, recommendModel, pledgeDefaults, devicesFrom, autoStart, colors, modelNeedGB } from "./hostui.js";
 import { liveRegion, keysOf, colorOn } from "./tui.js";
 import { pullWithProgress } from "./pullrun.js";
+import { style, detectTheme } from "./style.js";
 import { cleanText } from "./common.js";
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -30,35 +31,39 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   const rows0 = rowsFor();
   const model0 = opts.modelGiven ? opts.model : recommendModel(rows0);
 
+  // the look: the terminal's background is asked once, before the screen reads keys
+  await detectTheme();
+  const ST = style({ stream: process.stderr });
   const region = liveRegion(process.stderr);
   let chatting = false;
-  const stamp = () => c.dim(new Date().toTimeString().slice(0, 8));
-  // the room's log lines scroll above the screen; while the chat has the terminal they wait
-  const held = [];
-  const log = (m) => { const l = `${stamp()} ${c.dim(cleanText(String(m), 400))}`; if (chatting) held.push(l); else region.log(l); };
+  const stamp = () => ST.ink3(new Date().toTimeString().slice(0, 8));
+  // what happens in the room: the last three events on the screen; failures (and, with --verbose,
+  // every line of the room node) also scroll above it. While the chat has the terminal they wait
+  const held = [], events = [];
+  const log = (m, { keep = false } = {}) => {
+    const text = cleanText(String(m), 400);
+    events.unshift({ t: Date.now(), text: text.length > 70 ? text.slice(0, 69) + "…" : text }); events.length = Math.min(events.length, 3);
+    if (!(keep || opts.verbose || /fail|error|can't|couldn't|refused/i.test(text))) return;
+    const l = `${stamp()} ${ST.ink3(text)}`;
+    if (chatting) held.push(l); else region.log(l);
+  };
 
-  region.render([`${c.dim(SPIN[0])} opening a room on this computer…`]);
+  region.render(["", `  ${ST.spin(0)} opening a room on this computer…`]);
   const node = await rn.createRoom({ model: model0, pledgeGB: pledge0, name: opts.name, signal: opts.signal, modelDir: dir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   node.setPledge(pledge0);
   const code = node.code;
   const link = `${ROOM_URL}${code}${node.inviteFragment || ""}`;
   region.clear();
-  // the lines to copy, once, above the live screen
-  process.stderr.write([
-    `${c.bold("pooled host")} ${c.dim("·")} room ${c.bold(c.cyan(fmtCode(code)))}`,
-    `  ${c.dim("gpu")}     ${mem.kind === "discrete" ? `${mem.name} · ${Math.round(mem.totalGB)} GB` : mem.kind === "unified" ? `${mem.name || prepared.adapterName} · ${Math.round(mem.totalGB)} GB unified memory` : prepared.adapterName}`,
-    `  ${c.dim("invite")}  ${link}`,
-    `  ${c.dim("join")}    pooled join "${link}"`,
-    `  ${c.dim("chat")}    pooled chat "${link}"`,
-    `  ${c.dim(opts.allowAll ? `--allow-all: anyone with the code ${fmtCode(code)} comes in without asking` : opts.denyUnknown ? `--deny-unknown: a device with the code alone is turned away; the link lets it in` : `a device with the code ${fmtCode(code)} alone waits until you let it in (a / d)`)}`,
-    `  ${c.dim("every device holding layers sees what is asked here: share the link only with people you trust")}`,
-    "",
-  ].join("\n") + "\n");
+  // the room's header (code, invite link, how to join) is drawn once, at the top of the live screen
+  const gpu = mem.kind === "discrete" ? `${mem.name} · ${Math.round(mem.totalGB)} GB` : mem.kind === "unified" ? `${mem.name || prepared.adapterName} · ${Math.round(mem.totalGB)} GB unified memory` : prepared.adapterName;
+  const home = dir.startsWith(os.homedir()) ? "~" + dir.slice(os.homedir().length) : dir;
 
   S = initialState({ rows: rows0, model: opts.modelGiven ? opts.model : null, pledge: { gb: pledge0, max: Math.max(pd.max, pledge0), totalGB: pd.totalGB },
     fixedPledge: opts.gbGiven, flags: { start: opts.start, wait: opts.devices || 0, chat: opts.chat }, pulled, code, link: "", yes: opts.yes, noPull: opts.noPull });
   S.pledgeDone = opts.gbGiven;
+  S.gpu = gpu; S.modelsDir = home;
+  S.gate = opts.allowAll ? "allow-all" : opts.denyUnknown ? "deny-unknown" : "ask";
 
   // ---- effects
   let pullAbort = null, starting = null, leaving = false, spinAt = 0, chatOnce = false;
@@ -82,11 +87,11 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
     if (starting) return;
     pct.clear();
     log(`starting ${S.model} over ${S.devices.filter((d) => d.gb != null).length} device(s)`);
-    S.step = "starting";
+    S.step = "starting"; S.startedAt = Date.now();
     const again = !!node.ai.engine;
     starting = (again ? node.redeal() : node.start(S.model, { minDevices: 1 }))
       .then(() => {
-        S.step = "online";
+        S.step = "online"; S.onlineAt ||= Date.now();
         S.split = node.status().split?.join(" · ") || "";
         log(`room online: ${S.split}`);
         if (S.flags.chat && !chatOnce) { chatOnce = true; setTimeout(() => doChat(), 50); }
@@ -99,7 +104,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
     chatting = true;
     stopKeys();
     region.close();
-    process.stderr.write(c.dim("chat with the room here: /exit (or Ctrl-D) goes back to the room screen\n"));
+    process.stderr.write(`  ${ST.bold("chat")}${ST.ink3(` · ${(rn.MODELS[S.model]?.label || S.model).split("·")[0].trim()} · ${S.devices.filter((d) => d.gb > 0).length} devices · `)}${ST.ink2("/exit")}${ST.ink3(" goes back to the room")}\n\n`);
     const had = new Set(process.listeners("SIGINT"));
     try {
       const { chatMain } = await import("./chatrun.js");
@@ -115,7 +120,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
     leaving = true;
     pullAbort?.abort();
     stopKeys();
-    region.log(`${stamp()} closing room ${fmtCode(node.code)} and freeing the GPU`);
+    region.log(`${stamp()} ${ST.ink3(`closing room ${fmtCode(node.code)} and freeing the GPU`)}`);
     region.close();
     try { await node.close(); } catch {}
     process.exit(code);
@@ -131,6 +136,11 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
       else if (f.do === "allow") node.allowJoin(f.id)?.catch?.((e) => log(`couldn't let it in: ${e.message}`));
       else if (f.do === "deny") node.denyJoin(f.id);
       else if (f.do === "chat") doChat();
+      else if (f.do === "copy") {
+        // OSC 52: the terminal puts the link on the clipboard (over ssh too, where the terminal allows it)
+        process.stderr.write(`\x1b]52;c;${Buffer.from(link).toString("base64")}\x07`);
+        S.notice = "invite link copied (if this terminal allows it; the link is above)";
+      }
     }
   };
 
@@ -148,10 +158,12 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
     if (S.step === "online" && node.ai.online) S.split = node.status().split?.join(" · ") || S.split;
     if (autoStart(S)) { S.step = "starting"; doStart(); }
     S.link = link;
-    region.render(render(S, { width: process.stderr.columns || 80, c, lib, spin: c.cyan(SPIN[spinAt % SPIN.length]) }));
+    region.render(render(S, { width: process.stderr.columns || 80, S: ST, lib, spin: ST.spin(spinAt), events }));
     void force;
   }
   node.on("progress", (p) => { if (p?.name) pct.set(p.name, p.pct); });
+  // tok/s of the last answer (decode), for the online line
+  node.on("prefill", (x) => { if (x?.count && x.tDecode) { S.tps = x.count / (x.tDecode / 1000); log(`answered ${x.count} tokens at ${Math.round(S.tps)} tok/s`); } });
   node.on("loadprogress", (p) => pct.set(node.name, p));
   node.on("members", () => refresh());
   node.on("joinrequests", () => refresh());
@@ -174,7 +186,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   process.on("SIGTERM", () => bye(0));
   if (S.dl.state === "running") doPull(S.dl.key);
   startKeys();
-  setInterval(() => { spinAt++; refresh(); }, 120).unref?.();
+  setInterval(() => { spinAt++; refresh(); }, 80).unref?.();
   refresh();
   return new Promise(() => {});   // until bye()
 }

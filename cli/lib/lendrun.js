@@ -4,14 +4,16 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
-import { parseLendArgs, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
-  hostable, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
-import { dawnLoader } from "./dawn.js";
+import { parseLendArgs, parseGb, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
+  hostable, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST, needsRoom, loadText } from "./lend.js";
+import { dawnLoader, quietLoader, driverLog } from "./dawn.js";
 import { cleanText } from "./common.js";
 import { roomCodeFrom, roomKeyFrom } from "./room.js";
-import { modelsDir, modelState, fmtBytes, resolveModel } from "./cache.js";
+import { modelsDir, ensureModelsDir, modelState, fmtBytes, resolveModel } from "./cache.js";
 import { roomFitNow, devicesFrom } from "./hostui.js";
-import { askLine, colorOn, keysOf as KEYS } from "./tui.js";
+import { askLine, askYesNo, colorOn, termCaps, liveRegion, keysOf as KEYS } from "./tui.js";
+import { style, detectTheme, gbNum } from "./style.js";
+import { joinScreen } from "./joinui.js";
 import * as HOSTUI from "./hostui.js";
 
 const ROOM_URL = "https://pooled.run/r/";
@@ -58,27 +60,38 @@ async function testAlloc(gb) {
 
 // the terminal: log lines, and one status line kept at the bottom (a TTY), or plain lines
 function makeOut({ jsonLog, quiet }) {
-  const tty = !!process.stderr.isTTY && !jsonLog;
+  // a status line redrawn in place needs a terminal that takes escapes (not TERM=dumb)
+  const tty = !!process.stderr.isTTY && process.env.TERM !== "dumb" && !jsonLog;
   let status = "", shown = false;
-  const clear = () => { if (tty && shown) { process.stderr.write("\r\x1b[K"); shown = false; } };
-  const draw = () => { if (tty && status) { process.stderr.write("\r\x1b[K" + status); shown = true; } };
+  // screen: a whole live screen (pooled join at a terminal) instead of one status line
+  let screen = null, region = null, lastS = null;
+  const clear = () => { if (region) { region.clear(); return; } if (tty && shown) { process.stderr.write("\r\x1b[K"); shown = false; } };
+  const draw = () => { if (region) { if (lastS) region.render(screen(lastS)); return; } if (tty && status) { process.stderr.write("\r\x1b[K" + status); shown = true; } };
   const line = (msg, level) => {
     msg = String(msg).split("\n").map((l) => cleanText(l)).join("\n  ");
     if (jsonLog) { process.stderr.write(JSON.stringify({ t: new Date().toISOString(), level, msg }) + "\n"); return; }
+    if (region) { region.log(`${screenStyle.ink3(new Date().toTimeString().slice(0, 8))} ${level === "error" ? screenStyle.err(msg) : screenStyle.ink3(msg)}`); return; }
     clear();
     process.stderr.write(`${new Date().toTimeString().slice(0, 8)} ${msg}\n`);
     draw();
   };
+  let screenStyle = null;
   return {
     tty,
+    // lines(s) -> the screen for a status state; ST: its style
+    useScreen(lines, ST) { if (!tty) return; screen = lines; screenStyle = ST; region = liveRegion(process.stderr); },
+    redraw() { if (region && lastS) region.render(screen(lastS)); },
+    close() { if (region) { region.close(); region = null; screen = null; } },
     log: (msg, level = "info") => { if (!quiet || level === "error") line(msg, level); },
     print: (text) => {
       if (jsonLog) { process.stderr.write(JSON.stringify({ t: new Date().toISOString(), level: "info", msg: String(text).replace(/\n\s*/g, " | ") }) + "\n"); return; }
+      if (region) { region.log(text); return; }
       clear(); process.stderr.write(text + "\n"); draw();
     },
     hint: (text) => { if (jsonLog) process.stderr.write(JSON.stringify({ t: new Date().toISOString(), level: "hint", msg: text }) + "\n"); else process.stderr.write(`  ${text}\n`); },
     status(s) {
       if (jsonLog) { process.stderr.write(JSON.stringify({ t: new Date().toISOString(), level: "status", ...s }) + "\n"); return; }
+      if (region) { lastS = s; status = ""; region.render(screen(s)); return; }
       const text = formatStatus(s, tty ? (process.stderr.columns || 100) - 1 : 0);
       if (tty) { status = text; draw(); }
       else process.stderr.write(`${new Date().toTimeString().slice(0, 8)} ${text}\n`);
@@ -99,10 +112,12 @@ function fail(out, err, ctx) {
 // GPU + memory, before anything joins: -> { rn, pledge, rule, adapterName }
 export async function prepare(opts, out) {
   const rn = await loadRoomNode();
-  const loader = dawnLoader(opts.cmd);
+  // the GPU driver's own stderr lines are hidden unless --verbose (POOLED_VERBOSE=1)
+  const verbose = opts.verbose || !!process.env.POOLED_VERBOSE;
+  const loader = verbose ? dawnLoader(opts.cmd) : quietLoader(dawnLoader(opts.cmd));
   await rn.setupNode({ webgpu: loader });
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
-  if (!adapter) throw Object.assign(new Error("no WebGPU adapter"), { type: "no-adapter" });
+  if (!adapter) throw Object.assign(new Error("no WebGPU adapter"), { type: "no-adapter", driver: verbose ? "" : driverLog() });
   const info = adapter.info || {};
   const adapterName = [...new Set([info.vendor, info.architecture || info.device].filter(Boolean))].join(" ") || "GPU";
   const mem = detectMemory({
@@ -136,10 +151,10 @@ function header(out, { title, adapterName, mem, rule, hosting = false }) {
 
 // one line to pick a number of GB: ←/→ (or ↑/↓) step by 1, digits type it, Enter takes it -> GB | null (Ctrl-C)
 function pledgePrompt({ def, max, totalGB }) {
-  const { colors } = HOSTUI;
-  const c = colors(colorOn(process.stderr));
+  const ST = style({ stream: process.stderr });
   let gb = def, typed = "";
-  const draw = () => process.stderr.write(`\r\x1b[K  ${c.bold("lend")}     ${c.cyan("◀")} ${typed ? typed + c.dim("_") : c.bold(String(gb))} GB ${c.cyan("▶")}  ${c.dim(`${totalGB ? `of ${Math.round(totalGB)} GB here, ` : ""}at most ${max} · ←/→ or type, Enter`)}`);
+  const total = Math.round(totalGB || max);
+  const draw = () => process.stderr.write(`\r\x1b[K  ${ST.ink3("lend".padEnd(10))}${ST.bar(gb / (total || 1), 20)}  ${typed ? ST.bold(typed) + ST.rev(" ") : ST.bold(`${gb} GB`)}${ST.ink3(` of ${total} GB`)}   ${ST.keys([[ST.g.lr, "1 GB"], ["type", "a number"], ["enter", "lend", "primary"]])}`);
   return new Promise((resolve) => {
     const done = (v) => { process.stdin.off("data", on); try { process.stdin.setRawMode(false); } catch {} process.stdin.pause(); process.stderr.write("\n"); resolve(v); };
     const on = (b) => {
@@ -159,6 +174,18 @@ function pledgePrompt({ def, max, totalGB }) {
   });
 }
 
+// the same as a typed line (TERM=dumb) -> GB | null
+async function pledgeLine({ def, max }) {
+  for (;;) {
+    const a = await askLine(`  lend how many GB? 1-${max} (Enter: ${def}): `);
+    if (a == null) return null;
+    if (!a.trim()) return def;
+    const n = Number(a.trim());
+    if (Number.isFinite(n) && n >= 1) return Math.min(max, n);
+    process.stderr.write(`  type a number from 1 to ${max}\n`);
+  }
+}
+
 // ---------------- pooled join ----------------
 async function runJoin(opts, out) {
   let code = opts.code;
@@ -166,10 +193,19 @@ async function runJoin(opts, out) {
   const name = opts.name || deviceName(os.hostname());
   let hostName = null;   // the host this run joined: a rejoin only goes back to a host of that name
   const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
-  header(out, { title: `pooled join · room ${fmtCode(code)}`, adapterName, mem, rule });
+  let ST = null, spinAt = 0;
+  if (out.tty) {
+    // a terminal: the join screen (lib/joinui.js), redrawn in place
+    await detectTheme();
+    ST = style({ stream: process.stderr });
+    process.stderr.write(`\n  ${ST.ink3("Every device in a room sees what is asked there. Lend to rooms you trust.")}\n`);
+    out.useScreen((st) => joinScreen(st, { S: ST, cols: process.stderr.columns || 80, spin: ST.spin(spinAt) }), ST);
+  } else header(out, { title: `pooled join · room ${fmtCode(code)}`, adapterName, mem, rule });
   let pass = null;   // what the host gave this device when it let it in: back in without asking
   const passes = passCounter();
-  const S = { code, phase: "connecting", devices: null, range: null, model: null, tps: null, passes: 0, pct: null, tries: 0, signaling: true, answering: false };
+  const S = { code, phase: "connecting", devices: null, range: null, model: null, tps: null, passes: 0, pct: null, load: null, tries: 0, signaling: true, answering: false,
+    dl: null, hostName: null, modelLabel: null, lobbyAt: null, onlineAt: null, L: null,
+    you: { name: opts.name || deviceName(os.hostname()), gpu: mem.kind === "unknown" ? adapterName : (mem.name || adapterName), gb: rule.gb, totalGB: mem.totalGB } };
   let node = null, leaving = false, ended = null, rejoinP = null;
   const finish = (x) => { if (!ended) { ended = x; wake(x); } };
   let wake = () => {};
@@ -181,17 +217,56 @@ async function runJoin(opts, out) {
       const st = node.status();
       S.devices = st.devices.length || null; S.range = st.range; S.model = st.model; S.passes = passes(node, st.passes); S.signaling = st.signaling;
       S.phase = hostGone ? "hostgone" : node.admission === "lobby" ? "lobby" : st.loading ? "loading" : st.degraded ? "degraded" : st.online ? (!st.range ? "guest" : S.answering ? "answering" : "online") : st.range ? "ready" : "waiting";
+      S.hostName = node.hostName || S.hostName;
+      const hm = node.conns.get(node.ai.hostId)?.meta || {};
+      const mk = S.model || (hm.model && rn.MODELS[hm.model] ? hm.model : null);
+      if (mk) S.modelLabel = rn.MODELS[mk].label.split("·")[0].trim();
+      if (S.phase === "lobby") S.lobbyAt ||= Date.now();
+      if (S.phase === "online" || S.phase === "answering") S.onlineAt ||= Date.now();
+      S.you.gb = node.pledgeGB || S.you.gb;
     }
     out.status(S);
   };
+  // the host's model not on this computer: download it whole first (as pooled pull), so this load and
+  // every later one reads from disk; --no-pull streams this device's layers from Hugging Face instead.
+  // A deal that comes while it downloads waits for it (the room node's beforeLoad)
+  let pulling = null, pledged = null;
+  const ensurePulled = async (key) => {
+    if (opts.noPull || !rn.MODELS[key] || !rn.FILES?.[key] || modelState(opts.modelDir, key, rn.MODELS, rn.FILES, rn.LOCAL).pulled) return;
+    await pledged;
+    if (pulling?.key !== key) pulling = { key, p: pullFirst(key) };
+    await pulling.p;
+  };
+  const pullFirst = async (key) => {
+    const { pullWithProgress } = await import("./pullrun.js");
+    const home = opts.modelDir.startsWith(os.homedir()) ? "~" + opts.modelDir.slice(os.homedir().length) : opts.modelDir;
+    const say = `${rn.MODELS[key].label.split("·")[0].trim()} isn't downloaded yet (${fmtBytes(rn.FILES[key].bytes)}). Downloading it into ${home} so this and later joins load from disk.`;
+    let r;
+    if (out.tty) {
+      // the join screen shows the download row (the same row as pooled pull)
+      out.log(say);
+      S.dl = { state: "running", done: 0, total: rn.FILES[key].bytes, bps: null };
+      r = await pullWithProgress(rn, key, opts.modelDir, { quiet: true, onProgress: (p) => { S.dl = { state: "running", done: p.done, total: p.total || S.dl.total, bps: p.bps }; } });
+      S.dl = null;
+    } else {
+      prompting = true; out.done();
+      out.print(say);
+      r = await pullWithProgress(rn, key, opts.modelDir, { quiet: opts.jsonLog });
+      prompting = false;
+    }
+    if (r.ok) out.log(`${key} downloaded: loading from disk`);
+    else if (!r.aborted) out.log(`download failed (${cleanText(r.error?.message || "", 200)}): streaming the layers from Hugging Face instead; pooled pull ${key} resumes it`, "error");
+    tick();
+  };
   const joinOnce = () => rn.joinRoom(code, { pledgeGB: rule.gb, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
-    expectHost: hostName, key: opts.key, pass, log: (m) => out.log(m) });
+    expectHost: hostName, key: opts.key, pass, log: (m) => out.log(m), beforeLoad: ensurePulled });
   const attach = (n) => {
     n.on("loadprogress", (pct) => { S.pct = pct; });
+    n.on("loadstat", (x) => { S.load = x; });
     n.on("loaded", (x) => {
-      S.pct = null; out.log(`holding layers ${x.range[0]}-${x.range[1] - 1} of ${x.model} (loaded in ${x.s.toFixed(1)} s)`);
+      S.pct = null; S.load = null; out.log(`holding layers ${x.range[0]}-${x.range[1] - 1} of ${x.model} (loaded in ${x.s.toFixed(1)} s)`);
       // streamed from Hugging Face: say once how to make the next join start from disk
-      if (!hinted && !modelState(opts.modelDir, x.model, rn.MODELS, rn.FILES, rn.LOCAL).pulled) { hinted = true; out.hint(`pooled pull ${x.model} makes the next join start faster (it reads the layers from disk)`); }
+      if (!hinted && opts.noPull && !modelState(opts.modelDir, x.model, rn.MODELS, rn.FILES, rn.LOCAL).pulled) { hinted = true; out.hint(`pooled pull ${x.model} makes the next join start faster (it reads the layers from disk)`); }
     });
     n.on("hostgone", () => { hostGone = true; S.answering = false; });
     n.on("lobby", () => { tick(); });
@@ -246,23 +321,35 @@ async function runJoin(opts, out) {
     process.exit(0);
   };
   process.on("SIGINT", () => bye(true)); process.on("SIGTERM", () => bye(false));
+  // the spinner redraws the join screen at a terminal
+  if (out.tty) setInterval(() => { spinAt++; if (!prompting) tick(); }, 80).unref?.();
   node = await joinOnce();
   attach(node);
   S.phase = "waiting";
   out.log(`reached room ${fmtCode(code)} as ${node.name}${node.server && node.server.spec !== "cloud" ? ` (signaling: ${node.server.label})` : ""}`);
+  // the host's hello (its name and model) comes right after the link opens
+  let donePledge = () => {};
+  pledged = new Promise((r) => { donePledge = r; });
+  await new Promise((r) => setTimeout(r, 400));
+  const hm = node.conns.get(node.ai.hostId)?.meta || {};
+  const hostModel = hm.model && rn.MODELS[hm.model] ? hm.model : null;
   // a terminal and no --gb: say what the host runs and ask how much to lend (the host deals by it)
-  if (opts.interactive && !opts.gb) {
+  if ((opts.interactive || opts.lines) && !opts.gb) {
     prompting = true; out.done();
-    await new Promise((r) => setTimeout(r, 400));   // the host's hello (its name and model) comes right after the link opens
-    const hm = node.conns.get(node.ai.hostId)?.meta || {};
-    const hostModel = hm.model && rn.MODELS[hm.model] ? hm.model : null;
     const cached = hostModel && modelState(opts.modelDir, hostModel, rn.MODELS, rn.FILES, rn.LOCAL).pulled;
     out.print(`  host     ${node.hostName || "?"}${hostModel ? ` · ${rn.MODELS[hostModel].label}${cached ? " (downloaded here: loads from disk)" : ""}` : ""}`);
-    const gb = await pledgePrompt({ def: rule.gb, max: Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb), totalGB: mem.totalGB });
+    const max = Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb);
+    const gb = opts.interactive ? await pledgePrompt({ def: rule.gb, max, totalGB: mem.totalGB }) : await pledgeLine({ def: rule.gb, max });
     if (gb != null && gb !== rule.gb) { node.setPledge(gb); out.log(`lending ${gb} GB`); }
     else if (gb == null) { prompting = false; await bye(true); }
     prompting = false;
   }
+  donePledge();
+  // q leaves (Ctrl-C too): raw keys once the questions are done
+  if (out.tty && process.stdin.isTTY) {
+    try { process.stdin.setRawMode(true); process.stdin.resume(); process.stdin.on("data", (b) => { for (const k of KEYS(b)) if (k === "q" || k === "ctrl-c") bye(true); }); } catch {}
+  }
+  if (hostModel) await ensurePulled(hostModel);
   const timer = setInterval(tick, 1000);
   // plain (non-TTY) output: a status line when the phase changes, and once a minute while it runs
   if (!out.tty) {
@@ -404,13 +491,54 @@ async function runHost(opts, out, prepared = null) {
   return new Promise(() => { void timer; });   // until bye()
 }
 
+// pooled host at a terminal that takes no escapes (TERM=dumb): the choices the screen would ask
+// for, as numbered lines and typed answers; then the plain runHost. -> false when Ctrl-C / Ctrl-D
+async function askHostLines(opts, rn) {
+  const keys = hostable(rn.MODELS);
+  if (!opts.modelGiven) {
+    process.stderr.write("Models:\n");
+    keys.forEach((k, i) => {
+      const st = modelState(opts.modelDir, k, rn.MODELS, rn.FILES, rn.LOCAL);
+      process.stderr.write(`  ${i + 1}) ${k.padEnd(18)} ${rn.MODELS[k].label.padEnd(26)} ${st.pulled ? "downloaded" : `${fmtBytes(rn.FILES?.[k]?.bytes)} download`}\n`);
+    });
+    const def = Math.max(0, keys.indexOf(opts.model));
+    for (;;) {
+      const a = await askLine(`Model 1-${keys.length} (Enter: ${def + 1}): `);
+      if (a == null) return false;
+      const t = a.trim();
+      if (!t) { opts.model = keys[def]; break; }
+      const n = Number(t);
+      if (Number.isInteger(n) && n >= 1 && n <= keys.length) { opts.model = keys[n - 1]; break; }
+      const m = resolveModel(t, keys);
+      if (!m.error) { opts.model = m.key; break; }
+      process.stderr.write(`  type a number from 1 to ${keys.length}\n`);
+    }
+    opts.modelGiven = true;
+  }
+  if (!opts.gb) {
+    for (;;) {
+      const a = await askLine("GB of memory to lend (Enter: the memory rule): ");
+      if (a == null) return false;
+      if (!a.trim()) break;
+      try { opts.gb = parseGb(a.trim()); break; } catch (e) { process.stderr.write(`  ${e.message}\n`); }
+    }
+  }
+  if (!opts.noPull && !opts.yes && !modelState(opts.modelDir, opts.model, rn.MODELS, rn.FILES, rn.LOCAL).pulled) {
+    const y = await askYesNo(`${opts.model} is not downloaded (${fmtBytes(rn.FILES?.[opts.model]?.bytes)}). Download it now?`);
+    if (y == null) return false;
+    if (!y) opts.noPull = true;
+  }
+  if (!opts.devices && !opts.start) opts.start = true;
+  return true;
+}
+
 // argv after "join" / "host" -> exit status
 export async function lendMain(cmd, argv, { version = "" } = {}) {
   let opts;
   try { opts = parseLendArgs(cmd, argv); }
   catch (e) {
     if (!(e instanceof UsageError)) throw e;
-    process.stderr.write(`pooled ${cmd}: ${e.message}\n\n${cmd === "join" ? HELP_JOIN : HELP_HOST}`);
+    process.stderr.write((e.lines || [`pooled ${cmd}: ${e.message}`]).join("\n") + "\n");
     return 2;
   }
   if (opts.help) { process.stdout.write(cmd === "join" ? HELP_JOIN : HELP_HOST); return 0; }
@@ -430,18 +558,23 @@ export async function lendMain(cmd, argv, { version = "" } = {}) {
       opts.model = m.key;
     }
   }
+  // the one folder pooled keeps models in (made on first use); --models / POOLED_MODELS override it
   opts.modelDir = modelsDir({ flag: opts.modelDir });
-  // a terminal on both ends and no --json-log: the interactive screens (a flag given skips its question)
-  opts.interactive = !!process.stdin.isTTY && !!process.stderr.isTTY && !opts.jsonLog;
+  try { ensureModelsDir(opts.modelDir); } catch (e) { process.stderr.write(`pooled ${cmd}: can't make ${opts.modelDir}: ${e.message}\n`); return 1; }
+  // a terminal on both ends and no --json-log: the interactive screens (a flag given skips its
+  // question). A terminal that takes no escapes (TERM=dumb) gets the same questions as plain lines
+  const caps = termCaps();
+  opts.interactive = caps.ansi && !opts.jsonLog;
+  opts.lines = caps.tty && !caps.ansi && !opts.jsonLog;
   if (cmd === "join" && !opts.code) {
-    const bad = `pooled join: give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link`;
-    if (!opts.interactive) { process.stderr.write(`${bad}\n\n${HELP_JOIN}`); return 2; }
+    if (!opts.interactive && !opts.lines) { process.stderr.write(needsRoom("join") + "\n"); return 2; }
     for (;;) {
       const a = await askLine("Room code or invite link: ");
       if (a == null) return 130;
-      const code = roomCodeFrom(a.trim());
-      if (code) { opts.code = code; opts.key = roomKeyFrom(a.trim()); break; }
-      if (a.trim()) process.stderr.write(`  "${cleanText(a.trim(), 60)}" is not a room code (like 4TK-G9P) or a room link\n`);
+      const t = a.trim().replace(/^["']|["']$/g, "");
+      const code = roomCodeFrom(t);
+      if (code) { opts.code = code; opts.key = roomKeyFrom(t); break; }
+      if (t) process.stderr.write(`  "${cleanText(t, 60)}" is not a room code (like 4TK-G9P) or a room link\n`);
     }
   }
   const out = makeOut(opts);
@@ -451,6 +584,10 @@ export async function lendMain(cmd, argv, { version = "" } = {}) {
       const prepared = await prepare(opts, out);
       const { runHostInteractive } = await import("./hostrun.js");
       return await runHostInteractive(opts, { prepared, version });
+    }
+    if (opts.lines) {
+      const rn = await loadRoomNode();
+      if (!(await askHostLines(opts, rn))) return 130;
     }
     return await runHost(opts, out);
   }
