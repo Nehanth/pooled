@@ -793,3 +793,20 @@ finalResponse / chain / retrieve / delete), `cli/test/responses_store_test.mjs`,
 `tests/e2e/agents/codex.mjs --mock` (the real Codex CLI against a scripted room, no GPU) and
 `tests/e2e/serve_responses.mjs` (GPU: MoE 21 of 21 with a Codex run; 1.7B 19 of 21, the model not
 calling `exec_command` under Codex's prompt).
+
+## 14. The three APIs together (`feat/serve-full-api`)
+
+The core, Chat Completions, Responses and Messages branches merged without conflicts. The
+integration adds the README / banner for all three, `minItems` / `maxItems` in the grammar (11.3) and
+extends `tests/e2e/serve.mjs` so one run covers tools on every API through the official SDKs: the
+weather round trip (call, streamed call equal to the whole one, result sent back and used, the room's
+caches reused), `tool_choice` required / named (`any` / `tool` on Messages), Responses
+`previous_response_id`, a JSON schema answer (nested object, enum, bounded array) checked by an
+independent validator on each API, and with `--codex` / `--claude` one real agent turn each.
+
+On the Spark (2026-09-29, `--query ctx=65536 --codex --claude`): Qwen3.6 35B MoE 81 of 81, Qwen3 1.7B
+81 of 81. Codex CLI 0.104 ran `cat a.txt` through `exec_command` and quoted it (MoE 20 s, 1.7B 55 s;
+on the Responses branch's own run the 1.7B had described the command instead of calling it, so the
+1.7B is not reliable for Codex). Claude Code 2.1.285 read the file with Read and answered the word
+(MoE 61 s, 4 turns; 1.7B 330 s, 2 turns), each step after the first reusing the ~15 k-token prompt.
+Before the grammar fix the MoE wrote 4 items for `maxItems: 3` on all three APIs (78 of 81).
