@@ -83,6 +83,37 @@ End-to-end on the GB10 (two headless Chromium tabs, real PeerJS signaling and We
 
 Topology change (host link + on-demand chain links instead of a full mesh) and `--devices N` in the emulator, GB10, 27B, `japan` prompt, local signaling, loopback: 3 devices online in 3.0 min, prefill 4.5 s, decode 10.4 tok/s; 16 devices (8 phone-shaped, 64 layers dealt 18+embed / 4-5 per worker / 2 per phone) online in 2.3 min, prefill 8.3 / 7.2 s, decode 3.8 / 4.7 tok/s, every device holding one host link and two chain links, no errors. The decode drop on a zero-latency network is per-hop processing (unpack, upload, readback, pack), about 15 ms per hop, now a measured target. 64 tabs in one Chromium fail at `vkCreateDevice` (one GPU process, driver device cap); not a room limit.
 
+## 2026-09-30: 128K context on the 35B MoE (branch perf/kv-128k), GB10 Deno
+
+`cd tests && MODEL=moe CTX=131072 LENS=32k,64k,96k,127k DEPTHS=0.5,0.25,0.75,0.5 deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights needle_ctx.js`.
+Needle in a haystack: a fresh prompt of this repo's docs and source with one sentence holding a random passphrase at the given depth, then a question; greedy answer. maxSeq 131072 (2.5 GB of f16 KV for the whole MoE). Prefill is the whole prompt from an empty cache; decode is 32 tokens with that prompt in the cache.
+
+| Model | KV | Prompt | Needle depth | Needle | Prefill tok/s (time) | Decode tok/s |
+|---|---|---|---|---|---|---|
+| moe | f16 | 32.7K | 0.5 | found | 294.3 (1.9 min) | 15.89 |
+| moe | f16 | 65.5K | 0.25 | found | 220.6 (4.9 min) | 14.43 |
+| moe | f16 | 98.3K | 0.75 | found | 177.7 (9.2 min) | 12.49 |
+| moe | f16 | 130K | 0.5 | found | 149.6 (14.5 min) | 9.39 |
+| moe | q8 | 130K | 0.5 | found | 34.2 (63 min) | 9.87 |
+| 27b | f16 | 65.5K | 0.5 | found | 52.9 (20.6 min) | 5.07 |
+
+bench_ctx.js at CTX=131072, fills 32K / 64K / 96K / 127K (prefill tok/s is for the 32K tokens added to reach each fill; a headless Chromium job from another run shared the GPU for part of it, so read the speeds as a floor):
+
+| Date | Model | Hardware | KV | Context | Prefill tok/s | Plain decode tok/s | Spec decode tok/s | Spec = plain |
+|---|---|---|---|---|---|---|---|---|
+| Sep 30 | moe | GB10 (Deno) | f16 | 32K | 134.2 | 11.2 | 15.7 (24/30) | yes |
+| Sep 30 | moe | GB10 (Deno) | f16 | 64K | 77.2 | 10.02 | 10.69 (22/30) | yes |
+| Sep 30 | moe | GB10 (Deno) | f16 | 96K | 57.4 | 9.19 | 6.26 (18/39) | yes |
+| Sep 30 | moe | GB10 (Deno) | f16 | 127K | 43.8 | 6.55 | 5.64 (20/33) | yes |
+
+- No NaN and no GPU error at any length; speculative decoding identical to plain at every fill.
+- 128K works but a cold 128K prompt takes ~15 min to prefill on the GB10 (f16). It is useful for sessions that reuse
+  checkpoints (pinned system prompt, per-turn checkpoints), not for pasting a 128K document into a fresh room.
+- int8 KV at 128K: correct, same decode speed, 4.3x slower prefill (tiled prefill attention is off with int8).
+- The 27B at 128K (f16: 256 MiB per K/V buffer, 8 GB of KV) was not run to the end: its 64K run took 20.6 min and the
+  128K prefill was stopped to free the GPU. Its cap moves from 32K to 64K (128 MiB per buffer, fits every device).
+- tests/test_moe.js (3/3 MATCH llama.cpp, spec == plain) and tests/run.sh quick pass on this branch.
+
 ## 2026-09-29: phone memory while loading (#207, branch fix/i207-memory)
 
 The iPhone 14 Pro Max probe (memprobe.html, PR #244) found Safari's page process gets a 1536 MB soft limit (WebGPU buffers count against it), the networking process 840 MB, and that the page died on 3-layer MoE loads because the prefetcher re-fetched tensors the loader already had (~450 MB of unread bodies per MoE layer, piling up in the networking process). This branch: phone pledges capped (iPhone/iPad 0.5 GB default, 1 GB max; Android by `navigator.deviceMemory`), no duplicate prefetches (unread ones cancelled), ranges from room devices streamed with an 8 MB flow-control window instead of whole-range JS buffers, Q4_1/Q5_0/Q5_K/Q6_K requantized to Q8 a few rows at a time on the way to the GPU (bit-identical: `tests/test_stream_requant.js` on both models, 160 MB MoE expert tensors included), and a phone killed while loading gets a smaller share or is left out by an automatic re-deal.

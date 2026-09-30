@@ -7,7 +7,7 @@ A coding agent reads files, writes files, and reads errors, so its context fills
 
 ## What landed
 - f16 KV cache and split-K flash attention; int8 KV cache as an option (`?kv=q8`).
-- Context per model (`CTX` in `room/models.js`, from roadmap 13): the 27B defaults to 16K tokens (up to 32K with `?ctx=`), the 35B MoE to 32K (up to 128K; needle retrieval checked at 32K, 64K, 96K and 128K).
+- Context per model (`CTX` in `room/models.js`, from roadmap 13): the 27B defaults to 16K tokens (up to 64K with `?ctx=`), the 35B MoE to 32K (up to 128K; needle retrieval checked at 32K, 64K, 96K and 128K).
 - Session state export and import, GPU slots, room checkpoints after each answer (`?ckpt=N`), and several agent sessions on one engine (`harness/sessions.js`).
 - Prompt-lookup drafts over the whole context, so copying code back is cheap.
 

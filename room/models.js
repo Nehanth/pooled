@@ -50,10 +50,11 @@ export const MAX_SEQ_LONG = 8192;
 // those layers. One layer's K (or V) is one GPU buffer bound whole: 128 MiB for the MoE at 131072
 // positions in f16, exactly the binding size every WebGPU device supports (so no device limits the
 // MoE); the 27B needs 256 MiB at 131072 in f16 (128 MiB in int8), which the room only asks for
-// when every device can bind it (ctxForBinding). The practical limit is prefill speed, not memory
+// when every device can bind it (ctxForBinding); its cap stays at 64K (128 MiB) until 128K is
+// checked on it. The practical limit is prefill speed, not memory
 // (docs/long-context-and-sessions.md: needle and speed at 32K..128K).
 export const CTX = {
-  "qwen3.8-27b": { def: 16384, max: 32768 },
+  "qwen3.8-27b": { def: 16384, max: 65536 },
   "qwen3.6-35b-moe": { def: 32768, max: 131072 },
   // the dense engine keeps an f32 KV cache (~224 KB per position on the 1.7B, 1.8 GB at 8k); 2k was
   // too small for Code mode, whose prompt alone is ~620 tokens (checked exact at 8k: tests pass)

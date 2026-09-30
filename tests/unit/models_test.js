@@ -19,10 +19,11 @@ Deno.test("maxSeqFor: table of models and ?ctx= asks", () => {
     ["qwen3.8-27b", 4223, 4096, "just under the tie rounds down"],
     ["qwen3.8-27b", 1, 2048, "tiny asks are floored at 2048"],
     ["qwen3.8-27b", 2047, 2048, "floor"],
-    ["qwen3.8-27b", 32768, 32768, "exactly the cap"],
-    ["qwen3.8-27b", 32769, 32768, "just over the cap is clamped"],
-    ["qwen3.8-27b", 1e9, 32768, "huge asks are clamped"],
-    ["qwen3.8-27b", Infinity, 32768, "Infinity is clamped"],
+    ["qwen3.8-27b", 32768, 32768, "32K"],
+    ["qwen3.8-27b", 65536, 65536, "exactly the cap (64K)"],
+    ["qwen3.8-27b", 65537, 65536, "just over the cap is clamped"],
+    ["qwen3.8-27b", 1e9, 65536, "huge asks are clamped"],
+    ["qwen3.8-27b", Infinity, 65536, "Infinity is clamped"],
     ["qwen3.6-35b-moe", undefined, 32768, "MoE default"],
     ["qwen3.6-35b-moe", 65536, 65536, "MoE 64K"],
     ["qwen3.6-35b-moe", 131072, 131072, "MoE cap (128K)"],
@@ -63,7 +64,7 @@ Deno.test("maxSeqFor: ?ctx= arrives as a string or number the way room.js reads 
   eq(maxSeqFor("qwen3.8-27b", ask("?ctx=8192")), 8192);
   eq(maxSeqFor("qwen3.8-27b", ask("?ctx=abc")), 16384, "junk -> default");
   eq(maxSeqFor("qwen3.8-27b", ask("")), 16384, "missing -> default");
-  eq(maxSeqFor("qwen3.8-27b", ask("?ctx=1e5")), 32768, "exponent form is clamped");
+  eq(maxSeqFor("qwen3.8-27b", ask("?ctx=1e5")), 65536, "exponent form is clamped");
 });
 
 Deno.test("maxSeqFor: every result is a multiple of 256, within [2048, max] (sweep)", () => {

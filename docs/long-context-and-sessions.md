@@ -47,9 +47,10 @@ each has a switch for A/B timing on real hardware.
   throws a readable error at create when a device cannot bind its KV buffer
   (`tests/unit/kv_bind_limit_test.js`), and the room host holds the context to what the smallest
   binding limit among its devices fits (`ctxForBinding` in `room/models.js`; each device reports
-  `maxBindMB`, and a device that reports nothing counts as WebGPU's 128 MiB). Splitting a layer's
-  cache over several buffers was not needed for the MoE; it would only matter for the 27B past 64K
-  on a device that binds less than 256 MiB. Needle retrieval and speed at 32K..128K:
+  `maxBindMB`, and a device that reports nothing counts as WebGPU's 128 MiB). The 27B's cap is 64K
+  (128 MiB per buffer): its needle passes there; 128K on it is not checked yet. Splitting a layer's
+  cache over several buffers was not needed; it would only matter for the 27B past 64K on a device
+  that binds less than 256 MiB. Needle retrieval and speed at 32K..128K:
   `tests/needle_ctx.js` and docs/bench-log.md (2026-09-30).
 
 ## Sessions: save, restore, rewind, share a prefix

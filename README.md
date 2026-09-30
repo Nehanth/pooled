@@ -43,7 +43,7 @@ Models in the room today:
 
 | Model | Size | Notes |
 |---|---|---|
-| Qwen 3.8 27B | Q4_0, needs ~17 GB across the room | hybrid Gated DeltaNet + attention, built-in draft layer for speculative decoding, 16K context (up to 32K) |
+| Qwen 3.8 27B | Q4_0, needs ~17 GB across the room | hybrid Gated DeltaNet + attention, built-in draft layer for speculative decoding, 16K context (up to 64K) |
 | Qwen 3.6 35B MoE | Q4_0, needs ~22.5 GB across the room | 256 experts, 8 active per token, so it decodes several times faster than the 27B; 32K context (up to 128K) |
 | Qwen3 1.7B | Q8_0, needs ~4 GB across the room | small and quick, for rooms of phones and light laptops; 8K context |
 
