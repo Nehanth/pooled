@@ -73,6 +73,10 @@ curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/jso
 
 The bridge joins the room as an API client with no layers, so requests run on the room's GPUs, one at a time in the room's queue, and show in the chat under the room's visibility setting. It listens on 127.0.0.1 only; `POOLED_TOKEN` makes it require a key. Prompts go to the room's host and, unless the host limits who sees answers, to everyone in the room: see [who sees your prompts](cli/README.md#who-sees-your-prompts). Tool calls (streamed, parallel, every `tool_choice` form), tool results, JSON mode and JSON schemas, reasoning and Responses' `previous_response_id` work on all three APIs; every call and structured answer is grammar-constrained to its schema, so calls always parse, even from the 1.7B. The room's host must run a Pooled with tool calling (older hosts answer tools with a 400 asking to reload). Images become a note (the models read text only); the legacy `/v1/completions` is not served. Setup for each tool, including the context settings Codex, Claude Code and opencode need: [cli/README.md](cli/README.md). Design: [docs/design/serve.md](docs/design/serve.md).
 
+## Rooms at work
+
+Work networks often block the direct (UDP) connections rooms use. When the site has a relay set up, rooms fall back to it by themselves, over TCP or TLS on port 443. Links still go direct when they can, and model weights never go through the relay. Setup for the site's owner (a Cloudflare TURN key or your own coturn, set in the Vercel environment): [docs/rooms-at-work.md](docs/rooms-at-work.md).
+
 ## Run it locally
 
 ```bash

@@ -1782,7 +1782,7 @@
   <details id="join-net">
     <summary>Network</summary>
     <div class="jn-body">
-      <p class="jn-help">Can't connect from this network? A relay (TURN) server carries the traffic when two devices can't reach each other directly. Pooled doesn't run one: use your own (coturn, for example) or a provider's. Saved in this browser only; join links never include it.</p>
+      <p class="jn-help">Can't connect from this network? A relay (TURN) server carries the traffic when two devices can't reach each other directly (work networks that block UDP). When this site has one set up, rooms use it by themselves; here you can set your own instead (coturn, for example, or a provider's). Saved in this browser only; join links never include it.</p>
       <div class="jn-row">
         <input id="turn-url" placeholder="turn:relay.example.org:3478" autocomplete="off" spellcheck="false" aria-label="Relay server URL">
         <input id="turn-user" placeholder="Username" autocomplete="off" spellcheck="false" aria-label="Relay username">

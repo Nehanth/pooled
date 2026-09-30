@@ -37,7 +37,7 @@ const ckptDisk = CKPT_MAX && new URLSearchParams(location.search).get("ckptdisk"
   ? new CkptStore() : null;
 import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DROP_ALL, DUP_SLICES } from "./room/transport.js";
 import { peerErrorText, peerErrorLoud, FetchError, joinStep, versionMismatch } from "./room/errors.js";
-import { turnFrom, iceConfig, shareQuery, linkPath, normTurn, TURN_KEY } from "./room/ice.js";
+import { turnFrom, iceConfig, shareQuery, linkPath, linkRelayProtocol, normTurn, TURN_KEY, wantDefaultRelay, fetchRelay, markAuto, swapRelayServers, refreshInMs, isRelayServer, weightsOverLink, probeUdp, networkAdvice, WORK_DOCS } from "./room/ice.js";
 import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "./room/conversation.js";
 import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS,
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, lapTimeout, suspectBack, STALL_MS } from "./room/liveness.js";
@@ -84,6 +84,13 @@ const SIGNALS = serverList({ query: SIGNAL, configured: window.POOLED_SIGNAL_SER
 // what a page with no ?signal= would try first: the invite link names the server only when it differs
 const SIGNAL_FIRST = serverList({ configured: window.POOLED_SIGNAL_SERVERS, pageSecure: PAGE_SECURE })[0].spec;
 let signalServer = null;   // the server this tab registered on ({ spec, label, opts })
+// the relay this tab uses, and what the network allows (room/ice.js; see keepRelayFresh)
+let relayOn = false;     // a TURN server is in this tab's ICE configuration
+let relayFrom = null;    // "yours" (?turn= / Network box), "site" (window.TURN_SERVERS), "default" (/api/turn)
+let udpProbe = null;     // probeUdp(): { udpOut, host } or null
+let udpSeen = null;      // its answer, once in
+let relayTimer = null;
+let relayGot = null;     // the site's relay as last fetched: { relay, at } (defaultRelay)
 
 // Topology: every device keeps ONE link to the host (control, roster, tokens). Data links
 // between chain neighbours open when the layers are dealt (ensureLink), so a room of N
@@ -785,11 +792,18 @@ function dialStripe(entry, id, tries = 0) {
 // direct or through the TURN relay: read once the link has settled, logged, and shown in pooledDebug()
 function notePath(entry) {
   setTimeout(async () => {
-    const pc = entry.conn.peerConnection;
-    if (!pc || conns.get(entry.conn.peer) !== entry) return;
-    try { entry.path = linkPath(await pc.getStats()); } catch { return; }
-    if (entry.path === "relay") log("room", `link to ${entry.name} goes through the relay (TURN)`);
+    if (conns.get(entry.conn.peer) !== entry) return;
+    await pathOf(entry.conn.peer);
+    if (entry.path === "relay") log("room", `link to ${entry.name} goes through the relay (TURN${entry.via ? " over " + entry.via.toUpperCase() : ""})${PEER_WEIGHTS ? "; model weights never go over it" : ""}`);
   }, 3000);
+}
+// this link's path now ("direct", "relay", or null before ICE picked one), read from its stats
+async function pathOf(id) {
+  const e = conns.get(id), pc = e?.conn?.peerConnection;
+  if (!e) return null;
+  if (e.path) return e.path;
+  try { const st = pc ? await pc.getStats() : null; e.path = linkPath(st); e.via = linkRelayProtocol(st); } catch {}
+  return e.path;
 }
 
 // a link is gone (closed, or dropped as silent): on the host the device left; workers wait for the roster
@@ -846,7 +860,7 @@ ensureLink.pending = new Set();
 
 function sendTo(id, obj) { conns.get(id)?.conn.send(obj); }
 // debug: per-peer wire state (channels open, frames sent/received) — `pooledDebug()` in the console (`swarmDebug()` still works)
-window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0, ka: e.link?.kaSent ?? 0, dups: e.link?.dups ?? 0, skipped: e.link?.skipped ?? 0, path: e.path }));
+window.pooledDebug = window.swarmDebug = () => [...conns].map(([id, e]) => ({ id, name: e.name, chans: e.link?.chans.filter((c) => c.readyState === "open").length ?? 0, sent: e.link?.sent ?? 0, recv: e.link?.recv ?? 0, ka: e.link?.kaSent ?? 0, dups: e.link?.dups ?? 0, skipped: e.link?.skipped ?? 0, path: e.path, via: e.via || null }));
 // activations go over the sliced wire channel when it is up, else as a normal message
 // ?netlag=ms delays every activation frame this device sends, to emulate a slow link in tests
 // (equal delays keep send order)
@@ -1226,12 +1240,21 @@ async function start(create, resume = null, from = 0) {
   // killed while loading layers last time (the breadcrumb below): come back with the smallest share
   if (myMeta.pledgeMax && diedCrumb?.loading) myMeta.contribGB = lendMin();
 
-  // STUN for hole-punching; a TURN relay only when one is configured (room/ice.js: ?turn=, the
-  // Network box under the join form, or window.TURN_SERVERS). ICE prefers direct candidates, so
-  // the relay only carries traffic when a direct path is impossible (or ?relay=1 forces it).
+  // STUN for hole-punching; a TURN relay when there is one (room/ice.js: ?turn=, the Network box
+  // under the join form, window.TURN_SERVERS, else the site's default relay from /api/turn with
+  // credentials that expire). ICE prefers direct candidates, so the relay only carries traffic when
+  // a direct path is impossible (a work network that blocks UDP), or when ?relay=1 forces it.
   const turn = turnConfig();
   if (turn?.bad) log("room", `ignored relay URL${turn.bad.length > 1 ? "s" : ""} ${turn.bad.join(", ")} (want turn:host:port or turns:host:port)`);
-  const ICE = iceConfig(turn, window.TURN_SERVERS || []);
+  const extra = Array.isArray(window.TURN_SERVERS) ? window.TURN_SERVERS : [];
+  const params = new URLSearchParams(location.search);
+  // is UDP getting out of this network? (answers in a few seconds; used to explain a failed join)
+  udpProbe = probeUdp(window.RTCPeerConnection);
+  const auto = wantDefaultRelay(params, location.hostname, turn, extra) ? await defaultRelay() : null;
+  const ICE = iceConfig(turn, [...extra, ...markAuto(auto?.iceServers)], { force: params.get("relay") === "1" });
+  relayFrom = turn?.urls?.length ? "yours" : extra.length ? "site" : auto ? "default" : null;
+  relayOn = ICE.iceServers.some(isRelayServer);
+  if (auto) keepRelayFresh(ICE, auto.ttl);
   // PeerJS is a deferred script from cdn.jsdelivr.net (p2p.html): without it the page still renders, so say why nothing connects
   if (typeof Peer !== "function") { joinFailed("couldn't load the connection library from cdn.jsdelivr.net (offline, or blocked by an extension or network). Reload to try again"); return; }
   // a host coming back after a reload goes to the server its room was on first: its guests are there
@@ -1265,6 +1288,7 @@ async function start(create, resume = null, from = 0) {
   signalServer = got.server;
   if (got.index > 0 || from) log("room", `signaling on ${signalServer.label}`);
   watchSignaling(peer);
+  networkNote(create);
 
   isHost = create;
   roomCode = code;
@@ -1287,9 +1311,8 @@ async function start(create, resume = null, from = 0) {
         // the host answered (or ICE got as far as checking): the room exists, the path is what failed,
         // and a relay (TURN) server gets around that (room/ice.js)
         const found = !!pc?.remoteDescription || ice === "checking" || ice === "failed" || ice === "disconnected";
-        joinFailed(!found ? step.fail : ICE.iceServers.length > 1
-          ? "Found the room, but could not connect, not even through the relay (TURN) server. Check its address and password under Network, or try another network."
-          : "Found the room, but these two devices can't reach each other (a strict firewall or mobile network on one side). A relay (TURN) server gets around that: add one under Network below. Or put both on the same Wi-Fi, or try another network.");
+        joinFailed(!found ? step.fail : pathFailText(relayOn, relayFrom, udpSeen));
+        if (found) docsLink();
         if (found && $("join-net")) $("join-net").open = true;
       } else if (step.status) $("join-status").textContent = step.status;
     }, 1000);
@@ -1360,6 +1383,59 @@ async function start(create, resume = null, from = 0) {
 }
 
 const peerErrorShown = { text: "", t: 0 };
+
+// --- the relay this tab uses, and what the network allows (room/ice.js) ---
+// the default relay's credentials expire: fetch new ones before they do, so links made later in a
+// long session (a device joining, a chain relink, a stripe) still authenticate. Links already up
+// keep their allocation.
+// the site's relay (/api/turn), reused while less than half its lifetime has passed: start() runs
+// again on a resume retry (every 3 s) or a fallback to the next signaling server
+async function askRelay() {
+  const relay = await fetchRelay(window.fetch?.bind(window), window.POOLED_TURN_ENDPOINT || undefined);
+  if (relay) relayGot = { relay, at: performance.now() };
+  return relay;
+}
+async function defaultRelay() {
+  if (relayGot && performance.now() - relayGot.at < relayGot.relay.ttl * 500) return relayGot.relay;
+  return askRelay();
+}
+function keepRelayFresh(cfg, ttl) {
+  clearTimeout(relayTimer);
+  relayTimer = setTimeout(async () => {
+    const fresh = await askRelay();
+    if (fresh) swapRelayServers(cfg, fresh.iceServers);
+    keepRelayFresh(cfg, fresh ? fresh.ttl : ttl / 4);   // failed: try again sooner
+  }, refreshInMs(ttl));
+}
+// why a join that found the room still failed, from what this tab knows about its network
+function pathFailText(relay, from, udp) {
+  const blocked = udp && !udp.udpOut;
+  if (relay && from === "yours") return "Found the room, but could not connect, not even through the relay (TURN) server. Check its address and password under Network, or try another network.";
+  if (relay) return "Found the room, but could not connect, not even through the relay (TURN) server. This network may block it too (some work networks only let web traffic out). Try another network, or set up your own relay under Network.";
+  return blocked
+    ? "Found the room, but this network blocks direct (UDP) connections and there is no relay (TURN) server to go around it. Add one under Network below, or try another network (a phone hotspot works)."
+    : "Found the room, but these two devices can't reach each other (a strict firewall or mobile network on one side). A relay (TURN) server gets around that: add one under Network below. Or put both on the same Wi-Fi, or try another network.";
+}
+// a "Rooms at work" link after the join status text
+function docsLink() {
+  const a = document.createElement("a");
+  a.href = WORK_DOCS; a.target = "_blank"; a.rel = "noopener";
+  a.textContent = " Rooms at work";
+  $("join-status").append(" See", a, ".");
+}
+// debug / tests: what this tab knows about its network (`pooledNet()` in the console)
+window.pooledNet = () => ({ relay: relayOn, from: relayFrom, udp: udpSeen });
+// once the probe answers: say which relay this tab has, and warn when the network looks closed
+function networkNote(host) {
+  if (relayOn) log("room", relayFrom === "default" ? "relay (TURN) ready: links go direct when they can, through the relay when a network blocks that" : "relay (TURN) set: links go direct when they can, through the relay when they can't");
+  Promise.resolve(udpProbe).then((u) => {
+    udpSeen = u;
+    const adv = networkAdvice(u, relayOn);
+    if (!adv) return;
+    log("room", adv.text + (adv.level === "warn" ? ` (${WORK_DOCS})` : ""));
+    if (adv.level === "warn" && host) toast(adv.text, { kind: "error" });
+  }).catch(() => {});
+}
 
 // No signaling server answered: say what that means (the room can't be found or opened, a running
 // room would be fine) and what to do, on the join screen.
@@ -1708,7 +1784,12 @@ async function rangeFetch(url, lo, hi, noCache = false) {
       const resp = new Response(body, { status: 200, headers: { "content-type": "application/octet-stream", "x-swarm-len": String(hi - lo + 1) } });
       if (c && !myMeta?.phone) storeRange(c, key, resp.clone(), hi - lo + 1);
       return resp;
-    } catch (err) { crumb(`peer weights from ${conns.get(src)?.name || src} failed (${err.message}); using the network`); ai.wsrc.map.delete(lo + "-" + hi); }
+    } catch (err) {
+      crumb(`peer weights from ${conns.get(src)?.name || src} failed (${err.message}); using the network`);
+      // relayed: nothing else from that device either (one check, not one per range)
+      if (err.relayed) { for (const [k, v] of ai.wsrc.map) if (v === src) ai.wsrc.map.delete(k); }
+      else ai.wsrc.map.delete(lo + "-" + hi);
+    }
   }
   ai.netBytes = (ai.netBytes || 0) + (hi - lo + 1);
   let r;
@@ -1766,6 +1847,8 @@ let wSeq = 0;
 // -> a ReadableStream of the range, once its first part is here (rejects on a miss or a silent source)
 async function peerGet(src, url, lo, hi) {
   if (!(await ensureLink(src, 10000))) throw new Error("no link");
+  // a relayed link costs the relay's owner per GB: weights come from the network instead (room/ice.js)
+  if (!weightsOverLink(await pathOf(src), relayOn)) { const e = new Error("the link goes through the relay"); e.relayed = true; throw e; }
   const len = hi - lo + 1, id = `${peer.id}:${++wSeq}`;
   return new Promise((res, rej) => {
     const w = { got: 0, len, acked: 0, timer: null, ctl: null, first: { res, rej } };
@@ -1824,6 +1907,12 @@ function onWeightAck(d) {
   const s = wServes.get(d.id); if (!s) return;
   if (d.cancel) s.cancel = true; else s.acked = Math.max(s.acked, +d.got || 0);
   const wake = s.wake; s.wake = null; wake?.();
+}
+// a device asks for a range: serve it, or say "miss" (it then uses the network): with peer weights
+// off, or over a relayed link, which the serving side refuses too (an older tab asks without checking)
+async function answerWget(from, d) {
+  if (!PEER_WEIGHTS || !weightsOverLink(await pathOf(from), relayOn)) { sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return; }
+  return serveWeight(from, d);
 }
 async function serveWeight(from, d) {
   const e = conns.get(from); if (!e) return;
@@ -4218,7 +4307,7 @@ async function aiOnData(from, d) {
     case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0 }); } break;
     case "ai-inv-req": cachedRanges(d.url).then((have) => sendTo(from, { t: "ai-inv", url: d.url, have })); break;
     case "ai-inv": if (ai.invWait && ai.invWait.url === d.url && Array.isArray(d.have)) ai.invWait.inv[from] = d.have.slice(0, 20000); break;
-    case "ai-wget": if (PEER_WEIGHTS) serveWeight(from, d); else sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); break;
+    case "ai-wget": answerWget(from, d); break;
     case "ai-wpart": onWeightPart(d); break;
     case "ai-wack": onWeightAck(d); break;
     case "ai-map": renderMap(d.nodes, d.st, d.live); break;
