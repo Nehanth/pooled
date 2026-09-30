@@ -1,16 +1,17 @@
 # `pooled serve`: the room as a local OpenAI and Anthropic endpoint
 
-Status: v1 built (chat only). v2 (tools, structured output, reasoning in history; OpenAI Chat
-Completions, OpenAI Responses and Anthropic Messages, no legacy `/v1/completions`) in progress: its
-shared core is section 11; the endpoint mappings land with each endpoint. Roadmap item 04. Scope: a new `cli/` package, a small host-side
+Status: v1 built (chat only). v2 built on `feat/serve-full-api` (tools, structured output, reasoning
+in history; OpenAI Chat Completions, OpenAI Responses and Anthropic Messages, no legacy
+`/v1/completions`): the shared core is section 11, Chat Completions section 12, Messages section 4,
+Responses section 13, the combined GPU run section 14. Roadmap item 04. Scope: a new `cli/` package, a small host-side
 addition in `room.js` + a new DOM-free `room/api.js`, a panel in `p2p.html`, `docs/protocol.md`.
 Nothing in `engine/`. No `PROTOCOL` bump.
 
 ```
 $ npx @pooled/cli serve ABCD
 pooled serve · room ABCD · Qwen3.6 35B MoE · Q4 (3 devices)
-  OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
-  Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
+  OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
+  Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
   bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
   prompts go to the room's host and may be shown to everyone in the room
 ```
@@ -753,3 +754,41 @@ streamed wire format byte for byte, the OpenAI SDK's `stream().finalChatCompleti
 (2026-09-29, Qwen3 1.7B) `tests/e2e/serve.mjs` passes all 63 checks, the 6 "chat tools" ones included
 (a call, streamed arguments equal to whole ones, the tool result used with the prompt reused, a
 named choice, required with parallel off giving one call, a JSON schema answer).
+
+## 13. Responses on v2 (`cli/lib/responses.js`, `cli/lib/store.js`)
+
+Built on `feat/serve-responses` over the v2 core.
+
+**Request.** `input` as a string or items: messages (user, assistant, system, developer),
+`function_call`, `function_call_output`, `reasoning` (a `pooled1.` blob in `encrypted_content` wins
+over the summary text), `item_reference` · `instructions` (not inherited through
+`previous_response_id`, as OpenAI) · function `tools`, every `tool_choice` form including
+`allowed_tools`, `parallel_tool_calls`, `max_tool_calls` · `text.format` `json_object` /
+`json_schema` · `reasoning.effort` (absent or `none` = off) · `include:
+["reasoning.encrypted_content"]` · `previous_response_id`, `store`, `metadata`. Hosted tools
+(`web_search`, which Codex always sends) and items of tools that ran elsewhere are skipped with one
+warning per client. 400: custom tools, hosted `tool_choice`, images in user input (inside a function
+output they become a note), unknown item types, `background`, `conversation`, `prompt`, logprobs, an
+unknown previous id (code `previous_response_not_found`).
+
+**Output.** The full response object with usage (`input_tokens_details.cached_tokens`,
+`output_tokens_details.reasoning_tokens`); items in generation order (reasoning, message, function
+calls); `status` `completed`, or `incomplete` with `max_output_tokens` (a call cut short becomes an
+incomplete `function_call` item). Without `max_output_tokens` the default is 16384 (Codex never
+sends one; the room's context caps it).
+
+**Stream.** `response.created` … `response.completed` / `.incomplete` / `.failed`, `sequence_number`
+strictly increasing, ids minted once so the stream, the final object and the store agree. Reasoning
+streams as `response.content_part.*` with a `reasoning_text` part (the openai SDK's `finalResponse()`
+only builds reasoning from those; vLLM's `reasoning_part.*` makes it throw). A call cut short gets no
+`output_item.done`, so an agent does not run half-written arguments.
+
+**Store.** In memory: up to 256 responses and 64 MB, dropped an hour after last use, least recently
+used first. Backs `previous_response_id`, `item_reference`, GET / DELETE `/v1/responses/{id}` and GET
+`/v1/responses/{id}/input_items`. `/v1/responses/input_tokens` and `/compact` are 404.
+
+**Tests.** `cli/test/responses_test.mjs` (wire fixtures, the openai SDK's create / stream /
+finalResponse / chain / retrieve / delete), `cli/test/responses_store_test.mjs`,
+`tests/e2e/agents/codex.mjs --mock` (the real Codex CLI against a scripted room, no GPU) and
+`tests/e2e/serve_responses.mjs` (GPU: MoE 21 of 21 with a Codex run; 1.7B 19 of 21, the model not
+calling `exec_command` under Codex's prompt).

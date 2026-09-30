@@ -1,12 +1,12 @@
 # @pooled/cli
 
-`pooled serve` turns a [Pooled](https://pooled.run) room into a local OpenAI and Anthropic compatible endpoint. Any tool that talks to either API through a base URL then runs on the room's model: the model is split across the phones and laptops in the room, and this command only relays requests.
+`pooled serve` turns a [Pooled](https://pooled.run) room into a local OpenAI and Anthropic compatible endpoint. Any tool that talks to Chat Completions, Responses or Messages through a base URL (coding agents such as Codex CLI and Claude Code included, with their tool calls) then runs on the room's model: the model is split across the phones and laptops in the room, and this command only relays requests.
 
 ```
 $ npx @pooled/cli serve ABCD
 pooled serve · room ABCD · Qwen3.6 35B MoE · Q4
-  OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key)
-  Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL)
+  OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
+  Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
   bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
   prompts go to the room's host and may be shown to everyone in the room
 ```
@@ -54,7 +54,9 @@ Everything a tool sends goes to the room's host, a browser tab on someone's devi
 | Endpoint | |
 |---|---|
 | `POST /v1/chat/completions` | OpenAI Chat Completions with tool calls and JSON mode, streaming (`stream: true`, `stream_options.include_usage`) and not |
-| `POST /v1/messages` | Anthropic Messages, streaming and not |
+| `POST /v1/responses` | OpenAI Responses with function tools, `previous_response_id` and `text.format`, streaming and not |
+| `GET` / `DELETE /v1/responses/{id}`, `GET /v1/responses/{id}/input_items` | responses kept by this process (up to 256 or 64 MB, an hour after last use) |
+| `POST /v1/messages` | Anthropic Messages with tools, `tool_choice` and thinking, streaming and not |
 | `GET /v1/models`, `GET /v1/models/{id}` | the room's model, `pooled/<model>` (Anthropic's shape when the request has `anthropic-version` or `x-api-key`) |
 | `GET /health` | `{ok, room, connected, ready, model, queue, served}` for scripts; with a token set and not given, only `{ok: true}` |
 
@@ -68,7 +70,21 @@ Chat Completions tools and structured output (the room's host must run a Pooled 
 - A call cut by `max_tokens` is left out of a whole answer; streamed, its name and partial arguments already went out, and `finish_reason: "length"` says so.
 - A string argument containing a line `</parameter>` ends there (Qwen3.5+ call format).
 
-Still a clear `400`: `custom` tools, the deprecated `functions` / `function_call` and `role: "function"`, images and other non-text content in user messages (inside a tool result an image becomes a short note), `n > 1`, logprobs, `prediction`, `web_search_options`, audio, an assistant message last (prefill). `/v1/embeddings`, `/v1/completions` (the legacy API: use `/v1/chat/completions`), `/v1/responses` and `/v1/messages/count_tokens` are `404`.
+Still a clear `400`: `custom` tools, the deprecated `functions` / `function_call` and `role: "function"`, images and other non-text content in user messages (inside a tool result an image becomes a short note), `n > 1`, logprobs, `prediction`, `web_search_options`, audio, an assistant message last (prefill). Responses (`/v1/responses`), on the same machinery:
+
+- `input` as a string or items: messages (user, assistant, system, developer), `function_call` / `function_call_output`, `reasoning` (a `pooled1.` `encrypted_content` restores the exact reasoning), `item_reference`. `instructions`, function `tools`, every `tool_choice` form, `parallel_tool_calls`, `max_tool_calls`, `text.format` (`json_object`, `json_schema`), `reasoning.effort` (absent or `none` is off), `include: ["reasoning.encrypted_content"]`.
+- `previous_response_id` chains onto a response this process stored (`store`, default true); an unknown id is a `400` with code `previous_response_not_found`. Stored responses live in memory only.
+- Output items come in generation order (reasoning, message, function calls); a stream is the full event sequence with `sequence_number`, from `response.created` to `response.completed` / `.incomplete` / `.failed`. Without `max_output_tokens` up to 16384 tokens (capped by the room's context).
+- Hosted tools such as `web_search` (Codex always sends it) and items of tools that ran elsewhere are skipped with one logged warning. `400`: custom tools, hosted `tool_choice`, images in user input, `background`, `conversation`, `prompt`, logprobs.
+
+Messages (`/v1/messages`):
+
+- `tools` with `input_schema`, `tool_choice` (`auto`, `any`, `{"type": "tool", "name"}`, `none`, `disable_parallel_tool_use`). Calls come back as `tool_use` blocks with `stop_reason: "tool_use"`, streamed as `input_json_delta`; results go back as `tool_result` blocks (`is_error` too). Anthropic's own tools (web search, bash, text editor, ...) are skipped with a logged warning.
+- Thinking: `enabled` with `budget_tokens`, `adaptive`, `disabled`, `display: "omitted"`. The thinking block's `signature` carries the reasoning (`pooled1.`), so a client that sends the block back gives the room its exact reasoning with nothing stored here.
+- `output_config.format` / `output_format` (`json_schema`) are constrained; `output_config.effort` is accepted. `max_tokens` above 65536 is capped. `usage.input_tokens` leaves out `cache_read_input_tokens`.
+- `400`: images and documents in user content (inside a `tool_result` an image becomes a short note), a non-empty `mcp_servers`.
+
+`/v1/embeddings`, `/v1/completions` (the legacy API: use `/v1/chat/completions`), `/v1/responses/input_tokens`, `/v1/responses/compact` and `/v1/messages/count_tokens` are `404`.
 
 ## Tools
 
@@ -106,6 +122,32 @@ client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="pooled")
 m = client.messages.create(model="pooled", max_tokens=500, messages=[{"role": "user", "content": "Hi"}])
 print(m.content[0].text)
 ```
+
+### Codex CLI
+
+In `~/.codex/config.toml` (Codex has no size for a provider it does not know: give it the room's context):
+
+```toml
+model = "pooled"
+model_provider = "pooled"
+model_context_window = 32768
+model_auto_compact_token_limit = 26000
+
+[model_providers.pooled]
+name = "Pooled"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+```
+
+Codex's prompt is about 15 k tokens, so the room needs a long context and a model that calls tools reliably (the 35B MoE does; the 1.7B often says what it would run instead).
+
+### Claude Code
+
+```bash
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=pooled claude --model pooled
+```
+
+Its prompt is about 20 k tokens: give the room a 64 k context. Each step after the first reuses the room's caches and prefills only the new tool results.
 
 ### Continue
 

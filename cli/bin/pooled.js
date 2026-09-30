@@ -14,7 +14,8 @@ Usage
   pooled serve <ROOM CODE | room link> [options]
 
   Joins the room as an API client (no layers, no GPU needed here) and serves its model on
-  127.0.0.1 as an OpenAI and an Anthropic compatible endpoint.
+  127.0.0.1 as an OpenAI (Chat Completions and Responses) and an Anthropic (Messages)
+  compatible endpoint, tool calls included.
 
 Options
   --port <n>        HTTP port (default 8080)
@@ -31,8 +32,8 @@ Options
   -h, --help        this help
 
 Then point a tool at it
-  OpenAI     OPENAI_BASE_URL=http://127.0.0.1:8080/v1   (any API key)
-  Anthropic  ANTHROPIC_BASE_URL=http://127.0.0.1:8080
+  OpenAI     OPENAI_BASE_URL=http://127.0.0.1:8080/v1   (any API key; Codex: wire_api = "responses")
+  Anthropic  ANTHROPIC_BASE_URL=http://127.0.0.1:8080   (Claude Code too)
 `;
 
 let opts;
@@ -106,8 +107,8 @@ if (!bridge.ready) await new Promise((r) => { const t = setTimeout(r, 1500); bri
 const label = () => (bridge.ready ? `${bridge.modelLabel || bridge.model}` : "model not ready yet");
 const print = (s) => { if (!o.quiet) console.log(s); };
 print(`pooled serve · room ${code} · ${label()}
-  OpenAI     http://127.0.0.1:${bound}/v1         (OPENAI_BASE_URL, any API key)
-  Anthropic  http://127.0.0.1:${bound}            (ANTHROPIC_BASE_URL)
+  OpenAI     http://127.0.0.1:${bound}/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
+  Anthropic  http://127.0.0.1:${bound}            (ANTHROPIC_BASE_URL: messages)
   bound to 127.0.0.1 only · ${token ? "token required" : "no token (set POOLED_TOKEN to require one)"}
   prompts go to the room's host and may be shown to everyone in the room`);
 if (o["json-log"]) log(JSON.stringify({ ready: bridge.ready, port: bound, room: code }));

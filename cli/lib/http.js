@@ -222,7 +222,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
 
   function banner() {
     return [`pooled serve ${version} · room ${bridge.code} · ${bridge.ready ? modelLabel() : "model not ready yet"}`, "",
-      `OpenAI     http://127.0.0.1:${bound}/v1        POST /v1/chat/completions, GET /v1/models`,
+      `OpenAI     http://127.0.0.1:${bound}/v1        POST /v1/chat/completions, POST /v1/responses, GET /v1/models`,
       `Anthropic  http://127.0.0.1:${bound}           POST /v1/messages`,
       `Health     http://127.0.0.1:${bound}/health`, ""].join("\n");
   }
