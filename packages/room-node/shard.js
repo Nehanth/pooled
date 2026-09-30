@@ -5,9 +5,27 @@
 // compute what a browser's would.
 import { autotuneCoop, makeTokenizer, DenseEngine, gpuSelfTest, kernelMicroTests } from "../../engine/engine.js";
 import { Qwen35Engine } from "../../engine/qwen35.js";
-import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizerFromGGUF, gpuUploadEntry, GGML_EMBED } from "../../engine/gguf.js";
+import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizerFromGGUF, gpuUploadEntry, GGML_EMBED, GGML_FINAL_NORM, GGML_OUTPUT,
+  ggmlLayerNames, qwen35NamesFor } from "../../engine/gguf.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { maxSeqFor, kvModeFor } from "../../room/models.js";
+
+// The tensors a shard's loader reads (engine/gguf.js ggufWeights / qwen35Weights), in about its order,
+// as { byteOffset, byteLength }: what source.js fetches ahead of it when it streams
+export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }) {
+  const names = [];
+  const strings = (o) => Object.values(o).filter((v) => typeof v === "string");
+  for (let i = lo; i < hi; i++) names.push(...strings(kind === "qwen35" ? qwen35NamesFor(G, i) : ggmlLayerNames(i)));
+  if (hasEmbed || hasHead) names.push(GGML_EMBED);
+  if (hasHead) names.push(GGML_FINAL_NORM, GGML_OUTPUT);
+  if (kind === "qwen35" && mtp && hasHead) {
+    const N = G.meta["qwen35.block_count"] - 1, p = `blk.${N}.nextn.`;
+    if (G.tensors[p + "eh_proj.weight"]) names.push(...strings(qwen35NamesFor(G, N, true)), ...["eh_proj", "enorm", "hnorm", "shared_head_norm"].map((n) => p + n + ".weight"));
+  }
+  const seen = new Set(), out = [];
+  for (const n of names) { const t = G.tensors[n]; if (t && !seen.has(n)) { seen.add(n); out.push({ byteOffset: t.byteOffset, byteLength: t.byteLength }); } }
+  return out;
+}
 
 // -> { device, engine, tok, cfg, G, tune, gpuErrors }
 export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, null),
@@ -20,6 +38,12 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
   const out = { device, gpuErrors: 0 };
   device.addEventListener?.("uncapturederror", (ev) => { if (out.gpuErrors++ < 3) onGpuError(ev.error?.message || "GPU error"); });
   try {
+    // the index first, so a streamed shard's weights download while the GPU tests and tunes below run
+    const kind = M.kind === "qwen35" ? "qwen35" : "gguf";
+    const needTok = kind === "qwen35" && (hasEmbed || hasHead);
+    const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, ...(kind === "qwen35" ? { mtp: hasHead } : {}) };
+    const G0 = await src.header(needTok);
+    src.plan?.(shardTensors(G0, kind, opts));
     if (selfTest) {
       const tdev = await (await navigator.gpu.requestAdapter()).requestDevice();   // an adapter gives out one device only
       const st = await gpuSelfTest(tdev);
@@ -32,11 +56,9 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     log(`autotune WG=${out.tune.wg} ROWS=${out.tune.rows}`);
     const upload = (e, name) => gpuUploadEntry(device, e, name === GGML_EMBED);   // straight to the GPU
     if (M.kind === "qwen35") {
-      const needTok = hasEmbed || hasHead;
-      const G = out.G = await src.header(needTok);
+      const G = out.G = G0;
       out.cfg = { num_hidden_layers: G.meta["qwen35.block_count"] - (G.meta["qwen35.nextn_predict_layers"] || 0) };
       if (needTok) { out.tok = makeTokenizer(tokenizerFromGGUF(G.meta)); out.tok.chatTemplate = G.meta["tokenizer.chat_template"] || ""; }
-      const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, mtp: hasHead };
       const total = qwen35ShardBytes(G, opts);
       const weights = await qwen35Weights(G, src.bytesOf, opts, (done) => onProgress(done, total), upload);
       out.engine = await Qwen35Engine.create({
@@ -47,8 +69,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     } else {
       out.cfg = await src.cfg();
       if (hasEmbed || hasHead) out.tok = makeTokenizer(await src.tokJson());
-      const G = out.G = await src.header(false);   // vocab comes from tokenizer.json
-      const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead };
+      const G = out.G = G0;   // vocab comes from tokenizer.json
       const total = ggufShardBytes(G, opts);
       const weights = await ggufWeights(G, src.bytesOf, opts, (done) => onProgress(done, total), upload);
       out.engine = await DenseEngine.create({ coopWG: out.tune.wg, coopRows: out.tune.rows, device, cfg: out.cfg, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx });

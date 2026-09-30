@@ -90,8 +90,12 @@ export class RoomNode extends EventEmitter {
   // whoever asked; an agent host uses "asker" so its prompts and answers stay off other devices'
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
-    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null } = {}) {
+    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null } = {}) {
     super();
+    // beforeLoad(modelKey): awaited before a dealt shard opens the model (pooled join finishes pulling
+    // it to disk there); a throw fails that load like any other load error
+    this.beforeLoad = typeof beforeLoad === "function" ? beforeLoad : null;
+    this.loadStat = null;   // the last "loadstat" of the shard loading here (watchLoad)
     // joining (gate.js, docs/protocol.md "Joining a room"). A device: the invite key from its link and the
     // pass the host gave it; admission: null | "wait" | "lobby" | "in". A host: its gate (createRoom), and
     // the links waiting in its lobby
@@ -511,7 +515,10 @@ export class RoomNode extends EventEmitter {
         this.log(`dealt layers ${d.range[0]}-${d.range[1] - 1} of ${d.model}; next: ${d.next}`);
         let lastPct = -1;
         ai.loadingShard = true; ai.loadKey = `${d.model}:${d.range}`;
+        if (this.beforeLoad) await this.beforeLoad(d.model);
+        if (ai.startFailed) throw new Error(ai.startFailed);
         const src = openModel(d.model, { modelDir: this.modelDir });
+        const unwatch = this.watchLoad(src);
         try {
           const r = await loadShard({ modelKey: d.model, range: d.range, hasEmbed: false, hasHead: false, ctx: d.ctx || maxSeqFor(d.model),
             kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log,
@@ -523,7 +530,7 @@ export class RoomNode extends EventEmitter {
             } });
           Object.assign(ai, { engine: r.engine, device: r.device, cfg: r.cfg, range: d.range, model: d.model });
           ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv };
-        } finally { await src.close(); }
+        } finally { unwatch(); await src.close(); }
       }
       if (!(await this.ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
       this.log(`layers ${d.range[0]}-${d.range[1] - 1} ready in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
@@ -536,6 +543,27 @@ export class RoomNode extends EventEmitter {
       this.freeLayers(null);
       this.sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1 });
     } finally { ai.loadingShard = false; ai.loadKey = null; }
+  }
+  // A shard load's progress for a status line, ~4 times a second: "loadstat" { from: "Hugging Face" |
+  // "disk", fetched, total, bps } (fetched: bytes received from the network, or read from the disk, of
+  // this shard's total; bps: the rate over the last few seconds), also kept as node.loadStat.
+  // src: source.js openModel(). -> stop() (emits the last one)
+  watchLoad(src, { everyMs = 250, windowMs = 3000 } = {}) {
+    const hist = [];
+    const tick = () => {
+      const st = src.stat;
+      if (!st?.planned) return;
+      const now = performance.now();
+      hist.push([now, st.fetched]);
+      while (hist.length > 2 && now - hist[0][0] > windowMs) hist.shift();
+      const [t0, f0] = hist[0];
+      const bps = now - t0 > 0 ? Math.max(0, ((st.fetched - f0) / (now - t0)) * 1000) : 0;
+      this.loadStat = { from: st.from, fetched: Math.min(st.fetched, st.total || st.fetched), total: st.total, bps: Math.round(bps) };
+      this.emit("loadstat", this.loadStat);
+    };
+    const t = setInterval(tick, everyMs);
+    t.unref?.();
+    return () => { clearInterval(t); tick(); };
   }
   // frames run one at a time in arrival order; control rides on the frame and goes on with it
   async workerFrame(d) {
@@ -694,11 +722,13 @@ export class RoomNode extends EventEmitter {
     this.broadcast({ t: "ai-layers", by: ai.layersByName });
     const t0 = performance.now();
     const keep = ai.engine && sameShard(ai.held, { model: modelKey, range: ranges[0], ctx }) && ai.held.kv === kv;
+    let unwatch = () => {};
     try {
       if (!keep) {
         this.freeLayers("host");
         ai.loadingShard = true;
         let lastPct = -1;
+        unwatch = this.watchLoad(src);
         const r = await loadShard({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log,
           onGpuError: (m) => this.log("GPU error: " + m),
           onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
@@ -706,7 +736,7 @@ export class RoomNode extends EventEmitter {
         ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv };
       }
     } catch (err) { ai.starting = false; this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }
-    finally { ai.loadingShard = false; await src.close(); }
+    finally { unwatch(); ai.loadingShard = false; await src.close(); }
     this.log(`host layers ${ranges[0][0]}-${ranges[0][1] - 1} + embedding/head ready in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     ai.fed = []; ai.pendingCtl = {}; ai.pos = 0;
     try { ai.engine?.dropAllSlots?.(); } catch {}   // this device's own slots (it may have kept its layers)
