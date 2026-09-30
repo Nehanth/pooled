@@ -78,6 +78,8 @@ const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal",
 // the model allows for the qwen35 models (128k on the MoE, 64k on the 27B: an agent's prompt alone is
 // 8-12k tokens, and their KV cache is small), else the room's default (the dense 1.7B keeps an f32 cache).
 export const nodeCtxFor = (model, ask = 0) => (ask > 0 || MODELS[model]?.kind !== "qwen35" || !CTX[model] ? maxSeqFor(model, ask) : CTX[model].max);
+// what a host that closes its room says to the devices in it (bye {closed: 1})
+export const HOST_CLOSED = "The host closed the room.";
 export const cleanName = (s, id) => String(s ?? id).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(id).slice(0, 8);
 
 export class RoomNode extends EventEmitter {
@@ -398,7 +400,15 @@ export class RoomNode extends EventEmitter {
       }
       case "leaving": try { e?.conn.close(); } catch {} return;
       case "lobby": case "admit": if (!this.isHost && from === PREFIX + this.code) deviceGateMessage(this, d); return;
-      case "bye": this.log(`bye from ${e?.name || from}: ${d.reason}`); this.emit("bye", d.reason); return;
+      case "bye":
+        // the host closed the room for good (pooled host q): no knocking, the room is over
+        if (!this.isHost && from === PREFIX + this.code && d.closed) {
+          this.roomClosed = true; clearInterval(this.knock); this.knock = null;
+          this.log(d.reason || HOST_CLOSED);
+          this.emit("closed", d.reason || HOST_CLOSED);
+          return;
+        }
+        this.log(`bye from ${e?.name || from}: ${d.reason}`); this.emit("bye", d.reason); return;
       case "roster":
         if (from !== PREFIX + this.code) return;
         this.members = d.members;
@@ -608,6 +618,7 @@ export class RoomNode extends EventEmitter {
     this.failWaiters(new Error("the host left"));
     this.log("lost the link to the host");
     this.admission = null;   // back in through the gate (with the pass it was given) when it knocks
+    if (this.roomClosed) return;   // the host said it closed the room: nothing to wait for
     this.emit("hostgone");
     if (this.closing || this.knock || this.otherHost) return;
     const hostId = PREFIX + this.code, t0 = Date.now();
@@ -1468,6 +1479,9 @@ export class RoomNode extends EventEmitter {
   async close() {
     this.closing = true;
     clearInterval(this.pingTimer); clearInterval(this.knock); clearTimeout(this.ai.idleRedeal);
+    // a host closing for good tells the room first (the room page shows it as "Room over"), so no
+    // device knocks for a minute waiting for it to come back
+    if (this.isHost) try { this.broadcast({ t: "bye", reason: HOST_CLOSED, closed: 1 }); } catch {}
     try { this.broadcast({ t: "leaving" }); } catch {}
     for (const L of this.lobbyConns.values()) try { L.conn.send({ t: "bye", reason: "the room closed" }); } catch {}
     await new Promise((r) => setTimeout(r, 200));

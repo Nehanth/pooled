@@ -1021,7 +1021,11 @@ function onData(from, d) {
       if (versionSeen.has(from)) break;   // a version mismatch this tab already explained in its own words
       toast(d.reason);
       log("room", d.reason);
-      if (from === PREFIX + roomCode) { $("room-over").hidden = false; $("room-over-h").textContent = "Room over"; $("room-over-why").textContent = d.reason; }
+      if (from === PREFIX + roomCode) {
+        $("room-over").hidden = false; $("room-over-h").textContent = "Room over"; $("room-over-why").textContent = d.reason;
+        // the host closed the room for good (pooled host q): its link closing next is not a host to wait for
+        if (d.closed) { admission = "out"; clearInterval(hostGone.timer); aiStatus("the host closed the room"); }
+      }
       break;
     case "roster": {
       // the host's view of the room: draw a card per device, no mesh connections

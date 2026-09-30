@@ -186,6 +186,16 @@ async function pledgeLine({ def, max }) {
   }
 }
 
+// leave the room within about a second: the room node says "leaving" at once, and closing its links
+// (one being dialed to a host that is gone can take seconds) must not hold the process
+export const CLOSE_WAIT_MS = 800;
+export async function closeSoon(node, ms = CLOSE_WAIT_MS) {
+  if (!node) return;
+  let t;
+  await Promise.race([Promise.resolve().then(() => node.close()).catch(() => {}), new Promise((r) => { t = setTimeout(r, ms); })]);
+  clearTimeout(t);
+}
+
 // ---------------- pooled join ----------------
 async function runJoin(opts, out) {
   let code = opts.code;
@@ -290,6 +300,8 @@ async function runJoin(opts, out) {
       const v = versionFromBye(reason, rn.PROTOCOL);
       finish(v ? { type: "version", theirs: v.theirs, theyHost: true } : Object.assign(new Error(String(reason || "")), { type: "kicked" }));
     });
+    // the host closed the room (pooled host q): over, no knocking and no rejoin
+    n.on("closed", () => finish({ type: "host-closed" }));
     n.on("roomover", () => { if (!leaving && !rejoinP) rejoinP = rejoin().finally(() => { rejoinP = null; }); });
   };
   // the host did not come back within a minute: start over (join again) with backoff, for --wait
@@ -336,7 +348,7 @@ async function runJoin(opts, out) {
     if (leaving) { out.done(); process.exit(130); }
     leaving = true; S.phase = "leaving"; tick();
     out.log(`leaving room ${fmtCode(code)} and freeing the GPU${sig ? " (again to quit at once)" : ""}`);
-    try { await node?.close(); } catch {}
+    await closeSoon(node);
     out.done();
     process.exit(0);
   };
@@ -365,9 +377,10 @@ async function runJoin(opts, out) {
   tick();
   const r = await endP;
   clearInterval(timer);
-  if (!r.ok) { try { await node?.close(); } catch {} }
+  if (!r.ok) await closeSoon(node);
   out.done();
   if (r.ok) return 0;
+  if (r.type === "host-closed") { out.print("The host closed the room."); return 0; }
   return fail(out, r, { code, cmd: "join", mine: rn.PROTOCOL });
 }
 
@@ -438,7 +451,7 @@ async function runHost(opts, out, prepared = null) {
     if (leaving) { out.done(); process.exit(130); }
     leaving = true; exitCode = codeOut; S.phase = "leaving"; out.status(S);
     out.log(`closing room ${fmtCode(code)} and freeing the GPU${sig ? " (again to quit at once)" : ""}`);
-    try { await node.close(); } catch {}
+    await closeSoon(node);
     if (process.stdin.isTTY) { try { process.stdin.setRawMode(false); } catch {} }
     out.done();
     process.exit(exitCode);

@@ -9,6 +9,7 @@ import { liveRegion, keysOf, colorOn } from "./tui.js";
 import { pullWithProgress } from "./pullrun.js";
 import { style, detectTheme } from "./style.js";
 import { cleanText } from "./common.js";
+import { closeSoon } from "./lendrun.js";
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const ROOM_URL = "https://pooled.run/r/";
@@ -122,7 +123,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
     stopKeys();
     region.log(`${stamp()} ${ST.ink3(`closing room ${fmtCode(node.code)} and freeing the GPU`)}`);
     region.close();
-    try { await node.close(); } catch {}
+    await closeSoon(node);   // the room is told it is over at once; closing the links may take longer
     process.exit(code);
   }
   const run = (fx) => {

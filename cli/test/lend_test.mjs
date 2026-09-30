@@ -289,3 +289,14 @@ test("join security: a quoted invite link gives its key; six-character codes gro
   assert.equal(formatStatus({ code: "4TKG9P", phase: "lobby", passes: 0 }), "room 4TK-G9P · waiting for the host to let you in · 0 passes");
   assert.equal(formatStatus({ code: "4TKG9P", phase: "online", hosting: true, devices: 1, lobby: 2, passes: 0 }), "room 4TK-G9P · online · 1 device · 2 waiting to join · 0 passes");
 });
+
+test("leaving: a room node whose close hangs (a link dialed to a gone host) still lets pooled join exit within a second", async () => {
+  const { closeSoon, CLOSE_WAIT_MS } = await import("../lib/lendrun.js");
+  assert.ok(CLOSE_WAIT_MS <= 1000);
+  let closed = 0;
+  const t0 = Date.now();
+  await closeSoon({ close: () => { closed++; return new Promise(() => {}); } }, 50);
+  assert.equal(closed, 1); assert.ok(Date.now() - t0 < 500);
+  await closeSoon({ close: async () => { throw new Error("already closed"); } });
+  await closeSoon(null);
+});

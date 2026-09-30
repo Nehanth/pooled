@@ -394,3 +394,37 @@ test("dealPlan speed counts the KV cache like the room page: 1.7B, 2 GB + 2 GB s
   assert.deepEqual(p.chain, ["b"]);
   assert.ok(p.assigned[0] > 0 && p.assigned[0] < 28, `host holds ${p.assigned[0]}`);
 });
+
+test("close() on a host tells the room it is over (bye closed, then leaving); a device told so stops waiting for it", async () => {
+  const n = fakeNode();
+  n.addPeer("a", "mac"); n.addPeer("b", "phone");
+  n.peer.destroy = () => {};
+  await n.close();
+  for (const id of ["a", "b"]) {
+    assert.deepEqual(n.sent[id].map((m) => m.t), ["bye", "leaving"]);
+    assert.equal(n.sent[id][0].closed, 1); assert.equal(n.sent[id][0].reason, "The host closed the room.");
+  }
+  // a device closing sends no bye: only its host can end the room
+  const d = fakeNode({ host: false, name: "mac" });
+  d.addPeer("pooled-room-TEST", "host"); d.peer.destroy = () => {};
+  await d.close();
+  assert.deepEqual(d.sent["pooled-room-TEST"].map((m) => m.t), ["leaving"]);
+
+  // the device's side: "closed" (not "bye", which reads as being turned away), and when the host's
+  // link then drops it neither knocks nor reports the host gone
+  const w = fakeNode({ host: false, name: "mac" });
+  w.addPeer("pooled-room-TEST", "host"); w.ai.hostId = "pooled-room-TEST"; w.admission = "in";
+  const seen = [];
+  for (const ev of ["closed", "bye", "hostgone", "roomover"]) w.on(ev, (x) => seen.push([ev, x]));
+  w.onData("pooled-room-TEST", { t: "bye", reason: "The host closed the room.", closed: 1 });
+  assert.deepEqual(seen, [["closed", "The host closed the room."]]);
+  w.hostGone();
+  assert.equal(w.knock, null, "no knocking on a closed room");
+  assert.deepEqual(seen.map((x) => x[0]), ["closed"]);
+  // a bye without closed from the host is still a bye (turned away)
+  const k = fakeNode({ host: false, name: "mac" });
+  k.addPeer("pooled-room-TEST", "host");
+  let bye = null; k.on("bye", (r) => { bye = r; });
+  k.onData("pooled-room-TEST", { t: "bye", reason: "no" });
+  assert.equal(bye, "no"); assert.ok(!k.roomClosed);
+});
