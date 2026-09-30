@@ -8,16 +8,22 @@ room or join one. Other devices join over WebRTC: another machine with this plug
 or phone on pooled.run. Together they run a model none of them can run alone (the 35B MoE needs
 about 22.5 GB; two 16 GB Macs can hold it).
 
-Status: proof of concept, not published. Tested with OpenClaw 2026.9.6. It runs from a Pooled
+Status: proof of concept, not published. Tested with OpenClaw 2026.9.6 and 2026.9.7 (Linux GB10 and
+macOS 27 on an M5 Max). It runs from a Pooled
 checkout (it imports `packages/room-node`, `room/`, `harness/` and `cli/lib/` by relative path).
 
 ## Set up
 
 ```sh
 cd packages/room-node && npm install                      # Dawn, node-datachannel, peerjs
-openclaw plugins install --link --accept-capabilities packages/openclaw
+openclaw plugins install --link --accept-capabilities --force "$PWD/packages/openclaw"
 openclaw onboard        # or: openclaw models auth login --provider pooled --set-default
 ```
+
+`--force`: 2026.9.7 refuses a local path outside ClawHub review without it; the path must be
+absolute. With npm 11, installing OpenClaw itself needs its install scripts allowed
+(`--allow-scripts=@google/genai,esbuild,koffi,protobufjs,openclaw` for a global install, or an
+`allowScripts` field in a project's package.json).
 
 Onboarding offers **Pooled (run a model across your devices)** with two choices:
 
@@ -42,7 +48,7 @@ Non-interactive: `openclaw onboard --non-interactive --auth-choice pooled` with 
 | Key | Env | Meaning |
 |---|---|---|
 | `mode` | `POOLED_MODE` | `host` or `join` |
-| `code` | `POOLED_CODE` | the room code (4 to 6 characters) |
+| `code` | `POOLED_CODE` | the room code (4 to 6 characters; use 4 when a phone or tab joins by typing it: the room page's code box keeps 4) |
 | `model` | `POOLED_MODEL` | the model a host starts (`room/models.js` key) |
 | `pledgeGB` | `POOLED_PLEDGE_GB` | GPU memory this device lends |
 | `minDevices` | `POOLED_MIN_DEVICES` | devices to wait for before dealing the layers (default 1) |
@@ -92,9 +98,11 @@ clients, the host runs an older Pooled without tool calling, no model running ye
 
 ## Known gaps
 
-- The very first turn after the gateway starts prefills OpenClaw's whole prompt (8-12k tokens).
+- The very first turn after the gateway starts prefills OpenClaw's whole prompt (14-17k tokens
+  with 2026.9.7's full tool profile: 50-62 s on the MoE split over a Spark and a Mac).
   After that the host keeps it as pinned checkpoints (`packages/room-node/ckpt.js`): new sessions,
-  side requests and the next day's sessions start from them, and follow-ups from the last answer.
+  side requests and the next day's sessions start from them, follow-ups from the last answer, and
+  each step of a tool loop from where the previous call's last user turn started (turn checkpoints).
   The checkpoints live in GPU memory only, so a gateway restart starts cold again.
 - macOS needs 26 or newer for the `webgpu` package's Dawn build; Windows is untested.
 - Small models need the trimmed tool profile; the MoE is the model to use.

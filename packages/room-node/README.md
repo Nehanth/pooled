@@ -45,7 +45,7 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 | `code` | (createRoom) the room code; default a random one |
 | `pledgeGB` | GPU memory this device lends; default half its largest buffer (1 to 64) |
 | `ctx` | context to ask for, clamped by `room/models.js` CTX (1.7B 16k, 27B 64k, MoE 128k); default the largest for the qwen35 models (MoE 128k, 27B 64k) and the room default (8k) for the 1.7B, then lowered to what the smallest GPU binding limit in the room holds (`maxBindMB` in each hello; none counts as 128 MiB). Every device gets it with its `ai-load` |
-| `ckpt` | the host's checkpoints (`ckpt.js`): `{ answers, pins, minPin }` (default 3 answers, 4 pinned prefixes, pin a fixed start of 1024+ tokens), or `false` for none |
+| `ckpt` | the host's checkpoints (`ckpt.js`): `{ answers, pins, minPin, turns }` (default 4 answer and turn checkpoints, 4 pinned prefixes, pin a fixed start of 1024+ tokens, turn checkpoints on), or `false` for none |
 | `modelDir` | local model files, in the layout of `source.js` LOCAL (`qwen17/model.gguf`, `q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`, ...); else HTTP range reads of the model's URL, as the page makes |
 | `signal` | a PeerServer `host:port`; default the PeerJS cloud server pooled.run uses |
 | `name` | this device's name in the room |
@@ -74,6 +74,14 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
   Returns `{ rid, stop() }`. `hostMeta` is what the host's hello says (`{ api: 2, ctx }`).
 - `redeal(why)`, `close()`. Events: `log`, `members`, `online`, `degraded`, `loaded`, `progress`,
   `hostgone`, `back`, `chat`, `chatanswer`, `answer`.
+
+## From the command line
+
+`join.mjs` lends this machine's GPU to a room until Ctrl-C (no browser, no OpenClaw):
+
+```sh
+node packages/room-node/join.mjs K7QX --gb 12 --name mac-studio [--signal host:port] [--models dir] [--state status.json]
+```
 
 ## One tool-call path
 
@@ -107,7 +115,12 @@ api). The link layer, dealing, laps, prefill, plain and speculative decode (with
   - pinned prefixes: the system prompt + tools, and an agent's own cache boundary inside its system
     prompt (OpenClaw's `<!-- /openclaw:attempt:STABLE -->`: the date and model name that follow it
     change, the ~11k tokens before it do not). Answers never evict them; up to 4, by last use.
-  - answer checkpoints: up to 3, evicted by GreedyDual (the cost to rebuild past the pinned prefix,
+  - turn checkpoints: where the prompt's last user turn starts (`turnPoint`). OpenClaw ends every
+    call with a user turn of per-call context (`<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>`) that the next
+    call drops, so an answer checkpoint is never a prefix of the next call in a tool loop; the turn
+    checkpoint is, and the next call reads only the assistant turn and the tool results. Kept with
+    the answer checkpoints. `POOLED_CKPT_DEBUG=1` logs where each prompt leaves each checkpoint.
+  - answer checkpoints: up to 4 (with the turn checkpoints), evicted by GreedyDual (the cost to rebuild past the pinned prefix,
     aged by use), so a session title or compaction request does not push out the conversation.
   - one index for the whole host: a new session with the same system prompt starts from the pin.
   - a dense model (the 1.7B) has GPU slots too (`engine/dense.js`); a chain with a tab from before
