@@ -4,7 +4,7 @@
 import os from "node:os";
 import { hostable, memoryRule, fmtCode } from "./lend.js";
 import { modelState } from "./cache.js";
-import { initialState, reduce, render, roomFitNow, modelRows, recommendModel, pledgeDefaults, devicesFrom, autoStart, colors, modelNeedGB } from "./hostui.js";
+import { initialState, reduce, render, roomFitNow, modelRows, recommendModel, pledgeDefaults, devicesFrom, autoStart, colors, modelNeedGB, pullDone } from "./hostui.js";
 import { liveRegion, keysOf, colorOn } from "./tui.js";
 import { pullWithProgress } from "./pullrun.js";
 import { style, detectTheme } from "./style.js";
@@ -78,9 +78,9 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
       onProgress: (p) => { if (S.dl.key === key) S.dl = { ...S.dl, done: p.done, total: p.total || S.dl.total, bps: p.bps ?? S.dl.bps }; } })
       .then((r) => {
         if (pullAbort === ac) pullAbort = null;
-        if (r.ok) { pulled.add(key); S.rows = rowsFor(); if (S.dl.key === key) S.dl = { ...S.dl, state: "done" }; log(`${key} downloaded`); }
-        else if (r.aborted) { if (S.dl.key === key && S.dl.state === "running") S.dl = { ...S.dl, state: "none" }; }
-        else { if (S.dl.key === key) S.dl = { ...S.dl, state: "error", error: r.error.message }; log(`download failed: ${r.error.message}`); }
+        S = pullDone(S, key, r);
+        if (r.ok) { pulled.add(key); S.rows = rowsFor(); log(`${key} downloaded`); }
+        else if (!r.aborted) log(`download failed: ${r.error.message}`);
         refresh();
       });
   };

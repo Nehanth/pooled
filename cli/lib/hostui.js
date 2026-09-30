@@ -127,6 +127,19 @@ export function autoStart(s) {
   return canStart(s).ok;
 }
 
+// a download the screen started ended (pullWithProgress's result: { ok } | { aborted } | { error }).
+// A notice that waited on it ("waiting for the download") goes with it.
+export function pullDone(s, key, r = {}) {
+  const t = { ...s };
+  if (t.dl.key === key) {
+    if (r.ok) t.dl = { ...t.dl, state: "done" };
+    else if (r.aborted) { if (t.dl.state === "running") t.dl = { ...t.dl, state: "none" }; }
+    else t.dl = { ...t.dl, state: "error", error: r.error?.message || String(r.error || "failed") };
+  }
+  if (/^waiting for the download/.test(t.notice || "")) t.notice = "";
+  return t;
+}
+
 const nextAfterModel = (s) => (s.fixed.pledge ? "room" : s.pledgeDone ? "room" : "pledge");
 
 // one key -> { state, fx: [effects] }. keys: "up" | "down" | "left" | "right" | "enter" | "backspace"
@@ -145,8 +158,9 @@ export function reduce(s, key) {
       break;
     }
     case "pick": {
-      if (k === "up") t.sel = (t.sel - 1 + t.rows.length) % t.rows.length;
-      else if (k === "down") t.sel = (t.sel + 1) % t.rows.length;
+      // the list stops at its ends (it does not wrap: ↑ on the smallest model stays there)
+      if (k === "up") t.sel = Math.max(0, t.sel - 1);
+      else if (k === "down") t.sel = Math.min(t.rows.length - 1, t.sel + 1);
       else if (k === "esc" && t.model) t.step = "room";
       else if (k === "enter") {
         const row = t.rows[t.sel];

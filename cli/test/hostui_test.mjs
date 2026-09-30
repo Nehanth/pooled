@@ -269,3 +269,37 @@ test("split: s toggles fastest first / across all devices, the rows show what St
   assert.throws(() => parseLendArgs("host", ["--split", "sideways"]), /--split is "speed"/);
   assert.equal(initialState({ rows, pledge: { gb: 8, max: 60 }, flags: { split: "memory" } }).splitMode, "memory");
 });
+
+test("picker: models in size order; ↑ on the first and ↓ on the last stay put (no wrap)", () => {
+  const rows = modelRows(lib, { keys: [...KEYS].reverse(), pledgeGB: 8 });
+  const needs = rows.map((r) => r.needGB);
+  assert.deepEqual(needs, [...needs].sort((a, b) => a - b), "smallest first, whatever order the keys came in");
+  assert.deepEqual(rows.map((r) => r.fileBytes), [...rows.map((r) => r.fileBytes)].sort((a, b) => a - b), "and so by download size too");
+  let s = { ...initialState({ rows, pledge: { gb: 8, max: 16, totalGB: 16 } }), sel: 0 };
+  s = reduce(s, "up").state;
+  assert.equal(s.sel, 0, "↑ at the top stops");
+  for (let i = 0; i < rows.length + 2; i++) s = reduce(s, "down").state;
+  assert.equal(s.sel, rows.length - 1, "↓ at the bottom stops");
+  // the screen lists them in the same order the cursor walks
+  const shown = render(s, { lib }).filter((l) => /needs/.test(l)).map((l) => l.replace(/^[\s›]+/, "").split(/\s{2,}/)[0]);
+  assert.deepEqual(shown, rows.map((r) => lib.MODELS[r.key].label.split("·")[0].trim()));
+});
+
+test("the download ends: \"waiting for the download\" goes, Start can go", async () => {
+  const { pullDone } = await import("../lib/hostui.js");
+  const rows = modelRows(lib, { keys: KEYS, pledgeGB: 8 });
+  let s = initialState({ rows, model: "qwen3-1.7b", pledge: { gb: 8, max: 16, totalGB: 16 }, fixedPledge: true, yes: true });
+  assert.equal(s.dl.state, "running");
+  s.fit = roomFitNow(lib, { model: "qwen3-1.7b", devices: [dev("me", 8)] });
+  s = reduce(s, "enter").state;
+  assert.equal(s.notice, "waiting for the download");
+  assert.match(render(s, { lib }).join("\n"), /waiting for the download/);
+  s = pullDone(s, "qwen3-1.7b", { ok: true });
+  assert.equal(s.dl.state, "done"); assert.equal(s.notice, "");
+  assert.doesNotMatch(render(s, { lib }).join("\n"), /waiting for the download/);
+  assert.equal(canStart(s).ok, true);
+  // a failed one says so instead; another model's download leaves this one alone
+  const f = pullDone({ ...s, dl: { ...s.dl, state: "running" }, notice: "waiting for the download" }, "qwen3-1.7b", { error: new Error("HTTP 503") });
+  assert.equal(f.dl.state, "error"); assert.equal(f.dl.error, "HTTP 503"); assert.equal(f.notice, "");
+  assert.equal(pullDone(s, "qwen3-4b", { ok: true }).dl.key, "qwen3-1.7b");
+});
