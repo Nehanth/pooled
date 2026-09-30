@@ -222,6 +222,33 @@ Deno.test("plan: the model host is the strongest device, a computer before a pho
   eq(pickModelHost([{ id: "a", meta: { webgpu: true, ua: "Android", contribGB: 8 } }, laptop]), "z");
   eq(pickModelHost([]), null);
 });
+Deno.test("plan: a computer whose GPU copies memory clearly faster hosts, if it lends at least half as much", () => {
+  const gb10 = { id: "g", meta: { webgpu: true, ua: "Device", contribGB: 13, gbps: 200 } };
+  const mac = { id: "m", meta: { webgpu: true, ua: "Mac", contribGB: 12, gbps: 450 } };
+  eq(pickModelHost([gb10, mac]), "m");
+  eq(pickModelHost([mac, gb10]), "m");
+  // not clearly faster (under 1.5x): memory decides as before
+  eq(pickModelHost([gb10, { ...mac, meta: { ...mac.meta, gbps: 280 } }]), "g");
+  // faster but lends under half the memory pick's: memory decides
+  eq(pickModelHost([gb10, { ...mac, meta: { ...mac.meta, contribGB: 6 } }]), "g");
+  eq(pickModelHost([gb10, { ...mac, meta: { ...mac.meta, contribGB: 6.5 } }]), "m");
+  // either side unmeasured (an older tab, a failed probe, ?gbps=0): memory decides
+  eq(pickModelHost([gb10, { ...mac, meta: { ...mac.meta, gbps: 0 } }]), "g");
+  // the same GPU on both (two tabs on one machine, one probed while the GPU was busy): memory decides
+  const tab = (id, gb, gbps) => ({ id, meta: { webgpu: true, ua: "Device", contribGB: gb, gbps, gpu: "nvidia blackwell" } });
+  eq(pickModelHost([tab("a", 2, 110), tab("b", 1, 199)]), "a");
+  eq(pickModelHost([tab("b", 1, 199), tab("a", 2, 110)]), "a");
+  // a different GPU still takes it
+  eq(pickModelHost([tab("a", 2, 110), { ...mac, meta: { ...mac.meta, contribGB: 2, gpu: "apple metal-3" } }]), "m");
+  eq(pickModelHost([{ ...gb10, meta: { ...gb10.meta, gbps: undefined } }, mac]), "g");
+  // a phone never wins on speed over a computer
+  eq(pickModelHost([gb10, { id: "p", meta: { webgpu: true, phone: true, contribGB: 13, gbps: 900 } }]), "g");
+  // several clearly faster: the fastest, then memory, then id
+  const mac2 = { id: "n", meta: { webgpu: true, ua: "Mac", contribGB: 8, gbps: 500 } };
+  eq(pickModelHost([gb10, mac, mac2]), "n");
+  eq(pickModelHost([gb10, mac, { ...mac2, meta: { ...mac2.meta, gbps: 450 } }]), "m");
+  eq(pickModelHost([gb10, { ...mac, id: "q" }, { ...mac, id: "k" }]), "k");
+});
 
 import { phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
 Deno.test("plan: phones hold layers only when the computers cannot hold the model", () => {

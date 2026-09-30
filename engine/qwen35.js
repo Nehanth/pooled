@@ -164,7 +164,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -1019,6 +1019,9 @@ export class Qwen35Engine {
     // the GPU. Same kernels, same inputs, same order: bit-identical. engine.specFuse = false
     // restores the separate submits (trunk readback, head write-back) for A/B.
     this.specFuse = specFuse !== false;
+    // A chain host's share of each lap in one submit (headAhead, _hostTrunkFused); hostFuse: false
+    // keeps the separate submits for A/B (same bits)
+    this.hostFuse = hostFuse !== false;
   }
 
   // ---- tensor-core prefill GEMM (prefillMath "sgmatrix", engine/wgsl/gemm_sgm.js) ----
@@ -2512,6 +2515,111 @@ export class Qwen35Engine {
     this.pos = pos + n;
     return { lgs, drafts };
   }
+  // ---- a chain host's share of a lap in one submit (hostFuse) ----
+  // A room's host holds the embedding, the first layers and the head, so every lap it ran up to three
+  // GPU round trips of its own (submit, wait, read back) with the CPU idle in between. These put
+  // them into one command buffer with one readback. Same kernels, same inputs, same order as the
+  // separate calls, so the same bits; only where the data waits changes. Both need the GPU
+  // embedding table of the draft chain (emb_gather, bit-exact with _embedRowF32).
+  _canHostFuse(n) {
+    if (this.hostFuse === false || !this.draftChain || !this._eg || !this.hasHead || !this.hasEmbed || n > this.NC) return false;
+    if (!this.B) this._initBatch();
+    return true;
+  }
+  // Speculative step, chain host: the K drafts of tNext (the draft chain), their embeddings gathered
+  // into verify columns 1..K and this device's layers over [tNext, ...drafts] with the verify
+  // snapshots, as _draftChain then embedRunBatch(tokens, pos, true) run them -> { drafts, hs }.
+  async _hostTrunkFused(tNext, pos, K) {
+    const { dim } = this.dims, n = K + 1, q = this.device.queue;
+    q.writeBuffer(this.mtp.emb, 0, this._embedRowF32(tNext));
+    this.pos = pos;
+    const sp = this._snapWord(true, n);
+    for (let c = 0; c < n; c++) q.writeBuffer(this.frameBufsB[c], 0, new Uint32Array([pos + c, pos + c + 1, n, sp]));
+    q.writeBuffer(this.B.x.buf, 0, this._embedRowF32(tNext));
+    const stage = this.stageHF ||= this.device.createBuffer({ size: this.NC * dim * 4 + 128, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const tail = n * dim * 4;   // the drafts go right after the hiddens
+    const enc = this.device.createCommandEncoder();
+    this._encodeDraftChain(enc, pos, K, stage, tail, true);
+    for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, pos, n);
+    for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, stage, c * dim * 4, dim * 4);
+    q.submit([enc.finish()]);
+    const bytes = tail + K * 16;
+    await stage.mapAsync(GPUMapMode.READ, 0, bytes);
+    const m = stage.getMappedRange(0, bytes);
+    const hs = Float32Array.from(new Float32Array(m, 0, n * dim));
+    const ids = new Uint32Array(m, tail, K * 4);
+    const drafts = Array.from({ length: K }, (_, k) => ids[k * 4]);
+    stage.unmap();
+    this.pos = pos + n;
+    return { drafts, hs };
+  }
+  // Plain decoding, chain host, greedy: the final norm + LM head + top-1 of the hidden the chain
+  // returned for pos - 1 (headFromHiddenIds), that id's embedding gathered into x, and this device's
+  // layers at pos (embedRun) -> { cands, h }: h is embedRun(cands.ids[0], pos). The layers run before
+  // the caller knows it keeps the token (it may be a stop token or past the answer cap), so the
+  // recurrent state is saved first in the same buffer: keepAhead() keeps the step, dropAhead() puts
+  // the state back (the KV rows at pos are rewritten before anything reads them). The gather table
+  // may hold only the first draftVocab rows: a rarer pick returns h = null with the state already
+  // put back (the caller runs embedRun).
+  canHeadAhead() { return this.hostFuse !== false && !!this._eg && this.hasHead && this.hasEmbed && !!this.bgFinalNorm; }
+  async headAhead(xIn, pos, desc = { kind: "greedy" }) {
+    this._pre = null;
+    const { dim, vocab } = this.dims, dev = this.device;
+    if (!this.stageAhead) {
+      const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST, E = this._eg;
+      for (const L of this.layers) if (!L.isFull) {
+        L.S_ahead = dev.createBuffer({ size: L.S.size, usage: S });
+        L.conv_ahead = dev.createBuffer({ size: L.convState.size, usage: S });
+      }
+      this._egX = this._bg2(this.pipes.emb_gather, [{ buffer: E.qs }, { buffer: E.sc }, { buffer: this.topBuf, offset: 0, size: 16 },
+        { buffer: this.x, offset: 0, size: dim * 4 }, { buffer: E.u }]);
+      this.stageAhead = dev.createBuffer({ size: 16 + dim * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    }
+    const op = this._tkOp("one", this.logits, vocab, 0, 1, this.topBuf);   // [idx, bits, bad, 0]
+    this.pos = pos;
+    this._setFrame(pos, pos + 1);
+    dev.queue.writeBuffer(this.x, 0, xIn);
+    const enc = dev.createCommandEncoder();
+    {
+      const p = enc.beginComputePass();
+      this._d(p, "rmsnorm", this.bgFinalNorm, 256, 256);
+      this._dop(p, this.headOp);
+      this._dTopk(p, op, 1);
+      p.end();
+    }
+    {
+      const p = enc.beginComputePass();
+      this._d(p, "emb_gather", this._egX, dim);
+      p.end();
+    }
+    for (const L of this.layers) if (!L.isFull) {
+      enc.copyBufferToBuffer(L.S, 0, L.S_ahead, 0, L.S.size);
+      enc.copyBufferToBuffer(L.convState, 0, L.conv_ahead, 0, L.convState.size);
+    }
+    for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
+    enc.copyBufferToBuffer(this.topBuf, 0, this.stageAhead, 0, 16);
+    enc.copyBufferToBuffer(this.x, 0, this.stageAhead, 16, dim * 4);
+    dev.queue.submit([enc.finish()]);
+    this._aheadAt = pos;
+    await this.stageAhead.mapAsync(GPUMapMode.READ, 0, 16 + dim * 4);
+    const m = this.stageAhead.getMappedRange(0, 16 + dim * 4);
+    const cands = readCands(new Uint32Array(m, 0, 4), 0, op.k);
+    const h = Float32Array.from(new Float32Array(m, 16, dim));
+    this.stageAhead.unmap();
+    if (!(cands.ids[0] < this._eg.rows)) { this.dropAhead(); return { cands, h: null }; }
+    return { cands, h };
+  }
+  keepAhead() { this._aheadAt = null; }
+  dropAhead() {
+    if (this._aheadAt == null) return;
+    this._aheadAt = null;
+    const enc = this.device.createCommandEncoder();
+    for (const L of this.layers) if (!L.isFull) {
+      enc.copyBufferToBuffer(L.S_ahead, 0, L.S, 0, L.S.size);
+      enc.copyBufferToBuffer(L.conv_ahead, 0, L.convState, 0, L.convState.size);
+    }
+    this.device.queue.submit([enc.finish()]);
+  }
   _canFuse(n, runTrunk) {   // solo verify that fits one batch pass
     if (this.specFuse === false || runTrunk || n > this.NC || !this.hasHead || !this.hasEmbed) return false;
     if (!this.B) this._initBatch();
@@ -2524,7 +2632,9 @@ export class Qwen35Engine {
   // runTrunk(tokens, pos) -> hidden states for all columns (chain mode);
   // onReject(k) tells the other devices to roll their recurrent state back
   // to what it was after column k.
-  async specStep(tNext, sample, K = 3, { runTrunk = null, onReject = null } = {}) {
+  // preTrunk: runTrunk takes a third argument { hs, t0 }: this device's layers already ran (drafts
+  // and layers in one submit, _hostTrunkFused) and hs holds their hiddens, to send on as they are.
+  async specStep(tNext, sample, K = 3, { runTrunk = null, onReject = null, preTrunk = false } = {}) {
     const pos = this.pos, M2 = this.mtp;
     K = Math.max(1, Math.min(7, K));
     // GPU sampling: lgs are candidates objects ({ ids, vals, bad }) that `sample` reads directly
@@ -2537,7 +2647,13 @@ export class Qwen35Engine {
     // the previous step may already have run the draft block for (tNext, pos) (see _mtpRefill)
     const pre = chain ? this._takePre(-1, -1) : this._takePre(tNext, pos);
     if (chain && this._canFuse(K + 1, runTrunk)) ({ lgs, drafts } = await this._verifyFused([tNext], pos, K, desc));
-    else {
+    else if (chain && runTrunk && preTrunk && this._canHostFuse(K + 1)) {
+      // chain host: drafts + its layers in one submit; runTrunk gets the hiddens and sends them on
+      const t0 = performance.now();
+      const r = await this._hostTrunkFused(tNext, pos, K);
+      drafts = r.drafts;
+      ({ lgs, hs } = await this.verifyN([tNext, ...drafts], pos, (tokens, p) => runTrunk(tokens, p, { hs: r.hs, t0 }), desc));
+    } else {
       const d0 = pre ? await this._preDraft0(pre) : null;
       if (d0 !== null) drafts.push(d0);   // this.x now holds the draft block's output for column 0
       if (chain) drafts = await this._draftChain(tNext, pos, K);

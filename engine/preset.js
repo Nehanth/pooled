@@ -36,6 +36,9 @@ export function roomQwen35Options(flags) {
     draftChain: !off("draftchain"),
     // ?specfuse=0: speculative verify as separate trunk / head submits (A/B; same output bits)
     specFuse: !off("specfuse"),
+    // a chain host's share of each lap in one submit (engine headAhead / _hostTrunkFused); ?hostfuse=0 keeps
+    // the separate submits for A/B (same output bits)
+    hostFuse: !off("hostfuse"),
     // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched attention) for A/B
     // timing; both give the same bits, so devices may differ
     ...(off("fuse") ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),

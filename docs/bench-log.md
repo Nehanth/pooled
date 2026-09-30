@@ -1183,6 +1183,141 @@ the three changes apply there too (they do not depend on the fused expert layout
 - Not yet run: the 27B at 1K / 8K / 32K (f16 and int8), and repeated decode runs to average out the noise.
 - int8 KV decision for now: keep it off by default. It saves memory and keeps the tokens, but a 32K prompt takes 3.5x as long to prefill. Revisit once tiled prefill attention supports int8 KV.
 
+## 2026-09-28: the room host's share of a lap in one submit (branch perf/room-host-one-submit, `hostFuse`)
+
+Change: a chain host used to run its share of each lap as separate GPU round trips (submit, map, read back).
+Plain greedy decoding took 3 submits and 2 maps per token; a speculative step took 7 and 5. Now:
+- **Plain** (greedy, GPU sampling, in a chain): the head of the hidden the chain returned, the GPU gather of
+  its pick and the host's layers on it run as one command buffer with one readback (`engine.headAhead`).
+  The hidden goes out before the token is shown. The recurrent state is saved in the same buffer and put
+  back (`dropAhead`) when the pick is not piped (a stop token, the cap, an abort).
+- **Speculative, draft chain on**: the draft chain, the drafts' embeddings gathered into the verify columns
+  and the host's layers run in one submit (`_hostTrunkFused`).
+- Same kernels, same inputs, same order, so the same bits. `?hostfuse=0` restores the old path for A/B.
+
+The prose prompt (`japan`) does not take the speculative fused path. The reduced-vocabulary draft head
+misses more than 5% there, so `draftVocabAuto` turns the draft chain off, and those steps run the
+unchanged per-token drafting on both sides of the A/B. Its spec numbers below are the same code twice
+(noise). Solo never reaches either path (both need a chain).
+
+MoE, GB10 host (20 layers + embed/head) + M5 Max guest (20 layers), LAN Wi-Fi (IPv6 host candidates),
+exact sampling, 128 tokens. `tests/e2e/xroom_pair.sh -- --model qwen3.6-35b-moe --gb 13 --prompts
+japan,twosum --rounds 2|3 [--query hostfuse=0]`, sessions alternated off/on. Untraced rounds, tok/s median
+(n = rounds):
+
+| | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| off, 4 sessions (n=8) | 28.1 | 28.6 | 34.1 (41%) | 51.7 (67%) |
+| **on**, 4 sessions (n=8) | **29.9 (+6.8%)** | **31.9 (+11%)** | 34.1 (same path) | **54.0 (+4.5%)** |
+| off, GEMV shape 64/4 pinned on both ends (`--tune 64,4`, `--guest-tune 64,4`; n=2) | 27.0 | 30.4 | 35.7 | 50.5 |
+| **on**, same pin (n=4) | **30.9** | **32.6** | 34.6 (same path) | **54.0** |
+| off, `--fixk 3` (n=4) | | | 36.6 (49%) | 58.2 (80%) |
+| **on**, `--fixk 3` (n=4) | | | 38.0 (same path) | 58.8 (+1%, noise) |
+
+The spread inside a cell is 5-10 tok/s and follows ping spikes on the Wi-Fi (off: plain twosum 23.2-33.1;
+on: 24.0-35.6). The traced rounds are the cleaner comparison. Medians over the laps, GB10 clock,
+`xroom_report.mjs`:
+
+| traced round | off (2 sessions) | on (2 sessions) |
+|---|---|---|
+| plain japan, one token | 33.3 / 34.2 ms: layers 11.8 + head 4.2, 3 submits, 2 maps | **31.5 / 31.9 ms**: head + layers 15.2, 1 submit, 1 map |
+| plain twosum, one token | 31.2 / 32.4 ms | **28.5 / 28.5 ms** |
+| plain, send -> hidden back | 15.1-16.0 ms | 15.0-16.2 ms (unchanged: the Mac and the wire) |
+| spec twosum, drafting + host layers | 24.0 / 22.9 ms (2 submits, 2 maps) | **21.2 / 21.1 ms** (1 submit, 1 map) |
+
+So it saves about 2-3 ms of a ~33 ms plain token and about 2 ms of a ~50-55 ms spec step. That is less than
+the 4-5 ms estimated up front: the GPU work itself does not shrink (head + layers 12.3 ms of GPU), only the
+extra sync and the idle gap between submits go away.
+
+In process on the GB10 (`BENCH=2 tests/test_moe_split.js`, split at 20, same process, off / on medians):
+plain +7 to +24% over five prompts, spec -7% (bash, 22 tokens) to +14%.
+
+One device (`xroom.mjs --solo`, GB10, 4 rounds per cell, off / on): plain japan 35.7 / 35.5, plain twosum
+41.9 / 41.3, spec japan 47.8 / 47.4, spec twosum 67.8 / 66.6. Same code path, so this is noise; the answers
+are identical.
+
+Correctness:
+- `test_moe_split` passes with both paths: split == solo, spec == plain, and checkpoint/resume with a
+  pending rollback.
+- 27B `test_q38_bits` with `ATTN_PREFILL_TILE=0`: BITS 85b12667 / eba0b8d5 on the GB10 and b72e4d1f /
+  ac403b4e on the Mac, unchanged.
+- In the two-machine room every round of a cell gave the same answer, on and off.
+
+The one outlier is plain `japan`: 8e29cc8d in 7 of 8 unpinned sessions, and 44efa784 (the spec answer) in
+one "off" session. That session is the only one where both ends' autotune picked the 64/4 GEMV shape. With
+64/4 pinned on both ends, plain == spec == 44efa784 in every round, on and off. So the plain != spec seen
+in the first two-machine sessions comes from the cooperative GEMV shape the load-time autotune picks. It
+predates this change and is not caused by it. The next thing to chase is which device's plain (one-column)
+GEMV shape changes the bits against its batched verify.
+
+## 2026-09-28: which device hosts, and where the split falls (branch perf/room-placement)
+
+Same harness and machines as above, over the home LAN (Wi-Fi on both ends; Tailscale to the Mac was down).
+MoE (Qwen3.6-35B-A3B Q4_0) and the 27B, exact sampling, 128 tokens, `japan` and `twosum`, 2 untraced rounds
+per mode and prompt, each config run in 2 sessions interleaved with the others (so 4 samples per cell). The
+link was bad all evening: ping averages 15-150 ms with peaks of 100-440 ms (p50 during a round 3.5-6 ms, p90
+often 20-300 ms), so single rounds swing by 30%+ and only medians are quoted.
+
+**The question.** A spec step spends about 60% of its time on the host (embedding, 20 layers, head, drafting,
+rollback and refill), and the M5 Max moves memory about twice as fast as the GB10. Does it help to give the
+Mac more layers (split by speed), or to make the Mac the host?
+
+### MoE, split point and host (origin/perf/room-harness b25aa6a, `--split` and `--here guest`), median tok/s
+
+| config | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| GB10 hosts, 20 / 20 (pledge) | 29.0 | 31.3 | 34.0 | 51.5 |
+| GB10 hosts 16, Mac 24 | 29.9 | 30.6 | 36.6 | 47.3 |
+| GB10 hosts 12, Mac 28 | 29.4 | 33.2 | 39.1 | 41.8 |
+| **Mac hosts, 20 / 20** | **31.6** (+9%) | **34.9** (+11%) | **47.4** (+39%) | **61.8** (+20%) |
+| Mac hosts 16, GB10 24 | 30.3 | 32.2 | 45.0 | 58.5 |
+| Mac hosts 24, GB10 16 | 32.9 | 35.3 | 49.4 | 63.3 |
+
+Moving layers to the Mac while the GB10 hosts is within noise (the Mac's layers overlap nothing; they are
+simply 2x cheaper per layer, a few ms a lap). Moving the **host role** is what pays: the head, the sampler,
+the draft block and the rollback/refill all run on the faster memory, and they sit on every token's
+critical path. Mac-host 24/16 is a little ahead of 20/20 (+1-4%, within noise).
+
+### The change: pick the model host by GPU speed
+
+`room/gpuspeed.js` times a 64 MB buffer copy at page load (8 copies, best of 5 passes, its own device,
+destroyed afterwards); the result travels in the device's `hello` meta as `gbps` (old tabs don't send it,
+and a missing value leaves the pick by memory, so no protocol bump). `pickModelHost` still starts from the
+device that lends the most memory, then hands the host role to a device of the same kind that copies at
+least 1.5x faster and lends at least half as much memory (a phone never beats a computer). Measured in the
+same headless browsers as the rooms, 6 page loads each: **GB10 185-199 GB/s** (one outlier 106), 274-454 ms
+for the probe including device creation; **M5 Max 370-398 GB/s**, 11-33 ms. The ratio is about 2.0, so the Mac
+hosts even when it lends less (12 GB against 13). `?gbps=N` pins the value (0 = unknown).
+
+Checked in a real room (`xroom.mjs --speedpick`): the GB10 pressed Start and the Mac took the model host
+(Mac layers 1-18 + embed/head, GB10 serving 19-40, the split by pledge), online in 63 s. The harness pins
+its host page (`?gbps=0`) so `--here host|guest` still means what it says.
+
+Same code, pinned both ways (2 sessions; the second batch had ping p90 up to 300 ms, so plain is noise):
+
+| | plain japan | plain twosum | spec japan | spec twosum |
+|---|---|---|---|---|
+| MoE, GB10 hosts -> Mac hosts, all 8 samples | 25.4 -> 26.5 (+4%) | 28.4 -> 32.2 (+13%) | 30.7 -> 39.4 (+28%) | 45.3 -> 55.4 (+22%) |
+| 27B (31 / 33 layers), 4 samples | 9.4 -> 9.6 (+2%, noise) | 9.3 -> 9.0 (-4%, stalls) | 10.8 -> 12.6 (+17%) | 18.2 -> 21.6 (+19%) |
+
+The 27B across two machines is new: GB10-hosted spec twosum 18.2 matches the GB10 two-tab loopback (18.3);
+Mac-hosted 21.6 beats it. One GB10 alone, `--solo`, 2 runs each, before -> after the change (the probe runs at
+load), range over 4 rounds: plain japan 34.9-35.9 -> 35.9-37.2, plain twosum 40.1-41.5 -> 40.4-43.4, spec japan 45.7-47.8 -> 46.0-47.7 (59%), spec twosum 64.0-68.1 -> 65.1-67.8
+(80%): unchanged within noise, same answers (a0e7f9bd / 1df98ce0), spec == plain.
+
+### Correctness
+
+- `twosum`: one answer (1df98ce0…) in every config, split, host direction, mode, session and the solo runs.
+- 27B: `japan` 94b0f2de… and `twosum` 1df98ce0… in every round, both directions, plain == spec.
+- MoE `japan` depends on where the split falls, on either host: 16/24 (either host) gives the one-device
+  answer a0e7f9bd; 24/16 and 12/28 give 3f42e6… (from character 359); 20/20 gives 8e29cc… or 44efa7… (from
+  character 128, "local vibes"), and those two split at character 350 (`the "herd."` vs `the "herd" where
+  possible.`), a near tie that lands either way by session and by mode, on the old code as on the new (GB10
+  hosting, base code: plain 8e29cc / spec 44efa7 in one session, both 44efa7 in the next; Mac hosting, new
+  code: both 8e29cc in both sessions). The Vulkan + Metal split with an f16 wire moves a close argmax; the
+  host change changes no split's arithmetic. Open, as before.
+- No engine change (27B bit goldens not rerun). Unit tests: 245 passed, 0 failed.
+
 ## 2026-09-29: iPhones in rooms, combined branch (fix/iphone-rooms: memory + resume + GPU wake, #207)
 
 Spark (GB10) and iPhone 14 Pro Max (iOS 26.6.2), public signaling, the phone on the branch preview, 1 GB pledge, host 22 GB with `?phonelayers=1`, Qwen 3.6 35B MoE, `twosum`, 48 tokens, 2 answers per run (`xroom.mjs` + `xroom_phone.mjs`):
