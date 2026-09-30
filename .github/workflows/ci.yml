@@ -32,7 +32,10 @@ jobs:
         # --parallel runs test files on all cores; the slow MoE layout sweep is split across files for it
         run: deno test --parallel --allow-read --junit-path=unit-report.xml tests/unit
       - name: pooled serve HTTP bridge (Node, a stand-in room)
-        run: node --test cli/test/*_test.mjs
+        # the tests drive the bridge with the official openai / anthropic SDKs (cli's devDependencies)
+        run: |
+          npm ci --prefix cli --no-audit --no-fund
+          node --test cli/test/*_test.mjs
       - name: Kernel generator sanity
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: deno run --allow-read tests/unit/generator_smoke.js
