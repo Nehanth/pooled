@@ -71,6 +71,8 @@ test("a Peer class passed in is used instead of loading a second WebRTC stack (@
   const b = new Bridge({ code: "ABCD", name: "t", client: "c", Peer: FakePeer });
   await assert.rejects(b.connect(), /no room ABCD/);
   assert.equal(made.length, 1);
+});
+
 import { roomCodeFrom, roomKeyFrom } from "../lib/room.js";
 const KEY = "AbCdEfGhIjKlMnOpQrStUv";
 
