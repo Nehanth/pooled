@@ -98,7 +98,7 @@ export default definePluginEntry({
           clearInterval(tick); tick = setInterval(() => { writeState(r); r.persist?.(); }, 5000); tick.unref?.();
           if (!r.node.hosting()) return;
           ensureOnline(r, { waitPull: true, waitMs: Infinity, onWait: () => writeState(r) })
-            .then(() => { writeState(r); if (s.prewarm && !r.asked) return prewarm(r, { log }).catch((e) => log(`warm-up failed: ${e.message}`)); })
+            .then(() => { writeState(r); if (s.prewarm && !r.asked) return prewarm(r, { log: r.note }).catch((e) => r.note(`warm-up failed: ${e.message}`)); })
             .catch((err) => { log(`room not online yet: ${err.message}`); writeState(r); });
         };
         await open();
