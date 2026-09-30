@@ -1,7 +1,7 @@
 ---
 title: Rooms from the terminal
 eyebrow: Preview
-description: pooled pull downloads a model, pooled host opens a room on this computer, pooled join lends its GPU to a room, and pooled chat talks to a room's model. No browser needed. A preview, not on npm yet.
+description: pooled pull downloads a model, pooled host opens a room on this computer, pooled join lends its GPU to a room, and pooled chat talks to a room's model. No browser needed. A preview, on npm since @pooled/cli 0.3.0.
 sidebar:
   label: Rooms from the terminal
   order: 1
@@ -23,16 +23,15 @@ Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gat
   Dawn optional: npx -p @pooled/cli -p webgpu@0.6.1, "Who sees what", macOS 26+ / glibc 2.38+ / Windows untested)
 - PR #270 body: transcripts (its "until #268 is deployed … only with --allow-all" note is out of date: #268 is merged)
 - room/joingate.js on main (#268): the room page sends join: 1, waits in the lobby, takes #k= keys; CHANGELOG #268 entry
-- npm view @pooled/cli version = 0.2.0 (serve only); webgpu 0.6.1; cli/package.json 0.2.1, engines node >=22
+- npm view @pooled/cli version = 0.3.0 (2026-09-30: pull, host, join, chat and serve; webgpu an optional dependency that installs with it, #273); engines node >=22
 - pooled pull / list / rm, the interactive host and join (cli/lib/cache.js, pullrun.js, hostui.js, hostrun.js; transcripts from
   pty runs on the Spark 2026-09-30)
-TODO(verify): the npx lines are what the README says users will run once published; not runnable until then.
 */}
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-:::caution[Preview: not on npm yet]
-`pooled pull`, `pooled host`, `pooled join` and `pooled chat` are in [PR #270](https://github.com/Nehanth/pooled/pull/270), not in a release. The `@pooled/cli` on npm (0.2.0) has only `serve`. The commands on this page are the ones you will run once it is published. Until then, run them from a checkout of that branch as `node cli/bin/pooled.js …` (see [From a checkout](#from-a-checkout)).
+:::caution[Preview]
+`pooled pull`, `pooled host`, `pooled join` and `pooled chat` are on npm since `@pooled/cli` 0.3.0. They are new: expect rough edges, and use `npx @pooled/cli@latest` to get the newest.
 :::
 
 A few commands put a room in your terminal:
@@ -69,7 +68,7 @@ pooled join 4TK-G9P
 </TabItem>
 </Tabs>
 
-`webgpu` (Dawn, about 95 MB with the builds for five systems) is an optional dependency, so a plain `npm install @pooled/cli` doesn't fetch it. `join` and `host` load it when they start and say how to install it if it is missing.
+`webgpu` (Dawn, about 95 MB with the builds for five systems) is an optional dependency: `npm install -g @pooled/cli` installs it when it can, and if it can't, `join` and `host` say how to add it.
 
 ### Supported systems
 
@@ -499,11 +498,10 @@ Each error says what happened and what to do. The exit status is 1.
 
 ## From a checkout
 
-Until the package is published:
+To run what is on `main` before it is published:
 
 ```bash
 git clone https://github.com/Nehanth/pooled.git && cd pooled
-git checkout feat/pooled-join
 cd cli && npm ci && npm run build && (cd ../packages/room-node && npm install)
 node bin/pooled.js host --help
 node bin/pooled.js join HJQ-N44
