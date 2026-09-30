@@ -11,6 +11,7 @@ import { Ask, Collector } from "../../../cli/lib/answer.js";
 import { ids, outcome, ApiError } from "../../../cli/lib/common.js";
 import { ensureRoom, roomSettings, transport, PooledError } from "./pool.js";
 import { toAsk } from "./convert.js";
+import { remember } from "./prewarm.js";
 
 let seq = 0;
 const newRid = () => "oc" + Date.now().toString(36) + (seq++).toString(36);
@@ -82,7 +83,9 @@ export function createPooledStream({ getPluginConfig, log = () => {}, sdk }) {
         const s = roomSettings(getPluginConfig());
         r = await ensureRoom(s, (m) => log(m));
         const t = await transport(r, { signal });
+        r.asked = true;   // (a warm-up after this would only queue behind real work)
         const { req, v2, body } = toAsk(context, options, model, { hostMeta: t.hostMeta, log });
+        if (r.s.mode === "host" && r.s.prewarm) remember(body, r.s.model);   // the next gateway start warms up with it
         const enc = openclawEncoder(stream, message);
         const ask = new Ask({ req, v2, encoders: [new Collector(), enc], idFor: () => ids.call(), log, label: `room ${r.code}` });
         let stats = "", promptTokens = 0;

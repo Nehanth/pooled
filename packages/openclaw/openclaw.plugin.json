@@ -1,15 +1,42 @@
 {
   "id": "pooled",
   "name": "Pooled",
-  "description": "Run a model across your own devices: this machine joins a Pooled room (WebGPU + WebRTC) and holds part of the model.",
-  "categories": ["models"],
-  "activation": { "onStartup": true },
-  "providers": ["pooled"],
-  "syntheticAuthRefs": ["pooled"],
-  "nonSecretAuthMarkers": ["pooled-local"],
-  "autoEnableWhenConfiguredProviders": ["pooled"],
-  "modelPricing": { "providers": { "pooled": { "external": false } } },
-  "setup": { "providers": [{ "id": "pooled", "authMethods": ["room"] }] },
+  "description": "Run a model across your own devices: this machine joins a Pooled room (WebGPU + WebRTC) and holds part of the model. /pooled shows the room and lets devices in.",
+  "categories": [
+    "models"
+  ],
+  "activation": {
+    "onStartup": true
+  },
+  "providers": [
+    "pooled"
+  ],
+  "syntheticAuthRefs": [
+    "pooled"
+  ],
+  "nonSecretAuthMarkers": [
+    "pooled-local"
+  ],
+  "autoEnableWhenConfiguredProviders": [
+    "pooled"
+  ],
+  "modelPricing": {
+    "providers": {
+      "pooled": {
+        "external": false
+      }
+    }
+  },
+  "setup": {
+    "providers": [
+      {
+        "id": "pooled",
+        "authMethods": [
+          "room"
+        ]
+      }
+    ]
+  },
   "providerAuthChoices": [
     {
       "provider": "pooled",
@@ -27,18 +54,105 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {
-      "mode": { "type": "string", "enum": ["host", "join"] },
-      "code": { "type": "string", "pattern": "^[A-HJKMNP-TV-Za-hjkmnp-tv-z2-9]{4,6}$" },
-      "allowApiClients": { "type": "boolean" },
-      "model": { "type": "string" },
-      "pledgeGB": { "type": "number" },
-      "minDevices": { "type": "number" },
-      "waitSeconds": { "type": "number" },
-      "ctx": { "type": "number" },
-      "signal": { "type": "string" },
-      "modelDir": { "type": "string" },
-      "name": { "type": "string" },
-      "page": { "type": "string" }
+      "mode": {
+        "type": "string",
+        "enum": [
+          "host",
+          "join"
+        ]
+      },
+      "code": {
+        "type": "string",
+        "pattern": "^([A-HJKMNP-TV-Z2-9]{4}|[A-HJKMNP-TV-Z2-9]{6})$"
+      },
+      "model": {
+        "type": "string"
+      },
+      "pledgeGB": {
+        "type": "number"
+      },
+      "minDevices": {
+        "type": "number"
+      },
+      "waitSeconds": {
+        "type": "number"
+      },
+      "ask": {
+        "type": "boolean"
+      },
+      "allowApiClients": {
+        "type": "boolean"
+      },
+      "pull": {
+        "type": "boolean"
+      },
+      "prewarm": {
+        "type": "boolean"
+      },
+      "modelDir": {
+        "type": "string"
+      },
+      "ctx": {
+        "type": "number"
+      },
+      "name": {
+        "type": "string"
+      },
+      "signal": {
+        "type": "string"
+      },
+      "page": {
+        "type": "string"
+      }
+    }
+  },
+  "commandAliases": [
+    {
+      "name": "pooled",
+      "kind": "runtime-slash"
+    }
+  ],
+  "uiHints": {
+    "mode": {
+      "label": "Role",
+      "help": "host: this machine starts the room; join: it joins another device's room"
+    },
+    "code": {
+      "label": "Room code",
+      "help": "6 characters, like 4TKG9P (shown as 4TK-G9P)"
+    },
+    "pledgeGB": {
+      "label": "GPU memory lent (GB)"
+    },
+    "ask": {
+      "label": "Ask before new devices join",
+      "help": "on: a device with only the code waits for /pooled allow; the invite link gets in at once"
+    },
+    "pull": {
+      "label": "Download the model",
+      "help": "into ~/.pooled/models (shared with pooled pull); off streams it at each start"
+    },
+    "prewarm": {
+      "label": "Warm up at start",
+      "help": "prefill the last system prompt and tools when the room comes online",
+      "advanced": true
+    },
+    "modelDir": {
+      "label": "Models folder",
+      "help": "default ~/.pooled/models or POOLED_MODELS",
+      "advanced": true
+    },
+    "signal": {
+      "label": "Signaling server",
+      "advanced": true
+    },
+    "page": {
+      "label": "Room page",
+      "advanced": true
+    },
+    "ctx": {
+      "label": "Context (tokens)",
+      "advanced": true
     }
   }
 }
