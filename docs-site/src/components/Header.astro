@@ -1,10 +1,10 @@
 ---
-// Pooled docs header: wordmark + "Docs", search (Ctrl K, Pagefind, fully static), GitHub,
-// theme, and the black "Open Pooled" button. Replaces Starlight's Header.
+// Pooled docs header, built like the product's own nav (index.html .nav, p2p.html header): the mark and
+// wordmark, "Docs" after a hairline, search (Ctrl K, Pagefind, fully static) at the content column,
+// then GitHub, a light/dark switch and the landing's blue "Start a room" button. Replaces Starlight's Header.
 import Search from 'virtual:starlight/components/Search';
 import SiteTitle from 'virtual:starlight/components/SiteTitle';
 import SocialIcons from 'virtual:starlight/components/SocialIcons';
-import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 ---
 
 <div class="p-header">
@@ -18,18 +18,37 @@ import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 	<div class="p-right print:hidden">
 		<div class="sl-hidden md:sl-flex p-icons">
 			<SocialIcons />
-			<ThemeSelect />
+			<button class="p-theme" type="button" aria-label="Switch to dark theme" title="Theme">
+				<svg class="i-moon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round">
+					<path d="M13.5 9.6A5.6 5.6 0 0 1 6.4 2.5a5.6 5.6 0 1 0 7.1 7.1Z" />
+				</svg>
+				<svg class="i-sun" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round">
+					<circle cx="8" cy="8" r="2.8" />
+					<path d="M8 1.5v1.3M8 13.2v1.3M1.5 8h1.3M13.2 8h1.3M3.4 3.4l.9.9M11.7 11.7l.9.9M3.4 12.6l.9-.9M11.7 4.3l.9-.9" />
+				</svg>
+			</button>
 		</div>
-		<a class="p-open" href="/room">
-			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-				<circle cx="2.6" cy="2.6" r="1.9" /><circle cx="8" cy="2.6" r="2.05" /><circle cx="13.4" cy="2.6" r="2.25" />
-				<circle cx="2.6" cy="8" r="2.05" /><circle cx="8" cy="8" r="2.25" /><circle cx="13.4" cy="8" r="2.45" />
-				<circle cx="2.6" cy="13.4" r="2.25" /><circle cx="8" cy="13.4" r="2.45" /><circle class="lit" cx="13.4" cy="13.4" r="2.7" />
-			</svg>
-			<span>Open Pooled</span>
-		</a>
+		<a class="p-open" href="/room">Start a room</a>
 	</div>
 </div>
+
+<script>
+	// Light or dark, nothing else. Starlight's theme script already applied the stored or system theme;
+	// this flips it and stores the choice under Starlight's key, so every page (and code blocks) follow.
+	const root = document.documentElement;
+	const sync = (btn: HTMLButtonElement) =>
+		btn.setAttribute('aria-label', root.dataset.theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme');
+	document.querySelectorAll<HTMLButtonElement>('.p-theme').forEach((btn) => {
+		sync(btn);
+		btn.addEventListener('click', () => {
+			const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+			root.dataset.theme = next;
+			try { localStorage.setItem('starlight-theme', next); } catch {}
+			document.querySelectorAll<HTMLSelectElement>('starlight-theme-select select').forEach((s) => (s.value = next));
+			sync(btn);
+		});
+	});
+</script>
 
 <style>
 	.p-header {
@@ -41,60 +60,79 @@ import ThemeSelect from 'virtual:starlight/components/ThemeSelect';
 	.p-brand {
 		display: flex;
 		align-items: center;
-		gap: 10px;
 		min-width: 0;
 		flex: 0 0 auto;
 	}
+	/* the search starts where the page text starts */
 	@media (min-width: 50rem) {
-		.p-brand { width: calc(var(--sl-sidebar-width) - 2 * var(--sl-nav-pad-x)); }
+		.p-brand { width: calc(var(--sl-sidebar-width) - var(--sl-nav-pad-x) + var(--sl-content-pad-x) - 16px); }
 	}
+	/* "Docs" after a hairline, as the room's code sits after the wordmark (.cs-room) */
 	.p-docs-tag {
-		font: 500 12px/1 var(--__sl-font);
+		margin-inline-start: 14px;
+		padding-inline-start: 14px;
+		border-inline-start: 1px solid var(--p-rule-3);
+		font: 400 15px/18px var(--__sl-font);
+		letter-spacing: -0.01em;
 		color: var(--p-ink-3);
-		padding: 4px 8px;
-		border-radius: 999px;
-		box-shadow: inset 0 0 0 1px var(--p-rule);
 	}
 	.p-search {
-		flex: 1 1 auto;
+		flex: 0 1 20rem;
 		display: flex;
-		justify-content: center;
 		min-width: 0;
 	}
 	.p-right {
 		display: flex;
 		align-items: center;
-		gap: 12px;
+		gap: 8px;
 		margin-inline-start: auto;
 	}
 	.p-icons {
 		align-items: center;
-		gap: 12px;
+		gap: 2px;
 	}
+	.p-theme {
+		display: inline-grid;
+		place-items: center;
+		width: 36px;
+		height: 36px;
+		padding: 0;
+		border: 0;
+		border-radius: 8px;
+		background: transparent;
+		color: var(--p-ink-2);
+		cursor: pointer;
+	}
+	.p-theme:hover { color: var(--p-ink); background: var(--p-hover); }
+	.p-theme .i-sun { display: none; }
+	:global(:root[data-theme='dark']) .p-theme .i-sun { display: block; }
+	:global(:root[data-theme='dark']) .p-theme .i-moon { display: none; }
+	/* the landing's .btn.btn-blue.btn-sm */
 	.p-open {
 		display: inline-flex;
 		align-items: center;
-		gap: 8px;
-		height: 34px;
+		height: 36px;
+		margin-inline-start: 6px;
 		padding: 0 14px;
 		border-radius: 8px;
-		background: var(--p-ink);
-		color: var(--p-on-ink);
-		font: 500 13px/1 var(--__sl-font);
+		background: var(--p-blue-btn);
+		color: #fff;
+		font: 500 14px/1 var(--__sl-font);
+		letter-spacing: -0.006em;
 		text-decoration: none;
 		white-space: nowrap;
-		transition: background-color 0.15s var(--p-ease), transform 0.12s var(--p-ease);
+		box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset, 0 6px 16px -8px rgba(42, 69, 224, 0.7);
+		transition: background-color 0.16s var(--p-ease), transform 0.16s var(--p-ease);
 	}
-	.p-open:hover { background: color-mix(in srgb, var(--p-ink) 86%, var(--p-blue)); color: var(--p-on-ink); }
+	.p-open:hover { background: var(--p-blue-btn-hover); color: #fff; }
 	.p-open:active { transform: scale(0.98); }
-	.p-open:focus-visible { outline: 2px solid var(--p-blue); outline-offset: 2px; }
-	.p-open svg circle { fill: currentColor; }
-	.p-open svg .lit { fill: var(--p-blue-400); }
 	@media (max-width: 50rem) {
-		.p-docs-tag { display: none; }
-		.p-open { height: 36px; padding: 0 12px; }
-		.p-open span { font-size: 13px; }
+		.p-docs-tag { margin-inline-start: 10px; padding-inline-start: 10px; font-size: 14px; }
+		.p-open { height: 36px; padding: 0 12px; font-size: 13px; margin-inline-start: 0; }
 		.p-search { flex: 0 0 auto; margin-inline-start: auto; }
 		.p-right { margin-inline-start: 0; }
+	}
+	@media (max-width: 23rem) {
+		.p-docs-tag { display: none; }
 	}
 </style>
