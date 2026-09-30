@@ -1182,3 +1182,18 @@ the three changes apply there too (they do not depend on the fused expert layout
 - KV cache: 0.63 GB f16, 0.35 GB int8 at this maxSeq.
 - Not yet run: the 27B at 1K / 8K / 32K (f16 and int8), and repeated decode runs to average out the noise.
 - int8 KV decision for now: keep it off by default. It saves memory and keeps the tokens, but a 32K prompt takes 3.5x as long to prefill. Revisit once tiled prefill attention supports int8 KV.
+
+## 2026-09-29: iPhones in rooms, combined branch (fix/iphone-rooms: memory + resume + GPU wake, #207)
+
+Spark (GB10) and iPhone 14 Pro Max (iOS 26.6.2), public signaling, the phone on the branch preview, 1 GB pledge, host 22 GB with `?phonelayers=1`, Qwen 3.6 35B MoE, `twosum`, 48 tokens, 2 answers per run (`xroom.mjs` + `xroom_phone.mjs`):
+
+| Run | Split | Phone online after | Decode tok/s (answer 1 / 2) | Answer |
+|---|---|---|---|---|
+| m1 | host 38+embed, iPhone 2 (layers 39-40, 917 MB from the network) | 125 s | 23.6 / 20.2 | 6e01f17d both |
+| m2 | same | died at 82% of its download | | the page vanished with no jetsam entry and no crash report while the USB link (WebDriver and syslog) dropped at the same second |
+| m4 | same | 129 s | 25.4 / 21.7 | 6e01f17d both |
+| m5 | same | 121 s | 25.3 / 19.6 | 6e01f17d both |
+
+Recovery with the real phone (`room_resume.mjs --url --external iphone` + `resume_phone.mjs`, Qwen3 0.6B, host + worker tabs on the Spark, phone 4 layers): Safari in the background 30 s: the answer finished in 58 s with the same text and no drop (the link survived, main's liveness keeps a silent phone 60 s); reload: back in its slot, same text, 52 s. The same with the MoE (host 22, worker 1, phone 1 GB) was tried twice; both times the Spark's host browser closed (once mid-answer, once mid-load) as other GPU jobs started on the Spark, so it is not measured.
+
+Spark loopback: `room_resume.mjs` lock 20 s (answered in 25 s, link kept), reload (35 s, carried on), kill (72 s, re-dealt after 60 s), all the same text; `room_phone_mem.mjs` phone tab peak 311 MB (423 MB from the worker) and 364 MB (mostly from the network), killed twice while loading: 0.25 GB share, then re-dealt without it, room online with the same answer each time.
