@@ -3,6 +3,7 @@
 import { engineModel } from "../../harness/engine-model.js";
 import { ContextFull } from "../../harness/model-common.js";
 import { Agent } from "../../harness/agent.js";
+import { engineGenerate, engineHost } from "../../harness/engine-gen.js";
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 
@@ -79,4 +80,51 @@ Deno.test("a conversation past the context throws ContextFull, and the agent end
   const A = new Agent({ generate: m.generate, tools: [] });
   const r = await A.run("x".repeat(60));
   eq(r.reason, "context");
+});
+
+// ---- harness/engine-gen.js: the room's generate contract over one engine (Code mode's core path) ----
+const WANT = (words) => words.map((w) => ID[w]);
+Deno.test("engineGenerate: emits sampled tokens, never a stop id; any id in `stop` ends the answer", async () => {
+  const E = fakeEngine(["hello", "hello", "<tool_call>", "hello"]);
+  const g = engineGenerate(E, { spec: false });
+  const got = [];
+  const r = await g.generate(tok.encode("<|im_start|>user\nhi<|im_end|>\n"), { onToken: (t) => got.push(t), stop: new Set([ID["<tool_call>"]]), maxNew: 50, sample: (lg) => { let b = 0; for (let i = 1; i < lg.length; i++) if (lg[i] > lg[b]) b = i; return b; } });
+  eq(got, WANT(["hello", "hello"]));
+  eq([r.reason, r.count, r.reused], ["stop", 2, 0]);
+  ok(!g.fed.includes(ID["<tool_call>"]), "the stop id was never written");
+});
+Deno.test("engineGenerate: max, ctx and abort; the next prompt reuses what the engine holds", async () => {
+  const pick = (lg) => { let b = 0; for (let i = 1; i < lg.length; i++) if (lg[i] > lg[b]) b = i; return b; };
+  const E = fakeEngine(["hello"]);
+  const g = engineGenerate(E, { spec: false });
+  const p1 = tok.encode("<|im_start|>user\nhi<|im_end|>\n");
+  const out = [];
+  eq((await g.generate(p1, { onToken: (t) => out.push(t), stop: new Set(), maxNew: 3, sample: pick })).reason, "max");
+  const p2 = [...p1, ...out, ID["<|im_end|>"], ...tok.encode("\nmore")];
+  const r2 = await g.generate(p2, { onToken: () => {}, stop: new Set(), maxNew: 1, sample: pick });
+  eq(r2.reused, p1.length + 2, "the prompt and the written answer tokens (the last sampled one was never written)");
+  E.maxSeq = p2.length + 6;
+  const r3 = await g.generate(p2, { onToken: () => {}, stop: new Set(), maxNew: 100, sample: pick });
+  eq(r3.reason, "ctx");
+  const ac = new AbortController();
+  const r4 = await g.generate(p1, { onToken: () => ac.abort(), stop: new Set(), maxNew: 100, sample: pick, signal: ac.signal });
+  eq([r4.reason, r4.count], ["abort", 1]);
+});
+Deno.test("engineGenerate: a speculative step's accepted drafts come out in order, flagged drafted; fed holds what was written", async () => {
+  // a fake draft head: every step proposes K tokens and accepts them all; the last one is sampled
+  const E = fakeEngine(["hello"]);
+  E.mtp = {};
+  E.specStep = async (next, sample, K) => { const out = []; for (let k = 0; k <= K; k++) out.push(sample(await E.forwardToken())); return out; };
+  const g = engineGenerate(E, { spec: true, K: 3 });
+  const got = [];
+  const r = await g.generate(tok.encode("hi"), { onToken: (t, d) => got.push(d), stop: new Set([ID["<|im_end|>"]]), maxNew: 9, sample: (lg) => { let b = 0; for (let i = 1; i < lg.length; i++) if (lg[i] > lg[b]) b = i; return b; } });
+  eq(got, [0, 1, 1, 1, 0, 0, 0, 0, 0], "the first token, a step of 3 accepted drafts and the sampled one, then plain steps near the cap");
+  eq([r.count, r.reason], [9, "max"]);
+  eq(g.fed.length, tok.encode("hi").length + 8, "the prompt and every written token (the last sampled one is not)");
+});
+Deno.test("engineHost: the core's host over one engine (template, context, the larger vocabulary)", () => {
+  const E = fakeEngine(["hello"]);
+  E.dims = { vocab: VOCAB.length + 64 };
+  const h = engineHost(E, tok, { chatTemplate: "{{ '<tool_call>' }}" });
+  eq([h.tok(), h.chatTemplate(), h.maxSeq(), h.vocabSize()], [tok, "{{ '<tool_call>' }}", 4096, VOCAB.length + 64]);
 });

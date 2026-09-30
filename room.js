@@ -4430,6 +4430,11 @@ const roomApi = {
   chatTemplate: () => ai.tok?.chatTemplate || ai.G?.meta?.["tokenizer.chat_template"] || "",
   maxSeq: () => ctxMax(),
   generate: roomGenerate,
+  // Code mode on the serve v2 core (harness/core-model.js): the same template profile and token
+  // texts the API path uses (one mask cache for both), and which model the cached ids belong to
+  profile: () => (ai.tok ? apiProfile() : null),
+  tokenTexts: () => apiTokenTexts(),
+  modelKey: () => ai.model || "",
   recovering: () => !!ai.recovering,   // a device dropped mid-run: the run waits for it (or a re-deal) and carries on
   lock: roomLock, unlock: roomUnlock,
   busy: () => ai.busy,

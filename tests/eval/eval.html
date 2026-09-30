@@ -17,7 +17,57 @@ const out = document.getElementById("out");
 const say = (s) => { out.textContent += "\n" + s; };
 let makeModel = null;
 
+// Code mode's settings (room/code.js): the tool-call style from the chat template, greedy for JSON
+// (Qwen3 1.7B) and "focused" (t 0.4) for XML, maxNew 8192, the room's budget (harness/room-model.js).
+// ?hcore=1: Code mode's core path (harness/core-model.js over harness/engine-gen.js engineHost:
+// the serve v2 core in process); else the legacy adapter (harness/engine-model.js). Both report the
+// adapter's own stats.last ({ reason, prompt, reused, prefilled, generated, forced, tps }).
+async function codeModel(eng, tok, template, maxSeq) {
+  const { engineModel } = await import("/harness/engine-model.js");
+  const { detectStyle } = await import("/harness/tools.js");
+  const { pickSampler } = await import("/room/sampling.js");
+  const hcore = q.get("hcore") === "1";
+  const style = q.get("style") || detectStyle(template || "");
+  const samp = q.get("sampling") || (style === "json" ? "exact" : "focused");
+  const pick = pickSampler(samp);
+  say(`style ${style}, sampling ${samp}, path ${hcore ? "core (hcore=1)" : "legacy (hcore=0)"}`);
+  window.__engineInfo = { ...(window.__engineInfo || {}), style, sampling: samp, maxSeq, hcore };
+  if (hcore) {
+    const { coreModel } = await import("/harness/core-model.js");
+    const { engineHost } = await import("/harness/engine-gen.js");
+    // a fresh host per task (its prefix and pinned slot start empty), as engineModel per task
+    return () => coreModel(engineHost(eng, tok, { chatTemplate: template || "" }), { maxNew: 8192, sampling: q.get("sampling") || null });
+  }
+  const reserve = Math.min(8192, Math.floor(maxSeq / 4)) + 64;
+  return ({ tools }) => {
+    const m = engineModel(eng, tok, { tools, style, maxNew: 8192, sample: samp === "exact" ? null : pick });
+    return { generate: m.generate, style, stats: m.stats, budget: maxSeq - reserve, count: (t) => tok.encode(t).length };
+  };
+}
+
+// ?dense=1: a Qwen3 dense model (the 1.7B) as the room loads it: /__cfg.json, /__tok.json, /__m.gguf
+async function loadDense() {
+  const { DenseEngine, makeTokenizer } = await import("/engine/engine.js");
+  const { parseGGUFHeader, ggufWeights } = await import("/engine/gguf.js");
+  const cfg = await (await fetch("/__cfg.json")).json();
+  const tj = await (await fetch("/__tok.json")).json();
+  const tok = makeTokenizer(tj);
+  const buf = await (await fetch("/__m.gguf")).arrayBuffer();
+  const G = parseGGUFHeader(buf);
+  const adapter = await navigator.gpu.requestAdapter();
+  const device = await adapter.requestDevice({ requiredLimits: { maxBufferSize: adapter.limits.maxBufferSize, maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize } });
+  let gpuErrors = 0;
+  device.addEventListener("uncapturederror", (e) => { if (gpuErrors++ < 3) say("GPU ERROR " + (e.error?.message || "").slice(0, 200)); });
+  const maxSeq = +(q.get("ctx") || 8192);
+  const weights = await ggufWeights(G, (i) => new Uint8Array(buf, i.byteOffset, i.byteLength), { lo: 0, hi: cfg.num_hidden_layers, hasEmbed: true, hasHead: true });
+  const eng = await DenseEngine.create({ device, cfg, weights, maxSeq });
+  say(`dense engine: ${cfg.num_hidden_layers} layers, context ${maxSeq}`);
+  window.__engineInfo = { dense: true, get gpuErrors() { return gpuErrors; } };
+  return codeModel(eng, tok, G.meta["tokenizer.chat_template"] || tj.chat_template, maxSeq);
+}
+
 async function loadEngine() {
+  if (q.get("dense")) return loadDense();
   const { Qwen35Engine } = await import("/engine/qwen35.js");
   const { parseGGUFHeader, qwen35Weights, GGML_EMBED, tokenizerFromGGUF, streamEntryToGPU } = await import("/engine/gguf.js");
   const { makeTokenizer } = await import("/engine/tokenizer.js");
@@ -41,6 +91,7 @@ async function loadEngine() {
     weights: await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: !!G.meta[arch + ".nextn_predict_layers"] }) });
   say(`engine: ${L} layers, context ${maxSeq}, attnPrefillTile ${eng.attnPrefillTile}, moeGroupPrefill ${eng.moeGrpU || "off"}, prefillUbatch ${eng.ubatch || "off"}${Object.keys(xopts).length ? ", opts " + JSON.stringify(xopts) : ""}`);
   window.__engineInfo = { attnPrefillTile: eng.attnPrefillTile, moeGroupPrefill: eng.moeGrpU, prefillUbatch: eng.ubatch, get gpuErrors() { return gpuErrors; } };
+  if (q.get("codemode")) return codeModel(eng, tok, G.meta["tokenizer.chat_template"], maxSeq);
   return ({ tools }) => {
     const m = engineModel(eng, tok, { tools, maxNew: 4096 });
     let last = { prompt: 0, reused: 0, generated: 0 };
@@ -56,7 +107,11 @@ async function loadEngine() {
 window.__eval = {
   tasks: TASKS.map((t) => t.id),
   async init() {
-    makeModel = kind === "engine" ? await loadEngine() : ({ task }) => ({ generate: scripted(task.mock) });
+    if (kind === "engine") makeModel = await loadEngine();
+    else if (q.get("hcore") === "1") {
+      const { scriptedCore } = await import("/harness/core-model.js");
+      makeModel = ({ task }) => scriptedCore(scripted(task.mock), { style: "xml" });
+    } else makeModel = ({ task }) => ({ generate: scripted(task.mock) });
     say(`model: ${kind}`);
     return "ready";
   },

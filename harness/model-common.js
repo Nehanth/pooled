@@ -77,13 +77,18 @@ export function constrainedSampler(base, tools, opts = {}) {
 // GARBAGE.lowMass for GARBAGE.lowRun forced positions in a row there. The mask sees the sampler's
 // top-k (k = 1 when greedy), so the candidate fast path stays exact. setText() takes the grammar's
 // view of the answer so far: each emitted token's C.tt(id) (a tag token's symbol, not its text).
+// forcedFree: the forced positions among the model's own choices only (what `forced` counts minus
+// the grammar's literals: Code mode's "the call format forced N tokens" note reads this).
+// garbage: "mass" (Code mode) turns only on for an engine fault (NaN / +Infinity logits, or the low
+// allowed-mass run), never on a model that keeps preferring something the grammar forbids inside a
+// long value; the default also counts GARBAGE.abs / GARBAGE.ratio forced positions.
 function strictSampler(base, tools, opts) {
-  const { tokenText, vocabSize, style = "xml", stops = [], thinking = false, thinkInPrompt = false, mode = "auto", allowed = null, maxCalls = null, parallel = true, format = null, tags = null } = opts;
+  const { tokenText, vocabSize, style = "xml", stops = [], thinking = false, thinkInPrompt = false, mode = "auto", allowed = null, maxCalls = null, parallel = true, format = null, tags = null, garbage: rule = "count" } = opts;
   const C = new ToolCallConstraint(tools, { vocabSize, tokenText, style, stops, thinking, thinkInPrompt, mode, allowed, maxCalls, parallel, format, tags });
   const k = base.gpu ? (base.gpu.kind === "greedy" ? 1 : base.gpu.k || 64) : 64;
   let cols = [], kept = false, runF = 0, runN = 0, low = 0, lastIn = false;
   const w = {
-    forced: 0, garbage: false,
+    forced: 0, forcedFree: 0, garbage: false,
     sample(lg) {
       if (kept) { cols = []; kept = false; }
       const inValue = C.inCall || (C.state.k === "J");
@@ -103,12 +108,12 @@ function strictSampler(base, tools, opts) {
         if (!lastIn) { runF = 0; runN = 0; low = 0; lastIn = true; }
         if (!c.free) continue;
         runN++;
-        if (c.f) { runF++; low = c.mass < GARBAGE.lowMass ? low + 1 : 0; } else low = 0;
-        if (runF >= GARBAGE.abs || (runF >= GARBAGE.min && runF > GARBAGE.ratio * runN) || low >= GARBAGE.lowRun) w.garbage = true;
+        if (c.f) { runF++; w.forcedFree++; low = c.mass < GARBAGE.lowMass ? low + 1 : 0; } else low = 0;
+        if (low >= GARBAGE.lowRun || (rule !== "mass" && (runF >= GARBAGE.abs || (runF >= GARBAGE.min && runF > GARBAGE.ratio * runN)))) w.garbage = true;
       }
     },
     setText(t) {
-      if (!t) { w.forced = 0; w.garbage = false; cols = []; kept = false; runF = runN = low = 0; lastIn = false; }
+      if (!t) { w.forced = 0; w.forcedFree = 0; w.garbage = false; cols = []; kept = false; runF = runN = low = 0; lastIn = false; }
       C.setText(t);
     },
     constraint: C,
