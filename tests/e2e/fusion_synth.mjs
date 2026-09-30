@@ -42,13 +42,16 @@ async function pageMain({ plen, ntok }) {
   const a = await run(false, false, false);
   let ok = !errs.length;
   for (const [glue, dn, mc, tile, name, lf] of [[true, false, false, false, "attn_glue"], [false, true, false, false, "dn_delta_gn"], [false, false, true, false, "attn_*_mc"], [false, false, false, true, "attn_flash_t2"],
-    [false, true, false, false, "layerFuse.dn", "dn"], [false, false, false, false, "layerFuse.conv", "conv"], [true, false, false, false, "layerFuse.attn", "attn"],
+    [false, true, false, false, "layerFuse.dn", "dn"], [false, false, false, false, "layerFuse.conv", "conv"], [false, false, false, false, "layerFuse.comb", "comb"], [true, false, false, false, "layerFuse.kv", "kv,comb"],
     [false, false, false, false, "layerFuse.norm", "norm"], [false, false, false, false, "layerFuse.pass", "pass"], [true, true, true, true, "all", "all"]]) {
     const b = await run(glue, dn, mc, tile, lf || "");
+    // a layerFuse flag is compared with the same kernel switches and layerFuse off (so on a real GPU, where
+    // attn_glue's bits are not the five kernels', layerFuse.kv is still checked alone)
+    const ref = lf ? await run(glue, dn, mc, tile, "") : a;
     let diff = 0;
-    for (let i = 0; i < ntok; i++) for (let j = 0; j < a.logs[i].length; j++) if (!Object.is(a.logs[i][j], b.logs[i][j])) diff++;
+    for (let i = 0; i < ntok; i++) for (let j = 0; j < ref.logs[i].length; j++) if (!Object.is(ref.logs[i][j], b.logs[i][j])) diff++;
     ok = ok && diff === 0;
-    say(`${diff === 0 ? "PASS" : "FAIL"} ${name}: ${ntok} decode steps after a ${plen}-token prompt, ${diff} logits differ from the unfused kernels; ${b.msPerTok.toFixed(0)} vs ${a.msPerTok.toFixed(0)} ms/token (SwiftShader, not a GPU number)`);
+    say(`${diff === 0 ? "PASS" : "FAIL"} ${name}: ${ntok} decode steps after a ${plen}-token prompt, ${diff} logits differ from ${lf ? "layerFuse off" : "the unfused kernels"}; ${b.msPerTok.toFixed(0)} vs ${a.msPerTok.toFixed(0)} ms/token (SwiftShader, not a GPU number)`);
   }
   ok = ok && !errs.length;
   if (errs.length) say("GPU errors: " + errs.slice(0, 2).join(" | "));

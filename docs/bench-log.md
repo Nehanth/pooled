@@ -773,3 +773,62 @@ above; 27B with `CTX=16640`): MoE prefill 36.4 / 212.6 / 190.0, plain 33.31 / 32
 43.92; 27B prefill 31.9 / 58.5 / 53.6, plain 14.79 / 14.35 / 12.43, spec 23.54 / 21.13 / 15.96, spec == plain on
 every row. Chrome `chrome_bench.mjs` MoE defaults: plain 85.4 / 86.0, spec 135.8 / 121.5; `prefilllen=2048&
 prefillall=1`: 170.3 tok/s all off, 243.2 all on (relDiff 0.22, argmax equal).
+
+## 2026-09-29: decode layer fusion, fewer dispatches per layer (branch perf/kn-layer-fusion, not kept: opt-in)
+
+Question: how much of plain decode is launch overhead, i.e. what do fewer dispatches per layer buy when every
+fusion keeps today's bits? Engine option `layerFuse` (off by default; `true`, or a list of `dn,conv,kv,comb,norm,pass`;
+`engine.layerFuse.<k>` flips at runtime). One-token passes only: the batched verify/prefill kernels are untouched,
+so spec == plain holds by construction and was checked.
+
+Dispatches per decode layer today (counted by wrapping `dispatchWorkgroups` over 16 tokens, Deno):
+
+| | DeltaNet layer | attention layer | FFN | per token (+ head) | compute passes |
+|---|---|---|---|---|---|
+| MoE, main | 7: norm, [qkv\|z], [beta\|alpha], conv, dn_pre, dn_delta_gn, out+res | 9: norm, q, [k\|v], glue, kv_store, flash, combine, sigmoid_mul, o+res | 5: norm, router, route, gus, dnc | 502 | 91 |
+| 27B, main | 7 | 9 | 3: norm, gate/up, down+res | 674 | 145 |
+| layerFuse | 5 | 6 | unchanged | MoE 412, 27B 530 | 1 |
+
+The fusions (`engine/wgsl/layer_fuse.js`, `engine/wgsl/coop.js` CV / NRM variants):
+- `dn`: `dn_pre` (q/k L2 norm, beta/decay gates) folded into `dn_delta_gn` (`dn_delta_gnp`): each value-head
+  workgroup normalises its key head from workgroup memory with `dn_pre`'s in-order sum; [dt | A] packed in one buffer
+  to stay at 8 storage bindings. -1 per DeltaNet layer.
+- `conv`: `dn_conv` in the [qkv | z] GEMV's epilogue (`matvec_*_coop_cv`): the thread that stores a qkv row runs
+  the causal conv + SiLU + state shift on it; each channel belongs to one workgroup, so no race. -1 per DeltaNet layer.
+- `comb`: `sigmoid_mul` in `attn_combine` (`attn_combine_g`, gate read from q_full). -1 per attention layer.
+  Written as `(O / L) * sigmoid(g)` Metal folded the two and changed bits on the M5 Max (GB10 unchanged); the quotient
+  now goes through workgroup memory (store, barrier, load) and the bits match on both.
+- `kv`: `kv_store` in `attn_glue` (`attn_glue_kv`: k heads packed to the f16 cache from workgroup memory, v copied);
+  needs `comb` (the glue no longer copies the gate). -1 per attention layer.
+- `norm`: an attention layer's input rmsnorm inside its [k | v] GEMV (run before q): every workgroup recomputes
+  rmsnorm's 256 strided partials and tree (fewer threads each run several partials), normalises its x slices in
+  registers, workgroup 0 writes xn for q. -1 per attention layer. The same fold for the MoE router and the DeltaNet
+  [beta | alpha] GEMV was built and measured (+1.3% more on the GB10) and then dropped here: perf/decode-moe-bandwidth
+  already has it (`moe_nrt`, `dn_nba`).
+- `pass`: `forwardToken`'s layers and head in one compute pass instead of 2-3 per layer.
+
+Correctness (all with `layerFuse` on): per-flag logit hashes equal to off for 24 decode tokens after prefill,
+spec == plain, on the GB10 (MoE 92fafe48, 27B 4d85013d) and the M5 Max (MoE b97a1a37, 27B 2517aa46);
+`test_q38_bits.js` ATTN_PREFILL_TILE=0 LAYER_FUSE=1 = reference on both (see below for the GB10; Mac
+b72e4d1f / ac403b4e, GPU sampling == logits path); `test_moe.js LAYER_FUSE=1` MATCH llama.cpp 3/3, spec == plain
+3/3, GPU sampling head check 0 mismatches (Mac); `tests/e2e/fusion_synth.mjs` has one row per flag; unit tests 433/433.
+(Deno on the Mac: a long-running process fails `mapAsync` with "validation error" after ~6 prefill + decode + spec
+cycles, with `layerFuse` never on as well: a harness/runtime limit, not these kernels.)
+
+Speed, Chrome (`chrome_bench.mjs <model> 40`, plain tok/s, two prompts, OFF/ON interleaved in one snapshot tree):
+
+| | OFF | ON | gain |
+|---|---|---|---|
+| GB10 MoE (6 samples each) | 50.57 | 52.38 | +3.6% |
+| GB10 MoE, `dn,conv,kv,comb` only (6 each) | 50.67 | 52.56 | +3.7% |
+| GB10 MoE, with the router / beta-alpha norm folds as well (6 each) | 50.12 | 52.96 | +5.7% |
+| GB10 27B (4 / 2 samples; a later ON run hit GPU contention and is dropped) | 11.16 | 11.30 | +1.3% |
+| M5 Max MoE (6 each) | 91.02 | 91.88 | +0.9% |
+| M5 Max 27B (4 each) | 21.66 | 21.85 | +0.9% |
+
+Deno GB10 plain: MoE 31.96 -> 31.0 ms/token (median of 4), 27B 101.78 -> 100.09 ms. Spec tok/s unchanged
+(the verify step runs the batched kernels). About 1 ms per MoE token on the GB10 for 90 fewer dispatches and 90
+fewer passes (~11 µs each), under 0.1 ms on the M5 Max: Metal launches are cheap (1.2 µs per dispatch measured
+on 2026-09-28) and the Mac's MoE gap to MLX is inside the kernels, not between them. Below the 5% bar on both
+machines, so `layerFuse` stays opt-in. Stacked with perf/decode-moe-bandwidth (orthogonal kernels) the GB10 MoE
+gain would be expected around +7-8%; not measured together.

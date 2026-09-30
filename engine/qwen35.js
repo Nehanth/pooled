@@ -165,7 +165,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, layerFuse = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, layerFuse = false }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -291,15 +291,18 @@ export class Qwen35Engine {
     // Decode layer fusion (engine/wgsl/layer_fuse.js, bit-identical, one-token passes only):
     //   dn:   dn_pre folded into dn_delta_gn (needs dnFuse)    -1 dispatch per DeltaNet layer
     //   conv: dn_conv in the [qkv | z] GEMV's epilogue         -1 dispatch per DeltaNet layer
-    //   attn: kv_store in attn_glue, sigmoid_mul in attn_combine (f16 flash KV, attnGlue) -2 per attention layer
+    //   comb: sigmoid_mul in attn_combine (the gate read from q_full; f16 flash KV)     -1 per attention layer
+    //   kv:   kv_store in attn_glue (needs comb: the glue no longer copies the gate)  -1 per attention layer
     //   norm: an attention layer's input rmsnorm folded into its [k | v] GEMV, run before q (coop.js NRM)
     //         -1 per attention layer. (The MoE router / DeltaNet beta-alpha norm folds are perf/decode-moe-bandwidth's.)
     //   pass: forwardToken's layers and head in one compute pass (91 -> 1 passes per MoE token)
-    // layerFuse: true (all) | false | "dn,conv,attn,norm" | { dn, conv, attn, norm }; engine.layerFuse.<k> = false at runtime for A/B.
+    // layerFuse: false (default) | true (all) | "dn,conv,kv,comb,norm,pass" | { dn: false, ... }; engine.layerFuse.<k> at runtime for A/B.
+    // Off by default: bit-identical, but +3.6% MoE / +1.7% 27B plain decode on the GB10 and +0.9% on the M5 Max
+    // (Chrome), under the 5% bar (docs/bench-log.md, 2026-09-29 layer fusion). The kernels are always compiled.
     {
-      const want = (k) => layerFuse === true || layerFuse === undefined ? true : layerFuse === false ? false
+      const want = (k) => layerFuse === true ? true : layerFuse === false || layerFuse === undefined ? false
         : typeof layerFuse === "string" ? layerFuse.split(",").map((x) => x.trim()).includes(k) : layerFuse[k] !== false;
-      this.layerFuse = { dn: want("dn"), conv: want("conv") && matvecVariant === "coop", attn: want("attn"), norm: want("norm") && matvecVariant === "coop", pass: want("pass") };
+      this.layerFuse = { dn: want("dn"), conv: want("conv") && matvecVariant === "coop", kv: want("kv"), comb: want("comb"), norm: want("norm") && matvecVariant === "coop", pass: want("pass") };
     }
     // Merged projection GEMVs (docs/research/kernels-next-2026-09.md D5): at load, the DeltaNet
     // [qkv | z] and [beta | alpha] weights and the attention [k | v] weights are row-concatenated
@@ -837,9 +840,9 @@ export class Qwen35Engine {
           R.bgKvStore = this._bg(this.pipes[this.ksPipe], 1, [this.k, this.v, R.kCache, R.vCache, ...sc, this._uZero4]);
           R.bgFlash = this._bg(this.pipes[this.faPipe], 1, [this.q, R.kCache, R.vCache, ...sc, this.faO, this.faML, this.faU1]);
           R.bgCombine = this._bg(this.pipes.attn_combine, 1, [this.faO, this.faML, this.attnOut, this.faU1]);
-          if (!this.kvQ8 && this.attnGlueOn) {   // layerFuse.attn
-            R.bgGlueKv = this._bg(this.pipes.attn_glue_kv, 1, [this.qFull, this.q, this.k, this.v, R.qNorm.buf, R.kNorm.buf, R.kCache, R.vCache, this.dnBuf]);
+          if (!this.kvQ8) {   // layerFuse.comb / .kv
             R.bgCombineG = this._bg(this.pipes.attn_combine_g, 1, [this.faO, this.faML, this.attnOut, this.qFull, this.faU1]);
+            if (this.attnGlueOn) R.bgGlueKv = this._bg(this.pipes.attn_glue_kv, 1, [this.qFull, this.q, this.k, this.v, R.qNorm.buf, R.kNorm.buf, R.kCache, R.vCache, this.dnBuf]);
           }
         }
         R.bgGlue = this._bg(this.pipes.attn_glue, 1, [this.qFull, this.q, this.gAttn, this.k, R.qNorm.buf, R.kNorm.buf, this._uZero4, this.dnBuf]);
@@ -1280,7 +1283,8 @@ export class Qwen35Engine {
     const seqLen = pos + 1;
     const LF = this.layerFuse;
     if (L.isFull) {
-      const lfA = LF.attn && this.flash && !this.kvQ8 && this.attnGlue && !!L.bgGlueKv;
+      const lfC = LF.comb && this.flash && !this.kvQ8 && !!L.bgCombineG;   // sigmoid_mul in attn_combine
+      const lfA = lfC && LF.kv && this.attnGlue && !!L.bgGlueKv;         // kv_store in attn_glue (its gate copy is skipped: needs lfC)
       {
         const p = this._pp || enc.beginComputePass();
         if (LF.norm && this.fuseProj && L.mvKVn) { this._dop(p, L.mvKVn); this._dop(p, L.mvQ); }   // norm in the [k | v] GEMV, then q
@@ -1308,7 +1312,8 @@ export class Qwen35Engine {
       }
       {
         const p = this._pp || enc.beginComputePass();
-        if (lfA) {
+        if (lfC) {
+          if (!lfA) this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / 2 / 64), 1, 1);
           this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
           this._dxyz(p, "attn_combine_g", L.bgCombineG, D.nH, 1, 1);
         } else if (this.flash) {
@@ -1321,7 +1326,7 @@ export class Qwen35Engine {
           else this._d(p, "attn_softmax", L.bgSoftmax, D.nH, 1);
           this._d(p, "attn_out", L.bgAttnOut, D.qDim);
         }
-        if (!lfA) this._d(p, "sigmoid_mul", L.bgSigMul, D.qDim);
+        if (!lfC) this._d(p, "sigmoid_mul", L.bgSigMul, D.qDim);
         this._dop(p, L.mvO);
         if (!L.mvO.acc) this._d(p, "add_res", this.bgAddTmp, D.dim);
         if (p !== this._pp) p.end();
@@ -2989,7 +2994,7 @@ export class Qwen35Engine {
   // the next call submits at once instead of paying the CPU encode (~900 dispatches) on the critical
   // path. Same commands, same bits. engine.encodeAhead = false for A/B.
   // desc: forwardTokenIds' GPU sampling descriptor (the head's top-k in the same buffer), null: logits
-  _fwdKey(desc = null) { return [this.attnGlue, this.fuseProj, this.dnFuse, this.layerFuse.dn, this.layerFuse.conv, this.layerFuse.attn, this.layerFuse.norm, this.layerFuse.pass, this.softmaxWG, this.b4, this.skip ? 1 : 0, this._common ? 1 : 0, desc ? topkK(desc) : 0].join(); }
+  _fwdKey(desc = null) { return [this.attnGlue, this.fuseProj, this.dnFuse, this.layerFuse.dn, this.layerFuse.conv, this.layerFuse.kv, this.layerFuse.comb, this.layerFuse.norm, this.layerFuse.pass, this.softmaxWG, this.b4, this.skip ? 1 : 0, this._common ? 1 : 0, desc ? topkK(desc) : 0].join(); }
   _encodeForward(pos, desc = null) {
     const { vocab } = this.dims;
     const enc = this.device.createCommandEncoder();

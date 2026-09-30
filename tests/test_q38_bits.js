@@ -14,7 +14,8 @@ const model = openGGUF(Q38_PATH);
 const { device } = await gpuDevice();
 const L = model.trunkLayers, tok = model.tokenizer();
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true });
-const eng = await Qwen35Engine.create({ device, meta: model.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, batchCols: 16, coopRowsB: 1 });
+const eng = await Qwen35Engine.create({ device, meta: model.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, batchCols: 16, coopRowsB: 1,
+  layerFuse: Deno.env.get("LAYER_FUSE") === "1" });   // LAYER_FUSE=1: the decode layer fusions (must not change a bit)
 const h = (arrs) => { let x = 0x811c9dc5; for (const a of arrs) { const u = new Uint32Array(a.buffer, a.byteOffset, a.length); for (let i = 0; i < u.length; i++) x = Math.imul(x ^ u[i], 0x01000193) >>> 0; } return x.toString(16); };
 const ids = tok.encode(await Deno.readTextFile(new URL("./golden/q38_bits_prompt.txt", import.meta.url))).slice(0, 300);
 if (ids.length < 300) throw new Error(`prompt fixture too short: ${ids.length} tokens`);

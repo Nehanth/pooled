@@ -150,32 +150,40 @@ fn attn_glue_kv(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
   }
 }
 
-// attn_combine * sigmoid(gate) for one token; the gate of q head qh is q_full[qh * 2 * hd + hd + i]
-// (the values attn_glue copied into the gate buffer)
+// attn_combine + sigmoid_mul for one token. The gate of q head qh is q_full[qh * 2 * hd + hd + i] (the
+// values attn_glue copies into the gate buffer). The quotient O / L goes through workgroup memory before the
+// gate multiply: written as one expression, Metal folds the two (new bits on the M5 Max; the GB10 was unchanged).
 @group(1) @binding(0) var<storage, read> fcg_o: array<f32>;
 @group(1) @binding(1) var<storage, read> fcg_ml: array<f32>;
 @group(1) @binding(2) var<storage, read_write> fcg_out: array<f32>;
 @group(1) @binding(3) var<storage, read> fcg_full: array<f32>;
 @group(1) @binding(4) var<uniform> fcg: FA;
+var<workgroup> fcg_t: array<f32, 256>;
 @compute @workgroup_size(256)
 fn attn_combine_g(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let qh = wg.x; let i = lid.x;
   let hd = cfg.headDim;
-  if (qh >= cfg.nH || i >= hd) { return; }
-  let seqLen = frame.seqLen;
-  let ns = (seqLen + fcg.splitLen - 1u) / fcg.splitLen;
-  let b0 = qh * fcg.maxSplits;
-  var M: f32 = -3.0e38;
-  for (var s: u32 = 0u; s < ns; s++) { M = max(M, fcg_ml[(b0 + s) * 2u]); }
-  var L: f32 = 0.0; var O: f32 = 0.0;
-  for (var s: u32 = 0u; s < ns; s++) {
-    let w = exp(fcg_ml[(b0 + s) * 2u] - M);
-    L += fcg_ml[(b0 + s) * 2u + 1u] * w;
-    O += fcg_o[(b0 + s) * hd + i] * w;
+  let live = qh < cfg.nH && i < hd;   // no early return: the barrier below needs uniform control flow
+  if (live) {
+    let seqLen = frame.seqLen;
+    let ns = (seqLen + fcg.splitLen - 1u) / fcg.splitLen;
+    let b0 = qh * fcg.maxSplits;
+    var M: f32 = -3.0e38;
+    for (var s: u32 = 0u; s < ns; s++) { M = max(M, fcg_ml[(b0 + s) * 2u]); }
+    var L: f32 = 0.0; var O: f32 = 0.0;
+    for (var s: u32 = 0u; s < ns; s++) {
+      let w = exp(fcg_ml[(b0 + s) * 2u] - M);
+      L += fcg_ml[(b0 + s) * 2u + 1u] * w;
+      O += fcg_o[(b0 + s) * hd + i] * w;
+    }
+    fcg_t[i] = O / L;
   }
-  let a = O / L;
-  let g = fcg_full[qh * 2u * hd + hd + i];
-  fcg_out[qh * hd + i] = a * (1.0 / (1.0 + exp(-g)));
+  workgroupBarrier();   // the quotient goes through workgroup memory: the multiply cannot be folded into it
+  if (live) {
+    let g = fcg_full[qh * 2u * hd + hd + i];
+    fcg_out[qh * hd + i] = fcg_t[i] * (1.0 / (1.0 + exp(-g)));
+  }
 }
+
 `;
 }
