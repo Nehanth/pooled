@@ -261,7 +261,7 @@ npm install -g @pooled/cli webgpu@0.6.1
 npx -p @pooled/cli -p webgpu@0.6.1 pooled join K7QX
 ```
 
-`pooled host --model qwen3.6-35b-moe` opens a room and prints its code and link. In a terminal, Enter deals the layers over the devices in the room (and again, re-deals after more join); `--devices N` deals as soon as N devices are in. Ask from the room page, or with `pooled serve <CODE>`. `pooled join --help` and `pooled host --help` list the options.
+`pooled host --model qwen3.6-35b-moe` opens a room and prints its code and link. In a terminal, Enter deals the layers over the devices in the room (and again, re-deals after more join); `--devices N` deals as soon as N devices are in, and deals again by itself when a device stayed away past the minute's grace (the room went on without it) and N are back. Ask from the room page, or with `pooled serve <CODE>`. `pooled join --help` and `pooled host --help` list the options.
 
 Anyone with the room code can join, and every device that holds layers computes on every prompt, so lend to rooms you trust. Needs macOS 26 or newer, Linux with glibc 2.38 or newer (Ubuntu 24.04), or Windows (not yet tested).
 

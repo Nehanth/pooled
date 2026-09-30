@@ -46,8 +46,9 @@ export const HELP_HOST = `Usage
 Options
   --model <key>     the model (default qwen3-1.7b; --model list prints them)
   --gb <n|max>      how much memory to lend, as pooled join (default: the memory rule)
-  --devices <n>     deal the layers as soon as n devices (this one included) are in the room;
-                    the default without a terminal is 1 (start at once)
+  --devices <n>     deal the layers as soon as n devices (this one included) are in the room,
+                    and again when the room went on without one and n are back; the default
+                    without a terminal is 1 (start at once)
   --code <CODE>     the room code to use (default: a random one)
   --ctx <n>         the context to ask for, in tokens (default: the model's room default)
   --name <s>        how the room shows this device

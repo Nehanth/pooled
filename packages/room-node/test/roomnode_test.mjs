@@ -125,6 +125,36 @@ test("host: a chain device that leaves degrades the room; back under its name it
   assert.ok(msgs(n, "b2", "ai-ready-all").length === 1);
 });
 
+test("host: a device started again under its name (no back) takes its old slot once the old link stays silent", async () => {
+  const n = fakeNode();
+  n.autoRedeal = false;
+  n.addPeer("a", "mac"); n.roster.set("a", { name: "mac", meta: { webgpu: true, contribGB: 4 } });
+  n.ai.chain = ["a"]; n.ai.chainNames = ["mac"];
+  n.ai.plan = new Map([["mac", { msg: { t: "ai-load", v: PROTOCOL, model: "qwen3-1.7b", range: [10, 28], ctx: 4096, kv: "f16", next: "host", host: n.peer.id } }]]);
+  n.ai.engine = { maxSeq: 4096 }; n.ai.cfg = { num_hidden_layers: 28 }; n.ai.model = "qwen3-1.7b";
+  n.ai.readyPeers = new Set(["a"]); n.ai.online = true;
+  n.conns.get("a").seen = performance.now() - 5000;   // killed 5 s ago; its link has not timed out yet
+  n.addPeer("a2", "mac");
+  n.onData("a2", { t: "hello", name: "mac", v: PROTOCOL, meta: { webgpu: true, contribGB: 4 } });
+  assert.equal(msgs(n, "a", "ping").length, 1, "the quiet namesake is pinged first");
+  assert.ok(!n.roster.has("a2"), "the hello waits for the probe");
+  await new Promise((r) => setTimeout(r, 1700));
+  assert.ok(!n.conns.has("a") && !n.roster.has("a"), "the silent old link is dropped");
+  assert.equal(n.roster.get("a2")?.name, "mac", "the new link keeps the name");
+  assert.deepEqual(n.ai.chain, ["a2"]);
+  assert.deepEqual(msgs(n, "a2", "ai-load")[0].range, [10, 28], "and is re-seated in its slot");
+  // a namesake that answers the ping is alive: the newcomer gets another name
+  const m = fakeNode();
+  m.addPeer("x", "laptop"); m.roster.set("x", { name: "laptop", meta: { webgpu: true, contribGB: 4 } });
+  m.conns.get("x").seen = performance.now() - 5000;
+  m.addPeer("x2", "laptop");
+  m.onData("x2", { t: "hello", name: "laptop", v: PROTOCOL, meta: { webgpu: true, contribGB: 4 } });
+  m.onData("x", { t: "pong", ts: 0 });
+  await new Promise((r) => setTimeout(r, 1700));
+  assert.ok(m.conns.has("x"));
+  assert.equal(m.roster.get("x2")?.name, "laptop 2");
+});
+
 test("host: ai-linklost from a chain worker fails the laps in flight", () => {
   const n = fakeNode();
   n.addPeer("a", "mac"); n.ai.chain = ["a"]; n.ai.fed = [1, 2];

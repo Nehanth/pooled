@@ -50,7 +50,7 @@ import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from 
 import { pickSampler } from "../../room/sampling.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, helloMeta, pieceDecoder, API_LIMITS, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "../../room/api.js";
 import { tokenTexts } from "../../harness/model-common.js";
-import { uniqueName, PING_MS, lastHeard, isSilentGone, lapTimeout } from "../../room/liveness.js";
+import { uniqueName, PING_MS, lastHeard, isSilentGone, lapTimeout, quietNamesake, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
 import { lookupDrafts } from "../../room/lookup.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
 import { pledgeGB, afterLoadDeath } from "../../room/pledge.js";
@@ -103,6 +103,7 @@ export class RoomNode extends EventEmitter {
     this.peer = null; this.isHost = false; this.code = null; this.meta = null;
     this.conns = new Map();    // peer id -> { conn, name, meta, link, stripes, seen, missed, rtt }
     this.roster = new Map();   // host: id -> { name, meta }
+    this.probedHellos = new WeakMap();   // host: a hello held back while its namesake is pinged -> when
     this.pending = new Map();  // ensureLink in flight
     this.ai = { role: null, engine: null, tok: null, cfg: null, device: null, chain: [], next: null, hostId: null,
       readyPeers: new Set(), pos: 0, fed: [], pendingCtl: {}, waiters: new Map(), q: Promise.resolve(), lock: Promise.resolve(),
@@ -290,6 +291,31 @@ export class RoomNode extends EventEmitter {
           this.sendTo(from, { t: "bye", reason: `${this.name} speaks room protocol ${PROTOCOL}, this device ${d.v}: reload the older one` });
           this.emit("version", { theirs: d.v, theyHost: !this.isHost && from === PREFIX + this.code, name: cleanName(d.name, from) });
           return;
+        }
+        // the name is held by a device that has been quiet for a second (a `pooled join` killed and
+        // started again, a reloaded tab, before the old link times out): ping it and decide in a
+        // moment, as room.js does; a namesake that stays silent is dropped, and this device takes
+        // its name and its slot
+        if (this.isHost && !d.back) {
+          const heardOf = (id) => lastHeard(this.conns.get(id));
+          const name = cleanName(d.name, from);
+          if (!this.probedHellos.has(d)) {
+            const quiet = quietNamesake(name, from, this.roster, heardOf, performance.now());
+            if (quiet) {
+              const since = performance.now();
+              this.sendTo(quiet, { t: "ping", ts: since });
+              this.probedHellos.set(d, since);
+              setTimeout(() => { if (this.conns.get(from) === e && !this.closing) this.onData(from, d); }, NAME_PROBE_MS).unref?.();
+              return;
+            }
+          } else {
+            for (const id of staleNamesakes(name, from, this.roster, heardOf, this.probedHellos.get(d))) {
+              const old = this.conns.get(id);
+              this.log(`${name} is back under a new link: dropping its old one, silent for ${old ? Math.round((performance.now() - lastHeard(old)) / 1000) : "?"} s`);
+              this.roster.delete(id);
+              if (old) { this.conns.delete(id); try { old.conn.close(); } catch {} this.peerGone(id, old); }
+            }
+          }
         }
         d.name = cleanName(d.name, from);
         d.meta = helloMeta(d.meta, this.isHost);
