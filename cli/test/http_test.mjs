@@ -164,7 +164,7 @@ test("a room that floods tokens, sends non-text or odd usage cannot blow up the 
   const m = JSON.parse((await t.req("POST", "/v1/messages", { body: msgBody({ stop_sequences: ["END"] }) })).body);
   assert.equal(m.stop_reason, "end_turn");
   assert.equal(m.stop_sequence, null);
-  assert.deepEqual(m.usage, { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 12 });
+  assert.deepEqual(m.usage, { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 12, output_tokens: 0 });
   await t.close();
 });
 
