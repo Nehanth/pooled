@@ -58,7 +58,8 @@ in. It also learns the host's model and context, so OpenClaw knows the room's re
 
 ## /pooled
 
-In any OpenClaw chat (the TUI, the Control UI, a messaging channel), for the gateway's owner:
+In an OpenClaw chat (the TUI, the Control UI, a messaging channel), for the gateway's owner. It needs
+OpenClaw's `operator.admin` scope, so `openclaw agent --message` and `gateway call chat.send` can't run it:
 
 | Command | What it does |
 |---|---|

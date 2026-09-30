@@ -50,7 +50,26 @@ function side(name, port) {
       gw.on("exit", (c, s) => log(`${name}: gateway exited ${c ?? s}`));
     },
     async stop() { if (!gw) return; gw.kill("SIGTERM"); for (let i = 0; i < 40 && gw.exitCode == null && gw.signalCode == null; i++) await sleep(250); try { gw.kill("SIGKILL"); } catch {} gw = null; },
-    // one chat turn (or a /command) through this side's gateway
+    // a /command the way the owner types it: `openclaw agent` never runs plugin commands, and a
+    // `gateway call chat.send` has only operator.write; the TUI (a pty from script(1)) is the owner's
+    // client. The reply lands in the session's history.
+    async command(message, session = "pooled-cmd") {
+      const t = Date.now();
+      const hist = () => { try { const o = oc(["gateway", "call", "chat.history", "--params", JSON.stringify({ sessionKey: session, limit: 20 }), "--json"]);
+        return JSON.parse(o.slice(o.indexOf("{"))).messages || []; } catch { return []; } };
+      const before = hist().length;
+      const tui = spawn("script", ["-qfc", `${OC} tui --session ${session} --message ${JSON.stringify(message)}`, "/dev/null"], { env: { ...env, TERM: "xterm-256color" }, stdio: ["pipe", "ignore", "ignore"] });
+      let reply = null;
+      try {
+        for (let i = 0; i < 120 && !reply; i++) {
+          await sleep(500);
+          const h = hist();
+          if (h.length >= before + 2) reply = h.slice(before).filter((m) => m.role === "assistant").map((m) => (m.content || []).map((c) => c.text || "").join("")).join("\n");
+        }
+      } finally { tui.kill("SIGTERM"); setTimeout(() => { try { tui.kill("SIGKILL"); } catch {} }, 2000); }
+      return { message, seconds: (Date.now() - t) / 1000, text: reply ?? "(no reply)" };
+    },
+    // one chat turn through this side's gateway
     agent(message, session) {
       const t = Date.now();
       let stdout = "", stderr = "";
@@ -100,10 +119,10 @@ try {
   const early = B.agent("hello", "gate-early");
   out.steps.askInLobby = { seconds: early.seconds, says: /let this device in/.test(early.text + early.stderr) };
   log("B ask in the lobby:", early.seconds, "s", out.steps.askInLobby.says ? "(says it waits for the host)" : early.text.slice(0, 300));
-  const st = A.agent("/pooled", "gate-cmd");
+  const st = await A.command("/pooled");
   out.steps.pooledStatus = st.text.slice(0, 600);
   log("A /pooled:", st.text.slice(0, 400));
-  const al = A.agent("/pooled allow", "gate-cmd");
+  const al = await A.command("/pooled allow");
   out.steps.allow = al.text.slice(0, 300);
   log("A /pooled allow:", al.text.slice(0, 300));
   await until(() => B.status()?.admission === "in", 60000, "B let in");
