@@ -1,0 +1,42 @@
+---
+title: LiteLLM
+eyebrow: Serve API · Recipes
+description: Put a room behind a LiteLLM proxy or router as one more OpenAI-compatible model.
+sidebar:
+  label: LiteLLM
+  order: 7
+---
+{/*
+Sources (origin/main 40bb0fa):
+- cli/README.md "LiteLLM" (model_list yaml)
+- cli/README.md Options: 127.0.0.1 only, Host/Origin checks
+TODO (LiteLLM's own CLI, not in repo, not run): `litellm --config config.yaml`.
+*/}
+
+import { Aside } from '@astrojs/starlight/components';
+
+Start the bridge with `npx @pooled/cli serve ABCD`, then add the room to your LiteLLM config:
+
+```yaml title="config.yaml"
+model_list:
+  - model_name: pooled
+    litellm_params:
+      model: openai/pooled
+      api_base: http://127.0.0.1:8080/v1
+      api_key: pooled
+```
+
+- **`openai/`** tells LiteLLM to use its OpenAI-compatible client. The part after the slash is the model name sent to the bridge, and any name works.
+- **`api_key`** can be any value, or the bridge's token if it has one.
+
+Run the proxy on the same computer as the bridge:
+
+```bash
+litellm --config config.yaml
+```
+
+Clients of the proxy then ask for the model `pooled`.
+
+<Aside type="caution" title="Same computer only">
+The bridge listens on `127.0.0.1` only and refuses requests with any other `Host`. LiteLLM must run on the same computer, outside Docker or with `--network=host`. If you expose the LiteLLM proxy to others, remember that everything they send goes to the room's host. See [Privacy](/docs/privacy).
+</Aside>

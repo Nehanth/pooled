@@ -1,0 +1,172 @@
+---
+title: Deploying the site
+eyebrow: Self-hosting
+description: How pooled.run is deployed on Vercel, and how to deploy your own copy there or on any static host.
+sidebar:
+  label: Deploying the site
+  order: 4
+---
+
+{/*
+  Sources (origin/main 40bb0fa):
+  - vercel.json (framework null, trailingSlash false, ignoreCommand, rewrites, redirects, headers, preview-relay CSP)
+  - .vercelignore
+  - RELEASE.md (deploy table, staging, old domain, cutting a release). NOTE: RELEASE.md's "0.MINOR.PATCH" line is stale (v1.0.0 is tagged); not repeated here.
+  - scripts/deploy-staging.sh (manual staging alias to pooled-dev.vercel.app)
+  - PR #210 (opt-in previews via [preview]; Vercel reads ignoreCommand from the branch being built; fork protection)
+  - preview-host/vercel.json, PR #248, roadmap/29-*.md "Deploy step (owner)" (second Vercel project for Code mode previews)
+  - p2p.html <meta name="preview-origin" content=""> and its comment; harness/preview-frame.js relayUrl()/relayProblem()
+  - room/signal.js (window.POOLED_SIGNAL_SERVERS), room/ice.js (window.TURN_SERVERS)
+  TODO(verify): the feat/engine-opt row follows from ignoreCommand (only VERCEL_ENV=production always builds; staging is a
+  preview-env branch domain). RELEASE.md's table reads as if staging always deploys; confirm in the Vercel project settings.
+*/}
+
+import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
+
+The site is static: HTML, JavaScript modules, fonts and images, served from the repository root, plus these docs at `/docs`. pooled.run runs on Vercel, but any static host works if it applies the two rewrites.
+
+## How pooled.run is deployed
+
+Vercel's git integration deploys the repo. The site itself has no build step (`"framework": null` in `vercel.json`). The only thing built is these docs, an [Astro Starlight](https://starlight.astro.build) project in `docs-site/`:
+
+```json title="vercel.json"
+"installCommand": "npm ci --prefix docs-site",
+"buildCommand": "npm --prefix docs-site run build && node docs-site/build-vercel.mjs",
+"outputDirectory": "dist"
+```
+
+`build-vercel.mjs` copies the repository root into `dist/` as it is, leaving out what `.vercelignore` lists, and puts the built docs in `dist/docs/`. Search is [Pagefind](https://pagefind.app), an index built with the pages, so the docs need no service either.
+
+| Push to | Deploys to |
+|---|---|
+| `main` | Production, [pooled.run](https://pooled.run) |
+| any other branch | Nothing, unless the commit message contains `[preview]` |
+| `feat/engine-opt` | Like any other branch; a `[preview]` build also goes to staging, `https://pooled-dev.vercel.app` |
+
+So every merge to `main` is a production release.
+
+### Previews are opt-in
+
+The `ignoreCommand` in `vercel.json` skips a build unless it is production or the commit message contains `[preview]`:
+
+```json title="vercel.json"
+"ignoreCommand": "if [ \"$VERCEL_ENV\" = production ]; then exit 1; fi; case \"$VERCEL_GIT_COMMIT_MESSAGE\" in *\"[preview]\"*) exit 1;; esac; exit 0"
+```
+
+Vercel runs the command before building: exit 1 means build, exit 0 means skip. A preview builds at `https://<project>-git-<branch>-nehanths-projects.vercel.app`, and the PR gets the link as a bot comment.
+
+```sh
+git commit -m "Tweak the join screen [preview]"
+```
+
+:::note
+- Vercel reads `ignoreCommand` from the branch being built, so a branch cut before the rule existed keeps its old behavior.
+- A pull request from a fork builds only with `[preview]` in its commit message, and Vercel's fork protection also makes a maintainer approve it.
+:::
+
+### Staging by hand
+
+`scripts/deploy-staging.sh` deploys the checkout and points `pooled-dev.vercel.app` at it. It is a fallback for when the git integration is down.
+
+```sh
+npm run deploy:staging
+```
+
+A manual `npx vercel deploy --prod` is for emergencies only.
+
+## Deploy your own copy
+
+<Tabs>
+  <TabItem label="Vercel">
+    <Steps>
+
+    1. Fork [Nehanth/pooled](https://github.com/Nehanth/pooled) and import the fork as a new Vercel project.
+    2. Keep the root directory as the repo root. Framework preset: **Other**. `vercel.json` sets the install and build commands and the output folder.
+    3. Deploy. Open `https://<your-project>.vercel.app/room`.
+    4. Add your domain in the Vercel project settings, if you have one.
+
+    </Steps>
+
+    `vercel.json` also contains redirects from `swarmllm.ai`, `www.swarmllm.ai` and `www.pooled.run` to pooled.run. They only match those hosts, so they do nothing on your domain. You can delete them from your fork.
+  </TabItem>
+  <TabItem label="Any static host">
+    Build the docs and assemble the site, then serve `dist/`:
+
+    ```sh
+    npm ci --prefix docs-site
+    npm --prefix docs-site run build && node docs-site/build-vercel.mjs
+    ```
+
+    Or skip the docs and serve the repository root. Either way, add:
+
+    - **Rewrites:** `/room` and `/r/<code>` serve `/p2p.html` (the URL stays the same).
+    - **Headers:** `X-Content-Type-Options: nosniff` and `Referrer-Policy: strict-origin-when-cross-origin` on everything.
+    - **Caching:** `engine/`, `room/`, `harness/` and `room.js` must revalidate on every load (`Cache-Control: public, max-age=0, must-revalidate`), so every device in a room runs the same code. Fonts under `/site/fonts/` can be cached for a year (`immutable`).
+    - **The preview relay:** `/harness/preview-relay.html` needs its own headers. Copy them from `vercel.json`.
+
+    Leave out what isn't for the public: `.vercelignore` lists it (`tests`, `benchmarks`, `docs`, `cli`, `scripts`, `models`, `*.md`, `package.json`, `serve.json` and more).
+
+    [Run it locally](/docs/self-host/local#using-another-server) has a Caddy example of the rewrites.
+  </TabItem>
+</Tabs>
+
+:::caution[HTTPS is required]
+WebGPU only works in a secure context. Serve the site over https, or devices will join without a GPU (ask-only).
+:::
+
+### Settings for your deployment
+
+Set these in `p2p.html`, before `room.js` loads.
+
+| Setting | What it does | Page |
+|---|---|---|
+| `window.POOLED_SIGNAL_SERVERS` | Ordered list of signaling servers. Default `["cloud"]`. | [Signaling servers](/docs/self-host/signaling#point-rooms-at-your-server) |
+| `window.TURN_SERVERS` | `RTCIceServer` array with your TURN relay. Default: none. | [TURN relay](/docs/self-host/turn#use-a-relay) |
+| `<meta name="preview-origin">` | The second site for Code mode previews. Default: empty. | [Below](#code-mode-preview-site) |
+
+```html title="p2p.html"
+<script>
+  window.POOLED_SIGNAL_SERVERS = ["wss://signal.example.com", "cloud"];
+  window.TURN_SERVERS = [{ urls: "turns:relay.example.org:5349", username: "pooled", credential: "CHANGE_ME" }];
+</script>
+```
+
+:::caution
+Anything in `p2p.html` is public, including a TURN password. Anyone who opens the page can read it and use your relay.
+:::
+
+## Code mode preview site
+
+Code mode runs the agent's app in a sandboxed frame. With a second site, that frame gets its own browser process: an app stuck in `while (true) {}` hangs only that process, the room keeps working, and the agent can use its `run_js` tool. Without one, previews run in the room's own tab and `run_js` is off.
+
+The second site must be a different registrable domain, never a subdomain of your site: a subdomain shares the room's process. `*.vercel.app` is on the Public Suffix List, so `your-preview.vercel.app` counts as a different domain.
+
+<Steps>
+
+1. Create a second Vercel project from the same repo with **Root Directory** `preview-host` and framework **Other**. Keep "Include files outside the root directory in the Build Step" on. Its build copies `../harness/preview-relay.html` into `public/`, and it rebuilds only when the relay or `preview-host/` changes.
+
+2. Check the headers:
+
+   ```sh
+   curl -I https://<preview-site>/harness/preview-relay.html
+   ```
+
+   You should see a `Content-Security-Policy` with `frame-ancestors https://pooled.run ...` and no `X-Frame-Options`.
+
+3. If your site is not pooled.run, add your origin to `frame-ancestors` in both `vercel.json` and `preview-host/vercel.json`. Otherwise the browser refuses to show the relay on your page.
+
+4. Fill the meta in `p2p.html`. It takes one origin, or `host=origin` entries so one page can point production and staging at different preview sites:
+
+   ```html title="p2p.html"
+   <meta name="preview-origin" content="pooled.run=https://pooled-preview.vercel.app pooled-dev.vercel.app=https://pooled-preview.vercel.app">
+   ```
+
+5. Test it on staging. Start Code mode: the preview's "sandbox" tip should say it runs on a separate site. An app that runs `while (true) {}` should show as hung while the room keeps working.
+
+</Steps>
+
+The page checks the meta before using it. Plain http (except loopback from an http page), or an origin on the page's own site, is ignored with a warning in the console, and previews run in the tab.
+
+:::note
+pooled.run's own `preview-origin` meta is still empty, so on pooled.run today previews run in the room's tab.
+:::

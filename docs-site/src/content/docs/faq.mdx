@@ -1,0 +1,169 @@
+---
+title: FAQ
+eyebrow: FAQ and troubleshooting
+description: Short answers to the questions people ask before and during their first room.
+sidebar:
+  label: FAQ
+  order: 1
+---
+
+{/*
+Sources (origin/main 40bb0fa):
+- README.md: intro, "Models in the room today", Browsers, Privacy, Performance, "Use Pooled from your tools"
+- SECURITY.md: threat model, weights shared in the room, ?peerweights=0
+- docs/tech-stack.md: hosting, WebRTC/STUN, Cache API, runtime targets (Chrome/Edge 113+, Safari 26+)
+- docs/self-host-signaling.md: PeerJS cloud 0.peerjs.com
+- room/models.js: NEED_GB (1.7B 4.0, 27B 17.0, MoE 22.5), FILE_GB (1.83, 16.06, 20.84), CTX
+- room/pledge.js: iPhone/iPad 0.5 GB default, 1 GB max; Android by navigator.deviceMemory
+- room/ice.js: STUN stun.l.google.com / stun1.l.google.com
+- room/preflight.js: browser remedies (Chrome on Linux flags, Firefox, Android Chrome 121)
+- room.js: "couldn't load the connection library from cdn.jsdelivr.net"; ask-only guests without WebGPU
+- p2p.html: room settings labels ("Who sees the chat", "Layer split", "Re-deal on its own")
+- PR #233: For speed default, PHONE_COST 20x, phones ask-only, one phone layer = 15-25 GB10 layers
+- PR #234: per-model delete in the Room menu
+- PR #258: iOS 1536 MB soft limit, Wake Lock, auto re-deal after 60 s
+- GOVERNANCE.md: no accounts, tokens or ads
+*/}
+
+import { Aside } from '@astrojs/starlight/components';
+
+## Basics
+
+### What is Pooled?
+
+Pooled runs one open model across the devices in a room. Each device (a laptop, a desktop, a phone) holds some of the model's layers and runs them on its own GPU in a browser tab. Together they run a model none of them could run alone. You can chat with it, switch to [Code mode](/docs/code) to have it build a small app, or [serve it to your own tools](/docs/serve).
+
+### Do I need to install anything or make an account?
+
+No. Every device opens a link. There is no account, no API key and no sign-up. The only thing you install is optional: `npx @pooled/cli serve` if you want to use the room from Codex, Claude Code or another tool.
+
+### Does it cost anything?
+
+No. Pooled is MIT-licensed and has no paid tier, no tokens and no ads. You pay for your own electricity and bandwidth. The model weights come free from Hugging Face.
+
+### Is there a server doing the work?
+
+No server runs the model. A few services are involved, and none of them sees your prompts or answers:
+
+| Service | What it does |
+|---|---|
+| pooled.run (Vercel) | Serves the static page. Nothing runs server-side. |
+| PeerJS signaling (`0.peerjs.com` by default) | Introduces devices to each other by room code. You can [run your own](/docs/self-host/signaling). |
+| Google STUN (`stun.l.google.com`) | Helps two devices find a direct path through their routers. |
+| Hugging Face | Hosts the model files. Each device downloads only its own layers. |
+| cdn.jsdelivr.net | Serves the PeerJS library the page loads. |
+
+After two devices find each other, their traffic goes directly between them over WebRTC, encrypted with DTLS. A [TURN relay](/docs/self-host/turn) is used only if you set one up.
+
+## Devices and browsers
+
+### Do I need a GPU?
+
+A device that holds layers needs WebGPU, which any recent laptop, desktop or phone GPU supports in a current browser. A device without WebGPU can still join. It becomes an ask-only guest: it gets the chat but holds no layers.
+
+The computer that runs `pooled serve` needs no GPU at all. It only relays requests.
+
+### Which browser should I use?
+
+| Browser | Status |
+|---|---|
+| Chrome or Edge 113+ | The main target. Chrome on a Mac is the tested host. |
+| Safari 26+ on iPhone and iPad | Joins rooms. Lends up to 1 GB. |
+| Safari 26+ on a Mac | Works, but don't host the 27B from it. Safari reloads the tab under memory pressure when it holds most of that model. |
+| Chrome on Linux | WebGPU is off by default. Turn it on with two flags (see [Troubleshooting](/docs/troubleshooting#this-device-can-chat-but-not-help-run-the-model)). Not tested. |
+| Firefox | Usually joins without WebGPU, as an ask-only guest. Not tested. |
+| Android | Chrome 121 or later. |
+
+<Aside type="note">
+The page checks what the GPU supports when it loads, such as subgroups and `shader-f16`. It never assumes these features are there. That is why the same room works in Chrome and in Safari, which has no subgroups.
+</Aside>
+
+### Why does my phone only get to ask questions?
+
+That is on purpose. By default the room splits layers **For speed**: the fastest devices fill up first, each up to the memory it lends. A device that isn't needed joins as an ask-only guest.
+
+The room hasn't measured a phone before the first answer, so it counts the phone as 20 times slower than a computer. A phone therefore gets layers only when the computers can't hold the whole model. This is measured, not guessed. One phone layer can cost as much time as 15 to 25 layers on a GB10. With a GB10 and an iPhone running Qwen 3.6 35B, the room decoded 36 to 41 tokens/s with the phone asking only, against 15 to 25 with the phone holding one layer.
+
+To make phones hold layers anyway, switch **Layer split** to **by memory** in the room settings and add `?phonelayers=1` to the host's URL. Without the parameter, **by memory** still leaves phones out when the computers can hold the whole model.
+
+### How much memory can a phone lend?
+
+The limit is the browser tab, not the GPU. Safari closes a tab that uses more than about 1.5 GB, and the GPU buffers count toward that.
+
+| Device | Default | Most it can lend |
+|---|---|---|
+| iPhone, iPad | 0.5 GB | 1 GB |
+| Android, 2 GB of RAM or less | 0.5 GB | 0.5 GB |
+| Android, under 8 GB | 0.5 GB | 1 GB |
+| Android, 8 GB or more | 0.5 GB | 2 GB |
+| Android, RAM not reported | 0.5 GB | 1 GB |
+| Laptop or desktop | an estimate from the GPU's limits, shown on the join screen | 64 GB (you type the amount) |
+
+The host enforces the phone limits too, even for phones running older code.
+
+### Does the screen have to stay on?
+
+Yes, on every device that holds layers. Browsers pause a tab when its screen locks. The room asks for a screen wake lock, and a sun in the header shows when it has one. If the browser refuses, set Auto-Lock to Never on an iPhone, or set the screen timeout to its longest on Android. Keep phones on power.
+
+## Models and speed
+
+### Which model should I pick?
+
+Add up what your devices lend and pick the largest model that fits:
+
+| Model | Room needs | Full download | Context (default / max) |
+|---|---|---|---|
+| Qwen3 1.7B (Q8) | 4 GB | 1.83 GB | 8K / 16K |
+| Qwen 3.8 27B (Q4) | 17 GB | 16.06 GB | 16K / 32K |
+| Qwen 3.6 35B MoE (Q4) | 22.5 GB | 20.84 GB | 32K / 64K |
+
+Each device downloads only its share of the file. The MoE activates about 3B of its 35B parameters per token, so it decodes several times faster than the 27B. When the room is big enough, it is the one to pick. See [Which models fit](/docs/models).
+
+### Why is it slower than running the model natively?
+
+There are two reasons: the browser GPU API costs something, and so does the network between devices.
+
+- **One device.** On an NVIDIA GB10 in Chrome, the 35B MoE decodes at 40 to 46 tokens/s plain and 65 to 84 tokens/s with speculative decoding. llama.cpp CUDA on the same file does 85.5. Prefill is the biggest gap: a 172-token prompt takes about 1.0 s before the first token, against about 0.07 s natively.
+- **Several devices.** Every token passes through each device in turn. Each extra device adds about 3.5 to 4 ms per token, plus the network delay. Speculative decoding keeps rooms usable on real networks. At 20 to 50 ms of latency, it is 1.6 to 2.1 times faster than plain decoding on the MoE.
+
+Full numbers are in [Benchmarks](/docs/internals/benchmarks).
+
+### Do more devices make it faster?
+
+No. More devices give you more memory, not more speed. Pooling lets you run a model that no single device can hold. For a model that already fits on one device, that device alone is fastest. With the default **For speed** split, extra devices that aren't needed simply join to ask.
+
+### Is the answer the same as on one device?
+
+Yes. With greedy sampling a room gives the same tokens as one device running the whole model. Speculative decoding gives the same stream as plain decoding. Golden tests check both bit for bit.
+
+## Privacy
+
+### Who can see my prompts?
+
+Everyone in the room, on purpose: a room is a shared conversation. The host can change **Who sees the chat** in the room settings to **only me** or **only whoever asked**.
+
+No server sees your prompts. However, the devices running layers work on the model's hidden state, and hidden states can be turned back into much of the text. **Assume anyone in the room can read your prompts.** Run rooms with people you would share a document link with. See [Privacy](/docs/privacy) and the [security model](/docs/internals/security).
+
+### Can someone in the room tamper with the answers?
+
+Yes. Nothing checks another device's work yet. A device could return altered hidden states. It could also hand out altered weights, because devices can share cached layers with each other and only the length is checked. Add `?peerweights=0` to the room link to turn weight sharing off. Only run rooms with people you trust.
+
+### What do I send when I use `pooled serve` with a coding agent?
+
+Everything the tool sends: your prompts, and the file contents it reads. It all goes to the room's host, and the other devices compute on it. Point coding tools only at a room you trust. See [who sees your prompts](/docs/serve/options).
+
+## Storage
+
+### Where do the weights go, and how do I delete them?
+
+Each browser keeps the layers it downloaded in its Cache API storage, so the next load reads from disk instead of the network. Reloads are faster still, because the converted form of the weights is also kept on the device. To free space, open **Room settings** (the sliders button in the header). Its **Room** section lists each cached model with its size and a **Delete** button, plus **Clear cached weights** to remove them all.
+
+<Aside type="note">
+Browser storage is per site. If a device downloaded weights on the old swarmllm.ai domain, it downloads them again the first time it opens pooled.run.
+</Aside>
+
+### What happens if someone leaves mid-answer?
+
+The room waits for them. The host shows "*name* stopped responding; waiting for it (Stop gives up)". A device that comes back within a minute finishes the answer. A reloaded tab rejoins under the same name and gets its old slot back.
+
+If the device doesn't return within 60 seconds, the host deals its layers to the devices still in the room, and the answer carries on. This is **Re-deal on its own**, an experimental setting that is on by default. See [Device drops and recovery](/docs/rooms/recovery).

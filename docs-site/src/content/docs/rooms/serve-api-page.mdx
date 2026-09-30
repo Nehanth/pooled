@@ -1,0 +1,158 @@
+---
+title: The Serve API page
+eyebrow: Rooms
+description: The black Serve API button opens a dark page with this device's layers on one side and, on the other, the command that turns the room into a local OpenAI and Anthropic endpoint.
+sidebar:
+  label: The Serve API page
+  order: 3
+---
+{/* Sources (origin/main 40bb0fa):
+    PR #256 (black Serve API button in the header, "API" at 480px and below, blue dot while a client is connected, dots breathe
+    while holding layers, tooltip "This device holds layers 1–20", two halves side by side from 960px, "How to connect" folds,
+    "Serving Continue via API · 12 requests answered", guests see no count / no Disconnect / no Allow switch, room over hides the API half),
+    PR #255 (numbered steps, tabs, hints), PR #253 (history).
+    p2p.html #compute-screen and #api-panel (~L1975-2030: exact labels "Back to the room", "Waiting for a client to connect",
+    "Run step 1. Your tool shows up here when it connects.", "Connected now", step titles, URLs, "Any API key works…",
+    "Allow API clients" / "Off disconnects every client and refuses new ones.", "Needs Node 22 or newer…").
+    room.js API_EXAMPLES (~L4848, the snippets verbatim), api status texts (~L4929), apiCommand (~L4884: adds --signal when the page has ?signal=), API_EX_HINTS (~L4876).
+    docs/design/serve.md §6 (Disconnect remembered for the session; Allow API clients default on, saved with the room;
+    chat line "*name* · *client* (API)", "via API · not part of this chat's memory"), docs/protocol.md "API clients"
+    (bridge dropped after 6 missed pings, about 15 s). */}
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Every device in a room has a black **Serve API** button in the header, with the Pooled dots on it. On narrow phones it reads **API**. It opens a full-screen dark page with two halves:
+
+- **This device**: what it holds and how hard it's working.
+- **Serve API**: how to use the room from your own tools, and who is connected.
+
+Press **Back to the room** or <kbd>Esc</kbd> to close it.
+
+The button also shows state without opening it:
+
+- The dots breathe while this device holds layers. Hover shows which ones, for example "This device holds layers 1–20".
+- A small blue dot sits on its corner while an API client is connected.
+
+## This device
+
+The left half is the device screen: Standing by, Loading, Serving or Not holding layers, the layer range and its size, and live numbers while the room answers (a hop dot per pass, tok/s, tokens handled here, ms per hop). Under them are notes that stop a device from serving well: a screen that can sleep, a battery running low, a tab that was in the background. See [What each device does](/docs/rooms/devices#seeing-who-does-what).
+
+## Serve API
+
+The right half connects tools like Codex CLI, Claude Code, Continue or Open WebUI to the room's model. Any device may run the bridge on its own computer. The page walks you through it in three steps.
+
+### 1. Run this on your computer
+
+The page shows the command for this room, with a **Copy** button:
+
+```bash
+npx @pooled/cli serve ABCD
+```
+
+It needs Node 22 or newer. No GPU is needed on that computer: the bridge joins the room as an API client with no layers. If the room page was opened with `?signal=`, the command includes the same `--signal` so the bridge finds the room.
+
+### 2. Point any OpenAI or Anthropic tool here
+
+| API | Base URL |
+|---|---|
+| OpenAI | `http://127.0.0.1:8080/v1` |
+| Anthropic | `http://127.0.0.1:8080` |
+
+Any API key works, unless you started the bridge with a token. Started it with `--port`? Change 8080.
+
+### 3. Try it
+
+The page has the same four examples, with a Copy button.
+
+<Tabs syncKey="lang">
+<TabItem label="curl">
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{"model": "pooled",
+    "messages": [{"role": "user", "content": "Hi"}]}'
+```
+
+Add `"stream": true` to stream tokens.
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+# pip install openai
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+r = client.chat.completions.create(
+    model="pooled", messages=[{"role": "user", "content": "Hi"}])
+print(r.choices[0].message.content)
+```
+
+Pass `stream=True` to stream tokens.
+
+</TabItem>
+<TabItem label="JS">
+
+```js
+// npm install openai
+import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "http://127.0.0.1:8080/v1", apiKey: "pooled" });
+const r = await client.chat.completions.create({
+  model: "pooled", messages: [{ role: "user", content: "Hi" }] });
+console.log(r.choices[0].message.content);
+```
+
+Pass `stream: true` to stream tokens.
+
+</TabItem>
+<TabItem label="Anthropic">
+
+```python
+# pip install anthropic
+from anthropic import Anthropic
+
+client = Anthropic(base_url="http://127.0.0.1:8080", api_key="pooled")
+r = client.messages.create(model="pooled", max_tokens=400,
+    messages=[{"role": "user", "content": "Hi"}])
+print(r.content[0].text)
+```
+
+The same room through the Messages API. `stream=True` streams.
+
+</TabItem>
+</Tabs>
+
+Full setup for each tool, and every option, is in [Serve API](/docs/serve).
+
+## When a client connects
+
+The status at the top changes from "Waiting for a client to connect" to the tool's name, for example "Continue is connected", and to "Answering Continue" while the room works on its request. Pooled reads the name from the tool's first request. Before that it shows the bridge's name.
+
+- **Connected now** lists each client and how many requests it got answered.
+- The three steps fold under **How to connect**, so the page leads with what it serves.
+- The device half adds a line like "Serving Continue via API · 12 requests answered". Other devices see "Serving … via API" without the count.
+
+## Host controls
+
+Only the host sees these. Other devices see the list without the buttons.
+
+| Control | What it does |
+|---|---|
+| **Disconnect** (next to a client) | Closes that client. The room refuses it if it tries to reconnect by itself this session. Restarting `pooled serve` gets back in. |
+| **Allow API clients** (footer, on by default) | Off disconnects every client and refuses new ones. The status then reads "API clients are off in this room". It is saved with the room, so it survives a host reload. |
+
+It is on by default because anyone with the room code can already join and ask. The bridge adds automation, not access.
+
+## Who sees API requests
+
+API requests run in the room's one queue, like any question. They show in the chat under the room's **Who sees the chat** setting, as "*name* · *client* (API)" with the note "via API · not part of this chat's memory". Only the last user message is shown, cut at 2,000 characters. See [Privacy](/docs/privacy) and [Room settings](/docs/rooms/settings#who-sees-the-chat).
+
+:::caution
+Prompts from your tools go to the room's host, and to every screen when the chat is visible to everyone. Don't send secrets through a room you share with people you don't trust.
+:::
+
+## When the room ends
+
+If the room is over, the Serve API half is hidden and the page shows only the device screen. A bridge that stops answering (killed, laptop closed) is dropped after about 15 s of missed pings, so it can't hold the room.

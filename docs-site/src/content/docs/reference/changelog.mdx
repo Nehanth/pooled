@@ -1,0 +1,53 @@
+---
+title: Changelog
+eyebrow: Reference
+description: What changed in each release of Pooled and of the pooled serve CLI.
+sidebar:
+  label: Changelog
+  order: 6
+---
+{/*
+Sources (origin/main 40bb0fa):
+- CHANGELOG.md (release dates and one-line summaries: 1.0.0 2026-09-27, 0.2.0 2026-09-07, 0.1.0 2026-08-29)
+- git tags v0.2.0, v1.0.0
+- `npm view @pooled/cli version` -> 0.2.0 (2026-09-30); cli/package.json 0.2.1 (unreleased, CHANGELOG "Fixed": banner agent settings, opencode provider)
+- CHANGELOG.md Unreleased still says @pooled/cli is "not published yet": stale, this page says otherwise on purpose.
+BUILD NOTE: the full log below is imported from the repo's CHANGELOG.md, so this page never drifts from it. The path assumes
+this file lives at docs-site/src/content/docs/reference/changelog.mdx. .vercelignore excludes *.md today, so the Vercel build
+must be allowed to see CHANGELOG.md (or a prebuild step must copy it into docs-site/).
+*/}
+
+import { Content as FullChangelog } from '../../../../../CHANGELOG.md';
+
+Pooled has two things that get released: the site and room at [pooled.run](https://pooled.run), and the `@pooled/cli` package that provides `pooled serve`. The site deploys from `main`, so changes under **Unreleased** are usually already live.
+
+## Releases
+
+| Version | Date | Summary |
+|---|---|---|
+| [1.0.0](https://github.com/Nehanth/pooled/releases/tag/v1.0.0) | 2026-09-27 | The first stable release. Qwen 3.6 35B MoE in rooms, Code mode, long context (16K on the 27B, 32K on the MoE), room checkpoints, the new landing page and the room at `/room`. |
+| [0.2.0](https://github.com/Nehanth/pooled/releases/tag/v0.2.0) | 2026-09-07 | Demo release: Qwen 3.8 27B across a MacBook and an iPhone in browser tabs at 10.7 tok/s. |
+| 0.1.0 | 2026-08-29 | First public demo: Qwen 3.8 27B split across browser tabs over WebRTC, on Pooled's own WebGPU engine. |
+
+Pooled was called SwarmLLM before September 2026. Entries from before the rename keep the old name.
+
+### pooled serve
+
+| Version | Status |
+|---|---|
+| 0.2.0 | On npm as `@pooled/cli`. Chat Completions, Responses and Messages, with tool calling. |
+| 0.2.1 | In the repo, not yet on npm. The banner prints agent settings only once the model is ready, with the right context, and adds a ready-to-paste opencode provider. |
+
+```bash
+npx @pooled/cli@latest serve ABCD
+```
+
+:::note
+The full log below still says `@pooled/cli` is "not published yet". That line is out of date: 0.2.0 is on npm.
+:::
+
+## Full log
+
+The complete log, from `CHANGELOG.md` in the repository. It follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+<FullChangelog />

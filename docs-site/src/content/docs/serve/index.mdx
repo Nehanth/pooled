@@ -1,0 +1,150 @@
+---
+title: Serve API
+eyebrow: Serve API
+description: Turn a room into a local OpenAI and Anthropic compatible endpoint with one command. Any tool that takes a base URL then runs on the room's model, tool calls included.
+sidebar:
+  label: Overview and quickstart
+  order: 1
+---
+{/* Sources (origin/main 40bb0fa): cli/README.md (top, How it works, APIs), cli/bin/pooled.js (HELP, Node check,
+    room code 4 to 6 chars), cli/lib/http.js (KEEPALIVE_MS 10000, banner, /health, Retry-After 5), cli/lib/room.js
+    (HOST_WAIT_MS 60000), cli/package.json (engines node >=22), room/models.js (CTX), docs/design/serve.md §1, §7, §14. */}
+
+import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
+
+`pooled serve` is a small Node program. It joins your room as one more member and serves the room's model on `127.0.0.1`. Tools that speak OpenAI Chat Completions, OpenAI Responses or Anthropic Messages point their base URL at it. The model still runs on the devices in the room; this program only relays requests.
+
+No GPU is needed on the machine that runs it.
+
+## Quickstart
+
+<Steps>
+
+1. **Start the model in a room.** Open [pooled.run/room](https://pooled.run/room), pick a model and press Start. Keep the host's page open.
+
+2. **Copy the room code.** In the room, the black **Serve API** button in the header opens the Serve API page. It shows the room's code and the exact command for it.
+
+3. **Run the bridge** on the machine where your tools run. It needs Node 22 or newer.
+
+   ```bash
+   npx @pooled/cli serve ABCD
+   ```
+
+   You can pass the room link instead of the code.
+
+4. **Point a tool at it.** The banner prints both base URLs:
+
+   ```text
+   pooled serve · room ABCD · Qwen3.6 35B MoE · Q4 · 32768 tokens of context
+     OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
+     Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
+     bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
+     prompts go to the room's host and may be shown to everyone in the room
+   ```
+
+</Steps>
+
+Once the room's model is ready, the banner also prints settings for Codex, Claude Code and opencode, filled in with this room's context. If the host has not started the model yet, the bridge prints them when it does.
+
+{/* TODO(fact-check): the opencode settings and the late re-print are in cli 0.2.1 (origin/main, cli/lib/banner.js); npm @latest is still 0.2.0, which prints only Codex and Claude Code, and only if the model is ready at start. Publish 0.2.1 before this page ships. */}
+
+## First request
+
+<Tabs syncKey="lang">
+<TabItem label="curl">
+
+```bash
+curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model": "pooled", "messages": [{"role": "user", "content": "Hi"}], "stream": true}'
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="pooled")
+r = client.chat.completions.create(model="pooled", messages=[{"role": "user", "content": "Hi"}])
+print(r.choices[0].message.content)
+```
+
+</TabItem>
+<TabItem label="JavaScript">
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({ baseURL: "http://127.0.0.1:8080/v1", apiKey: "pooled" });
+const stream = await client.chat.completions.create({
+  model: "pooled",
+  messages: [{ role: "user", content: "Hi" }],
+  stream: true,
+});
+for await (const chunk of stream) process.stdout.write(chunk.choices[0]?.delta?.content || "");
+```
+
+</TabItem>
+<TabItem label="Anthropic SDK">
+
+```python
+import anthropic
+
+client = anthropic.Anthropic(base_url="http://127.0.0.1:8080", api_key="pooled")
+m = client.messages.create(model="pooled", max_tokens=500, messages=[{"role": "user", "content": "Hi"}])
+print(m.content[0].text)
+```
+
+</TabItem>
+</Tabs>
+
+`model` can be any string. Without a token set, any API key works; some tools insist on having one.
+
+:::tip
+Until the room's model is started, requests get `503` with `Retry-After: 5`. Check `GET /health`: `ready` turns `true` when the room can answer, and `ctx` is the room's context in tokens.
+:::
+
+## The endpoints
+
+| Endpoint | What it is |
+|---|---|
+| `POST /v1/chat/completions` | [OpenAI Chat Completions](/docs/serve/chat-completions), streaming and not |
+| `POST /v1/responses` | [OpenAI Responses](/docs/serve/responses), streaming and not |
+| `GET` / `DELETE /v1/responses/{id}`, `GET /v1/responses/{id}/input_items` | Responses this process stored |
+| `POST /v1/messages` | [Anthropic Messages](/docs/serve/messages), streaming and not |
+| `GET /v1/models`, `GET /v1/models/{id}` | The room's model as `pooled/<model>`, with `max_model_len` (the room's context) |
+| `GET /health` | `{ok, room, connected, ready, model, ctx, queue, served}` for scripts |
+
+All three APIs support [tool calling](/docs/serve/tools) and [structured output](/docs/serve/structured-output).
+
+## How it works
+
+A browser tab cannot accept HTTP connections. So the bridge joins the room as an **API client**: a member with no layers, over the same WebRTC data channels the room's devices use. Each HTTP request becomes one question to the room.
+
+- **The room shows it.** The client gets its own card in the room. Its exchanges appear in the chat, marked "via API", under the room's "who sees the chat" setting.
+- **Requests are stateless.** Your tool sends the whole conversation each time. The room answers without touching its own chat. When your tool resends the room's previous answer unchanged, the room reuses its caches and prefills only the new turn.
+- **One generation at a time.** The chat, Code mode and API clients share one queue in the room. Requests first wait in the bridge (up to 8 by default, see [`--max-queue`](/docs/serve/options)). Streams get a keep-alive after 10 s of silence while they wait.
+- **Reloads.** If the host's page reloads, requests in flight fail. The bridge knocks on the room's code every 3 s for a minute and reconnects when the room is back.
+- **The host is in charge.** If the host disconnects the client or turns API clients off, the bridge keeps running but stops taking work: every request gets `503` (`529` on Messages).
+
+:::caution[Your prompts go to the room]
+Everything a tool sends goes to the room's host, a browser tab on someone's device, and the other devices compute on it. Coding tools send file contents and sometimes secrets. Point them only at a room you trust. See [Who sees your prompts](/docs/serve/options#who-sees-your-prompts).
+:::
+
+## Which model to use
+
+Coding agents send long prompts: Codex's is about 15 k tokens, Claude Code's 15 to 20 k before any history. Use a room with a long context and a model that calls tools reliably.
+
+| Model | Default context | Most with `?ctx=` | For agents |
+|---|---|---|---|
+| Qwen3.6 35B MoE | 32768 | 65536 | Yes. Calls tools reliably. |
+| Qwen3.8 27B | 16384 | 32768 | Yes, at 32 k. |
+| Qwen3 1.7B | 8192 | 16384 | No. Too little room after an agent's prompt, and it often describes a command instead of calling it. |
+
+The context is set on the host's page. See [Limits and context](/docs/serve/limits).
+
+## Next
+
+- [CLI options and security](/docs/serve/options)
+- [Tool calling](/docs/serve/tools)
+- Recipes: [Codex CLI](/docs/serve/recipes/codex), [Claude Code](/docs/serve/recipes/claude-code), [opencode](/docs/serve/recipes/opencode)

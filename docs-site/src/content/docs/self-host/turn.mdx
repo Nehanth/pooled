@@ -1,0 +1,207 @@
+---
+title: TURN relay
+eyebrow: Self-hosting
+description: When two devices can't connect directly, a TURN relay carries their traffic. Pooled doesn't run one; here is how to use yours.
+sidebar:
+  label: TURN relay
+  order: 2
+---
+
+{/*
+  Sources (origin/main 40bb0fa):
+  - room/ice.js header comment and code: STUN list, TURN_KEY "pooled-turn", SECRET_PARAMS, validTurnUrl regex,
+    turnFrom() precedence (URL > saved > window.TURN_SERVERS), iceConfig() relay-only policy, shareQuery() strips relay params
+  - p2p.html lines ~1783-1792: the "Network" box text, fields and "Always go through the relay" checkbox
+  - room/errors.js joinStep(): JOIN_TIMEOUT_MS 15000, JOIN_ICE_MS 40000, the "Found the room, but..." message
+  - room.js ~1293: opens the Network box (#join-net) when the direct connection fails
+  - docs/protocol.md "Connecting: STUN and an optional TURN relay"
+  - PR #259: TURN relay; "no direct path, TURN relay configured: all links on the relay, 33 tok/s"
+  - tests/e2e/turn_server.mjs, tests/e2e/room_chaos.mjs --plan turn
+  - coturn section: fact-checked 2026-09-30. The config parsed in coturn/coturn 4.18 (Docker; `no-cli` removed, it is deprecated
+    there), and turnutils_uclient got an allocation with user pooled. Ubuntu's coturn 4.6.1 package: config /etc/turnserver.conf,
+    systemd unit runs as user turnserver, TURNSERVER_ENABLED only in /etc/default/coturn for the init script.
+    TODO(verify): not yet tried from a live room (relayed link, pooledDebug path "relay") against a real coturn.
+*/}
+
+import { Tabs, TabItem, Steps } from '@astrojs/starlight/components';
+
+Most rooms never need a relay. Devices find a direct path with public STUN servers, and that works on most home and office networks. When it doesn't, a TURN relay forwards the traffic between the two devices.
+
+Pooled doesn't run a relay and ships no credentials. It is off by default. To use one, bring your own (for example [coturn](https://github.com/coturn/coturn)) or a provider's.
+
+## When you need it
+
+You need a relay when no direct path exists between two devices. That happens when:
+
+- both sides are behind symmetric NAT or carrier-grade NAT (common on mobile data), or
+- a firewall blocks UDP.
+
+The join screen tells you. After 15 s it shows "Found the room; still looking for a path between the two devices…" while the devices are still checking paths, for up to 40 s in all. If no path turns up, the join fails with:
+
+> Found the room, but these two devices can't reach each other (a strict firewall or mobile network on one side). A relay (TURN) server gets around that: add one under Network below. Or put both on the same Wi-Fi, or try another network.
+
+When that happens, the **Network** box under the join form opens so you can add a relay. If a relay is already configured and the join still fails, the message says so instead: "Found the room, but could not connect, not even through the relay (TURN) server. Check its address and password under Network, or try another network."
+
+:::tip
+Try the easy fix first. Putting both devices on the same Wi-Fi usually gives a direct path, and a direct path is faster.
+:::
+
+## Use a relay
+
+There are three ways to set a relay. A relay in the URL wins over the one saved in the Network box. `window.TURN_SERVERS` is always added on top of either.
+
+<Tabs>
+  <TabItem label="Network box">
+    Under the join form, open **Network** and fill in:
+
+    - **Relay server URL**: `turn:relay.example.org:3478`, or `turns:` for TLS. Comma-separate several.
+    - **Username** and **Password**.
+
+    Press **Save**. The setting is saved in this browser only. **Remove** clears it.
+  </TabItem>
+  <TabItem label="URL">
+    Add the relay to the room URL. This overrides a saved setting.
+
+    ```text
+    https://pooled.run/room?turn=turn:relay.example.org:3478&turnuser=NAME&turncred=PASSWORD
+    ```
+  </TabItem>
+  <TabItem label="Your deployment">
+    If you [deploy the site yourself](/docs/self-host/deploy), define `window.TURN_SERVERS` before `room.js` loads. It is an array of standard [`RTCIceServer`](https://developer.mozilla.org/en-US/docs/Web/API/RTCIceServer) objects.
+
+    ```html title="p2p.html"
+    <script>
+      window.TURN_SERVERS = [
+        { urls: "turns:relay.example.org:5349", username: "pooled", credential: "CHANGE_ME" }
+      ];
+    </script>
+    ```
+
+    These servers are added on top of a relay set in the URL or the Network box.
+  </TabItem>
+</Tabs>
+
+Relay URLs look like `turn:host[:port]` or `turns:host[:port]`, optionally followed by `?transport=udp` or `?transport=tcp`. Put the username and password in their own fields, never in the URL. An invalid URL is dropped and the rest still work.
+
+### Relay only
+
+By default the browser still prefers a direct path and only falls back to the relay when it has to.
+
+Check **Always go through the relay** in the Network box (or add `?relay=1` to the URL) to use only the relay. The other devices then never see this device's IP address. `?relay=1` also forces a relay that was saved in the Network box without the checkbox.
+
+`?relay=1` applies to a relay set in the URL or the Network box. It has no effect when the only relay comes from `window.TURN_SERVERS`.
+
+### Who needs it configured
+
+Every device that can't connect directly needs the relay configured. A device on an open network can reach a relayed device without it.
+
+:::note[Join links never carry the relay]
+Invite links and QR codes never include `turn`, `turnuser`, `turncred` or `relay`, so a relay password doesn't end up in a chat or a QR code. Send the relay details to the people who need them separately.
+:::
+
+## Check that it works
+
+- Run `pooledDebug()` in the browser console. Each link shows its `path`: `direct` or `relay`.
+- The room log notes relayed links.
+
+A relay adds a hop to every token's round trip, so answers come slower through it than over a direct path. In the test for PR #259 (3 Chromium tabs on one machine, Qwen3 1.7B, every direct path blocked), all links used the relay and ran at 33 tok/s. Over a real network the extra hop costs more.
+
+## Run your own with coturn
+
+[coturn](https://github.com/coturn/coturn) is an open-source TURN server. Run it on a machine with a public IP address.
+
+<Steps>
+
+1. Install coturn.
+
+   <Tabs>
+     <TabItem label="Debian / Ubuntu">
+       ```sh
+       sudo apt install coturn
+       ```
+     </TabItem>
+     <TabItem label="Docker">
+       ```sh
+       docker pull coturn/coturn
+       ```
+     </TabItem>
+   </Tabs>
+
+2. Write a config with one long-term user. Pooled passes a fixed username and password, so use `lt-cred-mech`. The Debian and Ubuntu package reads `/etc/turnserver.conf`. For Docker, put it at `/etc/coturn/turnserver.conf` on the host; step 4 mounts it into the container.
+
+   ```ini title="/etc/turnserver.conf"
+   listening-port=3478
+   tls-listening-port=5349
+   realm=relay.example.org
+   fingerprint
+   lt-cred-mech
+   user=pooled:CHANGE_ME
+
+   # TLS for turns: (copies of your certificate and key, see below)
+   cert=/etc/coturn/certs/fullchain.pem
+   pkey=/etc/coturn/certs/privkey.pem
+
+   # Ports the relay hands out to devices
+   min-port=49152
+   max-port=65535
+
+   # Only if the machine is behind NAT (a cloud VM with a private address):
+   # external-ip=<public IP>/<private IP>
+
+   # Don't relay into private networks
+   no-multicast-peers
+   denied-peer-ip=10.0.0.0-10.255.255.255
+   denied-peer-ip=172.16.0.0-172.31.255.255
+   denied-peer-ip=192.168.0.0-192.168.255.255
+   ```
+
+   The key and certificate must be readable by the user coturn runs as: `turnserver` for the Debian and Ubuntu package, `nobody` in the Docker image. Let's Encrypt's `privkey.pem` is readable by root only, so copy the two files to `/etc/coturn/certs/` with permissions coturn can read (for example from a certbot deploy hook), and copy them again after each renewal.
+
+3. Open the firewall: 3478 UDP and TCP, 5349 TCP (for `turns:`), and UDP 49152 to 65535 for the relayed traffic.
+
+4. Start it.
+
+   <Tabs>
+     <TabItem label="Debian / Ubuntu">
+       ```sh
+       sudo systemctl enable --now coturn
+       ```
+
+       The systemd unit runs `turnserver -c /etc/turnserver.conf` as the `turnserver` user. `TURNSERVER_ENABLED=1` in `/etc/default/coturn` is read only by the old init script, so systemd doesn't need it.
+     </TabItem>
+     <TabItem label="Docker">
+       ```sh
+       docker run -d --name coturn --network=host \
+         -v /etc/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro \
+         -v /etc/coturn/certs:/etc/coturn/certs:ro \
+         coturn/coturn -c /etc/coturn/turnserver.conf --log-file=stdout
+       ```
+
+       `docker logs coturn` shows the log. Run `docker restart coturn` after changing the config.
+     </TabItem>
+   </Tabs>
+
+5. Point devices at it with any of the three ways above, for example:
+
+   ```text
+   ?turn=turns:relay.example.org:5349,turn:relay.example.org:3478&turnuser=pooled&turncred=CHANGE_ME
+   ```
+
+6. Join a room and run `pooledDebug()`. With **Always go through the relay** checked, every link should show `path: "relay"`.
+
+</Steps>
+
+:::caution
+Anyone with the username and password can use your relay's bandwidth. Share them only with people in your rooms, and change the password if it leaks.
+:::
+
+## Test it
+
+The repo has a minimal TURN server for tests (`tests/e2e/turn_server.mjs`: UDP, loopback only, not for real use). This test runs a room on one machine with every direct path dropped. It checks that the join fails without a relay and works through one:
+
+```sh
+node tests/e2e/room_chaos.mjs --devices 3 --plan turn --nomodel   # without a model
+node tests/e2e/room_chaos.mjs --devices 3 --plan turn             # also runs answers (Qwen3 1.7B by default)
+```
+
+It needs `npm install` (Playwright and the `peer` server). The run with a model loads it on WebGPU, so it needs a GPU.

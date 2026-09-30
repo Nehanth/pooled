@@ -1,0 +1,126 @@
+---
+title: Room errors
+eyebrow: Rooms
+description: Every message a room shows when something goes wrong, what it means and what to do next. Joining, the signaling server, downloads, version mismatches, loading and answering.
+sidebar:
+  label: Room errors
+  order: 8
+---
+{/* Sources (origin/main 40bb0fa):
+    room/errors.js (peerErrorText for all PeerJS error types, fetchErrorText by HTTP status, joinStep 5 s / 15 s / 40 s,
+    versionMismatch wording), PR #235 (errors that say what to do next; toasts stay about 8 s; the same signaling error shows
+    once per 30 s), room/preflight.js verdict (no-WebGPU lines and remedies), room.js: signalingDown (~L1366), signal note
+    (~L1403), "Lost the signaling server (…) while joining" (~L1358), no WebGPU adapter (~L2315), pipeline timeout (~L2859),
+    queue full (~L4628, QUEUE_MAX 10, two per device), "a device left: re-deal the layers first" (~L3766), degraded ask
+    (~L4620), "This device couldn't load its layers (…)" (~L4173), "The model didn't start: …" (~L4187), context full
+    (~L3749), "Start a model first: Code mode runs on the room's model." (~L4406), NaN messages (~L3926-3940),
+    "… was taken in this room: this device is …" (~L1012), "the host left; this room is over" (~L3984). */}
+
+Room errors are one sentence: what happened and what to do. In a room they show as a toast: connection and version errors stay about 8 seconds, other notices about 4. While joining they show on the join screen.
+
+## Joining a room
+
+| You see | What it means | What to do |
+|---|---|---|
+| Still connecting… | Nothing yet after 5 s. | Wait. The room gives it 15 s. |
+| Found the room; still looking for a path between the two devices… | The host answered, and the two devices are trying network paths. | Wait up to 40 s. |
+| Found the room, but these two devices can't reach each other (a strict firewall or mobile network on one side). Put both on the same Wi-Fi, or try another network. | No direct path between the devices. | Same Wi-Fi, another network, or a [TURN relay](/docs/rooms/networks#use-a-turn-relay). |
+| No room with that code. Check the code, and that the host's page is still open. | The signaling server has no room with that code. | Check the code. The room lives in the host's tab: if it closed, the room is gone. |
+| That room code isn't valid. Codes are 4 to 6 letters and digits. | Typo. | Codes never use I, L, O, U, 0 or 1. |
+| That room code is already in use by an open room. Press Join to join it, or create a new room. | You tried to create a room with a code that exists. | Join it, or start a new room. |
+| This browser can't make peer-to-peer connections (no WebRTC). Open the room in a recent Chrome, Edge, Firefox or Safari. | No WebRTC. | Switch browser. |
+| The browser's peer-to-peer connection failed. Reload the page and try again; if it keeps failing, try another network. | WebRTC setup failed. | Reload. Then another network. |
+| The room server refused this page's key. Reload the page; if it keeps happening, please open an issue. | The signaling server rejected the key. | Reload. Open an issue if it repeats. |
+| `…` was taken in this room: this device is `… 2` | Another device already uses your name. | Nothing. Your device got a number. |
+
+## The signaling server
+
+The signaling server only introduces devices. Rooms that are already running don't need it.
+
+| You see | What to do |
+|---|---|
+| Can't reach the signaling server (0.peerjs.com). Devices use it only to find each other, and it may be down or blocked on this network. Rooms already running are not affected. Try again in a minute, or run your own signaling server. | Try again in a minute, try another network, or [run your own](/docs/self-host/signaling). |
+| Can't reach the room server. Check your internet connection (a VPN or strict firewall can block it), then try again. | Check your connection or VPN. |
+| Lost the signaling server (…) while joining. Try again. | Press Join again. |
+| Lost the signaling server (0.peerjs.com). The devices here keep working; new devices can't join until it's back. Reconnecting… | Nothing. It reconnects by itself, and a toast says when new devices can join again. |
+| Lost the connection to the room server. Devices already here keep working; new devices can't join until you reload this page. | Reload this page when you want to add devices. |
+
+The same signaling error shows at most once every 30 s.
+
+## This device can't hold layers
+
+These show on the join screen. The device can still join and chat.
+
+| You see | What to do |
+|---|---|
+| This browser can't use its graphics chip, so this device can chat but not help run the model. Chrome or Edge on a laptop works best. | Use Chrome or Edge 113+, or Safari 26+. |
+| WebGPU is off in Chrome on Linux… | Enable `chrome://flags/#enable-unsafe-webgpu` and `chrome://flags/#enable-vulkan`, then reload. |
+| This Safari has no WebGPU… | Safari 26 has it: update macOS, or use Chrome. |
+| Firefox has no WebGPU here… | Use Chrome or Edge 113+, or Safari 26+. |
+| This browser has WebGPU but found no usable GPU… | A blocklisted driver. Try `chrome://flags/#enable-unsafe-webgpu`, then reload, or another browser. |
+| This page isn't secure… | WebGPU needs https (or localhost). |
+| This phone's GPU isn't available to the browser. It can still join and chat. | iPhone and iPad: Safari 26 (iOS 26) or later. Android: Chrome 121 or later. |
+
+More in [Browsers and requirements](/docs/browsers).
+
+## Downloads
+
+Every download error keeps the layers already cached, so pressing Start again resumes.
+
+| You see | What to do |
+|---|---|
+| Can't reach Hugging Face to download the model. Check your internet connection (a VPN, ad blocker or firewall can block it), then press Start again; cached layers are kept. | Check the connection, VPN or ad blocker. Press Start. |
+| Hugging Face is rate-limiting downloads (429). Wait a minute and press Start again; cached layers are kept. | Wait a minute. |
+| Hugging Face is busy or down right now (503). Wait a minute and press Start again; cached layers are kept. | Wait a minute. The same message shows for 502 and 504. |
+| Hugging Face refused the download (403). The model may have moved or need a login; please open an issue. | [Open an issue](https://github.com/Nehanth/pooled/issues). Also shown for 401. |
+| Hugging Face has no such file any more (404). The model may have moved; please open an issue. | Open an issue. Also shown for 410. |
+| Hugging Face sent the whole file instead of the part asked for, so layers can't be split. Reload the page and try again; if it keeps happening, please open an issue. | Reload. Something between you and Hugging Face ignored the range request. |
+
+## Different versions of Pooled
+
+Every device says its room protocol version when it connects. When two differ, each side says which one is older and who should reload.
+
+| You see | What to do |
+|---|---|
+| This room's host is on an older version of Pooled (protocol 3, this tab 4). Ask the host to reload the page, then join again. | Ask the host to reload. Then join again. |
+| This room's host is on a newer version of Pooled (…). Reload this page to update, then join again. | Reload your page. |
+| laptop is on an older version of Pooled (…). Ask them to reload the page. | Ask that device to reload. |
+
+## Starting the model
+
+| You see | What to do |
+|---|---|
+| This browser has no WebGPU, so this device can't hold layers. Open the room in a recent Chrome, Edge or Safari, or run the model from another device | Start from a device with WebGPU. |
+| This device couldn't load its layers (…). Press Start to try again. | Press Start. If it repeats, lend less memory from this device. |
+| The model didn't start: … Press Start to try again. | Read the reason. Usually a device left or failed while loading. |
+| wait for this device's layers to finish loading, then re-deal | Wait for the load to finish. |
+
+## Asking questions
+
+| You see | What it means | What to do |
+|---|---|---|
+| the queue is full, try again after this answer | 10 questions are waiting, or you already have 2 in the queue. | Wait for this answer. |
+| queued: 2 ahead of yours | Your question waits its turn. | Nothing. |
+| a device left: re-deal the layers first | The room is missing a device. | Wait for it to come back, or press **Re-deal the layers**. See [Device drops and recovery](/docs/rooms/recovery). |
+| the model is still loading | Not every device has its layers yet. | Wait. |
+| laptop stopped responding; waiting for it (Stop gives up) | A device went silent mid-answer. The answer is held. | Wait a few seconds, or press Stop. |
+| pipeline timeout (…): a device in the room stopped answering. Check that every device's tab is open with its screen on, then ask again | A lap got no answer in time. | Bring every tab to the front with its screen on. Ask again. |
+| stopped: context full (32768 tokens) | The conversation filled the context. | Start a new chat, or reload with a longer [`?ctx=`](/docs/rooms/settings#page-url-options-for-rooms). |
+| Start a model first: Code mode runs on the room's model. | Code needs a running model. | Press Start. |
+
+## The room ends
+
+| You see | What it means |
+|---|---|
+| Host reconnecting | The host's tab closed. The room waits a minute in case it comes back. |
+| Room over | The host left, so this room can't answer any more. Start a new room to lend this device again. |
+
+## Rare ones
+
+| You see | What it means |
+|---|---|
+| ⚠ NaN PRODUCED by this device (pos …, layers …) — GPU kernel issue here | This device's GPU returned bad numbers. Please open an issue with the browser, GPU and model. |
+| ⚠ NaN ARRIVED at this device (pos …) — upstream peer broken | A device earlier in the chain sent bad numbers. Check that device. |
+| Connection error (…). Reload the page and try again. | An error Pooled doesn't know. Reload. Open an issue if it repeats. |
+
+Still stuck? See [Troubleshooting](/docs/troubleshooting).
