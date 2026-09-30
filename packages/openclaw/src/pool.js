@@ -148,7 +148,7 @@ async function openRoom(s, log) {
   r.node.on("hostgone", () => note("lost the link to the room's host"));
   r.node.on("loaded", (x) => note(`this device holds layers ${x.range[0]}-${x.range[1] - 1} of ${x.model}`));
   r.node.on("online", () => note("room online"));
-  r.close = async () => { r.pullAbort?.abort(); try { await r.bridge?.leave?.(); } catch {} try { r.bridgeTry?.b?.destroy?.(); } catch {} try { await r.node?.close(); } catch {} };
+  r.close = async () => { r.closed = true; r.pullAbort?.abort(); try { await r.bridge?.leave?.(); } catch {} try { r.bridgeTry?.b?.destroy?.(); } catch {} try { await r.node?.close(); } catch {} };
   r.status = () => status(r);
   note(`${s.mode === "host" ? "hosting" : "joined"} Pooled room ${fmtCode(r.code)}${s.mode === "host" ? ` (invite link: ${r.link})` : ""}`);
   return r;
@@ -191,18 +191,19 @@ export function fitNow(r, st = status(r)) {
 // The host side before an ask: wait until enough devices (and memory) are in the room, then deal the
 // layers; a room waiting for a device to come back waits too. Throws PooledError with a message
 // meant for the chat. waitPull: wait for a download in progress (the service) instead of saying so.
-export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = false } = {}) {
+// waitMs: how long to wait for devices (default the waitSeconds setting; the service waits for good)
+export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = false, waitMs = r.s.waitSeconds * 1000 } = {}) {
   const n = r.node, s = r.s, info = modelInfo(s.model, s.ctx || 0), code = fmtCode(r.code);
   if (n.ai.online && !n.ai.degraded) return;
   if (r.pull && (r.pull.state === "waiting" || r.pull.state === "running" || r.pull.state === "checking")) {
     if (!waitPull) throw new PooledError("downloading", downloadingMessage(r.pull, code));
     await r.pullP;
   }
-  const t0 = Date.now(), waitMs = s.waitSeconds * 1000;
+  const t0 = Date.now();
   let said = 0;
   if (n.ai.engine && n.ai.degraded) {   // a device dropped: it may come back into its slot, or the room re-deals
     while (!n.whole()) {
-      if (signal?.aborted) throw new PooledError("abort", "aborted");
+      if (signal?.aborted || r.closed) throw new PooledError("abort", "aborted");
       if (Date.now() - t0 > waitMs) throw new PooledError("degraded", `a device left Pooled room ${code} while it held layers of the model (${n.missingNames().join(", ") || "reloading"}). ` +
         `Re-open ${r.link} on that device; the room re-deals over the devices still there after a minute`);
       await new Promise((res) => setTimeout(res, 500));
@@ -210,7 +211,7 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
     return;
   }
   for (;;) {
-    if (signal?.aborted) throw new PooledError("abort", "aborted");
+    if (signal?.aborted || r.closed) throw new PooledError("abort", "aborted");
     const st = status(r);
     const fit = fitNow(r, st);
     if (st.devices.length >= s.minDevices && fit.fits) break;
@@ -226,7 +227,9 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
     if (Date.now() - said > 10000) { said = Date.now(); onWait(st); }
     await new Promise((res) => setTimeout(res, 500));
   }
-  await n.start(s.model).catch((err) => {
+  // one start at a time (the service and a question can both get here)
+  r.startP ||= n.start(s.model).finally(() => { r.startP = null; });
+  await r.startP.catch((err) => {
     throw new PooledError(/memory|allocate|OOM|out of memory|maxBufferSize/i.test(err.message) ? "memory" : "start",
       `Pooled room ${code} could not load ${info.name}: ${err.message}`);
   });

@@ -13,6 +13,7 @@ import { pooledCommand } from "./src/commands.js";
 import { initStateDir, pooledDir, writeJson, joinState } from "./src/state.js";
 import { prewarm } from "./src/prewarm.js";
 
+const RETRY_MS = 30000;
 // the room as this gateway sees it, for `cat` and support: <state dir>/pooled/status.json (0600: the
 // invite link is in it)
 function writeState(r) {
@@ -71,6 +72,7 @@ export default definePluginEntry({
     // the room lives with the gateway: open it at startup so other devices can join before the first
     // question, download the model if it is not in the cache yet, load it as soon as the room has the
     // devices and memory it needs, then warm up OpenClaw's system prompt and tools
+    let running = false, retry = null;
     api.registerService({
       id: "pooled-room",
       start: async (ctx) => {
@@ -79,15 +81,29 @@ export default definePluginEntry({
         if (!s.mode || process.env.POOLED_NO_SERVICE) return;
         await initStateDir();
         lastConfig = ctx?.config || api.config || lastConfig;
-        const r = await ensureRoom(s, log);
-        writeState(r);
-        clearInterval(tick); tick = setInterval(() => { writeState(r); r.persist?.(); }, 5000); tick.unref?.();
-        if (!r.node.hosting()) return;
-        ensureOnline(r, { waitPull: true, onWait: () => writeState(r) })
-          .then(() => { writeState(r); if (s.prewarm && !r.asked) return prewarm(r, { log }).catch((e) => log(`warm-up failed: ${e.message}`)); })
-          .catch((err) => { log(`room not online yet: ${err.message}`); writeState(r); });
+        running = true;
+        // a room that can't open yet (its host isn't up, the code is still registered after a crash)
+        // is tried again every 30 s while the gateway runs; a setup problem is not
+        const open = async () => {
+          retry = null;
+          let r;
+          try { r = await ensureRoom(s, log); }
+          catch (err) {
+            const again = running && err.code !== "setup" && err.code !== "install";
+            log(`${err.message}${again ? "; trying again in 30 s" : ""}`);
+            if (again) { retry = setTimeout(open, RETRY_MS); retry.unref?.(); }
+            return;
+          }
+          writeState(r);
+          clearInterval(tick); tick = setInterval(() => { writeState(r); r.persist?.(); }, 5000); tick.unref?.();
+          if (!r.node.hosting()) return;
+          ensureOnline(r, { waitPull: true, waitMs: Infinity, onWait: () => writeState(r) })
+            .then(() => { writeState(r); if (s.prewarm && !r.asked) return prewarm(r, { log }).catch((e) => log(`warm-up failed: ${e.message}`)); })
+            .catch((err) => { log(`room not online yet: ${err.message}`); writeState(r); });
+        };
+        await open();
       },
-      stop: async () => { clearInterval(tick); tick = null; const h = current(); if (h) { const r = await h.ready.catch(() => null); await r?.close(); } },
+      stop: async () => { running = false; clearTimeout(retry); clearInterval(tick); tick = null; const h = current(); if (h) { const r = await h.ready.catch(() => null); await r?.close(); } },
     });
   },
 });
