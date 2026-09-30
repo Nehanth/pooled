@@ -71,4 +71,76 @@ test("a Peer class passed in is used instead of loading a second WebRTC stack (@
   const b = new Bridge({ code: "ABCD", name: "t", client: "c", Peer: FakePeer });
   await assert.rejects(b.connect(), /no room ABCD/);
   assert.equal(made.length, 1);
+import { roomCodeFrom, roomKeyFrom } from "../lib/room.js";
+const KEY = "AbCdEfGhIjKlMnOpQrStUv";
+
+test("room codes and invite links: six characters, four still, the key from the fragment", () => {
+  assert.equal(roomCodeFrom("4tk-g9p"), "4TKG9P");
+  assert.equal(roomCodeFrom("4TKG9P"), "4TKG9P");
+  assert.equal(roomCodeFrom("ABCD"), "ABCD");
+  assert.equal(roomCodeFrom("ABCDE"), null);
+  assert.equal(roomCodeFrom(`https://pooled.run/r/4TKG9P#k=${KEY}`), "4TKG9P");
+  assert.equal(roomCodeFrom(`http://127.0.0.1:8080/p2p.html?code=4TKG9P&signal=x#k=${KEY}`), "4TKG9P");
+  assert.equal(roomCodeFrom("https://pooled.run/r/ABCD"), "ABCD");
+  assert.equal(roomKeyFrom(`https://pooled.run/r/4TKG9P#k=${KEY}`), KEY);
+  assert.equal(roomKeyFrom("https://pooled.run/r/4TKG9P"), null);
+  assert.equal(roomKeyFrom("4TKG9P"), null);
+  assert.equal(roomKeyFrom("https://pooled.run/r/4TKG9P#k=short"), null);
+});
+
+// a stand-in PeerJS link: what the bridge sends, and the host's messages delivered by hand
+function fakeLink(b) {
+  const handlers = {}, sent = [];
+  const conn = { open: true, on: (ev, f) => { handlers[ev] = f; }, send: (m) => sent.push(m), close() {} };
+  b.peer = { connect: () => conn };
+  return { conn, sent, open: () => handlers.open(), host: (m) => handlers.data(m) };
+}
+
+test("the bridge waits in the host's lobby, then keeps the pass it is given", () => {
+  const logs = [];
+  const b = new Bridge({ code: "4TKG9P", name: "t", client: "c", log: (m) => logs.push(m) });
+  const L = fakeLink(b);
+  let greeted = null, lobby = 0;
+  b.on("lobby", () => lobby++);
+  b.dial(false, (h) => { greeted = h; });
+  L.open();
+  assert.equal(L.sent[0].join, 1, "it can wait");
+  assert.equal(L.sent[0].key, undefined, "no key without a link");
+  L.host({ t: "hello", name: "host", v: 4, gate: 1, ask: 1, meta: { api: 2 } });
+  assert.equal(greeted, null, "a host with the gate: not in yet");
+  assert.equal(b.connected, false);
+  L.host({ t: "ai-ready-all", model: "m" });
+  assert.equal(b.ready, false, "nothing from the room before admit");
+  L.host({ t: "lobby" });
+  assert.equal(b.waiting, true); assert.equal(lobby, 1);
+  assert.match(logs.join("\n"), /waiting for the host of room 4TKG9P/);
+  L.host({ t: "admit", pass: KEY });
+  assert.equal(greeted?.name, "host");
+  assert.equal(b.connected, true); assert.equal(b.waiting, false);
+  assert.equal(b.pass, KEY);
+  assert.equal(b.helloMsg(true).pass, KEY, "a reconnect shows the pass");
+});
+
+test("the bridge: an invite key goes in the hello; an older host lets it in at once; Deny is final", () => {
+  const b = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c" });
+  let L = fakeLink(b), greeted = null;
+  b.dial(false, (h) => { greeted = h; });
+  L.open();
+  assert.equal(L.sent[0].key, KEY);
+  L.host({ t: "hello", name: "old host", v: 4, meta: { api: 2 } });   // no gate: 1
+  assert.equal(greeted?.name, "old host");
+  assert.equal(b.connected, true);
+
+  const c = new Bridge({ code: "4TKG9P", name: "t", client: "c" });
+  L = fakeLink(c);
+  const refused = [];
+  c.on("refused", (why) => refused.push(why));
+  c.dial(false, () => { throw new Error("must not get in"); });
+  L.open();
+  L.host({ t: "hello", name: "host", v: 4, gate: 1, ask: 1, meta: { api: 2 } });
+  L.host({ t: "lobby" });
+  L.host({ t: "bye", reason: "The host didn't let this device in." });
+  assert.deepEqual(refused, ["The host didn't let this device in."]);
+  assert.equal(c.kicked, "The host didn't let this device in.");
+  assert.equal(c.connected, false);
 });

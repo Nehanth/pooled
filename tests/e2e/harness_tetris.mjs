@@ -11,6 +11,7 @@
 //   --shots: saves docs/design/shots/code-desktop.png, code-400.png, code-400-preview.png, code-preview.png, code-peer.png
 //   --guest-shots DIR: saves the peer's (a guest's) Code view: guest-approve-1440.png, guest-1440.png, guest-390.png
 //   --port 18990 --signal-port 9011
+//   --hcore 0|1: the agent's model path (room/code.js ?hcore=: the serve v2 core in process, or legacy)
 // Prerequisites: playwright, the `peer` server package and the PeerJS client bundle (`peerjs`)
 // importable from NODE_PATH or ./node_modules. Without the PeerJS bundle it prints SKIP and
 // exits 0 (tests/e2e/preview_browser.mjs still covers the preview without a room).
@@ -194,15 +195,15 @@ try {
     p.on("console", (m) => { if (m.type() === "error" && !expected.test(m.text()) && !/Could not connect to peer/.test(m.text())) errs[n].push(m.text().slice(0, 300)); });
     p.on("pageerror", (e) => { if (!expected.test(String(e))) errs[n].push("pageerror: " + String(e).slice(0, 300)); });
   }
-  const base = `http://127.0.0.1:${PORT}/p2p.html?split=memory&signal=127.0.0.1:${SIGNAL_PORT}`;
-  await host.goto(base + "&mock=code");
+  const base = `http://127.0.0.1:${PORT}/p2p.html?ask=0&split=memory&signal=127.0.0.1:${SIGNAL_PORT}`;
+  await host.goto(base + "&mock=code" + (arg("hcore", "") ? "&hcore=" + arg("hcore") : ""));
   await peer.goto(base);
   for (const [p, n] of [[host, "host"], [peer, "peer"]]) {
     await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 30000 });
     await p.fill("#name-input", n + "-e2e");
   }
   await host.click("#create-btn");
-  await host.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
+  await host.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
   const room = (await host.textContent("#room-badge")).trim();
   await peer.fill("#code-input", room);
   await peer.click("#join-btn");

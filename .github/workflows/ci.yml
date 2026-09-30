@@ -23,7 +23,7 @@ jobs:
         with: { node-version: 22 }
       - name: Syntax check (engine, room, harness, site, tests incl. unit and e2e, benchmarks, scripts)
         run: |
-          for f in engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js scripts/*.mjs packages/*/*.js packages/*/src/*.js packages/*/test/*.mjs; do node --check "$f"; done
+          for f in api/*.mjs engine/*.js engine/wgsl/*.js room.js room/*.js harness/*.js site/js/*.js tests/*.js tests/unit/*.js tests/e2e/*.mjs benchmarks/*.js scripts/*.mjs packages/*/*.js packages/*/src/*.js packages/*/test/*.mjs; do node --check "$f"; done
       - name: Unit tests (no GPU)
         id: unit
         # the unit tests import node: builtins via tests/weight_cache.js; without npm ci there is no local
@@ -50,10 +50,9 @@ jobs:
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: tests/run.sh selftest
   browser:
-    # Code mode's preview in headless Chromium, no GPU needed. Optional until it has a track record in CI.
+    # Code mode's preview in headless Chromium, no GPU needed.
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020   # v4.4.0

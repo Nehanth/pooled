@@ -174,10 +174,10 @@ Deno.test("plan: planForSpeed fills the fastest devices first and leaves out the
   eq(planForSpeed(64, [30, 30, 10], [3, 3, 12]).assigned, [30, 30, 4]);
   // the host keeps a layer even when it is the slowest
   eq(planForSpeed(8, [1, 20], [50, 1]).assigned, [1, 7]);
-  // overflow: everyone full, the rest spread by capacity; every layer placed exactly once
+  // overflow: nobody is dealt past its pledge; nothing is dealt and the room is 34 layers short
   const o = planForSpeed(64, [10, 10, 10]);
-  eq(o.assigned.reduce((a, b) => a + b, 0), 64);
-  eq(o.ranges[o.ranges.length - 1][1], 64);
+  eq(o.short, 34);
+  eq(o.assigned, [0, 0, 0]);
 });
 
 import { lookupDrafts } from "../../room/lookup.js";

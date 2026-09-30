@@ -127,13 +127,13 @@ const check = (name, cond, detail = "") => { checks.push({ name, ok: !!cond, ...
 const soft = async (name, fn) => { try { await fn(); } catch (e) { check(name, false, e.stack || e); } };
 let code = null;
 try {
-  await page.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG_PORT}&dev=1` + (QUERY ? "&" + QUERY : ""));
+  await page.goto(`http://127.0.0.1:${PORT}/p2p.html?ask=0&signal=127.0.0.1:${SIG_PORT}&dev=1` + (QUERY ? "&" + QUERY : ""));
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "1", null, { timeout: 45000 }).catch(() => {});
   await page.fill("#name-input", "spark-host"); await page.fill("#join-gb", GBV);
   await page.click("#create-btn");
-  await page.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
-  code = (await page.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+  await page.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
+  code = (await page.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
   log("room", code);
 
   // the bridge can join before the model runs: it serves 503 + Retry-After until the room is ready
@@ -167,7 +167,7 @@ try {
   await soft("guest view", async () => {
     const g = await ctx.newPage();
     g.on("pageerror", (e) => pageErrs.push("guest: " + String(e).slice(0, 200)));
-    await g.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG_PORT}&dev=1`);
+    await g.goto(`http://127.0.0.1:${PORT}/p2p.html?ask=0&signal=127.0.0.1:${SIG_PORT}&dev=1`);
     await g.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
     await g.fill("#name-input", "guest"); await g.fill("#code-input", code); await g.click("#join-btn");
     await g.waitForFunction(() => [...document.querySelectorAll(".peer-card")].some((c) => /spark-host/.test(c.textContent)), null, { timeout: 30000 });

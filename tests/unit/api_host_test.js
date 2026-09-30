@@ -264,6 +264,7 @@ import { apiPrompt2, apiRun2, TurnCache, EncodeCache, historyHashes, canonAnswer
 import { renderApi, templateProfile } from "../../room/conversation.js";
 import { makeTokenizer } from "../../engine/tokenizer.js";
 import { GrammarConstraint, maskCacheFor } from "../../harness/constrain.js";
+import { constrainedSampler } from "../../harness/model-common.js";
 
 const FX = new URL("../fixtures/api/", import.meta.url);
 const readFx = (name) => JSON.parse(Deno.readTextFileSync(new URL(name, FX)));
@@ -643,4 +644,47 @@ Deno.test("api v2: a grammar that cannot be built ends the answer as an error (t
   const res = await apiRun2({ tok: BT, req, prompt, generate: async () => { generated++; return { reason: "stop" }; }, send: () => {}, fallback: makeSampler({ temp: 0 }), ctxMax: 1 << 20 });
   eq([res.reason, generated], ["error", 0]);
   ok(/too large together/.test(res.err), res.err);
+});
+
+// ---- in-process fields (Code mode's core path, harness/core-model.js): the wire's fields unchanged ----
+const WIRE = ["reason", "stopSeq", "usage", "text", "think", "calls", "open", "reused", "stats", "err"];
+Deno.test("api v2: apiRun2's in-process fields (garbage, forced, openArgs, raw, gen, ids); the wire fields are as before", async () => {
+  // a complete answer: exact ids come back whether or not there is a cache, and match what it stores
+  const fx = readFx("qwen3-1.7b-write.json");
+  const { res, cache, prompt } = await replay(fx);
+  for (const k of WIRE) ok(k in res, k);
+  eq([res.garbage, res.openArgs, res.forced, res.forcedFree], [false, null, 0, 0]);
+  eq(res.raw, fx.texts.filter((t) => t !== "<|im_end|>").join(""), "raw: the decoded answer");
+  const hit = cache.get(prompt.histKey + canonAnswer(res.text, res.calls));
+  eq(Array.from(hit.ids), res.ids);
+  eq(hit.thinkEnd, res.thinkEnd);
+  ok(res.gen && "tps" in res.gen, JSON.stringify(res.gen));
+  // a cut call: its arguments so far, no exact ids
+  const t = readFx("qwen3.6-35b-moe-truncated.json");
+  const cut = await replay(t, { params: { maxTokens: t.texts.length } });
+  eq(cut.res.open.name, "write_file");
+  eq(Object.keys(cut.res.open).sort(), ["i", "name"], "open stays {i, name} on the wire");
+  ok(typeof cut.res.openArgs === "string" && cut.res.openArgs.startsWith('{"path": "'), cut.res.openArgs);
+  eq(cut.res.ids, null);
+  // cli/lib/answer.js reads these fields only: same keys and values as a run without the new ones
+  const again = await replay(fx);
+  eq(WIRE.map((k) => again.res[k]), WIRE.map((k) => res[k]));
+});
+Deno.test("api v2: garbage 'mass' (Code mode) ignores a model that keeps preferring forbidden tokens; an engine fault is garbage either way", () => {
+  // the grammar's per-position verdict stubbed: every position is a forced free value position
+  const run = (rule, { mass = 0.5, bad = false } = {}) => {
+    const cs = constrainedSampler(() => 0, [{ name: "w", parameters: { type: "object", properties: { c: { type: "string" } } } }], { tokenText: () => "x", vocabSize: 4, style: "json", mode: "auto", garbage: rule });
+    const C = cs.constraint;
+    C.mask = function () { this.forced = true; this.free = true; this.mass = mass; this.bad = bad; };
+    C.push = () => {};
+    C.st = { k: "V" };
+    let n = 0;
+    for (; n < 40 && !cs.garbage; n++) { cs.sample(new Float32Array(4)); cs.keep(1); }
+    return { garbage: cs.garbage, n, forced: cs.forced, forcedFree: cs.forcedFree };
+  };
+  const count = run("count"), mass = run("mass");
+  eq([count.garbage, count.n], [true, 6], "the count rule: GARBAGE.min forced positions, all of them forced");
+  eq([mass.garbage, mass.forcedFree], [false, 40], "the mass rule: a model's own preference, however often");
+  eq(run("mass", { mass: 1e-6 }).n, 8, "almost no mass on anything allowed: GARBAGE.lowRun positions");
+  eq(run("mass", { bad: true }).n, 1, "NaN / +Infinity logits");
 });

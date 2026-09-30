@@ -259,7 +259,7 @@ try {
   let code = arg("code");
   if (!code) log("waiting for the room code in", arg("codefile"));
   for (const tEnd = Date.now() + 30 * 60e3; !code && Date.now() < tEnd; await sleep(1000)) {
-    try { code = (fs.readFileSync(arg("codefile"), "utf8").match(/[A-Z0-9]{4}/) || [])[0]; } catch {}
+    try { code = (fs.readFileSync(arg("codefile"), "utf8").replace("-", "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/) || [])[0]; } catch {}
     if (!code && !arg("codefile")) throw new Error("--code or --codefile");
   }
   if (!code) throw new Error("no room code in " + arg("codefile"));
