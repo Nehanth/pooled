@@ -50,7 +50,7 @@ export class DenseEngine {
     return e;
   }
 
-  async _init({ device, cfg, tensors, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, matvecVariant = "coop", coopWG = 256, coopRows = 4, attnFast = true, fuse = true, fuseGlue = false, glue3 = true, mergeQKV = true, headRows = 8 }) {
+  async _init({ device, cfg, tensors, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, matvecVariant = "coop", coopWG = 256, coopRows = 4, attnFast = true, fuse = true, fuseGlue = false, glue3 = true, mergeQKV = true, headRows = 8, batchWG = 64, verifyWG = coopWG }) {
     this.device = device;
     this.cfg = cfg;
     this.maxSeq = maxSeq;
@@ -69,6 +69,7 @@ export class DenseEngine {
     this.lo = lo; this.hi = hi;
     this.hasEmbed = hasEmbed; this.hasHead = hasHead;
     this.pos = 0;
+    this.maxDrafts = 7;   // longest draft run one verify takes (8 columns: two batched passes per device)
 
     const W = weights || weightsFromSafetensors(tensors, { lo, hi, hasEmbed, hasHead });
 
@@ -91,7 +92,7 @@ export class DenseEngine {
     // turns the glue on (about -0.5 ms per token, changes the bits). fuseAcc / fuseRms = false for A/B.
     this.fuseGlue = fuseGlue === true;
     this.glue3 = glue3 !== false && !this.fuseGlue;   // the glue as 3 reference-shaped kernels (see DENSE_GLUE3_WGSL)
-    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, 4, this.rowsB, await probeUnpack(device))
+    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, batchWG, 4, this.rowsB, await probeUnpack(device))
       + (this.attnFastOn ? denseAttnWGSL({ G, hd: headDim }) : "") + (this.fuseOn ? DENSE_GLUE_WGSL + DENSE_GLUE3_WGSL : "") });
     const C = GPUShaderStage.COMPUTE;
     const layout0 = device.createBindGroupLayout({
@@ -144,6 +145,21 @@ export class DenseEngine {
         const layout1 = device.createBindGroupLayout({ entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
         this.pipes[name + "_h"] = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH, entryPoint: name } });
       }
+    }
+    // Exact verify ops: the batched GEMVs again, built with the single-token kernels' workgroup size
+    // (verifyWG = coopWG), so a column's sums run in the same order as matvec_*_coop's (the same
+    // per-thread strides and reduction tree) and its bits match single-token decoding; the batched
+    // prefill keeps its smaller, faster workgroups. Speculative verifies use these (embedRunBatch /
+    // runHiddenBatch with verify), so a verified token is exactly a plainly decoded one.
+    // tests/test_dense_spec.js checks the bits.
+    this.verifyX = matvecVariant === "coop" && verifyWG !== batchWG;
+    if (this.verifyX) {
+      const modX = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, verifyWG, 4, this.rowsB, await probeUnpack(device)) });
+      const xNames = Object.keys(G1).filter((k) => /_b(_acc)?$/.test(k) && k.startsWith("matvec"));
+      await Promise.all(xNames.map(async (name) => {
+        const layout1 = device.createBindGroupLayout({ entries: G1[name].map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
+        this.pipes[name + "_x"] = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modX, entryPoint: name } });
+      }));
     }
     // uniforms
     const cfgData = new ArrayBuffer(48);
@@ -255,10 +271,10 @@ export class DenseEngine {
     };
     this._mv = mv;
     // fused gate/up(+SiLU) op; null when kinds differ (fallback: unfused path)
-    const guOp = (wg2, wu2, x, y, dOut, dIn, xB, yB) => {
+    const guOp = (wg2, wu2, x, y, dOut, dIn, xB, yB, sfx = "") => {
       if (!coop || !wg2 || !wu2 || wg2.kind !== wu2.kind) return null;
       const base = wg2.kind === "q8" ? "matvec_q8_gu" : wg2.kind === "q4" ? "matvec_q4_gu" : "matvec_gu";
-      const pipe = xB ? base + "_b" : base;
+      const pipe = xB ? base + "_b" + sfx : base;
       const shp = xB ? this._shapeB(dOut, dIn, xB.stride / 16, yB.stride / 4) : this._shapeB(dOut, dIn, 0, 0);
       const bufs = wg2.kind === "f32" ? [wg2.buf, wu2.buf, x, y, shp] : [wg2.qs, wg2.sc, wu2.qs, wu2.sc, x, y, shp];
       return { pipe, wgs: Math.ceil(dOut / (xB ? this.rowsB : this.coopRows)), bg: this._bg(this.pipes[pipe], 1, bufs) };
@@ -600,9 +616,9 @@ export class DenseEngine {
       this.uDMCo = this._buf(new Uint32Array([B.attnOut.stride / 4, 0, 0, 0]), GPUBufferUsage.UNIFORM);
     }
     // batched matvec op builder: whole B-buffers bound, strides in the uniform
-    const mvB = (w, xB, yB, dOut, dIn, acc = false) => {   // acc: y += W x
+    const mvB = (w, xB, yB, dOut, dIn, acc = false, sfx = "") => {   // acc: y += W x; sfx "_x": the exact verify pipes
       const base = w.kind === "q8" ? "matvec_q8" : w.kind === "q4" ? "matvec_q4" : "matvec";
-      const pipe = base + "_coop_b" + (acc ? "_acc" : "");
+      const pipe = base + "_coop_b" + (acc ? "_acc" : "") + sfx;
       const shp = this._shapeB(dOut, dIn, xB.stride / 16, yB.stride / 4);
       const bufs = w.kind === "f32" ? [w.buf, xB.buf, yB.buf, shp] : [w.qs, w.sc, xB.buf, yB.buf, shp];
       return { pipe, wgs: Math.ceil(dOut / this.rowsB), bg: this._bg(this.pipes[pipe], 1, bufs) };
@@ -648,6 +664,16 @@ export class DenseEngine {
         scoresD: this.attnFastOn ? this._bg(this.pipes.attn_scores_d, 1, [B.q.buf, L.kCache, this.scores, this.uDMCq]) : null,
         softmaxD: this.attnFastOn ? this._bg(this.pipes.attn_softmax_d, 1, [this.scores]) : null,
         outD: this.attnFastOn ? this._bg(this.pipes.attn_out_d, 1, [this.scores, L.vCache, B.attnOut.buf, this.uDMCo]) : null,
+        // the exact verify ops (see verifyX in _init): the same GEMVs with the single-token kernels' workgroups
+        x: !this.verifyX ? null : {
+          oAcc: this.fuseOn ? mvB(L.wo, B.attnOut, B.x, dim, qDim, true, "_x") : null,
+          downAcc: this.fuseOn ? mvB(L.wdown, B.g, B.x, dim, inter, true, "_x") : null,
+          qkv: this.mergeQKV ? [mvB(L.wqkv, B.xn, B.qkv, qDim + 2 * kvDim, dim, false, "_x")] : [mvB(L.wq, B.xn, B.q, qDim, dim, false, "_x"), mvB(L.wk, B.xn, B.k, kvDim, dim, false, "_x"), mvB(L.wv, B.xn, B.v, kvDim, dim, false, "_x")],
+          o: mvB(L.wo, B.attnOut, B.tmpDim, dim, qDim, false, "_x"),
+          gateUp: [mvB(L.wgate, B.xn, B.g, inter, dim, false, "_x"), mvB(L.wup, B.xn, B.u, inter, dim, false, "_x")],
+          gu: this._guOp(L.wgate, L.wup, B.xn.buf, B.g.buf, inter, dim, B.xn, B.g, "_x"),
+          down: mvB(L.wdown, B.g, B.tmpDim, dim, inter, false, "_x"),
+        },
       };
     });
   }
@@ -671,13 +697,17 @@ export class DenseEngine {
     pass.dispatchWorkgroups(Math.ceil(threads / wgSize));
   }
 
-  _encodeLayerBatch(enc, i, basePos) {
+  // n: columns that are real tokens (1..4; the GEMVs always compute 4, the extra columns only touch
+  // the batch buffers). exact: the verify ops (see _initBatch), whose columns are bit-identical to
+  // single-token decoding.
+  _encodeLayerBatch(enc, i, basePos, n = 4, exact = false) {
     const { qDim, nH, nKV, headDim, kvDim, inter, dim } = this.dims;
-    const L = this.layers[i], LB = this.layerB[i], B = this.B;
+    const L = this.layers[i], LB0 = this.layerB[i], B = this.B;
+    const LB = exact && LB0.x ? { ...LB0, ...LB0.x } : LB0;
     if (this.fuse && LB.glue) {   // one pass, one dispatch per stage for all 4 columns (glue writes the caches)
       let pass = enc.beginComputePass();
-      const mc = (name, bg, x) => { pass.setPipeline(this.pipes[name]); pass.setBindGroup(0, this.bgCommonB[0][name]); pass.setBindGroup(1, bg); pass.dispatchWorkgroups(x, 4); };
-      const rms = (bgMC, which) => { if (this.fuseRms !== false) mc("rmsnorm_dmc", bgMC, 1); else for (let c = 0; c < 4; c++) this._dCol(pass, "rmsnorm", c, LB.cols[c][which], 256, 256); };
+      const mc = (name, bg, x) => { pass.setPipeline(this.pipes[name]); pass.setBindGroup(0, this.bgCommonB[0][name]); pass.setBindGroup(1, bg); pass.dispatchWorkgroups(x, n); };
+      const rms = (bgMC, which) => { if (this.fuseRms !== false) mc("rmsnorm_dmc", bgMC, 1); else for (let c = 0; c < n; c++) this._dCol(pass, "rmsnorm", c, LB.cols[c][which], 256, 256); };
       rms(LB.norm1MC, "norm1");
       for (const op of LB.qkv) this._dispatchOp(pass, op);
       if (this.glue3 !== false && LB.rope3) {   // three exact kernels for all columns, no copies
@@ -686,7 +716,7 @@ export class DenseEngine {
         mc("rope_dmc" + sfx, LB.rope3, Math.ceil((nH + nKV) * headDim / 2 / 64));
         mc("kv_store_d", LB.kv3, Math.ceil(kvDim / 64));
       } else if (this.fuseGlue === false) {   // the reference head_norm / rope dispatches and cache copies
-        for (let c = 0; c < 4; c++) {
+        for (let c = 0; c < n; c++) {
           const C = LB.cols[c];
           if (C.qNorm) this._dCol(pass, "head_norm", c, C.qNorm, nH, 32);
           if (C.kNorm) this._dCol(pass, "head_norm", c, C.kNorm, nKV, 32);
@@ -694,38 +724,38 @@ export class DenseEngine {
           this._dCol(pass, "rope", c, C.ropeK, nKV * headDim / 2);
         }
         pass.end();
-        for (let c = 0; c < 4; c++) {
+        for (let c = 0; c < n; c++) {
           enc.copyBufferToBuffer(DenseEngine._raw(B.k.buf)[0], DenseEngine._raw(B.k.buf)[1] + c * B.k.stride, L.kCache, (basePos + c) * kvDim * 4, kvDim * 4);
           enc.copyBufferToBuffer(DenseEngine._raw(B.v.buf)[0], DenseEngine._raw(B.v.buf)[1] + c * B.v.stride, L.vCache, (basePos + c) * kvDim * 4, kvDim * 4);
         }
         pass = enc.beginComputePass();
       } else {
-        if (this.fuseNorm === false) for (let c = 0; c < 4; c++) {
+        if (this.fuseNorm === false) for (let c = 0; c < n; c++) {
           const C = LB.cols[c];
           if (C.qNorm) this._dCol(pass, "head_norm", c, C.qNorm, nH, 32);
           if (C.kNorm) this._dCol(pass, "head_norm", c, C.kNorm, nKV, 32);
         }
         mc("attn_glue_d", this.fuseNorm === false ? LB.glueNN : LB.glue, nH + nKV);
       }
-      this._encodeAttnBatch(pass, LB, basePos);
+      this._encodeAttnBatch(pass, LB, basePos, n);
       if (this.fuseAcc !== false) this._dispatchOp(pass, LB.oAcc);
-      else { this._dispatchOp(pass, LB.o); for (let c = 0; c < 4; c++) this._dCol(pass, "add_res", c, LB.cols[c].addTmp, dim); }
+      else { this._dispatchOp(pass, LB.o); for (let c = 0; c < n; c++) this._dCol(pass, "add_res", c, LB.cols[c].addTmp, dim); }
       rms(LB.norm2MC, "norm2");
       if (LB.gu) this._dispatchOp(pass, LB.gu);
       else {
         for (const op of LB.gateUp) this._dispatchOp(pass, op);
-        for (let c = 0; c < 4; c++) this._dCol(pass, "silu_mul", c, LB.cols[c].silu, inter);
+        for (let c = 0; c < n; c++) this._dCol(pass, "silu_mul", c, LB.cols[c].silu, inter);
       }
       if (this.fuseAcc !== false) this._dispatchOp(pass, LB.downAcc);
-      else { this._dispatchOp(pass, LB.down); for (let c = 0; c < 4; c++) this._dCol(pass, "add_res", c, LB.cols[c].addTmp, dim); }
+      else { this._dispatchOp(pass, LB.down); for (let c = 0; c < n; c++) this._dCol(pass, "add_res", c, LB.cols[c].addTmp, dim); }
       pass.end();
       return;
     }
     {
       const pass = enc.beginComputePass();
-      for (let c = 0; c < 4; c++) this._dCol(pass, "rmsnorm", c, LB.cols[c].norm1, 256, 256);
+      for (let c = 0; c < n; c++) this._dCol(pass, "rmsnorm", c, LB.cols[c].norm1, 256, 256);
       for (const op of LB.qkv) this._dispatchOp(pass, op);
-      for (let c = 0; c < 4; c++) {
+      for (let c = 0; c < n; c++) {
         const C = LB.cols[c];
         if (C.qNorm) this._dCol(pass, "head_norm", c, C.qNorm, nH, 32);
         if (C.kNorm) this._dCol(pass, "head_norm", c, C.kNorm, nKV, 32);
@@ -734,30 +764,30 @@ export class DenseEngine {
       }
       pass.end();
     }
-    for (let c = 0; c < 4; c++) {
+    for (let c = 0; c < n; c++) {
       enc.copyBufferToBuffer(DenseEngine._raw(B.k.buf)[0], DenseEngine._raw(B.k.buf)[1] + c * B.k.stride, L.kCache, (basePos + c) * kvDim * 4, kvDim * 4);
       enc.copyBufferToBuffer(DenseEngine._raw(B.v.buf)[0], DenseEngine._raw(B.v.buf)[1] + c * B.v.stride, L.vCache, (basePos + c) * kvDim * 4, kvDim * 4);
     }
     {
       const pass = enc.beginComputePass();
-      this._encodeAttnBatch(pass, LB, basePos);
+      this._encodeAttnBatch(pass, LB, basePos, n);
       this._dispatchOp(pass, LB.o);
-      for (let c = 0; c < 4; c++) this._dCol(pass, "add_res", c, LB.cols[c].addTmp, dim);
-      for (let c = 0; c < 4; c++) this._dCol(pass, "rmsnorm", c, LB.cols[c].norm2, 256, 256);
+      for (let c = 0; c < n; c++) this._dCol(pass, "add_res", c, LB.cols[c].addTmp, dim);
+      for (let c = 0; c < n; c++) this._dCol(pass, "rmsnorm", c, LB.cols[c].norm2, 256, 256);
       if (LB.gu) this._dispatchOp(pass, LB.gu);
       else {
         for (const op of LB.gateUp) this._dispatchOp(pass, op);
-        for (let c = 0; c < 4; c++) this._dCol(pass, "silu_mul", c, LB.cols[c].silu, inter);
+        for (let c = 0; c < n; c++) this._dCol(pass, "silu_mul", c, LB.cols[c].silu, inter);
       }
       this._dispatchOp(pass, LB.down);
-      for (let c = 0; c < 4; c++) this._dCol(pass, "add_res", c, LB.cols[c].addTmp, dim);
+      for (let c = 0; c < n; c++) this._dCol(pass, "add_res", c, LB.cols[c].addTmp, dim);
       pass.end();
     }
   }
-  _encodeAttnBatch(pass, LB, basePos) {
+  _encodeAttnBatch(pass, LB, basePos, n = 4) {
     const { qDim, nH } = this.dims;
-    if (this.attnFast && LB.scoresD) { this._encodeAttnD(pass, LB.scoresD, LB.softmaxD, LB.outD, basePos + 1, 4, this.bgCommonB[0]); return; }
-    for (let c = 0; c < 4; c++) {
+    if (this.attnFast && LB.scoresD) { this._encodeAttnD(pass, LB.scoresD, LB.softmaxD, LB.outD, basePos + 1, n, this.bgCommonB[0]); return; }
+    for (let c = 0; c < n; c++) {
       const C = LB.cols[c];
       this._dCol(pass, "attn_scores", c, C.scores, nH * (basePos + c + 1));
       this._dCol(pass, "attn_softmax", c, C.softmax, nH, 1);
@@ -770,39 +800,49 @@ export class DenseEngine {
     if (this.embedGPU) enc.copyBufferToBuffer(this.embedGPU, id * dim * 4, this.B.x.buf, c * this.B.x.stride, dim * 4);
     else this.device.queue.writeBuffer(this.B.x.buf, c * this.B.x.stride, this._embedRowF32(id));
   }
-  async _runBatchAndRead(basePos) {
+  async _runBatchAndRead(basePos, n = 4, exact = false) {
     const { dim } = this.dims;
     const enc = this.device.createCommandEncoder();
     if (this._pendingEmbeds) { for (const [id, c] of this._pendingEmbeds) this._stageEmbedBatchCol(enc, id, c); this._pendingEmbeds = null; }
-    for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, basePos);
-    for (let c = 0; c < 4; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, this.stageXB, c * dim * 4, dim * 4);
+    for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, basePos, n, exact);
+    for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, this.stageXB, c * dim * 4, dim * 4);
     this.device.queue.submit([enc.finish()]);
-    await this.stageXB.mapAsync(GPUMapMode.READ);
-    const out = Float32Array.from(new Float32Array(this.stageXB.getMappedRange(), 0, 4 * dim));
+    await this.stageXB.mapAsync(GPUMapMode.READ, 0, n * dim * 4);
+    const out = Float32Array.from(new Float32Array(this.stageXB.getMappedRange(0, n * dim * 4), 0, n * dim));
     this.stageXB.unmap();
-    this.pos = basePos + 4;
+    this.pos = basePos + n;
     return out;
   }
-  // host, split mode: 4 prompt tokens -> 4 hiddens for the next peer
-  async embedRunBatch(ids, basePos) {
+  // host, split mode: 1..4 tokens -> their hiddens for the next peer. verify (a speculative verify
+  // frame; the room passes { base, total }): the exact ops, so every column is bit-identical to what
+  // embedRun would give for that token (plain decoding), and a verified token is a decoded token.
+  async embedRunBatch(ids, basePos, verify = false) {
     if (!this.B) this._initBatch();
+    const n = ids.length;
     this.pos = basePos;
     this._pendingEmbeds = ids.map((id, c) => [id, c]);
-    for (let c = 0; c < 4; c++)
+    for (let c = 0; c < n; c++)
       this.device.queue.writeBuffer(this.frameBufsB[c], 0, new Uint32Array([basePos + c, basePos + c + 1]));
-    return this._runBatchAndRead(basePos);
+    if (verify) this._vBase = basePos - (typeof verify === "object" ? verify.base : 0);
+    return this._runBatchAndRead(basePos, n, !!verify);
   }
-  // worker, split mode: 4 hiddens in, my layers, 4 hiddens out
-  async runHiddenBatch(xs, basePos) {
+  // worker, split mode: 1..4 hiddens in, my layers, as many hiddens out (verify: see embedRunBatch)
+  async runHiddenBatch(xs, basePos, verify = false) {
     if (!this.B) this._initBatch();
     const { dim } = this.dims;
+    const n = xs.length / dim;
     this.pos = basePos;
-    for (let c = 0; c < 4; c++) {
+    for (let c = 0; c < n; c++) {
       this.device.queue.writeBuffer(this.frameBufsB[c], 0, new Uint32Array([basePos + c, basePos + c + 1]));
       this.device.queue.writeBuffer(this.B.x.buf, c * this.B.x.stride, xs.subarray(c * dim, (c + 1) * dim));
     }
-    return this._runBatchAndRead(basePos);
+    if (verify) this._vBase = basePos - (typeof verify === "object" ? verify.base : 0);
+    return this._runBatchAndRead(basePos, n, !!verify);
   }
+  // a rejected speculative suffix: the caches past the accepted tokens are simply overwritten by the
+  // next frame (attention reads rows [0, pos] only), so rolling back is setting pos (checkpoints
+  // saved next then hold exactly the accepted context). The room sends it with the next frame.
+  restoreDN(k) { if (this._vBase != null) this.pos = this._vBase + k + 1; }
 
   // consume prompt tokens (no logits): chunks of 4 through the batched path,
   // remainder through the single-token fast path.
@@ -877,6 +917,82 @@ export class DenseEngine {
     }
     this.device.queue.submit([enc.finish()]);
     return await this._readback(this.logits, this.stageLogits, vocab);
+  }
+
+  // final norm + LM head for n hiddens (n * dim floats) in ONE submit and one readback, column by
+  // column with the single-token kernels, so each column's logits are bit-identical to
+  // headFromHidden's -> array of n logits vectors
+  async headBatch(hs, n = hs.length / this.dims.dim) {
+    const { dim, vocab } = this.dims;
+    const dev = this.device;
+    if (!this.hsIn || this.hsIn.size < n * dim * 4) {
+      this.hsIn?.destroy();
+      this.hsIn = dev.createBuffer({ size: Math.max(8, n) * dim * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    }
+    if (!this.stageLogitsN || this.stageLogitsN.size < n * vocab * 4) {
+      this.stageLogitsN?.destroy();
+      this.stageLogitsN = dev.createBuffer({ size: Math.max(8, n) * vocab * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    }
+    dev.queue.writeBuffer(this.hsIn, 0, hs, 0, n * dim);
+    const enc = dev.createCommandEncoder();
+    for (let c = 0; c < n; c++) {
+      enc.copyBufferToBuffer(this.hsIn, c * dim * 4, this.x, 0, dim * 4);
+      const pass = enc.beginComputePass();
+      this._dispatch(pass, "rmsnorm", this.bgFinalNorm, 256, 256);
+      this._dispatchOp(pass, this.headOp);
+      pass.end();
+      enc.copyBufferToBuffer(this.logits, 0, this.stageLogitsN, c * vocab * 4, vocab * 4);
+    }
+    dev.queue.submit([enc.finish()]);
+    await this.stageLogitsN.mapAsync(GPUMapMode.READ, 0, n * vocab * 4);
+    const all = new Float32Array(this.stageLogitsN.getMappedRange(0, n * vocab * 4)).slice();
+    this.stageLogitsN.unmap();
+    const out = [];
+    for (let c = 0; c < n; c++) out.push(all.subarray(c * vocab, (c + 1) * vocab));
+    return out;
+  }
+
+  // ---- speculative decoding with drafts from outside the model ----
+  // A dense model has no draft head, so the drafts come from the caller: prompt lookup (tokens that
+  // followed the same n-gram earlier in the context, room/lookup.js) or a small draft model of the
+  // same tokenizer. One verify pass runs tNext and the drafts at positions pos .. pos+K (in a room:
+  // ONE lap round the chain, runTrunk), and the usual acceptance rule keeps the drafts the model
+  // itself would have sampled, so the output is exactly plain decoding's: the verify columns are
+  // bit-identical to single-token decoding (the exact batch ops, headBatch), and a sampler draws the
+  // same token from the same logits. Same call as Qwen35Engine.specStepDrafts.
+  //   tNext: the token already chosen for this.pos. Returns 1..K+1 new tokens; the last one is the
+  //   next tNext (not yet written), all before it were written into the caches.
+  //   runTrunk(tokens, pos) -> the final hiddens of all columns (chain mode; the host's own layers
+  //   run inside it); onReject(k): the other devices' rollback to column k (see restoreDN).
+  async specStepDrafts(tNext, sample, drafts, { runTrunk = null, onReject = null } = {}) {
+    const pos = this.pos, { dim } = this.dims;
+    const K = Math.max(0, Math.min(this.maxDrafts, drafts.length, this.maxSeq - pos - 1));
+    drafts = drafts.slice(0, K);
+    const tokens = [tNext, ...drafts], n = K + 1;
+    let hs;
+    if (runTrunk) hs = await runTrunk(tokens, pos);
+    else {
+      hs = new Float32Array(n * dim);
+      for (let c0 = 0; c0 < n; c0 += 4) {
+        const m = Math.min(4, n - c0);
+        hs.set(await this.embedRunBatch(tokens.slice(c0, c0 + m), pos + c0, { base: c0, total: n }), c0 * dim);
+      }
+    }
+    const lgs = await this.headBatch(hs, n);
+    const out = [];
+    let a = 0;
+    for (let k = 0; k <= K; k++) {
+      const t = sample(lgs[k]);
+      out.push(t);
+      if (k < K && t === drafts[k]) a++; else break;
+    }
+    const st = this.specStats ||= { steps: 0, drafts: 0, accepted: 0 };
+    st.steps++; st.drafts += K; st.accepted += a;
+    this._vBase = pos;
+    this.pos = pos + a + 1;
+    this.lastHidden = hs.slice(a * dim, (a + 1) * dim);   // the final hidden of the last written token
+    if (a < K && onReject) await onReject(a);
+    return out;
   }
 
   // worker peer: hidden in, my layers, hidden out
