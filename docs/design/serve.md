@@ -261,63 +261,129 @@ Empty `data` before the room's model is ready. `GET /v1/models/{id}` returns the
 
 ### Anthropic: `POST /v1/messages`
 
-Required: `model`, `max_tokens`, `messages`. `anthropic-version` is accepted and not enforced.
-Non-stream response:
+Required: `model`, `max_tokens`, `messages`. `anthropic-version`, `anthropic-beta` and `?beta=true`
+are accepted and not enforced. Built on the v2 core (section 11); `cli/lib/anthropic.js`.
+
+**Request mapping** (onto the internal request, 11.1):
+
+- `system`: a string or text blocks (joined; `cache_control` ignored). A block starting
+  `x-anthropic-billing-header:` (Claude Code's first block, different on every request) is dropped,
+  or no two prompts would share a first token and the room's caches would never hit.
+  `role: "system"` inside `messages` (Claude Code's mid-conversation environment note) folds into
+  the user turn before it (`normalizeMessages`).
+- `tools`: `{name, description?, input_schema, cache_control?, strict?}` with `type` absent or
+  `custom`. Anthropic's own tools (`web_search_*`, `web_fetch_*`, `code_execution_*`, `computer_*`,
+  `bash_*`, `text_editor_*`, `memory_*`, `advisor_*`, `tool_search_tool_*`, any `…_YYYYMMDD` type)
+  are skipped with one logged warning, never a 400; another `type` is a 400.
+- `tool_choice`: `auto`; `any` → required; `{type: "tool", name}` → that tool; `none`;
+  `disable_parallel_tool_use: true` → one call at most.
+- Assistant blocks: `text`; `tool_use {id, name, input}` → calls; `thinking` → the turn's
+  reasoning: a `pooled1.` signature (ours) is decoded and is the reasoning, else the visible
+  `thinking` text; `redacted_thinking` ignored. User blocks: `text`; `tool_result {tool_use_id,
+  content, is_error?}` → a tool result (text parts joined; an image inside becomes
+  `[image omitted: this model reads text only]`); text sent along with tool results is an aside
+  (its own turn, not a new question). `image` / `document` as user content: 400. Server-tool blocks
+  (`server_tool_use`, `web_search_tool_result`, …) in the history are dropped with a warning.
+- `thinking`: `enabled` (+ `budget_tokens`, used when below `max_tokens`), `adaptive` (on, no
+  budget), `disabled`; `display: "omitted"` sends the thinking block empty (the signature still
+  carries the reasoning). `output_config.effort` (`low` … `max`) → the reasoning effort;
+  `output_config.format` / `output_format` `{type: "json_schema", schema}` → a JSON-schema answer.
+- `max_tokens` above 65536 is capped, not refused (agents send their model's output limit).
+  `temperature` 0 to 1, `top_k`, `stop_sequences` (4 × 64). Ignored: `metadata`,
+  `context_management`, `service_tier`, `container`, `top_p`. `mcp_servers` non-empty: 400.
+
+**Non-stream response:**
 
 ```json
 { "id": "msg_<rid>", "type": "message", "role": "assistant", "model": "pooled/qwen3.6-35b-moe",
-  "content": [{ "type": "text", "text": "…" }],
-  "stop_reason": "end_turn", "stop_sequence": null,
-  "usage": { "input_tokens": 812, "output_tokens": 143 } }
+  "content": [
+    { "type": "thinking", "thinking": "…", "signature": "pooled1.<base64url of the reasoning>" },
+    { "type": "text", "text": "Let me check." },
+    { "type": "tool_use", "id": "toolu_<24>", "name": "get_weather", "input": { "city": "Paris" } } ],
+  "stop_reason": "tool_use", "stop_sequence": null,
+  "usage": { "input_tokens": 50, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 850, "output_tokens": 12 } }
 ```
 
-With thinking on, a `{"type": "thinking", "thinking": "…", "signature": ""}` block comes before
-the text block (the signature is empty: there is nothing to verify against; the official SDKs do
-not check it client-side).
+The thinking block is there when thinking is on (or the model reasoned anyway); its signature is
+`"pooled1." + base64url(utf-8 reasoning)`, always, so a client that sends the block back (Claude
+Code does, also with the display omitted) gives the room its exact reasoning back without any
+state here. It is not a secret: the same user holds both ends. The text block is left out when it
+is empty and there are calls; a call cut off by `max_tokens` is left out.
 
-Stream: `event: <type>\ndata: <json>\n\n`, in exactly this order:
+`stop_reason`: `tool_use` (the answer ended with calls, whatever the `tool_choice`), `end_turn`,
+`stop_sequence` (with `stop_sequence` set to the one that matched), `max_tokens`,
+`model_context_window_exceeded` (the context is full). When the host presses Stop the request ends
+as an error (529, or an `error` event and no `message_stop`).
+
+Usage: `input_tokens` = prompt tokens − the tokens the room already held, which are
+`cache_read_input_tokens`; `cache_creation_input_tokens` is 0. Claude Code adds the three up for
+its context size, so counting the cached tokens in `input_tokens` too would make it compact early.
+
+**Stream:** `event: <type>\ndata: <json>\n\n`. `message_start` when the host's `ai-genstart`
+arrives (all prompt tokens as `input_tokens`: the cache split is known only at the end), the
+thinking block's `content_block_start` right away when thinking is on, `ping`; then each block in
+the order the answer writes it, one at a time, `index` counting up: `content_block_start`, its
+deltas, `content_block_stop`. Deltas: `thinking_delta` (not with the display omitted) then a
+`signature_delta` with the reasoning blob before the thinking block stops; `text_delta`; for a
+call, `content_block_start {type: "tool_use", id, name, input: {}}` once the name is complete and
+declared, then `input_json_delta {partial_json}` fragments that join exactly into the call's
+arguments. Last, `message_delta {delta: {stop_reason, stop_sequence}, usage}` with the final usage
+(the SDKs and Claude Code take `input_tokens` and `cache_read_input_tokens` from it) and
+`message_stop`. An answer with neither text nor calls still gets an empty text block. A call cut
+off by `max_tokens` has its block closed as it is, then `stop_reason: "max_tokens"`. While queued:
+`event: ping` every 10 s, also on any 10 s of silence mid-stream. Failure mid-stream:
+`event: error\ndata: {"type":"error","error":{"type":"api_error","message":"…"}}`, close.
 
 ```
 event: message_start
-data: {"type":"message_start","message":{"id":"msg_r7","type":"message","role":"assistant","model":"pooled/qwen3.6-35b-moe","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":812,"output_tokens":0}}}
-
-event: content_block_start
-data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+data: {"type":"message_start","message":{"id":"msg_r7","type":"message","role":"assistant","model":"pooled/qwen3.6-35b-moe","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":900,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0}}}
 
 event: ping
 data: {"type":"ping"}
 
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_…","name":"get_weather","input":{}}}
+
 event: content_block_delta
-data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"city\": \""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"Paris\"}"}}
 
 event: content_block_stop
 data: {"type":"content_block_stop","index":0}
 
 event: message_delta
-data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":143}}
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":850,"output_tokens":12}}
 
 event: message_stop
 data: {"type":"message_stop"}
 
 ```
 
-- `message_start` is sent when the host's `ai-genstart` arrives (it carries the prompt token
-  count, so `input_tokens` is exact). While queued: `event: ping` every 10 s.
-- Thinking on: block 0 is `{"type": "thinking", "thinking": ""}` with `thinking_delta` deltas, a
-  `signature_delta` with `""`, `content_block_stop`; then the text block at index 1.
-- Failure mid-stream: `event: error\ndata: {"type":"error","error":{"type":"api_error","message":"…"}}`, close.
+**Claude Code** (`ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=pooled`): its
+requests (captured from 2.1.285: 23 tools, three system blocks, a mid-conversation system message,
+adaptive thinking with the display omitted, `output_config.effort`, `context_management`,
+`cache_control` everywhere) map without a 400 (`cli/test/fixtures/claude_code_messages.json`). Its
+prompt is ~20 k tokens before any history, so the room needs a large context (the MoE with
+`?ctx=65536`). `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps its side requests (titles, …)
+from interleaving with the agent's and resetting the room's cached sequence.
 
-`stop_reason`: `end_turn` (end token), `stop_sequence` (with `stop_sequence` set to the one that
-matched), `max_tokens`, `model_context_window_exceeded` (the context is full). When the host
-presses Stop the request ends as an error (529, or an `error` event and no `message_stop`).
+GPU (`tests/e2e/serve_messages.mjs`, a real host room, the CLI's HTTP server and the Anthropic SDK;
+2026-09-29 on the Spark, `?ctx=65536`): 14 of 14 checks on Qwen3 1.7B and on Qwen3.6 35B MoE
+(tool_use non-stream and streamed, a tool_result follow-up reusing the caches, `any`, a named tool,
+`none`, `disable_parallel_tool_use`, omitted thinking whose signature brings the reasoning back
+with the prefix reused, stop sequences, and a real Claude Code 2.1.285 `claude -p` run that reads a
+file with Read and answers with its contents: 53 s on the MoE, 366 s on the 1.7B; its second step
+reused 15230 of ~15.2 k prompt tokens on the MoE, 15551 of 15601 on the 1.7B).
 
 ### Anthropic: `GET /v1/models`
 
 When the request carries `anthropic-version` (or `x-api-key`), `/v1/models` answers in
 Anthropic's shape: `{"data": [{"type": "model", "id": "pooled/qwen3.6-35b-moe", "display_name": "Qwen3.6 35B MoE · Q4 (Pooled room ABCD)", "created_at": "<ISO>"}], "has_more": false, "first_id": "pooled/qwen3.6-35b-moe", "last_id": "pooled/qwen3.6-35b-moe"}`.
 
-`POST /v1/messages/count_tokens` → 404 `not_found_error` in v1 (it would need a host round trip;
-it is listed as a follow-up because Claude Code calls it, although Claude Code also needs tools).
+`POST /v1/messages/count_tokens` → 404 `not_found_error` (it would need a render-only round trip to
+the host, section 10). Claude Code's `-p` and agent loop run without it.
 
 ### Also
 
