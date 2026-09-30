@@ -42,7 +42,10 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 | Option | Meaning |
 |---|---|
 | `model` | (createRoom) a key of `room/models.js` MODELS, default `qwen3-1.7b` |
-| `code` | (createRoom) the room code; default a random one |
+| `code` | (createRoom) the room code; default a random one of six characters (`room/joingate.js` alphabet) |
+| `gate` | (createRoom) hold new links at the room page's gate (`gate.js`, docs/protocol.md "Joining a room"): a device gets in with the room's invite key (`node.inviteFragment`, `#k=…` on the room link), a pass the host gave it before, or `allowJoin()`. Default false (anyone with the code, as before); `pooled host` turns it on |
+| `ask` | (createRoom, with `gate`) false lets anyone with the code in without asking (`pooled host --allow-all`); default true |
+| `key`, `pass` | (joinRoom) the invite key from a room link, and a pass from an earlier admit: sent only to the host (`hello {join: 1, key, pass}`). The node waits in a gated host's lobby (`lobby`, then `admitted`; `node.pass` is what the host gave it) and walks straight into a host from before the gate |
 | `pledgeGB` | GPU memory this device lends; default half its largest buffer (1 to 64) |
 | `ctx` | context to ask for, clamped by `room/models.js` CTX (1.7B 16k, 27B 64k, MoE 128k); default the largest for the qwen35 models (MoE 128k, 27B 64k) and the room default (8k) for the 1.7B, then lowered to what the smallest GPU binding limit in the room holds (`maxBindMB` in each hello; none counts as 128 MiB). Every device gets it with its `ai-load` |
 | `ckpt` | the host's checkpoints (`ckpt.js`): `{ answers, pins, minPin, turns }` (default 4 answer and turn checkpoints, 4 pinned prefixes, pin a fixed start of 1024+ tokens, turn checkpoints on), or `false` for none |
@@ -76,6 +79,11 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 - `request(body, handler, { rid })`: the raw API ask, the same `ai-ask` body `pooled serve` sends
   (`cli/lib/common.js` askBody); `handler` gets the same room messages a `Bridge.ask` handler gets.
   Returns `{ rid, stop() }`. `hostMeta` is what the host's hello says (`{ api: 2, ctx }`).
+- The gate (a host created with `gate`): `inviteFragment` (`#k=<key>`), `waitingJoins()` (the
+  devices in the lobby, oldest first, with `line`: "otter wants to join (Mac, 8 GB)"),
+  `allowJoin(id?)` / `denyJoin(id?)` (the oldest when no id). Events `joinrequest` (`{ id, name,
+  meta, line }`) and `joinrequests` (the lobby changed). A device: `admission` (`wait`, `lobby`,
+  `in`), events `lobby` and `admitted`.
 - `redeal(why)`, `close()` (closes every link without counting them as departures, stops the re-deal timer, frees the engine and GPU). Events: `log`, `members`, `online`, `degraded`, `loaded`, `progress`,
   `hostgone`, `back`, `roomover`, `chat`, `chatanswer`, `answer`, `loadprogress` (this device's load, %),
   `signaling` (false when the signaling server dropped, true when it is back), `otherhost` (`{ was, now }`: the code now belongs to a host of another name, and this node left it), `version` (a hello on
@@ -84,7 +92,7 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 
 ## From the command line
 
-`pooled join <CODE>` and `pooled host` in [`@pooled/cli`](../../cli/README.md#lend-your-gpu-pooled-join-and-pooled-host-preview) are the supported way (memory rule, status line, reconnects, errors). `join.mjs` is the bare version, kept for scripts. Either way, a device that holds layers receives the hidden state of every token the room computes, which carries its prompts and answers: lend only to rooms you trust.
+`pooled join <CODE>` and `pooled host` in [`@pooled/cli`](../../cli/README.md#lend-a-computer-pooled-join--pooled-host-preview) are the supported way (memory rule, status line, reconnects, errors). `join.mjs` is the bare version, kept for scripts. Either way, a device that holds layers receives the hidden state of every token the room computes, which carries its prompts and answers: lend only to rooms you trust.
 
 ```sh
 node packages/room-node/join.mjs K7QX --gb 12 --name mac-studio [--signal host:port] [--models dir] [--state status.json]

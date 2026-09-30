@@ -17,7 +17,7 @@ For this room's 32768-token context:
     {"provider":{"pooled":{"npm":"@ai-sdk/openai-compatible","name":"Pooled room","options":{"baseURL":"http://127.0.0.1:8080/v1","apiKey":"x"},"models":{"pooled/qwen3.6-35b-moe":{"name":"Qwen3.6 35B MoE · Q4","tool_call":true,"limit":{"context":32768,"output":8192}}}}},"model":"pooled/pooled/qwen3.6-35b-moe"}
 ```
 
-To lend this computer's GPU to a room instead (it holds some of the layers), see [pooled join and pooled host](#lend-your-gpu-pooled-join-and-pooled-host-preview).
+To talk to the room's model from the terminal, see [pooled chat](#talk-to-a-room-pooled-chat-preview); to lend this computer's GPU to a room instead (it holds some of the layers), see [pooled join and pooled host](#lend-a-computer-pooled-join--pooled-host-preview).
 
 The settings appear once the room's model is ready (if the host has not started it yet, the bridge prints them when it is).
 
@@ -236,35 +236,85 @@ Errors come in each API's own shape (`{"error": {...}}` / `{"type": "error", "er
 
 Once a stream has started, an error comes as an error chunk (OpenAI, no `[DONE]`) or an `error` event (Anthropic).
 
-## Lend your GPU: pooled join and pooled host [preview]
+## Talk to a room: pooled chat [preview]
+
+Not on npm yet: in a checkout, `node cli/bin/pooled.js chat …` (see Development).
+
+`pooled chat` talks to a room's model from the terminal, like `ollama run`. It joins the room as an ask-only client (no layers, no GPU needed here) over the same bridge and request checks as `pooled serve`, streams each answer token by token, and keeps the conversation: every turn sends all of it, so the room's host reuses what it already computed for the earlier turns and prefills only the new one (the line under each answer says how many prompt tokens were reused). Switching `/think` changes how the conversation is rendered, so the turn after a switch prefills it again.
+
+```
+$ pooled chat "https://pooled.run/r/HJQN44#k=…"
+pooled chat · room HJQ-N44 · Qwen3 1.7B · Q8 · host spark-host
+  type a message · /help for commands · Ctrl-C stops an answer · /exit or Ctrl-D leaves
+>>> Name the largest planet in our solar system. One sentence.
+The largest planet in our solar system is Jupiter.
+room HJQ-N44 · Qwen3 1.7B · Q8 · 10 tokens · 56.7 tok/s · 24 prompt tokens
+>>> How many moons does it have? Answer in one sentence.
+Jupiter has over 79 confirmed moons.
+room HJQ-N44 · Qwen3 1.7B · Q8 · 10 tokens · 61.5 tok/s · 34 of 60 prompt tokens reused
+>>> /exit
+```
+
+- **In the chat**: `/clear` starts over, `/think` (or `--think`) lets the model reason first, shown dimmed under "thinking", `/exit` or Ctrl-D leaves. Ctrl-C stops the answer being written (the room stops too; the part already written stays in the conversation) and, at the prompt, leaves. While nothing is on screen yet a spinner says what the room is doing (joining, queued, reading the conversation).
+- **In scripts**: with a prompt argument, or with input that is not a terminal, it asks once, prints the answer on stdout (no reasoning, no status) and exits: `echo "What is 17 times 23?" | pooled chat "$LINK"` prints `391`. Without a started model it waits `--wait` seconds (120) and then fails.
+- **Errors** say what happened: no room with that code, no model started yet (in a terminal it waits for the host to start one), the host doesn't allow API clients, the host runs an older Pooled, the host didn't let it in.
+- `--system`, `--max-tokens` (8192), `--temperature`, `--name`, `--signal`; `pooled chat --help` lists them. Text from the room is printed without control characters, so a host can't send escape sequences to your terminal.
+
+What you type goes to the room's host and, under the room's visibility setting, to the other screens in the room; every device holding layers sees its hidden states (see "Who sees your prompts" above).
+
+## Lend a computer: pooled join / pooled host [preview]
+
+Not on npm yet: in a checkout, `node cli/bin/pooled.js join …` / `host …` (see Development).
 
 `pooled join` puts this computer in a room as one more device that holds layers, the way a browser tab does, without a browser: Pooled's own engine runs on [Dawn](https://dawn.googlesource.com/dawn) (npm `webgpu`) in this process. `pooled host` opens a room here. Both run in the foreground until Ctrl-C, which leaves the room and frees the GPU.
 
+What a lender sees:
+
 ```
-$ pooled join K7QX
-pooled join · room K7QX
+$ pooled join HJQ-N44
+pooled join · room HJQ-N44
   GPU      NVIDIA GB10 · 121.7 GB unified memory
   lending  64 GB  (121.7 GB of unified memory, less 42.6 GB kept for the system, capped at 64 GB per device; --gb to change)
-  anyone with the room code can use what this computer lends, and it sees the room's hidden states
+  whoever the host lets in can use what this computer lends, and it sees the room's hidden states
   (they carry the prompts and answers): lend to rooms you trust
   Ctrl-C leaves the room and frees the GPU
-room K7QX · online · 3 devices · layers 20-39 of qwen3.6-35b-moe · 24.1 tok/s · 1204 passes
+13:06:50 reached room HJQ-N44 as node-kqd
+13:06:50 waiting for the host to let this device in (a room's invite link gets in without asking)
+13:06:52 the host let this device in
+13:06:55 holding layers 14-27 of qwen3-1.7b (loaded in 3.5 s)
+room HJQ-N44 · online · 2 devices · layers 14-27 of qwen3-1.7b · 56.4 tok/s · 390 passes
 ```
 
+and a host:
+
+```
+$ pooled host --model qwen3-1.7b
+pooled host · room HJQ-N44 · Qwen3 1.7B · Q8
+  GPU      NVIDIA GB10 · 121.7 GB unified memory
+  lending  64 GB  (…)
+  every device holding layers sees the hidden states of what is asked here (they carry the prompts
+  and answers), and whoever is in can ask: share the invite link only with people you trust
+  Ctrl-C leaves the room and frees the GPU
+  invite   https://pooled.run/r/HJQN44#k=829tHCW9PENjehzYl3IGjg
+  join     pooled join "https://pooled.run/r/HJQN44#k=…"
+  chat     pooled chat "https://pooled.run/r/HJQN44#k=…"      (your own tools: pooled serve "…")
+  with the code HJQ-N44 alone, a device waits until you let it in (a allows, d denies)
+13:06:50 spark-join wants to join (computer, 8 GB): press a to let it in, d to turn it away
+13:06:52 spark-join was let in
+13:06:56 room online: spark-host 0-13 · spark-join 14-27
+```
+
+- **Getting in** (the room page's gate, [docs/protocol.md](../docs/protocol.md) "Joining a room"; the room page's side is PR #268). Room codes are six characters (`4TK-G9P`; four-character codes of older rooms still work), and a code only finds a room. A device that has the room's **invite link** (its `#k=` key; quote it in the shell) is let in at once; one with the code alone waits in the host's lobby, "waiting for the host to let you in", until the host allows it. The host gives each device it lets in a pass, so a device that loses its link and knocks again is let back in without asking. `pooled join`, `pooled chat` and `pooled serve` all take the link. A host from before the gate lets everyone in, as before.
+- **As a host**, `pooled host` prints the invite link and asks you about each device that comes with the code alone: `a` lets the oldest request in, `d` turns it away (the status line shows how many are waiting). Without a terminal nobody is asked, so such a device waits until you give it the link; `--allow-all` lets in anyone with the code (and room pages from before the gate, which can't wait in a lobby). In a terminal, Enter deals the layers over the devices in the room (and again, re-deals after more join); `--devices N` deals as soon as N devices are in, and deals again by itself when a device stayed away past the minute's grace (the room went on without it) and N are back.
 - **How much it lends.** WebGPU does not say how much memory a GPU has, so `pooled` asks the OS: `nvidia-smi` for NVIDIA cards, sysfs for AMD on Linux, the system's memory on Apple silicon and on GPUs that share it (GB10). A discrete GPU lends its free memory less 1.5 GB; unified memory lends the total less max(8 GB, 35%) (on Linux, never more than is free right now, less 2 GB); at most 64 GB per device. On a discrete GPU it then allocates that much for a moment to make sure it is there (`--no-check` skips this; unified memory skips it, since the OS's numbers are the memory itself and touching 64 GB of it takes about 20 s). `--gb N` sets it, `--gb max` keeps only a small margin. When the memory can't be read it lends half of the GPU's largest buffer and says so.
-- **The status line** shows the room, what is happening (waiting for the host to deal layers, loading, online, answering, a device left, rejoining), the devices in the room, the layers this computer holds, the room's speed on its last answer and how many passes ran here. Without a terminal (or with `--json-log`) it prints a line when that changes, and once a minute.
-- **When the link drops.** A lost signaling server does not stop the room (the links are direct); `pooled` reconnects to it with backoff (2, 4, 8, 16, 30 s), as the room page does, and tries the next server in a `--signal` list when one is down. When the link to the host drops it knocks for a minute and the host puts it back in its slot, with its layers still loaded. If the host does not come back, it joins the room again from scratch for `--wait` minutes (10 by default), then stops. It goes back only to a host of the same name: a room code is short and can be reused by a new room, and `pooled join` never joins a room you did not name (it leaves one with another host and says so). Without `--name`, the device's name is `node-` and 3 letters made from the hostname, the same on every run, so a `pooled join` started again after a crash takes back its slot.
-- **Errors** say what to do: no WebGPU adapter (Dawn needs Metal on macOS 26+, Vulkan on Linux, D3D12 on Windows), not enough GPU memory, no room with that code, the signaling server can't be reached, and a host on another protocol version (update with `npx @pooled/cli@latest`, or ask the host to reload).
-- **Dawn is optional.** `pooled serve` needs no GPU, and `webgpu` is about 95 MB with all five OS builds, so it is an optional peer dependency that `npm install @pooled/cli` does not fetch. `join` and `host` load it when they start and say how to install it when it is missing:
+- **The status line** shows the room, what is happening (waiting for the host to let you in, waiting for the host to deal layers, loading, online, answering, a device left, rejoining), the devices in the room, the layers this computer holds, the room's speed on its last answer and how many passes ran here. Without a terminal (or with `--json-log`) it prints a line when that changes, and once a minute.
+- **When the link drops.** A lost signaling server does not stop the room (the links are direct); `pooled` reconnects to it with backoff (2, 4, 8, 16, 30 s), as the room page does, and tries the next server in a `--signal` list when one is down. When the link to the host drops it knocks for a minute (with its pass) and the host puts it back in its slot, with its layers still loaded. If the host does not come back, it joins the room again from scratch for `--wait` minutes (10 by default), then stops. It goes back only to a host of the same name: a room code can be reused by a new room, and `pooled join` never joins a room you did not name (it leaves one with another host and says so). Without `--name`, the device's name is `node-` and 3 letters made from the hostname, the same on every run, so a `pooled join` started again after a crash takes back its slot.
+- **Errors** say what to do: no WebGPU adapter (Dawn needs Metal on macOS 26+, Vulkan on Linux, D3D12 on Windows), not enough GPU memory, no room with that code, the signaling server can't be reached, the host turned this device away, and a host on another protocol version (update with `npx @pooled/cli@latest`, or ask the host to reload).
+- **Dawn is optional.** `pooled serve` and `pooled chat` need no GPU, and `webgpu` is about 95 MB with all five OS builds, so it is an optional peer dependency that `npm install @pooled/cli` does not fetch. `join` and `host` load it when they start and say how to install it when it is missing (once published: `npm install -g @pooled/cli webgpu@0.6.1`, or `npx -p @pooled/cli -p webgpu@0.6.1 pooled join CODE`).
 
-```
-npm install -g @pooled/cli webgpu@0.6.1
-npx -p @pooled/cli -p webgpu@0.6.1 pooled join K7QX
-```
+**Who sees what.** Every device that holds layers computes on every prompt: it receives the hidden state of each token, which carries the prompts, tool results and answers, so a `pooled join` device can in principle read what is asked in the room it lends to, and every device let into a `pooled host` room can read what is asked there. Whoever is let in can also ask, and use what the devices lend. The gate decides who that is: share the invite link only with people you trust, and let in (a) only devices you recognise. The invite key is a secret in the link's fragment (browsers never send it to a server, but it shows in `ps` for the process given it and in shell history). The room's host picks the model (from Pooled's own list; a host can't make this device download anything else) and how many layers this device holds. Needs macOS 26 or newer, Linux with glibc 2.38 or newer (Ubuntu 24.04), or Windows (not yet tested).
 
-`pooled host --model qwen3.6-35b-moe` opens a room and prints its code and link. In a terminal, Enter deals the layers over the devices in the room (and again, re-deals after more join); `--devices N` deals as soon as N devices are in, and deals again by itself when a device stayed away past the minute's grace (the room went on without it) and N are back. Ask from the room page, or with `pooled serve <CODE>`. `pooled join --help` and `pooled host --help` list the options.
-
-**Who sees what.** Anyone with the room code can join; there is no password yet. Every device that holds layers computes on every prompt: it receives the hidden state of each token, which carries the prompts, tool results and answers, so a `pooled join` device can in principle read what is asked in the room it lends to, and every device that joins a `pooled host` room can read what is asked there. The room's host picks the model (from Pooled's own list; a host can't make this device download anything else) and how many layers this device holds. Lend to rooms you trust, and share a host's code only with devices you trust. Needs macOS 26 or newer, Linux with glibc 2.38 or newer (Ubuntu 24.04), or Windows (not yet tested).
+Not included yet: running as a background service (it is a foreground command), and phones (they join from the room page).
 
 ## Development
 
@@ -273,8 +323,9 @@ cd cli && npm install
 node bin/pooled.js serve ABCD --signal 127.0.0.1:9000   # against a room page opened with ?signal=127.0.0.1:9000
 npm run build && (cd ../packages/room-node && npm install)   # join / host: the room node bundle (dist/) and Dawn
 node bin/pooled.js join ABCD --signal 127.0.0.1:9000
+node bin/pooled.js chat ABCD --signal 127.0.0.1:9000
 ```
 
-`npm run build` bundles `packages/room-node` (with `engine/`, `room/`, `harness/` and `cli/lib/`) into `dist/room-node.js` with esbuild; `npm pack` runs it. Without the bundle, `join` and `host` use `packages/room-node` from the checkout. In a checkout, Dawn comes from `packages/room-node`'s own `webgpu` dependency: npm 11 does not install an optional peer dependency into `cli/` (`npm install --no-save webgpu` there reports "up to date" and adds nothing). `test/lend_test.mjs` covers argument parsing, the memory rule, the status line and the error messages.
+`npm run build` bundles `packages/room-node` (with `engine/`, `room/`, `harness/` and `cli/lib/`) into `dist/room-node.js` with esbuild; `npm pack` runs it. Without the bundle, `join` and `host` use `packages/room-node` from the checkout. In a checkout, Dawn comes from `packages/room-node`'s own `webgpu` dependency: npm 11 does not install an optional peer dependency into `cli/` (`npm install --no-save webgpu` there reports "up to date" and adds nothing). `test/lend_test.mjs` covers argument parsing, the memory rule, the status line and the error messages; `test/chat_test.mjs` pooled chat's arguments, the conversation it sends, the rendering and its errors; `packages/room-node/test/gate_test.mjs` the gate on a node host and device.
 
 Unit tests (`tests/unit/serve_*_test.js`, Deno) cover the request mapping and the byte-exact streams; `tests/e2e/serve.mjs` runs a real room with Qwen3 1.7B in headless Chromium and checks both APIs end to end, with the official SDKs. Design: [docs/design/serve.md](../docs/design/serve.md).
