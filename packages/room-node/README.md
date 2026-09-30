@@ -42,13 +42,18 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 | Option | Meaning |
 |---|---|
 | `model` | (createRoom) a key of `room/models.js` MODELS, default `qwen3-1.7b` |
-| `code` | (createRoom) the room code; default a random one |
+| `code` | (createRoom) the room code; default a random one of six characters (`room/joingate.js` alphabet) |
+| `gate` | (createRoom) hold new links at the room page's gate (`gate.js`, docs/protocol.md "Joining a room"): a device gets in with the room's invite key (`node.inviteFragment`, `#k=…` on the room link), a pass the host gave it before, or `allowJoin()`. Default false (anyone with the code, as before); `pooled host` turns it on |
+| `ask` | (createRoom, with `gate`) false lets anyone with the code in without asking (`pooled host --allow-all`); default true |
+| `key`, `pass` | (joinRoom) the invite key from a room link, and a pass from an earlier admit: sent only to the host (`hello {join: 1, key, pass}`). The node waits in a gated host's lobby (`lobby`, then `admitted`; `node.pass` is what the host gave it) and walks straight into a host from before the gate |
 | `pledgeGB` | GPU memory this device lends; default half its largest buffer (1 to 64) |
 | `ctx` | context to ask for, clamped by `room/models.js` CTX (1.7B 16k, 27B 64k, MoE 128k); default the largest for the qwen35 models (MoE 128k, 27B 64k) and the room default (8k) for the 1.7B, then lowered to what the smallest GPU binding limit in the room holds (`maxBindMB` in each hello; none counts as 128 MiB). Every device gets it with its `ai-load` |
 | `ckpt` | the host's checkpoints (`ckpt.js`): `{ answers, pins, minPin, turns }` (default 4 answer and turn checkpoints, 4 pinned prefixes, pin a fixed start of 1024+ tokens, turn checkpoints on), or `false` for none |
-| `modelDir` | local model files, in the layout of `source.js` LOCAL (`qwen17/model.gguf`, `q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`, ...); else HTTP range reads of the model's URL, as the page makes |
-| `signal` | a PeerServer `host:port`; default the PeerJS cloud server pooled.run uses |
+| `modelDir` | local model files: `<model key>/<file name>` as `pooled pull` keeps them (`qwen3-1.7b/Qwen3-1.7B-Q8_0.gguf`), or the layout of `source.js` LOCAL (`qwen17/model.gguf`, `q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`, ...); else HTTP range reads of the model's URL, as the page makes |
+| `signal` | a PeerServer `host:port` (TLS only on port 443), or `room/signal.js` specs as a comma list (`wss://host/path,cloud`): the first that answers is used, the next when one is down; default the PeerJS cloud server pooled.run uses. A signaling server that drops later is reconnected with backoff (the `signaling` event) |
+| `setup` | `setupNode` options: `webgpu` (an async loader returning `{ create, globals }`, for a caller that resolves Dawn from its own install, as `pooled join` does), `dawnFlags` |
 | `name` | this device's name in the room |
+| `expectHost` | `joinRoom`: the host's name this device will serve (a rejoin after its room was over). Room codes are short and get reused: a host of another name is another room, and the node leaves it before it hears anything else from it (the `otherhost` event). A worker always does this when a host of another name answers under the same code later (knocking after the host link dropped) |
 | `flags` | engine switches, as the room page's `?query` (`engine/preset.js`) |
 | `visibility` | who sees the answers on the room's screens (`room/visibility.js`): `all` (the room page's default), `asker` (only the asker; other screens get the "answering…" stand-in) or `host`. Set once; newcomers are told the mode |
 | `allowApi` | answer API asks from devices that joined as API clients (`pooled serve`, another OpenClaw in join mode); default true, `false` refuses them |
@@ -74,12 +79,20 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 - `request(body, handler, { rid })`: the raw API ask, the same `ai-ask` body `pooled serve` sends
   (`cli/lib/common.js` askBody); `handler` gets the same room messages a `Bridge.ask` handler gets.
   Returns `{ rid, stop() }`. `hostMeta` is what the host's hello says (`{ api: 2, ctx }`).
+- The gate (a host created with `gate`): `inviteFragment` (`#k=<key>`), `waitingJoins()` (the
+  devices in the lobby, oldest first, with `line`: "otter wants to join (Mac, 8 GB)"),
+  `allowJoin(id?)` / `denyJoin(id?)` (the oldest when no id). Events `joinrequest` (`{ id, name,
+  meta, line }`) and `joinrequests` (the lobby changed). A device: `admission` (`wait`, `lobby`,
+  `in`), events `lobby` and `admitted`.
 - `redeal(why)`, `close()` (closes every link without counting them as departures, stops the re-deal timer, frees the engine and GPU). Events: `log`, `members`, `online`, `degraded`, `loaded`, `progress`,
-  `hostgone`, `back`, `chat`, `chatanswer`, `answer`.
+  `hostgone`, `back`, `roomover`, `chat`, `chatanswer`, `answer`, `loadprogress` (this device's load, %),
+  `signaling` (false when the signaling server dropped, true when it is back), `otherhost` (`{ was, now }`: the code now belongs to a host of another name, and this node left it), `version` (a hello on
+  another protocol: `{ theirs, theyHost, name }`), `bye`. `joinRoom` rejects with `code: "room-not-found"`
+  as soon as the signaling server says there is no such room.
 
 ## From the command line
 
-`join.mjs` lends this machine's GPU to a room until Ctrl-C (no browser, no OpenClaw):
+`pooled join <CODE>` and `pooled host` in [`@pooled/cli`](../../cli/README.md#lend-a-computer-pooled-join--pooled-host-preview) are the supported way (memory rule, status line, reconnects, errors). `join.mjs` is the bare version, kept for scripts. Either way, a device that holds layers receives the hidden state of every token the room computes, which carries its prompts and answers: lend only to rooms you trust.
 
 ```sh
 node packages/room-node/join.mjs K7QX --gb 12 --name mac-studio [--signal host:port] [--models dir] [--state status.json]

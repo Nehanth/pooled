@@ -50,15 +50,18 @@ import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from 
 import { pickSampler } from "../../room/sampling.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, helloMeta, pieceDecoder, API_LIMITS, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "../../room/api.js";
 import { tokenTexts } from "../../harness/model-common.js";
-import { uniqueName, PING_MS, lastHeard, isSilentGone, lapTimeout } from "../../room/liveness.js";
+import { uniqueName, PING_MS, lastHeard, isSilentGone, lapTimeout, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
 import { lookupDrafts } from "../../room/lookup.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
 import { pledgeGB, afterLoadDeath } from "../../room/pledge.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes } from "../../engine/gguf.js";
-import { signalOpts, guardChunks } from "../../cli/lib/room.js";
+import { guardChunks } from "../../cli/lib/room.js";
+import { parseServer, openPeer, reconnectDelay, FALLBACK_ERRORS } from "../../room/signal.js";
 import { withDefaults, finishRequest, askBody, needsV2, ApiError } from "../../cli/lib/common.js";
 import { chatRecipients } from "../../room/visibility.js";
 import { Ask, Collector } from "../../cli/lib/answer.js";
+import { hostGate, gateHelloFields, holdConn, allowJoin, denyJoin, waitingJoins, joinHelloFields, deviceGateMessage, onHostHello,
+  keyFragment, randomCode, CODE_LEN } from "./gate.js";
 
 export const PREFIX = "pooled-room-";
 const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
@@ -87,8 +90,18 @@ export class RoomNode extends EventEmitter {
   // whoever asked; an agent host uses "asker" so its prompts and answers stay off other devices'
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
-    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true } = {}) {
+    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null } = {}) {
     super();
+    // joining (gate.js, docs/protocol.md "Joining a room"). A device: the invite key from its link and the
+    // pass the host gave it; admission: null | "wait" | "lobby" | "in". A host: its gate (createRoom), and
+    // the links waiting in its lobby
+    this.key = key; this.pass = pass; this.admission = null;
+    this.gate = null; this.lobbyConns = new Map(); this.protocol = PROTOCOL;
+    this.setup = setup;   // setupNode options (webgpu: a loader for Dawn, dawnFlags)
+    // a worker: the host's name it will serve under this code (a rejoin after the room was over).
+    // Room codes are short and reusable; a host of another name is another room, which this device
+    // did not choose to join: it leaves (the "otherhost" event) before it hears anything else
+    this.expectHost = expectHost;
     this.visibility = visibility === "asker" || visibility === "host" ? visibility : "all";
     this.allowApi = allowApi !== false;
     this.ctxAsk = ctx;
@@ -101,6 +114,7 @@ export class RoomNode extends EventEmitter {
     this.peer = null; this.isHost = false; this.code = null; this.meta = null;
     this.conns = new Map();    // peer id -> { conn, name, meta, link, stripes, seen, missed, rtt }
     this.roster = new Map();   // host: id -> { name, meta }
+    this.probedHellos = new WeakMap();   // host: a hello held back while its namesake is pinged -> when
     this.pending = new Map();  // ensureLink in flight
     this.ai = { role: null, engine: null, tok: null, cfg: null, device: null, chain: [], next: null, hostId: null,
       readyPeers: new Set(), pos: 0, fed: [], pendingCtl: {}, waiters: new Map(), q: Promise.resolve(), lock: Promise.resolve(),
@@ -114,32 +128,80 @@ export class RoomNode extends EventEmitter {
 
   // ---------------- link layer (room.js wire / onData, without the DOM) ----------------
   async open(id) {
-    await setupNode();
+    await setupNode(this.setup);
     this.meta = await probeMeta(this.pledgeGB, { gbps: this.gbpsPin });
-    return new Promise((resolve, reject) => {
-      const Peer = env.Peer;
-      this.peer = new Peer(id, { debug: 0, config: ICE, ...signalOpts(this.signal) });
-      const t = setTimeout(() => reject(new Error("signaling timeout")), 20000);
-      this.peer.on("open", () => { clearTimeout(t); resolve(); });
-      this.peer.on("error", (err) => { if (!this.peer.open) { clearTimeout(t); reject(new Error(`peer error: ${err.type || err.message}`)); } else if (err.type !== "peer-unavailable") this.log(`peer error: ${err.type || err.message}`); });
-      this.peer.on("disconnected", () => { if (!this.closing) setTimeout(() => { try { if (!this.peer.destroyed) this.peer.reconnect(); } catch {} }, 1000); });
-      this.peer.on("connection", (conn) => this.accept(conn));
-      this.pingTimer = setInterval(() => this.pingTick(), PING_MS);
+    // the first signaling server that answers (room/signal.js openPeer: a server that is down or
+    // unreachable hands over to the next; a taken code or a bad id is an answer, not an outage)
+    const servers = nodeServers(this.signal);
+    // take connections from the moment the Peer exists: the signaling server can hand one over in the
+    // same read as "open" (a device knocking or rejoining while this host starts), before the await
+    // below returns, and PeerJS drops a connection event nobody listens to
+    const Base = env.Peer, node = this;
+    const PeerWithAccept = function (pid, o) { const p = new Base(pid, o); p.on("connection", (conn) => { if (!p.destroyed) node.accept(conn); }); return p; };
+    let got;
+    try {
+      got = await openPeer(PeerWithAccept, id, { debug: 0, config: ICE }, servers, {
+        onTry: (s, i, err) => { if (err) this.log(`signaling: ${servers[i - 1].label} failed (${err.type || err.message}); trying ${s.label}`); },
+      });
+    } catch (err) {
+      const e = new Error(err.type === "signaling-down" ? err.message : `peer error: ${err.type || err.message}`);
+      e.type = err.type; e.tried = err.tried;
+      throw e;
+    }
+    this.peer = got.peer; this.server = got.server;
+    // (a lost signaling server is watchSignaling's to report)
+    this.peer.on("error", (err) => { if (err.type !== "peer-unavailable" && !FALLBACK_ERRORS.has(err.type)) this.log(`peer error: ${err.type || err.message}`); });
+    this.watchSignaling();
+    this.pingTimer = setInterval(() => this.pingTick(), PING_MS);
+  }
+  // the signaling server dropped (the cloud restarts, the network blips): links already open keep
+  // working, only new devices can't find the room. Reconnect with room/signal.js's backoff (2, 4, 8,
+  // 16, 30 s ...) until it is back, as the room page does (room.js watchSignaling).
+  watchSignaling() {
+    const p = this.peer;
+    let tries = 0, timer = null;
+    this.signalDown = false;
+    const again = () => {
+      timer = null;
+      if (this.closing || p !== this.peer || p.destroyed || p.open) return;
+      // still connecting from the last try: under Node a refused WebSocket never closes, so PeerJS
+      // would wait on it forever ("still trying to make the initial connection"); drop it first
+      if (!p.disconnected) { try { p.disconnect(); } catch {} }
+      try { p.reconnect(); } catch {}
+      if (!timer) { timer = setTimeout(again, reconnectDelay(tries++)); timer.unref?.(); }
+    };
+    p.on("disconnected", () => {
+      if (this.closing || p !== this.peer || p.destroyed) return;
+      if (!this.signalDown) { this.signalDown = true; this.log("lost the signaling server: links already open keep working; reconnecting"); this.emit("signaling", false); }
+      if (!timer) { timer = setTimeout(again, reconnectDelay(tries++)); timer.unref?.(); }
+    });
+    p.on("open", () => {
+      clearTimeout(timer); timer = null; tries = 0;
+      if (this.signalDown) { this.signalDown = false; this.log("signaling is back"); this.emit("signaling", true); }
     });
   }
   accept(conn) {
     guardChunks(conn);
     conn.on("open", () => {
+      // a host with a gate: a new link waits in the lobby until its hello lets it in (gate.js)
+      if (this.isHost && this.gate && holdConn(this, conn)) return;
       if (conn.label === "stripe") {   // extra association for the wire, not a new peer
         const e = this.conns.get(conn.peer);
-        if (e) { attachWire(e.link, conn, (m) => this.onData(conn.peer, m)); e.stripes.push(conn); }
+        if (e) this.attachStripe(e, conn);
         return;
       }
       this.wire(conn);
       conn.send(this.helloMsg());
     });
   }
-  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax() } : this.meta, v: PROTOCOL, ...extra }; }
+  // (a host's meta names the model it will run, so a device joining before Start can say which)
+  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax(), ...(this.ai.model ? { model: this.ai.model } : {}) } : this.meta, v: PROTOCOL, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
+  attachStripe(e, conn) { attachWire(e.link, conn, (m) => this.onData(conn.peer, m)); e.stripes.push(conn); }
+  // host: the room's invite link fragment (#k=...), and Allow / Deny for a device in the lobby
+  get inviteFragment() { return keyFragment(this.gate?.key); }
+  allowJoin(id) { return allowJoin(this, id); }
+  denyJoin(id) { return denyJoin(this, id); }
+  waitingJoins() { return waitingJoins(this); }
   // a new link replaces any older one to the same peer id (a device that came back): the old one's
   // close handler sees it is not current and does nothing
   wire(conn, name, initiator = false) {
@@ -246,11 +308,56 @@ export class RoomNode extends EventEmitter {
     if (e) e.seen = performance.now();
     if (!d || typeof d.t !== "string") return;
     if (process.env.RN_DEBUG && d.t !== "ping" && d.t !== "pong") this.log(`<- ${d.t} from ${e?.name || from}`);
+    if (this.otherHost && from === PREFIX + this.code) return;   // a stranger's room under this code: nothing from it
     if (d.t.startsWith("ai-")) { this.aiOnData(from, d).catch((err) => this.log("error: " + err.message)); return; }
     switch (d.t) {
       case "hello": {
-        if (d.v !== PROTOCOL) { this.sendTo(from, { t: "bye", reason: `${this.name} speaks room protocol ${PROTOCOL}, this device ${d.v}: reload the older one` }); return; }
+        if (d.v !== PROTOCOL) {
+          this.sendTo(from, { t: "bye", reason: `${this.name} speaks room protocol ${PROTOCOL}, this device ${d.v}: reload the older one` });
+          this.emit("version", { theirs: d.v, theyHost: !this.isHost && from === PREFIX + this.code, name: cleanName(d.name, from) });
+          return;
+        }
+        // the name is held by another link (a `pooled join` killed and started again, a reloaded
+        // tab, before the old link times out): ping it and decide in a moment, as room.js does for a
+        // namesake quiet for a second; a namesake that stays silent is dropped, and this device takes
+        // its name and its slot. Any namesake is pinged, not only a quiet one: a process started
+        // again at once comes back while its old link was still heard less than a second ago
+        if (this.isHost && !d.back) {
+          const heardOf = (id) => lastHeard(this.conns.get(id));
+          const name = cleanName(d.name, from);
+          if (!this.probedHellos.has(d)) {
+            const quiet = [...this.roster].find(([id, m]) => id !== from && m.name === name)?.[0];
+            if (quiet) {
+              const since = performance.now();
+              this.sendTo(quiet, { t: "ping", ts: since });
+              this.probedHellos.set(d, since);
+              setTimeout(() => { if (this.conns.get(from) === e && !this.closing) this.onData(from, d); }, NAME_PROBE_MS).unref?.();
+              return;
+            }
+          } else {
+            for (const id of staleNamesakes(name, from, this.roster, heardOf, this.probedHellos.get(d))) {
+              const old = this.conns.get(id);
+              this.log(`${name} is back under a new link: dropping its old one, silent for ${old ? Math.round((performance.now() - lastHeard(old)) / 1000) : "?"} s`);
+              this.roster.delete(id);
+              if (old) { this.conns.delete(id); try { old.conn.close(); } catch {} this.peerGone(id, old); }
+            }
+          }
+        }
         d.name = cleanName(d.name, from);
+        // a worker: the host's hello comes first on its link. Under this code before (or asked for by
+        // expectHost) there was a host of another name: this is another room, so leave it
+        if (!this.isHost && from === PREFIX + this.code) {
+          const want = this.expectHost || this.hostName;
+          if (want && d.name !== want) {
+            this.otherHost = { was: want, now: d.name };
+            this.log(`room ${this.code} now has another host (${d.name}, was ${want}): leaving it`);
+            this.dropLink(from);
+            clearInterval(this.knock); this.knock = null; this.freeLayers(null); this.ai.online = false;
+            this.emit("otherhost", this.otherHost);
+            return;
+          }
+        }
+        if (!this.isHost && from === PREFIX + this.code) onHostHello(this, d);
         d.meta = helloMeta(d.meta, this.isHost);
         // a device coming back under its own name while its old link is still open but silent (a
         // phone back from a lock): the old link is dead, drop it now (room.js dropStaleNamesake)
@@ -269,7 +376,11 @@ export class RoomNode extends EventEmitter {
           this.broadcastRoster();
           if (this.visibility !== "all") this.sendTo(from, { t: "ai-visibility", mode: this.visibility });
           if (this.hosting() && !this.loadDeath(from, d)) this.rejoin(from, d.name);
-          // a newcomer while the room is online is an ask-only guest (aiWelcome)
+          // a newcomer while the room is online is an ask-only guest (aiWelcome). The layer map first:
+          // a device back after the room re-dealt without it (away past the grace, it missed that
+          // deal's ai-layers) still holds its old layers, and frees them when it is not in the map
+          // (also while a deal loads: it is the map of the deal in progress)
+          if (this.ai.layersByName && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-layers", by: this.ai.layersByName });
           if (this.ai.online && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-ready-all", model: this.ai.model, label: MODELS[this.ai.model]?.label, ctx: this.ctxMax() });
           this.log(`${d.meta?.api ? "API client " : ""}${d.name} ${d.back ? "came back" : "joined"}${d.meta?.webgpu ? ` (${d.meta.gpu}, ${d.meta.contribGB} GB)` : ""}`);
         } else if (from === PREFIX + this.code) this.hostName = d.name;
@@ -277,6 +388,7 @@ export class RoomNode extends EventEmitter {
         return;
       }
       case "leaving": try { e?.conn.close(); } catch {} return;
+      case "lobby": case "admit": if (!this.isHost && from === PREFIX + this.code) deviceGateMessage(this, d); return;
       case "bye": this.log(`bye from ${e?.name || from}: ${d.reason}`); this.emit("bye", d.reason); return;
       case "roster":
         if (from !== PREFIX + this.code) return;
@@ -380,7 +492,7 @@ export class RoomNode extends EventEmitter {
   }
   async workerLoad(from, d) {
     const ai = this.ai;
-    if (d.v != null && d.v !== PROTOCOL) { this.sendTo(from, { t: "ai-error", message: `protocol ${PROTOCOL} here, ${d.v} on the host` }); return; }
+    if (d.v != null && d.v !== PROTOCOL) { this.sendTo(from, { t: "ai-error", message: `protocol ${PROTOCOL} here, ${d.v} on the host` }); this.emit("version", { theirs: d.v, theyHost: true }); return; }
     if (!MODELS[d.model]) { this.sendTo(from, { t: "ai-error", message: `unknown model ${d.model}`, load: 1 }); return; }
     const kv = kvForLoad(d.model, d.kv, null);
     // re-seated in its slot (the host link dropped and came back) with the same layers still on the
@@ -407,7 +519,7 @@ export class RoomNode extends EventEmitter {
             onProgress: (done, total) => {
               if (ai.startFailed) throw new Error(ai.startFailed);
               const pct = Math.round(total ? (done / total) * 100 : 0);
-              if (pct !== lastPct) { lastPct = pct; this.sendTo(ai.hostId, { t: "ai-progress", pct }); }
+              if (pct !== lastPct) { lastPct = pct; this.sendTo(ai.hostId, { t: "ai-progress", pct }); this.emit("loadprogress", pct); }
             } });
           Object.assign(ai, { engine: r.engine, device: r.device, cfg: r.cfg, range: d.range, model: d.model });
           ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv };
@@ -462,8 +574,9 @@ export class RoomNode extends EventEmitter {
     const ai = this.ai;
     this.failWaiters(new Error("the host left"));
     this.log("lost the link to the host");
+    this.admission = null;   // back in through the gate (with the pass it was given) when it knocks
     this.emit("hostgone");
-    if (this.closing || this.knock) return;
+    if (this.closing || this.knock || this.otherHost) return;
     const hostId = PREFIX + this.code, t0 = Date.now();
     this.knock = setInterval(() => {
       if (this.closing || this.conns.has(hostId)) { clearInterval(this.knock); this.knock = null; return; }
@@ -482,7 +595,7 @@ export class RoomNode extends EventEmitter {
         if (this.conns.has(hostId)) { try { conn.close(); } catch {} return; }
         clearInterval(this.knock); this.knock = null;
         this.wire(conn, "host", true);
-        conn.send(this.helloMsg({ back: 1 }));
+        conn.send(this.helloMsg({ back: 1, ...joinHelloFields(this) }));
         ai.hostId = hostId;
         this.log("back in the room");
         this.emit("back");
@@ -560,6 +673,7 @@ export class RoomNode extends EventEmitter {
       }
     } catch (err) { ai.starting = false; await src.close(); throw err; }
     const nameOf = (id) => this.conns.get(id)?.name || id;
+    ai.dealtPeers = new Set(this.gpuPeers());   // every device this deal saw, left out or not (for a --devices host's re-deal)
     const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: this.conns.get(id)?.meta }));
     const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap });
     const { ranges, assigned } = plan;
@@ -584,8 +698,10 @@ export class RoomNode extends EventEmitter {
       if (!keep) {
         this.freeLayers("host");
         ai.loadingShard = true;
+        let lastPct = -1;
         const r = await loadShard({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log,
-          onGpuError: (m) => this.log("GPU error: " + m) });
+          onGpuError: (m) => this.log("GPU error: " + m),
+          onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
         Object.assign(ai, { engine: r.engine, device: r.device, tok: r.tok, cfg: r.cfg, range: ranges[0], role: "host" });
         ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv };
       }
@@ -613,6 +729,16 @@ export class RoomNode extends EventEmitter {
     return p;
   }
   hosting() { return this.isHost || !!this.modelHost; }
+  // lend another amount (GB), as the room page's stepper does: a device tells its host ("pledge"), a
+  // host tells the room; the next deal uses it
+  setPledge(gb) {
+    const v = Math.min(64, Math.max(0.5, +gb || 0));
+    this.pledgeGB = v;
+    if (this.meta) this.meta.contribGB = v;
+    if (this.isHost) { this.broadcast({ t: "pledge", gb: v }); this.emit("members"); }
+    else if (this.ai.hostId && this.conns.has(this.ai.hostId)) this.sendTo(this.ai.hostId, { t: "pledge", gb: v });
+    return v;
+  }
   ctxMax() { return this.ai.engine?.maxSeq || nodeCtxFor(this.ai.model || "qwen3-1.7b", this.ctxAsk); }
   // v2 asks (tools): the loaded model's template profile and token texts (room.js apiProfile / apiTokenTexts)
   apiProfile() { const ai = this.ai; return ai.apiProf ||= templateProfile(ai.tok?.chatTemplate || "", ai.tok); }
@@ -1280,7 +1406,8 @@ export class RoomNode extends EventEmitter {
     return { code: this.code, name: this.name, hosting: this.hosting(), role: ai.role, model: ai.model, online: !!ai.online, degraded: !!ai.degraded,
       range: ai.range, devices: devs, pledgedGB: +devs.reduce((a, d) => a + d.gb, 0).toFixed(1),
       split: this.split?.names?.map((nm, i) => `${nm} ${this.split.ranges[i][0]}-${this.split.ranges[i][1] - 1}`) || null,
-      ctx: ai.engine?.maxSeq || null,
+      ctx: ai.engine?.maxSeq || null, loading: !!ai.loadingShard, signaling: !this.signalDown,
+      passes: this.hosting() ? ai.frames || 0 : this.frames || 0,
       ckpt: ai.ckpt ? { pinned: ai.ckpt.items.filter((x) => x.pin).map((x) => x.ids.length), answers: ai.ckpt.items.filter((x) => !x.pin).map((x) => x.ids.length), hits: { ...ai.ckpt.hits } } : null };
   }
 
@@ -1288,8 +1415,10 @@ export class RoomNode extends EventEmitter {
     this.closing = true;
     clearInterval(this.pingTimer); clearInterval(this.knock); clearTimeout(this.ai.idleRedeal);
     try { this.broadcast({ t: "leaving" }); } catch {}
+    for (const L of this.lobbyConns.values()) try { L.conn.send({ t: "bye", reason: "the room closed" }); } catch {}
     await new Promise((r) => setTimeout(r, 200));
     try { this.peer?.destroy(); } catch {}
+    this.lobbyConns.clear();
     clearTimeout(this.ai.idleRedeal);
     this.failWaiters(new Error("the room closed"));
     this.ai.online = false; this.ai.chain = []; this.ai.ckpt = null;
@@ -1335,9 +1464,14 @@ export function eventEncoder(push) {
 }
 
 // Host a room on this machine. -> the RoomNode (room.code, room.start(), room.ask(), room.close())
-export async function createRoom({ model = "qwen3-1.7b", pledgeGB, code = randCode(4), ...opts } = {}) {
+// gate: hold links at the room page's gate (gate.js; pooled host turns it on). Off by default, so a
+// caller without a way to answer join requests (the OpenClaw plugin) keeps a room anyone with the code
+// joins, as before. ask (with the gate): hold new devices until allowJoin() (default), false to let
+// anyone with the code in; a device with the room's invite key (node.inviteFragment) is let in either way
+export async function createRoom({ model = "qwen3-1.7b", pledgeGB, code = randomCode(CODE_LEN), ask = true, gate = false, ...opts } = {}) {
   const node = new RoomNode({ pledgeGB, ...opts });
   node.isHost = true; node.code = code; node.ai.model = model; node.ai.role = "host";
+  if (gate) node.gate = hostGate({ ask });
   await node.open(PREFIX + code);
   return node;
 }
@@ -1349,16 +1483,36 @@ export async function joinRoom(code, { pledgeGB, joinMs = 20000, ...opts } = {})
   await node.open(undefined);
   const hostId = PREFIX + node.code;
   node.ai.hostId = hostId;
-  await new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`no room ${node.code}`)), joinMs);
-    const conn = node.peer.connect(hostId, { reliable: true });
-    guardChunks(conn);
-    conn.on("open", () => {
-      node.wire(conn, "host", true);
-      conn.send(node.helloMsg());
-      clearTimeout(t); resolve();
+  try {
+    await new Promise((resolve, reject) => {
+      const fail = (e) => { clearTimeout(t); node.peer.off("error", onPeerErr); reject(e); };
+      const notFound = () => Object.assign(new Error(`no room ${node.code}`), { code: "room-not-found" });
+      // the signaling server knows no such id: the room does not exist (or its host left)
+      const onPeerErr = (err) => { if (err?.type === "peer-unavailable" && String(err.message || "").includes(hostId)) fail(notFound()); };
+      node.peer.on("error", onPeerErr);
+      const t = setTimeout(() => fail(notFound()), joinMs);
+      const conn = node.peer.connect(hostId, { reliable: true });
+      guardChunks(conn);
+      conn.on("open", () => {
+        node.wire(conn, "host", true);
+        conn.send(node.helloMsg(joinHelloFields(node)));
+        clearTimeout(t); node.peer.off("error", onPeerErr); resolve();
+      });
+      conn.on("error", (e) => fail(e));
     });
-    conn.on("error", (e) => { clearTimeout(t); reject(e); });
-  });
+  } catch (err) { await node.close().catch(() => {}); throw err; }
   return node;
+}
+
+// --signal: "host:port" (the old form: TLS only on port 443, as cli/lib/room.js signalOpts), or
+// room/signal.js specs as a comma list (cloud, wss://host:port/path, ...); none -> the PeerJS cloud
+export function nodeServers(signal) {
+  const out = [];
+  for (const s of String(signal || "cloud").split(",").map((x) => x.trim()).filter(Boolean)) {
+    const bare = /^[^/:\[\]]+:(\d+)$/.exec(s);
+    const p = parseServer(s, bare ? +bare[1] === 443 : true);
+    if (p && !out.some((x) => x.spec === p.spec)) out.push(p);
+  }
+  if (!out.length) throw new Error(`--signal: no usable server in "${signal}"`);
+  return out;
 }
