@@ -272,7 +272,7 @@ class FakeEngine {
   async runHidden(x, pos) { this.run([x[0]], pos); return Float32Array.of(x[0]); }
   async runHiddenBatch(xs, base) { this.run(Array.from(xs), base); return Float32Array.from(xs); }
 }
-const HOST_FNS = ["sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin", "ckptPrune"];
+const HOST_FNS = ["ckptEngine", "sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin", "ckptPrune"];
 function host({ disk = store(), engine = new FakeEngine(0, 8), chain = ["w0"], ckptMax = 2, out = [], ckptN = 0 } = {}) {
   const ai = { role: "host", model: "m", chain, pendingCtl: {}, fed: [], pos: 0, engine, ckpt: null, ckptN };
   const fns = roomFns(HOST_FNS, { ai, CKPT_MAX: ckptMax, PrefixIndex, DROP_ALL, wireStats: { lastMax: 0 }, ckptDisk: disk, roomCode: "ABC", sendHidden: (to, msg) => out.push(msg) });

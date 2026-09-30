@@ -92,8 +92,9 @@ clients, the host runs an older Pooled without tool calling, no model running ye
 
 ## Known gaps
 
-- The first turn prefills OpenClaw's whole prompt (8-12k tokens): about 70 s for the 1.7B split
-  over two devices. The node has no pinned system-prompt cache yet (the browser room's pinned
-  checkpoints, #251 / #260); follow-ups in the same session reuse the cached prefix.
+- The very first turn after the gateway starts prefills OpenClaw's whole prompt (8-12k tokens).
+  After that the host keeps it as pinned checkpoints (`packages/room-node/ckpt.js`): new sessions,
+  side requests and the next day's sessions start from them, and follow-ups from the last answer.
+  The checkpoints live in GPU memory only, so a gateway restart starts cold again.
 - macOS needs 26 or newer for the `webgpu` package's Dawn build; Windows is untested.
 - Small models need the trimmed tool profile; the MoE is the model to use.

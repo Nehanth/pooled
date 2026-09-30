@@ -2910,8 +2910,11 @@ function ckptClear(tellChain = false) {   // engines rebuilt or in an unknown st
 }
 // pin: this save is the system prompt + tools (Code mode, issue #73). It is kept apart from the
 // CKPT_MAX answer checkpoints, never evicted by them, and replaces the previous pinned one.
+// the engine keeps checkpoints here: the qwen35 engine (the dense one has GPU slots too, for the room
+// node, and says hostCkpt: false, so a browser host keeps to the qwen35 engine as before)
+function ckptEngine() { return !!ai.engine?.saveSlot && ai.engine.hostCkpt !== false; }
 function ckptSave(pin = false) {
-  if (!CKPT_MAX || !ai.fed?.length || !ai.engine?.saveSlot) return;
+  if (!CKPT_MAX || !ai.fed?.length || !ckptEngine()) return;
   if (!ai.ckpt) ckptClear();
   // a worker applies sv before dp, so a save riding with DROP_ALL would be gone at once on every
   // worker: skip it (the host would otherwise index a slot the chain does not have)
@@ -3568,7 +3571,7 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
     const tag = pinTag || "code";
     if (pinned && ai.pinInfo && reused >= pinned.ids.length && pinned.ids.length <= ids.length && pinned.ids.every((t, i) => t === ids[i])) ai.pinInfo.hitAt = performance.now();
     if (pin && pinned && ai.pinInfo && ai.pinInfo.tag !== tag && performance.now() - ai.pinInfo.hitAt < PIN_KEEP_MS) pin = 0;
-    const cut = CKPT_MAX && ai.engine.saveSlot ? pinSplit(reused, pin, ids.length) : 0;
+    const cut = CKPT_MAX && ckptEngine() ? pinSplit(reused, pin, ids.length) : 0;
     let logits = null;
     if (!cut) logits = rest.length ? await aiPrefill(rest, { aborted, onStatus, desc }) : null;
     else {
@@ -4165,7 +4168,9 @@ async function aiOnData(from, d) {
         $("ldg-title").textContent = `layers ${d.range[0]}–${d.range[1] - 1} ready`;   // the card stays up as it is (Starting) until ai-ready-all
         $("ldg-sub").textContent = "syncing with the rest of the room";
         $("ldg-fill").style.width = "100%";
-        sendTo(ai.hostId, { t: "ai-ready", slots });   // the host forgets the checkpoints not in slots
+        // slots: the host forgets the checkpoints not in them; ckpt: this device applies sv / ld / dp
+        // (a room node hosting a dense model checks it: tabs from before the dense engine had slots ignore them)
+        sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0 });
       } catch (err) {
         if (onLoadError(ai.startFailed) === "stopped") { workerStopped(); break; }   // the host stopped the start (ai-start-failed): this load stopped with it
         aiLoading(false);

@@ -44,7 +44,8 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 | `model` | (createRoom) a key of `room/models.js` MODELS, default `qwen3-1.7b` |
 | `code` | (createRoom) the room code; default a random one |
 | `pledgeGB` | GPU memory this device lends; default half its largest buffer (1 to 64) |
-| `ctx` | context to ask for, clamped by `room/models.js` CTX (1.7B 16k, 27B 32k, MoE 64k) |
+| `ctx` | context to ask for, clamped by `room/models.js` CTX (1.7B 16k, 27B 32k, MoE 64k); default the largest for the qwen35 models (MoE 64k, 27B 32k) and the room default (8k) for the 1.7B. Every device gets it with its `ai-load` |
+| `ckpt` | the host's checkpoints (`ckpt.js`): `{ answers, pins, minPin }` (default 3 answers, 4 pinned prefixes, pin a fixed start of 1024+ tokens), or `false` for none |
 | `modelDir` | local model files, in the layout of `source.js` LOCAL (`qwen17/model.gguf`, `q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf`, ...); else HTTP range reads of the model's URL, as the page makes |
 | `signal` | a PeerServer `host:port`; default the PeerJS cloud server pooled.run uses |
 | `name` | this device's name in the room |
@@ -100,8 +101,21 @@ api). The link layer, dealing, laps, prefill, plain and speculative decode (with
 - `ai-share` (a smaller share after a killed load), `ai-linklost` (fail the laps in flight);
 - serve v2: `hello {api: 2, ctx}`, v1 and v2 asks, `ai-call`.
 
-Left out for now: checkpoints and pinned prefixes (a fresh 8-12k-token prompt is prefilled in full;
-frames still carry and apply `sv`/`ld`/`dp` control from a browser host), resuming a reloaded host,
+- checkpoints (`ckpt.js`, the browser room's design from #251 / #260): the host saves the state of
+  every device (`sv` on the next frame) at a prompt's fixed start and after every answer, and resumes
+  a new prompt from the longest saved prefix of it (`ld`), so only what is new is prefilled:
+  - pinned prefixes: the system prompt + tools, and an agent's own cache boundary inside its system
+    prompt (OpenClaw's `<!-- /openclaw:attempt:STABLE -->`: the date and model name that follow it
+    change, the ~11k tokens before it do not). Answers never evict them; up to 4, by last use.
+  - answer checkpoints: up to 3, evicted by GreedyDual (the cost to rebuild past the pinned prefix,
+    aged by use), so a session title or compaction request does not push out the conversation.
+  - one index for the whole host: a new session with the same system prompt starts from the pin.
+  - a dense model (the 1.7B) has GPU slots too (`engine/dense.js`); a chain with a tab from before
+    that change (no `ckpt: 1` in its `ai-ready`) runs without checkpoints.
+  - frames carry at most two drops (`room/transport.js`): evictions queue and go out two per frame.
+  - a failed lap, a device leaving or coming back, or a re-deal drops every checkpoint (`dp` all).
+
+Left out for now: disk copies of checkpoints (a gateway restart starts cold), resuming a reloaded host,
 the speed split, dead-link redial (the ICE state watch), visibility modes, Code mode, the room map,
 weight caches and peer-to-peer weights, the bandwidth test.
 

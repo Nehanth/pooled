@@ -9,7 +9,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-wait` | host → worker | join accepted; wait for assignment |
 | `ai-load {v, model, range, next, host}` | host → worker | download and load layers `[range[0], range[1])`; forward to `next`. A worker on another protocol `v` refuses it with `ai-error` instead of loading |
 | `ai-progress {pct}` / `ai-hostprog` | worker ↔ host | download progress for the room UI |
-| `ai-ready` / `ai-ready-all` | worker → host / host → all | layers loaded; room online |
+| `ai-ready {slots, ckpt}` / `ai-ready-all` | worker → host / host → all | layers loaded; room online. `slots`: the checkpoints the worker read back from disk; `ckpt: 1`: it applies checkpoint control on its frames (a room node hosting a dense model uses checkpoints only when every worker says so) |
 | `ai-reset` | host → all | "new chat": the host forgot the conversation; screens clear the transcript. It does **not** reset any engine: devices keep their caches between questions (multi-turn), and a reset rides on the next frame instead (see compute frames) |
 | `ai-genstart` / `ai-token` / `ai-gendone` | host → all | mirror the question and streamed answer to every screen. Under `ai-visibility` `host`/`asker`, the text goes only to the allowed screens; the others get `ai-genstart`/`ai-gendone` with `hidden: true` (no `ai-token`), so every Send box still locks and unlocks |
 | `ai-visibility {mode}` | host → all | who sees the chat: `all`, `host` (only the host's screen) or `asker` (the host and the peer that asked, by peer id). Sent on change and to every device that joins while it is not `all`. Every device still computes the answer; this only decides which screens get the text |

@@ -9,6 +9,41 @@ export class DenseEngine {
   // opts: { device, cfg, tensors?|weights?, layerRange, hasEmbed, hasHead, maxSeq }
   reset() { this.pos = 0; }   // fresh context; the KV cache is overwritten from position 0
 
+  // GPU-side checkpoints (the same calls as Qwen35Engine's saveSlot / loadSlot / dropSlot): a copy
+  // of this device's KV rows [0, pos) per layer. A dense model has no other state that depends on
+  // the tokens so far (the next token is embedded fresh), so this is exactly the context. No
+  // stateSignature / exportSlot: these are GPU copies only (no disk copies). A browser host keeps
+  // its checkpoints for the qwen35 engine (hostCkpt, room.js ckptEngine); the room node uses these.
+  get hostCkpt() { return false; }
+  saveSlot(name) {
+    this.dropSlot(name);
+    const bytes = this.pos * this.dims.kvDim * 4;
+    const enc = this.device.createCommandEncoder();
+    const bufs = [];
+    for (const L of this.layers) for (const src of [L.kCache, L.vCache]) {
+      const b = this.device.createBuffer({ size: Math.max(4, bytes), usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+      if (bytes) enc.copyBufferToBuffer(src, 0, b, 0, bytes);
+      bufs.push(b);
+    }
+    this.device.queue.submit([enc.finish()]);
+    (this.slots = this.slots || new Map()).set(name, { pos: this.pos, bufs });
+  }
+  loadSlot(name) {
+    const sl = this.slots?.get(name);
+    if (!sl) throw new Error("no saved slot " + name);
+    const bytes = sl.pos * this.dims.kvDim * 4;
+    const enc = this.device.createCommandEncoder();
+    let i = 0;
+    for (const L of this.layers) for (const dst of [L.kCache, L.vCache]) { if (bytes) enc.copyBufferToBuffer(sl.bufs[i], 0, dst, 0, bytes); i++; }
+    this.device.queue.submit([enc.finish()]);
+    this.pos = sl.pos;
+  }
+  dropSlot(name) {
+    const sl = this.slots?.get(name);
+    if (sl) { for (const b of sl.bufs) b.destroy(); this.slots.delete(name); }
+  }
+  dropAllSlots() { for (const k of [...(this.slots?.keys() || [])]) this.dropSlot(k); }
+
   static async create(opts) {
     const e = new DenseEngine();
     await e._init(opts);

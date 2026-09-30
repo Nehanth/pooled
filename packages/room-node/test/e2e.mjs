@@ -5,6 +5,10 @@
 //   node packages/room-node/test/e2e.mjs nodepair   two room nodes in this process (host + worker), no browser
 //   node packages/room-node/test/e2e.mjs api        `pooled serve`'s bridge (cli/lib/room.js) asks a node host
 //   node packages/room-node/test/e2e.mjs auto       createRoom + ask, no start(): the ask deals the layers (solo)
+//   node packages/room-node/test/e2e.mjs cache      OpenClaw's recorded request through the host's checkpoints:
+//        a cold first turn, a side request, the follow-up, a new session, the next day (see cacheRun);
+//        SETUP=solo|pair|tab (the node alone, + a second node, + a browser tab), REQ (requests.jsonl
+//        recorded from an OpenClaw gateway), CKPT=0 (no checkpoints: the baseline), CTX
 // env: MODELS (model dir, layout of source.js LOCAL; default <checkout>/models), MODEL (qwen3-1.7b), PROMPT,
 //      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, CHROME_BIN (a Chromium or
 //      headless_shell with WebGPU; default playwright's), PORT (8231), OUT (result JSON path),
@@ -33,6 +37,8 @@ const MODELS = path.resolve(process.env.MODELS || path.join(ROOT, "models"));
 const T0 = Date.now();
 const log = (...a) => console.error(((Date.now() - T0) / 1000).toFixed(1) + "s", ...a);
 const out = { mode: MODE, model: MODEL, prompt: PROMPT, maxNew: MAXNEW };
+const CKPT = process.env.CKPT === "0" ? false : {};
+const CTX = +(process.env.CTX || 0);
 
 // --- servers: the page (http), the weights (https + Range), PeerJS signaling
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
@@ -136,8 +142,70 @@ async function toolTurns(room) {
   return { first, second, ok: /PELICAN-42/.test(second.text) };
 }
 
+// OpenClaw's traffic on one host (the recorded request: a ~28k-character system prompt with its
+// STABLE / DYNAMIC cache boundary and 11 tools): what each step costs before the first token.
+//   turn1     the first turn after the gateway starts (cold: nothing cached)
+//   title     a side request with its own short system prompt and no tools (a session title)
+//   turn2     the same session's next turn (the conversation so far + a new question)
+//   session2  a new session's first turn (same system prompt and tools, another session id)
+//   nextday   a new session on another day (the date after the cache boundary changed)
+//   turn2b    the first session again, after all that (its answer checkpoint must still be there)
+function recorded() {
+  const file = process.env.REQ;
+  const rec = fs.readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l)).find((r) => r.body?.messages && String(r.path).includes("chat"));
+  const text = (c) => (typeof c === "string" ? c : (c || []).map((p) => p.text || "").join(""));
+  const b = rec.body;
+  return { messages: b.messages.map((m) => ({ role: m.role, content: text(m.content) })),
+    tools: (b.tools || []).map((t) => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters })) };
+}
+async function cacheRun(room) {
+  const R = recorded();
+  const maxTokens = MAXNEW;
+  const run = async (tag, messages, tools = R.tools) => {
+    const t = performance.now(); let first = null, text = "", done = null, pre = null;
+    const onPre = (p) => { pre = p; };
+    room.on("prefill", onPre);
+    for await (const ev of room.ask(messages, { tools, maxTokens, temperature: 0 })) {
+      if (ev.type === "token" || (ev.type === "call" && ev.name)) { if (first == null) first = performance.now() - t; if (ev.text && !ev.think) text += ev.text; }
+      if (ev.type === "done") done = ev;
+    }
+    room.off("prefill", onPre);
+    const r = { tag, ttftS: +((first ?? performance.now() - t) / 1000).toFixed(2), totalS: +((performance.now() - t) / 1000).toFixed(2), promptTokens: pre?.total, prefilled: pre?.prefilled, reused: pre?.reused, from: pre?.from, pinned: pre?.pinned,
+      prefillS: pre ? +(pre.tPre / 1000).toFixed(2) : null, decodeTok: pre?.count, reason: done?.reason, err: done?.err, calls: done?.calls?.map((c) => c.name), text };
+    log(`${tag}: first token ${r.ttftS} s (prompt ${r.promptTokens}: ${r.prefilled} read in ${r.prefillS} s, ${r.reused} reused from ${r.from}) ${JSON.stringify(text.slice(0, 80))}`);
+    return r;
+  };
+  const steps = [];
+  const turn1 = await run("turn1", R.messages); steps.push(turn1);
+  steps.push(await run("title", [{ role: "system", content: "Write a short title (at most 6 words) for this conversation. Reply with the title only." }, { role: "user", content: R.messages.filter((m) => m.role === "user").map((m) => m.content).join("\n").slice(0, 400) }], null));
+  const follow = [...R.messages, { role: "assistant", content: turn1.text }, { role: "user", content: "And what is the capital of Germany? One word." }];
+  const turn2 = await run("turn2", follow); steps.push(turn2);
+  const other = R.messages.map((m) => (m.role === "user" ? { ...m, content: m.content.replace(/What is the capital of France\?/, "Name one prime number.").replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "11111111-2222-3333-4444-555555555555") } : m));
+  steps.push(await run("session2", other));
+  const day = other.map((m) => (m.role === "system" ? { ...m, content: m.content.replace(/Current date: \d{4}-\d\d-\d\d/, "Current date: 2026-10-01") } : m));
+  steps.push(await run("nextday", day));
+  steps.push(await run("turn2b", [...follow, { role: "assistant", content: turn2.text }, { role: "user", content: "Thanks. Reply with OK." }]));
+  return { steps, status: room.status() };
+}
+
 try {
-  if (MODE === "nodehost") {
+  if (MODE === "cache") {
+    const SETUP = process.env.SETUP || "solo";
+    host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, name: "node-host", signal: SIGNAL, modelDir: MODELS, log: nodeLog("host"), ckpt: CKPT, ctx: CTX });
+    if (SETUP === "pair") worker = await joinRoom(host.code, { pledgeGB: NODE_GB, name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
+    if (SETUP === "tab") {
+      await openTab("tab", TAB_GB);
+      await page.fill("#code-input", host.code); await page.click("#join-btn");
+      const tJoin = Date.now();
+      while (host.gpuPeers().length < 1) { if (Date.now() - tJoin > 60000) throw new Error("the tab never joined"); await new Promise((r) => setTimeout(r, 200)); }
+    }
+    const tStart = Date.now();
+    await host.start(MODEL, { minDevices: SETUP === "solo" ? 1 : 2, waitMs: 60000 });
+    out.onlineS = (Date.now() - tStart) / 1000;
+    out.split = host.split; out.ckpt = CKPT !== false; out.setup = SETUP; out.ctx = host.ctxMax();
+    out.cache = await cacheRun(host);
+    if (page) out.tab = await tabStatus();
+  } else if (MODE === "nodehost") {
     host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, name: "node-host", signal: SIGNAL, modelDir: MODELS, log: nodeLog("host"), chatMaxNew: MAXNEW });
     log("room", host.code);
     await openTab("tab", TAB_GB);
