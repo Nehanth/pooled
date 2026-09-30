@@ -83,6 +83,17 @@ End-to-end on the GB10 (two headless Chromium tabs, real PeerJS signaling and We
 
 Topology change (host link + on-demand chain links instead of a full mesh) and `--devices N` in the emulator, GB10, 27B, `japan` prompt, local signaling, loopback: 3 devices online in 3.0 min, prefill 4.5 s, decode 10.4 tok/s; 16 devices (8 phone-shaped, 64 layers dealt 18+embed / 4-5 per worker / 2 per phone) online in 2.3 min, prefill 8.3 / 7.2 s, decode 3.8 / 4.7 tok/s, every device holding one host link and two chain links, no errors. The decode drop on a zero-latency network is per-hop processing (unpack, upload, readback, pack), about 15 ms per hop, now a measured target. 64 tabs in one Chromium fail at `vkCreateDevice` (one GPU process, driver device cap); not a room limit.
 
+## 2026-09-29: phone memory while loading (#207, branch fix/i207-memory)
+
+The iPhone 14 Pro Max probe (memprobe.html, PR #244) found Safari's page process gets a 1536 MB soft limit (WebGPU buffers count against it), the networking process 840 MB, and that the page died on 3-layer MoE loads because the prefetcher re-fetched tensors the loader already had (~450 MB of unread bodies per MoE layer, piling up in the networking process). This branch: phone pledges capped (iPhone/iPad 0.5 GB default, 1 GB max; Android by `navigator.deviceMemory`), no duplicate prefetches (unread ones cancelled), ranges from room devices streamed with an 8 MB flow-control window instead of whole-range JS buffers, Q4_1/Q5_0/Q5_K/Q6_K requantized to Q8 a few rows at a time on the way to the GPU (bit-identical: `tests/test_stream_requant.js` on both models, 160 MB MoE expert tensors included), and a phone killed while loading gets a smaller share or is left out by an automatic re-deal.
+
+| Test | Before (main) | After (branch) | Notes |
+|---|---|---|---|
+| Spark loopback room, 27B, host + worker + iPhone-UA tab joining late (`tests/e2e/room_phone_mem.mjs --no-kill`), phone dealt 2 layers from the worker's cache | renderer peak 546 / 505 MB; 568 MB fetched from the room | renderer peak **307 MB**; 423 MB fetched from the room | same split both runs (host 58 + embed, worker 4, phone 2); peak = resident size of the phone browser's renderer, sampled every 200 ms. Answers identical to host+worker. |
+| Same, phone's layers from the network | | renderer 328 MB, network service 106 MB | |
+| Same, phone tab killed while loading, twice (`room_phone_mem.mjs`) | host reloads the same layers into it | 1st kill: re-dealt with 0.22 GB for it; 2nd: re-dealt without it; room online both times, same answer | |
+| Real iPhone 14 Pro Max in a room with the Spark (public signaling, branch preview, 1 GB pledge), one load each | | MoE 1 layer ×1, MoE 2 layers ×3, 27B 4 layers ×2: every load online in 119–146 s, no WebKit kill of the room's page in the phone's syslog (two `long-idle-exit` kills of earlier sessions' idle tabs) | with the cap a phone can't be dealt 3 MoE layers any more (a 22 GB host pledge is the smallest that starts the MoE; the phone then gets 2); decode 22–24 tok/s MoE, 7.4 tok/s 27B |
+
 ## 2026-09-26: Qwen3.6-35B-A3B MoE on real hardware (GB10), expert kernels rebuilt
 
 File: bartowski `Qwen_Qwen3.6-35B-A3B-Q4_0.gguf` (shared experts Q5_0 → Q8 on load, routers BF16 → f32 exact).

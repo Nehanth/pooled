@@ -19,7 +19,8 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-react {mid, e}` / `ai-reacts {mid, counts}` | guest → host / host → all | emoji reactions on an answer; `mid` is the answer id the host puts in `ai-genstart`. The host toggles per device and broadcasts the counts |
 | `ai-typing {name?}` | guest → host → others | "… is typing", relayed only while the chat is visible to everyone |
 | `ai-inv-req {url}` / `ai-inv {url, have}` | host → all / all → host | before dealing, the host asks what byte ranges of the model each device has cached; the inventory goes out with every `ai-load` (`inv`) |
-| `ai-wget {id, url, lo, hi}` / `ai-wpart {id, off, data \| done \| miss}` | device ↔ device | take a cached range from another device instead of the model host, in 64 KB parts; any failure falls back to the network |
+| `ai-wget {id, url, lo, hi, win?}` / `ai-wpart {id, off, data \| done \| miss}` / `ai-wack {id, got \| cancel}` | device ↔ device | take a cached range from another device instead of the model host, in 64 KB parts, in order. The requester streams the parts to its loader as they arrive and acks what the loader has read (`got`); the sender keeps at most `win` bytes (8 MB) beyond the last ack in flight, so a phone never holds a whole range (a MoE expert tensor is 160 MB, #207). `cancel` stops the sender. A request without `win` (an older device) gets the whole range at channel speed. Any failure falls back to the network |
+| `ai-share {gb \| drop, why}` | host → device | the device's tab was killed while it loaded its layers (its `hello` carried `died.loading`): the host re-deals with a smaller share for it (`gb`, half its layers, at least one) or, after a second kill or at one layer, without it (`drop`: it stays as a guest). Its screen says why |
 | `ai-stop` | guest → host | stop the answer being generated. Honoured from the device that asked (the host can always stop); decoding ends after the lap in flight and `ai-gendone` unlocks every screen |
 | `ai-degraded {why}` | host → all | a device in the chain left; every lap in flight failed at once and the room waits for a re-deal |
 | `ai-redeal {by, model}` | host → all | the host is dealing the layers again over the devices now in the room (after a departure, or to include late joiners); fresh `ai-load`s follow, cached ranges reload in seconds, the conversation is kept and re-prefilled on the next question |
@@ -59,7 +60,8 @@ The host owns the conversation: `{system, turns}` rendered to ChatML ids by `roo
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `hello {name, meta, v, died?}` | both ways on every link | `v` is the protocol version; on a mismatch each side says which one is older and who should reload (room/errors.js), and sends that as `bye {reason}` for a tab too old to word it itself. `died` is a joiner's crumb from a tab that was killed (surfaced on the host) |
+| `hello {name, meta, v, died?}` | both ways on every link | `v` is the protocol version; on a mismatch each side says which one is older and who should reload (room/errors.js), and sends that as `bye {reason}` for a tab too old to word it itself. `died {during, ago, loading?}` is a joiner's crumb from a tab that was killed (surfaced on the host); `loading` means it died while loading its layers, and the host then re-deals (`ai-share`) instead of loading the same layers into it again. `meta.pledgeMax` is the most the device may lend (phones: 1 GB on iOS, by `navigator.deviceMemory` on Android, room/pledge.js); the host also holds iPhone and iPad pledges to 1 GB itself |
+
 | `hello {…, back: 1}` | returning guest → host | a device reconnecting to a host that resumed the room (it keeps its transcript, so no `ai-history`) |
 | `leaving` | all → all | sent on `pagehide`; the receiver closes the link at once instead of waiting for ICE to notice (tens of seconds), so a departure mid-answer fails within a lap |
 
