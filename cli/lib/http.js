@@ -30,11 +30,15 @@ const matches = (route, path) => (typeof route.path === "string" ? route.path ==
 
 // Settings for the coding agents, from the room's context: neither knows the size of a model it has
 // never heard of, so without these it never compacts before the room refuses a prompt that is too long
+// Claude Code keeps its output limit (32000 by default) free in the window: at a 16 k or 24 k window
+// it refuses its own ~15 k prompt ("Prompt is too long") before sending anything. A quarter of the
+// room's context, at most its default, leaves the prompt room (checked with 2.1.285 at 8 k to 64 k).
+export const claudeOutput = (ctx) => Math.max(1024, Math.min(32000, Math.floor(ctx / 4)));
 export function agentSettings(ctx, port) {
   if (!ctx) return [];
   return [`For this room's ${ctx}-token context:`,
     `  Codex        model_context_window = ${ctx}, model_auto_compact_token_limit = ${Math.floor(ctx * 0.8)}  (~/.codex/config.toml)`,
-    `  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:${port} CLAUDE_CODE_MAX_CONTEXT_TOKENS=${ctx} CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled`, ""];
+    `  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:${port} CLAUDE_CODE_MAX_CONTEXT_TOKENS=${ctx} CLAUDE_CODE_MAX_OUTPUT_TOKENS=${claudeOutput(ctx)} CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled`, ""];
 }
 
 export function createServer({ bridge, port, token = null, maxQueue = 8, log = () => {}, version = "", keepAliveMs = KEEPALIVE_MS, idleMs = IDLE_MS, hostQueuedMs = HOST_QUEUED_MS }) {

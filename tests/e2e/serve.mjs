@@ -287,9 +287,12 @@ try {
     check("OpenAI max_tokens 100000: capped, answered", big.status === 200, big.status);
     // tool schemas that fit one by one but not together: the host refuses them up front, and the room
     // is not left busy
-    const props = {}; for (let i = 0; i < 1800; i++) props[i.toString(36)] = { items: 1 };
+    // (small in characters, so the bridge's early context check lets it through on a 16 k room too:
+    // eight arrays deep per property, eight grammar nodes for ~90 characters)
+    const deep = () => { let v = 1; for (let d = 0; d < 8; d++) v = { items: v }; return v; };
+    const props = {}; for (let i = 0; i < 330; i++) props[i.toString(36)] = deep();
     const huge = await post("/v1/chat/completions", { model: "x", max_tokens: 5, messages: [{ role: "user", content: "hi" }],
-      tools: Array.from({ length: 6 }, (_, i) => ({ type: "function", function: { name: "t" + i, parameters: { type: "object", properties: props } } })) });
+      tools: Array.from({ length: 4 }, (_, i) => ({ type: "function", function: { name: "t" + i, parameters: { type: "object", properties: props } } })) });
     const hj = await huge.json();
     check("tool schemas too large together: 400 from the host", huge.status === 400 && /too large together/.test(hj.error?.message), JSON.stringify(hj).slice(0, 200));
     const after = await post("/v1/chat/completions", { model: "x", max_tokens: 5, messages: [{ role: "user", content: "hi" }] });
@@ -501,7 +504,7 @@ try {
       const p = spawn(arg("claude-bin", "claude"), ["-p", "Read notes.txt and tell me the secret word in it.", "--model", "pooled", "--allowedTools", "Read", "--output-format", "json"], { cwd: work,
         env: { ...Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(CLAUDE|ANTHROPIC_)/.test(k))), CLAUDE_CONFIG_DIR: cfg, ANTHROPIC_BASE_URL: BASE, ANTHROPIC_API_KEY: "pooled", CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
           // the room's real window (Claude Code does not know a model called pooled; the banner prints this)
-          CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(roomCtx) } });
+          CLAUDE_CODE_MAX_CONTEXT_TOKENS: String(roomCtx), CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(Math.max(1024, Math.min(32000, Math.floor(roomCtx / 4)))) } });
       let s = ""; p.stdout.on("data", (c) => (s += c)); p.stderr.on("data", (c) => (s += c));
       const kill = setTimeout(() => p.kill(), 1800000);
       p.on("close", () => { clearTimeout(kill); resolve(s); });

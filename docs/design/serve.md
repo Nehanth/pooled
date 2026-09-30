@@ -370,7 +370,9 @@ prompt is ~20 k tokens before any history, so the room needs a large context (th
 `?ctx=65536`). `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` keeps its side requests (titles, …)
 from interleaving with the agent's and resetting the room's cached sequence, and
 `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<the room's context>` tells it the window of a model it does not
-know, so it compacts before the room refuses a prompt; `pooled serve` prints both with the room's
+know, so it compacts before the room refuses a prompt, and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (a
+quarter of the context, at most 32000) keeps it from reserving 32000 output tokens of a small window
+and refusing its own prompt; `pooled serve` prints both with the room's
 context (section 15).
 
 GPU (`tests/e2e/serve_messages.mjs`, a real host room, the CLI's HTTP server and the Anthropic SDK;
@@ -856,7 +858,10 @@ changed, and why:
 - **The context is shown**: the banner, `/health` (`ctx`) and `/v1/models` (`max_model_len`, as vLLM)
   carry the host's context, and the banner prints the Codex (`model_context_window`,
   `model_auto_compact_token_limit` = 0.8 × ctx) and Claude Code (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`,
-  `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`) settings for it. The README no longer asks for a 64 k
+  `CLAUDE_CODE_MAX_OUTPUT_TOKENS` = ctx / 4 up to 32000, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`)
+  settings for it. The output limit matters: with the window alone at 16 k or 24 k, Claude Code
+  2.1.285 keeps 32000 output tokens free and answers "Prompt is too long" without sending anything
+  (found in the GPU run; checked against a scripted room from 8 k to 64 k). The README no longer asks for a 64 k
   context the 1.7B and 27B cannot have.
 - **The host is never left busy** (safety): tool schemas that each fit but together pass the grammar's
   10000 nodes made `GrammarConstraint` throw outside `apiRun2`'s try, with `ai.busy` set, locking the
@@ -885,7 +890,20 @@ non-stream Messages reply (either way `stop_reason` is `max_tokens`); openai-nod
 the final object only from `response.completed`); the Anthropic `ping` before `message_start` is
 harmless (checked with Claude Code and the SDK).
 
-Tests: `cli/test` (60), `tests/unit` (781 + 3 ignored), and the reviewers' repros rerun against the
-fix (Codex: a 3 s idle timeout with the room silent 8 s, `view_image`, `gpt-5-codex` applying a patch
-through the custom `apply_patch`; Claude Code with 150 MCP tools).
+Tests: `cli/test` (60), `tests/unit` (781 + 3 ignored), `tests/e2e/agents/codex.mjs --mock` (8 of
+8), and the reviewers' repros rerun against the fix (Codex: a 3 s idle timeout with the room silent
+8 s, `view_image`, `gpt-5-codex` applying a patch through the custom `apply_patch`; Claude Code with
+150 MCP tools, 173 tools reaching the room).
+
+GPU (the Spark, 2026-09-29, `tests/e2e/serve.mjs --model qwen3-1.7b --query ctx=16384 --codex
+--claude`): 85 of 86. New checks passed: an image answered with a note, `max_tokens: 100000` capped,
+tool schemas too large together refused by the host with the room answering the next request, the
+context in `/health` and `/v1/models`, and a Responses custom tool giving a `custom_tool_call`. Codex
+CLI ran `cat a.txt` and quoted it (51 s). The one failure is Claude Code on the 1.7B: now told the
+real 16 k window, it sent its first step (14964 prompt tokens, a Read call), the next step was 16713
+tokens (400 "prompt is too long"), and the 1.7B's compaction summary came back empty. Before the fix
+the same run passed only because Claude Code believed it had 200 k and the 1.7B's answers happened to
+stay short; the 1.7B's context is simply too small for Claude Code (cli/README.md says so). A first
+run of the new schema check sent 186 k characters and was stopped by the bridge's early context
+check on the 16 k room; the check now uses a denser schema (115 k characters, 10568 nodes).
 

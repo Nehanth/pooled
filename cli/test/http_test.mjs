@@ -272,7 +272,7 @@ test("the room's context: in /health, /v1/models (max_model_len) and the banner,
   const banner = (await t.req("GET", "/")).body;
   assert.match(banner, /16384 tokens of context/);
   assert.match(banner, /model_context_window = 16384, model_auto_compact_token_limit = 13107/);
-  assert.match(banner, /CLAUDE_CODE_MAX_CONTEXT_TOKENS=16384 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1/);
+  assert.match(banner, /CLAUDE_CODE_MAX_CONTEXT_TOKENS=16384 CLAUDE_CODE_MAX_OUTPUT_TOKENS=4096 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1/);
   t.bridge.hostMeta = { api: 1 };
   assert.equal(JSON.parse((await t.req("GET", "/health")).body).ctx, null, "an older host does not say");
   assert.equal(JSON.parse((await t.req("GET", "/v1/models")).body).data[0].max_model_len, undefined);
