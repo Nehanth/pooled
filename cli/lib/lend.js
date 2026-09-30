@@ -232,6 +232,17 @@ export function formatStatus(s, width = 0) {
   return width > 0 && line.length > width ? line.slice(0, Math.max(1, width - 1)) + "…" : line;
 }
 
+// pooled host --devices N: deal again by itself? When the room runs on fewer than N devices (one
+// stayed away past the rejoin grace and the room re-dealt without it) and N are in the room again,
+// counting only devices the last deal did not see (a phone that deal left out, or a device it
+// dropped after a load death, must not make it re-deal over and over). room: { online, busy,
+// starting, chain: [id], peers: [id] (GPU devices other than the host), dealt: Set of ids }
+export function autoRedeal(devices, { online, busy, starting, chain, peers, dealt }) {
+  if (!(devices > 1) || !online || busy || starting) return false;
+  if (chain.length + 1 >= devices || peers.length + 1 < devices) return false;
+  return peers.some((id) => !chain.includes(id) && !dealt?.has(id));
+}
+
 // passes run here since the start: the node's own counters restart with a re-deal or a new node
 export function passCounter() {
   let base = 0, last = 0, of = null;

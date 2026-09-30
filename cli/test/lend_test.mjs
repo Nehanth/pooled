@@ -2,7 +2,7 @@
 // status line, error messages, and loading Dawn lazily (cli/lib/lend.js, cli/lib/dawn.js).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseLendArgs, parseGb, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, passCounter, explainError,
+import { parseLendArgs, parseGb, autoRedeal, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, passCounter, explainError,
   versionAdvice, versionFromBye, hostable, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB } from "../lib/lend.js";
 import { dawnLoader, dawnPackages, DAWN_VERSION } from "../lib/dawn.js";
 
@@ -228,4 +228,20 @@ test("pooled serve still does not pull in Dawn: webgpu is an optional peer, not 
   assert.equal(pkg.dependencies.webgpu, undefined);
   assert.equal(pkg.optionalDependencies?.webgpu, undefined);
   assert.equal(pkg.peerDependenciesMeta.webgpu.optional, true);
+});
+
+test("autoRedeal: --devices re-deals when N are back, only for devices the last deal did not see", () => {
+  const base = { online: true, busy: false, starting: false };
+  // the room re-dealt without the mac (it was away); the mac is back under the same id
+  assert.equal(autoRedeal(2, { ...base, chain: [], peers: ["mac"], dealt: new Set() }), true);
+  // ... but not while an answer runs, a deal loads, or the room is not online
+  assert.equal(autoRedeal(2, { ...base, busy: true, chain: [], peers: ["mac"], dealt: new Set() }), false);
+  assert.equal(autoRedeal(2, { ...base, starting: true, chain: [], peers: ["mac"], dealt: new Set() }), false);
+  assert.equal(autoRedeal(2, { ...base, online: false, chain: [], peers: ["mac"], dealt: new Set() }), false);
+  // the last deal saw it and left it out (a phone, a load death): no loop
+  assert.equal(autoRedeal(2, { ...base, chain: [], peers: ["phone"], dealt: new Set(["phone"]) }), false);
+  // enough devices hold layers already, or not enough are in the room, or no --devices
+  assert.equal(autoRedeal(2, { ...base, chain: ["mac"], peers: ["mac", "pc"], dealt: new Set(["mac"]) }), false);
+  assert.equal(autoRedeal(3, { ...base, chain: [], peers: ["mac"], dealt: new Set() }), false);
+  assert.equal(autoRedeal(undefined, { ...base, chain: [], peers: ["mac"], dealt: new Set() }), false);
 });

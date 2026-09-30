@@ -632,6 +632,7 @@ export class RoomNode extends EventEmitter {
       }
     } catch (err) { ai.starting = false; await src.close(); throw err; }
     const nameOf = (id) => this.conns.get(id)?.name || id;
+    ai.dealtPeers = new Set(this.gpuPeers());   // every device this deal saw, left out or not (for a --devices host's re-deal)
     const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: this.conns.get(id)?.meta }));
     const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap });
     const { ranges, assigned } = plan;

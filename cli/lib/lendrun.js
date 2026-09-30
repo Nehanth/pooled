@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import { parseLendArgs, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
-  hostable, fmtGb, passCounter, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
+  hostable, autoRedeal, fmtGb, passCounter, UsageError, HELP_JOIN, HELP_HOST } from "./lend.js";
 import { dawnLoader } from "./dawn.js";
 import { cleanText } from "./common.js";
 
@@ -229,8 +229,6 @@ async function runHost(opts, out) {
   node.on("prefill", (x) => { if (x.count && x.tDecode) S.tps = x.count / (x.tDecode / 1000); if (!node.ai.chain.length) solo += x.count + (x.prefilled ? 1 : 0); });
   node.on("signaling", (up) => { S.signaling = up; });
   node.on("version", (v) => out.log(`${v.name || "a device"} can't join: ${v.theirs > rn.PROTOCOL ? `it runs a newer Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL}); update this one: npx @pooled/cli@latest host` : `it runs an older Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL}); it should reload`}`));
-  // the devices the last deal saw: --devices re-deals by itself only for devices that came since
-  let dealtWith = new Set();
   const tick = () => {
     const st = node.status();
     S.devices = st.devices.length; S.range = st.range; S.passes = passes(node, st.passes) + solo; S.signaling = st.signaling;
@@ -240,9 +238,8 @@ async function runHost(opts, out) {
     // room re-dealt without it) and N devices are in again: deal again so the newcomers hold layers
     // (a host at a terminal presses Enter instead)
     const peers = node.gpuPeers();
-    if (opts.devices > 1 && !starting && !leaving && st.online && !node.ai.busy && !node.ai.starting
-      && node.ai.chain.length + 1 < opts.devices && peers.length + 1 >= opts.devices
-      && peers.some((id) => !node.ai.chain.includes(id) && !dealtWith.has(id))) {
+    if (!starting && !leaving && autoRedeal(opts.devices, { online: st.online, busy: !!node.ai.busy, starting: !!node.ai.starting,
+      chain: node.ai.chain, peers, dealt: node.ai.dealtPeers })) {
       out.log(`${peers.length + 1} devices in the room again`);
       deal(true);
     }
@@ -253,7 +250,7 @@ async function runHost(opts, out) {
     if (again) { if (!auto) out.log("re-dealing the layers over the devices in the room"); }
     else if (!(opts.devices > node.gpuPeers().length + 1)) out.log(`dealing the layers over ${node.gpuPeers().length + 1} device(s)`);
     starting = (again ? node.redeal() : node.start(opts.model, { minDevices: opts.devices || 1 }))
-      .then(() => { dealtWith = new Set(node.gpuPeers()); out.log(`room online: ${node.status().split?.join(" · ") || "ready"}`); })
+      .then(() => out.log(`room online: ${node.status().split?.join(" · ") || "ready"}`))
       .catch((e) => { const x = explainError(e, { code, cmd: "host" }); out.log(`couldn't start: ${x.message}${x.hint ? ` ${x.hint}` : ""}`, "error"); if (!out.tty) bye(false, 1); })
       .finally(() => { starting = null; });
   };
