@@ -241,8 +241,8 @@ test("the legacy completions API is a 404 that points at chat completions; overs
   assert.equal(c.status, 404);
   assert.match(JSON.parse(c.body).error.message, /legacy completions API is not served; use POST \/v1\/chat\/completions/);
   const r = await t.req("POST", "/v1/responses", { body: {} });
-  assert.equal(r.status, 404, "Responses: not built yet");
-  assert.match(JSON.parse(r.body).error.message, /not built yet/);
+  assert.equal(r.status, 400, "Responses: served (cli/test/responses_test.mjs)");
+  assert.match(JSON.parse(r.body).error.message, /input is required/);
   const huge = await t.req("POST", "/v1/chat/completions", { body: "x".repeat((4 << 20) + 10) });
   assert.equal(huge.status, 413);
   t.bridge.hostMeta = { api: 2 };

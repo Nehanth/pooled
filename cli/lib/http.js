@@ -166,7 +166,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
 
   async function ask(req, res, adapter) {
     const body = await readBody(req);
-    let r = adapter.parse(body, req.headers);
+    let r = adapter.parse(body, req.headers, { log });
     // the label the room shows: the client program from User-Agent, never the request's user /
     // metadata.user_id (often an account or session id)
     r.client = clientFromUA(req.headers["user-agent"]) || "API";
