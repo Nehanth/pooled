@@ -683,5 +683,7 @@ arguments exactly), the finish chunk, the usage chunk with `include_usage`, `[DO
 
 **Tests.** `cli/test/openai_test.mjs` (the ask the room gets for a full agent request, the whole and
 streamed wire format byte for byte, the OpenAI SDK's `stream().finalChatCompletion()` and a streamed
-`runTools` loop, every 400, an older host) and `tests/unit/serve_openai_test.js`; on the GPU,
-`tests/e2e/serve.mjs` "chat tools".
+`runTools` loop, every 400, an older host) and `tests/unit/serve_openai_test.js`. On the Spark GPU
+(2026-09-29, Qwen3 1.7B) `tests/e2e/serve.mjs` passes all 63 checks, the 6 "chat tools" ones included
+(a call, streamed arguments equal to whole ones, the tool result used with the prompt reused, a
+named choice, required with parallel off giving one call, a JSON schema answer).
