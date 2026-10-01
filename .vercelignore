@@ -29,3 +29,6 @@ docs-site/.astro
 
 # The docs embed one demo video (the OpenClaw starter kit); *.mp4 above keeps every other video out of the upload.
 !docs-site/public/media/*.mp4
+
+# The docs embed one demo video (the OpenClaw starter kit); *.mp4 above keeps every other video out of the upload.
+!docs-site/public/media/*.mp4
