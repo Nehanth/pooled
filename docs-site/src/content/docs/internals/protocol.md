@@ -1,12 +1,14 @@
 ---
 title: Wire protocol
 description: The messages devices in a room send each other, how hidden states travel, what order is guaranteed, and how the protocol is versioned.
-eyebrow: How it works
+eyebrow: Internals
 sidebar:
   label: Wire protocol
   order: 2
 ---
 
+
+The messages devices in a room send each other, and what order they are guaranteed to arrive in.
 
 A room is a WebRTC mesh between browsers. PeerJS signaling is used only to introduce devices; once links are open, no traffic goes through a server.
 
@@ -20,28 +22,18 @@ This page covers the shape of the protocol. Every message and field is listed in
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `hello {name, meta, v}` | both ways, every link | First message on a link. `v` is the protocol version. On a mismatch, each side says which one is older and who should reload. |
-| `ai-wait` | host → worker | Join accepted; wait for an assignment. |
+| `hello {name, meta, v}` | both ways, every link | First message on a link. On a version mismatch, each side says which one is older and who should reload. |
 | `ai-inv-req` / `ai-inv` | host ↔ all | Before dealing, the host asks which byte ranges of the model each device has cached. |
 | `ai-load {v, model, range, next, host}` | host → worker | Load layers `[range[0], range[1])` and forward results to `next`. |
-| `ai-wget` / `ai-wpart` / `ai-wack` | device ↔ device | Take a cached byte range from another device in 64 KB parts. The receiver acks what it has read, and the sender keeps at most 8 MB beyond the last ack in flight. Any failure falls back to the network. |
-| `ai-progress` | worker → host | Download progress for the room screen. |
-| `ai-ready` / `ai-ready-all` | worker → host / host → all | Layers loaded; the room is online. |
-| `ai-share {gb \| drop}` | host → device | The device's tab was killed while loading. The host re-deals with half its share, or without it after a second kill. |
+| `ai-wget` / `ai-wpart` / `ai-wack` | device ↔ device | Take a cached byte range from another device in 64 KB parts, with at most 8 MB unacknowledged. Any failure falls back to the network. |
+| `ai-progress`, `ai-ready`, `ai-ready-all` | worker → host, host → all | Download progress; layers loaded; the room is online. |
+| `ai-share {gb \| drop}` | host → device | The device's tab was killed while loading: re-deal with half its share, or without it after a second kill. |
 
-A device that joins a room that is already online becomes an ask-only guest right away and gets the last 20 exchanges (when the chat is visible to everyone).
+A device that joins a room already online becomes an ask-only guest and gets the last 20 exchanges (when the chat is visible to everyone).
 
 ## Asking and answering
 
-| Message | Direction | Meaning |
-|---|---|---|
-| `ai-ask` / `ai-busy` | guest → host / host → guest | Anyone can ask. One generation runs at a time. |
-| `ai-queued {pos}` / `ai-queue {n}` | host → asker / host → all | Questions asked while the room is busy wait in the host's queue: at most 10, and two per device. |
-| `ai-genstart` / `ai-token` / `ai-gendone` | host → all | Mirror the question and the streamed answer to every screen. `ai-gendone` carries stats and the context meter. |
-| `ai-visibility {mode}` | host → all | Who sees the chat: `all`, `host`, or `asker`. Every device still computes; this only decides which screens get the text. |
-| `ai-stop` | asker → host | Stop the answer. Decoding ends after the lap in flight. |
-| `ai-cmd {cmd}` | guest → host | `continue` a capped answer or `regen` the last one. |
-| `ai-reset` | host → all | New chat. Screens clear. Engines are not reset by this message: the reset rides on the next compute frame. |
+Anyone can `ai-ask`; one generation runs at a time and the rest wait in the host's queue (`ai-queued`, at most 10, two per device). The host mirrors each question and streamed answer to every screen with `ai-genstart` / `ai-token` / `ai-gendone`, filtered by `ai-visibility` (`all`, `host` or `asker`). `ai-stop` ends an answer after the lap in flight, `ai-cmd` continues or regenerates, and `ai-reset` clears the screens; the engines' reset rides on the next compute frame.
 
 ## Compute frames
 
@@ -89,23 +81,15 @@ The host keeps a timeout for every lap in flight. Until four decode laps have be
 |---|---|
 | `ping` / `pong` | Every 2.5 s on every link. While an answer runs, the host also pings each chain device every 500 ms. |
 | `leaving` | Sent on `pagehide`, so a closed tab fails the answer within a lap instead of after ICE notices. |
-| Stalled-device notice | While answering, a chain device silent for `clamp(3 s + 3 × RTT, 3.5 s, 5 s)` is flagged: "<name> stopped responding; waiting for it (Stop gives up)". The answer waits. If the device comes back, it finishes. |
-| Silent-link drop | A device silent for 15 s (a computer) or 60 s (a phone) is dropped, never while it loads its layers. The host sends `ai-degraded` and offers a re-deal. |
-| Dead-link redial | When ICE gives up on a link (about 15 s with no packets), the side that dialed it dials again and sends `hello {back: 1}`. The device keeps its place and its layers. |
-| `hello {back: 1}` | A device returning after a lock, a background tab or a reload. The host re-seats it in its old slot by name. |
-| `ai-redeal` | The host deals the layers again over the devices now in the room. Cached ranges reload in seconds and the conversation is kept. |
+| `ai-degraded` | A chain device silent for 15 s (a computer) or 60 s (a phone) is dropped, never while it loads its layers, and the host offers a re-deal. |
+| `hello {back: 1}` | A device returning after a lock, a background tab, a reload or a dead-link redial. The host re-seats it in its old slot by name. |
+| `ai-redeal` | The host deals the layers again over the devices now in the room. |
 
-What a person sees in each case is on [Device drops and recovery](/docs/rooms/recovery). Measured timings are on [Benchmarks](/docs/internals/benchmarks#bad-networks).
-
-## Resuming a room
-
-After every answer the host saves the room (code, model, conversation, transcript, settings, peers) in `localStorage`. A reloaded host page offers to resume the room for 15 minutes. It claims the same signaling id, waits up to 25 s for the devices that held layers, and deals again. The other devices keep knocking on the host id every 3 s for a minute before calling the room over.
+The stalled-device notice, timings and what each screen shows are on [Device drops and recovery](/docs/rooms/recovery). A reloaded host resumes its room from `localStorage` for 15 minutes, as described there. Measured timings: [Benchmarks](/docs/internals/benchmarks#bad-networks).
 
 ## Connecting: STUN and TURN
 
-Every device uses public STUN servers to find its public address. That is enough on most home and office networks.
-
-When both sides are behind symmetric NAT or carrier-grade NAT, or a firewall blocks UDP, no direct path exists. The join fails after 15 s (up to 40 s while the browser is still trying paths) with "Found the room, but these two devices can't reach each other", and the Network box opens. A TURN relay fixes that. No relay credentials ship in the page: pooled.run hands each device short-lived ones from `POST /api/turn` (Cloudflare TURN), and a relay the user sets wins over it. ICE still prefers a direct path. Model weights never cross a relayed link: a device whose link to a weight source is relayed fetches those ranges from the network, and the serving side answers `ai-wpart {miss: 1}` over a relayed link. See [Rooms at work](/docs/rooms/at-work) and [TURN relay](/docs/self-host/turn).
+Every device uses public STUN servers to find its public address. When no direct path exists (symmetric or carrier-grade NAT, or blocked UDP), the join fails after 15 s (up to 40 s while the browser still tries paths) and the Network box opens. pooled.run hands each device short-lived TURN credentials from `POST /api/turn`; a relay the user sets wins over it, and ICE still prefers a direct path. Model weights never cross a relayed link: the serving side answers `ai-wpart {miss: 1}` and the device fetches the range from the network. See [TURN relay](/docs/self-host/turn).
 
 ## Code mode messages
 

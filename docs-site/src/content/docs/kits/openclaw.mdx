@@ -1,0 +1,131 @@
+---
+title: A personal assistant with OpenClaw
+eyebrow: Starter kits
+description: Install the Pooled plugin in OpenClaw, start a room on your own computers, and give the assistant its first task. No API key and no cloud model.
+sidebar:
+  label: OpenClaw assistant
+  order: 6
+  badge:
+    text: Soon
+    variant: caution
+---
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+{/*
+Sources (for the fact-checker):
+- feat/openclaw-v1 (worktree /home/nehanth/wt/openclaw-v1, acfb276 + uncommitted README), packages/openclaw/README.md:
+  Install, Start a room (lend, model, download choice, devices + who can join), Join a room, /pooled (allow, deny, link, pledge),
+  Models (~/.pooled/models shared with pooled pull), "Pooled: …" messages, Who can see and steer what, Known gaps
+- packages/openclaw/package.json 0.2.0: peerDependencies openclaw >=2026.9.6, engines node >=22, webgpu optional
+- packages/openclaw/openclaw.plugin.json: providerAuthChoices "Pooled (run a model across your devices)", group "Pooled"
+- openclaw 2026.9.6 --help: plugins install accepts clawhub:<package>; tui, dashboard, onboard
+- docs/openclaw-poc.md: MoE results (4-5 of 5 tasks), cold first call about a minute on two computers
+NOT VERIFIED YET (the plugin isn't published; re-run once it is):
+- `openclaw plugins install clawhub:@pooled/openclaw` (the branch README says `openclaw plugins install @pooled/openclaw`, from npm, "it isn't on ClawHub")
+- the onboarding menu path (README: Model/auth provider -> More… -> Pooled) and the exact wording of each question
+- that onboarding starts the gateway, or whether `openclaw gateway` is needed first
+- `openclaw tui` as the place for the first task; the first task's timing on the MoE
+- the Waiting for <host> text in Join a room
+*/}
+
+:::caution[Coming soon: the plugin isn't published yet]
+The steps below are for `@pooled/openclaw` once it is published. Until then, it runs from a Pooled checkout: see [OpenClaw](/docs/openclaw).
+:::
+
+**Goal:** an OpenClaw assistant that thinks with a model running on your own computers.
+
+[OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted assistant. The Pooled plugin makes Pooled its model: the OpenClaw gateway joins a Pooled room as a device and holds part of the model on its own GPU. Your other computers, browser tabs and phones hold the rest.
+
+## You need
+
+- **A computer with a GPU for the gateway:** Linux with Vulkan (glibc 2.38 or newer, like Ubuntu 24.04), or macOS 26 or newer. Windows is untested.
+- **Node 22 or newer** and **OpenClaw 2026.9.6 or newer**.
+- **Memory for the MoE:** the Qwen3.6 35B MoE needs 22.5 GB across the room. It is the model for agent work. Use one big machine, or pool two (the second one with a browser tab or `pooled join`).
+- **A 20.8 GB download** for the MoE, once per machine, and **30 minutes** the first time.
+
+## Steps
+
+<Steps>
+
+1. **Install the plugin.**
+
+   ```bash
+   openclaw plugins install clawhub:@pooled/openclaw
+   ```
+
+   OpenClaw asks you to accept the plugin's capabilities. It installs Pooled's engine and WebGPU (Dawn, about 95 MB).
+
+2. **Pick Pooled.** Run:
+
+   ```bash
+   openclaw onboard
+   ```
+
+   Under **Model/auth provider**, choose **More…** and then **Pooled**.
+
+3. **Start a room, or join one.**
+
+   <Tabs>
+   <TabItem label="Start a room">
+   Choose **Start a room on this device**, then answer four questions:
+
+   1. **How much GPU memory to lend.** The default is what `pooled host` picks for this machine.
+   2. **The model.** Pick **Qwen3.6 35B MoE**. The list shows what each needs across the room and whether it is downloaded.
+   3. **The download**, if the model isn't on this machine yet: **Download now**, **Download when the gateway starts**, or **Don't download** (stream this machine's layers at every start).
+   4. **How many devices to wait for, and who can join.** Keep **Devices with the invite link**: a device with only the code then waits for you.
+
+   Onboarding prints the room code (like `4TK-G9P`) and the invite link (`https://pooled.run/r/4TKG9P#k=…`). They stay the same when the gateway restarts.
+   </TabItem>
+   <TabItem label="Join a room">
+   Choose **Join a room**, paste the room's invite link (or type its code) and say how much memory to lend.
+
+   With the invite link, it is let in at once. With the code alone, it waits until the room's host lets it in. Either way it keeps the pass the host gives it, so the gateway gets straight back in after a restart.
+   </TabItem>
+   </Tabs>
+
+4. **Add your other devices** (skip this if one machine holds the model). On each one:
+
+   - open the invite link in Chrome or Safari, or
+   - run `npx @pooled/cli join "<invite link>"` on another computer (see [Rooms from the terminal](/docs/kits/terminal)), or
+   - pick **Pooled → Join a room** in OpenClaw there.
+
+5. **Open a chat with the assistant.** Run `openclaw tui`, or open the Control UI with `openclaw dashboard`. Type `/pooled` to see the room: its devices, what each lends, whether they hold the model, and who waits to join.
+
+6. **Give it a first task**, for example:
+
+   ```text
+   Make a folder called notes. In it, write todo.md with three things I should do this week to learn about GPUs, one line each.
+   ```
+
+   Keep OpenClaw's approvals on: it asks before it writes files or runs commands.
+
+</Steps>
+
+## What you should see
+
+- After step 3: the room code and the invite link.
+- After step 5: `/pooled` lists this machine as a device, and the model as loaded once the pledges hold it.
+- After step 6: the first answer takes about a minute on two computers, because the room reads OpenClaw's whole prompt (14,000 to 18,000 tokens) once. The plugin warms this up when the room comes online. Later answers start in seconds.
+
+## If something goes wrong
+
+### The chat says the room "is waiting for devices" or has "not enough memory"
+The room doesn't have the devices it waits for, or their pledges don't hold the model yet. The message names the devices and what they pledged. Open the invite link on another device (step 4), lend more with `/pooled pledge <GB>`, or pick a smaller model. A question waits up to 120 seconds for the room before it gives up.
+
+### A device waits to join
+It came with the code, not the invite link. Type `/pooled` to see who waits, then `/pooled allow` to let the first one in (`/pooled deny` turns it away). `/pooled link` prints the invite link to send instead.
+
+### `No WebGPU adapter` or the gateway can't use the GPU
+The plugin needs Vulkan on Linux or Metal on macOS 26 or newer. If the optional WebGPU package didn't install, the gateway says how to add it. On macOS, a copy from a zip may need `xattr -d com.apple.quarantine` on `dawn.node`.
+
+More: [OpenClaw](/docs/openclaw) and [Troubleshooting](/docs/troubleshooting).
+
+:::caution[Use rooms of your own devices]
+Every device that holds layers sees the conversation, including the files OpenClaw reads, and could steer the tool calls it runs. Share the invite link only with people you trust. See [Who can see and steer what](/docs/openclaw#who-can-see-and-steer-what).
+:::
+
+## Next
+
+- [OpenClaw](/docs/openclaw): the config keys, results and limits.
+- [Rooms from the terminal](/docs/kits/terminal), to add a computer with `pooled join`.
+- [Pool two devices](/docs/kits/two-devices).

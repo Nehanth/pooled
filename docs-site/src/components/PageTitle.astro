@@ -5,6 +5,7 @@ const PAGE_TITLE_ID = '_top'; // Starlight's skip-link target (not exported)
 const route = Astro.locals.starlightRoute;
 const { title, description, eyebrow } = route.entry.data as any;
 const body = route.entry.body ?? '';
+const showCopy = route.entry.id !== '404';
 const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim()}\n`;
 ---
 
@@ -12,17 +13,41 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 	{eyebrow && <p class="p-eyebrow">{eyebrow}</p>}
 	<div class="p-title-row">
 		<h1 id={PAGE_TITLE_ID}>{title}</h1>
-		<button class="p-copy print:hidden" data-pagefind-ignore type="button" data-md={md} aria-label="Copy this page as Markdown">
+		{showCopy && <button class="p-copy print:hidden" data-pagefind-ignore type="button" data-md={md} aria-label="Copy this page as Markdown">
 			<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round">
 				<rect x="5.5" y="5.5" width="8" height="8" rx="1.8" /><path d="M10.5 5.5V4.3a1.8 1.8 0 0 0-1.8-1.8H4.3a1.8 1.8 0 0 0-1.8 1.8v4.4a1.8 1.8 0 0 0 1.8 1.8h1.2" />
 			</svg>
 			<span>Copy page</span>
-		</button>
+		</button>}
 	</div>
 	{description && <p class="p-lede">{description}</p>}
 </div>
 
 <script>
+	// Table cells carry their column name, so phones can label the stacked reference rows ("Default: speed").
+	// Tables of long text (a sentence in a cell) are marked to stack on phones too, instead of scrolling.
+	document.querySelectorAll<HTMLTableElement>('.sl-markdown-content table').forEach((t) => {
+		const heads = [...t.querySelectorAll('thead th')].map((th) => th.textContent?.trim() || '');
+		if ([...t.querySelectorAll('td')].some((td) => (td.textContent || '').trim().length > 44)) t.classList.add('p-stack');
+		// reference tables (name, default, scope, description): the columns before the last are short, so they
+		// can stay on one line; a matrix of long values (API shapes side by side) is left to wrap
+		const rows = [...t.querySelectorAll('tr')];
+		if (heads.length >= 4 && rows.every((tr) => [...tr.children].slice(0, -1).every((c) => (c.textContent || '').trim().length <= 28))) t.classList.add('p-ref');
+		// a matrix whose last column is short values too (comparison tables): phones label that cell as well
+		const last = rows.slice(1).map((tr) => (tr.lastElementChild?.textContent || '').trim().length);
+		if (t.classList.contains('p-stack') && last.length && last.reduce((a, b) => a + b, 0) / last.length <= 32) t.classList.add('p-label-last');
+		const box = document.createElement('div');
+		box.className = 'p-table';
+		t.replaceWith(box);
+		box.append(t);
+		t.querySelectorAll('tbody tr').forEach((tr) => {
+			[...tr.children].forEach((td, i) => heads[i] && td.setAttribute('data-label', heads[i]));
+		});
+	});
+	// short inline code never breaks inside (`?ka=N`, not `?` then `ka=N`); long code still wraps
+	document.querySelectorAll<HTMLElement>('.sl-markdown-content :not(pre) > code').forEach((c) => {
+		if ((c.textContent || '').length <= 22) c.classList.add('p-nw');
+	});
 	document.querySelectorAll<HTMLButtonElement>('.p-copy').forEach((btn) => {
 		btn.addEventListener('click', async () => {
 			const label = btn.querySelector('span')!;
@@ -38,11 +63,13 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 </script>
 
 <style>
-	.p-title { margin-top: 8px; }
+	/* the masthead ends on a hairline, a calm break before the body */
+	.p-title { margin-top: 4px; padding-bottom: 28px; border-bottom: 1px solid var(--p-rule); }
+	/* the section the page is in, small and grey above the title */
 	.p-eyebrow {
-		margin: 0 0 6px;
+		margin: 0 0 10px;
 		font: 500 13px/1.4 var(--__sl-font);
-		color: var(--p-blue-text);
+		color: var(--p-ink-4);
 	}
 	.p-title-row {
 		display: flex;
@@ -50,45 +77,53 @@ const md = `# ${title}\n\n${description ? description + '\n\n' : ''}${body.trim(
 		justify-content: space-between;
 		gap: 16px;
 	}
+	/* the landing's display face, at its --d-lg */
 	h1 {
 		margin: 0;
 		font-family: var(--p-display);
 		font-weight: 400;
-		font-size: 36px;
-		line-height: 1.1;
-		letter-spacing: -0.025em;
+		font-size: 40px;
+		line-height: 1.08;
+		letter-spacing: -0.03em;
 		color: var(--p-ink);
+		text-wrap: balance;
 	}
+	/* the room's .hbtn: white, 1px --rule-3 outline, 34px */
 	.p-copy {
 		flex: 0 0 auto;
 		display: inline-flex;
 		align-items: center;
-		gap: 6px;
-		height: 32px;
-		margin-top: 2px;
+		gap: 7px;
+		height: 34px;
+		margin-top: 4px;
 		padding: 0 12px;
 		border: 0;
 		border-radius: 8px;
 		background: var(--p-card);
 		box-shadow: inset 0 0 0 1px var(--p-rule-3);
-		color: var(--p-ink-2);
+		color: var(--p-ink);
 		font: 500 13px/1 var(--__sl-font);
 		cursor: pointer;
-		transition: background-color 0.15s var(--p-ease), box-shadow 0.15s var(--p-ease), transform 0.12s var(--p-ease);
+		transition: background-color 0.16s var(--p-ease), box-shadow 0.16s var(--p-ease), transform 0.16s var(--p-ease);
 	}
-	.p-copy:hover { background: var(--p-bg-2); box-shadow: inset 0 0 0 1px var(--p-ink-3); color: var(--p-ink); }
+	.p-copy svg { color: var(--p-ink-3); }
+	.p-copy:hover { background: var(--p-bg-2); box-shadow: inset 0 0 0 1px var(--p-ink-3); }
 	.p-copy:active { transform: scale(0.98); }
-	.p-copy:focus-visible { outline: 2px solid var(--p-blue); outline-offset: 2px; }
 	.p-lede {
+		max-width: 36em;
 		margin: 14px 0 0;
-		font-size: 17px;
-		line-height: 1.6;
-		color: var(--p-ink-2);
+		font-size: 18px;
+		line-height: 1.55;
+		letter-spacing: -0.01em;
+		color: var(--p-ink-3);
 		text-wrap: pretty;
 	}
 	@media (max-width: 50rem) {
-		h1 { font-size: 30px; }
+		h1 { font-size: 32px; }
+		.p-title { padding-bottom: 22px; }
+		.p-eyebrow { margin-bottom: 8px; }
+		.p-lede { font-size: 17px; margin-top: 10px; }
 		.p-copy span { display: none; }
-		.p-copy { width: 34px; padding: 0; justify-content: center; }
+		.p-copy { width: 40px; height: 40px; margin-top: -2px; padding: 0; justify-content: center; }
 	}
 </style>

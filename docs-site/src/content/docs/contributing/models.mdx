@@ -20,7 +20,7 @@ Sources (origin/main 40bb0fa):
 
 import { Aside, Steps } from '@astrojs/starlight/components';
 
-Pooled ships no weights. Browsers fetch each tensor from a public Hugging Face repository with HTTP range requests, and tests read the same files from `models/`. A model the engine already understands needs only a few lines in the room's catalogue. A new architecture is a bigger job.
+Pooled ships no weights: browsers fetch tensors from Hugging Face with range requests, and tests read the same files from `models/`. A model the engine already understands needs a few lines in `room/models.js`. A new architecture is a bigger job.
 
 ## What the engine runs today
 
@@ -35,7 +35,7 @@ Pooled ships no weights. Browsers fetch each tensor from a public Hugging Face r
 Models that share the hybrid layout of Qwen 3.5, 3.6 and 3.8, such as Qwen 3.5 2B or 9B, need only catalogue entries.
 
 <Aside type="caution">
-A new architecture or a new quantization format is a substantial change. Open an issue with the *Research / design proposal* template before you write the engine code. See [Contributing](/docs/contributing#changes-that-need-a-design-note-first).
+A new architecture or quantization format needs a design note first. See [Contributing](/docs/contributing#changes-that-need-a-design-note-first).
 </Aside>
 
 ## Steps
@@ -72,7 +72,7 @@ A new architecture or a new quantization format is a substantial change. Open an
 
    `ref.cjs` covers Llama-style safetensors models, `ref_qwen.mjs` dense Qwen3 GGUFs (`QWEN_DIR` picks the folder, relative to `tests/reference/`), and `ref_q38.mjs` the Qwen 3.8 hybrid.
 
-   A golden file holds the prompt, its token ids, per-layer hidden-state samples at the last prompt position, the top logits and the generated tokens. Add a `tests/test_<model>.js` that loads the model, runs the prompt and compares against the golden. See [Testing](/docs/contributing/testing).
+   A golden holds the prompt's token ids, per-layer hidden-state samples, the top logits and the generated tokens. Add a `tests/test_<model>.js` that compares against it. See [Testing](/docs/contributing/testing).
 
 5. **Measure it.** Record decode and prefill tokens/s in `docs/bench-log.md`, with the hardware and the commit. See [Benchmarking](/docs/contributing/benchmarks).
 
@@ -90,4 +90,4 @@ The context a room opens with comes from `CTX` in `room/models.js`, and `?ctx=N`
 | Qwen 3.6 35B MoE | 32768 | 65536 |
 | Qwen3 1.7B | 8192 | 16384 |
 
-A model without a `CTX` entry gets 8192 tokens on the hybrid engine and 2048 on the dense engine. The hybrid models keep a KV cache only on their full-attention layers (one in four), so long context is cheap in memory: 64 KB per position for the 27B and 20 KB for the MoE, in f16. The caps keep each layer's K or V buffer at or under 64 MB. In practice the limit is prefill speed, not memory.
+Without a `CTX` entry a model gets 8192 tokens on the hybrid engine and 2048 on the dense engine. The hybrid models keep a KV cache only on their full-attention layers, so long context is cheap in memory; the practical limit is prefill speed. See [Long context and sessions](/docs/internals/sessions).

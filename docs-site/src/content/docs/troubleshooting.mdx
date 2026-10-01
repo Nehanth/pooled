@@ -1,225 +1,212 @@
 ---
 title: Troubleshooting
-eyebrow: FAQ and troubleshooting
-description: What each room and Serve API error means, and what to do about it.
+eyebrow: Help
+description: Find the message you see, then follow the fix. Joining, loading, answering and the Serve API.
+tableOfContents:
+  maxHeadingLevel: 2
 sidebar:
   label: Troubleshooting
-  order: 2
+  order: 1
 ---
 
 {/*
-Sources (origin/main 40bb0fa):
+Sources (origin/main):
 - room/errors.js: peerErrorText, fetchErrorText, joinStep (5 s / 15 s / 40 s), versionMismatch wording
 - room/preflight.js: verdict() remedies (secure page, chrome://flags, Safari 26, Chrome 121 on Android)
-- room.js: "couldn't load the connection library from cdn.jsdelivr.net", "Lost the signaling server (...)",
-  "<name> stopped responding; waiting for it (Stop gives up)", "pipeline timeout (...)", wake-lock hints,
-  "stopped: context full (N tokens)", "the link to <name> dropped; ask again"
-- room/ice.js: ?turn= ?turnuser= ?turncred= ?relay=1, Network box, window.TURN_SERVERS, links never carry them
+- room.js: pathFailText (join failures with and without a relay), "couldn't load the connection library from cdn.jsdelivr.net",
+  signalingDown, "Lost the signaling server (...)", "that code is already hosting a room", "waiting for room … to be free again",
+  "<name> stopped responding; waiting for it (Stop gives up)", "pipeline timeout (...)", "the link to <name> dropped; ask again",
+  "This screen can't stay awake on its own", "stopped: context full (N tokens)", QUEUE_MAX 10, "re-deal the layers first",
+  "couldn't load its layers", "The model didn't start", "Start a model first", NaN messages, "was taken in this room"
+- room/joingate.js: DENIED_TEXT, FULL_TEXT
 - room/pledge.js: 1 GB iPhone cap, afterLoadDeath (half share, then drop)
 - room/models.js: CTX defaults and maxima
-- docs/self-host-signaling.md: fallback rules, ?signal=, 8 s / 20 s timeouts, backoff 2,4,8,16,30 s
-- p2p.html: Network box text, "Always go through the relay"
-- cli/README.md: Errors table, 503 Retry-After: 5, --max-queue 8, Host/Origin 403, Codex/Claude Code/opencode notes, Open WebUI in Docker
-- PR #233 (keep-alive, ?ka=0, phones ask-only), #235 (errors), #258 (iOS limits, wake lock, re-deal), #259 (bad networks, TURN)
-- .github/ISSUE_TEMPLATE/010-bug-room.yml
+- cli/lib/http.js: --max-queue 8, Retry-After 5, IDLE_MS 5 min, HOST_QUEUED_MS 30 min, keep-alive 10 s; cli/README.md errors table
 */}
 
-import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
+import { Aside } from '@astrojs/starlight/components';
 
-Find the message you see, then follow the fix. Every message in the room is meant to say what happened and what to do next. This page adds the context behind each one.
+Find the message you see, then follow the fix. Messages in quotes are what the room shows.
 
 ## Joining a room
 
 ### "This device can chat but not help run the model"
 
-The browser has no usable WebGPU, so the device joins as an ask-only guest. The join screen shows the fix for your browser. The common ones are:
+The browser has no usable WebGPU. The device joins to ask questions only. The join screen shows the fix for your browser under **Details**.
 
 | Situation | Fix |
 |---|---|
-| The page isn't secure (plain `http` on another machine's address) | Open it over `https`, or on `localhost`. WebGPU needs a secure page. |
+| The page isn't secure (plain `http` on another machine) | Open it over `https`, or on `localhost`. |
 | Chrome on Linux | Turn on `chrome://flags/#enable-unsafe-webgpu` and `chrome://flags/#enable-vulkan`, then reload. |
-| "Has WebGPU but found no usable GPU" | The driver is probably blocklisted. Try `chrome://flags/#enable-unsafe-webgpu`, then reload, or use another browser. |
-| Safari on a Mac before version 26 | Update macOS, or use Chrome. |
-| iPhone or iPad | Update to iOS 26 or later. |
+| "Has WebGPU but found no usable GPU" | The driver is probably blocklisted. Try `chrome://flags/#enable-unsafe-webgpu`, or another browser. |
+| Safari before 26, iPhone or iPad before iOS 26 | Update to 26 or later, or use Chrome on the Mac. |
 | Android | Use Chrome 121 or later. |
 | Firefox | Use Chrome or Edge 113+, or Safari 26+. |
 
+See [Browsers and requirements](/docs/browsers).
+
 ### "No room with that code"
 
-The room code is wrong, or the host's page is closed. Codes are 4 to 6 letters and digits. Check the code with the host. The room exists only while the host's tab is open.
+The code is wrong, or the host's page is closed. The room lives in the host's tab. Check the code with the host. Codes never use I, L, O, U, 0 or 1.
+
+"That room code isn't valid" means a typo: codes are 4 to 6 letters and digits.
 
 ### "Still connecting…" and then "these two devices can't reach each other"
 
-The joiner found the room, but there is no network path between the two devices. The join screen shows "Still connecting…" after 5 seconds. While the devices are still looking for a path, it waits up to 40 seconds before giving up. This usually happens on strict firewalls, mobile networks and some corporate or campus Wi-Fi.
+The room was found, but the network blocks a path between the two devices. This is common on strict firewalls, mobile networks and work Wi-Fi. The join waits up to 40 seconds before it gives up.
 
-1. Put both devices on the same Wi-Fi. This fixes most cases.
-2. Turn off any VPN on either device.
-3. On pooled.run, the room already falls back to the site's TURN relay, over TCP or TLS on port 443 if it has to ([Rooms at work](/docs/rooms/at-work)). If the join still fails, the network may block the relay too: try a phone hotspot.
-4. Or set up a **TURN relay** of your own (coturn, for example, or a provider's). It replaces the site's. Give it to the room in one of these ways:
+1. Put both devices on the same Wi-Fi.
+2. Turn off any VPN.
+3. Try another network. A phone hotspot works.
+4. Add a relay of your own under **Network**. See [Use a TURN relay](/docs/rooms/networks#use-a-turn-relay).
 
-<Tabs>
-<TabItem label="Network box">
-Open **Network** under the join form. Enter the relay URL, user name and password, then press **Save**. The setting is saved in this browser only. Check **Always go through the relay** to force every link through it. The other devices then never see this device's IP address.
-</TabItem>
-<TabItem label="URL">
-```
-https://pooled.run/room?turn=turn:relay.example.org:3478&turnuser=USER&turncred=PASSWORD
-```
-Add `&relay=1` to use only the relay. The URL must be `turn:host:port` or `turns:host:port`. Anything else is ignored and logged.
-</TabItem>
-<TabItem label="Your own deployment">
-```html
-<script>window.TURN_SERVERS = [{ urls: "turn:relay.example.org:3478", username: "USER", credential: "PASSWORD" }];</script>
-```
-Put this before `room.js` loads.
-</TabItem>
-</Tabs>
-
-<Aside type="caution">
-Join links and QR codes never include the relay settings, so every device that needs the relay has to set it up itself. This keeps the relay password out of shared links. See [TURN relay](/docs/self-host/turn).
-</Aside>
+The exact message tells you which case you are in. See [When it still fails](/docs/rooms/networks#when-it-still-fails).
 
 ### "Can't reach the room server"
 
-The page can't reach the signaling server, which introduces devices to each other. By default this is the free public PeerJS cloud, which is sometimes slow, down or blocked.
+The page can't reach the signaling server, which introduces the devices. A VPN or strict firewall can block it, or it may be down.
 
-- Check your internet connection. A VPN or strict firewall can block the server.
-- Press **Create** or **Join** again to retry.
-- Inside a room you see "Lost the signaling server… Reconnecting…" instead. The devices already in the room keep working, but new devices can't join until the server is back. Each device reconnects on its own.
-- For rooms that must be reliable, [run your own signaling server](/docs/self-host/signaling) and add it to the room link with `?signal=`. You can also list a fallback: `?signal=signal.example.com,cloud`. The host and every joiner must use the same server, and the host's invite link includes it for you.
+- Check your connection, then press **Start a room** or **Join** again.
+- Inside a room you see "Lost the signaling server… Reconnecting…" instead. The devices already there keep working. New devices can join once it's back.
+- For rooms that must be reliable, [run your own signaling server](/docs/self-host/signaling).
 
 ### "Couldn't load the connection library from cdn.jsdelivr.net"
 
-The page loads PeerJS from cdn.jsdelivr.net. An ad blocker, a browser extension or the network blocked it. Allow the site, or try another network, then reload.
+An ad blocker, an extension or the network blocked the connection library. Allow the site or try another network, then reload.
 
 ### "That code is already hosting a room"
 
-A room with that code is open. Press **Join** to join it, or create a new room. A host that reloads its own room doesn't see this: it shows "waiting for room *code* to be free again" until the old tab's registration expires, then claims the code again on its own.
+A room with that code is already open. Join it, or start a new room.
+
+A host that reloads its own room sees "waiting for room … to be free again" for a few seconds. It takes the code back by itself.
 
 ### "…is on an older (or newer) version of Pooled"
 
-The two tabs speak different versions of the room protocol. This happens right after a deploy. The message says which side is older. Reload that page. If the host reloads, everyone joins again.
+The two tabs run different versions, usually right after an update. The message says which side is older. Reload that page.
+
+### Other joining messages
+
+| You see | Fix |
+|---|---|
+| "The host didn't let this device in." | Ask the host for an invite link. See [Invite devices](/docs/invite). |
+| "The host has several devices waiting to join already." | Try again in a minute. |
+| "This browser can't make peer-to-peer connections (no WebRTC)." | Use a recent Chrome, Edge, Firefox or Safari. |
+| "The browser's peer-to-peer connection failed." | Reload. If it repeats, try another network. |
+| "The room server refused this page's key." | Reload. Open an issue if it repeats. |
+| "*name* was taken in this room: this device is *name 2*" | Nothing to do. Your device got a number. |
 
 ## Loading the model
 
 ### Download errors
 
-Weights come from Hugging Face. When a download fails, **layers that already downloaded stay cached**, so pressing **Start** again resumes where it stopped.
+Weights come from Hugging Face. Layers that already downloaded stay cached, so pressing **Start** again carries on where it stopped.
 
-| Message says | Meaning | What to do |
-|---|---|---|
-| "Can't reach Hugging Face" | No answer at all. You are offline, or a VPN, ad blocker or firewall blocked it. | Fix the connection, press **Start** again. |
-| "rate-limiting downloads (429)" | Too many requests. | Wait a minute, press **Start** again. |
-| "busy or down right now (502/503/504)" | Hugging Face is having trouble. | Wait a minute, press **Start** again. |
-| "refused the download (401/403)" or "no such file any more (404/410)" | The model file moved or now needs a login. | [Open an issue](https://github.com/Nehanth/pooled/issues). |
-| "sent the whole file instead of the part asked for" | A proxy dropped the range request. | Reload and try again. Open an issue if it repeats. |
+| Message says | Fix |
+|---|---|
+| "Can't reach Hugging Face" | You are offline, or a VPN, ad blocker or firewall blocked it. Fix that and press **Start**. |
+| "rate-limiting downloads (429)" or "busy or down right now (502/503/504)" | Wait a minute and press **Start**. |
+| "refused the download (401/403)" or "no such file any more (404/410)" | The file moved. [Open an issue](https://github.com/Nehanth/pooled/issues). |
+| "sent the whole file instead of the part asked for" | A proxy broke the download. Reload and try again. |
 
 ### An iPhone's tab reloads or closes while loading
 
-iOS closes a Safari tab that uses more than about 1.5 GB, and GPU memory counts toward that. Pooled caps an iPhone or iPad at 1 GB of layers for this reason. If the tab is still killed:
+Safari closes a tab that uses more than about 1.5 GB. Pooled caps an iPhone or iPad at 1 GB for this reason. If the tab still dies, the host deals again with about half the share. The second time, the room carries on without the phone, and it stays to ask.
 
-- **The host takes over.** The first time a device's tab dies while loading, the host deals again and gives that device about half its share. The second time, the host deals without it, and the device stays in the room to ask.
-- **Close other Safari tabs.** A leftover tab can hold hundreds of megabytes.
-- **Lend 0.5 GB** instead of 1 GB.
-- **Keep the phone unlocked and on power.**
+- Close other Safari tabs.
+- Give 0.5 GB instead of 1 GB.
+- Keep the phone unlocked and on power.
 
-In most rooms the phone doesn't need layers at all. See [Why does my phone only get to ask questions?](/docs/faq#why-does-my-phone-only-get-to-ask-questions)
+Most rooms don't need a phone's layers at all. See [Phones and tablets](/docs/phones).
 
 ### "This screen can't stay awake on its own"
 
-The browser refused the screen wake lock. A tab whose screen locks stops working, so do this by hand: on an iPhone set **Auto-Lock** to **Never**, and on Android set the screen timeout to its longest (**Settings › Display**).
+The browser won't keep the screen on, and a locked screen stops the device. On an iPhone, set **Auto-Lock** to **Never**. On Android, set the screen timeout to its longest (**Settings › Display**).
+
+### The model won't start
+
+| You see | Fix |
+|---|---|
+| "This device couldn't load its layers (…)" | Press **Start** again. If it repeats, give less memory from this device. |
+| "The model didn't start: …" | Read the reason. Usually a device left while loading. Press **Start** again. |
+| "wait for this device's layers to finish loading, then re-deal" | Wait for the load to finish. |
+| "Start a model first: Code mode runs on the room's model." | Press **Start the model**. |
 
 ## During an answer
 
 ### "*name* stopped responding; waiting for it"
 
-A device in the room went silent. The answer is paused, not failed.
+A device went silent. The answer is paused, not lost.
 
-- **The device comes back:** it finishes the answer. A phone that went to the background reconnects on its own, and a reloaded tab rejoins under the same name. Neither has to download its layers again.
-- **The device doesn't come back within a minute:** with **Re-deal on its own** on (the default), the host deals its layers to the remaining devices and the answer carries on. With it off, or to skip the wait, the host re-deals from the notice in the room. Cached layers reload in seconds.
-- **To stop waiting,** press **Stop**.
-
-Check that the device's tab is still open and its screen is on.
+- If the device comes back, the answer carries on. A reloaded tab rejoins under the same name.
+- If it is not back within a minute, the host deals its layers to the others and the answer carries on. That is **Re-deal on its own**, on by default. You can also press **Re-deal the layers** yourself.
+- Press **Stop** to give up.
 
 ### "Pipeline timeout: a device in the room stopped answering"
 
-A device didn't answer in time. Check that every device's tab is open with its screen on, then ask again.
+A device didn't answer in time. Check that every device's tab is open, in front, with its screen on. Then ask again.
 
 ### "The link to *name* dropped; ask again"
 
-The network gave up on the connection. The room reconnects the link with the same layers. Ask the question again.
+The network dropped that connection. The room reconnects it. Ask again.
 
 ### Answers are slow on Wi-Fi
 
-Every token passes through every device that holds layers, so each extra device adds its network delay to each token.
+Every token passes through each device that holds layers, so each one adds its network delay.
 
 - Keep the default **For speed** split. It uses the fewest, fastest devices.
-- Put devices on the same Wi-Fi, close to the router. Wired is better still.
-- Don't give phones layers unless the room needs their memory.
-- Prefer the Qwen 3.6 35B MoE when it fits. It is the fastest model per token.
-- The room keeps the Wi-Fi radio awake during an answer by sending 1 byte every 10 ms of silence. Don't turn this off with `?ka=0` unless you are measuring it.
+- Put devices on the same Wi-Fi, near the router, or wired.
+- Pick the 35B MoE when it fits. It is the fastest model per token.
 
-The first answer in a room is slower than the later ones. Speculative decoding starts cautious and drafts further ahead once it has measured the room.
+The first answer is a bit slower than later ones. See [Networks and work Wi-Fi](/docs/rooms/networks).
 
 ### The answer stops with "context full"
 
-The conversation reached the model's context limit. Start a new chat, or reopen the room with a longer context. The host adds `?ctx=` to the room URL:
+The conversation filled the model's context. Start a new chat, or have the host reopen the room with a longer context, for example `https://pooled.run/room?ctx=65536`. See [Pick a model](/docs/models).
 
-| Model | Default | Most with `?ctx=` |
-|---|---|---|
-| Qwen3 1.7B | 8192 | 16384 |
-| Qwen 3.8 27B | 16384 | 32768 |
-| Qwen 3.6 35B MoE | 32768 | 65536 |
+### Other messages while asking
 
-A longer context uses more memory and makes long prompts slower to prefill.
+| You see | Fix |
+|---|---|
+| "the queue is full, try again after this answer" | 10 questions are waiting, or you have 2 in line. Wait. |
+| "a device left: re-deal the layers first" | Wait for it to come back, or press **Re-deal the layers**. |
+| "the model is still loading" | Wait for every device to finish loading. |
+| "NaN PRODUCED by this device" or "NaN ARRIVED at this device" | A GPU returned bad numbers. [Open an issue](https://github.com/Nehanth/pooled/issues) with the browser, GPU and model. |
+| "Room over" | The host left. Start a new room. |
 
 ## Serve API (`pooled serve`)
 
-The bridge answers errors in each API's own format:
+Errors come back in each API's own format.
 
 | Status (OpenAI / Anthropic) | Cause | Fix |
 |---|---|---|
-| 400 / 400 | Bad request, an unsupported feature, or a prompt longer than the room's context | Read the message. For a prompt that is too long, set your tool's context size (below). |
-| 400 asking to reload | The host's page is too old for tool calling | The host reloads the room page. |
-| 401 / 401 | Missing or wrong key while `POOLED_TOKEN`, `--token-file` or `--token` is set | Send it as `Authorization: Bearer <token>` or `x-api-key`. |
-| 403 / 403 | The request came with an `Origin` header, or a `Host` other than `127.0.0.1:<port>` or `localhost:<port>` | Call the bridge from a local program, not from a web page. |
-| 429 / 529 | The queue is full, here or in the room | Retry later, or raise `--max-queue` (default 8). |
-| 503 / 529 | The model isn't started, the host is gone, the host disconnected this client or pressed Stop | The host starts the model. Until then, requests get `Retry-After: 5`. |
-| 504 / 504 | The room sent nothing for 5 minutes (30 while the host queues the request) | Check the room. A device may have stalled. |
-| 500 / 500 | Generation failed in the room | Check the room page for the error, and retry. |
+| 400 | Bad request, or a prompt longer than the room's context | Read the message. Set your tool's context size (below). |
+| 401 | Missing or wrong key while a token is set | Send `Authorization: Bearer <token>` or `x-api-key`. |
+| 403 | The request came from a web page, or with the wrong `Host` | Call the bridge from a local program. |
+| 429 / 529 | The queue is full | Retry later, or raise `--max-queue` (default 8). |
+| 503 / 529 | The model isn't started, or the host left or pressed Stop | Start the model in the room. |
+| 504 | The room sent nothing for 5 minutes | Check the room. A device may have stalled. |
+| 500 | Generation failed in the room | Check the room page, then retry. |
 
 ### Claude Code says "Prompt is too long" before sending anything
 
-Claude Code doesn't know how big a model called `pooled` is. Tell it the room's context, and cap its output so it doesn't reserve 32000 tokens of the window:
-
-```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=pooled \
-  CLAUDE_CODE_MAX_CONTEXT_TOKENS=32768 CLAUDE_CODE_MAX_OUTPUT_TOKENS=8192 \
-  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled
-```
-
-The bridge's banner prints this line with your room's numbers once the model is ready. Claude Code's own prompt is 15 to 20 thousand tokens, so use the 35B MoE or the 27B. The 1.7B leaves about 1,000 tokens after Claude Code's prompt, which isn't enough.
+Claude Code doesn't know the room's context size. Copy the Claude Code line the bridge prints once the model is ready. It sets `CLAUDE_CODE_MAX_CONTEXT_TOKENS` and `CLAUDE_CODE_MAX_OUTPUT_TOKENS` to fit your room. Use the 35B MoE or the 27B: Claude Code's own prompt is 15 to 20 thousand tokens. See [Connect your tools](/docs/serve/recipes).
 
 ### Codex or opencode fails with a 400 after a long session
 
-The tool doesn't know the room's context, so it never compacts the conversation, and the prompt eventually grows past the room's limit. Set the context size: `model_context_window` and `model_auto_compact_token_limit` in Codex, `limit.context` in opencode. The banner and `GET /health` (`ctx`) give the number. See [Codex CLI](/docs/serve/recipes/codex) and [opencode](/docs/serve/recipes/opencode).
+The tool doesn't know the room's context, so it never compacts. Set `model_context_window` and `model_auto_compact_token_limit` in Codex, or `limit.context` in opencode. The bridge's banner prints the number. See [Codex CLI](/docs/serve/recipes#codex-cli) and [opencode](/docs/serve/recipes#opencode).
 
 ### Codex times out on the first prompt
 
-A slow room can take minutes to prefill Codex's 15,000-token prompt. The bridge sends keep-alive events every 10 seconds while it waits. If Codex still times out, raise `stream_idle_timeout_ms` in the provider section of `~/.codex/config.toml`.
+A slow room can take minutes to read Codex's long prompt. Raise `stream_idle_timeout_ms` in the provider section of `~/.codex/config.toml`.
 
 ### Open WebUI in Docker can't connect
 
-Inside a container, `127.0.0.1` is the container itself, not your computer, and the bridge listens only on your computer's `127.0.0.1`. Run Open WebUI directly on your computer, or start the container with `--network=host`.
+Inside a container, `127.0.0.1` is the container, not your computer. Run Open WebUI directly on your computer, or start the container with `--network=host`.
 
 ## Still stuck?
 
-[Open a room bug report](https://github.com/Nehanth/pooled/issues/new/choose) and include:
+[Open a room bug report](https://github.com/Nehanth/pooled/issues/new/choose). Include the site, one line per device (browser, OS, GPU, RAM, which one hosts), the model, the status line and the browser console output.
 
-- the site (pooled.run or staging);
-- one line per device: browser and version, OS, GPU and RAM, whether it's on the same network, and whether it's the host;
-- the model;
-- the status line and any breadcrumb, such as `spec: … · lap …ms`;
-- the browser console output.
-
-Security problems go by email instead. See [Security model](/docs/internals/security).
+<Aside type="caution">
+Security problems go by email, not an issue. See [SECURITY.md](https://github.com/Nehanth/pooled/blob/main/SECURITY.md#reporting-a-vulnerability).
+</Aside>

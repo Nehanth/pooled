@@ -5,16 +5,19 @@
 // setupNode() is idempotent and must run before anything touches navigator.gpu or new Peer().
 
 import { measureCopyGBps } from "../../room/gpuspeed.js";
+import { DENSE_SPEC_V } from "../../room/lookup.js";
 
 let ready = null;
 export let Peer = null;
 export const runtime = { gpu: null, rtc: null };
 
-export function setupNode({ dawnFlags = (process.env.DAWN_OPTS || "").split(" ").filter(Boolean) } = {}) {
+// webgpu: an async loader for Dawn ({ create, globals }), for a caller that resolves it from its own
+// install (the pooled CLI: an optional package); default the npm "webgpu" package next to this one
+export function setupNode({ dawnFlags = (process.env.DAWN_OPTS || "").split(" ").filter(Boolean), webgpu = () => import("webgpu") } = {}) {
   return ready ||= (async () => {
     // --- WebGPU (Dawn). Node 21+ already has a navigator object; add gpu to it.
     if (!globalThis.navigator?.gpu) {
-      const { create, globals } = await import("webgpu");
+      const { create, globals } = await webgpu();
       Object.assign(globalThis, globals);   // GPUBufferUsage, GPUMapMode, GPUShaderStage ...
       const gpu = create(dawnFlags);
       if (globalThis.navigator) Object.defineProperty(globalThis.navigator, "gpu", { value: gpu, configurable: true });
@@ -38,7 +41,8 @@ export function setupNode({ dawnFlags = (process.env.DAWN_OPTS || "").split(" ")
 // lets a clearly faster GPU be the model host (room/plan.js pickModelHost). gbps: pin it (0 = unknown).
 export async function probeMeta(pledgeGB, { gbps = null } = {}) {
   const ua = process.platform === "darwin" ? "Mac" : "Device";
-  const meta = { ua, webgpu: false, gpu: "no WebGPU", maxBufGB: 0, native: "node-dawn" };
+  // dspec: dense verify frames of any column count (the repo's engine; room/lookup.js chainDenseSpec)
+  const meta = { ua, webgpu: false, gpu: "no WebGPU", maxBufGB: 0, native: "node-dawn", dspec: DENSE_SPEC_V };
   const a = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (a) {
     const info = a.info || {};

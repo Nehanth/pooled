@@ -1,6 +1,21 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import { readFile, writeFile } from 'node:fs/promises';
+
+// CHANGELOG.md is imported into reference/changelog and links repo files relatively (docs/protocol.md).
+// On the site those resolve under /docs/reference/changelog/ and 404, so after the build they point at
+// GitHub instead. (A rehype plugin can't do it: markdown.rehypePlugins needs the old unified processor.)
+const repoLinks = {
+	name: 'pooled-changelog-repo-links',
+	hooks: {
+		'astro:build:done': async ({ dir }) => {
+			const file = new URL('reference/changelog/index.html', dir);
+			const html = await readFile(file, 'utf8');
+			await writeFile(file, html.replace(/href="((?:docs|tests|scripts|cli|room|engine|packages)\/[^"]+)"/g, 'href="https://github.com/Nehanth/pooled/blob/main/$1"'));
+		},
+	},
+};
 
 // Served by the main Vercel project at https://pooled.run/docs (static files, no hosted service).
 export default defineConfig({
@@ -9,7 +24,24 @@ export default defineConfig({
 	trailingSlash: 'never', // vercel.json has "trailingSlash": false
 	outDir: './dist', // build-vercel.mjs copies this to <site>/docs next to the static site
 	build: { format: 'directory' },
+	// Pages merged into others: old links still work (pooled.run/docs links are already shared).
+	redirects: {
+		'/rooms/errors': '/docs/troubleshooting',
+		'/rooms/at-work': '/docs/rooms/networks',
+		'/rooms/serve-api-page': '/docs/serve',
+		'/code/templates': '/docs/code#templates',
+		'/code/share': '/docs/code#download',
+		'/serve/recipes/codex': '/docs/serve/recipes#codex-cli',
+		'/serve/recipes/claude-code': '/docs/serve/recipes#claude-code',
+		'/serve/recipes/opencode': '/docs/serve/recipes#opencode',
+		'/serve/recipes/continue': '/docs/serve/recipes#continue',
+		'/serve/recipes/open-webui': '/docs/serve/recipes#open-webui',
+		'/serve/recipes/sdks': '/docs/serve/recipes#openai-and-anthropic-sdks',
+		'/serve/recipes/litellm': '/docs/serve/recipes#litellm',
+		'/serve/recipes/curl': '/docs/serve/recipes#curl',
+	},
 	integrations: [
+		repoLinks,
 		starlight({
 			title: 'Pooled docs',
 			description: 'Peer-to-peer LLM inference in the browser. Pool your devices to run big open models.',
@@ -32,30 +64,69 @@ export default defineConfig({
 			sidebar: [
 				{
 					label: 'Getting started',
-					items: ['index', 'start-a-room', 'invite', 'models', 'phones', 'browsers', 'privacy'],
+					items: ['index', 'start-a-room', 'invite', 'models', 'phones'],
 				},
-				{ label: 'Rooms', items: [{ autogenerate: { directory: 'rooms' } }] },
 				{
-					label: 'Serve API',
+					label: 'Starter kits',
 					items: [
-						'serve',
-						'serve/options',
-						'serve/chat-completions',
-						'serve/responses',
-						'serve/messages',
-						'serve/tools',
-						'serve/structured-output',
-						'serve/limits',
-						{ label: 'Client recipes', collapsed: false, items: [{ autogenerate: { directory: 'serve/recipes' } }] },
+						'kits/first-chat',
+						'kits/two-devices',
+						'kits/build-an-app',
+						'kits/coding-tools',
+						'kits/terminal',
+						'kits/openclaw',
 					],
 				},
-				{ label: 'Terminal and agents', items: ['terminal', 'openclaw'] },
-				{ label: 'Code mode', items: [{ autogenerate: { directory: 'code' } }] },
-				{ label: 'Self-hosting', items: [{ autogenerate: { directory: 'self-host' } }] },
-				{ label: 'How it works', items: [{ autogenerate: { directory: 'internals' } }] },
-				{ label: 'Reference', items: [{ autogenerate: { directory: 'reference' } }] },
-				{ label: 'FAQ and troubleshooting', items: ['faq', 'troubleshooting'] },
-				{ label: 'Contributing', items: [{ autogenerate: { directory: 'contributing' } }, 'roadmap'] },
+				{
+					label: 'Use it',
+					items: [
+						'chat',
+						'rooms/settings',
+						'code',
+						{ slug: 'serve', label: 'Serve API' },
+						{ slug: 'serve/recipes', label: 'Connect your tools' },
+						'openclaw',
+						'terminal',
+					],
+				},
+				{ label: 'Help', items: ['troubleshooting', 'faq', 'rooms/networks', 'browsers', 'privacy'] },
+				{
+					label: 'Reference',
+					items: [
+						'reference/url-options',
+						'reference/cli',
+						'reference/environment',
+						'reference/endpoints',
+						'reference/models',
+						'reference/changelog',
+						{
+							label: 'Serve API reference',
+							collapsed: true,
+							items: [
+								'serve/options',
+								'serve/chat-completions',
+								'serve/responses',
+								'serve/messages',
+								'serve/tools',
+								'serve/structured-output',
+								'serve/limits',
+							],
+						},
+					],
+				},
+				{ label: 'Self-hosting', collapsed: true, items: [{ autogenerate: { directory: 'self-host' } }] },
+				{ label: 'Contributing', collapsed: true, items: [{ autogenerate: { directory: 'contributing' } }, 'roadmap'] },
+				{
+					label: 'Internals',
+					collapsed: true,
+					items: [
+						{ autogenerate: { directory: 'internals' } },
+						{
+							label: 'How rooms work',
+							items: ['rooms/split', 'rooms/devices', 'rooms/downloads', 'rooms/recovery', 'code/agent', 'code/previews'],
+						},
+					],
+				},
 			],
 		}),
 	],
