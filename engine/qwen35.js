@@ -457,7 +457,7 @@ export class Qwen35Engine {
     this.moeGrpU = 0; this.moeGrpUC = 0;
     {
       const auto = moeGroupPrefill === undefined || moeGroupPrefill === "auto";
-      const gU = auto ? (this.moe && hasEmbed && lo === 0 ? MOE_PREFILL_UBATCH : 0) : Math.floor(+moeGroupPrefill) || 0, UC = Math.floor(+moeGroupUC) || 8, R = dnGroupRows(UC);
+      const gU = auto ? (this.moe ? MOE_PREFILL_UBATCH : 0) : Math.floor(+moeGroupPrefill) || 0, UC = Math.floor(+moeGroupUC) || 8, R = dnGroupRows(UC);
       const why = gU <= 0 ? null : !this.moeFuse ? "needs the fused MoE FFN (moeFuse)" : !this.flash ? "needs flash attention"
         : gU % batchCols || gU < 2 * batchCols ? `ubatch ${gU} is not a multiple of batchCols ${batchCols} (at least 2 passes)`
         : ![1, 2, 4, 8, 16].includes(UC) ? `moeGroupUC ${UC} is not 1, 2, 4, 8 or 16`
@@ -478,14 +478,15 @@ export class Qwen35Engine {
     // width BN) through _encodeLayerWide: every Q4_0 / Q8_0 projection is ONE tiled GEMM over the
     // whole chunk (engine/wgsl/gemm_wide.js); the DeltaNet recurrence, attention and MoE experts run
     // on the existing batchCols-wide kernels, sub-batch by sub-batch. Prefill-tolerance numerics (a
-    // different summation order); decode and verify never use it. Default (undefined): 256 on an engine
-    // that holds the embedding, MoE (MOE_PREFILL_UBATCH) and dense (DENSE_PREFILL_UBATCH) alike (its 64x64
-    // tile fits the 16 KB default workgroup memory).
+    // different summation order); decode and verify never use it. Default (undefined): 256 on a MoE engine
+    // (MOE_PREFILL_UBATCH; the MoE prefill tolerance, see attnPrefillTile) and on a dense engine that holds the
+    // embedding (DENSE_PREFILL_UBATCH); its 64x64 tile fits the 16 KB default workgroup memory. A MoE shard
+    // without the embedding (a room's later devices) uses it through prefillHidden.
     // An automatic setting that cannot be used here is silently off; an explicit one warns.
     // engine.prefillWide = false switches it off at runtime. prefillTile: { BM, BN, TM, TN, KB } overrides the tile.
     this.ubatch = 0; this.wideCfg = null;
     const ubAuto = prefillUbatch === undefined || prefillUbatch === "auto";
-    const UB = ubAuto ? (hasEmbed && lo === 0 ? (this.moe ? MOE_PREFILL_UBATCH : DENSE_PREFILL_UBATCH) : 0) : Math.floor(+prefillUbatch || 0);
+    const UB = ubAuto ? (this.moe ? MOE_PREFILL_UBATCH : hasEmbed && lo === 0 ? DENSE_PREFILL_UBATCH : 0) : Math.floor(+prefillUbatch || 0);
     if (UB > 0) {
       let why = null, cfg = null;
       try { cfg = wideTileConfig(prefillTile, device.limits.maxComputeWorkgroupStorageSize); } catch (e) { why = e.message; }
@@ -496,7 +497,6 @@ export class Qwen35Engine {
       else if (UB > device.limits.maxComputeWorkgroupsPerDimension) why = `it exceeds the dispatch limit ${device.limits.maxComputeWorkgroupsPerDimension}`
       else if (UB % cfg.BN || cfg.BN % batchCols) why = `it must be a multiple of the tile width ${cfg.BN}, which batchCols (${batchCols}) must divide`;
       else if (!this.flash) why = "it needs the flash-attention path";
-      else if (!hasEmbed || lo !== 0) why = "it needs the embedding (whole-model prefill)";
       else if ([dim, dInner, qDim, ...(weights.layers.some((L) => !L.moe) ? [inter] : [])].some((d) => d % cfg.KS)) why = `a projection width is not a multiple of ${cfg.KS}`;
       else if (!weights.layers.every((L) => projOK(L) && ffnOK(L))) why = "a projection is not Q4_0 / Q8_0";
       if (why) { if (!ubAuto) console.warn(`prefillUbatch ${UB}: wide prefill off (${why})`); }
@@ -2410,7 +2410,9 @@ export class Qwen35Engine {
   }
   // Returns false (and switches wide prefill off, freeing what it built) when its buffers cannot be set
   // up on this device, so prefillTokens falls back to the batchCols-wide passes instead of failing.
-  async _prefillWide(ids, i, w) {
+  // xs (prefillHidden, a chain shard): the chunk's input hiddens (w * dim floats) instead of ids' embeddings;
+  // fill = false: no draft-cache fill (a chain host fills it from the hiddens the chain returns)
+  async _prefillWide(ids, i, w, { xs = null, fill = true } = {}) {
     if (!this.layerW) {
       try { this._initWide(); }
       catch (e) {
@@ -2423,7 +2425,8 @@ export class Qwen35Engine {
     const q = this.device.queue, NC = this.NC, basePos = this.pos, Wx = this.Wt.x;
     this._dp4aOn = !!(this.dp4aCfg && this.prefillDp4a !== false);
     for (let j = 0; j < w / NC; j++) q.writeBuffer(this.frameW[j], 0, new Uint32Array([basePos + j * NC, basePos + j * NC + 1, NC, 0]));
-    for (let c = 0; c < w; c++) q.writeBuffer(Wx.buf, c * Wx.stride, this._embedRowF32(ids[i + c]));
+    const dim = this.dims.dim;
+    for (let c = 0; c < w; c++) q.writeBuffer(Wx.buf, c * Wx.stride, xs ? xs.subarray(c * dim, (c + 1) * dim) : this._embedRowF32(ids[i + c]));
     const gB = this.gB;
     if (gB && this.layers.some((L) => this._wideGrp(L, w)) && gB.sortW !== w) {   // the grouped sort's pair count
       q.writeBuffer(gB.sortU, 0, new Uint32Array([w * this.moe.KS, ...gB.sortArgs])); gB.sortW = w;
@@ -2435,7 +2438,7 @@ export class Qwen35Engine {
     }
     enc.copyBufferToBuffer(Wx.buf, (w - 1) * Wx.stride, this.x, 0, this.dims.dim * 4);
     q.submit([enc.finish()]);
-    if (this.mtp && this.mtpFill !== false) for (let j = 0; j < w / NC; j++) {
+    if (fill && this.mtp && this.mtpFill !== false) for (let j = 0; j < w / NC; j++) {
       const e = this.device.createCommandEncoder();   // the sub-batch's final hiddens into B.x, as after an NC pass
       this._wCopy(e, this.B.x, j, false);
       q.submit([e.finish()]);
@@ -3185,13 +3188,14 @@ export class Qwen35Engine {
   // buffers; then one sort + grouped gate/up + grouped down + combine covers the MoE FFN of all W tokens.
   // The draft (MTP) cache is filled per sub-pass afterwards, from the final hiddens, as prefillTokens does
   // after each pass.
-  async _prefillGrouped(ids, i0, W = this.gB.U) {
+  // xs / fill: as _prefillWide (prefillHidden)
+  async _prefillGrouped(ids, i0, W = this.gB.U, { xs: hx = null, fill = true } = {}) {
     const gB = this.gB, NC = this.NC, B = this.B, D = this.dims, q = this.device.queue, basePos = this.pos, nSub = W / NC;
     if (W % NC || W > gB.U || W < NC) throw new Error(`_prefillGrouped: width ${W} (NC ${NC}, ubatch ${gB.U})`);
     const xs = NC * B.x.stride, xns = NC * B.xn.stride, ss = NC * this.moe.KS * 4;
     if (gB.sortW !== W) { q.writeBuffer(gB.sortU, 0, new Uint32Array([W * this.moe.KS, ...gB.sortArgs])); gB.sortW = W; }
     for (let s = 0; s < nSub; s++) q.writeBuffer(gB.frames[s], 0, new Uint32Array([basePos + s * NC, basePos + s * NC + 1, NC, 0]));
-    for (let c = 0; c < W; c++) q.writeBuffer(gB.XW, c * B.x.stride, this._embedRowF32(ids[i0 + c]));
+    for (let c = 0; c < W; c++) q.writeBuffer(gB.XW, c * B.x.stride, hx ? hx.subarray(c * D.dim, (c + 1) * D.dim) : this._embedRowF32(ids[i0 + c]));
     const enc = this.device.createCommandEncoder();
     try {
       for (let l = 0; l < this.layers.length; l++) {
@@ -3222,7 +3226,7 @@ export class Qwen35Engine {
     if (this._grpDone) await this._grpDone;   // at most two ubatches in flight
     q.submit([enc.finish()]);
     this._grpDone = q.onSubmittedWorkDone();
-    if (this.mtp && this.mtpFill !== false) for (let s = 0; s < nSub; s++) {
+    if (fill && this.mtp && this.mtpFill !== false) for (let s = 0; s < nSub; s++) {
       const e2 = this.device.createCommandEncoder();
       e2.copyBufferToBuffer(gB.XW, s * xs, B.x.buf, 0, xs);
       q.submit([e2.finish()]);
@@ -3316,6 +3320,59 @@ export class Qwen35Engine {
       if (i % 8 === 7) await this.device.queue.onSubmittedWorkDone();
     }
     await this.device.queue.onSubmittedWorkDone();
+  }
+
+  // A room chain's prompt frames (room-node's batched prefill): n columns at basePos through this shard's
+  // layers with the kernels prefillTokens uses (wide GEMM chunks, expert-grouped MoE ubatches), every
+  // column's output hidden read back. src: token ids (the shard with the embedding) or n * dim input
+  // hiddens (a later shard). The draft cache is not filled: the chain host fills it from the hiddens the
+  // chain returns (roomnode fillDrafts). Columns past the last whole chunk run as batchCols passes
+  // (runHiddenBatch / embedRunBatch). Prefill tolerance, as prefillTokens. -> Float32Array(n * dim)
+  // the frame width prefillHidden is made for (a chain host's prompt frames); 0: no prefill kernels on this shard
+  prefillFrame() { return this.ubatch && this.prefillWide !== false ? this.ubatch : this.moeGrpU && this.moeGroup !== false ? this.moeGrpU : 0; }
+  async prefillHidden(src, basePos) {
+    if (!this.B) this._initBatch();
+    this._pre = null; this._snapNow = null;
+    const dim = this.dims.dim, NC = this.NC, ids = src instanceof Float32Array ? null : src;
+    const n = ids ? ids.length : src.length / dim, out = new Float32Array(n * dim);
+    const part = (i, m) => (ids ? null : src.subarray(i * dim, (i + m) * dim));
+    const read = async (buf, stride, i, m) => {   // columns 0 .. m - 1 of buf -> out[i ..]
+      if (!this._stageW || this._stageW.size < m * dim * 4) {
+        this._stageW?.destroy();
+        this._stageW = this.device.createBuffer({ size: m * dim * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      }
+      const st = this._stageW, enc = this.device.createCommandEncoder();
+      for (let c = 0; c < m; c++) enc.copyBufferToBuffer(buf, c * stride, st, c * dim * 4, dim * 4);
+      this.device.queue.submit([enc.finish()]);
+      await st.mapAsync(GPUMapMode.READ, 0, m * dim * 4);
+      out.set(new Float32Array(st.getMappedRange(0, m * dim * 4)), i * dim);
+      st.unmap();
+    };
+    let i = 0;
+    this.pos = basePos;
+    if (this.ubatch && this.prefillWide !== false) {
+      const BN = this.wideCfg.BN;
+      while (n - i >= BN) {
+        const w = Math.min(this.ubatch, Math.floor((n - i) / BN) * BN);
+        if (await this._prefillWide(ids, i, w, { xs: part(i, w), fill: false }) === false) break;
+        await read(this.Wt.x.buf, this.Wt.x.stride, i, w); i += w;
+      }
+    }
+    if (this.gB && this.moeGroup !== false) {
+      while (n - i >= 2 * NC) {
+        const W = Math.min(this.gB.U, Math.floor((n - i) / NC) * NC);
+        await this._prefillGrouped(ids, i, W, { xs: part(i, W), fill: false });
+        await read(this.gB.XW, this.B.x.stride, i, W); i += W;
+      }
+      this._grpDone = null;
+    }
+    while (i < n) {
+      const m = Math.min(NC, n - i);
+      out.set(ids ? await this.embedRunBatch(ids.slice(i, i + m), this.pos) : await this.runHiddenBatch(part(i, m), this.pos), i * dim);
+      i += m;
+    }
+    this.pos = basePos + n;
+    return out;
   }
 
   // prefill fast path: layers only, no head, no readback

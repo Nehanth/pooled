@@ -4557,9 +4557,11 @@ async function workerFrame(d) {
     const xs = unpackWire(d);
     const nTok = d.n || 4;
     const wdim = ai.engine.dims.dim;
-    const hb = new Float32Array(nTok * wdim);
     const NC = ai.engine.NC || 4;
-    for (let c = 0; c < nTok; c += NC) {
+    // a node host's prompt frame (hundreds of tokens): the prefill kernels (engine prefillHidden)
+    const wide = !d.spec && nTok >= 2 * NC && ai.engine.prefillHidden && ai.engine.prefillFrame?.() > 0;
+    const hb = wide ? await ai.engine.prefillHidden(xs, d.basePos) : new Float32Array(nTok * wdim);
+    if (!wide) for (let c = 0; c < nTok; c += NC) {
       const m = Math.min(NC, nTok - c);
       hb.set(await ai.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false), c * wdim);
     }

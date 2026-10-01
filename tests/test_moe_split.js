@@ -6,7 +6,8 @@
 // Phases per prompt:
 //   solo plain   prefillTokens + forwardToken, greedy                      (the reference)
 //   solo spec    the room's solo speculative loop (prompt lookup + MTP)     must == solo plain
-//   split plain  room-style split prefill (16/8/4-column frames + tail frame, draft-cache fill)
+//   split plain  room-style split prefill (the node host's prompt frames of up to 256 tokens through
+//                prefillHidden on both engines, then 16/8/4-column frames + tail frame, draft-cache fill)
 //                then one token per lap                                     compared with solo
 //   split spec   same prefill, then the room's speculative loop over the chain (runTrunk, verify
 //                chunks of NC, rollback riding on the next frame)          must == split plain
@@ -21,6 +22,7 @@
 //      BENCH=R: after the checks, R alternating rounds of split plain / split spec decode per case with
 //      the host's one-submit paths off and on (same process, same GPU queue: no network), tokens/s
 //      OPTS=0: tiled prefill attention, wide prefill GEMM and expert-grouped MoE prefill off (default: engine defaults)
+//      FRAMES=0: no prompt frames (the browser host's 16-column frames only, as before room-node's prefillHidden)
 //      SYNTH=1: a synthetic file (tests/e2e/synth.mjs --moe), prompts are token ids
 // CPU-only check with a synthetic model (lavapipe):
 //   node tests/e2e/synth.mjs /tmp/m.gguf --moe --mtp random
@@ -54,8 +56,8 @@ const vocabRows = G.tensors["token_embd.weight"].shape[0];
 const flags = roomFlags({ ...(SYNTH ? { draftvocab: "0" } : {}), draftchain: env("DRAFTCHAIN", "1"), specfuse: env("SPECFUSE", "1"), moefuse: env("MOE_FUSE", "1"), hostfuse: env("HOSTFUSE", "1") });
 const common = { device, meta: G.meta, maxSeq: CTX, vocab: vocabRows, ...roomQwen35Options(flags), batchCols: NC, coopRowsB: 1,
   // the prefill options come from the engine defaults, as in room.js (tiled prefill attention on every
-  // device; wide GEMM + expert-grouped MoE on the device that holds the embedding, used by solo
-  // prefillTokens only: the split prefill runs 16-column frames). OPTS=0: all three off everywhere (A/B).
+  // device; wide GEMM + expert-grouped MoE on every MoE device: solo prefillTokens, and the split prefill's
+  // prompt frames through prefillHidden on both engines). OPTS=0: all three off everywhere (A/B).
   ...(env("OPTS", "") === "0" ? { attnPrefillTile: false, moeGroupPrefill: 0, prefillUbatch: 0 } : {}) };
 // per-device kernel tuning (room.js autotuneCoop picks these per GPU): WG,ROWS for the worker,
 // e.g. WORKER_TUNE=64,8 to stand in for a phone whose autotune differs from the host's
@@ -161,8 +163,9 @@ function chain(host, worker) {
   // workerFrame: a pending rollback applies before the frame's own work
   C.workerBatch = async (xs, basePos, n, specFlag) => {
     if (C.pendingRb != null) { worker.restoreDN(C.pendingRb); C.pendingRb = null; }
-    const dim = worker.dims.dim, out = new Float32Array(n * dim);
-    for (let c = 0; c < n; c += NC) {
+    const dim = worker.dims.dim, wide = !specFlag && n >= 2 * NC && worker.prefillFrame() > 0;   // room-node workerFrame
+    const out = wide ? await worker.prefillHidden(xs, basePos) : new Float32Array(n * dim);
+    if (!wide) for (let c = 0; c < n; c += NC) {
       const m = Math.min(NC, n - c);
       out.set(await worker.runHiddenBatch(xs.subarray(c * dim, (c + m) * dim), basePos + c, specFlag ? { base: c, total: n } : false), c * dim);
     }
@@ -176,14 +179,15 @@ function chain(host, worker) {
   };
   return C;
 }
-function fillDrafts(host, h, ids, i0, basePos, n) {   // room.js fillDrafts
+function fillDrafts(host, h, ids, i0, basePos, n) {   // room-node fillDrafts (batchCols columns at a time)
   const dim = host.dims.dim;
-  if (host._mtpFillBatch && host.B && n > 1 && n <= host.NC) {
-    for (let c = 0; c < n; c++) host.device.queue.writeBuffer(host.B.x.buf, c * host.B.x.stride, h.subarray(c * dim, (c + 1) * dim));
-    host._mtpFillBatch(ids, i0, basePos, n);
-    return;
+  let c = 0;
+  if (host._mtpFillBatch && host.B) for (; n - c > 1; c += host.NC) {
+    const m = Math.min(host.NC, n - c);
+    for (let k = 0; k < m; k++) host.device.queue.writeBuffer(host.B.x.buf, k * host.B.x.stride, h.subarray((c + k) * dim, (c + k + 1) * dim));
+    host._mtpFillBatch(ids, i0 + c, basePos + c, m);
   }
-  for (let c = 0; c < n; c++) {
+  for (; c < n; c++) {
     const next = ids[i0 + c + 1];
     if (next === undefined) break;
     host.setHidden(h.subarray(c * dim, (c + 1) * dim));
@@ -194,6 +198,14 @@ function fillDrafts(host, h, ids, i0, basePos, n) {   // room.js fillDrafts
 async function splitPrefill(host, C, ids) {
   const dim = host.dims.dim;
   let i = 0, pos = 0;
+  // room-node prefill: prompt frames of up to F tokens through the prefill kernels on both engines
+  const F = env("FRAMES", "1") === "0" ? 0 : host.prefillFrame();
+  while (F && ids.length - 1 - i >= 2 * NC) {
+    const n = Math.min(F, ids.length - 1 - i), basePos = pos, i0 = i;
+    const h = await C.workerBatch(wire(await host.prefillHidden(ids.slice(i, i + n), basePos)), basePos, n, false);
+    fillDrafts(host, h, ids, i0, basePos, n);
+    pos = basePos + n; i += n;
+  }
   for (const W of [NC, ...[8, 4].filter((w) => w < NC)]) while (ids.length - 1 - i >= W) {
     const nChunks = Math.max(1, Math.min(Math.floor(16 / W), Math.floor((ids.length - 1 - i) / W)));
     const n = nChunks * W, basePos = pos, i0 = i;

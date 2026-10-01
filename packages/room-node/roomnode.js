@@ -603,8 +603,10 @@ export class RoomNode extends EventEmitter {
     const t0 = performance.now();
     if (d.t === "ai-hidden-b") {
       const xs = unpackWire(d), nTok = d.n || 4, wdim = E.dims.dim, NC = E.NC || 4;
-      const hb = new Float32Array(nTok * wdim);
-      for (let c = 0; c < nTok; c += NC) {
+      // a prompt frame wider than one pass: the prefill kernels (engine prefillHidden), not a verify's passes
+      const wide = !d.spec && nTok >= 2 * NC && E.prefillHidden && E.prefillFrame?.() > 0;
+      const hb = wide ? await E.prefillHidden(xs, d.basePos) : new Float32Array(nTok * wdim);
+      if (!wide) for (let c = 0; c < nTok; c += NC) {
         const m = Math.min(NC, nTok - c);
         hb.set(await E.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false), c * wdim);
       }
@@ -1071,13 +1073,17 @@ export class RoomNode extends EventEmitter {
   fillDrafts(h, ids, i0, basePos, n) {
     const E = this.ai.engine;
     if (!E?.mtp) return;
-    const dim = E.dims.dim;
-    if (E.mtpBatchFill !== false && E._mtpFillBatch && E.B && n > 1 && n <= (E.NC || 4)) {
-      for (let c = 0; c < n; c++) E.device.queue.writeBuffer(E.B.x.buf, c * E.B.x.stride, h.subarray(c * dim, (c + 1) * dim));
-      E._mtpFillBatch(ids, i0, basePos, n);
-      return;
+    const dim = E.dims.dim, NC = E.NC || 4;
+    // batchCols columns at a time (a prompt frame can be hundreds wide); a last single column as below
+    let c = 0;
+    if (E.mtpBatchFill !== false && E._mtpFillBatch && E.B) {
+      for (; n - c > 1; c += NC) {
+        const m = Math.min(NC, n - c);
+        for (let k = 0; k < m; k++) E.device.queue.writeBuffer(E.B.x.buf, k * E.B.x.stride, h.subarray((c + k) * dim, (c + k + 1) * dim));
+        E._mtpFillBatch(ids, i0 + c, basePos + c, m);
+      }
     }
-    for (let c = 0; c < n; c++) {
+    for (; c < n; c++) {
       const next = ids[i0 + c + 1];
       if (next === undefined) break;
       E.setHidden(h.subarray(c * dim, (c + 1) * dim));
@@ -1128,22 +1134,34 @@ export class RoomNode extends EventEmitter {
       const hdim = E.dims.dim, NC = E.NC || 4;
       const widths = [NC, ...[8, 4].filter((w) => w < NC)];
       const inflight = [];
+      // one frame's hiddens out to the chain (the host's layers done); its lap fills the draft cache
+      const send = async (hb, basePos, i0, n) => {
+        if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
+        if (ai.chain.length) {
+          while (inflight.length >= PREFILL_WINDOW) await inflight.shift();
+          const p = this.lapWait("b" + basePos, 90000, "batch prefill").then((h) => this.fillDrafts(h, ids, i0, basePos, n));
+          p.catch(() => {});
+          inflight.push(p);
+          this.sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb) });
+        }
+        ai.pos = basePos + n; for (let k = i0; k < i0 + n; k++) ai.fed.push(ids[k]); i += n;
+      };
       try {
+        // a long prompt in frames of up to F tokens, each through the prefill kernels on every device
+        // (engine prefillHidden: wide GEMMs, expert-grouped MoE) instead of 16 tokens in batchCols passes
+        // POOLED_PREFILL_FRAME: another width (0: off, 16-token frames as before; for A/B)
+        const F = ai.chain.length && E.prefillHidden && E.prefillFrame?.() > 0 ? +(process.env.POOLED_PREFILL_FRAME || E.prefillFrame()) || 0 : 0;
+        while (F && ids.length - 1 - i >= 2 * NC && !aborted()) {
+          const n = Math.min(F, ids.length - 1 - i), basePos = ai.pos;
+          await send(await E.prefillHidden(ids.slice(i, i + n), basePos), basePos, i, n);
+        }
         outer: for (const W of widths) while (ids.length - 1 - i >= W) {
           if (aborted()) break outer;
           const nChunks = Math.max(1, Math.min(Math.floor(16 / W), Math.floor((ids.length - 1 - i) / W)));
-          const n = nChunks * W, basePos = ai.pos, i0 = i;
+          const n = nChunks * W, basePos = ai.pos;
           const hb = new Float32Array(n * hdim);
           for (let c = 0; c < nChunks; c++) hb.set(await E.embedRunBatch(ids.slice(i + c * W, i + (c + 1) * W), basePos + c * W), c * W * hdim);
-          if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
-          if (ai.chain.length) {
-            while (inflight.length >= PREFILL_WINDOW) await inflight.shift();
-            const p = this.lapWait("b" + basePos, 90000, "batch prefill").then((h) => this.fillDrafts(h, ids, i0, basePos, n));
-            p.catch(() => {});
-            inflight.push(p);
-            this.sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb) });
-          }
-          ai.pos = basePos + n; for (let k = i0; k < i0 + n; k++) ai.fed.push(ids[k]); i += n;
+          await send(hb, basePos, i, n);
         }
         if (flex && !aborted() && i < ids.length) {
           const n = ids.length - i, basePos = ai.pos, i0 = i;
