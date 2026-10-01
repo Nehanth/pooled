@@ -59,11 +59,17 @@ export const DENSE_PREFILL_UBATCH = 256;
 // of the MoE's 40 layers at 256, passed. Submitting every 8 layers fixes it; the results are bit-identical
 // (the GEMM has no split-K, so chunking and submit boundaries do not change the arithmetic).
 export const WIDE_SUBMIT_LAYERS = 8;
-// prefillDp4a default (undefined / "auto"), per model kind, on the devices dp4aAutoDevice() accepts (see _init)
-export const DP4A_DEFAULT = Object.freeze({ dense: true, moe: false });
+// prefillDp4a default (undefined / "auto"), per model kind, on the devices dp4aAutoDevice() accepts (see _init).
+// Off for both (opt-in, prefillDp4a: true / ?dp4a=1): on the 27B it is ~1.8x the f32 wide GEMM's prefill on the GB10,
+// but it failed the llama.cpp log-probability gate (tests/test_prefill_dp4a.js, 2026-10-01): at 2100 tokens its next-token
+// logprobs were 0.95 nats from llama.cpp's top 20 against the f32 path's 0.26 (150 / 700 tokens: within 0.02 of f32).
+// Greedy tokens, argmax and spec == plain all matched. Turn dense back on only when that gate passes.
+export const DP4A_DEFAULT = Object.freeze({ dense: false, moe: false });
 // Devices where "auto" turns dp4a on: measured faster there (docs/bench-log.md, 2026-09-30). NVIDIA by the adapter's
 // vendor (Chrome); Deno reports no vendor, so there: any OS but macOS (the GB10 is where it was measured). Never Apple:
 // Metal has no native int8 dot product. Other vendors stay opt-in until measured.
+// the dp4a prefill's kernels: optional at create (one that does not compile turns prefillDp4a off)
+const DP4A_PIPES = ["gemm_d_q4", "gemm_d_q4_acc", "gemm_d_q8", "gemm_d_q8_acc", "quant_q8_w"];
 export function dp4aAutoDevice(info) {
   const v = (info?.vendor || "").toLowerCase();
   if (v) return v.includes("nvidia");
@@ -596,7 +602,7 @@ export class Qwen35Engine {
     // layerFuse's kernels: only the flags on at create, and optional (see the layerFuse note above)
     const lfOf = new Map();
     for (const [k, names] of Object.entries(LF_PIPES)) for (const n of names) { if (this.layerFuse[k]) lfOf.set(n, k); else delete G1[n]; }
-    const lfFails = [];
+    const lfFails = [], dpFails = [];
     if (this.moe) Object.assign(G1, {
       moe_router: ["ro", "rw", "rw", "u"], moe_combine: ["rw", "ro", "ro", "ro", "ro", "u"],
       moe_gu_q4: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"], moe_gu_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"],
@@ -640,7 +646,7 @@ export class Qwen35Engine {
     }
     G1.silu_mul_w = ["rw", "ro", "u"];   // SiLU(g) * u over many columns: the wide chunk and the batched pass (_encodeLayerBatch)
     if (this.dp4aCfg) {
-      for (const p of ["gemm_d_q4", "gemm_d_q4_acc", "gemm_d_q8", "gemm_d_q8_acc"]) G1[p] = ["ro", "ro", "ro", "ro", "rw", "u"];
+      for (const p of DP4A_PIPES.slice(0, 4)) G1[p] = ["ro", "ro", "ro", "ro", "rw", "u"];
       G1.quant_q8_w = ["ro", "rw", "rw", "u"];
     }
     const bufType = { u: "uniform", ro: "read-only-storage", rw: "storage" };
@@ -652,9 +658,18 @@ export class Qwen35Engine {
         entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })),
       });
       const desc = { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: mod, entryPoint: name } };
+      if (DP4A_PIPES.includes(name)) {   // optional too: a compiler that rejects them leaves the f32 wide GEMM
+        try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { dpFails.push(e); }
+        return;
+      }
       if (!lfOf.has(name)) { this.pipes[name] = await compilePipeline(device, desc); return; }
       try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { lfFails.push(e); }
     }));
+    if (dpFails.length) {
+      for (const n of DP4A_PIPES) delete this.pipes[n];
+      this.dp4aCfg = null; this.prefillDp4a = false;
+      console.warn(`prefillDp4a off: ${dpFails.map((e) => e.message).join("; ")}`);
+    }
     if (lfFails.length) {   // the unfused kernels compiled (or the load would have failed above): run those
       for (const n of lfOf.keys()) delete this.pipes[n];
       for (const k of Object.keys(this.layerFuse)) this.layerFuse[k] = false;

@@ -10,7 +10,7 @@
 //     must match llama.cpp for at least as many tokens as narrow does;
 //   * the next token's log-probabilities vs llama.cpp's (its top 20, n_probs, stored in the golden as "<key>#lp"):
 //     max |logprob - llama.cpp's| per mode. dp4a must be no further from llama.cpp than narrow (+ LP_SLACK, 0.05 nats),
-//     which is how a default-on dp4a is justified although its relDiff vs narrow is above the f32 prefill tolerance;
+//     the condition for turning dp4a on by default, since its relDiff vs narrow is above the f32 prefill tolerance;
 //   * speculative decoding after a dp4a prefill: identical to plain decoding after the same prefill.
 //   MODEL=27b|moe  LENS=150,700,2100  GEN=32  LLAMA_URL=
 //   cd tests && deno run --unstable-webgpu --allow-read --allow-env --allow-net --allow-write=$HOME/.cache/swarmllm-weights,golden test_prefill_dp4a.js
