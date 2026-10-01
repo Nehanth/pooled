@@ -4,6 +4,10 @@
 // decode tok/s. Manual trigger only (benchmark branch bench/latency).
 //
 //   node tests/e2e/room_latency.mjs --model qwen3.6-35b-moe --devices 2 --lat 0,5,20 --maxnew 128 [--query gpusample=0]
+//   node tests/e2e/room_latency.mjs --model qwen3-1.7b --devices 2 --lat 0,5,20,50 --prompts chat,code,edit
+// --prompts: which questions to ask (japan: the default travel plan; chat, code (write a function)
+// and edit (rename a variable in a pasted file, where prompt lookup shines)). "spec" is the model's
+// speculative decoding: the draft head for the MTP models, prompt lookup for the dense ones.
 //
 // Latency is emulated in the page, not by the kernel (netem needs root): the room already has
 // ?netlag=ms, which holds every activation frame a device sends for that long before it goes on
@@ -31,6 +35,36 @@ const ROUNDS = +arg("rounds", 2);          // answers per (lat, mode), each one 
 const MAXNEW = +arg("maxnew", 128);
 const PORT = +arg("port", 8123), SIGNAL_PORT = +arg("signal-port", 9000), TLS_PORT = PORT + 1;
 const PROMPT = "I am planning a two week trip through Japan in late October with my partner. We land in Tokyo, want three days there, then a day trip to Nikko, then the bullet train to Kyoto for four days with a side trip to Nara, then two nights in Osaka, and we fly home from Osaka. We like food markets, old temples, hiking, and small neighborhood bars, and we want to avoid the most crowded tourist spots where we can. Our budget is moderate, around two hundred dollars a day for the two of us not counting hotels. Please give me a day by day itinerary with one main activity each morning and afternoon, a neighborhood to eat dinner in each night, and tell me which days I should buy a rail pass for and whether it is worth it at all.";
+const CODE = `def load_users(path):
+    users = []
+    with open(path) as f:
+        for line in f:
+            name, age, city = line.strip().split(",")
+            users.append({"name": name, "age": int(age), "city": city})
+    return users
+
+
+def adults(users):
+    return [u for u in users if u["age"] >= 18]
+
+
+def by_city(users):
+    out = {}
+    for u in users:
+        out.setdefault(u["city"], []).append(u)
+    return out
+
+
+def oldest(users):
+    return max(users, key=lambda u: u["age"])
+`;
+const PROMPTS = {
+  japan: PROMPT,
+  chat: "What are three good habits for staying focused while working from home? Explain each one in a few sentences.",
+  code: "Write a Python class for an LRU cache with get and put methods, using an OrderedDict, with docstrings. Code only.",
+  edit: "Rename the variable `users` to `people` everywhere in this code and return the whole file. Code only.\n\n```python\n" + CODE + "```",
+};
+const ASK = arg("prompts", "japan").split(",");
 const NEED = { "qwen3.8-27b": 16.5, "qwen3.6-35b-moe": 22.5, "qwen3-1.7b": 2.0, "qwen3-0.6b": 0.8 }[MODEL] || 2;
 // roughly even split: every device pledges its share plus a little (the host also holds embed/head)
 const GB = (name) => String(Math.ceil(NEED / DEVICES + (name === "host" ? 2 : 0.5)));
@@ -42,9 +76,11 @@ const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; cha
 function patchRoom(src) {
   const a = "if (NETLAG) { setTimeout(() => sendHiddenNow(id, msg), NETLAG); return; }";
   const b = "else if (ai.engine.mtp && ai.engine.specStep) {";
-  if (!src.includes(a) || !src.includes(b)) throw new Error("room.js changed: update patchRoom in room_latency.mjs");
+  const c = "} else if (DENSE_SPEC && ai.chain.length && ai.engine.specStepDrafts && !ai.engine.specStep) {";
+  if (!src.includes(a) || !src.includes(b) || !src.includes(c)) throw new Error("room.js changed: update patchRoom in room_latency.mjs");
   return src.replace(a, "const lag = window.__netlag ?? NETLAG; if (lag) { setTimeout(() => sendHiddenNow(id, msg), lag); return; }")
-    .replace(b, "else if (ai.engine.mtp && ai.engine.specStep && !window.__nospec) {");
+    .replace(b, "else if (ai.engine.mtp && ai.engine.specStep && !window.__nospec) {")
+    .replace(c, "} else if (DENSE_SPEC && ai.chain.length && ai.engine.specStepDrafts && !ai.engine.specStep && !window.__nospec) {");
 }
 const srv = http.createServer((q, r) => {
   const p = path.join(ROOT, decodeURIComponent(q.url.split("?")[0]));
@@ -97,7 +133,9 @@ const t0 = Date.now(); const log = (...a) => console.error(((Date.now() - t0) / 
 const host = tabs.host;
 const out = { model: MODEL, devices: DEVICES, maxnew: MAXNEW, split: "", rows: [] };
 try {
-  for (const p of Object.values(tabs)) await p.goto(BASE);
+  // --worker-query "dspec=0": extra URL options on the worker tabs only (dspec=0: a worker that reports it
+  // cannot take dense verify frames, as one from an older build: the host must decode with plain laps)
+  for (const [n, p] of Object.entries(tabs)) await p.goto(n === "host" || !arg("worker-query") ? BASE : BASE + "&" + arg("worker-query"));
   for (const p of Object.values(tabs)) await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   for (const [n, p] of Object.entries(tabs)) { await p.fill("#name-input", n); await p.fill("#join-gb", GB(n)); }
   await host.click("#create-btn");
@@ -118,7 +156,7 @@ try {
   out.split = await host.evaluate(() => [...document.querySelectorAll("#chat-log div")].map((d) => d.textContent).filter((t) => /layer split/.test(t)).slice(-1)[0] || "");
   log("online in", out.loadS, "s;", out.split);
   await host.evaluate(() => { const s = document.getElementById("ai-sampling"); s.value = "exact"; s.dispatchEvent(new Event("change")); });   // greedy: same answer every round
-  for (const lat of LATS) for (const mode of MODES) {
+  for (const pname of ASK) for (const lat of LATS) for (const mode of MODES) {
     for (const p of Object.values(tabs)) await p.evaluate(([l, ns]) => { window.__netlag = l; window.__nospec = ns; }, [lat, mode === "plain"]);
     for (let r = 0; r < ROUNDS; r++) {
       await host.evaluate(() => document.getElementById("new-chat").click());
@@ -129,13 +167,16 @@ try {
         const ob = new MutationObserver(() => { const b = [...document.querySelectorAll(".m.bot .bubble")].pop(); if (b && b.textContent.trim()) { window.__ttft = performance.now() - t; ob.disconnect(); } });
         ob.observe(document.body, { subtree: true, childList: true, characterData: true });
         document.getElementById("ai-send").click();
-      }, PROMPT);
+      }, PROMPTS[pname]);
       await host.waitForFunction(() => /^ready — prefill|^generation failed/.test(document.getElementById("ai-status").textContent), null, { timeout: 600000, polling: 250 });
       const st = await host.textContent("#ai-status");
       const ttft = await host.evaluate(() => window.__ttft);
+      // the answer's text, to check that speculative decoding gave the same answer as plain (greedy)
+      const ans = await host.evaluate(() => [...document.querySelectorAll(".m.bot .bubble")].pop()?.textContent || "");
+      let hsh = 0x811c9dc5; for (let i = 0; i < ans.length; i++) hsh = Math.imul(hsh ^ ans.charCodeAt(i), 0x01000193) >>> 0;
       const pre = /prefill (\d+) tok in ([\d.]+)s/.exec(st), dec = /(\d+) tok · ([\d.]+) tok\/s/.exec(st);
-      const acc = /(\d+)% drafts accepted/.exec(st);
-      const row = { lat, mode, round: r, ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2], accepted: acc ? +acc[1] / 100 : null, status: st.slice(0, 160) };
+      const acc = /(\d+)% drafts accepted/.exec(st), cp = /(\d+) tok by lookup/.exec(st);
+      const row = { prompt: pname, lat, mode, round: r, copied: cp ? +cp[1] : 0, answerHash: hsh.toString(16), answerLen: ans.length, ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2], accepted: acc ? +acc[1] / 100 : null, status: st.slice(0, 160) };
       log(JSON.stringify(row));
       out.rows.push(row);
     }

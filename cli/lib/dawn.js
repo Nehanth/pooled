@@ -12,7 +12,9 @@
 // npm 11 won't add an optional peer dependency to cli/ itself (`npm install --no-save webgpu` in
 // cli/ is "up to date" and installs nothing), so (cd packages/room-node && npm install) is the way there.
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
+import fs, { existsSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const DAWN_VERSION = "0.6.1";   // the webgpu release the engine is tested on (packages/room-node)
@@ -57,5 +59,70 @@ export function dawnLoader(cmd, { resolve = defaultResolve, load = (p) => import
       }
     }
     throw dawnMissing(cmd, lastErr);
+  };
+}
+
+// ---------------- the GPU driver's own messages ----------------
+// Bringing up Dawn makes the system's Vulkan drivers write to stderr from native code: on a GB10,
+// "MESA: error: Opening /dev/dri/card0 failed: Permission denied", "TU: error: ... VK_ERROR_
+// INCOMPATIBLE_DRIVER" (Mesa drivers for GPUs this computer does not have, probing) and Dawn's
+// "Warning: maxDynamicUniformBuffersPerPipelineLayout artificially reduced ...". All harmless, and
+// out of reach of process.stderr. So while Dawn runs its native setup (create(), requestAdapter(),
+// requestDevice(): the messages come out synchronously inside those calls), fd 2 points at a file of
+// our own; then it points back at the terminal. Node has no dup2, but close(2) + open() takes the
+// lowest free descriptor, which is 2 again. What was caught is kept (driverLog()) for an error that
+// needs it, and --verbose skips all of this.
+let caught = "";
+export const driverLog = () => caught;
+
+// fn() with what native code writes to fd 2 caught -> fn's value. Linux and macOS; elsewhere, or when
+// stderr can't be reopened (a socket: a Node parent's stdio "pipe", a systemd journal stream), it
+// just runs fn.
+export function quietStderr(fn, { platform = process.platform } = {}) {
+  const self = platform === "linux" ? "/proc/self/fd/" : platform === "darwin" ? "/dev/fd/" : null;
+  if (!self) return fn();
+  let saved = -1, file = null;
+  try {
+    saved = fs.openSync(self + "2", "a");   // a second way to the same terminal / pipe / file
+    file = path.join(os.tmpdir(), `pooled-gpu-${process.pid}.log`);
+    fs.closeSync(fs.openSync(file, "w", 0o600));
+  } catch { if (saved >= 0) try { fs.closeSync(saved); } catch {} return fn(); }
+  let swapped = false;
+  try {
+    fs.closeSync(2);
+    const fd = fs.openSync(file, "a");
+    swapped = fd === 2;
+    // (another thread opened a file in between and got 2: leave it to its owner)
+    if (!swapped) fs.closeSync(fd);
+  } catch {}
+  try { return fn(); }
+  finally {
+    if (swapped) {
+      try { fs.closeSync(2); fs.openSync(self + saved, "a"); } catch {}
+      try { caught += fs.readFileSync(file, "utf8"); } catch {}
+    }
+    try { fs.closeSync(saved); } catch {}
+    try { fs.unlinkSync(file); } catch {}
+    if (caught.length > 64 * 1024) caught = caught.slice(-64 * 1024);
+  }
+}
+
+// a Dawn loader (dawnLoader()) whose native setup runs under quietStderr: create(), and every
+// requestAdapter() / requestDevice() after it
+export function quietLoader(loader, { quiet = quietStderr } = {}) {
+  return async () => {
+    const m = await loader();
+    const wrapAdapter = (a) => {
+      if (!a || a.__pooledQuiet) return a;
+      const rd = a.requestDevice;
+      try { Object.defineProperty(a, "requestDevice", { value: (...x) => quiet(() => rd.apply(a, x)), configurable: true }); a.__pooledQuiet = true; } catch {}
+      return a;
+    };
+    return { globals: m.globals, create: (flags) => {
+      const gpu = quiet(() => m.create(flags));
+      const ra = gpu.requestAdapter;
+      try { Object.defineProperty(gpu, "requestAdapter", { value: (...x) => quiet(() => ra.apply(gpu, x)).then(wrapAdapter), configurable: true }); } catch {}
+      return gpu;
+    } };
   };
 }

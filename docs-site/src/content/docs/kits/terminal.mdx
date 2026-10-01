@@ -1,0 +1,159 @@
+---
+title: Rooms from the terminal
+eyebrow: Starter kits
+description: Install the pooled command, download a model, open a room on one computer, lend a second computer's GPU to it, and chat. No browser needed.
+sidebar:
+  label: Rooms from the terminal
+  order: 5
+---
+import { Steps } from '@astrojs/starlight/components';
+
+{/*
+Sources (for the fact-checker):
+- @pooled/cli 0.3.0 on npm (npm view @pooled/cli version; engines node >=22; webgpu 0.6.1 optional dependency, CHANGELOG #273)
+- pooled --help, pooled host --help, pooled join --help, pooled chat --help, pooled pull --help (0.3.0)
+- cli/lib/hostui.js render(): "Choose a model ↑/↓ then Enter", "How much memory does this computer lend? ←/→ or type, then Enter",
+  "Devices (N)", "Waiting to join (N)" "a: allow  d: deny", "This room is X GB short for …", "Enter: start (when the room fits)",
+  "● online", "c: chat here", "Enter: re-deal", "q: quit"
+- cli/lib/lendrun.js (join: asks for the code or link, shows the host's model, asks how much to lend)
+- cli/lib/lend.js explainError() (No WebGPU adapter, Not enough GPU memory, No room …, Room code … is taken)
+- terminal.mdx (the full reference for these commands)
+- Verified 2026-09-30 on the Spark (GB10) with npm i -g --prefix <tmp> @pooled/cli@0.3.0 and POOLED_MODELS=<tmp>:
+  pull, list, an interactive host (Qwen3 1.7B, lend 2 GB) in a pty, an interactive join with the code alone + a,
+  Enter, c, a question, /exit, q; pooled chat one-shot and piped; a scripted host + join + chat; pooled rm.
+  Both "computers" were processes on the one GB10. Online 4.4 s after Enter; c chat 28.2 tok/s; chat one-shot "391", piped "Red.";
+  scripted host --gb 2 --wait 2 + join --gb 4 + chat "4"; pooled rm printed "removed qwen3-0.6b (621 MB)". The CLI's screens are being polished in 0.3.1: this page says what
+  each screen asks, not how it looks.
+*/}
+
+**Goal:** run a room from the command line: one computer hosts, a second lends its GPU, and you chat with the model.
+
+## You need
+
+- **Two computers** with a GPU that WebGPU can use: macOS 26 or newer (Metal), or Linux with glibc 2.38 or newer and a Vulkan driver (like Ubuntu 24.04). Windows is untested. One computer works too: skip steps 5 and 6.
+- **Node 22 or newer** on each. Check with `node --version`.
+- **About 100 MB** for the `pooled` command, and a **1.8 GB download** for Qwen3 1.7B, the model in this guide.
+- **15 minutes.**
+
+## Steps
+
+<Steps>
+
+1. **Install the command** on each computer:
+
+   ```bash
+   npm install -g @pooled/cli
+   pooled --version
+   ```
+
+   This guide was checked with 0.3.0. The install includes WebGPU for Node (Dawn, about 95 MB), which `host` and `join` need.
+
+2. **Download the model** on the computer that will host:
+
+   ```bash
+   pooled pull qwen3-1.7b
+   ```
+
+   It shows a progress bar and checks the file when it's done. `pooled list` shows what is downloaded and what isn't. Models go to `~/.pooled/models`. If you stop a download with Ctrl-C, `pooled pull` again carries on where it stopped.
+
+3. **Open a room:**
+
+   ```bash
+   pooled host
+   ```
+
+   The room opens at once. First it prints the room code, the **invite** link and the exact `pooled join` and `pooled chat` commands for this room, to copy to your other computers. The code and link stay at the top of the screen. Then it asks two things:
+
+   - **Choose a model.** Each line shows the model, whether it is downloaded (or how big the download is), what it **needs** across the whole room, and whether it fits here. The one marked **recommended** is selected. Move to **Qwen3 1.7B** with ↑/↓ and press Enter.
+   - **How much memory does this computer lend?** Type a number or use ←/→, then Enter. To see a second computer share the work, lend less than the model needs, like `2`.
+
+4. **Read the room screen.** It lists each device with what it lends, and whether the room has enough memory for the model. If not, it says so, for example `This room is 3.6 GB short for Qwen3 1.7B: add a device or raise a pledge`, and **Enter: start** stays off.
+
+5. **Join from the second computer:**
+
+   ```bash
+   pooled join
+   ```
+
+   It asks for the **room code or invite link**. Then it shows the host and its model, and asks how much to **lend** (←/→ or type, then Enter). With the invite link it gets in at once. With the code alone, it waits for the host.
+
+6. **Let it in.** On the host, the device shows under **Waiting to join**, like `spark-join wants to join (computer, 64 GB)`. Press **a** to let it in, or **d** to turn it away. Once it's in, it's listed under **Devices** with what it lends.
+
+7. **Press Enter to start** once the room has enough memory. Each device shows its load progress, then the screen says **● online** with the layers each one holds.
+
+8. **Press c to chat** right there. Type a question and press Enter. The line under each answer shows the speed. Type `/exit` to go back to the room screen.
+
+</Steps>
+
+## What you should see
+
+- After step 2: `✓ qwen3-1.7b is ready (1.7 GB): pooled host qwen3-1.7b`.
+- After step 7: `● online  spark-host 0-7 · spark-join 8-27`, a few seconds after Enter when the model is on disk (4 seconds in our test).
+- After step 8: an answer, then a line like `room EG6-T9J · Qwen3 1.7B · Q8 · 10 tokens · 28.2 tok/s · 24 prompt tokens`.
+
+What a model **needs** grows with the room's context. With `--ctx 16384`, the 1.7B needs 5.5 GB instead of 4.
+
+## Chat from anywhere
+
+`pooled chat` talks to a room from any computer, with no GPU. It joins to ask, not to hold layers:
+
+```bash
+pooled chat "https://pooled.run/r/FEAQ38#k=…"
+```
+
+It keeps the conversation. `/clear` starts over, `/think` lets the model think first, Ctrl-C stops an answer, and `/exit` leaves.
+
+## Scripting it
+
+Every question has a flag, and a flag you give skips its question. Without a terminal, nothing is asked.
+
+```bash
+# host: Qwen3 1.7B, lend 2 GB, start once 2 devices are in
+pooled host qwen3-1.7b --gb 2 --wait 2
+
+# second computer: lend 4 GB, no questions
+pooled join "https://pooled.run/r/FEAQ38#k=…" --gb 4
+
+# ask once and print only the answer
+pooled chat "https://pooled.run/r/FEAQ38#k=…" "What is 17 times 23? Answer with the number only."
+```
+
+| Flag | Does |
+|---|---|
+| `pooled host <model>` | Picks the model. A part of the name works: `1.7b`, `35b`. |
+| `--gb <n>` | How much this computer lends. `max` keeps only a small margin. |
+| `--start` | Starts as soon as the room has enough memory. |
+| `--wait <n>` | Starts once n devices (this one included) are in and it fits. |
+| `-y`, `--yes` | Downloads a missing model without asking. |
+| `--allow-all` | Lets in anyone with the code, without asking. |
+| `--name <s>` | How the room shows this computer. |
+| `--json-log` | One JSON object per log line, for services. |
+
+`pooled host --model list` prints the model names. Every flag is on [Rooms from the terminal](/docs/terminal).
+
+## Stop and clean up
+
+- **q** on the host, or Ctrl-C, closes the room for everyone.
+- **Ctrl-C** on a `pooled join` leaves the room and frees the GPU. After the host quits, a join keeps knocking for a while in case the host comes back: press Ctrl-C to stop it.
+- `pooled rm qwen3-1.7b` deletes the downloaded model. `pooled list` shows what is left.
+- `npm uninstall -g @pooled/cli` removes the command.
+
+## If something goes wrong
+
+### `No WebGPU adapter: Dawn found no GPU it can use on this computer.`
+`host` and `join` need Metal (macOS 26 or newer), Vulkan (Linux, with the NVIDIA or Mesa driver) or D3D12 (Windows). If WebGPU for Node didn't install, the command says how to add it. `pooled chat` and `pooled serve` work without a GPU.
+
+### `Not enough GPU memory to lend` or `The GPU ran out of memory`
+Close other apps that use the GPU, or lend less with `--gb`, at least 1.
+
+### `No room …` or the join waits for the host
+Check the code, and that `pooled host` (or the host's browser tab) is still open. With the code alone, the join waits until the host presses **a**. Give it the invite link to skip that.
+
+More: [Rooms from the terminal](/docs/terminal#errors) and [Troubleshooting](/docs/troubleshooting).
+
+## Next
+
+- [Rooms from the terminal](/docs/terminal): every command, flag and screen.
+- [Use a room from your coding tools](/docs/kits/coding-tools) with `pooled serve`.
+- [OpenClaw assistant](/docs/kits/openclaw).
+- Browser tabs and phones can join a `pooled host` room with its invite link, like any room: see [Pool two devices](/docs/kits/two-devices).

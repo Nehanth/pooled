@@ -10,6 +10,8 @@
 // lib: what the room node exports (MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, gbUp,
 // pledgeGB, nodeCtxFor), passed in so tests can use the repo's modules directly.
 
+import { mkStyle, visible, clip, wrap, width, padEnd, padStart, gb, gbNum, header, table, label, I, progressRow, clock, upFor } from "./style.js";
+
 const GiB = 2 ** 30;
 const r1 = (x) => Math.round(x * 10) / 10;
 export const shortLabel = (lib, key) => (lib.MODELS[key]?.label || key).split("·")[0].trim();
@@ -92,7 +94,7 @@ export function initialState({ rows, model = null, pledge, fixedPledge = false, 
   const s = {
     step: "pick", rows, model, sel: 0, pledge: { ...pledge, typed: "" }, fixed: { model: !!model, pledge: !!fixedPledge },
     devices: [], lobby: [], dl: { key: null, state: "none", done: 0, total: 0, bps: null, error: null },
-    fit: null, flags: { start: !!flags.start, wait: flags.wait || 0, chat: !!flags.chat }, notice: "", split: null, code, link, yes, noPull,
+    fit: null, flags: { start: !!flags.start, wait: flags.wait || 0, chat: !!flags.chat }, notice: "", split: null, splitMode: flags.split === "memory" ? "memory" : "speed", code, link, yes, noPull,
   };
   const rec = model || recommendModel(rows);
   s.sel = Math.max(0, rows.findIndex((r) => r.key === rec));
@@ -185,7 +187,9 @@ export function reduce(s, key) {
     }
     case "room": {
       if (k === "m") { t.step = "pick"; t.sel = Math.max(0, t.rows.findIndex((r) => r.key === t.model)); }
-      else if (k === "p") { t.step = "pledge"; t.pledge = { ...t.pledge, typed: "" }; }
+      else if (k === "p" || k === "l") { t.step = "pledge"; t.pledge = { ...t.pledge, typed: "" }; }
+      else if (k === "i") fx.push({ do: "copy" });
+      else if (k === "s") { t.splitMode = t.splitMode === "memory" ? "speed" : "memory"; fx.push({ do: "split", mode: t.splitMode }); }
       else if (k === "a" && t.lobby.length) fx.push({ do: "allow", id: t.lobby[0].id });
       else if (k === "d" && t.lobby.length) fx.push({ do: "deny", id: t.lobby[0].id });
       else if (k === "enter") {
@@ -202,6 +206,8 @@ export function reduce(s, key) {
     }
     case "online": {
       if (k === "c") fx.push({ do: "chat" });
+      else if (k === "i") fx.push({ do: "copy" });
+      else if (k === "s") { t.splitMode = t.splitMode === "memory" ? "speed" : "memory"; fx.push({ do: "split", mode: t.splitMode }); t.notice = "r rebalances the room with the new split"; }
       else if (k === "enter" || k === "r") fx.push({ do: "redeal" });
       else if (k === "a" && t.lobby.length) fx.push({ do: "allow", id: t.lobby[0].id });
       else if (k === "d" && t.lobby.length) fx.push({ do: "deny", id: t.lobby[0].id });
@@ -212,140 +218,291 @@ export function reduce(s, key) {
 }
 
 // ---------------- drawing ----------------
-// c: colors ({ dim, bold, green, yellow, red, cyan, inv } functions; identity without color)
+// The look (docs: the CLI design spec, "minimal") lives in lib/style.js: S = style() gives the roles
+// (ink, ink2, ink3, acc, err, pill, bar, mark, keys). colors() is kept for older callers.
 export function colors(on) {
   const w = (a, b = 0) => (s) => (on ? `\x1b[${a}m${s}\x1b[${b || (a === 1 || a === 2 ? 22 : 39)}m` : String(s));
   return { on, dim: w(2), bold: w(1), green: w(32), yellow: w(33), red: w(31), cyan: w(36), magenta: w(35) };
 }
-// the visible width of a string with escape codes, and a cut to `width` columns that keeps them balanced
-export const visible = (s) => String(s).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-export function clip(s, width) {
-  s = String(s);
-  if (visible(s).length <= width) return s;
-  let out = "", n = 0;
-  for (let i = 0; i < s.length;) {
-    const m = /^\x1b\[[0-9;?]*[A-Za-z]/.exec(s.slice(i));
-    if (m) { out += m[0]; i += m[0].length; continue; }
-    if (n >= width - 1) { out += "…"; break; }
-    out += s[i]; n++; i++;
-  }
-  return out + (/\x1b\[/.test(s) ? "\x1b[0m" : "");
-}
-// words to lines of at most w columns
-export function wrap(text, w) {
-  const out = [];
-  let line = "";
-  for (const word of String(text).split(/\s+/).filter(Boolean)) {
-    if (line && line.length + 1 + word.length > w) { out.push(line); line = word; }
-    else line = line ? `${line} ${word}` : word;
-  }
-  if (line) out.push(line);
-  return out;
-}
-const pad = (s, n) => s + " ".repeat(Math.max(0, n - visible(s).length));
-const gbText = (b) => (b >= GiB ? `${(b / GiB).toFixed(1)} GB` : `${Math.round(b / 2 ** 20)} MB`);
-function bar(pct, w, c) {
-  const f = Math.round((Math.max(0, Math.min(100, pct)) / 100) * w);
-  return c.green("█".repeat(f)) + c.dim("░".repeat(w - f));
-}
+export { visible, clip, wrap };
+const pad = padEnd;
+const gbText = (b) => gb(b);
 export const fmtCode = (x) => (String(x || "").length === 6 ? `${x.slice(0, 3)}-${x.slice(3)}` : String(x || ""));
 
-// the screen for a state -> lines (each cut to width)
-export function render(s, { width = 80, c = colors(false), lib, spin = "" } = {}) {
+// one picker row in words: downloaded / "1.8 GB download", "needs 4 GB", which group it is in
+export function pickerRow(r, { rec = null } = {}) {
+  const have = r.pulled ? "downloaded" : r.fileBytes ? `${gbText(r.fileBytes)} download` : "download";
+  const need = r.needGB != null ? `${Math.max(1, Math.round(r.needGB))} GB` : "";
+  return { have, need, alone: !!r.fitsAlone, rec: r.key === rec };
+}
+
+// the plain (no escapes) style: tests, and callers that pass nothing
+const PLAIN = mkStyle({ depth: "none", plain: true });
+
+// A split costs a network round per token. When the lends split a model that this computer could
+// hold alone by lending more, say so before Start, with a rough speed from the links' round trips
+// (informational: the user decides how much each computer lends).
+// -> { alone: { gb } | null, devices, hopMs, tps } | null (no split, or nothing to say)
+export function splitAdvice(s, lib) {
+  if (!s.model || !s.fit?.fits || !lib) return null;
+  const gpu = s.devices.filter((d) => d.gb > 0);
+  if (gpu.length < 2) return null;
+  const fitsOn = (d, g) => roomFitNow(lib, { model: s.model, devices: [{ name: d.name, meta: { ...d.meta, webgpu: true, contribGB: g } }] }).fits;
+  if (gpu.some((d) => fitsOn(d, d.gb))) return null;   // one device holds it: the deal puts it all there
+  const self = gpu.find((d) => d.self);
+  let alone = null;
+  if (self) for (let g = Math.ceil(self.gb); g <= (s.pledge.max || 0); g++) if (fitsOn(self, g)) { alone = { gb: g }; break; }
+  const rtts = gpu.map((d) => d.rtt).filter((x) => Number.isFinite(x) && x > 0);
+  const hopMs = rtts.length ? Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length / 2) : null;
+  // each token goes around the ring: one hop per device, plus a little compute
+  const tps = hopMs ? Math.max(1, Math.round(1000 / (gpu.length * hopMs + 12))) : null;
+  return { alone, devices: gpu.length, hopMs, tps };
+}
+export function splitLines(adv, { model, selfName = "this computer", gb: now } = {}) {
+  if (!adv) return [];
   const L = [];
-  const W = Math.max(40, width) - 1;
-  const label = (k) => (lib ? shortLabel(lib, k) : k);
-  L.push(`${c.bold("pooled host")} ${c.dim("·")} room ${c.bold(c.cyan(fmtCode(s.code)))}${s.model ? ` ${c.dim("·")} ${label(s.model)}` : ""}`);
-  if (s.link) L.push(`${c.dim("invite")}  ${s.link}`);
-  L.push(c.dim("─".repeat(Math.min(W, 72))));
-  const dlLine = () => {
-    const d = s.dl;
-    if (!d.key || d.key !== s.model) return null;
-    if (d.state === "running") {
-      const pct = d.total ? Math.floor((d.done / d.total) * 100) : 0;
-      const eta = d.total && d.bps ? Math.max(0, Math.round((d.total - d.done) / d.bps)) : null;
-      return `${c.dim("download")} ${bar(pct, 20, c)} ${String(pct).padStart(3)}%  ${gbText(d.done)} / ${d.total ? gbText(d.total) : "?"}${d.bps ? `  ${gbText(d.bps)}/s` : ""}${eta != null ? `  ${eta >= 60 ? `${Math.floor(eta / 60)}m${String(eta % 60).padStart(2, "0")}s` : `${eta}s`} left` : ""}`;
-    }
-    if (d.state === "error") return c.red(`download failed: ${d.error}`);
-    if (d.state === "stream") return c.dim("not downloaded: each device streams its layers from Hugging Face");
-    return null;
-  };
+  if (adv.alone) L.push(`${model} would run on ${selfName} alone if it lends ${adv.alone.gb} GB (now ${now} GB): l lends more.`);
+  L.push(`Split across ${adv.devices} devices, each token waits for the network: ${adv.tps ? `expect roughly ${adv.tps} tok/s` : "expect it to be slower"}.`);
+  return L;
+}
+// the network's share of an online split room
+export const hopHint = (devices, hopMs) => (devices > 1 && hopMs ? `each token crosses the network ${devices === 2 ? "twice" : `${devices} times`}; ~${hopMs} ms per hop` : "");
+
+// the model's name and the rest of its label ("Qwen3.8 27B", "Q4")
+const labelParts = (lib, key) => {
+  const full = lib?.MODELS?.[key]?.label || key || "";
+  const [name, ...rest] = full.split("·").map((x) => x.trim());
+  return { name, rest: rest.join(" · ") };
+};
+
+// the header's third line: the model and what the room is doing
+function statusText(s, S, { lib, spin, now }) {
+  const { name, rest } = labelParts(lib, s.model);
+  const tail = (t) => S.ink3(` · ${rest ? `${rest} · ` : ""}`) + t;
+  if (!s.model) return S.ink3("choosing a model");
+  if (s.step === "online") {
+    const n = s.devices.length;
+    return name + tail(`${S.acc(S.g.live)} online` + S.ink3(` · ${n} device${n === 1 ? "" : "s"}${s.onlineAt ? ` · up ${upFor(now - s.onlineAt)}` : ""}${s.tps ? ` · ${s.tps.toFixed(1)} tok/s` : ""}`));
+  }
+  if (s.step === "starting") return name + tail(`${spin} loading` + (s.startedAt ? S.ink3(` · ${clock(now - s.startedAt)}`) : ""));
+  if (s.dl.key === s.model && s.dl.state === "running") return name + tail(`${spin} downloading`);
+  if (canStart(s).ok) return name + tail(S.ink3("ready to start"));
+  return name + tail(S.ink3("waiting for devices"));
+}
+
+// What Start would deal, as the room page does it (room/plan.js dealRoom): device index (host first,
+// devices that lend) -> [lo, hi) | null (not needed). null when it can't be worked out (no fit yet).
+export function dealPreview(s, lib) {
+  if (!s.model || !s.fit?.fits || !lib?.dealRoom || !lib.roomBytes) return null;
+  const rb = lib.roomBytes(s.model, lib.nodeCtxFor(s.model, s.ctxAsk || 0), "f16");
+  if (!rb) return null;
+  const gpu = s.devices.filter((d) => d.gb > 0);
+  const deal = lib.dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges: gpu.map((d) => d.gb * GiB),
+    mode: s.splitMode === "memory" ? "memory" : "speed", phone: gpu.map((d) => d.kind === "phone") });
+  if (!deal?.used?.length) return null;
+  const out = new Map();
+  gpu.forEach((d, i) => { const k = deal.used.indexOf(i); out.set(d, k >= 0 ? deal.ranges[k] : null); });
+  return out;
+}
+// one device holds the model by its own pledge: spreading it is a choice, not a need
+const onePledgeHolds = (s, lib) => !!(lib && s.model && s.devices.some((d) => d.gb > 0 && roomFitNow(lib, { model: s.model, devices: [{ name: d.name, meta: { ...d.meta, webgpu: true, contribGB: d.gb } }] }).fits));
+
+// a device's GPU as the room reports it ("nvidia nvidia-gb10", "apple m3-pro") -> "NVIDIA GB10", "Apple M3 Pro"
+const VENDOR = { nvidia: "NVIDIA", amd: "AMD", apple: "Apple", intel: "Intel", qualcomm: "Qualcomm", arm: "Arm" };
+export function gpuLabel(g) {
+  let t = String(g || "").trim().split(/\s+/).filter(Boolean);
+  if (!t.length) return "";
+  const v = t[0].toLowerCase();
+  if (t.length > 1 && t[1].toLowerCase().startsWith(v + "-")) t = [t[0], t[1].slice(v.length + 1), ...t.slice(2)];
+  const words = t.join(" ").split(/[\s-]+/).map((w, i) => (i === 0 && VENDOR[w.toLowerCase()]) || (/^[a-z]*\d/i.test(w) ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)));
+  return words.join(" ");
+}
+
+// the table of devices: DEVICE, GPU (70 columns and up), LENDS or LAYERS, and a state
+function deviceTable(s, S, { W, online, preview = null }) {
+  const wide = W >= 69;
+  const cols = [{ h: "DEVICE", w: 12 }];
+  if (wide) cols.push({ h: "GPU", w: 14 });
+  cols.push(online ? { h: "LAYERS", w: 6 } : { h: "LENDS", w: 5, align: "r" });
+  if (preview) cols.push({ h: "HOLDS", w: 6 });
+  cols.push({ h: "", w: 20 });
+  const cut = (x, n) => (width(x) > n ? [...x].slice(0, n - 1).join("") + "…" : x);
+  const rows = s.devices.map((d) => {
+    const gpuName = cut(d.self && s.gpuName ? s.gpuName : gpuLabel(d.meta?.gpu) || (d.kind === "phone" ? "phone" : ""), 14);
+    const chatOnly = d.gb == null;
+    const name = d.self ? S.bold(cut(d.name, 12)) : chatOnly ? S.ink3(cut(d.name, 12)) : cut(d.name, 12);
+    const mid = online ? (chatOnly || !d.range ? S.ink3(S.g.none) : String(d.range).replace(/[–-]/, S.g.dash)) : (chatOnly ? S.ink3(S.g.none) : gbNum(d.gb));
+    const state = d.self ? S.ink3("this computer") : chatOnly ? S.ink3("chat only") : online ? "" : S.ink3("joined");
+    const r = [name];
+    if (wide) r.push(chatOnly ? S.ink3(gpuName || d.kind) : gpuName);
+    r.push(mid);
+    if (preview) {
+      const rg = preview.get(d);
+      r.push(rg ? `${rg[0]}${S.g.dash}${rg[1] - 1}` : S.ink3(S.g.none));
+      r.push(rg === null && !chatOnly ? S.ink3(d.self ? "this computer · not needed" : "not needed") : state);
+    } else r.push(state);
+    return r;
+  });
+  // who waits in the lobby: table rows too; keys on the first only
+  s.lobby.slice(0, 3).forEach((l, i) => {
+    const who = String(l.line || "").replace(/ wants to join.*$/, "");
+    const r = [cut(who, 12)];
+    if (wide) r.push(S.ink3(cut(String(l.line || "").match(/\(([^)]*)\)/)?.[1] || "", 14)));
+    r.push("");
+    if (preview) r.push("");
+    r.push(S.acc("wants to join") + (i === 0 ? "  " + S.ink2("a") + S.ink3(" allow  ") + S.ink2("d") + S.ink3(" deny") : ""));
+    rows.push(r);
+  });
+  const out = table(S, cols, rows);
+  if (s.lobby.length > 3) out.push(I + S.ink3(`and ${s.lobby.length - 3} more`));
+  return out;
+}
+
+// the screen for a state -> lines (each cut to width - 1)
+//   S: style() (plain when left out); spin: the spinner's frame; events: [{ t, text }] newest first
+export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events = [], now = Date.now() } = {}) {
+  const W = Math.max(40, cols) - 1;
+  const L = [];
+  const lbl = (k) => labelParts(lib, k).name;
+  spin ||= S.spin(0);
+  const push = (...ls) => { for (const l of ls) L.push(l); };
+  const blank = () => { if (L.length && L[L.length - 1] !== "") L.push(""); };
+
+  // the header, fixed for the whole session: the mark, the room code and its link, the status
+  const link = s.link || "";
+  const shortLink = link.replace(/^https:\/\//, "");
+  push("", ...header(S, cols, [
+    S.bold("pooled host"),
+    s.code ? S.pill(fmtCode(s.code)) + "  " + S.ink2(S.link(link, cols >= 100 ? link : shortLink)) : "",
+    statusText(s, S, { lib, spin, now }),
+  ]));
+  blank();
+  if (s.gpu && (s.step === "pick" || s.step === "pledge" || s.step === "confirm")) push(label(S, "gpu") + s.gpu.replace(/ · /, S.ink3(" · ")));
+  if (s.gpu && (s.step === "pick" || s.step === "pledge" || s.step === "confirm") && s.step !== "pledge") blank();
+
   if (s.step === "confirm") {
     const row = s.rows.find((r) => r.key === s.dl.key);
-    L.push(`${c.bold(s.dl.key)} is not downloaded${row?.fileBytes ? ` (${gbText(row.fileBytes)})` : ""}. Download it now? ${c.bold("[Y/n]")}`);
-    L.push(c.dim("  n streams this computer's layers from Hugging Face on every start instead"));
-  } else if (s.step === "pick") {
-    L.push(`${c.bold("Choose a model")} ${c.dim("↑/↓ then Enter")}`);
+    push(label(S, "model") + lbl(s.dl.key));
+    blank();
+    push(I + `${lbl(s.dl.key)} is not downloaded${row?.fileBytes ? ` (${gbText(row.fileBytes)})` : ""}.`);
+    push(I + "Download it now?");
+    blank();
+    push(I + S.keys([["y", "download", "primary"], ["n", "stream from Hugging Face instead"], ["q", "quit"]]));
+    return L.map((l) => clip(l.replace(/ +$/, ""), W));
+  }
+
+  if (s.step === "pick") {
+    push(...(s.devices.length > 1 || s.lobby.length ? [...deviceTable(s, S, { W, online: false }), ""] : []));
+    push(I + "Which model?");
     const rec = recommendModel(s.rows);
-    for (let i = 0; i < s.rows.length; i++) {
-      const r = s.rows[i], on = i === s.sel;
-      const have = r.pulled ? c.green("✓ downloaded") : r.fileBytes ? c.dim(`${gbText(r.fileBytes)} download`) : c.dim("download");
-      const need = r.needGB != null ? `needs ${String(r.needGB).padStart(4)} GB` : "";
-      const tag = r.key === rec ? c.cyan("recommended") : r.fitsAlone ? c.dim("fits here") : c.dim("needs more devices");
-      L.push(`${on ? c.cyan("❯") : " "} ${pad(on ? c.bold(label(r.key)) : label(r.key), 18)} ${pad(have, 18)} ${pad(need, 15)} ${tag}`);
+    const nameW = Math.max(...s.rows.map((r) => width(lbl(r.key)))) + 2;
+    const groups = [["Fits on this computer", s.rows.filter((r) => r.fitsAlone)], ["Needs another device", s.rows.filter((r) => !r.fitsAlone)]];
+    for (const [head, rows] of groups) {
+      if (!rows.length) continue;
+      blank();
+      push(I + S.ink3(head));
+      for (const r of rows) {
+        const i = s.rows.indexOf(r), on = i === s.sel, x = pickerRow(r, { rec });
+        const name = on ? `${S.acc(S.g.sel)} ${S.bold(pad(lbl(r.key), nameW))}` : `  ${pad(lbl(r.key), nameW)}`;
+        push(I + name + S.ink3("needs ") + padStart(x.need, 5) + "   " + (r.pulled ? S.ink2(x.have) : S.ink3(x.have)));
+      }
     }
-    L.push(c.dim(`  "needs": all devices together, at the room's context. this computer lends ${s.pledge.gb} GB${s.model ? " · Esc: back" : ""}`));
-  } else if (s.step === "pledge") {
-    const shown = s.pledge.typed ? `${s.pledge.typed}${c.dim("_")}` : c.bold(`${s.pledge.gb}`);
-    L.push(`${c.bold("How much memory does this computer lend?")} ${c.dim("←/→ or type, then Enter")}`);
-    L.push(`  ${c.cyan("◀")} ${shown} GB ${c.cyan("▶")}   ${c.dim(`of ${s.pledge.totalGB ? `${Math.round(s.pledge.totalGB)} GB on this GPU` : "this GPU"}; at most ${s.pledge.max} GB`)}`);
-    if (s.model) L.push(c.dim(`  ${label(s.model)} needs ${s.rows.find((r) => r.key === s.model)?.needGB ?? "?"} GB over the whole room`));
+    blank();
+    const k = [[S.g.up, "choose"], ["enter", "host it", "primary"]];
+    if (s.model) k.push(["esc", "back"]);
+    k.push(["q", "quit"]);
+    push(I + S.keys(k));
+    if (s.notice) push(I + S.ink3(s.notice));
+    return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
-  if (s.step === "room" || s.step === "starting" || s.step === "online" || ((s.step === "pick" || s.step === "pledge" || s.step === "confirm") && s.devices.length > 1)) {
-    if (s.step === "room" || s.step === "starting" || s.step === "online") {
-      const have = s.dl.key === s.model && s.dl.state === "done" ? c.green("✓ downloaded") : "";
-      L.push(`${c.dim("model  ")} ${s.model ? c.bold(label(s.model)) : c.dim("none yet")}${have ? `  ${have}` : ""}${s.step === "room" ? c.dim("   m: change") : ""}`);
-      const dl = dlLine(); if (dl) L.push(`${" ".repeat(8)}${dl}`);
-      L.push(`${c.dim("lending")} ${c.bold(`${s.pledge.gb} GB`)}${s.pledge.totalGB ? c.dim(` of ${Math.round(s.pledge.totalGB)} GB`) : ""}${s.step === "room" ? c.dim("   p: change") : ""}`);
+
+  if (s.step === "pledge") {
+    if (s.model) push(label(S, "model") + lbl(s.model) + S.ink3(s.dl.key === s.model && s.dl.state === "done" ? " · downloaded" : ""));
+    blank();
+    push(I + "How much GPU memory should this computer lend?");
+    blank();
+    const shown = s.pledge.typed ? S.bold(s.pledge.typed) + S.rev(" ") : S.bold(`${s.pledge.gb} GB`);
+    const total = s.pledge.totalGB ? Math.round(s.pledge.totalGB) : s.pledge.max;
+    push(I + S.bar(s.pledge.gb / (total || 1), W < 69 ? 16 : 32) + "  " + shown + S.ink3(` of ${total} GB`));
+    const row = s.rows.find((r) => r.key === s.model);
+    const sentence = [];
+    if (s.pledge.totalGB) sentence.push(`Leaves ${Math.max(0, Math.round(s.pledge.totalGB - s.pledge.gb))} GB for this computer.`);
+    if (row?.needGB != null) {
+      const need = Math.max(1, Math.round(row.needGB));
+      sentence.push(need > s.pledge.gb ? `The model needs ${need} GB, so other devices have to lend at least ${need - s.pledge.gb} GB more.` : `The model needs ${need} GB: this computer can hold it alone.`);
     }
-    L.push("");
-    L.push(c.bold(`Devices (${s.devices.length})`));
-    for (const d of s.devices) {
-      const dot = d.pct != null && d.pct < 100 ? c.yellow("◐") : s.step === "online" && d.range ? c.green("●") : c.dim("●");
-      let right = "";
-      if (s.step === "starting" && d.pct != null) right = `${bar(d.pct, 14, c)} ${String(d.pct).padStart(3)}%`;
-      else if (d.range) right = c.dim(`layers ${d.range}`);
-      L.push(`  ${dot} ${pad(d.self ? c.bold(d.name) : d.name, 18)} ${pad(c.dim(d.kind), 14)} ${pad(d.gb != null ? `${d.gb} GB` : c.dim("chat only"), 8)} ${right}`);
-    }
-    if (s.lobby.length) {
-      L.push("");
-      L.push(c.yellow(c.bold(`Waiting to join (${s.lobby.length})`)));
-      s.lobby.slice(0, 3).forEach((r, i) => L.push(`  ${c.yellow("?")} ${r.line}${i === 0 ? c.dim("   a: allow  d: deny") : ""}`));
-      if (s.lobby.length > 3) L.push(c.dim(`  and ${s.lobby.length - 3} more`));
-    }
+    for (const l of wrap(sentence.join(" "), W - 2)) push(I + S.ink3(l));
+    blank();
+    push(I + S.keys([[S.g.lr, "1 GB"], ["type", "a number"], ["enter", "lend", "primary"], ...(s.pledgeDone ? [["esc", "back"]] : [])]));
+    if (s.notice) push(I + S.ink3(s.notice));
+    return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
-  if (s.step === "room" && s.model && s.fit) {
-    L.push("");
-    const pct = s.fit.needGB ? Math.min(100, (s.fit.haveGB / s.fit.needGB) * 100) : 0;
-    L.push(`${c.dim("room   ")} ${bar(s.fit.fits ? 100 : pct, 20, c)} ${s.fit.haveGB} GB pledged, ${label(s.model)} needs ${s.fit.needGB} GB`);
-    if (!s.fit.fits) for (const l of wrap(s.fit.note, W)) L.push(c.yellow(l));
+
+  // room / starting / online
+  const online = s.step === "online";
+  if (s.step === "starting") {
+    const dealt = s.devices.filter((d) => d.gb > 0 && d.range);
+    const rows = (dealt.length ? dealt : s.devices.filter((d) => d.gb > 0)).map((d) => ({ d, pct: d.pct ?? 0 })).sort((a, b) => a.pct - b.pct);
+    const out = table(S, [{ h: "DEVICE", w: 12 }, { h: "LAYERS", w: 6 }, { h: "", w: 40 }], rows.map(({ d, pct }) => {
+      const range = String(d.range || S.g.none).replace(/[–-]/, S.g.dash);
+      if (pct >= 100) return [S.ink2(d.name), S.ink2(range), S.ink2("loaded")];
+      return [d.self ? S.bold(d.name) : d.name, range, S.bar(pct / 100, 20) + "  " + padStart(`${Math.round(pct)}%`, 4) + (d.self && s.load?.total ? "  " + S.ink3(loadNote(s.load)) : "")];
+    }));
+    push(...out);
+  } else push(...deviceTable(s, S, { W, online, preview: s.step === "room" ? dealPreview(s, lib) : null }));
+  blank();
+
+  if (!online && s.step === "room") {
+    const d = s.dl;
+    if (d.key === s.model && d.state === "running") push(progressRow(S, "download", { done: d.done, total: d.total, bps: d.bps, cols: 20 }));
+    else if (d.key === s.model && d.state === "stream") push(label(S, "download") + S.ink3("not downloaded: streams from Hugging Face on each start"));
+    else if (d.key === s.model && d.state === "error") push(label(S, "download") + S.err(`download failed: ${d.error}`));
+    if (s.fit) {
+      const have = Math.round(s.fit.haveGB), need = Math.max(1, Math.round(s.fit.needGB || 0));
+      push(label(S, "memory") + S.bar(Math.min(1, have / need), W < 69 ? 12 : 20) + "  " + `${have} GB lent` + S.ink3(` · ${need} GB needed`));
+    }
+    const gpuN = s.devices.filter((x) => x.gb > 0).length;
+    if (gpuN > 1) push(label(S, "split") + (s.splitMode === "memory" ? "across all devices" : "fastest first") + S.ink3(" · s changes it"));
+    if (s.code && (!s.fit?.fits || gpuN <= 1)) push(label(S, "invite") + S.bold(`pooled join ${fmtCode(s.code)}`) + S.ink3(" on the other computer"));
+    const notes = [];
+    if (s.fit && !s.fit.fits) notes.push(`Needs ${Math.max(1, Math.round(s.fit.shortGB))} GB more: one more device, or press l to lend more.`);
+    const self = s.devices.find((x) => x.self);
+    notes.push(...splitLines(splitAdvice(s, lib), { model: lbl(s.model), selfName: self?.name, gb: s.pledge.gb }));
+    if (s.splitMode === "memory" && gpuN > 1 && s.fit?.fits && onePledgeHolds(s, lib)) notes.push("Spreading over the network is slower per token; it uses less memory on each device.");
+    if (notes.length) { blank(); for (const n of notes) for (const l of wrap(n, W - 2)) push(I + S.ink3(l)); }
   }
-  if (s.step === "online" && s.split) { L.push(""); L.push(`${c.green("● online")}  ${c.dim(s.split)}`); }
-  if (s.step === "starting") { L.push(""); L.push(`${spin || "…"} ${c.bold("loading the model")} ${c.dim("each device loads its layers")}`); }
-  if (s.notice && s.notice !== s.fit?.note) for (const l of wrap(s.notice, W)) L.push(c.yellow(l));
-  // the keys, last
-  L.push("");
-  const keys = [];
+  if (online) {
+    push(label(S, "chat") + "press c, or " + S.bold(`pooled chat ${fmtCode(s.code)}`) + S.ink3(" on any computer"));
+    push(label(S, "api") + S.bold(`pooled serve ${fmtCode(s.code)}`));
+    const gpu = s.devices.filter((d) => d.gb > 0 && d.range);
+    const rtts = gpu.map((d) => d.rtt).filter((x) => Number.isFinite(x) && x > 0);
+    const hint = hopHint(gpu.length, rtts.length ? Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length / 2) : null);
+    if (hint) push(label(S, "network") + S.ink3(hint));
+  }
+  if (events.length && s.step !== "pick") {
+    blank();
+    for (const e of events.slice(0, 3)) push(I + S.ink3(`${new Date(e.t).toTimeString().slice(0, 5)}  ${e.text}`));
+  }
+  if (s.notice && s.notice !== s.fit?.note) { blank(); for (const l of wrap(s.notice, W - 2)) push(I + (/fail/i.test(s.notice) ? S.err(l) : S.ink3(l))); }
+  blank();
   if (s.step === "room") {
-    const cs = canStart(s);
-    if (cs.ok) keys.push(c.green(c.bold("Enter: start")));
-    else if (s.flags.start || s.flags.wait) keys.push(c.dim(s.flags.wait > 1 ? `starts by itself with ${s.flags.wait} devices` : "starts by itself once it fits"));
-    else keys.push(c.dim("Enter: start (when the room fits)"));
-    keys.push("m: model", "p: pledge");
-  }
-  if (s.step === "online") keys.push(c.bold("c: chat here"), "Enter: re-deal");
-  keys.push("q: quit");
-  L.push(keys.join(c.dim("  ·  ")));
+    const ok = canStart(s).ok;
+    push(I + S.keys(W < 69 ? [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["q", "quit"]]
+      : [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["m", "model"], ["l", "lend"], ...(s.devices.filter((x) => x.gb > 0).length > 1 ? [["s", "split"]] : []), ["q", "quit"]]));
+  } else if (s.step === "starting") push(I + S.keys([["q", "cancel and close the room"]]));
+  else push(I + S.keys([["c", "chat here", "primary"], ["i", "copy invite"], ["r", "rebalance"], ["q", "close room"]]));
   return L.map((l) => clip(l.replace(/ +$/, ""), W));
 }
+const loadNote = (ld) => (ld.from && ld.from !== "disk" && ld.fetched < ld.total ? `${gbText(ld.fetched)} of ${gbText(ld.total)} from ${ld.from}` : ld.fetched < ld.total ? "from disk" : "onto the GPU");
 
 // the room's devices for the screen, from the node: host first
 export function devicesFrom(node, lib, { pct = new Map(), ranges = null } = {}) {
-  const out = [{ id: "self", name: node.name, kind: deviceKind(node.meta, true), gb: +lib.pledgeGB(node.meta) || 0, self: true, meta: node.meta, pct: pct.get(node.name) ?? null, range: ranges?.[node.name] || null }];
+  const out = [{ id: "self", name: node.name, kind: deviceKind(node.meta, true), gb: +lib.pledgeGB(node.meta) || 0, self: true, meta: node.meta, pct: pct.get(node.name) ?? null, range: ranges?.[node.name] || null, rtt: null }];
   for (const [id, e] of node.conns) {
     if (!e?.meta || e.meta.api) continue;
     const gpu = !!e.meta.webgpu;
-    out.push({ id, name: e.name || id, kind: deviceKind(e.meta), gb: gpu ? +lib.pledgeGB(e.meta) || 0 : null, self: false, meta: e.meta, pct: pct.get(e.name) ?? null, range: ranges?.[e.name] || null });
+    out.push({ id, name: e.name || id, kind: deviceKind(e.meta), gb: gpu ? +lib.pledgeGB(e.meta) || 0 : null, self: false, meta: e.meta, pct: pct.get(e.name) ?? null, range: ranges?.[e.name] || null,
+      rtt: Number.isFinite(e.rtt) ? e.rtt : null });
   }
   return out;
 }

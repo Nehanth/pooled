@@ -1,6 +1,6 @@
 ---
 title: Anthropic Messages
-eyebrow: Serve API
+eyebrow: Serve API reference
 description: POST /v1/messages, the Anthropic API Claude Code and the Anthropic SDKs speak. Tools, tool_choice, thinking and JSON output work.
 sidebar:
   label: Anthropic Messages
@@ -14,7 +14,7 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Base URL: `http://127.0.0.1:8080` (no `/v1`: the SDKs add it). Send an `anthropic-version` header as usual.
+`POST http://127.0.0.1:8080/v1/messages`. The SDKs' base URL is `http://127.0.0.1:8080`, without `/v1`.
 
 <Tabs syncKey="lang">
 <TabItem label="curl">
@@ -38,21 +38,6 @@ with client.messages.stream(
 ) as stream:
     for text in stream.text_stream:
         print(text, end="")
-```
-
-</TabItem>
-<TabItem label="TypeScript">
-
-```ts
-import Anthropic from "@anthropic-ai/sdk";
-
-const client = new Anthropic({ baseURL: "http://127.0.0.1:8080", apiKey: "pooled" });
-const m = await client.messages.create({
-  model: "pooled",
-  max_tokens: 500,
-  messages: [{ role: "user", content: "What is a KV cache?" }],
-});
-console.log(m.content[0].type === "text" ? m.content[0].text : m.content);
 ```
 
 </TabItem>
@@ -103,11 +88,9 @@ Standard Messages events: `message_start`, content block start, delta and stop e
 
 While the request waits in the queue or the room prefills, the bridge sends a `ping` event after every 10 s of silence. If something fails after the stream started, you get an `error` event.
 
-## Images and documents
-
-An image or document block, in a user turn or inside a `tool_result`, becomes a short note: `[image omitted: this model reads text only]`.
-
 ## Skipped and refused
+
+Image and document blocks, in user turns or `tool_result`s, become a short note: `[image omitted: this model reads text only]`.
 
 Skipped, with a logged warning: Anthropic's own server tools (web search, bash, text editor and so on) and their result blocks.
 
@@ -118,7 +101,7 @@ A `400`:
 
 `/v1/messages/count_tokens` is `404`.
 
-Errors follow Anthropic's shape, `{"type": "error", "error": {"type", "message"}}`. Overload is `529` where OpenAI uses `429` and `503`. See [Limits and errors](/docs/serve/limits#errors).
+Errors use Anthropic's shape, `{"type": "error", "error": {"type", "message"}}`, with `529` where OpenAI uses `429` and `503`. See [status codes](/docs/reference/endpoints#status-codes).
 
 :::tip
 `GET /v1/models` answers in Anthropic's shape when the request has an `anthropic-version` header, or an `x-api-key` header and no `Authorization` header.

@@ -16,7 +16,7 @@ Sources (origin/main 40bb0fa):
 - 27B 64 layers (48 DeltaNet + 16 attention): docs/models.md
 */}
 
-Pooled ships no weights. Each device downloads only its share of the layers, by HTTP range request, straight from public Hugging Face repositories. Weights can also come from another device in the room that already has them.
+Pooled ships no weights. Each device downloads only its share of the layers from Hugging Face by range request, or from another device in the room that has them.
 
 ## In the room's picker
 
@@ -26,7 +26,7 @@ Pooled ships no weights. Each device downloads only its share of the layers, by 
 | Qwen 3.8 27B | Q4_0 | 16.06 GB | 17.0 GB | 16384 / 32768 |
 | Qwen 3.6 35B MoE (35B-A3B) | Q4_0 | 20.84 GB | 22.5 GB | 32768 / 65536 |
 
-"Memory the room needs" is the total across all devices. It is split across the devices by what each one lends. Raise the context with [`?ctx=`](/docs/reference/url-options#context-per-model).
+"Memory the room needs" is the total across all devices. Raise the context with [`?ctx=`](/docs/reference/url-options#context-per-model).
 
 ### What each one is
 
@@ -57,7 +57,7 @@ A prompt must leave at least 32 tokens for the answer. Generation stops before t
 
 ## KV cache format
 
-The KV cache is f16 by default. With [`?kv=q8`](/docs/reference/url-options) on the host, the 27B and the MoE keep it as int8, about 56% of f16's memory. The host picks the format and sends it to every device, so all devices in a room match. Other models ignore it.
+f16 by default. With [`?kv=q8`](/docs/reference/url-options) on the host, the 27B and the MoE keep it as int8 (about 56% of the memory); the host sends the choice to every device.
 
 ## Models for tests and development
 
@@ -78,15 +78,8 @@ Qwen3 0.6B is the golden-test model. Qwen3.5-122B-A10B MoE runs in the engine an
 | `Qwen35Engine` | Qwen 3.8 27B, Qwen 3.6 35B MoE (`qwen35moe`), Qwen3.5-122B-A10B |
 | `DenseEngine` | Qwen3 0.6B, 1.7B, 4B, SmolLM2 135M |
 
-Both are Pooled's own WebGPU engines with WGSL kernels. See [Engine and kernels](/docs/internals/engine).
+Both are Pooled's own WebGPU engines. See [Engine and kernels](/docs/internals/engine).
 
 ## Adding a model
 
-Architectures with the same hybrid layout as Qwen 3.5, 3.6 and 3.8 (for example Qwen 3.5 2B or 9B) need only entries in `room/models.js`.
-
-1. Check that the GGUF's tensor names and shapes match one of the two engines. `engine/gguf.js` has the name maps.
-2. Add the model to `room/models.js`: `MODELS` (URLs), `NEED_GB`, and `CTX` if its context should differ from the default. Add it to `PICKER` and `FILE_GB` to offer it in the room.
-3. Generate a golden with the reference implementation in `tests/reference/` and add a test.
-4. Record its tok/s in `docs/bench-log.md`.
-
-See [Adding a model](/docs/contributing/models) for the full walk-through.
+Models with the hybrid layout of Qwen 3.5, 3.6 and 3.8 need only entries in `room/models.js`. See [Adding a model](/docs/contributing/models).

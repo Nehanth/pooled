@@ -29,7 +29,11 @@ test("join: bad arguments are usage errors that say what is wrong", () => {
   const bad = (argv, re) => assert.throws(() => parseLendArgs("join", argv), (e) => e instanceof UsageError && re.test(e.message), argv.join(" "));
   assert.equal(parseLendArgs("join", []).code, null);   // no code: a terminal asks for it, a script gets the usage error
   assert.equal(parseLendArgs("join", []).askCode, true);
-  bad(["not a code!"], /not "not a code!"/);
+  bad(["not a code!"], /"not a code!" is not a room code/);
+  assert.throws(() => parseLendArgs("join", ["not a code!"]), (e) => e.lines.length === 1 && e.lines[0] === 'pooled join: "not a code!" is not a room code (like 4TK-G9P) or an invite link.');
+  // an unknown option: one line with the nearest real one, and where the rest are
+  assert.throws(() => parseLendArgs("join", ["ABCD", "--gbb", "4"]), (e) => e.lines.join("\n") === 'pooled join: unknown option "--gbb". Did you mean "--gb"?\nRun pooled join --help for all options.');
+  assert.throws(() => parseLendArgs("host", ["--strat"]), (e) => e.lines[0] === 'pooled host: unknown option "--strat". Did you mean "--start"?');
   bad(["ABCD", "EFGH"], /one room code/);
   bad(["ABCD", "--gb", "lots"], /--gb must be a number/);
   bad(["ABCD", "--gb", "0.5"], /at least 1/);
@@ -69,8 +73,10 @@ test("--gb: numbers, max, and the per-device cap", () => {
 });
 
 test("the help texts name every option", () => {
-  for (const o of ["--gb", "--name", "--signal", "--models", "--no-check", "--wait", "--json-log", "--quiet", "--help"]) assert.ok(HELP_JOIN.includes(o), o);
-  for (const o of ["--model", "--gb", "--devices", "--code", "--ctx", "--name", "--signal", "--models", "--no-check", "--json-log"]) assert.ok(HELP_HOST.includes(o), o);
+  for (const o of ["--gb", "--name", "--signal", "--no-pull", "--no-check", "--wait", "--json-log", "--quiet", "--verbose", "--help"]) assert.ok(HELP_JOIN.includes(o), o);
+  for (const o of ["--model", "--gb", "--devices", "--code", "--ctx", "--name", "--signal", "--no-pull", "--no-check", "--json-log", "--verbose"]) assert.ok(HELP_HOST.includes(o), o);
+  // where the models are kept is pooled pull's business (--models / POOLED_MODELS are advanced overrides)
+  assert.ok(!HELP_JOIN.includes("--models") && !HELP_HOST.includes("--models"));
 });
 
 test("the help texts say what a device in a room sees", () => {
@@ -80,10 +86,13 @@ test("the help texts say what a device in a room sees", () => {
 
 test("deviceName: the same for a hostname every run, different across hostnames, never the hostname itself", () => {
   assert.equal(deviceName("mac-studio"), deviceName("mac-studio"));
-  assert.match(deviceName("mac-studio"), /^node-[a-z]{3}$/);
+  assert.match(deviceName("mac-studio", "darwin"), /^mac-[a-z]{3}$/);
+  assert.match(deviceName("spark", "linux"), /^linux-[a-z]{3}$/);
+  assert.match(deviceName("desk", "win32"), /^pc-[a-z]{3}$/);
+  assert.match(deviceName("x", "aix"), /^node-[a-z]{3}$/);
   assert.notEqual(deviceName("mac-studio"), deviceName("spark"));
   assert.ok(!deviceName("alice-laptop").includes("alice"));
-  assert.match(deviceName(""), /^node-[a-z]{3}$/);
+  assert.match(deviceName("", "darwin"), /^mac-[a-z]{3}$/);
 });
 
 // ---------------- memory ----------------
@@ -270,7 +279,7 @@ test("join security: a quoted invite link gives its key; six-character codes gro
   assert.equal(j.code, "4TKG9P"); assert.equal(j.key, KEY);
   assert.equal(parseLendArgs("join", ["4tk-g9p"]).key, null);
   assert.equal(parseLendArgs("join", ["4tk-g9p"]).code, "4TKG9P");
-  assert.throws(() => parseLendArgs("join", ["4TKG9"]), (e) => e instanceof UsageError && /six letters and digits like 4TK-G9P/.test(e.message));
+  assert.throws(() => parseLendArgs("join", ["4TKG9"]), (e) => e instanceof UsageError && /like 4TK-G9P/.test(e.lines[0]));
   const h = parseLendArgs("host", ["--allow-all", "--code", "4tk-g9p"], { models: MODELS });
   assert.equal(h.allowAll, true); assert.equal(h.roomCode, "4TKG9P");
   assert.equal(parseLendArgs("host", [], { models: MODELS }).allowAll, false);

@@ -10,45 +10,37 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 {/*
 Sources (for the fact-checker):
-- room/pledge.js: pledgeRule() (iPhone/iPad 0.5 GB default, max 1 GB, step 0.5; Android by navigator.deviceMemory: 0.5 GB up to 2 GB RAM, 1 GB below 8, 2 GB at 8, 1 GB unknown), afterLoadDeath() (half share, drop after 2nd kill or at one layer), the 1536 MB comment
-- room/plan.js: PHONE_COST = 20, phonesToLeaveOut(); room.js SEG_HELP "ai-split"
+- room/pledge.js: pledgeRule() (iPhone/iPad 0.5 GB default, max 1 GB, step 0.5; Android by navigator.deviceMemory: 0.5 GB up to 2 GB RAM, 1 GB below 8, 2 GB at 8, 1 GB unknown), afterLoadDeath()
+- room/plan.js: PHONE_COST = 20, phonesToLeaveOut()
 - room/preflight.js: verdict() phone lines (Safari 26 / iOS 26; Android Chrome 121+; secure page)
 - room/compute.js lendNotes() (Auto-Lock, background tab, battery)
-- PR #233 (For speed default, phones only get layers when needed, ?phonelayers=1, keep-alive ?ka=0, GB10+iPhone MoE numbers)
-- PR #258 and #244 (iOS limits: 1536 MB tab, 840 MB networking process; caps; wake lock; reconnect; 60 s re-deal; phone GPU wake ?wake=0)
-- CHANGELOG.md Unreleased, Fixed (#207)
-- docs/bench-log.md "2026-09-28: device matrix" (one phone layer ~ 15-25 GB10 layers)
+- Measurements (phone vs GB10 speed, iOS tab limit, wake): internals/benchmarks
 */}
 
-A phone can join any room. Most of the time it joins to **ask**: it sends questions and reads the answers while the computers run the model. It holds layers only when the computers can't fit the model by themselves.
+A phone can join any room. Usually it joins to **ask**: it sends questions and reads answers while the computers run the model. A phone alone can't run a model, so start the room on a computer.
+
+## Join from a phone
+
+Scan the room's QR code with the camera, or open the invite link. See [Invite devices](/docs/invite).
+
+You need:
+
+- **iPhone or iPad:** Safari on iOS 26 or later. Older iOS can join to chat.
+- **Android:** Chrome 121 or later.
 
 ## Why phones usually only ask
 
-A phone's GPU is much slower than a computer's. In our tests one iPhone layer took as long as 15 to 25 layers on an NVIDIA GB10, and each phone adds two Wi-Fi hops to every token. On a GB10 and iPhone room running Qwen3.6 35B MoE:
+A phone's GPU is much slower than a computer's, and every device the answer passes through adds a Wi-Fi hop. So the room gives layers to the fastest devices first. A phone gets layers only when the computers don't have enough memory. See [How layers are split](/docs/rooms/split).
 
-| Room | Plain | Speculative |
-|---|---|---|
-| GB10 alone | 35–40 tok/s | 45–65 tok/s |
-| GB10 + iPhone, phone holds 1 layer | 15–25 tok/s | 25–39 tok/s |
-| GB10 + iPhone, phone only asks | 36–41 tok/s | 45–67 tok/s |
+## How much a phone can give
 
-So the room's default split, **For speed**, fills the fastest devices first. Until a phone is measured, it counts as 20 times slower than a computer, so it gets layers only if the computers run out of memory.
-
-The other split, **By memory**, also leaves phones out when the computers can hold the model. To make a phone hold layers anyway, for testing, add `?phonelayers=1` to the host's address. See [How layers are split](/docs/rooms/split).
-
-## How much memory a phone can give
-
-The limit is the browser tab, not the GPU. Pooled caps what a phone or tablet can give, and the host holds it to that cap.
+The browser tab limits it, not the GPU.
 
 <Tabs>
   <TabItem label="iPhone and iPad">
-    0.5 GB by default, at most 1 GB, in steps of 0.5 GB.
-
-    Safari closes a tab that uses more than about 1.5 GB, and the page itself, the engine and loading need room too. On an iPhone 14 Pro Max (iOS 26.6), the tab was killed at 1534 to 1537 MB after a few loads in a row.
+    0.5 GB by default, at most 1 GB.
   </TabItem>
   <TabItem label="Android">
-    Set by the phone's memory, as Chrome reports it:
-
     | Phone memory | Most it can give |
     |---|---|
     | up to 2 GB | 0.5 GB |
@@ -58,33 +50,18 @@ The limit is the browser tab, not the GPU. Pooled caps what a phone or tablet ca
   </TabItem>
 </Tabs>
 
-The join screen and the device's status explain the cap when it applies.
-
 ## Keep a phone serving
 
-If your phone does hold layers, it has to stay awake and in front.
+If your phone does hold layers:
 
-- **Keep the room's tab in front.** A tab in the background can stall the whole room.
-- **Keep the screen on.** Pooled asks the browser to keep the screen awake while the phone holds layers. If it can't, the device screen says so: set Auto-Lock to **Never** on an iPhone, or the screen timeout to its longest on Android.
-- **Plug it in.** Serving uses the battery fast, and battery saver can pause the tab.
+- **Keep the room's tab in front.** A background tab can stall the whole room.
+- **Keep the screen on.** Pooled tries to keep it awake. If it can't, it says so: set Auto-Lock to **Never** on an iPhone, or the screen timeout to its longest on Android.
+- **Plug it in.** Serving drains the battery fast.
 
-The Serve API page (the black button in the header) shows this device's layers and any of these warnings.
+## If a phone locks or reloads
 
-## When a phone locks, goes to the background or reloads
+- **Back within a minute:** it reconnects and the answer carries on.
+- **Reloaded:** it rejoins under the same name and gets its layers back.
+- **Gone for over a minute:** the room deals its layers to the other devices and keeps going. This is the **Re-deal on its own** setting, on by default.
 
-- **Back from the background:** the phone reconnects by itself and keeps its layers if its slot has not changed. A phone locked for under a minute usually keeps its link: the answer pauses and then carries on.
-- **Reloaded:** the tab rejoins under the same name and the host puts it back in its old slot.
-- **Gone for more than 60 seconds:** the host deals its layers to the devices still there, and the answer carries on from the last word shown. This is the **Re-deal on its own** setting, which is on by default and marked experimental.
-- **Closed by the system while loading:** the host deals again with about half the share for that phone. If it happens a second time, the room carries on without it, and the phone stays to ask.
-
-:::note
-While a phone holds layers, the host tells it when each token starts so its GPU stays clocked up. This made a GB10 and iPhone room 4.6% to 11.6% faster. `?wake=0` turns it off.
-:::
-
-## Requirements
-
-- **iPhone and iPad:** Safari on iOS 26 or later. Older iOS has no WebGPU, so the phone can still join and chat.
-- **Android:** Chrome 121 or later.
-- The page must be served over https. pooled.run always is.
-
-A phone alone can only chat: every model needs more memory than one phone can give. Start the room on a computer.
+See [Device drops and recovery](/docs/rooms/recovery) for the details, and [Benchmarks](/docs/internals/benchmarks) for phone speed measurements.
