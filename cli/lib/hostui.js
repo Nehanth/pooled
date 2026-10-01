@@ -8,7 +8,8 @@
 // stays off until they do.
 //
 // lib: what the room node exports (MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, gbUp,
-// pledgeGB, nodeCtxFor), passed in so tests can use the repo's modules directly.
+// pledgeGB, nodeCtxFor, and pickCtx / ctxShortNote for a model with a fallback context), passed in so
+// tests can use the repo's modules directly.
 
 import { mkStyle, visible, clip, wrap, width, padEnd, padStart, gb, gbNum, header, table, label, I, progressRow, clock, upFor } from "./style.js";
 
@@ -28,46 +29,85 @@ export function deviceKind(meta = {}, self = false) {
 
 // How much a model needs in this room: the whole deal's bytes at the context the node opens it with
 // (roomBytes), else room/models.js NEED_GB for a model without a SHAPE
+const needAt = (lib, key, ctx) => { const rb = lib.roomBytes(key, ctx, "f16"); return rb ? r1((rb.L * rb.layerBytes + rb.hostBytes) / GiB) : null; };
 export function modelNeedGB(lib, key, ctxAsk = 0) {
-  const rb = lib.roomBytes(key, lib.nodeCtxFor(key, ctxAsk), "f16");
-  return rb ? r1((rb.L * rb.layerBytes + rb.hostBytes) / GiB) : lib.NEED_GB[key] ?? null;
+  return needAt(lib, key, lib.nodeCtxFor(key, ctxAsk)) ?? lib.NEED_GB[key] ?? null;
+}
+// The context a node falls back to for `key` when the room is short for its default (room/models.js
+// pickCtx: the 1.7B opens at 8K when 16K doesn't fit), and what the model needs there; null when it
+// has none (or --ctx was given) -> { ctx, needGB } | null
+export function modelFallback(lib, key, ctxAsk = 0) {
+  if (!lib.pickCtx) return null;
+  const want = lib.nodeCtxFor(key, ctxAsk);
+  const p = lib.pickCtx(key, { want, ask: ctxAsk, fitsAt: () => false });
+  return p.ctx < want ? { ctx: p.ctx, needGB: needAt(lib, key, p.ctx) } : null;
+}
+const kOf = (n) => `${Math.round(n / 1024)}K`;
+// "6 GB" or "6 GB (4 GB at 8K)": a model's need in words, whole GB
+export function needWords(lib, key, ctxAsk = 0, needGB = modelNeedGB(lib, key, ctxAsk)) {
+  if (needGB == null) return "";
+  const fb = modelFallback(lib, key, ctxAsk);
+  return `${Math.max(1, Math.round(needGB))} GB` + (fb?.needGB ? ` (${Math.max(1, Math.round(fb.needGB))} GB at ${kOf(fb.ctx)})` : "");
 }
 
 // Whether the room's pledges hold `model`, as the room page decides it (room.js roomFitFor): devices
 // host first ({ name, meta, self }), each pledge through room/pledge.js pledgeGB.
 // spareGB: how much more each device could lend (the host's own headroom; others unknown: 0).
-// -> { fits, needGB, haveGB, shortGB, note }
+// The context is the one the node will open the room with (room/models.js pickCtx, as the room node
+// and the room page pick it): the model's default, or its fallback when only that fits (fellBack, with
+// ctxNote saying so); a room short even there is short for the fallback (shortGB, note).
+// -> { fits, needGB, minGB, haveGB, shortGB, note, ctx, want, fellBack, ctxNote }
 export function roomFitNow(lib, { model, devices, ctxAsk = 0, spareGB = [] }) {
   const pl = devices.map((d) => +lib.pledgeGB(d.meta) || 0);
   const haveGB = r1(pl.reduce((a, b) => a + b, 0));
   const needGB = modelNeedGB(lib, model, ctxAsk);
-  const rb = lib.roomBytes(model, lib.nodeCtxFor(model, ctxAsk), "f16");
+  const want = lib.nodeCtxFor(model, ctxAsk);
   const label = shortLabel(lib, model);
-  if (!rb) {
+  if (!lib.roomBytes(model, want, "f16")) {
     const fits = needGB != null && haveGB >= needGB;
     const shortGB = fits ? 0 : r1((needGB || 0) - haveGB);
-    return { fits, needGB, haveGB, shortGB, note: fits ? "" : `This room is ${shortGB} GB short for ${label}: add a device or raise a pledge.` };
+    return { fits, needGB, minGB: null, haveGB, shortGB, ctx: want, want, fellBack: false, ctxNote: "",
+      note: fits ? "" : `This room is ${shortGB} GB short for ${label}: add a device or raise a pledge.` };
   }
-  const fit = lib.roomFit(rb.L, pl.map((g) => g * GiB), rb.layerBytes, rb.hostBytes);
-  if (fit.fits) return { fits: true, needGB, haveGB, shortGB: 0, note: "" };
+  const fitAt = (c) => { const rb = lib.roomBytes(model, c, "f16"); return lib.roomFit(rb.L, pl.map((g) => g * GiB), rb.layerBytes, rb.hostBytes); };
+  const pick = lib.pickCtx ? lib.pickCtx(model, { want, ask: ctxAsk, fitsAt: (c) => fitAt(c).fits }) : { ctx: want, want, fellBack: false };
+  const fb = modelFallback(lib, model, ctxAsk);
+  const base = { needGB, minGB: fb?.needGB ?? null, haveGB, ctx: pick.ctx, want, fellBack: !!pick.fellBack,
+    ctxNote: pick.fellBack && lib.ctxShortNote ? lib.ctxShortNote(label, pick.ctx, want) : "" };
+  const fit = fitAt(pick.ctx);
+  if (fit.fits) return { fits: true, ...base, shortGB: 0, note: "" };
   const shortGB = lib.gbUp(lib.shortBy ? lib.shortBy(fit, spareGB) : fit.short);
   const note = lib.shortNote(label, fit, devices.map((d) => d.name), spareGB).replace(/\. Add a device/, ": add a device");
-  return { fits: false, needGB, haveGB, shortGB, note };
+  return { fits: false, ...base, shortGB, note };
 }
 
-// The picker's rows: every model a node can host, smallest first, with its download and its need.
-// pulled: Set of model keys on disk; pledgeGB: what this computer lends (for "fits here alone")
-export function modelRows(lib, { keys, pulled = new Set(), pledgeGB = 0, ctxAsk = 0 }) {
+// The picker's rows: every model a node can host, smallest first (by its download: what it needs
+// depends on its context, which is longer on some), with its download and its need.
+// pulled: Set of model keys on disk; pledgeGB: what this computer lends (for "fits here alone");
+// maxGB: the most it can lend (hereGB: the whole GB "Run it here" lends, null when it can't hold it)
+export function modelRows(lib, { keys, pulled = new Set(), pledgeGB = 0, ctxAsk = 0, maxGB = 0 }) {
   return keys.map((key) => {
     const needGB = modelNeedGB(lib, key, ctxAsk);
     const alone = roomFitNow(lib, { model: key, devices: [{ name: "this computer", meta: { contribGB: pledgeGB, webgpu: true } }], ctxAsk });
-    return { key, label: lib.MODELS[key].label, fileBytes: lib.FILES?.[key]?.bytes || null, pulled: pulled.has(key), needGB, fitsAlone: alone.fits };
-  }).sort((a, b) => (a.needGB ?? 99) - (b.needGB ?? 99));
+    return { key, label: lib.MODELS[key].label, fileBytes: lib.FILES?.[key]?.bytes || null, pulled: pulled.has(key), needGB, fitsAlone: alone.fits,
+      minNeed: modelFallback(lib, key, ctxAsk),
+      hereGB: hereGB(lib, key, { ctxAsk, maxGB: Math.max(maxGB, pledgeGB) }) };
+  }).sort((a, b) => (a.fileBytes ?? Infinity) - (b.fileBytes ?? Infinity) || (a.needGB ?? 99) - (b.needGB ?? 99));
+}
+// "Run it here": the smallest whole GB, up to maxGB, at which this computer holds the model alone
+// (the room page's math: roomFit with the embedding and head on this device) at its default context,
+// else at its fallback (the 1.7B: 16K on 6 GB, else 8K on 4 GB) -> GB | null
+export function hereGB(lib, key, { ctxAsk = 0, maxGB = 0 } = {}) {
+  const need = modelNeedGB(lib, key, ctxAsk), min = modelFallback(lib, key, ctxAsk)?.needGB;
+  const at = (g) => roomFitNow(lib, { model: key, devices: [{ name: "this computer", meta: { contribGB: g, webgpu: true } }], ctxAsk });
+  for (let g = Math.max(1, Math.floor(need || 1)); g <= Math.floor(maxGB); g++) { const f = at(g); if (f.fits && !f.fellBack) return g; }
+  if (min) for (let g = Math.max(1, Math.floor(min)); g <= Math.floor(maxGB); g++) if (at(g).fits) return g;
+  return null;
 }
 
-// the model to preselect: the largest this computer holds alone, else the smallest
+// the model to preselect: the largest this computer can hold alone, else the smallest
 export function recommendModel(rows) {
-  const fits = rows.filter((r) => r.fitsAlone);
+  const fits = rows.filter((r) => r.hereGB != null || r.fitsAlone);
   return (fits.length ? fits[fits.length - 1] : rows[0])?.key || null;
 }
 
@@ -84,7 +124,8 @@ export function pledgeDefaults(mem, { maxGB, ruleGB, smallestNeedGB = 4 }) {
 
 // ---------------- the state and its keys ----------------
 // state: {
-//   step: "confirm" | "pick" | "pledge" | "room" | "starting" | "online",
+//   step: "confirm" | "pick" | "how" | "pledge" | "room" | "starting" | "online",
+//   how: 0 "Pool with devices" | 1 "Run it here" (the cursor on the "how" step); flags.mode: --pool / --here
 //   model, rows, sel, pledge: { gb, max, totalGB, typed }, fixed: { model, pledge } (given as flags),
 //   devices: [{ id, name, kind, gb, self, pct, range }], lobby: [{ id, line }],
 //   dl: { key, state: "none" | "ask" | "running" | "done" | "error" | "stream", done, total, bps, error },
@@ -92,19 +133,22 @@ export function pledgeDefaults(mem, { maxGB, ruleGB, smallestNeedGB = 4 }) {
 // }
 export function initialState({ rows, model = null, pledge, fixedPledge = false, flags = {}, pulled = new Set(), code = "", link = "", yes = false, noPull = false }) {
   const s = {
-    step: "pick", rows, model, sel: 0, pledge: { ...pledge, typed: "" }, fixed: { model: !!model, pledge: !!fixedPledge },
+    step: "pick", rows, model, sel: 0, how: 0, pledge: { ...pledge, typed: "" }, fixed: { model: !!model, pledge: !!fixedPledge },
     devices: [], lobby: [], dl: { key: null, state: "none", done: 0, total: 0, bps: null, error: null },
-    fit: null, flags: { start: !!flags.start, wait: flags.wait || 0, chat: !!flags.chat }, notice: "", split: null, splitMode: flags.split === "memory" ? "memory" : "speed", code, link, yes, noPull,
+    fit: null, flags: { start: !!flags.start, wait: flags.wait || 0, chat: !!flags.chat, mode: flags.mode === "here" || flags.mode === "pool" ? flags.mode : null, splitGiven: !!flags.splitGiven },
+    notice: "", split: null, splitMode: flags.split === "memory" ? "memory" : "speed", code, link, yes, noPull,
   };
   const rec = model || recommendModel(rows);
   s.sel = Math.max(0, rows.findIndex((r) => r.key === rec));
   if (model) {
-    s.step = s.fixed.pledge ? "room" : "pledge";
     if (!pulled.has(model)) {
       if (noPull) s.dl = { ...s.dl, key: model, state: "stream" };
       else if (yes) s.dl = { ...s.dl, key: model, state: "running" };
-      else { s.dl = { ...s.dl, key: model, state: "ask" }; s.step = "confirm"; }
+      else s.dl = { ...s.dl, key: model, state: "ask" };
     } else s.dl = { ...s.dl, key: model, state: "done" };
+    // (initialState has no effects: hostrun applies the pledge and split of a --here / --pool start)
+    if (s.dl.state === "ask") s.step = "confirm";
+    else s.step = nextAfterModel(s, []);
   }
   return s;
 }
@@ -127,7 +171,44 @@ export function autoStart(s) {
   return canStart(s).ok;
 }
 
-const nextAfterModel = (s) => (s.fixed.pledge ? "room" : s.pledgeDone ? "room" : "pledge");
+// a download the screen started ended (pullWithProgress's result: { ok } | { aborted } | { error }).
+// A notice that waited on it ("waiting for the download") goes with it.
+export function pullDone(s, key, r = {}) {
+  const t = { ...s };
+  if (t.dl.key === key) {
+    if (r.ok) t.dl = { ...t.dl, state: "done" };
+    else if (r.aborted) { if (t.dl.state === "running") t.dl = { ...t.dl, state: "none" }; }
+    else t.dl = { ...t.dl, state: "error", error: r.error?.message || String(r.error || "failed") };
+  }
+  if (/^waiting for the download/.test(t.notice || "")) t.notice = "";
+  return t;
+}
+
+// after the model: "How do you want to run it?" (step "how"), unless --here / --pool said
+function nextAfterModel(t, fx) {
+  if (!t.flags.mode) { t.how = 0; return "how"; }
+  return runMode(t, t.flags.mode, fx);
+}
+const afterPledge = (t) => (t.fixed.pledge || t.pledgeDone ? "room" : "pledge");
+// the choice on "how" -> the next step (t changes in place; fx gets the pledge and split to set)
+//   pool: the lend question, then the room panel waiting for devices, spread across all of them
+//   here: lend what the model needs (never more than this computer can), start once it can
+function runMode(t, mode, fx) {
+  if (mode === "pool") {
+    if (!t.flags.splitGiven) { t.splitMode = "memory"; fx.push({ do: "split", mode: "memory" }); }
+    return afterPledge(t);
+  }
+  const row = t.rows.find((r) => r.key === t.model);
+  if (!row?.hereGB) { t.notice = hereWhy(row, t.pledge); return "how"; }
+  const gb = t.fixed.pledge && t.pledge.gb >= row.hereGB ? t.pledge.gb : row.hereGB;
+  t.pledge = { ...t.pledge, gb, typed: "" }; t.pledgeDone = true;
+  fx.push({ do: "pledge", gb });
+  if (!t.flags.splitGiven) { t.splitMode = "speed"; fx.push({ do: "split", mode: "speed" }); }
+  t.flags = { ...t.flags, start: true };
+  return "room";
+}
+// why "Run it here" is off for a model
+export const hereWhy = (row, pledge) => `needs ${Math.max(1, Math.round(row?.minNeed?.needGB || row?.needGB || 0))} GB${row?.minNeed ? ` (at ${kOf(row.minNeed.ctx)})` : ""}, this computer has ${pledge?.max ?? 0} GB to lend`;
 
 // one key -> { state, fx: [effects] }. keys: "up" | "down" | "left" | "right" | "enter" | "backspace"
 // | "esc" | a single character. Effects: { do: "pull", key } | { do: "stream", key } | { do: "model", key }
@@ -140,13 +221,21 @@ export function reduce(s, key) {
   if (k === "q" && t.step !== "pledge") return { state: t, fx: [{ do: "quit" }] };
   switch (t.step) {
     case "confirm": {
-      if (k === "y" || k === "enter") { t.dl = { ...t.dl, state: "running", done: 0 }; fx.push({ do: "pull", key: t.dl.key }); t.step = nextAfterModel(t); }
-      else if (k === "n") { t.dl = { ...t.dl, state: "stream" }; fx.push({ do: "stream", key: t.dl.key }); t.step = nextAfterModel(t); }
+      if (k === "y" || k === "enter") { t.dl = { ...t.dl, state: "running", done: 0 }; fx.push({ do: "pull", key: t.dl.key }); t.step = nextAfterModel(t, fx); }
+      else if (k === "n") { t.dl = { ...t.dl, state: "stream" }; fx.push({ do: "stream", key: t.dl.key }); t.step = nextAfterModel(t, fx); }
+      break;
+    }
+    case "how": {
+      if (k === "up") t.how = 0;
+      else if (k === "down") t.how = 1;
+      else if (k === "esc") { t.step = "pick"; t.sel = Math.max(0, t.rows.findIndex((r) => r.key === t.model)); }
+      else if (k === "enter") t.step = runMode(t, t.how === 1 ? "here" : "pool", fx);
       break;
     }
     case "pick": {
-      if (k === "up") t.sel = (t.sel - 1 + t.rows.length) % t.rows.length;
-      else if (k === "down") t.sel = (t.sel + 1) % t.rows.length;
+      // the list stops at its ends (it does not wrap: ↑ on the smallest model stays there)
+      if (k === "up") t.sel = Math.max(0, t.sel - 1);
+      else if (k === "down") t.sel = Math.min(t.rows.length - 1, t.sel + 1);
       else if (k === "esc" && t.model) t.step = "room";
       else if (k === "enter") {
         const row = t.rows[t.sel];
@@ -159,7 +248,7 @@ export function reduce(s, key) {
           t.dl = { key: row.key, state: "running", done: 0, total: row.fileBytes || 0, bps: null, error: null };
           fx.push({ do: "pull", key: row.key });
         }
-        t.step = nextAfterModel(t);
+        t.step = nextAfterModel(t, fx);
       }
       break;
     }
@@ -229,11 +318,13 @@ const pad = padEnd;
 const gbText = (b) => gb(b);
 export const fmtCode = (x) => (String(x || "").length === 6 ? `${x.slice(0, 3)}-${x.slice(3)}` : String(x || ""));
 
-// one picker row in words: downloaded / "1.8 GB download", "needs 4 GB", which group it is in
+// one picker row in words: downloaded / "1.8 GB download", "needs 6 GB", which group it is in;
+// min: "4 GB at 8K" for a model with a fallback context
 export function pickerRow(r, { rec = null } = {}) {
   const have = r.pulled ? "downloaded" : r.fileBytes ? `${gbText(r.fileBytes)} download` : "download";
   const need = r.needGB != null ? `${Math.max(1, Math.round(r.needGB))} GB` : "";
-  return { have, need, alone: !!r.fitsAlone, rec: r.key === rec };
+  const min = r.minNeed?.needGB ? `${Math.max(1, Math.round(r.minNeed.needGB))} GB at ${kOf(r.minNeed.ctx)}` : "";
+  return { have, need, min, alone: !!r.fitsAlone, rec: r.key === rec };
 }
 
 // the plain (no escapes) style: tests, and callers that pass nothing
@@ -294,7 +385,7 @@ function statusText(s, S, { lib, spin, now }) {
 // devices that lend) -> [lo, hi) | null (not needed). null when it can't be worked out (no fit yet).
 export function dealPreview(s, lib) {
   if (!s.model || !s.fit?.fits || !lib?.dealRoom || !lib.roomBytes) return null;
-  const rb = lib.roomBytes(s.model, lib.nodeCtxFor(s.model, s.ctxAsk || 0), "f16");
+  const rb = lib.roomBytes(s.model, s.fit.ctx || lib.nodeCtxFor(s.model, s.ctxAsk || 0), "f16");
   if (!rb) return null;
   const gpu = s.devices.filter((d) => d.gb > 0);
   const deal = lib.dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges: gpu.map((d) => d.gb * GiB),
@@ -377,8 +468,8 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     statusText(s, S, { lib, spin, now }),
   ]));
   blank();
-  if (s.gpu && (s.step === "pick" || s.step === "pledge" || s.step === "confirm")) push(label(S, "gpu") + s.gpu.replace(/ · /, S.ink3(" · ")));
-  if (s.gpu && (s.step === "pick" || s.step === "pledge" || s.step === "confirm") && s.step !== "pledge") blank();
+  if (s.gpu && (s.step === "pick" || s.step === "how" || s.step === "pledge" || s.step === "confirm")) push(label(S, "gpu") + s.gpu.replace(/ · /, S.ink3(" · ")));
+  if (s.gpu && (s.step === "pick" || s.step === "confirm")) blank();
 
   if (s.step === "confirm") {
     const row = s.rows.find((r) => r.key === s.dl.key);
@@ -387,7 +478,7 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     push(I + `${lbl(s.dl.key)} is not downloaded${row?.fileBytes ? ` (${gbText(row.fileBytes)})` : ""}.`);
     push(I + "Download it now?");
     blank();
-    push(I + S.keys([["y", "download", "primary"], ["n", "stream from Hugging Face instead"], ["q", "quit"]]));
+    push(I + S.keys([["y", "download", "primary"], ["n", "stream from Hugging Face instead"], ["q", "quit"]], { width: W - 2 }));
     return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
 
@@ -396,22 +487,42 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     push(I + "Which model?");
     const rec = recommendModel(s.rows);
     const nameW = Math.max(...s.rows.map((r) => width(lbl(r.key)))) + 2;
-    const groups = [["Fits on this computer", s.rows.filter((r) => r.fitsAlone)], ["Needs another device", s.rows.filter((r) => !r.fitsAlone)]];
-    for (const [head, rows] of groups) {
-      if (!rows.length) continue;
-      blank();
-      push(I + S.ink3(head));
-      for (const r of rows) {
-        const i = s.rows.indexOf(r), on = i === s.sel, x = pickerRow(r, { rec });
-        const name = on ? `${S.acc(S.g.sel)} ${S.bold(pad(lbl(r.key), nameW))}` : `  ${pad(lbl(r.key), nameW)}`;
-        push(I + name + S.ink3("needs ") + padStart(x.need, 5) + "   " + (r.pulled ? S.ink2(x.have) : S.ink3(x.have)));
-      }
-    }
+    // "(4 GB at 8K)" after a need with a fallback context, the column kept for the others
+    const minW = Math.max(0, ...s.rows.map((r) => { const m = pickerRow(r).min; return m ? width(m) + 3 : 0; }));
+    // one list, smallest first; how to run it (pooled or here) is the next question
+    blank();
+    s.rows.forEach((r, i) => {
+      const on = i === s.sel, x = pickerRow(r, { rec });
+      const name = on ? `${S.acc(S.g.sel)} ${S.bold(pad(lbl(r.key), nameW))}` : `  ${pad(lbl(r.key), nameW)}`;
+      push(I + name + S.ink3("needs ") + padStart(x.need, 5) + S.ink3(pad(x.min ? ` (${x.min})` : "", minW)) + "   " + (r.pulled ? S.ink2(x.have) : S.ink3(x.have)));
+    });
     blank();
     const k = [[S.g.up, "choose"], ["enter", "host it", "primary"]];
     if (s.model) k.push(["esc", "back"]);
     k.push(["q", "quit"]);
-    push(I + S.keys(k));
+    push(I + S.keys(k, { width: W - 2 }));
+    if (s.notice) push(I + S.ink3(s.notice));
+    return L.map((l) => clip(l.replace(/ +$/, ""), W));
+  }
+
+  if (s.step === "how") {
+    const row = s.rows.find((r) => r.key === s.model);
+    push(label(S, "model") + lbl(s.model) + S.ink3(row ? ` · ${pickerRow(row).have}` : ""));
+    blank();
+    push(I + `How do you want to run ${lbl(s.model)}?`);
+    blank();
+    const choices = [
+      ["Pool with devices", "other devices join and each holds a part", true],
+      ["Run it here", row?.hereGB ? `all of it here, lending ${row.hereGB} GB; others can chat` : hereWhy(row, s.pledge), !!row?.hereGB],
+    ];
+    const nameW = Math.max(...choices.map((c) => width(c[0]))) + 2;
+    choices.forEach(([name, what, ok], i) => {
+      const on = i === s.how;
+      const n = on ? `${S.acc(S.g.sel)} ${ok ? S.bold(pad(name, nameW)) : S.ink3(pad(name, nameW))}` : `  ${ok ? pad(name, nameW) : S.ink3(pad(name, nameW))}`;
+      push(I + n + S.ink3(what));
+    });
+    blank();
+    push(I + S.keys([[S.g.up, "choose"], ["enter", "go", "primary"], ["esc", "back"], ["q", "quit"]], { width: W - 2 }));
     if (s.notice) push(I + S.ink3(s.notice));
     return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
@@ -428,12 +539,15 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     const sentence = [];
     if (s.pledge.totalGB) sentence.push(`Leaves ${Math.max(0, Math.round(s.pledge.totalGB - s.pledge.gb))} GB for this computer.`);
     if (row?.needGB != null) {
-      const need = Math.max(1, Math.round(row.needGB));
-      sentence.push(need > s.pledge.gb ? `The model needs ${need} GB, so other devices have to lend at least ${need - s.pledge.gb} GB more.` : `The model needs ${need} GB: this computer can hold it alone.`);
+      const need = Math.max(1, Math.round(row.needGB)), mn = row.minNeed?.needGB ? Math.max(1, Math.round(row.minNeed.needGB)) : null;
+      const k = row.minNeed ? kOf(row.minNeed.ctx) : "";
+      sentence.push(need <= s.pledge.gb ? `The model needs ${need} GB: this computer can hold it alone.`
+        : mn && mn <= s.pledge.gb ? `The model needs ${need} GB, or ${mn} GB with a ${k} context: this computer can hold it alone at ${k}.`
+        : `The model needs ${need} GB${mn ? ` (${mn} GB at ${k})` : ""}, so other devices have to lend at least ${(mn || need) - s.pledge.gb} GB more.`);
     }
     for (const l of wrap(sentence.join(" "), W - 2)) push(I + S.ink3(l));
     blank();
-    push(I + S.keys([[S.g.lr, "1 GB"], ["type", "a number"], ["enter", "lend", "primary"], ...(s.pledgeDone ? [["esc", "back"]] : [])]));
+    push(I + S.keys([[S.g.lr, "1 GB"], ["type", "a number"], ["enter", "lend", "primary"], ...(s.pledgeDone ? [["esc", "back"]] : [])], { width: W - 2 }));
     if (s.notice) push(I + S.ink3(s.notice));
     return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
@@ -458,20 +572,25 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     else if (d.key === s.model && d.state === "stream") push(label(S, "download") + S.ink3("not downloaded: streams from Hugging Face on each start"));
     else if (d.key === s.model && d.state === "error") push(label(S, "download") + S.err(`download failed: ${d.error}`));
     if (s.fit) {
+      // a model with a fallback context: both needs, the bar against the one the room would open
       const have = Math.round(s.fit.haveGB), need = Math.max(1, Math.round(s.fit.needGB || 0));
-      push(label(S, "memory") + S.bar(Math.min(1, have / need), W < 69 ? 12 : 20) + "  " + `${have} GB lent` + S.ink3(` · ${need} GB needed`));
+      const fb = s.fit.minGB ? modelFallback(lib, s.model, s.ctxAsk || 0) : null, mn = fb ? Math.max(1, Math.round(s.fit.minGB)) : null;
+      const barTo = mn && (s.fit.fellBack || !s.fit.fits) ? mn : need;
+      push(label(S, "memory") + S.bar(Math.min(1, have / barTo), W < 69 ? 12 : 20) + "  " + `${have} GB lent` + S.ink3(` · ${need} GB needed${mn ? ` (${mn} GB at ${kOf(fb.ctx)})` : ""}`));
     }
     const gpuN = s.devices.filter((x) => x.gb > 0).length;
     if (gpuN > 1) push(label(S, "split") + (s.splitMode === "memory" ? "across all devices" : "fastest first") + S.ink3(" · s changes it"));
     if (s.code && (!s.fit?.fits || gpuN <= 1)) push(label(S, "invite") + S.bold(`pooled join ${fmtCode(s.code)}`) + S.ink3(" on the other computer"));
     const notes = [];
     if (s.fit && !s.fit.fits) notes.push(`Needs ${Math.max(1, Math.round(s.fit.shortGB))} GB more: one more device, or press l to lend more.`);
+    if (s.fit?.fits && s.fit.fellBack) notes.push(`${s.fit.ctxNote}. Lend ${Math.max(1, Math.round(s.fit.needGB - s.fit.haveGB))} GB more (l) or add a device for ${kOf(s.fit.want)}.`);
     const self = s.devices.find((x) => x.self);
     notes.push(...splitLines(splitAdvice(s, lib), { model: lbl(s.model), selfName: self?.name, gb: s.pledge.gb }));
     if (s.splitMode === "memory" && gpuN > 1 && s.fit?.fits && onePledgeHolds(s, lib)) notes.push("Spreading over the network is slower per token; it uses less memory on each device.");
     if (notes.length) { blank(); for (const n of notes) for (const l of wrap(n, W - 2)) push(I + S.ink3(l)); }
   }
   if (online) {
+    if (s.ctxNote) push(label(S, "context") + S.ink2(s.ctxNote));
     push(label(S, "chat") + "press c, or " + S.bold(`pooled chat ${fmtCode(s.code)}`) + S.ink3(" on any computer"));
     push(label(S, "api") + S.bold(`pooled serve ${fmtCode(s.code)}`));
     const gpu = s.devices.filter((d) => d.gb > 0 && d.range);
@@ -488,9 +607,9 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
   if (s.step === "room") {
     const ok = canStart(s).ok;
     push(I + S.keys(W < 69 ? [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["q", "quit"]]
-      : [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["m", "model"], ["l", "lend"], ...(s.devices.filter((x) => x.gb > 0).length > 1 ? [["s", "split"]] : []), ["q", "quit"]]));
-  } else if (s.step === "starting") push(I + S.keys([["q", "cancel and close the room"]]));
-  else push(I + S.keys([["c", "chat here", "primary"], ["i", "copy invite"], ["r", "rebalance"], ["q", "close room"]]));
+      : [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["m", "model"], ["l", "lend"], ...(s.devices.filter((x) => x.gb > 0).length > 1 ? [["s", "split"]] : []), ["q", "quit"]], { width: W - 2 }));
+  } else if (s.step === "starting") push(I + S.keys([["q", "cancel and close the room"]], { width: W - 2 }));
+  else push(I + S.keys([["c", "chat here", "primary"], ["i", "copy invite"], ["r", "rebalance"], ["q", "close room"]], { width: W - 2 }));
   return L.map((l) => clip(l.replace(/ +$/, ""), W));
 }
 const loadNote = (ld) => (ld.from && ld.from !== "disk" && ld.fetched < ld.total ? `${gbText(ld.fetched)} of ${gbText(ld.total)} from ${ld.from}` : ld.fetched < ld.total ? "from disk" : "onto the GPU");

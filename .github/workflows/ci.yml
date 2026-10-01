@@ -50,9 +50,9 @@ jobs:
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: tests/run.sh selftest
   browser:
-    # Code mode's preview in headless Chromium, no GPU needed.
+    # Code mode's preview and a room's screens (tests/e2e/room_state.mjs) in headless Chromium, no GPU needed.
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020   # v4.4.0
@@ -69,3 +69,5 @@ jobs:
           if [ "${{ steps.pw-cache.outputs.cache-hit }}" = "true" ]; then npx playwright install-deps chromium; else npx playwright install --with-deps chromium; fi
       - name: Preview in the browser
         run: node tests/e2e/preview_browser.mjs
+      - name: A room's screens on join, reload and a replacement link (synthetic model, SwiftShader)
+        run: node tests/e2e/room_state.mjs

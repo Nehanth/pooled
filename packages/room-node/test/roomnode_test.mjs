@@ -394,3 +394,61 @@ test("dealPlan speed counts the KV cache like the room page: 1.7B, 2 GB + 2 GB s
   assert.deepEqual(p.chain, ["b"]);
   assert.ok(p.assigned[0] > 0 && p.assigned[0] < 28, `host holds ${p.assigned[0]}`);
 });
+
+test("ctxPick: the 1.7B at 16k when the pledges hold it, 8k when they are short for 16k, an asked --ctx stays", async () => {
+  const { nodeCtxFor } = await import("../roomnode.js");
+  const want = nodeCtxFor("qwen3-1.7b");
+  assert.equal(want, 16384);
+  const self = (gb) => ({ name: "laptop", meta: { contribGB: gb } });
+  const p4 = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4) });
+  assert.deepEqual([p4.ctx, p4.fits, p4.fellBack], [8192, true, true], "one laptop lending 4 GB: 8k");
+  assert.equal(p4.note, "Qwen3 1.7B · 8K context: the room's memory is short for 16K");
+  const p6 = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(6) });
+  assert.deepEqual([p6.ctx, p6.fits, p6.fellBack, p6.note], [16384, true, false, ""]);
+  // two devices together hold 16k
+  const two = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4), peers: [{ id: "b", name: "mac", meta: { contribGB: 3 } }] });
+  assert.equal(two.ctx, 16384);
+  // a share the host lowered (shareCap) counts as the device's pledge
+  const capped = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4), peers: [{ id: "b", name: "mac", meta: { contribGB: 3 } }], shareCap: new Map([["mac", 0.5]]) });
+  assert.equal(capped.ctx, 8192);
+  // --ctx 16384: no fallback (and short on 4 GB); short for both: 8k, not fitting
+  const asked = RoomNode.ctxPick("qwen3-1.7b", { want: nodeCtxFor("qwen3-1.7b", 16384), ask: 16384, self: self(4) });
+  assert.deepEqual([asked.ctx, asked.fits, asked.fellBack], [16384, false, false]);
+  assert.deepEqual([RoomNode.ctxPick("qwen3-1.7b", { want, self: self(3) }).ctx, RoomNode.ctxPick("qwen3-1.7b", { want, self: self(3) }).fits], [8192, false]);
+  // the MoE has no fallback: its context stays
+  assert.equal(RoomNode.ctxPick("qwen3.6-35b-moe", { want: 131072, self: self(4) }).ctx, 131072);
+});
+
+test("close() on a host tells the room it is over (bye closed, then leaving); a device told so stops waiting for it", async () => {
+  const n = fakeNode();
+  n.addPeer("a", "mac"); n.addPeer("b", "phone");
+  n.peer.destroy = () => {};
+  await n.close();
+  for (const id of ["a", "b"]) {
+    assert.deepEqual(n.sent[id].map((m) => m.t), ["bye", "leaving"]);
+    assert.equal(n.sent[id][0].closed, 1); assert.equal(n.sent[id][0].reason, "The host closed the room.");
+  }
+  // a device closing sends no bye: only its host can end the room
+  const d = fakeNode({ host: false, name: "mac" });
+  d.addPeer("pooled-room-TEST", "host"); d.peer.destroy = () => {};
+  await d.close();
+  assert.deepEqual(d.sent["pooled-room-TEST"].map((m) => m.t), ["leaving"]);
+
+  // the device's side: "closed" (not "bye", which reads as being turned away), and when the host's
+  // link then drops it neither knocks nor reports the host gone
+  const w = fakeNode({ host: false, name: "mac" });
+  w.addPeer("pooled-room-TEST", "host"); w.ai.hostId = "pooled-room-TEST"; w.admission = "in";
+  const seen = [];
+  for (const ev of ["closed", "bye", "hostgone", "roomover"]) w.on(ev, (x) => seen.push([ev, x]));
+  w.onData("pooled-room-TEST", { t: "bye", reason: "The host closed the room.", closed: 1 });
+  assert.deepEqual(seen, [["closed", "The host closed the room."]]);
+  w.hostGone();
+  assert.equal(w.knock, null, "no knocking on a closed room");
+  assert.deepEqual(seen.map((x) => x[0]), ["closed"]);
+  // a bye without closed from the host is still a bye (turned away)
+  const k = fakeNode({ host: false, name: "mac" });
+  k.addPeer("pooled-room-TEST", "host");
+  let bye = null; k.on("bye", (r) => { bye = r; });
+  k.onData("pooled-room-TEST", { t: "bye", reason: "no" });
+  assert.equal(bye, "no"); assert.ok(!k.roomClosed);
+});

@@ -6,11 +6,15 @@ sidebar:
   label: Use it from coding tools
   order: 4
 ---
+import Shot from '../../../components/Shot.astro';
+import banner from '../../../assets/kits/coding-tools-banner.webp';
+import curl from '../../../assets/kits/coding-tools-curl.webp';
+import opencode from '../../../assets/kits/coding-tools-opencode.webp';
 import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
 {/*
 Sources (for the fact-checker):
-- cli/README.md (top banner, "Getting in", Options, Tools: Codex CLI, Claude Code, opencode), @pooled/cli 0.3.0 on npm (npm view @pooled/cli version)
+- cli/README.md (top banner, "Getting in", Options, Tools: Codex CLI, Claude Code, opencode), @pooled/cli 0.3.2 on npm (npm view @pooled/cli version)
 - cli/lib/banner.js + cli/lib/http.js agentSettings(): Codex compact = floor(ctx * 0.8); Claude Code output = max(1024, min(32000, floor(ctx / 4))); opencode output = min(8192, that); opencode model id "pooled/" + the /v1/models id
 - serve/index.mdx, serve/recipes (the same recipes), troubleshooting.mdx "Serve API"
 - room/models.js CTX: MoE 32768 (up to 65536 on a browser host), 27B 16384 (up to 32768), 1.7B 8192 (up to 16384)
@@ -19,12 +23,13 @@ Sources (for the fact-checker):
   /v1/messages, the openai and anthropic Python SDKs (Paris / Rome), opencode 1.18.33 with the banner's opencode.json (wrote hello.txt, 63 s),
   Codex CLI 0.104.0 with the config below (answered, 45 s, 6.8k tokens), Claude Code with the banner's line: "Prompt is too long" on the
   16K room, as expected (the 1.7B caps at 16K; not verified answering: needs the MoE or 27B). The 64K numbers below follow agentSettings().
-  The banner's Claude Code line has no ANTHROPIC_API_KEY; the README recipe (and this page) add ANTHROPIC_API_KEY=pooled.
+  Screenshots re-captured 2026-09-30 with @pooled/cli 0.3.2 from npm: pooled serve on a pooled host room's invite link (Qwen3 1.7B, 16384 tokens),
+  one curl call, opencode answering (1m 7s). In 0.3.2 the banner's Claude Code line includes ANTHROPIC_API_KEY=pooled.
 */}
 
 **Goal:** your coding agent runs on the room's model instead of a cloud API.
 
-`pooled serve` is a small program from the `@pooled/cli` package (version 0.3.0). It joins the room as a client and serves the room's model on `127.0.0.1`, as an OpenAI and an Anthropic API. It needs no GPU: the model still runs on the room's devices.
+`pooled serve` is a small program from the `@pooled/cli` package (version 0.3.2). It joins the room as a client and serves the room's model on `127.0.0.1`, as an OpenAI and an Anthropic API. It needs no GPU: the model still runs on the room's devices.
 
 ## You need
 
@@ -55,7 +60,7 @@ Everything the tool sends, file contents included, goes to the room's host and t
    npx @pooled/cli serve "https://pooled.run/r/4TKG9P#k=…"
    ```
 
-   Keep the quotes: the `#` starts a comment in most shells. This guide was checked with `@pooled/cli` 0.3.0. To use exactly that version, write `npx @pooled/cli@0.3.0 serve …`.
+   Keep the quotes: the `#` starts a comment in most shells. This guide was checked with `@pooled/cli` 0.3.2. To use exactly that version, write `npx @pooled/cli@0.3.2 serve …`.
 
 3. **Run it** on the computer where your tool runs, and leave it running.
 
@@ -70,9 +75,11 @@ Everything the tool sends, file contents included, goes to the room's host and t
 
    For this room's 65536-token context:
      Codex        model_context_window = 65536, model_auto_compact_token_limit = 52428  (~/.codex/config.toml)
-     Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:8080 CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536 …
+     Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=pooled CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536 …
      opencode     OPENCODE_DISABLE_CLAUDE_CODE=1 opencode, with this opencode.json: …
    ```
+
+   <Shot src={banner} alt="The pooled serve banner for a 16384-token room, with settings for Codex, Claude Code and opencode" caption="The same banner on a test room with Qwen3 1.7B at 16K." />
 
 4. **Check it answers.** In another terminal:
 
@@ -82,6 +89,8 @@ Everything the tool sends, file contents included, goes to the room's host and t
    ```
 
    You get a JSON answer from the room's model, with `"model":"pooled/qwen3.6-35b-moe"`. The room's chat shows it too, marked "via API".
+
+   <Shot src={curl} alt="The curl command and its JSON answer: Hello! How can I assist you today?" />
 
 5. **Set up your tool.** Use the numbers the bridge printed. The ones below are for a 64K room.
 
@@ -149,6 +158,8 @@ Everything the tool sends, file contents included, goes to the room's host and t
    </Tabs>
 
 6. **Give it a small first task**, like `Read README.md and tell me what this project does.` The first answer is the slow one. After that, the room reuses what it already read and each step reads only the new part.
+
+   <Shot src={opencode} alt="opencode reads README.md and says the project is a tip calculator web page" caption="opencode answering through a room. This test used the 1.7B on a one-file project." />
 
 </Steps>
 

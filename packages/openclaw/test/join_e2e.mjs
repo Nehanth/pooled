@@ -1,5 +1,6 @@
 // "Join a room" end to end: a browser tab creates the room (the room page from the Pooled checkout,
-// local signaling) and is the model host; the plugin's room joins it with this process's GPU and holds
+// local signaling) and is the model host; the plugin's room joins it with the code alone (the tab's
+// Allow lets it in) with this process's GPU and holds
 // layers; then the plugin's StreamFn (what OpenClaw calls) asks through the room's host over WebRTC,
 // once plain and once with a tool (v2 ask to a browser host). No OpenClaw gateway here: the StreamFn
 // is driven directly, as OpenClaw's agent loop would.
@@ -69,8 +70,8 @@ try {
   await page.waitForTimeout(1500);
   await page.fill("#name-input", "mac-tab"); await page.fill("#join-gb", "6");
   await page.click("#create-btn");
-  await page.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
-  const code = (await page.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+  await page.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}|[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
+  const code = (await page.textContent("#side-code")).trim().replace(/-/g, "").match(/[A-Z0-9]{6}|[A-Z0-9]{4}/)[0];
   out.code = code; log("tab room", code);
   // the plugin, as onboarding "Join a room" left it
   const cfg = { mode: "join", code, model: "qwen3-1.7b", pledgeGB: 3, signal: `127.0.0.1:${SIG}`, modelDir: MODELS, name: "spark-openclaw", waitSeconds: 5 };
@@ -82,9 +83,16 @@ try {
     const m = await st.result();
     return { stop: m.stopReason, err: m.errorMessage, text: m.content.filter((c) => c.type === "text").map((c) => c.text).join(""), calls: m.content.filter((c) => c.type === "toolCall").map((c) => ({ name: c.name, args: c.arguments })), usage: m.usage.input + "/" + m.usage.output };
   };
-  // before the model is up: the plugin's clear error
+  // the plugin joined with the code alone: the tab (which asks before new devices join, its default)
+  // holds it in the lobby, and an ask says so instead of hanging
+  const lobby = await run({ systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 1 }] });
+  out.inLobby = lobby; log("in the lobby:", JSON.stringify(lobby));
+  await page.click("#jr-allow", { timeout: 60000 });
+  await new Promise((r) => setTimeout(r, 1500));
+  // before the model is up: the plugin's clear error (its ask link shows the pass: no second request)
   const early = await run({ systemPrompt: "", messages: [{ role: "user", content: "hi", timestamp: 1 }] });
   out.beforeStart = early; log("before start:", JSON.stringify(early));
+  out.secondRequest = await page.evaluate(() => !!document.querySelector("#jr-allow")?.offsetParent);
   await page.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 60000 });
   await page.waitForTimeout(1500);
   await page.selectOption("#ai-model", "qwen3-1.7b");

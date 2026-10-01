@@ -218,10 +218,11 @@ test("host with a chain: saves and loads ride the next frame, drops go out two p
   assert.equal(n.ckptSave(), null, "no save may ride with DROP_ALL");
 });
 
-test("nodeCtxFor: the model's cap for the MoE (128k) and the 27B (64k), the room default for the dense 1.7B; an ask wins", () => {
+test("nodeCtxFor: each model's largest room context (128k MoE, 64k 27B, 16k 1.7B, as the OpenClaw plugin); an ask wins", () => {
   assert.equal(nodeCtxFor("qwen3.6-35b-moe"), 131072);
   assert.equal(nodeCtxFor("qwen3.8-27b"), 65536);
-  assert.equal(nodeCtxFor("qwen3-1.7b"), 8192);
+  assert.equal(nodeCtxFor("qwen3-1.7b"), 16384, "OpenClaw's ~12k prompt fits");
+  assert.equal(nodeCtxFor("qwen3-1.7b", 8192), 8192);
   assert.equal(nodeCtxFor("qwen3.6-35b-moe", 16384), 16384);
   assert.equal(nodeCtxFor("qwen3-1.7b", 16384), 16384);
 });

@@ -22,7 +22,7 @@ const PC = CFG.plugins.entries.pooled.config;
 const SIG = +PC.signal.split(":")[1], PORT = SIG - 2;
 const TAB_GB = +(process.env.TAB_GB || 4);
 const TURNS = (process.env.TURNS || "chat,tool").split(",");
-const STATE = path.join(process.env.OPENCLAW_STATE_DIR, "pooled-room.json");
+const STATE = path.join(process.env.OPENCLAW_STATE_DIR, "pooled", "status.json");
 const T0 = Date.now();
 const log = (...a) => console.error(((Date.now() - T0) / 1000).toFixed(1) + "s", ...a);
 const out = { code: PC.code, model: PC.model, turns: [] };
@@ -110,7 +110,7 @@ try {
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   await page.waitForTimeout(1500);
   await page.fill("#name-input", "phone-tab"); await page.fill("#join-gb", String(TAB_GB));
-  await page.fill("#code-input", st0.code); await page.click("#join-btn");
+  await page.fill("#code-input", st0.link); await page.click("#join-btn");   // the invite link: in without asking
   const tJoin = Date.now();
   // the plugin's service sees 2 devices with enough memory, deals the layers, loads its own share
   const st1 = await until(() => { const s = readState(); return s?.online ? s : null; }, 600000, "the room going online");

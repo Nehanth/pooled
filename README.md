@@ -45,7 +45,7 @@ Models in the room today:
 |---|---|---|
 | Qwen 3.8 27B | Q4_0, needs ~17 GB across the room | hybrid Gated DeltaNet + attention, built-in draft layer for speculative decoding, 16K context (up to 64K) |
 | Qwen 3.6 35B MoE | Q4_0, needs ~22.5 GB across the room | 256 experts, 8 active per token, so it decodes several times faster than the 27B; 32K context (up to 128K) |
-| Qwen3 1.7B | Q8_0, needs ~4 GB across the room | small and quick, for rooms of phones and light laptops; 8K context |
+| Qwen3 1.7B | Q8_0, needs ~5.6 GB across the room for 16K context, ~4 GB for 8K | small and quick, for rooms of phones and light laptops; 16K context, 8K when the room is short of memory |
 
 Every device downloads only its own layers, from Hugging Face or from another device in the room that already has them, and keeps them cached for next time. If a device leaves, the room says so and the host deals its layers out again with one click. Speculative decoding, batched prefill and every kernel trick are checked by golden tests, so the speculative stream is the same as plain decoding.
 

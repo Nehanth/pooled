@@ -1,34 +1,98 @@
 {
   "name": "@pooled/openclaw",
-  "version": "0.1.0",
-  "private": true,
-  "description": "OpenClaw provider plugin: pick Pooled and this machine becomes a device in a Pooled room, running part of the model on its own GPU.",
-  "homepage": "https://pooled.run",
+  "version": "0.2.1",
+  "description": "Peer-to-peer inference engine for your claw: run one model across your own devices, each holding part of it on its GPU.",
+  "keywords": [
+    "openclaw",
+    "peer-to-peer",
+    "p2p",
+    "openclaw-plugin",
+    "pooled",
+    "webgpu",
+    "webrtc",
+    "llm",
+    "local-llm",
+    "self-hosted"
+  ],
+  "homepage": "https://pooled.run/docs/kits/openclaw",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Nehanth/pooled.git",
     "directory": "packages/openclaw"
   },
+  "bugs": {
+    "url": "https://github.com/Nehanth/pooled/issues"
+  },
   "license": "MIT",
   "author": "Nehanth Narendrula",
   "type": "module",
-  "main": "./index.js",
+  "main": "./dist/index.js",
+  "files": [
+    "dist/",
+    "skills/",
+    "assets/",
+    "openclaw.plugin.json",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "test": "node --test test/*_test.mjs"
+    "build": "esbuild index.js --bundle --platform=node --format=esm --target=node22 --external:openclaw --external:webgpu --external:@pooled/dawn-* --external:node-datachannel --external:peerjs --log-level=warning --outfile=dist/index.js",
+    "prepack": "npm run build",
+    "test": "node --test test/*_test.mjs",
+    "test:install": "sh test/pack_install.sh"
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "node-datachannel": "0.33.4",
+    "peerjs": "1.5.4"
+  },
+  "optionalDependencies": {
+    "webgpu": "0.6.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
   },
   "peerDependencies": {
     "openclaw": ">=2026.9.6"
   },
   "peerDependenciesMeta": {
-    "openclaw": { "optional": true }
+    "openclaw": {
+      "optional": true
+    }
   },
   "openclaw": {
-    "extensions": ["./index.js"],
-    "providers": ["pooled"],
-    "compat": { "pluginApi": ">=2026.9.6", "minGatewayVersion": "2026.9.6" },
-    "build": { "openclawVersion": "2026.9.6", "pluginSdkVersion": "2026.9.6" }
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "providers": [
+      "pooled"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.9.6",
+      "minGatewayVersion": "2026.9.6"
+    },
+    "build": {
+      "openclawVersion": "2026.9.6",
+      "pluginSdkVersion": "2026.9.6"
+    },
+    "install": {
+      "clawhubSpec": "clawhub:@pooled/openclaw",
+      "npmSpec": "@pooled/openclaw",
+      "defaultChoice": "clawhub",
+      "minHostVersion": ">=2026.9.6",
+      "requiredPlatformPackages": [
+        "@node-datachannel/android-arm64",
+        "@node-datachannel/darwin-arm64",
+        "@node-datachannel/darwin-x64",
+        "@node-datachannel/linux-arm64-gnu",
+        "@node-datachannel/linux-arm64-musl",
+        "@node-datachannel/linux-x64-gnu",
+        "@node-datachannel/linux-x64-musl",
+        "@node-datachannel/win32-arm64-msvc",
+        "@node-datachannel/win32-x64-msvc"
+      ]
+    }
   }
 }

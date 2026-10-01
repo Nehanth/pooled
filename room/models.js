@@ -1,6 +1,9 @@
 // Model catalogue for the room: URLs, layer counts, memory needs, context length.
 
-export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 4.0, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "smollm-135m": 0.6 };
+// GB each model needs at its default context (the picker's "needs N GB"); NEED_MIN_GB: what a model
+// with a fallback context (CTX[model].fallback) needs there, the least a room can start it with
+export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "smollm-135m": 0.6 };
+export const NEED_MIN_GB = { "qwen3-1.7b": 4.0 };
 
 // What the model host holds besides its layers, in bytes, from the file's own tensor sizes: the
 // embedding stays in JS memory for row lookups, the output head goes to the GPU (the embedding again
@@ -81,7 +84,9 @@ export const MAX_SEQ = 2048;
 // the whole model, spread over the devices that hold the layers. The host reads the engine's
 // maxSeq, so prompts, answer budgets and "context full" all follow it.
 export const MAX_SEQ_LONG = 8192;
-// Context per model, in tokens: the default a room opens with and the most ?ctx=N may ask for.
+// Context per model, in tokens: the default a room opens with and the most ?ctx=N may ask for, and
+// for some a fallback: the context a room opens with instead when its pledges can't hold the model
+// at the default but can at the fallback (pickCtx), so a room short of memory still starts.
 // These hybrids keep a KV cache only on their full-attention layers (1 in 4), and the DeltaNet
 // layers hold a fixed-size state, so context is cheap in memory: f16 K+V is 64 KB per position
 // for the 27B (16 attention layers, 4 KV heads x 256) and 20 KB for the 35B MoE (10 layers,
@@ -95,9 +100,11 @@ export const MAX_SEQ_LONG = 8192;
 export const CTX = {
   "qwen3.8-27b": { def: 16384, max: 65536 },
   "qwen3.6-35b-moe": { def: 32768, max: 131072 },
-  // the dense engine keeps an f32 KV cache (~224 KB per position on the 1.7B, 1.8 GB at 8k); 2k was
-  // too small for Code mode, whose prompt alone is ~620 tokens (checked exact at 8k: tests pass)
-  "qwen3-1.7b": { def: 8192, max: 16384 },
+  // the dense engine keeps an f32 KV cache (~224 KB per position on the 1.7B: 1.8 GB at 8k, 3.6 GB
+  // at 16k: 5.6 GB for the room in all). 16k fits an agent's prompt (OpenClaw's alone is ~12k), so
+  // the room page, `pooled host` and the OpenClaw plugin all open it at 16k; a room short of that
+  // (one 8 GB laptop lends 4 GB) opens it at 8k (4 GB), so one laptop still runs it alone.
+  "qwen3-1.7b": { def: 16384, max: 16384, fallback: 8192 },
 };
 // WebGPU's default maxStorageBufferBindingSize: what a device binds when it reports nothing
 export const WEBGPU_MIN_BIND = 128 * 2 ** 20;
@@ -116,6 +123,32 @@ export const maxSeqFor = (model, ask = 0) => {
   if (!c) return MODELS[model]?.kind === "qwen35" ? MAX_SEQ_LONG : MAX_SEQ;
   return ask > 0 ? Math.min(c.max, Math.max(2048, Math.round(ask / 256) * 256)) : c.def;
 };
+// The contexts a room tries for `model`, best first: `want` (the context it would open with), then the
+// model's fallback when it has one below `want`. An explicit ask (?ctx=, --ctx) is tried alone.
+export const ctxChoices = (model, want = maxSeqFor(model), ask = 0) => {
+  const fb = CTX[model]?.fallback;
+  return ask > 0 || !(fb > 0) || fb >= want ? [want] : [want, fb];
+};
+// The context a room opens with: the first of ctxChoices whose deal fits (fitsAt(ctx) -> bool), else
+// the smallest of them (what a short room is short for: the least it could start with).
+// -> { ctx, want, fits, fellBack } (fellBack: it fits, but only at a shorter context than `want`)
+export function pickCtx(model, { want = maxSeqFor(model), ask = 0, fitsAt }) {
+  const cs = ctxChoices(model, want, ask);
+  const i = cs.findIndex((c) => !!fitsAt(c));
+  const ctx = cs[i < 0 ? cs.length - 1 : i];
+  return { ctx, want, fits: i >= 0, fellBack: i > 0 };
+}
+// "16K", "8K": a context in words
+export const ctxK = (n) => `${Math.round(n / 1024)}K`;
+// What the room says where it shows the model when it fell back: "Qwen3 1.7B · 8K context: the
+// room's memory is short for 16K"
+export const ctxShortNote = (label, ctx, want) => `${label} · ${ctxK(ctx)} context: the room's memory is short for ${ctxK(want)}`;
+// "needs 5.6 GB (4 GB at 8K)": a model's need at its default, and at its fallback when it has one
+export const needText = (model, gb = NEED_GB[model]) => {
+  const fb = CTX[model]?.fallback, min = NEED_MIN_GB[model];
+  return fb && min != null ? `${gb} GB (${min} GB at ${ctxK(fb)})` : `${gb} GB`;
+};
+
 // KV cache format per room: "f16" (the default) or "q8" (int8 values + one f32 scale per 32, engine
 // kvQ8, ~56% of f16's memory; asked for with ?kv=q8). Only the qwen35 engine has the int8 kernels, so
 // any other model, or any other ask, stays f16. The host decides and sends it with ai-load, so every

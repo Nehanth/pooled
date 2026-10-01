@@ -42,11 +42,13 @@ export function opencodeConfig(ctx, port, model = "pooled", label = model) {
   return { provider: { pooled: { npm: "@ai-sdk/openai-compatible", name: "Pooled room", options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "x" },
     models: { [model]: { name: label, tool_call: true, limit: { context: ctx, output: opencodeOutput(ctx) } } } } }, model: `pooled/${model}` };
 }
-export function agentSettings(ctx, port, { model, label } = {}) {
+// token: this pooled serve requires one (Claude Code sends ANTHROPIC_API_KEY as x-api-key); without
+// one any key works, but Claude Code needs some key or it asks to log in
+export function agentSettings(ctx, port, { model, label, token = false } = {}) {
   if (!ctx) return [];
   return [`For this room's ${ctx}-token context:`,
     `  Codex        model_context_window = ${ctx}, model_auto_compact_token_limit = ${Math.floor(ctx * 0.8)}  (~/.codex/config.toml)`,
-    `  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:${port} CLAUDE_CODE_MAX_CONTEXT_TOKENS=${ctx} CLAUDE_CODE_MAX_OUTPUT_TOKENS=${claudeOutput(ctx)} CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled`,
+    `  Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:${port} ANTHROPIC_API_KEY=${token ? '"$POOLED_TOKEN"' : "pooled"} CLAUDE_CODE_MAX_CONTEXT_TOKENS=${ctx} CLAUDE_CODE_MAX_OUTPUT_TOKENS=${claudeOutput(ctx)} CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled`,
     `  opencode     OPENCODE_DISABLE_CLAUDE_CODE=1 opencode, with this opencode.json:`,
     `    ${JSON.stringify(opencodeConfig(ctx, port, model || "pooled", label || model || "pooled"))}`, ""];
 }
@@ -252,7 +254,7 @@ export function createServer({ bridge, port, token = null, maxQueue = 8, log = (
     return [`pooled serve ${version} · room ${bridge.code} · ${bridge.ready ? modelLabel() : "model not ready yet"}${ctx ? ` · ${ctx} tokens of context` : ""}`, "",
       `OpenAI     http://127.0.0.1:${bound}/v1        POST /v1/chat/completions, POST /v1/responses, GET /v1/models`,
       `Anthropic  http://127.0.0.1:${bound}           POST /v1/messages`,
-      `Health     http://127.0.0.1:${bound}/health`, "", ...(bridge.ready ? agentSettings(ctx, bound, { model: modelId(), label: bridge.modelLabel || bridge.model }) : [])].join("\n");
+      `Health     http://127.0.0.1:${bound}/health`, "", ...(bridge.ready ? agentSettings(ctx, bound, { model: modelId(), label: bridge.modelLabel || bridge.model, token: !!token }) : [])].join("\n");
   }
 
   // which adapter's error shape a path gets
