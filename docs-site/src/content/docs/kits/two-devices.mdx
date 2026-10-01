@@ -6,6 +6,14 @@ sidebar:
   label: Pool two devices
   order: 2
 ---
+import Shot from '../../../components/Shot.astro';
+import invite from '../../../assets/kits/invite.png';
+import allow from '../../../assets/kits/allow.png';
+import desktop from '../../../assets/kits/two-devices-desktop.webp';
+import phoneWaiting from '../../../assets/kits/two-devices-phone-waiting.webp';
+import pool from '../../../assets/kits/two-devices-pool.webp';
+import loading from '../../../assets/kits/two-devices-loading.webp';
+import answer from '../../../assets/kits/two-devices-answer.webp';
 import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
 {/*
@@ -57,7 +65,7 @@ So a 16 GB laptop giving 8 GB and a desktop giving 16 GB can run the 27B or the 
 
    The **Invite a device** sheet shows a QR code, the room code and a **Copy link** button.
 
-   ![The Invite a device sheet: a QR code, the room code and Copy link](../../../assets/kits/invite.png)
+   <Shot src={invite} alt="The Invite a device sheet: a QR code, the room code and Copy link" />
 
 3. **Bring in the second device.**
 
@@ -72,21 +80,31 @@ So a 16 GB laptop giving 8 GB and a desktop giving 16 GB can run the 27B or the 
 
    The invite link and the QR code carry a key, so the device gets in without asking.
 
+   <Shot src={desktop} alt="The desktop after opening the invite link: in the room, with This device gives 4 GB and the room pooling 6 GB" caption="The desktop, straight in from the invite link, with a random name (weasel)." />
+
 4. **If a device typed the code instead, let it in.**
 
    A device that typed the code on [pooled.run/room](https://pooled.run/room) waits with `Waiting for the host to let you in`. On the laptop, a card names it, its kind and what it gives, like `phone wants to join (computer, 1 GB)`. Press **Allow**, or **Deny** if you don't know it.
 
-   ![The laptop's card for a device that typed the code, with Allow and Deny](../../../assets/kits/allow.png)
+   <Shot src={phoneWaiting} phone alt="A phone that typed the code, waiting: Waiting for the host to let you in" caption="The phone, while it waits." />
+
+   <Shot src={allow} alt="The laptop's card for a device that typed the code, with Allow and Deny" caption="The laptop, with Allow and Deny." />
 
 5. **Check the room's total.**
 
    The header now lists both devices, and **The room pools** shows their pledges added up. The picker preselects the biggest model that fits, and the line above **Start the model** says how much this device will download, like `Start downloads about 620 MB to this device (its share of 1.8 GB)`.
 
+   <Shot src={pool} alt="The laptop's room: three devices in the header, 5 GB pooled, and the picker with Qwen3 1.7B selected and marked fits" caption="Three devices in the header, their pledges added up on the right." />
+
 6. **Press Start the model.**
 
    Each device downloads and loads only its layers. The load card shows a row per device.
 
+   <Shot src={loading} alt="The load card with a row per device: laptop downloading layers 13 to 28, weasel layers 1 to 12, the phone not needed" caption="Two devices hold layers. The phone isn't needed to hold this model." />
+
 7. **Ask something**, from either device.
+
+   <Shot src={answer} alt="Qwen3 1.7B Ready with a bar per device, weasel layers 1 to 12 and laptop layers 13 to 28, and an answer ending 57 tok, 19.7 tok/s, 2 devices" />
 
 </Steps>
 

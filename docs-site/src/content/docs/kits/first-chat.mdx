@@ -6,6 +6,11 @@ sidebar:
   label: Chat on one laptop
   order: 1
 ---
+import Shot from '../../../components/Shot.astro';
+import start from '../../../assets/kits/start.png';
+import picker from '../../../assets/kits/picker.png';
+import loading from '../../../assets/kits/first-chat-loading.webp';
+import answer from '../../../assets/kits/first-chat-answer.webp';
 import { Steps } from '@astrojs/starlight/components';
 
 {/*
@@ -37,7 +42,7 @@ No account and nothing to install.
 
    The page checks that the browser can use the GPU. If it can't, it says so and how to fix it.
 
-   ![The start screen: a name for this device, how much memory it gives, and the Start a room button](../../../assets/kits/start.png)
+   <Shot src={start} alt="The start screen: a name for this device, how much memory it gives, and the Start a room button" />
 
 2. **Check the two fields at the top.**
 
@@ -51,15 +56,19 @@ No account and nothing to install.
 
    **Pick a model** lists the three models. Each one says **fits**, or how many GB the room is short, like `13 GB short`. On one laptop, pick **Qwen3 1.7B**: it needs 4 GB. On the right, **The room pools** shows what this laptop gives.
 
-   ![The model picker in a new room, with what the model needs and what the room pools](../../../assets/kits/picker.png)
+   <Shot src={picker} alt="The model picker in a new room, with what the model needs and what the room pools" />
 
 5. **Press Start the model.**
 
    A card shows the download and then the load. On a fast connection this takes under a minute (43 seconds in our test). When it's done, the room says **Model ready on 1 device** and the message box at the bottom turns on.
 
+   <Shot src={loading} alt="The Loading Qwen3 1.7B card: this laptop downloading layers 1 to 28, at 20 percent" caption="The load card while the model downloads." />
+
 6. **Ask something.**
 
    Type in **Message the room**, for example `Explain what a GPU is in two sentences.`, and press **Send**. The answer streams in word by word.
+
+   <Shot src={answer} alt="The room with Qwen3 1.7B Ready, the question, a two-sentence answer and the line 60 tok, 50.4 tok/s, 1 device" caption="Ready on one laptop, with the first answer. The bar shows the layers this laptop holds." />
 
 </Steps>
 
