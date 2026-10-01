@@ -45,7 +45,8 @@ import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, o
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { lookupDrafts } from "./room/lookup.js";
+import { lookupDrafts, chainDenseSpec, denseLookupDrafts, DENSE_SPEC_V } from "./room/lookup.js";
+import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
 import { pledgeRule, pledgeGB, afterLoadDeath } from "./room/pledge.js";
@@ -157,7 +158,10 @@ const roster = new Map();
 // contribution presets) ---
 async function probeGPU() {
   const meta = { ua: deviceKind({ ua: navigator.userAgent, touchPoints: navigator.maxTouchPoints || 0, mobile: !!navigator.userAgentData?.mobile }),
-                 webgpu: false, gpu: "no WebGPU", maxBufGB: 0 };
+                 webgpu: false, gpu: "no WebGPU", maxBufGB: 0,
+                 // dense verify frames this device's engine handles (room/lookup.js chainDenseSpec); ?dspec=0
+                 // reports none, as a device from before them would (tests)
+                 dspec: new URLSearchParams(location.search).get("dspec") === "0" ? 0 : DENSE_SPEC_V };
   if (navigator.gpu) {
     try {
       const a = await navigator.gpu.requestAdapter();
@@ -2741,7 +2745,7 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   // a previous attempt in this tab still owns its weights: release them first, or the
   // second load doubles GPU memory and every buffer after the limit comes back invalid
   if (ai.device) { try { ai.waker?.destroy(); ai.device.destroy(); } catch {} ai.device = null; ai.engine = null; }
-  ai.held = null; ai.waker = null;
+  ai.held = null; ai.waker = null; ai.draft = null;
   ai.firstGpuError = null;
   ai.peerBytes = 0; ai.netBytes = 0; cacheHits = 0;   // per load: a count left from an earlier load in this tab mislabels the status
   if (!Qwen35Engine) { aiStatus("loading the inference engine\u2026"); await loadEngine(); }
@@ -3049,6 +3053,7 @@ async function aiStart(modelArg) {
     ai.loadingShard = true;
     try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); } finally { ai.loadingShard = false; }
     if (ai.startFailed) throw new Error(ai.startFailed);   // a device failed to load its layers while this one loaded
+    if (n > 1) await aiLoadDraft(modelKey);
     if (ai.redealPending) { ai.busy = false; aiAutoRedeal(ai.redealWhy); return; }   // a device died while loading: deal again
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
     aiStatus(n === 1
@@ -3584,6 +3589,30 @@ async function aiPipeToken(id, needLogits = true, fillNext, desc = null, ahead =
 // the logits after the last one.
 const PREFILL_WINDOW = 6;
 const LOOKUP = new URLSearchParams(location.search).get("lookup") !== "0";   // ?lookup=0: draft head only, for A/B
+// ?densespec=0: dense models (no draft head) decode plainly in a room, no lookup drafts (A/B)
+const DENSE_SPEC = new URLSearchParams(location.search).get("densespec") !== "0";
+// ?draft=qwen3-0.6b (experimental, off by default): the host also loads that small model whole and it
+// drafts when prompt lookup finds nothing (room/draftmodel.js); ?draftk=N drafts per lap (default 4).
+// Same tokenizer as the Qwen3 1.7B / 4B. Exact like lookup: the verify decides every token.
+const DRAFT_MODEL = new URLSearchParams(location.search).get("draft");
+const DRAFT_K = Math.max(1, Math.min(7, parseInt(new URLSearchParams(location.search).get("draftk"), 10) || 4));
+const DRAFT_FOR = { "qwen3-0.6b": ["qwen3-1.7b", "qwen3-4b"] };
+async function aiLoadDraft(modelKey) {
+  ai.draft = null;
+  if (!DRAFT_MODEL || !DRAFT_FOR[DRAFT_MODEL]?.includes(modelKey) || !ai.engine || ai.engine.specStep) return;
+  try {
+    aiStatus(`loading the draft model (${DRAFT_MODEL})\u2026`);
+    const M = MODELS[DRAFT_MODEL];
+    const cfg = await (await fetch(M.cfg)).json();
+    const G = await fetchGGUFHeader(M.gguf, false);
+    const L = cfg.num_hidden_layers;
+    const weights = await ggufWeights(G, rangeBytesOf(M.gguf), { lo: 0, hi: L, hasEmbed: true, hasHead: true });
+    const e = await DenseEngine.create({ device: ai.device, cfg, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: ai.engine.maxSeq,
+      coopWG: ai.tune?.wg, coopRows: ai.tune?.rows });
+    ai.draft = new DraftModel(e, { argmax });
+    log("room", `draft model ${M.label} loaded on the host: it drafts ${DRAFT_K} tokens per lap when prompt lookup finds nothing`);
+  } catch (err) { ai.draft = null; log("room", `the draft model did not load (${err?.message || err}); prompt lookup only`); }
+}
 const TAIL_FRAME = new URLSearchParams(location.search).get("tail") !== "0";   // ?tail=0: old per-token tail, for A/B   // prefill rounds in flight round the chain at once
 // aborted / onStatus: the caller's stop test and status line (roomGenerate passes its own). On
 // abort no new round is issued, the rounds in flight are awaited, and it returns null with ai.fed
@@ -3978,6 +4007,34 @@ async function roomRecover(err, kind, status, aborted) {
     setBusyUI(true, true);
   }
 }
+// A speculative verify in a room: the tokens go round the chain as ONE frame (every device runs its
+// layers over all of them, batched) and their final hiddens come back to the host. {} when solo.
+function chainSpec() {
+  return ai.chain.length ? {
+    // pre: { hs, t0 } when the engine already ran the host's layers with the drafts (hostFuse)
+    runTrunk: async (tokens, pos, pre = null) => {
+      const tLap = pre?.t0 ?? performance.now();
+      wakeChain(pos);
+      const n = tokens.length, hdim = ai.engine.dims.dim, NC = ai.engine.NC || 4;
+      const hb = pre?.hs || new Float32Array(n * hdim);
+      if (!pre) for (let c = 0; c < n; c += NC) {
+        const m = Math.min(NC, n - c);
+        hb.set(await ai.engine.embedRunBatch(tokens.slice(c, c + m), pos + c, { base: c, total: n }), c * hdim);
+      }
+      if (badF32(hb)) throw new Error(`NaN after HOST layers (pos ${pos})`);
+      const hostMs = performance.now() - tLap;
+      const returned = lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, chainRtt()), "verify");
+      sendChain({ t: "ai-hidden-b", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb) });
+      const h = await returned;
+      if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos})`);
+      noteLap(performance.now() - tLap, hostMs);
+      return h;
+    },
+    // the rollback rides on the next frame (sendChain), strictly before it on every device
+    onReject: async (k) => { ai.pendingCtl = { rb: k }; },
+    preTrunk: true,
+  } : {};
+}
 // pin: the length of the prompt's fixed start (Code mode: the system prompt + tools). When the
 // caches do not hold it yet, the prefill pauses there and saves a pinned checkpoint on every
 // device, so a later prompt that changes after it (a compacted agent conversation) resumes there.
@@ -4052,30 +4109,7 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
     else if (ai.engine.mtp && ai.engine.specStep) {
       // speculative decoding: the model's own draft head proposes up to K tokens,
       // one batched trunk pass verifies them (byte-identical to plain decoding)
-      const spec = ai.chain.length ? {
-        // pre: { hs, t0 } when the engine already ran the host's layers with the drafts (hostFuse)
-        runTrunk: async (tokens, pos, pre = null) => {
-          const tLap = pre?.t0 ?? performance.now();
-          wakeChain(pos);
-          const n = tokens.length, hdim = ai.engine.dims.dim, NC = ai.engine.NC || 4;
-          const hb = pre?.hs || new Float32Array(n * hdim);
-          if (!pre) for (let c = 0; c < n; c += NC) {
-            const m = Math.min(NC, n - c);
-            hb.set(await ai.engine.embedRunBatch(tokens.slice(c, c + m), pos + c, { base: c, total: n }), c * hdim);
-          }
-          if (badF32(hb)) throw new Error(`NaN after HOST layers (pos ${pos})`);
-          const hostMs = performance.now() - tLap;
-          const returned = lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, chainRtt()), "verify");
-          sendChain({ t: "ai-hidden-b", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb) });
-          const h = await returned;
-          if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos})`);
-          noteLap(performance.now() - tLap, hostMs);
-          return h;
-        },
-        // the rollback rides on the next frame (sendChain), strictly before it on every device
-        onReject: async (k) => { ai.pendingCtl = { rb: k }; },
-        preTrunk: true,
-      } : {};
+      const spec = chainSpec();
       if (ai.chain.length && ai.lastHidden && first == null) ai.engine.setHidden(ai.lastHidden);
       ai.engine.pos = ai.pos;
       // draft depth: pick by MEASURED tokens/sec per depth (K=3 warm-up, probe
@@ -4145,6 +4179,68 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
       const st = ai.engine.mtp.stats;
       if (st.drafts) crumb(`spec: ${st.accepted}/${st.drafts} drafts accepted${ai.lapStat ? ` · lap ${Math.round(ai.lapStat.lap)}ms` : ""}`
         + (ai.chain.length ? ` · K tok/s ${kc.cand.map((k) => `${k}:${kc.ema[k] ? kc.ema[k].toFixed(1) : "-"}`).join(" ")} · tokens by K ${JSON.stringify(kc.used)}` : ""));
+    } else if (DENSE_SPEC && ai.chain.length && ai.engine.specStepDrafts && !ai.engine.specStep) {
+      // a model without a draft head (the dense Qwen3s) in a split room: every plain token costs a
+      // full lap round the chain, so when prompt lookup finds the text repeating something in the
+      // context, the tokens that followed it go round as drafts in the same lap (specStepDrafts,
+      // exact: same output as plain decoding). No drafts: a plain lap.
+      const spec = chainSpec();
+      const st0 = { ...(ai.engine.specStats || { drafts: 0, accepted: 0 }) };
+      const lapT = { v: 0, nv: 0, p: 0, np: 0, d: 0 };   // ms in verify laps / plain laps / drafting, for the crumb
+      let next = first ?? sample(logits), done = false, pendTok = null;
+      if (eos(next)) done = true; else emit(next, 0);
+      while (!done && count < maxNew && !aborted()) {
+        // a step writes positions pos .. pos+K; as in plain decoding, a token is piped only while
+        // pos < ctxMax() - 1, and never draft past the answer cap
+        const roomLeft = ctxMax() - ai.pos - 2;
+        if (roomLeft < 0) { capped = true; break; }
+        const ctxNow = [...(ai.fed || []), next], kMax = Math.min(ai.engine.maxDrafts || 7, roomLeft, maxNew - count);
+        // only while every device in the chain handles dense verify frames (its hello's dspec; one from
+        // an older build does not): otherwise plain laps. Checked every step, so a device that joins or
+        // comes back with another build switches it. A lookup guess that is wrong still costs its verify
+        // columns: up to 3 drafts (one batched pass per device) until a run is accepted in full, then 7.
+        const chainOK = chainDenseSpec(ai.chain.map((id) => conns.get(id)?.meta));
+        if (!chainOK && !ai.dspecWarned) { ai.dspecWarned = true; log("room", "a device in the chain runs an older build: dense speculation is off (plain laps) until it updates"); }
+        if (chainOK) ai.dspecWarned = false;
+        let lk = LOOKUP ? denseLookupDrafts(ai.chain.map((id) => conns.get(id)?.meta), ctxNow, kMax, { full: ai.lkFullD }) : [], via = 2;
+        // nothing to copy: the draft model's guesses, when there is one (?draft=)
+        // (only when the measured lap is long enough for the drafts to pay: DraftModel.pickK)
+        const dk = chainOK && !lk.length && ai.draft && kMax > 0 ? ai.draft.pickK(ai.lapStat?.lap, Math.min(DRAFT_K, kMax)) : 0;
+        if (dk) { const td = performance.now(); lk = await ai.draft.propose(ctxNow, dk); via = 1; lapT.d += performance.now() - td; }
+        let toks;
+        const tStep = performance.now();
+        if (lk.length) {
+          ai.engine.pos = ai.pos;
+          toks = await ai.engine.specStepDrafts(next, sample, lk, spec);
+          ai.fed?.push(next, ...toks.slice(0, -1));
+          ai.pos = ai.engine.pos;
+          ai.lastHidden = ai.engine.lastHidden;
+          if (via === 2) copied += toks.length - 1;
+          ai.lkFullD = via === 2 && toks.length === lk.length + 1;
+          if (via === 1) ai.draft.note(lk.length, toks.length - 1);
+          lapT.v += performance.now() - tStep; lapT.nv++;
+        } else {
+          ai.lkFullD = false;
+          const lg = await aiPipeToken(next, true, undefined, desc);
+          toks = [sample(lg)];
+          lapT.p += performance.now() - tStep; lapT.np++;
+        }
+        for (let j = 0; j < toks.length; j++) {
+          const tk = toks[j];
+          if (eos(tk)) { done = true; break; }
+          if (count >= maxNew) { done = true; capped = true; if (j === toks.length - 1) pendTok = tk; break; }
+          emit(tk, j < toks.length - 1 ? via : 0);   // all but the last were drafts the chain accepted (2: lookup, 1: draft model)
+        }
+        next = toks[toks.length - 1];
+        const st = ai.engine.specStats, d = st ? st.drafts - st0.drafts : 0;
+        acc = d ? (st.accepted - st0.accepted) / d : null;
+        pushMap(count / ((performance.now() - t0) / 1000), acc, true);
+      }
+      if (!done && count >= maxNew) capped = true;
+      if (pendTok != null && !aborted()) ai.pending = { next: pendTok, at: ai.pos };
+      const st = ai.engine.specStats;
+      if (st?.drafts) crumb(`dense spec: ${st.accepted - st0.accepted}/${st.drafts - st0.drafts} drafts accepted · ${lapT.nv} verify laps ${lapT.nv ? (lapT.v / lapT.nv).toFixed(1) : "-"} ms · ${lapT.np} plain laps ${lapT.np ? (lapT.p / lapT.np).toFixed(1) : "-"} ms · drafting ${Math.round(lapT.d)} ms`
+        + (ai.draft ? ` · draft model: ${ai.draft.stats.drafted} drafted in ${ai.draft.stats.calls} calls, ${Math.round(ai.draft.stats.ms)} ms` : ""));
     } else {
       // plain decoding. An end token is not piped through the chain: the next turn's template
       // writes <|im_end|> itself, so both paths leave the caches holding exactly prompt + answer

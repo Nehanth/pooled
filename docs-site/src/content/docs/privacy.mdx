@@ -1,20 +1,19 @@
 ---
 title: Privacy
-eyebrow: Getting started
-description: Who sees your questions and answers in a room, what the visibility setting changes, and what Pooled cannot protect.
+eyebrow: Help
+description: Who sees your questions and answers in a room, what the host can limit, and what Pooled cannot protect.
 sidebar:
   label: Privacy
-  order: 7
+  order: 5
 ---
 {/*
 Sources (for the fact-checker):
-- README.md "Privacy"
-- SECURITY.md: threat model (no counterparty; room is a shared conversation; host alone holds tokenizer/embedding/LM head/sampler; DTLS; activations are not encryption, arXiv 2503.09022; no verification of remote compute; peer weights unverified, ?peerweights=0; peers learn metadata), Code mode section
-- room/visibility.js (all / host / asker); p2p.html #ai-visibility labels ("everyone in the room", "only me", "only whoever asked"); room.js SEG_HELP "ai-visibility" wording; room.js line ~4354 (visibility applies to the Code agent too)
-- cli/README.md "Who sees your prompts" (host screen shows last user message up to 2000 characters; bridge knocks for a minute)
-- CHANGELOG.md Unreleased: room checkpoints on disk in OPFS, ?ckptdisk=0; API exchanges marked "via API · not part of this chat's memory"
-- p2p.html Network box: "Always go through the relay (the other devices never see this device's IP address)"; "Saved in this browser only; join links never include it"
-- docs/tech-stack.md: signaling broker only introduces peers; no model traffic touches a server
+- README.md "Privacy"; SECURITY.md threat model (shared conversation; host holds tokenizer, embedding, LM head, sampler; DTLS;
+  activations are not encryption, arXiv 2503.09022; no verification of remote compute; peer weights unverified, ?peerweights=0)
+- room/visibility.js (all / host / asker: asker = the host's screen and the device that asked); p2p.html #ai-visibility labels
+- cli/README.md "Who sees your prompts" (host screen shows API requests)
+- CHANGELOG.md: room checkpoints on disk, ?ckptdisk=0
+- p2p.html Network box: "Always go through the relay"; saved in this browser only
 */}
 
 A room is a shared conversation. Everyone in it can see the questions and answers, on purpose. No server sees them.
@@ -25,51 +24,41 @@ Run rooms with people you would share a document link with, not with strangers.
 
 | Who | What they see |
 |---|---|
-| **The host** | Every question and every answer, always. The host's device reads your message and picks each word of the answer. |
-| **Everyone else in the room** | Questions and answers, unless the host limits it (below). |
-| **Devices that hold layers** | The hidden state for every token. This is not readable text, but it is not private either (below). |
-| **The signaling server** | That devices want to meet, and their network addresses. It carries no model traffic and never sees your messages. |
-| **Hugging Face** | Downloads of the model's weights, like any download. |
+| **The host** | Every question and answer, always. The host's device reads your message and picks each word. |
+| **Everyone else** | Questions and answers, unless the host limits it (below). |
+| **Devices that hold layers** | A hidden form of every message. Not text, but not private either. |
+| **The signaling server** | That devices want to meet, and their network addresses. Never your messages. |
 | **pooled.run** | Nothing from the room. The site is static files. |
 
 ## Limit who sees the chat
 
-The host sets **Who sees the chat** in **Room settings**:
+The host sets **Who sees the chat** in [Room settings](/docs/rooms/settings):
 
-| Setting | Effect |
-|---|---|
-| **Everyone** | Everyone in the room sees the questions and the answers. This is the default. |
-| **Only me** | Only the host's screen shows the text. Every device still helps write it. |
-| **Whoever asked** | Each answer goes to whoever asked it, and to the host. Every device still helps write it. |
+- **Everyone** (default): every screen shows the chat.
+- **Only me**: only the host's screen shows it.
+- **Whoever asked**: each answer goes to whoever asked it, and to the host.
 
-The setting also applies to Code mode and to requests from the [Serve API](/docs/serve).
+It applies to chat, Code mode and requests from the [Serve API](/docs/serve).
 
-:::caution[Hidden states are not encryption]
-The setting decides which screens show the text. It does not hide your words from the devices that run layers. The hidden state that passes between devices is a lossy form of your text, and published attacks recover much of the text from it. **Assume anyone in the room can read your prompts.**
+:::caution[This does not hide your words from the room]
+The setting decides which screens show the text. The devices running layers still work on a hidden form of your words, and published attacks recover much of the text from it. **Assume anyone in the room can read your prompts.**
 :::
 
 ## What Pooled cannot promise
 
-- **Remote compute is not checked.** A device could send back wrong or altered results, and nothing detects it yet.
-- **Weights shared inside the room are not checked either.** A device can take missing layers from another device in the room, and only the length is checked. `?peerweights=0` turns this off, so every device downloads from Hugging Face.
-- **Devices learn some things about each other:** names, how much memory each gives, which layers each holds, and timing.
-- **Devices see each other's IP addresses** when they connect directly. To hide yours, add a TURN relay under **Network** on the join screen and tick **Always go through the relay**.
+- **Nobody checks another device's work.** A device could send back altered results.
+- **Weights shared inside the room are not checked.** A device can take layers from another device's cache. Add `?peerweights=0` so every device downloads from Hugging Face instead.
+- **Devices see each other's IP addresses** when they link directly. To hide yours, add a relay under **Network** and tick **Always go through the relay**. See [Networks and work Wi-Fi](/docs/rooms/networks#use-a-turn-relay).
 
-Pooled does not use noise or shuffling tricks to hide hidden states. They are known to be breakable and would give a false sense of safety.
+## Tools on the Serve API
 
-## Tools connected through the Serve API
-
-Everything a tool sends goes to the room's host. Coding tools send file contents, and sometimes secrets, so point them only at a room you trust.
-
-- The host's screen shows every API request: the last user message (up to 2000 characters) and the answer.
-- The others in the room see it too, unless the host picks **Only me** or **Whoever asked**.
-- If the host's page closes, the bridge keeps knocking on the room code for a minute in case the page reloads. Stop the bridge (Ctrl-C) when the room ends.
+Everything a tool sends goes to the room. Coding tools send file contents and sometimes secrets, so point them only at a room you trust. The host's screen shows each API request and its answer, and so do the others' screens unless the host limits who sees the chat.
 
 ## What stays on each device
 
-- **Cached weights**, in the browser's cache. Clear them under **Room settings**, **Clear cached weights**.
-- **Checkpoints of the conversation**: every device keeps its part of the room's checkpoints on disk, so a reload can pick up where it left off. `?ckptdisk=0` turns this off.
-- **Code mode files** live in the host's browser, or in a folder on disk the host picked. Other devices get a read-only copy.
-- **A TURN relay's address and password**, if you add one, are saved in that browser only and never go into join links.
+- **Cached weights.** Delete them in **Room settings**.
+- **Conversation checkpoints**, so a reload can pick up where it left off. `?ckptdisk=0` turns this off.
+- **Code mode files**, in the host's browser or a folder the host picked.
+- **Your relay settings**, in that browser only. They never go into join links.
 
-For the full threat model, see [Security model](/docs/internals/security). To report a vulnerability, see [SECURITY.md](https://github.com/Nehanth/pooled/blob/main/SECURITY.md#reporting-a-vulnerability).
+The full threat model is in [Security model](/docs/internals/security).

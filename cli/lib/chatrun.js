@@ -1,0 +1,235 @@
+// pooled chat <CODE | link>: talk to a room's model from the terminal (cli/lib/chat.js has the parts
+// that are unit tested). It joins as an API client over the same Bridge as pooled serve (room.js:
+// the gate, v2 asks), streams each answer, and keeps the conversation for the next turn.
+import { repl } from "./repl.js";
+import { style, header } from "./style.js";
+
+// a writer that starts every line with two spaces (the chat's answers sit on the screen's grid)
+function indenter(pad = "  ") {
+  let atStart = true;
+  return (s) => {
+    let out = "";
+    for (const ch of String(s)) {
+      if (atStart && ch !== "\n") { out += pad; atStart = false; }
+      out += ch;
+      if (ch === "\n") atStart = true;
+    }
+    return out;
+  };
+}
+import { Bridge } from "./room.js";
+import { Ask, Collector } from "./answer.js";
+import { askBody, newRid, cleanText } from "./common.js";
+import { parseChatArgs, parseLine, History, Renderer, statusLine, tokPerSec, explainChatError, fmtCode, UsageError, HELP_CHAT, DIM, RESET } from "./chat.js";
+
+const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+function busyText(d) {
+  const why = cleanText(d.why, 300);
+  if (d.code === "off") return "the host does not allow API clients in this room";
+  if (d.code === "loading") return "the room's model is not started yet (no model, or still loading)";
+  if (d.code === "degraded") return why || "a device left the room; the host has to re-deal the layers first";
+  if (d.code === "ctx") return `the conversation no longer fits the room's context (${d.n} tokens of ${d.max}): /clear starts over`;
+  if (d.code === "queue") return `the room's queue is full${why ? `: ${why}` : ""}`;
+  return why || "the room cannot answer now";
+}
+
+// embedded: run inside pooled host (its room screen comes back after /exit): leaving resolves instead
+// of ending the process, and Peer is the host's own WebRTC stack (one per process)
+export async function chatMain(argv, { version = "", embedded = false, Peer = null } = {}) {
+  let opts;
+  try { opts = parseChatArgs(argv); }
+  catch (e) {
+    if (!(e instanceof UsageError)) throw e;
+    process.stderr.write((e.lines || [`pooled chat: ${e.message}`]).join("\n") + "\n");
+    return 2;
+  }
+  if (opts.help) { process.stdout.write(HELP_CHAT); return 0; }
+
+  const interactive = opts.prompt == null && !!process.stdin.isTTY;
+  const ST = style({ stream: process.stderr, env: opts.color ? process.env : { ...process.env, NO_COLOR: "1" } });
+  // a spinner redrawn in place: a terminal that takes escapes (not TERM=dumb)
+  const errTTY = !!process.stderr.isTTY && process.env.TERM !== "dumb";
+  const color = opts.color && !!process.stdout.isTTY;
+  const ecolor = opts.color && errTTY;
+  const edim = (s) => (ecolor ? DIM + s + RESET : s);
+  const say = (s) => process.stderr.write(s + "\n");
+  const fail = (err) => {
+    const x = explainChatError(err, { code: opts.code });
+    say(`pooled chat: ${x.message}`);
+    if (x.hint) say(`  ${x.hint}`);
+    return 1;
+  };
+
+  // one question from a script: the prompt argument, else all of stdin
+  let oneShot = opts.prompt;
+  if (!interactive && oneShot == null) {
+    const chunks = [];
+    for await (const c of process.stdin) chunks.push(c);
+    oneShot = Buffer.concat(chunks).toString("utf8").trim();
+    if (!oneShot) { say("pooled chat: nothing to ask (stdin was empty)"); return 2; }
+  }
+
+  // the bridge's own lines (waiting in the lobby, the host's link lost and back), dimmed on stderr
+  let spinner = null;
+  const log = (m) => { clearSpin(); say(edim(`· ${cleanText(m, 400).replace("start pooled serve with", "start pooled chat with")}`)); };
+  const tag = Math.random().toString(36).slice(2, 6).padEnd(4, "0");
+  const bridge = new Bridge({ code: opts.code, key: opts.key, signal: opts.signal, name: opts.name || `pooled chat ${tag}`,
+    client: `pooled-chat/${version}`, log, Peer });
+
+  // a spinner on stderr while nothing is on screen yet (joining, waiting for the model, the prompt being read)
+  let spinLabel = "", spinAt = 0;
+  function spin(label) {
+    spinLabel = label;
+    if (!errTTY || spinner) return;
+    spinner = setInterval(() => { process.stderr.write(`\r\x1b[K  ${ST.spin(spinAt++)} ${ST.ink3(spinLabel)}`); }, 80);
+  }
+  function clearSpin() {
+    if (!spinner) return;
+    clearInterval(spinner); spinner = null;
+    process.stderr.write("\r\x1b[K");
+  }
+
+  let leaving = false, current = null, rl = null, left = null;
+  const leftP = new Promise((r) => { left = r; });
+  const leave = async (code = 0) => {
+    if (leaving) { if (embedded) return; process.exit(code); }
+    leaving = true;
+    clearSpin();
+    try { rl?.close(); } catch {}
+    await bridge.leave().catch(() => {});
+    await new Promise((r) => process.stdout.write("", r));
+    if (embedded) { process.off("SIGINT", onInt); left(code); return; }
+    process.exit(code);
+  };
+  if (!embedded) process.on("SIGTERM", () => leave(0));
+  // Ctrl-C: stops the answer being written; otherwise leaves (readline sends its own below)
+  const onInt = () => { if (current) current.stop(); else leave(interactive ? 0 : 130); };
+  process.on("SIGINT", onInt);
+
+  spin(`joining room ${fmtCode(opts.code)}`);
+  try { await bridge.connect(); }
+  catch (e) { clearSpin(); return fail(e); }
+  // the host's ai-ready-all follows its hello
+  if (!bridge.ready) await new Promise((r) => { const t = setTimeout(r, 1500); bridge.on("state", () => { if (bridge.ready) { clearTimeout(t); r(); } }); });
+  clearSpin();
+
+  // the room closed to us, or its host is gone for good: say so and leave
+  bridge.on("state", () => {
+    if (leaving) return;
+    if (bridge.kicked) { clearSpin(); const x = explainChatError(new Error(bridge.kicked), { code: opts.code }); say(`pooled chat: ${x.message.startsWith("The host") ? x.message : `the host said: ${bridge.kicked}`}`); leave(1); }
+    else if (!bridge.connected && /did not come back/.test(bridge.gone || "")) { clearSpin(); say(`pooled chat: the host of room ${fmtCode(opts.code)} left and did not come back`); leave(1); }
+  });
+
+  const model = () => bridge.modelLabel || bridge.model || null;
+  // the model is up: at once, or once the host starts it (a script waits --wait seconds)
+  async function ready() {
+    if (bridge.ready) return;
+    const noteFirst = interactive ? "no model started in this room yet: waiting for the host to start one (Ctrl-C to leave)" : null;
+    if (noteFirst) say(edim(`· ${noteFirst}`));
+    spin("waiting for the room's model");
+    await new Promise((resolve, reject) => {
+      const t = interactive ? null : setTimeout(() => { bridge.off("state", on); reject(new Error("no model started yet")); }, opts.waitMs);
+      const on = () => { if (bridge.ready) { clearTimeout(t); bridge.off("state", on); resolve(); } };
+      bridge.on("state", on);
+    }).finally(clearSpin);
+  }
+
+  const history = new History(opts.system);
+  let thinking = opts.thinking;
+
+  // one answer: the whole conversation goes to the room; tokens stream to stdout as they come
+  async function turn(text) {
+    history.add("user", text);
+    try { await ready(); }
+    catch (e) { history.settle(""); throw e; }
+    let req;
+    try { req = history.request({ maxTokens: opts.maxTokens, thinking, temperature: opts.temperature, hostMeta: bridge.hostMeta }); }
+    catch (e) { history.settle(""); throw e; }
+    const v2 = bridge.hostApi >= 2;
+    const rid = newRid();
+    const collector = new Collector({ id: rid });
+    let started = false;
+    // at the prompt, the answer is indented 2 like the rest of the screen (a script gets it as is)
+    const ind = interactive ? indenter() : (s) => s;
+    const R = new Renderer({ color, showThinking: interactive,
+      write: (s) => { if (!started) { started = true; clearSpin(); if (interactive) process.stdout.write("\n"); } process.stdout.write(ind(s)); } });
+    const ask = new Ask({ req, meta: { id: rid }, v2, encoders: [collector, R], log: () => {}, label: "chat" });
+    spin("waiting for the room");
+    const t0 = Date.now();
+    let stats = "";
+    const res = await new Promise((resolve) => {
+      let done = false;
+      const finish = (r) => { if (done) return; done = true; current = null; clearSpin(); resolve(r); };
+      current = { stop: () => { bridge.stop(rid); finish({ stopped: true }); } };
+      const ok = bridge.ask(rid, askBody(req, v2), (d) => {
+        switch (d.t) {
+          case "ai-queued": if (!started) spinLabel = `queued in the room${Number.isInteger(d.pos) && d.pos > 0 ? ` (${d.pos} ahead)` : ""}`; return;
+          case "ai-genstart": case "ai-token": case "ai-call": case "ai-gendone": {
+            if (d.t === "ai-genstart" && !started) spinLabel = "reading the conversation";
+            if (d.t === "ai-gendone") stats = d.stats || "";
+            const r = ask.feed(d);
+            if (!r) return;
+            if (d.t !== "ai-gendone") bridge.stop(rid);
+            finish(r.error ? { error: r.error } : { answer: r.answer });
+            return;
+          }
+          case "ai-busy": finish({ error: new Error(busyText(d)) }); return;
+          case "x-fail": finish({ error: new Error(cleanText(d.why, 300) || "the room dropped the request") }); return;
+        }
+      });
+      if (!ok) finish({ error: new Error(`not connected to room ${fmtCode(opts.code)}`) });
+    });
+    R.end();
+    const a = res.answer || collector.answer;
+    if (res.error) { history.settle(R.answer ? collector.answer.text : ""); throw res.error; }
+    // the text the model wrote (not the terminal's cleaned copy): the next turn's prompt starts with it
+    history.settle(collector.answer.text || R.answer, { stopped: !!res.stopped });
+    const tps = tokPerSec(stats, { tokens: R.tokens, tFirst: R.tFirst, tEnd: Date.now() });
+    const usage = res.stopped ? { ...a.usage, out: R.tokens, in: R.promptTokens } : a.usage;
+    const line = statusLine({ code: opts.code, model: model(), answer: { ...a, usage }, tps, stopped: !!res.stopped });
+    if (interactive) {
+      const first = R.tFirst && R.t0 ? ` · first token ${((R.tFirst - R.t0) / 1000).toFixed(1)}s` : "";
+      const out = usage?.out ?? R.tokens;
+      const reused = a.reused && usage?.in ? ` · ${a.reused} of ${usage.in} prompt tokens reused` : "";
+      process.stdout.write(`\n  ${ST.ink3(`${out} token${out === 1 ? "" : "s"}${res.stopped ? " (stopped)" : ""}${tps ? ` · ${Math.round(tps)} tok/s` : ""}${first}${reused}`)}\n\n`);
+    }
+    else if (errTTY) say(edim(line));
+    void t0;
+    return res;
+  }
+
+  if (!interactive) {
+    try { const r = await turn(oneShot); await bridge.leave(); return r.stopped ? 130 : 0; }
+    catch (e) { clearSpin(); await bridge.leave().catch(() => {}); return fail(e); }
+  }
+
+  if (!embedded) {
+    const [name, ...rest] = String(model() || "no model started yet").split("·").map((x) => x.trim());
+    const ctx = +bridge.hostMeta?.ctx;
+    say(["", ...header(ST, process.stderr.columns || 80, [ST.bold("pooled chat"),
+      ST.pill(fmtCode(opts.code)) + "  " + name + ST.ink3([...rest, ctx > 0 ? `${Math.round(ctx / 1024)}k context` : ""].filter(Boolean).map((x) => ` · ${x}`).join("")),
+      ST.ink3(`${bridge.hostName ? `host ${bridge.hostName} · ` : ""}the host's devices see what you send`)]), ""].join("\n"));
+  }
+  say(`  ${ST.keys([["/", "commands"], ["ctrl-c", "stops an answer"], ["ctrl-d", "leaves"]])}\n`);
+  const handle = async (line) => {
+    const p = parseLine(line);
+    if (!p) return;
+    if (p.cmd === "exit") { leave(0); return; }
+    if (p.cmd === "clear") { history.clear(); say(edim("· conversation cleared")); return; }
+    if (p.cmd === "help") { say(HELP_CHAT.split("\nIn the chat\n")[1].split("\nOptions\n")[0].trimEnd()); return; }
+    if (p.cmd === "think") {
+      thinking = p.arg === "on" ? true : p.arg === "off" ? false : !thinking;
+      say(edim(`· thinking ${thinking ? "on: the model reasons first (dimmed), then answers" : "off"}`));
+      return;
+    }
+    if (p.cmd === "unknown") { say(edim(`· unknown command /${p.arg}; /help lists them`)); return; }
+    try { await turn(p.text); }
+    catch (e) { const x = explainChatError(e, { code: opts.code }); say(`pooled chat: ${x.message}`); if (x.hint) say(`  ${x.hint}`); }
+  };
+  // the prompt goes away while an answer streams, and comes back after its status line (lib/repl.js)
+  rl = repl({ prompt: `  ${ST.acc(ST.g.sel)} `, onLine: (line) => (leaving ? null : handle(line)),
+    onStop: () => { current?.stop(); },
+    onEnd: () => { if (!leaving) { process.stdout.write("\n"); leave(0); } } });
+  return embedded ? leftP : new Promise(() => {});   // until leave()
+}

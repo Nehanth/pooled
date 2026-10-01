@@ -1,7 +1,7 @@
 ---
 title: Long context and sessions
 description: How Pooled fits long prompts, saves and resumes a conversation's state on every device, survives reloads, and why int8 KV is still off by default.
-eyebrow: How it works
+eyebrow: Internals
 sidebar:
   label: Long context and sessions
   order: 4
@@ -12,19 +12,7 @@ A coding agent resends almost its whole conversation on every turn: about 96% of
 
 ## Context per model
 
-| Model | Default context | Maximum |
-|---|---|---|
-| Qwen 3.8 27B | 16,384 tokens | 32,768 |
-| Qwen 3.6 35B MoE | 32,768 tokens | 65,536 |
-| Qwen3 1.7B | 8,192 tokens | 16,384 |
-
-Ask for another size with `?ctx=` on the host's room link. It is rounded to a multiple of 256, at least 2,048, and capped at the model's maximum.
-
-```txt
-https://pooled.run/room?ctx=65536
-```
-
-The KV cache is split with the layers, so each device holds only its own attention layers' share. The practical limit is prefill time, not memory.
+Each model's default and maximum context are on [Models reference](/docs/reference/models). `?ctx=` on the model host's page asks for another size, rounded to a multiple of 256, at least 2,048 and at most the maximum. The KV cache is split with the layers, so each device holds only its own attention layers' share, and the practical limit is prefill time, not memory.
 
 ## The KV cache
 
@@ -41,13 +29,7 @@ Attention is split-K flash attention: positions in splits of 256, an online soft
 
 ### Why int8 KV is off by default
 
-Measured on the 35B MoE on a GB10 (Deno), int8 KV gave the same 32 greedy tokens as f16 at 1K, 8K and 32K, and used 0.35 GB of KV instead of 0.63 GB. But a 32K prompt took 3.5 times as long to prefill (679.6 s against 195.8 s), because the tiled prefill attention kernel does not support int8 yet.
-
-:::caution[Use `?kv=q8` only when memory is the limit]
-It saves memory and keeps the output, but long prompts become much slower to read. It stays off by default until tiled prefill attention supports int8.
-:::
-
-The 27B at 1K, 8K and 32K has not been timed yet.
+On the 35B MoE on a GB10 (Deno), int8 KV gave the same 32 greedy tokens as f16 at 1K, 8K and 32K and used 0.35 GB of KV instead of 0.63 GB. But a 32K prompt took 3.5 times as long to prefill (679.6 s against 195.8 s), because the tiled prefill attention kernel does not support int8 yet. So use `?kv=q8` only when memory is the limit. The 27B has not been timed.
 
 ## Checkpoints
 
@@ -74,7 +56,7 @@ Each device also keeps a copy of its part of every checkpoint on disk, in the br
 - **A host that reloads** resumes its room, reads its copies and their token ids back, and every device reads its own when the layers are dealt again.
 - **A device missing a copy** (the write never finished, or the disk was full) says so when it is ready. The host forgets that checkpoint, so it never asks the chain to load a slot one device lacks. The next question resumes from an older checkpoint or prefills from scratch.
 
-A copy is named by room code, slot, and a hash of the model and the device's layers and KV format. A copy for other layers or another model reads as missing. A new copy removes the old one first, so a failed write leaves a slot missing, never stale. When the disk is full, the oldest copies of other rooms go first.
+A copy is keyed by room code, slot, and a hash of the model, the device's layers and the KV format, so a copy for other layers reads as missing. A failed write leaves a slot missing, never stale. When the disk is full, other rooms' oldest copies go first.
 
 :::note[Known limit]
 A save reaches the workers only with the next question's first frame. After a worker reloads, the room resumes from the checkpoint before the last answer and prefills that answer again. Reload times have not been measured on real hardware.

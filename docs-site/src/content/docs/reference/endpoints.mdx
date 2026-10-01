@@ -17,7 +17,7 @@ Sources (origin/main 40bb0fa):
 - cli/README.md APIs, Parameters, Errors
 */}
 
-`pooled serve` listens on `http://127.0.0.1:8080` by default. The OpenAI base URL is `http://127.0.0.1:8080/v1`; the Anthropic base URL is `http://127.0.0.1:8080`. For what each API accepts, see the [Serve API](/docs/serve) pages.
+`pooled serve` listens on `http://127.0.0.1:8080` by default. The OpenAI base URL is `http://127.0.0.1:8080/v1`; the Anthropic base URL is `http://127.0.0.1:8080`. For setup, see [Serve API](/docs/serve).
 
 ## Paths
 
@@ -59,7 +59,7 @@ curl http://127.0.0.1:8080/health
 ```json
 {
   "ok": true,
-  "room": "ABCD",
+  "room": "4TKG9P",
   "connected": true,
   "ready": true,
   "model": "pooled/qwen3.6-35b-moe",
@@ -79,7 +79,7 @@ curl http://127.0.0.1:8080/health
 | `served` | Requests answered since start. |
 | `closed` | Present only when the host disconnected this client or turned API clients off: the reason. |
 
-With a token set, a caller without it gets only `{"ok": true}`. The room code alone would let it join the room directly, around the token.
+With a token set, a caller without it gets only `{"ok": true}`.
 
 ## Status codes
 
@@ -102,17 +102,4 @@ Once a stream has started, an error arrives as an error chunk (OpenAI, with no `
 
 ## Limits
 
-| Limit | Value |
-|---|---|
-| Request body | 4 MiB |
-| Request as sent to the room | 3.5 MB |
-| Messages per request | 1000 |
-| Text per request | 1,500,000 characters |
-| Tools per request | 1024 |
-| One tool's JSON schema | 32,000 characters |
-| Tool calls in one assistant message | 64 |
-| Stop sequences | 4 |
-| Default output tokens (Chat Completions, Responses) | 16384, always capped by the room's context |
-| `max_tokens` above 65536 | capped, not refused |
-| Connections at once | 64 |
-| Stream keep-alive while waiting | every 10 s |
+Request size, queue and timeout limits are on [Limits and context](/docs/serve/limits).

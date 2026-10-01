@@ -1,12 +1,14 @@
 ---
 title: Architecture
 description: How one model runs across several browser tabs, from one token end to end to where the weights and caches live.
-eyebrow: How it works
+eyebrow: Internals
 sidebar:
   label: Architecture
   order: 1
 ---
 
+
+How one model runs across several browser tabs: the parts, one token end to end, and where the weights and caches live.
 
 Pooled has three parts:
 
@@ -32,23 +34,11 @@ The other devices are **workers**. Each holds one contiguous range of layers. To
 
 A device with no WebGPU, or one the room doesn't need, joins as an **ask-only guest**: it can ask questions and read answers, but holds no layers.
 
-### Which device hosts
+### Which device hosts, and the split
 
-The host starts as the device that lends the most memory. The role then moves to a device of the same kind that copies GPU memory at least 1.5 times faster and lends at least half as much memory. A phone never takes the host role from a computer.
+The device that lends the most memory hosts, unless a device of the same kind copies GPU memory at least 1.5 times faster (a 64 MB copy timed at page load and reported in its `hello`). The host role matters because the head, the sampler, the draft block and speculative rollback all sit on every token's critical path.
 
-Each device measures its speed once at page load: it times a 64 MB buffer copy (best of 5 passes of 8 copies) and reports the result in its `hello`. The host role matters because the head, the sampler, the draft block and speculative rollback all sit on every token's critical path. In a GB10 + M5 Max room, moving the host role to the Mac made speculative decoding on the MoE 20 to 39% faster.
-
-:::note
-`?gbps=N` pins the measured speed on a device (`0` means unknown). The room harness uses it to force which device hosts.
-:::
-
-### How the layers are split
-
-The split defaults to **For speed**. The fastest devices fill first, each up to the memory it lends, and devices that aren't needed join as guests. Until the first answer measures each device, a phone counts as 20 times slower than a computer, so a phone only gets layers the computers can't hold.
-
-**By memory** splits in proportion to the memory each device lends. Phones still hold nothing when the computers can hold the whole model (`?phonelayers=1` deals them layers anyway).
-
-Details and the URL options are on [How layers are split](/docs/rooms/split).
+The layers are dealt **For speed** by default: the fastest devices fill first and the rest join as guests. Both are explained on [How layers are split](/docs/rooms/split).
 
 ## One token, end to end
 
@@ -82,7 +72,17 @@ The host then checks `1 + K` tokens in **one** batched pass of the full model: o
 - The full model always decides, so the output is the same as plain decoding for any sampler.
 - Draft depth is 3, 5 or 7. The room tries each and keeps the one with the best measured tokens per second.
 
-This is what keeps a room usable on a real network: each lap pays the network latency once, and a good step accepts several tokens. See [Benchmarks](/docs/internals/benchmarks).
+Each lap pays the network latency once, and a good step accepts several tokens. See [Benchmarks](/docs/internals/benchmarks).
+
+### Models without a draft block
+
+The dense Qwen3 models (0.6B, 1.7B, 4B) have no draft block. In a room of two or more devices they still speculate, with prompt lookup: when the last few tokens of the answer already appear in the context, the tokens that followed them are checked in the same lap. Nothing repeats: the step is a plain lap. Code edits and quoted text gain the most. Ordinary chat rarely repeats itself and stays at plain speed.
+
+- The check runs `1 + K` tokens (K up to 7) through every device's layers as one batched frame. Lookup starts at 3 drafts, one batched pass per device, and allows 7 only after a run was accepted in full.
+- The batched matrix-vector kernels of the check use the same workgroup shape as single-token decoding, so each checked column gives **bit-identical** logits to a plain step. A verified token is exactly a decoded one, under any sampler (`tests/test_dense_spec.js`).
+- Rollback is just a position: the rejected K/V rows are overwritten by the next frame.
+- Only while every device in the chain says in its hello (`dspec`) that it takes these frames. A device from an older build does not, and the host then decodes with plain laps until it leaves or updates.
+- `?densespec=0` turns it off (plain laps). `?draft=qwen3-0.6b` (experimental) also loads Qwen3 0.6B whole on the host, and it drafts when lookup finds nothing.
 
 ## Memory and caching
 
@@ -95,28 +95,15 @@ This is what keeps a room usable on a real network: each lap pays the network la
 
 Q4_0 and Q8_0 matrices stream straight from the network into GPU buffers, repacked on the way into separate nibble and scale arrays so the kernels read them in contiguous stripes. RAM never holds the whole model.
 
-Ranges taken from another device come in 64 KB parts, with at most 8 MB in flight, so a phone never buffers a whole range. Each cached range is stored with a size stamp (`x-swarm-len`) that is checked on read, which guards against a truncated entry.
-
-More on checkpoints and the KV cache: [Long context and sessions](/docs/internals/sessions).
+More: [Downloads and caching](/docs/rooms/downloads) for weights, [Long context and sessions](/docs/internals/sessions) for checkpoints and the KV cache.
 
 ## Where the time goes
 
-Measured on a GB10 (DGX Spark) with the 27B, using `benchmarks/bench_breakdown.js`, which skips one kernel family at a time and re-times:
-
-| Part of one token | Time |
-|---|---|
-| All matrix-vector products (weights streamed at ~183 GB/s; the GPU's measured limit is 184) | 82 ms |
-| Everything else (small kernels, encoding, submit, readback) | ~30 ms |
-
-Decode is at the memory-bandwidth limit on this GPU, so speculative decoding is what raises tokens per second. Prefill is still the biggest gap to native llama.cpp.
-
-:::caution[Older numbers]
-This breakdown predates the prefill GEMM, flash attention and the fused kernels. It has not been re-measured since.
-:::
+On a GB10 with the 27B, the matrix-vector products streamed weights at about 183 GB/s, against a measured limit of 184: decode is at the memory-bandwidth limit, so speculative decoding is what raises tokens per second, and prefill is the biggest gap to native llama.cpp. This breakdown predates the prefill GEMM and the fused kernels. See [Engine and kernels](/docs/internals/engine).
 
 ## Code mode
 
-The host types a request. The room's model runs a small agent loop that reads and edits files in a project, serves it on a virtual `localhost:5173` in a sandboxed frame, reads the preview's console errors and fixes them. A Code run holds the room's generation lock for all of its steps. See [Code mode](/docs/code).
+The room's model runs a small agent loop on the host that edits a project, serves it on a virtual `localhost:5173` in a sandboxed frame and fixes the errors it reads back. A Code run holds the room's generation lock for all of its steps. See [The agent](/docs/code/agent).
 
 ## Files
 

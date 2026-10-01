@@ -70,6 +70,8 @@ export function signalOpts(signal) {
 }
 
 export class Bridge extends EventEmitter {
+  // Peer: a PeerJS class already set up in this process (@pooled/room-node's), so one process never
+  // loads two WebRTC stacks; default: load node-datachannel + peerjs here
   constructor({ code, key = null, signal = null, name, client, log = () => {}, Peer = null }) {
     super();
     this.code = code; this.signal = signal; this.name = name; this.client = client; this.log = log; this.PeerClass = Peer;
