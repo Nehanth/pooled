@@ -5,6 +5,7 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 ## [Unreleased]
 
 ### Fixed
+- **`@pooled/openclaw` 0.2.3: plain `openclaw onboard` finishes with a room that waits for devices.** OpenClaw 2026.9.7's onboarding ends the model step with a live test completion (90 s) and goes back to the provider picker if it gets no answer; a 2-device room can't answer until the other device joins, and the plugin used to open a second copy of the room in the onboarding process to try. That check is now answered at once with the room's state ("opens when OpenClaw's gateway starts and answers once 2 devices are in ..."), the room opens only with the gateway, and `--skip-health` is no longer needed.
 - **`@pooled/cli` 0.3.5 fixes 0.3.4's Windows joins of the MoE/27B** (with `@pooled/openclaw` 0.2.2): decode layer fusion's `matvec_coop_n` (the attention norm folded into the [k | v] GEMV, #276) had a thread-dependent loop inside its barrier loop, which Windows' FXC compiler rejects, so every D3D12 join of the 35B MoE and 27B failed. The loop now has a trip count all threads share (same bits), the barrier lint reads the generated GEMV variants and catches this shape, a layer-fusion flag's kernels are compiled only when it is on, and a fused kernel a GPU can't compile turns layer fusion off instead of failing the join.
 
 ### Added

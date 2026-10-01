@@ -2,21 +2,22 @@
 // flipped at runtime (engine.layerFuse.<k>) in alternating blocks, so both arms share the same load, weights
 // and any GPU contention. Reports the median ms/token of each arm and checks both arms give the same tokens.
 //   cd tests && deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights bench/lf_ab.js
-//   MODEL=moe|27b (default moe)  ROUNDS=8  BLOCK=24 (tokens per block)
+//   MODEL=moe|27b (default moe)  ROUNDS=8  BLOCK=24 (tokens per block)  FLAGS=comb,kv (flip only these; default all)
 import { Qwen35Engine } from "../../engine/qwen35.js";
 import { openGGUF, gpuDevice, trunkLayers, MOE_PATH, Q38_PATH } from "../load_model.js";
 import { roomQwen35Options } from "../../engine/preset.js";
 import { gpuGreedy } from "../gpusample_check.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
-const MODEL = env("MODEL", "moe"), ROUNDS = +env("ROUNDS", 8), BLOCK = +env("BLOCK", 24);
+const MODEL = env("MODEL", "moe"), ROUNDS = +env("ROUNDS", 8), BLOCK = +env("BLOCK", 24), FLAGS = env("FLAGS", "");
 const model = openGGUF(MODEL === "moe" ? MOE_PATH : Q38_PATH);
 const { device } = await gpuDevice();
 const G = model.G, L = trunkLayers(G), tok = model.tokenizer();
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true });
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048,
   ...roomQwen35Options(""), layerFuse: true });
-const KEYS = Object.keys(eng.layerFuse);
+const KEYS = FLAGS ? FLAGS.split(",") : Object.keys(eng.layerFuse);
+console.log(`attnDecode ${eng.attnDecode}, flipping ${KEYS.join(",")}, attn_dec_combine_g ${!!eng.pipes.attn_dec_combine_g}`);
 const set = (on) => { for (const k of KEYS) eng.layerFuse[k] = on; };
 const ids = tok.encode("<|im_start|>user\nWrite a long, detailed essay about the history of computing.<|im_end|>\n<|im_start|>assistant\n");
 
