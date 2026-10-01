@@ -2,7 +2,7 @@
 // with the room page's math, Start gating, the keys, and flags that skip every question.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { MODELS, FILES, NEED_GB, roomBytes } from "../../room/models.js";
+import { MODELS, FILES, NEED_GB, roomBytes, pickCtx, ctxShortNote } from "../../room/models.js";
 import { roomFit, shortNote, shortBy, gbUp } from "../../room/plan.js";
 import { pledgeGB } from "../../room/pledge.js";
 import { nodeCtxFor } from "../../packages/room-node/roomnode.js";
@@ -11,7 +11,7 @@ import { width } from "../lib/style.js";
 import { keysOf } from "../lib/tui.js";
 import { parseLendArgs } from "../lib/lend.js";
 
-const lib = { MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, shortBy, gbUp, pledgeGB, nodeCtxFor };
+const lib = { MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, shortBy, gbUp, pledgeGB, nodeCtxFor, pickCtx, ctxShortNote };
 const KEYS = ["qwen3-0.6b", "qwen3-1.7b", "qwen3-4b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 const dev = (name, gb, extra = {}) => ({ name, meta: { webgpu: true, contribGB: gb, ...extra } });
 
@@ -214,7 +214,8 @@ test("a split that one computer could avoid: say so before Start, with a speed f
   assert.equal(hopHint(2, 30), "each token crosses the network twice; ~30 ms per hop");
   assert.equal(hopHint(1, 30), "");
   // the picker in plain words
-  assert.deepEqual(pickerRow({ key: "a", pulled: true, needGB: 4.1, fitsAlone: true }, { rec: "a" }), { have: "downloaded", need: "4 GB", alone: true, rec: true });
+  assert.deepEqual(pickerRow({ key: "a", pulled: true, needGB: 4.1, fitsAlone: true }, { rec: "a" }), { have: "downloaded", need: "4 GB", min: "", alone: true, rec: true });
+  assert.equal(pickerRow({ key: "c", needGB: 5.5, minNeed: { ctx: 8192, needGB: 3.8 } }).min, "4 GB at 8K", "a fallback context: its need there");
   assert.equal(pickerRow({ key: "b", pulled: false, fileBytes: 2 ** 30 * 18.6, needGB: 70.1, fitsAlone: false }).have, "18.6 GB download");
 });
 
@@ -229,7 +230,8 @@ test("the host screen: the header once (pill, link, status), the picker as one p
   const text = L.join("\n");
   assert.match(text, /Which model\?\n\n    Qwen3 0\.6B/, "one list, smallest first, no groups");
   assert.doesNotMatch(text, /Fits on this computer|Needs another device/);
-  assert.match(text, /\n    Qwen3\.8 27B\s+needs 20 GB   15\.0 GB download/);
+  assert.match(text, /\n    Qwen3\.8 27B\s+needs 20 GB\s+15\.0 GB download/);
+  assert.match(text, /\n    Qwen3 1\.7B\s+needs  6 GB \(4 GB at 8K\)   1\.7 GB download/, "the 1.7B: 16K, and its 8K fallback");
   assert.match(text, /› Qwen3 4B\s+needs  5 GB/, "the recommended model is preselected, not labelled");
   assert.doesNotMatch(text, /recommended|"needs"/);
   assert.match(text, /↑↓ choose · enter host it · q quit/);
@@ -316,7 +318,13 @@ test("how to run it: Pool with devices first and preselected; Run it here lends 
   const r17 = rows.find((r) => r.key === "qwen3-1.7b"), moe = rows.find((r) => r.key === "qwen3.6-35b-moe");
   assert.equal(r17.hereGB, hereGB(lib, "qwen3-1.7b", { maxGB: 14 }));
   assert.ok(r17.hereGB >= 5 && r17.hereGB <= 6, `the 1.7B alone at ${r17.hereGB} GB (16k context)`);
-  assert.ok(roomFitNow(lib, { model: "qwen3-1.7b", devices: [dev("me", r17.hereGB)] }).fits && !roomFitNow(lib, { model: "qwen3-1.7b", devices: [dev("me", r17.hereGB - 1)] }).fits, "the least that holds it");
+  const at = (g) => roomFitNow(lib, { model: "qwen3-1.7b", devices: [dev("me", g)] });
+  assert.ok(at(r17.hereGB).fits && !at(r17.hereGB).fellBack && at(r17.hereGB - 1).fellBack, "the least that holds it at 16K");
+  // a computer that can lend 4 GB at most runs it here at 8K; 3 GB can't, and says what 8K needs
+  assert.equal(hereGB(lib, "qwen3-1.7b", { maxGB: 4 }), 4);
+  assert.equal(hereGB(lib, "qwen3-1.7b", { maxGB: 3 }), null);
+  const { hereWhy } = await import("../lib/hostui.js");
+  assert.equal(hereWhy(r17, { max: 3 }), "needs 4 GB (at 8K), this computer has 3 GB to lend");
   assert.equal(moe.hereGB, null, "14 GB can't hold the MoE");
   let s = initialState({ rows, pledge: { gb: 8, max: 14, totalGB: 16 }, code: "9PFZ8T" });
   s.gpu = "RTX 5070 Ti · 16 GB";
@@ -405,4 +413,40 @@ test("key hints never break inside a word: at 58, 60 and 80 columns they drop wh
       if (st.step === "room") assert.match(vis(foot), /q quit/, "q stays");
     }
   }
+});
+
+test("the 1.7B: 16K when the room holds it, 8K when it is short for 16K, an asked --ctx stays", () => {
+  const m = "qwen3-1.7b";
+  const f8 = roomFitNow(lib, { model: m, devices: [dev("laptop", 4)] });
+  assert.equal(f8.fits, true, "one laptop lending 4 GB starts it alone");
+  assert.equal(f8.ctx, 8192); assert.equal(f8.want, 16384); assert.equal(f8.fellBack, true);
+  assert.equal(f8.ctxNote, "Qwen3 1.7B · 8K context: the room's memory is short for 16K");
+  assert.equal(Math.round(f8.needGB), 6); assert.equal(Math.round(f8.minGB), 4);
+  const f16 = roomFitNow(lib, { model: m, devices: [dev("laptop", 6)] });
+  assert.deepEqual([f16.fits, f16.ctx, f16.fellBack, f16.ctxNote], [true, 16384, false, ""]);
+  // the reported room (a laptop 3 GB + a phone 1 GB): 8K, within both pledges
+  const rep = roomFitNow(lib, { model: m, devices: [dev("laptop", 3), dev("iphone", 1, { ua: "iPhone" })] });
+  assert.deepEqual([rep.fits, rep.ctx, rep.fellBack], [true, 8192, true]);
+  // short for both: short for 8K, the least it could start with
+  const f3 = roomFitNow(lib, { model: m, devices: [dev("laptop", 3)], spareGB: [5] });
+  assert.equal(f3.fits, false); assert.equal(f3.ctx, 8192);
+  assert.match(f3.note, /^This room is 0\.\d GB short for Qwen3 1\.7B: add a device or raise a pledge: laptop could give 0\.\d GB more\.$/);
+  // --ctx 16384 is taken as asked: no fallback, short on 4 GB
+  const asked = roomFitNow(lib, { model: m, devices: [dev("laptop", 4)], ctxAsk: 16384 });
+  assert.deepEqual([asked.fits, asked.ctx, asked.fellBack], [false, 16384, false]);
+  // --ctx 8192: 8K on 4 GB, not a fallback (nothing to say)
+  const a8 = roomFitNow(lib, { model: m, devices: [dev("laptop", 4)], ctxAsk: 8192 });
+  assert.deepEqual([a8.fits, a8.ctx, a8.fellBack, a8.ctxNote], [true, 8192, false, ""]);
+  // the room screen says both needs and why the context is 8K; online, the context line
+  const rows = modelRows(lib, { keys: KEYS, pulled: new Set([m]), pledgeGB: 4 });
+  const s = initialState({ rows, model: m, pledge: { gb: 4, max: 4, totalGB: 8 }, fixedPledge: true, pulled: new Set([m]), code: "4TKG9P", flags: { mode: "pool" } });
+  s.step = "room";
+  s.devices = [{ name: "laptop", kind: "this computer", gb: 4, self: true, meta: { webgpu: true, contribGB: 4 } }];
+  s.fit = f8;
+  const text = render(s, { width: 140, lib }).map(visible).join("\n");
+  assert.match(text, /4 GB lent · 6 GB needed \(4 GB at 8K\)/);
+  assert.match(text, /Qwen3 1\.7B · 8K context: the room's memory is short for 16K\. Lend 2 GB more \(l\) or add a device for 16K\./);
+  const on = render({ ...s, step: "online", ctxNote: f8.ctxNote }, { width: 100, lib }).map(visible).join("\n");
+  assert.match(on, /context +Qwen3 1\.7B · 8K context: the room's memory is short for 16K/);
+  assert.doesNotMatch(render({ ...s, fit: f16 }, { width: 100, lib }).map(visible).join("\n"), /8K context/);
 });

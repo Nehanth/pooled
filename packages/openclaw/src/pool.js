@@ -20,7 +20,7 @@ import { parseCode, formatCode, keyFragment, validKey, saveGate } from "../../..
 import { roomCodeFrom, roomKeyFrom } from "../../../cli/lib/room.js";
 import { roomFitNow, gpuLabel } from "../../../cli/lib/hostui.js";
 import { fmtBytes } from "../../../cli/lib/cache.js";
-import { MODELS, MODEL_CHOICES, modelInfo, modelsDir, isPulled, pluginCtx, lib, shortCtxNote } from "./models.js";
+import { MODELS, MODEL_CHOICES, modelInfo, modelsDir, isPulled, pluginAsk, lib, shortCtxNote, ownShortCtxNote } from "./models.js";
 import { PooledError, pooledModules } from "./runtime.js";
 import { savedGate, saveHostGate, joinState, saveJoinState } from "./state.js";
 import { download, pullState, pullLine, downloadingMessage } from "./download.js";
@@ -101,7 +101,7 @@ async function openRoom(s, log) {
   const note = (m) => { r.events.push({ t: Date.now(), m }); if (r.events.length > 50) r.events.shift(); log(m); };
   r.note = note;
   const common = { pledgeGB: s.pledgeGB || undefined, signal: s.signal, modelDir: s.modelDir, name: s.name, log: note,
-    ctx: pluginCtx(s.model, s.ctx || 0), setup: { webgpu: P.dawn } };
+    ctx: pluginAsk(s.model, s.ctx || 0), setup: { webgpu: P.dawn } };
   const fail = (code, msg) => (err) => { throw err instanceof PooledError ? err : new PooledError(code, `${msg}: ${err.message}`); };
   if (s.mode === "host") {
     if (s.code && !parseCode(s.code)) throw new PooledError("setup", `room code ${s.code} is not one the room page opens: 6 (or 4) of ABCDEFGHJKMNPQRSTVWXYZ23456789`);
@@ -204,7 +204,7 @@ export function deviceRows(r, st = r.node.status()) {
 // whether the pledges in the room hold the model, as the room page decides it -> { fits, note }
 export function fitNow(r, st = status(r)) {
   const devices = st.devices.map((d) => ({ name: d.name, meta: { contribGB: d.gb, webgpu: true } }));
-  return roomFitNow(lib, { model: r.s.model, devices, ctxAsk: pluginCtx(r.s.model, r.s.ctx || 0) });
+  return roomFitNow(lib, { model: r.s.model, devices, ctxAsk: pluginAsk(r.s.model, r.s.ctx || 0) });
 }
 
 // The host side before an ask: wait until enough devices (and memory) are in the room, then deal the
@@ -252,6 +252,10 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
     throw new PooledError(/memory|allocate|OOM|out of memory|maxBufferSize/i.test(err.message) ? "memory" : "start",
       `Pooled room ${code} could not load ${info.name}: ${err.message}`);
   });
+  // the room was short of memory for 16k and opened the model at 8k (room/models.js pickCtx): too short
+  // for OpenClaw's prompt; say so once per start (/pooled shows it)
+  const st = n.status(), short = ownShortCtxNote(s.model, st.ctx, st.ctxNote, info.needGB);
+  if (short) r.note(short);
 }
 
 const lobbyMessage = (r) => `waiting for the host of room ${fmtCode(r.code)} to let this device in. On the host: press Allow (pooled.run), ` +

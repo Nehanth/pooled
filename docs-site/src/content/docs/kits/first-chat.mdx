@@ -17,7 +17,7 @@ import { Steps } from '@astrojs/starlight/components';
 Sources (for the fact-checker):
 - p2p.html: join screen ("Start a room, or join one.", This device, Memory, Start a room, Have a code?), #ai-panel ("Pick a model", "Start the model", "The room pools", "This device gives"), #ai-prompt "Message the room", #ai-send
 - room.js updateNeed(): "Needs N GB. The room has N GB." / "…, N GB short."; the picker preselects the biggest model that fits
-- room/models.js: NEED_GB 4.0, FILE_GB 1.83 (Qwen3 1.7B)
+- room/models.js: NEED_GB 5.6 (16K), NEED_MIN_GB 4.0 (8K fallback: pickCtx), FILE_GB 1.83 (Qwen3 1.7B)
 - room/preflight.js, room/errors.js, troubleshooting.mdx (the three problems below)
 - Verified 2026-09-30 on the Spark (GB10), pooled.run/room in headless Chromium (1280x800): default Memory 4 GB, picker rows ("fits", "13 GB short"),
   "Start downloads the whole 1.8 GB model to this device", online 43 s after Start (1.7 GB from Hugging Face), "Model ready on 1 device",
@@ -29,7 +29,7 @@ Sources (for the fact-checker):
 ## You need
 
 - **One laptop or desktop** with Chrome or Edge (113 or newer), or Safari 26. See [Browsers and requirements](/docs/browsers) for Linux and Firefox.
-- **About 4 GB of free memory** for the model.
+- **About 4 GB of free memory** for the model (an 8K context). With 5.6 GB it gets 16K.
 - **5 minutes**, and a **1.8 GB download** the first time. Later starts use the copy the browser keeps.
 
 No account and nothing to install.
@@ -54,7 +54,7 @@ No account and nothing to install.
 
 4. **Pick Qwen3 1.7B.**
 
-   **Pick a model** lists the three models. Each one says **fits**, or how many GB the room is short, like `13 GB short`. On one laptop, pick **Qwen3 1.7B**: it needs 4 GB. On the right, **The room pools** shows what this laptop gives.
+   **Pick a model** lists the three models. Each one says **fits**, or how many GB the room is short, like `13 GB short`. On one laptop, pick **Qwen3 1.7B**: it needs 4 GB with an 8K context, 5.6 GB with 16K. With 4 to 5.5 GB the row says `4 GB · 8K` and **fits**, and the room says `Qwen3 1.7B · 8K context: the room's memory is short for 16K`. On the right, **The room pools** shows what this laptop gives.
 
    <Shot src={picker} alt="The model picker in a new room, with what the model needs and what the room pools" />
 

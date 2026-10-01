@@ -8,7 +8,7 @@ sidebar:
 ---
 {/*
 Sources (for the fact-checker):
-- room/models.js: PICKER, NEED_GB (4.0 / 17.0 / 22.5), FILE_GB (1.83 / 16.06 / 20.84), CTX (1.7B 8192/16384, 27B 16384/32768, MoE 32768/65536), maxSeqFor() (?ctx= rounded to 256, at least 2048)
+- room/models.js: PICKER, NEED_GB (5.6 / 17.0 / 22.5), NEED_MIN_GB (1.7B 4.0 at its 8K fallback), CTX.fallback + pickCtx() (16K, else 8K when the pledges are short for 16K), FILE_GB (1.83 / 16.06 / 20.84), CTX (1.7B 16384/16384, fallback 8192, 27B 16384/32768, MoE 32768/65536), maxSeqFor() (?ctx= rounded to 256, at least 2048)
 - room/plan.js: bestFit() (picker preselects the biggest model that fits)
 - cli/README.md "Claude Code": its prompt is 15-20k tokens; use the MoE or 27B
 - room/pledge.js (phone caps)
@@ -18,11 +18,13 @@ Pick by how much memory the room has. The header shows it as `N GB pooled`, and 
 
 | Model | The room needs | Download | Context |
 |---|---|---|---|
-| Qwen3 1.7B | 4 GB | 1.83 GB | 8K (up to 16K) |
+| Qwen3 1.7B | 5.6 GB (4 GB at 8K) | 1.83 GB | 16K (8K when the room is short) |
 | Qwen3.8 27B | 17 GB | 16.06 GB | 16K (up to 32K) |
 | Qwen3.6 35B MoE | 22.5 GB | 20.84 GB | 32K (up to 64K) |
 
 The download is split across the devices that run the model, so each one fetches only its part.
+
+The 1.7B opens with a 16K context when the room has 5.6 GB for it. With less, down to 4 GB, it opens with 8K instead, and the room says so: `Qwen3 1.7B · 8K context: the room's memory is short for 16K`. The picker row then reads `4 GB · 8K fits`. Add a device or raise a pledge for 16K. A room opened with `?ctx=` keeps the context it asked for.
 
 ## Which one to pick
 

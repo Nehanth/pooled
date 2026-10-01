@@ -17,11 +17,11 @@ Sources (feat/openclaw-v1):
   OpenClaw 2026.9.6, plugins inspect, non-interactive onboard, models list (Auth yes) — passed 2026-09-30
 - docs/openclaw.md results table (unchanged from #266)
 - Which model: scratchpad openclaw-v1/test ocA35 (MoE) and ocA (1.7B) runs on the Spark, 2026-09-30; src/models.js recommendForOpenClaw
-TODO(verify): `openclaw plugins install clawhub:@pooled/openclaw` needs the package on ClawHub (not published yet).
+- `openclaw plugins install clawhub:@pooled/openclaw` verified 2026-09-30 in a clean OpenClaw 2026.9.6 profile (0.2.0, ClawHub audit Safe); npm view @pooled/openclaw = 0.2.0
 */}
 
-:::caution[Preview: not published yet]
-`@pooled/openclaw` 0.2.0 is ready for ClawHub and npm but isn't published yet. Until it is, [install it from a checkout](#from-a-checkout).
+:::note
+`@pooled/openclaw` 0.2.0 is on ClawHub and npm. The ClawHub listing is new. For a step-by-step walk-through, see the [OpenClaw starter kit](/docs/kits/openclaw).
 :::
 
 [OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted agent: a gateway process on your machine runs the agent loop and its tools (`exec`, `read`, `edit`, …) and calls a model provider for every step. The `@pooled/openclaw` plugin adds **Pooled** as that provider.
@@ -90,7 +90,7 @@ In `openclaw onboard`, pick **Pooled** → **Join a room**, paste the invite lin
 
 It keeps the pass the host gives it, so the gateway gets straight back in after every restart. It also learns the host's model and context window.
 
-The room needs at least a 16k context, because OpenClaw's own instructions and tools are about 12k tokens. `pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2; with 0.3.0 or 0.3.1 its host should run `pooled host qwen3-1.7b --ctx 16384`. Onboarding warns when the context is shorter.
+The room needs at least a 16k context, because OpenClaw's own instructions and tools are about 12k tokens. `pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2; with 0.3.0 or 0.3.1 its host should run `pooled host qwen3-1.7b --ctx 16384`. A room whose memory is short for 16k (under about 5.5 GB across the room) opens the 1.7B at 8k instead, on the room page, in `pooled host` and in the plugin's own room: the plugin then warns that OpenClaw needs 16k, and onboarding says `fits on this machine alone at 8k (OpenClaw needs 16k)`. Onboarding warns when a joined room's context is shorter.
 
 ## Which model
 

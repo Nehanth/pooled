@@ -395,6 +395,30 @@ test("dealPlan speed counts the KV cache like the room page: 1.7B, 2 GB + 2 GB s
   assert.ok(p.assigned[0] > 0 && p.assigned[0] < 28, `host holds ${p.assigned[0]}`);
 });
 
+test("ctxPick: the 1.7B at 16k when the pledges hold it, 8k when they are short for 16k, an asked --ctx stays", async () => {
+  const { nodeCtxFor } = await import("../roomnode.js");
+  const want = nodeCtxFor("qwen3-1.7b");
+  assert.equal(want, 16384);
+  const self = (gb) => ({ name: "laptop", meta: { contribGB: gb } });
+  const p4 = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4) });
+  assert.deepEqual([p4.ctx, p4.fits, p4.fellBack], [8192, true, true], "one laptop lending 4 GB: 8k");
+  assert.equal(p4.note, "Qwen3 1.7B · 8K context: the room's memory is short for 16K");
+  const p6 = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(6) });
+  assert.deepEqual([p6.ctx, p6.fits, p6.fellBack, p6.note], [16384, true, false, ""]);
+  // two devices together hold 16k
+  const two = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4), peers: [{ id: "b", name: "mac", meta: { contribGB: 3 } }] });
+  assert.equal(two.ctx, 16384);
+  // a share the host lowered (shareCap) counts as the device's pledge
+  const capped = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4), peers: [{ id: "b", name: "mac", meta: { contribGB: 3 } }], shareCap: new Map([["mac", 0.5]]) });
+  assert.equal(capped.ctx, 8192);
+  // --ctx 16384: no fallback (and short on 4 GB); short for both: 8k, not fitting
+  const asked = RoomNode.ctxPick("qwen3-1.7b", { want: nodeCtxFor("qwen3-1.7b", 16384), ask: 16384, self: self(4) });
+  assert.deepEqual([asked.ctx, asked.fits, asked.fellBack], [16384, false, false]);
+  assert.deepEqual([RoomNode.ctxPick("qwen3-1.7b", { want, self: self(3) }).ctx, RoomNode.ctxPick("qwen3-1.7b", { want, self: self(3) }).fits], [8192, false]);
+  // the MoE has no fallback: its context stays
+  assert.equal(RoomNode.ctxPick("qwen3.6-35b-moe", { want: 131072, self: self(4) }).ctx, 131072);
+});
+
 test("close() on a host tells the room it is over (bye closed, then leaving); a device told so stops waiting for it", async () => {
   const n = fakeNode();
   n.addPeer("a", "mac"); n.addPeer("b", "phone");

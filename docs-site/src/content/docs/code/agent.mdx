@@ -16,7 +16,7 @@ sidebar:
     (hand-edit notice)
   - harness/room-model.js: thinking false, reserve = min(maxNew, maxSeq/4) + 64, budget = maxSeq - reserve,
     TAG "<tool_response>" text stop, MARGIN 16, pin = system prompt length
-  - room/models.js CTX: 1.7B 8192 (max 16384), 27B 16384 (max 32768), MoE 32768 (max 65536)
+  - room/models.js CTX: 1.7B 16384 (8192 when the room is short: pickCtx), 27B 16384 (max 32768), MoE 32768 (max 65536)
   - harness/codetools.js (list_dir, read_file, search, edit_file, write_file; MAX_LINES 200, MAX_CHARS 8000,
     MAX_HITS 30, SEARCH_MS 2000, MAX_ENTRIES 200; fuzzy edit matching; fragment and unchanged-write guards)
   - harness/preview-tools.js (serve, preview_logs; SERVE_LINES 8, LOG_LINES 40, LOG_CHARS 3000; waits 2 s)

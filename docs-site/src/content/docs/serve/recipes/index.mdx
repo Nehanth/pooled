@@ -30,7 +30,8 @@ Codex, Claude Code and opencode don't know how big a model called `pooled` is. W
 
 | Room | Context | Codex compact limit | Claude Code output | opencode output |
 |---|---|---|---|---|
-| Qwen3 1.7B | 8192 | 6553 | 2048 | 2048 |
+| Qwen3 1.7B | 16384 | 13107 | 4096 | 4096 |
+| Qwen3 1.7B, room short of memory for 16K | 8192 | 6553 | 2048 | 2048 |
 | Qwen3.8 27B | 16384 | 13107 | 4096 | 4096 |
 | Qwen3.8 27B, `?ctx=32768` | 32768 | 26214 | 8192 | 8192 |
 | Qwen3.6 35B MoE | 32768 | 26214 | 8192 | 8192 |
