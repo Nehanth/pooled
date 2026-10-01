@@ -73,19 +73,20 @@ const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
 
 // dev-only view of room.js: live netlag and a plain-decode switch (see the header)
-function patchRoom(src) {
+function patchRoom(src, generation = false) {
   const a = "if (NETLAG) { setTimeout(() => sendHiddenNow(id, msg), NETLAG); return; }";
-  const b = "else if (ai.engine.mtp && ai.engine.specStep) {";
-  const c = "} else if (DENSE_SPEC && ai.chain.length && ai.engine.specStepDrafts && !ai.engine.specStep) {";
-  if (!src.includes(a) || !src.includes(b) || !src.includes(c)) throw new Error("room.js changed: update patchRoom in room_latency.mjs");
-  return src.replace(a, "const lag = window.__netlag ?? NETLAG; if (lag) { setTimeout(() => sendHiddenNow(id, msg), lag); return; }")
-    .replace(b, "else if (ai.engine.mtp && ai.engine.specStep && !window.__nospec) {")
-    .replace(c, "} else if (DENSE_SPEC && ai.chain.length && ai.engine.specStepDrafts && !ai.engine.specStep && !window.__nospec) {");
+  const b = "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep) {";
+  const c = "} else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {";
+  if (generation ? !src.includes(b) || !src.includes(c) : !src.includes(a)) throw new Error("room.js changed: update patchRoom in room_latency.mjs");
+  if (!generation) return src.replace(a, "const lag = window.__netlag ?? NETLAG; if (lag) { setTimeout(() => sendHiddenNow(id, msg), lag); return; }");
+  return src.replace(b, "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep && !window.__nospec) {")
+    .replace(c, "} else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {");
 }
 const srv = http.createServer((q, r) => {
   const p = path.join(ROOT, decodeURIComponent(q.url.split("?")[0]));
   if (!p.startsWith(ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { r.statusCode = 404; r.end(); return; }
   r.setHeader("content-type", MIME[path.extname(p)] || "application/octet-stream");
+  if (p === path.join(ROOT, "engine/generate.js")) { r.end(patchRoom(fs.readFileSync(p, "utf8"), true)); return; }
   if (p === path.join(ROOT, "room.js")) { r.end(patchRoom(fs.readFileSync(p, "utf8"))); return; }
   fs.createReadStream(p).pipe(r);
 }).listen(PORT, "127.0.0.1");

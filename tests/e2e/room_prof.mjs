@@ -7,7 +7,7 @@
 //   node tests/e2e/room_prof.mjs --model qwen3.6-35b-moe --devices 2 [--maxnew 48] [--modes plain,spec] [--out f.json] [--query gpusample=1]
 //
 // room.js and room/transport.js on disk are not changed: this harness serves them with trace marks
-// added (patchRoom / patchTransport in room_trace.mjs; they fail loudly if the anchors move), plus the dev-only
+// added (patchGenerator / patchPipeline / patchTransport in room_trace.mjs; they fail loudly if the anchors move), plus the dev-only
 // plain-decode switch room_latency uses (window.__nospec). An init script in every tab adds a GPU
 // timestamp pair around every command buffer while tracing (empty timestamped passes at the start
 // and end of each encoder, so the engine's passes are untouched) and times every mapAsync.
@@ -20,7 +20,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawn, execSync } from "child_process";
-import { patchRoom, patchTransport, INIT, clockOffset } from "./room_trace.mjs";
+import { patchGenerator, patchPipeline, patchTransport, INIT, clockOffset } from "./room_trace.mjs";
 
 const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
 const MODEL = arg("model", "qwen3.6-35b-moe");
@@ -37,7 +37,7 @@ const LOCAL = { "Qwen3.8-27B-Q4_0.gguf": "models/q38/model.gguf", "Qwen3-0.6B-Q8
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
 
-const PATCHED = { [path.join(ROOT, "room.js")]: patchRoom, [path.join(ROOT, "room/transport.js")]: patchTransport };
+const PATCHED = { [path.join(ROOT, "engine/generate.js")]: patchGenerator, [path.join(ROOT, "room/pipeline.js")]: patchPipeline, [path.join(ROOT, "room/transport.js")]: patchTransport };
 
 const srv = http.createServer((q, r) => {
   const p = path.join(ROOT, decodeURIComponent(q.url.split("?")[0]));

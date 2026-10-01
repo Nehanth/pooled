@@ -5,7 +5,8 @@
 // its copy says so in its ai-ready and the host forgets that checkpoint (ckptPrune).
 import { CKPT_FORMAT, CkptStore, CkptFormatError, encodeHeader, decodeHeader, decodeCkpt, headerLength, mismatch, parseName, safeRoom, sigHash }
   from "../../room/ckpt-store.js";
-import { roomFns } from "./room_src.js";
+import { createPipeline } from "../../room/pipeline.js";
+import { packWire } from "../../room/wire.js";
 import { PrefixIndex } from "../../harness/prefix.js";
 import { DROP_ALL } from "../../room/transport.js";
 
@@ -272,19 +273,18 @@ class FakeEngine {
   async runHidden(x, pos) { this.run([x[0]], pos); return Float32Array.of(x[0]); }
   async runHiddenBatch(xs, base) { this.run(Array.from(xs), base); return Float32Array.from(xs); }
 }
-const HOST_FNS = ["ckptEngine", "sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin", "ckptPrune"];
 function host({ disk = store(), engine = new FakeEngine(0, 8), chain = ["w0"], ckptMax = 2, out = [], ckptN = 0 } = {}) {
   const ai = { role: "host", model: "m", chain, pendingCtl: {}, fed: [], pos: 0, engine, ckpt: null, ckptN };
-  const fns = roomFns(HOST_FNS, { ai, CKPT_MAX: ckptMax, PrefixIndex, DROP_ALL, wireStats: { lastMax: 0 }, ckptDisk: disk, roomCode: "ABC", sendHidden: (to, msg) => out.push(msg) });
+  const fns = createPipeline({ state: ai, options: { checkpointMax: ckptMax },
+    checkpointStore: disk, getRoomCode: () => "ABC",
+    transport: { sendHidden: (to, msg) => out.push(msg) } });
   return { ai, out, disk, engine, ...fns };
 }
 function worker({ disk = store(), engine = new FakeEngine(8, 16), ckptMax = 2 } = {}) {
   const ai = { role: "worker", model: "m", engine, next: "host", hostId: "host", range: [8, 16] };
-  const fns = roomFns(["workerFrame", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore"], {
-    ai, DROP_ALL, performance, ckptDisk: disk, roomCode: "ABC", CKPT_MAX: ckptMax, ckptClear: () => {},
-    unpackWire: (d) => Float32Array.from(d.x), packWire: (h) => ({ x: Array.from(h) }), badF32: () => false,
-    aiStatus: () => {}, sendTo: () => {}, teleNote: () => {}, compute: { pass() {} }, sendHidden: () => {},
-  });
+  const fns = createPipeline({ state: ai, options: { checkpointMax: ckptMax },
+    checkpointStore: disk, getRoomCode: () => "ABC",
+    transport: { sendHidden: () => {}, sendTo: () => {} } });
   return { ai, disk, engine, ...fns };
 }
 // one prefill frame of `toks` from the host through the worker; both engines run the tokens
@@ -292,7 +292,7 @@ async function lap(h, w, toks) {
   const base = h.ai.fed.length;
   h.engine.run(toks, base);
   h.ai.fed.push(...toks); h.ai.pos = h.ai.fed.length;
-  h.sendChain({ t: "ai-hidden-b", basePos: base, n: toks.length, x: toks });
+  h.sendChain({ t: "ai-hidden-b", basePos: base, n: toks.length, ...packWire(Float32Array.from(toks)) });
   await w.workerFrame(h.out[h.out.length - 1]);
 }
 // an answer ends: the host saves; the save goes out with the next frame
@@ -355,7 +355,7 @@ Deno.test("room disk: a device dealt other layers finds nothing, and a load woul
   const w2 = worker({ disk: w.disk, engine: new FakeEngine(8, 12) });
   eq(await w2.ckptRestore(), []);
   let err = null;
-  try { await w2.workerFrame({ t: "ai-hidden-b", basePos: 3, n: 1, x: [9], ld: 1 }); } catch (e) { err = e; }
+  try { await w2.workerFrame({ t: "ai-hidden-b", basePos: 3, n: 1, ...packWire(Float32Array.from([9])), ld: 1 }); } catch (e) { err = e; }
   ok(err && /no saved slot/.test(err.message), err?.message);
 });
 
