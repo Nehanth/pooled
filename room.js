@@ -977,7 +977,11 @@ function onData(from, d) {
       // unique ("laptop 2"), and the device takes the name the roster gives it
       if (isHost) {
         // the name is held by a device that has been quiet for a second: ping it and decide in a moment
-        const quiet = !probedHellos.has(d) && quietNamesake(d.name, from, roster, heardOf, performance.now());
+        // a device that says it is back (back: 1) under a new link: its old link may still look alive
+        // (its close not seen yet), so probe it whatever its silence, or the room lists it twice and a
+        // re-deal deals both
+        const quiet = !probedHellos.has(d) && (quietNamesake(d.name, from, roster, heardOf, performance.now())
+          || (d.back ? [...roster].find(([rid, m]) => rid !== from && m.name === d.name)?.[0] || null : null));
         if (quiet) {
           const since = performance.now();
           sendTo(quiet, { t: "ping", ts: since });
@@ -993,17 +997,27 @@ function onData(from, d) {
       members.set(from, { name: d.name, meta: d.meta });
       ensureCard(from, d.name, d.meta);
       if (isHost) {
+        // the model runs on another device (biggestPeerId): say which, so this one takes its ai-ready-all
+        // when it links in (welcomeFar)
+        if (ai.role !== "host" && ai.hostId && ai.hostId !== peer.id && conns.has(ai.hostId) && ai.hostId !== from && $("ai-panel").classList.contains("online")) sendTo(from, { t: "ai-modelhost", id: ai.hostId });
         roster.set(from, { name: d.name, meta: d.meta }); broadcastRoster();
         if (!aiLoadDeath(from, d)) aiRejoin(from, d.name);
         if (d.died?.during && d.died.ago > 2) log("room", `${d.name} came back: its tab was killed ${d.died.ago} s ago while ${d.died.during}. Phones kill background tabs; keep the screen on.`);
         if (ai.visibility !== "all") sendTo(from, { t: "ai-visibility", mode: ai.visibility });
-        if (!d.back) aiWelcome(from); else offerRedealForNewcomers();
+        // a device back (a reload rejoins by itself with back: 1) that holds no layers is welcomed too:
+        // without ai-ready-all it showed the model picker as if no model ran (it keeps its own chat)
+        aiWelcome(from, { history: !d.back });
         codeWelcome(from);
       }
       break;
-    case "leaving":   // the tab is closing: treat the link as gone now instead of waiting for ICE to time out
-      conns.get(from)?.conn.close();
+    case "leaving": {   // the tab is closing: treat the link as gone now instead of waiting for ICE to time out
+      // (and for PeerJS's close, which can come late or never: until then the device would stay listed,
+      // and come back beside itself under a new link)
+      const e = conns.get(from);
+      try { e?.conn.close(); } catch {}
+      if (e && conns.get(from) === e) e.drop?.();
       break;
+    }
     case "admit":   // the host let this device in: keep the pass it gave, for coming back
       if (isHost || from !== PREFIX + roomCode) break;
       if (validKey(d.pass)) { myPass = d.pass; keepPass(roomCode, myPass); }
@@ -1049,6 +1063,8 @@ function onData(from, d) {
         const ce = conns.get(m.id); if (ce) ce.meta = m.meta;
       }
       for (const id of [...members.keys()]) if (!seen.has(id)) { members.delete(id); dropCard(id); }
+      // this device runs the model but not the room: a device it has no link to can't ask it yet
+      for (const id of seen) if (!members.get(id)?.meta?.api) welcomeFar(id);
       updateCluster();
       apiPanel();   // the API clients in the roster: the Serve API dot and list
       break;
@@ -2930,6 +2946,7 @@ function aiStartAnywhere() {
   const model = $("ai-model").value;
   const boss = biggestPeerId();
   if (boss === peer.id) { aiStart(model); return; }
+  ai.hostId = boss;   // its ai-layers and ai-ready-all are the ones this device listens to (FROM_HOST)
   $("ai-start").disabled = true; $("ai-model").disabled = true;
   aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`);
   $("ldg-sub").textContent = `${conns.get(boss)?.name || "the biggest device"} is dealing the layers`;
@@ -2961,6 +2978,10 @@ async function aiStart(modelArg) {
     // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every device builds its engine with it
     let ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
     const ROOM_KV = kvModeFor(modelKey, KV_ASK);   // KV cache format for every device: f16, or int8 with ?kv=q8
+    // a model host that is not the room's creator (biggestPeerId) has links only to the creator and to
+    // devices it dialed: link every device first, so the deal, ai-layers and ai-ready-all reach them all
+    // (a device the deal leaves out would otherwise sit on its Loading card, and could not ask)
+    if (!isHost) { aiStatus("linking the devices in the room…"); await linkMembers(); }
     // devices without WebGPU join as ask-only guests: they get the chat, not layers
     // (a device whose tab was killed twice while loading its layers stays a guest: aiLoadDeath)
     ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && conns.get(id)?.conn?.open !== false && !ai.dropped?.has(conns.get(id)?.name)).sort();
@@ -3136,7 +3157,8 @@ function showRedeal(on, why) {
   $("redeal-why").hidden = b.hidden;
 }
 // devices with a GPU that are in the room but hold no layers (joined after the start)
-function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && !ai.chain.includes(id) && !ai.leftOut?.has(id)); }
+// (a device the deal left out by name is still left out under a new id after a reload, not "late")
+function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && !ai.chain.includes(id) && !ai.leftOut?.has(id) && !["unneeded", "small"].includes(ai.outWhy?.[conns.get(id)?.name])); }
 function offerRedealForNewcomers() {
   if (ai.role !== "host" || !ai.engine || ai.degraded) return;
   const spare = sparePeers();
@@ -3150,6 +3172,12 @@ function outNow() {
   const out = { ...(ai.outWhy || {}) };
   for (const id of sparePeers()) out[conns.get(id)?.name || id] = "late";
   return out;
+}
+// what a device the deal left out says in its own chat (the Serve API screen: room/compute.js lendStatus)
+function outNote(why) {
+  if (why === "small") return "Not holding layers: what this device lends is less than one layer of this model. You can still ask.";
+  if (why === "late") return "This device joined after the start: it gets layers when the room re-deals. You can still ask.";
+  return `Not needed for this model: the ${isPhoneMeta(myMeta) ? "computers" : "other devices"} hold it. You can still ask.`;
 }
 // the device cards: what each holds of its pledge, or why it holds nothing
 const OUT_TEXT = { unneeded: "not needed: the others hold the model", small: "pledge under one layer", late: "joined after the start: waits for a re-deal" };
@@ -3205,12 +3233,41 @@ function missingNames() { return ai.chain.map((id, i) => (conns.has(id) ? null :
 function autoRedealOn() { return $("ai-autoredeal")?.checked !== false; }
 
 // a newcomer while the room is online gets the chat as a guest, and the conversation so far
-function aiWelcome(id) {
-  if (ai.role !== "host" || !ai.engine || ai.readyPeers.size < ai.chain.length || ai.chain.includes(id)) return;
+// The room's state for a device that says hello (it joins, reloads, or comes back on a new link), sent
+// on every hello and not only once: its screen shows the chat from ai-ready-all, so a device that
+// missed it (a replacement link that came in before the host saw the old one close: the host had no
+// departure to re-seat, #265) would keep a hidden input. A device in the chain that is being re-seated
+// (aiRejoin: ai-load) gets it from aiMaybeReady once the chain is whole again.
+function aiWelcome(id, { history = true } = {}) {
+  if (ai.role !== "host" || !ai.engine || ai.readyPeers.size < ai.chain.length || relinking()) { offerRedealForNewcomers(); return; }
+  const inChain = ai.chain.includes(id);
+  if (inChain && !ai.readyPeers.has(id)) return;
+  if (ai.layersByName) sendTo(id, { t: "ai-layers", by: ai.layersByName, held: ai.heldGB, out: outNow() });
   sendTo(id, { t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax(), out: outNow() });
-  if (ai.visibility === "all" && ai.transcript.length) sendTo(id, { t: "ai-history", items: ai.transcript.slice(-20) });
+  if (!inChain && history && ai.visibility === "all" && ai.transcript.length) sendTo(id, { t: "ai-history", items: ai.transcript.slice(-20) });
   offerRedealForNewcomers();
 }
+
+// links from this device (a model host that is not the room's creator) to every device in the
+// room's roster it has none to; API clients talk to the creator only
+async function linkMembers(ms = 15000) {
+  const ids = [...members].filter(([id, m]) => !conns.has(id) && !m.meta?.api).map(([id]) => id);
+  await Promise.all(ids.map((id) => ensureLink(id, ms)));
+}
+// A device that joins (or reloads into) a room whose model host is not the room's creator only links
+// to the creator. The model host learns of it from the roster: it links to it and welcomes it, as the
+// creator would (aiWelcome), with the layer map, so a device left out of the deal sees why.
+function welcomeFar(id) {
+  if (isHost || ai.role !== "host" || !ai.engine || conns.has(id) || welcomeFar.pending.has(id)) return;
+  welcomeFar.pending.add(id);
+  ensureLink(id, 20000).then((ok) => {
+    welcomeFar.pending.delete(id);
+    if (!ok || ai.role !== "host" || !ai.engine) return;
+    if (ai.layersByName) sendTo(id, { t: "ai-layers", by: ai.layersByName, held: ai.heldGB, out: outNow() });
+    aiWelcome(id);
+  });
+}
+welcomeFar.pending = new Set();
 
 // A device in the chain comes back from a tab that was killed while it loaded its layers (the
 // "loading" breadcrumb in its hello: iOS closes a Safari tab that goes over its memory budget, #207).
@@ -4626,11 +4683,17 @@ async function aiOnData(from, d) {
   switch (d.t) {
     case "ai-start-req":
       setModelValue(d.model);   // every screen shows the model that was actually started
-      if (d.boss !== peer.id && conns.has(d.boss)) ai.hostId = d.boss;   // the device dealing the layers runs the room
+      // the device dealing the layers runs the room: listen to it, even before this device has a link to
+      // it (a model host that is not the room's creator links every device before it deals)
+      if (d.boss !== peer.id) ai.hostId = d.boss;
       $("ai-start").disabled = true; $("ai-model").disabled = true;
       if (d.boss !== peer.id) { aiLoading(true, `starting ${MODELS[d.model]?.label.split("·")[0].trim()}`); $("ldg-sub").textContent = `${d.by} pressed start`; $("ldg-fill").style.width = "0%"; }
       if (d.boss === peer.id) { toast(`${d.by} started ${MODELS[d.model]?.label.split("·")[0].trim()}`); aiStart(d.model); }
       else aiStatus(`${d.by} started the model…`);
+      break;
+    case "ai-modelhost":   // the room's creator: the model runs on another device, which links to this one
+      if (isHost || from !== PREFIX + roomCode || ai.role === "host" || ai.role === "worker" || typeof d.id !== "string") break;
+      ai.hostId = d.id;
       break;
     case "ai-next":
       // relink: the device after this one came back under the same id; the old link to it is dead
@@ -4848,7 +4911,8 @@ async function aiOnData(from, d) {
         chatBotEnd(null, it.stats);
       }
       break;
-    case "ai-ready-all":
+    case "ai-ready-all": {
+      const wasOnline = $("ai-panel").classList.contains("online");   // (a device back on a dropped link hears it again)
       aiLoading(false);
       if (d.out && typeof d.out === "object") { ai.outWhy = d.out; paintHeld(); }
       $("ai-panel").classList.add("online");
@@ -4859,11 +4923,14 @@ async function aiOnData(from, d) {
       $("chat-tools").hidden = false;
       $("mode-bar").hidden = false;   // Chat | Code for every device, not only the host (a phone guest had no way to Code)
       emptyText("The model is ready. Ask anything.");
-      sysNote("Model ready");
+      if (!wasOnline) sysNote("Model ready");
+      // left out of the deal: say why, so a device with no layers doesn't look broken
+      if (!ai.range && ai.outWhy?.[myName]) { const t = outNote(ai.outWhy[myName]); emptyText(t); if (!wasOnline) sysNote(t); }
       aiStatus(ai.range ? `cluster online · serving layers ${ai.range[0]}–${ai.range[1] - 1}` : "cluster online · this device asks, the others think");
       mascot("Cluster online! Type a question, the whole room answers.");
       codeRoleChanged();
       break;
+    }
     case "ai-ask":
       if (ai.role !== "host") break;
       if (d.api) { apiAsk(from, d); break; }
