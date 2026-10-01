@@ -7,8 +7,8 @@
 //   node packages/room-node/test/e2e.mjs auto       createRoom + ask, no start(): the ask deals the layers (solo)
 //   node packages/room-node/test/e2e.mjs cache      OpenClaw's recorded request through the host's checkpoints:
 //        a cold first turn, a side request, the follow-up, a new session, the next day (see cacheRun);
-//        SETUP=solo|pair|tab (the node alone, + a second node, + a browser tab), REQ (requests.jsonl
-//        recorded from an OpenClaw gateway), CKPT=0 (no checkpoints: the baseline), CTX
+//        SETUP=solo|pair|proc|tab (the node alone, + a second node, the second node in its own process, + a browser tab), REQ (requests.jsonl
+//        recorded from an OpenClaw gateway), CKPT=0 (no checkpoints: the baseline), CTX, STEPS=turn1 (the cold turn only)
 // env: MODELS (model dir, layout of source.js LOCAL; default <checkout>/models), MODEL (qwen3-1.7b), PROMPT,
 //      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, CHROME_BIN (a Chromium or
 //      headless_shell with WebGPU; default playwright's), PORT (8231), OUT (result JSON path),
@@ -102,13 +102,14 @@ async function openTab(name, gb) {
 }
 const tabStatus = () => page.evaluate(() => ({ status: document.getElementById("ai-status")?.textContent, log: [...document.querySelectorAll("#chat-log div")].slice(-4).map((d) => d.textContent) }));
 
-let host = null, worker = null, code = 1;
+let host = null, worker = null, joiner = null, code = 1;
 const finish = async (c) => {
   code = c;
   out.errors = out.errors || [];
   console.log(JSON.stringify(out));
   if (process.env.OUT) fs.writeFileSync(process.env.OUT, JSON.stringify(out, null, 1));
   try { await worker?.close(); } catch {}
+  joiner?.kill("SIGTERM");
   try { await host?.close(); } catch {}
   try { await Promise.race([ctx?.close(), new Promise((r) => setTimeout(r, 10000))]); } catch {}
   peerServer?.kill(); srv.close(); wsrv.close(); fs.rmSync(tlsDir, { recursive: true, force: true });
@@ -177,6 +178,7 @@ async function cacheRun(room) {
   };
   const steps = [];
   const turn1 = await run("turn1", R.messages); steps.push(turn1);
+  if (process.env.STEPS === "turn1") return { steps, status: room.status() };   // the cold first turn only
   steps.push(await run("title", [{ role: "system", content: "Write a short title (at most 6 words) for this conversation. Reply with the title only." }, { role: "user", content: R.messages.filter((m) => m.role === "user").map((m) => m.content).join("\n").slice(0, 400) }], null));
   const follow = [...R.messages, { role: "assistant", content: turn1.text }, { role: "user", content: "And what is the capital of Germany? One word." }];
   const turn2 = await run("turn2", follow); steps.push(turn2);
@@ -193,6 +195,13 @@ try {
     const SETUP = process.env.SETUP || "solo";
     host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, name: "node-host", signal: SIGNAL, modelDir: MODELS, log: nodeLog("host"), ckpt: CKPT, ctx: CTX });
     if (SETUP === "pair") worker = await joinRoom(host.code, { pledgeGB: NODE_GB, name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
+    if (SETUP === "proc") {   // the second node in its own process (its own JS thread and GPU device, as on two machines)
+      joiner = spawn(process.execPath, [path.join(ROOT, "packages/room-node/join.mjs"), host.code, "--gb", String(NODE_GB), "--name", "node-b",
+        ...(SIGNAL ? ["--signal", SIGNAL] : []), "--models", MODELS], { stdio: ["ignore", "pipe", "pipe"] });
+      for (const s of [joiner.stdout, joiner.stderr]) s.on("data", (b) => String(b).split("\n").filter((l) => l && !/^(TU|MESA|Warning)/.test(l)).forEach((l) => log("[b] " + l)));
+      const tJoin = Date.now();
+      while (host.gpuPeers().length < 1) { if (Date.now() - tJoin > 60000) throw new Error("the second node never joined"); await new Promise((r) => setTimeout(r, 200)); }
+    }
     if (SETUP === "tab") {
       await openTab("tab", TAB_GB);
       await page.fill("#code-input", host.code); await page.click("#join-btn");
