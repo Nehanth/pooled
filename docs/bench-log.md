@@ -1414,3 +1414,19 @@ How the three branches changed when merged:
 
 Still open: a re-deal while signaling is down still fails, and an answer caught in a freeze longer than
 ~15 s isn't retried automatically.
+
+## 2026-10-01: shared expert once per verify pass (report item MOE-2, branch perf/moe-shared-verify), GB10 Deno: not built
+
+Question: in a K=3 speculative verify (4 columns), `moe_gus` / `moe_dnc` read the shared expert (Q8_0, 3.3 MB a
+layer) once per column. Would a twin that reads it once for all columns pay? Measured first; the answer is no.
+
+- In the model (Qwen3.6-35B-A3B, prof_ts-style per-dispatch timestamps, `verifyN` of 4 tokens vs `forwardToken`,
+  2 runs): `moe_gus_q4_q8` 2.94 -> 7.20-7.24 ms (x2.45), `moe_dnc_q4_q8` 1.83-1.84 -> 4.12 ms (x2.24),
+  `moe_dnc_q8_q8` x1.91. Nowhere near 4x.
+- Upper bound (`tests/bench/moe_verify_cols.js`, synthetic, a separate shared expert per launch, 2 runs, legacy
+  layout as on GB10): C=4 gus+dnc 309-321 µs a layer vs 102-106 µs at C=1 (x3.02). The same kernels patched so that
+  only column 0 reads the shared expert: 303-309 µs, 6-12 µs a layer less (2-4% of the MoE FFN). Removing the
+  10 MB a layer of re-reads would cost 44 µs at that pass's bandwidth, so L2 already serves most of them.
+  All four columns on the same 8 experts: x2.46-2.52 (L2 reuse across columns works for routed experts too).
+- Ceiling over 40 layers: 0.24-0.48 ms of a ~43 ms spec step (0.5-1.1%), before any cost of the twin
+  (an extra launch per layer, the `moe_dnc` combine reindexed). Below the 5% bar; not built.
