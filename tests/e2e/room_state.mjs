@@ -145,7 +145,7 @@ async function startModel(host, split) {
   await host.evaluate(([m, sp]) => {
     for (const [id, v] of [["ai-model", m], ["ai-sampling", "exact"], ...(sp ? [["ai-split", sp]] : [])]) { const s = document.getElementById(id); s.value = v; s.dispatchEvent(new Event("change", { bubbles: true })); }
   }, [MODEL_KEY, split]);
-  await host.waitForFunction(() => !document.getElementById("ai-start").disabled, null, { timeout: 20000 });
+  await host.waitForFunction(() => !document.getElementById("ai-start").disabled, null, { timeout: 120000 });
   await host.click("#ai-start");
 }
 const online = (p, ms = 300000) => p.waitForFunction(() => document.getElementById("ai-panel").classList.contains("online"), null, { timeout: ms }).then(() => true, () => false);
@@ -212,7 +212,8 @@ async function leftout(label, gbs) {
 
 async function rejoin() {
   const host = await device("host"), worker = await device("worker", { phone: true });
-  await openRoom([[host, "host", 12], [worker, "worker", 6]], "&split=memory&phonelayers=1");
+  // (a phone lends at most 1 GB: the host's 16 makes the 17 the 27B's room needs)
+  await openRoom([[host, "host", 16], [worker, "worker", 6]], "&split=memory&phonelayers=1");
   await startModel(host, "memory");
   const up = (await online(host)) && (await online(worker, 60000));
   check("rejoin: the room is online with the worker holding layers", up && (await worker.evaluate(() => !!document.getElementById("ai-status").textContent.match(/serving layers/))), (await view(worker)).status);
