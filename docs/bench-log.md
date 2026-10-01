@@ -1597,3 +1597,30 @@ The M5 gained less than the ~5% estimated (the copies there cost ~0.3 ms per ste
 gained more. Gates: unit tests, `npm run check`, `test_q38_bits` (4cac59d8, and 4f70a9ca with
 ATTN_PREFILL_TILE=0: same as main), `test_moe` MATCH llama.cpp + spec == plain, `test_mtp`, `test_mtp_split`,
 `test_moe_split`, M5 bits equal to main, `specIdentical` and golden in every Chrome run.
+
+## 2026-10-01: dp4a wide prefill GEMM on the 27B (branch perf/prefill-dp4a-wide-gemm-27b, not kept as default: opt-in)
+
+The wide prefill's projections as `dot4I8Packed` on activations quantized per 32 values (llama.cpp's MMQ numerics),
+`prefillDp4a: true` / `?dp4a=1`. Fast, but it failed the gate that was set for turning it on: its next-token
+log-probabilities vs llama.cpp's top 20 (`tests/test_prefill_dp4a.js`, llama-server goldens refreshed with `n_probs`)
+must be no further than the f32 path's + 0.05 nats. So it ships opt-in, and the dense default is the f32 wide GEMM.
+
+| 27B, GB10, Chrome | 16-column | f32 wide (new default) | dp4a | dp4a relDiff vs 16-col |
+| --- | ---: | ---: | ---: | ---: |
+| 2048 tokens (2 runs) | 82.6 / 83.2 | 102.5 / 103.1 | 186.9 / 188.6 | 2.3e-2 |
+| 8192 tokens (2 runs) | 77.3 / 66.4 | 96.2 / 96.4 | 170.9 / 171.2 | 0.21-0.31 |
+
+Max |logprob - llama.cpp| over its top 20 (narrow / wide / dp4a): 27B 150 tok 0.148 / 0.148 / 0.135, 700 tok
+0.115 / 0.115 / 0.130, **2100 tok 0.260 / 0.260 / 0.951 (fail)**; MoE 150 tok 0.337 / 0.337 / 0.297, 700 tok
+0.214 / 0.216 / 0.264 (fail), 2100 tok 1.99 / 1.86 / 2.17 (fail). Argmax, 32 greedy tokens vs llama.cpp and spec ==
+plain matched in every mode. The metric is a max over tail tokens (logprob -13..-17 at 2100), so it is strict; a
+probability-weighted gate (KL) might pass, but the rule was fixed before the run and is kept.
+
+Kept from the branch: the f32 wide GEMM as the dense default (ubatch 256), and one multi-column SiLU on the
+16-column pass. Gates: unit 967 pass, `npm run check`, barrier lint 0 findings (dp4a kernels included; they are also
+optional at create, so a compiler that rejects them turns dp4a off instead of failing the load), `test_q38_bits`
+PREFILL_UBATCH=0 c26dbc5 / 3177f9f1 (= main: the SiLU change is exact), ATTN_PREFILL_TILE=0 PREFILL_UBATCH=0
+f0537158 / 5d287854, default re-baselined to 4612ece1 / aeb06a4d (the wide prefill; same greedy and spec tokens),
+`test_moe` MATCH llama.cpp x3 + spec == plain, `test_dense_spec` PASS, `test_prefill_opts` 27B PASS (relDiff
+1.44e-4). `test_prefill_opts` MoE fails at 700 tokens (relDiff 2.45e-2 vs 0.02 tolerance) on main too, same number:
+pre-existing, not from this branch.
