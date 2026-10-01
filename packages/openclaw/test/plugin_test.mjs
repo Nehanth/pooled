@@ -298,3 +298,33 @@ test("with OpenClaw's SDK: the entry registers and the StreamFn feeds its real e
   assert.equal(r.msg.stopReason, "toolUse", r.msg.errorMessage);
   assert.deepEqual(r.msg.content.find((c) => c.type === "toolCall").arguments, { path: "notes.txt" });
 });
+
+// The 1.7B opens at 16k, or at 8k when the room's memory is short for 16k (room/models.js pickCtx).
+// OpenClaw's prompt alone is ~12k tokens, so an 8k room is too short for it: the plugin says so.
+test("the 1.7B: the plugin asks the room node for no context (16k, 8k when short), and warns when OpenClaw gets 8k", async () => {
+  const { pluginAsk, pluginCtx, shortCtxNote, ownShortCtxNote, modelChoices, OPENCLAW_MIN_CTX, lib } = await import("../src/models.js");
+  const { roomFitNow } = await import("../../../cli/lib/hostui.js");
+  assert.equal(pluginCtx("qwen3-1.7b"), 16384, "what OpenClaw is told: 16k");
+  assert.equal(pluginAsk("qwen3-1.7b"), 0, "the node picks 16k, or 8k when the room is short");
+  assert.equal(pluginAsk("qwen3-1.7b", 16384), 16384, "an asked context stays asked");
+  assert.equal(pluginAsk("qwen3.6-35b-moe"), 131072, "no fallback on the MoE: its largest");
+  // one machine lending 4 GB: the room opens the 1.7B at 8k; 6 GB holds 16k
+  const one = (gb) => roomFitNow(lib, { model: "qwen3-1.7b", devices: [{ name: "this machine", meta: { contribGB: gb, webgpu: true } }], ctxAsk: pluginAsk("qwen3-1.7b") });
+  assert.deepEqual([one(4).fits, one(4).ctx, one(4).fellBack], [true, 8192, true]);
+  assert.deepEqual([one(6).fits, one(6).ctx, one(6).fellBack], [true, 16384, false]);
+  // onboarding says it before the owner picks
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-oc-ctx-"));
+  const r4 = modelChoices(dir, 4).rows.find((r) => r.key === "qwen3-1.7b");
+  assert.match(r4.hint, /needs about [\d.]+ GB across the room \([\d.]+ GB at 8k\) · 16k context · fits on this machine alone at 8k \(OpenClaw needs 16k\)/);
+  assert.match(modelChoices(dir, 8).rows.find((r) => r.key === "qwen3-1.7b").hint, / · fits on this machine alone · /);
+  // its own room at 8k: what the owner reads (/pooled)
+  const own = ownShortCtxNote("qwen3-1.7b", 8192, one(4).ctxNote, 5.5);
+  assert.match(own, /^Qwen3 1\.7B · 8K context: the room's memory is short for 16K\. OpenClaw needs 16k \(its own instructions and tools take about 12k tokens\), so answers may end in "Context overflow"\. Raise this machine's pledge \(\/pooled pledge <GB>: about 6 GB across the room\) or add a device/);
+  assert.equal(ownShortCtxNote("qwen3-1.7b", 16384, "", 5.5), null, "16k: nothing to say");
+  // a joined room at 8k: the host's memory was short; more memory gets 16k
+  const joined = shortCtxNote("qwen3-1.7b", 8192, "spark");
+  assert.match(joined, /spark runs this room with a 8192-token context, but OpenClaw needs 16k/);
+  assert.match(joined, /`pooled host qwen3-1\.7b --ctx 16384` \(the room opens Qwen3 1\.7B at 8K when its memory is short for 16K: a device lending more, or one more device, gets 16K\)\.$/);
+  assert.equal(shortCtxNote("qwen3-1.7b", 16384), null);
+  assert.equal(OPENCLAW_MIN_CTX, 16384);
+});

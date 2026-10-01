@@ -17,7 +17,7 @@ The room's context is the most tokens one request can hold: prompt plus answer.
 
 | Model | Default | Most with `?ctx=` |
 |---|---|---|
-| Qwen3 1.7B | 8192 | 16384 |
+| Qwen3 1.7B | 16384 (8192 when the room is short of memory for 16K) | 16384 |
 | Qwen3.8 27B | 16384 | 32768 |
 | Qwen3.6 35B MoE | 32768 | 65536 |
 

@@ -88,6 +88,8 @@ The context a room opens with comes from `CTX` in `room/models.js`, and `?ctx=N`
 |---|---|---|
 | Qwen 3.8 27B | 16384 | 32768 |
 | Qwen 3.6 35B MoE | 32768 | 65536 |
-| Qwen3 1.7B | 8192 | 16384 |
+| Qwen3 1.7B | 16384 (`fallback`: 8192) | 16384 |
+
+A `fallback` is the context a room opens with when its pledges can't hold the model at the default but can there (`pickCtx`): the room page, `pooled host` and the OpenClaw plugin all pick it the same way, and say so. `NEED_MIN_GB` is the need at the fallback. An explicit `?ctx=` or `--ctx` is never lowered.
 
 Without a `CTX` entry a model gets 8192 tokens on the hybrid engine and 2048 on the dense engine. The hybrid models keep a KV cache only on their full-attention layers, so long context is cheap in memory; the practical limit is prefill speed. See [Long context and sessions](/docs/internals/sessions).

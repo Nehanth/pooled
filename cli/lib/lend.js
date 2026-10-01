@@ -92,7 +92,8 @@ export const HELP_HOST = `Usage
 More options
   --code <CODE>     the room code to use (default: a random one of six characters)
   --ctx <n>         the context to ask for, in tokens (default: the longest the model takes in a
-                    room: 16k on the 1.7B, 64k on the 27B, 128k on the MoE)
+                    room: 16k on the 1.7B, 8k when the room is short of memory for 16k; 64k on
+                    the 27B, 128k on the MoE)
   --devices <n>     the same as --wait (its older name)
   --signal <spec>   PeerJS signaling server(s), as pooled join
   --no-check        skip the test allocation that confirms the memory is there

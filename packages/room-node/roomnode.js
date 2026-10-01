@@ -42,8 +42,8 @@ import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { packWire, unpackWire, badF32 } from "../../room/wire.js";
-import { planSplit, planForSpeed, phonesToLeaveOut, isPhoneMeta } from "../../room/plan.js";
-import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM } from "../../room/models.js";
+import { planSplit, planForSpeed, phonesToLeaveOut, isPhoneMeta, roomFit } from "../../room/plan.js";
+import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { isPrefix } from "../../harness/prefix.js";
 import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "../../room/conversation.js";
@@ -77,8 +77,9 @@ const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal",
 // The context a node opens a room with: what was asked (clamped by room/models.js), else the largest
 // room context the model allows (room/models.js CTX: 16k on the 1.7B, 64k on the 27B, 128k on the MoE),
 // as the OpenClaw plugin opens it (packages/openclaw pluginCtx): an agent's prompt alone is 8-12k
-// tokens, and the 1.7B at its 8k default ended every OpenClaw turn in "Context overflow". The 1.7B's
-// f32 cache costs 1.5 GB more at 16k (5.5 GB in all); --ctx 8192 asks for less. A model without a CTX
+// tokens, and the 1.7B at 8k ended every OpenClaw turn in "Context overflow". The 1.7B's f32 cache
+// costs 1.8 GB more at 16k (5.6 GB in all); a room whose pledges hold it only at 8k opens it there
+// (room/models.js pickCtx, as the room page does), and --ctx 8192 asks for 8k. A model without a CTX
 // entry keeps the room's default. (qwen35: the deal lowers it to what every device can bind.)
 export const nodeCtxFor = (model, ask = 0) => (ask > 0 || !CTX[model] ? maxSeqFor(model, ask) : CTX[model].max);
 // what a host that closes its room says to the devices in it (bye {closed: 1})
@@ -395,7 +396,7 @@ export class RoomNode extends EventEmitter {
           // deal's ai-layers) still holds its old layers, and frees them when it is not in the map
           // (also while a deal loads: it is the map of the deal in progress)
           if (this.ai.layersByName && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-layers", by: this.ai.layersByName });
-          if (this.ai.online && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-ready-all", model: this.ai.model, label: MODELS[this.ai.model]?.label, ctx: this.ctxMax() });
+          if (this.ai.online && !this.ai.chain.includes(from)) this.sendTo(from, { t: "ai-ready-all", model: this.ai.model, label: MODELS[this.ai.model]?.label, ctx: this.ctxMax(), ...(this.ai.ctxWant ? { ctxWant: this.ai.ctxWant } : {}) });
           this.log(`${d.meta?.api ? "API client " : ""}${d.name} ${d.back ? "came back" : "joined"}${d.meta?.webgpu ? ` (${d.meta.gpu}, ${d.meta.contribGB} GB)` : ""}`);
         } else if (from === PREFIX + this.code) this.hostName = d.name;
         this.emit("members");
@@ -454,7 +455,10 @@ export class RoomNode extends EventEmitter {
         if (ai.role === "worker" && !d.by?.[this.name]) this.freeLayers("guest");
         return;
       case "ai-start-failed": ai.startFailed = d.why || "stopped"; if (!ai.loadingShard) this.freeLayers(null); this.emit("startfailed", d.why); return;
-      case "ai-ready-all": ai.online = true; ai.model = d.model; if (!ai.role) ai.role = "guest"; this.emit("online", d); return;
+      case "ai-ready-all": ai.online = true; ai.model = d.model; if (!ai.role) ai.role = "guest";
+        // the host opened the model at its fallback context (room/models.js pickCtx): say so
+        ai.ctxNote = d.ctxWant > d.ctx && MODELS[d.model] ? ctxShortNote(String(MODELS[d.model].label).split("·")[0].trim(), d.ctx, d.ctxWant) : "";
+        this.emit("online", d); return;
       case "ai-degraded": case "ai-redeal": ai.online = false; this.emit(d.t.slice(3), d); return;
       case "ai-share":   // the host lowered this device's share (or left it out) after its load was killed
         if (!d.drop && d.gb > 0) this.meta.contribGB = Math.max(0.1, Math.min(this.meta.contribGB || d.gb, d.gb));
@@ -668,6 +672,18 @@ export class RoomNode extends EventEmitter {
     const bind = Math.min(...metas.map((m) => (m?.maxBindMB || 128) * 2 ** 20));
     return ctxForBinding(ggufMeta, ctx, kv, bind);
   }
+  // The room's context for these pledges (room/models.js pickCtx, as the room page's aiStart): `want`
+  // when the pledges hold the model there (roomBytes: weights + KV at that context, and what the host
+  // holds besides), else the model's fallback when they hold it there (the 1.7B: 8k for 16k); an asked
+  // --ctx stays. -> { ctx, want, fits, fellBack, note } (note: what the room says when it fell back)
+  static ctxPick(modelKey, { want, ask = 0, kv = "f16", self, peers = [], shareCap = new Map() }) {
+    const pl = [self, ...peers].map((d) => pledgeGB(d.meta, shareCap.get(d.name)) * 2 ** 30);
+    const pick = pickCtx(modelKey, { want, ask, fitsAt: (c) => {
+      const rb = roomBytes(modelKey, c, kv === "q8" ? "q8" : "f16");
+      return !rb || roomFit(rb.L, pl, rb.layerBytes, rb.hostBytes).fits;
+    } });
+    return { ...pick, note: pick.fellBack ? ctxShortNote(String(MODELS[modelKey]?.label || modelKey).split("·")[0].trim(), pick.ctx, pick.want) : "" };
+  }
   setSplit(mode) { this.splitMode = mode === "speed" ? "speed" : "memory"; }
   // fitBytes: room/models.js roomBytes() for the model at this context (weights + KV per layer, what the
   // host holds besides): the speed split fills each device by it, as the room page's roomFit does
@@ -740,6 +756,13 @@ export class RoomNode extends EventEmitter {
     const nameOf = (id) => this.conns.get(id)?.name || id;
     ai.dealtPeers = new Set(this.gpuPeers());   // every device this deal saw, left out or not (for a --devices host's re-deal)
     const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: this.conns.get(id)?.meta }));
+    // the model's default context, or its fallback (the 1.7B: 8k for 16k) when only that fits the
+    // room's pledges (room/models.js pickCtx, the room page's rule); an asked --ctx stays as asked
+    const pick = RoomNode.ctxPick(modelKey, { want: ctx, ask: this.ctxAsk, kv, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap });
+    ctx = pick.ctx;
+    ai.ctxWant = pick.fellBack ? pick.want : 0;
+    ai.ctxNote = pick.note;
+    if (ai.ctxNote) this.log(ai.ctxNote);
     const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
       fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16") });
     const { ranges, assigned } = plan;
@@ -822,7 +845,7 @@ export class RoomNode extends EventEmitter {
     if (!this.hosting() || !ai.engine || ai.readyPeers.size < ai.chain.length || this.relinking()) return;
     ai.degraded = false; ai.online = true; ai.role = "host";
     clearTimeout(ai.idleRedeal);
-    this.broadcast({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: this.ctxMax() });
+    this.broadcast({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: this.ctxMax(), ...(ai.ctxWant ? { ctxWant: ai.ctxWant } : {}) });
     this.log(`room online · ${ai.chain.length + 1} device(s), ${ai.cfg.num_hidden_layers} layers`);
     this.emit("online");
     ai.startOk?.();
@@ -1517,7 +1540,7 @@ export class RoomNode extends EventEmitter {
     return { code: this.code, name: this.name, hosting: this.hosting(), role: ai.role, model: ai.model, online: !!ai.online, degraded: !!ai.degraded,
       range: ai.range, devices: devs, pledgedGB: +devs.reduce((a, d) => a + d.gb, 0).toFixed(1),
       split: this.split?.names?.map((nm, i) => `${nm} ${this.split.ranges[i][0]}-${this.split.ranges[i][1] - 1}`) || null,
-      ctx: ai.engine?.maxSeq || null, loading: !!ai.loadingShard, signaling: !this.signalDown,
+      ctx: ai.engine?.maxSeq || null, ctxNote: ai.ctxNote || null, loading: !!ai.loadingShard, signaling: !this.signalDown,
       passes: this.hosting() ? ai.frames || 0 : this.frames || 0,
       ckpt: ai.ckpt ? { pinned: ai.ckpt.items.filter((x) => x.pin).map((x) => x.ids.length), answers: ai.ckpt.items.filter((x) => !x.pin).map((x) => x.ids.length), hits: { ...ai.ckpt.hits } } : null };
   }
