@@ -49,6 +49,13 @@ Sources (for the fact-checker):
 
 [OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted assistant. The Pooled plugin makes Pooled its model: the OpenClaw gateway starts a Pooled room and holds part of the model on its own GPU. Your other computers, browser tabs and phones join the room and hold the rest.
 
+
+<video controls preload="metadata" playsinline poster="/docs/media/openclaw-inbox-demo.jpg" style="width:100%;border-radius:12px;margin:1rem 0">
+  <source src="/docs/media/openclaw-inbox-demo.mp4" type="video/mp4" />
+</video>
+
+*Two minutes, no sound: OpenClaw on a Mac Studio and a gaming PC with an RTX 5070, pooling the 35B MoE to triage an inbox. Slow parts are sped up and labeled.*
+
 ## You need
 
 - **A computer with a GPU for the gateway:** Linux with Vulkan (glibc 2.38 or newer, like Ubuntu 24.04), or macOS 26 or newer. Windows is untested.
@@ -139,6 +146,17 @@ Onboarding couldn't start the gateway as a service. Run `openclaw gateway run` a
 The plugin needs Vulkan on Linux or Metal on macOS 26 or newer. If the optional WebGPU package didn't install, the gateway says how to add it.
 
 More: [OpenClaw](/docs/openclaw) and [Troubleshooting](/docs/troubleshooting).
+
+
+## Try next: triage your inbox
+
+The task from the video. Unzip [sample-inbox.zip](/docs/kits/sample-inbox.zip) into your OpenClaw workspace (it makes an `inbox/` folder with 15 made-up emails), then ask:
+
+```text
+Triage my inbox: the 15 emails are in inbox/, read them all in one go. Sort them into reply today, later and ignore, one line each. Then draft short replies for the reply-today ones.
+```
+
+OpenClaw lists the folder, reads all 15 in one step and answers. In our run, the leaking ceiling, the moved deadline and the airport pickup went to reply today, and the "you won a yacht" email went to ignore. On a Mac Studio plus an RTX 5070 PC the answer streamed at 29 tokens a second.
 
 ## Next
 
