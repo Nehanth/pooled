@@ -1,7 +1,7 @@
 local-server
 .gitignore
 *.mov
-*.mp4
+/*.mp4
 models
 tests
 benchmarks
@@ -27,8 +27,4 @@ docs-site/dist
 docs-site/.astro
 /dist
 
-# The docs embed one demo video (the OpenClaw starter kit); *.mp4 above keeps every other video out of the upload.
-!docs-site/public/media/*.mp4
 
-# The docs embed one demo video (the OpenClaw starter kit); *.mp4 above keeps every other video out of the upload.
-!docs-site/public/media/*.mp4
