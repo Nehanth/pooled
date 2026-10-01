@@ -167,6 +167,7 @@ These change speed, not the tokens, unless noted.
 | `?densespec=0` | on | Dense models (Qwen3 0.6B / 1.7B / 4B) in a room decode one token per lap, without prompt-lookup drafts. |
 | `?draft=qwen3-0.6b` | off | Experimental. The host also loads Qwen3 0.6B whole (about 0.7 GB more on the host, outside the pledges) to draft for Qwen3 1.7B / 4B when prompt lookup finds nothing. Same tokens, more per lap, but the drafts add host GPU time. |
 | `?draftk=N` | `4` | Drafts per lap from `?draft=`, 1 to 7. |
+| `?dspec=0` | off | Testing. This device reports that it cannot take dense verify frames, as a device from an older build would. A host with such a device in the chain decodes dense models with plain laps. |
 | `?tail=0` | on | The old per-token tail after a prefill. |
 | `?mtpbatch=0` | on | One draft-cache row per GPU submit. |
 | `?mtprefill=0` | on | Draft-cache refill after a verify as one submit per row. |

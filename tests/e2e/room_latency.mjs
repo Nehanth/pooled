@@ -133,7 +133,9 @@ const t0 = Date.now(); const log = (...a) => console.error(((Date.now() - t0) / 
 const host = tabs.host;
 const out = { model: MODEL, devices: DEVICES, maxnew: MAXNEW, split: "", rows: [] };
 try {
-  for (const p of Object.values(tabs)) await p.goto(BASE);
+  // --worker-query "dspec=0": extra URL options on the worker tabs only (dspec=0: a worker that reports it
+  // cannot take dense verify frames, as one from an older build: the host must decode with plain laps)
+  for (const [n, p] of Object.entries(tabs)) await p.goto(n === "host" || !arg("worker-query") ? BASE : BASE + "&" + arg("worker-query"));
   for (const p of Object.values(tabs)) await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   for (const [n, p] of Object.entries(tabs)) { await p.fill("#name-input", n); await p.fill("#join-gb", GB(n)); }
   await host.click("#create-btn");

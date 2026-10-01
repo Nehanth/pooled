@@ -175,3 +175,50 @@ Deno.test("draft model: drafts only when the measured lap is long enough to pay 
   ok(d.pickK(100, 4) < 4);
   d.note(4, 4); ok(d.acc > 0.2);
 });
+
+// ---- compatibility gate: dense verify frames only to devices that advertise them (hello meta dspec) ----
+import { chainDenseSpec, denseLookupDrafts, DENSE_SPEC_V } from "../../room/lookup.js";
+Deno.test("dense spec gate: an old worker in the chain means plain laps; all new means lookup drafts", () => {
+  const NEW = { ua: "Mac", dspec: DENSE_SPEC_V }, OLD = { ua: "Mac", maxBindMB: 2048 };   // a hello from before dspec
+  const ctx = [1, 2, 3, 4, 5, 9, 1, 2, 3];
+  ok(chainDenseSpec([NEW]) && chainDenseSpec([NEW, { ...NEW, native: "node-dawn" }]));
+  ok(!chainDenseSpec([OLD]) && !chainDenseSpec([NEW, OLD]) && !chainDenseSpec([NEW, { dspec: 0 }]));
+  ok(!chainDenseSpec([]), "solo: no chain, no dense verify frames");
+  ok(!chainDenseSpec([NEW, undefined]), "a device whose hello has not arrived is not assumed new");
+  eq(denseLookupDrafts([NEW, NEW], ctx, 7), [4, 5, 9]);
+  eq(denseLookupDrafts([NEW, NEW], ctx, 7, { full: true }), [4, 5, 9, 1, 2, 3]);
+  eq(denseLookupDrafts([NEW, OLD], ctx, 7), []);
+  eq(denseLookupDrafts([OLD], ctx, 7, { full: true }), []);
+});
+
+Deno.test("dense spec gate: a room loop switches between plain laps and verify laps as devices change", async () => {
+  // the room's dense loop, reduced: per step the gate decides; a plain step is one token per lap
+  const prompt = [1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3], answer = [4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8];
+  const all = [...prompt, ...answer], target = (p) => all[p];
+  const run = async (metasAt) => {
+    const e = fakeDense(target);
+    e.pos = prompt.length;
+    const fed = [...prompt], toks = [answer[0]];
+    let laps = 0, verifyLaps = 0;
+    while (toks.length < answer.length) {
+      const next = toks[toks.length - 1];
+      const lk = denseLookupDrafts(metasAt(laps), [...fed, next], Math.min(7, answer.length - toks.length), { full: true });
+      laps++;
+      let out;
+      if (lk.length) { out = await e.specStepDrafts(next, pick, lk); verifyLaps++; }
+      else { out = [target(e.pos + 1)]; e.pos++; }
+      fed.push(next, ...out.slice(0, -1));
+      toks.push(...out);
+    }
+    eq(toks.slice(0, answer.length), answer);
+    return { laps, verifyLaps };
+  };
+  const NEW = { dspec: DENSE_SPEC_V }, OLD = {};
+  const allNew = await run(() => [NEW, NEW]);
+  ok(allNew.verifyLaps > 0 && allNew.laps < answer.length - 1, `all new: speculates (${JSON.stringify(allNew)})`);
+  const oldOne = await run(() => [NEW, OLD]);
+  eq(oldOne, { laps: answer.length - 1, verifyLaps: 0 }, "an old worker: plain laps only");
+  // the old device leaves (or updates) after 3 laps: verify laps from then on
+  const later = await run((lap) => (lap < 3 ? [NEW, OLD] : [NEW, NEW]));
+  ok(later.verifyLaps > 0 && later.laps > allNew.laps);
+});

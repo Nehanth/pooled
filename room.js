@@ -45,7 +45,7 @@ import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, o
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { lookupDrafts } from "./room/lookup.js";
+import { lookupDrafts, chainDenseSpec, denseLookupDrafts, DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
@@ -158,7 +158,10 @@ const roster = new Map();
 // contribution presets) ---
 async function probeGPU() {
   const meta = { ua: deviceKind({ ua: navigator.userAgent, touchPoints: navigator.maxTouchPoints || 0, mobile: !!navigator.userAgentData?.mobile }),
-                 webgpu: false, gpu: "no WebGPU", maxBufGB: 0 };
+                 webgpu: false, gpu: "no WebGPU", maxBufGB: 0,
+                 // dense verify frames this device's engine handles (room/lookup.js chainDenseSpec); ?dspec=0
+                 // reports none, as a device from before them would (tests)
+                 dspec: new URLSearchParams(location.search).get("dspec") === "0" ? 0 : DENSE_SPEC_V };
   if (navigator.gpu) {
     try {
       const a = await navigator.gpu.requestAdapter();
@@ -4192,12 +4195,17 @@ async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NE
         const roomLeft = ctxMax() - ai.pos - 2;
         if (roomLeft < 0) { capped = true; break; }
         const ctxNow = [...(ai.fed || []), next], kMax = Math.min(ai.engine.maxDrafts || 7, roomLeft, maxNew - count);
-        // a lookup guess that is wrong still costs its verify columns: up to 3 drafts (one batched pass
-        // per device) until a run is accepted in full (a copy in progress), then up to 7
-        let lk = LOOKUP ? lookupDrafts(ctxNow, ai.lkFullD ? kMax : Math.min(3, kMax)) : [], via = 2;
+        // only while every device in the chain handles dense verify frames (its hello's dspec; one from
+        // an older build does not): otherwise plain laps. Checked every step, so a device that joins or
+        // comes back with another build switches it. A lookup guess that is wrong still costs its verify
+        // columns: up to 3 drafts (one batched pass per device) until a run is accepted in full, then 7.
+        const chainOK = chainDenseSpec(ai.chain.map((id) => conns.get(id)?.meta));
+        if (!chainOK && !ai.dspecWarned) { ai.dspecWarned = true; log("room", "a device in the chain runs an older build: dense speculation is off (plain laps) until it updates"); }
+        if (chainOK) ai.dspecWarned = false;
+        let lk = LOOKUP ? denseLookupDrafts(ai.chain.map((id) => conns.get(id)?.meta), ctxNow, kMax, { full: ai.lkFullD }) : [], via = 2;
         // nothing to copy: the draft model's guesses, when there is one (?draft=)
         // (only when the measured lap is long enough for the drafts to pay: DraftModel.pickK)
-        const dk = !lk.length && ai.draft && kMax > 0 ? ai.draft.pickK(ai.lapStat?.lap, Math.min(DRAFT_K, kMax)) : 0;
+        const dk = chainOK && !lk.length && ai.draft && kMax > 0 ? ai.draft.pickK(ai.lapStat?.lap, Math.min(DRAFT_K, kMax)) : 0;
         if (dk) { const td = performance.now(); lk = await ai.draft.propose(ctxNow, dk); via = 1; lapT.d += performance.now() - td; }
         let toks;
         const tStep = performance.now();

@@ -5,6 +5,7 @@
 // setupNode() is idempotent and must run before anything touches navigator.gpu or new Peer().
 
 import { measureCopyGBps } from "../../room/gpuspeed.js";
+import { DENSE_SPEC_V } from "../../room/lookup.js";
 
 let ready = null;
 export let Peer = null;
@@ -40,7 +41,8 @@ export function setupNode({ dawnFlags = (process.env.DAWN_OPTS || "").split(" ")
 // lets a clearly faster GPU be the model host (room/plan.js pickModelHost). gbps: pin it (0 = unknown).
 export async function probeMeta(pledgeGB, { gbps = null } = {}) {
   const ua = process.platform === "darwin" ? "Mac" : "Device";
-  const meta = { ua, webgpu: false, gpu: "no WebGPU", maxBufGB: 0, native: "node-dawn" };
+  // dspec: dense verify frames of any column count (the repo's engine; room/lookup.js chainDenseSpec)
+  const meta = { ua, webgpu: false, gpu: "no WebGPU", maxBufGB: 0, native: "node-dawn", dspec: DENSE_SPEC_V };
   const a = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (a) {
     const info = a.info || {};
