@@ -1597,3 +1597,33 @@ The M5 gained less than the ~5% estimated (the copies there cost ~0.3 ms per ste
 gained more. Gates: unit tests, `npm run check`, `test_q38_bits` (4cac59d8, and 4f70a9ca with
 ATTN_PREFILL_TILE=0: same as main), `test_moe` MATCH llama.cpp + spec == plain, `test_mtp`, `test_mtp_split`,
 `test_moe_split`, M5 bits equal to main, `specIdentical` and golden in every Chrome run.
+## 2026-10-01: room prompt frames through the prefill kernels (branch perf/cold-turn)
+
+OpenClaw's cold first turn on a room was slow because a chain prefilled in 16-token frames, each through
+batchCols-wide passes on every device; the MoE's wide GEMM and expert-grouped prefill ran only in a solo
+`prefillTokens`. Now a node host sends frames of up to 256 tokens (`engine.prefillFrame()`) and every device
+runs them through the new `prefillHidden` (wide chunks, grouped ubatches, every column read back). The MoE
+prefill kernels are on by default on shards without the embedding as well. Spec frames and an older host's
+16-token frames still take the old passes; an older worker runs the wide frames NC columns at a time.
+
+TTFT of a real OpenClaw request (captured gateway prompt, paths and host name replaced: 15,846 tokens with the
+12 tools; `packages/room-node/test/e2e.mjs cache`, `STEPS=turn1`, 35B MoE, split 19 + 21 layers), GB10:
+
+| setup | main | branch |
+|---|---|---|
+| solo (one node) | 45.5 s | unchanged (same path) |
+| 2 nodes in one process (`SETUP=pair`) | 119.8 s | 77.5 s |
+| 2 nodes in 2 processes (`SETUP=proc`, new: the joiner via join.mjs) | 196.3 s | 63.7 s, 51.0 s (2 runs) |
+| `SETUP=proc`, `POOLED_PREFILL_FRAME=128` / `512` | | 71.7 s / 49.7 s |
+
+Same answer in every run. Both nodes share one GPU here, so the frames cannot overlap; on two machines the
+host's next frame runs while the worker runs the last one. Gates: unit tests (962, incl. a new mock check that
+`prefillHidden` keeps every column in place), `npm run check`, barrier lint clean, `test_moe_split` PASS
+(now with the prompt frames; plain == solo on all 5 cases incl. the 3,449-token one, spec == plain),
+`test_moe` MATCH llama.cpp + spec == plain, `test_dense_spec` PASS, `test_q38_bits` c26dbc5 / 3177f9f1
+(unchanged). Not measured on Apple or Windows workers (the frames use the same kernels a solo Mac / PC host
+already runs); `POOLED_PREFILL_FRAME=0` restores the 16-token frames.
+
+Not done: a first-start warm-up from a bundled OpenClaw prompt. Two of our own OpenClaw installs differ at
+character 2,978 of the system prompt (the tool list), and the prompt holds absolute skill paths, so a bundled
+prompt would never be a prefix the checkpoints can resume from: it would cost a minute of GPU for nothing.
