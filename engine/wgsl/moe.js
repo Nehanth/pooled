@@ -229,28 +229,33 @@ function termOff(fmt, Q, qo, SC, so, X, er, xc, nb = "nb", b = "b", O = FOPS) {
 // sum cancels in the renormalization, so this is the same math as llama.cpp's softmax -> top-K -> renormalize without
 // the two 256-wide trees (the probabilities order the experts as the logits do; only exp() rounding ties could
 // differ). The weights' last bits differ from moe_router's; every pass width runs this kernel, so spec == plain.
-// Without norm: the same softmax as moe_router (max and sum trees, same order), then top-K by rank: thread i counts
-// the experts ordered before it, (p_j > p_i) or (p_j == p_i and j < i), and writes itself to that slot if
-// it is below K. That is exactly the order of moe_router's K argmax rounds (ties to the lower index), so
-// the ids and weights are the same bits, without the 8 x 8 barrier rounds. Slot K gets the shared gate
-// sigmoid(logit[nExp]) with moe_combine's expression.
-// The rank is counted among candidates only: split the experts into K groups, T = the smallest group maximum.
-// At least K experts (the K maxima) are >= T, so every top-K expert is, and so is every expert ordered before
-// one of them (greater, or equal with a lower index): a candidate's rank among the candidates is its rank among
-// all experts, exactly, below K. Typically a dozen candidates instead of nExp comparisons per thread (the rank
-// loop was most of this one-workgroup kernel's time). Thread g < K scans group g twice (its maximum, then its
-// candidates into its own list, no atomics); the count is an integer sum, so every id and weight bit is unchanged.
-export function routeKernel(K) {
-  const KS = K + 1;
+// Without norm: the same softmax as moe_router (max and sum trees, same order), then the same top-K selection.
+// Top-K by a merge network. Each expert's value becomes a u32 sort key, larger = ahead (the float order: sign-flipped
+// bits; -0 keyed as +0, so the two tie as they compare equal; NaN 0, behind every number), and the order is (key desc,
+// id asc), exactly the order of moe_router's K argmax rounds (ties to the lower index), so the ids and weights are the
+// same bits (the key maps back to the value's bits; only -0 comes back +0, which no weight can tell apart). Phase 0:
+// the experts in chunks of CH = K * F (ids >= nExp pad the last chunk with key 0: behind NaN, as their ids are higher),
+// each thread ranks one expert in its chunk and writes it to the chunk's sorted top-K list if the rank is below K
+// (F 1, 2, 4, 8 all measured the same on the GB10; F 1 is the default). Then ceil(log2(chunks)) rounds merge list
+// pairs (2m, 2m + 1) into list m keeping K: an element's slot is its index plus the count of partner-list elements
+// ahead of it (binary search), written if below K; the order is total (distinct ids), so the slots are a permutation.
+// Lists hold ids (ping-pong halves of rt_ix), one barrier per round. NaN and padding are never written to a slot (any
+// slot left over keeps id 0, weight 0). Slot K gets the shared gate sigmoid(logit[nExp]) with moe_combine's
+// expression. Unlike the key-free comparator (the class tests per compare cost more than they saved), this takes the
+// GB10 sweep (tests/bench/moe_fused_sweep.js) from 12.40 to 10.35 µs. (Until 2026-10: a candidate-threshold rank
+// count over the float values; same ids and weights for every finite input.)
+const rtKey = (v, o) => `let ${o}b = bitcast<u32>(${v}); let ${o}a = ${o}b & 0x7FFFFFFFu;
+      let ${o} = select(select(select(0xFFFFFFFFu - ${o}b, ${o}b + 0x80000000u, ${o}b < 0x80000000u), 0x80000000u, ${o}a == 0u), 0u, ${o}a > 0x7F800000u);`;
+export function routeKernel(K, F = 1) {
+  const KS = K + 1, CH = K * F, H = 1024 + CH;   // CH: phase-0 chunk; H: ceil(nExp / CH) * CH <= nExp + CH - 1 ids
+  const ahead = (ka, a, kb, b) => `(${ka} > ${kb} || (${ka} == ${kb} && ${a} < ${b}))`;
   return `
 @group(1) @binding(0) var<storage, read> rt_l: array<f32>;
 @group(1) @binding(1) var<storage, read_write> rt_sel: array<u32>;
 @group(1) @binding(2) var<storage, read_write> rt_w: array<f32>;
 @group(1) @binding(3) var<uniform> rt_s: MOEF;
-var<workgroup> rt_p: array<f32, 1024>;
-var<workgroup> rt_gm: array<f32, ${K}>;
-var<workgroup> rt_cd: array<u32, ${1024 + K}>;
-var<workgroup> rt_nc: array<u32, ${K}>;
+var<workgroup> rt_k: array<u32, ${H}>;
+var<workgroup> rt_ix: array<u32, ${2 * H}>;
 var<workgroup> rt_v: array<f32, 256>;
 var<workgroup> rt_ki: array<u32, ${K}>;
 var<workgroup> rt_kv: array<f32, ${K}>;
@@ -258,9 +263,11 @@ var<workgroup> rt_kv: array<f32, ${K}>;
 fn moe_route(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let col = wg.x; let t = lid.x; let n = rt_s.nExp;
   let lb = col * rt_s.xs;
+  var nl: u32 = (n + ${CH - 1}u) / ${CH}u;
   if (t < ${K}u) { rt_ki[t] = 0u; rt_kv[t] = 0.0; }
+  for (var i: u32 = n + t; i < nl * ${CH}u; i += 256u) { rt_k[i] = 0u; }
   if (rt_s.norm == 1u) {   // renormalized: rank the logits themselves (no softmax over all nExp)
-    for (var i: u32 = t; i < n; i += 256u) { rt_p[i] = rt_l[lb + i]; }
+    for (var i: u32 = t; i < n; i += 256u) { ${rtKey("rt_l[lb + i]", "kk")} rt_k[i] = kk; }
     workgroupBarrier();
   } else {
     var m: f32 = -3.0e38;
@@ -271,38 +278,52 @@ fn moe_route(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id)
     let mx = rt_v[0];
     workgroupBarrier();
     var s: f32 = 0.0;
-    for (var i: u32 = t; i < n; i += 256u) { let p = exp(rt_l[lb + i] - mx); rt_p[i] = p; s += p; }
+    for (var i: u32 = t; i < n; i += 256u) { let p = exp(rt_l[lb + i] - mx); rt_k[i] = bitcast<u32>(p); s += p; }
     rt_v[t] = s;
     workgroupBarrier();
     for (var st: u32 = 128u; st > 0u; st >>= 1u) { if (t < st) { rt_v[t] += rt_v[t + st]; } workgroupBarrier(); }
     let inv = 1.0 / rt_v[0];
-    for (var i: u32 = t; i < n; i += 256u) { rt_p[i] = rt_p[i] * inv; }
+    for (var i: u32 = t; i < n; i += 256u) { ${rtKey("bitcast<f32>(rt_k[i]) * inv", "kk")} rt_k[i] = kk; }
     workgroupBarrier();
   }
-  let gs = (n + ${K - 1}u) / ${K}u;
-  if (t < ${K}u) {
-    var gm: f32 = -3.0e38;
-    for (var j: u32 = t * gs; j < min(t * gs + gs, n); j++) { gm = max(gm, rt_p[j]); }
-    rt_gm[t] = gm;
-  }
-  workgroupBarrier();
-  var th: f32 = rt_gm[0];
-  for (var k: u32 = 1u; k < ${K}u; k++) { th = min(th, rt_gm[k]); }
-  if (t < ${K}u) {
-    var c: u32 = 0u;
-    for (var j: u32 = t * gs; j < min(t * gs + gs, n); j++) { if (rt_p[j] >= th) { rt_cd[t * gs + c] = j; c++; } }
-    rt_nc[t] = c;
-  }
-  workgroupBarrier();
-  for (var i: u32 = t; i < n; i += 256u) {
-    let p = rt_p[i];
-    if (p >= th) {
+  // phase 0: sorted chunk lists
+  let reps0 = (nl * ${CH}u + 255u) / 256u;
+  for (var q: u32 = 0u; q < reps0; q++) {
+    let e = t + q * 256u;
+    if (e < nl * ${CH}u) {
+      let c0 = e - e % ${CH}u; let ke = rt_k[e];
       var r: u32 = 0u;
-      for (var g: u32 = 0u; g < ${K}u; g++) {
-        for (var c: u32 = 0u; c < rt_nc[g]; c++) { let j = rt_cd[g * gs + c]; let q = rt_p[j]; r += select(0u, 1u, q > p || (q == p && j < i)); }
-      }
-      if (r < ${K}u && p == p) { rt_ki[r] = i; rt_kv[r] = p; }
+      for (var j: u32 = c0; j < c0 + ${CH}u; j++) { let kj = rt_k[j]; r += select(0u, 1u, ${ahead("kj", "j", "ke", "e")}); }
+      if (r < ${K}u) { rt_ix[(c0 / ${CH}u) * ${K}u + r] = e; }
     }
+  }
+  let reps = (nl * ${K}u + 255u) / 256u;
+  workgroupBarrier();
+  var src: u32 = 0u;
+  for (var rd: u32 = 0u; rd < 16u; rd++) {
+    if (nl <= 1u) { break; }
+    let dst = ${H}u - src;
+    for (var q: u32 = 0u; q < reps; q++) {
+      let e = t + q * 256u;
+      if (e < nl * ${K}u) {
+        let l = e / ${K}u; let i = e % ${K}u; let x = rt_ix[src + e]; let kx = rt_k[x]; let pl = l ^ 1u;
+        var r: u32 = i;
+        if (pl < nl) {
+          var lo: u32 = 0u; var hi: u32 = ${K}u;
+          for (var bs: u32 = 0u; bs < 5u; bs++) {
+            if (lo < hi) { let mid = (lo + hi) / 2u; let y = rt_ix[src + pl * ${K}u + mid]; let ky = rt_k[y]; if (${ahead("ky", "y", "kx", "x")}) { lo = mid + 1u; } else { hi = mid; } }
+          }
+          r = i + lo;
+        }
+        if (r < ${K}u) { rt_ix[dst + (l >> 1u) * ${K}u + r] = x; }
+      }
+    }
+    workgroupBarrier();
+    src = dst; nl = (nl + 1u) / 2u;
+  }
+  if (t < ${K}u) {
+    let x = rt_ix[src + t]; let kx = rt_k[x];
+    if (kx != 0u) { rt_ki[t] = x; rt_kv[t] = bitcast<f32>(select(0xFFFFFFFFu - kx, kx - 0x80000000u, kx >= 0x80000000u)); }
   }
   workgroupBarrier();
   if (t == 0u) {

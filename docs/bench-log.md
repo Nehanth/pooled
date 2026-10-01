@@ -1570,3 +1570,32 @@ fails on a real GPU with or without this branch, which the file's own comment al
 comes from main (routing near-ties, see the note in the test) and not from this branch. Argmax, greedy and spec == plain are
 unchanged. M5 Max (Deno): `test_q38_bits ATTN_PREFILL_TILE=0` e3903fe5 / 8742688e for both off and on. Unit tests 942/942,
 `npm run check` clean.
+
+## 2026-10-01: moe_route top-K by a merge network (branch perf/moe-route-merge), GB10
+
+Report item B4 (MOE-1). `moe_route` now turns each expert's value into a u32 sort key, sorts chunks of K by rank
+and merges list pairs in ceil(log2(nExp / K)) rounds (5 for 256 experts), one barrier per round, all 256 threads.
+The order is (value desc, id asc), the same as before, so ids and weights are the same bits.
+
+| | origin/main 8a435fe | branch |
+|---|---|---|
+| `moe_fused_sweep.js` route µs (REF = main, 2 x 3 runs) | 12.40 | 10.35 |
+| `prof_ts.js` moe_route in the model (2 runs) | 17.2 / 17.3 µs, 0.69 ms/token | 14.8 / 14.8 µs, 0.59 ms/token |
+| `prof_ts.js` kernel sum per token | 18.39 / 18.41 ms | 18.23 / 18.28 ms |
+| Chrome plain tok/s, two-sum / hash-map / japan (mean of 3, interleaved) | 50.98 / 50.91 / 44.06 | 51.08 / 51.31 / 44.65 |
+| Chrome spec K=3 tok/s | 92.22 / 63.13 / 48.29 | 90.55 / 64.49 / 49.35 |
+
+The kernel gain is clear and repeatable (-2 µs a launch, -0.1 ms a token, ~0.5%). End to end it is inside run-to-run
+noise (plain +0.2..+1.3%, spec -1.8..+2.2%, with one low branch run at 86.6 two-sum spec). What I tried that did
+not help: a comparator on the float values plus NaN and padding tests in each compare (14.45 µs with a linear count,
+12.40 with a binary search, no better than main); bigger phase-0 chunks (F = 2, 4, 8: same 10.35 µs). Empty
+selection floor: 4.2 µs. The selection part went from ~8.2 to ~6.1 µs.
+
+Correctness: unit tests 960/960 (new cases: +0/-0 ties, nExp 1024 with K 16); a CPU differential fuzz against
+origin/main's kernel (3500 cases: random, integer ties, +0/-0, nExp up to 1024, K 1..16) gives identical ids
+and weight bits. Only inputs with NaN or -inf logits differ: main's group-max threshold drops them or picks nothing.
+The new kernel orders NaN after every number and never writes it to a slot. `test_moe.js` MATCH llama.cpp 3/3, spec ==
+plain 3/3 (same output and acceptance as main); Chrome golden true, specIdentical true, the same acceptance as main.
+`test_q38_bits.js` default 4cac59d8 / a67b7bcd and ATTN_PREFILL_TILE=0 4f70a9ca / 5eb28e41, both the same as
+origin/main on the same machine (the 27B does not use moe_route). Barrier lint clean; `npm run check` passes.
+Not measured on the M5 Max.
