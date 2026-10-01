@@ -1,6 +1,7 @@
 // DenseEngine: WebGPU inference for dense Llama-architecture models (Qwen3, SmolLM), layer-shardable.
 import { weightsFromSafetensors } from "./safetensors.js";
 import { WGSL } from "./wgsl/base.js";
+import { compilePipeline } from "./compile.js";
 import { probeUnpack, coopWGSL } from "./wgsl/coop.js";
 import { f16ToF32 } from "./gguf.js";
 import { denseAttnWGSL, DENSE_GLUE_WGSL, DENSE_GLUE3_WGSL } from "./wgsl/dense.js";
@@ -129,7 +130,7 @@ export class DenseEngine {
       const layout1 = device.createBindGroupLayout({
         entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })),
       });
-      this.pipes[name] = await device.createComputePipelineAsync({
+      this.pipes[name] = await compilePipeline(device, {
         layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }),
         compute: { module: mod, entryPoint: name },
       });
@@ -143,7 +144,7 @@ export class DenseEngine {
       const modH = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, this.headRows, 64, 4, this.rowsB, await probeUnpack(device)) });
       for (const [name, spec] of [["matvec_q8_coop", G1.matvec_q8_coop], ["matvec_q4_coop", G1.matvec_q4_coop], ["matvec_coop", G1.matvec_coop]]) {
         const layout1 = device.createBindGroupLayout({ entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
-        this.pipes[name + "_h"] = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH, entryPoint: name } });
+        this.pipes[name + "_h"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH, entryPoint: name } });
       }
     }
     // Exact verify ops: the batched GEMVs again, built with the single-token kernels' workgroup size
@@ -158,7 +159,7 @@ export class DenseEngine {
       const xNames = Object.keys(G1).filter((k) => /_b(_acc)?$/.test(k) && k.startsWith("matvec"));
       await Promise.all(xNames.map(async (name) => {
         const layout1 = device.createBindGroupLayout({ entries: G1[name].map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
-        this.pipes[name + "_x"] = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modX, entryPoint: name } });
+        this.pipes[name + "_x"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modX, entryPoint: name } });
       }));
     }
     // uniforms
