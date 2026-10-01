@@ -74,6 +74,16 @@ The host then checks `1 + K` tokens in **one** batched pass of the full model: o
 
 Each lap pays the network latency once, and a good step accepts several tokens. See [Benchmarks](/docs/internals/benchmarks).
 
+### Models without a draft block
+
+The dense Qwen3 models (0.6B, 1.7B, 4B) have no draft block. In a room of two or more devices they still speculate, with prompt lookup: when the last few tokens of the answer already appear in the context, the tokens that followed them are checked in the same lap. Nothing repeats: the step is a plain lap. Code edits and quoted text gain the most. Ordinary chat rarely repeats itself and stays at plain speed.
+
+- The check runs `1 + K` tokens (K up to 7) through every device's layers as one batched frame. Lookup starts at 3 drafts, one batched pass per device, and allows 7 only after a run was accepted in full.
+- The batched matrix-vector kernels of the check use the same workgroup shape as single-token decoding, so each checked column gives **bit-identical** logits to a plain step. A verified token is exactly a decoded one, under any sampler (`tests/test_dense_spec.js`).
+- Rollback is just a position: the rejected K/V rows are overwritten by the next frame.
+- Only while every device in the chain says in its hello (`dspec`) that it takes these frames. A device from an older build does not, and the host then decodes with plain laps until it leaves or updates.
+- `?densespec=0` turns it off (plain laps). `?draft=qwen3-0.6b` (experimental) also loads Qwen3 0.6B whole on the host, and it drafts when lookup finds nothing.
+
 ## Memory and caching
 
 | What | Where | Switch |

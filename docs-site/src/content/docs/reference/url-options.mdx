@@ -105,6 +105,10 @@ Speed switches. Each turns a faster path off; the tokens stay the same unless no
 |---|---|---|
 | `?fill=0` | on | No draft-cache fill during a room prefill (fewer drafts accepted). |
 | `?lookup=0` | on | Draft head only, no prompt lookup. |
+| `?densespec=0` | on | Dense models (Qwen3 0.6B / 1.7B / 4B) in a room decode one token per lap, no prompt-lookup drafts. |
+| `?draft=qwen3-0.6b` | off | Experimental. The host also loads Qwen3 0.6B (about 0.7 GB more, outside the pledges) to draft for Qwen3 1.7B / 4B. Same tokens. |
+| `?draftk=N` | `4` | Drafts per lap from `?draft=`, 1 to 7. |
+| `?dspec=0` | off | Testing. This device reports it can't take dense verify frames, like an older build; the host then uses plain laps. |
 | `?tail=0` | on | Old per-token tail after a prefill. |
 | `?mtpbatch=0` | on | One draft-cache row per submit. |
 | `?mtprefill=0` | on | Draft-cache refill as one submit per row. |

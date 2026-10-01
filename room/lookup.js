@@ -21,3 +21,18 @@ export function lookupDrafts(ctx, k, { maxN = 4, minN = 2, window = 16384 } = {}
   }
   return [];
 }
+
+// Dense verify frames (DenseEngine.specStepDrafts: 1..8 columns with `spec`) need workers whose
+// dense engine takes any column count; a worker from before that assumed 4 columns and breaks on
+// them. Every device advertises what it handles in its hello meta (dspec); the host speculates on a
+// dense model only while every layer-holding device in the chain advertises it, else plain laps.
+export const DENSE_SPEC_V = 1;
+export function chainDenseSpec(metas) {
+  return metas.length > 0 && metas.every((m) => (m?.dspec | 0) >= DENSE_SPEC_V);
+}
+// The lookup drafts for one dense step: none unless the chain handles dense verify frames; up to 3
+// until a run was accepted in full (`full`), then up to kMax.
+export function denseLookupDrafts(chainMetas, ctx, kMax, { full = false } = {}) {
+  if (!chainDenseSpec(chainMetas) || kMax < 1) return [];
+  return lookupDrafts(ctx, full ? kMax : Math.min(3, kMax));
+}

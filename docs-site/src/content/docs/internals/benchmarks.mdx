@@ -69,6 +69,17 @@ What this shows:
 Loopback has no bandwidth limit, loss or jitter. All devices share one GPU, so their compute never overlaps, which makes the 0 ms rows pessimistic compared with separate machines.
 :::
 
+**Models without a draft head.** Same setup, 2026-09-30, Qwen3 1.7B split 15 + 13 layers over two devices, 128-token answers (chat: 76), mean of two, greedy. Decode tok/s: plain / prompt lookup / lookup plus the experimental Qwen3 0.6B draft model (`?draft=qwen3-0.6b`). Every run gave the same answer as plain.
+
+| Prompt | 0 ms | 5 ms | 20 ms | 50 ms |
+|---|---|---|---|---|
+| Chat (habits for working from home) | 35.8 / 36.0 / 36.1 | 26.3 / 20.1 / 26.6 | 14.4 / 14.6 / 14.8 | 7.3 / 7.3 / 12.5 |
+| Writing code (an LRU cache class) | 37.0 / 39.5 / 35.4 | 26.6 / 28.4 / 28.0 | 14.8 / 15.6 / 20.3 | 7.3 / 7.8 / 14.4 |
+| Editing code (rename a variable in a pasted file) | 36.9 / 58.4 / 43.3 | 26.5 / 44.2 / 39.6 | 14.8 / 26.9 / 32.2 | 7.3 / 14.6 / 22.0 |
+
+- **Lookup is large when the answer copies the prompt:** 1.6 to 2.0× on the edit, where 66 of 128 tokens came from lookup. When nothing repeats it changes little. The chat cell at 5 ms (26.3 / 20.1) did not hold up: a later run gave 24.3 plain and 24.4 lookup. Other GPU jobs shared this machine during these runs, so single cells vary by up to ±30%.
+- **The draft model pays only on slow links.** The 0.6B has as many layers as the 1.7B, so on WebGPU a draft token costs almost as much as a real one. The room drafts with it only when the measured lap is long enough to pay for the drafts. At 50 ms it is 1.7× on chat, 2.0× on writing code and 3.0× on the edit. It stays off by default: it adds about 0.7 GB on the host, outside the pledges.
+
 </TabItem>
 <TabItem label="Real machines">
 
@@ -155,6 +166,9 @@ Each harness prints the rows it measured. The GPU ones need a WebGPU GPU and the
 
 ```sh title="Rooms with emulated latency (one machine, several headless Chromium tabs)"
 node tests/e2e/room_latency.mjs --model qwen3.6-35b-moe --devices 2 --lat 0,5,20 --maxnew 128
+# dense model, three prompt types, plain vs prompt lookup; then with the draft model
+node tests/e2e/room_latency.mjs --model qwen3-1.7b --devices 2 --lat 0,5,20,50 --prompts chat,code,edit
+node tests/e2e/room_latency.mjs --model qwen3-1.7b --devices 2 --lat 0,5,20,50 --prompts chat,code,edit --modes spec --query draft=qwen3-0.6b
 ```
 
 ```sh title="Bad networks: latency, loss, freezes, deaths, signaling, TURN"
