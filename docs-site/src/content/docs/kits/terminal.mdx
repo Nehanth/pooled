@@ -8,7 +8,9 @@ sidebar:
 ---
 import Shot from '../../../components/Shot.astro';
 import pull from '../../../assets/kits/terminal-pull.webp';
+import list from '../../../assets/kits/terminal-list.webp';
 import picker from '../../../assets/kits/terminal-picker.webp';
+import how from '../../../assets/kits/terminal-how.webp';
 import lend from '../../../assets/kits/terminal-lend.webp';
 import roomShort from '../../../assets/kits/terminal-room-short.webp';
 import join from '../../../assets/kits/terminal-join.webp';
@@ -19,8 +21,10 @@ import { Steps } from '@astrojs/starlight/components';
 
 {/*
 Sources (for the fact-checker):
-- @pooled/cli 0.3.0 on npm (npm view @pooled/cli version; engines node >=22; webgpu 0.6.1 optional dependency, CHANGELOG #273)
+- @pooled/cli 0.3.2 on npm (npm view @pooled/cli version; engines node >=22; webgpu 0.6.1 optional dependency, CHANGELOG #273)
 - pooled --help, pooled host --help, pooled join --help, pooled chat --help, pooled pull --help (0.3.0)
+- Screenshots: @pooled/cli 0.3.2 from npm, 2026-09-30, in a pty on the Spark (GB10): pull, list, host (Which model? -> How do you want to run it? -> lend 2 GB),
+  join with the code alone (lend 8 GB first, then waits), a, Enter (online in 5.9 s, spark-host 0-4 · spark-join 5-27), c chat (54 tokens, 49 tok/s)
 - cli/lib/hostui.js render(): "Choose a model ↑/↓ then Enter", "How much memory does this computer lend? ←/→ or type, then Enter",
   "Devices (N)", "Waiting to join (N)" "a: allow  d: deny", "This room is X GB short for …", "Enter: start (when the room fits)",
   "● online", "c: chat here", "Enter: re-deal", "q: quit"
@@ -55,7 +59,7 @@ Sources (for the fact-checker):
    pooled --version
    ```
 
-   This guide was checked with 0.3.0. The install includes WebGPU for Node (Dawn, about 95 MB), which `host` and `join` need.
+   This guide was checked with 0.3.2. The install includes WebGPU for Node (Dawn, about 95 MB), which `host` and `join` need.
 
 2. **Download the model** on the computer that will host:
 
@@ -67,6 +71,8 @@ Sources (for the fact-checker):
 
    <Shot src={pull} alt="pooled pull: the download and check bars at 100%, then Downloaded and checked, and the next command" />
 
+   <Shot src={list} alt="pooled list: qwen3-1.7b downloaded, the other models under Not downloaded with their sizes" />
+
 3. **Open a room:**
 
    ```bash
@@ -77,16 +83,18 @@ Sources (for the fact-checker):
 
    - **Which model?** One list, smallest first. Each line shows what the model **needs** and whether it is downloaded (or how big the download is). The largest model this computer can hold alone is selected. Move to **Qwen3 1.7B** with ↑/↓ and press Enter.
 
-     <Shot src={picker} alt="The model list: Qwen3 1.7B selected, needs 4 GB, downloaded" caption="The invite key is hidden in these captures." />
+     <Shot src={picker} alt="The model list: Qwen3 1.7B selected, needs 6 GB, downloaded" caption="The invite key is hidden in these captures." />
 
-   - **How do you want to run it?** **Pool with devices** is selected: press Enter. (**Run it here** would put all of it on this computer and start at once; other devices could still join to chat.)
+   - **How do you want to run it?** Two choices: **Pool with devices** (other devices join and each holds a part) and **Run it here** (all of it on this computer, lending what the model needs, and it starts at once; other devices can still join to chat). **Pool with devices** is selected: press Enter. Esc goes back to the model list.
+
+     <Shot src={how} alt="How do you want to run Qwen3 1.7B? Pool with devices selected, Run it here lending 6 GB" />
    - **How much memory does this computer lend?** Type a number or use ←/→, then Enter. To see a second computer share the work, lend less than the model needs, like `2`.
 
-     <Shot src={lend} alt="How much GPU memory should this computer lend? with 2 of 122 GB typed" />
+     <Shot src={lend} alt="How much GPU memory should this computer lend? with 2 of 122 GB typed, and a note that the model needs 6 GB" />
 
-4. **Read the room screen.** It lists each device with what it lends, and whether the room has enough memory for the model. If not, it says so, for example `This room is 3.6 GB short for Qwen3 1.7B: add a device or raise a pledge`, and **Enter: start** stays off.
+4. **Read the room screen.** It lists each device with what it lends, and how much memory the room has against what the model needs. If it is short, it says so, for example `Needs 4 GB more: one more device, or press l to lend more.`, and **enter start** stays off.
 
-   <Shot src={roomShort} alt="The room screen: spark-host lends 2 GB, 4 GB needed, Needs 2 GB more" />
+   <Shot src={roomShort} alt="The room screen: spark-host lends 2 GB, 6 GB needed, Needs 4 GB more" />
 
 5. **Join from the second computer:**
 
@@ -94,17 +102,17 @@ Sources (for the fact-checker):
    pooled join
    ```
 
-   It asks for the **room code or invite link**, then how much to **lend** (←/→ or type, then Enter), before it knocks, so the host sees the real amount. With the invite link it gets in at once. With the code alone, it waits for the host.
+   It asks for the **room code or invite link**, then how much to **lend** (←/→ or type, then Enter), before it knocks, so the host sees the real amount. With the invite link it gets in at once. With the code alone, it shows the host's room and model and waits for the host to let it in.
 
-   <Shot src={join} alt="pooled join with the code alone: waiting for the host, the host's model, and how much to lend" />
+   <Shot src={join} alt="pooled join with the code alone: lend 8 GB typed first, then waiting for spark-host to let you in" />
 
-6. **Let it in.** On the host, the device shows under **Waiting to join**, like `spark-join wants to join (computer, 64 GB)`. Press **a** to let it in, or **d** to turn it away. Once it's in, it's listed under **Devices** with what it lends.
+6. **Let it in.** On the host, the device shows under **Waiting to join**, like `spark-join wants to join (computer, 8 GB)`. Press **a** to let it in, or **d** to turn it away. Once it's in, it's listed under **Devices** with what it lends.
 
    <Shot src={allow} alt="The host screen: spark-join wants to join, a allow, d deny" />
 
 7. **Press Enter to start** once the room has enough memory. Each device shows its load progress, then the screen says **● online** with the layers each one holds.
 
-   <Shot src={online} alt="The room online: spark-host holds layers 0-11, spark-join 12-27" />
+   <Shot src={online} alt="The room online: spark-host holds layers 0-4, spark-join 5-27" />
 
 8. **Press c to chat** right there. Type a question and press Enter. The line under each answer shows the speed. Type `/exit` to go back to the room screen.
 
@@ -114,11 +122,11 @@ Sources (for the fact-checker):
 
 ## What you should see
 
-- After step 2: `✓ qwen3-1.7b is ready (1.7 GB): pooled host qwen3-1.7b`.
-- After step 7: `● online  spark-host 0-7 · spark-join 8-27`, a few seconds after Enter when the model is on disk (4 seconds in our test).
-- After step 8: an answer, then a line like `room EG6-T9J · Qwen3 1.7B · Q8 · 10 tokens · 28.2 tok/s · 24 prompt tokens`.
+- After step 2: `● Downloaded and checked`, then `next  pooled host qwen3-1.7b`.
+- After step 7: `● online` at the top and `room online: spark-host 0-4 · spark-join 5-27` in the log, a few seconds after Enter when the model is on disk (6 seconds in our test).
+- After step 8: an answer, then a line like `54 tokens · 49 tok/s · first token 0.3s`.
 
-What a model **needs** grows with the room's context. `pooled host` opens each model at its longest room context (16k on the 1.7B, which an agent such as OpenClaw needs): the 1.7B needs 5.5 GB. With `--ctx 8192` it needs 4.
+What a model **needs** grows with the room's context. `pooled host` opens each model at its longest room context (16k on the 1.7B, which an agent such as OpenClaw needs): the 1.7B needs about 6 GB. With `--ctx 8192` it needs 4.
 
 ## Chat from anywhere
 
