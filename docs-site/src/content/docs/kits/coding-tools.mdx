@@ -1,0 +1,177 @@
+---
+title: Use a room from your coding tools
+eyebrow: Starter kits
+description: Run pooled serve on your computer and point Codex CLI, Claude Code or opencode at the room's model. Copy-paste setup for each.
+sidebar:
+  label: Use it from coding tools
+  order: 4
+---
+import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
+
+{/*
+Sources (for the fact-checker):
+- cli/README.md (top banner, "Getting in", Options, Tools: Codex CLI, Claude Code, opencode), @pooled/cli 0.3.0 on npm (npm view @pooled/cli version)
+- cli/lib/banner.js + cli/lib/http.js agentSettings(): Codex compact = floor(ctx * 0.8); Claude Code output = max(1024, min(32000, floor(ctx / 4))); opencode output = min(8192, that); opencode model id "pooled/" + the /v1/models id
+- serve/index.mdx, serve/recipes (the same recipes), troubleshooting.mdx "Serve API"
+- room/models.js CTX: MoE 32768 (up to 65536 on a browser host), 27B 16384 (up to 32768), 1.7B 8192 (up to 16384)
+- Verified 2026-09-30 on the Spark with npx @pooled/cli@0.3.0 against a pooled host room (Qwen3 1.7B, --ctx 16384):
+  the banner (16384-token room: Codex 16384 / 13107, Claude Code output 4096, opencode output 4096), /health, curl on /v1/chat/completions and
+  /v1/messages, the openai and anthropic Python SDKs (Paris / Rome), opencode 1.18.33 with the banner's opencode.json (wrote hello.txt, 63 s),
+  Codex CLI 0.104.0 with the config below (answered, 45 s, 6.8k tokens), Claude Code with the banner's line: "Prompt is too long" on the
+  16K room, as expected (the 1.7B caps at 16K; not verified answering: needs the MoE or 27B). The 64K numbers below follow agentSettings().
+  The banner's Claude Code line has no ANTHROPIC_API_KEY; the README recipe (and this page) add ANTHROPIC_API_KEY=pooled.
+*/}
+
+**Goal:** your coding agent runs on the room's model instead of a cloud API.
+
+`pooled serve` is a small program from the `@pooled/cli` package (version 0.3.0). It joins the room as a client and serves the room's model on `127.0.0.1`, as an OpenAI and an Anthropic API. It needs no GPU: the model still runs on the room's devices.
+
+## You need
+
+- **A room running a big model.** Coding agents send long prompts (15,000 to 20,000 tokens for Codex and Claude Code) and need a model that calls tools reliably. Use the **Qwen3.6 35B MoE** (22.5 GB across the room) or the **Qwen3.8 27B** at 32K context. The 1.7B is too small. See [Pool two devices](/docs/kits/two-devices).
+- **Node 22 or newer** on the computer where your tool runs. Check with `node --version`.
+- **The tool:** Codex CLI, Claude Code or opencode.
+- **15 minutes.** The first prompt takes a while: the room reads the agent's whole system prompt once.
+
+:::caution[Your code goes to the room]
+Everything the tool sends, file contents included, goes to the room's host and the devices that run the model. Use a room of your own devices.
+:::
+
+## Steps
+
+<Steps>
+
+1. **Start the room with a long context.** On the device that will host, open the room with `?ctx=` before you press **Start the model**:
+
+   ```text
+   https://pooled.run/room?ctx=65536
+   ```
+
+   Pick **Qwen3.6 35B MoE** and press **Start the model**. (For the 27B, use `?ctx=32768`.)
+
+2. **Copy the command.** In the room, press **Serve API** in the header. The page shows the command for this room with a **Copy** button. On the device that opened the room, it carries the invite link:
+
+   ```bash
+   npx @pooled/cli serve "https://pooled.run/r/4TKG9P#k=…"
+   ```
+
+   Keep the quotes: the `#` starts a comment in most shells. This guide was checked with `@pooled/cli` 0.3.0. To use exactly that version, write `npx @pooled/cli@0.3.0 serve …`.
+
+3. **Run it** on the computer where your tool runs, and leave it running.
+
+   Once the model is ready, it prints the two base URLs, then settings for Codex, Claude Code and opencode sized for your room's context:
+
+   ```text
+   pooled serve · room 4TKG9P · Qwen3.6 35B MoE · Q4 · 65536 tokens of context
+     OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
+     Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
+     bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
+     prompts go to the room's host and may be shown to everyone in the room
+
+   For this room's 65536-token context:
+     Codex        model_context_window = 65536, model_auto_compact_token_limit = 52428  (~/.codex/config.toml)
+     Claude Code  ANTHROPIC_BASE_URL=http://127.0.0.1:8080 CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536 …
+     opencode     OPENCODE_DISABLE_CLAUDE_CODE=1 opencode, with this opencode.json: …
+   ```
+
+4. **Check it answers.** In another terminal:
+
+   ```bash
+   curl http://127.0.0.1:8080/v1/chat/completions -H 'content-type: application/json' \
+     -d '{"model": "pooled", "messages": [{"role": "user", "content": "Say hi"}]}'
+   ```
+
+   You get a JSON answer from the room's model, with `"model":"pooled/qwen3.6-35b-moe"`. The room's chat shows it too, marked "via API".
+
+5. **Set up your tool.** Use the numbers the bridge printed. The ones below are for a 64K room.
+
+   <Tabs syncKey="agent">
+   <TabItem label="Codex CLI">
+
+   Add this to `~/.codex/config.toml`:
+
+   ```toml title="~/.codex/config.toml"
+   model = "pooled"
+   model_provider = "pooled"
+   model_context_window = 65536
+   model_auto_compact_token_limit = 52428
+
+   [model_providers.pooled]
+   name = "Pooled"
+   base_url = "http://127.0.0.1:8080/v1"
+   wire_api = "responses"
+   ```
+
+   Then run `codex` in your project. Codex warns that model metadata for `pooled` is not found. That is harmless: the two numbers above give it what it needs.
+
+   </TabItem>
+   <TabItem label="Claude Code">
+
+   Run this in your project, as one command:
+
+   ```bash
+   ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=pooled \
+     CLAUDE_CODE_MAX_CONTEXT_TOKENS=65536 CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384 \
+     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude --model pooled
+   ```
+
+   Claude Code doesn't know how big the room's model is. The two limits tell it, so it compacts in time.
+
+   </TabItem>
+   <TabItem label="opencode">
+
+   Save this as `opencode.json` in your project:
+
+   ```json title="opencode.json"
+   {
+     "$schema": "https://opencode.ai/config.json",
+     "provider": {
+       "pooled": {
+         "npm": "@ai-sdk/openai-compatible",
+         "name": "Pooled room",
+         "options": { "baseURL": "http://127.0.0.1:8080/v1", "apiKey": "x" },
+         "models": {
+           "pooled/qwen3.6-35b-moe": { "name": "Qwen3.6 35B MoE · Q4", "tool_call": true, "limit": { "context": 65536, "output": 8192 } }
+         }
+       }
+     },
+     "model": "pooled/pooled/qwen3.6-35b-moe"
+   }
+   ```
+
+   Then run it with Claude Code's files left out of its prompt:
+
+   ```bash
+   OPENCODE_DISABLE_CLAUDE_CODE=1 opencode
+   ```
+
+   </TabItem>
+   </Tabs>
+
+6. **Give it a small first task**, like `Read README.md and tell me what this project does.` The first answer is the slow one. After that, the room reuses what it already read and each step reads only the new part.
+
+</Steps>
+
+## What you should see
+
+- After step 3: the banner. On the room's **Serve API** page, "Waiting for a client to connect" changes to say a client is connected.
+- After step 6: the tool's usual screen, answering from the room. On the 35B MoE, answers stream at the room's speed (about 30 to 50 words a second on one or two fast computers).
+
+## If something goes wrong
+
+### Requests get `503` or the tool says the model is unavailable
+The room's model isn't started, or the host's page closed. Start the model in the room and keep that page open. Until then the bridge answers `503` with `Retry-After: 5`, and `GET http://127.0.0.1:8080/health` shows `"ready": false`.
+
+### Claude Code says "Prompt is too long" before sending anything, or Codex or opencode fail with a `400`
+The tool doesn't know the room's context, or the room's context is too small for its prompt. Use the numbers the bridge printed, and a room with the MoE or the 27B at 32K or more.
+
+### The bridge says "waiting for the host of room … to let this client in"
+You gave it the room code, not the invite link. The host presses **Allow** on the room page, or you run the command from the **Serve API** page on the device that opened the room. If the host turned off **Allow API clients** in the room's settings, turn it back on.
+
+More: [Troubleshooting: Serve API](/docs/troubleshooting#serve-api-pooled-serve).
+
+## Next
+
+- [Connect your tools](/docs/serve/recipes): Continue, Open WebUI, LiteLLM and the SDKs.
+- [Serve API](/docs/serve): what the bridge does, and who sees your prompts.
+- [CLI reference](/docs/reference/cli): every flag, like `--port` and `--token-file`.
