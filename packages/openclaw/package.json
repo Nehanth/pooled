@@ -1,6 +1,6 @@
 {
   "name": "@pooled/openclaw",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Run a model across your own devices: this machine joins a Pooled room and holds part of the model on its GPU.",
   "keywords": [
     "openclaw",
