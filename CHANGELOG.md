@@ -4,6 +4,9 @@ All notable changes to Pooled (called SwarmLLM before September 2026). Format fo
 
 ## [Unreleased]
 
+### Fixed
+- **`@pooled/cli` 0.3.5 fixes 0.3.4's Windows joins of the MoE/27B** (with `@pooled/openclaw` 0.2.2): decode layer fusion's `matvec_coop_n` (the attention norm folded into the [k | v] GEMV, #276) had a thread-dependent loop inside its barrier loop, which Windows' FXC compiler rejects, so every D3D12 join of the 35B MoE and 27B failed. The loop now has a trip count all threads share (same bits), the barrier lint reads the generated GEMV variants and catches this shape, a layer-fusion flag's kernels are compiled only when it is on, and a fused kernel a GPU can't compile turns layer fusion off instead of failing the join.
+
 ### Added
 - **`@pooled/cli` 0.3.4 and `@pooled/openclaw` 0.2.2**: `pooled join` / `pooled host` and the OpenClaw plugin run the 35B MoE and 27B on Windows (D3D12/FXC: `topk_b` rewritten with uniform barriers, same picks), a re-deal never deals a device past its pledge (a short room stops and waits), `pooled host` names itself from the hostname, and a shader that a GPU's compiler can't build gives a one-line "join from Chrome or Edge" message (#291).
 - **`@pooled/cli` 0.3.3**: `pooled host` / `pooled join` follow the room page's context rule for Qwen3 1.7B: 16K when the room's memory holds it, 8K when it is short (and they say so), instead of always 16K. The picker shows `needs 6 GB (4 GB at 8K)`; `--ctx` still wins.

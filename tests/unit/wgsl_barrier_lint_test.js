@@ -2,7 +2,7 @@
 // (scripts/wgsl-barrier-lint.mjs). Windows' FXC compiler (Dawn's D3D12 backend without DXC) refuses a
 // kernel that breaks this with X3663 "thread sync operation found in varying flow control", so one
 // such kernel fails the whole engine on that GPU: topk_b did, the first Windows test of Pooled.
-import { lintSources } from "../../scripts/wgsl-barrier-lint.mjs";
+import { lintSources, generatedSources } from "../../scripts/wgsl-barrier-lint.mjs";
 
 const WGSL_DIR = new URL("../../engine/wgsl/", import.meta.url);
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -28,6 +28,13 @@ Deno.test("engine WGSL: no barrier that only some threads reach", () => {
   ok(!found.length, "\n" + found.map((x) => `${x.file} fn ${x.fn}: \`${x.what}\`: ${x.msg}`).join("\n"));
 });
 
+Deno.test("engine WGSL: coopWGSL's generated variants (_acc, _cv, _n) too", async () => {
+  const gen = await generatedSources();
+  ok(gen.length >= 6 && gen.every((g) => g.js.includes("fn matvec_coop_n(")), "generated the normed GEMVs");
+  const found = gen.flatMap((g) => lintSources([g]));
+  ok(!found.length, "\n" + found.map((x) => `${x.file} fn ${x.fn}: \`${x.what}\`: ${x.msg}`).join("\n"));
+});
+
 Deno.test("lint: flags the shapes FXC rejects", () => {
   const cases = {
     // topk_b before the fix: a run-time, thread-dependent candidate loop (with a data-dependent
@@ -41,6 +48,9 @@ Deno.test("lint: flags the shapes FXC rejects", () => {
     barrierInIf: `if (xs[t] > 0u) { workgroupBarrier(); }`,
     helperInIf: `if (t < 32u) { let w = red(t, 1u); }`,
     threadLoopWithBarrier: `for (var i: u32 = t; i < n; i += 64u) { workgroupBarrier(); }`,
+    // matvec_coop_n before the fix (layerFuse.norm, CLI 0.3.4): the rmsnorm tree's strided add, bounded by
+    // the halving loop's own stride, next to an inline barrier (FXC X4026 on Windows)
+    stridedTree: `var s: u32 = 128u; while (s > 0u) { for (var v: u32 = t; v < s; v += 64u) { sh[v] += sh[v + s]; } workgroupBarrier(); s = s / 2u; }`,
     assignedUnderThreadCond: `var m: u32 = n; if (t == 0u) { m = 3u; } for (var i: u32 = 0u; i < m; i++) { workgroupBarrier(); }`,
   };
   for (const [name, body] of Object.entries(cases)) ok(lint(kernel(body)).length > 0, `${name}: not flagged`);
@@ -61,6 +71,8 @@ Deno.test("lint: passes uniform shapes", () => {
     // the same names in two blocks are two variables
     shadowed: `{ let s = t; ys[s] = 1u; } { let s = n; for (var i: u32 = 0u; i < s; i++) { workgroupBarrier(); } }`,
     // a thread-dependent loop next to inline barriers (moe_router, attn_flash): FXC compiles it
+    // matvec_coop_n after the fix: a shared trip count, the body guarded
+    stridedTree: `var s: u32 = 128u; while (s > 0u) { for (var v0: u32 = 0u; v0 < s; v0 += 64u) { let v = v0 + t; if (v < s) { sh[v] += sh[v + s]; } } workgroupBarrier(); s = s >> 1u; }`,
     inlineBarriers: `for (var k: u32 = 0u; k < n; k++) { var b: u32 = 0u; for (var i: u32 = t; i < n; i += 64u) { if (xs[i] > b) { b = xs[i]; } } sh[t] = b; workgroupBarrier(); }`,
   };
   for (const [name, body] of Object.entries(cases)) {

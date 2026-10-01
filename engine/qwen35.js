@@ -18,6 +18,14 @@ import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows } fr
 import { f16ToF32, f32ToF16 } from "./gguf.js";
 import { TOPK_MAX, topkK, readCands } from "./topk.js";
 
+// the kernels each layerFuse flag dispatches ("pass" has none of its own)
+const LF_PIPES = {
+  dn: ["dn_delta_gnp"],
+  conv: ["matvec_coop_cv", "matvec_q8_coop_cv", "matvec_q4_coop_cv"],
+  kv: ["attn_glue_kv"],
+  comb: ["attn_combine_g"],
+  norm: ["matvec_coop_n", "matvec_q8_coop_n", "matvec_q4_coop_n"],
+};
 
 // Prefill GEMM operand precision (docs/research/prefill-f16-subgroup.md):
 //   "f32"      default: the row-stationary f32 GEMM (engine/wgsl/gemm.js), the pinned numerics
@@ -333,7 +341,10 @@ export class Qwen35Engine {
     // adapter info is empty (the GB10 and the M5 Max are the Deno hosts; GB10 Deno MoE 31.96 -> 31.0 ms/token).
     // Other vendors keep the unfused kernels until measured: a driver that contracts the fused kernels' arithmetic
     // differently from the batched ones would break spec == plain there. docs/bench-log.md 2026-09-29 / 09-30.
-    // The kernels are always compiled.
+    // A flag's kernels are compiled only when it is on at create (LF_PIPES below), and a fused kernel this GPU's
+    // compiler rejects turns layerFuse off (the unfused path runs) instead of failing the load: CLI 0.3.4 failed
+    // every Windows (FXC) join of the MoE / 27B on matvec_coop_n. A flag that was off at create stays a no-op if
+    // switched on at runtime (its kernels were never built): create with layerFuse: true to A/B them.
     {
       let lf = layerFuse;
       if (lf === undefined || lf === "auto") {
@@ -544,6 +555,10 @@ export class Qwen35Engine {
     // the LM head's kernels only where the head is: a device without it never runs them, and a
     // compiler that rejects one of them (FXC once refused topk_b) then cannot fail that device
     if (!hasHead) for (const n of ["argmax", "emb_gather", "topk_a", "topk_b"]) delete G1[n];
+    // layerFuse's kernels: only the flags on at create, and optional (see the layerFuse note above)
+    const lfOf = new Map();
+    for (const [k, names] of Object.entries(LF_PIPES)) for (const n of names) { if (this.layerFuse[k]) lfOf.set(n, k); else delete G1[n]; }
+    const lfFails = [];
     if (this.moe) Object.assign(G1, {
       moe_router: ["ro", "rw", "rw", "u"], moe_combine: ["rw", "ro", "ro", "ro", "ro", "u"],
       moe_gu_q4: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"], moe_gu_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"],
@@ -594,11 +609,16 @@ export class Qwen35Engine {
       const layout1 = device.createBindGroupLayout({
         entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })),
       });
-      this.pipes[name] = await compilePipeline(device, {
-        layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }),
-        compute: { module: mod, entryPoint: name },
-      });
+      const desc = { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: mod, entryPoint: name } };
+      if (!lfOf.has(name)) { this.pipes[name] = await compilePipeline(device, desc); return; }
+      try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { lfFails.push(e); }
     }));
+    if (lfFails.length) {   // the unfused kernels compiled (or the load would have failed above): run those
+      for (const n of lfOf.keys()) delete this.pipes[n];
+      for (const k of Object.keys(this.layerFuse)) this.layerFuse[k] = false;
+      this.layerFuseError = lfFails.map((e) => e.message).join("; ");
+      console.warn(`layerFuse off: ${this.layerFuseError}`);
+    }
     this._pmAvail.f16 = this._pmR16;
     if (pm === "sgmatrix" && this.gemmOn) {
       const spec = G1.matvec_q4_coop_b;
@@ -723,6 +743,7 @@ export class Qwen35Engine {
     const mvN = (w, nw, y, dOut) => {
       if (!coop || !w || !nw || nw.kind !== "f32") return null;
       const pipe = (w.kind === "q8" ? "matvec_q8" : w.kind === "q4" ? "matvec_q4" : "matvec") + "_coop_n";
+      if (!this.pipes[pipe]) return null;   // layerFuse.norm off at create, or its kernel did not compile
       const bufs = w.kind === "f32" ? [w.buf, this.x, y, this._shape(dOut, dim)] : [w.qs, w.sc, this.x, y, this._shape(dOut, dim)];
       return { pipe, wgs: Math.ceil(dOut / this.coopRows), bg: this._bg(this.pipes[pipe], 1, [...bufs, nw.buf, this.xn]) };
     };
@@ -900,9 +921,9 @@ export class Qwen35Engine {
           R.bgKvStore = this._bg(this.pipes[this.ksPipe], 1, [this.k, this.v, R.kCache, R.vCache, ...sc, this._uZero4]);
           R.bgFlash = this._bg(this.pipes[this.faPipe], 1, [this.q, R.kCache, R.vCache, ...sc, this.faO, this.faML, this.faU1]);
           R.bgCombine = this._bg(this.pipes.attn_combine, 1, [this.faO, this.faML, this.attnOut, this.faU1]);
-          if (!this.kvQ8) {   // layerFuse.comb / .kv
-            R.bgCombineG = this._bg(this.pipes.attn_combine_g, 1, [this.faO, this.faML, this.attnOut, this.qFull, this.faU1]);
-            if (this.attnGlueOn) R.bgGlueKv = this._bg(this.pipes.attn_glue_kv, 1, [this.qFull, this.q, this.k, this.v, R.qNorm.buf, R.kNorm.buf, R.kCache, R.vCache, this.dnBuf]);
+          if (!this.kvQ8) {   // layerFuse.comb / .kv (when their kernels were built)
+            if (this.pipes.attn_combine_g) R.bgCombineG = this._bg(this.pipes.attn_combine_g, 1, [this.faO, this.faML, this.attnOut, this.qFull, this.faU1]);
+            if (this.attnGlueOn && this.pipes.attn_glue_kv) R.bgGlueKv = this._bg(this.pipes.attn_glue_kv, 1, [this.qFull, this.q, this.k, this.v, R.qNorm.buf, R.kNorm.buf, R.kCache, R.vCache, this.dnBuf]);
           }
           if (this.pipes.attn_dec) {
             R.bgDec = this._bg(this.pipes.attn_dec, 1, [this.q, R.kCache, R.vCache, this.faO, this.faML, this.adU1]);
@@ -962,7 +983,7 @@ export class Qwen35Engine {
         R.bgGateNorm = this._bg(this.pipes.dn_gatenorm, 1, [this.dOut, this.z, R.ssmNorm, this.gated, this.dnBuf]);
         R.bgDeltaGn = this._bg(this.pipes.dn_delta_gn, 1, [this.convOut, this.beta, this.decay, R.S, this.z, R.ssmNorm, this.gated, this.dnBuf]);
         // layerFuse.dn: [dt bias | A] in one buffer, so dn_delta_gnp fits in 8 storage bindings
-        if (dState === 128 && L.dtBias.data && L.ssmA.data && L.dtBias.data.length === nVH && L.ssmA.data.length === nVH) {
+        if (this.pipes.dn_delta_gnp && dState === 128 && L.dtBias.data && L.ssmA.data && L.dtBias.data.length === nVH && L.ssmA.data.length === nVH) {
           const dtA = new Float32Array(2 * nVH); dtA.set(L.dtBias.data, 0); dtA.set(L.ssmA.data, nVH);
           R.dtA = this._buf(dtA, GPUBufferUsage.STORAGE);
           R.bgDeltaGnp = this._bg(this.pipes.dn_delta_gnp, 1, [this.convOut, this.betaRaw, this.alpha, R.dtA, R.S, this.z, R.ssmNorm, this.gated, this.dnBuf]);
@@ -971,6 +992,7 @@ export class Qwen35Engine {
         if (coop) {
           const cvOp = (w, y, dOut) => {
             const pipe = (w.kind === "q8" ? "matvec_q8" : w.kind === "q4" ? "matvec_q4" : "matvec") + "_coop_cv";
+            if (!this.pipes[pipe]) return null;   // layerFuse.conv off at create, or its kernel did not compile
             const bufs = w.kind === "f32" ? [w.buf, this.xn, y, this._shape(dOut, dim)] : [w.qs, w.sc, this.xn, y, this._shape(dOut, dim)];
             return { pipe, wgs: Math.ceil(dOut / this.coopRows), bg: this._bg(this.pipes[pipe], 1, [...bufs, R.convW, R.convState, this.convOut, this.dnBuf]) };
           };
@@ -1412,7 +1434,7 @@ export class Qwen35Engine {
       const nba = this.fuseProj && L.bgNba;   // input norm + beta / alpha, then [qkv | z] on its xn
       if (nba) this._dxyz(p, "dn_nba", L.bgNba, Math.ceil(L.fBA.rows / 4), 1, 1);
       else this._d(p, "rmsnorm", L.bgNorm1, 256, 256);
-      const cv = LF.conv && !!L.mvQKVcv;   // conv in the qkv GEMV's epilogue
+      const cv = LF.conv && !!L.mvQKVcv && !(this.fuseProj && L.mvQZ && !L.mvQZcv);   // conv in the qkv GEMV's epilogue
       if (this.fuseProj && L.mvQZ) this._dop(p, cv ? L.mvQZcv : L.mvQZ);
       else { this._dop(p, cv ? L.mvQKVcv : L.mvQKV); this._dop(p, L.mvZ); }
       if (!nba) {

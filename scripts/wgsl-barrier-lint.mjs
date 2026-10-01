@@ -19,7 +19,11 @@
 // value computed from those or assigned under such a condition. workgroup_id, uniforms, constants and
 // literals are uniform. It errs on the side of flagging.
 //
-// node scripts/wgsl-barrier-lint.mjs [files...]   (default engine/wgsl/*.js) -> one line per finding, exit 1 if any
+//   - (inline barriers) a thread-dependent loop whose bound is a variable the enclosing barrier loop
+//     updates: FXC rejected matvec_coop_n (for v = t; v < nstride inside the nstride halving loop) with
+//     X4026, though it takes thread-dependent loops with other bounds there (moe_router, attn_flash)
+// node scripts/wgsl-barrier-lint.mjs [files...]   (default engine/wgsl/*.js plus coopWGSL's generated
+// variants) -> one line per finding, exit 1 if any
 
 const BARRIERS = new Set(["workgroupBarrier", "storageBarrier", "textureBarrier", "workgroupUniformLoad"]);
 const VARYING_BUILTINS = new Set(["local_invocation_id", "local_invocation_index", "global_invocation_id", "subgroup_invocation_id"]);
@@ -369,8 +373,23 @@ export function analyze(fns, mod, file = "") {
         const varies = loopExitVaries(s);
         if (bar && (ctl || varies)) say(s, "loop with a barrier runs a thread-dependent number of times");
         if (barViaCall(s.body)) walk(s.body, (x) => { if (x !== s && x.k === "loop" && !stmtHasBarrier(x.body) && !constBound(x) && (isVarying(x.cond) || loopExitVaries(x))) say(x, "thread-dependent loop inside a loop that calls a barrier helper (FXC X3663, topk_b): give it a shared trip count and guard its body"); });
+        else if (bar) {   // inline barriers: flagged when the inner loop's bound is one the barrier loop carries (coop_n's nstride)
+          const carried = carriedBy(s);
+          walk(s.body, (x) => { if (x !== s && x.k === "loop" && !stmtHasBarrier(x.body) && !constBound(x) && (isVarying(x.cond) || loopExitVaries(x)) && x.cond.some((t) => carried.has(t.v))) say(x, "thread-dependent loop bounded by a variable its enclosing barrier loop updates (FXC X4026, matvec_coop_n): give it a shared trip count and guard its body"); });
+        }
         check(s.body, ctl || varies, [...loops, s]);
       }
+    };
+    // names a loop assigns that live across its iterations: declared outside its body (or in its init), assigned inside it
+    const carriedBy = (L) => {
+      const declared = new Set(), assigned = new Set();
+      walk(L.body, (x) => {
+        for (const ts of [x.toks, x.init]) if (ts?.length && (ts[0].v === "let" || ts[0].v === "var" || ts[0].v === "const")) { const a = target(ts); if (a) declared.add(a.name); }
+        for (const ts of [x.toks, x.update]) if (ts?.length && !(ts[0].v === "let" || ts[0].v === "var" || ts[0].v === "const")) { const a = target(ts); if (a) assigned.add(a.name); }
+      });
+      const u = L.update?.length ? target(L.update) : null;
+      if (u) assigned.add(u.name);
+      return new Set([...assigned].filter((n) => !declared.has(n)));
     };
     // `i < 512u` / `i < ${N}u`: a compile-time trip count FXC can unroll (moe_gusg's staging loop compiles)
     const constBound = (L) => L.cond.length >= 3 && L.cond[1].v === "<" && L.cond.slice(2).every((t) => !t.id || t.v.startsWith("_X_")) && !loopExitVaries({ ...L, cond: [] });
@@ -427,12 +446,25 @@ export function lintSources(sources) {
   return out;
 }
 
+// Kernels the JS assembles by string surgery (coop.js's _acc / _cv / _n variants: the NRM prologue is
+// spliced into the GEMV by .replace) are not whole functions in any one template literal, so the lint
+// also reads coopWGSL's output for the configurations the engine builds (coopWG 64 / 128 / 256 from
+// autotune, 4 or 8 rows).
+export async function generatedSources() {
+  const { coopWGSL } = await import(new URL("../engine/wgsl/coop.js", import.meta.url).href);
+  const out = [];
+  for (const WG of [64, 128, 256]) for (const ROWS of [4, 8]) for (const unpack of [true, false])
+    out.push({ file: `coop.js (generated: coopWGSL(${WG}, ${ROWS}, unpack ${unpack}, CV, NRM))`, js: "export const W = `" + coopWGSL(WG, ROWS, 64, 16, 1, unpack, true, true) + "`;" });
+  return out;
+}
+
 if (typeof process !== "undefined" && process.argv?.[1] && import.meta.url === new URL(process.argv[1], "file://").href) {
   const fs = await import("node:fs");
   const path = await import("node:path");
   const dir = new URL("../engine/wgsl/", import.meta.url).pathname;
   const files = process.argv.slice(2).length ? process.argv.slice(2) : fs.readdirSync(dir).filter((f) => f.endsWith(".js")).map((f) => path.join(dir, f));
   const found = lintSources(files.map((file) => ({ file: path.basename(file), js: fs.readFileSync(file, "utf8") })));
+  if (!process.argv.slice(2).length) for (const g of await generatedSources()) found.push(...lintSources([g]));
   for (const x of found) console.log(`${x.file} fn ${x.fn}: \`${x.what}\`: ${x.msg}`);
   console.log(`${found.length} finding(s)`);
   process.exit(found.length ? 1 : 0);

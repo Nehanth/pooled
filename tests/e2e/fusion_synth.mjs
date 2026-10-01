@@ -25,7 +25,7 @@ async function pageMain({ plen, ntok }) {
   const device = await adapter.requestDevice({ requiredLimits: { maxBufferSize: adapter.limits.maxBufferSize, maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize } });
   const errs = []; device.addEventListener("uncapturederror", (e) => errs.push(e.error?.message));
   const eng = await Qwen35Engine.create({ device, meta: G.meta, layerRange: [0, L], hasEmbed: true, hasHead: true, vocab: G.tensors[GGML_EMBED].shape[0],
-    maxSeq: 2048, batchCols: 16, coopRowsB: 1, coopWG: 64, weights: await qwen35Weights(G, bytesOf, { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true }) });
+    maxSeq: 2048, batchCols: 16, coopRowsB: 1, coopWG: 64, layerFuse: true, weights: await qwen35Weights(G, bytesOf, { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true }) });
   const prompt = Array.from({ length: plen }, (_, i) => 33 + ((i * 7919) % 90));
   const LFK = Object.keys(eng.layerFuse);
   const run = async (glue, dn, mc, tile = false, lf = "") => {

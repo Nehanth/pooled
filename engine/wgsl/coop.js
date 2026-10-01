@@ -403,9 +403,11 @@ fn ${P}_conv(c: u32, x: f32) {
   workgroupBarrier();
   var nstride: u32 = 128u;
   while (nstride > 0u) {
-    for (var v: u32 = t; v < nstride; v += ${WG}u) { nrm_p[v] += nrm_p[v + nstride]; }
+    // a trip count every thread shares, the body guarded: FXC (Windows D3D12) rejects a thread-dependent
+    // loop here (for v = t; v < nstride) with X4026 at the barrier below. Same adds, same order.
+    for (var v0: u32 = 0u; v0 < nstride; v0 += ${WG}u) { let v = v0 + t; if (v < nstride) { nrm_p[v] += nrm_p[v + nstride]; } }
     workgroupBarrier();
-    nstride = nstride / 2u;
+    nstride = nstride >> 1u;
   }
   let ninv = inverseSqrt(nrm_p[0] / f32(${n}) + cfg.eps);
   if (wg.x == 0u && wg.y == 0u) {
