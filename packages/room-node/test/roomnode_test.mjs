@@ -368,3 +368,29 @@ test("setPledge: a host tells the room, a device tells its host; the host's hell
   h.onData("p1", { t: "pledge", gb: 9 });
   assert.equal(h.conns.get("p1").meta.contribGB, 9);
 });
+
+test("dealPlan split: speed puts it all on the host when its pledge holds it; memory spreads by pledge; speed spills over when it doesn't", () => {
+  const self = { name: "spark", meta: { contribGB: 8 } };
+  const L = 28, layerBytes = 0.06 * GB, embedBytes = 0.6 * GB;
+  const peers = [{ id: "b", name: "mac", meta: { contribGB: 8 } }];
+  const speed = RoomNode.dealPlan({ L, layerBytes, embedBytes, self, peers, mode: "speed" });
+  assert.deepEqual(speed.chain, []); assert.deepEqual(speed.leftOut, ["b"]);
+  assert.deepEqual(speed.ranges, [[0, L]]);
+  const spread = RoomNode.dealPlan({ L, layerBytes, embedBytes, self, peers, mode: "memory" });
+  assert.deepEqual(spread.chain, ["b"]); assert.ok(spread.assigned[1] > 0);
+  // the host lends 1 GB: 6 layers there, the rest on the mac
+  const spill = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: "spark", meta: { contribGB: 1 } }, peers, mode: "speed" });
+  assert.deepEqual(spill.chain, ["b"]); assert.equal(spill.ranges[0][0], 0); assert.equal(spill.ranges.at(-1)[1], L);
+  assert.equal(spill.assigned[0], Math.floor((1 - 0.6) / 0.06));
+  const n = new RoomNode({ pledgeGB: 4, split: "speed" }); assert.equal(n.splitMode, "speed");
+  n.setSplit("spread"); assert.equal(n.splitMode, "memory");
+});
+
+test("dealPlan speed counts the KV cache like the room page: 1.7B, 2 GB + 2 GB splits (it does not all go to the host)", async () => {
+  const { roomBytes } = await import("../../../room/models.js");
+  const fitBytes = roomBytes("qwen3-1.7b", 16384, "f16");
+  const p = RoomNode.dealPlan({ L: 28, layerBytes: 53494784, embedBytes: 330612736, self: { name: "spark", meta: { contribGB: 2 } },
+    peers: [{ id: "b", name: "mac", meta: { contribGB: 2 } }], mode: "speed", fitBytes });
+  assert.deepEqual(p.chain, ["b"]);
+  assert.ok(p.assigned[0] > 0 && p.assigned[0] < 28, `host holds ${p.assigned[0]}`);
+});

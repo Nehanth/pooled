@@ -122,6 +122,67 @@ test("pull: a file of the wrong size or hash is rejected and never becomes the m
   } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("pull: a big file comes in several ranges at once, resumes each after an abort, and keeps a one-connection .part", async () => {
+  const { srv, seen, base } = await server();
+  const dir = tmp();
+  try {
+    const MODELS = fakeModels(base), FILES = { "fake-1b": { bytes: BODY.length, sha256: SHA } };
+    const seg = { segments: 4, minSegmentedBytes: 0 };
+    const gguf = path.join(dir, "fake-1b", "Fake-Q8.gguf"), part = gguf + ".part";
+    // straight through: four ranges that cover the file
+    const r = await pullModel("fake-1b", { dir, MODELS, FILES, ...seg });
+    assert.equal(r.skipped, false);
+    assert.deepEqual(fs.readFileSync(gguf), BODY);
+    const q = BODY.length / 4;
+    for (let i = 0; i < 4; i++) assert.ok(seen.ranges.includes(`bytes=${Math.floor(q * i)}-${Math.floor(q * (i + 1)) - 1}`), `range ${i}`);
+    assert.ok(!fs.existsSync(part) && !fs.existsSync(part + ".json"));
+    removeModel(dir, "fake-1b");
+    // stopped halfway: the .part and its .json say how far each range got; the next pull asks only for the rest
+    const ac = new AbortController();
+    await assert.rejects(pullModel("fake-1b", { dir, MODELS, FILES, ...seg, signal: ac.signal, onProgress: (p) => { if (p.done > BODY.length / 3) ac.abort(); } }),
+      (e) => e.type === "aborted");
+    const meta = JSON.parse(fs.readFileSync(part + ".json", "utf8"));
+    const had = meta.base + meta.segs.reduce((a, g) => a + g.done, 0);
+    assert.ok(had > 0 && had < BODY.length, `partial (${had})`);
+    assert.equal(modelState(dir, "fake-1b", MODELS, FILES).partBytes, had);
+    seen.ranges.length = 0;
+    let first = null;
+    await pullModel("fake-1b", { dir, MODELS, FILES, ...seg, onProgress: (p) => { first ??= p; } });
+    assert.equal(first.resumed, had);
+    for (const g of meta.segs) if (g.done < g.end - g.start) assert.ok(seen.ranges.includes(`bytes=${g.start + g.done}-${g.end - 1}`));
+    assert.deepEqual(fs.readFileSync(gguf), BODY);
+    assert.ok(!fs.existsSync(part + ".json"));
+    removeModel(dir, "fake-1b");
+    // a .part from a one-connection download (0.3.0): its bytes stay, the ranges fetch the rest
+    fs.mkdirSync(path.dirname(part), { recursive: true });
+    fs.writeFileSync(part, BODY.subarray(0, 1000000));
+    seen.ranges.length = 0;
+    await pullModel("fake-1b", { dir, MODELS, FILES, ...seg });
+    assert.deepEqual(fs.readFileSync(gguf), BODY);
+    assert.ok(seen.ranges.some((r) => r.startsWith("bytes=1000000-")), "starts after the bytes it had");
+  } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("pull: a server that ignores ranges still works (one connection), and a wrong size is caught in ranges too", async () => {
+  const srv = http.createServer((req, res) => { res.writeHead(200, { "content-length": BODY.length }); res.end(BODY); });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const dir = tmp();
+  try {
+    const f = { name: "Fake-Q8.gguf", url: `${base}/Fake-Q8.gguf`, bytes: BODY.length, sha256: SHA, main: true };
+    const r = await pullFile(f, dir, { segments: 4, minSegmentedBytes: 0 });
+    assert.deepEqual(fs.readFileSync(r.path), BODY);
+    assert.ok(!fs.existsSync(r.path + ".part.json"));
+  } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  const { srv: s2, base: b2 } = await server();
+  const d2 = tmp();
+  try {
+    await assert.rejects(pullFile({ name: "Fake-Q8.gguf", url: `${b2}/Fake-Q8.gguf`, bytes: BODY.length + 5, main: true }, d2, { segments: 4, minSegmentedBytes: 0 }),
+      (e) => e.type === "size");
+    assert.ok(!fs.existsSync(path.join(d2, "Fake-Q8.gguf.part")) && !fs.existsSync(path.join(d2, "Fake-Q8.gguf.part.json")));
+  } finally { s2.close(); fs.rmSync(d2, { recursive: true, force: true }); }
+});
+
 test("list and rm: what is here, what is not, partial downloads; rm deletes one model", async () => {
   const { srv, base } = await server();
   const dir = tmp();

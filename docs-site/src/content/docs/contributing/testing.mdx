@@ -24,9 +24,7 @@ Sources (origin/main 40bb0fa):
 
 import { Aside, Tabs, TabItem } from '@astrojs/starlight/components';
 
-There are three kinds of test. Unit tests run anywhere. Browser tests run in headless Chromium on SwiftShader, a software GPU, so they need no real GPU either. GPU tests need WebGPU in Deno and the model files.
-
-Start with the first two. They cover most room, Code mode and Serve API changes.
+Unit tests and browser tests (headless Chromium on SwiftShader, a software GPU) run on any machine and cover most room, Code mode and Serve API changes. GPU tests need WebGPU in Deno and the model files.
 
 ## No GPU needed
 
@@ -77,7 +75,7 @@ Run the suites through `tests/run.sh`:
 | `tests/run.sh extra` | MoE, sharding, splits, the full 27B: GPU tests no other suite covers | The MoE and 27B files. |
 | `npm run test:all` | `quick` plus `q38` | |
 
-A test fails if it exits nonzero **or** prints `FAIL` or `FAILED`, even when it exits 0. Set `STRICT=1` to also fail on a printed `SKIP`. Set `ONLY=test_mtp,test_ctx` to run a subset of `q38once`.
+A test fails if it exits nonzero **or** prints `FAIL`/`FAILED`. `STRICT=1` also fails on `SKIP`; `ONLY=test_mtp,test_ctx` runs a subset of `q38once`.
 
 To run one test on its own:
 
@@ -87,7 +85,7 @@ cd tests && deno run --unstable-webgpu --allow-read --allow-env test_qwen.js
 
 ### The converted-weights cache
 
-Loading the 27B means reading and converting a 15 GB file, which used to take about 45 seconds of CPU per test. The 27B and MoE tests now keep the converted tensors in `~/.cache/swarmllm-weights`, and a warm load takes about 4 to 9 seconds. The cache takes about 16 GB for the 27B and 20 GB for the MoE, on top of the GGUFs.
+The 27B and MoE tests keep converted tensors in `~/.cache/swarmllm-weights` (about 16 GB and 20 GB), so a warm load takes seconds instead of converting the GGUF again.
 
 | Variable | Effect |
 |---|---|
@@ -96,7 +94,7 @@ Loading the 27B means reading and converting a 15 GB file, which used to take ab
 | `WEIGHT_CACHE_VERIFY=1` | Also check each entry's checksum (about 1.5 times the warm load time). |
 | `WEIGHT_CACHE_PRUNE=1` | Delete directories left over from older loader versions. |
 
-Any edit to `engine/gguf.js` starts a new cache directory, so you never read stale conversions. `npm run test:cache` checks that the cache gives byte-identical tensors for every quantization type.
+Any edit to `engine/gguf.js` starts a new cache directory. `npm run test:cache` checks the cache is byte-identical.
 
 <Aside type="caution">
 Never run two GPU jobs at once: tests, benchmarks or a CUDA build. They share memory bandwidth, and every number becomes meaningless. If the GPU is busy, stick to the no-GPU tests.
@@ -104,26 +102,20 @@ Never run two GPU jobs at once: tests, benchmarks or a CUDA build. They share me
 
 ## Rooms on one machine
 
-These form real rooms, with real WebRTC and PeerJS signaling, between headless Chromium tabs on your machine. They need a GPU and are only run by hand.
+Real rooms between headless Chromium tabs on your machine. GPU needed; run by hand.
 
 | Command | What it checks |
 |---|---|
-| `npm run e2e -- --phone` | A host, a worker and a phone-shaped tab (mobile user agent, 4x CPU throttle). Reports stats, wire counters and console errors. `--wire off\|slice\|stripeN` picks the transport. |
-| `node tests/e2e/room_chaos.mjs --devices 3 --plan net` | Latency, packet loss and freezes, through a userland packet shaper (no root). Other plans: `death`, `signal`, `join`, `turn`. |
-| `node tests/e2e/room_drop.mjs --devices 3` | A device that goes silent mid-answer is noticed in 3 to 5 s. A bad but working network is never mistaken for a dead device. |
-| `node tests/e2e/room_resume.mjs` | Locks, reloads or kills a device mid-answer. The answer must finish with the same text as an uninterrupted one. |
-| `node tests/e2e/room_latency.mjs --model qwen3.6-35b-moe --devices 2 --lat 0,5,20` | Decode speed and time to first token against emulated one-way latency. |
-| `node tests/e2e/serve.mjs` | `pooled serve` against a real room running Qwen3 1.7B, with the official SDKs. `--codex` and `--claude` also run one real agent turn. |
+| `npm run e2e -- --phone` | Host, worker and a phone-shaped tab. `--wire off\|slice\|stripeN` picks the transport. |
+| `node tests/e2e/room_chaos.mjs --devices 3 --plan net` | Latency, loss and freezes (no root). Other plans: `death`, `signal`, `join`, `turn`. |
+| `node tests/e2e/room_drop.mjs --devices 3` | A silent device is noticed in 3 to 5 s; a bad network is not mistaken for one. |
+| `node tests/e2e/room_resume.mjs` | Lock, reload or kill a device mid-answer; the text must match an uninterrupted run. |
+| `node tests/e2e/room_latency.mjs --model qwen3.6-35b-moe --devices 2 --lat 0,5,20` | Speed against emulated latency. |
+| `node tests/e2e/serve.mjs` | `pooled serve` against a real 1.7B room with the official SDKs; `--codex`, `--claude` run an agent turn. |
 
 ## Real devices
 
-For rooms across two machines, or with a real iPhone, see the rigs in [`docs/testing-fast.md`](https://github.com/Nehanth/pooled/blob/main/docs/testing-fast.md):
-
-- `tests/e2e/xroom_pair.sh` runs a room with one headless browser on each of two machines, and `xroom_report.mjs` splits every lap into compute and wire time.
-- `tests/e2e/xroom_phone.mjs` drives Safari on a USB-attached iPhone over WebDriver. `xroom_cluster.sh` combines any of this machine, another machine and the phone.
-- `tests/e2e/resume_phone.mjs` backgrounds or reloads Safari on the phone mid-answer.
-
-The phone must open an `https` page, such as pooled.run or a branch's Vercel preview. All devices must run the same commit.
+Rigs for two machines (`tests/e2e/xroom_pair.sh`, `xroom_report.mjs`) and a USB-attached iPhone (`xroom_phone.mjs`, `xroom_cluster.sh`, `resume_phone.mjs`) are described in [`docs/testing-fast.md`](https://github.com/Nehanth/pooled/blob/main/docs/testing-fast.md). The phone must open an `https` page, and all devices must run the same commit.
 
 ## What CI runs
 
@@ -139,8 +131,8 @@ Every pull request and every push to `main` runs two jobs on GitHub's Ubuntu run
 6. `tests/run.sh selftest`.
 </TabItem>
 <TabItem label="browser (optional)">
-Installs Playwright's Chromium and runs `tests/e2e/preview_browser.mjs`. It is allowed to fail until it has a track record in CI.
+Runs `tests/e2e/preview_browser.mjs` in Playwright's Chromium. Allowed to fail for now.
 </TabItem>
 </Tabs>
 
-CI has no GPU. GPU tests run on the maintainer's hardware before merge, so in your PR say which ones you ran, and on which GPU.
+CI has no GPU, so say in your PR which GPU tests you ran, and on which GPU.

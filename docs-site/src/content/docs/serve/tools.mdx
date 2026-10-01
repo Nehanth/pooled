@@ -1,6 +1,6 @@
 ---
 title: Tool calling
-eyebrow: Serve API
+eyebrow: Serve API reference
 description: Function tools work on all three APIs. Every call is constrained to its tool's schema while the model writes it, so arguments always parse.
 sidebar:
   label: Tool calling
@@ -179,6 +179,7 @@ Give agents enough `max_tokens` for their largest call, such as a file write.
 | One tool's schema | 32 000 characters |
 | All tools and the output format together | 10 000 grammar nodes, checked by the host |
 | Calls in one answer | 16 |
+| Calls sent back in one assistant message | 64 |
 
 :::caution[Known limit]
 On the Qwen3.5+ call format (the 27B and the 35B MoE), a string argument that contains a line `</parameter>` ends at that line.

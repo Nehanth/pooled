@@ -19,14 +19,15 @@ Sources (origin/main 40bb0fa):
 
 import { Aside, Steps } from '@astrojs/starlight/components';
 
-Pooled has three parts: a WebGPU engine, a peer-to-peer room runtime over WebRTC, and Code mode, a coding agent that runs in the browser on top of them. We welcome help with kernels, model support, the room protocol, Code mode, the site, the docs, and benchmark reports from hardware we don't have.
+Pooled has three parts: a WebGPU engine, a peer-to-peer room runtime over WebRTC, and Code mode, an in-browser coding agent. Help is welcome on all of them, on the site and docs, and with benchmark reports from hardware we don't have.
+
+**Shortest path:** clone, `npm test` (no GPU needed), `npm run serve`, then open a PR with one change and the tests you ran.
 
 ## Before you start
 
-- Search the [existing issues](https://github.com/Nehanth/pooled/issues). For anything bigger than a small fix, open an issue first so we can agree on the approach before you write code.
-- Keep each pull request to one change. Put refactors and behavior changes in separate PRs.
-- Ask usage questions in [Discussions](https://github.com/Nehanth/pooled/discussions), not in issues.
-- Report security issues privately. See [Security model](/docs/internals/security).
+- Search the [issues](https://github.com/Nehanth/pooled/issues); for anything bigger than a small fix, open one first to agree on the approach.
+- One change per PR. Refactors and behavior changes go in separate PRs.
+- Usage questions go in [Discussions](https://github.com/Nehanth/pooled/discussions). Security issues are reported privately ([Security model](/docs/internals/security)).
 
 ### Changes that need a design note first
 
@@ -40,7 +41,7 @@ Open an issue with the *Research / design proposal* template before you write co
 
 ### What won't be accepted
 
-These are the project's commitments. A proposal that conflicts with one of them is declined, however good the code is:
+A proposal that conflicts with these commitments is declined, however good the code is:
 
 1. **Easy to use.** Opening a room link in a browser must always work with nothing installed. Native and headless peers are welcome, but they must never become a requirement.
 2. **No accounts, no tokens, no ads.**
@@ -70,51 +71,45 @@ These are the project's commitments. A proposal that conflicts with one of them 
    npm run serve
    ```
 
-   `serve` reads `serve.json` for the `/room` and `/r/:code` rewrites. Opening the HTML files directly doesn't work: the room uses ES modules, and the landing page uses absolute `/site/...` paths.
-
 4. For the browser tests, run `npm install` to get Playwright and the `peer` signaling server.
 
 </Steps>
 
-Model files aren't in the repo. The GPU tests read them from `models/`. See [Testing](/docs/contributing/testing) for what each suite needs, and which tests run without a GPU.
+Model files aren't in the repo; GPU tests read them from `models/`. See [Testing](/docs/contributing/testing).
 
 ## Pull requests
 
 **Before you open one:**
 
-- Engine and kernel changes must keep the golden tests passing **bit for bit**. The speculative path must produce exactly the same stream as plain decoding (`tests/test_mtp.js`).
-- Performance changes add a row to `docs/bench-log.md` with the hardware, the commit, and before and after numbers. Include neutral results too. A PR that says "faster" without a number can't be reviewed. See [Benchmarking](/docs/contributing/benchmarks).
-- Protocol changes must make older peers fail loudly, not silently. Bump the message version.
-- Add or update a test: GPU tests in `tests/`, no-GPU unit tests in `tests/unit/`, browser tests in `tests/e2e/`.
-- Code mode changes (`harness/`, or the Code pane in the room) must keep `npm run e2e:code` and `node tests/e2e/preview_browser.mjs` passing.
-- Keep the diff readable. Don't reformat untouched code, and don't rename things you don't need to.
-- User-facing changes update the matching page in `docs/`.
+- Engine changes keep the golden tests passing **bit for bit**, and speculative decoding equal to plain (`tests/test_mtp.js`).
+- Speed changes add a row to `docs/bench-log.md` (neutral results too). "Faster" without a number can't be reviewed. See [Benchmarking](/docs/contributing/benchmarks).
+- Protocol changes make older peers fail loudly: bump the message version.
+- Add or update a test: `tests/` (GPU), `tests/unit/` (no GPU), `tests/e2e/` (browser).
+- Code mode changes keep `npm run e2e:code` and `node tests/e2e/preview_browser.mjs` passing.
+- Keep the diff readable: no reformatting or renaming you don't need.
+- User-facing changes update the docs.
 
 **Commit messages:** write an imperative subject under 72 characters, and a body that says *why*. For performance work, include the measured effect.
 
-**After you open it:** CI runs the syntax checks and unit tests. A maintainer can build a Vercel preview of your branch if that helps the review. GPU tests run on the maintainer's hardware before merge. In the PR, say which tests you ran and on which GPU. Merging to `main` deploys to production.
-
-The PR template has a checklist for correctness, performance and "Tested on". Fill it in.
+**After you open it:** CI runs the syntax checks and unit tests. GPU tests run on the maintainer's hardware before merge, so fill in the template's "Tested on" with the tests and GPU you used. Merging to `main` deploys to production.
 
 ## AI usage policy
 
-You can use AI to help write your contribution. You are still responsible for the code: read it, run it, and be ready to explain it in review. We close pull requests that show no sign of having been run, such as failing tests, invented APIs or performance claims nobody measured. Don't paste raw model output into issues or reviews.
-
-If you work with a coding agent, point it at `docs/agents.md`. It has the project rules in a form agents follow.
+You can use AI, but you are responsible for the code: read it, run it, and be ready to explain it. PRs that show no sign of having been run (failing tests, invented APIs, unmeasured speed claims) are closed. Don't paste raw model output into issues or reviews. Point coding agents at `docs/agents.md`.
 
 ## Coding guidelines
 
-- **Plain modern JavaScript.** ES modules. No build step, no framework.
-- **Kernels** live in `engine/wgsl/*.js` as JavaScript templates that generate WGSL, per shape when the shape varies. Keep the generated code deterministic and readable.
+- **Plain modern JavaScript**, ES modules, no build step, no framework.
+- **Kernels** are JavaScript templates in `engine/wgsl/*.js` that generate deterministic, readable WGSL.
 - **Rules we learned the hard way:**
   - Never index a local array with a runtime value in WGSL. It spills to memory and runs about 3 times slower.
   - Keep `workgroupBarrier()` outside conditionals.
   - Accumulate in f32. f16 accumulation corrupted the output.
   - Don't use subgroups or pointer parameters without a probe and a fallback. Safari 26 has neither.
   - Dispatch tall matrix-vector products in 2-D. A dispatch with more than 65,535 workgroups in one dimension is silently dropped.
-- **Portability.** Everything must run in Chrome, Safari 26 and Deno. Detect features at runtime, and never assume an extension is there.
-- **Measure, don't reason.** `tests/prof_ts.js` gives per-kernel GPU time, and `tests/bench/chrome_bench.mjs` gives the Chrome numbers we quote.
-- **One GPU job at a time.** Two tests or benchmarks sharing a GPU make every number meaningless.
+- **Portability.** Everything runs in Chrome, Safari 26 and Deno. Detect features at runtime.
+- **Measure, don't reason.** `tests/prof_ts.js` for per-kernel time, `tests/bench/chrome_bench.mjs` for Chrome numbers.
+- **One GPU job at a time**, or every number is meaningless.
 
 <Aside type="caution">
 A shell loop that waits with `pgrep -f "<name>"` matches its own command line and waits forever. Wait for a completion line in a log instead.
@@ -136,10 +131,6 @@ Kernel suffixes: `_coop` is cooperative rows, `_b` batched columns, `_acc` accum
 
 ## Where to read next
 
-- [Architecture](/docs/internals/architecture): how a token flows through the system.
-- [Engine and kernels](/docs/internals/engine): the WebGPU engine.
-- [Wire protocol](/docs/internals/protocol): the room protocol.
-- [Testing](/docs/contributing/testing), [Adding a model](/docs/contributing/models), [Benchmarking](/docs/contributing/benchmarks), [Releases](/docs/contributing/releases).
-- [Roadmap](/docs/roadmap): what's being worked on and what's open.
+[Architecture](/docs/internals/architecture), [Engine and kernels](/docs/internals/engine), [Wire protocol](/docs/internals/protocol), [Testing](/docs/contributing/testing), [Adding a model](/docs/contributing/models), [Benchmarking](/docs/contributing/benchmarks), [Releases](/docs/contributing/releases) and the [Roadmap](/docs/roadmap).
 
 Contributors are listed in [AUTHORS](https://github.com/Nehanth/pooled/blob/main/AUTHORS). Everyone in the project follows the [Code of Conduct](https://github.com/Nehanth/pooled/blob/main/CODE_OF_CONDUCT.md).

@@ -1,6 +1,6 @@
 ---
 title: Chat Completions
-eyebrow: Serve API
+eyebrow: Serve API reference
 description: POST /v1/chat/completions, the OpenAI API most tools and SDKs speak. Streaming, tool calls, JSON output and thinking all work.
 sidebar:
   label: Chat Completions
@@ -13,7 +13,7 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Base URL: `http://127.0.0.1:8080/v1`. Any API key works unless you [set a token](/docs/serve/options#require-a-token).
+`POST http://127.0.0.1:8080/v1/chat/completions`. Any API key works unless you [set a token](/docs/serve/options#require-a-token).
 
 <Tabs syncKey="lang">
 <TabItem label="curl">
@@ -44,20 +44,6 @@ stream = client.chat.completions.create(
 )
 for chunk in stream:
     print(chunk.choices[0].delta.content or "", end="")
-```
-
-</TabItem>
-<TabItem label="JavaScript">
-
-```js
-import OpenAI from "openai";
-
-const client = new OpenAI({ baseURL: "http://127.0.0.1:8080/v1", apiKey: "pooled" });
-const r = await client.chat.completions.create({
-  model: "pooled",
-  messages: [{ role: "user", content: "What is a KV cache?" }],
-});
-console.log(r.choices[0].message.content);
 ```
 
 </TabItem>
@@ -118,17 +104,13 @@ When the room reused its caches, `usage.prompt_tokens_details.cached_tokens` cou
 
 The stream is standard Chat Completions chunks: a role chunk, then reasoning, content and tool-call chunks as the room writes them, the finish chunk, the usage chunk if asked, and `data: [DONE]`.
 
-While a request waits in the queue or the room prefills a long prompt, the bridge sends an SSE comment after every 10 s of silence (`: keep-alive`, or `: queued, 2 ahead`). Clients ignore these; they keep proxies and idle timers from closing the connection.
+While a request waits or the room reads a long prompt, the bridge sends an SSE comment after 10 s of silence (`: keep-alive` or `: queued, 2 ahead`).
 
 If something fails after the stream started, you get an error chunk and no `[DONE]`.
 
-## Images and files
-
-This is a text-only model. An image or file part anywhere in the conversation becomes a short note, `[image omitted: this model reads text only]`, logged once. A pasted screenshot does not break the session.
-
 ## Not supported
 
-Each of these is a clear `400`:
+Images and files become a short note, `[image omitted: this model reads text only]`, so a pasted screenshot doesn't break a session. These are a `400`:
 
 - `custom` tools, and the deprecated `functions`, `function_call` and `role: "function"`
 - audio input
@@ -138,8 +120,4 @@ Each of these is a clear `400`:
 - `prediction`, `web_search_options`
 - an assistant message last (prefill)
 
-:::note
-If the room's host runs an older Pooled without tool calling, requests with tools or `response_format` get a `400` asking to reload the host page.
-:::
-
-Errors follow OpenAI's shape, `{"error": {"message", "type", "param", "code"}}`. See [Limits and errors](/docs/serve/limits#errors).
+Errors use OpenAI's shape, `{"error": {"message", "type", "param", "code"}}`. See [status codes](/docs/reference/endpoints#status-codes).

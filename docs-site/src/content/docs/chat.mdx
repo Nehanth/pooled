@@ -1,0 +1,55 @@
+---
+title: Chat
+eyebrow: Use it
+description: Ask the room's model questions, queue them, stop or continue an answer, and control who sees the chat.
+sidebar:
+  label: Chat
+  order: 1
+---
+{/*
+Sources (for the fact-checker):
+- p2p.html: #ai-prompt "Message the room", #ai-send, #chat-tools (New chat, Continue, Regenerate, queue note, ctx meter)
+- room.js: sendLabel() (Send / Queue / Stop), setBusyUI(busy, canStop) (the asker can stop), ai-queued toasts, aiNewChat() (model host only), setCtx() ("N% of context"), capped line "stopped: context full"
+- room/visibility.js (all / host / asker: the host's screen always sees it)
+- p2p.html #room-menu (Save the chat)
+*/}
+
+Once the model is running, anyone in the room can ask it something.
+
+## Ask a question
+
+Type in **Message the room** and press **Send**. The answer streams in word by word, on every screen that can see the chat.
+
+- **Several people asking at once:** questions wait in one queue and run in order. While an answer runs, the button reads **Queue**, and a note says how many are ahead of yours.
+- **Stop:** the person who asked can press **Stop** (the Send button, with the box empty).
+- **Continue:** if an answer hits the length limit, press **Continue** to keep going.
+- **Regenerate:** ask the last question again.
+- **New chat:** the host can make the room forget the conversation.
+
+The ring next to the box shows how much of the model's context the chat uses. When it's full, the answer stops with `context full`. Start a new chat, or see [Pick a model](/docs/models#longer-context) for more context.
+
+## Who sees the chat
+
+By default everyone in the room sees every question and answer. The device that opened the room can change this in **Room settings → Who sees the chat**:
+
+| Option | Who sees it |
+|---|---|
+| **Everyone** (default) | Every device in the room. |
+| **Only me** | Only the host. |
+| **Whoever asked** | The host and the device that asked. |
+
+This only decides which screens show the text. The devices that run the model still work on every answer. See [Privacy](/docs/privacy).
+
+## Change how it answers
+
+The room's creator sets answer length, thinking, style and wording in [Room settings](/docs/rooms/settings).
+
+## Keep the chat
+
+Anyone can press **Room settings → Save the chat** to download the conversation as a Markdown file.
+
+## Other ways to ask
+
+- [Code mode](/docs/code): ask for an app instead of an answer.
+- [Serve API](/docs/serve): send questions from your own tools.
+- [Terminal](/docs/terminal): chat from the command line.

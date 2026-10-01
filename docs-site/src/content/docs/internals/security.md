@@ -1,7 +1,7 @@
 ---
 title: Security model
 description: What a Pooled room protects and what it does not, how Code mode's preview is sandboxed, where weights come from, and how to report a vulnerability.
-eyebrow: How it works
+eyebrow: Internals
 sidebar:
   label: Security model
   order: 7
@@ -16,11 +16,7 @@ Everyone in a room can read your prompts. Run rooms with people you trust, not s
 
 ## How a room works, for security purposes
 
-A room is a set of browsers that split one model's layers. They pass the model's intermediate activations (the "hidden state") to each other over direct WebRTC connections.
-
-- The **host** holds the tokenizer, the embedding table, the LM head and the sampler. Only the host turns hidden states into text.
-- The other devices run their layers on the hidden state they receive and pass the result on. They never make sampling decisions.
-- The **signaling server** only introduces browsers to each other. It carries no model traffic.
+The browsers in a room split one model's layers and pass its intermediate activations (the "hidden state") to each other over direct WebRTC connections. Only the **host** turns hidden states into text: it holds the tokenizer, embedding, LM head and sampler. The **signaling server** only introduces browsers and carries no model traffic.
 
 ## What the design gives you
 
@@ -29,13 +25,7 @@ A room is a set of browsers that split one model's layers. They pass the model's
 - **Each device loads only its own layers**, from the public model repository or from another device in the room.
 - **You choose who sees the chat.** The room is a shared conversation by design, and everyone sees questions and answers on their own screen. The host can limit that:
 
-  | Visibility | Who sees the text |
-  |---|---|
-  | everyone in the room (default) | Every screen in the room |
-  | only me | Only the host's screen |
-  | only whoever asked | The host and the device that asked |
-
-  Every device still computes the answer. This only decides which screens get the text.
+  **Room settings → Who sees the chat**: **Everyone** (default), **Only me** (the host) or **Whoever asked**. Every device still computes the answer; this only decides which screens get the text.
 
 ## What it cannot promise
 

@@ -7,6 +7,7 @@ import { roomFit, shortNote, shortBy, gbUp } from "../../room/plan.js";
 import { pledgeGB } from "../../room/pledge.js";
 import { nodeCtxFor } from "../../packages/room-node/roomnode.js";
 import { modelRows, recommendModel, pledgeDefaults, roomFitNow, initialState, reduce, canStart, autoStart, render, deviceKind, clip, visible, colors, modelNeedGB } from "../lib/hostui.js";
+import { width } from "../lib/style.js";
 import { keysOf } from "../lib/tui.js";
 import { parseLendArgs } from "../lib/lend.js";
 
@@ -113,7 +114,8 @@ test("a model given but not downloaded: [Y/n] in the screen, -y downloads, --no-
   const ask = initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 32, max: 60 } });
   assert.equal(ask.step, "confirm");
   const lines = render(ask, { lib }).join("\n");
-  assert.match(lines, /qwen3\.6-35b-moe is not downloaded \(19\.4 GB\)\. Download it now\? \[Y\/n\]/);
+  assert.match(lines, /Qwen3\.6 35B MoE is not downloaded \(19\.4 GB\)\.\n  Download it now\?/);
+  assert.match(lines, /y download · n stream from Hugging Face instead/);
   let r = reduce(ask, "enter");
   assert.deepEqual(r.fx, [{ do: "pull", key: "qwen3.6-35b-moe" }]); assert.equal(r.state.step, "pledge");
   r = reduce(ask, "n");
@@ -140,7 +142,7 @@ test("every choice as a flag: no question at all (pooled host qwen3.6-35b-moe --
   assert.equal(autoStart(s), true);
 });
 
-test("the screen: fits 80 columns, colors only when on, the room's devices, the lobby and the keys", () => {
+test("the screen: fits 58, 80 and 110 columns in every style, the room's devices, the lobby and the keys", async () => {
   const rows = modelRows(lib, { keys: KEYS, pulled: new Set(["qwen3.6-35b-moe"]), pledgeGB: 12 });
   const s = initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 12, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set(["qwen3.6-35b-moe"]), code: "4TKG9P" });
   s.link = "https://pooled.run/r/4TKG9P#k=AbCdEfGhIjKlMnOpQrStUv";
@@ -148,21 +150,32 @@ test("the screen: fits 80 columns, colors only when on, the room's devices, the 
   s.lobby = [{ id: "x", line: "otter wants to join (Mac, 8 GB)" }];
   s.fit = roomFitNow(lib, { model: s.model, devices: [dev("spark", 12), dev("node-abc", 4), dev("iphone", 1, { ua: "iPhone" })] });
   const plain = render(s, { width: 80, lib });
-  assert.ok(plain.every((l) => visible(l).length <= 79), plain.find((l) => visible(l).length > 79));
+  assert.ok(plain.every((l) => width(l) <= 79), plain.find((l) => width(l) > 79));
   const text = plain.join("\n");
-  assert.match(text, /room 4TK-G9P · Qwen3\.6 35B MoE/);
-  assert.match(text, /invite\s+https:\/\/pooled\.run\/r\/4TKG9P#k=/);
-  assert.match(text, /Devices \(3\)/); assert.match(text, /node-abc\s+CLI\s+4 GB/); assert.match(text, /iphone\s+phone/);
-  assert.match(text, /otter wants to join \(Mac, 8 GB\)\s+a: allow  d: deny/);
-  assert.match(text, /This room is [\d.]+ GB short for Qwen3\.6 35B MoE/);
-  assert.match(text, /Enter: start \(when the room fits\)/);
-  assert.doesNotMatch(text, /\x1b\[/, "no color codes when color is off");
-  const colored = render(s, { width: 80, lib, c: colors(true) });
-  assert.match(colored.join(""), /\x1b\[/);
-  assert.ok(colored.every((l) => visible(l).length <= 79));
-  // fits: Enter starts
+  assert.match(text, /pooled host\n  \[4TK-G9P\]  pooled\.run\/r\/4TKG9P#k=/);
+  assert.match(text, /Qwen3\.6 35B MoE · Q4 · waiting for devices/);
+  assert.match(text, /DEVICE\s+GPU\s+LENDS/); assert.match(text, /node-abc\s+4 GB\s+joined/); assert.match(text, /spark\s+12 GB\s+this computer/);
+  assert.match(text, /otter\s+Mac, 8 GB\s+wants to join  a allow  d deny/);
+  assert.match(text, /memory    ━+─*  17 GB lent · 23 GB needed/);
+  assert.match(text, /invite    pooled join 4TK-G9P on the other computer/);
+  assert.match(text, /Needs \d+ GB more: one more device, or press l to lend more\./);
+  assert.match(text, /enter start · i copy invite · m model · l lend · s split · q quit/);
+  assert.doesNotMatch(text, /\x1b\[/, "no escapes in the plain style");
+  assert.doesNotMatch(text, /[✓❯█░◐]/);
+  const { mkStyle } = await import("../lib/style.js");
+  for (const [depth, theme] of [["truecolor", "dark"], ["256", "light"], ["none", "dark"]]) {
+    for (const w of [58, 80, 110]) {
+      const lines = render(s, { width: w, lib, S: mkStyle({ depth, theme }) });
+      assert.ok(lines.every((l) => width(l) <= w - 1), `${depth} ${w}: ${lines.find((l) => width(l) > w - 1)}`);
+      assert.doesNotMatch(lines.join(""), /\x1b\[(31|32|33|35|36)m/, "no red/green/yellow/magenta/cyan");
+      assert.doesNotMatch(lines.join(""), /[✓❯█░◐]/);
+    }
+  }
+  assert.match(render(s, { width: 80, lib, S: mkStyle({ depth: "truecolor" }) }).join(""), /\x1b\[48;2;42;69;224m/, "the pill in the brand blue");
+  // fits: enter is the primary key
   s.fit = { fits: true, needGB: 22.8, haveGB: 30, shortGB: 0, note: "" };
-  assert.match(render(s, { lib }).join("\n"), /^Enter: start  ·  m: model/m);
+  assert.match(render(s, { lib }).join("\n"), /ready to start/);
+  assert.doesNotMatch(render(s, { lib }).join("\n"), /invite    pooled join/, "the invite row only while short (or alone)");
   assert.equal(clip("\x1b[1mabcdef\x1b[22m", 4).replace(/\x1b\[[0-9;]*m/g, ""), "abc…");
   assert.equal(deviceKind({ native: "node-dawn" }), "CLI"); assert.equal(deviceKind({ ua: "iPhone" }), "phone");
   assert.equal(deviceKind({ ua: "Mac" }), "browser tab"); assert.equal(deviceKind({}, true), "this computer");
@@ -173,4 +186,86 @@ test("keys from the terminal: arrows, Enter, Backspace, Ctrl-C and pasted digits
   assert.deepEqual(keysOf(Buffer.from("24\r")), ["2", "4", "enter"]);
   assert.deepEqual(keysOf(Buffer.from("\x1bOA")), ["up"]);
   assert.deepEqual(keysOf(Buffer.from("\x1b")), ["esc"]);
+});
+
+test("a split that one computer could avoid: say so before Start, with a speed from the links", async () => {
+  const { splitAdvice, splitLines, hopHint, pickerRow } = await import("../lib/hostui.js");
+  const model = "qwen3-1.7b";
+  const devs = [{ name: "spark", self: true, gb: 2, meta: { webgpu: true, contribGB: 2 }, rtt: null },
+    { name: "mac", gb: 2, meta: { webgpu: true, contribGB: 2 }, rtt: 60 }];
+  const s = { model, devices: devs, pledge: { gb: 2, max: 64 } };
+  s.fit = roomFitNow(lib, { model, devices: devs });
+  assert.equal(s.fit.fits, true, "2 + 2 GB hold the 1.7B");
+  const adv = splitAdvice(s, lib);
+  assert.ok(adv.alone.gb > 2 && adv.alone.gb <= 5, `alone at ${adv.alone.gb} GB`);
+  assert.equal(adv.hopMs, 30); assert.equal(adv.tps, Math.round(1000 / (2 * 30 + 12)));
+  const lines = splitLines(adv, { model: "Qwen3 1.7B", selfName: "spark", gb: 2 });
+  assert.equal(lines[0], `Qwen3 1.7B would run on spark alone if it lends ${adv.alone.gb} GB (now 2 GB): l lends more.`);
+  assert.equal(lines[1], `Split across 2 devices, each token waits for the network: expect roughly ${adv.tps} tok/s.`);
+  // no round trips yet: no number; one device holding it all: nothing to say
+  assert.match(splitLines(splitAdvice({ ...s, devices: devs.map((d) => ({ ...d, rtt: null })) }, lib), {})[1], /expect it to be slower/);
+  const big = devs.map((d) => (d.self ? { ...d, gb: 8, meta: { webgpu: true, contribGB: 8 } } : d));
+  assert.equal(splitAdvice({ ...s, devices: big, fit: roomFitNow(lib, { model, devices: big }) }, lib), null);
+  assert.equal(hopHint(2, 30), "each token crosses the network twice; ~30 ms per hop");
+  assert.equal(hopHint(1, 30), "");
+  // the picker in plain words
+  assert.deepEqual(pickerRow({ key: "a", pulled: true, needGB: 4.1, fitsAlone: true }, { rec: "a" }), { have: "downloaded", need: "4 GB", alone: true, rec: true });
+  assert.equal(pickerRow({ key: "b", pulled: false, fileBytes: 2 ** 30 * 18.6, needGB: 70.1, fitsAlone: false }).have, "18.6 GB download");
+});
+
+test("the host screen: the header once (pill, link, status), the picker in two plain groups", () => {
+  const rows = modelRows(lib, { keys: KEYS, pledgeGB: 12 });
+  const s = initialState({ rows, pledge: { gb: 12, max: 14, totalGB: 16 }, code: "9PFZ8T" });
+  Object.assign(s, { link: "https://pooled.run/r/9PFZ8T#k=AbCdEfGhIjKlMnOpQrStUv", gpu: "RTX 5070 Ti · 16 GB", devices: [] });
+  const L = render(s, { width: 80, lib }).map(visible);
+  assert.equal(L.filter((l) => l.includes("9PF-Z8T")).length, 1);
+  assert.equal(L.filter((l) => l.includes("9PFZ8T#k=")).length, 1);
+  assert.ok(L.includes("  gpu       RTX 5070 Ti · 16 GB"));
+  const text = L.join("\n");
+  assert.match(text, /Which model\?\n\n  Fits on this computer\n/);
+  assert.match(text, /Needs another device\n    Qwen3\.8 27B\s+needs 20 GB   15\.0 GB download/);
+  assert.match(text, /› Qwen3 4B\s+needs  5 GB/, "the recommended model is preselected, not labelled");
+  assert.doesNotMatch(text, /recommended|"needs"/);
+  assert.match(text, /↑↓ choose · enter host it · q quit/);
+  for (const l of L) assert.ok(l.length <= 79, l);
+  const w110 = render(s, { width: 110, lib }).map(visible).join("\n");
+  assert.match(w110, /https:\/\/pooled\.run\/r\/9PFZ8T#k=/, "the whole link from 100 columns");
+});
+
+test("split: s toggles fastest first / across all devices, the rows show what Start would deal, the choice reaches the node", async () => {
+  const { dealRoom } = await import("../../room/plan.js");
+  const { parseLendArgs } = await import("../lib/lend.js");
+  const L2 = { ...lib, dealRoom };
+  const model = "qwen3-1.7b";
+  const rows = modelRows(lib, { keys: KEYS, pulled: new Set([model]), pledgeGB: 8 });
+  let s = initialState({ rows, model, pledge: { gb: 8, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set([model]), code: "4TKG9P" });
+  s.devices = [{ name: "spark", kind: "this computer", gb: 8, self: true, meta: { webgpu: true, contribGB: 8 } }, { name: "mac", kind: "CLI", gb: 8, meta: { webgpu: true, contribGB: 8 } }];
+  s.fit = roomFitNow(lib, { model, devices: [dev("spark", 8), dev("mac", 8)] });
+  assert.equal(s.splitMode, "speed", "fastest first by default, as the room page");
+  let text = render(s, { width: 80, lib: L2 }).join("\n");
+  assert.match(text, /HOLDS/);
+  assert.match(text, /spark\s+8\.0 GB\s+0–27\s+this computer|spark\s+8 GB\s+0–27\s+this computer/);
+  assert.match(text, /mac\s+8 GB\s+—\s+not needed/);
+  assert.match(text, /split     fastest first · s changes it/);
+  assert.match(text, /s split/);
+  assert.doesNotMatch(text, /Spreading over the network/);
+  const r = reduce(s, "s");
+  assert.deepEqual(r.fx, [{ do: "split", mode: "memory" }]);
+  s = r.state;
+  text = render(s, { width: 80, lib: L2 }).join("\n");
+  assert.match(text, /split     across all devices/);
+  assert.match(text, /spark\s+8 GB\s+0–1\d\s+this computer/);
+  assert.match(text, /mac\s+8 GB\s+1\d–27\s+joined/);
+  assert.match(text, /Spreading over the network is slower per token; it uses less memory on each\s+device\./);
+  assert.equal(reduce(s, "s").state.splitMode, "speed");
+  // online: s changes it for the next rebalance
+  const on = reduce({ ...s, step: "online" }, "s");
+  assert.deepEqual(on.fx, [{ do: "split", mode: "speed" }]); assert.match(on.state.notice, /rebalances/);
+  // --split, with friendly names
+  assert.equal(parseLendArgs("host", []).split, "speed");
+  assert.equal(parseLendArgs("host", ["--split", "spread"]).split, "memory");
+  assert.equal(parseLendArgs("host", ["--split", "memory"]).split, "memory");
+  assert.equal(parseLendArgs("host", ["--split", "fastest"]).split, "speed");
+  assert.throws(() => parseLendArgs("host", ["--split", "sideways"]), /--split is "speed"/);
+  assert.equal(initialState({ rows, pledge: { gb: 8, max: 60 }, flags: { split: "memory" } }).splitMode, "memory");
 });

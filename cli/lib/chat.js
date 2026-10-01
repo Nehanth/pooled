@@ -5,6 +5,7 @@
 import { parseArgs } from "node:util";
 import { roomCodeFrom, roomKeyFrom } from "./room.js";
 import { withDefaults, finishRequest, cleanText, cleanLabel } from "./common.js";
+import { argsError, needsRoom, notARoom } from "./cli.js";
 
 export const DEFAULT_MAX_TOKENS = 8192;
 
@@ -50,23 +51,24 @@ Options
 export class UsageError extends Error {}
 
 // argv after "chat" -> options, or throws UsageError
+const CHAT_OPTS = {
+  system: { type: "string" }, think: { type: "boolean" }, "max-tokens": { type: "string" }, temperature: { type: "string" },
+  name: { type: "string" }, signal: { type: "string" }, wait: { type: "string" }, "no-color": { type: "boolean" },
+  help: { type: "boolean", short: "h" },
+};
 export function parseChatArgs(argv) {
   let r;
-  try {
-    r = parseArgs({ args: argv, allowPositionals: true, strict: true, options: {
-      system: { type: "string" }, think: { type: "boolean" }, "max-tokens": { type: "string" }, temperature: { type: "string" },
-      name: { type: "string" }, signal: { type: "string" }, wait: { type: "string" }, "no-color": { type: "boolean" },
-      help: { type: "boolean", short: "h" },
-    } });
-  } catch (e) { throw new UsageError(e.message.replace(/^.*?: /, "")); }
+  try { r = parseArgs({ args: argv, allowPositionals: true, strict: true, options: CHAT_OPTS }); }
+  catch (e) { throw Object.assign(new UsageError(e.message.replace(/^.*?: /, "")), { lines: argsError("chat", e, Object.keys(CHAT_OPTS)) }); }
   const o = r.values, pos = r.positionals;
   if (o.help) return { help: true };
+  if (!pos.length) throw Object.assign(new UsageError(needsRoom("chat").replace(/^pooled chat /, "")), { lines: [needsRoom("chat")] });
   const code = roomCodeFrom(pos[0]);
-  if (!code) throw new UsageError(`give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link${pos[0] ? `, not "${pos[0]}"` : ""}`);
+  if (!code) throw Object.assign(new UsageError(notARoom("chat", pos[0]).replace(/^pooled chat: /, "")), { lines: [notARoom("chat", pos[0])] });
   const out = { code, key: roomKeyFrom(pos[0]), prompt: pos.length > 1 ? pos.slice(1).join(" ") : null,
     system: o.system ?? "", thinking: !!o.think, maxTokens: DEFAULT_MAX_TOKENS, temperature: null,
     name: o.name != null ? cleanLabel(o.name) : null, signal: o.signal || null, waitMs: 120000,
-    color: !o["no-color"] && !process.env.NO_COLOR };
+    color: !o["no-color"] && !process.env.NO_COLOR && process.env.TERM !== "dumb" };
   if (o.name != null && !out.name) throw new UsageError("--name must not be empty");
   if (o["max-tokens"] != null) {
     const n = Number(o["max-tokens"]);
