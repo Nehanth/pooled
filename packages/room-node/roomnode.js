@@ -564,6 +564,9 @@ export class RoomNode extends EventEmitter {
       this.log("load failed: " + err.message);
       this.freeLayers(null);
       this.sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1 });
+      // this GPU's shader compiler rejects one of the engine's kernels (engine/compile.js): every later
+      // deal would fail the same way, so say so once (pooled join leaves with a clear message)
+      if (err.shaderCompile) this.emit("compilefail", { kernel: err.kernel, message: err.message, raw: err.raw });
     } finally { ai.loadingShard = false; ai.loadKey = null; }
   }
   // A shard load's progress for a status line, ~4 times a second: "loadstat" { from: "Hugging Face" |

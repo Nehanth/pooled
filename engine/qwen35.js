@@ -4,6 +4,7 @@
 // reference: tests/reference/ref_q38.mjs (validated line by line against
 // llama.cpp eval-callback dumps).
 import { WGSL } from "./wgsl/base.js";
+import { compilePipeline } from "./compile.js";
 import { gemmWGSL, GEMM_S, GEMM_TILE } from "./wgsl/gemm.js";
 import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SGM_SYNTAX, SGM_DEFAULT } from "./wgsl/gemm_sgm.js";
 import { gemmWideWGSL, wideTileConfig } from "./wgsl/gemm_wide.js";
@@ -496,6 +497,9 @@ export class Qwen35Engine {
       argmax: ["ro", "rw", "u"], emb_gather: ["ro", "ro", "ro", "rw", "u"],
       topk_a: ["ro", "rw", "u"], topk_b: ["ro", "rw", "u"],
     };
+    // the LM head's kernels only where the head is: a device without it never runs them, and a
+    // compiler that rejects one of them (FXC once refused topk_b) then cannot fail that device
+    if (!hasHead) for (const n of ["argmax", "emb_gather", "topk_a", "topk_b"]) delete G1[n];
     if (this.moe) Object.assign(G1, {
       moe_router: ["ro", "rw", "rw", "u"], moe_combine: ["rw", "ro", "ro", "ro", "ro", "u"],
       moe_gu_q4: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"], moe_gu_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"],
@@ -546,7 +550,7 @@ export class Qwen35Engine {
       const layout1 = device.createBindGroupLayout({
         entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })),
       });
-      this.pipes[name] = await device.createComputePipelineAsync({
+      this.pipes[name] = await compilePipeline(device, {
         layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }),
         compute: { module: mod, entryPoint: name },
       });
@@ -572,7 +576,7 @@ export class Qwen35Engine {
       const modH = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, this.headRows, 64, batchCols, coopRowsB, unpack) });
       for (const name of ["matvec_q8_coop", "matvec_q4_coop", "matvec_coop"]) {
         const layout1 = device.createBindGroupLayout({ entries: G1[name].map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
-        this.pipes[name + "_h"] = await device.createComputePipelineAsync({ layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH, entryPoint: name } });
+        this.pipes[name + "_h"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH, entryPoint: name } });
       }
     }
     // ---- uniforms ----
@@ -1069,7 +1073,7 @@ export class Qwen35Engine {
       }
       if (!mod) return no(err);
       device.pushErrorScope("validation");
-      await Promise.all(names.map(async (n) => { pipes[n] = await device.createComputePipelineAsync({ layout, compute: { module: mod, entryPoint: n } }); }));
+      await Promise.all(names.map(async (n) => { pipes[n] = await compilePipeline(device, { layout, compute: { module: mod, entryPoint: n } }); }));
       const pe = await device.popErrorScope();
       if (pe) return no("pipeline: " + pe.message.slice(0, 300));
     } catch (e) { return no("pipeline: " + String(e?.message || e).slice(0, 300)); }
@@ -1439,7 +1443,7 @@ export class Qwen35Engine {
       const module = device.createShaderModule({ code: attnTileWGSL(this.attnPTCfg) });
       for (const [name, spec] of Object.entries(specs)) {
         const layout1 = device.createBindGroupLayout({ entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
-        pipes[name] = await device.createComputePipelineAsync({
+        pipes[name] = await compilePipeline(device, {
           layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module, entryPoint: name } });
       }
     } catch (e) { fail = e; }

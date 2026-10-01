@@ -201,6 +201,7 @@ async function runJoin(opts, out) {
   let code = opts.code;
   // one name for the whole run, the same after a restart (the host re-seats a device by its name)
   const name = opts.name || deviceName(os.hostname());
+  const verbose = opts.verbose || !!process.env.POOLED_VERBOSE;   // the raw compiler / driver text
   let hostName = null;   // the host this run joined: a rejoin only goes back to a host of that name
   const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
   let ST = null, spinAt = 0;
@@ -294,6 +295,8 @@ async function runJoin(opts, out) {
       if (d.t === "ai-gendone") { S.answering = false; const t = tpsFromStats(d.stats); if (t != null) S.tps = t; }
     });
     n.on("version", (v) => { if (v.theyHost) finish({ type: "version", theirs: v.theirs, theyHost: true }); });
+    // a kernel this GPU's compiler can't build fails every deal the same way: leave now and say so
+    n.on("compilefail", (x) => finish({ type: "shader-compile", kernel: x.kernel, raw: verbose ? x.raw || x.message : "" }));
     n.on("members", () => { if (!hostName && n.hostName) hostName = n.hostName; });
     n.on("otherhost", (x) => finish({ type: "other-host", ...x }));
     n.on("bye", (reason) => {
@@ -419,7 +422,7 @@ async function runHost(opts, out, prepared = null) {
   }
   const cn = ctxNote(rn, opts.model, opts.ctx);
   if (cn) out.log(`--ctx ${opts.ctx}: ${cn}`);
-  const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name, signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
+  const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log: (m) => out.log(m), split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   const code = node.code;
   // the invite link: its #k= key lets a device in without asking (a room node from before the gate has none)

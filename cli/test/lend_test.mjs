@@ -249,6 +249,26 @@ test("dawn: per-OS package first, then webgpu; a clear message when neither is i
   assert.equal(x.hint, "h");
 });
 
+test("errors: a kernel this GPU's shader compiler rejects says to join from the browser; the raw text only under --verbose", () => {
+  const raw = "FXC compile failed with error: E_FAIL msg: C:\\fakepath(51,3-35): error X3663: thread sync operation found in varying flow control\n/* Generated HLSL: */";
+  let x = explainError({ type: "shader-compile", kernel: "topk_b", raw: "" });
+  assert.equal(x.message, "This GPU's shader compiler can't build topk_b; join from Chrome or Edge instead (open the room's link).");
+  assert.equal(x.hint, "pooled join --verbose shows the compiler's error.");
+  assert.equal(x.code, 1);
+  x = explainError({ type: "shader-compile", kernel: "topk_b", raw });
+  assert.ok(x.hint.includes("X3663") && x.hint.includes("Generated HLSL"));
+});
+
+test("pooled host without --name: the same device name as pooled join (not the room node's random node-xxxx)", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const f of ["../lib/hostrun.js", "../lib/lendrun.js"]) {
+    const src = readFileSync(new URL(f, import.meta.url), "utf8");
+    const calls = src.match(/rn\.createRoom\(\{[^\n]*/g) || [];
+    assert.ok(calls.length >= 1, f);
+    for (const c of calls) assert.match(c, /name: opts\.name \|\| deviceName\(os\.hostname\(\)\)/, f);
+  }
+});
+
 test("Dawn installs with the package but never blocks it: webgpu is an optional dependency", async () => {
   const { readFileSync } = await import("node:fs");
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
