@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { toRequest, toAsk, toolSchema, MAX_TOKENS } from "../src/convert.js";
-import { createPooledStream, busyMessage } from "../src/stream.js";
+import { createPooledStream, busyMessage, isSetupCheck } from "../src/stream.js";
 import { roomSettings, keyOf, modelInfo, MODEL_CHOICES, roomLink } from "../src/pool.js";
 import { providerConfig, applyToConfig, setupFromEnv, modelRef, PROVIDER, newCode } from "../src/setup.js";
 import { validateApiAsk, apiPrompt2, TurnCache, EncodeCache } from "../../../room/api.js";
@@ -194,6 +194,33 @@ test("stream: an older host gets no tools; the chat says why", async () => {
   assert.equal(r.msg.stopReason, "stop");
   assert.match(r.msg.content[0].text, /^\*\*Pooled\*\* · `TEST` · the host runs an older Pooled\n\n.*older Pooled/);
   assert.equal(room.asks.length, 0);
+});
+
+test("stream: OpenClaw's setup check (onboard's live completion) is answered at once, without opening the room", async () => {
+  const CHECK = "Reply with the single word OK. Do not use tools.";
+  delete globalThis[Symbol.for("pooled.openclaw.room")];   // no room in this process: the check must not open one
+  for (const [cfg, re] of [
+    [{ mode: "host", code: "ZBBDY4", model: "qwen3-1.7b", minDevices: 2 }, /^OK\. Pooled room ZBB-DY4 \(Qwen3 1\.7B\) opens when OpenClaw's gateway starts and answers once 2 devices are in: .*\/pooled link/],
+    [{ mode: "host", code: "ZBBDY4", model: "qwen3-1.7b", minDevices: 1 }, /answers once the model is loaded/],
+    [{ mode: "join", code: "ZBBDY4" }, /^OK\. This device joins Pooled room ZBB-DY4 when OpenClaw's gateway starts/],
+  ]) {
+    const fn = createPooledStream({ getPluginConfig: () => cfg, sdk: fakeSdk() });
+    for (const content of [CHECK, [{ type: "text", text: CHECK }]]) {
+      const t0 = Date.now();
+      const r = await run(fn, { messages: [{ role: "user", content, timestamp: 1 }], tools: [] });
+      assert.ok(Date.now() - t0 < 1000);
+      assert.equal(r.msg.stopReason, "stop");
+      assert.deepEqual(r.types, ["start", "text_start", "text_delta", "text_end", "done"]);
+      assert.match(r.msg.content[0].text, re);
+      assert.ok(!r.msg.content[0].text.includes("#k="), "no invite key in the answer");
+    }
+  }
+  assert.equal(globalThis[Symbol.for("pooled.openclaw.room")], undefined, "no room opened");
+  // a real chat turn is not the check: tools, more messages, other words
+  assert.ok(isSetupCheck({ messages: [{ role: "user", content: CHECK }] }));
+  assert.ok(!isSetupCheck({ messages: [{ role: "user", content: CHECK }], tools: TOOLS }));
+  assert.ok(!isSetupCheck({ messages: [{ role: "assistant", content: "hi" }, { role: "user", content: CHECK }] }));
+  assert.ok(!isSetupCheck({ messages: [{ role: "user", content: "Reply with the single word OK. Do not use tools. Then list my files." }] }));
 });
 
 test("stream: the room's own conditions (queue full, loading, ...) come back as visible text, dropped on replay", async () => {

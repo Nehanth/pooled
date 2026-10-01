@@ -1597,3 +1597,17 @@ The M5 gained less than the ~5% estimated (the copies there cost ~0.3 ms per ste
 gained more. Gates: unit tests, `npm run check`, `test_q38_bits` (4cac59d8, and 4f70a9ca with
 ATTN_PREFILL_TILE=0: same as main), `test_moe` MATCH llama.cpp + spec == plain, `test_mtp`, `test_mtp_split`,
 `test_moe_split`, M5 bits equal to main, `specIdentical` and golden in every Chrome run.
+
+## 2026-10-01: `openclaw onboard` health check with a 2-device room (branch openclaw-onboard-health, @pooled/openclaw 0.2.3), GB10
+
+Plain `openclaw onboard` (OpenClaw 2026.9.7, Node 24, clean throwaway profile, plugin linked) → More… → Pooled →
+Start a room → lend 4 GB → Qwen3 1.7B → 2 devices → invite link only. OpenClaw then runs its setup check: one
+live completion ("Reply with the single word OK. Do not use tools.", tools off, 90 s) in the onboarding process.
+Before: the plugin opened a second copy of the room in that process and waited for the other device; the
+spinner ("Testing your AI connection…") was still up after 7 min (the video run saw the timeout and the loop back
+to the provider picker instead). After: answered at once with the room's state, "Inference verified:
+pooled/qwen3-1.7b · AI check: replied in 2.7s", the default model saved, no room opened by onboarding. Then
+`openclaw gateway run` opened room 2QQ-7FS, `npx @pooled/cli@0.3.5 join <link> --gb 4` joined, the room went
+online (13+embed / 15 layers) and `openclaw agent` answered "2 + 2 = 4." (246 s, 15069 prompt tokens, cold).
+Gates: plugin unit tests (new: the check is answered without a room, tools/multi-turn/other text is not the check).
+No engine change.
