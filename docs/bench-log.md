@@ -1414,3 +1414,32 @@ How the three branches changed when merged:
 
 Still open: a re-deal while signaling is down still fails, and an answer caught in a freeze longer than
 ~15 s isn't retried automatically.
+
+## 2026-10-01: DeltaNet decode, each value head over 2/4/8 workgroups (GDN-5, branch perf/gdn-head-split), GB10. Not kept
+
+The idea (kernels-next-2026-10.md, `dn_delta_gn`; ninfer gives each value head 8 CTAs): the MoE has 32 value
+heads, so decode `dn_delta` runs 32 workgroups on a 48-SM GPU. `dn_delta_sS` ran each head as S workgroups of
+128/S threads (thread j still owns state column j, k/q staged whole in every workgroup), then the separate
+`dn_gatenorm`, since the gated norm needs all 128 outputs of a head. The code is in 4cedfd1 (`?dnsplit=2|4|8`),
+removed again in the next commit.
+
+Bits: identical. Logits hashes of a 17-token decode match `dnFuse` on, `dnFuse` off and S = 2, 4, 8 on both
+models (MoE fdf0ac94, 27B cd1fcbda), and Chrome spec == plain, golden text.
+
+Per-kernel GPU time (`prof_ts.js`, timestamp queries, µs per layer; two values = two runs):
+
+| | fused `dn_delta_gn` (main) | unfused `dn_delta` + `dn_gatenorm` | S=2 + gatenorm | S=4 + gatenorm | S=8 + gatenorm |
+|---|---|---|---|---|---|
+| 35B MoE (32 heads, ×30) | 39.9 / 40.1 | 48.8 + 7.1 | 45.1 + 7.1 | 44.0 + 7.0 / 44.0 + 7.0 | 51.1 + 7.1 |
+| 27B (48 heads, ×48) | 45.5 / 45.8 | | 53.0 + 7.5 | 51.8 + 7.3 | |
+
+Chrome decode (`chrome_bench.mjs <moe> 64`, two-sum / hash-map prompts, 2 interleaved runs each): plain
+51.75 / 50.69, 51.76 / 52.17 on main against 50.06 / 51.37, 50.52 / 49.40 with `dnsplit=4` (-2.5%); spec
+unchanged (92.9-94.1 / 64.7-66.7 both; the verify uses `dn_delta_mc`). 27B Deno decode (logits read back each
+token): 101.2 / 101.3 ms on main, 101.9 / 102.3 ms with S=4.
+
+Why: the split only moves `dn_delta` from 48.8 to 44 µs, so the kernel is not limited by how many SMs hold a
+head (the total number of warps, 128, does not change). Losing the fused gated norm then costs 7 µs plus a
+launch, more than the split saves. More parallel memory traffic would need more threads per column (a split
+over state rows), which changes the summation order of `vh` / `sq` and so the bits. Do not retry the column
+split on the GB10; the Metal estimate (M5, report B1) was not measured here.

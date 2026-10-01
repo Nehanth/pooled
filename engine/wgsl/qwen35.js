@@ -33,43 +33,6 @@ fn dn_delta(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
 }`;
 }
 
-// dn_delta with each value head split over S workgroups of 128/S threads (S = 2, 4 or 8; report GDN-5,
-// ninfer recurrent.cuh gives each value head 8 CTAs): more workgroups in flight for the state sweep
-// when nVH is small next to the GPU's core count (32 heads on a 48-SM GB10). Thread j still owns
-// state column j and runs the same operations in the same order, and k/q are staged whole in each
-// workgroup, so S, the output and every bit match dn_delta. The gated norm reduces across the whole
-// head, so this kernel is followed by the separate dn_gatenorm. Same bindings as dn_delta.
-function dnDeltaSplitWGSL(S) {
-  const W = 128 / S;
-  const rows = Array.from({ length: 128 }, (_, i) => i);
-  const load = rows.map((i) => `s[${i}u] = dl_s[Sb + ${i * 128}u + j];`).join(" ");
-  const store = rows.map((i) => `dl_s[Sb + ${i * 128}u + j] = s[${i}u];`).join(" ");
-  const loop1 = rows.map((i) => `{ let sd = s[${i}u] * decay; s[${i}u] = sd; vh += sd * dls${S}_k[${i}u]; sq += sd * dls${S}_q[${i}u]; kq += dls${S}_k[${i}u] * dls${S}_q[${i}u]; }`).join("\n  ");
-  const loop2 = rows.map((i) => `s[${i}u] += dls${S}_k[${i}u] * d;`).join(" ");
-  const stage = Array.from({ length: S }, (_, t) => `dls${S}_k[l + ${t * W}u] = dl_k[kOff + l + ${t * W}u]; dls${S}_q[l + ${t * W}u] = dl_q[kOff + l + ${t * W}u];`).join(" ");
-  return `
-var<workgroup> dls${S}_k: array<f32, 128>;
-var<workgroup> dls${S}_q: array<f32, 128>;
-@compute @workgroup_size(${W})
-fn dn_delta_s${S}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let h = wg.x / ${S}u; let l = lid.x; let j = (wg.x % ${S}u) * ${W}u + l;
-  let kh = h % dl_dn.nKH;
-  let kOff = kh * 128u; let vOff = h * 128u; let Sb = h * 16384u;
-  let decay = dl_decay[h];
-  let scale = inverseSqrt(f32(dl_dn.dState));
-  ${stage}
-  var s: array<f32, 128>;
-  ${load}
-  workgroupBarrier();
-  var vh: f32 = 0.0; var sq: f32 = 0.0; var kq: f32 = 0.0;
-  ${loop1}
-  let d = (dl_v[vOff + j] - vh) * dl_beta[h];
-  ${loop2}
-  dl_o[vOff + j] = (sq + d * kq) * scale;
-  ${store}
-}`;
-}
-
 // dn_delta + dn_gatenorm for one token in one dispatch: both use one 128-thread workgroup per
 // value head, so the head's output stays in the workgroup and the gated norm (same tree
 // reduction, same expression) follows a barrier. Bit-identical to the two kernels; q/k/v are
@@ -344,9 +307,6 @@ fn dn_l2(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(1) @binding(6) var<storage, read_write> dl_o: array<f32>; // [dInner]
 @group(1) @binding(7) var<uniform> dl_dn: DN;
 ${dnDelta1RegsWGSL()}
-${dnDeltaSplitWGSL(2)}
-${dnDeltaSplitWGSL(4)}
-${dnDeltaSplitWGSL(8)}
 ${dnDeltaGnWGSL()}
 
 // --- gated norm: rmsnorm per head (w[dState]) * silu(z) ---

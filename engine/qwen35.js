@@ -165,7 +165,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, dnSplit = 1, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -305,9 +305,6 @@ export class Qwen35Engine {
     this.attnGlue = this.attnGlueOn;
     // dn_delta + dn_gatenorm in one dispatch for decode (bit-identical); engine.dnFuse = false for A/B
     this.dnFuse = dnFuse !== false;
-    // decode dn_delta with each value head over dnSplit workgroups (1, 2, 4 or 8; bit-identical, see
-    // dnDeltaSplitWGSL); > 1 runs the unfused dn_delta + dn_gatenorm pair. Settable at runtime for A/B.
-    this.dnSplit = [2, 4, 8].includes(dnSplit) ? dnSplit : 1;
     // Merged projection GEMVs (docs/research/kernels-next-2026-09.md D5): at load, the DeltaNet
     // [qkv | z] and [beta | alpha] weights and the attention [k | v] weights are row-concatenated
     // into one matrix each (and the MoE router with the shared-expert gate), so one GEMV launch
@@ -483,8 +480,6 @@ export class Qwen35Engine {
       dn_l2: ["rw", "u", "u"],
       dn_delta: ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"],
       dn_gatenorm: ["ro", "ro", "ro", "rw", "u"],
-      dn_delta_s2: ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"], dn_delta_s4: ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"],
-      dn_delta_s8: ["ro", "ro", "ro", "ro", "ro", "rw", "rw", "u"],
       qsplit: ["ro", "rw", "rw", "u"],
       rope_part: ["rw", "u", "u"],
       sigmoid_mul: ["rw", "ro", "u"],
@@ -1328,10 +1323,7 @@ export class Qwen35Engine {
       }
       this._d(p, "dn_conv", L.bgConv, D.convDim);
       this._d(p, "dn_pre", L.bgPre, 128, 128);      // gates + L2(q,k) fused
-      if (this.dnSplit > 1) {
-        this._d(p, "dn_delta_s" + this.dnSplit, L.bgDelta, D.nVH * 128, 128 / this.dnSplit);
-        this._d(p, "dn_gatenorm", L.bgGateNorm, D.nVH * 128, 128);
-      } else if (this.dnFuse) this._d(p, "dn_delta_gn", L.bgDeltaGn, D.nVH * 128, 128);
+      if (this.dnFuse) this._d(p, "dn_delta_gn", L.bgDeltaGn, D.nVH * 128, 128);
       else {
         this._d(p, "dn_delta", L.bgDelta, D.nVH * 128, 128);
         this._d(p, "dn_gatenorm", L.bgGateNorm, D.nVH * 128, 128);
@@ -3111,7 +3103,7 @@ export class Qwen35Engine {
   // the next call submits at once instead of paying the CPU encode (~900 dispatches) on the critical
   // path. Same commands, same bits. engine.encodeAhead = false for A/B.
   // desc: forwardTokenIds' GPU sampling descriptor (the head's top-k in the same buffer), null: logits
-  _fwdKey(desc = null) { return [this.attnGlue, this.fuseProj, this.dnFuse, this.dnSplit, this.softmaxWG, this.b4, this.skip ? 1 : 0, this._common ? 1 : 0, desc ? topkK(desc) : 0].join(); }
+  _fwdKey(desc = null) { return [this.attnGlue, this.fuseProj, this.dnFuse, this.softmaxWG, this.b4, this.skip ? 1 : 0, this._common ? 1 : 0, desc ? topkK(desc) : 0].join(); }
   _encodeForward(pos, desc = null) {
     const { vocab } = this.dims;
     const enc = this.device.createCommandEncoder();

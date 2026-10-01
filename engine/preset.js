@@ -42,8 +42,6 @@ export function roomQwen35Options(flags) {
     // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched attention) for A/B
     // timing; both give the same bits, so devices may differ
     ...(off("fuse") ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
-    // ?dnsplit=2|4|8: decode dn_delta with each DeltaNet value head over 2 or 4 workgroups (bit-identical)
-    ...(q.get("dnsplit") ? { dnSplit: parseInt(q.get("dnsplit"), 10) || 1 } : {}),
     // ?kv=q8: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics a little
     kvQ8: q.get("kv") === "q8",
     // ?moefuse=0: the unfused MoE FFN kernels (A/B). The fused path (the default) gives different MoE bits,

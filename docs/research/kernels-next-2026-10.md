@@ -90,6 +90,7 @@ Four kernels account for 4.9 ms of the MoE's 20.5 ms, and each is a latency prob
   - Splitting a head's 128 state columns over 2–4 workgroups is exact, because columns are independent. It doubles the number of SMs streaming the state.
   - The catch is the fused gated norm, which needs all 128 outputs of a head. Either keep 128-column workgroups for `dn_delta_gn` and only split the unfused `dn_delta` (then run `dn_gatenorm`: +1 dispatch, bit-identical per `dnFuse`), or A/B both.
   - Expected −0.3 to −0.5 ms per token on the MoE [E]. On the 27B (48 heads) the effect is smaller.
+  - Measured 2026-10-01 (bench-log, branch perf/gdn-head-split): bit-identical but slower. The split `dn_delta` takes 44 µs against 49 µs unsplit and 40 µs fused, so with `dn_gatenorm` it loses ~11 µs per layer. Not kept.
 
 Expected total: **−2 to −3 ms per MoE token, about +10–15% plain [E]**, and about −2 to −3 ms on the 27B (48 × `dn_pre` plus 129 × `rmsnorm`), about +2–3%.
 - Effort: low. These are generator edits in `engine/wgsl/qwen35.js`, `base.js` and `moe.js`.
