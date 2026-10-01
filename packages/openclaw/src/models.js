@@ -17,6 +17,26 @@ export { MODELS, FILES, fmtBytes, modelsDir };
 // what onboarding offers (room/models.js PICKER order)
 export const MODEL_CHOICES = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 
+// The model for OpenClaw: the 35B MoE when the room can hold it, else the 27B. Measured on the Spark
+// (a Spark + a second Linux machine): with the MoE a 2nd turn took 4.6 s (17k tokens reused), a tool
+// turn 10 s and a new session 21 s; with the 1.7B a 2nd turn took ~120 s with nothing reused, its
+// background memory saves held the room for ~120 s, and a new session looped on tool search
+// (85 tool_search/tool_describe calls in 580 s) until OpenClaw aborted the run.
+export const OPENCLAW_MODEL = "qwen3.6-35b-moe";
+export const OPENCLAW_FALLBACK = "qwen3.8-27b";
+export const SMALL_MODELS = new Set(["qwen3-1.7b"]);
+export const isSmall = (key) => SMALL_MODELS.has(key);
+export const SMALL_WARNING = "Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops. Use the 35B MoE if your devices can hold it.";
+// rows: modelChoices' rows -> the key to preselect: the MoE if this device's pledge holds it, else the
+// 27B if it does; when neither fits on this device alone the room needs more devices anyway, and the
+// MoE needs only ~3 GB more than the 27B, so the MoE
+export function recommendForOpenClaw(rows) {
+  const row = (k) => rows.find((r) => r.key === k);
+  if (row(OPENCLAW_MODEL)?.fitsAlone) return OPENCLAW_MODEL;
+  if (row(OPENCLAW_FALLBACK)?.fitsAlone) return OPENCLAW_FALLBACK;
+  return row(OPENCLAW_MODEL) ? OPENCLAW_MODEL : recommendModel(rows);
+}
+
 // the context a node opens a room with (room-node roomnode.js nodeCtxFor): the qwen35 models' largest
 // (OpenClaw's prompts alone are 8-12k tokens), the room's default otherwise
 export const nodeCtxFor = (model, ask = 0) => (ask > 0 || MODELS[model]?.kind !== "qwen35" || !CTX[model] ? maxSeqFor(model, ask) : CTX[model].max);
@@ -74,14 +94,15 @@ export function modelChoices(dir, pledge) {
     const alone = roomFitNow(lib, { model: key, devices: [{ name: "this machine", meta: { contribGB: pledge, webgpu: true } }], ctxAsk: info.ctx });
     return { key, name: info.name, ctx: info.ctx, fileBytes: info.fileBytes, needGB: info.needGB, pulled: isPulled(dir, key), fitsAlone: alone.fits };
   }).sort((a, b) => (a.needGB ?? 99) - (b.needGB ?? 99));
-  const recommended = recommendModel(rows);
+  const recommended = recommendForOpenClaw(rows);
   for (const r of rows) {
     r.hint = [
       r.pulled ? "downloaded ✓" : `${fmtBytes(r.fileBytes)} download`,
       `needs about ${r.needGB} GB across the room`,
       `${Math.round(r.ctx / 1024)}k context`,
-      r.fitsAlone ? "fits on this machine alone" : null,
-      r.key === recommended ? "recommended" : null,
+      r.fitsAlone ? "fits on this machine alone" : "needs more devices",
+      r.key === recommended ? "recommended for OpenClaw" : null,
+      isSmall(r.key) ? "small: slow turns and tool loops in OpenClaw" : null,
     ].filter(Boolean).join(" · ");
   }
   return { rows, recommended };

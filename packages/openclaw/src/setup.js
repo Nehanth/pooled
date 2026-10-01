@@ -8,7 +8,7 @@
 import { randomCode, CODE_LEN, makeGate, saveGate, validKey } from "../../../room/joingate.js";
 import { Bridge } from "../../../cli/lib/room.js";
 import { roomLink, roomSettings, parseRoom, fmtCode, defaultName, ROOM_ORIGIN } from "./pool.js";
-import { MODEL_CHOICES, MODELS, modelInfo, modelChoices, memoryDefaults, isPulled, modelsDir, fmtBytes, shortCtxNote } from "./models.js";
+import { MODEL_CHOICES, MODELS, modelInfo, modelChoices, memoryDefaults, isPulled, modelsDir, fmtBytes, shortCtxNote, isSmall, SMALL_WARNING } from "./models.js";
 import { download, pullLine } from "./download.js";
 import { initStateDir, savedGate, saveHostGate, joinState, saveJoinState } from "./state.js";
 
@@ -45,9 +45,23 @@ export function providerConfig(s, learned = {}) {
 }
 export const modelRef = (s) => `${PROVIDER}/${s.mode === "join" ? "room" : s.model}`;
 
+// The trimmed OpenClaw settings a small model may opt into (onboarding asks; off unless chosen). Both are
+// global in OpenClaw, not per provider: tool search off puts every allowed tool in the prompt instead of
+// the tool_search/tool_describe meta tools a 1.7B loops on; memory flush off stops the background
+// "save memories before compaction" turn, which a 16k context triggers on nearly every turn.
+export const TRIM_PATCH = { tools: { toolSearch: false }, agents: { defaults: { compaction: { memoryFlush: { enabled: false } } } } };
+export const TRIM_NOTE = [
+  "OpenClaw's tool search and its memory flush (a background turn that saves memories before compaction)",
+  "make a small model slow: it loops on tool search, and the flush holds the room for about two minutes.",
+  "This can turn both off: tools.toolSearch = false and agents.defaults.compaction.memoryFlush.enabled = false.",
+  "These are global OpenClaw settings: they apply to every model and agent, not only Pooled, and stay",
+  "after you switch models. Undo with `openclaw config unset tools.toolSearch` and",
+  "`openclaw config unset agents.defaults.compaction.memoryFlush.enabled`.",
+].join("\n");
+
 function result(s, learned = {}) {
   const ref = modelRef(s);
-  const small = s.mode === "host" ? s.model === "qwen3-1.7b" : learned.model === "qwen3-1.7b";
+  const small = s.mode === "host" ? isSmall(s.model) : isSmall(learned.model);
   return {
     profiles: [],
     defaultModel: ref,
@@ -57,10 +71,10 @@ function result(s, learned = {}) {
     configPatch: {
       models: { providers: { [PROVIDER]: providerConfig(s, learned) } },
       plugins: { entries: { [PROVIDER]: { enabled: true, config: clean(s) } } },
-      agents: { defaults: { models: { [ref]: { agentRuntime: { id: "openclaw" } } } } },
+      agents: { defaults: { models: { [ref]: { agentRuntime: { id: "openclaw" } } }, ...(s.trim ? TRIM_PATCH.agents.defaults : {}) } },
       // a small room model (1.7B, 16k context) cannot follow OpenClaw's full tool catalog: give it the
-      // file tools only, listed directly (no tool-search meta tools). Bigger models keep the defaults.
-      ...(small ? { tools: { byProvider: { [PROVIDER]: { allow: ["read", "write", "edit", "ls"] } } } } : {}),
+      // file tools only. Bigger models keep the defaults. s.trim: the opt-in global trims (TRIM_PATCH).
+      ...(small || s.trim ? { tools: { ...(small ? { byProvider: { [PROVIDER]: { allow: ["read", "write", "edit", "ls"] } } } : {}), ...(s.trim ? TRIM_PATCH.tools : {}) } } : {}),
     },
   };
 }
@@ -127,8 +141,10 @@ export async function runSetup(ctx) {
     const model = await p.select({
       message: "Which model should the room run?",
       options: rows.map((r) => ({ value: r.key, label: r.name, hint: r.hint })),
-      initialValue: prev.mode === "host" && MODEL_CHOICES.includes(prev.model) ? prev.model : recommended,
+      // the earlier choice, unless it was a small model: then the one recommended for OpenClaw
+      initialValue: prev.mode === "host" && MODEL_CHOICES.includes(prev.model) && !isSmall(prev.model) ? prev.model : recommended,
     });
+    const trim = isSmall(model) ? await smallModel(p) : false;
     let pull = prev.pull;
     if (!isPulled(dir, model)) pull = await getModel(p, dir, model);
     const devs = await p.select({ message: "Wait for how many devices before loading the model?", options: [
@@ -138,7 +154,7 @@ export async function runSetup(ctx) {
       { value: true, label: "Devices with the invite link", hint: "recommended: a device with only the code waits until you send /pooled allow" },
       { value: false, label: "Anyone with the room code", hint: "no asking" }], initialValue: prev.ask !== false });
     const code = prev.mode === "host" && prev.code ? prev.code : newCode();
-    const s = { mode, model, code, pledgeGB: pledge, minDevices: devs, signal: prev.signal, modelDir: dir, ask, pull };
+    const s = { mode, model, code, pledgeGB: pledge, minDevices: devs, signal: prev.signal, modelDir: dir, ask, pull, trim };
     const key = hostKey(code, ask);
     const link = roomLink(code, { key, signal: s.signal });
     const info = modelInfo(model);
@@ -173,6 +189,7 @@ export async function runSetup(ctx) {
     prog.stop(`In Pooled room ${fmtCode(code)}${k.host ? ` (host: ${k.host})` : ""}${k.model && MODELS[k.model] ? `, running ${modelInfo(k.model).name}` : ""}`);
     const short = shortCtxNote(k.model, k.ctx, k.host || "the host");
     if (short) await p.note(short, "The room's context is too short for OpenClaw");
+    if (isSmall(k.model)) learned.trim = await smallModel(p, k.host || "the host");
   } else if (k.refused) {
     prog.stop(`The host of room ${fmtCode(code)} turned this device away: ${k.refused}`);
     throw new Error(`Pooled: the host of room ${fmtCode(code)} turned this device away (${k.refused}). Ask for the room's invite link and run the setup again with it.`);
@@ -180,8 +197,24 @@ export async function runSetup(ctx) {
     prog.stop(k.timeout ? `The host of room ${fmtCode(code)} has not let this device in yet: the gateway asks again when it starts`
       : `Couldn't reach room ${fmtCode(code)} now (${k.error}): the gateway tries again when it starts`);
   }
-  const s = { mode: "join", code, model: prev.model || "qwen3-1.7b", pledgeGB: pledge, signal: prev.signal, modelDir: dir };
+  const s = { mode: "join", code, model: prev.model || "qwen3-1.7b", pledgeGB: pledge, signal: prev.signal, modelDir: dir, trim: !!learned.trim };
   return result(s, learned);
+}
+
+// a small model was picked (or the joined room runs one): say what to expect, and offer the trimmed
+// OpenClaw settings, off unless chosen -> whether to apply TRIM_PATCH
+async function smallModel(p, host = null) {
+  await p.note(host ? `${host} runs this room with a small model. ${SMALL_WARNING}` : SMALL_WARNING, "Small model");
+  await p.note(TRIM_NOTE, "Optional: trim OpenClaw for a small model");
+  const v = await p.select({
+    message: "Turn off OpenClaw's tool search and memory flush? (global: every model and agent)",
+    options: [
+      { value: false, label: "No, keep OpenClaw's settings", hint: "keep them if you use other models in OpenClaw too" },
+      { value: true, label: "Yes, turn both off for all of OpenClaw", hint: "tools.toolSearch = false, compaction.memoryFlush off" },
+    ],
+    initialValue: false,
+  });
+  return v === true;
 }
 
 // the model is not on disk: download it now (with progress), let the gateway do it, or stream

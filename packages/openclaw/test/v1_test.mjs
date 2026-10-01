@@ -88,11 +88,17 @@ class FakeBridge extends EventEmitter {
 test("onboarding (host): the GPU's default pledge, the model list, 'don't download', the gate; the link carries the kept key", async () => {
   deps.memoryDefaults = MEM;
   const models = tmp("models");
-  const p = prompter(["host", "8", "qwen3-1.7b", "stream", 1, true]);
+  const p = prompter(["host", "8", "qwen3-1.7b", false, "stream", 1, true]);
   const res = await runSetup({ prompter: p, config: { plugins: { entries: { pooled: { config: { modelDir: models } } } } } });
   const sel = p.shown.selects;
-  assert.match(sel[1].options.map((o) => o.hint).join("\n"), /1\.7 GB download · needs about [\d.]+ GB across the room · 16k context · fits on this machine alone · recommended/);
-  assert.match(sel[2].message, /not downloaded yet \(1\.7 GB/);
+  const hints = sel[1].options.map((o) => o.hint).join("\n");
+  assert.match(hints, /1\.7 GB download · needs about [\d.]+ GB across the room · 16k context · fits on this machine alone · small: slow turns and tool loops in OpenClaw/);
+  assert.equal(sel[1].initialValue, "qwen3.6-35b-moe", "8 GB holds neither big model alone: the MoE is still the one for OpenClaw");
+  assert.match(hints, /128k context · needs more devices · recommended for OpenClaw/);
+  assert.match(p.shown.notes.join("\n"), /Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops\. Use the 35B MoE if your devices can hold it\./);
+  assert.match(p.shown.notes.join("\n"), /global OpenClaw settings/);
+  assert.equal(sel[2].initialValue, false, "the trimmed settings are opt-in");
+  assert.match(sel[3].message, /not downloaded yet \(1\.7 GB/);
   const c = res.configPatch.plugins.entries.pooled.config;
   assert.deepEqual([c.mode, c.model, c.pledgeGB, c.minDevices, c.modelDir, c.pull, c.ask], ["host", "qwen3-1.7b", 8, 1, models, false, undefined]);
   assert.match(c.code, /^[A-HJKMNP-TV-Z2-9]{6}$/);
@@ -102,11 +108,31 @@ test("onboarding (host): the GPU's default pledge, the model list, 'don't downlo
   assert.match(note, /\/pooled allow/);
   assert.ok(res.notes[0].includes(`#k=${key}`));
   assert.deepEqual(res.configPatch.tools.byProvider.pooled.allow, ["read", "write", "edit", "ls"], "the 1.7B gets the file tools only");
+  assert.equal(res.configPatch.tools.toolSearch, undefined, "no global change unless chosen");
+  assert.equal(res.configPatch.agents.defaults.compaction, undefined);
   // the same room again keeps its code (and so its link)
-  const p2 = prompter(["host", "8", "qwen3-1.7b", "later", 1, false]);
+  const p2 = prompter(["host", "8", "qwen3-1.7b", true, "later", 1, false]);
   const res2 = await runSetup({ prompter: p2, config: { plugins: { entries: { pooled: { config: { ...c } } } } } });
   assert.equal(res2.configPatch.plugins.entries.pooled.config.code, c.code);
   assert.equal(res2.configPatch.plugins.entries.pooled.config.ask, false);
+  assert.equal(p2.shown.selects[1].initialValue, "qwen3.6-35b-moe", "an earlier small pick is not preselected again");
+  // opted in: the two global settings, next to the 1.7B's file tools
+  assert.equal(res2.configPatch.tools.toolSearch, false);
+  assert.deepEqual(res2.configPatch.tools.byProvider.pooled.allow, ["read", "write", "edit", "ls"]);
+  assert.deepEqual(res2.configPatch.agents.defaults.compaction, { memoryFlush: { enabled: false } });
+  assert.ok(res2.configPatch.agents.defaults.models["pooled/qwen3-1.7b"], "the model entry stays");
+});
+
+test("onboarding (host): the 35B MoE is preselected when this device holds it, else the 27B; no small-model warning for them", async () => {
+  const models = tmp("models");
+  for (const [gb, want] of [[40, "qwen3.6-35b-moe"], [22, "qwen3.8-27b"]]) {
+    deps.memoryDefaults = () => ({ mem: { kind: "unified", name: "M5", totalGB: 64 }, def: gb, max: 48, label: "M5 · 64 GB" });
+    const p = prompter(["host", String(gb), want, "stream", 1, true]);
+    const res = await runSetup({ prompter: p, config: { plugins: { entries: { pooled: { config: { modelDir: models } } } } } });
+    assert.equal(p.shown.selects[1].initialValue, want, `${gb} GB`);
+    assert.ok(!p.shown.notes.join("\n").includes("Small models"), "no warning");
+    assert.equal(res.configPatch.tools, undefined, "big models keep OpenClaw's tools");
+  }
 });
 
 test("onboarding (join): a pasted link; waiting for the host's Allow is shown; the pass and the host's model are kept", async () => {
@@ -131,10 +157,12 @@ test("onboarding (join): a host whose context is shorter than OpenClaw's prompt 
   deps.memoryDefaults = MEM; deps.Bridge = class extends FakeBridge {
     async connect() { await super.connect(); this.hostName = "spark"; this.hostMeta = { api: 2, ctx: 8192, model: "qwen3-1.7b" }; }
   };
-  const p = prompter(["join", "K7Q-XAB", "6"]);
+  const p = prompter(["join", "K7Q-XAB", "6", false]);
   const res = await runSetup({ prompter: p, config: {} });
   const note = p.shown.notes.join("\n");
   assert.match(note, /spark runs this room with a 8192-token context/);
+  assert.match(note, /spark runs this room with a small model\. Small models struggle with OpenClaw/);
+  assert.equal(res.configPatch.tools.toolSearch, undefined, "declined: OpenClaw's settings stay");
   assert.match(note, /`pooled host qwen3-1\.7b --ctx 16384`/);
   assert.equal(res.configPatch.models.providers.pooled.models[0].contextWindow, 8192, "OpenClaw is told the truth (it fails fast)");
   FakeBridge.how = "in"; deps.Bridge = FakeBridge;

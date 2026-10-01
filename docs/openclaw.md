@@ -1,7 +1,7 @@
 # OpenClaw on Pooled
 
-Status: `@pooled/openclaw` 0.2.0, preview. The package is ready for npm but not published yet, and it
-isn't in OpenClaw's plugin catalog.
+Status: `@pooled/openclaw` 0.2.0, preview. The package is ready for ClawHub and npm but not published
+yet.
 
 ## What it is
 
@@ -41,11 +41,11 @@ Linux with glibc 2.38 or newer and a Vulkan driver (tested: DGX Spark, GB10), or
 (tested: Mac Studio M5 Max, macOS 27). Windows is untested.
 
 ```sh
-openclaw plugins install @pooled/openclaw     # --force --accept-capabilities to skip the two prompts
-openclaw onboard                              # Model/auth provider -> More... -> Pooled
+openclaw plugins install clawhub:@pooled/openclaw   # or from npm: openclaw plugins install @pooled/openclaw
+openclaw onboard                                    # Model/auth provider -> More... -> Pooled
 ```
 
-Until the package is on npm, build the tarball from a checkout and install that:
+Until the package is published, build the tarball from a checkout and install that:
 
 ```sh
 cd packages/openclaw && npm install && npm pack
@@ -55,8 +55,8 @@ openclaw plugins install ./pooled-openclaw-0.2.0.tgz --force --accept-capabiliti
 ### Start a room
 
 **Start a room on this device** asks how much GPU memory to lend, which model (downloaded or its size,
-what it needs across the room, its context; the one this machine holds alone is recommended), whether
-to download it now, how many devices to wait for, and who can join. It prints the code (`4TK-G9P`) and
+what it needs across the room, its context; the 35B MoE is preselected, see [Which model](#which-model)),
+whether to download it now, how many devices to wait for, and who can join. It prints the code (`4TK-G9P`) and
 the invite link. The room opens with the gateway and keeps its code and link across restarts.
 
 On the other devices, open the invite link in Chrome or Safari, run
@@ -72,6 +72,35 @@ the pass the host gives it, so the gateway gets straight back in after every res
 host's model and context window. The room needs at least a 16k context (OpenClaw's own instructions
 and tools are about 12k tokens): `pooled host qwen3-1.7b` opens at 8k, so run it with `--ctx 16384`.
 Onboarding warns when the context is shorter.
+
+### Which model
+
+Use the Qwen3.6 35B MoE (about 23 GB across the room). Onboarding preselects it when this device's
+memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits
+on this device alone (the room then waits for more devices). Picking the 1.7B, or joining a room that
+runs it, shows: "Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops. Use the 35B MoE if your devices can hold it."
+
+Measured on a DGX Spark, the OpenClaw gateway hosting and a second device (`pooled join`) holding the
+other half of the layers, OpenClaw 2026.9.6:
+
+| Turn | Qwen3.6 35B MoE (128k context) | Qwen3 1.7B (16k context) |
+|---|---|---|
+| First question after the room came online | 143 s (OpenClaw's whole prompt, cold) | 163 s |
+| Second question in the same chat | 4.6 s (17k tokens reused) | 119 s (nothing reused) |
+| "Read notes.txt and tell me the secret word" | 10.4 s (2 model calls) | 25.8 s (5 model calls) |
+| The same in a new session | 21.2 s | 580 s: 85 tool-search calls, then OpenClaw stopped the loop with no answer |
+| OpenClaw's background memory save | not triggered | on almost every turn; holds the room for about 120 s |
+
+The 1.7B re-read its whole prompt every turn, and with a 16k context OpenClaw's memory flush (a
+background turn that saves memories before compaction) fired on almost every turn and held the room.
+In a new session it looped on `tool_search`/`tool_describe` until OpenClaw's loop guard aborted the run.
+
+The 1.7B gets OpenClaw's file tools only (`read`, `write`, `edit`, `ls`). For a small model, onboarding
+also offers (off unless you pick it) to turn off OpenClaw's tool search (`tools.toolSearch = false`)
+and its memory flush (`agents.defaults.compaction.memoryFlush.enabled = false`). Both are global
+OpenClaw settings: they apply to every model and agent, not only Pooled, and stay when you switch
+models. Undo them with `openclaw config unset tools.toolSearch` and
+`openclaw config unset agents.defaults.compaction.memoryFlush.enabled`.
 
 Models are kept in `~/.pooled/models`, shared with `pooled pull`. Config keys, non-interactive setup
 and how requests flow: [packages/openclaw/README.md](../packages/openclaw/README.md).
@@ -123,4 +152,6 @@ suite in 52 s over 6 model calls, with the Mac holding layers 19-39. It is not i
   more per tool call than with a Node host.
 - **Checkpoint memory** is not part of the layer split: at 50K tokens one checkpoint is ~1 GB across
   the room for the MoE, and the host keeps up to 8 (4 pinned, 4 answer/turn).
-- **Windows** is untested. Small models (the 1.7B) get a file-tools-only profile.
+- **Small models.** The 1.7B is slow with OpenClaw and loops on tool search (see
+  [Which model](#which-model)); it gets a file-tools-only profile. Use the MoE.
+- **Windows** is untested.

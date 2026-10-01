@@ -23,7 +23,7 @@ function writeState(r) {
 export default definePluginEntry({
   id: PROVIDER,
   name: "Pooled",
-  description: "Run a model across your own devices: this machine joins a Pooled room and holds part of the model",
+  description: "Run a model across your own devices: this machine joins a Pooled room and holds part of the model on its GPU.",
   register(api) {
     if (process.env.POOLED_DEBUG) console.error(`[pooled] register mode=${api.registrationMode} pid=${process.pid}`);
     const log = (m) => { try { api.logger?.info?.(`[pooled] ${m}`); } catch {} if (process.env.POOLED_DEBUG) console.error(`[pooled] ${m}`); const r = current(); r?.ready?.then(writeState, () => {}); };

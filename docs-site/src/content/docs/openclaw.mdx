@@ -16,11 +16,12 @@ Sources (feat/openclaw-v1):
 - packages/openclaw/test/pack_install.sh: npm pack + `openclaw plugins install <tgz> --force --accept-capabilities` into a clean
   OpenClaw 2026.9.6, plugins inspect, non-interactive onboard, models list (Auth yes) — passed 2026-09-30
 - docs/openclaw.md results table (unchanged from #266)
-TODO(verify): `openclaw plugins install @pooled/openclaw` needs the package on npm (not published yet).
+- Which model: scratchpad openclaw-v1/test ocA35 (MoE) and ocA (1.7B) runs on the Spark, 2026-09-30; src/models.js recommendForOpenClaw
+TODO(verify): `openclaw plugins install clawhub:@pooled/openclaw` needs the package on ClawHub (not published yet).
 */}
 
-:::caution[Preview: not on npm yet]
-`@pooled/openclaw` 0.2.0 is ready to publish but isn't on npm or in OpenClaw's plugin catalog yet. Until it is, [install it from a checkout](#from-a-checkout).
+:::caution[Preview: not published yet]
+`@pooled/openclaw` 0.2.0 is ready for ClawHub and npm but isn't published yet. Until it is, [install it from a checkout](#from-a-checkout).
 :::
 
 [OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted agent: a gateway process on your machine runs the agent loop and its tools (`exec`, `read`, `edit`, …) and calls a model provider for every step. The `@pooled/openclaw` plugin adds **Pooled** as that provider.
@@ -49,11 +50,12 @@ OpenClaw's requests and tool calls take the same path as [`pooled serve`](/docs/
 You need Node 22 or newer (OpenClaw ships on 24), OpenClaw 2026.9.6 or newer, and a GPU that Dawn runs on: Linux with glibc 2.38 or newer and a Vulkan driver, or macOS 26 or newer. Windows is untested.
 
 ```sh
-openclaw plugins install @pooled/openclaw
+openclaw plugins install clawhub:@pooled/openclaw
 openclaw onboard          # Model/auth provider -> More... -> Pooled
 ```
 
-- OpenClaw asks you to confirm a package from npm and to accept its capabilities; `--force --accept-capabilities` skips both.
+- Or from npm: `openclaw plugins install @pooled/openclaw`.
+- OpenClaw shows the plugin's capabilities and asks you to accept them; `--accept-capabilities` skips that.
 - `webgpu` (Dawn, about 95 MB) is an optional dependency. If it didn't install, the gateway says how to add it when it needs the GPU.
 
 ### From a checkout
@@ -69,7 +71,7 @@ openclaw plugins install ./pooled-openclaw-0.2.0.tgz --force --accept-capabiliti
 In `openclaw onboard`, pick **Pooled** → **Start a room on this device**, then:
 
 1. Say how much of this GPU's memory to lend.
-2. Pick the model. Each one shows whether it's downloaded, its download size, the memory it needs across the room and its context; the one this machine holds alone is recommended. The Qwen3.6 35B MoE is the one for agent work.
+2. Pick the model. Each one shows whether it's downloaded, its download size, the memory it needs across the room and its context. The Qwen3.6 35B MoE is preselected; see [Which model](#which-model).
 3. If it isn't downloaded, pick **Download now**, **Download when the gateway starts** or **Don't download** (stream this machine's layers at each start).
 4. Pick how many devices to wait for, and who can join: **Devices with the invite link** or **Anyone with the room code**.
 
@@ -89,6 +91,26 @@ In `openclaw onboard`, pick **Pooled** → **Join a room**, paste the invite lin
 It keeps the pass the host gives it, so the gateway gets straight back in after every restart. It also learns the host's model and context window.
 
 The room needs at least a 16k context, because OpenClaw's own instructions and tools are about 12k tokens. `pooled host qwen3-1.7b` opens at 8k, so its host should run `pooled host qwen3-1.7b --ctx 16384`. Onboarding warns when the context is shorter.
+
+## Which model
+
+Use the **Qwen3.6 35B MoE** (about 23 GB across the room). Onboarding preselects it when this device's memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits on this device alone (the room then waits for more devices).
+
+:::caution[Small models]
+Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops. Use the 35B MoE if your devices can hold it.
+:::
+
+Measured on a DGX Spark, the OpenClaw gateway hosting and a second device (`pooled join`) holding the other half of the layers, OpenClaw 2026.9.6:
+
+| Turn | Qwen3.6 35B MoE (128k context) | Qwen3 1.7B (16k context) |
+|---|---|---|
+| First question after the room came online | 143 s (OpenClaw's whole prompt, cold) | 163 s |
+| Second question in the same chat | 4.6 s (17k tokens reused) | 119 s (nothing reused) |
+| "Read notes.txt and tell me the secret word" | 10.4 s (2 model calls) | 25.8 s (5 model calls) |
+| The same in a new session | 21.2 s | 580 s: 85 tool-search calls, then OpenClaw stopped the loop with no answer |
+| OpenClaw's background memory save | not triggered | on almost every turn; holds the room for about 120 s |
+
+The 1.7B gets OpenClaw's file tools only (`read`, `write`, `edit`, `ls`). For a small model, onboarding also offers (off unless you pick it) to turn off OpenClaw's tool search (`tools.toolSearch = false`) and its memory flush (`agents.defaults.compaction.memoryFlush.enabled = false`). **Both are global OpenClaw settings**: they apply to every model and agent, not only Pooled, and stay when you switch models. Undo them with `openclaw config unset tools.toolSearch` and `openclaw config unset agents.defaults.compaction.memoryFlush.enabled`.
 
 ## Let devices in: /pooled
 
@@ -168,7 +190,7 @@ Per-task tables are in [docs/openclaw-poc.md](https://github.com/Nehanth/pooled/
 - **Decode over the network.** Two computers over Wi-Fi decode at 25-30 tok/s; the Mac alone does about 92. Splitting pays one network hop per token, so it is for models that don't fit on one device.
 - **Browser hosts** have no turn checkpoints yet, so OpenClaw joined to a room hosted in a tab re-reads more per tool call.
 - **Checkpoint memory** isn't part of the layer split. At 50K tokens one checkpoint is about 1 GB across the room for the MoE, and the host keeps up to 8 (4 pinned, 4 answer or turn).
-- **Small models** (the 1.7B) get a file-tools-only profile; onboarding sets it. The MoE is the model to use.
+- **Small models** (the 1.7B) are slow with OpenClaw and loop on tool search; see [Which model](#which-model). The MoE is the model to use.
 - **Windows** is untested.
 
 ## Who can see and steer what

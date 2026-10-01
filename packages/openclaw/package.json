@@ -1,14 +1,16 @@
 {
   "name": "@pooled/openclaw",
   "version": "0.2.0",
-  "description": "OpenClaw provider plugin: pick Pooled and this machine becomes a device in a Pooled room, running part of the model on its own GPU. Start a room or join one with its invite link; /pooled lets devices in.",
+  "description": "Run a model across your own devices: this machine joins a Pooled room and holds part of the model on its GPU.",
   "keywords": [
     "openclaw",
     "openclaw-plugin",
     "pooled",
     "webgpu",
+    "webrtc",
     "llm",
-    "local-llm"
+    "local-llm",
+    "self-hosted"
   ],
   "homepage": "https://pooled.run/docs/openclaw/",
   "repository": {
@@ -25,8 +27,11 @@
   "main": "./dist/index.js",
   "files": [
     "dist/",
+    "skills/",
+    "assets/",
     "openclaw.plugin.json",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "esbuild index.js --bundle --platform=node --format=esm --target=node22 --external:openclaw --external:webgpu --external:@pooled/dawn-* --external:node-datachannel --external:peerjs --log-level=warning --outfile=dist/index.js",
@@ -57,9 +62,6 @@
   },
   "openclaw": {
     "extensions": [
-      "./index.js"
-    ],
-    "runtimeExtensions": [
       "./dist/index.js"
     ],
     "providers": [
@@ -74,7 +76,9 @@
       "pluginSdkVersion": "2026.9.6"
     },
     "install": {
+      "clawhubSpec": "clawhub:@pooled/openclaw",
       "npmSpec": "@pooled/openclaw",
+      "defaultChoice": "clawhub",
       "minHostVersion": ">=2026.9.6",
       "requiredPlatformPackages": [
         "@node-datachannel/android-arm64",

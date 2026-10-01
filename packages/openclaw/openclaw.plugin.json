@@ -1,13 +1,16 @@
 {
   "id": "pooled",
   "name": "Pooled",
-  "description": "Run a model across your own devices: this machine joins a Pooled room (WebGPU + WebRTC) and holds part of the model. /pooled shows the room and lets devices in.",
+  "description": "Run a model across your own devices: this machine joins a Pooled room and holds part of the model on its GPU.",
   "categories": [
     "models"
   ],
   "activation": {
     "onStartup": true
   },
+  "skills": [
+    "skills"
+  ],
   "providers": [
     "pooled"
   ],
@@ -106,6 +109,14 @@
       }
     }
   },
+  "configContracts": {
+    "dangerousFlags": [
+      {
+        "path": "mode",
+        "equals": "join"
+      }
+    ]
+  },
   "commandAliases": [
     {
       "name": "pooled",
@@ -115,18 +126,35 @@
   "uiHints": {
     "mode": {
       "label": "Role",
-      "help": "host: this machine starts the room; join: it joins another device's room"
+      "help": "host: this machine starts the room. join: it joins another device's room and sends OpenClaw's whole conversation to that room's host, which also chooses the tool calls OpenClaw runs. Join only rooms you trust."
     },
     "code": {
       "label": "Room code",
-      "help": "6 characters, like 4TKG9P (shown as 4TK-G9P)"
+      "help": "6 characters, like 4TKG9P (shown as 4TK-G9P). With 'Anyone with the room code', anyone who has the code can join."
     },
     "pledgeGB": {
       "label": "GPU memory lent (GB)"
     },
+    "model": {
+      "label": "Model",
+      "help": "host: qwen3.6-35b-moe (recommended for OpenClaw), qwen3.8-27b, or qwen3-1.7b (small: slow turns and tool loops)"
+    },
+    "minDevices": {
+      "label": "Devices to wait for",
+      "help": "before the layers are dealt"
+    },
+    "waitSeconds": {
+      "label": "Wait for the room (s)",
+      "help": "how long a question waits for devices or the host's model",
+      "advanced": true
+    },
     "ask": {
       "label": "Ask before new devices join",
       "help": "on: a device with only the code waits for /pooled allow; the invite link gets in at once"
+    },
+    "allowApiClients": {
+      "label": "Answer other devices' API requests",
+      "help": "host: another OpenClaw in join mode or `pooled serve` may ask this room; off keeps this GPU for this OpenClaw"
     },
     "pull": {
       "label": "Download the model",
@@ -152,6 +180,11 @@
     },
     "ctx": {
       "label": "Context (tokens)",
+      "advanced": true
+    },
+    "name": {
+      "label": "Device name",
+      "help": "this device's name in the room",
       "advanced": true
     }
   }
