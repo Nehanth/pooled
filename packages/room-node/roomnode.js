@@ -51,7 +51,7 @@ import { pickSampler } from "../../room/sampling.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, helloMeta, pieceDecoder, API_LIMITS, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "../../room/api.js";
 import { tokenTexts } from "../../harness/model-common.js";
 import { uniqueName, PING_MS, lastHeard, isSilentGone, lapTimeout, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
-import { lookupDrafts } from "../../room/lookup.js";
+import { lookupDrafts, denseLookupDrafts } from "../../room/lookup.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
 import { pledgeGB, afterLoadDeath } from "../../room/pledge.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes } from "../../engine/gguf.js";
@@ -75,9 +75,12 @@ const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
   "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-load", "ai-share", "ai-wake"]);
 // The context a node opens a room with: what was asked (clamped by room/models.js), else the largest
-// the model allows for the qwen35 models (128k on the MoE, 64k on the 27B: an agent's prompt alone is
-// 8-12k tokens, and their KV cache is small), else the room's default (the dense 1.7B keeps an f32 cache).
-export const nodeCtxFor = (model, ask = 0) => (ask > 0 || MODELS[model]?.kind !== "qwen35" || !CTX[model] ? maxSeqFor(model, ask) : CTX[model].max);
+// room context the model allows (room/models.js CTX: 16k on the 1.7B, 64k on the 27B, 128k on the MoE),
+// as the OpenClaw plugin opens it (packages/openclaw pluginCtx): an agent's prompt alone is 8-12k
+// tokens, and the 1.7B at its 8k default ended every OpenClaw turn in "Context overflow". The 1.7B's
+// f32 cache costs 1.5 GB more at 16k (5.5 GB in all); --ctx 8192 asks for less. A model without a CTX
+// entry keeps the room's default. (qwen35: the deal lowers it to what every device can bind.)
+export const nodeCtxFor = (model, ask = 0) => (ask > 0 || !CTX[model] ? maxSeqFor(model, ask) : CTX[model].max);
 // what a host that closes its room says to the devices in it (bye {closed: 1})
 export const HOST_CLOSED = "The host closed the room.";
 export const cleanName = (s, id) => String(s ?? id).replace(/[\u0000-\u001f\u007f<>"'`&]/g, "").trim().slice(0, 40) || String(id).slice(0, 8);
@@ -404,7 +407,7 @@ export class RoomNode extends EventEmitter {
         // the host closed the room for good (pooled host q): no knocking, the room is over
         if (!this.isHost && from === PREFIX + this.code && d.closed) {
           this.roomClosed = true; clearInterval(this.knock); this.knock = null;
-          this.log(d.reason || HOST_CLOSED);
+          // (no log line: whoever listens to "closed" says it, once)
           this.emit("closed", d.reason || HOST_CLOSED);
           return;
         }
@@ -1184,28 +1187,30 @@ export class RoomNode extends EventEmitter {
       tPre = performance.now() - t0Pre;
       const t0 = performance.now();
       const emit = (tok, drafted) => { tokens.push(tok); count++; onToken(tok, drafted); };
+      // a verify lap round the chain: every column's hidden through every device (ai-hidden-b {spec})
+      const chainSpec = () => (ai.chain.length ? {
+        // pre: { hs, t0 } when the engine already ran the host's layers with the drafts (hostFuse)
+        runTrunk: async (toks, pos, pre = null) => {
+          const tLap = pre?.t0 ?? performance.now();
+          this.wakeChain(pos);
+          const n = toks.length, hdim = E.dims.dim, NC = E.NC || 4;
+          const hb = pre?.hs || new Float32Array(n * hdim);
+          if (!pre) for (let c = 0; c < n; c += NC) { const m = Math.min(NC, n - c); hb.set(await E.embedRunBatch(toks.slice(c, c + m), pos + c, { base: c, total: n }), c * hdim); }
+          if (badF32(hb)) throw new Error(`NaN after host layers (pos ${pos})`);
+          const hostMs = performance.now() - tLap;
+          const returned = this.lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, this.chainRtt()), "verify");
+          this.sendChain({ t: "ai-hidden-b", basePos: pos, n, spec: 1, ...packWire(hb) });
+          const h = await returned;
+          if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos})`);
+          this.noteLap(performance.now() - tLap, hostMs);
+          return h;
+        },
+        onReject: async (k) => { ai.pendingCtl = { rb: k }; },
+        preTrunk: true,
+      } : {});
       if (!logits) { /* stopped during prefill */ }
       else if (useSpec && E.mtp && E.specStep) {
-        const spec = ai.chain.length ? {
-          // pre: { hs, t0 } when the engine already ran the host's layers with the drafts (hostFuse)
-          runTrunk: async (toks, pos, pre = null) => {
-            const tLap = pre?.t0 ?? performance.now();
-            this.wakeChain(pos);
-            const n = toks.length, hdim = E.dims.dim, NC = E.NC || 4;
-            const hb = pre?.hs || new Float32Array(n * hdim);
-            if (!pre) for (let c = 0; c < n; c += NC) { const m = Math.min(NC, n - c); hb.set(await E.embedRunBatch(toks.slice(c, c + m), pos + c, { base: c, total: n }), c * hdim); }
-            if (badF32(hb)) throw new Error(`NaN after host layers (pos ${pos})`);
-            const hostMs = performance.now() - tLap;
-            const returned = this.lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, this.chainRtt()), "verify");
-            this.sendChain({ t: "ai-hidden-b", basePos: pos, n, spec: 1, ...packWire(hb) });
-            const h = await returned;
-            if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos})`);
-            this.noteLap(performance.now() - tLap, hostMs);
-            return h;
-          },
-          onReject: async (k) => { ai.pendingCtl = { rb: k }; },
-          preTrunk: true,
-        } : {};
+        const spec = chainSpec();
         if (ai.chain.length && ai.lastHidden) E.setHidden(ai.lastHidden);
         E.pos = ai.pos;
         const kc = { cand: [3, 5, 7], ema: {}, n: {}, step: 0 };
@@ -1250,7 +1255,48 @@ export class RoomNode extends EventEmitter {
         }
         if (!done && count >= maxNew) capped = true;
         ai.pos = E.pos; ai.xAt = ai.pos;
-      } else {
+      }
+      else if (useSpec && !E.mtp && E.specStepDrafts && !E.specStep && ai.chain.length) {
+        // a model without a draft head (the dense Qwen3s) in a split room, as the room page (#278):
+        // when prompt lookup finds the text repeating the context, the tokens that followed it go
+        // round as drafts in one lap (specStepDrafts: the same output as plain decoding), only while
+        // every device in the chain handles dense verify frames (its hello's dspec). No drafts: a plain lap.
+        const spec = chainSpec();
+        const st0 = { ...(E.specStats || { drafts: 0, accepted: 0 }) };
+        let next = sample(logits), done = false, lkFull = false;
+        if (eos(next)) done = true; else emit(next, 0);
+        while (!done && count < maxNew && !aborted()) {
+          const roomLeft = ctxMax - ai.pos - 2;
+          if (roomLeft < 0) { capped = true; break; }
+          const kMax = Math.min(E.maxDrafts || 7, roomLeft, maxNew - count);
+          const lk = ai.fed ? denseLookupDrafts(ai.chain.map((id) => this.conns.get(id)?.meta), [...ai.fed, next], kMax, { full: lkFull }) : [];
+          let toks;
+          if (lk.length) {
+            E.pos = ai.pos;
+            toks = await E.specStepDrafts(next, sample, lk, spec);
+            ai.fed.push(next, ...toks.slice(0, -1));
+            ai.pos = E.pos; ai.lastHidden = E.lastHidden;
+            copied += toks.length - 1;
+            lkFull = toks.length === lk.length + 1;
+          } else {
+            lkFull = false;
+            const lg = await this.pipeToken(next, true, undefined, desc);
+            toks = [sample(lg)];
+          }
+          for (let j = 0; j < toks.length; j++) {
+            const tk = toks[j];
+            if (eos(tk)) { done = true; break; }
+            if (count >= maxNew) { done = true; capped = true; break; }
+            emit(tk, j < toks.length - 1 ? 2 : 0);
+          }
+          next = toks[toks.length - 1];
+          const st = E.specStats, d = st ? st.drafts - st0.drafts : 0;
+          acc = d ? (st.accepted - st0.accepted) / d : null;
+        }
+        if (!done && count >= maxNew) capped = true;
+        ai.xAt = ai.pos;
+      }
+      else {
         // plain decoding. ahead (greedy GPU sampling in a chain, host fuse): from the second lap on,
         // the head of the returned hidden and the host's layers on its pick are one submit
         // (engine headAhead); a pick that is not piped has its layers undone (dropAhead)
