@@ -643,12 +643,18 @@ fn topk_b(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) w
   var lv: f32 = 0.0; var li: u32 = TK_NONE;
   for (var r: u32 = 0u; r < k; r++) {
     var bv: f32 = -3.402823e38; var bi: u32 = TK_NONE;
-    for (var e: u32 = t; e < m; e += 256u) {
-      let o = pb + (e / k) * R + 2u * (e % k);
-      let i = tb_p[o];
-      if (i == TK_NONE) { continue; }
-      let v = bitcast<f32>(tb_p[o + 1u]);
-      if ((r == 0u || tk_after(v, i, lv, li)) && tk_better(v, i, bv, bi)) { bv = v; bi = i; }
+    // the same per-thread order (e = t, t + 256, ...) with a trip count every thread shares: a loop
+    // whose exit depends on t, ahead of tk_reduce's barriers in this round loop, fails under FXC
+    for (var e0: u32 = 0u; e0 < m; e0 += 256u) {
+      let e = e0 + t;
+      if (e < m) {
+        let o = pb + (e / k) * R + 2u * (e % k);
+        let i = tb_p[o];
+        if (i != TK_NONE) {
+          let v = bitcast<f32>(tb_p[o + 1u]);
+          if ((r == 0u || tk_after(v, i, lv, li)) && tk_better(v, i, bv, bi)) { bv = v; bi = i; }
+        }
+      }
     }
     let w = tk_reduce(t, bv, bi);
     li = w.x; lv = bitcast<f32>(w.y);

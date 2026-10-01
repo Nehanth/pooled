@@ -20,7 +20,7 @@ Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gat
 - cli/lib/chat.js, chatrun.js: /clear /think /help /exit /bye, Ctrl-C, one-shot mode, --wait 120, explain() errors
 - cli/README.md "Talk to a room: pooled chat" and "Lend a computer: pooled join / pooled host" (transcripts,
   reconnect backoff 2/4/8/16/30 s, knock for a minute, --wait 10 min, same-name host only, stable node- name,
-  Dawn optional: npx -p @pooled/cli -p webgpu@0.6.1, "Who sees what", macOS 26+ / glibc 2.38+ / Windows untested)
+  Dawn optional: npx -p @pooled/cli -p webgpu@0.6.1, "Who sees what", macOS 26+ / glibc 2.38+ / Windows (D3D12, tested 2026-10-01 on an RTX 5070))
 - PR #270 body: transcripts (its "until #268 is deployed … only with --allow-all" note is out of date: #268 is merged)
 - room/joingate.js on main (#268): the room page sends join: 1, waits in the lobby, takes #k= keys; CHANGELOG #268 entry
 - npm view @pooled/cli version = 0.3.0 (2026-09-30: pull, host, join, chat and serve; webgpu an optional dependency that installs with it, #273); engines node >=22
@@ -78,7 +78,9 @@ pooled join 4TK-G9P
 |---|---|---|
 | macOS 26 or newer | Metal | Tested (Mac Studio, M5 Max) |
 | Linux with glibc 2.38 or newer (Ubuntu 24.04) | Vulkan (the NVIDIA or Mesa driver) | Tested (DGX Spark, GB10) |
-| Windows | D3D12 | Not tested yet |
+| Windows | D3D12 | Tested (Windows 11, RTX 5070) |
+
+On Windows the browser is the fallback: if `pooled join` says this GPU's shader compiler can't build a kernel, open the room's link in Chrome or Edge, which compile the same kernels with their own compiler. On a computer with two GPUs (integrated and discrete), set Chrome or Edge to **High performance** in Windows Settings > System > Display > Graphics, or the browser picks the integrated GPU.
 
 Phones join from the room page, not from the terminal. See [Phones and tablets](/docs/phones).
 
@@ -492,6 +494,7 @@ Each error says what happened and what to do. The exit status is 1.
 | You see | What to do |
 |---|---|
 | No WebGPU adapter: Dawn found no GPU it can use on this computer. | It needs Metal (macOS 26 or newer), Vulkan (Linux: a Vulkan driver, for example the NVIDIA or Mesa one) or D3D12 (Windows). `pooled chat` and `pooled serve` work without a GPU. |
+| This GPU's shader compiler can't build topk_b; join from Chrome or Edge instead (open the room's link). | Open the room's link in Chrome or Edge on this computer. `--verbose` shows the compiler's own error (worth a bug report). |
 | Not enough GPU memory to lend: … | Close other GPU apps, or lend a set amount with `--gb N` (at least 1). |
 | The GPU ran out of memory: … | Lend less with `--gb N`, or close other GPU apps. |
 | No room HJQ-N44. | Check the code, and that the host's page (or `pooled host`) is still open. |

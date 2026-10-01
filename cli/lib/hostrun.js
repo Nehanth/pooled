@@ -2,7 +2,7 @@
 // what the flags did not say (model, pledge), shows the room live (devices, pledges, who waits to
 // join, whether the pledges hold the model), starts it, and offers chat right there.
 import os from "node:os";
-import { hostable, memoryRule, fmtCode, ctxNote, UsageError } from "./lend.js";
+import { hostable, memoryRule, fmtCode, ctxNote, UsageError, deviceName } from "./lend.js";
 import { modelState } from "./cache.js";
 import { initialState, reduce, render, roomFitNow, modelRows, recommendModel, pledgeDefaults, devicesFrom, autoStart, colors, modelNeedGB, pullDone, hereWhy } from "./hostui.js";
 import { liveRegion, keysOf, colorOn } from "./tui.js";
@@ -56,7 +56,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   };
 
   region.render(["", `  ${ST.spin(0)} opening a room on this computer…`]);
-  const node = await rn.createRoom({ model: model0, pledgeGB: pledge0, name: opts.name, signal: opts.signal, modelDir: dir, ctx: opts.ctx || 0,
+  const node = await rn.createRoom({ model: model0, pledgeGB: pledge0, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: dir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log, split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   node.setPledge(pledge0);
   const code = node.code;
@@ -178,6 +178,9 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   // tok/s of the last answer (decode), for the online line
   node.on("prefill", (x) => { if (x?.count && x.tDecode) { S.tps = x.count / (x.tDecode / 1000); log(`answered ${x.count} tokens at ${Math.round(S.tps)} tok/s`); } });
   node.on("loadprogress", (p) => pct.set(node.name, p));
+  // the room re-dealt after a device left and the devices still here are short of the model: it
+  // stopped (nothing is dealt past a pledge) and waits for devices, as before a Start
+  node.on("short", (note) => { if (!starting && S.step === "online") { S.step = "room"; S.notice = note; } refresh(); });
   node.on("members", () => refresh());
   node.on("joinrequests", () => refresh());
   node.on("joinrequest", (r) => { if (!opts.denyUnknown) log(`${r.line}: press a to let it in, d to turn it away`); });

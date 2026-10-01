@@ -1,6 +1,6 @@
 {
   "name": "@pooled/openclaw",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Peer-to-peer inference engine for your claw: run one model across your own devices, each holding part of it on its GPU.",
   "keywords": [
     "openclaw",

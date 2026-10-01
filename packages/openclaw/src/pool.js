@@ -223,11 +223,14 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
   if (n.ai.engine && n.ai.degraded) {   // a device dropped: it may come back into its slot, or the room re-deals
     while (!n.whole()) {
       if (signal?.aborted || r.closed) throw new PooledError("abort", "aborted");
+      // the re-deal found the devices still here short of the model and stopped the room (no device
+      // is dealt past its pledge): wait for devices to join, as a Start the pledges don't cover does
+      if (!n.ai.engine && !n.ai.starting && !n.ai.loadingShard) break;
       if (Date.now() - t0 > waitMs) throw new PooledError("degraded", `a device left Pooled room ${code} while it held layers of the model (${n.missingNames().join(", ") || "reloading"}). ` +
         `Re-open ${r.shareLink} on that device (or its invite link: /pooled link); the room re-deals over the devices still there after a minute`);
       await new Promise((res) => setTimeout(res, 500));
     }
-    return;
+    if (n.whole()) return;
   }
   for (;;) {
     if (signal?.aborted || r.closed) throw new PooledError("abort", "aborted");
@@ -249,7 +252,7 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
   // one start at a time (the service and a question can both get here)
   r.startP ||= n.start(s.model).finally(() => { r.startP = null; });
   await r.startP.catch((err) => {
-    throw new PooledError(/memory|allocate|OOM|out of memory|maxBufferSize/i.test(err.message) ? "memory" : "start",
+    throw new PooledError(err.short || /memory|allocate|OOM|out of memory|maxBufferSize/i.test(err.message) ? "memory" : "start",
       `Pooled room ${code} could not load ${info.name}: ${err.message}`);
   });
   // the room was short of memory for 16k and opened the model at 8k (room/models.js pickCtx): too short
