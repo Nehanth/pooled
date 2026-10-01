@@ -83,6 +83,37 @@ End-to-end on the GB10 (two headless Chromium tabs, real PeerJS signaling and We
 
 Topology change (host link + on-demand chain links instead of a full mesh) and `--devices N` in the emulator, GB10, 27B, `japan` prompt, local signaling, loopback: 3 devices online in 3.0 min, prefill 4.5 s, decode 10.4 tok/s; 16 devices (8 phone-shaped, 64 layers dealt 18+embed / 4-5 per worker / 2 per phone) online in 2.3 min, prefill 8.3 / 7.2 s, decode 3.8 / 4.7 tok/s, every device holding one host link and two chain links, no errors. The decode drop on a zero-latency network is per-hop processing (unpack, upload, readback, pack), about 15 ms per hop, now a measured target. 64 tabs in one Chromium fail at `vkCreateDevice` (one GPU process, driver device cap); not a room limit.
 
+## 2026-10-01: split-K decode attention (attnDecode "v2") on by default (branch perf/kf-long-context)
+
+`engine/wgsl/attn_dec.js` replaces attn_flash + attn_combine for decode and verify passes. Its split length comes
+from the column's own position (not maxSeq), it uses coalesced vec4 K/V loads, a 32-thread softmax, and (new) a
+combine that is parallel over splits (MoE 0.83 -> 0.16 ms per token at 64K). Not bit-identical to v1, so the 27B
+goldens are re-baselined; `?attndecode=v1` / `ATTN_DECODE=v1` keep the old path. Details:
+docs/research/long-context-2026-09.md.
+
+Plain decode tok/s, v1 -> v2 (2 runs each; same prompts per row):
+
+| Path | Model | 1K | 8K | 32K | 64K |
+|---|---|---|---|---|---|
+| GB10 Chrome `chrome_bench.mjs` (fill, rep 2) | MoE | 31.8 -> 50.4 | 32.2 -> 48.5 | 24.5 -> 41.0 | 18.2 -> 35.5 |
+| GB10 Chrome `chrome_bench.mjs` (mean of 2) | 27B | 10.20 -> 11.23 | 9.65 -> 10.81 | 7.65 -> 9.76 | n/a |
+| GB10 Deno `bench_attn_ctx.js` (in-process A/B) | MoE | 23.3 -> 32.3 | 23.2 -> 31.4 | 20.1 -> 28.3 | 14.7 -> 25.7 |
+| GB10 Deno `bench_attn_ctx.js` (in-process A/B) | 27B | 8.61 -> 10.00 | 8.28 -> 9.69 | 6.79 -> 8.87 | 5.47 -> 7.99 |
+| GB10 Deno `bench_ctx.js` (mean of 2) | 27B | 8.48 -> 10.02 | 8.10 -> 9.67 | 6.60 -> 8.81 | 5.32 -> 7.89 |
+| M5 Max Chrome `chrome_bench.mjs` (mean of 2) | MoE | 69.3 -> 88.0 | 68.2 -> 82.3 | 46.5 -> 68.1 | n/a |
+| M5 Max Chrome `chrome_bench.mjs` (mean of 5) | 27B | 19.7 -> 21.0 | 18.7 -> 20.3 | n/a | n/a |
+
+Attention GPU ms per token (Deno A/B): MoE 12.6 -> 0.58 (1K), 19.4 -> 4.9 (32K), 37.6 -> 8.7 (64K); 27B 17.6 -> 1.07
+(1K), 48.5 -> 13.8 (32K), 82.8 -> 26.1 (64K). GB10 Chrome MoE rep 1 ran under GPU contention (v1 1K 15.6), rep 2 shown.
+
+Correctness: greedy tokens identical v1 vs v2 in every Chrome run (both GPUs, all fills); `test_moe` MATCH llama.cpp
+on all prompts, spec == plain; `needle_ctx.js` PASS (MoE 32K/64K, 27B 16K/32K); `test_attn_dec.js` relDiff vs f64
+<= 2.4e-7, verify == decode; `test_attn_dec_model.js` logits relDiff v2 vs v1 <= 1e-5, argmax and 24 greedy equal.
+New 27B goldens (GB10): default `BITS plain c26dbc5 hidden 3177f9f1`, `ATTN_PREFILL_TILE=0` f0537158 / 5d287854
+(v1: 4cac59d8 / a67b7bcd and 4f70a9ca / 5eb28e41), same 13 tokens, spec == plain. `test_prefill_opts.js` MoE
+fails its 0.02 tolerance at 700 tokens on main too (2.44e-2 main and v1, 2.45e-2 v2; argmax, greedy, spec equal):
+pre-existing, not from this change.
+
 ## 2026-09-30: 128K context on the 35B MoE (branch perf/kv-128k), GB10 Deno
 
 `cd tests && MODEL=moe CTX=131072 LENS=32k,64k,96k,127k DEPTHS=0.5,0.25,0.75,0.5 deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights needle_ctx.js`.

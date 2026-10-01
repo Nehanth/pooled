@@ -30,8 +30,10 @@ Same outer shape (one workgroup per (split, column, KV head), per-split partials
   4 rows in flight, summed in a fixed order.
 
 Every reduction has a fixed order, so the kernel is deterministic. It is **not bit-identical** to attn_flash
-(different split boundaries and summation order), so it is **opt-in**: engine option `attnDecode: "v2"`
-(runtime toggle `engine.attnDecode = "v1" | "v2"`), `ATTN_DECODE=v2` for tests through `tests/load_model.js`.
+(different split boundaries and summation order). It started opt-in and is **the default since September 30**
+(engine option `attnDecode`, default `"v2"`; runtime toggle `engine.attnDecode = "v1" | "v2"`; `?attndecode=v1`
+for a room, `ATTN_DECODE=v1` for tests through `tests/load_model.js`). The 27B goldens were re-baselined (see
+"Default on" below).
 Prefill full-width passes keep the tiled prefill kernel; partial prefill passes and verify passes use v2 when on.
 Limits: headDim 256, G <= 8, f16 KV (not `kvQ8`); otherwise it stays on v1.
 
@@ -43,7 +45,7 @@ Limits: headDim 256, G <= 8, f16 KV (not `kvQ8`); otherwise it stays on v1.
   - MoE, 1000 / 8000 / 30000-token prompts: logits relDiff 3.4e-6 / 1.2e-6 / 2.0e-6, argmax equal, 24 greedy
     tokens identical, v2 speculative (MTP, K=3) identical to v2 plain. PASS.
   - 27B, 1000 / 8000: relDiff 3.7e-6 / 8.0e-6, greedy 16 identical, spec == plain. PASS.
-- Default path unchanged (v1 is the default): 27B bits `BITS plain 8a532ef5 hidden 52f2ae10` (the reference),
+- While it was opt-in, the default path was unchanged: 27B bits `BITS plain 8a532ef5 hidden 52f2ae10` (the reference),
   `test_moe` MATCH llama.cpp on both prompts with spec identical to plain, unit tests 433 passed.
 
 ## Speed (tests/bench_attn_ctx.js, plain decode, wall tok/s; attention = kv_store + attention + combine GPU ms)
@@ -82,10 +84,8 @@ tok/s 2.9 -> 4.2 at 64K under contention (the dense weights, ~90 ms per token, d
 - 3-20x less attention time per token; decode +41-76 % on the MoE at 4K-64K and +7-15 % on the 27B.
 - Most of the short-context win on large-maxSeq rooms is point 1 (split length from maxSeq); most of the
   long-context win is point 2 (v2 at 64K streams ~140 GB/s of K/V vs ~35 GB/s for v1).
-- Next: the combine is serial over up to S splits per thread (0.9 ms at 64K on the MoE, 5 ms on the 27B*),
-  a two-level combine or fewer, longer splits at 64K would trim it. Subgroup reductions (where available)
-  would shorten the softmax. Candidate for default-on once it has run in Chrome (Metal / D3D) and the room
-  suites with `ATTN_DECODE=v2`.
+- Done since: the combine is parallel over splits (4 workgroups per head, fixed-order tree reductions),
+  0.83 -> 0.17 ms per MoE token at 64K. Still open: subgroup reductions (where available) for the softmax.
 
 Reproduce:
 
