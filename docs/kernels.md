@@ -14,6 +14,8 @@ A generated token on the 27B = ~111 ms on the GB10: **82 ms streaming 15 GB of w
 | Batched GEMV | `matvec*_coop_b[8|4][_acc]` | speculative verify and prefill tails: `_b8`/`_b4` twins for ≤8 / ≤4 live columns, each with rows-per-workgroup chosen to keep 16 accumulators per thread |
 | Fused gate/up | `matvec*_gu[_b[8|4]]` | FFN gate and up in one weight sweep, SiLU applied in the epilogue (GEMV path only) |
 | Prefill GEMM | `gemm_q4_<dIn>_s<S>`, `gemm_red_s<S>[_acc]`, `gemm_xpose` | row-stationary Q4_0 GEMM for 16-column prefill passes: packed-nibble weight tile in shared memory, broadcast activations, pinned split-K, fixed-order reduce |
+| Wide prefill GEMM | `gemm_w_q4|q8[_acc]`, `silu_mul_w` | tiled f32 GEMM over a whole 256-token chunk (engine/wgsl/gemm_wide.js); default for any engine holding the embedding. `silu_mul_w` is also the 16-column pass's one-launch SiLU |
+| DP4a prefill GEMM | `quant_q8_w`, `gemm_d_q4|q8[_acc]` | the wide chunk's projections as `dot4I8Packed` on activations quantized per 32 values (llama.cpp's MMQ numerics); default for dense models on NVIDIA, opt-in elsewhere (`prefillDp4a`), never Apple |
 | Glue | `rmsnorm`, `qsplit`, `head_norm`, `rope_part`, `attn_scores/softmax/out`, `sigmoid_mul`, `silu_mul`, `add_res`, `argmax` + `_mc` multi-column forms | normalization, attention, activations, sampling prep |
 | DeltaNet | `dn_pre` (gates + L2), `dn_conv`, `dn_delta`, `dn_gatenorm` + `_mc` forms | the gated delta-rule recurrence, with snapshot slots for speculative rollback |
 | Legacy | `matvec[_q8|_q4]` | one thread per row; kept as the correctness reference and fallback |
