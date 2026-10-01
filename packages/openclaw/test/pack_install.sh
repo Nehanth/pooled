@@ -51,6 +51,12 @@ if (!e?.config?.mode) { console.error("FAIL: no plugins.entries.pooled.config af
 console.log("   config:", JSON.stringify(e.config), "· default model:", c.agents?.defaults?.model?.primary);
 if (!/^[A-HJKMNP-TV-Z2-9]{6}$/.test(e.config.code)) { console.error("FAIL: code", e.config.code); process.exit(1); }'
 [ -f "$T/state/pooled/room.json" ] || fail "no room.json (the host's invite key) in the state dir"
+# the invite key lives in room.json only, never in openclaw.json
+node -e '
+const fs = require("fs"), k = JSON.parse(fs.readFileSync(process.env.OPENCLAW_STATE_DIR + "/pooled/room.json", "utf8")).host?.gate?.key;
+if (!k) { console.error("FAIL: no invite key in room.json"); process.exit(1); }
+if (fs.readFileSync(process.env.OPENCLAW_CONFIG_PATH, "utf8").includes(k)) { console.error("FAIL: the invite key is in openclaw.json"); process.exit(1); }
+console.log("   invite key: in room.json, not in openclaw.json");'
 echo "   room.json mode $(stat -c %a "$T/state/pooled/room.json" 2>/dev/null || stat -f %Lp "$T/state/pooled/room.json")"
 
 echo "== models list (catalog + synthetic auth for a non-bundled plugin)"

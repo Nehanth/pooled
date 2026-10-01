@@ -26,13 +26,15 @@ export function tryLock(dir, key, { pid = process.pid, isAlive = alive } = {}) {
       return () => { if (done) return; done = true; try { if (JSON.parse(fs.readFileSync(p, "utf8")).pid === pid) fs.rmSync(p, { force: true }); } catch {} };
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
-      let holder = null;
-      try { holder = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+      let holder = null, raw = null;
+      try { raw = fs.readFileSync(p, "utf8"); holder = JSON.parse(raw); } catch {}
       // another machine's lock on a shared folder: trust it for a day
       const foreign = holder?.host && holder.host !== os.hostname();
       const stale = !holder || (foreign ? Date.now() - Date.parse(holder.at || 0) > 864e5 : !isAlive(holder.pid));
       if (!stale) return null;
-      try { fs.rmSync(p, { force: true }); } catch {}
+      // take over only the lock judged stale: another process may have taken it over meanwhile
+      // (rm'ing its fresh lock would let two writers into the same .part)
+      try { if (fs.readFileSync(p, "utf8") === raw) fs.rmSync(p, { force: true }); } catch {}
     }
   }
   return null;

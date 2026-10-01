@@ -302,3 +302,57 @@ test("warm-up: the last system prompt and tools are kept (0600) and replayed onc
   assert.match(logs[0], /warmed up OpenClaw's system prompt and tools: 17400 tokens/);
   assert.equal(replayBody(null), null);
 });
+
+// ---------------- review fixes ----------------
+test("the invite key never reaches chat text or logs: waiting / memory / degraded name /pooled link instead", async () => {
+  const link = `https://pooled.run/r/4TKG9P#k=${KEY}`;
+  const base = { code: "4TKG9P", link, shareLink: "https://pooled.run/r/4TKG9P", s: { model: "qwen3-1.7b", waitSeconds: 0, minDevices: 2, ctx: null } };
+  const node = { ai: { online: false }, status: () => ({ devices: [{ name: "a", gb: 1 }], pledgedGB: 1 }), waitingJoins: () => [] };
+  const e1 = await ensureOnline({ ...base, node }, { waitMs: 0 }).catch((x) => x);
+  assert.equal(e1.code, "waiting");
+  assert.ok(!e1.message.includes(KEY) && /\/pooled link/.test(e1.message), e1.message);
+  const e2 = await ensureOnline({ ...base, s: { ...base.s, minDevices: 1 }, node }, { waitMs: 0 }).catch((x) => x);
+  assert.equal(e2.code, "memory");
+  assert.ok(!e2.message.includes(KEY), e2.message);
+  const deg = { ai: { online: true, degraded: true, engine: {} }, whole: () => false, missingNames: () => ["mac"] };
+  const e3 = await ensureOnline({ ...base, node: deg }, { waitMs: 0 }).catch((x) => x);
+  assert.equal(e3.code, "degraded");
+  assert.ok(!e3.message.includes(KEY), e3.message);
+  const { busyMessage } = await import("../src/stream.js");
+  assert.ok(!busyMessage({ code: "degraded" }, base).includes(KEY));
+});
+
+test("/pooled allow with a word that isn't a number or all lets nobody in", async () => {
+  const r = hostRoom();
+  assert.match(await runPooledCommand("allow everyone", { getRoom: async () => r }), /takes a number/);
+  assert.equal(r.node.waitingJoins().length, 2);
+});
+
+test("download: a model key that isn't a known model never becomes a path", async () => {
+  const dir = tmp("badkey");
+  const st = await download(dir, "../../escape", { fetch: async () => { throw new Error("no fetch expected"); } });
+  assert.equal(st.state, "error");
+  assert.match(st.error, /unknown model/);
+  assert.ok(!fs.existsSync(path.join(dir, "..", "..", "escape")));
+});
+
+test("pull lock: a stale lock another process already took over is left alone", () => {
+  const dir = tmp("lock2");
+  fs.mkdirSync(path.join(dir, "m"), { recursive: true });
+  fs.writeFileSync(lockPath(dir, "m"), JSON.stringify({ pid: 4194301, host: os.hostname(), at: "x" }));
+  const fresh = JSON.stringify({ pid: 4194302, host: os.hostname(), at: "y" });
+  // between our read of the dead holder's lock and our rm, another process takes it over
+  const rel = tryLock(dir, "m", { isAlive: (pid) => { if (pid === 4194301) { fs.writeFileSync(lockPath(dir, "m"), fresh); return false; } return true; } });
+  assert.equal(rel, null, "the new holder keeps it");
+  assert.equal(fs.readFileSync(lockPath(dir, "m"), "utf8"), fresh);
+});
+
+test("webgpu (optional) didn't install: the GPU path says how to add it, as an install error", async () => {
+  const { dawnFor } = await import("../src/runtime.js");
+  const e = await dawnFor(async () => { throw Object.assign(new Error("no webgpu"), { type: "dawn-missing" }); })().catch((x) => x);
+  assert.equal(e.code, "install");
+  assert.match(e.message, /npm install webgpu@\d/);
+  const b = await dawnFor(async () => { throw Object.assign(new Error("dawn.node: bad ELF"), { type: "dawn-broken", hint: "reinstall it" }); })().catch((x) => x);
+  assert.equal(b.code, "install");
+  assert.match(b.message, /bad ELF\. reinstall it/);
+});

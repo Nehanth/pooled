@@ -20,7 +20,7 @@ import { parseCode, formatCode, keyFragment, validKey, saveGate } from "../../..
 import { roomCodeFrom, roomKeyFrom } from "../../../cli/lib/room.js";
 import { roomFitNow } from "../../../cli/lib/hostui.js";
 import { fmtBytes } from "../../../cli/lib/cache.js";
-import { MODEL_CHOICES, modelInfo, modelsDir, isPulled, pluginCtx, lib, shortCtxNote } from "./models.js";
+import { MODELS, MODEL_CHOICES, modelInfo, modelsDir, isPulled, pluginCtx, lib, shortCtxNote } from "./models.js";
 import { PooledError, pooledModules } from "./runtime.js";
 import { savedGate, saveHostGate, joinState, saveJoinState } from "./state.js";
 import { download, pullState, pullLine, downloadingMessage } from "./download.js";
@@ -95,6 +95,7 @@ export const keyOf = (s) => JSON.stringify([s.mode, s.code, s.key, s.model, s.pl
 
 async function openRoom(s, log) {
   if (!s.mode) throw new PooledError("setup", "Pooled is not set up on this machine: run `openclaw onboard` (or `openclaw models auth login --provider pooled`) and pick Pooled");
+  if (s.mode === "host" && !MODELS[s.model]) throw new PooledError("setup", `unknown model ${String(s.model).slice(0, 40)}: one of ${MODEL_CHOICES.join(", ")}`);
   const P = await pooledModules();
   const r = { s, P, code: s.code, key: null, bridge: null, bridgeTry: null, events: [], pull: null, pullP: null, refused: null };
   const note = (m) => { r.events.push({ t: Date.now(), m }); if (r.events.length > 50) r.events.shift(); log(m); };
@@ -144,13 +145,16 @@ async function openRoom(s, log) {
     r.node.on("bye", (why) => { if (r.node.admission !== "in") r.refused = why || "the host turned this device away"; });
   } else throw new PooledError("setup", `unknown Pooled mode ${s.mode}`);
   r.link = roomLink(r.code, { key: r.key, signal: s.page ? null : s.signal });
+  // the link without the invite key: for chat text and logs, which other people may read (a group
+  // channel, a shared log). /pooled link (operator.admin) and status.json (0600) show the real one
+  r.shareLink = roomLink(r.code, { signal: s.page ? null : s.signal });
   r.node.on("degraded", (why) => note(`room degraded: ${why}`));
   r.node.on("hostgone", () => note("lost the link to the room's host"));
   r.node.on("loaded", (x) => note(`this device holds layers ${x.range[0]}-${x.range[1] - 1} of ${x.model}`));
   r.node.on("online", () => note("room online"));
   r.close = async () => { r.closed = true; r.pullAbort?.abort(); try { await r.bridge?.leave?.(); } catch {} try { r.bridgeTry?.b?.destroy?.(); } catch {} try { await r.node?.close(); } catch {} };
   r.status = () => status(r);
-  note(`${s.mode === "host" ? "hosting" : "joined"} Pooled room ${fmtCode(r.code)}${s.mode === "host" ? ` (invite link: ${r.link})` : ""}`);
+  note(`${s.mode === "host" ? "hosting" : "joined"} Pooled room ${fmtCode(r.code)}${s.mode === "host" ? " (/pooled link shows its invite link)" : ""}`);
   return r;
 }
 
@@ -205,7 +209,7 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
     while (!n.whole()) {
       if (signal?.aborted || r.closed) throw new PooledError("abort", "aborted");
       if (Date.now() - t0 > waitMs) throw new PooledError("degraded", `a device left Pooled room ${code} while it held layers of the model (${n.missingNames().join(", ") || "reloading"}). ` +
-        `Re-open ${r.link} on that device; the room re-deals over the devices still there after a minute`);
+        `Re-open ${r.shareLink} on that device (or its invite link: /pooled link); the room re-deals over the devices still there after a minute`);
       await new Promise((res) => setTimeout(res, 500));
     }
     return;
@@ -219,10 +223,10 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
       const waiting = st.waiting?.length ? ` ${st.waiting.map((q) => q.line).join("; ")}: send /pooled allow to let ${st.waiting.length > 1 ? "them" : "it"} in.` : "";
       if (st.devices.length < s.minDevices)
         throw new PooledError("waiting", `Pooled room ${code} is waiting for devices: ${st.devices.length} of ${s.minDevices} joined.${waiting} ` +
-          `Open ${r.link} on your other device (or paste it in OpenClaw there: Pooled → Join a room), then ask again`);
+          `Open the room's invite link (/pooled link shows it) on your other device, or paste it in OpenClaw there (Pooled → Join a room), then ask again`);
       throw new PooledError("memory", `not enough memory in Pooled room ${code} for ${info.name}: ` +
         `the devices pledged ${st.pledgedGB} GB (${st.devices.map((d) => `${d.name} ${d.gb} GB`).join(", ")}), it needs about ${fit.needGB ?? info.needGB} GB.${waiting} ` +
-        `Add a device at ${r.link}, raise a pledge (/pooled pledge <GB>), or pick a smaller model`);
+        `Add a device with the room's invite link (/pooled link), raise a pledge (/pooled pledge <GB>), or pick a smaller model`);
     }
     if (Date.now() - said > 10000) { said = Date.now(); onWait(st); }
     await new Promise((res) => setTimeout(res, 500));

@@ -16,6 +16,8 @@ export async function download(dir, key, { signal, onChange = () => {}, fetch, s
   const change = (force) => { const t = Date.now(); if (force || t - last > 250) { last = t; onChange(st); } };
   let release = null;
   try {
+    // a known model only: its key is a folder name under dir (a config typo must not reach the path)
+    if (!Object.hasOwn(models.MODELS, key) || !/^[\w.-]+$/.test(key) || key.startsWith(".")) throw new Error(`unknown model ${String(key).slice(0, 40)}`);
     release = await lock(dir, key, { signal, onWait: () => { st.state = "waiting"; change(true); } });
     st.done = models.MODELS === MODELS ? diskState(dir, key).partBytes || 0 : 0;
     st.state = "running"; change(true);

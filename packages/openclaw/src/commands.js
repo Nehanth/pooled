@@ -55,6 +55,7 @@ export async function runPooledCommand(args, { getRoom = room } = {}) {
       if (r.s.mode !== "host" || !r.node.gate) return "Only the room's host lets devices in: this gateway joined someone else's room.";
       const q = r.node.waitingJoins();
       if (!q.length) return "Nobody is waiting to join.";
+      if (arg && !/^\d+$/.test(arg) && !(sub === "allow" && /^all$/i.test(arg))) return `/pooled ${sub} takes a number from the waiting list${sub === "allow" ? " or all" : ""}: ${HELP}`;
       const picks = sub === "allow" && /^all$/i.test(arg) ? q : [q[(+arg || 1) - 1]].filter(Boolean);
       if (!picks.length) return `There ${q.length === 1 ? "is 1 device" : `are ${q.length} devices`} waiting: /pooled ${sub} 1${q.length > 1 ? `…${q.length}` : ""}`;
       const done = [];

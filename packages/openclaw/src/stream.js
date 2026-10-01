@@ -22,7 +22,7 @@ export function busyMessage(ev, r) {
   switch (ev.code) {
     case "ctx": return `context length exceeded: the conversation is ${ev.n} tokens; Pooled room ${r.code}'s context holds ${ev.max}. Start a new session (/new) or compact it`;
     case "loading": return `Pooled room ${r.code} is still loading the model; ask again in a moment`;
-    case "degraded": return `a device left Pooled room ${r.code} while it held layers of the model; re-open ${r.link} on it, or wait for the room to re-deal the layers`;
+    case "degraded": return `a device left Pooled room ${r.code} while it held layers of the model; re-open the room's invite link on it (/pooled link), or wait for the room to re-deal the layers`;
     case "off": return `the host of Pooled room ${r.code} does not allow API clients: turn on "Allow API clients" in the room's Serve API panel`;
     case "queue": return `Pooled room ${r.code}'s queue is full; try again after the current answer`;
     case "gone": return `lost the link to Pooled room ${r.code}'s host (${ev.err})`;
