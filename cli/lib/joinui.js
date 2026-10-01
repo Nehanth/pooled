@@ -4,7 +4,7 @@
 //
 // s: lendrun's status state { code, phase, devices, range, model, tps, passes, pct, load, dl,
 //    hostName, modelLabel, you: { name, gpu, gb, totalGB }, lobbyAt, onlineAt, L (layers in the model) }
-import { header, label, progressRow, clip, I, gbNum, clock, upFor } from "./style.js";
+import { header, label, progressRow, clip, I, gbNum, clock, upFor, width } from "./style.js";
 import { loadText } from "./lend.js";
 
 const fmtCode = (c) => (String(c || "").length === 6 ? `${c.slice(0, 3)}-${c.slice(3)}` : String(c || ""));
@@ -53,6 +53,15 @@ export function joinScreen(s, { S, cols = 80, spin = "", now = Date.now() } = {}
     : s.phase === "online" || s.phase === "answering" ? "Keep this open. Closing it takes your layers out of the room."
     : s.phase === "waiting" ? "The host starts the room once enough devices are in." : "";
   if (hint) L.push(I + S.ink3(hint), "");
-  L.push(I + S.keys(s.phase === "online" || s.phase === "answering" ? [["q", "leave the room"]] : [["q", "leave"]]));
+  L.push(I + S.keys(s.phase === "online" || s.phase === "answering" ? [["q", "leave the room"]] : [["q", "leave"]], { width: W - 2 }));
   return L.map((l) => clip(l, W));
+}
+
+// pooled join's lend question, one line redrawn in place (lendrun.js pledgePrompt): the bar, the
+// amount, and the key hints that fit in cols - 1 (a hint never wraps, so never breaks in a word)
+export function lendRow(S, { gb, typed = "", total, cols = 80 }) {
+  const W = Math.max(40, cols) - 1;
+  const head = `  ${S.ink3("lend".padEnd(10))}${S.bar(gb / (total || 1), W < 69 ? 10 : 20)}  ${typed ? S.bold(typed) + S.rev(" ") : S.bold(`${gb} GB`)}${S.ink3(` of ${total} GB`)}`;
+  const keys = S.keys([[S.g.lr, "1 GB"], ["type", "a number"], ["enter", "lend", "primary"]], { width: W - width(head) - 3 });
+  return clip(width(head) + 3 + width(keys) <= W ? `${head}   ${keys}` : head, W);
 }

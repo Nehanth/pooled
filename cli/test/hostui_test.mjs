@@ -366,3 +366,43 @@ test("--here / --pool skip the question; --split given wins; --here and --pool t
   // no flag: the question
   assert.equal(initialState({ rows, model: "qwen3-1.7b", pledge: { gb: 8, max: 14 }, pulled: new Set(["qwen3-1.7b"]) }).step, "how");
 });
+
+test("key hints never break inside a word: at 58, 60 and 80 columns they drop whole hints (never the primary one, q last)", async () => {
+  const { mkStyle, visible: vis, width: wd } = await import("../lib/style.js");
+  const { joinScreen, lendRow } = await import("../lib/joinui.js");
+  const S = mkStyle({ depth: "truecolor", theme: "dark" });
+  const whole = (line, hints) => vis(line).trim().split(" · ").every((h) => hints.includes(h));
+  // pooled join's lend line (it wrapped as "en / ter lend" in a 0.3.1 capture)
+  for (const cols of [58, 60, 80]) {
+    const l = lendRow(S, { gb: 32, total: 128, cols });
+    assert.ok(wd(l) <= cols - 1, `${cols}: ${vis(l)}`);
+    const keys = vis(l).split(/GB {3}/)[1] || "";
+    assert.ok(!keys || keys.split(" · ").every((h) => ["←→ 1 GB", "type a number", "enter lend"].includes(h)), `${cols}: ${keys}`);
+    assert.match(vis(l), /enter lend/, "the primary hint stays");
+    // the join screen's footer
+    for (const phase of ["lobby", "online"]) {
+      const L = joinScreen({ code: "4TKG9P", phase, you: { name: "spark", gb: 32 } }, { S, cols });
+      assert.ok(L.every((x) => wd(x) <= cols - 1));
+    }
+  }
+  // the host's footers: every step, and the room with many hints
+  const rows = modelRows(lib, { keys: KEYS, pulled: new Set(["qwen3-1.7b"]), pledgeGB: 8, maxGB: 14 });
+  const HINTS = ["↑↓ choose", "enter host it", "enter go", "esc back", "q quit", "←→ 1 GB", "type a number", "enter lend", "enter start", "i copy invite", "m model", "l lend", "s split",
+    "c chat here", "r rebalance", "q close room", "y download", "n stream from Hugging Face instead", "q cancel and close the room"];
+  for (const cols of [58, 60, 80]) {
+    let s = initialState({ rows, pledge: { gb: 8, max: 14, totalGB: 16 }, code: "4TKG9P" });
+    const states = [s];
+    s = reduce(s, "enter").state; states.push(s);                 // how
+    s = reduce(s, "enter").state; states.push(s);                 // pledge
+    s = reduce(s, "enter").state;                                 // room
+    s.devices = [{ name: "spark", gb: 8, self: true, meta: { webgpu: true, contribGB: 8 } }, { name: "mac", gb: 8, meta: { webgpu: true, contribGB: 8 } }];
+    states.push(s, { ...s, step: "online" }, { ...s, step: "starting" });
+    for (const st of states) {
+      const L = render(st, { width: cols, lib, S });
+      assert.ok(L.every((x) => wd(x) <= cols - 1), `${st.step} ${cols}`);
+      const foot = L.filter((x) => / · |^ {2}\S+ \S/.test(vis(x))).pop();
+      assert.ok(whole(foot, HINTS), `${st.step} at ${cols}: "${vis(foot)}"`);
+      if (st.step === "room") assert.match(vis(foot), /q quit/, "q stays");
+    }
+  }
+});

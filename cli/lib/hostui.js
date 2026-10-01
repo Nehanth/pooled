@@ -448,7 +448,7 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     push(I + `${lbl(s.dl.key)} is not downloaded${row?.fileBytes ? ` (${gbText(row.fileBytes)})` : ""}.`);
     push(I + "Download it now?");
     blank();
-    push(I + S.keys([["y", "download", "primary"], ["n", "stream from Hugging Face instead"], ["q", "quit"]]));
+    push(I + S.keys([["y", "download", "primary"], ["n", "stream from Hugging Face instead"], ["q", "quit"]], { width: W - 2 }));
     return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
 
@@ -468,7 +468,7 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     const k = [[S.g.up, "choose"], ["enter", "host it", "primary"]];
     if (s.model) k.push(["esc", "back"]);
     k.push(["q", "quit"]);
-    push(I + S.keys(k));
+    push(I + S.keys(k, { width: W - 2 }));
     if (s.notice) push(I + S.ink3(s.notice));
     return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
@@ -490,7 +490,7 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
       push(I + n + S.ink3(what));
     });
     blank();
-    push(I + S.keys([[S.g.up, "choose"], ["enter", "go", "primary"], ["esc", "back"], ["q", "quit"]]));
+    push(I + S.keys([[S.g.up, "choose"], ["enter", "go", "primary"], ["esc", "back"], ["q", "quit"]], { width: W - 2 }));
     if (s.notice) push(I + S.ink3(s.notice));
     return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
@@ -512,7 +512,7 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     }
     for (const l of wrap(sentence.join(" "), W - 2)) push(I + S.ink3(l));
     blank();
-    push(I + S.keys([[S.g.lr, "1 GB"], ["type", "a number"], ["enter", "lend", "primary"], ...(s.pledgeDone ? [["esc", "back"]] : [])]));
+    push(I + S.keys([[S.g.lr, "1 GB"], ["type", "a number"], ["enter", "lend", "primary"], ...(s.pledgeDone ? [["esc", "back"]] : [])], { width: W - 2 }));
     if (s.notice) push(I + S.ink3(s.notice));
     return L.map((l) => clip(l.replace(/ +$/, ""), W));
   }
@@ -567,9 +567,9 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
   if (s.step === "room") {
     const ok = canStart(s).ok;
     push(I + S.keys(W < 69 ? [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["q", "quit"]]
-      : [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["m", "model"], ["l", "lend"], ...(s.devices.filter((x) => x.gb > 0).length > 1 ? [["s", "split"]] : []), ["q", "quit"]]));
-  } else if (s.step === "starting") push(I + S.keys([["q", "cancel and close the room"]]));
-  else push(I + S.keys([["c", "chat here", "primary"], ["i", "copy invite"], ["r", "rebalance"], ["q", "close room"]]));
+      : [["enter", "start", ok ? "primary" : "off"], ["i", "copy invite"], ["m", "model"], ["l", "lend"], ...(s.devices.filter((x) => x.gb > 0).length > 1 ? [["s", "split"]] : []), ["q", "quit"]], { width: W - 2 }));
+  } else if (s.step === "starting") push(I + S.keys([["q", "cancel and close the room"]], { width: W - 2 }));
+  else push(I + S.keys([["c", "chat here", "primary"], ["i", "copy invite"], ["r", "rebalance"], ["q", "close room"]], { width: W - 2 }));
   return L.map((l) => clip(l.replace(/ +$/, ""), W));
 }
 const loadNote = (ld) => (ld.from && ld.from !== "disk" && ld.fetched < ld.total ? `${gbText(ld.fetched)} of ${gbText(ld.total)} from ${ld.from}` : ld.fetched < ld.total ? "from disk" : "onto the GPU");

@@ -13,7 +13,7 @@ import { modelsDir, ensureModelsDir, modelState, fmtBytes, resolveModel } from "
 import { roomFitNow, devicesFrom } from "./hostui.js";
 import { askLine, askYesNo, colorOn, termCaps, liveRegion, keysOf as KEYS } from "./tui.js";
 import { style, detectTheme, gbNum } from "./style.js";
-import { joinScreen } from "./joinui.js";
+import { joinScreen, lendRow } from "./joinui.js";
 import * as HOSTUI from "./hostui.js";
 
 const ROOM_URL = "https://pooled.run/r/";
@@ -154,7 +154,7 @@ function pledgePrompt({ def, max, totalGB }) {
   const ST = style({ stream: process.stderr });
   let gb = def, typed = "";
   const total = Math.round(totalGB || max);
-  const draw = () => process.stderr.write(`\r\x1b[K  ${ST.ink3("lend".padEnd(10))}${ST.bar(gb / (total || 1), 20)}  ${typed ? ST.bold(typed) + ST.rev(" ") : ST.bold(`${gb} GB`)}${ST.ink3(` of ${total} GB`)}   ${ST.keys([[ST.g.lr, "1 GB"], ["type", "a number"], ["enter", "lend", "primary"]])}`);
+  const draw = () => process.stderr.write(`\r\x1b[K${lendRow(ST, { gb, typed, total, cols: process.stderr.columns || 80 })}`);
   return new Promise((resolve) => {
     const done = (v) => { process.stdin.off("data", on); try { process.stdin.setRawMode(false); } catch {} process.stdin.pause(); process.stderr.write("\n"); resolve(v); };
     const on = (b) => {
