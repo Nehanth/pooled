@@ -28,16 +28,24 @@ Sources (for the fact-checker):
   a phone-size window by code + Allow with 1 GB); all on one GB10 over loopback, so no Wi-Fi in the numbers. Invite sheet, lobby card
   "phone wants to join (computer, 1 GB)" (the window had a desktop user agent), split desktop L0-11 (host) + laptop L12-27, answer
   "14 tok · 13.8 tok/s · 2 devices". Bug seen three times: a device the split leaves out stays on the Loading card; after a reload it shows the model picker (see the PR).
+- Screenshots re-taken 2026-10-01 on the Spark (GB10), same setup, Qwen3.6 35B MoE: laptop 14 GB; desktop "raven" by invite link (joined at the default 4 GB,
+  raised to 10 GB; picker "Start downloads about 8.7 GB to this device (its share of 20.8 GB)"); phone-size window (Android user agent) by code,
+  card "phone wants to join (Android phone, 1 GB)", Allow; room pools 25 GB, "Needs 22.5 GB. The room has 25 GB.", "about 11.7 GB to this device";
+  load card laptop layers 1-25, raven 26-40, phone 0%, "1.9 GB of 12.7 GB · about 5 min left"; online 292 s after Start (download included),
+  "Model ready on 2 devices", answer "63 tok · 38.8 tok/s · 2 devices · 30% drafts accepted" (one GPU, loopback: no Wi-Fi in the number).
 */}
 
-**Goal:** run one model across two devices, so together they hold more than either could alone.
+**Goal:** run one model across two devices, so together they hold more than either could alone. This guide splits the Qwen3.6 35B MoE (22.5 GB) between a laptop giving 14 GB and a desktop giving 10 GB.
 
 ## You need
 
 - **A laptop** that opens the room, as in [Chat on one laptop](/docs/kits/first-chat).
 - **A second device:** a desktop or another laptop with Chrome, Edge or Safari 26, or a phone (iPhone with iOS 26, or Android with Chrome 121+).
 - **Both on the same Wi-Fi**, ideally. Other networks work too, but some block the direct link.
-- **10 minutes.** Each device downloads only its own part of the model.
+- **About 14 GB and 10 GB of free GPU memory** on the two computers, for the MoE.
+- **15 minutes.** Each device downloads only its own part of the 19.4 GB model: about 11.7 GB and 8.7 GB here (5 minutes in our test).
+
+On small laptops, pick Qwen3 1.7B (4 GB at 8K) instead: it fits on one, or pools with another device the same way.
 
 ## Decide what each device gives
 
@@ -59,7 +67,7 @@ So a 16 GB laptop giving 8 GB and a desktop giving 16 GB can run the 27B or the 
 
 <Steps>
 
-1. **Open the room on the laptop.** Go to [pooled.run/room](https://pooled.run/room), set **Memory**, and press **Start a room**. Don't start a model yet.
+1. **Open the room on the laptop.** Go to [pooled.run/room](https://pooled.run/room), set **Memory** (14 GB here), and press **Start a room**. Don't start a model yet.
 
 2. **Press Invite** in the header.
 
@@ -71,7 +79,7 @@ So a 16 GB laptop giving 8 GB and a desktop giving 16 GB can run the 27B or the 
 
    <Tabs>
      <TabItem label="Desktop or laptop">
-       Send yourself the link (**Copy link**, then paste it in a chat or a note) and open it on the desktop. It joins at once. Check **Memory** on its join screen, or **This device gives** once it's in.
+       Send yourself the link (**Copy link**, then paste it in a chat or a note) and open it on the desktop. It joins at once. Check **Memory** on its join screen, or **This device gives** once it's in: raise it to 10 GB for the MoE.
      </TabItem>
      <TabItem label="Phone">
        Point the phone's camera at the QR code and open the link. It joins at once, with a small pledge set for you.
@@ -80,11 +88,11 @@ So a 16 GB laptop giving 8 GB and a desktop giving 16 GB can run the 27B or the 
 
    The invite link and the QR code carry a key, so the device gets in without asking.
 
-   <Shot src={desktop} alt="The desktop after opening the invite link: in the room, with This device gives 4 GB and the room pooling 6 GB" caption="The desktop, straight in from the invite link, with a random name (weasel)." />
+   <Shot src={desktop} alt="The desktop after opening the invite link: in the room, This device gives 10 GB, the room pools 24 GB and Qwen3.6 35B MoE fits" caption="The desktop, straight in from the invite link, with a random name (raven). The key in the link is hidden in these captures." />
 
 4. **If a device typed the code instead, let it in.**
 
-   A device that typed the code on [pooled.run/room](https://pooled.run/room) waits with `Waiting for the host to let you in`. On the laptop, a card names it, its kind and what it gives, like `phone wants to join (computer, 1 GB)`. Press **Allow**, or **Deny** if you don't know it.
+   A device that typed the code on [pooled.run/room](https://pooled.run/room) waits with `Waiting for the host to let you in`. On the laptop, a card names it, its kind and what it gives, like `phone wants to join (Android phone, 1 GB)`. Press **Allow**, or **Deny** if you don't know it.
 
    <Shot src={phoneWaiting} phone alt="A phone that typed the code, waiting: Waiting for the host to let you in" caption="The phone, while it waits." />
 
@@ -92,27 +100,27 @@ So a 16 GB laptop giving 8 GB and a desktop giving 16 GB can run the 27B or the 
 
 5. **Check the room's total.**
 
-   The header now lists both devices, and **The room pools** shows their pledges added up. The picker preselects the biggest model that fits, and the line above **Start the model** says how much this device will download, like `Start downloads about 620 MB to this device (its share of 1.8 GB)`.
+   The header now lists both devices, and **The room pools** shows their pledges added up. The picker preselects the biggest model that fits, and the line above **Start the model** says how much this device will download, like `Start downloads about 11.7 GB to this device (its share of 20.8 GB)`. Pick **Qwen3.6 35B MoE** if it isn't selected: it needs 22.5 GB, and the room has 25.
 
-   <Shot src={pool} alt="The laptop's room: three devices in the header, 5 GB pooled, and the picker with Qwen3 1.7B selected and marked fits" caption="Three devices in the header, their pledges added up on the right." />
+   <Shot src={pool} alt="The laptop's room: laptop 14 GB, raven 10 GB and phone 1 GB in the header, 25 GB pooled, and the picker with Qwen3.6 35B MoE selected and marked fits" caption="Three devices in the header, their pledges added up on the right." />
 
 6. **Press Start the model.**
 
-   Each device downloads and loads only its layers. The load card shows a row per device.
+   Each device downloads and loads only its layers. The load card shows a row per device, and the time left.
 
-   <Shot src={loading} alt="The load card with a row per device: laptop downloading layers 13 to 28, weasel layers 1 to 12, the phone not needed" caption="Two devices hold layers. The phone isn't needed to hold this model." />
+   <Shot src={loading} alt="The load card with a row per device: laptop downloading layers 1 to 25, raven layers 26 to 40, the phone at 0 percent, about 5 minutes left" caption="Two devices hold layers. The phone isn't needed to hold this model." />
 
 7. **Ask something**, from either device.
 
-   <Shot src={answer} alt="Qwen3 1.7B Ready with a bar per device, weasel layers 1 to 12 and laptop layers 13 to 28, and an answer ending 57 tok, 19.7 tok/s, 2 devices" />
+   <Shot src={answer} alt="Qwen3.6 35B MoE Ready with a bar per device, laptop layers 1 to 25 and raven layers 26 to 40, Model ready on 2 devices, and an answer ending 63 tok, 38.8 tok/s, 2 devices" />
 
 </Steps>
 
 ## What you should see
 
 - After step 3 or 4: the second device in the room's device list, and its memory added to **The room pools**.
-- After step 6: **Ready**, and a bar per device with the layers it holds, like `desktop layers 1–12` and `laptop layers 13–28`. The room picks which device hosts the model: not always the one that pressed Start. By default it gives layers to the fastest devices first, each up to its pledge. A device that isn't needed to hold the model joins to ask, and a phone usually does.
-- After step 7: the answer on the screens that see the chat, with a line like `14 tok · 13.8 tok/s · 2 devices`.
+- After step 6: **Model ready on 2 devices**, **Ready**, and a bar per device with the layers it holds, like `laptop layers 1–25` and `raven layers 26–40`. The room picks which device hosts the model: not always the one that pressed Start. By default it gives layers to the fastest devices first, each up to its pledge. A device that isn't needed to hold the model joins to ask, and a phone usually does.
+- After step 7: the answer on the screens that see the chat, with a line like `63 tok · 38.8 tok/s · 2 devices · 30% drafts accepted`.
 
 ### How fast to expect
 
