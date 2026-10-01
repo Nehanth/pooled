@@ -81,7 +81,18 @@ for (let i = 0; ; i++) {
   await new Promise((r) => setTimeout(r, 200));
 }
 const { chromium } = await loadPlaywright();
-const browser = await chromium.launch({ executablePath: chromiumPath(), args: [...GPU_ARGS, "--allow-loopback-in-peer-connection", "--disable-features=WebRtcHideLocalIpsWithMdns"] });
+// SwiftShader (no GPU, CI): the full Chromium, not the headless shell, and SwiftShader allowed for WebGPU
+const SOFT = process.env.E2E_GPU !== "real";
+const browser = await chromium.launch({ executablePath: chromiumPath(), ...(SOFT && !chromiumPath() ? { channel: "chromium" } : {}),
+  args: [...GPU_ARGS, ...(SOFT ? ["--enable-unsafe-swiftshader", "--use-angle=swiftshader"] : []), "--allow-loopback-in-peer-connection", "--disable-features=WebRtcHideLocalIpsWithMdns"] });
+{   // no WebGPU adapter: every room tab would join to chat only; say that instead of timing out
+  const p = await browser.newPage();
+  await p.goto(`http://127.0.0.1:${PORT}/__blank.html`);
+  const gpu = await p.evaluate(async () => { try { const a = await navigator.gpu?.requestAdapter(); return a ? (a.info?.vendor || "") + " " + (a.info?.architecture || a.info?.description || "") : null; } catch (e) { return null; } });
+  await p.close();
+  log("WebGPU adapter:", gpu ?? "none");
+  if (gpu == null) { console.error("no WebGPU adapter in this Chromium (SwiftShader); E2E_GPU=real uses the machine's GPU"); await browser.close(); srv.close(); sig.kill(); process.exit(2); }
+}
 
 const ctxs = [];
 async function device(name, { phone = false, size = null } = {}) {
