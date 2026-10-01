@@ -48,7 +48,8 @@ export const lib = { MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, shor
 export const pluginCtx = (key, ask = 0) => (ask > 0 ? maxSeqFor(key, ask) : CTX[key]?.max ?? maxSeqFor(key));
 
 // OpenClaw's own instructions and tools are about 12k tokens and it keeps 4k for the answer: a room
-// with a shorter context (`pooled host qwen3-1.7b` opens at 8k) ends every turn in "Context overflow"
+// with a shorter context (`pooled host qwen3-1.7b` from @pooled/cli 0.3.0-0.3.1 opened at 8k) ends every
+// turn in "Context overflow"
 export const OPENCLAW_MIN_CTX = 16384;
 // a joined room's context is too short for OpenClaw: what to tell the owner, else null
 export function shortCtxNote(model, ctx, host = "the host") {

@@ -88,8 +88,8 @@ Either way it keeps the pass the host gives it, so the gateway (and every restar
 in. It also learns the host's model and context, so OpenClaw knows the room's real context window.
 
 OpenClaw's own instructions and tools are about 12k tokens, so the room needs at least a 16k context.
-`pooled host qwen3-1.7b` opens at 8k: its host should run `pooled host qwen3-1.7b --ctx 16384` (the
-1.7B's longest). Onboarding says so when it sees a shorter one, and so does `/pooled`.
+`pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2; with 0.3.0 or 0.3.1 its host should run
+`pooled host qwen3-1.7b --ctx 16384` (the 1.7B's longest). Onboarding says so when it sees a shorter one, and so does `/pooled`.
 
 Join mode is flagged as a dangerous setting (`plugins.entries.pooled.config.mode=join`): the gateway
 logs a security warning at startup, and `openclaw security audit` lists it. See

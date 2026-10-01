@@ -70,7 +70,7 @@ there. A device with the code alone waits: `/pooled` in any OpenClaw chat shows 
 the code alone it shows `Waiting for <host> to let this device in…` until the host allows it. It keeps
 the pass the host gives it, so the gateway gets straight back in after every restart, and it learns the
 host's model and context window. The room needs at least a 16k context (OpenClaw's own instructions
-and tools are about 12k tokens): `pooled host qwen3-1.7b` opens at 8k, so run it with `--ctx 16384`.
+and tools are about 12k tokens): `pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2 (0.3.0 and 0.3.1 opened it at 8k: run those with `--ctx 16384`).
 Onboarding warns when the context is shorter.
 
 ### Which model
