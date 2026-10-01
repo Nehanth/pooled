@@ -67,6 +67,17 @@ export default defineConfig({
 					items: ['index', 'start-a-room', 'invite', 'models', 'phones'],
 				},
 				{
+					label: 'Starter kits',
+					items: [
+						'kits/first-chat',
+						'kits/two-devices',
+						'kits/build-an-app',
+						'kits/coding-tools',
+						'kits/terminal',
+						'kits/openclaw',
+					],
+				},
+				{
 					label: 'Use it',
 					items: [
 						'chat',
