@@ -90,7 +90,7 @@ In `openclaw onboard`, pick **Pooled** → **Join a room**, paste the invite lin
 
 It keeps the pass the host gives it, so the gateway gets straight back in after every restart. It also learns the host's model and context window.
 
-The room needs at least a 16k context, because OpenClaw's own instructions and tools are about 12k tokens. `pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2; with 0.3.0 or 0.3.1 its host should run `pooled host qwen3-1.7b --ctx 16384`. Onboarding warns when the context is shorter.
+The room needs at least a 16k context, because OpenClaw's own instructions and tools are about 12k tokens. `pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2; with 0.3.0 or 0.3.1 its host should run `pooled host qwen3-1.7b --ctx 16384`. A room whose memory is short for 16k (under about 5.5 GB across the room) opens the 1.7B at 8k instead, on the room page, in `pooled host` and in the plugin's own room: the plugin then warns that OpenClaw needs 16k, and onboarding says `fits on this machine alone at 8k (OpenClaw needs 16k)`. Onboarding warns when a joined room's context is shorter.
 
 ## Which model
 

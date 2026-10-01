@@ -90,6 +90,8 @@ in. It also learns the host's model and context, so OpenClaw knows the room's re
 OpenClaw's own instructions and tools are about 12k tokens, so the room needs at least a 16k context.
 `pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2; with 0.3.0 or 0.3.1 its host should run
 `pooled host qwen3-1.7b --ctx 16384` (the 1.7B's longest). Onboarding says so when it sees a shorter one, and so does `/pooled`.
+A room short of memory for 16k (under about 5.5 GB across the room) opens the 1.7B at 8k, the plugin's own room too: then
+`/pooled` warns that OpenClaw needs 16k, and onboarding shows `fits on this machine alone at 8k (OpenClaw needs 16k)`.
 
 Join mode is flagged as a dangerous setting (`plugins.entries.pooled.config.mode=join`): the gateway
 logs a security warning at startup, and `openclaw security audit` lists it. See
@@ -186,7 +188,7 @@ Onboarding writes `plugins.entries.pooled.config`. Each key can be overridden by
 | `pull` | `POOLED_PULL` | Host: download a missing model (default on); off streams it at each start |
 | `prewarm` | `POOLED_PREWARM` | Host: warm up OpenClaw's system prompt and tools when the room comes online (default on) |
 | `modelDir` | `POOLED_MODELS` | Models folder (default `~/.pooled/models`) |
-| `ctx` | `POOLED_CTX` | Context to ask for (default the model's largest: 1.7B 16k, 27B 64k, MoE 128k) |
+| `ctx` | `POOLED_CTX` | Context to ask for (default the model's largest: 1.7B 16k, or 8k when the room is short of memory for 16k; 27B 64k, MoE 128k) |
 | `name` | `POOLED_NAME` | This device's name in the room (default `<hostname> (OpenClaw)`) |
 | `signal` | `POOLED_SIGNAL` | A PeerServer `host:port` (default the public PeerJS server pooled.run uses) |
 

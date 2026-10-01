@@ -1,7 +1,7 @@
 // room/models.js: maxSeqFor decides every room's context window (host and devices build their
 // engines with it) and kvBytesPerLayerPos decides how many layers each device is dealt at that
 // context. Both are pure; nothing else asserts them.
-import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvLayerBufBytes, ctxForBinding, WEBGPU_MIN_BIND, kvModeFor, kvForLoad, KV_MODES } from "../../room/models.js";
+import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvLayerBufBytes, ctxForBinding, WEBGPU_MIN_BIND, kvModeFor, kvForLoad, KV_MODES, NEED_MIN_GB, ctxChoices, pickCtx, ctxK, ctxShortNote, needText } from "../../room/models.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -29,7 +29,8 @@ Deno.test("maxSeqFor: table of models and ?ctx= asks", () => {
     ["qwen3.6-35b-moe", 131072, 131072, "MoE cap (128K)"],
     ["qwen3.6-35b-moe", 200000, 131072, "MoE clamp"],
     ["qwen3.6-35b-moe", 8000, 7936, "MoE rounding (8000/256 = 31.25)"],
-    ["qwen3-1.7b", undefined, 8192, "dense default"],
+    ["qwen3-1.7b", undefined, 16384, "dense default (16K; 8K is the fallback: pickCtx)"],
+    ["qwen3-1.7b", 8192, 8192, "dense 8K when asked"],
     ["qwen3-1.7b", 20000, 16384, "dense cap"],
     ["qwen3-1.7b", 3000, 3072, "dense rounding (3000/256 = 11.7)"],
     // models without a CTX entry: the ask is ignored, the kind decides
@@ -236,4 +237,31 @@ Deno.test("answer budgets fit in the smallest context", () => {
   ok(MIN_ROOM > 0 && MAX_NEW > MIN_ROOM && MAX_NEW_THINKING > MAX_NEW);
   ok(MAX_NEW_THINKING + MIN_ROOM < MAX_SEQ, "a thinking answer must fit the 2048 window with room for a prompt");
   ok(MAX_SEQ_LONG > MAX_SEQ);
+});
+
+// The 1.7B opens at 16K, or at 8K when the room's pledges can't hold it at 16K (one 8 GB laptop
+// lends 4 GB); an explicit ?ctx= / --ctx is taken as asked. Every surface (room page, room node,
+// pooled host, the OpenClaw plugin) picks with pickCtx.
+Deno.test("pickCtx: 16K when it fits, 8K fallback when only that fits, an explicit ask stays", () => {
+  const m = "qwen3-1.7b";
+  eq(CTX[m], { def: 16384, max: 16384, fallback: 8192 });
+  eq(ctxChoices(m), [16384, 8192], "no ask: the default, then the fallback");
+  eq(ctxChoices(m, 16384, 16384), [16384], "an explicit ask is tried alone");
+  eq(ctxChoices(m, 8192, 8192), [8192]);
+  eq(ctxChoices(m, 4096), [4096], "a want at or below the fallback has nothing to fall back to");
+  eq(ctxChoices("qwen3.8-27b"), [16384], "no fallback on the 27B");
+  eq(ctxChoices("qwen3.6-35b-moe", 131072), [131072]);
+  const tried = [];
+  eq(pickCtx(m, { fitsAt: (c) => (tried.push(c), true) }), { ctx: 16384, want: 16384, fits: true, fellBack: false }, "fits at 16K");
+  eq(tried, [16384], "16K first, nothing else tried when it fits");
+  eq(pickCtx(m, { fitsAt: (c) => c <= 8192 }), { ctx: 8192, want: 16384, fits: true, fellBack: true }, "short for 16K: 8K");
+  eq(pickCtx(m, { fitsAt: () => false }), { ctx: 8192, want: 16384, fits: false, fellBack: false }, "short for both: short for 8K, the least it could start with");
+  eq(pickCtx(m, { want: 16384, ask: 16384, fitsAt: (c) => c <= 8192 }), { ctx: 16384, want: 16384, fits: false, fellBack: false }, "--ctx 16384 stays 16K (and short)");
+  eq(pickCtx(m, { want: 8192, ask: 8192, fitsAt: () => true }), { ctx: 8192, want: 8192, fits: true, fellBack: false }, "?ctx=8192 is not a fallback");
+  eq(pickCtx("qwen3.8-27b", { fitsAt: () => false }).ctx, 16384, "a model without a fallback keeps its context");
+  eq(ctxK(16384), "16K"); eq(ctxK(8192), "8K");
+  eq(ctxShortNote("Qwen3 1.7B", 8192, 16384), "Qwen3 1.7B · 8K context: the room's memory is short for 16K");
+  eq(needText(m), "5.6 GB (4 GB at 8K)");
+  eq(needText("qwen3.8-27b"), `${NEED_GB["qwen3.8-27b"]} GB`);
+  eq(NEED_MIN_GB[m], 4);
 });

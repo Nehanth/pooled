@@ -392,11 +392,11 @@ async function runHost(opts, out, prepared = null) {
   if (!hostable(rn.MODELS).includes(opts.model)) throw new UsageError(`unknown model "${opts.model}"; one of: ${hostable(rn.MODELS).join(", ")}`);
   // --here: lend what the model needs on this computer alone and start; --pool: spread over the room
   if (opts.mode === "here") {
-    const { hereGB, hereWhy, modelNeedGB } = await import("./hostui.js");
-    const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor };
+    const { hereGB, hereWhy, modelNeedGB, modelFallback } = await import("./hostui.js");
+    const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote };
     const max = Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb);
     const gb = hereGB(lib, opts.model, { ctxAsk: opts.ctx || 0, maxGB: max });
-    if (!gb) throw new UsageError(`--here: ${rn.MODELS[opts.model].label.split("·")[0].trim()} ${hereWhy({ needGB: modelNeedGB(lib, opts.model, opts.ctx || 0) }, { max })}; --pool runs it with other devices`);
+    if (!gb) throw new UsageError(`--here: ${rn.MODELS[opts.model].label.split("·")[0].trim()} ${hereWhy({ needGB: modelNeedGB(lib, opts.model, opts.ctx || 0), minNeed: modelFallback(lib, opts.model, opts.ctx || 0) }, { max })}; --pool runs it with other devices`);
     if (!(opts.gbGiven && rule.gb >= gb)) rule = { ...rule, gb, why: "--here: what the model needs" };
     if (!opts.splitGiven) opts.split = "speed";
     opts.start = true;
@@ -503,7 +503,7 @@ async function runHost(opts, out, prepared = null) {
   // model, by the room page's math (room/plan.js roomFit); a terminal otherwise waits for Enter
   const auto = !tty || opts.start || opts.devices > 0;
   const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy,
-    gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor };
+    gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote };
   let lastWhy = "";
   const maybeDeal = () => {
     if (!auto || starting || leaving || node.ai.engine || node.ai.starting) return;

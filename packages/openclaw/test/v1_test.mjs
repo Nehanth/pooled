@@ -92,7 +92,7 @@ test("onboarding (host): the GPU's default pledge, the model list, 'don't downlo
   const res = await runSetup({ prompter: p, config: { plugins: { entries: { pooled: { config: { modelDir: models } } } } } });
   const sel = p.shown.selects;
   const hints = sel[1].options.map((o) => o.hint).join("\n");
-  assert.match(hints, /1\.7 GB download · needs about [\d.]+ GB across the room · 16k context · fits on this machine alone · small: slow turns and tool loops in OpenClaw/);
+  assert.match(hints, /1\.7 GB download · needs about [\d.]+ GB across the room \([\d.]+ GB at 8k\) · 16k context · fits on this machine alone · small: slow turns and tool loops in OpenClaw/);
   assert.equal(sel[1].initialValue, "qwen3.6-35b-moe", "8 GB holds neither big model alone: the MoE is still the one for OpenClaw");
   assert.match(hints, /128k context · needs more devices · recommended for OpenClaw/);
   assert.match(p.shown.notes.join("\n"), /Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops\. Use the 35B MoE if your devices can hold it\./);

@@ -18,7 +18,8 @@ const ROOM_URL = "https://pooled.run/r/";
 export async function runHostInteractive(opts, { prepared, version = "" }) {
   const { rn, loader, rule, mem } = prepared;
   const lib = { MODELS: rn.MODELS, FILES: rn.FILES, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote,
-    shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, dealRoom: rn.dealRoom };
+    shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, dealRoom: rn.dealRoom,
+    pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote };
   const dir = opts.modelDir;
   const keys = hostable(rn.MODELS);
   const pulled = new Set(keys.filter((k) => modelState(dir, k, rn.MODELS, rn.FILES, rn.LOCAL).pulled));
@@ -167,7 +168,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
     const gpu = S.devices.filter((d) => d.gb != null);
     S.fit = S.model ? roomFitNow(lib, { model: S.model, devices: gpu, ctxAsk: opts.ctx || 0, spareGB: [Math.max(0, S.pledge.max - S.pledge.gb)] }) : null;
     if (S.step === "online" && !node.ai.online && !starting) S.notice = "a device left: the room waits for it (Enter re-deals without it)";
-    if (S.step === "online" && node.ai.online) S.split = node.status().split?.join(" · ") || S.split;
+    if (S.step === "online" && node.ai.online) { const st = node.status(); S.split = st.split?.join(" · ") || S.split; S.ctxNote = st.ctxNote || ""; }
     if (autoStart(S)) { S.step = "starting"; doStart(); }
     S.link = link;
     region.render(render(S, { width: process.stderr.columns || 80, S: ST, lib, spin: ST.spin(spinAt), events }));
