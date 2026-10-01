@@ -386,8 +386,21 @@ async function runJoin(opts, out) {
 
 // ---------------- pooled host ----------------
 async function runHost(opts, out, prepared = null) {
-  const { rn, loader, rule, adapterName, mem } = prepared || await prepare(opts, out);
+  const p0 = prepared || await prepare(opts, out);
+  const { rn, loader, adapterName, mem } = p0;
+  let rule = p0.rule;
   if (!hostable(rn.MODELS).includes(opts.model)) throw new UsageError(`unknown model "${opts.model}"; one of: ${hostable(rn.MODELS).join(", ")}`);
+  // --here: lend what the model needs on this computer alone and start; --pool: spread over the room
+  if (opts.mode === "here") {
+    const { hereGB, hereWhy, modelNeedGB } = await import("./hostui.js");
+    const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor };
+    const max = Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb);
+    const gb = hereGB(lib, opts.model, { ctxAsk: opts.ctx || 0, maxGB: max });
+    if (!gb) throw new UsageError(`--here: ${rn.MODELS[opts.model].label.split("·")[0].trim()} ${hereWhy({ needGB: modelNeedGB(lib, opts.model, opts.ctx || 0) }, { max })}; --pool runs it with other devices`);
+    if (!(opts.gbGiven && rule.gb >= gb)) rule = { ...rule, gb, why: "--here: what the model needs" };
+    if (!opts.splitGiven) opts.split = "speed";
+    opts.start = true;
+  } else if (opts.mode === "pool" && !opts.splitGiven) opts.split = "memory";
   // not on this computer: download it first (--no-pull streams this computer's layers instead)
   if (!modelState(opts.modelDir, opts.model, rn.MODELS, rn.FILES, rn.LOCAL).pulled) {
     if (opts.noPull) out.log(`${opts.model} is not downloaded: streaming this computer's layers from Hugging Face (--no-pull)`);

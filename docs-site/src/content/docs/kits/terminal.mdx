@@ -75,9 +75,10 @@ Sources (for the fact-checker):
 
    The room opens at once. First it prints the room code, the **invite** link and the exact `pooled join` and `pooled chat` commands for this room, to copy to your other computers. The code and link stay at the top of the screen. Then it asks two things:
 
-   - **Choose a model.** Each line shows the model, whether it is downloaded (or how big the download is), what it **needs** across the whole room, and whether it fits here. The one marked **recommended** is selected. Move to **Qwen3 1.7B** with ↑/↓ and press Enter.
+   - **Which model?** One list, smallest first. Each line shows what the model **needs** and whether it is downloaded (or how big the download is). The largest model this computer can hold alone is selected. Move to **Qwen3 1.7B** with ↑/↓ and press Enter.
 
      <Shot src={picker} alt="The model list: Qwen3 1.7B selected, needs 4 GB, downloaded" caption="The invite key is hidden in these captures." />
+   - **How do you want to run it?** **Pool with devices** is selected: press Enter. (**Run it here** would put all of it on this computer and start at once; other devices could still join to chat.)
    - **How much memory does this computer lend?** Type a number or use ←/→, then Enter. To see a second computer share the work, lend less than the model needs, like `2`.
 
      <Shot src={lend} alt="How much GPU memory should this computer lend? with 2 of 122 GB typed" />
@@ -92,7 +93,7 @@ Sources (for the fact-checker):
    pooled join
    ```
 
-   It asks for the **room code or invite link**. Then it shows the host and its model, and asks how much to **lend** (←/→ or type, then Enter). With the invite link it gets in at once. With the code alone, it waits for the host.
+   It asks for the **room code or invite link**, then how much to **lend** (←/→ or type, then Enter), before it knocks, so the host sees the real amount. With the invite link it gets in at once. With the code alone, it waits for the host.
 
    <Shot src={join} alt="pooled join with the code alone: waiting for the host, the host's model, and how much to lend" />
 
@@ -116,7 +117,7 @@ Sources (for the fact-checker):
 - After step 7: `● online  spark-host 0-7 · spark-join 8-27`, a few seconds after Enter when the model is on disk (4 seconds in our test).
 - After step 8: an answer, then a line like `room EG6-T9J · Qwen3 1.7B · Q8 · 10 tokens · 28.2 tok/s · 24 prompt tokens`.
 
-What a model **needs** grows with the room's context. With `--ctx 16384`, the 1.7B needs 5.5 GB instead of 4.
+What a model **needs** grows with the room's context. `pooled host` opens each model at its longest room context (16k on the 1.7B, which an agent such as OpenClaw needs): the 1.7B needs 5.5 GB. With `--ctx 8192` it needs 4.
 
 ## Chat from anywhere
 
@@ -134,7 +135,7 @@ Every question has a flag, and a flag you give skips its question. Without a ter
 
 ```bash
 # host: Qwen3 1.7B, lend 2 GB, start once 2 devices are in
-pooled host qwen3-1.7b --gb 2 --wait 2
+pooled host qwen3-1.7b --pool --gb 2 --wait 2
 
 # second computer: lend 4 GB, no questions
 pooled join "https://pooled.run/r/FEAQ38#k=…" --gb 4
@@ -146,6 +147,7 @@ pooled chat "https://pooled.run/r/FEAQ38#k=…" "What is 17 times 23? Answer wit
 | Flag | Does |
 |---|---|
 | `pooled host <model>` | Picks the model. A part of the name works: `1.7b`, `35b`. |
+| `--pool` / `--here` | Answers "how do you want to run it": pooled with other devices, or all of it here (it lends what the model needs and starts). |
 | `--gb <n>` | How much this computer lends. `max` keeps only a small margin. |
 | `--start` | Starts as soon as the room has enough memory. |
 | `--wait <n>` | Starts once n devices (this one included) are in and it fits. |

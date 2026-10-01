@@ -63,14 +63,17 @@ export const HELP_HOST = `Usage
   with the code.
 
   In a terminal, the room opens at once (its code and invite link at the top), then pooled host asks
-  for what the flags did not say: the model (with what each needs and whether it is downloaded) and
-  how much this computer lends. The room panel lists every device and its pledge, who waits to join
+  for what the flags did not say: the model (with what each needs and whether it is downloaded), how
+  to run it (pooled with other devices, or all of it here) and, pooled, how much this computer lends. The room panel lists every device and its pledge, who waits to join
   (press a to allow, d to deny), and whether the pledges hold the model; Enter starts once they do. When the
   room is online, c chats with it right there. Without a terminal, give the choices as flags.
 
   Every step has a flag; a flag given skips its question:
 
     [model] / --model <m>  the model (a part of the name works: 35b); skips the picker
+    --pool                 pool it with other devices: lend, then wait for them (split: spread)
+    --here                 run all of it on this computer: lends what it needs and starts; other
+                           devices can still join to chat. An error when it does not fit here
     --gb <n|max>           how much this computer lends; skips the pledge question
     -y, --yes              download the model without asking when it is not on this computer
     --no-pull              don't download: stream this computer's layers from Hugging Face
@@ -83,12 +86,13 @@ export const HELP_HOST = `Usage
     --split <speed|spread> speed: the fastest devices first (default); spread: across all
                            devices by what each lends, even when one could hold the model
 
-  pooled host qwen3.6-35b-moe --gb 64 --start --yes runs with no questions at all. Without a
+  pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes runs with no questions at all. Without a
   terminal, the defaults are qwen3-1.7b, the memory rule and --start.
 
 More options
   --code <CODE>     the room code to use (default: a random one of six characters)
-  --ctx <n>         the context to ask for, in tokens (default: the model's room default)
+  --ctx <n>         the context to ask for, in tokens (default: the longest the model takes in a
+                    room: 16k on the 1.7B, 64k on the 27B, 128k on the MoE)
   --devices <n>     the same as --wait (its older name)
   --signal <spec>   PeerJS signaling server(s), as pooled join
   --no-check        skip the test allocation that confirms the memory is there
@@ -132,7 +136,7 @@ const COMMON = {
 };
 const HOST_OPTS = { model: { type: "string" }, devices: { type: "string" }, wait: { type: "string" }, code: { type: "string" }, ctx: { type: "string" },
   "allow-all": { type: "boolean" }, "deny-unknown": { type: "boolean" }, start: { type: "boolean" }, chat: { type: "boolean" }, split: { type: "string" },
-  yes: { type: "boolean", short: "y" } };
+  here: { type: "boolean" }, pool: { type: "boolean" }, yes: { type: "boolean", short: "y" } };
 
 // argv after the command word -> options, or throws UsageError. models: MODELS (room/models.js) for
 // checking --model; left out, any key passes (the runner checks it again)
@@ -181,6 +185,10 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
     if (out.allowAll && out.denyUnknown) throw new UsageError("--allow-all and --deny-unknown say opposite things: pick one");
     out.start = !!o.start; out.chat = !!o.chat; out.yes = !!o.yes;
     out.split = splitModeOf(o.split);
+    out.splitGiven = o.split != null;
+    // --here: all of it on this computer; --pool: pooled with other devices (spread over them)
+    if (o.here && o.pool) throw new UsageError("--here and --pool say opposite things: pick one");
+    out.mode = o.here ? "here" : o.pool ? "pool" : null;
     out.gbGiven = o.gb != null;
     // --wait N (and its older name --devices N): deal once N devices (this one included) are in
     for (const [flag, v] of [["--devices", o.devices], ["--wait", o.wait]]) {

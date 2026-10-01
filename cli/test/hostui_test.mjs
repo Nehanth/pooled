@@ -54,7 +54,7 @@ test("a short room: the same sentence and number as the room page; pledges that 
 
 test("Start stays off until the pledges fit and the download is done; --start and --wait start by themselves", () => {
   const rows = modelRows(lib, { keys: KEYS, pulled: new Set(["qwen3-1.7b"]), pledgeGB: 12 });
-  let s = initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 12, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set(["qwen3.6-35b-moe"]), flags: { start: true } });
+  let s = initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 12, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set(["qwen3.6-35b-moe"]), flags: { start: true, mode: "pool" } });
   assert.equal(s.step, "room");
   s.devices = [{ name: "spark", gb: 12 }];
   s.fit = roomFitNow(lib, { model: s.model, devices: [dev("spark", 12)] });
@@ -85,7 +85,11 @@ test("keys: pick a model, a download starts when it is not here; pledge by arrow
   r = reduce(r.state, "down");
   r = reduce(r.state, "enter");
   assert.deepEqual(r.fx, [{ do: "model", key: "qwen3.6-35b-moe" }, { do: "pull", key: "qwen3.6-35b-moe" }]);
-  assert.equal(r.state.step, "pledge"); assert.equal(r.state.dl.state, "running");
+  assert.equal(r.state.step, "how", "then: how to run it"); assert.equal(r.state.dl.state, "running");
+  assert.equal(r.state.how, 0, "Pool with devices is preselected");
+  r = reduce(r.state, "enter");
+  assert.deepEqual(r.fx, [{ do: "split", mode: "memory" }], "pooled: spread across the devices");
+  assert.equal(r.state.step, "pledge");
   s = r.state;
   r = reduce(s, "right"); assert.equal(r.state.pledge.gb, 33);
   r = reduce(r.state, "left"); r = reduce(r.state, "left"); assert.equal(r.state.pledge.gb, 31);
@@ -99,6 +103,7 @@ test("keys: pick a model, a download starts when it is not here; pledge by arrow
   r = reduce(r.state, "m"); assert.equal(r.state.step, "pick");
   r = reduce(r.state, "up"); r = reduce(r.state, "enter");
   assert.deepEqual(r.fx, [{ do: "model", key: "qwen3-1.7b" }], "already here: no download");
+  r = reduce(r.state, "enter");
   assert.equal(r.state.step, "room", "the pledge was answered once: back to the room");
   // the lobby: a / d answer the oldest request
   r.state.lobby = [{ id: "p1", line: "otter wants to join (Mac, 8 GB)" }];
@@ -117,22 +122,22 @@ test("a model given but not downloaded: [Y/n] in the screen, -y downloads, --no-
   assert.match(lines, /Qwen3\.6 35B MoE is not downloaded \(19\.4 GB\)\.\n  Download it now\?/);
   assert.match(lines, /y download · n stream from Hugging Face instead/);
   let r = reduce(ask, "enter");
-  assert.deepEqual(r.fx, [{ do: "pull", key: "qwen3.6-35b-moe" }]); assert.equal(r.state.step, "pledge");
+  assert.deepEqual(r.fx, [{ do: "pull", key: "qwen3.6-35b-moe" }]); assert.equal(r.state.step, "how");
   r = reduce(ask, "n");
   assert.deepEqual(r.fx, [{ do: "stream", key: "qwen3.6-35b-moe" }]); assert.equal(r.state.dl.state, "stream");
   assert.equal(initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 32 }, yes: true }).dl.state, "running");
   assert.equal(initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 32 }, noPull: true }).dl.state, "stream");
 });
 
-test("every choice as a flag: no question at all (pooled host qwen3.6-35b-moe --gb 64 --start --yes)", () => {
+test("every choice as a flag: no question at all (pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes)", () => {
   const MODELS2 = { "qwen3-1.7b": { kind: "gguf" }, "qwen3.6-35b-moe": { kind: "qwen35" } };
-  const o = parseLendArgs("host", ["qwen3.6-35b-moe", "--gb", "64", "--start", "--yes", "--allow-all", "--chat", "--name", "spark", "--wait", "2"], { models: MODELS2 });
+  const o = parseLendArgs("host", ["qwen3.6-35b-moe", "--pool", "--gb", "64", "--start", "--yes", "--allow-all", "--chat", "--name", "spark", "--wait", "2"], { models: MODELS2 });
   assert.equal(o.modelGiven, true); assert.equal(o.gbGiven, true); assert.equal(o.start, true); assert.equal(o.yes, true);
   assert.equal(o.allowAll, true); assert.equal(o.chat, true); assert.equal(o.name, "spark"); assert.equal(o.devices, 2);
   assert.throws(() => parseLendArgs("host", ["--allow-all", "--deny-unknown"], { models: MODELS2 }), /opposite/);
   assert.equal(parseLendArgs("host", ["-y", "--no-pull", "--deny-unknown"], { models: MODELS2 }).denyUnknown, true);
   const rows = modelRows(lib, { keys: KEYS, pledgeGB: 64 });
-  const s = initialState({ rows, model: o.model, pledge: { gb: 64, max: 64 }, fixedPledge: o.gbGiven, yes: o.yes, flags: { start: o.start } });
+  const s = initialState({ rows, model: o.model, pledge: { gb: 64, max: 64 }, fixedPledge: o.gbGiven, yes: o.yes, flags: { start: o.start, mode: o.mode } });
   // no picker, no pledge question, no [Y/n]: straight to the room, downloading, and it starts by itself
   assert.equal(s.step, "room"); assert.equal(s.dl.state, "running");
   s.devices = [{ name: "spark", gb: 64 }];
@@ -144,7 +149,7 @@ test("every choice as a flag: no question at all (pooled host qwen3.6-35b-moe --
 
 test("the screen: fits 58, 80 and 110 columns in every style, the room's devices, the lobby and the keys", async () => {
   const rows = modelRows(lib, { keys: KEYS, pulled: new Set(["qwen3.6-35b-moe"]), pledgeGB: 12 });
-  const s = initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 12, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set(["qwen3.6-35b-moe"]), code: "4TKG9P" });
+  const s = initialState({ rows, model: "qwen3.6-35b-moe", pledge: { gb: 12, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set(["qwen3.6-35b-moe"]), code: "4TKG9P", flags: { mode: "pool", splitGiven: true } });
   s.link = "https://pooled.run/r/4TKG9P#k=AbCdEfGhIjKlMnOpQrStUv";
   s.devices = [{ name: "spark", kind: "this computer", gb: 12, self: true }, { name: "node-abc", kind: "CLI", gb: 4 }, { name: "iphone", kind: "phone", gb: 1 }];
   s.lobby = [{ id: "x", line: "otter wants to join (Mac, 8 GB)" }];
@@ -191,16 +196,16 @@ test("keys from the terminal: arrows, Enter, Backspace, Ctrl-C and pasted digits
 test("a split that one computer could avoid: say so before Start, with a speed from the links", async () => {
   const { splitAdvice, splitLines, hopHint, pickerRow } = await import("../lib/hostui.js");
   const model = "qwen3-1.7b";
-  const devs = [{ name: "spark", self: true, gb: 2, meta: { webgpu: true, contribGB: 2 }, rtt: null },
-    { name: "mac", gb: 2, meta: { webgpu: true, contribGB: 2 }, rtt: 60 }];
-  const s = { model, devices: devs, pledge: { gb: 2, max: 64 } };
+  const devs = [{ name: "spark", self: true, gb: 3, meta: { webgpu: true, contribGB: 3 }, rtt: null },
+    { name: "mac", gb: 3, meta: { webgpu: true, contribGB: 3 }, rtt: 60 }];
+  const s = { model, devices: devs, pledge: { gb: 3, max: 64 } };
   s.fit = roomFitNow(lib, { model, devices: devs });
-  assert.equal(s.fit.fits, true, "2 + 2 GB hold the 1.7B");
+  assert.equal(s.fit.fits, true, "3 + 3 GB hold the 1.7B (16k context)");
   const adv = splitAdvice(s, lib);
-  assert.ok(adv.alone.gb > 2 && adv.alone.gb <= 5, `alone at ${adv.alone.gb} GB`);
+  assert.ok(adv.alone.gb > 3 && adv.alone.gb <= 6, `alone at ${adv.alone.gb} GB`);
   assert.equal(adv.hopMs, 30); assert.equal(adv.tps, Math.round(1000 / (2 * 30 + 12)));
-  const lines = splitLines(adv, { model: "Qwen3 1.7B", selfName: "spark", gb: 2 });
-  assert.equal(lines[0], `Qwen3 1.7B would run on spark alone if it lends ${adv.alone.gb} GB (now 2 GB): l lends more.`);
+  const lines = splitLines(adv, { model: "Qwen3 1.7B", selfName: "spark", gb: 3 });
+  assert.equal(lines[0], `Qwen3 1.7B would run on spark alone if it lends ${adv.alone.gb} GB (now 3 GB): l lends more.`);
   assert.equal(lines[1], `Split across 2 devices, each token waits for the network: expect roughly ${adv.tps} tok/s.`);
   // no round trips yet: no number; one device holding it all: nothing to say
   assert.match(splitLines(splitAdvice({ ...s, devices: devs.map((d) => ({ ...d, rtt: null })) }, lib), {})[1], /expect it to be slower/);
@@ -213,7 +218,7 @@ test("a split that one computer could avoid: say so before Start, with a speed f
   assert.equal(pickerRow({ key: "b", pulled: false, fileBytes: 2 ** 30 * 18.6, needGB: 70.1, fitsAlone: false }).have, "18.6 GB download");
 });
 
-test("the host screen: the header once (pill, link, status), the picker in two plain groups", () => {
+test("the host screen: the header once (pill, link, status), the picker as one plain list", () => {
   const rows = modelRows(lib, { keys: KEYS, pledgeGB: 12 });
   const s = initialState({ rows, pledge: { gb: 12, max: 14, totalGB: 16 }, code: "9PFZ8T" });
   Object.assign(s, { link: "https://pooled.run/r/9PFZ8T#k=AbCdEfGhIjKlMnOpQrStUv", gpu: "RTX 5070 Ti · 16 GB", devices: [] });
@@ -222,8 +227,9 @@ test("the host screen: the header once (pill, link, status), the picker in two p
   assert.equal(L.filter((l) => l.includes("9PFZ8T#k=")).length, 1);
   assert.ok(L.includes("  gpu       RTX 5070 Ti · 16 GB"));
   const text = L.join("\n");
-  assert.match(text, /Which model\?\n\n  Fits on this computer\n/);
-  assert.match(text, /Needs another device\n    Qwen3\.8 27B\s+needs 20 GB   15\.0 GB download/);
+  assert.match(text, /Which model\?\n\n    Qwen3 0\.6B/, "one list, smallest first, no groups");
+  assert.doesNotMatch(text, /Fits on this computer|Needs another device/);
+  assert.match(text, /\n    Qwen3\.8 27B\s+needs 20 GB   15\.0 GB download/);
   assert.match(text, /› Qwen3 4B\s+needs  5 GB/, "the recommended model is preselected, not labelled");
   assert.doesNotMatch(text, /recommended|"needs"/);
   assert.match(text, /↑↓ choose · enter host it · q quit/);
@@ -238,7 +244,7 @@ test("split: s toggles fastest first / across all devices, the rows show what St
   const L2 = { ...lib, dealRoom };
   const model = "qwen3-1.7b";
   const rows = modelRows(lib, { keys: KEYS, pulled: new Set([model]), pledgeGB: 8 });
-  let s = initialState({ rows, model, pledge: { gb: 8, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set([model]), code: "4TKG9P" });
+  let s = initialState({ rows, model, pledge: { gb: 8, max: 60, totalGB: 128 }, fixedPledge: true, pulled: new Set([model]), code: "4TKG9P", flags: { mode: "pool", splitGiven: true } });
   s.devices = [{ name: "spark", kind: "this computer", gb: 8, self: true, meta: { webgpu: true, contribGB: 8 } }, { name: "mac", kind: "CLI", gb: 8, meta: { webgpu: true, contribGB: 8 } }];
   s.fit = roomFitNow(lib, { model, devices: [dev("spark", 8), dev("mac", 8)] });
   assert.equal(s.splitMode, "speed", "fastest first by default, as the room page");
@@ -272,9 +278,8 @@ test("split: s toggles fastest first / across all devices, the rows show what St
 
 test("picker: models in size order; ↑ on the first and ↓ on the last stay put (no wrap)", () => {
   const rows = modelRows(lib, { keys: [...KEYS].reverse(), pledgeGB: 8 });
-  const needs = rows.map((r) => r.needGB);
-  assert.deepEqual(needs, [...needs].sort((a, b) => a - b), "smallest first, whatever order the keys came in");
-  assert.deepEqual(rows.map((r) => r.fileBytes), [...rows.map((r) => r.fileBytes)].sort((a, b) => a - b), "and so by download size too");
+  assert.deepEqual(rows.map((r) => r.fileBytes), [...rows.map((r) => r.fileBytes)].sort((a, b) => a - b), "smallest download first, whatever order the keys came in");
+  assert.deepEqual(rows.map((r) => r.key), KEYS, "0.6B, 1.7B, 4B, 27B, MoE (the 1.7B's 16k context needs more than the 4B's 4k: it is still listed by its size)");
   let s = { ...initialState({ rows, pledge: { gb: 8, max: 16, totalGB: 16 } }), sel: 0 };
   s = reduce(s, "up").state;
   assert.equal(s.sel, 0, "↑ at the top stops");
@@ -288,7 +293,7 @@ test("picker: models in size order; ↑ on the first and ↓ on the last stay pu
 test("the download ends: \"waiting for the download\" goes, Start can go", async () => {
   const { pullDone } = await import("../lib/hostui.js");
   const rows = modelRows(lib, { keys: KEYS, pledgeGB: 8 });
-  let s = initialState({ rows, model: "qwen3-1.7b", pledge: { gb: 8, max: 16, totalGB: 16 }, fixedPledge: true, yes: true });
+  let s = initialState({ rows, model: "qwen3-1.7b", pledge: { gb: 8, max: 16, totalGB: 16 }, fixedPledge: true, yes: true, flags: { mode: "pool" } });
   assert.equal(s.dl.state, "running");
   s.fit = roomFitNow(lib, { model: "qwen3-1.7b", devices: [dev("me", 8)] });
   s = reduce(s, "enter").state;
@@ -302,4 +307,62 @@ test("the download ends: \"waiting for the download\" goes, Start can go", async
   const f = pullDone({ ...s, dl: { ...s.dl, state: "running" }, notice: "waiting for the download" }, "qwen3-1.7b", { error: new Error("HTTP 503") });
   assert.equal(f.dl.state, "error"); assert.equal(f.dl.error, "HTTP 503"); assert.equal(f.notice, "");
   assert.equal(pullDone(s, "qwen3-4b", { ok: true }).dl.key, "qwen3-1.7b");
+});
+
+test("how to run it: Pool with devices first and preselected; Run it here lends what the model needs and starts", async () => {
+  const { hereGB } = await import("../lib/hostui.js");
+  const { mkStyle } = await import("../lib/style.js");
+  const rows = modelRows(lib, { keys: KEYS, pulled: new Set(["qwen3-1.7b"]), pledgeGB: 8, maxGB: 14 });
+  const r17 = rows.find((r) => r.key === "qwen3-1.7b"), moe = rows.find((r) => r.key === "qwen3.6-35b-moe");
+  assert.equal(r17.hereGB, hereGB(lib, "qwen3-1.7b", { maxGB: 14 }));
+  assert.ok(r17.hereGB >= 5 && r17.hereGB <= 6, `the 1.7B alone at ${r17.hereGB} GB (16k context)`);
+  assert.ok(roomFitNow(lib, { model: "qwen3-1.7b", devices: [dev("me", r17.hereGB)] }).fits && !roomFitNow(lib, { model: "qwen3-1.7b", devices: [dev("me", r17.hereGB - 1)] }).fits, "the least that holds it");
+  assert.equal(moe.hereGB, null, "14 GB can't hold the MoE");
+  let s = initialState({ rows, pledge: { gb: 8, max: 14, totalGB: 16 }, code: "9PFZ8T" });
+  s.gpu = "RTX 5070 Ti · 16 GB";
+  s.sel = rows.indexOf(r17);
+  let r = reduce(s, "enter");
+  assert.equal(r.state.step, "how"); assert.equal(r.state.how, 0);
+  const text = render(r.state, { width: 80, lib }).join("\n");
+  assert.match(text, /model     Qwen3 1\.7B · downloaded\n\n  How do you want to run Qwen3 1\.7B\?\n\n  › Pool with devices +other devices join and each holds a part\n/);
+  assert.match(text, new RegExp(`\\n    Run it here +all of it here, lending ${r17.hereGB} GB; others can chat\\n`));
+  assert.match(text, /↑↓ choose · enter go · esc back · q quit/);
+  for (const [depth, theme] of [["truecolor", "dark"], ["256", "light"], ["none", "dark"]]) for (const w of [58, 80, 110]) {
+    const lines = render(r.state, { width: w, lib, S: mkStyle({ depth, theme }) });
+    assert.ok(lines.every((l) => width(l) <= w - 1), `${depth} ${w}`);
+  }
+  assert.equal(reduce(r.state, "up").state.how, 0, "no wrap");
+  r = reduce(r.state, "down"); assert.equal(r.state.how, 1);
+  assert.equal(reduce(r.state, "down").state.how, 1);
+  assert.equal(reduce(r.state, "esc").state.step, "pick");
+  r = reduce(r.state, "enter");
+  assert.equal(r.state.step, "room"); assert.equal(r.state.pledge.gb, r17.hereGB); assert.equal(r.state.pledgeDone, true);
+  assert.equal(r.state.splitMode, "speed"); assert.equal(r.state.flags.start, true, "starts once it can");
+  assert.deepEqual(r.fx, [{ do: "pledge", gb: r17.hereGB }, { do: "split", mode: "speed" }]);
+  // a model this computer can't hold: Run it here is off, with why
+  s.sel = rows.indexOf(moe);
+  r = reduce(s, "enter"); r = reduce(r.state, "down");
+  assert.match(render(r.state, { lib }).join("\n"), /Run it here +needs 23 GB, this computer has 14 GB to lend/);
+  r = reduce(r.state, "enter");
+  assert.equal(r.state.step, "how"); assert.match(r.state.notice, /needs 23 GB, this computer has 14 GB to lend/);
+  r = reduce(r.state, "up"); r = reduce(r.state, "enter");
+  assert.equal(r.state.step, "pledge"); assert.equal(r.state.splitMode, "memory");
+});
+
+test("--here / --pool skip the question; --split given wins; --here and --pool together are an error", () => {
+  const MODELS2 = { "qwen3-1.7b": { kind: "gguf" }, "qwen3.6-35b-moe": { kind: "qwen35" } };
+  assert.equal(parseLendArgs("host", ["1.7b", "--here"], { models: MODELS2 }).mode, "here");
+  assert.equal(parseLendArgs("host", ["--pool"], { models: MODELS2 }).mode, "pool");
+  assert.equal(parseLendArgs("host", [], { models: MODELS2 }).mode, null);
+  assert.throws(() => parseLendArgs("host", ["--here", "--pool"], { models: MODELS2 }), /opposite/);
+  assert.equal(parseLendArgs("host", ["--split", "speed"], { models: MODELS2 }).splitGiven, true);
+  const rows = modelRows(lib, { keys: KEYS, pulled: new Set(["qwen3-1.7b"]), pledgeGB: 8, maxGB: 14 });
+  const here = initialState({ rows, model: "qwen3-1.7b", pledge: { gb: 8, max: 14 }, pulled: new Set(["qwen3-1.7b"]), flags: { mode: "here" } });
+  assert.equal(here.step, "room"); assert.equal(here.flags.start, true); assert.equal(here.pledge.gb, rows.find((r) => r.key === "qwen3-1.7b").hereGB);
+  const pool = initialState({ rows, model: "qwen3-1.7b", pledge: { gb: 8, max: 14 }, pulled: new Set(["qwen3-1.7b"]), flags: { mode: "pool" } });
+  assert.equal(pool.step, "pledge"); assert.equal(pool.splitMode, "memory");
+  const kept = initialState({ rows, model: "qwen3-1.7b", pledge: { gb: 8, max: 14 }, pulled: new Set(["qwen3-1.7b"]), flags: { mode: "pool", split: "speed", splitGiven: true } });
+  assert.equal(kept.splitMode, "speed");
+  // no flag: the question
+  assert.equal(initialState({ rows, model: "qwen3-1.7b", pledge: { gb: 8, max: 14 }, pulled: new Set(["qwen3-1.7b"]) }).step, "how");
 });

@@ -293,12 +293,14 @@ Send the **invite** line to the devices you want in: a browser tab, a phone, or 
 Every step has a flag. A flag you give skips its question, so this asks nothing at all:
 
 ```bash
-pooled host qwen3.6-35b-moe --gb 64 --start --yes
+pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes
 ```
 
 | Flag | Skips or does |
 |---|---|
 | `[model]`, `--model <m>` | The model picker. A part of the name works: `35b`. |
+| `--pool` | The "how do you want to run it" question: pooled with other devices, split across all of them. |
+| `--here` | The same question: all of it on this computer, lending what it needs, and it starts by itself. An error when it doesn't fit here. |
 | `--gb <n\|max>` | The pledge question. |
 | `-y`, `--yes` | Downloads a model that is not on this computer without asking. |
 | `--no-pull` | Doesn't download: this computer streams its layers from Hugging Face on every start. |
@@ -332,14 +334,17 @@ Usage
   with the code.
 
   In a terminal, the room opens at once (its code and invite link at the top), then pooled host asks
-  for what the flags did not say: the model (with what each needs and whether it is downloaded) and
-  how much this computer lends. The room panel lists every device and its pledge, who waits to join
+  for what the flags did not say: the model (with what each needs and whether it is downloaded), how
+  to run it (pooled with other devices, or all of it here) and, pooled, how much this computer lends. The room panel lists every device and its pledge, who waits to join
   (press a to allow, d to deny), and whether the pledges hold the model; Enter starts once they do. When the
   room is online, c chats with it right there. Without a terminal, give the choices as flags.
 
   Every step has a flag; a flag given skips its question:
 
     [model] / --model <m>  the model (a part of the name works: 35b); skips the picker
+    --pool                 pool it with other devices: lend, then wait for them (split: spread)
+    --here                 run all of it on this computer: lends what it needs and starts; other
+                           devices can still join to chat. An error when it does not fit here
     --gb <n|max>           how much this computer lends; skips the pledge question
     -y, --yes              download the model without asking when it is not on this computer
     --no-pull              don't download: stream this computer's layers from Hugging Face
@@ -349,19 +354,22 @@ Usage
     --deny-unknown         turn away devices that come with the code alone (the link still works)
     --chat                 chat here once the room is online
     --name <s>             how the room shows this computer
+    --split <speed|spread> speed: the fastest devices first (default); spread: across all
+                           devices by what each lends, even when one could hold the model
 
-  pooled host qwen3.6-35b-moe --gb 64 --start --yes runs with no questions at all. Without a
+  pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes runs with no questions at all. Without a
   terminal, the defaults are qwen3-1.7b, the memory rule and --start.
 
 More options
   --code <CODE>     the room code to use (default: a random one of six characters)
-  --ctx <n>         the context to ask for, in tokens (default: the model's room default)
+  --ctx <n>         the context to ask for, in tokens (default: the longest the model takes in a
+                    room: 16k on the 1.7B, 64k on the 27B, 128k on the MoE)
   --devices <n>     the same as --wait (its older name)
   --signal <spec>   PeerJS signaling server(s), as pooled join
-  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
   --no-check        skip the test allocation that confirms the memory is there
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
+  --verbose         also show the GPU driver's own messages
   -h, --help        this help
 
   pooled host --model list prints the models.

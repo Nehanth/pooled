@@ -2,9 +2,9 @@
 // what the flags did not say (model, pledge), shows the room live (devices, pledges, who waits to
 // join, whether the pledges hold the model), starts it, and offers chat right there.
 import os from "node:os";
-import { hostable, memoryRule, fmtCode, ctxNote } from "./lend.js";
+import { hostable, memoryRule, fmtCode, ctxNote, UsageError } from "./lend.js";
 import { modelState } from "./cache.js";
-import { initialState, reduce, render, roomFitNow, modelRows, recommendModel, pledgeDefaults, devicesFrom, autoStart, colors, modelNeedGB, pullDone } from "./hostui.js";
+import { initialState, reduce, render, roomFitNow, modelRows, recommendModel, pledgeDefaults, devicesFrom, autoStart, colors, modelNeedGB, pullDone, hereWhy } from "./hostui.js";
 import { liveRegion, keysOf, colorOn } from "./tui.js";
 import { pullWithProgress } from "./pullrun.js";
 import { style, detectTheme } from "./style.js";
@@ -27,10 +27,15 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   const smallest = Math.min(...keys.map((k) => modelNeedGB(lib, k, opts.ctx || 0) || 99));
   const pd = pledgeDefaults(mem, { maxGB, ruleGB: rule.gb, smallestNeedGB: Math.min(smallest, 4) });
   const pledge0 = opts.gbGiven ? rule.gb : pd.def;
-  const rowsFor = () => modelRows(lib, { keys, pulled, pledgeGB: S?.pledge.gb ?? pledge0, ctxAsk: opts.ctx || 0 });
+  const rowsFor = () => modelRows(lib, { keys, pulled, pledgeGB: S?.pledge.gb ?? pledge0, ctxAsk: opts.ctx || 0, maxGB: Math.max(pd.max, pledge0) });
   let S = null;
   const rows0 = rowsFor();
   const model0 = opts.modelGiven ? opts.model : recommendModel(rows0);
+  // --here with a model that this computer can't hold: say so before opening a room
+  if (opts.mode === "here" && opts.modelGiven && !rows0.find((r) => r.key === opts.model)?.hereGB) {
+    const row = rows0.find((r) => r.key === opts.model);
+    throw new UsageError(`--here: ${(rn.MODELS[opts.model]?.label || opts.model).split("·")[0].trim()} ${hereWhy(row, { max: Math.max(pd.max, pledge0) })}; --pool runs it with other devices`);
+  }
 
   // the look: the terminal's background is asked once, before the screen reads keys
   await detectTheme();
@@ -61,8 +66,11 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   const home = dir.startsWith(os.homedir()) ? "~" + dir.slice(os.homedir().length) : dir;
 
   S = initialState({ rows: rows0, model: opts.modelGiven ? opts.model : null, pledge: { gb: pledge0, max: Math.max(pd.max, pledge0), totalGB: pd.totalGB },
-    fixedPledge: opts.gbGiven, flags: { start: opts.start, wait: opts.devices || 0, chat: opts.chat, split: opts.split }, pulled, code, link: "", yes: opts.yes, noPull: opts.noPull });
-  S.pledgeDone = opts.gbGiven;
+    fixedPledge: opts.gbGiven, flags: { start: opts.start, wait: opts.devices || 0, chat: opts.chat, split: opts.split, mode: opts.mode, splitGiven: opts.splitGiven }, pulled, code, link: "", yes: opts.yes, noPull: opts.noPull });
+  S.pledgeDone = S.pledgeDone || opts.gbGiven;
+  // a --here / --pool start chose the pledge and the split already (initialState runs no effects)
+  if (S.pledge.gb !== pledge0) node.setPledge(S.pledge.gb);
+  if (S.splitMode !== opts.split) node.setSplit(S.splitMode);
   S.gpu = gpu; S.gpuName = mem.name || prepared.adapterName; S.modelsDir = home; S.ctxAsk = opts.ctx || 0;
   S.gate = opts.allowAll ? "allow-all" : opts.denyUnknown ? "deny-unknown" : "ask";
 

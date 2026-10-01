@@ -307,7 +307,7 @@ A download is written to `<file>.part` and resumes where it stopped (Ctrl-C, a l
 
 ### 2. Open a room: pooled host
 
-In a terminal, `pooled host` opens the room at once (its code, invite link and the `pooled join` command at the top of the screen, once, so devices can join while you choose), then asks only for what you did not give as flags: the model, from a list that says in plain words how much memory each takes, whether it runs on this computer alone or needs more devices, and whether it is downloaded (or how big the download is); then how much this computer lends (half the GPU's memory by default, as the room page; ←/→ or type a number). A model that is not downloaded downloads right there, with its progress in the screen, while devices join. Then the room itself, redrawn in place:
+In a terminal, `pooled host` opens the room at once (its code, invite link and the `pooled join` command at the top of the screen, once, so devices can join while you choose), then asks only for what you did not give as flags: the model, from one list, smallest first, that says how much memory each takes and whether it is downloaded (or how big the download is); then how to run it. **Pool with devices** (first, and preselected) asks how much this computer lends (half the GPU's memory by default, as the room page; ←/→ or type a number) and waits for devices, spreading the layers across all of them (`s` changes it). **Run it here** lends what the model needs on this computer alone (never more than its GPU allows) and starts as soon as the model is on disk; other devices can still join to chat. It is offered only when the model fits here, and otherwise shows why ("needs 23 GB, this computer has 16 GB to lend"). A model that is not downloaded downloads right there, with its progress in the screen, while devices join. Then the room itself, redrawn in place:
 
 ```
 pooled host · room 9PF-Z8T · Qwen3 1.7B
@@ -344,11 +344,13 @@ c: chat here  ·  Enter: re-deal  ·  q: quit
 
 `c` chats with the room right there (the same REPL as `pooled chat`, over the invite link; `/exit` comes back to the room screen), so the host needs no second terminal. `m` / `p` change the model or the pledge while the room waits.
 
-Every step has a flag, and a flag given skips its question, so `pooled host qwen3.6-35b-moe --gb 64 --start --yes` runs with no questions at all:
+Every step has a flag, and a flag given skips its question, so `pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes` runs with no questions at all:
 
 | Flag | Skips / does |
 |---|---|
 | `[model]`, `--model <m>` | the model picker (a part of the name works: `35b`) |
+| `--pool` | the "how do you want to run it" question: pooled with other devices (the split: spread) |
+| `--here` | the same: all of it on this computer, lending what it needs, starting by itself; an error when it doesn't fit here |
 | `--gb <n\|max>` | the pledge question |
 | `-y`, `--yes` | the "not downloaded (19.4 GB). Download it now? [Y/n]" question: downloads |
 | `--no-pull` | don't download: stream this computer's layers from Hugging Face, as before |
