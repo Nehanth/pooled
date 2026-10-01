@@ -60,7 +60,7 @@ whether to download it now, how many devices to wait for, and who can join. It p
 the invite link. The room opens with the gateway and keeps its code and link across restarts.
 
 On the other devices, open the invite link in Chrome or Safari, run
-`npx -p @pooled/cli -p webgpu@0.6.1 pooled join "<invite link>"`, or pick **Join a room** in OpenClaw
+`npx @pooled/cli join "<invite link>"`, or pick **Join a room** in OpenClaw
 there. A device with the code alone waits: `/pooled` in any OpenClaw chat shows who is waiting,
 `/pooled allow` lets it in.
 

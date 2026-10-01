@@ -171,9 +171,8 @@ export async function runSetup(ctx) {
       "",
       label(S, "invite") + S.link(link),
       ...para(S, "join", "On your other device: open the invite link in Chrome or Safari (a Mac, a PC or a phone), or pick Pooled → Join a room in OpenClaw there and paste it, or run:", W),
-      // the command in two lines (a shell continuation), so it fits 80-100 columns and still pastes
-      I + "  " + S.bold("npx -p @pooled/cli -p webgpu@0.6.1 \\"),
-      I + "    " + S.bold(`pooled join "${link}"`),
+      // @pooled/cli installs the WebGPU addon itself since 0.3.0
+      I + "  " + S.bold(`npx @pooled/cli join "${link}"`),
       ...para(S, "ask", ask ? `A device with only the code ${fmtCode(code)} waits: /pooled allow (in any OpenClaw chat) lets it in.` : `Anyone with the code ${fmtCode(code)} can join.`, W),
       label(S, "status") + S.ink2("/pooled") + S.ink3(" in any OpenClaw chat shows the room"),
       "",
