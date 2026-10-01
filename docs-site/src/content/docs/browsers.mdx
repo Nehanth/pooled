@@ -1,10 +1,10 @@
 ---
 title: Browsers and requirements
-eyebrow: Getting started
+eyebrow: Help
 description: Which browsers can hold part of the model, which can only chat, and how to turn WebGPU on where it is off.
 sidebar:
   label: Browsers and requirements
-  order: 6
+  order: 4
 ---
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
@@ -18,7 +18,7 @@ Sources (for the fact-checker):
 - cli/README.md / README "Use Pooled from your tools": Serve API needs Node 22+
 */}
 
-Pooled runs in the browser on WebGPU. A device whose browser has WebGPU can hold part of the model. Any other device can still join the room to ask questions and read answers.
+A device whose browser has WebGPU can run part of the model. Any other device can still join to ask questions and read answers.
 
 ## Supported browsers
 
@@ -31,10 +31,10 @@ Pooled runs in the browser on WebGPU. A device whose browser has WebGPU can hold
 | Firefox | No WebGPU here yet, so it joins to chat. Not tested. |
 | Anything without WebGPU | Joins as **Chat only, no memory to give**. |
 
-The room's page checks the browser as soon as it opens. If this device can't hold layers, the join screen says why in one sentence and shows the fix under **Details**.
+The page checks the browser when it opens. If this device can't hold layers, the join screen says why and shows the fix under **Details**.
 
 :::caution[Safari on a Mac]
-Safari on a Mac reloads the tab under memory pressure when it holds most of the 27B. Host from Chrome or Edge on a Mac instead. Safari is fine for a device that holds a smaller share.
+Safari on a Mac reloads the tab when it holds most of the 27B. Host from Chrome or Edge instead. Safari is fine for a smaller share.
 :::
 
 ## Turn on WebGPU
@@ -63,14 +63,14 @@ WebGPU also needs a secure page: `https://`, or `http://localhost` when you [run
 
 ## Device requirements
 
-- **To start a room and run a model:** a laptop or desktop. The smallest model needs 4 GB across the room, and one computer gives at least that by default when its GPU allows it.
-- **A phone alone can only chat.** Phones give at most 0.5 to 2 GB, less than any model needs.
-- **Disk:** each device caches the layers it downloads. The smallest model is at most a 1.8 GB download; the MoE file is 20.84 GB in total, split across the devices.
-- **Network:** the devices need to reach each other directly, or through a TURN relay. See [Bad networks](/docs/rooms/networks).
-- **The Serve API** runs `npx @pooled/cli` on your computer and needs Node 22 or newer. It needs no GPU.
+- **To run a model:** a laptop or desktop. One computer is usually enough for the smallest model, which needs 4 GB.
+- **A phone alone can only chat.** Phones give at most 0.5 to 2 GB.
+- **Disk:** each device caches its own layers. The smallest model is at most a 1.8 GB download.
+- **Network:** devices link directly, or through a relay. See [Networks and work Wi-Fi](/docs/rooms/networks).
+- **The Serve API** needs Node 22 or newer on your computer, and no GPU.
 
 ## What the page loads from elsewhere
 
 - **Model weights** from Hugging Face, or from another device in the room.
-- **The connection library (PeerJS)** from `cdn.jsdelivr.net`. If an extension or network blocks it, the room can't connect and says so.
-- **A signaling server** to introduce the devices. The public PeerJS server is the default; you can [run your own](/docs/self-host/signaling).
+- **The connection library (PeerJS)** from `cdn.jsdelivr.net`. If an extension blocks it, the room can't connect and says so.
+- **A signaling server** that introduces the devices. You can [run your own](/docs/self-host/signaling).

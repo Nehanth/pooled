@@ -75,21 +75,15 @@ npx peer --port 9000 --path /
 http://localhost:8080/room?signal=127.0.0.1:9000
 ```
 
-The page is plain http, so a bare `host:port` uses `ws://`. A URL with `?signal=` opens the room in dev mode; add `&dev=0` if you don't want that. Every device in the room must use the same server. See [Signaling servers](/docs/self-host/signaling) for the details.
+On an http page a bare `host:port` uses `ws://`. `?signal=` opens the room in dev mode; add `&dev=0` if you don't want that. Every device must use the same server. See [Signaling servers](/docs/self-host/signaling).
 
 ## What still comes from the internet
 
-Serving the site yourself doesn't make it fully offline. The room page still loads:
-
-- **PeerJS** from `cdn.jsdelivr.net` (`peerjs@1.5.4`).
-- **Model files** from Hugging Face, unless another device in the room already has the layers.
-- **STUN** from Google's public STUN servers, to find each device's public address.
-
-Browser caches are per site. Weights downloaded on pooled.run are downloaded again the first time a device opens your own origin (and `localhost` and `127.0.0.1` count as different sites).
+The page still loads PeerJS from `cdn.jsdelivr.net`, model files from Hugging Face (unless a device in the room has them), and STUN from Google's public servers. Browser caches are per site, so weights cached on pooled.run download again on your origin (and `localhost` and `127.0.0.1` are different sites).
 
 ## Other devices on your network
 
-WebGPU needs a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts). `http://localhost` and `http://127.0.0.1` count as secure, but `http://192.168.1.20:8080` on another device does not. On a plain-http LAN address the page loads but gets no GPU, so the device can only join as an ask-only guest. iOS Safari is strict about this.
+WebGPU needs a [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts). `http://localhost` counts; `http://192.168.1.20:8080` on another device does not, so that device gets no GPU and can only ask.
 
 <Tabs>
   <TabItem label="Serve over https">
@@ -98,7 +92,7 @@ WebGPU needs a [secure context](https://developer.mozilla.org/en-US/docs/Web/Sec
   <TabItem label="Mix with pooled.run">
     Keep the computers on their own checkout at `http://127.0.0.1:8080/room`, and open `https://pooled.run/room` on phones. Use the public PeerJS server on every device (don't add `?signal=`), so they all meet on the same server.
 
-    The two pages must speak the same room protocol. In practice, run the same commit that pooled.run is on (`main`). A mismatch is shown on both screens, with which side should reload.
+    Run the same commit as pooled.run (`main`) so both speak the same room protocol.
   </TabItem>
   <TabItem label="Chrome flag (testing only)">
     On Chrome for desktop and Android, `chrome://flags/#unsafely-treat-insecure-origin-as-secure` lets you list `http://192.168.1.20:8080` as secure. Use it only on test devices.
@@ -107,7 +101,7 @@ WebGPU needs a [secure context](https://developer.mozilla.org/en-US/docs/Web/Sec
 
 ## Code mode previews
 
-Code mode runs the agent's app on a second site, so a runaway app can't freeze the room. Locally it uses the other loopback name for that: a page on `localhost` runs previews on `127.0.0.1`, and the other way round. Nothing to set up. On a LAN address there is no second site, so previews run in the room's own tab and the agent's `run_js` tool is off.
+Previews run on a second site so a runaway app can't freeze the room. Locally that is the other loopback name (`localhost` ↔ `127.0.0.1`), with nothing to set up. On a LAN address there is no second site, so previews run in the room's tab and `run_js` is off.
 
 ## Next steps
 

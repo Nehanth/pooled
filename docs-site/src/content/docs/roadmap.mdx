@@ -19,7 +19,7 @@ Sources (origin/main 40bb0fa):
 
 import { Aside, LinkCard, CardGrid } from '@astrojs/starlight/components';
 
-The roadmap lives in the repository, in [`roadmap/README.md`](https://github.com/Nehanth/pooled/blob/main/roadmap/README.md). It lists every planned item, grouped by the part of Pooled it touches: Kernels, Inference, Harness (Code mode), Loading, Networking, Room, UI, Infra, and Tests and benchmarks. Longer design notes sit next to it as numbered files, such as `roadmap/02-prefill-gemm.md`. The pinned [Roadmap: Pooled](https://github.com/Nehanth/pooled/issues/83) issue has the same list as a checklist.
+The roadmap lives in [`roadmap/README.md`](https://github.com/Nehanth/pooled/blob/main/roadmap/README.md), grouped by area (Kernels, Inference, Harness, Loading, Networking, Room, UI, Infra, Tests). Design notes sit next to it as numbered files, and the pinned issue [#83](https://github.com/Nehanth/pooled/issues/83) has the same list as a checklist.
 
 <CardGrid>
   <LinkCard title="Roadmap" description="Every item with its priority, design note and issue." href="https://github.com/Nehanth/pooled/blob/main/roadmap/README.md" />
@@ -34,7 +34,7 @@ The roadmap lives in the repository, in [`roadmap/README.md`](https://github.com
 | **P1** | Next. Planned and ready to build. |
 | **P2** | Later, or needs a design note first. |
 
-A filed issue gets the `area:` label of its section. Design-note file names never change, because issues and links point at them.
+Issues get the `area:` label of their section.
 
 ## Top of the list
 
@@ -46,26 +46,11 @@ A filed issue gets the `area:` label of its section. Design-note file names neve
 
 ## Shipped recently
 
-Some roadmap lines and issues haven't caught up with merged work yet. As of September 30, 2026:
+Some roadmap lines and issues lag behind merged work. As of September 30, 2026:
 
-| Item | Status | Shipped in |
-|---|---|---|
-| TURN relay for strict NATs ([#1](https://github.com/Nehanth/pooled/issues/1)) | Done. Optional and off by default. | #259 |
-| Room checkpoints on disk, so a reload resumes ([#69](https://github.com/Nehanth/pooled/issues/69)) | Done. `?ckptdisk=0` turns it off. | #242 |
-| Tokenizer checked against llama.cpp ([#70](https://github.com/Nehanth/pooled/issues/70)) | Done. | #243 |
-| Prefix-cache reuse across Code mode turns ([#73](https://github.com/Nehanth/pooled/issues/73)) | Done. | #251 |
-| Harness fixes from the audit ([#76](https://github.com/Nehanth/pooled/issues/76)) | Done. | #238 |
-| Delete one cached model ([#59](https://github.com/Nehanth/pooled/issues/59)) | Done. | #234 |
-| GPU tests that print FAIL exit nonzero ([#81](https://github.com/Nehanth/pooled/issues/81)) | Done. | #241 |
-| `npx @pooled/cli serve`, a local OpenAI and Anthropic endpoint ([#4](https://github.com/Nehanth/pooled/issues/4)) | Done, with tool calling. | #231, #260, #261 |
-| Converted weights cached in the browser ([#77](https://github.com/Nehanth/pooled/issues/77)) | Done for the tensors converted on the CPU. | #250 |
-| Self-hosted signaling ([#15](https://github.com/Nehanth/pooled/issues/15)) | Partly. The server fallback list and `?signal=` shipped. Vendored PeerJS and a status canary are still open. | #259 |
-| Longer context ([#71](https://github.com/Nehanth/pooled/issues/71)) | Partly. Timed at 1K, 8K and 32K. int8 KV exists (`?kv=q8`) but stays off by default. | #252 |
-| Actionable errors ([#16](https://github.com/Nehanth/pooled/issues/16)) | Partly. Room errors say what to do. The diagnostic report button is still open. | #235 |
-| Code mode agent robustness ([#74](https://github.com/Nehanth/pooled/issues/74)) | Partly. More call formats, clearer loop stops, first error first. | #239 |
-| `run_js` in production ([#75](https://github.com/Nehanth/pooled/issues/75)) | Issue closed. `run_js` turns on only when the page's preview origin is on a second domain. pooled.run doesn't have one yet ([#79](https://github.com/Nehanth/pooled/issues/79)), so it stays off there. | #247, #248 |
-| Automatic re-deal ([#3](https://github.com/Nehanth/pooled/issues/3)) | Partly. **Re-deal on its own** is experimental and on by default. | #258 |
-| Lend this device ([#78](https://github.com/Nehanth/pooled/issues/78)), keep worker tabs alive ([#44](https://github.com/Nehanth/pooled/issues/44)) | Partly. Wake lock, warnings, and phones that come back after a reload or the background. | #236, #258 |
+- **Done:** TURN relay for strict networks ([#1](https://github.com/Nehanth/pooled/issues/1)); room checkpoints on disk ([#69](https://github.com/Nehanth/pooled/issues/69)); tokenizer checked against llama.cpp ([#70](https://github.com/Nehanth/pooled/issues/70)); prefix-cache reuse across Code mode turns ([#73](https://github.com/Nehanth/pooled/issues/73)); harness audit fixes ([#76](https://github.com/Nehanth/pooled/issues/76)); delete one cached model ([#59](https://github.com/Nehanth/pooled/issues/59)); GPU tests that print FAIL exit nonzero ([#81](https://github.com/Nehanth/pooled/issues/81)); `npx @pooled/cli serve` with tool calling ([#4](https://github.com/Nehanth/pooled/issues/4)); converted weights cached in the browser ([#77](https://github.com/Nehanth/pooled/issues/77)).
+- **Partly:** self-hosted signaling ([#15](https://github.com/Nehanth/pooled/issues/15): fallback list and `?signal=` shipped); longer context ([#71](https://github.com/Nehanth/pooled/issues/71): `?kv=q8` exists, off by default); actionable errors ([#16](https://github.com/Nehanth/pooled/issues/16): no diagnostic report button yet); Code mode agent robustness ([#74](https://github.com/Nehanth/pooled/issues/74)); automatic re-deal ([#3](https://github.com/Nehanth/pooled/issues/3): experimental, on by default); keeping worker tabs alive ([#78](https://github.com/Nehanth/pooled/issues/78), [#44](https://github.com/Nehanth/pooled/issues/44)).
+- **`run_js` in production** ([#75](https://github.com/Nehanth/pooled/issues/75)) is closed, but needs a preview site on a second domain, which pooled.run doesn't have yet ([#79](https://github.com/Nehanth/pooled/issues/79)).
 
 <Aside type="note">
 The [changelog](/docs/reference/changelog) has the full list of what changed in each release.
@@ -77,4 +62,4 @@ The [changelog](/docs/reference/changelog) has the full list of what changed in 
 2. Comment on its issue before you start, so two people don't build the same thing.
 3. P2 items and anything that changes the protocol, the model output or what peers can see need a design note first. See [Contributing](/docs/contributing#changes-that-need-a-design-note-first).
 
-Benchmark reports from hardware we don't have help every item on the list. See [Benchmarking](/docs/contributing/benchmarks#report-numbers-from-your-hardware).
+Benchmark reports from hardware we don't have always help. See [Benchmarking](/docs/contributing/benchmarks#report-numbers-from-your-hardware).

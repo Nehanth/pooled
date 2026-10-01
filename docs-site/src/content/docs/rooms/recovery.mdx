@@ -1,6 +1,6 @@
 ---
 title: Device drops and recovery
-eyebrow: Rooms
+eyebrow: Internals
 description: What the room does when a device freezes, locks, reloads or leaves, how long it waits, and when it deals the layers again. Answers carry on from the last token shown.
 sidebar:
   label: Device drops and recovery
@@ -20,7 +20,7 @@ sidebar:
 
 import { Steps } from '@astrojs/starlight/components';
 
-Every token passes through every device that holds layers. So when one of them freezes or leaves, the room has to wait for it or deal its layers to someone else. Pooled tries to wait first, because a device that comes back keeps its layers and nothing has to reload.
+What the room does when a device freezes, locks, reloads or leaves. Every token passes through every device that holds layers, so the room waits first (a device that comes back keeps its layers), then deals its layers to the others.
 
 ## What happens, in order
 
@@ -45,9 +45,7 @@ The answer, or the Code run, does not start over. When the room is whole again, 
 Press **Re-deal the layers** to skip the wait. Devices that still have their layers cached reload them in seconds, and the conversation is kept.
 :::
 
-### With Re-deal on its own turned off
-
-The room waits for the device, or for you to press Re-deal. An answer that is waiting gives up after 6 minutes. Turn it on or off in **Room settings → Model → Re-deal on its own**.
+With **Re-deal on its own** turned off (**Room settings → Model**), the room waits for the device or for you to press Re-deal, and a waiting answer gives up after 6 minutes.
 
 ### A link that fails but the device is alive
 
@@ -55,12 +53,7 @@ If a network stays silent for about 15 s, the browser can give up on a connectio
 
 ## Phones that lock or go to the background
 
-A locked iPhone, or Safari in the background, stops running the page. The room gives phones longer before it drops them (60 s instead of 15 s).
-
-- **Keep the screen on.** Every device that holds layers asks the browser to keep its screen awake. If it can't, the device screen tells you to set Auto-Lock to Never.
-- **Coming back.** A phone that was away for 3 s or more reconnects by itself. If its slot didn't change, it keeps its layers and skips the download.
-
-On an iPhone with 30 s in the background, the answer finished with the same text and the link survived.
+A locked iPhone, or Safari in the background, stops running the page, so phones get 60 s instead of 15 s before they are dropped. A phone that was away for 3 s or more reconnects by itself and keeps its layers if its slot didn't change. On an iPhone with 30 s in the background, the answer finished with the same text. How to keep a phone awake: [Phones and tablets](/docs/phones).
 
 ## Reloads
 
@@ -70,7 +63,7 @@ On an iPhone with 30 s in the background, the answer finished with the same text
 
 **The host's tab closes.** The other devices keep knocking for a minute ("Host reconnecting"). If it doesn't come back, the room is over and each screen offers to start a new one.
 
-The disk copies use at most 4 GiB. `?ckptdisk=0` keeps checkpoints on the GPU only. More in [Long context and sessions](/docs/internals/sessions).
+The disk copies use at most 4 GiB. More in [Long context and sessions](/docs/internals/sessions#on-disk-across-reloads).
 
 ## A tab killed while loading
 
@@ -83,11 +76,11 @@ A phone can be killed by the browser while it loads its layers if it runs out of
 
 </Steps>
 
-To avoid it, lend less from phones. iPhones lend 0.5 GB by default and at most 1 GB. See [Phones and tablets](/docs/phones).
+To avoid it, lend less from phones ([phone caps](/docs/phones)).
 
 ## Two devices with the same name
 
-Names identify devices in a room. When a device joins with a name another device holds, and that other device has gone quiet, the host pings it for 1.5 s. If it doesn't answer, the host drops it and the newcomer takes the name and its layers back. That is usually the same device after a crash. If it answers, the newcomer gets a number ("laptop 2").
+When a device joins with a name a quiet device holds, the host pings the old one for 1.5 s. If it doesn't answer, the newcomer (usually the same device after a crash) takes the name and its layers back. If it answers, the newcomer gets a number ("laptop 2").
 
 ## URL options
 

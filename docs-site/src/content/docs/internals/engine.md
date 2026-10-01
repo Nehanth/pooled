@@ -1,12 +1,14 @@
 ---
 title: Engine and kernels
 description: The WebGPU engine under Pooled, its kernel families, the tricks that made it fast with what each one bought, and what runs differently on Apple GPUs.
-eyebrow: How it works
+eyebrow: Internals
 sidebar:
   label: Engine and kernels
   order: 3
 ---
 
+
+The WebGPU engine under Pooled: what it runs, its kernel families, what each trick bought, and what is still open.
 
 The engine is our own. It is not WebLLM, MLC or llama.cpp. Every kernel is hand-written WGSL, generated from JavaScript templates so that thread counts, rows per workgroup and batch widths can change per device from one source.
 
@@ -60,7 +62,7 @@ All numbers are from a DGX Spark (GB10) through Deno unless stated. Each row has
 |---|---|
 | **One command submit per token.** All ~900 dispatches of a decode token go in one command buffer. | |
 | **Accumulate into the residual** (`y += W·x`) in the output, DeltaNet out and FFN down projections. | 128 fewer dispatches per token; neutral on Vulkan |
-| **Fused norm + router and norm + DeltaNet gates** on the MoE (#246). | 502 → 432 dispatches per MoE token, +4 to 5% decode |
+| **Fused norm + router and norm + DeltaNet gates** on the MoE. | 502 → 432 dispatches per MoE token, +4 to 5% decode |
 | **GPU argmax and top-k.** Lowest-index tie-breaking matches the CPU loop exactly. | 16 B read back per greedy token instead of 1 MB |
 
 ### Batching and prefill
@@ -93,11 +95,11 @@ All numbers are from a DGX Spark (GB10) through Deno unless stated. Each row has
 
 Apple Silicon runs the same kernels through WebGPU on Metal. A few things differ:
 
-- **Wide fused MoE expert kernels** are the default on Apple adapters in Chrome and Safari, and the legacy layout everywhere else (#209). On an M5 Max in Chrome, MoE decode went up 5.6% plain and 11% speculative.
+- **Wide fused MoE expert kernels** are the default on Apple adapters in Chrome and Safari, and the legacy layout everywhere else. On an M5 Max in Chrome, MoE decode went up 5.6% plain and 11% speculative.
 - **Wide prefill submits every 8 layers** instead of once per chunk. One large submit lost the device on Metal under Deno.
-- **Per-component writes into a workgroup `vec4` array** lose neighbouring threads' writes on Metal. The tiled MoE prefill kernel gave garbage from the first token on Apple GPUs until that store was rewritten (#104).
+- **Per-component writes into a workgroup `vec4` array** lose neighbouring threads' writes on Metal. The tiled MoE prefill kernel gave garbage from the first token on Apple GPUs until that store was rewritten.
 
-For scale: an M5 Max decodes the MoE at 80 to 90 tok/s plain in Chrome, and the 27B at about 21.6 tok/s plain and 45 tok/s speculative. It moves memory about twice as fast as a GB10, and decode follows memory bandwidth.
+An M5 Max moves memory about twice as fast as a GB10, and decode follows memory bandwidth ([numbers](/docs/internals/benchmarks#one-device)).
 
 ## Tried and dropped
 

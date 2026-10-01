@@ -1,6 +1,6 @@
 ---
 title: What each device does
-eyebrow: Rooms
+eyebrow: Internals
 description: The model host tokenizes, samples and drafts. Workers run their layer ranges. Guests ask. What travels between them for each token, and how to see it.
 sidebar:
   label: What each device does
@@ -14,9 +14,7 @@ sidebar:
     (hop, tok/s, tokens here, per hop), CHANGELOG 1.0.0 ("Device screen"), CHANGELOG [Unreleased] (hostFuse one submit),
     room/gpuwake.js via protocol ai-wake (50 ms), room.js QUEUE_MAX = 10. */}
 
-import { Steps } from '@astrojs/starlight/components';
-
-Every device in a room has one of three jobs.
+Every device in a room has one of three jobs: model host, worker or guest. This page says what each does and how to see it in the room.
 
 | Role | Who | What it does |
 |---|---|---|
@@ -24,22 +22,13 @@ Every device in a room has one of three jobs.
 | **Worker** | Devices dealt a layer range | Runs its range of layers on its own GPU and passes the result to the next device. |
 | **Guest** | Devices with no layers | Chats and asks. That covers devices without WebGPU, phones left out of the split, devices For speed didn't need, and `pooled serve` API clients. |
 
-Anyone in the room can ask a question. The room answers one at a time. Up to 10 questions wait in the host's queue, at most two per device.
+Anyone in the room can ask. The room answers one question at a time. Up to 10 questions wait in the host's queue, at most two per device.
 
-## One token, step by step
-
-<Steps>
-
-1. The host turns the last token into a hidden state (embedding) and runs its own layers on it.
-2. It sends the hidden state to the first worker over a direct WebRTC connection. It is small: about 10 KB on the 27B and 4 KB on the MoE.
-3. Each worker runs its layers and sends the result on to the next device. The last one sends it back to the host.
-4. The host runs the output head, samples the next token and shows it on every screen.
-
-</Steps>
+## One token
 
 ```text
 host      embed the last token → hidden state
-   ↓ a few KB over WebRTC
+   ↓ a few KB over WebRTC (about 10 KB on the 27B, 4 KB on the MoE)
 laptop    layers 1–22           ─┐
 desktop   layers 23–43           ├─ each device runs its layers on its own GPU
 phone     layers 44–64          ─┘
@@ -47,43 +36,25 @@ phone     layers 44–64          ─┘
 host      final norm → output head → sample → next token (and draft the ones after it)
 ```
 
-One trip round the room is a **lap**. A lap costs every device's compute plus one network hop per device. That is why [For speed](/docs/rooms/split#for-speed) uses as few devices as it can.
+One trip round the room is a **lap**. A lap costs every device's compute plus one network hop per device, which is why [For speed](/docs/rooms/split#for-speed) uses as few devices as it can. The prompt goes round in pipelined batches of 16 tokens, and speculative decoding checks several drafted tokens per lap, so the text is the same as plain decoding. Both are explained in [Architecture](/docs/internals/architecture#one-token-end-to-end).
 
-## Reading the prompt
+Two things the host does for speed:
 
-The prompt is known in advance, so it goes round in batches of up to 16 tokens, with up to 6 batches in flight at once. While one device works on batch 2, the next one works on batch 1. Latency barely changes the time to the first token: at 50 ms one way it grew by at most 0.03 s in the room benchmark.
-
-## Speculative decoding in a room
-
-The 27B and the MoE have a built-in draft layer. On the host it guesses the next few tokens. A draft can also come from text already in the conversation (prompt lookup, up to 15 tokens). The room then checks the guess and the real token together in **one lap**, up to 16 tokens wide.
-
-- Accepted drafts are free tokens: one lap, several tokens.
-- The first wrong guess ends the run, and the room's own token is used. So the text is the same as plain decoding.
-- The host picks a draft depth of 3, 5 or 7 by the tokens per second it measures.
-
-On a real network this is what keeps a room usable: at 20–50 ms of latency it is 1.6–2.1× plain decoding on the MoE.
-
-## Small things the host does for speed
-
-- **One GPU submit per token.** The host runs the output head, the next token's embedding and its own layers as one command buffer with one readback.
-- **Phone GPU wake.** At the start of each lap, the host tells every phone that holds layers that a frame is on its way. The phone keeps its GPU busy until the frame arrives, for at most 50 ms, so the GPU hasn't clocked down when the real work starts. `?wake=0` turns this off.
+- **One GPU submit per token.** The output head, the next token's embedding and the host's own layers run as one command buffer with one readback.
+- **Phone GPU wake.** At the start of each lap, the host tells every phone that holds layers that a frame is on its way. The phone keeps its GPU busy until it arrives, for at most 50 ms, so the GPU hasn't clocked down. `?wake=0` turns this off.
 
 ## Seeing who does what
 
-**Device chips.** The header shows a chip per device: a status dot, an icon, the name and the memory it lends. Click a chip to open its card. API clients show as "API client · *tool*" with "no layers" and aren't counted as devices.
+**Device chips.** The header shows a chip per device: a status dot, an icon, the name and the memory it lends. Click one to open its card. API clients show as "API client · *tool*" with "no layers" and aren't counted as devices.
 
-**The device screen.** The black **Serve API** button opens a dark page. Its left half shows what this device is doing:
+**The device screen.** The black **Serve API** button opens a dark page whose left half shows what this device is doing:
 
 | Title | Meaning |
 |---|---|
 | Standing by | No model is running yet. |
-| Loading 40% | This device is downloading and loading its layers. |
-| Serving | This device holds layers, for example "Layers 1–20 · 2.4 GB · Qwen3.6 35B MoE". |
+| Loading 40% | Downloading and loading its layers. |
+| Serving | Holds layers, for example "Layers 1–20 · 2.4 GB · Qwen3.6 35B MoE". |
 | Not holding layers | The model runs on the other devices. This one can still ask. |
 | Room over / Host reconnecting | The host left, or its tab closed and the room is waiting a minute for it. |
 
-While it works, a **hop** dot flashes each time a pass reaches this device, next to its tok/s, the tokens it handled and the milliseconds per hop. More on that page: [The Serve API page](/docs/rooms/serve-api-page).
-
-:::tip
-A device that holds layers should stay in front, with its screen on and plugged in. A tab in the background can stall, and the room waits for it. The device screen warns you about both.
-:::
+While it works, a **hop** dot flashes each time a pass reaches this device, next to its tok/s, the tokens it handled and the milliseconds per hop. It also warns when the tab is in the background, the screen can sleep or the battery is low. See [Serve API](/docs/serve).
