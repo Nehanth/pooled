@@ -1,6 +1,6 @@
 ---
 title: Downloads and caching
-eyebrow: Rooms
+eyebrow: Internals
 description: Each device downloads only its own layers, from Hugging Face or from another device in the room, and keeps them for next time. How to see and delete what is cached.
 sidebar:
   label: Downloads and caching
@@ -17,7 +17,7 @@ sidebar:
     PR #234 (delete one cached model; phones don't store weights so the list stays hidden), PR #258 (flow control, prefetch dedupe),
     PR #245 (Start says what it downloads), room/errors.js fetchErrorText, docs/architecture.md "Memory and caching". */}
 
-When a room starts a model, each device downloads only the byte ranges of its own layers. A laptop that holds half the MoE fetches about half of its 20.8 GB, not the whole file.
+Where each device's weights come from, what the browser keeps, and how to delete it. Each device downloads only the byte ranges of its own layers: a laptop that holds half the MoE fetches about half of its 20.8 GB.
 
 | Model | Whole weights file |
 |---|---|
@@ -48,13 +48,13 @@ The host first reads the model's index (the file header, about 11 MB for the 27B
 
 **Downloaded weights** make a rejoin fast: a device that held the same layers before reloads them from disk in seconds. Every entry carries its size, and a short entry (a tab that died mid-write) is thrown away and downloaded again.
 
-**Converted weights** skip the CPU work on a second load. Some tensors (K-quants, BF16, F16, Q5_0, the embedding) are converted before they reach the GPU. That takes seconds per device. In a test with 48 such tensors (816 MB), the first load took 8.6 s and the second 0.8 s. The Q4_0 and Q8_0 matrices that stream straight to the GPU are not stored here. This cache only writes while the site keeps 1 GB or 15% of its storage quota free, and any problem with it falls back to converting as before.
+**Converted weights** skip the CPU work on a second load. Some tensors (K-quants, BF16, F16, Q5_0, the embedding) are converted before they reach the GPU, which takes seconds per device; with 48 such tensors (816 MB), a second load took 0.8 s instead of 8.6 s. The Q4_0 and Q8_0 matrices that stream straight to the GPU are not stored. The cache writes only while 1 GB or 15% of the site's storage quota stays free, and any problem with it falls back to converting.
 
 :::note[Phones]
 Phones don't keep downloaded weights. A phone tab has no spare memory for the copy the cache needs. A phone downloads its layers each time it loads them.
 :::
 
-The room also keeps checkpoints of the conversation on disk, so a reload doesn't re-read the whole chat. That is separate from the weights: see [Device drops and recovery](/docs/rooms/recovery#reloads).
+Conversation checkpoints on disk are separate from the weights: see [Device drops and recovery](/docs/rooms/recovery#reloads).
 
 ## See and delete cached models
 
@@ -68,15 +68,7 @@ The next Start downloads whatever was deleted again.
 
 ## When a download fails
 
-The room says what happened and what to do, and keeps the layers already cached. The usual ones:
-
-| You see | What to do |
-|---|---|
-| Can't reach Hugging Face to download the model… | Check your internet connection. A VPN, ad blocker or firewall can block it. Press Start again. |
-| Hugging Face is rate-limiting downloads (429)… | Wait a minute and press Start again. |
-| Hugging Face is busy or down right now (503)… | Wait a minute and press Start again. |
-
-All of them are in [Room errors](/docs/rooms/errors#downloads).
+The room says what happened and keeps the layers already cached. Most failures are a blocked or rate-limited connection to Hugging Face: wait a minute and press Start again. Every message is in [Troubleshooting](/docs/troubleshooting).
 
 ## URL options
 

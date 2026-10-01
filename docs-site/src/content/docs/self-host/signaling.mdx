@@ -20,15 +20,13 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-A room uses a signaling server only so its devices can find each other. By default that is the public PeerJS cloud (`0.peerjs.com`). It is free and shared, so it can be slow, down, or blocked on some networks. Run your own if you need rooms to be reliable. It also keeps room codes and device IP addresses off a third-party server.
+A signaling server only introduces a room's devices to each other. By default rooms use the public PeerJS cloud (`0.peerjs.com`), which is free and shared, so it can be slow, down or blocked. Run your own for reliable rooms, and to keep room codes and IP addresses off a third-party server.
+
+**Shortest path:** run `npx peer --port 9000 --path /` behind TLS, then open rooms with `?signal=signal.example.com`.
 
 ## What signaling does
 
-The host registers the room code. A joiner asks for that code, and the two devices swap WebRTC offers and network candidates through the server. After that, the links are direct (or go through a [TURN relay](/docs/self-host/turn)).
-
-- The model, the prompts and the answers never touch the signaling server.
-- A room that is already running keeps going if signaling drops.
-- While it is down, new devices can't join, and a host that reloads can't claim its room again.
+The host registers the room code; a joiner asks for it, and the two swap WebRTC offers through the server. After that the links are direct (or through a [TURN relay](/docs/self-host/turn)). Prompts, answers and the model never touch it. A running room keeps going if signaling drops, but new devices can't join and a reloading host can't reclaim its room until it's back.
 
 ## Run a PeerServer
 
@@ -52,7 +50,7 @@ Any PeerJS server 1.x works. The repo already has one as a dev dependency (`peer
 
 ### Put it behind TLS
 
-A page served over https (pooled.run, a Vercel preview, your own deployment) can only open `wss://`. So the server needs TLS. Either give it a certificate directly:
+An https page can only open `wss://`, so the server needs TLS. Give it a certificate:
 
 ```sh
 npx peer --port 9000 --path / --sslkey key.pem --sslcert cert.pem
@@ -71,10 +69,9 @@ npx peer --port 9000 --path / --proxied
 ```
 
 :::caution[Proxy settings]
-- The proxy must pass WebSocket upgrades through. Caddy does this by default. nginx needs `proxy_http_version 1.1` plus the `Upgrade` and `Connection` headers.
-- Joiners also make one plain HTTPS request, `GET <path>peerjs/id`, so that path must reach the server too.
-- The server allows any origin by default. If you restrict origins with `--cors`, include the room's origin.
-- Keep the default `--expire_timeout` (5 s) or something close. It sets how fast a joiner learns that a server has no such room and moves on to the next server.
+- Pass WebSocket upgrades through (Caddy does by default; nginx needs `proxy_http_version 1.1` and the `Upgrade` and `Connection` headers), and plain HTTPS `GET <path>peerjs/id` too.
+- If you restrict origins with `--cors`, include the room's origin.
+- Keep `--expire_timeout` near its 5 s default, so joiners move on quickly from a server without the room.
 :::
 
 ### Check it
@@ -98,7 +95,7 @@ It should print a fresh id (a UUID). With a non-default `--key`, the path is `/<
     http://127.0.0.1:8080/room?signal=127.0.0.1:9000                    local dev: ws, since the page is http
     ```
 
-    When `?signal=` is present it replaces every other setting: only the servers it names are tried, in order.
+    `?signal=` replaces every other setting: only the servers it names are tried, in order.
   </TabItem>
   <TabItem label="A whole deployment">
     If you [deploy the site yourself](/docs/self-host/deploy), define an ordered list before `room.js` loads, for example in `p2p.html`:
@@ -121,30 +118,25 @@ It should print a fresh id (a UUID). With a non-default `--key`, the path is `/<
 | `host:port/path` | `signal.example.com:443/pooled` | Same, under that path |
 | URL | `wss://signal.example.com:8443/pooled` | `wss://`, `ws://`, `https://` or `http://` |
 
-Without a port, a bare host or `host/path` uses 443, whether the page is http or https. A URL without a port uses 443 for `wss://` and `https://`, and 80 for `ws://` and `http://`.
+Without a port, a bare host uses 443; a URL uses 443 for `wss://`/`https://` and 80 for `ws://`/`http://`.
 
 ## How the fallback works
 
-You can list several servers. This is what the room does with the list (`room/signal.js`):
+You can list several servers (`room/signal.js`):
 
-- **Order.** The host tries the servers in order and uses the first one that registers the room code. A server counts as down when it refuses or drops the connection, fails TLS, or gives no answer within 8 s. The last server in the list gets 20 s, since nothing is left to try after it. The join screen shows which server it is trying.
-- **Taken codes.** "That code is already hosting a room" is an answer, not an outage, so it never triggers a fallback. Falling back there would split one room across two servers.
-- **Joiners.** A joiner walks the same list. When a server answers but has no such room, the joiner tries the next one, because the host may have fallen back to it. A joiner who comes from an invite link goes straight to the host's server: whenever the host isn't on the first server in the list, the link includes `?signal=` (and `dev=0`, so the page doesn't open in dev mode).
-- **Host reloads.** A host that reloads tries its room's server first, because its guests are there.
-- **All servers down.** The join screen says it can't reach the signaling server, that running rooms are not affected, and links to the self-hosting guide in the repo (`docs/self-host-signaling.md`). The Create and Join buttons work again, so you can retry.
-- **Drops during a room.** Every device shows a note under the header ("Lost the signaling server (…). The devices here keep working; new devices can't join until it's back. Reconnecting…"). Each device registers its id again with backoff: 2, 4, 8, 16 s, then every 30 s. The note clears when the server is back.
+- **The host** uses the first server that registers the room code. A server counts as down when it refuses, drops, fails TLS or doesn't answer within 8 s (20 s for the last one). "That code is already hosting a room" is an answer, not an outage, so it never falls back.
+- **A joiner** walks the same list, and tries the next server when one has no such room. An invite link goes straight to the host's server: it carries `?signal=` (and `dev=0`) whenever the host isn't on the first server.
+- **A host that reloads** tries its room's server first, because its guests are there.
+- **All servers down:** the join screen says so, running rooms are not affected, and you can retry.
+- **Drops during a room:** every device shows a note under the header and re-registers with backoff (2, 4, 8, 16 s, then every 30 s). Running rooms keep working; new devices can't join until it's back.
 
-:::note
-Signaling is not part of the room protocol. Devices on different Pooled versions still meet as long as they use the same server.
-:::
+Signaling is not part of the room protocol, so devices on different Pooled versions still meet on the same server.
 
 ## Test it
 
-These tests need no GPU.
+No GPU needed:
 
 ```sh
-deno test --allow-read tests/unit/signal_test.js   # spec parsing, list order, fallback rules against a fake Peer
+deno test --allow-read tests/unit/signal_test.js   # spec parsing, list order, fallback rules
 node tests/e2e/signal_fallback.mjs                 # the fallback end to end in headless Chromium
 ```
-
-`signal_fallback.mjs` starts two local PeerServers, makes the cloud unreachable with a resolver rule, and uses a TCP port that never answers as a black-holed server. It covers four cases: the cloud is down; one server is down for the host only; every server is down; and a server drops and comes back while a room is running.

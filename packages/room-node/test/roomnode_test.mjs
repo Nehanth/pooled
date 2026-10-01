@@ -60,9 +60,9 @@ test("dealPlan: layers by pledge, an iPhone held to 1 GB, phones left out when c
   const withPhone = RoomNode.dealPlan({ L, layerBytes, embedBytes, self, peers: [{ id: "b", name: "mac", meta: { contribGB: 8 } }, { id: "p", name: "iphone", meta: { contribGB: 6, ua: "iPhone", phone: true } }] });
   assert.deepEqual(withPhone.chain, ["b"]);
   assert.deepEqual(withPhone.leftOut, ["p"]);
-  // a model the computers cannot hold alone: the phone gets layers, at most 1 GB of them
+  // a model the computers cannot hold alone: the phone gets layers, at most 1 GB of them (14 + 24 + 2 layers)
   const big = RoomNode.dealPlan({ L: 40, layerBytes: 0.5 * GB, embedBytes: 1 * GB, self: { name: "a", meta: { contribGB: 8 } },
-    peers: [{ id: "b", name: "mac", meta: { contribGB: 11 } }, { id: "p", name: "iphone", meta: { contribGB: 6, ua: "iPhone", phone: true } }] });
+    peers: [{ id: "b", name: "mac", meta: { contribGB: 12 } }, { id: "p", name: "iphone", meta: { contribGB: 6, ua: "iPhone", phone: true } }] });
   assert.deepEqual(big.chain, ["b", "p"]);
   const phoneLayers = big.ranges[2][1] - big.ranges[2][0];
   assert.ok(phoneLayers >= 1 && phoneLayers * 0.5 <= 1.0001, `phone holds ${phoneLayers} layers`);
@@ -367,4 +367,176 @@ test("setPledge: a host tells the room, a device tells its host; the host's hell
   h.roster.set("p1", { name: "mac", meta: { webgpu: true, contribGB: 4 } });
   h.onData("p1", { t: "pledge", gb: 9 });
   assert.equal(h.conns.get("p1").meta.contribGB, 9);
+});
+
+test("dealPlan split: speed puts it all on the host when its pledge holds it; memory spreads by pledge; speed spills over when it doesn't", () => {
+  const self = { name: "spark", meta: { contribGB: 8 } };
+  const L = 28, layerBytes = 0.06 * GB, embedBytes = 0.6 * GB;
+  const peers = [{ id: "b", name: "mac", meta: { contribGB: 8 } }];
+  const speed = RoomNode.dealPlan({ L, layerBytes, embedBytes, self, peers, mode: "speed" });
+  assert.deepEqual(speed.chain, []); assert.deepEqual(speed.leftOut, ["b"]);
+  assert.deepEqual(speed.ranges, [[0, L]]);
+  const spread = RoomNode.dealPlan({ L, layerBytes, embedBytes, self, peers, mode: "memory" });
+  assert.deepEqual(spread.chain, ["b"]); assert.ok(spread.assigned[1] > 0);
+  // the host lends 1 GB: 6 layers there, the rest on the mac
+  const spill = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: "spark", meta: { contribGB: 1 } }, peers, mode: "speed" });
+  assert.deepEqual(spill.chain, ["b"]); assert.equal(spill.ranges[0][0], 0); assert.equal(spill.ranges.at(-1)[1], L);
+  assert.equal(spill.assigned[0], Math.floor((1 - 0.6) / 0.06));
+  const n = new RoomNode({ pledgeGB: 4, split: "speed" }); assert.equal(n.splitMode, "speed");
+  n.setSplit("spread"); assert.equal(n.splitMode, "memory");
+});
+
+test("dealPlan speed counts the KV cache like the room page: 1.7B, 2 GB + 2 GB splits (it does not all go to the host)", async () => {
+  const { roomBytes } = await import("../../../room/models.js");
+  const fitBytes = roomBytes("qwen3-1.7b", 8192, "f16");   // (2 + 2 GB is short at 16k: ctxPick opens it at 8k)
+  const p = RoomNode.dealPlan({ L: 28, layerBytes: 53494784, embedBytes: 330612736, self: { name: "spark", meta: { contribGB: 2 } },
+    peers: [{ id: "b", name: "mac", meta: { contribGB: 2 } }], mode: "speed", fitBytes });
+  assert.deepEqual(p.chain, ["b"]);
+  assert.ok(p.assigned[0] > 0 && p.assigned[0] < 28, `host holds ${p.assigned[0]}`);
+});
+
+test("ctxPick: the 1.7B at 16k when the pledges hold it, 8k when they are short for 16k, an asked --ctx stays", async () => {
+  const { nodeCtxFor } = await import("../roomnode.js");
+  const want = nodeCtxFor("qwen3-1.7b");
+  assert.equal(want, 16384);
+  const self = (gb) => ({ name: "laptop", meta: { contribGB: gb } });
+  const p4 = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4) });
+  assert.deepEqual([p4.ctx, p4.fits, p4.fellBack], [8192, true, true], "one laptop lending 4 GB: 8k");
+  assert.equal(p4.note, "Qwen3 1.7B · 8K context: the room's memory is short for 16K");
+  const p6 = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(6) });
+  assert.deepEqual([p6.ctx, p6.fits, p6.fellBack, p6.note], [16384, true, false, ""]);
+  // two devices together hold 16k
+  const two = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4), peers: [{ id: "b", name: "mac", meta: { contribGB: 3 } }] });
+  assert.equal(two.ctx, 16384);
+  // a share the host lowered (shareCap) counts as the device's pledge
+  const capped = RoomNode.ctxPick("qwen3-1.7b", { want, self: self(4), peers: [{ id: "b", name: "mac", meta: { contribGB: 3 } }], shareCap: new Map([["mac", 0.5]]) });
+  assert.equal(capped.ctx, 8192);
+  // --ctx 16384: no fallback (and short on 4 GB); short for both: 8k, not fitting
+  const asked = RoomNode.ctxPick("qwen3-1.7b", { want: nodeCtxFor("qwen3-1.7b", 16384), ask: 16384, self: self(4) });
+  assert.deepEqual([asked.ctx, asked.fits, asked.fellBack], [16384, false, false]);
+  assert.deepEqual([RoomNode.ctxPick("qwen3-1.7b", { want, self: self(3) }).ctx, RoomNode.ctxPick("qwen3-1.7b", { want, self: self(3) }).fits], [8192, false]);
+  // the MoE has no fallback: its context stays
+  assert.equal(RoomNode.ctxPick("qwen3.6-35b-moe", { want: 131072, self: self(4) }).ctx, 131072);
+});
+
+test("close() on a host tells the room it is over (bye closed, then leaving); a device told so stops waiting for it", async () => {
+  const n = fakeNode();
+  n.addPeer("a", "mac"); n.addPeer("b", "phone");
+  n.peer.destroy = () => {};
+  await n.close();
+  for (const id of ["a", "b"]) {
+    assert.deepEqual(n.sent[id].map((m) => m.t), ["bye", "leaving"]);
+    assert.equal(n.sent[id][0].closed, 1); assert.equal(n.sent[id][0].reason, "The host closed the room.");
+  }
+  // a device closing sends no bye: only its host can end the room
+  const d = fakeNode({ host: false, name: "mac" });
+  d.addPeer("pooled-room-TEST", "host"); d.peer.destroy = () => {};
+  await d.close();
+  assert.deepEqual(d.sent["pooled-room-TEST"].map((m) => m.t), ["leaving"]);
+
+  // the device's side: "closed" (not "bye", which reads as being turned away), and when the host's
+  // link then drops it neither knocks nor reports the host gone
+  const w = fakeNode({ host: false, name: "mac" });
+  w.addPeer("pooled-room-TEST", "host"); w.ai.hostId = "pooled-room-TEST"; w.admission = "in";
+  const seen = [];
+  for (const ev of ["closed", "bye", "hostgone", "roomover"]) w.on(ev, (x) => seen.push([ev, x]));
+  w.onData("pooled-room-TEST", { t: "bye", reason: "The host closed the room.", closed: 1 });
+  assert.deepEqual(seen, [["closed", "The host closed the room."]]);
+  w.hostGone();
+  assert.equal(w.knock, null, "no knocking on a closed room");
+  assert.deepEqual(seen.map((x) => x[0]), ["closed"]);
+  // a bye without closed from the host is still a bye (turned away)
+  const k = fakeNode({ host: false, name: "mac" });
+  k.addPeer("pooled-room-TEST", "host");
+  let bye = null; k.on("bye", (r) => { bye = r; });
+  k.onData("pooled-room-TEST", { t: "bye", reason: "no" });
+  assert.equal(bye, "no"); assert.ok(!k.roomClosed);
+});
+
+// #271: a pledge is a promise. The OpenClaw host (the room node) once re-dealt all 40 layers of the
+// MoE plus the embedding onto a Mac lending 14 GB after the other device left ("it may not fit").
+// Every layer a deal gives a device, with its KV cache (and the host's embedding/head), fits its pledge.
+const heldOk = (p, pledgesGB, fit) => p.assigned.every((a, k) => a * fit.layerBytes + (k === 0 ? fit.hostBytes : 0) <= pledgesGB[k] * GB + 1);
+test("dealPlan: a room short of the model deals nothing (the MoE on a Mac lending 14 GB); one that fits stays within every pledge", async () => {
+  const { roomBytes } = await import("../../../room/models.js");
+  const fit = roomBytes("qwen3.6-35b-moe", 16384, "f16");
+  const mac = { name: "mac", meta: { contribGB: 14 } }, stoat = { id: "s", name: "stoat", meta: { contribGB: 12 } };
+  for (const mode of ["speed", "memory"]) {
+    const alone = RoomNode.dealPlan({ L: fit.L, layerBytes: fit.layerBytes, embedBytes: fit.hostBytes, self: mac, peers: [], mode, fitBytes: fit });
+    assert.equal(alone.fit.fits, false, mode);
+    assert.deepEqual([alone.chain, alone.ranges, alone.assigned], [[], [], []], `${mode}: nothing dealt`);
+    const both = RoomNode.dealPlan({ L: fit.L, layerBytes: fit.layerBytes, embedBytes: fit.hostBytes, self: mac, peers: [stoat], mode, fitBytes: fit });
+    assert.equal(both.fit.fits, true, mode);
+    assert.deepEqual(both.chain, ["s"], mode);
+    assert.equal(both.assigned.reduce((a, b) => a + b, 0), fit.L, mode);
+    assert.ok(heldOk(both, [14, 12], fit), `${mode}: ${both.assigned}`);
+  }
+  // a share the host lowered after a killed load counts: stoat at 4 GB leaves the room short again
+  const capped = RoomNode.dealPlan({ L: fit.L, layerBytes: fit.layerBytes, embedBytes: fit.hostBytes, self: mac, peers: [stoat], fitBytes: fit, shareCap: new Map([["stoat", 4]]) });
+  assert.equal(capped.fit.fits, false);
+  assert.deepEqual(capped.chain, []);
+});
+
+test("dealPlan: never more layers than a pledge holds, whatever the pledges (random rooms)", async () => {
+  const { roomBytes } = await import("../../../room/models.js");
+  let seed = 7; const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  for (const key of ["qwen3-1.7b", "qwen3.6-35b-moe", "qwen3.8-27b"]) {
+    const fit = roomBytes(key, 16384, "f16");
+    for (let t = 0; t < 150; t++) {
+      const n = 1 + Math.floor(rnd() * 4), gbs = Array.from({ length: n }, () => Math.round(rnd() * 160) / 10 + 0.5);
+      const peers = gbs.slice(1).map((gb, i) => ({ id: "p" + i, name: "d" + i, meta: { contribGB: gb, ...(rnd() < 0.2 ? { phone: true, ua: "iPhone" } : {}) } }));
+      const p = RoomNode.dealPlan({ L: fit.L, layerBytes: fit.layerBytes, embedBytes: fit.hostBytes, self: { name: "h", meta: { contribGB: gbs[0] } }, peers, mode: rnd() < 0.5 ? "speed" : "memory", fitBytes: fit });
+      if (!p.fit.fits) { assert.deepEqual(p.assigned, []); continue; }
+      const pl = [gbs[0], ...p.chain.map((id) => Math.min(peers.find((x) => x.id === id).meta.phone ? 1 : Infinity, peers.find((x) => x.id === id).meta.contribGB))];
+      assert.equal(p.assigned.reduce((a, b) => a + b, 0), fit.L);
+      assert.ok(heldOk(p, pl, fit), `${key} ${gbs} -> ${p.assigned}`);
+    }
+  }
+});
+
+// the host's re-deal after a device in the chain left, with the model's source stubbed (no GPU, no
+// download): the 1.7B at 16k (28 layers of ~0.18 GB with their KV, ~0.62 GB on the host besides)
+function redealNode({ hostGB, peers }) {
+  const n = fakeNode({ name: "mac" });
+  n.meta.contribGB = hostGB; n.pledgeGB = hostGB;
+  for (const [id, name, gb] of peers) n.addPeer(id, name, { webgpu: true, contribGB: gb });
+  n.openSource = () => ({ M: { kind: "gguf" }, stat: {}, cfg: async () => ({ num_hidden_layers: 28 }),
+    header: async () => ({ tensors: new Proxy({}, { get: () => ({ byteLength: 1 << 20 }) }), meta: {} }), close: async () => {} });
+  n.broadcast = (m) => { for (const id of n.conns.keys()) n.sendTo(id, m); };
+  n.logs = []; n.log = (m) => n.logs.push(m);
+  return n;
+}
+test("re-deal after a device left: short of the pledges, the room stops and says so instead of over-dealing; when it fits it deals within the pledges", async () => {
+  const { roomBytes } = await import("../../../room/models.js");
+  const fit = roomBytes("qwen3-1.7b", 16384, "f16");
+  // mac lends 2 GB (7 layers + the embedding at 16k, or 12 at 8k), stoat 4 GB: the room held the model
+  // with stoat; stoat leaves and does not come back
+  const n = redealNode({ hostGB: 2, peers: [["s", "stoat", 4], ["k", "kiwi", 0.5]] });
+  n.ai.model = "qwen3-1.7b";
+  n.ai.engine = { maxSeq: 16384 }; n.ai.held = { model: "qwen3-1.7b", range: [0, 7], ctx: 16384, kv: "f16" }; n.ai.device = { destroy() {} };
+  n.ai.chain = ["s"]; n.ai.chainNames = ["stoat"]; n.ai.layersByName = { mac: "0–6", stoat: "7–27" }; n.ai.degraded = true; n.ai.gone = new Set(["s"]);
+  n.conns.delete("s");
+  let shortSaid = null; n.on("short", (x) => { shortSaid = x; });
+  await assert.rejects(n.redeal("stoat did not come back: re-dealing the layers"), (e) => e.short === true && /GB short for Qwen3 1\.7B/.test(e.message));
+  assert.equal(msgs(n, "k", "ai-load").length, 0, "no device is dealt layers");
+  assert.match(msgs(n, "k", "ai-start-failed")[0].why, /short/);
+  assert.equal(n.ai.engine, null, "the host's layers are freed: the room is stopped, not half up");
+  assert.deepEqual([n.ai.degraded, n.ai.online, n.ai.starting, n.ai.chain.length], [false, false, false, 0]);
+  assert.match(shortSaid, /^This room is [\d.]+ GB short for Qwen3 1\.7B/);
+  assert.equal(n.status().short, shortSaid);
+  assert.ok(!n.logs.some((l) => /may not fit|layer split/.test(l)), n.logs.join("\n"));
+  // a device joins and the room holds the model again: the next start deals, each within its pledge
+  n.addPeer("t", "tern", { webgpu: true, contribGB: 4 });
+  const p = n.start("qwen3-1.7b");
+  await assert.rejects(p);   // (no GPU here: the host's own load fails after the deal went out)
+  const load = msgs(n, "t", "ai-load")[0];
+  assert.ok(load, "tern is dealt layers");
+  const at = roomBytes("qwen3-1.7b", load.ctx, load.kv === "q8" ? "q8" : "f16");
+  const gbOf = { mac: 2, kiwi: 0.5, tern: 4 };
+  assert.equal(n.split.ranges.at(-1)[1], fit.L);
+  n.split.names.forEach((nm, k) => {
+    const [lo, hi] = n.split.ranges[k];
+    assert.ok((hi - lo) * at.layerBytes + (k === 0 ? at.hostBytes : 0) <= gbOf[nm] * GB, `${nm} holds ${hi - lo} layers at ${load.ctx}/${load.kv}`);
+  });
+  assert.equal(n.status().short, null);
 });

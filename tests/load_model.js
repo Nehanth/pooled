@@ -22,10 +22,14 @@ import { Qwen35Engine, prefillMathFeatures } from "../engine/qwen35.js";
 //   ATTN_PREFILL_TK=4|8|16  its positions per tile (default: the largest that fits the workgroup memory;
 //                         16 needs 32 KB, which gpuDevice() then requests from the adapter)
 //   ATTN_PREFILL_SPLITS=N its target number of context splits per pass (default 32)
+//   ATTN_DECODE=v1|v2     decode/verify attention: v2 = split-K attn_dec (engine/wgsl/attn_dec.js, the default), v1 = attn_flash
+//   ATTN_DECODE_SPLITS=N  its most splits per column (default 256 / kv heads)
 const envGet = (k) => globalThis.Deno?.env.get(k);
 if (envGet("ATTN_PREFILL_TILE")) Qwen35Engine.defaults.attnPrefillTile = envGet("ATTN_PREFILL_TILE") !== "0";
 if (envGet("ATTN_PREFILL_TK")) Qwen35Engine.defaults.attnPrefillTK = +envGet("ATTN_PREFILL_TK");
 if (envGet("ATTN_PREFILL_SPLITS")) Qwen35Engine.defaults.attnPrefillSplits = +envGet("ATTN_PREFILL_SPLITS");
+if (envGet("ATTN_DECODE")) Qwen35Engine.defaults.attnDecode = envGet("ATTN_DECODE");
+if (envGet("ATTN_DECODE_SPLITS")) Qwen35Engine.defaults.attnDecodeSplits = +envGet("ATTN_DECODE_SPLITS");
 
 // The room's engine settings for a Deno test or bench (engine/preset.js): ROOM_FLAGS takes the room's own
 // query-string switches, e.g. ROOM_FLAGS="draftvocab=0&kv=q8". Unset: exactly what the room runs.

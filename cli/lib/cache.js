@@ -14,6 +14,11 @@ import { createHash } from "node:crypto";
 
 export const defaultModelsDir = () => path.join(os.homedir(), ".pooled", "models");
 export const modelsDir = ({ flag = null, env = process.env } = {}) => flag || env.POOLED_MODELS || defaultModelsDir();
+// the models folder, made on first use (mkdir -p; only this user can write it) -> dir
+export function ensureModelsDir(dir = modelsDir()) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o755 });
+  return dir;
+}
 
 // the files one model needs: [{ name, url, bytes?, sha256?, main }] (main: the GGUF)
 export function modelFiles(key, MODELS, FILES = {}) {
@@ -28,6 +33,11 @@ export function modelFiles(key, MODELS, FILES = {}) {
 }
 
 const size = (p) => { try { return fs.statSync(p).size; } catch { return null; } };
+// the bytes a .part holds: a segmented download's .part is full size, its .json says how much is in
+const partDone = (part) => {
+  try { const m = JSON.parse(fs.readFileSync(part + ".json", "utf8")); return m.base + m.segs.reduce((a, g) => a + g.done, 0); }
+  catch { return size(part) || 0; }
+};
 
 // what is on disk for a model: { pulled, bytes (complete files), partBytes (.part files), main (the
 // GGUF's path when complete) }. local: the room node's older layout (packages/room-node/source.js
@@ -44,7 +54,7 @@ export function modelState(dir, key, MODELS, FILES = {}, local = null) {
     const p = f.main ? mainPath : path.join(folder, f.name);
     const s = size(p);
     if (s != null && (!f.bytes || s === f.bytes)) { bytes += s; if (f.main) main = p; }
-    else { pulled = false; partBytes += size(p + ".part") || 0; }
+    else { pulled = false; partBytes += partDone(p + ".part"); }
   }
   return { pulled, bytes, partBytes, main };
 }
@@ -86,12 +96,19 @@ async function sha256File(p, onProgress = () => {}) {
 
 // Download one file into dir (resuming its .part). onProgress({ name, done, total, resumed }) as bytes
 // arrive; onVerify(done, total) while the SHA-256 is checked. -> { path, bytes, skipped, resumedFrom }
-export async function pullFile(f, dir, { fetch = globalThis.fetch, signal, onProgress = () => {}, onVerify = () => {} } = {}) {
+// segments: a file of known size (room/models.js FILES) and at least minSegmentedBytes downloads in
+// this many ranges at once (one connection to Hugging Face gives ~35 MB/s on the Spark, four ~50+)
+export async function pullFile(f, dir, { fetch = globalThis.fetch, signal, onProgress = () => {}, onVerify = () => {}, segments = 4, minSegmentedBytes = 64 * 2 ** 20 } = {}) {
   fs.mkdirSync(dir, { recursive: true });
   const dest = path.join(dir, f.name), part = dest + ".part";
   const have = size(dest);
   if (have != null && (!f.bytes || have === f.bytes)) return { path: dest, bytes: have, skipped: true, resumedFrom: 0 };
   if (have != null) fs.rmSync(dest, { force: true });   // a wrong size under the final name: fetch it again
+  if (f.bytes && segments > 1 && f.bytes >= minSegmentedBytes) {
+    const r = await pullSegmented(f, part, { fetch, signal, onProgress, segments });
+    if (r) return finishPart(f, part, dest, r.from, { onVerify });
+  }
+  fs.rmSync(part + ".json", { force: true });
   let from = size(part) || 0;
   if (f.bytes && from > f.bytes) { fs.rmSync(part, { force: true }); from = 0; }
   let res = await fetch(f.url, { headers: from ? { range: `bytes=${from}-` } : {}, signal, redirect: "follow" });
@@ -130,6 +147,89 @@ export async function pullFile(f, dir, { fetch = globalThis.fetch, signal, onPro
     }
     await new Promise((r, j) => out.end((e) => (e ? j(e) : r())));
   }
+  return finishPart(f, part, dest, from, { total, onVerify });
+}
+
+// Several ranges at once into a .part of the file's full size, with <file>.part.json beside it saying
+// how far each range got ({ total, base, segs: [{ start, end, done }] }), so Ctrl-C or a dropped network
+// resumes each range where it stopped. A .part from a one-connection download (no .json) keeps its
+// bytes: the ranges cover the rest. -> { from } once every byte is in; null when the server ignores
+// ranges (the caller then downloads it in one piece); throws PullError otherwise.
+async function pullSegmented(f, part, { fetch, signal, onProgress, segments }) {
+  const total = f.bytes, metaPath = part + ".json";
+  let meta = null;
+  try { meta = JSON.parse(fs.readFileSync(metaPath, "utf8")); } catch {}
+  if (!meta || meta.total !== total || !Array.isArray(meta.segs) || size(part) !== total) {
+    // a .part without its .json: a one-connection download's first bytes
+    let base = meta ? 0 : size(part) || 0;
+    if (base > total) base = 0;
+    if (!base) fs.rmSync(part, { force: true });
+    const rest = total - base, n = Math.max(1, Math.min(segments, Math.ceil(rest / 2 ** 18)));
+    const segs = [];
+    for (let i = 0; i < n; i++) {
+      const a = base + Math.floor((rest * i) / n), b = base + Math.floor((rest * (i + 1)) / n);
+      if (b > a) segs.push({ start: a, end: b, done: 0 });
+    }
+    meta = { total, base, segs };
+    const fd0 = fs.openSync(part, base ? "r+" : "w");
+    fs.ftruncateSync(fd0, total);
+    fs.closeSync(fd0);
+    fs.writeFileSync(metaPath, JSON.stringify(meta));
+  }
+  const doneBytes = () => meta.base + meta.segs.reduce((a, g) => a + g.done, 0);
+  const from = doneBytes();
+  const save = () => { try { fs.writeFileSync(metaPath + ".tmp", JSON.stringify(meta)); fs.renameSync(metaPath + ".tmp", metaPath); } catch {} };
+  const ac = new AbortController();
+  const onAbort = () => ac.abort();
+  signal?.addEventListener("abort", onAbort);
+  if (signal?.aborted) ac.abort();
+  const fh = await fs.promises.open(part, "r+");
+  let noRanges = false, lastSave = Date.now();
+  onProgress({ name: f.name, done: from, total, resumed: from });
+  const one = async (g) => {
+    if (g.done >= g.end - g.start) return;
+    const res = await fetch(f.url, { headers: { range: `bytes=${g.start + g.done}-${g.end - 1}` }, signal: ac.signal, redirect: "follow" });
+    if (res.status !== 206) {
+      try { await res.body?.cancel(); } catch {}
+      if (res.ok) { noRanges = true; throw new PullError("no ranges", "no-ranges"); }
+      throw new PullError(`${f.name}: the server answered ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`, "http");
+    }
+    const said = totalOf(res, 0);
+    if (said != null && said !== total) throw Object.assign(new PullError(`${f.name}: the server's file is ${said} bytes, not the ${total} this pooled expects (a different file?)`, "size"), { said });
+    for await (const chunk of res.body) {
+      const want = g.end - g.start - g.done;
+      const n = Math.min(chunk.length, want);
+      if (n > 0) await fh.write(chunk, 0, n, g.start + g.done);
+      g.done += n;
+      onProgress({ name: f.name, done: doneBytes(), total, resumed: from });
+      if (Date.now() - lastSave > 1000) { lastSave = Date.now(); save(); }
+      if (g.done >= g.end - g.start) break;
+    }
+    if (g.done < g.end - g.start) throw new PullError(`${f.name}: a range stopped at ${g.start + g.done} of ${g.end}`, "short");
+  };
+  try {
+    const rs = await Promise.allSettled(meta.segs.map((g) => one(g).catch((e) => { ac.abort(); throw e; })));
+    await fh.close();
+    save();
+    if (noRanges) { fs.rmSync(metaPath, { force: true }); fs.rmSync(part, { force: true }); return null; }
+    // the range that failed first, not the others it stopped (AbortError)
+    const bad = rs.find((r) => r.status === "rejected" && r.reason?.name !== "AbortError")?.reason
+      || rs.find((r) => r.status === "rejected")?.reason;
+    if (bad) {
+      if (signal?.aborted) throw new PullError("stopped", "aborted");
+      if (bad.type === "size") { fs.rmSync(metaPath, { force: true }); fs.rmSync(part, { force: true }); }
+      if (bad instanceof PullError) throw bad;
+      if (bad.name === "AbortError") throw new PullError(`${f.name}: stopped`, "network");
+      throw new PullError(`${f.name}: ${bad.message}`, "network");
+    }
+    if (doneBytes() !== total) throw new PullError(`${f.name}: the download stopped at ${doneBytes()} of ${total} bytes (run it again to resume)`, "short");
+    fs.rmSync(metaPath, { force: true });
+    return { from };
+  } finally { signal?.removeEventListener("abort", onAbort); try { await fh.close(); } catch {} }
+}
+
+// a .part that is all there: its size, its SHA-256, then its final name
+async function finishPart(f, part, dest, from, { total = f.bytes || null, onVerify = () => {} } = {}) {
   const got = size(part) || 0;
   if (total != null && got !== total) {
     if (got > total) { fs.rmSync(part, { force: true }); throw new PullError(`${f.name}: ${got} bytes, more than the ${total} expected`, "size"); }
@@ -145,7 +245,7 @@ export async function pullFile(f, dir, { fetch = globalThis.fetch, signal, onPro
 
 // Pull every file of a model. onProgress({ file, done, total, allDone, allTotal }) over the whole
 // model (sizes of the small side files count once known). -> { dir, bytes, skipped }
-export async function pullModel(key, { dir, MODELS, FILES = {}, fetch = globalThis.fetch, signal, onProgress = () => {}, onVerify = () => {} } = {}) {
+export async function pullModel(key, { dir, MODELS, FILES = {}, fetch = globalThis.fetch, signal, onProgress = () => {}, onVerify = () => {}, segments, minSegmentedBytes } = {}) {
   const files = modelFiles(key, MODELS, FILES);
   if (!files.length) throw new PullError(`${key} is not a model this pooled can download`, "unknown");
   const d = path.join(dir, key);
@@ -153,7 +253,7 @@ export async function pullModel(key, { dir, MODELS, FILES = {}, fetch = globalTh
   const order = [...files.filter((f) => !f.main), ...files.filter((f) => f.main)];
   let bytes = 0, skipped = true;
   for (const f of order) {
-    const r = await pullFile(f, d, { fetch, signal, onVerify: (a, b) => onVerify(a, b, f),
+    const r = await pullFile(f, d, { fetch, signal, segments, minSegmentedBytes, onVerify: (a, b) => onVerify(a, b, f),
       onProgress: (p) => { if (f.main) onProgress({ file: f.name, done: p.done, total: p.total, resumed: p.resumed }); } });
     bytes += r.bytes; skipped &&= r.skipped;
     if (f.main && r.skipped) onProgress({ file: f.name, done: r.bytes, total: r.bytes, resumed: 0 });
@@ -217,4 +317,52 @@ export function resolveModel(input, keys) {
   const hits = keys.filter((k) => k.includes(t));
   if (hits.length === 1) return { key: hits[0] };
   return { error: hits.length ? `"${input}" matches more than one model: ${hits.join(", ")}` : `unknown model "${input}"`, choices: hits.length ? hits : keys };
+}
+
+// ---------------- one writer per model: <dir>/<model>/.pull.lock ----------------
+// Every download into the models folder takes this lock first: pooled pull, pooled host and pooled
+// join (pullrun.js pullWithProgress), and the OpenClaw plugin's onboarding and background pull
+// (packages/openclaw), which write the same <file>.part. The file holds { pid, host, at }. A lock whose
+// process is gone (a crash, a kill) is stale; one from another machine (a shared folder) counts for a
+// day. A stale lock is removed only if it is unchanged since it was read: another process may have
+// taken it over meanwhile, and removing its fresh lock would let two writers into one .part.
+export const pullLockPath = (dir, key) => path.join(dir, key, ".pull.lock");
+const pidAlive = (pid) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+};
+// -> a release() function, or null when another live process holds the lock
+export function tryPullLock(dir, key, { pid = process.pid, isAlive = pidAlive, hostname = os.hostname() } = {}) {
+  const p = pullLockPath(dir, key);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  for (let i = 0; i < 2; i++) {
+    try {
+      const fd = fs.openSync(p, "wx");
+      fs.writeSync(fd, JSON.stringify({ pid, host: hostname, at: new Date().toISOString() }));
+      fs.closeSync(fd);
+      let done = false;
+      return () => { if (done) return; done = true; try { if (JSON.parse(fs.readFileSync(p, "utf8")).pid === pid) fs.rmSync(p, { force: true }); } catch {} };
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      let holder = null, raw = null;
+      try { raw = fs.readFileSync(p, "utf8"); holder = JSON.parse(raw); } catch {}
+      const foreign = holder?.host && holder.host !== hostname;
+      const stale = !holder || (foreign ? Date.now() - Date.parse(holder.at || 0) > 864e5 : !isAlive(holder.pid));
+      if (!stale) return null;
+      try { if (fs.readFileSync(p, "utf8") === raw) fs.rmSync(p, { force: true }); } catch {}
+    }
+  }
+  return null;
+}
+// wait for the lock (another process downloading the same model) until it is free or signal aborts
+// -> release(); onWait() once, when it has to wait
+export async function pullLock(dir, key, { signal, pollMs = 2000, onWait = () => {}, ...o } = {}) {
+  let said = false;
+  for (;;) {
+    const rel = tryPullLock(dir, key, o);
+    if (rel) return rel;
+    if (!said) { said = true; onWait(); }
+    if (signal?.aborted) throw Object.assign(new Error("stopped"), { type: "aborted" });
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
 }

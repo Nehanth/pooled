@@ -29,7 +29,11 @@ test("join: bad arguments are usage errors that say what is wrong", () => {
   const bad = (argv, re) => assert.throws(() => parseLendArgs("join", argv), (e) => e instanceof UsageError && re.test(e.message), argv.join(" "));
   assert.equal(parseLendArgs("join", []).code, null);   // no code: a terminal asks for it, a script gets the usage error
   assert.equal(parseLendArgs("join", []).askCode, true);
-  bad(["not a code!"], /not "not a code!"/);
+  bad(["not a code!"], /"not a code!" is not a room code/);
+  assert.throws(() => parseLendArgs("join", ["not a code!"]), (e) => e.lines.length === 1 && e.lines[0] === 'pooled join: "not a code!" is not a room code (like 4TK-G9P) or an invite link.');
+  // an unknown option: one line with the nearest real one, and where the rest are
+  assert.throws(() => parseLendArgs("join", ["ABCD", "--gbb", "4"]), (e) => e.lines.join("\n") === 'pooled join: unknown option "--gbb". Did you mean "--gb"?\nRun pooled join --help for all options.');
+  assert.throws(() => parseLendArgs("host", ["--strat"]), (e) => e.lines[0] === 'pooled host: unknown option "--strat". Did you mean "--start"?');
   bad(["ABCD", "EFGH"], /one room code/);
   bad(["ABCD", "--gb", "lots"], /--gb must be a number/);
   bad(["ABCD", "--gb", "0.5"], /at least 1/);
@@ -69,8 +73,10 @@ test("--gb: numbers, max, and the per-device cap", () => {
 });
 
 test("the help texts name every option", () => {
-  for (const o of ["--gb", "--name", "--signal", "--models", "--no-check", "--wait", "--json-log", "--quiet", "--help"]) assert.ok(HELP_JOIN.includes(o), o);
-  for (const o of ["--model", "--gb", "--devices", "--code", "--ctx", "--name", "--signal", "--models", "--no-check", "--json-log"]) assert.ok(HELP_HOST.includes(o), o);
+  for (const o of ["--gb", "--name", "--signal", "--no-pull", "--no-check", "--wait", "--json-log", "--quiet", "--verbose", "--help"]) assert.ok(HELP_JOIN.includes(o), o);
+  for (const o of ["--model", "--gb", "--devices", "--code", "--ctx", "--name", "--signal", "--no-pull", "--no-check", "--json-log", "--verbose"]) assert.ok(HELP_HOST.includes(o), o);
+  // where the models are kept is pooled pull's business (--models / POOLED_MODELS are advanced overrides)
+  assert.ok(!HELP_JOIN.includes("--models") && !HELP_HOST.includes("--models"));
 });
 
 test("the help texts say what a device in a room sees", () => {
@@ -80,10 +86,13 @@ test("the help texts say what a device in a room sees", () => {
 
 test("deviceName: the same for a hostname every run, different across hostnames, never the hostname itself", () => {
   assert.equal(deviceName("mac-studio"), deviceName("mac-studio"));
-  assert.match(deviceName("mac-studio"), /^node-[a-z]{3}$/);
+  assert.match(deviceName("mac-studio", "darwin"), /^mac-[a-z]{3}$/);
+  assert.match(deviceName("spark", "linux"), /^linux-[a-z]{3}$/);
+  assert.match(deviceName("desk", "win32"), /^pc-[a-z]{3}$/);
+  assert.match(deviceName("x", "aix"), /^node-[a-z]{3}$/);
   assert.notEqual(deviceName("mac-studio"), deviceName("spark"));
   assert.ok(!deviceName("alice-laptop").includes("alice"));
-  assert.match(deviceName(""), /^node-[a-z]{3}$/);
+  assert.match(deviceName("", "darwin"), /^mac-[a-z]{3}$/);
 });
 
 // ---------------- memory ----------------
@@ -240,6 +249,26 @@ test("dawn: per-OS package first, then webgpu; a clear message when neither is i
   assert.equal(x.hint, "h");
 });
 
+test("errors: a kernel this GPU's shader compiler rejects says to join from the browser; the raw text only under --verbose", () => {
+  const raw = "FXC compile failed with error: E_FAIL msg: C:\\fakepath(51,3-35): error X3663: thread sync operation found in varying flow control\n/* Generated HLSL: */";
+  let x = explainError({ type: "shader-compile", kernel: "topk_b", raw: "" });
+  assert.equal(x.message, "This GPU's shader compiler can't build topk_b; join from Chrome or Edge instead (open the room's link).");
+  assert.equal(x.hint, "pooled join --verbose shows the compiler's error.");
+  assert.equal(x.code, 1);
+  x = explainError({ type: "shader-compile", kernel: "topk_b", raw });
+  assert.ok(x.hint.includes("X3663") && x.hint.includes("Generated HLSL"));
+});
+
+test("pooled host without --name: the same device name as pooled join (not the room node's random node-xxxx)", async () => {
+  const { readFileSync } = await import("node:fs");
+  for (const f of ["../lib/hostrun.js", "../lib/lendrun.js"]) {
+    const src = readFileSync(new URL(f, import.meta.url), "utf8");
+    const calls = src.match(/rn\.createRoom\(\{[^\n]*/g) || [];
+    assert.ok(calls.length >= 1, f);
+    for (const c of calls) assert.match(c, /name: opts\.name \|\| deviceName\(os\.hostname\(\)\)/, f);
+  }
+});
+
 test("Dawn installs with the package but never blocks it: webgpu is an optional dependency", async () => {
   const { readFileSync } = await import("node:fs");
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
@@ -270,7 +299,7 @@ test("join security: a quoted invite link gives its key; six-character codes gro
   assert.equal(j.code, "4TKG9P"); assert.equal(j.key, KEY);
   assert.equal(parseLendArgs("join", ["4tk-g9p"]).key, null);
   assert.equal(parseLendArgs("join", ["4tk-g9p"]).code, "4TKG9P");
-  assert.throws(() => parseLendArgs("join", ["4TKG9"]), (e) => e instanceof UsageError && /six letters and digits like 4TK-G9P/.test(e.message));
+  assert.throws(() => parseLendArgs("join", ["4TKG9"]), (e) => e instanceof UsageError && /like 4TK-G9P/.test(e.lines[0]));
   const h = parseLendArgs("host", ["--allow-all", "--code", "4tk-g9p"], { models: MODELS });
   assert.equal(h.allowAll, true); assert.equal(h.roomCode, "4TKG9P");
   assert.equal(parseLendArgs("host", [], { models: MODELS }).allowAll, false);
@@ -279,4 +308,28 @@ test("join security: a quoted invite link gives its key; six-character codes gro
   assert.match(HELP_JOIN, /invite link/);
   assert.equal(formatStatus({ code: "4TKG9P", phase: "lobby", passes: 0 }), "room 4TK-G9P · waiting for the host to let you in · 0 passes");
   assert.equal(formatStatus({ code: "4TKG9P", phase: "online", hosting: true, devices: 1, lobby: 2, passes: 0 }), "room 4TK-G9P · online · 1 device · 2 waiting to join · 0 passes");
+});
+
+test("leaving: a room node whose close hangs (a link dialed to a gone host) still lets pooled join exit within a second", async () => {
+  const { closeSoon, CLOSE_WAIT_MS } = await import("../lib/lendrun.js");
+  assert.ok(CLOSE_WAIT_MS <= 1000);
+  let closed = 0;
+  const t0 = Date.now();
+  await closeSoon({ close: () => { closed++; return new Promise(() => {}); } }, 50);
+  assert.equal(closed, 1); assert.ok(Date.now() - t0 < 500);
+  await closeSoon({ close: async () => { throw new Error("already closed"); } });
+  await closeSoon(null);
+});
+
+test("--ctx above the model's most: pooled host says what it gets instead of lowering it silently", async () => {
+  const { ctxNote } = await import("../lib/lend.js");
+  const { MODELS } = await import("../../room/models.js");
+  const { nodeCtxFor } = await import("../../packages/room-node/roomnode.js");
+  const rn = { MODELS, nodeCtxFor };
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 32768), "the 1.7B's context is 16384; using that");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 16384), "");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 8000), "", "rounding to 256 tokens is not worth a line");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 0), "", "no --ctx");
+  assert.equal(ctxNote(rn, "qwen3.6-35b-moe", 32768), "");
+  assert.match(ctxNote(rn, "qwen3.8-27b", 262144), /^the 27B's context is 65536; using that$/);
 });

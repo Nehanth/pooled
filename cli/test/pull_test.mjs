@@ -122,6 +122,67 @@ test("pull: a file of the wrong size or hash is rejected and never becomes the m
   } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("pull: a big file comes in several ranges at once, resumes each after an abort, and keeps a one-connection .part", async () => {
+  const { srv, seen, base } = await server();
+  const dir = tmp();
+  try {
+    const MODELS = fakeModels(base), FILES = { "fake-1b": { bytes: BODY.length, sha256: SHA } };
+    const seg = { segments: 4, minSegmentedBytes: 0 };
+    const gguf = path.join(dir, "fake-1b", "Fake-Q8.gguf"), part = gguf + ".part";
+    // straight through: four ranges that cover the file
+    const r = await pullModel("fake-1b", { dir, MODELS, FILES, ...seg });
+    assert.equal(r.skipped, false);
+    assert.deepEqual(fs.readFileSync(gguf), BODY);
+    const q = BODY.length / 4;
+    for (let i = 0; i < 4; i++) assert.ok(seen.ranges.includes(`bytes=${Math.floor(q * i)}-${Math.floor(q * (i + 1)) - 1}`), `range ${i}`);
+    assert.ok(!fs.existsSync(part) && !fs.existsSync(part + ".json"));
+    removeModel(dir, "fake-1b");
+    // stopped halfway: the .part and its .json say how far each range got; the next pull asks only for the rest
+    const ac = new AbortController();
+    await assert.rejects(pullModel("fake-1b", { dir, MODELS, FILES, ...seg, signal: ac.signal, onProgress: (p) => { if (p.done > BODY.length / 3) ac.abort(); } }),
+      (e) => e.type === "aborted");
+    const meta = JSON.parse(fs.readFileSync(part + ".json", "utf8"));
+    const had = meta.base + meta.segs.reduce((a, g) => a + g.done, 0);
+    assert.ok(had > 0 && had < BODY.length, `partial (${had})`);
+    assert.equal(modelState(dir, "fake-1b", MODELS, FILES).partBytes, had);
+    seen.ranges.length = 0;
+    let first = null;
+    await pullModel("fake-1b", { dir, MODELS, FILES, ...seg, onProgress: (p) => { first ??= p; } });
+    assert.equal(first.resumed, had);
+    for (const g of meta.segs) if (g.done < g.end - g.start) assert.ok(seen.ranges.includes(`bytes=${g.start + g.done}-${g.end - 1}`));
+    assert.deepEqual(fs.readFileSync(gguf), BODY);
+    assert.ok(!fs.existsSync(part + ".json"));
+    removeModel(dir, "fake-1b");
+    // a .part from a one-connection download (0.3.0): its bytes stay, the ranges fetch the rest
+    fs.mkdirSync(path.dirname(part), { recursive: true });
+    fs.writeFileSync(part, BODY.subarray(0, 1000000));
+    seen.ranges.length = 0;
+    await pullModel("fake-1b", { dir, MODELS, FILES, ...seg });
+    assert.deepEqual(fs.readFileSync(gguf), BODY);
+    assert.ok(seen.ranges.some((r) => r.startsWith("bytes=1000000-")), "starts after the bytes it had");
+  } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("pull: a server that ignores ranges still works (one connection), and a wrong size is caught in ranges too", async () => {
+  const srv = http.createServer((req, res) => { res.writeHead(200, { "content-length": BODY.length }); res.end(BODY); });
+  await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+  const base = `http://127.0.0.1:${srv.address().port}`;
+  const dir = tmp();
+  try {
+    const f = { name: "Fake-Q8.gguf", url: `${base}/Fake-Q8.gguf`, bytes: BODY.length, sha256: SHA, main: true };
+    const r = await pullFile(f, dir, { segments: 4, minSegmentedBytes: 0 });
+    assert.deepEqual(fs.readFileSync(r.path), BODY);
+    assert.ok(!fs.existsSync(r.path + ".part.json"));
+  } finally { srv.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+  const { srv: s2, base: b2 } = await server();
+  const d2 = tmp();
+  try {
+    await assert.rejects(pullFile({ name: "Fake-Q8.gguf", url: `${b2}/Fake-Q8.gguf`, bytes: BODY.length + 5, main: true }, d2, { segments: 4, minSegmentedBytes: 0 }),
+      (e) => e.type === "size");
+    assert.ok(!fs.existsSync(path.join(d2, "Fake-Q8.gguf.part")) && !fs.existsSync(path.join(d2, "Fake-Q8.gguf.part.json")));
+  } finally { s2.close(); fs.rmSync(d2, { recursive: true, force: true }); }
+});
+
 test("list and rm: what is here, what is not, partial downloads; rm deletes one model", async () => {
   const { srv, base } = await server();
   const dir = tmp();
@@ -189,4 +250,42 @@ test("pooled host <model>: the model as a positional (or a part of its name), --
   assert.equal(parseLendArgs("host", ["qwen3.6-35b-moe", "--model", "qwen3.6-35b-moe"], { models: MODELS }).modelGiven, true);
   const d = parseLendArgs("host", [], { models: MODELS });
   assert.equal(d.model, "qwen3-1.7b"); assert.equal(d.modelGiven, false);
+});
+
+test("one writer per model: .pull.lock, taken over only when its process is gone and it is unchanged", async () => {
+  const { tryPullLock, pullLock, pullLockPath } = await import("../lib/cache.js");
+  const fs2 = await import("node:fs"); const os2 = await import("node:os"); const path2 = await import("node:path");
+  const dir = fs2.mkdtempSync(path2.join(os2.tmpdir(), "pooled-lock-"));
+  const rel = tryPullLock(dir, "qwen3-1.7b");
+  assert.ok(rel, "free: taken");
+  const held = JSON.parse(fs2.readFileSync(pullLockPath(dir, "qwen3-1.7b"), "utf8"));
+  assert.equal(held.pid, process.pid); assert.equal(held.host, os2.hostname()); assert.ok(Date.parse(held.at));
+  assert.equal(tryPullLock(dir, "qwen3-1.7b", { pid: 999999 }), null, "a live holder (this process) keeps it");
+  rel();
+  assert.ok(!fs2.existsSync(pullLockPath(dir, "qwen3-1.7b")), "released");
+  // a dead holder's lock is taken over
+  fs2.writeFileSync(pullLockPath(dir, "qwen3-1.7b"), JSON.stringify({ pid: 424242, host: os2.hostname(), at: new Date().toISOString() }));
+  const rel2 = tryPullLock(dir, "qwen3-1.7b", { isAlive: () => false });
+  assert.ok(rel2); rel2();
+  // another machine's lock (a shared folder) counts for a day
+  fs2.writeFileSync(pullLockPath(dir, "qwen3-1.7b"), JSON.stringify({ pid: 1, host: "other-machine", at: new Date().toISOString() }));
+  assert.equal(tryPullLock(dir, "qwen3-1.7b", { isAlive: () => false }), null);
+  fs2.writeFileSync(pullLockPath(dir, "qwen3-1.7b"), JSON.stringify({ pid: 1, host: "other-machine", at: new Date(Date.now() - 2 * 864e5).toISOString() }));
+  const rel3 = tryPullLock(dir, "qwen3-1.7b"); assert.ok(rel3); rel3();
+  // a lock that changed after it was judged stale is not removed (someone took it over meanwhile)
+  fs2.writeFileSync(pullLockPath(dir, "qwen3-1.7b"), JSON.stringify({ pid: 424242, host: os2.hostname(), at: "x" }));
+  let calls = 0;
+  const r4 = tryPullLock(dir, "qwen3-1.7b", { isAlive: (pid) => { if (calls++ === 0) fs2.writeFileSync(pullLockPath(dir, "qwen3-1.7b"), JSON.stringify({ pid: 777, host: os2.hostname(), at: "y" })); return pid === 777; } });
+  assert.equal(r4, null, "the fresh lock stays");
+  assert.equal(JSON.parse(fs2.readFileSync(pullLockPath(dir, "qwen3-1.7b"), "utf8")).pid, 777);
+  // waiting: onWait once, then the lock when it frees; an abort stops the wait
+  let waited = 0;
+  setTimeout(() => fs2.rmSync(pullLockPath(dir, "qwen3-1.7b")), 60);
+  const r5 = await pullLock(dir, "qwen3-1.7b", { pollMs: 20, onWait: () => waited++, isAlive: () => true });
+  assert.equal(waited, 1); r5();
+  const keep = tryPullLock(dir, "qwen3-1.7b");
+  const ac = new AbortController(); setTimeout(() => ac.abort(), 50);
+  await assert.rejects(pullLock(dir, "qwen3-1.7b", { pollMs: 20, signal: ac.signal, pid: 5 }), /stopped/);
+  keep();
+  fs2.rmSync(dir, { recursive: true, force: true });
 });

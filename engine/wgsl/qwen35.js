@@ -197,6 +197,8 @@ function dnDeltaRegsWGSL() {
   const load = rows.map((i) => `s[${i}u] = dlm_s[Sb + ${i * 128}u + j];`).join(" ");
   const store = rows.map((i) => `dlm_s[Sb + ${i * 128}u + j] = s[${i}u];`).join(" ");
   const shadow = rows.map((i) => `dlm_shadow[so + ${i * 128}u] = s[${i}u];`).join(" ");
+  const loadPre = rows.map((i) => `s[${i}u] = dlm_c[Sb + ${i * 128}u + j];`).join(" ");
+  const storePre = rows.map((i) => `dlm_shadow[Sb + ${i * 128}u + j] = s[${i}u];`).join(" ");
   const loop1 = rows.map((i) => `{ let sd = s[${i}u] * decay; s[${i}u] = sd; vh += sd * dlr_k[${i}u]; sq += sd * dlr_q[${i}u]; kq += dlr_k[${i}u] * dlr_q[${i}u]; }`).join("\n      ");
   const loop2 = rows.map((i) => `s[${i}u] += dlr_k[${i}u] * d;`).join(" ");
   return `
@@ -211,21 +213,40 @@ fn dn_delta_mc(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_i
   let nCols = max(frame.nCols, 1u);
   let sSize = dlm_dn.nVH * 16384u;
   var s: array<f32, 128>;
-  ${load}
+  // Replay rollback. L.rp = [S_pre | cap columns of conv | of beta | of decay] (cap = mc.n).
+  // A verify pass (snap bit 31 + slot base) records into it through dlm_shadow: the state it
+  // starts from (first chunk) and exactly the inputs each column reads, at slot base + col, so
+  // no copies are needed around the pass. _restoreDN (bit 30) binds L.rp as dlm_c / dlm_beta /
+  // dlm_decay (read-only) and replays the accepted columns from S_pre.
+  let dlSB = frame.snap & 0xffu;               // snapshot slot base + 1 (0 = off)
+  let rec = dlSB != 0u && (frame.snap & 0x80000000u) != 0u;
+  let rpv = (frame.snap & 0x40000000u) != 0u;
+  let cap = dlm_mc.n;
+  let rG = sSize + cap * dlm_mc.s0; let rD = rG + cap * dlm_mc.s1;   // beta / decay regions of L.rp
+  let cB = select(0u, sSize, rpv); let gB = select(0u, rG, rpv); let dB = select(0u, rD, rpv);
+  if (rpv) { ${loadPre} } else { ${load} }
+  if (rec && dlSB == 1u) { ${storePre} }
   for (var col: u32 = 0u; col < nCols; col++) {
-    let qo = col * dlm_mc.s0 + kOff;
-    let ko = col * dlm_mc.s0 + dlm_dn.keyDim + kOff;
-    let vo = col * dlm_mc.s0 + 2u * dlm_dn.keyDim + vOff;
+    let qo = cB + col * dlm_mc.s0 + kOff;
+    let ko = cB + col * dlm_mc.s0 + dlm_dn.keyDim + kOff;
+    let vo = cB + col * dlm_mc.s0 + 2u * dlm_dn.keyDim + vOff;
     workgroupBarrier();                          // the previous column is done reading k/q
     dlr_k[j] = dlm_c[ko + j]; dlr_q[j] = dlm_c[qo + j];
     workgroupBarrier();
-    let decay = dlm_decay[col * dlm_mc.s1 + h];
+    let decay = dlm_decay[dB + col * dlm_mc.s1 + h];
+    let beta = dlm_beta[gB + col * dlm_mc.s1 + h];
+    if (rec) {
+      let slot = dlSB - 1u + col; let rc = sSize + slot * dlm_mc.s0;
+      dlm_shadow[rc + 2u * dlm_dn.keyDim + vOff + j] = dlm_c[vo + j];
+      if (h < dlm_dn.nKH) { dlm_shadow[rc + kOff + j] = dlr_q[j]; dlm_shadow[rc + dlm_dn.keyDim + kOff + j] = dlr_k[j]; }
+      if (j == 0u) { dlm_shadow[rG + slot * dlm_mc.s1 + h] = beta; dlm_shadow[rD + slot * dlm_mc.s1 + h] = decay; }
+    }
     var vh: f32 = 0.0; var sq: f32 = 0.0; var kq: f32 = 0.0;
       ${loop1}
-    let d = (dlm_c[vo + j] - vh) * dlm_beta[col * dlm_mc.s1 + h];
+    let d = (dlm_c[vo + j] - vh) * beta;
     ${loop2}
     dlm_o[col * dlm_mc.s2 + vOff + j] = (sq + d * kq) * scale;
-    let dlSB = frame.snap & 0xffu;               // snapshot slot base + 1 (0 = off); bit 31: replay rollback, no state snapshots
+    // bit 31: replay rollback, no state snapshots
     if (dlSB != 0u && (frame.snap & 0x80000000u) == 0u && dlSB + col < ((frame.snap >> 8u) & 0xffu)) {
       let so = (dlSB - 1u + col) * sSize + Sb + j;
       ${shadow}
@@ -492,8 +513,20 @@ fn dn_l2_mc(@builtin(global_invocation_id) gid: vec3<u32>) {
 @group(1) @binding(4) var<storage, read_write> dlm_o: array<f32>;
 @group(1) @binding(5) var<uniform> dlm_mc: MC;          // s0 conv stride, s1 gate stride, s2 out stride
 @group(1) @binding(6) var<uniform> dlm_dn: DN;
-@group(1) @binding(7) var<storage, read_write> dlm_shadow: array<f32>;   // [7][nVH*dState*dState]
+@group(1) @binding(7) var<storage, read_write> dlm_shadow: array<f32>;   // [7][nVH*dState*dState]; replay: L.rp
 ${dnDeltaRegsWGSL()}
+
+// _restoreDN: conv state <- its snapshot after verify column frame.nCols - 1 (a compute copy in
+// the replay pass instead of a blit per layer)
+@group(1) @binding(0) var<storage, read> cvr_src: array<f32>;       // conv_shadow
+@group(1) @binding(1) var<storage, read_write> cvr_st: array<f32>;  // convState [convDim*3]
+@group(1) @binding(2) var<uniform> cvr_mc: MC;                      // n = convDim * 3
+@compute @workgroup_size(64)
+fn dn_conv_restore(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= cvr_mc.n) { return; }
+  cvr_st[i] = cvr_src[(max(frame.nCols, 1u) - 1u) * cvr_mc.n + i];
+}
 
 // --- draft chain: the embedding row of the token the last argmax picked, dequantized on the GPU
 // exactly as the host's _embedRowF32 does (f16 scale x small integer: exact in f32), so K drafts
@@ -643,12 +676,18 @@ fn topk_b(@builtin(local_invocation_id) lid: vec3<u32>, @builtin(workgroup_id) w
   var lv: f32 = 0.0; var li: u32 = TK_NONE;
   for (var r: u32 = 0u; r < k; r++) {
     var bv: f32 = -3.402823e38; var bi: u32 = TK_NONE;
-    for (var e: u32 = t; e < m; e += 256u) {
-      let o = pb + (e / k) * R + 2u * (e % k);
-      let i = tb_p[o];
-      if (i == TK_NONE) { continue; }
-      let v = bitcast<f32>(tb_p[o + 1u]);
-      if ((r == 0u || tk_after(v, i, lv, li)) && tk_better(v, i, bv, bi)) { bv = v; bi = i; }
+    // the same per-thread order (e = t, t + 256, ...) with a trip count every thread shares: a loop
+    // whose exit depends on t, ahead of tk_reduce's barriers in this round loop, fails under FXC
+    for (var e0: u32 = 0u; e0 < m; e0 += 256u) {
+      let e = e0 + t;
+      if (e < m) {
+        let o = pb + (e / k) * R + 2u * (e % k);
+        let i = tb_p[o];
+        if (i != TK_NONE) {
+          let v = bitcast<f32>(tb_p[o + 1u]);
+          if ((r == 0u || tk_after(v, i, lv, li)) && tk_better(v, i, bv, bi)) { bv = v; bi = i; }
+        }
+      }
     }
     let w = tk_reduce(t, bv, bi);
     li = w.x; lv = bitcast<f32>(w.y);

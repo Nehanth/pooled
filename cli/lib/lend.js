@@ -4,6 +4,7 @@
 import { parseArgs } from "node:util";
 import { roomCodeFrom, roomKeyFrom } from "./room.js";
 import { cleanText } from "./common.js";
+import { argsError, needsRoom, notARoom } from "./cli.js";
 
 export const DESK_MAX_GB = 64;          // room/pledge.js: the most one computer lends a room
 export const DISCRETE_RESERVE_GB = 1.5; // kept free on a discrete GPU (the desktop, other apps)
@@ -26,19 +27,19 @@ export const HELP_JOIN = `Usage
   host lets this computer in at once. With the code alone (4TK-G9P), a host that asks before new
   devices join sees "<name> wants to join" and this waits until it presses Allow.
 
-  The layers come from ~/.pooled/models when the host's model is there (pooled pull <model>),
-  else each start streams this device's layers from Hugging Face.
+  The layers load from ~/.pooled/models: when the host's model is not there yet, pooled join
+  downloads it first (as pooled pull does), so this and every later join load from disk.
 
 Options
   --gb <n|max>      how much memory to lend, in GB. Default: the memory rule, printed at start:
                     a discrete GPU lends its free memory less ${DISCRETE_RESERVE_GB} GB; unified memory (Apple
                     silicon, GB10) lends the total less max(${UNIFIED_KEEP_GB} GB, ${Math.round(UNIFIED_KEEP_FRAC * 100)}%). "max" keeps only a
                     small margin. At most ${DESK_MAX_GB} GB per device.
-  --name <s>        how the room shows this device (default: "node-" and 3 letters made from this
-                    computer's hostname, the same each run, so a restart takes back its slot)
+  --name <s>        how the room shows this device (default: mac-, linux- or pc- and 3 letters
+                    made from the hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
                     default: the PeerJS cloud pooled.run uses)
-  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
+  --no-pull         don't download the model: stream this device's layers from Hugging Face
   --no-check        skip the test allocation that confirms the memory is there
   --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
                     (default 10); only a host of the same name: a room code can be reused by a
@@ -46,6 +47,7 @@ Options
 
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
+  --verbose         also show the GPU driver's own messages and a shader compiler's full error
   -h, --help        this help
 
   Every device that holds layers computes on every prompt in the room: this computer sees the
@@ -61,14 +63,17 @@ export const HELP_HOST = `Usage
   with the code.
 
   In a terminal, the room opens at once (its code and invite link at the top), then pooled host asks
-  for what the flags did not say: the model (with what each needs and whether it is downloaded) and
-  how much this computer lends. The room panel lists every device and its pledge, who waits to join
+  for what the flags did not say: the model (with what each needs and whether it is downloaded), how
+  to run it (pooled with other devices, or all of it here) and, pooled, how much this computer lends. The room panel lists every device and its pledge, who waits to join
   (press a to allow, d to deny), and whether the pledges hold the model; Enter starts once they do. When the
   room is online, c chats with it right there. Without a terminal, give the choices as flags.
 
   Every step has a flag; a flag given skips its question:
 
     [model] / --model <m>  the model (a part of the name works: 35b); skips the picker
+    --pool                 pool it with other devices: lend, then wait for them (split: spread)
+    --here                 run all of it on this computer: lends what it needs and starts; other
+                           devices can still join to chat. An error when it does not fit here
     --gb <n|max>           how much this computer lends; skips the pledge question
     -y, --yes              download the model without asking when it is not on this computer
     --no-pull              don't download: stream this computer's layers from Hugging Face
@@ -78,19 +83,23 @@ export const HELP_HOST = `Usage
     --deny-unknown         turn away devices that come with the code alone (the link still works)
     --chat                 chat here once the room is online
     --name <s>             how the room shows this computer
+    --split <speed|spread> speed: the fastest devices first (default); spread: across all
+                           devices by what each lends, even when one could hold the model
 
-  pooled host qwen3.6-35b-moe --gb 64 --start --yes runs with no questions at all. Without a
+  pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes runs with no questions at all. Without a
   terminal, the defaults are qwen3-1.7b, the memory rule and --start.
 
 More options
   --code <CODE>     the room code to use (default: a random one of six characters)
-  --ctx <n>         the context to ask for, in tokens (default: the model's room default)
+  --ctx <n>         the context to ask for, in tokens (default: the longest the model takes in a
+                    room: 16k on the 1.7B, 8k when the room is short of memory for 16k; 64k on
+                    the 27B, 128k on the MoE)
   --devices <n>     the same as --wait (its older name)
   --signal <spec>   PeerJS signaling server(s), as pooled join
-  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
   --no-check        skip the test allocation that confirms the memory is there
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
+  --verbose         also show the GPU driver's own messages and a shader compiler's full error
   -h, --help        this help
 
   pooled host --model list prints the models.
@@ -99,6 +108,17 @@ More options
 `;
 
 export class UsageError extends Error {}
+
+// --split: how the layers spread over the room, as the room page's "Layer split": "speed" (fastest
+// first, the default) or "memory" (across all devices by what each lends). Friendly names too.
+export function splitModeOf(v) {
+  if (v == null) return "speed";
+  const k = String(v).trim().toLowerCase();
+  if (["speed", "fastest", "fast", "fastest-first"].includes(k)) return "speed";
+  if (["spread", "memory", "all", "even", "across", "share"].includes(k)) return "memory";
+  throw new UsageError(`--split is "speed" (fastest first) or "spread" (across all devices), not "${v}"`);
+}
+export { needsRoom };
 
 // --gb: a positive number of GB, or "max" -> { gb } | { max: true } | null (not given)
 export function parseGb(v) {
@@ -112,11 +132,12 @@ export function parseGb(v) {
 
 const COMMON = {
   gb: { type: "string" }, name: { type: "string" }, signal: { type: "string" }, models: { type: "string" },
-  "no-check": { type: "boolean" }, "json-log": { type: "boolean" }, quiet: { type: "boolean" }, help: { type: "boolean", short: "h" },
+  "no-check": { type: "boolean" }, "json-log": { type: "boolean" }, quiet: { type: "boolean" }, verbose: { type: "boolean" },
+  "no-pull": { type: "boolean" }, help: { type: "boolean", short: "h" },
 };
 const HOST_OPTS = { model: { type: "string" }, devices: { type: "string" }, wait: { type: "string" }, code: { type: "string" }, ctx: { type: "string" },
-  "allow-all": { type: "boolean" }, "deny-unknown": { type: "boolean" }, start: { type: "boolean" }, chat: { type: "boolean" },
-  yes: { type: "boolean", short: "y" }, "no-pull": { type: "boolean" } };
+  "allow-all": { type: "boolean" }, "deny-unknown": { type: "boolean" }, start: { type: "boolean" }, chat: { type: "boolean" }, split: { type: "string" },
+  here: { type: "boolean" }, pool: { type: "boolean" }, yes: { type: "boolean", short: "y" } };
 
 // argv after the command word -> options, or throws UsageError. models: MODELS (room/models.js) for
 // checking --model; left out, any key passes (the runner checks it again)
@@ -126,18 +147,18 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
     : { ...COMMON, ...HOST_OPTS };
   let r;
   try { r = parseArgs({ args: argv, options, allowPositionals: true, strict: true }); }
-  catch (e) { throw new UsageError(e.message.replace(/^.*?: /, "")); }
+  catch (e) { throw Object.assign(new UsageError(e.message.replace(/^.*?: /, "")), { lines: argsError(cmd, e, Object.keys(options)) }); }
   const o = r.values, pos = r.positionals;
   if (o.help) return { cmd, help: true };
   const out = { cmd, gb: parseGb(o.gb), name: o.name ? cleanText(o.name, 40) : undefined, signal: o.signal || null,
-    modelDir: o.models || null, check: !o["no-check"], jsonLog: !!o["json-log"], quiet: !!o.quiet };
+    modelDir: o.models || null, check: !o["no-check"], jsonLog: !!o["json-log"], quiet: !!o.quiet, verbose: !!o.verbose, noPull: !!o["no-pull"] };
   if (o.name != null && !out.name) throw new UsageError("--name must not be empty");
   if (cmd === "join") {
     if (pos.length > 1) throw new UsageError(`one room code, not ${pos.length}: ${pos.join(" ")}`);
     const code = roomCodeFrom(pos[0]);
     // no code at all: a terminal asks for it (lendrun), a script gets this same error there
     if (!pos.length) { out.code = null; out.key = null; out.askCode = true; }
-    else if (!code) throw new UsageError(`give a room code (six letters and digits like 4TK-G9P; older rooms have four) or a room link${pos[0] ? `, not "${pos[0]}"` : ""}`);
+    else if (!code) throw Object.assign(new UsageError(notARoom("join", pos[0]).replace(/^pooled join: /, "")), { lines: [notARoom("join", pos[0])] });
     if (pos.length) {
       out.code = code;
       out.key = roomKeyFrom(pos[0]);   // the invite link's #k=: in without the host's Allow
@@ -163,7 +184,12 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
     out.allowAll = !!o["allow-all"];
     out.denyUnknown = !!o["deny-unknown"];
     if (out.allowAll && out.denyUnknown) throw new UsageError("--allow-all and --deny-unknown say opposite things: pick one");
-    out.start = !!o.start; out.chat = !!o.chat; out.yes = !!o.yes; out.noPull = !!o["no-pull"];
+    out.start = !!o.start; out.chat = !!o.chat; out.yes = !!o.yes;
+    out.split = splitModeOf(o.split);
+    out.splitGiven = o.split != null;
+    // --here: all of it on this computer; --pool: pooled with other devices (spread over them)
+    if (o.here && o.pool) throw new UsageError("--here and --pool say opposite things: pick one");
+    out.mode = o.here ? "here" : o.pool ? "pool" : null;
     out.gbGiven = o.gb != null;
     // --wait N (and its older name --devices N): deal once N devices (this one included) are in
     for (const [flag, v] of [["--devices", o.devices], ["--wait", o.wait]]) {
@@ -187,6 +213,15 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
   return out;
 }
 // the models a node can host (the loaders in packages/room-node/source.js)
+// --ctx above what the model takes: the room node lowers it (room/models.js maxSeqFor); say so.
+// rn: { MODELS, nodeCtxFor } (the room node) -> "the 1.7B's context is 16384; using that" | ""
+export function ctxNote(rn, model, ask) {
+  if (!(ask > 0) || !rn?.MODELS?.[model] || !rn.nodeCtxFor) return "";
+  const got = rn.nodeCtxFor(model, ask);
+  if (!(got > 0) || got > ask - 256) return "";   // (a context is rounded to 256 tokens)
+  const name = rn.MODELS[model].label.split("·")[0].trim().replace(/^Qwen[\d.]*\s+/, "");
+  return `the ${name}'s context is ${got}; using that`;
+}
 export const hostable = (models) => Object.keys(models).filter((k) => models[k].kind === "gguf" || models[k].kind === "qwen35");
 
 // ---------------- the memory rule ----------------
@@ -275,6 +310,20 @@ export const fmtCode = (c) => (String(c || "").length === 6 ? `${c.slice(0, 3)}-
 export const fmtGb = (x) => (Math.round(x * 10) / 10).toString();
 
 // ---------------- the status line ----------------
+const MB = (b) => Math.round((b || 0) / 1e6);
+// what a load is doing, from the room node's loadstat ({ from, fetched, total, bps }) and its %:
+// "downloading 312 of 900 MB · 18 MB/s · from Hugging Face", then "loading onto the GPU"
+export function loadText(load, pct = null) {
+  if (load?.total > 0) {
+    const streaming = load.from && load.from !== "disk";
+    if (streaming && load.fetched < load.total)
+      return `downloading ${MB(load.fetched)} of ${MB(load.total)} MB${load.bps ? ` · ${load.bps >= 1e6 ? MB(load.bps) : (load.bps / 1e6).toFixed(1)} MB/s` : ""} · from ${load.from}`;
+    if (!streaming && load.fetched < load.total) return `loading onto the GPU ${Math.floor((load.fetched / load.total) * 100)}% (from disk)`;
+    return "loading onto the GPU";
+  }
+  return `loading layers${pct != null ? ` ${pct}%` : ""}`;
+}
+
 // s: { code, phase, devices, range: [lo, hi) | null, model, tps, passes, pct, tries, host, signaling, hosting }
 // phases: connecting | waiting | ready | loading | online | answering | degraded | hostgone | rejoining | leaving
 export function formatStatus(s, width = 0) {
@@ -282,7 +331,7 @@ export function formatStatus(s, width = 0) {
     connecting: "connecting", lobby: "waiting for the host to let you in", waiting: s.hosting ? "waiting for devices" : "waiting for the host to deal layers",
     ready: "layers loaded: waiting for the rest of the room",
     guest: "in the room without layers (the host re-deals to include this device)",
-    loading: `loading layers${s.pct != null ? ` ${s.pct}%` : ""}`, online: "online", answering: "answering",
+    loading: loadText(s.load, s.pct), online: "online", answering: "answering",
     degraded: "a device left: waiting for it", hostgone: "lost the host: knocking", rejoining: `rejoining${s.tries ? ` (try ${s.tries})` : ""}`,
     leaving: "leaving",
   }[s.phase] || s.phase;
@@ -326,16 +375,18 @@ export function tpsFromStats(stats) {
 }
 
 // ---------------- errors ----------------
-// pooled join's default name: "node-" and 3 letters from the hostname (hashed: the hostname itself,
-// often a person's name, is not shown to the room), the same on every run, so a join started again
-// after a crash is re-seated in its old slot (the host knows a device by its name)
-export function deviceName(hostname = "") {
+// the default device name: the kind of computer ("mac", "linux", "pc") and 3 letters from the
+// hostname (hashed: the hostname itself, often a person's name, is not shown to the room), the same
+// on every run, so a join started again after a crash is re-seated in its old slot (the host knows a
+// device by its name)
+const KIND = { darwin: "mac", linux: "linux", win32: "pc" };
+export function deviceName(hostname = "", platform = process.platform) {
   let h = 2166136261;   // FNV-1a
   for (const ch of String(hostname)) { h ^= ch.codePointAt(0); h = Math.imul(h, 16777619) >>> 0; }
   const A = "abcdefghjkmnpqrstvwxyz";   // no i, l, o, u (they read alike)
   let s = "";
   for (let i = 0; i < 3; i++) { s += A[h % A.length]; h = Math.floor(h / A.length); }
-  return "node-" + s;
+  return (KIND[platform] || "node") + "-" + s;
 }
 
 // the host's protocol vs this one -> what to do about it
@@ -361,9 +412,19 @@ export function explainError(err, { code = "", cmd = "join", mine = 4 } = {}) {
   const msg = String(err?.message || err || "unknown error");
   const t = err?.type || err?.code || "";
   if (t === "dawn-missing" || t === "dawn-broken" || t === "room-node-missing") return { message: msg, hint: err.hint, code: 1 };
-  if (t === "no-adapter" || /no WebGPU adapter/i.test(msg))
+  if (t === "no-adapter" || /no WebGPU adapter/i.test(msg)) {
+    const driver = String(err?.driver || "").trim().split("\n").slice(-6).map((l) => cleanText(l, 200)).join("\n  ");
     return { message: "No WebGPU adapter: Dawn found no GPU it can use on this computer.",
-      hint: "It needs Metal (macOS 26 or newer), Vulkan (Linux: a Vulkan driver, e.g. the NVIDIA or Mesa one) or D3D12 (Windows). pooled serve works without a GPU.", code: 1 };
+      hint: "It needs Metal (macOS 26 or newer), Vulkan (Linux: a Vulkan driver, e.g. the NVIDIA or Mesa one) or D3D12 (Windows). pooled serve works without a GPU." +
+        (driver ? `\n  The GPU driver said:\n  ${driver}` : ""), code: 1 };
+  }
+  // a kernel this GPU's shader compiler rejects (FXC on a Windows PC without DXC, say): the browser's
+  // WebGPU compiles the same kernels with its own compiler. err.raw (the compiler's text) under --verbose
+  if (t === "shader-compile") {
+    const raw = String(err?.raw || "").trim();
+    return { message: `This GPU's shader compiler can't build ${cleanText(err.kernel || "one of the kernels", 60)}; join from Chrome or Edge instead (open the room's link).`,
+      hint: raw ? `The compiler said:\n${raw}` : "pooled join --verbose shows the compiler's error.", code: 1 };
+  }
   if (t === "low-memory")
     return { message: `Not enough GPU memory to lend: ${msg}.`, hint: "Close other GPU apps, or lend a set amount with --gb N (at least 1).", code: 1 };
   if (t === "room-not-found")

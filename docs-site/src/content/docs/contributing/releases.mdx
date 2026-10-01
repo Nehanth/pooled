@@ -21,21 +21,9 @@ Sources (origin/main 40bb0fa):
 
 import { Aside, Steps } from '@astrojs/starlight/components';
 
-Pooled deploys with Vercel's Git integration. The room and the landing page have no build step: Vercel serves those files as they are.
+Every merge to `main` deploys [pooled.run](https://pooled.run). Other branches deploy nothing unless a commit message contains `[preview]`; then they get a public preview at `https://pooled-git-<branch>-nehanths-projects.vercel.app`. The details are in [Deploying the site](/docs/self-host/deploy#how-pooledrun-is-deployed).
 
 ## Where a push goes
-
-| Push to | Deploys to |
-|---|---|
-| `main` | Production, [pooled.run](https://pooled.run). Every merge to `main` is a production release. |
-| Any other branch | Nothing, unless the commit message contains `[preview]`. |
-| A commit with `[preview]` in its message | A public preview at `https://pooled-git-<branch>-nehanths-projects.vercel.app`. On a PR, a bot comments with the link. |
-
-The rule lives in `ignoreCommand` in `vercel.json`: production always builds, and anything else builds only when asked. The staging alias, `https://pooled-dev.vercel.app`, follows the `feat/engine-opt` branch, so a push there also needs `[preview]` to build.
-
-<Aside type="note">
-The first part of the preview host is the Vercel project's name, so the URL changes if the project is renamed. A pull request from a fork builds only with `[preview]` in its commit message, and a maintainer has to approve the deployment.
-</Aside>
 
 ### Get a preview of your branch
 
@@ -44,7 +32,7 @@ The first part of the preview host is the Vercel project's name, so the URL chan
 3. Check the deployment's commit before you trust what it shows.
 4. Test the room at `/room`, not `/p2p.html`. `/p2p.html` redirects to `/room`.
 
-A preview is also how you test on a real iPhone. iOS gives WebGPU only to `https` pages, so the phone can't use a plain `http` checkout on your laptop's address.
+A preview is also how you test on a real iPhone, since iOS gives WebGPU only to `https` pages.
 
 <Aside type="caution">
 Vercel refuses to deploy commits whose author email isn't on a GitHub account. Check `git config user.email` before you push.
@@ -74,14 +62,8 @@ A change to the room protocol bumps the minor version. The protocol number itsel
 
 ### The CLI
 
-`@pooled/cli` (`pooled serve`) has its own version in `cli/package.json` and is published to npm separately from the site. Its changes still go into the main `CHANGELOG.md`.
+`@pooled/cli` has its own version in `cli/package.json` and is published to npm separately. Its changes still go into `CHANGELOG.md`.
 
 ## Old links keep working
 
-`swarmllm.ai` and `www.swarmllm.ai` stay attached to the Vercel project. `vercel.json` sends every request on them to the same path on pooled.run with a permanent redirect, and the query string carries over. Old join links like `swarmllm.ai/r/ABCD?signal=...` therefore still work. `www.pooled.run` redirects to `pooled.run` the same way. Don't remove these rules: people have the old links saved.
-
-Browser storage is per site. A device that downloaded weights on swarmllm.ai downloads them again the first time it opens pooled.run.
-
-## When Vercel's Git integration is down
-
-`scripts/deploy-staging.sh` (`npm run deploy:staging`) deploys your working tree with the Vercel CLI and points `pooled-dev.vercel.app` at it. Use it only as a fallback.
+`vercel.json` permanently redirects `swarmllm.ai`, `www.swarmllm.ai` and `www.pooled.run` to the same path and query on pooled.run, so old join links like `swarmllm.ai/r/ABCD?signal=...` still work. Don't remove these rules. (Weights cached on swarmllm.ai download again on pooled.run: browser storage is per site.)

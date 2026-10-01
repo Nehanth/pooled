@@ -4,7 +4,9 @@
 // ATTN_PREFILL_TILE=0 (read by load_model.js) turns the tiled prefill attention off, the one accepted deviation.
 // The prompt is a frozen fixture (golden/q38_bits_prompt.txt, the first 150 lines of engine/gguf.js as of
 // kopt/combined). It used to be read live from engine/gguf.js, so a comment edit there changed the prompt and
-// the hashes. Reference (GB10): ATTN_PREFILL_TILE=0 -> BITS plain 85b12667 hidden eba0b8d5; default -> 8a532ef5 / 52f2ae10.
+// the hashes. Reference (GB10, attnDecode v2, the default since perf/kf-long-context): ATTN_PREFILL_TILE=0 ->
+// BITS plain f0537158 hidden 5d287854; default -> c26dbc5 / 3177f9f1. With ATTN_DECODE=v1 (attn_flash, the
+// default before): 4f70a9ca / 5eb28e41 and 4cac59d8 / a67b7bcd. Greedy and spec tokens are the same in all four.
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
 import { openGGUF, Q38_PATH, gpuDevice } from "./load_model.js";

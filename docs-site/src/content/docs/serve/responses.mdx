@@ -1,6 +1,6 @@
 ---
 title: Responses
-eyebrow: Serve API
+eyebrow: Serve API reference
 description: POST /v1/responses, the OpenAI API Codex CLI uses. Input items, function and custom tools, previous_response_id and the full event stream.
 sidebar:
   label: Responses
@@ -12,7 +12,7 @@ sidebar:
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Base URL: `http://127.0.0.1:8080/v1`. It runs on the same machinery as [Chat Completions](/docs/serve/chat-completions): same model, same tool calling, same limits.
+`POST http://127.0.0.1:8080/v1/responses`, the API Codex CLI uses. Same model, tool calling and limits as [Chat Completions](/docs/serve/chat-completions).
 
 <Tabs syncKey="lang">
 <TabItem label="curl">
@@ -38,17 +38,6 @@ print(r.output_text)
 # Continue from the stored response
 r2 = client.responses.create(model="pooled", previous_response_id=r.id, input="Shorter.")
 print(r2.output_text)
-```
-
-</TabItem>
-<TabItem label="JavaScript">
-
-```js
-import OpenAI from "openai";
-
-const client = new OpenAI({ baseURL: "http://127.0.0.1:8080/v1", apiKey: "pooled" });
-const stream = client.responses.stream({ model: "pooled", input: "What is a KV cache?" });
-for await (const ev of stream) if (ev.type === "response.output_text.delta") process.stdout.write(ev.delta);
 ```
 
 </TabItem>
@@ -106,7 +95,7 @@ Output items come in the order they were generated: reasoning, then the message,
 
 A stream is the full Responses event sequence, each event with an increasing `sequence_number`: `response.created`, `response.in_progress`, the output item, content part and delta events, and finally `response.completed`, `response.incomplete` or `response.failed`.
 
-While the request waits in the queue or the room prefills, the bridge repeats `response.in_progress` every 10 s. These are real events, not SSE comments. Clients such as Codex reset their idle timer only on events.
+While the request waits or the room reads a long prompt, the bridge repeats `response.in_progress` every 10 s: real events, since clients such as Codex reset their idle timer only on events.
 
 Reasoning streams as a `reasoning` item with a `reasoning_text` content part: `response.reasoning_text.delta` events, then `response.reasoning_text.done`.
 

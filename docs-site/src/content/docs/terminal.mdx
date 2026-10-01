@@ -1,7 +1,7 @@
 ---
 title: Rooms from the terminal
 eyebrow: Preview
-description: pooled pull downloads a model, pooled host opens a room on this computer, pooled join lends its GPU to a room, and pooled chat talks to a room's model. No browser needed. A preview, not on npm yet.
+description: pooled pull downloads a model, pooled host opens a room on this computer, pooled join lends its GPU to a room, and pooled chat talks to a room's model. No browser needed. A preview, on npm since @pooled/cli 0.3.0.
 sidebar:
   label: Rooms from the terminal
   order: 1
@@ -20,19 +20,18 @@ Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gat
 - cli/lib/chat.js, chatrun.js: /clear /think /help /exit /bye, Ctrl-C, one-shot mode, --wait 120, explain() errors
 - cli/README.md "Talk to a room: pooled chat" and "Lend a computer: pooled join / pooled host" (transcripts,
   reconnect backoff 2/4/8/16/30 s, knock for a minute, --wait 10 min, same-name host only, stable node- name,
-  Dawn optional: npx -p @pooled/cli -p webgpu@0.6.1, "Who sees what", macOS 26+ / glibc 2.38+ / Windows untested)
+  Dawn optional: npx -p @pooled/cli -p webgpu@0.6.1, "Who sees what", macOS 26+ / glibc 2.38+ / Windows (D3D12, tested 2026-10-01 on an RTX 5070))
 - PR #270 body: transcripts (its "until #268 is deployed … only with --allow-all" note is out of date: #268 is merged)
 - room/joingate.js on main (#268): the room page sends join: 1, waits in the lobby, takes #k= keys; CHANGELOG #268 entry
-- npm view @pooled/cli version = 0.2.0 (serve only); webgpu 0.6.1; cli/package.json 0.2.1, engines node >=22
+- npm view @pooled/cli version = 0.3.0 (2026-09-30: pull, host, join, chat and serve; webgpu an optional dependency that installs with it, #273); engines node >=22
 - pooled pull / list / rm, the interactive host and join (cli/lib/cache.js, pullrun.js, hostui.js, hostrun.js; transcripts from
   pty runs on the Spark 2026-09-30)
-TODO(verify): the npx lines are what the README says users will run once published; not runnable until then.
 */}
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-:::caution[Preview: not on npm yet]
-`pooled pull`, `pooled host`, `pooled join` and `pooled chat` are in [PR #270](https://github.com/Nehanth/pooled/pull/270), not in a release. The `@pooled/cli` on npm (0.2.0) has only `serve`. The commands on this page are the ones you will run once it is published. Until then, run them from a checkout of that branch as `node cli/bin/pooled.js …` (see [From a checkout](#from-a-checkout)).
+:::caution[Preview]
+`pooled pull`, `pooled host`, `pooled join` and `pooled chat` are on npm since `@pooled/cli` 0.3.0. They are new: expect rough edges, and use `npx @pooled/cli@latest` to get the newest.
 :::
 
 A few commands put a room in your terminal:
@@ -69,7 +68,7 @@ pooled join 4TK-G9P
 </TabItem>
 </Tabs>
 
-`webgpu` (Dawn, about 95 MB with the builds for five systems) is an optional dependency, so a plain `npm install @pooled/cli` doesn't fetch it. `join` and `host` load it when they start and say how to install it if it is missing.
+`webgpu` (Dawn, about 95 MB with the builds for five systems) is an optional dependency: `npm install -g @pooled/cli` installs it when it can, and if it can't, `join` and `host` say how to add it.
 
 ### Supported systems
 
@@ -79,7 +78,9 @@ pooled join 4TK-G9P
 |---|---|---|
 | macOS 26 or newer | Metal | Tested (Mac Studio, M5 Max) |
 | Linux with glibc 2.38 or newer (Ubuntu 24.04) | Vulkan (the NVIDIA or Mesa driver) | Tested (DGX Spark, GB10) |
-| Windows | D3D12 | Not tested yet |
+| Windows | D3D12 | Tested (Windows 11, RTX 5070) |
+
+On Windows the browser is the fallback: if `pooled join` says this GPU's shader compiler can't build a kernel, open the room's link in Chrome or Edge, which compile the same kernels with their own compiler. On a computer with two GPUs (integrated and discrete), set Chrome or Edge to **High performance** in Windows Settings > System > Display > Graphics, or the browser picks the integrated GPU.
 
 Phones join from the room page, not from the terminal. See [Phones and tablets](/docs/phones).
 
@@ -294,12 +295,14 @@ Send the **invite** line to the devices you want in: a browser tab, a phone, or 
 Every step has a flag. A flag you give skips its question, so this asks nothing at all:
 
 ```bash
-pooled host qwen3.6-35b-moe --gb 64 --start --yes
+pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes
 ```
 
 | Flag | Skips or does |
 |---|---|
 | `[model]`, `--model <m>` | The model picker. A part of the name works: `35b`. |
+| `--pool` | The "how do you want to run it" question: pooled with other devices, split across all of them. |
+| `--here` | The same question: all of it on this computer, lending what it needs, and it starts by itself. An error when it doesn't fit here. |
 | `--gb <n\|max>` | The pledge question. |
 | `-y`, `--yes` | Downloads a model that is not on this computer without asking. |
 | `--no-pull` | Doesn't download: this computer streams its layers from Hugging Face on every start. |
@@ -333,14 +336,17 @@ Usage
   with the code.
 
   In a terminal, the room opens at once (its code and invite link at the top), then pooled host asks
-  for what the flags did not say: the model (with what each needs and whether it is downloaded) and
-  how much this computer lends. The room panel lists every device and its pledge, who waits to join
+  for what the flags did not say: the model (with what each needs and whether it is downloaded), how
+  to run it (pooled with other devices, or all of it here) and, pooled, how much this computer lends. The room panel lists every device and its pledge, who waits to join
   (press a to allow, d to deny), and whether the pledges hold the model; Enter starts once they do. When the
   room is online, c chats with it right there. Without a terminal, give the choices as flags.
 
   Every step has a flag; a flag given skips its question:
 
     [model] / --model <m>  the model (a part of the name works: 35b); skips the picker
+    --pool                 pool it with other devices: lend, then wait for them (split: spread)
+    --here                 run all of it on this computer: lends what it needs and starts; other
+                           devices can still join to chat. An error when it does not fit here
     --gb <n|max>           how much this computer lends; skips the pledge question
     -y, --yes              download the model without asking when it is not on this computer
     --no-pull              don't download: stream this computer's layers from Hugging Face
@@ -350,19 +356,22 @@ Usage
     --deny-unknown         turn away devices that come with the code alone (the link still works)
     --chat                 chat here once the room is online
     --name <s>             how the room shows this computer
+    --split <speed|spread> speed: the fastest devices first (default); spread: across all
+                           devices by what each lends, even when one could hold the model
 
-  pooled host qwen3.6-35b-moe --gb 64 --start --yes runs with no questions at all. Without a
+  pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes runs with no questions at all. Without a
   terminal, the defaults are qwen3-1.7b, the memory rule and --start.
 
 More options
   --code <CODE>     the room code to use (default: a random one of six characters)
-  --ctx <n>         the context to ask for, in tokens (default: the model's room default)
+  --ctx <n>         the context to ask for, in tokens (default: the longest the model takes in a
+                    room: 16k on the 1.7B, 64k on the 27B, 128k on the MoE)
   --devices <n>     the same as --wait (its older name)
   --signal <spec>   PeerJS signaling server(s), as pooled join
-  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
   --no-check        skip the test allocation that confirms the memory is there
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
+  --verbose         also show the GPU driver's own messages
   -h, --help        this help
 
   pooled host --model list prints the models.
@@ -485,6 +494,7 @@ Each error says what happened and what to do. The exit status is 1.
 | You see | What to do |
 |---|---|
 | No WebGPU adapter: Dawn found no GPU it can use on this computer. | It needs Metal (macOS 26 or newer), Vulkan (Linux: a Vulkan driver, for example the NVIDIA or Mesa one) or D3D12 (Windows). `pooled chat` and `pooled serve` work without a GPU. |
+| This GPU's shader compiler can't build topk_b; join from Chrome or Edge instead (open the room's link). | Open the room's link in Chrome or Edge on this computer. `--verbose` shows the compiler's own error (worth a bug report). |
 | Not enough GPU memory to lend: … | Close other GPU apps, or lend a set amount with `--gb N` (at least 1). |
 | The GPU ran out of memory: … | Lend less with `--gb N`, or close other GPU apps. |
 | No room HJQ-N44. | Check the code, and that the host's page (or `pooled host`) is still open. |
@@ -499,11 +509,10 @@ Each error says what happened and what to do. The exit status is 1.
 
 ## From a checkout
 
-Until the package is published:
+To run what is on `main` before it is published:
 
 ```bash
 git clone https://github.com/Nehanth/pooled.git && cd pooled
-git checkout feat/pooled-join
 cd cli && npm ci && npm run build && (cd ../packages/room-node && npm install)
 node bin/pooled.js host --help
 node bin/pooled.js join HJQ-N44

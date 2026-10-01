@@ -41,11 +41,11 @@ The client tools read their own variables. These are the ones the banner prints:
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | Claude Code | `1` |
 | `OPENCODE_DISABLE_CLAUDE_CODE` | opencode | `1` |
 
-See [Serve API recipes](/docs/serve/recipes) for why each one matters.
+See [Connect your tools](/docs/serve/recipes).
 
 ## TURN relay (/api/turn)
 
-Set in the Vercel project (**Settings → Environment Variables**, for Production and Preview) for `api/turn.mjs`, the function that gives each room short-lived relay credentials. pooled.run sets the Cloudflare pair. With neither provider set, `POST /api/turn` answers `204` and rooms use direct links only. Environment variables reach only new deployments, so redeploy after changing them.
+Set in the Vercel project for `api/turn.mjs`, then redeploy. pooled.run sets the Cloudflare pair. With neither provider set, `POST /api/turn` answers `204` and rooms use direct links only.
 
 | Variable | What it does |
 |---|---|
@@ -58,64 +58,32 @@ Set in the Vercel project (**Settings → Environment Variables**, for Productio
 | `TURN_RATE` | Credential requests per minute per IP, per function instance. Default 10. |
 | `TURN_ALLOWED_ORIGINS` | Other origins allowed to ask, comma-separated; `*` matches within one host label. The deployment's own origin is always allowed. |
 
-If both providers are set, Cloudflare wins. Model weights never go over the relay; only token traffic does. Setup, abuse and cost: [TURN relay](/docs/self-host/turn#the-sites-relay-apiturn).
+If both providers are set, Cloudflare wins. Setup: [TURN relay](/docs/self-host/turn#give-your-deployment-a-relay-apiturn).
 
 ## Page globals for self-hosting
 
-A deployment of the site can set these in `p2p.html`, before `room.js` loads. The public site at pooled.run sets none of them.
+Set these in `p2p.html`, before `room.js` loads. pooled.run sets none of them.
 
-### window.POOLED_SIGNAL_SERVERS
+| Global | Default | What it does |
+|---|---|---|
+| `window.POOLED_SIGNAL_SERVERS` | `["cloud"]` | Ordered signaling servers; the first that answers is used. Entries take the `?signal=` forms, or `{ host, port, path, secure, key }`. `?signal=` wins over it. See [Signaling servers](/docs/self-host/signaling). |
+| `window.TURN_SERVERS` | none | `RTCIceServer` objects added after the public STUN servers, on top of a `?turn=` or Network-box relay. When set, the page doesn't ask `/api/turn`. See [TURN relay](/docs/self-host/turn). |
+| `window.POOLED_TURN_ENDPOINT` | `/api/turn` | Where the page asks for the site's relay. On `localhost` only with `?turnapi=1`. |
+| `<meta name="preview-origin">` | empty | The second site for Code mode previews (needed for `run_js`). See below. |
 
-An ordered list of signaling servers. The room tries them in order and keeps the first that answers.
-
-```html
-<script>window.POOLED_SIGNAL_SERVERS = ["wss://signal.example.com", "cloud"];</script>
-```
-
-- Entries are the same forms as `?signal=`: `cloud`, `host`, `host:port`, `host:port/path`, or a `wss://`, `ws://`, `https://` or `http://` URL.
-- Entries can also be objects: `{ host, port, path, secure, key }`. Set `key` if your PeerServer runs with a non-default `--key`.
-- Without it, rooms use `["cloud"]`, the public PeerJS server.
-- `?signal=` in the page URL wins over this list.
-
-See [Signaling servers](/docs/self-host/signaling) for running your own.
-
-### window.TURN_SERVERS
-
-An array of `RTCIceServer` objects, added to every WebRTC connection after the public STUN servers.
-
-```html
+```html title="p2p.html"
 <script>
-  window.TURN_SERVERS = [
-    { urls: "turn:relay.example.org:3478", username: "pooled", credential: "SECRET" },
-  ];
+  window.POOLED_SIGNAL_SERVERS = ["wss://signal.example.com", "cloud"];
+  window.TURN_SERVERS = [{ urls: "turn:relay.example.org:3478", username: "pooled", credential: "SECRET" }];
 </script>
-```
-
-:::caution
-Anything in the page is public. Credentials here can be read by anyone who opens the site. Use short-lived credentials from your TURN server, or have each person enter a relay in the room's **Network** box instead.
-:::
-
-A relay from `?turn=` or the saved **Network** setting is used as well. When either this or one of those is set, the page doesn't ask `/api/turn` for the site's relay. `?relay=1`, or **Always go through the relay** in the Network box, makes every connection use a relay only.
-
-### window.POOLED_TURN_ENDPOINT
-
-Where the page asks for the site's relay. Default `/api/turn`. On `localhost` the page asks only with `?turnapi=1`.
-
-### preview-origin meta
-
-Code mode runs previews in a sandbox. For `run_js` to work, previews must load from a second deployment on a different site, so a loop in a preview cannot freeze the room.
-
-```html
 <meta name="preview-origin" content="https://pooled-preview.example.net">
 ```
 
-- The value is a list separated by spaces or commas. `host=origin` entries apply to one page host, and a bare origin applies to any other host. One page can then serve production and staging:
-  ```text
-  pooled.run=https://pooled-preview.vercel.app pooled-dev.vercel.app=https://pooled-preview-dev.vercel.app
-  ```
-- The origin must be `https`. Plain `http` works only on loopback, from an `http` page.
-- An origin on the same site as the page (the same host, a subdomain or a sibling) is ignored with one console warning, because it would share the room's process.
-- Empty, as in the repo's `p2p.html`: previews run in local mode, without `run_js`. On `localhost` and `127.0.0.1` the other loopback name is used automatically.
+:::caution
+Anything in the page is public, including TURN credentials. Use short-lived credentials, or have people enter a relay in the room's **Network** box.
+:::
+
+`preview-origin` takes a list separated by spaces or commas: `host=origin` entries apply to one page host (so one page can serve production and staging), a bare origin to any other. It must be `https` (plain `http` only on loopback), and an origin on the page's own site is ignored with a console warning. Empty means previews run in the room's tab without `run_js`; on `localhost` the other loopback name is used automatically.
 
 ## Browser console
 
@@ -126,7 +94,7 @@ Code mode runs previews in a sandbox. For `run_js` to work, previews must load f
 
 ## Tests and benchmarks
 
-These are for working on Pooled itself. See [Testing](/docs/contributing/testing).
+For working on Pooled itself. See [Testing](/docs/contributing/testing).
 
 | Variable | Used by | What it does |
 |---|---|---|
@@ -148,4 +116,4 @@ cd tests && MODEL=moe KV=q8 HW="GB10" DATE="Sep 29" \
   deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights bench_ctx.js
 ```
 
-The engine test scripts read many more kernel-tuning variables (`BCOLS`, `MOE_FUSE`, `PREFILL_UBATCH` and others). Each script lists its own in its header comment.
+Engine test scripts read more kernel-tuning variables (`BCOLS`, `MOE_FUSE`, `PREFILL_UBATCH` and others), listed in each script's header comment.

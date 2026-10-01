@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RoomNode } from "../roomnode.js";
-import { hostGate } from "../gate.js";
+import { hostGate, saveGate } from "../gate.js";
 import { PROTOCOL } from "../../../room/transport.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
@@ -141,4 +141,25 @@ test("device: its hello carries join, the key and the pass (only to the host); i
   o.conns.set("pooled-room-ABCD", { conn: { close() {}, send() {} }, name: "host", meta: {}, stripes: [], seen: performance.now(), missed: 0 });
   o.onData("pooled-room-ABCD", { t: "hello", name: "host", v: PROTOCOL, meta: { api: 2 } });
   assert.equal(o.admission, "in");
+});
+
+test("host restarted with its saved gate: the old invite key and the passes it gave out still let devices in", async () => {
+  const a = hostNode();
+  const L = incoming(a, "dev-a");
+  L.say(hello("mac", { join: 1, key: a.gate.key }));
+  await tick();
+  const pass = L.sent.find((m) => m.t === "admit").pass;
+  const saved = JSON.parse(JSON.stringify(saveGate(a.gate)));
+  assert.ok(!JSON.stringify(saved).includes(pass), "only the pass's hash is kept");
+  // a new process: same key, the pass comes back in without asking; ask follows today's setting
+  const b = hostNode();
+  b.gate = hostGate({ ask: true, saved });
+  assert.equal(b.gate.key, a.gate.key);
+  const back = incoming(b, "dev-a2");
+  back.say(hello("mac", { join: 1, pass }));
+  await tick();
+  assert.ok(types(back).includes("admit") && !types(back).includes("lobby"));
+  const c = hostGate({ ask: false, saved });
+  assert.equal(c.ask, false);
+  assert.equal(hostGate({ saved: null }).key.length >= 22, true, "no saved gate: a new key");
 });

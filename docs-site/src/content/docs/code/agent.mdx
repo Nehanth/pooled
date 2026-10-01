@@ -1,9 +1,9 @@
 ---
 title: The agent
-eyebrow: Code mode
+eyebrow: Internals
 description: The eight tools the agent uses, how one request runs step by step, how it keeps within the model's context, and why it stops.
 sidebar:
-  label: The agent
+  label: Code mode agent
   order: 2
 ---
 {/*
@@ -16,7 +16,7 @@ sidebar:
     (hand-edit notice)
   - harness/room-model.js: thinking false, reserve = min(maxNew, maxSeq/4) + 64, budget = maxSeq - reserve,
     TAG "<tool_response>" text stop, MARGIN 16, pin = system prompt length
-  - room/models.js CTX: 1.7B 8192 (max 16384), 27B 16384 (max 32768), MoE 32768 (max 65536)
+  - room/models.js CTX: 1.7B 16384 (8192 when the room is short: pickCtx), 27B 16384 (max 32768), MoE 32768 (max 65536)
   - harness/codetools.js (list_dir, read_file, search, edit_file, write_file; MAX_LINES 200, MAX_CHARS 8000,
     MAX_HITS 30, SEARCH_MS 2000, MAX_ENTRIES 200; fuzzy edit matching; fragment and unchanged-write guards)
   - harness/preview-tools.js (serve, preview_logs; SERVE_LINES 8, LOG_LINES 40, LOG_CHARS 3000; waits 2 s)
@@ -43,17 +43,17 @@ The agent is a short loop. It asks the model what to do, runs the tools the mode
 | `edit_file` | Replaces `old` with `new`. `old` must match the file exactly, once. | Needs approval when edits ask first |
 | `serve` | Serves a folder on a preview port (default `5173`) and returns the page's first errors. | Waits up to 2 s for the page to load; shows up to 8 lines |
 | `preview_logs` | Console output of a served page since a cursor. | 40 lines or 3,000 characters, newest last |
-| `run_js` | Runs a JS module in the sandbox, next to a page, and returns what it printed. | 3 s. **Off on pooled.run for now**, see [Previews](/docs/code/previews#run_js) |
+| `run_js` | Runs a JS module in the sandbox, next to a page, and returns what it printed. | 3 s. **Off on pooled.run for now**, see [Preview sandbox](/docs/code/previews#run_js) |
 
 Any single tool result is cut to 6,000 characters, keeping the start and the end, so one call never fills the context.
 
-The system prompt is kept tiny on purpose, because every token of it is computed across the whole room before the first answer. It says: the project is a folder with no shell; build static web apps; keep each `write_file` under about 100 lines and write longer files in parts with `append: true`; change files with `edit_file`; then serve and fix every error.
+The system prompt is kept tiny, because every token of it is computed across the whole room before the first answer. It asks for static web apps, `write_file` calls under about 100 lines (longer files in parts with `append: true`), `edit_file` for changes, then serve and fix every error.
 
 ## How a request runs
 
 1. Your request goes in as a user turn.
 2. The model answers. Its text streams into the timeline. When it starts a tool call, the call's card appears and fills in live.
-3. Each tool call runs. `write_file` and `edit_file` may wait for approval first (see [Approving edits](/docs/code#approving-edits)).
+3. Each tool call runs. `write_file` and `edit_file` may wait for approval first (see [Files and approvals](/docs/code#files-and-approvals)).
 4. The results go back to the model as the next turn, and it answers again.
 5. The request ends when the model replies without a tool call. A one-line summary closes it:
 
@@ -145,7 +145,7 @@ The agent's conversation must fit the model's context, less room for the next an
 | Qwen3.8 27B | 16,384 | about 12,220 |
 | Qwen3.6 35B MoE | 32,768 | about 24,510 |
 
-The meter next to **New task** shows how much of the context the conversation uses. A bigger `?ctx=` gives the agent more room; see [Which models fit](/docs/models).
+The meter next to **New task** shows how much of the context the conversation uses. A bigger `?ctx=` gives the agent more room; see [Pick a model](/docs/models).
 
 When the conversation grows past its budget, the agent shortens it to 60% of the budget, in this order:
 
@@ -165,5 +165,3 @@ To avoid that, the first time the room processes the system prompt and tools, it
 ## Sessions
 
 Each project keeps its agent conversation, its timeline (the last 200 items) and its served ports in the host's browser. Reopening the project brings them back. The conversation keeps the exact tokens the model sampled, so a reopened session carries on without re-encoding them, unless the room now runs a different model.
-
-**New task** forgets the conversation. Files and previews stay.

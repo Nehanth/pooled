@@ -1,14 +1,14 @@
 ---
 title: Comparison
 description: How Pooled differs from other projects that split models across machines or run models in a browser tab, and when to pick one of them instead.
-eyebrow: How it works
+eyebrow: Internals
 sidebar:
   label: Comparison
   order: 6
 ---
 
 
-Other projects split models across machines, or run models in a browser tab. Pooled does both: it splits one model across devices, and every device runs its share in a browser tab.
+How Pooled differs from other projects, and when to pick one of them instead. Other projects split models across machines, or run models in a browser tab. Pooled does both: it splits one model across devices, and every device runs its share in a browser tab.
 
 :::caution[Not a ranking]
 Each published speed below is for a different model on different hardware, taken from each project's own sources. Read it as what each project can do, not as a head-to-head result.
@@ -59,15 +59,6 @@ Each published speed below is for a different model on different hardware, taken
 
 ## Related projects
 
-- [exo](https://github.com/exo-explore/exo): turns your Macs (and Linux, on CPU for now) into one cluster over MLX, with RDMA over Thunderbolt 5.
-- [llama.cpp RPC](https://github.com/ggml-org/llama.cpp/tree/master/tools/rpc): exposes ggml devices on other hosts so llama.cpp can spread one model across them. Trusted networks only.
-- [distributed-llama](https://github.com/b4rtaz/distributed-llama): tensor-parallel CPU and Vulkan inference across home devices, down to Raspberry Pis.
-- [Petals](https://github.com/bigscience-workshop/petals): a BitTorrent-style public swarm for running and fine-tuning large models in Python.
-- [Mesh LLM](https://github.com/Mesh-LLM/mesh-llm): pools GPUs across machines behind one OpenAI-compatible API, built on llama.cpp and iroh.
-- [WebLLM](https://github.com/mlc-ai/web-llm): single-tab WebGPU inference compiled with MLC and TVM.
-- [Transformers.js](https://github.com/huggingface/transformers.js): Hugging Face models in the browser through ONNX Runtime, on WASM or WebGPU.
-- [pi](https://github.com/earendil-works/pi): a small, extensible terminal coding agent that works with Ollama, LM Studio, vLLM and other local servers.
-- [little-coder](https://github.com/itayinbarr/little-coder): a coding agent tuned for small local models, built on pi.
-- [aider](https://github.com/Aider-AI/aider): a terminal pair-programming agent that works with almost any LLM, including local ones.
+Besides the projects in the table, these coding agents work well with local models: [pi](https://github.com/earendil-works/pi), [little-coder](https://github.com/itayinbarr/little-coder) (built on pi) and [aider](https://github.com/Aider-AI/aider).
 
 Model weights and the tokenizer come from [Qwen](https://huggingface.co/Qwen), hosting from Hugging Face, and signaling from PeerJS. llama.cpp's speculative-decoding graph for Qwen 3.5 was the reference for Pooled's.

@@ -1,97 +1,64 @@
 ---
-title: Bad networks
-eyebrow: Rooms
-description: Every token crosses the network once per device, so latency and packet loss set a room's speed. What each costs, what Pooled does about it, and what to do when devices can't connect.
+title: Networks and work Wi-Fi
+eyebrow: Help
+description: Make a room faster on Wi-Fi, and get devices connected on work, school or hotel networks that block direct connections.
 sidebar:
-  label: Bad networks
-  order: 6
+  label: Networks and work Wi-Fi
+  order: 3
 ---
-{/* Sources (origin/main 40bb0fa):
-    README "Across devices, with emulated network latency" (table, 3.5-4 ms per extra device, speculative 1.6-2.1x on the MoE at 20-50 ms,
-    TTFT +0.03 s at 50 ms), PR #259 (chaos table: RTT 50/150/300 ms, 1/5/15% loss, freezes, signaling blips, TURN 33 tok/s),
-    PR #233 + docs/protocol.md "Ordering guarantees" (keep-alive 1 byte per 10 ms of silence on channel 78, ?ka=0;
-    frames sliced <= 4.6 KB, striped, small frames sent twice, ?wiredup=0; late frames waited for), docs/protocol.md
-    "Connecting: STUN and an optional TURN relay", room/ice.js (STUN servers, ?turn= / ?turnuser= / ?turncred= / ?relay=1,
-    Network box saved in localStorage, window.TURN_SERVERS, join links strip them), p2p.html #join-net text and "Always go through
-    the relay", room/signal.js (cloud default, fallback list, ?signal=, window.POOLED_SIGNAL_SERVERS; 8 s per server, 20 s for the last),
-    room/errors.js joinStep (5 s "Still connecting…", 15 s, 40 s while ICE checking), room.js signal note (~L1403).
-    The site's relay: origin/main 74744ac (PR #264) docs/rooms-at-work.md, api/turn.mjs, room/ice.js wantDefaultRelay. */}
+{/* Sources (origin/main):
+    room/ice.js (STUN, ?turn= / ?turnuser= / ?turncred= / ?relay=1 / ?relay=0 / ?turnapi=1, Network box in localStorage,
+    window.TURN_SERVERS, join links strip them, wantDefaultRelay, RELAY_FETCH_MS 2500, weightsOverLink),
+    api/turn.mjs (POST, credential TTL default 6 h), room.js pathFailText and the host's UDP notes, window.pooledNet,
+    room/signal.js (cloud default, ?signal= fallback list, window.POOLED_SIGNAL_SERVERS), room/errors.js joinStep,
+    p2p.html #join-net ("Always go through the relay"), docs/rooms-at-work.md.
+    Latency and loss measurements: see internals/benchmarks. */}
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-A token goes from the host through every device that holds layers and back. So plain decoding pays the network's one-way delay once per device, per token. Three devices at 50 ms add about 150 ms to every token.
-
-## What latency costs
-
-Same GB10, each device its own browser with real WebRTC, every model frame delayed by the given one-way latency. Decode tok/s, plain / speculative:
-
-| Model | Devices | 0 ms | 5 ms | 20 ms | 50 ms |
-|---|---|---|---|---|---|
-| 35B MoE | 1 | 32.5 / 44.2 | | | |
-| 35B MoE | 2 | 27.9 / 32.7 | 21.1 / 27.9 | 12.9 / 20.6 | 7.2 / 13.5 |
-| 35B MoE | 3 | 24.8 / 33.3 | 17.7 / 26.9 | 9.9 / 17.5 | 5.2 / 10.8 |
-| 27B | 2 | 8.6 / 11.9 | 7.8 / 10.9 | 6.3 / 9.3 | 4.6 / 7.6 |
-| 27B | 3 | 8.4 / 11.0 | 7.3 / 10.2 | 5.5 / 8.6 | 3.7 / 6.6 |
-
-- **Speculative decoding is what keeps a room usable.** It checks several drafted tokens in one lap. At 20–50 ms it is 1.6–2.1× plain on the MoE and 1.5–1.8× on the 27B.
-- **Time to first token barely moves:** at most +0.03 s at 50 ms, because the prompt goes out in pipelined batches.
-- **Each extra device costs about 3.5–4 ms per token** even at 0 ms, to read back, pack and send the hidden state.
-
-Full numbers and caveats are in [Benchmarks](/docs/internals/benchmarks).
+Every token passes through each device that holds layers, and back. So the network sets a room's speed, and a network that blocks direct connections can keep a device out.
 
 ## Make a room faster
 
-- Put the devices on the **same Wi-Fi** or wired network. A room over the internet works, but every hop adds its latency.
+- Put the devices on the **same Wi-Fi**, near the router, or wired. A room over the internet works, but every hop adds its delay to every token.
 - Use **fewer devices**. The default [For speed](/docs/rooms/split#for-speed) split already leaves out devices the model doesn't need.
 - Keep every device that holds layers **in front, screen on, plugged in**. A background tab or a sleeping screen stalls the whole room.
 
-## What Pooled does on a bad link
+Pooled already works around bad links: it waits for late data instead of dropping it, sends small messages twice, and keeps phone Wi-Fi awake during an answer. Measurements are in [Benchmarks](/docs/internals/benchmarks).
 
-**Late frames are waited for, not skipped.** The room's connections are reliable, so a missing frame is late, not lost. The receiver waits for it instead of giving up.
+## Work, school and hotel networks
 
-**Small frames go out twice.** A decode token's hidden state is sent on two connections at once, so one lost packet doesn't stall the token behind a retransmission. Frames are also split across several connections, and each piece goes to the one with the least queued.
+Devices link directly, over UDP. Many work networks block UDP and every port except 443, so there is no direct path.
 
-**Keep-alive.** While an answer runs, each end sends 1 byte after every 10 ms of silence. This keeps a phone's Wi-Fi out of power save between tokens. With a GB10 and an iPhone it made Qwen3 1.7B 17% faster. `?ka=0` turns it off.
+On pooled.run this is handled for you. Every room gets a **TURN relay**, which both devices reach over TLS on port 443, like ordinary web traffic. The relay forwards between them.
 
-**A stalled device is flagged in seconds.** See [Device drops and recovery](/docs/rooms/recovery).
+- Links still go direct whenever they can. The relay is only the fallback.
+- Model weights never go through the relay. A relayed device downloads its layers from Hugging Face.
+- A relayed room is slower than a direct one, because every token takes an extra hop.
 
-Measured with 3 browser tabs on one GB10 and a network shaper, Qwen3 1.7B, before and after these changes (PR #259):
+To check, look for `goes through the relay` in the room log, or run `pooledNet()` in the browser console.
 
-| Network | Before | After |
-|---|---|---|
-| 50 / 150 / 300 ms round trip | 7.5 / 3.5 / 1.9 tok/s | 8.8 / 3.6 / 2.0 tok/s |
-| 1% / 5% / 15% loss (50 ms round trip) | 6.0 / 4.4 / 1.4 tok/s | 8.1 / 7.3 / 4.1 tok/s |
-| One device freezes for 2–12 s | completes, same text | completes, same text |
-| No direct path, TURN relay set | join times out | all links on the relay, 33 tok/s |
+## When it still fails
 
-## Devices that can't connect
+A join that found the room but can't connect says why:
 
-Devices connect directly to each other. Public STUN servers help each one find its public address, which is enough on most home and office networks. When both sides are behind strict NAT (common on mobile networks), or a firewall blocks UDP, there is no direct path.
-
-On pooled.run, the room then falls back to the site's **TURN relay** by itself, over TCP or TLS on port 443 if it has to. That covers most work and school networks. See [Rooms at work](/docs/rooms/at-work).
-
-What you see while joining:
-
-| After | You see |
+| You see | What to do |
 |---|---|
-| 5 s | "Still connecting…" |
-| 15 s, if the room answered | "Found the room; still looking for a path between the two devices…" (up to 40 s) |
-| Then | "Found the room, but …" with the reason (no path, UDP blocked, or not even through the relay) and the **Network** box opens |
+| "…could not connect, not even through the relay (TURN) server. This network may block it too…" | The network blocks the relay as well. Try a phone hotspot. |
+| "…could not connect, not even through the relay (TURN) server. Check its address and password under Network…" | Your own relay didn't work. Check its address and password. |
+| "…this network blocks direct (UDP) connections and there is no relay (TURN) server…" | No relay is set, for example on a self-hosted site. Add one (below), or try a hotspot. |
+| "…these two devices can't reach each other (a strict firewall or mobile network on one side)…" | Same Wi-Fi, another network, or a relay (below). |
 
-Try these in order:
-
-1. Put both devices on the same Wi-Fi.
-2. Try another network, for example a phone hotspot.
-3. Use a **TURN relay** of your own. It forwards the traffic between two devices that can't reach each other.
+A relay can't help when the network blocks TLS to the relay, or only allows traffic through a proxy that needs a login. Use a phone hotspot then.
 
 ### Use a TURN relay
 
-pooled.run gives every room a relay already (see [Rooms at work](/docs/rooms/at-work)), so you rarely need this. Set your own when the site's relay is blocked too, or on a self-hosted site without one: your own ([coturn](https://github.com/coturn/coturn), see [TURN relay](/docs/self-host/turn)) or a provider's. A relay you set replaces the site's.
+You rarely need this on pooled.run. Set your own relay when the site's is blocked too, or on a self-hosted site. It replaces the site's. Use [coturn](https://github.com/coturn/coturn) or a provider's; see [TURN relay](/docs/self-host/turn).
 
 <Tabs>
 <TabItem label="Network box">
 
-Under the join form, open **Network** and fill in the relay URL (`turn:relay.example.org:3478`, or `turns:` for TLS), the username and the password. It is saved in this browser only.
+Under the join form, open **Network**. Fill in the relay URL (`turn:relay.example.org:3478`, or `turns:` for TLS), the username and the password. It is saved in this browser only.
 
 Tick **Always go through the relay** so the other devices never see this device's IP address.
 
@@ -102,7 +69,7 @@ Tick **Always go through the relay** so the other devices never see this device'
 https://pooled.run/room?turn=turn:relay.example.org:3478&turnuser=NAME&turncred=PASSWORD
 ```
 
-Add `&relay=1` to use only the relay. The URL overrides the saved setting.
+Add `&relay=1` to use only the relay.
 
 </TabItem>
 <TabItem label="Self-hosted site">
@@ -112,23 +79,30 @@ Define `window.TURN_SERVERS`, an `RTCIceServer` array, before `room.js` loads.
 </TabItem>
 </Tabs>
 
-- The room still prefers a direct path and uses the relay only when it has to.
-- Model weights never go over a relayed link. Only token traffic does.
-- Every device that can't connect directly needs your relay set. A device on an open network can reach a relayed one without it.
-- Join links and QR codes never include the relay settings, so the password doesn't end up in a chat.
-- A relay adds a hop to every token, so it is slower than a direct path.
+Join links and QR codes never include relay settings, so the password stays out of chats. Each device that can't connect directly needs the relay set itself.
 
 ## When the signaling server is down
 
-A signaling server only introduces devices to each other. Once they're connected, the room runs without it. Pooled uses the public PeerJS server by default.
+A signaling server introduces devices. Once they're connected, the room runs without it.
 
-- **In a running room,** if it drops, the devices already there keep working. The room shows "Lost the signaling server (0.peerjs.com). The devices here keep working; new devices can't join until it's back. Reconnecting…" and reconnects by itself.
-- **On the join screen,** if no server answers within about 20 s, you see "Can't reach the signaling server…" with a link to run your own.
+- **In a running room,** you see "Lost the signaling server… Reconnecting…". The devices already there keep working. New devices can join once it's back.
+- **On the join screen,** you see "Can't reach the signaling server…". Try again in a minute, or another network. Some work filters block it.
 
-To use your own servers, or a fallback list, add `?signal=` to the page URL, or set `window.POOLED_SIGNAL_SERVERS` on a self-hosted site:
+To use your own server, with the public one as a fallback:
 
 ```text
 https://pooled.run/room?signal=signal.example.org,cloud
 ```
 
-Servers are tried in order. Each server is its own world: a room registered on one is invisible on another, so every device must be able to reach the host's server. The invite link carries `?signal=` when the host didn't end up on the first choice. See [Signaling servers](/docs/self-host/signaling).
+Every device must reach the host's server. The invite link carries `?signal=` for you. See [Signaling servers](/docs/self-host/signaling).
+
+## Details
+
+| Option | Effect |
+|---|---|
+| `?relay=1` | Every link goes through the relay, the site's included. Other devices never see this device's IP address. |
+| `?relay=0` | Never ask for the site's relay. |
+| `?turnapi=1` | On `localhost`, ask `/api/turn` anyway. |
+| `?ka=0` | Turn off the Wi-Fi keep-alive during answers. |
+
+A self-hosted copy gets the site's relay once its Vercel environment has a Cloudflare TURN key or a coturn secret. See [TURN relay](/docs/self-host/turn#give-your-deployment-a-relay-apiturn) and [Environment](/docs/reference/environment#turn-relay-apiturn).

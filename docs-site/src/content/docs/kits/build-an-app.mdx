@@ -1,0 +1,122 @@
+---
+title: Build an app in Code mode
+eyebrow: Starter kits
+description: A worked example. Ask the room's model for a small web app, approve its edits, try it in the preview and download it.
+sidebar:
+  label: Build an app
+  order: 3
+---
+import Shot from '../../../components/Shot.astro';
+import codeEmpty from '../../../assets/kits/code-empty.webp';
+import codeNew from '../../../assets/kits/code-new.webp';
+import codeApprove from '../../../assets/kits/code-approve.png';
+import codeSteps from '../../../assets/kits/code-steps.webp';
+import code from '../../../assets/kits/code.png';
+import codeDownload from '../../../assets/kits/code-download.webp';
+import { Steps } from '@astrojs/starlight/components';
+
+{/*
+Sources (for the fact-checker):
+- p2p.html: #mode-code "Code", #code-auto "Auto-approve edits", #code-newtask "New task", #code-prompt "Ask the agent to build or change something", #code-send, #code-stop, #code-dl "Download", #code-dl-menu, #code-new "New", #code-new-tpl, Preview / Editor tabs
+- room/code-ui.js: approval card buttons "Approve", "Reject…", "Allow edits for this task"
+- room/code.js: first request creates a project named from the words; auto-approve on for browser projects
+- harness/templates.js: Game ("Add a high score that stays after a reload"), Dashboard, Form app, Landing page
+- harness/preview.js: virtual port :5173; code/index.mdx (preview limits, Download: Project .zip / One HTML file)
+- CHANGELOG: Code mode eval, Qwen3.6 35B MoE 18-19/24 vs Qwen3 1.7B 2-4/24
+- Verified 2026-09-30 on the Spark, pooled.run/room, Qwen3 1.7B, empty project, Auto-approve off, the tip calculator prompt below:
+  2 approvals, "8 steps · 9 tool calls · 1510 tok · 10.2 tok/s · 1 device · 156.3 s", one index.html, preview at sandbox:5173/index.html,
+  Download menu ("Project .zip · every file", "One HTML file"), tip-calculator.zip (577 bytes). The app's total was string concatenation (bill + tip).
+  The follow-up fix prompt in step 7 was not run.
+- Screenshots re-taken 2026-10-01 on the Spark (GB10), pooled.run/room in headless Chromium (1280x800), Qwen3.6 35B MoE on 1 device (24 GB), empty project,
+  Auto-approve off, the same prompt: 3 approvals (index.html, style.css, app.js), "5 steps · 4 tool calls · 1537 tok · 16.0 tok/s · 1 device · 83.7 s",
+  no tool errors, preview at sandbox:5173/index.html ("serving . on :5173 (index.html, 3 files, 3.4 KB) loaded in 31 ms · no errors"), the total adds numbers
+  (parseFloat). Download menu opened, not downloaded in this run (tip-calculator.zip is from the 2026-09-30 run). New + "Start from: Game" in the template menu.
+*/}
+
+**Goal:** get a working web app from one sentence, then change it, try it and keep a copy.
+
+## You need
+
+- **A room with the Qwen3.6 35B MoE started** (about 23 GB of memory, one device or pooled). Follow [Chat on one laptop](/docs/kits/first-chat) or [Pool two devices](/docs/kits/two-devices) first.
+- **10 minutes.** Nothing more to download once the model runs.
+
+On a small laptop, pick Qwen3 1.7B (4 GB at 8K), or pool it with another device. The 1.7B does better changing an app that already runs: start from a template (step 2).
+
+Code mode builds static web apps: HTML, CSS and JavaScript. There is no shell and no server code.
+
+## Steps
+
+<Steps>
+
+1. **Press Code** in the room's header.
+
+   The room switches to three parts: the files on the left, the agent in the middle and the preview on the right.
+
+   <Shot src={codeEmpty} alt="Code mode with no project yet: files on the left, the agent in the middle, the preview on the right" />
+
+2. **Pick a starting point.**
+
+   - **From scratch:** do nothing. Your first request creates a project named from your words.
+   - **From a template** (best on the 1.7B): press **New**, pick **Game**, **Dashboard**, **Form app** or **Landing page** in the menu next to the name, and press Enter. The app runs straight away, and the prompt box holds a first change to try.
+
+   <Shot src={codeNew} width={720} alt="After New: a project name box and the menu Start from: Game" caption="New, with the Game template picked." />
+
+3. **Turn off Auto-approve edits** under the agent, so you see each change before it lands. (It is on by default for projects saved in the browser.)
+
+4. **Ask for the app.** Type this and press **Send**:
+
+   ```text
+   Build a tip calculator: a box for the bill, buttons for 10%, 15% and 20%, and show the tip and the total.
+   ```
+
+   On a template, ask for a change instead, for example the one it suggests: `Add a high score that stays after a reload`.
+
+5. **Approve the edits.**
+
+   Each time the agent wants to write a file, the timeline shows the change as a diff, marked **needs approval**, with **Approve**, **Reject…** and **Allow edits for this task**. Read it and press **Approve**. **Reject…** lets you say why, and the agent tries again. **Allow edits for this task** approves the rest of this request.
+
+   <Shot src={codeApprove} alt="Code mode with Qwen3.6 35B MoE: write_file index.html marked needs approval, the new file's diff, and Approve, Reject and Allow edits for this task" />
+
+   <Shot src={codeSteps} alt="The agent's timeline: write_file index.html done with its diff, and the next file, style.css, being written" caption="The timeline after the first approval: index.html is written and the agent goes on to style.css. In our test the MoE asked for three approvals, one per file." />
+
+6. **Try it in the preview.**
+
+   When the agent is done it writes a short summary, and the preview on the right shows the app at `sandbox:5173/index.html`. It reloads after every change. Type a bill, press a button and check the numbers. The **Console** under the preview shows errors, and **Send to agent** asks the agent to fix them.
+
+   <Shot src={code} alt="Code mode with the finished tip calculator in the preview at sandbox:5173/index.html, the files app.js, index.html and style.css, and the agent's summary" />
+
+7. **Ask for a fix or a change.** Models make small mistakes, smaller ones more often: in an earlier test, the 1.7B's first version added the tip to the bill as text instead of as a number. Say what is wrong, like `The total is wrong: turn the bill into a number before adding the tip.`, or ask for more, like `Add a 25% button`. The agent remembers the conversation until you press **New task**.
+
+8. **Download it.** Press **Download** above the file list and pick:
+
+   - **Project .zip**: every file.
+   - **One HTML file**: the whole app in one file you can double-click.
+
+   <Shot src={codeDownload} width={720} alt="The Download menu: Project .zip, every file, and One HTML file, index.html from :5173, ready to open" />
+
+</Steps>
+
+## What you should see
+
+- After step 4: the timeline shows each tool call (`write_file`, `serve`, and sometimes `list_dir` or `read_file`) with **done** or **error**. An error along the way is normal: the agent reads it and tries another way.
+- After step 6: `No errors. Here's what I built:`, a short summary, and a line like `5 steps · 4 tool calls · 1537 tok · 16.0 tok/s · 1 device · 83.7 s`. That was the MoE on one GB10, with three approvals, for an app in `index.html`, `style.css` and `app.js`.
+- After step 8: a file like `tip-calculator.zip` in your downloads.
+
+## If something goes wrong
+
+### Code is greyed out
+**Code** turns on once the room's model runs. In **Chat**, press **Start the model** and wait for it to load. If the page says `Start a model first: Code mode runs on the room's model.`, the model stopped: start it again.
+
+### The agent stops, or the app is blank or half done
+Small models lose track on apps built from scratch. Use the MoE if the room can run it, start from a template, ask for one change at a time, or open **Console** and press **Send to agent** so it sees the error. A bigger model helps most: see [Pick a model](/docs/models).
+
+### A button or form does nothing in the preview
+The preview is a sandbox: a `<form>` submit never fires there. Ask the agent to use a button with a click handler instead. `localStorage` works, but is empty again after each reload.
+
+More: [Code mode](/docs/code) and [Troubleshooting](/docs/troubleshooting).
+
+## Next
+
+- [Code mode](/docs/code): templates, folders on disk, sharing with the room.
+- [The agent](/docs/code/agent): its tools and why it stops.
+- [Use a room from your coding tools](/docs/kits/coding-tools), for bigger projects.

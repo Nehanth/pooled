@@ -7,46 +7,43 @@ sidebar:
   order: 2
 ---
 {/*
-Sources (origin/main 40bb0fa):
-- cli/bin/pooled.js: HELP text, parseArgs options and defaults (port 8080, max-queue 8), Node >= 22 check (exit 1),
-  exit 2 on bad args / unknown command / bad code / bad port / empty token, token precedence (--token-file, then POOLED_TOKEN,
-  then --token with a ps warning), EADDRINUSE message (exit 1), connect failure (exit 1), SIGINT/SIGTERM shutdown,
-  POOLED_KEEPALIVE_MS, default name "pooled serve" + 4 random letters
-- cli/lib/room.js roomCodeFrom (4-6 letters/digits; link: ?code=, last path segment, #hash), signalOpts (host:port only,
-  secure only on port 443, default 443)
-- cli/lib/http.js: listens on 127.0.0.1 only, Host/Origin checks, max 64 connections, KEEPALIVE_MS 10000
-- cli/README.md Options, How it works
-- cli/package.json: version 0.2.1 in repo, engines node >=22; `npm view @pooled/cli version` = 0.2.0 on 2026-09-30
+Sources (origin/main):
+- cli/bin/pooled.js: HELP, parseArgs options and defaults (port 8080, max-queue 8), Node >= 22 check (exit 1), exit 2 on bad
+  args / unknown command / bad code / bad port / empty token, token precedence, EADDRINUSE (exit 1), connect failure (exit 1)
+- cli/lib/room.js roomCodeFrom (4 or 6 letters/digits, dash optional; link: ?code=, last path segment, #hash), roomKeyFrom (#k=),
+  JOIN_MS 15000 (no timeout while waiting in the host's lobby), signalOpts (host:port, secure only on 443)
+- cli/lib/common.js LIMITS.client 40; cli/lib/http.js 127.0.0.1 only
+- cli/package.json 0.2.1 = npm latest
 */}
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-`pooled` is the command-line bridge from the `@pooled/cli` npm package. It has one command, `serve`. For setup and client recipes, see [Serve API](/docs/serve).
+`pooled` is the command-line bridge from the `@pooled/cli` npm package. Its command is `serve`. For setup, see [Serve API](/docs/serve).
 
 :::note[Coming: pooled chat, join and host]
-`pooled chat`, `pooled join` and `pooled host` are in preview in [PR #270](https://github.com/Nehanth/pooled/pull/270), not on npm yet. See [Rooms from the terminal](/docs/terminal).
+`pooled chat`, `pooled join` and `pooled host` are in preview, on npm since 0.3.0. See [Rooms from the terminal](/docs/terminal).
 :::
 
 ## Install
 
-It needs Node 22 or newer. No GPU is needed on this machine.
+Node 22 or newer. No GPU needed.
 
 <Tabs>
 <TabItem label="npx">
 ```bash
-npx @pooled/cli serve ABCD
+npx @pooled/cli serve 4TKG9P
 ```
 </TabItem>
 <TabItem label="Global install">
 ```bash
 npm install -g @pooled/cli
-pooled serve ABCD
+pooled serve 4TKG9P
 ```
 </TabItem>
 <TabItem label="From the repo">
 ```bash
 cd cli && npm install
-node bin/pooled.js serve ABCD
+node bin/pooled.js serve 4TKG9P
 ```
 </TabItem>
 </Tabs>
@@ -59,79 +56,39 @@ pooled --version
 pooled --help
 ```
 
-`serve` joins the room as an API client with no layers, then serves the room's model on `127.0.0.1` as OpenAI (Chat Completions and Responses) and Anthropic (Messages) endpoints.
-
-The room argument is a code of 4 to 6 letters and digits, or a room link. From a link it takes `?code=`, then the last part of the path (`/r/ABCD`), then the hash (`#ABCD`).
+The room is a code (six characters like `4TK-G9P`, the dash optional; older rooms have four) or a room link. With the host's invite link, which carries `#k=…`, the host lets the bridge in at once; quote it in the shell. With the code alone, the bridge waits until the host presses **Allow**.
 
 ## Options
 
 | Flag | Default | What it does |
 |---|---|---|
-| `--port <n>` | `8080` | HTTP port on `127.0.0.1`. `0` picks a free port; the banner prints it. |
-| `--token-file <f>` | none | Requires the token in this file on every request, as `Authorization: Bearer <t>` or `x-api-key: <t>`. |
-| `--token <t>` | none | The same token, given on the command line. Other users on the computer can read it with `ps`, and `pooled` warns about it. |
-| `--name <s>` | `pooled serve` + 4 random letters | How the room shows this client, up to 40 characters. The hostname is never used, since every guest sees this name. |
-| `--signal <host:port>` | PeerJS cloud | Signaling server, the same one the room page uses with `?signal=`. |
-| `--max-queue <n>` | `8` | Requests that may wait here behind the running one. More get `429` (OpenAI) or `529` (Anthropic). `0` accepts a request only when idle; a negative number counts as `0`. |
-| `--quiet` | off | Prints only errors. |
+| `--port <n>` | `8080` | HTTP port on `127.0.0.1`. `0` picks a free port and the banner prints it. |
+| `--token-file <f>` | none | Require the token in this file on every request. |
+| `--token <t>` | none | The same, on the command line. Other users can read it with `ps`. |
+| `--name <s>` | `pooled serve` + 4 random letters | How the room shows this client, up to 40 characters. |
+| `--signal <host:port>` | PeerJS cloud | Signaling server, the same one as the room page's `?signal=`. One `host:port` only; the connection is secure only on port 443. |
+| `--max-queue <n>` | `8` | Requests that may wait behind the running one before `429` / `529`. `0` accepts one only when idle. |
+| `--quiet` | off | Print only errors. |
 | `--json-log` | off | One JSON object per log line: `{t, level, msg}`. |
-| `-v`, `--version` | | Prints the version. |
-| `-h`, `--help` | | Prints the help. |
+| `-v`, `--version` | | Print the version. |
+| `-h`, `--help` | | Print the help. |
 
-### Tokens
-
-Set a token in one of three ways. The first one found wins:
-
-1. `--token-file <f>`
-2. the `POOLED_TOKEN` environment variable
-3. `--token <t>` (prints a warning about `ps` unless `--quiet`)
-
-```bash
-POOLED_TOKEN=$(openssl rand -hex 16) npx @pooled/cli serve ABCD
-```
-
-With a token, every path needs it except `GET /health`, which then answers only `{"ok": true}` to callers without it. Without a token any API key is accepted, because some tools insist on sending one.
-
-:::caution[--signal takes host:port only]
-The CLI's `--signal` is simpler than the room page's `?signal=`. It takes one `host:port`. The port defaults to 443, and the connection is secure only on port 443. It does not take a comma list or a `wss://` URL. Use the same server the room's host opened the room on.
-:::
-
-## What it prints
-
-Once the room's model is ready, the banner shows the base URLs and settings for the coding agents, sized to the room's context:
-
-```text
-pooled serve · room ABCD · Qwen3.6 35B MoE · Q4 · 32768 tokens of context
-  OpenAI     http://127.0.0.1:8080/v1         (OPENAI_BASE_URL, any API key: chat/completions, responses)
-  Anthropic  http://127.0.0.1:8080            (ANTHROPIC_BASE_URL: messages)
-  bound to 127.0.0.1 only · no token (set POOLED_TOKEN to require one)
-  prompts go to the room's host and may be shown to everyone in the room
-```
-
-If the host has not started the model yet, the agent settings appear when it does, and again if the context changes. `GET /` on the running server returns a similar plain-text banner: the version, the paths each API serves, the `/health` URL and the same agent settings.
+The `POOLED_TOKEN` environment variable also sets the token. See [Tokens and security](/docs/serve/options#require-a-token).
 
 ## Exit codes
 
 | Code | When |
 |---|---|
-| `0` | `--version`, `--help`, `pooled` with no arguments, `pooled help`, or a clean stop with Ctrl-C or `SIGTERM`. |
-| `1` | Node older than 22, the port is busy or cannot be bound, or joining the room failed (no such room within 15 s, the signaling server unreachable, or a host too old for API clients). |
-| `2` | Bad arguments: an unknown command or flag, no or a malformed room code, a bad `--port`, a `--max-queue` that is not a number, an empty token, or an unreadable or empty `--token-file`. `--help` after a command (`pooled serve --help`) prints the help and also exits `2`. |
+| `0` | `--version`, `--help`, no arguments, or a clean stop with Ctrl-C or `SIGTERM`. |
+| `1` | Node older than 22, the port is busy, or joining the room failed (no such room within 15 s, the signaling server unreachable, the host turned it away). |
+| `2` | Bad arguments: unknown command or flag, a missing or malformed room code, a bad `--port` or `--max-queue`, an empty or unreadable token. `pooled serve --help` also exits `2`. |
 
-On Ctrl-C, open requests end with an error, the client leaves the room, and the process exits. A second Ctrl-C exits at once.
+On Ctrl-C, open requests end with an error and the client leaves the room. A second Ctrl-C exits at once.
 
 :::tip[Port 8080 is busy]
 The repo's `npm run serve` also uses 8080. Pass `--port 8081` and change the base URLs to match.
 :::
 
-## Behaviour to know
-
-- It listens on `127.0.0.1` only. Requests whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`, or that carry an `Origin` header, get `403`, so a web page cannot reach the room through your browser.
-- At most 64 connections at once.
-- One generation runs in the room at a time. The room's chat, Code mode and API clients share one queue.
-- While a request waits, a stream gets a keep-alive every 10 s.
-- If the host page reloads, in-flight requests fail and the client reconnects when the room is back. It knocks on the room's code every 3 s for a minute; after that it gives up, and requests get `503`. If the host disconnects the client or turns API clients off, the process keeps running but answers every request with `503`. Restart it to rejoin.
-
 ## Version
 
-The npm package `@pooled/cli` is at 0.2.0. The repo's `cli/package.json` is at 0.2.1, which fixes the banner's agent settings and adds the opencode provider.
+The current release on npm is 0.2.1. It takes six-character codes and invite links with `#k=`, and prints settings for Codex, Claude Code and opencode once the room's model is ready. See the [changelog](/docs/reference/changelog).

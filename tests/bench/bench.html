@@ -192,6 +192,7 @@ try {
   if (FILLS.length) {   // prefill speed and decode speed at a long context
     let ids = [];
     for (const f of ["../../engine/qwen35.js", "../../room.js", "../../engine/gguf.js", "../../engine/wgsl/base.js"]) { ids.push(...tok.encode(`\n// file: ${f}\n` + await (await fetch(f)).text())); if (ids.length > Math.max(...FILLS) + 8) break; }
+    while (ids.length < Math.max(...FILLS) + 8) ids = ids.concat(ids);   // 64K fills: the four files are shorter
     for (const fill of FILLS) {
       eng.reset(); if (eng.mtp) eng.mtpFill = true;
       t0 = performance.now();

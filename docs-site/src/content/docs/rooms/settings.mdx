@@ -1,10 +1,10 @@
 ---
 title: Room settings
-eyebrow: Rooms
-description: Every setting in the Room settings menu, what it changes and its default, plus the room options that live on the Serve API page and in the page URL.
+eyebrow: Use it
+description: Every setting in the Room settings menu, what it changes and its default.
 sidebar:
   label: Room settings
-  order: 7
+  order: 2
 ---
 {/* Sources (origin/main 40bb0fa):
     p2p.html #room-menu (~L1691-1745: sections Conversation / Model / Room, labels, "Re-deal on its own" text, Room actions and their
@@ -30,13 +30,7 @@ On by default. A device that types the room code waits until you press **Allow**
 
 ### Who sees the chat
 
-| Option | What it does |
-|---|---|
-| **Everyone** (default) | Everyone in the room sees the questions and the answers. |
-| **Only me** | Only this device sees the text. Every device still helps write it. |
-| **Whoever asked** | Each answer goes to whoever asked it. Every device still helps write it. |
-
-This decides which screens get the text, not who computes it. The devices that hold layers still process hidden states for every answer, and those are not private against a determined peer. See [Privacy](/docs/privacy). API requests from `pooled serve` follow this setting too.
+**Everyone** (default), **Only me** or **Whoever asked**. It decides which screens show the text, not who computes it. API requests from `pooled serve` follow it too. See [Chat](/docs/chat#who-sees-the-chat).
 
 ### Answer length
 
@@ -90,37 +84,20 @@ Experimental, on by default. When a device drops and is not back within a minute
 | **Clear cached weights** | Frees this device's disk. Press twice. The next Start downloads again. |
 | Cached models list | One row per cached model with its size and a **Delete** button, so you can remove one model and keep the others. Hidden on phones, which don't cache weights. |
 
-Below that, a line says whether this device is keeping its screen awake. More in [Downloads and caching](/docs/rooms/downloads#see-and-delete-cached-models).
+Below that, a line says whether this device is keeping its screen awake. 
 
 ## Settings in other places
 
-| Setting | Where | Default |
-|---|---|---|
-| Memory this device lends | The **Memory** stepper on the join screen (and in the room) | On a computer, half of what the browser says the GPU can use, and at least 4 GB when the GPU allows that. iPhone and iPad 0.5 GB (at most 1 GB). Android 0.5 GB (at most 0.5 to 2 GB, depending on the phone's RAM). |
-| **Allow API clients** | Footer of the [Serve API page](/docs/rooms/serve-api-page#host-controls), host only | On |
-| Relay (TURN) | The **Network** box under the join form | None. See [Bad networks](/docs/rooms/networks#use-a-turn-relay). |
+- **Memory this device gives:** the **Memory** stepper on the join screen, or **This device gives** in the room.
+- **Allow API clients:** on the [Serve API page](/docs/serve#the-serve-api-page), host only. On by default.
+- **Relay (TURN):** the **Network** box under the join form. See [Networks and work Wi-Fi](/docs/rooms/networks#use-a-turn-relay).
 
-The host's settings are saved with the room. A host that reloads and resumes the room gets them back.
+The host's settings are saved with the room, so a host that reloads gets them back.
 
-## Page URL options for rooms
+## Options in the page address
 
-Some choices are made when the page loads. Add them to the room URL, for example `https://pooled.run/room?ctx=65536`. They are read on the device that deals the layers, which is the model host.
+A few choices, like context length (`?ctx=`) and the layer split (`?split=`), go in the room's address before you press Start, on the device that hosts the model. See [URL options](/docs/reference/url-options).
 
-| Option | What it does | Default |
-|---|---|---|
-| `?split=speed` / `?split=memory` | Picks the layer split. | `speed` |
-| `?ctx=N` | Context length in tokens, rounded to a multiple of 256, at least 2,048, up to the model's maximum. | 27B: 16,384 (max 32,768). MoE: 32,768 (max 65,536). 1.7B: 8,192 (max 16,384). |
-| `?kv=q8` | Keeps the KV cache in int8, about 56% of the memory of f16. 27B and MoE only. | f16 |
-| `?phonelayers=1` | By memory: deal phones layers even when the computers can hold the model. | off |
-
-A longer context uses more memory on the devices that hold attention layers, and makes long prompts slower to read. All options, including device-level ones like `?ka=0` and `?wake=0`, are in [URL options](/docs/reference/url-options).
-
-{/* TODO(fact-check, origin/main 40bb0fa): when another device hosts the model (pickModelHost), the creator's
-    menu settings do not reach it either. aiStartAnywhere sends ai-start-req with only {model, boss, by}, so the
-    model host deals with its own #ai-split, and the ai-style handler on other devices only shows a toast, so the
-    model host keeps its default answer style, wording, length and thinking (room.js ~L2487, ~L4069, ~L4246,
-    ~L4483). Looks like a bug; the caution below only covers the URL options. Fix the code or widen the caution. */}
-
-:::caution
-`?ctx=`, `?kv=` and `?split=` take effect on the model host's page. The model host is not always the device that created the room: a device with a clearly faster GPU hosts instead. If a setting seems ignored, check which device is hosting (its device screen says "Serving" with the first layers) and put the option on that device's URL.
-:::
+{/* TODO(fact-check): when another device hosts the model (pickModelHost), the creator's menu settings
+    (answer style, wording, length, thinking, split) may not reach it: aiStartAnywhere sends only {model, boss, by}.
+    Looks like a bug (room.js aiStartAnywhere, ai-style handler). Fix the code or document it. */}
