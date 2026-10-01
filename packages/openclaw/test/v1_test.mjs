@@ -355,6 +355,33 @@ test("the invite key never reaches chat text or logs: waiting / memory / degrade
   assert.ok(!busyMessage({ code: "degraded" }, base).includes(KEY));
 });
 
+// #271: a device left and the re-deal found the devices still here short of the model: the room node
+// stopped (no engine, not degraded, status().short). An ask then waits for devices as a Start the
+// pledges don't cover does ("memory"), instead of waiting on the degraded room until it times out;
+// once a device joins and the pledges hold the model, it starts the room again.
+test("a room stopped short after a re-deal waits for devices like Start (memory), then starts when they hold the model", async () => {
+  const base = { code: "4TKG9P", link: "https://pooled.run/r/4TKG9P", shareLink: "https://pooled.run/r/4TKG9P", s: { model: "qwen3.6-35b-moe", waitSeconds: 0, minDevices: 1, ctx: null } };
+  let devices = [{ name: "mac", gb: 14 }], starts = 0, polled = 0;
+  const node = { ai: { online: false, degraded: true, engine: {}, starting: false }, whole: () => false, missingNames: () => ["stoat"], waitingJoins: () => [],
+    status: () => ({ devices, pledgedGB: devices.reduce((a, d) => a + d.gb, 0), ctx: 16384, ctxNote: null }),
+    start: async () => { starts++; node.ai.online = true; } };
+  // the auto re-deal runs while the ask waits on the degraded room, and stops the room short
+  const r = { ...base, node };
+  setTimeout(() => { Object.assign(node.ai, { engine: null, degraded: false }); }, 20);
+  const e = await ensureOnline(r, { waitMs: 300, onWait: () => polled++ }).catch((x) => x);
+  assert.equal(e.code, "memory", e.message);
+  assert.match(e.message, /needs about [\d.]+ GB; the devices in the room lend 14 GB/);
+  assert.equal(starts, 0, "nothing is dealt while the pledges are short");
+  // stoat is back (or another device joins): the pledges hold the model and the room starts
+  devices = [{ name: "mac", gb: 14 }, { name: "stoat", gb: 12 }];
+  await ensureOnline(r, { waitMs: 300 });
+  assert.equal(starts, 1);
+  // a start refused short by the node is reported as memory too
+  const shortNode = { ...node, ai: { online: false }, start: async () => { const x = new Error("This room is 6.4 GB short for Qwen3.6 35B MoE. Add a device or raise a pledge."); x.short = true; throw x; } };
+  const e2 = await ensureOnline({ ...base, node: shortNode }, { waitMs: 0 }).catch((x) => x);
+  assert.equal(e2.code, "memory", e2.message);
+});
+
 test("/pooled allow with a word that isn't a number or all lets nobody in", async () => {
   const r = hostRoom();
   assert.match(await runPooledCommand("allow everyone", { getRoom: async () => r }), /takes a number/);

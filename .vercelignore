@@ -1,7 +1,7 @@
 local-server
 .gitignore
 *.mov
-*.mp4
+/*.mp4
 models
 tests
 benchmarks
@@ -26,3 +26,5 @@ docs-site/node_modules
 docs-site/dist
 docs-site/.astro
 /dist
+
+

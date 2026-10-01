@@ -201,6 +201,7 @@ async function runJoin(opts, out) {
   let code = opts.code;
   // one name for the whole run, the same after a restart (the host re-seats a device by its name)
   const name = opts.name || deviceName(os.hostname());
+  const verbose = opts.verbose || !!process.env.POOLED_VERBOSE;   // the raw compiler / driver text
   let hostName = null;   // the host this run joined: a rejoin only goes back to a host of that name
   const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
   let ST = null, spinAt = 0;
@@ -294,6 +295,8 @@ async function runJoin(opts, out) {
       if (d.t === "ai-gendone") { S.answering = false; const t = tpsFromStats(d.stats); if (t != null) S.tps = t; }
     });
     n.on("version", (v) => { if (v.theyHost) finish({ type: "version", theirs: v.theirs, theyHost: true }); });
+    // a kernel this GPU's compiler can't build fails every deal the same way: leave now and say so
+    n.on("compilefail", (x) => finish({ type: "shader-compile", kernel: x.kernel, raw: verbose ? x.raw || x.message : "" }));
     n.on("members", () => { if (!hostName && n.hostName) hostName = n.hostName; });
     n.on("otherhost", (x) => finish({ type: "other-host", ...x }));
     n.on("bye", (reason) => {
@@ -419,7 +422,7 @@ async function runHost(opts, out, prepared = null) {
   }
   const cn = ctxNote(rn, opts.model, opts.ctx);
   if (cn) out.log(`--ctx ${opts.ctx}: ${cn}`);
-  const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name, signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
+  const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log: (m) => out.log(m), split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   const code = node.code;
   // the invite link: its #k= key lets a device in without asking (a room node from before the gate has none)
@@ -431,7 +434,10 @@ async function runHost(opts, out, prepared = null) {
   ${opts.allowAll ? `--allow-all: anyone with the code ${fmtCode(code)} comes in without asking` : `with the code ${fmtCode(code)} alone, a device waits until you let it in${process.stdin.isTTY ? " (a allows, d denies)" : ""}`}`);
   const passes = passCounter();
   const S = { code, hosting: true, lobby: 0, phase: "waiting", devices: 1, range: null, embed: true, model: opts.model, tps: null, passes: 0, signaling: true };
-  let leaving = false, solo = 0, starting = null;
+  let leaving = false, solo = 0, starting = null, shortAt = null;
+  // a re-deal found the devices still here short of the model (one left): the room stopped, nothing
+  // dealt past a pledge (room node stopShort, which logs why). Start again when another device is in
+  node.on("short", () => { shortAt = node.gpuPeers().length; });
   node.on("prefill", (x) => { if (x.count && x.tDecode) S.tps = x.count / (x.tDecode / 1000); if (!node.ai.chain.length) solo += x.count + (x.prefilled ? 1 : 0); });
   node.on("signaling", (up) => { S.signaling = up; });
   node.on("version", (v) => out.log(`${v.name || "a device"} can't join: ${v.theirs > rn.PROTOCOL ? `it runs a newer Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL}); update this one: npx @pooled/cli@latest host` : `it runs an older Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL}); it should reload`}`));
@@ -449,6 +455,11 @@ async function runHost(opts, out, prepared = null) {
       out.log(`${peers.length + 1} devices in the room again`);
       deal(true);
     }
+    if (shortAt != null && !starting && !leaving && !st.online && peers.length > shortAt) {
+      shortAt = null;
+      out.log(`${peers.length + 1} devices in the room: starting again`);
+      deal(true);
+    }
   };
   const deal = (auto = false) => {
     if (starting || leaving) return;
@@ -457,7 +468,8 @@ async function runHost(opts, out, prepared = null) {
     else if (!(opts.devices > node.gpuPeers().length + 1)) out.log(`dealing the layers over ${node.gpuPeers().length + 1} device(s)`);
     starting = (again ? node.redeal() : node.start(opts.model, { minDevices: opts.devices || 1 }))
       .then(() => out.log(`room online: ${node.status().split?.join(" · ") || "ready"}`))
-      .catch((e) => { const x = explainError(e, { code, cmd: "host" }); out.log(`couldn't start: ${x.message}${x.hint ? ` ${x.hint}` : ""}`, "error"); if (!out.tty) bye(false, 1); })
+      // still short on a start again: the room node said so and waits for the next device (no exit)
+      .catch((e) => { if (auto && e.short) return; const x = explainError(e, { code, cmd: "host" }); out.log(`couldn't start: ${x.message}${x.hint ? ` ${x.hint}` : ""}`, "error"); if (!out.tty) bye(false, 1); })
       .finally(() => { starting = null; });
   };
   let exitCode = 0;

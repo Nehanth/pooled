@@ -1,4 +1,4 @@
-// CPU check of moe_route (the candidate-threshold top-K) and normRouterKernel (moe_nrt / dn_nba: RMSNorm + GEMV
+// CPU check of moe_route (the merge-network top-K) and normRouterKernel (moe_nrt / dn_nba: RMSNorm + GEMV
 // in one launch), engine/wgsl/moe.js. The kernel bodies run as JavaScript (wgslToJs, one generator per thread,
 // workgroupBarrier() as a yield), in float64 with float32 storage. The GPU-side bit checks are tests/test_moe.js.
 // No GPU.   deno test --no-check tests/unit/moe_route_nrt_test.js
@@ -8,7 +8,7 @@ const f32u = new Float32Array(1), u32f = new Uint32Array(f32u.buffer);
 const H = {
   dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3],
   V4: (a, b, c, d) => [a, b, c, d], mul4: (a, b) => a.map((v, i) => v * b[i]),
-  bitcastF: (u) => { u32f[0] = u >>> 0; return f32u[0]; },
+  bitcastF: (u) => { u32f[0] = u >>> 0; return f32u[0]; }, bitcastU: (f) => { f32u[0] = f; return u32f[0]; },
   inverseSqrt: (v) => 1 / Math.sqrt(v), f32: (v) => v,
   select: (f, t, c) => (c ? t : f), min: Math.min, max: Math.max, exp: Math.exp,
 };
@@ -20,10 +20,10 @@ function bodyJs(src, name) {
   const i = src.indexOf(`fn ${name}(`), j = src.indexOf("{\n", i), k = src.indexOf("\n}", j) + 1;
   if (i < 0) throw new Error(`${name} not in source`);
   return wgslToJs(src.slice(j + 2, k))
-    .replace(/let gs = \((n \+ \d+)\) \/ (\d+);/, "let gs = Math.floor(($1) / $2);")   // u32 division
+    .replace(/= ([^;=]+?) \/ (\d+);/g, "= Math.floor(($1) / $2);")   // u32 division by a constant
     .replace(/let d4 = n \/ 4;/, "let d4 = Math.floor(n / 4);")
     .replace(/let xw = x4 \* vec4<f32>\(([^;]*)\);/, "let xw = mul4(x4, V4($1));")
-    .replace(/vec4<f32>\(/g, "V4(").replace(/bitcast<f32>\(/g, "bitcastF(");
+    .replace(/vec4<f32>\(/g, "V4(").replace(/bitcast<f32>\(/g, "bitcastF(").replace(/bitcast<u32>\(/g, "bitcastU(");
 }
 function run(src, name, WG, bufs, wgv, gx, gy) {
   const hn = Object.keys(H), bn = Object.keys(bufs), wn = Object.keys(wgv);
@@ -43,7 +43,7 @@ function run(src, name, WG, bufs, wgv, gx, gy) {
 function route(K, nExp, lg, xs, C, norm) {
   const KS = K + 1, sel = new Uint32Array(C * KS).fill(0xdead), w = new Float32Array(C * KS).fill(NaN);
   run(routeKernel(K), "moe_route", 256, { rt_l: lg, rt_sel: sel, rt_w: w, rt_s: { nExp, xs, norm } },
-    { rt_p: () => new Float32Array(1024), rt_gm: () => new Float32Array(K), rt_cd: () => new Uint32Array(1024 + K), rt_nc: () => new Uint32Array(K),
+    { rt_k: () => new Uint32Array(1024 + K), rt_ix: () => new Uint32Array(2 * (1024 + K)),
       rt_v: () => new Float32Array(256), rt_ki: () => new Uint32Array(K), rt_kv: () => new Float32Array(K) }, C, 1);
   return { sel, w };
 }
@@ -79,6 +79,9 @@ Deno.test("moe_route: top-K ids and weights match the full sort (random logits, 
     // fewer experts than K groups can fill (nExp 12, K 8: groups of 2, the last two empty) and nExp == K
     checkRoute(8, 12, 1, norm, () => (rnd() - 0.5) * 6);
     checkRoute(4, 4, 1, norm, () => (rnd() - 0.5) * 6);
+    // +0 and -0 tie (the sort keys map -0 to +0), the lower index first; and nExp at the 1024 limit, K 16
+    checkRoute(8, 256, 2, norm, () => (rnd() < 0.5 ? 0 : -0));
+    checkRoute(16, 1024, 1, norm, () => Math.floor(rnd() * 9) - 4);
     // every expert tied: ids 0 .. K - 1, equal weights
     checkRoute(8, 256, 1, norm, (c, i) => (i < 256 ? 0.25 : 1));
     // all the top experts in one group (the other groups' maxima are low; the threshold still admits them)

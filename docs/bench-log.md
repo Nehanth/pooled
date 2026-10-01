@@ -83,6 +83,37 @@ End-to-end on the GB10 (two headless Chromium tabs, real PeerJS signaling and We
 
 Topology change (host link + on-demand chain links instead of a full mesh) and `--devices N` in the emulator, GB10, 27B, `japan` prompt, local signaling, loopback: 3 devices online in 3.0 min, prefill 4.5 s, decode 10.4 tok/s; 16 devices (8 phone-shaped, 64 layers dealt 18+embed / 4-5 per worker / 2 per phone) online in 2.3 min, prefill 8.3 / 7.2 s, decode 3.8 / 4.7 tok/s, every device holding one host link and two chain links, no errors. The decode drop on a zero-latency network is per-hop processing (unpack, upload, readback, pack), about 15 ms per hop, now a measured target. 64 tabs in one Chromium fail at `vkCreateDevice` (one GPU process, driver device cap); not a room limit.
 
+## 2026-10-01: split-K decode attention (attnDecode "v2") on by default (branch perf/kf-long-context)
+
+`engine/wgsl/attn_dec.js` replaces attn_flash + attn_combine for decode and verify passes. Its split length comes
+from the column's own position (not maxSeq), it uses coalesced vec4 K/V loads, a 32-thread softmax, and (new) a
+combine that is parallel over splits (MoE 0.83 -> 0.16 ms per token at 64K). Not bit-identical to v1, so the 27B
+goldens are re-baselined; `?attndecode=v1` / `ATTN_DECODE=v1` keep the old path. Details:
+docs/research/long-context-2026-09.md.
+
+Plain decode tok/s, v1 -> v2 (2 runs each; same prompts per row):
+
+| Path | Model | 1K | 8K | 32K | 64K |
+|---|---|---|---|---|---|
+| GB10 Chrome `chrome_bench.mjs` (fill, rep 2) | MoE | 31.8 -> 50.4 | 32.2 -> 48.5 | 24.5 -> 41.0 | 18.2 -> 35.5 |
+| GB10 Chrome `chrome_bench.mjs` (mean of 2) | 27B | 10.20 -> 11.23 | 9.65 -> 10.81 | 7.65 -> 9.76 | n/a |
+| GB10 Deno `bench_attn_ctx.js` (in-process A/B) | MoE | 23.3 -> 32.3 | 23.2 -> 31.4 | 20.1 -> 28.3 | 14.7 -> 25.7 |
+| GB10 Deno `bench_attn_ctx.js` (in-process A/B) | 27B | 8.61 -> 10.00 | 8.28 -> 9.69 | 6.79 -> 8.87 | 5.47 -> 7.99 |
+| GB10 Deno `bench_ctx.js` (mean of 2) | 27B | 8.48 -> 10.02 | 8.10 -> 9.67 | 6.60 -> 8.81 | 5.32 -> 7.89 |
+| M5 Max Chrome `chrome_bench.mjs` (mean of 2) | MoE | 69.3 -> 88.0 | 68.2 -> 82.3 | 46.5 -> 68.1 | n/a |
+| M5 Max Chrome `chrome_bench.mjs` (mean of 5) | 27B | 19.7 -> 21.0 | 18.7 -> 20.3 | n/a | n/a |
+
+Attention GPU ms per token (Deno A/B): MoE 12.6 -> 0.58 (1K), 19.4 -> 4.9 (32K), 37.6 -> 8.7 (64K); 27B 17.6 -> 1.07
+(1K), 48.5 -> 13.8 (32K), 82.8 -> 26.1 (64K). GB10 Chrome MoE rep 1 ran under GPU contention (v1 1K 15.6), rep 2 shown.
+
+Correctness: greedy tokens identical v1 vs v2 in every Chrome run (both GPUs, all fills); `test_moe` MATCH llama.cpp
+on all prompts, spec == plain; `needle_ctx.js` PASS (MoE 32K/64K, 27B 16K/32K); `test_attn_dec.js` relDiff vs f64
+<= 2.4e-7, verify == decode; `test_attn_dec_model.js` logits relDiff v2 vs v1 <= 1e-5, argmax and 24 greedy equal.
+New 27B goldens (GB10): default `BITS plain c26dbc5 hidden 3177f9f1`, `ATTN_PREFILL_TILE=0` f0537158 / 5d287854
+(v1: 4cac59d8 / a67b7bcd and 4f70a9ca / 5eb28e41), same 13 tokens, spec == plain. `test_prefill_opts.js` MoE
+fails its 0.02 tolerance at 700 tokens on main too (2.44e-2 main and v1, 2.45e-2 v2; argmax, greedy, spec equal):
+pre-existing, not from this change.
+
 ## 2026-09-30: 128K context on the 35B MoE (branch perf/kv-128k), GB10 Deno
 
 `cd tests && MODEL=moe CTX=131072 LENS=32k,64k,96k,127k DEPTHS=0.5,0.25,0.75,0.5 deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights needle_ctx.js`.
@@ -1414,3 +1445,155 @@ How the three branches changed when merged:
 
 Still open: a re-deal while signaling is down still fails, and an answer caught in a freeze longer than
 ~15 s isn't retried automatically.
+
+## 2026-09-29: decode layer fusion, fewer dispatches per layer (branch perf/kn-layer-fusion, not kept: opt-in)
+
+Question: how much of plain decode is launch overhead, i.e. what do fewer dispatches per layer buy when every
+fusion keeps today's bits? Engine option `layerFuse` (off by default; `true`, or a list of `dn,conv,kv,comb,norm,pass`;
+`engine.layerFuse.<k>` flips at runtime). One-token passes only: the batched verify/prefill kernels are untouched,
+so spec == plain holds by construction and was checked.
+
+Dispatches per decode layer today (counted by wrapping `dispatchWorkgroups` over 16 tokens, Deno):
+
+| | DeltaNet layer | attention layer | FFN | per token (+ head) | compute passes |
+|---|---|---|---|---|---|
+| MoE, main | 7: norm, [qkv\|z], [beta\|alpha], conv, dn_pre, dn_delta_gn, out+res | 9: norm, q, [k\|v], glue, kv_store, flash, combine, sigmoid_mul, o+res | 5: norm, router, route, gus, dnc | 502 | 91 |
+| 27B, main | 7 | 9 | 3: norm, gate/up, down+res | 674 | 145 |
+| layerFuse | 5 | 6 | unchanged | MoE 412, 27B 530 | 1 |
+
+The fusions (`engine/wgsl/layer_fuse.js`, `engine/wgsl/coop.js` CV / NRM variants):
+- `dn`: `dn_pre` (q/k L2 norm, beta/decay gates) folded into `dn_delta_gn` (`dn_delta_gnp`): each value-head
+  workgroup normalises its key head from workgroup memory with `dn_pre`'s in-order sum; [dt | A] packed in one buffer
+  to stay at 8 storage bindings. -1 per DeltaNet layer.
+- `conv`: `dn_conv` in the [qkv | z] GEMV's epilogue (`matvec_*_coop_cv`): the thread that stores a qkv row runs
+  the causal conv + SiLU + state shift on it; each channel belongs to one workgroup, so no race. -1 per DeltaNet layer.
+- `comb`: `sigmoid_mul` in `attn_combine` (`attn_combine_g`, gate read from q_full). -1 per attention layer.
+  Written as `(O / L) * sigmoid(g)` Metal folded the two and changed bits on the M5 Max (GB10 unchanged); the quotient
+  now goes through workgroup memory (store, barrier, load) and the bits match on both.
+- `kv`: `kv_store` in `attn_glue` (`attn_glue_kv`: k heads packed to the f16 cache from workgroup memory, v copied);
+  needs `comb` (the glue no longer copies the gate). -1 per attention layer.
+- `norm`: an attention layer's input rmsnorm inside its [k | v] GEMV (run before q): every workgroup recomputes
+  rmsnorm's 256 strided partials and tree (fewer threads each run several partials), normalises its x slices in
+  registers, workgroup 0 writes xn for q. -1 per attention layer. The same fold for the MoE router and the DeltaNet
+  [beta | alpha] GEMV was built and measured (+1.3% more on the GB10) and then dropped here: perf/decode-moe-bandwidth
+  already has it (`moe_nrt`, `dn_nba`).
+- `pass`: `forwardToken`'s layers and head in one compute pass instead of 2-3 per layer.
+
+Correctness (all with `layerFuse` on): per-flag logit hashes equal to off for 24 decode tokens after prefill,
+spec == plain, on the GB10 (MoE 92fafe48, 27B 4d85013d) and the M5 Max (MoE b97a1a37, 27B 2517aa46);
+`test_q38_bits.js` ATTN_PREFILL_TILE=0 LAYER_FUSE=1 = reference on both (see below for the GB10; Mac
+b72e4d1f / ac403b4e, GPU sampling == logits path); `test_moe.js LAYER_FUSE=1` MATCH llama.cpp 3/3, spec == plain
+3/3, GPU sampling head check 0 mismatches (Mac); `tests/e2e/fusion_synth.mjs` has one row per flag; unit tests 433/433.
+(Deno on the Mac: a long-running process fails `mapAsync` with "validation error" after ~6 prefill + decode + spec
+cycles, with `layerFuse` never on as well: a harness/runtime limit, not these kernels.)
+
+Speed, Chrome (`chrome_bench.mjs <model> 40`, plain tok/s, two prompts, OFF/ON interleaved in one snapshot tree):
+
+| | OFF | ON | gain |
+|---|---|---|---|
+| GB10 MoE (6 samples each) | 50.57 | 52.38 | +3.6% |
+| GB10 MoE, `dn,conv,kv,comb` only (6 each) | 50.67 | 52.56 | +3.7% |
+| GB10 MoE, with the router / beta-alpha norm folds as well (6 each) | 50.12 | 52.96 | +5.7% |
+| GB10 27B (4 / 2 samples; a later ON run hit GPU contention and is dropped) | 11.16 | 11.30 | +1.3% |
+| M5 Max MoE (6 each) | 91.02 | 91.88 | +0.9% |
+| M5 Max 27B (4 each) | 21.66 | 21.85 | +0.9% |
+
+Deno GB10 plain: MoE 31.96 -> 31.0 ms/token (median of 4), 27B 101.78 -> 100.09 ms. Spec tok/s unchanged
+(the verify step runs the batched kernels). About 1 ms per MoE token on the GB10 for 90 fewer dispatches and 90
+fewer passes (~11 µs each), under 0.1 ms on the M5 Max: Metal launches are cheap (1.2 µs per dispatch measured
+on 2026-09-28) and the Mac's MoE gap to MLX is inside the kernels, not between them. Below the 5% bar on both
+machines, so `layerFuse` stays opt-in. Stacked with perf/decode-moe-bandwidth (orthogonal kernels) the GB10 MoE
+gain would be expected around +7-8%; not measured together.
+
+## 2026-09-30: layerFuse on by default for NVIDIA, Apple and Deno (branch perf/kn-layer-fusion)
+
+The 2026-09-29 layer fusions above, merged with main (#246's `dn_nba` and `moe_nrt` now run next to them) and
+turned on by default: `layerFuse` "auto" (the default) is on when the adapter vendor is NVIDIA or Apple, or when
+there is no adapter info (Deno), and off on everything else until someone measures it there. `?layerfuse=0|1`
+(engine/preset.js) or `layerFuse: false` turns it off or on. Every flag keeps the bits, so rooms may mix devices
+with it on and off.
+
+The Chrome numbers from separate tab loads were not usable tonight: three other worktrees' Deno jobs were on
+the GB10 during the runs (nvidia-smi), and plain MoE decode swung between 15 and 52 tok/s in both arms. The
+numbers below come from a new in-process A/B that flips `engine.layerFuse` at runtime in alternating blocks after
+the same prompt, so both arms share the load and any contention: `tests/bench/lf_ab.js` (Deno, 8 rounds x 24
+tokens) and `bench.html?lfab=R` (Chrome, R rounds x 40 tokens). Both check that the two arms give the same tokens.
+
+| | off | on | gain |
+|---|---|---|---|
+| GB10 Deno MoE (8 blocks each, median ms/token) | 30.77 | 29.46 | +4.5% (every on block faster than every off block) |
+| GB10 Deno 27B | 101.89 | 100.70 | +1.2% |
+| GB10 Chrome 27B (2 tabs x 8 blocks, median tok/s) | 11.09 / 11.09 | 11.15 / 11.21 | +0.5% / +1.0% |
+| GB10 Chrome MoE, 4 tabs (8, 8, 12, 12 blocks), all contended (quiet GB10: ~52 tok/s) | 19.0 / 43.2 / 16.0 / 12.8 | 20.1 / 47.9 / 17.0 / 13.2 | +5.7% / +10.9% / +6.0% / +3.1%, tokens identical |
+| GB10 Chrome MoE, only the quiet blocks of tab 2 (3 pairs at 52-55 tok/s) | 52.3 / 52.9 / 53.4 | 54.7 / 53.0 / 54.2 | +4.6% / +0.2% / +1.5% |
+| M5 Max Chrome MoE (2 tabs x 8 blocks) | 90.29 / 90.78 | 92.09 / 92.28 | +2.0% / +1.7% (every on block faster) |
+| M5 Max Chrome 27B | 21.10 / 21.07 | 21.34 / 21.29 | +1.1% / +1.0% (every on block faster) |
+
+Every GB10 Chrome MoE tab's median favoured on, but the GB10 was never quiet enough tonight for a clean Chrome MoE figure.
+The 2026-09-29 quiet run (+3.6%) and the quiet tail above (~+2%) are the numbers to trust. The M5 Max, which had no
+contention, gains 1-2% in Chrome and has every on block faster than every off block.
+
+Correctness, GB10 (Deno): `test_q38_bits` with `LAYER_FUSE=0` and default (on) give the same hashes: 4cac59d8 / a67b7bcd, and
+`ATTN_PREFILL_TILE=0` 4f70a9ca / 5eb28e41 both ways. These are not the old 8a532ef5 / 85b12667 references: main moved them
+before this branch, and `LAYER_FUSE=0` is main's code path. Spec == plain and GPU sampling == logits in both.
+`test_moe` MATCH llama.cpp 3/3, spec == plain 3/3, head check 0 mismatches (on and off). `test_moe_split` PASS (split == solo,
+spec == plain). `fusion_synth.mjs` on the real GPU (`E2E_GPU=real`): every layerFuse row 0 logits differ. Its `attn_glue` row
+fails on a real GPU with or without this branch, which the file's own comment already says. `test_prefill_opts` 27B PASS. MoE:
+700 tokens relDiff 2.44e-2 over the 2e-2 tolerance, with identical numbers under `LAYER_FUSE=0` and `LAYER_FUSE=1`, so it
+comes from main (routing near-ties, see the note in the test) and not from this branch. Argmax, greedy and spec == plain are
+unchanged. M5 Max (Deno): `test_q38_bits ATTN_PREFILL_TILE=0` e3903fe5 / 8742688e for both off and on. Unit tests 942/942,
+`npm run check` clean.
+## 2026-10-01: moe_route top-K by a merge network (branch perf/moe-route-merge), GB10
+
+Report item B4 (MOE-1). `moe_route` now turns each expert's value into a u32 sort key, sorts chunks of K by rank
+and merges list pairs in ceil(log2(nExp / K)) rounds (5 for 256 experts), one barrier per round, all 256 threads.
+The order is (value desc, id asc), the same as before, so ids and weights are the same bits.
+
+| | origin/main 8a435fe | branch |
+|---|---|---|
+| `moe_fused_sweep.js` route µs (REF = main, 2 x 3 runs) | 12.40 | 10.35 |
+| `prof_ts.js` moe_route in the model (2 runs) | 17.2 / 17.3 µs, 0.69 ms/token | 14.8 / 14.8 µs, 0.59 ms/token |
+| `prof_ts.js` kernel sum per token | 18.39 / 18.41 ms | 18.23 / 18.28 ms |
+| Chrome plain tok/s, two-sum / hash-map / japan (mean of 3, interleaved) | 50.98 / 50.91 / 44.06 | 51.08 / 51.31 / 44.65 |
+| Chrome spec K=3 tok/s | 92.22 / 63.13 / 48.29 | 90.55 / 64.49 / 49.35 |
+
+The kernel gain is clear and repeatable (-2 µs a launch, -0.1 ms a token, ~0.5%). End to end it is inside run-to-run
+noise (plain +0.2..+1.3%, spec -1.8..+2.2%, with one low branch run at 86.6 two-sum spec). What I tried that did
+not help: a comparator on the float values plus NaN and padding tests in each compare (14.45 µs with a linear count,
+12.40 with a binary search, no better than main); bigger phase-0 chunks (F = 2, 4, 8: same 10.35 µs). Empty
+selection floor: 4.2 µs. The selection part went from ~8.2 to ~6.1 µs.
+
+Correctness: unit tests 960/960 (new cases: +0/-0 ties, nExp 1024 with K 16); a CPU differential fuzz against
+origin/main's kernel (3500 cases: random, integer ties, +0/-0, nExp up to 1024, K 1..16) gives identical ids
+and weight bits. Only inputs with NaN or -inf logits differ: main's group-max threshold drops them or picks nothing.
+The new kernel orders NaN after every number and never writes it to a slot. `test_moe.js` MATCH llama.cpp 3/3, spec ==
+plain 3/3 (same output and acceptance as main); Chrome golden true, specIdentical true, the same acceptance as main.
+`test_q38_bits.js` default 4cac59d8 / a67b7bcd and ATTN_PREFILL_TILE=0 4f70a9ca / 5eb28e41, both the same as
+origin/main on the same machine (the 27B does not use moe_route). Barrier lint clean; `npm run check` passes.
+Not measured on the M5 Max.
+## 2026-10-01: speculative verify without state copies (branch perf/decode-verify-blits)
+
+Replay rollback used to copy every DeltaNet layer's state into `S_pre` before the verify pass and the
+conv/beta/decay inputs into `L.rp` after it, then copy `S_pre` back and copy the conv state per layer in
+`_restoreDN`. Now `dn_delta_mc` writes `S_pre` and each column's inputs into `L.rp` from its own registers
+during the verify, and `_restoreDN` is one compute pass (replay from `S_pre` + new `dn_conv_restore`). Same
+kernel, inputs and order on replay, so the bits are unchanged.
+
+Copies per speculative step (M5 Max, `prof_chrome.mjs`, K=3): MoE 142 (81.5 MB) -> 7 (24 KB); 27B 222.8
+(194 MB) -> 6.8 (57 KB). Step 19.71 -> 19.44 ms (MoE), 69.73 -> 68.98 ms (27B). `prof_chrome.mjs` and
+`prof_moe_decode.js` hang in submit mode on GB10 (main too), so the counts come from the M5.
+
+Spec K=3 tok/s, `chrome_bench.mjs <model> 64`, mean of 3 runs (plain unchanged in every pair):
+
+| | main | branch | |
+|---|---|---|---|
+| GB10 Chrome MoE two-sum / hash-map | 93.4 / 65.6 | 97.9 / 68.0 | +4.9% / +3.6% |
+| GB10 Chrome 27B two-sum / hash-map | 25.5 / 22.8 | 26.4 / 23.7 | +3.5% / +3.6% |
+| GB10 Deno MoE (`test_moe.js`) two-sum / hash-map / bash | 59.7 / 52.7 / 44.2 | 63.2 / 55.9 / 46.2 | +5.9% / +6.0% / +4.6% (2-3 runs) |
+| M5 Max Chrome MoE two-sum / hash-map | 176.0 / 125.6 | 179.1 / 128.1 | +1.8% / +2.0% |
+| M5 Max Chrome 27B two-sum / hash-map | 47.35 / 42.57 | 47.91 / 43.12 | +1.2% / +1.3% |
+
+The M5 gained less than the ~5% estimated (the copies there cost ~0.3 ms per step, not 1.2-1.5 ms); GB10
+gained more. Gates: unit tests, `npm run check`, `test_q38_bits` (4cac59d8, and 4f70a9ca with
+ATTN_PREFILL_TILE=0: same as main), `test_moe` MATCH llama.cpp + spec == plain, `test_mtp`, `test_mtp_split`,
+`test_moe_split`, M5 bits equal to main, `specIdentical` and golden in every Chrome run.

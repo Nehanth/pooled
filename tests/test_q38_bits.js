@@ -4,7 +4,9 @@
 // ATTN_PREFILL_TILE=0 (read by load_model.js) turns the tiled prefill attention off, the one accepted deviation.
 // The prompt is a frozen fixture (golden/q38_bits_prompt.txt, the first 150 lines of engine/gguf.js as of
 // kopt/combined). It used to be read live from engine/gguf.js, so a comment edit there changed the prompt and
-// the hashes. Reference (GB10): ATTN_PREFILL_TILE=0 -> BITS plain 85b12667 hidden eba0b8d5; default -> 8a532ef5 / 52f2ae10.
+// the hashes. Reference (GB10, attnDecode v2, the default since perf/kf-long-context): ATTN_PREFILL_TILE=0 ->
+// BITS plain f0537158 hidden 5d287854; default -> c26dbc5 / 3177f9f1. With ATTN_DECODE=v1 (attn_flash, the
+// default before): 4f70a9ca / 5eb28e41 and 4cac59d8 / a67b7bcd. Greedy and spec tokens are the same in all four.
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
 import { openGGUF, Q38_PATH, gpuDevice } from "./load_model.js";
@@ -14,7 +16,8 @@ const model = openGGUF(Q38_PATH);
 const { device } = await gpuDevice();
 const L = model.trunkLayers, tok = model.tokenizer();
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true });
-const eng = await Qwen35Engine.create({ device, meta: model.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, batchCols: 16, coopRowsB: 1 });
+const eng = await Qwen35Engine.create({ device, meta: model.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, batchCols: 16, coopRowsB: 1,
+  layerFuse: { "0": false, "1": true }[Deno.env.get("LAYER_FUSE")] });   // LAYER_FUSE=0 / 1: the decode layer fusions off / on (unset: the engine default; must not change a bit)
 const h = (arrs) => { let x = 0x811c9dc5; for (const a of arrs) { const u = new Uint32Array(a.buffer, a.byteOffset, a.length); for (let i = 0; i < u.length; i++) x = Math.imul(x ^ u[i], 0x01000193) >>> 0; } return x.toString(16); };
 const ids = tok.encode(await Deno.readTextFile(new URL("./golden/q38_bits_prompt.txt", import.meta.url))).slice(0, 300);
 if (ids.length < 300) throw new Error(`prompt fixture too short: ${ids.length} tokens`);

@@ -42,12 +42,18 @@ export function roomQwen35Options(flags) {
     // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched attention) for A/B
     // timing; both give the same bits, so devices may differ
     ...(off("fuse") ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
+    // ?layerfuse=0|1: decode layer fusion (engine layerFuse: fewer dispatches per token, same bits) off / on;
+    // unset: the engine's per-adapter default (on for NVIDIA, Apple and Deno)
+    ...(q.has("layerfuse") ? { layerFuse: q.get("layerfuse") === "0" ? false : q.get("layerfuse") === "1" ? true : q.get("layerfuse") } : {}),
     // ?kv=q8: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics a little
     kvQ8: q.get("kv") === "q8",
     // ?moefuse=0: the unfused MoE FFN kernels (A/B). The fused path (the default) gives different MoE bits,
     // so every device of a room should run the same setting; ?moednrows=1|2|4 tunes it
     moeFuse: !off("moefuse"),
     moeDnRows: parseInt(q.get("moednrows"), 10) || 1,
+    // ?attndecode=v1: decode / verify attention on attn_flash instead of the split-K attn_dec (engine default
+    // "v2"; different numerics, so every device of a room should run the same setting)
+    ...(q.get("attndecode") ? { attnDecode: q.get("attndecode") } : {}),
     // Prefill options (attnPrefillTile, prefillUbatch, moeGroupPrefill) are deliberately not set: every device
     // takes the engine's defaults, so host and workers agree.
     // GPU sampling, on by default (?gpusample=0: off): argmax / top-k of the head in the same submit.

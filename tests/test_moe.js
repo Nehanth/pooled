@@ -22,6 +22,7 @@ const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRang
   // DRAFTCHAIN=0 / SPECFUSE=0: per-submit drafts / separate verify submits (A/B; same output)
   draftChain: Deno.env.get("DRAFTCHAIN") !== "0", specFuse: Deno.env.get("SPECFUSE") !== "0",
   moeNormRouter: Deno.env.get("MOE_NORM_ROUTER") !== "0",   // MOE_NORM_ROUTER=0: rmsnorm + router GEMV launches instead of moe_nrt (A/B)
+  layerFuse: { "0": false, "1": true }[Deno.env.get("LAYER_FUSE")],   // LAYER_FUSE=0 / 1: the decode layer fusions off / on (unset: engine default)
   moeFuse: Deno.env.get("MOE_FUSE") !== "0", moeDnRows: +(Deno.env.get("MOE_DN_ROWS") || 1), moeKernel: MOEK, moeFusedLayout: MOEFL,   // MOE_FUSE=0: unfused MoE kernels (A/B)
   // MOEGROUP=U (unset: the engine default, 256 tiled; 0: off): expert-grouped prefill in ubatches of up to U tokens (U a multiple of BCOLS; these prompts are ~25 tokens:
   // with the default BCOLS=4, MOEGROUP=16 puts all but the last 0..7 prompt tokens through it), MOEGROUP_UC: pairs per chunk

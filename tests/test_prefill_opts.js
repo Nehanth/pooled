@@ -45,6 +45,7 @@ const maxSeq = Math.ceil((Math.max(...LENS) + GEN + 64) / 256) * 256;
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead, maxSeq, batchCols: 16, coopRowsB: 1,
   // the f32 wide GEMM (its 2e-3 / 2e-2 tolerance); the dp4a GEMM is tests/test_prefill_dp4a.js (PREFILL_DP4A=1 forces it here)
   ...(Deno.env.get("PREFILL_DP4A") ? {} : { prefillDp4a: false }),
+  layerFuse: { "0": false, "1": true }[env("LAYER_FUSE", "")],   // LAYER_FUSE=0 / 1: decode layer fusion off / on (unset: engine default)
   ...wideOpts(), ...(env("MOEGROUP") ? { moeGroupPrefill: +env("MOEGROUP") } : {}), ...(env("MOEGROUP_UC") ? { moeGroupUC: +env("MOEGROUP_UC") } : {}) });
 const TOL = prefillTol(!!eng.moe);
 const set = (on) => { eng.attnPrefillTile = on && !!eng.attnPTCfg; eng.prefillWide = on && eng.ubatch > 0; eng.moeGroup = on && eng.moeGrpU > 0; };

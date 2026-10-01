@@ -47,7 +47,7 @@ Options
 
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
-  --verbose         also show the GPU driver's own messages
+  --verbose         also show the GPU driver's own messages and a shader compiler's full error
   -h, --help        this help
 
   Every device that holds layers computes on every prompt in the room: this computer sees the
@@ -99,7 +99,7 @@ More options
   --no-check        skip the test allocation that confirms the memory is there
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
-  --verbose         also show the GPU driver's own messages
+  --verbose         also show the GPU driver's own messages and a shader compiler's full error
   -h, --help        this help
 
   pooled host --model list prints the models.
@@ -417,6 +417,13 @@ export function explainError(err, { code = "", cmd = "join", mine = 4 } = {}) {
     return { message: "No WebGPU adapter: Dawn found no GPU it can use on this computer.",
       hint: "It needs Metal (macOS 26 or newer), Vulkan (Linux: a Vulkan driver, e.g. the NVIDIA or Mesa one) or D3D12 (Windows). pooled serve works without a GPU." +
         (driver ? `\n  The GPU driver said:\n  ${driver}` : ""), code: 1 };
+  }
+  // a kernel this GPU's shader compiler rejects (FXC on a Windows PC without DXC, say): the browser's
+  // WebGPU compiles the same kernels with its own compiler. err.raw (the compiler's text) under --verbose
+  if (t === "shader-compile") {
+    const raw = String(err?.raw || "").trim();
+    return { message: `This GPU's shader compiler can't build ${cleanText(err.kernel || "one of the kernels", 60)}; join from Chrome or Edge instead (open the room's link).`,
+      hint: raw ? `The compiler said:\n${raw}` : "pooled join --verbose shows the compiler's error.", code: 1 };
   }
   if (t === "low-memory")
     return { message: `Not enough GPU memory to lend: ${msg}.`, hint: "Close other GPU apps, or lend a set amount with --gb N (at least 1).", code: 1 };

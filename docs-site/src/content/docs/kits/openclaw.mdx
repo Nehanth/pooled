@@ -21,27 +21,27 @@ import { Steps } from '@astrojs/starlight/components';
 
 {/*
 Sources (for the fact-checker):
-- Verified 2026-09-30 on the Spark (GB10, 122 GB unified memory), OpenClaw 2026.9.6, in a clean throwaway profile
-  (OPENCLAW_HOME / OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH in a temp dir), every screenshot a real pty capture:
-  - `openclaw plugins install clawhub:@pooled/openclaw`: resolved @pooled/openclaw@0.2.0, ClawHub Security Audit "Outcome: Safe",
-    "Proceed with installation? [y/N]", then "Plugin capabilities require approval … Accept these capabilities and install "pooled"? [y/N]",
-    "Installed plugin: pooled" (14 s). npm: `npm view @pooled/openclaw version` = 0.2.0.
+- Screenshots re-captured 2026-10-01 on the Spark (GB10, 122 GB unified memory), OpenClaw 2026.9.6, @pooled/openclaw 0.2.1 from ClawHub,
+  in a clean throwaway profile (OPENCLAW_HOME / OPENCLAW_STATE_DIR / OPENCLAW_CONFIG_PATH in a temp dir), every screenshot a real pty capture:
+  - `openclaw plugins install clawhub:@pooled/openclaw`: resolved @pooled/openclaw@0.2.1, ClawHub Security Audit "Outcome: Safe",
+    "Proceed with installation? [y/N]", then the capabilities prompt, "Installed plugin: pooled".
   - `openclaw onboard` (QuickStart): Model/auth provider -> More… -> type "pooled" -> "Pooled (Your own devices, no API key)";
-    "How should this device take part?" -> Start a room on this device; "This GPU: NVIDIA GB10 · 122 GB unified memory. How much …
-    lend the room (GB)?" 16; "Which model should the room run?" Qwen3.6 35B MoE "downloaded ✓ · needs about 22.8 GB across the room ·
-    128k context · needs more devices · recommended for OpenClaw"; "Wait for how many devices" Two; "Who can join" Devices with the
-    invite link; "Pooled room" note with code + link; "Default model: Keep current (pooled/qwen3.6-35b-moe)".
-  - The profile had no systemd user session, so onboarding said "Gateway not detected yet. Start now: openclaw gateway run";
-    we ran `openclaw gateway run`. The room opened about 10 s after the gateway started.
-  - Second device: `pooled join GX4-BAC --gb 10 --name spark-join` (@pooled/cli 0.3.0), a second process on the same GB10,
-    with the code alone: "waiting for the host to let this device in". `/pooled` in `openclaw tui` showed "Waiting to join:
-    1. spark-join wants to join (computer, 10 GB)"; `/pooled allow` -> "Let in: spark-join"; online 48 s later
-    (join: "layers 24-39 ready in 13.9 s"); `/pooled`: "qwen3.6-35b-moe online", "Layers: nehanth (OpenClaw) 0-23 · spark-join 24-39".
-  - First task in a fresh install (session main): 182.8 s; the gateway log: "18655 prompt tokens (0 reused) … calls read …
-    18655 read in 149.8 s", then "397 read in 4.2 s, 18464 from a pinned checkpoint", 416 tokens at 17.7 tok/s.
-    Next question in the same session: 14.0 s ("590 read in 5.9 s"). A new session (todo) with the same task: 46.1 s
-    ("1911 read in 16.2 s, 16507 from a pinned checkpoint"); the screenshots are from that session (notes.txt in the
-    workspace, 7 lines). The Control UI (openclaw dashboard) showed the same chat with "Read notes.txt".
+    the Pooled box ("gpu NVIDIA GB10 · 122 GB unified memory"); "How should this device take part?" Start a room / Join a room;
+    "How much GPU memory should this device lend? (GB)" 16; "Which model?": Qwen3 1.7B needs 6 GB, Qwen3.8 27B needs 20 GB,
+    Qwen3.6 35B MoE "needs 23 GB · downloaded (recommended · needs another device)"; "How many devices should be in before the model
+    loads?" 2; "Who can join the room?" Invite link only; the "Pooled room" box with code + invite link + how to join.
+    A model that isn't on disk: "… is not downloaded (…). Download it now?" Download now / When the gateway starts / Don't download (src/setup.js).
+  - `openclaw gateway run` (no systemd user session in the profile): room open 12 s after the gateway started.
+  - Second device: `pooled join MXB-PHZ --gb 10 --name spark-join` (@pooled/cli 0.3.3), a second process on the same GB10,
+    with the code alone: "waiting for nehanth (OpenClaw) to let you in". `/pooled` in `openclaw tui`: "waiting for devices · 1 device",
+    "This room is 6.9 GB short for Qwen3.6 35B MoE", "spark-join wants to join (computer, 10 GB)"; `/pooled allow` -> "Let in: spark-join";
+    online 66 s later ("host layers 0-23 + embedding/head ready in 66.4 s"); `/pooled`: "online · 2 devices", HOLDS 0-23 and 24-39,
+    "26 GB lent · 23 GB needed".
+  - First task in a fresh install (session main): 296 s; the gateway log: "18660 prompt tokens (0 reused) … calls read …
+    18660 read in 264.8 s", then "393 read in 6.3 s, 18471 from a pinned checkpoint". Next question in the same session: 42 s
+    ("559 read in 8.6 s"). A new session (todo) with the same task: 64 s ("1844 read in 28.8 s, 16514 from a pinned checkpoint");
+    the screenshots are from that session (notes.txt in the workspace, 7 lines). A perf benchmark shared the GPU during this run.
+    The Control UI (openclaw dashboard) showed the same chat with "Read notes.txt".
 - packages/openclaw/src/setup.js, src/commands.js (/pooled allow|deny|link|pledge), src/prewarm.js (warm-up from the last prompt)
 */}
 
@@ -49,12 +49,19 @@ Sources (for the fact-checker):
 
 [OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted assistant. The Pooled plugin makes Pooled its model: the OpenClaw gateway starts a Pooled room and holds part of the model on its own GPU. Your other computers, browser tabs and phones join the room and hold the rest.
 
+
+<video controls preload="metadata" playsinline poster="/docs/media/openclaw-inbox-demo.jpg" style="width:100%;border-radius:12px;margin:1rem 0">
+  <source src="/docs/media/openclaw-inbox-demo.mp4" type="video/mp4" />
+</video>
+
+*Two minutes, no sound: OpenClaw on a Mac Studio and a gaming PC with an RTX 5070, pooling the 35B MoE to triage an inbox. Slow parts are sped up and labeled.*
+
 ## You need
 
 - **A computer with a GPU for the gateway:** Linux with Vulkan (glibc 2.38 or newer, like Ubuntu 24.04), or macOS 26 or newer. Windows is untested.
 - **Node 22 or newer** and **OpenClaw 2026.9.6 or newer**.
 - **About 23 GB of GPU memory across the room** for the 35B MoE, the model for OpenClaw. One big machine can hold it alone. This guide pools two devices.
-- **A 20.8 GB download** for the MoE, once per machine, and **30 minutes** the first time.
+- **A 19.4 GB download** for the MoE, once per machine, and **30 minutes** the first time.
 
 ## Steps
 
@@ -68,37 +75,37 @@ Sources (for the fact-checker):
 
    OpenClaw shows ClawHub's security audit, then the plugin's capabilities, and asks before each. Answer `y` to both. The ClawHub listing is new. The same package is on npm: `openclaw plugins install @pooled/openclaw`.
 
-   <Shot src={install} alt="ClawHub Security Audit for @pooled/openclaw 0.2.0: Outcome Safe, then Proceed with installation?" />
+   <Shot src={install} alt="ClawHub Security Audit for @pooled/openclaw 0.2.1: Outcome Safe, then Proceed with installation?" />
 
 2. **Pick Pooled.** Run `openclaw onboard`. Under **Model/auth provider**, choose **More…** and type `pooled`.
 
    <Shot src={provider} alt="The provider search: pooled, 1 match, Pooled (Your own devices, no API key)" />
 
-3. **Start a room on this device.**
+3. **Start a room on this device.** Onboarding shows the GPU it found, then asks how this device takes part.
 
-   <Shot src={start} alt="How should this device take part? Start a room on this device, or Join a room" />
+   <Shot src={start} alt="Pooled, gpu NVIDIA GB10 · 122 GB unified memory, then How should this device take part? Start a room, or Join a room" />
 
-4. **Lend memory and pick the MoE.** Say how much of this GPU's memory to lend. The model list marks **Qwen3.6 35B MoE** as recommended for OpenClaw and says whether it is downloaded. If it isn't, onboarding offers to download it now, when the gateway starts, or not at all.
+4. **Lend memory and pick the MoE.** Say how much of this GPU's memory to lend. **Which model?** lists what each model needs and whether it is downloaded, and marks **Qwen3.6 35B MoE** as recommended. If it isn't downloaded, onboarding offers to download it now, when the gateway starts, or not at all.
 
-   <Shot src={model} alt="Lend 16 GB, then the model list: Qwen3.6 35B MoE, downloaded, needs about 22.8 GB, recommended for OpenClaw" />
+   <Shot src={model} alt="Lend 16 GB, then Which model?: Qwen3.6 35B MoE, needs 23 GB, downloaded, recommended, needs another device" />
 
-   Then keep **Two (this + one more)** devices and **Devices with the invite link**. Onboarding prints the room code and the invite link. They stay the same when the gateway restarts. Answer the rest of onboarding as you like.
+   Then keep **2** devices (this one and one more) and **Invite link only**. Onboarding prints the room code, the invite link and how another device joins. They stay the same when the gateway restarts. Answer the rest of onboarding as you like.
 
-   <Shot src={room} alt="The Pooled room box: room code GX4-BAC, the invite link, and how another device joins" caption="The invite key is hidden in these captures." />
+   <Shot src={room} alt="The Pooled room box: room code MXB-PHZ, Qwen3.6 35B MoE, the invite link, and how another device joins" caption="The invite key is hidden in these captures." />
 
 5. **Start the gateway**, if onboarding didn't: `openclaw gateway run`. The room opens with it, in about 10 seconds.
 
 6. **Add a second device.** On another computer (or a second terminal), run `pooled join` with the invite link, or open the link in Chrome or Safari. See [Rooms from the terminal](/docs/kits/terminal). With the invite link it gets in at once. With the code alone, it waits for you:
 
-   <Shot src={join} alt="pooled join with the code alone: waiting for the host to let this device in" />
+   <Shot src={join} alt="pooled join with the code alone: waiting for nehanth (OpenClaw) to let you in, lends 10 GB" />
 
-   Open a chat with `openclaw tui` and type `/pooled`. It lists who waits. `/pooled allow` lets them in:
+   Open a chat with `openclaw tui` and type `/pooled`. It shows the room's devices, how much memory it has against what the model needs, and who waits. `/pooled allow` lets them in:
 
-   <Shot src={allow} alt="/pooled lists spark-join wants to join (computer, 10 GB); /pooled allow answers Let in: spark-join" />
+   <Shot src={allow} alt="/pooled: waiting for devices, 16 GB lent of 23 GB needed, spark-join wants to join (computer, 10 GB); /pooled allow answers Let in: spark-join" />
 
-   The model loads once the room holds it (48 seconds in our test). `/pooled` then says **online** and which layers each device holds:
+   The model loads once the room holds it (66 seconds in our test). `/pooled` then says **online** and which layers each device holds:
 
-   <Shot src={online} alt="/pooled: qwen3.6-35b-moe online, 26 GB pledged, layers 0-23 and 24-39" />
+   <Shot src={online} alt="/pooled: Qwen3.6 35B MoE online, 2 devices, holds 0-23 and 24-39, 26 GB lent of 23 GB needed" />
 
 7. **Give it a first task.** Put a `notes.txt` in OpenClaw's workspace and ask:
 
@@ -108,19 +115,19 @@ Sources (for the fact-checker):
 
    It reads the file with its `read` tool and answers.
 
-   <Shot src={task} alt="The TUI: /pooled shows the room online, then the task and a to-do list grouped by urgency" />
+   <Shot src={task} alt="The TUI: /pooled shows the room online, then the task and a numbered to-do list, most urgent first" />
 
    `openclaw dashboard` opens the same chat in the Control UI, with the tool call and the model, **Qwen3.6 35B MoE · Pooled room**:
 
-   <Shot src={controlUi} alt="The Control UI: Read notes.txt, the to-do list, and Qwen3.6 35B MoE · Pooled room GX4-BAC under the message box" />
+   <Shot src={controlUi} alt="The Control UI: Read notes.txt, the to-do list, and Qwen3.6 35B MoE · Pooled room MXB-PHZ under the message box" />
 
 </Steps>
 
 ## What you should see
 
-- **The first answer is slow: about 3 minutes in our test.** OpenClaw sends a prompt of about 18,000 tokens (its instructions and tools), and the room reads it once. That took 150 seconds here.
-- **Later answers are fast.** The room keeps that prompt, so the next question took 14 seconds, and the same task in a new session took 46 seconds. After a gateway restart, the plugin reads the prompt again as soon as the room is online, before you ask.
-- Our test ran both devices on one GB10. On two computers the times differ with their GPUs.
+- **The first answer is slow: about 5 minutes in our test.** OpenClaw sends a prompt of about 18,000 tokens (its instructions and tools), and the room reads it once. That took 265 seconds here.
+- **Later answers are fast.** The room keeps that prompt, so the next question took 42 seconds, and the same task in a new session took 64 seconds. After a gateway restart, the plugin reads the prompt again as soon as the room is online, before you ask.
+- Our test ran both devices on one GB10, which a benchmark shared at the time. On two computers the times differ with their GPUs.
 
 Every device that holds layers sees the conversation, including the files OpenClaw reads, and could steer its tool calls: share the invite link only with people you trust. See [Who can see and steer what](/docs/openclaw#who-can-see-and-steer-what).
 
@@ -139,6 +146,17 @@ Onboarding couldn't start the gateway as a service. Run `openclaw gateway run` a
 The plugin needs Vulkan on Linux or Metal on macOS 26 or newer. If the optional WebGPU package didn't install, the gateway says how to add it.
 
 More: [OpenClaw](/docs/openclaw) and [Troubleshooting](/docs/troubleshooting).
+
+
+## Try next: triage your inbox
+
+The task from the video. Unzip [sample-inbox.zip](/docs/kits/sample-inbox.zip) into your OpenClaw workspace (it makes an `inbox/` folder with 15 made-up emails), then ask:
+
+```text
+Triage my inbox: the 15 emails are in inbox/, read them all in one go. Sort them into reply today, later and ignore, one line each. Then draft short replies for the reply-today ones.
+```
+
+OpenClaw lists the folder, reads all 15 in one step and answers. In our run, the leaking ceiling, the moved deadline and the airport pickup went to reply today, and the "you won a yacht" email went to ignore. On a Mac Studio plus an RTX 5070 PC the answer streamed at 29 tokens a second.
 
 ## Next
 

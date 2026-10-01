@@ -27,15 +27,20 @@ Sources (for the fact-checker):
   2 approvals, "8 steps · 9 tool calls · 1510 tok · 10.2 tok/s · 1 device · 156.3 s", one index.html, preview at sandbox:5173/index.html,
   Download menu ("Project .zip · every file", "One HTML file"), tip-calculator.zip (577 bytes). The app's total was string concatenation (bill + tip).
   The follow-up fix prompt in step 7 was not run.
+- Screenshots re-taken 2026-10-01 on the Spark (GB10), pooled.run/room in headless Chromium (1280x800), Qwen3.6 35B MoE on 1 device (24 GB), empty project,
+  Auto-approve off, the same prompt: 3 approvals (index.html, style.css, app.js), "5 steps · 4 tool calls · 1537 tok · 16.0 tok/s · 1 device · 83.7 s",
+  no tool errors, preview at sandbox:5173/index.html ("serving . on :5173 (index.html, 3 files, 3.4 KB) loaded in 31 ms · no errors"), the total adds numbers
+  (parseFloat). Download menu opened, not downloaded in this run (tip-calculator.zip is from the 2026-09-30 run). New + "Start from: Game" in the template menu.
 */}
 
 **Goal:** get a working web app from one sentence, then change it, try it and keep a copy.
 
 ## You need
 
-- **A room with a started model.** Follow [Chat on one laptop](/docs/kits/first-chat) or [Pool two devices](/docs/kits/two-devices) first.
-- **10 minutes.** Nothing more to download.
-- **The biggest model your room can run.** The 35B MoE builds most small apps from scratch. The 1.7B does better changing an app that already runs: start from a template (step 2).
+- **A room with the Qwen3.6 35B MoE started** (about 23 GB of memory, one device or pooled). Follow [Chat on one laptop](/docs/kits/first-chat) or [Pool two devices](/docs/kits/two-devices) first.
+- **10 minutes.** Nothing more to download once the model runs.
+
+On a small laptop, pick Qwen3 1.7B (4 GB at 8K), or pool it with another device. The 1.7B does better changing an app that already runs: start from a template (step 2).
 
 Code mode builds static web apps: HTML, CSS and JavaScript. There is no shell and no server code.
 
@@ -70,31 +75,31 @@ Code mode builds static web apps: HTML, CSS and JavaScript. There is no shell an
 
    Each time the agent wants to write a file, the timeline shows the change as a diff, marked **needs approval**, with **Approve**, **Reject…** and **Allow edits for this task**. Read it and press **Approve**. **Reject…** lets you say why, and the agent tries again. **Allow edits for this task** approves the rest of this request.
 
-   <Shot src={codeApprove} alt="Code mode waiting for approval of a file, with the diff and the Approve button" />
+   <Shot src={codeApprove} alt="Code mode with Qwen3.6 35B MoE: write_file index.html marked needs approval, the new file's diff, and Approve, Reject and Allow edits for this task" />
 
-   <Shot src={codeSteps} alt="The agent's timeline: read_file and edit_file marked error, write_file index.html done with its diff, and the agent still working" caption="The timeline after the first approval. The two errors are normal: the agent read them and wrote the file instead." />
+   <Shot src={codeSteps} alt="The agent's timeline: write_file index.html done with its diff, and the next file, style.css, being written" caption="The timeline after the first approval: index.html is written and the agent goes on to style.css. In our test the MoE asked for three approvals, one per file." />
 
 6. **Try it in the preview.**
 
    When the agent is done it writes a short summary, and the preview on the right shows the app at `sandbox:5173/index.html`. It reloads after every change. Type a bill, press a button and check the numbers. The **Console** under the preview shows errors, and **Send to agent** asks the agent to fix them.
 
-   <Shot src={code} alt="Code mode with the finished app in the preview" />
+   <Shot src={code} alt="Code mode with the finished tip calculator in the preview at sandbox:5173/index.html, the files app.js, index.html and style.css, and the agent's summary" />
 
-7. **Ask for a fix or a change.** Small models make small mistakes: in our test, the 1.7B's first version added the tip to the bill as text instead of as a number. Say what is wrong, like `The total is wrong: turn the bill into a number before adding the tip.`, or ask for more, like `Add a 25% button`. The agent remembers the conversation until you press **New task**.
+7. **Ask for a fix or a change.** Models make small mistakes, smaller ones more often: in an earlier test, the 1.7B's first version added the tip to the bill as text instead of as a number. Say what is wrong, like `The total is wrong: turn the bill into a number before adding the tip.`, or ask for more, like `Add a 25% button`. The agent remembers the conversation until you press **New task**.
 
 8. **Download it.** Press **Download** above the file list and pick:
 
    - **Project .zip**: every file.
    - **One HTML file**: the whole app in one file you can double-click.
 
-   <Shot src={codeDownload} width={720} alt="The Download menu: Project .zip, every file, and One HTML file" />
+   <Shot src={codeDownload} width={720} alt="The Download menu: Project .zip, every file, and One HTML file, index.html from :5173, ready to open" />
 
 </Steps>
 
 ## What you should see
 
-- After step 4: the timeline shows each tool call (`list_dir`, `read_file`, `write_file`, `serve`) with **done** or **error**. A few errors along the way are normal: the agent reads them and tries another way.
-- After step 6: a summary line like `8 steps · 9 tool calls · 1510 tok · 10.2 tok/s · 1 device · 156.3 s`. That was the 1.7B on one GB10, with two approvals, for an app in one `index.html`.
+- After step 4: the timeline shows each tool call (`write_file`, `serve`, and sometimes `list_dir` or `read_file`) with **done** or **error**. An error along the way is normal: the agent reads it and tries another way.
+- After step 6: `No errors. Here's what I built:`, a short summary, and a line like `5 steps · 4 tool calls · 1537 tok · 16.0 tok/s · 1 device · 83.7 s`. That was the MoE on one GB10, with three approvals, for an app in `index.html`, `style.css` and `app.js`.
 - After step 8: a file like `tip-calculator.zip` in your downloads.
 
 ## If something goes wrong
@@ -103,7 +108,7 @@ Code mode builds static web apps: HTML, CSS and JavaScript. There is no shell an
 **Code** turns on once the room's model runs. In **Chat**, press **Start the model** and wait for it to load. If the page says `Start a model first: Code mode runs on the room's model.`, the model stopped: start it again.
 
 ### The agent stops, or the app is blank or half done
-Small models lose track on apps built from scratch. Start from a template, ask for one change at a time, or open **Console** and press **Send to agent** so it sees the error. A bigger model helps most: see [Pick a model](/docs/models).
+Small models lose track on apps built from scratch. Use the MoE if the room can run it, start from a template, ask for one change at a time, or open **Console** and press **Send to agent** so it sees the error. A bigger model helps most: see [Pick a model](/docs/models).
 
 ### A button or form does nothing in the preview
 The preview is a sandbox: a `<form>` submit never fires there. Ask the agent to use a button with a click handler instead. `localStorage` works, but is empty again after each reload.
