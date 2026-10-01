@@ -1,12 +1,12 @@
 {
   "name": "@pooled/cli",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "@pooled/cli",
-      "version": "0.3.5",
+      "version": "0.3.6",
       "license": "MIT",
       "dependencies": {
         "node-datachannel": "0.33.4",
