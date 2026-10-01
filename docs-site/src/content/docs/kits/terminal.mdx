@@ -6,6 +6,15 @@ sidebar:
   label: Rooms from the terminal
   order: 5
 ---
+import Shot from '../../../components/Shot.astro';
+import pull from '../../../assets/kits/terminal-pull.webp';
+import picker from '../../../assets/kits/terminal-picker.webp';
+import lend from '../../../assets/kits/terminal-lend.webp';
+import roomShort from '../../../assets/kits/terminal-room-short.webp';
+import join from '../../../assets/kits/terminal-join.webp';
+import allow from '../../../assets/kits/terminal-allow.webp';
+import online from '../../../assets/kits/terminal-online.webp';
+import chat from '../../../assets/kits/terminal-chat.webp';
 import { Steps } from '@astrojs/starlight/components';
 
 {/*
@@ -56,6 +65,8 @@ Sources (for the fact-checker):
 
    It shows a progress bar and checks the file when it's done. `pooled list` shows what is downloaded and what isn't. Models go to `~/.pooled/models`. If you stop a download with Ctrl-C, `pooled pull` again carries on where it stopped.
 
+   <Shot src={pull} alt="pooled pull: the download and check bars at 100%, then Downloaded and checked, and the next command" />
+
 3. **Open a room:**
 
    ```bash
@@ -65,9 +76,15 @@ Sources (for the fact-checker):
    The room opens at once. First it prints the room code, the **invite** link and the exact `pooled join` and `pooled chat` commands for this room, to copy to your other computers. The code and link stay at the top of the screen. Then it asks two things:
 
    - **Choose a model.** Each line shows the model, whether it is downloaded (or how big the download is), what it **needs** across the whole room, and whether it fits here. The one marked **recommended** is selected. Move to **Qwen3 1.7B** with ↑/↓ and press Enter.
+
+     <Shot src={picker} alt="The model list: Qwen3 1.7B selected, needs 4 GB, downloaded" caption="The invite key is hidden in these captures." />
    - **How much memory does this computer lend?** Type a number or use ←/→, then Enter. To see a second computer share the work, lend less than the model needs, like `2`.
 
+     <Shot src={lend} alt="How much GPU memory should this computer lend? with 2 of 122 GB typed" />
+
 4. **Read the room screen.** It lists each device with what it lends, and whether the room has enough memory for the model. If not, it says so, for example `This room is 3.6 GB short for Qwen3 1.7B: add a device or raise a pledge`, and **Enter: start** stays off.
+
+   <Shot src={roomShort} alt="The room screen: spark-host lends 2 GB, 4 GB needed, Needs 2 GB more" />
 
 5. **Join from the second computer:**
 
@@ -77,11 +94,19 @@ Sources (for the fact-checker):
 
    It asks for the **room code or invite link**. Then it shows the host and its model, and asks how much to **lend** (←/→ or type, then Enter). With the invite link it gets in at once. With the code alone, it waits for the host.
 
+   <Shot src={join} alt="pooled join with the code alone: waiting for the host, the host's model, and how much to lend" />
+
 6. **Let it in.** On the host, the device shows under **Waiting to join**, like `spark-join wants to join (computer, 64 GB)`. Press **a** to let it in, or **d** to turn it away. Once it's in, it's listed under **Devices** with what it lends.
+
+   <Shot src={allow} alt="The host screen: spark-join wants to join, a allow, d deny" />
 
 7. **Press Enter to start** once the room has enough memory. Each device shows its load progress, then the screen says **● online** with the layers each one holds.
 
+   <Shot src={online} alt="The room online: spark-host holds layers 0-11, spark-join 12-27" />
+
 8. **Press c to chat** right there. Type a question and press Enter. The line under each answer shows the speed. Type `/exit` to go back to the room screen.
+
+   <Shot src={chat} alt="Chat under the room screen: a question, the answer, and 54 tokens at 49 tok/s" />
 
 </Steps>
 

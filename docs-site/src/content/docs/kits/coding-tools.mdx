@@ -6,6 +6,10 @@ sidebar:
   label: Use it from coding tools
   order: 4
 ---
+import Shot from '../../../components/Shot.astro';
+import banner from '../../../assets/kits/coding-tools-banner.webp';
+import curl from '../../../assets/kits/coding-tools-curl.webp';
+import opencode from '../../../assets/kits/coding-tools-opencode.webp';
 import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
 
 {/*
@@ -74,6 +78,8 @@ Everything the tool sends, file contents included, goes to the room's host and t
      opencode     OPENCODE_DISABLE_CLAUDE_CODE=1 opencode, with this opencode.json: …
    ```
 
+   <Shot src={banner} alt="The pooled serve banner for a 16384-token room, with settings for Codex, Claude Code and opencode" caption="The same banner on a test room with Qwen3 1.7B at 16K." />
+
 4. **Check it answers.** In another terminal:
 
    ```bash
@@ -82,6 +88,8 @@ Everything the tool sends, file contents included, goes to the room's host and t
    ```
 
    You get a JSON answer from the room's model, with `"model":"pooled/qwen3.6-35b-moe"`. The room's chat shows it too, marked "via API".
+
+   <Shot src={curl} alt="The curl command and its JSON answer: Hello! How can I assist you today?" />
 
 5. **Set up your tool.** Use the numbers the bridge printed. The ones below are for a 64K room.
 
@@ -149,6 +157,8 @@ Everything the tool sends, file contents included, goes to the room's host and t
    </Tabs>
 
 6. **Give it a small first task**, like `Read README.md and tell me what this project does.` The first answer is the slow one. After that, the room reuses what it already read and each step reads only the new part.
+
+   <Shot src={opencode} alt="opencode reads README.md and says the project is a tip calculator web page" caption="opencode answering through a room. This test used the 1.7B on a one-file project." />
 
 </Steps>
 
