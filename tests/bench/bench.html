@@ -104,7 +104,7 @@ try {
   Object.assign(eng, XSET);
   if (Object.keys(XOPTS).length || Object.keys(XSET).length) log(`opts ${JSON.stringify(XOPTS)} set ${JSON.stringify(XSET)}`);
   if (PM) log(`prefillMath requested ${PM}, running ${eng.prefillMath}${eng.sgmWhy ? " (" + eng.sgmWhy + ")" : ""}${eng.sgmCfg ? ", sgm " + JSON.stringify(eng.sgmCfg) : ""}, GEMM ${eng.gemmOn ? "on" : "off (needs batchcols=16)"}`);
-  log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s${G.entryCache ? " (pre-converted tensors from serve.mjs)" : ""}, mtp ${!!eng.mtp}, adapter ${ad.info?.vendor}, draftVocab ${eng.draftVocab || "off"}, gpuSample ${GS}, argmaxWide ${!!eng.argmaxWide}, refill ${eng.mtpBatchRefill ? "batched" : "per-row"}, predraft ${eng.mtpPreDraft}`);
+  log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s${G.entryCache ? " (pre-converted tensors from serve.mjs)" : ""}, mtp ${!!eng.mtp}, adapter ${ad.info?.vendor}, draftVocab ${eng.draftVocab || "off"}, gpuSample ${GS}, argmaxWide ${!!eng.argmaxWide}, refill ${eng.mtpBatchRefill ? "batched" : "per-row"}, predraft ${eng.mtpPreDraft}, layerFuse ${Object.entries(eng.layerFuse || {}).filter(([, v]) => v).map(([k]) => k).join(",") || "off"}`);
   log(`draftChain ${!!eng.draftChain}, specFuse ${eng.specFuse}, fuseProj ${eng.fuseProj}, moeFuse ${!!eng.moeFuse} R ${eng.moe?.R}, moeKernel ${JSON.stringify(eng.moeK)}, attnPrefillTile ${eng.attnPrefillTile}, moeGroupPrefill ${eng.moeGrpU || "off"}${eng.moeGrpU ? ` UC ${eng.moeGrpUC} tiled ${!!eng.moeGrpTiled}` : ""}${eng.attnPTCfg ? " TK " + eng.attnPTCfg.TK : ""}`);
   // ?pmab=N: prefill tok/s on an N-token prompt (this page's own source, repeated) before the decode checks,
   // with ?prefillmath=... A/B'd against the f32 GEMM in the same tab (engine.prefillMath is a runtime switch).
@@ -153,6 +153,26 @@ try {
     for (const k of ["default", "wide"]) if (res[k]) delete res[k].lg;
     eng.prefillWide = !!eng.ubatch; if (ALL) { eng.attnPrefillTile = apt; eng.moeGroup = mg; }
     log("prefill " + JSON.stringify({ tokens: pids.length, ubatch: eng.ubatch, all: ALL, tile: eng.wideCfg, ...res })); out.push({ prefill: res });
+  }
+  // ?lfab=R: decode layer fusion A/B in this tab (engine.layerFuse flipped at runtime, R rounds of alternating
+  // off / on blocks of N tokens after the same prompt), so both arms share the load and any GPU contention
+  if (q.has("lfab") && eng.layerFuse) {
+    const ids = chat("Write a long, detailed essay about the history of computing."), KEYS = Object.keys(eng.layerFuse), keep = { ...eng.layerFuse };
+    const res = { off: [], on: [] }; let ref = null, same = true;
+    for (let r = 0; r < +q.get("lfab"); r++) for (const on of r % 2 ? [true, false] : [false, true]) {
+      for (const k of KEYS) eng.layerFuse[k] = on;
+      eng.reset(); if (eng.mtp) eng.mtpFill = false; await eng.prefillTokens(ids.slice(0, -1));
+      let next = pick(await fwd(ids.at(-1))); const gen = [next];
+      for (let j = 0; j < 4; j++) { next = pick(await fwd(next)); gen.push(next); }
+      const t1 = performance.now();
+      for (let j = 0; j < N; j++) { next = pick(await fwd(next)); gen.push(next); }
+      res[on ? "on" : "off"].push(+(N / ((performance.now() - t1) / 1000)).toFixed(2));
+      if (!ref) ref = gen; else same &&= gen.every((x, j) => x === ref[j]);
+    }
+    Object.assign(eng.layerFuse, keep);
+    const med = (a) => { const s = [...a].sort((x, y) => x - y); return s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2; };
+    const r = { lfab: res, medOff: med(res.off), medOn: med(res.on), gainPct: +((med(res.on) / med(res.off) - 1) * 100).toFixed(1), tokensIdentical: same };
+    out.push(r); log(JSON.stringify(r));
   }
   // ?japan=1: also the room's standard `japan` prompt (docs/bench-log.md), no golden
   const JAPAN = "I am planning a two week trip through Japan in late October with my partner. We land in Tokyo, want three days there, then a day trip to Nikko, then the bullet train to Kyoto for four days with a side trip to Nara, then two nights in Osaka, and we fly home from Osaka. We like food markets, old temples, hiking, and small neighborhood bars, and we want to avoid the most crowded tourist spots where we can. Our budget is moderate, around two hundred dollars a day for the two of us not counting hotels. Please give me a day by day itinerary with one main activity each morning and afternoon, a neighborhood to eat dinner in each night, and tell me which days I should buy a rail pass for and whether it is worth it at all.";

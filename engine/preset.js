@@ -42,6 +42,9 @@ export function roomQwen35Options(flags) {
     // ?fuse=0: the unfused kernels (attention glue, DeltaNet delta + gated norm, batched attention) for A/B
     // timing; both give the same bits, so devices may differ
     ...(off("fuse") ? { attnGlue: false, dnFuse: false, attnMC: false } : {}),
+    // ?layerfuse=0|1: decode layer fusion (engine layerFuse: fewer dispatches per token, same bits) off / on;
+    // unset: the engine's per-adapter default (on for NVIDIA, Apple and Deno)
+    ...(q.has("layerfuse") ? { layerFuse: q.get("layerfuse") === "0" ? false : q.get("layerfuse") === "1" ? true : q.get("layerfuse") } : {}),
     // ?kv=q8: int8 KV cache (~56% of f16's memory) for long contexts; changes the numerics a little
     kvQ8: q.get("kv") === "q8",
     // ?moefuse=0: the unfused MoE FFN kernels (A/B). The fused path (the default) gives different MoE bits,
