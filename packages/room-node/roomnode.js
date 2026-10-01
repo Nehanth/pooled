@@ -42,7 +42,7 @@ import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { packWire, unpackWire, badF32 } from "../../room/wire.js";
-import { planSplit, planForSpeed, phonesToLeaveOut, isPhoneMeta, roomFit } from "../../room/plan.js";
+import { isPhoneMeta, roomFit, dealRoom, shortNote } from "../../room/plan.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { isPrefix } from "../../harness/prefix.js";
@@ -689,32 +689,24 @@ export class RoomNode extends EventEmitter {
   }
   setSplit(mode) { this.splitMode = mode === "speed" ? "speed" : "memory"; }
   // fitBytes: room/models.js roomBytes() for the model at this context (weights + KV per layer, what the
-  // host holds besides): the speed split fills each device by it, as the room page's roomFit does
+  // host holds besides): the deal holds each device to it, as the room page's roomFit does
+  // A pledge is a promise (#271): no device is dealt more whole layers than fit in what it lends (the
+  // host's pays for the embedding and the head first), and when the pledges cannot hold the model
+  // nothing is dealt: `fit.fits` is false and `chain`/`ranges` are empty (the room page's dealRoom).
   static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null }) {
     const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name)) * 2 ** 30;
-    let chain = peers.map((p) => p.id);
-    let caps = [Math.max(pledgeOf(self.meta, self.name) - embedBytes, layerBytes / 2), ...peers.map((p) => Math.max(pledgeOf(p.meta, p.name), layerBytes / 2))];
-    // phones hold layers only when the computers cannot hold the model (room/plan.js)
-    const out = phonesToLeaveOut(L, caps.map((c) => c / layerBytes), [false, ...peers.map((p) => isPhoneMeta(p.meta))]);
-    const leftOut = out.map((i) => chain[i - 1]);
-    if (out.length) { chain = chain.filter((id) => !leftOut.includes(id)); caps = caps.filter((_, i) => !out.includes(i)); }
-    let { assigned, ranges } = planSplit(L, caps);
-    if (mode === "speed") {
-      // fill the host first, then the biggest devices, each up to its pledge (in whole layers); a device
-      // not needed joins without layers. Short (the pledges hold less than L in whole layers): by memory
-      const per = fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
-      const allIds = [self, ...peers.filter((p) => chain.includes(p.id))];
-      const layerCaps = allIds.map((d, i) => Math.max(0, (pledgeOf(d.meta, d.name) - (i === 0 ? hostB : 0)) / per));
-      const sp = planForSpeed(L, layerCaps, [], layerCaps.map(() => false));
-      if (!sp.short) {
-        const used = sp.used.filter((i) => i > 0);
-        leftOut.push(...chain.filter((_, k) => !used.includes(k + 1)));
-        chain = used.map((i) => chain[i - 1]);
-        assigned = sp.used.map((i) => sp.assigned[i]); ranges = sp.used.map((i) => sp.ranges[i]);
-        caps = sp.used.map((i) => caps[i]);
-      }
-    }
-    return { chain, ranges, assigned, leftOut, needGB: (L * layerBytes + embedBytes) / 2 ** 30, haveGB: caps.reduce((s, c) => s + c, embedBytes) / 2 ** 30 };
+    const per = fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
+    const pledges = [pledgeOf(self.meta, self.name), ...peers.map((p) => pledgeOf(p.meta, p.name))];
+    // phones hold layers only when the computers cannot hold the model (room/plan.js); speed: fill
+    // the host first, then the biggest devices, each up to its pledge; a device not needed (or whose
+    // pledge is under one layer) joins without layers
+    const deal = dealRoom({ L, layerBytes: per, hostBytes: hostB, pledges, mode: mode === "speed" ? "speed" : "memory",
+      phone: [false, ...peers.map((p) => isPhoneMeta(p.meta))] });
+    const needGB = (L * layerBytes + embedBytes) / 2 ** 30, haveGB = pledges.reduce((s, b) => s + b, 0) / 2 ** 30;
+    if (!deal.fit.fits || !deal.used.length) return { chain: [], ranges: [], assigned: [], leftOut: [], fit: deal.fit, needGB, haveGB };
+    const chain = deal.used.slice(1).map((i) => peers[i - 1].id);
+    const leftOut = peers.map((p) => p.id).filter((id) => !chain.includes(id));
+    return { chain, ranges: deal.ranges, assigned: deal.assigned, leftOut, fit: deal.fit, needGB, haveGB };
   }
   async _start(modelKey, { minDevices = 1, waitMs = 0, redeal = false } = {}) {
     const ai = this.ai;
@@ -730,6 +722,7 @@ export class RoomNode extends EventEmitter {
       }
     }
     ai.starting = true; ai.degraded = false; ai.readyPeers = new Set(); ai.model = modelKey; ai.online = false;
+    ai.short = null;
     // a fresh deal: every device starts without checkpoints (a worker that keeps its layers drops its
     // slots); what each worker applies comes with its ai-ready, which may arrive before this device's load ends
     ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map();
@@ -737,7 +730,7 @@ export class RoomNode extends EventEmitter {
     let ctx = nodeCtxFor(modelKey, this.ctxAsk);
     const kv = kvModeFor(modelKey, null);
     ai.apiCache = new AnswerCache(8); ai.apiTurns.clear(); ai.apiEnc.clear(); ai.apiProf = null; ai.apiTT = null; ai.bounds.clear();
-    const src = openModel(modelKey, { modelDir: this.modelDir });
+    const src = (this.openSource || openModel)(modelKey, { modelDir: this.modelDir });   // (tests stub openSource)
     let L, layerBytes, embedBytes;
     try {
       if (M.kind === "qwen35") {
@@ -768,11 +761,21 @@ export class RoomNode extends EventEmitter {
     if (ai.ctxNote) this.log(ai.ctxNote);
     const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
       fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16") });
+    if (!plan.fit.fits) {
+      // short: the room stops instead of dealing past a pledge (a re-deal after a device left that the
+      // others cannot hold, or a pledge lowered since the start): the host frees its layers, the
+      // devices drop theirs (ai-start-failed), and the room waits for devices to join, as a Start
+      // that the pledges don't cover does (the plugin's ensureOnline, pooled host's canStart)
+      const note = shortNote(String(M.label).split("·")[0].trim(), plan.fit, [this.name, ...peers.map((p) => p.name)]);
+      await src.close();
+      this.stopShort(note);
+      const err = new Error(note); err.short = true;
+      throw err;
+    }
     const { ranges, assigned } = plan;
     ai.chain = plan.chain; ai.chainNames = ai.chain.map(nameOf); ai.layerGB = layerBytes / 2 ** 30;
     ai.layersN = Object.fromEntries([[this.name, assigned[0]], ...ai.chain.map((id, i) => [nameOf(id), assigned[i + 1]])]);
     if (plan.leftOut.length) this.log(`${plan.leftOut.map(nameOf).join(", ")} ask without holding layers: the other devices hold the whole model${this.splitMode === "speed" ? " (split: fastest first)" : ""}`);
-    if (plan.needGB > plan.haveGB * 1.15) this.log(`this model needs ~${plan.needGB.toFixed(1)} GB but the room pledged ~${plan.haveGB.toFixed(1)} GB: it may not fit`);
     ai.layersByName = Object.fromEntries([[this.name, `${ranges[0][0]}–${ranges[0][1] - 1}`], ...ai.chain.map((id, i) => [nameOf(id), `${ranges[i + 1][0]}–${ranges[i + 1][1] - 1}`])]);
     this.log(`${M.label}: layer split ${[`${this.name} ${assigned[0]}+embed`, ...ai.chain.map((id, i) => `${nameOf(id)} ${assigned[i + 1]}`)].join(" · ")}`);
     this.split = { L, ranges, names: [this.name, ...ai.chain.map(nameOf)] };
@@ -808,6 +811,21 @@ export class RoomNode extends EventEmitter {
     try { await readyAll; }
     catch (err) { ai.starting = false; this.freeLayers(null); ai.chain = []; ai.plan = new Map(); this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }
     ai.starting = false;
+  }
+  // the pledges in the room cannot hold the model (_start): nothing is dealt and nothing stays loaded;
+  // ai.short says why (status().short) until a deal goes through
+  stopShort(note) {
+    const ai = this.ai;
+    clearTimeout(ai.idleRedeal);
+    ai.starting = false; ai.online = false; ai.degraded = false; ai.fed = null;
+    if (!ai.loadingShard) this.freeLayers(null);
+    ai.chain = []; ai.chainNames = []; ai.plan = new Map(); ai.gone = new Set(); ai.readyPeers = new Set();
+    ai.layersByName = null; ai.layersN = null; this.split = null;
+    ai.short = note;
+    this.failWaiters(new Error(note));
+    this.broadcast({ t: "ai-start-failed", why: note });
+    this.log(note);
+    this.emit("short", note);
   }
   // deal the layers again over the devices in the room now (after a departure, or to include late joiners)
   async redeal(why = "re-dealing the layers") {
@@ -869,7 +887,7 @@ export class RoomNode extends EventEmitter {
     clearTimeout(ai.idleRedeal);
     if (this.autoRedeal && !ai.starting) ai.idleRedeal = setTimeout(() => {
       if (!ai.degraded || ai.busy || ai.loadingShard || !this.missingNames().length) return;
-      this.redeal(`${this.missingNames().join(", ")} did not come back in ${Math.round(REJOIN_GRACE_MS / 1000)} s: re-dealing the layers`).catch((err) => this.log("re-deal failed: " + err.message));
+      this.redeal(`${this.missingNames().join(", ")} did not come back in ${Math.round(REJOIN_GRACE_MS / 1000)} s: re-dealing the layers`).catch((err) => { if (!err.short) this.log("re-deal failed: " + err.message); });
     }, REJOIN_GRACE_MS);
     ai.idleRedeal?.unref?.();
   }
@@ -906,7 +924,7 @@ export class RoomNode extends EventEmitter {
     const r = afterLoadDeath({ layers: ai.layersN?.[name] || 1, layerGB: ai.layerGB || 0.5, gb: pledgeGB(this.conns.get(newId)?.meta, ai.shareCap.get(name)), deaths });
     if (r.drop) { ai.dropped.add(name); this.sendTo(newId, { t: "ai-share", drop: true, why: "This device's browser closed the tab while it loaded its layers, so the room runs without it. You can still ask questions." }); }
     else { ai.shareCap.set(name, r.gb); this.sendTo(newId, { t: "ai-share", gb: r.gb, why: `This device's browser closed the tab while it loaded its layers, so it now holds less of the model (${r.gb} GB).` }); }
-    setTimeout(() => this.redeal(`${name}'s tab was killed while it loaded its layers: re-dealing ${r.drop ? "without it" : `with ${r.gb} GB for it`}`).catch((err) => this.log("re-deal failed: " + err.message)), 500);
+    setTimeout(() => this.redeal(`${name}'s tab was killed while it loaded its layers: re-dealing ${r.drop ? "without it" : `with ${r.gb} GB for it`}`).catch((err) => { if (!err.short) this.log("re-deal failed: " + err.message); }), 500);
     return true;
   }
 
@@ -1541,7 +1559,7 @@ export class RoomNode extends EventEmitter {
       ? [{ name: this.name, gb: this.meta?.contribGB || 0, self: true }, ...this.gpuPeers().map((id) => { const e = this.conns.get(id); return { name: e?.name || id, gb: +pledgeGB(e?.meta) || 0 }; })]
       : (this.members || []).filter((m) => m.meta?.webgpu && !m.meta?.api).map((m) => ({ name: m.name, gb: +m.meta?.contribGB || 0 }));
     return { code: this.code, name: this.name, hosting: this.hosting(), role: ai.role, model: ai.model, online: !!ai.online, degraded: !!ai.degraded,
-      range: ai.range, devices: devs, pledgedGB: +devs.reduce((a, d) => a + d.gb, 0).toFixed(1),
+      short: ai.short || null, range: ai.range, devices: devs, pledgedGB: +devs.reduce((a, d) => a + d.gb, 0).toFixed(1),
       split: this.split?.names?.map((nm, i) => `${nm} ${this.split.ranges[i][0]}-${this.split.ranges[i][1] - 1}`) || null,
       ctx: ai.engine?.maxSeq || null, ctxNote: ai.ctxNote || null, loading: !!ai.loadingShard, signaling: !this.signalDown,
       passes: this.hosting() ? ai.frames || 0 : this.frames || 0,

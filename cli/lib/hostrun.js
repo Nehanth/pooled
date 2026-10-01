@@ -178,6 +178,9 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   // tok/s of the last answer (decode), for the online line
   node.on("prefill", (x) => { if (x?.count && x.tDecode) { S.tps = x.count / (x.tDecode / 1000); log(`answered ${x.count} tokens at ${Math.round(S.tps)} tok/s`); } });
   node.on("loadprogress", (p) => pct.set(node.name, p));
+  // the room re-dealt after a device left and the devices still here are short of the model: it
+  // stopped (nothing is dealt past a pledge) and waits for devices, as before a Start
+  node.on("short", (note) => { if (!starting && S.step === "online") { S.step = "room"; S.notice = note; } refresh(); });
   node.on("members", () => refresh());
   node.on("joinrequests", () => refresh());
   node.on("joinrequest", (r) => { if (!opts.denyUnknown) log(`${r.line}: press a to let it in, d to turn it away`); });
