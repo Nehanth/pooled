@@ -4,6 +4,7 @@
 //   dn_delta_gnp  = dn_pre (q/k L2 norm + beta/decay gates) folded into dn_delta_gn
 //   attn_glue_kv  = attn_glue + kv_store (f16 KV cache), gate left in q_full
 //   attn_combine_g = attn_combine + sigmoid_mul (the gate read straight from q_full)
+//   (attnDecode v2's twin, attn_dec_combine_g = attn_dec_combine + sigmoid_mul, is in attn_dec.js)
 // The DeltaNet conv is folded into the [qkv | z] GEMV's epilogue (coop.js, CV = true).
 // Batched passes (verify, prefill) keep their _mc kernels. Appended to the module after WGSL2
 // (uses its DN, MC and FA structs).

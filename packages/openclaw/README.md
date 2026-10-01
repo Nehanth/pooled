@@ -141,7 +141,9 @@ approvals on for `exec` and writes.
 
 It prints the room code (`4TK-G9P`) and the invite link (`https://pooled.run/r/4TKG9P#k=…`). The
 room opens when the gateway starts and keeps its code and link across restarts. If onboarding
-couldn't start the gateway, run `openclaw gateway run`.
+couldn't start the gateway, run `openclaw gateway run`. Onboarding's own AI check (OpenClaw's live
+test completion) is answered at once with the room's state, so it passes even while the room waits
+for its other devices; no `--skip-health` is needed.
 
 While a model downloads, a question gets an answer like `Qwen3 1.7B is downloading for room 4TK-G9P:
 42% · 734 MB of 1.7 GB · 48 MB/s · 18s left`. Devices can join meanwhile.

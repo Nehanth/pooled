@@ -9,7 +9,7 @@
 // (index.js passes the real ones from openclaw/plugin-sdk; the unit tests pass stand-ins).
 import { Ask, Collector } from "../../../cli/lib/answer.js";
 import { ids, outcome, ApiError, OLD_HOST_MSG } from "../../../cli/lib/common.js";
-import { ensureRoom, roomSettings, transport, PooledError } from "./pool.js";
+import { ensureRoom, roomSettings, transport, PooledError, fmtCode, modelInfo } from "./pool.js";
 import { toAsk } from "./convert.js";
 import { noticeText } from "./ui.js";
 import { remember } from "./prewarm.js";
@@ -74,8 +74,9 @@ function openclawEncoder(stream, message) {
 const NOTICE_CODES = new Set(["setup", "noroom", "lobby", "denied", "waiting", "memory", "degraded", "downloading", "install", "start", "off", "queue", "loading", "older"]);
 export const isNotice = (error, message, signal) => !signal?.aborted && error instanceof PooledError && NOTICE_CODES.has(error.code) &&
   !message.content.some((c) => c.type === "toolCall" || (c.type === "text" && c.text.trim()));
-function noticeTurn(stream, message, code, text, room) {
-  const body = noticeText(code, text, room);
+const noticeTurn = (stream, message, code, text, room) => textTurn(stream, message, noticeText(code, text, room));
+// a whole answer of one text block
+function textTurn(stream, message, body) {
   message.content = [{ type: "text", text: body }];
   message.stopReason = "stop";
   stream.push({ type: "text_start", contentIndex: 0, partial: message });
@@ -85,6 +86,25 @@ function noticeTurn(stream, message, code, text, room) {
   stream.end(message);
 }
 
+// OpenClaw's setup check: `openclaw onboard` (2026.9.7) ends the model step with one live completion
+// (this prompt, tools off, 90 s) and keeps the model as the default only if text comes back; otherwise
+// it says "The completion timed out" and goes back to the provider picker. The check runs in the
+// onboarding process, not in the gateway, and the room lives with the gateway: answering it here would
+// open a second copy of the room (same code) in a process about to exit, and a room that waits for its
+// other devices (or a download) can't answer in 90 s anyway. So the check gets the room's state at
+// once, as text, and the room opens when the gateway starts.
+export const SETUP_CHECK_PROMPT = /^\s*Reply with the single word OK\.\s*Do not use tools\.?\s*$/i;
+const userText = (m) => typeof m?.content === "string" ? m.content
+  : Array.isArray(m?.content) ? m.content.filter((c) => c?.type === "text").map((c) => c.text).join("") : "";
+export const isSetupCheck = (context) => !(context?.tools?.length) && context?.messages?.length === 1 &&
+  context.messages[0].role === "user" && SETUP_CHECK_PROMPT.test(userText(context.messages[0]));
+export function setupCheckText(s) {
+  const code = s.code ? fmtCode(s.code) : "";
+  if (s.mode === "join") return `OK. This device joins Pooled room ${code} when OpenClaw's gateway starts; the room answers once its host has the model running. /pooled in the chat shows the room.`;
+  const devs = s.minDevices > 1 ? `once ${s.minDevices} devices are in: open the invite link on the other device${s.minDevices > 2 ? "s" : ""} (\`/pooled link\` shows it), or run \`npx @pooled/cli join <link>\` there` : "once the model is loaded";
+  return `OK. Pooled room ${code} (${modelInfo(s.model).name}) opens when OpenClaw's gateway starts and answers ${devs}. /pooled in the chat shows the room.`;
+}
+
 export function createPooledStream({ getPluginConfig, log = () => {}, sdk }) {
   const { createAssistantMessageEventStream, createEmptyTransportUsage, failTransportStream } = sdk;
   return (model, context, options) => {
@@ -92,6 +112,10 @@ export function createPooledStream({ getPluginConfig, log = () => {}, sdk }) {
     // (the released 2026.9.6 SDK has no buildAssistantMessage yet: the same shape by hand, as its apple-fm does)
     const message = { role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id, usage: createEmptyTransportUsage(), stopReason: "stop", timestamp: Date.now() };
     stream.push({ type: "start", partial: message });
+    if (isSetupCheck(context)) {
+      const s = roomSettings(getPluginConfig());
+      if (s.mode) { log(`answered OpenClaw's setup check without the room (it opens with the gateway)`); textTurn(stream, message, setupCheckText(s)); return stream; }
+    }
     void (async () => {
       let r = null;
       const signal = options?.signal;

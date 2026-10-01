@@ -1598,6 +1598,86 @@ gained more. Gates: unit tests, `npm run check`, `test_q38_bits` (4cac59d8, and 
 ATTN_PREFILL_TILE=0: same as main), `test_moe` MATCH llama.cpp + spec == plain, `test_mtp`, `test_mtp_split`,
 `test_moe_split`, M5 bits equal to main, `specIdentical` and golden in every Chrome run.
 
+## 2026-10-01: test_prefill_opts MoE 700-token miss is a routing near-tie in the all-off baseline (branch test/prefill-opts-tol), GB10
+
+`MODEL=moe test_prefill_opts.js` failed on clean main at 700 tokens: relDiff all-on vs all-off 2.45e-2 over the 2e-2
+gate, with argmax, greedy 24 and spec == plain all equal. Swept 18 prompt lengths with `SEQ_ALL=1` (each also run
+token by token through decode), relDiff to the token-by-token logits:
+
+| tokens | all-off (16-col batched) | all-on | | tokens | all-off | all-on |
+|---|---|---|---|---|---|---|
+| 150 | 1.13e-5 | 3.55e-5 | | 701 | 2.11e-4 | 3.65e-4 |
+| 300 | 1.75e-5 | 5.10e-5 | | 704 | 2.06e-4 | 3.27e-4 |
+| 450 | 1.82e-5 | 2.68e-4 | | 710 | 2.18e-4 | 3.40e-4 |
+| 640 | 2.50e-4 | 3.21e-4 | | 730 | 2.38e-4 | 2.74e-4 |
+| 670 | 1.60e-4 | **1.61e-3** | | 760 | 2.04e-4 | 3.44e-4 |
+| 690 | **8.51e-3** | **8.50e-3** | | 1000 | 3.26e-4 | 2.29e-4 |
+| 696 | 1.39e-4 | 4.11e-4 | | 1400 | 7.24e-4 | 4.43e-4 |
+| 699 | 1.76e-4 | 3.94e-4 | | 2100 | 3.39e-4 | 3.66e-4 |
+| **700** | **2.49e-2** | 3.56e-4 | | | | |
+
+No drift: everything sits at 1e-5..7e-4 and does not grow with length, except isolated single-length spikes, and the
+path that spikes changes (670: all-on; 690: token-by-token, the two prefills agree to 4e-4; 700: the all-off baseline).
+That is one token's top-8 routing flipping on a near-tie in whichever path, the effect the test's prompt note already
+records (1.5e-3 -> 3.0e-2 from a prompt change alone). At 700 the options are right and the baseline is the outlier.
+`BATCH_COLS=8` gives the same 2.49e-2, so it is the batched kernels vs decode, not the 16-column grouping. Why 700
+moved from v1.0.0's 1.48e-3: #243 (Qwen pre-tokenizer split) changed the fixture's token ids, so these are new prompts.
+
+Fix (test only, no engine change): when on vs off is over the tolerance (or argmax differs), the test runs the prompt
+token by token and passes the length if all-on is within the tolerance of that and has the same argmax, printing that
+the baseline was the outlier. The 2e-2 gate itself is unchanged, and a real break (0.2..1.0 in past entries) still
+fails because it would miss the token-by-token logits too. Also `OPTS=attn,wide,group` (which options the on run uses)
+and `BATCH_COLS`. After: MoE default lengths PASS (700 reported as a baseline outlier), 27B PASS (max 1.44e-4), unit
+tests 961/961, `npm run check` clean.
+
+## 2026-10-01: `openclaw onboard` health check with a 2-device room (branch openclaw-onboard-health, @pooled/openclaw 0.2.3), GB10
+
+Plain `openclaw onboard` (OpenClaw 2026.9.7, Node 24, clean throwaway profile, plugin linked) → More… → Pooled →
+Start a room → lend 4 GB → Qwen3 1.7B → 2 devices → invite link only. OpenClaw then runs its setup check: one
+live completion ("Reply with the single word OK. Do not use tools.", tools off, 90 s) in the onboarding process.
+Before: the plugin opened a second copy of the room in that process and waited for the other device; the
+spinner ("Testing your AI connection…") was still up after 7 min (the video run saw the timeout and the loop back
+to the provider picker instead). After: answered at once with the room's state, "Inference verified:
+pooled/qwen3-1.7b · AI check: replied in 2.7s", the default model saved, no room opened by onboarding. Then
+`openclaw gateway run` opened room 2QQ-7FS, `npx @pooled/cli@0.3.5 join <link> --gb 4` joined, the room went
+online (13+embed / 15 layers) and `openclaw agent` answered "2 + 2 = 4." (246 s, 15069 prompt tokens, cold).
+Gates: plugin unit tests (new: the check is answered without a room, tools/multi-turn/other text is not the check).
+No engine change.
+
+## 2026-10-01: layerFuse comb/kv under attention v2 (branch perf/lf-v2), GB10
+
+Since #294 made attnDecode v2 the default, `layerFuse.comb` and `.kv` switched themselves off on every attention
+layer (they wrapped attn_flash + attn_combine), so the MoE's in-process layerFuse gain fell from +4.5% to +3.7%.
+New `attn_dec_combine_g` (engine/wgsl/attn_dec.js) is attn_dec_combine with sigmoid_mul folded in: the quotient
+O / L goes through workgroup memory, then each of 64 threads per slice multiplies by the gate read from q_full,
+the same expressions as sigmoid_mul. With it, `attn_glue_kv` (kv_store in the glue) runs under v2 too: 2 dispatches
+fewer per attention layer. Its own module, compiled only when comb is on, optional: a compile failure turns comb off
+for v2 only (warning) and the separate sigmoid_mul runs; #300's fallback (any layerFuse kernel failing turns
+layerFuse off) is unchanged and skips this kernel.
+
+`tests/bench/lf_ab.js` (Deno, 8 rounds x 24 tokens, median ms/token; new `FLAGS=comb,kv` flips only those):
+
+| | off | on | gain |
+|---|---|---|---|
+| MoE, branch, all flags (2 runs) | 29.95 / 29.99 | 28.63 / 28.64 | +4.6% / +4.7% |
+| MoE, origin/main, all flags (2 runs) | 29.77 / 30.00 | 28.71 / 28.77 | +3.7% / +4.3% |
+| MoE, branch, comb,kv only (2 runs) | 28.94 / 28.62 | 28.82 / 28.70 | +0.4% / -0.3% |
+| 27B, branch, comb,kv only (2 runs) | 97.76 / 97.72 | 97.39 / 97.56 | +0.4% / +0.2% |
+| 27B, branch / main, all flags (one clean run each; the others were contended) | 98.70 / 99.40 | 96.61 / 98.02 | +2.2% / +1.4% |
+
+Small: the "on" arm is 0.1 ms/token (~0.3%) faster than main's on the MoE and the full-fusion gain is back to
+main's pre-v2 +4.5%; comb,kv alone sits at the edge of the noise (20 dispatches of a few µs each per MoE token).
+Kept because it is free: same bits, two dispatches fewer per attention layer.
+
+Correctness (GB10, Deno): `test_q38_bits` default c26dbc5 / 3177f9f1 with layerFuse on (attn_dec_combine_g built)
+and with `LAYER_FUSE=0`; `ATTN_PREFILL_TILE=0` f0537158 / 5d287854: all equal to main. Fallbacks, with a temporary
+(not committed) hook in compile.js that throws for a named kernel: attn_dec_combine_g failing -> warning, comb off
+for v2, other flags on, c26dbc5 / 3177f9f1; attn_combine_g failing (#300 path) -> layerFuse off, c26dbc5 / 3177f9f1.
+`test_moe` MATCH llama.cpp 3/3, spec == plain 3/3, head check 0 mismatches. `test_dense_spec` PASS. lf_ab tokens
+identical in every run (under 64 positions: the combine's one-split path; `test_q38_bits`, 300 positions, covers
+the multi-split path). Barrier lint
+clean, unit tests 961/961, `npm run check` passes. Not measured on the M5 Max or under FXC.
+
 ## 2026-10-01: dp4a wide prefill GEMM on the 27B (branch perf/prefill-dp4a-wide-gemm-27b, not kept as default: opt-in)
 
 The wide prefill's projections as `dot4I8Packed` on activations quantized per 32 values (llama.cpp's MMQ numerics),
