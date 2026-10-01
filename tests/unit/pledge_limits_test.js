@@ -6,7 +6,7 @@
 // 51 MB of weights) and the host's second copy of the embedding were not counted, so the laptop
 // "fit" all 28 layers; and when pledges fell short both splits spread the rest over everyone.
 import { planSplit, planForSpeed, roomFit, dealRoom, layerCaps, shortNote, shortBy, gbUp } from "../../room/plan.js";
-import { roomBytes, hostHeldBytes, SHAPE, NEED_GB, PICKER, maxSeqFor } from "../../room/models.js";
+import { roomBytes, hostHeldBytes, SHAPE, NEED_GB, NEED_MIN_GB, PICKER, CTX, maxSeqFor, pickCtx } from "../../room/models.js";
 import { pledgeGB } from "../../room/pledge.js";
 import { lendStatus } from "../../room/compute.js";
 
@@ -21,13 +21,38 @@ function rng(seed) {
 const int = (r, lo, hi) => lo + Math.floor(r() * (hi - lo + 1));
 const pick = (r, xs) => xs[Math.floor(r() * xs.length)];
 
-// the reported room, as the host sees it: pledges held to each kind's cap (room/pledge.js)
+// the reported room, as the host sees it: pledges held to each kind's cap (room/pledge.js), at the
+// context the host picks for them (room/models.js pickCtx): 4 GB in all is short for the 1.7B at
+// 16K, so it opens at its 8K fallback, the context of the reported case
 const laptop = { ua: "Device", contribGB: 3, webgpu: true };
 const iphone = { ua: "iPhone", contribGB: 1, webgpu: true, phone: true };
+const pledgesOf = (...metas) => metas.map((m) => pledgeGB(m) * GB);
+const ctxFor = (model, pledges) => pickCtx(model, { fitsAt: (c) => { const rb = roomBytes(model, c); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes).fits; } });
 const reported = () => {
-  const rb = roomBytes("qwen3-1.7b", maxSeqFor("qwen3-1.7b"));
-  return { ...rb, pledges: [pledgeGB(laptop) * GB, pledgeGB(iphone) * GB], phone: [false, true] };
+  const pledges = pledgesOf(laptop, iphone);
+  const pick = ctxFor("qwen3-1.7b", pledges);
+  return { ...roomBytes("qwen3-1.7b", pick.ctx), pledges, phone: [false, true], pick };
 };
+
+Deno.test("reported case: 3 GB + 1 GB is short for the 1.7B at 16K, so the room opens it at 8K", () => {
+  const r = reported();
+  eq(r.pick, { ctx: 8192, want: 16384, fits: true, fellBack: true });
+  const at16 = roomBytes("qwen3-1.7b", 16384);
+  const f16 = roomFit(at16.L, r.pledges, at16.layerBytes, at16.hostBytes);
+  ok(!f16.fits, "short at 16K");
+  // and the room page's "short" sentence, had it been asked for 16K (?ctx=16384): what 16K would cost
+  ok(/^This room is [\d.]+ GB short for Qwen3 1\.7B\. Add a device or raise a pledge: Laptop could give [\d.]+ GB more\.$/.test(shortNote("Qwen3 1.7B", f16, ["Laptop", "iPhone"], [6, 0])));
+  // one laptop lending 4 GB (an 8 GB laptop's default) starts it alone, at 8K; 6 GB holds 16K
+  eq(ctxFor("qwen3-1.7b", [4 * GB]), { ctx: 8192, want: 16384, fits: true, fellBack: true });
+  eq(ctxFor("qwen3-1.7b", [6 * GB]), { ctx: 16384, want: 16384, fits: true, fellBack: false });
+  // 3 GB alone holds it at neither: short for 8K, the least it could start with
+  const p3 = ctxFor("qwen3-1.7b", [3 * GB]);
+  eq(p3, { ctx: 8192, want: 16384, fits: false, fellBack: false });
+  const rb8 = roomBytes("qwen3-1.7b", 8192);
+  const f3 = roomFit(rb8.L, [3 * GB], rb8.layerBytes, rb8.hostBytes);
+  eq(shortNote("Qwen3 1.7B", f3, ["Laptop"], [5]), `This room is ${gbUp(f3.raise[0])} GB short for Qwen3 1.7B. Add a device or raise a pledge: Laptop could give ${gbUp(f3.raise[0])} GB more.`);
+  ok(gbUp(f3.raise[0]) <= 1, "less than a GB short at 8K");
+});
 
 Deno.test("reported case: a dense layer counts its f32 KV cache, the host its embedding twice", () => {
   const { L, layerBytes, hostBytes } = reported();
@@ -122,7 +147,13 @@ Deno.test("picker shapes: SHAPE matches NEED_GB within reason for every picker m
     // NEED_GB (the ladder's label) is at least what the deal needs, and not far above it
     ok(need <= NEED_GB[k] && need >= NEED_GB[k] * 0.85, `${k}: deal needs ${need.toFixed(2)} GB, NEED_GB ${NEED_GB[k]}`);
   }
-  // the reported pair fits the 1.7B (4 GB pooled) by the deal, as the picker says
+  // and NEED_MIN_GB at the fallback context, the same way
+  for (const k of PICKER.filter((k) => CTX[k]?.fallback)) {
+    const rb = roomBytes(k, CTX[k].fallback);
+    const need = (rb.L * rb.layerBytes + rb.hostBytes) / GB;
+    ok(need <= NEED_MIN_GB[k] && need >= NEED_MIN_GB[k] * 0.85, `${k} at ${CTX[k].fallback}: deal needs ${need.toFixed(2)} GB, NEED_MIN_GB ${NEED_MIN_GB[k]}`);
+  }
+  // the reported pair fits the 1.7B (4 GB pooled) by the deal at 8K, as the picker says
   const r = reported();
   ok(roomFit(r.L, r.pledges, r.layerBytes, r.hostBytes).fits);
 });

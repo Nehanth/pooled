@@ -6,6 +6,13 @@ sidebar:
   label: Build an app
   order: 3
 ---
+import Shot from '../../../components/Shot.astro';
+import codeEmpty from '../../../assets/kits/code-empty.webp';
+import codeNew from '../../../assets/kits/code-new.webp';
+import codeApprove from '../../../assets/kits/code-approve.png';
+import codeSteps from '../../../assets/kits/code-steps.webp';
+import code from '../../../assets/kits/code.png';
+import codeDownload from '../../../assets/kits/code-download.webp';
 import { Steps } from '@astrojs/starlight/components';
 
 {/*
@@ -40,10 +47,14 @@ Code mode builds static web apps: HTML, CSS and JavaScript. There is no shell an
 
    The room switches to three parts: the files on the left, the agent in the middle and the preview on the right.
 
+   <Shot src={codeEmpty} alt="Code mode with no project yet: files on the left, the agent in the middle, the preview on the right" />
+
 2. **Pick a starting point.**
 
    - **From scratch:** do nothing. Your first request creates a project named from your words.
    - **From a template** (best on the 1.7B): press **New**, pick **Game**, **Dashboard**, **Form app** or **Landing page** in the menu next to the name, and press Enter. The app runs straight away, and the prompt box holds a first change to try.
+
+   <Shot src={codeNew} width={720} alt="After New: a project name box and the menu Start from: Game" caption="New, with the Game template picked." />
 
 3. **Turn off Auto-approve edits** under the agent, so you see each change before it lands. (It is on by default for projects saved in the browser.)
 
@@ -59,13 +70,15 @@ Code mode builds static web apps: HTML, CSS and JavaScript. There is no shell an
 
    Each time the agent wants to write a file, the timeline shows the change as a diff, marked **needs approval**, with **Approve**, **Reject…** and **Allow edits for this task**. Read it and press **Approve**. **Reject…** lets you say why, and the agent tries again. **Allow edits for this task** approves the rest of this request.
 
-   ![Code mode waiting for approval of a file, with the diff and the Approve button](../../../assets/kits/code-approve.png)
+   <Shot src={codeApprove} alt="Code mode waiting for approval of a file, with the diff and the Approve button" />
+
+   <Shot src={codeSteps} alt="The agent's timeline: read_file and edit_file marked error, write_file index.html done with its diff, and the agent still working" caption="The timeline after the first approval. The two errors are normal: the agent read them and wrote the file instead." />
 
 6. **Try it in the preview.**
 
    When the agent is done it writes a short summary, and the preview on the right shows the app at `sandbox:5173/index.html`. It reloads after every change. Type a bill, press a button and check the numbers. The **Console** under the preview shows errors, and **Send to agent** asks the agent to fix them.
 
-   ![Code mode with the finished app in the preview](../../../assets/kits/code.png)
+   <Shot src={code} alt="Code mode with the finished app in the preview" />
 
 7. **Ask for a fix or a change.** Small models make small mistakes: in our test, the 1.7B's first version added the tip to the bill as text instead of as a number. Say what is wrong, like `The total is wrong: turn the bill into a number before adding the tip.`, or ask for more, like `Add a 25% button`. The agent remembers the conversation until you press **New task**.
 
@@ -73,6 +86,8 @@ Code mode builds static web apps: HTML, CSS and JavaScript. There is no shell an
 
    - **Project .zip**: every file.
    - **One HTML file**: the whole app in one file you can double-click.
+
+   <Shot src={codeDownload} width={720} alt="The Download menu: Project .zip, every file, and One HTML file" />
 
 </Steps>
 

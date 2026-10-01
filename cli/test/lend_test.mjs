@@ -289,3 +289,27 @@ test("join security: a quoted invite link gives its key; six-character codes gro
   assert.equal(formatStatus({ code: "4TKG9P", phase: "lobby", passes: 0 }), "room 4TK-G9P · waiting for the host to let you in · 0 passes");
   assert.equal(formatStatus({ code: "4TKG9P", phase: "online", hosting: true, devices: 1, lobby: 2, passes: 0 }), "room 4TK-G9P · online · 1 device · 2 waiting to join · 0 passes");
 });
+
+test("leaving: a room node whose close hangs (a link dialed to a gone host) still lets pooled join exit within a second", async () => {
+  const { closeSoon, CLOSE_WAIT_MS } = await import("../lib/lendrun.js");
+  assert.ok(CLOSE_WAIT_MS <= 1000);
+  let closed = 0;
+  const t0 = Date.now();
+  await closeSoon({ close: () => { closed++; return new Promise(() => {}); } }, 50);
+  assert.equal(closed, 1); assert.ok(Date.now() - t0 < 500);
+  await closeSoon({ close: async () => { throw new Error("already closed"); } });
+  await closeSoon(null);
+});
+
+test("--ctx above the model's most: pooled host says what it gets instead of lowering it silently", async () => {
+  const { ctxNote } = await import("../lib/lend.js");
+  const { MODELS } = await import("../../room/models.js");
+  const { nodeCtxFor } = await import("../../packages/room-node/roomnode.js");
+  const rn = { MODELS, nodeCtxFor };
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 32768), "the 1.7B's context is 16384; using that");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 16384), "");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 8000), "", "rounding to 256 tokens is not worth a line");
+  assert.equal(ctxNote(rn, "qwen3-1.7b", 0), "", "no --ctx");
+  assert.equal(ctxNote(rn, "qwen3.6-35b-moe", 32768), "");
+  assert.match(ctxNote(rn, "qwen3.8-27b", 262144), /^the 27B's context is 65536; using that$/);
+});

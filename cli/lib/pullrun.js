@@ -1,7 +1,7 @@
 // pooled pull / pooled list / pooled rm: the models this computer keeps (cli/lib/cache.js).
 import { parseArgs } from "node:util";
 import os from "node:os";
-import { modelsDir, ensureModelsDir, pullModel, listModels, removeModel, resolveModel, modelState, fmtBytes, rateMeter, progressLine, progressPlain } from "./cache.js";
+import { modelsDir, ensureModelsDir, pullModel, pullLock, listModels, removeModel, resolveModel, modelState, fmtBytes, rateMeter, progressLine, progressPlain } from "./cache.js";
 import { colors } from "./hostui.js";
 import { style, label, progressRow, padStart, clip, gb, I } from "./style.js";
 import { liveRegion } from "./tui.js";
@@ -37,7 +37,7 @@ const ALIASES = { download: "pull", ls: "list", remove: "rm", delete: "rm" };
 //
 //     ctrl-c stop (resumes next time)
 // -> { ok, bytes, ms } | { ok: false, aborted | error }. rn: the room node module (MODELS, FILES)
-export async function pullWithProgress(rn, key, dir, { stream = process.stderr, signal, quiet = false, onProgress = null, title = true } = {}) {
+export async function pullWithProgress(rn, key, dir, { stream = process.stderr, signal, quiet = false, onProgress = null, onWait = null, title = true } = {}) {
   const tty = !!stream.isTTY && process.env.TERM !== "dumb";
   const S = style({ stream });
   const rate = rateMeter();
@@ -68,7 +68,14 @@ export async function pullWithProgress(rn, key, dir, { stream = process.stderr, 
     else if (Date.now() - lastPlain > 5000 || p.done === p.total) { lastPlain = Date.now(); stream.write(`${new Date().toTimeString().slice(0, 8)} ${key}: ${progressPlain({ done: p.done, total: p.total, bps })}\n`); }
   };
   if (region) region.render(lines());
+  let release = null;
   try {
+    // one writer per model (cache.js pullLock): another pooled, or an OpenClaw gateway, may be
+    // downloading it into the same .part
+    release = await pullLock(dir, key, { signal, onWait: () => {
+      if (!quiet && !region) stream.write(`${new Date().toTimeString().slice(0, 8)} ${key}: another download of it is running; waiting for it to finish\n`);
+      onWait?.();
+    } });
     const r = await pullModel(key, { dir, MODELS: rn.MODELS, FILES: rn.FILES, signal, onProgress: draw,
       onVerify: (d, t) => {
         if (quiet) return;
@@ -82,7 +89,7 @@ export async function pullWithProgress(rn, key, dir, { stream = process.stderr, 
     region?.clear();
     if (e.type === "aborted") return { ok: false, aborted: true, done: last.done, total: last.total };
     return { ok: false, error: e };
-  }
+  } finally { release?.(); }
 }
 
 const took = (ms) => { const s = Math.round(ms / 1000); return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`; };

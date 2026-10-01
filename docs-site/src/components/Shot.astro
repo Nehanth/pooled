@@ -1,0 +1,21 @@
+---
+// A screenshot in a guide: an optimized image (webp, sized for the content column), a thin border from
+// the docs styles, and an optional short caption. `phone` keeps a phone-size capture narrow.
+import { Image } from 'astro:assets';
+import type { ImageMetadata } from 'astro';
+
+interface Props {
+	src: ImageMetadata;
+	alt: string;
+	caption?: string;
+	phone?: boolean;
+	width?: number;
+}
+const { src, alt, caption, phone = false, width } = Astro.props;
+// The content column is ~720 px wide: 1440 covers 2x screens; a phone shot shows at 300 px.
+const w = Math.min(src.width, width ?? (phone ? 600 : 1440));
+---
+<figure class:list={['p-shot', { 'p-shot--phone': phone }]}>
+	<Image src={src} alt={alt} width={w} format="webp" quality={82} />
+	{caption && <figcaption>{caption}</figcaption>}
+</figure>
