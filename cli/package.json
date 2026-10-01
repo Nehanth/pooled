@@ -1,6 +1,6 @@
 {
   "name": "@pooled/cli",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Use a Pooled room from the command line: pooled serve <ROOM CODE> (a local OpenAI and Anthropic compatible endpoint), pooled chat <ROOM CODE> (talk to its model), pooled join <ROOM CODE> and pooled host (lend this computer's GPU).",
   "homepage": "https://pooled.run",
   "repository": {
