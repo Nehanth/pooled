@@ -22,7 +22,7 @@ import { Qwen35Engine, prefillMathFeatures } from "../engine/qwen35.js";
 //   ATTN_PREFILL_TK=4|8|16  its positions per tile (default: the largest that fits the workgroup memory;
 //                         16 needs 32 KB, which gpuDevice() then requests from the adapter)
 //   ATTN_PREFILL_SPLITS=N its target number of context splits per pass (default 32)
-//   ATTN_DECODE=v2        split-K decode/verify attention (engine/wgsl/attn_dec.js; opt-in, default v1 = attn_flash)
+//   ATTN_DECODE=v1|v2     decode/verify attention: v2 = split-K attn_dec (engine/wgsl/attn_dec.js, the default), v1 = attn_flash
 //   ATTN_DECODE_SPLITS=N  its most splits per column (default 256 / kv heads)
 const envGet = (k) => globalThis.Deno?.env.get(k);
 if (envGet("ATTN_PREFILL_TILE")) Qwen35Engine.defaults.attnPrefillTile = envGet("ATTN_PREFILL_TILE") !== "0";

@@ -165,7 +165,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnDecode, attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -299,10 +299,13 @@ export class Qwen35Engine {
     this.attnPTCfg = this.flash && !this.kvQ8 && attnPrefillTile !== false
       ? attnTileConfig({ hd, G: nH / nKV, faSplit: this.faSplit, faSplits: this.faSplits,
         wgMem: device.limits.maxComputeWorkgroupStorageSize, target: attnPrefillSplits, tk: attnPrefillTK }) : null;
-    // attnDecode: "v2" = split-K decode attention with coalesced loads and per-position split lengths
-    // (engine/wgsl/attn_dec.js) for decode and verify passes; opt-in (new numerics vs attn_flash, same
-    // greedy tokens; spec == plain holds because a column's splits depend only on its position).
-    // "compile" builds the kernels without using them (engine.attnDecode = "v2" at runtime for A/B).
+    // attnDecode: "v2" (default) = split-K decode attention with coalesced loads and per-position split
+    // lengths (engine/wgsl/attn_dec.js) for decode and verify passes; faster than attn_flash at every context
+    // length measured (docs/research/long-context-2026-09.md). Other numerics than attn_flash (same greedy
+    // tokens, llama.cpp goldens still match); spec == plain holds because a column's splits depend only on
+    // its position. "v1" = attn_flash + attn_combine (A/B, ?attndecode=v1). "compile" builds the v2 kernels
+    // but starts on v1 (engine.attnDecode = "v2" at runtime). kvQ8, head sizes other than 256 or more than
+    // 8 query heads per kv head stay on v1.
     this.adCfg = this.flash && (attnDecode === "v2" || attnDecode === "compile")
       ? attnDecConfig({ hd, G: nH / nKV, nKV, splits: attnDecodeSplits, kvQ8: this.kvQ8 }) : null;
     this.attnDecode = "v1";

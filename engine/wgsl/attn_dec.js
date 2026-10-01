@@ -202,6 +202,16 @@ fn attn_dec_combine(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
   let SL = fd_split(seqLen, adc.S);
   let ns = (seqLen + SL - 1u) / SL;
   let b0 = (col * cfg.nH + qh) * adc.slots;
+  let lane = tid & ${CD / 4 - 1}u; let grp = tid / ${CD / 4}u;
+  let vi = dq * ${CD / 4}u + lane;      // vec4 index within the head
+  if (ns == 1u) {   // one split (short contexts): the same bits as below (weight exp(0) = 1, sums with zeros)
+    if (tid < ${CD / 4}u) {
+      let r = adc_o[b0 * ${HD / 4}u + vi] / adc_ml[b0 * 2u + 1u];
+      let ob = col * adc.s1 + qh * ${HD}u + 4u * vi;
+      adc_out[ob] = r.x; adc_out[ob + 1u] = r.y; adc_out[ob + 2u] = r.z; adc_out[ob + 3u] = r.w;
+    }
+    return;
+  }
   var lm: f32 = -3.0e38;
   for (var s: u32 = tid; s < ns; s += 256u) { lm = max(lm, adc_ml[(b0 + s) * 2u]); }
   adc_r[tid] = lm;
@@ -215,8 +225,6 @@ fn attn_dec_combine(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocat
   workgroupBarrier();
   for (var k: u32 = 128u; k > 0u; k >>= 1u) { if (tid < k) { adc_r[tid] = adc_r[tid] + adc_r[tid + k]; } workgroupBarrier(); }
   let L = adc_r[0];
-  let lane = tid & ${CD / 4 - 1}u; let grp = tid / ${CD / 4}u;
-  let vi = dq * ${CD / 4}u + lane;      // vec4 index within the head
   var o = vec4<f32>(0.0);
   for (var s: u32 = grp; s < ns; s += ${CG}u) { o += adc_o[(b0 + s) * ${HD / 4}u + vi] * adc_w[s]; }
   adc_p[tid] = o;

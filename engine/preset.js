@@ -48,6 +48,9 @@ export function roomQwen35Options(flags) {
     // so every device of a room should run the same setting; ?moednrows=1|2|4 tunes it
     moeFuse: !off("moefuse"),
     moeDnRows: parseInt(q.get("moednrows"), 10) || 1,
+    // ?attndecode=v1: decode / verify attention on attn_flash instead of the split-K attn_dec (engine default
+    // "v2"; different numerics, so every device of a room should run the same setting)
+    ...(q.get("attndecode") ? { attnDecode: q.get("attndecode") } : {}),
     // Prefill options (attnPrefillTile, prefillUbatch, moeGroupPrefill) are deliberately not set: every device
     // takes the engine's defaults, so host and workers agree.
     // GPU sampling, on by default (?gpusample=0: off): argmax / top-k of the head in the same submit.
