@@ -1445,3 +1445,30 @@ How the three branches changed when merged:
 
 Still open: a re-deal while signaling is down still fails, and an answer caught in a freeze longer than
 ~15 s isn't retried automatically.
+
+## 2026-10-01: speculative verify without state copies (branch perf/decode-verify-blits)
+
+Replay rollback used to copy every DeltaNet layer's state into `S_pre` before the verify pass and the
+conv/beta/decay inputs into `L.rp` after it, then copy `S_pre` back and copy the conv state per layer in
+`_restoreDN`. Now `dn_delta_mc` writes `S_pre` and each column's inputs into `L.rp` from its own registers
+during the verify, and `_restoreDN` is one compute pass (replay from `S_pre` + new `dn_conv_restore`). Same
+kernel, inputs and order on replay, so the bits are unchanged.
+
+Copies per speculative step (M5 Max, `prof_chrome.mjs`, K=3): MoE 142 (81.5 MB) -> 7 (24 KB); 27B 222.8
+(194 MB) -> 6.8 (57 KB). Step 19.71 -> 19.44 ms (MoE), 69.73 -> 68.98 ms (27B). `prof_chrome.mjs` and
+`prof_moe_decode.js` hang in submit mode on GB10 (main too), so the counts come from the M5.
+
+Spec K=3 tok/s, `chrome_bench.mjs <model> 64`, mean of 3 runs (plain unchanged in every pair):
+
+| | main | branch | |
+|---|---|---|---|
+| GB10 Chrome MoE two-sum / hash-map | 93.4 / 65.6 | 97.9 / 68.0 | +4.9% / +3.6% |
+| GB10 Chrome 27B two-sum / hash-map | 25.5 / 22.8 | 26.4 / 23.7 | +3.5% / +3.6% |
+| GB10 Deno MoE (`test_moe.js`) two-sum / hash-map / bash | 59.7 / 52.7 / 44.2 | 63.2 / 55.9 / 46.2 | +5.9% / +6.0% / +4.6% (2-3 runs) |
+| M5 Max Chrome MoE two-sum / hash-map | 176.0 / 125.6 | 179.1 / 128.1 | +1.8% / +2.0% |
+| M5 Max Chrome 27B two-sum / hash-map | 47.35 / 42.57 | 47.91 / 43.12 | +1.2% / +1.3% |
+
+The M5 gained less than the ~5% estimated (the copies there cost ~0.3 ms per step, not 1.2-1.5 ms); GB10
+gained more. Gates: unit tests, `npm run check`, `test_q38_bits` (4cac59d8, and 4f70a9ca with
+ATTN_PREFILL_TILE=0: same as main), `test_moe` MATCH llama.cpp + spec == plain, `test_mtp`, `test_mtp_split`,
+`test_moe_split`, M5 bits equal to main, `specIdentical` and golden in every Chrome run.

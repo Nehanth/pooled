@@ -498,7 +498,7 @@ export class Qwen35Engine {
       rmsnorm_mc: ["ro", "ro", "rw", "u"], add_res_mc: ["rw", "ro", "u"],
       dn_gates_mc: ["ro", "ro", "ro", "ro", "rw", "rw", "u"], dn_conv_mc: ["ro", "ro", "rw", "rw", "u", "rw"],
       dn_pre: ["ro", "ro", "ro", "ro", "rw", "rw", "rw", "u"], dn_pre_mc: ["ro", "ro", "ro", "ro", "rw", "rw", "rw", "u", "u"],
-      dn_l2_mc: ["rw", "u", "u"], dn_delta_mc: ["ro", "ro", "ro", "rw", "rw", "u", "u", "rw"],
+      dn_l2_mc: ["rw", "u", "u"], dn_delta_mc: ["ro", "ro", "ro", "rw", "rw", "u", "u", "rw"], dn_conv_restore: ["ro", "rw", "u"],
       dn_gatenorm_mc: ["ro", "ro", "ro", "rw", "u", "u"], qsplit_mc: ["ro", "rw", "rw", "u", "u"],
       head_norm_mc: ["rw", "ro", "u"], rope_part_mc: ["rw", "u", "u"], sigmoid_mul_mc: ["rw", "ro", "u"],
       attn_glue: ["ro", "rw", "rw", "rw", "ro", "ro", "u", "u"],
@@ -1577,19 +1577,18 @@ export class Qwen35Engine {
     }
     // Rollback for the recurrent layers (speculative decoding). Snapshots: the state after every
     // verify column, 7 slots (~3.1 MB each per layer on the 27B: ~1 GB for a whole model).
-    // Replay (default): one pre-verify copy plus each column's delta-rule inputs; a rejection
-    // copies the state back and re-runs dn_delta_mc over the accepted columns: same kernel, same
-    // inputs, same order, so the state is bit-identical, in ~1/7 of the memory. The conv state
-    // snapshots are small and stay either way.
-    const maxCols = Math.max(NC, 8);
+    // Replay (default): the pre-verify state plus each column's delta-rule inputs, which
+    // dn_delta_mc writes into L.rp itself during the verify (no copies); a rejection re-runs
+    // dn_delta_mc from there over the accepted columns: same kernel, same inputs, same order, so
+    // the state is bit-identical, in ~1/7 of the memory. The conv state snapshots are small and
+    // stay either way. L.rp: [S_pre | maxCols columns of conv | of beta | of decay].
+    const maxCols = this._rpCols = Math.max(NC, 8);
+    if (this.replay && B.decay.stride !== B.beta.stride) throw new Error("replay: beta and decay must share a column stride");
     this._dummy = this._dummy || dev.createBuffer({ size: 256, usage: S });
     for (const L of this.layers) if (!L.isFull && !L.conv_shadow) {
       L.conv_shadow = dev.createBuffer({ size: Math.max(7, this.maxDrafts) * L.convState.size, usage: S });
       if (this.replay) {
-        L.S_shadow = this._dummy;
-        L.S_pre = dev.createBuffer({ size: L.S.size, usage: S });
-        L.rp = { conv: dev.createBuffer({ size: maxCols * B.convOut.stride, usage: S }),
-          beta: dev.createBuffer({ size: maxCols * B.beta.stride, usage: S }), decay: dev.createBuffer({ size: maxCols * B.decay.stride, usage: S }) };
+        L.rp = L.S_shadow = dev.createBuffer({ size: L.S.size + maxCols * (B.convOut.stride + 2 * B.beta.stride), usage: S });
       } else L.S_shadow = dev.createBuffer({ size: 7 * L.S.size, usage: S });
     }
     // + 8 x 16 B tail: the fused speculative step (_verifyFused) reads its drafts in the same map
@@ -1602,7 +1601,7 @@ export class Qwen35Engine {
     const colPipes = this._colPipes = ["rmsnorm", "head_norm", "attn_scores", "attn_softmax", "attn_softmax_wg", "attn_out",
       "silu_mul", "add_res", "rope_part", "qsplit", "sigmoid_mul",
       "dn_gates", "dn_conv", "dn_l2", "dn_delta", "dn_gatenorm",
-      "rmsnorm_mc", "add_res_mc", "dn_gates_mc", "dn_conv_mc", "dn_l2_mc", "dn_pre_mc", "dn_delta_mc", "dn_gatenorm_mc",
+      "rmsnorm_mc", "add_res_mc", "dn_gates_mc", "dn_conv_mc", "dn_l2_mc", "dn_pre_mc", "dn_delta_mc", "dn_conv_restore", "dn_gatenorm_mc",
       "qsplit_mc", "head_norm_mc", "rope_part_mc", "sigmoid_mul_mc", "attn_glue",
       "attn_scores_mc", "attn_softmax_wg_mc", "attn_out_mc", "kv_store", "attn_flash", "attn_combine", "kv_store_q8", "attn_flash_q8", "attn_flash_t2",
       ...(this.pipes.attn_flash_tile ? ["attn_flash_tile", "attn_combine_tile"] : []),
@@ -1752,10 +1751,11 @@ export class Qwen35Engine {
         pre: this._bg2res(this.pipes.dn_pre_mc, [whole(B.alpha), whole(B.betaRaw), { buffer: L.dtBias }, { buffer: L.ssmA },
           whole(B.beta), whole(B.decay), whole(B.convOut), mcU(0, st(B.alpha), st(B.convOut)), dn]),
         delta: this._bg2res(this.pipes.dn_delta_mc, [whole(B.convOut), whole(B.beta), whole(B.decay), { buffer: L.S }, whole(B.dOut),
-          mcU(0, st(B.convOut), st(B.beta), st(B.dOut)), dn, { buffer: L.S_shadow }]),
-        // replay: the same kernel over the saved inputs of the accepted columns
-        replay: L.rp ? this._bg2res(this.pipes.dn_delta_mc, [{ buffer: L.rp.conv }, { buffer: L.rp.beta }, { buffer: L.rp.decay }, { buffer: L.S }, whole(B.dOut),
-          mcU(0, st(B.convOut), st(B.beta), st(B.dOut)), dn, { buffer: this._dummy }]) : null,
+          mcU(L.rp ? this._rpCols : 0, st(B.convOut), st(B.beta), st(B.dOut)), dn, { buffer: L.S_shadow }]),
+        // replay: the same kernel over the saved inputs of the accepted columns, from S_pre (all in L.rp)
+        replay: L.rp ? this._bg2res(this.pipes.dn_delta_mc, [{ buffer: L.rp }, { buffer: L.rp }, { buffer: L.rp }, { buffer: L.S }, whole(B.dOut),
+          mcU(this._rpCols, st(B.convOut), st(B.beta), st(B.dOut)), dn, { buffer: this._dummy }]) : null,
+        convRestore: this._bg2res(this.pipes.dn_conv_restore, [{ buffer: L.conv_shadow }, { buffer: L.convState }, mcU(L.convState.size / 4)]),
         gatenorm: this._bg2res(this.pipes.dn_gatenorm_mc, [whole(B.dOut), whole(B.z), { buffer: L.ssmNorm }, whole(B.gated),
           mcU(0, st(B.dOut), st(B.z), st(B.gated)), dn]),
       });
@@ -1886,8 +1886,7 @@ export class Qwen35Engine {
         p.end();
       }
     } else {
-      const R = this.replay && L.rp && this._snapNow;   // a verify pass: keep what replay needs
-      if (R && R.base === 0) enc.copyBufferToBuffer(L.S, 0, L.S_pre, 0, L.S.size);
+      // a verify pass with replay: dn_delta_mc records what replay needs into L.rp (frame.snap)
       const p = enc.beginComputePass();
       const nba = this.fuseProj && LB.nba;   // input norm + beta / alpha (as the one-token path), then [qkv | z]
       if (nba) this._dMC(p, "dn_nba", LB.nba, Math.ceil(this.layers[i].fBA.rows / 4) * 64, 64, nCols);
@@ -1902,8 +1901,6 @@ export class Qwen35Engine {
       this._dop(p, LB.out, nCols);
       if (!LB.out.acc) this._dMC(p, "add_res_mc", M.addTmp, D.dim, 64, nCols);
       p.end();
-      if (R) for (const [src, dst] of [[B.convOut, L.rp.conv], [B.beta, L.rp.beta], [B.decay, L.rp.decay]])
-        enc.copyBufferToBuffer(src.buf, 0, dst, R.base * src.stride, nCols * src.stride);
     }
     {
       const p = enc.beginComputePass();
@@ -2473,20 +2470,20 @@ export class Qwen35Engine {
     return { lgs, hs };
   }
   _restoreDN(k) {   // recurrent state as it was after verify column k
-    const enc = this.device.createCommandEncoder();
-    if (this.replay) this.device.queue.writeBuffer(this.frameBufsB[0], 0, new Uint32Array([0, 1, k + 1, 0]));   // replay columns 0..k
+    // one pass for every layer: replay columns 0..k from S_pre (snap bit 30), conv state <- slot k
+    const enc = this.device.createCommandEncoder(), q = this.device.queue, D = this.dims;
+    q.writeBuffer(this.frameBufsB[0], 0, new Uint32Array([0, 1, k + 1, this.replay ? 0x40000000 : 0]));
+    if (!this.replay) for (const L of this.layers) if (!L.isFull) enc.copyBufferToBuffer(L.S_shadow, k * L.S.size, L.S, 0, L.S.size);
+    const p = enc.beginComputePass();
     for (let i = 0; i < this.layers.length; i++) {
-      const L = this.layers[i];
-      if (L.isFull) continue;
-      if (this.replay) {
-        enc.copyBufferToBuffer(L.S_pre, 0, L.S, 0, L.S.size);
-        const p = enc.beginComputePass();
-        this._dMC(p, "dn_delta_mc", this.layerB[i].mc.replay, this.dims.nVH * 128, 128, 1);
-        p.end();
-      } else enc.copyBufferToBuffer(L.S_shadow, k * L.S.size, L.S, 0, L.S.size);
-      enc.copyBufferToBuffer(L.conv_shadow, k * L.convState.size, L.convState, 0, L.convState.size);
+      if (this.layers[i].isFull) continue;
+      const M = this.layerB[i].mc;
+      if (this.replay) this._dMC(p, "dn_delta_mc", M.replay, D.nVH * 128, 128, 1);
+      this._dMC(p, "dn_conv_restore", M.convRestore, this.layers[i].convState.size / 4, 64, 1);
     }
-    this.device.queue.submit([enc.finish()]);
+    p.end();
+    q.submit([enc.finish()]);
+    q.writeBuffer(this.frameBufsB[0], 0, new Uint32Array([0, 1, k + 1, 0]));   // no later pass may see bit 30
   }
   _adoptHidden(col) {   // batch column -> this.x (the hidden the next draft reads)
     const enc = this.device.createCommandEncoder();
