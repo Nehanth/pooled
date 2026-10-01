@@ -1599,3 +1599,41 @@ plain 3/3 (same output and acceptance as main); Chrome golden true, specIdentica
 `test_q38_bits.js` default 4cac59d8 / a67b7bcd and ATTN_PREFILL_TILE=0 4f70a9ca / 5eb28e41, both the same as
 origin/main on the same machine (the 27B does not use moe_route). Barrier lint clean; `npm run check` passes.
 Not measured on the M5 Max.
+
+## 2026-10-01: #294 + #295 + #276 + #298 together (branch perf/combined-check, GB10, check only, no PR)
+
+origin/main 8a435fe plus attnDecode v2 (#294), verify without state copies (#295), layerFuse on by default (#276)
+and the moe_route merge network (#298), merged in that order. One code conflict: #276's `layerFuse.comb` / `.kv`
+fold sigmoid_mul and kv_store around attn_flash's combine, and #294 replaces attn_flash + attn_combine in decode.
+v2 takes precedence (comb / kv off while v2 runs); layerFuse's DeltaNet, norm and pass fusions stay on. In-process
+A/B (`bench/lf_ab.js`) on the combined tree: layerFuse still gives MoE +3.7% with v2 (+4.5% with v1), 27B +1.6% both.
+
+Same machine, same session, main and combined interleaved, 2 runs each (Chrome: `chrome_bench.mjs <model> 64
+"prefill=512,2048,8192"`; Deno: `bench_ctx.js FILLS=512,2048,8192`). The Deno spec column is not like for like
+(bench_ctx builds its prompt from engine source files, which the branches change); Chrome's spec prompts are fixed.
+
+| | main | combined | |
+|---|---|---|---|
+| Chrome MoE plain (two-sum / hash-map, mean of 4) | 51.76 | 56.45 | +9.1% |
+| Chrome MoE spec two-sum / hash-map | 93.60 / 65.83 | 102.52 / 72.48 | +9.5% / +10.1% |
+| Chrome MoE prefill 512 / 2048 / 8192 | 360.4 / 404.5 / 381.8 | 381.6 / 419.0 / 389.5 | +5.9% / +3.6% / +2.0% |
+| Chrome MoE decode at fill 512 / 2048 / 8192 | 41.6 / 39.5 / 36.7 | 53.6 / 51.9 / 47.8 | +29% / +31% / +30% |
+| Chrome 27B plain | 11.16 | 11.37 | +1.9% |
+| Chrome 27B spec two-sum / hash-map | 25.37 / 22.66 | 26.94 / 23.93 | +6.2% / +5.6% |
+| Chrome 27B prefill 512 / 2048 / 8192 | 77.4 / 81.2 / 78.0 | 78.8 / 82.2 / 78.9 | +1.8% / +1.2% / +1.2% |
+| Chrome 27B decode at fill 512 / 2048 / 8192 | 10.38 / 10.37 / 9.83 | 11.22 / 11.13 / 10.86 | +8.1% / +7.4% / +10.5% |
+| Deno MoE prefill 512 / 2048 / 8192 | 295.1 / 376.8 / 355.6 | 317.1 / 389.9 / 365.2 | +7.4% / +3.5% / +2.7% |
+| Deno MoE plain at 512 / 2048 / 8192 | 27.21 / 27.07 / 25.39 | 33.39 / 33.05 / 32.07 | +23% / +22% / +26% |
+| Deno 27B prefill 512 / 2048 / 8192 | 71.1 / 75.7 / 72.5 | 72.4 / 76.6 / 73.3 | +1.8% / +1.2% / +1.0% |
+| Deno 27B plain at 512 / 2048 / 8192 | 9.32 / 9.27 / 8.80 | 10.15 / 10.04 / 9.80 | +8.9% / +8.3% / +11.3% |
+| llama.cpp CUDA (b749f688) MoE pp512 / pp2048 / pp8192 / tg64 | 2379 / 2406 / 2343 / 84.1 | | |
+| llama.cpp CUDA 27B pp512 / pp2048 / pp8192 / tg64 | 889 / 902 / 876 / 13.45 | | |
+
+Gates on the combined tree: unit tests 960/960, `npm run check` clean; `test_q38_bits` default c26dbc5 / 3177f9f1,
+ATTN_PREFILL_TILE=0 f0537158 / 5d287854 (#294's re-baselined goldens), LAYER_FUSE=0 c26dbc5 (layerFuse keeps the
+bits), ATTN_DECODE=v1 4cac59d8 / a67b7bcd and v1 + ATTN_PREFILL_TILE=0 4f70a9ca / 5eb28e41 (= main);
+`test_moe` MATCH llama.cpp 3/3 + spec == plain (v2 and v1); `test_attn_dec`, `test_mtp`, `test_moe_split`,
+`test_mtp_split` PASS; `test_prefill_opts` 27B PASS, MoE fails 2.45e-2 > 0.02 at 700 tokens as main does (2.44e-2,
+the known routing near-tie). Prefill answers at 512 / 2048 / 8192 on the fixed prefill_opts prompt: 24 greedy
+tokens identical to main for both models, spec == plain; with ATTN_DECODE=v1 the logits hashes equal main's too,
+so #295, #276 and #298 together change no bit.
