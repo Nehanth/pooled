@@ -4,6 +4,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { toRequest, toAsk, toolSchema, MAX_TOKENS } from "../src/convert.js";
 import { createPooledStream, busyMessage } from "../src/stream.js";
 import { roomSettings, keyOf, modelInfo, MODEL_CHOICES, roomLink } from "../src/pool.js";
@@ -11,6 +13,9 @@ import { providerConfig, applyToConfig, setupFromEnv, modelRef, PROVIDER, newCod
 import { validateApiAsk, apiPrompt2, TurnCache, EncodeCache } from "../../../room/api.js";
 import { templateProfile } from "../../../room/conversation.js";
 import { makeTokenizer } from "../../../engine/tokenizer.js";
+import { setStateDir } from "../src/state.js";
+
+setStateDir(fs.mkdtempSync(path.join(os.tmpdir(), "pooled-oc-test-")));   // never the real ~/.openclaw
 
 const FX = JSON.parse(fs.readFileSync(new URL("fixtures/openclaw-tools.json", import.meta.url), "utf8"));
 const HOST2 = { api: 2, ctx: 65536 };
@@ -126,13 +131,13 @@ function scriptedRoom({ hosting = true, hostMeta = HOST2, script }) {
     setTimeout(() => { for (const m of msgs) h({ rid, ...m }); }, 0);
     return { stop() {} };
   };
-  const node = { hosting: () => hosting, hostMeta, ai: { online: true, degraded: false }, log() {}, request: (body, h, { rid }) => handler(rid, body, h), status: () => ({ devices: [] }) };
+  const node = { hosting: () => hosting, hostMeta, admission: "in", ai: { online: true, degraded: false }, log() {}, request: (body, h, { rid }) => handler(rid, body, h), status: () => ({ devices: [] }) };
   const bridge = { ready: true, kicked: null, hostMeta, ask: (rid, body, h) => { handler(rid, body, h); return true; }, stop() {} };
   return { node, bridge, asks };
 }
 function install(room, cfg) {
   const s = roomSettings(cfg, {});
-  globalThis[Symbol.for("pooled.openclaw.room")] = { key: keyOf(s), s, ready: Promise.resolve({ s, node: room.node, bridge: room.bridge, code: "TEST", link: "https://pooled.run/room/TEST", P: {} }) };
+  globalThis[Symbol.for("pooled.openclaw.room")] = { key: keyOf(s), s, ready: Promise.resolve({ s, node: room.node, bridge: room.bridge, code: "TEST", link: "https://pooled.run/r/TEST", P: {} }) };
   return createPooledStream({ getPluginConfig: () => cfg, sdk: fakeSdk() });
 }
 const MODEL = { id: "qwen3-1.7b", provider: "pooled", api: "openai-completions", maxTokens: 4096, reasoning: false };
@@ -166,7 +171,7 @@ for (const hosting of [true, false]) {
     assert.deepEqual(room.asks[1].messages.slice(1), [{ role: "assistant", text: "", calls: [{ name: "read", args: { path: "notes.txt" } }] }, { role: "tool", text: "The secret word is PELICAN-42." }]);
     const r3 = await run(fn, c1);
     assert.equal(r3.msg.stopReason, "error");
-    assert.match(r3.msg.errorMessage, /^Pooled: the conversation is 20000 tokens; .*16352/);
+    assert.match(r3.msg.errorMessage, /^Pooled: context length exceeded: the conversation is 20000 tokens; .*16352/);
   });
 }
 
@@ -186,51 +191,96 @@ test("stream: an older host gets no tools; the chat says why", async () => {
   const room = scriptedRoom({ hostMeta: { api: 1 }, script: [] });
   const fn = install(room, { mode: "join", code: "TEST", model: "qwen3-1.7b" });
   const r = await run(fn, { messages: [{ role: "user", content: "hi" }], tools: TOOLS });
-  assert.match(r.msg.errorMessage, /^Pooled: .*older Pooled/);
+  assert.equal(r.msg.stopReason, "stop");
+  assert.match(r.msg.content[0].text, /^\*\*Pooled\*\* · `TEST` · the host runs an older Pooled\n\n.*older Pooled/);
   assert.equal(room.asks.length, 0);
 });
 
+test("stream: the room's own conditions (queue full, loading, ...) come back as visible text, dropped on replay", async () => {
+  // OpenClaw hides a provider's error text and resubmits an empty error turn 3 times: a notice is a turn
+  const room = scriptedRoom({ script: [[{ t: "ai-busy", code: "queue" }], TEXT_TURN] });
+  const fn = install(room, { mode: "host", code: "TEST", model: "qwen3-1.7b" });
+  const c1 = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
+  const r1 = await run(fn, c1);
+  assert.equal(r1.msg.stopReason, "stop");
+  assert.match(r1.msg.content[0].text, /^\*\*Pooled\*\* · `TEST` · the room is busy\n\nRoom TEST's queue is full\. Try again/);
+  assert.deepEqual(r1.types, ["start", "text_start", "text_delta", "text_end", "done"]);
+  const c2 = { messages: [...c1.messages, { role: "assistant", content: r1.msg.content, stopReason: "stop" }, { role: "user", content: "hi again", timestamp: 2 }] };
+  await run(fn, c2);
+  assert.deepEqual(room.asks[1].messages.map((m) => m.role), ["user"]);   // the two user turns merge; the notice is gone
+  // a 0.2.x notice still in a conversation's history is dropped too
+  const old = { messages: [{ role: "user", content: "hi" }, { role: "assistant", content: [{ type: "text", text: "⚠️ Pooled: Pooled room TEST's queue is full" }], stopReason: "stop" }, { role: "user", content: "again" }] };
+  assert.deepEqual(toRequest(old).messages.map((m) => m.role), ["user", "user"]);
+});
+
 test("busyMessage: every refusal reads as a sentence with the room code", () => {
-  const r = { code: "K7QX", link: "https://pooled.run/room/K7QX" };
+  const r = { code: "K7QX", link: "https://pooled.run/r/K7QX" };
   for (const code of ["ctx", "loading", "degraded", "off", "queue", "gone", "other"]) assert.match(busyMessage({ code, n: 1, max: 2, err: "x" }, r), /K7QX/);
 });
 
 // ---------------- settings and onboarding ----------------
-test("settings: plugin config, overridden by POOLED_* env", () => {
-  const s = roomSettings({ mode: "host", code: "abcd", model: "qwen3.6-35b-moe", pledgeGB: 12 }, { POOLED_PLEDGE_GB: "20" });
-  assert.deepEqual([s.mode, s.code, s.model, s.pledgeGB, s.minDevices, s.waitSeconds], ["host", "ABCD", "qwen3.6-35b-moe", 20, 1, 120]);
+test("settings: plugin config, overridden by POOLED_* env; codes and links as pasted", () => {
+  const s = roomSettings({ mode: "host", code: "4tk-g9p", model: "qwen3.6-35b-moe", pledgeGB: 12 }, { POOLED_PLEDGE_GB: "20" });
+  assert.deepEqual([s.mode, s.code, s.model, s.pledgeGB, s.minDevices, s.waitSeconds, s.ask, s.pull, s.prewarm], ["host", "4TKG9P", "qwen3.6-35b-moe", 20, 1, 120, true, true, true]);
   assert.equal(roomSettings({}, {}).mode, null);
-  assert.equal(roomLink("ABCD"), "https://pooled.run/room/ABCD");
-  assert.equal(roomLink("ABCD", "127.0.0.1:9000"), "https://pooled.run/room/ABCD?signal=127.0.0.1%3A9000");
+  assert.equal(roomSettings({}, {}).modelDir, path.join(os.homedir(), ".pooled", "models"), "the cache pooled pull fills");
+  assert.equal(roomSettings({ modelDir: "/m" }, {}).modelDir, "/m");
+  assert.equal(roomSettings({ ask: false, pull: false }, {}).ask, false);
+  const key = "abcdefghijklmnopqrstuv";
+  const j = roomSettings({ mode: "join" }, { POOLED_LINK: `https://pooled.run/r/4TKG9P#k=${key}` });
+  assert.deepEqual([j.code, j.key], ["4TKG9P", key]);
+  assert.match(roomSettings({}, {}).name, / \(OpenClaw\)$/);
 });
 
-test("models: onboarding offers the room's models with their largest context (the MoE: 128k)", () => {
+test("links: /r/<CODE> with the invite key in the fragment (never the old /room/ path)", () => {
+  const key = "abcdefghijklmnopqrstuv";
+  assert.equal(roomLink("4TKG9P"), "https://pooled.run/r/4TKG9P");
+  assert.equal(roomLink("4TKG9P", { key }), `https://pooled.run/r/4TKG9P#k=${key}`);
+  assert.equal(roomLink("ABCD", { signal: "127.0.0.1:9000" }), "https://pooled.run/r/ABCD?signal=127.0.0.1%3A9000");
+  assert.equal(roomLink("4TKG9P", { key: "short" }), "https://pooled.run/r/4TKG9P", "not a key: no fragment");
+});
+
+test("models: onboarding offers the room's models with their largest context (the MoE: 128k) and what they need", () => {
   assert.deepEqual(MODEL_CHOICES, ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"]);
-  assert.deepEqual(modelInfo("qwen3.6-35b-moe"), { name: "Qwen3.6 35B MoE", needGB: 22.5, ctx: 131072 });
+  const moe = modelInfo("qwen3.6-35b-moe");
+  assert.equal(moe.name, "Qwen3.6 35B MoE"); assert.equal(moe.ctx, 131072);
+  assert.ok(moe.needGB > 20 && moe.needGB < 30, `${moe.needGB}`);
+  assert.equal(moe.fileBytes, 20836243072);
   assert.equal(modelInfo("qwen3-1.7b").ctx, 16384);
+  assert.equal(modelInfo("qwen3-1.7b", 4000).ctx < 16384, true, "an asked context is clamped by room/models.js");
 });
 
 test("onboarding: a host config puts one model in the catalog, turns the plugin on and makes it the default", () => {
-  const s = { mode: "host", code: "K7QX", model: "qwen3.6-35b-moe", pledgeGB: 12, minDevices: 2 };
+  const s = { mode: "host", code: "4TKG9P", model: "qwen3.6-35b-moe", pledgeGB: 12, minDevices: 2 };
   const pc = providerConfig(s);
   assert.equal(pc.models.length, 1);
   assert.deepEqual([pc.models[0].id, pc.models[0].contextWindow, pc.models[0].reasoning, pc.authHeader], ["qwen3.6-35b-moe", 131072, true, false]);
+  assert.equal(pc.models[0].name, "Qwen3.6 35B MoE · Pooled room 4TK-G9P");
   assert.equal(providerConfig({ ...s, ctx: 20000 }).models[0].contextWindow, 19968);
   const cfg = applyToConfig({ agents: { defaults: { model: { primary: "openai/gpt" } } } }, s);
   assert.equal(cfg.agents.defaults.model.primary, "pooled/qwen3.6-35b-moe");
-  assert.deepEqual(cfg.plugins.entries[PROVIDER], { enabled: true, config: { mode: "host", code: "K7QX", model: "qwen3.6-35b-moe", pledgeGB: 12, minDevices: 2 } });
+  assert.deepEqual(cfg.plugins.entries[PROVIDER], { enabled: true, config: { mode: "host", code: "4TKG9P", model: "qwen3.6-35b-moe", pledgeGB: 12, minDevices: 2 } });
   assert.equal(cfg.agents.defaults.models["pooled/qwen3.6-35b-moe"].agentRuntime.id, "openclaw");
-  const join = providerConfig({ mode: "join", code: "K7QX" });
-  assert.deepEqual([join.models[0].id, join.models[0].name], ["room", "Pooled room K7QX"]);
+  assert.equal(applyToConfig({}, { ...s, ask: false, pull: false }).plugins.entries[PROVIDER].config.ask, false, "only a non-default is written");
+  // joined: the room's model, context and name once onboarding learned them from the host
+  const join = providerConfig({ mode: "join", code: "4TKG9P" });
+  assert.deepEqual([join.models[0].id, join.models[0].name, join.models[0].contextWindow], ["room", "Pooled room 4TK-G9P", 32768]);
+  const learned = providerConfig({ mode: "join", code: "4TKG9P" }, { model: "qwen3.6-35b-moe", ctx: 65536 });
+  assert.deepEqual([learned.models[0].name, learned.models[0].contextWindow, learned.models[0].reasoning], ["Pooled room 4TK-G9P (Qwen3.6 35B MoE)", 65536, true]);
   assert.equal(modelRef({ mode: "join" }), "pooled/room");
+  // the invite key never goes into openclaw.json
+  assert.ok(!JSON.stringify(applyToConfig({}, { mode: "join", code: "4TKG9P", key: "abcdefghijklmnopqrstuv" })).includes("abcdefghijklmnopqrstuv"));
 });
 
-test("onboarding (non-interactive): POOLED_* env; a join needs a real code", () => {
+test("onboarding (non-interactive): POOLED_* env; a join takes the room's link; codes are six characters", () => {
   const h = setupFromEnv({});
-  assert.equal(h.mode, "host"); assert.match(h.code, /^[A-HJKMNP-TV-Z2-9]{4}$/);
-  assert.equal(setupFromEnv({ POOLED_MODE: "join", POOLED_CODE: "k7qx" }).code, "K7QX");
-  assert.throws(() => setupFromEnv({ POOLED_MODE: "join", POOLED_CODE: "I0O1" }), /POOLED_CODE/);
-  assert.match(newCode(), /^[A-HJKMNP-TV-Z2-9]{4}$/);
+  assert.equal(h.mode, "host"); assert.match(h.code, /^[A-HJKMNP-TV-Z2-9]{6}$/);
+  assert.equal(setupFromEnv({ POOLED_MODE: "join", POOLED_CODE: "4tk-g9p" }).code, "4TKG9P");
+  const j = setupFromEnv({ POOLED_LINK: "https://pooled.run/r/4TKG9P#k=abcdefghijklmnopqrstuv" });
+  assert.deepEqual([j.mode, j.code, j.key], ["join", "4TKG9P", "abcdefghijklmnopqrstuv"]);
+  assert.throws(() => setupFromEnv({ POOLED_MODE: "join", POOLED_CODE: "I0O1-" }), /POOLED_LINK/);
+  assert.throws(() => setupFromEnv({ POOLED_MODE: "host", POOLED_CODE: "I0O1" }), /POOLED_CODE/);
+  assert.match(newCode(), /^[A-HJKMNP-TV-Z2-9]{6}$/);
 });
 
 // With a local OpenClaw (OC_ROOT=<dir with node_modules/openclaw>, run with --import ./test/oc-resolve.mjs):
@@ -250,4 +300,34 @@ test("with OpenClaw's SDK: the entry registers and the StreamFn feeds its real e
   const r = await run(fn, { messages: [{ role: "user", content: "read notes.txt", timestamp: 1 }], tools: TOOLS });
   assert.equal(r.msg.stopReason, "toolUse", r.msg.errorMessage);
   assert.deepEqual(r.msg.content.find((c) => c.type === "toolCall").arguments, { path: "notes.txt" });
+});
+
+// The 1.7B opens at 16k, or at 8k when the room's memory is short for 16k (room/models.js pickCtx).
+// OpenClaw's prompt alone is ~12k tokens, so an 8k room is too short for it: the plugin says so.
+test("the 1.7B: the plugin asks the room node for no context (16k, 8k when short), and warns when OpenClaw gets 8k", async () => {
+  const { pluginAsk, pluginCtx, shortCtxNote, ownShortCtxNote, modelChoices, OPENCLAW_MIN_CTX, lib } = await import("../src/models.js");
+  const { roomFitNow } = await import("../../../cli/lib/hostui.js");
+  assert.equal(pluginCtx("qwen3-1.7b"), 16384, "what OpenClaw is told: 16k");
+  assert.equal(pluginAsk("qwen3-1.7b"), 0, "the node picks 16k, or 8k when the room is short");
+  assert.equal(pluginAsk("qwen3-1.7b", 16384), 16384, "an asked context stays asked");
+  assert.equal(pluginAsk("qwen3.6-35b-moe"), 131072, "no fallback on the MoE: its largest");
+  // one machine lending 4 GB: the room opens the 1.7B at 8k; 6 GB holds 16k
+  const one = (gb) => roomFitNow(lib, { model: "qwen3-1.7b", devices: [{ name: "this machine", meta: { contribGB: gb, webgpu: true } }], ctxAsk: pluginAsk("qwen3-1.7b") });
+  assert.deepEqual([one(4).fits, one(4).ctx, one(4).fellBack], [true, 8192, true]);
+  assert.deepEqual([one(6).fits, one(6).ctx, one(6).fellBack], [true, 16384, false]);
+  // onboarding says it before the owner picks
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-oc-ctx-"));
+  const r4 = modelChoices(dir, 4).rows.find((r) => r.key === "qwen3-1.7b");
+  assert.match(r4.hint, /needs about [\d.]+ GB across the room \([\d.]+ GB at 8k\) · 16k context · fits on this machine alone at 8k \(OpenClaw needs 16k\)/);
+  assert.match(modelChoices(dir, 8).rows.find((r) => r.key === "qwen3-1.7b").hint, / · fits on this machine alone · /);
+  // its own room at 8k: what the owner reads (/pooled)
+  const own = ownShortCtxNote("qwen3-1.7b", 8192, one(4).ctxNote, 5.5);
+  assert.match(own, /^Qwen3 1\.7B · 8K context: the room's memory is short for 16K\. OpenClaw needs 16k \(its own instructions and tools take about 12k tokens\), so answers may end in "Context overflow"\. Raise this machine's pledge \(\/pooled pledge <GB>: about 6 GB across the room\) or add a device/);
+  assert.equal(ownShortCtxNote("qwen3-1.7b", 16384, "", 5.5), null, "16k: nothing to say");
+  // a joined room at 8k: the host's memory was short; more memory gets 16k
+  const joined = shortCtxNote("qwen3-1.7b", 8192, "spark");
+  assert.match(joined, /spark runs this room with a 8192-token context, but OpenClaw needs 16k/);
+  assert.match(joined, /`pooled host qwen3-1\.7b --ctx 16384` \(the room opens Qwen3 1\.7B at 8K when its memory is short for 16K: a device lending more, or one more device, gets 16K\)\.$/);
+  assert.equal(shortCtxNote("qwen3-1.7b", 16384), null);
+  assert.equal(OPENCLAW_MIN_CTX, 16384);
 });

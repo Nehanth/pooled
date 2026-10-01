@@ -24,7 +24,7 @@ import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecode
 import { tokenTexts } from "./harness/model-common.js";
 import { PrefixIndex, pinSplit } from "./harness/prefix.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes } from "./room/models.js";
+import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -228,8 +228,8 @@ preflight().then((v) => {
   $("ap-no").textContent = v.line;
   if (v.detail) { const d = document.createElement("span"); d.className = "ap-no-d"; d.textContent = v.detail; $("ap-no").append(" ", d); }
 });
-// the least any model in the picker needs (the 1.7B's 4 GB)
-const SMALLEST_NEED = Math.min(...PICKER.map((k) => NEED_GB[k]));
+// the least any model in the picker needs (the 1.7B's 4 GB, at its 8K fallback context)
+const SMALLEST_NEED = Math.min(...PICKER.map((k) => NEED_MIN_GB[k] ?? NEED_GB[k]));
 // probe once at load; fill the contribution selector, unless an amount was already chosen there
 // (typed, stepped or filled in while the probe ran: it takes up to ~0.5 s with the copy timing)
 let joinGbChosen = false;
@@ -454,18 +454,23 @@ function spareGBOf(meta) {
 }
 // Whether this room's pledges hold `key` the way the host will deal it (room/plan.js roomFit): each
 // device's pledge (held to its kind's cap) in whole layers with their KV cache at the room's context,
-// the model host's (room/plan.js pickModelHost) less the embedding and the head. null for a model
-// without a SHAPE (room/models.js) or a room with no device that can hold layers.
+// the model host's (room/plan.js pickModelHost) less the embedding and the head. The context is the
+// one the host will pick (room/models.js pickCtx): the model's default, or its fallback (the 1.7B: 8K
+// for 16K) when only that fits; a short room is short for the fallback. null for a model without a
+// SHAPE (room/models.js) or a room with no device that can hold layers.
 function roomFitFor(key) {
   const devs = [{ id: peer?.id || "self", name: myName, meta: myMeta }, ...[...members].map(([id, m]) => ({ id, name: m.name || "device", meta: m.meta || {} }))]
     .filter((d) => d.meta?.webgpu && !d.meta?.api);
-  const q = new URLSearchParams(location.search);
-  const rb = roomBytes(key, maxSeqFor(key, +q.get("ctx") || 0), kvModeFor(key, roomQwen35Options(location.search).kvQ8 ? "q8" : null));
-  if (!devs.length || !rb) return null;
+  const ask = +new URLSearchParams(location.search).get("ctx") || 0, kv = kvModeFor(key, roomQwen35Options(location.search).kvQ8 ? "q8" : null);
+  if (!devs.length || !roomBytes(key, maxSeqFor(key, ask), kv)) return null;
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
-  const fit = roomFit(rb.L, devs.map((d) => pledgeGB(d.meta) * 2 ** 30), rb.layerBytes, rb.hostBytes), spare = devs.map((d) => spareGBOf(d.meta));
-  return { fit, devs, shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare) };
+  const pledges = devs.map((d) => pledgeGB(d.meta) * 2 ** 30);
+  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes); };
+  const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
+  const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
+  return { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
+    shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare) };
 }
 // the ladder with each row's fit from the real deal where the model has a SHAPE (NEED_GB otherwise)
 function fitLadder(pledged) {
@@ -481,11 +486,13 @@ function renderLadder(pledged, rows = fitLadder(pledged)) {
   // on every change, so the focus follows the picked row when it was in the group.
   const had = el.contains(document.activeElement);
   el.innerHTML = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + rows.map((x) => {
-    const gb = `<span class="nd">${NEED_GB[x.key] ?? ""} GB</span>`;
+    // fits only at the model's fallback context: say which, with what it needs there
+    const back = x.ok && x.f?.fellBack;
+    const gb = `<span class="nd">${back ? `${NEED_MIN_GB[x.key] ?? ""} GB · ${ctxK(x.f.ctx)}` : `${NEED_GB[x.key] ?? ""} GB`}</span>`;
     const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">${x.short} GB short</span>`;
     // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
     const sel = !none && x.key === $("ai-model").value;
-    return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${x.ok ? "" : ` title="${esc(x.f?.note || (giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"))}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
+    return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${back ? ` title="${esc(ctxShortNote(shortName(x.key), x.f.ctx, x.f.want))}"` : x.ok ? "" : ` title="${esc(x.f?.note || (giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"))}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
   if (!el.querySelector(".rung.sel")) el.querySelector(".rung")?.setAttribute("tabindex", "0");
   if (had) el.querySelector('.rung[tabindex="0"]')?.focus({ preventScroll: true });
@@ -524,9 +531,12 @@ function updateNeed(pledged) {
   const note = row?.f?.note || (ok ? "" : `This room is ${shortGB} GB short for ${shortName($("ai-model").value)}. Add a device or raise a pledge.`);
   $("need-fill").style.width = Math.min(100, ok ? 100 : pledged / (pledged + shortGB) * 100).toFixed(1) + "%";
   const has = +pledged.toFixed(1);
+  // a model with a fallback context says both needs; a room that holds it only there says so
+  const needs = NEED_GB[$("ai-model").value] ? needText($("ai-model").value) : `${need} GB`;
+  const back = ok && row?.f?.fellBack ? ` ${ctxShortNote(shortName($("ai-model").value), row.f.ctx, row.f.want)}.` : "";
   $("need-text").textContent = ok
-    ? `Needs ${need} GB. The room has ${has} GB.`
-    : `Needs ${need} GB. The room has ${has} GB, ${shortGB} GB short.`;
+    ? `Needs ${needs}. The room has ${has} GB.${back}`
+    : `Needs ${needs}. The room has ${has} GB, ${shortGB} GB short.`;
   $("ai-need").classList.toggle("ok", ok);
   if (!ai.busy && !ai.engine) $("ai-start").disabled = !ok;
   // short: say by how much and who could give more, right under Start
@@ -977,7 +987,11 @@ function onData(from, d) {
       // unique ("laptop 2"), and the device takes the name the roster gives it
       if (isHost) {
         // the name is held by a device that has been quiet for a second: ping it and decide in a moment
-        const quiet = !probedHellos.has(d) && quietNamesake(d.name, from, roster, heardOf, performance.now());
+        // a device that says it is back (back: 1) under a new link: its old link may still look alive
+        // (its close not seen yet), so probe it whatever its silence, or the room lists it twice and a
+        // re-deal deals both
+        const quiet = !probedHellos.has(d) && (quietNamesake(d.name, from, roster, heardOf, performance.now())
+          || (d.back ? [...roster].find(([rid, m]) => rid !== from && m.name === d.name)?.[0] || null : null));
         if (quiet) {
           const since = performance.now();
           sendTo(quiet, { t: "ping", ts: since });
@@ -993,17 +1007,27 @@ function onData(from, d) {
       members.set(from, { name: d.name, meta: d.meta });
       ensureCard(from, d.name, d.meta);
       if (isHost) {
+        // the model runs on another device (biggestPeerId): say which, so this one takes its ai-ready-all
+        // when it links in (welcomeFar)
+        if (ai.role !== "host" && ai.hostId && ai.hostId !== peer.id && conns.has(ai.hostId) && ai.hostId !== from && $("ai-panel").classList.contains("online")) sendTo(from, { t: "ai-modelhost", id: ai.hostId });
         roster.set(from, { name: d.name, meta: d.meta }); broadcastRoster();
         if (!aiLoadDeath(from, d)) aiRejoin(from, d.name);
         if (d.died?.during && d.died.ago > 2) log("room", `${d.name} came back: its tab was killed ${d.died.ago} s ago while ${d.died.during}. Phones kill background tabs; keep the screen on.`);
         if (ai.visibility !== "all") sendTo(from, { t: "ai-visibility", mode: ai.visibility });
-        if (!d.back) aiWelcome(from); else offerRedealForNewcomers();
+        // a device back (a reload rejoins by itself with back: 1) that holds no layers is welcomed too:
+        // without ai-ready-all it showed the model picker as if no model ran (it keeps its own chat)
+        aiWelcome(from, { history: !d.back });
         codeWelcome(from);
       }
       break;
-    case "leaving":   // the tab is closing: treat the link as gone now instead of waiting for ICE to time out
-      conns.get(from)?.conn.close();
+    case "leaving": {   // the tab is closing: treat the link as gone now instead of waiting for ICE to time out
+      // (and for PeerJS's close, which can come late or never: until then the device would stay listed,
+      // and come back beside itself under a new link)
+      const e = conns.get(from);
+      try { e?.conn.close(); } catch {}
+      if (e && conns.get(from) === e) e.drop?.();
       break;
+    }
     case "admit":   // the host let this device in: keep the pass it gave, for coming back
       if (isHost || from !== PREFIX + roomCode) break;
       if (validKey(d.pass)) { myPass = d.pass; keepPass(roomCode, myPass); }
@@ -1021,7 +1045,11 @@ function onData(from, d) {
       if (versionSeen.has(from)) break;   // a version mismatch this tab already explained in its own words
       toast(d.reason);
       log("room", d.reason);
-      if (from === PREFIX + roomCode) { $("room-over").hidden = false; $("room-over-h").textContent = "Room over"; $("room-over-why").textContent = d.reason; }
+      if (from === PREFIX + roomCode) {
+        $("room-over").hidden = false; $("room-over-h").textContent = "Room over"; $("room-over-why").textContent = d.reason;
+        // the host closed the room for good (pooled host q): its link closing next is not a host to wait for
+        if (d.closed) { admission = "out"; clearInterval(hostGone.timer); aiStatus("the host closed the room"); }
+      }
       break;
     case "roster": {
       // the host's view of the room: draw a card per device, no mesh connections
@@ -1045,6 +1073,8 @@ function onData(from, d) {
         const ce = conns.get(m.id); if (ce) ce.meta = m.meta;
       }
       for (const id of [...members.keys()]) if (!seen.has(id)) { members.delete(id); dropCard(id); }
+      // this device runs the model but not the room: a device it has no link to can't ask it yet
+      for (const id of seen) if (!members.get(id)?.meta?.api) welcomeFar(id);
       updateCluster();
       apiPanel();   // the API clients in the roster: the Serve API dot and list
       break;
@@ -2926,6 +2956,7 @@ function aiStartAnywhere() {
   const model = $("ai-model").value;
   const boss = biggestPeerId();
   if (boss === peer.id) { aiStart(model); return; }
+  ai.hostId = boss;   // its ai-layers and ai-ready-all are the ones this device listens to (FROM_HOST)
   $("ai-start").disabled = true; $("ai-model").disabled = true;
   aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`);
   $("ldg-sub").textContent = `${conns.get(boss)?.name || "the biggest device"} is dealing the layers`;
@@ -2954,9 +2985,16 @@ async function aiStart(modelArg) {
     ai.lapStat = null;                        // a new chain: lap timeouts start from the fixed fallbacks again
     const modelKey = $("ai-model").value;
     const M = MODELS[modelKey];
-    // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every device builds its engine with it
-    let ROOM_CTX = maxSeqFor(modelKey, +new URLSearchParams(location.search).get("ctx") || 0);
+    // context for this room: the model's default, or ?ctx=N up to its cap (room/models.js CTX); every
+    // device builds its engine with it. Without ?ctx= a room whose pledges hold the model only at its
+    // fallback (the 1.7B: 8K for 16K) opens it there (pickCtx, below)
+    const CTX_ASK = +new URLSearchParams(location.search).get("ctx") || 0;
+    let ROOM_CTX = maxSeqFor(modelKey, CTX_ASK);
     const ROOM_KV = kvModeFor(modelKey, KV_ASK);   // KV cache format for every device: f16, or int8 with ?kv=q8
+    // a model host that is not the room's creator (biggestPeerId) has links only to the creator and to
+    // devices it dialed: link every device first, so the deal, ai-layers and ai-ready-all reach them all
+    // (a device the deal leaves out would otherwise sit on its Loading card, and could not ask)
+    if (!isHost) { aiStatus("linking the devices in the room…"); await linkMembers(); }
     // devices without WebGPU join as ask-only guests: they get the chat, not layers
     // (a device whose tab was killed twice while loading its layers stays a guest: aiLoadDeath)
     ai.chain = [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && conns.get(id)?.conn?.open !== false && !ai.dropped?.has(conns.get(id)?.name)).sort();
@@ -2965,7 +3003,8 @@ async function aiStart(modelArg) {
     ai.gone = new Set();                      // chain ids whose link closed (aiPeerLeft), for a same-id rejoin
     ai.chainNames = ai.chain.map((id) => conns.get(id)?.name || id);
     const n = ai.chain.length + 1;
-    let L, layerBytes, embedBytes, cfg = null;
+    // layerAt(ctx): one layer's bytes with its KV cache at that context
+    let L, layerBytes, layerAt, embedBytes, cfg = null;
     if (M.kind === "qwen35") {
       aiStatus("reading model index… (11 MB)");
       ai.G = await fetchGGUFHeader(M.gguf);
@@ -2976,8 +3015,8 @@ async function aiStart(modelArg) {
       const fitCtx = ctxForBinding(ai.G.meta, ROOM_CTX, ROOM_KV, bindMin);
       if (fitCtx < ROOM_CTX) { log("room", `context ${ROOM_CTX} needs bigger GPU buffers than a device here allows: using ${fitCtx}`); ROOM_CTX = fitCtx; }
       L = ai.G.meta["qwen35.block_count"] - (ai.G.meta["qwen35.nextn_predict_layers"] || 0);
-      layerBytes = qwen35ShardBytes(ai.G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4
-        + ROOM_CTX * kvBytesPerLayerPos(ai.G.meta, ROOM_KV);   // the attention layers' KV cache at this room's context
+      const w = qwen35ShardBytes(ai.G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4;
+      layerAt = (c) => w + c * kvBytesPerLayerPos(ai.G.meta, ROOM_KV);   // the attention layers' KV cache at the room's context
       embedBytes = hostHeldBytes("qwen35", { embed: ai.G.tensors[GGML_EMBED]?.byteLength || 0, out: ai.G.tensors[GGML_OUTPUT]?.byteLength || 0, mtp: qwen35MtpBytes(ai.G) });
     } else {
       cfg = await (await fetch(M.cfg)).json();
@@ -2992,13 +3031,13 @@ async function aiStart(modelArg) {
       // one layer's weights plus its f32 KV cache at this room's context (engine/dense.js: 64 MB a
       // layer for the 1.7B at 8k, more than its weights), and what the host holds besides its layers
       const kvDim = cfg.num_key_value_heads * (cfg.head_dim || cfg.hidden_size / cfg.num_attention_heads);
-      layerBytes = Object.values(ggmlLayerNames(0))
-        .reduce((s, nm) => s + (ai.G.tensors[nm]?.byteLength || 0), 0) + ROOM_CTX * denseKvBytesPerLayerPos(kvDim);
+      const w = Object.values(ggmlLayerNames(0)).reduce((s, nm) => s + (ai.G.tensors[nm]?.byteLength || 0), 0);
+      layerAt = (c) => w + c * denseKvBytesPerLayerPos(kvDim);
       embedBytes = hostHeldBytes("gguf", { embed: ai.G.tensors[GGML_EMBED]?.byteLength || 0, out: ai.G.tensors[GGML_OUTPUT]?.byteLength || 0 });
     } else if (M.kind === "safetensors") {
       const d = cfg.hidden_size;
       const kvDim = cfg.num_key_value_heads * ((cfg.head_dim || d / cfg.num_attention_heads));
-      layerBytes = (2 * d * d + 2 * kvDim * d + 3 * cfg.intermediate_size * d) * 4 + ROOM_CTX * denseKvBytesPerLayerPos(kvDim);
+      layerAt = (c) => (2 * d * d + 2 * kvDim * d + 3 * cfg.intermediate_size * d) * 4 + c * denseKvBytesPerLayerPos(kvDim);
       embedBytes = cfg.vocab_size * d * 4;
     }
     // what each device lends, held to its kind's cap (phones: room/pledge.js) and to a share this host
@@ -3009,6 +3048,15 @@ async function aiStart(modelArg) {
     const nameOf = (id) => conns.get(id)?.name || id;
     const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name)) * 2 ** 30;
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
+    // the model's default context, or its fallback when only that fits these pledges (room/models.js
+    // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
+    const pick = pickCtx(modelKey, { want: ROOM_CTX, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes).fits });
+    ROOM_CTX = pick.ctx;
+    layerBytes = layerAt(ROOM_CTX);
+    ai.ctxWant = pick.fellBack ? pick.want : 0;
+    ai.ctxNote = pick.fellBack ? ctxShortNote(shortName(modelKey), pick.ctx, pick.want) : "";
+    ai.ctxK = ctxK(pick.ctx);
+    if (ai.ctxNote) log("room", ai.ctxNote);
     ai.layerGB = layerBytes / 2 ** 30;
     // fastest devices first (measured ms per layer from earlier answers), fewest hops, or by memory;
     // either way devices that are not needed (phones while the computers hold the model) and devices
@@ -3132,7 +3180,8 @@ function showRedeal(on, why) {
   $("redeal-why").hidden = b.hidden;
 }
 // devices with a GPU that are in the room but hold no layers (joined after the start)
-function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && !ai.chain.includes(id) && !ai.leftOut?.has(id)); }
+// (a device the deal left out by name is still left out under a new id after a reload, not "late")
+function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.meta?.webgpu && !ai.chain.includes(id) && !ai.leftOut?.has(id) && !["unneeded", "small"].includes(ai.outWhy?.[conns.get(id)?.name])); }
 function offerRedealForNewcomers() {
   if (ai.role !== "host" || !ai.engine || ai.degraded) return;
   const spare = sparePeers();
@@ -3146,6 +3195,12 @@ function outNow() {
   const out = { ...(ai.outWhy || {}) };
   for (const id of sparePeers()) out[conns.get(id)?.name || id] = "late";
   return out;
+}
+// what a device the deal left out says in its own chat (the Serve API screen: room/compute.js lendStatus)
+function outNote(why) {
+  if (why === "small") return "Not holding layers: what this device lends is less than one layer of this model. You can still ask.";
+  if (why === "late") return "This device joined after the start: it gets layers when the room re-deals. You can still ask.";
+  return `Not needed for this model: the ${isPhoneMeta(myMeta) ? "computers" : "other devices"} hold it. You can still ask.`;
 }
 // the device cards: what each holds of its pledge, or why it holds nothing
 const OUT_TEXT = { unneeded: "not needed: the others hold the model", small: "pledge under one layer", late: "joined after the start: waits for a re-deal" };
@@ -3201,12 +3256,41 @@ function missingNames() { return ai.chain.map((id, i) => (conns.has(id) ? null :
 function autoRedealOn() { return $("ai-autoredeal")?.checked !== false; }
 
 // a newcomer while the room is online gets the chat as a guest, and the conversation so far
-function aiWelcome(id) {
-  if (ai.role !== "host" || !ai.engine || ai.readyPeers.size < ai.chain.length || ai.chain.includes(id)) return;
-  sendTo(id, { t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax(), out: outNow() });
-  if (ai.visibility === "all" && ai.transcript.length) sendTo(id, { t: "ai-history", items: ai.transcript.slice(-20) });
+// The room's state for a device that says hello (it joins, reloads, or comes back on a new link), sent
+// on every hello and not only once: its screen shows the chat from ai-ready-all, so a device that
+// missed it (a replacement link that came in before the host saw the old one close: the host had no
+// departure to re-seat, #265) would keep a hidden input. A device in the chain that is being re-seated
+// (aiRejoin: ai-load) gets it from aiMaybeReady once the chain is whole again.
+function aiWelcome(id, { history = true } = {}) {
+  if (ai.role !== "host" || !ai.engine || ai.readyPeers.size < ai.chain.length || relinking()) { offerRedealForNewcomers(); return; }
+  const inChain = ai.chain.includes(id);
+  if (inChain && !ai.readyPeers.has(id)) return;
+  if (ai.layersByName) sendTo(id, { t: "ai-layers", by: ai.layersByName, held: ai.heldGB, out: outNow() });
+  sendTo(id, { t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax(), ...(ai.ctxWant ? { ctxWant: ai.ctxWant } : {}), out: outNow() });
+  if (!inChain && history && ai.visibility === "all" && ai.transcript.length) sendTo(id, { t: "ai-history", items: ai.transcript.slice(-20) });
   offerRedealForNewcomers();
 }
+
+// links from this device (a model host that is not the room's creator) to every device in the
+// room's roster it has none to; API clients talk to the creator only
+async function linkMembers(ms = 15000) {
+  const ids = [...members].filter(([id, m]) => !conns.has(id) && !m.meta?.api).map(([id]) => id);
+  await Promise.all(ids.map((id) => ensureLink(id, ms)));
+}
+// A device that joins (or reloads into) a room whose model host is not the room's creator only links
+// to the creator. The model host learns of it from the roster: it links to it and welcomes it, as the
+// creator would (aiWelcome), with the layer map, so a device left out of the deal sees why.
+function welcomeFar(id) {
+  if (isHost || ai.role !== "host" || !ai.engine || conns.has(id) || welcomeFar.pending.has(id)) return;
+  welcomeFar.pending.add(id);
+  ensureLink(id, 20000).then((ok) => {
+    welcomeFar.pending.delete(id);
+    if (!ok || ai.role !== "host" || !ai.engine) return;
+    if (ai.layersByName) sendTo(id, { t: "ai-layers", by: ai.layersByName, held: ai.heldGB, out: outNow() });
+    aiWelcome(id);
+  });
+}
+welcomeFar.pending = new Set();
 
 // A device in the chain comes back from a tab that was killed while it loaded its layers (the
 // "loading" breadcrumb in its hello: iOS closes a Safari tab that goes over its memory budget, #207).
@@ -3299,8 +3383,9 @@ function aiMaybeReady() {
   setAfterAnswer(false, !!ai.conv.turns.length);
   emptyText("The model is ready. Ask anything.");
   sysNote(`Model ready on ${n} device${n > 1 ? "s" : ""}`);
+  if (ai.ctxNote) sysNote(ai.ctxNote);
   if (!matchMedia("(pointer: coarse)").matches) $("ai-prompt").focus();   // touch: the keyboard opens when the user taps the prompt
-  broadcastAll({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax(), out: outNow() });
+  broadcastAll({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: ctxMax(), ...(ai.ctxWant ? { ctxWant: ai.ctxWant } : {}), out: outNow() });
   pushMap(0, null, false, true);
   offerRedealForNewcomers();
   if (!ai.recovering) setTimeout(nextQueued, 0);
@@ -3773,7 +3858,9 @@ function renderMap(nodes, st, live) {
   }
   const agm = $("ag-m");
   if (agm) agm.textContent = `${shortName(ai.model || $("ai-model").value)} on ${nodes.length} device${nodes.length > 1 ? "s" : ""}`;
-  el.querySelector(".sm-model").textContent = shortName(ai.model || $("ai-model").value);
+  // "Qwen3 1.7B · 8K context" when the room's memory was short for the model's default context
+  el.querySelector(".sm-model").textContent = shortName(ai.model || $("ai-model").value) + (ai.ctxNote ? ` · ${ai.ctxK} context` : "");
+  el.querySelector(".sm-model").title = ai.ctxNote || "";
   // the device cards say which layers they hold, in the strip's colours
   for (const card of document.querySelectorAll("#peers .peer-card")) {
     const k = nodes.findIndex((x) => x.name === card.dataset.name);
@@ -4622,11 +4709,17 @@ async function aiOnData(from, d) {
   switch (d.t) {
     case "ai-start-req":
       setModelValue(d.model);   // every screen shows the model that was actually started
-      if (d.boss !== peer.id && conns.has(d.boss)) ai.hostId = d.boss;   // the device dealing the layers runs the room
+      // the device dealing the layers runs the room: listen to it, even before this device has a link to
+      // it (a model host that is not the room's creator links every device before it deals)
+      if (d.boss !== peer.id) ai.hostId = d.boss;
       $("ai-start").disabled = true; $("ai-model").disabled = true;
       if (d.boss !== peer.id) { aiLoading(true, `starting ${MODELS[d.model]?.label.split("·")[0].trim()}`); $("ldg-sub").textContent = `${d.by} pressed start`; $("ldg-fill").style.width = "0%"; }
       if (d.boss === peer.id) { toast(`${d.by} started ${MODELS[d.model]?.label.split("·")[0].trim()}`); aiStart(d.model); }
       else aiStatus(`${d.by} started the model…`);
+      break;
+    case "ai-modelhost":   // the room's creator: the model runs on another device, which links to this one
+      if (isHost || from !== PREFIX + roomCode || ai.role === "host" || ai.role === "worker" || typeof d.id !== "string") break;
+      ai.hostId = d.id;
       break;
     case "ai-next":
       // relink: the device after this one came back under the same id; the old link to it is dead
@@ -4844,22 +4937,29 @@ async function aiOnData(from, d) {
         chatBotEnd(null, it.stats);
       }
       break;
-    case "ai-ready-all":
+    case "ai-ready-all": {
+      const wasOnline = $("ai-panel").classList.contains("online");   // (a device back on a dropped link hears it again)
       aiLoading(false);
       if (d.out && typeof d.out === "object") { ai.outWhy = d.out; paintHeld(); }
       $("ai-panel").classList.add("online");
       if (ai.role !== "host" && ai.role !== "worker") ai.role = "guest";
       if (ai.role !== "host") ai.hostId = from;
       if (MODELS[d.model]) { setModelValue(d.model); ai.model = d.model; }
+      // the host opened the model at its fallback context: the room's memory is short for the default
+      ai.ctxNote = d.ctxWant > d.ctx && MODELS[d.model] ? ctxShortNote(shortName(d.model), d.ctx, d.ctxWant) : "";
+      ai.ctxK = d.ctx > 0 ? ctxK(d.ctx) : "";
       $("ai-row").style.display = "flex";
       $("chat-tools").hidden = false;
       $("mode-bar").hidden = false;   // Chat | Code for every device, not only the host (a phone guest had no way to Code)
       emptyText("The model is ready. Ask anything.");
-      sysNote("Model ready");
+      if (!wasOnline) { sysNote("Model ready"); if (ai.ctxNote) sysNote(ai.ctxNote); }
+      // left out of the deal: say why, so a device with no layers doesn't look broken
+      if (!ai.range && ai.outWhy?.[myName]) { const t = outNote(ai.outWhy[myName]); emptyText(t); if (!wasOnline) sysNote(t); }
       aiStatus(ai.range ? `cluster online · serving layers ${ai.range[0]}–${ai.range[1] - 1}` : "cluster online · this device asks, the others think");
       mascot("Cluster online! Type a question, the whole room answers.");
       codeRoleChanged();
       break;
+    }
     case "ai-ask":
       if (ai.role !== "host") break;
       if (d.api) { apiAsk(from, d); break; }

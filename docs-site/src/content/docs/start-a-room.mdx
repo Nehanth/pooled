@@ -11,6 +11,7 @@ import { Steps } from '@astrojs/starlight/components';
 {/*
 Sources (for the fact-checker):
 - p2p.html: join screen labels ("Memory", "Start a room", "Have a code?", "Join"), "Pick a model", "Start the model", "Give N GB from this device", "This device gives"
+- room/models.js pickCtx() (the 1.7B: 16K, else 8K when the pledges are short), needText() ("5.6 GB (4 GB at 8K)")
 - room.js: updateNeed() (need text, "Give N GB", download note), metaPromise (default pledge: half of maxBufferSize, at least min(4 GB, budget) on a computer), start() (6-character code), aiStartAnywhere() (anyone can press Start; model host picked by room/plan.js pickModelHost), leave dialog text (leave-why)
 - room/models.js: NEED_GB, FILE_GB
 - room/joingate.js (CODE_LEN = 6, formatCode "4TK-G9P")
@@ -34,7 +35,7 @@ You need one laptop or desktop with Chrome, Edge or Safari 26. That is enough fo
 
 4. **Pick a model.**
 
-   The picker shows what each model needs and what the room has, for example `Needs 4 GB. The room has 4 GB.` On one laptop, pick **Qwen3 1.7B**. See [Pick a model](/docs/models).
+   The picker shows what each model needs and what the room has, for example `Needs 5.6 GB (4 GB at 8K). The room has 4 GB.` On one laptop, pick **Qwen3 1.7B**. With less than 5.6 GB it runs with an 8K context instead of 16K, and says so. See [Pick a model](/docs/models).
 
 5. **Press Start the model.**
 

@@ -420,6 +420,19 @@ site-search button[data-open-modal] > kbd kbd { font-weight: 400; }
 .sl-markdown-content hr { border: 0; border-top: 1px solid var(--p-rule); margin-block: 2.5rem; }
 .sl-markdown-content .expressive-code { margin-block: 1.25rem; }
 
+/* ---------- screenshots (components/Shot.astro, and plain markdown images): scale to the column, a 1px rule ---------- */
+.sl-markdown-content .p-shot { margin-block: 1.25rem 1.5rem; }
+.sl-markdown-content .p-shot img,
+.sl-markdown-content p > img {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	border: 1px solid var(--p-rule-3);
+	border-radius: 8px;
+}
+.sl-markdown-content .p-shot--phone img { max-width: min(300px, 100%); }
+.sl-markdown-content .p-shot figcaption { margin-top: 8px; font-size: 13px; line-height: 1.5; color: var(--p-ink-3); }
+
 /* ---------- asides: a white card, 1px rule, an ink title; never yellow, never blue ---------- */
 .starlight-aside {
 	border: 1px solid var(--p-rule);

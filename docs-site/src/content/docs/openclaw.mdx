@@ -1,7 +1,7 @@
 ---
 title: OpenClaw
 eyebrow: Preview
-description: Use a Pooled room as OpenClaw's model. The OpenClaw gateway joins the room as a device, and other machines, tabs and phones hold the rest of the model. A proof of concept, not on npm yet.
+description: Use Pooled as an OpenClaw model provider. The OpenClaw gateway becomes a device in a room, holds its share of the layers, and other machines, tabs and phones hold the rest. Start a room or join one with its invite link.
 sidebar:
   label: OpenClaw
   order: 2
@@ -10,113 +10,199 @@ sidebar:
     variant: caution
 ---
 {/*
-Sources (origin/main, PR #266 merged):
-- docs/openclaw.md, docs/openclaw-poc.md (setup, results table, limits)
-- packages/openclaw/README.md (onboarding choices, config table, "Who can see and steer what", known gaps);
-  packages/openclaw/package.json ("private": true, not published)
-- packages/openclaw/src/pool.js roomLink() prints https://pooled.run/room/<CODE>; vercel.json rewrites only /room and /r/:code
-- packages/room-node/join.mjs --help: node join.mjs <CODE> [--gb N] [--name NAME] [--signal host:port] [--models DIR] [--state FILE]
-- packages/room-node/roomnode.js helloMsg() sends no join/key/pass; room/joingate.js decide() then asks the host
-TODO(verify): OpenClaw install and onboarding were not re-run for this page; commands from packages/openclaw/README.md.
+Sources (feat/openclaw-v1):
+- packages/openclaw/README.md (install, start, join, /pooled, models, config, files, who can see and steer what)
+- packages/openclaw/src/setup.js (onboarding prompts and notes), src/commands.js (/pooled), src/pool.js (links, gate, lobby message)
+- packages/openclaw/test/pack_install.sh: npm pack + `openclaw plugins install <tgz> --force --accept-capabilities` into a clean
+  OpenClaw 2026.9.6, plugins inspect, non-interactive onboard, models list (Auth yes) — passed 2026-09-30
+- docs/openclaw.md results table (unchanged from #266)
+- Which model: scratchpad openclaw-v1/test ocA35 (MoE) and ocA (1.7B) runs on the Spark, 2026-09-30; src/models.js recommendForOpenClaw
+- `openclaw plugins install clawhub:@pooled/openclaw` verified 2026-09-30 in a clean OpenClaw 2026.9.6 profile (0.2.0, ClawHub audit Safe); npm view @pooled/openclaw = 0.2.0
 */}
 
-import { Steps, Tabs, TabItem } from '@astrojs/starlight/components';
-
-:::caution[Preview: not on npm yet]
-The `@pooled/openclaw` plugin is a proof of concept. It isn't on npm or in OpenClaw's plugin catalog, and runs from a Pooled checkout.
-:::
-
-[OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted agent. The `@pooled/openclaw` plugin adds **Pooled** as its model provider. Pick it, and the OpenClaw gateway becomes a device in a Pooled room: it holds part of the model on its own GPU. Other machines, browser tabs and phones hold the rest. No API key, no cloud model.
-
-## Set it up
-
-You need Node 22 or newer and OpenClaw 2026.9.6 or newer, on a machine with a GPU (Linux with Vulkan, or macOS 26+).
-
-<Steps>
-
-1. **Get Pooled and the plugin's dependencies.**
-
-   ```sh
-   git clone https://github.com/Nehanth/pooled.git && cd pooled
-   (cd packages/room-node && npm install --omit=dev)
-   ```
-
-2. **Install OpenClaw and the plugin.**
-
-   ```sh
-   npm install -g --allow-scripts=@google/genai,esbuild,koffi,protobufjs,openclaw openclaw@2026.9.7
-   openclaw plugins install --link --accept-capabilities --force "$PWD/packages/openclaw"
-   ```
-
-3. **Pick Pooled.** Run `openclaw onboard` and choose **Model/auth provider → More… → Pooled**.
-
-4. **Start or join a room.**
-   - **Start a room on this device**: pick the model (the 35B MoE is the one for agent work), the GPU memory to give and how many devices to wait for. It prints the room code.
-   - **Join a room**: enter the code and the GB to give.
-
-5. **Add more devices.** Open `https://pooled.run/r/<CODE>` in a browser, or run this on another machine with a checkout:
-
-   ```sh
-   node packages/room-node/join.mjs <CODE> --gb 12 --name mac-studio
-   ```
-
-</Steps>
-
 :::note
-The link onboarding prints, `pooled.run/room/<CODE>`, doesn't open. Use `pooled.run/r/<CODE>`.
-
-**Join a room** and `join.mjs` can't answer the room page's **Allow / Deny** yet. To bring them into a room started on pooled.run, first turn off **Room settings → Joining → Ask before new devices join**.
+`@pooled/openclaw` 0.2.0 is on ClawHub and npm. The ClawHub listing is new. For a step-by-step walk-through, see the [OpenClaw starter kit](/docs/kits/openclaw).
 :::
 
-Problems show in the OpenClaw chat as `Pooled: …`, for example waiting for devices or not enough memory.
+[OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted agent: a gateway process on your machine runs the agent loop and its tools (`exec`, `read`, `edit`, …) and calls a model provider for every step. The `@pooled/openclaw` plugin adds **Pooled** as that provider.
 
-:::caution[Use rooms of your own devices]
-A room the plugin starts lets in anyone with the code. Devices that hold layers see OpenClaw's prompts and could steer its tool calls. Keep OpenClaw's approvals on for `exec` and writes. See [Details](#who-can-see-and-steer-what).
+When you pick Pooled, the OpenClaw gateway itself becomes a device in a Pooled room. It holds its share of the model's layers on the local GPU and runs them with Pooled's own engine, on Dawn (npm `webgpu`) inside the gateway's Node process. Other devices join the same room and hold the rest:
+
+- another machine with the plugin, or with [`pooled join`](/docs/terminal);
+- a browser tab or a phone with the room's invite link.
+
+So a model none of the devices can run alone serves the agent, with no API key and no cloud model.
+
+```text
+ OpenClaw gateway (Spark)                Mac Studio               iPhone (optional)
+ ┌───────────────────────────┐          ┌──────────────┐          ┌──────────────┐
+ │ agent loop + tools        │          │ pooled join  │          │ Safari,      │
+ │ @pooled/openclaw          │  WebRTC  │ Node + Dawn  │  WebRTC  │ pooled.run   │
+ │ room node: embed, layers  │ <------> │ layers 19-39 │ <------> │ 1-2 layers   │
+ │ 0-18, head, checkpoints   │          │ (Metal)      │          │              │
+ └───────────────────────────┘          └──────────────┘          └──────────────┘
+```
+
+OpenClaw's requests and tool calls take the same path as [`pooled serve`](/docs/serve): the room's host renders the chat template, constrains tool calls with a grammar and parses them. The host also keeps OpenClaw's system prompt and each turn as checkpoints, so each step reads only its new tokens.
+
+## Install
+
+You need Node 22 or newer (OpenClaw ships on 24), OpenClaw 2026.9.6 or newer, and a GPU that Dawn runs on: Linux with glibc 2.38 or newer and a Vulkan driver, or macOS 26 or newer. Windows is untested.
+
+```sh
+openclaw plugins install clawhub:@pooled/openclaw
+openclaw onboard          # Model/auth provider -> More... -> Pooled
+```
+
+- Or from npm: `openclaw plugins install @pooled/openclaw`.
+- OpenClaw shows the plugin's capabilities and asks you to accept them; `--accept-capabilities` skips that.
+- `webgpu` (Dawn, about 95 MB) is an optional dependency. If it didn't install, the gateway says how to add it when it needs the GPU.
+
+### From a checkout
+
+```sh
+git clone https://github.com/Nehanth/pooled.git && cd pooled/packages/openclaw
+npm install && npm pack
+openclaw plugins install ./pooled-openclaw-0.2.0.tgz --force --accept-capabilities
+```
+
+## Start a room
+
+In `openclaw onboard`, pick **Pooled** → **Start a room on this device**, then:
+
+1. Say how much of this GPU's memory to lend.
+2. Pick the model. Each one shows whether it's downloaded, its download size, the memory it needs across the room and its context. The Qwen3.6 35B MoE is preselected; see [Which model](#which-model).
+3. If it isn't downloaded, pick **Download now**, **Download when the gateway starts** or **Don't download** (stream this machine's layers at each start).
+4. Pick how many devices to wait for, and who can join: **Devices with the invite link** or **Anyone with the room code**.
+
+Onboarding prints the room code (`4TK-G9P`) and the invite link (`https://pooled.run/r/4TKG9P#k=…`). The room opens when the gateway starts and keeps its code and link across restarts. On your other devices, do one of these:
+
+- Open the invite link in Chrome or Safari.
+- Run `npx @pooled/cli join "<invite link>"`.
+- Pick **Join a room** in OpenClaw there and paste the link.
+
+## Join a room
+
+In `openclaw onboard`, pick **Pooled** → **Join a room**, paste the invite link (or type the code) and say how much memory to lend. Onboarding connects right away:
+
+- With the invite link, the device is let in at once.
+- With the code alone, it shows `Waiting for <host> to let this device in…` until the host allows it.
+
+It keeps the pass the host gives it, so the gateway gets straight back in after every restart. It also learns the host's model and context window.
+
+The room needs at least a 16k context, because OpenClaw's own instructions and tools are about 12k tokens. `pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2; with 0.3.0 or 0.3.1 its host should run `pooled host qwen3-1.7b --ctx 16384`. A room whose memory is short for 16k (under about 5.5 GB across the room) opens the 1.7B at 8k instead, on the room page, in `pooled host` and in the plugin's own room: the plugin then warns that OpenClaw needs 16k, and onboarding says `fits on this machine alone at 8k (OpenClaw needs 16k)`. Onboarding warns when a joined room's context is shorter.
+
+## Which model
+
+Use the **Qwen3.6 35B MoE** (about 23 GB across the room). Onboarding preselects it when this device's memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits on this device alone (the room then waits for more devices).
+
+:::caution[Small models]
+Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops. Use the 35B MoE if your devices can hold it.
 :::
 
-## Details
+Measured on a DGX Spark, the OpenClaw gateway hosting and a second device (`pooled join`) holding the other half of the layers, OpenClaw 2026.9.6:
 
-### Config
+| Turn | Qwen3.6 35B MoE (128k context) | Qwen3 1.7B (16k context) |
+|---|---|---|
+| First question after the room came online | 143 s (OpenClaw's whole prompt, cold) | 163 s |
+| Second question in the same chat | 4.6 s (17k tokens reused) | 119 s (nothing reused) |
+| "Read notes.txt and tell me the secret word" | 10.4 s (2 model calls) | 25.8 s (5 model calls) |
+| The same in a new session | 21.2 s | 580 s: 85 tool-search calls, then OpenClaw stopped the loop with no answer |
+| OpenClaw's background memory save | not triggered | on almost every turn; holds the room for about 120 s |
 
-Onboarding writes `plugins.entries.pooled.config`. Each key can be overridden by an environment variable.
+The 1.7B gets OpenClaw's file tools only (`read`, `write`, `edit`, `ls`). For a small model, onboarding also offers (off unless you pick it) to turn off OpenClaw's tool search (`tools.toolSearch = false`) and its memory flush (`agents.defaults.compaction.memoryFlush.enabled = false`). **Both are global OpenClaw settings**: they apply to every model and agent, not only Pooled, and stay when you switch models. Undo them with `openclaw config unset tools.toolSearch` and `openclaw config unset agents.defaults.compaction.memoryFlush.enabled`.
+
+## Let devices in: /pooled
+
+In any OpenClaw chat (the TUI, the Control UI, a messaging channel), the gateway's owner can run:
+
+| Command | What it does |
+|---|---|
+| `/pooled` | Shows the room: invite link, devices, whether they hold the model, who is waiting to join |
+| `/pooled allow` | Lets the first waiting device in (`/pooled allow 2`, `/pooled allow all`) |
+| `/pooled deny` | Turns it away |
+| `/pooled link` | Prints the invite link |
+| `/pooled pledge 12` | Lends another amount of this machine's GPU memory |
+
+## Models
+
+Models are kept in `~/.pooled/models`, the same folder as [`pooled pull`](/docs/terminal), so each is downloaded once per machine. Downloads resume and are checked against their SHA-256. A hosting gateway downloads a missing model in the background while devices join; a question meanwhile says how far it is.
+
+## Config
+
+Onboarding writes `plugins.entries.pooled.config`. Each key can be overridden by its variable:
 
 | Key | Variable | Meaning |
 |---|---|---|
 | `mode` | `POOLED_MODE` | `host` or `join` |
-| `code` | `POOLED_CODE` | The room code, 4 to 6 characters |
+| `code` | `POOLED_CODE` | The room code |
+| — | `POOLED_LINK` | A room's invite link, to join (non-interactive setup) |
 | `model` | `POOLED_MODEL` | The model a host starts |
-| `pledgeGB` | `POOLED_PLEDGE_GB` | GPU memory this device gives |
+| `pledgeGB` | `POOLED_PLEDGE_GB` | GPU memory this device lends |
 | `minDevices` | `POOLED_MIN_DEVICES` | Devices to wait for before dealing the layers (default 1) |
-| `waitSeconds` | `POOLED_WAIT_S` | How long a request waits for devices or the model (default 120) |
+| `ask` | `POOLED_ASK` | Host: a device with the code alone waits for `/pooled allow` (default on) |
+| `pull` | `POOLED_PULL` | Host: download a missing model (default on) |
+| `prewarm` | `POOLED_PREWARM` | Host: warm up OpenClaw's system prompt and tools when the room comes online (default on) |
+| `allowApiClients` | `POOLED_ALLOW_API` | Host: answer other devices' API asks (default on) |
+| `modelDir` | `POOLED_MODELS` | Models folder (default `~/.pooled/models`) |
+| `waitSeconds` | `POOLED_WAIT_S` | How long a question waits for devices or the host's model (default 120) |
 | `ctx` | `POOLED_CTX` | Context to ask for (default: the model's largest) |
-| `signal` | `POOLED_SIGNAL` | A PeerServer `host:port` |
-| `modelDir` | `POOLED_MODELS` | Local model files instead of downloads |
 | `name` | `POOLED_NAME` | This device's name in the room |
-| `page` | `POOLED_PAGE` | A room page other than pooled.run |
-| `allowApiClients` | `POOLED_ALLOW_API` | Host: also answer other devices' API requests. On by default. |
+| `signal` | `POOLED_SIGNAL` | A PeerServer `host:port` (default: the PeerJS cloud server pooled.run uses) |
 
-Non-interactive: `openclaw onboard --non-interactive --auth-choice pooled` with `POOLED_MODE`, `POOLED_CODE`, `POOLED_MODEL` and `POOLED_PLEDGE_GB`.
+Non-interactive setup: `openclaw onboard --non-interactive --auth-choice pooled` with `POOLED_MODE=host`, or with `POOLED_LINK="<invite link>"` to join.
 
-On macOS, Dawn runs on Metal and needs macOS 26 or newer. If you copied the package from a zip or a download, run `xattr -d com.apple.quarantine` on `dawn.node`.
+The invite key and the passes are kept in `~/.openclaw/pooled/room.json` (mode 0600), never in `openclaw.json`.
 
-### Results
+Room problems show in the OpenClaw chat as `⚠️ Pooled: …`: waiting for the host to let this device in, waiting for devices, not enough memory, downloading, a device left while it held layers, the host doesn't allow API clients, the host runs an older Pooled. The model never sees them. When the conversation outgrows the room's context, OpenClaw compacts it and asks again.
 
-With Qwen3.6 35B MoE on a DGX Spark and a Mac Studio, the agent passed 4 or 5 of 5 test tasks, with no malformed tool calls. Two computers decoded at about 16 to 32 tok/s. Full tables: [docs/openclaw-poc.md](https://github.com/Nehanth/pooled/blob/main/docs/openclaw-poc.md).
+## Results
 
-### Limits
+Qwen3.6 35B MoE (Q4_0, about 20 GB), 128K context, OpenClaw 2026.9.7 with its full tool profile. Five tasks, each in a new session, each checked by a script the agent never sees:
 
-- **Cold first call.** The first call after the gateway starts reads OpenClaw's whole prompt (14-18K tokens): about a minute on two computers. A gateway restart starts cold again.
-- **Splitting costs speed.** Each token pays a network hop, so split only a model that doesn't fit on one device.
-- **Join mode** tells OpenClaw the room has 32K of context, whatever the host runs.
-- **Install size** is about 156 MB (Dawn for five platforms).
-- **Small models**: the 1.7B gets a file-tools-only profile. Use the MoE.
+1. answer a question by reading files;
+2. a code edit;
+3. run the tests and fix the code;
+4. add a feature with tests;
+5. summarize a 140 KB (about 33K-token) file.
+
+No tool call in any run was malformed or came back as an error.
+
+| Room | Layer split | Passed | First call (cold) | Decode |
+|---|---|---|---|---|
+| A: OpenClaw on the Spark, Mac joins | Spark 0-18 + head, Mac 19-39 | 4/5 | 61.8 s (17.4K tokens) | 17-29 tok/s |
+| A2: A with turn checkpoints | same | 5/5 | 61.7 s | 16-30 tok/s |
+| B: OpenClaw on the Mac, Spark joins | Mac 0-18 + head, Spark 19-39 | 4/5 | 49.2 s (14.5K tokens) | 17-32 tok/s |
+| C: A plus an iPhone 14 Pro Max in Safari | Spark 0-17, iPhone 18-19, Mac 20-39 | 4/5 | 89.2 s | 9-16 tok/s |
+
+- After the first call, each task's first model call reads 4-8 s of prompt: the system prompt comes from a checkpoint.
+- With turn checkpoints (A2), the four short tasks took 55-139 s and the long file 306 s.
+- Every failure is the same model mistake on the edit task: it printed `$-12.34` instead of `-$12.34`, said it was fixed and never checked. In A2 the model tested its change and passed.
+- The phone held its 2 layers through a 23-minute run and roughly halved the speed. A phone should get layers only when the computers can't hold the model.
+
+**Turn checkpoints.** OpenClaw drops each call's trailing context block from the next call, so in a tool loop the host's cache never matched past the system prompt. The host now also saves a checkpoint where the last user turn starts. From A to A2: the long file went from 813 to 306 s, the feature from 298 to 139 s, the tests from 119 to 57 s.
+
+Per-task tables are in [docs/openclaw-poc.md](https://github.com/Nehanth/pooled/blob/main/docs/openclaw-poc.md).
+
+## Limits
+
+- **Cold first call.** The first call after a gateway starts reads OpenClaw's whole prompt (14-18K tokens): 49-64 s on two computers, 89 s with a phone. A hosting gateway replays the last system prompt and tools when its room comes online, so that read happens before the first question. Checkpoints live in GPU memory only.
+- **Decode over the network.** Two computers over Wi-Fi decode at 25-30 tok/s; the Mac alone does about 92. Splitting pays one network hop per token, so it is for models that don't fit on one device.
+- **Browser hosts** have no turn checkpoints yet, so OpenClaw joined to a room hosted in a tab re-reads more per tool call.
+- **Checkpoint memory** isn't part of the layer split. At 50K tokens one checkpoint is about 1 GB across the room for the MoE, and the host keeps up to 8 (4 pinned, 4 answer or turn).
+- **Small models** (the 1.7B) are slow with OpenClaw and loop on tool search; see [Which model](#which-model). The MoE is the model to use.
 - **Windows** is untested.
 
-### Who can see and steer what
+## Who can see and steer what
 
-- Other devices' room pages show "answering…" stand-ins, never OpenClaw's prompts or tool calls.
-- **Devices that hold layers see the conversation anyway.** They process every token's hidden state, which carries the files and tool results. A bad device could also choose the model's output, including the tool calls OpenClaw runs.
-- **Join mode trusts the room's host with everything.** If the real host is down, anyone could register that code on the public signaling server.
-- **Guests** can ask their own questions, which queue with OpenClaw's. Turn `allowApiClients` off to keep them out.
+:::caution[Use rooms of your own devices]
+Share the invite link only with people you trust, and keep OpenClaw's approvals on for `exec` and writes.
+:::
 
-See also [Terminal](/docs/terminal), which uses the same headless room node, and [Privacy](/docs/privacy).
+- **Getting in.** A hosted room asks before new devices join: the invite link gets a device in, a code alone waits for `/pooled allow`, and a device you let in keeps a pass. With **Anyone with the room code**, anyone who has or guesses the code gets in.
+- **Screens.** A hosting gateway opens its room so the other devices' room pages show "answering…" stand-ins, never OpenClaw's prompts, answers or tool calls.
+- **Devices holding layers see the conversation anyway.** Each one gets the hidden state of every token, which carries the prompt (the files OpenClaw read, the tool results). A device holding layers can also send back any hidden states it likes. That lets it choose the model's output, **including the tool calls OpenClaw then runs on the gateway machine**. The call grammar only keeps the calls well formed.
+- **Join mode trusts the room's host with everything.** It sends OpenClaw's whole context to the room's host and runs the tool calls it gets back.
+- **Guests** can ask their own questions, which queue with OpenClaw's requests. Turn `allowApiClients` off to keep API clients out.
+
+See also [Rooms from the terminal](/docs/terminal), which uses the same headless room node, and [Privacy](/docs/privacy).

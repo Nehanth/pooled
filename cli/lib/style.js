@@ -165,8 +165,22 @@ export function mkStyle({ theme = "dark", depth = "truecolor", ascii = false, pl
     return [S.ink3(`${a} ${a} ${b}`), S.ink3(`${a} ${b} ${c}`), S.ink3(`${b} ${c} `) + S.acc(c)];
   };
   // key hints: [key, verb, state]; "primary": the one action to take now; "off": not available yet
-  S.keys = (pairs) => pairs.map(([k, v, st]) => (st === "primary" ? `${S.bold(S.acc(k))} ${S.ink(v)}`
-    : st === "off" ? S.ink3(`${k} ${v}`) : `${S.ink2(k)} ${S.ink3(v)}`)).join(S.sep);
+  // width: the columns they may take. A hint never breaks inside a word: hints that don't fit are
+  // dropped (they are listed most important first), never the primary one, q last
+  S.keys = (pairs, { width: max = Infinity } = {}) => {
+    const one = ([k, v, st]) => (st === "primary" ? `${S.bold(S.acc(k))} ${S.ink(v)}`
+      : st === "off" ? S.ink3(`${k} ${v}`) : `${S.ink2(k)} ${S.ink3(v)}`);
+    let ps = pairs.slice();
+    const text = () => ps.map(one).join(S.sep);
+    // the first to go: the last that is neither the primary one nor q (how to get out)
+    while (ps.length > 1 && width(text()) > max) {
+      let i = ps.findLastIndex((p) => p[2] !== "primary" && p[0] !== "q");
+      if (i < 0) i = ps.findLastIndex((p) => p[2] !== "primary");
+      if (i < 0) break;
+      ps.splice(i, 1);
+    }
+    return text();
+  };
   S.spin = (i) => S.acc(g.spin[((i % g.spin.length) + g.spin.length) % g.spin.length]);
   return S;
 }

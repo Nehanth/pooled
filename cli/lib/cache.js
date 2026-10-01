@@ -318,3 +318,51 @@ export function resolveModel(input, keys) {
   if (hits.length === 1) return { key: hits[0] };
   return { error: hits.length ? `"${input}" matches more than one model: ${hits.join(", ")}` : `unknown model "${input}"`, choices: hits.length ? hits : keys };
 }
+
+// ---------------- one writer per model: <dir>/<model>/.pull.lock ----------------
+// Every download into the models folder takes this lock first: pooled pull, pooled host and pooled
+// join (pullrun.js pullWithProgress), and the OpenClaw plugin's onboarding and background pull
+// (packages/openclaw), which write the same <file>.part. The file holds { pid, host, at }. A lock whose
+// process is gone (a crash, a kill) is stale; one from another machine (a shared folder) counts for a
+// day. A stale lock is removed only if it is unchanged since it was read: another process may have
+// taken it over meanwhile, and removing its fresh lock would let two writers into one .part.
+export const pullLockPath = (dir, key) => path.join(dir, key, ".pull.lock");
+const pidAlive = (pid) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; }
+};
+// -> a release() function, or null when another live process holds the lock
+export function tryPullLock(dir, key, { pid = process.pid, isAlive = pidAlive, hostname = os.hostname() } = {}) {
+  const p = pullLockPath(dir, key);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  for (let i = 0; i < 2; i++) {
+    try {
+      const fd = fs.openSync(p, "wx");
+      fs.writeSync(fd, JSON.stringify({ pid, host: hostname, at: new Date().toISOString() }));
+      fs.closeSync(fd);
+      let done = false;
+      return () => { if (done) return; done = true; try { if (JSON.parse(fs.readFileSync(p, "utf8")).pid === pid) fs.rmSync(p, { force: true }); } catch {} };
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      let holder = null, raw = null;
+      try { raw = fs.readFileSync(p, "utf8"); holder = JSON.parse(raw); } catch {}
+      const foreign = holder?.host && holder.host !== hostname;
+      const stale = !holder || (foreign ? Date.now() - Date.parse(holder.at || 0) > 864e5 : !isAlive(holder.pid));
+      if (!stale) return null;
+      try { if (fs.readFileSync(p, "utf8") === raw) fs.rmSync(p, { force: true }); } catch {}
+    }
+  }
+  return null;
+}
+// wait for the lock (another process downloading the same model) until it is free or signal aborts
+// -> release(); onWait() once, when it has to wait
+export async function pullLock(dir, key, { signal, pollMs = 2000, onWait = () => {}, ...o } = {}) {
+  let said = false;
+  for (;;) {
+    const rel = tryPullLock(dir, key, o);
+    if (rel) return rel;
+    if (!said) { said = true; onWait(); }
+    if (signal?.aborted) throw Object.assign(new Error("stopped"), { type: "aborted" });
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}

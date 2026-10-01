@@ -1,18 +1,34 @@
-// Onboarding: the user picked Pooled. Start a room on this device (the code and link to open on the
-// other Mac / phone), or join one with its code. The choice is saved in plugins.entries.pooled.config;
-// the room itself runs in OpenClaw's gateway (the plugin's service), not in the wizard.
-import { MODEL_CHOICES, modelInfo, roomLink, roomSettings, CODE_ABC, CODE_RE } from "./pool.js";
-import { maxSeqFor } from "../../../room/models.js";
+// Onboarding: the user picked Pooled. Start a room on this device (the invite link to open on the
+// other Mac / PC / phone), or join one by pasting its link or code. The choice is saved in
+// plugins.entries.pooled.config; secrets (the invite key, the pass the host gives this device) go to
+// the plugin's own state file (state.js), not openclaw.json. The room itself runs in OpenClaw's
+// gateway (the plugin's service), not in the wizard; joining is settled here, though: the wizard
+// knocks on the room without the GPU, waits for the host's Allow if it asks, and keeps the pass, so
+// the gateway walks straight in.
+import { randomCode, CODE_LEN, makeGate, saveGate, validKey } from "../../../room/joingate.js";
+import { Bridge } from "../../../cli/lib/room.js";
+import { roomLink, roomSettings, parseRoom, fmtCode, defaultName, ROOM_ORIGIN } from "./pool.js";
+import { MODEL_CHOICES, MODELS, modelInfo, modelChoices, memoryDefaults, isPulled, modelsDir, fmtBytes, shortCtxNote, isSmall, SMALL_WARNING } from "./models.js";
+import { download, pullLine } from "./download.js";
+import { promptUI, block, introLines, padLabels, modelOptions, progressText, para, note, PLAIN, stripAnsi } from "./ui.js";
+import { header, label, I, gbNum, clock } from "../../../cli/lib/style.js";
+import { initStateDir, savedGate, saveHostGate, joinState, saveJoinState } from "./state.js";
 
 export const PROVIDER = "pooled";
 export const AUTH_MARKER = "pooled-local";
-export const newCode = () => Array.from(crypto.getRandomValues(new Uint32Array(4)), (x) => CODE_ABC[x % CODE_ABC.length]).join("");
+export const newCode = () => randomCode(CODE_LEN);
+export const JOIN_WAIT_MS = 180000;   // onboarding waits this long for the host's Allow
+// what onboarding reaches outside itself (tests swap them): the room link and this GPU's memory
+export const deps = { Bridge, memoryDefaults, waitMs: JOIN_WAIT_MS };
 
 // the catalog entry: one model, the room's. Native transport: the base URL is never called.
-export function providerConfig(s) {
-  const info = modelInfo(s.model);
-  const id = s.mode === "join" ? "room" : s.model;
-  const name = s.mode === "join" ? `Pooled room ${s.code}` : `${info.name} · Pooled room ${s.code}`;
+// learned: what onboarding (or an earlier run) learned of a joined room's host: { model, ctx }
+export function providerConfig(s, learned = {}) {
+  const join = s.mode === "join";
+  const hostModel = join && MODELS[learned.model] ? learned.model : null;
+  const info = modelInfo(join ? hostModel || s.model : s.model, s.ctx || 0);
+  const id = join ? "room" : s.model;
+  const name = join ? `Pooled room ${fmtCode(s.code)}${hostModel ? ` (${info.name})` : ""}` : `${info.name} · Pooled room ${fmtCode(s.code)}`;
   return {
     baseUrl: "http://127.0.0.1",
     api: "openai-completions",
@@ -20,10 +36,10 @@ export function providerConfig(s) {
     timeoutSeconds: 900,
     models: [{
       id, name,
-      reasoning: s.model !== "qwen3-1.7b" && s.mode !== "join",
+      reasoning: join ? !!hostModel && hostModel !== "qwen3-1.7b" : s.model !== "qwen3-1.7b",
       input: ["text"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: s.mode === "join" ? 32768 : s.ctx ? maxSeqFor(s.model, s.ctx) : info.ctx,
+      contextWindow: join ? (Number.isInteger(learned.ctx) && learned.ctx > 0 ? learned.ctx : hostModel ? info.ctx : 32768) : info.ctx,
       maxTokens: 4096,
       compat: { supportsTools: true, supportsDeveloperRole: false, supportsUsageInStreaming: true },
     }],
@@ -31,82 +47,249 @@ export function providerConfig(s) {
 }
 export const modelRef = (s) => `${PROVIDER}/${s.mode === "join" ? "room" : s.model}`;
 
-function result(s) {
+// The trimmed OpenClaw settings a small model may opt into (onboarding asks; off unless chosen). Both are
+// global in OpenClaw, not per provider: tool search off puts every allowed tool in the prompt instead of
+// the tool_search/tool_describe meta tools a 1.7B loops on; memory flush off stops the background
+// "save memories before compaction" turn, which a 16k context triggers on nearly every turn.
+export const TRIM_PATCH = { tools: { toolSearch: false }, agents: { defaults: { compaction: { memoryFlush: { enabled: false } } } } };
+export const TRIM_NOTE = [
+  "OpenClaw's tool search and its memory flush (a background turn that saves memories before compaction)",
+  "make a small model slow: it loops on tool search, and the flush holds the room for about two minutes.",
+  "This can turn both off: tools.toolSearch = false and agents.defaults.compaction.memoryFlush.enabled = false.",
+  "These are global OpenClaw settings: they apply to every model and agent, not only Pooled, and stay",
+  "after you switch models. Undo with `openclaw config unset tools.toolSearch` and",
+  "`openclaw config unset agents.defaults.compaction.memoryFlush.enabled`.",
+].join("\n");
+
+function result(s, learned = {}) {
   const ref = modelRef(s);
+  const small = s.mode === "host" ? isSmall(s.model) : isSmall(learned.model);
   return {
     profiles: [],
     defaultModel: ref,
-    notes: s.mode === "host"
-      ? [`Pooled room ${s.code} starts with OpenClaw's gateway. Open ${roomLink(s.code, s.signal)} on your other devices (or pick Pooled → "Join a room" → ${s.code} in OpenClaw there).`]
-      : [`This device joins Pooled room ${s.code} when OpenClaw's gateway starts, and holds layers when the room deals them.`],
+    // the room's block said it all (the invite link once); a join that isn't in yet gets one line
+    notes: s.mode === "host" || learned.inRoom
+      ? []
+      : [`This device joins Pooled room ${fmtCode(s.code)} when OpenClaw's gateway starts, and holds layers when the room deals them.`],
     configPatch: {
-      models: { providers: { [PROVIDER]: providerConfig(s) } },
+      models: { providers: { [PROVIDER]: providerConfig(s, learned) } },
       plugins: { entries: { [PROVIDER]: { enabled: true, config: clean(s) } } },
-      agents: { defaults: { models: { [ref]: { agentRuntime: { id: "openclaw" } } } } },
+      agents: { defaults: { models: { [ref]: { agentRuntime: { id: "openclaw" } } }, ...(s.trim ? TRIM_PATCH.agents.defaults : {}) } },
       // a small room model (1.7B, 16k context) cannot follow OpenClaw's full tool catalog: give it the
-      // file tools only, listed directly (no tool-search meta tools). Bigger models keep the defaults.
-      ...(s.model === "qwen3-1.7b" && s.mode === "host" ? { tools: { byProvider: { [PROVIDER]: { allow: ["read", "write", "edit", "ls"] } } } } : {}),
+      // file tools only. Bigger models keep the defaults. s.trim: the opt-in global trims (TRIM_PATCH).
+      ...(small || s.trim ? { tools: { ...(small ? { byProvider: { [PROVIDER]: { allow: ["read", "write", "edit", "ls"] } } } : {}), ...(s.trim ? TRIM_PATCH.tools : {}) } } : {}),
     },
   };
 }
-const clean = (s) => Object.fromEntries(Object.entries({ mode: s.mode, code: s.code, model: s.model, pledgeGB: s.pledgeGB, minDevices: s.minDevices, signal: s.signal, modelDir: s.modelDir }).filter(([, v]) => v != null && v !== ""));
+// what goes in openclaw.json (never the invite key or a pass; the default models folder is left out)
+const clean = (s) => Object.fromEntries(Object.entries({ mode: s.mode, code: s.code, model: s.model, pledgeGB: s.pledgeGB, minDevices: s.minDevices, signal: s.signal,
+  modelDir: s.modelDir && s.modelDir !== modelsDir() ? s.modelDir : null, ask: s.mode === "host" && s.ask === false ? false : null, pull: s.pull === false ? false : null })
+  .filter(([, v]) => v != null && v !== ""));
+
+// the host's invite key for code, kept (state.js) so the link shown now is the gateway's
+export function hostKey(code, ask = true) {
+  const saved = savedGate(code);
+  if (saved && validKey(saved.key)) return saved.key;
+  const g = makeGate({ ask });
+  saveHostGate(code, saveGate(g));
+  return g.key;
+}
+
+// Knock on a room without the GPU (the `pooled serve` bridge): the host lets this device in with the
+// key, a pass from before, or its Allow; the pass it gives is kept for the gateway.
+// -> { ok, host, model, ctx, pass } | { ok: false, refused | error | timeout }
+export async function knock(code, key, { name = defaultName(), signal = null, waitMs = deps.waitMs, onLobby = () => {}, BridgeClass = deps.Bridge } = {}) {
+  const b = new BridgeClass({ code, key, signal, name, client: "OpenClaw" });
+  const prev = joinState(code).pass;
+  if (validKey(prev)) b.pass = prev;
+  b.on?.("lobby", () => onLobby(b));
+  let timer = null;
+  try {
+    const out = await Promise.race([
+      b.connect().then(() => ({ ok: true })),
+      new Promise((res) => { timer = setTimeout(() => res({ ok: false, timeout: true }), waitMs); }),
+    ]);
+    if (!out.ok) return out;
+    return { ok: true, host: b.hostName || null, model: b.model || b.hostMeta?.model || null, ctx: Number.isInteger(b.hostMeta?.ctx) ? b.hostMeta.ctx : null, pass: validKey(b.pass) ? b.pass : null };
+  } catch (err) {
+    return b.kicked ? { ok: false, refused: b.kicked } : { ok: false, error: err.message };
+  } finally {
+    clearTimeout(timer);
+    try { if (b.connected) await b.leave(); else b.destroy(); } catch {}
+  }
+}
+
+const gbPrompt = (p, initial) => p.text({
+  message: "How much GPU memory should this device lend? (GB)",
+  initialValue: String(initial),
+  validate: (v) => (+v > 0 && +v <= 512 ? undefined : "a number of GB, like 12"),
+});
 
 export async function runSetup(ctx) {
+  await initStateDir();
   const p = ctx.prompter;
+  const ui = promptUI(p);
+  const { S } = ui;
+  const mem = deps.memoryDefaults();
+  await block(p, ui, introLines(S, ui.cols, mem), "Pooled");
   const mode = await p.select({
-    message: "Pooled runs a model across your own devices. How should this device take part?",
-    options: [
-      { value: "host", label: "Start a room on this device", hint: "you get a code; your other Mac, PC or phone joins with it" },
-      { value: "join", label: "Join a room", hint: "another device already started one and showed you its code" },
-    ],
+    message: "How should this device take part?",
+    options: padLabels([
+      { value: "host", label: "Start a room", hint: "this device hosts; your other Mac, PC or phone joins with the invite link" },
+      { value: "join", label: "Join a room", hint: "another device started one: paste its invite link or code" },
+    ]),
   });
   const prev = roomSettings(ctx.config?.plugins?.entries?.[PROVIDER]?.config || {}, {});
+  const dir = prev.modelDir;
   if (mode === "host") {
+    const pledge = +(await gbPrompt(p, prev.mode === "host" && prev.pledgeGB ? prev.pledgeGB : mem.def));
+    const { rows, recommended } = modelChoices(dir, pledge);
     const model = await p.select({
-      message: "Which model should the room run?",
-      options: MODEL_CHOICES.map((k) => { const v = modelInfo(k); return { value: k, label: v.name, hint: `needs about ${v.needGB} GB of GPU memory across the room · ${Math.round(v.ctx / 1024)}k context` }; }),
-      initialValue: prev.model || "qwen3-1.7b",
+      message: "Which model?",
+      options: modelOptions(S, rows.map((r) => ({ ...r, small: isSmall(r.key) })), { recommended }),
+      // the earlier choice, unless it was a small model: then the one recommended for OpenClaw
+      initialValue: prev.mode === "host" && MODEL_CHOICES.includes(prev.model) && !isSmall(prev.model) ? prev.model : recommended,
     });
-    const pledge = await p.text({ message: "GPU memory this device gives the room (GB)", initialValue: String(prev.pledgeGB || Math.ceil(modelInfo(model).needGB / 2) + 1),
-      validate: (v) => (+v > 0 && +v <= 512 ? undefined : "a number of GB, e.g. 12") });
-    const devs = await p.select({ message: "Wait for how many devices before loading the model?", options: [
-      { value: 1, label: "Just this one when it has enough memory", hint: "others can still join later as askers" },
-      { value: 2, label: "Two (this + one more)" }, { value: 3, label: "Three" }], initialValue: 2 });
-    const s = { mode, model, code: prev.mode === "host" && prev.code ? prev.code : newCode(), pledgeGB: +pledge, minDevices: devs, signal: prev.signal, modelDir: prev.modelDir };
-    await p.note([
-      `Room code: ${s.code}`,
-      `Link: ${roomLink(s.code, s.signal)}`,
+    const trim = isSmall(model) ? await smallModel(p, ui) : false;
+    let pull = prev.pull;
+    if (!isPulled(dir, model)) pull = await getModel(p, ui, dir, model);
+    const devs = await p.select({ message: "How many devices should be in before the model loads?", options: padLabels([
+      { value: 1, label: "1  this device", hint: "once it holds the whole model; others can still join" },
+      { value: 2, label: "2  this one and one more" }, { value: 3, label: "3  this one and two more" }]), initialValue: rows.find((r) => r.key === model)?.fitsAlone ? 1 : 2 });
+    const ask = await p.select({ message: "Who can join the room?", options: padLabels([
+      { value: true, label: "Invite link only", hint: "recommended: a device with only the code waits for /pooled allow" },
+      { value: false, label: "Anyone with the code", hint: "no asking" }]), initialValue: prev.ask !== false });
+    const code = prev.mode === "host" && prev.code ? prev.code : newCode();
+    const s = { mode, model, code, pledgeGB: pledge, minDevices: devs, signal: prev.signal, modelDir: dir, ask, pull, trim };
+    const key = hostKey(code, ask);
+    const link = roomLink(code, { key, signal: s.signal });
+    const info = modelInfo(model);
+    const W = ui.cols;
+    await block(p, ui, [
+      ...header(S, W, [S.bold("Pooled room"), `${S.pill(fmtCode(code))}  ${S.ink3(`${info.name} · opens with OpenClaw's gateway`)}`,
+        S.ink3(`loads once ${devs > 1 ? `${devs} devices are in and ` : ""}the room has ${gbNum(info.needGB)}`)]),
       "",
-      "On the other device, either:",
-      `  - open the link in Chrome / Safari (a Mac, a PC, or a phone), set how much memory it gives, and press Join;`,
-      `  - or run OpenClaw with this plugin, pick Pooled → "Join a room" and enter ${s.code}.`,
-      `The model (${modelInfo(model).name}) loads once ${devs > 1 ? `${devs} devices are in the room and ` : ""}the room has about ${modelInfo(model).needGB} GB.`,
-    ].join("\n"), "Pooled room");
-    return result(s);
+      label(S, "invite") + S.link(link),
+      ...para(S, "join", "On your other device: open the invite link in Chrome or Safari (a Mac, a PC or a phone), or pick Pooled → Join a room in OpenClaw there and paste it, or run:", W),
+      // @pooled/cli installs the WebGPU addon itself since 0.3.0
+      I + "  " + S.bold(`npx @pooled/cli join "${link}"`),
+      ...para(S, "ask", ask ? `A device with only the code ${fmtCode(code)} waits: /pooled allow (in any OpenClaw chat) lets it in.` : `Anyone with the code ${fmtCode(code)} can join.`, W),
+      label(S, "status") + S.ink2("/pooled") + S.ink3(" in any OpenClaw chat shows the room"),
+      "",
+      ...note(S, "Share the link only with people you trust: every device holding layers computes what is asked here.", W),
+    ], "Pooled room");
+    return result(s, { key });
   }
-  const code = (await p.text({ message: "Room code (4 letters/digits, from the device that started the room)", placeholder: "ABCD",
-    validate: (v) => (CODE_RE.test(String(v).trim().toUpperCase()) ? undefined : "4 to 6 characters, like K7QX") })).trim().toUpperCase();
-  const pledge = await p.text({ message: "GPU memory this device gives the room (GB)", initialValue: String(prev.pledgeGB || 8),
-    validate: (v) => (+v > 0 && +v <= 512 ? undefined : "a number of GB, e.g. 12") });
-  return result({ mode: "join", code, model: prev.model || "qwen3-1.7b", pledgeGB: +pledge, signal: prev.signal, modelDir: prev.modelDir });
+  // join
+  const pasted = await p.text({ message: "Paste the room's invite link or code", placeholder: `${ROOM_ORIGIN}/r/4TK-G9P#k=…  or  4TK-G9P`,
+    validate: (v) => (parseRoom(v).code ? undefined : "a link like https://pooled.run/r/4TKG9P#k=…, or a code like 4TK-G9P") });
+  const { code, key } = parseRoom(pasted);
+  const pledge = +(await gbPrompt(p, prev.mode === "join" && prev.pledgeGB ? prev.pledgeGB : mem.def));
+  if (key) saveJoinState(code, { key });
+  const prog = p.progress(`Connecting to room ${fmtCode(code)}`);
+  const name = defaultName();
+  let lobbyAt = null, tick = null, host = "the host";
+  const lobbyLine = () => `Waiting for ${host} to let this device in · ${clock(Date.now() - lobbyAt)} · an invite link skips this`;
+  const k = await knock(code, key || joinState(code).key || null, { signal: prev.signal, name,
+    onLobby: (b) => {
+      host = b.hostName || "the host"; lobbyAt ??= Date.now(); prog.update(lobbyLine());
+      if (ui.terminal && !tick) { tick = setInterval(() => prog.update(lobbyLine()), 1000); tick.unref?.(); }
+    } }).finally(() => clearInterval(tick));
+  const learned = { model: null, ctx: null };
+  if (k.ok) {
+    saveJoinState(code, { key, pass: k.pass, host: k.host, model: k.model, ctx: k.ctx });
+    Object.assign(learned, { model: k.model, ctx: k.ctx, inRoom: true });
+    const mname = k.model && MODELS[k.model] ? modelInfo(k.model).name : null;
+    prog.stop(`In room ${fmtCode(code)}${k.host ? ` · host ${k.host}` : ""}${mname ? ` · ${mname}` : ""}`);
+    await block(p, ui, [
+      ...header(S, ui.cols, [S.bold("Pooled room"), `${S.pill(fmtCode(code))}  ${S.ink3([k.host ? `${k.host}'s room` : null, mname].filter(Boolean).join(" · "))}`,
+        `${S.acc(S.g.live)} in the room` + S.ink3(" · joins again when OpenClaw's gateway starts")]),
+      "",
+      label(S, "you") + name + S.ink3(` · lends ${gbNum(pledge)}`),
+      label(S, "status") + S.ink2("/pooled") + S.ink3(" in any OpenClaw chat shows the room"),
+    ], "Pooled room");
+    const short = shortCtxNote(k.model, k.ctx, k.host || "the host");
+    if (short) await p.note(short, "The room's context is too short for OpenClaw");
+    if (isSmall(k.model)) learned.trim = await smallModel(p, ui, k.host || "the host");
+  } else if (k.refused) {
+    prog.stop(`${k.host || "The host"} of room ${fmtCode(code)} turned this device away: ${k.refused}`);
+    throw new Error(`Pooled: the host of room ${fmtCode(code)} turned this device away (${k.refused}). Ask for the room's invite link and run the setup again with it.`);
+  } else {
+    prog.stop(k.timeout ? `The host of room ${fmtCode(code)} has not let this device in yet; the gateway asks again when it starts`
+      : `Couldn't reach room ${fmtCode(code)} now (${k.error}); the gateway tries again when it starts`);
+  }
+  const s = { mode: "join", code, model: prev.model || "qwen3-1.7b", pledgeGB: pledge, signal: prev.signal, modelDir: dir, trim: !!learned.trim };
+  return result(s, learned);
+}
+
+// a small model was picked (or the joined room runs one): say what to expect, and offer the trimmed
+// OpenClaw settings, off unless chosen -> whether to apply TRIM_PATCH
+async function smallModel(p, ui, host = null) {
+  const { S } = ui, W = ui.cols;
+  await block(p, ui, [
+    ...para(S, "small", host ? `${host} runs this room with a small model. ${SMALL_WARNING}` : SMALL_WARNING, W),
+    "",
+    ...TRIM_NOTE.split("\n").join(" ").split(/(?<=\.) (?=These|Undo)/).flatMap((t, i) => para(S, i === 0 ? "optional" : "", t, W, i === 0 ? (x) => x : S.ink3)),
+  ], "Small model");
+  const v = await p.select({
+    message: "Turn off OpenClaw's tool search and memory flush? (global: every model and agent)",
+    options: padLabels([
+      { value: false, label: "No, keep OpenClaw's settings", hint: "keep them if you use other models in OpenClaw too" },
+      { value: true, label: "Yes, turn both off", hint: "for all of OpenClaw: tools.toolSearch = false, compaction.memoryFlush off" },
+    ]),
+    initialValue: false,
+  });
+  return v === true;
+}
+
+// the model is not on disk: download it now (with progress), let the gateway do it, or stream
+async function getModel(p, ui, dir, model) {
+  const info = modelInfo(model);
+  const how = await p.select({
+    message: `${info.name} is not downloaded (${fmtBytes(info.fileBytes)}). Download it now?`,
+    options: padLabels([
+      { value: "now", label: "Download now", hint: `into ${dir.replace(process.env.HOME || "~", "~")}, shared with pooled pull; resumes, checks its SHA-256` },
+      { value: "later", label: "When the gateway starts", hint: "devices can join while it downloads" },
+      { value: "stream", label: "Don't download", hint: "stream this device's layers from Hugging Face at each start" },
+    ]),
+    initialValue: "now",
+  });
+  if (how === "stream") return false;
+  if (how === "later") return true;
+  const cols = Math.min(ui.cols, 100) - 8;
+  const prog = p.progress(`Downloading ${info.name}`);
+  const st = await download(dir, model, { onChange: (x) => prog.update(progressText(ui.S, info.name, x, { cols })) });
+  prog.stop(st.state === "done" ? stripAnsi(progressText(PLAIN, info.name, st)) : `${info.name}: ${pullLine(st)}; the gateway tries again when it starts`);
+  return true;
 }
 
 // `openclaw onboard --non-interactive --auth-choice pooled`: the choice from POOLED_* env
+// (POOLED_LINK: a room's invite link to join)
 export function setupFromEnv(env = process.env) {
   const s = roomSettings({}, env);
-  if (!s.mode) s.mode = "host";
+  if (!s.mode) s.mode = s.code && env.POOLED_LINK ? "join" : "host";
   if (s.mode === "host" && !s.code) s.code = newCode();
-  if (s.mode === "host" && !CODE_RE.test(s.code)) throw new Error(`POOLED_CODE: ${s.code} is not a room code the room page opens (4 to 6 of ${CODE_ABC})`);
-  if (s.mode === "join" && !CODE_RE.test(s.code || "")) throw new Error("POOLED_CODE: the room code to join (4 to 6 characters)");
+  if (s.mode === "host" && !/^[A-HJKMNP-TV-Z2-9]{4}$|^[A-HJKMNP-TV-Z2-9]{6}$/.test(s.code)) throw new Error(`POOLED_CODE: ${s.code} is not a room code the room page opens (6 of ABCDEFGHJKMNPQRSTVWXYZ23456789)`);
+  if (s.mode === "join" && !/^[A-Z0-9]{4}$|^[A-Z0-9]{6}$/.test(s.code || "")) throw new Error("POOLED_LINK: the invite link of the room to join (or POOLED_CODE: its code)");
   return s;
 }
-export function applyToConfig(cfg, s) {
-  const r = result(s).configPatch, ref = modelRef(s);
+export function applyToConfig(cfg, s, learned = {}) {
+  const r = result(s, learned).configPatch, ref = modelRef(s);
   return {
     ...cfg,
     models: { ...cfg.models, providers: { ...cfg.models?.providers, ...r.models.providers } },
     plugins: { ...cfg.plugins, entries: { ...cfg.plugins?.entries, [PROVIDER]: { ...cfg.plugins?.entries?.[PROVIDER], ...r.plugins.entries[PROVIDER] } } },
     agents: { ...cfg.agents, defaults: { ...cfg.agents?.defaults, model: { ...(typeof cfg.agents?.defaults?.model === "object" ? cfg.agents.defaults.model : {}), primary: ref },
       models: { ...cfg.agents?.defaults?.models, [ref]: { ...cfg.agents?.defaults?.models?.[ref], agentRuntime: { id: "openclaw" } } } } },
+    ...(r.tools ? { tools: { ...cfg.tools, byProvider: { ...cfg.tools?.byProvider, ...r.tools.byProvider } } } : {}),
   };
+}
+// non-interactive: keep the key from POOLED_LINK (join), or make the host's key (host), in the state file
+export async function nonInteractive(cfg, env = process.env) {
+  await initStateDir();
+  const s = setupFromEnv(env);
+  const learned = {};
+  if (s.mode === "join" && s.key) saveJoinState(s.code, { key: s.key });
+  if (s.mode === "host") learned.key = hostKey(s.code, s.ask);
+  return applyToConfig(cfg, s, learned);
 }
