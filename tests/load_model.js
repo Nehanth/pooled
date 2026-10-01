@@ -101,7 +101,10 @@ export function wideLimits(adapter) {
 // the old kernels: it already sits 2e-3..2.3e-2 from token-by-token decode at 700+ tokens in Deno (0.16..0.17 in
 // Chrome on the bench page's HTML), with argmax, greedy text and spec == plain identical. The default MoE prefill
 // options (tiled attention, wide GEMM, expert-grouped FFN) land inside that band (up to 1.7e-2 in Deno, 5.7e-2 in
-// Chrome, docs/bench-log.md 2026-09-27), so 2e-2 is the baseline's width, not a loosening for them.
+// Chrome, docs/bench-log.md 2026-09-27), so 2e-2 is the baseline's width, not a loosening for them. Since the
+// baseline can itself land past 2e-2 (2.49e-2 from token-by-token at 700 tokens of test_prefill_opts' prompt,
+// 2026-10-01, with every neighbouring length under 1e-3), test_prefill_opts breaks a miss with the token-by-token
+// logits: the options pass a length when they match those even though the baseline does not.
 export const prefillTol = (moe) => (moe ? 2e-2 : 2e-3);
 
 // Count (and print the first few) uncaptured GPU errors; tests read errors.count.

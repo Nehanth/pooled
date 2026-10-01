@@ -161,10 +161,26 @@ const view = (p) => p.evaluate(() => {
     picker: !$("ai-start").disabled && $("ai-start").getClientRects().length > 0,
     inRoom: document.body.classList.contains("in-room"),
     status: $("ai-status").textContent.slice(0, 120),
-    note: [...document.querySelectorAll("#ai-output .sys, #ai-empty-t")].map((e) => e.textContent).find((t) => /Not needed/.test(t)) || "",
+    // why this device holds no layers (room.js outNote): "Not needed" is the one these scenarios expect;
+    // the others ("Not holding layers", "joined after the start") show up here so a failure says which
+    note: [...document.querySelectorAll("#ai-output .sys, #ai-empty-t")].map((e) => e.textContent).find((t) => /Not needed|Not holding layers|joined after the start/.test(t)) || "",
     cards: [...document.querySelectorAll("#peers .peer-card")].map((c) => c.dataset.name),
   };
 });
+// a tab's view once ok(view) holds, or the last one after ms: a screen paints over a few messages
+// (ai-layers, ai-ready-all, ai-out, a re-seat), so a check reads the view it waits for, not the first one
+async function viewWhen(p, ok, ms = 15000) {
+  const end = Date.now() + ms;
+  for (;;) {
+    const v = await view(p);
+    if (ok(v) || Date.now() > end) return v;
+    await p.waitForTimeout(250);
+  }
+}
+const hasNote = (v) => /Not needed for this model/.test(v.note) && /can still ask/.test(v.note);
+// for a failure's log: a tab's system notes, and the tail of its room log
+const notes = (p) => p.evaluate(() => [...document.querySelectorAll("#ai-output .sys")].map((e) => e.textContent).concat(document.getElementById("ai-empty-t").textContent));
+const roomLog = (p) => p.evaluate(() => document.getElementById("chat-log").innerText.slice(-1500));
 const isModelHost = (p) => p.evaluate(() => /^cluster online · \d+ device/.test(document.getElementById("ai-status").textContent));
 // ask from a tab (its own Send) and wait for the answer on it
 async function ask(p, text, ms = 180000) {
@@ -191,23 +207,24 @@ async function leftout(label, gbs) {
   const out = Object.entries(tabs).filter(([n]) => n !== boss);
   for (const [n, p] of out) {
     const up = await online(p, 30000);
-    const v = await view(p);
+    // the note comes with the room's ready (ai-ready-all) or the deal's reasons (ai-layers, ai-out)
+    const v = await viewWhen(p, (v) => !v.loading && v.online && v.input && hasNote(v));
     check(`${label}: ${n} (left out) is not stuck on the Loading card`, up && !v.loading, JSON.stringify(v));
     check(`${label}: ${n} shows the chat and its input`, v.online && v.input, JSON.stringify(v));
-    check(`${label}: ${n} says why it holds no layers`, /Not needed for this model/.test(v.note) && /can still ask/.test(v.note), JSON.stringify(v));
+    check(`${label}: ${n} says why it holds no layers`, hasNote(v), JSON.stringify(v));
+    if (!hasNote(v)) log(`${n}'s notes:`, JSON.stringify(await notes(p)), `| ${boss}'s room log:`, JSON.stringify(await roomLog(tabs[boss])));
   }
   const a1 = await ask(phone, "Hello from the phone.");
   check(`${label}: the phone-size tab's question is answered`, a1.length > 0);
   // a reload: back in the room in the same state (the chat and the note), not the model picker
   await phone.reload(); await wired(phone);
   const up = await online(phone, 60000);
-  await phone.waitForTimeout(1500);
-  const v = await view(phone);
+  const v = await viewWhen(phone, (v) => v.inRoom && v.input && !v.picker && !v.loading && /Not needed for this model/.test(v.note));
   check(`${label}: after a reload the phone-size tab is back with the chat, not the picker`, up && v.inRoom && v.input && !v.picker && !v.loading, JSON.stringify(v));
   check(`${label}: after a reload it still says why it holds no layers`, /Not needed for this model/.test(v.note), JSON.stringify(v));
   const a2 = await ask(phone, "And again after a reload.");
   check(`${label}: after a reload its question is answered`, a2.length > 0);
-  const hv = await view(tabs[boss]);
+  const hv = await viewWhen(tabs[boss], (v) => v.cards.length === 3 && new Set(v.cards).size === 3);
   check(`${label}: the room lists each device once`, hv.cards.length === 3 && new Set(hv.cards).size === 3, JSON.stringify(hv.cards));
 }
 
@@ -217,10 +234,11 @@ async function rejoin() {
   await openRoom([[host, "host", 24], [worker, "worker", 6]], "&split=memory&phonelayers=1");
   await startModel(host, "memory");
   const up = (await online(host)) && (await online(worker, 60000));
-  check("rejoin: the room is online with the worker holding layers", up && (await worker.evaluate(() => !!document.getElementById("ai-status").textContent.match(/serving layers/))), (await view(worker)).status);
+  const holds = up && await worker.waitForFunction(() => /serving layers/.test(document.getElementById("ai-status").textContent), null, { timeout: 15000 }).then(() => true, () => false);
+  check("rejoin: the room is online with the worker holding layers", holds, (await view(worker)).status);
   if (!up) return;
   await chatMode(worker);
-  check("rejoin: the worker's input shows", (await view(worker)).input);
+  check("rejoin: the worker's input shows", (await viewWhen(worker, (v) => v.input)).input);
   // an answer in flight, then the worker's link drops; the host sees the close only 8 s later
   await host.evaluate(() => { const b = document.getElementById("ai-prompt"); b.value = "Write a story about a ship."; b.dispatchEvent(new Event("input")); document.getElementById("ai-send").click(); });
   await host.waitForFunction(() => /generating|prefill/.test(document.getElementById("ai-status").textContent), null, { timeout: 60000 }).catch(() => {});
@@ -231,8 +249,7 @@ async function rejoin() {
   await host.waitForTimeout(9500);   // past the held-back close
   await host.waitForFunction(() => !/generating|prefill/.test(document.getElementById("ai-status").textContent), null, { timeout: 120000 }).catch(() => {});
   await host.evaluate(() => { window.__delayClose = 0; });
-  await host.waitForTimeout(1000);
-  const v = await view(worker);
+  const v = await viewWhen(worker, (v) => v.online && v.input);
   check("rejoin: after a replacement link the worker's input is back", v.online && v.input, JSON.stringify(v));
   const a = await ask(worker, "Are you back?");
   check("rejoin: and it can ask", a.length > 0, JSON.stringify(await view(worker)));
@@ -251,10 +268,12 @@ async function duplicate() {
   await worker.reload(); await wired(worker);
   await online(worker, 60000);
   await host.waitForTimeout(4000);   // the name probe (1.5 s) and the re-seat
-  const hv = await view(host);
+  // (a duplicate is the old link listed beside the new one: it would stay listed until the held-back close, 20 s)
+  const hv = await viewWhen(host, (v) => v.cards.length === 2 && !v.cards.some((n) => / 2$/.test(n)), 6000);
   check("duplicate: the host lists the worker once (not beside its old link)", hv.cards.length === 2 && !hv.cards.some((n) => / 2$/.test(n)), JSON.stringify(hv.cards));
   const wv = await view(worker);
-  check("duplicate: the worker keeps its name", (await worker.evaluate(() => document.getElementById("name-input").value)) === "worker", JSON.stringify(wv.cards));
+  const named = await worker.waitForFunction(() => document.getElementById("name-input").value === "worker", null, { timeout: 6000 }).then(() => true, () => false);
+  check("duplicate: the worker keeps its name", named, JSON.stringify(wv.cards));
   await host.evaluate(() => { window.__delayClose = 0; });
 }
 
