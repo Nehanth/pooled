@@ -38,6 +38,8 @@ jobs:
           node --test cli/test/*_test.mjs
       - name: Room node and OpenClaw plugin (Node, no GPU, stand-in links and room)
         run: node --test packages/room-node/test/*_test.mjs packages/openclaw/test/*_test.mjs
+      - name: Shared runtime (ordered binary frames, checkpoints and recovery; no GPU)
+        run: npm run test:runtime
       - name: Kernel generator sanity
         env: { DENO_NO_PACKAGE_JSON: "1" }
         run: deno run --allow-read tests/unit/generator_smoke.js

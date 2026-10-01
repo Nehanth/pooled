@@ -1053,7 +1053,7 @@ export class RoomNode extends EventEmitter {
 
   async preparePrompt(ids, { aborted, desc, maxNew, engine: E, pins = [], turn = 0 }) {
     const ai = this.ai, ctxMax = E.maxSeq;
-    let reused = 0, from = null, prefilled = 0, pinned = 0, turned = 0, tPre = 0;
+    let reused = 0, from = null, prefilled = 0, pinned = 0, tPre = 0;
     reused = reusablePrefix(ai.fed, ids);
     if (reused) from = "live";
     const r0 = this.ckptResume(ids, reused);
@@ -1074,7 +1074,7 @@ export class RoomNode extends EventEmitter {
       await this.prefill(ids.slice(at, c), { aborted, desc });
       if (aborted()) break;
       const pin = pins.includes(c);
-      if (ai.fed?.length === c && this.ckptSave(pin, !pin) != null) { if (pin) pinned++; else turned++; }
+      if (ai.fed?.length === c && this.ckptSave(pin, !pin) != null && pin) pinned++;
       at = c;
     }
     if (!aborted() && at < ids.length) logits = await this.prefill(ids.slice(at), { aborted, desc });
