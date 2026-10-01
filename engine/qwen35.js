@@ -13,7 +13,7 @@ import { layerFuseWGSL } from "./wgsl/layer_fuse.js";
 import { WGSL2 } from "./wgsl/qwen35.js";
 import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout, normRouterKernel } from "./wgsl/moe.js";
 import { attnTileWGSL, attnTileConfig } from "./wgsl/attn_tile.js";
-import { attnDecWGSL, attnDecConfig, decSplits, DEC_CQ } from "./wgsl/attn_dec.js";
+import { attnDecWGSL, attnDecCombineGWSL, attnDecConfig, decSplits, DEC_CQ } from "./wgsl/attn_dec.js";
 import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows } from "./wgsl/moe_group.js";
 import { f16ToF32, f32ToF16 } from "./gguf.js";
 import { TOPK_MAX, topkK, readCands } from "./topk.js";
@@ -329,7 +329,9 @@ export class Qwen35Engine {
     // Decode layer fusion (engine/wgsl/layer_fuse.js, bit-identical, one-token passes only):
     //   dn:   dn_pre folded into dn_delta_gn (needs dnFuse)    -1 dispatch per DeltaNet layer
     //   conv: dn_conv in the [qkv | z] GEMV's epilogue         -1 dispatch per DeltaNet layer
-    //   comb: sigmoid_mul in attn_combine (the gate read from q_full; f16 flash KV)     -1 per attention layer
+    //   comb: sigmoid_mul in attn_combine, or in attn_dec_combine under attnDecode v2 (attn_dec_combine_g,
+    //         engine/wgsl/attn_dec.js, optional: its compile failure only turns comb off for v2); the gate is
+    //         read from q_full; f16 flash KV                                            -1 per attention layer
     //   kv:   kv_store in attn_glue (needs comb: the glue no longer copies the gate)  -1 per attention layer
     //   norm: an attention layer's input rmsnorm folded into its [k | v] GEMV, run before q (coop.js NRM)
     //         -1 per attention layer. (The MoE router / DeltaNet beta-alpha norm folds are perf/decode-moe-bandwidth's.)
@@ -928,6 +930,7 @@ export class Qwen35Engine {
           if (this.pipes.attn_dec) {
             R.bgDec = this._bg(this.pipes.attn_dec, 1, [this.q, R.kCache, R.vCache, this.faO, this.faML, this.adU1]);
             R.bgDecC = this._bg(this.pipes.attn_dec_combine, 1, [this.faO, this.faML, this.attnOut, this.adU1]);
+            if (this.pipes.attn_dec_combine_g) R.bgDecCG = this._bg(this.pipes.attn_dec_combine_g, 1, [this.faO, this.faML, this.attnOut, this.qFull, this.adU1]);
           }
         }
         R.bgGlue = this._bg(this.pipes.attn_glue, 1, [this.qFull, this.q, this.gAttn, this.k, R.qNorm.buf, R.kNorm.buf, this._uZero4, this.dnBuf]);
@@ -1375,8 +1378,8 @@ export class Qwen35Engine {
     const seqLen = pos + 1;
     const LF = this.layerFuse;
     if (L.isFull) {
-      const v2 = this.flash && this.attnDecode === "v2" && !!L.bgDec;   // v2 replaces the attention kernel these two fusions wrap
-      const lfC = LF.comb && this.flash && !this.kvQ8 && !!L.bgCombineG && !v2;   // sigmoid_mul in attn_combine
+      const v2 = this.flash && this.attnDecode === "v2" && !!L.bgDec;   // split-K decode attention (attn_dec + attn_dec_combine)
+      const lfC = LF.comb && this.flash && !this.kvQ8 && !!(v2 ? L.bgDecCG : L.bgCombineG);   // sigmoid_mul in attn_combine / attn_dec_combine
       const lfA = lfC && LF.kv && this.attnGlue && !!L.bgGlueKv;         // kv_store in attn_glue (its gate copy is skipped: needs lfC)
       {
         const p = this._pp || enc.beginComputePass();
@@ -1407,8 +1410,13 @@ export class Qwen35Engine {
         const p = this._pp || enc.beginComputePass();
         if (lfC) {
           if (!lfA) this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / 2 / 64), 1, 1);
-          this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
-          this._dxyz(p, "attn_combine_g", L.bgCombineG, D.nH, 1, 1);
+          if (v2) {
+            this._dxyz(p, "attn_dec", L.bgDec, decSplits(seqLen, this.adCfg.S), 1, D.nKV);
+            this._dxyz(p, "attn_dec_combine_g", L.bgDecCG, D.nH * DEC_CQ, 1, 1);
+          } else {
+            this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
+            this._dxyz(p, "attn_combine_g", L.bgCombineG, D.nH, 1, 1);
+          }
         } else if (this.flash) {
           this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / (this.kvQ8 ? 32 : 2) / 64), 1, 1);
           if (this.attnDecode === "v2" && L.bgDec) {
@@ -1599,6 +1607,23 @@ export class Qwen35Engine {
       console.warn("attnDecode v2 disabled:", String(fail.message || fail).slice(0, 300));
       this.adCfg = null;
     } else Object.assign(this.pipes, pipes);
+    // layerFuse.comb under v2: attn_dec_combine_g (attn_dec_combine + sigmoid_mul) in a module of its own and
+    // optional like the other layerFuse kernels: a compile failure (FXC, ...) only leaves the separate sigmoid_mul
+    if (!fail && this.layerFuse.comb && !this.kvQ8) {
+      device.pushErrorScope("validation");
+      let gf = null;
+      try {
+        const module = device.createShaderModule({ code: attnDecCombineGWSL(this.adCfg) });
+        const layout1 = device.createBindGroupLayout({ entries: ["ro", "ro", "rw", "ro", "u"].map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
+        this.pipes.attn_dec_combine_g = await compilePipeline(device, {
+          layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module, entryPoint: "attn_dec_combine_g" } });
+      } catch (e) { gf = e; }
+      gf ||= await device.popErrorScope();
+      if (gf) {
+        delete this.pipes.attn_dec_combine_g;
+        console.warn("layerFuse.comb under attnDecode v2 off:", String(gf.message || gf).slice(0, 300));
+      }
+    }
   }
   _bg2res(pipe, resources) {
     return this.device.createBindGroup({

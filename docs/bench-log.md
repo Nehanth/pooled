@@ -1597,3 +1597,36 @@ The M5 gained less than the ~5% estimated (the copies there cost ~0.3 ms per ste
 gained more. Gates: unit tests, `npm run check`, `test_q38_bits` (4cac59d8, and 4f70a9ca with
 ATTN_PREFILL_TILE=0: same as main), `test_moe` MATCH llama.cpp + spec == plain, `test_mtp`, `test_mtp_split`,
 `test_moe_split`, M5 bits equal to main, `specIdentical` and golden in every Chrome run.
+## 2026-10-01: layerFuse comb/kv under attention v2 (branch perf/lf-v2), GB10
+
+Since #294 made attnDecode v2 the default, `layerFuse.comb` and `.kv` switched themselves off on every attention
+layer (they wrapped attn_flash + attn_combine), so the MoE's in-process layerFuse gain fell from +4.5% to +3.7%.
+New `attn_dec_combine_g` (engine/wgsl/attn_dec.js) is attn_dec_combine with sigmoid_mul folded in: the quotient
+O / L goes through workgroup memory, then each of 64 threads per slice multiplies by the gate read from q_full,
+the same expressions as sigmoid_mul. With it, `attn_glue_kv` (kv_store in the glue) runs under v2 too: 2 dispatches
+fewer per attention layer. Its own module, compiled only when comb is on, optional: a compile failure turns comb off
+for v2 only (warning) and the separate sigmoid_mul runs; #300's fallback (any layerFuse kernel failing turns
+layerFuse off) is unchanged and skips this kernel.
+
+`tests/bench/lf_ab.js` (Deno, 8 rounds x 24 tokens, median ms/token; new `FLAGS=comb,kv` flips only those):
+
+| | off | on | gain |
+|---|---|---|---|
+| MoE, branch, all flags (2 runs) | 29.95 / 29.99 | 28.63 / 28.64 | +4.6% / +4.7% |
+| MoE, origin/main, all flags (2 runs) | 29.77 / 30.00 | 28.71 / 28.77 | +3.7% / +4.3% |
+| MoE, branch, comb,kv only (2 runs) | 28.94 / 28.62 | 28.82 / 28.70 | +0.4% / -0.3% |
+| 27B, branch, comb,kv only (2 runs) | 97.76 / 97.72 | 97.39 / 97.56 | +0.4% / +0.2% |
+| 27B, branch / main, all flags (one clean run each; the others were contended) | 98.70 / 99.40 | 96.61 / 98.02 | +2.2% / +1.4% |
+
+Small: the "on" arm is 0.1 ms/token (~0.3%) faster than main's on the MoE and the full-fusion gain is back to
+main's pre-v2 +4.5%; comb,kv alone sits at the edge of the noise (20 dispatches of a few µs each per MoE token).
+Kept because it is free: same bits, two dispatches fewer per attention layer.
+
+Correctness (GB10, Deno): `test_q38_bits` default c26dbc5 / 3177f9f1 with layerFuse on (attn_dec_combine_g built)
+and with `LAYER_FUSE=0`; `ATTN_PREFILL_TILE=0` f0537158 / 5d287854: all equal to main. Fallbacks, with a temporary
+(not committed) hook in compile.js that throws for a named kernel: attn_dec_combine_g failing -> warning, comb off
+for v2, other flags on, c26dbc5 / 3177f9f1; attn_combine_g failing (#300 path) -> layerFuse off, c26dbc5 / 3177f9f1.
+`test_moe` MATCH llama.cpp 3/3, spec == plain 3/3, head check 0 mismatches. `test_dense_spec` PASS. lf_ab tokens
+identical in every run (under 64 positions: the combine's one-split path; `test_q38_bits`, 300 positions, covers
+the multi-split path). Barrier lint
+clean, unit tests 961/961, `npm run check` passes. Not measured on the M5 Max or under FXC.
