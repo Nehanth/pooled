@@ -1,12 +1,15 @@
 # Pooled for OpenClaw
 
-Run a big model across your own devices, right from OpenClaw. No API key, no cloud model.
+**Peer-to-peer inference engine for your claw.**
+
+[Website](https://pooled.run) · [Docs](https://pooled.run/docs/kits/openclaw) · [GitHub](https://github.com/Nehanth/pooled)
 
 ![OpenClaw's Control UI: the assistant reads notes.txt and answers with a to-do list, running on the Qwen3.6 35B MoE in a Pooled room](https://raw.githubusercontent.com/Nehanth/pooled/main/site/img/openclaw/control-ui.webp)
 
-This machine joins a [Pooled](https://pooled.run) room and holds part of the model on its GPU. Your
-other computers, browser tabs and phones hold the rest. Together they run a model none of them could
-run alone.
+Run a big model across your own devices, right from OpenClaw. No API key, no cloud model. This
+machine joins a [Pooled](https://pooled.run) room and holds part of the model on its GPU. Your other
+computers, browser tabs and phones hold the rest. Together they run a model none of them could run
+alone.
 
 ## Get started
 
@@ -16,8 +19,8 @@ run alone.
    openclaw plugins install clawhub:@pooled/openclaw
    ```
 
-2. **Start a room.** Run `openclaw onboard`, pick **More… → Pooled**, then **Start a room on this
-   device**. Choose the **Qwen3.6 35B MoE** (recommended). Onboarding prints an invite link.
+2. **Start a room.** Run `openclaw onboard`, pick **More… → Pooled**, then **Start a room**. Choose
+   the **Qwen3.6 35B MoE** (recommended). Onboarding prints the room code and an invite link.
 
 3. **Invite a second device.** Open the invite link in Chrome or Safari, run
    `npx @pooled/cli join "<invite link>"` on another computer, or pick **Pooled → Join a room** in
@@ -38,7 +41,7 @@ instructions and tools) once. After that the room keeps it.
 
 Qwen3.6 35B MoE, two devices on one DGX Spark, OpenClaw 2026.9.6. On other GPUs the times differ.
 
-![/pooled in the OpenClaw TUI: the room is online with two devices, layers 0-23 on this gateway and 24-39 on the second device](https://raw.githubusercontent.com/Nehanth/pooled/main/site/img/openclaw/room-online.webp)
+![/pooled in the OpenClaw TUI: room VAV-A53 online on the Qwen3.6 35B MoE, two devices in a table (GPU, what each lends, the layers each holds: 0-23 on this gateway, 24-39 on the second device) and the memory row](https://raw.githubusercontent.com/Nehanth/pooled/main/site/img/openclaw/room-online.webp)
 
 ## Which model
 
@@ -105,7 +108,7 @@ approvals on for `exec` and writes.
 
 - **Getting in.** A hosted room asks before new devices join. The invite link's key gets a device in;
   a code alone waits for `/pooled allow`; a device you let in keeps a pass. With **Anyone with the
-  room code**, anyone who has or guesses the code gets in.
+  code**, anyone who has or guesses the code gets in.
 - **Screens.** A hosting gateway opens its room with visibility `asker`: other devices' room pages
   show "answering…", never OpenClaw's prompts, answers or tool calls.
 - **Devices holding layers see the conversation anyway.** Each one gets the hidden states of every
@@ -125,22 +128,23 @@ approvals on for `exec` and writes.
 <details>
 <summary><b>Start a room: every question</b></summary>
 
-`openclaw onboard` → **Pooled** → **Start a room on this device**:
+`openclaw onboard` → **Pooled** → **Start a room**:
 
 1. How much of this GPU's memory to lend (the default is what `pooled host` picks).
-2. The model: each one shows whether it's downloaded, its download size, the memory it needs across
-   the room and its context.
-3. If it isn't downloaded: **Download now** (with progress), **Download when the gateway starts**, or
-   **Don't download** (stream this machine's layers from Hugging Face at each start).
-4. How many devices to wait for, and who can join: **Devices with the invite link** (a device with
-   only the code waits for your Allow) or **Anyone with the room code**.
+2. The model: each row shows the memory it needs across the room and whether it's downloaded (or its
+   download size).
+3. If it isn't downloaded: **Download now** (with a progress bar, speed and time left), **When the
+   gateway starts**, or **Don't download** (stream this machine's layers from Hugging Face at each
+   start).
+4. How many devices to wait for, and who can join: **Invite link only** (a device with only the code
+   waits for your Allow) or **Anyone with the code**.
 
 It prints the room code (`4TK-G9P`) and the invite link (`https://pooled.run/r/4TKG9P#k=…`). The
 room opens when the gateway starts and keeps its code and link across restarts. If onboarding
 couldn't start the gateway, run `openclaw gateway run`.
 
-While a model downloads, a question gets an answer like `Pooled is downloading Qwen3 1.7B for room
-4TK-G9P: 42% (734 MB of 1.7 GB), about 18s left`. Devices can join meanwhile.
+While a model downloads, a question gets an answer like `Qwen3 1.7B is downloading for room 4TK-G9P:
+42% · 734 MB of 1.7 GB · 48 MB/s · 18s left`. Devices can join meanwhile.
 
 </details>
 
@@ -151,7 +155,7 @@ While a model downloads, a question gets an answer like `Pooled is downloading Q
 say how much memory to lend. Onboarding connects right away (no GPU needed for that):
 
 - with the invite link, it's let in at once;
-- with the code alone, it shows `Waiting for <host> to let this device in…` until the host allows it.
+- with the code alone, it shows `Waiting for <host> to let this device in · 0:08` until the host allows it.
 
 Either way it keeps the pass the host gives it, so the gateway (and every restart) gets straight back
 in. It also learns the host's model and context.
@@ -171,14 +175,15 @@ run them.
 
 | Command | What it does |
 |---|---|
-| `/pooled` | The room: invite link, devices, pledges, whether they hold the model, who is waiting, the download |
+| `/pooled` | The room: invite link, each device's GPU, what it lends and the layers it holds, the memory, who is waiting, the download |
 | `/pooled allow [n\|all]` | Let a waiting device in (the first one, the n-th, or all) |
 | `/pooled deny [n]` | Turn one away |
 | `/pooled link` | The invite link |
 | `/pooled pledge <GB>` | Lend another amount of this machine's GPU memory |
 
-Room problems show in the chat as `⚠️ Pooled: …` (waiting for devices, not enough memory,
-downloading, a device left, and so on). They are not part of the conversation the model sees. The
+Room problems show in the chat as a short note that starts with **Pooled**, the room code and what
+happened: waiting for devices, not enough memory, downloading the model, a device left, and so on.
+They are not part of the conversation the model sees. The
 bundled `pooled-room` skill tells the agent what they mean.
 
 </details>

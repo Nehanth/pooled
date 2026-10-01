@@ -10,6 +10,8 @@ import { Bridge } from "../../../cli/lib/room.js";
 import { roomLink, roomSettings, parseRoom, fmtCode, defaultName, ROOM_ORIGIN } from "./pool.js";
 import { MODEL_CHOICES, MODELS, modelInfo, modelChoices, memoryDefaults, isPulled, modelsDir, fmtBytes, shortCtxNote, isSmall, SMALL_WARNING } from "./models.js";
 import { download, pullLine } from "./download.js";
+import { promptUI, block, introLines, padLabels, modelOptions, progressText, para, note, PLAIN, stripAnsi } from "./ui.js";
+import { header, label, I, gbNum, clock } from "../../../cli/lib/style.js";
 import { initStateDir, savedGate, saveHostGate, joinState, saveJoinState } from "./state.js";
 
 export const PROVIDER = "pooled";
@@ -65,8 +67,9 @@ function result(s, learned = {}) {
   return {
     profiles: [],
     defaultModel: ref,
-    notes: s.mode === "host"
-      ? [`Pooled room ${fmtCode(s.code)} opens with OpenClaw's gateway. Invite link for your other devices: ${roomLink(s.code, { key: learned.key, signal: s.signal })}. /pooled in the chat shows the room and who is waiting to join.`]
+    // the room's block said it all (the invite link once); a join that isn't in yet gets one line
+    notes: s.mode === "host" || learned.inRoom
+      ? []
       : [`This device joins Pooled room ${fmtCode(s.code)} when OpenClaw's gateway starts, and holds layers when the room deals them.`],
     configPatch: {
       models: { providers: { [PROVIDER]: providerConfig(s, learned) } },
@@ -116,86 +119,105 @@ export async function knock(code, key, { name = defaultName(), signal = null, wa
   }
 }
 
-const gbPrompt = (p, mem, initial) => p.text({
-  message: `This GPU: ${mem.label}. How much of its memory does this device lend the room (GB)?`,
+const gbPrompt = (p, initial) => p.text({
+  message: "How much GPU memory should this device lend? (GB)",
   initialValue: String(initial),
-  validate: (v) => (+v > 0 && +v <= 512 ? undefined : "a number of GB, e.g. 12"),
+  validate: (v) => (+v > 0 && +v <= 512 ? undefined : "a number of GB, like 12"),
 });
 
 export async function runSetup(ctx) {
   await initStateDir();
   const p = ctx.prompter;
+  const ui = promptUI(p);
+  const { S } = ui;
+  const mem = deps.memoryDefaults();
+  await block(p, ui, introLines(S, ui.cols, mem), "Pooled");
   const mode = await p.select({
-    message: "Pooled runs a model across your own devices. How should this device take part?",
-    options: [
-      { value: "host", label: "Start a room on this device", hint: "you get an invite link; your other Mac, PC or phone joins with it" },
-      { value: "join", label: "Join a room", hint: "another device already started one: paste its link or code" },
-    ],
+    message: "How should this device take part?",
+    options: padLabels([
+      { value: "host", label: "Start a room", hint: "this device hosts; your other Mac, PC or phone joins with the invite link" },
+      { value: "join", label: "Join a room", hint: "another device started one: paste its invite link or code" },
+    ]),
   });
   const prev = roomSettings(ctx.config?.plugins?.entries?.[PROVIDER]?.config || {}, {});
-  const mem = deps.memoryDefaults();
   const dir = prev.modelDir;
   if (mode === "host") {
-    const pledge = +(await gbPrompt(p, mem, prev.mode === "host" && prev.pledgeGB ? prev.pledgeGB : mem.def));
+    const pledge = +(await gbPrompt(p, prev.mode === "host" && prev.pledgeGB ? prev.pledgeGB : mem.def));
     const { rows, recommended } = modelChoices(dir, pledge);
     const model = await p.select({
-      message: "Which model should the room run?",
-      options: rows.map((r) => ({ value: r.key, label: r.name, hint: r.hint })),
+      message: "Which model?",
+      options: modelOptions(S, rows.map((r) => ({ ...r, small: isSmall(r.key) })), { recommended }),
       // the earlier choice, unless it was a small model: then the one recommended for OpenClaw
       initialValue: prev.mode === "host" && MODEL_CHOICES.includes(prev.model) && !isSmall(prev.model) ? prev.model : recommended,
     });
-    const trim = isSmall(model) ? await smallModel(p) : false;
+    const trim = isSmall(model) ? await smallModel(p, ui) : false;
     let pull = prev.pull;
-    if (!isPulled(dir, model)) pull = await getModel(p, dir, model);
-    const devs = await p.select({ message: "Wait for how many devices before loading the model?", options: [
-      { value: 1, label: "Just this one when it has enough memory", hint: "others can still join later as askers" },
-      { value: 2, label: "Two (this + one more)" }, { value: 3, label: "Three" }], initialValue: rows.find((r) => r.key === model)?.fitsAlone ? 1 : 2 });
-    const ask = await p.select({ message: "Who can join the room?", options: [
-      { value: true, label: "Devices with the invite link", hint: "recommended: a device with only the code waits until you send /pooled allow" },
-      { value: false, label: "Anyone with the room code", hint: "no asking" }], initialValue: prev.ask !== false });
+    if (!isPulled(dir, model)) pull = await getModel(p, ui, dir, model);
+    const devs = await p.select({ message: "How many devices should be in before the model loads?", options: padLabels([
+      { value: 1, label: "1  this device", hint: "once it holds the whole model; others can still join" },
+      { value: 2, label: "2  this one and one more" }, { value: 3, label: "3  this one and two more" }]), initialValue: rows.find((r) => r.key === model)?.fitsAlone ? 1 : 2 });
+    const ask = await p.select({ message: "Who can join the room?", options: padLabels([
+      { value: true, label: "Invite link only", hint: "recommended: a device with only the code waits for /pooled allow" },
+      { value: false, label: "Anyone with the code", hint: "no asking" }]), initialValue: prev.ask !== false });
     const code = prev.mode === "host" && prev.code ? prev.code : newCode();
     const s = { mode, model, code, pledgeGB: pledge, minDevices: devs, signal: prev.signal, modelDir: dir, ask, pull, trim };
     const key = hostKey(code, ask);
     const link = roomLink(code, { key, signal: s.signal });
     const info = modelInfo(model);
-    await p.note([
-      `Room code: ${fmtCode(code)}`,
-      `Invite link: ${link}`,
+    const W = ui.cols;
+    await block(p, ui, [
+      ...header(S, W, [S.bold("Pooled room"), `${S.pill(fmtCode(code))}  ${S.ink3(`${info.name} · opens with OpenClaw's gateway`)}`,
+        S.ink3(`loads once ${devs > 1 ? `${devs} devices are in and ` : ""}the room has ${gbNum(info.needGB)}`)]),
       "",
-      "On the other device, either:",
-      "  - open the invite link in Chrome or Safari (a Mac, a PC or a phone), set how much memory it lends, and press Join;",
-      `  - or run \`npx -p @pooled/cli -p webgpu@0.6.1 pooled join "${link}"\`;`,
-      "  - or pick Pooled → \"Join a room\" in OpenClaw there and paste the link.",
-      ask ? `A device with only the code ${fmtCode(code)} waits: /pooled allow (in any OpenClaw chat) lets it in.` : `Anyone with the code ${fmtCode(code)} can join.`,
-      `The model (${info.name}) loads once ${devs > 1 ? `${devs} devices are in the room and ` : ""}the room has about ${info.needGB} GB.`,
-      "Share the link only with people you trust: every device holding layers computes what is asked here.",
-    ].join("\n"), "Pooled room");
+      label(S, "invite") + S.link(link),
+      ...para(S, "join", "On your other device: open the invite link in Chrome or Safari (a Mac, a PC or a phone), or pick Pooled → Join a room in OpenClaw there and paste it, or run:", W),
+      // the command in two lines (a shell continuation), so it fits 80-100 columns and still pastes
+      I + "  " + S.bold("npx -p @pooled/cli -p webgpu@0.6.1 \\"),
+      I + "    " + S.bold(`pooled join "${link}"`),
+      ...para(S, "ask", ask ? `A device with only the code ${fmtCode(code)} waits: /pooled allow (in any OpenClaw chat) lets it in.` : `Anyone with the code ${fmtCode(code)} can join.`, W),
+      label(S, "status") + S.ink2("/pooled") + S.ink3(" in any OpenClaw chat shows the room"),
+      "",
+      ...note(S, "Share the link only with people you trust: every device holding layers computes what is asked here.", W),
+    ], "Pooled room");
     return result(s, { key });
   }
   // join
-  const pasted = await p.text({ message: "Paste the room's invite link (or type its code)", placeholder: `${ROOM_ORIGIN}/r/4TK-G9P#k=…  or  4TK-G9P`,
+  const pasted = await p.text({ message: "Paste the room's invite link or code", placeholder: `${ROOM_ORIGIN}/r/4TK-G9P#k=…  or  4TK-G9P`,
     validate: (v) => (parseRoom(v).code ? undefined : "a link like https://pooled.run/r/4TKG9P#k=…, or a code like 4TK-G9P") });
   const { code, key } = parseRoom(pasted);
-  const pledge = +(await gbPrompt(p, mem, prev.mode === "join" && prev.pledgeGB ? prev.pledgeGB : mem.def));
+  const pledge = +(await gbPrompt(p, prev.mode === "join" && prev.pledgeGB ? prev.pledgeGB : mem.def));
   if (key) saveJoinState(code, { key });
-  const prog = p.progress(`Connecting to Pooled room ${fmtCode(code)}…`);
+  const prog = p.progress(`Connecting to room ${fmtCode(code)}`);
   const name = defaultName();
+  let lobbyAt = null, tick = null, host = "the host";
+  const lobbyLine = () => `Waiting for ${host} to let this device in · ${clock(Date.now() - lobbyAt)} · an invite link skips this`;
   const k = await knock(code, key || joinState(code).key || null, { signal: prev.signal, name,
-    onLobby: (b) => prog.update(`Waiting for ${b.hostName || "the host"} to let this device in… (it sees "${name} wants to join"; the invite link skips this)`) });
+    onLobby: (b) => {
+      host = b.hostName || "the host"; lobbyAt ??= Date.now(); prog.update(lobbyLine());
+      if (ui.terminal && !tick) { tick = setInterval(() => prog.update(lobbyLine()), 1000); tick.unref?.(); }
+    } }).finally(() => clearInterval(tick));
   const learned = { model: null, ctx: null };
   if (k.ok) {
     saveJoinState(code, { key, pass: k.pass, host: k.host, model: k.model, ctx: k.ctx });
-    Object.assign(learned, { model: k.model, ctx: k.ctx });
-    prog.stop(`In Pooled room ${fmtCode(code)}${k.host ? ` (host: ${k.host})` : ""}${k.model && MODELS[k.model] ? `, running ${modelInfo(k.model).name}` : ""}`);
+    Object.assign(learned, { model: k.model, ctx: k.ctx, inRoom: true });
+    const mname = k.model && MODELS[k.model] ? modelInfo(k.model).name : null;
+    prog.stop(`In room ${fmtCode(code)}${k.host ? ` · host ${k.host}` : ""}${mname ? ` · ${mname}` : ""}`);
+    await block(p, ui, [
+      ...header(S, ui.cols, [S.bold("Pooled room"), `${S.pill(fmtCode(code))}  ${S.ink3([k.host ? `${k.host}'s room` : null, mname].filter(Boolean).join(" · "))}`,
+        `${S.acc(S.g.live)} in the room` + S.ink3(" · joins again when OpenClaw's gateway starts")]),
+      "",
+      label(S, "you") + name + S.ink3(` · lends ${gbNum(pledge)}`),
+      label(S, "status") + S.ink2("/pooled") + S.ink3(" in any OpenClaw chat shows the room"),
+    ], "Pooled room");
     const short = shortCtxNote(k.model, k.ctx, k.host || "the host");
     if (short) await p.note(short, "The room's context is too short for OpenClaw");
-    if (isSmall(k.model)) learned.trim = await smallModel(p, k.host || "the host");
+    if (isSmall(k.model)) learned.trim = await smallModel(p, ui, k.host || "the host");
   } else if (k.refused) {
-    prog.stop(`The host of room ${fmtCode(code)} turned this device away: ${k.refused}`);
+    prog.stop(`${k.host || "The host"} of room ${fmtCode(code)} turned this device away: ${k.refused}`);
     throw new Error(`Pooled: the host of room ${fmtCode(code)} turned this device away (${k.refused}). Ask for the room's invite link and run the setup again with it.`);
   } else {
-    prog.stop(k.timeout ? `The host of room ${fmtCode(code)} has not let this device in yet: the gateway asks again when it starts`
-      : `Couldn't reach room ${fmtCode(code)} now (${k.error}): the gateway tries again when it starts`);
+    prog.stop(k.timeout ? `The host of room ${fmtCode(code)} has not let this device in yet; the gateway asks again when it starts`
+      : `Couldn't reach room ${fmtCode(code)} now (${k.error}); the gateway tries again when it starts`);
   }
   const s = { mode: "join", code, model: prev.model || "qwen3-1.7b", pledgeGB: pledge, signal: prev.signal, modelDir: dir, trim: !!learned.trim };
   return result(s, learned);
@@ -203,37 +225,42 @@ export async function runSetup(ctx) {
 
 // a small model was picked (or the joined room runs one): say what to expect, and offer the trimmed
 // OpenClaw settings, off unless chosen -> whether to apply TRIM_PATCH
-async function smallModel(p, host = null) {
-  await p.note(host ? `${host} runs this room with a small model. ${SMALL_WARNING}` : SMALL_WARNING, "Small model");
-  await p.note(TRIM_NOTE, "Optional: trim OpenClaw for a small model");
+async function smallModel(p, ui, host = null) {
+  const { S } = ui, W = ui.cols;
+  await block(p, ui, [
+    ...para(S, "small", host ? `${host} runs this room with a small model. ${SMALL_WARNING}` : SMALL_WARNING, W),
+    "",
+    ...TRIM_NOTE.split("\n").join(" ").split(/(?<=\.) (?=These|Undo)/).flatMap((t, i) => para(S, i === 0 ? "optional" : "", t, W, i === 0 ? (x) => x : S.ink3)),
+  ], "Small model");
   const v = await p.select({
     message: "Turn off OpenClaw's tool search and memory flush? (global: every model and agent)",
-    options: [
+    options: padLabels([
       { value: false, label: "No, keep OpenClaw's settings", hint: "keep them if you use other models in OpenClaw too" },
-      { value: true, label: "Yes, turn both off for all of OpenClaw", hint: "tools.toolSearch = false, compaction.memoryFlush off" },
-    ],
+      { value: true, label: "Yes, turn both off", hint: "for all of OpenClaw: tools.toolSearch = false, compaction.memoryFlush off" },
+    ]),
     initialValue: false,
   });
   return v === true;
 }
 
 // the model is not on disk: download it now (with progress), let the gateway do it, or stream
-async function getModel(p, dir, model) {
+async function getModel(p, ui, dir, model) {
   const info = modelInfo(model);
   const how = await p.select({
-    message: `${info.name} is not downloaded yet (${fmtBytes(info.fileBytes)}, kept in ${dir.replace(process.env.HOME || "~", "~")} with \`pooled pull\`'s models)`,
-    options: [
-      { value: "now", label: "Download now", hint: "resumable, checked against its SHA-256" },
-      { value: "later", label: "Download when the gateway starts", hint: "devices can join while it downloads" },
+    message: `${info.name} is not downloaded (${fmtBytes(info.fileBytes)}). Download it now?`,
+    options: padLabels([
+      { value: "now", label: "Download now", hint: `into ${dir.replace(process.env.HOME || "~", "~")}, shared with pooled pull; resumes, checks its SHA-256` },
+      { value: "later", label: "When the gateway starts", hint: "devices can join while it downloads" },
       { value: "stream", label: "Don't download", hint: "stream this device's layers from Hugging Face at each start" },
-    ],
+    ]),
     initialValue: "now",
   });
   if (how === "stream") return false;
   if (how === "later") return true;
-  const prog = p.progress(`Downloading ${info.name}…`);
-  const st = await download(dir, model, { onChange: (x) => prog.update(`Downloading ${info.name}: ${pullLine(x)}`) });
-  prog.stop(st.state === "done" ? `${info.name} downloaded (${fmtBytes(st.total)})` : `${info.name}: ${pullLine(st)}; the gateway tries again when it starts`);
+  const cols = Math.min(ui.cols, 100) - 8;
+  const prog = p.progress(`Downloading ${info.name}`);
+  const st = await download(dir, model, { onChange: (x) => prog.update(progressText(ui.S, info.name, x, { cols })) });
+  prog.stop(st.state === "done" ? stripAnsi(progressText(PLAIN, info.name, st)) : `${info.name}: ${pullLine(st)}; the gateway tries again when it starts`);
   return true;
 }
 

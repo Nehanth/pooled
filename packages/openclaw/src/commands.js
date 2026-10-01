@@ -6,9 +6,10 @@
 //   /pooled deny [n]        turn one away
 //   /pooled link            the invite link
 //   /pooled pledge <GB>     lend another amount of this machine's GPU memory (the next deal uses it)
-import { current, fmtCode, fitNow } from "./pool.js";
+import { current, fmtCode, fitNow, modelInfo } from "./pool.js";
+import { headLine, deviceBlock, memoryLine, downloadLine } from "./ui.js";
 
-const HELP = "/pooled · /pooled allow [n|all] · /pooled deny [n] · /pooled link · /pooled pledge <GB>";
+const HELP = "`/pooled` the room · `/pooled allow [n|all]` · `/pooled deny [n]` · `/pooled link` · `/pooled pledge <GB>`";
 
 async function room() {
   const h = current();
@@ -16,29 +17,47 @@ async function room() {
   return h.ready.catch(() => null);
 }
 
+// the room as markdown (it reads the same in the TUI, the Control UI and a channel): a header line, the
+// invite link, the devices in a code block (the CLI's table), then one sentence on what to do
 export function statusText(r) {
   const st = r.status();
-  const lines = [];
   const host = st.mode === "host";
-  lines.push(`Pooled room ${fmtCode(r.code)} · ${host ? "this gateway hosts it" : "this gateway joined it"}${st.online ? ` · ${st.model} online` : ""}`);
-  if (host) lines.push(`Invite link: ${r.link}`);
+  const model = st.model ? modelInfo(st.model).name : null;
+  const n = st.devices?.length || 0;
+  const devs = `${n} device${n === 1 ? "" : "s"}`;
+  const out = [];
+  let state;
+  if (!host && st.refused) state = "turned away";
+  else if (!host && st.admission !== "in") state = "waiting to be let in";
+  else if (st.online && st.degraded) state = "a device left";
+  else if (st.online) state = `● online · ${devs}`;
+  else if (st.download && ["waiting", "running", "checking"].includes(st.download.state)) state = `downloading · ${devs}`;
+  else if (st.loading) state = `loading · ${devs}`;
+  else state = `${host ? "waiting for devices" : "waiting for the host to start"} · ${devs}`;
+  out.push(headLine(r.code, host ? model : st.hostName ? `${st.hostName}'s room` : "joined", state));
+  if (host) out.push(`Invite link: ${r.link}`);
+  const rows = st.rows?.length ? st.rows : (st.devices || []).map((d) => ({ name: d.name, gb: d.gb, self: !!d.self, gpu: "", range: null }));
+  const extra = [];
+  if (host && st.needGB) extra.push(memoryLine(st.pledgedGB || 0, st.needGB));
+  const dl = downloadLine(st.download);
+  if (dl) extra.push(dl);
+  if (rows.length || st.waiting?.length) out.push("", ...deviceBlock(rows, { waiting: (st.waiting || []).map((q) => ({ name: q.name || String(q.line || "").replace(/ wants to join.*$/, "") })), extra }));
+  const say = [];
   if (!host) {
-    if (st.refused) lines.push(`The host turned this device away: ${st.refused}`);
-    else if (st.admission !== "in") lines.push("Waiting for the host to let this device in (the room's invite link skips this: run `openclaw onboard` and paste it)");
+    if (st.refused) say.push(`The host turned this device away: ${st.refused}. Ask them for the room's invite link and run \`openclaw onboard\` with it.`);
+    else if (st.admission !== "in") say.push("Waiting for the host to let this device in. The host is asked to allow or deny it; the room's invite link skips this step (run `openclaw onboard` here and paste it).");
   }
-  if (st.devices?.length) lines.push(`Devices: ${st.devices.map((d) => `${d.name}${d.self ? " (this)" : ""} ${d.gb} GB`).join(", ")} · ${st.pledgedGB} GB pledged`);
   if (host && !st.online) {
     const fit = fitNow(r, st);
-    if (!fit.fits && fit.note) lines.push(fit.note);
+    if (!fit.fits && fit.note) say.push(fit.note.replace(/([^.])$/, "$1."));
   }
-  if (st.split?.length) lines.push(`Layers: ${st.split.join(" · ")}`);
-  if (st.download && st.download.state !== "done") lines.push(`Model download: ${st.download.line}`);
   if (st.waiting?.length) {
-    lines.push("Waiting to join:");
-    st.waiting.forEach((q, i) => lines.push(`  ${i + 1}. ${q.line}`));
-    lines.push("/pooled allow lets the first one in (/pooled allow 2, /pooled allow all), /pooled deny turns it away");
+    const who = st.waiting.map((q, i) => `${i + 1}. ${q.line}`);
+    say.push(...(st.waiting.length > 1 ? ["Waiting to join:", ...who] : [`${st.waiting[0].line}.`]),
+      `\`/pooled allow\` lets ${st.waiting.length > 1 ? "the first one" : "it"} in${st.waiting.length > 1 ? " (\`/pooled allow 2\`, \`/pooled allow all\`)" : ""}; \`/pooled deny\` turns it away.`);
   }
-  return lines.join("\n");
+  if (say.length) out.push("", ...say);
+  return out.join("\n");
 }
 
 // args: what followed /pooled -> reply text
@@ -49,7 +68,7 @@ export async function runPooledCommand(args, { getRoom = room } = {}) {
   switch (sub.toLowerCase()) {
     case "": case "status": return statusText(r);
     case "link": case "invite":
-      return r.s.mode === "host" ? `Invite link for Pooled room ${fmtCode(r.code)}: ${r.link}\nEvery device holding layers computes what is asked here: share it only with people you trust.`
+      return r.s.mode === "host" ? `${headLine(r.code, "invite link")}\n\n${r.link}\n\nEvery device holding layers computes what is asked here: share it only with people you trust.`
         : `This gateway joined Pooled room ${fmtCode(r.code)}; its host has the invite link.`;
     case "allow": case "deny": {
       if (r.s.mode !== "host" || !r.node.gate) return "Only the room's host lets devices in: this gateway joined someone else's room.";

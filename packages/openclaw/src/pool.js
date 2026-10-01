@@ -18,7 +18,7 @@
 import os from "node:os";
 import { parseCode, formatCode, keyFragment, validKey, saveGate } from "../../../room/joingate.js";
 import { roomCodeFrom, roomKeyFrom } from "../../../cli/lib/room.js";
-import { roomFitNow } from "../../../cli/lib/hostui.js";
+import { roomFitNow, gpuLabel } from "../../../cli/lib/hostui.js";
 import { fmtBytes } from "../../../cli/lib/cache.js";
 import { MODELS, MODEL_CHOICES, modelInfo, modelsDir, isPulled, pluginCtx, lib, shortCtxNote } from "./models.js";
 import { PooledError, pooledModules } from "./runtime.js";
@@ -181,9 +181,24 @@ export function status(r) {
   const st = r.node.status();
   const out = { mode: r.s.mode, link: r.link, ...st, model: st.model || r.s.model, modelHost: st.hosting, needGB: modelInfo(r.s.model, r.s.ctx || 0).needGB };
   if (r.s.mode === "host") out.waiting = (r.node.waitingJoins?.() || []).map((q) => ({ id: q.id, name: q.name, line: q.line }));
-  else { out.admission = r.node.admission || "wait"; if (r.refused) out.refused = r.refused; }
+  else { out.admission = r.node.admission || "wait"; out.hostName = r.node.hostName || null; if (r.refused) out.refused = r.refused; }
   if (r.pull) out.download = { ...r.pull, line: pullLine(r.pull) };
+  out.rows = deviceRows(r, st);
   return out;
+}
+
+// the room's devices for /pooled: { name, gpu, gb, range, self }, this device first (the host's view:
+// its links; a joined device's: the room's member list)
+export function deviceRows(r, st = r.node.status()) {
+  const n = r.node;
+  const ranges = new Map((n.split?.names || []).map((nm, i) => [nm, n.split.ranges[i]]));
+  const row = (name, meta, gb, self = false) => ({ name, gpu: gpuLabel(meta?.gpu) || "", gb, range: ranges.get(name) || null, self });
+  if (st.hosting) {
+    const out = [row(n.name, n.meta, +n.meta?.contribGB || st.devices?.[0]?.gb || 0, true)];
+    for (const id of n.gpuPeers?.() || []) { const e = n.conns.get(id); out.push(row(e?.name || id, e?.meta, +e?.meta?.contribGB || 0)); }
+    return out;
+  }
+  return (n.members || []).filter((m) => m.meta?.webgpu && !m.meta?.api).map((m) => row(m.name, m.meta, +m.meta?.contribGB || 0, m.name === n.name));
 }
 
 // whether the pledges in the room hold the model, as the room page decides it -> { fits, note }
@@ -220,13 +235,13 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
     const fit = fitNow(r, st);
     if (st.devices.length >= s.minDevices && fit.fits) break;
     if (Date.now() - t0 > waitMs) {
-      const waiting = st.waiting?.length ? ` ${st.waiting.map((q) => q.line).join("; ")}: send /pooled allow to let ${st.waiting.length > 1 ? "them" : "it"} in.` : "";
+      const waiting = st.waiting?.length ? ` ${st.waiting.map((q) => q.line).join("; ")}: send \`/pooled allow\` to let ${st.waiting.length > 1 ? "them" : "it"} in.` : "";
       if (st.devices.length < s.minDevices)
-        throw new PooledError("waiting", `Pooled room ${code} is waiting for devices: ${st.devices.length} of ${s.minDevices} joined.${waiting} ` +
-          `Open the room's invite link (/pooled link shows it) on your other device, or paste it in OpenClaw there (Pooled → Join a room), then ask again`);
-      throw new PooledError("memory", `not enough memory in Pooled room ${code} for ${info.name}: ` +
-        `the devices pledged ${st.pledgedGB} GB (${st.devices.map((d) => `${d.name} ${d.gb} GB`).join(", ")}), it needs about ${fit.needGB ?? info.needGB} GB.${waiting} ` +
-        `Add a device with the room's invite link (/pooled link), raise a pledge (/pooled pledge <GB>), or pick a smaller model`);
+        throw new PooledError("waiting", `${st.devices.length} of ${s.minDevices} devices are in the room.${waiting} ` +
+          "Open the room's invite link on your other device (`/pooled link` shows it), or paste it in OpenClaw there (Pooled → Join a room). Then ask again.");
+      throw new PooledError("memory", `${info.name} needs about ${fit.needGB ?? info.needGB} GB; the devices in the room lend ${st.pledgedGB} GB ` +
+        `(${st.devices.map((d) => `${d.name} ${d.gb} GB`).join(", ")}).${waiting} ` +
+        "Add a device with the room's invite link (`/pooled link`), lend more with `/pooled pledge <GB>`, or pick a smaller model.");
     }
     if (Date.now() - said > 10000) { said = Date.now(); onWait(st); }
     await new Promise((res) => setTimeout(res, 500));
@@ -239,10 +254,10 @@ export async function ensureOnline(r, { signal, onWait = () => {}, waitPull = fa
   });
 }
 
-const lobbyMessage = (r) => `waiting for the host of Pooled room ${fmtCode(r.code)} to let this device in. On the host: press Allow (pooled.run), ` +
-  `a (pooled host) or send /pooled allow (OpenClaw). The room's invite link (${ROOM_ORIGIN}/r/${r.code}#k=…) gets in without asking: ` +
-  "run `openclaw onboard` here, pick Pooled → Join a room and paste it";
-const deniedMessage = (r, why) => `the host of Pooled room ${fmtCode(r.code)} turned this device away (${why}). Ask them for the room's invite link, then run \`openclaw onboard\` → Pooled → Join a room with it`;
+const lobbyMessage = (r) => `waiting for the host of room ${fmtCode(r.code)} to let this device in. On the host: press Allow (pooled.run), ` +
+  "a (`pooled host`) or send `/pooled allow` (OpenClaw). The room's invite link gets in without asking: " +
+  "run `openclaw onboard` here, pick Pooled → Join a room and paste it.";
+const deniedMessage = (r, why) => `the host of room ${fmtCode(r.code)} turned this device away (${why}). Ask them for the room's invite link, then run \`openclaw onboard\` → Pooled → Join a room with it.`;
 
 // a joined device: in the room (the host let it in), or a PooledError after lobbyMs in the lobby
 export async function admitted(r, { signal, lobbyMs = LOBBY_MS } = {}) {
@@ -305,7 +320,7 @@ export async function transport(r, { signal, lobbyMs = LOBBY_MS } = {}) {
     if (signal?.aborted) throw new PooledError("abort", "aborted");
     if (b.kicked) throw new PooledError("off", `the host of Pooled room ${fmtCode(r.code)} closed the link: ${b.kicked}`);
     if (Date.now() - t0 > r.s.waitSeconds * 1000)
-      throw new PooledError("waiting", `Pooled room ${fmtCode(r.code)} has no model running yet: press Start on the room's host, or wait for it to finish loading, then ask again`);
+      throw new PooledError("waiting", `room ${fmtCode(r.code)} has no model running yet. Press Start on the room's host, or wait for it to finish loading, then ask again.`);
     await new Promise((res) => setTimeout(res, 500));
   }
   return {

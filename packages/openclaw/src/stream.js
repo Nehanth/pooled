@@ -10,7 +10,8 @@
 import { Ask, Collector } from "../../../cli/lib/answer.js";
 import { ids, outcome, ApiError, OLD_HOST_MSG } from "../../../cli/lib/common.js";
 import { ensureRoom, roomSettings, transport, PooledError } from "./pool.js";
-import { toAsk, NOTICE } from "./convert.js";
+import { toAsk } from "./convert.js";
+import { noticeText } from "./ui.js";
 import { remember } from "./prewarm.js";
 
 let seq = 0;
@@ -21,10 +22,10 @@ const newRid = () => "oc" + Date.now().toString(36) + (seq++).toString(36);
 export function busyMessage(ev, r) {
   switch (ev.code) {
     case "ctx": return `context length exceeded: the conversation is ${ev.n} tokens; Pooled room ${r.code}'s context holds ${ev.max}. Start a new session (/new) or compact it`;
-    case "loading": return `Pooled room ${r.code} is still loading the model; ask again in a moment`;
-    case "degraded": return `a device left Pooled room ${r.code} while it held layers of the model; re-open the room's invite link on it (/pooled link), or wait for the room to re-deal the layers`;
+    case "loading": return `room ${r.code} is still loading the model. Ask again in a moment.`;
+    case "degraded": return `a device left room ${r.code} while it held layers of the model. Open the room's invite link on it again (\`/pooled link\`), or wait for the room to deal the layers again.`;
     case "off": return `the host of Pooled room ${r.code} does not allow API clients: turn on "Allow API clients" in the room's Serve API panel`;
-    case "queue": return `Pooled room ${r.code}'s queue is full; try again after the current answer`;
+    case "queue": return `room ${r.code}'s queue is full. Try again after the current answer.`;
     case "gone": return `lost the link to Pooled room ${r.code}'s host (${ev.err})`;
     default: return `Pooled room ${r.code}: ${ev.err || "the answer failed"}`;
   }
@@ -73,8 +74,8 @@ function openclawEncoder(stream, message) {
 const NOTICE_CODES = new Set(["setup", "noroom", "lobby", "denied", "waiting", "memory", "degraded", "downloading", "install", "start", "off", "queue", "loading", "older"]);
 export const isNotice = (error, message, signal) => !signal?.aborted && error instanceof PooledError && NOTICE_CODES.has(error.code) &&
   !message.content.some((c) => c.type === "toolCall" || (c.type === "text" && c.text.trim()));
-function noticeTurn(stream, message, text) {
-  const body = NOTICE + text.replace(/^Pooled: /, "");
+function noticeTurn(stream, message, code, text, room) {
+  const body = noticeText(code, text, room);
   message.content = [{ type: "text", text: body }];
   message.stopReason = "stop";
   stream.push({ type: "text_start", contentIndex: 0, partial: message });
@@ -150,7 +151,7 @@ export function createPooledStream({ getPluginConfig, log = () => {}, sdk }) {
         // error turn with no output up to 3 times. The room's own conditions (the lobby, waiting
         // for devices, a download, a refusal) are things the owner acts on: they come back as the
         // turn's visible text instead, once. convert.js drops them when the history is replayed.
-        if (isNotice(error, message, signal)) { noticeTurn(stream, message, e.message); return; }
+        if (isNotice(error, message, signal)) { noticeTurn(stream, message, error.code, e.message, r?.code || null); return; }
         failTransportStream({ stream, output: message, error: e, signal });
       }
     })();

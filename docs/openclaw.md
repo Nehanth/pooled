@@ -54,7 +54,7 @@ openclaw plugins install ./pooled-openclaw-0.2.0.tgz --force --accept-capabiliti
 
 ### Start a room
 
-**Start a room on this device** asks how much GPU memory to lend, which model (downloaded or its size,
+**Start a room** asks how much GPU memory to lend, which model (downloaded or its size,
 what it needs across the room, its context; the 35B MoE is preselected, see [Which model](#which-model)),
 whether to download it now, how many devices to wait for, and who can join. It prints the code (`4TK-G9P`) and
 the invite link. The room opens with the gateway and keeps its code and link across restarts.
@@ -67,7 +67,7 @@ there. A device with the code alone waits: `/pooled` in any OpenClaw chat shows 
 ### Join a room
 
 **Join a room** takes the invite link (or the code) and the GB to lend, and connects right away. With
-the code alone it shows `Waiting for <host> to let this device in…` until the host allows it. It keeps
+the code alone it shows `Waiting for <host> to let this device in · 0:08` until the host allows it. It keeps
 the pass the host gives it, so the gateway gets straight back in after every restart, and it learns the
 host's model and context window. The room needs at least a 16k context (OpenClaw's own instructions
 and tools are about 12k tokens): `pooled host qwen3-1.7b` opens at 16k from `@pooled/cli` 0.3.2 (0.3.0 and 0.3.1 opened it at 8k: run those with `--ctx 16384`).

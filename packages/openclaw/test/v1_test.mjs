@@ -92,13 +92,17 @@ test("onboarding (host): the GPU's default pledge, the model list, 'don't downlo
   const res = await runSetup({ prompter: p, config: { plugins: { entries: { pooled: { config: { modelDir: models } } } } } });
   const sel = p.shown.selects;
   const hints = sel[1].options.map((o) => o.hint).join("\n");
-  assert.match(hints, /1\.7 GB download · needs about [\d.]+ GB across the room · 16k context · fits on this machine alone · small: slow turns and tool loops in OpenClaw/);
+  const labels = sel[1].options.map((o) => o.label);
+  assert.match(labels[0], /^Qwen3 1\.7B {7}needs {2}\d GB {3}1\.7 GB download$/, "name, need and download in columns");
+  assert.equal(new Set(labels.map((l) => l.indexOf("needs"))).size, 1, "the columns line up");
+  assert.match(hints, /small: slow in OpenClaw · fits on this device/);
   assert.equal(sel[1].initialValue, "qwen3.6-35b-moe", "8 GB holds neither big model alone: the MoE is still the one for OpenClaw");
-  assert.match(hints, /128k context · needs more devices · recommended for OpenClaw/);
+  assert.match(hints, /recommended · needs another device/);
   assert.match(p.shown.notes.join("\n"), /Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops\. Use the 35B MoE if your devices can hold it\./);
   assert.match(p.shown.notes.join("\n"), /global OpenClaw settings/);
   assert.equal(sel[2].initialValue, false, "the trimmed settings are opt-in");
-  assert.match(sel[3].message, /not downloaded yet \(1\.7 GB/);
+  assert.match(sel[3].message, /Qwen3 1\.7B is not downloaded \(1\.7 GB\)\. Download it now\?/);
+  assert.match(p.shown.notes[0], /^Pooled\nPeer-to-peer inference engine for your claw\npooled\.run\n\ngpu {7}RTX 5070 · 12 GB$/, "the intro, as plain text");
   const c = res.configPatch.plugins.entries.pooled.config;
   assert.deepEqual([c.mode, c.model, c.pledgeGB, c.minDevices, c.modelDir, c.pull, c.ask], ["host", "qwen3-1.7b", 8, 1, models, false, undefined]);
   assert.match(c.code, /^[A-HJKMNP-TV-Z2-9]{6}$/);
@@ -106,7 +110,7 @@ test("onboarding (host): the GPU's default pledge, the model list, 'don't downlo
   const note = p.shown.notes.join("\n");
   assert.ok(note.includes(`https://pooled.run/r/${c.code}#k=${key}`), note);
   assert.match(note, /\/pooled allow/);
-  assert.ok(res.notes[0].includes(`#k=${key}`));
+  assert.deepEqual(res.notes, [], "the invite key is shown once, in the room's block");
   assert.deepEqual(res.configPatch.tools.byProvider.pooled.allow, ["read", "write", "edit", "ls"], "the 1.7B gets the file tools only");
   assert.equal(res.configPatch.tools.toolSearch, undefined, "no global change unless chosen");
   assert.equal(res.configPatch.agents.defaults.compaction, undefined);
@@ -141,7 +145,7 @@ test("onboarding (join): a pasted link; waiting for the host's Allow is shown; t
   const res = await runSetup({ prompter: p, config: {} });
   assert.equal(FakeBridge.made[0].key, KEY, "knocks with the link's key");
   assert.match(p.shown.progress.join("\n"), /Waiting for .* to let this device in/);
-  assert.match(p.shown.progress.at(-1), /In Pooled room K7Q-XAB \(host: mac\), running Qwen3\.6 35B MoE/);
+  assert.match(p.shown.progress.at(-1), /In room K7Q-XAB · host mac · Qwen3\.6 35B MoE/);
   assert.equal(joinState("K7QXAB").pass, PASS);
   const m = res.configPatch.models.providers.pooled.models[0];
   assert.deepEqual([m.id, m.name, m.contextWindow], ["room", "Pooled room K7Q-XAB (Qwen3.6 35B MoE)", 65536]);
@@ -178,7 +182,7 @@ test("onboarding (join): turned away is an error; no answer yet is saved for the
   FakeBridge.how = "hang"; deps.waitMs = 50;
   const p = prompter(["join", "ZXCVBN", "6"]);
   const res = await runSetup({ prompter: p, config: {} });
-  assert.match(p.shown.progress.at(-1), /has not let this device in yet: the gateway asks again/);
+  assert.match(p.shown.progress.at(-1), /has not let this device in yet; the gateway asks again/);
   assert.equal(res.configPatch.plugins.entries.pooled.config.code, "ZXCVBN");
   assert.ok(FakeBridge.made.at(-1).destroyed, "the knock is dropped");
   deps.waitMs = 180000;
@@ -201,7 +205,7 @@ test("join: an ask while the host hasn't let this device in says so after a whil
   const r = joinedRoom({ admission: "lobby" });
   const e = await transport(r, { lobbyMs: 60 }).catch((x) => x);
   assert.ok(e instanceof PooledError); assert.equal(e.code, "lobby");
-  assert.match(e.message, /waiting for the host of Pooled room K7Q-XAB to let this device in.*\/pooled allow.*invite link/);
+  assert.match(e.message, /waiting for the host of room K7Q-XAB to let this device in.*\/pooled allow.*invite link/);
   r.refused = "The host didn't let this device in.";
   assert.equal((await admitted(r).catch((x) => x)).code, "denied");
 });
@@ -227,7 +231,7 @@ test("host: an ask while the model downloads says how far it is", async () => {
     pull: { key: "qwen3-1.7b", state: "running", done: 2 ** 30 * 0.8, total: 2 ** 30 * 1.8, bps: 50 * 2 ** 20 } };
   const e = await ensureOnline(r).catch((x) => x);
   assert.equal(e.code, "downloading");
-  assert.match(e.message, /downloading Qwen3 1\.7B for room 4TK-G9P: 44% \(819 MB of 1\.8 GB\), about 20s left/);
+  assert.match(e.message, /Qwen3 1\.7B is downloading for room 4TK-G9P: 44% · 819 MB of 1\.8 GB · 52 MB\/s · 20s left\./);
 });
 
 // ---------------- /pooled ----------------
@@ -245,9 +249,10 @@ function hostRoom() {
 test("/pooled: the room, the link, and Allow / Deny for devices waiting to join", async () => {
   const r = hostRoom(), get = async () => r;
   const st = await runPooledCommand("", { getRoom: get });
-  assert.match(st, /Pooled room 4TK-G9P · this gateway hosts it/);
-  assert.ok(st.includes(r.link));
-  assert.match(st, /1\. phone wants to join .*\n  2\. otter wants to join/);
+  assert.match(st, /^\*\*Pooled\*\* · `4TK-G9P` · .*waiting for devices · 1 device\n/);
+  assert.ok(st.includes(`Invite link: ${r.link}`));
+  assert.match(st, /```text\nDEVICE +GPU +LENDS +HOLDS\ngb10 \(OpenClaw\) +2 GB +— +this device\nphone +wants to join\notter +wants to join\n/);
+  assert.match(st, /1\. phone wants to join .*\n2\. otter wants to join/);
   assert.match(st, /short|add a device/i, "says the room can't hold the model yet");
   assert.equal(await runPooledCommand("allow 2", { getRoom: get }), "Let in: otter");
   assert.equal(await runPooledCommand("deny", { getRoom: get }), "Turned away: phone");
@@ -306,7 +311,7 @@ test("download: into <dir>/<model>/ with progress, checked against its SHA-256; 
   assert.ok(!fs.existsSync(lockPath(dir, "tiny")), "the lock is released");
   const bad = await download(tmp("dl2"), "tiny", { models, fetch: async () => new Response("no", { status: 404 }) });
   assert.equal(bad.state, "error"); assert.match(pullLine(bad), /download failed: .*404/);
-  assert.match(pullLine({ ...pullState("qwen3-1.7b"), state: "running", done: 2 ** 29, total: 2 ** 30, bps: 2 ** 27 }), /^50% \(512 MB of 1\.0 GB\), about 4s left$/);
+  assert.match(pullLine({ ...pullState("qwen3-1.7b"), state: "running", done: 2 ** 29, total: 2 ** 30, bps: 2 ** 27 }), /^50% · 512 MB of 1\.0 GB · 134 MB\/s · 4s left$/);
   assert.match(downloadingMessage({ ...pullState("qwen3-1.7b"), state: "waiting" }, "4TK-G9P"), /waiting for another download/);
 });
 

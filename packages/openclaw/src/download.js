@@ -31,7 +31,7 @@ export async function download(dir, key, { signal, onChange = () => {}, fetch, s
   return st;
 }
 
-// "42% (0.8 GB of 1.8 GB), about 18s left" / "checking the download"
+// one line, as the CLI words it: "42% · 0.8 GB of 1.8 GB · 48 MB/s · 18 s left" / "checking the download"
 export function pullLine(st) {
   if (!st) return "";
   if (st.state === "waiting") return "waiting for another download of it to finish";
@@ -39,7 +39,10 @@ export function pullLine(st) {
   if (st.state === "done") return `downloaded (${fmtBytes(st.total)})`;
   if (st.state === "error") return `download failed: ${st.error}`;
   const pct = st.total ? Math.floor((st.done / st.total) * 100) : null;
-  return `${pct != null ? `${pct}% ` : ""}(${fmtBytes(st.done)}${st.total ? ` of ${fmtBytes(st.total)}` : ""})${st.bps && st.total ? `, about ${fmtEta((st.total - st.done) / st.bps)} left` : ""}`;
+  const rate = st.bps ? `${st.bps >= 1e6 ? Math.round(st.bps / 1e6) : (st.bps / 1e6).toFixed(1)} MB/s` : null;
+  return [pct != null ? `${pct}%` : null, `${fmtBytes(st.done)}${st.total ? ` of ${fmtBytes(st.total)}` : ""}`, rate,
+    st.bps && st.total ? `${fmtEta((st.total - st.done) / st.bps)} left` : null].filter(Boolean).join(" · ");
 }
+// the chat's notice while the host downloads (stream.js puts the header on it)
 export const downloadingMessage = (st, code) =>
-  `Pooled is downloading ${modelInfo(st.key).name} for room ${code}: ${pullLine(st)}. Ask again when it's done; devices can join the room meanwhile`;
+  `${modelInfo(st.key).name} is downloading for room ${code}: ${pullLine(st)}. Ask again when it's done; devices can join the room meanwhile.`;

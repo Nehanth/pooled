@@ -1,9 +1,11 @@
 {
   "name": "@pooled/openclaw",
   "version": "0.2.1",
-  "description": "Run a model across your own devices: this machine joins a Pooled room and holds part of the model on its GPU.",
+  "description": "Peer-to-peer inference engine for your claw: run one model across your own devices, each holding part of it on its GPU.",
   "keywords": [
     "openclaw",
+    "peer-to-peer",
+    "p2p",
     "openclaw-plugin",
     "pooled",
     "webgpu",
@@ -12,7 +14,7 @@
     "local-llm",
     "self-hosted"
   ],
-  "homepage": "https://pooled.run/docs/openclaw/",
+  "homepage": "https://pooled.run/docs/kits/openclaw",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Nehanth/pooled.git",

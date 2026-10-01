@@ -1,7 +1,7 @@
 {
   "id": "pooled",
   "name": "Pooled",
-  "description": "Run a model across your own devices: this machine joins a Pooled room and holds part of the model on its GPU.",
+  "description": "Peer-to-peer inference engine for your claw: run one model across your own devices, each holding part of it on its GPU.",
   "categories": [
     "models"
   ],

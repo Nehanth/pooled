@@ -1,12 +1,12 @@
 ---
 name: pooled-room
-description: What the Pooled model provider is, how to check its room, and what its "⚠️ Pooled:" notices mean.
+description: What the Pooled model provider is, how to check its room, and what its "**Pooled** ·" notices mean.
 metadata:
   openclaw:
     requires:
       config:
         - plugins.entries.pooled.config
-    homepage: https://pooled.run/docs/openclaw/
+    homepage: https://pooled.run/docs/kits/openclaw
 ---
 
 # Pooled room
@@ -26,10 +26,11 @@ devices (Macs, PCs, phones) each hold part of the model on their GPUs and talk o
   the user to run `/pooled link` instead.
 - Never read or print `pooled/room.json`: it holds the room's keys and passes.
 
-## "⚠️ Pooled:" notices
+## "Pooled" notices
 
-Messages that start with `⚠️ Pooled:` come from the room, not the model. Tell the user what they
-say and what to do:
+Messages that start with **Pooled**, the room code and a few words (`**Pooled** · \`4TK-G9P\` ·
+waiting for devices`) come from the room, not the model. Older versions started them with
+`⚠️ Pooled:`. Tell the user what they say and what to do:
 
 - waiting for the host to let this device in: the host runs `/pooled allow`, or the user joins with
   the invite link instead of the code;

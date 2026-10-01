@@ -192,7 +192,7 @@ test("stream: an older host gets no tools; the chat says why", async () => {
   const fn = install(room, { mode: "join", code: "TEST", model: "qwen3-1.7b" });
   const r = await run(fn, { messages: [{ role: "user", content: "hi" }], tools: TOOLS });
   assert.equal(r.msg.stopReason, "stop");
-  assert.match(r.msg.content[0].text, /^⚠️ Pooled: .*older Pooled/);
+  assert.match(r.msg.content[0].text, /^\*\*Pooled\*\* · `TEST` · the host runs an older Pooled\n\n.*older Pooled/);
   assert.equal(room.asks.length, 0);
 });
 
@@ -203,11 +203,14 @@ test("stream: the room's own conditions (queue full, loading, ...) come back as 
   const c1 = { messages: [{ role: "user", content: "hi", timestamp: 1 }] };
   const r1 = await run(fn, c1);
   assert.equal(r1.msg.stopReason, "stop");
-  assert.match(r1.msg.content[0].text, /^⚠️ Pooled: Pooled room TEST's queue is full/);
+  assert.match(r1.msg.content[0].text, /^\*\*Pooled\*\* · `TEST` · the room is busy\n\nRoom TEST's queue is full\. Try again/);
   assert.deepEqual(r1.types, ["start", "text_start", "text_delta", "text_end", "done"]);
   const c2 = { messages: [...c1.messages, { role: "assistant", content: r1.msg.content, stopReason: "stop" }, { role: "user", content: "hi again", timestamp: 2 }] };
   await run(fn, c2);
   assert.deepEqual(room.asks[1].messages.map((m) => m.role), ["user"]);   // the two user turns merge; the notice is gone
+  // a 0.2.x notice still in a conversation's history is dropped too
+  const old = { messages: [{ role: "user", content: "hi" }, { role: "assistant", content: [{ type: "text", text: "⚠️ Pooled: Pooled room TEST's queue is full" }], stopReason: "stop" }, { role: "user", content: "again" }] };
+  assert.deepEqual(toRequest(old).messages.map((m) => m.role), ["user", "user"]);
 });
 
 test("busyMessage: every refusal reads as a sentence with the room code", () => {
