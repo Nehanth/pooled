@@ -20,7 +20,7 @@ import { parseCode, formatCode, keyFragment, validKey, saveGate } from "../../..
 import { roomCodeFrom, roomKeyFrom } from "../../../cli/lib/room.js";
 import { roomFitNow } from "../../../cli/lib/hostui.js";
 import { fmtBytes } from "../../../cli/lib/cache.js";
-import { MODEL_CHOICES, modelInfo, modelsDir, isPulled, pluginCtx, lib } from "./models.js";
+import { MODEL_CHOICES, modelInfo, modelsDir, isPulled, pluginCtx, lib, shortCtxNote } from "./models.js";
 import { PooledError, pooledModules } from "./runtime.js";
 import { savedGate, saveHostGate, joinState, saveJoinState } from "./state.js";
 import { download, pullState, pullLine, downloadingMessage } from "./download.js";
@@ -265,6 +265,8 @@ export async function bridgeFor(r, { signal, lobbyMs = LOBBY_MS } = {}) {
       t.done = true; r.bridge = b;
       if (validKey(b.pass) && !validKey(r.node.pass)) try { saveJoinState(r.code, { pass: b.pass }); } catch {}
       if (Number.isInteger(b.hostMeta?.ctx)) try { saveJoinState(r.code, { ctx: b.hostMeta.ctx }); } catch {}
+      const short = shortCtxNote(b.model || b.hostMeta?.model, b.hostMeta?.ctx, b.hostName || "the host");
+      if (short) r.note?.(short);   // (/pooled shows it; OpenClaw itself only says "Context overflow")
     }, (err) => { t.err = err; }).finally(() => { if (r.bridgeTry === t) r.bridgeTry = null; });
     r.bridgeTry = t;
   }

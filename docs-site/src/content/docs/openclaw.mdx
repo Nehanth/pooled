@@ -88,6 +88,8 @@ In `openclaw onboard`, pick **Pooled** → **Join a room**, paste the invite lin
 
 It keeps the pass the host gives it, so the gateway gets straight back in after every restart. It also learns the host's model and context window.
 
+The room needs at least a 16k context, because OpenClaw's own instructions and tools are about 12k tokens. `pooled host qwen3-1.7b` opens at 8k, so its host should run `pooled host qwen3-1.7b --ctx 16384`. Onboarding warns when the context is shorter.
+
 ## Let devices in: /pooled
 
 In any OpenClaw chat (the TUI, the Control UI, a messaging channel), the gateway's owner can run:

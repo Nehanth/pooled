@@ -127,6 +127,22 @@ test("onboarding (join): a pasted link; waiting for the host's Allow is shown; t
   assert.equal(FakeBridge.made.at(-1).key, KEY, "the key kept from the link");
 });
 
+test("onboarding (join): a host whose context is shorter than OpenClaw's prompt (pooled host's 8k default) is called out", async () => {
+  deps.memoryDefaults = MEM; deps.Bridge = class extends FakeBridge {
+    async connect() { await super.connect(); this.hostName = "spark"; this.hostMeta = { api: 2, ctx: 8192, model: "qwen3-1.7b" }; }
+  };
+  const p = prompter(["join", "K7Q-XAB", "6"]);
+  const res = await runSetup({ prompter: p, config: {} });
+  const note = p.shown.notes.join("\n");
+  assert.match(note, /spark runs this room with a 8192-token context/);
+  assert.match(note, /`pooled host qwen3-1\.7b --ctx 16384`/);
+  assert.equal(res.configPatch.models.providers.pooled.models[0].contextWindow, 8192, "OpenClaw is told the truth (it fails fast)");
+  FakeBridge.how = "in"; deps.Bridge = FakeBridge;
+  const p2 = prompter(["join", "K7Q-XAB", "6"]);   // the 35B at 64k: no note
+  await runSetup({ prompter: p2, config: {} });
+  assert.ok(!p2.shown.notes.join("\n").includes("too short"), p2.shown.notes.join("\n"));
+});
+
 test("onboarding (join): turned away is an error; no answer yet is saved for the gateway to retry", async () => {
   deps.memoryDefaults = MEM; deps.Bridge = FakeBridge;
   FakeBridge.how = "refused";

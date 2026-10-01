@@ -27,6 +27,17 @@ export const lib = { MODELS, FILES, NEED_GB, roomBytes, roomFit, shortNote, shor
 // prompts alone are 8-12k tokens)
 export const pluginCtx = (key, ask = 0) => (ask > 0 ? maxSeqFor(key, ask) : CTX[key]?.max ?? maxSeqFor(key));
 
+// OpenClaw's own instructions and tools are about 12k tokens and it keeps 4k for the answer: a room
+// with a shorter context (`pooled host qwen3-1.7b` opens at 8k) ends every turn in "Context overflow"
+export const OPENCLAW_MIN_CTX = 16384;
+// a joined room's context is too short for OpenClaw: what to tell the owner, else null
+export function shortCtxNote(model, ctx, host = "the host") {
+  if (!(Number.isInteger(ctx) && ctx > 0 && ctx < OPENCLAW_MIN_CTX)) return null;
+  const max = CTX[model]?.max;
+  const how = max >= OPENCLAW_MIN_CTX ? `\`pooled host ${model} --ctx ${max}\`` : `a model with a longer context (at least ${OPENCLAW_MIN_CTX / 1024}k)`;
+  return `${host} runs this room with a ${ctx}-token context, but OpenClaw's own instructions and tools take about 12k tokens, so every answer would end in "Context overflow". Ask ${host} to open the room again with ${how}.`;
+}
+
 // needGB: the whole deal at that context (room/models.js roomBytes, as the room page counts it)
 export function modelInfo(key, ctxAsk = 0) {
   const ctx = pluginCtx(key, ctxAsk);

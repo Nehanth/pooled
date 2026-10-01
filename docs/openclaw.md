@@ -69,7 +69,9 @@ there. A device with the code alone waits: `/pooled` in any OpenClaw chat shows 
 **Join a room** takes the invite link (or the code) and the GB to lend, and connects right away. With
 the code alone it shows `Waiting for <host> to let this device in…` until the host allows it. It keeps
 the pass the host gives it, so the gateway gets straight back in after every restart, and it learns the
-host's model and context window.
+host's model and context window. The room needs at least a 16k context (OpenClaw's own instructions
+and tools are about 12k tokens): `pooled host qwen3-1.7b` opens at 8k, so run it with `--ctx 16384`.
+Onboarding warns when the context is shorter.
 
 Models are kept in `~/.pooled/models`, shared with `pooled pull`. Config keys, non-interactive setup
 and how requests flow: [packages/openclaw/README.md](../packages/openclaw/README.md).

@@ -8,7 +8,7 @@
 import { randomCode, CODE_LEN, makeGate, saveGate, validKey } from "../../../room/joingate.js";
 import { Bridge } from "../../../cli/lib/room.js";
 import { roomLink, roomSettings, parseRoom, fmtCode, defaultName, ROOM_ORIGIN } from "./pool.js";
-import { MODEL_CHOICES, MODELS, modelInfo, modelChoices, memoryDefaults, isPulled, modelsDir, fmtBytes } from "./models.js";
+import { MODEL_CHOICES, MODELS, modelInfo, modelChoices, memoryDefaults, isPulled, modelsDir, fmtBytes, shortCtxNote } from "./models.js";
 import { download, pullLine } from "./download.js";
 import { initStateDir, savedGate, saveHostGate, joinState, saveJoinState } from "./state.js";
 
@@ -171,6 +171,8 @@ export async function runSetup(ctx) {
     saveJoinState(code, { key, pass: k.pass, host: k.host, model: k.model, ctx: k.ctx });
     Object.assign(learned, { model: k.model, ctx: k.ctx });
     prog.stop(`In Pooled room ${fmtCode(code)}${k.host ? ` (host: ${k.host})` : ""}${k.model && MODELS[k.model] ? `, running ${modelInfo(k.model).name}` : ""}`);
+    const short = shortCtxNote(k.model, k.ctx, k.host || "the host");
+    if (short) await p.note(short, "The room's context is too short for OpenClaw");
   } else if (k.refused) {
     prog.stop(`The host of room ${fmtCode(code)} turned this device away: ${k.refused}`);
     throw new Error(`Pooled: the host of room ${fmtCode(code)} turned this device away (${k.refused}). Ask for the room's invite link and run the setup again with it.`);

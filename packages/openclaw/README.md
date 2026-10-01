@@ -56,6 +56,10 @@ say how much memory to lend. Onboarding connects to the room right away (no GPU 
 Either way it keeps the pass the host gives it, so the gateway (and every restart) gets straight back
 in. It also learns the host's model and context, so OpenClaw knows the room's real context window.
 
+OpenClaw's own instructions and tools are about 12k tokens, so the room needs at least a 16k context.
+`pooled host qwen3-1.7b` opens at 8k: its host should run `pooled host qwen3-1.7b --ctx 16384` (the
+1.7B's longest). Onboarding says so when it sees a shorter one, and so does `/pooled`.
+
 ## /pooled
 
 In an OpenClaw chat (the TUI, the Control UI, a messaging channel), for the gateway's owner. It needs
