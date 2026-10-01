@@ -27,7 +27,7 @@ Sources (for the fact-checker):
 - Verified 2026-09-30 on the Spark: three headless Chromium profiles on pooled.run/room (laptop 2 GB, desktop by invite link with 2 GB,
   a phone-size window by code + Allow with 1 GB); all on one GB10 over loopback, so no Wi-Fi in the numbers. Invite sheet, lobby card
   "phone wants to join (computer, 1 GB)" (the window had a desktop user agent), split desktop L0-11 (host) + laptop L12-27, answer
-  "14 tok · 13.8 tok/s · 2 devices". Bug seen three times: a device the split leaves out stays on the Loading card; after a reload it shows the model picker (see the PR).
+  "14 tok · 13.8 tok/s · 2 devices". That run hit a bug (a device the split leaves out stayed on the Loading card); fixed in #282.
 - Screenshots re-taken 2026-10-01 on the Spark (GB10), same setup, Qwen3.6 35B MoE: laptop 14 GB; desktop "raven" by invite link (joined at the default 4 GB,
   raised to 10 GB; picker "Start downloads about 8.7 GB to this device (its share of 20.8 GB)"); phone-size window (Android user agent) by code,
   card "phone wants to join (Android phone, 1 GB)", Allow; room pools 25 GB, "Needs 22.5 GB. The room has 25 GB.", "about 11.7 GB to this device";
