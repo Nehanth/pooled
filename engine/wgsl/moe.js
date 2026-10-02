@@ -650,64 +650,17 @@ ${tree(WG, ROWS + 1, `${P}_red`)}
 }`;
 }
 
-// moe_nrt_w: moe_nrt's router logits for C columns per workgroup (the wide prefill chunk's router, all its columns in one
-// launch). Each (row, column) gets exactly moe_nrt's arithmetic: thread t's partial over the vec4s c = t, t + WG, ... of
-// dot(W_r, x * w) and of dot(x, x), the same reduction tree, logit = red * inverseSqrt(sum / dim + eps); so the same
-// bits. Only the loads are shared: each router row is read once for C columns (moe_nrt reads it once per column), and
-// the norm weight once per vec4 for all C. No xn output (the wide prefill's experts take norm2's). nCols in NRT.p0.
-// Workgroup memory (ROWS + 1) * C * WG floats (15 KB at 4 x 3).
-export function normRouterWideKernel({ ROWS = 4, C = 3, bf16 = true, WG = 256 } = {}) {
-  const P = "nrw", RS = Array.from({ length: ROWS }, (_, r) => r), CS = Array.from({ length: C }, (_, k) => k);
-  const wv = (r) => bf16 ? `let q${r} = ${P}_W[er${r} + c]; let w${r} = vec4<f32>(bitcast<f32>(q${r}.x << 16u), bitcast<f32>(q${r}.x & 0xffff0000u), bitcast<f32>(q${r}.y << 16u), bitcast<f32>(q${r}.y & 0xffff0000u));`
-    : `let w${r} = ${P}_W[er${r} + c];`;
-  const A = (k, j) => (k * (ROWS + 1) + j) * WG;   // array j (0: sum of squares, 1 + r: row r) of column k
-  return `
-@group(1) @binding(0) var<storage, read> ${P}_x: array<f32>;
-@group(1) @binding(1) var<storage, read> ${P}_nw: array<f32>;
-@group(1) @binding(2) var<storage, read> ${P}_W: array<${bf16 ? "vec2<u32>" : "vec4<f32>"}>;
-@group(1) @binding(3) var<storage, read_write> ${P}_lg: array<f32>;
-@group(1) @binding(4) var<uniform> ${P}_s: NRT;
-var<workgroup> ${P}_red: array<f32, ${(ROWS + 1) * C * WG}>;
-@compute @workgroup_size(${WG})
-fn moe_nrt_w(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-  let t = lid.x; let col0 = wg.y * ${C}u; let n = ${P}_s.dim; let d4 = n / 4u; let row0 = wg.x * ${ROWS}u; let nCols = ${P}_s.p0;
-${CS.map((k) => `  let ok${k} = col0 + ${k}u < nCols; let xo${k} = min(col0 + ${k}u, nCols - 1u) * ${P}_s.xs; var ss${k}: f32 = 0.0;`).join("\n")}
-${RS.map((r) => `  let er${r} = min(row0 + ${r}u, ${P}_s.dOut - 1u) * d4;${CS.map((k) => ` var a${r}_${k}: f32 = 0.0;`).join("")}`).join("\n")}
-  for (var c: u32 = t; c < d4; c += ${WG}u) {
-    let j = c * 4u;
-    let nw4 = vec4<f32>(${P}_nw[j], ${P}_nw[j + 1u], ${P}_nw[j + 2u], ${P}_nw[j + 3u]);
-${RS.map((r) => `    ${wv(r)}`).join("\n")}
-${CS.map((k) => `    if (ok${k}) {
-      let x4 = vec4<f32>(${P}_x[xo${k} + j], ${P}_x[xo${k} + j + 1u], ${P}_x[xo${k} + j + 2u], ${P}_x[xo${k} + j + 3u]);
-      let xw = x4 * nw4;
-      ss${k} += dot(x4, x4);
-${RS.map((r) => `      a${r}_${k} += dot(w${r}, xw);`).join("\n")}
-    }`).join("\n")}
-  }
-${CS.map((k) => `  ${P}_red[${A(k, 0)}u + t] = ss${k};${RS.map((r) => ` ${P}_red[${A(k, 1 + r)}u + t] = a${r}_${k};`).join("")}`).join("\n")}
-${tree(WG, (ROWS + 1) * C, `${P}_red`)}
-  if (t < ${ROWS * C}u) {
-    let k = t / ${ROWS}u; let r = t % ${ROWS}u; let row = row0 + r; let col = col0 + k;
-    if (row < ${P}_s.dOut && col < nCols) {
-      let inv = inverseSqrt(${P}_red[k * ${(ROWS + 1) * WG}u] / f32(n) + cfg.eps);
-      ${P}_lg[col * ${P}_s.ls + row] = ${P}_red[(k * ${ROWS + 1}u + 1u + r) * ${WG}u] * inv;
-    }
-  }
-}`;
-}
-
 // The fused kernels for one engine: K (top-k), R (output rows per legacy moe_dnc workgroup), the
 // (routed, shared) format pairs the model's layers need for gate/up and for down, and layout
 // (moeFusedLayout(...): null = the legacy kernels, else the wide ones).
 // nrt: null or { ROWS, bf16 } (moe_nrt, normRouterKernel).
-export function moeFusedWGSL({ K, R = 2, gu = [], dn = [], layout = null, nrt = null, nrtWide = false }) {
+export function moeFusedWGSL({ K, R = 2, gu = [], dn = [], layout = null, nrt = null }) {
   if (!(K >= 1 && K <= 16) || ![1, 2, 4].includes(R)) throw new Error(`moeFusedWGSL: K ${K}, R ${R}`);
   return /* wgsl */ `
 // ---------------- fused mixture of experts (engine/wgsl/moe.js moeFusedWGSL) ----------------
 struct MOEF { dOut: u32, dIn: u32, sDim: u32, nExp: u32, xs: u32, ys: u32, norm: u32, shOff: u32, oUq: u32, oGs: u32, oUs: u32, pad: u32 };
 ${routeKernel(K)}
 ${nrt ? normRouterKernel(nrt) : ""}
-${nrt && nrtWide ? normRouterWideKernel({ bf16: nrt.bf16 }) : ""}
 ${gu.map(([f, s]) => layout ? gusKernelWide(f, s, K, layout.gu) : gusKernel(f, s, K)).join("\n")}
 ${dn.map(([f, s]) => layout ? dncKernelWide(f, s, K, layout.dn) : dncKernel(f, s, K, R)).join("\n")}
 `;

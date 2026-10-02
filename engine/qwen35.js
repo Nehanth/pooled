@@ -571,7 +571,7 @@ export class Qwen35Engine {
     const mod = moduleSet(device, WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack, true, true)
       + (this.moe ? moeWGSL(this.moeK) : "")
       + (this.dnNba ? normRouterKernel({ ROWS: 4, bf16: false, name: "dn_nba", P: "nba", struct: !(this.moeFuse && this.moe.nrt) }) : "")
-      + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, nrt: this.moe.nrt, nrtWide: !!this.moeGrpU, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
+      + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, nrt: this.moe.nrt, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && this.moeGrpTiled ? tiledGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeDp4a ? dp4aGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp, sort: false,
@@ -646,7 +646,6 @@ export class Qwen35Engine {
     if (this.moeFuse) {
       G1.moe_route = ["ro", "rw", "rw", "u"];
       if (this.moe.nrt) G1.moe_nrt = ["ro", "ro", "ro", "rw", "rw", "u"];
-      if (this.moe.nrt && this.moeGrpU) G1.moe_nrt_w = ["ro", "ro", "ro", "rw", "u"];
       for (const p of this.moe.guPairs) G1["moe_gus_" + p] = ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "ro", "u"];
       for (const p of this.moe.dnPairs) G1["moe_dnc_" + p] = ["ro", "ro", "ro", "rw", "ro", "ro", "ro", "ro", "u"];
     }
@@ -701,10 +700,6 @@ export class Qwen35Engine {
       const desc = { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: mod(name), entryPoint: name } };
       if (DP4A_PIPES.includes(name)) {   // optional too: a compiler that rejects them leaves the f32 wide GEMM
         try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { dpFails.push(e); }
-        return;
-      }
-      if (name === "moe_nrt_w") {   // optional: a compiler that rejects it leaves the per-column moe_nrt for the wide router
-        try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { console.warn(`moe_nrt_w off: ${e.message}`); }
         return;
       }
       if (mdpPipes.includes(name)) {   // optional: a compiler that rejects them leaves the f32 tiled expert kernels
@@ -2383,9 +2378,6 @@ export class Qwen35Engine {
         R.nrtW = this._bg2res(this.pipes.moe_nrt, [whole(Wt.x), { buffer: L.postNorm.buf }, { buffer: L.router.buf }, { buffer: gB.XNS }, { buffer: gB.LG },
           u32([D.dim, this.moe.nExp + 1, st(Wt.x), ls, st(B.xn), 0, 0, 0])]);
         R.routeW = this._bg2res(this.pipes.moe_route, [{ buffer: gB.LG }, { buffer: gB.sel }, { buffer: gB.selw }, u32(L.moeU(ls, 0, 0, 0))]);
-        // moe_nrt_w: the same logits, 3 columns per workgroup (each router row read once for 3 columns)
-        if (this.pipes.moe_nrt_w) R.nrtWW = this._bg2res(this.pipes.moe_nrt_w, [whole(Wt.x), { buffer: L.postNorm.buf }, { buffer: L.router.buf }, { buffer: gB.LG },
-          u32([D.dim, this.moe.nExp + 1, st(Wt.x), ls, 0, U, 0, 0])]);
         R.combW = this._bg2res(this.pipes.moe_combw, [whole(Wt.x), { buffer: gB.Y }, { buffer: gB.selw },
           u32([D.dim, 0, 0, this.moe.nExp, st(Wt.x), 0, 0, 0, 0, 0, 0, 0])]);
       }
@@ -2566,8 +2558,7 @@ export class Qwen35Engine {
         const gB = this.gB, ss = NC * this.moe.KS * 4, tx = this._wTwin.get(B.x.buf), txn = this._wTwin.get(B.xn.buf);
         if (LW.nrtW && this.wideRouter !== false) {   // moe_nrt + moe_route over all w columns: the same per-column kernels, 2 launches
           const p = enc.beginComputePass();
-          if (LW.nrtWW && this.nrtWide !== false) this._dxyz(p, "moe_nrt_w", LW.nrtWW, Math.ceil((this.moe.nExp + 1) / 4), Math.ceil(w / 3), 1);
-          else this._dxyz(p, "moe_nrt", LW.nrtW, Math.ceil((this.moe.nExp + 1) / this.moe.nrt.ROWS), w, 1);
+          this._dxyz(p, "moe_nrt", LW.nrtW, Math.ceil((this.moe.nExp + 1) / this.moe.nrt.ROWS), w, 1);
           this._dxyz(p, "moe_route", LW.routeW, w, 1, 1);
           p.end();
         } else for (let j = 0; j < J; j++) {
