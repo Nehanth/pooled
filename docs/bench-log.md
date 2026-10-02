@@ -1801,3 +1801,89 @@ Gates: `test_q38_bits` default re-baselined to **4dc814b1 / 4f075117** (dp4a; sa
 `PREFILL_DP4A=0` 4612ece1 / aeb06a4d (= the f32 default before), `PREFILL_UBATCH=0` c26dbc5 / 3177f9f1 (unchanged);
 `test_prefill_dp4a` 27B PASS (argmax, 32 greedy tokens == llama.cpp and narrow at 150 / 700 / 2100, spec == plain);
 unit 968 pass; `npm run check`; `tests/run.sh q38once` PASS (9 checks incl. MTP spec, split, twins, ctx).
+
+## 2026-10-02: MoE prefill 2x (branch perf/moe-prefill, PR #314), GB10
+
+The 35B-A3B MoE prefilled at 350-400 tok/s in Deno against llama.cpp CUDA's ~2,400 on the same GGUF
+(`llama-bench -p 512,2048,8192,16384 -n 0 -fa 1`, build 749f688, measured here: 2354 / 2411 / 2347 / 2285).
+OpenClaw's prompt pays that on every cold first turn.
+
+**Profile before** (`tests/prof_prefill.js`, timestamps per sampled dispatch, `PREFILL_UBATCH=256`, main's defaults; ms per
+token of kernel time): 2048 tokens: expert gate/up (`moe_gusg`) 0.565, expert down 0.380, DeltaNet projection GEMMs 0.407,
+draft-cache (MTP) fill 0.180, attention 0.149, attention projections 0.106, `dn_delta` 0.097, DeltaNet glue 0.095, `moe_nrt`
+0.087, `moe_gsort` 0.082, the rest under 0.03. At 8192 tokens attention rises to 0.353 (14%). 43,374 dispatches per
+2048-token prefill. A skip-a-family profile (`tests/bench/moe_prefill_ab.js SKIP=1`) overstated some families: skipping
+`moe_gsort` "saved" 30% because the expert launches then run on a stale chunk list; launching a kernel twice
+(`DOUBLE=`) gives its real marginal cost (`moe_gsort` 3%).
+
+**Kept** (each measured on / off in one process at the end state, `tests/bench/moe_prefill_ab.js`, Deno, 2048 / 16384 tokens):
+
+| change | off | on | bits |
+| --- | ---: | ---: | --- |
+| dp4a expert kernels (`moe_gusq` / `moe_dnq` + `moe_qx`, `moeGroupDp4a`; wide chunks only) | 588 / 492 | 860 / 675 | evaluated (below) |
+| draft-cache fill with wide GEMMs, KV rows only (`mtpWide`) | 759 / 588 | 860 / 675 | same logits |
+| the wide chunk's router once per chunk (`wideRouter`) | 789 / 627 | 860 / 675 | same |
+| DeltaNet conv / gates / recurrence / gated norm once per chunk (`wideDn`) | 799 / 634 | 860 / 675 | same |
+| dp4a projections for the MoE too (`DP4A_DEFAULT.moe`; A/B at the dp4a-experts commit) | 631 / 586 (2048 / 8192) | 731 / 680 | evaluated |
+| `moe_gsort` in O(pairs / 256) steps (atomic histogram, per-column bitmask placement) | 0.53 ms | 0.04 ms a launch | same output (CPU test) |
+| ubatch 256 -> 512 (`MOE_PREFILL_UBATCH`) | 803 / 732 (2048 / 8192) | 859 / 791 | same |
+| tiled attention: next K / V tile prefetched to registers, f16 tile, named registers | 861 / 640 (2048 / 16384) | 869 / 674 | same (CPU test; 27B bits) |
+
+The dp4a experts keep each thread's weight blocks as packed i8 in registers and dot4I8Packed them against activations
+quantized per 32 values (llama.cpp's MMQ numerics); the f32 tiled kernels unpacked every block once per pair. Kernel
+microbench (`tests/bench/moe_group_sweep.js`, synthetic, 256 tokens): gate/up 4.41 -> 2.27 ms, down 3.01 -> 1.57 ms, plus
+0.63 ms quantization. They run only inside wide chunks (>= 64 tokens), like the dp4a projections: test_moe's 23-27-token
+prompts (batchCols 4, so an expert-grouped ubatch without a wide chunk) flipped a near-tie against the llama.cpp golden with
+them on (hash-map, token ~20), and with them off there those prompts compute exactly what main does.
+
+**Accuracy (pre-registered, `tests/eval_dp4a.js MODEL=moe`; rule committed in ed19a35 before any MoE dp4a measurement).**
+llama.cpp CPU goldens (`tests/golden/dp4a_eval_moe_llama.json`), 15 prompts, 256 teacher-forced positions each:
+
+| 35B-A3B, GB10, Deno | KL(llama ‖ ours) wide | dp4a | dp4ax | top-1 wide | dp4a | dp4ax |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| short (control) | 0.00214 | 0.00223 | 0.00223 | 98.68% | 98.68% | 98.58% |
+| mid | 0.00154 | 0.00194 | 0.00178 | 98.44% | 98.44% | 98.44% |
+| 2K | 0.00313 | 0.00291 | 0.00325 | 98.44% | 98.63% | 97.85% |
+| 8K | 0.00349 | 0.00362 | 0.00360 | 97.66% | 97.07% | 97.85% |
+| **gated** | **0.00255** | **0.00270** | 0.00272 | **98.21%** | **98.10%** | 98.10% |
+
+Downstream 40 items: llama.cpp 36, wide 36, dp4a 36 (the same items), dp4ax 35. R1 0.00270 <= 2 x 0.00255, R2 -0.11 pt,
+R3 0.00194 / 0.00291 / 0.00362 against 0.0115 / 0.0131 / 0.0135, R4 36 vs 36: **PASS**, so `DP4A_DEFAULT.moe = true` with
+the dp4a experts. KL(wide ‖ dp4a) 0.0019 nats, smaller than either path's distance to llama.cpp. (The run used the
+experts in grouped tails too; the shipped scope is narrower.)
+
+**Before / after**, same bench script, two processes each, alternating (Deno, GB10, tok/s; main = e45d9a8):
+
+| prompt tokens | 512 | 2048 | 8192 | 16384 |
+| --- | ---: | ---: | ---: | ---: |
+| main | 353 | 402 | 379 | 337 |
+| branch | 623 | 861 | 809 | 675 |
+| llama.cpp CUDA (llama-bench) | 2354 | 2411 | 2347 | 2285 |
+
+OpenClaw cold first turn (`packages/room-node/test/e2e.mjs cache STEPS=turn1`, the recorded gateway request: 11,286 prompt
+tokens with its tools, 35B MoE, Node + Dawn; same answer in every run):
+
+| setup | main | branch |
+| --- | ---: | ---: |
+| solo (`SETUP=solo`, one node) | 30.9 s (30.9 s) | 14.7 s |
+| 2 nodes, 2 processes (`SETUP=proc`, split 18 + 22) | 33.7 s | 18.7 s (20.0 s with ubatch 512, before the attention change) |
+
+**After** (`prof_prefill.js`, ms per token at 2048 / 8192): DeltaNet projection GEMMs 0.211 / 0.211, expert gate/up 0.175,
+down 0.145, attention 0.131 / 0.318 (29% at 8K), `dn_delta` 0.074, `moe_nrt` 0.051, draft fill 0.047 / 0.012, attention
+projections 0.046; 107 dispatches per 16 tokens (was 317).
+
+**Gates** (final snapshot): `test_q38_bits` 4dc814b1 / 4f075117 (= main); `test_moe` MATCH llama.cpp 3/3, spec == plain,
+acceptance 28/33, 28/39, 25/45 (= main); `test_moe_split` PASS (copy: split plain differs from solo at a 0.075 near-tie
+over the f16 wire; with the dp4a experts off it matches, as on main; the other 4 cases plain == solo);
+`test_prefill_opts MODEL=moe` PASS (700 tokens: the all-off path is the outlier, as on main); unit 1029 pass;
+`npm run check`; barrier lint 0 findings.
+
+**Tried, not kept**: `moe_nrt_w` (the router GEMV for 3 columns per workgroup, exact): 859 vs 860 / 675 vs 672 tok/s.
+dp4a expert chunks of 16 / 32 pairs: slower than 8 (synthetic, 256 tokens: 4.54 / 5.53 vs 3.84 ms). dp4a GEMM tiles BM 128
+(TM 8, or BN 32): slower than 64 x 64. ubatch 1024: +3% over 512 at 2048 / 8192 tokens for twice the wide buffers.
+Attention split targets 64 / 128: no change. One wide-chunk attention launch with the per-sub-batch split boundaries (exact):
+its split partials would take ~0.5 GB at 16K. Attention is the open item: at 8K one 16-column pass takes 1.5 ms (~1.5 TFLOPS);
+dropping its QK FMAs saves 0.42 ms and its PV FMAs 0.27 ms, so the tile loads, four barriers per 8 positions and the softmax
+are over half. TK > 8 (fewer barriers per position) needs more than 16 KB of workgroup memory or another partial-sum layout,
+and changes the numerics. Then `dn_delta` (sequential over the chunk) and the DeltaNet projection GEMMs.
+Not measured on Apple or Windows (the dp4a kernels are NVIDIA-only by default and optional at create).
