@@ -2213,13 +2213,14 @@ export class Qwen35Engine {
   }
   // DeltaNet beta / alpha projections, conv, gates + L2, recurrence, gated norm: B.xn, B.qkv, B.z -> B.gated
   // baDone: dn_nba already wrote beta / alpha
+  _encDnBA(p, LB, nCols) {   // the DeltaNet beta / alpha projections: B.xn -> B.betaRaw / B.alpha
+    const [, , obeta, oalpha] = LB.dnOps;
+    if (this.fuseProj && LB.ba && !this._gemmAt(obeta, nCols) && !this._gemmAt(oalpha, nCols)) this._dop(p, LB.ba, nCols);
+    else { this._dop(p, obeta, nCols); this._dop(p, oalpha, nCols); }
+  }
   _encDnMid(p, LB, M, nCols, baDone = false) {
     const D = this.dims;
-    const [, , obeta, oalpha] = LB.dnOps;
-    if (!baDone) {
-      if (this.fuseProj && LB.ba && !this._gemmAt(obeta, nCols) && !this._gemmAt(oalpha, nCols)) this._dop(p, LB.ba, nCols);
-      else { this._dop(p, obeta, nCols); this._dop(p, oalpha, nCols); }
-    }
+    if (!baDone) this._encDnBA(p, LB, nCols);
     this._dMC(p, "dn_conv_mc", M.conv, D.convDim, 64, 1);           // loops over columns
     this._dMC(p, "dn_pre_mc", M.pre, 128, 128, nCols);              // gates + L2(q,k) fused, one WG per column
     this._dMC(p, "dn_delta_mc", M.delta, D.nVH * 128, 128, 1);     // loops over columns
@@ -2318,6 +2319,9 @@ export class Qwen35Engine {
     const uniq = (...bs) => bs.filter((b, i) => bs.findIndex((c) => c.buf === b.buf) === i);   // fuseProj segments share a buffer
     // one frame per sub-batch: [pos, seqLen, nCols, snap], written by prefillTokens before each chunk
     this.frameW = Array.from({ length: U / NC }, () => dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+    this.frameWD = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });   // [basePos, basePos + 1, w, 0]
+    this.bgCommonWD = {};
+    for (const name of this._colPipes) if (this.pipes[name]) this.bgCommonWD[name] = this._bg2g0(this.pipes[name], [{ buffer: this.cfgBuf }, { buffer: this.frameWD }]);
     this.bgCommonW = this.frameW.map((f) => {
       const m = {};
       for (const name of this._colPipes) if (this.pipes[name]) m[name] = this._bg2g0(this.pipes[name], [{ buffer: this.cfgBuf }, { buffer: f }]);
@@ -2343,6 +2347,21 @@ export class Qwen35Engine {
         R.out = wop(L.wOut, Wt.gated, Wt.x, D.dim, D.dInner, true); R.qOut = qop(Wt.gated, D.dInner);
         R.toNarrow = uniq(B.xn, B.qkv, B.z);   // xn: the beta / alpha GEMV stays batched
         R.toWide = [B.gated];
+        // wide DeltaNet middle (engine.wideDn, default on): the beta / alpha GEMV per sub-batch into a wide twin, then
+        // conv, gates + L2, the recurrence and the gated norm ONE launch each over the whole chunk (the same
+        // per-column kernels, which loop over frame.nCols columns or take one workgroup row per column: same bits)
+        const tw = { ba: W(B.betaRaw), beta: W(B.beta), decay: W(B.decay), conv: W(B.convOut), dOut: W(B.dOut) };
+        const dn = { buffer: this.dnBuf };
+        R.dnW = {
+          conv: this._bg2res(this.pipes.dn_conv_mc, [whole(Wt.qkv), { buffer: L.convW }, { buffer: L.convState }, whole(tw.conv),
+            mcU(D.convDim, st(B.qkv), st(B.convOut)), { buffer: L.conv_shadow }]),
+          pre: this._bg2res(this.pipes.dn_pre_mc, [whole(W(B.alpha)), whole(tw.ba), { buffer: L.dtBias }, { buffer: L.ssmA },
+            whole(tw.beta), whole(tw.decay), whole(tw.conv), mcU(0, st(B.alpha), st(B.convOut)), dn]),
+          delta: this._bg2res(this.pipes.dn_delta_mc, [whole(tw.conv), whole(tw.beta), whole(tw.decay), { buffer: L.S }, whole(tw.dOut),
+            mcU(0, st(B.convOut), st(B.beta), st(B.dOut)), dn, { buffer: L.S_shadow || this._dummy }]),
+          gatenorm: this._bg2res(this.pipes.dn_gatenorm_mc, [whole(tw.dOut), whole(Wt.z), { buffer: L.ssmNorm }, whole(Wt.gated),
+            mcU(0, st(B.dOut), st(B.z), st(B.gated)), dn]),
+        };
       }
       if (L.moe && L.fused && this.moe.nrt && this.gB) {   // the expert-grouped chunk's router over all its columns at once (_wideGrp)
         const gB = this.gB, ls = B.mLogits.stride / 4, u32 = (a) => ({ buffer: this._buf(new Uint32Array(a), GPUBufferUsage.UNIFORM) });
@@ -2477,7 +2496,27 @@ export class Qwen35Engine {
         for (const op of LW.proj) this._dW(p, op, w);
         p.end();
       }
-      for (let j = 0; j < J; j++) {
+      if (!L.isFull && LW.dnW && this.wideDn !== false) {
+        const B2 = this.B;
+        for (let j = 0; j < J; j++) {   // beta / alpha: the batched GEMV per sub-batch, into the wide twin
+          this._wCopy(enc, B2.xn, j, false);
+          this._mcCommon = this.bgCommonW[j];
+          const p = enc.beginComputePass();
+          this._encDnBA(p, LB, NC);
+          p.end();
+          this._mcCommon = null;
+          this._wCopy(enc, B2.betaRaw, j, true);
+          if (B2.alpha.buf !== B2.betaRaw.buf) this._wCopy(enc, B2.alpha, j, true);
+        }
+        this._mcCommon = this.bgCommonWD;
+        const p = enc.beginComputePass();
+        this._dMC(p, "dn_conv_mc", LW.dnW.conv, D.convDim, 64, 1);
+        this._dMC(p, "dn_pre_mc", LW.dnW.pre, 128, 128, w);
+        this._dMC(p, "dn_delta_mc", LW.dnW.delta, D.nVH * 128, 128, 1);
+        this._dMC(p, "dn_gatenorm_mc", LW.dnW.gatenorm, D.nVH * 128, 128, w);
+        p.end();
+        this._mcCommon = null;
+      } else for (let j = 0; j < J; j++) {
         for (const b of LW.toNarrow) this._wCopy(enc, b, j, false);
         this._mcCommon = this.bgCommonW[j];
         const p = enc.beginComputePass();
@@ -2568,6 +2607,7 @@ export class Qwen35Engine {
     const q = this.device.queue, NC = this.NC, basePos = this.pos, Wx = this.Wt.x;
     this._dp4aOn = !!(this.dp4aCfg && this.prefillDp4a !== false);
     for (let j = 0; j < w / NC; j++) q.writeBuffer(this.frameW[j], 0, new Uint32Array([basePos + j * NC, basePos + j * NC + 1, NC, 0]));
+    q.writeBuffer(this.frameWD, 0, new Uint32Array([basePos, basePos + 1, w, 0]));
     const dim = this.dims.dim;
     for (let c = 0; c < w; c++) q.writeBuffer(Wx.buf, c * Wx.stride, xs ? xs.subarray(c * dim, (c + 1) * dim) : this._embedRowF32(ids[i + c]));
     const gB = this.gB;
