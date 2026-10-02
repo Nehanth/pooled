@@ -5,6 +5,7 @@
 // multi-x slowdowns). ~1s total at model load.
 import { WGSL } from "./wgsl/base.js";
 import { probeUnpack, coopWGSL } from "./wgsl/coop.js";
+import { moduleSet } from "./wgsl/prune.js";
 
 export async function autotuneCoop(device, { dIn = 5120, dOut = 17408, kind = "q4" } = {}) {
   const candidates = [[256, 4], [128, 4], [256, 8], [128, 8], [64, 4]];
@@ -23,7 +24,7 @@ export async function autotuneCoop(device, { dIn = 5120, dOut = 17408, kind = "q
   for (const [wg, rows] of candidates) {
     try {
       const entry = kind === "q4" ? "matvec_q4_coop" : "matvec_q8_coop";
-      const mod = device.createShaderModule({ code: WGSL + coopWGSL(wg, rows, 64, 4, 4, await probeUnpack(device)) });
+      const mod = moduleSet(device, WGSL + coopWGSL(wg, rows, 64, 4, 4, await probeUnpack(device)))(entry);
       const l0 = device.createBindGroupLayout({ entries: [0, 1].map((b) => ({ binding: b, visibility: C, buffer: { type: "uniform" } })) });
       const l1 = device.createBindGroupLayout({ entries: ["read-only-storage", "read-only-storage", "read-only-storage", "storage", "uniform"].map((t, i) => ({ binding: i, visibility: C, buffer: { type: t } })) });
       const pipe = await device.createComputePipelineAsync({

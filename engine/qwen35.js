@@ -5,6 +5,7 @@
 // llama.cpp eval-callback dumps).
 import { WGSL } from "./wgsl/base.js";
 import { compilePipeline } from "./compile.js";
+import { moduleSet } from "./wgsl/prune.js";
 import { gemmWGSL, GEMM_S, GEMM_TILE } from "./wgsl/gemm.js";
 import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SGM_SYNTAX, SGM_DEFAULT } from "./wgsl/gemm_sgm.js";
 import { gemmWideWGSL, wideTileConfig, gemmDp4aWGSL, dp4aTileConfig, probeDp4a, SILU_MUL_W_WGSL } from "./wgsl/gemm_wide.js";
@@ -538,7 +539,9 @@ export class Qwen35Engine {
 
     // ---- pipelines with explicit layouts ----
     const unpack = await probeUnpack(device);
-    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack, true, true)
+    // one module per entry point, pruned to what it uses (engine/wgsl/prune.js): Dawn reprocesses the
+    // whole ~650 KB module for every pipeline otherwise (~1.3 s each under Windows' FXC)
+    const mod = moduleSet(device, WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack, true, true)
       + (this.moe ? moeWGSL(this.moeK) : "")
       + (this.dnNba ? normRouterKernel({ ROWS: 4, bf16: false, name: "dn_nba", P: "nba", struct: !(this.moeFuse && this.moe.nrt) }) : "")
       + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, nrt: this.moe.nrt, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
@@ -548,7 +551,7 @@ export class Qwen35Engine {
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.gemmOn ? gemmWGSL({ N: batchCols, pairs: this._gemmPairs, pairs8: this._gemm8Pairs, UNPACK: unpack, R16: this._pmR16 }) : "")
       + (this.ubatch ? gemmWideWGSL(this.wideCfg, { UNPACK: unpack }) : "")
-      + (this.dp4aCfg ? gemmDp4aWGSL(this.dp4aCfg) : "") + SILU_MUL_W_WGSL + WGSL2 + layerFuseWGSL() });
+      + (this.dp4aCfg ? gemmDp4aWGSL(this.dp4aCfg) : "") + SILU_MUL_W_WGSL + WGSL2 + layerFuseWGSL());
     const C = GPUShaderStage.COMPUTE;
     const layout0 = device.createBindGroupLayout({
       entries: [
@@ -659,7 +662,7 @@ export class Qwen35Engine {
       const layout1 = device.createBindGroupLayout({
         entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })),
       });
-      const desc = { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: mod, entryPoint: name } };
+      const desc = { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: mod(name), entryPoint: name } };
       if (DP4A_PIPES.includes(name)) {   // optional too: a compiler that rejects them leaves the f32 wide GEMM
         try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { dpFails.push(e); }
         return;
@@ -698,10 +701,10 @@ export class Qwen35Engine {
     // a row's arithmetic, so the logits are bit-identical to the coopRows kernel (tests/bench_wide.js)
     this.headRows = hasHead && matvecVariant === "coop" && headRows > 0 && headRows !== coopRows ? headRows : 0;
     if (this.headRows) {
-      const modH = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, this.headRows, 64, batchCols, coopRowsB, unpack) });
+      const modH = moduleSet(device, WGSL + coopWGSL(coopWG, this.headRows, 64, batchCols, coopRowsB, unpack));
       for (const name of ["matvec_q8_coop", "matvec_q4_coop", "matvec_coop"]) {
         const layout1 = device.createBindGroupLayout({ entries: G1[name].map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
-        this.pipes[name + "_h"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH, entryPoint: name } });
+        this.pipes[name + "_h"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH(name), entryPoint: name } });
       }
     }
     // ---- uniforms ----
