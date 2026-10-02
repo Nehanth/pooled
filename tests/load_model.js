@@ -32,6 +32,8 @@ if (envGet("ATTN_PREFILL_TK")) Qwen35Engine.defaults.attnPrefillTK = +envGet("AT
 if (envGet("ATTN_TILE_KVH")) Qwen35Engine.defaults.attnTileKvh = envGet("ATTN_TILE_KVH") !== "0";
 if (envGet("ATTN_TILE_PF")) Qwen35Engine.defaults.attnTilePf = envGet("ATTN_TILE_PF") !== "0";
 if (envGet("ATTN_TILE_NR")) Qwen35Engine.defaults.attnTileNr = envGet("ATTN_TILE_NR") !== "0";
+// WIDE_DN / WIDE_ROUTER / MTP_WIDE=0: the wide prefill's per-sub-batch structure for that part (A/B, bisection)
+for (const [e, k] of [["WIDE_DN", "wideDn"], ["WIDE_ROUTER", "wideRouter"], ["MTP_WIDE", "mtpWide"]]) if (envGet(e)) Qwen35Engine.defaults[k] = envGet(e) !== "0";
 if (envGet("ATTN_PREFILL_SPLITS")) Qwen35Engine.defaults.attnPrefillSplits = +envGet("ATTN_PREFILL_SPLITS");
 if (envGet("PREFILL_DP4A")) Qwen35Engine.defaults.prefillDp4a = envGet("PREFILL_DP4A") !== "0";
 // MOE_DP4A=0|1: the MoE's dp4a expert kernels (engine option moeGroupDp4a) off / on for every test

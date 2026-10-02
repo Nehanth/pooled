@@ -205,7 +205,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnTileKvh = true, attnTilePf = true, attnTileNr = true, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, moeGroupDp4a, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnTileKvh = true, attnTilePf = true, attnTileNr = true, wideDn = true, wideRouter = true, mtpWide = true, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, moeGroupDp4a, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -486,6 +486,10 @@ export class Qwen35Engine {
       else if (why === "") { this.moeGrpU = gU; this.moeGrpUC = UC; this.moeGrpTiled = !!moeGroupTiled; }
     }
     this.moeGroup = this.moeGrpU > 0;   // runtime kill switch
+    // wide prefill structure switches (also runtime engine properties, for A/B; none of them changes a value of the
+    // trunk): the DeltaNet middle once per chunk, the grouped chunk's router once per chunk, the draft-cache fill
+    // with wide GEMMs (see _encodeLayerWide / _mtpFillWide)
+    this.wideDn = wideDn !== false; this.wideRouter = wideRouter !== false; this.mtpWide = mtpWide !== false;
 
     // ---- wide prefill (docs/research/prefill-profile-2026-09.md candidate B) ----
     // prefillUbatch = U > 0: prefillTokens runs chunks of up to U prompt tokens (multiples of the tile
