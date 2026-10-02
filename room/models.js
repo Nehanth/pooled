@@ -2,7 +2,7 @@
 
 // GB each model needs at its default context (the picker's "needs N GB"); NEED_MIN_GB: what a model
 // with a fallback context (CTX[model].fallback) needs there, the least a room can start it with
-export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "smollm-135m": 0.6 };
+export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "qwen3.5-122b-moe": 72.0, "smollm-135m": 0.6 };
 export const NEED_MIN_GB = { "qwen3-1.7b": 4.0 };
 
 // What the model host holds besides its layers, in bytes, from the file's own tensor sizes: the
@@ -36,7 +36,7 @@ export function roomBytes(model, ctx, kv = "f16") {
 
 // The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
 // each device downloads about its share of the layers, so the picker can say what this device will fetch.
-export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84 };
+export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84, "qwen3.5-122b-moe": 72.52 };
 
 // Each GGUF's exact size and SHA-256 (Hugging Face's x-linked-size / x-linked-etag), so `pooled pull`
 // can check what it downloaded (cli/lib/cache.js)
@@ -46,6 +46,10 @@ export const FILES = {
   "qwen3-4b": { bytes: 4280404704, sha256: "8c2f07f26af9747e41988551106f149b03eb9b5cb6df636027b6bf6278473300" },
   "qwen3.8-27b": { bytes: 16056478688, sha256: "ede16c7b36e578ca87a8c70e011e4b4633a32c831c0ce76d0f474582384e671d" },
   "qwen3.6-35b-moe": { bytes: 20836243072, sha256: "52312daa5b2190c1f5723d33c3315c01c55af4206f6c6e6eb63f3d8dd52bb85e" },
+  // a split GGUF (llama.cpp gguf-split, two files): bytes is the whole model, shards each file's size and SHA-256
+  "qwen3.5-122b-moe": { bytes: 72517482816, shards: [
+    { bytes: 39917224704, sha256: "717ab3efe330cb8581e7233bb93ad0c965fdb351ce5ae61a6f7b1252ba6925d9" },
+    { bytes: 32600258112, sha256: "28d9accacf99f2e87c6b2f4a199556067775af6ecccd76e31904f5bb0fd5867f" }] },
 };
 
 // The models the room's picker offers. The others stay for tests and ?dev=1.
@@ -69,6 +73,11 @@ export const MODELS = {
   // mixture of experts: 256 experts, 8 active per token (~3B of 35B), so decode reads far less than the 27B
   "qwen3.6-35b-moe": { label: "Qwen3.6 35B MoE \u00b7 Q4", kind: "qwen35",
     gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf" },
+  // 256 experts, 8 active (~10B of 122B), 48 layers, 16 query heads per kv head. Two files (shards); the room's loader
+  // reads one GGUF, so it is not in the picker or the ?dev=1 list yet: tests/test_moe.js MODEL=122b, `pooled pull`
+  "qwen3.5-122b-moe": { label: "Qwen3.5 122B MoE \u00b7 Q4", kind: "qwen35",
+    gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf",
+    shards: ["00001", "00002"].map((n) => `https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-${n}-of-00002.gguf`) },
   "smollm-135m": { label: "SmolLM 135M · bf16", kind: "safetensors",
     st: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/model.safetensors",
     cfg: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/config.json",
@@ -100,6 +109,9 @@ export const MAX_SEQ_LONG = 8192;
 export const CTX = {
   "qwen3.8-27b": { def: 16384, max: 65536 },
   "qwen3.6-35b-moe": { def: 32768, max: 131072 },
+  // the 122B MoE: 12 attention layers, 2 KV heads x 256 (the 35B's K/V row): 24 KB per position in f16, 128 MiB per
+  // layer's K at 131072. Checked at short contexts so far (phase 1): its default stays at the 35B's
+  "qwen3.5-122b-moe": { def: 32768, max: 131072 },
   // the dense engine keeps an f32 KV cache (~224 KB per position on the 1.7B: 1.8 GB at 8k, 3.6 GB
   // at 16k: 5.6 GB for the room in all). 16k fits an agent's prompt (OpenClaw's alone is ~12k), so
   // the room page, `pooled host` and the OpenClaw plugin all open it at 16k; a room short of that

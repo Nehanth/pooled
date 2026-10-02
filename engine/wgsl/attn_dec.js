@@ -26,12 +26,14 @@
 // not bit-identical to attn_flash (different split boundaries and summation orders): tolerance, not
 // bits, against the f32 reference (tests/test_attn_dec.js), same greedy tokens as attn_flash.
 //
-// Shape limits: headDim 256, G = nH / nKV <= 8, f16 KV (not kvQ8). Workgroup memory <= 16 KB.
+// Shape limits: headDim 256, G = nH / nKV <= 8 per workgroup, f16 KV (not kvQ8). Workgroup memory <= 16 KB.
+// R > 1: more query heads per kv head than that (Qwen3.5-122B: 16), so each kv head gets R workgroups of
+// G = nH / nKV / R heads (wg.z runs over nKV * R; the engine passes that product as nKV and this G).
 
-export function attnDecConfig({ hd, G, nKV, splits = 0, kvQ8 = false }) {
-  if (kvQ8 || hd !== 256 || !(G >= 1 && G <= 8)) return null;
+export function attnDecConfig({ hd, G, nKV, splits = 0, kvQ8 = false, R = 1 }) {
+  if (kvQ8 || hd !== 256 || !(G >= 1 && G <= 8) || !(R >= 1)) return null;
   const S = splits > 0 ? splits | 0 : Math.max(16, Math.floor(256 / nKV));
-  return { HD: hd, G, S };
+  return { HD: hd, G, S, R };
 }
 
 // JavaScript mirror of fd_split / the number of splits a column with s positions uses
@@ -55,7 +57,7 @@ struct FD { s0: u32, s1: u32, S: u32, slots: u32 };   // q col stride, out col s
 fn fd_split(s: u32, S: u32) -> u32 { return max(64u, ((s + S - 1u) / S + 63u) / 64u * 64u); }
 `;
 
-export function attnDecWGSL({ HD, G, S }) {
+export function attnDecWGSL({ HD, G, S, R = 1 }) {
   const CQ = DEC_CQ, CD = HD / CQ, CG = 256 / (CD / 4);   // slices, dims per slice, split groups
   const H = [...Array(G).keys()];
   const QV = HD / 4;                 // vec4s of q per head
@@ -105,7 +107,7 @@ fn attn_dec(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
   let r = tid >> 1u; let hf = tid & 1u;
   let rg = tid >> 5u; let j = tid & 31u;
   let kvRow = cfg.kvDim / 8u;            // vec4<u32> per position (all kv heads)
-  let gOff = g * ${HD / 8}u;
+  let gOff = ${R > 1 ? `(g / ${R}u)` : "g"} * ${HD / 8}u;
   let sh = tid >> 5u; let ln = tid & 31u; // softmax: head, lane
   var Mh: f32 = -3.0e38;                  // this head's new running max (softmax threads)
   workgroupBarrier();

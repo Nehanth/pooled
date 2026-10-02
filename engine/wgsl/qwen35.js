@@ -114,8 +114,8 @@ function flashWGSL(q8) {
 @group(1) @binding(4) var<storage, read_write> ${P}_ml: array<f32>;
 @group(1) @binding(5) var<uniform> ${P}: FA;`;
   const dot = q8
-    ? `let kb = (c0 + t) * (cfg.kvDim / 4u) + g * (hd / 4u);
-        let sb = (c0 + t) * (cfg.kvDim / 32u) + g * (hd / 32u);
+    ? `let kb = (c0 + t) * (cfg.kvDim / 4u) + kvh * (hd / 4u);
+        let sb = (c0 + t) * (cfg.kvDim / 32u) + kvh * (hd / 32u);
         let qb = h * hd;
         var s: f32 = 0.0;
         for (var p: u32 = 0u; p < hd / 4u; p++) {
@@ -125,7 +125,7 @@ function flashWGSL(q8) {
           s += fa_qs[qb + 4u * p + 2u] * (f32(bitcast<i32>(w << 8u) >> 24u) * sc);
           s += fa_qs[qb + 4u * p + 3u] * (f32(bitcast<i32>(w) >> 24u) * sc);
         }`
-    : `let kb = (c0 + t) * kvw + g * hw;
+    : `let kb = (c0 + t) * kvw + kvh * hw;
         let qb = h * hd;
         var s: f32 = 0.0;
         for (var p: u32 = 0u; p < hw; p++) {
@@ -134,9 +134,9 @@ function flashWGSL(q8) {
           s += fa_qs[qb + 2u * p + 1u] * kk.y;
         }`;
   const vread = q8
-    ? `let vw = ${P}_v[(c0 + t) * (cfg.kvDim / 4u) + g * (hd / 4u) + tid / 4u];
-        let v = f32(bitcast<i32>(vw << (24u - 8u * (tid & 3u))) >> 24u) * ${P}_vs[(c0 + t) * (cfg.kvDim / 32u) + (g * hd + tid) / 32u];`
-    : `let v = unpack2x16float(${P}_v[(c0 + t) * kvw + g * hw + tid / 2u])[tid & 1u];`;
+    ? `let vw = ${P}_v[(c0 + t) * (cfg.kvDim / 4u) + kvh * (hd / 4u) + tid / 4u];
+        let v = f32(bitcast<i32>(vw << (24u - 8u * (tid & 3u))) >> 24u) * ${P}_vs[(c0 + t) * (cfg.kvDim / 32u) + (kvh * hd + tid) / 32u];`
+    : `let v = unpack2x16float(${P}_v[(c0 + t) * kvw + kvh * hw + tid / 2u])[tid & 1u];`;
   return `
 ${binds}
 @compute @workgroup_size(256)
@@ -146,7 +146,10 @@ fn attn_flash${q8 ? "_q8" : ""}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(l
   let t0 = sp * ${P}.splitLen;
   if (t0 >= seqLen) { return; }
   let t1 = min(seqLen, t0 + ${P}.splitLen);
-  let hd = cfg.headDim; let G = cfg.nH / cfg.nKV;
+  // more than 8 query heads per kv head (Qwen3.5-122B: 16): R workgroups per kv head, each takes G = 8 of them
+  // (wg.z runs over nKV * R); R = 1 (G <= 8) is the original kernel
+  let GA = cfg.nH / cfg.nKV; let R = (GA + 7u) / 8u;
+  let hd = cfg.headDim; let G = GA / R; let kvh = g / R;
   let hw = hd / 2u; let kvw = cfg.kvDim / 2u;
   let rs = sqrt(f32(hd));
   for (var w: u32 = tid; w < G * hd; w += 256u) { fa_qs[w] = ${P}_q[col * ${P}.s0 + g * G * hd + w]; }
