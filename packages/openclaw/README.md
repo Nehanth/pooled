@@ -87,6 +87,12 @@ OpenClaw shows the plugin's capabilities and asks you to accept them at install.
   - `room.json`: the hosted room's invite key and the passes it gave out; a joined room's key and pass.
   - `status.json`: the room as the gateway sees it (devices, split, who is waiting, recent events).
   - `prewarm.json`: the last system prompt and tool list, for the warm-up.
+
+  And, as every room node does, the room's saved prompt state in `~/.pooled/cache/ckpt/` (folder 0700,
+  files 0600, at most 4 GB; `POOLED_CKPT_GB`, `POOLED_CKPT_DIR`, `POOLED_CKPT_DISK=0` turns it off):
+  the attention cache of OpenClaw's system prompt and tools, so a gateway restart does not read them
+  again. It is derived from your prompts (the prompt's text can be roughly recovered from it), stays on
+  each machine that holds layers, and is safe to delete.
 - **Reads environment variables**: the `POOLED_*` variables in the config table below, plus
   `POOLED_DEBUG` for logging.
 - **Runs one helper program.** During onboarding it runs `nvidia-smi` (without a shell, when it is
@@ -235,8 +241,12 @@ or `POOLED_LINK="<invite link>"` to join.
 
 Known gaps:
 
-- Reading the prompt is the slow part: OpenClaw's prompt is 14-19k tokens. The warm-up moves the
-  cold read to when the room comes online; checkpoints live in GPU memory only.
+- Reading the prompt is the slow part: OpenClaw's prompt is 14-19k tokens. Each device keeps its part
+  of the pinned system prompt + tools on disk (`~/.pooled/cache/ckpt/`), so after a gateway restart
+  the room reads it back when it comes online and the warm-up reads only the last few tokens. Only
+  when the room is exactly the same (model file, layer split, engine settings, context): any change,
+  or a device without its copy, means the full read once, then the cache is filled again. The very
+  first start still reads the whole prompt; answer and turn checkpoints live in GPU memory only.
 - A room hosted in a browser tab has no turn checkpoints yet, so OpenClaw re-reads more per tool call
   there than with a Node host.
 - Checkpoints are not part of the memory split: at 50k tokens one is about 1 GB across the room (MoE).

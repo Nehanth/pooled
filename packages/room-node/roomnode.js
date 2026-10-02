@@ -29,7 +29,9 @@
 //   checkpoints (ckpt.js): the browser room's pinned prefix + answer checkpoints (ckptSave /
 //     ckptResume, sv / ld / dp on the frame header), with more slots: pinned system prompts and an
 //     agent's cache boundary, answer states kept by last use, one index for every session.
-//   left out: disk copies of checkpoints, host resume after a reload, the speed split, dead-link redial
+//   disk copies of the pinned checkpoints (ckptdisk.js): a restarted host resumes its system prompt +
+//     tools from them, each device from its own copy (ai-ckpt-save / ai-ckpt-load / ai-ckpt-loaded).
+//   left out: disk copies of answer checkpoints, the speed split, dead-link redial
 //     (ICE state watch), changing the visibility at run time (the constructor sets it), Code mode, reactions/typing, the room
 //     map, weight caches and peer weights (ai-wget answered "miss"), the bandwidth test.
 import { createPipeline } from "../../room/pipeline.js";
@@ -45,6 +47,7 @@ import { unpackWire } from "../../room/wire.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote } from "../../room/plan.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
+import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
 import { isPrefix } from "../../harness/prefix.js";
 import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "../../room/conversation.js";
 import { pickSampler } from "../../room/sampling.js";
@@ -71,7 +74,7 @@ export const HOST_WAIT_MS = 60000;   // a worker knocks on the host id this long
 // messages only the room's host (or the device it made model host) may send
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
-  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-load", "ai-share", "ai-wake"]);
+  "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-load", "ai-share", "ai-wake", "ai-ckpt-save", "ai-ckpt-load"]);
 // The context a node opens a room with: what was asked (clamped by room/models.js), else the largest
 // room context the model allows (room/models.js CTX: 16k on the 1.7B, 64k on the 27B, 128k on the MoE),
 // as the OpenClaw plugin opens it (packages/openclaw pluginCtx): an agent's prompt alone is 8-12k
@@ -94,7 +97,7 @@ export class RoomNode extends EventEmitter {
   // whoever asked; an agent host uses "asker" so its prompts and answers stay off other devices'
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
-    gbps = null, autoRedeal = true, ckpt = {}, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory" } = {}) {
+    gbps = null, autoRedeal = true, ckpt = {}, ckptDisk, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory" } = {}) {
     super();
     // split: how a deal spreads the layers, as the room page's "Layer split" (room.js ai-split):
     // "memory" = over every device in proportion to what it lends (this node's default so far);
@@ -119,6 +122,9 @@ export class RoomNode extends EventEmitter {
     this.allowApi = allowApi !== false;
     this.ctxAsk = ctx;
     this.ckptOpts = ckpt === false ? null : { ...CKPT_DEFAULTS, ...(ckpt || {}) };
+    // the pinned checkpoints' disk copies (ckptdisk.js): a CkptDisk, false for none, default
+    // ~/.pooled/cache/ckpt (POOLED_CKPT_DISK=0 turns it off, POOLED_CKPT_GB caps it, POOLED_CKPT_DIR moves it)
+    this.disk = ckptDisk === false ? null : ckptDisk || CkptDisk.fromEnv(process.env, { log: (s) => this.log(s) });
     this.chatMaxNew = chatMaxNew;
     this.name = name || "node-" + randCode(3).toLowerCase();
     this.pledgeGB = pledgeGB; this.signal = signal; this.modelDir = modelDir; this.flags = flags;
@@ -141,7 +147,8 @@ export class RoomNode extends EventEmitter {
       apis: new Map(), runs: new Map(), degraded: false, model: null, range: null, online: false,
       plan: new Map(), gone: new Set(), chainNames: [], relinks: new Map(), lapStat: null, held: null,
       shareCap: new Map(), dropped: new Set(), loadDeaths: new Map(),
-      ckpt: null, dropQ: [], ckptCap: new Map(), bounds: new Map() };
+      ckpt: null, dropQ: [], ckptCap: new Map(), bounds: new Map(),
+      diskOf: new Map(), diskRoom: null, diskWait: new Map(), diskPend: new Map(), dealGen: 0 };
     this.pipeline = createPipeline({
       state: this.ai, options: { profile: "node" },
       transport: { sendHidden: (id, msg) => this.sendHidden(id, msg), sendTo: (id, msg) => this.sendTo(id, msg), chainRtt: () => this.chainRtt() },
@@ -487,15 +494,23 @@ export class RoomNode extends EventEmitter {
       case "ai-wake": return;   // a phone's GPU wake hint; a computer's GPU does not clock down between laps
       case "ai-hidden": case "ai-hidden-b":
         if (ai.role !== "worker") return;
-        ai.q = ai.q.then(() => this.workerFrame(d)).catch((err) => { this.log("frame failed: " + err.message); this.sendTo(ai.hostId, { t: "ai-error", message: err.message }); });
+        ai.q = ai.q.then(() => this.workerFrame(d)).then(() => this.diskAfterFrame(d)).catch((err) => { this.log("frame failed: " + err.message); this.sendTo(ai.hostId, { t: "ai-error", message: err.message }); });
         return;
+      // the host pinned a prefix (its slot rides a frame's sv): this device's part goes to disk
+      case "ai-ckpt-save": if (ai.role === "worker") this.diskSaveReq(d); return;
+      // the room is back online after a restart: read the host's pinned prefixes back, where this device has them
+      case "ai-ckpt-load": if (ai.role === "worker") ai.q = ai.q.then(() => this.diskLoadReq(d)).catch((err) => this.log("checkpoint restore failed: " + err.message)); return;
       case "ai-inv-req": this.sendTo(from, { t: "ai-inv", url: d.url, have: [] }); return;   // no weight cache here
       case "ai-wget": this.sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return;
       case "ai-genstart": case "ai-token": case "ai-gendone": case "ai-busy": case "ai-queued": this.emit("chat", d); return;
       // --- host
       case "ai-ready":
         if (!this.hosting() || !ai.chain.includes(from)) return;
-        ai.readyPeers.add(from); ai.ckptCap.set(from, !!d.ckpt); this.emit("progress", { name: e?.name, pct: 100 }); this.maybeReady();
+        ai.readyPeers.add(from); ai.ckptCap.set(from, !!d.ckpt); ai.diskOf.set(from, d.disk && typeof d.disk === "object" ? d.disk : null); this.emit("progress", { name: e?.name, pct: 100 }); this.maybeReady();
+        return;
+      case "ai-ckpt-loaded":   // worker -> host: the slots it read back from disk (diskRestore)
+        if (!this.hosting() || !ai.chain.includes(from)) return;
+        ai.diskWait.get(from)?.(Array.isArray(d.slots) ? d.slots : []);
         return;
       case "ai-linked":   // worker -> host: its fresh link to a device that came back is up
         if (!this.hosting() || !ai.chain.includes(from)) return;
@@ -571,13 +586,16 @@ export class RoomNode extends EventEmitter {
               if (pct !== lastPct) { lastPct = pct; this.sendTo(ai.hostId, { t: "ai-progress", pct }); this.emit("loadprogress", pct); }
             } });
           Object.assign(ai, { engine: r.engine, device: r.device, cfg: r.cfg, range: d.range, model: d.model });
-          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv };
+          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv, file: this.disk ? await modelFileId(src) : null };
         } finally { unwatch(); await src.close(); }
       }
       if (!(await this.ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
       this.log(`layers ${d.range[0]}-${d.range[1] - 1} ready in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
       // ckpt: this device applies checkpoint control (sv / ld / dp) on its frames
-      this.sendTo(ai.hostId, { t: "ai-ready", slots: [], ckpt: ai.engine?.saveSlot ? 1 : 0 });
+      // disk: what keys this device's disk copies (ckptdisk.js), for the host's room key
+      ai.diskPend.clear();
+      const disk = this.diskLocal();
+      this.sendTo(ai.hostId, { t: "ai-ready", slots: [], ckpt: ai.engine?.saveSlot ? 1 : 0, ...(disk ? { disk } : {}) });
       this.emit("loaded", { range: d.range, model: d.model, s: (performance.now() - t0) / 1000 });
     } catch (err) {
       if (ai.startFailed) { this.freeLayers(null); return; }
@@ -719,6 +737,8 @@ export class RoomNode extends EventEmitter {
     // a fresh deal: every device starts without checkpoints (a worker that keeps its layers drops its
     // slots); what each worker applies comes with its ai-ready, which may arrive before this device's load ends
     ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map();
+    // and, once every device is in, the pinned prefixes this room saved to disk before (diskRestore)
+    ai.diskOf = new Map(); ai.diskRoom = null; ai.dealGen++; ai.diskRestore = !!this.disk;
     ai.relinks = new Map(); ai.gone = new Set(); ai.plan = new Map(); ai.lapStat = null;
     let ctx = nodeCtxFor(modelKey, this.ctxAsk);
     const kv = kvModeFor(modelKey, null);
@@ -794,7 +814,7 @@ export class RoomNode extends EventEmitter {
           onGpuError: (m) => this.log("GPU error: " + m),
           onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
         Object.assign(ai, { engine: r.engine, device: r.device, tok: r.tok, cfg: r.cfg, range: ranges[0], role: "host" });
-        ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv };
+        ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv, file: this.disk ? await modelFileId(src) : null };
       }
     } catch (err) { ai.starting = false; ai.redealWanted = null; clearTimeout(ai.idleRedeal); this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }
     finally { unwatch(); ai.loadingShard = false; await src.close(); }
@@ -876,6 +896,15 @@ export class RoomNode extends EventEmitter {
     const ai = this.ai;
     if (!this.hosting() || !ai.engine || ai.readyPeers.size < ai.chain.length || this.relinking()) return;
     if (!ai.chain.every((id) => this.conns.has(id) && ai.readyPeers.has(id))) return;
+    if (ai.restoring) return;
+    // the first time this deal is whole: read the pinned prefixes back from disk, then go online
+    if (ai.diskRestore) {
+      ai.diskRestore = false; ai.restoring = true;
+      this.diskRestoreAll().catch((err) => this.log("checkpoint restore failed: " + err.message))
+        .finally(() => { ai.restoring = false; this.maybeReady(); });
+      return;
+    }
+    ai.diskRoom = this.diskRoomKey();
     ai.degraded = false; ai.online = true; ai.role = "host";
     clearTimeout(ai.idleRedeal);
     this.broadcast({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: this.ctxMax(), ...(ai.ctxWant ? { ctxWant: ai.ctxWant } : {}) });
@@ -1044,6 +1073,109 @@ export class RoomNode extends EventEmitter {
     if (ai.chain.length) { const { reset, ...rest } = ai.pendingCtl || {}; ai.pendingCtl = { ...rest, ld: x.key }; }
     return { reused: ai.pos, from: x.pin ? "pin" : x.turn ? "turn" : "answer" };
   }
+  // ---------------- checkpoints on disk (ckptdisk.js): the pinned prefixes survive a restart ----------------
+  // what keys this device's copies: { model, file, sig, ctx, kv }, or null when it keeps none (no
+  // disk cache, an engine without state export, a model file it could not identify)
+  diskLocal() {
+    const ai = this.ai, E = ai.engine;
+    if (!this.disk || !E?.stateSignature || !E.exportSlot || !E.importState || !ai.held?.file || !ai.model) return null;
+    return { model: ai.model, file: ai.held.file, sig: E.stateSignature(), ctx: E.maxSeq || ai.held.ctx || 0, kv: ai.held.kv || "f16" };
+  }
+  // The room key: the model, context and KV mode and every device's file and state signature, host
+  // first, in chain order (a worker's state depends on what every device before it computed). null
+  // when checkpoints are off or any device keeps no disk copies (an older tab, a dense engine).
+  diskRoomKey() {
+    const ai = this.ai, me = this.diskLocal();
+    if (!me || !this.ckptOn()) return null;
+    const devs = [me, ...ai.chain.map((id) => ai.diskOf.get(id))];
+    if (devs.some((d) => !d || d.model !== me.model)) return null;
+    return roomKey({ model: me.model, ctx: me.ctx, kv: me.kv, devices: devs.map((d) => ({ file: d.file, sig: d.sig, ctx: d.ctx, kv: d.kv })) });
+  }
+  // Host, when the deal is whole for the first time: index the pinned prefixes this exact room saved
+  // before. Every worker reads its own part into the slot the host names (ai-ckpt-load) and says
+  // which it has (ai-ckpt-loaded); the host keeps only the ones every device has, so a device without
+  // a matching copy (another split, another engine, a cleared cache) means a normal prefill.
+  async diskRestoreAll({ timeoutMs = 120000 } = {}) {
+    const ai = this.ai, E = ai.engine, gen = ai.dealGen, room = ai.diskRoom = this.diskRoomKey(), local = this.diskLocal();
+    if (!room) return { restored: 0 };
+    const t0 = performance.now();
+    const have = (await this.disk.list({ room, local })).filter((c) => Array.isArray(c.ids) && c.ids.length === c.n).slice(0, this.ckptOpts.pins);
+    if (!have.length) return { restored: 0 };
+    ai.ckpt ||= new CkptIndex(this.ckptOpts);
+    const loads = have.map((c) => ({ slot: ai.ckpt.nextKey(), h: c.h, ids: c.ids }));
+    const asks = ai.chain.map((id) => new Promise((res) => {
+      const timer = setTimeout(() => { ai.diskWait.delete(id); res([]); }, timeoutMs);
+      ai.diskWait.set(id, (slots) => { clearTimeout(timer); ai.diskWait.delete(id); res(slots); });
+      this.sendTo(id, { t: "ai-ckpt-load", room, loads: loads.map(({ slot, h }) => ({ slot, h })) });
+    }));
+    const mine = [];
+    for (const L of loads) {
+      const st = await this.disk.get({ room, local, h: L.h });
+      if (!st || ai.engine !== E) continue;
+      try { E.importState({ sig: E.stateSignature(), pos: st.pos, parts: st.parts }); E.saveSlot(L.slot); mine.push(L); } catch {}
+    }
+    const theirs = (await Promise.all(asks)).map((s) => new Set(s));
+    const live = ai.engine === E && ai.dealGen === gen && !ai.degraded;
+    const ok = live ? mine.filter((L) => theirs.every((s) => s.has(L.slot))) : [];
+    for (const L of loads) {
+      if (ok.includes(L)) { ai.ckpt.commit(L.slot, L.ids.slice(), true); continue; }
+      try { E.dropSlot(L.slot); } catch {}
+      if (live && theirs.some((s) => s.has(L.slot))) ai.dropQ.push(L.slot);   // a worker holds one the room cannot use
+    }
+    if (ai.engine === E) { try { E.reset(); } catch {} if (live) { ai.pos = 0; ai.fed = []; } }
+    const ms = performance.now() - t0, tokens = ok.map((L) => L.ids.length);
+    if (live) {
+      this.log(ok.length ? `read ${ok.length} pinned prompt checkpoint${ok.length > 1 ? "s" : ""} back from disk (${tokens.join(" + ")} tokens) in ${(ms / 1000).toFixed(1)} s`
+        : `no usable pinned prompt checkpoints on disk for this room (${loads.length} here, not on every device)`);
+      ai.diskRestored = { n: ok.length, tokens, ms: Math.round(ms) };
+      this.emit("ckptrestore", ai.diskRestored);
+    }
+    return { restored: ok.length, tokens, ms };
+  }
+  // Host: a pinned prefix was saved as `slot` holding exactly `ids`: its copy goes to disk here, and
+  // every worker writes its own part once its frame applied the save (ai-ckpt-save)
+  diskPersist(slot, ids) {
+    const ai = this.ai, room = ai.diskRoom, E = ai.engine, local = this.diskLocal();
+    if (!room || !local || !ids?.length) return;
+    const h = prefixHash(ai.model, ids);
+    this.disk.put({ room, local, h }, () => (ai.engine === E && E.slots?.has(slot) ? E.exportSlot(slot) : Promise.reject(new Error("the slot is gone"))), { ids: Array.from(ids) })
+      .catch(() => false);
+    for (const id of ai.chain) this.sendTo(id, { t: "ai-ckpt-save", room, slot, h });
+  }
+  // Worker: the save may not have reached this device yet (it rides a frame through the chain, this
+  // message comes straight from the host): written now when the slot is here, else after the frame
+  diskSaveReq(d) {
+    const ai = this.ai;
+    if (!this.disk || typeof d.room !== "string" || typeof d.h !== "string" || !Number.isInteger(d.slot)) return;
+    if (ai.engine?.slots?.has(d.slot)) this.diskWrite(d);
+    else { ai.diskPend.set(d.slot, d); if (ai.diskPend.size > 16) ai.diskPend.delete(ai.diskPend.keys().next().value); }
+  }
+  diskAfterFrame(d) {
+    const ai = this.ai;
+    if (!ai.diskPend.size) return;
+    if (d.sv != null && ai.diskPend.has(d.sv)) { const p = ai.diskPend.get(d.sv); ai.diskPend.delete(d.sv); this.diskWrite(p); }
+    for (const k of [].concat(d.dp ?? [])) { if (k === DROP_ALL) ai.diskPend.clear(); else ai.diskPend.delete(k); }
+  }
+  diskWrite({ room, slot, h }) {
+    const ai = this.ai, E = ai.engine, local = this.diskLocal();
+    if (!local) return;
+    this.disk.put({ room, local, h }, () => (ai.engine === E && E.slots?.has(slot) ? E.exportSlot(slot) : Promise.reject(new Error("the slot is gone")))).catch(() => false);
+  }
+  // Worker: read the named prefixes back into the named slots (in frame order: queued on ai.q).
+  // -> ai-ckpt-loaded { slots: the ones this device has }
+  async diskLoadReq(d) {
+    const ai = this.ai, E = ai.engine, local = this.diskLocal(), got = [];
+    if (E && local && typeof d.room === "string" && Array.isArray(d.loads)) {
+      for (const L of d.loads.slice(0, 16)) {
+        if (!Number.isInteger(L?.slot) || L.slot < 1 || L.slot > 0xfffe || typeof L.h !== "string") continue;
+        const st = await this.disk.get({ room: d.room, local, h: L.h });
+        if (!st || ai.engine !== E) continue;
+        try { E.importState({ sig: E.stateSignature(), pos: st.pos, parts: st.parts }); E.saveSlot(L.slot); got.push(L.slot); } catch {}
+      }
+      if (got.length) { try { E.reset(); } catch {} this.log(`read ${got.length} pinned prompt checkpoint${got.length > 1 ? "s" : ""} back from disk`); }
+    }
+    this.sendTo(ai.hostId, { t: "ai-ckpt-loaded", slots: got });
+  }
   // the id of "user" right after <|im_start|> (one token in the Qwen vocabularies), or null
   userTok() {
     const ai = this.ai;
@@ -1131,7 +1263,7 @@ export class RoomNode extends EventEmitter {
       const pin = pins.includes(c);
       if (ai.fed?.length === c) {
         const saved = this.ckptSave(pin, !pin);
-        if (pin && saved != null) pinned++;
+        if (pin && saved != null) { pinned++; this.diskPersist(saved, ai.fed); }
       }
       at = c;
     }
@@ -1325,7 +1457,8 @@ export class RoomNode extends EventEmitter {
       split: this.split?.names?.map((nm, i) => `${nm} ${this.split.ranges[i][0]}-${this.split.ranges[i][1] - 1}`) || null,
       ctx: ai.engine?.maxSeq || null, ctxNote: ai.ctxNote || null, loading: !!ai.loadingShard, signaling: !this.signalDown,
       passes: this.hosting() ? ai.frames || 0 : this.frames || 0,
-      ckpt: ai.ckpt ? { pinned: ai.ckpt.items.filter((x) => x.pin).map((x) => x.ids.length), answers: ai.ckpt.items.filter((x) => !x.pin).map((x) => x.ids.length), hits: { ...ai.ckpt.hits } } : null };
+      ckpt: ai.ckpt ? { pinned: ai.ckpt.items.filter((x) => x.pin).map((x) => x.ids.length), answers: ai.ckpt.items.filter((x) => !x.pin).map((x) => x.ids.length), hits: { ...ai.ckpt.hits } } : null,
+      ckptDisk: this.disk ? { dir: this.disk.dir, restored: ai.diskRestored || null, writes: this.disk.writes, failures: this.disk.failures } : null };
   }
 
   async close() {
@@ -1342,6 +1475,8 @@ export class RoomNode extends EventEmitter {
     clearTimeout(this.ai.idleRedeal);
     this.failWaiters(new Error("the room closed"));
     this.ai.online = false; this.ai.chain = []; this.ai.ckpt = null;
+    // checkpoint copies still being written (a gateway stopping right after the first question)
+    if (this.disk) await Promise.race([this.disk.q, new Promise((r) => setTimeout(r, 15000).unref?.())]);
     this.freeLayers(null);   // the engine, its checkpoint slots and the device (device.destroy frees every buffer)
   }
 }

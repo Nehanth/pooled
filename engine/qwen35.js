@@ -122,10 +122,14 @@ export class Qwen35Engine {
   // one staging buffer, so a long context never needs one giant mapping.
   async exportState() { return this._readParts(this._stateParts(), this.pos); }
   // A GPU slot read back the same way (for spilling a session to disk without switching to it).
+  // A slot dropped while it is read back keeps its buffers until the read ends (dropSlot), so the
+  // copy never reads a destroyed buffer (what it read is still that slot's state; `dropped` says it went).
   async exportSlot(name) {
     const sl = this.slots?.get(name);
     if (!sl) throw new Error("no saved slot " + name);
-    return this._readParts(this._stateParts(sl.pos).map((p, i) => ({ buf: sl.bufs[i], bytes: p.bytes })), sl.pos);
+    sl.reading = (sl.reading || 0) + 1;
+    try { return { ...(await this._readParts(this._stateParts(sl.pos).map((p, i) => ({ buf: sl.bufs[i], bytes: p.bytes })), sl.pos)), dropped: !!sl.dropped }; }
+    finally { if (!--sl.reading && sl.dropped) for (const b of sl.bufs) b.destroy(); }
   }
   async _readParts(parts, pos) {
     const most = Math.max(4, ...parts.map((p) => p.bytes));
@@ -181,7 +185,10 @@ export class Qwen35Engine {
   }
   dropSlot(name) {
     const sl = this.slots?.get(name);
-    if (sl) { for (const b of sl.bufs) b.destroy(); this.slots.delete(name); }
+    if (!sl) return;
+    this.slots.delete(name);
+    if (sl.reading) sl.dropped = true;   // exportSlot destroys them when its read ends
+    else for (const b of sl.bufs) b.destroy();
   }
   dropAllSlots() { for (const k of [...(this.slots?.keys() || [])]) this.dropSlot(k); }
 
