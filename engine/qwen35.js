@@ -919,6 +919,25 @@ export class Qwen35Engine {
     this._guOp = guOp;
     const bgNorm = (x, w, y) => this._bg(this.pipes.rmsnorm, 1, [x, w.buf, y, this.uDim]);
 
+    // ---- expert offload (engine/expert_store.js): layers whose routed experts the loader parked in an ExpertStore ----
+    // (qwen35Weights(..., { experts })). Their expert tensors become the store's region (the bind groups every
+    // resident path builds) and its per-layer slot pool (one-token and batched passes, after a cut at moe_route).
+    this.experts = null;
+    {
+      const offL = weights.layers.filter((L) => L.moe && L.expGate?.offload);
+      if (offL.length) {
+        if (!this.moeFuse) throw new Error("expert offload needs the fused MoE FFN (moeFuse)");
+        if (!offL.every((L) => L.expUp?.offload && L.expDown?.offload && L.expGate.store === offL[0].expGate.store)) throw new Error("expert offload: a layer's experts are only partly parked");
+        const st = offL[0].expGate.store;
+        st.build({ K: this.moe.K });
+        await st.checkAlloc();
+        this.experts = st;
+        const KS = this.moe.KS;
+        this.offSel = device.createBuffer({ size: KS * 4, usage: S });   // one token's slot ids (moe_gus / moe_dnc on the pool)
+        this.offStage = device.createBuffer({ size: Math.max(1, batchCols) * KS * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+        this._cut = null;
+      }
+    }
     this.layers = [];
     if (this.moe) {   // one token's routing and expert activations
       const { nExp, K, inter: ei } = this.moe;
@@ -987,9 +1006,16 @@ export class Qwen35Engine {
           for (let i = 0; i < pk.length; i++) pk[i] = (u[2 * i] >>> 16) | (u[2 * i + 1] & 0xffff0000);
           R.router = { kind: "bf16", buf: this._buf(pk, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC) };
         } else R.router = { kind: "f32", buf: this._buf(rp, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC) };
-        R.expGate = up(L.expGate); R.expUp = up(L.expUp); R.expDown = up(L.expDown);
+        // offloaded (L.expGate.offload): the experts bind the store's whole-layer region on every resident code path
+        // (filled per use: _cutResolve, ExpertStore.loadLayer), plus the layer's slot pool for the cut passes (bgGusP / bgDncP)
+        const off = L.expGate.offload ? L.expGate.layer : -1;
+        if (off >= 0) {
+          R.off = true; R.offLayer = off;
+          [R.expGate, R.expUp, R.expDown] = ["gate", "up", "down"].map((p) => this.experts.regionEntry(off, p));
+          [R.poolGate, R.poolUp, R.poolDown] = ["gate", "up", "down"].map((p) => this.experts.poolEntry(off, p));
+        } else { R.expGate = up(L.expGate); R.expUp = up(L.expUp); R.expDown = up(L.expDown); }
         const lim = device.limits.maxStorageBufferBindingSize;
-        for (const [w, n] of [[R.expGate, "ffn_gate_exps"], [R.expUp, "ffn_up_exps"], [R.expDown, "ffn_down_exps"]])
+        for (const [w, n] of [[R.expGate, "ffn_gate_exps"], [R.expUp, "ffn_up_exps"], [R.expDown, "ffn_down_exps"], ...(R.off ? [[R.poolGate, "pool gate"], [R.poolUp, "pool up"], [R.poolDown, "pool down"]] : [])])
           if (w.qs.size > lim) throw new Error(`${n} is ${(w.qs.size / 2 ** 20).toFixed(0)} MB, over this device's ${(lim / 2 ** 20).toFixed(0)} MB storage-binding limit (a Q4_0 file needs less)`);
         if (R.expUp.kind !== R.expGate.kind) throw new Error("MoE gate and up experts must share a format");
         R.shPack = packGU(L.shGate, L.shUp);
@@ -1006,6 +1032,13 @@ export class Qwen35Engine {
           U(R.moeU(dim, ei, dim, hs, R.shPack))]);
         R.bgDnc = this._bg(this.pipes[R.dncPipe], 1, [R.expDown.qs, R.expDown.sc, MB.hF, this.x, MB.sel, MB.selw, R.ffnDown.qs, R.ffnDown.sc,
           U(R.moeU(dim, dim, ei, hs))]);
+        if (R.off) {   // the same kernels on the slot pool, the slot ids (offSel) in place of the expert ids
+          R.selBuf = MB.sel;
+          R.bgGusP = this._bg(this.pipes[R.gusPipe], 1, [R.poolGate.qs, R.poolGate.sc, R.poolUp.qs, R.poolUp.sc, this.xn, MB.hF, this.offSel, R.shPack.buf,
+            U(R.moeU(dim, ei, dim, hs, R.shPack))]);
+          R.bgDncP = this._bg(this.pipes[R.dncPipe], 1, [R.poolDown.qs, R.poolDown.sc, MB.hF, this.x, this.offSel, MB.selw, R.ffnDown.qs, R.ffnDown.sc,
+            U(R.moeU(dim, dim, ei, hs))]);
+        }
       } else if (L.moe) {
         const { nExp, K, inter: ei, norm } = this.moe, MB = this._moeTraceBufs(R);
         R.moe = true;
@@ -1630,6 +1663,7 @@ export class Qwen35Engine {
       if (this.moe.nrt) this._dxyz(p, "moe_nrt", L.bgNrt, Math.ceil((this.moe.nExp + 1) / this.moe.nrt.ROWS), 1, 1);
       else this._dop(p, L.mvRouter);
       this._dxyz(p, "moe_route", L.bgRoute, 1, 1, 1);
+      if (L.off) { this._cutAt(enc, p, L, 1, L.selBuf, null); return; }   // offloaded: the experts run after _cutResolve
       this._dxyz(p, L.gusPipe, L.bgGus, Math.ceil(hs / gusRows), KS, 1);
       this._dxyz(p, L.dncPipe, L.bgDnc, Math.ceil(D.dim / dncRows), 1, 1);
       if (p !== this._pp) p.end();
@@ -1662,11 +1696,71 @@ export class Qwen35Engine {
     if (!L.mvDown.acc) this._d(p, "add_res", this.bgAddTmp, D.dim);
     if (p !== this._pp) p.end();
   }
+  // ---- expert offload: the cut at an offloaded layer's moe_route (see engine/expert_store.js) ----
+  // _cutAt ends the pass, copies the route's selection (nCols x KS ids) to the staging buffer and records the cut;
+  // the encoding caller then runs _cutResolve before anything else: it submits what was encoded, reads the ids back,
+  // lets the store plan the copies (misses into the pool, or the experts into the region when they outnumber the
+  // pool), writes the slot ids and encodes the layer's expert kernels into a new encoder, which it returns.
+  // M: the batched pass's bind groups (null: the one-token pass). A shared compute pass (layerFuse.pass _pp, the
+  // verify pass _ppB) is ended here and reopened in the new encoder.
+  _cutAt(enc, p, L, nCols, selBuf, M) {
+    if (this._cut) throw new Error("expert offload: a cut was not resolved");
+    const pp = p === this._pp, ppB = p === this._ppB;
+    p.end();
+    if (pp) this._pp = null;
+    if (ppB) this._ppB = null;
+    enc.copyBufferToBuffer(selBuf, 0, this.offStage, 0, nCols * this.moe.KS * 4);
+    this._cut = { L, nCols, M, pp, ppB };
+  }
+  async _cutResolve(enc) {
+    const c = this._cut, q = this.device.queue, KS = this.moe.KS, bytes = c.nCols * KS * 4, st = this.offStage;
+    this._cut = null;
+    q.submit([enc.finish()]);
+    await st.mapAsync(GPUMapMode.READ, 0, bytes);
+    const sel = new Uint32Array(st.getMappedRange(0, bytes)).slice();
+    st.unmap();
+    const e2 = this.device.createCommandEncoder();
+    const r = this.experts.plan(e2, c.L.offLayer, sel, c.nCols, KS);
+    if (r.pool) q.writeBuffer(c.M ? this.B.offSel : this.offSel, 0, r.remap);   // lands before e2's kernels (queue order)
+    const p = e2.beginComputePass();
+    if (c.pp) this._pp = p;
+    if (c.ppB) this._ppB = p;
+    const { hs, gusRows, dncRows } = this.moe, L = c.L;
+    if (c.M) {
+      this._dMC(p, L.gusPipe, r.pool ? c.M.gusP : c.M.gus, Math.ceil(hs / gusRows) * 64, 64, c.nCols * KS);
+      this._dMC(p, L.dncPipe, r.pool ? c.M.dncP : c.M.dnc, Math.ceil(this.dims.dim / dncRows) * 64, 64, c.nCols);
+    } else {
+      this._dxyz(p, L.gusPipe, r.pool ? L.bgGusP : L.bgGus, Math.ceil(hs / gusRows), KS, 1);
+      this._dxyz(p, L.dncPipe, r.pool ? L.bgDncP : L.bgDnc, Math.ceil(this.dims.dim / dncRows), 1, 1);
+    }
+    if (!c.pp && !c.ppB) p.end();
+    return e2;
+  }
+  // A prefill frame of W tokens on an offloaded layer (grouped prefill, after the routing of all W): its experts into
+  // the store's region. A frame whose picks can cover the layer (W * K >= nExp; 512-token frames touch nearly every
+  // expert) copies the whole layer with no readback; a shorter one reads its routing back and copies only the
+  // distinct experts it chose. -> the encoder to continue in
+  async _regionLoad(enc, L, selBuf, W) {
+    const { K, KS, nExp } = this.moe, st = this.experts;
+    if (W * K >= nExp) { st.loadLayer(enc, L.offLayer); return enc; }
+    const bytes = W * KS * 4, q = this.device.queue;
+    if (!this._offStageG || this._offStageG.size < bytes) { this._offStageG?.destroy(); this._offStageG = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); }
+    const sg = this._offStageG;
+    enc.copyBufferToBuffer(selBuf, 0, sg, 0, bytes);
+    q.submit([enc.finish()]);
+    await sg.mapAsync(GPUMapMode.READ, 0, bytes);
+    const sel = new Uint32Array(sg.getMappedRange(0, bytes)).slice();
+    sg.unmap();
+    const e2 = this.device.createCommandEncoder();
+    st.loadExperts(e2, L.offLayer, sel, W, KS);
+    return e2;
+  }
   // Debug / test hook: run only layer i's FFN block on a given residual x (one token).
   async ffnOnly(i, xIn) {
     this.device.queue.writeBuffer(this.x, 0, xIn);
-    const enc = this.device.createCommandEncoder();
+    let enc = this.device.createCommandEncoder();
     this._encodeFFN(enc, i < this.layers.length ? this.layers[i] : this.mtpLayer);
+    if (this._cut) enc = await this._cutResolve(enc);
     this.device.queue.submit([enc.finish()]);
     return this._readback(this.x, this.stageX, this.dims.dim);
   }
@@ -2075,6 +2169,13 @@ export class Qwen35Engine {
           whole(B.xn), { buffer: B.mHF }, { buffer: B.mSel }, { buffer: L.shPack.buf }, U(L.moeU(st(B.xn), ei, D.dim, hs, L.shPack))]);
         mc.dnc = this._bg2res(this.pipes[L.dncPipe], [{ buffer: L.expDown.qs }, { buffer: L.expDown.sc }, { buffer: B.mHF }, whole(B.x),
           { buffer: B.mSel }, { buffer: B.mSelw }, { buffer: L.ffnDown.qs }, { buffer: L.ffnDown.sc }, U(L.moeU(st(B.x), D.dim, ei, hs))]);
+        if (L.off) {   // offloaded: the same launches on the layer's slot pool, slot ids from B.offSel (_cutResolve)
+          B.offSel ||= dev.createBuffer({ size: NC * this.moe.KS * 4, usage: S });
+          mc.gusP = this._bg2res(this.pipes[L.gusPipe], [{ buffer: L.poolGate.qs }, { buffer: L.poolGate.sc }, { buffer: L.poolUp.qs }, { buffer: L.poolUp.sc },
+            whole(B.xn), { buffer: B.mHF }, { buffer: B.offSel }, { buffer: L.shPack.buf }, U(L.moeU(st(B.xn), ei, D.dim, hs, L.shPack))]);
+          mc.dncP = this._bg2res(this.pipes[L.dncPipe], [{ buffer: L.poolDown.qs }, { buffer: L.poolDown.sc }, { buffer: B.mHF }, whole(B.x),
+            { buffer: B.offSel }, { buffer: B.mSelw }, { buffer: L.ffnDown.qs }, { buffer: L.ffnDown.sc }, U(L.moeU(st(B.x), D.dim, ei, hs))]);
+        }
         if (this.gB) {   // grouped prefill: the same weights and uniforms, over the ubatch buffers and the chunk list
           const gB = this.gB;
           mc.gusG = this._bg2res(this.pipes[L.gusgPipe], [{ buffer: L.expGate.qs }, { buffer: L.expGate.sc }, { buffer: L.expUp.qs }, { buffer: L.expUp.sc },
@@ -2204,7 +2305,9 @@ export class Qwen35Engine {
       const p = this._ppB || enc.beginComputePass();
       if (!(L.fused && this.moe.nrt)) this._dMC(p, "rmsnorm_mc", M.norm2, 256, 256, nCols);   // (moe_nrt: the norm is in the router launch)
       if (L.moe) {
-        this._encMoeFfn(p, L, LB, M, nCols, G, routeOnly);
+        const cut = !!L.off && !routeOnly;   // offloaded: stop after moe_route, the experts run after _cutResolve
+        this._encMoeFfn(p, L, LB, M, nCols, G, routeOnly || cut);
+        if (cut) { this._cutAt(enc, p, L, nCols, B.mSel, M); return; }
         if (p !== this._ppB) p.end();
         return;
       }
@@ -2623,6 +2726,7 @@ export class Qwen35Engine {
         }
         enc.copyBufferToBuffer(txn, 0, gB.XNW, 0, w * B.xn.stride);
         if (!LW.combW) enc.copyBufferToBuffer(tx, 0, gB.XW, 0, w * B.x.stride);
+        if (L.off) this.experts.loadLayer(enc, L.offLayer);   // offloaded: the layer's whole expert set into the region
         const p = enc.beginComputePass();
         this._dxyz(p, "moe_gsort", gB.bgSort, 1, 1, 1);
         this._encGroupExperts(p, L, M, w, true);
@@ -2630,6 +2734,7 @@ export class Qwen35Engine {
         p.end();
         if (!LW.combW) enc.copyBufferToBuffer(gB.XW, 0, tx, 0, w * B.x.stride);
       } else if (L.moe) for (let j = 0; j < J; j++) {   // experts: the batched MoE kernels, sub-batch by sub-batch
+        if (L.off && j === 0) this.experts.loadLayer(enc, L.offLayer);   // (offloaded: on the whole-layer region)
         this._wCopy(enc, B.xn, j, false); this._wCopy(enc, B.x, j, false);
         this._mcCommon = this.bgCommonW[j];
         const p = enc.beginComputePass();
@@ -2692,8 +2797,8 @@ export class Qwen35Engine {
 
   async _runBatchAndRead(basePos, n = this.NC) {
     const { dim } = this.dims;
-    const enc = this.device.createCommandEncoder();
-    for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, basePos, n);
+    let enc = this.device.createCommandEncoder();
+    for (let l = 0; l < this.layers.length; l++) { this._encodeLayerBatch(enc, l, basePos, n); if (this._cut) enc = await this._cutResolve(enc); }
     for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, this.stageXB, c * dim * 4, dim * 4);
     this.device.queue.submit([enc.finish()]);
     await this.stageXB.mapAsync(GPUMapMode.READ, 0, n * dim * 4);
@@ -2839,7 +2944,7 @@ export class Qwen35Engine {
       this.device.queue.writeBuffer(this.x, 0, this._embedRowF32(tokenId));
       const pre = this._fwdPre;
       this._fwdPre = null;
-      job = pre && pre.pos === this.pos && pre.key === key ? pre : this._encodeForward(this.pos, desc);
+      job = this.experts ? await this._encodeForwardOff(this.pos, desc) : pre && pre.pos === this.pos && pre.key === key ? pre : this._encodeForward(this.pos, desc);
       this.device.queue.submit([job.cb]);
     }
     const bytes = job.op.R * 4;
@@ -2849,7 +2954,7 @@ export class Qwen35Engine {
       this._setFrame(this.pos + 1, this.pos + 2);
       next = this._encodeForward(this.pos + 1, desc, true);
       this.device.queue.submit([next.cb]);
-    } else if (this.encodeAhead !== false && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1, desc);
+    } else if (this.encodeAhead !== false && !this.experts && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1, desc);
     this._fwdRun = (this._fwdRun || 0) + 1;
     await mapped;
     const c = readCands(new Uint32Array(job.stage.getMappedRange(0, bytes)), 0, job.op.k);
@@ -2860,7 +2965,7 @@ export class Qwen35Engine {
     return c;
   }
   _canDecodeAhead(desc) {
-    return this.decodeAhead !== false && desc && desc.kind === "greedy" && topkK(desc) === 1 && !!this._eg && this.hasEmbed && this.hasHead
+    return this.decodeAhead !== false && !this.experts && desc && desc.kind === "greedy" && topkK(desc) === 1 && !!this._eg && this.hasEmbed && this.hasHead
       && this.flash && !!this.pipes.emb_gather && this.pos + 2 < this.maxSeq;
   }
   // buffers a step run ahead saves the recurrent state and this.x into (shared with headAhead: never both at once)
@@ -3091,14 +3196,14 @@ export class Qwen35Engine {
     const sp = this._snapWord(true, n);
     for (let c = 0; c < n; c++) q.writeBuffer(this.frameBufsB[c], 0, new Uint32Array([pos + c, pos + c + 1, n, sp]));
     for (let c = 0; c < tokens.length; c++) q.writeBuffer(this.B.x.buf, c * this.B.x.stride, this._embedRowF32(tokens[c]));
-    const enc = this.device.createCommandEncoder();
+    let enc = this.device.createCommandEncoder();
     const op = desc ? this._tkOpB(desc) : null, stage = op ? this.stageTopN : this.stageLogitsN;
     const tail = op ? n * op.R * 4 : n * vocab * 4;   // drafts go right after the n logits rows (or candidate rows)
     if (chainK) this._encodeDraftChain(enc, pos, chainK, stage, tail, true);
     // verifyPass: the trunk's layers and the head in one compute pass instead of 3 per layer (as layerFuse.pass does
     // for one token): the same dispatches in the same order, each its own usage scope, so the same bits
     this._ppB = this.verifyPass !== false && this.flash ? enc.beginComputePass() : null;
-    for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, pos, n);
+    for (let l = 0; l < this.layers.length; l++) { this._encodeLayerBatch(enc, l, pos, n); if (this._cut) enc = await this._cutResolve(enc); }
     const p = this._ppB || enc.beginComputePass();
     this._ppB = null;
     this._dMC(p, "rmsnorm_mc", this.bgFinalNormMC, 256, 256, n);
@@ -3143,9 +3248,9 @@ export class Qwen35Engine {
     q.writeBuffer(this.B.x.buf, 0, this._embedRowF32(tNext));
     const stage = this.stageHF ||= this.device.createBuffer({ size: this.NC * dim * 4 + 128, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const tail = n * dim * 4;   // the drafts go right after the hiddens
-    const enc = this.device.createCommandEncoder();
+    let enc = this.device.createCommandEncoder();
     this._encodeDraftChain(enc, pos, K, stage, tail, true);
-    for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, pos, n);
+    for (let l = 0; l < this.layers.length; l++) { this._encodeLayerBatch(enc, l, pos, n); if (this._cut) enc = await this._cutResolve(enc); }
     for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, stage, c * dim * 4, dim * 4);
     q.submit([enc.finish()]);
     const bytes = tail + K * 16;
@@ -3178,7 +3283,7 @@ export class Qwen35Engine {
     this.pos = pos;
     this._setFrame(pos, pos + 1);
     dev.queue.writeBuffer(this.x, 0, xIn);
-    const enc = dev.createCommandEncoder();
+    let enc = dev.createCommandEncoder();
     {
       const p = enc.beginComputePass();
       this._d(p, "rmsnorm", this.bgFinalNorm, 256, 256);
@@ -3192,7 +3297,7 @@ export class Qwen35Engine {
       p.end();
     }
     this._saveAhead(enc);
-    for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
+    for (let i = 0; i < this.layers.length; i++) { this._encodeLayer(enc, i); if (this._cut) enc = await this._cutResolve(enc); }
     enc.copyBufferToBuffer(this.topBuf, 0, this.stageAhead, 0, 16);
     enc.copyBufferToBuffer(this.x, 0, this.stageAhead, 16, dim * 4);
     dev.queue.submit([enc.finish()]);
@@ -3490,7 +3595,7 @@ export class Qwen35Engine {
     if (gB.sortW !== W) { q.writeBuffer(gB.sortU, 0, new Uint32Array([W * this.moe.KS, ...gB.sortArgs])); gB.sortW = W; }
     for (let s = 0; s < nSub; s++) q.writeBuffer(gB.frames[s], 0, new Uint32Array([basePos + s * NC, basePos + s * NC + 1, NC, 0]));
     for (let c = 0; c < W; c++) q.writeBuffer(gB.XW, c * B.x.stride, hx ? hx.subarray(c * D.dim, (c + 1) * D.dim) : this._embedRowF32(ids[i0 + c]));
-    const enc = this.device.createCommandEncoder();
+    let enc = this.device.createCommandEncoder();
     try {
       for (let l = 0; l < this.layers.length; l++) {
         const L = this.layers[l], grp = !!L.fused;
@@ -3507,6 +3612,7 @@ export class Qwen35Engine {
           }
         }
         if (grp) {
+          if (L.off) enc = await this._regionLoad(enc, L, gB.sel, W);   // offloaded: the frame's experts into the region
           const M = this.layerB[l].mc, p = enc.beginComputePass();
           this._dxyz(p, "moe_gsort", gB.bgSort, 1, 1, 1);
           this._encGroupExperts(p, L, M, W);
@@ -3589,8 +3695,8 @@ export class Qwen35Engine {
         this.device.queue.writeBuffer(this.frameBufsB[c], 0, new Uint32Array([basePos + c, basePos + c + 1, NC, 0]));
         this.device.queue.writeBuffer(this.B.x.buf, c * this.B.x.stride, this._embedRowF32(ids[i + c]));
       }
-      const enc = this.device.createCommandEncoder();
-      for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, basePos, NC);
+      let enc = this.device.createCommandEncoder();
+      for (let l = 0; l < this.layers.length; l++) { this._encodeLayerBatch(enc, l, basePos, NC); if (this._cut) enc = await this._cutResolve(enc); }
       enc.copyBufferToBuffer(this.B.x.buf, (NC - 1) * this.B.x.stride, this.x, 0, this.dims.dim * 4);
       this.device.queue.submit([enc.finish()]);
       if (this.mtp && this.mtpFill !== false) {
@@ -3611,8 +3717,8 @@ export class Qwen35Engine {
           this.device.queue.writeBuffer(this.frameBufsB[c], 0, new Uint32Array([basePos + c, basePos + c + 1, W, 0]));
           this.device.queue.writeBuffer(this.B.x.buf, c * this.B.x.stride, this._embedRowF32(ids[i + c]));
         }
-        const enc = this.device.createCommandEncoder();
-        for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, basePos, W);
+        let enc = this.device.createCommandEncoder();
+        for (let l = 0; l < this.layers.length; l++) { this._encodeLayerBatch(enc, l, basePos, W); if (this._cut) enc = await this._cutResolve(enc); }
         enc.copyBufferToBuffer(this.B.x.buf, (W - 1) * this.B.x.stride, this.x, 0, this.dims.dim * 4);
         this.device.queue.submit([enc.finish()]);
         if (this.mtp && this.mtpFill !== false) {
@@ -3691,8 +3797,8 @@ export class Qwen35Engine {
     this._pre = null;
     this._setFrame(this.pos, this.pos + 1);
     this.device.queue.writeBuffer(this.x, 0, this._embedRowF32(tokenId));
-    const enc = this.device.createCommandEncoder();
-    for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
+    let enc = this.device.createCommandEncoder();
+    for (let i = 0; i < this.layers.length; i++) { this._encodeLayer(enc, i); if (this._cut) enc = await this._cutResolve(enc); }
     this.device.queue.submit([enc.finish()]);
     this.pos++;
     // fire-and-forget; callers batch backpressure via onSubmittedWorkDone()
@@ -3704,8 +3810,8 @@ export class Qwen35Engine {
     this.pos = pos;
     this._setFrame(pos, pos + 1);
     this.device.queue.writeBuffer(this.x, 0, this._embedRowF32(tokenId));
-    const enc = this.device.createCommandEncoder();
-    for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
+    let enc = this.device.createCommandEncoder();
+    for (let i = 0; i < this.layers.length; i++) { this._encodeLayer(enc, i); if (this._cut) enc = await this._cutResolve(enc); }
     this.device.queue.submit([enc.finish()]);
     return await this._readback(this.x, this.stageX, dim);
   }
@@ -3716,8 +3822,8 @@ export class Qwen35Engine {
     this.pos = pos;
     this._setFrame(pos, pos + 1);
     this.device.queue.writeBuffer(this.x, 0, xIn);
-    const enc = this.device.createCommandEncoder();
-    for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
+    let enc = this.device.createCommandEncoder();
+    for (let i = 0; i < this.layers.length; i++) { this._encodeLayer(enc, i); if (this._cut) enc = await this._cutResolve(enc); }
     this.device.queue.submit([enc.finish()]);
     const h = await this._readback(this.x, this.stageX, dim);
     // the caches now hold [0, pos]: a checkpoint saved before the next frame (sv) must keep this
@@ -3751,7 +3857,18 @@ export class Qwen35Engine {
   // desc: forwardTokenIds' GPU sampling descriptor (the head's top-k in the same buffer), null: logits
   _fwdKey(desc = null) { return [this.attnGlue, this.attnDecode, this.fuseProj, this.dnFuse, this.layerFuse.dn, this.layerFuse.conv, this.layerFuse.kv, this.layerFuse.comb, this.layerFuse.norm, this.layerFuse.pass, this.softmaxWG, this.b4, this.skip ? 1 : 0, this._common ? 1 : 0, desc ? topkK(desc) : 0].join(); }
   _encodeForward(pos, desc = null, ahead = false) {
-    const { vocab } = this.dims;
+    const enc = this._fwdBegin(ahead);
+    for (let i = 0; i < this.layers.length; i++) this._encodeLayerR(enc, this.layers[i], pos);
+    return this._fwdEnd(enc, pos, desc);
+  }
+  // expert offload: the same token, its command buffer split at every offloaded layer (_cutResolve submits the parts
+  // up to each cut); -> the job of the last part, as _encodeForward's (cb not yet submitted)
+  async _encodeForwardOff(pos, desc = null) {
+    let enc = this._fwdBegin(false);
+    for (let i = 0; i < this.layers.length; i++) { this._encodeLayerR(enc, this.layers[i], pos); if (this._cut) enc = await this._cutResolve(enc); }
+    return this._fwdEnd(enc, pos, desc);
+  }
+  _fwdBegin(ahead) {
     const enc = this.device.createCommandEncoder();
     if (ahead) { this._aheadBufs(); this._saveAhead(enc, true); }   // decode-ahead: save the state, then gather x from the top-1
     // layerFuse.pass: the whole token (every layer and the head) in one compute pass instead of 2-3
@@ -3759,7 +3876,10 @@ export class Qwen35Engine {
     const one = this.layerFuse.pass && this.flash;
     this._pp = one ? enc.beginComputePass() : null;
     if (ahead) { const p = this._pp || enc.beginComputePass(); this._d(p, "emb_gather", this._egX, this.dims.dim); if (p !== this._pp) p.end(); }
-    for (let i = 0; i < this.layers.length; i++) this._encodeLayerR(enc, this.layers[i], pos);
+    return enc;
+  }
+  _fwdEnd(enc, pos, desc) {
+    const { vocab } = this.dims;
     if (desc) {
       const op = this._tkOp("one", this.logits, vocab, 0, topkK(desc), this.topBuf);
       const p = this._pp || enc.beginComputePass();
@@ -3792,10 +3912,11 @@ export class Qwen35Engine {
     this.device.queue.writeBuffer(this.x, 0, this._embedRowF32(tokenId));
     const pre = this._fwdPre;
     this._fwdPre = null;
-    const job = pre && pre.pos === this.pos && pre.key === this._fwdKey() ? pre : this._encodeForward(this.pos);
+    // (expert offload: no encode-ahead, a token's commands depend on its routing)
+    const job = this.experts ? await this._encodeForwardOff(this.pos) : pre && pre.pos === this.pos && pre.key === this._fwdKey() ? pre : this._encodeForward(this.pos);
     this.device.queue.submit([job.cb]);
     const mapped = job.stage.mapAsync(GPUMapMode.READ);
-    if (this.encodeAhead !== false && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1);
+    if (this.encodeAhead !== false && !this.experts && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1);
     await mapped;
     const logits = Float32Array.from(new Float32Array(job.stage.getMappedRange(), 0, vocab));
     job.stage.unmap();

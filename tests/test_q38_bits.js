@@ -15,14 +15,16 @@
 // 4612ece1 / aeb06a4d and PREFILL_UBATCH=0 c26dbc5 / 3177f9f1; same greedy and spec tokens in all three.
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
-import { openGGUF, Q38_PATH, MOE_PATH, gpuDevice } from "./load_model.js";
+import { openGGUF, Q38_PATH, MOE_PATH, gpuDevice, offloadFromEnv } from "./load_model.js";
 import { gpuGreedy } from "./gpusample_check.js";
 
 // MODEL=moe: the same fingerprint for the 35B MoE (no reference list here: compare against main on the same machine)
 const model = openGGUF(Deno.env.get("MODEL") === "moe" ? MOE_PATH : Q38_PATH);
 const { device } = await gpuDevice();
 const L = model.trunkLayers, tok = model.tokenizer();
-const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true });
+// MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 (tests/load_model.js offloadFromEnv): expert offload must give the same hashes
+const experts = offloadFromEnv(device, L);
+const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true, experts });
 const eng = await Qwen35Engine.create({ device, meta: model.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, batchCols: 16, coopRowsB: 1,
   layerFuse: { "0": false, "1": true }[Deno.env.get("LAYER_FUSE")] });   // LAYER_FUSE=0 / 1: the decode layer fusions off / on (unset: the engine default; must not change a bit)
 console.log(`attnDecode ${eng.attnDecode} layerFuse ${JSON.stringify(eng.layerFuse)} attn_dec_combine_g ${!!eng.pipes.attn_dec_combine_g}`);
@@ -62,4 +64,5 @@ if (eng.gpuSample) {
   console.log(`GPU sampling: plain ${gp.join(",")} spec ${gs.slice(0, 13).join(",")} ${same ? "== logits path" : "DIFFERS from the logits path"}`);
   ok &&= same;
 }
+if (eng.experts) console.log(eng.experts.summary());
 Deno.exit(ok ? 0 : 1);
