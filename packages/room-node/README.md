@@ -96,8 +96,10 @@ const node = await joinRoom("K7QX", { pledgeGB: 16 });
 `pooled join <CODE>` and `pooled host` in [`@pooled/cli`](../../cli/README.md#lend-a-computer-pooled-join--pooled-host-preview) are the supported way (memory rule, status line, reconnects, errors). `join.mjs` is the bare version, kept for scripts. Either way, a device that holds layers receives the hidden state of every token the room computes, which carries its prompts and answers: lend only to rooms you trust.
 
 ```sh
-node packages/room-node/join.mjs K7QX --gb 12 --name mac-studio [--signal host:port] [--models dir] [--state status.json]
+node packages/room-node/join.mjs K7QX --gb 12 --name mac-studio [--ram 32] [--signal host:port] [--models dir] [--state status.json]
 ```
+
+`--ram N` (`ramGB` in `createRoom` / `joinRoom`): expert offload. The device tells the room it can keep a MoE model's routed experts in N GB of system RAM (`meta.offload`, `meta.ramGB`); when the pledges can't hold the model, the host deals it layers past its pledge with `ai-load {offload: {lo, hi, vramBytes, ramBytes}}`, and `shard.js` parks those layers' experts in an `ExpertStore` (engine/expert_store.js) with a GPU cache of `vramBytes`. Only for a discrete GPU (`pooled` sets it from the memory rule); 0 (the default here) never offloads. A split GGUF (the 122B: two files) is read as one model, from `<models>/<key>/` when every file is there, else from Hugging Face, each tensor from its own file.
 
 ## One tool-call path
 

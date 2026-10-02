@@ -188,7 +188,7 @@ export function rangePrefetcher({ fetchRange: get, concurrency = 6, capBytes = 5
   const pump = () => {
     while (!closed && inflight < concurrency && next < order.length) {
       const c = chunks[order[next]];
-      if (c.p) { next++; continue; }
+      if (c.p || c.dropped) { next++; continue; }
       if (held + (c.end - c.start) > capBytes && held > 0) return;
       start(order[next++]);
     }
@@ -198,6 +198,9 @@ export function rangePrefetcher({ fetchRange: get, concurrency = 6, capBytes = 5
     if (c.dropped) return;
     c.dropped = true;
     if (c.data) { held -= c.end - c.start; c.data = null; }
+    // the settled promise holds the bytes too: without this a streamed load kept every byte it fetched until
+    // close() (a whole shard: 47 GB for the 122B's offloaded share, on top of the 43 GB it parks)
+    c.p = null;
     pump();
   };
   return {
