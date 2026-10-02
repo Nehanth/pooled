@@ -5,6 +5,9 @@
 // (prewarm.json, 0600, next to room.json) and, when the room comes online, asks once with them and a
 // one-word question for a one-token answer: that fills the pinned checkpoints before anyone asks.
 // Host mode only; POOLED_PREWARM=0 (or config prewarm: false) turns it off.
+// After a gateway restart the room node usually has those checkpoints on disk already (room-node
+// ckptdisk.js: read back when the room comes online, when the room is exactly the same), so this ask
+// then reads only its last few tokens; it still fills them when the disk copies were not usable.
 import path from "node:path";
 import { pooledDir, readJson, writeJson } from "./state.js";
 

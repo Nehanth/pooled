@@ -1801,3 +1801,20 @@ Gates: `test_q38_bits` default re-baselined to **4dc814b1 / 4f075117** (dp4a; sa
 `PREFILL_DP4A=0` 4612ece1 / aeb06a4d (= the f32 default before), `PREFILL_UBATCH=0` c26dbc5 / 3177f9f1 (unchanged);
 `test_prefill_dp4a` 27B PASS (argmax, 32 greedy tokens == llama.cpp and narrow at 150 / 700 / 2100, spec == plain);
 unit 968 pass; `npm run check`; `tests/run.sh q38once` PASS (9 checks incl. MTP spec, split, twins, ctx).
+
+## 2026-10-02: OpenClaw's first answer after a restart from disk checkpoints (branch perf/ckpt-persist), GB10
+
+Every device of a room-node room keeps its part of the pinned prefixes (OpenClaw's system prompt + tools, and its
+STABLE cache boundary) on disk (`packages/room-node/ckptdisk.js`, `~/.pooled/cache/ckpt`); when a restarted room's
+deal is whole, each device reads them back into GPU slots before the room goes online. Recorded OpenClaw request
+(11,286 tokens with its tools), `packages/room-node/test/e2e.mjs cache`, `STEPS=turn1`, 35B MoE:
+
+| setup | cold first turn (= every restart on main) | after a restart, with the cache |
+|---|---|---|
+| 2 nodes in 2 processes (`SETUP=proc`, split 19 + 21) | 52.5 s, 34.5 s (cache on); 41.6, 34.4, 42.3 s (`POOLED_CKPT_DISK=0`) | **1.26 s, 1.20 s** (231 tokens read; restore 0.4-0.8 s while the room comes online) |
+| solo (`SETUP=solo`) | 31.0 s | **2.2 s** (restore 1.7 s) |
+
+Same answer: turn1 identical in every run, and the full six-step `cache` run after a restart matched the
+`POOLED_CKPT_DISK=0` run step for step (texts and token counts). Cold turns with the cache on are within the run-to-run
+spread of the cache off (both nodes share one GPU here). On disk: two prefixes, ~0.6 GB for the room (host ~330 MB,
+worker ~285 MB; solo 615 MB), written after the pinned save, atomically, 0600.
