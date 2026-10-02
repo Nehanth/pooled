@@ -4,6 +4,7 @@
 //
 // setupNode() is idempotent and must run before anything touches navigator.gpu or new Peer().
 
+import { setFlagsFromString } from "node:v8";
 import { measureCopyGBps } from "../../room/gpuspeed.js";
 import { DENSE_SPEC_V } from "../../room/lookup.js";
 
@@ -25,10 +26,20 @@ export function dawnFlagsFor(env = process.env, platform = process.platform) {
   return flags.map((f, j) => (j === i ? f + ",d3d_skip_shader_optimizations" : f));   // one list: Dawn reads the last flag of a name
 }
 
+// V8's flags for a process that holds a Dawn device. On Windows (Node 24, npm webgpu 0.6.1, RTX 5070)
+// the process dies with an access violation (0xC0000005) when V8's Maglev compiler optimizes a hot
+// function once a GPU device exists, even with no GPU work going on; --no-maglev (or --max-opt=1, or
+// --no-concurrent-recompilation) avoids it. Hot functions then go from Sparkplug straight to TurboFan.
+// The flag is set at run time (the OpenClaw plugin runs inside the gateway's process, which we can't
+// re-exec): V8 compiles nothing with Maglev after it, and what Node had already compiled with Maglev
+// before (path helpers while loading modules) predates the device.
+export const v8FlagsFor = (platform = process.platform) => (platform === "win32" ? ["--no-maglev"] : []);
+
 // webgpu: an async loader for Dawn ({ create, globals }), for a caller that resolves it from its own
 // install (the pooled CLI: an optional package); default the npm "webgpu" package next to this one
-export function setupNode({ dawnFlags = dawnFlagsFor(), webgpu = () => import("webgpu") } = {}) {
+export function setupNode({ dawnFlags = dawnFlagsFor(), webgpu = () => import("webgpu"), v8Flags = v8FlagsFor() } = {}) {
   return ready ||= (async () => {
+    for (const f of v8Flags) setFlagsFromString(f);   // before Dawn makes a device
     // --- WebGPU (Dawn). Node 21+ already has a navigator object; add gpu to it.
     if (!globalThis.navigator?.gpu) {
       const { create, globals } = await webgpu();
