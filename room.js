@@ -4207,7 +4207,7 @@ async function aiOnData(from, d) {
     case "ai-hidden-b":
     case "ai-hidden":
     case "ai-hiddenret-b":
-    case "ai-hiddenret": pipeline.handleFrame(d); break;
+    case "ai-hiddenret": pipeline.handleFrame(from, d); break;
     case "ai-visibility":
       ai.visibility = d.mode;
       toast(d.mode === "all" ? "the host shows the chat to everyone" : d.mode === "host" ? "the host keeps the chat private" : "the host shows each answer to whoever asked");

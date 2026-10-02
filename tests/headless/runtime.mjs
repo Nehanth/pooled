@@ -8,7 +8,7 @@ function createRuntime({ state, transport, options }) {
   const pipeline = createPipeline({ state, transport, options });
   return {
     pipeline, generate: createGenerator({ state, pipeline, options }),
-    handleFrame(from, frame) { pipeline.handleFrame(frame); },
+    handleFrame(from, frame) { pipeline.handleFrame(from, frame); },
     fail(err) { state.abort = true; pipeline.failWaiters(err); },
     async drain() { await state.q; },
     async dispose() { pipeline.failWaiters(new Error("test room closed")); await state.q; },

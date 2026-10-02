@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers";
 import { createPipeline } from "../../room/pipeline.js";
 import { packWire, unpackWire } from "../../room/wire.js";
 import { DROP_ALL } from "../../room/transport.js";
@@ -112,11 +113,11 @@ Deno.test("pipeline: a failed worker frame reports once and the next queued fram
   const p = createPipeline({ state: ai, options: { profile: "node" },
     transport: { sendTo: (id, d) => sent.push(d), sendHidden: (id, d) => sent.push(d) },
     hooks: { onError: (e) => errors.push(e.message) } });
-  for (const pos of [0, 1]) p.handleFrame({ t: "ai-hidden", pos, ...packWire(new Float32Array([2])) });
+  for (const pos of [0, 1]) p.handleFrame("host", { t: "ai-hidden", pos, ...packWire(new Float32Array([2])) });
   await ai.q;
   eq(errors, ["broken frame"]);
   eq(sent.map((d) => [d.t, d.message, d.pos]), [["ai-error", "broken frame", undefined], ["ai-hiddenret", undefined, 1]]);
-  eq(p.handleFrame({ t: "ai-chat" }), false);
+  eq(p.handleFrame("host", { t: "ai-chat" }), false);
 });
 
 Deno.test("pipeline profiles: a replaced engine stays captured in node calls and remains live in browser calls", async () => {
@@ -159,3 +160,148 @@ Deno.test("pipeline node: browser abort and observer hooks do not affect node ex
   eq([...await p.aiPrefill([1])], [2]);
   await p.workerFrame({ t: "ai-hidden", pos: 0, ...packWire(new Float32Array([1])) });
 });
+
+
+Deno.test("pipeline: only the current chain tail can resolve returned frames", async () => {
+  for (const type of ["ai-hiddenret", "ai-hiddenret-b"]) {
+    const ai = { ...state(), role: "host", chain: ["first", "tail"] };
+    const p = createPipeline({ state: ai, transport: { sendTo() {}, sendHidden() {} } });
+    const key = type === "ai-hiddenret" ? 3 : "b3";
+    const frame = { t: type, pos: 3, basePos: 3, ...packWire(Float32Array.of(7)) };
+    const returned = p.lapWait(key, 1000, "test");
+    returned.catch(() => {});
+    try {
+      for (const from of ["first", "stranger", undefined]) {
+        eq(p.handleFrame(from, frame), false);
+        ok(ai.waiters.has(key), "untrusted reply consumed waiter");
+      }
+      ai.chain = [];
+      eq(p.handleFrame(undefined, frame), false);
+      ok(ai.waiters.has(key), "empty chain consumed waiter");
+      ai.chain = ["replacement"];
+      eq(p.handleFrame("tail", frame), false);
+      ok(ai.waiters.has(key), "old tail consumed waiter");
+      eq(p.handleFrame("replacement", frame), true);
+      eq([...await returned], [7]);
+      eq(ai.waiters.size, 0);
+    } finally { p.failWaiters(new Error("test finished")); }
+  }
+});
+
+Deno.test("pipeline: activation frames require the worker role", async () => {
+  for (const profile of ["browser", "node"]) for (const type of ["ai-hidden", "ai-hidden-b"]) {
+    const calls = [], sent = [];
+    const ai = { ...state(), role: "host", hostId: "host", next: "host", range: [0, 1], engine: {
+      dims: { dim: 1 }, runHidden: async (h) => { calls.push("one"); return h; },
+      runHiddenBatch: async (h) => { calls.push("batch"); return h; },
+    } };
+    const p = createPipeline({ state: ai, options: { profile }, transport: {
+      sendTo() {}, sendHidden: (_, d) => sent.push(d),
+    } });
+    const frame = { t: type, n: 1, pos: 0, basePos: 0, ...packWire(Float32Array.of(1)) };
+    for (const role of ["host", null]) {
+      ai.role = role;
+      const before = ai.q;
+      p.handleFrame("host", frame);
+      await ai.q;
+      ok(before === ai.q, "non-worker queued activation work");
+      eq([calls, sent], [[], []]);
+    }
+    ai.role = "worker";
+    p.handleFrame("host", frame);
+    await ai.q;
+    eq(calls, [type === "ai-hidden" ? "one" : "batch"]);
+    eq(sent.length, 1);
+  }
+});
+
+// Drain queued promise work to an event-loop boundary, without a timing-based delay.
+const nextTurn = () => new Promise((resolve) => setImmediate(resolve));
+for (const [window, expected] of [[undefined, 6], [NaN, 6], [Infinity, 6], [-Infinity, 6], [0, 1], [-2, 1], [1, 1], [2.9, 2], [3, 3]]) {
+  Deno.test(`pipeline: prefill window ${String(window)} bounds outstanding frames at ${expected}`, async () => {
+    const ai = { ...state(), role: "host", chain: ["worker"] }, sent = [], pending = [];
+    ai.engine = { dims: { dim: 1 }, NC: 4,
+      embedRunBatch: async (ids) => Float32Array.from(ids),
+      embedRun: async (id) => Float32Array.of(id), headFromHidden: async (h) => h,
+    };
+    const p = createPipeline({ state: ai, options: { prefillWindow: window }, transport: {
+      sendTo() {}, sendHidden(_, d) { sent.push(d); pending.push(d); },
+    } });
+    const ids = Array.from({ length: 16 * (expected + 3) + 1 }, (_, i) => i);
+    let done = false, error;
+    const work = p.aiPrefill(ids).then(() => { done = true; }, (e) => { done = true; error = e; });
+    const release = () => {
+      const d = pending.shift();
+      p.handleFrame("worker", { ...d, t: d.t === "ai-hidden-b" ? "ai-hiddenret-b" : "ai-hiddenret" });
+    };
+    try {
+      await nextTurn();
+      eq(sent.length, expected);
+      eq(pending.length, expected);
+      release();
+      await nextTurn();
+      eq(sent.length, expected + 1);
+      eq(pending.length, expected);
+      for (let turns = 0; !done && turns < ids.length; turns++) {
+        ok(pending.length <= expected, "prefill exceeded its window");
+        if (pending.length) release();
+        await nextTurn();
+      }
+      ok(done && !error, error?.message || "prefill did not complete");
+      eq(ai.fed, ids);
+      eq(ai.waiters.size, 0);
+    } finally { p.failWaiters(new Error("test finished")); await work; }
+  });
+}
+
+for (const profile of ["browser", "node"]) {
+  Deno.test(`pipeline ${profile}: wide worker prefill never replaces speculative passes`, async () => {
+    const ai = { ...state(), role: "worker", hostId: "host", next: "host" }, calls = [];
+    ai.engine = { dims: { dim: 1 }, NC: 4, prefillFrame: () => 8,
+      prefillHidden: async (h) => { calls.push("wide"); return h; },
+      runHiddenBatch: async (h, pos, spec) => { calls.push([pos, spec]); return h; },
+    };
+    const p = createPipeline({ state: ai, options: { profile }, transport: { sendTo() {}, sendHidden() {} } });
+    const frame = { t: "ai-hidden-b", n: 8, basePos: 0, ...packWire(new Float32Array(8)) };
+    await p.workerFrame(frame);
+    eq(calls.splice(0), ["wide"]);
+    await p.workerFrame({ ...frame, spec: 1 });
+    eq(calls, [[0, { base: 0, total: 8 }], [4, { base: 4, total: 8 }]]);
+  });
+
+  Deno.test(`pipeline ${profile}: node wide-frame override preserves browser host framing`, async () => {
+    for (const override of ["8", "0"]) {
+      const ai = { ...state(), role: "host", chain: ["worker"] }, sent = [], wide = [];
+      ai.engine = { dims: { dim: 1 }, NC: 4, prefillFrame: () => 32,
+        prefillHidden: async (ids) => { wide.push(ids.length); return Float32Array.from(ids); },
+        embedRunBatch: async (ids) => Float32Array.from(ids), embedRun: async (id) => Float32Array.of(id),
+        headFromHidden: async (h) => h,
+      };
+      let p;
+      p = createPipeline({ state: ai, options: { profile }, hooks: { prefillFrame: () => override }, transport: {
+        sendTo() {}, sendHidden(_, d) {
+          if (d.n) sent.push(d.n);
+          queueMicrotask(() => p.handleFrame("worker", { ...d, t: d.n ? "ai-hiddenret-b" : "ai-hiddenret" }));
+        },
+      } });
+      const ids = Array.from({ length: 33 }, (_, i) => i);
+      await p.aiPrefill(ids);
+      eq(sent, profile === "node" && override !== "0" ? [8, 8, 8, 8] : [16, 16]);
+      eq(wide, profile === "node" && override !== "0" ? [8, 8, 8, 8] : []);
+      eq(ai.fed, ids);
+    }
+  });
+
+  Deno.test(`pipeline ${profile}: wide draft fills retain caller batch policy`, () => {
+    const ai = state(), batches = [], singles = [];
+    ai.engine = { mtp: {}, dims: { dim: 1 }, NC: 4, B: { x: { buf: {}, stride: 4 } },
+      device: { queue: { writeBuffer() {} } },
+      _mtpFillBatch: (_, at, pos, n) => batches.push([at, pos, n]), setHidden() {},
+      mtpRun: (_, next, pos) => singles.push([next, pos]),
+    };
+    const p = createPipeline({ state: ai, options: { profile }, transport: { sendTo() {}, sendHidden() {} } });
+    p.fillDrafts(new Float32Array(9), Array.from({ length: 10 }, (_, i) => i), 0, 100, 9);
+    eq(batches, profile === "node" ? [[0, 100, 4], [4, 104, 4]] : []);
+    eq(singles, profile === "node" ? [[9, 109]] : Array.from({ length: 9 }, (_, i) => [i + 1, 101 + i]));
+  });
+}

@@ -297,3 +297,22 @@ Deno.test("generate: engines that disable host checkpoints do not split pinned p
   await f.run([1, 2, 3], { pin: 2, pinTag: "dense" });
   eq(f.calls.prefill, [[1, 2, 3]]); eq(f.ai.pinInfo, undefined);
 });
+
+
+Deno.test("generate: draft model requires capable peers and rechecks after a verify", async () => {
+  for (const initiallyCapable of [false, true]) {
+    let capable = initiallyCapable, proposed = 0, verified = 0;
+    const f = fixture({ outputs: [2, 9], options: { lookup: false }, state: { chain: ["worker"] },
+      hooks: { getPeerMeta: () => capable ? { dspec: 1 } : {} } });
+    f.ai.draft = { pickK: () => 2, propose: async () => { proposed++; return [7, 8]; }, note() {}, stats: {} };
+    f.ai.engine.specStats = { drafts: 0, accepted: 0 };
+    f.ai.engine.specStepDrafts = async () => {
+      verified++; capable = false; f.ai.engine.pos += 3;
+      return [7, 8, 1];
+    };
+    const result = await f.run([1, 2], { maxNew: 8 });
+    eq([proposed, verified], initiallyCapable ? [1, 1] : [0, 0]);
+    eq(result.tokens, initiallyCapable ? [2, 7, 8, 1] : [2]);
+    eq(f.calls.pipe, initiallyCapable ? [1] : [2]);
+  }
+});

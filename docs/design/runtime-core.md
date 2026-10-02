@@ -57,11 +57,16 @@ aborted)` saves the end checkpoint, formats node statistics and emits its existi
 
 `transport.sendHidden(id, frame)` delivers activation frames; `sendTo(id, message)`
 delivers worker errors. `chainRtt()` supplies the existing timeout estimate. After
-sender and role checks, the caller passes frames to `pipeline.handleFrame(frame)`.
-It queues worker work and resolves returned host laps. Connection failures call
+sender and role checks, the caller passes frames to `pipeline.handleFrame(from, frame)`.
+It queues work only for workers and accepts returned host laps only from the current
+chain tail; callers retain their existing membership and worker-sender checks. Connection failures call
 `pipeline.failWaiters(error)`. Hooks retain caller diagnostics, GPU wake behavior
 and frame accounting. The node continues draining at most two queued slot drops
 per frame; rollback/save/drop/reset/load order and binary framing remain unchanged.
+`options.prefillWindow` defaults to 6. Finite values are floored and clamped to at
+least 1; non-finite values use the default. The node supplies its wide-prefill
+environment override through `hooks.prefillFrame`, keeping process globals outside
+the shared module.
 
 The generator runs one attempt. Browser `roomGenerate`/`roomRecover` and node
 `generate` still compose `resumableGenerate` with their existing locking, readiness

@@ -8,7 +8,8 @@ import { PrefixIndex } from "../harness/prefix.js";
 export function createPipeline({ state: ai, transport, options = {}, hooks = {}, checkpointStore: ckptDisk = null, getRoomCode = () => null }) {
   const { sendHidden, sendTo, chainRtt = () => 0 } = transport;
   const { profile = "browser", checkpointMax: CKPT_MAX = 2, fillDrafts: FILL_DRAFTS = true,
-    mtpBatch: MTP_BATCH = true, tailFrame: TAIL_FRAME = true, prefillWindow: PREFILL_WINDOW = 6 } = options;
+    mtpBatch: MTP_BATCH = true, tailFrame: TAIL_FRAME = true, prefillWindow = 6 } = options;
+  const PREFILL_WINDOW = Number.isFinite(prefillWindow) ? Math.max(1, Math.floor(prefillWindow)) : 6;
   const { onStatus: aiStatus = () => {}, computePass = () => {}, teleNote = () => {},
     wakeChain = () => {}, keepWarm = () => {}, onFrame = () => {}, prefillFrame = () => undefined,
     onWorkerFrame = () => {}, onError = (err) => aiStatus("⚠ " + err.message) } = hooks;
@@ -419,7 +420,9 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     }
     if (node) onWorkerFrame(performance.now() - t0);
   }
-  function handleFrame(d) {
+  function handleFrame(from, d) {
+    if ((d.t === "ai-hiddenret" || d.t === "ai-hiddenret-b") &&
+        (!ai.chain.length || from !== ai.chain[ai.chain.length - 1])) return false;
     switch (d.t) {
       case "ai-hidden-b":
       case "ai-hidden":

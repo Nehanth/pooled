@@ -12,7 +12,7 @@
 //     room/transport.js (wire frames, stripes, ordered delivery, keep-alive), room/wire.js,
 //     room/plan.js, room/models.js, room/pledge.js (phone caps, a smaller share after a killed load),
 //     room/conversation.js, room/sampling.js, room/liveness.js (silence rules, lap timeouts),
-//     engine/generate.js, room/pipeline.js, room/resume.js (an answer carries on after a device drops, sameShard),
+//     room/lookup.js (through engine/generate.js), room/pipeline.js, room/resume.js (an answer carries on after a device drops, sameShard),
 //     room/gpuspeed.js (the copy speed that picks the model host), engine/preset.js;
 //     API asks: room/api.js (validateApiAsk, apiPrompt / apiPrompt2, apiRun / apiRun2: the host side
 //     of tool calling), and cli/lib (common.js finishRequest + askBody, answer.js Ask: the client side

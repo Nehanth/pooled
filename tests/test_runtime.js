@@ -53,7 +53,7 @@ async function checkMode(split) {
         sendHidden(to, message) {
           frames.push({ from: id, to, t: message.t });
           // Like an asynchronous network delivery, return before the peer performs its work.
-          queueMicrotask(() => peers.get(to).pipeline.handleFrame(message));
+          queueMicrotask(() => peers.get(to).pipeline.handleFrame(id, message));
         },
         sendTo(to, message) {
           assert(message.t === "ai-error", "unexpected runtime control message");
