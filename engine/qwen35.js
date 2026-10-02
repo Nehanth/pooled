@@ -703,6 +703,10 @@ export class Qwen35Engine {
         try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { dpFails.push(e); }
         return;
       }
+      if (name === "moe_nrt_w") {   // optional: a compiler that rejects it leaves the per-column moe_nrt for the wide router
+        try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { console.warn(`moe_nrt_w off: ${e.message}`); }
+        return;
+      }
       if (mdpPipes.includes(name)) {   // optional: a compiler that rejects them leaves the f32 tiled expert kernels
         try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { mdpFails.push(e); }
         return;
