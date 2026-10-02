@@ -2065,7 +2065,7 @@ export class Qwen35Engine {
     const G = this.gemmOn && this.gemm !== false && nCols === this.NC;   // full-width pass: GEMM needs transposed activations
     if (L.isFull) {
       {
-        const p = enc.beginComputePass();
+        const p = this._ppB || enc.beginComputePass();
         this._dMC(p, "rmsnorm_mc", M.norm1, 256, 256, nCols);
         if (G) this._dop(p, this.xposeXn);
         const [oq, ok, ov] = LB.qkvOps;
@@ -2073,23 +2073,23 @@ export class Qwen35Engine {
         if (this.fuseProj && LB.kv && !this._gemmAt(ok, nCols) && !this._gemmAt(ov, nCols)) this._dop(p, LB.kv, nCols);
         else { this._dop(p, ok, nCols); this._dop(p, ov, nCols); }
         this._encAttnGlue(p, M, nCols);
-        p.end();
+        if (p !== this._ppB) p.end();
       }
       if (!this.flash) for (let c = 0; c < nCols; c++) {
         enc.copyBufferToBuffer(B.k.buf, c * B.k.stride + (B.k.off || 0), L.kCache, (basePos + c) * D.kvDim * 4, D.kvDim * 4);
         enc.copyBufferToBuffer(B.v.buf, c * B.v.stride + (B.v.off || 0), L.vCache, (basePos + c) * D.kvDim * 4, D.kvDim * 4);
       }
       {
-        const p = enc.beginComputePass();
+        const p = this._ppB || enc.beginComputePass();
         this._encAttnCore(p, LB, M, basePos, nCols);
         if (G) this._dop(p, this.xposeAttnOut);
         this._dop(p, LB.o, nCols);
         if (!LB.o.acc) this._dMC(p, "add_res_mc", M.addTmp, D.dim, 64, nCols);
-        p.end();
+        if (p !== this._ppB) p.end();
       }
     } else {
       // a verify pass with replay: dn_delta_mc records what replay needs into L.rp (frame.snap)
-      const p = enc.beginComputePass();
+      const p = this._ppB || enc.beginComputePass();
       const nba = this.fuseProj && LB.nba;   // input norm + beta / alpha (as the one-token path), then [qkv | z]
       if (nba) this._dMC(p, "dn_nba", LB.nba, Math.ceil(this.layers[i].fBA.rows / 4) * 64, 64, nCols);
       else this._dMC(p, "rmsnorm_mc", M.norm1, 256, 256, nCols);
@@ -2102,14 +2102,14 @@ export class Qwen35Engine {
       if (G) this._dop(p, this.xposeGated);
       this._dop(p, LB.out, nCols);
       if (!LB.out.acc) this._dMC(p, "add_res_mc", M.addTmp, D.dim, 64, nCols);
-      p.end();
+      if (p !== this._ppB) p.end();
     }
     {
-      const p = enc.beginComputePass();
+      const p = this._ppB || enc.beginComputePass();
       if (!(L.fused && this.moe.nrt)) this._dMC(p, "rmsnorm_mc", M.norm2, 256, 256, nCols);   // (moe_nrt: the norm is in the router launch)
       if (L.moe) {
         this._encMoeFfn(p, L, LB, M, nCols, G, routeOnly);
-        p.end();
+        if (p !== this._ppB) p.end();
         return;
       }
       if (G) this._dop(p, this.xposeXn);
@@ -2121,7 +2121,7 @@ export class Qwen35Engine {
       if (G) this._dop(p, this.xposeG);
       this._dop(p, LB.down, nCols);
       if (!LB.down.acc) this._dMC(p, "add_res_mc", M.addTmp, D.dim, 64, nCols);
-      p.end();
+      if (p !== this._ppB) p.end();
     }
   }
 
@@ -2804,8 +2804,12 @@ export class Qwen35Engine {
     const op = desc ? this._tkOpB(desc) : null, stage = op ? this.stageTopN : this.stageLogitsN;
     const tail = op ? n * op.R * 4 : n * vocab * 4;   // drafts go right after the n logits rows (or candidate rows)
     if (chainK) this._encodeDraftChain(enc, pos, chainK, stage, tail, true);
+    // verifyPass: the trunk's layers and the head in one compute pass instead of 3 per layer (as layerFuse.pass does
+    // for one token): the same dispatches in the same order, each its own usage scope, so the same bits
+    this._ppB = this.verifyPass !== false && this.flash ? enc.beginComputePass() : null;
     for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, pos, n);
-    const p = enc.beginComputePass();
+    const p = this._ppB || enc.beginComputePass();
+    this._ppB = null;
     this._dMC(p, "rmsnorm_mc", this.bgFinalNormMC, 256, 256, n);
     this._dop(p, this.headB, n);
     if (op) this._dTopk(p, op, n);
