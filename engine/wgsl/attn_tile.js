@@ -33,13 +33,20 @@
 import { wgslToJs } from "./moe.js";
 
 // { HD, G, CW, TK, FASPLIT, FASPLITS, TARGET } or null when the shape is not supported
-export function attnTileConfig({ hd, G, faSplit, faSplits, wgMem = 16384, target = 32, tk = 0 }) {
+// kvh: keep the staged K / V tile as packed f16 pairs and widen at each read (half the workgroup-memory traffic of the
+// inner loops; the same f32 values, since f16 -> f32 is exact, so the same bits). TK is picked as without it.
+// pf: prefetch the next K / V tile into registers while the current one is used (the global loads' latency overlaps
+// the dot products instead of stalling every thread at the barrier after each load); the same values in the same
+// order, so the same bits.
+// nr: q, o and p as named variables (q0 .. q15, ...) instead of private arrays (a backend that keeps a private array in
+// scratch memory pays a memory access per use; the same values, so the same bits).
+export function attnTileConfig({ hd, G, faSplit, faSplits, wgMem = 16384, target = 32, tk = 0, kvh = false, pf = false, nr = false }) {
   if (!(hd % 16 === 0 && hd >= 16 && hd <= 256 && G >= 1 && G <= 64)) return null;
   if (faSplit % 64 !== 0 || faSplits < 1) return null;
   const bytes = (TK) => TK * hd * 4 + TK * 256 * 4;
   const TK = tk || [16, 8, 4].find((t) => bytes(t) <= wgMem);
   if (!TK || bytes(TK) > wgMem) return null;
-  return { HD: hd, G, CW: Math.floor(64 / G), TK, FASPLIT: faSplit, FASPLITS: faSplits, TARGET: Math.max(1, target | 0) };
+  return { HD: hd, G, CW: Math.floor(64 / G), TK, FASPLIT: faSplit, FASPLITS: faSplits, TARGET: Math.max(1, target | 0), KVH: !!kvh, PF: !!pf, NR: !!nr };
 }
 
 // JavaScript mirror of the kernel's split length for a pass whose last column sees seqEnd positions
@@ -76,13 +83,28 @@ export function attnTileBodies(c, js = false) {
   const I = Array.from({ length: NQ }, (_, i) => i), T = Array.from({ length: TK }, (_, t) => t);
   const tileLoad = (src) => `for (var w: u32 = tid; w < ${TK * HD4}u; w += 256u) {
       let t = ${E.div("w", `${HD4}u`)}; let d4 = w % ${HD4}u;
-      ${E.vdecl("kv")}
+      ${c.KVH ? (js ? "let kv = [0, 0];" : "var kv = vec2<u32>(0u);") : E.vdecl("kv")}
       if (c0 + t < t1) {
         let kb = (c0 + t) * kvw + g * ${HW}u + d4 * 2u;
-        kv = ${E.v4of2(`${src}[kb]`, `${src}[kb + 1u]`)};
+        kv = ${c.KVH ? (js ? `[${src}[kb], ${src}[kb + 1u]]` : `vec2<u32>(${src}[kb], ${src}[kb + 1u])`) : E.v4of2(`${src}[kb]`, `${src}[kb + 1u]`)};
       }
       at_kv[w] = kv;
     }`;
+  // PF: the tile's f16 pairs in registers (thread tid holds slots tid + 256 k), fetched one tile ahead
+  const PK = Array.from({ length: Math.ceil(TK * HD4 / 256) }, (_, k) => k);
+  const z2 = js ? "[0, 0]" : "vec2<u32>(0u)";
+  const pfDecl = PK.map((k) => `${js ? "let" : "var"} kr${k} = ${z2}; ${js ? "let" : "var"} vr${k} = ${z2};`).join(" ");
+  const fetch = (src, base, nm) => PK.map((k) => `{
+      let w = tid + ${256 * k}u; let t = ${E.div("w", `${HD4}u`)}; let d4 = w % ${HD4}u;
+      ${nm}${k} = ${z2};
+      if (w < ${TK * HD4}u && ${base} + t < t1) {
+        let kb = (${base} + t) * kvw + g * ${HW}u + d4 * 2u;
+        ${nm}${k} = ${js ? `[${src}[kb], ${src}[kb + 1u]]` : `vec2<u32>(${src}[kb], ${src}[kb + 1u])`};
+      }
+    }`).join("\n    ");
+  const store = (nm) => PK.map((k) => `{ let w = tid + ${256 * k}u; if (w < ${TK * HD4}u) { at_kv[w] = ${c.KVH ? `${nm}${k}` : E.v4of2(js ? `${nm}${k}[0]` : `${nm}${k}.x`, js ? `${nm}${k}[1]` : `${nm}${k}.y`)}; } }`).join("\n    ");
+  // a staged K / V vec4 (KVH: widened from its f16 pair at the read)
+  const kvAt = (ix) => c.KVH ? E.v4of2(`at_kv[${ix}].x`, `at_kv[${ix}].y`).replace(/\.x\b/g, js ? "[0]" : ".x").replace(/\.y\b/g, js ? "[1]" : ".y") : `at_kv[${ix}]`;
   const flash = `
   let sp = wg.x; let g = wg.y; let cg = wg.z; let tid = lid.x;
   let nc = max(frame.nCols, 1u);
@@ -106,19 +128,24 @@ export function attnTileBodies(c, js = false) {
   }
   var m: f32 = -3.0e38;
   var l: f32 = 0.0;
+  ${c.PF ? `${pfDecl}
+  ${fetch("at_k", "t0", "kr")}
+  ${fetch("at_v", "t0", "vr")}` : ""}
   for (var c0: u32 = t0; c0 < t1; c0 += ${TK}u) {
-    ${tileLoad("at_k")}
+    ${c.PF ? store("kr") : tileLoad("at_k")}
     workgroupBarrier();
+    ${c.PF ? fetch("at_k", `c0 + ${TK}u`, "kr") : ""}
     let act = c0 < rowEnd;
     if (act) {
       ${T.map((t) => `{
         ${E.vdecl("a")}
-        ${I.map((i) => E.vmad("a", `q[${i}u]`, `at_kv[${t * HD4 + i * 4}u + ds]`)).join(" ")}
+        ${I.map((i) => E.vmad("a", `q[${i}u]`, kvAt(`${t * HD4 + i * 4}u + ds`))).join(" ")}
         at_sp[${t * 256}u + tid] = (a[0u] + a[1u]) + (a[2u] + a[3u]);
       }`).join("\n      ")}
     }
     workgroupBarrier();
-    ${tileLoad("at_v")}
+    ${c.PF ? `${store("vr")}
+    ${fetch("at_v", `c0 + ${TK}u`, "vr")}` : tileLoad("at_v")}
     var alpha: f32 = 1.0;
     if (act) {
       let n = min(${TK}u, rowEnd - c0);
@@ -136,7 +163,7 @@ export function attnTileBodies(c, js = false) {
       ${I.map((i) => E.vscale(`o[${i}u]`, "alpha")).join(" ")}
       ${T.map((t) => `{
         let pt = p[${t}u];
-        ${I.map((i) => E.vmad(`o[${i}u]`, "pt", `at_kv[${t * HD4 + i * 4}u + ds]`)).join(" ")}
+        ${I.map((i) => E.vmad(`o[${i}u]`, "pt", kvAt(`${t * HD4 + i * 4}u + ds`))).join(" ")}
       }`).join("\n      ")}
     }
     workgroupBarrier();
@@ -164,7 +191,16 @@ export function attnTileBodies(c, js = false) {
     O += atc_o[(b0 + s) * ${HD}u + i] * w;
   }
   atc_out[col * atc.s1 + qh * ${HD}u + i] = O / L;`;
-  return js ? { flash: wgslToJs(flash), combine: wgslToJs(combine) } : { flash, combine };
+  // NR: the private arrays as named variables (every index is a literal, so this is a rename)
+  const named = (src) => {
+    if (!c.NR) return src;
+    const z4 = js ? "[0, 0, 0, 0]" : "vec4<f32>(0.0)", z1 = js ? "0" : "0.0", kw = js ? "let" : "var";
+    const decl = (n, len, z) => Array.from({ length: len }, (_, i) => `${kw} ${n}${i} = ${z};`).join(" ");
+    return src
+      .replace(E.varr("q", NQ), decl("q", NQ, z4)).replace(E.varr("o", NQ), decl("o", NQ, z4)).replace(E.farr("p", TK), decl("p", TK, z1))
+      .replace(/\b([qop])\[(\d+)u\]/g, "$1$2");
+  };
+  return js ? { flash: wgslToJs(named(flash)), combine: wgslToJs(combine) } : { flash: named(flash), combine };
 }
 
 // A standalone module (compiled only when attnPrefillTile is on, so a problem here cannot take down
@@ -188,7 +224,7 @@ struct FA { s0: u32, s1: u32, splitLen: u32, maxSplits: u32 };   // q col stride
 @group(1) @binding(3) var<storage, read_write> at_o: array<f32>;
 @group(1) @binding(4) var<storage, read_write> at_ml: array<f32>;
 @group(1) @binding(5) var<uniform> atu: FA;
-var<workgroup> at_kv: array<vec4<f32>, ${c.TK * c.HD / 4}>;
+var<workgroup> at_kv: array<${c.KVH ? "vec2<u32>" : "vec4<f32>"}, ${c.TK * c.HD / 4}>;
 var<workgroup> at_sp: array<f32, ${c.TK * 256}>;
 @compute @workgroup_size(256)
 fn attn_flash_tile(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {${flash}
