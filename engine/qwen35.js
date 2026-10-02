@@ -2298,6 +2298,16 @@ export class Qwen35Engine {
         R.toNarrow = uniq(B.xn, B.qkv, B.z);   // xn: the beta / alpha GEMV stays batched
         R.toWide = [B.gated];
       }
+      if (L.moe && L.fused && this.moe.nrt && this.gB) {   // the expert-grouped chunk's router over all its columns at once (_wideGrp)
+        const gB = this.gB, ls = B.mLogits.stride / 4, u32 = (a) => ({ buffer: this._buf(new Uint32Array(a), GPUBufferUsage.UNIFORM) });
+        if (!gB.LG) gB.LG = dev.createBuffer({ size: U * B.mLogits.stride, usage: S });
+        if (!gB.XNS) gB.XNS = dev.createBuffer({ size: U * B.xn.stride, usage: S });   // moe_nrt's own xn: not used (the experts take norm2's)
+        R.nrtW = this._bg2res(this.pipes.moe_nrt, [whole(Wt.x), { buffer: L.postNorm.buf }, { buffer: L.router.buf }, { buffer: gB.XNS }, { buffer: gB.LG },
+          u32([D.dim, this.moe.nExp + 1, st(Wt.x), ls, st(B.xn), 0, 0, 0])]);
+        R.routeW = this._bg2res(this.pipes.moe_route, [{ buffer: gB.LG }, { buffer: gB.sel }, { buffer: gB.selw }, u32(L.moeU(ls, 0, 0, 0))]);
+        R.combW = this._bg2res(this.pipes.moe_combw, [whole(Wt.x), { buffer: gB.Y }, { buffer: gB.selw },
+          u32([D.dim, 0, 0, this.moe.nExp, st(Wt.x), 0, 0, 0, 0, 0, 0, 0])]);
+      }
       if (!L.moe) {
         R.gate = wop(L.ffnGate, Wt.xn, Wt.g, D.inter, D.dim);
         R.up = wop(L.ffnUp, Wt.xn, Wt.u, D.inter, D.dim);
@@ -2376,7 +2386,12 @@ export class Qwen35Engine {
         // experts expert-grouped over the whole chunk (moeGroupPrefill on too): route each sub-batch, then one
         // sort + grouped gate/up + grouped down + combine over all w tokens, as _prefillGrouped does per ubatch
         const gB = this.gB, ss = NC * this.moe.KS * 4, tx = this._wTwin.get(B.x.buf), txn = this._wTwin.get(B.xn.buf);
-        for (let j = 0; j < J; j++) {
+        if (LW.nrtW && this.wideRouter !== false) {   // moe_nrt + moe_route over all w columns: the same per-column kernels, 2 launches
+          const p = enc.beginComputePass();
+          this._dxyz(p, "moe_nrt", LW.nrtW, Math.ceil((this.moe.nExp + 1) / this.moe.nrt.ROWS), w, 1);
+          this._dxyz(p, "moe_route", LW.routeW, w, 1, 1);
+          p.end();
+        } else for (let j = 0; j < J; j++) {
           this._wCopy(enc, B.xn, j, false);
           if (this.moe.nrt) this._wCopy(enc, B.x, j, false);   // moe_nrt norms x itself
           this._mcCommon = this.bgCommonW[j];
@@ -2387,15 +2402,14 @@ export class Qwen35Engine {
           enc.copyBufferToBuffer(B.mSel, 0, gB.sel, j * ss, ss);
           enc.copyBufferToBuffer(B.mSelw, 0, gB.selw, j * ss, ss);
         }
-        enc.copyBufferToBuffer(tx, 0, gB.XW, 0, w * B.x.stride);
         enc.copyBufferToBuffer(txn, 0, gB.XNW, 0, w * B.xn.stride);
+        if (!LW.combW) enc.copyBufferToBuffer(tx, 0, gB.XW, 0, w * B.x.stride);
         const p = enc.beginComputePass();
         this._dxyz(p, "moe_gsort", gB.bgSort, 1, 1, 1);
-        this._dInd(p, L.gusgPipe, M.gusG, gB.ind, 0);
-        this._dInd(p, L.dngPipe, M.dngG, gB.ind, 12);
-        this._dxyz(p, "moe_combw", gB.bgComb, Math.ceil(D.dim / 64), w, 1);
+        this._encGroupExperts(p, L, M, w);
+        this._dxyz(p, "moe_combw", LW.combW || gB.bgComb, Math.ceil(D.dim / 64), w, 1);   // combW: straight into the chunk's residual
         p.end();
-        enc.copyBufferToBuffer(gB.XW, 0, tx, 0, w * B.x.stride);
+        if (!LW.combW) enc.copyBufferToBuffer(gB.XW, 0, tx, 0, w * B.x.stride);
       } else if (L.moe) for (let j = 0; j < J; j++) {   // experts: the batched MoE kernels, sub-batch by sub-batch
         this._wCopy(enc, B.xn, j, false); this._wCopy(enc, B.x, j, false);
         this._mcCommon = this.bgCommonW[j];
@@ -3241,6 +3255,22 @@ export class Qwen35Engine {
       else for (let c = 0; c < NC; c++) if (i + c + 1 < ids.length) await this.mtpRun(c, ids[i + c + 1], pos + c + 1, false);
     }
     this.pos += W;
+  }
+
+  // the grouped expert launches of one MoE layer over w ubatch columns (after moe_gsort, before moe_combw): the f32
+  // tiled kernels, or with moeGroupDp4a the input quantization + dp4a gate/up, h quantization + dp4a down
+  _encGroupExperts(p, L, M, w) {
+    const gB = this.gB;
+    if (this.moeDp4a && this.moeGroupDp4a !== false) {
+      const { KS, hs } = this.moe;
+      this._dxyz(p, "moe_qx", gB.bgQx, Math.ceil(this.dims.dim / 1024), w, 1);
+      this._dInd(p, L.gusqPipe, M.gusQ, gB.ind, 0);
+      this._dxyz(p, "moe_qx", gB.bgQh, Math.ceil(w * KS * hs / 1024), 1, 1);
+      this._dInd(p, L.dnqPipe, M.dnQ, gB.ind, 12);
+      return;
+    }
+    this._dInd(p, L.gusgPipe, M.gusG, gB.ind, 0);
+    this._dInd(p, L.dngPipe, M.dngG, gB.ind, 12);
   }
 
   // What the last grouped MoE layer saw: { pairs, uniqueRouted (distinct routed experts), chunks }. For logs and
