@@ -1774,7 +1774,7 @@ max(2, 1.96 sqrt(b + c)).
 | 8K (2) | 0.00095 | 0.00098 | 97.46% | 97.85% | 98.05 / 97.89% | 53.0 / 75.5 | 0.00022 | 99.22% |
 | **gated (mid+2K+8K)** | **0.00088** | **0.00092** | **97.43%** | **97.60%** | 98.15 / 98.10% | 43.9 / 73.1 | 0.00019 | 99.22% |
 
-Downstream (correct of 40; lookup / math / code): 27B llama.cpp LLAMA27B, f32 33 (20 / 10 / 3), dp4a 33 (20 / 10 / 3);
+Downstream (correct of 40; lookup / math / code): 27B llama.cpp 33 (20 / 10 / 3, the same items), f32 33 (20 / 10 / 3), dp4a 33 (20 / 10 / 3);
 2B llama.cpp 26 (17 / 9 / 0), f32 27 (18 / 9 / 0), dp4a 27 (18 / 9 / 0). f32 and dp4a got exactly the same items right
 on both models (b = c = 0).
 
