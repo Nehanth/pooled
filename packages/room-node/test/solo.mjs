@@ -4,7 +4,7 @@
 // n GB GPU cache (expert offload, as a room deal gives it: shard.js offload)
 import { setupNode } from "../env.js";
 import { openModel } from "../source.js";
-import { loadShard } from "../shard.js";
+import { loadShard, modelLayers } from "../shard.js";
 import { buildIds, specials } from "../../../room/conversation.js";
 import { greedy } from "../../../room/sampling.js";
 import path from "node:path";
@@ -13,8 +13,7 @@ const prompt = process.argv[2] || "Why is the sky blue? Answer in two sentences.
 const maxNew = +(process.argv[3] || 64), model = process.argv[4] || "qwen3-1.7b";
 await setupNode();
 const src = openModel(model, { modelDir: path.resolve(process.env.MODELS || new URL("../../../models", import.meta.url).pathname) });
-const G0 = model === "qwen3-1.7b" ? null : await src.header(false);
-const L = G0 ? G0.meta["qwen35.block_count"] - (G0.meta["qwen35.nextn_predict_layers"] || 0) : (await src.cfg()).num_hidden_layers;
+const L = await modelLayers(src);
 const t0 = performance.now();
 const OFF = process.env.OFFLOAD ? process.env.OFFLOAD.split("-").map(Number) : null;
 const offload = OFF ? { lo: OFF[0], hi: OFF[1] + 1, vramBytes: +(process.env.OFFLOAD_GB || 4) * 2 ** 30 } : null;
