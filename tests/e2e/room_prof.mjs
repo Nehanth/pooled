@@ -6,9 +6,10 @@
 //
 //   node tests/e2e/room_prof.mjs --model qwen3.6-35b-moe --devices 2 [--maxnew 48] [--modes plain,spec] [--out f.json] [--query gpusample=1]
 //
-// room.js and room/transport.js on disk are not changed: this harness serves them with trace marks
-// added (patchGenerator / patchPipeline / patchTransport in room_trace.mjs; they fail loudly if the anchors move), plus the dev-only
-// plain-decode switch room_latency uses (window.__nospec). An init script in every tab adds a GPU
+// engine/generate.js, room/pipeline.js and room/transport.js are served with trace marks
+// by patchGenerator / patchPipeline / patchTransport in room_trace.mjs, which fail if anchors move.
+// Files on disk are unchanged. The generator also gets room_latency's dev-only plain-decode
+// switch (window.__nospec). An init script in every tab adds a GPU
 // timestamp pair around every command buffer while tracing (empty timestamped passes at the start
 // and end of each encoder, so the engine's passes are untouched) and times every mapAsync.
 // Clock: marks are performance.timeOrigin + performance.now() in each browser, shifted onto the

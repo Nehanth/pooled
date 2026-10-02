@@ -138,7 +138,7 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
         // 5 and 7 once, keep the best, re-probe now and then). Deep chains only
         // pay when the network round-trip dominates the lap; a lap-time
         // threshold can't tell GPU time from RTT and gets stuck deep.
-        const kc = { cand: [3, 5, 7], ema: {}, n: {}, step: 0, used: {} };
+        const kc = { cand: [3, 5, 7], ema: {}, n: {}, step: 0, used: node ? null : {} };
         const pickK = () => {
           if (!ai.chain.length) return 3;
           kc.step++;
@@ -182,7 +182,8 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
           const tps = toks.length / ((performance.now() - tStep) / 1000);
           if (!viaLookup) {
             kc.ema[K] = kc.n[K] ? 0.6 * kc.ema[K] + 0.4 * tps : tps;
-            kc.n[K] = (kc.n[K] || 0) + 1; kc.used[K] = (kc.used[K] || 0) + toks.length;
+            kc.n[K] = (kc.n[K] || 0) + 1;
+            if (!node) kc.used[K] = (kc.used[K] || 0) + toks.length;
           }
           for (let j = 0; j < toks.length; j++) {
             const tk = toks[j];
@@ -209,7 +210,7 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
         // exact: same output as plain decoding). No drafts: a plain lap.
         const spec = chainSpec(current);
         const st0 = { ...(current.engine.specStats || { drafts: 0, accepted: 0 }) };
-        const lapT = { v: 0, nv: 0, p: 0, np: 0, d: 0 };   // ms in verify laps / plain laps / drafting, for the crumb
+        const lapT = node ? null : { v: 0, nv: 0, p: 0, np: 0, d: 0 };   // browser diagnostics: verify / plain / drafting time
         let next = first ?? sample(logits), done = false, pendTok = null, lkFull = false;
         if (eos(next)) done = true; else emit(next, 0);
         while (!done && count < maxNew && !aborted()) {
@@ -231,7 +232,7 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
           const dk = !node && chainOK && !lk.length && ai.draft && kMax > 0 ? ai.draft.pickK(ai.lapStat?.lap, Math.min(DRAFT_K, kMax)) : 0;
           if (dk) { const td = performance.now(); lk = await ai.draft.propose(ctxNow, dk); via = 1; lapT.d += performance.now() - td; }
           let toks;
-          const tStep = performance.now();
+          const tStep = node ? 0 : performance.now();
           if (lk.length) {
             current.engine.pos = ai.pos;
             toks = await current.engine.specStepDrafts(next, sample, lk, spec);
@@ -242,13 +243,13 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
             lkFull = via === 2 && toks.length === lk.length + 1;
             if (!node) ai.lkFullD = lkFull;
             if (via === 1) ai.draft.note(lk.length, toks.length - 1);
-            lapT.v += performance.now() - tStep; lapT.nv++;
+            if (!node) { lapT.v += performance.now() - tStep; lapT.nv++; }
           } else {
             lkFull = false;
             if (!node) ai.lkFullD = false;
             const lg = await aiPipeToken(next, true, undefined, desc);
             toks = [sample(lg)];
-            lapT.p += performance.now() - tStep; lapT.np++;
+            if (!node) { lapT.p += performance.now() - tStep; lapT.np++; }
           }
           for (let j = 0; j < toks.length; j++) {
             const tk = toks[j];

@@ -7,7 +7,6 @@ import { CKPT_FORMAT, CkptStore, CkptFormatError, encodeHeader, decodeHeader, de
   from "../../room/ckpt-store.js";
 import { createPipeline } from "../../room/pipeline.js";
 import { packWire } from "../../room/wire.js";
-import { PrefixIndex } from "../../harness/prefix.js";
 import { DROP_ALL } from "../../room/transport.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };

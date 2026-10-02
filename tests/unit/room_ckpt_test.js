@@ -7,7 +7,7 @@
 // slot") or, worse, runs a worker's layers on the wrong state and answers garbage without an error.
 import { createPipeline } from "../../room/pipeline.js";
 import { packWire } from "../../room/wire.js";
-import { PrefixIndex, pinSplit } from "../../harness/prefix.js";
+import { pinSplit } from "../../harness/prefix.js";
 import { DROP_ALL, sendFrame, makeLink } from "../../room/transport.js";
 import { reusablePrefix } from "../../room/conversation.js";
 

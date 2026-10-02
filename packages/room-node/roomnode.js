@@ -1074,7 +1074,10 @@ export class RoomNode extends EventEmitter {
       await this.prefill(ids.slice(at, c), { aborted, desc });
       if (aborted()) break;
       const pin = pins.includes(c);
-      if (ai.fed?.length === c && this.ckptSave(pin, !pin) != null && pin) pinned++;
+      if (ai.fed?.length === c) {
+        const saved = this.ckptSave(pin, !pin);
+        if (pin && saved != null) pinned++;
+      }
       at = c;
     }
     if (!aborted() && at < ids.length) logits = await this.prefill(ids.slice(at), { aborted, desc });

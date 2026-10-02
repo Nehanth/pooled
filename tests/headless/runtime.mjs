@@ -2,6 +2,7 @@
 // Run: node tests/headless/runtime.mjs (or deno run tests/headless/runtime.mjs).
 import { createPipeline } from "../../room/pipeline.js";
 import { createGenerator } from "../../engine/generate.js";
+import { attachWire, makeLink, sendFrame, PROTOCOL } from "../../room/transport.js";
 
 // This harness is the caller: it owns serialization, failures and teardown.
 function createRuntime({ state, transport, options }) {
@@ -14,14 +15,13 @@ function createRuntime({ state, transport, options }) {
     async dispose() { pipeline.failWaiters(new Error("test room closed")); await state.q; },
   };
 }
-import { attachWire, makeLink, sendFrame, PROTOCOL } from "../../room/transport.js";
 
 export const assert = (condition, message) => { if (!condition) throw new Error(message); };
 export const equal = (a, b, message) => assert(JSON.stringify(a) === JSON.stringify(b), message);
 const sample = (logits) => logits.indexOf(Math.max(...logits));
 
 // Integer additions are exactly representable on the f16 wire. This models stateful shard
-// ordering, not neural inference: the production engine/generator remain the implementations.
+// ordering, not neural inference: generation and framing use the production modules.
 class CountingEngine {
   constructor(layers) {
     this.layers = layers; this.dims = { dim: 1 }; this.maxSeq = 256; this.NC = 4;
