@@ -8,6 +8,7 @@
 // The DeltaNet conv is folded into the [qkv | z] GEMV's epilogue (coop.js, CV = true).
 // Batched passes (verify, prefill) keep their _mc kernels. Appended to the module after WGSL2
 // (uses its DN, MC and FA structs).
+import { dnTwoPass } from "./qwen35.js";
 
 // dn_delta_gn with the pre-pass inside. Per value head h: beta and decay come from the raw
 // GEMV outputs with dn_pre's expressions, and the q and k heads of key head kh = h % nKH are
@@ -15,11 +16,7 @@
 // dn_pre wrote the normalised q/k back to the conv output in place; nothing else reads them in the
 // one-token path, so here they only live in workgroup memory. Requires dState = 128.
 function dnDeltaGnpWGSL() {
-  const rows = Array.from({ length: 128 }, (_, i) => i);
-  const load = rows.map((i) => `s[${i}u] = dp_s[Sb + ${i * 128}u + j];`).join(" ");
-  const store = rows.map((i) => `dp_s[Sb + ${i * 128}u + j] = s[${i}u];`).join(" ");
-  const loop1 = rows.map((i) => `{ let sd = s[${i}u] * decay; s[${i}u] = sd; vh += sd * dp1_k[${i}u]; sq += sd * dp1_q[${i}u]; kq += dp1_k[${i}u] * dp1_q[${i}u]; }`).join("\n  ");
-  const loop2 = rows.map((i) => `s[${i}u] += dp1_k[${i}u] * d;`).join(" ");
+  const tp = dnTwoPass("dp_s", "dp1_k", "dp1_q");
   // pp_l2's sum, over a workgroup array instead of the conv output
   const l2 = (A) => `
     var ss: f32 = 0.0;
@@ -56,8 +53,6 @@ fn dn_delta_gnp(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
   let decay = exp(sp * dp_dta[dp_dn.nVH + h]);
   let scale = inverseSqrt(f32(dp_dn.dState));
   dp1_k[j] = dp_c[dp_dn.keyDim + kOff + j]; dp1_q[j] = dp_c[kOff + j];
-  var s: array<f32, 128>;
-  ${load}
   workgroupBarrier();
   if (j == 0u) {${l2("dp1_q").replace("dp_inv =", "dp_invq =")}
   } else if (j == 64u) {${l2("dp1_k").replace("dp_inv =", "dp_invk =")}
@@ -66,11 +61,10 @@ fn dn_delta_gnp(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_
   dp1_q[j] = dp1_q[j] * dp_invq; dp1_k[j] = dp1_k[j] * dp_invk;
   workgroupBarrier();
   var vh: f32 = 0.0; var sq: f32 = 0.0; var kq: f32 = 0.0;
-  ${loop1}
+  ${tp.pass1}
   let d = (dp_c[2u * dp_dn.keyDim + vOff + j] - vh) * beta;
-  ${loop2}
+  ${tp.pass2}
   let o = (sq + d * kq) * scale;
-  ${store}
   dp_partial[j] = o * o;
   workgroupBarrier();
   var stride: u32 = 64u;
