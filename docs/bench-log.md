@@ -1818,3 +1818,125 @@ Same answer: turn1 identical in every run, and the full six-step `cache` run aft
 `POOLED_CKPT_DISK=0` run step for step (texts and token counts). Cold turns with the cache on are within the run-to-run
 spread of the cache off (both nodes share one GPU here). On disk: two prefixes, ~0.6 GB for the room (host ~330 MB,
 worker ~285 MB; solo 615 MB), written after the pinned save, atomically, 0600.
+
+## 2026-10-02: MoE decode, where a token goes and what was cut (branch perf/moe-decode), GB10
+
+Question: plain decode of the 35B MoE ran ~50-56 tok/s in Chrome at 1K context against llama.cpp CUDA's 85.2 tok/s
+(`llama-bench -p 0 -n 128`, build 749f688, same GGUF; 11.7 ms/token). Where does a token go?
+
+### Profile (main e45d9a8, Chrome GB10 unless noted)
+
+New probes: `tests/prof/decode_gap.js` (GPU span and idle of every submit, CPU encode, back-to-back GPU time;
+`bench.html ?ctx=1024&gap=1`, `tests/prof/gap_deno.js`), `tests/prof/skip_cost.js` (what each kernel family
+costs inside the real one-pass token: back-to-back GPU time with the family skipped), `prof_ts.js SPEC=1`.
+
+| | plain token, 1K | spec step K=3, 1K (2.3-2.5 tokens) |
+|---|---|---|
+| wall | 17.7 ms | 37.4 ms |
+| GPU busy (sum of submit spans) | 15.7 ms | 33.5 ms: verify 30.1-31.2, DeltaNet replay 0.93, draft refill 0.55 |
+| GPU idle between submits | 1.8 ms (the readback, JS, next submit) | 3.5-4.8 ms |
+| submits / readbacks | 1 / 1 | 3.8 / 1 |
+| CPU encode | 0.07 ms (Deno 0.9) | 0.5-0.6 ms |
+| dispatches / compute passes | 342 / 1 | ~540 / 2 + 3 per layer |
+| back-to-back GPU time (no readback between tokens) | 16.1 ms | |
+
+In-situ cost per family, plain token (Deno, back-to-back 15.4 ms/token, `skip_cost.js`, after the DeltaNet change below):
+
+| family | launches | ms/token | us each | bytes read | GB/s |
+|---|---|---|---|---|---|
+| moe_gus (8 routed experts + shared, gate/up + SiLU) | 40 | 2.76 | 69 | 11.65 MB | 169 |
+| matvec_q4_coop_cv ([qkv \| z] + conv) | 30 | 2.69 | 90 | 14.2 MB | 158 |
+| matvec_q8_coop (LM head 540 MB ~2.5 ms + 4 Q8 attention q) | 5 | 2.88 | | | ~215 (head) |
+| moe_dnc (down + combine + residual), Q4 / Q8 | 35 / 5 | 1.59 / 0.37 | 45.5 / 73 | 5.8 MB / 10 MB | 128 / 137 |
+| dn_delta_gnp (DeltaNet, 2 MB state read + written) | 30 | 1.11 | 37 | 4 MB | 108 |
+| out projections Q4 / Q8 (+ residual) | 26 / 14 | 0.87 / 0.77 | 33.5 / 55 | 4.7 / 8.9 MB | 141 / 162 |
+| moe_nrt (norm + router) / moe_route / dn_nba | 40 / 40 / 30 | 0.59 / 0.55 / 0.26 | 14.6 / 13.8 / 8.6 | | latency |
+| attention (attn_dec, glue_kv, combine_g, Q4 q, Q8 [k \| v]) | | 1.06 | | | |
+| head norm, top-k | | 0.10 | | | |
+
+The GB10 streams ~210 GB/s through WebGPU at best (the LM head reaches it); at that rate the ~2.15 GB a token reads
+would take ~10.3 ms. The rest is (a) GEMVs over 2048- and 4096-wide rows reaching 130-170 GB/s (one Q4 block per
+thread, then an 8-level workgroup tree per row: short rows pay the tree on little data), (b) ~110 latency-bound
+small launches a token (router, route, DeltaNet input norm: ~1.4 ms), (c) the DeltaNet update, and in Chrome (d) the
+1.8 ms round trip between tokens.
+
+llama.cpp, `nsys --cuda-graph-trace=node` over `llama-bench -n 32` (33 tokens: per token, its own profiler
+overhead included): expert gate/up `mul_mat_vec_q<Q4_0, ids>` 40 x 57.8 us = 2.31 ms (ours 2.76), expert down 35 x 28.9 us
+(ours 1.96 with the shared expert and combine), the Q4 projections 66 x 34.4 us = 2.27 ms (ours ~3.8 ms over the same
+weights), the Q6_K head ~2.0 ms (ours 2.5 ms from Q8), `gated_delta_net` 30 x 4.5 us = 0.13 ms (ours 1.11 ms: one warp per
+state column over a transposed state, rows across lanes and a warp shuffle sum), `topk_moe` 3.7 us, `rms_norm` 3.1 us, plus
+`quantize_q8_1` 291 x 2.2 us = 0.63 ms that we do not pay (it multiplies Q8_1 activations with dp4a).
+
+### Kept (every change keeps main's bits)
+
+1. DeltaNet one-token update in two chunked sweeps (`dnTwoPass`, dn_delta / dn_delta_gn / dn_delta_gnp). The state
+   column sat in 128 registers loaded and stored as one straight line of 128 accesses, which the GB10 runs nearly
+   serially: 39 us for the 32 heads in isolation against 14 us for two sweeps of 16 rows (the second hits L2). In
+   the model dn_delta_gnp 54.4 -> 30.6 us (prof_ts), -0.7 ms a token.
+2. `verifyPass`: the fused verify's 40 layers and head in one compute pass instead of three per layer. Chrome in-tab
+   A/B at 1K: spec 60.0 -> 61.8 tok/s.
+3. `dn_pre_mc`'s q/k norms with 16 loads in flight: 39.8 -> 29.7 us per layer per verify (-0.3 ms a step).
+4. Decode-ahead in `forwardTokenIds` (greedy, from the second call in a row): token N + 1 is queued behind token N,
+   its embedding gathered on the GPU from N's top-1, after a save of the DeltaNet states, conv windows and x; the
+   next call keeps it if it gets that top-1, anything else puts the state back. Chrome in-tab A/B at 1K: plain
+   59.2 -> 63.8 tok/s (+7.7%); Deno 28.07 -> 18.55 ms/token. The room's solo MoE path speculates and does not use it.
+
+### Before / after
+
+Chrome (`chrome_bench.mjs <moe> 64 "ctx=1024,8192,32768"`: a chat turn over this repo's source with a question about it,
+GPU sampling, greedy, K=3; median of 4 main / 3 branch runs; runs that overlapped another agent's GPU job, visible as
+25-30 tok/s, are dropped). The decode-ahead-off column is the branch with `set={"decodeAhead":false}`, the kernel and
+pass changes alone (one run).
+
+| context | main plain | branch plain | branch, decode-ahead off | main spec | branch spec |
+|---|---|---|---|---|---|
+| 1K | 55.1 | **63.9** (+16%) | 58.8 (+7%) | 60.6 | 59.5 |
+| 8K | 52.0 | **59.6** (+15%) | 55.3 (+6%) | 56.7 | 57.0 |
+| 32K | 45.0 | **50.1** (+11%) | 47.3 (+5%) | 47.7 | 47.8 |
+
+Acceptance 39/81, 36/81, 42/72 in every run, spec == plain in every run. Speculative decoding does not move outside the
+run-to-run noise (+-2 tok/s here): the verify pass is the batched GEMVs and expert kernels, which this branch does not
+change; the in-tab A/B above sees verifyPass at +3%.
+
+Deno (`bench_ctx.js`, `CTX_SRC` = the main checkout for both, one run each). It decodes through `forwardToken` and
+reads back the logits, so decode-ahead does not apply; Deno pays ~11 ms per readback.
+
+| context | main plain | branch plain | main spec | branch spec |
+|---|---|---|---|---|
+| 1K | 34.23 | 34.85 | 43.92 | 43.73 |
+| 8K | 32.97 | 34.21 | 43.46 | 45.45 |
+| 32K | 29.15 | 30.34 | 42.39 | 43.89 |
+
+Deno through `forwardTokenIds` (`tests/bench/decode_ab.js`, decodeAhead off / on in one process): 28.07 -> 18.55 ms/token.
+Back-to-back GPU time per token (Chrome, 1K): 16.1 ms on main, 14.8 ms on the branch.
+
+### Tried, not kept
+
+- DeltaNet value head over 2 / 4 workgroups (GDN-5, `dnSplit`): same bits, -1.2% (per-thread latency bound, not
+  occupancy bound: the 32-thread groups took as long as the 128-thread ones).
+- `dn_delta_mc2`, the two-sweep DeltaNet for verify passes of <= 4 columns: 59 -> 41 us at 4 columns in isolation, but
+  +4.7 ms GPU per speculative step in the model (33.5 -> 38.3 ms): the per-column re-reads miss L2 there.
+- The [qkv | z] GEMV's conv weights and state loaded before the dot products: no faster (102 vs 90 us) and it moved
+  the MoE bits (937cf4e4 vs 864fb862): the epilogue's contraction changed.
+- dn_pre_mc with the heads staged in workgroup memory: 42 us (bank conflicts) vs 29.7 us for 16 loads in flight.
+- coopRows 8 (bit-neutral): 15.11 vs 15.23 ms/token back to back, inside the noise.
+
+### Not done: needs a pre-registered accuracy rule (bits change)
+
+The remaining gap sits in kernels whose summation order is the bit contract: short-row GEMVs (qkvz 158 GB/s, out
+projections 141-162 GB/s; the verify's 4-column twins 92-118 GB/s: matvec_q8_coop_b4 194 us, matvec_q4_coop_b4 120 us),
+the expert kernels (169 / 128 GB/s), a native Q6_K LM head and attention q (417 instead of 540 MB for the head), and
+a DeltaNet update that splits a column's sums across threads (llama.cpp 4.5 us vs 37 us). Together roughly 3-4 ms of
+a 15 ms token on these numbers. The spec step's own overhead (replay 0.9 ms, refill 0.6 ms, ~4 ms idle around one
+readback) needs acceptance on the GPU (SPEC-2).
+
+Gates: `test_moe` MATCH llama.cpp 3/3, spec == plain 3/3, GPU sampling head check 0 mismatches; `test_moe_split` PASS;
+`test_dense_spec` PASS; `test_q38_bits` 4dc814b1 / 4f075117 on main and the branch, also with `LAYER_FUSE=0` (the
+dn_delta_gn path); the new MoE fingerprint (`MODEL=moe test_q38_bits.js`) 864fb862 / 46e62439 on main and the branch;
+unit tests 1024/1024 (with the FXC barrier lint), `npm run check`. On the GB10 (`E2E_GPU=real`): `gpusample_synth` PASS
+with a new decode-ahead check (tokens other than the top-1 and a `forwardToken` in between give exactly decodeAhead
+off); `fusion_synth` 0 logits differ for every layerFuse row (its attn_glue row fails on a real GPU on main too);
+`dn_delta_synth` single-token dn_delta bit-identical to the reference (its "nCols 8, replay" row fails the same way on
+main since #295 records the replay inputs). 2-device room, `xroom.mjs` host + guest on this GB10 (19 + embed / 21
+layers, twosum and japan, plain and spec, 2 rounds each): answer sha-256 identical to main in all 8 cells. Not measured
+on the M5 Max (the two-sweep DeltaNet must keep Metal's bits too) or under FXC beyond the lint.

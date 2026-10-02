@@ -78,7 +78,9 @@ export function openGGUF(path, { skipTokenizer = false, cache = true, headerByte
 export async function gpuDevice() {
   const adapter = await navigator.gpu.requestAdapter();
   // PREFILL_MATH=sgmatrix asks for the tensor-core features where the adapter has them (Chrome only; none in Deno)
-  const device = await adapter.requestDevice({ requiredFeatures: prefillMathFeatures(adapter), requiredLimits: {
+  // TIMESTAMPS=1: also "timestamp-query" (tests/prof/gap_deno.js)
+  const ts = envGet("TIMESTAMPS") === "1" && adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
+  const device = await adapter.requestDevice({ requiredFeatures: [...prefillMathFeatures(adapter), ...ts], requiredLimits: {
     maxBufferSize: adapter.limits.maxBufferSize,
     maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize, ...wideLimits(adapter),
     ...(Qwen35Engine.defaults.attnPrefillTK >= 16 ? { maxComputeWorkgroupStorageSize: adapter.limits.maxComputeWorkgroupStorageSize } : {}) } });
