@@ -11,6 +11,7 @@
 //   (n_probs) is the reference; ours is teacher-forced on llama.cpp's tokens, so every position is comparable:
 //     KL(llama || ours) over llama's top 20, both renormalized over those 20 ids (nats, mean over positions)
 //     top-1 agreement: our argmax == llama.cpp's greedy token
+//       (also reported: top1A, our argmax == llama.cpp's argmax; they differ where ignore_eos sampled the runner-up of <|im_end|>)
 //     top-5 overlap: |our top 5 ∩ llama.cpp's top 5| / 5
 //     greedy agreement: first position where our argmax leaves llama.cpp's greedy sequence (== the length of a free
 //       greedy run's common prefix with llama.cpp's, since every earlier token was the same)
@@ -30,9 +31,11 @@
 //   Reported, not gated: top-5 overlap, greedy agreement, KL(f32 || dp4a), short bucket (must be identical: control).
 //
 //   MODEL=27b|2b  MODES=wide,dp4a  GEN=256  ONLY=name,name  LLAMA_URL=http://127.0.0.1:8091 (refresh the llama.cpp
-//   golden first; GOLD_ONLY=1 then exits before the GPU)  OUT=results.json
-//   cd tests && deno run --unstable-webgpu --allow-read --allow-env --allow-net --allow-run --allow-write=$HOME/.cache/swarmllm-weights,golden,/tmp eval_dp4a.js
-//   llama.cpp: llama-server -m <model.gguf> -c 9216 -t 20 -np 1 --port 8091 (CPU build)
+//   golden first; GOLD_ONLY=1 then exits before the GPU;
+//   REUSE=1 keeps entries whose ids still match)  OUT=results.json
+//   cd tests && deno run --unstable-webgpu --allow-read --allow-env --allow-net --allow-write=$HOME/.cache/swarmllm-weights,golden,/tmp eval_dp4a.js
+//   llama.cpp: llama-server -m <model.gguf> -c 9216 -t 8 -np 1 --port 8091 (CPU build). Refresh the golden without
+//   --unstable-webgpu (GOLD_ONLY=1 never touches the GPU, and the GPU queue counts any WebGPU deno as a GPU job).
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
 import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, Q38_PATH } from "./load_model.js";
@@ -168,14 +171,19 @@ let gold = {}; try { gold = JSON.parse(await Deno.readTextFile(GOLD)); } catch {
 gold.prompts ??= {}; gold.downstream ??= {};
 if (LLAMA) {
   const t0 = performance.now();
+  const keep = env("REUSE", "") === "1";   // keep golden entries whose ids still match (resume an interrupted refresh)
   for (const p of PROMPTS) {
+    if (keep && gold.prompts[p.name]?.h === hash(p.ids) && gold.prompts[p.name].tokens.length >= GEN) continue;
     const j = await llama(p.ids, GEN, true);
-    const top = j.completion_probabilities.map((c) => c.top_logprobs.map((e) => [e.id, Math.round(e.logprob * 1e4) / 1e4]));
+    // llama-server can leave out the entry of a token that ends inside a UTF-8 character: align by the sampled id
+    const cp = j.completion_probabilities; let k = 0;
+    const top = j.tokens.map((t) => cp[k]?.id === t ? cp[k++].top_logprobs.map((e) => [e.id, Math.round(e.logprob * 1e4) / 1e4]) : null);
     gold.prompts[p.name] = { n: p.ids.length, h: hash(p.ids), tokens: j.tokens, top };
     console.log(`llama.cpp ${p.name} (${p.ids.length} tokens): ${JSON.stringify(tok.decode(j.tokens.slice(0, 24)))}... ${((performance.now() - t0) / 1e3).toFixed(0)} s`);
     await Deno.writeTextFile(GOLD, JSON.stringify(gold) + "\n");
   }
   for (const it of ITEMS) {
+    if (keep && gold.downstream[it.name]?.h === hash(it.ids)) continue;
     const j = await llama(it.ids, it.max, false), text = tok.decode(j.tokens.filter((t) => !STOP.has(t)));
     gold.downstream[it.name] = { h: hash(it.ids), tokens: j.tokens, ok: score(it, text) };
     console.log(`llama.cpp ${it.name}: ${score(it, text) ? "ok " : "BAD"} ${JSON.stringify(text.slice(-60))}`);
@@ -216,8 +224,16 @@ function klRenorm(lp, lq) {
   return Math.max(0, kl);
 }
 const f32Top = {};   // prompt -> per position [ids, logits] of the first mode (the f32 reference for KL(f32 || dp4a))
+// llama.cpp's top 20 per generated token, or null where llama-server sent no entry. Goldens written before the
+// refresh stored the sampled id have one entry per sent position: a token without an entry is skipped when it is not
+// among that entry's ids (llama-server leaves out the entry of a token that ends inside a UTF-8 character).
+function alignTop(g) {
+  if (g.top.length === g.tokens.length) return g.top;
+  let k = 0;
+  return g.tokens.map((t) => g.top[k] && g.top[k].some((e) => e[0] === t) ? g.top[k++] : null);
+}
 async function evalPrompt(p, mode) {
-  const g = gold.prompts[p.name], ref = g.tokens.slice(0, GEN);
+  const g = gold.prompts[p.name], ref = g.tokens.slice(0, GEN), tops = alignTop(g);
   setMode(mode);
   const t0 = performance.now();
   await eng.prefillTokens(p.ids.slice(0, -1));
@@ -226,13 +242,18 @@ async function evalPrompt(p, mode) {
   const pos = [], keep = mode === MODES[0] ? (f32Top[p.name] = []) : null;
   let diverge = -1;
   for (let i = 0; i < ref.length; i++) {
-    const tk = topk(lg, NP), top = g.top[i];
-    const kl = klRenorm(top.map((e) => e[1]), top.map((e) => lg[e[0]]));
+    const tk = topk(lg, NP), top = tops[i];
+    // top1: vs llama.cpp's greedy token (the pre-registered metric); top1A: vs llama.cpp's argmax, which differs where
+    // ignore_eos made it sample the runner-up of an end-of-turn token (same for both modes either way)
     const top1 = tk.ids[0] === ref[i];
     if (!top1 && diverge < 0) diverge = i;
-    const l5 = new Set(top.slice(0, 5).map((e) => e[0])), ov5 = tk.ids.slice(0, 5).filter((t) => l5.has(t)).length / 5;
-    const r = { kl, top1, ov5 };
-    if (i === 0) r.maxLp = Math.max(...top.map(([id, l]) => Math.abs(lg[id] - tk.lz - l)));
+    const r = { kl: null, top1, ov5: null, top1A: null };
+    if (top) {
+      r.kl = klRenorm(top.map((e) => e[1]), top.map((e) => lg[e[0]]));
+      const l5 = new Set(top.slice(0, 5).map((e) => e[0])); r.ov5 = tk.ids.slice(0, 5).filter((t) => l5.has(t)).length / 5;
+      r.top1A = tk.ids[0] === top[0][0];
+    }
+    if (i === 0 && top) r.maxLp = Math.max(...top.map(([id, l]) => Math.abs(lg[id] - tk.lz - l)));
     if (keep) keep.push([tk.ids, tk.ids.map((t) => lg[t])]);
     else if (f32Top[p.name]) { const [fi, fl] = f32Top[p.name][i]; r.klF = klRenorm(fl, fi.map((t) => lg[t])); r.top1F = fi[0] === tk.ids[0]; }
     pos.push(r);
@@ -250,22 +271,25 @@ async function evalItem(it, mode) {
   return { ok: score(it, text), text };
 }
 
-const mean = (a) => a.length ? a.reduce((s, x) => s + x, 0) / a.length : NaN;
+const mean = (a0) => { const a = a0.filter((x) => x != null); return a.length ? a.reduce((s, x) => s + x, 0) / a.length : NaN; };
 const R = { model: MODEL, gen: GEN, modes: MODES, prompts: {}, downstream: {} };
 for (const p of PROMPTS) {
   R.prompts[p.name] = { bucket: p.bucket, n: p.ids.length };
   for (const m of MODES) {
     const r = await evalPrompt(p, m);
     R.prompts[p.name][m] = { kl: mean(r.pos.map((x) => x.kl)), top1: mean(r.pos.map((x) => +x.top1)), ov5: mean(r.pos.map((x) => x.ov5)), diverge: r.diverge, maxLp0: r.pos[0].maxLp,
-      klF: r.pos[0].klF === undefined ? undefined : mean(r.pos.map((x) => x.klF)), top1F: r.pos[0].top1F === undefined ? undefined : mean(r.pos.map((x) => +x.top1F)), kls: r.pos.map((x) => x.kl), top1s: r.pos.map((x) => +x.top1), prefillS: r.tPre / 1e3 };
+      klF: r.pos[0].klF === undefined ? undefined : mean(r.pos.map((x) => x.klF)), top1F: r.pos[0].top1F === undefined ? undefined : mean(r.pos.map((x) => +x.top1F)), kls: r.pos.map((x) => x.kl), top1s: r.pos.map((x) => +x.top1), top1As: r.pos.map((x) => x.top1A == null ? null : +x.top1A), prefillS: r.tPre / 1e3 };
     const q = R.prompts[p.name][m];
     console.log(`${p.name.padEnd(18)} ${String(p.ids.length).padStart(5)} ${m.padEnd(5)} KL ${q.kl.toFixed(5)} top1 ${(100 * q.top1).toFixed(1)}% top5 ${(100 * q.ov5).toFixed(1)}% greedy==llama ${q.diverge} maxLp0 ${q.maxLp0.toFixed(3)}`
       + (q.klF !== undefined ? ` KL(f32||dp4a) ${q.klF.toFixed(5)} top1==f32 ${(100 * q.top1F).toFixed(1)}%` : "") + ` prefill ${q.prefillS.toFixed(1)} s`);
   }
 }
+try { gold = JSON.parse(await Deno.readTextFile(GOLD)); } catch { /* keep the one read at start */ }   // a refresh may still be writing the llama.cpp answers
 for (const it of ITEMS) {
-  R.downstream[it.name] = { task: it.task, llama: gold.downstream[it.name]?.h === hash(it.ids) ? gold.downstream[it.name].ok : null };
+  R.downstream[it.name] = { task: it.task };
   for (const m of MODES) { const r = await evalItem(it, m); R.downstream[it.name][m] = r.ok; R.downstream[it.name][m + "Text"] = r.text; }
+  try { gold = JSON.parse(await Deno.readTextFile(GOLD)); } catch { /* partial write: keep the last one */ }
+  R.downstream[it.name].llama = gold.downstream?.[it.name]?.h === hash(it.ids) ? gold.downstream[it.name].ok : null;
   console.log(`${it.name.padEnd(16)} llama ${R.downstream[it.name].llama} ${MODES.map((m) => `${m} ${R.downstream[it.name][m]}`).join(" ")}  ${JSON.stringify(R.downstream[it.name][MODES.at(-1) + "Text"].slice(-50))}`);
 }
 
@@ -277,16 +301,16 @@ for (const m of MODES) {
   S[m] = {};
   for (const [nm, bk] of [["gated", ["mid", "2k", "8k"]], ["short", ["short"]], ["mid", ["mid"]], ["2k", ["2k"]], ["8k", ["8k"]]]) {
     const ps = PROMPTS.filter((p) => bk.includes(p.bucket)).map((p) => R.prompts[p.name][m]);
-    S[m][nm] = { kl: mean(pool(bk, m, "kls")), top1: 100 * mean(pool(bk, m, "top1s")), ov5: 100 * mean(ps.map((x) => x.ov5)), diverge: mean(ps.map((x) => x.diverge)),
+    S[m][nm] = { kl: mean(pool(bk, m, "kls")), top1: 100 * mean(pool(bk, m, "top1s")), top1A: 100 * mean(pool(bk, m, "top1As")), ov5: 100 * mean(ps.map((x) => x.ov5)), diverge: mean(ps.map((x) => x.diverge)),
       klF: ps[0]?.klF === undefined ? undefined : mean(ps.map((x) => x.klF)), top1F: ps[0]?.top1F === undefined ? undefined : 100 * mean(ps.map((x) => x.top1F)) };
   }
   S[m].downstream = Object.values(R.downstream).filter((x) => x[m]).length;
 }
 S.llamaDownstream = Object.values(R.downstream).filter((x) => x.llama).length;
-console.log("\nbucket   mode  KL(llama||ours)  top1%   top5%  greedy==llama  KL(f32||dp4a)  top1==f32%");
+console.log("\nbucket   mode  KL(llama||ours)  top1%  top1A%   top5%  greedy==llama  KL(f32||dp4a)  top1==f32%");
 for (const nm of ["short", "mid", "2k", "8k", "gated"]) for (const m of MODES) {
   const s = S[m][nm];
-  console.log(`${nm.padEnd(8)} ${m.padEnd(5)} ${s.kl.toFixed(5).padStart(15)} ${s.top1.toFixed(2).padStart(7)} ${s.ov5.toFixed(2).padStart(7)} ${s.diverge.toFixed(1).padStart(14)} ${s.klF === undefined ? "" : s.klF.toFixed(5).padStart(14)} ${s.top1F === undefined ? "" : s.top1F.toFixed(2).padStart(11)}`);
+  console.log(`${nm.padEnd(8)} ${m.padEnd(5)} ${s.kl.toFixed(5).padStart(15)} ${s.top1.toFixed(2).padStart(7)} ${s.top1A.toFixed(2).padStart(7)} ${s.ov5.toFixed(2).padStart(7)} ${s.diverge.toFixed(1).padStart(14)} ${s.klF === undefined ? "" : s.klF.toFixed(5).padStart(14)} ${s.top1F === undefined ? "" : s.top1F.toFixed(2).padStart(11)}`);
 }
 console.log(`downstream correct of ${ITEMS.length}: llama.cpp ${S.llamaDownstream}, ${MODES.map((m) => `${m} ${S[m].downstream}`).join(", ")}`);
 for (const t of ["lookup", "math", "code"]) console.log(`  ${t}: llama.cpp ${Object.values(R.downstream).filter((x) => x.task === t && x.llama).length}, ${MODES.map((m) => `${m} ${Object.values(R.downstream).filter((x) => x.task === t && x[m]).length}`).join(", ")}`);
