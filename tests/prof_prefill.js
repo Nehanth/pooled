@@ -148,7 +148,7 @@ const pipeCat = (p) => {
   if (/^dn_/.test(p)) return "dn_glue";
   if (/^(kv_store|attn_flash|attn_combine|attn_scores|attn_softmax|attn_out)/.test(p)) return "attn_core";
   if (/^(attn_glue|sigmoid_mul|qsplit|head_norm|rope_part)/.test(p)) return "attn_glue";
-  if (/^moe_route|^moe_router/.test(p)) return "moe_router";
+  if (/^moe_route|^moe_router|^moe_nrt/.test(p)) return "moe_router";
   if (p === "moe_gsort") return "moe_group_sort";
   if (/^moe_gus|^moe_gu_/.test(p)) return "moe_experts_gu";   // (moe_gusg: grouped)
   if (/^moe_dnc|^moe_dn_|^moe_dng|^moe_dnq|^moe_combine|^moe_combw/.test(p)) return "moe_experts_down";

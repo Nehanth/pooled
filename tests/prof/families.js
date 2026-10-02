@@ -10,7 +10,7 @@
 export const FAMILIES = [
   ["GEMV (projections, LM head)", /^matvec/],
   ["prefill GEMM", /^gemm_|^quant_q8_w$/],   // quant_q8_w: the dp4a GEMM's activation quantization
-  ["MoE router", /^moe_(router|route|nrt)$/],   // nrt: the post-attention RMSNorm fused into the router GEMV
+  ["MoE router", /^moe_(router|route|nrt|nrt_w)$/],   // nrt: the post-attention RMSNorm fused into the router GEMV
   ["MoE sort/combine", /^moe_(combine|combw|gsort)$/],
   ["MoE experts", /^moe_(gu|dn|qx$)/],   // moe_qx: the dp4a experts' activation quantization
   ["DeltaNet core", /^dn_/],
