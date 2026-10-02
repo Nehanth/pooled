@@ -630,3 +630,93 @@ test("a device that leaves while the host loads and stays away: a room that fits
   assert.ok(n.ai.online && n.whole());
   assert.ok(n.split.names.every((nm) => nm !== "stoat"));
 });
+
+test("expert offload: dealPlan gives a device that offers RAM the layers the pledges can't hold, with their experts parked", async () => {
+  const { roomBytes } = await import("../../../room/models.js");
+  const fitBytes = roomBytes("qwen3.6-35b-moe", 32768, "f16");
+  const self = { name: "spark", meta: { webgpu: true, contribGB: 6 } };
+  const pcMeta = { webgpu: true, contribGB: 8, offload: true, ramGB: 48 };
+  const p = RoomNode.dealPlan({ L: 40, layerBytes: fitBytes.layerBytes, embedBytes: fitBytes.hostBytes, self, peers: [{ id: "pc", name: "pc", meta: pcMeta }], mode: "speed", fitBytes });
+  assert.deepEqual(p.chain, ["pc"]);
+  assert.equal(p.fit.offload, true);
+  assert.equal(p.offload[0], null);
+  const o = p.offload[1];
+  assert.ok(o && o.hi === 40 && o.lo === 40 - o.layers && o.ramBytes <= 48 * GB && o.vramBytes > 0, JSON.stringify(o));
+  // the same room without the RAM: short, nothing dealt
+  const none = RoomNode.dealPlan({ L: 40, layerBytes: fitBytes.layerBytes, embedBytes: fitBytes.hostBytes, self, peers: [{ id: "pc", name: "pc", meta: { webgpu: true, contribGB: 8 } }], mode: "speed", fitBytes });
+  assert.equal(none.fit.fits, false); assert.deepEqual(none.chain, []);
+  // ctxPick counts the offload too: the room opens at the model's default context
+  const pick = RoomNode.ctxPick("qwen3.6-35b-moe", { want: 32768, self, peers: [{ id: "pc", name: "pc", meta: pcMeta }] });
+  assert.equal(pick.fits, true);
+});
+
+test("expert offload: a worker loads only the offload it offered, and says why otherwise", () => {
+  const n = new RoomNode({ pledgeGB: 8, ramGB: 20, log: () => {} });
+  assert.equal(n.offloadOk(null), null);
+  const o = { lo: 30, hi: 40, vramBytes: 3 * GB, ramBytes: 10 * GB };
+  assert.deepEqual(n.offloadOk(o), { ...o, ramCap: 20 * GB }, "the load parks within the RAM it lends (ExpertStore ramBytes)");
+  assert.throws(() => n.offloadOk({ ...o, ramBytes: 30 * GB }), /lends 20 GB/);
+  assert.throws(() => new RoomNode({ pledgeGB: 8, log: () => {} }).offloadOk(o), /does not offload/);
+});
+
+test("expert offload: a worker whose experts would park past its RAM fails the load and never comes online", async () => {
+  const n = fakeNode({ host: false, name: "pc" });
+  n.ramGB = 12; n.modelDir = fs.mkdtempSync(path.join(os.tmpdir(), "rn-off-"));
+  let seen = null;
+  // shard.js hands the offload to ExpertStore, which counts what it really parks against ramCap (engine/expert_store.js)
+  n.loadShardFn = async ({ offload }) => {
+    seen = offload;
+    throw new Error(`ExpertStore: layer 0 down: parking its experts would take 12.86 GiB of RAM, over the ${(offload.ramCap / GB).toFixed(2)} GiB this device lends`);
+  };
+  await n.workerLoad("h", { t: "ai-load", v: PROTOCOL, model: "qwen3.6-35b-moe", range: [0, 40], ctx: 4096, next: "host", host: "h",
+    offload: { lo: 0, hi: 40, vramBytes: 3 * GB, ramBytes: 11.9 * GB } });
+  assert.equal(seen.ramCap, 12 * GB, "the store is held to the RAM this device lends");
+  assert.equal(msgs(n, "h", "ai-ready").length, 0, "not online");
+  const err = msgs(n, "h", "ai-error");
+  assert.equal(err.length, 1); assert.equal(err[0].load, 1); assert.match(err[0].message, /this device lends/);
+  assert.equal(n.ai.engine, null);
+  fs.rmSync(n.modelDir, { recursive: true, force: true });
+});
+
+test("expert offload: the deal parks exactly what the header's experts park (Q4_1 layers as Q8), within each device's RAM", async () => {
+  const { roomBytes } = await import("../../../room/models.js");
+  const fitBytes = roomBytes("qwen3.6-35b-moe", 32768, "f16"), ex = fitBytes.experts;
+  const layerPark = (l) => ex.slices[l].reduce((a, b) => a + b, 0) * ex.nExp;
+  for (const [self, peers] of [
+    [{ name: "pc", meta: { webgpu: true, contribGB: 10, offload: true, ramGB: 48 } }, []],
+    [{ name: "spark", meta: { webgpu: true, contribGB: 4 } }, [{ id: "pc", name: "pc", meta: { webgpu: true, contribGB: 8, offload: true, ramGB: 24 } }]]]) {
+    const p = RoomNode.dealPlan({ L: 40, layerBytes: fitBytes.layerBytes, embedBytes: fitBytes.hostBytes, self, peers, mode: "speed", fitBytes, experts: ex });
+    assert.ok(p.fit.fits);
+    p.offload.forEach((o, k) => {
+      if (!o) return;
+      let want = 0;
+      for (let l = o.lo; l < o.hi; l++) want += layerPark(l);
+      assert.equal(o.ramBytes, want, `device ${k}: ${o.lo}-${o.hi}`);
+      assert.ok(o.ramBytes <= [self, ...peers][k].meta.ramGB * GB);
+    });
+  }
+});
+
+test("split GGUF: openModel reads every file of a split model from disk, each tensor from its own file", async () => {
+  const { MODELS } = await import("../../../room/models.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "split-"));
+  const key = "qwen3.5-122b-moe", M = MODELS[key];
+  fs.mkdirSync(path.join(dir, key));
+  const files = M.shards.map((u) => path.join(dir, key, u.split("/").pop()));
+  fs.writeFileSync(files[0], Buffer.from([1, 2, 3, 4, 5, 6, 7, 8]));
+  fs.writeFileSync(files[1], Buffer.from([11, 12, 13, 14, 15, 16, 17, 18]));
+  const src = openModel(key, { modelDir: dir, fetch: () => { throw new Error("no network"); } });
+  assert.equal(src.stat.from, "disk"); assert.equal(src.shards, 2); assert.equal(src.local, files[0]);
+  assert.deepEqual([...(await src.bytesOf({ byteOffset: 2, byteLength: 3 }))], [3, 4, 5]);
+  assert.deepEqual([...(await src.bytesOf({ byteOffset: 2, byteLength: 3, shard: 1 }))], [13, 14, 15]);
+  await src.close();
+  // one file missing: the model is not local (it streams, every file from its own URL)
+  fs.rmSync(files[1]);
+  const urls = [];
+  const s2 = openModel(key, { modelDir: dir, fetch: async (u, o) => { urls.push(u); const [a, b] = /bytes=(\d+)-(\d+)/.exec(o.headers.range).slice(1).map(Number); return new Response(new Uint8Array(b - a + 1).fill(7), { status: 206 }); } });
+  assert.equal(s2.stat.from, "Hugging Face");
+  await s2.bytesOf({ byteOffset: 0, byteLength: 4, shard: 1 });
+  assert.equal(urls[0], M.shards[1]);
+  await s2.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});

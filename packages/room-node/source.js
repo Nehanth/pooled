@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { MODELS } from "../../room/models.js";
 import { parseGGUFHeader } from "../../engine/gguf.js";
+import { mergeSplitHeaders } from "../../room/models.js";
 
 // file name in the room's URL -> path under modelDir (the layout of tests/e2e/xroom.mjs LOCAL)
 export const LOCAL = {
@@ -13,59 +14,79 @@ export const LOCAL = {
   "Qwen3-0.6B-Q8_0.gguf": "qwen/model.gguf",
   "Qwen3-1.7B-Q8_0.gguf": "qwen17/model.gguf",
   "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf": "q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf",
+  "Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf": "q35-122b/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf",
+  "Qwen_Qwen3.5-122B-A10B-Q4_0-00002-of-00002.gguf": "q35-122b/Qwen_Qwen3.5-122B-A10B-Q4_0-00002-of-00002.gguf",
 };
 
+// A split GGUF (room/models.js MODELS[key].shards: llama.cpp's gguf-split, e.g. the 122B in two files) is read as one
+// model: the metadata is the first file's, every file lists its own tensors (offsets within that file), so each
+// tensor remembers its file (info.shard) and bytesOf reads it from there. Local copies sit side by side
+// (<modelDir>/<key>/<file>, as `pooled pull` keeps them); a model is local only when every file is.
 export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || null, fetch: fetchImpl = globalThis.fetch, concurrency = 6, capBytes = 512 * MiB } = {}) {
   const M = MODELS[modelKey];
   if (!M || (M.kind !== "gguf" && M.kind !== "qwen35")) throw new Error(`unsupported model ${modelKey}`);
-  const base = M.gguf.split("/").pop();
+  const urls = M.shards?.length ? M.shards : [M.gguf];
   // `pooled pull`'s layout (<dir>/<model key>/<file>, cli/lib/cache.js) first, then the test layout
-  const local = modelDir ? [path.join(modelDir, modelKey, base), LOCAL[base] && path.join(modelDir, LOCAL[base])].find((f) => f && fs.existsSync(f)) || null : null;
+  const localOf = (url) => { const base = url.split("/").pop(); return [path.join(modelDir, modelKey, base), LOCAL[base] && path.join(modelDir, LOCAL[base])].find((f) => f && fs.existsSync(f)) || null; };
+  const locals = modelDir ? urls.map(localOf) : urls.map(() => null);
+  const isLocal = locals.every(Boolean);
+  const local = isLocal ? locals[0] : null;
   // what this load has read so far (loadstat): bytes from the network or the disk since plan(), of total
-  const stat = { from: local ? "disk" : "Hugging Face", fetched: 0, total: 0, planned: false };
+  const stat = { from: isLocal ? "disk" : "Hugging Face", fetched: 0, total: 0, planned: false };
   const count = (n) => { if (stat.planned) stat.fetched += n; };
-  let fh = null;
-  const direct = async (off, len) => fetchRange(fetchImpl, M.gguf, off, off + len, count);
-  let pre = null;   // the prefetcher, once plan() gave it the shard's tensors (streaming only)
-  const readAt = local
-    ? async (off, len) => {
-      fh ||= await fs.promises.open(local, "r");
-      const out = new Uint8Array(len);
-      let o = 0;
-      while (o < len) { const { bytesRead } = await fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
-      if (o !== len) throw new Error(`short read in ${local} at ${off}`);
-      count(len);
-      return out;
-    }
-    : async (off, len) => (pre && (await pre.read(off, len))) || direct(off, len);
+  const files = urls.map((url, i) => {
+    const f = { url, fh: null, pre: null, local: isLocal ? locals[i] : null };
+    f.readAt = f.local
+      ? async (off, len) => {
+        f.fh ||= await fs.promises.open(f.local, "r");
+        const out = new Uint8Array(len);
+        let o = 0;
+        while (o < len) { const { bytesRead } = await f.fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
+        if (o !== len) throw new Error(`short read in ${f.local} at ${off}`);
+        count(len);
+        return out;
+      }
+      : async (off, len) => (f.pre && (await f.pre.read(off, len))) || fetchRange(fetchImpl, url, off, off + len, count);
+    return f;
+  });
+  const fileOf = (info) => files[info?.shard || 0] || files[0];
   const sideFile = (url) => {   // config.json / tokenizer.json for the dense models: next to the local GGUF, else the URL
     const f = local && path.join(path.dirname(local), url.split("/").pop());
     return f && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : fetchImpl(url).then((r) => r.json());
   };
+  // one file's index (and the tokenizer when asked): 12 MB first, doubling, as room.js fetchGGUFHeader
+  const headerOf = async (f, needTokenizer) => {
+    for (let size = 12 * 2 ** 20; ; size *= 2) {
+      const buf = await f.readAt(0, size);
+      try { return parseGGUFHeader(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), { skipTokenizer: !needTokenizer }); }
+      catch (e) { if (size > 256 * 2 ** 20) throw e; }
+    }
+  };
   return {
-    M, local, url: M.gguf, stat,
-    readAt,
-    bytesOf: (info) => readAt(info.byteOffset, info.byteLength),
-    // the tensors this load will read, in the loader's order ([{ byteOffset, byteLength }]): streaming,
+    M, local, url: M.gguf, stat, shards: urls.length,
+    readAt: files[0].readAt,   // the first file (ckptdisk.js modelFileId)
+    bytesOf: (info) => fileOf(info).readAt(info.byteOffset, info.byteLength),
+    // the tensors this load will read, in the loader's order ([{ byteOffset, byteLength, shard? }]): streaming,
     // they are fetched ahead of the loader in large ranges, several at once; from disk, only counted
     plan(infos) {
       stat.planned = true; stat.fetched = 0;
-      if (local) { stat.total = infos.reduce((a, t) => a + t.byteLength, 0); return; }
-      pre?.close();
-      pre = rangePrefetcher({ fetchRange: (a, b, onBytes) => fetchRange(fetchImpl, M.gguf, a, b, (n) => { onBytes(n); count(n); }), concurrency, capBytes });
-      stat.total = pre.plan(infos.map((t) => ({ off: t.byteOffset, len: t.byteLength })));
+      if (isLocal) { stat.total = infos.reduce((a, t) => a + t.byteLength, 0); return; }
+      stat.total = 0;
+      files.forEach((f, i) => {
+        f.pre?.close();
+        f.pre = rangePrefetcher({ fetchRange: (a, b, onBytes) => fetchRange(fetchImpl, f.url, a, b, (n) => { onBytes(n); count(n); }), concurrency, capBytes: capBytes / files.length });
+        stat.total += f.pre.plan(infos.filter((t) => (t.shard || 0) === i).map((t) => ({ off: t.byteOffset, len: t.byteLength })));
+      });
     },
-    // the GGUF index (and the tokenizer when asked): 12 MB first, doubling, as room.js fetchGGUFHeader
+    // the GGUF index (and the tokenizer when asked); a split model's every file merged into one (mergeSplitHeaders)
     async header(needTokenizer = true) {
-      for (let size = 12 * 2 ** 20; ; size *= 2) {
-        const buf = await readAt(0, size);
-        try { return parseGGUFHeader(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), { skipTokenizer: !needTokenizer }); }
-        catch (e) { if (size > 256 * 2 ** 20) throw e; }
-      }
+      const G = await headerOf(files[0], needTokenizer);
+      if (files.length === 1) return G;
+      return mergeSplitHeaders([G, ...(await Promise.all(files.slice(1).map((f) => headerOf(f, false))))]);
     },
     cfg: () => (M.cfg ? sideFile(M.cfg) : null),
     tokJson: () => (M.tok ? sideFile(M.tok) : null),
-    async close() { pre?.close(); pre = null; try { await fh?.close(); } catch {} fh = null; },
+    async close() { for (const f of files) { f.pre?.close(); f.pre = null; try { await f.fh?.close(); } catch {} f.fh = null; } },
   };
 }
 
@@ -169,7 +190,7 @@ export function rangePrefetcher({ fetchRange: get, concurrency = 6, capBytes = 5
   const pump = () => {
     while (!closed && inflight < concurrency && next < order.length) {
       const c = chunks[order[next]];
-      if (c.p) { next++; continue; }
+      if (c.p || c.dropped) { next++; continue; }
       if (held + (c.end - c.start) > capBytes && held > 0) return;
       start(order[next++]);
     }
@@ -179,6 +200,9 @@ export function rangePrefetcher({ fetchRange: get, concurrency = 6, capBytes = 5
     if (c.dropped) return;
     c.dropped = true;
     if (c.data) { held -= c.end - c.start; c.data = null; }
+    // the settled promise holds the bytes too: without this a streamed load kept every byte it fetched until
+    // close() (a whole shard: 47 GB for the 122B's offloaded share, on top of the 43 GB it parks)
+    c.p = null;
     pump();
   };
   return {

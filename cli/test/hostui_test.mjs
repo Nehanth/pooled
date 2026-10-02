@@ -450,3 +450,26 @@ test("the 1.7B: 16K when the room holds it, 8K when it is short for 16K, an aske
   assert.match(on, /context +Qwen3 1\.7B · 8K context: the room's memory is short for 16K/);
   assert.doesNotMatch(render({ ...s, fit: f16 }, { width: 100, lib }).map(visible).join("\n"), /8K context/);
 });
+
+test("expert offload: a 12 GB GPU with RAM to spare runs the 35B --here, its experts in RAM; without RAM it can't", async () => {
+  const { hereGB } = await import("../lib/hostui.js");
+  const { offloadFor } = await import("../../room/pledge.js");
+  const olib = { ...lib, offloadFor };
+  // the RTX 5070 PC: lends 10 GB by the memory rule (11 at most), 48 GB of its 64 GB of RAM (total less 16)
+  assert.equal(hereGB(olib, "qwen3.6-35b-moe", { maxGB: 11 }), null, "no RAM: as before");
+  assert.equal(hereGB(lib, "qwen3.6-35b-moe", { maxGB: 11, ramGB: 48, offGB: 10 }), null, "a lib without offloadFor: as before");
+  assert.equal(hereGB(olib, "qwen3.6-35b-moe", { maxGB: 11, ramGB: 48, offGB: 10 }), 10, "the memory rule's 10 GB, the experts it can't hold in RAM");
+  assert.equal(hereGB(olib, "qwen3.6-35b-moe", { maxGB: 11, ramGB: 4, offGB: 10 }), null, "4 GB of RAM can't take the experts");
+  // a model it holds whole is still dealt whole, at the least that holds it
+  assert.equal(hereGB(olib, "qwen3-1.7b", { maxGB: 11, ramGB: 48, offGB: 10 }), hereGB(lib, "qwen3-1.7b", { maxGB: 11 }));
+  const rows = modelRows(olib, { keys: KEYS, pledgeGB: 10, maxGB: 11, ramGB: 48, offGB: 10 });
+  const moe = rows.find((r) => r.key === "qwen3.6-35b-moe"), r17 = rows.find((r) => r.key === "qwen3-1.7b");
+  assert.equal(moe.hereGB, 10); assert.equal(moe.hereOff, true); assert.equal(r17.hereOff, false);
+  // the room's fit: a device that offers RAM counts with it (the room page's roomFit with offload)
+  const f = roomFitNow(olib, { model: "qwen3.6-35b-moe", devices: [dev("pc", 10, { offload: true, ramGB: 48 })] });
+  assert.equal(f.fits, true); assert.equal(f.offload, true);
+  assert.equal(roomFitNow(olib, { model: "qwen3.6-35b-moe", devices: [dev("pc", 10)] }).fits, false);
+  // two devices whose pledges hold it: no offload
+  const two = roomFitNow(olib, { model: "qwen3.6-35b-moe", devices: [dev("a", 14), dev("pc", 12, { offload: true, ramGB: 48 })] });
+  assert.equal(two.fits, true); assert.equal(two.offload, false);
+});

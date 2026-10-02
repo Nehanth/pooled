@@ -125,12 +125,15 @@ Deno.test("loadLayer: the whole layer into the region, skipped when it is alread
   const { st, nExp } = makeStore();
   const enc = fakeEncoder();
   st.loadLayer(enc, 2);
-  assert(enc.copies.length === 6 && st.region.layer === 2, "six whole-array copies");
+  // one copy per parked segment of each of the six arrays (a slice may span two parked buffers)
+  const c1 = enc.copies.length, segs = (l) => ["gate", "up", "down"].reduce((a, p) => a + st.L.get(l).parts[p].sl.reduce((x, y) => x + y.segs.length, 0), 0);
+  assert(c1 === segs(2) && c1 >= 6 && st.region.layer === 2, "whole-array copies");
   for (let e = 0; e < nExp; e += 5) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 2, p, e) === want(2, p, e), "region contents");
   st.loadLayer(enc, 2);
-  assert(enc.copies.length === 6, "skipped");
+  assert(enc.copies.length === c1, "skipped");
   st.loadLayer(enc, 5);
-  assert(enc.copies.length === 12 && regionByte(st, 5, "up", 31) === want(5, "up", 31), "next layer");
+  assert(enc.copies.length === c1 + segs(5) && regionByte(st, 5, "up", 31) === want(5, "up", 31), "next layer");
+  for (let e = 0; e < nExp; e++) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 5, p, e) === want(5, p, e), "next layer's contents");
 });
 
 Deno.test("build: the budget sets the slots; under one token's experts it refuses", () => {
@@ -144,4 +147,21 @@ Deno.test("build: the budget sets the slots; under one token's experts it refuse
   for (const l of [0, 1]) ["gate", "up", "down"].forEach((p, i) => st2.park(l, p, entry(l, i, 16, 32, 64), 16));
   st2.build({ K: 8 });
   assert(st2.P === 10, `slots ${st2.P}`);
+});
+
+Deno.test("park: a slice that doesn't fit what is left of a parked buffer fills it and goes on in the next, at an expert boundary", () => {
+  // 5 experts of 4096 B (qs) per 16 KiB buffer: slices span buffers; no buffer is left mostly empty
+  const nExp = 32, rows = 64, cols = 128, dev = fakeDevice(), st = new ExpertStore(dev, { layers: [3], slots: 6, parkBytes: 18 * 1024 });
+  ["gate", "up", "down"].forEach((p, i) => st.park(3, p, entry(3, i, nExp, rows, cols), nExp));
+  st.build({ K: 4 });
+  const parked = dev.bufs.filter((b) => b.usage & GPUBufferUsage.MAP_WRITE);
+  const need = 3 * nExp * (rows * cols / 2 + rows * cols / 16);
+  assert(parked.length * 18 * 1024 <= need + 3 * 18 * 1024, `${parked.length} buffers of 18 KiB for ${need} B`);
+  assert(st.L.get(3).parts.gate.sl[0].segs.length > 1, "the gate qs slice spans buffers");
+  let enc = fakeEncoder();
+  const r = st.plan(enc, 3, sel1([0, 4, 5, 31]), 1, 5);
+  for (let k = 0; k < 4; k++) for (const p of ["gate", "up", "down"]) assert(poolByte(st, 3, p, r.remap[k]) === want(3, p, [0, 4, 5, 31][k]), `slot of expert ${[0, 4, 5, 31][k]} ${p}`);
+  enc = fakeEncoder();
+  st.loadLayer(enc, 3);
+  for (let e = 0; e < nExp; e++) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 3, p, e) === want(3, p, e), `region expert ${e} ${p}`);
 });

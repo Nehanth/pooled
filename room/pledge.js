@@ -54,3 +54,21 @@ export function afterLoadDeath({ layers, layerGB, gb, deaths }) {
   if (!(next < gb)) return { drop: true };
   return { drop: false, gb: Math.round(next * 100) / 100 };
 }
+
+// Expert offload (room/plan.js offloadNeed): the system RAM a device lets the room park a MoE model's routed experts
+// in, in GB. Only a device that says it can (meta.offload: a room node on a discrete GPU; browsers never offload)
+// and as much as it says (meta.ramGB), held to the most one computer lends (DESK_MAX_GB). It is a promise like the
+// pledge: the deal never parks more than this. 0 for any other device.
+export function ramGB(meta) {
+  const r = Number(meta?.ramGB);
+  return meta?.offload && meta?.webgpu !== false && r > 0 ? Math.min(DESK_MAX_GB, r) : 0;
+}
+// room/plan.js's `off` for a room's devices (metas, host first) and the model's routed experts: a profile
+// (room/models.js expertsOf, roomBytes experts: what ExpertStore parks, layer by layer) or one layer's bytes (an
+// estimate), or null when the model has none or no device offloads
+export function offloadFor(metas, ex) {
+  const ram = metas.map((m) => ramGB(m) * 2 ** 30);
+  const expertBytes = ex && typeof ex === "object" ? +ex.E || 0 : +ex || 0;
+  if (!(expertBytes > 0) || !ram.some((r) => r > 0)) return null;
+  return ex && typeof ex === "object" ? { expertBytes, experts: ex, ram } : { expertBytes, ram };
+}

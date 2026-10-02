@@ -2,7 +2,7 @@
 // status line, error messages, and loading Dawn lazily (cli/lib/lend.js, cli/lib/dawn.js).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseLendArgs, parseGb, autoRedeal, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, passCounter, explainError,
+import { parseLendArgs, parseGb, parseRam, ramRule, autoRedeal, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, passCounter, explainError,
   versionAdvice, versionFromBye, hostable, deviceName, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB } from "../lib/lend.js";
 import { dawnLoader, dawnPackages, DAWN_VERSION } from "../lib/dawn.js";
 
@@ -332,4 +332,30 @@ test("--ctx above the model's most: pooled host says what it gets instead of low
   assert.equal(ctxNote(rn, "qwen3-1.7b", 0), "", "no --ctx");
   assert.equal(ctxNote(rn, "qwen3.6-35b-moe", 32768), "");
   assert.match(ctxNote(rn, "qwen3.8-27b", 262144), /^the 27B's context is 65536; using that$/);
+});
+
+test("--ram: expert offload's RAM, discrete GPUs only; default total less 16 GB, held to what is free and to 64", () => {
+  assert.equal(parseRam(undefined), null);
+  assert.deepEqual(parseRam("32"), { gb: 32 });
+  assert.deepEqual(parseRam("0"), { gb: 0 });
+  assert.deepEqual(parseRam("500"), { gb: 64 });
+  assert.throws(() => parseRam("lots"), /--ram must be a number/);
+  assert.throws(() => parseRam("-1"), /--ram must be a number/);
+  assert.deepEqual(parseLendArgs("join", ["ABCD", "--ram", "20"]).ram, { gb: 20 });
+  assert.deepEqual(parseLendArgs("host", ["--ram", "0"]).ram, { gb: 0 });
+  const disc = { kind: "discrete", name: "RTX 5070", totalGB: 12, freeGB: 11.8 };
+  assert.equal(ramRule(disc, null, { totalGB: 63.6, freeGB: 56 }).gb, 47, "64 GB PC: total less 16");
+  assert.equal(ramRule(disc, null, { totalGB: 63.6, freeGB: 30 }).gb, 26, "busy: free less 4");
+  assert.equal(ramRule(disc, null, { totalGB: 256, freeGB: 250 }).gb, 64, "at most 64");
+  assert.equal(ramRule(disc, null, { totalGB: 16, freeGB: 12 }).gb, 0, "16 GB: none");
+  assert.equal(ramRule(disc, { gb: 20 }, { totalGB: 64, freeGB: 56 }).gb, 20);
+  assert.equal(ramRule(disc, { gb: 0 }, { totalGB: 64, freeGB: 56 }).gb, 0);
+  assert.equal(ramRule({ kind: "unified", totalGB: 128 }, { gb: 20 }, { totalGB: 128, freeGB: 100 }).gb, 0, "unified memory never offloads");
+  assert.equal(ramRule({ kind: "unknown" }, null, { totalGB: 64, freeGB: 56 }).gb, 0);
+});
+
+test("explainError: a room short of a model is not a GPU out of memory (\"rOOM\")", () => {
+  const x = explainError(new Error("This room is 47.3 GB short for Qwen3.5 122B MoE. Add a device or raise a pledge."), {});
+  assert.doesNotMatch(x.message, /ran out of memory/);
+  assert.match(explainError(new Error("GPU OOM in createBuffer"), {}).message, /ran out of memory/);
 });

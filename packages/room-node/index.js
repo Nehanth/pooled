@@ -15,6 +15,6 @@ export { reconnectDelay } from "../../room/signal.js";
 export { MODELS, FILES, FILE_GB, NEED_GB, NEED_MIN_GB, SHAPE, PICKER, CTX, roomBytes, pickCtx, ctxChoices, ctxShortNote, ctxK } from "../../room/models.js";
 // the room page's fit math (#271), so pooled host says "short" exactly when the room page would
 export { roomFit, shortNote, shortBy, gbUp, dealRoom } from "../../room/plan.js";
-export { pledgeGB } from "../../room/pledge.js";
+export { pledgeGB, ramGB, offloadFor } from "../../room/pledge.js";
 export { setupNode, runtime, probeMeta } from "./env.js";
 export { openModel, LOCAL } from "./source.js";

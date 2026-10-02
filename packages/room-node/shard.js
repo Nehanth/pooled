@@ -10,9 +10,10 @@ import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizer
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { maxSeqFor, kvModeFor } from "../../room/models.js";
 import { convertPool } from "./convert.js";
+import { ExpertStore } from "../../engine/expert_store.js";
 
 // The tensors a shard's loader reads (engine/gguf.js ggufWeights / qwen35Weights), in about its order,
-// as { byteOffset, byteLength }: what source.js fetches ahead of it when it streams
+// as { byteOffset, byteLength, shard? }: what source.js fetches ahead of it when it streams (shard: the file of a split GGUF)
 export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }) {
   const names = [];
   const strings = (o) => Object.values(o).filter((v) => typeof v === "string");
@@ -24,8 +25,18 @@ export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }
     if (G.tensors[p + "eh_proj.weight"]) names.push(...strings(qwen35NamesFor(G, N, true)), ...["eh_proj", "enorm", "hnorm", "shared_head_norm"].map((n) => p + n + ".weight"));
   }
   const seen = new Set(), out = [];
-  for (const n of names) { const t = G.tensors[n]; if (t && !seen.has(n)) { seen.add(n); out.push({ byteOffset: t.byteOffset, byteLength: t.byteLength }); } }
+  for (const n of names) { const t = G.tensors[n]; if (t && !seen.has(n)) { seen.add(n); out.push({ byteOffset: t.byteOffset, byteLength: t.byteLength, ...(t.shard ? { shard: t.shard } : {}) }); } }
   return out;
+}
+
+// offload (expert offload, room/plan.js dealRoom): { lo, hi, vramBytes, ramBytes, ramCap }: the routed experts of
+// layers [lo, hi) are parked in RAM (engine/expert_store.js ExpertStore) with a GPU cache of vramBytes (its slot pools +
+// prefill region) instead of uploaded. ramBytes: what the deal says they park; ramCap: the RAM this device lends
+// (roomnode.js offloadOk): parking past it fails the load. A Qwen3.5 / 3.6 MoE shard on a room node only.
+// the layers an ai-load's offload covers within this shard's range, or null for none
+export function offloadLayers(o, range) {
+  const lo = Math.max(range[0], +o?.lo || 0), hi = Math.min(range[1], +o?.hi || 0);
+  return hi > lo && o.vramBytes > 0 ? Array.from({ length: hi - lo }, (_, i) => lo + i) : null;
 }
 
 // A model's transformer layers: config.json's num_hidden_layers for a dense GGUF (qwen3-*), the GGUF
@@ -46,9 +57,9 @@ export function checkRange(range) {
   if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo < 0 || hi < lo) throw new Error(`bad layer range [${lo}, ${hi}]`);
 }
 
-// -> { device, engine, tok, cfg, G, tune, gpuErrors }
+// -> { device, engine, tok, cfg, G, tune, gpuErrors, experts }
 export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, null),
-  src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {} }) {
+  src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {}, offload = null }) {
   checkRange(range);
   const M = src.M;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
@@ -58,6 +69,11 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
   const out = { device, gpuErrors: 0 };
   let pool = null;
   device.addEventListener?.("uncapturederror", (ev) => { if (out.gpuErrors++ < 3) onGpuError(ev.error?.message || "GPU error"); });
+  // a buffer the GPU had no memory for is an error buffer: the layers would load "fine" and every answer come out as
+  // garbage (seen on the RTX 5070 with the 122B's experts filling the RAM WDDM spills VRAM into). The whole load runs
+  // in one out-of-memory scope and fails when anything in it ran out
+  device.pushErrorScope?.("out-of-memory");
+  let scoped = !!device.pushErrorScope;
   try {
     // the index first, so a streamed shard's weights download while the GPU tests and tunes below run
     const kind = M.kind === "qwen35" ? "qwen35" : "gguf";
@@ -70,7 +86,8 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     G0.convert = pool.convert;
     src.plan?.(shardTensors(G0, kind, opts));
     if (selfTest) {
-      const tdev = await (await navigator.gpu.requestAdapter()).requestDevice();   // an adapter gives out one device only
+      // an adapter gives out one device only; the same GPU as the shard's (env.js highPerformance)
+      const tdev = await (await navigator.gpu.requestAdapter({ powerPreference: "high-performance" })).requestDevice();
       const st = await gpuSelfTest(tdev);
       if (!st.ok) throw new Error("GPU self-test FAILED on this device: " + st.detail);
       const mt = await kernelMicroTests(tdev);
@@ -85,7 +102,12 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
       out.cfg = { num_hidden_layers: G.meta["qwen35.block_count"] - (G.meta["qwen35.nextn_predict_layers"] || 0) };
       if (needTok) { out.tok = makeTokenizer(tokenizerFromGGUF(G.meta)); out.tok.chatTemplate = G.meta["tokenizer.chat_template"] || ""; }
       const total = qwen35ShardBytes(G, opts);
-      const weights = await qwen35Weights(G, src.bytesOf, opts, (done) => onProgress(done, total), upload);
+      const off = offload && offloadLayers(offload, range);
+      if (off?.length) {
+        out.experts = new ExpertStore(device, { layers: off, vramBytes: offload.vramBytes, ramBytes: +offload.ramCap || Infinity, expectBytes: +offload.ramBytes || 0 });
+        log(`expert offload: layers ${off[0]}-${off[off.length - 1]} park their experts in RAM, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GB GPU cache`);
+      }
+      const weights = await qwen35Weights(G, src.bytesOf, { ...opts, experts: out.experts || null }, (done) => onProgress(done, total), upload);
       out.engine = await Qwen35Engine.create({
         device, meta: G.meta, weights, vocab: G.tensors[GGML_EMBED]?.shape?.[0],
         layerRange: range, hasEmbed, hasHead, maxSeq: ctx, coopWG: out.tune.wg, coopRows: out.tune.rows,
@@ -100,6 +122,16 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
       out.engine = await DenseEngine.create({ coopWG: out.tune.wg, coopRows: out.tune.rows, device, cfg: out.cfg, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx });
     }
     applyRoomFlags(out.engine, flags);
+    if (scoped) {
+      scoped = false;
+      const oom = await device.popErrorScope();
+      if (oom) throw Object.assign(new Error(`the GPU ran out of memory while loading layers ${range[0]}-${range[1] - 1}: ${String(oom.message || "").split("\n")[0].slice(0, 200)}`), { oom: true });
+    }
+    if (out.experts) {
+      log(out.experts.summary().replace(/; \d+ cuts.*/, ""));
+      if (offload.ramBytes > 0 && out.experts.parkedBytes > offload.ramBytes * 1.0001)
+        log(`expert offload: parked ${(out.experts.parkedBytes / 2 ** 30).toFixed(2)} GiB, more than the ${(offload.ramBytes / 2 ** 30).toFixed(2)} GiB the deal planned (within what this device lends)`);
+    }
     return out;
   } catch (e) { try { device.destroy(); } catch {} throw e; }
   finally { if (out.G) delete out.G.convert; await pool?.close(); }

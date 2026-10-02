@@ -22,8 +22,8 @@ export function parseKey(key) {
   return { url, lo: +m[1], hi: +m[2] };
 }
 
-// The weights urls of a model (a GGUF file, or a safetensors file for the small test model).
-const weightUrls = (m) => [m?.gguf, m?.st].filter(Boolean);
+// The weights urls of a model (a GGUF file, every file of a split GGUF, or a safetensors file for the small test model).
+const weightUrls = (m) => [...new Set([m?.gguf, ...(m?.shards || []), m?.st].filter(Boolean))];
 
 // A name for weights no catalogue model points at any more (an old URL, a ?dev model): the file name.
 const fileName = (url) => { try { return decodeURIComponent(new URL(url).pathname.split("/").pop()) || url; } catch { return url; } };

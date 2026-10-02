@@ -2123,3 +2123,40 @@ Not in this phase: the room (`room/plan.js` dealing layers to an offload device 
 room-node's shard range and `--no-maglev`, the room loader reading split GGUFs), native Q4_1 down experts (layers 0-5 of
 the 122B still widen to Q8), seeding the LRU from the prompt, and an offload path in Chrome (its readback latency is not
 measured). Encode-ahead and decode-ahead are off on an offloaded engine (a token's commands depend on its routing).
+
+## 2026-10-02: expert offload in rooms, phase 2b (branch feat/offload-rooms, on feat/expert-offload), GB10 + RTX 5070 PC
+
+A room node with a discrete GPU offers RAM for a MoE model's experts (`--ram`, default total less 16 GB); when the
+pledges can't hold the model, the host deals it layers past its pledge with their experts parked (room/plan.js
+dealRoom, room-node shard.js). Answers are the CLI's `pooled chat` against the room; tok/s is the host's status line
+(the room's own measure of its last answer, MTP speculation on).
+
+| room | split | offload | answers | tok/s (two-sum / hash-map / bash / 250-word story) |
+|---|---|---|---|---|
+| PC alone, `pooled host qwen3.6-35b-moe --here` (lends 10 GB) | PC 0-39 | 40 layers, 17.5 GiB parked, 60 slots | two-sum, hash-map = the 35B goldens | 54.3 / 53.8 / - / 40.9 |
+| Spark `--gb 6` hosts, PC `--gb 8` joins, 35B | Spark 0-7, PC 8-39 | PC: 11-39, 12.2 GiB parked, 71 slots | same | 43.4 / 36.7 / - / 34.1 (an earlier run 49.1 / 42.7 / - / 27.5) |
+| Spark `--gb 26` hosts, PC `--gb 10` joins, 122B (128K context) | Spark 0-14, PC 15-47 | PC: 15-47, 41.8 GiB parked, 26 slots | the 3 llama.cpp goldens (q122_llama_greedy.json), text prefix | 19.0 / 15.2 / 15.4 / 12.0 |
+
+PC memory with the 122B share: process working set 43.3 GB (peak 45.4), private 54.4 GB, 15 GB of the 63.5 GB free;
+VRAM 10.6 of 12.2 GB. Load from disk 110 s. Three things had to change on the way (all in this branch):
+- **Streamed loads kept every byte they fetched until the end** (source.js rangePrefetcher: a dropped chunk's settled
+  promise still held its bytes). Streaming the 122B share from Hugging Face reached 87 GB private / 1 GB free commit
+  at 85% before I stopped it. Fixed: on the GB10 a streamed 11-layer share peaks at 19.6 GB RSS instead of 32.4.
+- **Parked buffers were 22% empty**: a slice that did not fit the rest of a 1 GiB buffer started a new one (402 MB
+  slices: 2 per GiB). 50 GiB of upload heap for 41.8 GiB of experts; D3D12 then failed CreateCommittedResource. Now a
+  slice spans buffers at an expert boundary: 42 GiB for 41.8. (A bare test allocated 60 x 1 GiB MAP_WRITE buffers on
+  the PC without an error, Windows paging the working set out at the end: the limit is RAM, not a heap cap.)
+- **An out-of-memory buffer in a load came online as garbage** ("!!!!" answers). shard.js runs the load in an
+  out-of-memory error scope and fails it.
+Streaming the share from Hugging Face (74-110 MB/s, then 16 MB/s) still peaked at 57 GB working set at 94% with the
+prefetch fix (the watchdog stopped it at 1.8 GB free RAM): ~14 GB more than from disk. Not found yet; from disk is fine.
+
+Chain host offload: an offloading **host** in a chain (node-a 0-28 offloaded + head, node-b 29-39) answered nothing:
+the room's draft fill (pipeline.js fillDrafts: setHidden, mtpRun, _mtpFillBatch writing B.x) ran between the parts
+of a trunk call split at a cut and overwrote its scratch. The engine now has a gate (offGate: from a cut's submit
+until the call is through); the fill waits for it. Same answer as the resident host (35B, 900-token prompt: identical
+48 tokens, 39.1 vs 41.8 tok/s), and the room page as host dealing offload to a node (tab 0-16 + head, node 17-39 with
+29-39 offloaded): matches solo, 53.7 tok/s.
+
+Gates: `test_q38_bits` 4dc814b1 / 4f075117; 35B `test_moe` MATCH 3/3, spec == plain (Deno, and Dawn with all 40
+layers offloaded at 4 GB); `MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 test_q38_bits` 5ef77d06 / 403ae12b (= resident).

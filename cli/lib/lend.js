@@ -11,6 +11,8 @@ export const DISCRETE_RESERVE_GB = 1.5; // kept free on a discrete GPU (the desk
 export const UNIFIED_KEEP_GB = 8;       // kept for the system on unified memory: at least this much
 export const UNIFIED_KEEP_FRAC = 0.35;  // ... or this share of it, whichever is more
 export const LINUX_AVAIL_SLACK_GB = 2;  // unified memory on Linux: never more than what is free now, less this
+export const RAM_KEEP_GB = 16;          // expert offload (--ram): system RAM kept for the OS and other apps
+export const RAM_FREE_SLACK_GB = 4;     // ... and never more than what is free now, less this
 export const UPDATE_HINT = "npx @pooled/cli@latest";
 
 export const HELP_JOIN = `Usage
@@ -39,6 +41,10 @@ Options
                     made from the hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
                     default: the PeerJS cloud pooled.run uses)
+  --ram <n>         system RAM, in GB, a MoE model's experts may use when this GPU's pledge can't
+                    hold the layers the room needs from it (expert offload: the GPU keeps a cache
+                    of them; slower than layers held whole). Discrete GPUs only. Default: total
+                    RAM less ${RAM_KEEP_GB} GB (at most what is free less ${RAM_FREE_SLACK_GB}, and ${DESK_MAX_GB}); 0 never offloads
   --no-pull         don't download the model: stream this device's layers from Hugging Face
   --no-check        skip the test allocation that confirms the memory is there
   --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
@@ -75,6 +81,8 @@ export const HELP_HOST = `Usage
     --here                 run all of it on this computer: lends what it needs and starts; other
                            devices can still join to chat. An error when it does not fit here
     --gb <n|max>           how much this computer lends; skips the pledge question
+    --ram <n>              system RAM for a MoE model's experts when the GPU is short (as pooled
+                           join): a 12 GB GPU runs the 35B --here this way. 0 never offloads
     -y, --yes              download the model without asking when it is not on this computer
     --no-pull              don't download: stream this computer's layers from Hugging Face
     --start                start as soon as the room's pledges hold the model
@@ -120,6 +128,24 @@ export function splitModeOf(v) {
 }
 export { needsRoom };
 
+// --ram: a number of GB, 0 or more -> { gb } | null (not given)
+export function parseRam(v) {
+  if (v == null) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) throw new UsageError(`--ram must be a number of GB (like 32), or 0 to never offload, not "${v}"`);
+  return { gb: Math.min(n, DESK_MAX_GB) };
+}
+// How much system RAM this computer lets a room park a MoE model's experts in (expert offload, room/plan.js):
+// only with a discrete GPU (on unified memory the GPU's pledge is that same memory), what --ram says, else the
+// total less RAM_KEEP_GB, held to what is free now less RAM_FREE_SLACK_GB and to DESK_MAX_GB. Whole GB.
+// mem: detectMemory(); want: parseRam(--ram) or null; totalGB / freeGB: the system's RAM. -> { gb, why }
+export function ramRule(mem, want, { totalGB = 0, freeGB = 0 } = {}) {
+  if (mem?.kind !== "discrete") return { gb: 0, why: mem?.kind === "unified" ? "unified memory: no expert offload" : "no expert offload (the GPU's memory is unknown)" };
+  if (want) return { gb: Math.floor(want.gb), why: `--ram ${want.gb}` };
+  const gb = Math.max(0, Math.floor(Math.min(totalGB - RAM_KEEP_GB, freeGB - RAM_FREE_SLACK_GB, DESK_MAX_GB)));
+  return { gb, why: `${fmtGb(totalGB)} GB of RAM, less ${RAM_KEEP_GB} GB kept for the system` + (freeGB - RAM_FREE_SLACK_GB < totalGB - RAM_KEEP_GB ? `; ${fmtGb(freeGB)} GB is free right now` : "") };
+}
+
 // --gb: a positive number of GB, or "max" -> { gb } | { max: true } | null (not given)
 export function parseGb(v) {
   if (v == null) return null;
@@ -131,7 +157,7 @@ export function parseGb(v) {
 }
 
 const COMMON = {
-  gb: { type: "string" }, name: { type: "string" }, signal: { type: "string" }, models: { type: "string" },
+  gb: { type: "string" }, ram: { type: "string" }, name: { type: "string" }, signal: { type: "string" }, models: { type: "string" },
   "no-check": { type: "boolean" }, "json-log": { type: "boolean" }, quiet: { type: "boolean" }, verbose: { type: "boolean" },
   "no-pull": { type: "boolean" }, help: { type: "boolean", short: "h" },
 };
@@ -150,7 +176,7 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
   catch (e) { throw Object.assign(new UsageError(e.message.replace(/^.*?: /, "")), { lines: argsError(cmd, e, Object.keys(options)) }); }
   const o = r.values, pos = r.positionals;
   if (o.help) return { cmd, help: true };
-  const out = { cmd, gb: parseGb(o.gb), name: o.name ? cleanText(o.name, 40) : undefined, signal: o.signal || null,
+  const out = { cmd, gb: parseGb(o.gb), ram: parseRam(o.ram), name: o.name ? cleanText(o.name, 40) : undefined, signal: o.signal || null,
     modelDir: o.models || null, check: !o["no-check"], jsonLog: !!o["json-log"], quiet: !!o.quiet, verbose: !!o.verbose, noPull: !!o["no-pull"] };
   if (o.name != null && !out.name) throw new UsageError("--name must not be empty");
   if (cmd === "join") {
@@ -436,7 +462,8 @@ export function explainError(err, { code = "", cmd = "join", mine = 4 } = {}) {
     return { message: `Room code ${code} is taken.`, hint: "Pick another with --code, or leave it out for a random one.", code: 1 };
   if (t === "version") return { message: versionAdvice({ mine, theirs: err.theirs, theyHost: err.theyHost !== false, code }), code: 1 };
   if (t === "kicked") return { message: `The host refused this device: ${cleanText(msg, 300)}`, code: 1 };
-  if (/out of memory|OOM|allocation failed|Failed to allocate|createBuffer/i.test(msg))
+  // (OOM as a word: "This room is 4 GB short" read as a GPU out of memory through "rOOM")
+  if (/out of memory|\bOOM\b|allocation failed|Failed to allocate|createBuffer/i.test(msg))
     return { message: `The GPU ran out of memory: ${cleanText(msg, 200)}`, hint: "Lend less with --gb N, or close other GPU apps.", code: 1 };
   if (t === "other-host")
     return { message: `Room ${code} now has another host (${cleanText(err.now, 40)}, not ${cleanText(err.was, 40)}): a new room under the same code, so pooled left it.`,

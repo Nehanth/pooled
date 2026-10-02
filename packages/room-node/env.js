@@ -7,6 +7,10 @@
 import { setFlagsFromString } from "node:v8";
 import { measureCopyGBps } from "../../room/gpuspeed.js";
 import { DENSE_SPEC_V } from "../../room/lookup.js";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import os from "node:os";
+import { detectMemory } from "../../cli/lib/lend.js";
 
 let ready = null;
 export let Peer = null;
@@ -44,7 +48,7 @@ export function setupNode({ dawnFlags = dawnFlagsFor(), webgpu = () => import("w
     if (!globalThis.navigator?.gpu) {
       const { create, globals } = await webgpu();
       Object.assign(globalThis, globals);   // GPUBufferUsage, GPUMapMode, GPUShaderStage ...
-      const gpu = create(dawnFlags);
+      const gpu = highPerformance(create(dawnFlags));
       if (globalThis.navigator) Object.defineProperty(globalThis.navigator, "gpu", { value: gpu, configurable: true });
       else globalThis.navigator = { gpu, userAgent: "pooled-node" };
       runtime.gpu = "dawn.node";
@@ -61,10 +65,26 @@ export function setupNode({ dawnFlags = dawnFlagsFor(), webgpu = () => import("w
   })();
 }
 
+// Every adapter this process asks for is the high-performance one unless the caller says otherwise: without a
+// preference Dawn may hand out the integrated GPU (the PC's Core Ultra iGPU instead of its RTX 5070), and a shard's
+// self-test device would then test another GPU than the one that runs it (tests/dawn_run.mjs does the same).
+export function highPerformance(gpu) {
+  const ra = gpu.requestAdapter.bind(gpu);
+  const req = (o = {}) => ra({ powerPreference: "high-performance", ...o });
+  try { Object.defineProperty(gpu, "requestAdapter", { value: req, configurable: true }); } catch {}
+  if (gpu.requestAdapter !== req) return new Proxy(gpu, { get: (t, k) => (k === "requestAdapter" ? req : typeof t[k] === "function" ? t[k].bind(t) : t[k]) });
+  return gpu;
+}
+
 // What this device tells the room in its hello (the page's probeGPU, without the DOM): the room deals
 // layers to devices with meta.webgpu and weighs them by meta.contribGB; meta.gbps (room/gpuspeed.js)
 // lets a clearly faster GPU be the model host (room/plan.js pickModelHost). gbps: pin it (0 = unknown).
-export async function probeMeta(pledgeGB, { gbps = null } = {}) {
+// ramGB: system RAM this device lets the room park a MoE model's experts in (expert offload: meta.offload and
+// meta.ramGB, room/pledge.js ramGB); 0 or none: it doesn't offload. Browsers never do, and neither does a GPU on
+// unified memory (Apple silicon, a GB10 / Jetson): its "RAM" is the memory its pledge already lends, so parking
+// experts there frees nothing and spends the same memory twice. mem: cli/lib/lend.js detectMemory()'s answer
+// (the CLI has it); without one, probeMeta asks the OS itself, only when ramGB asks for offload.
+export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null } = {}) {
   const ua = process.platform === "darwin" ? "Mac" : "Device";
   // dspec: dense verify frames of any column count (the repo's engine; room/lookup.js chainDenseSpec)
   const meta = { ua, webgpu: false, gpu: "no WebGPU", maxBufGB: 0, native: "node-dawn", dspec: DENSE_SPEC_V };
@@ -82,7 +102,23 @@ export async function probeMeta(pledgeGB, { gbps = null } = {}) {
   }
   meta.phone = false;
   meta.contribGB = pledgeFor(pledgeGB, meta.maxBufGB);
+  if (meta.webgpu && +ramGB > 0) {
+    if (unifiedMemory(mem || hostMemory())) meta.noOffload = "unified memory";
+    else { meta.offload = true; meta.ramGB = ramFor(ramGB); }
+  }
   return meta;
 }
+// whether the GPU shares the system's memory (detectMemory's kind; Apple silicon reads as unified there too)
+export const unifiedMemory = (mem) => mem?.kind === "unified";
+// detectMemory on this machine (nvidia-smi, amdgpu sysfs, the platform), or { kind: "unknown" } when it fails
+export function hostMemory() {
+  try {
+    return detectMemory({
+      run: (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }),
+      read: (p) => readFileSync(p, "utf8"), totalmem: os.totalmem, freemem: os.freemem });
+  } catch (e) { return { kind: "unknown", why: String(e?.message || e) }; }
+}
+// the RAM this device lets the room park experts in, GB: what it was told, at most 64 (as a pledge), whole tenths
+export const ramFor = (gb) => Math.max(0, Math.min(64, Math.floor((+gb || 0) * 10) / 10));
 // the GB this device lends: what it was told, else half its largest buffer; 1..64
 export const pledgeFor = (pledgeGB, maxBufGB) => Math.min(64, Math.max(1, +pledgeGB || Math.round(maxBufGB * 0.5) || 1));

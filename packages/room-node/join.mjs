@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Join a Pooled room from the command line and lend this machine's GPU: the room node holds the
 // layers the host deals it until Ctrl-C. No browser, no OpenClaw.
-//   node packages/room-node/join.mjs <CODE> [--gb 12] [--name mac] [--signal host:port] [--models dir]
+//   node packages/room-node/join.mjs <CODE> [--gb 12] [--ram 32] [--name mac] [--signal host:port] [--models dir]
 // --signal: a PeerServer host:port (default the PeerJS cloud server pooled.run uses)
 // --models: local model files (source.js LOCAL layout) instead of HTTP range reads
 // --state <file>: write the room status there every 5 s (JSON)
@@ -15,7 +15,7 @@ if (!code) { console.error("usage: node join.mjs <CODE> [--gb N] [--name NAME] [
 const t0 = Date.now();
 const log = (m) => console.log(`${new Date().toISOString()} +${((Date.now() - t0) / 1000).toFixed(1)}s ${m}`);
 const node = await joinRoom(code.toUpperCase(), {
-  pledgeGB: +opt("gb", 0) || undefined, name: opt("name") || undefined, signal: opt("signal"), modelDir: opt("models"), log,
+  pledgeGB: +opt("gb", 0) || undefined, ramGB: +opt("ram", 0) || 0, name: opt("name") || undefined, signal: opt("signal"), modelDir: opt("models"), log,
 });
 log(`joined room ${node.code} as ${node.name}`);
 node.on("loaded", (x) => log(`holding layers ${x.range[0]}-${x.range[1] - 1} of ${x.model}`));

@@ -1712,11 +1712,29 @@ export class Qwen35Engine {
     enc.copyBufferToBuffer(selBuf, 0, this.offStage, 0, nCols * this.moe.KS * 4);
     this._cut = { L, nCols, M, pp, ppB };
   }
+  // The gate (offGate): from a cut's submit until the call that made it has submitted the rest, the GPU has run only
+  // part of that call's work, and its scratch (this.x / xn, the batch columns, the frame uniforms) is mid-use. Work
+  // the room queues meanwhile without awaiting a trunk call (the draft fill: setHidden + mtpRun, _mtpFillBatch on
+  // B.x, room/pipeline.js fillDrafts) would land between the parts and overwrite it: an offloaded chain host answered
+  // garbage. Such work waits for offGate() to be null. A resident engine never opens it (no cuts): unchanged.
+  _gateOpen() {
+    this._offWaits = (this._offWaits || 0) + 1;
+    if (!this._offGateP) { let res; this._offGateP = { p: new Promise((r) => (res = r)), res }; }
+  }
+  _gateDone() {
+    this._offWaits--;
+    // closes once the caller has gone on past its last cut: its encoding between two cuts is synchronous, so by the
+    // next macrotask it is either waiting on another cut (offWaits > 0) or has submitted everything
+    setTimeout(() => { if (!this._offWaits && !this._cut && this._offGateP) { const g = this._offGateP; this._offGateP = null; g.res(); } }, 0);
+  }
+  // null when nothing of an offloaded call is in flight, else a promise that resolves when that may have changed (check again)
+  offGate() { return this._offGateP ? this._offGateP.p : null; }
   async _cutResolve(enc) {
     const c = this._cut, q = this.device.queue, KS = this.moe.KS, bytes = c.nCols * KS * 4, st = this.offStage;
     this._cut = null;
     q.submit([enc.finish()]);
-    await st.mapAsync(GPUMapMode.READ, 0, bytes);
+    this._gateOpen();
+    try { await st.mapAsync(GPUMapMode.READ, 0, bytes); } finally { this._gateDone(); }
     const sel = new Uint32Array(st.getMappedRange(0, bytes)).slice();
     st.unmap();
     const e2 = this.device.createCommandEncoder();
@@ -1748,7 +1766,8 @@ export class Qwen35Engine {
     const sg = this._offStageG;
     enc.copyBufferToBuffer(selBuf, 0, sg, 0, bytes);
     q.submit([enc.finish()]);
-    await sg.mapAsync(GPUMapMode.READ, 0, bytes);
+    this._gateOpen();
+    try { await sg.mapAsync(GPUMapMode.READ, 0, bytes); } finally { this._gateDone(); }
     const sel = new Uint32Array(sg.getMappedRange(0, bytes)).slice();
     sg.unmap();
     const e2 = this.device.createCommandEncoder();
@@ -3048,7 +3067,10 @@ export class Qwen35Engine {
   // trunk hidden of the previous position: srcCol === null reads this.x,
   // otherwise batch column srcCol. Appends to the MTP layer's own KV cache.
   // wantLogits -> returns draft logits (argmax = drafted token).
-  async mtpRun(srcCol, tNext, pos, wantLogits) { this._pre = null; return this._mtpRun(srcCol, tNext, pos, wantLogits); }
+  async mtpRun(srcCol, tNext, pos, wantLogits) {
+    for (let g = this.offGate(); g; g = this.offGate()) await g;   // (expert offload: not inside another call's cut window)
+    this._pre = null; return this._mtpRun(srcCol, tNext, pos, wantLogits);
+  }
   async _mtpRun(srcCol, tNext, pos, wantLogits) {
     const M2 = this.mtp, { dim, vocab } = this.dims;
     this.device.queue.writeBuffer(M2.emb, 0, this._embedRowF32(tNext));
