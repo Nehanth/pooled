@@ -759,11 +759,27 @@ fn dn_pre(@builtin(local_invocation_id) lid: vec3<u32>) {
 @group(1) @binding(6) var<storage, read_write> ppm_v: array<f32>;
 @group(1) @binding(7) var<uniform> ppm_mc: MC;          // s0 = gate column stride, s1 = conv-out column stride
 @group(1) @binding(8) var<uniform> ppm_dn: DN;
+// the same in-order sum and the same products, with the loads issued 16 at a time: one dependent load per element
+// left the 32 norm threads of a column latency bound (dn_pre_mc 39.8 -> 29.7 us per layer per verify pass on the GB10)
 fn ppm_l2(off: u32) {
   var ss: f32 = 0.0;
-  for (var i: u32 = 0u; i < ppm_dn.dState; i++) { let v = ppm_v[off + i]; ss += v * v; }
+  if (ppm_dn.dState % 16u == 0u) {
+    for (var i: u32 = 0u; i < ppm_dn.dState; i += 16u) {
+      let v0 = ppm_v[off + i + 0u]; let v1 = ppm_v[off + i + 1u]; let v2 = ppm_v[off + i + 2u]; let v3 = ppm_v[off + i + 3u]; let v4 = ppm_v[off + i + 4u]; let v5 = ppm_v[off + i + 5u]; let v6 = ppm_v[off + i + 6u]; let v7 = ppm_v[off + i + 7u]; let v8 = ppm_v[off + i + 8u]; let v9 = ppm_v[off + i + 9u]; let v10 = ppm_v[off + i + 10u]; let v11 = ppm_v[off + i + 11u]; let v12 = ppm_v[off + i + 12u]; let v13 = ppm_v[off + i + 13u]; let v14 = ppm_v[off + i + 14u]; let v15 = ppm_v[off + i + 15u];
+      ss += v0 * v0; ss += v1 * v1; ss += v2 * v2; ss += v3 * v3; ss += v4 * v4; ss += v5 * v5; ss += v6 * v6; ss += v7 * v7; ss += v8 * v8; ss += v9 * v9; ss += v10 * v10; ss += v11 * v11; ss += v12 * v12; ss += v13 * v13; ss += v14 * v14; ss += v15 * v15;
+    }
+  } else {
+    for (var i: u32 = 0u; i < ppm_dn.dState; i++) { let v = ppm_v[off + i]; ss += v * v; }
+  }
   let inv = 1.0 / max(sqrt(ss), ppm_dn.eps2);
-  for (var i: u32 = 0u; i < ppm_dn.dState; i++) { ppm_v[off + i] *= inv; }
+  if (ppm_dn.dState % 16u == 0u) {
+    for (var i: u32 = 0u; i < ppm_dn.dState; i += 16u) {
+      let v0 = ppm_v[off + i + 0u]; let v1 = ppm_v[off + i + 1u]; let v2 = ppm_v[off + i + 2u]; let v3 = ppm_v[off + i + 3u]; let v4 = ppm_v[off + i + 4u]; let v5 = ppm_v[off + i + 5u]; let v6 = ppm_v[off + i + 6u]; let v7 = ppm_v[off + i + 7u]; let v8 = ppm_v[off + i + 8u]; let v9 = ppm_v[off + i + 9u]; let v10 = ppm_v[off + i + 10u]; let v11 = ppm_v[off + i + 11u]; let v12 = ppm_v[off + i + 12u]; let v13 = ppm_v[off + i + 13u]; let v14 = ppm_v[off + i + 14u]; let v15 = ppm_v[off + i + 15u];
+      ppm_v[off + i + 0u] = v0 * inv; ppm_v[off + i + 1u] = v1 * inv; ppm_v[off + i + 2u] = v2 * inv; ppm_v[off + i + 3u] = v3 * inv; ppm_v[off + i + 4u] = v4 * inv; ppm_v[off + i + 5u] = v5 * inv; ppm_v[off + i + 6u] = v6 * inv; ppm_v[off + i + 7u] = v7 * inv; ppm_v[off + i + 8u] = v8 * inv; ppm_v[off + i + 9u] = v9 * inv; ppm_v[off + i + 10u] = v10 * inv; ppm_v[off + i + 11u] = v11 * inv; ppm_v[off + i + 12u] = v12 * inv; ppm_v[off + i + 13u] = v13 * inv; ppm_v[off + i + 14u] = v14 * inv; ppm_v[off + i + 15u] = v15 * inv;
+    }
+  } else {
+    for (var i: u32 = 0u; i < ppm_dn.dState; i++) { ppm_v[off + i] *= inv; }
+  }
 }
 @compute @workgroup_size(128)
 fn dn_pre_mc(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
