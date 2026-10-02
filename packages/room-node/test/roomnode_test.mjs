@@ -540,3 +540,93 @@ test("re-deal after a device left: short of the pledges, the room stops and says
   });
   assert.equal(n.status().short, null);
 });
+
+// A joiner that drops while the host still loads its own layers (the 35B MoE on a PC: a ~5 min load,
+// the Mac killed meanwhile) must not wedge the room: the host used to go "online · 2 devices" without
+// it once its load ended, with no engine behind ask() ("the model is still loading") and an empty plan,
+// so the Mac coming back was told it holds no layers until the gateway restarted.
+// slowHost(): the host's own load waits until release(); the workers' loads are theirs to report.
+function slowHost(n) {
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  n.loadShardFn = async () => { await gate; return { engine: { maxSeq: 16384, dropAllSlots() {}, reset() {} }, device: { destroy() {} }, tok: {}, cfg: { num_hidden_layers: 28 } }; };
+  return () => release();
+}
+const until = async (f, ms = 2000) => { const t0 = Date.now(); while (!f()) { if (Date.now() - t0 > ms) throw new Error("timed out: " + f); await new Promise((r) => setTimeout(r, 5)); } };
+
+test("a device that leaves while the host loads: the room doesn't go online without it; back within the grace it is dealt its layers again", async () => {
+  const n = redealNode({ hostGB: 2, peers: [["s", "stoat", 4]] });
+  n.rejoinGraceMs = 60000;
+  const release = slowHost(n);
+  const p = n.start("qwen3-1.7b"); p.catch(() => {});
+  await until(() => msgs(n, "s", "ai-load").length);
+  const range = msgs(n, "s", "ai-load")[0].range;
+  n.aiOnData("s", { t: "ai-ready", slots: [] });   // stoat loads fast...
+  n.peerGone("s", n.conns.get("s"));               // ...and is killed while the host still loads
+  assert.ok(n.ai.starting, "the deal waits for it");
+  // a second start (the plugin's service, a question) joins this one instead of dealing again
+  assert.equal(n.start("qwen3-1.7b"), p);
+  release();
+  await until(() => !n.ai.loadingShard);
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(n.ai.online, false, "not online with a device of the chain gone");
+  assert.ok(n.ai.engine && n.ai.starting, "the host keeps its layers and waits");
+  assert.equal(msgs(n, "s", "ai-ready-all").length, 0);
+  assert.deepEqual(n.missingNames(), ["stoat"]);
+  // stoat started again (a new process: a new peer id, no back): back into its slot with the same layers
+  n.addPeer("s2", "stoat", { webgpu: true, contribGB: 4 });
+  n.onData("s2", { t: "hello", name: "stoat", v: PROTOCOL, meta: { webgpu: true, contribGB: 4 } });
+  assert.deepEqual(msgs(n, "s2", "ai-load")[0]?.range, range, "dealt its layers again");
+  assert.equal(msgs(n, "s2", "ai-ready-all").length, 0, "not told the room is up without it");
+  n.aiOnData("s2", { t: "ai-ready", slots: [] });
+  await p;
+  assert.ok(n.ai.online && !n.ai.degraded && n.whole());
+  assert.equal(msgs(n, "s2", "ai-ready-all").length, 1);
+});
+
+test("a device that leaves while the host loads and stays away: after the grace the room re-deals (short: it stops and says so, not online)", async () => {
+  // mac (2 GB) can't hold the 1.7B alone: the re-deal without stoat is short
+  const n = redealNode({ hostGB: 2, peers: [["s", "stoat", 4]] });
+  n.rejoinGraceMs = 50;
+  const release = slowHost(n);
+  let shortSaid = null; n.on("short", (x) => { shortSaid = x; });
+  const p = n.start("qwen3-1.7b"); p.catch(() => {});
+  await until(() => msgs(n, "s", "ai-load").length);
+  n.aiOnData("s", { t: "ai-ready", slots: [] });
+  n.peerGone("s", n.conns.get("s"));
+  await new Promise((r) => setTimeout(r, 120));   // the grace runs out while the host still loads
+  assert.ok(n.ai.loadingShard && !n.ai.online);
+  release();
+  await assert.rejects(p, (e) => e.short === true && /GB short/.test(e.message));
+  assert.match(shortSaid, /^This room is [\d.]+ GB short/);
+  assert.deepEqual([n.ai.online, n.ai.starting, !!n.ai.engine, n.ai.chain.length], [false, false, false, 0]);
+  assert.equal(n.status().short, shortSaid);
+  assert.ok(n.logs.some((l) => /stoat .*did not come back/.test(l)), n.logs.join("\n"));
+  // stoat comes back: a new start deals it its layers again (the plugin's ensureOnline, pooled host's start again)
+  n.addPeer("s2", "stoat", { webgpu: true, contribGB: 4 });
+  n.onData("s2", { t: "hello", name: "stoat", v: PROTOCOL, meta: { webgpu: true, contribGB: 4 } });
+  const q = n.start("qwen3-1.7b"); q.catch(() => {});
+  await until(() => msgs(n, "s2", "ai-load").length);
+  n.aiOnData("s2", { t: "ai-ready", slots: [] });
+  await q;
+  assert.ok(n.ai.online && n.whole());
+});
+
+test("a device that leaves while the host loads and stays away: a room that fits without it re-deals and comes online without it", async () => {
+  const n = redealNode({ hostGB: 4, peers: [["s", "stoat", 4], ["k", "kiwi", 4]] });
+  n.rejoinGraceMs = 50;
+  const release = slowHost(n);
+  const p = n.start("qwen3-1.7b"); p.catch(() => {});
+  await until(() => msgs(n, "s", "ai-load").length && msgs(n, "k", "ai-load").length);
+  n.aiOnData("s", { t: "ai-ready", slots: [] }); n.aiOnData("k", { t: "ai-ready", slots: [] });
+  n.peerGone("s", n.conns.get("s"));
+  await new Promise((r) => setTimeout(r, 120));
+  release();
+  await until(() => msgs(n, "k", "ai-load").length === 2);   // the re-deal: kiwi gets its new share
+  assert.deepEqual(n.ai.chain, ["k"]);
+  assert.ok(!n.ai.online);
+  n.aiOnData("k", { t: "ai-ready", slots: [] });
+  await p;
+  assert.ok(n.ai.online && n.whole());
+  assert.ok(n.split.names.every((nm) => nm !== "stoat"));
+});

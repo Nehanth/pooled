@@ -125,6 +125,11 @@ export class RoomNode extends EventEmitter {
     this.name = name || "node-" + randCode(3).toLowerCase();
     this.pledgeGB = pledgeGB; this.signal = signal; this.modelDir = modelDir; this.flags = flags;
     this.stripes = stripes; this.selfTest = selfTest; this.gbpsPin = gbps; this.autoRedeal = autoRedeal;
+    // how long the host waits for a chain device that left to come back into its slot before it
+    // re-deals without it (room/resume.js; tests shorten it)
+    this.rejoinGraceMs = REJOIN_GRACE_MS;
+    // shard.js loadShard, for this device's layers (tests stub it, and e2e.mjs slows it down)
+    this.loadShardFn = loadShard;
     this.log = log || ((s) => this.emit("log", s));
     this.peer = null; this.isHost = false; this.code = null; this.meta = null;
     this.conns = new Map();    // peer id -> { conn, name, meta, link, stripes, seen, missed, rtt }
@@ -221,7 +226,10 @@ export class RoomNode extends EventEmitter {
   // close handler sees it is not current and does nothing
   wire(conn, name, initiator = false) {
     const old = this.conns.get(conn.peer);
-    const e = { conn, name: name || old?.name || conn.peer, meta: old?.meta || {}, link: makeLink(), stripes: [], seen: performance.now(), missed: 0, rtt: old?.rtt ?? null };
+    // a device in the creator's roster: its name and meta from there until its hello says (the hello is
+    // the first message on the link, and WebRTC can lose that one: room.js wire)
+    const known = old ? null : (this.members || []).find((m) => m.id === conn.peer);
+    const e = { conn, name: name || old?.name || known?.name || conn.peer, meta: old?.meta || known?.meta || {}, link: makeLink(), stripes: [], seen: performance.now(), missed: 0, rtt: old?.rtt ?? null };
     this.conns.set(conn.peer, e);
     if (old && old.conn !== conn) {
       for (const s of old.stripes) try { s.close(); } catch {}
@@ -542,7 +550,7 @@ export class RoomNode extends EventEmitter {
         const src = openModel(d.model, { modelDir: this.modelDir });
         const unwatch = this.watchLoad(src);
         try {
-          const r = await loadShard({ modelKey: d.model, range: d.range, hasEmbed: false, hasHead: false, ctx: d.ctx || maxSeqFor(d.model),
+          const r = await this.loadShardFn({ modelKey: d.model, range: d.range, hasEmbed: false, hasHead: false, ctx: d.ctx || maxSeqFor(d.model),
             kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log,
             onGpuError: (m) => { this.log("GPU error: " + m); this.sendTo(ai.hostId, { t: "ai-error", message: "GPU error: " + m.slice(0, 300) }); },
             onProgress: (done, total) => {
@@ -663,7 +671,9 @@ export class RoomNode extends EventEmitter {
   // ---------------- host: dealing (room.js aiStart / aiMaybeReady / aiRejoin) ----------------
   start(modelKey = this.ai.model, opts = {}) {
     if (typeof modelKey === "object") { opts = modelKey; modelKey = this.ai.model; }
-    if (this.ai.engine && this.startP) return this.startP;
+    // one deal at a time: a start while one is in progress (the host still loading its layers, or
+    // waiting for the devices') joins it instead of dealing a second time over it
+    if (this.startP && (this.ai.engine || this.ai.starting)) return this.startP;
     const p = this.startP = this._start(modelKey, opts);
     p.catch(() => { if (this.startP === p) this.startP = null; });
     return p;
@@ -724,7 +734,7 @@ export class RoomNode extends EventEmitter {
       }
     }
     ai.starting = true; ai.degraded = false; ai.readyPeers = new Set(); ai.model = modelKey; ai.online = false;
-    ai.short = null;
+    ai.short = null; ai.startOk = ai.startErr = null;   // (this deal's, once its devices are dealt: dealAgain)
     // a fresh deal: every device starts without checkpoints (a worker that keeps its layers drops its
     // slots); what each worker applies comes with its ai-ready, which may arrive before this device's load ends
     ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map();
@@ -750,7 +760,7 @@ export class RoomNode extends EventEmitter {
         layerBytes = Object.values(ggmlLayerNames(0)).reduce((s, nm) => s + (G.tensors[nm]?.byteLength || 0), 0);
         embedBytes = (G.tensors[GGML_EMBED]?.byteLength || 0) + (G.tensors[GGML_OUTPUT]?.byteLength || 0);
       }
-    } catch (err) { ai.starting = false; await src.close(); throw err; }
+    } catch (err) { ai.starting = false; ai.redealWanted = null; await src.close(); throw err; }
     const nameOf = (id) => this.conns.get(id)?.name || id;
     ai.dealtPeers = new Set(this.gpuPeers());   // every device this deal saw, left out or not (for a --devices host's re-deal)
     const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: this.conns.get(id)?.meta }));
@@ -783,6 +793,7 @@ export class RoomNode extends EventEmitter {
     this.split = { L, ranges, names: [this.name, ...ai.chain.map(nameOf)] };
     const readyAll = new Promise((res, rej) => { ai.startOk = res; ai.startErr = rej; });
     readyAll.catch(() => {});
+    if (ai.redealWanted) { ai.startErr(ai.redealWanted); ai.redealWanted = null; }
     ai.chain.forEach((id, i) => {
       const msg = { t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx, kv, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: this.peer.id };
       ai.plan.set(nameOf(id), { msg });
@@ -798,20 +809,34 @@ export class RoomNode extends EventEmitter {
         ai.loadingShard = true;
         let lastPct = -1;
         unwatch = this.watchLoad(src);
-        const r = await loadShard({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log,
+        const r = await this.loadShardFn({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log,
           onGpuError: (m) => this.log("GPU error: " + m),
           onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
         Object.assign(ai, { engine: r.engine, device: r.device, tok: r.tok, cfg: r.cfg, range: ranges[0], role: "host" });
         ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv };
       }
-    } catch (err) { ai.starting = false; this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }
+    } catch (err) { ai.starting = false; ai.redealWanted = null; clearTimeout(ai.idleRedeal); this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }
     finally { unwatch(); ai.loadingShard = false; await src.close(); }
     this.log(`host layers ${ranges[0][0]}-${ranges[0][1] - 1} + embedding/head ready in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
     ai.fed = []; ai.pendingCtl = {}; ai.pos = 0;
     try { ai.engine?.dropAllSlots?.(); } catch {}   // this device's own slots (it may have kept its layers)
     this.maybeReady();
     try { await readyAll; }
-    catch (err) { ai.starting = false; this.freeLayers(null); ai.chain = []; ai.plan = new Map(); this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }
+    catch (err) {
+      ai.starting = false;
+      clearTimeout(ai.idleRedeal);
+      // a device of this deal left while it loaded and did not come back in the grace (chainLeft), or
+      // the room asked for a new deal meanwhile (a load death): deal again over the devices here now,
+      // by the same rules as any re-deal (#291: a room short of the model stops and says so). This
+      // device keeps its layers when its range is unchanged
+      if (err.redeal && !this.closing) return this.redeal(err.message);
+      // nothing stays half up: not online, no layers, no plan to re-seat into
+      ai.online = false; ai.degraded = false; ai.fed = null;
+      this.freeLayers(null); ai.chain = []; ai.chainNames = []; ai.plan = new Map(); ai.readyPeers = new Set(); ai.gone = new Set();
+      ai.layersByName = null; ai.layersN = null; this.split = null;
+      this.broadcast({ t: "ai-start-failed", why: err.message });
+      throw err;
+    }
     ai.starting = false;
   }
   // the pledges in the room cannot hold the model (_start): nothing is dealt and nothing stays loaded;
@@ -819,7 +844,7 @@ export class RoomNode extends EventEmitter {
   stopShort(note) {
     const ai = this.ai;
     clearTimeout(ai.idleRedeal);
-    ai.starting = false; ai.online = false; ai.degraded = false; ai.fed = null;
+    ai.starting = false; ai.online = false; ai.degraded = false; ai.fed = null; ai.redealWanted = null;
     if (!ai.loadingShard) this.freeLayers(null);
     ai.chain = []; ai.chainNames = []; ai.plan = new Map(); ai.gone = new Set(); ai.readyPeers = new Set();
     ai.layersByName = null; ai.layersN = null; this.split = null;
@@ -833,6 +858,9 @@ export class RoomNode extends EventEmitter {
   async redeal(why = "re-dealing the layers") {
     const ai = this.ai;
     if (!this.hosting()) throw new Error("only the host deals layers");
+    // a deal still in progress (this device loading its layers, or waiting for the others'): it ends
+    // and deals again once this device's load is in (_start's readyAll), not a second deal beside it
+    if (ai.starting && this.startP) { this.dealAgain(why); return this.startP; }
     this.log(why);
     clearTimeout(ai.idleRedeal);
     this.broadcast({ t: "ai-redeal", by: this.name, model: ai.model });
@@ -866,6 +894,7 @@ export class RoomNode extends EventEmitter {
   maybeReady() {
     const ai = this.ai;
     if (!this.hosting() || !ai.engine || ai.readyPeers.size < ai.chain.length || this.relinking()) return;
+    if (!ai.chain.every((id) => this.conns.has(id) && ai.readyPeers.has(id))) return;
     ai.degraded = false; ai.online = true; ai.role = "host";
     clearTimeout(ai.idleRedeal);
     this.broadcast({ t: "ai-ready-all", model: ai.model, label: MODELS[ai.model]?.label, ctx: this.ctxMax(), ...(ai.ctxWant ? { ctxWant: ai.ctxWant } : {}) });
@@ -880,7 +909,7 @@ export class RoomNode extends EventEmitter {
     if (this.closing || !ai.chain.includes(id) || ai.gone.has(id)) return;
     const layers = ai.layersByName?.[name];
     const why = `${name} ${verb}${layers ? ` (layers ${layers})` : ""}`;
-    if (ai.starting) { ai.startErr?.(new Error(why)); return; }
+    if (ai.starting) return this.leftWhileStarting(id, why);
     ai.degraded = true; ai.online = false; ai.fed = null; ai.readyPeers.delete(id); ai.gone.add(id);
     this.ckptClear(true);   // frames in flight (and the saves on them) are gone: no checkpoint is known good
     this.failWaiters(new Error(why));
@@ -889,9 +918,35 @@ export class RoomNode extends EventEmitter {
     clearTimeout(ai.idleRedeal);
     if (this.autoRedeal && !ai.starting) ai.idleRedeal = setTimeout(() => {
       if (!ai.degraded || ai.busy || ai.loadingShard || !this.missingNames().length) return;
-      this.redeal(`${this.missingNames().join(", ")} did not come back in ${Math.round(REJOIN_GRACE_MS / 1000)} s: re-dealing the layers`).catch((err) => { if (!err.short) this.log("re-deal failed: " + err.message); });
-    }, REJOIN_GRACE_MS);
+      this.redeal(`${this.missingNames().join(", ")} did not come back in ${Math.round(this.rejoinGraceMs / 1000)} s: re-dealing the layers`).catch((err) => { if (!err.short) this.log("re-deal failed: " + err.message); });
+    }, this.rejoinGraceMs);
     ai.idleRedeal?.unref?.();
+  }
+  // A chain device left while the deal loads (this device's layers, or the others'): the room must not
+  // go online without it (it used to: the deal had counted its ai-ready, so the host went "online" once
+  // its own load ended, then the failed wait freed the engine and the plan, and every ask said "still
+  // loading" while the device coming back was told it holds no layers). It is out of the ready count
+  // now and may come back into its slot (rejoin sends its ai-load again); past the grace the deal ends
+  // and the room deals again over the devices still here (_start), short or not by #291's rules.
+  leftWhileStarting(id, why) {
+    const ai = this.ai;
+    ai.readyPeers.delete(id); ai.gone.add(id); ai.fed = null;
+    this.failWaiters(new Error(why));
+    this.log(`${why} while the layers loaded: waiting ${Math.round(this.rejoinGraceMs / 1000)} s for it to come back`);
+    this.emit("degraded", why);
+    clearTimeout(ai.idleRedeal);
+    ai.idleRedeal = setTimeout(() => {
+      const missing = this.missingNames();
+      if (!ai.starting || !missing.length) return;
+      this.dealAgain(`${missing.join(", ")} did not come back in ${Math.round(this.rejoinGraceMs / 1000)} s: re-dealing the layers`);
+    }, this.rejoinGraceMs);
+    ai.idleRedeal?.unref?.();
+  }
+  // end the deal in progress so it deals again (_start's readyAll); asked before that wait exists (the
+  // model's header still being read), it ends as soon as it does
+  dealAgain(why) {
+    const err = Object.assign(new Error(why), { redeal: true });
+    if (this.ai.startErr) this.ai.startErr(err); else this.ai.redealWanted = err;
   }
   missingNames() { const ai = this.ai; return ai.chain.map((id, i) => (this.conns.has(id) ? null : ai.chainNames[i] || id)).filter(Boolean); }
   // a device that left comes back to its slot (a reloaded tab with a new peer id, or a phone back

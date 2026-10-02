@@ -5,6 +5,12 @@
 //   node packages/room-node/test/e2e.mjs nodepair   two room nodes in this process (host + worker), no browser
 //   node packages/room-node/test/e2e.mjs api        `pooled serve`'s bridge (cli/lib/room.js) asks a node host
 //   node packages/room-node/test/e2e.mjs auto       createRoom + ask, no start(): the ask deals the layers (solo)
+//   node packages/room-node/test/e2e.mjs wedge      a joiner (its own process) is stopped while the host still loads its
+//        layers (slowed down by HOST_DELAY_MS, 40 s): the room must not go online without it (it used to, and
+//        every ask said "the model is still loading"). BACK=after (default): it starts again once the host's
+//        load is in, is dealt its layers again and the room answers. BACK=none: it stays away past GRACE_MS
+//        (default 15 s here), the room re-deals, finds HOST_GB (2.5) short and stops saying so; then it
+//        comes back, a start deals it in again and the room answers. KILL=9: SIGKILL instead of SIGTERM.
 //   node packages/room-node/test/e2e.mjs cache      OpenClaw's recorded request through the host's checkpoints:
 //        a cold first turn, a side request, the follow-up, a new session, the next day (see cacheRun);
 //        SETUP=solo|pair|proc|tab (the node alone, + a second node, the second node in its own process, + a browser tab), REQ (requests.jsonl
@@ -20,6 +26,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, execSync } from "node:child_process";
 import { createRoom, joinRoom } from "../index.js";
+import { loadShard } from "../shard.js";
 
 const MODE = process.argv[2] || "nodehost";
 const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
@@ -190,8 +197,66 @@ async function cacheRun(room) {
   return { steps, status: room.status() };
 }
 
+// the wedge scenario's second node, in its own process; -> { proc, said: [lines], exited }
+function spawnJoiner(code, name, gb) {
+  const j = { said: [], exited: null };
+  j.proc = spawn(process.execPath, [path.join(ROOT, "packages/room-node/join.mjs"), code, "--gb", String(gb), "--name", name,
+    ...(SIGNAL ? ["--signal", SIGNAL] : []), "--models", MODELS], { stdio: ["ignore", "pipe", "pipe"] });
+  for (const st of [j.proc.stdout, j.proc.stderr]) st.on("data", (b) => String(b).split("\n").filter((l) => l && !/^(TU|MESA|Warning)/.test(l)).forEach((l) => { j.said.push(l); log(`[${name}] ` + l); }));
+  j.proc.on("exit", (c, sig) => { j.exited = sig || c; });
+  return j;
+}
+const waitFor = async (f, ms, what) => { const t0 = Date.now(); while (!f()) { if (Date.now() - t0 > ms) throw new Error("timed out: " + what); await new Promise((r) => setTimeout(r, 200)); } };
+async function wedgeRun() {
+  const DELAY = +(process.env.HOST_DELAY_MS || 40000), BACK = process.env.BACK || "after";
+  const GRACE = +(process.env.GRACE_MS || (BACK === "none" ? 15000 : 60000));
+  const HOST_GB = +(process.env.HOST_GB || (BACK === "none" ? 2.5 : NODE_GB));
+  const checks = out.checks = [];
+  const check = (name, ok, extra = "") => { checks.push({ name, ok: !!ok }); log(ok ? "PASS" : "FAIL", name, ok ? "" : String(extra).slice(0, 300)); };
+  host = await createRoom({ model: MODEL, pledgeGB: HOST_GB, name: "node-host", signal: SIGNAL, modelDir: MODELS, log: nodeLog("host") });
+  host.rejoinGraceMs = GRACE;
+  // a slow host (the 35B MoE on a PC: ~5 min): its own load waits DELAY first
+  let hostLoaded = false;
+  host.loadShardFn = async (o) => { await new Promise((r) => setTimeout(r, DELAY)); const r = await loadShard(o); hostLoaded = true; return r; };
+  const ask1 = async () => { const r = { text: "", err: null }; for await (const ev of host.ask([{ role: "user", content: PROMPT }], { maxTokens: 24, temperature: 0 })) { if (ev.type === "token") r.text += ev.text; if (ev.type === "done" && ev.reason === "error") r.err = ev.err; } return r; };
+  let j = spawnJoiner(host.code, "node-b", NODE_GB);
+  await waitFor(() => host.gpuPeers().length >= 1, 60000, "node-b joins");
+  const p = host.start(MODEL, { minDevices: 2, waitMs: 60000 }); p.catch(() => {});
+  await waitFor(() => j.said.some((l) => /holding layers/.test(l)), 120000, "node-b loads its layers");
+  check("the joiner holds its layers while the host still loads", !hostLoaded);
+  log(`stopping node-b (${process.env.KILL === "9" ? "SIGKILL" : "SIGTERM"}) while the host loads`);
+  j.proc.kill(process.env.KILL === "9" ? "SIGKILL" : "SIGTERM");
+  await waitFor(() => j.exited != null, 20000, "node-b exits");
+  await waitFor(() => hostLoaded, DELAY + 120000, "the host's load");
+  await new Promise((r) => setTimeout(r, 3000));
+  const st1 = host.status();
+  out.afterLoad = { online: st1.online, short: st1.short, engine: !!host.ai.engine, chain: host.ai.chain.length };
+  check("after its load the host is not online without the device that left", !st1.online, JSON.stringify(out.afterLoad));
+  if (BACK === "none") {
+    await waitFor(() => host.status().short || host.status().online, GRACE + 60000, "the re-deal");
+    const st2 = host.status();
+    check("past the grace the re-deal finds the room short and stops (not online, nothing loaded)", st2.short && !st2.online && !host.ai.engine, JSON.stringify(st2));
+    const a = await ask1();
+    check("an ask meanwhile says the room is short (not 'still loading')", a.err && /GB short/.test(a.err) && !/still loading/.test(a.err), JSON.stringify(a));
+  }
+  j = spawnJoiner(host.code, "node-b", NODE_GB);
+  if (BACK === "none") {   // pooled host / the plugin start again once a device joins a short room
+    await waitFor(() => host.gpuPeers().length >= 1, 60000, "node-b joins again");
+    host.start(MODEL).catch((e) => log("start again failed: " + e.message));
+  }
+  await waitFor(() => host.status().online, 180000, "the room online again").catch((e) => log(e.message));
+  check("node-b back: it is dealt its layers again", j.said.some((l) => /holding layers/.test(l)), j.said.slice(-6).join(" | "));
+  const a = await ask1();
+  out.node = a;
+  check("the room answers", a.text.length > 0 && !a.err, JSON.stringify(a));
+  check("with both devices", host.status().online && host.ai.chain.length === 1, JSON.stringify(host.status().split));
+  joiner = j.proc;
+  return checks.every((c) => c.ok);
+}
+
 try {
-  if (MODE === "cache") {
+  if (MODE === "wedge") { const ok = await wedgeRun(); await finish(ok ? 0 : 1); await new Promise(() => {}); }   // (finish exits)
+  else if (MODE === "cache") {
     const SETUP = process.env.SETUP || "solo";
     host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, name: "node-host", signal: SIGNAL, modelDir: MODELS, log: nodeLog("host"), ckpt: CKPT, ctx: CTX });
     if (SETUP === "pair") worker = await joinRoom(host.code, { pledgeGB: NODE_GB, name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
