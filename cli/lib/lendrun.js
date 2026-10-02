@@ -404,7 +404,10 @@ async function runHost(opts, out, prepared = null) {
     // a MoE model this GPU can't hold whole: with --ram (a discrete GPU's default), its experts in RAM, lending the rule's GB
     const gb = hereGB(lib, opts.model, { ctxAsk: opts.ctx || 0, maxGB: max, ramGB: ram?.gb || 0, offGB: rule.gb });
     if (!gb) throw new UsageError(`--here: ${rn.MODELS[opts.model].label.split("·")[0].trim()} ${hereWhy({ needGB: modelNeedGB(lib, opts.model, opts.ctx || 0), minNeed: modelFallback(lib, opts.model, opts.ctx || 0) }, { max })}; --pool runs it with other devices`);
-    if (!(opts.gbGiven && rule.gb >= gb)) rule = { ...rule, gb, why: "--here: what the model needs" };
+    // (a MoE model this GPU holds only with its experts in RAM: it lends the memory rule's GB, the rest is the expert cache)
+    const { roomFitNow } = await import("./hostui.js");
+    const off = !!(ram?.gb > 0 && roomFitNow(lib, { model: opts.model, devices: [{ name: "this computer", meta: { contribGB: gb, webgpu: true, offload: true, ramGB: ram.gb } }], ctxAsk: opts.ctx || 0 }).offload);
+    if (!(opts.gbGiven && rule.gb >= gb)) rule = { ...rule, gb, why: off ? "--here: all it lends, with the experts it can't hold in RAM" : "--here: what the model needs" };
     if (!opts.splitGiven) opts.split = "speed";
     opts.start = true;
   } else if (opts.mode === "pool" && !opts.splitGiven) opts.split = "memory";
