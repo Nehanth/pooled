@@ -14,7 +14,7 @@ const ad = await navigator.gpu.requestAdapter();
 const device = await ad.requestDevice({ requiredFeatures: ["timestamp-query"], requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize } });
 const G = model.G; const tok = makeTokenizer(tokenizerFromGGUF(G.meta));
 const arch = G.meta["general.architecture"], L = G.meta[arch + ".block_count"] - (G.meta[arch + ".nextn_predict_layers"] || 0);
-const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true });
+const weights = await qwen35Weights(G, (i) => readAt(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: Deno.env.get("SPEC") === "1" });
 // the room's settings (engine/preset.js); MOE_FUSE=0 / MOE_DN_ROWS=N are ?moefuse / ?moednrows, ROOM_FLAGS takes any other
 const flags = roomFlags({ ...(Deno.env.get("MOE_FUSE") ? { moefuse: Deno.env.get("MOE_FUSE") } : {}), ...(Deno.env.get("MOE_DN_ROWS") ? { moednrows: Deno.env.get("MOE_DN_ROWS") } : {}) });
 const eng = applyRoomFlags(await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
@@ -42,7 +42,12 @@ device.createCommandEncoder = (d) => { const enc = origCreate(d); const ob = enc
   return enc; };
 eng._pname = new Map(Object.entries(eng.pipes).map(([k, v]) => [v, k]));
 const agg = {}; const RUNS = 5;
-for (let r = 0; r < RUNS; r++) { names = []; nq = 0; await eng.forwardToken(1); await rd.mapAsync(GPUMapMode.READ); const t = new BigUint64Array(rd.getMappedRange().slice(0, nq * 8)); rd.unmap();
+// SPEC=1: one speculative step (K=3, logits path) per run instead of one token: every submit of the step is timed
+const SPEC = Deno.env.get("SPEC") === "1";
+let specTok = 1;
+if (SPEC) { eng.reset(); eng.mtpFill = true; for (const id of ids) specTok = argmaxL(await eng.forwardToken(id)); }
+function argmaxL(a) { let b = 0; for (let i = 1; i < a.length; i++) if (a[i] > a[b]) b = i; return b; }
+for (let r = 0; r < RUNS; r++) { names = []; nq = 0; if (SPEC) { const t = await eng.specStep(specTok, argmaxL, 3); specTok = t.at(-1); } else await eng.forwardToken(1); await rd.mapAsync(GPUMapMode.READ); const t = new BigUint64Array(rd.getMappedRange().slice(0, nq * 8)); rd.unmap();
   names.forEach((n, i) => { const ns = Number(t[2 * i + 1] - t[2 * i]); (agg[n] ||= [0, 0])[0] += ns / 1e6 / RUNS; agg[n][1] += 1 / RUNS; }); }
 const gpu = Object.values(agg).reduce((a, b) => a + b[0], 0);
 console.log(`${arch}: wall ${wall.toFixed(2)} ms/token (${(1000 / wall).toFixed(1)} tok/s) · sum of kernel GPU time ${gpu.toFixed(2)} ms · dispatches ${Math.round(Object.values(agg).reduce((a, b) => a + b[1], 0))}`);

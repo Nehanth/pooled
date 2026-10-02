@@ -173,8 +173,7 @@ try {
       src.push(...tok.encode(`\n// file: ${f}\n` + await (await fetch(f)).text())); if (src.length > Math.max(...CTXF)) break; }
     while (src.length < Math.max(...CTXF)) src = src.concat(src);
     const { decodeGap } = q.has("gap") ? await import("../prof/decode_gap.js") : {};
-    for (const fill of CTXF) {
-      const pre = [...head, ...src.slice(0, fill - head.length - tail.length), ...tail];
+    const measure = async (pre) => {
       eng.reset(); if (eng.mtp) eng.mtpFill = false; await eng.prefillTokens(pre.slice(0, -1)); let lg = await fwd(pre.at(-1));
       let next = pick(lg); const gen = [next]; t0 = performance.now();
       for (let j = 1; j < N; j++) { next = pick(await fwd(next)); gen.push(next); }
@@ -183,7 +182,29 @@ try {
       if (eng.mtp) { eng.reset(); eng.mtpFill = true; eng.mtp.stats = { drafts: 0, accepted: 0 }; await eng.prefillTokens(pre.slice(0, -1)); lg = await fwd(pre.at(-1));
         next = pick(lg); const sp = [next]; t0 = performance.now(); while (sp.length < N) { for (const x of await eng.specStep(next, pick, K)) sp.push(x); next = sp.at(-1); }
         spec = (sp.length - 1) / ((performance.now() - t0) / 1000); same = gen.every((x, j) => sp[j] === x); acc = `${eng.mtp.stats.accepted}/${eng.mtp.stats.drafts}`; }
-      const r = { ctx: fill, plain: +plain.toFixed(2), spec: spec && +spec.toFixed(2), acceptance: acc, specIdentical: same, gen: gen.slice(0, 8) };
+      return { plain: +plain.toFixed(2), spec: spec && +spec.toFixed(2), acceptance: acc, specIdentical: same, gen };
+    };
+    // &ab=[{...},{...}]: engine fields per arm, set at runtime, measured in alternating order for &rounds=R rounds at every
+    // fill, so both arms share any GPU contention; medians per arm, tokens compared across arms
+    const ARMS = q.has("ab") ? JSON.parse(q.get("ab")) : null, ROUNDS = +(q.get("rounds") || 3);
+    for (const fill of CTXF) {
+      const pre = [...head, ...src.slice(0, fill - head.length - tail.length), ...tail];
+      if (ARMS) {
+        const keep = Object.fromEntries(Object.keys(Object.assign({}, ...ARMS)).map((k) => [k, eng[k]]));
+        const res = ARMS.map(() => ({ plain: [], spec: [] })); let ref = null, sameAll = true;
+        for (let r = 0; r < ROUNDS; r++) for (const a of (r % 2 ? [...ARMS.keys()].reverse() : [...ARMS.keys()])) {
+          Object.assign(eng, ARMS[a]); eng._fwdPre = null;
+          const m = await measure(pre); res[a].plain.push(m.plain); res[a].spec.push(m.spec);
+          if (!ref) ref = m.gen; else sameAll &&= m.gen.every((x, j) => x === ref[j]) && m.specIdentical !== false;
+        }
+        Object.assign(eng, keep);
+        const med = (v) => { const s2 = [...v].sort((x, y) => x - y); return s2[s2.length >> 1]; };
+        const r = { ctx: fill, ab: ARMS.map((arm, a) => ({ arm, plain: med(res[a].plain), spec: med(res[a].spec), all: res[a] })), tokensIdentical: sameAll };
+        out.push(r); log(JSON.stringify(r));
+        continue;
+      }
+      const m = await measure(pre);
+      const r = { ctx: fill, plain: m.plain, spec: m.spec, acceptance: m.acceptance, specIdentical: m.specIdentical, gen: m.gen.slice(0, 8) };
       out.push(r); log(JSON.stringify(r));
       if (decodeGap) out.push({ ctx: fill, gap: await decodeGap({ eng, device, prefix: pre, N, K, log }) });
     }

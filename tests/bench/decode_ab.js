@@ -8,12 +8,14 @@
 //     --allow-write=$HOME/.cache/swarmllm-weights bench/decode_ab.js
 //   MODEL=moe|27b  ROUNDS=6  BLOCK=24  CTX=0 (tokens of context before decoding; 0 = a short chat prompt)
 //   OPTS: extra Qwen35Engine.create options (the B arm's kernels must be built at create)
+//   SPEC=1: speculative steps (K=3, GPU sampling) instead: wall ms per token only (no back-to-back), tokens compared
 import { Qwen35Engine } from "../../engine/qwen35.js";
 import { openGGUF, gpuDevice, trunkLayers, MOE_PATH, Q38_PATH } from "../load_model.js";
 import { roomQwen35Options } from "../../engine/preset.js";
 import { gpuGreedy } from "../gpusample_check.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
+const SPEC = env("SPEC", "0") === "1";
 const MODEL = env("MODEL", "moe"), ROUNDS = +env("ROUNDS", 6), BLOCK = +env("BLOCK", 24), CTX = +env("CTX", 0);
 const A = JSON.parse(env("A", "{}")), B = JSON.parse(env("B", "{}")), OPTS = JSON.parse(env("OPTS", "{}"));
 const model = openGGUF(MODEL === "moe" ? MOE_PATH : Q38_PATH);
@@ -33,7 +35,21 @@ if (CTX > ids.length) {
 console.log(`${MODEL}: A ${JSON.stringify(A)} vs B ${JSON.stringify(B)}, opts ${JSON.stringify(OPTS)}, context ${ids.length} tokens`);
 const fnv = (u32) => { let h = 0x811c9dc5; for (let i = 0; i < u32.length; i++) { h ^= u32[i]; h = Math.imul(h, 0x01000193) >>> 0; } return h.toString(16); };
 
+async function specBlock(arm) {
+  setArm(arm);
+  eng.reset(); eng.mtpFill = true; eng.mtp.stats = { drafts: 0, accepted: 0 };
+  await eng.prefillTokens(ids.slice(0, -1));
+  const pick = Object.assign((c) => c.ids[0], { gpu: { kind: "greedy" } });
+  let t = gpuGreedy(await eng.forwardTokenIds(ids.at(-1)));
+  const out = [t];
+  for (let i = 0; i < 2; i++) { const r = await eng.specStep(t, pick, 3); out.push(...r); t = r.at(-1); }
+  const n0 = out.length, t0 = performance.now();
+  while (out.length - n0 < BLOCK) { const r = await eng.specStep(t, pick, 3); out.push(...r); t = r.at(-1); }
+  const wall = (performance.now() - t0) / (out.length - n0);
+  return { wall, gpu: 0, out: out.slice(0, n0 + BLOCK), hash: `${eng.mtp.stats.accepted}/${eng.mtp.stats.drafts}` };
+}
 async function block(arm) {
+  if (SPEC) return specBlock(arm);
   setArm(arm);
   eng.reset();
   await eng.prefillTokens(ids.slice(0, -1));
@@ -63,7 +79,7 @@ for (let r = 0; r < ROUNDS; r++) {
   for (const k of r % 2 ? ["B", "A"] : ["A", "B"]) {
     const b = await block(k === "A" ? A : B);
     res[k].wall.push(b.wall); res[k].gpu.push(b.gpu); hashes[k].add(b.hash);
-    if (!ref) ref = b.out; else same &&= b.out.every((x, i) => x === ref[i]);
+    if (!ref) ref = b.out; else same &&= b.out.every((x, i) => i >= ref.length || x === ref[i]);
   }
 }
 const med = (a) => { const s = [...a].sort((x, y) => x - y); return s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2; };
