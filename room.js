@@ -687,7 +687,10 @@ function selfStepper() {
 
 // --- connection wiring ---
 function wire(conn, name, meta, initiator = false) {
-  const entry = { conn, name: name || conn.peer, meta: meta || {}, rtt: null, card: null, link: makeLink({ dup: WIRE_DUP }), stripes: [], seen: performance.now(), path: null, initiator };
+  // a link this device opened (or took) to a device in the room's roster: its name and meta from the
+  // roster until its hello says (the hello can be lost: see the roster message)
+  const known = members.get(conn.peer);
+  const entry = { conn, name: name || known?.name || conn.peer, meta: meta || known?.meta || {}, rtt: null, card: null, link: makeLink({ dup: WIRE_DUP }), stripes: [], seen: performance.now(), path: null, initiator };
   const prev = conns.get(conn.peer);
   conns.set(conn.peer, entry);
   if (prev && prev.conn !== conn) retire(prev);   // a new link to a device we already had one to
@@ -1071,6 +1074,13 @@ function onData(from, d) {
         const c = ensureCard(m.id, m.name, m.meta);
         if (m.meta?.contribGB) setLends(c, m.meta.contribGB);
         const ce = conns.get(m.id); if (ce) ce.meta = m.meta;
+        // the room's names are the host's (it makes them unique): a link's name comes from here too, not
+        // only from the hello on it. That hello is the first message the other side sends when the link
+        // opens, and WebRTC can lose it (a fresh link in Chromium drops the accepting side's first message
+        // now and then): a joiner's link to the room's creator then kept its placeholder "host", and a
+        // model host that is not the creator dealt with the creator under that name, so the creator found
+        // no reason under its own ("Not needed" missing: room_state leftout-guest's flake)
+        if (ce && from === PREFIX + roomCode && !isHost && m.name) ce.name = m.name;
       }
       for (const id of [...members.keys()]) if (!seen.has(id)) { members.delete(id); dropCard(id); }
       // this device runs the model but not the room: a device it has no link to can't ask it yet
@@ -2971,6 +2981,7 @@ function shortWhy(M, fit, names, metas) {
 async function aiStart(modelArg) {
   if (ai.engine || ai.busy) return;
   ai.busy = true;
+  ai.dealing = true;   // until this function ends: a re-deal asked meanwhile waits for it (aiAutoRedeal)
   if (typeof modelArg === "string") setModelValue(modelArg);
   $("ai-start").disabled = true;
   $("ai-model").disabled = true;
@@ -3102,7 +3113,7 @@ async function aiStart(modelArg) {
     try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); } finally { ai.loadingShard = false; }
     if (ai.startFailed) throw new Error(ai.startFailed);   // a device failed to load its layers while this one loaded
     if (n > 1) await aiLoadDraft(modelKey);
-    if (ai.redealPending) { ai.busy = false; aiAutoRedeal(ai.redealWhy); return; }   // a device died while loading: deal again
+    if (ai.redealPending) { ai.busy = false; ai.dealing = false; aiAutoRedeal(ai.redealWhy); return; }   // a device died (or stayed away) while loading: deal again
     if (ai.degraded) aiLoading(false);        // a device left while this one loaded: the Re-deal button is on the panel
     aiStatus(n === 1
       ? `solo: all ${L} layers local — ready`
@@ -3116,6 +3127,12 @@ async function aiStart(modelArg) {
     aiMaybeReady();
   } catch (err) {
     aiStartStopped(stopReason(ai.startFailed, err));   // a device that failed first is the reason, not what this load hit after
+  } finally {
+    ai.dealing = false;
+    // a re-deal asked for after this device's load (the rejoin grace ran out while the deal was still
+    // reading back checkpoints): deal again now, unless the room came whole meanwhile
+    if (ai.redealPending && ai.role === "host" && ai.degraded && missingNames().length) { ai.busy = false; aiAutoRedeal(ai.redealWhy); }
+    else if (!ai.degraded) ai.redealPending = false;
   }
 }
 // A start that cannot finish: this device failed, or a device in the chain could not load its layers
@@ -3124,6 +3141,7 @@ async function aiStart(modelArg) {
 // the load stops at its next tensor (the pacer) and aiStart's catch lands here.
 function aiStartStopped(why) {
   ai.startFailed = null;
+  ai.redealPending = false;   // nothing to deal again: the room is stopped
   clearInterval(ai.progTimer);
   aiLoading(false);
   ai.engine = null;
@@ -3242,12 +3260,19 @@ function aiPeerLeft(id, name, verb = "left") {
   showRedeal(true, `${why}. It goes back into its slot if it returns${auto ? `; otherwise the layers are dealt again over the devices still here in ${secs} s (experimental)` : ""}. Or re-deal now: cached layers reload in seconds.`);
   broadcastAll({ t: "ai-degraded", why: `${why}: waiting for it to come back` });
   codeRoleChanged();
-  // idle room: re-deal on its own after the grace period (a run in progress does this in roomRecover)
+  // idle room: re-deal on its own after the grace period (a run in progress does this in roomRecover).
+  // A device that left while the deal loads counts too: the grace can run out while this device still
+  // loads its own layers (a slow host: the 35B MoE on a PC takes minutes), or after, with the start's
+  // lock (busy) still held because the room never came whole. That used to skip the re-deal for good
+  // and leave the room waiting forever; now aiAutoRedeal deals again once this device's layers are in
   clearTimeout(ai.idleRedeal);
   if (auto && !running) ai.idleRedeal = setTimeout(() => {
-    if (ai.role !== "host" || !ai.degraded || ai.busy || ai.recovering || ai.loadingShard || !autoRedealOn() || !missingNames().length) return;
-    log("room", `${missingNames().join(", ")} did not come back in ${secs} s: re-dealing the layers (experimental auto re-deal)`);
-    aiRedeal();
+    if (ai.role !== "host" || !ai.degraded || ai.busy === "gen" || ai.busy === "code" || ai.recovering || !autoRedealOn() || !missingNames().length) return;
+    const why = `${missingNames().join(", ")} did not come back in ${secs} s: re-dealing the layers (experimental auto re-deal)`;
+    log("room", why);
+    const had = ai.redealPending;
+    aiAutoRedeal(why);
+    if (ai.redealPending && !had) ai.redealPending = "grace";   // (dropped if it comes back before then: aiRejoin)
   }, REJOIN_GRACE_MS);
 }
 // chain devices that are not in the room now (by name, for the screen)
@@ -3330,7 +3355,7 @@ function aiLoadDeath(newId, d) {
 // re-deal on its own (after a load death); waits for this device's own layers when they are still loading
 function aiAutoRedeal(why) {
   if (ai.role !== "host") return;
-  if (ai.loadingShard || ai.busy === "gen" || ai.busy === "code") { ai.redealWhy = why; ai.redealPending = true; return; }
+  if (ai.loadingShard || ai.dealing || ai.busy === "gen" || ai.busy === "code") { ai.redealWhy = why; ai.redealPending = true; return; }
   ai.redealPending = false;
   aiStatus(why);
   setTimeout(() => aiRedeal(), 500);   // after the old link's close has run
@@ -3347,6 +3372,7 @@ function aiRejoin(newId, name) {
   ai.readyPeers.delete(oldId);
   ai.gone.delete(oldId); ai.gone.delete(newId);
   clearTimeout(ai.idleRedeal);
+  if (ai.redealPending === "grace" && !missingNames().length) ai.redealPending = false;   // back after all: no re-deal
   const { msg } = ai.plan.get(name);
   const fresh = { ...msg, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: peer.id };
   // the device before it opens a fresh link and says so (ai-linked): until then the chain is not whole,
@@ -3367,6 +3393,7 @@ function aiMaybeReady() {
   if (ai.role !== "host" || !ai.engine || ai.ckptRestoring) return;   // (aiStart calls it again once the restore is done)
   ckptPrune();
   if (ai.readyPeers.size < ai.chain.length || relinking()) return;
+  if (!ai.chain.every((id) => conns.has(id) && ai.readyPeers.has(id))) return;   // (a device that left is not ready)
   const n = ai.chain.length + 1;
   ai.degraded = false;
   clearTimeout(ai.idleRedeal);

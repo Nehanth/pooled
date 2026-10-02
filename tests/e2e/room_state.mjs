@@ -15,12 +15,22 @@
 //   leftout-guest  the same with the laptop lending the most, so the laptop runs the model and the
 //                  room's creator is left out too: the model host links every device before it
 //                  deals, and welcomes a device that reloads.
+//   leftout-lost-hello  leftout-guest with the laptop losing the first message (the hello) on each of
+//                  its links, as WebRTC does now and then on a fresh link (the flake on #302's CI: the
+//                  laptop named the creator "host", so the creator found no reason under its own name)
 //   rejoin         a worker's link drops mid-answer and its replacement link reaches the host before
 //                  the host sees the old one close (the host's close handling is held back 8 s): its
 //                  input comes back, and it can ask (#265).
 //   duplicate      a worker reloads without saying "leaving" (its tab killed) while the host's close
 //                  of the old link is held back: the host lists it once, not beside itself, so a
 //                  re-deal can't deal it twice (#22).
+//   loaddrop-back  a worker's tab is killed while the host still loads its own layers (held until then:
+//                  the 35B MoE's ~5 min on a PC): once that load is in the room does not go online without
+//                  it; it comes back (a new tab, same name) within the grace (45 s here), is dealt its
+//                  layers again, and the room answers.
+//   loaddrop-gone  the same, and it stays away: past the rejoin grace (15 s here) the host re-deals by
+//                  itself without it (it used to sit "waiting for it to come back" for good: the grace ran
+//                  out while its own load was in progress).
 //
 // In CI's browser job. Locally: npm install at the repo root (playwright, peer); in a worktree,
 // symlink node_modules (ES modules ignore NODE_PATH).
@@ -33,7 +43,7 @@ import { loadPlaywright, chromiumPath, GPU_ARGS, serveRepo } from "./engine_synt
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf("--" + k); return i >= 0 ? argv[i + 1] : d; };
-const ONLY = new Set((arg("only", "leftout,leftout-guest,rejoin,duplicate")).split(","));
+const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,loaddrop-back,loaddrop-gone")).split(","));
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const PORT = +arg("port", 8191), SIG = PORT + 1;
 const MODEL_KEY = "qwen3.8-27b";
@@ -67,8 +77,22 @@ const ANCHOR = '  conn.on("close", onClose);\n';
 if (!room.includes(ANCHOR)) { console.error(`room.js has no ${JSON.stringify(ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
 extra["/room.js"] = path.join(tmp, "room.js");
 // window.__dropLinks(): this device drops every link, the path a screen back from a lock takes
+// window.__loseFirstHello = true: this device never sees the first hello on a link (WebRTC lost it)
+const HELLO_ANCHOR = '    case "hello":\n      // one protocol per room: a tab from an older or newer deploy is told to reload\n';
+if (!room.includes(HELLO_ANCHOR)) { console.error(`room.js has no ${JSON.stringify(HELLO_ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
+// window.__holdHostLoad = true: the model host's own load, once its layers are in, holds until
+// window.__releaseHostLoad() (a slow host: its engine not up yet, as while it loads; it ends when the test says)
+const LOAD_ANCHOR = "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); }";
+if (!room.includes(LOAD_ANCHOR)) { console.error(`room.js has no ${JSON.stringify(LOAD_ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
 fs.writeFileSync(extra["/room.js"], room.replace(ANCHOR, '  conn.on("close", () => { if (window.__delayClose) setTimeout(onClose, window.__delayClose); else onClose(); });\n')
+  .replace(HELLO_ANCHOR, HELLO_ANCHOR + "      if (window.__loseFirstHello && e && !e.lostHello) { e.lostHello = 1; break; }\n")
+  .replace(LOAD_ANCHOR, "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); if (window.__holdHostLoad) { const e = ai.engine; ai.engine = null; await new Promise((r) => { window.__hostLoadHeld = true; window.__releaseHostLoad = r; }); ai.engine = e; } }")
   + '\nwindow.__dropLinks = () => { for (const id of [...conns.keys()]) dropLink(id, "e2e: the link dropped"); };\n');
+// globalThis.__e2eGraceMs (an init script): the rejoin grace (room/resume.js REJOIN_GRACE_MS, 60 s)
+const resume = fs.readFileSync(path.join(ROOT, "room/resume.js"), "utf8"), GRACE_ANCHOR = "export const REJOIN_GRACE_MS = 60000;";
+if (!resume.includes(GRACE_ANCHOR)) { console.error(`room/resume.js has no ${JSON.stringify(GRACE_ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
+extra["/room/resume.js"] = path.join(tmp, "resume.js");
+fs.writeFileSync(extra["/room/resume.js"], resume.replace(GRACE_ANCHOR, "export const REJOIN_GRACE_MS = globalThis.__e2eGraceMs || 60000;"));
 const srv = serveRepo(PORT, extra);
 const peerDir = findPkg("peer");
 if (!peerDir) { console.error("the peer package is not installed: npm install at the repo root"); process.exit(2); }
@@ -99,7 +123,7 @@ const browser = await chromium.launch({ executablePath: chromiumPath(), ...(SOFT
 }
 
 const ctxs = [];
-async function device(name, { phone = false, size = null } = {}) {
+async function device(name, { phone = false, size = null, graceMs = 0, loseHello = false } = {}) {
   const ctx = await browser.newContext({ viewport: size || (phone ? { width: 390, height: 844 } : { width: 1280, height: 900 }), ...(phone ? { userAgent: UA_PHONE, isMobile: true, hasTouch: true } : {}), ignoreHTTPSErrors: true });
   ctxs.push(ctx);
   await ctx.route("**/*", async (route) => {
@@ -117,6 +141,8 @@ async function device(name, { phone = false, size = null } = {}) {
     return route.abort();
   });
   await ctx.addInitScript((n) => { try { if (!sessionStorage.getItem("pooled-name")) sessionStorage.setItem("pooled-name", n); } catch {} }, name);
+  if (graceMs) await ctx.addInitScript((ms) => { globalThis.__e2eGraceMs = ms; }, graceMs);
+  if (loseHello) await ctx.addInitScript(() => { window.__loseFirstHello = true; });
   const p = await ctx.newPage();
   p.label = name; p.errs = [];
   p.on("pageerror", (e) => p.errs.push(String(e).slice(0, 200)));
@@ -193,8 +219,8 @@ async function ask(p, text, ms = 180000) {
 const closeAll = async () => { for (const c of ctxs.splice(0)) await c.close().catch(() => {}); };
 
 // ---------------------------------------------------------------- scenarios
-async function leftout(label, gbs) {
-  const desk = await device("desk"), laptop = await device("laptop"), phone = await device("phone", { size: { width: 390, height: 844 } });
+async function leftout(label, gbs, { loseHello = false } = {}) {
+  const desk = await device("desk"), laptop = await device("laptop", { loseHello }), phone = await device("phone", { size: { width: 390, height: 844 } });
   const tabs = { desk, laptop, phone };
   await openRoom([[desk, "desk", gbs[0]], [laptop, "laptop", gbs[1]], [phone, "phone", gbs[2]]]);
   await startModel(desk, null);   // the room's default split: For speed
@@ -277,9 +303,63 @@ async function duplicate() {
   await host.evaluate(() => { window.__delayClose = 0; });
 }
 
+// a device joins a room that is already going (a new tab, as a reopened link)
+async function joinTab(p, name, gb, code, q = "") {
+  await p.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG}&maxnew=24${q}`); await wired(p);
+  await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
+  await p.fill("#name-input", name); await p.fill("#join-gb", String(gb));
+  await p.fill("#code-input", code); await p.click("#join-btn");
+}
+// A worker's tab is killed while the host still loads its own layers (the field run: a Mac joiner
+// killed during a PC host's ~5 min load of the 35B MoE wedged the room until a restart).
+// back: it comes back after the host's load; else it stays away (the rejoin grace is 15 s here)
+async function loaddrop(label, { hostGB, workerGB, back }) {
+  const host = await device("host", { graceMs: back ? 45000 : 15000 }), worker = await device("worker");
+  // (the copy speed picks the model host before the pledges do: pinned, so the room's creator runs it)
+  const code = await openRoom([[host, "host", hostGB, "&gbps=100"], [worker, "worker", workerGB, "&gbps=1"]], "&split=memory");
+  await host.evaluate(() => { window.__holdHostLoad = true; });
+  await startModel(host, "memory");
+  const loaded = await worker.waitForFunction(() => /ready · syncing with the room/.test(document.getElementById("ai-status").textContent), null, { timeout: 900000 }).then(() => true, () => false);
+  check(`${label}: the worker holds its layers while the host still loads`, loaded && !(await view(host)).online, JSON.stringify(await view(worker)));
+  if (!loaded) return;
+  const held = await host.waitForFunction(() => window.__hostLoadHeld, null, { timeout: 900000 }).then(() => true, () => false);
+  // its tab is killed: no "leaving"
+  await worker.evaluate(() => { addEventListener("pagehide", (e) => e.stopImmediatePropagation(), true); });
+  const wctx = worker.context(); ctxs.splice(ctxs.indexOf(wctx), 1); await wctx.close();
+  const left = await host.waitForFunction(() => /worker left|worker stopped responding/.test(document.getElementById("chat-log").innerText), null, { timeout: 60000 }).then(() => true, () => false);
+  check(`${label}: the host sees the worker leave while it still loads`, held && left);
+  // then the host's load ends
+  await host.evaluate(() => window.__releaseHostLoad());
+  await host.waitForFunction(() => /ready · syncing with|cluster online|GB short|failed:|re-dealing/.test(document.getElementById("ai-status").textContent), null, { timeout: 120000, polling: 250 }).catch(() => {});
+  await host.waitForTimeout(1000);
+  const hv = await view(host);
+  check(`${label}: once its load is in the host is not online without the worker`, !hv.online, JSON.stringify(hv));
+  if (back) {
+    const again = await device("worker");
+    await joinTab(again, "worker", workerGB, code, "&gbps=1");
+    const up = await online(host, 300000) && await online(again, 60000);
+    const holds = up && await again.waitForFunction(() => /serving layers/.test(document.getElementById("ai-status").textContent), null, { timeout: 15000 }).then(() => true, () => false);
+    check(`${label}: the worker back is dealt its layers again and the room is online`, holds, JSON.stringify({ host: await view(host), worker: await view(again) }));
+    if (!holds) { log("host's room log:", JSON.stringify(await roomLog(host))); return; }
+    const a = await ask(again, "Are you back?");
+    check(`${label}: and the room answers it`, a.length > 0);
+    return;
+  }
+  // past the grace it re-deals by itself over the devices still here (#291's rules; the synthetic model
+  // is small, so the host's pledge holds it alone): it used to wait for good. (It is not waited online
+  // here: on SwiftShader a tab's second engine build right after its first can stall for many minutes.)
+  const redealt = await host.waitForFunction(() => /did not come back in \d+ s: re-dealing/.test(document.getElementById("chat-log").innerText)
+    && /layer split by pledge: you \d+\+embed\s*$/m.test(document.getElementById("chat-log").innerText), null, { timeout: 120000, polling: 500 }).then(() => true, () => false);
+  check(`${label}: past the grace the host re-deals by itself, without the worker`, redealt, JSON.stringify(await view(host)));
+  if (!redealt) log("host's room log:", JSON.stringify(await roomLog(host)));
+}
+
 let code = 1;
 try {
-  for (const [name, fn] of [["leftout", () => leftout("leftout", [12, 8, 8])], ["leftout-guest", () => leftout("leftout-guest", [8, 12, 8])], ["rejoin", rejoin], ["duplicate", duplicate]]) {
+  for (const [name, fn] of [["leftout", () => leftout("leftout", [12, 8, 8])], ["leftout-guest", () => leftout("leftout-guest", [8, 12, 8])],
+    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate],
+    ["loaddrop-back", () => loaddrop("loaddrop-back", { hostGB: 24, workerGB: 12, back: true })],
+    ["loaddrop-gone", () => loaddrop("loaddrop-gone", { hostGB: 24, workerGB: 12, back: false })]]) {
     if (!ONLY.has(name)) continue;
     log("---", name);
     try { await fn(); } catch (e) { check(`${name}: ran to the end`, false, String(e).slice(0, 300)); }
