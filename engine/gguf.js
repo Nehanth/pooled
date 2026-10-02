@@ -193,7 +193,8 @@ export const GGML_OUTPUT = "output.weight"; // absent when embeddings are tied
 // One tensor's engine entry (repacked for the GPU) from a parsed GGUF header.
 // bytesOf: async (info) => Uint8Array of that tensor's data (local slice or
 // HTTP range fetch, same contract as the safetensors shard path).
-export async function ggufEntry(G, bytesOf, name, optional, onBytes = () => {}) {
+// cpuOnly: never through G.streamEntry (an offloaded expert tensor is parked by the caller, not uploaded)
+export async function ggufEntry(G, bytesOf, name, optional, onBytes = () => {}, cpuOnly = false) {
   const info0 = G.tensors[name];
   if (!info0) {
     if (optional) return null;
@@ -208,7 +209,7 @@ export async function ggufEntry(G, bytesOf, name, optional, onBytes = () => {}) 
     if (hit) { onBytes(info.byteLength); return hit; }
   }
   // the embedding stays on the CPU too (per-token row lookups), so it takes the normal path
-  if (G.streamEntry && name !== GGML_EMBED && info.shape.length === 2 && streamable(info.ggmlType)) {
+  if (G.streamEntry && !cpuOnly && name !== GGML_EMBED && info.shape.length === 2 && streamable(info.ggmlType)) {
     const e = await G.streamEntry(info);
     if (e) { onBytes(info.byteLength); return e; }
   }
@@ -518,7 +519,9 @@ export function qwen35LayerNames(i, forceFull = false, moe = false, interval = 4
     wOut: p + "ssm_out.weight" };
 }
 
-export async function qwen35Weights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp = false }, onProgress = () => {}, onEntry = null) {
+// experts: an ExpertStore (engine/expert_store.js): the routed experts of the layers it holds (experts.has(i)) are
+// parked in its buffers instead of returned for upload; the layer then carries its placeholder entries.
+export async function qwen35Weights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp = false, experts = null }, onProgress = () => {}, onEntry = null) {
   let fetched = 0;
   const entry = async (name, optional) => {
     const e = await ggufEntry(G, bytesOf, name, optional, (b) => { fetched += b; onProgress(fetched); });
@@ -533,7 +536,12 @@ export async function qwen35Weights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp
       attnNorm: await entry(N.attnNorm), postNorm: await entry(N.postNorm) };
     if (moe) {
       L.moe = true;
-      L.router = await entry(N.router); L.expGate = await entry(N.expGate); L.expUp = await entry(N.expUp); L.expDown = await entry(N.expDown);
+      L.router = await entry(N.router);
+      if (experts && !forceFull && experts.has(i)) {   // offloaded: converted on the CPU, parked, never uploaded
+        const nExp = G.meta["qwen35.expert_count"];
+        for (const [k, part] of [["expGate", "gate"], ["expUp", "up"], ["expDown", "down"]])
+          L[k] = experts.park(i, part, await ggufEntry(G, bytesOf, N[k], false, (b) => { fetched += b; onProgress(fetched); }, true), nExp);
+      } else { L.expGate = await entry(N.expGate); L.expUp = await entry(N.expUp); L.expDown = await entry(N.expDown); }
       L.shGate = await entry(N.shGate, true); L.shUp = await entry(N.shUp, true); L.shDown = await entry(N.shDown, true);
       L.shRouter = await entry(N.shRouter, true);
     } else {

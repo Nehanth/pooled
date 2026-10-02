@@ -5,7 +5,7 @@
 // its weights stream to the GPU a layer at a time (tests/load_model.js streamWeights).
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
-import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, MOE_PATH, Q122_PATH, streamWeights, wideOpts } from "./load_model.js";
+import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, MOE_PATH, Q122_PATH, streamWeights, wideOpts, offloadFromEnv } from "./load_model.js";
 import { GPU_SAMPLE, ARGMAX_WIDE, gpuGreedy, checkHeadIds } from "./gpusample_check.js";
 const N = +(Deno.env.get("TOKENS") || 40), K = +(Deno.env.get("K") || 3);
 const MOEFL = Deno.env.get("MOE_FUSED_LAYOUT") ? (Deno.env.get("MOE_FUSED_LAYOUT").startsWith("{") ? JSON.parse(Deno.env.get("MOE_FUSED_LAYOUT")) : Deno.env.get("MOE_FUSED_LAYOUT")) : undefined;   // moeFusedLayout: legacy | wide | JSON (unset: auto)
@@ -21,8 +21,10 @@ const hasMtp = G.tensors ? Object.keys(G.tensors).some((k) => k.startsWith(`blk.
 const L = trunkLayers(G);
 const tok = model.tokenizer();
 let t0 = performance.now();
-const weights = BIG ? await streamWeights(model, device, { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp }, (i) => { if (i % 8 === 7) console.log(`  layer ${i + 1}/${L} on the GPU, ${((performance.now() - t0) / 1000).toFixed(0)} s`); })
-  : await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp });
+// OFFLOAD=lo-hi | all [OFFLOAD_GB=8 | OFFLOAD_SLOTS=N]: those layers' routed experts parked off the GPU's resident weights (expert offload)
+const experts = offloadFromEnv(device, L);
+const weights = BIG ? await streamWeights(model, device, { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp, experts }, (i) => { if (i % 8 === 7) console.log(`  layer ${i + 1}/${L} on the GPU, ${((performance.now() - t0) / 1000).toFixed(0)} s`); })
+  : await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp, experts });
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,
   // DRAFTCHAIN=0 / SPECFUSE=0: per-submit drafts / separate verify submits (A/B; same output)
   draftChain: Deno.env.get("DRAFTCHAIN") !== "0", specFuse: Deno.env.get("SPECFUSE") !== "0",
@@ -40,6 +42,7 @@ console.log(`draftChain ${!!eng.draftChain}, specFuse ${eng.specFuse}, gpuSample
 console.log(`${arch}: ${L} layers, mtp tensors ${hasMtp}, engine mtp ${!!eng.mtp}, moeFuse ${eng.moeFuse}; loaded in ${((performance.now() - t0) / 1000).toFixed(0)}s`);
 if (eng.moeK) console.log("moeKernel", JSON.stringify(eng.moeK));
 if (eng.moeFuse) console.log("moeFusedLayout", JSON.stringify(eng.moe.layout || "legacy"));
+if (eng.experts) console.log(eng.experts.summary());
 const V = tok.vocab;
 const chat = (q) => [V["<|im_start|>"], ...tok.encode("user\n" + q), V["<|im_end|>"], ...tok.encode("\n"), V["<|im_start|>"], ...tok.encode("assistant\n"), V["<think>"], ...tok.encode("\n\n"), V["</think>"], ...tok.encode("\n\n")];
 // (plain "The capital of France is" is a near tie after " Paris": "." 19.029 vs "," 18.968 here, llama.cpp CUDA picks ",". Not used as a golden.)
@@ -58,6 +61,8 @@ for (const [name, prompt, golden, goldenIds] of CASES) {
     && (!goldenIds || goldenIds.slice(0, N).every((t, i) => gen[i] === t));   // 122B: llama.cpp's token ids too
   console.log(`${name}: prefill ${prompt.length} tok ${pf.toFixed(2)}s · decode ${ts.toFixed(2)} tok/s · ${ok ? "MATCH llama.cpp" : "MISMATCH"}\n  engine: ${JSON.stringify(text)}${ok ? "" : "\n  golden: " + JSON.stringify(golden)}`);
   if (!ok) fail++;
+  // decode only: the stats since the last token of the prompt (the prefill's region loads are counted apart)
+  if (eng.experts) { const d = eng.experts.stats; console.log(`  offload (prompt + decode): ${d.cuts} cuts, hits ${(100 * d.hits / Math.max(1, d.lookups)).toFixed(1)}%, ${(d.bytes / 2 ** 20 / N).toFixed(1)} MiB to the pools per token, ${d.regionCuts} region cuts, ${d.layerLoads} whole-layer loads (${(d.layerBytes / 2 ** 30).toFixed(1)} GiB)`); eng.experts.resetStats(); }
   if (eng.mtp) {
     eng.reset(); eng.mtpFill = true; eng.mtp.stats = { drafts: 0, accepted: 0 };
     await eng.prefillTokens(prompt.slice(0, -1)); logits = await eng.forwardToken(prompt[prompt.length - 1]);
@@ -65,6 +70,7 @@ for (const [name, prompt, golden, goldenIds] of CASES) {
     while (spec.length < N) { for (const t of await eng.specStep(next, GPU_SAMPLE ? gpuGreedy : argmax, K)) spec.push(t); next = spec[spec.length - 1]; }
     const sts = (spec.length - 1) / ((performance.now() - ts0) / 1000), same = gen.every((t, i) => spec[i] === t), st = eng.mtp.stats;
     console.log(`  spec K=${K}: ${sts.toFixed(2)} tok/s, acceptance ${st.accepted}/${st.drafts}, ${same ? "identical to plain" : "DIFFERS from plain"}`);
+    if (eng.experts) { const d = eng.experts.stats; console.log(`  offload (spec): ${d.cuts} cuts, hits ${(100 * d.hits / Math.max(1, d.lookups)).toFixed(1)}%, ${(d.bytes / 2 ** 20 / spec.length).toFixed(1)} MiB to the pools per token, ${d.regionCuts} region cuts (${(d.regionBytes / 2 ** 20).toFixed(0)} MiB)`); eng.experts.resetStats(); }
     if (!same) fail++;
   }
 }

@@ -2065,3 +2065,61 @@ buffers, `readMoeTrace()`). Per MoE layer one expert is 5.06 MiB (gate + up + do
 always-resident weights are 53-74 MiB per layer, 3.0 GiB for the 48 layers, against 61 GiB of routed experts. On chat,
 code, a 12K-token OpenClaw-like agent turn and a 4-turn chat, a per-layer LRU of 32 / 64 / 128 experts hits 53-58% /
 69-71% / 85-86% of the decode-time picks (cold misses included).
+
+## 2026-10-02: expert offload, phase 2a (branch feat/expert-offload, on feat/qwen35-122b), GB10 + RTX 5070 PC
+
+Selected MoE layers keep their 256 routed experts out of the GPU's resident weights (`engine/expert_store.js`): parked
+in `MAP_WRITE | COPY_SRC` buffers (system RAM on a discrete GPU), cached per layer in a VRAM slot pool (LRU, equal slots
+per layer from the budget), plus one whole-layer region for prefill frames. Decode and verify cut each offloaded layer
+at `moe_route`: the selection is read back, the store copies the misses into the pool and the CPU writes the slot ids
+in place of the expert ids, so `moe_gus` / `moe_dnc` run unchanged on the pool (no new kernel, no extra binding: the
+offloaded engine gives the resident engine's bits). Prefill frames copy the layer (or, under 32 tokens, the experts the
+frame chose) into the region and run the grouped kernels there. Load: `qwen35Weights(..., { experts: store })`; Deno
+tests: `OFFLOAD=lo-hi|all OFFLOAD_GB=8 | OFFLOAD_SLOTS=N` (`tests/load_model.js offloadFromEnv`).
+
+Correctness. Bits: 35B `MODEL=moe test_q38_bits` with every layer offloaded at 16 slots (pool, region fallback in
+verify, grouped prefill on the region) and with layers 0-19 at 64 slots: 5ef77d06 / 403ae12b, the resident engine's
+(and phase 1's). Off: `test_q38_bits` 4dc814b1 / 4f075117, 35B `test_moe` MATCH 3/3 with phase 1's acceptance.
+On: 122B `MODEL=122b test_moe` MATCH llama.cpp 3/3 (token ids) and spec == plain with layers 17-47 offloaded at 8 GB
+(Deno and Dawn) and with all 48 at 8 GB (Dawn; includes layers 0-5's Q8-widened down experts); 35B MATCH 3/3 and
+spec == plain with all 40 layers offloaded (Deno 16 slots; Dawn 4 GB on the GB10, on the RTX 5070 and on the PC's
+Intel iGPU, both D3D12 + FXC). The store's LRU replayed on the 122B traces (layers 17-47, 50 slots) hits 78.9 / 80.8 /
+75.8 / 79.8% (chat / code / agent / multiturn) vs the feasibility study's per-layer simulation 78.6 / 80.5 / 75.4 / 79.4.
+
+The cut needs a fast readback: Deno's mapAsync costs ~14 ms (122B, 31 cuts: 2.2 tok/s), Dawn's ~0.2 ms. Perf numbers
+are Node + Dawn (`tests/dawn_run.mjs`: a Deno GPU test under Node on dawn.node, as room-node runs).
+
+GB10, Dawn (Vulkan), 122B, engine defaults (test_moe: decode over 40 tokens incl. the cold start; spec K=3):
+
+| | decode tok/s | spec tok/s | cache | MiB copied / token |
+|---|---|---|---|---|
+| resident | 24.7-26.3 | 30.8-40.2 | | |
+| layers 17-47 offloaded, 8 GB (43 slots + 1.27 GiB region) | 18.6-20.3 | 25.4-29.3 | 72-75% hits | 325-363 |
+| all 48 offloaded, 8 GB (25 slots + 1.64 GiB region) | 16.3-17.2 | 19.4-22.0 | 51-60% hits | 867-1055 |
+
+RTX 5070 PC (D3D12 + FXC, Node 24 + dawn.node 0.6.1, `--no-maglev`), 35B-A3B with all 40 layers offloaded (it does not
+fit the 12 GB card resident; 17.5 GiB parked, process RSS 20.4 GB): test_moe at 4 GB (50 slots) decode 45.4-46.5 tok/s,
+spec 54-71, 70-75% hits. One decode token (4 GB, 40 cuts): 18.5 ms, of which the cuts' resolve 16.5 ms (waiting for the
+readback, which includes the GPU work of the segment, 8.8 ms; JS plan + encode + submit ~0.19 ms per cut).
+`tests/bench/offload_bench.js` (room preset, 128 decode tokens after a code prompt):
+
+| 35B on the 5070, all offloaded | prefill 512 / 2048 tok/s | decode tok/s | hits | MiB copied / token |
+|---|---|---|---|---|
+| 4 GB (50 slots) | 268 / 540 | 38.1 / 37.6 | 69% | 179 |
+| 8 GB (109 slots) | 252 / 546 | 43.9 / 54.7 | 89-91% | 53-60 |
+
+GB10, Dawn, 122B, `offload_bench.js` (room preset):
+
+| 122B on the GB10 | prefill 512 / 2048 tok/s | decode tok/s (after 512 / 2048) | hits | MiB copied / token |
+|---|---|---|---|---|
+| resident | 234 / 373 | 25.1 / 24.8 | | |
+| layers 17-47 offloaded, 8 GB | 161 / 268 | 20.3 / 19.4 | 77% / 68% | 290 / 402 |
+| layers 17-47 offloaded, 4 GB (17 slots; engine defaults) | 165 / 230 | 17.7 / 17.4 | 51% / 45% | 622 / 691 |
+
+Prefill copies each offloaded layer whole into the region per frame (a 2048-token prompt: 155 layer loads, 196 GiB on
+the GB10's unified memory); on the PC that is ~0.9 s per 512-token frame for the 122B's 31 layers.
+
+Not in this phase: the room (`room/plan.js` dealing layers to an offload device by resident VRAM + RAM for experts,
+room-node's shard range and `--no-maglev`, the room loader reading split GGUFs), native Q4_1 down experts (layers 0-5 of
+the 122B still widen to Q8), seeding the LRU from the prompt, and an offload path in Chrome (its readback latency is not
+measured). Encode-ahead and decode-ahead are off on an offloaded engine (a token's commands depend on its routing).
