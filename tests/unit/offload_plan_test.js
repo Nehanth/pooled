@@ -23,7 +23,7 @@ const tab = (gb) => ({ webgpu: true, contribGB: gb });
 function deal(model, metas, { ctx = 32768, mode = "speed", phone = [] } = {}) {
   const rb = roomBytes(model, ctx);
   const pledges = metas.map((m) => pledgeGB(m) * GB);
-  return { rb, pledges, d: dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges, mode, phone, off: offloadFor(metas, rb.expertBytes) }) };
+  return { rb, pledges, d: dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges, mode, phone, off: offloadFor(metas, rb.experts) }) };
 }
 // what a dealt device keeps in VRAM: its layers less the parked experts, plus its cache; and in RAM the parked experts
 const vramOf = (rb, d, k) => {

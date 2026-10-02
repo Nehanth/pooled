@@ -29,9 +29,10 @@ export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }
   return out;
 }
 
-// offload (expert offload, room/plan.js dealRoom): { lo, hi, vramBytes }: the routed experts of layers [lo, hi) are
-// parked in RAM (engine/expert_store.js ExpertStore) with a GPU cache of vramBytes (its slot pools + prefill region)
-// instead of uploaded. A Qwen3.5 / 3.6 MoE shard on a room node only.
+// offload (expert offload, room/plan.js dealRoom): { lo, hi, vramBytes, ramBytes, ramCap }: the routed experts of
+// layers [lo, hi) are parked in RAM (engine/expert_store.js ExpertStore) with a GPU cache of vramBytes (its slot pools +
+// prefill region) instead of uploaded. ramBytes: what the deal says they park; ramCap: the RAM this device lends
+// (roomnode.js offloadOk): parking past it fails the load. A Qwen3.5 / 3.6 MoE shard on a room node only.
 // the layers an ai-load's offload covers within this shard's range, or null for none
 export function offloadLayers(o, range) {
   const lo = Math.max(range[0], +o?.lo || 0), hi = Math.min(range[1], +o?.hi || 0);
@@ -84,7 +85,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
       const total = qwen35ShardBytes(G, opts);
       const off = offload && offloadLayers(offload, range);
       if (off?.length) {
-        out.experts = new ExpertStore(device, { layers: off, vramBytes: offload.vramBytes });
+        out.experts = new ExpertStore(device, { layers: off, vramBytes: offload.vramBytes, ramBytes: +offload.ramCap || Infinity, expectBytes: +offload.ramBytes || 0 });
         log(`expert offload: layers ${off[0]}-${off[off.length - 1]} park their experts in RAM, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GB GPU cache`);
       }
       const weights = await qwen35Weights(G, src.bytesOf, { ...opts, experts: out.experts || null }, (done) => onProgress(done, total), upload);
@@ -107,7 +108,11 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
       const oom = await device.popErrorScope();
       if (oom) throw Object.assign(new Error(`the GPU ran out of memory while loading layers ${range[0]}-${range[1] - 1}: ${String(oom.message || "").split("\n")[0].slice(0, 200)}`), { oom: true });
     }
-    if (out.experts) log(out.experts.summary().replace(/; \d+ cuts.*/, ""));
+    if (out.experts) {
+      log(out.experts.summary().replace(/; \d+ cuts.*/, ""));
+      if (offload.ramBytes > 0 && out.experts.parkedBytes > offload.ramBytes * 1.0001)
+        log(`expert offload: parked ${(out.experts.parkedBytes / 2 ** 30).toFixed(2)} GiB, more than the ${(offload.ramBytes / 2 ** 30).toFixed(2)} GiB the deal planned (within what this device lends)`);
+    }
     return out;
   } catch (e) { try { device.destroy(); } catch {} throw e; }
   finally { if (out.G) delete out.G.convert; await pool?.close(); }

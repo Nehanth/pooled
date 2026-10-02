@@ -30,7 +30,11 @@ export const OFFLOAD_PARTS = ["gate", "up", "down"];
 export class ExpertStore {
   // layers: absolute layer indices whose routed experts are offloaded. vramBytes: the GPU budget for the slot pools
   // plus the prefill region. slots: a fixed slot count per layer instead (tests). parkBytes: size of each parked buffer.
-  constructor(device, { layers = [], vramBytes = 8 * 2 ** 30, slots = 0, parkBytes = 2 ** 30 } = {}) {
+  // ramBytes: the most system RAM the parked buffers may take (a room node's ramGB: a promise, as a pledge is). Parking
+  // past it throws, so the load fails instead of the device coming online over what it lends. expectBytes: what the
+  // whole store will park (room/plan.js offloadPlan ramBytes), so the last buffer is sized to what is left instead of
+  // a whole parkBytes.
+  constructor(device, { layers = [], vramBytes = 8 * 2 ** 30, slots = 0, parkBytes = 2 ** 30, ramBytes = Infinity, expectBytes = 0 } = {}) {
     this.device = device;
     this.layerSet = new Set(layers);
     this.vramBytes = vramBytes; this.slotsOpt = slots;
@@ -38,7 +42,10 @@ export class ExpertStore {
     this.L = new Map();          // layer -> { parts: { gate|up|down: { kind, nExp, rows, cols, sl: [qs, sc] } } }
     this.park_ = [];             // { buf, view (until seal), used }
     this.sealed = false;
-    this.parkedBytes = 0;
+    this.parkedBytes = 0;        // the experts' bytes (what room/plan.js plans: offloadPlan ramBytes)
+    this.bufBytes = 0;           // the parked buffers' sizes (the RAM they take: parkedBytes plus alignment and tails)
+    this.placed = 0;             // bytes placed so far (for expectBytes)
+    this.ramBytes = ramBytes > 0 ? ramBytes : Infinity; this.expectBytes = expectBytes > 0 ? expectBytes : 0;
     this.stats = this._zeroStats();
   }
   _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0 }; }
@@ -55,8 +62,15 @@ export class ExpertStore {
     if (this.sealed) throw new Error("ExpertStore: parked buffers are sealed");
     let p = this.park_[this.park_.length - 1];
     if (!p || p.used + per > p.buf.size) {
-      const size = Math.max(this.parkBytes, Math.ceil(per / 256) * 256);
-      if (size > (this.device.limits?.maxBufferSize ?? Infinity)) throw new Error(`ExpertStore: a ${per}-byte expert exceeds maxBufferSize`);
+      const one = Math.ceil(per / 256) * 256, left = this.expectBytes - this.placed;
+      let size = Math.max(one, this.expectBytes > 0 ? Math.min(this.parkBytes, Math.ceil(Math.max(0, left) / 256) * 256 + 4096) : this.parkBytes);
+      if (one > (this.device.limits?.maxBufferSize ?? Infinity)) throw new Error(`ExpertStore: a ${per}-byte expert exceeds maxBufferSize`);
+      size = Math.min(size, this.device.limits?.maxBufferSize ?? Infinity);
+      // never past the RAM this device lends: a smaller last buffer if that still holds an expert, else fail the load
+      const room = Math.floor((this.ramBytes - this.bufBytes) / 256) * 256;
+      if (room < one) throw new Error(`ExpertStore: parking more experts would take over the ${(this.ramBytes / 2 ** 30).toFixed(2)} GiB of RAM this device lends (${(this.bufBytes / 2 ** 30).toFixed(2)} GiB parked so far)`);
+      size = Math.min(size, room);
+      this.bufBytes += size;
       const buf = this.device.createBuffer({ size, usage: MAP_PARK(), mappedAtCreation: true });
       p = { buf, view: new Uint8Array(buf.getMappedRange()), used: 0 };
       this.park_.push(p);
@@ -64,6 +78,7 @@ export class ExpertStore {
     const n = Math.min(want, Math.floor((p.buf.size - p.used) / per));
     const at = { buf: p.buf, off: p.used, view: p.view, n };
     p.used += Math.ceil(n * per / 256) * 256;
+    this.placed += n * per;
     return at;
   }
   // -> the placeholder entry the engine sees in place of the stacked expert tensor
@@ -73,6 +88,8 @@ export class ExpertStore {
     if (rows % 1 || cols % 32) throw new Error(`ExpertStore: layer ${layer} ${part}: shape ${e.shape} is not ${nExp} experts of whole blocks`);
     const qsB = rows * cols / (e.kind === "q4" ? 2 : 1), scB = rows * cols / 32 * 2;   // per expert
     if (qsB % 16 || scB % 4) throw new Error(`ExpertStore: layer ${layer} ${part}: per-expert slices ${qsB} / ${scB} B are not copyable`);
+    if (this.parkedBytes + (qsB + scB) * nExp > this.ramBytes)
+      throw new Error(`ExpertStore: layer ${layer} ${part}: parking its experts would take ${((this.parkedBytes + (qsB + scB) * nExp) / 2 ** 30).toFixed(2)} GiB of RAM, over the ${(this.ramBytes / 2 ** 30).toFixed(2)} GiB this device lends`);
     // each slice: segs [{ buf, off, e0, n }]: experts e0 .. e0 + n - 1 at off + (e - e0) * per in buf
     const sl = [[e.qs, qsB], [e.scales, scB]].map(([src, per]) => {
       const bytes = per * nExp;
@@ -223,7 +240,7 @@ export class ExpertStore {
   clear() { for (const l of this.layers || []) { const S = this.L.get(l); S.slotOf.fill(-1); S.expOf.fill(-1); S.used.fill(0); } }
   summary() {
     const s = this.stats, h = s.lookups ? (100 * s.hits / s.lookups).toFixed(1) : "-";
-    return `expert offload: ${this.layers.length} layers, ${this.P} slots each (${(this.poolBytes / 2 ** 30).toFixed(2)} GiB) + region ${(this.regionBytes / 2 ** 30).toFixed(2)} GiB, parked ${(this.parkedBytes / 2 ** 30).toFixed(2)} GiB; `
+    return `expert offload: ${this.layers.length} layers, ${this.P} slots each (${(this.poolBytes / 2 ** 30).toFixed(2)} GiB) + region ${(this.regionBytes / 2 ** 30).toFixed(2)} GiB, parked ${(this.parkedBytes / 2 ** 30).toFixed(2)} GiB in ${(this.bufBytes / 2 ** 30).toFixed(2)} GiB of buffers; `
       + `${s.cuts} cuts, hits ${h}% (${s.hits}/${s.lookups}), ${(s.bytes / 2 ** 20).toFixed(0)} MiB copied to the pools, ${s.regionCuts} region cuts (${(s.regionBytes / 2 ** 20).toFixed(0)} MiB), ${s.layerLoads} whole-layer loads (${(s.layerBytes / 2 ** 30).toFixed(1)} GiB)`;
   }
 }

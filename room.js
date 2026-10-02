@@ -25,7 +25,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, mergeSplitHeaders, expertBytesOf } from "./room/models.js";
+import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, mergeSplitHeaders, expertsOf } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -467,7 +467,7 @@ function roomFitFor(key) {
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
   const pledges = devs.map((d) => pledgeGB(d.meta) * 2 ** 30);
-  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.expertBytes)); };
+  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes)); };
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
   return { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
@@ -3025,7 +3025,7 @@ async function aiStart(modelArg) {
     ai.chainNames = ai.chain.map((id) => conns.get(id)?.name || id);
     const n = ai.chain.length + 1;
     // layerAt(ctx): one layer's bytes with its KV cache at that context
-    let L, layerBytes, layerAt, embedBytes, cfg = null, expertBytes = 0;
+    let L, layerBytes, layerAt, embedBytes, cfg = null, experts = null;
     if (M.kind === "qwen35") {
       aiStatus("reading model index… (11 MB)");
       ai.G = await fetchModelHeader(M);
@@ -3039,7 +3039,7 @@ async function aiStart(modelArg) {
       const w = qwen35ShardBytes(ai.G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4;
       layerAt = (c) => w + c * kvBytesPerLayerPos(ai.G.meta, ROOM_KV);   // the attention layers' KV cache at the room's context
       embedBytes = hostHeldBytes("qwen35", { embed: ai.G.tensors[GGML_EMBED]?.byteLength || 0, out: ai.G.tensors[GGML_OUTPUT]?.byteLength || 0, mtp: qwen35MtpBytes(ai.G) });
-      expertBytes = expertBytesOf(ai.G, 0, 4) / 4;
+      experts = expertsOf(ai.G, L);   // what each layer's experts park (null for a dense model): ExpertStore's sizes
     } else {
       cfg = await (await fetch(M.cfg)).json();
       L = cfg.num_hidden_layers;
@@ -3072,7 +3072,7 @@ async function aiStart(modelArg) {
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
     // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); browsers never offload
-    const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], expertBytes);
+    const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], experts);
     // the model's default context, or its fallback when only that fits these pledges (room/models.js
     // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
     const pick = pickCtx(modelKey, { want: ROOM_CTX, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes, off).fits });

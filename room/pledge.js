@@ -63,9 +63,12 @@ export function ramGB(meta) {
   const r = Number(meta?.ramGB);
   return meta?.offload && meta?.webgpu !== false && r > 0 ? Math.min(DESK_MAX_GB, r) : 0;
 }
-// room/plan.js's `off` for a room's devices (metas, host first) and the model's routed experts per layer (bytes,
-// room/models.js roomBytes expertBytes), or null when the model has none or no device offloads
-export function offloadFor(metas, expertBytes) {
+// room/plan.js's `off` for a room's devices (metas, host first) and the model's routed experts: a profile
+// (room/models.js expertsOf, roomBytes experts: what ExpertStore parks, layer by layer) or one layer's bytes (an
+// estimate), or null when the model has none or no device offloads
+export function offloadFor(metas, ex) {
   const ram = metas.map((m) => ramGB(m) * 2 ** 30);
-  return expertBytes > 0 && ram.some((r) => r > 0) ? { expertBytes, ram } : null;
+  const expertBytes = ex && typeof ex === "object" ? +ex.E || 0 : +ex || 0;
+  if (!(expertBytes > 0) || !ram.some((r) => r > 0)) return null;
+  return ex && typeof ex === "object" ? { expertBytes, experts: ex, ram } : { expertBytes, ram };
 }

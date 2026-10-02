@@ -45,7 +45,7 @@ import { loadShard } from "./shard.js";
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { unpackWire } from "../../room/wire.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote } from "../../room/plan.js";
-import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertBytesOf } from "../../room/models.js";
+import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
 import { isPrefix } from "../../harness/prefix.js";
@@ -553,14 +553,15 @@ export class RoomNode extends EventEmitter {
   }
 
   // ---------------- worker (room.js ai-load + workerFrame) ----------------
-  // An ai-load's offload ({ lo, hi, vramBytes }) as this device loads it: only when it offered to (ramGB), and only
-  // what it offered. A host that asks for more RAM than this device lends fails the load instead (a pledge is a
-  // promise both ways).
+  // An ai-load's offload ({ lo, hi, vramBytes, ramBytes }) as this device loads it: only when it offered to (ramGB),
+  // and only what it offered. A host that asks for more RAM than this device lends fails the load instead (a pledge
+  // is a promise both ways), and so does a load whose experts park more than that once parked (ramCap: ExpertStore
+  // counts what it really parks, whatever the host estimated).
   offloadOk(o) {
     if (!o) return null;
     if (!(this.ramGB > 0)) throw new Error("the host asked this device to offload experts, but it does not offload (--ram 0)");
     if (o.ramBytes > this.ramGB * 2 ** 30 * 1.0001) throw new Error(`the host asked for ${(o.ramBytes / 2 ** 30).toFixed(1)} GB of RAM for experts; this device lends ${this.ramGB} GB`);
-    return o;
+    return { ...o, ramCap: this.ramGB * 2 ** 30 };
   }
   freeLayers(role) {
     const ai = this.ai;
@@ -712,7 +713,7 @@ export class RoomNode extends EventEmitter {
     const pl = [self, ...peers].map((d) => pledgeGB(d.meta, shareCap.get(d.name)) * 2 ** 30);
     const pick = pickCtx(modelKey, { want, ask, fitsAt: (c) => {
       const rb = roomBytes(modelKey, c, kv === "q8" ? "q8" : "f16");
-      return !rb || roomFit(rb.L, pl, rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.expertBytes)).fits;
+      return !rb || roomFit(rb.L, pl, rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.experts || rb.expertBytes)).fits;
     } });
     return { ...pick, note: pick.fellBack ? ctxShortNote(String(MODELS[modelKey]?.label || modelKey).split("·")[0].trim(), pick.ctx, pick.want) : "" };
   }
@@ -722,15 +723,16 @@ export class RoomNode extends EventEmitter {
   // A pledge is a promise (#271): no device is dealt more whole layers than fit in what it lends (the
   // host's pays for the embedding and the head first), and when the pledges cannot hold the model
   // nothing is dealt: `fit.fits` is false and `chain`/`ranges` are empty (the room page's dealRoom).
-  // expertBytes: one layer's routed experts (a MoE model; 0 for none): with it, a device that offloads (meta.offload,
+  // experts: the model's expert profile (room/models.js expertsOf: what each layer's experts park, ExpertStore's sizes;
+  // null for a dense model), or expertBytes: one layer's routed experts (an estimate): with it, a device that offloads (meta.offload,
   // meta.ramGB: room/pledge.js ramGB) holds layers past its pledge with their experts in its RAM when the pledges
   // alone fall short (room/plan.js dealRoom). offload: per device in [self, ...chain], null or { lo, hi, vramBytes,
   // ramBytes, layers, slots }; the ai-load carries it.
-  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0 }) {
+  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null }) {
     const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name)) * 2 ** 30;
     const per = fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
     const pledges = [pledgeOf(self.meta, self.name), ...peers.map((p) => pledgeOf(p.meta, p.name))];
-    const off = offloadFor([self.meta, ...peers.map((p) => p.meta)], expertBytes || fitBytes?.expertBytes || 0);
+    const off = offloadFor([self.meta, ...peers.map((p) => p.meta)], experts || expertBytes || fitBytes?.experts || fitBytes?.expertBytes || 0);
     // phones hold layers only when the computers cannot hold the model (room/plan.js); speed: fill
     // the host first, then the biggest devices, each up to its pledge; a device not needed (or whose
     // pledge is under one layer) joins without layers
@@ -767,7 +769,7 @@ export class RoomNode extends EventEmitter {
     const kv = kvModeFor(modelKey, null);
     ai.apiCache = new AnswerCache(8); ai.apiTurns.clear(); ai.apiEnc.clear(); ai.apiProf = null; ai.apiTT = null; ai.bounds.clear();
     const src = (this.openSource || openModel)(modelKey, { modelDir: this.modelDir });   // (tests stub openSource)
-    let L, layerBytes, embedBytes, expertBytes = 0;
+    let L, layerBytes, embedBytes, experts = null;
     try {
       if (M.kind === "qwen35") {
         const G = await src.header(false);
@@ -778,7 +780,7 @@ export class RoomNode extends EventEmitter {
         L = G.meta["qwen35.block_count"] - (G.meta["qwen35.nextn_predict_layers"] || 0);
         layerBytes = qwen35ShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4 + ctx * kvBytesPerLayerPos(G.meta, kv);
         embedBytes = (G.tensors[GGML_EMBED]?.byteLength || 0) + (G.tensors[GGML_OUTPUT]?.byteLength || 0) + qwen35MtpBytes(G);
-        expertBytes = expertBytesOf(G, 0, 4) / 4;   // routed experts per layer (0 for a dense model): what offload parks
+        experts = expertsOf(G, L);   // what each layer's routed experts park (null for a dense model): ExpertStore's sizes
       } else {
         L = (await src.cfg()).num_hidden_layers;
         const G = await src.header(false);
@@ -797,7 +799,7 @@ export class RoomNode extends EventEmitter {
     ai.ctxNote = pick.note;
     if (ai.ctxNote) this.log(ai.ctxNote);
     const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
-      fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16"), expertBytes });
+      fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16"), experts });
     if (!plan.fit.fits) {
       // short: the room stops instead of dealing past a pledge (a re-deal after a device left that the
       // others cannot hold, or a pledge lowered since the start): the host frees its layers, the
@@ -839,7 +841,7 @@ export class RoomNode extends EventEmitter {
         ai.loadingShard = true;
         let lastPct = -1;
         unwatch = this.watchLoad(src);
-        const r = await this.loadShardFn({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: myOff,
+        const r = await this.loadShardFn({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(myOff),
           onGpuError: (m) => this.log("GPU error: " + m),
           onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
         Object.assign(ai, { engine: r.engine, device: r.device, tok: r.tok, cfg: r.cfg, range: ranges[0], role: "host" });

@@ -117,46 +117,123 @@ function residentFit(L, pledges, layerBytes, hostBytes) {
 export const OFFLOAD_MIN_SLOTS = 16;
 export const OFFLOAD_EXPERTS = 256;   // routed experts per layer (Qwen3.5 / 3.6 MoE): the cache's unit is 1/256 layer
 const offloadOn = (off) => !!off && off.expertBytes > 0 && (off.ram || []).some((r) => r > 0);
+// The experts' sizes, ExpertStore's way (engine/expert_store.js). ex: room/models.js expertsOf's profile
+// ({ E, nExp, slices: per layer, one expert's six parked slices }), or a number: every layer's experts that many bytes
+// in the file and parked alike (an estimate; the tests' toy models).
+//   E: the VRAM a layer's estimate (layerBytes) frees when its experts are parked
+//   park(lo, hi): RAM the experts of layers [lo, hi) park (ExpertStore.parkedBytes)
+//   region(lo, hi): the prefill region ExpertStore allocates for them (the largest of each slice, all experts)
+//   ramOf(park, m): the RAM ExpertStore's buffers take to park that many bytes of m layers: the bytes, plus at most
+//     one expert slice left at the end of each 1 GiB buffer (a slice never spans two), 256-byte alignment per
+//     segment, and the last buffer's 4 KiB of slack (ExpertStore._alloc). The deal holds this to the device's RAM.
+// Layers differ: the 35B's layers 0-4 and the 122B's 0-5 have Q4_1 down experts, which park as Q8 (25% more).
+const exCache = new WeakMap();
+function expertSizes(ex, nExp = OFFLOAD_EXPERTS) {
+  if (ex && typeof ex === "object") {
+    let X = exCache.get(ex);
+    if (X) return X;
+    const N = ex.nExp || nExp, sl = ex.slices || [], L = sl.length;
+    const pre = [0]; sl.forEach((a, i) => { pre[i + 1] = pre[i] + a.reduce((x, y) => x + y, 0) * N; });
+    const maxSlice = Math.max(0, ...sl.flat());
+    const bad = (lo, hi) => !(lo >= 0 && hi <= L && hi >= lo);
+    X = { E: +ex.E || 0, nExp: N, L,
+      ramOf: (park, m) => { const bufs = Math.ceil(park / 2 ** 30) + 1; return park + bufs * maxSlice + (6 * m + bufs) * 256 + 4096; },
+      park: (lo, hi) => (bad(lo, hi) ? Infinity : pre[hi] - pre[lo]),
+      region: (lo, hi) => {
+        if (bad(lo, hi)) return Infinity;
+        let r = 0;
+        for (let j = 0; j < 6; j++) { let m = 0; for (let l = lo; l < hi; l++) m = Math.max(m, sl[l][j]); r += m * N; }
+        return r;
+      } };
+    exCache.set(ex, X);
+    return X;
+  }
+  const E = +ex || 0;
+  return { E, nExp, L: Infinity, ramOf: (park) => park, park: (lo, hi) => (hi - lo) * E, region: () => E };
+}
+// Where a device's layers are (offloadNeed's pos): its last m layers are the ones offloaded, so what they park depends
+// on where its range ends.
+//   a number: the range ends there (the deal has dealt it: exact)
+//   { lo, fixed: true }: the range starts at lo (the host's starts at 0), so n layers end at lo + n (exact)
+//   { lo } or null: it starts at lo or later (not dealt yet): the worst range of n layers that does (its last m layers
+//     the m that park the most, the region of every layer they could be)
+// Every device after the host starts past the host's resident layers (dealOffload gives the host at least those),
+// so a device's caps from { lo: that } hold for whatever range the deal then gives it.
+// -> { park, ramNeed, region, perExp: one expert of each offloaded layer (ExpertStore.build's perExp), resident }
+function offloadAt(X, n, m, layerBytes, pos) {
+  let park, region;
+  const hi = typeof pos === "number" ? pos : pos?.fixed ? (pos.lo || 0) + n : null;
+  if (hi != null) { park = X.park(hi - m, hi); region = X.region(hi - m, hi); }
+  else if (!Number.isFinite(X.L)) { park = X.park(0, m); region = X.region(0, m); }
+  else {
+    const s0 = Math.max(0, (pos?.lo || 0) + n - m);
+    park = s0 + m > X.L ? Infinity : 0;
+    for (let s = s0; s + m <= X.L; s++) park = Math.max(park, X.park(s, s + m));
+    region = X.region(Math.min(s0, X.L), X.L);
+  }
+  return { park, ramNeed: X.ramOf(park, m), region, perExp: park / X.nExp, resident: n * layerBytes - m * X.E };
+}
+// the VRAM cache n layers with m offloaded leave in `bytes`, and the slots per offloaded layer it holds after the
+// region (ExpertStore.build: P = floor((vramBytes - region) / perExp), at most nExp)
+function cacheAt(a, bytes, nExp) {
+  const vram = Math.floor(bytes - a.resident + 1e-6);
+  return { vram, slots: Math.min(nExp, Math.floor((vram - a.region) / a.perExp)) };
+}
 // The fewest of n layers to offload so they fit `bytes` of VRAM (the pledge, less the host's own tensors) and
-// `ram` bytes of RAM: 0 when they fit without, -1 when they can't fit at all.
-export function offloadNeed(n, bytes, ram, layerBytes, expertBytes, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS) {
+// `ram` bytes of RAM: 0 when they fit without, -1 when they can't fit at all. ex: expertSizes's (a profile or a
+// number); pos: where the device's range is (offloadAt).
+export function offloadNeed(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS, pos = null) {
   if (!(n > 0)) return 0;
   if (n * layerBytes <= bytes + 1e-6) return 0;
-  const E = expertBytes;
-  if (!(E > 0) || !(E < layerBytes) || !(ram >= E)) return -1;
-  // n layers, m offloaded: n*layer - m*E (parked) + E (region) + m*E*minSlots/nExp (slots) <= bytes
-  const save = E * (1 - minSlots / nExp);
-  const m = Math.max(1, Math.ceil((n * layerBytes + E - bytes) / save - 1e-9));
-  return m <= n && m * E <= ram + 1e-6 ? m : -1;
+  const X = expertSizes(ex, nExp);
+  if (!(X.E > 0) || !(X.E < layerBytes)) return -1;
+  // n layers, m offloaded: their resident part + the region + minSlots experts per offloaded layer <= bytes; parked <= ram
+  for (let m = 1; m <= n; m++) {
+    const a = offloadAt(X, n, m, layerBytes, pos);
+    if (!(a.ramNeed <= ram + 1e-6)) return -1;   // (parking more layers only takes more RAM)
+    if (cacheAt(a, bytes, X.nExp).slots >= minSlots) return m;
+  }
+  return -1;
 }
-// The most layers (up to L) a device holds with offload. bytes: VRAM for layers (pledge less host tensors).
-export function offloadCap(L, bytes, ram, layerBytes, expertBytes, minSlots = OFFLOAD_MIN_SLOTS) {
+// The most layers (up to L) a device holds with offload. bytes: VRAM for layers (pledge less host tensors); pos: where
+// its range starts (offloadAt).
+export function offloadCap(L, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, pos = null) {
   let n = layerBytes > 0 && bytes > 0 ? Math.min(L, Math.floor(bytes / layerBytes + 1e-9)) : 0;
-  while (n < L && offloadNeed(n + 1, bytes, ram, layerBytes, expertBytes, minSlots) >= 0) n++;
+  while (n < L && offloadNeed(n + 1, bytes, ram, layerBytes, ex, minSlots, OFFLOAD_EXPERTS, pos) >= 0) n++;
   return n;
 }
 const vramFor = (pledges, hostBytes, i) => (Number.isFinite(pledges[i]) && pledges[i] > 0 ? pledges[i] : 0) - (i === 0 ? hostBytes : 0);
-// layers each device holds with offload where it can (off.ram[i] > 0), within its pledge otherwise
+const offEx = (off) => off.experts || off.expertBytes;
+// layers each device holds with offload where it can (off.ram[i] > 0), within its pledge otherwise. The host's range
+// starts at layer 0; every other device's after the host's resident layers (dealOffload).
 export function offloadCaps(L, pledges, layerBytes, hostBytes, off) {
   const rc = layerCaps(pledges, layerBytes, hostBytes);
-  return pledges.map((_, i) => (off.ram?.[i] > 0 ? Math.max(rc[i], offloadCap(L, vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, off.expertBytes, off.minSlots)) : rc[i]));
+  return pledges.map((_, i) => (off.ram?.[i] > 0
+    ? Math.max(rc[i], offloadCap(L, vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, offEx(off), off.minSlots, i === 0 ? { lo: 0, fixed: true } : { lo: Math.min(rc[0], L) }))
+    : rc[i]));
 }
 // What one device's n layers look like with offload: null when they fit its pledge as they are, else
 // { layers: m (the last m of its range are offloaded), vramBytes: its expert cache (region + slots: the rest of the
-// pledge), ramBytes: the experts parked, slots: experts cached per offloaded layer (ExpertStore sizes it the same) }.
+// pledge), ramBytes: the experts parked, slots: experts cached per offloaded layer }. With a profile and the range's
+// end (pos: a number, as dealOffload passes), ramBytes and slots are ExpertStore's own: it parks exactly ramBytes and
+// sizes P = slots from vramBytes.
 // m: the fewest layers that leave each offloaded layer OFFLOAD_GOOD_SLOTS cached experts, else as many as RAM
 // allows. Offloading one more layer frees its experts but adds a GPU round trip per token (~0.4 ms on the RTX 5070);
 // the cache's hit rate falls fast below a quarter of the experts (35B on the 5070: 109 slots 90% hits, 50 slots 70%,
 // docs/bench-log.md 2026-10-02), so the cache's size wins until then.
 export const OFFLOAD_GOOD_SLOTS = 64;
-export function offloadPlan(n, bytes, ram, layerBytes, expertBytes, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS) {
-  const m0 = offloadNeed(n, bytes, ram, layerBytes, expertBytes, minSlots, nExp);
+export function offloadPlan(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS, pos = null) {
+  const m0 = offloadNeed(n, bytes, ram, layerBytes, ex, minSlots, nExp, pos);
   if (m0 <= 0) return null;
-  const E = expertBytes, cache = (m) => bytes - (n * layerBytes - m * E), slots = (m) => Math.floor((cache(m) - E) / (m * E / nExp));
-  const top = Math.min(n, Math.floor(ram / E + 1e-9));
-  let m = m0;
-  while (m < top && slots(m) < OFFLOAD_GOOD_SLOTS) m++;
-  return { layers: m, vramBytes: Math.floor(cache(m)), ramBytes: m * E, slots: Math.min(nExp, slots(m)) };
+  const X = expertSizes(ex, nExp);
+  const at = (m) => { const a = offloadAt(X, n, m, layerBytes, pos); return { ...a, ...cacheAt(a, bytes, X.nExp) }; };
+  let m = m0, best = at(m0);
+  for (let k = m0 + 1; k <= n && best.slots < OFFLOAD_GOOD_SLOTS; k++) {
+    const a = at(k);
+    if (!(a.ramNeed <= ram + 1e-6)) break;
+    if (a.slots >= minSlots) { m = k; best = a; }
+  }
+  return { layers: m, vramBytes: best.vram, ramBytes: best.park, slots: best.slots };
 }
 
 // The deal when the pledges alone can't hold the model and offload can (roomFit's offload: true): every device
@@ -188,9 +265,12 @@ function dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, of
   const assigned = used.map((i) => a.get(i)), ranges = rangesOf(assigned);
   const offload = used.map((i, k) => {
     if (!(off.ram?.[i] > 0)) return null;
-    const p = offloadPlan(assigned[k], vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, off.expertBytes, off.minSlots);
+    const p = offloadPlan(assigned[k], vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, offEx(off), off.minSlots, OFFLOAD_EXPERTS, ranges[k][1]);
     return p && { ...p, lo: ranges[k][1] - p.layers, hi: ranges[k][1] };
   });
+  // (the caps hold for any range the deal gives: offloadCaps. Should a device still be dealt past its pledge without
+  // a plan, the deal fails rather than break a promise)
+  if (used.some((i, k) => assigned[k] > rc[i] && !offload[k])) return null;
   // a device that offloads holds its whole pledge (its layers' resident part, then the cache); its RAM apart
   const held = used.map((i, k) => (offload[k] ? vramFor(pledges, hostBytes, i) : assigned[k] * layerBytes) + (i === 0 ? hostBytes : 0));
   return { fit, used, assigned, ranges, held, out, offload };

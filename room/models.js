@@ -18,16 +18,56 @@ export function hostHeldBytes(kind, { embed = 0, out = 0, mtp = 0 } = {}) {
 // f32 (engine/dense.js), one K and one V row of kvDim per position
 export const denseKvBytesPerLayerPos = (kvDim) => 2 * kvDim * 4;
 
+// ---- what expert offload parks (engine/expert_store.js ExpertStore.park) ----
+// The loader converts each expert tensor before it is parked (engine/gguf.js convertEntry): Q4_0 stays Q4 (nibbles +
+// an f16 scale per 32: 18/32 B per weight), Q8_0 and every other quant (Q4_1, Q5_0, Q5_K, Q6_K) become Q8 (int8 + an
+// f16 scale per 32: 34/32 B per weight). So a Q4_1 tensor parks 34/32 B per weight, not the file's 20/32.
+const Q4 = 2, Q41 = 3;   // engine/gguf.js GGML_Q4_0, GGML_Q4_1
+const FLOAT_TYPES = [0, 1, 30];   // F32, F16, BF16: ExpertStore can't park these
+// One expert's six parked slices (gate qs, gate scales, up qs, up scales, down qs, down scales: ExpertStore.SLICES),
+// in bytes, for experts of rows x cols weights (gate / up: [ffn, hidden]; down: [hidden, ffn]) of these GGML types
+export function expertSlices(ffn, hidden, types) {
+  const n = ffn * hidden;
+  return types.flatMap((t) => [t === Q4 ? n / 2 : n, n / 16]);
+}
+// A layer's parked slices from a GGUF header (G.tensors[name]: { shape: [nExp, rows, cols], ggmlType }), or null when
+// it has no routed experts. -> { nExp, slices: [6] }
+export function expertSlicesOf(G, i) {
+  const ts = ["gate", "up", "down"].map((p) => G.tensors[`blk.${i}.ffn_${p}_exps.weight`]);
+  if (ts.some((t) => !t)) return null;
+  const slices = [];
+  for (const t of ts) {
+    if (FLOAT_TYPES.includes(t.ggmlType) || t.shape?.length !== 3) return null;
+    const n = t.shape[1] * t.shape[2];
+    slices.push(t.ggmlType === Q4 ? n / 2 : n, n / 16);
+  }
+  return { nExp: ts[0].shape[0], slices };
+}
+// The experts' offload profile (room/plan.js offloadNeed / offloadPlan) for layers 0..L-1 of a header, or null for a
+// dense model: { E: one layer's routed expert bytes in the file (layers 0-3's average: the part of a layer's VRAM
+// estimate that parking frees), nExp, slices: per layer, one expert's six parked slices (what ExpertStore parks) }
+export function expertsOf(G, L) {
+  const per = [];
+  for (let i = 0; i < L; i++) { const x = expertSlicesOf(G, i); if (!x) return null; per.push(x); }
+  if (!per.length || per.some((x) => x.nExp !== per[0].nExp)) return null;
+  return { E: expertBytesOf(G, 0, Math.min(4, L)) / Math.min(4, L), nExp: per[0].nExp, slices: per.map((x) => x.slices) };
+}
+// SHAPE's park (runs of layers that park alike) as expertsOf's profile
+const parkProfile = (s) => s.park && { E: s.exp, nExp: s.park.nExp, slices: s.park.runs.flatMap(([n, sl]) => Array(n).fill(sl)) };
+
 // Each picker model's shape, from its GGUF header (the host reads the same numbers from the file at
 // Start, so these only let the picker say before Start whether the room's pledges hold the model):
 // L layers; layer = one layer's weights (the largest group's average for the hybrids); kvPos = K+V
 // bytes per layer and position by KV format; embed / out / mtp: the host-only tensors; exp: one layer's routed
-// experts (the MoE models; layers 0-3's average, as `layer`): what a device that offloads parks in RAM per layer.
+// experts in the file (the MoE models; layers 0-3's average, as `layer`); park: what ExpertStore parks per expert, by
+// runs of layers (expertSlices; the 35B's layers 0-4 and the 122B's 0-5 have Q4_1 down experts, parked as Q8).
 export const SHAPE = {
   "qwen3-1.7b": { kind: "gguf", L: 28, layer: 53494784, kvPos: { f16: denseKvBytesPerLayerPos(1024) }, embed: 330612736, out: 0, mtp: 0 },
   "qwen3.8-27b": { kind: "qwen35", L: 64, layer: 223970464, kvPos: { f16: 1024, q8: 576 }, embed: 715161600, out: 1042944000, mtp: 265197568 },
-  "qwen3.6-35b-moe": { kind: "qwen35", L: 40, layer: 498197568, kvPos: { f16: 512, q8: 288 }, embed: 286064640, out: 417177600, mtp: 897955840, exp: 469762048 },
-  "qwen3.5-122b-moe": { kind: "qwen35", L: 48, layer: 1485116672, kvPos: { f16: 512, q8: 288 }, embed: 429096960, out: 625766400, mtp: 2682195968, exp: 1409286144 },
+  "qwen3.6-35b-moe": { kind: "qwen35", L: 40, layer: 498197568, kvPos: { f16: 512, q8: 288 }, embed: 286064640, out: 417177600, mtp: 897955840, exp: 469762048,
+    park: { nExp: 256, runs: [[5, expertSlices(512, 2048, [Q4, Q4, Q41])], [35, expertSlices(512, 2048, [Q4, Q4, Q4])]] } },
+  "qwen3.5-122b-moe": { kind: "qwen35", L: 48, layer: 1485116672, kvPos: { f16: 512, q8: 288 }, embed: 429096960, out: 625766400, mtp: 2682195968, exp: 1409286144,
+    park: { nExp: 256, runs: [[6, expertSlices(1024, 3072, [Q4, Q4, Q41])], [42, expertSlices(1024, 3072, [Q4, Q4, Q4])]] } },
 };
 // A split GGUF's headers (llama.cpp gguf-split: MODELS[key].shards, in order) as one: the first file's metadata and
 // every file's tensors, each tensor with its file (shard: index; url: that file's URL when urls is given, for the
@@ -47,10 +87,12 @@ export function expertBytesOf(G, lo, hi) {
   return n;
 }
 // { L, layerBytes, hostBytes, expertBytes } for a room running `model` at `ctx` positions with `kv` format, or
-// null for a model without a SHAPE (the picker then falls back to NEED_GB). expertBytes: 0 for a dense model.
+// null for a model without a SHAPE (the picker then falls back to NEED_GB). expertBytes: 0 for a dense model;
+// experts: the MoE models' offload profile (expertsOf), else null.
 export function roomBytes(model, ctx, kv = "f16") {
   const s = SHAPE[model]; if (!s) return null;
-  return { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0 };
+  return { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0,
+    experts: parkProfile(s) || null };
 }
 
 // The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:

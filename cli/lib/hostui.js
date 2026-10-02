@@ -71,7 +71,7 @@ export function roomFitNow(lib, { model, devices, ctxAsk = 0, spareGB = [] }) {
     return { fits, needGB, minGB: null, haveGB, shortGB, ctx: want, want, fellBack: false, ctxNote: "",
       note: fits ? "" : `This room is ${shortGB} GB short for ${label}: add a device or raise a pledge.` };
   }
-  const off = (rb) => (lib.offloadFor ? lib.offloadFor(devices.map((d) => d.meta), rb.expertBytes || 0) : null);
+  const off = (rb) => (lib.offloadFor ? lib.offloadFor(devices.map((d) => d.meta), rb.experts || rb.expertBytes || 0) : null);
   const fitAt = (c) => { const rb = lib.roomBytes(model, c, "f16"); return lib.roomFit(rb.L, pl.map((g) => g * GiB), rb.layerBytes, rb.hostBytes, off(rb)); };
   const pick = lib.pickCtx ? lib.pickCtx(model, { want, ask: ctxAsk, fitsAt: (c) => fitAt(c).fits }) : { ctx: want, want, fellBack: false };
   const fb = modelFallback(lib, model, ctxAsk);
