@@ -214,7 +214,8 @@ export async function ggufEntry(G, bytesOf, name, optional, onBytes = () => {}) 
   }
   const bytes = await bytesOf(info);
   onBytes(info.byteLength);
-  const e = convertEntry(info, bytes);
+  // G.convert: the same conversion elsewhere (packages/room-node/convert.js: worker threads, off the event loop)
+  const e = G.convert ? await G.convert(info, bytes) : convertEntry(info, bytes);
   if (G.entryCache) await G.entryCache.put(info, e);
   return e;
 }

@@ -12,7 +12,7 @@
   "author": "Nehanth Narendrula",
   "type": "module",
   "scripts": {
-    "build": "esbuild ../packages/room-node/index.js --bundle --platform=node --format=esm --target=node22 --external:webgpu --external:@pooled/dawn-* --external:node-datachannel --external:peerjs --log-level=warning --outfile=dist/room-node.js",
+    "build": "esbuild room-node=../packages/room-node/index.js convert_worker=../packages/room-node/convert_worker.js --bundle --platform=node --format=esm --target=node22 --external:webgpu --external:@pooled/dawn-* --external:node-datachannel --external:peerjs --log-level=warning --outdir=dist",
     "prepack": "npm run build",
     "test": "node --test test/*_test.mjs"
   },
