@@ -1,7 +1,7 @@
 // Expert offload: prefill and decode tok/s with and without it, the cache's hit rate and the bytes it copies.
 // Per prompt length: reset, prefill n - 1 tokens + the last one (forwardTokenIds), then DECODE greedy tokens; the store's
 // counters are read separately for the prefill and the decode.
-//   MODEL=moe|122b LENS=512,2048 DECODE=128   OFFLOAD / OFFLOAD_GB / OFFLOAD_SLOTS as tests/load_model.js offloadFromEnv
+//   MODEL=moe|122b [MOE=path] LENS=512,2048 DECODE=128   OFFLOAD / OFFLOAD_GB / OFFLOAD_SLOTS as tests/load_model.js offloadFromEnv
 //   Deno:  deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights tests/bench/offload_bench.js
 //   Dawn:  node --no-maglev tests/dawn_run.mjs tests/bench/offload_bench.js   (Deno's ~12 ms mapAsync dominates offloaded decode)
 import { Qwen35Engine } from "../../engine/qwen35.js";
@@ -12,7 +12,7 @@ const env = (k, d) => Deno.env.get(k) ?? d;
 const BIG = env("MODEL", "moe") === "122b", LENS = env("LENS", "512,2048").split(",").map(Number), DEC = +env("DECODE", 128);
 const { device } = await gpuDevice();
 const errors = watchGpuErrors(device);
-const model = openGGUF(BIG ? Q122_PATH : MOE_PATH);
+const model = openGGUF(env("MOE", BIG ? Q122_PATH : MOE_PATH));   // MOE=path: another copy of the file
 const G = model.G, L = trunkLayers(G), tok = model.tokenizer();
 const experts = offloadFromEnv(device, L);
 const t0 = performance.now();
@@ -24,7 +24,7 @@ const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRang
 applyRoomFlags(eng, roomFlags());
 console.log(`${BIG ? "122B" : "35B"}: ${L} layers, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s; ${eng.experts ? eng.experts.summary() : "no offload"}`);
 let src = [];
-for (const f of ["../../engine/qwen35.js", "../../engine/gguf.js", "../../engine/wgsl/moe.js", "../../room.js"]) src.push(...tok.encode(Deno.readTextFileSync(new URL(f, import.meta.url))));
+for (const f of ["../../engine/qwen35.js", "../../engine/gguf.js", "../../engine/wgsl/moe.js"]) src.push(...tok.encode(Deno.readTextFileSync(new URL(f, import.meta.url))));   // ~70K tokens of this repo's source
 const st = () => ({ ...(eng.experts?.stats || {}) });
 const d = (a, b, k) => (b[k] || 0) - (a[k] || 0);
 for (const n of LENS) {
