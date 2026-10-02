@@ -203,6 +203,10 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
 
   function fillDrafts(h, ids, i0, basePos, n) {
     if (!FILL_DRAFTS || !ai.engine?.mtp) return;
+    // an engine with offloaded experts may be inside a trunk call that has submitted only part of its work: these
+    // writes would land between the parts (engine offGate); fill once it is through
+    const gate = ai.engine.offGate?.();
+    if (gate) { const E0 = ai.engine; gate.then(() => { if (ai.engine === E0) fillDrafts(h, ids, i0, basePos, n); }); return; }
     const dim = ai.engine.dims.dim, E = ai.engine, NC = E.NC || 4;
     // Node prompt frames can span several batches; the browser keeps its original fill policy.
     let c = 0;

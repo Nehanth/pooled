@@ -92,8 +92,9 @@ export const MODELS = {
   // mixture of experts: 256 experts, 8 active per token (~3B of 35B), so decode reads far less than the 27B
   "qwen3.6-35b-moe": { label: "Qwen3.6 35B MoE \u00b7 Q4", kind: "qwen35",
     gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf" },
-  // 256 experts, 8 active (~10B of 122B), 48 layers, 16 query heads per kv head. Two files (shards); the room's loader
-  // reads one GGUF, so it is not in the picker or the ?dev=1 list yet: tests/test_moe.js MODEL=122b, `pooled pull`
+  // 256 experts, 8 active (~10B of 122B), 48 layers, 16 query heads per kv head. Two files (shards: the loaders read
+  // both, room/models.js mergeSplitHeaders). In the ?dev=1 list, not the picker: 72 GB of weights, a room of big
+  // machines (or a PC that offloads its experts to RAM: room/plan.js), tests/test_moe.js MODEL=122b, `pooled pull`
   "qwen3.5-122b-moe": { label: "Qwen3.5 122B MoE \u00b7 Q4", kind: "qwen35",
     gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf",
     shards: ["00001", "00002"].map((n) => `https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-${n}-of-00002.gguf`) },

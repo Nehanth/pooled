@@ -14,6 +14,8 @@ export const LOCAL = {
   "Qwen3-0.6B-Q8_0.gguf": "qwen/model.gguf",
   "Qwen3-1.7B-Q8_0.gguf": "qwen17/model.gguf",
   "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf": "q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf",
+  "Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf": "q35-122b/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf",
+  "Qwen_Qwen3.5-122B-A10B-Q4_0-00002-of-00002.gguf": "q35-122b/Qwen_Qwen3.5-122B-A10B-Q4_0-00002-of-00002.gguf",
 };
 
 // A split GGUF (room/models.js MODELS[key].shards: llama.cpp's gguf-split, e.g. the 122B in two files) is read as one

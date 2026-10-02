@@ -16,7 +16,7 @@
 //        SETUP=solo|pair|proc|tab (the node alone, + a second node, the second node in its own process, + a browser tab), REQ (requests.jsonl
 //        recorded from an OpenClaw gateway), CKPT=0 (no checkpoints: the baseline), CTX, STEPS=turn1 (the cold turn only)
 // env: MODELS (model dir, layout of source.js LOCAL; default <checkout>/models), MODEL (qwen3-1.7b), PROMPT,
-//      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, WORKER_GB / WORKER_RAM (nodepair), CHROME_BIN (a Chromium or
+//      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, WORKER_GB / WORKER_RAM / HOST_RAM (nodepair), NODE_RAM (tabhost), CHROME_BIN (a Chromium or
 //      headless_shell with WebGPU; default playwright's), PORT (8231), OUT (result JSON path),
 //      SIGNAL=cloud / PAGE=live (the public PeerJS server / the room page on https://pooled.run)
 import http from "node:http";
@@ -81,7 +81,9 @@ async function openTab(name, gb) {
       "--disable-background-timer-throttling", "--disable-renderer-backgrounding", "--disable-features=WebRtcHideLocalIpsWithMdns,LocalNetworkAccessChecks,BlockInsecurePrivateNetworkRequests,PrivateNetworkAccessRespectPreflightResults,PrivateNetworkAccessSendPreflights",
       "--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"] });
   await ctx.route("**/*.gguf", (route) => {
-    const f = { "Qwen3-1.7B-Q8_0.gguf": "models/qwen17/model.gguf", "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf": "models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf" }[route.request().url().split("/").pop()];
+    const base = route.request().url().split("/").pop();
+    const f = { "Qwen3-1.7B-Q8_0.gguf": "models/qwen17/model.gguf", "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf": "models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf" }[base]
+      || (/^Qwen_Qwen3\.5-122B-A10B-Q4_0-0000[12]-of-00002\.gguf$/.test(base) ? `models/q35-122b/${base}` : null);   // the 122B's two files
     if (!f) return route.continue();
     if (process.env.PAGE !== "live" || process.env.FULFILL !== "1") return route.continue({ url: `https://127.0.0.1:${PORT + 1}/${f}` });
     // a public page may not fetch from 127.0.0.1 (Private Network Access): answer the range here
@@ -101,7 +103,7 @@ async function openTab(name, gb) {
   page.on("crash", () => log("tab CRASHED"));
   page.on("pageerror", (e) => log("tab pageerror:", String(e).slice(0, 200)));
   page.on("console", (m) => { if (m.type() === "error") log("tab console:", m.text().slice(0, 200)); });
-  await page.goto(`${PAGE}?${SIGNAL ? `signal=${SIGNAL}&` : ""}peerweights=0&dev=1&maxnew=${MAXNEW}&ckpt=0&split=memory`);
+  await page.goto(`${PAGE}?${SIGNAL ? `signal=${SIGNAL}&` : ""}peerweights=0&dev=1&maxnew=${MAXNEW}&ckpt=0&split=memory&ask=0`);   // ask=0: a tab host lets devices in without its Allow (the gate)
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "1", null, { timeout: 30000 }).catch(() => {});
   await page.waitForTimeout(800);
@@ -306,10 +308,12 @@ try {
   } else if (MODE === "tabhost") {
     await openTab("tab-host", TAB_GB);
     await page.click("#create-btn");
-    await page.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
-    const roomCode = (await page.textContent("#side-code")).trim().match(/[A-Z0-9]{4}/)[0];
+    // (six-character codes show as "ABC-DEF"; older four-character ones as they are)
+    await page.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
+    const roomCode = (await page.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{4,6}/)[0];
     log("tab room", roomCode);
-    worker = await joinRoom(roomCode, { pledgeGB: NODE_GB, name: "node-worker", signal: SIGNAL, modelDir: MODELS, log: nodeLog("worker") });
+    // NODE_RAM: the node offers RAM for experts (expert offload: the tab's deal gives it what the pledges can't hold)
+    worker = await joinRoom(roomCode, { pledgeGB: NODE_GB, ramGB: +(process.env.NODE_RAM || 0), name: "node-worker", signal: SIGNAL, modelDir: MODELS, log: nodeLog("worker") });
     await page.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 60000 });
     await page.waitForTimeout(1500);
     await page.selectOption("#ai-model", MODEL);
@@ -334,7 +338,7 @@ try {
     out.node = { text, stats, sent: worker.sent, frames: worker.frames, frameMsAvg: worker.frames ? +(worker.frameMs / worker.frames).toFixed(2) : null, range: worker.ai.range, split: worker.split };
     out.tab = await tabStatus();
   } else if (MODE === "nodepair") {
-    host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, name: "node-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a") });
+    host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, ramGB: +(process.env.HOST_RAM || 0), name: "node-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a") });
     // WORKER_GB / WORKER_RAM: the worker's own pledge, and RAM for experts (expert offload: it holds what the pledges can't)
     worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || NODE_GB), ramGB: +(process.env.WORKER_RAM || 0), name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
     const tStart = Date.now();
