@@ -207,6 +207,30 @@ export class Qwen35Engine {
   }
   dropAllSlots() { for (const k of [...(this.slots?.keys() || [])]) this.dropSlot(k); }
 
+  // moeTrace (engine option, default off; tests/trace_moe.js): every MoE layer routes one-token passes into
+  // its own selection buffers instead of the shared ones, so after a decode step readMoeTrace() returns which
+  // experts each layer chose and their weights. Same kernels and arithmetic: only the buffers differ.
+  _moeTraceBufs(R) {
+    if (!this.moeTraceOn) return this.moeB;
+    const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+    R.trSel = this.device.createBuffer({ size: 32 * 4, usage: S }); R.trSelw = this.device.createBuffer({ size: 32 * 4, usage: S });
+    return { ...this.moeB, sel: R.trSel, selw: R.trSelw };
+  }
+  // -> [{ sel: Uint32Array(K), w: Float32Array(K) }] per MoE layer of this engine (trunk order), for the last one-token pass
+  async readMoeTrace() {
+    const ls = this.layers.filter((R) => R.trSel);
+    if (!ls.length) throw new Error("readMoeTrace: create the engine with moeTrace: true");
+    const dev = this.device, K = this.moe.K;
+    this._trStage ||= dev.createBuffer({ size: ls.length * 256, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const enc = dev.createCommandEncoder();
+    ls.forEach((R, i) => { enc.copyBufferToBuffer(R.trSel, 0, this._trStage, i * 256, 128); enc.copyBufferToBuffer(R.trSelw, 0, this._trStage, i * 256 + 128, 128); });
+    dev.queue.submit([enc.finish()]);
+    await this._trStage.mapAsync(GPUMapMode.READ);
+    const ab = this._trStage.getMappedRange().slice(0);
+    this._trStage.unmap();
+    return ls.map((_, i) => ({ sel: new Uint32Array(ab, i * 256, K).slice(), w: new Float32Array(ab, i * 256 + 128, K).slice() }));
+  }
+
   // Fresh context: forget the conversation so far. Recurrent (DeltaNet) states and
   // conv windows are zeroed; the KV caches are simply overwritten from position 0.
   reset() {
@@ -221,7 +245,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnTileKvh = true, attnTilePf = true, attnTileNr = true, wideDn = true, wideRouter = true, mtpWide = true, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, moeGroupDp4a, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnTileKvh = true, attnTilePf = true, attnTileNr = true, wideDn = true, wideRouter = true, mtpWide = true, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, moeGroupDp4a, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse, moeTrace = false }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -251,6 +275,7 @@ export class Qwen35Engine {
     this.moe = nExp > 0 ? { nExp, K: M["qwen35.expert_used_count"], inter: M["qwen35.expert_feed_forward_length"],
       shInter: M["qwen35.expert_shared_feed_forward_length"] || 0, norm: M["qwen35.expert_weights_norm"] === false ? 0 : 1 } : null;
     if (this.moe && (nExp > 1024 || !(this.moe.K > 0) || this.moe.K > 16)) throw new Error(`unsupported MoE shape: ${nExp} experts, top-${this.moe.K}`);
+    this.moeTraceOn = !!this.moe && moeTrace === true;
     const inter = this.moe ? (this.moe.shInter || this.moe.inter) : M["qwen35.feed_forward_length"];
     // Fused MoE FFN (engine/wgsl/moe.js moeFusedWGSL): router GEMV with the shared-expert gate as row
     // nExp, moe_route, gate/up over K + 1 slots (the shared expert is slot K), down + combine + residual
@@ -309,14 +334,18 @@ export class Qwen35Engine {
     // workers parse the header without the vocab; the embedding's row count says the same thing
     const vocab = M["tokenizer.ggml.tokens"]?.length ?? vocabOpt ?? M["qwen35.vocab_size"] ?? 248320;
     const qDim = nH * hd, kvDim = nKV * hd;
-    this.dims = { dim, nH, nKV, hd, nRot, inter, dState, nKH, nVH, dInner, keyDim, convDim, vocab, qDim, kvDim };
+    // attention workgroups per kv head: the flash / attn_dec kernels take at most 8 query heads per workgroup,
+    // so a kv head with more (Qwen3.5-122B: 16 per kv head) gets R workgroups of nH / nKV / R heads each;
+    // nKVa = nKV * R is their grid size. R = 1 on every model with <= 8 (the 27B, the 35B MoE): unchanged.
+    const attnR = Math.ceil(nH / nKV / 8), nKVa = nKV * attnR;
+    this.dims = { dim, nH, nKV, hd, nRot, inter, dState, nKH, nVH, dInner, keyDim, convDim, vocab, qDim, kvDim, attnR, nKVa };
     this.maxSeq = maxSeq;
     // workgroup softmax (bit-identical, see engine/wgsl/base.js); its staging array holds 2048 positions
     this.softmaxWG = softmaxWG !== false && maxSeq <= 2048;
     // long context: f16 KV cache + split-K flash attention (engine/wgsl/qwen35.js attn_flash), used
     // by every pass so decode, verify and prefill agree bit for bit. attnFlash: false keeps the f32
     // cache and the scores / softmax / out kernels (A/B, and the pre-flash numerics).
-    this.flash = attnFlash !== false && hd <= 256 && nH % nKV === 0 && nH / nKV <= 8 && nH / nKV * hd <= 2048;
+    this.flash = attnFlash !== false && hd <= 256 && nH % nKV === 0 && (nH / nKV) % attnR === 0 && nH / nKVa * hd <= 2048;
     this.faSplit = Math.max(256, Math.ceil(maxSeq / 128 / 64) * 64);   // <= 128 splits per head
     this.faSplits = Math.ceil(maxSeq / this.faSplit);
     // kvQ8: int8 K/V with one scale per 32 values (~56% of f16's memory: 36 KB per token for the
@@ -367,7 +396,7 @@ export class Qwen35Engine {
     // but starts on v1 (engine.attnDecode = "v2" at runtime). kvQ8, head sizes other than 256 or more than
     // 8 query heads per kv head stay on v1.
     this.adCfg = this.flash && (attnDecode === "v2" || attnDecode === "compile")
-      ? attnDecConfig({ hd, G: nH / nKV, nKV, splits: attnDecodeSplits, kvQ8: this.kvQ8 }) : null;
+      ? attnDecConfig({ hd, G: nH / nKVa, nKV: nKVa, R: attnR, splits: attnDecodeSplits, kvQ8: this.kvQ8 }) : null;
     this.attnDecode = "v1";
     this._adWant = attnDecode;
     // fused attention glue (qsplit + q/k head_norm + rope in one dispatch, bit-identical); its
@@ -946,7 +975,7 @@ export class Qwen35Engine {
       R.bgNorm1 = bgNorm(this.x, R.attnNorm, this.xn);
       R.bgNorm2 = bgNorm(this.x, R.postNorm, this.xn);
       if (L.moe && this.moeFuse) {
-        const { nExp, inter: ei, norm, sDim, hs } = this.moe, MB = this.moeB;
+        const { nExp, inter: ei, norm, sDim, hs } = this.moe, MB = this._moeTraceBufs(R);
         R.moe = true; R.fused = true; R.shared = true;
         // router and shared-expert gate as one F32 [nExp + 1][dim] matrix: one GEMV, logit nExp is the shared gate
         const rp = new Float32Array((nExp + 1) * dim);
@@ -978,7 +1007,7 @@ export class Qwen35Engine {
         R.bgDnc = this._bg(this.pipes[R.dncPipe], 1, [R.expDown.qs, R.expDown.sc, MB.hF, this.x, MB.sel, MB.selw, R.ffnDown.qs, R.ffnDown.sc,
           U(R.moeU(dim, dim, ei, hs))]);
       } else if (L.moe) {
-        const { nExp, K, inter: ei, norm } = this.moe, MB = this.moeB;
+        const { nExp, K, inter: ei, norm } = this.moe, MB = this._moeTraceBufs(R);
         R.moe = true;
         R.router = up(L.router); R.expGate = up(L.expGate); R.expUp = up(L.expUp); R.expDown = up(L.expDown);
         const lim = device.limits.maxStorageBufferBindingSize;
@@ -1536,19 +1565,19 @@ export class Qwen35Engine {
         if (lfC) {
           if (!lfA) this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / 2 / 64), 1, 1);
           if (v2) {
-            this._dxyz(p, "attn_dec", L.bgDec, decSplits(seqLen, this.adCfg.S), 1, D.nKV);
+            this._dxyz(p, "attn_dec", L.bgDec, decSplits(seqLen, this.adCfg.S), 1, D.nKVa);
             this._dxyz(p, "attn_dec_combine_g", L.bgDecCG, D.nH * DEC_CQ, 1, 1);
           } else {
-            this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
+            this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKVa);
             this._dxyz(p, "attn_combine_g", L.bgCombineG, D.nH, 1, 1);
           }
         } else if (this.flash) {
           this._dxyz(p, this.ksPipe, L.bgKvStore, Math.ceil(D.kvDim / (this.kvQ8 ? 32 : 2) / 64), 1, 1);
           if (this.attnDecode === "v2" && L.bgDec) {
-            this._dxyz(p, "attn_dec", L.bgDec, decSplits(seqLen, this.adCfg.S), 1, D.nKV);
+            this._dxyz(p, "attn_dec", L.bgDec, decSplits(seqLen, this.adCfg.S), 1, D.nKVa);
             this._dxyz(p, "attn_dec_combine", L.bgDecC, D.nH * DEC_CQ, 1, 1);
           } else {
-            this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKV);
+            this._dxyz(p, this.faPipe, L.bgFlash, Math.ceil(seqLen / this.faSplit), 1, D.nKVa);
             this._dxyz(p, "attn_combine", L.bgCombine, D.nH, 1, 1);
           }
         } else {
@@ -2219,11 +2248,11 @@ export class Qwen35Engine {
         // decode / verify: each column's splits from its own position (engine/wgsl/attn_dec.js)
         let ns = 1;
         for (let c = 0; c < nCols; c++) ns = Math.max(ns, decSplits(basePos + c + 1, this.adCfg.S));
-        this._dMC(p, "attn_dec", M.dec, ns * 256, 256, nCols, D.nKV);
+        this._dMC(p, "attn_dec", M.dec, ns * 256, 256, nCols, D.nKVa);
         this._dMC(p, "attn_dec_combine", M.decC, D.nH * DEC_CQ * 256, 256, nCols);
       } else {
         if (this.attnTile && M.flashT2 && nCols > 1) this._dMC(p, "attn_flash_t2", M.flashT2, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, Math.ceil(nCols / 2), D.nKV);
-        else this._dMC(p, this.faPipe, M.flash, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, nCols, D.nKV);
+        else this._dMC(p, this.faPipe, M.flash, Math.ceil((basePos + nCols) / this.faSplit) * 256, 256, nCols, D.nKVa);
         this._dMC(p, "attn_combine", M.combine, D.nH * 256, 256, nCols);
       }
     } else if (this.attnMC && M.scoresMC) {

@@ -25,7 +25,9 @@ export function modelFiles(key, MODELS, FILES = {}) {
   const M = MODELS[key];
   if (!M?.gguf) return [];
   const f = FILES[key] || {};
-  const out = [{ name: M.gguf.split("/").pop(), url: M.gguf, bytes: f.bytes || null, sha256: f.sha256 || null, main: true }];
+  // a split GGUF: every shard is a file, the first one is the main file (the loaders find the rest by name)
+  const out = M.shards ? M.shards.map((url, i) => ({ name: url.split("/").pop(), url, bytes: f.shards?.[i]?.bytes || null, sha256: f.shards?.[i]?.sha256 || null, main: i === 0 }))
+    : [{ name: M.gguf.split("/").pop(), url: M.gguf, bytes: f.bytes || null, sha256: f.sha256 || null, main: true }];
   // the dense engine reads config.json and tokenizer.json next to the GGUF (source.js sideFile)
   if (M.cfg) out.push({ name: "config.json", url: M.cfg, main: false });
   if (M.tok) out.push({ name: "tokenizer.json", url: M.tok, main: false });

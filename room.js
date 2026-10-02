@@ -443,7 +443,8 @@ function addModelOption(key) {
   if (!MODELS[key] || [...sel.options].some((o) => o.value === key)) return;
   sel.add(new Option(shortName(key), key));
 }
-if (DEV) Object.keys(MODELS).forEach(addModelOption);
+// (not the split-GGUF models: the room's loader reads one file)
+if (DEV) Object.keys(MODELS).filter((k) => !MODELS[k].shards).forEach(addModelOption);
 // set the picker to a model, adding it when another device started one the picker does not list
 function setModelValue(key) { if (!MODELS[key]) return; addModelOption(key); $("ai-model").value = key; }
 // How much more a device could still lend: its kind's cap (phones), the cap it reported itself and

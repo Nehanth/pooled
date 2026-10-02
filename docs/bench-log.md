@@ -2035,3 +2035,33 @@ M5 Max (Metal, Deno) dp4a stays off (`prefillDp4a` and `moeDp4a` false), `test_q
 change no bit there), spec == plain, and prefill goes 247 / 266 / 256 -> 284 / 309 / 302 tok/s at 512 / 2048 / 8192.
 After the merge on the GB10: `test_q38_bits` 4dc814b1 / 4f075117, `test_moe` MATCH 3/3 with the same acceptance,
 `test_moe_split` PASS as before.
+
+## 2026-10-02: Qwen3.5-122B-A10B loads and matches llama.cpp (branch feat/qwen35-122b, phase 1), GB10
+
+Model: bartowski `Qwen_Qwen3.5-122B-A10B-Q4_0` (two-file split GGUF, 72.5 GB; the 35B's quant mix: Q4_0 experts, Q4_1
+down experts on layers 0-5, Q8_0 / Q5_0 shared experts, Q6_K head, F32 routers). Same hybrid as the 35B, larger: 48
+layers (+ MTP), dim 3072, 256 experts top-8 of width 1024, 64 DeltaNet value heads, 32 query heads on 2 KV heads.
+
+What it needed: (1) 16 query heads per KV head, past the flash / `attn_dec` kernels' 8. Each KV head now gets
+R = ceil(G / 8) workgroups of G / R heads (`dims.attnR`, `nKVa = nKV * R`); R = 1 on the 27B and the 35B, so their
+kernels and bits are unchanged (the tiled prefill attention already took G up to 64). (2) Split GGUFs in the Deno
+loader (`tests/load_model.js openGGUF` reads every shard; the room's loader still reads one file, so the model is not in
+the picker or the ?dev=1 list). (3) A streamed load (`streamWeights`: a layer at a time, each matrix uploaded as it is
+converted), since the weights do not fit twice in 121 GB. Engine GPU memory ~70 GB; 133 s from disk (no weight cache).
+
+| | engine (Deno, GB10) | llama.cpp 749f688 CUDA |
+|---|---|---|
+| decode, plain | 24.9 tok/s (512 ctx), 24.2 (8K) | 27.8 (tg64) |
+| decode, spec K=3 (MTP) | 30.1-35.5 tok/s, acceptance 27-31 of 33-36 | |
+| prefill | 353 tok/s (512), 349 (2K), 292 (8K), 264 (12K agent prompt) | 766 (pp512) |
+
+Correctness: `MODEL=122b tests/test_moe.js` MATCH llama.cpp (CUDA llama-server, greedy, same ids) 3/3 over 40 tokens,
+token ids included, spec == plain on all three; also with `ATTN_DECODE=v1 ATTN_PREFILL_TILE=0` (attn_flash everywhere).
+Gates: `test_q38_bits` 4dc814b1 / 4f075117 (= main), 35B `test_moe` MATCH 3/3 with main's acceptance (28/33, 28/39,
+25/45), unit 1029 pass, `npm run check`.
+
+Routing traces for the expert-offload design: `tests/trace_moe.js` (engine option `moeTrace`: per-layer selection
+buffers, `readMoeTrace()`). Per MoE layer one expert is 5.06 MiB (gate + up + down, Q4_0; 5.25 MiB on layers 0-5);
+always-resident weights are 53-74 MiB per layer, 3.0 GiB for the 48 layers, against 61 GiB of routed experts. On chat,
+code, a 12K-token OpenClaw-like agent turn and a 4-turn chat, a per-layer LRU of 32 / 64 / 128 experts hits 53-58% /
+69-71% / 85-86% of the decode-time picks (cold misses included).

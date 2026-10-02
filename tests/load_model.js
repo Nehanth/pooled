@@ -54,6 +54,7 @@ export function roomFlags(extra = {}) {
 
 export const Q38_PATH = new URL("../models/q38/model.gguf", import.meta.url).pathname;
 export const MOE_PATH = new URL("../models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", import.meta.url).pathname;
+export const Q122_PATH = new URL("../models/q35-122b/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf", import.meta.url).pathname;
 
 // layers before the MTP ("nextn") block, when the file has one
 export function trunkLayers(G) {
@@ -61,24 +62,38 @@ export function trunkLayers(G) {
   return n - (G.meta["qwen35.nextn_predict_layers"] || (G.tensors[`blk.${n - 1}.nextn.eh_proj.weight`] ? 1 : 0));
 }
 
+// A split GGUF ("name-00001-of-00002.gguf", llama.cpp's gguf-split: Qwen3.5-122B ships as two files):
+// the shard paths in order, from any one of them; [path] for a single file.
+export function ggufShardPaths(path) {
+  const m = /^(.*)-(\d{5})-of-(\d{5})\.gguf$/.exec(path);
+  if (!m) return [path];
+  return Array.from({ length: +m[3] }, (_, i) => `${m[1]}-${String(i + 1).padStart(5, "0")}-of-${m[3]}.gguf`);
+}
+
 export function openGGUF(path, { skipTokenizer = false, cache = true, headerBytes = 64 << 20 } = {}) {
-  const fd = fs.openSync(path, "r");
-  const readAt = (off, len) => {
+  const paths = ggufShardPaths(path);
+  const fds = paths.map((p) => fs.openSync(p, "r"));
+  const readFd = (fd, off, len) => {
     const out = new Uint8Array(len);
     let o = 0;
     while (o < len) { const n = fs.readSync(fd, out, o, Math.min(len - o, 1 << 30), off + o); if (n <= 0) break; o += n; }
     return out;
   };
-  const G = parseGGUFHeader(readAt(0, headerBytes).buffer, { skipTokenizer });
-  const wcache = cache ? attachWeightCache(G, path) : null;
-  const bytesOf = (info) => readAt(info.byteOffset, info.byteLength);
+  const readAt = (off, len) => readFd(fds[0], off, len);
+  const hdr = (i) => parseGGUFHeader(readFd(fds[i], 0, Math.min(headerBytes, fs.fstatSync(fds[i]).size)).buffer, { skipTokenizer: skipTokenizer || i > 0 });
+  // the metadata is the first shard's; every shard lists its own tensors (offsets within that file), so a
+  // tensor remembers its shard and bytesOf reads from that file
+  const G = hdr(0);
+  for (let i = 1; i < fds.length; i++) for (const [n, t] of Object.entries(hdr(i).tensors)) G.tensors[n] = { ...t, shard: i };
+  const wcache = cache ? attachWeightCache(G, paths[0]) : null;
+  const bytesOf = (info) => readFd(fds[info.shard || 0], info.byteOffset, info.byteLength);
   let tok = null;
   return {
-    path, G, meta: G.meta, readAt, bytesOf, cache: wcache,
+    path, paths, G, meta: G.meta, readAt, bytesOf, cache: wcache,
     trunkLayers: trunkLayers(G),
     tokenizer: () => (tok ||= makeTokenizer(tokenizerFromGGUF(G.meta))),
     weights: (range, onProgress, onEntry) => qwen35Weights(G, bytesOf, range, onProgress, onEntry),
-    close: () => fs.closeSync(fd),
+    close: () => fds.forEach((fd) => fs.closeSync(fd)),
   };
 }
 
@@ -188,4 +203,22 @@ export async function sharedQ38Context() {
     return out;
   };
   return { adapter, device, model, errors, shared: true };
+}
+
+// A model too big to hold twice (Qwen3.5-122B: ~75 GB of weights on a 128 GB GB10): load it a layer at a time and
+// upload every quantized matrix as it is converted, dropping its CPU copy (gpuUploadEntry; the embedding stays on
+// the CPU for row lookups, f32 tensors keep their CPU copy as the engine expects), with a queue flush after each
+// layer so staged writes never pile up. Same structure as model.weights(range); the engine takes entry.gpu as-is.
+export async function streamWeights(model, device, { lo, hi, hasEmbed = false, hasHead = false, mtp = false }, log = () => {}) {
+  const up = (e, name) => { if (name !== "token_embd.weight") gpuUploadEntry(device, e, false); };
+  const flush = async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); };
+  const layers = [];
+  for (let i = lo; i < hi; i++) {
+    layers.push((await model.weights({ lo: i, hi: i + 1 }, undefined, up)).layers[0]);
+    await flush();
+    log(i);
+  }
+  const rest = await model.weights({ lo: hi, hi, hasEmbed, hasHead, mtp }, undefined, up);
+  await flush();
+  return { ...rest, layers };
 }
