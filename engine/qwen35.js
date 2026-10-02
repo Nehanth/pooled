@@ -2317,6 +2317,83 @@ export class Qwen35Engine {
       return R;
     });
   }
+  // The draft (MTP) block's share of a wide chunk (_mtpFillWide): only its KV cache rows matter during prefill (the
+  // draft block's attention output and FFN feed the draft head, which prefill never runs), so the wide fill is
+  // enorm / hnorm + eh_proj + the block's input norm + k / v projections as wide GEMMs, then per sub-batch the
+  // attention glue (k norm, rope) and kv_store at positions + 1. null when the block cannot take the wide path.
+  _initMtpWide() {
+    const M2 = this.mtp, L = this.mtpLayer, D = this.dims, dev = this.device, B = this.B, NC = this.NC, U = this.ubatch, Wt = this.Wt, cfg = this.wideCfg;
+    const qk = (e) => !!e && (e.kind === "q4" || e.kind === "q8");
+    if (!M2 || !L || !L.isFull || !B.mEmb || !qk(M2.ehProj) || !(L.fKV ? qk(L.fKV.w) : qk(L.wk) && qk(L.wv)) || (2 * D.dim) % cfg.KS) return null;
+    const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+    const lim = Math.min(dev.limits.maxStorageBufferBindingSize, dev.limits.maxBufferSize);
+    if (U * B.ehIn.stride > lim) return null;
+    const emb = dev.createBuffer({ size: U * B.mEmb.stride, usage: S }), ehIn = dev.createBuffer({ size: U * B.ehIn.stride, usage: S });
+    this._wTwin.set(Symbol("mtpEmb"), emb); this._wTwin.set(Symbol("mtpEhIn"), ehIn);   // freed with the twins
+    const st = (b) => b.stride / 4;
+    const mcU = (n, s0 = 0, s1 = 0, s2 = 0) => {
+      const k = n + "," + s0 + "," + s1 + "," + s2;
+      return this._mcU[k] || (this._mcU[k] = { buffer: this._buf(new Uint32Array([n, s0, s1, s2]), GPUBufferUsage.UNIFORM) });
+    };
+    const view = (b) => (b.off ? Qwen35Engine._view(b.buf, b.off, b.buf.size - b.off) : b.buf);
+    const op = (w, x, y, dOut, dIn) => {   // as _initWide's wop (f32, plus the dp4a twin when dp4a is built)
+      const pipe = `gemm_w_${w.kind}`, o = { pipe, gx: Math.ceil(dOut / cfg.BM), bg: this._bg(this.pipes[pipe], 1, [w.qs, w.sc, view(x), view(y), this._shapeB(dOut, dIn, x.stride / 16, y.stride / 4)]) };
+      if (this.dp4aCfg) { const dc = this.dp4aCfg, pd = `gemm_d_${w.kind}`;
+        o.d = { pipe: pd, gx: Math.ceil(dOut / dc.BM), bn: dc.BN, bg: this._bg(this.pipes[pd], 1, [w.qs, w.sc, this._wDq.q, this._wDq.d, view(y), this._shapeB(dOut, dIn, 0, y.stride / 4)]) }; }
+      return o;
+    };
+    const qop = (x, dIn) => this.dp4aCfg && { dIn, bg: this._bg2res(this.pipes.quant_q8_w, [Qwen35Engine._res(view(x)),
+      { buffer: this._wDq.q }, { buffer: this._wDq.d }, mcU(dIn, x.stride / 16)]) };
+    const E = { buf: ehIn, stride: B.ehIn.stride };
+    const frames = Array.from({ length: U / NC }, () => dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+    return {
+      emb, frames,
+      common: frames.map((f) => { const m = {}; for (const name of this._colPipes) if (this.pipes[name]) m[name] = this._bg2g0(this.pipes[name], [{ buffer: this.cfgBuf }, { buffer: f }]); return m; }),
+      enorm: this._bg2res(this.pipes.rmsnorm_mc, [{ buffer: emb }, { buffer: M2.enorm.buf }, { buffer: ehIn, offset: 0, size: ehIn.size }, mcU(D.dim, st(B.mEmb), st(B.ehIn))]),
+      hnorm: this._bg2res(this.pipes.rmsnorm_mc, [{ buffer: Wt.x.buf }, { buffer: M2.hnorm.buf }, { buffer: ehIn, offset: D.dim * 4, size: ehIn.size - D.dim * 4 }, mcU(D.dim, st(Wt.x), st(B.ehIn))]),
+      qIn: qop(E, 2 * D.dim), proj: op(M2.ehProj, E, Wt.x, D.dim, 2 * D.dim),
+      norm1: this._bg2res(this.pipes.rmsnorm_mc, [{ buffer: Wt.x.buf }, { buffer: L.attnNorm.buf }, { buffer: Wt.xn.buf }, mcU(D.dim, st(Wt.x), st(Wt.xn))]),
+      qXn: qop(Wt.xn, D.dim),
+      kv: L.fKV ? [op(L.fKV.w, Wt.xn, { buf: Wt.k.buf, stride: Wt.k.stride }, L.fKV.rows, D.dim)] : [op(L.wk, Wt.xn, Wt.k, D.kvDim, D.dim), op(L.wv, Wt.xn, Wt.v, D.kvDim, D.dim)],
+      toNarrow: [B.k, B.v].filter((b, i, a) => a.findIndex((c) => c.buf === b.buf) === i),
+    };
+  }
+  // Fill the draft cache for wide chunk ids[i .. i + w) at positions basePos + 1 ... from the trunk's final hiddens in
+  // Wt.x (clobbers Wt.x / Wt.xn). False (nothing done) when the wide fill does not apply: then the per-sub-batch fill runs.
+  _mtpFillWide(ids, i, basePos, w) {
+    if (this.mtpWide === false || ids.length - i - 1 < w) return false;   // the prompt's last column has no next token: the old fill
+    if (this._mtpW === undefined) { try { this._mtpW = this._initMtpWide(); } catch (e) { console.warn("wide draft fill off:", String(e.message || e).slice(0, 200)); this._mtpW = null; } }
+    const MW = this._mtpW; if (!MW) return false;
+    this._pre = null;   // as _mtpFillBatch
+    const q = this.device.queue, NC = this.NC, D = this.dims, B = this.B, Mm = this.layerB[this.layers.length].mc;
+    for (let j = 0; j < w / NC; j++) q.writeBuffer(MW.frames[j], 0, new Uint32Array([basePos + j * NC + 1, basePos + j * NC + 2, NC, 0]));
+    for (let c = 0; c < w; c++) q.writeBuffer(MW.emb, c * B.mEmb.stride, this._embedRowF32(ids[i + c + 1]));
+    const enc = this.device.createCommandEncoder();
+    {
+      const p = enc.beginComputePass();
+      this._dMC(p, "rmsnorm_mc", MW.enorm, 256, 256, w);
+      this._dMC(p, "rmsnorm_mc", MW.hnorm, 256, 256, w);
+      this._dQ(p, MW.qIn, w);
+      this._dW(p, MW.proj, w);
+      this._dMC(p, "rmsnorm_mc", MW.norm1, 256, 256, w);
+      this._dQ(p, MW.qXn, w);
+      for (const o of MW.kv) this._dW(p, o, w);
+      p.end();
+    }
+    try {
+      for (let j = 0; j < w / NC; j++) {
+        for (const b of MW.toNarrow) this._wCopy(enc, b, j, false);
+        this._mcCommon = MW.common[j];
+        const p = enc.beginComputePass();
+        this._encAttnGlue(p, Mm, NC);
+        this._dMC(p, this.ksPipe, Mm.kvStore, D.kvDim / (this.kvQ8 ? 32 : 2), 64, NC);
+        p.end();
+        this._mcCommon = null;
+      }
+    } finally { this._mcCommon = null; }
+    q.submit([enc.finish()]);
+    return true;
+  }
   // sub-batch j of the chunk between a wide twin and its batchCols-wide buffer (whole columns, all segments)
   _wCopy(enc, b, j, toWide) {
     const tw = this._wTwin.get(b.buf), n = this.NC * b.stride;
@@ -2458,7 +2535,7 @@ export class Qwen35Engine {
     }
     enc.copyBufferToBuffer(Wx.buf, (w - 1) * Wx.stride, this.x, 0, this.dims.dim * 4);
     q.submit([enc.finish()]);
-    if (fill && this.mtp && this.mtpFill !== false) for (let j = 0; j < w / NC; j++) {
+    if (fill && this.mtp && this.mtpFill !== false && !this._mtpFillWide(ids, i, basePos, w)) for (let j = 0; j < w / NC; j++) {
       const e = this.device.createCommandEncoder();   // the sub-batch's final hiddens into B.x, as after an NC pass
       this._wCopy(e, this.B.x, j, false);
       q.submit([e.finish()]);
