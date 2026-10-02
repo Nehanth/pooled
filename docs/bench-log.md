@@ -2025,4 +2025,13 @@ its split partials would take ~0.5 GB at 16K. Attention is the open item: at 8K 
 dropping its QK FMAs saves 0.42 ms and its PV FMAs 0.27 ms, so the tile loads, four barriers per 8 positions and the softmax
 are over half. TK > 8 (fewer barriers per position) needs more than 16 KB of workgroup memory or another partial-sum layout,
 and changes the numerics. Then `dn_delta` (sequential over the chunk) and the DeltaNet projection GEMMs.
-Not measured on Apple or Windows (the dp4a kernels are NVIDIA-only by default and optional at create).
+Windows / Metal (after merging #313 / #315): every pipeline of a worker shard (layers 20-22) and a host shard with the head
+(0-2) compiles under FXC on the RTX 5070 PC (Dawn D3D12, d3dcompiler_47 only; `packages/room-node/test/compile_check.mjs`,
+322 / 329 pipelines, 0 failures), the dp4a experts (`moe_gusq` / `moe_dnq` q4 and q8, `moe_qx`) and the f16-prefetch
+attention tile included; the dp4a fallback was not needed. A real join of that PC into a Spark-hosted room (Spark 0-20 +
+embed / head, PC 21-39 over WebRTC) answered OpenClaw's request (11,286 tokens) in 11.5 s TTFT (prefill 11.3 s). On the
+M5 Max (Metal, Deno) dp4a stays off (`prefillDp4a` and `moeDp4a` false), `test_q38_bits MODEL=moe` gives e1b27cc1 /
+1a71afaf on both main and this branch (the per-chunk router / DeltaNet, the KV-only draft fill and the attention tile
+change no bit there), spec == plain, and prefill goes 247 / 266 / 256 -> 284 / 309 / 302 tok/s at 512 / 2048 / 8192.
+After the merge on the GB10: `test_q38_bits` 4dc814b1 / 4f075117, `test_moe` MATCH 3/3 with the same acceptance,
+`test_moe_split` PASS as before.
