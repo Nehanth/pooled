@@ -46,18 +46,24 @@ export class ExpertStore {
   has(i) { return this.layerSet.has(i); }
 
   // ---- load: park one converted tensor ({ kind: "q4" | "q8", qs, scales, shape: [nExp * rows, cols] }) ----
-  _alloc(bytes) {
+  // Room in the parked buffers for up to `want` experts of `per` bytes each: as many as the last buffer still holds
+  // (at least one: else a new buffer), so a tensor's slice may span buffers at an expert boundary. Before this a slice
+  // that did not fit whole started a new buffer: the 122B's 402 MB slices left 220 MB of every 1 GiB buffer unused
+  // (50 GiB of buffers for 41.8 GiB of experts on the RTX 5070 PC, which then ran out of RAM).
+  // -> { buf, off, view, n }
+  _alloc(per, want) {
     if (this.sealed) throw new Error("ExpertStore: parked buffers are sealed");
     let p = this.park_[this.park_.length - 1];
-    if (!p || p.used + bytes > p.buf.size) {
-      const size = Math.max(this.parkBytes, Math.ceil(bytes / 256) * 256);
-      if (size > (this.device.limits?.maxBufferSize ?? Infinity)) throw new Error(`ExpertStore: a ${bytes}-byte expert array exceeds maxBufferSize`);
+    if (!p || p.used + per > p.buf.size) {
+      const size = Math.max(this.parkBytes, Math.ceil(per / 256) * 256);
+      if (size > (this.device.limits?.maxBufferSize ?? Infinity)) throw new Error(`ExpertStore: a ${per}-byte expert exceeds maxBufferSize`);
       const buf = this.device.createBuffer({ size, usage: MAP_PARK(), mappedAtCreation: true });
       p = { buf, view: new Uint8Array(buf.getMappedRange()), used: 0 };
       this.park_.push(p);
     }
-    const at = { buf: p.buf, off: p.used, view: p.view };
-    p.used += Math.ceil(bytes / 256) * 256;
+    const n = Math.min(want, Math.floor((p.buf.size - p.used) / per));
+    const at = { buf: p.buf, off: p.used, view: p.view, n };
+    p.used += Math.ceil(n * per / 256) * 256;
     return at;
   }
   // -> the placeholder entry the engine sees in place of the stacked expert tensor
@@ -67,12 +73,19 @@ export class ExpertStore {
     if (rows % 1 || cols % 32) throw new Error(`ExpertStore: layer ${layer} ${part}: shape ${e.shape} is not ${nExp} experts of whole blocks`);
     const qsB = rows * cols / (e.kind === "q4" ? 2 : 1), scB = rows * cols / 32 * 2;   // per expert
     if (qsB % 16 || scB % 4) throw new Error(`ExpertStore: layer ${layer} ${part}: per-expert slices ${qsB} / ${scB} B are not copyable`);
+    // each slice: segs [{ buf, off, e0, n }]: experts e0 .. e0 + n - 1 at off + (e - e0) * per in buf
     const sl = [[e.qs, qsB], [e.scales, scB]].map(([src, per]) => {
-      const bytes = per * nExp, at = this._alloc(bytes);
+      const bytes = per * nExp;
       const s = src instanceof Uint8Array ? src : new Uint8Array(src.buffer, src.byteOffset, src.byteLength);
       if (s.byteLength < bytes) throw new Error(`ExpertStore: layer ${layer} ${part}: ${s.byteLength} B for ${bytes}`);
-      at.view.set(s.subarray(0, bytes), at.off);
-      return { buf: at.buf, off: at.off, per };
+      const segs = [];
+      for (let e0 = 0; e0 < nExp;) {
+        const at = this._alloc(per, nExp - e0);
+        at.view.set(s.subarray(e0 * per, (e0 + at.n) * per), at.off);
+        segs.push({ buf: at.buf, off: at.off, e0, n: at.n });
+        e0 += at.n;
+      }
+      return { segs, per };
     });
     this.parkedBytes += (qsB + scB) * nExp;
     e.qs = e.scales = null;   // the CPU copy is no longer needed
@@ -131,8 +144,8 @@ export class ExpertStore {
   _copyExpert(enc, S, e, dst, at) {   // dst: pool or region buffers; at: slot (pool) or expert id (region)
     let n = 0;
     ExpertStore.SLICES.forEach(([p, s], j) => {
-      const src = S.parts[p].sl[s];
-      enc.copyBufferToBuffer(src.buf, src.off + e * src.per, dst[j], at * src.per, src.per);
+      const src = S.parts[p].sl[s], g = src.segs.find((x) => e >= x.e0 && e < x.e0 + x.n);
+      enc.copyBufferToBuffer(g.buf, g.off + (e - g.e0) * src.per, dst[j], at * src.per, src.per);
       n += src.per;
     });
     return n;
@@ -145,9 +158,8 @@ export class ExpertStore {
     const S = this.L.get(layer);
     let n = 0;
     ExpertStore.SLICES.forEach(([p, s], j) => {
-      const src = S.parts[p].sl[s], bytes = src.per * this.nExp;
-      enc.copyBufferToBuffer(src.buf, src.off, R.bufs[j], 0, bytes);
-      n += bytes;
+      const src = S.parts[p].sl[s];
+      for (const g of src.segs) { enc.copyBufferToBuffer(g.buf, g.off, R.bufs[j], g.e0 * src.per, g.n * src.per); n += g.n * src.per; }
     });
     R.layer = layer;
     this.stats.layerLoads++; this.stats.layerBytes += n;
