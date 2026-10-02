@@ -163,7 +163,9 @@ Deno.test("prefill defaults on a MoE: wide chunks with the expert-grouped kernel
   const dq = !!r.eng.moeDp4a;
   eq(dq, DP4A_DEFAULT.moe && dp4aAutoDevice(null), "MoE dp4a experts default");
   if (!n("moe_gsort") || !n(dq ? "moe_gusq_" : "moe_gusg_") || !n(dq ? "moe_dnq_" : "moe_dng_") || (dq && !n("moe_qx"))) throw new Error("no expert-grouped kernels");
-  if (n(dq ? "moe_gusg_" : "moe_gusq_")) throw new Error("both expert kernel kinds ran");
+  // dp4a experts only in the wide chunk: the 32-token grouped ubatch after it keeps the f32 tiled kernels
+  if (!n("moe_gusg_") || !n("moe_dng_")) throw new Error("the grouped ubatch outside the wide chunk did not take the f32 kernels");
+  if (!dq && n("moe_gusq_")) throw new Error("dp4a expert kernels with moeGroupDp4a off");
   eq(r.eng.pos, 300, "position after prefill");
 });
 

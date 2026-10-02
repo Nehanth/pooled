@@ -2572,7 +2572,7 @@ export class Qwen35Engine {
         if (!LW.combW) enc.copyBufferToBuffer(tx, 0, gB.XW, 0, w * B.x.stride);
         const p = enc.beginComputePass();
         this._dxyz(p, "moe_gsort", gB.bgSort, 1, 1, 1);
-        this._encGroupExperts(p, L, M, w);
+        this._encGroupExperts(p, L, M, w, true);
         this._dxyz(p, "moe_combw", LW.combW || gB.bgComb, Math.ceil(D.dim / 64), w, 1);   // combW: straight into the chunk's residual
         p.end();
         if (!LW.combW) enc.copyBufferToBuffer(gB.XW, 0, tx, 0, w * B.x.stride);
@@ -3424,10 +3424,12 @@ export class Qwen35Engine {
   }
 
   // the grouped expert launches of one MoE layer over w ubatch columns (after moe_gsort, before moe_combw): the f32
-  // tiled kernels, or with moeGroupDp4a the input quantization + dp4a gate/up, h quantization + dp4a down
-  _encGroupExperts(p, L, M, w) {
+  // tiled kernels, or with moeGroupDp4a the input quantization + dp4a gate/up, h quantization + dp4a down. dp4a only
+  // in wide chunks (wide = true), where prefillDp4a's projections run too: a prompt under one wide tile (the grouped
+  // ubatches of _prefillGrouped, 32-63 tokens at batchCols 16) keeps the f32 kernels, as its projections do.
+  _encGroupExperts(p, L, M, w, wide = false) {
     const gB = this.gB;
-    if (this.moeDp4a && this.moeGroupDp4a !== false) {
+    if (wide && this.moeDp4a && this.moeGroupDp4a !== false) {
       const { KS, hs } = this.moe;
       this._dxyz(p, "moe_qx", gB.bgQx, Math.ceil(this.dims.dim / 1024), w, 1);
       this._dInd(p, L.gusqPipe, M.gusQ, gB.ind, 0);
