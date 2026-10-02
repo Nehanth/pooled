@@ -28,9 +28,28 @@ export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }
   return out;
 }
 
+// A model's transformer layers: config.json's num_hidden_layers for a dense GGUF (qwen3-*), the GGUF
+// index for qwen35 (block_count less the MTP layers). Keyed on the model's kind, not its name: reading
+// qwen35.* keys from a dense model's index gives NaN, and a [0, NaN] range loads no layers at all.
+export async function modelLayers(src) {
+  if (src.M.kind === "qwen35") {
+    const m = (await src.header(false)).meta;
+    return m["qwen35.block_count"] - (m["qwen35.nextn_predict_layers"] || 0);
+  }
+  return (await src.cfg()).num_hidden_layers;
+}
+
+// [lo, hi) must be whole layer numbers, 0 <= lo <= hi. A NaN bound used to load an engine with no
+// layers that still "worked": embed -> final norm -> tied head, the same token every step.
+export function checkRange(range) {
+  const [lo, hi] = range || [];
+  if (!Number.isInteger(lo) || !Number.isInteger(hi) || lo < 0 || hi < lo) throw new Error(`bad layer range [${lo}, ${hi}]`);
+}
+
 // -> { device, engine, tok, cfg, G, tune, gpuErrors }
 export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, null),
   src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {} }) {
+  checkRange(range);
   const M = src.M;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("no WebGPU adapter on this machine");
