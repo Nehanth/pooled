@@ -151,7 +151,8 @@ const pipeCat = (p) => {
   if (/^moe_route|^moe_router/.test(p)) return "moe_router";
   if (p === "moe_gsort") return "moe_group_sort";
   if (/^moe_gus|^moe_gu_/.test(p)) return "moe_experts_gu";   // (moe_gusg: grouped)
-  if (/^moe_dnc|^moe_dn_|^moe_dng|^moe_combine|^moe_combw/.test(p)) return "moe_experts_down";
+  if (/^moe_dnc|^moe_dn_|^moe_dng|^moe_dnq|^moe_combine|^moe_combw/.test(p)) return "moe_experts_down";
+  if (p === "moe_qx") return "moe_quant";   // moeGroupDp4a: the experts' activation quantization
   if (/^(rmsnorm|add_res|silu_mul)/.test(p)) return "norms_glue";
   if (p === "gemm_xpose") return "glue";
   return "other";

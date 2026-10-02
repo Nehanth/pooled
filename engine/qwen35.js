@@ -15,7 +15,7 @@ import { WGSL2 } from "./wgsl/qwen35.js";
 import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout, normRouterKernel } from "./wgsl/moe.js";
 import { attnTileWGSL, attnTileConfig } from "./wgsl/attn_tile.js";
 import { attnDecWGSL, attnDecCombineGWSL, attnDecConfig, decSplits, DEC_CQ } from "./wgsl/attn_dec.js";
-import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows } from "./wgsl/moe_group.js";
+import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows, dp4aGroupWGSL } from "./wgsl/moe_group.js";
 import { f16ToF32, f32ToF16 } from "./gguf.js";
 import { TOPK_MAX, topkK, readCands } from "./topk.js";
 
@@ -56,8 +56,12 @@ export function prefillMathFeatures(adapter, mode = envPrefillMath()) {
   return [...SGM_FEATURES, ...SGM_FEATURES_OPT].filter((f) => adapter.features.has(f));
 }
 
-// MoE prefill ubatch (tokens) for the default expert-grouped + wide prefill (moeGroupPrefill, prefillUbatch)
-export const MOE_PREFILL_UBATCH = 256;
+// MoE prefill ubatch (tokens) for the default expert-grouped + wide prefill (moeGroupPrefill, prefillUbatch). 512 since
+// the dp4a expert kernels (each expert's rows are read once per chunk of its pairs, so a wider ubatch reads them for
+// more tokens): GB10 Deno 2048 / 8192 tokens ~800 / 730 tok/s at 256, ~780-860 / 790 at 512, ~835 / 815 at 1024
+// (docs/bench-log.md 2026-10-02 "MoE prefill"). Bits do not depend on it (every kernel's per-column arithmetic is the
+// same at any chunk width).
+export const MOE_PREFILL_UBATCH = 512;
 // dense (27B) default wide prefill ubatch: +24-29% prefill on the GB10 with the f32 wide GEMM (72-76 -> 91-99 tok/s),
 // logits relDiff vs the 16-column path 4e-5..1.4e-4 (under the dense prefill tolerance 2e-3)
 export const DENSE_PREFILL_UBATCH = 256;
@@ -74,8 +78,10 @@ export const WIDE_SUBMIT_LAYERS = 8;
 // docs/bench-log.md 2026-10-02, PR #309): 27B and Qwen3.5-2B, 256 teacher-forced tokens on 15 prompts up to 8K tokens,
 // KL(llama.cpp || ours) over its top 20 within 2x of the f32 path's (27B 0.00046 vs 0.00045 nats), top-1 agreement
 // with llama.cpp no lower (98.94% vs 98.88%), and 40 scored downstream items identical (33/33, 2B 27/27).
-// MoE: opt-in (+8-10% there, relDiff over the MoE prefill tolerance; not evaluated).
-export const DP4A_DEFAULT = Object.freeze({ dense: true, moe: false });
+// MoE: on, together with the dp4a expert kernels (moeGroupDp4a, which follows DP4A_DEFAULT.moe): passed the same
+// pre-registered evaluation on the 35B-A3B (tests/eval_dp4a.js MODEL=moe, docs/bench-log.md 2026-10-02 "MoE prefill"):
+// KL(llama.cpp || ours) 0.00270 vs the f32 path's 0.00255 nats, top-1 98.10% vs 98.21%, downstream 36 / 36 both.
+export const DP4A_DEFAULT = Object.freeze({ dense: true, moe: true });
 // Devices where "auto" turns dp4a on: measured faster there (docs/bench-log.md, 2026-09-30). NVIDIA by the adapter's
 // vendor (Chrome); Deno reports no vendor, so there: any OS but macOS (the GB10 is where it was measured). Never Apple:
 // Metal has no native int8 dot product. Other vendors stay opt-in until measured.
@@ -215,7 +221,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnTileKvh = true, attnTilePf = true, attnTileNr = true, wideDn = true, wideRouter = true, mtpWide = true, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, moeGroupDp4a, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -348,7 +354,11 @@ export class Qwen35Engine {
     const aptOn = attnPrefillTile !== false;
     this.attnPTCfg = this.flash && !this.kvQ8 && attnPrefillTile !== false
       ? attnTileConfig({ hd, G: nH / nKV, faSplit: this.faSplit, faSplits: this.faSplits,
-        wgMem: device.limits.maxComputeWorkgroupStorageSize, target: attnPrefillSplits, tk: attnPrefillTK }) : null;
+        wgMem: device.limits.maxComputeWorkgroupStorageSize, target: attnPrefillSplits, tk: attnPrefillTK,
+        // the K / V tile as f16 pairs (kvh), the next tile prefetched into registers (pf), named registers (nr): the same
+        // arithmetic, so the same bits; GB10 one 16-column pass at 8K / 16K: 1630 / 2769 -> 1505 / 2468 µs
+        // (tests/bench/attn_tile_bench.js). attnTileKvh / attnTilePf / attnTileNr: false for A/B.
+        kvh: attnTileKvh, pf: attnTilePf, nr: attnTileNr }) : null;
     // attnDecode: "v2" (default) = split-K decode attention with coalesced loads and per-position split
     // lengths (engine/wgsl/attn_dec.js) for decode and verify passes; faster than attn_flash at every context
     // length measured (docs/research/long-context-2026-09.md). Other numerics than attn_flash (same greedy
@@ -492,6 +502,10 @@ export class Qwen35Engine {
       else if (why === "") { this.moeGrpU = gU; this.moeGrpUC = UC; this.moeGrpTiled = !!moeGroupTiled; }
     }
     this.moeGroup = this.moeGrpU > 0;   // runtime kill switch
+    // wide prefill structure switches (also runtime engine properties, for A/B; none of them changes a value of the
+    // trunk): the DeltaNet middle once per chunk, the grouped chunk's router once per chunk, the draft-cache fill
+    // with wide GEMMs (see _encodeLayerWide / _mtpFillWide)
+    this.wideDn = wideDn !== false; this.wideRouter = wideRouter !== false; this.mtpWide = mtpWide !== false;
 
     // ---- wide prefill (docs/research/prefill-profile-2026-09.md candidate B) ----
     // prefillUbatch = U > 0: prefillTokens runs chunks of up to U prompt tokens (multiples of the tile
@@ -547,6 +561,20 @@ export class Qwen35Engine {
     }
     this.prefillDp4a = !!this.dp4aCfg;
 
+    // moeGroupDp4a: the expert-grouped prefill's expert kernels as int8 dot products (engine/wgsl/moe_group.js
+    // dp4aGroupKernel: the chunk's activations quantized per 32 values, llama.cpp's MMQ numerics) instead of the f32
+    // tiled kernels. Needs the tiled grouped prefill (moeGroupTiled) and dot4I8Packed; default (undefined / "auto"):
+    // DP4A_DEFAULT.moe on the devices dp4aAutoDevice() accepts. engine.moeGroupDp4a = false switches it off at runtime.
+    this.moeDp4a = false;
+    {
+      const auto = moeGroupDp4a === undefined || moeGroupDp4a === "auto";
+      if (this.moeGrpU && this.moeGrpTiled && (auto ? DP4A_DEFAULT.moe && dp4aAutoDevice(dpInfo) : !!moeGroupDp4a)) {
+        const why = /apple/i.test(dpInfo?.vendor || "") ? "Apple GPUs emulate dp4a" : !(await probeDp4a(device)) ? "no packed_4x8_integer_dot_product on this device" : "";
+        if (why) { if (!auto) console.warn(`moeGroupDp4a: off (${why})`); } else this.moeDp4a = true;
+      } else if (!auto && moeGroupDp4a) console.warn("moeGroupDp4a: off (needs the tiled expert-grouped prefill)");
+    }
+    this.moeGroupDp4a = this.moeDp4a;
+
     // prefill GEMM operand precision (see PREFILL_MATH above). _pmAvail: the modes built for this
     // engine; engine.prefillMath can be switched at runtime among them (A/B), anything else runs f32.
     let pm = prefillMath ?? envPrefillMath() ?? "f32";
@@ -565,6 +593,8 @@ export class Qwen35Engine {
       + (this.dnNba ? normRouterKernel({ ROWS: 4, bf16: false, name: "dn_nba", P: "nba", struct: !(this.moeFuse && this.moe.nrt) }) : "")
       + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, nrt: this.moe.nrt, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && this.moeGrpTiled ? tiledGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
+        gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
+      + (this.moeDp4a ? dp4aGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp, sort: false,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && !this.moeGrpTiled ? moeGroupWGSL({ K: this.moe.K, R: dnGroupRows(this.moeGrpUC), UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
@@ -626,7 +656,7 @@ export class Qwen35Engine {
     // layerFuse's kernels: only the flags on at create, and optional (see the layerFuse note above)
     const lfOf = new Map();
     for (const [k, names] of Object.entries(LF_PIPES)) for (const n of names) { if (this.layerFuse[k]) lfOf.set(n, k); else delete G1[n]; }
-    const lfFails = [], dpFails = [];
+    const lfFails = [], dpFails = [], mdpFails = [];
     if (this.moe) Object.assign(G1, {
       moe_router: ["ro", "rw", "rw", "u"], moe_combine: ["rw", "ro", "ro", "ro", "ro", "u"],
       moe_gu_q4: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"], moe_gu_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"],
@@ -644,6 +674,12 @@ export class Qwen35Engine {
       G1.moe_combw = ["rw", "ro", "ro", "u"];
       for (const p of this.moe.guPairs) G1["moe_gusg_" + p] = ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "ro", "u"];
       for (const p of this.moe.dnPairs) G1["moe_dng_" + p] = ["ro", "ro", "ro", "rw", "ro", "ro", "ro", "u"];
+    }
+    const mdpPipes = this.moeDp4a ? ["moe_qx", ...this.moe.guPairs.map((p) => "moe_gusq_" + p), ...this.moe.dnPairs.map((p) => "moe_dnq_" + p)] : [];
+    if (this.moeDp4a) {
+      G1.moe_qx = ["ro", "rw", "u"];
+      for (const p of this.moe.guPairs) G1["moe_gusq_" + p] = ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "ro", "u"];
+      for (const p of this.moe.dnPairs) G1["moe_dnq_" + p] = ["ro", "ro", "ro", "rw", "ro", "ro", "ro", "u"];
     }
     // narrower twins: a verify or tail pass with w live columns pays for w, not batchCols
     for (const W of [8, 4]) if (batchCols > W) Object.assign(G1, {
@@ -686,6 +722,10 @@ export class Qwen35Engine {
         try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { dpFails.push(e); }
         return;
       }
+      if (mdpPipes.includes(name)) {   // optional: a compiler that rejects them leaves the f32 tiled expert kernels
+        try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { mdpFails.push(e); }
+        return;
+      }
       if (!lfOf.has(name)) { this.pipes[name] = await compilePipeline(device, desc); return; }
       try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { lfFails.push(e); }
     }));
@@ -693,6 +733,11 @@ export class Qwen35Engine {
       for (const n of DP4A_PIPES) delete this.pipes[n];
       this.dp4aCfg = null; this.prefillDp4a = false;
       console.warn(`prefillDp4a off: ${dpFails.map((e) => e.message).join("; ")}`);
+    }
+    if (mdpFails.length) {
+      for (const n of mdpPipes) delete this.pipes[n];
+      this.moeDp4a = false; this.moeGroupDp4a = false;
+      console.warn(`moeGroupDp4a off: ${mdpFails.map((e) => e.message).join("; ")}`);
     }
     if (lfFails.length) {   // the unfused kernels compiled (or the load would have failed above): run those
       for (const n of lfOf.keys()) delete this.pipes[n];
@@ -922,6 +967,7 @@ export class Qwen35Engine {
         R.ffnDown = up(L.shDown);
         R.gusPipe = `moe_gus_${R.expGate.kind}_${L.shGate.kind}`; R.dncPipe = `moe_dnc_${R.expDown.kind}_${R.ffnDown.kind}`;
         R.gusgPipe = R.gusPipe.replace("moe_gus_", "moe_gusg_"); R.dngPipe = R.dncPipe.replace("moe_dnc_", "moe_dng_");
+        R.gusqPipe = R.gusPipe.replace("moe_gus_", "moe_gusq_"); R.dnqPipe = R.dncPipe.replace("moe_dnc_", "moe_dnq_");
         R.moeU = (xs, dOut, dIn, ys, pk) => [dOut, dIn, sDim, nExp, xs, ys, norm, 1, pk ? pk.oUq : 0, pk ? pk.oGs : 0, pk ? pk.oUs : 0, 0];
         const U = (a) => this._buf(new Uint32Array(a), GPUBufferUsage.UNIFORM);
         if (nrt) R.bgNrt = this._bg(this.pipes.moe_nrt, 1, [this.x, R.postNorm.buf, R.router.buf, this.xn, MB.logits, U([dim, nExp + 1, dim, nExp + 1, dim, 0, 0, 0])]);
@@ -1893,6 +1939,12 @@ export class Qwen35Engine {
       gB.bgSort = this._bg2res(this.pipes.moe_gsort, [{ buffer: gB.sel }, { buffer: gB.grp }, { buffer: gB.ind }, { buffer: gB.sortU }]);
       gB.bgComb = this._bg2res(this.pipes.moe_combw, [{ buffer: gB.XW }, { buffer: gB.Y }, { buffer: gB.selw },
         u32([D.dim, 0, 0, nExp, B.x.stride / 4, 0, 0, 0, 0, 0, 0, 0])]);
+      if (this.moeDp4a) {   // the quantized expert inputs: packed i8 blocks, then their f32 scales (moe_qx)
+        gB.XQ = nb(U * D.dim * 9 / 8); gB.HQ = nb(U * KS * hs * 9 / 8);
+        gB.bgQx = this._bg2res(this.pipes.moe_qx, [{ buffer: gB.XNW }, { buffer: gB.XQ }, u32([D.dim, B.xn.stride / 16, U * D.dim / 4, 0])]);
+        // h is compact (pair stride hs): quantized as one flat column of U * KS * hs values, so every workgroup is full
+        gB.bgQh = this._bg2res(this.pipes.moe_qx, [{ buffer: gB.H }, { buffer: gB.HQ }, u32([U * KS * hs, 0, U * KS * hs / 4, 0])]);
+      }
     }
     if (this.flash) this.faUB = this._buf(new Uint32Array([B.q.stride / 4, B.attnOut.stride / 4, this.faSplit, this.faSplits]), GPUBufferUsage.UNIFORM);
     if (this.adCfg) this.adUB = this._buf(new Uint32Array([B.q.stride / 4, B.attnOut.stride / 4, this.adCfg.S, this.adCfg.S]), GPUBufferUsage.UNIFORM);
@@ -2000,6 +2052,12 @@ export class Qwen35Engine {
             { buffer: gB.XNW }, { buffer: gB.H }, { buffer: gB.grp }, { buffer: L.shPack.buf }, U(L.moeU(st(B.xn), ei, D.dim, hs, L.shPack))]);
           mc.dngG = this._bg2res(this.pipes[L.dngPipe], [{ buffer: L.expDown.qs }, { buffer: L.expDown.sc }, { buffer: gB.H }, { buffer: gB.Y },
             { buffer: gB.grp }, { buffer: L.ffnDown.qs }, { buffer: L.ffnDown.sc }, U(L.moeU(st(B.x), D.dim, ei, hs))]);
+          if (this.moeDp4a) {
+            mc.gusQ = this._bg2res(this.pipes[L.gusqPipe], [{ buffer: L.expGate.qs }, { buffer: L.expGate.sc }, { buffer: L.expUp.qs }, { buffer: L.expUp.sc },
+              { buffer: gB.XQ }, { buffer: gB.H }, { buffer: gB.grp }, { buffer: L.shPack.buf }, U(L.moeU(st(B.xn), ei, D.dim, hs, L.shPack))]);
+            mc.dnQ = this._bg2res(this.pipes[L.dnqPipe], [{ buffer: L.expDown.qs }, { buffer: L.expDown.sc }, { buffer: gB.HQ }, { buffer: gB.Y },
+              { buffer: gB.grp }, { buffer: L.ffnDown.qs }, { buffer: L.ffnDown.sc }, U(L.moeU(st(B.x), D.dim, ei, hs))]);
+          }
         }
       } else if (L.moe) {
         const { nExp, K, inter: ei, norm } = this.moe;
@@ -2183,13 +2241,14 @@ export class Qwen35Engine {
   }
   // DeltaNet beta / alpha projections, conv, gates + L2, recurrence, gated norm: B.xn, B.qkv, B.z -> B.gated
   // baDone: dn_nba already wrote beta / alpha
+  _encDnBA(p, LB, nCols) {   // the DeltaNet beta / alpha projections: B.xn -> B.betaRaw / B.alpha
+    const [, , obeta, oalpha] = LB.dnOps;
+    if (this.fuseProj && LB.ba && !this._gemmAt(obeta, nCols) && !this._gemmAt(oalpha, nCols)) this._dop(p, LB.ba, nCols);
+    else { this._dop(p, obeta, nCols); this._dop(p, oalpha, nCols); }
+  }
   _encDnMid(p, LB, M, nCols, baDone = false) {
     const D = this.dims;
-    const [, , obeta, oalpha] = LB.dnOps;
-    if (!baDone) {
-      if (this.fuseProj && LB.ba && !this._gemmAt(obeta, nCols) && !this._gemmAt(oalpha, nCols)) this._dop(p, LB.ba, nCols);
-      else { this._dop(p, obeta, nCols); this._dop(p, oalpha, nCols); }
-    }
+    if (!baDone) this._encDnBA(p, LB, nCols);
     this._dMC(p, "dn_conv_mc", M.conv, D.convDim, 64, 1);           // loops over columns
     this._dMC(p, "dn_pre_mc", M.pre, 128, 128, nCols);              // gates + L2(q,k) fused, one WG per column
     this._dMC(p, "dn_delta_mc", M.delta, D.nVH * 128, 128, 1);     // loops over columns
@@ -2288,6 +2347,9 @@ export class Qwen35Engine {
     const uniq = (...bs) => bs.filter((b, i) => bs.findIndex((c) => c.buf === b.buf) === i);   // fuseProj segments share a buffer
     // one frame per sub-batch: [pos, seqLen, nCols, snap], written by prefillTokens before each chunk
     this.frameW = Array.from({ length: U / NC }, () => dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+    this.frameWD = dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });   // [basePos, basePos + 1, w, 0]
+    this.bgCommonWD = {};
+    for (const name of this._colPipes) if (this.pipes[name]) this.bgCommonWD[name] = this._bg2g0(this.pipes[name], [{ buffer: this.cfgBuf }, { buffer: this.frameWD }]);
     this.bgCommonW = this.frameW.map((f) => {
       const m = {};
       for (const name of this._colPipes) if (this.pipes[name]) m[name] = this._bg2g0(this.pipes[name], [{ buffer: this.cfgBuf }, { buffer: f }]);
@@ -2313,6 +2375,31 @@ export class Qwen35Engine {
         R.out = wop(L.wOut, Wt.gated, Wt.x, D.dim, D.dInner, true); R.qOut = qop(Wt.gated, D.dInner);
         R.toNarrow = uniq(B.xn, B.qkv, B.z);   // xn: the beta / alpha GEMV stays batched
         R.toWide = [B.gated];
+        // wide DeltaNet middle (engine.wideDn, default on): the beta / alpha GEMV per sub-batch into a wide twin, then
+        // conv, gates + L2, the recurrence and the gated norm ONE launch each over the whole chunk (the same
+        // per-column kernels, which loop over frame.nCols columns or take one workgroup row per column: same bits)
+        const tw = { ba: W(B.betaRaw), beta: W(B.beta), decay: W(B.decay), conv: W(B.convOut), dOut: W(B.dOut) };
+        const dn = { buffer: this.dnBuf };
+        R.dnW = {
+          conv: this._bg2res(this.pipes.dn_conv_mc, [whole(Wt.qkv), { buffer: L.convW }, { buffer: L.convState }, whole(tw.conv),
+            mcU(D.convDim, st(B.qkv), st(B.convOut)), { buffer: L.conv_shadow }]),
+          pre: this._bg2res(this.pipes.dn_pre_mc, [whole(W(B.alpha)), whole(tw.ba), { buffer: L.dtBias }, { buffer: L.ssmA },
+            whole(tw.beta), whole(tw.decay), whole(tw.conv), mcU(0, st(B.alpha), st(B.convOut)), dn]),
+          delta: this._bg2res(this.pipes.dn_delta_mc, [whole(tw.conv), whole(tw.beta), whole(tw.decay), { buffer: L.S }, whole(tw.dOut),
+            mcU(0, st(B.convOut), st(B.beta), st(B.dOut)), dn, { buffer: L.S_shadow || this._dummy }]),
+          gatenorm: this._bg2res(this.pipes.dn_gatenorm_mc, [whole(tw.dOut), whole(Wt.z), { buffer: L.ssmNorm }, whole(Wt.gated),
+            mcU(0, st(B.dOut), st(B.z), st(B.gated)), dn]),
+        };
+      }
+      if (L.moe && L.fused && this.moe.nrt && this.gB) {   // the expert-grouped chunk's router over all its columns at once (_wideGrp)
+        const gB = this.gB, ls = B.mLogits.stride / 4, u32 = (a) => ({ buffer: this._buf(new Uint32Array(a), GPUBufferUsage.UNIFORM) });
+        if (!gB.LG) gB.LG = dev.createBuffer({ size: U * B.mLogits.stride, usage: S });
+        if (!gB.XNS) gB.XNS = dev.createBuffer({ size: U * B.xn.stride, usage: S });   // moe_nrt's own xn: not used (the experts take norm2's)
+        R.nrtW = this._bg2res(this.pipes.moe_nrt, [whole(Wt.x), { buffer: L.postNorm.buf }, { buffer: L.router.buf }, { buffer: gB.XNS }, { buffer: gB.LG },
+          u32([D.dim, this.moe.nExp + 1, st(Wt.x), ls, st(B.xn), 0, 0, 0])]);
+        R.routeW = this._bg2res(this.pipes.moe_route, [{ buffer: gB.LG }, { buffer: gB.sel }, { buffer: gB.selw }, u32(L.moeU(ls, 0, 0, 0))]);
+        R.combW = this._bg2res(this.pipes.moe_combw, [whole(Wt.x), { buffer: gB.Y }, { buffer: gB.selw },
+          u32([D.dim, 0, 0, this.moe.nExp, st(Wt.x), 0, 0, 0, 0, 0, 0, 0])]);
       }
       if (!L.moe) {
         R.gate = wop(L.ffnGate, Wt.xn, Wt.g, D.inter, D.dim);
@@ -2322,6 +2409,83 @@ export class Qwen35Engine {
       }
       return R;
     });
+  }
+  // The draft (MTP) block's share of a wide chunk (_mtpFillWide): only its KV cache rows matter during prefill (the
+  // draft block's attention output and FFN feed the draft head, which prefill never runs), so the wide fill is
+  // enorm / hnorm + eh_proj + the block's input norm + k / v projections as wide GEMMs, then per sub-batch the
+  // attention glue (k norm, rope) and kv_store at positions + 1. null when the block cannot take the wide path.
+  _initMtpWide() {
+    const M2 = this.mtp, L = this.mtpLayer, D = this.dims, dev = this.device, B = this.B, NC = this.NC, U = this.ubatch, Wt = this.Wt, cfg = this.wideCfg;
+    const qk = (e) => !!e && (e.kind === "q4" || e.kind === "q8");
+    if (!M2 || !L || !L.isFull || !B.mEmb || !qk(M2.ehProj) || !(L.fKV ? qk(L.fKV.w) : qk(L.wk) && qk(L.wv)) || (2 * D.dim) % cfg.KS) return null;
+    const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+    const lim = Math.min(dev.limits.maxStorageBufferBindingSize, dev.limits.maxBufferSize);
+    if (U * B.ehIn.stride > lim) return null;
+    const emb = dev.createBuffer({ size: U * B.mEmb.stride, usage: S }), ehIn = dev.createBuffer({ size: U * B.ehIn.stride, usage: S });
+    this._wTwin.set(Symbol("mtpEmb"), emb); this._wTwin.set(Symbol("mtpEhIn"), ehIn);   // freed with the twins
+    const st = (b) => b.stride / 4;
+    const mcU = (n, s0 = 0, s1 = 0, s2 = 0) => {
+      const k = n + "," + s0 + "," + s1 + "," + s2;
+      return this._mcU[k] || (this._mcU[k] = { buffer: this._buf(new Uint32Array([n, s0, s1, s2]), GPUBufferUsage.UNIFORM) });
+    };
+    const view = (b) => (b.off ? Qwen35Engine._view(b.buf, b.off, b.buf.size - b.off) : b.buf);
+    const op = (w, x, y, dOut, dIn) => {   // as _initWide's wop (f32, plus the dp4a twin when dp4a is built)
+      const pipe = `gemm_w_${w.kind}`, o = { pipe, gx: Math.ceil(dOut / cfg.BM), bg: this._bg(this.pipes[pipe], 1, [w.qs, w.sc, view(x), view(y), this._shapeB(dOut, dIn, x.stride / 16, y.stride / 4)]) };
+      if (this.dp4aCfg) { const dc = this.dp4aCfg, pd = `gemm_d_${w.kind}`;
+        o.d = { pipe: pd, gx: Math.ceil(dOut / dc.BM), bn: dc.BN, bg: this._bg(this.pipes[pd], 1, [w.qs, w.sc, this._wDq.q, this._wDq.d, view(y), this._shapeB(dOut, dIn, 0, y.stride / 4)]) }; }
+      return o;
+    };
+    const qop = (x, dIn) => this.dp4aCfg && { dIn, bg: this._bg2res(this.pipes.quant_q8_w, [Qwen35Engine._res(view(x)),
+      { buffer: this._wDq.q }, { buffer: this._wDq.d }, mcU(dIn, x.stride / 16)]) };
+    const E = { buf: ehIn, stride: B.ehIn.stride };
+    const frames = Array.from({ length: U / NC }, () => dev.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST }));
+    return {
+      emb, frames,
+      common: frames.map((f) => { const m = {}; for (const name of this._colPipes) if (this.pipes[name]) m[name] = this._bg2g0(this.pipes[name], [{ buffer: this.cfgBuf }, { buffer: f }]); return m; }),
+      enorm: this._bg2res(this.pipes.rmsnorm_mc, [{ buffer: emb }, { buffer: M2.enorm.buf }, { buffer: ehIn, offset: 0, size: ehIn.size }, mcU(D.dim, st(B.mEmb), st(B.ehIn))]),
+      hnorm: this._bg2res(this.pipes.rmsnorm_mc, [{ buffer: Wt.x.buf }, { buffer: M2.hnorm.buf }, { buffer: ehIn, offset: D.dim * 4, size: ehIn.size - D.dim * 4 }, mcU(D.dim, st(Wt.x), st(B.ehIn))]),
+      qIn: qop(E, 2 * D.dim), proj: op(M2.ehProj, E, Wt.x, D.dim, 2 * D.dim),
+      norm1: this._bg2res(this.pipes.rmsnorm_mc, [{ buffer: Wt.x.buf }, { buffer: L.attnNorm.buf }, { buffer: Wt.xn.buf }, mcU(D.dim, st(Wt.x), st(Wt.xn))]),
+      qXn: qop(Wt.xn, D.dim),
+      kv: L.fKV ? [op(L.fKV.w, Wt.xn, { buf: Wt.k.buf, stride: Wt.k.stride }, L.fKV.rows, D.dim)] : [op(L.wk, Wt.xn, Wt.k, D.kvDim, D.dim), op(L.wv, Wt.xn, Wt.v, D.kvDim, D.dim)],
+      toNarrow: [B.k, B.v].filter((b, i, a) => a.findIndex((c) => c.buf === b.buf) === i),
+    };
+  }
+  // Fill the draft cache for wide chunk ids[i .. i + w) at positions basePos + 1 ... from the trunk's final hiddens in
+  // Wt.x (clobbers Wt.x / Wt.xn). False (nothing done) when the wide fill does not apply: then the per-sub-batch fill runs.
+  _mtpFillWide(ids, i, basePos, w) {
+    if (this.mtpWide === false || ids.length - i - 1 < w) return false;   // the prompt's last column has no next token: the old fill
+    if (this._mtpW === undefined) { try { this._mtpW = this._initMtpWide(); } catch (e) { console.warn("wide draft fill off:", String(e.message || e).slice(0, 200)); this._mtpW = null; } }
+    const MW = this._mtpW; if (!MW) return false;
+    this._pre = null;   // as _mtpFillBatch
+    const q = this.device.queue, NC = this.NC, D = this.dims, B = this.B, Mm = this.layerB[this.layers.length].mc;
+    for (let j = 0; j < w / NC; j++) q.writeBuffer(MW.frames[j], 0, new Uint32Array([basePos + j * NC + 1, basePos + j * NC + 2, NC, 0]));
+    for (let c = 0; c < w; c++) q.writeBuffer(MW.emb, c * B.mEmb.stride, this._embedRowF32(ids[i + c + 1]));
+    const enc = this.device.createCommandEncoder();
+    {
+      const p = enc.beginComputePass();
+      this._dMC(p, "rmsnorm_mc", MW.enorm, 256, 256, w);
+      this._dMC(p, "rmsnorm_mc", MW.hnorm, 256, 256, w);
+      this._dQ(p, MW.qIn, w);
+      this._dW(p, MW.proj, w);
+      this._dMC(p, "rmsnorm_mc", MW.norm1, 256, 256, w);
+      this._dQ(p, MW.qXn, w);
+      for (const o of MW.kv) this._dW(p, o, w);
+      p.end();
+    }
+    try {
+      for (let j = 0; j < w / NC; j++) {
+        for (const b of MW.toNarrow) this._wCopy(enc, b, j, false);
+        this._mcCommon = MW.common[j];
+        const p = enc.beginComputePass();
+        this._encAttnGlue(p, Mm, NC);
+        this._dMC(p, this.ksPipe, Mm.kvStore, D.kvDim / (this.kvQ8 ? 32 : 2), 64, NC);
+        p.end();
+        this._mcCommon = null;
+      }
+    } finally { this._mcCommon = null; }
+    q.submit([enc.finish()]);
+    return true;
   }
   // sub-batch j of the chunk between a wide twin and its batchCols-wide buffer (whole columns, all segments)
   _wCopy(enc, b, j, toWide) {
@@ -2360,7 +2524,27 @@ export class Qwen35Engine {
         for (const op of LW.proj) this._dW(p, op, w);
         p.end();
       }
-      for (let j = 0; j < J; j++) {
+      if (!L.isFull && LW.dnW && this.wideDn !== false) {
+        const B2 = this.B;
+        for (let j = 0; j < J; j++) {   // beta / alpha: the batched GEMV per sub-batch, into the wide twin
+          this._wCopy(enc, B2.xn, j, false);
+          this._mcCommon = this.bgCommonW[j];
+          const p = enc.beginComputePass();
+          this._encDnBA(p, LB, NC);
+          p.end();
+          this._mcCommon = null;
+          this._wCopy(enc, B2.betaRaw, j, true);
+          if (B2.alpha.buf !== B2.betaRaw.buf) this._wCopy(enc, B2.alpha, j, true);
+        }
+        this._mcCommon = this.bgCommonWD;
+        const p = enc.beginComputePass();
+        this._dMC(p, "dn_conv_mc", LW.dnW.conv, D.convDim, 64, 1);
+        this._dMC(p, "dn_pre_mc", LW.dnW.pre, 128, 128, w);
+        this._dMC(p, "dn_delta_mc", LW.dnW.delta, D.nVH * 128, 128, 1);
+        this._dMC(p, "dn_gatenorm_mc", LW.dnW.gatenorm, D.nVH * 128, 128, w);
+        p.end();
+        this._mcCommon = null;
+      } else for (let j = 0; j < J; j++) {
         for (const b of LW.toNarrow) this._wCopy(enc, b, j, false);
         this._mcCommon = this.bgCommonW[j];
         const p = enc.beginComputePass();
@@ -2392,7 +2576,12 @@ export class Qwen35Engine {
         // experts expert-grouped over the whole chunk (moeGroupPrefill on too): route each sub-batch, then one
         // sort + grouped gate/up + grouped down + combine over all w tokens, as _prefillGrouped does per ubatch
         const gB = this.gB, ss = NC * this.moe.KS * 4, tx = this._wTwin.get(B.x.buf), txn = this._wTwin.get(B.xn.buf);
-        for (let j = 0; j < J; j++) {
+        if (LW.nrtW && this.wideRouter !== false) {   // moe_nrt + moe_route over all w columns: the same per-column kernels, 2 launches
+          const p = enc.beginComputePass();
+          this._dxyz(p, "moe_nrt", LW.nrtW, Math.ceil((this.moe.nExp + 1) / this.moe.nrt.ROWS), w, 1);
+          this._dxyz(p, "moe_route", LW.routeW, w, 1, 1);
+          p.end();
+        } else for (let j = 0; j < J; j++) {
           this._wCopy(enc, B.xn, j, false);
           if (this.moe.nrt) this._wCopy(enc, B.x, j, false);   // moe_nrt norms x itself
           this._mcCommon = this.bgCommonW[j];
@@ -2403,15 +2592,14 @@ export class Qwen35Engine {
           enc.copyBufferToBuffer(B.mSel, 0, gB.sel, j * ss, ss);
           enc.copyBufferToBuffer(B.mSelw, 0, gB.selw, j * ss, ss);
         }
-        enc.copyBufferToBuffer(tx, 0, gB.XW, 0, w * B.x.stride);
         enc.copyBufferToBuffer(txn, 0, gB.XNW, 0, w * B.xn.stride);
+        if (!LW.combW) enc.copyBufferToBuffer(tx, 0, gB.XW, 0, w * B.x.stride);
         const p = enc.beginComputePass();
         this._dxyz(p, "moe_gsort", gB.bgSort, 1, 1, 1);
-        this._dInd(p, L.gusgPipe, M.gusG, gB.ind, 0);
-        this._dInd(p, L.dngPipe, M.dngG, gB.ind, 12);
-        this._dxyz(p, "moe_combw", gB.bgComb, Math.ceil(D.dim / 64), w, 1);
+        this._encGroupExperts(p, L, M, w, true);
+        this._dxyz(p, "moe_combw", LW.combW || gB.bgComb, Math.ceil(D.dim / 64), w, 1);   // combW: straight into the chunk's residual
         p.end();
-        enc.copyBufferToBuffer(gB.XW, 0, tx, 0, w * B.x.stride);
+        if (!LW.combW) enc.copyBufferToBuffer(gB.XW, 0, tx, 0, w * B.x.stride);
       } else if (L.moe) for (let j = 0; j < J; j++) {   // experts: the batched MoE kernels, sub-batch by sub-batch
         this._wCopy(enc, B.xn, j, false); this._wCopy(enc, B.x, j, false);
         this._mcCommon = this.bgCommonW[j];
@@ -2447,6 +2635,7 @@ export class Qwen35Engine {
     const q = this.device.queue, NC = this.NC, basePos = this.pos, Wx = this.Wt.x;
     this._dp4aOn = !!(this.dp4aCfg && this.prefillDp4a !== false);
     for (let j = 0; j < w / NC; j++) q.writeBuffer(this.frameW[j], 0, new Uint32Array([basePos + j * NC, basePos + j * NC + 1, NC, 0]));
+    q.writeBuffer(this.frameWD, 0, new Uint32Array([basePos, basePos + 1, w, 0]));
     const dim = this.dims.dim;
     for (let c = 0; c < w; c++) q.writeBuffer(Wx.buf, c * Wx.stride, xs ? xs.subarray(c * dim, (c + 1) * dim) : this._embedRowF32(ids[i + c]));
     const gB = this.gB;
@@ -2460,7 +2649,7 @@ export class Qwen35Engine {
     }
     enc.copyBufferToBuffer(Wx.buf, (w - 1) * Wx.stride, this.x, 0, this.dims.dim * 4);
     q.submit([enc.finish()]);
-    if (fill && this.mtp && this.mtpFill !== false) for (let j = 0; j < w / NC; j++) {
+    if (fill && this.mtp && this.mtpFill !== false && !this._mtpFillWide(ids, i, basePos, w)) for (let j = 0; j < w / NC; j++) {
       const e = this.device.createCommandEncoder();   // the sub-batch's final hiddens into B.x, as after an NC pass
       this._wCopy(e, this.B.x, j, false);
       q.submit([e.finish()]);
@@ -3291,8 +3480,7 @@ export class Qwen35Engine {
         if (grp) {
           const M = this.layerB[l].mc, p = enc.beginComputePass();
           this._dxyz(p, "moe_gsort", gB.bgSort, 1, 1, 1);
-          this._dInd(p, L.gusgPipe, M.gusG, gB.ind, 0);
-          this._dInd(p, L.dngPipe, M.dngG, gB.ind, 12);
+          this._encGroupExperts(p, L, M, W);
           this._dxyz(p, "moe_combw", gB.bgComb, Math.ceil(D.dim / 64), W, 1);
           p.end();
         }
@@ -3311,6 +3499,24 @@ export class Qwen35Engine {
       else for (let c = 0; c < NC; c++) if (i + c + 1 < ids.length) await this.mtpRun(c, ids[i + c + 1], pos + c + 1, false);
     }
     this.pos += W;
+  }
+
+  // the grouped expert launches of one MoE layer over w ubatch columns (after moe_gsort, before moe_combw): the f32
+  // tiled kernels, or with moeGroupDp4a the input quantization + dp4a gate/up, h quantization + dp4a down. dp4a only
+  // in wide chunks (wide = true), where prefillDp4a's projections run too: a prompt under one wide tile (the grouped
+  // ubatches of _prefillGrouped, 32-63 tokens at batchCols 16) keeps the f32 kernels, as its projections do.
+  _encGroupExperts(p, L, M, w, wide = false) {
+    const gB = this.gB;
+    if (wide && this.moeDp4a && this.moeGroupDp4a !== false) {
+      const { KS, hs } = this.moe;
+      this._dxyz(p, "moe_qx", gB.bgQx, Math.ceil(this.dims.dim / 1024), w, 1);
+      this._dInd(p, L.gusqPipe, M.gusQ, gB.ind, 0);
+      this._dxyz(p, "moe_qx", gB.bgQh, Math.ceil(w * KS * hs / 1024), 1, 1);
+      this._dInd(p, L.dnqPipe, M.dnQ, gB.ind, 12);
+      return;
+    }
+    this._dInd(p, L.gusgPipe, M.gusG, gB.ind, 0);
+    this._dInd(p, L.dngPipe, M.dngG, gB.ind, 12);
   }
 
   // What the last grouped MoE layer saw: { pairs, uniqueRouted (distinct routed experts), chunks }. For logs and

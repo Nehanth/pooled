@@ -39,43 +39,45 @@ export function moeGroupSizes({ U, K, nExp, UC }) {
 }
 
 // ---- moe_gsort ----
-// Thread t owns the experts e with e % 256 == t (QM = ceil((nExp + 1) / 256) of them). Pass 1 counts each
-// owned expert's pairs over the pair list (read in tiles of 1024 through workgroup memory), a scan in expert
-// order gives each expert its first chunk and first pair-list slot, pass 2 appends each pair to its expert's
-// list in pair order (stable), and the owner writes its experts' chunk records. No atomics: the result is a
-// pure function of sel.
+// One workgroup of 256 threads. Pass 1 counts each expert's pairs with workgroup atomics (an order-free sum), a scan
+// in expert order (thread t owns the experts e with e % 256 == t, QM = ceil((nExp + 1) / 256) of them) gives each
+// expert its first chunk and first pair-list slot, and pass 2 places the pairs in rounds of CR whole columns (one pair
+// per thread): each expert gets a CR-bit mask of the round's columns that picked it (atomicOr), a pair's slot is its
+// expert's running count plus the mask bits below its column, and the round's last such column advances the count.
+// A column picks an expert at most once (top-K picks distinct experts; the shared expert is one slot), so this is the
+// stable order (by pair index), the same output as the counting loops it replaced, in O(pairs / 256) steps per
+// thread instead of O(pairs) (those took ~0.5 ms a launch on the GB10, ~3% of MoE prefill). The result is a pure
+// function of sel.
 function sortKernel(K, UC, QM, CO, O) {
-  const KS = K + 1, D = O.div;
+  const KS = K + 1, D = O.div, Q = Array.from({ length: QM }, (_, q) => q), NE = 256 * QM;
+  const CR = Math.min(28, Math.floor(256 / KS));   // columns per placement round (lc < 28: the masks stay below 2^28)
   return `
 @group(1) @binding(0) var<storage, read> gso_sel: array<u32>;
 @group(1) @binding(1) var<storage, read_write> gso_grp: array<u32>;
 @group(1) @binding(2) var<storage, read_write> gso_ind: array<u32>;
 @group(1) @binding(3) var<uniform> gso_s: MOEG;
-var<workgroup> gso_tile: array<u32, 1024>;
+var<workgroup> gso_h: array<atomic<u32>, ${NE}>;
+var<workgroup> gso_m: array<atomic<u32>, ${NE}>;
+var<workgroup> gso_b: array<u32, ${NE}>;
+var<workgroup> gso_r: array<u32, ${NE}>;
 var<workgroup> gso_sc: array<u32, 256>;
 var<workgroup> gso_sp: array<u32, 256>;
 var<workgroup> gso_su: array<u32, 256>;
 @compute @workgroup_size(256)
 fn moe_gsort(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let t = lid.x; let N = gso_s.n; let nE = gso_s.nExp;
-  var cnt: array<u32, ${QM}>;   // zero-initialized
-  var placed: array<u32, ${QM}>;   // zero-initialized
-  var cbase: array<u32, ${QM}>;   // zero-initialized
-  var pbase: array<u32, ${QM}>;   // zero-initialized
-  for (var i0: u32 = 0u; i0 < N; i0 += 1024u) {
-    for (var j: u32 = t; j < 1024u; j += 256u) {
-      let i = i0 + j;
-      if (i < N) { let slot = i % ${KS}u; gso_tile[j] = select(min(gso_sel[i], nE - 1u), nE, slot == ${K}u); }
-    }
-    workgroupBarrier();
-    let m = min(1024u, N - i0);
-    for (var j: u32 = 0u; j < m; j++) { let e = gso_tile[j]; if ((e & 255u) == t) { cnt[e >> 8u] += 1u; } }
-    workgroupBarrier();
+${Q.map((q) => `  atomicStore(&gso_h[${q * 256}u + t], 0u); gso_r[${q * 256}u + t] = 0u;`).join("\n")}
+  workgroupBarrier();
+  for (var i: u32 = t; i < N; i += 256u) {
+    let slot = i % ${KS}u; let e = select(min(gso_sel[i], nE - 1u), nE, slot == ${K}u);
+    atomicAdd(&gso_h[e], 1u);
   }
+  workgroupBarrier();
   var carryC: u32 = 0u; var carryP: u32 = 0u; var carryU: u32 = 0u;
-  for (var q: u32 = 0u; q < ${QM}u; q++) {
-    let c = cnt[q]; let nch = ${D(`c + ${UC - 1}u`, `${UC}u`)};
-    gso_sc[t] = nch; gso_sp[t] = c; gso_su[t] = select(0u, 1u, c > 0u && q * 256u + t < nE);
+${Q.map((q) => `  let cnt${q} = atomicLoad(&gso_h[${q * 256}u + t]); var cbase${q}: u32 = 0u;
+  {
+    let c = cnt${q}; let nch = ${D(`c + ${UC - 1}u`, `${UC}u`)};
+    gso_sc[t] = nch; gso_sp[t] = c; gso_su[t] = select(0u, 1u, c > 0u && ${q * 256}u + t < nE);
     workgroupBarrier();
     for (var off: u32 = 1u; off < 256u; off <<= 1u) {   // inclusive scan in expert order (Hillis-Steele)
       var a = gso_sc[t]; var b = gso_sp[t]; var u = gso_su[t];
@@ -84,30 +86,33 @@ fn moe_gsort(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id)
       gso_sc[t] = a; gso_sp[t] = b; gso_su[t] = u;
       workgroupBarrier();
     }
-    cbase[q] = carryC + gso_sc[t] - nch; pbase[q] = carryP + gso_sp[t] - c;
+    cbase${q} = carryC + gso_sc[t] - nch; gso_b[${q * 256}u + t] = carryP + gso_sp[t] - c;
     carryC += gso_sc[255]; carryP += gso_sp[255]; carryU += gso_su[255];
     workgroupBarrier();
-  }
-  for (var i0: u32 = 0u; i0 < N; i0 += 1024u) {
-    for (var j: u32 = t; j < 1024u; j += 256u) {
-      let i = i0 + j;
-      if (i < N) { let slot = i % ${KS}u; gso_tile[j] = select(min(gso_sel[i], nE - 1u), nE, slot == ${K}u); }
-    }
+  }`).join("\n")}
+  let nCol = ${D("N", `${KS}u`)};
+  let lc = ${D("t", `${KS}u`)}; let slot = t % ${KS}u;
+  for (var c0: u32 = 0u; c0 < nCol; c0 += ${CR}u) {
+    let col = c0 + lc; let ok = lc < ${CR}u && col < nCol;
+    let i = col * ${KS}u + slot;
+    var e: u32 = 0u;
+    if (ok) { e = select(min(gso_sel[i], nE - 1u), nE, slot == ${K}u); atomicStore(&gso_m[e], 0u); }
     workgroupBarrier();
-    let m = min(1024u, N - i0);
-    for (var j: u32 = 0u; j < m; j++) {
-      let e = gso_tile[j];
-      if ((e & 255u) == t) { let q = e >> 8u; gso_grp[${CO}u + pbase[q] + placed[q]] = i0 + j; placed[q] += 1u; }
-    }
+    if (ok) { atomicOr(&gso_m[e], 1u << lc); }
+    workgroupBarrier();
+    var m: u32 = 0u;
+    if (ok) { m = atomicLoad(&gso_m[e]); gso_grp[${CO}u + gso_b[e] + gso_r[e] + countOneBits(m & ((1u << lc) - 1u))] = i; }
+    workgroupBarrier();
+    if (ok && (m >> (lc + 1u)) == 0u) { gso_r[e] += countOneBits(m); }
     workgroupBarrier();
   }
-  for (var q: u32 = 0u; q < ${QM}u; q++) {
-    let e = q * 256u + t; let c = cnt[q];
+${Q.map((q) => `  {
+    let e = ${q * 256}u + t; let c = cnt${q}; let pb = gso_b[e];
     for (var k: u32 = 0u; k * ${UC}u < c; k++) {
-      let ci = (cbase[q] + k) * 4u;
-      gso_grp[ci] = pbase[q] + k * ${UC}u; gso_grp[ci + 1u] = min(${UC}u, c - k * ${UC}u); gso_grp[ci + 2u] = e; gso_grp[ci + 3u] = 0u;
+      let ci = (cbase${q} + k) * 4u;
+      gso_grp[ci] = pb + k * ${UC}u; gso_grp[ci + 1u] = min(${UC}u, c - k * ${UC}u); gso_grp[ci + 2u] = e; gso_grp[ci + 3u] = 0u;
     }
-  }
+  }`).join("\n")}
   if (t == 0u) {
     gso_ind[0] = gso_s.gx; gso_ind[1] = carryC; gso_ind[2] = 1u;
     gso_ind[3] = gso_s.dx; gso_ind[4] = carryC; gso_ind[5] = 1u;
@@ -406,5 +411,177 @@ ${sortKernel(K, UC, QM, CO, O)}
 ${gu.map(([f, s]) => tiledKernel("gu", f, s, K, UC, CO, O)).join("\n")}
 ${dn.map(([f, s]) => tiledKernel("dn", f, s, K, UC, CO, O)).join("\n")}
 ${combKernel(K)}
+`;
+};
+
+// ---- dp4a variant (engine option moeGroupDp4a; NOT bit-identical: llama.cpp's MMQ numerics) ----
+// The tiled kernels above dequantize every weight block to f32 once per pair of the chunk (the unpack sits inside the
+// pair loop: hoisting 32 floats per row and matrix does not fit the registers), so they are ALU-bound well before the
+// expert weights are read once. Here the activations are quantized first, per 32 values (moe_qx: d = amax / 127,
+// q = round(x / d) as packed i8, the dense dp4a GEMM's quant_q8_w), and each thread keeps its weight blocks as packed
+// i8 words in registers (Q4_0 nibbles re-centred to q - 8 once per block, as gemm_d_q4 does; Q8_0 words as they are),
+// so a pair costs 8 dot4I8Packed per row and matrix plus one f32 multiply-add: f32(isum) * (dW * dX), k ascending per
+// lane, then the 8 lanes summed in lane order. Larger chunks fit (the chunk's activations are 9 words per block in
+// workgroup memory instead of 32 floats), so each expert's rows are read fewer times per ubatch.
+// Thread map as the tiled kernels: 256 threads, lane ln = t & 7 takes block kt + ln of each 8-block k tile, rows
+// row0 + 32 r + (t >> 3), r < RPT. Activation tile [pair][half][lane] vec4<u32> (8 lanes read 128 contiguous bytes).
+// Inputs: gate/up reads the quantized normed input (moe_qx over the ubatch's columns: xq[(col * nb + blk) * 2 + h]
+// vec4s, xd[col * nb + blk]); down reads the quantized h (moe_qx over the (column, slot) pairs, nb = ys / 32 per pair).
+export const DP4A_RPT = TILE_RPT;
+export const dp4aRows = (kind) => 32 * DP4A_RPT[kind];
+function dp4aGroupKernel(kind, fmt, sfmt, K, UC, CO, U, O = FOPS) {
+  const KS = K + 1, WG = 256, gu = kind === "gu", NM = gu ? 2 : 1, RPT = DP4A_RPT[kind], TR = 32 * RPT, D = O.div;
+  const P = `${gu ? "qg" : "qd"}${fmt}${sfmt}`;
+  // pairs reduced per round: their partials (NM * RPT * WG floats each) fit next to the activation tile in 16 KB
+  const PR = Math.min(UC, WG / TR, Math.floor((WG_MEM - 64 - UC * (16 * 16 + 8 * 4 + 8)) / (NM * RPT * WG * 4)));
+  if (PR < 1) throw new Error(`dp4a moe group: UC ${UC} leaves no workgroup memory for the reduction`);
+  const RED = PR * NM * RPT * WG;
+  const mats = gu ? ["g", "u"] : ["y"], RS = Array.from({ length: RPT }, (_, r) => r), US = Array.from({ length: UC }, (_, u) => u);
+  // the block's weight words of (matrix m, row r) as 8 packed-i8 words w{m}{r}_{0..7} and its scale
+  const load = (f, m, r, Q, qo, SC, so, er, vec) => {
+    const bi = `((${er}) * nbk + b)`;
+    const sc = `        let ${m}s${r} = unpack2x16float(${SC}[${so} + (${bi} >> 1u)])[${bi} & 1u];`;
+    if (f === "q4") {
+      const q = vec ? `let ${m}q${r} = ${Q}[${bi}];` : `let ${m}q${r} = vec4<u32>(${[0, 1, 2, 3].map((j) => `${Q}[${qo} + ${bi} * 4u + ${j}u]`).join(", ")});`;
+      return `${sc}\n        ${q}
+        let ${m}l${r} = ((${m}q${r} & vec4<u32>(0x0F0F0F0Fu)) + vec4<u32>(0x78787878u)) ^ vec4<u32>(0x80808080u);
+        let ${m}h${r} = (((${m}q${r} >> vec4<u32>(4u)) & vec4<u32>(0x0F0F0F0Fu)) + vec4<u32>(0x78787878u)) ^ vec4<u32>(0x80808080u);`;
+    }
+    return `${sc}\n        let ${m}l${r} = vec4<u32>(${[0, 1, 2, 3].map((j) => `${Q}[${qo} + ${bi} * 8u + ${j}u]`).join(", ")});
+        let ${m}h${r} = vec4<u32>(${[4, 5, 6, 7].map((j) => `${Q}[${qo} + ${bi} * 8u + ${j}u]`).join(", ")});`;
+  };
+  const d4 = (a, b) => `dot4I8Packed(${a}.x, ${b}.x) + dot4I8Packed(${a}.y, ${b}.y) + dot4I8Packed(${a}.z, ${b}.z) + dot4I8Packed(${a}.w, ${b}.w)`;
+  const accum = US.map((u) => `        ${guard(u, `let x0 = ${P}_xt[${u * 16}u + ln]; let x1 = ${P}_xt[${u * 16 + 8}u + ln]; let dx = ${P}_xs[${u * 8}u + ln];
+${RS.map((r) => mats.map((m) => `          a${m}${r}_${u} += f32(${d4(`${m}l${r}`, "x0")} + ${d4(`${m}h${r}`, "x1")}) * (${m}s${r} * dx);`).join("\n")).join("\n")}`)}`).join("\n");
+  const er = (r) => `e * S.dOut + tr${r}`;
+  const routed = RS.map((r) => gu
+    ? `${load(fmt, "g", r, `${P}_gq`, "0u", `${P}_gs`, "0u", er(r), true)}\n${load(fmt, "u", r, `${P}_uq`, "0u", `${P}_us`, "0u", er(r), true)}`
+    : load(fmt, "y", r, `${P}_q`, "0u", `${P}_sc`, "0u", er(r), true)).join("\n");
+  const shared = RS.map((r) => gu
+    ? `${load(sfmt, "g", r, `${P}_sh`, "0u", `${P}_sh`, "S.oGs", `tr${r}`, false)}\n${load(sfmt, "u", r, `${P}_sh`, "S.oUq", `${P}_sh`, "S.oUs", `tr${r}`, false)}`
+    : load(sfmt, "y", r, `${P}_sq`, "0u", `${P}_ss`, "0u", `tr${r}`, false)).join("\n");
+  const qdecl = (n, f) => f === "q4" ? `array<vec4<u32>>` : `array<u32>`;
+  let red = "";
+  for (let q0 = 0; q0 < UC; q0 += PR) {
+    const np = Math.min(PR, UC - q0);
+    const body = `  workgroupBarrier();
+${Array.from({ length: np }, (_, i) => RS.map((r) => mats.map((m, mi) => `  ${P}_red[${((i * NM + mi) * RPT + r) * WG}u + t] = a${m}${r}_${q0 + i};`).join("\n")).join("\n")).join("\n")}
+  workgroupBarrier();
+  if (t < ${TR * np}u) {
+    let lr = t & ${TR - 1}u; let pi = t >> ${Math.log2(TR)}u; let u = ${q0}u + pi; let orow = row0 + lr; let rr = lr >> 5u; let rw = lr & 31u;
+    if (u < n && orow < dOut) {
+      let cs = ${P}_cs[u];
+${mats.map((m, mi) => `      var s${m}: f32 = 0.0;
+      for (var l: u32 = 0u; l < 8u; l++) { s${m} += ${P}_red[((pi * ${NM}u + ${mi}u) * ${RPT}u + rr) * ${WG}u + rw * 8u + l]; }`).join("\n")}
+      ${gu ? `${P}_h[cs * S.ys + orow] = sg / (1.0 + exp(-sg)) * su;` : `${P}_y[cs * S.dOut + orow] = sy;`}
+    }
+  }`;
+    red += q0 ? `\n  if (n > ${q0}u) {\n${body}\n  }` : `\n${body}`;
+  }
+  const decl = gu ? `
+@group(1) @binding(0) var<storage, read> ${P}_gq: ${qdecl(0, fmt)};
+@group(1) @binding(1) var<storage, read> ${P}_gs: array<u32>;
+@group(1) @binding(2) var<storage, read> ${P}_uq: ${qdecl(0, fmt)};
+@group(1) @binding(3) var<storage, read> ${P}_us: array<u32>;
+@group(1) @binding(4) var<storage, read> ${P}_xq: array<vec4<u32>>;
+@group(1) @binding(5) var<storage, read_write> ${P}_h: array<f32>;
+@group(1) @binding(6) var<storage, read> ${P}_grp: array<u32>;
+@group(1) @binding(7) var<storage, read> ${P}_sh: array<u32>;
+@group(1) @binding(8) var<uniform> ${P}_s: MOEF;` : `
+@group(1) @binding(0) var<storage, read> ${P}_q: ${qdecl(0, fmt)};
+@group(1) @binding(1) var<storage, read> ${P}_sc: array<u32>;
+@group(1) @binding(2) var<storage, read> ${P}_xq: array<vec4<u32>>;
+@group(1) @binding(3) var<storage, read_write> ${P}_y: array<f32>;
+@group(1) @binding(4) var<storage, read> ${P}_grp: array<u32>;
+@group(1) @binding(5) var<storage, read> ${P}_sq: array<u32>;
+@group(1) @binding(6) var<storage, read> ${P}_ss: array<u32>;
+@group(1) @binding(7) var<uniform> ${P}_s: MOEF;`;
+  return `${decl}
+var<workgroup> ${P}_xt: array<vec4<u32>, ${UC * 16}>;
+var<workgroup> ${P}_xs: array<f32, ${UC * 8}>;
+var<workgroup> ${P}_red: array<f32, ${RED}>;
+var<workgroup> ${P}_xo: array<u32, ${UC}>;
+var<workgroup> ${P}_cs: array<u32, ${UC}>;
+var<workgroup> ${P}_n: u32;
+@compute @workgroup_size(${WG})
+fn ${gu ? "moe_gusq" : "moe_dnq"}_${fmt}_${sfmt}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let S = ${P}_s; let t = lid.x; let ln = t & 7u; let row0 = wg.x * ${TR}u;
+  let cb = wg.y * 4u;
+  if (t == 0u) { ${P}_n = ${P}_grp[cb + 1u]; }
+  let n = workgroupUniformLoad(&${P}_n);
+  let p0 = ${P}_grp[cb]; let e = ${P}_grp[cb + 2u];
+  let sh = e >= S.nExp;
+  let dOut = ${gu ? "select(S.dOut, S.sDim, sh)" : "S.dOut"};
+  let nbk = ${gu ? D("S.dIn", "32u") : `select(${D("S.dIn", "32u")}, ${D("S.sDim", "32u")}, sh)`};
+  let nbx = ${gu ? D("S.dIn", "32u") : D("S.ys", "32u")};   // activation blocks per column (gate/up) or per pair (down)
+  let dOff = ${gu ? U : U * KS}u * nbx * 8u;   // word offset of the block scales behind the packed blocks (moe_qx)
+  if (t < n) { let c = ${P}_grp[${CO}u + p0 + t]; ${P}_cs[t] = c; ${P}_xo[t] = ${gu ? `(${D("c", `${KS}u`)}) * nbx` : "c * nbx"}; }
+${RS.map((r) => `  let tr${r} = min(row0 + ${32 * r}u + (t >> 3u), dOut - 1u);`).join("\n")}
+${US.map((u) => `  ${RS.map((r) => mats.map((m) => `var a${m}${r}_${u}: f32 = 0.0;`).join(" ")).join(" ")}`).join("\n")}
+  for (var kt: u32 = 0u; kt < nbk; kt += 8u) {
+    workgroupBarrier();
+    for (var i: u32 = t; i < ${UC * 16}u; i += ${WG}u) {
+      let u = i >> 4u; let hl = (i >> 3u) & 1u; let bl = i & 7u; let kb = kt + bl;
+      if (u < n && kb < nbk) {
+        let xb = ${P}_xo[u] + kb;
+        ${P}_xt[i] = ${P}_xq[xb * 2u + hl];
+        if (hl == 0u) { let di = dOff + xb; ${P}_xs[u * 8u + bl] = bitcast<f32>(${P}_xq[di >> 2u][di & 3u]); }
+      }
+    }
+    workgroupBarrier();
+    let b = kt + ln;
+    if (b < nbk) {
+      if (!sh) {
+${routed}
+${accum}
+      } else {
+${shared}
+${accum}
+      }
+    }
+  }${red}
+}`;
+}
+// moe_qx: Q8_1-style quantization of n values per column (column stride s0 vec4s) into compact blocks:
+// q[(col * nb + blk) * 8 + j] (packed i8) and the scales as f32 bits behind them, q[dOff + col * nb + blk] (one binding:
+// the grouped kernels already use 8 storage buffers); grid (ceil(nb / 32), columns). quant_q8_w's code.
+export function moeQuantKernel() {
+  return `
+struct MOEQ { n: u32, s0: u32, dOff: u32, p1: u32 };
+@group(1) @binding(0) var<storage, read> mqx_x: array<vec4<f32>>;
+@group(1) @binding(1) var<storage, read_write> mqx_q: array<u32>;
+@group(1) @binding(2) var<uniform> mqx_s: MOEQ;
+var<workgroup> mqx_m: array<f32, 256>;
+@compute @workgroup_size(256)
+fn moe_qx(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+  let nb = mqx_s.n / 32u; let t = lid.x; let blk = wg.x * 32u + t / 8u; let col = wg.y;
+  let ok = blk < nb;
+  var v = vec4<f32>(0.0);
+  if (ok) { v = mqx_x[col * mqx_s.s0 + blk * 8u + t % 8u]; }
+  let a = abs(v);
+  mqx_m[t] = max(max(a.x, a.y), max(a.z, a.w));
+  workgroupBarrier();
+  let g0 = t & ~7u;
+  var m = mqx_m[g0];
+  for (var i = 1u; i < 8u; i++) { m = max(m, mqx_m[g0 + i]); }
+  if (!ok) { return; }
+  let d = m / 127.0; let id = select(0.0, 1.0 / d, d > 0.0);
+  mqx_q[(col * nb + blk) * 8u + t % 8u] = pack4xI8(vec4<i32>(round(v * id)));
+  if (t % 8u == 0u) { mqx_q[mqx_s.dOff + col * nb + blk] = bitcast<u32>(d); }
+}`;
+}
+// sort: false when the module already has the tiled kernels' moe_gsort / moe_combw (the engine: same UC, same chunk
+// list); the expert launches use the same grid as the tiled kernels (DP4A_RPT == TILE_RPT), so one sort serves both.
+export const dp4aGroupWGSL = ({ K, UC, U, nExp, gu = [], dn = [], sort = true }, O = FOPS) => {
+  if (![1, 2, 4, 8, 16, 32].includes(UC)) throw new Error(`dp4a moe group: UC ${UC} is not 1, 2, 4, 8, 16 or 32`);
+  const { CO } = moeGroupSizes({ U, K, nExp, UC }), QM = Math.ceil((nExp + 1) / 256);
+  return /* wgsl */ `
+// ---------------- expert-grouped MoE prefill, dp4a (engine/wgsl/moe_group.js) ----------------
+${sort ? `struct MOEG { n: u32, nExp: u32, gx: u32, dx: u32 };
+${sortKernel(K, UC, QM, CO, O)}
+${combKernel(K)}` : ""}
+${gu.map(([f, s]) => dp4aGroupKernel("gu", f, s, K, UC, CO, U, O)).join("\n")}
+${dn.map(([f, s]) => dp4aGroupKernel("dn", f, s, K, UC, CO, U, O)).join("\n")}
+${moeQuantKernel()}
 `;
 };

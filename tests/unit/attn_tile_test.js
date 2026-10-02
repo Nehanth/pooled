@@ -34,10 +34,10 @@ function runGrid(body, names, args, gx, gy, gz, wgArrays) {
 }
 
 // one prefill pass of nc columns at basePos; returns max relative error vs exact attention
-function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgMem = 16384 }) {
+function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgMem = 16384, kvh = false, pf = false, nr = false }) {
   const G = nH / nKV, kvDim = nKV * hd;
   const { faSplit, faSplits } = faSizing(maxSeq);
-  const c = attnTileConfig({ hd, G, faSplit, faSplits, wgMem, target, tk });
+  const c = attnTileConfig({ hd, G, faSplit, faSplits, wgMem, target, tk, kvh, pf, nr });
   if (!c) throw new Error("config rejected");
   const seqEnd = basePos + nc;
   // K/V caches (f16 pairs); rows at or past seqEnd hold NaN: the kernel must never use them
@@ -78,7 +78,7 @@ function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgM
   }
   // padding between columns untouched
   for (let col = 0; col < nc; col++) for (let i = nH * hd; i < s1; i++) if (!Number.isNaN(out[col * s1 + i])) throw new Error("wrote into padding");
-  return { maxRel, c, splits: Math.ceil(seqEnd / tileSplitLen(seqEnd, c)) };
+  return { maxRel, c, splits: Math.ceil(seqEnd / tileSplitLen(seqEnd, c)), out };
 }
 
 Deno.test("attn_tile: split length mirror and bounds", () => {
@@ -127,4 +127,36 @@ for (const t of cases) Deno.test(`attn_tile: ${t.name}`, () => {
   const { maxRel, c, splits } = check(t);
   console.log(`  ${t.name}: TK ${c.TK}, CW ${c.CW}, ${splits} splits, max rel err ${maxRel.toExponential(2)} (float64 run, f16 K/V)`);
   if (!(maxRel < 1e-9)) throw new Error(`max rel err ${maxRel}`);
+});
+
+// kvh (K / V staged as f16 pairs, widened at each read): the same values in the same order, so the same output
+Deno.test("attn_tile: kvh gives the identical output", () => {
+  for (const t of [cases[1], cases[3], cases[5]]) {
+    const s0 = seed;
+    const a = check(t); seed = s0;
+    const b = check({ ...t, kvh: true });
+    if (a.out.length !== b.out.length || a.out.some((v, i) => !Object.is(v, b.out[i]))) throw new Error(`${t.name}: kvh output differs`);
+    if (!/at_kv: array<vec2<u32>/.test(attnTileWGSL(b.c))) throw new Error("kvh: the tile is not packed");
+  }
+});
+
+// pf (the next tile prefetched into registers), alone and with kvh: the same output
+Deno.test("attn_tile: pf, pf + kvh, nr, nr + pf give the identical output", () => {
+  for (const t of [cases[0], cases[1], cases[3], cases[5]]) {
+    const s0 = seed;
+    const a = check(t);
+    for (const o of [{ pf: true }, { pf: true, kvh: true }, { nr: true }, { nr: true, pf: true }]) {
+      seed = s0;
+      const b = check({ ...t, ...o });
+      if (a.out.some((v, i) => !Object.is(v, b.out[i]))) throw new Error(`${t.name}: ${JSON.stringify(o)} output differs`);
+    }
+    seed = s0; check(t);
+  }
+});
+
+Deno.test("attn_tile: nr leaves no private array", () => {
+  const c = attnTileConfig({ hd: 256, G: 8, faSplit: 256, faSplits: 64, nr: true, pf: true });
+  const src = attnTileWGSL(c);
+  if (/var (q|o|p): array/.test(src) || /\b[qop]\[\d+u\]/.test(src)) throw new Error("a private array is left");
+  if (!/var q15 = vec4<f32>\(0\.0\);/.test(src) || !/var p7 = 0\.0;/.test(src)) throw new Error("named variables missing");
 });

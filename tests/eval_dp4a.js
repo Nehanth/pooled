@@ -30,7 +30,21 @@
 //   All pass -> DP4A_DEFAULT.dense = true (NVIDIA only via dp4aAutoDevice; the FXC/compile fallback unchanged).
 //   Reported, not gated: top-5 overlap, greedy agreement, KL(f32 || dp4a), short bucket (must be identical: control).
 //
-//   MODEL=27b|2b  MODES=wide,dp4a  GEN=256  ONLY=name,name  LLAMA_URL=http://127.0.0.1:8091 (refresh the llama.cpp
+//
+// PRE-REGISTERED RULE FOR THE 35B-A3B MoE (MODEL=moe; written 2026-10-02 for the PR "Perf: MoE prefill", before any
+// accuracy measurement of the MoE dp4a kernels; not changed after):
+//   Modes: wide = main's MoE prefill (f32 wide GEMM projections, f32 tiled expert kernels moe_gusg / moe_dng);
+//          dp4a = prefillDp4a (dp4a projections) + moeGroupDp4a (dp4a expert kernels moe_gusq / moe_dnq);
+//          dp4ax = moeGroupDp4a alone (dp4a experts, f32 projections).
+//   Same prompts, positions (mid + 2k + 8k), llama.cpp CPU reference (llama-server on the same GGUF) and the same
+//   four rules R1-R4 as above, with "dp4a" in the place of dp4a.
+//   Primary decision: wide vs dp4a. All four pass -> DP4A_DEFAULT.moe = true and moeGroupDp4a on by default wherever
+//   prefillDp4a is on (NVIDIA only via dp4aAutoDevice; the compile fallback turns both off).
+//   Only if the primary fails, a secondary decision: wide vs dp4ax under the same four rules (DMODE=dp4ax). Pass ->
+//   moeGroupDp4a on by default (NVIDIA), prefillDp4a stays opt-in on the MoE. Fail -> both stay opt-in.
+//   MODEL=moe MODES=wide,dp4a,dp4ax: one run serves both decisions.
+//
+//   MODEL=27b|2b|moe  MODES=wide,dp4a  DMODE=dp4a (the mode the rules compare with wide)  GEN=256  ONLY=name,name  LLAMA_URL=http://127.0.0.1:8091 (refresh the llama.cpp
 //   golden first; GOLD_ONLY=1 then exits before the GPU;
 //   REUSE=1 keeps entries whose ids still match)  OUT=results.json
 //   cd tests && deno run --unstable-webgpu --allow-read --allow-env --allow-net --allow-write=$HOME/.cache/swarmllm-weights,golden,/tmp eval_dp4a.js
@@ -38,12 +52,12 @@
 //   --unstable-webgpu (GOLD_ONLY=1 never touches the GPU, and the GPU queue counts any WebGPU deno as a GPU job).
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
-import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, Q38_PATH } from "./load_model.js";
+import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, Q38_PATH, MOE_PATH } from "./load_model.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
 const MODEL = env("MODEL", "27b"), GEN = +env("GEN", 256), LLAMA = env("LLAMA_URL", ""), NP = 20;
 const MODES = env("MODES", "wide,dp4a").split(","), ONLY = env("ONLY", "") ? env("ONLY", "").split(",") : null;
-const PATHS = { "27b": Q38_PATH, "2b": new URL("../models/q35-2b/model.gguf", import.meta.url).pathname };
+const PATHS = { "27b": Q38_PATH, "2b": new URL("../models/q35-2b/model.gguf", import.meta.url).pathname, moe: MOE_PATH };
 const GOLD = new URL(`./golden/dp4a_eval_${MODEL}_llama.json`, import.meta.url);
 const model = openGGUF(PATHS[MODEL]);
 const G = model.G, L = trunkLayers(G), nBlk = G.meta["qwen35.block_count"];
@@ -200,10 +214,14 @@ const errors = watchGpuErrors(device);
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: L < nBlk });
 const maxLen = Math.max(...PROMPTS.map((p) => p.ids.length), ...ITEMS.map((i) => i.ids.length));
 const maxSeq = Math.ceil((maxLen + GEN + 64) / 256) * 256;
-const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq, batchCols: 16, coopRowsB: 1, prefillUbatch: 256, prefillDp4a: true });
+const MOE = MODEL === "moe";
+// the MoE keeps its engine default ubatch (the wide chunk is also the expert group); the dense models the 256 of #309
+const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq, batchCols: 16, coopRowsB: 1,
+  ...(MOE ? { moeGroupDp4a: true } : { prefillUbatch: 256 }), prefillDp4a: true });
 if (MODES.includes("dp4a") && !eng.dp4aCfg) { console.log("SKIP: prefillDp4a unavailable on this device"); Deno.exit(0); }
+if (MOE && MODES.some((m) => m.startsWith("dp4a")) && !eng.moeDp4a) { console.log("SKIP: moeGroupDp4a unavailable on this device"); Deno.exit(0); }
 console.log(`${MODEL}: ${L} layers, ubatch ${eng.ubatch}, wide BN ${eng.wideCfg?.BN}, dp4a tile ${JSON.stringify(eng.dp4aCfg)}, maxSeq ${maxSeq}`);
-const setMode = (m) => { eng.reset(); eng.prefillWide = m !== "narrow"; eng.prefillDp4a = m === "dp4a"; };
+const setMode = (m) => { eng.reset(); eng.prefillWide = m !== "narrow"; eng.prefillDp4a = m === "dp4a"; if (MOE) eng.moeGroupDp4a = m === "dp4a" || m === "dp4ax"; };
 
 // top-k ids of a logits row (descending) and its log-sum-exp
 function topk(lg, k) {
@@ -294,7 +312,7 @@ for (const it of ITEMS) {
 }
 
 // ---- summary and the pre-registered rule ----
-const [F, D] = ["wide", "dp4a"];
+const [F, D] = ["wide", env("DMODE", "dp4a")];
 const pool = (bk, m, f) => PROMPTS.filter((p) => bk.includes(p.bucket)).flatMap((p) => R.prompts[p.name][m][f]);
 const S = {};
 for (const m of MODES) {
