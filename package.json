@@ -14,6 +14,7 @@
   "scripts": {
     "test": "deno test --allow-read tests/unit",
     "test:runtime": "node tests/headless/runtime.mjs",
+    "test:runtime:q38": "deno run --unstable-webgpu --allow-read --allow-env --allow-write tests/test_runtime.js --q38",
     "test:packages": "node --test packages/room-node/test/*_test.mjs packages/openclaw/test/*_test.mjs",
     "check": "deno check engine/*.js && for f in api/*.mjs tests/*.js benchmarks/*.js room.js room/*.js harness/*.js site/js/*.js engine/wgsl/*.js cli/bin/*.js cli/lib/*.js cli/test/*.mjs tests/e2e/serve.mjs tests/e2e/serve_record.mjs tests/e2e/serve_v2_smoke.mjs tests/e2e/serve_responses.mjs tests/e2e/serve_messages.mjs tests/e2e/agents/*.mjs packages/*/*.js packages/*/src/*.js packages/*/test/*.mjs; do node --check \"$f\" || exit 1; done",
     "test:gpu": "tests/run.sh quick",

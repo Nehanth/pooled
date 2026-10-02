@@ -2,6 +2,7 @@
 // No DOM or PeerJS: only activation delivery is in-process. The production pipeline still
 // packs/unpacks its f16 frames, queues worker compute, carries resets and resolves token laps.
 // Run: deno run --unstable-webgpu --allow-read tests/test_runtime.js
+// 27B Qwen35Engine split: npm run test:runtime:q38 (requires models/q38, ~16 GB GPU weights).
 import { DenseEngine, argmax, makeTokenizer } from "../engine/engine.js";
 import { parseGGUFHeader, ggufWeights } from "../engine/gguf.js";
 import { createPipeline } from "../room/pipeline.js";
@@ -11,12 +12,15 @@ const assert = (ok, message) => { if (!ok) throw new Error(message); };
 const equal = (a, b, message) => assert(JSON.stringify(a) === JSON.stringify(b),
   `${message}: ${JSON.stringify(a)} != ${JSON.stringify(b)}`);
 const dir = new URL(".", import.meta.url).pathname;
-const cfg = JSON.parse(await Deno.readTextFile(dir + "../models/qwen/config.json"));
-const golden = JSON.parse(await Deno.readTextFile(dir + "golden/golden_qwen.json"));
-const tok = makeTokenizer(JSON.parse(await Deno.readTextFile(dir + "../models/qwen/tokenizer.json")));
-const raw = await Deno.readFile(dir + "../models/qwen/model.gguf");
-const G = parseGGUFHeader(raw.buffer);
-const bytesOf = (info) => new Uint8Array(raw.buffer, info.byteOffset, info.byteLength);
+let cfg, golden, tok, raw, G, bytesOf;
+async function loadDense() {
+  cfg = JSON.parse(await Deno.readTextFile(dir + "../models/qwen/config.json"));
+  golden = JSON.parse(await Deno.readTextFile(dir + "golden/golden_qwen.json"));
+  tok = makeTokenizer(JSON.parse(await Deno.readTextFile(dir + "../models/qwen/tokenizer.json")));
+  raw = await Deno.readFile(dir + "../models/qwen/model.gguf");
+  G = parseGGUFHeader(raw.buffer);
+  bytesOf = (info) => new Uint8Array(raw.buffer, info.byteOffset, info.byteLength);
+}
 async function checkMode(split) {
   const label = split ? "split" : "solo";
   // Browser GPUAdapters can be consumed by requestDevice; each mode requests a fresh one.
@@ -117,11 +121,121 @@ async function checkMode(split) {
   }
 }
 
+// Explicit large-model case: shares the real runtime but keeps 27B weights out of quick.
+async function checkQwen35() {
+  const { Qwen35Engine } = await import("../engine/qwen35.js");
+  const { openGGUF, Q38_PATH, gpuDevice } = await import("./load_model.js");
+  const { packWire, unpackWire } = await import("../room/wire.js");
+  const model = openGGUF(Q38_PATH), { device } = await gpuDevice();
+  const peers = new Map(), frames = [], restored = [], gpuErrors = [];
+  device.addEventListener("uncapturederror", (e) => gpuErrors.push(e.error.message));
+  let lost = null;
+  device.lost.then((info) => { if (info.reason !== "destroyed") lost = info.message; });
+  try {
+    const L = model.trunkLayers, split = Math.floor(L / 2), tokenizer = model.tokenizer();
+    console.log("runtime Qwen35 model:", model.meta["general.name"], `layers ${L}, split ${split}/${L - split}`);
+    for (const [id, lo, hi] of [["host", 0, split], ["worker", split, L]]) {
+      const host = id === "host";
+      const engine = await Qwen35Engine.create({ device, meta: model.meta, maxSeq: 512,
+        layerRange: [lo, hi], hasEmbed: host, hasHead: host,
+        vocab: model.G.tensors["token_embd.weight"].shape[0],
+        weights: await model.weights({ lo, hi, hasEmbed: host, hasHead: host, mtp: host }),
+      });
+      const state = { engine, device, role: host ? "host" : "worker", chain: host ? ["worker"] : [],
+        hostId: "host", next: host ? "worker" : "host", range: [lo, hi], pos: 0, fed: [],
+        settings: { sampling: "exact" }, abort: false, degraded: false,
+        waiters: new Map(), q: Promise.resolve(), pendingCtl: {}, pending: null };
+      const options = { checkpointMax: 0, lookup: false, denseSpec: false };
+      const pipeline = createPipeline({ state, options, transport: {
+        sendHidden(to, frame) {
+          frames.push({ from: id, to, t: frame.t, spec: frame.spec, rb: frame.rb });
+          queueMicrotask(() => peers.get(to).pipeline.handleFrame(id, frame));
+        },
+        sendTo(to, frame) { peers.get(to).pipeline.failWaiters(new Error(frame.message)); },
+      } });
+      peers.set(id, { state, pipeline, generate: createGenerator({ state, pipeline, options }) });
+    }
+    const host = peers.get("host"), worker = peers.get("worker");
+    const E = host.state.engine, W = worker.state.engine, specStep = E.specStep;
+    assert(E.mtp && specStep, "27B host has no MTP head");
+    const restore = W.restoreDN.bind(W);
+    W.restoreDN = (pos) => { restored.push(pos); return restore(pos); };
+    const wire = (h) => unpackWire(packWire(h));
+
+    // Independent engine-level reference: token-at-a-time through the two shards,
+    // with the same f16 wire conversion, without the extracted pipeline or generator.
+    async function reference(ids, count) {
+      E.reset(); W.reset(); E.mtpFill = false;
+      let pos = 0, logits;
+      const step = async (id) => E.headFromHidden(wire(await W.runHidden(wire(await E.embedRun(id, pos)), pos++)));
+      for (const id of ids) logits = await step(id);
+      const out = [];
+      for (let i = 0; i < count; i++) { const id = argmax(logits); out.push(id); logits = await step(id); }
+      return out;
+    }
+    const capital = await reference(tokenizer.encode("The capital of France is"), 12);
+    equal(tokenizer.decode(capital), " Paris.\nThe capital of Germany is Berlin.\nThe", "27B reference golden");
+    const V = tokenizer.vocab;
+    const ids = [V["<|im_start|>"], ...tokenizer.encode("user\nWrite the Python code for two sum. Code only."),
+      V["<|im_end|>"], ...tokenizer.encode("\n"), V["<|im_start|>"], ...tokenizer.encode("assistant\n"),
+      V["<think>"], ...tokenizer.encode("\n\n"), V["</think>"], ...tokenizer.encode("\n\n")];
+    const expected = await reference(ids, 40);
+    const followIds = [...ids, ...expected, ...tokenizer.encode("\nContinue:")];
+    const followExpected = await reference(followIds, 8);
+    function reset() {
+      E.reset(); W.reset(); E.mtpFill = true;
+      Object.assign(host.state, { pos: 0, fed: [], pending: null, pendingCtl: {}, xAt: null, lastHidden: null });
+      E.mtp.stats = { drafts: 0, accepted: 0 };
+      frames.length = 0; restored.length = 0;
+    }
+    async function generate(prompt, count, spec) {
+      const emitted = [];
+      // This test switch selects the existing plain branch without duplicating it.
+      E.specStep = spec ? specStep : undefined;
+      try {
+        const result = await host.generate(prompt, { stop: new Set(), sample: argmax, maxNew: count,
+          onToken: (id) => emitted.push(id) });
+        equal(emitted, result.tokens, "27B ordered stream");
+        equal(result.reason, "max", "27B length cap");
+        equal(host.state.pos, host.state.fed.length, "27B cached position");
+        return result.tokens;
+      } finally { E.specStep = specStep; }
+    }
+    reset();
+    equal(await generate(ids, 40, false), expected, "27B shared plain versus reference");
+    reset();
+    equal(await generate(ids, 40, true), expected, "27B shared MTP versus reference");
+    assert(frames.some((f) => f.from === "host" && f.spec), "27B did not send a verify frame");
+    assert(E.mtp.stats.drafts > E.mtp.stats.accepted, "27B prompt exercised no draft rejection");
+    const stats = { ...E.mtp.stats };
+    // The next request must apply any final pending rollback and reuse a correct prefix.
+    equal(await generate(followIds, 8, false), followExpected, "27B request after rejection");
+    const rollbacks = frames.filter((f) => f.from === "host" && f.rb != null).map((f) => f.rb);
+    assert(rollbacks.length > 0, "27B did not transmit rollback control");
+    equal(restored, rollbacks, "27B worker applied each rollback");
+    equal(host.state.fed, [...followIds, ...followExpected], "27B follow-up cache contents");
+    equal(W.pos, host.state.pos, "27B worker position after rollback and follow-up");
+    await device.queue.onSubmittedWorkDone();
+    assert(!gpuErrors.length && lost === null, `27B GPU failure: ${gpuErrors.join("; ")} ${lost || ""}`);
+    console.log("RUNTIME QWEN35 SPLIT PASS", JSON.stringify({ tokens: expected.length, followup: followExpected.length,
+      frames: frames.length, rollbacks: rollbacks.length, ...stats }));
+  } finally {
+    for (const p of peers.values()) p.pipeline.failWaiters(new Error("test finished"));
+    await Promise.all([...peers.values()].map((p) => p.state.q));
+    model.close(); device.destroy(); await device.lost;
+  }
+}
+
 try {
-  const solo = await checkMode(false);
-  const split = await checkMode(true);
-  equal(split, solo, "solo/split runtime parity");
-  console.log("RUNTIME GPU PASS");
+  if (Deno.args.includes("--q38")) {
+    await checkQwen35();
+  } else {
+    await loadDense();
+    const solo = await checkMode(false);
+    const split = await checkMode(true);
+    equal(split, solo, "solo/split runtime parity");
+    console.log("RUNTIME GPU PASS");
+  }
 } catch (error) {
   console.error("RUNTIME GPU FAIL:", error);
   Deno.exit(1);
