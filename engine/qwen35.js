@@ -49,8 +49,12 @@ export function prefillMathFeatures(adapter, mode = envPrefillMath()) {
   return [...SGM_FEATURES, ...SGM_FEATURES_OPT].filter((f) => adapter.features.has(f));
 }
 
-// MoE prefill ubatch (tokens) for the default expert-grouped + wide prefill (moeGroupPrefill, prefillUbatch)
-export const MOE_PREFILL_UBATCH = 256;
+// MoE prefill ubatch (tokens) for the default expert-grouped + wide prefill (moeGroupPrefill, prefillUbatch). 512 since
+// the dp4a expert kernels (each expert's rows are read once per chunk of its pairs, so a wider ubatch reads them for
+// more tokens): GB10 Deno 2048 / 8192 tokens ~800 / 730 tok/s at 256, ~780-860 / 790 at 512, ~835 / 815 at 1024
+// (docs/bench-log.md 2026-10-02 "MoE prefill"). Bits do not depend on it (every kernel's per-column arithmetic is the
+// same at any chunk width).
+export const MOE_PREFILL_UBATCH = 512;
 // dense (27B) default wide prefill ubatch: +24-29% prefill on the GB10 with the f32 wide GEMM (72-76 -> 91-99 tok/s),
 // logits relDiff vs the 16-column path 4e-5..1.4e-4 (under the dense prefill tolerance 2e-3)
 export const DENSE_PREFILL_UBATCH = 256;

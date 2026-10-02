@@ -40,8 +40,10 @@ const models = {
 };
 const ids = (n) => Array.from({ length: n }, (_, i) => 33 + ((i * 7919) % 90));
 
-async function trace(model, n, engine = {}, wgMem) {
+// props: engine properties set after create (runtime switches), e.g. { wideDn: false }
+async function trace(model, n, engine = {}, wgMem, props = {}) {
   const { eng, device, warns } = await engineFor(models[model], { engine, wgMem });
+  Object.assign(eng, props);
   device.log.length = 0;
   await eng.prefillTokens(ids(n));
   return { eng, log: device.log.slice(), warns };
@@ -60,7 +62,8 @@ const eq = (a, b, m) => { if (a !== b) throw new Error(`${m}: ${a} != ${b}`); };
 
 async function compare(model, n, U, wgMem) {
   const base = await trace(model, n, { prefillUbatch: 0, moeGroupPrefill: 0 });
-  const wide = await trace(model, n, { prefillUbatch: U, moeGroupPrefill: 0, prefillDp4a: false }, wgMem);
+  // the wide path's per-sub-batch structure (wideDn / mtpWide off): those two run once per chunk otherwise (tested below)
+  const wide = await trace(model, n, { prefillUbatch: U, moeGroupPrefill: 0, prefillDp4a: false }, wgMem, { wideDn: false, mtpWide: false });
   if (wide.warns.length || !wide.eng.ubatch) throw new Error(`wide prefill did not turn on: ${wide.warns}`);
   const A = byBg(base.log), B = byBg(wide.log);
   let same = 0;
@@ -126,7 +129,7 @@ Deno.test("wide prefill: off with prefillUbatch 0 and at runtime (engine.prefill
 
 Deno.test("prefill defaults: wide on for an engine with the embedding (MoE + expert-grouped, dense), MoE workers too (prefillHidden)", async () => {
   const host = await engineFor(models.moe);
-  eq(host.eng.ubatch, 256, "MoE host prefillUbatch default"); eq(host.eng.moeGrpU, 256, "MoE host moeGroupPrefill default");
+  eq(host.eng.ubatch, 512, "MoE host prefillUbatch default"); eq(host.eng.moeGrpU, 512, "MoE host moeGroupPrefill default");
   eq(!!host.eng.attnPrefillTile, true, "MoE attnPrefillTile default");
   eq(host.warns.length, 0, "MoE host warnings");
   const G = parseGGUFHeader(models.moe.buffer.slice(models.moe.byteOffset, models.moe.byteOffset + models.moe.byteLength));
@@ -137,8 +140,8 @@ Deno.test("prefill defaults: wide on for an engine with the embedding (MoE + exp
     worker = await Qwen35Engine.create({ device: mockDevice({ wgMem: 16384 }), meta: G.meta, layerRange: [4, L], hasEmbed: false, hasHead: false,
       maxSeq: 512, batchCols: 16, coopRowsB: 1, weights: await qwen35Weights(G, bytesOf, { lo: 4, hi: L, hasEmbed: false, hasHead: false }) });
   } finally { console.warn = origWarn; }
-  eq(worker.ubatch, 256, "MoE worker prefillUbatch"); eq(worker.moeGrpU, 256, "MoE worker moeGroupPrefill");
-  eq(worker.prefillFrame(), 256, "MoE worker prefill frame");
+  eq(worker.ubatch, 512, "MoE worker prefillUbatch"); eq(worker.moeGrpU, 512, "MoE worker moeGroupPrefill");
+  eq(worker.prefillFrame(), 512, "MoE worker prefill frame");
   eq(!!worker.attnPrefillTile, true, "MoE worker attnPrefillTile"); eq(warns.length, 0, "MoE worker warnings: " + warns.join("; "));
   const dense = await engineFor(models.dense);
   eq(dense.eng.ubatch, 256, "dense prefillUbatch default"); eq(dense.eng.moeGrpU, 0, "dense moeGroupPrefill");
@@ -155,14 +158,18 @@ Deno.test("prefill defaults: wide on for an engine with the embedding (MoE + exp
 Deno.test("prefill defaults on a MoE: wide chunks with the expert-grouped kernels inside, valid commands", async () => {
   const r = await trace("moe", 300);   // 256-token wide chunk, then a 32-token grouped ubatch, then 16-column passes
   const n = (p) => r.log.filter((e) => e.pipe.startsWith(p)).length;
-  if (!n("gemm_w_")) throw new Error("no wide GEMMs");
-  if (!n("moe_gsort") || !n("moe_gusg_") || !n("moe_dng_")) throw new Error("no expert-grouped kernels");
+  if (!n("gemm_w_") && !n("gemm_d_")) throw new Error("no wide GEMMs");
+  // the expert kernels: dp4a by default where DP4A_DEFAULT.moe and the device allow it, else the f32 tiled ones
+  const dq = !!r.eng.moeDp4a;
+  eq(dq, DP4A_DEFAULT.moe && dp4aAutoDevice(null), "MoE dp4a experts default");
+  if (!n("moe_gsort") || !n(dq ? "moe_gusq_" : "moe_gusg_") || !n(dq ? "moe_dnq_" : "moe_dng_") || (dq && !n("moe_qx"))) throw new Error("no expert-grouped kernels");
+  if (n(dq ? "moe_gusg_" : "moe_gusq_")) throw new Error("both expert kernel kinds ran");
   eq(r.eng.pos, 300, "position after prefill");
 });
 
 Deno.test("dp4a wide prefill: each projection input quantized once, int8 GEMMs over the chunk, valid commands, runtime switch", async () => {
   for (const [model, n, U, wgMem] of [["dense", 150, 64], ["q8out", 200, 128, 32768], ["moe", 150, 64]]) {
-    const r = await trace(model, n, { prefillUbatch: U, moeGroupPrefill: 0, prefillDp4a: true }, wgMem);
+    const r = await trace(model, n, { prefillUbatch: U, moeGroupPrefill: 0, prefillDp4a: true }, wgMem, { mtpWide: false });   // trunk GEMMs only
     if (r.warns.length || !r.eng.dp4aCfg) throw new Error(`${model}: dp4a did not turn on: ${r.warns}`);
     const dc = r.eng.dp4aCfg, BN = r.eng.wideCfg.BN, chunks = [];
     for (let i = 0; n - i >= BN; ) { const w = Math.min(U, Math.floor((n - i) / BN) * BN); chunks.push(w); i += w; }
@@ -221,7 +228,7 @@ Deno.test("prefillHidden: a room worker's prompt frame through wide, grouped and
   for (let k = 0; k < out.length; k++) if (out[k] !== xs[k]) throw new Error(`column ${Math.floor(k / dim)} row ${k % dim}: ${out[k]} != ${xs[k]}`);
   eq(worker.pos, base + n, "position after the frame");
   const nk = (p) => device.log.filter((e) => e.pipe.startsWith(p)).length;
-  if (!nk("gemm_w_")) throw new Error("no wide GEMMs on the worker");
+  if (!nk("gemm_w_") && !nk("gemm_d_")) throw new Error("no wide GEMMs on the worker");
   if (!nk("moe_gsort")) throw new Error("no expert-grouped kernels on the worker");
   // the shard with the embedding: ids in, the embedding rows out (the mock runs no layers), no draft-cache fill
   const host = await engineFor(models.moe);
@@ -232,4 +239,47 @@ Deno.test("prefillHidden: a room worker's prompt frame through wide, grouped and
     for (let r = 0; r < dim; r++) if (h[c * dim + r] !== e[r]) throw new Error(`host column ${c}: not its embedding row`);
   }
   eq(host.eng.pos, 40, "host position");
+});
+
+// wideDn: each DeltaNet layer's conv / gates + L2 / recurrence / gated norm once per chunk (frame nCols = the chunk
+// width), the beta / alpha GEMV still per 16-column sub-batch; wideDn = false: per sub-batch (compared above)
+Deno.test("wide prefill: the DeltaNet middle runs once per chunk (wideDn), beta / alpha per sub-batch", async () => {
+  const n = 150, U = 64;
+  const r = await trace("dense", n, { prefillUbatch: U, prefillDp4a: false }, undefined, { mtpWide: false });
+  const off = await trace("dense", n, { prefillUbatch: U, prefillDp4a: false }, undefined, { mtpWide: false, wideDn: false });
+  const dnL = r.eng.layers.filter((Ly) => !Ly.isFull).length, chunks = [64, 64];   // 150 tokens: 2 chunks of 64, then 16-column passes
+  for (const k of ["dn_conv_mc", "dn_pre_mc", "dn_delta_mc", "dn_gatenorm_mc"]) {
+    const on = r.log.filter((e) => e.pipe === k && String(e.frame).split(",")[2] === "64");
+    eq(on.length, dnL * chunks.length, `${k}: one launch per DeltaNet layer per chunk`);
+    eq(off.log.filter((e) => e.pipe === k && String(e.frame).split(",")[2] === "64").length, 0, `${k}: wideDn = false keeps 16-column launches`);
+  }
+  // the per-column kernels take one workgroup row per column of the chunk
+  eq(r.log.filter((e) => e.pipe === "dn_pre_mc" && e.grid[1] === 64).length, dnL * chunks.length, "dn_pre_mc grid y = chunk width");
+  // beta / alpha: the batched GEMV, 16 columns at a time, as many launches as before
+  const ba = (log) => log.filter((e) => /^matvec_.*coop_b/.test(e.pipe) && e.grid[0] > 0).length;
+  eq(ba(r.log), ba(off.log), "beta / alpha GEMV launches");
+  eq(r.eng.pos, off.eng.pos, "position");
+});
+
+// mtpWide: a wide chunk with a next token for every column fills the draft cache with wide GEMMs (eh_proj and the
+// draft layer's k / v) and kv_store per sub-batch at positions + 1; the chunk that ends the prompt keeps the old fill
+Deno.test("wide prefill: draft (MTP) cache fill with wide GEMMs (mtpWide), the prompt's last chunk the old way", async () => {
+  const n = 150, U = 64;
+  const r = await trace("dense", n, { prefillUbatch: U, prefillDp4a: false });
+  const L = r.eng.layers.length, mtpIdx = L;
+  // draft fill kv_store launches: the draft layer's bind group; per 16-column sub-batch of each wide chunk, at pos + 1
+  const kvBg = r.eng.layerB[mtpIdx].mc.kvStore;
+  const ks = r.log.filter((e) => e.pipe === r.eng.ksPipe && e.bg1 === kvBg.id);
+  const wideKs = ks.filter((e) => String(e.frame).split(",")[2] === "16");
+  if (!r.eng._mtpW) throw new Error("wide draft fill not set up");
+  const frames = wideKs.map((e) => +String(e.frame).split(",")[0]);
+  for (const p of [1, 17, 33, 49, 65, 81, 97, 113]) if (!frames.includes(p)) throw new Error(`no wide draft kv_store at position ${p}: ${frames}`);
+  // the wide draft GEMMs: eh_proj (2 * dim in) and the draft layer's k / v, over 64 columns
+  const ehIn = r.eng.dims.dim * 2;
+  const g = r.log.filter((e) => e.pipe.startsWith("gemm_w_") && e.grid[1] === 1);
+  if (g.length < 2 * (2 + (r.eng.mtpLayer.fKV ? 1 : 2))) throw new Error(`draft fill wide GEMMs: ${g.length}`);
+  const off = await trace("dense", n, { prefillUbatch: U, prefillDp4a: false }, undefined, { mtpWide: false });
+  if (off.eng._mtpW !== undefined) throw new Error("mtpWide = false still set up the wide fill");
+  eq(r.eng.pos, off.eng.pos, "position");
+  void ehIn;
 });
