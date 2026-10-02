@@ -16,7 +16,7 @@
 //        SETUP=solo|pair|proc|tab (the node alone, + a second node, the second node in its own process, + a browser tab), REQ (requests.jsonl
 //        recorded from an OpenClaw gateway), CKPT=0 (no checkpoints: the baseline), CTX, STEPS=turn1 (the cold turn only)
 // env: MODELS (model dir, layout of source.js LOCAL; default <checkout>/models), MODEL (qwen3-1.7b), PROMPT,
-//      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, CHROME_BIN (a Chromium or
+//      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, WORKER_GB / WORKER_RAM (nodepair), CHROME_BIN (a Chromium or
 //      headless_shell with WebGPU; default playwright's), PORT (8231), OUT (result JSON path),
 //      SIGNAL=cloud / PAGE=live (the public PeerJS server / the room page on https://pooled.run)
 import http from "node:http";
@@ -335,7 +335,8 @@ try {
     out.tab = await tabStatus();
   } else if (MODE === "nodepair") {
     host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, name: "node-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a") });
-    worker = await joinRoom(host.code, { pledgeGB: NODE_GB, name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
+    // WORKER_GB / WORKER_RAM: the worker's own pledge, and RAM for experts (expert offload: it holds what the pledges can't)
+    worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || NODE_GB), ramGB: +(process.env.WORKER_RAM || 0), name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
     const tStart = Date.now();
     await host.start(MODEL, { minDevices: 2, waitMs: 30000 });
     out.onlineS = (Date.now() - tStart) / 1000;

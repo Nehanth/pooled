@@ -25,7 +25,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText } from "./room/models.js";
+import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, mergeSplitHeaders, expertBytesOf } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -50,7 +50,7 @@ import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
-import { pledgeRule, pledgeGB, afterLoadDeath } from "./room/pledge.js";
+import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
@@ -468,7 +468,7 @@ function roomFitFor(key) {
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
   const pledges = devs.map((d) => pledgeGB(d.meta) * 2 ** 30);
-  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes); };
+  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.expertBytes)); };
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
   return { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
@@ -2362,6 +2362,13 @@ async function convertedSummary(c, t0) {
   if (c.stats.hit) log("room", `${myName}: ${msg}`);
 }
 
+// a model's index: a split GGUF (MODELS[key].shards) reads every file's and merges them (room/models.js
+// mergeSplitHeaders: each tensor of a later file carries that file's url, which rangeOf fetches it from)
+async function fetchModelHeader(M, needTokenizer = true) {
+  if (!M.shards?.length) return fetchGGUFHeader(M.gguf, needTokenizer);
+  const hs = await Promise.all(M.shards.map((u, i) => fetchGGUFHeader(u, needTokenizer && i === 0)));
+  return mergeSplitHeaders(hs, M.shards);
+}
 async function fetchGGUFHeader(url, needTokenizer = true) {
   let size = 12 * 2 ** 20;
   for (;;) {
@@ -2376,9 +2383,9 @@ const streamWithRetry = (url, streamOpts) => async (info) => {
   try { return await streamEntryToGPU(ai.device, info, openRangeOf(url), streamOpts); }
   catch (e) {
     if (!/short tensor/.test(String(e)) && !e?.retryNet) throw e;   // (retryNet: a room device stopped sending it)
-    const c = await getWeightCache();
-    if (c) c.delete(cacheKey(url, info.byteOffset, info.byteOffset + info.byteLength - 1)).catch(() => {});
-    return streamEntryToGPU(ai.device, info, (i) => rangeFetch(url, i.byteOffset, i.byteOffset + i.byteLength - 1, true), streamOpts);
+    const c = await getWeightCache(), u = info.url || url;
+    if (c) c.delete(cacheKey(u, info.byteOffset, info.byteOffset + info.byteLength - 1)).catch(() => {});
+    return streamEntryToGPU(ai.device, info, (i) => rangeFetch(i.url || url, i.byteOffset, i.byteOffset + i.byteLength - 1, true), streamOpts);
   }
 };
 // Prefetch: a shard is hundreds of tensors (a 27B worker with 30 layers fetches ~450), and fetching
@@ -2392,11 +2399,13 @@ const PREFETCH_Q = new URLSearchParams(location.search).get("prefetch");
 // unread downloads per MoE layer, and on an iPhone they piled up in Safari's networking process
 // until iOS killed it and the page with it (#207, measured with memprobe.html ?pfdedupe).
 const prefetcher = { url: null, list: [], at: new Map(), pending: new Map(), taken: new Set() };
+// (a split GGUF's tensors carry their own file's url: the list goes file by file, and every key names the file:
+// "<url>@<offset>")
 function planPrefetch(url, infos) {
   clearPrefetch();
   prefetcher.url = url;
-  prefetcher.list = infos.filter(Boolean).sort((a, b) => a.byteOffset - b.byteOffset);
-  prefetcher.at = new Map(prefetcher.list.map((x, i) => [x.byteOffset, i]));
+  prefetcher.list = infos.filter(Boolean).sort((a, b) => (a.shard || 0) - (b.shard || 0) || a.byteOffset - b.byteOffset);
+  prefetcher.at = new Map(prefetcher.list.map((x, i) => [(x.url || url) + "@" + x.byteOffset, i]));
 }
 // drop what nobody will read: cancel the bodies so the browser lets go of them now
 function clearPrefetch() {
@@ -2404,22 +2413,22 @@ function clearPrefetch() {
   prefetcher.pending = new Map(); prefetcher.taken = new Set(); prefetcher.url = null;
 }
 function rangeOf(url, info) {
-  const lo = info.byteOffset, hi = info.byteOffset + info.byteLength - 1;
-  if (url !== prefetcher.url) return rangeFetch(url, lo, hi);
+  const lo = info.byteOffset, hi = info.byteOffset + info.byteLength - 1, u = info.url || url;
+  if (url !== prefetcher.url) return rangeFetch(u, lo, hi);
   const ahead = PREFETCH_Q != null ? Math.max(0, parseInt(PREFETCH_Q, 10) || 0) : myMeta?.phone ? 1 : 4;
-  const i = prefetcher.at.get(lo);
-  prefetcher.taken.add(lo);
+  const key = u + "@" + lo, i = prefetcher.at.get(key);
+  prefetcher.taken.add(key);
   if (i !== undefined) for (let k = i + 1; k <= i + ahead && k < prefetcher.list.length; k++) {
-    const n = prefetcher.list[k];
-    if (!prefetcher.pending.has(n.byteOffset) && !prefetcher.taken.has(n.byteOffset)) {
-      const p = rangeFetch(url, n.byteOffset, n.byteOffset + n.byteLength - 1);
+    const n = prefetcher.list[k], nk = (n.url || url) + "@" + n.byteOffset;
+    if (!prefetcher.pending.has(nk) && !prefetcher.taken.has(nk)) {
+      const p = rangeFetch(n.url || url, n.byteOffset, n.byteOffset + n.byteLength - 1);
       p.catch(() => {});
-      prefetcher.pending.set(n.byteOffset, p);
+      prefetcher.pending.set(nk, p);
     }
   }
-  const p = prefetcher.pending.get(lo);
-  if (p) { prefetcher.pending.delete(lo); return p.catch(() => rangeFetch(url, lo, hi)); }   // a failed prefetch retries in line
-  return rangeFetch(url, lo, hi);
+  const p = prefetcher.pending.get(key);
+  if (p) { prefetcher.pending.delete(key); return p.catch(() => rangeFetch(u, lo, hi)); }   // a failed prefetch retries in line
+  return rangeFetch(u, lo, hi);
 }
 // the tensors a shard loads, for the prefetcher (a superset is harmless: the list only orders fetches)
 function shardInfos(G, names) { return [...new Set(names)].map((n) => G.tensors[n]).filter(Boolean); }
@@ -2434,7 +2443,7 @@ const rangeBytesOf = (url) => async (info) => {
   let r = await rangeOf(url, info);
   let bytes = await r.arrayBuffer().then((b) => new Uint8Array(b), (e) => { if (e?.retryNet) return new Uint8Array(0); throw e; });
   if (bytes.length !== info.byteLength) {
-    r = await rangeFetch(url, info.byteOffset, info.byteOffset + info.byteLength - 1, true);
+    r = await rangeFetch(info.url || url, info.byteOffset, info.byteOffset + info.byteLength - 1, true);
     bytes = new Uint8Array(await r.arrayBuffer());
     if (bytes.length !== info.byteLength) throw new Error(`short download for ${info.name}: ${bytes.length}/${info.byteLength} bytes`);
   }
@@ -2873,7 +2882,7 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
     aiStatus("reading model index\u2026");
     const needTok = hasEmbed || hasHead;
     const cachedOk = ai.G && ai.GModel === modelKey && (!needTok || ai.G.meta["tokenizer.ggml.tokens"]);
-    const G = cachedOk ? ai.G : await fetchGGUFHeader(M.gguf, needTok);
+    const G = cachedOk ? ai.G : await fetchModelHeader(M, needTok);
     ai.G = G; ai.GModel = modelKey;
     ai.cfg = { num_hidden_layers: G.meta["qwen35.block_count"] - (G.meta["qwen35.nextn_predict_layers"] || 0) };
     if (hasEmbed || hasHead) {
@@ -3017,10 +3026,10 @@ async function aiStart(modelArg) {
     ai.chainNames = ai.chain.map((id) => conns.get(id)?.name || id);
     const n = ai.chain.length + 1;
     // layerAt(ctx): one layer's bytes with its KV cache at that context
-    let L, layerBytes, layerAt, embedBytes, cfg = null;
+    let L, layerBytes, layerAt, embedBytes, cfg = null, expertBytes = 0;
     if (M.kind === "qwen35") {
       aiStatus("reading model index… (11 MB)");
-      ai.G = await fetchGGUFHeader(M.gguf);
+      ai.G = await fetchModelHeader(M);
       ai.GModel = modelKey;
       // one attention layer's K (or V) cache is a single GPU buffer: hold the context to what the
       // smallest binding limit in the room fits (a device from before maxBindMB counts as WebGPU's 128 MiB)
@@ -3031,6 +3040,7 @@ async function aiStart(modelArg) {
       const w = qwen35ShardBytes(ai.G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4;
       layerAt = (c) => w + c * kvBytesPerLayerPos(ai.G.meta, ROOM_KV);   // the attention layers' KV cache at the room's context
       embedBytes = hostHeldBytes("qwen35", { embed: ai.G.tensors[GGML_EMBED]?.byteLength || 0, out: ai.G.tensors[GGML_OUTPUT]?.byteLength || 0, mtp: qwen35MtpBytes(ai.G) });
+      expertBytes = expertBytesOf(ai.G, 0, 4) / 4;
     } else {
       cfg = await (await fetch(M.cfg)).json();
       L = cfg.num_hidden_layers;
@@ -3061,9 +3071,12 @@ async function aiStart(modelArg) {
     const nameOf = (id) => conns.get(id)?.name || id;
     const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name)) * 2 ** 30;
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
+    // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
+    // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); browsers never offload
+    const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], expertBytes);
     // the model's default context, or its fallback when only that fits these pledges (room/models.js
     // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
-    const pick = pickCtx(modelKey, { want: ROOM_CTX, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes).fits });
+    const pick = pickCtx(modelKey, { want: ROOM_CTX, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes, off).fits });
     ROOM_CTX = pick.ctx;
     layerBytes = layerAt(ROOM_CTX);
     ai.ctxWant = pick.fellBack ? pick.want : 0;
@@ -3076,7 +3089,7 @@ async function aiStart(modelArg) {
     // whose pledge is under one layer stay in the room as ask-only guests (room/plan.js dealRoom)
     const deal = dealRoom({ L, layerBytes, hostBytes: embedBytes, pledges, mode: $("ai-split").value === "speed" ? "speed" : "memory",
       ms: [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
-      phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS });
+      phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS, off });
     if (!deal.fit.fits || !deal.used.length) throw new Error(shortWhy(M, deal.fit, [myName, ...ai.chain.map(nameOf)], [myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)]));
     ai.outWhy = Object.fromEntries(Object.entries(deal.out).map(([i, why]) => [nameOf(ai.chain[i - 1]), why]));
     for (const i of Object.keys(deal.out)) ai.leftOut.add(ai.chain[i - 1]);
@@ -3096,11 +3109,14 @@ async function aiStart(modelArg) {
     const inv = M.gguf && conns.size ? await gatherInventory(M.gguf) : {};
     ai.wsrc = M.gguf ? weightSources(M.gguf, inv) : null;
     ai.chain.forEach((id, i) => {
+      const o = deal.offload?.[i + 1];
+      if (o) log("room", `${nameOf(id)} offloads layers ${o.lo}–${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`);
       const msg = {
         t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX, kv: ROOM_KV,
         next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host",
         host: peer.id,
         inv,
+        ...(o ? { offload: { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes } } : {}),
       };
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });
       sendTo(id, msg);

@@ -80,7 +80,17 @@ export function layerCaps(pledges, layerBytes, hostBytes = 0) {
 // missing layers, short = the fewest extra bytes one device could add to make it fit (0 when it
 // fits), raise[i] = the extra bytes device i alone would have to add (Infinity when it alone can't:
 // the host must hold the embedding and head plus a layer before anyone else's layers count).
-export function roomFit(L, pledges, layerBytes, hostBytes = 0) {
+// off (optional, expert offload): { expertBytes, ram: [bytes per device, host first] }. When the pledges
+// alone fall short, a device with RAM to park experts in counts with what it holds that way (offloadCap);
+// the result then fits with offload: true, caps in layers with offload and residentCaps the pledge-only ones.
+export function roomFit(L, pledges, layerBytes, hostBytes = 0, off = null) {
+  const fit = residentFit(L, pledges, layerBytes, hostBytes);
+  if (fit.fits || !offloadOn(off)) return fit;
+  const caps = offloadCaps(L, pledges, layerBytes, hostBytes, off);
+  if (caps[0] < 1 || caps.reduce((s, c) => s + c, 0) < L) return fit;
+  return { fits: true, caps, missing: 0, short: 0, raise: caps.map(() => 0), offload: true, residentCaps: fit.caps };
+}
+function residentFit(L, pledges, layerBytes, hostBytes) {
   const caps = layerCaps(pledges, layerBytes, hostBytes);
   const has = caps.reduce((s, c) => s + c, 0);
   const hostOk = caps[0] >= 1;
@@ -94,6 +104,96 @@ export function roomFit(L, pledges, layerBytes, hostBytes = 0) {
     return (c + (L - has)) * layerBytes - p(i);
   }).map((b) => (b === Infinity ? b : Math.max(1, Math.ceil(b))));
   return { fits: false, caps, missing, short: Math.min(...raise), raise };
+}
+
+// ---------------- expert offload (engine/expert_store.js; room-node devices with a discrete GPU) ----------------
+// A MoE layer's routed experts are most of its bytes (35B: 470 of 498 MB; 122B: 1.41 of 1.49 GB). A device that
+// offloads keeps the experts of some of its layers in system RAM ("parked") and copies the ones a token picks into
+// a VRAM cache. Its pledge (VRAM) then pays for: its layers less the parked experts, plus the cache: one whole
+// layer's experts for prefill (the region) and at least OFFLOAD_MIN_SLOTS experts per offloaded layer. Its RAM
+// (meta.ramGB) pays for the parked experts. Neither is ever exceeded: a pledge is a promise (#291), and so is ramGB.
+// A device offloads only what its pledge can't hold, the fewest layers it can (each costs a GPU round trip per
+// token), and the rest of its pledge becomes the cache.
+export const OFFLOAD_MIN_SLOTS = 16;
+export const OFFLOAD_EXPERTS = 256;   // routed experts per layer (Qwen3.5 / 3.6 MoE): the cache's unit is 1/256 layer
+const offloadOn = (off) => !!off && off.expertBytes > 0 && (off.ram || []).some((r) => r > 0);
+// The fewest of n layers to offload so they fit `bytes` of VRAM (the pledge, less the host's own tensors) and
+// `ram` bytes of RAM: 0 when they fit without, -1 when they can't fit at all.
+export function offloadNeed(n, bytes, ram, layerBytes, expertBytes, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS) {
+  if (!(n > 0)) return 0;
+  if (n * layerBytes <= bytes + 1e-6) return 0;
+  const E = expertBytes;
+  if (!(E > 0) || !(E < layerBytes) || !(ram >= E)) return -1;
+  // n layers, m offloaded: n*layer - m*E (parked) + E (region) + m*E*minSlots/nExp (slots) <= bytes
+  const save = E * (1 - minSlots / nExp);
+  const m = Math.max(1, Math.ceil((n * layerBytes + E - bytes) / save - 1e-9));
+  return m <= n && m * E <= ram + 1e-6 ? m : -1;
+}
+// The most layers (up to L) a device holds with offload. bytes: VRAM for layers (pledge less host tensors).
+export function offloadCap(L, bytes, ram, layerBytes, expertBytes, minSlots = OFFLOAD_MIN_SLOTS) {
+  let n = layerBytes > 0 && bytes > 0 ? Math.min(L, Math.floor(bytes / layerBytes + 1e-9)) : 0;
+  while (n < L && offloadNeed(n + 1, bytes, ram, layerBytes, expertBytes, minSlots) >= 0) n++;
+  return n;
+}
+const vramFor = (pledges, hostBytes, i) => (Number.isFinite(pledges[i]) && pledges[i] > 0 ? pledges[i] : 0) - (i === 0 ? hostBytes : 0);
+// layers each device holds with offload where it can (off.ram[i] > 0), within its pledge otherwise
+export function offloadCaps(L, pledges, layerBytes, hostBytes, off) {
+  const rc = layerCaps(pledges, layerBytes, hostBytes);
+  return pledges.map((_, i) => (off.ram?.[i] > 0 ? Math.max(rc[i], offloadCap(L, vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, off.expertBytes, off.minSlots)) : rc[i]));
+}
+// What one device's n layers look like with offload: null when they fit its pledge as they are, else
+// { layers: m (the last m of its range are offloaded), vramBytes: its expert cache (region + slots: the rest of the
+// pledge), ramBytes: the experts parked, slots: experts cached per offloaded layer (ExpertStore sizes it the same) }.
+// m: the fewest layers that leave each offloaded layer OFFLOAD_GOOD_SLOTS cached experts, else as many as RAM
+// allows. Offloading one more layer frees its experts but adds a GPU round trip per token (~0.4 ms on the RTX 5070);
+// the cache's hit rate falls fast below a quarter of the experts (35B on the 5070: 109 slots 90% hits, 50 slots 70%,
+// docs/bench-log.md 2026-10-02), so the cache's size wins until then.
+export const OFFLOAD_GOOD_SLOTS = 64;
+export function offloadPlan(n, bytes, ram, layerBytes, expertBytes, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS) {
+  const m0 = offloadNeed(n, bytes, ram, layerBytes, expertBytes, minSlots, nExp);
+  if (m0 <= 0) return null;
+  const E = expertBytes, cache = (m) => bytes - (n * layerBytes - m * E), slots = (m) => Math.floor((cache(m) - E) / (m * E / nExp));
+  const top = Math.min(n, Math.floor(ram / E + 1e-9));
+  let m = m0;
+  while (m < top && slots(m) < OFFLOAD_GOOD_SLOTS) m++;
+  return { layers: m, vramBytes: Math.floor(cache(m)), ramBytes: m * E, slots: Math.min(nExp, slots(m)) };
+}
+
+// The deal when the pledges alone can't hold the model and offload can (roomFit's offload: true): every device
+// that does not offload holds what its pledge holds (all of it: the room is short without offload), and the
+// devices that offload take the rest, each from its pledge-only layers up to its cap with offload, in proportion
+// to the extra each can take. Phones are left out when the computers hold the model (as dealRoom does).
+function dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, off, fit }) {
+  const n = pledges.length, rc = fit.residentCaps, oc = fit.caps, out = {};
+  const canOff = (i) => off.ram?.[i] > 0 && oc[i] > rc[i];
+  let idx = [...Array(n).keys()].filter((i) => i === 0 || oc[i] >= 1);
+  for (let i = 1; i < n; i++) if (oc[i] < 1) out[i] = "small";
+  if (!phoneLayers) {
+    const comp = idx.reduce((s, i) => s + (i === 0 || !phone?.[i] ? oc[i] : 0), 0);
+    if (comp >= L) { idx.filter((i) => i > 0 && phone?.[i]).forEach((i) => { out[i] = "unneeded"; }); idx = idx.filter((i) => i === 0 || !phone?.[i]); }
+  }
+  const a = new Map(idx.map((i) => [i, rc[i]]));
+  let left = L - [...a.values()].reduce((s, x) => s + x, 0);
+  const offIdx = idx.filter(canOff), extra = new Map(offIdx.map((i) => [i, oc[i] - rc[i]]));
+  const tot = offIdx.reduce((s, i) => s + extra.get(i), 0);
+  if (left <= 0 || left > tot) return null;   // (left <= 0: the pledges hold it after all; roomFit says so first)
+  // in proportion to the extra each can take, largest remainders first, never past a cap
+  const want = offIdx.map((i) => ({ i, x: left * extra.get(i) / tot }));
+  for (const { i, x } of want) { const t = Math.min(Math.floor(x), extra.get(i)); a.set(i, a.get(i) + t); left -= t; }
+  want.sort((p, q) => (q.x - Math.floor(q.x)) - (p.x - Math.floor(p.x)) || p.i - q.i);
+  for (let guard = 0; left > 0 && guard < 4 * n + 4; guard++) for (const { i } of want) { if (left <= 0) break; if (a.get(i) < oc[i]) { a.set(i, a.get(i) + 1); left--; } }
+  if (left > 0) return null;
+  const used = idx.filter((i) => i === 0 || a.get(i) > 0);
+  idx.forEach((i) => { if (!used.includes(i)) out[i] = "unneeded"; });
+  const assigned = used.map((i) => a.get(i)), ranges = rangesOf(assigned);
+  const offload = used.map((i, k) => {
+    if (!(off.ram?.[i] > 0)) return null;
+    const p = offloadPlan(assigned[k], vramFor(pledges, hostBytes, i), off.ram[i], layerBytes, off.expertBytes, off.minSlots);
+    return p && { ...p, lo: ranges[k][1] - p.layers, hi: ranges[k][1] };
+  });
+  // a device that offloads holds its whole pledge (its layers' resident part, then the cache); its RAM apart
+  const held = used.map((i, k) => (offload[k] ? vramFor(pledges, hostBytes, i) : assigned[k] * layerBytes) + (i === 0 ? hostBytes : 0));
+  return { fit, used, assigned, ranges, held, out, offload };
 }
 // What this room can run, smallest model first: [{ key, need, ok, short }]. short is how many
 // more GB the room needs for that model (0 when it fits).
@@ -244,10 +344,14 @@ export function shortBy(fit, spareGB = []) {
 // Returns { fit, used: device indices that hold layers (host first, in order), assigned and ranges
 // for those devices, held: bytes each device in `used` holds, out: { index: "small" | "unneeded" } }.
 // When the pledges cannot hold the model nothing is dealt: fit.fits is false (fit.short, fit.raise).
-export function dealRoom({ L, layerBytes, hostBytes = 0, pledges, mode = "memory", ms = [], phone = [], phoneLayers = false }) {
-  const fit = roomFit(L, pledges, layerBytes, hostBytes);
+// off (optional): roomFit's expert offload ({ expertBytes, ram }). Only when the pledges alone can't hold the
+// model does a device offload (dealOffload); the result then also has `offload`: per device in `used`, null or
+// { layers, lo, hi, vramBytes, ramBytes } (offloadPlan, with the range of its layers to offload).
+export function dealRoom({ L, layerBytes, hostBytes = 0, pledges, mode = "memory", ms = [], phone = [], phoneLayers = false, off = null }) {
+  const fit = roomFit(L, pledges, layerBytes, hostBytes, off);
   const none = { fit, used: [], assigned: [], ranges: [], held: [], out: {} };
   if (!fit.fits) return none;
+  if (fit.offload) return dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, off, fit }) || { ...none, fit: { ...fit, fits: false } };
   const out = {};
   // a device whose pledge is under one layer holds none (the host always has room: fit says so)
   let idx = fit.caps.map((c, i) => i).filter((i) => i === 0 || fit.caps[i] >= 1);

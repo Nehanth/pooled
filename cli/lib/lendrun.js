@@ -4,7 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
-import { parseLendArgs, parseGb, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
+import { parseLendArgs, parseGb, detectMemory, memoryRule, ramRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
   hostable, ctxNote, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST, needsRoom, loadText } from "./lend.js";
 import { dawnLoader, quietLoader, driverLog } from "./dawn.js";
 import { cleanText } from "./common.js";
@@ -135,14 +135,17 @@ export async function prepare(opts, out) {
     rule = afterCheck(rule, got);
     if (rule.low) throw Object.assign(new Error(rule.why), { type: "low-memory" });
   }
-  return { rn, loader, rule, adapterName, mem };
+  // expert offload: the RAM a MoE model's experts may use when this GPU's pledge is short (--ram; discrete GPUs)
+  const ram = ramRule(mem, opts.ram, { totalGB: os.totalmem() / 2 ** 30, freeGB: os.freemem() / 2 ** 30 });
+  return { rn, loader, rule, adapterName, mem, ram };
 }
 
-function header(out, { title, adapterName, mem, rule, hosting = false }) {
+function header(out, { title, adapterName, mem, rule, ram = null, hosting = false }) {
   const gpu = mem.kind === "discrete" ? `${mem.name} · ${fmtGb(mem.totalGB)} GB` : mem.kind === "unified" ? `${mem.name || adapterName} · ${fmtGb(mem.totalGB)} GB unified memory` : adapterName;
   out.print(`${title}
   GPU      ${gpu}
-  lending  ${rule.gb} GB  (${rule.why}${rule.why.startsWith("--gb") || rule.why.includes("--gb sets it") ? "" : "; --gb to change"})
+  lending  ${rule.gb} GB  (${rule.why}${rule.why.startsWith("--gb") || rule.why.includes("--gb sets it") ? "" : "; --gb to change"})${ram?.gb > 0
+    ? `\n  RAM      up to ${ram.gb} GB for a MoE model's experts when the GPU is short (${ram.why}${ram.why.startsWith("--ram") ? "" : "; --ram to change"})` : ""}
   ${hosting
     ? "every device holding layers sees the hidden states of what is asked here (they carry the prompts\n  and answers), and whoever is in can ask: share the invite link only with people you trust"
     : "whoever the host lets in can use what this computer lends, and it sees the room's hidden states\n  (they carry the prompts and answers): lend to rooms you trust"}
@@ -203,7 +206,7 @@ async function runJoin(opts, out) {
   const name = opts.name || deviceName(os.hostname());
   const verbose = opts.verbose || !!process.env.POOLED_VERBOSE;   // the raw compiler / driver text
   let hostName = null;   // the host this run joined: a rejoin only goes back to a host of that name
-  const { rn, loader, rule, adapterName, mem } = await prepare(opts, out);
+  const { rn, loader, rule, adapterName, mem, ram } = await prepare(opts, out);
   let ST = null, spinAt = 0;
   if (out.tty) {
     // a terminal: the join screen (lib/joinui.js), redrawn in place
@@ -211,7 +214,7 @@ async function runJoin(opts, out) {
     ST = style({ stream: process.stderr });
     process.stderr.write(`\n  ${ST.ink3("Every device in a room sees what is asked there. Lend to rooms you trust.")}\n`);
     out.useScreen((st) => joinScreen(st, { S: ST, cols: process.stderr.columns || 80, spin: ST.spin(spinAt) }), ST);
-  } else header(out, { title: `pooled join · room ${fmtCode(code)}`, adapterName, mem, rule });
+  } else header(out, { title: `pooled join · room ${fmtCode(code)}`, adapterName, mem, rule, ram });
   let pass = null;   // what the host gave this device when it let it in: back in without asking
   const passes = passCounter();
   const S = { code, phase: "connecting", devices: null, range: null, model: null, tps: null, passes: 0, pct: null, load: null, tries: 0, signaling: true, answering: false,
@@ -275,7 +278,7 @@ async function runJoin(opts, out) {
     else if (!r.aborted) out.log(`download failed (${cleanText(r.error?.message || "", 200)}): streaming the layers from Hugging Face instead; pooled pull ${key} resumes it`, "error");
     tick();
   };
-  const joinOnce = () => rn.joinRoom(code, { pledgeGB: lendGB, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
+  const joinOnce = () => rn.joinRoom(code, { pledgeGB: lendGB, ramGB: ram?.gb || 0, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
     expectHost: hostName, key: opts.key, pass, log: (m) => out.log(m), beforeLoad: ensurePulled });
   const attach = (n) => {
     n.on("loadprogress", (pct) => { S.pct = pct; });
@@ -390,15 +393,16 @@ async function runJoin(opts, out) {
 // ---------------- pooled host ----------------
 async function runHost(opts, out, prepared = null) {
   const p0 = prepared || await prepare(opts, out);
-  const { rn, loader, adapterName, mem } = p0;
+  const { rn, loader, adapterName, mem, ram } = p0;
   let rule = p0.rule;
   if (!hostable(rn.MODELS).includes(opts.model)) throw new UsageError(`unknown model "${opts.model}"; one of: ${hostable(rn.MODELS).join(", ")}`);
   // --here: lend what the model needs on this computer alone and start; --pool: spread over the room
   if (opts.mode === "here") {
     const { hereGB, hereWhy, modelNeedGB, modelFallback } = await import("./hostui.js");
-    const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote };
+    const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote, offloadFor: rn.offloadFor };
     const max = Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb);
-    const gb = hereGB(lib, opts.model, { ctxAsk: opts.ctx || 0, maxGB: max });
+    // a MoE model this GPU can't hold whole: with --ram (a discrete GPU's default), its experts in RAM, lending the rule's GB
+    const gb = hereGB(lib, opts.model, { ctxAsk: opts.ctx || 0, maxGB: max, ramGB: ram?.gb || 0, offGB: rule.gb });
     if (!gb) throw new UsageError(`--here: ${rn.MODELS[opts.model].label.split("·")[0].trim()} ${hereWhy({ needGB: modelNeedGB(lib, opts.model, opts.ctx || 0), minNeed: modelFallback(lib, opts.model, opts.ctx || 0) }, { max })}; --pool runs it with other devices`);
     if (!(opts.gbGiven && rule.gb >= gb)) rule = { ...rule, gb, why: "--here: what the model needs" };
     if (!opts.splitGiven) opts.split = "speed";
@@ -422,12 +426,12 @@ async function runHost(opts, out, prepared = null) {
   }
   const cn = ctxNote(rn, opts.model, opts.ctx);
   if (cn) out.log(`--ctx ${opts.ctx}: ${cn}`);
-  const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
+  const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, ramGB: ram?.gb || 0, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log: (m) => out.log(m), split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   const code = node.code;
   // the invite link: its #k= key lets a device in without asking (a room node from before the gate has none)
   const link = `${ROOM_URL}${code}${node.inviteFragment || ""}`;
-  header(out, { title: `pooled host · room ${fmtCode(code)} · ${rn.MODELS[opts.model].label}`, adapterName, mem, rule, hosting: true });
+  header(out, { title: `pooled host · room ${fmtCode(code)} · ${rn.MODELS[opts.model].label}`, adapterName, mem, rule, ram, hosting: true });
   out.print(`  invite   ${link}
   join     pooled join "${link}"
   chat     pooled chat "${link}"      (your own tools: pooled serve "${link}")
@@ -515,7 +519,7 @@ async function runHost(opts, out, prepared = null) {
   // model, by the room page's math (room/plan.js roomFit); a terminal otherwise waits for Enter
   const auto = !tty || opts.start || opts.devices > 0;
   const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy,
-    gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote };
+    gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote, offloadFor: rn.offloadFor };
   let lastWhy = "";
   const maybeDeal = () => {
     if (!auto || starting || leaving || node.ai.engine || node.ai.starting) return;

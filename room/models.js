@@ -21,17 +21,36 @@ export const denseKvBytesPerLayerPos = (kvDim) => 2 * kvDim * 4;
 // Each picker model's shape, from its GGUF header (the host reads the same numbers from the file at
 // Start, so these only let the picker say before Start whether the room's pledges hold the model):
 // L layers; layer = one layer's weights (the largest group's average for the hybrids); kvPos = K+V
-// bytes per layer and position by KV format; embed / out / mtp: the host-only tensors.
+// bytes per layer and position by KV format; embed / out / mtp: the host-only tensors; exp: one layer's routed
+// experts (the MoE models; layers 0-3's average, as `layer`): what a device that offloads parks in RAM per layer.
 export const SHAPE = {
   "qwen3-1.7b": { kind: "gguf", L: 28, layer: 53494784, kvPos: { f16: denseKvBytesPerLayerPos(1024) }, embed: 330612736, out: 0, mtp: 0 },
   "qwen3.8-27b": { kind: "qwen35", L: 64, layer: 223970464, kvPos: { f16: 1024, q8: 576 }, embed: 715161600, out: 1042944000, mtp: 265197568 },
-  "qwen3.6-35b-moe": { kind: "qwen35", L: 40, layer: 498197568, kvPos: { f16: 512, q8: 288 }, embed: 286064640, out: 417177600, mtp: 897955840 },
+  "qwen3.6-35b-moe": { kind: "qwen35", L: 40, layer: 498197568, kvPos: { f16: 512, q8: 288 }, embed: 286064640, out: 417177600, mtp: 897955840, exp: 469762048 },
+  "qwen3.5-122b-moe": { kind: "qwen35", L: 48, layer: 1485116672, kvPos: { f16: 512, q8: 288 }, embed: 429096960, out: 625766400, mtp: 2682195968, exp: 1409286144 },
 };
-// { L, layerBytes, hostBytes } for a room running `model` at `ctx` positions with `kv` format, or
-// null for a model without a SHAPE (the picker then falls back to NEED_GB)
+// A split GGUF's headers (llama.cpp gguf-split: MODELS[key].shards, in order) as one: the first file's metadata and
+// every file's tensors, each tensor with its file (shard: index; url: that file's URL when urls is given, for the
+// loaders that fetch by URL). Offsets stay within their own file. -> the first header, merged
+export function mergeSplitHeaders(headers, urls = null) {
+  const G = headers[0], n = +G.meta?.["split.count"] || headers.length;
+  if (n !== headers.length) throw new Error(`a split GGUF of ${n} files, ${headers.length} read`);
+  for (let i = 1; i < headers.length; i++)
+    for (const [name, t] of Object.entries(headers[i].tensors)) G.tensors[name] = { ...t, shard: i, ...(urls ? { url: urls[i] } : {}) };
+  return G;
+}
+// A MoE GGUF's routed expert bytes over layers [lo, hi) (G: a parsed header): what a device that offloads parks per
+// layer (room/plan.js offloadNeed); 0 for a dense model
+export function expertBytesOf(G, lo, hi) {
+  let n = 0;
+  for (let i = lo; i < hi; i++) for (const p of ["gate", "up", "down"]) n += G.tensors[`blk.${i}.ffn_${p}_exps.weight`]?.byteLength || 0;
+  return n;
+}
+// { L, layerBytes, hostBytes, expertBytes } for a room running `model` at `ctx` positions with `kv` format, or
+// null for a model without a SHAPE (the picker then falls back to NEED_GB). expertBytes: 0 for a dense model.
 export function roomBytes(model, ctx, kv = "f16") {
   const s = SHAPE[model]; if (!s) return null;
-  return { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s) };
+  return { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0 };
 }
 
 // The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
