@@ -15,10 +15,11 @@
 // 4612ece1 / aeb06a4d and PREFILL_UBATCH=0 c26dbc5 / 3177f9f1; same greedy and spec tokens in all three.
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
-import { openGGUF, Q38_PATH, gpuDevice } from "./load_model.js";
+import { openGGUF, Q38_PATH, MOE_PATH, gpuDevice } from "./load_model.js";
 import { gpuGreedy } from "./gpusample_check.js";
 
-const model = openGGUF(Q38_PATH);
+// MODEL=moe: the same fingerprint for the 35B MoE (no reference list here: compare against main on the same machine)
+const model = openGGUF(Deno.env.get("MODEL") === "moe" ? MOE_PATH : Q38_PATH);
 const { device } = await gpuDevice();
 const L = model.trunkLayers, tok = model.tokenizer();
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true });

@@ -55,7 +55,7 @@ try {
   // ?prefillmath=f32|f16|sgmatrix (prefill GEMM operand precision, engine/qwen35.js PREFILL_MATH); sgmatrix
   // requests Chrome's subgroup-matrix + shader-f16 features when the adapter has them, else the engine falls back
   const PM = q.get("prefillmath") || undefined, SGM = q.get("sgm") ? JSON.parse(q.get("sgm")) : undefined;
-  const ad = await navigator.gpu.requestAdapter(); const device = await ad.requestDevice({ requiredFeatures: prefillMathFeatures(ad, PM),
+  const ad = await navigator.gpu.requestAdapter(); const device = await ad.requestDevice({ requiredFeatures: [...prefillMathFeatures(ad, PM), ...(q.has("gap") && ad.features.has("timestamp-query") ? ["timestamp-query"] : [])],
     requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, ...(PM || q.has("ubatch") ? { maxComputeWorkgroupStorageSize: ad.limits.maxComputeWorkgroupStorageSize } : {}) } });
   let gpuErrors = 0;
   device.addEventListener("uncapturederror", (e) => { if (gpuErrors++ < 3) log("GPU ERROR " + e.error?.message?.slice(0, 200)); });
@@ -65,7 +65,11 @@ try {
   const dense = arch !== "qwen35" && arch !== "qwen35moe", dirURL = MODEL.replace(/[^/]+$/, "");
   const tok = makeTokenizer(dense ? await (await fetch(dirURL + "tokenizer.json")).json() : tokenizerFromGGUF(G.meta));
   const FILLS = (q.get("prefill") || "").split(",").filter(Boolean).map(Number);
-  const MAXSEQ = Math.max(dense ? 8192 : 512, ...FILLS.map((f) => f + N + 16), (+q.get("pmab") || 0) + 256);
+  // ?ctx=1024,8192,32768: plain and speculative decode tok/s (GPU sampling, greedy) with that many tokens of this
+  // repo's source already in the cache, spec == plain checked; &gap=1 also runs tests/prof/decode_gap.js there.
+  // The context comes from files the engine work does not touch, so A/B runs across branches decode the same tokens.
+  const CTXF = (q.get("ctx") || "").split(",").filter(Boolean).map(Number);
+  const MAXSEQ = Math.max(dense ? 8192 : 512, ...FILLS.map((f) => f + N + 16), ...CTXF.map((f) => f + N + 64), (+q.get("pmab") || 0) + 256);
   const XOPTS = JSON.parse(q.get("opts") || "{}"), XSET = JSON.parse(q.get("set") || "{}");
   // stream Q4_0/Q8_0 tensors straight into GPU buffers, as the room does (a 21 GB model does not fit in a tab's JS heap)
   G.streamEntry = (info) => streamEntryToGPU(device, info, (i) => fetch(MODEL, { headers: { Range: `bytes=${i.byteOffset}-${i.byteOffset + i.byteLength - 1}` } }));
@@ -160,6 +164,33 @@ try {
     eng.prefillWide = !!eng.ubatch; if (ALL) { eng.attnPrefillTile = apt; eng.moeGroup = mg; }
     log("prefill " + JSON.stringify({ tokens: pids.length, ubatch: eng.ubatch, all: ALL, tile: eng.wideCfg, dp4a: eng.dp4aCfg, ...res })); out.push({ prefill: res });
   }
+  if (CTXF.length) {
+    // a chat turn: the source as the user's message, then a question about it (prose answers, so drafts get accepted)
+    const V = tok.vocab, head = [V["<|im_start|>"], ...tok.encode("user\n")];
+    const tail = [...tok.encode("\n\nExplain what this code does, step by step, in plain English."), V["<|im_end|>"], ...tok.encode("\n"), V["<|im_start|>"], ...tok.encode("assistant\n"), V["<think>"], ...tok.encode("\n\n"), V["</think>"], ...tok.encode("\n\n")];
+    let src = [];
+    for (const f of ["../../room.js", "../../engine/gguf.js", "../../engine/wgsl/base.js", "../../harness/agent.js", "../../room/plan.js", "../../engine/dense.js"]) {
+      src.push(...tok.encode(`\n// file: ${f}\n` + await (await fetch(f)).text())); if (src.length > Math.max(...CTXF)) break; }
+    while (src.length < Math.max(...CTXF)) src = src.concat(src);
+    const { decodeGap } = q.has("gap") ? await import("../prof/decode_gap.js") : {};
+    for (const fill of CTXF) {
+      const pre = [...head, ...src.slice(0, fill - head.length - tail.length), ...tail];
+      eng.reset(); if (eng.mtp) eng.mtpFill = false; await eng.prefillTokens(pre.slice(0, -1)); let lg = await fwd(pre.at(-1));
+      let next = pick(lg); const gen = [next]; t0 = performance.now();
+      for (let j = 1; j < N; j++) { next = pick(await fwd(next)); gen.push(next); }
+      const plain = (N - 1) / ((performance.now() - t0) / 1000);
+      let spec = null, same = null, acc = "";
+      if (eng.mtp) { eng.reset(); eng.mtpFill = true; eng.mtp.stats = { drafts: 0, accepted: 0 }; await eng.prefillTokens(pre.slice(0, -1)); lg = await fwd(pre.at(-1));
+        next = pick(lg); const sp = [next]; t0 = performance.now(); while (sp.length < N) { for (const x of await eng.specStep(next, pick, K)) sp.push(x); next = sp.at(-1); }
+        spec = (sp.length - 1) / ((performance.now() - t0) / 1000); same = gen.every((x, j) => sp[j] === x); acc = `${eng.mtp.stats.accepted}/${eng.mtp.stats.drafts}`; }
+      const r = { ctx: fill, plain: +plain.toFixed(2), spec: spec && +spec.toFixed(2), acceptance: acc, specIdentical: same, gen: gen.slice(0, 8) };
+      out.push(r); log(JSON.stringify(r));
+      if (decodeGap) out.push({ ctx: fill, gap: await decodeGap({ eng, device, prefix: pre, N, K, log }) });
+    }
+    log(`gpuErrors ${gpuErrors}`);
+    window.RESULT = out;
+    throw "done";
+  }
   // ?lfab=R: decode layer fusion A/B in this tab (engine.layerFuse flipped at runtime, R rounds of alternating
   // off / on blocks of N tokens after the same prompt), so both arms share the load and any GPU contention
   if (q.has("lfab") && eng.layerFuse) {
@@ -212,5 +243,5 @@ try {
   }
   log(`gpuErrors ${gpuErrors}`);
   window.RESULT = out;
-} catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; }
+} catch (e) { if (e !== "done") { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; } }
 </script>

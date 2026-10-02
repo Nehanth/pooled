@@ -20,7 +20,8 @@ const GOLD = { "q36moe": ["```python\ndef two_sum(nums, target):\n    seen = {}\
 const wcache = process.env.WCACHE !== "0", prof = process.env.CHROME_PROFILE ?? path.join(os.homedir(), ".cache", "swarmllm-chrome-bench");
 const srv = spawn("node", [root + "tests/bench/serve.mjs", root, PORT], { stdio: "inherit" }); await new Promise((r) => setTimeout(r, 600));
 // the ANGLE / Vulkan flags are Linux-only: on macOS they leave the tab without a WebGPU adapter (Chrome runs WebGPU on Metal by default)
-const args = ["--no-sandbox", "--headless=new", "--enable-unsafe-webgpu", "--ignore-gpu-blocklist", "--js-flags=--max-old-space-size=65536",
+// WEBGPU_DEV=1: full-precision timestamps (?gap=1; Chrome quantizes them to 100 µs otherwise)
+const args = ["--no-sandbox", "--headless=new", "--enable-unsafe-webgpu", ...(process.env.WEBGPU_DEV === "1" ? ["--enable-webgpu-developer-features"] : []), "--ignore-gpu-blocklist", "--js-flags=--max-old-space-size=65536",
   ...(process.platform === "linux" ? ["--use-gl=angle", "--use-angle=gl-egl", "--enable-features=Vulkan"] : [])];
 let b, ctx;
 const exe = process.env.CHROME_BIN ? { executablePath: process.env.CHROME_BIN } : {};
