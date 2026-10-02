@@ -11,9 +11,23 @@ let ready = null;
 export let Peer = null;
 export const runtime = { gpu: null, rtc: null };
 
+// Dawn's options: DAWN_OPTS (space separated, e.g. "enable-dawn-features=dump_shaders"), and on Windows
+// d3d_skip_shader_optimizations. Dawn's D3D12 backend compiles HLSL with FXC there (npm webgpu ships
+// no DXC), and FXC's optimizer is most of a slow kernel's compile: attn_flash_tile 13.3 s -> 2.0 s,
+// attn_dec 11.2 s -> 2.0 s, a MoE shard's pipelines ~2x faster in all on an RTX 5070. The driver
+// optimizes the DXBC again when it builds the GPU code: same outputs bit for bit, decode ~2-3% slower
+// on that PC's 8-layer MoE shard (1.96 vs 1.91 ms). POOLED_FXC_OPTIMIZE=1 keeps FXC's optimizer.
+export function dawnFlagsFor(env = process.env, platform = process.platform) {
+  const flags = (env.DAWN_OPTS || "").split(" ").filter(Boolean);
+  if (platform !== "win32" || env.POOLED_FXC_OPTIMIZE === "1" || flags.some((f) => f.includes("d3d_skip_shader_optimizations"))) return flags;
+  const i = flags.findIndex((f) => f.startsWith("enable-dawn-features="));
+  if (i < 0) return [...flags, "enable-dawn-features=d3d_skip_shader_optimizations"];
+  return flags.map((f, j) => (j === i ? f + ",d3d_skip_shader_optimizations" : f));   // one list: Dawn reads the last flag of a name
+}
+
 // webgpu: an async loader for Dawn ({ create, globals }), for a caller that resolves it from its own
 // install (the pooled CLI: an optional package); default the npm "webgpu" package next to this one
-export function setupNode({ dawnFlags = (process.env.DAWN_OPTS || "").split(" ").filter(Boolean), webgpu = () => import("webgpu") } = {}) {
+export function setupNode({ dawnFlags = dawnFlagsFor(), webgpu = () => import("webgpu") } = {}) {
   return ready ||= (async () => {
     // --- WebGPU (Dawn). Node 21+ already has a navigator object; add gpu to it.
     if (!globalThis.navigator?.gpu) {

@@ -1,13 +1,13 @@
 // room.js checkpoints (?ckpt) and the control that rides on the next frame (pendingCtl), host and
-// worker side. room.js is DOM-bound, so room_src.js cuts the real functions out of its source and
-// runs them here over a stub `ai` state; nothing is copied.
+// worker side. The extracted pipeline runs directly over a stub `ai` state.
 //
 // Why this matters: every device keeps its own caches, and the host only tells the chain what to
 // do (roll back, save, drop, reset, load) on the next frame it sends. If the host's view of what
 // the workers hold drifts from what they actually hold, the room either fails a lap ("no saved
 // slot") or, worse, runs a worker's layers on the wrong state and answers garbage without an error.
-import { roomFns, fnSource } from "./room_src.js";
-import { PrefixIndex, pinSplit } from "../../harness/prefix.js";
+import { createPipeline } from "../../room/pipeline.js";
+import { packWire } from "../../room/wire.js";
+import { pinSplit } from "../../harness/prefix.js";
 import { DROP_ALL, sendFrame, makeLink } from "../../room/transport.js";
 import { reusablePrefix } from "../../room/conversation.js";
 
@@ -45,43 +45,24 @@ class FakeEngine {
   async runHiddenBatch(xs, base) { this.run(Array.from(xs), base); return Float32Array.from(xs); }
 }
 
-const HOST_FNS = ["ckptEngine", "sendChain", "resetState", "ckptClear", "ckptSave", "ckptResume", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore", "ckptRejoin"];
 
 // the host's functions over a stub ai; sent frames land in `out`. disk: a CkptStore (null: GPU only)
 function host({ chain = ["w0"], ckptMax = 2, fed = [], engine = new FakeEngine(), out = [], disk = null, room = "ROOM", model = "m" } = {}) {
   const ai = { role: "host", model, chain, pendingCtl: {}, fed, pos: fed ? fed.length : 0, engine, ckpt: null, ckptN: 0 };
-  const fns = roomFns(HOST_FNS, {
-    ai, CKPT_MAX: ckptMax, PrefixIndex, DROP_ALL, wireStats: { lastMax: 0 }, ckptDisk: disk, roomCode: room,
-    sendHidden: (to, msg) => out.push({ to, msg }),
-  });
+  const fns = createPipeline({ state: ai, options: { checkpointMax: ckptMax },
+    checkpointStore: disk, getRoomCode: () => room,
+    transport: { sendHidden: (to, msg) => out.push({ to, msg }) } });
   return { ai, out, engine, ...fns };
 }
 
 // a worker's workerFrame over a stub ai; what it forwards lands in `send`
 function worker({ next = "host", engine = new FakeEngine(), send = () => {}, disk = null, room = "ROOM", model = "m", ckptMax = 2 } = {}) {
   const ai = { role: "worker", model, engine, next, hostId: "host", range: [0, 1] };
-  const { workerFrame, ckptRestore } = roomFns(["workerFrame", "ckptWhere", "ckptPersist", "ckptForget", "ckptRestore"], {
-    ai, DROP_ALL, performance, ckptDisk: disk, roomCode: room, CKPT_MAX: ckptMax, ckptClear: () => {},
-    unpackWire: (d) => Float32Array.from(d.x),
-    packWire: (h) => ({ x: Array.from(h) }),
-    badF32: () => false,
-    aiStatus: () => {}, sendTo: () => {}, teleNote: () => {}, compute: { pass() {} }, keepWarm: () => {},
-    sendHidden: send,
-  });
+  const { workerFrame, ckptRestore } = createPipeline({ state: ai, options: { checkpointMax: ckptMax },
+    checkpointStore: disk, getRoomCode: () => room,
+    transport: { sendHidden: send, sendTo: () => {} } });
   return { ai, engine, workerFrame, ckptRestore };
 }
-
-// ---------------------------------------------------------------------------------------------
-// the functions are really there (a rename in room.js should fail here, loudly)
-
-Deno.test("room_src: the checkpoint and worker functions are cut out of room.js whole", () => {
-  for (const n of [...HOST_FNS, "workerFrame"]) {
-    const s = fnSource(n);
-    ok(s.startsWith("function " + n) || s.startsWith("async function " + n), n);
-    ok(s.trim().endsWith("}"), n);
-    new Function(s);   // parses on its own
-  }
-});
 
 // ---------------------------------------------------------------------------------------------
 // resetState
@@ -358,11 +339,11 @@ Deno.test("ckptResume without ?ckpt, before any save, or solo", () => {
 Deno.test("sendChain sends the pending control with the next frame, once", () => {
   const h = host({ chain: ["w0", "w1"] });
   h.ai.pendingCtl = { rb: 1, sv: 2, dp: [1], reset: 1, ld: 3 };
-  h.sendChain({ t: "ai-hidden", pos: 4, x: [1] });
-  h.sendChain({ t: "ai-hidden", pos: 5, x: [2] });
+  h.sendChain({ t: "ai-hidden", pos: 4, ...packWire(Float32Array.from([1])) });
+  h.sendChain({ t: "ai-hidden", pos: 5, ...packWire(Float32Array.from([2])) });
   eq(h.out.map((o) => o.to), ["w0", "w0"], "to the first device only");
-  eq(h.out[0].msg, { t: "ai-hidden", pos: 4, x: [1], rb: 1, sv: 2, dp: [1], reset: 1, ld: 3 });
-  eq(h.out[1].msg, { t: "ai-hidden", pos: 5, x: [2] });
+  eq(h.out[0].msg, { t: "ai-hidden", pos: 4, ...packWire(Float32Array.from([1])), rb: 1, sv: 2, dp: [1], reset: 1, ld: 3 });
+  eq(h.out[1].msg, { t: "ai-hidden", pos: 5, ...packWire(Float32Array.from([2])) });
   eq(h.ai.frames, 2);
 });
 
@@ -389,7 +370,7 @@ Deno.test("workerFrame applies control in the order rb, sv, dp, reset, ld, befor
       const run = w.engine.run.bind(w.engine);
       w.engine.run = (toks, base) => { log.push("run"); w.engine.st.length = base; run(toks, base); };
       const pos = w.engine.st.length;
-      const msg = frame === "ai-hidden" ? { t: frame, pos, x: [1], ...c.d } : { t: frame, basePos: pos, n: 1, x: [1], ...c.d };
+      const msg = frame === "ai-hidden" ? { t: frame, pos, ...packWire(Float32Array.from([1])), ...c.d } : { t: frame, basePos: pos, n: 1, ...packWire(Float32Array.from([1])), ...c.d };
       await w.workerFrame(msg);
       eq(log, [...c.log, "run"], `${frame} ${JSON.stringify(c.d)}`);
     }
@@ -404,7 +385,7 @@ Deno.test("workerFrame passes the control on to the next worker, never back to t
       const w = worker({ next, send: (to, msg) => sent.push({ to, msg }) });
       w.engine.slots.set(2, []);
       w.engine.run = () => {};   // only the forwarding is under test here
-      const msg = frame === "ai-hidden" ? { t: frame, pos: 0, x: [5], ...ctl } : { t: frame, basePos: 0, n: 1, x: [5], ...ctl };
+      const msg = frame === "ai-hidden" ? { t: frame, pos: 0, ...packWire(Float32Array.from([5])), ...ctl } : { t: frame, basePos: 0, n: 1, ...packWire(Float32Array.from([5])), ...ctl };
       await w.workerFrame(msg);
       eq(sent.length, 1);
       eq(sent[0].to, next);
@@ -421,14 +402,14 @@ Deno.test("workerFrame passes the control on to the next worker, never back to t
 Deno.test("workerFrame only forwards control it received (no stray keys)", async () => {
   const sent = [];
   const w = worker({ next: "w1", send: (to, msg) => sent.push(msg) });
-  await w.workerFrame({ t: "ai-hidden", pos: 0, x: [5] });
+  await w.workerFrame({ t: "ai-hidden", pos: 0, ...packWire(Float32Array.from([5])) });
   for (const k of ["rb", "sv", "dp", "reset", "ld"]) ok(!(k in sent[0]), k);
 });
 
 Deno.test("workerFrame with no engine yet does nothing", async () => {
   const w = worker();
   w.ai.engine = null;
-  await w.workerFrame({ t: "ai-hidden", pos: 0, x: [1], reset: 1 });
+  await w.workerFrame({ t: "ai-hidden", pos: 0, ...packWire(Float32Array.from([1])), reset: 1 });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -458,7 +439,7 @@ function makeRoom(nWorkers, ckptMax = 2) {
       if (!toks.length) return;
       const base = h.ai.pos;
       h.engine.run(toks, base);
-      h.sendChain({ t: "ai-hidden-b", basePos: base, n: toks.length, x: toks });
+      h.sendChain({ t: "ai-hidden-b", basePos: base, n: toks.length, ...packWire(Float32Array.from(toks)) });
       h.ai.pos += toks.length; h.ai.fed.push(...toks);
       await pump();
       if (room.strict) room.check("after frame at " + base);

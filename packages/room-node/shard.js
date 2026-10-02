@@ -9,6 +9,7 @@ import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizer
   ggmlLayerNames, qwen35NamesFor } from "../../engine/gguf.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { maxSeqFor, kvModeFor } from "../../room/models.js";
+import { convertPool } from "./convert.js";
 
 // The tensors a shard's loader reads (engine/gguf.js ggufWeights / qwen35Weights), in about its order,
 // as { byteOffset, byteLength }: what source.js fetches ahead of it when it streams
@@ -36,6 +37,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
   const device = await adapter.requestDevice({ requiredLimits: {
     maxBufferSize: adapter.limits.maxBufferSize, maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize } });
   const out = { device, gpuErrors: 0 };
+  let pool = null;
   device.addEventListener?.("uncapturederror", (ev) => { if (out.gpuErrors++ < 3) onGpuError(ev.error?.message || "GPU error"); });
   try {
     // the index first, so a streamed shard's weights download while the GPU tests and tunes below run
@@ -43,6 +45,10 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     const needTok = kind === "qwen35" && (hasEmbed || hasHead);
     const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, ...(kind === "qwen35" ? { mtp: hasHead } : {}) };
     const G0 = await src.header(needTok);
+    // requantizing the tensors the GPU has no kernel for (Q4_1 / K-quants -> Q8) on worker threads:
+    // seconds per tensor on the event loop otherwise (convert.js)
+    pool = convertPool({ log });
+    G0.convert = pool.convert;
     src.plan?.(shardTensors(G0, kind, opts));
     if (selfTest) {
       const tdev = await (await navigator.gpu.requestAdapter()).requestDevice();   // an adapter gives out one device only
@@ -77,4 +83,5 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     applyRoomFlags(out.engine, flags);
     return out;
   } catch (e) { try { device.destroy(); } catch {} throw e; }
+  finally { if (out.G) delete out.G.convert; await pool?.close(); }
 }

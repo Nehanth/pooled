@@ -52,7 +52,7 @@ import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { spawn, execSync } from "child_process";
-import { patchRoom, patchTransport, INIT, clockOffset } from "./room_trace.mjs";
+import { patchGenerator, patchPipeline, patchTransport, INIT, clockOffset } from "./room_trace.mjs";
 
 const arg = (k, d) => { const i = process.argv.indexOf("--" + k); return i > 0 ? process.argv[i + 1] : d; };
 const flag = (k) => process.argv.includes("--" + k);
@@ -119,12 +119,16 @@ function serveRoom(src) {
     { const f = ${JSON.stringify(SPLIT)}; if (f.length !== assigned.length || f.reduce((a, b) => a + b, 0) !== L) throw new Error("--split " + f + ": need " + assigned.length + " counts adding up to " + L);
       assigned = f; let a = 0; ranges = f.map((x) => [a, a += x]); }
 `);
-  if (FIXK) src = rep(src, "      const pickK = () => {\n", `      const pickK = () => { if (ai.chain.length) return ${FIXK};\n`);
   if (TRACE) {
-    src = patchRoom(src);   // includes the __nospec switch
     return rep(src, "function onData(from, d) {", "function onData(from, d) {\n  if (d && d.t === \"x-trace\") { window.__hpOn = !!d.on; if (d.on) window.__hpMark?.(\"x-trace\", \"on\", d.idx); else window.__gpResolve?.(); return; }");
   }
-  return rep(src, "else if (ai.engine.mtp && ai.engine.specStep) {", "else if (ai.engine.mtp && ai.engine.specStep && !window.__nospec) {");
+  return src;
+}
+function serveGenerator(src) {
+  if (FIXK) src = rep(src, "const pickK = () => {", `const pickK = () => { if (ai.chain.length) return ${FIXK};`);
+  if (TRACE) return patchGenerator(src);
+  src = rep(src, "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep) {", "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep && !window.__nospec) {");
+  return rep(src, "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {", "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {");
 }
 // the selected ICE candidate pair of every room link and its wire stripes, with Chrome's own STUN
 // round trip on it (currentRoundTripTime: the network with no application in the way)
@@ -142,7 +146,7 @@ const linkStats = () => p.evaluate(async () => {
   }
   return out;
 });
-const SERVED = { [path.join(ROOT, "room.js")]: serveRoom, ...(TRACE ? { [path.join(ROOT, "room/transport.js")]: patchTransport } : {}) };
+const SERVED = { [path.join(ROOT, "room.js")]: serveRoom, [path.join(ROOT, "engine/generate.js")]: serveGenerator, ...(TRACE ? { [path.join(ROOT, "room/transport.js")]: patchTransport, [path.join(ROOT, "room/pipeline.js")]: patchPipeline } : {}) };
 for (const [p, fn] of Object.entries(SERVED)) fn(fs.readFileSync(p, "utf8"));   // fail before any browser starts
 
 const srv = http.createServer((q, r) => {

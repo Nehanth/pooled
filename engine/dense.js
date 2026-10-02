@@ -2,6 +2,7 @@
 import { weightsFromSafetensors } from "./safetensors.js";
 import { WGSL } from "./wgsl/base.js";
 import { compilePipeline } from "./compile.js";
+import { moduleSet } from "./wgsl/prune.js";
 import { probeUnpack, coopWGSL } from "./wgsl/coop.js";
 import { f16ToF32 } from "./gguf.js";
 import { denseAttnWGSL, DENSE_GLUE_WGSL, DENSE_GLUE3_WGSL } from "./wgsl/dense.js";
@@ -93,8 +94,9 @@ export class DenseEngine {
     // turns the glue on (about -0.5 ms per token, changes the bits). fuseAcc / fuseRms = false for A/B.
     this.fuseGlue = fuseGlue === true;
     this.glue3 = glue3 !== false && !this.fuseGlue;   // the glue as 3 reference-shaped kernels (see DENSE_GLUE3_WGSL)
-    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, batchWG, 4, this.rowsB, await probeUnpack(device))
-      + (this.attnFastOn ? denseAttnWGSL({ G, hd: headDim }) : "") + (this.fuseOn ? DENSE_GLUE_WGSL + DENSE_GLUE3_WGSL : "") });
+    // one module per entry point, pruned to what it uses (engine/wgsl/prune.js)
+    const mod = moduleSet(device, WGSL + coopWGSL(coopWG, coopRows, batchWG, 4, this.rowsB, await probeUnpack(device))
+      + (this.attnFastOn ? denseAttnWGSL({ G, hd: headDim }) : "") + (this.fuseOn ? DENSE_GLUE_WGSL + DENSE_GLUE3_WGSL : ""));
     const C = GPUShaderStage.COMPUTE;
     const layout0 = device.createBindGroupLayout({
       entries: [
@@ -132,7 +134,7 @@ export class DenseEngine {
       });
       this.pipes[name] = await compilePipeline(device, {
         layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }),
-        compute: { module: mod, entryPoint: name },
+        compute: { module: mod(name), entryPoint: name },
       });
     }));
 
@@ -141,10 +143,10 @@ export class DenseEngine {
     // coopRows kernel; at dIn = 2048 the head is ~20% faster with 8 rows (tests/bench_wide.js q17)
     this.headRows = hasHead && matvecVariant === "coop" && headRows > 0 && headRows !== coopRows ? headRows : 0;
     if (this.headRows) {
-      const modH = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, this.headRows, 64, 4, this.rowsB, await probeUnpack(device)) });
+      const modH = moduleSet(device, WGSL + coopWGSL(coopWG, this.headRows, 64, 4, this.rowsB, await probeUnpack(device)));
       for (const [name, spec] of [["matvec_q8_coop", G1.matvec_q8_coop], ["matvec_q4_coop", G1.matvec_q4_coop], ["matvec_coop", G1.matvec_coop]]) {
         const layout1 = device.createBindGroupLayout({ entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
-        this.pipes[name + "_h"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH, entryPoint: name } });
+        this.pipes[name + "_h"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH(name), entryPoint: name } });
       }
     }
     // Exact verify ops: the batched GEMVs again, built with the single-token kernels' workgroup size
@@ -155,11 +157,11 @@ export class DenseEngine {
     // tests/test_dense_spec.js checks the bits.
     this.verifyX = matvecVariant === "coop" && verifyWG !== batchWG;
     if (this.verifyX) {
-      const modX = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, verifyWG, 4, this.rowsB, await probeUnpack(device)) });
+      const modX = moduleSet(device, WGSL + coopWGSL(coopWG, coopRows, verifyWG, 4, this.rowsB, await probeUnpack(device)));
       const xNames = Object.keys(G1).filter((k) => /_b(_acc)?$/.test(k) && k.startsWith("matvec"));
       await Promise.all(xNames.map(async (name) => {
         const layout1 = device.createBindGroupLayout({ entries: G1[name].map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
-        this.pipes[name + "_x"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modX, entryPoint: name } });
+        this.pipes[name + "_x"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modX(name), entryPoint: name } });
       }));
     }
     // uniforms

@@ -25,6 +25,7 @@ fi
 TGZ=$(ls "$T/pack"/*.tgz)
 tar -tzf "$TGZ" | sed 's/^/   /'
 tar -tzf "$TGZ" | grep -q '^package/dist/index.js$' || fail "no dist/index.js in the tarball"
+tar -tzf "$TGZ" | grep -q '^package/dist/convert_worker.js$' || fail "no dist/convert_worker.js in the tarball (the weight conversion workers)"
 tar -tzf "$TGZ" | grep -q '^package/openclaw.plugin.json$' || fail "no manifest in the tarball"
 for f in assets/icon.png skills/pooled-room/SKILL.md LICENSE README.md; do
   tar -tzf "$TGZ" | grep -q "^package/$f\$" || fail "no $f in the tarball (ClawHub listing)"

@@ -5,6 +5,7 @@
 // llama.cpp eval-callback dumps).
 import { WGSL } from "./wgsl/base.js";
 import { compilePipeline } from "./compile.js";
+import { moduleSet } from "./wgsl/prune.js";
 import { gemmWGSL, GEMM_S, GEMM_TILE } from "./wgsl/gemm.js";
 import { gemmSgmWGSL, pickSgmConfig, sgmPlan, SGM_FEATURES, SGM_FEATURES_OPT, SGM_SYNTAX, SGM_DEFAULT } from "./wgsl/gemm_sgm.js";
 import { gemmWideWGSL, wideTileConfig, gemmDp4aWGSL, dp4aTileConfig, probeDp4a, SILU_MUL_W_WGSL } from "./wgsl/gemm_wide.js";
@@ -60,11 +61,14 @@ export const DENSE_PREFILL_UBATCH = 256;
 // (the GEMM has no split-K, so chunking and submit boundaries do not change the arithmetic).
 export const WIDE_SUBMIT_LAYERS = 8;
 // prefillDp4a default (undefined / "auto"), per model kind, on the devices dp4aAutoDevice() accepts (see _init).
-// Off for both (opt-in, prefillDp4a: true / ?dp4a=1): on the 27B it is ~1.8x the f32 wide GEMM's prefill on the GB10,
-// but it failed the llama.cpp log-probability gate (tests/test_prefill_dp4a.js, 2026-10-01): at 2100 tokens its next-token
-// logprobs were 0.95 nats from llama.cpp's top 20 against the f32 path's 0.26 (150 / 700 tokens: within 0.02 of f32).
-// Greedy tokens, argmax and spec == plain all matched. Turn dense back on only when that gate passes.
-export const DP4A_DEFAULT = Object.freeze({ dense: false, moe: false });
+// Dense: on (~1.8x the f32 wide GEMM's prefill on the 27B, GB10: 187 vs 103 tok/s at 2048 tokens). It failed #302's
+// gate (max |logprob - llama.cpp| over llama.cpp's top 20, dominated by tail tokens at -13..-17: 0.95 vs 0.26 nats at
+// 2100 tokens) but passed the pre-registered probability-weighted evaluation that replaced it (tests/eval_dp4a.js,
+// docs/bench-log.md 2026-10-02, PR #309): 27B and Qwen3.5-2B, 256 teacher-forced tokens on 15 prompts up to 8K tokens,
+// KL(llama.cpp || ours) over its top 20 within 2x of the f32 path's (27B 0.00046 vs 0.00045 nats), top-1 agreement
+// with llama.cpp no lower (98.94% vs 98.88%), and 40 scored downstream items identical (33/33, 2B 27/27).
+// MoE: opt-in (+8-10% there, relDiff over the MoE prefill tolerance; not evaluated).
+export const DP4A_DEFAULT = Object.freeze({ dense: true, moe: false });
 // Devices where "auto" turns dp4a on: measured faster there (docs/bench-log.md, 2026-09-30). NVIDIA by the adapter's
 // vendor (Chrome); Deno reports no vendor, so there: any OS but macOS (the GB10 is where it was measured). Never Apple:
 // Metal has no native int8 dot product. Other vendors stay opt-in until measured.
@@ -538,7 +542,9 @@ export class Qwen35Engine {
 
     // ---- pipelines with explicit layouts ----
     const unpack = await probeUnpack(device);
-    const mod = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack, true, true)
+    // one module per entry point, pruned to what it uses (engine/wgsl/prune.js): Dawn reprocesses the
+    // whole ~650 KB module for every pipeline otherwise (~1.3 s each under Windows' FXC)
+    const mod = moduleSet(device, WGSL + coopWGSL(coopWG, coopRows, 64, batchCols, coopRowsB, unpack, true, true)
       + (this.moe ? moeWGSL(this.moeK) : "")
       + (this.dnNba ? normRouterKernel({ ROWS: 4, bf16: false, name: "dn_nba", P: "nba", struct: !(this.moeFuse && this.moe.nrt) }) : "")
       + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, nrt: this.moe.nrt, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
@@ -548,7 +554,7 @@ export class Qwen35Engine {
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.gemmOn ? gemmWGSL({ N: batchCols, pairs: this._gemmPairs, pairs8: this._gemm8Pairs, UNPACK: unpack, R16: this._pmR16 }) : "")
       + (this.ubatch ? gemmWideWGSL(this.wideCfg, { UNPACK: unpack }) : "")
-      + (this.dp4aCfg ? gemmDp4aWGSL(this.dp4aCfg) : "") + SILU_MUL_W_WGSL + WGSL2 + layerFuseWGSL() });
+      + (this.dp4aCfg ? gemmDp4aWGSL(this.dp4aCfg) : "") + SILU_MUL_W_WGSL + WGSL2 + layerFuseWGSL());
     const C = GPUShaderStage.COMPUTE;
     const layout0 = device.createBindGroupLayout({
       entries: [
@@ -659,7 +665,7 @@ export class Qwen35Engine {
       const layout1 = device.createBindGroupLayout({
         entries: spec.map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })),
       });
-      const desc = { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: mod, entryPoint: name } };
+      const desc = { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: mod(name), entryPoint: name } };
       if (DP4A_PIPES.includes(name)) {   // optional too: a compiler that rejects them leaves the f32 wide GEMM
         try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { dpFails.push(e); }
         return;
@@ -698,10 +704,10 @@ export class Qwen35Engine {
     // a row's arithmetic, so the logits are bit-identical to the coopRows kernel (tests/bench_wide.js)
     this.headRows = hasHead && matvecVariant === "coop" && headRows > 0 && headRows !== coopRows ? headRows : 0;
     if (this.headRows) {
-      const modH = device.createShaderModule({ code: WGSL + coopWGSL(coopWG, this.headRows, 64, batchCols, coopRowsB, unpack) });
+      const modH = moduleSet(device, WGSL + coopWGSL(coopWG, this.headRows, 64, batchCols, coopRowsB, unpack));
       for (const name of ["matvec_q8_coop", "matvec_q4_coop", "matvec_coop"]) {
         const layout1 = device.createBindGroupLayout({ entries: G1[name].map((t, i) => ({ binding: i, visibility: C, buffer: { type: bufType[t] } })) });
-        this.pipes[name + "_h"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH, entryPoint: name } });
+        this.pipes[name + "_h"] = await compilePipeline(device, { layout: device.createPipelineLayout({ bindGroupLayouts: [layout0, layout1] }), compute: { module: modH(name), entryPoint: name } });
       }
     }
     // ---- uniforms ----

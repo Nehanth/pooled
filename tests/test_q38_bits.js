@@ -10,6 +10,9 @@
 // Since perf/prefill-dp4a-wide-gemm-27b the dense default prefill is the f32 wide GEMM (ubatch 256, +24-29% prefill,
 // logits relDiff 4e-5..1.4e-4 vs the 16-column path): default -> 4612ece1 / aeb06a4d. PREFILL_UBATCH=0 (the 16-column
 // path) still gives c26dbc5 / 3177f9f1 (and f0537158 / 5d287854 with ATTN_PREFILL_TILE=0); same greedy and spec tokens.
+// Since perf/dp4a-eval (#309) the dense default on NVIDIA is the dp4a wide GEMM (int8 dot products on Q8_1-quantized
+// activations, passed tests/eval_dp4a.js): default -> 4dc814b1 / 4f075117. PREFILL_DP4A=0 (the f32 wide GEMM) still gives
+// 4612ece1 / aeb06a4d and PREFILL_UBATCH=0 c26dbc5 / 3177f9f1; same greedy and spec tokens in all three.
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
 import { openGGUF, Q38_PATH, gpuDevice } from "./load_model.js";

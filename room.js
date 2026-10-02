@@ -3,6 +3,8 @@
 // The inference engine (engine/engine.js, engine/qwen35.js and their WGSL kernels, ~250 KB) is not
 // part of the join screen's module graph: loadEngine() imports it when this device enters a room,
 // and aiLoadShard waits for it. The join screen works as soon as the lobby modules below are in.
+import { createPipeline } from "./room/pipeline.js";
+import { createGenerator } from "./engine/generate.js";
 import { argmax } from "./engine/sampling.js";
 let autotuneCoop, makeTokenizer, DenseEngine, fetchModelShard, shardTensorNames, gpuSelfTest, kernelMicroTests, Qwen35Engine;
 let engineLoad = null;
@@ -16,13 +18,12 @@ import { f32ToF16, f16ToF32, parseGGUFHeader, ggufWeights, ggufShardBytes, GGML_
   ggmlLayerNames, qwen35Weights, qwen35ShardBytes, qwen35MtpBytes, qwen35LayerNames, qwen35NamesFor, tokenizerFromGGUF, gpuUploadEntry, streamEntryToGPU }
   from "./engine/gguf.js";
 import { roomQwen35Options, roomEngineFlags, applyRoomFlags } from "./engine/preset.js";   // no imports of its own; the engine itself loads late (loadEngine)
-import { WIRE_F16, badF32, f32ToB64, packF16, unpackF16, asU16, packWire, unpackWire, asF32, b64ToF32, wireStats } from "./room/wire.js";
+import { WIRE_F16, f32ToB64, packF16, unpackF16, asU16, asF32, b64ToF32, wireStats } from "./room/wire.js";
 import { esc, md, mdChat } from "./room/markdown.js";
 import { pickSampler, SAMPLING } from "./room/sampling.js";
 import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
-import { PrefixIndex, pinSplit } from "./harness/prefix.js";
 import { CkptStore } from "./room/ckpt-store.js";
 import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
@@ -35,17 +36,17 @@ const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("
 // back instead of the room prefilling the whole conversation again. ?ckptdisk=0: GPU copies only.
 const ckptDisk = CKPT_MAX && new URLSearchParams(location.search).get("ckptdisk") !== "0" && globalThis.navigator?.storage?.getDirectory
   ? new CkptStore() : null;
-import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DROP_ALL, DUP_SLICES } from "./room/transport.js";
+import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DUP_SLICES } from "./room/transport.js";
 import { peerErrorText, peerErrorLoud, FetchError, joinStep, versionMismatch } from "./room/errors.js";
 import { turnFrom, iceConfig, shareQuery, linkPath, linkRelayProtocol, normTurn, TURN_KEY, wantDefaultRelay, fetchRelay, markAuto, swapRelayServers, refreshInMs, isRelayServer, weightsOverLink, probeUdp, networkAdvice, WORK_DOCS } from "./room/ice.js";
-import { PERSONAS, specials, fitContext, reusablePrefix, templateProfile } from "./room/conversation.js";
+import { PERSONAS, specials, fitContext, templateProfile } from "./room/conversation.js";
 import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS,
-  makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, lapTimeout, suspectBack, STALL_MS } from "./room/liveness.js";
+  makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { lookupDrafts, chainDenseSpec, denseLookupDrafts, DENSE_SPEC_V } from "./room/lookup.js";
+import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
@@ -3422,34 +3423,8 @@ function aiMaybeReady() {
   codeRoleChanged();
 }
 
-// ---- laps ----
-// A lap is one frame's trip round the chain. Its waiter resolves with the returned hidden
-// state(s), or rejects on timeout or as soon as a device in the chain leaves.
-function lapWait(key, ms, what) {
-  return new Promise((res, rej) => {
-    const timer = setTimeout(() => { ai.waiters.delete(key); rej(new Error(`pipeline timeout (${what}): a device in the room stopped answering. Check that every device's tab is open with its screen on, then ask again`)); }, ms);
-    ai.waiters.set(key, {
-      res: (h) => { clearTimeout(timer); res(h); },
-      rej: (e) => { clearTimeout(timer); rej(e); },
-    });
-  });
-}
 // the slowest round trip to a device in the chain (pongs), for lap timeouts
 function chainRtt() { return Math.max(0, ...ai.chain.map((id) => conns.get(id)?.rtt || 0)); }
-function failWaiters(err) { for (const [k, w] of ai.waiters) { ai.waiters.delete(k); w.rej(err); } }
-function lapDone(key, h) { const w = ai.waiters.get(key); if (w) { ai.waiters.delete(key); w.res(h); } }
-// send a frame to the first device of the chain; a pending reset or rollback rides with it,
-// so it reaches every device strictly before the frame it applies to
-function sendChain(msg) {
-  ai.frames = (ai.frames || 0) + 1;
-  ai.hostAmax = Math.max(0.9 * (ai.hostAmax || 0), wireStats.lastMax || 0);
-  const ctl = ai.pendingCtl; ai.pendingCtl = {};
-  sendHidden(ai.chain[0], { ...msg, ...ctl });
-  // the chain saves with this frame: only now is it a checkpoint every device has, so only now
-  // does the host's own copy go to disk (a reloaded host must not index a slot no worker saved)
-  const saved = ctl.sv != null && ai.ckpt?.items.find((x) => x.key === ctl.sv);
-  if (saved) ckptPersist(ctl.sv, saved.ids, saved.pin);
-}
 // a decode lap starts: the workers that asked for it (a phone) wake their GPU now, so it is clocked
 // up when this lap's frame reaches them (room/gpuwake.js). A hint only: a worker that misses it or
 // gets it late is just slower, and it is ignored once its frame has arrived.
@@ -3457,169 +3432,6 @@ function wakeChain(pos) {
   if (WAKE === "0" || !ai.chain.length) return;
   for (const id of ai.chain) if (conns.get(id)?.meta?.wake) sendTo(id, { t: "ai-wake", pos });
 }
-// forget the conversation state on every device: here now, on the chain with the next frame
-function resetState() {
-  try { ai.engine.reset?.(); } catch {}
-  ai.pos = 0;
-  ai.fed = [];
-  // a pending rollback (the last answer's final verify rejected drafts) must still reach the chain:
-  // the save that rides with it records that answer's end state, and without the rollback a
-  // worker would save its state with the rejected columns in it (the host saved its rolled-back
-  // state), so a later resume of that checkpoint would run the worker's layers on a corrupt state
-  const { sv, dp, rb } = ai.pendingCtl || {};
-  ai.pendingCtl = ai.chain.length ? { ...(rb != null ? { rb } : {}), ...(sv != null ? { sv } : {}), ...(dp != null ? { dp } : {}), reset: 1 } : {};
-}
-// ---- checkpoints (?ckpt): the room's state after an answer, saved on every device ----
-// (tellChain: the states are bad, so the disk copies go too; without it the engines were rebuilt,
-// and the copies on disk are what a restore reads back)
-function ckptClear(tellChain = false) {   // engines rebuilt or in an unknown state: nothing saved is usable
-  const keys = ai.ckpt ? ai.ckpt.items.map((x) => x.key) : [];
-  for (const k of keys) { try { ai.engine?.dropSlot?.(k); } catch {} }
-  if (tellChain && keys.length && ai.chain.length) ai.pendingCtl = { ...ai.pendingCtl, dp: [DROP_ALL] };
-  if (tellChain) ckptForget([DROP_ALL]);
-  ai.ckpt = new PrefixIndex(1 << 30); ai.ckptN = ai.ckptN || 0;
-}
-// pin: this save is the system prompt + tools (Code mode, issue #73). It is kept apart from the
-// CKPT_MAX answer checkpoints, never evicted by them, and replaces the previous pinned one.
-// the engine keeps checkpoints here: the qwen35 engine (the dense one has GPU slots too, for the room
-// node, and says hostCkpt: false, so a browser host keeps to the qwen35 engine as before)
-function ckptEngine() { return !!ai.engine?.saveSlot && ai.engine.hostCkpt !== false; }
-function ckptSave(pin = false) {
-  if (!CKPT_MAX || !ai.fed?.length || !ckptEngine()) return;
-  if (!ai.ckpt) ckptClear();
-  // a worker applies sv before dp, so a save riding with DROP_ALL would be gone at once on every
-  // worker: skip it (the host would otherwise index a slot the chain does not have)
-  if (ai.chain.length && [].concat(ai.pendingCtl?.dp ?? []).includes(DROP_ALL)) return;
-  // a save still waiting for its frame never reached the chain (no frame went out since, e.g. Stop
-  // before the first prefill round): the frame header carries one save, so this one supersedes it.
-  // Forget it here too, or a later resume could load a slot no worker saved. Its drops stay pending.
-  const prev = ai.chain.length ? ai.pendingCtl?.sv : null;
-  if (prev != null) {
-    // a pinned save superseded at the same tokens (Stop right after it) stays pinned
-    const p = ai.ckpt.items.find((x) => x.key === prev);
-    if (p?.pin && p.ids.length === ai.fed.length && p.ids.every((t, i) => t === ai.fed[i])) pin = true;
-    ai.ckpt.remove(prev); try { ai.engine.dropSlot(prev); } catch {}
-    ckptForget([prev]);   // the host's copy is only written once the frame goes out: none should exist, but never keep one
-  }
-  // the caches hold exactly a checkpoint already on every device (Stop right after the pinned
-  // save, solo; or a regenerate stopped before its first frame): keep that one instead of a
-  // second slot with the same state, which would only evict an answer checkpoint
-  const same = ai.ckpt.items.find((x) => x.ids.length === ai.fed.length && x.ids.every((t, i) => t === ai.fed[i]));
-  if (same && (same.pin || !pin)) {
-    same.t = ++ai.ckpt.clock;
-    // the superseded save must not go out any more: no new sv replaces it here, and the workers
-    // would save (and copy to disk) a slot the host no longer indexes
-    if (prev != null) { const { sv, ...rest } = ai.pendingCtl; ai.pendingCtl = rest; }
-    return;
-  }
-  const drop = [];
-  if (same) { ai.ckpt.remove(same.key); ai.engine.dropSlot(same.key); drop.push(same.key); }   // re-saved pinned below
-  if (pin) for (const old of ai.ckpt.pinned()) { ai.ckpt.remove(old.key); ai.engine.dropSlot(old.key); drop.push(old.key); }
-  else while (ai.ckpt.unpinned().length >= CKPT_MAX) {
-    const old = ai.ckpt.unpinned().reduce((a, b) => (a.t < b.t ? a : b));
-    ai.ckpt.remove(old.key); ai.engine.dropSlot(old.key); drop.push(old.key);
-  }
-  if (drop.length) ckptForget(drop);
-  const key = ai.ckptN = (ai.ckptN || 0) % 65534 + 1;   // slot numbers ride the frame header (u16)
-  ai.engine.saveSlot(key);
-  ai.ckpt.add(ai.fed.slice(), key, { pin });
-  if (!ai.chain.length) ckptPersist(key, ai.fed, pin);   // solo: no chain to wait for (sendChain does it otherwise)
-  if (ai.chain.length) {
-    const dp = [...new Set([...[].concat(ai.pendingCtl?.dp ?? []), ...drop])];
-    ai.pendingCtl = { ...ai.pendingCtl, sv: key, ...(dp.length ? { dp } : {}) };
-  }
-}
-// resume from the longest checkpoint that is a prefix of ids, if it beats what the caches hold
-function ckptResume(ids, reused) {
-  if (!CKPT_MAX || !ai.ckpt) return reused;
-  const b = ai.ckpt.best(ids);
-  if (!b || b.n <= reused) return reused;
-  ai.engine.loadSlot(b.key);
-  ai.pos = b.n; ai.fed = ids.slice(0, b.n);
-  if (ai.chain.length) { const { reset, ...rest } = ai.pendingCtl || {}; ai.pendingCtl = { ...rest, ld: b.key }; }
-  return b.n;
-}
-// where this device's copy of a slot lives on disk: the room, the model and its layers
-function ckptWhere(slot) { return { room: roomCode, model: ai.model, sig: ai.engine.stateSignature(), slot }; }
-// copy slot `key` (just saved on the GPU) to disk, in the background; ids: the host's tokens for it,
-// pin: it is the pinned system prompt checkpoint (a reloaded host indexes it pinned again)
-function ckptPersist(key, ids, pin = false) {
-  if (!ckptDisk || !ai.engine?.exportSlot || !ai.engine.stateSignature || !roomCode) return;
-  const E = ai.engine, where = ckptWhere(key);
-  // read when the write's turn comes: a slot dropped or an engine replaced by then is skipped
-  ckptDisk.put(where, () => (ai.engine === E ? E.exportSlot(key) : Promise.reject(new Error("engine replaced"))), ids ? { ids: Array.from(ids), ...(pin ? { pin: true } : {}) } : {})
-    .catch(() => false);
-}
-function ckptForget(keys) {
-  if (!ckptDisk || !roomCode || !keys?.length) return;
-  ckptDisk.drop(roomCode, keys.includes(DROP_ALL) ? "all" : keys).catch(() => {});
-}
-// After this device's layers load (a reload, the host resuming its room, a re-deal): read the copies
-// of its part back into GPU slots. The host also gets its index back (the tokens of each checkpoint);
-// a worker holds the slots for when the host asks (ld) and lists them in its ai-ready, so the host
-// forgets any it lacks (ckptPrune). -> the slots read back.
-async function ckptRestore() {
-  if (!ckptDisk || !ai.engine?.importState || !ai.engine.stateSignature || !roomCode) return [];
-  const E = ai.engine, host = ai.role === "host", got = [];
-  try {
-    const have = (await ckptDisk.list(ckptWhere(0))).filter((c) => !host || Array.isArray(c.meta.ids));
-    // the host indexes the newest CKPT_MAX answer checkpoints, oldest first so they keep their age
-    // order (ckptSave evicts the oldest), and the newest pinned one (the system prompt), pinned again
-    // so answer saves still never evict it. A worker does not know which is pinned: it keeps one
-    // more for the pinned one and one more in case the host's copy of the newest is gone.
-    const pinned = host ? have.filter((c) => c.meta.pin).slice(0, 1) : [];
-    for (const c of host ? [...pinned, ...have.filter((c) => !c.meta.pin).slice(0, CKPT_MAX).reverse()] : have.slice(0, CKPT_MAX + 2)) {
-      const st = await ckptDisk.get(ckptWhere(c.slot));
-      if (!st || ai.engine !== E) continue;
-      try { E.importState(st); E.saveSlot(c.slot); } catch { continue; }   // another shape: not ours after all
-      got.push(c.slot);
-      ai.ckptN = Math.max(ai.ckptN || 0, c.slot);   // never hand out a number a device may still have on disk
-      if (host) { if (!ai.ckpt) ckptClear(); ai.ckpt.add(st.meta.ids, c.slot, { pin: !!st.meta.pin }); }
-    }
-  } catch {}
-  if (got.length && ai.engine === E) { E.reset?.(); if (host) { ai.pos = 0; ai.fed = []; } }
-  return got;
-}
-// Host: forget the checkpoints a device that just loaded its layers does not hold (it lists the slots
-// it read back in ai-ready; a device without disk copies holds none), so a resume never asks it
-// for a slot it lacks. Runs once the host's own restore is done (aiMaybeReady).
-function ckptPrune() {
-  if (!ai.ckptHeld?.size) return;
-  const drop = [], reports = [...ai.ckptHeld].filter(([id]) => ai.chain.includes(id));
-  for (const [, slots] of reports) {
-    const held = new Set(Array.isArray(slots) ? slots : []);
-    for (const x of ai.ckpt?.items.slice() || []) if (!held.has(x.key)) {
-      ai.ckpt.remove(x.key); try { ai.engine?.dropSlot?.(x.key); } catch {}
-      drop.push(x.key);
-    }
-  }
-  // a device reads back more than the host indexes (a worker keeps CKPT_MAX + 1, and copies the host
-  // lost): a slot it holds that the index does not name would sit on its GPU for good, so the chain
-  // drops it too. Slot numbers go on past it, so no new save can land on a number still being dropped.
-  const kept = new Set((ai.ckpt?.items || []).map((x) => x.key));
-  for (const [, slots] of reports) for (const k of Array.isArray(slots) ? slots : []) {
-    if (!Number.isInteger(k) || kept.has(k) || drop.includes(k)) continue;
-    drop.push(k); ai.ckptN = Math.max(ai.ckptN || 0, k);
-  }
-  ai.ckptHeld.clear();
-  if (!drop.length) return;
-  ckptForget(drop);
-  const dp = [...new Set([...[].concat(ai.pendingCtl?.dp ?? []), ...drop])];
-  ai.pendingCtl = { ...ai.pendingCtl, dp };
-}
-// A device of the chain came back with a fresh engine that reads its copies back from disk
-// (ckptRestore). The checkpoints it can have are those whose save went out on a frame before it
-// left: keep those, forget one still waiting to go out (no device saved it; on the fresh engine it
-// would save nothing useful). Without disk copies nothing saved survives it: drop everything.
-function ckptRejoin() {
-  if (!ckptDisk) { ckptClear(true); return; }
-  const { sv, ...rest } = ai.pendingCtl || {};
-  if (sv == null) return;
-  ai.ckpt?.remove(sv);
-  try { ai.engine?.dropSlot?.(sv); } catch {}
-  ai.pendingCtl = rest;
-}
-
 // Speculative drafting reads the draft block's own KV cache, which prefill fills with the trunk's
 // final hidden state at every prompt position. Solo prefill does it inside the engine; in a room
 // the returned hidden states come back from the chain, so the host fills it as they arrive
@@ -3635,70 +3447,7 @@ const MTP_BATCH = roomEngineFlags(location.search).mtpBatchFill;   // ?mtpbatch=
 const KV_ASK = roomQwen35Options(location.search).kvQ8 ? "q8" : null;   // ?kv=q8 (engine/preset.js): int8 KV cache, host only; see aiLoadShard
 // the host's share of each lap in one submit (engine hostFuse, engine/preset.js); ?hostfuse=0 for A/B, same output
 const HOST_FUSE = roomQwen35Options(location.search).hostFuse;
-function fillDrafts(h, ids, i0, basePos, n) {
-  if (!FILL_DRAFTS || !ai.engine?.mtp) return;
-  const dim = ai.engine.dims.dim, E = ai.engine;
-  // the whole round in one batched pass: its returned hiddens go into the engine's batch columns
-  if (MTP_BATCH && E._mtpFillBatch && E.B && n > 1 && n <= (E.NC || 4)) {
-    for (let c = 0; c < n; c++) E.device.queue.writeBuffer(E.B.x.buf, c * E.B.x.stride, h.subarray(c * dim, (c + 1) * dim));
-    E._mtpFillBatch(ids, i0, basePos, n);
-    return;
-  }
-  for (let c = 0; c < n; c++) {
-    const next = ids[i0 + c + 1];
-    if (next === undefined) break;
-    ai.engine.setHidden(h.subarray(c * dim, (c + 1) * dim));
-    ai.engine.mtpRun(null, next, basePos + c + 1, false);   // no readback: queued, returns at once
-  }
-}
 
-// run one token through the whole pipeline, returns logits (or null for a prompt token).
-// fillNext: the prompt token after this one, to fill the draft cache with this position's hidden.
-// desc: GPU sampling descriptor (engine.gpuDescFor(sample)): returns the sampler's candidates
-// { ids, vals, bad } instead of the logits (the sampler reads either).
-// ahead (plain decoding in a chain, see roomGenerate): { h, t0, defer, onSent }. h: the host's
-// layers for id already ran (engine.headAhead, started at t0), so the lap starts with the send;
-// onSent: runs while the other devices work; defer: returns null without running the head (the
-// next headAhead runs it in the same submit as the next token's layers).
-async function aiPipeToken(id, needLogits = true, fillNext, desc = null, ahead = null) {
-  const pos = ai.pos;
-  if (!ai.chain.length && !needLogits) {
-    // solo prefill: layers only, no head, no readback; sync every 8 tokens
-    ai.engine.pos = pos;
-    await ai.engine.prefillToken(id);
-    if (pos % 8 === 7) await ai.device.queue.onSubmittedWorkDone();
-    ai.pos++; ai.fed?.push(id);
-    return null;
-  }
-  const tHost = ahead?.t0 ?? performance.now();
-  if (needLogits) wakeChain(pos);
-  let h = ahead?.h || await ai.engine.embedRun(id, pos);
-  if (badF32(h)) throw new Error(`NaN after HOST layers (pos ${pos}) — host GPU kernel issue`);
-  if (ai.chain.length) {
-    const hostMs = performance.now() - tHost;
-    const returned = lapWait(pos, lapTimeout(ai.lapStat, 30000, chainRtt()), "token");
-    sendChain({ t: "ai-hidden", pos, ...packWire(h) });
-    ahead?.onSent?.();
-    h = await returned;
-    if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos}) — check peer status lines`);
-    noteLap(performance.now() - tHost, hostMs);
-    ai.lastHidden = h;
-    if (!needLogits && fillNext !== undefined) fillDrafts(h, [id, fillNext], 0, pos, 1);
-  } // solo mode: engine holds every layer, embedRun already produced the final hidden
-  ai.pos++; ai.fed?.push(id);
-  if (!needLogits || ahead?.defer) return null;   // prefill: skip the head entirely
-  if (desc) {
-    const c = await ai.engine.headFromHiddenIds(h, desc);
-    if (c.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
-    return c;
-  }
-  const logits = await ai.engine.headFromHidden(h);
-  if (badF32(logits)) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
-  return logits;
-}
-
-// Prefill `ids` (the part of the conversation the caches do not hold yet) from ai.pos; returns
-// the logits after the last one.
 const PREFILL_WINDOW = 6;
 const LOOKUP = new URLSearchParams(location.search).get("lookup") !== "0";   // ?lookup=0: draft head only, for A/B
 // ?densespec=0: dense models (no draft head) decode plainly in a room, no lookup drafts (A/B)
@@ -3726,100 +3475,26 @@ async function aiLoadDraft(modelKey) {
   } catch (err) { ai.draft = null; log("room", `the draft model did not load (${err?.message || err}); prompt lookup only`); }
 }
 const TAIL_FRAME = new URLSearchParams(location.search).get("tail") !== "0";   // ?tail=0: old per-token tail, for A/B   // prefill rounds in flight round the chain at once
-// aborted / onStatus: the caller's stop test and status line (roomGenerate passes its own). On
-// abort no new round is issued, the rounds in flight are awaited, and it returns null with ai.fed
-// and ai.pos matching exactly what the caches hold, so the next request reuses that prefix.
-async function aiPrefill(ids, { aborted = () => ai.abort, onStatus = aiStatus, desc = null } = {}) {
-  if (!ai.chain.length && ai.engine.prefillTokens && ids.length > 1) {
-    // solo: batched prefill, several prompt tokens per GPU pass
-    ai.engine.pos = ai.pos;
-    await ai.engine.prefillTokens(ids.slice(0, -1));
-    ai.pos = ai.engine.pos;
-    ai.fed.push(...ids.slice(0, -1));
-    return aiPipeToken(ids[ids.length - 1], true, undefined, desc);
-  }
-  let i = 0;
-  // the hybrid engine takes any column count per frame (speculative verifies already send 2..8),
-  // so the prompt's tail, last token included, goes round the chain as ONE frame instead of one
-  // serial lap per token; short follow-ups become a single lap
-  const flex = TAIL_FRAME && !!(ai.chain.length && ai.engine.specStep && ai.engine.embedRunBatch);
-  let tailLogits = null;
-  if (ai.engine.embedRunBatch && (ids.length > 5 || flex)) {
-    // split: up to 16 prompt tokens per round, and several rounds in flight at once. Every device
-    // runs frames in send order, so round r+1 can enter the host's layers while round r is on a
-    // worker: the chain works like a pipeline instead of one device at a time.
-    const hdim = ai.engine.dims.dim;
-    const NC = ai.engine.NC || 4;   // columns per GPU pass
-    // step down 16 -> 8 -> 4 on the tail: without this a remainder of up to NC-1 tokens costs one
-    // network lap each
-    const widths = [NC, ...[8, 4].filter((w) => w < NC)];
-    const inflight = [];
-    try {
-      outer: for (const W of widths) while (ids.length - 1 - i >= W) {
-        if (aborted()) break outer;
-        const nChunks = Math.max(1, Math.min(Math.floor(16 / W), Math.floor((ids.length - 1 - i) / W)));
-        const n = nChunks * W, basePos = ai.pos, i0 = i;
-        const hb = new Float32Array(n * hdim);
-        for (let c = 0; c < nChunks; c++)
-          hb.set(await ai.engine.embedRunBatch(ids.slice(i + c * W, i + (c + 1) * W), basePos + c * W), c * W * hdim);
-        if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
-        if (ai.chain.length) {
-          while (inflight.length >= PREFILL_WINDOW) await inflight.shift();
-          const p = lapWait("b" + basePos, 90000, "batch prefill").then((h) => fillDrafts(h, ids, i0, basePos, n));
-          p.catch(() => {});
-          inflight.push(p);
-          sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb) });
-        }
-        ai.pos = basePos + n;
-        ai.fed.push(...ids.slice(i0, i0 + n));
-        i += n;
-        onStatus(`prefill: ${i}/${ids.length} tokens…`);
-      }
-      if (flex && !aborted() && i < ids.length) {
-        const n = ids.length - i, basePos = ai.pos, i0 = i;   // n <= 4: what the widths above left
-        const hb = await ai.engine.embedRunBatch(ids.slice(i), basePos);
-        if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
-        const p = lapWait("b" + basePos, 90000, "prefill tail");
-        p.catch(() => {});
-        sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb) });
-        ai.pos = basePos + n;
-        ai.fed.push(...ids.slice(i0));
-        i = ids.length;
-        for (const q of inflight) await q;
-        const h = await p;
-        if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${basePos})`);
-        fillDrafts(h, ids, i0, basePos, n);
-        const dim = ai.engine.dims.dim;
-        ai.lastHidden = h.slice((n - 1) * dim, n * dim);
-        if (desc) {
-          tailLogits = await ai.engine.headFromHiddenIds(ai.lastHidden, desc);
-          if (tailLogits.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
-        } else tailLogits = await ai.engine.headFromHidden(ai.lastHidden);
-        if (!desc && badF32(tailLogits)) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
-      }
-      for (const p of inflight) await p;
-    } catch (err) { failWaiters(err); throw err; }
-  }
-  if (aborted()) return null;
-  if (tailLogits) return tailLogits;
-  let logits = null;
-  for (; i < ids.length; i++) {
-    if (aborted()) return null;
-    logits = await aiPipeToken(ids[i], i === ids.length - 1, ids[i + 1], desc);
-  }
-  return logits;
-}
 
+// Engines stay lazy-loaded; the browser owns delivery, storage and UI observers.
+const pipeline = createPipeline({
+  state: ai, transport: { sendHidden, sendTo, chainRtt },
+  options: { checkpointMax: CKPT_MAX, fillDrafts: FILL_DRAFTS, mtpBatch: MTP_BATCH, tailFrame: TAIL_FRAME, prefillWindow: PREFILL_WINDOW },
+  checkpointStore: ckptDisk, getRoomCode: () => roomCode,
+  hooks: { onStatus: aiStatus, computePass: compute.pass, teleNote, wakeChain, keepWarm,
+    onFrame(d) { ai.waker?.stop(); ai.lastFramePos = d.t === "ai-hidden" ? d.pos : d.basePos; } },
+});
+const { failWaiters, ckptClear, ckptRestore, ckptPrune, ckptRejoin } = pipeline;
+const roomGenerateOnce = createGenerator({
+  state: ai, pipeline,
+  options: { checkpointMax: CKPT_MAX, fillDrafts: FILL_DRAFTS, lookup: LOOKUP, hostFuse: HOST_FUSE, denseSpec: DENSE_SPEC, draftK: DRAFT_K },
+  hooks: { computePass: compute.pass, mapPulse, pushMap, crumb, noteSpeeds, wakeChain, chainRtt, log,
+    getPeerMeta: (id) => conns.get(id)?.meta,
+    onSoloSpeed(tps) { lastSoloTps = Math.max(lastSoloTps, tps); } },
+});
 // ---- telemetry and the room map ----
 // Workers report their compute per frame kind (ai-tele); the host times each lap, so what is left
 // is the wire. The map shows the chain, what each device holds and how long its part takes.
-function noteLap(lapMs, hostMs) {
-  const L = ai.lapStat ||= { lap: 0, host: 0, n: 0, max: 0 };
-  L.lap = L.n ? 0.7 * L.lap + 0.3 * lapMs : lapMs;
-  L.max = Math.max(lapMs, 0.98 * (L.max || 0));   // the slowest recent lap, fading over ~50 laps (lap timeouts)
-  L.host = L.n ? 0.7 * L.host + 0.3 * hostMs : hostMs;
-  L.n++;
-}
 function mapNodes(kind = "spec") {
   const nodes = [{ name: myName, layers: ai.layersByName?.[myName] || "", ms: ai.lapStat?.host, host: 1, amax: ai.hostAmax }];
   for (const id of ai.chain) {
@@ -4121,306 +3796,6 @@ async function roomRecover(err, kind, status, aborted) {
     setBusyUI(true, true);
   }
 }
-// A speculative verify in a room: the tokens go round the chain as ONE frame (every device runs its
-// layers over all of them, batched) and their final hiddens come back to the host. {} when solo.
-function chainSpec() {
-  return ai.chain.length ? {
-    // pre: { hs, t0 } when the engine already ran the host's layers with the drafts (hostFuse)
-    runTrunk: async (tokens, pos, pre = null) => {
-      const tLap = pre?.t0 ?? performance.now();
-      wakeChain(pos);
-      const n = tokens.length, hdim = ai.engine.dims.dim, NC = ai.engine.NC || 4;
-      const hb = pre?.hs || new Float32Array(n * hdim);
-      if (!pre) for (let c = 0; c < n; c += NC) {
-        const m = Math.min(NC, n - c);
-        hb.set(await ai.engine.embedRunBatch(tokens.slice(c, c + m), pos + c, { base: c, total: n }), c * hdim);
-      }
-      if (badF32(hb)) throw new Error(`NaN after HOST layers (pos ${pos})`);
-      const hostMs = performance.now() - tLap;
-      const returned = lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, chainRtt()), "verify");
-      sendChain({ t: "ai-hidden-b", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb) });
-      const h = await returned;
-      if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos})`);
-      noteLap(performance.now() - tLap, hostMs);
-      return h;
-    },
-    // the rollback rides on the next frame (sendChain), strictly before it on every device
-    onReject: async (k) => { ai.pendingCtl = { rb: k }; },
-    preTrunk: true,
-  } : {};
-}
-// pin: the length of the prompt's fixed start (Code mode: the system prompt + tools). When the
-// caches do not hold it yet, the prefill pauses there and saves a pinned checkpoint on every
-// device, so a later prompt that changes after it (a compacted agent conversation) resumes there.
-// pinTag: whose fixed start it is (API asks: a hash of it; Code mode: none). A pinned checkpoint
-// another tag used in the last PIN_KEEP_MS is not replaced (two agents in one room would otherwise
-// keep evicting each other's system prompt): the new request just runs without pinning.
-const PIN_KEEP_MS = 600000;
-async function roomGenerateOnce(ids, { onToken = () => {}, stop, maxNew = MAX_NEW, sample = pickSampler(ai.settings.sampling), signal, onStatus = () => {}, pin = 0, pinTag = "" } = {}) {
-  if (!ai.engine) throw new Error("the model is not loaded");
-  // a device in the chain is gone: its frames would go nowhere and wait out the lap timeouts
-  if (ai.degraded) throw new Error("a device left: re-deal the layers first");
-  const aborted = () => ai.abort || !!signal?.aborted;
-  const eos = (t) => stop.has(t);
-  const tokens = [];
-  let count = 0, capped = false, acc = null, copied = 0, first = null;
-  let tPre = 0, tDecode = 0, reused = 0, prefilled = 0, preFrames = 0;
-  // GPU sampling (?gpusample=1): the head's top-k / argmax runs on the GPU and "logits" below are
-  // the sampler's candidates. Only for a sampler that says it reads them (.gpu); a wrapper that
-  // masks logits has no .gpu and keeps the full-logits path. specStep checks the same itself.
-  const desc = ai.engine.gpuDescFor?.(sample) || null;
-  try {
-    reused = ckptResume(ids, reusablePrefix(ai.fed, ids));
-    // Continue after a cap that landed on a written token: the caches hold the whole open answer,
-    // so there is nothing to prefill, and the next token was already sampled when it stopped
-    const pend = ai.pending; ai.pending = null;
-    if (!reused && pend && pend.at === ai.pos && ai.fed?.length === ids.length && ai.fed.every((t, i) => t === ids[i])) {
-      reused = ids.length; first = pend.next;
-    }
-    if (!reused) resetState();
-    const rest = ids.slice(reused);
-    // a follow-up's first token needs a draft-cache row too: the trunk hidden at the position
-    // before it is still in the engine when the last answer ended on a speculative step
-    if (reused && rest.length && FILL_DRAFTS && ai.engine.mtp && ai.xAt === ai.pos) ai.engine.mtpRun(null, rest[0], ai.pos, false);
-    ai.xAt = null;
-    prefilled = rest.length;
-    maxNew = Math.min(maxNew, ctxMax() - ids.length);
-    onStatus(reused ? `prefill: ${rest.length} new tokens (${reused} already in the room's caches)…` : `prefill: ${rest.length} tokens…`);
-    const t0Pre = performance.now();
-    ai.frames = 0;
-    // the fixed start first, then its checkpoint, then the rest (the same tokens at the same
-    // positions, so the answer is the same; the head's logits after the first part are unused)
-    // Stopped during the first part: nothing more is sent, and the end-of-answer save below keeps
-    // what the caches hold, as for any stop during a prefill.
-    const pinned = ai.ckpt?.pinned?.()[0];
-    const tag = pinTag || "code";
-    if (pinned && ai.pinInfo && reused >= pinned.ids.length && pinned.ids.length <= ids.length && pinned.ids.every((t, i) => t === ids[i])) ai.pinInfo.hitAt = performance.now();
-    if (pin && pinned && ai.pinInfo && ai.pinInfo.tag !== tag && performance.now() - ai.pinInfo.hitAt < PIN_KEEP_MS) pin = 0;
-    const cut = CKPT_MAX && ckptEngine() ? pinSplit(reused, pin, ids.length) : 0;
-    let logits = null;
-    if (!cut) logits = rest.length ? await aiPrefill(rest, { aborted, onStatus, desc }) : null;
-    else {
-      const part = await aiPrefill(ids.slice(reused, cut), { aborted, onStatus, desc });
-      // the whole fixed start is in the caches (also when Stop came during its last lap): pin it,
-      // or the next request, which reuses it from the plain end save, would never pin it
-      if (ai.fed?.length === cut) { ckptSave(true); ai.pinInfo = { tag, hitAt: performance.now() }; }
-      if (part && !aborted()) logits = await aiPrefill(ids.slice(cut), { aborted, onStatus, desc });
-    }
-    tPre = performance.now() - t0Pre;
-    if (prefilled) compute.pass(prefilled);
-    preFrames = ai.frames;
-
-    const t0 = performance.now();
-    const emit = (tok, drafted) => {
-      tokens.push(tok);
-      count++;
-      onToken(tok, drafted);
-      mapPulse(); compute.pass(1);
-      const tps = count / ((performance.now() - t0) / 1000);
-      onStatus(`generating… ${count} tok · ${tps.toFixed(1)} tok/s`);
-    };
-    if (!logits && first == null) { /* stopped during prefill */ }
-    else if (ai.engine.mtp && ai.engine.specStep) {
-      // speculative decoding: the model's own draft head proposes up to K tokens,
-      // one batched trunk pass verifies them (byte-identical to plain decoding)
-      const spec = chainSpec();
-      if (ai.chain.length && ai.lastHidden && first == null) ai.engine.setHidden(ai.lastHidden);
-      ai.engine.pos = ai.pos;
-      // draft depth: pick by MEASURED tokens/sec per depth (K=3 warm-up, probe
-      // 5 and 7 once, keep the best, re-probe now and then). Deep chains only
-      // pay when the network round-trip dominates the lap; a lap-time
-      // threshold can't tell GPU time from RTT and gets stuck deep.
-      const kc = { cand: [3, 5, 7], ema: {}, n: {}, step: 0, used: {} };
-      const pickK = () => {
-        if (!ai.chain.length) return 3;
-        kc.step++;
-        if (kc.step <= 3) return 3;
-        const untried = kc.cand.find((k) => !kc.n[k]);
-        if (untried) return untried;
-        let best = 3;
-        for (const k of kc.cand) if (kc.ema[k] > kc.ema[best]) best = k;
-        if (kc.step % 16 === 0) { const alt = kc.cand.filter((k) => k !== best); return alt[(kc.step / 16) % alt.length | 0]; }
-        return best;
-      };
-      const st0 = { ...ai.engine.mtp.stats };
-      // the first answer token is sampled here; specStep treats it as already chosen for this
-      // position and returns only the tokens after it, so it has to be emitted (or end the
-      // answer) before the loop, or the reply starts one word late
-      let next = first ?? sample(logits), done = false, pendTok = null;
-      if (eos(next)) done = true; else emit(next, false);
-      while (!done && count < maxNew && !aborted()) {
-        // a speculative step touches positions pos .. pos+K (K drafts verified in one pass) and
-        // drafts one more; shrink K near the end of the context and stop before it overflows
-        let K = pickK();
-        const roomLeft = ctxMax() - ai.engine.pos - 2;
-        if (roomLeft < 1) { capped = true; break; }
-        // never draft past the answer cap: every token a step writes into the caches is then an
-        // emitted one, so a capped answer is still a prefix of the next turn and nothing re-prefills
-        K = Math.min(K, roomLeft, maxNew - count);
-        const tStep = performance.now();
-        // prompt lookup first: if the text is repeating something in the context, verify what
-        // followed it last time (free to guess, up to 7 at once); otherwise the draft head
-        // a lookup run that was accepted in full is probably a copy in progress (code being edited,
-        // a file quoted back): let the next one run long, up to what one verify can take
-        const lkMax = ai.lkFull ? (ai.engine.maxDrafts || 7) : 7;
-        const lk = LOOKUP && ai.engine.specStepDrafts && ai.fed ? lookupDrafts([...ai.fed, next], Math.min(lkMax, roomLeft, maxNew - count)) : [];
-        const viaLookup = lk.length >= 2;
-        const toks = viaLookup ? await ai.engine.specStepDrafts(next, sample, lk, spec) : await ai.engine.specStep(next, sample, K, spec);
-        if (viaLookup) copied += toks.length - 1;
-        ai.lkFull = viaLookup && toks.length === lk.length + 1;
-        // specStep wrote `next` and the accepted drafts; its last token is the next `next`
-        ai.fed.push(next, ...toks.slice(0, -1));
-        const tps = toks.length / ((performance.now() - tStep) / 1000);
-        if (!viaLookup) {
-          kc.ema[K] = kc.n[K] ? 0.6 * kc.ema[K] + 0.4 * tps : tps;
-          kc.n[K] = (kc.n[K] || 0) + 1; kc.used[K] = (kc.used[K] || 0) + toks.length;
-        }
-        for (let j = 0; j < toks.length; j++) {
-          const tk = toks[j];
-          if (eos(tk)) { done = true; break; }
-          if (count >= maxNew) { done = true; capped = true; if (j === toks.length - 1) pendTok = tk; break; }
-          emit(tk, j < toks.length - 1 ? (viaLookup ? 2 : 1) : 0);   // all but the last were drafts the trunk accepted (2: from lookup)
-        }
-        next = toks[toks.length - 1];
-        const d = ai.engine.mtp.stats.drafts - st0.drafts;
-        acc = d ? (ai.engine.mtp.stats.accepted - st0.accepted) / d : null;
-        if (ai.chain.length) pushMap(count / ((performance.now() - t0) / 1000), acc, true);
-      }
-      if (!done && count >= maxNew) capped = true;
-      ai.pos = ai.engine.pos;
-      ai.xAt = ai.pos;   // specStep left the trunk hidden at ai.pos - 1 in the engine
-      if (pendTok != null && !aborted()) ai.pending = { next: pendTok, at: ai.pos };
-      const st = ai.engine.mtp.stats;
-      if (st.drafts) crumb(`spec: ${st.accepted}/${st.drafts} drafts accepted${ai.lapStat ? ` · lap ${Math.round(ai.lapStat.lap)}ms` : ""}`
-        + (ai.chain.length ? ` · K tok/s ${kc.cand.map((k) => `${k}:${kc.ema[k] ? kc.ema[k].toFixed(1) : "-"}`).join(" ")} · tokens by K ${JSON.stringify(kc.used)}` : ""));
-    } else if (DENSE_SPEC && ai.chain.length && ai.engine.specStepDrafts && !ai.engine.specStep) {
-      // a model without a draft head (the dense Qwen3s) in a split room: every plain token costs a
-      // full lap round the chain, so when prompt lookup finds the text repeating something in the
-      // context, the tokens that followed it go round as drafts in the same lap (specStepDrafts,
-      // exact: same output as plain decoding). No drafts: a plain lap.
-      const spec = chainSpec();
-      const st0 = { ...(ai.engine.specStats || { drafts: 0, accepted: 0 }) };
-      const lapT = { v: 0, nv: 0, p: 0, np: 0, d: 0 };   // ms in verify laps / plain laps / drafting, for the crumb
-      let next = first ?? sample(logits), done = false, pendTok = null;
-      if (eos(next)) done = true; else emit(next, 0);
-      while (!done && count < maxNew && !aborted()) {
-        // a step writes positions pos .. pos+K; as in plain decoding, a token is piped only while
-        // pos < ctxMax() - 1, and never draft past the answer cap
-        const roomLeft = ctxMax() - ai.pos - 2;
-        if (roomLeft < 0) { capped = true; break; }
-        const ctxNow = [...(ai.fed || []), next], kMax = Math.min(ai.engine.maxDrafts || 7, roomLeft, maxNew - count);
-        // only while every device in the chain handles dense verify frames (its hello's dspec; one from
-        // an older build does not): otherwise plain laps. Checked every step, so a device that joins or
-        // comes back with another build switches it. A lookup guess that is wrong still costs its verify
-        // columns: up to 3 drafts (one batched pass per device) until a run is accepted in full, then 7.
-        const chainOK = chainDenseSpec(ai.chain.map((id) => conns.get(id)?.meta));
-        if (!chainOK && !ai.dspecWarned) { ai.dspecWarned = true; log("room", "a device in the chain runs an older build: dense speculation is off (plain laps) until it updates"); }
-        if (chainOK) ai.dspecWarned = false;
-        let lk = LOOKUP ? denseLookupDrafts(ai.chain.map((id) => conns.get(id)?.meta), ctxNow, kMax, { full: ai.lkFullD }) : [], via = 2;
-        // nothing to copy: the draft model's guesses, when there is one (?draft=)
-        // (only when the measured lap is long enough for the drafts to pay: DraftModel.pickK)
-        const dk = chainOK && !lk.length && ai.draft && kMax > 0 ? ai.draft.pickK(ai.lapStat?.lap, Math.min(DRAFT_K, kMax)) : 0;
-        if (dk) { const td = performance.now(); lk = await ai.draft.propose(ctxNow, dk); via = 1; lapT.d += performance.now() - td; }
-        let toks;
-        const tStep = performance.now();
-        if (lk.length) {
-          ai.engine.pos = ai.pos;
-          toks = await ai.engine.specStepDrafts(next, sample, lk, spec);
-          ai.fed?.push(next, ...toks.slice(0, -1));
-          ai.pos = ai.engine.pos;
-          ai.lastHidden = ai.engine.lastHidden;
-          if (via === 2) copied += toks.length - 1;
-          ai.lkFullD = via === 2 && toks.length === lk.length + 1;
-          if (via === 1) ai.draft.note(lk.length, toks.length - 1);
-          lapT.v += performance.now() - tStep; lapT.nv++;
-        } else {
-          ai.lkFullD = false;
-          const lg = await aiPipeToken(next, true, undefined, desc);
-          toks = [sample(lg)];
-          lapT.p += performance.now() - tStep; lapT.np++;
-        }
-        for (let j = 0; j < toks.length; j++) {
-          const tk = toks[j];
-          if (eos(tk)) { done = true; break; }
-          if (count >= maxNew) { done = true; capped = true; if (j === toks.length - 1) pendTok = tk; break; }
-          emit(tk, j < toks.length - 1 ? via : 0);   // all but the last were drafts the chain accepted (2: lookup, 1: draft model)
-        }
-        next = toks[toks.length - 1];
-        const st = ai.engine.specStats, d = st ? st.drafts - st0.drafts : 0;
-        acc = d ? (st.accepted - st0.accepted) / d : null;
-        pushMap(count / ((performance.now() - t0) / 1000), acc, true);
-      }
-      if (!done && count >= maxNew) capped = true;
-      if (pendTok != null && !aborted()) ai.pending = { next: pendTok, at: ai.pos };
-      const st = ai.engine.specStats;
-      if (st?.drafts) crumb(`dense spec: ${st.accepted - st0.accepted}/${st.drafts - st0.drafts} drafts accepted · ${lapT.nv} verify laps ${lapT.nv ? (lapT.v / lapT.nv).toFixed(1) : "-"} ms · ${lapT.np} plain laps ${lapT.np ? (lapT.p / lapT.np).toFixed(1) : "-"} ms · drafting ${Math.round(lapT.d)} ms`
-        + (ai.draft ? ` · draft model: ${ai.draft.stats.drafted} drafted in ${ai.draft.stats.calls} calls, ${Math.round(ai.draft.stats.ms)} ms` : ""));
-    } else {
-      // plain decoding. An end token is not piped through the chain: the next turn's template
-      // writes <|im_end|> itself, so both paths leave the caches holding exactly prompt + answer
-      // ahead (greedy GPU sampling in a chain, HOST_FUSE): from the second lap on, the head of the
-      // hidden the chain returned and the host's layers on its pick are one submit (engine
-      // headAhead), the hidden goes out before the token is shown, and a pick that is not piped (a
-      // stop token, the cap, an abort) has its layers undone (dropAhead)
-      const ahead = HOST_FUSE && ai.chain.length > 0 && desc?.kind === "greedy" && !!ai.engine.canHeadAhead?.();
-      let deferred = false;   // ahead: the head of ai.lastHidden has not run yet
-      try {
-        for (let i = 0; i < maxNew && !aborted(); i++) {
-          let next, pre = null;
-          const tLap = performance.now();
-          if (i === 0 && first != null) next = first;
-          else if (!deferred) next = sample(logits);
-          else {
-            const r = await ai.engine.headAhead(ai.lastHidden, ai.pos, desc);
-            if (r.cands.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
-            logits = r.cands; deferred = false;
-            next = sample(r.cands);
-            if (r.h && next === r.cands.ids[0]) pre = r.h;
-          }
-          if (eos(next)) break;
-          if (ai.pos >= ctxMax() - 1) { emit(next, false); capped = true; break; }   // no position left for another token
-          if (ahead) {
-            if (pre) ai.engine.keepAhead(); else ai.engine.dropAhead();
-            logits = null; deferred = true;
-            await aiPipeToken(next, true, undefined, desc, { h: pre, t0: tLap, defer: true, onSent: () => emit(next, false) });
-          } else {
-            emit(next, false);
-            logits = await aiPipeToken(next, true, undefined, desc);
-          }
-          if (ai.chain.length) pushMap(count / ((performance.now() - t0) / 1000), null, true);
-        }
-      } finally { if (ahead) ai.engine.dropAhead(); }   // a pick that was not piped: its layers undone
-      if (count >= maxNew) {
-        capped = true;
-        // for Continue: the chosen id (sample reads logits or GPU candidates alike)
-        if (deferred && !aborted() && ai.pos < ctxMax() - 1) {
-          logits = await ai.engine.headFromHiddenIds(ai.lastHidden, desc);
-          if (logits.bad) throw new Error(`NaN in logits (pos ${ai.pos}) — head/lm_head kernel issue on host`);
-        }
-        if (logits && !aborted() && ai.pos < ctxMax() - 1) ai.pending = { next: sample(logits), at: ai.pos };
-      }
-    }
-    tDecode = performance.now() - t0;
-  } catch (err) {
-    ai.fed = null;            // the caches are in an unknown state: the next request starts clean
-    ai.pendingCtl = {};
-    ckptClear(true);
-    throw err;
-  }
-  const secs = tDecode / 1000, tps = count / Math.max(secs, 1e-3);
-  const full = capped && ai.pos >= ctxMax() - 2;
-  const stats = `${count} tok · ${tps.toFixed(1)} tok/s · ${ai.chain.length + 1} device${ai.chain.length ? "s" : ""}`
-    + (acc != null ? ` · ${Math.round(acc * 100)}% drafts accepted` : "")
-    + (copied ? ` · ${copied} tok by lookup` : "")
-    + (aborted() ? " · stopped" : "")
-    + (capped ? (full ? ` · stopped: context full (${ctxMax()} tokens)` : ` · stopped at ${count} tokens`) : "");
-  if (ai.chain.length && count) { pushMap(tps, acc, false, true); noteSpeeds(); }
-  else if (count > 8) lastSoloTps = Math.max(lastSoloTps, tps);
-  ckptSave();   // this answer's end state, on every device, for a later regenerate or branch
-  const reason = aborted() ? "abort" : capped ? (full ? "ctx" : "max") : "stop";
-  return { tokens, reason, reused, prefilled, count, tps, acc, copied, tPre, tDecode, preFrames, stats, capped };
-}
-
 // mode: "ask" a new question, or "continue" the last answer (it stopped at the length cap)
 async function aiGenerate(textArg, who, askerId = peer.id, mode = "ask") {
   const cont = mode === "continue";
@@ -4560,61 +3935,6 @@ function clearChat() {
   $("ai-output").innerHTML = "";
   botEl = null;
   setCtx(0);
-}
-
-// ---- worker ----
-// Frames run strictly one after another in arrival order (the transport delivers them in send
-// order), so several prefill rounds can be queued here while the GPU works. Control that rides
-// on a frame (reset, rollback) applies before it, and goes on down the chain with it.
-async function workerFrame(d) {
-  if (!ai.engine) return;
-  const ctl = {};
-  // order matters: a pending rollback belongs to the answer that just ended, the save records
-  // that answer's final state, and only then may the state be reset or replaced by a checkpoint
-  // (also before a reset: the save may record the state first, and the host saved its own after
-  // its rollback)
-  if (d.rb != null) { ai.engine.restoreDN?.(d.rb); ctl.rb = d.rb; }
-  if (d.sv != null) { ai.engine.saveSlot?.(d.sv); ckptPersist(d.sv); ctl.sv = d.sv; }
-  if (d.dp != null) { for (const k of [].concat(d.dp)) k === DROP_ALL ? ai.engine.dropAllSlots?.() : ai.engine.dropSlot?.(k); ckptForget([].concat(d.dp)); ctl.dp = d.dp; }
-  if (d.reset) { ai.engine.reset?.(); ctl.reset = 1; }
-  if (d.ld != null) { ai.engine.loadSlot?.(d.ld); ctl.ld = d.ld; }
-  const t0 = performance.now();
-  if (d.t === "ai-hidden-b") {
-    // n hiddens in, my layers (batched), n hiddens on
-    const xs = unpackWire(d);
-    const nTok = d.n || 4;
-    const wdim = ai.engine.dims.dim;
-    const NC = ai.engine.NC || 4;
-    // a node host's prompt frame (hundreds of tokens): the prefill kernels (engine prefillHidden)
-    const wide = !d.spec && nTok >= 2 * NC && ai.engine.prefillHidden && ai.engine.prefillFrame?.() > 0;
-    const hb = wide ? await ai.engine.prefillHidden(xs, d.basePos) : new Float32Array(nTok * wdim);
-    if (!wide) for (let c = 0; c < nTok; c += NC) {
-      const m = Math.min(NC, nTok - c);
-      hb.set(await ai.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false), c * wdim);
-    }
-    if (badF32(hb)) { aiStatus(`⚠ NaN in batched prefill on this device`); sendTo(ai.hostId, { t: "ai-error", message: "NaN in batched prefill" }); }
-    teleNote(d.spec ? "spec" : "pre", performance.now() - t0);
-    compute.pass(nTok, performance.now() - t0);
-    // the verify flag travels with the frame: every device snapshots its recurrent state per
-    // column, or a later rollback on it restores a stale snapshot
-    const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };
-    if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
-    else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
-    if (d.spec) keepWarm(d.basePos);
-  } else {
-    // one token: run my layers, forward along the chain
-    const hin = unpackWire(d);
-    if (badF32(hin)) { aiStatus(`⚠ NaN ARRIVED at this device (pos ${d.pos}) — upstream peer broken`); }
-    const h = await ai.engine.runHidden(hin, d.pos);
-    if (badF32(h)) { aiStatus(`⚠ NaN PRODUCED by this device (pos ${d.pos}, layers ${ai.range[0]}–${ai.range[1] - 1}) — GPU kernel issue here`); sendTo(ai.hostId, { t: "ai-error", message: `NaN produced on worker layers ${ai.range[0]}–${ai.range[1] - 1}` }); }
-    teleNote("one", performance.now() - t0);
-    compute.pass(1, performance.now() - t0);
-    const msg = { pos: d.pos, ...packWire(h) };
-    if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
-    else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
-    keepWarm(d.pos);
-    if (d.pos % 8 === 0) aiStatus(`serving layers ${ai.range[0]}–${ai.range[1] - 1} — pos ${d.pos}`);
-  }
 }
 
 // GPU wake on a worker (room/gpuwake.js): spin until the next frame arrives (aiOnData stops it)
@@ -4913,16 +4233,8 @@ async function aiOnData(from, d) {
       break;
     case "ai-hidden-b":
     case "ai-hidden":
-      if (ai.role !== "worker") break;
-      ai.waker?.stop();
-      ai.lastFramePos = d.t === "ai-hidden" ? d.pos : d.basePos;
-      ai.q = ai.q.then(() => workerFrame(d)).catch((err) => {
-        aiStatus("⚠ " + err.message);
-        sendTo(ai.hostId, { t: "ai-error", message: err.message });
-      });
-      break;
-    case "ai-hiddenret-b": lapDone("b" + d.basePos, unpackWire(d)); break;
-    case "ai-hiddenret": lapDone(d.pos, unpackWire(d)); break;
+    case "ai-hiddenret-b":
+    case "ai-hiddenret": pipeline.handleFrame(from, d); break;
     case "ai-visibility":
       ai.visibility = d.mode;
       toast(d.mode === "all" ? "the host shows the chat to everyone" : d.mode === "host" ? "the host keeps the chat private" : "the host shows each answer to whoever asked");

@@ -1,7 +1,7 @@
 // Trace marks and GPU hooks shared by the room profilers (tests/e2e/room_prof.mjs on one machine,
 // tests/e2e/xroom.mjs across two). Nothing here runs by itself.
 //
-//   patchRoom(src), patchTransport(src): room.js and room/transport.js as served with trace marks
+//   patchGenerator(src), patchPipeline(src), patchTransport(src): the generation, pipeline and transport modules as served with trace marks
 //     (__HP(event, kind, pos, a, b) -> window.__hp) and the dev-only plain-decode switch
 //     window.__nospec. They throw when an anchor moved, so a stale patch fails loudly.
 //   INIT: an init script for every tab: the mark recorder, a GPU timestamp pair around every
@@ -18,50 +18,57 @@
 // ---- serve-time trace marks ----
 const HP = "const __HP = (...a) => globalThis.__hpMark?.(...a);\n";
 function rep(src, a, b, file) { if (!src.includes(a)) throw new Error(`${file} changed: anchor not found: ${a.slice(0, 80)}`); return src.replace(a, b); }
-export function patchRoom(s) {
-  const f = "room.js";
+export function patchGenerator(s) {
+  const f = "engine/generate.js";
   s = HP + s;
   // plain-decode switch (room_latency's)
-  s = rep(s, "else if (ai.engine.mtp && ai.engine.specStep) {", "else if (ai.engine.mtp && ai.engine.specStep && !window.__nospec) {", f);
+  s = rep(s, "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep) {", "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep && !window.__nospec) {", f);
+  s = rep(s, "              const r = await current.engine.headAhead(ai.lastHidden, ai.pos, desc);", "              __HP('h.fuse0', 'ai-hidden', ai.pos); const r = await current.engine.headAhead(ai.lastHidden, ai.pos, desc); __HP('h.fuse1', 'ai-hidden', ai.pos);", f);
+  s = rep(s, "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {",
+    "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {", f);
+  // host, speculative verify lap
+  s = rep(s, "        const tLap = pre?.t0 ?? performance.now();", "        const tLap = pre?.t0 ?? performance.now(); __HP('h.lap0', 'ai-hidden-b', pos, tokens.length);", f);
+  s = rep(s, "        const hostMs = performance.now() - tLap;", "        const hostMs = performance.now() - tLap; __HP('h.emb1', 'ai-hidden-b', pos, tokens.length);", f);
+  s = rep(s, "        sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb) });\n        const h = await returned;",
+    "        { const __w = packWire(hb); __HP('h.pack1', 'ai-hidden-b', pos, tokens.length); sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...__w }); }\n        const h = await returned; __HP('h.ret', 'ai-hidden-b', pos, tokens.length);", f);
+  s = rep(s, "          const toks = viaLookup ? await current.engine.specStepDrafts(next, sample, lk, spec) : await current.engine.specStep(next, sample, K, spec);",
+    "          __HP('h.step0', viaLookup ? 'lookup' : 'draft', current.engine.pos, viaLookup ? lk.length : K); const toks = viaLookup ? await current.engine.specStepDrafts(next, sample, lk, spec) : await current.engine.specStep(next, sample, K, spec); __HP('h.step1', viaLookup ? 'lookup' : 'draft', current.engine.pos, toks.length);", f);
+  return s;
+}
+export function patchPipeline(s) {
+  const f = "room/pipeline.js";
+  s = HP + s;
   // host, one token
   // (hostFuse: with ahead.h the layers already ran in headAhead, marked h.fuse0 / h.fuse1 below)
-  s = rep(s, "  let h = ahead?.h || await ai.engine.embedRun(id, pos);", "  __HP('h.lap0', 'ai-hidden', pos); let h = ahead?.h || await ai.engine.embedRun(id, pos); __HP('h.emb1', 'ai-hidden', pos);", f);
-  s = rep(s, "    sendChain({ t: \"ai-hidden\", pos, ...packWire(h) });\n    ahead?.onSent?.();\n    h = await returned;",
-    "    { const __w = packWire(h); __HP('h.pack1', 'ai-hidden', pos); sendChain({ t: \"ai-hidden\", pos, ...__w }); }\n    ahead?.onSent?.();\n    h = await returned; __HP('h.ret', 'ai-hidden', pos);", f);
-  s = rep(s, "            const r = await ai.engine.headAhead(ai.lastHidden, ai.pos, desc);", "            __HP('h.fuse0', 'ai-hidden', ai.pos); const r = await ai.engine.headAhead(ai.lastHidden, ai.pos, desc); __HP('h.fuse1', 'ai-hidden', ai.pos);", f);
-  s = rep(s, "  const logits = await ai.engine.headFromHidden(h);", "  __HP('h.head0', 'ai-hidden', pos); const logits = await ai.engine.headFromHidden(h); __HP('h.head1', 'ai-hidden', pos);", f);
+  s = rep(s, "    let h = ahead?.h || await current.engine.embedRun(id, pos);", "    __HP('h.lap0', 'ai-hidden', pos); let h = ahead?.h || await current.engine.embedRun(id, pos); __HP('h.emb1', 'ai-hidden', pos);", f);
+  s = rep(s, "      sendChain({ t: \"ai-hidden\", pos, ...packWire(h) });\n      ahead?.onSent?.();\n      h = await returned;",
+    "      { const __w = packWire(h); __HP('h.pack1', 'ai-hidden', pos); sendChain({ t: \"ai-hidden\", pos, ...__w }); }\n      ahead?.onSent?.();\n      h = await returned; __HP('h.ret', 'ai-hidden', pos);", f);
+  s = rep(s, "    const logits = await current.engine.headFromHidden(h);", "    __HP('h.head0', 'ai-hidden', pos); const logits = await current.engine.headFromHidden(h); __HP('h.head1', 'ai-hidden', pos);", f);
   // GPU sampling (exp/gpu-sample, --query gpusample=1): the same marks around the candidates head
-  if (s.includes("    const c = await ai.engine.headFromHiddenIds(h, desc);"))
-    s = rep(s, "    const c = await ai.engine.headFromHiddenIds(h, desc);", "    __HP('h.head0', 'ai-hidden', pos); const c = await ai.engine.headFromHiddenIds(h, desc); __HP('h.head1', 'ai-hidden', pos);", f);
-  // host, speculative verify lap
-  s = rep(s, "          const tLap = pre?.t0 ?? performance.now();", "          const tLap = pre?.t0 ?? performance.now(); __HP('h.lap0', 'ai-hidden-b', pos, tokens.length);", f);
-  s = rep(s, "          const hostMs = performance.now() - tLap;", "          const hostMs = performance.now() - tLap; __HP('h.emb1', 'ai-hidden-b', pos, tokens.length);", f);
-  s = rep(s, "          sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb) });\n          const h = await returned;",
-    "          { const __w = packWire(hb); __HP('h.pack1', 'ai-hidden-b', pos, tokens.length); sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...__w }); }\n          const h = await returned; __HP('h.ret', 'ai-hidden-b', pos, tokens.length);", f);
-  s = rep(s, "        const toks = viaLookup ? await ai.engine.specStepDrafts(next, sample, lk, spec) : await ai.engine.specStep(next, sample, K, spec);",
-    "        __HP('h.step0', viaLookup ? 'lookup' : 'draft', ai.engine.pos, viaLookup ? lk.length : K); const toks = viaLookup ? await ai.engine.specStepDrafts(next, sample, lk, spec) : await ai.engine.specStep(next, sample, K, spec); __HP('h.step1', viaLookup ? 'lookup' : 'draft', ai.engine.pos, toks.length);", f);
+  if (s.includes("      const c = await current.engine.headFromHiddenIds(h, desc);"))
+    s = rep(s, "      const c = await current.engine.headFromHiddenIds(h, desc);", "      __HP('h.head0', 'ai-hidden', pos); const c = await current.engine.headFromHiddenIds(h, desc); __HP('h.head1', 'ai-hidden', pos);", f);
   // host, returned frames
-  s = rep(s, "    case \"ai-hiddenret-b\": lapDone(\"b\" + d.basePos, unpackWire(d)); break;",
-    "    case \"ai-hiddenret-b\": { __HP('h.unp0', 'ai-hiddenret-b', d.basePos); const __u = unpackWire(d); __HP('h.unp1', 'ai-hiddenret-b', d.basePos); lapDone(\"b\" + d.basePos, __u); break; }", f);
-  s = rep(s, "    case \"ai-hiddenret\": lapDone(d.pos, unpackWire(d)); break;",
-    "    case \"ai-hiddenret\": { __HP('h.unp0', 'ai-hiddenret', d.pos); const __u = unpackWire(d); __HP('h.unp1', 'ai-hiddenret', d.pos); lapDone(d.pos, __u); break; }", f);
+  s = rep(s, "      case \"ai-hiddenret-b\": lapDone(\"b\" + d.basePos, unpackWire(d)); break;",
+    "      case \"ai-hiddenret-b\": { __HP('h.unp0', 'ai-hiddenret-b', d.basePos); const __u = unpackWire(d); __HP('h.unp1', 'ai-hiddenret-b', d.basePos); lapDone(\"b\" + d.basePos, __u); break; }", f);
+  s = rep(s, "      case \"ai-hiddenret\": lapDone(d.pos, unpackWire(d)); break;",
+    "      case \"ai-hiddenret\": { __HP('h.unp0', 'ai-hiddenret', d.pos); const __u = unpackWire(d); __HP('h.unp1', 'ai-hiddenret', d.pos); lapDone(d.pos, __u); break; }", f);
   // worker
-  s = rep(s, "      ai.q = ai.q.then(() => workerFrame(d))", "      __HP('w.enq', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos); ai.q = ai.q.then(() => workerFrame(d))", f);
-  s = rep(s, "  const t0 = performance.now();\n  if (d.t === \"ai-hidden-b\") {", "  const t0 = performance.now(); __HP('w.start', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos, d.n || 1);\n  if (d.t === \"ai-hidden-b\") {", f);
-  s = rep(s, "    const xs = unpackWire(d);", "    const xs = unpackWire(d); __HP('w.unp1', d.t, d.basePos);", f);
-  s = rep(s, "    teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0);", "    __HP('w.gpu1', d.t, d.basePos); teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0);", f);
-  s = rep(s, "    const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };",
-    "    const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) }; __HP('w.pack1', d.t, d.basePos);", f);
-  s = rep(s, "    const hin = unpackWire(d);", "    const hin = unpackWire(d); __HP('w.unp1', d.t, d.pos);", f);
-  s = rep(s, "    teleNote(\"one\", performance.now() - t0);", "    __HP('w.gpu1', d.t, d.pos); teleNote(\"one\", performance.now() - t0);", f);
-  s = rep(s, "    const msg = { pos: d.pos, ...packWire(h) };", "    const msg = { pos: d.pos, ...packWire(h) }; __HP('w.pack1', d.t, d.pos);", f);
+  s = rep(s, "        ai.q = ai.q.then(() => workerFrame(d))", "        __HP('w.enq', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos); ai.q = ai.q.then(() => workerFrame(d))", f);
+  s = rep(s, "    const t0 = performance.now();\n    if (d.t === \"ai-hidden-b\") {", "    const t0 = performance.now(); __HP('w.start', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos, d.n || 1);\n    if (d.t === \"ai-hidden-b\") {", f);
+  s = rep(s, "      const xs = unpackWire(d);", "      const xs = unpackWire(d); __HP('w.unp1', d.t, d.basePos);", f);
+  s = rep(s, "      teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0);", "      __HP('w.gpu1', d.t, d.basePos); teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0);", f);
+  s = rep(s, "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };",
+    "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) }; __HP('w.pack1', d.t, d.basePos);", f);
+  s = rep(s, "      const hin = unpackWire(d);", "      const hin = unpackWire(d); __HP('w.unp1', d.t, d.pos);", f);
+  s = rep(s, "      teleNote(\"one\", performance.now() - t0);", "      __HP('w.gpu1', d.t, d.pos); teleNote(\"one\", performance.now() - t0);", f);
+  s = rep(s, "      const msg = { pos: d.pos, ...packWire(h) };", "      const msg = { pos: d.pos, ...packWire(h) }; __HP('w.pack1', d.t, d.pos);", f);
   return s;
 }
 export function patchTransport(s) {
   const f = "room/transport.js";
   s = HP + s;
   s = rep(s, "  const flags = packFlags(msg);", "  const flags = packFlags(msg); __HP('send0', msg.t, pos, bytes.length, nSlices);", f);
-  s = rep(s, "    ch.send(buf);\n  }\n  return true;", "    ch.send(buf);\n  }\n  __HP('send1', msg.t, pos);\n  return true;", f);
+  s = rep(s, "  return true;\n}\n// The open channel", "  __HP('send1', msg.t, pos);\n  return true;\n}\n// The open channel", f);
   s = rep(s, "  if (!r) { r = {", "  if (!r) { __HP('rx0', KINDS[kind], pos, nSlices); r = {", f);
   s = rep(s, "  link.recv++;", "  link.recv++; __HP('rx1', KINDS[kind], pos);", f);
   s = rep(s, "    link.expect++;\n    onFrame(m);", "    link.expect++;\n    __HP('dlv', m.t, m.pos ?? m.basePos);\n    onFrame(m);", f);
