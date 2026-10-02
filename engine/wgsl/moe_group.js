@@ -39,43 +39,45 @@ export function moeGroupSizes({ U, K, nExp, UC }) {
 }
 
 // ---- moe_gsort ----
-// Thread t owns the experts e with e % 256 == t (QM = ceil((nExp + 1) / 256) of them). Pass 1 counts each
-// owned expert's pairs over the pair list (read in tiles of 1024 through workgroup memory), a scan in expert
-// order gives each expert its first chunk and first pair-list slot, pass 2 appends each pair to its expert's
-// list in pair order (stable), and the owner writes its experts' chunk records. No atomics: the result is a
-// pure function of sel.
+// One workgroup of 256 threads. Pass 1 counts each expert's pairs with workgroup atomics (an order-free sum), a scan
+// in expert order (thread t owns the experts e with e % 256 == t, QM = ceil((nExp + 1) / 256) of them) gives each
+// expert its first chunk and first pair-list slot, and pass 2 places the pairs in rounds of CR whole columns (one pair
+// per thread): each expert gets a CR-bit mask of the round's columns that picked it (atomicOr), a pair's slot is its
+// expert's running count plus the mask bits below its column, and the round's last such column advances the count.
+// A column picks an expert at most once (top-K picks distinct experts; the shared expert is one slot), so this is the
+// stable order (by pair index), the same output as the counting loops it replaced, in O(pairs / 256) steps per
+// thread instead of O(pairs) (those took ~0.5 ms a launch on the GB10, ~3% of MoE prefill). The result is a pure
+// function of sel.
 function sortKernel(K, UC, QM, CO, O) {
-  const KS = K + 1, D = O.div;
+  const KS = K + 1, D = O.div, Q = Array.from({ length: QM }, (_, q) => q), NE = 256 * QM;
+  const CR = Math.min(28, Math.floor(256 / KS));   // columns per placement round (lc < 28: the masks stay below 2^28)
   return `
 @group(1) @binding(0) var<storage, read> gso_sel: array<u32>;
 @group(1) @binding(1) var<storage, read_write> gso_grp: array<u32>;
 @group(1) @binding(2) var<storage, read_write> gso_ind: array<u32>;
 @group(1) @binding(3) var<uniform> gso_s: MOEG;
-var<workgroup> gso_tile: array<u32, 1024>;
+var<workgroup> gso_h: array<atomic<u32>, ${NE}>;
+var<workgroup> gso_m: array<atomic<u32>, ${NE}>;
+var<workgroup> gso_b: array<u32, ${NE}>;
+var<workgroup> gso_r: array<u32, ${NE}>;
 var<workgroup> gso_sc: array<u32, 256>;
 var<workgroup> gso_sp: array<u32, 256>;
 var<workgroup> gso_su: array<u32, 256>;
 @compute @workgroup_size(256)
 fn moe_gsort(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let t = lid.x; let N = gso_s.n; let nE = gso_s.nExp;
-  var cnt: array<u32, ${QM}>;   // zero-initialized
-  var placed: array<u32, ${QM}>;   // zero-initialized
-  var cbase: array<u32, ${QM}>;   // zero-initialized
-  var pbase: array<u32, ${QM}>;   // zero-initialized
-  for (var i0: u32 = 0u; i0 < N; i0 += 1024u) {
-    for (var j: u32 = t; j < 1024u; j += 256u) {
-      let i = i0 + j;
-      if (i < N) { let slot = i % ${KS}u; gso_tile[j] = select(min(gso_sel[i], nE - 1u), nE, slot == ${K}u); }
-    }
-    workgroupBarrier();
-    let m = min(1024u, N - i0);
-    for (var j: u32 = 0u; j < m; j++) { let e = gso_tile[j]; if ((e & 255u) == t) { cnt[e >> 8u] += 1u; } }
-    workgroupBarrier();
+${Q.map((q) => `  atomicStore(&gso_h[${q * 256}u + t], 0u); gso_r[${q * 256}u + t] = 0u;`).join("\n")}
+  workgroupBarrier();
+  for (var i: u32 = t; i < N; i += 256u) {
+    let slot = i % ${KS}u; let e = select(min(gso_sel[i], nE - 1u), nE, slot == ${K}u);
+    atomicAdd(&gso_h[e], 1u);
   }
+  workgroupBarrier();
   var carryC: u32 = 0u; var carryP: u32 = 0u; var carryU: u32 = 0u;
-  for (var q: u32 = 0u; q < ${QM}u; q++) {
-    let c = cnt[q]; let nch = ${D(`c + ${UC - 1}u`, `${UC}u`)};
-    gso_sc[t] = nch; gso_sp[t] = c; gso_su[t] = select(0u, 1u, c > 0u && q * 256u + t < nE);
+${Q.map((q) => `  let cnt${q} = atomicLoad(&gso_h[${q * 256}u + t]); var cbase${q}: u32 = 0u;
+  {
+    let c = cnt${q}; let nch = ${D(`c + ${UC - 1}u`, `${UC}u`)};
+    gso_sc[t] = nch; gso_sp[t] = c; gso_su[t] = select(0u, 1u, c > 0u && ${q * 256}u + t < nE);
     workgroupBarrier();
     for (var off: u32 = 1u; off < 256u; off <<= 1u) {   // inclusive scan in expert order (Hillis-Steele)
       var a = gso_sc[t]; var b = gso_sp[t]; var u = gso_su[t];
@@ -84,30 +86,33 @@ fn moe_gsort(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id)
       gso_sc[t] = a; gso_sp[t] = b; gso_su[t] = u;
       workgroupBarrier();
     }
-    cbase[q] = carryC + gso_sc[t] - nch; pbase[q] = carryP + gso_sp[t] - c;
+    cbase${q} = carryC + gso_sc[t] - nch; gso_b[${q * 256}u + t] = carryP + gso_sp[t] - c;
     carryC += gso_sc[255]; carryP += gso_sp[255]; carryU += gso_su[255];
     workgroupBarrier();
-  }
-  for (var i0: u32 = 0u; i0 < N; i0 += 1024u) {
-    for (var j: u32 = t; j < 1024u; j += 256u) {
-      let i = i0 + j;
-      if (i < N) { let slot = i % ${KS}u; gso_tile[j] = select(min(gso_sel[i], nE - 1u), nE, slot == ${K}u); }
-    }
+  }`).join("\n")}
+  let nCol = ${D("N", `${KS}u`)};
+  let lc = ${D("t", `${KS}u`)}; let slot = t % ${KS}u;
+  for (var c0: u32 = 0u; c0 < nCol; c0 += ${CR}u) {
+    let col = c0 + lc; let ok = lc < ${CR}u && col < nCol;
+    let i = col * ${KS}u + slot;
+    var e: u32 = 0u;
+    if (ok) { e = select(min(gso_sel[i], nE - 1u), nE, slot == ${K}u); atomicStore(&gso_m[e], 0u); }
     workgroupBarrier();
-    let m = min(1024u, N - i0);
-    for (var j: u32 = 0u; j < m; j++) {
-      let e = gso_tile[j];
-      if ((e & 255u) == t) { let q = e >> 8u; gso_grp[${CO}u + pbase[q] + placed[q]] = i0 + j; placed[q] += 1u; }
-    }
+    if (ok) { atomicOr(&gso_m[e], 1u << lc); }
+    workgroupBarrier();
+    var m: u32 = 0u;
+    if (ok) { m = atomicLoad(&gso_m[e]); gso_grp[${CO}u + gso_b[e] + gso_r[e] + countOneBits(m & ((1u << lc) - 1u))] = i; }
+    workgroupBarrier();
+    if (ok && (m >> (lc + 1u)) == 0u) { gso_r[e] += countOneBits(m); }
     workgroupBarrier();
   }
-  for (var q: u32 = 0u; q < ${QM}u; q++) {
-    let e = q * 256u + t; let c = cnt[q];
+${Q.map((q) => `  {
+    let e = ${q * 256}u + t; let c = cnt${q}; let pb = gso_b[e];
     for (var k: u32 = 0u; k * ${UC}u < c; k++) {
-      let ci = (cbase[q] + k) * 4u;
-      gso_grp[ci] = pbase[q] + k * ${UC}u; gso_grp[ci + 1u] = min(${UC}u, c - k * ${UC}u); gso_grp[ci + 2u] = e; gso_grp[ci + 3u] = 0u;
+      let ci = (cbase${q} + k) * 4u;
+      gso_grp[ci] = pb + k * ${UC}u; gso_grp[ci + 1u] = min(${UC}u, c - k * ${UC}u); gso_grp[ci + 2u] = e; gso_grp[ci + 3u] = 0u;
     }
-  }
+  }`).join("\n")}
   if (t == 0u) {
     gso_ind[0] = gso_s.gx; gso_ind[1] = carryC; gso_ind[2] = 1u;
     gso_ind[3] = gso_s.dx; gso_ind[4] = carryC; gso_ind[5] = 1u;

@@ -17,6 +17,7 @@ const H = {
   dot: (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3],
   unpack2x16float: (w) => [f16ToF32(w & 0xffff), f16ToF32(w >>> 16)],
   select: (f, t, c) => (c ? t : f), min: Math.min, max: Math.max, exp: Math.exp,
+  countOneBits: (x) => { let n = 0; for (x >>>= 0; x; x &= x - 1) n++; return n; },
 };
 let seed = 12345;
 const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
@@ -27,7 +28,10 @@ function bodyJs(src, name) {
   if (i < 0) throw new Error(`${name} not in source`);
   return wgslToJs(src.slice(j + 2, k))
     .replace(/let (\w+) = workgroupUniformLoad\(&(\w+)\);/g, "yield; let $1 = $2;")
-    .replace(/var (\w+): array<u32, (\d+)>;/g, "let $1 = new Array($2).fill(0);");
+    .replace(/var (\w+): array<u32, (\d+)>;/g, "let $1 = new Array($2).fill(0);")
+    // workgroup atomics (moe_gsort): the threads run one at a time between barriers, so plain updates are atomic
+    .replace(/atomicAdd\(&(\w+\[[^\]]+\]), ([^)]+)\)/g, "(($1 += $2) - $2)").replace(/atomicOr\(&(\w+\[[^\]]+\]), ([^;]+)\);/g, "$1 = ($1 | $2) >>> 0;")
+    .replace(/atomicStore\(&(\w+\[[^\]]+\]), ([^)]+)\)/g, "($1 = $2)").replace(/atomicLoad\(&(\w+\[[^\]]+\])\)/g, "($1)");
 }
 // Run kernel `name` over a (gx, gy) grid of WG threads. bufs: binding name -> array / object (shared by all
 // workgroups); wgv: workgroup variable name -> () => fresh value (per workgroup).
@@ -89,7 +93,8 @@ function runSort(sel, { U, K, nExp, UC, gx = 7, dx = 9 }) {
   const src = moeGroupWGSL({ K, UC, U, nExp }, FOPS_JS);
   const grp = new Array(words).fill(-1), ind = new Array(8).fill(-1);
   run(src, "moe_gsort", 256, { gso_sel: sel, gso_grp: grp, gso_ind: ind, gso_s: { n: pairs, nExp, gx, dx } },
-    { gso_tile: () => new Array(1024).fill(-7), gso_sc: () => new Array(256).fill(-7), gso_sp: () => new Array(256).fill(-7), gso_su: () => new Array(256).fill(-7) }, 1, 1);
+    { gso_h: () => new Array(Math.ceil((nExp + 1) / 256) * 256).fill(-7), gso_m: () => new Array(Math.ceil((nExp + 1) / 256) * 256).fill(-7), gso_b: () => new Array(Math.ceil((nExp + 1) / 256) * 256).fill(-7),
+      gso_r: () => new Array(Math.ceil((nExp + 1) / 256) * 256).fill(-7), gso_sc: () => new Array(256).fill(-7), gso_sp: () => new Array(256).fill(-7), gso_su: () => new Array(256).fill(-7) }, 1, 1);
   return { grp, ind, CO, pairs };
 }
 function checkSort(sel, cfg) {
