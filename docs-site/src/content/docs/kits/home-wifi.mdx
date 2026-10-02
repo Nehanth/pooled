@@ -1,0 +1,103 @@
+---
+title: A room on your Wi-Fi
+eyebrow: Starter kits
+description: Run Pooled from your own computer, with no pooled.run and no public servers, and let a phone on the same Wi-Fi join by scanning a QR code.
+sidebar:
+  label: A room on your Wi-Fi
+  order: 7
+---
+import Shot from '../../../components/Shot.astro';
+import start from '../../../assets/kits/wifi-mac-start.webp';
+import flags from '../../../assets/kits/wifi-phone-flags.webp';
+import invite from '../../../assets/kits/wifi-mac-invite.webp';
+import loading from '../../../assets/kits/wifi-phone-loading.webp';
+import answer from '../../../assets/kits/wifi-phone-answer.webp';
+import { Steps } from '@astrojs/starlight/components';
+
+{/*
+Sources (for the fact-checker):
+- scripts/lan.mjs: one process serves the checkout (/room and /r/:code rewrites, no dotfiles or node_modules) on :8080 and a PeerServer on :9000,
+  on all interfaces; prints the computer's address and the flag value; opens http://localhost:8080/room?signal=<ip>:9000&invite=http://<ip>:8080
+- room/lan.js inviteOrigin(): ?invite= is used for the QR code, Copy link and Share only on a loopback page and for a private address
+- room/preflight.js: phones need a secure page for WebGPU ("WebGPU needs a secure page: open this over https.")
+- room/plan.js: phones get layers last (see /docs/phones)
+- Verified 2026-10-01: MacBook Pro (M3 Pro, 18 GB) + realme 9 Pro+ (RMX3393, Dimensity 920, Android 14) in Brave (Chromium 154) on home Wi-Fi.
+  Flag set in brave://flags (the phone's default browser opened the QR link, so a flag set in Chrome did nothing). Computer at Memory 3.5 GB,
+  phone at its default 0.5 GB: "Needs 5.6 GB (4 GB at 8K). The room has 4 GB."; load card my-mac layers 1-25, wombat layers 26-28;
+  answer "79 tok · 5.8 tok/s · 2 devices". Same model on the computer alone (Memory 4 GB, phone only asking): "13 tok · 42.8 tok/s · 1 device".
+*/}
+
+**Goal:** run Pooled from your own computer and let a phone on the same Wi-Fi join the room by scanning a QR code. Nothing goes through pooled.run or a public signaling server.
+
+## You need
+
+- **A computer** with a copy of this repository, [Node.js](https://nodejs.org) 20 or newer, and Chrome, Edge or Brave.
+- **An Android phone** on the same Wi-Fi, with Chrome or Brave. (iPhones can't use this guide yet: Safari allows WebGPU only on https pages.)
+- **A Wi-Fi network you trust**, like your home network. See [Good to know](#good-to-know).
+
+## Steps
+
+<Steps>
+
+1. **Start Pooled on the computer.**
+
+   In the repository folder:
+
+   ```sh
+   npm install
+   npm run lan
+   ```
+
+   It prints this computer's address and opens the room in your browser. Leave it running.
+
+   ```text
+   pooled on your network · this computer is 192.168.1.20
+     ...
+     2. Once per phone or other device, in the browser that opens the QR code:
+          chrome://flags (brave://flags in Brave)  ->  "Insecure origins treated as secure"  ->  paste this, Enabled, Relaunch:
+          http://192.168.1.20:8080,http://192.168.1.20:9000
+   ```
+
+2. **Start a room on the computer.**
+
+   **Memory** is how much this computer gives the room. To see the phone do part of the work with Qwen3 1.7B, set it to **3.5 GB**: the model needs 4 GB, and the phone adds 0.5 GB. Leave it at 4 GB or more if you only want to chat from the phone. Then press **Start a room**.
+
+   <Shot src={start} alt="The start screen on the computer: device name my-mac, Memory 3.5 GB, and the Start a room button" />
+
+3. **Let the phone use its GPU. You do this once per phone.**
+
+   The phone opens the room over plain `http`, and browsers only let secure pages use the GPU. Tell the phone's browser to trust your computer's address:
+
+   - Open the browser your phone uses for links: `chrome://flags` in Chrome, `brave://flags` in Brave.
+   - Search for **insecure origins**.
+   - Paste the two addresses `npm run lan` printed, set it to **Enabled**, and tap **Relaunch**.
+
+   <Shot src={flags} phone alt="brave://flags on the phone: Insecure origins treated as secure, with the two addresses and Enabled, and the Relaunch button" />
+
+4. **Scan the QR code.**
+
+   On the computer, press **Invite**. Scan the code with the phone's camera and open the link. The phone joins the room, with no code to type.
+
+   <Shot src={invite} alt="The Invite a device sheet on the computer: a QR code and a link starting with the computer's network address" />
+
+5. **Start the model.**
+
+   Pick **Qwen3 1.7B** and press **Start the model**, on either device. Each device downloads only the layers it holds.
+
+   <Shot src={loading} phone alt="The loading card on the phone: my-mac holds layers 1 to 25, wombat (this phone) holds layers 26 to 28" caption="The computer holds layers 1–25, the phone 26–28." />
+
+6. **Ask something from the phone.**
+
+   Type in **Message the room** and press **Send**. The line under the answer says **2 devices**: every word passed through both GPUs.
+
+   <Shot src={answer} phone alt="An answer on the phone with the line 79 tok, 5.8 tok/s, 2 devices" />
+
+</Steps>
+
+## Good to know
+
+- **Splitting a small model makes it slower.** In our test, Qwen3 1.7B ran at 5.8 tokens per second split across the computer and the phone, and at 42.8 on the computer alone. Every word crosses the Wi-Fi twice, and a phone's GPU is slow. Pooling pays off when a model doesn't fit on one device. See [Phones and tablets](/docs/phones).
+- **Use a network you trust.** The page and signaling go over the Wi-Fi unencrypted. The flag trusts an address, not your computer, so turn it off when you're done: on another network, a different device could have that address.
+- **The phone's browser matters.** The QR code opens the phone's default browser. Set the flag in that browser.
+- **Some things still come from the internet:** the model files the first time (from Hugging Face, or from another device in the room) and the PeerJS library from jsDelivr.
+- **To stop**, press Ctrl+C in the terminal running `npm run lan`.

@@ -94,8 +94,8 @@ WebGPU needs a [secure context](https://developer.mozilla.org/en-US/docs/Web/Sec
 
     Run the same commit as pooled.run (`main`) so both speak the same room protocol.
   </TabItem>
-  <TabItem label="Chrome flag (testing only)">
-    On Chrome for desktop and Android, `chrome://flags/#unsafely-treat-insecure-origin-as-secure` lets you list `http://192.168.1.20:8080` as secure. Use it only on test devices.
+  <TabItem label="Browser flag (home Wi-Fi)">
+    On Chrome for desktop and Android (and Brave, at `brave://flags`), `chrome://flags/#unsafely-treat-insecure-origin-as-secure` lets you list `http://192.168.1.20:8080` as secure. Use it only on a network you trust. `npm run lan` serves the site and a signaling server for this and points the room's QR code at your computer: see [A room on your Wi-Fi](/docs/kits/home-wifi).
   </TabItem>
 </Tabs>
 

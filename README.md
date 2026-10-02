@@ -86,6 +86,14 @@ npx -y serve -l 8080 .        # then open http://localhost:8080/room
 
 `serve` reads `serve.json` for the `/room` and `/r/:code` rewrites. Production uses the same two rewrites in `vercel.json`, so keep the two files in step.
 
+### A room on your Wi-Fi (no pooled.run)
+
+```bash
+npm install && npm run lan     # serves the site and a signaling server from this computer, opens the room
+```
+
+Phones on the same Wi-Fi join by scanning the room's QR code, after a one-time browser flag (the page is plain `http`, and browsers allow WebGPU only on secure pages). Step by step, with screenshots: [A room on your Wi-Fi](https://pooled.run/docs/kits/home-wifi).
+
 ## Tests
 
 ```bash

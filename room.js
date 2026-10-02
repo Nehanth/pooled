@@ -54,6 +54,7 @@ import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
+import { inviteOrigin } from "./room/lan.js";
 import { attachBrowserWeightCache, convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
 import { resumableGenerate, waitForRoom, linkSilent, backFromAway, sameShard, guestResume, GUEST_KEY, REJOIN_GRACE_MS, LINK_SILENT_MS } from "./room/resume.js";
 import { GpuWaker } from "./room/gpuwake.js";
@@ -87,6 +88,9 @@ const SIGNALS = serverList({ query: SIGNAL, configured: window.POOLED_SIGNAL_SER
 // what a page with no ?signal= would try first: the invite link names the server only when it differs
 const SIGNAL_FIRST = serverList({ configured: window.POOLED_SIGNAL_SERVERS, pageSecure: PAGE_SECURE })[0].spec;
 let signalServer = null;   // the server this tab registered on ({ spec, label, opts })
+// a room served from this computer to its Wi-Fi (npm run lan): the host is on localhost, so its invite
+// links and QR codes use ?invite=, the computer's network address (room/lan.js)
+const INVITE_ORIGIN = inviteOrigin(new URLSearchParams(location.search).get("invite"), location.hostname);
 // the relay this tab uses, and what the network allows (room/ice.js; see keepRelayFresh)
 let relayOn = false;     // a TURN server is in this tab's ICE configuration
 let relayFrom = null;    // "yours" (?turn= / Network box), "site" (window.TURN_SERVERS), "default" (/api/turn)
@@ -657,7 +661,7 @@ function enterRoom() {
   $("room-h").textContent = `Room ${formatCode(roomCode)}`;
   $("side-code").textContent = formatCode(roomCode);
   $("side-code").addEventListener("click", openShare);
-  $("ap-qr").innerHTML = qrSVG(roomLink(), { size: 112 });
+  $("ap-qr").innerHTML = qrSVG(shareLink(), { size: 112 });
   // Chat | Code shows from the lobby on, so a visitor who came for Code sees where it is; Code stays
   // off (codeGate) until a model is running (?mock=code: at once, there is no model)
   if (isHost) $("host-controls").hidden = false;
@@ -1988,32 +1992,34 @@ $("add-virtual").addEventListener("click", addVirtual);
 // Join links: pooled.run/r/ABCD opens this page and joins the room with no typing. Served
 // elsewhere (a local static server, the emulator), the link keeps this page's path and query
 // (signal=, wire=) and adds ?code=.
-function roomLink() {
+function roomLink(origin = location.origin) {
   // a room on anything but the page's usual first server: the link names it, so joiners look there
   if (location.pathname === "/room" || location.pathname.startsWith("/r/")) {
     // (dev=0: a signal= link would otherwise open the page in dev mode, see p2p.html)
     const sig = signalServer && signalServer.spec !== SIGNAL_FIRST ? "?signal=" + encodeURIComponent(signalServer.spec) + (DEV ? "" : "&dev=0") : "";
-    return `${location.origin}/r/${roomCode}${sig}${inviteKey()}`;
+    return `${origin}/r/${roomCode}${sig}${inviteKey()}`;
   }
   const q = shareQuery(location.search); q.set("code", roomCode); q.delete("ask");   // never a relay password in a link
   if (signalServer && (q.has("signal") || signalServer.spec !== SIGNAL_FIRST)) {
     if (!q.has("signal") && !DEV) q.set("dev", "0");
     q.set("signal", signalServer.spec);
   }
-  return `${location.origin}${location.pathname}?${q}${inviteKey()}`;
+  return `${origin}${location.pathname}?${q}${inviteKey()}`;
 }
+// the link other devices get (QR, Copy link, Share): the same, at ?invite='s address when there is one
+const shareLink = () => roomLink(INVITE_ORIGIN || location.origin);
 // the host's links carry the invite key (a device that opens one is let in without asking); a guest's
 // don't: it doesn't know the key, and the host is asked about whoever it invites
 function inviteKey() { return isHost && gate ? keyFragment(gate.key) : ""; }
 // a code for a screen reader, one character at a time ("4 T K, G 9 P")
 function spokenCode(c) { return formatCode(c).split("-").map((g) => g.split("").join(" ")).join(", "); }
 function copyRoomLink() {
-  const url = roomLink();
+  const url = shareLink();
   if (!navigator.clipboard) { toast("room code: " + formatCode(roomCode)); return; }
   navigator.clipboard.writeText(url).then(() => toast("join link copied")).catch(() => { navigator.clipboard.writeText(formatCode(roomCode)); toast("room code copied"); });
 }
 function openShare() {
-  const url = roomLink();
+  const url = shareLink();
   $("share-qr").innerHTML = qrSVG(url, { size: 220 });
   $("share-url").textContent = url;
   $("share-code").textContent = formatCode(roomCode);
@@ -2062,7 +2068,7 @@ $("share-close").addEventListener("click", closeShare);
 $("share").addEventListener("click", (e) => { if (e.target === $("share")) closeShare(); });
 $("room-over-close").addEventListener("click", () => { $("room-over").hidden = true; });
 $("share-copy").addEventListener("click", copyRoomLink);
-$("share-native").addEventListener("click", () => navigator.share?.({ title: "Join my Pooled room", text: `Room ${formatCode(roomCode)}: add this device to the AI model we run together`, url: roomLink() }).catch(() => {}));
+$("share-native").addEventListener("click", () => navigator.share?.({ title: "Join my Pooled room", text: `Room ${formatCode(roomCode)}: add this device to the AI model we run together`, url: shareLink() }).catch(() => {}));
 // the logo leads home. In a room it asks first: it sits in the thumb's corner on a phone, and
 // leaving ends the room for everyone (the host) or takes this device's layers with it
 const logoLink = document.querySelector(".logo a");
@@ -5554,7 +5560,7 @@ let apiTab = "curl";
 // the host's command carries the invite link (its key lets the client in without asking); a guest's has
 // the code, and the host is asked
 function apiCommand() {
-  const room = isHost && roomCode && gate ? `"${roomLink()}"` : formatCode(roomCode || "") || "CODE";
+  const room = isHost && roomCode && gate ? `"${shareLink()}"` : formatCode(roomCode || "") || "CODE";
   return `npx @pooled/cli serve ${room}${SIGNAL ? ` --signal ${SIGNAL}` : ""}`;
 }
 // the API clients in this room: the host's own map (with how many answers each got), or the roster's
