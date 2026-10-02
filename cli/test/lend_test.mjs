@@ -353,3 +353,9 @@ test("--ram: expert offload's RAM, discrete GPUs only; default total less 16 GB,
   assert.equal(ramRule({ kind: "unified", totalGB: 128 }, { gb: 20 }, { totalGB: 128, freeGB: 100 }).gb, 0, "unified memory never offloads");
   assert.equal(ramRule({ kind: "unknown" }, null, { totalGB: 64, freeGB: 56 }).gb, 0);
 });
+
+test("explainError: a room short of a model is not a GPU out of memory (\"rOOM\")", () => {
+  const x = explainError(new Error("This room is 47.3 GB short for Qwen3.5 122B MoE. Add a device or raise a pledge."), {});
+  assert.doesNotMatch(x.message, /ran out of memory/);
+  assert.match(explainError(new Error("GPU OOM in createBuffer"), {}).message, /ran out of memory/);
+});

@@ -462,7 +462,8 @@ export function explainError(err, { code = "", cmd = "join", mine = 4 } = {}) {
     return { message: `Room code ${code} is taken.`, hint: "Pick another with --code, or leave it out for a random one.", code: 1 };
   if (t === "version") return { message: versionAdvice({ mine, theirs: err.theirs, theyHost: err.theyHost !== false, code }), code: 1 };
   if (t === "kicked") return { message: `The host refused this device: ${cleanText(msg, 300)}`, code: 1 };
-  if (/out of memory|OOM|allocation failed|Failed to allocate|createBuffer/i.test(msg))
+  // (OOM as a word: "This room is 4 GB short" read as a GPU out of memory through "rOOM")
+  if (/out of memory|\bOOM\b|allocation failed|Failed to allocate|createBuffer/i.test(msg))
     return { message: `The GPU ran out of memory: ${cleanText(msg, 200)}`, hint: "Lend less with --gb N, or close other GPU apps.", code: 1 };
   if (t === "other-host")
     return { message: `Room ${code} now has another host (${cleanText(err.now, 40)}, not ${cleanText(err.was, 40)}): a new room under the same code, so pooled left it.`,

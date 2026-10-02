@@ -49,6 +49,11 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
   const out = { device, gpuErrors: 0 };
   let pool = null;
   device.addEventListener?.("uncapturederror", (ev) => { if (out.gpuErrors++ < 3) onGpuError(ev.error?.message || "GPU error"); });
+  // a buffer the GPU had no memory for is an error buffer: the layers would load "fine" and every answer come out as
+  // garbage (seen on the RTX 5070 with the 122B's experts filling the RAM WDDM spills VRAM into). The whole load runs
+  // in one out-of-memory scope and fails when anything in it ran out
+  device.pushErrorScope?.("out-of-memory");
+  let scoped = !!device.pushErrorScope;
   try {
     // the index first, so a streamed shard's weights download while the GPU tests and tunes below run
     const kind = M.kind === "qwen35" ? "qwen35" : "gguf";
@@ -97,6 +102,11 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
       out.engine = await DenseEngine.create({ coopWG: out.tune.wg, coopRows: out.tune.rows, device, cfg: out.cfg, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx });
     }
     applyRoomFlags(out.engine, flags);
+    if (scoped) {
+      scoped = false;
+      const oom = await device.popErrorScope();
+      if (oom) throw Object.assign(new Error(`the GPU ran out of memory while loading layers ${range[0]}-${range[1] - 1}: ${String(oom.message || "").split("\n")[0].slice(0, 200)}`), { oom: true });
+    }
     if (out.experts) log(out.experts.summary().replace(/; \d+ cuts.*/, ""));
     return out;
   } catch (e) { try { device.destroy(); } catch {} throw e; }
