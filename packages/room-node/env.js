@@ -7,6 +7,10 @@
 import { setFlagsFromString } from "node:v8";
 import { measureCopyGBps } from "../../room/gpuspeed.js";
 import { DENSE_SPEC_V } from "../../room/lookup.js";
+import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import os from "node:os";
+import { detectMemory } from "../../cli/lib/lend.js";
 
 let ready = null;
 export let Peer = null;
@@ -76,8 +80,11 @@ export function highPerformance(gpu) {
 // layers to devices with meta.webgpu and weighs them by meta.contribGB; meta.gbps (room/gpuspeed.js)
 // lets a clearly faster GPU be the model host (room/plan.js pickModelHost). gbps: pin it (0 = unknown).
 // ramGB: system RAM this device lets the room park a MoE model's experts in (expert offload: meta.offload and
-// meta.ramGB, room/pledge.js ramGB); 0 or none: it doesn't offload. Browsers never do.
-export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0 } = {}) {
+// meta.ramGB, room/pledge.js ramGB); 0 or none: it doesn't offload. Browsers never do, and neither does a GPU on
+// unified memory (Apple silicon, a GB10 / Jetson): its "RAM" is the memory its pledge already lends, so parking
+// experts there frees nothing and spends the same memory twice. mem: cli/lib/lend.js detectMemory()'s answer
+// (the CLI has it); without one, probeMeta asks the OS itself, only when ramGB asks for offload.
+export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null } = {}) {
   const ua = process.platform === "darwin" ? "Mac" : "Device";
   // dspec: dense verify frames of any column count (the repo's engine; room/lookup.js chainDenseSpec)
   const meta = { ua, webgpu: false, gpu: "no WebGPU", maxBufGB: 0, native: "node-dawn", dspec: DENSE_SPEC_V };
@@ -95,8 +102,21 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0 } = {}) {
   }
   meta.phone = false;
   meta.contribGB = pledgeFor(pledgeGB, meta.maxBufGB);
-  if (meta.webgpu && +ramGB > 0) { meta.offload = true; meta.ramGB = ramFor(ramGB); }
+  if (meta.webgpu && +ramGB > 0) {
+    if (unifiedMemory(mem || hostMemory())) meta.noOffload = "unified memory";
+    else { meta.offload = true; meta.ramGB = ramFor(ramGB); }
+  }
   return meta;
+}
+// whether the GPU shares the system's memory (detectMemory's kind; Apple silicon reads as unified there too)
+export const unifiedMemory = (mem) => mem?.kind === "unified";
+// detectMemory on this machine (nvidia-smi, amdgpu sysfs, the platform), or { kind: "unknown" } when it fails
+export function hostMemory() {
+  try {
+    return detectMemory({
+      run: (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }),
+      read: (p) => readFileSync(p, "utf8"), totalmem: os.totalmem, freemem: os.freemem });
+  } catch (e) { return { kind: "unknown", why: String(e?.message || e) }; }
 }
 // the RAM this device lets the room park experts in, GB: what it was told, at most 64 (as a pledge), whole tenths
 export const ramFor = (gb) => Math.max(0, Math.min(64, Math.floor((+gb || 0) * 10) / 10));

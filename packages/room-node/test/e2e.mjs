@@ -16,7 +16,7 @@
 //        SETUP=solo|pair|proc|tab (the node alone, + a second node, the second node in its own process, + a browser tab), REQ (requests.jsonl
 //        recorded from an OpenClaw gateway), CKPT=0 (no checkpoints: the baseline), CTX, STEPS=turn1 (the cold turn only)
 // env: MODELS (model dir, layout of source.js LOCAL; default <checkout>/models), MODEL (qwen3-1.7b), PROMPT,
-//      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, WORKER_GB / WORKER_RAM / HOST_RAM (nodepair), NODE_RAM (tabhost), CHROME_BIN (a Chromium or
+//      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, WORKER_GB / WORKER_RAM / HOST_RAM (nodepair), NODE_RAM (tabhost), OFFLOAD_DISCRETE=1 (offload on unified memory, as a discrete GPU), CHROME_BIN (a Chromium or
 //      headless_shell with WebGPU; default playwright's), PORT (8231), OUT (result JSON path),
 //      SIGNAL=cloud / PAGE=live (the public PeerJS server / the room page on https://pooled.run)
 import http from "node:http";
@@ -46,6 +46,9 @@ const log = (...a) => console.error(((Date.now() - T0) / 1000).toFixed(1) + "s",
 const out = { mode: MODE, model: MODEL, prompt: PROMPT, maxNew: MAXNEW };
 const CKPT = process.env.CKPT === "0" ? false : {};
 const CTX = +(process.env.CTX || 0);
+// OFFLOAD_DISCRETE=1: the nodes count as discrete GPUs for expert offload (env.js probeMeta refuses it on unified
+// memory: a GB10 testing what a PC with a discrete GPU does)
+const MEM = process.env.OFFLOAD_DISCRETE === "1" ? { kind: "discrete", name: "test", totalGB: 0, freeGB: 0 } : null;
 
 // --- servers: the page (http), the weights (https + Range), PeerJS signaling
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
@@ -313,7 +316,7 @@ try {
     const roomCode = (await page.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{4,6}/)[0];
     log("tab room", roomCode);
     // NODE_RAM: the node offers RAM for experts (expert offload: the tab's deal gives it what the pledges can't hold)
-    worker = await joinRoom(roomCode, { pledgeGB: NODE_GB, ramGB: +(process.env.NODE_RAM || 0), name: "node-worker", signal: SIGNAL, modelDir: MODELS, log: nodeLog("worker") });
+    worker = await joinRoom(roomCode, { pledgeGB: NODE_GB, ramGB: +(process.env.NODE_RAM || 0), mem: MEM, name: "node-worker", signal: SIGNAL, modelDir: MODELS, log: nodeLog("worker") });
     await page.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 60000 });
     await page.waitForTimeout(1500);
     await page.selectOption("#ai-model", MODEL);
@@ -338,9 +341,9 @@ try {
     out.node = { text, stats, sent: worker.sent, frames: worker.frames, frameMsAvg: worker.frames ? +(worker.frameMs / worker.frames).toFixed(2) : null, range: worker.ai.range, split: worker.split };
     out.tab = await tabStatus();
   } else if (MODE === "nodepair") {
-    host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, ramGB: +(process.env.HOST_RAM || 0), name: "node-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a") });
+    host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, ramGB: +(process.env.HOST_RAM || 0), mem: MEM, name: "node-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a") });
     // WORKER_GB / WORKER_RAM: the worker's own pledge, and RAM for experts (expert offload: it holds what the pledges can't)
-    worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || NODE_GB), ramGB: +(process.env.WORKER_RAM || 0), name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
+    worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || NODE_GB), ramGB: +(process.env.WORKER_RAM || 0), mem: MEM, name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
     const tStart = Date.now();
     await host.start(MODEL, { minDevices: 2, waitMs: 30000 });
     out.onlineS = (Date.now() - tStart) / 1000;

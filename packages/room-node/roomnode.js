@@ -102,11 +102,14 @@ export class RoomNode extends EventEmitter {
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
     gbps = null, autoRedeal = true, ckpt = {}, ckptDisk, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory",
-    ramGB = 0 } = {}) {
+    ramGB = 0, mem = null } = {}) {
     super();
     // ramGB: system RAM this device lets the room park a MoE model's routed experts in when its pledge can't hold
     // its layers (expert offload, room/plan.js offloadNeed; meta.offload / meta.ramGB). 0: it never offloads.
     this.ramGB = +ramGB > 0 ? +ramGB : 0;
+    // mem: cli/lib/lend.js detectMemory()'s answer, when the caller has it (env.js probeMeta: no offload on unified
+    // memory; without it probeMeta asks the OS)
+    this.mem = mem;
     // split: how a deal spreads the layers, as the room page's "Layer split" (room.js ai-split):
     // "memory" = over every device in proportion to what it lends (this node's default so far);
     // "speed" = the fastest devices first, each up to what it lends, the rest not needed (room/plan.js
@@ -176,7 +179,9 @@ export class RoomNode extends EventEmitter {
   // ---------------- link layer (room.js wire / onData, without the DOM) ----------------
   async open(id) {
     await setupNode(this.setup);
-    this.meta = await probeMeta(this.pledgeGB, { gbps: this.gbpsPin, ramGB: this.ramGB });
+    this.meta = await probeMeta(this.pledgeGB, { gbps: this.gbpsPin, ramGB: this.ramGB, mem: this.mem });
+    // the room offloads to this device only when its hello says so (meta.offload): its own loads follow that too
+    if (this.ramGB > 0 && !this.meta.offload) { this.log(`no expert offload here (${this.meta.noOffload || "no WebGPU"})`); this.ramGB = 0; }
     // the first signaling server that answers (room/signal.js openPeer: a server that is down or
     // unreachable hands over to the next; a taken code or a bad id is an answer, not an outage)
     const servers = nodeServers(this.signal);

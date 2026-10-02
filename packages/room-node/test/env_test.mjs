@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dawnFlagsFor, v8FlagsFor } from "../env.js";
+import { dawnFlagsFor, v8FlagsFor, probeMeta, unifiedMemory } from "../env.js";
 
 const SKIP = "d3d_skip_shader_optimizations";
 test("dawnFlagsFor: DAWN_OPTS elsewhere, FXC's optimizer off on Windows", () => {
@@ -35,4 +35,25 @@ test("--no-maglev set at run time: nothing compiles with Maglev after it", (t) =
   assert.match(before, /ran/); assert.match(after, /ran/);
   if (maglevF(before) === 0) return t.skip(`this V8 (Node ${process.versions.node}) did not use Maglev for the hot function`);
   assert.equal(maglevF(after), 0);
+});
+
+// expert offload only on a discrete GPU: on unified memory (Apple silicon, a GB10) the RAM is the memory the pledge
+// already lends. probeMeta refuses it itself, whatever ramGB says (the CLI's ramRule says 0 there too).
+test("probeMeta: offload on a discrete GPU, never on unified memory", async () => {
+  const fake = { requestAdapter: async () => ({ info: { vendor: "nvidia", device: "test" }, limits: { maxBufferSize: 8 * 2 ** 30, maxStorageBufferBindingSize: 2 ** 31 } }) };
+  const had = Object.getOwnPropertyDescriptor(globalThis.navigator, "gpu");
+  Object.defineProperty(globalThis.navigator, "gpu", { value: fake, configurable: true });
+  try {
+    const disc = await probeMeta(8, { gbps: 0, ramGB: 40, mem: { kind: "discrete", name: "RTX 5070", totalGB: 12, freeGB: 11 } });
+    assert.equal(disc.offload, true); assert.equal(disc.ramGB, 40);
+    for (const mem of [{ kind: "unified", name: "NVIDIA GB10", totalGB: 119 }, { kind: "unified", name: "Apple silicon", totalGB: 64 }]) {
+      const m = await probeMeta(8, { gbps: 0, ramGB: 40, mem });
+      assert.equal(m.offload, undefined, mem.name); assert.equal(m.ramGB, undefined); assert.equal(m.noOffload, "unified memory");
+      assert.equal(m.webgpu, true); assert.equal(m.contribGB, 8, "the pledge is unchanged");
+    }
+    assert.equal((await probeMeta(8, { gbps: 0, ramGB: 0, mem: { kind: "discrete" } })).offload, undefined, "--ram 0");
+    assert.ok(unifiedMemory({ kind: "unified" }) && !unifiedMemory({ kind: "discrete" }) && !unifiedMemory(null));
+  } finally {
+    if (had) Object.defineProperty(globalThis.navigator, "gpu", had); else delete globalThis.navigator.gpu;
+  }
 });

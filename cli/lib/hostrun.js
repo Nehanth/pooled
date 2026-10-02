@@ -56,7 +56,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   };
 
   region.render(["", `  ${ST.spin(0)} opening a room on this computer…`]);
-  const node = await rn.createRoom({ model: model0, pledgeGB: pledge0, ramGB: ram?.gb || 0, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: dir, ctx: opts.ctx || 0,
+  const node = await rn.createRoom({ model: model0, pledgeGB: pledge0, ramGB: ram?.gb || 0, mem, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: dir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log, split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   node.setPledge(pledge0);
   const code = node.code;

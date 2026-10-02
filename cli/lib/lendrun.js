@@ -278,7 +278,7 @@ async function runJoin(opts, out) {
     else if (!r.aborted) out.log(`download failed (${cleanText(r.error?.message || "", 200)}): streaming the layers from Hugging Face instead; pooled pull ${key} resumes it`, "error");
     tick();
   };
-  const joinOnce = () => rn.joinRoom(code, { pledgeGB: lendGB, ramGB: ram?.gb || 0, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
+  const joinOnce = () => rn.joinRoom(code, { pledgeGB: lendGB, ramGB: ram?.gb || 0, mem, name, signal: opts.signal, modelDir: opts.modelDir, setup: { webgpu: loader },
     expectHost: hostName, key: opts.key, pass, log: (m) => out.log(m), beforeLoad: ensurePulled });
   const attach = (n) => {
     n.on("loadprogress", (pct) => { S.pct = pct; });
@@ -429,7 +429,7 @@ async function runHost(opts, out, prepared = null) {
   }
   const cn = ctxNote(rn, opts.model, opts.ctx);
   if (cn) out.log(`--ctx ${opts.ctx}: ${cn}`);
-  const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, ramGB: ram?.gb || 0, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
+  const node = await rn.createRoom({ model: opts.model, pledgeGB: rule.gb, ramGB: ram?.gb || 0, mem, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: opts.modelDir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log: (m) => out.log(m), split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   const code = node.code;
   // the invite link: its #k= key lets a device in without asking (a room node from before the gate has none)
