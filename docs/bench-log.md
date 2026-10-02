@@ -1735,3 +1735,69 @@ f0537158 / 5d287854, default re-baselined to 4612ece1 / aeb06a4d (the wide prefi
 `test_moe` MATCH llama.cpp x3 + spec == plain, `test_dense_spec` PASS, `test_prefill_opts` 27B PASS (relDiff
 1.44e-4). `test_prefill_opts` MoE fails at 700 tokens (relDiff 2.45e-2 vs 0.02 tolerance) on main too, same number:
 pre-existing, not from this branch.
+
+## 2026-10-02: DP4a accuracy evaluation, pre-registered (branch perf/dp4a-eval, PR #309): dp4a becomes the dense default on NVIDIA
+
+#302 left the dp4a wide prefill opt-in because it failed a max-|Δ logprob| gate over llama.cpp's top 20 (0.951 vs 0.260
+nats at 2100 tokens on the 27B), a metric set by a few tail tokens at logprob -13..-17. This run asks what a user would
+see instead. The rule was written in the PR description and in `tests/eval_dp4a.js` and pushed (commit 1, PR opened as a
+draft) before anything was measured, and was not changed afterwards.
+
+Setup: `tests/eval_dp4a.js`, 15 frozen prompts (`tests/golden/dp4a_eval_prompts.json`, chat template, thinking off):
+short (< 64 tokens: English chat, code, Chinese, French, Japanese; under the wide GEMM's 64-column tile, so a control),
+mid (238-361 tokens: multi-turn trip plan, email rewrite, Chinese translation), 2K (code, prose), 8K (code, prose).
+Reference: CPU `llama-server` (build 749f688, `-t 8`/`-t 10`, n_probs 20), greedy 256 tokens per prompt on the same ids;
+ours is teacher-forced on llama.cpp's tokens so all 256 positions compare (goldens in
+`tests/golden/dp4a_eval_{27b,2b}_llama.json`). "f32" = the f32 wide GEMM, the dense default until now. Models: every dense
+model with the dp4a path (`qwen35` architecture): 27B (q38) and Qwen3.5-2B (q35-2b). The Qwen3 1.7B / 4B run on
+`DenseEngine`, which has no wide or dp4a prefill, so the flag cannot change them.
+
+Rule (per model, both must pass; positions = mid + 2K + 8K, 1792 per model): R1 mean KL(llama ‖ ours) over llama's top 20
+(renormalized) dp4a <= 2x f32; R2 top-1 agreement (our argmax == llama.cpp's greedy token) f32 - dp4a <= 0.5 pt; R3 per
+bucket KL dp4a <= max(3x f32, f32 + 0.01 nats); R4 downstream (40 items scored exactly: 20 lookups in an 80-row table at
+~2.3K tokens, 10 word problems 3-shot, 10 "what does this Python print" 4-shot) correct_f32 - correct_dp4a <=
+max(2, 1.96 sqrt(b + c)).
+
+| 27B, GB10, Deno | KL f32 | KL dp4a | top-1 f32 | top-1 dp4a | top-5 overlap f32 / dp4a | greedy == llama.cpp (mean tokens of 256) f32 / dp4a | KL(f32 ‖ dp4a) | top-1 dp4a == f32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| short (control, 8) | 0.00039 | 0.00039 | 99.27% | 99.27% | 98.43 / 98.40% | 95.6 / 95.6 | 0.00001 | 100.00% |
+| mid (3) | 0.00040 | 0.00041 | 98.57% | 98.44% | 98.57 / 98.67% | 86.3 / 66.0 | 0.00003 | 99.87% |
+| 2K (2) | 0.00050 | 0.00047 | 98.63% | 98.83% | 98.48 / 98.59% | 129.5 / 114.0 | 0.00015 | 99.41% |
+| 8K (2) | 0.00049 | 0.00053 | 99.61% | 99.80% | 98.40 / 98.71% | 152.5 / 240.0 | 0.00021 | 99.80% |
+| **gated (mid+2K+8K)** | **0.00045** | **0.00046** | **98.88%** | **98.94%** | 98.49 / 98.66% | 117.6 / 129.4 | 0.00012 | 99.72% |
+
+| Qwen3.5-2B, GB10, Deno | KL f32 | KL dp4a | top-1 f32 | top-1 dp4a | top-5 overlap f32 / dp4a | greedy == llama.cpp f32 / dp4a | KL(f32 ‖ dp4a) | top-1 dp4a == f32 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| short (control, 8) | 0.00084 | 0.00085 | 98.34% | 98.44% | 98.13 / 98.15% | 74.9 / 76.5 | 0.00000 | 99.90% |
+| mid (3) | 0.00080 | 0.00083 | 97.27% | 97.27% | 98.10 / 98.05% | 60.3 / 99.3 | 0.00012 | 99.48% |
+| 2K (2) | 0.00093 | 0.00100 | 97.66% | 97.85% | 98.32 / 98.40% | 10.0 / 31.5 | 0.00028 | 98.83% |
+| 8K (2) | 0.00095 | 0.00098 | 97.46% | 97.85% | 98.05 / 97.89% | 53.0 / 75.5 | 0.00022 | 99.22% |
+| **gated (mid+2K+8K)** | **0.00088** | **0.00092** | **97.43%** | **97.60%** | 98.15 / 98.10% | 43.9 / 73.1 | 0.00019 | 99.22% |
+
+Downstream (correct of 40; lookup / math / code): 27B llama.cpp LLAMA27B, f32 33 (20 / 10 / 3), dp4a 33 (20 / 10 / 3);
+2B llama.cpp 26 (17 / 9 / 0), f32 27 (18 / 9 / 0), dp4a 27 (18 / 9 / 0). f32 and dp4a got exactly the same items right
+on both models (b = c = 0).
+
+Verdict: **PASS on both models, all four rules.** 27B: R1 0.00046 <= 2 x 0.00045; R2 -0.06 pt (dp4a higher); R3 mid
+0.00041, 2K 0.00047, 8K 0.00053 (3x f32 would also pass); R4 33 vs 33. 2B: R1 0.00092 <= 2 x 0.00088; R2 -0.17 pt; R3
+0.00083 / 0.00100 / 0.00098; R4 27 vs 27. So `DP4A_DEFAULT.dense = true` (NVIDIA only via `dp4aAutoDevice`, never Apple;
+the compile fallback that turns dp4a off when its kernels do not build, e.g. FXC, is unchanged; MoE stays opt-in).
+
+Notes. The KL divergence dp4a adds against f32 (0.0001-0.0003 nats) is several times smaller than the gap both have to
+llama.cpp (0.0004-0.0010): dp4a moves the distribution less than the f32 path already differs from the reference.
+Greedy agreement is noisy (one near-tie flips the rest of a run) and is reported, not gated: dp4a stays on llama.cpp's
+path longer on average for both models, as expected from the same Q8 activation numerics llama.cpp uses on CPU and GPU.
+The short bucket is identical between modes except `code-sql` (65 tokens with the template, so 64 of them go through the
+wide GEMM). top-1 counts our argmax against llama.cpp's sampled token; with `ignore_eos` llama.cpp samples the runner-up
+where `<|im_end|>` is its argmax (2B mid-email: 8 positions), so a second column, our argmax vs llama.cpp's argmax, is in
+the script output (27B gated 99.16 / 99.22%, 2B 98.16 / 98.33%). #302's metric is still printed by
+`tests/test_prefill_dp4a.js` (now reported, not gated): 2100 tokens 0.2599 / 0.2599 / 0.9510, same as #302; on this set
+the first position's max |Δ logprob| on the 27B's 2K / 8K prompts is 0.174-0.337 for dp4a against 0.182-0.316 for f32, so the
+2100-token number is one position's tail, not a trend.
+Prefill in the eval (27B, Deno, includes the first logits): 2K 19.7-20.0 s f32 vs 10.7-10.9 s dp4a, 8K 82.2 / 82.5 s vs
+46.0 / 46.7 s.
+
+Gates: `test_q38_bits` default re-baselined to **4dc814b1 / 4f075117** (dp4a; same greedy and spec tokens),
+`PREFILL_DP4A=0` 4612ece1 / aeb06a4d (= the f32 default before), `PREFILL_UBATCH=0` c26dbc5 / 3177f9f1 (unchanged);
+`test_prefill_dp4a` 27B PASS (argmax, 32 greedy tokens == llama.cpp and narrow at 150 / 700 / 2100, spec == plain);
+unit 968 pass; `npm run check`; `tests/run.sh q38once` PASS (9 checks incl. MTP spec, split, twins, ctx).
