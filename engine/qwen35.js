@@ -15,7 +15,7 @@ import { WGSL2 } from "./wgsl/qwen35.js";
 import { moeWGSL, moeFusedWGSL, moeKernelConfig, moeFusedLayout, normRouterKernel } from "./wgsl/moe.js";
 import { attnTileWGSL, attnTileConfig } from "./wgsl/attn_tile.js";
 import { attnDecWGSL, attnDecCombineGWSL, attnDecConfig, decSplits, DEC_CQ } from "./wgsl/attn_dec.js";
-import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows } from "./wgsl/moe_group.js";
+import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows, dp4aGroupWGSL } from "./wgsl/moe_group.js";
 import { f16ToF32, f32ToF16 } from "./gguf.js";
 import { TOPK_MAX, topkK, readCands } from "./topk.js";
 
@@ -67,8 +67,10 @@ export const WIDE_SUBMIT_LAYERS = 8;
 // docs/bench-log.md 2026-10-02, PR #309): 27B and Qwen3.5-2B, 256 teacher-forced tokens on 15 prompts up to 8K tokens,
 // KL(llama.cpp || ours) over its top 20 within 2x of the f32 path's (27B 0.00046 vs 0.00045 nats), top-1 agreement
 // with llama.cpp no lower (98.94% vs 98.88%), and 40 scored downstream items identical (33/33, 2B 27/27).
-// MoE: opt-in (+8-10% there, relDiff over the MoE prefill tolerance; not evaluated).
-export const DP4A_DEFAULT = Object.freeze({ dense: true, moe: false });
+// MoE: on, together with the dp4a expert kernels (moeGroupDp4a, which follows DP4A_DEFAULT.moe): passed the same
+// pre-registered evaluation on the 35B-A3B (tests/eval_dp4a.js MODEL=moe, docs/bench-log.md 2026-10-02 "MoE prefill"):
+// KL(llama.cpp || ours) 0.00270 vs the f32 path's 0.00255 nats, top-1 98.10% vs 98.21%, downstream 36 / 36 both.
+export const DP4A_DEFAULT = Object.freeze({ dense: true, moe: true });
 // Devices where "auto" turns dp4a on: measured faster there (docs/bench-log.md, 2026-09-30). NVIDIA by the adapter's
 // vendor (Chrome); Deno reports no vendor, so there: any OS but macOS (the GB10 is where it was measured). Never Apple:
 // Metal has no native int8 dot product. Other vendors stay opt-in until measured.
@@ -199,7 +201,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, moeGroupDp4a, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -531,6 +533,20 @@ export class Qwen35Engine {
     }
     this.prefillDp4a = !!this.dp4aCfg;
 
+    // moeGroupDp4a: the expert-grouped prefill's expert kernels as int8 dot products (engine/wgsl/moe_group.js
+    // dp4aGroupKernel: the chunk's activations quantized per 32 values, llama.cpp's MMQ numerics) instead of the f32
+    // tiled kernels. Needs the tiled grouped prefill (moeGroupTiled) and dot4I8Packed; default (undefined / "auto"):
+    // DP4A_DEFAULT.moe on the devices dp4aAutoDevice() accepts. engine.moeGroupDp4a = false switches it off at runtime.
+    this.moeDp4a = false;
+    {
+      const auto = moeGroupDp4a === undefined || moeGroupDp4a === "auto";
+      if (this.moeGrpU && this.moeGrpTiled && (auto ? DP4A_DEFAULT.moe && dp4aAutoDevice(dpInfo) : !!moeGroupDp4a)) {
+        const why = /apple/i.test(dpInfo?.vendor || "") ? "Apple GPUs emulate dp4a" : !(await probeDp4a(device)) ? "no packed_4x8_integer_dot_product on this device" : "";
+        if (why) { if (!auto) console.warn(`moeGroupDp4a: off (${why})`); } else this.moeDp4a = true;
+      } else if (!auto && moeGroupDp4a) console.warn("moeGroupDp4a: off (needs the tiled expert-grouped prefill)");
+    }
+    this.moeGroupDp4a = this.moeDp4a;
+
     // prefill GEMM operand precision (see PREFILL_MATH above). _pmAvail: the modes built for this
     // engine; engine.prefillMath can be switched at runtime among them (A/B), anything else runs f32.
     let pm = prefillMath ?? envPrefillMath() ?? "f32";
@@ -549,6 +565,8 @@ export class Qwen35Engine {
       + (this.dnNba ? normRouterKernel({ ROWS: 4, bf16: false, name: "dn_nba", P: "nba", struct: !(this.moeFuse && this.moe.nrt) }) : "")
       + (this.moeFuse ? moeFusedWGSL({ K: this.moe.K, R: this.moe.R, layout: this.moe.layout, nrt: this.moe.nrt, gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && this.moeGrpTiled ? tiledGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
+        gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
+      + (this.moeDp4a ? dp4aGroupWGSL({ K: this.moe.K, UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp, sort: false,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
       + (this.moeGrpU && !this.moeGrpTiled ? moeGroupWGSL({ K: this.moe.K, R: dnGroupRows(this.moeGrpUC), UC: this.moeGrpUC, U: this.moeGrpU, nExp: this.moe.nExp,
         gu: this.moe.guPairs.map((p) => p.split("_")), dn: this.moe.dnPairs.map((p) => p.split("_")) }) : "")
@@ -610,7 +628,7 @@ export class Qwen35Engine {
     // layerFuse's kernels: only the flags on at create, and optional (see the layerFuse note above)
     const lfOf = new Map();
     for (const [k, names] of Object.entries(LF_PIPES)) for (const n of names) { if (this.layerFuse[k]) lfOf.set(n, k); else delete G1[n]; }
-    const lfFails = [], dpFails = [];
+    const lfFails = [], dpFails = [], mdpFails = [];
     if (this.moe) Object.assign(G1, {
       moe_router: ["ro", "rw", "rw", "u"], moe_combine: ["rw", "ro", "ro", "ro", "ro", "u"],
       moe_gu_q4: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"], moe_gu_q8: ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "u"],
@@ -628,6 +646,12 @@ export class Qwen35Engine {
       G1.moe_combw = ["rw", "ro", "ro", "u"];
       for (const p of this.moe.guPairs) G1["moe_gusg_" + p] = ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "ro", "u"];
       for (const p of this.moe.dnPairs) G1["moe_dng_" + p] = ["ro", "ro", "ro", "rw", "ro", "ro", "ro", "u"];
+    }
+    const mdpPipes = this.moeDp4a ? ["moe_qx", ...this.moe.guPairs.map((p) => "moe_gusq_" + p), ...this.moe.dnPairs.map((p) => "moe_dnq_" + p)] : [];
+    if (this.moeDp4a) {
+      G1.moe_qx = ["ro", "rw", "u"];
+      for (const p of this.moe.guPairs) G1["moe_gusq_" + p] = ["ro", "ro", "ro", "ro", "ro", "rw", "ro", "ro", "u"];
+      for (const p of this.moe.dnPairs) G1["moe_dnq_" + p] = ["ro", "ro", "ro", "rw", "ro", "ro", "ro", "u"];
     }
     // narrower twins: a verify or tail pass with w live columns pays for w, not batchCols
     for (const W of [8, 4]) if (batchCols > W) Object.assign(G1, {
@@ -670,6 +694,10 @@ export class Qwen35Engine {
         try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { dpFails.push(e); }
         return;
       }
+      if (mdpPipes.includes(name)) {   // optional: a compiler that rejects them leaves the f32 tiled expert kernels
+        try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { mdpFails.push(e); }
+        return;
+      }
       if (!lfOf.has(name)) { this.pipes[name] = await compilePipeline(device, desc); return; }
       try { this.pipes[name] = await compilePipeline(device, desc); } catch (e) { lfFails.push(e); }
     }));
@@ -677,6 +705,11 @@ export class Qwen35Engine {
       for (const n of DP4A_PIPES) delete this.pipes[n];
       this.dp4aCfg = null; this.prefillDp4a = false;
       console.warn(`prefillDp4a off: ${dpFails.map((e) => e.message).join("; ")}`);
+    }
+    if (mdpFails.length) {
+      for (const n of mdpPipes) delete this.pipes[n];
+      this.moeDp4a = false; this.moeGroupDp4a = false;
+      console.warn(`moeGroupDp4a off: ${mdpFails.map((e) => e.message).join("; ")}`);
     }
     if (lfFails.length) {   // the unfused kernels compiled (or the load would have failed above): run those
       for (const n of lfOf.keys()) delete this.pipes[n];
@@ -906,6 +939,7 @@ export class Qwen35Engine {
         R.ffnDown = up(L.shDown);
         R.gusPipe = `moe_gus_${R.expGate.kind}_${L.shGate.kind}`; R.dncPipe = `moe_dnc_${R.expDown.kind}_${R.ffnDown.kind}`;
         R.gusgPipe = R.gusPipe.replace("moe_gus_", "moe_gusg_"); R.dngPipe = R.dncPipe.replace("moe_dnc_", "moe_dng_");
+        R.gusqPipe = R.gusPipe.replace("moe_gus_", "moe_gusq_"); R.dnqPipe = R.dncPipe.replace("moe_dnc_", "moe_dnq_");
         R.moeU = (xs, dOut, dIn, ys, pk) => [dOut, dIn, sDim, nExp, xs, ys, norm, 1, pk ? pk.oUq : 0, pk ? pk.oGs : 0, pk ? pk.oUs : 0, 0];
         const U = (a) => this._buf(new Uint32Array(a), GPUBufferUsage.UNIFORM);
         if (nrt) R.bgNrt = this._bg(this.pipes.moe_nrt, 1, [this.x, R.postNorm.buf, R.router.buf, this.xn, MB.logits, U([dim, nExp + 1, dim, nExp + 1, dim, 0, 0, 0])]);
@@ -1877,6 +1911,12 @@ export class Qwen35Engine {
       gB.bgSort = this._bg2res(this.pipes.moe_gsort, [{ buffer: gB.sel }, { buffer: gB.grp }, { buffer: gB.ind }, { buffer: gB.sortU }]);
       gB.bgComb = this._bg2res(this.pipes.moe_combw, [{ buffer: gB.XW }, { buffer: gB.Y }, { buffer: gB.selw },
         u32([D.dim, 0, 0, nExp, B.x.stride / 4, 0, 0, 0, 0, 0, 0, 0])]);
+      if (this.moeDp4a) {   // the quantized expert inputs: packed i8 blocks, then their f32 scales (moe_qx)
+        gB.XQ = nb(U * D.dim * 9 / 8); gB.HQ = nb(U * KS * hs * 9 / 8);
+        gB.bgQx = this._bg2res(this.pipes.moe_qx, [{ buffer: gB.XNW }, { buffer: gB.XQ }, u32([D.dim, B.xn.stride / 16, U * D.dim / 4, 0])]);
+        // h is compact (pair stride hs): quantized as one flat column of U * KS * hs values, so every workgroup is full
+        gB.bgQh = this._bg2res(this.pipes.moe_qx, [{ buffer: gB.H }, { buffer: gB.HQ }, u32([U * KS * hs, 0, U * KS * hs / 4, 0])]);
+      }
     }
     if (this.flash) this.faUB = this._buf(new Uint32Array([B.q.stride / 4, B.attnOut.stride / 4, this.faSplit, this.faSplits]), GPUBufferUsage.UNIFORM);
     if (this.adCfg) this.adUB = this._buf(new Uint32Array([B.q.stride / 4, B.attnOut.stride / 4, this.adCfg.S, this.adCfg.S]), GPUBufferUsage.UNIFORM);
@@ -1984,6 +2024,12 @@ export class Qwen35Engine {
             { buffer: gB.XNW }, { buffer: gB.H }, { buffer: gB.grp }, { buffer: L.shPack.buf }, U(L.moeU(st(B.xn), ei, D.dim, hs, L.shPack))]);
           mc.dngG = this._bg2res(this.pipes[L.dngPipe], [{ buffer: L.expDown.qs }, { buffer: L.expDown.sc }, { buffer: gB.H }, { buffer: gB.Y },
             { buffer: gB.grp }, { buffer: L.ffnDown.qs }, { buffer: L.ffnDown.sc }, U(L.moeU(st(B.x), D.dim, ei, hs))]);
+          if (this.moeDp4a) {
+            mc.gusQ = this._bg2res(this.pipes[L.gusqPipe], [{ buffer: L.expGate.qs }, { buffer: L.expGate.sc }, { buffer: L.expUp.qs }, { buffer: L.expUp.sc },
+              { buffer: gB.XQ }, { buffer: gB.H }, { buffer: gB.grp }, { buffer: L.shPack.buf }, U(L.moeU(st(B.xn), ei, D.dim, hs, L.shPack))]);
+            mc.dnQ = this._bg2res(this.pipes[L.dnqPipe], [{ buffer: L.expDown.qs }, { buffer: L.expDown.sc }, { buffer: gB.HQ }, { buffer: gB.Y },
+              { buffer: gB.grp }, { buffer: L.ffnDown.qs }, { buffer: L.ffnDown.sc }, U(L.moeU(st(B.x), D.dim, ei, hs))]);
+          }
         }
       } else if (L.moe) {
         const { nExp, K, inter: ei, norm } = this.moe;
@@ -3312,8 +3358,7 @@ export class Qwen35Engine {
         if (grp) {
           const M = this.layerB[l].mc, p = enc.beginComputePass();
           this._dxyz(p, "moe_gsort", gB.bgSort, 1, 1, 1);
-          this._dInd(p, L.gusgPipe, M.gusG, gB.ind, 0);
-          this._dInd(p, L.dngPipe, M.dngG, gB.ind, 12);
+          this._encGroupExperts(p, L, M, W);
           this._dxyz(p, "moe_combw", gB.bgComb, Math.ceil(D.dim / 64), W, 1);
           p.end();
         }

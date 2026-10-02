@@ -31,6 +31,8 @@ if (envGet("ATTN_PREFILL_TILE")) Qwen35Engine.defaults.attnPrefillTile = envGet(
 if (envGet("ATTN_PREFILL_TK")) Qwen35Engine.defaults.attnPrefillTK = +envGet("ATTN_PREFILL_TK");
 if (envGet("ATTN_PREFILL_SPLITS")) Qwen35Engine.defaults.attnPrefillSplits = +envGet("ATTN_PREFILL_SPLITS");
 if (envGet("PREFILL_DP4A")) Qwen35Engine.defaults.prefillDp4a = envGet("PREFILL_DP4A") !== "0";
+// MOE_DP4A=0|1: the MoE's dp4a expert kernels (engine option moeGroupDp4a) off / on for every test
+if (envGet("MOE_DP4A")) Qwen35Engine.defaults.moeGroupDp4a = envGet("MOE_DP4A") !== "0";
 // PREFILL_UBATCH=N (0: off) for every test, including those that do not spread wideOpts() (e.g. test_q38_bits.js)
 if (envGet("PREFILL_UBATCH")) Qwen35Engine.defaults.prefillUbatch = +envGet("PREFILL_UBATCH");
 if (envGet("ATTN_DECODE")) Qwen35Engine.defaults.attnDecode = envGet("ATTN_DECODE");
