@@ -1,15 +1,33 @@
 // WGSL for the hybrid Qwen 3.5/3.8 engine: Gated-DeltaNet recurrence (single and
 // multi-column, with speculative snapshot slots), gated attention glue, fused pre-pass,
 // and the logits argmax. Base kernels come from ./base.js; GEMVs from ./coop.js.
+// The one-token DeltaNet column update (thread j owns state column j of its value head) as two sweeps over
+// the state in global memory instead of 128 registers: sweep 1 loads the column in chunks of B rows and runs the
+// three dot-product chains (vh, sq, kq), sweep 2 loads it again, decays it and adds k * d. Every value goes through
+// the same expressions in the same order as the register version (sd = s * decay; the chains add in row order;
+// s' = sd + k * d), so the state and the output are bit-identical. The register version wrote 128 loads as one
+// straight line, which the GB10 (Vulkan) runs nearly serially: 39 us for the 32 heads in isolation against 14 us
+// for two chunked sweeps (the second reads hit L2). Uses `decay`, `d` and declared vh / sq / kq.
+export function dnTwoPass(S, K, Q, Sb = "Sb", j = "j", B = 16) {
+  const r = Array.from({ length: B }, (_, x) => x);
+  const ld = r.map((x) => `let a${x} = ${S}[${Sb} + (i + ${x}u) * 128u + ${j}];`).join(" ");
+  return {
+    pass1: `for (var i: u32 = 0u; i < 128u; i += ${B}u) {
+    ${ld}
+    ${r.map((x) => `{ let sd = a${x} * decay; vh += sd * ${K}[i + ${x}u]; sq += sd * ${Q}[i + ${x}u]; kq += ${K}[i + ${x}u] * ${Q}[i + ${x}u]; }`).join("\n    ")}
+  }`,
+    pass2: `for (var i: u32 = 0u; i < 128u; i += ${B}u) {
+    ${ld}
+    ${r.map((x) => `{ let sd = a${x} * decay; ${S}[${Sb} + (i + ${x}u) * 128u + ${j}] = sd + ${K}[i + ${x}u] * d; }`).join("\n    ")}
+  }`,
+  };
+}
+
 // Register-resident single-token dn_delta (decode): the same transform as dn_delta_mc below, for
 // the one-column bindings. Same operations in the same order as the kernel it replaces, so the
 // state and output are bit-identical. Requires dState = 128.
 function dnDelta1RegsWGSL() {
-  const rows = Array.from({ length: 128 }, (_, i) => i);
-  const load = rows.map((i) => `s[${i}u] = dl_s[Sb + ${i * 128}u + j];`).join(" ");
-  const store = rows.map((i) => `dl_s[Sb + ${i * 128}u + j] = s[${i}u];`).join(" ");
-  const loop1 = rows.map((i) => `{ let sd = s[${i}u] * decay; s[${i}u] = sd; vh += sd * dl1_k[${i}u]; sq += sd * dl1_q[${i}u]; kq += dl1_k[${i}u] * dl1_q[${i}u]; }`).join("\n  ");
-  const loop2 = rows.map((i) => `s[${i}u] += dl1_k[${i}u] * d;`).join(" ");
+  const tp = dnTwoPass("dl_s", "dl1_k", "dl1_q");
   return `
 var<workgroup> dl1_k: array<f32, 128>;
 var<workgroup> dl1_q: array<f32, 128>;
@@ -21,15 +39,12 @@ fn dn_delta(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
   let decay = dl_decay[h];
   let scale = inverseSqrt(f32(dl_dn.dState));
   dl1_k[j] = dl_k[kOff + j]; dl1_q[j] = dl_q[kOff + j];
-  var s: array<f32, 128>;
-  ${load}
   workgroupBarrier();
   var vh: f32 = 0.0; var sq: f32 = 0.0; var kq: f32 = 0.0;
-  ${loop1}
+  ${tp.pass1}
   let d = (dl_v[vOff + j] - vh) * dl_beta[h];
-  ${loop2}
+  ${tp.pass2}
   dl_o[vOff + j] = (sq + d * kq) * scale;
-  ${store}
 }`;
 }
 
@@ -38,11 +53,7 @@ fn dn_delta(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
 // reduction, same expression) follows a barrier. Bit-identical to the two kernels; q/k/v are
 // read from the whole conv output (q | k | v), so the kernel fits in 7 storage bindings.
 function dnDeltaGnWGSL() {
-  const rows = Array.from({ length: 128 }, (_, i) => i);
-  const load = rows.map((i) => `s[${i}u] = dg_s[Sb + ${i * 128}u + j];`).join(" ");
-  const store = rows.map((i) => `dg_s[Sb + ${i * 128}u + j] = s[${i}u];`).join(" ");
-  const loop1 = rows.map((i) => `{ let sd = s[${i}u] * decay; s[${i}u] = sd; vh += sd * dg1_k[${i}u]; sq += sd * dg1_q[${i}u]; kq += dg1_k[${i}u] * dg1_q[${i}u]; }`).join("\n  ");
-  const loop2 = rows.map((i) => `s[${i}u] += dg1_k[${i}u] * d;`).join(" ");
+  const tp = dnTwoPass("dg_s", "dg1_k", "dg1_q");
   return `
 @group(1) @binding(0) var<storage, read> dg_c: array<f32>;      // conv output [q | k | v]
 @group(1) @binding(1) var<storage, read> dg_beta: array<f32>;
@@ -63,15 +74,12 @@ fn dn_delta_gn(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_i
   let decay = dg_decay[h];
   let scale = inverseSqrt(f32(dg_dn.dState));
   dg1_k[j] = dg_c[dg_dn.keyDim + kOff + j]; dg1_q[j] = dg_c[kOff + j];
-  var s: array<f32, 128>;
-  ${load}
   workgroupBarrier();
   var vh: f32 = 0.0; var sq: f32 = 0.0; var kq: f32 = 0.0;
-  ${loop1}
+  ${tp.pass1}
   let d = (dg_c[2u * dg_dn.keyDim + vOff + j] - vh) * dg_beta[h];
-  ${loop2}
+  ${tp.pass2}
   let o = (sq + d * kq) * scale;
-  ${store}
   dg_partial[j] = o * o;
   workgroupBarrier();
   var stride: u32 = 64u;
@@ -751,11 +759,27 @@ fn dn_pre(@builtin(local_invocation_id) lid: vec3<u32>) {
 @group(1) @binding(6) var<storage, read_write> ppm_v: array<f32>;
 @group(1) @binding(7) var<uniform> ppm_mc: MC;          // s0 = gate column stride, s1 = conv-out column stride
 @group(1) @binding(8) var<uniform> ppm_dn: DN;
+// the same in-order sum and the same products, with the loads issued 16 at a time: one dependent load per element
+// left the 32 norm threads of a column latency bound (dn_pre_mc 39.8 -> 29.7 us per layer per verify pass on the GB10)
 fn ppm_l2(off: u32) {
   var ss: f32 = 0.0;
-  for (var i: u32 = 0u; i < ppm_dn.dState; i++) { let v = ppm_v[off + i]; ss += v * v; }
+  if (ppm_dn.dState % 16u == 0u) {
+    for (var i: u32 = 0u; i < ppm_dn.dState; i += 16u) {
+      let v0 = ppm_v[off + i + 0u]; let v1 = ppm_v[off + i + 1u]; let v2 = ppm_v[off + i + 2u]; let v3 = ppm_v[off + i + 3u]; let v4 = ppm_v[off + i + 4u]; let v5 = ppm_v[off + i + 5u]; let v6 = ppm_v[off + i + 6u]; let v7 = ppm_v[off + i + 7u]; let v8 = ppm_v[off + i + 8u]; let v9 = ppm_v[off + i + 9u]; let v10 = ppm_v[off + i + 10u]; let v11 = ppm_v[off + i + 11u]; let v12 = ppm_v[off + i + 12u]; let v13 = ppm_v[off + i + 13u]; let v14 = ppm_v[off + i + 14u]; let v15 = ppm_v[off + i + 15u];
+      ss += v0 * v0; ss += v1 * v1; ss += v2 * v2; ss += v3 * v3; ss += v4 * v4; ss += v5 * v5; ss += v6 * v6; ss += v7 * v7; ss += v8 * v8; ss += v9 * v9; ss += v10 * v10; ss += v11 * v11; ss += v12 * v12; ss += v13 * v13; ss += v14 * v14; ss += v15 * v15;
+    }
+  } else {
+    for (var i: u32 = 0u; i < ppm_dn.dState; i++) { let v = ppm_v[off + i]; ss += v * v; }
+  }
   let inv = 1.0 / max(sqrt(ss), ppm_dn.eps2);
-  for (var i: u32 = 0u; i < ppm_dn.dState; i++) { ppm_v[off + i] *= inv; }
+  if (ppm_dn.dState % 16u == 0u) {
+    for (var i: u32 = 0u; i < ppm_dn.dState; i += 16u) {
+      let v0 = ppm_v[off + i + 0u]; let v1 = ppm_v[off + i + 1u]; let v2 = ppm_v[off + i + 2u]; let v3 = ppm_v[off + i + 3u]; let v4 = ppm_v[off + i + 4u]; let v5 = ppm_v[off + i + 5u]; let v6 = ppm_v[off + i + 6u]; let v7 = ppm_v[off + i + 7u]; let v8 = ppm_v[off + i + 8u]; let v9 = ppm_v[off + i + 9u]; let v10 = ppm_v[off + i + 10u]; let v11 = ppm_v[off + i + 11u]; let v12 = ppm_v[off + i + 12u]; let v13 = ppm_v[off + i + 13u]; let v14 = ppm_v[off + i + 14u]; let v15 = ppm_v[off + i + 15u];
+      ppm_v[off + i + 0u] = v0 * inv; ppm_v[off + i + 1u] = v1 * inv; ppm_v[off + i + 2u] = v2 * inv; ppm_v[off + i + 3u] = v3 * inv; ppm_v[off + i + 4u] = v4 * inv; ppm_v[off + i + 5u] = v5 * inv; ppm_v[off + i + 6u] = v6 * inv; ppm_v[off + i + 7u] = v7 * inv; ppm_v[off + i + 8u] = v8 * inv; ppm_v[off + i + 9u] = v9 * inv; ppm_v[off + i + 10u] = v10 * inv; ppm_v[off + i + 11u] = v11 * inv; ppm_v[off + i + 12u] = v12 * inv; ppm_v[off + i + 13u] = v13 * inv; ppm_v[off + i + 14u] = v14 * inv; ppm_v[off + i + 15u] = v15 * inv;
+    }
+  } else {
+    for (var i: u32 = 0u; i < ppm_dn.dState; i++) { ppm_v[off + i] *= inv; }
+  }
 }
 @compute @workgroup_size(128)
 fn dn_pre_mc(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
