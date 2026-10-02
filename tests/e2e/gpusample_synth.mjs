@@ -66,6 +66,18 @@ for (const [label, opts] of [["dense", {}], ["moe", { moe: SYNTH_MOE }]]) {
   t = await start(eng, true); const plainIds = [t];
   for (let i = 1; i < N; i++) { t = (await eng.forwardTokenIds(t)).ids[0]; plainIds.push(t); }
   check(`${label}: forwardTokenIds greedy == forwardToken + argmax (${N} tokens)`, plainIds.join() === plain.join());
+  // decode-ahead (forwardTokenIds queues the next token on its top-1): a token that is not the top-1, and another
+  // engine call while a step is queued, must give exactly what the engine gives with decodeAhead off
+  const off = async (feed) => {   // feed(i, top1) -> the token to feed at step i
+    const lg = [], ids = [];
+    let c = await start(eng, true); ids.push(c.ids ? c.ids[0] : c);
+    for (let i = 1; i < N; i++) { const f = feed(i, ids.at(-1)); const r = await eng.forwardTokenIds(f); ids.push(r.ids[0]); lg.push(r.vals[0]); if (i === 12) { const x = await eng.forwardToken(ids.at(-1)); lg.push(argmax(x)); eng.pos--; } }
+    return ids.join() + "|" + lg.join();
+  };
+  const feed = (i, top) => (i % 5 === 3 ? (top + 7) % 90 + 33 : top);
+  eng.decodeAhead = false; const refA = await off(feed);
+  eng.decodeAhead = true; const gotA = await off(feed);
+  check(`${label}: decode-ahead == off with off-top-1 tokens and a forwardToken in between`, gotA === refA);
 
   // 3. speculative, several paths
   const spec = async (e, sample, o = {}) => {

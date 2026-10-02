@@ -28,6 +28,13 @@ const LF_PIPES = {
   norm: ["matvec_coop_n", "matvec_q8_coop_n", "matvec_q4_coop_n"],
 };
 
+// Every Qwen35Engine method that reads or writes the sequence state, other than forwardTokenIds: each first drops
+// a decode-ahead step forwardTokenIds may have queued (_settleAhead)
+const AHEAD_SETTLE = ["reset", "exportState", "exportSlot", "importState", "saveSlot", "loadSlot", "dropSlot", "stateSignature", "_readParts",
+  "forwardToken", "prefillTokens", "prefillToken", "prefillHidden", "embedRun", "runHidden", "headFromHidden", "headFromHiddenIds",
+  "embedRunBatch", "runHiddenBatch", "headBatch", "headBatchIds", "verifyN", "specStep", "specStepDrafts", "mtpRun", "headAhead",
+  "keepAhead", "dropAhead", "setHidden", "ffnOnly", "_readback", "moeGroupStats"];
+
 // Prefill GEMM operand precision (docs/research/prefill-f16-subgroup.md):
 //   "f32"      default: the row-stationary f32 GEMM (engine/wgsl/gemm.js), the pinned numerics
 //   "f16"      same kernels, weights and activations rounded to f16 on the way in (ALU, any device)
@@ -87,6 +94,8 @@ export class Qwen35Engine {
   static async create(opts) {
     const e = new Qwen35Engine();
     await e._init({ ...Qwen35Engine.defaults, ...opts });
+    // a decode-ahead step (forwardTokenIds) still queued is dropped before anything else touches the state
+    for (const m of AHEAD_SETTLE) if (typeof e[m] === "function") { const f = e[m]; e[m] = function (...a) { this._settleAhead(); return f.apply(this, a); }; }
     return e;
   }
 
@@ -2592,23 +2601,87 @@ export class Qwen35Engine {
     this.device.queue.submit([enc.finish()]);
     return await this._readTop(op);
   }
-  // forwardToken with the sampling on the GPU (see headFromHiddenIds); encode-ahead as forwardToken
+  // forwardToken with the sampling on the GPU (see headFromHiddenIds); encode-ahead as forwardToken.
+  // Decode-ahead (greedy, from the second call in a row on): token N + 1 is submitted right behind token N, its
+  // embedding gathered on the GPU from N's top-1 (emb_gather, bit-exact with _embedRowF32), so the GPU never waits
+  // for the readback, the JS and the next submit between tokens (~1.8 ms a MoE token in Chrome, ~12 ms in Deno).
+  // The step saves the recurrent state (DeltaNet S and conv window) and this.x first, in the same command buffer.
+  // The next call keeps it when its token is that top-1; any other token, and any other engine call
+  // (_settleAhead), puts the state back (the KV row it wrote is rewritten before anything reads it).
+  // Same kernels, same inputs: the same bits. engine.decodeAhead = false turns it off.
   async forwardTokenIds(tokenId, desc = { kind: "greedy" }) {
     this._pre = null;
-    this._setFrame(this.pos, this.pos + 1);
-    this.device.queue.writeBuffer(this.x, 0, this._embedRowF32(tokenId));
-    const pre = this._fwdPre;
-    this._fwdPre = null;
-    const job = pre && pre.pos === this.pos && pre.key === this._fwdKey(desc) ? pre : this._encodeForward(this.pos, desc);
-    this.device.queue.submit([job.cb]);
+    const A = this._ahead, key = this._fwdKey(desc);
+    this._ahead = null;
+    let job;
+    if (A && A.pos === this.pos && A.tok === tokenId && A.key === key) job = A.job;   // already queued
+    else {
+      if (A) this._dropAhead(A);
+      this._setFrame(this.pos, this.pos + 1);
+      this.device.queue.writeBuffer(this.x, 0, this._embedRowF32(tokenId));
+      const pre = this._fwdPre;
+      this._fwdPre = null;
+      job = pre && pre.pos === this.pos && pre.key === key ? pre : this._encodeForward(this.pos, desc);
+      this.device.queue.submit([job.cb]);
+    }
     const bytes = job.op.R * 4;
     const mapped = job.stage.mapAsync(GPUMapMode.READ, 0, bytes);
-    if (this.encodeAhead !== false && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1, desc);
+    let next = null;
+    if (this._fwdRun > 0 && this._canDecodeAhead(desc)) {
+      this._setFrame(this.pos + 1, this.pos + 2);
+      next = this._encodeForward(this.pos + 1, desc, true);
+      this.device.queue.submit([next.cb]);
+    } else if (this.encodeAhead !== false && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1, desc);
+    this._fwdRun = (this._fwdRun || 0) + 1;
     await mapped;
     const c = readCands(new Uint32Array(job.stage.getMappedRange(0, bytes)), 0, job.op.k);
     job.stage.unmap();
     this.pos++;
+    // the queued step gathered the top-1's embedding: kept only if that id is in the gather table
+    if (next) this._ahead = { pos: this.pos, tok: !c.bad && c.ids[0] < this._eg.rows ? c.ids[0] : -1, job: next, key };
     return c;
+  }
+  _canDecodeAhead(desc) {
+    return this.decodeAhead !== false && desc && desc.kind === "greedy" && topkK(desc) === 1 && !!this._eg && this.hasEmbed && this.hasHead
+      && this.flash && !!this.pipes.emb_gather && this.pos + 2 < this.maxSeq;
+  }
+  // buffers a step run ahead saves the recurrent state and this.x into (shared with headAhead: never both at once)
+  _aheadBufs() {
+    if (this._egX) return;
+    const dev = this.device, S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST, E = this._eg, dim = this.dims.dim;
+    for (const L of this.layers) if (!L.isFull) {
+      L.S_ahead = dev.createBuffer({ size: L.S.size, usage: S });
+      L.conv_ahead = dev.createBuffer({ size: L.convState.size, usage: S });
+    }
+    this.xAhead = dev.createBuffer({ size: dim * 4, usage: S });
+    this._egX = this._bg2(this.pipes.emb_gather, [{ buffer: E.qs }, { buffer: E.sc }, { buffer: this.topBuf, offset: 0, size: 16 },
+      { buffer: this.x, offset: 0, size: dim * 4 }, { buffer: E.u }]);
+  }
+  _saveAhead(enc, x = false) {
+    for (const L of this.layers) if (!L.isFull) {
+      enc.copyBufferToBuffer(L.S, 0, L.S_ahead, 0, L.S.size);
+      enc.copyBufferToBuffer(L.convState, 0, L.conv_ahead, 0, L.convState.size);
+    }
+    if (x) enc.copyBufferToBuffer(this.x, 0, this.xAhead, 0, this.dims.dim * 4);
+  }
+  _restoreAhead(x = false) {
+    const enc = this.device.createCommandEncoder();
+    for (const L of this.layers) if (!L.isFull) {
+      enc.copyBufferToBuffer(L.S_ahead, 0, L.S, 0, L.S.size);
+      enc.copyBufferToBuffer(L.conv_ahead, 0, L.convState, 0, L.convState.size);
+    }
+    if (x) enc.copyBufferToBuffer(this.xAhead, 0, this.x, 0, this.dims.dim * 4);
+    this.device.queue.submit([enc.finish()]);
+  }
+  // a queued decode-ahead step is not wanted: the state (and this.x) as they were before it
+  _dropAhead(A) { this._restoreAhead(true); this._fwdRun = 0; }
+  // every engine entry point but forwardTokenIds runs this first (see the wrappers in create)
+  _settleAhead() {
+    this._fwdRun = 0;
+    const A = this._ahead;
+    if (!A) return;
+    this._ahead = null;
+    this._dropAhead(A);
   }
   // headBatch with the sampling on the GPU: an array of n candidates objects
   async headBatchIds(hs, n = hs ? hs.length / this.dims.dim : this.NC, desc = { kind: "greedy" }) {
@@ -2880,13 +2953,7 @@ export class Qwen35Engine {
     this._pre = null;
     const { dim, vocab } = this.dims, dev = this.device;
     if (!this.stageAhead) {
-      const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST, E = this._eg;
-      for (const L of this.layers) if (!L.isFull) {
-        L.S_ahead = dev.createBuffer({ size: L.S.size, usage: S });
-        L.conv_ahead = dev.createBuffer({ size: L.convState.size, usage: S });
-      }
-      this._egX = this._bg2(this.pipes.emb_gather, [{ buffer: E.qs }, { buffer: E.sc }, { buffer: this.topBuf, offset: 0, size: 16 },
-        { buffer: this.x, offset: 0, size: dim * 4 }, { buffer: E.u }]);
+      this._aheadBufs();
       this.stageAhead = dev.createBuffer({ size: 16 + dim * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     }
     const op = this._tkOp("one", this.logits, vocab, 0, 1, this.topBuf);   // [idx, bits, bad, 0]
@@ -2906,10 +2973,7 @@ export class Qwen35Engine {
       this._d(p, "emb_gather", this._egX, dim);
       p.end();
     }
-    for (const L of this.layers) if (!L.isFull) {
-      enc.copyBufferToBuffer(L.S, 0, L.S_ahead, 0, L.S.size);
-      enc.copyBufferToBuffer(L.convState, 0, L.conv_ahead, 0, L.convState.size);
-    }
+    this._saveAhead(enc);
     for (let i = 0; i < this.layers.length; i++) this._encodeLayer(enc, i);
     enc.copyBufferToBuffer(this.topBuf, 0, this.stageAhead, 0, 16);
     enc.copyBufferToBuffer(this.x, 0, this.stageAhead, 16, dim * 4);
@@ -2927,12 +2991,7 @@ export class Qwen35Engine {
   dropAhead() {
     if (this._aheadAt == null) return;
     this._aheadAt = null;
-    const enc = this.device.createCommandEncoder();
-    for (const L of this.layers) if (!L.isFull) {
-      enc.copyBufferToBuffer(L.S_ahead, 0, L.S, 0, L.S.size);
-      enc.copyBufferToBuffer(L.conv_ahead, 0, L.convState, 0, L.convState.size);
-    }
-    this.device.queue.submit([enc.finish()]);
+    this._restoreAhead();
   }
   _canFuse(n, runTrunk) {   // solo verify that fits one batch pass
     if (this.specFuse === false || runTrunk || n > this.NC || !this.hasHead || !this.hasEmbed) return false;
@@ -3456,13 +3515,15 @@ export class Qwen35Engine {
   // path. Same commands, same bits. engine.encodeAhead = false for A/B.
   // desc: forwardTokenIds' GPU sampling descriptor (the head's top-k in the same buffer), null: logits
   _fwdKey(desc = null) { return [this.attnGlue, this.attnDecode, this.fuseProj, this.dnFuse, this.layerFuse.dn, this.layerFuse.conv, this.layerFuse.kv, this.layerFuse.comb, this.layerFuse.norm, this.layerFuse.pass, this.softmaxWG, this.b4, this.skip ? 1 : 0, this._common ? 1 : 0, desc ? topkK(desc) : 0].join(); }
-  _encodeForward(pos, desc = null) {
+  _encodeForward(pos, desc = null, ahead = false) {
     const { vocab } = this.dims;
     const enc = this.device.createCommandEncoder();
+    if (ahead) { this._aheadBufs(); this._saveAhead(enc, true); }   // decode-ahead: save the state, then gather x from the top-1
     // layerFuse.pass: the whole token (every layer and the head) in one compute pass instead of 2-3
     // per layer; dispatches stay in the same order (each dispatch is its own usage scope)
     const one = this.layerFuse.pass && this.flash;
     this._pp = one ? enc.beginComputePass() : null;
+    if (ahead) { const p = this._pp || enc.beginComputePass(); this._d(p, "emb_gather", this._egX, this.dims.dim); if (p !== this._pp) p.end(); }
     for (let i = 0; i < this.layers.length; i++) this._encodeLayerR(enc, this.layers[i], pos);
     if (desc) {
       const op = this._tkOp("one", this.logits, vocab, 0, topkK(desc), this.topBuf);
