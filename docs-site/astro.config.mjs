@@ -71,6 +71,7 @@ export default defineConfig({
 					items: [
 						'kits/first-chat',
 						'kits/two-devices',
+						'kits/home-wifi',
 						'kits/build-an-app',
 						'kits/coding-tools',
 						'kits/terminal',

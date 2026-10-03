@@ -27,6 +27,7 @@
     "bench:q38": "MODEL=q38 deno run --unstable-webgpu --allow-read --allow-env --allow-write=${WEIGHT_CACHE:-$HOME/.cache/swarmllm-weights} benchmarks/bench.js",
     "bench:breakdown": "deno run --unstable-webgpu --allow-read --allow-env benchmarks/bench_breakdown.js",
     "serve": "npx -y serve -l 8080 .",
+    "lan": "node scripts/lan.mjs",
     "deploy:staging": "scripts/deploy-staging.sh",
     "e2e": "node tests/e2e/room.mjs",
     "e2e:code": "node tests/e2e/harness_tetris.mjs",
