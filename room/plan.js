@@ -127,6 +127,32 @@ const offloadOn = (off) => !!off && off.expertBytes > 0 && (off.ram || []).some(
 //     one expert slice left at the end of each 1 GiB buffer (a slice never spans two), 256-byte alignment per
 //     segment, and the last buffer's 4 KiB of slack (ExpertStore._alloc). The deal holds this to the device's RAM.
 // Layers differ: the 35B's layers 0-4 and the 122B's 0-5 have Q4_1 down experts, which park as Q8 (25% more).
+//   spare(n): what a device that offloads n layers needs past them and its cache (offloadSpare); 0 with a number
+//
+// What else grows on a device that offloads. It holds its whole pledge (its layers' resident part, then the cache),
+// so anything the engine allocates past its layers went over the pledge: on the 122B room the RTX 5070 PC (10 GiB
+// pledged, layers 15-47 offloaded) reached 11.5 of its 12.2 GB of VRAM after a 12k-token prompt (prefill buffers,
+// speculation's rollback state, the prompt's checkpoints), and WDDM moved what did not fit into system RAM: the
+// process grew from 43 to 49-51 GB with 6.7-8 GB of the 63.5 GB left free. So the deal keeps room for it:
+//   vram: the engine's working buffers (profile work), each layer's rollback state for speculation (state) and the
+//     host's checkpoints: OFFLOAD_CKPT_SLOTS copies of every layer's recurrent state (state each, whatever the prompt's
+//     length) and the KV rows of OFFLOAD_CKPT_TOKENS positions across them (kvPos each), all out of the cache;
+//   ram: OFFLOAD_RAM_BASE (the process itself: JS, Dawn, upload staging) and one long checkpoint's copy (a pinned
+//     prefix goes to disk through RAM, packages/room-node/ckptdisk.js), on top of the parked experts, within what the
+//     device lends.
+// The 122B on that PC (33 layers): 2.0 GiB of VRAM (its cache 7.15 -> 5.17 GiB, 36 -> 23 experts per layer) and 1.9 GiB
+// of RAM kept. Replayed there with the deal's numbers (8 checkpoints, a 12k-token prompt): main's cache spilled 6 GB
+// into RAM (free 14.3 -> 8.4 GB) and decode slowed 23 -> 14.5 tok/s; with the spare VRAM peaked at 10.2 GiB, no spill.
+export const OFFLOAD_CKPT_SLOTS = 8;           // a room node host keeps 4 answer + 4 pinned checkpoints (ckpt.js CKPT_DEFAULTS)
+export const OFFLOAD_CKPT_TOKENS = 32768;      // their KV rows: a 16k-token agent prompt pinned, and its turn checkpoint
+export const OFFLOAD_RAM_BASE = 1.5 * 2 ** 30; // the PC's process past its parked experts: 1.6 GB
+function offloadSpare(p, n) {
+  if (!(p.work > 0)) return { vram: 0, ram: 0 };
+  const st = p.state || 0, kv = p.kvPos || 0;
+  return { vram: p.work + n * (st * (1 + OFFLOAD_CKPT_SLOTS) + kv * OFFLOAD_CKPT_TOKENS),
+    ram: OFFLOAD_RAM_BASE + n * (st + kv * OFFLOAD_CKPT_TOKENS / 2) };
+}
+export { offloadSpare as offloadSpareOf };
 const exCache = new WeakMap();
 function expertSizes(ex, nExp = OFFLOAD_EXPERTS) {
   if (ex && typeof ex === "object") {
@@ -136,7 +162,7 @@ function expertSizes(ex, nExp = OFFLOAD_EXPERTS) {
     const pre = [0]; sl.forEach((a, i) => { pre[i + 1] = pre[i] + a.reduce((x, y) => x + y, 0) * N; });
     const maxSlice = Math.max(0, ...sl.flat());
     const bad = (lo, hi) => !(lo >= 0 && hi <= L && hi >= lo);
-    X = { E: +ex.E || 0, nExp: N, L,
+    X = { E: +ex.E || 0, nExp: N, L, spare: (n) => offloadSpare(ex, n),
       ramOf: (park, m) => { const bufs = Math.ceil(park / 2 ** 30) + 1; return park + bufs * maxSlice + (6 * m + bufs) * 256 + 4096; },
       park: (lo, hi) => (bad(lo, hi) ? Infinity : pre[hi] - pre[lo]),
       region: (lo, hi) => {
@@ -149,7 +175,7 @@ function expertSizes(ex, nExp = OFFLOAD_EXPERTS) {
     return X;
   }
   const E = +ex || 0;
-  return { E, nExp, L: Infinity, ramOf: (park) => park, park: (lo, hi) => (hi - lo) * E, region: () => E };
+  return { E, nExp, L: Infinity, spare: () => ({ vram: 0, ram: 0 }), ramOf: (park) => park, park: (lo, hi) => (hi - lo) * E, region: () => E };
 }
 // Where a device's layers are (offloadNeed's pos): its last m layers are the ones offloaded, so what they park depends
 // on where its range ends.
@@ -171,7 +197,8 @@ function offloadAt(X, n, m, layerBytes, pos) {
     for (let s = s0; s + m <= X.L; s++) park = Math.max(park, X.park(s, s + m));
     region = X.region(Math.min(s0, X.L), X.L);
   }
-  return { park, ramNeed: X.ramOf(park, m), region, perExp: park / X.nExp, resident: n * layerBytes - m * X.E };
+  const sp = X.spare(n);
+  return { park, ramNeed: X.ramOf(park, m) + sp.ram, ramSpare: sp.ram, vramSpare: sp.vram, region, perExp: park / X.nExp, resident: n * layerBytes - m * X.E + sp.vram };
 }
 // the VRAM cache n layers with m offloaded leave in `bytes`, and the slots per offloaded layer it holds after the
 // region (ExpertStore.build: P = floor((vramBytes - region) / perExp), at most nExp)
@@ -214,7 +241,8 @@ export function offloadCaps(L, pledges, layerBytes, hostBytes, off) {
 }
 // What one device's n layers look like with offload: null when they fit its pledge as they are, else
 // { layers: m (the last m of its range are offloaded), vramBytes: its expert cache (region + slots: the rest of the
-// pledge), ramBytes: the experts parked, slots: experts cached per offloaded layer }. With a profile and the range's
+// pledge after vramSpare), ramBytes: the experts parked, ramSpare / vramSpare: what it keeps free past them
+// (offloadSpare), slots: experts cached per offloaded layer }. With a profile and the range's
 // end (pos: a number, as dealOffload passes), ramBytes and slots are ExpertStore's own: it parks exactly ramBytes and
 // sizes P = slots from vramBytes.
 // m: the fewest layers that leave each offloaded layer OFFLOAD_GOOD_SLOTS cached experts, else as many as RAM
@@ -233,7 +261,27 @@ export function offloadPlan(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MI
     if (!(a.ramNeed <= ram + 1e-6)) break;
     if (a.slots >= minSlots) { m = k; best = a; }
   }
-  return { layers: m, vramBytes: best.vram, ramBytes: best.park, slots: best.slots };
+  return { layers: m, vramBytes: best.vram, ramBytes: best.park, ramSpare: best.ramSpare, vramSpare: best.vramSpare, slots: best.slots };
+}
+
+// Speculative decoding (the draft head's MTP drafts, lookup drafts) in a room whose deal has a device offloading
+// experts. A verify pass runs K+1 tokens through every layer, and on an offloaded layer their distinct experts
+// (up to 8 per token, ~30 for K=3) must all be in the slot pool: a verify copies several times the experts one plain
+// token does, and copies don't overlap compute on the offloading GPU. Measured on the 122B room (Mac Studio +
+// RTX 5070 with layers 15-47 offloaded): plain 17-18 tok/s, speculation 12.7-13.5 on prose and 9.3-11.6 on a
+// 12k-token agent turn; only a short, highly predictable code answer gained. So speculation is off by default
+// while the deal offloads, on otherwise (a resident room: unchanged).
+//   offloads: the deal's offload per device (dealRoom's `offload`, or a name -> offload map), or a boolean
+//   force: true / false to override (room node POOLED_OFFLOAD_SPEC, room page ?offspec=), null for the default
+export const dealOffloads = (offloads) => !!offloads && (typeof offloads === "boolean" ? offloads : Object.values(offloads).some(Boolean));
+export function specWithOffload(offloads, force = null) {
+  if (force === true || force === false) return force;
+  return !dealOffloads(offloads);
+}
+// "1" / "on" / "true" -> true, "0" / "off" / "false" -> false, anything else -> null (the default)
+export function parseForce(v) {
+  const s = String(v ?? "").trim().toLowerCase();
+  return ["1", "on", "true", "yes"].includes(s) ? true : ["0", "off", "false", "no"].includes(s) ? false : null;
 }
 
 // The deal when the pledges alone can't hold the model and offload can (roomFit's offload: true): every device

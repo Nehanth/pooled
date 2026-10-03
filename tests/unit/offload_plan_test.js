@@ -25,10 +25,11 @@ function deal(model, metas, { ctx = 32768, mode = "speed", phone = [] } = {}) {
   const pledges = metas.map((m) => pledgeGB(m) * GB);
   return { rb, pledges, d: dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges, mode, phone, off: offloadFor(metas, rb.experts) }) };
 }
-// what a dealt device keeps in VRAM: its layers less the parked experts, plus its cache; and in RAM the parked experts
+// what a dealt device keeps in VRAM: its layers less the parked experts, plus its cache and what it keeps free for
+// the engine's own buffers and checkpoints (vramSpare); and in RAM the parked experts
 const vramOf = (rb, d, k) => {
   const host = d.used[k] === 0 ? rb.hostBytes : 0, o = d.offload?.[k];
-  return host + d.assigned[k] * rb.layerBytes - (o ? o.layers * rb.expertBytes - o.vramBytes : 0);
+  return host + d.assigned[k] * rb.layerBytes - (o ? o.layers * rb.expertBytes - o.vramBytes - (o.vramSpare || 0) : 0);
 };
 
 Deno.test("offload: the pledges hold the model -> the deal is the one without offload (no offload field set)", () => {
@@ -74,9 +75,9 @@ Deno.test("offload: two devices: the one that doesn't offload holds its whole pl
   eq(d.offload[1].hi, rb.L);
   ok(vramOf(rb, d, 0) <= 6 * GB && vramOf(rb, d, 1) <= 8 * GB + 1);
   // the host can offload too: then both keep within pledge and RAM
-  const both = deal("qwen3.6-35b-moe", [pc(6, 8), pc(4, 8)]).d;
+  const both = deal("qwen3.6-35b-moe", [pc(6, 10), pc(4, 10)]).d;
   ok(both.fit.fits);
-  both.used.forEach((i, k) => { ok(vramOf(roomBytes("qwen3.6-35b-moe", 32768), both, k) <= [6, 4][i] * GB + 1); ok(!both.offload[k] || both.offload[k].ramBytes <= 8 * GB); });
+  both.used.forEach((i, k) => { ok(vramOf(roomBytes("qwen3.6-35b-moe", 32768), both, k) <= [6, 4][i] * GB + 1); ok(!both.offload[k] || both.offload[k].ramBytes + both.offload[k].ramSpare <= 10 * GB); });
 });
 
 Deno.test("offload: the 122B on a Spark lending 30 GB and the 5070 PC (10 GB, 48 GB of RAM)", () => {

@@ -46,15 +46,41 @@ export function expertSlicesOf(G, i) {
 // The experts' offload profile (room/plan.js offloadNeed / offloadPlan) for layers 0..L-1 of a header, or null for a
 // dense model: { E: one layer's routed expert bytes in the file (layers 0-3's average: the part of a layer's VRAM
 // estimate that parking frees), nExp, slices: per layer, one expert's six parked slices (what ExpertStore parks) }
+// ... and what a device that offloads needs past its layers and its expert cache (room/plan.js offloadSpare): kvPos
+// (f16 K+V bytes per layer and position, averaged: a checkpoint's KV rows), state (a layer's recurrent state, averaged:
+// DeltaNet S and conv window, which a checkpoint copies and speculation's rollback keeps once more) and work (the
+// engine's working buffers: prefill frames, batched passes; offloadWork)
 export function expertsOf(G, L) {
   const per = [];
   for (let i = 0; i < L; i++) { const x = expertSlicesOf(G, i); if (!x) return null; per.push(x); }
   if (!per.length || per.some((x) => x.nExp !== per[0].nExp)) return null;
-  return { E: expertBytesOf(G, 0, Math.min(4, L)) / Math.min(4, L), nExp: per[0].nExp, slices: per.map((x) => x.slices) };
+  const M = G.meta || {};
+  return { E: expertBytesOf(G, 0, Math.min(4, L)) / Math.min(4, L), nExp: per[0].nExp, slices: per.map((x) => x.slices),
+    kvPos: kvBytesPerLayerPos(M, "f16"), state: stateBytesPerLayer(M), work: offloadWork(+M["qwen35.embedding_length"] || 0) };
 }
+// A Qwen3.5 / 3.6 layer's recurrent state, averaged over the layers (all but every full_attention_interval-th are
+// DeltaNet): S (nVH x dState x dState f32) and the conv window (3 x convDim f32), as engine/qwen35.js allocates them
+export function stateBytesPerLayer(meta) {
+  const dState = +meta["qwen35.ssm.state_size"] || 0, nVH = +meta["qwen35.ssm.time_step_rank"] || 0;
+  const convDim = 2 * dState * (+meta["qwen35.ssm.group_count"] || 0) + (+meta["qwen35.ssm.inner_size"] || 0);
+  const k = +meta["qwen35.full_attention_interval"] || 1;
+  return (nVH * dState * dState * 4 + 3 * convDim * 4) * (k - 1) / k;
+}
+// The engine's working buffers on a device that offloads, beyond its layers and the cache: the prefill frames' and
+// batched passes' activations, allocated on the first long prompt. Measured with every buffer counted (Dawn, a worker
+// shard, a 12k-token prefill, decode and verifies): 0.16 GiB on the 35B (hidden 2048), 0.30 GiB on the 122B (3072);
+// D3D12 (the RTX 5070 PC) adds about 70% to that (64 KiB placement, Dawn's own heaps). 192 KiB per hidden unit
+// covers both with that margin: 0.38 / 0.56 GiB.
+export const offloadWork = (dim) => dim * 192 * 1024;
 // SHAPE's park (runs of layers that park alike) as expertsOf's profile
-const parkProfile = (s) => s.park && { E: s.exp, nExp: s.park.nExp, slices: s.park.runs.flatMap(([n, sl]) => Array(n).fill(sl)) };
+const parkProfile = (s) => s.park && { E: s.exp, nExp: s.park.nExp, slices: s.park.runs.flatMap(([n, sl]) => Array(n).fill(sl)),
+  kvPos: s.kvPos.f16, state: stateBytesPerLayer(s.meta), work: offloadWork(s.meta["qwen35.embedding_length"]) };
 
+// the header fields stateBytesPerLayer and offloadWork read (SHAPE's MoE models: their GGUFs' values)
+function ssmMeta(dim, nVH, nKH, inner) {
+  return { "qwen35.embedding_length": dim, "qwen35.ssm.state_size": 128, "qwen35.ssm.time_step_rank": nVH, "qwen35.ssm.group_count": nKH,
+    "qwen35.ssm.inner_size": inner, "qwen35.full_attention_interval": 4 };
+}
 // Each picker model's shape, from its GGUF header (the host reads the same numbers from the file at
 // Start, so these only let the picker say before Start whether the room's pledges hold the model):
 // L layers; layer = one layer's weights (the largest group's average for the hybrids); kvPos = K+V
@@ -65,9 +91,9 @@ export const SHAPE = {
   "qwen3-1.7b": { kind: "gguf", L: 28, layer: 53494784, kvPos: { f16: denseKvBytesPerLayerPos(1024) }, embed: 330612736, out: 0, mtp: 0 },
   "qwen3.8-27b": { kind: "qwen35", L: 64, layer: 223970464, kvPos: { f16: 1024, q8: 576 }, embed: 715161600, out: 1042944000, mtp: 265197568 },
   "qwen3.6-35b-moe": { kind: "qwen35", L: 40, layer: 498197568, kvPos: { f16: 512, q8: 288 }, embed: 286064640, out: 417177600, mtp: 897955840, exp: 469762048,
-    park: { nExp: 256, runs: [[5, expertSlices(512, 2048, [Q4, Q4, Q41])], [35, expertSlices(512, 2048, [Q4, Q4, Q4])]] } },
+    park: { nExp: 256, runs: [[5, expertSlices(512, 2048, [Q4, Q4, Q41])], [35, expertSlices(512, 2048, [Q4, Q4, Q4])]] }, meta: ssmMeta(2048, 32, 16, 4096) },
   "qwen3.5-122b-moe": { kind: "qwen35", L: 48, layer: 1485116672, kvPos: { f16: 512, q8: 288 }, embed: 429096960, out: 625766400, mtp: 2682195968, exp: 1409286144,
-    park: { nExp: 256, runs: [[6, expertSlices(1024, 3072, [Q4, Q4, Q41])], [42, expertSlices(1024, 3072, [Q4, Q4, Q4])]] } },
+    park: { nExp: 256, runs: [[6, expertSlices(1024, 3072, [Q4, Q4, Q41])], [42, expertSlices(1024, 3072, [Q4, Q4, Q4])]] }, meta: ssmMeta(3072, 64, 16, 8192) },
 };
 // A split GGUF's headers (llama.cpp gguf-split: MODELS[key].shards, in order) as one: the first file's metadata and
 // every file's tensors, each tensor with its file (shard: index; url: that file's URL when urls is given, for the

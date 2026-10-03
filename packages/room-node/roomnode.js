@@ -44,7 +44,7 @@ import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
 import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { unpackWire } from "../../room/wire.js";
-import { isPhoneMeta, roomFit, dealRoom, shortNote } from "../../room/plan.js";
+import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
@@ -89,7 +89,7 @@ export const cleanName = (s, id) => String(s ?? id).replace(/[\u0000-\u001f\u007
 
 // what an ai-load says about a device's expert offload (room/plan.js dealRoom offload): the layers whose experts it
 // parks in RAM, its GPU cache budget, and the RAM that takes (it checks that against what it lends)
-const offloadMsg = (o) => ({ lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes });
+const offloadMsg = (o) => ({ lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}) });
 
 export class RoomNode extends EventEmitter {
   // name, pledgeGB, signal ("host:port" PeerServer, null = the PeerJS cloud), modelDir, flags (engine
@@ -102,8 +102,12 @@ export class RoomNode extends EventEmitter {
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
     gbps = null, autoRedeal = true, ckpt = {}, ckptDisk, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory",
-    ramGB = 0, mem = null } = {}) {
+    ramGB = 0, mem = null, offloadSpec = parseForce(process.env.POOLED_OFFLOAD_SPEC) } = {}) {
     super();
+    // offloadSpec: speculative decoding while the deal has a device offloading experts (room/plan.js
+    // specWithOffload): null = off there, on otherwise (the default); true / false = always on / off with offload.
+    // POOLED_OFFLOAD_SPEC=1 / 0 sets it from the environment
+    this.offloadSpec = offloadSpec === true || offloadSpec === false ? offloadSpec : null;
     // ramGB: system RAM this device lets the room park a MoE model's routed experts in when its pledge can't hold
     // its layers (expert offload, room/plan.js offloadNeed; meta.offload / meta.ramGB). 0: it never offloads.
     this.ramGB = +ramGB > 0 ? +ramGB : 0;
@@ -167,7 +171,7 @@ export class RoomNode extends EventEmitter {
         onWorkerFrame: (ms) => { this.frames = (this.frames || 0) + 1; this.frameMs = (this.frameMs || 0) + ms; } },
     });
     this.generateAttempt = createGenerator({
-      state: this.ai, options: { profile: "node" },
+      state: this.ai, options: { profile: "node", offloadSpec: this.offloadSpec },
       pipeline: { ...this.pipeline, ckptClear: (tell) => this.ckptClear(tell), ckptSave: () => this.ckptSave() },
       hooks: { wakeChain: (pos) => this.wakeChain(pos), chainRtt: () => this.chainRtt(),
         getPeerMeta: (id) => this.conns.get(id)?.meta,
@@ -565,8 +569,11 @@ export class RoomNode extends EventEmitter {
   offloadOk(o) {
     if (!o) return null;
     if (!(this.ramGB > 0)) throw new Error("the host asked this device to offload experts, but it does not offload (--ram 0)");
-    if (o.ramBytes > this.ramGB * 2 ** 30 * 1.0001) throw new Error(`the host asked for ${(o.ramBytes / 2 ** 30).toFixed(1)} GB of RAM for experts; this device lends ${this.ramGB} GB`);
-    return { ...o, ramCap: this.ramGB * 2 ** 30 };
+    // ramSpare (room/plan.js offloadSpare): RAM the deal keeps free past the experts on this device (the process, a
+    // checkpoint's copy); the experts may park in the rest only. 0 from a host that predates it
+    const lend = this.ramGB * 2 ** 30, spare = +o.ramSpare > 0 ? +o.ramSpare : 0;
+    if (o.ramBytes + spare > lend * 1.0001) throw new Error(`the host asked for ${(o.ramBytes / 2 ** 30).toFixed(1)} GB of RAM for experts${spare ? ` and ${(spare / 2 ** 30).toFixed(1)} GB kept free` : ""}; this device lends ${this.ramGB} GB`);
+    return { ...o, ramCap: lend - spare };
   }
   freeLayers(role) {
     const ai = this.ai;
@@ -825,6 +832,8 @@ export class RoomNode extends EventEmitter {
     const offTxt = (o) => `layers ${o.lo}-${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`;
     plan.offload.forEach((o, k) => { if (o) this.log(`${k ? nameOf(ai.chain[k - 1]) : this.name} offloads ${offTxt(o)}`); });
     ai.offloadBy = Object.fromEntries(plan.offload.map((o, k) => [k ? nameOf(ai.chain[k - 1]) : this.name, o]).filter(([, o]) => o));
+    if (dealOffloads(ai.offloadBy)) this.log(specWithOffload(true, this.offloadSpec) ? "speculative decoding stays on with expert offload (POOLED_OFFLOAD_SPEC=1)"
+      : "speculative decoding is off while experts are offloaded: plain decoding is faster there (POOLED_OFFLOAD_SPEC=1 turns it on)");
     this.split = { L, ranges, names: [this.name, ...ai.chain.map(nameOf)] };
     const readyAll = new Promise((res, rej) => { ai.startOk = res; ai.startErr = rej; });
     readyAll.catch(() => {});

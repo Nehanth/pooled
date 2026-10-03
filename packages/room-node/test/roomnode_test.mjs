@@ -657,6 +657,22 @@ test("expert offload: a worker loads only the offload it offered, and says why o
   assert.deepEqual(n.offloadOk(o), { ...o, ramCap: 20 * GB }, "the load parks within the RAM it lends (ExpertStore ramBytes)");
   assert.throws(() => n.offloadOk({ ...o, ramBytes: 30 * GB }), /lends 20 GB/);
   assert.throws(() => new RoomNode({ pledgeGB: 8, log: () => {} }).offloadOk(o), /does not offload/);
+  // the RAM the deal keeps free past the experts (room/plan.js offloadSpare): the experts park in the rest only
+  assert.deepEqual(n.offloadOk({ ...o, ramSpare: 2 * GB }), { ...o, ramSpare: 2 * GB, ramCap: 18 * GB });
+  assert.throws(() => n.offloadOk({ ...o, ramBytes: 19 * GB, ramSpare: 2 * GB }), /2\.0 GB kept free; this device lends 20 GB/);
+});
+
+test("speculation with expert offload: the option, POOLED_OFFLOAD_SPEC, and the deal's note", () => {
+  const was = process.env.POOLED_OFFLOAD_SPEC;
+  try {
+    delete process.env.POOLED_OFFLOAD_SPEC;
+    assert.equal(new RoomNode({ pledgeGB: 8, log: () => {} }).offloadSpec, null, "default: off with offload, on otherwise");
+    process.env.POOLED_OFFLOAD_SPEC = "1";
+    assert.equal(new RoomNode({ pledgeGB: 8, log: () => {} }).offloadSpec, true);
+    process.env.POOLED_OFFLOAD_SPEC = "0";
+    assert.equal(new RoomNode({ pledgeGB: 8, log: () => {} }).offloadSpec, false);
+    assert.equal(new RoomNode({ pledgeGB: 8, log: () => {}, offloadSpec: true }).offloadSpec, true, "the option wins over the environment");
+  } finally { if (was == null) delete process.env.POOLED_OFFLOAD_SPEC; else process.env.POOLED_OFFLOAD_SPEC = was; }
 });
 
 test("expert offload: a worker whose experts would park past its RAM fails the load and never comes online", async () => {

@@ -316,3 +316,31 @@ Deno.test("generate: draft model requires capable peers and rechecks after a ver
     eq(f.calls.pipe, initiallyCapable ? [1] : [2]);
   }
 });
+
+// Expert offload (room/plan.js specWithOffload): a deal with a device offloading experts decodes plainly by default,
+// a forced override speculates again, and a room without offload speculates as before
+function offloadFixture({ offloadBy = null, experts = false, options = {} } = {}) {
+  const f = fixture({ outputs: [3, 4, 9], options });
+  f.ai.engine.mtp = { stats: { drafts: 0, accepted: 0 } };
+  f.verifies = 0;
+  f.ai.engine.specStep = async () => { f.verifies++; f.ai.engine.pos += 2; return [4, 9]; };
+  if (offloadBy) f.ai.offloadBy = offloadBy;
+  if (experts) f.ai.engine.experts = { layers: [1] };
+  return f;
+}
+Deno.test("generate: a deal with expert offload decodes plainly unless forced; without offload it speculates", async () => {
+  const pc = { lo: 15, hi: 48, vramBytes: 1, ramBytes: 1 };
+  for (const [what, f, spec] of [
+    ["no offload", offloadFixture(), true],
+    ["an empty offload map (the deal offloads nothing)", offloadFixture({ offloadBy: {} }), true],
+    ["a worker offloads", offloadFixture({ offloadBy: { pc } }), false],
+    ["this device's own engine offloads", offloadFixture({ experts: true }), false],
+    ["forced on (POOLED_OFFLOAD_SPEC=1, ?offspec=1)", offloadFixture({ offloadBy: { pc }, options: { offloadSpec: true } }), true],
+    ["forced off", offloadFixture({ options: { offloadSpec: false } }), false],
+  ]) {
+    const r = await f.run([1, 2]);
+    eq(r.tokens, [3, 4], what);
+    eq(f.verifies > 0, spec, what + ": speculated");
+    eq(f.calls.pipe, spec ? [] : [3, 4], what + ": plain tokens piped");
+  }
+});

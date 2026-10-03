@@ -43,7 +43,7 @@ import { PERSONAS, specials, fitContext, templateProfile } from "./room/conversa
 import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS,
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
-import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp } from "./room/plan.js";
+import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
@@ -3107,6 +3107,10 @@ async function aiStart(modelArg) {
     // so a device missing a range goes to the model host instead of queueing behind it.
     const inv = M.gguf && conns.size ? await gatherInventory(M.gguf) : {};
     ai.wsrc = M.gguf ? weightSources(M.gguf, inv) : null;
+    // who offloads (engine/generate.js: speculation stays off then, room/plan.js specWithOffload)
+    ai.offloadBy = Object.fromEntries((deal.offload || []).map((o, k) => [k ? nameOf(ai.chain[k - 1]) : myName, o]).filter(([, o]) => o));
+    if (dealOffloads(ai.offloadBy)) log("room", specWithOffload(true, OFFLOAD_SPEC) ? "speculative decoding stays on with expert offload (?offspec=1)"
+      : "speculative decoding is off while experts are offloaded: plain decoding is faster there (?offspec=1 turns it on)");
     ai.chain.forEach((id, i) => {
       const o = deal.offload?.[i + 1];
       if (o) log("room", `${nameOf(id)} offloads layers ${o.lo}–${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`);
@@ -3115,7 +3119,7 @@ async function aiStart(modelArg) {
         next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host",
         host: peer.id,
         inv,
-        ...(o ? { offload: { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes } } : {}),
+        ...(o ? { offload: { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}) } } : {}),
       };
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });
       sendTo(id, msg);
@@ -3468,6 +3472,9 @@ const PREFILL_WINDOW = 6;
 const LOOKUP = new URLSearchParams(location.search).get("lookup") !== "0";   // ?lookup=0: draft head only, for A/B
 // ?densespec=0: dense models (no draft head) decode plainly in a room, no lookup drafts (A/B)
 const DENSE_SPEC = new URLSearchParams(location.search).get("densespec") !== "0";
+// speculation while a room node in the deal offloads experts (room/plan.js specWithOffload): off by default
+// there (plain decoding is faster), ?offspec=1 forces it on, ?offspec=0 off
+const OFFLOAD_SPEC = parseForce(new URLSearchParams(location.search).get("offspec"));
 // ?draft=qwen3-0.6b (experimental, off by default): the host also loads that small model whole and it
 // drafts when prompt lookup finds nothing (room/draftmodel.js); ?draftk=N drafts per lap (default 4).
 // Same tokenizer as the Qwen3 1.7B / 4B. Exact like lookup: the verify decides every token.
@@ -3503,7 +3510,7 @@ const pipeline = createPipeline({
 const { failWaiters, ckptClear, ckptRestore, ckptPrune, ckptRejoin } = pipeline;
 const roomGenerateOnce = createGenerator({
   state: ai, pipeline,
-  options: { checkpointMax: CKPT_MAX, fillDrafts: FILL_DRAFTS, lookup: LOOKUP, hostFuse: HOST_FUSE, denseSpec: DENSE_SPEC, draftK: DRAFT_K },
+  options: { checkpointMax: CKPT_MAX, fillDrafts: FILL_DRAFTS, lookup: LOOKUP, hostFuse: HOST_FUSE, denseSpec: DENSE_SPEC, draftK: DRAFT_K, offloadSpec: OFFLOAD_SPEC },
   hooks: { computePass: compute.pass, mapPulse, pushMap, crumb, noteSpeeds, wakeChain, chainRtt, log,
     getPeerMeta: (id) => conns.get(id)?.meta,
     onSoloSpeed(tps) { lastSoloTps = Math.max(lastSoloTps, tps); } },

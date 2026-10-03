@@ -75,12 +75,12 @@ const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; cha
 // dev-only view of room.js: live netlag and a plain-decode switch (see the header)
 function patchRoom(src, generation = false) {
   const a = "if (NETLAG) { setTimeout(() => sendHiddenNow(id, msg), NETLAG); return; }";
-  const b = "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep) {";
-  const c = "} else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {";
+  const b = "else if ((!node || useSpec) && offOk && current.engine.mtp && current.engine.specStep) {";
+  const c = "} else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && offOk && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {";
   if (generation ? !src.includes(b) || !src.includes(c) : !src.includes(a)) throw new Error("room.js changed: update patchRoom in room_latency.mjs");
   if (!generation) return src.replace(a, "const lag = window.__netlag ?? NETLAG; if (lag) { setTimeout(() => sendHiddenNow(id, msg), lag); return; }");
-  return src.replace(b, "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep && !window.__nospec) {")
-    .replace(c, "} else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {");
+  return src.replace(b, "else if ((!node || useSpec) && offOk && current.engine.mtp && current.engine.specStep && !window.__nospec) {")
+    .replace(c, "} else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && offOk && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {");
 }
 const srv = http.createServer((q, r) => {
   const p = path.join(ROOT, decodeURIComponent(q.url.split("?")[0]));

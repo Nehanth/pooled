@@ -127,8 +127,8 @@ function serveRoom(src) {
 function serveGenerator(src) {
   if (FIXK) src = rep(src, "const pickK = () => {", `const pickK = () => { if (ai.chain.length) return ${FIXK};`);
   if (TRACE) return patchGenerator(src);
-  src = rep(src, "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep) {", "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep && !window.__nospec) {");
-  return rep(src, "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {", "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {");
+  src = rep(src, "else if ((!node || useSpec) && offOk && current.engine.mtp && current.engine.specStep) {", "else if ((!node || useSpec) && offOk && current.engine.mtp && current.engine.specStep && !window.__nospec) {");
+  return rep(src, "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && offOk && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {", "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && offOk && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {");
 }
 // the selected ICE candidate pair of every room link and its wire stripes, with Chrome's own STUN
 // round trip on it (currentRoundTripTime: the network with no application in the way)
