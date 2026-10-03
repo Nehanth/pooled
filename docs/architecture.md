@@ -53,6 +53,7 @@ Decode is at the memory roofline on this GPU; speculation is what raises tokens 
 - `engine/tokenizer.js`, `sampling.js`, `quant.js`, `autotune.js`, `selftest.js`: what their names say.
 - `engine/wgsl/gemm.js` (prefill GEMM), `engine/wgsl/moe.js` (mixture-of-experts router and expert kernels).
 - `room.js`: the room: signaling, links, layer assignment, download orchestration, the generation loop. `p2p.html` holds its markup and styles and is served at `/room`.
+- `room/model-loader.js`: browser model headers, tensor prefetch/retry, converted-weight caching and engine construction, including the optional draft model. The room supplies its state, range transport and lazily imported engine constructors; GPU acquisition, progress/pacing, membership and recovery stay in `room.js`.
 - `room/`: `transport.js` (the hidden-state wire, `PROTOCOL`), `wire.js` (frame packing), `conversation.js` (the conversation and the exact tokens every device holds), `models.js` (the model list and context per model), `plan.js` (layer split and model ladder), `compute.js` (the compute screen), `lookup.js` (prompt-lookup drafts), `preflight.js` (can this browser hold layers), `qr.js`, `card.js` (the room card), `markdown.js`, `sampling.js`, `visibility.js`, and `code.js` / `code-ui.js` (the Code pane).
 - `index.html` + `site/`: the landing page.
 
