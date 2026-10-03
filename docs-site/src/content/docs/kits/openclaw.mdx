@@ -43,6 +43,12 @@ Sources (for the fact-checker):
     the screenshots are from that session (notes.txt in the workspace, 7 lines). A perf benchmark shared the GPU during this run.
     The Control UI (openclaw dashboard) showed the same chat with "Read notes.txt".
 - packages/openclaw/src/setup.js, src/commands.js (/pooled allow|deny|link|pledge), src/prewarm.js (warm-up from the last prompt)
+- The email walkthrough video (openclaw-email-mcp-walkthrough.mp4, 5:27, recorded 2026-10-02): OpenClaw 2026.9.7 installed with npm on a
+  Windows PC with an RTX 5070 (12 GB, lends 10), the plugin from ClawHub, onboarding starts a room for the Qwen3.6 35B MoE; a Mac Studio
+  (M5 Max, 36 GB) joins with `npx @pooled/cli join "<link>" --gb 14` (@pooled/cli 0.3.6); split PC layers 0-14, Mac 15-39.
+  The email MCP server is @ni-c/imap-mcp, added with the exact `openclaw mcp add email ...` line below (only the address differs) and checked
+  with `openclaw mcp probe email` ("email: 4 tools"). The prompt went in with `openclaw agent --agent main`; a real Gmail inbox with
+  15 unread: 14 tool calls, 6 drafts saved in [Gmail]/Drafts, Sent empty, the answer at 36 tokens/s. Script: the take's script.json.
 */}
 
 **Goal:** an OpenClaw assistant that thinks with the Qwen3.6 35B MoE, running on your own computers.
@@ -157,6 +163,38 @@ Triage my inbox: the 15 emails are in inbox/, read them all in one go. Sort them
 ```
 
 OpenClaw lists the folder, reads all 15 in one step and answers. In our run, the leaking ceiling, the moved deadline and the airport pickup went to reply today, and the "you won a yacht" email went to ignore. On a Mac Studio plus an RTX 5070 PC the answer streamed at 29 tokens a second.
+
+## Full walkthrough: a clean install and a real inbox
+
+<video controls preload="none" playsinline poster="/docs/media/openclaw-email-mcp-walkthrough.jpg" style="width:100%;border-radius:12px;margin:1rem 0">
+  <source src="/docs/media/openclaw-email-mcp-walkthrough.mp4" type="video/mp4" />
+</video>
+
+*Five and a half minutes, from a clean install: OpenClaw and the Pooled plugin go on a Windows PC with an RTX 5070 (12 GB), which starts a room for the 35B MoE and lends 10 GB. A Mac Studio joins with `npx @pooled/cli join` and lends 14. Through an email MCP server that can only read and save drafts, the assistant triages a real Gmail inbox: 15 emails sorted, 14 tool calls, 6 drafts saved and nothing sent, with the answer at 36 tokens a second. Downloads and loading are sped up and labeled.*
+
+The email server in the video is [`@ni-c/imap-mcp`](https://www.npmjs.com/package/@ni-c/imap-mcp). It has no send tool, and `IMAP_ALLOW_TOOLS` limits it to four tools: list folders, list messages, read a message and save a draft. On the gateway's computer, in PowerShell:
+
+```powershell
+npm install -g @ni-c/imap-mcp
+openclaw mcp add email --command node --arg "$(npm root -g)\@ni-c\imap-mcp\dist\index.js" `
+  --env IMAP_HOST=imap.gmail.com --env IMAP_USER=you@gmail.com --env 'IMAP_PASSWORD=${IMAP_PASSWORD}' `
+  --env IMAP_READ_ONLY=false --env 'IMAP_DRAFTS_MAILBOX=[Gmail]/Drafts' --env IMAP_SEEN_KEYWORD= `
+  --env IMAP_TRUSTED_AUTHSERV_ID=mx.google.com `
+  --env 'IMAP_ALLOW_TOOLS=list_mailboxes,list_messages,get_message,save_draft' --connect-timeout 20
+openclaw mcp probe email
+```
+
+- **Mind the quotes.** `'IMAP_PASSWORD=${IMAP_PASSWORD}'` is in single quotes, so PowerShell passes it as written: OpenClaw saves the reference, not your password, and fills it in from the environment when it starts the server. Set `$env:IMAP_PASSWORD` to a Gmail [app password](https://myaccount.google.com/apppasswords) in the shell that runs `openclaw gateway run`. The `[Gmail]/Drafts` and allow-list values are single-quoted too. `"$(npm root -g)..."` is in double quotes, so PowerShell fills in the global npm folder. In bash, use `"$(npm root -g)/@ni-c/imap-mcp/dist/index.js"` and keep the single quotes.
+- `IMAP_READ_ONLY=false` is needed for `save_draft`. The allow list still leaves out every tool that moves or deletes mail. An empty `IMAP_SEEN_KEYWORD` stops the server from tagging the messages it reads.
+- `openclaw mcp probe email` should list 4 tools.
+
+Then ask:
+
+```text
+Triage my inbox: list my unread emails, sort them into reply today, later and ignore, one line each. Then save short draft replies for the reply-today ones.
+```
+
+The drafts wait in Gmail's Drafts folder until you read and send them yourself.
 
 ## Next
 
