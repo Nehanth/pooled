@@ -47,7 +47,7 @@ OpenClaw's requests and tool calls take the same path as [`pooled serve`](/docs/
 
 ## Install
 
-You need Node 22 or newer (OpenClaw ships on 24), OpenClaw 2026.9.6 or newer, and a GPU that Dawn runs on: Linux with glibc 2.38 or newer and a Vulkan driver, or macOS 26 or newer. Windows is untested.
+You need Node 22 or newer (OpenClaw ships on 24), OpenClaw 2026.9.6 or newer, and a GPU that Dawn runs on: Linux with glibc 2.38 or newer and a Vulkan driver, macOS 26 or newer, or Windows with an NVIDIA GPU (Direct3D 12).
 
 ```sh
 openclaw plugins install clawhub:@pooled/openclaw
@@ -191,7 +191,7 @@ Per-task tables are in [docs/openclaw-poc.md](https://github.com/Nehanth/pooled/
 - **Browser hosts** have no turn checkpoints yet, so OpenClaw joined to a room hosted in a tab re-reads more per tool call.
 - **Checkpoint memory** isn't part of the layer split. At 50K tokens one checkpoint is about 1 GB across the room for the MoE, and the host keeps up to 8 (4 pinned, 4 answer or turn).
 - **Small models** (the 1.7B) are slow with OpenClaw and loop on tool search; see [Which model](#which-model). The MoE is the model to use.
-- **Windows** is untested.
+- **Windows** (Direct3D 12) is tested on an RTX 5070 with the gateway hosting the room. Only NVIDIA GPUs have been tried there.
 
 ## Who can see and steer what
 
