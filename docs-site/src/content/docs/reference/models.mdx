@@ -12,6 +12,9 @@ Sources (origin/main 40bb0fa):
   KV bytes per position (27B 64 KB f16, MoE 20 KB), MAX_NEW 400, MAX_NEW_THINKING 1200, MIN_ROOM 32
 - room.js:3458 ANSWER_LEN { short: 150, normal: MAX_NEW, long: 1200 }
 - docs/models.md (engines, layer layout, local test layout, adding a model), README.md Models table
+- 0.4.0 (origin/main ed31899): CTX maxes (27B 65536, MoE 131072, 122B 32768/131072), the 122B MODELS/FILES/NEED_GB 72 (#316),
+  cli/lib/lend.js hostable() lists it for pooled pull / host; expert offload #319/#320/#323 (numbers: docs/bench-log.md 2026-10-02
+  phase 2b, the maintainer's Mac Studio + RTX 5070 122B run)
 - MoE 40 layers: docs/bench-log.md ("35B-A3B MoE (40 layers"); 10 attention layers from room/models.js comment
 - 27B 64 layers (48 DeltaNet + 16 attention): docs/models.md
 */}
@@ -23,8 +26,8 @@ Pooled ships no weights. Each device downloads only its share of the layers from
 | Model | Quantization | File | Memory the room needs | Context (default / max) |
 |---|---|---|---|---|
 | Qwen3 1.7B | Q8_0 | 1.83 GB | 4.0 GB | 8192 / 16384 |
-| Qwen 3.8 27B | Q4_0 | 16.06 GB | 17.0 GB | 16384 / 32768 |
-| Qwen 3.6 35B MoE (35B-A3B) | Q4_0 | 20.84 GB | 22.5 GB | 32768 / 65536 |
+| Qwen 3.8 27B | Q4_0 | 16.06 GB | 17.0 GB | 16384 / 65536 |
+| Qwen 3.6 35B MoE (35B-A3B) | Q4_0 | 20.84 GB | 22.5 GB | 32768 / 131072 |
 
 "Memory the room needs" is the total across all devices. Raise the context with [`?ctx=`](/docs/reference/url-options#context-per-model).
 
@@ -41,6 +44,7 @@ Pooled ships no weights. Each device downloads only its share of the layers from
 | Qwen3 1.7B | [`Qwen/Qwen3-1.7B-GGUF`](https://huggingface.co/Qwen/Qwen3-1.7B-GGUF) `Qwen3-1.7B-Q8_0.gguf` |
 | Qwen 3.8 27B | [`unsloth/Qwen3.8-27B-GGUF`](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) `Qwen3.8-27B-Q4_0.gguf` |
 | Qwen 3.6 35B MoE | [`bartowski/Qwen_Qwen3.6-35B-A3B-GGUF`](https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF) `Qwen_Qwen3.6-35B-A3B-Q4_0.gguf` |
+| Qwen 3.5 122B MoE | [`bartowski/Qwen_Qwen3.5-122B-A10B-GGUF`](https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF) `Qwen_Qwen3.5-122B-A10B-Q4_0-0000{1,2}-of-00002.gguf` (two files) |
 
 The Qwen3 dense models also fetch `config.json` and `tokenizer.json` from the matching `Qwen/Qwen3-*` repository. The 27B and the MoE read everything from the GGUF.
 
@@ -68,8 +72,13 @@ These stay in `room/models.js` for tests. The picker shows them with [`?dev=1`](
 | Qwen3 0.6B | GGUF Q8_0 | `DenseEngine` | 0.8 GB | 2048 |
 | Qwen3 4B | GGUF Q8_0 | `DenseEngine` | 4.6 GB | 2048 |
 | SmolLM2 135M | safetensors bf16 | `DenseEngine` | 0.6 GB | 2048 |
+| Qwen 3.5 122B MoE (122B-A10B) | GGUF Q4_0, two files, 72.52 GB | `Qwen35Engine` | 72 GB | 32768 / 131072 |
 
-Qwen3 0.6B is the golden-test model. Qwen3.5-122B-A10B MoE runs in the engine and its tests but is not in the room.
+Qwen3 0.6B is the golden-test model. The 122B MoE has 48 layers and 256 experts, 8 active per token (about 10B of the 122B). Besides `?dev=1`, it is in the terminal's list: `pooled pull` and `pooled host` (from `@pooled/cli` 0.4.0) offer it with what it needs.
+
+## Experts in system RAM
+
+On the 35B and the 122B MoE, a `pooled host` or `pooled join` device with a discrete GPU can keep some layers' experts in system RAM when the room's pledges can't hold the model (`--ram`). It copies the experts each token uses into a cache on its GPU. One RTX 5070 (12 GB) runs the 35B alone at 41-54 tok/s this way, and a Mac Studio (25 GB) with an RTX 5070 PC keeping 42 GB of experts in RAM runs the 122B at about 17 tok/s. Unified memory and browsers don't do this. See [MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram).
 
 ## Engines
 

@@ -52,14 +52,17 @@ Qwen3.6 35B MoE, two devices on one DGX Spark, OpenClaw 2026.9.6. On other GPUs 
 | Qwen3 1.7B | Not recommended. Small (about 5.5 GB), but slow on OpenClaw's long prompt and loops on its tools. |
 
 Onboarding preselects the MoE when this device can hold it, and the 27B when only that fits. A room
-can hold more than one device holds alone: it waits for more devices.
+can hold more than one device holds alone: it waits for more devices. A device that joins with
+`pooled join` (`@pooled/cli` 0.4.0 or newer) on a discrete GPU can make up a short room by keeping
+some of the MoE's experts in system RAM (`--ram`), more slowly; the gateway holds its layers whole.
 
 ## Requirements
 
 - OpenClaw 2026.9.6 or newer, Node 22 or newer.
-- A GPU: Linux with a Vulkan driver and glibc 2.38 or newer (like Ubuntu 24.04), or macOS 26 or
-  newer. Windows is untested.
-- Tested on OpenClaw 2026.9.6 and 2026.9.7, on Linux (DGX Spark, GB10) and macOS 27 (M5 Max).
+- A GPU: Linux with a Vulkan driver and glibc 2.38 or newer (like Ubuntu 24.04), macOS 26 or
+  newer, or Windows with an NVIDIA GPU (Direct3D 12).
+- Tested on OpenClaw 2026.9.6 and 2026.9.7, on Linux (DGX Spark, GB10), macOS 27 (M5 Max) and
+  Windows 11 (RTX 5070, the gateway hosting the room).
 - Install size: the plugin bundles Pooled's engine and room code, and installs `node-datachannel`
   (WebRTC), `peerjs` (signaling) and, as an optional dependency, `webgpu` (Dawn, about 95 MB). If
   `webgpu` didn't install, the gateway says how to add it when it needs the GPU.
@@ -250,7 +253,7 @@ Known gaps:
 - A room hosted in a browser tab has no turn checkpoints yet, so OpenClaw re-reads more per tool call
   there than with a Node host.
 - Checkpoints are not part of the memory split: at 50k tokens one is about 1 GB across the room (MoE).
-- Windows is untested.
+- Windows has been tried only with NVIDIA GPUs.
 
 Design notes, results and limits:
 [docs/openclaw.md](https://github.com/Nehanth/pooled/blob/main/docs/openclaw.md).

@@ -21,7 +21,7 @@ Sources (feat/openclaw-v1):
 */}
 
 :::note
-`@pooled/openclaw` 0.2.0 is on ClawHub and npm. The ClawHub listing is new. For a step-by-step walk-through, see the [OpenClaw starter kit](/docs/kits/openclaw).
+`@pooled/openclaw` is on ClawHub and npm. For a step-by-step walk-through, see the [OpenClaw starter kit](/docs/kits/openclaw).
 :::
 
 [OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted agent: a gateway process on your machine runs the agent loop and its tools (`exec`, `read`, `edit`, …) and calls a model provider for every step. The `@pooled/openclaw` plugin adds **Pooled** as that provider.
@@ -94,7 +94,7 @@ The room needs at least a 16k context, because OpenClaw's own instructions and t
 
 ## Which model
 
-Use the **Qwen3.6 35B MoE** (about 23 GB across the room). Onboarding preselects it when this device's memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits on this device alone (the room then waits for more devices).
+Use the **Qwen3.6 35B MoE** (about 23 GB across the room). Onboarding preselects it when this device's memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits on this device alone (the room then waits for more devices). A device that joins with `pooled join` (`@pooled/cli` 0.4.0 or newer) on a discrete GPU can make up a short room by keeping some of the MoE's experts in system RAM, more slowly ([MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram)). The gateway itself holds its layers whole.
 
 :::caution[Small models]
 Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops. Use the 35B MoE if your devices can hold it.

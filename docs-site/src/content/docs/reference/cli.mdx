@@ -91,4 +91,4 @@ The repo's `npm run serve` also uses 8080. Pass `--port 8081` and change the bas
 
 ## Version
 
-The current release on npm is 0.2.1. It takes six-character codes and invite links with `#k=`, and prints settings for Codex, Claude Code and opencode once the room's model is ready. See the [changelog](/docs/reference/changelog).
+`pooled --version` prints the version you have; `npx @pooled/cli@latest` runs the newest. From 0.4.0, `pooled host` and `pooled join` take `--ram`, which lets a discrete GPU keep a MoE model's experts in system RAM ([MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram)), and `pooled pull` / `pooled host` list the Qwen3.5 122B MoE. See the [changelog](/docs/reference/changelog).
