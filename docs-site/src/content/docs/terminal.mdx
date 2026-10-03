@@ -13,6 +13,10 @@ sidebar:
 Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gate is PR #268, merged to main):
 - `node cli/bin/pooled.js host --help`, `join --help`, `chat --help`, `--help` (copied below as printed, 2026-09-30)
 - `node cli/bin/pooled.js host --model list` (the five model keys)
+- 0.4.0 (origin/main ed31899): --ram and expert offload (#319, #320, #323: cli/lib/lend.js parseRam/ramRule, RAM_KEEP_GB 16;
+  room/plan.js; 35B on the RTX 5070 alone 41-54 tok/s and the 122B Spark/Mac+PC rooms: docs/bench-log.md 2026-10-02 and the
+  maintainer's Mac Studio + RTX 5070 run, ~17 tok/s), the 122B (#316; NEED_GB 72 -> the picker's "needs 73 GB"; FILES 72.5 GB),
+  help blocks re-copied from `node cli/bin/pooled.js <cmd> --help`
 - cli/lib/lend.js: HELP_JOIN, HELP_HOST, parseGb (at least 1, capped at 64), memoryRule (discrete: free less 1.5 GB;
   unified: total less max(8 GB, 35%); Linux unified: never more than free now less 2 GB; 64 GB cap; half the largest
   buffer when unknown), formatStatus (phases and their words), explainError (messages and hints)
@@ -111,13 +115,17 @@ Usage
   pooled list              the models on this computer, and the ones not downloaded yet
   pooled rm <model>        delete a downloaded model
 
-  The files go to ~/.pooled/models/<model> (--models <dir> or POOLED_MODELS picks another place).
+  Models live in ~/.pooled/models (made the first time pooled needs it); pooled host and pooled
+  join use the same folder, and pooled join downloads the room's model there by itself.
   A download resumes where it stopped: Ctrl-C, then pooled pull again. Each file is checked
   against its size and SHA-256 before it is used. <model> may be part of a name ("35b", "1.7b").
 
 Options
-  --models <dir>   where the models are kept
   -h, --help       this help
+
+Advanced
+  --models <dir>   keep models somewhere else (also POOLED_MODELS=<dir>); give the same to
+                   pooled host and pooled join (they take --models and POOLED_MODELS too)
 ```
 
 ## pooled join
@@ -162,6 +170,21 @@ On a discrete GPU it then allocates that much for a moment, to make sure it is r
 
 - `--gb 12` lends 12 GB (at least 1, at most 64).
 - `--gb max` keeps only a small margin.
+
+### MoE experts in system RAM
+
+From `@pooled/cli` 0.4.0, a computer with a discrete GPU can hold more of a mixture-of-experts model (the 35B MoE or the 122B MoE) than its GPU pledge. It keeps some layers' experts in system RAM and copies the ones each token uses into a cache on the GPU. The room does this only when the pledges alone can't hold the model. It is slower than holding the layers whole, and while a device does it the room decodes without speculation, which is faster there.
+
+- `--ram 24` lets the experts use up to 24 GB of RAM. `--ram 0` turns it off.
+- The default is the total RAM less 16 GB, never more than is free at start less 4 GB, and at most 64 GB.
+- Unified memory (Apple silicon, the GB10) never does this: its GPU pledge is that same memory. Neither do browsers.
+
+The header shows `RAM up to N GB`, and the host's log says which layers each device keeps in RAM. Measured:
+
+| Room | Speed |
+|---|---|
+| Qwen3.6 35B MoE on one RTX 5070 (12 GB): `pooled host qwen3.6-35b-moe --here` | 41-54 tok/s |
+| Qwen3.5 122B MoE on a Mac Studio (lends 25 GB) and an RTX 5070 PC (the rest of the layers, 42 GB of experts in RAM) | about 17 tok/s, matching llama.cpp |
 
 ### The status line
 
@@ -215,19 +238,23 @@ Usage
   host lets this computer in at once. With the code alone (4TK-G9P), a host that asks before new
   devices join sees "<name> wants to join" and this waits until it presses Allow.
 
-  The layers come from ~/.pooled/models when the host's model is there (pooled pull <model>),
-  else each start streams this device's layers from Hugging Face.
+  The layers load from ~/.pooled/models: when the host's model is not there yet, pooled join
+  downloads it first (as pooled pull does), so this and every later join load from disk.
 
 Options
   --gb <n|max>      how much memory to lend, in GB. Default: the memory rule, printed at start:
                     a discrete GPU lends its free memory less 1.5 GB; unified memory (Apple
                     silicon, GB10) lends the total less max(8 GB, 35%). "max" keeps only a
                     small margin. At most 64 GB per device.
-  --name <s>        how the room shows this device (default: "node-" and 3 letters made from this
-                    computer's hostname, the same each run, so a restart takes back its slot)
+  --name <s>        how the room shows this device (default: mac-, linux- or pc- and 3 letters
+                    made from the hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
                     default: the PeerJS cloud pooled.run uses)
-  --models <dir>    where downloaded models are (default ~/.pooled/models, or POOLED_MODELS)
+  --ram <n>         system RAM, in GB, a MoE model's experts may use when this GPU's pledge can't
+                    hold the layers the room needs from it (expert offload: the GPU keeps a cache
+                    of them; slower than layers held whole). Discrete GPUs only. Default: total
+                    RAM less 16 GB (at most what is free less 4, and 64); 0 never offloads
+  --no-pull         don't download the model: stream this device's layers from Hugging Face
   --no-check        skip the test allocation that confirms the memory is there
   --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
                     (default 10); only a host of the same name: a room code can be reused by a
@@ -235,6 +262,7 @@ Options
 
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
+  --verbose         also show the GPU driver's own messages and a shader compiler's full error
   -h, --help        this help
 
   Every device that holds layers computes on every prompt in the room: this computer sees the
@@ -302,8 +330,9 @@ pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes
 |---|---|
 | `[model]`, `--model <m>` | The model picker. A part of the name works: `35b`. |
 | `--pool` | The "how do you want to run it" question: pooled with other devices, split across all of them. |
-| `--here` | The same question: all of it on this computer, lending what it needs, and it starts by itself. An error when it doesn't fit here. |
+| `--here` | The same question: all of it on this computer, lending what it needs, and it starts by itself. A MoE model that the GPU can't hold keeps some experts in RAM ([MoE experts in system RAM](#moe-experts-in-system-ram)), so a 12 GB GPU runs the 35B. An error when it doesn't fit here. |
 | `--gb <n\|max>` | The pledge question. |
+| `--ram <n>` | How much system RAM a MoE model's experts may use when the GPU is short. `0` never does. |
 | `-y`, `--yes` | Downloads a model that is not on this computer without asking. |
 | `--no-pull` | Doesn't download: this computer streams its layers from Hugging Face on every start. |
 | `--start` | Starts as soon as the pledges hold the model. |
@@ -323,7 +352,10 @@ qwen3-1.7b         Qwen3 1.7B · Q8
 qwen3-4b           Qwen3 4B · Q8
 qwen3.8-27b        Qwen3.8 27B · Q4
 qwen3.6-35b-moe    Qwen3.6 35B MoE · Q4
+qwen3.5-122b-moe   Qwen3.5 122B MoE · Q4
 ```
+
+The Qwen3.5 122B MoE is a 72.5 GB download (two files) and needs about 73 GB across the room. It is for a room of big machines, or one with a PC that keeps its experts in RAM. The room page lists it only with `?dev=1`.
 
 ### pooled host --help
 
@@ -348,6 +380,8 @@ Usage
     --here                 run all of it on this computer: lends what it needs and starts; other
                            devices can still join to chat. An error when it does not fit here
     --gb <n|max>           how much this computer lends; skips the pledge question
+    --ram <n>              system RAM for a MoE model's experts when the GPU is short (as pooled
+                           join): a 12 GB GPU runs the 35B --here this way. 0 never offloads
     -y, --yes              download the model without asking when it is not on this computer
     --no-pull              don't download: stream this computer's layers from Hugging Face
     --start                start as soon as the room's pledges hold the model
@@ -365,13 +399,14 @@ Usage
 More options
   --code <CODE>     the room code to use (default: a random one of six characters)
   --ctx <n>         the context to ask for, in tokens (default: the longest the model takes in a
-                    room: 16k on the 1.7B, 64k on the 27B, 128k on the MoE)
+                    room: 16k on the 1.7B, 8k when the room is short of memory for 16k; 64k on
+                    the 27B, 128k on the MoE)
   --devices <n>     the same as --wait (its older name)
   --signal <spec>   PeerJS signaling server(s), as pooled join
   --no-check        skip the test allocation that confirms the memory is there
   --json-log        one JSON object per log line (no status line)
   --quiet           only errors and the status line
-  --verbose         also show the GPU driver's own messages
+  --verbose         also show the GPU driver's own messages and a shader compiler's full error
   -h, --help        this help
 
   pooled host --model list prints the models.
