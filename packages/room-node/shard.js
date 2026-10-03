@@ -32,7 +32,7 @@ export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }
 // offload (expert offload, room/plan.js dealRoom): { lo, hi, vramBytes, ramBytes, ramCap }: the routed experts of
 // layers [lo, hi) are parked in RAM (engine/expert_store.js ExpertStore) with a GPU cache of vramBytes (its slot pools +
 // prefill region) instead of uploaded. ramBytes: what the deal says they park; ramCap: the RAM this device lends
-// (roomnode.js offloadOk): parking past it fails the load. A Qwen3.5 / 3.6 MoE shard on a room node only.
+// less the RAM the deal keeps free there (ramSpare; roomnode.js offloadOk): parking past it fails the load. A Qwen3.5 / 3.6 MoE shard on a room node only.
 // the layers an ai-load's offload covers within this shard's range, or null for none
 export function offloadLayers(o, range) {
   const lo = Math.max(range[0], +o?.lo || 0), hi = Math.min(range[1], +o?.hi || 0);

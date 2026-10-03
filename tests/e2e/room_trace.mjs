@@ -22,10 +22,10 @@ export function patchGenerator(s) {
   const f = "engine/generate.js";
   s = HP + s;
   // plain-decode switch (room_latency's)
-  s = rep(s, "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep) {", "else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep && !window.__nospec) {", f);
+  s = rep(s, "else if ((!node || useSpec) && offOk && current.engine.mtp && current.engine.specStep) {", "else if ((!node || useSpec) && offOk && current.engine.mtp && current.engine.specStep && !window.__nospec) {", f);
   s = rep(s, "              const r = await current.engine.headAhead(ai.lastHidden, ai.pos, desc);", "              __HP('h.fuse0', 'ai-hidden', ai.pos); const r = await current.engine.headAhead(ai.lastHidden, ai.pos, desc); __HP('h.fuse1', 'ai-hidden', ai.pos);", f);
-  s = rep(s, "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {",
-    "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {", f);
+  s = rep(s, "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && offOk && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {",
+    "else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && offOk && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {", f);
   // host, speculative verify lap
   s = rep(s, "        const tLap = pre?.t0 ?? performance.now();", "        const tLap = pre?.t0 ?? performance.now(); __HP('h.lap0', 'ai-hidden-b', pos, tokens.length);", f);
   s = rep(s, "        const hostMs = performance.now() - tLap;", "        const hostMs = performance.now() - tLap; __HP('h.emb1', 'ai-hidden-b', pos, tokens.length);", f);

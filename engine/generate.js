@@ -7,13 +7,14 @@ import { lookupDrafts, chainDenseSpec, denseLookupDrafts } from "../room/lookup.
 import { MAX_NEW, MAX_SEQ } from "../room/models.js";
 import { lapTimeout } from "../room/liveness.js";
 import { pinSplit } from "../harness/prefix.js";
+import { specWithOffload, dealOffloads } from "../room/plan.js";
 
 const PIN_KEEP_MS = 600000;
 const noop = () => {};
 
 export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} }) {
   const { fillDrafts: FILL_DRAFTS = true, lookup: LOOKUP = true, hostFuse: HOST_FUSE = true,
-    denseSpec: DENSE_SPEC = true, draftK: DRAFT_K = 4,
+    denseSpec: DENSE_SPEC = true, draftK: DRAFT_K = 4, offloadSpec: OFFLOAD_SPEC = null,
     checkpointMax: CKPT_MAX = 2, maxNew: defaultMaxNew = MAX_NEW, maxSeq = MAX_SEQ } = options;
   // The existing callers have different Continue, cancellation and lookup lifetimes.
   const node = options.profile === "node", plainDraft = node ? 0 : false;
@@ -127,8 +128,12 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
           onStatus(`generating… ${count} tok · ${tps.toFixed(1)} tok/s`);
         }
       };
+      // a deal with expert offload decodes plainly unless told otherwise (room/plan.js specWithOffload): a verify
+      // pass makes the offloading device copy in several times the experts a plain token does. ai.offloadBy: the
+      // deal's offload per device (both hosts set it); engine.experts: this device's own
+      const offOk = specWithOffload(dealOffloads(ai.offloadBy) || !!current.engine?.experts, OFFLOAD_SPEC);
       if (!logits && first == null) { /* stopped during prefill */ }
-      else if ((!node || useSpec) && current.engine.mtp && current.engine.specStep) {
+      else if ((!node || useSpec) && offOk && current.engine.mtp && current.engine.specStep) {
         // speculative decoding: the model's own draft head proposes up to K tokens,
         // one batched trunk pass verifies them (byte-identical to plain decoding)
         const spec = chainSpec(current);
@@ -203,7 +208,7 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
         const st = current.engine.mtp.stats;
         if (!node && st.drafts) crumb(`spec: ${st.accepted}/${st.drafts} drafts accepted${ai.lapStat ? ` · lap ${Math.round(ai.lapStat.lap)}ms` : ""}`
           + (ai.chain.length ? ` · K tok/s ${kc.cand.map((k) => `${k}:${kc.ema[k] ? kc.ema[k].toFixed(1) : "-"}`).join(" ")} · tokens by K ${JSON.stringify(kc.used)}` : ""));
-      } else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {
+      } else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && offOk && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep) {
         // a model without a draft head (the dense Qwen3s) in a split room: every plain token costs a
         // full lap round the chain, so when prompt lookup finds the text repeating something in the
         // context, the tokens that followed it go round as drafts in the same lap (specStepDrafts,
