@@ -197,3 +197,23 @@ Deno.test("legacy: a raw key in an old device's hello still works (marked), unle
   eq((await decide(strictOpen, "old", { t: "hello", name: "old", join: 1, key: strictOpen.key })).via, "open");
   ok(sameHex("ab", "ab") && !sameHex("ab", "ac") && !sameHex("", ""));
 });
+
+// A signaling server in the middle can add a=fingerprint lines for the other link's certificates to the
+// descriptions it forwards. Firefox keeps every line in remoteDescription and accepts a certificate that
+// matches any of them, so both ends would read the same set {J, M1, H, M2} and the relayed proofs would
+// check out. Only one fingerprint per end binds the link: more (or a line that doesn't parse) binds nothing.
+Deno.test("fingerprints: extra a=fingerprint lines added by signaling bind nothing (both ends would agree on them)", async () => {
+  const multi = (...cs) => `v=0\r\ns=-\r\n${cs.map(fp).join("\r\n")}\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n`;
+  const pcEnd = (mine, theirs) => ({ peerConnection: { localDescription: { sdp: mine }, remoteDescription: { sdp: theirs } } });
+  // J <-> M (M's cert M1), M <-> H (M's cert M2); signaling stuffed the other link's certs into each remote side
+  const jEnd = pcEnd(sdp("AA"), multi("C1", "BB", "C2")), hEnd = pcEnd(sdp("BB"), multi("C2", "AA", "C1"));
+  eq(linkFingerprints(jEnd), null, "more than one fingerprint on an end: no binding");
+  eq(linkFingerprints(hEnd), null);
+  const g = makeGate({ ask: true });
+  const x = await exchange({ g, key: g.key, jEnd, hEnd });
+  ok(x.r.kind !== "admit", "the relayed proof doesn't get in");
+  // the same certificate twice (a session-level and a media-level line) is still one
+  ok(linkFingerprints(pcEnd(multi("AA", "AA"), sdp("BB"))), "a repeated fingerprint is one");
+  // a fingerprint line this parser can't read (but a WebRTC stack might): nothing is bound
+  eq(linkFingerprints(pcEnd(sdp("AA"), sdp("BB") + "a=fingerprint:sha-256 GG:HH extra\r\n")), null, "an unreadable fingerprint line");
+});

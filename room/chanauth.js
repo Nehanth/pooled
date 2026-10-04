@@ -62,15 +62,25 @@ export function sdpFingerprints(sdp) {
   }
   return [...out].sort();
 }
+// the one certificate an end of a link shows -> ["sha-256 ab:..."], or null when it shows none, more than
+// one, or a fingerprint line this parser can't read. More than one would bind nothing: a signaling server
+// in the middle can add lines for the other link's certificates to what it forwards, and Firefox keeps
+// every line in remoteDescription and accepts a certificate that matches any of them, so both ends would
+// read the same set. (Chrome and libdatachannel show only the line they use.) A repeated line is one.
+function oneFingerprint(sdp) {
+  const lines = String(sdp || "").split(/\r?\n/).filter((l) => /^\s*a=fingerprint\s*:/i.test(l));
+  const fps = sdpFingerprints(sdp);
+  return lines.length && fps.length === 1 && lines.every((l) => /^a=fingerprint:\s*[A-Za-z0-9-]+\s+[0-9A-Fa-f:]+\s*$/.test(l)) ? fps : null;
+}
 // a PeerJS DataConnection (conn.peerConnection) or an RTCPeerConnection -> { local, remote } fingerprint
-// lists, or null when either side has none (not negotiated yet, or a runtime that hides its SDP).
-// WebRTC itself refuses a DTLS certificate that doesn't match the remote description's fingerprint,
-// so these are the certificates the link really runs on.
+// lists (one each), or null when either side has none (not negotiated yet, or a runtime that hides its
+// SDP) or more than one (oneFingerprint). WebRTC itself refuses a DTLS certificate that doesn't match the
+// remote description's fingerprint, so these are the certificates the link really runs on.
 export function linkFingerprints(connOrPc) {
   const pc = connOrPc?.peerConnection || connOrPc;
   try {
-    const local = sdpFingerprints(pc?.localDescription?.sdp), remote = sdpFingerprints(pc?.remoteDescription?.sdp);
-    if (!local.length || !remote.length) return null;
+    const local = oneFingerprint(pc?.localDescription?.sdp), remote = oneFingerprint(pc?.remoteDescription?.sdp);
+    if (!local || !remote) return null;
     return { local, remote };
   } catch { return null; }
 }
