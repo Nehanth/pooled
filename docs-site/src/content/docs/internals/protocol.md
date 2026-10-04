@@ -23,6 +23,8 @@ This page covers the shape of the protocol. Every message and field is listed in
 | Message | Direction | Meaning |
 |---|---|---|
 | `hello {name, meta, v}` | both ways, every link | First message on a link. On a version mismatch, each side says which one is older and who should reload. |
+| `auth` / `auth-proof` / `admit {via, hp, mk}` | host ↔ joining device | The joining device proves the invite key or a pass, bound to this link, and the host proves it back; never the secret itself. See [Security model](/docs/internals/security#who-is-on-a-link). |
+| `mesh {p}` | both ends, links between devices and stripes | Proof of the room's key, before the link carries anything. |
 | `ai-inv-req` / `ai-inv` | host ↔ all | Before dealing, the host asks which byte ranges of the model each device has cached. |
 | `ai-load {v, model, range, next, host}` | host → worker | Load layers `[range[0], range[1])` and forward results to `next`. |
 | `ai-wget` / `ai-wpart` / `ai-wack` | device ↔ device | Take a cached byte range from another device in 64 KB parts, with at most 8 MB unacknowledged. Any failure falls back to the network. |

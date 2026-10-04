@@ -25,6 +25,21 @@ export function guardChunks(conn) {
 }
 const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
 
+// room/chanauth.js (proving the invite key and pass without sending them): the copy built into dist/
+// (npm run build; what the npm package ships), else the checkout's
+let authP = null;
+export function loadAuth() {
+  return authP ||= (async () => {
+    let last;
+    for (const u of [new URL("../dist/chanauth.js", import.meta.url), new URL("../../room/chanauth.js", import.meta.url)]) {
+      try { return await import(u.href); } catch (e) { last = e; }
+    }
+    authP = null;
+    throw last;
+  })();
+}
+const HOST_HELLO_WAIT_MS = 2000;
+
 let PeerClass = null;
 // PeerJS is a browser library: give it RTCPeerConnection & co. (node-datachannel/polyfill) and the
 // few globals it reads, then load its CommonJS bundle (its named exports sit on default).
@@ -72,8 +87,11 @@ export function signalOpts(signal) {
 export class Bridge extends EventEmitter {
   // Peer: a PeerJS class already set up in this process (@pooled/room-node's), so one process never
   // loads two WebRTC stacks; default: load node-datachannel + peerjs here
-  constructor({ code, key = null, signal = null, name, client, log = () => {}, Peer = null }) {
+  // legacyAuth: a host from before channel-bound proofs gets the raw invite key or pass, as it used to
+  // (with a warning); POOLED_LEGACY_AUTH=0 or false: never (this client waits for the host's Allow)
+  constructor({ code, key = null, signal = null, name, client, log = () => {}, Peer = null, legacyAuth = process.env.POOLED_LEGACY_AUTH !== "0" }) {
     super();
+    this.legacyAuth = legacyAuth !== false;
     this.code = code; this.signal = signal; this.name = name; this.client = client; this.log = log; this.PeerClass = Peer;
     this.key = key;             // the room's invite key, from its link: in without the host's Allow
     this.pass = null;           // what the host gave us once it let us in: back in after a reconnect
@@ -89,11 +107,32 @@ export class Bridge extends EventEmitter {
     this.closing = false;
   }
   // join: 1 = this client can wait in the host's lobby (a host that asks before devices join holds it
-  // until the host allows it); key / pass: what lets it in without asking
-  helloMsg(back) {
-    return { t: "hello", name: this.name, v: PROTOCOL, join: 1, ...(back ? { back: 1 } : {}),
-      ...(this.pass ? { pass: this.pass } : {}), ...(this.key ? { key: this.key } : {}),
+  // until the host allows it); auth fields: what it can prove (room/chanauth.js joinerStart), never the
+  // invite key or pass themselves. legacy: the raw key and pass, for a gated host from before the proofs
+  helloMsg(back, fields = {}) {
+    return { t: "hello", name: this.name, v: PROTOCOL, join: 1, ...(back ? { back: 1 } : {}), ...fields,
       meta: { api: 1, client: this.client, webgpu: false, ua: "API" } };
+  }
+  // -> [hello fields, the link's auth state (null: nothing to check)]. Holding a key or a pass, it waits
+  // briefly for the host's hello first: it says whether the host speaks the proofs
+  async joinFields(link) {
+    const A = await loadAuth();
+    if (this.key || this.pass) {
+      const t0 = Date.now();
+      while (!link.greeted && Date.now() - t0 < HOST_HELLO_WAIT_MS && link.conn.open !== false) await new Promise((r) => setTimeout(r, 25));
+    }
+    const hh = link.greeted;
+    if (hh && hh.gate && !(+hh.auth >= A.AUTH_V) && (this.key || this.pass)) {
+      if (this.legacyAuth) {
+        this.log("this room's host runs an older Pooled: the invite key goes to it the old way, unprotected. Ask the host to update");
+        return [{ ...(this.pass ? { pass: this.pass } : {}), ...(this.key ? { key: this.key } : {}) }, null];
+      }
+      this.log("this room's host runs an older Pooled that can't check the invite key safely: waiting for it to let this client in instead");
+      const st = await A.joinerStart({});
+      return [st.helloFields, st];
+    }
+    const st = await A.joinerStart({ key: this.key, pass: this.pass });
+    return [st.helloFields, st];
   }
   // -> resolves once the host said hello with meta.api; rejects with a message for the user
   async connect() {
@@ -134,6 +173,7 @@ export class Bridge extends EventEmitter {
     const conn = this.peer.connect(PREFIX + this.code, { reliable: true });
     guardChunks(conn);
     let greeted = null, admitted = false;
+    const link = { conn, greeted: null, auth: null };
     // in: the host said hello and (a host with the gate) let us in
     const inRoom = () => {
       if (!greeted || !admitted || this.connected) return;
@@ -144,28 +184,62 @@ export class Bridge extends EventEmitter {
     conn.on("open", () => {
       if (this.conn && this.conn !== conn && this.conn.open) { try { conn.close(); } catch {} return; }
       this.conn = conn;
-      conn.send(this.helloMsg(back));
+      this.joinFields(link).then(([fields, st]) => { link.auth = st; conn.send(this.helloMsg(back, fields)); })
+        .catch((err) => { this.log(`could not prepare the join: ${err.message}`); try { conn.close(); } catch {} });
     });
+    // the host let us in: when this client proved its invite key or pass, the host must prove it back
+    // (room/chanauth.js), or this is not the room's host (or someone sits in the middle of the link)
+    const onAdmit = async (d) => {
+      const A = await loadAuth();
+      const v = link.auth ? await A.joinerCheckAdmit(link.auth, d) : "ok";
+      if (v === "tofu") this.log(`this client's invite link or pass didn't check out with the host, which let it in by hand${link.auth.sas ? ` (code ${link.auth.sas})` : ""}`);
+      if (v === "unverified" || v === "bad") {
+        this.kicked = "couldn't verify the room's host: it didn't prove it holds the invite key (the link may be from an earlier room, or someone sits in the middle of the connection)";
+        this.waiting = false;
+        this.log(this.kicked);
+        this.emit("refused", this.kicked);
+        this.emit("state");
+        try { conn.close(); } catch {}
+        return;
+      }
+      if (typeof d.pass === "string" && /^[A-Za-z0-9_-]{22,64}$/.test(d.pass)) this.pass = d.pass;
+      if (this.waiting) this.log("the host let this client in");
+      admitted = true;
+      inRoom();
+    };
     conn.on("data", (d) => {
       if (!d || typeof d.t !== "string") return;
       if (d.t === "hello" && !greeted) {
-        greeted = d;
+        greeted = d; link.greeted = d;
         this.hostMeta = d.meta || {}; this.hostName = cleanText(d.name, 40);
-        if (!d.gate) admitted = true;   // a host from before the gate lets everyone in
+        // a host from before the gate lets everyone in (and never got a key or pass from this client);
+        // holding one, this client goes in only while hosts from before the proofs are allowed
+        if (!d.gate && (this.key || this.pass) && !this.legacyAuth) {
+          this.kicked = "couldn't verify the room's host: it says it doesn't gate, so it can't prove it holds the invite key";
+          this.log(this.kicked); this.emit("refused", this.kicked); this.emit("state");
+          try { conn.close(); } catch {}
+          return;
+        }
+        if (!d.gate) admitted = true;
         inRoom();
+        return;
+      }
+      if (d.t === "auth" && !admitted && link.auth && !link.auth.hn) {   // the host's challenge
+        loadAuth().then((A) => A.joinerProof(link.auth, d, { fps: A.linkFingerprints(conn), me: this.peer?.id, host: conn.peer }))
+          .then((m) => { if (m) try { conn.send(m); } catch {} }).catch((err) => this.log(`auth: ${err.message}`));
         return;
       }
       if (d.t === "admit" && !admitted) {
-        if (typeof d.pass === "string" && /^[A-Za-z0-9_-]{22,64}$/.test(d.pass)) this.pass = d.pass;
-        if (this.waiting) this.log("the host let this client in");
-        admitted = true;
-        inRoom();
+        onAdmit(d).catch((err) => this.log(`admit: ${err.message}`));
         return;
       }
       if (d.t === "lobby" && !admitted) {
-        if (!this.waiting) this.log(`waiting for the host of room ${this.code} to let this client in (start pooled serve with the room's invite link to skip this)`);
+        if (link.auth) link.auth.lobbied = true;
+        const sas = link.auth?.sas;
+        if (!this.waiting) this.log(`waiting for the host of room ${this.code} to let this client in (start pooled serve with the room's invite link to skip this)${sas ? `; the host sees code ${sas} beside the request` : ""}`);
         this.waiting = true;
-        this.emit("lobby");
+        this.sas = sas || null;
+        this.emit("lobby", { sas: sas || null });
         this.emit("state");
         return;
       }

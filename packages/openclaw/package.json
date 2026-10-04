@@ -36,7 +36,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "esbuild index=index.js convert_worker=../room-node/convert_worker.js --bundle --platform=node --format=esm --target=node22 --external:openclaw --external:webgpu --external:@pooled/dawn-* --external:node-datachannel --external:peerjs --log-level=warning --outdir=dist",
+    "build": "esbuild index=index.js convert_worker=../room-node/convert_worker.js chanauth=../../room/chanauth.js --bundle --platform=node --format=esm --target=node22 --external:openclaw --external:webgpu --external:@pooled/dawn-* --external:node-datachannel --external:peerjs --log-level=warning --outdir=dist",
     "prepack": "npm run build",
     "test": "node --test test/*_test.mjs",
     "test:install": "sh test/pack_install.sh"

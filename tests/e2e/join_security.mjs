@@ -13,6 +13,11 @@
 //   6 pooled serve (cli/, needs `cd cli && npm ci`): with the code alone the host is asked (API client)
 //     and Allow lets it in; with the invite link it is in at once
 //   7 Ask off: a typed code gets in without a prompt
+//   8 a room node device (pooled join's, packages/room-node, no GPU) with the invite link: in at once,
+//     the host's proof checked and the room's mesh key in hand; it links to a browser tab of the room
+//     and the two prove the mesh key to each other (stripes too)
+// Proofs (room/chanauth.js): 2 and 6 come in by proving the key; 3 checks that the host's prompt and
+// the waiting tab show the same six digits.
 // --shots DIR: screenshots of the prompt and the waiting screen at 1280 and 390 wide.
 import { chromium } from "playwright";
 import http from "http";
@@ -133,6 +138,9 @@ try {
   check("3 a screen reader hears it", heard, await host.textContent("#jr-live"));
   const waitText = await typed.waitForFunction(() => /Waiting for the host to let you in/.test(document.getElementById("jw-t").textContent), null, { timeout: 15000 }).then(() => true, () => false);
   check("3 the typed tab waits", waitText && !(await inRoom(typed)) && !(await typed.isHidden("#jw-cancel")));
+  const hostSas = ((await host.textContent("#jr-sas")) || "").match(/\d{3} \d{3}/)?.[0];
+  const typedSas = await typed.waitForFunction(() => document.getElementById("join-status").textContent.match(/\d{3} \d{3}/)?.[0], null, { timeout: 5000 }).then((h) => h.jsonValue(), () => null);
+  check("3 both screens show the same six-digit code", !!hostSas && hostSas === typedSas, `${hostSas} / ${typedSas}`);
   await host.waitForTimeout(1500);
   const leaks = await typed.evaluate(() => ({ text: document.body.innerText.includes("linky"), cards: [...document.querySelectorAll(".peer-card")].map((c) => c.dataset.name) }));
   check("3 a waiting tab gets no roster", !leaks.text && !leaks.cards.includes("linky"), JSON.stringify(leaks));
@@ -194,6 +202,28 @@ try {
     const b2Prompts = await watchPrompt(host, async () => { bridge(link, PORT + 11, "cli link"); await waitHealth(PORT + 11, (h) => h.connected === true); });
     check("6 pooled serve with the invite link: in at once", (await health(PORT + 11)).connected === true && b2Prompts === 0, `prompts ${b2Prompts}`);
   } else log("SKIP 6: no cli/node_modules (cd cli && npm ci)");
+
+  // ---- 8: a room node device with the invite link, and its proved link to a browser tab ----
+  if (fs.existsSync(path.join(ROOT, "packages/room-node/node_modules/node-datachannel"))) {
+    const { joinRoom } = await import(path.join(ROOT, "packages/room-node/roomnode.js"));
+    const noGpu = async () => ({ create: () => ({ requestAdapter: async () => null }), globals: {} });
+    const key = link.split("#k=")[1];
+    const rlog = [];
+    const prompts8 = await watchPrompt(host, async () => {
+      const node = await joinRoom(room, { name: "node-dev", key, pledgeGB: 1, signal: `127.0.0.1:${SIG}`, setup: { webgpu: noGpu }, stripes: 2, selfTest: false, log: (s) => rlog.push(s) });
+      bridges.push({ kill: () => node.close().catch(() => {}) });
+      let verified = null;
+      node.on("admitted", (x) => { verified = x.verified; });
+      for (let i = 0; i < 200 && node.admission !== "in"; i++) await new Promise((r) => setTimeout(r, 100));
+      check("8 a room node device with the invite link: in, the host's proof checked, the mesh key in hand", node.admission === "in" && verified === true && !!node.mk, rlog.slice(-3).join(" | "));
+      for (let i = 0; i < 100 && !(node.members || []).some((m) => m.name === "linky"); i++) await new Promise((r) => setTimeout(r, 100));
+      const linky = (node.members || []).find((m) => m.name === "linky");
+      const linked = linky ? await node.ensureLink(linky.id, 20000) : false;
+      for (let i = 0; i < 100 && !(node.conns.get(linky?.id)?.stripes.length >= 1); i++) await new Promise((r) => setTimeout(r, 100));
+      check("8 it links to a browser tab and both prove the mesh key (a stripe too)", linked && node.conns.get(linky.id)?.stripes.length >= 1 && !rlog.some((l) => /didn't prove|no proof/.test(l)), rlog.slice(-3).join(" | "));
+    });
+    check("8 no prompt for it", prompts8 === 0, `prompts ${prompts8}`);
+  } else log("SKIP 8: no packages/room-node/node_modules (cd packages/room-node && npm ci)");
 
   // ---- 7: Ask off ----
   await host.evaluate(() => { const s = document.getElementById("ask-join"); s.checked = false; s.dispatchEvent(new Event("change")); });

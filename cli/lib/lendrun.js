@@ -306,6 +306,8 @@ async function runJoin(opts, out) {
       const v = versionFromBye(reason, rn.PROTOCOL);
       finish(v ? { type: "version", theirs: v.theirs, theyHost: true } : Object.assign(new Error(String(reason || "")), { type: "kicked" }));
     });
+    // the "host" couldn't prove it holds the invite key or pass this device proved (gate.js): leave, no rejoin
+    n.on("unverified", () => finish({ type: "unverified-host" }));
     // the host closed the room (pooled host q): over, no knocking and no rejoin
     n.on("closed", () => finish({ type: "host-closed" }));
     n.on("roomover", () => { if (!leaving && !rejoinP) rejoinP = rejoin().finally(() => { rejoinP = null; }); });
@@ -494,7 +496,8 @@ async function runHost(opts, out, prepared = null) {
   // who gets in: a device with the code alone waits in the lobby until the host answers (a / d here)
   const tty = !!process.stdin.isTTY;
   node.on("joinrequest", (r) => {
-    out.log(tty ? `${r.line}: press a to let it in, d to turn it away`
+    const code = r.sas ? ` (its screen shows code ${r.sas})` : "";
+    out.log(tty ? `${r.line}${code}: press a to let it in, d to turn it away`
       : `${r.line}: it waits (no terminal here to ask; give it the invite link, or start pooled host with --allow-all)`);
   });
   const answerJoin = async (yes) => {

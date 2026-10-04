@@ -21,7 +21,7 @@ The browsers in a room split one model's layers and pass its intermediate activa
 ## What the design gives you
 
 - **No counterparty.** There is no account, no API key, and no server that sees your conversation.
-- **Transport encryption.** WebRTC data channels are encrypted with DTLS on every hop.
+- **Transport encryption.** WebRTC data channels are encrypted with DTLS on every hop, and each link proves it is the one the two ends think it is (below), so the signaling server can't sit in the middle of it.
 - **Each device loads only its own layers**, from the public model repository or from another device in the room.
 - **You choose who sees the chat.** The room is a shared conversation by design, and everyone sees questions and answers on their own screen. The host can limit that:
 
@@ -36,6 +36,22 @@ The browsers in a room split one model's layers and pass its intermediate activa
 - **Peers see your IP address**, as with any direct WebRTC connection. `?relay=1` with a [TURN relay](/docs/self-host/turn) sends all of a device's traffic through the relay so other devices never see its address.
 
 Noise or permutation "privacy" tricks are not used on purpose. They are known to be breakable and would give a false sense of safety. For the same reason Pooled does not open rooms to strangers by default, and does not claim to be private, end-to-end encrypted or verified.
+
+## Who is on a link
+
+A room finds its devices through a **signaling server**: the public PeerJS cloud (`0.peerjs.com`, run by a third party) unless you [run your own](/docs/self-host/signaling). Signaling carries each link's offer and answer, and those name the certificates the encrypted link is checked against. A signaling server that rewrote them could put itself in the middle of a link and pass everything along. A TURN relay can't do this; it only forwards encrypted packets.
+
+So Pooled never sends a secret over a link as is:
+
+- **The invite key and passes are proved, not sent.** A joining device proves it holds the key (or the pass the host gave it) with a cryptographic proof tied to the exact link it is on: both ends' certificates, both device ids and a fresh random number from each side. The host proves the key back, so a fake host learns nothing and gets nothing it can replay. A proof made on a link someone sits in the middle of is worth nothing on the other half, so the host doesn't let that device in, and the device leaves a "host" that can't prove itself.
+- **The host keeps no plaintext pass.** It keeps each pass's SHA-256 hash, and the proof uses that hash. Someone who could read the host's saved room could use those hashes, but that same saved room already holds the invite key itself.
+- **Links between devices prove the room's key.** Every device the host lets in gets a room key. Links between devices, and the extra links the hidden state uses, prove it before they carry anything, so a stranger who dials a device, or someone in the middle of such a link, is closed out.
+
+**Allow is trust on first use.** A device that typed the code has nothing to prove. When you press Allow, you trust that link. To check it, compare the six-digit code on your prompt (and in `pooled host`'s lobby line) with the one on the joining device's waiting screen. If they match, nobody is in the middle. Checking is optional.
+
+**A room that doesn't ask** (**Ask before new devices join** off, `pooled host --allow-all`, or a room node made without the gate) lets in anyone with the code, which includes whoever runs signaling.
+
+**Older Pooled versions.** For one release, a host still accepts the raw invite key from a device that runs an older Pooled, and a new device still sends it to an older host. Both warn ("runs an older Pooled … update"). Until both ends update, someone in the middle of signaling can still pretend to be the older side and read the key. `?legacyauth=0` on the page, or `POOLED_LEGACY_AUTH=0` for the CLI and the OpenClaw plugin, turns this off now. The next release turns it off by default.
 
 ## The Serve API
 

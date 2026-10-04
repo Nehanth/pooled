@@ -42,6 +42,7 @@ Supported and stable.
 | `?wake=0` | on for phones | Every device | Turns off GPU wake, which keeps a phone's GPU clocked up between laps. `?wake=1` asks for it on any device. |
 | `?ckptdisk=0` | on | Every device | Keeps answer checkpoints in GPU memory only, not on disk, so a reload re-reads the conversation. |
 | `?wcache=0` | on | Every device | Turns off the converted-weights cache on disk. |
+| `?legacyauth=0` | on, for one release | Every device | Never trades the invite key or a pass the old way with a Pooled from before channel-bound proofs: a host ignores raw keys (the device waits for Allow) and refuses links that prove nothing; a joining device never sends its key to an older host. See [Security model](/docs/internals/security#who-is-on-a-link). |
 
 ### Context per model
 

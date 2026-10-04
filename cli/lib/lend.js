@@ -461,6 +461,7 @@ export function explainError(err, { code = "", cmd = "join", mine = 4 } = {}) {
   if (t === "unavailable-id")
     return { message: `Room code ${code} is taken.`, hint: "Pick another with --code, or leave it out for a random one.", code: 1 };
   if (t === "version") return { message: versionAdvice({ mine, theirs: err.theirs, theyHost: err.theyHost !== false, code }), code: 1 };
+  if (t === "unverified-host") return { message: "Couldn't verify the room's host: it didn't prove it holds the invite key or pass. The link may be from an earlier room, or someone may be in the middle of the connection. Join with the room code instead, or ask the host for a fresh link.", code: 1 };
   if (t === "kicked") return { message: `The host refused this device: ${cleanText(msg, 300)}`, code: 1 };
   // (OOM as a word: "This room is 4 GB short" read as a GPU out of memory through "rOOM")
   if (/out of memory|\bOOM\b|allocation failed|Failed to allocate|createBuffer/i.test(msg))
