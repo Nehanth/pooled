@@ -10,6 +10,15 @@
 //   - the host presses Allow, or
 //   - the host turned "Ask before new devices join" off.
 // Until then the device is held in the lobby: no layers, no chat, no roster.
+//
+// Neither the key nor a pass crosses the link as is: the device proves it holds one with an HMAC
+// bound to this link's DTLS fingerprints, and the host proves it back (room/chanauth.js), so a
+// signaling server that put itself in the middle of the link learns nothing it can use. A device let
+// in by Allow has no secret to prove: both screens show six digits (the SAS) that match only on a link
+// nobody sits in the middle of. Devices from before this send the raw key (`legacy`, below).
+
+import { hostWantsAuth, hostStart, hostVerify, passIdOf, newMeshKey, validMeshKey } from "./chanauth.js";
+export { hostWantsAuth };
 
 // 30 letters and digits, no I, L, O, U, 0 or 1 (easy to read aloud and to type from a screen)
 export const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789";
@@ -84,15 +93,23 @@ export const LOBBY_MAX = 8;   // requests waiting at once; more are told to try 
 export const DENIED_TEXT = "The host didn't let this device in.";
 export const OLD_TAB_TEXT = "This room's host asks before new devices join, and this tab runs an older Pooled that can't wait for that. Reload the page, then join again.";
 export const FULL_TEXT = "The host has several devices waiting to join already. Try again in a minute.";
+export const UNVERIFIED_TEXT = "This device couldn't prove it was let into this room on this link. Try again, or ask the host for a fresh invite link.";
 
 // What the host keeps (and saves with the room, so a reload keeps its links and its devices):
 //   ask     "Ask before new devices join" (default on)
 //   key     the invite key (links made before a reload keep working)
 //   passes  { hash: name } of the passes it gave out (hashes only)
+//   mk      the room's mesh key: every device let in gets it, and proves it on its links to the
+//           other devices (room/chanauth.js meshProof), so a link from outside the room is refused
 // and, for this page only, the lobby: requests waiting for Allow / Deny, oldest first.
-export function makeGate({ ask = true, key = null, passes = null, rng } = {}) {
+//   legacy  (not saved) a device from before channel-bound proofs may still send the raw key or pass
+//           in its hello: let it in with them (with a warning), or, false, ignore them
+export function makeGate({ ask = true, key = null, passes = null, mk = null, legacy = true, rng } = {}) {
   const g = {
     ask: ask !== false,
+    legacy: legacy !== false,
+    mk: validMeshKey(mk) ? mk : newMeshKey(),
+    pids: new Map(),       // pass hash -> its id (chanauth.js passIdOf), computed once each
     key: validKey(key) ? key : newKey(rng),
     passes: new Map(passes && typeof passes === "object" ? Object.entries(passes).filter(([h]) => /^[0-9a-f]{64}$/.test(h)).slice(-500) : []),
     lobby: [],             // [{ id, name, meta, at }]
@@ -103,12 +120,12 @@ export function makeGate({ ask = true, key = null, passes = null, rng } = {}) {
   return g;
 }
 export function saveGate(g) {
-  return { ask: g.ask, key: g.key, passes: Object.fromEntries([...g.passes].slice(-500)) };
+  return { ask: g.ask, key: g.key, mk: g.mk, passes: Object.fromEntries([...g.passes].slice(-500)) };
 }
 // a gate from a saved room (saveGate), or a new one when the room was saved by an older build
 export function restoreGate(saved, opts = {}) {
   if (!saved || typeof saved !== "object") return makeGate(opts);
-  return makeGate({ ...opts, ask: saved.ask, key: saved.key, passes: saved.passes });
+  return makeGate({ ...opts, ask: saved.ask, key: saved.key, passes: saved.passes, mk: saved.mk });
 }
 
 // Is this hello's device let in? hello: { name, join, key, pass, back, meta }; id: its peer id.
@@ -118,22 +135,58 @@ export function restoreGate(saved, opts = {}) {
 //  | { kind: "ask" }                                         held: the host is asked
 //  | { kind: "refuse", reason }                              a bye, and the link closes
 // Doesn't change the gate except to remember a pass it gives out (via key or open).
+// This is the old way in, for a hello that carries the raw key or pass (a device from before the
+// proofs: `legacy: true` on the answer when one let it in). A hello that speaks the proofs
+// (hostWantsAuth) goes through hostStart and decideAuth instead; until then it holds no secret here.
 export async function decide(g, id, hello) {
-  const pass = typeof hello?.pass === "string" && validKey(hello.pass) ? hello.pass : null;
+  const raw = g.legacy && !hostWantsAuth(hello);
+  const pass = raw && typeof hello?.pass === "string" && validKey(hello.pass) ? hello.pass : null;
   if (pass) {
     const h = await digest(pass);
-    for (const known of g.passes.keys()) if (sameHash(h, known)) return { kind: "admit", via: "pass", pass: null };
+    for (const known of g.passes.keys()) if (sameHash(h, known)) return { kind: "admit", via: "pass", pass: null, legacy: true };
   }
-  if (typeof hello?.key === "string" && validKey(hello.key)) {
+  if (raw && typeof hello?.key === "string" && validKey(hello.key)) {
     g.keyHash ||= await digest(g.key);
-    if (sameHash(await digest(hello.key), g.keyHash)) return { kind: "admit", via: "key", pass: await issuePass(g, hello.name) };
+    if (sameHash(await digest(hello.key), g.keyHash)) return { kind: "admit", via: "key", pass: await issuePass(g, hello.name), legacy: true };
   }
+  const r = await openOrAsk(g, id, hello);
+  // a device from before the proofs that showed a raw key or pass this host doesn't take (legacy off):
+  // the host is told why it is asked about a device that came by an invite link
+  if (!g.legacy && !hostWantsAuth(hello) && (validKey(hello?.key) || validKey(hello?.pass))) r.oldRaw = true;
+  return r;
+}
+// no secret let it in: in when the host doesn't ask, else held (or refused: an old tab, Deny, a full lobby)
+async function openOrAsk(g, id, hello) {
   if (!g.ask) return { kind: "admit", via: "open", pass: hello?.join ? await issuePass(g, hello.name) : null };
   // a tab from before this change doesn't know it may have to wait: tell it to reload
   if (!hello?.join) return { kind: "refuse", reason: OLD_TAB_TEXT };
   if (g.denied.has(id)) return { kind: "refuse", reason: DENIED_TEXT };
   if (!g.lobby.some((r) => r.id === id) && g.lobby.length >= LOBBY_MAX) return { kind: "refuse", reason: FULL_TEXT };
   return { kind: "ask" };
+}
+// the hash of a pass the host gave out, by the id a device shows for it (chanauth.js passIdOf)
+export async function passHashFor(g, pid) {
+  for (const h of g.passes.keys()) {
+    let id = g.pids.get(h);
+    if (!id) { id = await passIdOf(h); g.pids.set(h, id); }
+    if (id === pid) return h;
+  }
+  return null;
+}
+// a hello that speaks the proofs -> { pending, msg }: send msg ({ t: "auth", hn }) and wait for the
+// device's auth-proof
+export const startAuth = (g, hello) => hostStart(hello, g.rng);
+// the device's auth-proof for a pending exchange -> what decide answers, plus
+//   hp   the host's own proof, for the admit (via "key" or "pass"): the device checks it
+//   sas  six digits for both screens (null when the link shows no fingerprints)
+// link: { fps (chanauth.js linkFingerprints of the link), me (the host's peer id), peer (the device's) }
+export async function decideAuth(g, id, hello, pending, proof, link) {
+  const v = await hostVerify(pending, proof, { key: g.key, passHashFor: (pid) => passHashFor(g, pid) }, link);
+  if (v.bad) return { kind: "refuse", reason: UNVERIFIED_TEXT };
+  if (v.cred === "pass") return { kind: "admit", via: "pass", pass: null, hp: v.hp, sas: v.sas };
+  if (v.cred === "key") return { kind: "admit", via: "key", pass: await issuePass(g, hello?.name), hp: v.hp, sas: v.sas };
+  const r = await openOrAsk(g, id, hello);
+  return { ...r, sas: v.sas, ...(pending.kc || pending.pid ? { failed: true } : {}) };
 }
 async function issuePass(g, name) {
   const p = newPass(g.rng);
@@ -143,9 +196,11 @@ async function issuePass(g, name) {
 }
 
 // the lobby: a request waits here until the host answers it (or its device leaves)
-export function enqueue(g, id, name, meta, now = Date.now()) {
+// sas: the six digits this device's screen shows too (null for a device from before them)
+// old: a device from before the proofs whose raw key or pass this host doesn't take (legacy off)
+export function enqueue(g, id, name, meta, now = Date.now(), sas = null, old = false) {
   const i = g.lobby.findIndex((r) => r.id === id);
-  const r = { id, name: String(name ?? "").slice(0, 40), meta: meta || {}, at: i >= 0 ? g.lobby[i].at : now };
+  const r = { id, name: String(name ?? "").slice(0, 40), meta: meta || {}, at: i >= 0 ? g.lobby[i].at : now, sas: typeof sas === "string" ? sas : null, ...(old ? { old: true } : {}) };
   if (i >= 0) g.lobby[i] = r; else g.lobby.push(r);
   return r;
 }

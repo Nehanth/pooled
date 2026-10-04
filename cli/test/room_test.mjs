@@ -91,14 +91,17 @@ test("room codes and invite links: six characters, four still, the key from the 
 });
 
 // a stand-in PeerJS link: what the bridge sends, and the host's messages delivered by hand
+const sdp = (c) => `v=0\r\na=fingerprint:sha-256 ${Array(32).fill(c).join(":")}\r\n`;
 function fakeLink(b) {
   const handlers = {}, sent = [];
-  const conn = { open: true, on: (ev, f) => { handlers[ev] = f; }, send: (m) => sent.push(m), close() {} };
-  b.peer = { connect: () => conn };
+  const conn = { open: true, peer: "pooled-room-4TKG9P", peerConnection: { localDescription: { sdp: sdp("AA") }, remoteDescription: { sdp: sdp("BB") } },
+    on: (ev, f) => { handlers[ev] = f; }, send: (m) => sent.push(m), close() { this.closed = true; } };
+  b.peer = { id: "bridge-id", connect: () => conn };
   return { conn, sent, open: () => handlers.open(), host: (m) => handlers.data(m) };
 }
+const until = async (f, ms = 3000) => { const t0 = Date.now(); while (!f()) { if (Date.now() - t0 > ms) throw new Error("timed out"); await new Promise((r) => setTimeout(r, 10)); } };
 
-test("the bridge waits in the host's lobby, then keeps the pass it is given", () => {
+test("the bridge waits in the host's lobby, then keeps the pass it is given", async () => {
   const logs = [];
   const b = new Bridge({ code: "4TKG9P", name: "t", client: "c", log: (m) => logs.push(m) });
   const L = fakeLink(b);
@@ -106,43 +109,92 @@ test("the bridge waits in the host's lobby, then keeps the pass it is given", ()
   b.on("lobby", () => lobby++);
   b.dial(false, (h) => { greeted = h; });
   L.open();
+  await until(() => L.sent.length);
   assert.equal(L.sent[0].join, 1, "it can wait");
   assert.equal(L.sent[0].key, undefined, "no key without a link");
-  L.host({ t: "hello", name: "host", v: 4, gate: 1, ask: 1, meta: { api: 2 } });
+  assert.equal(L.sent[0].kc, undefined, "nothing to prove");
+  L.host({ t: "hello", name: "host", v: 4, gate: 1, ask: 1, auth: 1, meta: { api: 2 } });
   assert.equal(greeted, null, "a host with the gate: not in yet");
   assert.equal(b.connected, false);
   L.host({ t: "ai-ready-all", model: "m" });
   assert.equal(b.ready, false, "nothing from the room before admit");
+  L.host({ t: "auth", v: 1, hn: "HnHnHnHnHnHnHnHnHnHnHn" });
+  await until(() => L.sent.some((m) => m.t === "auth-proof"));
   L.host({ t: "lobby" });
   assert.equal(b.waiting, true); assert.equal(lobby, 1);
-  assert.match(logs.join("\n"), /waiting for the host of room 4TKG9P/);
+  assert.match(logs.join("\n"), /waiting for the host of room 4TKG9P.*code \d{3} \d{3}/);
   L.host({ t: "admit", pass: KEY });
+  await until(() => b.connected);
   assert.equal(greeted?.name, "host");
-  assert.equal(b.connected, true); assert.equal(b.waiting, false);
+  assert.equal(b.waiting, false);
   assert.equal(b.pass, KEY);
-  assert.equal(b.helloMsg(true).pass, KEY, "a reconnect shows the pass");
 });
 
-test("the bridge: an invite key goes in the hello; an older host lets it in at once; Deny is final", () => {
-  const b = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c" });
-  let L = fakeLink(b), greeted = null;
+test("the bridge: the invite key is proved, never sent; a wrong host proof is refused; an older host never gets it", async () => {
+  // a host that speaks the proofs
+  const a = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: () => {} });
+  let L = fakeLink(a);
+  const refusedA = [];
+  a.on("refused", (w) => refusedA.push(w));
+  a.dial(false, () => { throw new Error("must not get in"); });
+  L.open();
+  L.host({ t: "hello", name: "host", v: 4, gate: 1, ask: 1, auth: 1, meta: { api: 2 } });
+  await until(() => L.sent.length);
+  assert.equal(L.sent[0].key, undefined); assert.equal(L.sent[0].kc, 1); assert.match(L.sent[0].jc, /^[0-9a-f]{64}$/);
+  L.host({ t: "auth", v: 1, hn: "HnHnHnHnHnHnHnHnHnHnHn" });
+  await until(() => L.sent.some((m) => m.t === "auth-proof"));
+  assert.ok(!JSON.stringify(L.sent).includes(KEY), "the key never crossed");
+  L.host({ t: "admit", via: "key", hp: "0".repeat(64) });
+  await until(() => refusedA.length);
+  assert.match(refusedA[0], /couldn't verify the room's host/); assert.equal(a.connected, false); assert.ok(L.conn.closed);
+  // a host from before the gate: in at once, nothing sent
+  const b = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: () => {} });
+  L = fakeLink(b);
+  let greeted = null;
   b.dial(false, (h) => { greeted = h; });
   L.open();
-  assert.equal(L.sent[0].key, KEY);
   L.host({ t: "hello", name: "old host", v: 4, meta: { api: 2 } });   // no gate: 1
   assert.equal(greeted?.name, "old host");
   assert.equal(b.connected, true);
-
-  const c = new Bridge({ code: "4TKG9P", name: "t", client: "c" });
-  L = fakeLink(c);
+  await until(() => L.sent.length);
+  assert.equal(L.sent[0].key, undefined);
+  // a gated host from before the proofs: never the raw key (it waits for Allow), unless the unsafe opt-in
+  for (const legacySend of [true, false]) {
+    const logs = [];
+    const c = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: (m) => logs.push(m), legacySend });
+    L = fakeLink(c);
+    c.dial(false, () => {});
+    L.open();
+    L.host({ t: "hello", name: "older host", v: 4, gate: 1, ask: 1, meta: { api: 2 } });
+    await until(() => L.sent.length);
+    assert.equal(L.sent[0].key, legacySend ? KEY : undefined);
+    assert.match(logs.join("\n"), /older Pooled/);
+  }
+  // the default: no raw key, and the lobby hint fits a client that came with a link
+  {
+    const logs = [];
+    const c = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: (m) => logs.push(m) });
+    L = fakeLink(c);
+    c.dial(false, () => {});
+    L.open();
+    L.host({ t: "hello", name: "older host", v: 4, gate: 1, ask: 1, meta: { api: 2 } });
+    await until(() => L.sent.length);
+    assert.equal(L.sent[0].key, undefined);
+    L.host({ t: "lobby" });
+    assert.match(logs.join("\n"), /older Pooled.*ask them to let this client in/);
+    assert.doesNotMatch(logs.join("\n"), /with the room's invite link to skip this/);
+  }
+  // Deny is final
+  const d = new Bridge({ code: "4TKG9P", name: "t", client: "c", log: () => {} });
+  L = fakeLink(d);
   const refused = [];
-  c.on("refused", (why) => refused.push(why));
-  c.dial(false, () => { throw new Error("must not get in"); });
+  d.on("refused", (why) => refused.push(why));
+  d.dial(false, () => { throw new Error("must not get in"); });
   L.open();
   L.host({ t: "hello", name: "host", v: 4, gate: 1, ask: 1, meta: { api: 2 } });
   L.host({ t: "lobby" });
   L.host({ t: "bye", reason: "The host didn't let this device in." });
   assert.deepEqual(refused, ["The host didn't let this device in."]);
-  assert.equal(c.kicked, "The host didn't let this device in.");
-  assert.equal(c.connected, false);
+  assert.equal(d.kicked, "The host didn't let this device in.");
+  assert.equal(d.connected, false);
 });

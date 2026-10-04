@@ -3,6 +3,8 @@
 // it). The room replaces such a link instead of waiting on it forever. room.js is DOM-bound, so
 // room_src.js cuts the real functions out of its source and runs them over stubs here.
 import { roomFns } from "./room_src.js";
+import { joinerStart, AUTH_V } from "../../room/chanauth.js";
+import { validKey } from "../../room/joingate.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -25,7 +27,7 @@ class FakeConn {
   close() { this.closed++; if (this.open) { this.open = false; this.emit("close"); } }
 }
 
-const NAMES = ["watchLink", "linkDied", "relink", "retire", "chainLinkLost", "linkState", "noteLink", "linksUp", "helloFor"];
+const NAMES = ["watchLink", "linkDied", "relink", "retire", "chainLinkLost", "linkState", "noteLink", "linksUp", "helloFor", "linkOpened", "joinHello"];
 function setup({ role = "host", chain = [], waiters = 0, relinkWait = 40, pass = "", key = "" } = {}) {
   const logs = [], dialed = [], wired = [], sentTo = [], failed = [];
   const conns = new Map();
@@ -37,7 +39,9 @@ function setup({ role = "host", chain = [], waiters = 0, relinkWait = 40, pass =
     isHost: role === "host", myPass: pass, joinKey: key,
     linksDown: new Map(), performance,
     log: (_f, t) => logs.push(t),
-    wire: (c, name, meta, initiator) => { const e = { conn: c, name, meta, initiator, stripes: [] }; conns.set(c.peer, e); wired.push(e); return e; },
+    wire: (c, name, meta, initiator, opts) => { const e = { conn: c, name, meta, initiator, stripes: [], hold: opts?.hold || null }; conns.set(c.peer, e); wired.push(e); return e; },
+    meshKey: null, sendMesh: (c, role) => c.send({ t: "mesh", v: 1, none: 1, role }),
+    AUTH_V, joinerStart, validKey, HOST_HELLO_WAIT_MS: 0, LEGACY_AUTH: true, toast: () => {},
     sendTo: (id, obj) => sentTo.push([id, obj]),
     failWaiters: (err) => { failed.push(err.message); ai.waiters.clear(); },
     ckptClear: () => {},
@@ -66,14 +70,17 @@ Deno.test("relink: a link whose peer connection fails is redialed by the side th
   ok(!("pass" in hello) && !("join" in hello), "to another device: no pass");
 });
 
-Deno.test("relink: the redial to the host shows the pass the host gave this device, and never to anyone else", () => {
+Deno.test("relink: the redial to the host proves the pass the host gave this device (never sends it), and shows nothing to anyone else", async () => {
   const P = "AbCdEfGhIjKlMnOpQrStUv", K = "ZyXwVuTsRqPoNmLkJiHgFe";
   const t = setup({ role: "worker", pass: P, key: K });
   const h = t.entry("pooled-room-ABCD", true);
   h.conn.peerConnection.set("failed");
   const c = t.dialed[0]; c.open = true; c.emit("open");
+  for (let i = 0; i < 50 && !c.sent.some((m) => m.t === "hello"); i++) await sleep(10);
   const hello = c.sent.find((m) => m.t === "hello");
-  eq([hello.join, hello.pass, hello.key, hello.back], [1, P, K, 1], "the host lets it back in without asking");
+  eq([hello.join, hello.pass, hello.key, hello.back, hello.kc, hello.auth], [1, undefined, undefined, 1, 1, 1], "what it can prove, so the host lets it back in without asking");
+  ok(/^[0-9a-f]{32}$/.test(hello.pid) && /^[0-9a-f]{64}$/.test(hello.jc), JSON.stringify(hello));
+  eq(t.wired[0].hold, "host", "held until the host proves itself back");
   const o = t.entry("peerC", true);
   o.conn.peerConnection.set("failed");
   const c2 = t.dialed[1]; c2.open = true; c2.emit("open");

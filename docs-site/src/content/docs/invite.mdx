@@ -49,6 +49,7 @@ The new device's memory is added to the room. Check the header for how many GB t
 - **Your invite link or QR code** lets a device in at once. It carries a key that only the room's creator shares.
 - **The code alone** needs your OK. Denied devices see `The host didn't let this device in.`
 - A device you let in comes back after a reload without asking again.
+- Your prompt shows a six-digit code, and so does the joining device's waiting screen. If they match, nobody sits between the two devices. See [Security model](/docs/internals/security#who-is-on-a-link).
 
 To let anyone with the code in, turn off **Room settings → Joining → Ask before new devices join**.
 

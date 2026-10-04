@@ -59,10 +59,11 @@ import { pledgeGB, afterLoadDeath, offloadFor } from "../../room/pledge.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes } from "../../engine/gguf.js";
 import { guardChunks } from "../../cli/lib/room.js";
 import { parseServer, openPeer, reconnectDelay, FALLBACK_ERRORS } from "../../room/signal.js";
+import { AUTH_V } from "../../room/chanauth.js";
 import { withDefaults, finishRequest, askBody, needsV2, ApiError } from "../../cli/lib/common.js";
 import { chatRecipients } from "../../room/visibility.js";
 import { Ask, Collector } from "../../cli/lib/answer.js";
-import { hostGate, gateHelloFields, holdConn, allowJoin, denyJoin, waitingJoins, joinHelloFields, deviceGateMessage, onHostHello,
+import { hostGate, gateHelloFields, holdConn, allowJoin, denyJoin, waitingJoins, joinHello, deviceGateMessage, onHostHello, meshHello, meshVerdict,
   keyFragment, randomCode, CODE_LEN } from "./gate.js";
 
 export const PREFIX = "pooled-room-";
@@ -72,6 +73,10 @@ export const randCode = (n = 4) => Array.from(crypto.getRandomValues(new Uint32A
 export const RELINK_MS = 15000;      // how long the host waits for an ai-linked (an older device never sends one)
 export const HOST_WAIT_MS = 60000;   // a worker knocks on the host id this long after the host link dropped
 // messages only the room's host (or the device it made model host) may send
+// what passes a held link (wire hold): pings both ways, a departure, and on the link to the host, its gate
+const PASS_HELD = new Set(["ping", "pong", "leaving", "mesh", "hello", "auth-proof", "bye"]);
+const HOST_HANDSHAKE = new Set(["hello", "auth", "lobby", "admit", "bye"]);
+const MESH_WAIT_MS = 10000;
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
   "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-load", "ai-share", "ai-wake", "ai-ckpt-save", "ai-ckpt-load"]);
@@ -102,6 +107,7 @@ export class RoomNode extends EventEmitter {
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
     gbps = null, autoRedeal = true, ckpt = {}, ckptDisk, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory",
+    legacyAuth = process.env.POOLED_LEGACY_AUTH !== "0", legacySend = process.env.POOLED_LEGACY_AUTH === "1",
     ramGB = 0, mem = null, offloadSpec = parseForce(process.env.POOLED_OFFLOAD_SPEC) } = {}) {
     super();
     // offloadSpec: speculative decoding while the deal has a device offloading experts (room/plan.js
@@ -128,6 +134,13 @@ export class RoomNode extends EventEmitter {
     // the links waiting in its lobby
     this.key = key; this.pass = pass; this.admission = null;
     this.gate = null; this.lobbyConns = new Map(); this.protocol = PROTOCOL;
+    // the room's mesh key (the host's gate makes it, its admit hands it to each device): every link
+    // between two devices, and every stripe, proves it before it carries anything (gate.js meshHello).
+    // legacyAuth (a host, for one release): a device from before the proofs may still send the raw key or
+    // pass, and link without a proof when the host's roster says it is one (POOLED_LEGACY_AUTH=0: never).
+    // legacySend (a device; off by default, unsafe): send the raw key or pass to a gated host from before
+    // the proofs, as before (POOLED_LEGACY_AUTH=1). Anyone in the middle of signaling can pose as one
+    this.mk = null; this.legacyAuth = legacyAuth !== false; this.legacySend = legacySend === true;
     this.setup = setup;   // setupNode options (webgpu: a loader for Dawn, dawnFlags)
     // a worker: the host's name it will serve under this code (a rejoin after the room was over).
     // Room codes are short and reusable; a host of another name is another room, which this device
@@ -244,15 +257,75 @@ export class RoomNode extends EventEmitter {
       if (conn.label === "stripe") {   // extra association for the wire, not a new peer
         const e = this.conns.get(conn.peer);
         if (e) this.attachStripe(e, conn);
+        else try { conn.close(); } catch {}
         return;
       }
-      this.wire(conn);
+      // a link from another device of the room: held until it proves the room's mesh key
+      this.wire(conn, undefined, false, { hold: this.mk ? "mesh" : null });
       conn.send(this.helloMsg());
+      this.sendMesh(conn, "accept");
     });
   }
   // (a host's meta names the model it will run, so a device joining before Start can say which)
-  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax(), ...(this.ai.model ? { model: this.ai.model } : {}) } : this.meta, v: PROTOCOL, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
-  attachStripe(e, conn) { attachWire(e.link, conn, (m) => this.onData(conn.peer, m)); e.stripes.push(conn); }
+  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax(), ...(this.ai.model ? { model: this.ai.model } : {}) } : this.meta, v: PROTOCOL, auth: AUTH_V, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
+  // a stripe (an extra association for the wire) joins the link's wire once it proved the mesh key
+  attachStripe(e, conn) { this.proveStripe(e, conn, "accept"); }
+  attachStripeNow(e, conn) { if (e.stripes.includes(conn)) return; attachWire(e.link, conn, (m) => this.onData(conn.peer, m)); e.stripes.push(conn); }
+  proveStripe(e, sc, role) {
+    if (!this.mk) { this.attachStripeNow(e, sc); this.sendMesh(sc, role); return; }
+    let done = false;
+    const finish = (v) => {
+      if (done) return;
+      done = true; clearTimeout(timer);
+      if (this.conns.get(sc.peer) !== e) { try { sc.close(); } catch {} return; }
+      if (v === "ok" || v === "legacy") this.attachStripeNow(e, sc);
+      else { this.log(`a stripe to ${e.name} didn't prove it belongs to this room: closed it`); try { sc.close(); } catch {} }
+    };
+    const timer = setTimeout(() => meshVerdict(this, sc, role, null).then((v) => finish(v === "legacy" ? v : "bad")), MESH_WAIT_MS);
+    timer.unref?.();
+    sc.on("data", (d) => { if (!done && d?.t === "mesh") meshVerdict(this, sc, role, d).then((v) => { if (v !== "wait") finish(v); }); });
+    this.sendMesh(sc, role);
+    // a device the host listed as one from before the proofs sends none: no point waiting for it
+    meshVerdict(this, sc, role, null).then((v) => { if (v === "legacy") finish(v); });
+  }
+  sendMesh(conn, role) { meshHello(this, conn, role).then((m) => { try { conn.send(m); } catch {} }).catch(() => {}); }
+  // a held link: what it sent waits (up to 256 messages), what this device sends it waits too, until
+  // it proves the mesh key ("mesh") or the host lets this device in ("host")
+  holdLink(e, kind) {
+    e.hold = { kind, q: [], out: [] };
+    if (kind === "mesh") {
+      e.hold.timer = setTimeout(() => {
+        if (!e.hold || this.conns.get(e.conn.peer) !== e) return;
+        meshVerdict(this, e.conn, e.initiator ? "dial" : "accept", null).then((v) => {
+          if (!e.hold) return;
+          if (v === "legacy") { this.release(e, "legacy"); return; }
+          this.log(`${e.name}: no proof that this link belongs to the room in ${MESH_WAIT_MS / 1000} s: closing it`);
+          this.dropLink(e.conn.peer);
+        });
+      }, MESH_WAIT_MS);
+      e.hold.timer.unref?.();
+    }
+  }
+  release(e, why = "ok") {
+    const h = e?.hold;
+    if (!h) return;
+    e.hold = null; clearTimeout(h.timer);
+    const id = e.conn.peer;
+    if (why === "legacy") this.log(`${e.name}: linked without a proof (an older Pooled)`);
+    if (h.kind === "host" && e.stripesLater) this.dialStripes(e);
+    for (const m of h.out) this.sendTo(id, m);
+    for (const m of h.q) this.onData(id, m);
+  }
+  async meshIn(e, d) {
+    const h = e.hold;
+    if (!h || h.kind !== "mesh") return;
+    const v = await meshVerdict(this, e.conn, e.initiator ? "dial" : "accept", d);
+    if (e.hold !== h) return;
+    if (v === "wait") { h.waitOn = d; return; }   // asked again when the roster comes (roster)
+    if (v === "ok" || v === "legacy") { this.release(e, v); return; }
+    this.log(`${e.name}: the link didn't prove it belongs to this room (someone else, or someone in the middle): closing it`);
+    this.dropLink(e.conn.peer);
+  }
   // host: the room's invite link fragment (#k=...), and Allow / Deny for a device in the lobby
   get inviteFragment() { return keyFragment(this.gate?.key); }
   allowJoin(id) { return allowJoin(this, id); }
@@ -260,12 +333,16 @@ export class RoomNode extends EventEmitter {
   waitingJoins() { return waitingJoins(this); }
   // a new link replaces any older one to the same peer id (a device that came back): the old one's
   // close handler sees it is not current and does nothing
-  wire(conn, name, initiator = false) {
+  // opts.hold: "mesh" (a link to another device: held until it proves the room's mesh key) or "host"
+  // (this device's link to the room's host: held until the host let it in, its proof checked);
+  // opts.stripesLater: open the stripes once the hold is over
+  wire(conn, name, initiator = false, { hold = null, stripesLater = false } = {}) {
     const old = this.conns.get(conn.peer);
     // a device in the creator's roster: its name and meta from there until its hello says (the hello is
     // the first message on the link, and WebRTC can lose that one: room.js wire)
     const known = old ? null : (this.members || []).find((m) => m.id === conn.peer);
-    const e = { conn, name: name || old?.name || known?.name || conn.peer, meta: old?.meta || known?.meta || {}, link: makeLink(), stripes: [], seen: performance.now(), missed: 0, rtt: old?.rtt ?? null };
+    const e = { conn, name: name || old?.name || known?.name || conn.peer, meta: old?.meta || known?.meta || {}, link: makeLink(), stripes: [], seen: performance.now(), missed: 0, rtt: old?.rtt ?? null, initiator, stripesLater: !!(hold && stripesLater) };
+    if (hold) this.holdLink(e, hold);
     this.conns.set(conn.peer, e);
     if (old && old.conn !== conn) {
       for (const s of old.stripes) try { s.close(); } catch {}
@@ -276,43 +353,55 @@ export class RoomNode extends EventEmitter {
     }
     if (this.stripes > 0) {
       attachWire(e.link, conn, (m) => this.onData(conn.peer, m));
-      if (initiator) for (let i = 1; i < this.stripes; i++) {
-        const sc = this.peer.connect(conn.peer, { reliable: true, label: "stripe" });
-        if (!sc) continue;
-        sc.on("open", () => attachWire(e.link, sc, (m) => this.onData(conn.peer, m)));
-        sc.on("error", () => {});
-        e.stripes.push(sc);
-      }
+      if (initiator && !e.stripesLater) this.dialStripes(e);
     }
     conn.on("data", (d) => this.onData(conn.peer, d));
     conn.on("close", () => { const x = this.conns.get(conn.peer); if (!x || x.conn !== conn) return; this.peerGone(conn.peer, x); });
     conn.on("error", () => {});
     return e;
   }
-  sendTo(id, obj) { try { this.conns.get(id)?.conn.send(obj); } catch {} }
+  // extra associations for the wire (the side that dialed opens them); each proves the mesh key first
+  dialStripes(e) {
+    const id = e.conn.peer;
+    for (let i = 1; i < this.stripes; i++) {
+      const sc = this.peer.connect(id, { reliable: true, label: "stripe" });
+      if (!sc) continue;
+      guardChunks(sc);
+      sc.on("open", () => this.proveStripe(e, sc, "dial"));
+      sc.on("error", () => {});
+    }
+  }
+  sendTo(id, obj) {
+    const e = this.conns.get(id);
+    if (e?.hold && !PASS_HELD.has(obj?.t)) { if (e.hold.out.length < 256) e.hold.out.push(obj); return; }
+    try { e?.conn.send(obj); } catch {}
+  }
   broadcast(obj, filter = () => true) { for (const [id, e] of this.conns) if (filter(id, e)) this.sendTo(id, obj); }
   sendHidden(id, msg) {
     const e = this.conns.get(id);
     this.sent ||= { wire: 0, msg: 0 };
+    if (e?.hold) { this.sendTo(id, msg); return; }
     if (e?.link && wireReady(e.link) && sendFrame(e.link, msg)) { this.sent.wire++; return; }
     this.sent.msg++;
     this.sendTo(id, msg);   // PeerJS message fallback, as room.js
   }
+  // a link up and proved (not held)
+  linked(id) { const e = this.conns.get(id); return !!e && !e.hold; }
   ensureLink(id, timeoutMs = 60000) {
-    if (!id || id === "host" || this.conns.has(id)) return Promise.resolve(true);
-    if (!this.pending.has(id)) {
+    if (!id || id === "host" || this.linked(id)) return Promise.resolve(true);
+    if (!this.pending.has(id) && !this.conns.has(id)) {
       this.pending.set(id, true);
       const conn = this.peer.connect(id, { reliable: true });
       if (conn) {
         guardChunks(conn);
-        conn.on("open", () => { this.wire(conn, undefined, true); conn.send(this.helloMsg()); });
+        conn.on("open", () => { this.wire(conn, undefined, true, { hold: this.mk ? "mesh" : null }); conn.send(this.helloMsg()); this.sendMesh(conn, "dial"); });
         conn.on("error", () => {});
       }
     }
     return new Promise((res) => {
       const t0 = performance.now();
       const t = setInterval(() => {
-        if (this.conns.has(id)) { clearInterval(t); this.pending.delete(id); res(true); }
+        if (this.linked(id)) { clearInterval(t); this.pending.delete(id); res(true); }
         else if (performance.now() - t0 > timeoutMs) { clearInterval(t); this.pending.delete(id); res(false); }
       }, 100);
     });
@@ -339,7 +428,8 @@ export class RoomNode extends EventEmitter {
     this.emit("members");
   }
   broadcastRoster() {
-    const members = [{ id: this.peer.id, name: this.name, meta: this.meta }, ...[...this.roster].map(([id, m]) => ({ id, ...m }))];
+    // a: 1 = it proves its links (chanauth.js); a link from one without it is a device from before them
+    const members = [{ id: this.peer.id, name: this.name, meta: this.meta, ...(this.mk ? { a: 1 } : {}) }, ...[...this.roster].map(([id, m]) => ({ id, ...m }))];
     this.broadcast({ t: "roster", members });
   }
   pingTick() {
@@ -368,6 +458,18 @@ export class RoomNode extends EventEmitter {
     if (!d || typeof d.t !== "string") return;
     if (process.env.RN_DEBUG && d.t !== "ping" && d.t !== "pong") this.log(`<- ${d.t} from ${e?.name || from}`);
     if (this.otherHost && from === PREFIX + this.code) return;   // a stranger's room under this code: nothing from it
+    // a held link: only what proves it gets through (and pings, so it isn't dropped as silent)
+    if (e?.hold) {
+      if (e.hold.kind === "mesh" && d.t === "mesh") { this.meshIn(e, d).catch(() => {}); return; }
+      const pass = d.t === "ping" || d.t === "pong" || d.t === "leaving" || (e.hold.kind === "host" && HOST_HANDSHAKE.has(d.t));
+      if (!pass) {
+        // a device from before the proofs says hello without auth: it sends no mesh message either
+        if (e.hold.kind === "mesh" && d.t === "hello" && !(+d.auth >= AUTH_V)) this.meshIn(e, d).catch(() => {});
+        if (e.hold.q.length < 256) e.hold.q.push(d);
+        return;
+      }
+    }
+    if (d.t === "mesh") return;   // a proof on a link that needs none (or one already proved)
     if (d.t.startsWith("ai-")) { this.aiOnData(from, d).catch((err) => this.log("error: " + err.message)); return; }
     switch (d.t) {
       case "hello": {
@@ -416,7 +518,7 @@ export class RoomNode extends EventEmitter {
             return;
           }
         }
-        if (!this.isHost && from === PREFIX + this.code) onHostHello(this, d);
+        if (!this.isHost && from === PREFIX + this.code) onHostHello(this, d, from);
         d.meta = helloMeta(d.meta, this.isHost);
         // a device coming back under its own name while its old link is still open but silent (a
         // phone back from a lock): the old link is dead, drop it now (room.js dropStaleNamesake)
@@ -431,7 +533,7 @@ export class RoomNode extends EventEmitter {
         e.name = d.name; e.meta = d.meta || {};
         if (this.isHost) {
           if (d.meta?.api) this.ai.apis.set(from, { name: d.name, client: d.meta.client });
-          this.roster.set(from, { name: d.name, meta: d.meta });
+          this.roster.set(from, { name: d.name, meta: d.meta, ...(+d.auth >= AUTH_V ? { a: 1 } : {}) });
           this.broadcastRoster();
           if (this.visibility !== "all") this.sendTo(from, { t: "ai-visibility", mode: this.visibility });
           if (this.hosting() && !this.loadDeath(from, d)) this.rejoin(from, d.name);
@@ -447,7 +549,7 @@ export class RoomNode extends EventEmitter {
         return;
       }
       case "leaving": try { e?.conn.close(); } catch {} return;
-      case "lobby": case "admit": if (!this.isHost && from === PREFIX + this.code) deviceGateMessage(this, d); return;
+      case "lobby": case "admit": case "auth": if (!this.isHost && from === PREFIX + this.code) deviceGateMessage(this, d, from); return;
       case "bye":
         // the host closed the room for good (pooled host q): no knocking, the room is over
         if (!this.isHost && from === PREFIX + this.code && d.closed) {
@@ -464,6 +566,8 @@ export class RoomNode extends EventEmitter {
           const c = this.conns.get(m.id); if (c) { c.meta = m.meta || {}; c.name = m.name; }
           if (m.id === this.peer.id && m.name && m.name !== this.name) this.name = m.name;   // the host made it unique
         }
+        // links that waited to see whether the roster lists their device as one from before the proofs
+        for (const [, c] of this.conns) if (c.hold?.waitOn) { const w = c.hold.waitOn; c.hold.waitOn = null; this.meshIn(c, w).catch(() => {}); }
         this.emit("members");
         return;
       case "ping": this.sendTo(from, { t: "pong", ts: d.ts }); return;
@@ -669,6 +773,7 @@ export class RoomNode extends EventEmitter {
     this.log("lost the link to the host");
     this.admission = null;   // back in through the gate (with the pass it was given) when it knocks
     if (this.roomClosed) return;   // the host said it closed the room: nothing to wait for
+    if (this.authFailed) { this.emit("roomover"); return; }   // the "host" couldn't prove itself: don't knock on it again
     this.emit("hostgone");
     if (this.closing || this.knock || this.otherHost) return;
     const hostId = PREFIX + this.code, t0 = Date.now();
@@ -688,8 +793,9 @@ export class RoomNode extends EventEmitter {
       conn.on("open", () => {
         if (this.conns.has(hostId)) { try { conn.close(); } catch {} return; }
         clearInterval(this.knock); this.knock = null;
-        this.wire(conn, "host", true);
-        conn.send(this.helloMsg({ back: 1, ...joinHelloFields(this) }));
+        this.wire(conn, "host", true, { hold: "host", stripesLater: true });
+        this.admission = "wait";
+        joinHello(this, conn).then((f) => conn.send(this.helloMsg({ back: 1, ...f })));
         ai.hostId = hostId;
         this.log("back in the room");
         this.emit("back");
@@ -1571,7 +1677,7 @@ export function eventEncoder(push) {
 export async function createRoom({ model = "qwen3-1.7b", pledgeGB, code = randomCode(CODE_LEN), ask = true, gate = false, gateState = null, ...opts } = {}) {
   const node = new RoomNode({ pledgeGB, ...opts });
   node.isHost = true; node.code = code; node.ai.model = model; node.ai.role = "host";
-  if (gate) node.gate = hostGate({ ask, saved: gateState });   // gateState: gate.js saveGate() from an earlier run
+  if (gate) { node.gate = hostGate({ ask, saved: gateState, legacy: node.legacyAuth }); node.mk = node.gate.mk; }   // gateState: gate.js saveGate() from an earlier run
   await node.open(PREFIX + code);
   return node;
 }
@@ -1594,8 +1700,8 @@ export async function joinRoom(code, { pledgeGB, joinMs = 20000, ...opts } = {})
       const conn = node.peer.connect(hostId, { reliable: true });
       guardChunks(conn);
       conn.on("open", () => {
-        node.wire(conn, "host", true);
-        conn.send(node.helloMsg(joinHelloFields(node)));
+        node.wire(conn, "host", true, { hold: "host", stripesLater: true });
+        joinHello(node, conn).then((f) => conn.send(node.helloMsg(f)));
         clearTimeout(t); node.peer.off("error", onPeerErr); resolve();
       });
       conn.on("error", (e) => fail(e));

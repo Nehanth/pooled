@@ -162,7 +162,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
     if (chatting || leaving) return;
     const ranges = node.ai.layersByName || null;
     S.devices = devicesFrom(node, lib, { pct, ranges: S.step === "online" || S.step === "starting" ? ranges : null });
-    S.lobby = node.waitingJoins().map((r) => ({ id: r.id, line: r.line }));
+    S.lobby = node.waitingJoins().map((r) => ({ id: r.id, line: r.line, sas: r.sas || null, old: !!r.old }));
     if (opts.denyUnknown) for (const r of S.lobby) node.denyJoin(r.id);
     if (opts.denyUnknown) S.lobby = [];
     const gpu = S.devices.filter((d) => d.gb != null);
@@ -183,7 +183,8 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   node.on("short", (note) => { if (!starting && S.step === "online") { S.step = "room"; S.notice = note; } refresh(); });
   node.on("members", () => refresh());
   node.on("joinrequests", () => refresh());
-  node.on("joinrequest", (r) => { if (!opts.denyUnknown) log(`${r.line}: press a to let it in, d to turn it away`); });
+  // sas: the six digits the device's screen shows too; they match only when nobody sits in the middle
+  node.on("joinrequest", (r) => { if (!opts.denyUnknown) log(`${r.line}${r.old ? " (an older Pooled: it can't prove the invite key)" : ""}${r.sas ? ` (its screen shows code ${r.sas})` : ""}: press a to let it in, d to turn it away`); });
   node.on("version", (v) => log(`${v.name || "a device"} can't join: it runs ${v.theirs > rn.PROTOCOL ? "a newer" : "an older"} Pooled (protocol ${v.theirs}, this pooled ${rn.PROTOCOL})`));
 
   // ---- keys

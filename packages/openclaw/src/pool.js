@@ -122,7 +122,7 @@ async function openRoom(s, log) {
     r.persist();
     r.node.on("members", r.persist);
     r.node.on("joinrequests", r.persist);
-    r.node.on("joinrequest", (q) => note(`${q.line}: /pooled allow lets it in, /pooled deny turns it away`));
+    r.node.on("joinrequest", (q) => note(`${q.line}${q.old ? " (an older Pooled: it can't prove the invite key)" : ""}${q.sas ? ` (its screen shows code ${q.sas})` : ""}: /pooled allow lets it in, /pooled deny turns it away`));
     if (s.pull && !isPulled(s.modelDir, s.model)) startPull(r);
   } else if (s.mode === "join") {
     const code = parseCode(s.code || "");
@@ -139,10 +139,11 @@ async function openRoom(s, log) {
       const hm = r.node.conns.get(r.P.PREFIX + code)?.meta;
       try { saveJoinState(code, { pass: validKey(r.node.pass) ? r.node.pass : null, host: r.node.hostName || null, model: hm?.model || null }); } catch {}
     };
-    r.node.on("lobby", () => note(`waiting for the host of room ${fmtCode(code)} to let this device in (it sees "${r.node.name} wants to join")`));
+    r.node.on("lobby", (x) => note(`waiting for the host of room ${fmtCode(code)} to let this device in (it sees "${r.node.name} wants to join"${x?.sas ? ` with code ${x.sas}` : ""})`));
     r.node.on("admitted", remember);
     r.node.on("members", remember);
     r.node.on("bye", (why) => { if (r.node.admission !== "in") r.refused = why || "the host turned this device away"; });
+    r.node.on("unverified", () => { r.refused = "couldn't verify the room's host: its proof of the invite key or pass is wrong (someone may be in the middle of the connection)"; });
   } else throw new PooledError("setup", `unknown Pooled mode ${s.mode}`);
   r.link = roomLink(r.code, { key: r.key, signal: s.page ? null : s.signal });
   // the link without the invite key: for chat text and logs, which other people may read (a group
