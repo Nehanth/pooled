@@ -130,7 +130,7 @@ test("the bridge waits in the host's lobby, then keeps the pass it is given", as
   assert.equal(b.pass, KEY);
 });
 
-test("the bridge: the invite key is proved, never sent; a wrong host proof is refused; an older host gets it the old way", async () => {
+test("the bridge: the invite key is proved, never sent; a wrong host proof is refused; an older host never gets it", async () => {
   // a host that speaks the proofs
   const a = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: () => {} });
   let L = fakeLink(a);
@@ -158,17 +158,31 @@ test("the bridge: the invite key is proved, never sent; a wrong host proof is re
   assert.equal(b.connected, true);
   await until(() => L.sent.length);
   assert.equal(L.sent[0].key, undefined);
-  // a gated host from before the proofs: the raw key, with a warning (legacy on) or not at all (off)
-  for (const legacyAuth of [true, false]) {
+  // a gated host from before the proofs: never the raw key (it waits for Allow), unless the unsafe opt-in
+  for (const legacySend of [true, false]) {
     const logs = [];
-    const c = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: (m) => logs.push(m), legacyAuth });
+    const c = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: (m) => logs.push(m), legacySend });
     L = fakeLink(c);
     c.dial(false, () => {});
     L.open();
     L.host({ t: "hello", name: "older host", v: 4, gate: 1, ask: 1, meta: { api: 2 } });
     await until(() => L.sent.length);
-    assert.equal(L.sent[0].key, legacyAuth ? KEY : undefined);
+    assert.equal(L.sent[0].key, legacySend ? KEY : undefined);
     assert.match(logs.join("\n"), /older Pooled/);
+  }
+  // the default: no raw key, and the lobby hint fits a client that came with a link
+  {
+    const logs = [];
+    const c = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: (m) => logs.push(m) });
+    L = fakeLink(c);
+    c.dial(false, () => {});
+    L.open();
+    L.host({ t: "hello", name: "older host", v: 4, gate: 1, ask: 1, meta: { api: 2 } });
+    await until(() => L.sent.length);
+    assert.equal(L.sent[0].key, undefined);
+    L.host({ t: "lobby" });
+    assert.match(logs.join("\n"), /older Pooled.*ask them to let this client in/);
+    assert.doesNotMatch(logs.join("\n"), /with the room's invite link to skip this/);
   }
   // Deny is final
   const d = new Bridge({ code: "4TKG9P", name: "t", client: "c", log: () => {} });

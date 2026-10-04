@@ -59,7 +59,8 @@ export async function startSignal({ port = 0 } = {}) {
 // The attacker in the middle: Peer is a PeerJS class (room-node's env.Peer after setupNode). Its peer
 // `attackerId` takes the victim's link; its second peer dials the real target and relays. -> { stop(),
 // seen: messages that crossed (victim -> target as "up", target -> victim as "down") }
-export async function relay(Peer, { port, attackerId, target, signal }) {
+// down(m): what the attacker forwards to the victim instead of m (default: m unchanged)
+export async function relay(Peer, { port, attackerId, target, signal, down = (m) => m }) {
   const opts = { host: "127.0.0.1", port, path: "/", secure: false, debug: 0, config: { iceServers: [] } };
   const a1 = new Peer(attackerId, opts);
   const a2 = new Peer(undefined, opts);
@@ -73,7 +74,7 @@ export async function relay(Peer, { port, attackerId, target, signal }) {
     victim.on("open", () => { downOpen = true; for (const m of toDown.splice(0)) victim.send(m); });
     up.on("open", () => { upOpen = true; for (const m of toUp.splice(0)) up.send(m); });
     victim.on("data", (m) => { seen.push({ dir: "up", m }); if (upOpen) up.send(m); else toUp.push(m); });
-    up.on("data", (m) => { seen.push({ dir: "down", m }); if (downOpen) victim.send(m); else toDown.push(m); });
+    up.on("data", (m) => { m = down(m); seen.push({ dir: "down", m }); if (downOpen) victim.send(m); else toDown.push(m); });
     victim.on("close", () => { try { up.close(); } catch {} });
     up.on("close", () => { try { victim.close(); } catch {} });
     victim.on("error", () => {}); up.on("error", () => {});

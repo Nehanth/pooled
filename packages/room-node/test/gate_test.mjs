@@ -203,10 +203,13 @@ test("host: the same proof from a link with someone in the middle waits for Allo
   assert.ok(!types(L).includes("admit"));
   assert.ok(reqs[0].sas && reqs[0].sas !== st.sas, "different codes on the two screens");
   const strict = hostNode({ legacy: false });
+  const sreqs = [];
+  strict.on("joinrequest", (r) => sreqs.push(r));
   const O = incoming(strict, "old-dev");
   O.say(hello("old", { join: 1, key: strict.gate.key }));
   await until(() => types(O).includes("lobby"));
   assert.ok(!types(O).includes("admit"), "the raw key is not taken");
+  assert.equal(sreqs[0]?.old, true, "the host is told it is an older Pooled that can't prove the link");
 });
 
 function deviceNode(opts = {}) {
@@ -239,15 +242,15 @@ test("device: no secret in its hello to a host that speaks the proofs; it checks
   assert.deepEqual(evs, ["unverified"]); assert.ok(conn.closed); assert.equal(w.mk, null); assert.notEqual(w.admission, "in");
 });
 
-test("device: an older host with the gate gets the raw key (legacy on), or nothing (legacy off)", async () => {
+test("device: an older host with the gate never gets the raw key (it waits for Allow); only legacySend sends it", async () => {
   const a = deviceNode({ key: "AbCdEfGhIjKlMnOpQrStUv" });
   a.w.onData("pooled-room-4TKG9P", { t: "hello", name: "host", v: PROTOCOL, gate: 1, ask: 1, meta: {} });
   const fa = await joinHello(a.w, a.conn);
-  assert.equal(fa.key, "AbCdEfGhIjKlMnOpQrStUv", "the old way, warned");
-  const b = deviceNode({ key: "AbCdEfGhIjKlMnOpQrStUv", legacyAuth: false });
+  assert.equal(fa.key, undefined); assert.equal(fa.kc, undefined, "nothing to prove to it either: it waits for Allow");
+  const b = deviceNode({ key: "AbCdEfGhIjKlMnOpQrStUv", legacySend: true });
   b.w.onData("pooled-room-4TKG9P", { t: "hello", name: "host", v: PROTOCOL, gate: 1, ask: 1, meta: {} });
   const fb = await joinHello(b.w, b.conn);
-  assert.equal(fb.key, undefined); assert.equal(fb.kc, undefined, "it proves nothing and waits for Allow");
+  assert.equal(fb.key, "AbCdEfGhIjKlMnOpQrStUv", "the unsafe opt-in");
 });
 
 test("device: a key that didn't check out, then the host's Allow after the lobby: in, trust on first use", async () => {
@@ -292,10 +295,26 @@ test("host: a newer link under the same id withdraws the request on screen (Allo
   assert.equal(n.waitingJoins().length, 0, "the old request is gone");
 });
 
-test("device: holding a key, a \"host\" without the gate is left when devices from before the proofs aren't allowed", () => {
-  const { w, conn } = deviceNode({ key: "AbCdEfGhIjKlMnOpQrStUv", legacyAuth: false });
+test("device: holding a key, a \"host\" without the gate lets it in on trust, with a warning", () => {
+  const { w } = deviceNode({ key: "AbCdEfGhIjKlMnOpQrStUv" });
   const ev = [];
-  w.on("unverified", () => ev.push("unverified"));
+  w.on("tofu", () => ev.push("tofu")); w.on("unverified", () => ev.push("unverified"));
   w.onData("pooled-room-4TKG9P", { t: "hello", name: "host", v: PROTOCOL, meta: {} });
-  assert.deepEqual(ev, ["unverified"]); assert.ok(conn.closed); assert.notEqual(w.admission, "in");
+  assert.deepEqual(ev, ["tofu"]); assert.equal(w.admission, "in");
+});
+
+test("device: a host that proves nothing back lets it in on trust (warned), with or without the lobby", async () => {
+  for (const lobby of [false, true]) {
+    const { w, conn, sent } = deviceNode({ key: "AbCdEfGhIjKlMnOpQrStUv" });
+    const ev = [];
+    w.on("tofu", () => ev.push("tofu")); w.on("unverified", () => ev.push("unverified"));
+    w.onData("pooled-room-4TKG9P", { t: "hello", name: "host", v: PROTOCOL, gate: 1, ask: 1, auth: 1, meta: {} });
+    await joinHello(w, conn);
+    w.onData("pooled-room-4TKG9P", { t: "auth", v: 1, hn: "HnHnHnHnHnHnHnHnHnHnHn" });
+    await until(() => sent.some((m) => m.t === "auth-proof"));
+    if (lobby) w.onData("pooled-room-4TKG9P", { t: "lobby" });
+    w.onData("pooled-room-4TKG9P", { t: "admit", pass: "QqQqQqQqQqQqQqQqQqQqQq" });
+    await until(() => w.admission === "in");
+    assert.deepEqual(ev, ["tofu"]); assert.ok(!w.authFailed);
+  }
 });

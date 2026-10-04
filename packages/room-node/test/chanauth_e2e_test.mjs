@@ -157,3 +157,73 @@ test("channel-bound join: honest links get in and prove; links with someone in t
 
   }
 });
+
+test("downgrade: a forged 'older host' hello gets no raw key or pass out of a new device or bridge", { skip, timeout: 120000 }, async () => {
+  const { startSignal, relay } = await import("./mitm_signal.mjs");
+  const { createRoom, joinRoom, PREFIX } = await import("../roomnode.js");
+  const env = await import("../env.js");
+  const { Bridge } = await import("../../../cli/lib/room.js");
+  const sig = await startSignal();
+  const signal = `127.0.0.1:${sig.port}`;
+  const noGpu = async () => ({ create: () => ({ requestAdapter: async () => null }), globals: {} });
+  const common = { signal, setup: { webgpu: noGpu }, stripes: 1, selfTest: false };
+  const code = "Q7KX4N", hostId = PREFIX + code;
+  const nodes = []; const logs = []; let mitm = null;
+  try {
+    const host = await createRoom({ code, gate: true, ask: true, name: "host", log: (s) => logs.push("host: " + s), ...common });
+    nodes.push(host);
+    const reqs = []; host.on("joinrequest", (q) => reqs.push(q));
+    const key = host.gate.key;
+    // the attacker strips auth from the host's hello: the device takes it for a host from before the proofs
+    const strip = (m) => (m?.t === "hello" ? (({ auth, ...rest }) => rest)(m) : m);
+    mitm = await relay(env.Peer, { port: sig.port, attackerId: "attacker-d", target: hostId, signal: sig, down: strip });
+    const dev = await joinRoom(code, { name: "victim", key, pledgeGB: 2, log: (s) => logs.push("v: " + s), ...common });
+    nodes.push(dev);
+    await until(() => reqs.length === 1, 20000, "the device asked about instead");
+    mitm.stop();
+    mitm = await relay(env.Peer, { port: sig.port, attackerId: "attacker-e", target: hostId, signal: sig, down: strip });
+    const b = new Bridge({ code, key, signal, name: "victim-serve", client: "test", Peer: env.Peer, log: (s) => logs.push("b: " + s) });
+    nodes.push({ close: async () => b.destroy() });
+    b.connect().catch(() => {});
+    await until(() => reqs.length === 2, 20000, "the bridge asked about instead");
+    const ups = JSON.stringify(mitm.seen.filter((x) => x.dir === "up"));
+    assert.ok(!ups.includes(key), "no raw key crossed");
+    assert.ok(logs.some((l) => /^v: .*older Pooled: ask them to let you in/.test(l)), "the device says why it waits");
+    assert.ok(logs.some((l) => /^b: .*older Pooled/.test(l)), "so does the bridge");
+    assert.notEqual(dev.admission, "in"); assert.equal(b.connected, false);
+  } finally {
+    if (mitm) mitm.stop();
+    for (const n of nodes.reverse()) try { await n.close(); } catch {}
+    sig.close();
+  }
+});
+
+for (const ask of [false, true]) test(`a host restarted without its saved gate (ask ${ask}): its device comes back, warned, not refused`, { skip, timeout: 120000 }, async () => {
+  const { startSignal } = await import("./mitm_signal.mjs");
+  const { createRoom, joinRoom } = await import("../roomnode.js");
+  const sig = await startSignal();
+  const signal = `127.0.0.1:${sig.port}`;
+  const noGpu = async () => ({ create: () => ({ requestAdapter: async () => null }), globals: {} });
+  const common = { signal, setup: { webgpu: noGpu }, stripes: 1, selfTest: false };
+  const code = ask ? "Q7KX4R" : "Q7KX4P"; const logs = []; const nodes = [];
+  try {
+    const h1 = await createRoom({ code, gate: true, ask, name: "host", log: (s) => logs.push("h1: " + s), ...common });
+    nodes.push(h1);
+    const dev = await joinRoom(code, { name: "dev", key: h1.gate.key, pledgeGB: 2, log: (s) => logs.push("d: " + s), ...common });
+    nodes.push(dev);
+    await until(() => dev.admission === "in" && dev.pass, 15000, "dev in");
+    let unverified = false, tofu = false;
+    dev.on("unverified", () => { unverified = true; }); dev.on("tofu", () => { tofu = true; });
+    // a crash: no bye; a new run of the host under the same code, with a new key and no passes
+    h1.closing = true; clearInterval(h1.pingTimer); try { h1.peer.destroy(); } catch {} nodes.splice(nodes.indexOf(h1), 1);
+    await sleep(1500);
+    const h2 = await createRoom({ code, gate: true, ask, name: "host", log: (s) => logs.push("h2: " + s), ...common });
+    nodes.push(h2);
+    const reqs = []; h2.on("joinrequest", (q) => reqs.push(q));
+    await until(() => unverified || (h2.roster.size > 0 && dev.admission === "in") || reqs.length, 40000, "dev back or asked about");
+    if (reqs.length) { await h2.allowJoin(reqs[0].id); await until(() => unverified || (dev.admission === "in" && h2.roster.size > 0), 15000, "in after Allow"); }
+    assert.equal(unverified, false, "the device did not leave a host that let it in");
+    assert.equal(dev.admission, "in"); assert.ok(tofu, "it warned that it couldn't verify the host");
+    assert.equal(dev.mk, h2.mk, "the new run's mesh key");
+  } finally { for (const n of nodes.reverse()) try { await n.close(); } catch {} sig.close(); }
+});

@@ -149,7 +149,11 @@ export async function decide(g, id, hello) {
     g.keyHash ||= await digest(g.key);
     if (sameHash(await digest(hello.key), g.keyHash)) return { kind: "admit", via: "key", pass: await issuePass(g, hello.name), legacy: true };
   }
-  return openOrAsk(g, id, hello);
+  const r = await openOrAsk(g, id, hello);
+  // a device from before the proofs that showed a raw key or pass this host doesn't take (legacy off):
+  // the host is told why it is asked about a device that came by an invite link
+  if (!g.legacy && !hostWantsAuth(hello) && (validKey(hello?.key) || validKey(hello?.pass))) r.oldRaw = true;
+  return r;
 }
 // no secret let it in: in when the host doesn't ask, else held (or refused: an old tab, Deny, a full lobby)
 async function openOrAsk(g, id, hello) {
@@ -193,9 +197,10 @@ async function issuePass(g, name) {
 
 // the lobby: a request waits here until the host answers it (or its device leaves)
 // sas: the six digits this device's screen shows too (null for a device from before them)
-export function enqueue(g, id, name, meta, now = Date.now(), sas = null) {
+// old: a device from before the proofs whose raw key or pass this host doesn't take (legacy off)
+export function enqueue(g, id, name, meta, now = Date.now(), sas = null, old = false) {
   const i = g.lobby.findIndex((r) => r.id === id);
-  const r = { id, name: String(name ?? "").slice(0, 40), meta: meta || {}, at: i >= 0 ? g.lobby[i].at : now, sas: typeof sas === "string" ? sas : null };
+  const r = { id, name: String(name ?? "").slice(0, 40), meta: meta || {}, at: i >= 0 ? g.lobby[i].at : now, sas: typeof sas === "string" ? sas : null, ...(old ? { old: true } : {}) };
   if (i >= 0) g.lobby[i] = r; else g.lobby.push(r);
   return r;
 }

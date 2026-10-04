@@ -146,16 +146,15 @@ export async function joinerProof(st, chal, link) {
   return msg;
 }
 // the host's admit ->
-//   "ok"          it proved the secret this device used (or this device used none)
-//   "tofu"        this device's secret didn't check out (an old link, a pass the host no longer has),
-//                 it waited in the lobby (st.lobbied: the caller sets it on "lobby") and the host let it
-//                 in by hand: trust on first use, as for a typed code; the caller says so
-//   "unverified"  the host neither proved the secret nor asked: it doesn't know it, or someone sits in
-//                 the middle of the link. The caller leaves
-//   "bad"         a proof that is wrong: the same, louder
+//   "ok"    it proved the secret this device used (or this device used none)
+//   "tofu"  it proved nothing back: this device's secret didn't check out (a link from an earlier room,
+//           a host restarted without its saved passes, Allow after the lobby) or it doesn't know it.
+//           Trust on first use, as for a typed code: nothing secret crossed, so the caller goes in
+//           and says plainly that it couldn't verify the host
+//   "bad"   a proof that is wrong: a host pretending to prove what it can't. The caller leaves
 export async function joinerCheckAdmit(st, admit) {
   if (!st.proved) return "ok";
-  if (admit?.via !== "key" && admit?.via !== "pass") return st.lobbied ? "tofu" : "unverified";
+  if (admit?.via !== "key" && admit?.via !== "pass") return "tofu";
   const secret = admit.via === "key" ? st.key : st.passHash;
   if (!secret || !st.hn) return "bad";
   const ok = await checkProof(secret, { binding: st.binding, ...st.ids, jn: st.jn, hn: st.hn, role: "host", cred: admit.via }, admit.hp);

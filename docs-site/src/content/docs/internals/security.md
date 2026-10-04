@@ -51,7 +51,9 @@ So Pooled never sends a secret over a link as is:
 
 **A room that doesn't ask** (**Ask before new devices join** off, `pooled host --allow-all`, or a room node made without the gate) lets in anyone with the code, which includes whoever runs signaling.
 
-**Older Pooled versions.** For one release, a host still accepts the raw invite key from a device that runs an older Pooled, and a new device still sends it to an older host. Both warn ("runs an older Pooled … update"). Until both ends update, someone in the middle of signaling can still pretend to be the older side and read the key. `?legacyauth=0` on the page, or `POOLED_LEGACY_AUTH=0` for the CLI and the OpenClaw plugin, turns this off now. The next release turns it off by default.
+**A host that can't prove the key** (one restarted without its saved room, or one from before the gate) still lets a device in, on trust, and the device says it couldn't verify the host. A host whose proof is wrong is left.
+
+**Older Pooled versions.** A new device never sends the raw invite key: an older host has to let it in by hand ("This room's host runs an older Pooled: ask them to let you in, or to update"). For one release, a new host still accepts the raw key from a device that runs an older Pooled, with a warning. Until then, someone in the middle of signaling could relay an older device's key. `?legacyauth=0` on the host's page, or `POOLED_LEGACY_AUTH=0` for `pooled host` and the OpenClaw plugin, refuses raw keys now; the host's prompt then says the device runs an older Pooled. The next release refuses them by default. `?legacyauth=1` / `POOLED_LEGACY_AUTH=1` makes a new device send its raw key to an older host again; it is unsafe and only for a room you trust end to end.
 
 ## The Serve API
 

@@ -144,10 +144,15 @@ let joinKey = "", myPass = "", admission = null, afterAdmit = null;
 // key and passes never cross a link; each side proves them with an HMAC bound to the link's DTLS
 // fingerprints. meshKey: the room's key for links between devices (the host makes it with its gate and
 // hands it out in admit); every such link, and every stripe, proves it before it carries anything.
-// ?legacyauth=0 (or window.POOLED_LEGACY_AUTH = false): no raw keys from or to devices from before the
-// proofs, and no links without a proof
+// Devices from before the proofs (docs/protocol.md "Compatibility"): a host still takes their raw key or
+// pass for one release, with a warning, and links from devices its roster lists as theirs without a proof
+// (LEGACY_AUTH; ?legacyauth=0 or window.POOLED_LEGACY_AUTH = false: never). A joining device never sends
+// its raw key or pass: an older host waits for Allow instead. ?legacyauth=1 (LEGACY_SEND) restores that,
+// and is unsafe: anyone in the middle of signaling can pose as an older host and read the key
 let meshKey = null;
-const LEGACY_AUTH = new URLSearchParams(location.search).get("legacyauth") !== "0" && window.POOLED_LEGACY_AUTH !== false;
+const LEGACY_Q = new URLSearchParams(location.search).get("legacyauth");
+const LEGACY_AUTH = LEGACY_Q !== "0" && window.POOLED_LEGACY_AUTH !== false;
+const LEGACY_SEND = LEGACY_Q === "1";
 const MESH_WAIT_MS = 10000;
 const HOST_HELLO_WAIT_MS = 2000;
 // The breadcrumb the previous page of this tab left (room.js crumb): what it was doing when it was
@@ -1087,10 +1092,9 @@ function onData(from, d) {
       if (!isHost && from === PREFIX + roomCode) {
         if (e) e.hostHello = d;
         hostAsks = !!d.gate && !!d.ask;
-        // a host from before the gate: nothing to prove. This device never sent it its key or pass;
-        // holding one, it goes in only while devices from before the proofs are allowed (it can't tell
-        // that host from someone pretending to be one)
-        if (!d.gate && (joinKey || myPass) && !LEGACY_AUTH && admission !== "in") { if (e) try { e.conn.close(); } catch {} refused(UNVERIFIED_HOST); break; }
+        // a host from before the gate: nothing to prove, and it never got this device's key or pass.
+        // Holding one, it goes in on trust (as for a typed code), and says so
+        if (!d.gate && (joinKey || myPass) && admission === "wait") { log("room", TOFU_HOST); toast(TOFU_HOST); }
         if (!d.gate) releaseLink(e);
         if (!d.gate && admission === "wait") guestIn();
       }
@@ -1157,7 +1161,7 @@ function onData(from, d) {
     case "lobby":   // the host was asked: wait for Allow or Deny
       if (isHost || from !== PREFIX + roomCode) break;
       if (e?.jauth) e.jauth.lobbied = true;
-      inLobby(e?.jauth?.sas, !!e?.jauth?.proved);
+      inLobby(e?.jauth?.sas, !!e?.jauth?.proved, !!e?.oldHost);
       break;
     case "bye":
       // the host said no (Deny, a full lobby, a tab too old to wait) before this device got in: back
@@ -1267,7 +1271,7 @@ function guestIn() {
 }
 // the host has been asked about this device: the waiting screen (or, for a device already in the room
 // whose link came back without a pass the host knows, the room's own card)
-function inLobby(sas = null, linkFailed = false) {
+function inLobby(sas = null, linkFailed = false, oldHost = false) {
   if (admission === "in") {
     $("room-over").hidden = false;
     $("room-over-h").textContent = "Waiting for the host";
@@ -1280,10 +1284,10 @@ function inLobby(sas = null, linkFailed = false) {
   $("join-status").textContent = `The host of room ${formatCode(roomCode)} sees \u201c${myName} wants to join\u201d.`;
   // the six digits the host sees beside the request: the same on both screens only when nobody sits in
   // the middle of the link (room/chanauth.js sasOf)
-  if (sas || linkFailed) {
+  if (sas || linkFailed || oldHost) {
     const c = document.createElement("span");
     c.className = "jw-sas";
-    c.textContent = (linkFailed ? " This invite link didn't check out with the host, so it has to let you in." : "") + (sas ? ` Check that it shows the code ${sas}.` : "");
+    c.textContent = (oldHost ? " " + OLD_HOST : linkFailed ? " This invite link didn't check out with the host, so it has to let you in." : "") + (sas ? ` Check that it shows the code ${sas}.` : "");
     $("join-status").append(c);
   }
   $("jw-cancel").hidden = false;
@@ -1293,8 +1297,10 @@ function inLobby(sas = null, linkFailed = false) {
 async function hostAdmitted(e, from, d) {
   const st = e?.jauth;
   const v = st ? await joinerCheckAdmit(st, d) : "ok";
-  if (v === "tofu") log("room", `this device's invite link or pass didn't check out with the host, which let it in by hand${st.sas ? ` (code ${st.sas})` : ""}`);
-  if (v === "unverified" || v === "bad") {
+  // nothing proved back (a host restarted without its saved passes, a link from an earlier room, Allow
+  // after the lobby, an older host): in on trust, as for a typed code, and said out loud
+  if (v === "tofu") { const w = TOFU_HOST + (st.sas ? ` (code ${st.sas})` : ""); log("room", w); toast(w); }
+  if (v === "bad") {
     console.warn("auth: the host's proof is missing or wrong");
     if (e) { e.authFailed = true; try { e.conn.close(); } catch {} }
     if (admission !== "in") refused(UNVERIFIED_HOST);
@@ -1309,7 +1315,9 @@ async function hostAdmitted(e, from, d) {
   if (admission !== "in") { if (admission === "lobby") toast("The host let you in"); guestIn(); }
   else if (!$("room-over").hidden && $("room-over-h").textContent === "Waiting for the host") $("room-over").hidden = true;
 }
-const UNVERIFIED_HOST = "Couldn't verify this room's host: it didn't prove it holds the invite key. The link may be from an earlier room, or someone may be in the middle of the connection. Try joining with the room code instead.";
+const UNVERIFIED_HOST = "Couldn't verify this room's host: its proof of the invite key is wrong, so someone may be in the middle of the connection. Try again later, or join with the room code and check the six digits with the host.";
+const TOFU_HOST = "Couldn't verify this room's host with the invite link (fine if it restarted or runs an older Pooled; otherwise check the six digits with the host).";
+const OLD_HOST = "This room's host runs an older Pooled: ask them to let you in, or to update.";
 // the host said no, or went away, before this device got in
 function refused(reason) {
   admission = "out";
@@ -1422,8 +1430,10 @@ function gateAnswer(L, d, name, meta, r) {
     gateRefuse(L, why);
     return;
   }
-  // ask the host
-  gateEnqueue(gate, id, name, meta, Date.now(), r.sas);
+  // ask the host. A device from before the proofs that showed the raw invite key (which this host
+  // doesn't take, ?legacyauth=0) is marked, so the prompt says why it asks about one that came by a link
+  if (r.oldRaw) { log("room", `${name} runs an older Pooled and can't prove the invite key: it waits for you to let it in (ask it to update)`); }
+  gateEnqueue(gate, id, name, meta, Date.now(), r.sas, !!r.oldRaw);
   try { L.conn.send({ t: "lobby" }); } catch {}
   log("room", `${name} is waiting to join`);
   joinRequests(true);
@@ -1436,13 +1446,14 @@ function gateAdmit(L, pass, via, hp = null) {
   lobbyConns.delete(id);
   L.conn.off("data", L.onMsg);
   const entry = wire(L.conn);
-  for (const sc of L.stripes) if (sc.open) acceptStripe(entry, sc);
   // (an API client never links to other devices: it gets no mesh key, so a client the host disconnects
   // can't use one to dial the room's devices)
   const mk = meshKey && !L.hello?.meta?.api ? { mk: meshKey } : {};
   try { L.conn.send({ t: "admit", ...(pass ? { pass } : {}), ...(hp ? { via, hp } : {}), ...mk }); } catch {}
   if (via === "key") log("room", `${cleanName(L.hello?.name, id)} came in with the invite link`);
   onData(id, L.hello);
+  // after its hello: the roster then says whether it proves its links (its stripes do too)
+  for (const sc of L.stripes) if (sc.open) acceptStripe(entry, sc);
   for (const m of L.buf) onData(id, m);
   saveHost();
 }
@@ -1500,7 +1511,8 @@ function joinRequests(announce = false) {
   // of the link (room/chanauth.js sasOf; a device from before them has none)
   $("jr-sas").textContent = head.sas ? `Check that its screen shows ${head.sas}` : "";
   $("jr-sas").hidden = !head.sas;
-  $("jr-sub").textContent = head.meta?.api ? "An API client (pooled serve) that typed the room code. Once in, it can ask the model and see the chat."
+  $("jr-sub").textContent = head.old ? "An older Pooled device that can't prove the invite link. Ask it to update, or Allow it if you expect it."
+    : head.meta?.api ? "An API client (pooled serve) that typed the room code. Once in, it can ask the model and see the chat."
     : "It typed the room code. Once in, it can hold layers and see the chat.";
   $("jr-more").textContent = q.length > 1 ? `${q.length - 1} more waiting` : "";
   box.hidden = false;
@@ -1590,13 +1602,14 @@ async function joinHello(conn) {
   }
   const hh = e?.hostHello;
   if (hh && hh.gate && !(+hh.auth >= AUTH_V) && (key || pass)) {
-    if (LEGACY_AUTH) {
-      log("room", "this room's host runs an older Pooled: the invite key goes to it the old way, unprotected. Ask the host to reload its page or update");
-      toast("This room's host runs an older Pooled. Ask them to update it.");
+    if (LEGACY_SEND) {
+      log("room", "this room's host runs an older Pooled: the invite key goes to it the old way, unprotected (?legacyauth=1)");
       return { join: 1, ...(pass ? { pass } : {}), ...(key ? { key } : {}) };
     }
-    log("room", "this room's host runs an older Pooled that can't check the invite key safely: waiting for it to let this device in instead");
-    if (e) e.jauth = await joinerStart({});
+    // it can't check a proof, and the raw key would go to whoever answers as that host: wait for Allow
+    log("room", OLD_HOST + " (This device doesn't send it the invite key: it can't check it safely.)");
+    toast(OLD_HOST);
+    if (e) { e.jauth = await joinerStart({}); e.oldHost = true; }
     return { join: 1, ...(e?.jauth?.helloFields || {}) };
   }
   const st = await joinerStart({ key, pass });

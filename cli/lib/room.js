@@ -87,11 +87,12 @@ export function signalOpts(signal) {
 export class Bridge extends EventEmitter {
   // Peer: a PeerJS class already set up in this process (@pooled/room-node's), so one process never
   // loads two WebRTC stacks; default: load node-datachannel + peerjs here
-  // legacyAuth: a host from before channel-bound proofs gets the raw invite key or pass, as it used to
-  // (with a warning); POOLED_LEGACY_AUTH=0 or false: never (this client waits for the host's Allow)
-  constructor({ code, key = null, signal = null, name, client, log = () => {}, Peer = null, legacyAuth = process.env.POOLED_LEGACY_AUTH !== "0" }) {
+  // legacySend: send the raw invite key or pass to a gated host from before channel-bound proofs, as
+  // before. Off by default (this client waits for that host's Allow); POOLED_LEGACY_AUTH=1 turns it on,
+  // which is unsafe: anyone in the middle of signaling can pose as such a host and read the key
+  constructor({ code, key = null, signal = null, name, client, log = () => {}, Peer = null, legacySend = process.env.POOLED_LEGACY_AUTH === "1" }) {
     super();
-    this.legacyAuth = legacyAuth !== false;
+    this.legacySend = legacySend === true;
     this.code = code; this.signal = signal; this.name = name; this.client = client; this.log = log; this.PeerClass = Peer;
     this.key = key;             // the room's invite key, from its link: in without the host's Allow
     this.pass = null;           // what the host gave us once it let us in: back in after a reconnect
@@ -123,11 +124,12 @@ export class Bridge extends EventEmitter {
     }
     const hh = link.greeted;
     if (hh && hh.gate && !(+hh.auth >= A.AUTH_V) && (this.key || this.pass)) {
-      if (this.legacyAuth) {
-        this.log("this room's host runs an older Pooled: the invite key goes to it the old way, unprotected. Ask the host to update");
+      if (this.legacySend) {
+        this.log("this room's host runs an older Pooled: the invite key goes to it the old way, unprotected (POOLED_LEGACY_AUTH=1)");
         return [{ ...(this.pass ? { pass: this.pass } : {}), ...(this.key ? { key: this.key } : {}) }, null];
       }
-      this.log("this room's host runs an older Pooled that can't check the invite key safely: waiting for it to let this client in instead");
+      this.log("this room's host runs an older Pooled: ask them to let this client in, or to update (it doesn't get the invite key: it can't check it safely)");
+      this.oldHost = true;
       const st = await A.joinerStart({});
       return [st.helloFields, st];
     }
@@ -192,9 +194,11 @@ export class Bridge extends EventEmitter {
     const onAdmit = async (d) => {
       const A = await loadAuth();
       const v = link.auth ? await A.joinerCheckAdmit(link.auth, d) : "ok";
-      if (v === "tofu") this.log(`this client's invite link or pass didn't check out with the host, which let it in by hand${link.auth.sas ? ` (code ${link.auth.sas})` : ""}`);
-      if (v === "unverified" || v === "bad") {
-        this.kicked = "couldn't verify the room's host: it didn't prove it holds the invite key (the link may be from an earlier room, or someone sits in the middle of the connection)";
+      // nothing proved back (a host restarted without its passes, a link from an earlier room, an older
+      // host): in on trust, as with a typed code, and said plainly
+      if (v === "tofu") this.log(`warning: couldn't verify the room's host with the invite link or pass${link.auth.sas ? ` (code ${link.auth.sas})` : ""}: fine if it restarted or runs an older Pooled; otherwise someone may be in the middle of the connection`);
+      if (v === "bad") {
+        this.kicked = "couldn't verify the room's host: its proof of the invite key is wrong (someone may be in the middle of the connection)";
         this.waiting = false;
         this.log(this.kicked);
         this.emit("refused", this.kicked);
@@ -212,14 +216,9 @@ export class Bridge extends EventEmitter {
       if (d.t === "hello" && !greeted) {
         greeted = d; link.greeted = d;
         this.hostMeta = d.meta || {}; this.hostName = cleanText(d.name, 40);
-        // a host from before the gate lets everyone in (and never got a key or pass from this client);
-        // holding one, this client goes in only while hosts from before the proofs are allowed
-        if (!d.gate && (this.key || this.pass) && !this.legacyAuth) {
-          this.kicked = "couldn't verify the room's host: it says it doesn't gate, so it can't prove it holds the invite key";
-          this.log(this.kicked); this.emit("refused", this.kicked); this.emit("state");
-          try { conn.close(); } catch {}
-          return;
-        }
+        // a host from before the gate lets everyone in (and never got a key or pass from this client):
+        // in on trust, said plainly
+        if (!d.gate && (this.key || this.pass)) this.log("warning: couldn't verify the room's host: it runs a Pooled from before the gate");
         if (!d.gate) admitted = true;
         inRoom();
         return;
@@ -236,7 +235,12 @@ export class Bridge extends EventEmitter {
       if (d.t === "lobby" && !admitted) {
         if (link.auth) link.auth.lobbied = true;
         const sas = link.auth?.sas;
-        if (!this.waiting) this.log(`waiting for the host of room ${this.code} to let this client in (start pooled serve with the room's invite link to skip this)${sas ? `; the host sees code ${sas} beside the request` : ""}`);
+        // the hint fits what this client came with: an invite link that didn't get it in (an older host,
+        // a link from an earlier room) is not fixed by the invite link
+        const hint = this.oldHost ? "it runs an older Pooled that can't check the invite link: ask them to let this client in, or to update"
+          : this.key ? "the invite link didn't check out with this host: ask for a fresh one, or for the host to let this client in"
+          : "start pooled serve with the room's invite link to skip this";
+        if (!this.waiting) this.log(`waiting for the host of room ${this.code} to let this client in (${hint})${sas ? `; the host sees code ${sas} beside the request` : ""}`);
         this.waiting = true;
         this.sas = sas || null;
         this.emit("lobby", { sas: sas || null });

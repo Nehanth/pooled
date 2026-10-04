@@ -29,7 +29,7 @@ Sources (origin/main 40bb0fa):
 |---|---|
 | `POOLED_TOKEN` | Requires this token on every request, as `Authorization: Bearer <t>` or `x-api-key: <t>`. Kept out of the process list, unlike `--token`. `--token-file` wins over it. An empty value is an error. |
 | `POOLED_KEEPALIVE_MS` | How often a waiting stream gets a keep-alive. For tests; the default is 10 s. |
-| `POOLED_LEGACY_AUTH` | `0`: never send the invite key or a pass the old way to a room host from before channel-bound proofs (wait for its Allow instead). Read by `pooled serve`, `pooled chat`, `pooled join`, `pooled host` (which then ignores raw keys from older devices and refuses links that prove nothing) and the OpenClaw plugin. See [Security model](/docs/internals/security#who-is-on-a-link). |
+| `POOLED_LEGACY_AUTH` | `0`: `pooled host` and the OpenClaw plugin's host ignore the raw invite key from devices that run a Pooled from before channel-bound proofs (they wait for Allow) and refuse links that prove nothing. `1` (**unsafe**): `pooled serve`, `pooled chat`, `pooled join` and the plugin send their raw invite key to an older host, as before, instead of waiting for its Allow. Unset: hosts accept older devices for one release with a warning; clients never send raw keys. See [Security model](/docs/internals/security#who-is-on-a-link). |
 
 The client tools read their own variables. These are the ones the banner prints:
 

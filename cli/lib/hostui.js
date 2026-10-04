@@ -454,7 +454,7 @@ function deviceTable(s, S, { W, online, preview = null }) {
     r.push("");
     if (preview) r.push("");
     // the code the joining screen shows too (room/chanauth.js sasOf): the same only on a link nobody sits in the middle of
-    r.push(S.acc("wants to join") + (l.sas ? S.ink3(` · code ${l.sas}`) : "") + (i === 0 ? "  " + S.ink2("a") + S.ink3(" allow  ") + S.ink2("d") + S.ink3(" deny") : ""));
+    r.push(S.acc("wants to join") + (l.old ? S.ink3(" · older Pooled, can't prove the link") : "") + (l.sas ? S.ink3(` · code ${l.sas}`) : "") + (i === 0 ? "  " + S.ink2("a") + S.ink3(" allow  ") + S.ink2("d") + S.ink3(" deny") : ""));
     rows.push(r);
   });
   const out = table(S, cols, rows);

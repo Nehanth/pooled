@@ -496,7 +496,7 @@ async function runHost(opts, out, prepared = null) {
   // who gets in: a device with the code alone waits in the lobby until the host answers (a / d here)
   const tty = !!process.stdin.isTTY;
   node.on("joinrequest", (r) => {
-    const code = r.sas ? ` (its screen shows code ${r.sas})` : "";
+    const code = (r.old ? " (an older Pooled: it can't prove the invite key)" : "") + (r.sas ? ` (its screen shows code ${r.sas})` : "");
     out.log(tty ? `${r.line}${code}: press a to let it in, d to turn it away`
       : `${r.line}: it waits (no terminal here to ask; give it the invite link, or start pooled host with --allow-all)`);
   });

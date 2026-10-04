@@ -107,7 +107,7 @@ export class RoomNode extends EventEmitter {
   // screens), allowApi (answer API asks from other devices; default on, as the room page)
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
     gbps = null, autoRedeal = true, ckpt = {}, ckptDisk, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory",
-    legacyAuth = process.env.POOLED_LEGACY_AUTH !== "0",
+    legacyAuth = process.env.POOLED_LEGACY_AUTH !== "0", legacySend = process.env.POOLED_LEGACY_AUTH === "1",
     ramGB = 0, mem = null, offloadSpec = parseForce(process.env.POOLED_OFFLOAD_SPEC) } = {}) {
     super();
     // offloadSpec: speculative decoding while the deal has a device offloading experts (room/plan.js
@@ -136,9 +136,11 @@ export class RoomNode extends EventEmitter {
     this.gate = null; this.lobbyConns = new Map(); this.protocol = PROTOCOL;
     // the room's mesh key (the host's gate makes it, its admit hands it to each device): every link
     // between two devices, and every stripe, proves it before it carries anything (gate.js meshHello).
-    // legacyAuth: during the move to proved links, a device from before them may still send the raw key
-    // or pass, and link without a proof when the host's roster says it is one (POOLED_LEGACY_AUTH=0: never)
-    this.mk = null; this.legacyAuth = legacyAuth !== false;
+    // legacyAuth (a host, for one release): a device from before the proofs may still send the raw key or
+    // pass, and link without a proof when the host's roster says it is one (POOLED_LEGACY_AUTH=0: never).
+    // legacySend (a device; off by default, unsafe): send the raw key or pass to a gated host from before
+    // the proofs, as before (POOLED_LEGACY_AUTH=1). Anyone in the middle of signaling can pose as one
+    this.mk = null; this.legacyAuth = legacyAuth !== false; this.legacySend = legacySend === true;
     this.setup = setup;   // setupNode options (webgpu: a loader for Dawn, dawnFlags)
     // a worker: the host's name it will serve under this code (a rejoin after the room was over).
     // Room codes are short and reusable; a host of another name is another room, which this device

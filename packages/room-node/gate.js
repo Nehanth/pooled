@@ -16,9 +16,9 @@
 // sits in the middle of the link.
 //
 // Device (a node made by joinRoom): its hello to the host carries join: 1 (it can wait in the lobby)
-// and what it can prove. A host from before the gate (no gate: 1 in its hello) lets it in at once, as
-// before; a host with the gate but from before the proofs (no auth: 1) gets the raw key or pass as it
-// used to, with a warning, unless legacyAuth is off.
+// and what it can prove. It never sends the raw key or pass: a host with the gate but from before the
+// proofs (no auth: 1) can't check them, so the device waits for that host's Allow (legacySend, off by
+// default and unsafe, restores the old way). A host from before the gate lets it in at once, as before.
 import { makeGate, decide, decideAuth, startAuth, hostWantsAuth, enqueue, allow, deny, withdraw, requestLine, validKey, keyFragment,
   randomCode, formatCode, parseCode, CODE_LEN, OLD_TAB_TEXT, saveGate } from "../../room/joingate.js";
 import { AUTH_V, linkFingerprints, joinerStart, joinerProof, joinerCheckAdmit, validMeshKey, meshProof, meshCheck } from "../../room/chanauth.js";
@@ -129,10 +129,12 @@ function gateAnswer(node, L, d, name, r) {
     refuse(node, L, why);
     return;
   }
-  const req = enqueue(node.gate, id, name, d.meta, Date.now(), r.sas);
+  const req = enqueue(node.gate, id, name, d.meta, Date.now(), r.sas, !!r.oldRaw);
   try { L.conn.send({ t: "lobby" }); } catch {}
+  // a device from before the proofs that came with the raw invite key, which this host doesn't take
+  if (r.oldRaw) node.log(`${name} runs an older Pooled and can't prove the invite key: it waits for Allow (ask it to update)`);
   if (!node.listenerCount("joinrequest")) node.log(`${requestLine(name, d.meta)}${r.sas ? ` (check code ${r.sas})` : ""}: allowJoin() lets it in, denyJoin() turns it away`);
-  node.emit("joinrequest", { id, name, meta: d.meta || {}, line: requestLine(name, d.meta), at: req.at, sas: req.sas });
+  node.emit("joinrequest", { id, name, meta: d.meta || {}, line: requestLine(name, d.meta), at: req.at, sas: req.sas, ...(r.oldRaw ? { old: true } : {}) });
   node.emit("joinrequests", waitingJoins(node));
 }
 
@@ -185,8 +187,9 @@ export const waitingJoins = (node) => (node.gate ? node.gate.lobby.map((r) => ({
 const HOST_HELLO_WAIT_MS = 2000;
 // the hello a device sends the host (never to another device): it can wait in the lobby, and what it
 // can prove. Holding a key or a pass, it first waits (briefly) for the host's hello, which says
-// whether the host speaks the proofs: a gated host from before them gets the raw key or pass as it
-// used to (warned), when node.legacyAuth allows it. -> the fields to add to the hello
+// whether the host speaks the proofs. A gated host from before them gets nothing it can't check: the
+// device waits for its Allow. Only node.legacySend (POOLED_LEGACY_AUTH=1: unsafe, anyone in the middle
+// of signaling can pose as such a host) sends it the raw key or pass. -> the fields to add to the hello
 export async function joinHello(node, conn) {
   const key = validKey(node.key) ? node.key : null, pass = validKey(node.pass) ? node.pass : null;
   const e = node.conns.get(conn.peer);
@@ -196,12 +199,12 @@ export async function joinHello(node, conn) {
   }
   const hh = e?.hostHello;
   if (hh && hh.gate && !(+hh.auth >= AUTH_V) && (key || pass)) {
-    if (node.legacyAuth !== false) {
-      node.log("this room's host runs an older Pooled: its invite key or pass goes to it the old way, unprotected. Ask the host to update");
-      node.emit("legacyhost");
+    node.emit("legacyhost");
+    if (node.legacySend === true) {
+      node.log("this room's host runs an older Pooled: the invite key or pass goes to it the old way, unprotected (POOLED_LEGACY_AUTH=1)");
       return { join: 1, ...(pass ? { pass } : {}), ...(key ? { key } : {}) };
     }
-    node.log("this room's host runs an older Pooled that can't check the invite key safely: waiting for it to let this device in instead");
+    node.log("this room's host runs an older Pooled: ask them to let you in, or to update. (This device doesn't send it the invite key: it can't check it safely)");
     if (e) e.jauth = await joinerStart({});
     return { join: 1, ...(e?.jauth?.helloFields || {}) };
   }
@@ -243,9 +246,12 @@ export function deviceGateMessage(node, d, from = null) {
 async function admitted(node, e, from, d) {
   const st = e?.jauth;
   const v = st ? await joinerCheckAdmit(st, d) : "ok";
-  if (v === "tofu") node.log(`this device's invite link or pass didn't check out with the host, which let it in by hand${st.sas ? ` (code ${st.sas})` : ""}`);
-  if (v === "unverified" || v === "bad") {
-    node.log("couldn't verify this room's host on this link: it didn't prove it holds the invite key or pass (the link may be from an earlier room, or someone sits in the middle of the link). Leaving it");
+  if (v === "tofu") {
+    node.log(`warning: couldn't verify this room's host: the invite link or pass didn't check out with it, and it let this device in anyway${st.sas ? ` (code ${st.sas})` : ""}. Fine after a host restart; otherwise someone may be in the middle of the link`);
+    node.emit("tofu", { host: from, sas: st.sas || null });
+  }
+  if (v === "bad") {
+    node.log("couldn't verify this room's host on this link: its proof of the invite key or pass is wrong (someone may be in the middle of the link). Leaving it");
     node.authFailed = true;
     node.emit("unverified", { host: from });
     if (e) { e.unverified = true; try { e.conn.close(); } catch {} }
@@ -267,13 +273,11 @@ export function onHostHello(node, d, from = null) {
   const e = from ? node.conns.get(from) : null;
   if (e) e.hostHello = d;
   if (node.admission === "in") { if (!d.gate && e) node.release?.(e); return; }
-  // a host from before the gate never got this device's key or pass; holding one, it goes in only while
-  // devices from before the proofs are allowed (it can't tell that host from someone pretending)
-  if (!d.gate && (validKey(node.key) || validKey(node.pass)) && node.legacyAuth === false) {
-    node.log("this room's \"host\" says it doesn't gate, so it can't prove it holds the invite key: leaving it");
-    node.authFailed = true; node.emit("unverified", { host: from });
-    if (e) try { e.conn.close(); } catch {}
-    return;
+  // a host from before the gate never got this device's key or pass, and can't prove it holds them:
+  // trust on first use, said out loud
+  if (!d.gate && (validKey(node.key) || validKey(node.pass))) {
+    node.log("warning: couldn't verify this room's host: it runs a Pooled from before the gate and can't prove it holds the invite key");
+    node.emit("tofu", { host: from, sas: null });
   }
   node.admission = d.gate ? "wait" : "in";
   if (!d.gate) { if (e) node.release?.(e); node.emit("admitted", { waited: false, old: true }); }

@@ -63,7 +63,7 @@ Deno.test("gate: a wrong key gets no admit by key; the device waits for Allow an
   const o = makeGate({ ask: false });
   const y = await exchange({ g: o, key: newKey(), jEnd: end("AA", "BB"), hEnd: end("BB", "AA") });
   eq(y.r.kind, "admit"); eq(y.r.via, "open");
-  eq(y.check, "unverified", "a device that proved a key insists on the host proving it back");
+  eq(y.check, "tofu", "a device that proved a key and got no proof back goes in on trust (and says so)");
 });
 
 Deno.test("gate: someone in the middle (fingerprints swapped by signaling) gets refused both ways", async () => {
@@ -136,7 +136,7 @@ Deno.test("gate: mutual: a host that doesn't hold the key can't fake its proof; 
   const st = await joinerStart({ key: newKey() });
   const chal = { t: "auth", hn: newNonce() };
   await joinerProof(st, chal, { fps: linkFingerprints(end("AA", "BB")), me: J, host: H });
-  eq(await joinerCheckAdmit(st, { t: "admit" }), "unverified", "no proof at all");
+  eq(await joinerCheckAdmit(st, { t: "admit" }), "tofu", "no proof at all: trust on first use, never a refusal (a restarted host)");
   eq(await joinerCheckAdmit(st, { t: "admit", via: "key", hp: "0".repeat(64) }), "bad", "a made-up proof");
   eq(await joinerCheckAdmit(st, { t: "admit", via: "pass", hp: "0".repeat(64) }), "bad", "a pass it never showed");
   // after waiting in the lobby, the host's Allow is trust on first use (the caller says the link didn't check out)
@@ -192,7 +192,8 @@ Deno.test("legacy: a raw key in an old device's hello still works (marked), unle
   const back = await decide(g, "old", { t: "hello", name: "old", join: 1, pass });
   eq(back.via, "pass"); eq(back.legacy, true);
   const strict = makeGate({ ask: true, legacy: false, key: g.key });
-  eq((await decide(strict, "old", { t: "hello", name: "old", join: 1, key: g.key })).kind, "ask", "strict: the raw key is ignored, the host is asked");
+  const sr = await decide(strict, "old", { t: "hello", name: "old", join: 1, key: g.key });
+  eq([sr.kind, sr.oldRaw], ["ask", true], "strict: the raw key is ignored, the host is asked, and told why");
   const strictOpen = makeGate({ ask: false, legacy: false });
   eq((await decide(strictOpen, "old", { t: "hello", name: "old", join: 1, key: strictOpen.key })).via, "open");
   ok(sameHex("ab", "ab") && !sameHex("ab", "ac") && !sameHex("", ""));
