@@ -10,44 +10,8 @@ import {
   encodeEntry, decodeEntry, entryFile, BrowserWeightCache, convertedBytes, clearConverted, attachBrowserWeightCache,
   convertedByModel, deleteConverted,
 } from "../../room/convertedcache.js";
+import { FakeDir, FakeFile } from "../helpers/fake-opfs.js";
 
-// ---- a small in-memory OPFS: directories, files, writables, move ----
-const notFound = (n) => Object.assign(new Error(`${n} not found`), { name: "NotFoundError" });
-class FakeFile {
-  constructor(parent, name) { this.kind = "file"; this.parent = parent; this.name = name; this.data = new Uint8Array(0); }
-  getFile() { const d = this.data; return Promise.resolve({ size: d.byteLength, arrayBuffer: async () => d.slice().buffer, text: async () => new TextDecoder().decode(d) }); }
-  createWritable() {
-    const chunks = [], root = this.parent.root;
-    return Promise.resolve({
-      write: async (p) => {
-        if (root.failWrites) throw Object.assign(new Error("quota"), { name: "QuotaExceededError" });
-        chunks.push(new Uint8Array(p.buffer ? p.buffer.slice(p.byteOffset, p.byteOffset + p.byteLength) : p));
-      },
-      close: async () => {   // like Chrome: the file changes only on close
-        const n = chunks.reduce((a, c) => a + c.byteLength, 0), out = new Uint8Array(n);
-        let o = 0; for (const c of chunks) { out.set(c, o); o += c.byteLength; }
-        this.data = out;
-      },
-      abort: async () => {},
-    });
-  }
-  async move(name) { this.parent.children.delete(this.name); this.name = name; this.parent.children.set(name, this); }
-}
-class FakeDir {
-  constructor(name = "", root = null) { this.kind = "directory"; this.name = name; this.children = new Map(); this.root = root || this; }
-  async getDirectoryHandle(n, { create = false } = {}) {
-    let h = this.children.get(n);
-    if (!h) { if (!create) throw notFound(n); h = new FakeDir(n, this.root); this.children.set(n, h); }
-    return h;
-  }
-  async getFileHandle(n, { create = false } = {}) {
-    let h = this.children.get(n);
-    if (!h) { if (!create) throw notFound(n); h = new FakeFile(this, n); this.children.set(n, h); }
-    return h;
-  }
-  async removeEntry(n) { if (!this.children.delete(n)) throw notFound(n); }
-  async *entries() { for (const e of [...this.children.entries()]) yield e; }
-}
 const big = () => ({ quota: 100 * 2 ** 30, usage: 0 });
 
 // ---- synthetic tensors: one Q8_0 matrix (repack) and one BF16 matrix (-> f32) ----

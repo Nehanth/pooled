@@ -1,14 +1,48 @@
 // Real header/weight loading with in-memory ranges and recording engine constructors.
 // Browser integration tests cover GPU construction and room lifecycle around this boundary.
 import { createModelLoader } from "../../room/model-loader.js";
-import { GGML_EMBED, GGML_FINAL_NORM, GGML_Q4_0, ggmlLayerNames } from "../../engine/gguf.js";
+import { GGML_EMBED, GGML_OUTPUT, GGML_FINAL_NORM, GGML_Q4_0, GGML_BF16, ggmlLayerNames, qwen35LayerNames } from "../../engine/gguf.js";
 import { MODELS, MAX_SEQ } from "../../room/models.js";
+import { HDR, entryFile, MIN_ENTRY_BYTES } from "../../room/convertedcache.js";
+import { FakeDir } from "../helpers/fake-opfs.js";
 
 const eq = (a, b) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${JSON.stringify(a)} != ${JSON.stringify(b)}`); };
 const ok = (v, message = "assertion failed") => { if (!v) throw new Error(message); };
 async function rejects(fn, message) {
   try { await fn(); } catch (e) { ok(String(e).includes(message), String(e)); return; }
   throw new Error("expected rejection: " + message);
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
+async function withGPU(fn) {
+  const usage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
+  Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value: { STORAGE: 128, COPY_DST: 8, COPY_SRC: 4 } });
+  const device = { createBuffer: ({ size }) => ({ size, destroy() {} }), queue: { writeBuffer() {} },
+    pushErrorScope() {}, popErrorScope: async () => null };
+  try { await fn(device); }
+  finally {
+    if (usage) Object.defineProperty(globalThis, "GPUBufferUsage", usage);
+    else delete globalThis.GPUBufferUsage;
+  }
+}
+
+async function withStorage(root, fn) {
+  const fetch = globalThis.fetch, storage = Object.getOwnPropertyDescriptor(navigator, "storage");
+  globalThis.fetch = async () => new Response("converter source");
+  Object.defineProperty(navigator, "storage", { configurable: true, value: {
+    getDirectory: async () => root, estimate: async () => ({ quota: 100 * 2 ** 30, usage: 0 }),
+  } });
+  try { await fn(); }
+  finally {
+    globalThis.fetch = fetch;
+    if (storage) Object.defineProperty(navigator, "storage", storage);
+    else delete navigator.storage;
+  }
 }
 
 function test(name, fn) {
@@ -23,22 +57,58 @@ function test(name, fn) {
   });
 }
 
-function loader(state, rangeFetch, { getMeta = () => ({}), getWeightCache = async () => null } = {}) {
+function loader(state, rangeFetch, { getMeta = () => ({}), getWeightCache = async () => null, hooks = {} } = {}) {
   return createModelLoader({ state, rangeFetch, getWeightCache, getMeta,
-    hooks: { onStatus() {}, crumb() {}, onCacheHit() {}, onModelLoaded() {} } });
+    hooks: { onStatus() {}, crumb() {}, onCacheHit() {}, onModelLoaded() {}, ...hooks } });
 }
 
-// Minimal valid GGUF index: f32 tensors and a tokenizer marker, no tensor payload.
-function header(name) {
+// A small f32 GGUF index, optionally with metadata, shapes and distinct tensor payloads.
+function header(name, { meta = { "tokenizer.ggml.model": "test" }, shapes = {}, payload = false } = {}) {
   const names = Array.isArray(name) ? name : [name];
   const bytes = [], enc = new TextEncoder();
   const u32 = (n) => { for (let i = 0; i < 4; i++) bytes.push(n >>> (8 * i) & 255); };
   const u64 = (n) => { u32(n); u32(0); };
   const str = (s) => { const b = enc.encode(s); u64(b.length); bytes.push(...b); };
-  u32(0x46554747); u32(3); u64(names.length); u64(1);
-  str("tokenizer.ggml.model"); u32(8); str("test");
-  for (const [i, n] of names.entries()) { str(n); u32(1); u64(1); u32(0); u64(i * 4); }
+  u32(0x46554747); u32(3); u64(names.length); u64(Object.keys(meta).length);
+  for (const [key, value] of Object.entries(meta)) {
+    str(key);
+    if (Array.isArray(value)) { u32(9); u32(8); u64(value.length); for (const v of value) str(v); }
+    else if (typeof value === "string") { u32(8); str(value); }
+    else { u32(4); u32(value); }
+  }
+  let offset = 0;
+  for (const n of names) {
+    const shape = shapes[n] || [1];
+    str(n); u32(shape.length); for (const dim of [...shape].reverse()) u64(dim);
+    u32(0); u64(offset); offset += shape.reduce((a, b) => a * b, 1) * 4;
+    if (payload) offset = Math.ceil(offset / 32) * 32;
+  }
+  if (payload) {
+    while (bytes.length % 32) bytes.push(0);
+    for (const [i, n] of names.entries()) {
+      const data = new Float32Array((shapes[n] || [1]).reduce((a, b) => a * b, 1)).fill(i + 1);
+      bytes.push(...new Uint8Array(data.buffer));
+      while (bytes.length % 32) bytes.push(0);
+    }
+  }
   return new Uint8Array(bytes);
+}
+
+function qwen35() {
+  const names = [GGML_EMBED, GGML_OUTPUT, GGML_FINAL_NORM,
+    ...[0, 1].flatMap((i) => Object.values(qwen35LayerNames(i, true)).filter((n) => typeof n === "string")),
+    ...["eh_proj", "enorm", "hnorm", "shared_head_norm"].map((n) => `blk.1.nextn.${n}.weight`)];
+  const meta = { "qwen35.block_count": 2, "qwen35.nextn_predict_layers": 1, "qwen35.full_attention_interval": 1,
+    "tokenizer.ggml.tokens": ["a", "b", "c"], "tokenizer.ggml.merges": ["a b"],
+    "tokenizer.ggml.pre": "qwen35", "tokenizer.chat_template": "host template {{ messages }}" };
+  const shapes = Object.fromEntries(names.map((n) => [n, n === GGML_EMBED || n === GGML_OUTPUT ? [3, 2] : [2]]));
+  const file = header(names, { meta, shapes, payload: true }), requests = [], tokenizers = [];
+  const state = { device: {}, tune: { wg: 64, rows: 4 } };
+  const engines = { makeTokenizer(tj) { tokenizers.push(tj); return {}; }, Qwen35Engine: { async create(opts) { return opts; } } };
+  const opts = { modelKey: "qwen3.8-27b", range: [0, 1], hasEmbed: true, hasHead: true, ctx: 8192, kv: "q8",
+    streamOpts: {}, onProgress() {} };
+  const rangeFetch = async (url, lo, hi) => { requests.push([url, lo, hi]); return new Response(file.slice(lo, hi + 1)); };
+  return { names, meta, file, requests, tokenizers, state, engines, opts, rangeFetch };
 }
 
 function dense(names = [GGML_EMBED]) {
@@ -50,6 +120,16 @@ function dense(names = [GGML_EMBED]) {
   const opts = { modelKey: state.GModel, range: [0, 0], hasEmbed: true, hasHead: false, ctx: 4096,
     streamOpts: {}, onProgress() {}, pace: async () => {} };
   return { state, engines, opts, built: () => built };
+}
+
+// A real BF16 conversion large enough for the cache's ordinary admission policy.
+function cacheModel() {
+  const f = dense(), n = MIN_ENTRY_BYTES / 2;
+  Object.assign(f.state.G.tensors[GGML_EMBED], { ggmlType: GGML_BF16, shape: [n / 2, 2], nElems: n, byteLength: n * 2 });
+  const bytes = new Uint16Array(n).fill(0x3f80); // BF16 1.0
+  let fetched = 0;
+  const rangeFetch = async () => { fetched++; return new Response(bytes); };
+  return { ...f, rangeFetch, fetched: () => fetched };
 }
 
 test("model loader: grow a short header and retain tokenizer only when requested", async () => {
@@ -141,6 +221,46 @@ test("model loader: prefetch fetches each tensor once when file and model order 
   }
 });
 
+test("model loader: split-shard prefetch distinguishes identical offsets in different files", async () => {
+  location.search = "?wcache=0&prefetch=4";
+  const layerNames = ggmlLayerNames(0), names = Object.values(layerNames), { state, engines, opts } = dense(names), requests = [];
+  const first = MODELS[opts.modelKey].gguf, second = first + ".part2", perFile = Math.ceil(names.length / 2);
+  for (const [i, name] of names.entries()) Object.assign(state.G.tensors[name], {
+    url: i < perFile ? first : second, shard: Math.floor(i / perFile), byteOffset: (i % perFile) * 4,
+  });
+  const m = loader(state, async (url, lo, hi) => {
+    requests.push([url, lo, hi]);
+    return new Response(new Float32Array([lo / 4 + (url === first ? 1 : perFile + 1)]));
+  });
+  await m.loadShard({ ...opts, range: [0, 1], hasEmbed: false }, engines);
+  for (const [key, name] of Object.entries(layerNames)) eq([...state.engine.weights.layers[0][key].data], [names.indexOf(name) + 1]);
+  eq(requests[0], [first, 4, 7]); // the URL-keyed index actually schedules work ahead of the first tensor
+  eq(requests.length, names.length);
+  eq(new Set(requests.map((r) => JSON.stringify(r))).size, names.length);
+});
+
+test("model loader: successful load consumes or cancels every prefetched response body", async () => {
+  location.search = "?wcache=0&prefetch=4";
+  const f = qwen35(), bodies = [];
+  const m = loader(f.state, async (_url, lo, hi) => {
+    const body = { state: "unread" }; bodies.push(body);
+    return new Response(new ReadableStream({
+      start(c) { c.enqueue(f.file.slice(lo, hi + 1)); },
+      pull(c) { body.state = "consumed"; c.close(); },
+      cancel() { body.state = "cancelled"; },
+    }, { highWaterMark: 0 }));
+  });
+  f.state.G = await m.fetchModelHeader(MODELS[f.opts.modelKey]);
+  f.state.GModel = f.opts.modelKey;
+  // Without eh_proj the optional nextn block is skipped; its other tensors are still in the prefetch plan.
+  delete f.state.G.tensors["blk.1.nextn.eh_proj.weight"];
+  await m.loadShard(f.opts, f.engines);
+  ok(f.state.engine); eq(f.state.engine.weights.mtp, undefined);
+  ok(bodies.some((b) => b.state === "consumed"));
+  ok(bodies.some((b) => b.state === "cancelled"), "unused nextn prefetches must be cancelled");
+  eq(bodies.filter((b) => b.state === "unread").length, 0);
+});
+
 test("model loader: the next load cancels prefetched bodies left unread by a failed load", async () => {
   location.search = "?wcache=0&prefetch=2";
   const { state, engines, opts } = dense(Object.values(ggmlLayerNames(0))), cancelled = [];
@@ -184,6 +304,52 @@ test("model loader: Qwen35 worker keeps context, KV choice and layer range", asy
   ok(state.engine.device === state.device);
 });
 
+test("model loader: Qwen35 host loads trunk, nextn, tokenizer, template, vocab and progress", async () => {
+  const f = qwen35(), progress = [], notifications = [];
+  const m = loader(f.state, f.rangeFetch, { hooks: { onModelLoaded() { notifications.push(f.state.tok.chatTemplate); } } });
+  await m.loadShard({ ...f.opts, onProgress: (done, total) => progress.push([done, total]) }, f.engines);
+  const { weights, vocab, layerRange, hasEmbed, hasHead } = f.state.engine;
+  eq(f.state.cfg.num_hidden_layers, 1); // nextn is not a trunk layer
+  eq(vocab, 3); // vocabulary and hidden dimension (2) deliberately differ
+  eq(layerRange, [0, 1]); ok(hasEmbed && hasHead);
+  eq(f.tokenizers, [{ model: { vocab: { a: 0, b: 1, c: 2 }, merges: ["a b"] }, pre: "qwen35" }]);
+  eq(f.state.tok.chatTemplate, f.meta["tokenizer.chat_template"]);
+  eq(notifications, [f.meta["tokenizer.chat_template"]]);
+  const value = (entry, name) => eq([...entry.data], Array(f.state.G.tensors[name].nElems).fill(f.names.indexOf(name) + 1));
+  value(weights.embed, GGML_EMBED); value(weights.head, GGML_OUTPUT); value(weights.finalNorm, GGML_FINAL_NORM);
+  eq(weights.layers.length, 1); ok(weights.mtp, "host must load nextn");
+  const layerKeys = { attnNorm: "attn_norm", postNorm: "post_attention_norm", ffnGate: "ffn_gate", ffnUp: "ffn_up", ffnDown: "ffn_down",
+    wq: "attn_q", wk: "attn_k", wv: "attn_v", wo: "attn_output", qNorm: "attn_q_norm", kNorm: "attn_k_norm" };
+  for (const [i, layer] of [weights.layers[0], weights.mtp.layer].entries()) {
+    ok(layer.isFull);
+    for (const [key, name] of Object.entries(layerKeys)) value(layer[key], `blk.${i}.${name}.weight`);
+  }
+  for (const [key, name] of Object.entries({ ehProj: "eh_proj", enorm: "enorm", hnorm: "hnorm", sharedHeadNorm: "shared_head_norm" }))
+    value(weights.mtp[key], `blk.1.nextn.${name}.weight`);
+  const sizes = Object.values(f.state.G.tensors).map((t) => t.byteLength), total = sizes.reduce((a, b) => a + b, 0);
+  eq(progress.length, f.names.length);
+  ok(progress.every(([done, t], i) => done > (progress[i - 1]?.[0] || 0) && t === total));
+  eq(progress.at(-1), [total, total]);
+  eq(f.requests.length, f.names.length + 1); // header plus every tensor
+});
+
+test("model loader: Qwen35 worker promotion refetches tokens; a complete host header is reused", async () => {
+  const f = qwen35(), m = loader(f.state, f.rangeFetch);
+  const headers = () => f.requests.filter(([, lo]) => lo === 0).length;
+  await m.loadShard({ ...f.opts, hasEmbed: false, hasHead: false }, f.engines);
+  eq(headers(), 1); eq(f.tokenizers.length, 0);
+  eq(f.state.G.meta["tokenizer.ggml.tokens"], undefined);
+  await m.loadShard(f.opts, f.engines);
+  eq(headers(), 2); eq(f.tokenizers.length, 1);
+  eq(f.state.G.meta["tokenizer.ggml.tokens"], ["a", "b", "c"]);
+  eq(f.state.tok.chatTemplate, f.meta["tokenizer.chat_template"]);
+  await m.loadShard(f.opts, f.engines);
+  eq(headers(), 2); eq(f.tokenizers.length, 2);
+  eq(f.tokenizers[1], f.tokenizers[0]);
+  eq(f.state.tok.chatTemplate, f.meta["tokenizer.chat_template"]);
+  eq(f.state.engine.vocab, 3); ok(f.state.engine.weights.mtp);
+});
+
 test("model loader: converted cache hashes the original converter URL and tolerates unavailable storage", async () => {
   location.search = "?prefetch=0";
   const { state, engines, opts } = dense(), urls = [];
@@ -203,13 +369,92 @@ test("model loader: converted cache hashes the original converter URL and tolera
   }
 });
 
+test("model loader: converted cache reports a warm hit without fetching weights again", async () => {
+  location.search = "?prefetch=0";
+  await withStorage(new FakeDir(), async () => {
+    const f = cacheModel(), hits = [], m = loader(f.state, f.rangeFetch, { hooks: { onCacheHit: (s) => hits.push(s) } });
+    await m.loadShard(f.opts, f.engines);
+    eq(f.state.G.entryCache.stats.write, 1); eq(hits, []);
+    await m.loadShard(f.opts, f.engines);
+    eq(f.fetched(), 1); eq(f.state.G.entryCache.stats.hit, 1);
+    eq(hits.length, 1); ok(hits[0].includes("1 from this device"));
+    ok(f.state.engine.weights.embed.data.every((v) => v === 1));
+  });
+});
+
+test("model loader: wcacheverify detects a corrupt payload and reloads it", async () => {
+  for (const verify of [false, true]) await withStorage(new FakeDir(), async () => {
+    location.search = "?prefetch=0";
+    const f = cacheModel();
+    await loader(f.state, f.rangeFetch).loadShard(f.opts, f.engines);
+    const file = await f.state.G.entryCache.dir.getFileHandle(entryFile(GGML_EMBED));
+    new DataView(file.data.buffer).setFloat32(HDR, 9, true); // valid file layout, wrong payload hash
+    location.search = "?prefetch=0&wcacheverify=" + Number(verify);
+    await loader(f.state, f.rangeFetch).loadShard(f.opts, f.engines);
+    eq(f.state.engine.weights.embed.data[0], verify ? 1 : 9);
+    eq(f.fetched(), verify ? 2 : 1);
+    eq(f.state.G.entryCache.stats.bad, verify ? 1 : 0);
+  });
+});
+
+test("model loader: converted cache flush finishes before engine construction", async () => {
+  location.search = "?prefetch=0";
+  const root = new FakeDir(), release = deferred(), entered = deferred();
+  let closed = false, built = false, wrapped = false;
+  root.beforeClose = async (name) => { if (name.includes(".bin")) { await release.promise; closed = true; } };
+  await withStorage(root, async () => {
+    const f = cacheModel(), m = loader(f.state, f.rangeFetch);
+    const loading = m.loadShard({ ...f.opts, onProgress() {
+      if (wrapped) return;
+      wrapped = true;
+      const cache = f.state.G.entryCache, flush = cache.flush.bind(cache);
+      cache.flush = () => { entered.resolve("flush"); return flush(); };
+    } }, { DenseEngine: { async create(opts) {
+      built = true; entered.resolve("engine");
+      ok(closed, "engine constructed before the pending cache write finished");
+      return opts;
+    } } }).then(() => null, (error) => error);
+    try {
+      eq(await Promise.race([entered.promise, loading]), "flush");
+      ok(!built, "engine must wait for cache flush");
+      ok(f.state.G.entryCache.pending.size > 0, "a real cache write must still be pending");
+    } finally { release.resolve(); await loading; }
+    const error = await loading;
+    if (error) throw error;
+    ok(closed && built); eq(f.state.G.entryCache.stats.write, 1);
+  });
+});
+
+test("model loader: GPU stream awaits room pacing before opening a range", async () => {
+  await withGPU(async (device) => {
+    const { state, engines, opts } = dense(), paced = deferred(), release = deferred(), requests = [];
+    state.device = device;
+    const m = loader(state, async (...args) => { requests.push(args); return new Response(new Uint8Array(18)); });
+    await m.loadShard({ ...opts, hasEmbed: false, pace() { paced.resolve(); return release.promise; } }, engines);
+    const pending = state.G.streamEntry({ name: "matrix", ggmlType: GGML_Q4_0, shape: [1, 32], nElems: 32, byteOffset: 64, byteLength: 18 });
+    try { eq(await Promise.race([paced.promise.then(() => "paced"), pending.then(() => "streamed")]), "paced"); eq(requests, []); }
+    finally { release.resolve(); await pending; }
+    eq(requests, [[MODELS[opts.modelKey].gguf, 64, 81]]);
+    ok((await pending).gpu);
+  });
+});
+
+test("model loader: GPU stream propagates a room pacing rejection without fetching", async () => {
+  await withGPU(async (device) => {
+    const { state, engines, opts } = dense(), requests = [];
+    state.device = device;
+    const m = loader(state, async (...args) => { requests.push(args); return new Response(new Uint8Array(18)); });
+    await m.loadShard({ ...opts, hasEmbed: false, pace: async () => { throw new Error("stream stopped"); } }, engines);
+    await rejects(() => state.G.streamEntry({ name: "matrix", ggmlType: GGML_Q4_0, shape: [1, 32], nElems: 32,
+      byteOffset: 64, byteLength: 18 }), "stream stopped");
+    eq(requests, []);
+  });
+});
+
 test("model loader: a short GPU stream evicts the actual shard's range and retries without cache", async () => {
-  const { state, engines, opts } = dense(), requests = [], deleted = [];
-  const usage = Object.getOwnPropertyDescriptor(globalThis, "GPUBufferUsage");
-  Object.defineProperty(globalThis, "GPUBufferUsage", { configurable: true, value: { STORAGE: 128, COPY_DST: 8, COPY_SRC: 4 } });
-  state.device = { createBuffer: ({ size }) => ({ size, destroy() {} }), queue: { writeBuffer() {} },
-    pushErrorScope() {}, popErrorScope: async () => null };
-  try {
+  await withGPU(async (device) => {
+    const { state, engines, opts } = dense(), requests = [], deleted = [];
+    state.device = device;
     const m = loader(state, async (url, lo, hi, noCache = false) => {
       requests.push([url, lo, hi, noCache]);
       return new Response(new Uint8Array(noCache ? 18 : 0));
@@ -219,10 +464,7 @@ test("model loader: a short GPU stream evicts the actual shard's range and retri
     eq(requests, [["second-shard", 64, 81, false], ["second-shard", 64, 81, true]]);
     eq(deleted.length, 1);
     ok(deleted[0].includes("second-shard") && deleted[0].endsWith("/64-81"));
-  } finally {
-    if (usage) Object.defineProperty(globalThis, "GPUBufferUsage", usage);
-    else delete globalThis.GPUBufferUsage;
-  }
+  });
 });
 
 test("model loader: draft construction uses the loaded context without replacing the main engine", async () => {
@@ -233,6 +475,8 @@ test("model loader: draft construction uses the loaded context without replacing
     const m = loader(state, async (_url, lo) => new Response(lo === 0 ? header([GGML_EMBED, GGML_FINAL_NORM]) : new Float32Array([1])));
     const draft = await m.loadDraft({ cfg: "config", gguf: "draft" }, { async create(opts) { return opts; } });
     eq(draft.maxSeq, 8192);
+    eq(draft.coopWG, 64);
+    eq(draft.coopRows, 4);
     eq(draft.layerRange, [0, 0]);
     ok(draft.hasEmbed && draft.hasHead);
     ok(draft.device === state.device && state.engine === engine);

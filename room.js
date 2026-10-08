@@ -15,8 +15,8 @@ function loadEngine() {
     ({ Qwen35Engine } = q);
   }, (err) => { engineLoad = null; throw new Error("couldn't load the inference engine (" + (err?.message || err) + "). Check the connection and try again"); });
 }
-import { f32ToF16, f16ToF32, GGML_EMBED, GGML_OUTPUT,
-  ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes, qwen35LayerNames }
+import { GGML_EMBED, GGML_OUTPUT,
+  ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes }
   from "./engine/gguf.js";
 import { roomQwen35Options, roomEngineFlags, applyRoomFlags } from "./engine/preset.js";   // no imports of its own; the engine itself loads late (loadEngine)
 import { WIRE_F16, f32ToB64, packF16, unpackF16, asU16, asF32, b64ToF32, wireStats } from "./room/wire.js";
