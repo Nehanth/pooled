@@ -58,27 +58,17 @@ ol,ul{list-style:none}
 .nav{position:sticky;top:0;z-index:50;background:rgba(246,245,241,.82);-webkit-backdrop-filter:saturate(180%) blur(14px);backdrop-filter:saturate(180%) blur(14px)}
 .nav-in{display:flex;align-items:center;height:64px;gap:20px}
 .nav .right{display:flex;align-items:center;gap:8px;margin-left:auto}
-.nav .btn-sm{height:36px;padding-top:0;padding-bottom:0;white-space:nowrap}
+.nav .btn-sm{height:36px;padding-top:0;padding-bottom:0}
 
 /* header GitHub link: the mark only */
 .nav-link{display:inline-flex;align-items:center;height:36px;padding:0 10px;border-radius:8px;color:var(--ink-2);font:500 14px/1 var(--sans);text-decoration:none}
 .nav-link:hover{color:var(--ink);background:var(--bg-2)}
+/* Run agents: the OpenClaw and coding-tools kits, with a small "beta" sitting on top of the word */
+.nav-new{position:relative;white-space:nowrap}
+.nl-s{display:none}
+.nav-tag{position:absolute;right:6px;top:-7px;padding:2px 5px;border-radius:var(--r-pill);background:var(--blue-soft);color:var(--blue-text);font:500 9.5px/1 var(--sans);letter-spacing:.02em;pointer-events:none}
 .gh-link{display:inline-grid;place-items:center;width:36px;height:36px;border-radius:8px;color:var(--ink-2)}
 .gh-link:hover{color:var(--ink);background:var(--bg-2)}
-/* Beta: a quiet pill beside the wordmark, in the room's blue-on-blue-soft (as the chips' download percent) */
-.beta{display:inline-flex;align-items:center;height:20px;margin-left:-10px;padding:0 8px;border-radius:var(--r-pill);background:var(--blue-soft);color:var(--blue-text);font:500 var(--t-xs)/1 var(--sans);letter-spacing:.01em;white-space:nowrap;transform:translateY(.5px)}
-
-/* ---------- copy a command: a mono line on white with a copy mark; copy.js puts it on the clipboard ---------- */
-.cmd{display:flex;align-items:center;gap:14px;min-height:41px;padding:9px 10px 9px 14px;border-radius:var(--r-sm);background:var(--white);box-shadow:inset 0 0 0 1px var(--rule-3);color:var(--ink);text-align:left;transition:background-color .16s var(--ease),box-shadow .16s var(--ease)}
-.cmd:hover{background:var(--bg-2);box-shadow:inset 0 0 0 1px var(--ink-3)}
-.cmd:focus-visible{border-radius:var(--r-sm)}
-.cmd code{flex:1;min-width:0;font:500 var(--t-md)/1.45 var(--mono);letter-spacing:-.01em}
-.cmd .cp{flex:none;display:inline-flex;align-items:center;gap:5px;height:22px;color:var(--ink-3);font:500 var(--t-sm)/1 var(--sans)}
-.cmd:hover .cp{color:var(--ink)}
-.cmd .i-ok,.cmd .cp-l{display:none}
-.cmd.copied .i-cp{display:none}
-.cmd.copied .i-ok,.cmd.copied .cp-l{display:block}
-.cmd.copied .cp{color:var(--ok)}
 
 /* ---------- hero, over the swarm ---------- */
 .hero{position:relative;padding:clamp(20px,3.5vh,40px) 0 clamp(18px,2.5vh,28px);text-align:center;overflow:hidden}
@@ -91,11 +81,6 @@ ol,ul{list-style:none}
 .hero .sub{max-width:38em;margin:16px auto 0;font:400 clamp(17px,1.3vw,18px)/1.55 var(--sans);color:var(--ink-2);text-wrap:pretty;text-shadow:0 0 14px var(--bg),0 0 4px var(--bg)}
 .js .hero-in>*{animation:rise .9s var(--ease) both}
 .js .hero-in>:nth-child(2){animation-delay:.08s}
-.js .hero-in>:nth-child(3){animation-delay:.16s}
-/* Start a room, and beside it the same thing from a terminal */
-.hero-cta{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:12px 18px;margin-top:24px}
-.term{display:flex;align-items:center;gap:12px}
-.term-l{font-size:var(--t-base);color:var(--ink-3);white-space:nowrap;text-shadow:0 0 10px var(--bg),0 0 3px var(--bg)}
 @keyframes rise{from{opacity:0;transform:translateY(10px)}}
 
 /* ---------- the demo ---------- */
@@ -676,26 +661,6 @@ html:not(.js) .game canvas{display:none}
 #pause.paused .i-play{display:block}
 .demo.paused *,.demo.paused *::before,.demo.paused *::after{animation-play-state:paused!important}
 
-/* ---------- OpenClaw: the plugin, one command, the guide ---------- */
-.kit{padding:clamp(56px,8vw,104px) 0 0}
-.kit-in{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:center;gap:28px 56px;max-width:1160px;margin:0 auto;padding:clamp(28px,4vw,44px);background:var(--white);border:1px solid var(--rule);border-radius:16px}
-.kit h2{max-width:13em;font:400 clamp(28px,2.8vw,36px)/1.08 var(--display);letter-spacing:-.03em;text-wrap:balance}
-.kit h2 span{color:var(--blue)}
-.kit-t p{max-width:30em;margin-top:12px;color:var(--ink-2);text-wrap:pretty}
-.kit-do{display:flex;flex-direction:column;align-items:flex-start;gap:16px}
-.kit-do .cmd{align-self:stretch;background:var(--bg-2)}
-.kit-do .cmd:hover{background:var(--bg)}
-.kit-a{display:inline-flex;align-items:center;gap:7px;font:500 var(--t-lg)/1.3 var(--sans);color:var(--blue-text);text-decoration:none}
-.kit-a:hover{text-decoration:underline;text-underline-offset:3px}
-.kit-a svg{transition:transform .16s var(--ease)}
-.kit-a:hover svg{transform:translateX(2px)}
-.kit-also{align-self:stretch;padding-top:14px;border-top:1px solid var(--rule-2);font-size:var(--t-base);color:var(--ink-3)}
-.kit-also a{color:var(--ink);text-underline-offset:3px;text-decoration-color:var(--rule-3)}
-.kit-also a:hover{text-decoration-color:currentColor}
-@media (max-width:820px){
-  .kit-in{grid-template-columns:minmax(0,1fr)}
-}
-
 /* ---------- closer + footer ---------- */
 .closer{position:relative;overflow:hidden;padding:clamp(80px,11vw,140px) 0 clamp(80px,10vw,128px);text-align:center}
 .closer .swarm{-webkit-mask-image:radial-gradient(ellipse 60% 78% at 50% 48%,#000 35%,transparent 100%);mask-image:radial-gradient(ellipse 60% 78% at 50% 48%,#000 35%,transparent 100%)}
@@ -872,7 +837,6 @@ html:not(.js) .sb-dots i{display:none}
 @media (min-width:641px) and (max-height:860px){
   .hero{padding:12px 0 14px}
   .hero .sub{margin-top:10px}
-  .hero-cta{margin-top:16px}
   .modes{margin-bottom:10px}
   .hd{height:46px}
   .stepbar{min-height:52px;margin-top:10px;padding-top:4px;padding-bottom:4px}
@@ -966,34 +930,25 @@ html:not(.js) .sb-dots i{display:none}
   .sb-dots button{height:32px}
   .replay{margin-left:auto;height:32px}
 
-  .nav-in{gap:16px}
-  .nav .right{gap:2px}
-  .beta{margin-left:-8px}
-  .hero-cta{flex-direction:column;gap:10px;margin-top:16px}
-  .hero-cta .btn{justify-content:center;width:248px;padding-top:12px;padding-bottom:12px}
-  .term{flex-direction:column;gap:6px}
-  .term .cmd{width:248px}
-  .term-l{font-size:var(--t-md)}
-  .kit{padding-top:48px}
-  .kit-in{padding:24px 20px;gap:22px}
-  .kit h2{font-size:clamp(26px,7.4vw,30px)}
-  .kit-t p{font-size:15px;margin-top:10px}
-
   .logo-slot{width:80px;height:80px;margin-bottom:26px}
   .closer h2{font-size:clamp(32px,9.4vw,40px)}
   .ctas{margin-top:28px}
 }
 
-/* small phones: the header's GitHub mark gives way to the Beta tag (GitHub is still the Star button at the end) */
-@media (max-width:400px){
+/* phones: the header keeps Docs, Run agents and Start a room on one line; GitHub is still the Star button at the end */
+@media (max-width:640px){
+  .nav-in{gap:12px}
+  .nav .right{gap:4px}
+  .nav-link{padding:0 7px}
   .nav .gh-link{display:none}
-  .nav-link{padding:0 8px}
+  .nav .btn-sm{white-space:nowrap}
+  .nav-tag{right:2px}
 }
-@media (max-width:340px){.nav-in{gap:12px}.beta{margin-left:-4px;padding:0 7px}.nav-link{padding:0 5px}.nav .btn-sm{padding:0 10px}}
+@media (max-width:374px){.nl-l{display:none}.nl-s{display:inline}.nav .btn-sm{padding:0 11px}}
+@media (max-width:340px){.nav .wm{display:none}}
 
 /* ---------- touch: at least 44px to hit ---------- */
 @media (pointer:coarse){
-  .cmd{min-height:44px}
   .nav .btn,.modes button,.sb-dots button,.replay{position:relative}
   .nav .btn::before,.modes button::before,.sb-dots button::before,.replay::before{content:"";position:absolute;inset:-8px}
   .modes button::before{inset:-6px 0}
