@@ -26,7 +26,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf } from "./room/models.js";
+import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -2629,6 +2629,7 @@ let ai = {
 
 const modelLoader = createModelLoader({
   state: ai, rangeFetch, getWeightCache, getMeta: () => myMeta,
+  options: modelLoadOptions(location.search), getEnginePreset: () => roomQwen35Options(location.search),
   hooks: { onStatus: aiStatus, crumb, onModelLoaded: apiModelLoaded,
     onCacheHit(msg) { log("room", `${myName}: ${msg}`); } },
 });
@@ -2927,6 +2928,25 @@ function setCtx(used, max) {
   el.classList.toggle("warn", used > max * 0.8);
 }
 
+// Main and draft loads share the room's pacing and cancellation policy.
+function slowestLoadProgress() {
+  const now = Date.now();
+  let m = Infinity;
+  for (const [nm, pct] of Object.entries(ai.prog || {})) {
+    if (nm === myName || pct >= 100) continue;
+    if (now - ((ai.progAt || {})[nm] || 0) > 30000) continue;     // silent for 30 s: don't wait on it
+    m = Math.min(m, pct);
+  }
+  return m;
+}
+async function aiLoadPace() {
+  if (ai.startFailed) throw new Error(ai.startFailed);   // the start was stopped (aiStartStopped): no point loading the rest
+  while (ai.myPct < 100 && ai.myPct > slowestLoadProgress() + 4) {
+    aiStatus(`downloading weights\u2026 in step with the room (${Math.round(ai.myPct)}%)`);
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 // the breadcrumbs written while this runs say "loading": if iOS kills the tab now, the host learns
 // from the hello after the reload that this share was too big for it (aiLoadDeath)
 async function aiLoadShard(...args) {
@@ -3009,24 +3029,7 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   }
   // every device (host included, even when its weights come from cache) keeps within a few
   // percent of the slowest device, so the bars climb together and the room finishes as one
-  const slowest = () => {
-    const now = Date.now();
-    let m = Infinity;
-    for (const [nm, pct] of Object.entries(ai.prog || {})) {
-      if (nm === myName || pct >= 100) continue;
-      if (now - ((ai.progAt || {})[nm] || 0) > 30000) continue;     // silent for 30 s: don't wait on it
-      m = Math.min(m, pct);
-    }
-    return m;
-  };
-  const pacer = async () => {
-    if (ai.startFailed) throw new Error(ai.startFailed);   // the start was stopped (aiStartStopped): no point loading the rest
-    while (ai.myPct < 100 && ai.myPct > slowest() + 4) {
-      aiStatus(`downloading weights\u2026 in step with the room (${Math.round(ai.myPct)}%)`);
-      await new Promise((r) => setTimeout(r, 250));
-    }
-  };
-  await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: pacer },
+  await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: aiLoadPace },
     { makeTokenizer, DenseEngine, Qwen35Engine, fetchModelShard, shardTensorNames });
   if (ai.peerBytes) log("room", `${myName}: ${(ai.peerBytes / 2 ** 20).toFixed(1)} MB of weights came from devices in the room, ${((ai.netBytes || 0) / 2 ** 20).toFixed(1)} MB from the network`);
   // batched draft-cache fill and refill, next step's first draft in the verify's pass (engine/preset.js)
@@ -3559,7 +3562,7 @@ async function aiLoadDraft(modelKey) {
   try {
     aiStatus(`loading the draft model (${DRAFT_MODEL})\u2026`);
     const M = MODELS[DRAFT_MODEL];
-    const e = await modelLoader.loadDraft(M, DenseEngine);
+    const e = await modelLoader.loadDraft({ modelKey: DRAFT_MODEL, pace: aiLoadPace }, { DenseEngine });
     ai.draft = new DraftModel(e, { argmax });
     log("room", `draft model ${M.label} loaded on the host: it drafts ${DRAFT_K} tokens per lap when prompt lookup finds nothing`);
   } catch (err) { ai.draft = null; log("room", `the draft model did not load (${err?.message || err}); prompt lookup only`); }

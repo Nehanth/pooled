@@ -3,8 +3,9 @@
 import { createModelLoader } from "../../room/model-loader.js";
 import { GGML_EMBED, GGML_OUTPUT, GGML_FINAL_NORM, GGML_Q4_0, GGML_BF16, ggmlLayerNames, qwen35LayerNames } from "../../engine/gguf.js";
 import { MODELS, MAX_SEQ } from "../../room/models.js";
-import { HDR, entryFile, MIN_ENTRY_BYTES } from "../../room/convertedcache.js";
+import { HDR, entryFile, MIN_ENTRY_BYTES, attachBrowserWeightCache } from "../../room/convertedcache.js";
 import { FakeDir } from "../helpers/fake-opfs.js";
+import { roomQwen35Options } from "../../engine/preset.js";
 
 const eq = (a, b) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${JSON.stringify(a)} != ${JSON.stringify(b)}`); };
 const ok = (v, message = "assertion failed") => { if (!v) throw new Error(message); };
@@ -45,21 +46,11 @@ async function withStorage(root, fn) {
   }
 }
 
-function test(name, fn) {
-  Deno.test(name, async () => {
-    const location = Object.getOwnPropertyDescriptor(globalThis, "location");
-    Object.defineProperty(globalThis, "location", { configurable: true, value: { search: "?wcache=0&prefetch=0" } });
-    try { await fn(); }
-    finally {
-      if (location) Object.defineProperty(globalThis, "location", location);
-      else delete globalThis.location;
-    }
-  });
-}
+const test = Deno.test;
 
-function loader(state, rangeFetch, { getMeta = () => ({}), getWeightCache = async () => null, hooks = {} } = {}) {
-  return createModelLoader({ state, rangeFetch, getWeightCache, getMeta,
-    hooks: { onStatus() {}, crumb() {}, onCacheHit() {}, onModelLoaded() {}, ...hooks } });
+function loader(state, rangeFetch, { getMeta = () => ({}), getWeightCache = async () => null, hooks,
+  options = { wcache: false, prefetch: 0 }, getEnginePreset = () => ({}) } = {}) {
+  return createModelLoader({ state, rangeFetch, getWeightCache, getMeta, getEnginePreset, options, hooks });
 }
 
 // A small f32 GGUF index, optionally with metadata, shapes and distinct tensor payloads.
@@ -196,11 +187,10 @@ test("model loader: a room pacing failure propagates before fetching weights", a
 });
 
 test("model loader: prefetch reads live phone metadata and never refetches taken tensors", async () => {
-  location.search = "?wcache=0";
   const names = Object.values(ggmlLayerNames(0));
   const { state, engines, opts } = dense(names), offsets = [];
   let meta = { phone: false };
-  const m = loader(state, async (_url, lo) => { offsets.push(lo); return new Response(new Float32Array([1])); }, { getMeta: () => meta });
+  const m = loader(state, async (_url, lo) => { offsets.push(lo); return new Response(new Float32Array([1])); }, { getMeta: () => meta, options: { wcache: false } });
   meta = { phone: true };
   await m.loadShard({ ...opts, range: [0, 1], hasEmbed: false }, engines);
   eq(offsets.slice(0, 2), [4, 0]); // one range ahead, then the requested range
@@ -208,13 +198,24 @@ test("model loader: prefetch reads live phone metadata and never refetches taken
   eq(new Set(offsets).size, names.length);
 });
 
+test("model loader: explicit prefetch overrides phone policy and is captured at creation", async () => {
+  for (const [phone, prefetch, first] of [[true, 2, [4, 8, 0]], [false, 0, [0, 28, 4]]]) {
+    const { state, engines, opts } = dense(Object.values(ggmlLayerNames(0))), offsets = [];
+    const options = { wcache: false, prefetch };
+    const m = loader(state, async (_url, lo) => { offsets.push(lo); return new Response(new Float32Array([1])); },
+      { options, getMeta: () => ({ phone }) });
+    options.prefetch = 5;
+    await m.loadShard({ ...opts, range: [0, 1], hasEmbed: false }, engines);
+    eq(offsets.slice(0, 3), first);
+  }
+});
+
 test("model loader: prefetch fetches each tensor once when file and model order differ", async () => {
-  location.search = "?wcache=0";
   for (const phone of [true, false]) {
     const names = Object.values(ggmlLayerNames(0)), { state, engines, opts } = dense(names), offsets = [];
     // Model order visits the second half of the file before its first half.
     for (const [i, name] of names.entries()) state.G.tensors[name].byteOffset = ((i + 6) % names.length) * 4;
-    const m = loader(state, async (_url, lo) => { offsets.push(lo); return new Response(new Float32Array([1])); }, { getMeta: () => ({ phone }) });
+    const m = loader(state, async (_url, lo) => { offsets.push(lo); return new Response(new Float32Array([1])); }, { getMeta: () => ({ phone }), options: { wcache: false } });
     await m.loadShard({ ...opts, range: [0, 1], hasEmbed: false }, engines);
     eq(offsets.length, names.length);
     eq(new Set(offsets).size, names.length);
@@ -222,7 +223,6 @@ test("model loader: prefetch fetches each tensor once when file and model order 
 });
 
 test("model loader: split-shard prefetch distinguishes identical offsets in different files", async () => {
-  location.search = "?wcache=0&prefetch=4";
   const layerNames = ggmlLayerNames(0), names = Object.values(layerNames), { state, engines, opts } = dense(names), requests = [];
   const first = MODELS[opts.modelKey].gguf, second = first + ".part2", perFile = Math.ceil(names.length / 2);
   for (const [i, name] of names.entries()) Object.assign(state.G.tensors[name], {
@@ -231,7 +231,7 @@ test("model loader: split-shard prefetch distinguishes identical offsets in diff
   const m = loader(state, async (url, lo, hi) => {
     requests.push([url, lo, hi]);
     return new Response(new Float32Array([lo / 4 + (url === first ? 1 : perFile + 1)]));
-  });
+  }, { options: { wcache: false, prefetch: 4 } });
   await m.loadShard({ ...opts, range: [0, 1], hasEmbed: false }, engines);
   for (const [key, name] of Object.entries(layerNames)) eq([...state.engine.weights.layers[0][key].data], [names.indexOf(name) + 1]);
   eq(requests[0], [first, 4, 7]); // the URL-keyed index actually schedules work ahead of the first tensor
@@ -240,7 +240,6 @@ test("model loader: split-shard prefetch distinguishes identical offsets in diff
 });
 
 test("model loader: successful load consumes or cancels every prefetched response body", async () => {
-  location.search = "?wcache=0&prefetch=4";
   const f = qwen35(), bodies = [];
   const m = loader(f.state, async (_url, lo, hi) => {
     const body = { state: "unread" }; bodies.push(body);
@@ -249,7 +248,7 @@ test("model loader: successful load consumes or cancels every prefetched respons
       pull(c) { body.state = "consumed"; c.close(); },
       cancel() { body.state = "cancelled"; },
     }, { highWaterMark: 0 }));
-  });
+  }, { options: { wcache: false, prefetch: 4 } });
   f.state.G = await m.fetchModelHeader(MODELS[f.opts.modelKey]);
   f.state.GModel = f.opts.modelKey;
   // Without eh_proj the optional nextn block is skipped; its other tensors are still in the prefetch plan.
@@ -262,13 +261,12 @@ test("model loader: successful load consumes or cancels every prefetched respons
 });
 
 test("model loader: the next load cancels prefetched bodies left unread by a failed load", async () => {
-  location.search = "?wcache=0&prefetch=2";
   const { state, engines, opts } = dense(Object.values(ggmlLayerNames(0))), cancelled = [];
   const m = loader(state, async (_url, lo) => new Response(new ReadableStream({
     start(c) { c.enqueue(new Uint8Array(new Float32Array([1]).buffer)); },
     pull(c) { c.close(); },
     cancel() { cancelled.push(lo); },
-  })));
+  })), { options: { wcache: false, prefetch: 2 } });
   let n = 0;
   await rejects(() => m.loadShard({ ...opts, range: [0, 1], hasEmbed: false,
     pace: async () => { if (++n > 1) throw new Error("stopped"); } }, engines), "stopped");
@@ -350,15 +348,64 @@ test("model loader: Qwen35 worker promotion refetches tokens; a complete host he
   eq(f.state.engine.vocab, 3); ok(f.state.engine.weights.mtp);
 });
 
+test("model loader: preset is read at engine construction and host KV wins without mutation", async () => {
+  const f = qwen35();
+  let preset = Object.freeze(roomQwen35Options("")), reads = 0;
+  const m = loader(f.state, f.rangeFetch, { getEnginePreset() { reads++; return preset; } });
+  eq(reads, 0);
+  for (const [i, kv] of ["f16", "q8"].entries()) {
+    const query = i ? "fuse=0&draftchain=0&kv=f16&gpusample=0" : "draftvocab=64&specfuse=0&kv=q8";
+    const next = Object.freeze(roomQwen35Options(query));
+    await m.loadShard({ ...f.opts, kv, onProgress() { preset = next; } }, f.engines);
+    eq(reads, i + 1);
+    for (const [k, v] of Object.entries(next)) eq(f.state.engine[k], k === "kvQ8" ? kv === "q8" : v);
+    eq(next, roomQwen35Options(query));
+  }
+});
+
+test("model loader: default options and omitted hooks work without browser location", async () => {
+  eq(globalThis.location, undefined);
+  await withStorage(new FakeDir(), async () => {
+    const f = cacheModel();
+    const m = createModelLoader({ state: f.state, rangeFetch: f.rangeFetch, getMeta: () => ({ phone: true }),
+      getWeightCache: async () => null, getEnginePreset: () => ({}) });
+    await m.loadShard(f.opts, f.engines);
+    ok(f.state.G.entryCache, "cache must be enabled by default");
+    eq(f.state.G.entryCache.stats.write, 1);
+    const file = await f.state.G.entryCache.dir.getFileHandle(entryFile(GGML_EMBED));
+    new DataView(file.data.buffer).setFloat32(HDR, 9, true);
+    await m.loadShard(f.opts, f.engines);
+    eq(f.fetched(), 1); eq(f.state.engine.weights.embed.data[0], 9); // verification defaults off
+  });
+});
+
+test("model loader: explicit cache options are captured at creation", async () => {
+  for (const enabled of [false, true]) await withStorage(new FakeDir(), async () => {
+    const f = cacheModel(), options = { wcache: enabled, wcacheVerify: true, prefetch: 0 };
+    const m = loader(f.state, f.rangeFetch, { options });
+    options.wcache = !enabled; options.wcacheVerify = false;
+    await m.loadShard(f.opts, f.engines);
+    if (enabled) {
+      const file = await f.state.G.entryCache.dir.getFileHandle(entryFile(GGML_EMBED));
+      new DataView(file.data.buffer).setFloat32(HDR, 9, true);
+    } else ok(f.state.G.entryCache === null, "explicit wcache: false must disable the cache");
+    await m.loadShard(f.opts, f.engines);
+    eq(f.fetched(), 2); eq(f.state.engine.weights.embed.data[0], 1);
+    if (enabled) eq(f.state.G.entryCache.stats.bad, 1);
+  });
+});
+
 test("model loader: converted cache hashes the original converter URL and tolerates unavailable storage", async () => {
-  location.search = "?prefetch=0";
+  // Prime another converter so this assertion does not depend on which cache test ran first.
+  await attachBrowserWeightCache({}, "model", { srcUrl: "previous-converter", fetchFn: async () => new Response("old source"),
+    storage: { getDirectory: async () => new FakeDir() } });
   const { state, engines, opts } = dense(), urls = [];
   const fetch = globalThis.fetch, storage = Object.getOwnPropertyDescriptor(navigator, "storage");
   Object.defineProperty(navigator, "storage", { configurable: true,
     value: { getDirectory() { throw new Error("storage unavailable"); } } });
   globalThis.fetch = async (url) => { urls.push(url); return new Response("converter source"); };
   try {
-    await loader(state, async () => new Response(new Float32Array([1]))).loadShard(opts, engines);
+    await loader(state, async () => new Response(new Float32Array([1])), { options: { prefetch: 0 } }).loadShard(opts, engines);
     eq(urls, [new URL("../../engine/gguf.js", import.meta.url).href]);
     eq(state.G.entryCache, null);
     ok(state.engine);
@@ -370,9 +417,8 @@ test("model loader: converted cache hashes the original converter URL and tolera
 });
 
 test("model loader: converted cache reports a warm hit without fetching weights again", async () => {
-  location.search = "?prefetch=0";
   await withStorage(new FakeDir(), async () => {
-    const f = cacheModel(), hits = [], m = loader(f.state, f.rangeFetch, { hooks: { onCacheHit: (s) => hits.push(s) } });
+    const f = cacheModel(), hits = [], m = loader(f.state, f.rangeFetch, { options: { prefetch: 0 }, hooks: { onCacheHit: (s) => hits.push(s) } });
     await m.loadShard(f.opts, f.engines);
     eq(f.state.G.entryCache.stats.write, 1); eq(hits, []);
     await m.loadShard(f.opts, f.engines);
@@ -384,13 +430,11 @@ test("model loader: converted cache reports a warm hit without fetching weights 
 
 test("model loader: wcacheverify detects a corrupt payload and reloads it", async () => {
   for (const verify of [false, true]) await withStorage(new FakeDir(), async () => {
-    location.search = "?prefetch=0";
     const f = cacheModel();
-    await loader(f.state, f.rangeFetch).loadShard(f.opts, f.engines);
+    await loader(f.state, f.rangeFetch, { options: { prefetch: 0 } }).loadShard(f.opts, f.engines);
     const file = await f.state.G.entryCache.dir.getFileHandle(entryFile(GGML_EMBED));
     new DataView(file.data.buffer).setFloat32(HDR, 9, true); // valid file layout, wrong payload hash
-    location.search = "?prefetch=0&wcacheverify=" + Number(verify);
-    await loader(f.state, f.rangeFetch).loadShard(f.opts, f.engines);
+    await loader(f.state, f.rangeFetch, { options: { prefetch: 0, wcacheVerify: verify } }).loadShard(f.opts, f.engines);
     eq(f.state.engine.weights.embed.data[0], verify ? 1 : 9);
     eq(f.fetched(), verify ? 2 : 1);
     eq(f.state.G.entryCache.stats.bad, verify ? 1 : 0);
@@ -398,12 +442,11 @@ test("model loader: wcacheverify detects a corrupt payload and reloads it", asyn
 });
 
 test("model loader: converted cache flush finishes before engine construction", async () => {
-  location.search = "?prefetch=0";
   const root = new FakeDir(), release = deferred(), entered = deferred();
   let closed = false, built = false, wrapped = false;
   root.beforeClose = async (name) => { if (name.includes(".bin")) { await release.promise; closed = true; } };
   await withStorage(root, async () => {
-    const f = cacheModel(), m = loader(f.state, f.rangeFetch);
+    const f = cacheModel(), m = loader(f.state, f.rangeFetch, { options: { prefetch: 0 } });
     const loading = m.loadShard({ ...f.opts, onProgress() {
       if (wrapped) return;
       wrapped = true;
@@ -467,18 +510,67 @@ test("model loader: a short GPU stream evicts the actual shard's range and retri
   });
 });
 
-test("model loader: draft construction uses the loaded context without replacing the main engine", async () => {
-  const engine = { maxSeq: 8192 }, state = { engine, device: {}, tune: { wg: 64, rows: 4 } };
+async function withDraft(fn) {
+  const f = dense(), requests = [], file = header([GGML_EMBED, GGML_FINAL_NORM], { payload: true });
+  f.state.engine = { maxSeq: 8192 };
   const fetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({ num_hidden_layers: 0 }));
-  try {
-    const m = loader(state, async (_url, lo) => new Response(lo === 0 ? header([GGML_EMBED, GGML_FINAL_NORM]) : new Float32Array([1])));
-    const draft = await m.loadDraft({ cfg: "config", gguf: "draft" }, { async create(opts) { return opts; } });
+  globalThis.fetch = async (url) => { eq(url, MODELS["qwen3-0.6b"].cfg); return new Response(JSON.stringify({ num_hidden_layers: 0 })); };
+  const rangeFetch = async (url, lo, hi) => {
+    eq(url, MODELS["qwen3-0.6b"].gguf); requests.push([lo, hi]); return new Response(file.slice(lo, hi + 1));
+  };
+  try { await fn({ ...f, requests, m: loader(f.state, rangeFetch) }); }
+  finally { globalThis.fetch = fetch; }
+}
+
+test("model loader: draft construction uses the loaded context without replacing the main engine", async () => {
+  await withDraft(async ({ state, m }) => {
+    const engine = state.engine;
+    let paced = 0;
+    const draft = await m.loadDraft({ modelKey: "qwen3-0.6b", pace: () => { paced++; } }, { DenseEngine: { async create(opts) { return opts; } } });
+    eq(paced, 2);
     eq(draft.maxSeq, 8192);
     eq(draft.coopWG, 64);
     eq(draft.coopRows, 4);
     eq(draft.layerRange, [0, 0]);
+    eq([...draft.weights.embed.data], [1]); eq([...draft.weights.finalNorm.data], [2]);
     ok(draft.hasEmbed && draft.hasHead);
     ok(draft.device === state.device && state.engine === engine);
-  } finally { globalThis.fetch = fetch; }
+  });
+});
+
+test("model loader: an independent draft load waits for its explicit pacer", async () => {
+  await withDraft(async ({ state, m, requests }) => {
+    const engine = state.engine, entered = deferred(), release = deferred();
+    let built = false;
+    const pending = m.loadDraft({ modelKey: "qwen3-0.6b", pace() { entered.resolve("paced"); return release.promise; } },
+      { DenseEngine: { async create(opts) { built = true; return opts; } } });
+    try {
+      eq(await Promise.race([entered.promise, pending.then(() => "built")]), "paced");
+      eq(requests.length, 1); // header only; no tensor range may open yet
+      ok(!built);
+    } finally { release.resolve(); await pending; }
+    eq(requests.length, 3); ok(built && state.engine === engine);
+  });
+});
+
+test("model loader: a draft pacing rejection stops tensor fetches and engine construction", async () => {
+  await withDraft(async ({ state, m, requests }) => {
+    const engine = state.engine;
+    let built = false;
+    await rejects(() => m.loadDraft({ modelKey: "qwen3-0.6b", pace: async () => { throw new Error("draft stopped"); } },
+      { DenseEngine: { async create() { built = true; } } }), "draft stopped");
+    eq(requests.length, 1); ok(!built && state.engine === engine);
+  });
+});
+
+test("model loader: draft pacing never inherits the preceding shard's pacer", async () => {
+  await withDraft(async ({ state, m, opts, engines }) => {
+    await m.loadShard({ ...opts, hasEmbed: false, ctx: 8192, pace() { throw new Error("stale shard pacer"); } }, engines);
+    const engine = state.engine;
+    let paced = 0;
+    await m.loadDraft({ modelKey: "qwen3-0.6b", pace: () => { paced++; } }, engines);
+    eq(paced, 2); ok(state.engine === engine);
+    await m.loadDraft({ modelKey: "qwen3-0.6b" }, engines);
+    eq(paced, 2); ok(state.engine === engine);
+  });
 });
