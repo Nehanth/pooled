@@ -11,7 +11,7 @@ Sources (for the fact-checker):
 - room/models.js: PICKER, NEED_GB (5.6 / 17.0 / 22.5), NEED_MIN_GB (1.7B 4.0 at its 8K fallback), CTX.fallback + pickCtx() (16K, else 8K when the pledges are short for 16K), FILE_GB (1.83 / 16.06 / 20.84), CTX (1.7B 16384/16384, fallback 8192, 27B 16384/32768, MoE 32768/65536), maxSeqFor() (?ctx= rounded to 256, at least 2048)
 - 0.4.0 (origin/main ed31899): CTX 27B max 65536, MoE max 131072; the 122B (#316): NEED_GB 72 (the CLI picker's "needs 73 GB"
   with its context), FILE_GB 72.52, in hostable() for pooled host / pull, ?dev=1 only on the room page; expert offload
-  (#319, #320, #323): 35B on the RTX 5070 alone 41-54 tok/s, 17.5 GiB parked (docs/bench-log.md 2026-10-02 phase 2b);
+  (#319, #320, #323): 35B on the RTX 5070 alone about 38-45 tok/s (37.5-44.9 measured on the published 0.4.0, ~40 on long generations), 17.5 GiB parked;
   122B Mac Studio --gb 25 + RTX 5070 PC (layers 15-47 offloaded, 41.8 GiB parked) ~17 tok/s (#323, maintainer's run)
 - room/plan.js: bestFit() (picker preselects the biggest model that fits)
 - cli/README.md "Claude Code": its prompt is 15-20k tokens; use the MoE or 27B
@@ -36,7 +36,7 @@ The 1.7B opens with a 16K context when the room has 5.6 GB for it. With less, do
 - **17 to 22 GB across the room:** Qwen3.8 27B.
 - **22.5 GB or more:** Qwen3.6 35B MoE. It is the bigger file but the fastest of the two big models, because each word uses only a small part of it.
 - **Claude Code or Codex through the [Serve API](/docs/serve):** the MoE or the 27B. Their prompts alone are too long for the 1.7B.
-- **One PC with a 12 GB GPU:** the MoE from the terminal, with `pooled host qwen3.6-35b-moe --here`. It keeps the experts the GPU can't hold in system RAM (about 19 GB of them) and runs at 41-54 tok/s on an RTX 5070. See [MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram).
+- **One PC with a 12 GB GPU:** the MoE from the terminal, with `pooled host qwen3.6-35b-moe --here`. It keeps the experts the GPU can't hold in system RAM (about 19 GB of them) and runs at about 38-45 tok/s on an RTX 5070. See [MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram).
 
 In the terminal, `pooled host` and `pooled pull` also list the **Qwen3.5 122B MoE**: about 73 GB across the room and a 72.52 GB download. A Mac Studio lending 25 GB and an RTX 5070 PC keeping 42 GB of its experts in RAM run it at about 17 tok/s. The room page shows it only with `?dev=1`.
 

@@ -235,7 +235,13 @@ export function deviceGateMessage(node, d, from = null) {
       }
       return true;
     case "admit":
-      admitted(node, e, from, d).catch((err) => node.log(`admit: ${err.message}`));
+      // what the host sends next (ai-ready-all comes right behind admit) waits behind it while its proof
+      // is checked (roomnode.js onData), and is handled in order once this device is in (release)
+      if (e?.hold) e.hold.admitting = true;
+      admitted(node, e, from, d).catch((err) => {
+        node.log(`admit: ${err.message}`);
+        if (e?.hold) { e.hold.admitting = false; try { e.conn.close(); } catch {} }
+      });
       return true;
   }
   return false;

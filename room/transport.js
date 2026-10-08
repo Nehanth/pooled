@@ -85,8 +85,48 @@ export function makeLink({ dup = DUP_SLICES } = {}) {
 export function attachWire(link, conn, onFrame, { ordered = true } = {}) {
   const pc = conn.peerConnection;
   if (!pc) return null;
+  return wireUp(link, pc, openWire(pc, ordered), onFrame, ordered);
+}
+const openWire = (pc, ordered) => {
   const ch = pc.createDataChannel("swarm-wire", { negotiated: true, id: WIRE_ID, ordered, ...(ordered ? {} : { maxRetransmits: 0 }) });
   ch.binaryType = "arraybuffer";
+  return ch;
+};
+// The wire channel of an association that has yet to prove it belongs to the room (a stripe proving
+// the mesh key, room/chanauth.js). It opens now, so that a slice the other end sends as soon as it is
+// satisfied (it may finish its check first) lands on a channel this end has: a negotiated channel the
+// receiver hasn't created yet drops what arrives on it, and a lost slice loses its frame. Until join()
+// nothing that arrives counts (it waits, in order, up to HELD_SLICES; more closes the channel) and
+// nothing goes out on it; join() hands the waiting slices over in arrival order and makes it one of
+// the link's channels. drop(): the association failed its proof. -> null without a peer connection
+const HELD_SLICES = 512;
+export function holdWire(conn, { ordered = true } = {}) {
+  const pc = conn.peerConnection;
+  if (!pc) return null;
+  const ch = openWire(pc, ordered);
+  let q = [];
+  ch.onmessage = (ev) => {
+    if (!q || q.full) return;
+    if (q.length < HELD_SLICES) { q.push(ev.data); return; }
+    q.full = true;
+    try { ch.close(); } catch {}
+  };
+  return {
+    ch,
+    join(link, onFrame) {
+      const held = q || [];
+      q = null;
+      wireUp(link, pc, ch, onFrame, ordered);
+      // a channel that closed while it waited (too much came, or its association went): what it carried
+      // after the slices kept here is gone, so gaps on the link may be real
+      if (ch.readyState === "closing" || ch.readyState === "closed") link.closedAt = performance.now();
+      for (const b of held) { link.rxAt = performance.now(); receive(link, b, onFrame, ch); }
+      return ch;
+    },
+    drop() { q = null; try { ch.close(); } catch {} },
+  };
+}
+function wireUp(link, pc, ch, onFrame, ordered) {
   if (!ordered) link.unordered = true;
   ch.onmessage = (ev) => { link.rxAt = performance.now(); receive(link, ev.data, onFrame, ch); };
   ch.onclose = () => {
