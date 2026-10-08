@@ -1,7 +1,6 @@
 # OpenClaw on Pooled
 
-Status: `@pooled/openclaw` 0.2.0, preview. The package is ready for ClawHub and npm but not published
-yet.
+Status: `@pooled/openclaw` 0.3.1, preview, on ClawHub and npm.
 
 ## What it is
 
@@ -38,18 +37,19 @@ read.
 
 You need Node 22 or newer (OpenClaw ships on 24), OpenClaw 2026.9.6 or newer, and a GPU Dawn runs on:
 Linux with glibc 2.38 or newer and a Vulkan driver (tested: DGX Spark, GB10), or macOS 26 or newer
-(tested: Mac Studio M5 Max, macOS 27). Windows is untested.
+(tested: Mac Studio M5 Max, macOS 27), or Windows with an NVIDIA GPU (Direct3D 12; tested: RTX 5070, the
+gateway hosting the room).
 
 ```sh
 openclaw plugins install clawhub:@pooled/openclaw   # or from npm: openclaw plugins install @pooled/openclaw
 openclaw onboard                                    # Model/auth provider -> More... -> Pooled
 ```
 
-Until the package is published, build the tarball from a checkout and install that:
+From a checkout, build the tarball and install that:
 
 ```sh
 cd packages/openclaw && npm install && npm pack
-openclaw plugins install ./pooled-openclaw-0.2.0.tgz --force --accept-capabilities
+openclaw plugins install ./pooled-openclaw-0.3.1.tgz --force --accept-capabilities
 ```
 
 ### Start a room
@@ -77,7 +77,10 @@ Onboarding warns when the context is shorter.
 
 Use the Qwen3.6 35B MoE (about 23 GB across the room). Onboarding preselects it when this device's
 memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits
-on this device alone (the room then waits for more devices). Picking the 1.7B, or joining a room that
+on this device alone (the room then waits for more devices). A `pooled join` device (`@pooled/cli`
+0.4.0 or newer) on a discrete GPU can make up a short room by keeping some experts in system RAM
+(`--ram`); the gateway holds its layers whole. The Qwen3.5 122B MoE is in `pooled host`, not in
+OpenClaw's onboarding. Picking the 1.7B, or joining a room that
 runs it, shows: "Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops. Use the 35B MoE if your devices can hold it."
 
 Measured on a DGX Spark, the OpenClaw gateway hosting and a second device (`pooled join`) holding the
@@ -139,8 +142,9 @@ suite in 52 s over 6 model calls, with the Mac holding layers 19-39. It is not i
 
 - **Cold first call.** The first call after a gateway starts reads OpenClaw's whole prompt (14-18K
   tokens): 49-64 s on two computers, 89 s with a phone. A hosting gateway now replays the last system
-  prompt and tools when its room comes online, so that read happens before the first question
-  (checkpoints still live in GPU memory only).
+  prompt and tools when its room comes online, so that read happens before the first question.
+  Each device keeps its part of the pinned prompt on disk (`~/.pooled/cache/ckpt/`) for restarts;
+  answer and turn checkpoints live in GPU memory only.
 - **Decode over the network.** Two computers over Wi-Fi decode at 25-30 tok/s; the Mac alone does ~92.
   Splitting pays one network hop per token, so it is for models that do not fit on one device.
 - **Trust.** Every device holding layers sees the hidden state of every token (which carries the
@@ -154,4 +158,5 @@ suite in 52 s over 6 model calls, with the Mac holding layers 19-39. It is not i
   the room for the MoE, and the host keeps up to 8 (4 pinned, 4 answer/turn).
 - **Small models.** The 1.7B is slow with OpenClaw and loops on tool search (see
   [Which model](#which-model)); it gets a file-tools-only profile. Use the MoE.
-- **Windows** is untested.
+- **Windows** is tested on an RTX 5070 with the gateway hosting the room; only NVIDIA GPUs have been
+  tried. With OpenClaw 2026.9.8 on Windows, the Control UI's chat works only at `/chat/main`.

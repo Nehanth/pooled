@@ -55,13 +55,14 @@ Onboarding preselects the MoE when this device can hold it, and the 27B when onl
 can hold more than one device holds alone: it waits for more devices. A device that joins with
 `pooled join` (`@pooled/cli` 0.4.0 or newer) on a discrete GPU can make up a short room by keeping
 some of the MoE's experts in system RAM (`--ram`), more slowly; the gateway holds its layers whole.
+The Qwen3.5 122B MoE is in `pooled host`, not in OpenClaw's onboarding.
 
 ## Requirements
 
 - OpenClaw 2026.9.6 or newer, Node 22 or newer.
 - A GPU: Linux with a Vulkan driver and glibc 2.38 or newer (like Ubuntu 24.04), macOS 26 or
   newer, or Windows with an NVIDIA GPU (Direct3D 12).
-- Tested on OpenClaw 2026.9.6 and 2026.9.7, on Linux (DGX Spark, GB10), macOS 27 (M5 Max) and
+- Tested on OpenClaw 2026.9.6 to 2026.9.8, on Linux (DGX Spark, GB10), macOS 27 (M5 Max) and
   Windows 11 (RTX 5070, the gateway hosting the room).
 - Install size: the plugin bundles Pooled's engine and room code, and installs `node-datachannel`
   (WebRTC), `peerjs` (signaling) and, as an optional dependency, `webgpu` (Dawn, about 95 MB). If
@@ -118,6 +119,10 @@ approvals on for `exec` and writes.
 - **Getting in.** A hosted room asks before new devices join. The invite link's key gets a device in;
   a code alone waits for `/pooled allow`; a device you let in keeps a pass. With **Anyone with the
   code**, anyone who has or guesses the code gets in.
+- **Proofs, not keys.** Devices prove the invite key or pass on each link instead of sending it, and
+  the host proves it back. A device waiting for `/pooled allow` shows a six-digit code that the
+  gateway's log shows beside its request; if they match, nobody sits in the middle. A device on an
+  older Pooled is marked `an older Pooled: it can't prove the invite key`.
 - **Screens.** A hosting gateway opens its room with visibility `asker`: other devices' room pages
   show "answering…", never OpenClaw's prompts, answers or tool calls.
 - **Devices holding layers see the conversation anyway.** Each one gets the hidden states of every
@@ -253,7 +258,8 @@ Known gaps:
 - A room hosted in a browser tab has no turn checkpoints yet, so OpenClaw re-reads more per tool call
   there than with a Node host.
 - Checkpoints are not part of the memory split: at 50k tokens one is about 1 GB across the room (MoE).
-- Windows has been tried only with NVIDIA GPUs.
+- Windows has been tried only with NVIDIA GPUs. With OpenClaw 2026.9.8 on Windows, the Control UI's
+  chat works only at `/chat/main`.
 
 Design notes, results and limits:
 [docs/openclaw.md](https://github.com/Nehanth/pooled/blob/main/docs/openclaw.md).
