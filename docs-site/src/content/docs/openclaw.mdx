@@ -63,7 +63,7 @@ openclaw onboard          # Model/auth provider -> More... -> Pooled
 ```sh
 git clone https://github.com/Nehanth/pooled.git && cd pooled/packages/openclaw
 npm install && npm pack
-openclaw plugins install ./pooled-openclaw-0.2.0.tgz --force --accept-capabilities
+openclaw plugins install ./pooled-openclaw-0.3.1.tgz --force --accept-capabilities
 ```
 
 ## Start a room
@@ -94,7 +94,7 @@ The room needs at least a 16k context, because OpenClaw's own instructions and t
 
 ## Which model
 
-Use the **Qwen3.6 35B MoE** (about 23 GB across the room). Onboarding preselects it when this device's memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits on this device alone (the room then waits for more devices). A device that joins with `pooled join` (`@pooled/cli` 0.4.0 or newer) on a discrete GPU can make up a short room by keeping some of the MoE's experts in system RAM, more slowly ([MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram)). The gateway itself holds its layers whole.
+Use the **Qwen3.6 35B MoE** (about 23 GB across the room). Onboarding preselects it when this device's memory holds it, the Qwen3.8 27B (about 20 GB) when only that fits, and the MoE again when neither fits on this device alone (the room then waits for more devices). A device that joins with `pooled join` (`@pooled/cli` 0.4.0 or newer) on a discrete GPU can make up a short room by keeping some of the MoE's experts in system RAM, more slowly ([MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram)). The gateway itself holds its layers whole. The Qwen3.5 122B MoE is in `pooled host` and `pooled pull` from 0.4.0, not in OpenClaw's onboarding.
 
 :::caution[Small models]
 Small models struggle with OpenClaw's long prompts and tools: expect slow turns and tool loops. Use the 35B MoE if your devices can hold it.
@@ -186,12 +186,12 @@ Per-task tables are in [docs/openclaw-poc.md](https://github.com/Nehanth/pooled/
 
 ## Limits
 
-- **Cold first call.** The first call after a gateway starts reads OpenClaw's whole prompt (14-18K tokens): 49-64 s on two computers, 89 s with a phone. A hosting gateway replays the last system prompt and tools when its room comes online, so that read happens before the first question. Checkpoints live in GPU memory only.
+- **Cold first call.** The first call after a gateway starts reads OpenClaw's whole prompt (14-18K tokens): 49-64 s on two computers, 89 s with a phone. A hosting gateway replays the last system prompt and tools when its room comes online, so that read happens before the first question. Each device keeps its part of the pinned system prompt and tools on disk (`~/.pooled/cache/ckpt/`), so after a restart the room reads it back; answer and turn checkpoints live in GPU memory only.
 - **Decode over the network.** Two computers over Wi-Fi decode at 25-30 tok/s; the Mac alone does about 92. Splitting pays one network hop per token, so it is for models that don't fit on one device.
 - **Browser hosts** have no turn checkpoints yet, so OpenClaw joined to a room hosted in a tab re-reads more per tool call.
 - **Checkpoint memory** isn't part of the layer split. At 50K tokens one checkpoint is about 1 GB across the room for the MoE, and the host keeps up to 8 (4 pinned, 4 answer or turn).
 - **Small models** (the 1.7B) are slow with OpenClaw and loop on tool search; see [Which model](#which-model). The MoE is the model to use.
-- **Windows** (Direct3D 12) is tested on an RTX 5070 with the gateway hosting the room. Only NVIDIA GPUs have been tried there.
+- **Windows** (Direct3D 12) is tested on an RTX 5070 with the gateway hosting the room. Only NVIDIA GPUs have been tried there. With OpenClaw 2026.9.8 on Windows, the Control UI's chat works only at `/chat/main`.
 
 ## Who can see and steer what
 
@@ -200,6 +200,7 @@ Share the invite link only with people you trust, and keep OpenClaw's approvals 
 :::
 
 - **Getting in.** A hosted room asks before new devices join: the invite link gets a device in, a code alone waits for `/pooled allow`, and a device you let in keeps a pass. With **Anyone with the room code**, anyone who has or guesses the code gets in.
+- **Proofs, not keys.** From plugin 0.3.0 and CLI 0.4.0, devices prove the invite key or pass on each link instead of sending it, and the host proves it back. A device waiting for `/pooled allow` shows a six-digit code that the gateway's log shows beside its request; if they match, nobody sits in the middle. A device on an older Pooled is marked `an older Pooled: it can't prove the invite key`. See [Who is on a link](/docs/internals/security#who-is-on-a-link).
 - **Screens.** A hosting gateway opens its room so the other devices' room pages show "answering…" stand-ins, never OpenClaw's prompts, answers or tool calls.
 - **Devices holding layers see the conversation anyway.** Each one gets the hidden state of every token, which carries the prompt (the files OpenClaw read, the tool results). A device holding layers can also send back any hidden states it likes. That lets it choose the model's output, **including the tool calls OpenClaw then runs on the gateway machine**. The call grammar only keeps the calls well formed.
 - **Join mode trusts the room's host with everything.** It sends OpenClaw's whole context to the room's host and runs the tool calls it gets back.

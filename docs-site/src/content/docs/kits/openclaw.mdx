@@ -43,7 +43,8 @@ Sources (for the fact-checker):
     the screenshots are from that session (notes.txt in the workspace, 7 lines). A perf benchmark shared the GPU during this run.
     The Control UI (openclaw dashboard) showed the same chat with "Read notes.txt".
 - packages/openclaw/src/setup.js, src/commands.js (/pooled allow|deny|link|pledge), src/prewarm.js (warm-up from the last prompt)
-- The email walkthrough video (openclaw-email-mcp-walkthrough.mp4, 5:27, recorded 2026-10-02): OpenClaw 2026.9.7 installed with npm on a
+- The demo video at the top (openclaw-demo.mp4) is a 2-minute cut of the same take as the walkthrough below (take1: src/ logs, words.json).
+- The email walkthrough video (openclaw-email-mcp-walkthrough.mp4, 5:27, now a link, recorded 2026-10-02): OpenClaw 2026.9.7 installed with npm on a
   Windows PC with an RTX 5070 (12 GB, lends 10), the plugin from ClawHub, onboarding starts a room for the Qwen3.6 35B MoE; a Mac Studio
   (M5 Max, 36 GB) joins with `npx @pooled/cli join "<link>" --gb 14` (@pooled/cli 0.3.6); split PC layers 0-14, Mac 15-39.
   The email MCP server is @ni-c/imap-mcp, added with the exact `openclaw mcp add email ...` line below (only the address differs) and checked
@@ -56,15 +57,15 @@ Sources (for the fact-checker):
 [OpenClaw](https://github.com/openclaw/openclaw) is a self-hosted assistant. The Pooled plugin makes Pooled its model: the OpenClaw gateway starts a Pooled room and holds part of the model on its own GPU. Your other computers, browser tabs and phones join the room and hold the rest.
 
 
-<video controls preload="metadata" playsinline poster="/docs/media/openclaw-inbox-demo.jpg" style="width:100%;border-radius:12px;margin:1rem 0">
-  <source src="/docs/media/openclaw-inbox-demo.mp4" type="video/mp4" />
+<video controls preload="none" playsinline poster="/docs/media/openclaw-demo.jpg" style="width:100%;border-radius:12px;margin:1rem 0">
+  <source src="/docs/media/openclaw-demo.mp4" type="video/mp4" />
 </video>
 
-*Four minutes, from scratch: a gaming PC with an RTX 5070 can't run the 35B MoE alone, so it hosts a Pooled room; OpenClaw on a Mac Studio joins with the plugin from ClawHub, and together they triage an inbox. Slow parts (downloads, loading) are sped up and labeled.*
+*Two minutes: an RTX 5070 PC and a Mac Studio pool the Qwen3.6 35B MoE, lending 10 + 14 GB. OpenClaw triages a real inbox through an email MCP server: 14 tool calls, the answer at 36 tokens a second.*
 
 ## You need
 
-- **A computer with a GPU for the gateway:** Linux with Vulkan (glibc 2.38 or newer, like Ubuntu 24.04), macOS 26 or newer, or Windows with an NVIDIA GPU (the [full walkthrough](#full-walkthrough-a-clean-install-and-a-real-inbox) runs the gateway on an RTX 5070).
+- **A computer with a GPU for the gateway:** Linux with Vulkan (glibc 2.38 or newer, like Ubuntu 24.04), macOS 26 or newer, or Windows with an NVIDIA GPU (tested on an RTX 5070, the gateway hosting the room).
 - **Node 22 or newer** and **OpenClaw 2026.9.6 or newer**.
 - **About 23 GB of GPU memory across the room** for the 35B MoE, the model for OpenClaw. One big machine can hold it alone. This guide pools two devices. A `pooled join` device on a discrete GPU can also keep some experts in system RAM when the room is short ([MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram)).
 - **A 19.4 GB download** for the MoE, once per machine, and **30 minutes** the first time.
@@ -79,7 +80,7 @@ Sources (for the fact-checker):
    openclaw plugins install clawhub:@pooled/openclaw
    ```
 
-   OpenClaw shows ClawHub's security audit, then the plugin's capabilities, and asks before each. Answer `y` to both. The ClawHub listing is new. The same package is on npm: `openclaw plugins install @pooled/openclaw`.
+   OpenClaw shows ClawHub's security audit, then the plugin's capabilities, and asks before each. Answer `y` to both. The same package is on npm: `openclaw plugins install @pooled/openclaw`.
 
    <Shot src={install} alt="ClawHub Security Audit for @pooled/openclaw 0.2.1: Outcome Safe, then Proceed with installation?" />
 
@@ -108,6 +109,8 @@ Sources (for the fact-checker):
    Open a chat with `openclaw tui` and type `/pooled`. It shows the room's devices, how much memory it has against what the model needs, and who waits. `/pooled allow` lets them in:
 
    <Shot src={allow} alt="/pooled: waiting for devices, 16 GB lent of 23 GB needed, spark-join wants to join (computer, 10 GB); /pooled allow answers Let in: spark-join" />
+
+   The waiting device shows a six-digit code, and the gateway's log shows the same code beside its request (`its screen shows code …`). If they match, nobody sits between the two devices. A device on an older Pooled is marked `an older Pooled: it can't prove the invite key`. See [Who is on a link](/docs/internals/security#who-is-on-a-link).
 
    The model loads once the room holds it (66 seconds in our test). `/pooled` then says **online** and which layers each device holds:
 
@@ -149,14 +152,17 @@ It came with the code, not the invite link. `/pooled` shows who waits, `/pooled 
 Onboarding couldn't start the gateway as a service. Run `openclaw gateway run` and keep it open.
 
 ### `No WebGPU adapter` or the gateway can't use the GPU
-The plugin needs Vulkan on Linux or Metal on macOS 26 or newer. If the optional WebGPU package didn't install, the gateway says how to add it.
+The plugin needs Vulkan on Linux, Metal on macOS 26 or newer, or Direct3D 12 on Windows (NVIDIA GPUs). If the optional WebGPU package didn't install, the gateway says how to add it.
+
+### The Control UI chat on Windows
+With OpenClaw 2026.9.8 on Windows, the Control UI's chat works only at `/chat/main`. Open that page of `openclaw dashboard`, or use `openclaw tui`.
 
 More: [OpenClaw](/docs/openclaw) and [Troubleshooting](/docs/troubleshooting).
 
 
 ## Try next: triage your inbox
 
-The task from the video. Unzip [sample-inbox.zip](/docs/kits/sample-inbox.zip) into your OpenClaw workspace (it makes an `inbox/` folder with 15 made-up emails), then ask:
+The video's task with made-up emails, no email account needed. Unzip [sample-inbox.zip](/docs/kits/sample-inbox.zip) into your OpenClaw workspace (it makes an `inbox/` folder with 15 made-up emails), then ask:
 
 ```text
 Triage my inbox: the 15 emails are in inbox/, read them all in one go. Sort them into reply today, later and ignore, one line each. Then draft short replies for the reply-today ones.
@@ -166,11 +172,7 @@ OpenClaw lists the folder, reads all 15 in one step and answers. In our run, the
 
 ## Full walkthrough: a clean install and a real inbox
 
-<video controls preload="none" playsinline poster="/docs/media/openclaw-email-mcp-walkthrough.jpg" style="width:100%;border-radius:12px;margin:1rem 0">
-  <source src="/docs/media/openclaw-email-mcp-walkthrough.mp4" type="video/mp4" />
-</video>
-
-*Five and a half minutes, from a clean install: OpenClaw and the Pooled plugin go on a Windows PC with an RTX 5070 (12 GB), which starts a room for the 35B MoE and lends 10 GB. A Mac Studio joins with `npx @pooled/cli join` and lends 14. Through an email MCP server that can only read and save drafts, the assistant triages a real Gmail inbox: 15 emails sorted, 14 tool calls, 6 drafts saved and nothing sent, with the answer at 36 tokens a second. Downloads and loading are sped up and labeled.*
+[Full walkthrough (5:27)](/docs/media/openclaw-email-mcp-walkthrough.mp4): OpenClaw and the plugin installed from scratch on a Windows PC with an RTX 5070 (12 GB, lends 10), a Mac Studio joining with `npx @pooled/cli join` (lends 14), and the same Gmail inbox: 6 drafts saved, nothing sent. Downloads and loading are sped up and labeled.
 
 The email server in the video is [`@ni-c/imap-mcp`](https://www.npmjs.com/package/@ni-c/imap-mcp). It has no send tool, and `IMAP_ALLOW_TOOLS` limits it to four tools: list folders, list messages, read a message and save a draft. On the gateway's computer, in PowerShell:
 
