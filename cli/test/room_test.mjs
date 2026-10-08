@@ -198,3 +198,64 @@ test("the bridge: the invite key is proved, never sent; a wrong host proof is re
   assert.equal(d.kicked, "The host didn't let this device in.");
   assert.equal(d.connected, false);
 });
+
+// pooled chat / serve with an invite link hung about 1 in 6 times on 0.4.0: the host sends admit and
+// then ai-ready-all at once, the bridge checks the host's proof in admit (an await), and ai-ready-all
+// arrived before the check finished and was dropped ("no model started yet"). The check is made slow
+// here (every HMAC waits 100 ms), so the old bridge loses the messages every time.
+test("the bridge keeps what the host sends while its admit is checked, in order", async () => {
+  const A = await import("../../room/chanauth.js");
+  const subtle = globalThis.crypto.subtle, sign = subtle.sign;
+  const hostFps = { local: ["sha-256 " + Array(32).fill("bb").join(":")], remote: ["sha-256 " + Array(32).fill("aa").join(":")] };
+  // a host that speaks the proofs, up to its admit: -> { b, L, hp, states }
+  async function upToAdmit() {
+    const b = new Bridge({ code: "4TKG9P", key: KEY, name: "t", client: "c", log: () => {} });
+    const L = fakeLink(b);
+    const states = [];
+    b.on("state", () => { if (b.connected) states.push(b.ready ? `ready ${b.model}` : "not ready"); });
+    b.dial(false, () => {});
+    L.open();
+    L.host({ t: "hello", name: "host", v: 4, gate: 1, ask: 1, auth: 1, meta: { api: 2 } });
+    await until(() => L.sent.length);
+    const { pending, msg } = A.hostStart(L.sent[0]);
+    L.host(msg);
+    await until(() => L.sent.some((m) => m.t === "auth-proof"));
+    const r = await A.hostVerify(pending, L.sent.find((m) => m.t === "auth-proof"), { key: KEY, passHashFor: async () => null },
+      { fps: hostFps, me: L.conn.peer, peer: "bridge-id" });
+    assert.equal(r.cred, "key", "the bridge proved the invite key");
+    return { b, L, hp: r.hp, states };
+  }
+  const slow = () => { subtle.sign = async function (...a) { await new Promise((res) => setTimeout(res, 100)); return sign.apply(this, a); }; };
+  try {
+    const { b, L, hp, states } = await upToAdmit();
+    slow();
+    // what the host sends back to back: admit, then the model's state (and its changes), and a ping
+    L.host({ t: "admit", via: "key", hp, pass: "PaSsPaSsPaSsPaSsPaSsPa" });
+    L.host({ t: "ai-ready-all", model: "qwen3-1.7b", label: "Qwen3 1.7B", ctx: 4096 });
+    L.host({ t: "ai-degraded" });
+    L.host({ t: "ai-ready-all", model: "qwen3-4b", label: "Qwen3 4B" });
+    L.host({ t: "ping", ts: 7 });
+    assert.equal(b.connected, false, "not in before the host's proof is checked");
+    await until(() => b.connected);
+    assert.equal(b.ready, true, "ai-ready-all that came during the check counts");
+    assert.equal(b.model, "qwen3-4b");
+    assert.equal(b.hostMeta.ctx, 4096);
+    assert.equal(b.pass, "PaSsPaSsPaSsPaSsPaSsPa");
+    assert.deepEqual(states, ["not ready", "ready qwen3-1.7b", "not ready", "ready qwen3-4b"], "in the host's order");
+    assert.ok(L.sent.some((m) => m.t === "pong" && m.ts === 7));
+    // after that, messages go straight through
+    L.host({ t: "ai-degraded" });
+    assert.equal(b.ready, false);
+    subtle.sign = sign;
+    // a wrong proof: what came during the check never counts
+    const w = await upToAdmit();
+    const refused = [];
+    w.b.on("refused", (why) => refused.push(why));
+    slow();
+    w.L.host({ t: "admit", via: "key", hp: "0".repeat(64) });
+    w.L.host({ t: "ai-ready-all", model: "evil" });
+    await until(() => refused.length);
+    await new Promise((res) => setTimeout(res, 50));
+    assert.equal(w.b.ready, false); assert.equal(w.b.connected, false); assert.equal(w.b.model, null); assert.ok(w.L.conn.closed);
+  } finally { subtle.sign = sign; }
+});

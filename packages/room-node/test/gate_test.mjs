@@ -5,8 +5,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { RoomNode } from "../roomnode.js";
 import { hostGate, saveGate, joinHello, deviceGateMessage } from "../gate.js";
-import { joinerStart, joinerProof, meshProof, linkFingerprints } from "../../../room/chanauth.js";
-import { PROTOCOL } from "../../../room/transport.js";
+import { joinerStart, joinerProof, meshProof, linkFingerprints, hostStart, hostVerify } from "../../../room/chanauth.js";
+import { PROTOCOL, makeLink, sendFrame, WIRE_ID } from "../../../room/transport.js";
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
 
@@ -317,4 +317,81 @@ test("device: a host that proves nothing back lets it in on trust (warned), with
     await until(() => w.admission === "in");
     assert.deepEqual(ev, ["tofu"]); assert.ok(!w.authFailed);
   }
+});
+
+// The host sends admit and the room's state right behind it (ai-ready-all, ...) while the device still
+// checks the host's proof in admit (an await, made slow here). Everything after the admit waits behind
+// it and is handled in the host's order once the device is in: a bye too, which used to pass the hold
+// and be handled before the messages that came ahead of it
+test("device: what the host sends while its admit is checked waits, then counts in the host's order", async () => {
+  const KEY = "AbCdEfGhIjKlMnOpQrStUv";
+  const { w, conn, sent } = deviceNode({ key: KEY });
+  const seen = [];
+  w.aiOnData = async (from, d) => { seen.push(`${d.t} ${d.model || ""}`.trim()); };
+  w.on("bye", (why) => seen.push(`bye ${why}`));
+  w.onData("pooled-room-4TKG9P", { t: "hello", name: "host", v: PROTOCOL, gate: 1, ask: 1, auth: 1, meta: { api: 2 } });
+  const f = await joinHello(w, conn);
+  const { pending, msg } = hostStart(f);
+  w.onData("pooled-room-4TKG9P", msg);
+  await until(() => sent.some((m) => m.t === "auth-proof"));
+  const r = await hostVerify(pending, sent.find((m) => m.t === "auth-proof"), { key: KEY, passHashFor: async () => null },
+    { fps: linkFingerprints(pcOf("BB", "AA")), me: "pooled-room-4TKG9P", peer: "me" });
+  assert.equal(r.cred, "key");
+  const subtle = globalThis.crypto.subtle, sign = subtle.sign;
+  subtle.sign = async function (...a) { await new Promise((res) => setTimeout(res, 100)); return sign.apply(this, a); };
+  try {
+    for (const m of [{ t: "admit", via: "key", hp: r.hp, mk: "M".repeat(43) }, { t: "ai-ready-all", model: "qwen3-1.7b" }, { t: "ai-degraded" },
+      { t: "bye", reason: "the host stopped" }]) w.onData("pooled-room-4TKG9P", m);
+    assert.deepEqual(seen, [], "nothing counts before the host's proof is checked");
+    await until(() => w.admission === "in");
+  } finally { subtle.sign = sign; }
+  assert.deepEqual(seen, ["ai-ready-all qwen3-1.7b", "ai-degraded", "bye the host stopped"]);
+  assert.ok(!w.conns.get("pooled-room-4TKG9P").hold);
+});
+
+// a stand-in RTCPeerConnection for a stripe: negotiated channels by id, and what the other end sends on
+// one this end hasn't opened is dropped, as WebRTC does
+function stripePc(mine, theirs) {
+  const chans = new Map();
+  return { ...pcOf(mine, theirs), chans,
+    createDataChannel(label, o) { const ch = { label, readyState: "open", bufferedAmount: 0, onmessage: null, close() { this.readyState = "closed"; this.onclose?.(); }, send() {}, addEventListener() {} }; chans.set(o.id, ch); return ch; },
+    deliver(id, data) { chans.get(id)?.onmessage?.({ data }); } };
+}
+// The two ends of a stripe each check the other's mesh proof; one that finishes first starts sending
+// slices of the hidden state on it at once. The wire channel used to open only once this end's check
+// passed, so those slices were dropped and the frame was lost. It opens at once now, and what comes
+// before the check passes waits for it
+test("stripe: wire slices the other end sends while this end checks its proof are kept, then delivered in order", async () => {
+  const w = new RoomNode({ name: "w", pledgeGB: 8, log: () => {}, stripes: 0 });
+  w.code = "4TKG9P"; w.meta = {}; w.peer = { id: "me", connect: () => null };
+  w.mk = "K".repeat(43);
+  const frames = [];
+  w.aiOnData = async (from, d) => { frames.push(d.pos); };
+  const e = { conn: { peer: "dev-s", open: true }, name: "s", meta: {}, link: makeLink(), stripes: [] };
+  w.conns.set("dev-s", e);
+  const pc = stripePc("AA", "BB");
+  const h = {};
+  const sc = { peer: "dev-s", label: "stripe", open: true, peerConnection: pc, on: (ev, f) => { (h[ev] ||= []).push(f); }, send() {}, close() { this.closed = true; } };
+  w.proveStripe(e, sc, "accept");
+  // the other end: its proof, then (its own check done) two frames on the stripe, straight away
+  const p = await meshProof(w.mk, { fps: linkFingerprints(pcOf("BB", "AA")), dialer: "dev-s", acceptor: "me", role: "dial" });
+  const out = makeLink({ dup: 0 }), wireOut = [];
+  out.chans.push({ readyState: "open", bufferedAmount: 0, send: (b) => wireOut.push(b) });
+  sendFrame(out, { t: "ai-hidden", pos: 5, data: new Uint16Array(3000) });   // two slices
+  sendFrame(out, { t: "ai-hidden", pos: 6, data: new Uint16Array(8) });
+  for (const f of h.data) f({ t: "mesh", v: 1, p });
+  for (const b of wireOut) pc.deliver(WIRE_ID, b);
+  await until(() => e.stripes.includes(sc));
+  await tick();
+  assert.deepEqual(frames, [5, 6], "both frames, in order");
+  // a stripe whose proof is wrong: what it carried never counts
+  const pc2 = stripePc("AA", "C0"), h2 = {};
+  const sc2 = { peer: "dev-s", label: "stripe", open: true, peerConnection: pc2, on: (ev, f) => { (h2[ev] ||= []).push(f); }, send() {}, close() { this.closed = true; } };
+  w.proveStripe(e, sc2, "accept");
+  for (const f of h2.data) f({ t: "mesh", v: 1, p });
+  sendFrame(out, { t: "ai-hidden", pos: 7, data: new Uint16Array(8) });
+  pc2.deliver(WIRE_ID, wireOut.at(-1));
+  await until(() => sc2.closed);
+  await tick();
+  assert.deepEqual(frames, [5, 6]); assert.ok(!e.stripes.includes(sc2)); assert.equal(pc2.chans.get(WIRE_ID).readyState, "closed");
 });

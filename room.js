@@ -37,7 +37,7 @@ const CKPT_MAX = Math.max(0, parseInt(new URLSearchParams(location.search).get("
 // back instead of the room prefilling the whole conversation again. ?ckptdisk=0: GPU copies only.
 const ckptDisk = CKPT_MAX && new URLSearchParams(location.search).get("ckptdisk") !== "0" && globalThis.navigator?.storage?.getDirectory
   ? new CkptStore() : null;
-import { makeLink, attachWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DUP_SLICES } from "./room/transport.js";
+import { makeLink, attachWire, holdWire, wireReady, sendFrame, setKeepalive, PROTOCOL, DUP_SLICES } from "./room/transport.js";
 import { peerErrorText, peerErrorLoud, FetchError, joinStep, versionMismatch } from "./room/errors.js";
 import { turnFrom, iceConfig, shareQuery, linkPath, linkRelayProtocol, normTurn, TURN_KEY, wantDefaultRelay, fetchRelay, markAuto, swapRelayServers, refreshInMs, isRelayServer, weightsOverLink, probeUdp, networkAdvice, WORK_DOCS } from "./room/ice.js";
 import { PERSONAS, specials, fitContext, templateProfile } from "./room/conversation.js";
@@ -747,6 +747,7 @@ function wire(conn, name, meta, initiator = false, { hold = null, stripesLater =
 // dropped as silent meanwhile.
 const PASS_HELD = new Set(["ping", "pong", "leaving", "mesh", "hello", "auth-proof", "bye"]);
 const HOST_HANDSHAKE = new Set(["hello", "auth", "lobby", "admit", "bye"]);
+const HELD_MAX = 256;
 function holdLink(e, kind) {
   e.hold = { kind, q: [], out: [] };
   if (kind !== "mesh") return;
@@ -799,16 +800,19 @@ async function meshIn(e, d) {
   log("room", `${e.name}: the link didn't prove it belongs to this room (someone else, or someone in the middle); closing it`);
   dropLink(e.conn.peer, "closed an unproved link");
 }
-// a stripe joins its link's wire once it proved the mesh key
+// a stripe joins its link's wire once it proved the mesh key. attach(held): held is its wire channel,
+// opened at once (room/transport.js holdWire): the other end may finish its check first and send
+// slices straight away, which wait there, in order, until this end's check passes
 function proveStripe(e, sc, role, attach) {
-  if (!meshKey) { attach(); sendMesh(sc, role); return; }
+  if (!meshKey) { attach(null); sendMesh(sc, role); return; }
+  const held = holdWire(sc);
   let done = false;
   const finish = (v) => {
     if (done) return;
     done = true; clearTimeout(timer);
-    if (conns.get(sc.peer) !== e) { try { sc.close(); } catch {} return; }
-    if (v === "ok" || v === "legacy") attach();
-    else { log("room", `a stripe to ${e.name} didn't prove it belongs to this room; closed it`); try { sc.close(); } catch {} }
+    if (conns.get(sc.peer) !== e) { held?.drop(); try { sc.close(); } catch {} return; }
+    if (v === "ok" || v === "legacy") attach(held);
+    else { held?.drop(); log("room", `a stripe to ${e.name} didn't prove it belongs to this room; closed it`); try { sc.close(); } catch {} }
   };
   const timer = setTimeout(() => meshVerdict(sc, role, null).then((v) => finish(v === "legacy" ? v : "bad")), MESH_WAIT_MS);
   sc.on("data", (d) => { if (!done && d?.t === "mesh") meshVerdict(sc, role, d).then((v) => { if (v !== "wait") finish(v); }); });
@@ -955,7 +959,7 @@ function dialStripe(entry, id, tries = 0) {
   const sc = peer.connect(id, { reliable: true, label: "stripe" });
   if (!sc) { if (tries < 4) setTimeout(() => { if (conns.get(id) === entry && entry.conn.open) dialStripe(entry, id, tries + 1); }, 2000 * (tries + 1)); return; }
   let opened = false;
-  sc.on("open", () => { opened = true; proveStripe(entry, sc, "dial", () => { attachWire(entry.link, sc, (m) => onData(id, m)); watchLink(sc, () => sc.close()); }); });
+  sc.on("open", () => { opened = true; proveStripe(entry, sc, "dial", (held) => { wireStripe(entry.link, sc, held, (m) => onData(id, m)); watchLink(sc, () => sc.close()); }); });
   sc.on("error", () => {});
   sc.on("close", () => {
     entry.stripes = entry.stripes.filter((c) => c !== sc);
@@ -1039,7 +1043,7 @@ ensureLink.pending = new Set();
 
 function sendTo(id, obj) {
   const e = conns.get(id);
-  if (e?.hold && !PASS_HELD.has(obj?.t)) { if (e.hold.out.length < 256) e.hold.out.push(obj); return; }
+  if (e?.hold && !PASS_HELD.has(obj?.t)) { if (e.hold.out.length < HELD_MAX) e.hold.out.push(obj); return; }
   e?.conn.send(obj);
 }
 // debug: per-peer wire state (channels open, frames sent/received) — `pooledDebug()` in the console (`swarmDebug()` still works)
@@ -1076,10 +1080,15 @@ function onData(from, d) {
   // a held link: only what proves it gets through, and pings (room/chanauth.js)
   if (e?.hold) {
     if (e.hold.kind === "mesh" && d.t === "mesh") { meshIn(e, d); return; }
-    if (!(d.t === "ping" || d.t === "pong" || d.t === "leaving" || (e.hold.kind === "host" && HOST_HANDSHAKE.has(d.t)))) {
+    // once the host's admit is in (its proof being checked), everything but pings waits behind it, so the
+    // room's messages count in the order the host sent them (ai-ready-all comes right behind admit)
+    if (!(d.t === "ping" || d.t === "pong" || (!e.hold.admitting && (d.t === "leaving" || (e.hold.kind === "host" && HOST_HANDSHAKE.has(d.t)))))) {
       // a device from before the proofs says hello without auth, and sends no mesh message either
       if (e.hold.kind === "mesh" && d.t === "hello" && !(+d.auth >= AUTH_V)) meshIn(e, d);
-      if (e.hold.q.length < 256) e.hold.q.push(d);
+      if (e.hold.q.length < HELD_MAX) { e.hold.q.push(d); return; }
+      // more than a link can have to say before it is proved: start over rather than lose a message
+      e.hold.q = [];
+      dropLink(from, "too many messages while the link was being proved; closed it");
       return;
     }
   }
@@ -1157,7 +1166,8 @@ function onData(from, d) {
       break;
     case "admit":   // the host let this device in: keep the pass it gave, for coming back
       if (isHost || from !== PREFIX + roomCode) break;
-      hostAdmitted(e, from, d);
+      if (e?.hold) e.hold.admitting = true;   // what comes next waits behind it while its proof is checked
+      hostAdmitted(e, from, d).catch((err) => { console.warn("admit", err); if (e?.hold) { e.hold.admitting = false; try { e.conn.close(); } catch {} } });
       break;
     case "lobby":   // the host was asked: wait for Allow or Deny
       if (isHost || from !== PREFIX + roomCode) break;
@@ -1464,11 +1474,13 @@ function gateRefuse(L, reason) {
   try { L.conn.send({ t: "bye", reason }); } catch {}
   setTimeout(() => { try { L.conn.close(); } catch {} }, 400);   // after the bye is out
 }
+// a stripe's end of the wire: the channel it opened while it proved the mesh key (held), or a new one
+function wireStripe(link, sc, held, onFrame) { if (held) held.join(link, onFrame); else attachWire(link, sc, onFrame); }
 // a stripe someone else opened for a link: it joins the link's wire once it proved the mesh key
 function acceptStripe(e, sc) {
-  proveStripe(e, sc, "accept", () => {
-    if (e.stripes.includes(sc)) return;
-    attachWire(e.link, sc, (m) => onData(sc.peer, m)); e.stripes.push(sc);
+  proveStripe(e, sc, "accept", (held) => {
+    if (e.stripes.includes(sc)) { held?.drop(); return; }
+    wireStripe(e.link, sc, held, (m) => onData(sc.peer, m)); e.stripes.push(sc);
     sc.on("close", () => { e.stripes = e.stripes.filter((c) => c !== sc); });
     watchLink(sc, () => sc.close());   // the dialing side opens a new one
   });

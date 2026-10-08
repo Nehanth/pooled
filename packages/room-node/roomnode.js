@@ -42,7 +42,7 @@ import { setupNode, probeMeta } from "./env.js";
 import * as env from "./env.js";
 import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
-import { makeLink, attachWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
+import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { unpackWire } from "../../room/wire.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf } from "../../room/models.js";
@@ -77,6 +77,7 @@ export const HOST_WAIT_MS = 60000;   // a worker knocks on the host id this long
 const PASS_HELD = new Set(["ping", "pong", "leaving", "mesh", "hello", "auth-proof", "bye"]);
 const HOST_HANDSHAKE = new Set(["hello", "auth", "lobby", "admit", "bye"]);
 const MESH_WAIT_MS = 10000;
+const HELD_MAX = 256;   // messages a held link keeps (each way) until it is proved
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
   "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-load", "ai-share", "ai-wake", "ai-ckpt-save", "ai-ckpt-load"]);
@@ -270,16 +271,25 @@ export class RoomNode extends EventEmitter {
   helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax(), ...(this.ai.model ? { model: this.ai.model } : {}) } : this.meta, v: PROTOCOL, auth: AUTH_V, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
   // a stripe (an extra association for the wire) joins the link's wire once it proved the mesh key
   attachStripe(e, conn) { this.proveStripe(e, conn, "accept"); }
-  attachStripeNow(e, conn) { if (e.stripes.includes(conn)) return; attachWire(e.link, conn, (m) => this.onData(conn.peer, m)); e.stripes.push(conn); }
+  // held: its wire channel, opened while it proved the mesh key (transport.js holdWire)
+  attachStripeNow(e, conn, held = null) {
+    if (e.stripes.includes(conn)) { held?.drop(); return; }
+    const onFrame = (m) => this.onData(conn.peer, m);
+    if (held) held.join(e.link, onFrame); else attachWire(e.link, conn, onFrame);
+    e.stripes.push(conn);
+  }
   proveStripe(e, sc, role) {
     if (!this.mk) { this.attachStripeNow(e, sc); this.sendMesh(sc, role); return; }
+    // its wire channel opens now: the other end may finish its check first and send slices at once,
+    // which wait here (in order) until this end's check passes
+    const held = holdWire(sc);
     let done = false;
     const finish = (v) => {
       if (done) return;
       done = true; clearTimeout(timer);
-      if (this.conns.get(sc.peer) !== e) { try { sc.close(); } catch {} return; }
-      if (v === "ok" || v === "legacy") this.attachStripeNow(e, sc);
-      else { this.log(`a stripe to ${e.name} didn't prove it belongs to this room: closed it`); try { sc.close(); } catch {} }
+      if (this.conns.get(sc.peer) !== e) { held?.drop(); try { sc.close(); } catch {} return; }
+      if (v === "ok" || v === "legacy") this.attachStripeNow(e, sc, held);
+      else { held?.drop(); this.log(`a stripe to ${e.name} didn't prove it belongs to this room: closed it`); try { sc.close(); } catch {} }
     };
     const timer = setTimeout(() => meshVerdict(this, sc, role, null).then((v) => finish(v === "legacy" ? v : "bad")), MESH_WAIT_MS);
     timer.unref?.();
@@ -373,7 +383,7 @@ export class RoomNode extends EventEmitter {
   }
   sendTo(id, obj) {
     const e = this.conns.get(id);
-    if (e?.hold && !PASS_HELD.has(obj?.t)) { if (e.hold.out.length < 256) e.hold.out.push(obj); return; }
+    if (e?.hold && !PASS_HELD.has(obj?.t)) { if (e.hold.out.length < HELD_MAX) e.hold.out.push(obj); return; }
     try { e?.conn.send(obj); } catch {}
   }
   broadcast(obj, filter = () => true) { for (const [id, e] of this.conns) if (filter(id, e)) this.sendTo(id, obj); }
@@ -461,11 +471,18 @@ export class RoomNode extends EventEmitter {
     // a held link: only what proves it gets through (and pings, so it isn't dropped as silent)
     if (e?.hold) {
       if (e.hold.kind === "mesh" && d.t === "mesh") { this.meshIn(e, d).catch(() => {}); return; }
-      const pass = d.t === "ping" || d.t === "pong" || d.t === "leaving" || (e.hold.kind === "host" && HOST_HANDSHAKE.has(d.t));
+      // once the host's admit is in (its proof being checked), everything but pings waits behind it, so
+      // the room's messages are handled in the order the host sent them (a bye after ai-ready-all too)
+      const pass = d.t === "ping" || d.t === "pong" || (!e.hold.admitting && (d.t === "leaving" || (e.hold.kind === "host" && HOST_HANDSHAKE.has(d.t))));
       if (!pass) {
         // a device from before the proofs says hello without auth: it sends no mesh message either
         if (e.hold.kind === "mesh" && d.t === "hello" && !(+d.auth >= AUTH_V)) this.meshIn(e, d).catch(() => {});
-        if (e.hold.q.length < 256) e.hold.q.push(d);
+        if (e.hold.q.length < HELD_MAX) { e.hold.q.push(d); return; }
+        // more than a link can have to say before it is proved: start over rather than lose a message
+        // (a link to the host closes, and this device knocks again)
+        this.log(`${e.name}: too many messages while the link was being proved: closing it`);
+        e.hold.q = [];
+        if (e.hold.kind === "mesh") this.dropLink(from); else try { e.conn.close(); } catch {}
         return;
       }
     }

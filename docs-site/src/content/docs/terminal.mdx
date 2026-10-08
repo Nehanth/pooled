@@ -14,7 +14,7 @@ Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gat
 - `node cli/bin/pooled.js host --help`, `join --help`, `chat --help`, `--help` (copied below as printed, 2026-09-30)
 - `node cli/bin/pooled.js host --model list` (the five model keys)
 - 0.4.0 (origin/main ed31899): --ram and expert offload (#319, #320, #323: cli/lib/lend.js parseRam/ramRule, RAM_KEEP_GB 16;
-  room/plan.js; 35B on the RTX 5070 alone 41-54 tok/s and the 122B Spark/Mac+PC rooms: docs/bench-log.md 2026-10-02 and the
+  room/plan.js; 35B on the RTX 5070 alone about 38-45 tok/s (37.5-44.9 measured on the published 0.4.0) and the 122B Spark/Mac+PC rooms: docs/bench-log.md 2026-10-02 and the
   maintainer's Mac Studio + RTX 5070 run, ~17 tok/s), the 122B (#316; NEED_GB 72 -> the picker's "needs 73 GB"; FILES 72.5 GB),
   help blocks re-copied from `node cli/bin/pooled.js <cmd> --help`
 - cli/lib/lend.js: HELP_JOIN, HELP_HOST, parseGb (at least 1, capped at 64), memoryRule (discrete: free less 1.5 GB;
@@ -183,7 +183,7 @@ The header shows `RAM up to N GB`, and the host's log says which layers each dev
 
 | Room | Speed |
 |---|---|
-| Qwen3.6 35B MoE on one RTX 5070 (12 GB): `pooled host qwen3.6-35b-moe --here` | 41-54 tok/s |
+| Qwen3.6 35B MoE on one RTX 5070 (12 GB): `pooled host qwen3.6-35b-moe --here` | about 38-45 tok/s |
 | Qwen3.5 122B MoE on a Mac Studio (lends 25 GB) and an RTX 5070 PC (the rest of the layers, 42 GB of experts in RAM) | about 17 tok/s, matching llama.cpp |
 
 ### The status line

@@ -39,6 +39,7 @@ export function loadAuth() {
   })();
 }
 const HOST_HELLO_WAIT_MS = 2000;
+const HELD_MAX = 256;   // messages kept while the host's admit is checked (Bridge.dial)
 
 let PeerClass = null;
 // PeerJS is a browser library: give it RTCPeerConnection & co. (node-datachannel/polyfill) and the
@@ -174,7 +175,11 @@ export class Bridge extends EventEmitter {
   dial(back, onHello) {
     const conn = this.peer.connect(PREFIX + this.code, { reliable: true });
     guardChunks(conn);
-    let greeted = null, admitted = false;
+    let greeted = null, admitted = false, admitting = false;
+    // what the host sends while its admit is being checked (the host sends ai-ready-all right after
+    // admit, and the check awaits): kept in order and handled once this client is in, so nothing the
+    // host said in between is lost. Dropped with the link when the check fails
+    const held = [];
     const link = { conn, greeted: null, auth: null };
     // in: the host said hello and (a host with the gate) let us in
     const inRoom = () => {
@@ -203,16 +208,29 @@ export class Bridge extends EventEmitter {
         this.log(this.kicked);
         this.emit("refused", this.kicked);
         this.emit("state");
+        admitting = false; held.length = 0;
         try { conn.close(); } catch {}
         return;
       }
       if (typeof d.pass === "string" && /^[A-Za-z0-9_-]{22,64}$/.test(d.pass)) this.pass = d.pass;
       if (this.waiting) this.log("the host let this client in");
-      admitted = true;
+      admitted = true; admitting = false;
       inRoom();
+      for (const m of held.splice(0)) onMsg(m);   // what came while the check ran, in the host's order
     };
     conn.on("data", (d) => {
       if (!d || typeof d.t !== "string") return;
+      if (admitting) {
+        if (held.length < HELD_MAX) { held.push(d); return; }
+        // the host can't have this much to say before this client is in: start over (lost() knocks again)
+        this.log("too many messages from the host while checking its admit: reconnecting");
+        admitting = false; held.length = 0;
+        try { conn.close(); } catch {}
+        return;
+      }
+      onMsg(d);
+    });
+    const onMsg = (d) => {
       if (d.t === "hello" && !greeted) {
         greeted = d; link.greeted = d;
         this.hostMeta = d.meta || {}; this.hostName = cleanText(d.name, 40);
@@ -229,7 +247,12 @@ export class Bridge extends EventEmitter {
         return;
       }
       if (d.t === "admit" && !admitted) {
-        onAdmit(d).catch((err) => this.log(`admit: ${err.message}`));
+        admitting = true;
+        onAdmit(d).catch((err) => {
+          this.log(`admit: ${err.message}`);
+          admitting = false; held.length = 0;
+          try { conn.close(); } catch {}
+        });
         return;
       }
       if (d.t === "lobby" && !admitted) {
@@ -256,7 +279,7 @@ export class Bridge extends EventEmitter {
       }
       if (!admitted) return;   // nothing from the room until we are in (the host sends nothing anyway)
       this.onData(d);
-    });
+    };
     conn.on("close", () => { if (this.conn === conn) this.lost("lost the link to the host"); });
     conn.on("error", () => {});
   }

@@ -78,7 +78,7 @@ Qwen3 0.6B is the golden-test model. The 122B MoE has 48 layers and 256 experts,
 
 ## Experts in system RAM
 
-On the 35B and the 122B MoE, a `pooled host` or `pooled join` device with a discrete GPU can keep some layers' experts in system RAM when the room's pledges can't hold the model (`--ram`). It copies the experts each token uses into a cache on its GPU. One RTX 5070 (12 GB) runs the 35B alone at 41-54 tok/s this way, and a Mac Studio (25 GB) with an RTX 5070 PC keeping 42 GB of experts in RAM runs the 122B at about 17 tok/s. Unified memory and browsers don't do this. See [MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram).
+On the 35B and the 122B MoE, a `pooled host` or `pooled join` device with a discrete GPU can keep some layers' experts in system RAM when the room's pledges can't hold the model (`--ram`). It copies the experts each token uses into a cache on its GPU. One RTX 5070 (12 GB) runs the 35B alone at about 38-45 tok/s this way, and a Mac Studio (25 GB) with an RTX 5070 PC keeping 42 GB of experts in RAM runs the 122B at about 17 tok/s. Unified memory and browsers don't do this. See [MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram).
 
 ## Engines
 
