@@ -63,6 +63,13 @@ ol,ul{list-style:none}
 /* header GitHub link: the mark only */
 .nav-link{display:inline-flex;align-items:center;height:36px;padding:0 10px;border-radius:8px;color:var(--ink-2);font:500 14px/1 var(--sans);text-decoration:none}
 .nav-link:hover{color:var(--ink);background:var(--bg-2)}
+/* CLI | Agents: the room's Chat | Code switch (p2p.html header #mode-bar), as two links. Neither is selected
+   here: a segment lifts to the white pill on hover or focus. Agents carries a small "beta". */
+.nav-seg{display:flex;gap:2px;padding:3px;border-radius:var(--r-md);background:var(--bg-3);box-shadow:inset 0 0 0 1px var(--rule-2)}
+.nav-seg a{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 12px;border-radius:var(--r-sm);font:500 var(--t-md)/1 var(--sans);color:var(--ink-3);text-decoration:none;white-space:nowrap;transition:color .2s var(--ease),background-color .2s var(--ease),box-shadow .2s var(--ease)}
+.nav-seg a:hover,.nav-seg a:focus-visible{background:var(--white);color:var(--ink);box-shadow:0 1px 2px rgba(20,22,29,.08),0 0 0 1px rgba(20,22,29,.04)}
+.nav-seg a:focus-visible{border-radius:var(--r-sm)}
+.nav-tag{padding:2px 5px;border-radius:var(--r-pill);background:var(--blue-soft);color:var(--blue-text);font:500 9.5px/1 var(--sans);letter-spacing:.02em}
 .gh-link{display:inline-grid;place-items:center;width:36px;height:36px;border-radius:8px;color:var(--ink-2)}
 .gh-link:hover{color:var(--ink);background:var(--bg-2)}
 
@@ -930,6 +937,19 @@ html:not(.js) .sb-dots i{display:none}
   .closer h2{font-size:clamp(32px,9.4vw,40px)}
   .ctas{margin-top:28px}
 }
+
+/* phones: Docs, CLI | Agents and Start a room stay on one line. GitHub is still the Star button at the end; under 431px the mark stands without the wordmark */
+@media (max-width:640px){
+  .nav-in{gap:12px}
+  .nav .right{gap:4px}
+  .nav-link{padding:0 7px}
+  .nav .gh-link{display:none}
+  .nav .btn-sm{white-space:nowrap}
+  .nav-seg a{gap:4px;padding:0 8px;font-size:var(--t-sm)}
+  .nav-tag{padding:2px 4px;font-size:8.5px}
+}
+@media (max-width:430px){.nav .wm{display:none}.nav-link{padding:0 6px}.nav .btn-sm{padding:0 11px}}
+@media (max-width:359px){.nav-in{gap:6px}.nav .right{gap:2px}.nav-link{padding:0 4px}.nav-seg a{padding:0 6px}.nav .btn-sm{padding:0 9px;font-size:var(--t-md)}}
 
 /* ---------- touch: at least 44px to hit ---------- */
 @media (pointer:coarse){
