@@ -1,6 +1,7 @@
 // Browser model headers, weight loading and engine construction. The room owns GPU
 // acquisition, progress/pacing, membership and recovery. Engine constructors arrive
 // after room.js's lazy import; importing this module does not load the GPU engine.
+// Main-model dense/safetensors configuration and tokenizer preparation remain in room.js.
 import { parseGGUFHeader, ggufWeights, ggufShardBytes, GGML_EMBED, GGML_OUTPUT, GGML_FINAL_NORM,
   ggmlLayerNames, qwen35Weights, qwen35ShardBytes, qwen35NamesFor, tokenizerFromGGUF, gpuUploadEntry, streamEntryToGPU }
   from "../engine/gguf.js";
@@ -205,6 +206,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   }
 
   async function loadDraft(M, DenseEngine) {
+    // The room loads the draft after its main shard; rangeBytesOf reuses that shard's pacer.
     const cfg = await (await fetch(M.cfg)).json();
     const G = await fetchGGUFHeader(M.gguf, false);
     const L = cfg.num_hidden_layers;

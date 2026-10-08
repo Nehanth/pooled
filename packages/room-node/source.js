@@ -54,7 +54,7 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
     const f = local && path.join(path.dirname(local), url.split("/").pop());
     return f && fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, "utf8")) : fetchImpl(url).then((r) => r.json());
   };
-  // one file's index (and the tokenizer when asked): 12 MB first, doubling, as room.js fetchGGUFHeader
+  // one file's index (and the tokenizer when asked): 12 MB first, doubling, as room/model-loader.js fetchGGUFHeader
   const headerOf = async (f, needTokenizer) => {
     for (let size = 12 * 2 ** 20; ; size *= 2) {
       const buf = await f.readAt(0, size);
