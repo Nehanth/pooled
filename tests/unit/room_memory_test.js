@@ -1,6 +1,6 @@
-// Phone memory in rooms (#207): what a device may pledge (room/pledge.js), the prefetcher never
-// fetching a tensor twice, weights from a room device streamed with flow control (so a phone holds a
-// window, not a whole range), and the host re-dealing when a phone's tab is killed while loading.
+// Phone memory in rooms (#207): pledges, peer weights streamed with flow control (a window,
+// not a whole range), and the host re-dealing when a phone's tab is killed while loading.
+// Prefetch memory invariants now exercise the imported loader in model_loader_test.js.
 // The room.js pieces are the real functions, cut out of its source by room_src.js.
 import { pledgeRule, pledgeGB, afterLoadDeath, IOS_MAX_GB } from "../../room/pledge.js";
 import { roomFns } from "./room_src.js";
@@ -39,42 +39,6 @@ Deno.test("afterLoadDeath: halve the share (in whole layers, at least one), drop
   eq(afterLoadDeath({ layers: 8, layerGB: 0.1, gb: 1, deaths: 1 }), { drop: false, gb: 0.4 });
   eq(afterLoadDeath({ layers: 1, layerGB: 0.46, gb: 0.5, deaths: 1 }), { drop: true });
   eq(afterLoadDeath({ layers: 4, layerGB: 0.21, gb: 1, deaths: 2 }), { drop: true });
-});
-
-// ---- the prefetcher ----
-Deno.test("rangeOf: a tensor is fetched once, even when the loader asks in a different order than the file", async () => {
-  const fetched = [];
-  const cancelled = [];
-  const rangeFetch = async (url, lo) => { fetched.push(lo); return { body: { cancel: () => cancelled.push(lo) } }; };
-  const prefetcher = { url: null, list: [], at: new Map(), pending: new Map(), taken: new Set() };
-  for (const [phone, ahead] of [[true, 1], [false, 4]]) {
-    fetched.length = 0; cancelled.length = 0;
-    const f = roomFns(["planPrefetch", "clearPrefetch", "rangeOf"], { prefetcher, rangeFetch, PREFETCH_Q: null, myMeta: { phone } });
-    // 12 tensors in the file; the loader wants them in model order: the second half first
-    const infos = Array.from({ length: 12 }, (_, i) => ({ byteOffset: i * 100, byteLength: 100 }));
-    f.planPrefetch("u", infos);
-    const order = [6, 7, 8, 9, 10, 11, 0, 1, 2, 3, 4, 5];
-    for (const i of order) await f.rangeOf("u", infos[i]);
-    const counts = {};
-    for (const lo of fetched) counts[lo] = (counts[lo] || 0) + 1;
-    ok(Object.values(counts).every((c) => c === 1), `phone=${phone}: a tensor fetched twice: ${JSON.stringify(counts)}`);
-    eq(Object.keys(counts).length, 12, "every tensor fetched");
-    eq(prefetcher.pending.size, 0, `ahead ${ahead}: every prefetch was read`);
-    f.clearPrefetch();
-    eq(prefetcher.url, null);
-  }
-});
-Deno.test("clearPrefetch: prefetched bodies nobody read are cancelled", async () => {
-  const cancelled = [];
-  const rangeFetch = async (url, lo) => ({ body: { cancel: () => cancelled.push(lo) } });
-  const prefetcher = { url: null, list: [], at: new Map(), pending: new Map(), taken: new Set() };
-  const f = roomFns(["planPrefetch", "clearPrefetch", "rangeOf"], { prefetcher, rangeFetch, PREFETCH_Q: "2", myMeta: {} });
-  const infos = Array.from({ length: 5 }, (_, i) => ({ byteOffset: i * 10, byteLength: 10 }));
-  f.planPrefetch("u", infos);
-  await f.rangeOf("u", infos[0]);     // prefetches 1 and 2, then the load stops
-  f.clearPrefetch();
-  await tick();
-  eq(cancelled.sort(), [10, 20]);
 });
 
 // ---- weights from a device in the room ----
