@@ -39,6 +39,7 @@ import os from "os";
 import path from "path";
 import { spawn } from "child_process";
 import { writeSynth } from "./synth.mjs";
+import { MODELS } from "../../room/models.js";
 import { loadPlaywright, chromiumPath, GPU_ARGS, serveRepo } from "./engine_synth.mjs";
 
 const argv = process.argv.slice(2);
@@ -47,7 +48,7 @@ const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejo
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const PORT = +arg("port", 8191), SIG = PORT + 1;
 const MODEL_KEY = "qwen3.8-27b";
-const MODEL_URL = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_0.gguf";
+const MODEL_URL = MODELS[MODEL_KEY].gguf;
 const PEERJS_URL = "https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js";
 const UA_PHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
 
@@ -67,6 +68,10 @@ function findPkg(name) {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-room-state-"));
 const modelBytes = fs.readFileSync(writeSynth(path.join(tmp, "synth.gguf"), { seed: 1, eosAt: 40 }).file);
 const extra = {};
+// The synthetic GGUF replaces this model, including its expected HTTP file size.
+extra["/room/models.js"] = path.join(tmp, "models.js");
+fs.writeFileSync(extra["/room/models.js"], fs.readFileSync(path.join(ROOT, "room/models.js"), "utf8") +
+  `\nFILES[${JSON.stringify(MODEL_KEY)}] = { bytes: ${modelBytes.length} };\n`);
 // a fixed cooperative-GEMV pick (the real autotune takes minutes on SwiftShader), as room_synth.mjs
 extra["/engine/autotune.js"] = path.join(tmp, "autotune.js");
 fs.writeFileSync(extra["/engine/autotune.js"], "export async function autotuneCoop() { return { wg: 64, rows: 4, results: [], stub: true }; }\n");

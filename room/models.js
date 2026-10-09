@@ -142,35 +142,66 @@ export const FILES = {
 // The models the room's picker offers. The others stay for tests and ?dev=1.
 export const PICKER = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 
+// Immutable Hugging Face revisions. GGUF LFS hashes and sizes at these revisions match FILES;
+// configs and tokenizers are pinned too, so a later upload cannot mix one release's byte ranges
+// or converted cache with another. Replacing a model means updating the revision and FILES together.
 export const MODELS = {
   "qwen3-0.6b": { label: "Qwen3 0.6B · Q8", kind: "gguf",
-    gguf: "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
-    cfg: "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/config.json",
-    tok: "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/main/tokenizer.json" },
+    gguf: "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
+    cfg: "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/config.json",
+    tok: "https://huggingface.co/Qwen/Qwen3-0.6B/resolve/c1899de289a04d12100db370d81485cdf75e47ca/tokenizer.json" },
   "qwen3-1.7b": { label: "Qwen3 1.7B · Q8", kind: "gguf",
-    gguf: "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q8_0.gguf",
-    cfg: "https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/config.json",
-    tok: "https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/tokenizer.json" },
+    gguf: "https://huggingface.co/Qwen/Qwen3-1.7B-GGUF/resolve/90862c4b9d2787eaed51d12237eafdfe7c5f6077/Qwen3-1.7B-Q8_0.gguf",
+    cfg: "https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/config.json",
+    tok: "https://huggingface.co/Qwen/Qwen3-1.7B/resolve/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e/tokenizer.json" },
   "qwen3-4b": { label: "Qwen3 4B · Q8", kind: "gguf",
-    gguf: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q8_0.gguf",
-    cfg: "https://huggingface.co/Qwen/Qwen3-4B/resolve/main/config.json",
-    tok: "https://huggingface.co/Qwen/Qwen3-4B/resolve/main/tokenizer.json" },
+    gguf: "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/bc640142c66e1fdd12af0bd68f40445458f3869b/Qwen3-4B-Q8_0.gguf",
+    cfg: "https://huggingface.co/Qwen/Qwen3-4B/resolve/1cfa9a7208912126459214e8b04321603b3df60c/config.json",
+    tok: "https://huggingface.co/Qwen/Qwen3-4B/resolve/1cfa9a7208912126459214e8b04321603b3df60c/tokenizer.json" },
   "qwen3.8-27b": { label: "Qwen3.8 27B \u00b7 Q4", kind: "qwen35",
-    gguf: "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_0.gguf" },
+    gguf: "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/4ca720788d1e01f1bff70c033e0d0028fd02e502/Qwen3.8-27B-Q4_0.gguf" },
   // mixture of experts: 256 experts, 8 active per token (~3B of 35B), so decode reads far less than the 27B
   "qwen3.6-35b-moe": { label: "Qwen3.6 35B MoE \u00b7 Q4", kind: "qwen35",
-    gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf" },
+    gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.6-35B-A3B-GGUF/resolve/5c2410d71524f4f72b023ce8daf7a80528226d5f/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf" },
   // 256 experts, 8 active (~10B of 122B), 48 layers, 16 query heads per kv head. Two files (shards: the loaders read
   // both, room/models.js mergeSplitHeaders). In the ?dev=1 list, not the picker: 72 GB of weights, a room of big
   // machines (or a PC that offloads its experts to RAM: room/plan.js), tests/test_moe.js MODEL=122b, `pooled pull`
   "qwen3.5-122b-moe": { label: "Qwen3.5 122B MoE \u00b7 Q4", kind: "qwen35",
-    gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf",
-    shards: ["00001", "00002"].map((n) => `https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-${n}-of-00002.gguf`) },
+    gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/fec8b222a2eddc3346d6b6d7f7c85efea93cd6bf/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf",
+    shards: ["00001", "00002"].map((n) => `https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/fec8b222a2eddc3346d6b6d7f7c85efea93cd6bf/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-${n}-of-00002.gguf`) },
   "smollm-135m": { label: "SmolLM 135M · bf16", kind: "safetensors",
-    st: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/model.safetensors",
-    cfg: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/config.json",
-    tok: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/tokenizer.json" },
+    st: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/model.safetensors",
+    cfg: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/config.json",
+    tok: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/12fd25f77366fa6b3b4b768ec3050bf629380bac/tokenizer.json" },
 };
+
+// The expected total of this exact file, including split GGUFs. An unknown URL has no
+// catalogue size: self-hosted/test models still get HTTP offset and stream-length checks.
+export function weightFileBytes(url) {
+  for (const [key, M] of Object.entries(MODELS)) {
+    const F = FILES[key];
+    if (!F) continue;
+    if (M.shards?.length) {
+      const i = M.shards.indexOf(url);
+      if (i >= 0) return F.shards?.[i]?.bytes ?? null;
+    } else if (M.gguf === url) return F.bytes;
+  }
+  return null;
+}
+
+// Benchmark a matrix shape the model actually uses, and check every converted quant
+// format present in its header. Q4_0 stays Q4; the other supported quants become Q8.
+// Prefer a layer's up projection to the vocabulary head (a much larger allocation).
+export function coopTuneOptions(G) {
+  const matrices = Object.entries(G?.tensors || {}).filter(([, t]) =>
+    t.shape?.length >= 2 && !FLOAT_TYPES.includes(t.ggmlType) &&
+    Number.isInteger(t.ggmlType) && Number.isInteger(t.shape.at(-1)) && t.shape.at(-1) > 0 && t.shape.at(-1) % 32 === 0 &&
+    Number.isInteger(t.shape.at(-2)) && t.shape.at(-2) > 0);
+  if (!matrices.length) return null;   // float-only models don't use cooperative quantized GEMV
+  const [, t] = matrices.find(([name]) => /^blk\.\d+\.ffn_up(?:_exps|_shexp)?\.weight$/.test(name)) || matrices[0];
+  const kindOf = (x) => x.ggmlType === Q4 ? "q4" : "q8";
+  return { dIn: t.shape.at(-1), dOut: t.shape.at(-2), kind: kindOf(t), validateKinds: [...new Set(matrices.map(([, x]) => kindOf(x)))] };
+}
 
 // Context window per room, in tokens: prompt + answer. Each full-attention layer keeps K and V
 // for this many positions (4 KB per position each for the 27B, so 16 MiB per attention layer at

@@ -100,7 +100,7 @@ try {
     const f = { "Qwen3-1.7B-Q8_0.gguf": "models/qwen17/model.gguf", "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf": "models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf" }[route.request().url().split("/").pop()];
     return f ? route.continue({ url: `https://127.0.0.1:${PORT + 1}/${f}` }) : route.continue();
   });
-  await ctx.route("https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/*.json", (route) =>
+  await ctx.route("https://huggingface.co/Qwen/Qwen3-1.7B/resolve/*/*.json", (route) =>
     route.fulfill({ path: path.join(MODELS, "qwen17", route.request().url().split("/").pop()), contentType: "application/json", headers: { "access-control-allow-origin": "*" } }));
   await ctx.route("https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js", (route) => route.fulfill({ path: path.join(NN, "peerjs/dist/peerjs.min.js"), contentType: "text/javascript" }));
   page = ctx.pages()[0] || await ctx.newPage();

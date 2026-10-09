@@ -98,7 +98,7 @@ async function openTab(name, gb) {
     return route.fulfill({ status: m ? 206 : 200, body, headers: { "content-type": "application/octet-stream", "content-range": `bytes ${lo}-${hi}/${size}`, "accept-ranges": "bytes",
       "access-control-allow-origin": "*", "access-control-expose-headers": "content-range, content-length, accept-ranges" } });
   });
-  await ctx.route("https://huggingface.co/Qwen/Qwen3-1.7B/resolve/main/*.json", (route) =>
+  await ctx.route("https://huggingface.co/Qwen/Qwen3-1.7B/resolve/*/*.json", (route) =>
     route.fulfill({ path: path.join(MODELS, "qwen17", route.request().url().split("/").pop()), contentType: "application/json", headers: { "access-control-allow-origin": "*" } }));
   await ctx.route("https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js", (route) =>
     route.fulfill({ path: path.join(NM, "peerjs/dist/peerjs.min.js"), contentType: "text/javascript" }));
