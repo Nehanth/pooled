@@ -8,7 +8,7 @@ import { Qwen35Engine } from "../../engine/qwen35.js";
 import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizerFromGGUF, gpuUploadEntry, GGML_EMBED, GGML_FINAL_NORM, GGML_OUTPUT,
   ggmlLayerNames, qwen35NamesFor } from "../../engine/gguf.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
-import { maxSeqFor, kvModeFor } from "../../room/models.js";
+import { maxSeqFor, kvModeFor, coopTuneOptions } from "../../room/models.js";
 import { convertPool } from "./convert.js";
 import { ExpertStore } from "../../engine/expert_store.js";
 
@@ -94,7 +94,8 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
       if (!mt.ok) throw new Error("GPU kernel FAILED on this device: " + mt.firstFail);
       try { tdev.destroy(); } catch {}
     }
-    out.tune = await autotuneCoop(device).catch(() => ({ wg: 256, rows: 4 }));
+    const tuneOptions = coopTuneOptions(G0);
+    out.tune = tuneOptions ? await autotuneCoop(device, tuneOptions) : { wg: 256, rows: 4, skipped: "float-only model" };
     log(`autotune WG=${out.tune.wg} ROWS=${out.tune.rows}`);
     const upload = (e, name) => gpuUploadEntry(device, e, name === GGML_EMBED);   // straight to the GPU
     if (M.kind === "qwen35") {

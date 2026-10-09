@@ -26,7 +26,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf } from "./room/models.js";
+import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, weightFileBytes, coopTuneOptions } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -54,6 +54,7 @@ import { probe as preflight, deviceKind } from "./room/preflight.js";
 import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
+import { validateWeightRange } from "./room/weight-range.js";
 import { working, liveWords } from "./room/working.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 import { convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
@@ -2401,6 +2402,10 @@ async function getWeightCache() {
   return weightCache;
 }
 async function rangeFetch(url, lo, hi, noCache = false) {
+  const expectedBytes = weightFileBytes(url);
+  // Header probes can request more than a small model contains. Normalize before
+  // cache/peer lookup so every source uses the same complete range.
+  if (expectedBytes != null) hi = Math.min(hi, expectedBytes - 1);
   const c = await getWeightCache();
   const key = cacheKey(url, lo, hi);
   if (c && !noCache) {
@@ -2437,8 +2442,12 @@ async function rangeFetch(url, lo, hi, noCache = false) {
   try { r = await fetch(url, { headers: { Range: `bytes=${lo}-${hi}` } }); }
   catch { throw new FetchError(0, url); }   // offline, CORS or a blocked host: no status to go on
   if (r.status !== 206) throw new FetchError(r.status, url);
+  r = validateWeightRange(r, lo, hi, expectedBytes);
+  // Unknown self-hosted files can clamp a header probe at EOF. The response is
+  // usable, but does not fill this requested cache key's range.
+  const actualHi = Number(/-(\d+)\//.exec(r.headers.get("content-range"))[1]);
   // phones skip the store (no spare RAM for the copy); Cache API refuses 206s, so store as a plain 200
-  if (c && !myMeta?.phone) storeRange(c, key, r.clone(), hi - lo + 1);
+  if (c && !myMeta?.phone && actualHi === hi) storeRange(c, key, r.clone(), hi - lo + 1);
   return r;
 }
 // Store a range in the weight cache as it streams (no whole-range copy in JS). A body that errors
@@ -2978,7 +2987,14 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   try { tdev.destroy(); } catch {}
   ai.device.lost.then((l) => crumb("GPU device lost: " + l.reason + " " + l.message));
   aiStatus("tuning kernels for this GPU\u2026");
-  ai.tune = await autotuneCoop(ai.device).catch(() => ({ wg: 256, rows: 4 }));
+  // Read the model's index before tuning; the loader reuses it below. An unchecked
+  // default after a failed correctness gate would allow a broken kernel into the room.
+  if (M.gguf && !(ai.G && ai.GModel === modelKey)) {
+    ai.G = await fetchModelHeader(M, hasEmbed || hasHead);
+    ai.GModel = modelKey;
+  }
+  const tuneOptions = M.gguf ? coopTuneOptions(ai.G) : null;
+  ai.tune = tuneOptions ? await autotuneCoop(ai.device, tuneOptions) : { wg: 256, rows: 4, skipped: "float-only model" };
   crumb(`autotune: WG=${ai.tune.wg} ROWS=${ai.tune.rows}`);
   const isPhone = myMeta?.phone;
   ai.myPct = 0;

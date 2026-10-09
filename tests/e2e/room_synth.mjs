@@ -41,6 +41,7 @@ import path from "path";
 import { spawn, execSync } from "child_process";
 import https from "https";
 import { writeSynth } from "./synth.mjs";
+import { MODELS } from "../../room/models.js";
 import { loadPlaywright, chromiumPath, GPU_ARGS, serveRepo } from "./engine_synth.mjs";
 
 const argv = process.argv.slice(2);
@@ -59,7 +60,7 @@ const TIMEOUT = +arg("timeout-s", 300) * 1000;
 // --stop: press Stop (the Send button while an answer streams) in these rounds, default round 0
 const STOP_ROUNDS = new Set(flag("stop") ? (arg("stop-rounds", "0")).split(",").map(Number) : []);
 const MODEL_KEY = "qwen3.8-27b";
-const MODEL_URL = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q4_0.gguf";
+const MODEL_URL = MODELS[MODEL_KEY].gguf;
 const PEERJS_URL = "https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js";
 
 function resolvePkg(name) {
@@ -391,6 +392,10 @@ peerServer.stderr.on("data", (d) => { peerErr += d; });
 // engine/autotune.js is swapped for a fixed pick unless --real-autotune: the real one times a
 // 17408x5120 GEMV (the 27B's FFN) for five configs, which takes more than 10 minutes on SwiftShader
 const extra = {};
+// The synthetic GGUF replaces this model, including its expected HTTP file size.
+extra["/room/models.js"] = path.join(tmp, "models.js");
+fs.writeFileSync(extra["/room/models.js"], fs.readFileSync(path.join(ROOT, "room/models.js"), "utf8") +
+  `\nFILES[${JSON.stringify(MODEL_KEY)}] = { bytes: ${modelBytes.length} };\n`);
 if (!flag("real-autotune")) {
   const stub = path.join(tmp, "autotune.js");
   fs.writeFileSync(stub, `// e2e stub (tests/e2e/room_synth.mjs): fixed cooperative-GEMV config, no timing\nexport async function autotuneCoop() { return { wg: ${+arg("wg", 64)}, rows: 4, results: [], stub: true }; }\n`);

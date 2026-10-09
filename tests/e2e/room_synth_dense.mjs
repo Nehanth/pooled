@@ -350,6 +350,10 @@ peerServer.stderr.on("data", (d) => { peerErr += d; });
 // engine/autotune.js is swapped for a fixed pick unless --real-autotune: the real one times a
 // 17408x5120 GEMV (the 27B's FFN) for five configs, which takes more than 10 minutes on SwiftShader
 const extra = {};
+// The synthetic GGUF replaces this model, including its expected HTTP file size.
+extra["/room/models.js"] = path.join(tmp, "models.js");
+fs.writeFileSync(extra["/room/models.js"], fs.readFileSync(path.join(ROOT, "room/models.js"), "utf8") +
+  `\nFILES[${JSON.stringify(MODEL_KEY)}] = { bytes: ${modelBytes.length} };\n`);
 if (!flag("real-autotune")) {
   const stub = path.join(tmp, "autotune.js");
   fs.writeFileSync(stub, `// e2e stub (tests/e2e/room_synth.mjs): fixed cooperative-GEMV config, no timing\nexport async function autotuneCoop() { return { wg: globalThis.__e2eWG || ${+arg("wg", 64)}, rows: globalThis.__e2eRows || ${+arg("rows", 4)}, results: [], stub: true }; }\n`);

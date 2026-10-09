@@ -6,22 +6,22 @@ sidebar:
   label: Limits and context
   order: 8
 ---
-<!-- Sources (origin/main): room/models.js (CTX, maxSeqFor: rounded to 256, min 2048), room.js (?ctx= read on the host page,
+{/* Sources: room/models.js (PICKER, MODELS, CTX, maxSeqFor: rounded to 256, min 2048), room.js (?ctx= read on the host page,
      QUEUE_MAX 10, 2 per member), room/api.js (API_LIMITS.reserve 32, "prompt is too long"), cli/lib/common.js (LIMITS;
      early check chars > 8 * ctx), cli/lib/http.js (KEEPALIVE_MS 10000, IDLE_MS 300000, HOST_QUEUED_MS 1800000,
-     maxConnections 64, Retry-After 5, --max-queue), harness/constrain.js (MAX_CALLS 16), cli/README.md, docs/design/serve.md §7, §11.6. -->
+     maxConnections 64, Retry-After 5, --max-queue), harness/constrain.js (MAX_CALLS 16), cli/README.md, docs/design/serve.md §7, §11.6. */}
+
+import ModelContextTable from '../../../components/ModelContextTable.astro';
 
 ## Context per model
 
 The room's context is the most tokens one request can hold: prompt plus answer.
 
-| Model | Default | Most with `?ctx=` |
-|---|---|---|
-| Qwen3 1.7B | 16384 (8192 when the room is short of memory for 16K) | 16384 |
-| Qwen3.8 27B | 16384 | 32768 |
-| Qwen3.6 35B MoE | 32768 | 65536 |
+<ModelContextTable />
 
 The host sets it by opening the room page with `?ctx=` before starting the model, for example `pooled.run/room?ctx=65536`. The value is rounded to a multiple of 256, at least 2048.
+
+These are the catalogue limits. The room needs enough memory for the selected context, and each device's GPU buffer binding limit can lower it. Use the context the running room reports.
 
 The bridge reports it in the banner, as `ctx` in `GET /health` and as `max_model_len` in `GET /v1/models`. Give it to coding agents so they compact in time: see [context settings](/docs/serve/recipes#context-settings-for-coding-agents).
 

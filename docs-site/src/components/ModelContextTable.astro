@@ -1,0 +1,32 @@
+---
+// Keep the public model limits in step with the room's catalogue.
+import { CTX, MODELS, PICKER, ctxK } from '../../../room/models.js';
+
+const rows = PICKER.filter((model) => CTX[model]).map((model) => {
+	const { def, max, fallback } = CTX[model];
+	return {
+		name: MODELS[model].label.split(' · ')[0],
+		def,
+		max,
+		fallback: fallback ? ` (${fallback} when the room is short of memory for ${ctxK(def)})` : '',
+	};
+});
+---
+<table>
+	<thead>
+		<tr>
+			<th scope="col">Model</th>
+			<th scope="col">Default</th>
+			<th scope="col">Most with <code>?ctx=</code></th>
+		</tr>
+	</thead>
+	<tbody>
+		{rows.map((row) => (
+			<tr>
+				<td>{row.name}</td>
+				<td>{row.def}{row.fallback}</td>
+				<td>{row.max}</td>
+			</tr>
+		))}
+	</tbody>
+</table>
