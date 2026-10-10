@@ -10,6 +10,7 @@ import { cacheKey } from "./weightcache.js";
 import { attachBrowserWeightCache } from "./convertedcache.js";
 
 export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMeta, getEnginePreset, options = {}, hooks = {} }) {
+  if (typeof getEnginePreset !== "function") throw new TypeError("getEnginePreset must be a function");
   const { onStatus: aiStatus = () => {}, crumb = () => {}, onCacheHit = () => {}, onModelLoaded: apiModelLoaded = () => {} } = hooks;
   const { wcache: WCACHE = true, wcacheVerify: WCACHE_VERIFY = false, prefetch = null } = options;
 

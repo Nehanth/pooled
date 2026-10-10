@@ -266,6 +266,7 @@ export const kvBytesPerLayerPos = (meta, kv = "f16") => {
 };
 // The browser snapshots these loading options when it creates its loader. Null prefetch keeps
 // the live device policy; engine presets are separate and read when an engine is constructed.
+// ?wcache=0 disables converted weights; ?wcacheverify=1 verifies them; ?prefetch=N overrides lookahead.
 export function modelLoadOptions(search) {
   const q = new URLSearchParams(search), prefetch = q.get("prefetch");
   return { wcache: q.get("wcache") !== "0", wcacheVerify: q.get("wcacheverify") === "1",

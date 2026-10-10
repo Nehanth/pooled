@@ -123,6 +123,33 @@ function cacheModel() {
   return { ...f, rangeFetch, fetched: () => fetched };
 }
 
+test("model loader: require a preset getter at construction", async () => {
+  for (const getEnginePreset of [undefined, null, {}])
+    await rejects(() => createModelLoader({ getEnginePreset }), "getEnginePreset must be a function");
+});
+
+test("model loader: decode tokenizer strings only from the first split shard", async () => {
+  const decoded = [], decode = TextDecoder.prototype.decode;
+  const tokens = ["first-shard-token", "second-shard-token"];
+  const files = tokens.map((token, i) => header(`tensor${i}`, { meta: { "tokenizer.ggml.tokens": [token] } }));
+  const m = loader({}, async (url) => new Response(files[Number(url)]));
+  // Merging discards later metadata, so observe decoding itself to catch redundant parsing.
+  TextDecoder.prototype.decode = function (...args) {
+    const text = decode.apply(this, args);
+    if (tokens.includes(text)) decoded.push(text);
+    return text;
+  };
+  try {
+    const g = await m.fetchModelHeader({ shards: ["0", "1"] });
+    eq(g.meta["tokenizer.ggml.tokens"], [tokens[0]]);
+    eq(decoded, [tokens[0]]);
+    decoded.length = 0;
+    const worker = await m.fetchModelHeader({ shards: ["0", "1"] }, false);
+    eq(worker.meta, {});
+    eq(decoded, []);
+  } finally { TextDecoder.prototype.decode = decode; }
+});
+
 test("model loader: grow a short header and retain tokenizer only when requested", async () => {
   const requests = [];
   const m = loader({}, async (url, lo, hi) => {
