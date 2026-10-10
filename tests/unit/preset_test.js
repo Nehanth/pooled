@@ -46,22 +46,24 @@ Deno.test("preset: engine flags and applyRoomFlags", () => {
   eq(applyRoomFlags(null, ""), null, "no engine");
 });
 
-Deno.test("the browser loader builds its Qwen engine from the preset; the room applies its flags", () => {
+Deno.test("the room supplies the loader's options and live preset, and applies engine flags", () => {
   const src = read("room.js");
   if (!/import \{[^}]*roomQwen35Options[^}]*\} from "\.\/engine\/preset\.js"/.test(src)) throw new Error("room.js does not import the preset");
   const loader = read("room/model-loader.js");
-  const create = loader.slice(loader.indexOf("ai.engine = await Qwen35Engine.create({"), loader.indexOf("} else if (M.kind === \"gguf\")"));
-  if (!create.includes("...roomQwen35Options(location.search)")) throw new Error("Qwen35Engine.create in model-loader.js does not spread the preset");
-  for (const k of ["draftVocab", "draftChain", "specFuse", "moeFuse", "gpuSample", "argmaxWide", "batchCols"]) {
-    if (new RegExp(`\\b${k}:`).test(create)) throw new Error(`model-loader.js sets ${k} itself instead of taking it from the preset`);
-  }
-  // the KV format is the host's choice for every device (sent with ai-load), so it overrides the preset's ?kv
-  const kvAt = create.indexOf('kvQ8: kv === "q8"');
-  if (kvAt < 0 || kvAt < create.indexOf("...roomQwen35Options(location.search)")) throw new Error("model-loader.js must set kvQ8 from the host's ai-load value, after the preset");
+  const factory = src.slice(src.indexOf("const modelLoader = createModelLoader({"), src.indexOf("const { fetchModelHeader, fetchGGUFHeader }"));
+  if (!factory.includes("getEnginePreset: () => roomQwen35Options(location.search)")) throw new Error("the room must supply a live preset getter");
+  if (!factory.includes("options: modelLoadOptions(location.search)")) throw new Error("the room must supply parsed loading options");
+  if (/\blocation\b|URLSearchParams|roomQwen35Options/.test(loader)) throw new Error("the loader must not read browser flags or choose the room's preset");
   if (!src.includes("applyRoomFlags(ai.engine, location.search)")) throw new Error("room.js does not apply the preset's engine flags");
   for (const f of ["draftvocab", "dvauto", "draftchain", "specfuse", "kv", "moefuse", "moednrows", "gpusample", "argmaxwide", "mtprefill", "predraft", "mtpbatch"]) {
     if ((src + loader).includes(`get("${f}")`)) throw new Error(`the browser reads ?${f} itself; it belongs in engine/preset.js`);
   }
+});
+
+Deno.test("the room supplies the same pacer explicitly to shard and draft loads", () => {
+  const src = read("room.js");
+  if (!/modelLoader\.loadShard\(\{[^}]*pace: aiLoadPace/.test(src)) throw new Error("shard pacer missing");
+  if (!/modelLoader\.loadDraft\(\{[^}]*pace: aiLoadPace/.test(src)) throw new Error("draft pacer missing");
 });
 
 Deno.test("benchmarks and profilers build their Qwen engines from the same preset", () => {

@@ -264,6 +264,15 @@ export const kvBytesPerLayerPos = (meta, kv = "f16") => {
   const perKV = kv === "q8" ? kvDim + kvDim / 32 * 4 : kvDim * 2;   // int8 values + f32 scales, or f16
   return perKV * 2 / (meta["qwen35.full_attention_interval"] || 1);
 };
+// The browser snapshots these loading options when it creates its loader. Null prefetch keeps
+// the live device policy; engine presets are separate and read when an engine is constructed.
+// ?wcache=0 disables converted weights; ?wcacheverify=1 verifies them; ?prefetch=N overrides lookahead.
+export function modelLoadOptions(search) {
+  const q = new URLSearchParams(search), prefetch = q.get("prefetch");
+  return { wcache: q.get("wcache") !== "0", wcacheVerify: q.get("wcacheverify") === "1",
+    prefetch: prefetch === null ? null : Math.max(0, parseInt(prefetch, 10) || 0) };
+}
+
 export const MAX_NEW = 400;    // longest answer, tokens
 export const MAX_NEW_THINKING = 1200;   // with thinking on, the think block comes out of the same budget
 export const MIN_ROOM = 32;    // a prompt must leave at least this many tokens for the answer

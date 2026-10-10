@@ -1,10 +1,23 @@
-// room/models.js: maxSeqFor decides every room's context window (host and devices build their
-// engines with it) and kvBytesPerLayerPos decides how many layers each device is dealt at that
-// context. Both are pure; nothing else asserts them.
-import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvLayerBufBytes, ctxForBinding, WEBGPU_MIN_BIND, kvModeFor, kvForLoad, KV_MODES, NEED_MIN_GB, ctxChoices, pickCtx, ctxK, ctxShortNote, needText } from "../../room/models.js";
+// Model catalogue, loading flags, and shared context/memory policy from room/models.js.
+import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvLayerBufBytes, ctxForBinding, WEBGPU_MIN_BIND, kvModeFor, kvForLoad, KV_MODES, NEED_MIN_GB, ctxChoices, pickCtx, ctxK, ctxShortNote, needText, modelLoadOptions } from "../../room/models.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
+
+Deno.test("modelLoadOptions: browser flags keep defaults and prefetch parsing", () => {
+  for (const [search, want] of [
+    ["", { wcache: true, wcacheVerify: false, prefetch: null }],
+    ["?wcache=0&wcacheverify=1&prefetch=0", { wcache: false, wcacheVerify: true, prefetch: 0 }],
+    ["?wcache=1&wcacheverify=0&prefetch=3", { wcache: true, wcacheVerify: false, prefetch: 3 }],
+    ["?wcache=&wcacheverify=&prefetch=", { wcache: true, wcacheVerify: false, prefetch: 0 }],
+    ["?wcache=false&wcacheverify=true&prefetch=bad", { wcache: true, wcacheVerify: false, prefetch: 0 }],
+    ["?prefetch=-3", { wcache: true, wcacheVerify: false, prefetch: 0 }],
+    ["?prefetch=2.9", { wcache: true, wcacheVerify: false, prefetch: 2 }],
+    ["?prefetch=2tails", { wcache: true, wcacheVerify: false, prefetch: 2 }],
+    ["?prefetch=0x10", { wcache: true, wcacheVerify: false, prefetch: 0 }],
+    ["?prefetch=1&prefetch=4", { wcache: true, wcacheVerify: false, prefetch: 1 }],
+  ]) eq(modelLoadOptions(search), want, search);
+});
 
 Deno.test("maxSeqFor: table of models and ?ctx= asks", () => {
   const cases = [

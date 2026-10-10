@@ -5,20 +5,19 @@
 import { parseGGUFHeader, ggufWeights, ggufShardBytes, GGML_EMBED, GGML_OUTPUT, GGML_FINAL_NORM,
   ggmlLayerNames, qwen35Weights, qwen35ShardBytes, qwen35NamesFor, tokenizerFromGGUF, gpuUploadEntry, streamEntryToGPU }
   from "../engine/gguf.js";
-import { roomQwen35Options } from "../engine/preset.js";
 import { MODELS, MAX_SEQ, mergeSplitHeaders } from "./models.js";
 import { cacheKey } from "./weightcache.js";
 import { attachBrowserWeightCache } from "./convertedcache.js";
 
-export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMeta, hooks }) {
-  const { onStatus: aiStatus, crumb, onCacheHit, onModelLoaded: apiModelLoaded } = hooks;
+export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMeta, getEnginePreset, options = {}, hooks = {} }) {
+  if (typeof getEnginePreset !== "function") throw new TypeError("getEnginePreset must be a function");
+  const { onStatus: aiStatus = () => {}, crumb = () => {}, onCacheHit = () => {}, onModelLoaded: apiModelLoaded = () => {} } = hooks;
+  const { wcache: WCACHE = true, wcacheVerify: WCACHE_VERIFY = false, prefetch = null } = options;
 
   // ---- converted weights on disk (room/convertedcache.js, OPFS): a second load of the same layers skips
   // the CPU conversion (K-quant -> Q8, BF16/Q5_0 -> f32, the embedding's repack). Keyed by model URL,
   // its pinned revision, the GGUF header and engine/gguf.js itself, so any of those changing starts
-  // fresh. ?wcache=0 turns it off (A/B); ?wcacheverify=1 also checks each entry's payload hash.
-  const WCACHE = new URLSearchParams(location.search).get("wcache") !== "0";
-  const WCACHE_VERIFY = new URLSearchParams(location.search).get("wcacheverify") === "1";
+  // fresh. The caller can disable it or also verify each entry's payload hash.
   async function useConvertedCache(G, url) {
     if (!WCACHE) { G.entryCache = null; return null; }
     return attachBrowserWeightCache(G, url, { srcUrl: new URL("../engine/gguf.js", import.meta.url).href, verify: WCACHE_VERIFY });
@@ -48,9 +47,8 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       catch (e) { if (size > 256 * 2 ** 20) throw e; size *= 2; }
     }
   }
-  let pacerHook = null;
-  const streamWithRetry = (url, streamOpts) => async (info) => {
-    try { return await streamEntryToGPU(ai.device, info, openRangeOf(url), streamOpts); }
+  const streamWithRetry = (url, streamOpts, pace) => async (info) => {
+    try { return await streamEntryToGPU(ai.device, info, openRangeOf(url, pace), streamOpts); }
     catch (e) {
       if (!/short tensor/.test(String(e)) && !e?.retryNet) throw e;   // (retryNet: a room device stopped sending it)
       const c = await getWeightCache(), u = info.url || url;
@@ -60,10 +58,9 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   };
   // Prefetch: a shard is hundreds of tensors (a 27B worker with 30 layers fetches ~450), and fetching
   // them one after another pays the model host's time-to-first-byte every time. When the loader
-  // asks for a tensor, the next PREFETCH tensors of the shard (file order) are requested too, so
+  // asks for a tensor, the next few tensors of the shard (file order) are requested too, so
   // several are in flight at once. Phones keep one: every buffered body is RAM they do not have.
-  // ?prefetch=N overrides (0 = off, for A/B).
-  const PREFETCH_Q = new URLSearchParams(location.search).get("prefetch");
+  // An explicit prefetch count overrides the device policy (0 = off).
   // The loader asks for tensors in model order, not file order, so "the next one in the file" is often
   // one it already has: those are never fetched again (taken). Fetching them anyway was ~450 MB of
   // unread downloads per MoE layer, and on an iPhone they piled up in Safari's networking process
@@ -85,7 +82,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   function rangeOf(url, info) {
     const lo = info.byteOffset, hi = info.byteOffset + info.byteLength - 1, u = info.url || url;
     if (url !== prefetcher.url) return rangeFetch(u, lo, hi);
-    const ahead = PREFETCH_Q != null ? Math.max(0, parseInt(PREFETCH_Q, 10) || 0) : getMeta()?.phone ? 1 : 4;
+    const ahead = prefetch ?? (getMeta()?.phone ? 1 : 4);
     const key = u + "@" + lo, i = prefetcher.at.get(key);
     prefetcher.taken.add(key);
     if (i !== undefined) for (let k = i + 1; k <= i + ahead && k < prefetcher.list.length; k++) {
@@ -102,13 +99,13 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   }
   // the tensors a shard loads, for the prefetcher (a superset is harmless: the list only orders fetches)
   function shardInfos(G, names) { return [...new Set(names)].map((n) => G.tensors[n]).filter(Boolean); }
-  const openRangeOf = (url) => async (info) => {
-    if (pacerHook) await pacerHook();
+  const openRangeOf = (url, pace) => async (info) => {
+    if (pace) await pace();
     crumb("streaming " + info.name + " (" + (info.byteLength / 2 ** 20).toFixed(0) + " MB)");
     return rangeOf(url, info);
   };
-  const rangeBytesOf = (url) => async (info) => {
-    if (pacerHook) await pacerHook();
+  const rangeBytesOf = (url, pace) => async (info) => {
+    if (pace) await pace();
     crumb("fetching " + info.name + " (" + (info.byteLength / 2 ** 20).toFixed(0) + " MB)");
     let r = await rangeOf(url, info);
     let bytes = await r.arrayBuffer().then((b) => new Uint8Array(b), (e) => { if (e?.retryNet) return new Uint8Array(0); throw e; });
@@ -123,7 +120,6 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace }, engines) {
     const M = MODELS[modelKey];
     const { makeTokenizer, DenseEngine, Qwen35Engine, fetchModelShard, shardTensorNames } = engines;
-    pacerHook = pace;
     if (M.kind === "qwen35") {
       aiStatus("reading model index\u2026");
       const needTok = hasEmbed || hasHead;
@@ -151,9 +147,9 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         names.push(...Object.values(qwen35NamesFor(G, N, true)).filter((v) => typeof v === "string"), ...["eh_proj", "enorm", "hnorm", "shared_head_norm"].map((x) => `blk.${N}.nextn.${x}.weight`));
       }
       planPrefetch(M.gguf, shardInfos(G, names));
-      G.streamEntry = streamWithRetry(M.gguf, streamOpts);
+      G.streamEntry = streamWithRetry(M.gguf, streamOpts, pace);
       const wc = await useConvertedCache(G, M.gguf), tw = performance.now();
-      const weights = await qwen35Weights(G, rangeBytesOf(M.gguf), opts, (done) => onProg(done, total),
+      const weights = await qwen35Weights(G, rangeBytesOf(M.gguf, pace), opts, (done) => onProg(done, total),
         (e, name) => gpuUploadEntry(ai.device, e, name === GGML_EMBED));   // straight to the GPU, RAM stays flat
       await convertedSummary(wc, tw);
       aiStatus("building GPU pipelines (compiling shaders)\u2026");
@@ -161,13 +157,8 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         device: ai.device, meta: G.meta, weights, vocab: G.tensors[GGML_EMBED]?.shape?.[0],
         layerRange: range, hasEmbed, hasHead, maxSeq: ctx,
         coopWG: ai.tune?.wg, coopRows: ai.tune?.rows,
-        // the room's settings (engine/preset.js: 16 batch columns, the small draft head, fused kernels, GPU
-        // sampling, and the ?flags that change them). The benchmarks and profilers build their engines from
-        // the same preset, so their numbers come from these settings. Prefill options are not set there:
-        // every device takes the engine's defaults, so host and workers agree.
-        ...roomQwen35Options(location.search),
-        // ?kv=q8 on the host: int8 KV cache. The host decides for every device and sends its choice with
-        // ai-load (room/models.js kvModeFor, kvForLoad), so this overrides the preset's own ?kv reading.
+        // Read the caller's preset at construction time; the host's KV choice wins for every device.
+        ...getEnginePreset(),
         kvQ8: kv === "q8",
       });
     } else if (M.kind === "gguf") {
@@ -181,9 +172,9 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       if (hasEmbed || hasHead) names.push(GGML_EMBED);
       if (hasHead) names.push(GGML_FINAL_NORM, GGML_OUTPUT);
       planPrefetch(M.gguf, shardInfos(G, names));
-      G.streamEntry = streamWithRetry(M.gguf, streamOpts);
+      G.streamEntry = streamWithRetry(M.gguf, streamOpts, pace);
       const wc = await useConvertedCache(G, M.gguf), tw = performance.now();
-      const weights = await ggufWeights(G, rangeBytesOf(M.gguf), opts, (done) => onProg(done, total),
+      const weights = await ggufWeights(G, rangeBytesOf(M.gguf, pace), opts, (done) => onProg(done, total),
         (e, name) => gpuUploadEntry(ai.device, e, name === GGML_EMBED));
       await convertedSummary(wc, tw);
       aiStatus("building GPU pipelines\u2026");
@@ -205,12 +196,12 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
     clearPrefetch();
   }
 
-  async function loadDraft(M, DenseEngine) {
-    // The room loads the draft after its main shard; rangeBytesOf reuses that shard's pacer.
+  async function loadDraft({ modelKey, pace }, { DenseEngine }) {
+    const M = MODELS[modelKey];
     const cfg = await (await fetch(M.cfg)).json();
     const G = await fetchGGUFHeader(M.gguf, false);
     const L = cfg.num_hidden_layers;
-    const weights = await ggufWeights(G, rangeBytesOf(M.gguf), { lo: 0, hi: L, hasEmbed: true, hasHead: true });
+    const weights = await ggufWeights(G, rangeBytesOf(M.gguf, pace), { lo: 0, hi: L, hasEmbed: true, hasHead: true });
     return DenseEngine.create({ device: ai.device, cfg, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: ai.engine.maxSeq,
       coopWG: ai.tune?.wg, coopRows: ai.tune?.rows });
   }
