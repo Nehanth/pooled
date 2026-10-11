@@ -110,15 +110,18 @@ test("expertDiskReader: every expert of every type equals the whole-tensor conve
   } finally { await disk.close(); }
 });
 
-test("expertDiskReader: readAt returns the file's bytes; one chunk size up to whole experts", async () => {
+test("expertDiskReader: readAt returns the file's bytes; chunks from a few bytes to whole experts; slots smaller than a read", async () => {
   const file = fs.readFileSync(paths[1]);
-  for (const chunkBytes of [7, 4096, 2 ** 20]) {
-    const disk = expertDiskReader({ paths, threads: 2, chunkBytes });
+  // slotBytes 4096 (one page): a 10000-byte readAt goes through three slots, a Q6_K expert (6 KB converted) gets a buffer of its own
+  for (const [chunkBytes, slotBytes] of [[7, undefined], [4096, 4096], [2 ** 20, undefined], [1000, 4096]]) {
+    const disk = expertDiskReader({ paths, threads: 2, chunkBytes, slotBytes, ringSlots: 2 });
     try {
       const info = tensors["blk.1.ffn_down_exps.weight"];
-      const got = await disk.readAt(1, info.byteOffset + 5, 3000);
-      assert.deepEqual(Buffer.from(got), file.subarray(info.byteOffset + 5, info.byteOffset + 3005));
-      same(await disk.readPart(info, 1), want(info, 1), `chunkBytes ${chunkBytes}`);
+      const got = await disk.readAt(1, info.byteOffset + 5, 10000);
+      assert.ok(!(got.buffer instanceof SharedArrayBuffer), "readAt hands out plain memory");
+      assert.deepEqual(Buffer.from(got), file.subarray(info.byteOffset + 5, info.byteOffset + 10005));
+      for (let e = 0; e < 3; e++) same(await disk.readPart(info, e), want(info, e), `chunkBytes ${chunkBytes}, slotBytes ${slotBytes}`);
+      if (slotBytes) assert.equal(disk.stats.oversize, 3);
     } finally { await disk.close(); }
   }
 });
@@ -165,10 +168,10 @@ test("expertDiskReader: a short read fails that request only; close() stops the 
   assert.throws(() => expertDiskReader({ paths: [] }), /paths/);
 });
 
-test("defaultDiskThreads: POOLED_DISK_THREADS, else up to 8", () => {
+test("defaultDiskThreads: POOLED_DISK_THREADS, else up to 16", () => {
   assert.equal(defaultDiskThreads({ POOLED_DISK_THREADS: "12" }), 12);
   assert.equal(defaultDiskThreads({ POOLED_DISK_THREADS: "999" }), 64);
   const d = defaultDiskThreads({});
-  assert.ok(d >= 1 && d <= 8);
+  assert.ok(d >= 1 && d <= 16);
   assert.equal(defaultDiskThreads({ POOLED_DISK_THREADS: "nope" }), d);
 });

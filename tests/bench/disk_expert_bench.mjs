@@ -28,7 +28,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { parseGGUFHeader } from "../../engine/gguf.js";
+import { parseGGUFHeader, convertEntry, GGML_Q4_0, GGML_Q8_0 } from "../../engine/gguf.js";
 import { expertDiskReader, expertPart } from "../../packages/room-node/expert_disk.js";
 
 const env = (k, d) => process.env[k] ?? d;
@@ -65,7 +65,9 @@ const layers = [];
 for (let l = 0; tensors[`blk.${l}.attn_norm.weight`] || tensors[`blk.${l}.ffn_down_exps.weight`]; l++) {
   if (Object.keys(tensors).some((k) => k.startsWith(`blk.${l}.nextn.`))) continue;
   const parts = ["gate", "up", "gate_up", "down"].map((p) => tensors[`blk.${l}.ffn_${p}_exps.weight`]).filter(Boolean);
-  if (parts.length >= 2) layers.push({ l, parts });
+  // requant: a part the loader requantizes to Q8 on the CPU (Q4_1 / Q5_0 / K-quants: the first layers' down
+  // experts in the bartowski Q4_0 files), the slow conversion
+  if (parts.length >= 2) layers.push({ l, parts, requant: parts.some((t) => t.ggmlType !== GGML_Q4_0 && t.ggmlType !== GGML_Q8_0) });
 }
 if (!layers.length) throw new Error("no routed expert tensors (blk.N.ffn_{gate,up,down}_exps.weight) in " + files.join(", "));
 const nExp = layers[0].parts[0].shape[0];
@@ -97,7 +99,7 @@ function dropCache() {
 
 // one pass over ROUTE -> { s, bytes, lat: per-expert ms, layer: per-layer ms }
 async function pass(read) {
-  const lat = [], layer = [];
+  const lat = [], latRq = [], layer = [];
   let bytes = 0;
   const t0 = performance.now();
   for (const { L, ids } of ROUTE) {
@@ -106,11 +108,11 @@ async function pass(read) {
       const a = performance.now();
       const n = await read(L, e);   // not bytes += await ...: that reads bytes before the await and loses the others' adds
       bytes += n;
-      lat.push(performance.now() - a);
+      (L.requant ? latRq : lat).push(performance.now() - a);
     }));
     layer.push(performance.now() - l0);
   }
-  return { s: (performance.now() - t0) / 1000, bytes, lat, layer };
+  return { s: (performance.now() - t0) / 1000, bytes, lat: [...lat, ...latRq], latQ: lat, latRq, layer };
 }
 const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return s[Math.min(s.length - 1, Math.floor((p / 100) * s.length))]; };
 
@@ -148,14 +150,32 @@ function reader(mode, threads) {
 }
 
 const GBs = (r) => (r.bytes / 1e9 / r.s).toFixed(2);
-const row = (mode, threads, kind, r, x) =>
-  console.log(`| ${mode} | ${mode === "uv" ? `libuv ${process.env.UV_THREADPOOL_SIZE || 4}` : threads} | ${kind} | ${GBs(r)} | ${pct(r.lat, 50).toFixed(2)} | ${pct(r.lat, 99).toFixed(2)} | ${pct(r.layer, 50).toFixed(2)} | ${(r.s * 1000 / TOKENS).toFixed(0)}${x} |`);
+const split = [];   // conv passes: per-expert latency on layers with and without a requantized part
+const row = (mode, threads, kind, r, x) => (mode === "conv" && r.latRq.length && split.push({ threads, kind, r }),
+  console.log(`| ${mode} | ${mode === "uv" ? `libuv ${process.env.UV_THREADPOOL_SIZE || 4}` : threads} | ${kind} | ${GBs(r)} | ${pct(r.lat, 50).toFixed(2)} | ${pct(r.lat, 99).toFixed(2)} | ${pct(r.layer, 50).toFixed(2)} | ${(r.s * 1000 / TOKENS).toFixed(0)}${x} |`));
 
 const sizeGB = files.reduce((a, f) => a + fs.statSync(f).size, 0) / 1e9;
 console.log(`${files.map((f) => path.basename(f)).join(", ")} (${sizeGB.toFixed(1)} GB): ${layers.length} MoE layers, ${nExp} experts, K = ${K}, ` +
   `${(expBytes(layers[0]) / MiB).toFixed(2)} MiB per expert (gate + up + down), ${(perToken / 1e9).toFixed(2)} GB per token if nothing is cached`);
 console.log(`${TOKENS} tokens per pass (${(perToken * TOKENS / 1e9).toFixed(1)} GB, ${ROUTE.length * K} experts), chunks ${CHUNK / 1024} KiB, ` +
   `${os.cpus().length} CPUs, node ${process.version}, ${os.platform()} ${os.arch()}${COLD ? "" : " (no cold passes)"}\n`);
+// what converting one expert costs on one thread (convertEntry on its bytes, as a worker runs it), per part type
+{
+  const seen = new Map();
+  for (const L of layers) for (const t of L.parts) if (!seen.has(t.ggmlType)) seen.set(t.ggmlType, t);
+  const fd = files.map((f) => fs.openSync(f, "r")), out = [];
+  for (const [T, t] of seen) {
+    const p = expertPart(t, 0), b = Buffer.alloc(p.len);
+    fs.readSync(fd[p.shard], b, 0, p.len, p.off);
+    const info = { ggmlType: T, shape: [p.rows, p.cols], nElems: p.rows * p.cols };
+    convertEntry(info, b);
+    const t0 = performance.now();
+    for (let i = 0; i < 5; i++) convertEntry(info, b);
+    out.push(`ggml type ${T} (${p.kind}) ${((performance.now() - t0) / 5).toFixed(2)} ms per part (${(p.len / MiB).toFixed(2)} MiB)`);
+  }
+  fd.forEach((x) => fs.closeSync(x));
+  console.log(`convert on one thread: ${out.join("; ")}\n`);
+}
 console.log("| mode | workers | cache | GB/s | p50 ms / expert | p99 ms / expert | p50 ms / layer | ms / token | convert ms / expert | copy ms / expert |");
 console.log("|---|---|---|---|---|---|---|---|---|---|");
 for (const mode of MODES) {
@@ -172,6 +192,13 @@ for (const mode of MODES) {
   }
 }
 if (COLD) dropCache();   // leave the page cache as it was before (empty of these files), not full of experts
+if (split.length) {
+  const nRq = layers.filter((L) => L.requant).length;
+  console.log(`\nconv, per expert: the ${layers.length - nRq} Q4_0 layers / the ${nRq} layers with a part requantized to Q8\n`);
+  console.log("| workers | cache | p50 ms Q4_0 | p99 ms Q4_0 | p50 ms requant | p99 ms requant |\n|---|---|---|---|---|---|");
+  for (const { threads, kind, r } of split)
+    console.log(`| ${threads} | ${kind} | ${pct(r.latQ, 50).toFixed(2)} | ${pct(r.latQ, 99).toFixed(2)} | ${pct(r.latRq, 50).toFixed(2)} | ${pct(r.latRq, 99).toFixed(2)} |`);
+}
 
 if (env("GPU", "0") === "1") await gpuProbe();
 

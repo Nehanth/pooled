@@ -2160,3 +2160,57 @@ until the call is through); the fill waits for it. Same answer as the resident h
 
 Gates: `test_q38_bits` 4dc814b1 / 4f075117; 35B `test_moe` MATCH 3/3, spec == plain (Deno, and Dawn with all 40
 layers offloaded at 4 GB); `MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 test_q38_bits` 5ef77d06 / 403ae12b (= resident).
+
+## 2026-10-11: expert offload's disk reader on the room node (branch feat/room-node-disk-reader, roadmap 32 step 2), GB10
+
+`packages/room-node/expert_disk.js`: worker threads, each with its own fd per GGUF file, reading experts in ~1 MiB
+pieces into a SharedArrayBuffer ring and converting them there (engine/gguf.js convertEntry). Not wired into the engine
+yet. `tests/bench/disk_expert_bench.mjs` reads experts the way decode asks for them: per token, per layer, K distinct
+random experts at once (gate + up + down each), layer after layer, nothing cached in the reader. Cold: each file's pages
+dropped first (`dd iflag=nocache count=0`, posix_fadvise without root). Warm: the same sequence again. ~6.7 GB per pass,
+two runs each (both shown where they differ). Samsung MZALC4T0HBL1 4 TB NVMe, Node 22.23, Linux arm64, 20 cores;
+other agents were compiling and one was reading the Flash files at ~180 MB/s, so the numbers are a floor.
+
+Models: the 35B (Q4_0, 40 layers, 256 experts, K = 8, 1.75 MiB per expert, 0.57 GB per token if nothing is cached) and
+Qwen3.8-Flash-Next (bartowski Q4_0, 3 files, 48 layers, 512 experts, K = 10, 2.73 MiB per expert, 1.33 GB per token).
+
+Flash, cold, raw bytes (`raw`: readAt, no conversion) and what the engine would get (`conv`: readPart, converted and
+copied out), against today's `fs.promises` reads (`uv`: libuv's pool, 4 threads by default):
+
+| reader | in flight | GB/s | p50 / p99 ms per expert | ms per token (nothing cached) |
+|---|---|---|---|---|
+| uv, UV_THREADPOOL_SIZE 4 (today) | 4 | 1.8-2.0 | 8.2-8.8 / 15-17 | 680-730 |
+| uv, UV_THREADPOOL_SIZE 16 | 16 | 4.6-5.3 | 3.5-3.9 / 6.1-6.8 | 254-288 |
+| raw, 1 worker | 1 | 0.55-0.65 | 24-28 / 48-62 | 2070-2440 |
+| raw, 4 workers | 4 | 2.0 | 8.0-8.4 / 15-16 | 650-690 |
+| raw, 8 workers | 8 | 3.0-3.3 | 5.2-5.7 / 12-13 | 400-450 |
+| raw, 16 workers | 16 | 4.8-4.9 | 3.8 / 5.4-6.7 | 270-276 |
+| raw, 32 workers | 32 | 4.2-5.0 | 4.2-4.6 / 6.7-13 | 265-319 |
+| conv, 16 workers | 16 | 3.0 | 5.0 / 28-29 | 438-440 |
+
+The 35B, cold: raw 1.1 / 1.9 / 2.7 / 3.2-3.5 / 4.0-4.6 GB/s at 2 / 4 / 8 / 16 / 32 workers (p50 2.5-2.8 ms per expert at
+16-32), uv 1.5-1.7 at 4 threads and 4.1-4.2 at 16; conv 2.1-2.3 GB/s at 16-32 workers, 250-272 ms per token (before the
+requant split below).
+
+- **Reads in flight is what counts.** One reader at a time gets 0.6 GB/s; 16 at once get 4.9. A decode step asks for
+  K x 3 parts per layer and waits for all of them, so 16-32 workers keep the drive busy within a layer. Default
+  `POOLED_DISK_THREADS`: up to 16, one fewer than the cores.
+- **libuv with 16 threads reads as fast for raw bytes.** The pool earns its place by converting off the event loop
+  and in parallel, not by the reads: warm (page cache) reads are slower through it (6-10 GB/s raw vs 17-22 for uv) from
+  the copy out of the ring and a message per piece.
+- **Conversion is the cost, and the Q4_1 layers are most of it.** One thread converts a Flash Q4_0 part (0.88 MiB) in
+  0.4-0.8 ms, a Q4_1 down part (0.98 MiB, layers 0-5, requantized to Q8) in 18.6-19 ms (the 35B: 0.3 / 11 ms). At 16
+  workers, cold: 4.5-4.6 ms p50 per expert on Q4_0 layers, 18-19 ms (p99 49-64) on the 6 Q4_1 layers. A requantized
+  part is now split over 4 workers whatever its size (24-31 ms p50 before). A direct Q4_1 -> Q8 path without the f32
+  round trip would help both this reader and engine/expert_disk.js (PR 1, which converts on the main thread).
+- **Found on the way:** a new SharedArrayBuffer per read (the first draft's readAt) took most of the main thread and
+  got slower the longer the process ran: the second and later readers in one process read at a third of the first's
+  rate (event-loop utilization 0.25 -> 0.84, worker read times unchanged). Reads now go through the ring and are
+  copied into plain memory; three readers in a row: 4.5 / 5.0 / 4.7 GB/s.
+- Chunk size (Flash, 16 workers, cold): 256 KiB 3.2 GB/s raw, 1 MiB 4.8-4.9, 4 MiB 4.5. 1 MiB stays.
+
+Upload side, Dawn on the GB10 (`GPU=1`, one Flash expert of 2.73 MiB): `queue.writeBuffer` takes a view of a
+SharedArrayBuffer (the ring) without complaint, 4.0-4.6 GB/s, the same as from an ArrayBuffer; memcpy from the ring into a
+mapped MAP_WRITE buffer 24.5-25.8 GB/s (0.11 ms); `mapAsync(WRITE)` on a buffer whose copy was just submitted p50 0.054
+ms (p99 27 ms, the first map); 2996 expert-sized MAP_WRITE buffers (8 GiB) created mapped in 0.87 s without an error.
+Not measured yet: the RTX 5070 PC (Windows, D3D12, its SK hynix P41) and the Mac.

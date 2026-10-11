@@ -20,16 +20,17 @@
 // Reads of the same range that overlap in time share one read (in-flight dedup; nothing is kept once it is done:
 // a RAM cache of experts is step 3, T1). POOLED_DISK_THREADS sets the default pool size.
 import os from "node:os";
-import { ggmlTypeBytes, GGML_F32, GGML_F16, GGML_BF16, GGML_Q4_0 } from "../../engine/gguf.js";
+import { ggmlTypeBytes, GGML_F32, GGML_F16, GGML_BF16, GGML_Q4_0, GGML_Q8_0 } from "../../engine/gguf.js";
 
 const MiB = 2 ** 20;
 
 export function defaultDiskThreads(env = process.env) {
   const n = parseInt(env.POOLED_DISK_THREADS, 10);
   if (n > 0) return Math.min(n, 64);
-  // 8 keeps a PCIe 4 NVMe drive near its random-read peak (docs/bench-log.md, disk_expert_bench.mjs) without
-  // taking more cores than a room node can spare
-  return Math.max(1, Math.min(8, (os.availableParallelism?.() ?? os.cpus().length) - 1));
+  // 16: the GB10's NVMe drive reaches its random-read rate for decode-shaped reads at 16 reads in flight (4.9 GB/s
+  // for Flash's experts, 2.0 at 4; docs/bench-log.md, tests/bench/disk_expert_bench.mjs). The workers spend that
+  // time blocked in the kernel, not on a core; a smaller machine gets one fewer than its cores
+  return Math.max(1, Math.min(16, (os.availableParallelism?.() ?? os.cpus().length) - 1));
 }
 
 // one expert of a stacked expert tensor: where it is and what it converts to
@@ -45,13 +46,14 @@ export function expertPart(info, e) {
   return {
     shard: info.shard || 0, off: info.byteOffset + e * rows * rowBytes, len: rows * rowBytes,
     rows, cols, rowBytes, ggmlType: T, kind,
+    requant: T !== GGML_Q4_0 && T !== GGML_Q8_0,   // the slow conversion (convertEntry's requantQ8Streaming)
     qsRow: kind === "q4" ? cols / 2 : cols,   // converted bytes per row
     qsBytes: kind === "q4" ? rows * cols / 2 : rows * cols,
     scBytes: Math.ceil(nb / 2) * 4,   // f16 per block, padded to whole u32 words like convertEntry's Uint32Array
   };
 }
 
-export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkBytes = MiB, ringSlots = 32, slotBytes = 0,
+export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkBytes = MiB, ringSlots = 32, slotBytes = 4 * MiB,
   perWorker = 2, workerURL = new URL("./expert_disk_worker.js", import.meta.url) } = {}) {
   if (!paths?.length) throw new Error("expertDiskReader: paths (one local GGUF file per shard) are required");
   let workers = null, closed = false, seq = 0;
@@ -110,21 +112,25 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
   }
   // every chunk job of one request, settled; the first error after all of them are done (a chunk still running
   // would otherwise write into a slot that was handed out again)
-  async function all(ps) {
+  async function settled(ps) {
     const rs = await Promise.allSettled(ps);
     const bad = rs.find((r) => r.status === "rejected");
     if (bad) throw bad.reason;
-    for (const { value: m } of rs) { stats.readMs += m.readMs; stats.convMs += m.convMs; }
-    stats.chunks += rs.length;
+    return rs.map((r) => r.value);
+  }
+  async function all(ps) {
+    for (const m of await settled(ps)) { stats.readMs += m.readMs; stats.convMs += m.convMs; stats.chunks++; }
   }
 
-  // the staging ring: ringSlots slots of one converted expert part each, made on first use and sized for it
-  // (slotBytes, or the first part's size with room for a Q4_0 tensor's Q8 neighbours). A larger part gets a
-  // buffer of its own. A request waits for a free slot; readPart gives its slot back once it has copied out.
+  // the staging ring: ringSlots slots of slotBytes (4 MiB: a converted part of the 122B is 2.6 MB, Flash's 0.9),
+  // one SharedArrayBuffer made on first use and reused. Not a new SharedArrayBuffer per read: allocating them
+  // took most of the main thread and got slower the longer a process ran (a third reader in one process read at
+  // a third of the first one's rate; docs/bench-log.md). A part larger than a slot gets a buffer of its own. A
+  // request waits for a free slot; readPart and readAt give it back once they have copied out.
   let ring = null, free = [], slotWaiters = [];
   function slotFor(need) {
     if (!ring) {
-      const per = Math.ceil(Math.max(slotBytes, need * 2) / 4096) * 4096;
+      const per = Math.ceil(slotBytes / 4096) * 4096;
       ring = { per, sab: new SharedArrayBuffer(per * ringSlots) };
       free = Array.from({ length: ringSlots }, (_, i) => i);
     }
@@ -152,7 +158,12 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
         const slot = r.slot = await slotFor(p.qsBytes + p.scBytes);
         const scBase = slot.base + p.qsBytes;
         new Uint8Array(slot.sab, scBase, p.scBytes).fill(0, ((p.rows * p.cols) / 32) * 2);   // the padding no chunk writes
-        const per = Math.max(1, Math.floor(chunkBytes / p.rowBytes)), ps = [];
+        // rows per chunk: chunkBytes of them, and for a part requantized to Q8 (Q4_1 / Q5_0 / K-quants: ~19 ms of
+        // CPU per Flash part against ~0.5 for a Q4_0 repack) at most a quarter of the part, so its conversion runs
+        // on four workers at once
+        let per = Math.max(1, Math.floor(chunkBytes / p.rowBytes));
+        if (p.requant) per = Math.min(per, Math.ceil(p.rows / Math.min(4, threads)));
+        const ps = [];
         for (let r0 = 0; r0 < p.rows; r0 += per) {
           const rc = Math.min(per, p.rows - r0);
           ps.push(run({ shard: p.shard, off: p.off + r0 * p.rowBytes, len: rc * p.rowBytes, dst: slot.sab, dstOff: slot.base + r0 * p.qsRow,
@@ -177,19 +188,28 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
   return {
     threads,
     stats,
-    // the bytes [byteOffset, byteOffset + byteLength) of one shard, in chunkBytes pieces over the workers ->
-    // Uint8Array (on a SharedArrayBuffer of its own)
+    // the bytes [byteOffset, byteOffset + byteLength) of one shard -> a Uint8Array of its own (plain memory, not
+    // shared): through ring slots a slot at a time, each slot's bytes in chunkBytes pieces over the workers
     readAt(shard, byteOffset, byteLength) {
       const key = `raw:${shard}:${byteOffset}:${byteLength}`;
       let r = inflight.get(key);
       if (r) { stats.dedup++; return r; }
       r = (async () => {
-        const sab = new SharedArrayBuffer(byteLength), ps = [];
-        for (let o = 0; o < byteLength; o += chunkBytes)
-          ps.push(run({ shard, off: byteOffset + o, len: Math.min(chunkBytes, byteLength - o), dst: sab, dstOff: o }));
-        await all(ps);
+        const out = new Uint8Array(byteLength), per = ring?.per || Math.ceil(slotBytes / 4096) * 4096, pieces = [];
+        for (let p0 = 0; p0 < byteLength; p0 += per) pieces.push((async () => {
+          const n = Math.min(per, byteLength - p0), slot = await slotFor(n), ps = [];
+          try {
+            for (let o = 0; o < n; o += chunkBytes)
+              ps.push(run({ shard, off: byteOffset + p0 + o, len: Math.min(chunkBytes, n - o), dst: slot.sab, dstOff: slot.base + o }));
+            await all(ps);
+            const t0 = performance.now();
+            out.set(new Uint8Array(slot.sab, slot.base, n), p0);
+            stats.copyMs += performance.now() - t0;
+          } finally { freeSlot(slot); }
+        })());
+        await settled(pieces);
         stats.raw++; stats.bytes += byteLength;
-        return new Uint8Array(sab);
+        return out;
       })();
       inflight.set(key, r);
       r.then(() => inflight.delete(key), () => inflight.delete(key));
