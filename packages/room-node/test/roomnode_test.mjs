@@ -679,7 +679,7 @@ test("expert offload: a worker whose experts would park past its RAM fails the l
   const n = fakeNode({ host: false, name: "pc" });
   n.ramGB = 12; n.modelDir = fs.mkdtempSync(path.join(os.tmpdir(), "rn-off-"));
   let seen = null;
-  n.ai.dealer = "h";   // the host this node checked (room/authz.js)
+  n.ai.hostId = "h";   // the host the creator named (room/authz.js)
   // shard.js hands the offload to ExpertStore, which counts what it really parks against ramCap (engine/expert_store.js)
   n.loadShardFn = async ({ offload }) => {
     seen = offload;
