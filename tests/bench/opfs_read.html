@@ -1,0 +1,16 @@
+<!doctype html><title>OPFS read probe</title><pre id="log"></pre>
+<script type="module">
+// Random reads from OPFS (and the Cache API) at expert and n-gram-row sizes, see tests/bench/opfs_read.js.
+// Driver: node tests/bench/opfs_read.mjs. By hand: open this page, then in the console
+//   await probe.setup({ GB: 4 }); await probe.run({ size: "expert", W: 4, mode: "map" })
+// (reads straight after setup come from the page cache: see the driver for cold reads)
+import { OpfsProbe } from "./opfs_read.js";
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+try {
+  const ad = await navigator.gpu?.requestAdapter();
+  const device = ad ? await ad.requestDevice() : null;
+  window.probe = new OpfsProbe({ device, log });
+  window.INFO = { ua: navigator.userAgent, adapter: ad ? `${ad.info?.vendor} ${ad.info?.architecture}` : "none", storage: await window.probe.storage() };
+  log(JSON.stringify(window.INFO));
+} catch (e) { log("ERROR " + (e.stack || e)); window.INFO = { error: String(e) }; }
+</script>
