@@ -2160,3 +2160,68 @@ until the call is through); the fill waits for it. Same answer as the resident h
 
 Gates: `test_q38_bits` 4dc814b1 / 4f075117; 35B `test_moe` MATCH 3/3, spec == plain (Deno, and Dawn with all 40
 layers offloaded at 4 GB); `MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 test_q38_bits` 5ef77d06 / 403ae12b (= resident).
+
+## 2026-10-11: OPFS random reads in a tab at Qwen3.8-Flash-Next sizes (branch bench/opfs-read-probe), the Spark (GB10)
+
+Groundwork for roadmap/32 step 8 (the disk tier in a browser tab): how fast a tab reads random expert-sized and
+n-gram-row-sized pieces from OPFS, and what getting them to the GPU adds. `node tests/bench/opfs_read.mjs`
+(defaults: 4 GiB of test data as 16 files of 256 MiB, 384 random reads per expert run, never the same piece twice
+in a run). Sizes from the Qwen3.8-Flash-Next design note: an **expert** is 2,764,800 B (gate + up + down at Q4_0,
+one read), a **part** 921,600 B (one of the three; straight from the GGUF an expert is three such reads), a
+**row** 90 B (one n-gram row; a token needs 16). Each worker reads one piece at a time (queue depth 1); GB/s is
+over the wall time of all workers, p50 / p99 per piece. Cold: the driver drops the profile's files from the page
+cache before each run (`posix_fadvise DONTNEED`). Native: the same reads from node worker threads (`readSync`) on
+the files Chrome keeps the OPFS data in. Playwright's Chromium 131 (headless, `--enable-unsafe-webgpu`, Vulkan),
+persistent profile on the internal NVMe (Samsung MZALC4T0HBL1, ext4, read_ahead_kb 128). A model download was
+writing ~110 MB/s to the same disk during both runs.
+
+Cold, two runs:
+
+| piece | workers | OPFS read GB/s | native GB/s | OPFS p50 / p99 ms |
+|---|---|---|---|---|
+| expert 2.76 MB | 1 | 0.98 / 0.86 | 0.91 / 0.91 | 2.7 / 4.1 |
+| | 2 | 1.85 / 1.65 | 1.78 / 1.42 | 2.9 / 4.4 |
+| | 4 | 3.42 / 3.25 | 3.50 / 2.71 | 3.0 / 6.9 |
+| | 8 | 5.98 / 5.86 | 6.51 / 5.30 | 3.3 / 5.7 |
+| part 0.92 MB | 1 / 4 / 8 | 0.68 / 2.50 / 5.26 (0.70 / 2.26 / 5.12) | | 1.2 / 2.4 (1 worker) |
+| row 90 B | 1 / 4 / 8 / 16 | 4.9K / 19.8K / 38.8K / 80.2K rows/s (4.5K / 15.7K / 32.1K / 61.2K) | native 4.7K / 19.4K / 41.5K / 67.0K | 0.20 / 0.32 |
+
+- **A cold OPFS read in a worker is a native read.** Sync access handles match `readSync` at every worker count:
+  ~1 GB/s per worker for an expert at queue depth 1 (2.8 ms each), scaling to ~6 GB/s with 8 workers.
+- **Read-only handles serialize.** Chromium 131 lets several workers open one file with
+  `createSyncAccessHandle({ mode: "read-only" })`, but reads through them run one at a time across workers:
+  0.92-1.03 GB/s cold and 10-22 GB/s warm at 2, 4 or 8 workers, and rows stay at 4.4K/s with 16 workers. Ordinary
+  handles on a file per worker scale. So the tier wants files of its own per reader (per layer for experts, per
+  hash head for the n-gram table, as the design note has it), not shared files. Check on the Mac's Chrome.
+- **Three part reads cost more than one expert read**: 3 x 1.2 ms vs 2.8 ms at depth 1 (~25%), 5.3 vs 6.0 GB/s
+  with 8 workers. A repacked per-expert layout is worth that much; reading straight from the GGUF is not far off.
+- **n-gram rows: 0.2 ms each cold**, the same natively (each 90 B read pulls in a readahead window; a tab can't
+  set `POSIX_FADV_RANDOM`). With 16 workers 60-80K rows/s, so a token's 16 rows land in ~0.2-0.3 ms if each head
+  file has its own worker, and a 2048-token prefill's 32K rows in ~0.5 s: the design note's estimate holds.
+
+Getting the bytes to the GPU, cold expert reads (run 1; run 2 within ~10%):
+
+| path | 1 worker | 4 workers | 8 workers | p50 / p99 ms, 4 workers |
+|---|---|---|---|---|
+| read only | 0.98 | 3.42 | 5.98 | 3.0 / 6.9 |
+| read into a mapped MAP_WRITE ring (4 per worker), unmap, copyBufferToBuffer; device per worker | 0.93 | 3.16 | 4.23 | 3.1 / 16.9 |
+| read, `queue.writeBuffer`; device per worker | 0.61 | 2.12 | 3.16 | 3.4 / 17.7 |
+| read, transfer the ArrayBuffer to the page, page's `writeBuffer` | 0.78 | 2.03 | 2.15 | 21.6 / 39.9 |
+| Cache API: `match` + `arrayBuffer()` of an expert-sized entry (rangeFetch's read), C in flight | 0.34 | 0.71 | 0.85 | 14.0 / 27.5 |
+
+Warm (in the page cache) the same paths reach: read 12-14 GB/s with 1 worker, 37-48 with 8 (native 12-23 / 64-83);
+mapped ring 7.3-9.2 GB/s with 1 worker, 3.9-5.8 with 8 (8 devices on one GPU); writeBuffer 1.6-4.1; page
+writeBuffer 1.6-2.7; Cache API 0.4-0.8.
+- **Read straight into a mapped staging buffer in the reading worker.** It costs almost nothing over the bare
+  read up to 4 workers (3.16 vs 3.42 GB/s), unlike `writeBuffer` (an extra copy, ~2-4 GB/s even warm).
+- **Don't funnel the bytes through the page's main thread**: one `writeBuffer` thread caps everything at ~2 GB/s
+  and the queueing puts p50 at 12-40 ms. The readers need their own staging (a worker that owns the device, or
+  mapped ranges handed out by it).
+- **The Cache API is not a disk tier**: 0.3-0.85 GB/s and 6-25 ms per expert, 7x below OPFS with 8 readers, and it
+  can only return a whole entry.
+- Writing the 4 GiB test set: 4.8 GB/s (8 workers' sync handles); the Cache API put 1 GiB at 0.24 GB/s.
+- Storage: quota 2,419 GB (Chromium's 60% of the disk), `persist()` false in a headless profile with no site
+  engagement. The Mac's quota and `persist()` in a real profile are still to check (the design note needs ~100 GB).
+
+Not measured here: the Mac (instructions in the PR), queue depth above 1 per worker (sync handles have no async
+read), and one device fed by several readers' mapped ranges, which is what the engine would do.
