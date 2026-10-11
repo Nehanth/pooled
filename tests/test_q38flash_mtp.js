@@ -13,10 +13,12 @@
 //   one pass. HEAD=own drafts with the MTP file's own Q4_0 head instead of the trunk's (the default; see
 //   engine/qwen4exp_mtp.js). TOKENS=n caps the generated ids (default: the golden's). CASES=a,b picks prompts.
 //   REFILL=0: no draft-row refill after a verify. ROLLBACK=0 skips the full-pass rollback check.
+//   VERIFY=batch: verify with PR #348's batched pass (engine/qwen4exp_batch.js, when this tree has it) instead of
+//   decode steps: one pass of K + 1 columns, accept() restoring the recurrent state and the n-gram history.
 import fs from "node:fs";
 import path from "node:path";
 import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
-import { Qwen4ExpMtp, DecodeVerifier } from "../engine/qwen4exp_mtp.js";
+import { Qwen4ExpMtp, DecodeVerifier, BatchVerifier } from "../engine/qwen4exp_mtp.js";
 import { qwen4expWeights, qwen4expConfig, gpuUploadEntry } from "../engine/gguf.js";
 import { ngramConfig, NgramTable } from "../engine/ngram.js";
 import { openGGUF, gpuDevice, watchGpuErrors } from "./load_model.js";
@@ -75,6 +77,11 @@ let fail = 0;
   console.log(`MTP file: output (${m.head.kind}) vs the trunk's (${weights.head.kind}): rel L2 ${Math.sqrt(num / den).toExponential(2)}, worst row ${worst.toExponential(2)} (Q4_0 vs Q6_K of one tensor: ~1e-1)`);
 }
 weights.head.qs = weights.head.scales = null;   // on the GPU already
+let batch = null;
+if (env("VERIFY") === "batch") {
+  const { Qwen4ExpBatch } = await import("../engine/qwen4exp_batch.js");   // PR #348
+  batch = await Qwen4ExpBatch.create(eng, weights, { maxCols: 8, verifyCols: 8 });
+}
 const mtp = await Qwen4ExpMtp.create(eng, weights.mtp, { head: OWN ? weights.mtp.head : weights.head });
 weights.mtp.head.qs = weights.mtp.head.scales = weights.mtp.embed.qs = weights.mtp.embed.scales = null;
 console.log(`qwen4exp + MTP (${OWN ? "its own Q4_0 head" : "the trunk's head"}) loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
@@ -95,10 +102,10 @@ for (const [name, g] of cases) {
   sum.plainMs += plainMs; sum.plainN += N - 1;
   const diffG = plain.findIndex((x, i) => x !== g.ids[i]);
   console.log(`${name}: prompt ${g.prompt.length}, ${N} ids · plain ${((N - 1) / plainMs * 1000).toFixed(2)} tok/s · ${diffG < 0 ? "== llama.cpp" : `differs from llama.cpp at ${diffG}`}`);
-  for (const K of KS) for (const earlyStop of env("ROLLBACK") === "0" ? [true] : [true, false]) {
+  for (const K of KS) for (const earlyStop of batch || env("ROLLBACK") === "0" ? [true] : [true, false]) {
     eng.reset(); mtp.reset();
     mtp.stats = { steps: 0, drafts: 0, accepted: 0 };
-    const ver = new DecodeVerifier(eng, { maxCols: K + 1, earlyStop });
+    const ver = batch ? new BatchVerifier(eng, batch, { maxCols: K + 1 }) : new DecodeVerifier(eng, { maxCols: K + 1, earlyStop });
     r = await mtp.prefill(g.prompt);
     const spec = [r.id];
     let draftMs = 0;
@@ -112,7 +119,7 @@ for (const [name, g] of cases) {
     spec.length = N;
     const diff = spec.findIndex((x, i) => x !== plain[i]);
     const st = mtp.stats, acc = st.accepted / st.drafts, perStep = (st.accepted + st.steps) / st.steps;
-    console.log(`  K=${K} ${earlyStop ? "stop at rejection" : "full pass + rollback"}: ${diff < 0 ? "spec == plain" : `MISMATCH at ${diff}`} · accepted ${st.accepted}/${st.drafts} (${(acc * 100).toFixed(1)}%), ${perStep.toFixed(2)} tokens per verify · ${((N - 1) / ms * 1000).toFixed(2)} tok/s · drafting ${(draftMs / st.steps).toFixed(1)} ms per step (${(draftMs / st.drafts).toFixed(1)} ms per draft)`);
+    console.log(`  K=${K} ${batch ? "batched verify" : earlyStop ? "stop at rejection" : "full pass + rollback"}: ${diff < 0 ? "spec == plain" : `MISMATCH at ${diff}`} · accepted ${st.accepted}/${st.drafts} (${(acc * 100).toFixed(1)}%), ${perStep.toFixed(2)} tokens per verify · ${((N - 1) / ms * 1000).toFixed(2)} tok/s · drafting ${(draftMs / st.steps).toFixed(1)} ms per step (${(draftMs / st.drafts).toFixed(1)} ms per draft)`);
     if (diff >= 0) { fail++; console.log(`    plain ${plain.slice(Math.max(0, diff - 2), diff + 3)} spec ${spec.slice(Math.max(0, diff - 2), diff + 3)}`); }
     if (earlyStop) {
       const k = perK.get(K) || { steps: 0, drafts: 0, accepted: 0, draftMs: 0 };
