@@ -2160,3 +2160,53 @@ until the call is through); the fill waits for it. Same answer as the resident h
 
 Gates: `test_q38_bits` 4dc814b1 / 4f075117; 35B `test_moe` MATCH 3/3, spec == plain (Deno, and Dawn with all 40
 layers offloaded at 4 GB); `MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 test_q38_bits` 5ef77d06 / 403ae12b (= resident).
+
+## 2026-10-11: 3-tier expert cache simulator, 122B traces and a Flash extrapolation (branch feat/tiersim), no GPU
+
+`tests/sim/tiersim.js` (Node or Deno) replays `tests/trace_moe.js` routing traces through a per-layer VRAM pool (the
+`ExpertStore.plan()` LRU: a unit test replays random traces through the real store and gets the same hits), a global
+RAM LRU in bytes (T1; parked layers always hit), and disk, with an optional modelled router-lookahead prefetch. A cost
+model built from measured numbers (feasibility study on the 5070 PC, OPFS and Chrome uploads on the GB10, the offload
+phases above) turns that into ms per token. Decode only, batch 1, no MTP, first 32 steps not counted. It reproduces the
+measured 122B Mac + PC room (PC 15-47 parked, 26 slots) at 16.5 tok/s mid against ~17 measured. Its hit rates match the
+store's replay on the traces exactly, and the engine's 72-77% at 43 slots; at 17 slots it reads 5-10 points high (cold
+start). Run: `node tests/sim/tiersim.js <traces dir>` (~20 s).
+
+122B (real traces, modelled costs), tok/s mid [slowest trace slow costs - fastest trace fast costs]:
+
+| room | disk MB / token | tok/s |
+|---|---|---|
+| Mac alone, Chrome tab, expert cache 11 / 18 / 25 GiB (44 / 73 / 101 slots per layer) | 766 / 529 / 371 | 2.9 / 3.8 / 5.0 [1.9-6.9] |
+| Mac + PC room node, all PC experts parked (the measured room) | 0 | 16.5 [12.2-22.7] |
+| Mac + PC room node, `--ram 24`: 19 disk layers, T1 4 GiB | 164 | 9.5 [6.5-13.1] |
+| Mac + PC with the PC as a Chrome tab (36 slots, OPFS; Windows page cache 0 / 40 GiB) | 419 / 50 | 4.7 / 6.3 |
+
+Qwen3.8-Flash-Next, **EXTRAPOLATED**: the 122B traces mapped onto 512 experts / top-10 (each expert split into two
+children; q = how often a child flips: 0 keeps the 122B's locality, 0.5 halves it; quoted at q = 0.25, range over q in
+the report), Flash's byte sizes from roadmap 33:
+
+| room | pool hits | disk MB / token | tok/s mid, q = 0.25 [range] | q = 0 / 0.5 |
+|---|---|---|---|---|
+| Mac alone, tab, 11 / 18 / 25 GiB (85 / 140 / 195 slots) | 64 / 76 / 83% | 479 / 322 / 223 | 4.2 / 5.7 / 7.3 [2.9-10.0] | 4.7-8.4 / 4.0-6.7 |
+| Mac + PC room node, `--ram ~44` (31 parked + 3 disk layers) | 69% | 5 | 19.4 [14.0-26.5] | 19.9 / 19.2 |
+| Mac + PC room node, `--ram 24` (14 parked + 20 disk, T1 4 GiB) | 69% | 99 | 12.6 [8.7-17.5] | 14.0 / 12.0 |
+| Mac + PC tab (72 slots; page cache 0 / 40 GiB) | 71% | 276 / 53 | 6.5 / 8.2 | |
+
+What it says:
+- **Lookahead with a realistic predictor doesn't pay on disk-bound devices.** Top-K recall 0.74-0.82, wrong picks
+  random: Mac alone 5.7 -> 4.6. Top-2K overfetch: 1.7. On the CLI room it is +9% (12.9 -> 14.1). An oracle would give
+  Mac 8.2 and CLI 18.9. The gap is the predictor's wrong picks, so record the real predictor next to the traces
+  before building prefetch.
+- **An inclusive T1 smaller than the pool above it does nothing.** It holds what the pool holds: 0-2 GiB of T1 under
+  a 2.4-3.5 GiB disk-layer pool gains under 3%. The Mac's OS page cache likewise gives 0 hits under an 18 GiB cache.
+  Ordering T1 by pool eviction (a victim cache) is worth 0-3%.
+- **At a fixed `--ram`, T1 beats parking whole layers for decode.** 122B at `--ram 24`: 16 disk layers + 2.5 GiB T1
+  give 9.3 tok/s; 26 disk + 15 GiB T1 give 13.7. Flash `--ram 40`: 6 disk layers is the best split (18.8). A parked
+  layer spends RAM on cold experts. This holds for decode only: a prefill frame loads each disk layer's whole expert
+  set from disk (~7 s per 512-token frame for 26 layers), so it needs layer-major prefill first (roadmap 32 item 9).
+- Flash's 16 n-gram rows per token are 64 KiB of reads, 0-1.3 ms on the layer-1 device: noise next to the experts.
+
+`tests/trace_moe.js` now writes uint16 expert ids past 256 experts. uint8 would have wrapped Flash's ids above 255.
+Flash traces: once roadmap 33 PR 4 runs Flash resident on the GB10, add its path to `trace_moe.js`'s `MODEL` switch and
+record. `tiersim.js` reads 512-expert traces directly (no mapping), and those numbers replace the extrapolation above.
+Full tables, constants and caveats: the PR description.
