@@ -12,9 +12,11 @@
 //              <Q38F_DIR>/dumps; README there): layers 0..N-1 (48: and the head), every tapped tensor's relative
 //              L2 error per token, and the expert sets. Teacher-forced by default (each half layer starts from
 //              llama.cpp's residual, as tests/reference/ref_q38flash.mjs checks); FREE=1 chains our own.
-//              SEQS=s0,s1 picks sequences (default all four). TOL (default 5e-2) is the worst relative error allowed:
-//              f32 activations against llama.cpp's Q8-rounded ones put the reference itself at up to 3.3e-2 (its
-//              --act f32 numbers), and the engine also reads the Q4_1 / Q5_0 / Q6_K weights requantized to Q8.
+//              FREE=both runs both; GREEDY=1 (with LAYERS=48) runs the goldens after, on the same load.
+//              SEQS=s0,s1 picks sequences (default all four). Q38F_DUMPS=<dir> from tests/reference/q38flash_refdump.mjs
+//              compares against the JS reference (f32 activations, as the engine) instead: there TOL (default 2e-2)
+//              gates every tensor and the expert sets must equal. Against llama.cpp's Q8-rounded activations the
+//              errors compound within a half layer, so there only the argmax, n-gram rows and sizes gate.
 import fs from "node:fs";
 import path from "node:path";
 import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
@@ -57,19 +59,30 @@ const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRa
 console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""} loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s${model.cache ? "; " + model.cache.summary() : ""}`);
 
 let fail = 0;
-if (LAYERS) await perLayer(); else await greedy();
+if (LAYERS) {
+  for (const free of env("FREE") === "both" ? [false, true] : [env("FREE") === "1"]) await perLayer(free);
+  if (hasHead && env("GREEDY") === "1") await greedy();   // the same load: per-layer, then the goldens
+} else await greedy();
+if (hasHead && env("BENCH") === "1") await bench();
 if (errors.count) { console.log(`${errors.count} GPU errors`); fail++; }
 console.log(fail ? "Q38FLASH FAIL" : "Q38FLASH PASS ✓");
 Deno.exit(fail ? 1 : 0);
 
 // ---- per-layer check against the q38dump tensors
-async function perLayer() {
-  const DUMPS = env("Q38F_DUMPS", path.join(DIR, "dumps")), FREE = env("FREE") === "1", TOL = +env("TOL", 5e-2);
+async function perLayer(FREE) {
+  // free-running, small differences compound over 48 layers (the reference's own --act f32 run ends ~9e-2 off at
+  // layer 47): the gate there is the argmax, the tolerance only flags a blow-up
+  const DUMPS = env("Q38F_DUMPS", path.join(DIR, "dumps")), TOL = +env("TOL", FREE ? 2 : 2e-2);
   const seqs = (env("SEQS") || fs.readdirSync(DUMPS).filter((s) => /^s\d+$/.test(s)).sort().join(",")).split(",");
+  // a q38flash_refdump.mjs directory: the reference's tensors ("REF"), with llama.cpp's forced residuals ("LLAMA")
+  let refMode = false;
+  const forced = new Set();
   const loadDump = (dir) => {
     const out = new Map();
     for (const line of fs.readFileSync(path.join(dir, "shapes.tsv"), "utf8").trim().split("\n")) {
-      const [key, , , , , , type] = line.split("\t");
+      const [key, op, , , , , type] = line.split("\t");
+      if (op === "REF") refMode = true;
+      if (op === "LLAMA") forced.add(key);
       const b = fs.readFileSync(path.join(dir, key + (type === "i32" ? ".i32" : ".f32")));
       out.set(key, type === "i32" ? new Int32Array(b.buffer, b.byteOffset, b.length / 4) : new Float32Array(b.buffer, b.byteOffset, b.length / 4));
     }
@@ -105,6 +118,7 @@ async function perLayer() {
           if (!ref) continue;
           if (key.startsWith("ffn_moe_topk")) { const set = new Set(a); for (const e of ref) if (!set.has(e)) expertMiss++; continue; }
           if (ref.length !== a.length) { console.log(`  ${key}: size ${a.length} vs ${ref.length}`); fail++; continue; }
+          if (forced.has(key)) continue;   // llama.cpp's residual, the reference's input: not the reference's output
           note(key, rel(a, ref));
           if (key.startsWith("ffn_moe_out")) moe = a;
           if (key.startsWith("ffn_shexp_gated") && moe) {
@@ -120,15 +134,19 @@ async function perLayer() {
       console.log(`  ${s}/${c}: ${T} tokens`);
     }
   }
-  console.log(`per-layer, ${FREE ? "free-running" : "teacher-forced"}, layers 0..${nL - 1}${hasHead ? " + head" : ""}: ${compared} tensors compared`);
+  // against llama.cpp's own tensors the engine's f32 activations (vs its Q8-rounded ones) compound within a half layer
+  // and flip near-tied experts, so the tolerance is informational there (the argmax, the n-gram rows and the sizes
+  // gate); against the JS reference (q38flash_refdump.mjs) it gates: every op equal to ~1e-6 where both read the
+  // same weights, ~1e-2 where the engine reads a requantized copy, and the same expert sets
+  console.log(`per-layer vs ${refMode ? "the JS reference (f32 activations)" : "llama.cpp's tensors"}, ${FREE ? "free-running" : "teacher-forced"}, layers 0..${nL - 1}${hasHead ? " + head" : ""}: ${compared} tensors compared`);
   let bad = 0;
   for (const [k, [r, key]] of [...worst].sort((a, b) => b[1][0] - a[1][0])) {
-    const over = r > TOL;
+    const over = r > TOL && (refMode || FREE);
     if (over) bad++;
     console.log(`  ${k.padEnd(24)} worst rel ${r.toExponential(2)}  (${key})${over ? "  OVER " + TOL : ""}`);
   }
   console.log(`  expert ids not in llama.cpp's set: ${expertMiss}; n-gram rows differing: ${rowMiss}${argmaxN ? `; argmax equal ${argmaxSame}/${argmaxN}` : ""}`);
-  if (bad || rowMiss || (!FREE && expertMiss) || (argmaxN && argmaxSame !== argmaxN && !FREE)) fail++;
+  if (bad || rowMiss || (refMode && !FREE && expertMiss) || (argmaxN && argmaxSame !== argmaxN && !FREE)) fail++;
 }
 
 // ---- greedy ids vs llama.cpp
@@ -162,6 +180,41 @@ async function greedy() {
     if (!ok && !tieOk) fail++;
   }
   if (tsAll.length) console.log(`decode: ${(tsAll.reduce((a, b) => a + b) / tsAll.length).toFixed(2)} tok/s mean`);
+}
+
+// BENCH=1: decode tok/s without the logits readback (greedy ids only), and where one token's GPU time goes
+// (each part submitted alone, 20 times, timed to queue completion; frame state as after the run)
+async function bench() {
+  const tok = model.tokenizer(), N = +env("BENCH_TOKENS", 64);
+  eng.reset();
+  let r = await eng.prefillTokens(tok.encode("Write a long story about a lighthouse keeper."));
+  const t = performance.now();
+  for (let i = 1; i < N; i++) r = await eng.forwardToken(r.id);
+  console.log(`bench: decode ${((N - 1) / ((performance.now() - t) / 1000)).toFixed(2)} tok/s over ${N - 1} tokens (ids only)`);
+  const time = async (name, ops) => {
+    const reps = 20, t0 = performance.now();
+    for (let k = 0; k < reps; k++) {
+      const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+      eng._encode(pass, ops); pass.end(); device.queue.submit([enc.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+    console.log(`  ${name.padEnd(28)} ${((performance.now() - t0) / reps).toFixed(2)} ms  (${ops.length} dispatches)`);
+  };
+  const all = (f) => eng.layers.flatMap(f);
+  await time("token mixers + HC (attn half)", all((l) => l.attnOps));
+  await time("  DeltaNet halves", all((l) => (l.isQ ? [] : l.attnOps)));
+  await time("  attention halves", all((l) => (l.isQ ? l.attnOps : [])));
+  await time("MoE halves", all((l) => l.ffnOps));
+  await time("head", eng.headOps);
+  await time("whole token", [...all((l) => [...l.attnOps, ...l.ffnOps]), ...eng.headOps]);
+  // per kernel and launch shape, summed over the layers
+  const groups = new Map();
+  for (const o of [...all((l) => [...l.attnOps, ...l.ffnOps]), ...eng.headOps]) {
+    const k = `${o.pipe.label} [${o.wg.join("x")}]`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(o);
+  }
+  for (const [k, ops] of groups) await time(k, ops);
 }
 
 function gap(lg) {

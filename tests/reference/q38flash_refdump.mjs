@@ -7,7 +7,8 @@
 //   then: LAYERS=<nLayers> Q38F_DUMPS=<outDir> deno run ... tests/test_q38flash.js
 import fs from "fs"; import path from "path";
 import * as R from "./ref_q38flash.mjs";
-const [dumps, out, nL, seqArg] = process.argv.slice(2);
+// FREE=1: no forcing at all (the reference chained on its own tensors), for tests/test_q38flash.js FREE=1
+const [dumps, out, nL, seqArg] = process.argv.slice(2), FREE = process.env.FREE === "1";
 const seqs = seqArg ? seqArg.split(",") : fs.readdirSync(dumps).filter((s) => /^s\d+$/.test(s)).sort();
 const model = R.openModel();
 for (const s of seqs) {
@@ -15,9 +16,9 @@ for (const s of seqs) {
   const tap = (name, x) => {
     const k = seen.get(name) || 0; seen.set(name, k + 1);
     const key = `${name}.${k}`;
-    if (name === "hc_init" || name.startsWith("hc_combine-") || name.startsWith("l_last-")) {
+    if (!FREE && (name === "hc_init" || name.startsWith("hc_combine-") || name.startsWith("l_last-"))) {
       const r = dump.get(key);
-      if (r) { rec.push([key, Float32Array.from(r)]); return Float32Array.from(r); }   // forced: llama.cpp's
+      if (r) { rec.push([key, Float32Array.from(r), "LLAMA"]); return Float32Array.from(r); }   // forced: llama.cpp's
     }
     rec.push([key, x instanceof Int32Array ? Int32Array.from(x) : Float32Array.from(x)]);
     return null;
@@ -31,13 +32,13 @@ for (const s of seqs) {
     dump = R.loadDump(cd); seen = new Map(); rec = [];
     ref.forward(st, ids, +nL);
     const lines = [];
-    for (const [key, a] of rec) {
+    for (const [key, a, op = "REF"] of rec) {
       const i32 = a instanceof Int32Array;
       fs.writeFileSync(path.join(od, key + (i32 ? ".i32" : ".f32")), new Uint8Array(a.buffer));
-      lines.push([key, "REF", a.length, 1, 1, 1, i32 ? "i32" : "f32"].join("\t"));
+      lines.push([key, op, a.length, 1, 1, 1, i32 ? "i32" : "f32"].join("\t"));
     }
     // the residuals the engine is forced with stay llama.cpp's
-    for (const [key, a] of dump) if (/^(hc_init|hc_combine-\d+|l_last-\d+)\.\d+$/.test(key) && !rec.some(([k]) => k === key)) {
+    if (!FREE) for (const [key, a] of dump) if (/^(hc_init|hc_combine-\d+|l_last-\d+)\.\d+$/.test(key) && !rec.some(([k]) => k === key)) {
       fs.writeFileSync(path.join(od, key + ".f32"), new Uint8Array(a.buffer, a.byteOffset, a.byteLength)); lines.push([key, "LLAMA", a.length, 1, 1, 1, "f32"].join("\t"));
     }
     fs.writeFileSync(path.join(od, "shapes.tsv"), lines.join("\n") + "\n");
