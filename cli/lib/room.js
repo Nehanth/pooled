@@ -4,6 +4,7 @@
 // right HTTP response by its rid.
 import { EventEmitter } from "node:events";
 import { cleanText } from "./common.js";
+import { iceSetup, STUN } from "./relay.js";
 
 export const PREFIX = "pooled-room-";
 export const PROTOCOL = 4;          // room/transport.js PROTOCOL: the host says bye to any other
@@ -23,7 +24,6 @@ export function guardChunks(conn) {
     orig(data);
   };
 }
-const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
 
 // room/chanauth.js (proving the invite key and pass without sending them): the copy built into dist/
 // (npm run build; what the npm package ships), else the checkout's
@@ -91,10 +91,13 @@ export class Bridge extends EventEmitter {
   // legacySend: send the raw invite key or pass to a gated host from before channel-bound proofs, as
   // before. Off by default (this client waits for that host's Allow); POOLED_LEGACY_AUTH=1 turns it on,
   // which is unsafe: anyone in the middle of signaling can pose as such a host and read the key
-  constructor({ code, key = null, signal = null, name, client, log = () => {}, Peer = null, legacySend = process.env.POOLED_LEGACY_AUTH === "1" }) {
+  constructor({ code, key = null, signal = null, name, client, log = () => {}, Peer = null, legacySend = process.env.POOLED_LEGACY_AUTH === "1", relay = !Peer }) {
     super();
     this.legacySend = legacySend === true;
     this.code = code; this.signal = signal; this.name = name; this.client = client; this.log = log; this.PeerClass = Peer;
+    // relay: ask for a TURN relay (cli/lib/relay.js) for when no direct path to the host works; a caller that
+    // brings its own Peer class (the tests) gets STUN only unless it says so
+    this.relay = relay;
     this.key = key;             // the room's invite key, from its link: in without the host's Allow
     this.pass = null;           // what the host gave us once it let us in: back in after a reconnect
     this.waiting = false;       // in the host's lobby: it was asked to let us in
@@ -140,6 +143,7 @@ export class Bridge extends EventEmitter {
   // -> resolves once the host said hello with meta.api; rejects with a message for the user
   async connect() {
     const Peer = this.PeerClass || await loadPeer();
+    this.ice = this.relay ? await iceSetup({ client: this.client || "pooled-cli", log: this.log }) : { config: { iceServers: [STUN] }, relay: null, stop() {} };
     return new Promise((resolve, reject) => {
       let settled = false;
       const fail = (msg) => { if (settled) return; settled = true; clearTimeout(timer); this.destroy(); reject(new Error(msg)); };
@@ -148,7 +152,7 @@ export class Bridge extends EventEmitter {
       this.once("lobby", () => { clearTimeout(timer); timer = null; });
       // turned away before we got in (Deny, API clients off, a full lobby, an older client)
       this.once("refused", (why) => fail(`the host of room ${this.code} said: ${why}`));
-      this.peer = new Peer(undefined, { debug: 0, config: ICE, ...signalOpts(this.signal) });
+      this.peer = new Peer(undefined, { debug: 0, config: this.ice.config, ...signalOpts(this.signal) });
       this.peer.on("error", (err) => {
         if (!settled) {
           if (err.type === "peer-unavailable") fail(`no room ${this.code} (is the host page open?)`);
@@ -358,6 +362,7 @@ export class Bridge extends EventEmitter {
   destroy() {
     this.closing = true;
     clearInterval(this.knock);
+    this.ice?.stop();
     try { this.peer?.destroy(); } catch {}
   }
   // Ctrl-C: say so, so the host drops the card now instead of when ICE times out

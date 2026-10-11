@@ -98,7 +98,7 @@ Deno.test("turn api: only this site's own pages (or listed origins) may ask", ()
 Deno.test("turn api: the handler: methods, origins, not configured, success, CORS, no-store", async () => {
   eq((await handle(req("GET"), { env: CT })).status, 405, "GET: a browser always sends Origin on POST");
   eq((await handle(req("POST", "https://evil.example"), { env: CT })).status, 403);
-  eq((await handle(req("POST", null), { env: CT })).status, 403, "no Origin (a plain script) is refused too");
+  eq((await handle(req("POST", null), { env: CT })).status, 403, "no Origin and no client tag (a plain script) is refused too");
   eq((await handle(req("OPTIONS", "https://evil.example"), { env: CT })).status, 403);
   const pre = await handle(req("OPTIONS"), { env: CT });
   eq(pre.status, 204); eq(pre.headers.get("access-control-allow-origin"), "https://pooled.run");
@@ -128,4 +128,20 @@ Deno.test("turn api: per-IP rate limit", async () => {
 Deno.test("turn api: the default export is a Vercel fetch handler", async () => {
   const mod = await import("../../api/turn.mjs");
   eq(typeof mod.default.fetch, "function");
+});
+
+Deno.test("turn api: the CLI (no Origin, an X-Pooled-Client tag) gets credentials, without CORS", async () => {
+  const cli = await handle(req("POST", null, undefined, { "x-pooled-client": "pooled-cli/0.4.2" }), { env: CT, now: 1700000000 * 1000 });
+  eq(cli.status, 200);
+  eq(cli.headers.get("access-control-allow-origin"), null, "no CORS grant: a page cannot read it");
+  eq((await cli.json()).iceServers.length > 0, true);
+  eq((await handle(req("POST", null, undefined, { "x-pooled-client": "pooled-room-node" }), { env: CT })).status, 200);
+  eq((await handle(req("POST", "https://evil.example", undefined, { "x-pooled-client": "pooled-cli/0.4.2" }), { env: CT })).status, 403, "a page on another site still sends its Origin");
+  eq((await handle(req("POST", null, undefined, { "x-pooled-client": "" }), { env: CT })).status, 403);
+  eq((await handle(req("POST", null, undefined, { "x-pooled-client": "a b<script>" }), { env: CT })).status, 403, "a tag is a short token");
+  eq((await handle(req("POST", null, undefined, { "x-pooled-client": "x".repeat(65) }), { env: CT })).status, 403);
+  eq((await handle(req("OPTIONS", null, undefined, { "x-pooled-client": "pooled-cli/0.4.2" }), { env: CT })).status, 403, "no preflight for a client that is not a browser");
+  const limited = makeLimiter(1);
+  eq((await handle(req("POST", null, undefined, { "x-pooled-client": "pooled-cli" }), { env: CT, limiter: limited })).status, 200);
+  eq((await handle(req("POST", null, undefined, { "x-pooled-client": "pooled-cli" }), { env: CT, limiter: limited })).status, 429, "the per-IP limit applies to the CLI too");
 });

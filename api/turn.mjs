@@ -17,7 +17,10 @@
 // bytes cost money (Cloudflare: 1,000 GB a month free, then per GB). So:
 //   - only pages on this deployment's own origin (or TURN_ALLOWED_ORIGINS) may ask: POST only, and
 //     the browser's Origin header must match. That stops other websites from minting credentials
-//     in their visitors' browsers; it does not stop a script (it can forge headers), which is what
+//     in their visitors' browsers. The CLI (cli/lib/relay.js: pooled chat / serve / host / join) is
+//     no browser and sends no Origin: a request without one is let through when it names itself in
+//     X-Pooled-Client (a browser on another site always sends Origin on a POST, so this opens nothing
+//     to other pages). Neither stops a script (it can forge headers), which is what
 //   - the per-IP limit is for: TURN_RATE per minute per IP (default 10), per function instance.
 //     Instances are not shared, so this is a speed bump; add a Vercel Firewall rate-limit rule on
 //     /api/turn for a hard limit (docs/rooms-at-work.md).
@@ -134,14 +137,22 @@ export function makeLimiter(limit = DEFAULT_RATE, windowMs = 60000) {
 
 const clientIp = (req) => (req.headers.get("x-real-ip") || req.headers.get("x-forwarded-for") || "").split(",")[0].trim() || "?";
 
+// a non-browser Pooled client: no Origin at all, and a short client tag ("pooled-cli/0.4.2")
+export const CLIENT_HEADER = "x-pooled-client";
+export function cliClient(req) {
+  const o = req.headers.get("origin");
+  return !o && /^[a-z0-9][a-z0-9._/-]{0,63}$/i.test(req.headers.get(CLIENT_HEADER) || "");
+}
+
 export async function handle(req, { env = {}, fetchImpl = fetch, limiter = null, now = Date.now() } = {}) {
   const selfHost = new URL(req.url).host;
   const origin = req.headers.get("origin");
-  const ok = originAllowed(origin, selfHost, env);
+  const cli = cliClient(req);
+  const ok = originAllowed(origin, selfHost, env) || cli;
   const base = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", Vary: "Origin" };
-  const cors = ok ? { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Methods": "POST", "Access-Control-Max-Age": "600" } : {};
+  const cors = ok && !cli ? { "Access-Control-Allow-Origin": origin, "Access-Control-Allow-Methods": "POST", "Access-Control-Max-Age": "600" } : {};
   const json = (status, body) => new Response(body == null ? null : JSON.stringify(body), { status, headers: { ...base, ...cors, ...(body == null ? {} : { "Content-Type": "application/json" }) } });
-  if (req.method === "OPTIONS") return ok ? json(204, null) : json(403, { error: "origin not allowed" });
+  if (req.method === "OPTIONS") return ok && !cli ? json(204, null) : json(403, { error: "origin not allowed" });
   if (req.method !== "POST") return new Response(JSON.stringify({ error: "POST only" }), { status: 405, headers: { ...base, Allow: "POST, OPTIONS", "Content-Type": "application/json" } });
   if (!ok) return json(403, { error: "origin not allowed" });
   if (!providerOf(env)) return json(204, null);
