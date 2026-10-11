@@ -634,13 +634,30 @@ export function qwen4expConfig(meta) {
     if (v === undefined && required) throw new Error("qwen4exp: missing key qwen4exp." + k);
     return v;
   };
-  const all = key("block_count"), nextn = key("nextn_predict_layers", false) || 0;
+  const all = key("block_count"), nextn = key("nextn_predict_layers", false) || 0, L = all - nextn;
   const dim = key("embedding_length"), hc = key("hyper_connection.count"), hcRank = key("hyper_connection.low_rank");
-  // QSA (full attention) layers have a compress ratio (the indexer's block size); llama.cpp falls back to the
-  // interval when the file has no ratios (qwen4exp.cpp:148-156)
-  const ratios = key("attention.compress_ratios", false), interval = key("full_attention_interval", false) || 4;
-  if (ratios && ratios.length !== all) throw new Error(`qwen4exp: ${ratios.length} compress ratios for ${all} layers`);
-  const qsa = Array.from({ length: all }, (_, i) => ratios ? ratios[i] > 0 : i % interval === interval - 1);
+  // a per-layer key is one value for every layer or an array of exactly one per layer (llama.cpp get_key_or_arr)
+  const perLayer = (k, v) => {
+    if (!Array.isArray(v)) return Array(all).fill(v);
+    if (v.length !== all) throw new Error(`qwen4exp: ${v.length} ${k} for ${all} layers`);
+    return v;
+  };
+  // the layer types as llama.cpp sets them (qwen4exp.cpp:148-156): attention.recurrent_layers when the file has it,
+  // else every interval-th trunk layer is full attention (QSA), and so is every MTP block (i >= L)
+  const recurrent = key("attention.recurrent_layers", false), interval = key("full_attention_interval", false) ?? 4;
+  if (interval === 0) throw new Error("qwen4exp: full_attention_interval is 0");
+  const qsa = recurrent !== undefined ? perLayer("recurrent layer flags", recurrent).map((r) => !r)
+    : Array.from({ length: all }, (_, i) => i >= L || (i + 1) % interval === 0);
+  // the indexer pools its keys in blocks of the compress ratio, one for the whole model (qwen4exp.cpp:62-79): the
+  // QSA layers' shared ratio, 0 when the file has none
+  const topK = key("attention.indexer.top_k");
+  let block = 0;
+  for (const r of perLayer("compress ratios", key("attention.compress_ratios", false) ?? 0)) {
+    if (!r) continue;
+    if (block && r !== block) throw new Error(`qwen4exp: QSA layers must share one compress ratio, got ${block} and ${r}`);
+    block = r;
+  }
+  if (block === 1 || (block && topK % block)) throw new Error(`qwen4exp: compress ratio ${block} does not divide top_k ${topK}`);
   const ssm = { convK: key("ssm.conv_kernel"), stateSize: key("ssm.state_size"), nKHeads: key("ssm.group_count"),
     nVHeads: key("ssm.time_step_rank"), inner: key("ssm.inner_size") };
   let ple = null;
@@ -657,18 +674,20 @@ export function qwen4expConfig(meta) {
     if (nHeads * headDim !== dim) throw new Error(`qwen4exp: ${nHeads} PLE heads of ${headDim} make ${nHeads * headDim}, not ${dim}`);
     for (const l of pleLayers) if (qsa[l]) throw new Error(`qwen4exp: PLE layer ${l} is not a DeltaNet layer`);
     ple = { layers: pleLayers, ngram, headsPerNgram, nHeads, headDim, convK: key("ple.conv_kernel"),
-      eos: key("ple.eos_token_id"), image: key("ple.image_token_id", false) ?? -1,
+      eos: key("ple.eos_token_id"),
+      // files written before the key (or with 0) hash image positions as EOS (qwen4exp.cpp:1230)
+      image: key("ple.image_token_id", false) || key("ple.eos_token_id"),
       multipliers: multipliers.map(BigInt), offsets, vocab,
       rows: Math.max(...offsets.map((o, h) => o + vocab[h])) };   // the rows the heads index (the table pads past it)
   }
   return {
-    L: all - nextn, nextn, dim, hc, hcRank, hDim: hc * dim, eps: key("attention.layer_norm_rms_epsilon"),
+    L, nextn, dim, hc, hcRank, hDim: hc * dim, eps: key("attention.layer_norm_rms_epsilon"),
     nHeads: key("attention.head_count"), nKVHeads: key("attention.head_count_kv"), headDim: key("attention.key_length"),
     ropeDims: key("rope.dimension_count"), ropeTheta: key("rope.freq_base"), ropeSections: key("rope.dimension_sections"),
     qsa, ssm, nExp: key("expert_count"), K: key("expert_used_count"),
     expFF: key("expert_feed_forward_length"), shFF: key("expert_shared_feed_forward_length"),
     indexer: { nHeads: key("attention.indexer.head_count"), headDim: key("attention.indexer.key_length"),
-      topK: key("attention.indexer.top_k"), block: ratios ? Math.max(...ratios) : 4 },
+      topK, block },
     ple,
   };
 }
@@ -709,6 +728,11 @@ export function qwen4expLayerNames(i, { qsa = false, ple = false } = {}) {
 export function qwen4expNamesFor(G, i, cfg = qwen4expConfig(G.meta)) {
   return qwen4expLayerNames(i, { qsa: cfg.qsa[i], ple: !!cfg.ple?.layers.includes(i) });
 }
+// the tensor names of a layer qwen4expWeights loads (qsa: false leaves out the indexer)
+const QWEN4EXP_INDEXER = new Set(["idxQ", "idxK", "idxQNorm", "idxKNorm"]);
+function qwen4expLoadedNames(N, qsa = true) {
+  return Object.entries(N).filter(([k, v]) => typeof v === "string" && (qsa || !QWEN4EXP_INDEXER.has(k))).map(([, v]) => v);
+}
 // the head: the last HC mixer (no inject) stands in for the output norm, then the LM head
 export const QWEN4EXP_HEAD = { hcNorm: "output_hc_norm.weight", hcDown: "output_hc_down.weight", hcUp: "output_hc_up.weight" };
 // the MTP block's own tensors besides its layer (blk.<L>.nextn.*): eh_proj is [fc_embedding | fc_hidden], hnorm and
@@ -721,14 +745,15 @@ export function qwen4expMtpNames(L) {
 
 // Where the n-gram table is, for a row reader (it is never an entry: ggufEntry refuses it). Each of the ple.nHeads
 // hash heads owns rows [firstRow, firstRow + rows); a row is rowElems values of ggmlType, rowBytes long.
-// shard / url: the split file holding it (room/models.js mergeSplitHeaders). -> null for a file without one
+// shard: which split file holds it (room/models.js mergeSplitHeaders; the caller maps it to that file's URL). -> null
+// for a file without one
 export function qwen4expPleTable(G, cfg = qwen4expConfig(G.meta)) {
   const t = G.tensors[GGML_PLE_TABLE];
   if (!t || !cfg.ple) return null;
   const [rows, rowElems] = t.shape;
   if (rowElems !== cfg.ple.headDim || rows < cfg.ple.rows)
     throw new Error(`${GGML_PLE_TABLE}: ${rows} rows of ${rowElems}, the heads need ${cfg.ple.rows} of ${cfg.ple.headDim}`);
-  return { name: GGML_PLE_TABLE, shard: t.shard || 0, url: t.url, byteOffset: t.byteOffset, byteLength: t.byteLength,
+  return { name: GGML_PLE_TABLE, shard: t.shard || 0, byteOffset: t.byteOffset, byteLength: t.byteLength,
     ggmlType: t.ggmlType, rows, rowElems, rowBytes: ggmlTypeBytes(t.ggmlType, rowElems),
     heads: cfg.ple.offsets.map((firstRow, h) => ({ firstRow, rows: cfg.ple.vocab[h] })) };
 }
@@ -738,11 +763,16 @@ export function qwen4expPleTable(G, cfg = qwen4expConfig(G.meta)) {
 // normKey, normQuery, normConv, conv }) on the n-gram layer. The head is headHC ({ norm, down, up }) and head; there
 // is no finalNorm. pleTable (qwen4expPleTable) is returned with the n-gram layer, for the row reader.
 // mtp: the MTP file's parsed header, read through mtpBytesOf; loaded with the head as out.mtp = { layer, ehProj,
-// enorm, hnorm, hcHead }. ggml-org's MTP file also carries its own token_embd and output (Q4_0; the trunk's head is
+// enorm, hnorm, hcHead }. Its tensors go through ggufEntry with the MTP header's own hooks, never G's:
+// mtp.entryCache (the converted-weights cache is keyed per file, and token_embd / output exist in both files) and
+// mtp.streamEntry (G's reads G's file) are unset unless the caller sets them for the MTP file; mtp.convert defaults
+// to G.convert, which only converts bytes. ggml-org's MTP file also carries its own token_embd and output (Q4_0; the trunk's head is
 // Q6_K); llama.cpp loading that file as its own model uses them, so mtpOwnHead loads them as mtp.embed / mtp.head.
-// experts: an ExpertStore, as in qwen35Weights (its layers' routed experts are parked, not returned for upload).
+// experts: an ExpertStore, as in qwen35Weights (its layers' routed experts are parked, not returned for upload). The
+// MTP block's experts are parked too when the store has its layer (cfg.L), unlike qwen35Weights, which never parks it.
+// qsa: false skips the indexer tensors (layer.indexer = null), for the dense phase that does not run QSA.
 export async function qwen4expWeights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp = null, mtpBytesOf = null, mtpOwnHead = false,
-  experts = null }, onProgress = () => {}, onEntry = null) {
+  experts = null, qsa = true }, onProgress = () => {}, onEntry = null) {
   let fetched = 0;
   const progress = (b) => { fetched += b; onProgress(fetched); };
   const entryOf = (H, read) => async (name, optional) => {
@@ -760,7 +790,7 @@ export async function qwen4expWeights(G, bytesOf, { lo, hi, hasEmbed, hasHead, m
     if (N.isFull) {
       L.wq = await get(N.wq); L.wk = await get(N.wk); L.wv = await get(N.wv); L.wo = await get(N.wo);
       L.qNorm = await get(N.qNorm); L.kNorm = await get(N.kNorm);
-      L.indexer = await group({ q: N.idxQ, k: N.idxK, qNorm: N.idxQNorm, kNorm: N.idxKNorm });
+      L.indexer = qsa ? await group({ q: N.idxQ, k: N.idxK, qNorm: N.idxQNorm, kNorm: N.idxKNorm }) : null;
     } else {
       L.wqkv = await get(N.wqkv); L.wz = await get(N.wz);
       L.wBeta = await get(N.wBeta); L.wAlpha = await get(N.wAlpha);
@@ -794,9 +824,11 @@ export async function qwen4expWeights(G, bytesOf, { lo, hi, hasEmbed, hasHead, m
     if (!mc.nextn) throw new Error("the MTP GGUF has no nextn block");
     if (mc.dim !== cfg.dim || mc.hc !== cfg.hc || mc.nExp !== cfg.nExp || mc.L !== cfg.L)
       throw new Error("the MTP GGUF does not match the model");
-    const read = mtpBytesOf || bytesOf, get = entryOf(mtp, read), M = qwen4expMtpNames(mc.L);
+    const Hm = { meta: mtp.meta, tensors: mtp.tensors, entryCache: mtp.entryCache || null, streamEntry: mtp.streamEntry || null,
+      convert: mtp.convert || G.convert || null };
+    const read = mtpBytesOf || bytesOf, get = entryOf(Hm, read), M = qwen4expMtpNames(mc.L);
     out.mtp = {
-      layer: await loadLayer(mtp, read, qwen4expLayerNames(mc.L, { qsa: true }), mc.L, false),
+      layer: await loadLayer(Hm, read, qwen4expNamesFor(mtp, mc.L, mc), mc.L, true),
       ehProj: await get(M.ehProj), enorm: await get(M.enorm), hnorm: await get(M.hnorm),
       hcHead: { norm: await get(M.hcHeadNorm), down: await get(M.hcHeadDown), up: await get(M.hcHeadUp) },
     };
@@ -806,24 +838,26 @@ export async function qwen4expWeights(G, bytesOf, { lo, hi, hasEmbed, hasHead, m
 }
 
 // File bytes qwen4expWeights reads for a shard (progress bars, pledges). The n-gram table is never part of it.
-// mtp: the MTP file's parsed header, counted with the head as qwen4expWeights loads it.
-export function qwen4expShardBytes(G, { lo, hi, hasEmbed, hasHead, mtp = null, mtpOwnHead = false }) {
+// mtp: the MTP file's parsed header, counted with the head as qwen4expWeights loads it. qsa: false leaves out the
+// indexer, as qwen4expWeights does.
+export function qwen4expShardBytes(G, { lo, hi, hasEmbed, hasHead, mtp = null, mtpOwnHead = false, qsa = true }) {
   const cfg = qwen4expConfig(G.meta);
   let total = 0;
   const add = (n) => { if (G.tensors[n]) total += G.tensors[n].byteLength; };
-  for (let i = lo; i < hi; i++) Object.values(qwen4expNamesFor(G, i, cfg)).forEach((v) => { if (typeof v === "string") add(v); });
+  for (let i = lo; i < hi; i++) qwen4expLoadedNames(qwen4expNamesFor(G, i, cfg), qsa).forEach(add);
   if (hasEmbed || hasHead) add(GGML_EMBED);
   if (hasHead) { Object.values(QWEN4EXP_HEAD).forEach(add); add(GGML_OUTPUT); }
-  if (mtp && hasHead) total += qwen4expMtpBytes(mtp, mtpOwnHead);
+  if (mtp && hasHead) total += qwen4expMtpBytes(mtp, { ownHead: mtpOwnHead, qsa });
   return total;
 }
-// bytes of the MTP file's block (its layer and nextn tensors; ownHead: its token_embd and output too)
-export function qwen4expMtpBytes(Gm, ownHead = false) {
+// bytes of the MTP file's block (its layer and nextn tensors; ownHead: its token_embd and output too; qsa: false
+// leaves out the indexer)
+export function qwen4expMtpBytes(Gm, { ownHead = false, qsa = true } = {}) {
   const mc = qwen4expConfig(Gm.meta);
   if (!mc.nextn) return 0;
   let total = 0;
   const add = (n) => { if (Gm.tensors[n]) total += Gm.tensors[n].byteLength; };
-  Object.values(qwen4expLayerNames(mc.L, { qsa: true })).forEach((v) => { if (typeof v === "string") add(v); });
+  qwen4expLoadedNames(qwen4expNamesFor(Gm, mc.L, mc), qsa).forEach(add);
   Object.values(qwen4expMtpNames(mc.L)).forEach(add);
   if (ownHead) { add(GGML_EMBED); add(GGML_OUTPUT); }
   return total;

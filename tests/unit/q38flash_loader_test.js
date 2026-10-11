@@ -4,6 +4,8 @@
 // claim every tensor of the files exactly once, the shapes and types the engine will be written against, the byte
 // sums, and qwen4expWeights' structure with a stub conversion. No GPU, no weights.
 //   deno test --allow-read tests/unit/q38flash_loader_test.js
+// With the real files on disk, one more test checks the fixture against them (ignored otherwise):
+//   Q38FLASH_DIR=~/llm/models/q38flash deno test --allow-read --allow-env tests/unit/q38flash_loader_test.js
 import { parseGGUFHeader, qwen4expConfig, qwen4expLayerNames, qwen4expNamesFor, qwen4expMtpNames, qwen4expPleTable,
   qwen4expWeights, qwen4expShardBytes, qwen4expMtpBytes, entryByteLength, ggufEntry, QWEN4EXP_HEAD,
   GGML_EMBED, GGML_OUTPUT, GGML_PLE_TABLE, GGML_F32, GGML_F16, GGML_BF16, GGML_Q4_0, GGML_Q4_1, GGML_Q5_0, GGML_Q6_K,
@@ -29,7 +31,7 @@ function headers() {
 const LAYERS = 48, QSA = [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 43, 47];
 const range = (n) => Array.from({ length: n }, (_, i) => i);
 
-test("fixture: each header is the real file's, and its tensors fill the file to the byte", () => {
+test("fixture is self-consistent: each header parses to its stored sizes, and its tensors fill the file to the byte", () => {
   eq(FIX.files.map((f) => f.size), [39853467552, 39647284192, 21098500928, 2199652640]);
   for (const f of FIX.files) {
     const G = parse(f);
@@ -39,6 +41,27 @@ test("fixture: each header is the real file's, and its tensors fill the file to 
     ok(Object.values(G.tensors).every((t) => t.byteLength > 0), f.name + ": a type the loader can't size");
   }
 });
+
+// Q38FLASH_DIR: a folder with the four real files (the fixture's names). Unset, or no --allow-env: the test is ignored
+function realDir() {
+  try { return Deno.env.get("Q38FLASH_DIR") || null; } catch { return null; }
+}
+const REAL = realDir();
+test({ name: "fixture: matches the real files in Q38FLASH_DIR (metadata, tensor tables, sizes)", ignore: !REAL, fn: () => {
+  for (const f of FIX.files) {
+    const path = `${REAL}/${f.name}`;
+    eq(Deno.statSync(path).size, f.size, f.name + " size");
+    const fd = Deno.openSync(path), buf = new Uint8Array(f.headerBytes);
+    try { let n = 0; while (n < buf.length) { const r = fd.readSync(buf.subarray(n)); if (!r) break; n += r; } } finally { fd.close(); }
+    const real = parseGGUFHeader(buf.buffer, { skipTokenizer: true }), fix = parse(f);
+    eq([real.headerBytes, real.dataStart], [f.headerBytes, f.dataStart], f.name);
+    const meta = (G) => Object.fromEntries(Object.entries(G.meta).filter(([k]) => !k.startsWith("tokenizer.")));
+    eq(meta(fix), meta(real), f.name + " metadata");
+    eq(fix.tensors, real.tensors, f.name + " tensors");
+    // without a tokenizer to stand in for, the fixture writes the header back byte for byte
+    if (!f.omitted.length) ok(new Uint8Array(ggufFromFixture(f)).every((b, i) => b === buf[i]), f.name + " header bytes");
+  }
+} });
 
 test("header: the split model merges to its 1224 tensors; qwen4exp keys aliased under qwen35.", () => {
   const { G, Gm } = headers();
@@ -64,6 +87,7 @@ test("qwen4expConfig: the trunk", () => {
   eq(c.ssm, { convK: 4, stateSize: 128, nKHeads: 16, nVHeads: 48, inner: 6144 });
   eq([c.nExp, c.K, c.expFF, c.shFF], [512, 10, 640, 640]);
   eq(c.indexer, { nHeads: 4, headDim: 128, topK: 2048, block: 4 });
+  ok(!("qwen4exp.attention.recurrent_layers" in G.meta), "the trunk's layer types come from the interval");
   const p = c.ple;
   eq([p.layers, p.ngram, p.headsPerNgram, p.nHeads, p.headDim, p.convK, p.eos, p.image], [[1], 3, 8, 16, 160, 4, 248044, 248056]);
   eq(p.multipliers.map(String), ["23703573157769", "20109073645365", "8052911324071"]);
@@ -86,6 +110,26 @@ test("qwen4expConfig: the MTP file and bad metadata", () => {
   throws(() => qwen4expConfig({ ...G.meta, "qwen4exp.ple.layer_multipliers": [2 ** 60, 1, 1] }), "past 2^53");
   throws(() => qwen4expConfig({ ...G.meta, "qwen4exp.ple.head_offsets": [0] }), "PLE arrays");
   throws(() => qwen4expConfig({ ...G.meta, "qwen4exp.attention.compress_ratios": [0, 4] }), "2 compress ratios for 48 layers");
+  // the MTP file's layer types come from recurrent_layers (block 48 is QSA there), as llama.cpp reads them
+  eq(range(49).filter((i) => m.qsa[i]), [...QSA, 48]);
+  eq(qwen4expConfig({ ...Gm.meta, "qwen4exp.attention.recurrent_layers": Array(49).fill(true) }).qsa.some(Boolean), false);
+  throws(() => qwen4expConfig({ ...Gm.meta, "qwen4exp.attention.recurrent_layers": [true] }), "1 recurrent layer flags for 49 layers");
+  // without recurrent_layers: every interval-th trunk layer, and every MTP block
+  const { ["qwen4exp.attention.recurrent_layers"]: _r, ...noRecurrent } = Gm.meta;
+  eq(range(49).filter((i) => qwen4expConfig({ ...noRecurrent, "qwen4exp.full_attention_interval": 6 }).qsa[i]), [5, 11, 17, 23, 29, 35, 41, 47, 48]);
+  throws(() => qwen4expConfig({ ...G.meta, "qwen4exp.full_attention_interval": 0 }), "full_attention_interval is 0");
+  // the indexer block is the QSA layers' one shared ratio: 0 without ratios, a single value for every layer, mixed refused
+  const { ["qwen4exp.attention.compress_ratios"]: _c, ...noRatios } = G.meta;
+  eq(qwen4expConfig(noRatios).indexer.block, 0);
+  eq(qwen4expConfig({ ...G.meta, "qwen4exp.attention.compress_ratios": 8 }).indexer.block, 8);
+  throws(() => qwen4expConfig({ ...G.meta, "qwen4exp.attention.compress_ratios": [...Array(47).fill(0), 8].map((r, i) => i === 3 ? 4 : r) }),
+    "share one compress ratio, got 4 and 8");
+  throws(() => qwen4expConfig({ ...G.meta, "qwen4exp.attention.compress_ratios": 3 }), "compress ratio 3 does not divide top_k 2048");
+  throws(() => qwen4expConfig({ ...G.meta, "qwen4exp.attention.compress_ratios": 1 }), "compress ratio 1");
+  // an older file without image_token_id (or with 0) hashes image positions as EOS, as llama.cpp does
+  const { ["qwen4exp.ple.image_token_id"]: _i, ...noImage } = G.meta;
+  eq(qwen4expConfig(noImage).ple.image, 248044);
+  eq(qwen4expConfig({ ...G.meta, "qwen4exp.ple.image_token_id": 0 }).ple.image, 248044);
 });
 
 test("names: the layer, head, MTP and table names claim every tensor of both files exactly once", () => {
@@ -101,7 +145,7 @@ test("names: the layer, head, MTP and table names claim every tensor of both fil
   const strings = (N) => Object.values(N).filter((v) => typeof v === "string");
   claims(G, [...range(LAYERS).flatMap((i) => strings(qwen4expNamesFor(G, i))),
     GGML_EMBED, GGML_OUTPUT, ...Object.values(QWEN4EXP_HEAD), GGML_PLE_TABLE]);
-  claims(Gm, [...strings(qwen4expLayerNames(48, { qsa: true })), ...Object.values(qwen4expMtpNames(48)), GGML_EMBED, GGML_OUTPUT]);
+  claims(Gm, [...strings(qwen4expNamesFor(Gm, 48)), ...Object.values(qwen4expMtpNames(48)), GGML_EMBED, GGML_OUTPUT]);
   // per layer: 8 HC + 8 MoE + 9 DeltaNet or 6 attention + 4 indexer, + 6 PLE on layer 1
   eq(strings(qwen4expNamesFor(G, 0)).length, 25); eq(strings(qwen4expNamesFor(G, 1)).length, 31);
   eq(strings(qwen4expNamesFor(G, 3)).length, 26);
@@ -179,7 +223,7 @@ test("bytes: file sizes, the n-gram table, experts and dense weights as the engi
   const all = qwen4expShardBytes(G, { lo: 0, hi: LAYERS, hasEmbed: true, hasHead: true });
   eq(all + G.tensors[GGML_PLE_TABLE].byteLength, data);
   eq(G.tensors[GGML_PLE_TABLE].byteLength, 28800138240);   // 28.8 GB
-  eq(qwen4expMtpBytes(Gm, true) + FIX.files[3].dataStart, FIX.files[3].size);
+  eq(qwen4expMtpBytes(Gm, { ownHead: true }) + FIX.files[3].dataStart, FIX.files[3].size);
   eq(qwen4expShardBytes(G, { lo: 0, hi: 0, hasEmbed: false, hasHead: true, mtp: Gm }) - qwen4expShardBytes(G, { lo: 0, hi: 0, hasEmbed: false, hasHead: true }),
     qwen4expMtpBytes(Gm));
   // split across devices, the layer ranges add up
@@ -222,6 +266,7 @@ test("the n-gram table is never converted; qwen4expPleTable says where its rows 
   eq(read, 0);
   const P = qwen4expPleTable(G);
   eq([P.shard, P.rows, P.rowElems, P.rowBytes, P.ggmlType, P.heads.length], [0, 320001536, 160, 90, GGML_Q4_0, 16]);
+  ok(!("url" in P), "the caller maps the shard to its URL");
   eq(P.byteOffset, G.tensors[GGML_PLE_TABLE].byteOffset); eq(P.byteLength, P.rows * P.rowBytes);
   eq(P.heads[15].firstRow + P.heads[15].rows, 320001446);
   ok(P.byteOffset + P.byteLength <= FIX.files[0].size, "inside the first shard");
@@ -280,4 +325,40 @@ test("qwen4expWeights: the head and the MTP block from its own file", async () =
   // a trunk header is not an MTP file
   await qwen4expWeights(G, stubbed(G, []), { lo: 0, hi: 0, hasHead: true, mtp: G }).then(() => { throw new Error("loaded"); },
     (e) => ok(String(e).includes("no nextn block"), String(e)));
+});
+
+test("qwen4expWeights: qsa: false skips the indexer, and the byte counts leave it out too", async () => {
+  const { G, Gm } = headers();
+  const log = [], mlog = [];
+  const opts = { lo: 0, hi: LAYERS, hasEmbed: true, hasHead: true, mtp: Gm, qsa: false };
+  let progress = 0;
+  const W = await qwen4expWeights(G, stubbed(G, log), { ...opts, mtpBytesOf: stubbed(Gm, mlog) }, (n) => { progress = n; });
+  ok(![...log, ...mlog].some((n) => n.includes(".indexer.")), "an indexer tensor was read");
+  ok(W.layers[3].isFull && W.layers[3].indexer === null && W.mtp.layer.indexer === null, "indexer groups are null");
+  eq(progress, qwen4expShardBytes(G, opts));
+  const indexerBytes = (H) => Object.values(H.tensors).filter((t) => t.name.includes(".indexer.")).reduce((n, t) => n + t.byteLength, 0);
+  eq(qwen4expShardBytes(G, { ...opts, qsa: true }) - progress, indexerBytes(G) + indexerBytes(Gm));
+  eq(qwen4expMtpBytes(Gm) - qwen4expMtpBytes(Gm, { qsa: false }), indexerBytes(Gm));
+});
+
+test("qwen4expWeights: the MTP file uses its own hooks (G.convert by default), and parks its experts when the store has it", async () => {
+  const { G, Gm } = headers();
+  const cached = [], streamed = [], mlog = [];
+  G.convert = (info) => ({ name: info.name, by: "G.convert" });
+  G.entryCache = { get: async (info) => { cached.push(info.name); return null; }, put: async () => {} };
+  G.streamEntry = async (info) => { streamed.push(info.name); return null; };
+  const mread = async (info) => { mlog.push(info.name); return new Uint8Array(0); };
+  const parked = [];
+  const experts = { has: (i) => i === 48, park: (i, part, e) => { parked.push(`${i}${part}`); return { parked: e.name }; } };
+  const W = await qwen4expWeights(G, async () => new Uint8Array(0), { lo: 0, hi: 0, hasHead: true, mtp: Gm, mtpBytesOf: mread, experts });
+  ok(!cached.some((n) => n.startsWith("blk.48.")) && !streamed.some((n) => n.startsWith("blk.48.")), "G's cache or stream saw an MTP tensor");
+  eq(W.mtp.ehProj, { name: "blk.48.nextn.eh_proj.weight", by: "G.convert" });
+  eq(parked, ["48gate", "48up", "48down"]);
+  eq(W.mtp.layer.expDown, { parked: "blk.48.ffn_down_exps.weight" });
+  ok(!("convert" in Gm) && !("entryCache" in Gm), "the caller's MTP header was written to");
+  // hooks the caller sets on the MTP header are the ones used for it
+  const mcached = [];
+  Gm.entryCache = { get: async (info) => { mcached.push(info.name); return null; }, put: async () => {} };
+  await qwen4expWeights(G, async () => new Uint8Array(0), { lo: 0, hi: 0, hasHead: true, mtp: Gm, mtpBytesOf: mread });
+  ok(mcached.includes("blk.48.nextn.eh_proj.weight"), "the MTP header's own cache");
 });
