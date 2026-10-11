@@ -803,8 +803,12 @@ export async function qwen4expWeights(G, bytesOf, { lo, hi, hasEmbed, hasHead, m
     L.hcFfn = await group({ norm: N.hcFfnNorm, down: N.hcFfnDown, up: N.hcFfnUp, inject: N.hcFfnInject });
     L.router = await get(N.router);
     if (mayPark && experts && experts.has(i)) {   // offloaded: converted on the CPU, parked, never uploaded
-      for (const [k, part] of [["expGate", "gate"], ["expUp", "up"], ["expDown", "down"]])
-        L[k] = experts.park(i, part, await ggufEntry(H, read, N[k], false, progress, true), cfg.nExp);
+      for (const [k, part] of [["expGate", "gate"], ["expUp", "up"], ["expDown", "down"]]) {
+        if (experts.isDisk?.(i)) {   // a disk layer (roadmap 32's disk tier, a store that has one): read when used
+          if (!H.tensors[N[k]]) throw new Error("missing tensor " + N[k]);
+          L[k] = experts.attach(i, part, { name: N[k], ...H.tensors[N[k]] }, cfg.nExp);
+        } else L[k] = experts.park(i, part, await ggufEntry(H, read, N[k], false, progress, true), cfg.nExp);
+      }
     } else { L.expGate = await get(N.expGate); L.expUp = await get(N.expUp); L.expDown = await get(N.expDown); }
     L.shGate = await get(N.shGate); L.shUp = await get(N.shUp); L.shDown = await get(N.shDown);
     L.shRouter = await get(N.shRouter);

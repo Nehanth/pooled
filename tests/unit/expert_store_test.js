@@ -149,6 +149,26 @@ Deno.test("build: the budget sets the slots; under one token's experts it refuse
   assert(st2.P === 10, `slots ${st2.P}`);
 });
 
+Deno.test("build without a region (one-token engines, Flash): its bytes go to the pools; a batch over the pool refuses", () => {
+  const per = 3 * (32 * 64 / 2 + 32 * 64 / 16), region = 16 * per;
+  const st = new ExpertStore(fakeDevice(), { layers: [0, 1], vramBytes: region + 2 * 10 * per + 100 });
+  for (const l of [0, 1]) ["gate", "up", "down"].forEach((p, i) => st.park(l, p, entry(l, i, 16, 32, 64), 16));
+  st.build({ K: 4, region: false });
+  assert(st.region === null && st.regionBytes === 0, "no region");
+  assert(st.P === 16, `the region's bytes become slots (capped at nExp): ${st.P}`);
+  const r = st.plan(fakeEncoder(), 0, sel1([1, 2, 3, 4]), 1, 5);
+  assert(r.pool && r.remap.length === 5, "one token through the pool");
+  const st2 = new ExpertStore(fakeDevice(), { layers: [0], slots: 4 });
+  ["gate", "up", "down"].forEach((p, i) => st2.park(0, p, entry(0, i, 16, 32, 64), 16));
+  st2.build({ K: 4, region: false });
+  let threw = false;
+  try { st2.plan(fakeEncoder(), 0, new Uint32Array([1, 2, 3, 4, 0, 5, 6, 7, 8, 0]), 2, 5); } catch (e) { threw = /no region/.test(e.message); }
+  assert(threw, "8 experts over 4 slots and no region: a clear error");
+  threw = false;
+  try { st2.loadLayer(fakeEncoder(), 0); } catch (e) { threw = /without a region/.test(e.message); }
+  assert(threw, "loadLayer refuses");
+});
+
 Deno.test("park: a slice that doesn't fit what is left of a parked buffer fills it and goes on in the next, at an expert boundary", () => {
   // 5 experts of 4096 B (qs) per 16 KiB buffer: slices span buffers; no buffer is left mostly empty
   const nExp = 32, rows = 64, cols = 128, dev = fakeDevice(), st = new ExpertStore(dev, { layers: [3], slots: 6, parkBytes: 18 * 1024 });
