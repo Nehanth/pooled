@@ -9,7 +9,8 @@
 //         expert parked in mapped buffers in memory (what the same cache costs without the disk); ingest: only fill OPFS
 //   ?offload=all | lo-hi | a,b,c   the layers whose experts are on disk (default all)
 //   ?slots=N | ?offgb=G | ?mem=G   the GPU expert cache: N experts per layer, or G GiB for the pools + prefill region,
-//         or a device with G GB of memory (engine/expert_opfs.js diskCacheBytes: ~19.8 GiB on a 36 GB Mac)
+//         or engine/expert_opfs.js diskCacheBytes' bound for a device with G GiB of memory (mem=36: 19.8 GiB; on
+//         Apple a cache that big likely starves the page cache: sweep offgb=2, 4, 8 first, see the runbook)
 //   ?workers=4   OPFS reader workers;  ?ring=64 staging ring slots (0: queue.writeBuffer);  ?tokens=64 decode length
 //   ?bits=0      skip the bit-exactness fingerprint (prefill + 13 greedy steps, tests/test_q38_bits.js's)
 // window.RESULT: { mode, bits: { plain, hidden, tokens }, decode: { tps, tokens }, summary, ingest, reader }.
@@ -19,7 +20,7 @@ import { makeTokenizer, argmax } from "../../engine/engine.js";
 import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, streamEntryToGPU } from "../../engine/gguf.js";
 import { ExpertStore } from "../../engine/expert_store.js";
 import { StageRing } from "../../engine/stage_ring.js";
-import { expertLayout, ingestExperts, opfsExpertStore, OpfsExpertReader, readManifest, ingested, diskCacheBytes, EXPERT_OPFS_DIR } from "../../engine/expert_opfs.js";
+import { expertLayout, expertContentSig, ingestExperts, opfsExpertStore, OpfsExpertReader, readManifest, ingested, diskCacheBytes, EXPERT_OPFS_DIR } from "../../engine/expert_opfs.js";
 const q = new URLSearchParams(location.search), MODEL = q.get("model"), MODE = q.get("mode") || "disk";
 const N = +(q.get("tokens") || 64), W = +(q.get("workers") || 4), RING = +(q.get("ring") ?? 64);
 const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
@@ -38,19 +39,26 @@ try {
   const ov = q.get("offload") || "all";
   const layers = (ov === "all" ? Array.from({ length: L }, (_, i) => i) : ov.includes("-") ? (([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i))(ov.split("-").map(Number)) : ov.split(",").map(Number)).filter((i) => i >= 0 && i < L);
   let experts = null;
-  const vramBytes = q.has("offgb") ? +q.get("offgb") * 2 ** 30 : q.has("mem") ? diskCacheBytes({ memoryBytes: +q.get("mem") * 1e9, residentBytes: 2 * 2 ** 30 }) : 8 * 2 ** 30;
+  const vramBytes = q.has("offgb") ? +q.get("offgb") * 2 ** 30 : q.has("mem") ? diskCacheBytes({ memoryBytes: +q.get("mem") * 2 ** 30, residentBytes: 2 * 2 ** 30 }) : 8 * 2 ** 30;
   if (MODE === "parked") experts = new ExpertStore(device, { layers, slots: +(q.get("slots") || 0), vramBytes });
   else if (MODE !== "resident") {
-    const lay = expertLayout(G, layers);
+    const lay = expertLayout(G, layers, { contentSig: await expertContentSig(G, (_s, off, len) => range(off, len)) });
+    // estimate(): quota is the origin's budget; usage does not count OPFS files written through sync handles in an
+    // earlier session (8987 B here with the 17.5 GiB copy present), so it cannot say how much room is left. The copy
+    // itself must fit the quota whatever is there already, and a write past it fails resumably (the last checkpoint).
     res.storage = await navigator.storage.estimate().then((e) => ({ quota: e.quota, usage: e.usage })).catch(() => null);
     if (!ingested(await readManifest([EXPERT_OPFS_DIR, lay.key]), lay)) {
+      if (res.storage?.quota && res.storage.quota < lay.totalBytes) throw new Error(`OPFS quota ${(res.storage.quota / 2 ** 30).toFixed(1)} GiB < the copy's ${(lay.totalBytes / 2 ** 30).toFixed(1)} GiB`);
       const store = await opfsExpertStore(lay), t0 = performance.now();
-      let last = 0;
-      const r = await ingestExperts({ layout: lay, store, readAt: (_s, off, len) => range(off, len), onProgress: (p) => {
-        const t = performance.now();
-        if (t - last > 10e3) { last = t; log(`ingest: ${(p.doneBytes / 2 ** 30).toFixed(1)} / ${(p.totalBytes / 2 ** 30).toFixed(1)} GiB`); }
-      } });
-      await store.shutdown();
+      let last = 0, r;
+      // the writer worker holds exclusive read-write handles: release them even when the ingest fails (a fetch, the
+      // quota), or a retry or a reader in this page fails with NoModificationAllowed until a reload
+      try {
+        r = await ingestExperts({ layout: lay, store, readAt: (_s, off, len) => range(off, len), onProgress: (p) => {
+          const t = performance.now();
+          if (t - last > 10e3) { last = t; log(`ingest: ${(p.doneBytes / 2 ** 30).toFixed(1)} / ${(p.totalBytes / 2 ** 30).toFixed(1)} GiB`); }
+        } });
+      } finally { await store.shutdown(); }
       const s = (performance.now() - t0) / 1000;
       res.ingest = { gib: r.wroteBytes / 2 ** 30, s, gbps: r.wroteBytes / 1e9 / s, skippedGiB: r.skippedBytes / 2 ** 30, persisted: store.persisted };
       log(`ingest: ${res.ingest.gib.toFixed(2)} GiB in ${s.toFixed(0)} s (${res.ingest.gbps.toFixed(2)} GB/s), ${res.ingest.skippedGiB.toFixed(2)} GiB already there, persist() ${store.persisted}`);

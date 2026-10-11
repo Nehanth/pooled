@@ -301,7 +301,9 @@ export class ExpertStore {
     ids.forEach((e, i) => m.set(e, got[i]));
     this.stats.diskWaitMs += performance.now() - t0;
     this.stats.diskReads += ids.length;
-    this.stats.diskBytes += ids.length * OFFLOAD_PARTS.reduce((a, p) => a + expertGeometry(S.parts[p].info).expBytes, 0);
+    // bytes read from disk: the reader's own size of an expert when it has one (engine/expert_opfs.js: the 4 KiB-padded
+    // record in the engine's layout), else the GGUF's (engine/expert_disk.js reads the stacked tensors)
+    this.stats.diskBytes += ids.length * (this.reader.expertBytes?.(layer) || OFFLOAD_PARTS.reduce((a, p) => a + expertGeometry(S.parts[p].info).expBytes, 0));
     return m;
   }
   // Before plan() on a disk layer (engine _cutResolve, after the selection is read back and the cut's encoder is
@@ -384,6 +386,10 @@ export class ExpertStore {
   // is submitted and the GPU hands slots back as it finishes copying them. -> bytes put
   async _regionRing(S, ids, got) {
     const R = this.region, q = this.device.queue, ring = this.ring;
+    // the caller has submitted everything (its contract above), so the slots the last decode or verify cut sealed can
+    // map again. Without this, a ring the last cut filled has no free slot and none mapping: waitFree() gives up and
+    // the whole layer takes the writeBuffer path
+    ring.recycle();
     let staged = [], n = 0;
     const flush = () => {   // unmap what was put, then copy it (a slot is unmapped before any command uses it)
       if (!staged.length) return;

@@ -4,7 +4,7 @@
 // tests/e2e/expert_opfs.mjs in Chromium), and ExpertStore's staging ring: decode cuts through mapped slots and
 // copyBufferToBuffer put the same bytes in the same slots as the writeBuffer path.
 // No GPU, no browser.   deno test --no-check tests/unit/expert_opfs_test.js
-import { expertLayout, expertModelKey, expertPartOf, ingestExperts, ingested, OpfsExpertReader, diskCacheBytes, expertFileName } from "../../engine/expert_opfs.js";
+import { expertLayout, expertModelKey, expertContentSig, expertPartOf, ingestExperts, ingested, OpfsExpertReader, diskCacheBytes, expertFileName } from "../../engine/expert_opfs.js";
 import { expertDisk } from "../../engine/expert_disk.js";
 import { StageRing } from "../../engine/stage_ring.js";
 import { ExpertStore } from "../../engine/expert_store.js";
@@ -170,24 +170,38 @@ Deno.test("diskCacheBytes: a 36 GB Mac starts near 18-20 GB; less with a big res
 });
 
 // ---- the staging ring in ExpertStore ----
+// A device that enforces the ring's contract: no buffer is mapped again (mapAsync) while an encoder that copies from
+// it is not yet submitted, and no submit copies from a buffer that is mapped or has a map pending (WebGPU rejects
+// that submit). Encoders come from dev.createCommandEncoder() and are open until submitted.
 function fakeDevice() {
-  const bufs = [], writes = [];
-  return {
-    bufs, writes, limits: { maxBufferSize: 2 ** 31 },
+  const bufs = [], writes = [], open = new Set();
+  const dev = {
+    bufs, writes, open, limits: { maxBufferSize: 2 ** 31 },
     queue: { writeBuffer(b, off, data) { const d = new Uint8Array(data.buffer, data.byteOffset, data.byteLength); writes.push([b, off, d.byteLength]); b.bytes.set(d, off); },
-      submit(cbs) { for (const c of cbs) assert(c.copies.every(([s]) => !s.mapped), "submit with a mapped source"); } },
-    createCommandEncoder() { const e = fakeEncoder(); e.finish = () => e; return e; },
+      submit(cbs) {
+        for (const c of cbs) {
+          assert(c.copies.every(([s]) => !s.mapped && !s.pending), "submit with a mapped or mapping source");
+          open.delete(c);
+        }
+      } },
+    createCommandEncoder() { const e = fakeEncoder(); e.finish = () => e; open.add(e); return e; },
     createBuffer({ size, usage, mappedAtCreation }) {
-      const b = { size, usage, bytes: new Uint8Array(size), mapped: !!mappedAtCreation, maps: 0,
+      const b = { size, usage, bytes: new Uint8Array(size), mapped: !!mappedAtCreation, pending: false, maps: 0,
         getMappedRange() { assert(this.mapped, "getMappedRange on an unmapped buffer"); return this.bytes.buffer; },
         unmap() { assert(this.mapped, "unmap twice"); this.mapped = false; },
-        mapAsync() { assert(!this.mapped, "mapAsync on a mapped buffer"); this.maps++; return Promise.resolve().then(() => { this.mapped = true; }); },
+        mapAsync() {
+          assert(!this.mapped && !this.pending, "mapAsync on a mapped buffer");
+          assert(![...open].some((e) => e.copies.some(([src]) => src === this)), "mapAsync on a buffer an unsubmitted encoder copies from");
+          this.maps++; this.pending = true;
+          return Promise.resolve().then(() => { this.pending = false; this.mapped = true; });
+        },
         destroy() {} };
       bufs.push(b);
       return b;
     },
     pushErrorScope() {}, popErrorScope: async () => null,
   };
+  return dev;
 }
 function fakeEncoder() {
   const copies = [];
@@ -213,7 +227,8 @@ Deno.test("ring: decode cuts copy from mapped slots and give the writeBuffer pat
     const l = rnd(2), KS = 5, nCols = rnd(5) ? 1 : 3, sel = new Uint32Array(nCols * KS);
     for (let c = 0; c < nCols; c++) { const ids = []; while (ids.length < 4) { const e = rnd(rnd(3) ? 12 : 32); if (!ids.includes(e)) ids.push(e); } sel.set(ids, c * KS); }
     await st.prepare(l, sel, nCols, KS); await ref.prepare(l, sel, nCols, KS);
-    const enc = fakeEncoder(), a = st.plan(enc, l, sel, nCols, KS), b = ref.plan(fakeEncoder(), l, sel, nCols, KS);
+    const enc = dev.createCommandEncoder(), a = st.plan(enc, l, sel, nCols, KS), b = ref.plan(fakeEncoder(), l, sel, nCols, KS);
+    dev.queue.submit([enc.finish()]);   // as engine _cutResolve: the cut's encoder goes out before the next prepare()
     assert(a.pool === b.pool && (!a.pool || a.remap.every((x, i) => x === b.remap[i])), `t ${t}: same plan`);
     for (let j = 0; j < 6; j++) assert(same(st.L.get(l).pool[j].bytes, ref.L.get(l).pool[j].bytes), `t ${t}: pool slice ${j}`);
     if (!a.pool) for (let j = 0; j < 6; j++) assert(same(st.region.bufs[j].bytes, ref.region.bufs[j].bytes), `t ${t}: region`);
@@ -222,7 +237,9 @@ Deno.test("ring: decode cuts copy from mapped slots and give the writeBuffer pat
   // a 3-column verify with 12 distinct experts: over the pool, all 12 read, through the region; 6 fit the ring
   const big = Uint32Array.from([20, 21, 22, 23, 0, 24, 25, 26, 27, 0, 28, 29, 30, 31, 0]);
   await st.prepare(1, big, 3, 5); await ref.prepare(1, big, 3, 5);
-  assert(!st.plan(fakeEncoder(), 1, big, 3, 5).pool && !ref.plan(fakeEncoder(), 1, big, 3, 5).pool, "region path");
+  const encBig = dev.createCommandEncoder();
+  assert(!st.plan(encBig, 1, big, 3, 5).pool && !ref.plan(fakeEncoder(), 1, big, 3, 5).pool, "region path");
+  dev.queue.submit([encBig.finish()]);
   for (let j = 0; j < 6; j++) assert(same(st.region.bufs[j].bytes, ref.region.bufs[j].bytes), "region bytes with an overflowing ring");
   const rs = st.ring.stats;
   assert(rs.puts > 0 && rs.puts === st.stats.diskReads - rs.full, `ring: ${JSON.stringify(rs)} of ${st.stats.diskReads} reads`);
@@ -259,4 +276,60 @@ Deno.test("ring: slots cycle free -> filled -> sealed -> mapping -> free, never 
   let threw = false;
   try { ring.put([new Uint8Array(65)]); } catch { threw = true; }
   assert(threw, "an expert bigger than a slot throws");
+});
+
+Deno.test("ring: a prefill layer load right after a cut that filled the ring still goes through the ring", async () => {
+  const { st, dev } = diskStore(4), { st: ref } = diskStore(0);
+  // a decode cut with 4 misses: every slot is sealed, its copies submitted, none mapped again yet
+  const sel = Uint32Array.from([3, 9, 17, 25, 0]);
+  await st.prepare(1, sel, 1, 5); await ref.prepare(1, sel, 1, 5);
+  const enc = dev.createCommandEncoder();
+  st.plan(enc, 1, sel, 1, 5); ref.plan(fakeEncoder(), 1, sel, 1, 5);
+  dev.queue.submit([enc.finish()]);
+  assert(st.ring.slots.every((x) => x.state === "sealed") && dev.writes.length === 0, "the cut filled the ring");
+  await st.loadLayerAsync(0, 7); await ref.loadLayerAsync(0, 7);
+  for (let j = 0; j < 6; j++) assert(same(st.region.bufs[j].bytes, ref.region.bufs[j].bytes), `region slice ${j}`);
+  assert(dev.writes.length === 0 && st.ring.stats.full > 0, `the layer waited for slots instead of writeBuffer: ${dev.writes.length} writes, ${JSON.stringify(st.ring.stats)}`);
+});
+
+Deno.test("ring: the fake device catches a slot mapped again under an unsubmitted encoder", async () => {
+  const dev = fakeDevice(), ring = new StageRing(dev, { slotBytes: 64, slots: 2 }), dst = dev.createBuffer({ size: 64 });
+  const a = ring.put([new Uint8Array(64).fill(7)]);
+  ring.seal();
+  const enc = dev.createCommandEncoder();
+  enc.copyBufferToBuffer(a.buf, 0, dst, 0, 64);
+  let threw = null;
+  try { ring.recycle(); } catch (e) { threw = e; }
+  assert(threw && /unsubmitted encoder/.test(threw.message), `recycle before submit: ${threw}`);
+  const dev2 = fakeDevice(), ring2 = new StageRing(dev2, { slotBytes: 64, slots: 2 }), dst2 = dev2.createBuffer({ size: 64 });
+  const b = ring2.put([new Uint8Array(64)]);
+  ring2.seal();
+  const enc2 = dev2.createCommandEncoder();
+  enc2.copyBufferToBuffer(b.buf, 0, dst2, 0, 64);
+  dev2.queue.submit([enc2.finish()]);
+  ring2.recycle();   // after the submit: fine
+  await Promise.resolve(); await Promise.resolve();
+  assert(ring2.put([new Uint8Array(4)]) !== null, "mapped again after the submit");
+});
+
+Deno.test("content signature: same layout, other weights -> another key; the OPFS reader counts record bytes", async () => {
+  const m = synthModel(), m2 = synthModel();
+  const t = m2.G.tensors["blk.2.ffn_down_exps.weight"];
+  m2.file[t.byteOffset + t.byteLength - 5] ^= 0xff;   // a fix in the last expert of the last tensor, same offsets
+  const s1 = await expertContentSig(m.G, m.readAt), s2 = await expertContentSig(m2.G, m2.readAt);
+  assert(/^[0-9a-f]{8}$/.test(s1) && s1 === await expertContentSig(synthModel().G, synthModel().readAt), `stable: ${s1}`);
+  assert(s1 !== s2, "other weights, other signature");
+  assert(expertModelKey(m.G) === expertModelKey(m2.G), "the layout alone cannot tell them apart");
+  const k1 = expertLayout(m.G, [0], { contentSig: s1 }).key, k2 = expertLayout(m2.G, [0], { contentSig: s2 }).key;
+  assert(k1 !== k2 && k1.startsWith(expertModelKey(m.G)) && k1.endsWith(s1), `keys ${k1} ${k2}`);
+  // ExpertStore's diskBytes counts what the reader reads (a 4 KiB-padded record), not the GGUF's bytes
+  const lay = expertLayout(m.G, [0, 1, 2]), st = memStore();
+  await ingestExperts({ layout: lay, readAt: m.readAt, store: st });
+  const files = new Map([0, 1, 2].map((l) => [lay.layers[l].file, st.bytes(l)]));
+  const R = new OpfsExpertReader(lay, fakeRpc(files, 2), [0, 1, 2].map((l) => lay.layers[l].file), true);
+  const es = new ExpertStore(fakeDevice(), { layers: [1], slots: 4, disk: { layers: [1], reader: R } });
+  for (const p of ["gate", "up", "down"]) es.attach(1, p, { name: `blk.1.ffn_${p}_exps.weight`, ...m.G.tensors[`blk.1.ffn_${p}_exps.weight`] }, 8);
+  es.build({ K: 2 });
+  await es.prepare(1, Uint32Array.from([2, 5, 0]), 1, 3);
+  assert(es.stats.diskReads === 2 && es.stats.diskBytes === 2 * lay.layers[1].recBytes && es.stats.diskBytes === R.stats.bytes, `diskBytes ${es.stats.diskBytes} vs ${R.stats.bytes}`);
 });

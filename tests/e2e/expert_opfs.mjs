@@ -43,7 +43,9 @@ async function pageBody({ G, workers }, res) {
   const check = (name, ok, detail = "") => { results.push(ok); out.push(`${ok ? "PASS" : "FAIL"} ${name}${detail ? "  " + detail : ""}`); };
   const same = (a, b) => a.byteLength === b.byteLength && a.every((v, i) => v === b[i]);
   const readAt = async (_s, o, n) => new Uint8Array(await (await fetch("/__shard.gguf", { headers: { Range: `bytes=${o}-${o + n - 1}` } })).arrayBuffer());
-  const layers = [0, 1, 2, 3], lay = X.expertLayout(G, layers);
+  // as a tab does it: the key carries a content signature of the experts, read over HTTP ranges
+  const sig = await X.expertContentSig(G, readAt), layers = [0, 1, 2, 3], lay = X.expertLayout(G, layers, { contentSig: sig });
+  check("the model key carries the content signature", lay.key === `${X.expertModelKey(G)}-${sig}` && /^[0-9a-f]{8}$/.test(sig), lay.key);
   await X.removeExperts(lay.key);
   // 1. ingest, with a failure in layer 2, then a resume
   let store = await X.opfsExpertStore(lay), reads = 0, err = null;

@@ -13,11 +13,13 @@
 //   1. npm ci; node tests/bench/serve.mjs . 8793      (the model at models/..., or any path under the repo)
 //   2. open http://127.0.0.1:8793/tests/bench/tab_disk.html?model=/models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf&mode=ingest
 //      in a normal (not incognito: incognito OPFS lives in RAM) Chrome window, once: copies the experts into OPFS
-//   3. the same URL with mode=disk&mem=36 (the default cache for a 36 GB Mac, ~19.8 GiB), then offgb=4, 8, 12, 18
-//      (a sweep: Apple's wired GPU memory starves the page cache that serves the reads), each with &ring=0 too
+//   3. the same URL with mode=disk&offgb=2, then offgb=4, 8, 12, 18 and last mem=36 (diskCacheBytes' bound for a
+//      36 GiB Mac, 19.8 GiB), each with &ring=0 too. Small first: Apple's wired GPU memory takes from the page cache
+//      that serves the reads (flash-moe: 1.99 tok/s with a 21 GB Metal cache, 5.74 with none), so the best cache may
+//      be the smallest. Stop growing it when decode tok/s falls.
 //   4. mode=resident for the reference fingerprint (BITS line) when the model fits; else compare with this script's
 //      run on the Spark: the fingerprint is the same on any device whose kernels give the same bits
-// Or the whole thing from a terminal: CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" COLD=0 node tests/bench/tab_disk.mjs
+// Or the whole thing from a terminal: CHROME_BIN="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" COLD=0 RUNS="disk?offgb=2,disk?offgb=4,disk?offgb=8,disk?mem=36,resident" node tests/bench/tab_disk.mjs
 import { chromium } from "playwright"; import { spawn, spawnSync } from "node:child_process"; import fs from "node:fs"; import os from "node:os"; import path from "node:path";
 const env = (k, d) => process.env[k] ?? d;
 const root = new URL("../..", import.meta.url).pathname, PORT = env("PORT", "8793");

@@ -2389,8 +2389,9 @@ p50 17.7-19.7 ms (p99 35-40).
 
 `node tests/bench/tab_disk.mjs` (tests/bench/tab_disk.html): Qwen3.6-35B-A3B Q4_0 in headless Chrome (Playwright's
 Chromium, `--enable-unsafe-webgpu`, Vulkan), every one of the 40 layers' routed experts in the tab's OPFS
-(`engine/expert_opfs.js`: one file per layer, one 4 KiB-aligned 1.77 MB record per expert, already in the engine's
-layout), read by 4 workers with read-only shared sync handles into the ExpertStore pools through a 64-slot mapped
+(`engine/expert_opfs.js`: one file per layer, one 4 KiB-aligned record per expert, already in the engine's
+layout; records vary by layer: 1.77 MiB per read on average in these runs, 2.19 MiB for the largest layer, which sizes
+the ring's slots), read by 4 workers with read-only shared sync handles into the ExpertStore pools through a 64-slot mapped
 staging ring (`engine/stage_ring.js`). Persistent profile on the internal NVMe; the profile's files are dropped from the
 page cache before each disk run (cold). Other agents were using the GPU, CPU and disk during these runs: the
 tok/s below moved by up to ~30% between identical runs. Decode: 64 greedy tokens after each of two chat prompts.
@@ -2400,6 +2401,11 @@ tok/s below moved by up to ~30% between identical runs. Decode: 64 greedy tokens
   and for the resident model, same tokens.
 - **Ingest** (GGUF over HTTP ranges from tests/bench/serve.mjs -> convert -> a worker's sync handle): 17.5 GiB in 109 s
   (0.17 GB/s), resumable at 256 MiB checkpoints. `persist()` false in a headless profile; quota 2.4 TB.
+  `navigator.storage.estimate()` reported usage 8987 B in a later session with the 17.5 GiB copy present: usage does
+  not count OPFS files written through sync handles in an earlier session, so it cannot gate a ~100 GB Flash ingest
+  (the page checks the copy's size against the quota instead).
+- **Bytes read.** The summary's "MiB from the file" counted the GGUF's bytes per expert in these runs (48644 MiB in one
+  run, where the reader read 53.1 GB = 49.4 GiB of padded records); it now counts the reader's record bytes.
 
 | run | cache | hits | expert reads / token | OPFS wait / token | decode tok/s |
 |---|---|---|---|---|---|
@@ -2413,10 +2419,12 @@ tok/s below moved by up to ~30% between identical runs. Decode: 64 greedy tokens
 | disk, + striped lone misses (ring 32 / 64 / off) | 128 / layer | 89-94% | 19-34 | 31-59 ms | 4.15-6.05 (ring off 4.50 / 5.77) |
 
 - **The ceiling is the cut, not the disk.** Every offloaded layer reads its selection back to the CPU once per token
-  (engine `_cutResolve`). In Chrome on the GB10 that costs ~2.9 ms per cut (parked: 8.5 tok/s with 40 offloaded
-  layers whatever the hit rate, vs 0.4 ms per cut in Dawn on the 5070), so 40 offloaded layers cap a tab at ~8.5 tok/s
-  before any read. A tab should offload as few layers as its memory allows (room/plan.js already picks the fewest).
-- **A lone miss is latency-bound.** At 94% hits a cut has ~0.5 misses: one 1.77 MB read at queue depth 1 is ~2-3 ms
+  (engine `_cutResolve`). In Chrome on the GB10, parked runs at 8.5 tok/s with 40 offloaded layers whatever the hit
+  rate: 118 ms per token, ~2.9 ms per offloaded layer including that layer's GPU work (resident: ~17 ms per token for
+  all of it). So 40 offloaded layers cap a tab at ~8.5 tok/s before any read. Not measured in Chrome on the 5070; Node
+  + Dawn there resolved 40 cuts in 16.5 ms per token, also including the GPU work (~0.4 ms per cut, of which JS ~0.19
+  ms; this log, 2026-10-02, expert offload phase 2a). A tab should offload as few layers as its memory allows (room/plan.js already picks the fewest).
+- **A lone miss is latency-bound.** At 94% hits a cut has ~0.5 misses: one ~1.8 MiB read at queue depth 1 is ~2-3 ms
   cold. Striping a cut's records over the idle workers (`stripeBytes`, 256 KiB minimum stripe) cut the OPFS wait from
   77-102 to 31-59 ms per token (+27-36% tok/s).
 - **The ring matters for prefill, little for decode.** The mapped ring plus reading the next run of a layer while the
@@ -2425,5 +2433,6 @@ tok/s below moved by up to ~30% between identical runs. Decode: 64 greedy tokens
   at 16 slots the ring gave +13-27% before striping.
 - Prefill on disk layers re-reads every expert of every layer per wide pass (roadmap/32 item 9, layer-major prefill).
 
-Not measured here: the Mac (runbook in tests/bench/tab_disk.mjs), cache sizes near the Mac default (~19.8 GiB), a model
+Not measured here: the Mac (runbook in tests/bench/tab_disk.mjs: a cache sweep from 2 GiB up to diskCacheBytes' 19.8
+GiB bound for 36 GiB), a model
 whose experts do not fit memory (the 122B, Flash), and a warm page cache.

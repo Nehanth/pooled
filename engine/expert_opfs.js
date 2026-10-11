@@ -45,19 +45,37 @@ const fnv = (s) => { let x = 0x811c9dc5; for (let i = 0; i < s.length; i++) x = 
 // ------------------------------------------------------------------ layout
 
 // The model's identity for the OPFS copy: general.name plus a hash of where and what every stacked expert tensor is
-// (another quant or another revision of the file gets another directory, never a stale copy).
-export function expertModelKey(G) {
-  const sig = Object.keys(G.tensors).filter((n) => NAME_RE.test(n)).sort()
-    .map((n) => { const t = G.tensors[n]; return `${n}:${t.ggmlType}:${t.shape.join("x")}:${t.shard || 0}:${t.byteOffset}`; }).join(";");
+// (another quant or another layout of the file gets another directory) and, when given, contentSig
+// (expertContentSig: a few bytes of each expert tensor, so a re-upload with the same layout but other weights gets
+// another directory too, never a stale copy).
+const expertNames = (G) => Object.keys(G.tensors).filter((n) => NAME_RE.test(n)).sort();
+export function expertModelKey(G, contentSig = "") {
+  const sig = expertNames(G).map((n) => { const t = G.tensors[n]; return `${n}:${t.ggmlType}:${t.shape.join("x")}:${t.shard || 0}:${t.byteOffset}`; }).join(";");
   if (!sig) throw new Error("expert OPFS: the model has no stacked expert tensors");
   const name = String(G.meta?.["general.name"] || G.meta?.["general.architecture"] || "model").replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 48);
-  return `${name}-${fnv(sig)}`;
+  return `${name}-${fnv(sig)}` + (contentSig ? `-${contentSig}` : "");
 }
 
-// G: a parsed (or merged split) GGUF header; layers: GGUF block indices (the trunk's layer indices).
+// A cheap content signature of the experts: FNV-1a over the first and last `bytes` of every stacked expert tensor (all
+// layers, read in parallel: 6 small reads per layer). Callers that make or open an OPFS copy pass it to expertLayout,
+// so fixed weights at the same offsets do not reuse the old copy. readAt(shard, byteOffset, byteLength) as for ingest.
+export async function expertContentSig(G, readAt, { bytes = 4096 } = {}) {
+  const names = expertNames(G);
+  if (!names.length) throw new Error("expert OPFS: the model has no stacked expert tensors");
+  const reads = await Promise.all(names.flatMap((n) => {
+    const t = G.tensors[n], k = Math.min(bytes, t.byteLength);
+    return [readAt(t.shard || 0, t.byteOffset, k), readAt(t.shard || 0, t.byteOffset + t.byteLength - k, k)];
+  }));
+  let x = 0x811c9dc5;
+  for (const b of reads) for (let i = 0; i < b.length; i++) x = Math.imul(x ^ b[i], 0x01000193) >>> 0;
+  return x.toString(16).padStart(8, "0");
+}
+
+// G: a parsed (or merged split) GGUF header; layers: GGUF block indices (the trunk's layer indices);
 // -> { version, key, layers: { [l]: { file, nExp, recBytes, slices[6], offs[6], parts: { gate|up|down: info } } }, totalBytes }
-export function expertLayout(G, layers) {
-  const out = { version: EXPERT_OPFS_VERSION, key: expertModelKey(G), layers: {}, totalBytes: 0 };
+// contentSig: expertContentSig(G, readAt) (a tab should always pass it; tests on synthetic headers may not)
+export function expertLayout(G, layers, { contentSig = "" } = {}) {
+  const out = { version: EXPERT_OPFS_VERSION, key: expertModelKey(G, contentSig), layers: {}, totalBytes: 0 };
   for (const l of layers) {
     const parts = {}, slices = [];
     let nExp = 0;
@@ -343,6 +361,8 @@ export class OpfsExpertReader {
     return r;
   }
   get workers() { return this.rpc.ws.length; }
+  // what one expert read costs on disk: its whole record (ExpertStore's diskBytes counts this, not the GGUF's bytes)
+  expertBytes(layer) { return this.layout.layers[layer]?.recBytes ?? 0; }
   _record(layer, e) {
     const k = layer * 2 ** 20 + e;
     let p = this.inflight.get(k);
@@ -406,9 +426,11 @@ export class OpfsExpertReader {
 // The expert cache's GPU budget on a unified-memory device in disk mode (a Mac, the GB10): the pools and the prefill
 // region come out of the same memory the OS page cache serves the OPFS reads from, and on Apple silicon Metal buffers
 // are wired (flash-moe: a 21 GB Metal LRU ran at 1.99 tok/s, no cache at 5.74, because the reads lost the page
-// cache). So the default leaves room: at most `frac` of memory, and the Metal working set (~75% of memory) less the
-// resident weights and `headroomBytes`. A knob, not an answer: sweep it on the Mac (the runbook in the PR).
-//   memoryBytes: the device's memory (a tab cannot read it: navigator.deviceMemory caps at 8; the page asks)
+// cache). So this is an upper bound, not a default: at most `frac` of memory, and the Metal working set (~75% of
+// memory) less the resident weights and `headroomBytes`. Nothing calls it by default; the Mac runbook
+// (tests/bench/tab_disk.mjs) sweeps the cache up from 2 GiB and treats this bound as one point of the sweep.
+//   memoryBytes: the device's memory in bytes (a "36 GB" Mac has 36 GiB; a tab cannot read it: navigator.deviceMemory
+//   caps at 8, so the page asks). -> bytes (36 GiB, 2 GiB resident: 19.8 GiB)
 export function diskCacheBytes({ memoryBytes, residentBytes = 0, frac = 0.55, headroomBytes = 2 * 2 ** 30 }) {
   if (!(memoryBytes > 0)) throw new Error("diskCacheBytes: memoryBytes is required");
   return Math.max(0, Math.floor(Math.min(frac * memoryBytes, 0.75 * memoryBytes - residentBytes - headroomBytes)));
