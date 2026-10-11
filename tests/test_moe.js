@@ -22,7 +22,7 @@ const L = trunkLayers(G);
 const tok = model.tokenizer();
 let t0 = performance.now();
 // OFFLOAD=lo-hi | all [OFFLOAD_GB=8 | OFFLOAD_SLOTS=N]: those layers' routed experts parked off the GPU's resident weights (expert offload)
-const experts = offloadFromEnv(device, L);
+const experts = offloadFromEnv(device, L, model);
 const weights = BIG ? await streamWeights(model, device, { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp, experts }, (i) => { if (i % 8 === 7) console.log(`  layer ${i + 1}/${L} on the GPU, ${((performance.now() - t0) / 1000).toFixed(0)} s`); })
   : await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp, experts });
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,

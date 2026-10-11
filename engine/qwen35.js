@@ -1737,6 +1737,12 @@ export class Qwen35Engine {
     try { await st.mapAsync(GPUMapMode.READ, 0, bytes); } finally { this._gateDone(); }
     const sel = new Uint32Array(st.getMappedRange(0, bytes)).slice();
     st.unmap();
+    // a disk layer (engine/expert_store.js): read the experts plan() will put, before it plans (the cut's encoder is
+    // submitted, so plan()'s writeBuffers land after it and before e2)
+    if (this.experts.isDisk(c.L.offLayer)) {
+      this._gateOpen();
+      try { await this.experts.prepare(c.L.offLayer, sel, c.nCols, KS); } finally { this._gateDone(); }
+    }
     const e2 = this.device.createCommandEncoder();
     const r = this.experts.plan(e2, c.L.offLayer, sel, c.nCols, KS);
     if (r.pool) q.writeBuffer(c.M ? this.B.offSel : this.offSel, 0, r.remap);   // lands before e2's kernels (queue order)
@@ -1760,7 +1766,10 @@ export class Qwen35Engine {
   // distinct experts it chose. -> the encoder to continue in
   async _regionLoad(enc, L, selBuf, W) {
     const { K, KS, nExp } = this.moe, st = this.experts;
-    if (W * K >= nExp) { st.loadLayer(enc, L.offLayer); return enc; }
+    if (W * K >= nExp) {
+      if (!st.isDisk(L.offLayer)) { st.loadLayer(enc, L.offLayer); return enc; }
+      return this._regionLoadDisk(enc, L.offLayer);
+    }
     const bytes = W * KS * 4, q = this.device.queue;
     if (!this._offStageG || this._offStageG.size < bytes) { this._offStageG?.destroy(); this._offStageG = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); }
     const sg = this._offStageG;
@@ -1770,9 +1779,24 @@ export class Qwen35Engine {
     try { await sg.mapAsync(GPUMapMode.READ, 0, bytes); } finally { this._gateDone(); }
     const sel = new Uint32Array(sg.getMappedRange(0, bytes)).slice();
     sg.unmap();
+    if (st.isDisk(L.offLayer)) {   // read after the submit above: the writeBuffers land before the next encoder
+      this._gateOpen();
+      try { await st.loadExpertsAsync(L.offLayer, sel, W, KS); } finally { this._gateDone(); }
+      return this.device.createCommandEncoder();
+    }
     const e2 = this.device.createCommandEncoder();
     st.loadExperts(e2, L.offLayer, sel, W, KS);
     return e2;
+  }
+  // A disk layer's whole expert set into the region: submit what was encoded (it may still read the region), then
+  // read the layer and write it in queue order. -> a fresh encoder. A no-op when the region already holds it.
+  async _regionLoadDisk(enc, layer) {
+    const st = this.experts;
+    if (st.region.layer === layer) return enc;
+    this.device.queue.submit([enc.finish()]);
+    this._gateOpen();
+    try { await st.loadLayerAsync(layer); } finally { this._gateDone(); }
+    return this.device.createCommandEncoder();
   }
   // Debug / test hook: run only layer i's FFN block on a given residual x (one token).
   async ffnOnly(i, xIn) {
@@ -2798,6 +2822,10 @@ export class Qwen35Engine {
     let enc = this.device.createCommandEncoder();
     for (let l = 0; l < this.layers.length; l++) {
       if (l && l % WIDE_SUBMIT_LAYERS === 0) { q.submit([enc.finish()]); enc = this.device.createCommandEncoder(); }
+      // a disk layer's experts into the region first (_encodeLayerWide's loadLayer is then a no-op): the read is async,
+      // and a writeBuffer inside this encoder would land before the earlier layers' kernels in it ran
+      const Lw = this.layers[l];
+      if (Lw.off && this.experts.isDisk(Lw.offLayer)) enc = await this._regionLoadDisk(enc, Lw.offLayer);
       this._encodeLayerWide(enc, l, basePos, w);
     }
     enc.copyBufferToBuffer(Wx.buf, (w - 1) * Wx.stride, this.x, 0, this.dims.dim * 4);

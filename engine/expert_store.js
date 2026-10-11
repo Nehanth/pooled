@@ -23,6 +23,18 @@
 //
 // Per-layer LRU partitions are within 0.6 pt of a global LRU on the traces (feasibility study, q122/traces), so
 // each layer gets the same slot count: P = (vramBytes - region) / (sum over offloaded layers of one expert's bytes).
+//
+// Disk layers (option disk: { layers, reader }; roadmap/32-ssd-expert-offload.md): offloaded layers whose experts are
+// never parked. The loader attaches each part's tensor entry (where its experts are in the GGUF) instead, and an expert
+// is read from the file and converted when a cut or a frame needs it (engine/expert_disk.js reader.readPart). The
+// pool, the region and the kernels are the same; only the source of a copy changes: queue.writeBuffer of the read
+// bytes instead of copyBufferToBuffer from a parked buffer. A read is async, so the engine awaits the store before it
+// plans (prepare(), before plan() at a cut) and fills the region with loadLayerAsync / loadExpertsAsync, each only
+// after it has submitted every encoder that uses the region: a writeBuffer lands at once in queue order, so issued in
+// the middle of an unsubmitted encoder it would land before that encoder's earlier kernels ran. Same bytes in the same
+// slots: a disk layer gives the parked layer's bits.
+import { expertGeometry } from "./expert_disk.js";
+
 const MAP_PARK = () => GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC;
 const POOL_USAGE = () => GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 export const OFFLOAD_PARTS = ["gate", "up", "down"];
@@ -34,9 +46,15 @@ export class ExpertStore {
   // past it throws, so the load fails instead of the device coming online over what it lends. expectBytes: what the
   // whole store will park (room/plan.js offloadPlan ramBytes), so the last buffer is sized to what is left instead of
   // a whole parkBytes.
-  constructor(device, { layers = [], vramBytes = 8 * 2 ** 30, slots = 0, parkBytes = 2 ** 30, ramBytes = Infinity, expectBytes = 0 } = {}) {
+  // disk: { layers, reader } (reader: engine/expert_disk.js expertDisk()): of the offloaded layers, those whose experts
+  // stay in the file
+  constructor(device, { layers = [], vramBytes = 8 * 2 ** 30, slots = 0, parkBytes = 2 ** 30, ramBytes = Infinity, expectBytes = 0, disk = null } = {}) {
     this.device = device;
     this.layerSet = new Set(layers);
+    this.diskSet = new Set((disk?.layers || []).filter((l) => this.layerSet.has(l)));
+    this.reader = disk?.reader || null;
+    if (this.diskSet.size && !this.reader) throw new Error("ExpertStore: disk layers need a reader (engine/expert_disk.js)");
+    this._staged = null;
     this.vramBytes = vramBytes; this.slotsOpt = slots;
     this.parkBytes = Math.min(parkBytes, device.limits?.maxBufferSize ?? parkBytes);
     this.L = new Map();          // layer -> { parts: { gate|up|down: { kind, nExp, rows, cols, sl: [qs, sc] } } }
@@ -48,9 +66,10 @@ export class ExpertStore {
     this.ramBytes = ramBytes > 0 ? ramBytes : Infinity; this.expectBytes = expectBytes > 0 ? expectBytes : 0;
     this.stats = this._zeroStats();
   }
-  _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0 }; }
+  _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0, diskReads: 0, diskBytes: 0, diskWaitMs: 0 }; }
   resetStats() { this.stats = this._zeroStats(); }
   has(i) { return this.layerSet.has(i); }
+  isDisk(i) { return this.diskSet.has(i); }
 
   // ---- load: park one converted tensor ({ kind: "q4" | "q8", qs, scales, shape: [nExp * rows, cols] }) ----
   // Room in the parked buffers for up to `want` experts of `per` bytes each: as many as the last buffer still holds
@@ -110,6 +129,21 @@ export class ExpertStore {
     if (!S) this.L.set(layer, S = { parts: {} });
     S.parts[part] = { kind: e.kind, nExp, rows, cols, sl };
     return { kind: e.kind, shape: e.shape, offload: true, store: this, layer, part };
+  }
+  // ---- load: a disk layer's part. info: the stacked tensor's header entry ([nExp][rows][cols], ggmlType, byteOffset,
+  // shard); nothing is read. -> the same placeholder park() returns
+  attach(layer, part, info, nExp) {
+    if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
+    const g = expertGeometry(info);
+    if (g.nExp !== nExp) throw new Error(`ExpertStore: layer ${layer} ${part}: ${g.nExp} experts in the file, ${nExp} expected`);
+    const { rows, cols, kind } = g;
+    if (cols % 32) throw new Error(`ExpertStore: layer ${layer} ${part}: shape ${info.shape} is not ${nExp} experts of whole blocks`);
+    const qsB = rows * cols / (kind === "q4" ? 2 : 1), scB = rows * cols / 32 * 2;
+    if (qsB % 16 || scB % 4) throw new Error(`ExpertStore: layer ${layer} ${part}: per-expert slices ${qsB} / ${scB} B are not copyable`);
+    let S = this.L.get(layer);
+    if (!S) this.L.set(layer, S = { parts: {} });
+    S.parts[part] = { kind, nExp, rows, cols, info, disk: true, sl: [{ per: qsB }, { per: scB }] };
+    return { kind, shape: [nExp * rows, cols], offload: true, store: this, layer, part };
   }
   // unmap every parked buffer (the copy engine reads them from here on)
   seal() {
@@ -172,6 +206,7 @@ export class ExpertStore {
   loadLayer(enc, layer) {
     const R = this.region;
     if (R.layer === layer) return 0;
+    if (this.isDisk(layer)) throw new Error(`expert offload: disk layer ${layer} must be loaded into the region with loadLayerAsync, after a submit`);
     const S = this.L.get(layer);
     let n = 0;
     ExpertStore.SLICES.forEach(([p, s], j) => {
@@ -198,6 +233,7 @@ export class ExpertStore {
     st.lookups += uniq.length;
     if (uniq.length > this.P) {   // a wide verify / prompt-tail pass: through the region, no caching
       this._toRegion(enc, layer, uniq);
+      this._staged = null;
       return { pool: false };
     }
     // recency is one stamp per use (hits in selection order, then the misses), so the order is total; the
@@ -215,9 +251,10 @@ export class ExpertStore {
       }
       if (S.expOf[v] >= 0) S.slotOf[S.expOf[v]] = -1;
       S.expOf[v] = e; S.slotOf[e] = v; S.used[v] = ++this.stamp;
-      st.bytes += this._copyExpert(enc, S, e, S.pool, v);
+      st.bytes += this._putExpert(enc, layer, S, e, S.pool, v);
       st.misses++;
     }
+    this._staged = null;
     const remap = new Uint32Array(nCols * KS);
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) remap[c * KS + k] = S.slotOf[sel[c * KS + k]];
     return { pool: true, remap };
@@ -225,15 +262,95 @@ export class ExpertStore {
   // these experts of a layer into the region at their own ids (the rest of it is stale from here on)
   _toRegion(enc, layer, ids) {
     const S = this.L.get(layer);
-    for (const e of ids) this.stats.regionBytes += this._copyExpert(enc, S, e, this.region.bufs, e);
+    for (const e of ids) this.stats.regionBytes += this._putExpert(enc, layer, S, e, this.region.bufs, e);
     this.region.layer = -1;
     this.stats.regionCuts++;
   }
   // a short prefill frame (engine _regionLoad): the distinct experts of its nCols x KS selection into the region
   loadExperts(enc, layer, sel, nCols, KS) {
+    if (this.isDisk(layer)) throw new Error(`expert offload: disk layer ${layer} takes loadExpertsAsync, after a submit`);
+    const ids = this._frameIds(sel, nCols, KS);
+    this._toRegion(enc, layer, ids);
+    return ids.length;
+  }
+  _frameIds(sel, nCols, KS) {
     const ids = [], seen = new Uint8Array(this.nExp);
     for (let c = 0; c < nCols; c++) for (let k = 0; k < KS - 1; k++) { const e = sel[c * KS + k]; if (e < this.nExp && !seen[e]) { seen[e] = 1; ids.push(e); } }
-    this._toRegion(enc, layer, ids);
+    return ids;
+  }
+
+  // ---- disk layers ----
+  // one expert's six slices (SLICES order), read and converted
+  async _readExpert(S, e) {
+    const out = [];
+    const parts = await Promise.all(OFFLOAD_PARTS.map((p) => this.reader.readPart(S.parts[p].info, e)));
+    for (const r of parts) out.push(r.qs, r.sc);
+    ExpertStore.SLICES.forEach(([p, s], j) => {
+      const want = S.parts[p].sl[s].per;
+      if (out[j].byteLength !== want) throw new Error(`expert offload: expert ${e} ${p} slice ${s} converted to ${out[j].byteLength} B, expected ${want}`);
+    });
+    return out;
+  }
+  // these experts of a disk layer, read in parallel -> Map(e -> slices); stats count the wait
+  async _readMany(layer, ids) {
+    const S = this.L.get(layer), t0 = performance.now(), m = new Map();
+    const got = await Promise.all(ids.map((e) => this._readExpert(S, e)));
+    ids.forEach((e, i) => m.set(e, got[i]));
+    this.stats.diskWaitMs += performance.now() - t0;
+    this.stats.diskReads += ids.length;
+    this.stats.diskBytes += ids.length * OFFLOAD_PARTS.reduce((a, p) => a + expertGeometry(S.parts[p].info).expBytes, 0);
+    return m;
+  }
+  // Before plan() on a disk layer (engine _cutResolve, after the selection is read back and the cut's encoder is
+  // submitted): read the experts plan() will copy, the same set it computes (no LRU state changes in between).
+  async prepare(layer, sel, nCols, KS) {
+    if (!this.isDisk(layer)) return 0;
+    const S = this.L.get(layer), K = KS - 1, uniq = [];
+    for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) { const e = sel[c * KS + k]; if (e < this.nExp && !uniq.includes(e)) uniq.push(e); }
+    const ids = uniq.length > this.P ? uniq : uniq.filter((e) => S.slotOf[e] < 0);
+    this._staged = { layer, bytes: await this._readMany(layer, ids) };
+    return ids.length;
+  }
+  // an expert into dst slot / region id `at`: a copy from its parked buffer, or (disk layer) a writeBuffer of the bytes
+  // prepare() read. A writeBuffer lands in queue order, after what was submitted and before enc's commands.
+  _putExpert(enc, layer, S, e, dst, at) {
+    if (!this.isDisk(layer)) return this._copyExpert(enc, S, e, dst, at);
+    const b = this._staged?.layer === layer ? this._staged.bytes.get(e) : null;
+    if (!b) throw new Error(`expert offload: disk layer ${layer} expert ${e} was not prepared`);
+    let n = 0;
+    ExpertStore.SLICES.forEach(([p, s], j) => { const per = S.parts[p].sl[s].per; this.device.queue.writeBuffer(dst[j], at * per, b[j]); n += per; });
+    return n;
+  }
+  // The whole disk layer into the region (a prefill frame). Only after the caller has submitted everything that uses
+  // the region. Reads in runs of `run` experts, so a layer is never held whole in memory.
+  async loadLayerAsync(layer, run = 32) {
+    const R = this.region;
+    if (R.layer === layer) return 0;
+    if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
+    const S = this.L.get(layer), q = this.device.queue;
+    R.layer = -1;
+    let n = 0;
+    for (let e0 = 0; e0 < this.nExp; e0 += run) {
+      const ids = Array.from({ length: Math.min(run, this.nExp - e0) }, (_, i) => e0 + i);
+      const got = await this._readMany(layer, ids);
+      ExpertStore.SLICES.forEach(([p, s], j) => {
+        const per = S.parts[p].sl[s].per, buf = new Uint8Array(per * ids.length);
+        ids.forEach((e, i) => buf.set(got.get(e)[j], i * per));
+        q.writeBuffer(R.bufs[j], e0 * per, buf);
+        n += buf.byteLength;
+      });
+    }
+    R.layer = layer;
+    this.stats.layerLoads++; this.stats.layerBytes += n;
+    return n;
+  }
+  // A short frame's experts of a disk layer into the region (engine _regionLoad), after the caller's submit.
+  async loadExpertsAsync(layer, sel, nCols, KS) {
+    if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
+    const ids = this._frameIds(sel, nCols, KS);
+    this._staged = { layer, bytes: await this._readMany(layer, ids) };
+    this._toRegion(null, layer, ids);
+    this._staged = null;
     return ids.length;
   }
   // drop every cached expert (tests: a cold cache)
@@ -241,6 +358,7 @@ export class ExpertStore {
   summary() {
     const s = this.stats, h = s.lookups ? (100 * s.hits / s.lookups).toFixed(1) : "-";
     return `expert offload: ${this.layers.length} layers, ${this.P} slots each (${(this.poolBytes / 2 ** 30).toFixed(2)} GiB) + region ${(this.regionBytes / 2 ** 30).toFixed(2)} GiB, parked ${(this.parkedBytes / 2 ** 30).toFixed(2)} GiB in ${(this.bufBytes / 2 ** 30).toFixed(2)} GiB of buffers; `
-      + `${s.cuts} cuts, hits ${h}% (${s.hits}/${s.lookups}), ${(s.bytes / 2 ** 20).toFixed(0)} MiB copied to the pools, ${s.regionCuts} region cuts (${(s.regionBytes / 2 ** 20).toFixed(0)} MiB), ${s.layerLoads} whole-layer loads (${(s.layerBytes / 2 ** 30).toFixed(1)} GiB)`;
+      + `${s.cuts} cuts, hits ${h}% (${s.hits}/${s.lookups}), ${(s.bytes / 2 ** 20).toFixed(0)} MiB copied to the pools, ${s.regionCuts} region cuts (${(s.regionBytes / 2 ** 20).toFixed(0)} MiB), ${s.layerLoads} whole-layer loads (${(s.layerBytes / 2 ** 30).toFixed(1)} GiB)`
+      + (this.diskSet.size ? `; ${this.diskSet.size} disk layers: ${s.diskReads} expert reads, ${(s.diskBytes / 2 ** 20).toFixed(0)} MiB from the file, ${(s.diskWaitMs / 1000).toFixed(2)} s waiting` : "");
   }
 }
