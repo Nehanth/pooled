@@ -19,6 +19,7 @@ A generated token on the 27B = ~111 ms on the GB10: **82 ms streaming 15 GB of w
 | Expert-grouped MoE prefill | `moe_gsort`, `moe_gusg|moe_dng_<fmt>` (f32 tiled), `moe_qx` + `moe_gusq|moe_dnq_<fmt>` (dp4a), `moe_combw` | the ubatch's (token, slot) pairs sorted by expert (one workgroup, atomic histogram + per-column bitmask placement, stable), each expert's rows read once per chunk of up to 8 of its pairs; inside wide chunks the gate/up and down run as `dot4I8Packed` on activations quantized per 32 values with the weight blocks kept as packed i8 in registers (`moeGroupDp4a`, follows `DP4A_DEFAULT.moe`; 1.9x the f32 tiled kernels); the wide chunk (ubatch 512 on the MoE) is the expert group |
 | Glue | `rmsnorm`, `qsplit`, `head_norm`, `rope_part`, `attn_scores/softmax/out`, `sigmoid_mul`, `silu_mul`, `add_res`, `argmax` + `_mc` multi-column forms | normalization, attention, activations, sampling prep |
 | DeltaNet | `dn_pre` (gates + L2), `dn_conv`, `dn_delta`, `dn_gatenorm` + `_mc` forms | the gated delta-rule recurrence, with snapshot slots for speculative rollback |
+| QSA (Qwen3.8-Flash-Next) | `qsa_proj`, `qsa_prep`, `qsa_pool`, `qsa_score[_c4]`, `qsa_select`, `attn_dec_qsa` + `_combine[_g]` | sparse attention for the 12 full-attention layers: indexer, pooled block keys, exact top-512 block select, attention over the selected KV rows ([QSA](#qsa-qwen-sparse-attention) below) |
 | Legacy | `matvec[_q8|_q4]` | one thread per row; kept as the correctness reference and fallback |
 
 ## The tricks, with what each one bought
@@ -66,6 +67,55 @@ A generated token on the 27B = ~111 ms on the GB10: **82 ms streaming 15 GB of w
 27. **16 prompt tokens per network round** (4 GPU passes per round) so prefill pays one round-trip per 16 tokens.
 28. **Cache API with size stamps**: the cache refuses 206 responses, so range responses are stored as 200 with an `x-swarm-len` stamp and validated on read (the header keeps its old name so caches from before the rename stay valid).
 29. **Fire-and-forget prefill dispatches** with periodic `onSubmittedWorkDone()` syncs to keep the queue from growing unbounded.
+
+## QSA (Qwen Sparse Attention)
+
+Qwen3.8-Flash-Next's 12 full-attention layers (and the MTP block) attend to a selected subset of the KV cache. Kernels: `engine/wgsl/qsa.js` and the gather mode of `engine/wgsl/attn_dec.js`; host side (sizes, pass order, dispatch, bind groups): `engine/qsa.js`; CPU reference written from llama.cpp (file:line citations): `tests/reference/qsa_ref.mjs`; tests: `tests/test_qsa.js` (GPU), `tests/unit/qsa_ref_test.js`; timings: `tests/bench_qsa.js`. Not wired into `engine/qwen35.js` yet.
+
+**What it computes.** For the token at position p (0-based within the sequence), on the layer input x:
+1. raw indexer key `kr[p] = index_k_proj · x` (128), cached with no norm and no rope;
+2. blocks are positions 4b .. 4b+3. When the last one is written, the block's pooled key is `P[b] = rope(rmsnorm(((kr[4b] + kr[4b+1]) + kr[4b+2]) + kr[4b+3]) * 0.25) * k_norm, 4b)`, cached once (rope: NeoX, first 64 of 128 dims, theta 1e7, at the block's first position);
+3. indexer query `qi = rope(rmsnorm_head(index_q_proj · x) * q_norm, p)`, 4 heads x 128;
+4. for the nv = floor((p+1)/4) complete blocks: `s[b] = Σ_h relu(qi_h · P[b]) / sqrt(128)`;
+5. keep the top min(nv, 512) blocks by (score descending, block index ascending), plus the tail rows 4nv .. p (the token's own unfinished block, itself included): at most 2051 rows;
+6. the layer's ordinary GQA attention (24 q heads, 2 kv heads, hd 256, scale 1/16, then the sigmoid gate) over those rows only.
+
+With p + 1 ≤ 2051 every block is kept, so QSA *is* dense causal attention; past that it differs (llama.cpp's PR #27742 reports 3% of positions diverging at 8K under dense). A prefill token selects exactly what a decode step at its position would. The GGUF ships `indexer.{q,k}_proj` as BF16 and `indexer.{q,k}_norm` already folded to (1 + w) (llama.cpp's converter adds the 1; the bartowski Q4_0 file's norms average ~0.96).
+
+**Ties.** llama.cpp leaves them undefined: `ggml_top_k` is "unordered" (the CPU op is a `std::partial_sort`, CUDA's radix/CUB paths are explicitly non-deterministic). They are common: a block whose four head dots are all ≤ 0 scores exactly 0. We keep the lower block index, as `engine/topk.js` and ds4/vmlx do, in the reference and on the GPU.
+
+**State per sequence and QSA layer** (besides the K / V cache): `rawK` [maxSeq][128] f16 and `pooled` [maxSeq / 4][128] f16, 256 B per position plus 64 B per position: +12.5% over the layer's f16 KV. llama.cpp keeps both in its F16 idx cache (`type_k`), so the f16 rounding matches it. Rollback needs nothing extra: rewinding to position r and re-decoding rewrites `rawK` from r and re-pools a block when its last position is written again; a pooled key of an unfinished block is never read (nv only counts complete blocks). Scratch per pass, shared by all layers: `proj` (cols x 640), `qi` (cols x 512), `scores` (cols x maxSeq / 4 f32), `sel` (cols x 2052 u32: count, then rows).
+
+**Kernels and pass order** (one pass = nCols consecutive positions from `frame.pos`; group 0 is the engine's `[cfg, frame]`):
+
+| Kernel | Dispatch | Does |
+|---|---|---|
+| `qsa_proj` (optional) | (80, cols) | `proj = [index_q_proj ; index_k_proj] · x`, BF16 weights as u32 pairs. The engine may instead append these 640 rows to its own fused projection |
+| `qsa_prep` | (5, cols) | q heads: rmsnorm · q_norm, rope → `qi`; head 4: raw key → `rawK[p]` (f16) |
+| `qsa_pool` | (blocks touched, 1) | pooled key of every block this pass completes |
+| `qsa_score` / `qsa_score_c4` | (nv/256, cols / CW) | scores of the visible blocks; skipped while no column sees more than 512 blocks. Same bits for CW 1 and 4 |
+| `qsa_select` | (cols) | per column, one workgroup: 11/11/10-bit radix select of the 512th key (scores ≥ 0, so their bits order them), then a block-order compaction with a workgroup scan; writes the ascending row list. Exact, deterministic, no sort |
+| (engine) | | store this pass's K / V rows, as for dense attention |
+| `attn_dec_qsa` + `attn_dec_qsa_combine[_g]` | (splits, cols, nKV·R), (nH·4, cols) | `attn_dec` with list position t reading KV row `list[t]`; split lengths come from the list length |
+
+Integration points for the Flash path: per QSA layer call `prep` and `pool` on every pass from position 0 (the state must be complete before the context passes 2051); `score`, `select` and `attn` replace the layer's attention. Below 2052 positions the engine can keep its dense kernels: `attn_dec_qsa` with the full list gives `attn_dec`'s bits (tested), and a dense prefill chunk (`attn_tile`) is the same math. Decode uses the engine's `adCfg` (S = 64 splits, R = 2 for 24 / 2 heads); for wide prefill chunks pass S = 4 in the FD uniform so the split partials stay at cols x 24 x 4 x 256 floats (50 MB at 512 columns). `qsaDispatch` gives every size from (pos, nCols). MTP: the paper reuses draft step 0's selection for later draft steps; `sel` can simply be kept.
+
+**Tests** (`tests/test_qsa.js`, GB10): `qsa_select` equals the reference rule exactly on 28 score sets (random with ~50% zeros, five-value ties, all equal, all zero, a tie run across the boundary, 1-ulp steps and -0, every tail length, up to 65,536 blocks). End to end at 512, 2051, 2052, 4096, 8192 and 32768 positions (decode and a prefill chunk ending there, random data, plus real blk.3 indexer weights at 4100): row lists equal to the CPU reference's, the GPU list equals the reference rule applied to the GPU's own scores, attention within 3e-7 of float64; ≤ 2051: bit-equal to `attn_dec` (decode and multi-column); a prefill column is bit-equal to a decode step at its position; two runs give the same bits; all-zero scores pick blocks 0 .. 511; a rewind re-pools correctly. Scores agree with the reference to ~5e-5 relative (f16 pooled keys round differently in ~0.05% of values), so a GPU list could differ from a CPU one on a near tie; none did.
+
+**Timings** per layer (`tests/bench_qsa.js`, GB10, random data; µs):
+
+| context | decode QSA total (prep, pool, score, select, attn) | dense `attn_dec` | prefill, per token (512-col chunk; 64 above 32K) |
+|---|---|---|---|
+| 4K | 92 (6, 6, 9, 21, 49) | 70 | 17.9 |
+| 8K | 94 (6, 6, 10, 23, 50) | 94 | 18.3 |
+| 32K | 106 (6, 6, 11, 35, 48) | 779 | 20.8 |
+| 64K | 138 | 1,435 | 25.7 |
+| 128K | 194 | 2,811 | 32.8 |
+| 256K | 300 (7, 7, 53, 183, 51) | 5,594 | 46.9 |
+
+Decode breaks even with dense at ~8K and is 7x faster at 32K, 19x at 256K. Prefill is dominated by the attention (8.8 ms per 512 columns, ~17 µs per token): each column runs the decode kernel over its own ~2051 rows, so K / V rows are re-read per column (~4 GB of L2 traffic per chunk). The indexer projection through `qsa_proj` costs 17 µs per decode token and 2 ms per 512-column chunk; folding it into the engine's prefill GEMM is the cheaper route.
+
+**Open items.** (1) Prefill attention: a tiled kernel over the union of a few adjacent columns' lists (per-column masks) would share K / V tiles as `attn_tile` does. (2) Decode select is one workgroup per column (183 µs at 256K); a multi-workgroup histogram, or ds4's tile-maximum prefilter fused into `qsa_score`, would cut it. (3) The engine's own `rope_part` takes `cos(p · pow(...))` directly, which drifts from ggml by ~1e-3 rad at p ~ 1e5; the QSA kernels use ggml's f32 theta product and a Cody-Waite reduction, the main attention's q / k rope does not. (4) `rawK` only needs the last few positions once their block is pooled (vLLM keeps a ring of `4·ceil((4 + n_draft)/4)`); a ring would save 256 B per position per layer. (5) Agreement with llama.cpp itself (not just this reference) is still to be checked with the 4K / 8K goldens once the Flash path runs end to end.
 
 ## Things tried and rejected (measured)
 - Q4 KV cache: −92.5% prefill.
