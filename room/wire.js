@@ -63,6 +63,9 @@ export function asU16(x) {
 // The floats per column of a frame: the engine's hDim when it has one (Qwen3.8-Flash-Next sends its 4-stream
 // residual, 4 x 2560 = 10240 floats, 20 KB per token in f16), else its hidden size. 0 when the engine says neither.
 export const wireDim = (engine) => engine?.dims?.hDim || engine?.dims?.dim || 0;
+// The token ids a host's frame carries for the devices past it (packWire): only for an engine that asks
+// (engine.frameIds: Qwen3.8-Flash-Next, whose n-gram layer may be on the first worker), else none
+export const idsFor = (engine, ids) => (engine?.frameIds ? ids : null);
 
 // ids (optional): the frame's token ids, one per column, after the values. A device whose layers read the tokens
 // themselves (Qwen3.8-Flash-Next's n-gram layer: engine.frameIds) gets them this way. Each id is two u16 (low word

@@ -1,6 +1,6 @@
 // Host/worker inference and checkpoints over caller-owned state and frame delivery.
 // No browser globals, engine construction, or PeerJS connection ownership.
-import { badF32, packWire, unpackWire, splitWire, wireDim, wireStats } from "./wire.js";
+import { badF32, packWire, unpackWire, splitWire, wireDim, idsFor, wireStats } from "./wire.js";
 import { DROP_ALL } from "./transport.js";
 import { lapTimeout } from "./liveness.js";
 import { PrefixIndex } from "../harness/prefix.js";
@@ -20,9 +20,6 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
   const peerError = (pos) => `NaN in hidden returned by peers (pos ${pos})` + (node ? "" : " — check peer status lines");
   const headError = (pos) => `NaN in logits (pos ${pos})` + (node ? "" : " — head/lm_head kernel issue on host");
   const defaultStatus = aiStatus;
-  // the token ids a frame carries for the devices past the host (wire.js packWire): only for an engine that asks
-  // (engine.frameIds: Qwen3.8-Flash-Next, whose n-gram layer may be on the first worker), else none
-  const idsFor = (E, ids) => (E?.frameIds ? ids : null);
 
   function lapWait(key, ms, what) {
     return new Promise((res, rej) => {

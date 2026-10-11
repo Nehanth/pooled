@@ -446,6 +446,8 @@ export const gbUp = (bytes) => Math.ceil(bytes / 2 ** 30 * 10 - 1e-9) / 10;
 // two devices that could close the gap alone, the host's raise first when it is the smaller one.
 export function shortNote(label, fit, names = [], spareGB = []) {
   if (fit.fits) return "";
+  // the pledges hold it, but no device that can take the n-gram table's layer has the disk for it (dealRoom ngram)
+  if (fit.ngram) return `${label} needs ${gbUp(fit.ngram.bytes)} GB of free disk for its n-gram table on the device that holds layer ${fit.ngram.layer}, and the devices that could hold that layer don't have it. Free disk space there or add a device that has the room.`;
   const who = givers(fit, spareGB).slice(0, 2).map(({ i, b }) => `${names[i] || "a device"} could give ${gbUp(b)} GB more`);
   const head = `This room is ${gbUp(shortBy(fit, spareGB))} GB short for ${label}`;
   const host = fit.caps[0] < 1 ? `; the model host (${names[0] || "the biggest device"}) needs room for the embedding, the output head and a layer` : "";

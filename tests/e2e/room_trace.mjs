@@ -29,8 +29,8 @@ export function patchGenerator(s) {
   // host, speculative verify lap
   s = rep(s, "        const tLap = pre?.t0 ?? performance.now();", "        const tLap = pre?.t0 ?? performance.now(); __HP('h.lap0', 'ai-hidden-b', pos, tokens.length);", f);
   s = rep(s, "        const hostMs = performance.now() - tLap;", "        const hostMs = performance.now() - tLap; __HP('h.emb1', 'ai-hidden-b', pos, tokens.length);", f);
-  s = rep(s, "        sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb, current.engine.frameIds ? tokens : null) });\n        const h = await returned;",
-    "        { const __w = packWire(hb, current.engine.frameIds ? tokens : null); __HP('h.pack1', 'ai-hidden-b', pos, tokens.length); sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...__w }); }\n        const h = await returned; __HP('h.ret', 'ai-hidden-b', pos, tokens.length);", f);
+  s = rep(s, "        sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb, idsFor(current.engine, tokens)) });\n        const h = await returned;",
+    "        { const __w = packWire(hb, idsFor(current.engine, tokens)); __HP('h.pack1', 'ai-hidden-b', pos, tokens.length); sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...__w }); }\n        const h = await returned; __HP('h.ret', 'ai-hidden-b', pos, tokens.length);", f);
   s = rep(s, "          const toks = viaLookup ? await current.engine.specStepDrafts(next, sample, lk, spec) : await current.engine.specStep(next, sample, K, spec);",
     "          __HP('h.step0', viaLookup ? 'lookup' : 'draft', current.engine.pos, viaLookup ? lk.length : K); const toks = viaLookup ? await current.engine.specStepDrafts(next, sample, lk, spec) : await current.engine.specStep(next, sample, K, spec); __HP('h.step1', viaLookup ? 'lookup' : 'draft', current.engine.pos, toks.length);", f);
   return s;

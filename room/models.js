@@ -100,7 +100,11 @@ export const SHAPE = {
   "qwen3.5-122b-moe": { kind: "qwen35", L: 48, layer: 1485116672, kvPos: { f16: 512, q8: 288 }, embed: 429096960, out: 625766400, mtp: 2682195968, exp: 1409286144,
     park: { nExp: 256, runs: [[6, expertSlices(1024, 3072, [Q4, Q4, Q41])], [42, expertSlices(1024, 3072, [Q4, Q4, Q4])]] }, meta: ssmMeta(3072, 64, 16, 8192) },
   // Qwen3.8-Flash-Next (llama.cpp arch qwen4exp; roadmap/33), bartowski Q4_0 (three files), read from its headers:
-  // layer: the DeltaNet layers' average (36 of 48; layer 1 also has the PLE block: 1.55 GB); kvPos: the 12 QSA layers'
+  // layer: the DeltaNet layers' average (36 of 48). The planner deals every layer at this one size, which under-counts
+  // the front of the model: layer 0 is 1.528 GB, layer 1 (with the PLE block) 1.546 GB, layers 0-5 carry Q4_1 down
+  // experts, so the host and whichever device holds layers 0-5 hold up to ~0.3 GB more than the deal says (the 12 QSA
+  // layers average 1.474 GB, about even). dealRoom has one layerBytes for every layer (roomFit, offload, placeNgram);
+  // per-range sizes would change all of them, so this stays a known gap, inside the pledge margin. kvPos: the 12 QSA layers'
   // K+V, 2 KV heads x 256, kept in f32 by the phase-1 engine (engine/qwen4exp.js, PR #346), so 4 KB per QSA layer and
   // position, 1 KB averaged over 4 (the room's KV format stays "f16": kvModeFor); out: output.weight and the head's
   // HC mixer (output_hc_*); exp / park: 512 experts of 2560 x 640, layers 0-5 with Q4_1 down experts (parked as Q8).
@@ -146,7 +150,9 @@ export function roomBytes(model, ctx, kv = "f16") {
 
 // The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
 // each device downloads about its share of the layers, so the picker can say what this device will fetch.
-export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84, "qwen3.5-122b-moe": 72.52, "qwen3.8-flash": 100.6 };
+// Qwen3.8-Flash-Next: 71.8 of its 100.6 GB (FILES), without the 28.8 GB n-gram table, which only the device holding
+// layer 1 fetches (SHAPE ngram, ngramOf), on top of its share: counting it here would put ~29 GB on every device.
+export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84, "qwen3.5-122b-moe": 72.52, "qwen3.8-flash": 71.8 };
 
 // Each GGUF's exact size and SHA-256 (Hugging Face's x-linked-size / x-linked-etag), so `pooled pull`
 // can check what it downloaded (cli/lib/cache.js)

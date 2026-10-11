@@ -43,12 +43,16 @@ export class FlashRoomEngine {
     this.mtp = null;        // no draft block in rooms yet: plain decoding
     this.NC = 4;            // columns per pipeline batch (the core runs them one at a time)
     this.slots = new Map();
+    // checkpoints only when every state buffer can be copied out. PR #346 creates its K/V caches without COPY_SRC, so a
+    // device holding an attention layer can't save one. Then this engine has no slot methods at all: every reader of the
+    // capability (room/pipeline.js ckptEngine and workerFrame, the ai-ready `ckpt` flag on the room page and the room
+    // node, the room node's disk copies) tests for saveSlot / exportSlot / importState / stateSignature, so the host
+    // leaves checkpoints off for the room instead of a worker throwing on an `sv` frame
+    this.ckpt = core.stateParts(0).every((p) => copyable(p.buf));
+    if (!this.ckpt) for (const k of SLOT_API) this[k] = undefined;
   }
   static wrap(engine) { return new FlashRoomEngine(qwen4expCore(engine)); }
 
-  // checkpoints (room/pipeline.js ckptEngine): on when every state buffer can be copied out. PR #346 creates its K/V
-  // caches without COPY_SRC, so a core with attention layers has them off until the engine adds it
-  get hostCkpt() { return this.core.stateParts(0).every((p) => copyable(p.buf)); }
   get dims() { return this.core.dims; }
   get maxSeq() { return this.core.maxSeq; }
   get pos() { return this.core.pos; }
@@ -105,7 +109,6 @@ export class FlashRoomEngine {
   saveSlot(name) {
     this.dropSlot(name);
     const parts = this.core.stateParts(this.pos), enc = this.device.createCommandEncoder();
-    if (!parts.every((p) => copyable(p.buf))) throw new Error("qwen4exp: a state buffer has no COPY_SRC usage, so it cannot be checkpointed (engine/qwen4exp.js K/V caches)");
     const bufs = parts.map((p) => {
       const b = this.device.createBuffer({ size: Math.max(4, p.bytes), usage: U.COPY_SRC | U.COPY_DST });
       if (p.bytes) enc.copyBufferToBuffer(p.buf, 0, b, 0, p.bytes);
@@ -172,6 +175,8 @@ export class FlashRoomEngine {
   }
 }
 
+// what a device without checkpoints lacks (dropSlot / dropAllSlots stay: with no slots they do nothing)
+const SLOT_API = ["saveSlot", "loadSlot", "exportSlot", "exportState", "importState", "stateSignature"];
 // a GPU buffer copies can read (a test's fake buffer says nothing: yes)
 const copyable = (b) => b?.usage == null || !!(b.usage & U.COPY_SRC);
 

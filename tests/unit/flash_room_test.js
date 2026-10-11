@@ -6,7 +6,7 @@ import { setImmediate } from "node:timers";
 import { MODELS, SHAPE, FILES, NEED_GB, CTX, FILE_GB, PICKER, maxSeqFor, kvModeFor, roomBytes, wireWidth, ngramOf, hostHeldBytes, expertSlices } from "../../room/models.js";
 import { packWire, unpackWire, splitWire, wireDim } from "../../room/wire.js";
 import { SLICE_BYTES } from "../../room/transport.js";
-import { dealRoom, placeNgram, ngramHolder } from "../../room/plan.js";
+import { dealRoom, placeNgram, ngramHolder, shortNote } from "../../room/plan.js";
 import { offloadFor, ngramFor, ngramDisk, pledgeGB } from "../../room/pledge.js";
 import { createPipeline } from "../../room/pipeline.js";
 import { FlashRoomEngine } from "../../room/flash.js";
@@ -31,7 +31,8 @@ Deno.test("flash catalogue: dev-gated entry, pinned files, shape from the GGUF h
   eq(F.bytes, F.shards.reduce((a, s) => a + s.bytes, 0));
   ok(F.shards.every((s) => /^[0-9a-f]{64}$/.test(s.sha256)) && /^[0-9a-f]{64}$/.test(F.mtp.sha256));
   eq(F.mtp.bytes, 2199652640);
-  eq(Math.round(F.bytes / 1e8) / 10, FILE_GB[KEY], "FILE_GB is the files' size in GB");
+  // FILE_GB: what a device downloads for its share, so the files without the n-gram table (only its holder fetches it)
+  eq(Math.round((F.bytes - S.ngram.bytes) / 1e8) / 10, FILE_GB[KEY], "FILE_GB is the files' size in GB without the table");
   // context: dense attention is exact to 2051 cells and the phase-1 engine refuses more
   eq([CTX[KEY], maxSeqFor(KEY), maxSeqFor(KEY, 32768), kvModeFor(KEY, "q8")], [{ def: 2048, max: 2048 }, 2048, 2048, "f16"]);
   // shape: 48 layers, 512 experts with layers 0-5's Q4_1 down experts parked as Q8, the 4-stream residual, the table
@@ -107,6 +108,8 @@ Deno.test("flash planner: Mac (tab) + 5070 PC (offload) deal puts the table with
   // the Mac short of disk for the table: an offload deal does not move its boundary; the room does not start
   const s = deal([mac(26, 10), pc(10, 48, 400)]);
   eq([s.fit.fits, s.fit.ngram, s.used.length], [false, { layer: 1, bytes: 28800138240 }, 0]);
+  // what the room page and the room node say then (shortNote): the disk, not a pledge
+  eq(shortNote("Qwen3.8 Flash Next", s.fit, ["mac", "pc"]), "Qwen3.8 Flash Next needs 26.9 GB of free disk for its n-gram table on the device that holds layer 1, and the devices that could hold that layer don't have it. Free disk space there or add a device that has the room.");
   // neither says (an older client): the deal is the one without the field, unchecked
   const u = deal([mac(26), pc(10, 48)]);
   eq([u.fit.fits, u.ngram.device, u.ngram.checked], [true, 0, false]);
@@ -250,7 +253,7 @@ const argmax = (a) => { let b = 0; for (let i = 1; i < a.length; i++) if (a[i] >
 Deno.test("flash adapter: one device, every layer: decode, slots, export / import with the n-gram state", async () => {
   const dev = fakeDevice(), L = 8;
   const E = new FlashRoomEngine(fakeCore(dev, { lo: 0, hi: L, L, hasEmbed: true, hasHead: true }));
-  eq([E.dims.hDim, E.frameIds, E.hostCkpt, E.mtp, E.maxSeq, E.stateSignature()], [16, true, true, null, 64, { v: 1, arch: "qwen4exp", lo: 0, hi: L, hDim: 16, kv: "f32", ple: [1] }]);
+  eq([E.dims.hDim, E.frameIds, E.ckpt, E.mtp, E.maxSeq, E.stateSignature()], [16, true, true, null, 64, { v: 1, arch: "qwen4exp", lo: 0, hi: L, hDim: 16, kv: "f32", ple: [1] }]);
   const run = async (ids, n) => {
     const out = [];
     await E.prefillTokens(ids.slice(0, -1));
@@ -286,14 +289,16 @@ Deno.test("flash adapter: one device, every layer: decode, slots, export / impor
   ok(bad, "no speculative verify yet");
   E.dropAllSlots();
   eq(E.slots.size, 0);
-  // a state buffer without COPY_SRC (PR #346's K/V caches today): checkpoints off, and a save says why
-  const core = E.core, parts = core.stateParts;
+  // a state buffer without COPY_SRC (PR #346's K/V caches today): this device has no checkpoints at all. The slot
+  // methods are gone, so everything that tests for them leaves checkpoints off (room/pipeline.js ckptEngine, the
+  // worker's `sv` in workerFrame, ai-ready's `ckpt`, the room node's disk copies) instead of a save throwing
+  const core = fakeCore(dev, { lo: 0, hi: L, L, hasEmbed: true, hasHead: true }), parts = core.stateParts;
   core.stateParts = (pos) => parts(pos).map((p, i) => (i === 0 ? { ...p, buf: Object.assign(Object.create(p.buf), { usage: 0x80 | 8 }) } : p));
-  eq(E.hostCkpt, false);
-  bad = false; try { E.saveSlot(2); } catch (e) { bad = /COPY_SRC/.test(e.message); }
-  ok(bad && !E.slots.has(2), "saveSlot refuses rather than copy from a buffer it cannot read");
-  core.stateParts = parts;
-  eq(E.hostCkpt, true);
+  const N = new FlashRoomEngine(core);
+  eq([N.ckpt, N.saveSlot, N.loadSlot, N.exportSlot, N.exportState, N.importState, N.stateSignature, N.saveSlot ? 1 : 0], [false, undefined, undefined, undefined, undefined, undefined, undefined, 0]);
+  N.dropSlot(3); N.dropAllSlots();   // (dropping is still safe: there is nothing to drop)
+  eq(N.slots.size, 0);
+  ok(typeof E.saveSlot === "function", "a device whose buffers can all be copied keeps them");
 });
 
 // A host and a worker, each a room/pipeline.js over its own FlashRoomEngine, frames through a wire that keeps only

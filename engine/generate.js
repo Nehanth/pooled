@@ -1,6 +1,6 @@
 // A single generation attempt over caller-owned state. Readiness, request locking and
 // recovery stay with the browser or room node; both use this decode loop.
-import { badF32, packWire, wireDim } from "../room/wire.js";
+import { badF32, packWire, wireDim, idsFor } from "../room/wire.js";
 import { pickSampler } from "../room/sampling.js";
 import { reusablePrefix } from "../room/conversation.js";
 import { lookupDrafts, chainDenseSpec, denseLookupDrafts } from "../room/lookup.js";
@@ -39,7 +39,7 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
         if (badF32(hb)) throw new Error(`NaN after ${node ? "host" : "HOST"} layers (pos ${pos})`);
         const hostMs = performance.now() - tLap;
         const returned = lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, chainRtt()), "verify");
-        sendChain({ t: "ai-hidden-b", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb, current.engine.frameIds ? tokens : null) });
+        sendChain({ t: "ai-hidden-b", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb, idsFor(current.engine, tokens)) });
         const h = await returned;
         if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${pos})`);
         noteLap(performance.now() - tLap, hostMs);

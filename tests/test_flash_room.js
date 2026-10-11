@@ -4,6 +4,9 @@
 // holding layers 0..N-1:
 //   exact:  the residual handed over in f32 -> the worker's output equals the single engine's, bit for bit
 //   wire:   handed over in f16 (packWire / splitWire, as a room sends it) -> relative error at f16's rounding
+//   head:   the host's headFromHidden (the head's HC mixer and output.weight, what a room host runs for every token)
+//           on the worker's residual equals the single engine's logits (forwardToken wantLogits), and greedy decoding
+//           through the split picks the same ids
 //   slots:  saveSlot / loadSlot and exportSlot / importState on both ends restore the PLE conv ring and the n-gram
 //           predecessors: the continuation after a restore is bit-identical
 // Needs engine/qwen4exp.js (PR #346) and the model (bartowski Qwen3.8-Flash-Next-Q4_0 in models/q38flash, or
@@ -31,17 +34,18 @@ const G = model.G, cfg = qwen4expConfig(G.meta);
 if (!(N >= 2 && N <= cfg.L)) throw new Error("LAYERS must be 2.." + cfg.L);
 const t0 = performance.now();
 const up = (e, name) => { if (name !== "token_embd.weight") gpuUploadEntry(device, e, false); };
-const weights = await qwen4expWeights(G, model.bytesOf, { lo: 0, hi: N, hasEmbed: true, hasHead: false, qsa: false }, undefined, up);
+const weights = await qwen4expWeights(G, model.bytesOf, { lo: 0, hi: N, hasEmbed: true, hasHead: true, qsa: false }, undefined, up);
 device.queue.submit([device.createCommandEncoder().finish()]);
 await device.queue.onSubmittedWorkDone();
 const fds = model.paths.map((p) => fs.openSync(p, "r"));
 const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.readSync(fds[file], b, 0, len, off); return b; };
 const table = () => new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
-const mk = (lo, hi, hasEmbed) => Qwen4ExpEngine.create({ device, meta: G.meta, hasEmbed, hasHead: false, layerRange: [lo, hi],
-  weights: { embed: weights.embed, layers: weights.layers.slice(lo, hi) }, ngram: cfg.ple.layers.some((l) => l >= lo && l < hi) ? table() : null });
-const ref = await mk(0, N, true);
-const host = FlashRoomEngine.wrap(await mk(0, 1, true)), work = FlashRoomEngine.wrap(await mk(1, N, false));
-console.log(`qwen4exp room split: layers 0..${N - 1} loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s; host [0, 1), worker [1, ${N}) with the n-gram layer`);
+// the engines share the weights: only their state and scratch buffers are their own
+const mk = (lo, hi, hasEmbed, hasHead = false) => Qwen4ExpEngine.create({ device, meta: G.meta, hasEmbed, hasHead, layerRange: [lo, hi],
+  weights: { ...weights, layers: weights.layers.slice(lo, hi) }, ngram: cfg.ple.layers.some((l) => l >= lo && l < hi) ? table() : null });
+const ref = await mk(0, N, true), refHead = await mk(0, N, true, true);
+const host = FlashRoomEngine.wrap(await mk(0, 1, true, true)), work = FlashRoomEngine.wrap(await mk(1, N, false));
+console.log(`qwen4exp room split: layers 0..${N - 1} + head loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s; host [0, 1) + head, worker [1, ${N}) with the n-gram layer`);
 
 let fail = 0;
 const check = (c, what) => { console.log(`  ${c ? "ok  " : "FAIL"} ${what}`); if (!c) fail++; };
@@ -78,10 +82,36 @@ for (const wire of [false, true]) {
   }
 }
 
-// 2. slots and disk copies on both ends (PR #346 must create its K/V caches with COPY_SRC for a worker with a QSA
-// layer, LAYERS >= 5: room/flash.js hostCkpt)
-check(host.hostCkpt && work.hostCkpt, "every state buffer can be checkpointed (COPY_SRC)");
-if (!(host.hostCkpt && work.hostCkpt)) { console.log("FLASH ROOM FAIL"); Deno.exit(1); }
+// 2. the head on the host (qwen4expCore.head: headOps into B.hl, then logitStage), on the residual the worker returns,
+// against the single engine's own head: the logits, then greedy decoding fed back through the split
+{
+  const argmax = (a) => { let b = 0; for (let i = 1; i < a.length; i++) if (a[i] > a[b]) b = i; return b; };
+  host.reset(); work.reset(); refHead.reset();
+  let exact = true, worst = 0, ids1 = true, next = 0;
+  for (let p = 0; p < ids.length; p++) {
+    const want = await refHead.forwardToken(ids[p], { wantLogits: true });
+    const got = await host.headFromHidden(await work.runHidden(await host.embedRun(ids[p], p), p, { ids: [ids[p]] }));
+    exact &&= same(got, want.logits);
+    worst = Math.max(worst, rel(got, want.logits));
+    ids1 &&= argmax(got) === want.id;
+    next = want.id;
+  }
+  check(exact, `headFromHidden: the host's logits equal the single engine's, bit for bit (${ids.length} tokens, vocab ${host.dims.vocab}; worst rel. error ${worst.toExponential(2)})`);
+  check(ids1, "and its argmax is the single engine's greedy id at every position");
+  const G1 = [], G2 = [];
+  let a = next, b = next;   // from the prompt's last greedy id, both at pos ids.length
+  for (let k = 0, p = ids.length; k < 8; k++, p++) {
+    a = (await refHead.forwardToken(a)).id; G1.push(a);
+    const lg = await host.headFromHidden(await work.runHidden(await host.embedRun(b, p), p, { ids: [b] }));
+    b = argmax(lg); G2.push(b);
+  }
+  check(same(G1, G2), `greedy through the split: the same 8 ids as one engine (${G2.join(" ")})`);
+}
+
+// 3. slots and disk copies on both ends (PR #346 must create its K/V caches with COPY_SRC for a worker with a QSA
+// layer, LAYERS >= 5; without it that engine has no slot methods: room/flash.js ckpt)
+check(host.ckpt && work.ckpt, "every state buffer can be checkpointed (COPY_SRC)");
+if (!(host.ckpt && work.ckpt)) { console.log("FLASH ROOM FAIL"); Deno.exit(1); }
 const run = async (toks, base) => { const out = []; for (let k = 0; k < toks.length; k++) out.push(await work.runHidden(await host.embedRun(toks[k], base + k), base + k, { ids: [toks[k]] })); return out; };
 host.reset(); work.reset();
 await run(ids.slice(0, 12), 0);   // saved two tokens past the EOS: both predecessors are real tokens
