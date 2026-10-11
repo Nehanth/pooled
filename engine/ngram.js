@@ -1,5 +1,5 @@
 // N-gram row source for Qwen3.8-Flash-Next (qwen4exp): the 51B-parameter "per layer" n-gram embedding that the
-// model injects into its residual at layer 1 (roadmap/33 §1 "N-gram embedding", §6 PR 3).
+// model injects into its residual at layer 1 (roadmap/33-qwen38-flash.md §1 "N-gram embedding (PLE)", §6 PR 3).
 //
 // The table, per_layer_token_embd.weight, has 320,001,536 rows of 160 values (28.8 GB at Q4_0, 90 bytes a row).
 // It never goes to the GPU and is never converted: it stays on disk and each token reads 16 rows of it, one per hash
@@ -20,7 +20,8 @@
 //   "tensor"  the table where the GGUF has it: file = the shard, at the tensor's byteOffset (a room node reading the
 //             model file, a cold start over HTTP)
 //   "split"   one file per hash head, file = h, row r of the head at r * rowBytes (OPFS: a sync access handle is
-//             exclusive per file, so 16 files are what lets several workers read at once; roadmap/33 §3)
+//             exclusive per file, so 16 files are what lets several workers read at once;
+//             roadmap/33-qwen38-flash.md §3)
 //
 // Indices depend only on tokens, so a decode step can start its read as soon as the token is sampled and let layer 0
 // run while it lands. Browser-safe: no node: imports, nothing here touches the GPU.
@@ -45,7 +46,7 @@ export function ngramConfig(G, arch = ARCH) {
 }
 
 // The same from plain values (tests, a synthetic table, a split-file manifest).
-export function makeConfig({ offsets, vocab, mult, ngramSize = 3, perNgram = 8, width = 160, eos, image = null, ggmlType = GGML_Q4_0,
+export function makeConfig({ offsets, vocab, mult, ngramSize = 3, perNgram = 8, width = 160, eos, image = 0, ggmlType = GGML_Q4_0,
   nRows = null, byteOffset = 0, shard = 0, dim = null }) {
   const nHeads = (ngramSize - 1) * perNgram;
   if (offsets.length !== nHeads || vocab.length !== nHeads) throw new Error(`n-gram table: ${offsets.length} offsets / ${vocab.length} sizes for ${nHeads} heads`);
@@ -53,6 +54,9 @@ export function makeConfig({ offsets, vocab, mult, ngramSize = 3, perNgram = 8, 
   // the multipliers are 45-bit: exact as Numbers, but the products need 64-bit arithmetic (BigInt below)
   for (const x of mult) if (!Number.isSafeInteger(x) || x < 0) throw new Error(`n-gram table: multiplier ${x} is not an exact integer`);
   if (eos == null) throw new Error("n-gram table: no eos_token_id");
+  // llama.cpp qwen4exp set_input: img_tok = image_token_id != 0 ? image_token_id : eos (a missing key reads as 0)
+  if (!image) image = eos;
+  if (!(Number.isInteger(image) && image >= 0)) throw new Error(`n-gram table: image_token_id ${image}`);
   const rowBytes = ggmlTypeBytes(ggmlType, width);
   if (!(rowBytes > 0) || rowBytes % 1) throw new Error(`n-gram table: ${width} values of ggml type ${ggmlType} are not whole blocks`);
   const end = offsets[nHeads - 1] + vocab[nHeads - 1];
@@ -85,7 +89,8 @@ export function ngramRowsOf(cfg, c0, c1, c2, out = new Uint32Array(cfg.nHeads), 
 
 // The tokens before the next one, as the hash sees them: p1 is the previous token, p2 the one before. A predecessor
 // that does not exist (sequence start), or that has an EOS at or after it, reads as EOS; the token's own EOS does
-// not cut its own context (roadmap/33 §1). Image positions are the caller's: it pushes cfg.image for them.
+// not cut its own context (roadmap/33-qwen38-flash.md §1). Image positions are the caller's: it pushes cfg.image for
+// them (the file's image_token_id, or EOS when the key is missing or 0, as llama.cpp's set_input does).
 //
 // push(tokens) hashes the tokens in order and advances; it returns their rows (n x 16, Uint32Array). A short history
 // of states (HIST deep) backs rollback(k): a speculative verify pushes its draft tokens and rolls back the rejected
@@ -105,10 +110,11 @@ export class NgramState {
   push(tokens) { return this._run(tokens, true); }
   _run(tokens, advance) {
     const cfg = this.cfg, E = cfg.eos, n = tokens.length, out = new Uint32Array(n * cfg.nHeads);
+    // every token checked before any state moves: a throw leaves the state as it was
+    for (let i = 0; i < n; i++) if (!(Number.isInteger(tokens[i]) && tokens[i] >= 0)) throw new Error(`n-gram: bad token ${tokens[i]}`);
     let p1 = this.p1, p2 = this.p2;
     for (let i = 0; i < n; i++) {
       const t = tokens[i];
-      if (!(Number.isInteger(t) && t >= 0)) throw new Error(`n-gram: bad token ${t}`);
       ngramRowsOf(cfg, t, p1, p2, out, i * cfg.nHeads);
       if (advance) {
         const s = (this.pos % this.H) * 2;
@@ -217,15 +223,18 @@ export class NgramTable {
       need.set(r, hit || null);
     }
     const miss = [...need.keys()].filter((r) => !need.get(r));
-    let next = 0;
+    // failed: once one read throws, the other loops stop issuing reads (Promise.all has already rejected)
+    let next = 0, failed = false;
     const worker = async () => {
-      while (next < miss.length) {
-        const r = miss[next++], [file, off] = rowAddress(cfg, this.layout, r);
-        const b = await this.readAt(file, off, RB);
-        if (!b || b.byteLength < RB) throw new Error(`n-gram: short read of row ${r} (${b?.byteLength ?? 0} of ${RB} B)`);
-        this.stats.reads++; this.stats.bytes += RB;
-        need.set(r, b.byteLength === RB ? b : b.subarray(0, RB));
-      }
+      try {
+        while (!failed && next < miss.length) {
+          const r = miss[next++], [file, off] = rowAddress(cfg, this.layout, r);
+          const b = await this.readAt(file, off, RB);
+          if (!b || b.byteLength < RB) throw new Error(`n-gram: short read of row ${r} (${b?.byteLength ?? 0} of ${RB} B)`);
+          this.stats.reads++; this.stats.bytes += RB;
+          need.set(r, b.byteLength === RB ? b : b.subarray(0, RB));
+        }
+      } catch (e) { failed = true; throw e; }
     };
     await Promise.all(Array.from({ length: Math.min(this.inflight, miss.length) }, worker));
     for (let i = 0; i < ids.length; i++) dequantRow(cfg, need.get(ids[i]), 0, out, i * W);
@@ -292,14 +301,25 @@ export function opfsReadAt(syncHandles) {
 
 // HTTP range requests. urls[file] is the file's URL (a split head file, or the GGUF shard for layout "tensor").
 // For a cold start only: 16 round trips a token is fine while the OPFS copy fills, not for steady decode.
+// A server that ignores Range answers 200 with the whole file (a split head file is 1.8 GB): that is refused before
+// the body is read, unless the request starts at 0 and Content-Length says the whole file is no bigger than asked.
+// A 206's Content-Range, when the response exposes it (cross-origin it needs Access-Control-Expose-Headers), must
+// start where we asked.
 export function httpReadAt(urls, { fetch: f = globalThis.fetch, headers = {} } = {}) {
   return async (file, off, len) => {
     const url = urls[file];
     if (!url) throw new Error(`n-gram: no URL for file ${file}`);
     const r = await f(url, { headers: { ...headers, Range: `bytes=${off}-${off + len - 1}` } });
-    if (r.status !== 206 && !(r.status === 200 && off === 0)) throw new Error(`n-gram: ${url} answered ${r.status} to a range request`);
+    const hdr = (k) => r.headers?.get?.(k) ?? null;
+    const refuse = (why) => { r.body?.cancel?.()?.catch?.(() => {}); throw new Error(`n-gram: ${url} ${why}`); };
+    if (r.status === 206) {
+      const cr = hdr("content-range"), m = cr && /^bytes (\d+)-/.exec(cr);
+      if (cr && (!m || +m[1] !== off)) refuse(`answered bytes ${cr} to a range request at ${off}`);
+    } else if (r.status === 200) {
+      const cl = hdr("content-length");
+      if (off !== 0 || cl == null || !(+cl <= len)) refuse(`ignored the range request (200, ${cl ?? "no"} Content-Length for ${len} B at ${off})`);
+    } else refuse(`answered ${r.status} to a range request`);
     const b = new Uint8Array(await r.arrayBuffer());
-    // a 200 for a request at 0 is the whole file: keep the asked part
     return b.byteLength > len ? b.subarray(0, len) : b;
   };
 }

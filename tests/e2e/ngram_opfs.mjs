@@ -2,10 +2,13 @@
 // Q4_0 table laid out like the real one (16 prime-sized heads, 160 values a row) inside a fake GGUF shard:
 //   1. HTTP range reads of the shard (layout "tensor") give dequantF32's rows
 //   2. splitHeads copies the table into 16 OPFS files (HTTP range -> createWritable)
-//   3. NgramWorkers (sync access handles in 1 and 4 workers) give the same rows, for hashed token rows and random ones
+//   3. NgramWorkers (sync access handles in 1, 4 and 16 workers) give the same rows, for hashed token rows and random
+//      ones; timings for decode (16 rows a token) and a 2048-token prefill (32,768 rows, cold in the row cache)
 //   4. while the handles are open a second open fails (one table user per origin), and works again after close()
 //   5. a split file of the wrong size is refused at open
-// No WebGPU needed.   node tests/e2e/ngram_opfs.mjs [--rows 4000] [--keep]
+// The timings are on this synthetic table (16 x --rows rows: 5.8 MB at the default 4000, so it sits in the page cache)
+// and say what the OPFS sync-read path costs per call, not what a cold 28.8 GB table on an SSD costs. --rows 1300000
+// makes a 1.9 GB table. No WebGPU needed.   node tests/e2e/ngram_opfs.mjs [--rows 4000] [--workers 1,4,16] [--keep]
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -35,7 +38,7 @@ async function pageMain(args) {
   const res = { out: [], ok: false };
   try { return await pageBody(args, res); } catch (e) { res.out.push(`FAIL ${e.name}: ${e.message}`); return res; }
 }
-async function pageBody({ cfg: plain }, res) {
+async function pageBody({ cfg: plain, workers }, res) {
   const { makeConfig, NgramState, NgramTable, httpReadAt, splitHeads, ngramFileName } = await import("/engine/ngram.js");
   const { NgramWorkers } = await import("/engine/ngram_worker.js");
   const { dequantF32 } = await import("/engine/gguf.js");
@@ -70,7 +73,7 @@ async function pageBody({ cfg: plain }, res) {
   check("splitHeads into 16 OPFS files", sizes, `${(bytes / 2 ** 20).toFixed(1)} MiB in ${(performance.now() - t0).toFixed(0)} ms`);
 
   // 3. workers with sync access handles
-  for (const W of [1, 4]) {
+  for (const W of workers) {
     const t = await NgramWorkers.open(cfg, { dir: ["ngram-e2e"], workers: W });
     const a = await t.rows(hashed), b = await t.rows(random), c = await t.rows(hashed);
     check(`OPFS workers=${W}: hashed rows == dequantF32`, same(a, want(hashed)));
@@ -79,9 +82,17 @@ async function pageBody({ cfg: plain }, res) {
     // decode-shaped timing: 16 rows of one token, cold rows each time (warm page cache; not a disk number)
     const st = new NgramState(cfg), T = 200, t1 = performance.now();
     for (let i = 0; i < T; i++) await t.rows(st.push([(i * 104729 + 7) % 248000]));
-    out.push(`     workers=${W}: ${((performance.now() - t1) / T).toFixed(3)} ms per token (16 rows)`);
+    const decodeMs = (performance.now() - t1) / T;
+    // prefill-shaped: one rows() call for 2048 tokens (other token ids than above; on a small table rows repeat and
+    // some are in the row cache already, so the distinct count is printed)
+    const preRows = new NgramState(cfg).push(Array.from({ length: 2048 }, (_, i) => (i * 7907 + 100003) % 248000));
+    const t2 = performance.now();
+    const pre = await t.rows(preRows);
+    const preMs = performance.now() - t2;
+    check(`OPFS workers=${W}: 2048-token prefill rows == dequantF32`, same(pre, want(preRows)));
+    out.push(`     workers=${W}: ${decodeMs.toFixed(3)} ms per token (16 rows); 2048-token prefill (${preRows.length} rows, ${new Set(preRows).size} distinct): ${preMs.toFixed(0)} ms`);
     // 4. the handles are exclusive
-    if (W === 4) {
+    if (W === Math.max(...workers)) {
       let err = null;
       try { const t2 = await NgramWorkers.open(cfg, { dir: ["ngram-e2e"], workers: 2 }); await t2.close(); } catch (e) { err = e; }
       check("a second open while the handles are held fails", !!err, err ? `${err.name}: ${err.message.slice(0, 80)}` : "it opened");
@@ -112,7 +123,7 @@ try {
   page.on("pageerror", (e) => console.log("pageerror:", e.message));
   await page.goto(`http://127.0.0.1:${PORT}/__blank.html`);
   await page.addScriptTag({ content: pageBody.toString() });
-  res = await page.evaluate(pageMain, { cfg: plainCfg });
+  res = await page.evaluate(pageMain, { cfg: plainCfg, workers: arg("workers", "1,4,16").split(",").map(Number) });
 } catch (e) { console.log("FAIL", e.message); }
 for (const l of res.out) console.log(l);
 console.log(res.ok ? "NGRAM OPFS PASS" : "NGRAM OPFS FAIL");

@@ -1,6 +1,6 @@
 // The n-gram table's OPFS reader (engine/ngram.js), in dedicated workers: FileSystemSyncAccessHandle exists only
 // in a worker, and one handle is exclusive per file, so each worker opens the split head files it owns and reads
-// them synchronously. Several workers give parallel reads (roadmap/33 §1: 16 random reads a token, ~80 µs each
+// them synchronously. Several workers give parallel reads (roadmap/33-qwen38-flash.md §4: 16 random reads a token, ~80 µs each
 // cold, overlapped with layer 0).
 //
 // The same file is the worker script and, imported on the main thread, its client:

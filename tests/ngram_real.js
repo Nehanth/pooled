@@ -55,10 +55,13 @@ const table = new NgramTable(cfg, { readAt: fileReadAt([f]), layout: "tensor" })
 const got = await table.rows(ids);
 check(`${prompt.length} prompt tokens' rows + ${edges.length} edge / padding rows + ${random.length} random rows == dequantF32`, same(got, want), `${ids.length} rows`);
 
-// do they look like an embedding: finite, not all zero (except padding), a sane scale
-let nonFinite = 0, zeroRows = 0, sumAbs = 0, maxAbs = 0;
-const nReal = hashed.length + 32;
-for (let i = 0; i < nReal; i++) {
+// do they look like an embedding: finite, not all zero (except padding), a sane scale. Every row checked that is in a
+// head (the hashed rows, the head edges and the random rows), not the padding rows past the last head.
+let nonFinite = 0, zeroRows = 0, sumAbs = 0, maxAbs = 0, nReal = 0;
+const headsEnd = cfg.offsets[15] + cfg.vocab[15];
+for (let i = 0; i < ids.length; i++) {
+  if (ids[i] >= headsEnd) continue;
+  nReal++;
   let z = true;
   for (let j = 0; j < 160; j++) { const v = got[i * 160 + j]; if (!Number.isFinite(v)) nonFinite++; if (v) z = false; sumAbs += Math.abs(v); maxAbs = Math.max(maxAbs, Math.abs(v)); }
   if (z) zeroRows++;

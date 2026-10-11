@@ -1,11 +1,12 @@
 // The n-gram row source (engine/ngram.js) on synthetic tables: rows must equal engine/gguf.js dequantF32 of the same
 // rows of the whole tensor, for both layouts (the GGUF's tensor, per-head split files), every reader, with and
 // without the row cache; and the predecessor state must give a straight run's rows across batches, rollback and
-// export / import. The hash's agreement with llama.cpp is checked in the reference track (roadmap/33 §5), not here;
-// here it is only checked against the formula written out with BigInt. No GPU.
+// export / import. The hash is checked against the row indices llama.cpp computed (tests/fixtures/q38flash/
+// ngram_rows.json, the fixture tests/unit/q38flash_ngram_test.js checks the reference port against: so both ports are
+// held to the same llama.cpp output) and against the formula written out with BigInt. No GPU.
 //   deno test --allow-read tests/unit/ngram_test.js
 // The real file: tests/ngram_real.js. OPFS in Chrome: tests/e2e/ngram_opfs.mjs.
-import { makeConfig, ngramRowsOf, NgramState, NgramTable, dequantRow, rowAddress, memoryReadAt, fileReadAt, opfsReadAt, httpReadAt,
+import { ngramConfig, makeConfig, ngramRowsOf, NgramState, NgramTable, dequantRow, rowAddress, memoryReadAt, fileReadAt, opfsReadAt, httpReadAt,
   splitHeads } from "../../engine/ngram.js";
 import { dequantF32, f32ToF16, ggmlTypeBytes, GGML_Q4_0, GGML_Q8_0, GGML_F16, GGML_BF16, GGML_F32 } from "../../engine/gguf.js";
 
@@ -124,7 +125,7 @@ Deno.test("bad input: out-of-range rows, short reads", async () => {
   assert(threw, "split address for a padding row");
 });
 
-// the hash written out separately, as roadmap/33 §1 states it
+// the hash written out separately, as roadmap/33-qwen38-flash.md §1 states it
 function refRows(cfg, c0, c1, c2) {
   const m = cfg.mult.map(BigInt), out = [];
   const mix2 = (BigInt(c0) * m[0]) ^ (BigInt(c1) * m[1]), mix3 = mix2 ^ (BigInt(c2) * m[2]);
@@ -160,6 +161,62 @@ Deno.test("state: sequence start and EOS cuts", () => {
   const ctx = [[11, E, E], [22, 11, E], [33, 22, 11], [E, 33, 22], [44, E, E], [55, 44, E], [E, 55, 44], [E, E, E], [66, E, E]];
   ctx.forEach((c, i) => assert(same([...rows.subarray(i * 16, i * 16 + 16)], refRows(cfg, ...c)), `token ${i} (${toks[i]}): wrong context`));
   assert(st.pos === toks.length, "pos");
+});
+
+Deno.test("state: a bad token anywhere in a push changes nothing", () => {
+  const cfg = makeConfig({ ...REAL });
+  const st = new NgramState(cfg);
+  st.push([1, 2]);
+  const s0 = JSON.stringify(st.export()), n0 = st.nHist;
+  for (const bad of [[3, -1], [3, 4, null], [3, 1.5], [3, undefined]]) {
+    let threw = false;
+    try { st.push(bad); } catch { threw = true; }
+    assert(threw, `push(${bad}) accepted`);
+    assert(JSON.stringify(st.export()) === s0 && st.nHist === n0, `push(${bad}) moved the state`);
+  }
+  st.rollback(2);
+  assert(same(st.push([1, 2, 3]), new NgramState(cfg).push([1, 2, 3])), "rollback after a failed push");
+});
+
+Deno.test("config: image token defaults to EOS when the key is missing or 0 (llama.cpp set_input)", () => {
+  const tensors = { "per_layer_token_embd.weight": { ggmlType: GGML_Q4_0, shape: [320001536, 160], byteOffset: 0 } };
+  const meta = { "qwen4exp.ple.head_offsets": REAL.offsets, "qwen4exp.ple.head_vocab_sizes": REAL.vocab, "qwen4exp.ple.layer_multipliers": REAL.mult,
+    "qwen4exp.ple.ngram_size": 3, "qwen4exp.ple.heads_per_ngram": 8, "qwen4exp.ple.eos_token_id": REAL.eos };
+  assert(ngramConfig({ meta, tensors }).image === REAL.eos, "missing key");
+  assert(ngramConfig({ meta: { ...meta, "qwen4exp.ple.image_token_id": 0 }, tensors }).image === REAL.eos, "key = 0");
+  assert(ngramConfig({ meta: { ...meta, "qwen4exp.ple.image_token_id": 248056 }, tensors }).image === 248056, "key set");
+  assert(makeConfig({ ...REAL }).image === REAL.eos, "makeConfig without image");
+  // and it can be pushed like any token
+  const st = new NgramState(makeConfig({ ...REAL }));
+  st.push([7, st.cfg.image, 8]);
+});
+
+Deno.test("hash: rows equal llama.cpp's own indices (tests/fixtures/q38flash/ngram_rows.json)", () => {
+  const FIX = JSON.parse(Deno.readTextFileSync(new URL("../fixtures/q38flash/ngram_rows.json", import.meta.url)));
+  const m = FIX.meta;
+  // the config through ngramConfig, from the fixture's GGUF keys (the tensor entry as the bartowski file has it)
+  const cfg = ngramConfig({ meta: m, tensors: { "per_layer_token_embd.weight": { ggmlType: GGML_Q4_0, shape: [320001536, m["qwen4exp.embedding_length_per_layer_input"]], byteOffset: 0 } } });
+  assert(cfg.image === 248056 && cfg.eos === 248044, "fixture eos / image");
+  assert(FIX.cases.length >= 4, "fixture cases");
+  let n = 0;
+  for (const c of FIX.cases) {
+    // each chunk was one llama_decode on the same sequence: one push per chunk, the state carried between them
+    const st = new NgramState(cfg), all = [];
+    c.chunks.forEach((ids, i) => {
+      const got = st.push(ids);
+      assert(same([...got], c.rows[i]), `${c.name} chunk ${i}: ${[...got].slice(0, 4)}... vs llama.cpp ${c.rows[i].slice(0, 4)}...`);
+      all.push(...got); n += ids.length;
+    });
+    // and token by token, and through export / import between chunks
+    const one = new NgramState(cfg), steps = [];
+    for (const t of c.chunks.flat()) steps.push(...one.push([t]));
+    assert(same(steps, all), `${c.name}: token by token differs`);
+    let st2 = new NgramState(cfg);
+    const viaImport = [];
+    for (const ids of c.chunks) { viaImport.push(...st2.push(ids)); const s = st2.export(); st2 = new NgramState(cfg); st2.import(s); }
+    assert(same(viaImport, all), `${c.name}: export / import between chunks differs`);
+  }
+  assert(n >= 30, `only ${n} fixture tokens`);
 });
 
 Deno.test("state: batches, peek, rollback and export/import all equal one straight run", () => {
@@ -221,15 +278,47 @@ Deno.test("readers: positional file reads (Deno file, Node-style handle), OPFS s
   const fetch206 = async (url, { headers }) => {
     seen.push(headers.Range);
     const [, a, b] = /bytes=(\d+)-(\d+)/.exec(headers.Range).map(Number);
-    return { status: 206, arrayBuffer: async () => whole.slice(a, b + 1).buffer };
+    return { status: 206, headers: new Headers({ "content-range": `bytes ${a}-${b}/${whole.length}` }), arrayBuffer: async () => whole.slice(a, b + 1).buffer };
   };
   assert(same(await httpReadAt(["u"], { fetch: fetch206 })(0, 500, 90), whole.subarray(500, 590)), "HTTP range read");
   assert(seen[0] === "bytes=500-589", `range header ${seen[0]}`);
-  const fetch200 = async () => ({ status: 200, arrayBuffer: async () => whole.slice().buffer });
-  assert(same(await httpReadAt(["u"], { fetch: fetch200 })(0, 0, 90), whole.subarray(0, 90)), "200 at offset 0");
-  let threw = false;
-  try { await httpReadAt(["u"], { fetch: fetch200 })(0, 90, 90); } catch { threw = true; }
-  assert(threw, "a 200 for a range past 0 must not be taken as the range");
+  // a 206 without Content-Range (cross-origin, not exposed) is taken; one for other bytes is not
+  const bare206 = async () => ({ status: 206, arrayBuffer: async () => whole.slice(500, 590).buffer });
+  assert(same(await httpReadAt(["u"], { fetch: bare206 })(0, 500, 90), whole.subarray(500, 590)), "206 without Content-Range");
+  const wrong206 = async () => ({ status: 206, headers: new Headers({ "content-range": `bytes 0-89/${whole.length}` }), arrayBuffer: async () => whole.slice(0, 90).buffer });
+  const throws = async (fn) => { try { await fn(); } catch { return true; } return false; };
+  assert(await throws(() => httpReadAt(["u"], { fetch: wrong206 })(0, 500, 90)), "a 206 for other bytes accepted");
+  // a server that ignores Range: refused before the body is read (a split head file is 1.8 GB), unless the whole
+  // file is no bigger than the request
+  let bodyRead = 0;
+  const fetch200 = (file) => async () => ({ status: 200, headers: new Headers({ "content-length": String(file.length) }),
+    arrayBuffer: async () => { bodyRead++; return file.slice().buffer; } });
+  assert(await throws(() => httpReadAt(["u"], { fetch: fetch200(whole) })(0, 0, 90)), "a 200 with the whole file at offset 0 accepted");
+  assert(await throws(() => httpReadAt(["u"], { fetch: fetch200(whole) })(0, 90, 90)), "a 200 for a range past 0 accepted");
+  assert(bodyRead === 0, `the body of a refused 200 was read ${bodyRead} times`);
+  const small = whole.slice(0, 90);
+  assert(same(await httpReadAt(["u"], { fetch: fetch200(small) })(0, 0, 90), small), "a 200 for a file exactly the asked size");
+  const noLen = async () => ({ status: 200, headers: new Headers(), arrayBuffer: async () => small.slice().buffer });
+  assert(await throws(() => httpReadAt(["u"], { fetch: noLen })(0, 0, 90)), "a 200 without Content-Length accepted");
+});
+
+Deno.test("a failed read stops the other read loops", async () => {
+  const { cfg, shard } = synth();
+  const base = memoryReadAt([null, shard]);
+  let reads = 0;
+  const readAt = async (f, o, n) => {
+    const k = reads++;
+    await new Promise((r) => setTimeout(r, 1));
+    if (k === 0) throw new Error("disk gone");
+    return base(f, o, n);
+  };
+  const t = new NgramTable(cfg, { readAt, layout: "tensor", inflight: 8, cacheRows: 0 });
+  let msg = "";
+  try { await t.rows(Uint32Array.from({ length: 200 }, (_, i) => i)); } catch (e) { msg = e.message; }
+  assert(msg === "disk gone", `rows() gave ${msg || "no error"}`);
+  await new Promise((r) => setTimeout(r, 30));
+  // the 8 loops each had one read in flight when the first failed; none should start another
+  assert(reads <= 8, `${reads} reads issued for a call that failed on its first`);
 });
 
 Deno.test("a table through the HTTP reader, tensor layout, equals dequantF32", async () => {
