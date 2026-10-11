@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { expertDiskReader, expertPart, defaultDiskThreads } from "../expert_disk.js";
 import { parseGGUFHeader, convertEntry, ggmlTypeBytes, GGML_F32, GGML_Q4_0, GGML_Q8_0, GGML_Q4_1, GGML_Q5_K, GGML_Q6_K } from "../../../engine/gguf.js";
 
@@ -158,14 +159,92 @@ test("expertDiskReader: a short read fails that request only; close() stops the 
   await assert.rejects(disk.readPart(info, 3), /short read/);
   same(await disk.readPart(info, 1), want(info, 1), "after a failed read");
   await assert.rejects(disk.readAt(5, 0, 10), /no file for shard 5/);
-  // a read in flight at close() either finished first or fails as closed
-  const pending = disk.readPart(info, 2).then(() => null, (e) => e);
   await disk.close();
   await disk.close();   // twice is fine
-  const err = await pending;
-  if (err) assert.match(err.message, /closed/);
   await assert.rejects(disk.readPart(info, 0), /closed/);
   assert.throws(() => expertDiskReader({ paths: [] }), /paths/);
+});
+
+// a worker that runs expert_disk_worker.js but first does what a job's offset says: OFF_EXIT exits the thread
+// (a crash mid-job), OFF_SLOW blocks it for 300 ms (a read still in flight)
+const OFF_EXIT = 7777, OFF_SLOW = 8888;
+const testWorker = path.join(dir, "test_worker.mjs");
+fs.writeFileSync(testWorker, `import { parentPort } from "node:worker_threads";
+parentPort.on("message", (m) => {
+  if (m.off === ${OFF_EXIT}) process.exit(3);
+  if (m.off === ${OFF_SLOW}) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+});
+await import(${JSON.stringify(new URL("../expert_disk_worker.js", import.meta.url).href)});
+`);
+const testWorkerURL = pathToFileURL(testWorker);
+// p settles within ms, or the test fails as hung
+const within = (p, ms, what) => Promise.race([p, new Promise((_, reject) => setTimeout(() => reject(new Error(`${what}: still pending after ${ms} ms`)), ms).unref())]);
+
+test("expertDiskReader: a worker that dies mid-job fails that read only and is replaced, up to maxRespawns", async () => {
+  const disk = expertDiskReader({ paths, threads: 2, chunkBytes: 4096, ringSlots: 2, maxRespawns: 2, workerURL: testWorkerURL });
+  const info = tensors["blk.0.ffn_gate_exps.weight"];
+  try {
+    same(await disk.readPart(info, 0), want(info, 0), "before");
+    await assert.rejects(within(disk.readAt(0, OFF_EXIT, 16), 2000, "read on a dying worker"), /exited \(3\)/);
+    assert.equal(disk.stats.lost, 1); assert.equal(disk.stats.respawns, 1);
+    for (let e = 0; e < 6; e++) same(await within(disk.readPart(info, e), 2000, "after a respawn"), want(info, e), `after a respawn, expert ${e}`);
+    // two more deaths: the second respawn, then no more; one worker is left and still reads
+    await assert.rejects(within(disk.readAt(0, OFF_EXIT, 16), 2000, "2nd death"), /exited/);
+    await assert.rejects(within(disk.readAt(0, OFF_EXIT, 16), 2000, "3rd death"), /exited/);
+    assert.equal(disk.stats.lost, 3); assert.equal(disk.stats.respawns, 2);
+    same(await within(disk.readPart(info, 5), 2000, "one worker left"), want(info, 5), "one worker left");
+    // the last one dies: every request after it fails at once, and none of them keeps a ring slot
+    await assert.rejects(within(disk.readAt(0, OFF_EXIT, 16), 2000, "last death"), /exited/);
+    for (let i = 0; i < 5; i++) {   // more than ringSlots: a leaked slot would hang the third
+      await assert.rejects(within(disk.readPart(info, i % 6), 2000, `request ${i} after the pool died`), /no worker left/);
+      await assert.rejects(within(disk.readAt(0, 64 * i, 64), 2000, `readAt ${i} after the pool died`), /no worker left/);
+    }
+  } finally { await disk.close(); }
+});
+
+test("expertDiskReader: a pool that cannot start (no worker file) fails every request at once, not only the first", async () => {
+  const disk = expertDiskReader({ paths, threads: 1, ringSlots: 2, workerURL: pathToFileURL(path.join(dir, "missing_worker.mjs")) });
+  const info = tensors["blk.0.ffn_gate_exps.weight"];
+  try {
+    const rs = await within(Promise.allSettled([disk.readPart(info, 0), disk.readPart(info, 1), disk.readAt(0, 0, 64)]), 3000, "the first requests");
+    for (const r of rs) assert.equal(r.status, "rejected");
+    for (let i = 0; i < 4; i++) await assert.rejects(within(disk.readPart(info, i), 1000, `request ${i} later`), /no worker left/);
+    assert.equal(disk.stats.respawns, 0, "a worker that never ran a job is not restarted");
+  } finally { await disk.close(); }
+});
+
+test("expertDiskReader: close() fails a read in flight and one waiting for a slot; leases held stay readable", async () => {
+  const disk = expertDiskReader({ paths, threads: 2, chunkBytes: 4096, ringSlots: 2, workerURL: testWorkerURL });
+  const info = tensors["blk.0.ffn_gate_exps.weight"];
+  const held = await disk.leasePart(info, 0);   // one slot
+  const slow = disk.readAt(0, OFF_SLOW, 16).then(() => null, (e) => e);   // the other, in a worker for 300 ms
+  await new Promise((r) => setTimeout(r, 50));
+  const waiting = disk.leasePart(info, 1).then(() => null, (e) => e);   // no slot left
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(disk.stats.slotWaits, 1);
+  await within(disk.close(), 3000, "close with a lease held");
+  assert.match((await waiting)?.message, /closed/, "the request waiting for a slot");
+  assert.match((await slow)?.message, /closed/, "the read in flight");
+  same(held, want(info, 0), "a lease held across close()");
+  held.release(); held.release();
+  await assert.rejects(disk.leasePart(info, 2), /closed/);
+  await assert.rejects(disk.readAt(0, 0, 16), /closed/);
+});
+
+test("expertDiskReader: callers that share one read get buffers of their own; methods work unbound", async () => {
+  const disk = expertDiskReader({ paths, threads: 2 });
+  try {
+    const { readAt, readPart, readExpert } = disk;
+    const [a, b] = await Promise.all([readAt(0, 100, 64), readAt(0, 100, 64)]);
+    assert.equal(disk.stats.dedup, 1);
+    assert.notEqual(a.buffer, b.buffer);
+    assert.deepEqual(Buffer.from(a), Buffer.from(b));
+    a.fill(0);
+    assert.notDeepEqual(Buffer.from(b), Buffer.alloc(64), "a change to one caller's bytes is not the other's");
+    const trio = ["blk.1.ffn_up_exps.weight", "blk.1.ffn_gate_exps.weight", "blk.1.ffn_down_exps.weight"].map((n) => tensors[n]);
+    (await readExpert(trio, 1)).forEach((got, j) => same(got, want(trio[j], 1), `unbound readExpert ${trio[j].name}`));
+    same(await readPart(trio[0], 0), want(trio[0], 0), "unbound readPart");
+  } finally { await disk.close(); }
 });
 
 test("defaultDiskThreads: POOLED_DISK_THREADS, else up to 16", () => {

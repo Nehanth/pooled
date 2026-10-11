@@ -19,6 +19,18 @@
 //
 // Reads of the same range that overlap in time share one read (in-flight dedup; nothing is kept once it is done:
 // a RAM cache of experts is step 3, T1). POOLED_DISK_THREADS sets the default pool size.
+//
+// A worker that dies (an uncaught error, OOM) fails the chunks it was running and is replaced, up to maxRespawns
+// over the reader's life, once the pool has finished a job (a worker that cannot start at all, say a bundle without
+// expert_disk_worker.js, is not restarted). With no worker left, every request fails at once with that error.
+// There is no in-process fallback here, unlike convert.js: the engine's own reader (engine/expert_disk.js over
+// readAt) is that fallback, and PR 5 picks it when this one fails.
+//
+// Two worker pools in one room node: this one (up to 16 threads, mostly blocked in the kernel on reads) and
+// convert.js's (up to 8, CPU-bound requant of whole tensors, only while a model loads). Both can run at once when a
+// load converts while experts are read, so a node may have up to 24 extra threads; the requant work is the same
+// (convertEntry's requantQ8Streaming on row slices). Before PR 5 wires this in, the two should share one pool or
+// size against each other (roadmap 32, step 2 follow-up).
 import os from "node:os";
 import { ggmlTypeBytes, GGML_F32, GGML_F16, GGML_BF16, GGML_Q4_0, GGML_Q8_0 } from "../../engine/gguf.js";
 
@@ -27,7 +39,7 @@ const MiB = 2 ** 20;
 export function defaultDiskThreads(env = process.env) {
   const n = parseInt(env.POOLED_DISK_THREADS, 10);
   if (n > 0) return Math.min(n, 64);
-  // 16: the GB10's NVMe drive reaches its random-read rate for decode-shaped reads at 16 reads in flight (4.9 GB/s
+  // 16: the GB10's NVMe drive reaches its random-read rate for decode-shaped reads at 16 reads in flight (4.2-4.9 GB/s
   // for Flash's experts, 2.0 at 4; docs/bench-log.md, tests/bench/disk_expert_bench.mjs). The workers spend that
   // time blocked in the kernel, not on a core; a smaller machine gets one fewer than its cores
   return Math.max(1, Math.min(16, (os.availableParallelism?.() ?? os.cpus().length) - 1));
@@ -54,40 +66,56 @@ export function expertPart(info, e) {
 }
 
 export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkBytes = MiB, ringSlots = 32, slotBytes = 4 * MiB,
-  perWorker = 2, workerURL = new URL("./expert_disk_worker.js", import.meta.url) } = {}) {
+  perWorker = 2, maxRespawns = threads, workerURL = new URL("./expert_disk_worker.js", import.meta.url) } = {}) {
   if (!paths?.length) throw new Error("expertDiskReader: paths (one local GGUF file per shard) are required");
   let workers = null, closed = false, seq = 0;
+  let dead = null, worked = false;   // dead: the error every request gets once no worker is left; worked: a job finished
   const jobs = [], waiting = new Map();   // queued chunk jobs; id -> { resolve, reject, w }
   const inflight = new Map();   // range key -> the read every overlapping request shares
-  const stats = { parts: 0, raw: 0, bytes: 0, chunks: 0, readMs: 0, convMs: 0, copyMs: 0, dedup: 0, slotWaits: 0, oversize: 0 };
+  const stats = { parts: 0, raw: 0, bytes: 0, chunks: 0, readMs: 0, convMs: 0, copyMs: 0, dedup: 0, slotWaits: 0, oversize: 0, lost: 0, respawns: 0 };
 
+  // no worker left: fail what is queued and waiting for a slot, and every request from now on
+  function die(err) {
+    dead = new Error(`expert disk reader: no worker left (${String(err?.message || err).split("\n")[0]})`);
+    while (jobs.length) jobs.shift().reject(dead);
+    for (const s of slotWaiters.splice(0)) s.reject(dead);
+  }
+  function spawn(Worker) {
+    const w = new Worker(workerURL, { workerData: { paths: [...paths] } });
+    w.busy = 0;
+    w.unref();   // only a worker with jobs holds the process open (refd in pump)
+    w.on("message", (m) => {
+      const p = waiting.get(m.id); if (!p) return;
+      waiting.delete(m.id);
+      if (--w.busy === 0) w.unref();
+      worked = true;
+      m.error ? p.reject(new Error(m.error)) : p.resolve(m);
+      pump();
+    });
+    const lost = (err) => {   // a worker that died fails the chunks it had; a replacement takes its place
+      if (!workers?.includes(w)) return;
+      workers.splice(workers.indexOf(w), 1);
+      stats.lost++;
+      for (const [id, p] of waiting) if (p.w === w) { waiting.delete(id); p.reject(err); }
+      if (!closed && worked && stats.respawns < maxRespawns) {
+        stats.respawns++;
+        try { workers.push(spawn(Worker)); } catch {}
+      }
+      if (!workers.length) die(err);
+      pump();
+    };
+    w.on("error", (e) => lost(e));
+    w.on("exit", (code) => lost(new Error(`expert disk worker exited (${code})`)));
+    return w;
+  }
   function start() {
     // dynamic import: a bundle or test that never reads from disk never loads worker_threads
     return import("node:worker_threads").then(({ Worker }) => {
       if (workers || closed) return;
       workers = [];
-      for (let i = 0; i < threads; i++) {
-        const w = new Worker(workerURL, { workerData: { paths: [...paths] } });
-        w.busy = 0;
-        w.unref();   // only a worker with jobs holds the process open (refd in pump)
-        w.on("message", (m) => {
-          const p = waiting.get(m.id); if (!p) return;
-          waiting.delete(m.id);
-          if (--w.busy === 0) w.unref();
-          m.error ? p.reject(new Error(m.error)) : p.resolve(m);
-          pump();
-        });
-        const lost = (err) => {   // a worker that died takes its jobs with it; the others go on
-          if (!workers?.includes(w)) return;
-          workers.splice(workers.indexOf(w), 1);
-          for (const [id, p] of waiting) if (p.w === w) { waiting.delete(id); p.reject(err); }
-          if (!workers.length) while (jobs.length) jobs.shift().reject(err);
-          pump();
-        };
-        w.on("error", (e) => lost(e));
-        w.on("exit", (code) => lost(new Error(`expert disk worker exited (${code})`)));
-        workers.push(w);
-      }
+      let err = null;
+      for (let i = 0; i < threads; i++) try { workers.push(spawn(Worker)); } catch (e) { err = e; }
+      if (!workers.length) die(err);
     });
   }
   let starting = null;
@@ -104,6 +132,7 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
   }
   function run(msg) {
     if (closed) return Promise.reject(new Error("expert disk reader is closed"));
+    if (dead) return Promise.reject(dead);
     return new Promise((resolve, reject) => {
       jobs.push({ msg: { id: ++seq, ...msg }, resolve, reject });
       if (workers) pump();
@@ -129,6 +158,8 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
   // request waits for a free slot; readPart and readAt give it back once they have copied out.
   let ring = null, free = [], slotWaiters = [];
   function slotFor(need) {
+    if (closed) return Promise.reject(new Error("expert disk reader is closed"));
+    if (dead) return Promise.reject(dead);
     if (!ring) {
       const per = Math.ceil(slotBytes / 4096) * 4096;
       ring = { per, sab: new SharedArrayBuffer(per * ringSlots) };
@@ -185,15 +216,27 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
     };
   }
 
+  // expert e of one part -> { qs, sc }: plain Uint8Arrays of their own, the engine's layout (what a parked
+  // layer's slices hold; engine/expert_disk.js readPart's contract)
+  async function readPart(info, e) {
+    const l = await leasePart(info, e);
+    const t0 = performance.now();
+    const out = { qs: l.qs.slice(), sc: l.sc.slice() };
+    l.release();
+    stats.copyMs += performance.now() - t0;
+    return out;
+  }
+
   return {
     threads,
     stats,
     // the bytes [byteOffset, byteOffset + byteLength) of one shard -> a Uint8Array of its own (plain memory, not
-    // shared): through ring slots a slot at a time, each slot's bytes in chunkBytes pieces over the workers
+    // shared): through ring slots a slot at a time, each slot's bytes in chunkBytes pieces over the workers. A
+    // request that joins one already in flight gets a copy of its bytes, so callers never share a buffer
     readAt(shard, byteOffset, byteLength) {
       const key = `raw:${shard}:${byteOffset}:${byteLength}`;
       let r = inflight.get(key);
-      if (r) { stats.dedup++; return r; }
+      if (r) { stats.dedup++; return r.then((b) => b.slice()); }
       r = (async () => {
         const out = new Uint8Array(byteLength), per = ring?.per || Math.ceil(slotBytes / 4096) * 4096, pieces = [];
         for (let p0 = 0; p0 < byteLength; p0 += per) pieces.push((async () => {
@@ -216,25 +259,20 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
       return r;
     },
     leasePart,
-    // expert e of one part -> { qs, sc }: plain Uint8Arrays of their own, the engine's layout (what a parked
-    // layer's slices hold; engine/expert_disk.js readPart's contract)
-    async readPart(info, e) {
-      const l = await leasePart(info, e);
-      const t0 = performance.now();
-      const out = { qs: l.qs.slice(), sc: l.sc.slice() };
-      l.release();
-      stats.copyMs += performance.now() - t0;
-      return out;
-    },
-    // expert e of a layer's [gate, up, down] infos, all three at once
-    readExpert(parts, e) { return Promise.all(parts.map((info) => this.readPart(info, e))); },
-    // stops the workers (each closes its fds first); what is still queued or waiting fails
+    readPart,
+    // expert e of a layer's [gate, up, down] infos, all three at once (like readAt, readPart and leasePart: works
+    // unbound, const { readExpert } = disk)
+    readExpert(parts, e) { return Promise.all(parts.map((info) => readPart(info, e))); },
+    // stops the workers (each closes its fds first); what is still queued, running or waiting for a slot fails
+    // now. A lease still held stays readable (its views keep the ring alive); release() after close is a no-op
     async close() {
       if (closed) return;
       closed = true;
       const err = new Error("expert disk reader is closed");
       while (jobs.length) jobs.shift().reject(err);
       for (const w of slotWaiters.splice(0)) w.reject(err);
+      // a chunk still running may write into its slot after this; nothing hands that slot out again
+      for (const [id, p] of waiting) { waiting.delete(id); p.reject(err); }
       await starting?.catch(() => {});
       const ws = workers || [];
       workers = null;
@@ -247,7 +285,6 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
         });
         await w.terminate().catch(() => {});
       }));
-      for (const [id, p] of waiting) { waiting.delete(id); p.reject(err); }
       ring = null; free = [];
     },
   };

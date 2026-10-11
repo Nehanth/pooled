@@ -5,12 +5,15 @@
 // first) and warm (the same sequence again, now cached).
 //
 //   node tests/bench/disk_expert_bench.mjs [model dir or .gguf files]   (default ~/.pooled/models/qwen3.6-35b-moe)
-//   THREADS=1,2,4,8,16  MODES=uv,raw,conv  GB=6 (bytes read per pass: sets the token count; TOKENS=n instead)
+//   THREADS=1,2,4,8,16  MODES=uv,inline,raw,conv  GB=6 (bytes read per pass: sets the token count; TOKENS=n instead)
 //   K=n (default the header's expert_used_count)  CHUNK_KB=1024  COLD=0|1  WARM=0|1  SEED=1  GPU=1 (the upload probes below)
 //
 // Modes:
 //   uv    fs.promises reads, one per part (what source.js does today): libuv's thread pool, UV_THREADPOOL_SIZE
 //         (default 4) reads at a time; THREADS does not apply
+//   inline the uv reads, then convertEntry on the main thread (what engine/expert_disk.js does in process): the
+//         baseline for conv. Run both uv modes with UV_THREADPOOL_SIZE=16 too: at 16 reads in flight libuv reads
+//         raw bytes as fast as the pool does, so the pool's gain is conv against inline, not raw against uv
 //   raw   packages/room-node/expert_disk.js readAt: the three parts' bytes in CHUNK_KB pieces over the worker pool,
 //         no conversion (IO alone)
 //   conv  expert_disk.js readPart: the same reads, converted in the workers to the engine's layout (engine/gguf.js
@@ -75,7 +78,7 @@ const K = +env("K", meta[`${arch}.expert_used_count`] || 8);
 const expBytes = (L) => L.parts.reduce((a, t) => a + expertPart(t, 0).len, 0);
 const perToken = layers.reduce((a, L) => a + K * expBytes(L), 0);
 const TOKENS = +env("TOKENS", Math.max(2, Math.ceil((+env("GB", 6) * GiB) / perToken)));
-const THREADS = list("THREADS", "1,2,4,8,16").map(Number), MODES = list("MODES", "uv,raw,conv");
+const THREADS = list("THREADS", "1,2,4,8,16").map(Number), MODES = list("MODES", "uv,inline,raw,conv");
 const CHUNK = +env("CHUNK_KB", 1024) * 1024;
 const COLD = env("COLD", process.platform === "linux" ? "1" : "0") === "1" && process.platform === "linux", WARM = env("WARM", "1") === "1";
 
@@ -118,23 +121,38 @@ const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return s[Math.mi
 
 // mode, worker count -> a reader (L, e) -> bytes read, and its close()
 function reader(mode, threads) {
-  if (mode === "uv") {
+  if (mode === "uv" || mode === "inline") {
     const fhs = files.map((f) => fs.promises.open(f, "r"));
+    let convMs = 0, n = 0;
     const readRange = async (shard, off, len) => {
       const fh = await fhs[shard], b = Buffer.allocUnsafe(len);
       let o = 0;
       while (o < len) { const { bytesRead } = await fh.read(b, o, len - o, off + o); if (bytesRead <= 0) throw new Error("short read"); o += bytesRead; }
-      return len;
+      return b;
+    };
+    const readOne = async (t, e) => {
+      const p = expertPart(t, e), b = await readRange(p.shard, p.off, p.len);
+      if (mode === "inline") {   // on the event loop, as engine/expert_disk.js converts today
+        const t0 = performance.now();
+        convertEntry({ ggmlType: p.ggmlType, shape: [p.rows, p.cols], nElems: p.rows * p.cols }, b);
+        convMs += performance.now() - t0; n++;
+      }
+      return p.len;
     };
     return {
-      read: async (L, e) => (await Promise.all(L.parts.map((t) => { const p = expertPart(t, e); return readRange(p.shard, p.off, p.len); }))).reduce((a, b) => a + b, 0),
+      read: async (L, e) => (await Promise.all(L.parts.map((t) => readOne(t, e)))).reduce((a, b) => a + b, 0),
       close: async () => { for (const fh of fhs) await (await fh).close(); },
-      extra: () => "",
+      extra: () => (mode === "inline" ? ` | ${(convMs / (n / 3 || 1)).toFixed(2)} | ` : ""),
+      reset: () => { convMs = 0; n = 0; },
     };
   }
   const disk = expertDiskReader({ paths: files, threads, chunkBytes: CHUNK });
-  // the workers started and their read path compiled before the clock starts (4 KiB of the header: no expert's pages)
-  const ready = Promise.all(Array.from({ length: threads * 4 }, () => disk.readAt(0, 0, 4096)));
+  // every worker started and its read path (and for conv, both conversions) compiled before the clock starts:
+  // distinct 4 KiB pieces of the header (one key each, so dedup does not fold them into one read), then for conv one
+  // expert per worker of a Q4_0 layer and of a requantized one. The cold pass drops these pages first
+  const warmLayers = mode === "conv" ? [layers.find((L) => !L.requant), layers.find((L) => L.requant)].filter(Boolean) : [];
+  const ready = Promise.all(Array.from({ length: threads * 4 }, (_, i) => disk.readAt(0, i * 4096, 4096)))
+    .then(async () => { for (const L of warmLayers) await Promise.all(Array.from({ length: threads }, (_, i) => disk.readExpert(L.parts, i % nExp))); });
   const read = mode === "raw"
     ? async (L, e) => (await Promise.all(L.parts.map((t) => { const p = expertPart(t, e); return disk.readAt(p.shard, p.off, p.len).then((b) => b.byteLength); }))).reduce((a, b) => a + b, 0)
     : async (L, e) => { await disk.readExpert(L.parts, e); return expBytes(L); };
@@ -152,7 +170,7 @@ function reader(mode, threads) {
 const GBs = (r) => (r.bytes / 1e9 / r.s).toFixed(2);
 const split = [];   // conv passes: per-expert latency on layers with and without a requantized part
 const row = (mode, threads, kind, r, x) => (mode === "conv" && r.latRq.length && split.push({ threads, kind, r }),
-  console.log(`| ${mode} | ${mode === "uv" ? `libuv ${process.env.UV_THREADPOOL_SIZE || 4}` : threads} | ${kind} | ${GBs(r)} | ${pct(r.lat, 50).toFixed(2)} | ${pct(r.lat, 99).toFixed(2)} | ${pct(r.layer, 50).toFixed(2)} | ${(r.s * 1000 / TOKENS).toFixed(0)}${x} |`));
+  console.log(`| ${mode} | ${mode === "uv" || mode === "inline" ? `libuv ${process.env.UV_THREADPOOL_SIZE || 4}` : threads} | ${kind} | ${GBs(r)} | ${pct(r.lat, 50).toFixed(2)} | ${pct(r.lat, 99).toFixed(2)} | ${pct(r.layer, 50).toFixed(2)} | ${(r.s * 1000 / TOKENS).toFixed(0)}${x} |`));
 
 const sizeGB = files.reduce((a, f) => a + fs.statSync(f).size, 0) / 1e9;
 console.log(`${files.map((f) => path.basename(f)).join(", ")} (${sizeGB.toFixed(1)} GB): ${layers.length} MoE layers, ${nExp} experts, K = ${K}, ` +
@@ -179,7 +197,7 @@ console.log(`${TOKENS} tokens per pass (${(perToken * TOKENS / 1e9).toFixed(1)} 
 console.log("| mode | workers | cache | GB/s | p50 ms / expert | p99 ms / expert | p50 ms / layer | ms / token | convert ms / expert | copy ms / expert |");
 console.log("|---|---|---|---|---|---|---|---|---|---|");
 for (const mode of MODES) {
-  for (const threads of mode === "uv" ? [0] : THREADS) {
+  for (const threads of mode === "uv" || mode === "inline" ? [0] : THREADS) {
     const R = reader(mode, threads);
     try {
       await R.ready;
