@@ -58,6 +58,7 @@ import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS,
 import { pledgeGB, afterLoadDeath, offloadFor } from "../../room/pledge.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes } from "../../engine/gguf.js";
 import { guardChunks } from "../../cli/lib/room.js";
+import { iceSetup, STUN } from "../../cli/lib/relay.js";
 import { parseServer, openPeer, reconnectDelay, FALLBACK_ERRORS } from "../../room/signal.js";
 import { AUTH_V } from "../../room/chanauth.js";
 import { withDefaults, finishRequest, askBody, needsV2, ApiError } from "../../cli/lib/common.js";
@@ -67,7 +68,6 @@ import { hostGate, gateHelloFields, holdConn, allowJoin, denyJoin, waitingJoins,
   keyFragment, randomCode, CODE_LEN } from "./gate.js";
 
 export const PREFIX = "pooled-room-";
-const ICE = { iceServers: [{ urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] }] };
 const CODE_ABC = "ABCDEFGHJKMNPQRSTVWXYZ23456789";   // room/plan.js codeFromLocation's alphabet
 export const randCode = (n = 4) => Array.from(crypto.getRandomValues(new Uint32Array(n)), (x) => CODE_ABC[x % CODE_ABC.length]).join("");
 export const RELINK_MS = 15000;      // how long the host waits for an ai-linked (an older device never sends one)
@@ -109,12 +109,15 @@ export class RoomNode extends EventEmitter {
   constructor({ name, pledgeGB, signal = null, modelDir, flags = "", stripes = 4, log = null, selfTest = true, chatMaxNew = MAX_NEW, ctx = 0,
     gbps = null, autoRedeal = true, ckpt = {}, ckptDisk, visibility = "all", allowApi = true, setup = {}, expectHost = null, key = null, pass = null, beforeLoad = null, split = "memory",
     legacyAuth = process.env.POOLED_LEGACY_AUTH !== "0", legacySend = process.env.POOLED_LEGACY_AUTH === "1",
-    ramGB = 0, mem = null, offloadSpec = parseForce(process.env.POOLED_OFFLOAD_SPEC) } = {}) {
+    ramGB = 0, mem = null, offloadSpec = parseForce(process.env.POOLED_OFFLOAD_SPEC), relay = null } = {}) {
     super();
     // offloadSpec: speculative decoding while the deal has a device offloading experts (room/plan.js
     // specWithOffload): null = off there, on otherwise (the default); true / false = always on / off with offload.
     // POOLED_OFFLOAD_SPEC=1 / 0 sets it from the environment
     this.offloadSpec = offloadSpec === true || offloadSpec === false ? offloadSpec : null;
+    // relay: ask for a TURN relay (cli/lib/relay.js) so links still open when no direct path works (strict NAT
+    // or CGNAT on both ends). Default: on with a public signaling server, off with one on this machine (tests).
+    this.relay = relay ?? !/^(localhost|127\.|\[::1\])/i.test(String(signal ?? ""));
     // ramGB: system RAM this device lets the room park a MoE model's routed experts in when its pledge can't hold
     // its layers (expert offload, room/plan.js offloadNeed; meta.offload / meta.ramGB). 0: it never offloads.
     this.ramGB = +ramGB > 0 ? +ramGB : 0;
@@ -203,6 +206,8 @@ export class RoomNode extends EventEmitter {
     // the first signaling server that answers (room/signal.js openPeer: a server that is down or
     // unreachable hands over to the next; a taken code or a bad id is an answer, not an outage)
     const servers = nodeServers(this.signal);
+    this.ice = this.relay ? await iceSetup({ client: "pooled-room-node", log: this.log }) : { config: { iceServers: [STUN] }, relay: null, stop() {} };
+    if (this.ice.relay) this.log(`relay: ${this.ice.relay} (${this.ice.config.iceTransportPolicy === "relay" ? "every link goes through it" : "links use it only when no direct path works"})`);
     // take connections from the moment the Peer exists: the signaling server can hand one over in the
     // same read as "open" (a device knocking or rejoining while this host starts), before the await
     // below returns, and PeerJS drops a connection event nobody listens to
@@ -210,7 +215,7 @@ export class RoomNode extends EventEmitter {
     const PeerWithAccept = function (pid, o) { const p = new Base(pid, o); p.on("connection", (conn) => { if (!p.destroyed) node.accept(conn); }); return p; };
     let got;
     try {
-      got = await openPeer(PeerWithAccept, id, { debug: 0, config: ICE }, servers, {
+      got = await openPeer(PeerWithAccept, id, { debug: 0, config: this.ice.config }, servers, {
         onTry: (s, i, err) => { if (err) this.log(`signaling: ${servers[i - 1].label} failed (${err.type || err.message}); trying ${s.label}`); },
       });
     } catch (err) {
@@ -1632,6 +1637,7 @@ export class RoomNode extends EventEmitter {
   async close() {
     this.closing = true;
     clearInterval(this.pingTimer); clearInterval(this.knock); clearTimeout(this.ai.idleRedeal);
+    this.ice?.stop();
     // a host closing for good tells the room first (the room page shows it as "Room over"), so no
     // device knocks for a minute waiting for it to come back
     if (this.isHost) try { this.broadcast({ t: "bye", reason: HOST_CLOSED, closed: 1 }); } catch {}
