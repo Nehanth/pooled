@@ -64,6 +64,8 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
   };
   return {
     M, local, url: M.gguf, stat, shards: urls.length,
+    // every file's local path in shard order when the whole model is local (expert_disk.js reads experts from them), else null
+    localPaths: isLocal ? [...locals] : null,
     readAt: files[0].readAt,   // the first file (ckptdisk.js modelFileId)
     bytesOf: (info) => fileOf(info).readAt(info.byteOffset, info.byteLength),
     // the tensors this load will read, in the loader's order ([{ byteOffset, byteLength, shard? }]): streaming,

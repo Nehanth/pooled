@@ -1,0 +1,234 @@
+// The room node's reader for expert offload's disk tier (roadmap/32-ssd-expert-offload.md, step 2): routed experts
+// read from the model's local GGUF files when a layer's experts are not in memory, off the event loop.
+//
+// One expert of a stacked [nExp][rows][cols] tensor is one contiguous range of the file, and decode needs K of them
+// per layer at once. A single synchronous handle reads them one after another (an NVMe drive gives ~1.8 GB/s at
+// queue depth 1 and 5-6 GB/s at 4-8), so here a pool of worker threads, each with its own fd per shard, takes the
+// range in ~1 MiB pieces of whole rows: one expert keeps several reads in flight, K experts keep more. Each worker
+// converts its rows with engine/gguf.js convertEntry (the loader's own conversion: Q4_0 / Q8_0 blocks and the Q8
+// requant never span rows, so the bytes are exactly what the whole tensor's conversion has at that expert) and
+// writes them into a SharedArrayBuffer staging ring: no copy back through postMessage.
+//
+//   const disk = expertDiskReader({ paths: model.localPaths });
+//   const { qs, sc } = await disk.readPart(G.tensors["blk.30.ffn_up_exps.weight"], 17);
+//
+// The contract is engine/expert_disk.js's (PR 1): readPart(info, e) -> { qs, sc } for a header entry with shape
+// [nExp, rows, cols], ggmlType, byteOffset and shard; and readAt(shard, byteOffset, byteLength) -> Uint8Array, so
+// either the engine's in-process reader (expertDisk({ readAt: disk.readAt })) or this one (readPart converts in the
+// workers) can serve the ExpertStore. Not wired into the engine yet.
+//
+// Reads of the same range that overlap in time share one read (in-flight dedup; nothing is kept once it is done:
+// a RAM cache of experts is step 3, T1). POOLED_DISK_THREADS sets the default pool size.
+import os from "node:os";
+import { ggmlTypeBytes, GGML_F32, GGML_F16, GGML_BF16, GGML_Q4_0 } from "../../engine/gguf.js";
+
+const MiB = 2 ** 20;
+
+export function defaultDiskThreads(env = process.env) {
+  const n = parseInt(env.POOLED_DISK_THREADS, 10);
+  if (n > 0) return Math.min(n, 64);
+  // 8 keeps a PCIe 4 NVMe drive near its random-read peak (docs/bench-log.md, disk_expert_bench.mjs) without
+  // taking more cores than a room node can spare
+  return Math.max(1, Math.min(8, (os.availableParallelism?.() ?? os.cpus().length) - 1));
+}
+
+// one expert of a stacked expert tensor: where it is and what it converts to
+export function expertPart(info, e) {
+  if (info.shape?.length !== 3) throw new Error(`expert disk: ${info.name || "tensor"} is not a stacked [nExp][rows][cols] expert tensor`);
+  const [nExp, rows, cols] = info.shape, T = info.ggmlType;
+  if (T === GGML_F32 || T === GGML_F16 || T === GGML_BF16) throw new Error(`expert disk: experts of ggml type ${T} stay f32, not Q4_0 / Q8_0`);
+  const rowBytes = ggmlTypeBytes(T, cols);
+  if (!(rowBytes > 0) || rowBytes % 1 || cols % 32) throw new Error(`expert disk: unsupported ggml type ${T} with ${cols} columns`);
+  if (!(Number.isInteger(e) && e >= 0 && e < nExp)) throw new Error(`expert disk: expert ${e} of ${nExp}`);
+  const kind = T === GGML_Q4_0 ? "q4" : "q8";
+  const nb = (rows * cols) / 32;
+  return {
+    shard: info.shard || 0, off: info.byteOffset + e * rows * rowBytes, len: rows * rowBytes,
+    rows, cols, rowBytes, ggmlType: T, kind,
+    qsRow: kind === "q4" ? cols / 2 : cols,   // converted bytes per row
+    qsBytes: kind === "q4" ? rows * cols / 2 : rows * cols,
+    scBytes: Math.ceil(nb / 2) * 4,   // f16 per block, padded to whole u32 words like convertEntry's Uint32Array
+  };
+}
+
+export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkBytes = MiB, ringSlots = 32, slotBytes = 0,
+  perWorker = 2, workerURL = new URL("./expert_disk_worker.js", import.meta.url) } = {}) {
+  if (!paths?.length) throw new Error("expertDiskReader: paths (one local GGUF file per shard) are required");
+  let workers = null, closed = false, seq = 0;
+  const jobs = [], waiting = new Map();   // queued chunk jobs; id -> { resolve, reject, w }
+  const inflight = new Map();   // range key -> the read every overlapping request shares
+  const stats = { parts: 0, raw: 0, bytes: 0, chunks: 0, readMs: 0, convMs: 0, copyMs: 0, dedup: 0, slotWaits: 0, oversize: 0 };
+
+  function start() {
+    // dynamic import: a bundle or test that never reads from disk never loads worker_threads
+    return import("node:worker_threads").then(({ Worker }) => {
+      if (workers || closed) return;
+      workers = [];
+      for (let i = 0; i < threads; i++) {
+        const w = new Worker(workerURL, { workerData: { paths: [...paths] } });
+        w.busy = 0;
+        w.unref();   // only a worker with jobs holds the process open (refd in pump)
+        w.on("message", (m) => {
+          const p = waiting.get(m.id); if (!p) return;
+          waiting.delete(m.id);
+          if (--w.busy === 0) w.unref();
+          m.error ? p.reject(new Error(m.error)) : p.resolve(m);
+          pump();
+        });
+        const lost = (err) => {   // a worker that died takes its jobs with it; the others go on
+          if (!workers?.includes(w)) return;
+          workers.splice(workers.indexOf(w), 1);
+          for (const [id, p] of waiting) if (p.w === w) { waiting.delete(id); p.reject(err); }
+          if (!workers.length) while (jobs.length) jobs.shift().reject(err);
+          pump();
+        };
+        w.on("error", (e) => lost(e));
+        w.on("exit", (code) => lost(new Error(`expert disk worker exited (${code})`)));
+        workers.push(w);
+      }
+    });
+  }
+  let starting = null;
+  function pump() {
+    while (jobs.length && workers?.length) {
+      let w = null;
+      for (const x of workers) if (x.busy < perWorker && (!w || x.busy < w.busy)) w = x;
+      if (!w) return;
+      const j = jobs.shift();
+      waiting.set(j.msg.id, { resolve: j.resolve, reject: j.reject, w });
+      if (w.busy++ === 0) w.ref();
+      w.postMessage(j.msg);
+    }
+  }
+  function run(msg) {
+    if (closed) return Promise.reject(new Error("expert disk reader is closed"));
+    return new Promise((resolve, reject) => {
+      jobs.push({ msg: { id: ++seq, ...msg }, resolve, reject });
+      if (workers) pump();
+      else (starting ||= start()).then(pump, (e) => { while (jobs.length) jobs.shift().reject(e); });
+    });
+  }
+  // every chunk job of one request, settled; the first error after all of them are done (a chunk still running
+  // would otherwise write into a slot that was handed out again)
+  async function all(ps) {
+    const rs = await Promise.allSettled(ps);
+    const bad = rs.find((r) => r.status === "rejected");
+    if (bad) throw bad.reason;
+    for (const { value: m } of rs) { stats.readMs += m.readMs; stats.convMs += m.convMs; }
+    stats.chunks += rs.length;
+  }
+
+  // the staging ring: ringSlots slots of one converted expert part each, made on first use and sized for it
+  // (slotBytes, or the first part's size with room for a Q4_0 tensor's Q8 neighbours). A larger part gets a
+  // buffer of its own. A request waits for a free slot; readPart gives its slot back once it has copied out.
+  let ring = null, free = [], slotWaiters = [];
+  function slotFor(need) {
+    if (!ring) {
+      const per = Math.ceil(Math.max(slotBytes, need * 2) / 4096) * 4096;
+      ring = { per, sab: new SharedArrayBuffer(per * ringSlots) };
+      free = Array.from({ length: ringSlots }, (_, i) => i);
+    }
+    if (need > ring.per) { stats.oversize++; return Promise.resolve({ sab: new SharedArrayBuffer(need), base: 0, own: true }); }
+    if (free.length) return Promise.resolve({ sab: ring.sab, base: free.pop() * ring.per });
+    stats.slotWaits++;
+    return new Promise((resolve, reject) => slotWaiters.push({ resolve, reject }));
+  }
+  function freeSlot(s) {
+    if (s.own || !ring || s.sab !== ring.sab) return;
+    const w = slotWaiters.shift();
+    if (w) w.resolve(s); else free.push(s.base / ring.per);
+  }
+
+  // one expert part into a slot, its rows split over the workers -> { qs, sc, release() } (views of the ring:
+  // valid until release(); a caller that holds more than ringSlots leases at once waits forever)
+  async function leasePart(info, e) {
+    const p = expertPart(info, e);
+    const key = `${p.shard}:${p.off}`;
+    let r = inflight.get(key);
+    if (r) stats.dedup++;
+    else {
+      r = { refs: 0, slot: null };
+      r.ready = (async () => {
+        const slot = r.slot = await slotFor(p.qsBytes + p.scBytes);
+        const scBase = slot.base + p.qsBytes;
+        new Uint8Array(slot.sab, scBase, p.scBytes).fill(0, ((p.rows * p.cols) / 32) * 2);   // the padding no chunk writes
+        const per = Math.max(1, Math.floor(chunkBytes / p.rowBytes)), ps = [];
+        for (let r0 = 0; r0 < p.rows; r0 += per) {
+          const rc = Math.min(per, p.rows - r0);
+          ps.push(run({ shard: p.shard, off: p.off + r0 * p.rowBytes, len: rc * p.rowBytes, dst: slot.sab, dstOff: slot.base + r0 * p.qsRow,
+            conv: { ggmlType: p.ggmlType, rows: rc, cols: p.cols, scOff: scBase + ((r0 * p.cols) / 32) * 2 } }));
+        }
+        try { await all(ps); } catch (err) { freeSlot(slot); throw err; }
+        stats.parts++; stats.bytes += p.len;
+      })();
+      inflight.set(key, r);
+      r.ready.then(() => inflight.delete(key), () => inflight.delete(key));
+    }
+    r.refs++;
+    try { await r.ready; } catch (err) { r.refs--; throw err; }
+    let done = false;
+    const { sab, base } = r.slot;
+    return {
+      qs: new Uint8Array(sab, base, p.qsBytes), sc: new Uint8Array(sab, base + p.qsBytes, p.scBytes), kind: p.kind,
+      release() { if (done) return; done = true; if (--r.refs === 0) freeSlot(r.slot); },
+    };
+  }
+
+  return {
+    threads,
+    stats,
+    // the bytes [byteOffset, byteOffset + byteLength) of one shard, in chunkBytes pieces over the workers ->
+    // Uint8Array (on a SharedArrayBuffer of its own)
+    readAt(shard, byteOffset, byteLength) {
+      const key = `raw:${shard}:${byteOffset}:${byteLength}`;
+      let r = inflight.get(key);
+      if (r) { stats.dedup++; return r; }
+      r = (async () => {
+        const sab = new SharedArrayBuffer(byteLength), ps = [];
+        for (let o = 0; o < byteLength; o += chunkBytes)
+          ps.push(run({ shard, off: byteOffset + o, len: Math.min(chunkBytes, byteLength - o), dst: sab, dstOff: o }));
+        await all(ps);
+        stats.raw++; stats.bytes += byteLength;
+        return new Uint8Array(sab);
+      })();
+      inflight.set(key, r);
+      r.then(() => inflight.delete(key), () => inflight.delete(key));
+      return r;
+    },
+    leasePart,
+    // expert e of one part -> { qs, sc }: plain Uint8Arrays of their own, the engine's layout (what a parked
+    // layer's slices hold; engine/expert_disk.js readPart's contract)
+    async readPart(info, e) {
+      const l = await leasePart(info, e);
+      const t0 = performance.now();
+      const out = { qs: l.qs.slice(), sc: l.sc.slice() };
+      l.release();
+      stats.copyMs += performance.now() - t0;
+      return out;
+    },
+    // expert e of a layer's [gate, up, down] infos, all three at once
+    readExpert(parts, e) { return Promise.all(parts.map((info) => this.readPart(info, e))); },
+    // stops the workers (each closes its fds first); what is still queued or waiting fails
+    async close() {
+      if (closed) return;
+      closed = true;
+      const err = new Error("expert disk reader is closed");
+      while (jobs.length) jobs.shift().reject(err);
+      for (const w of slotWaiters.splice(0)) w.reject(err);
+      await starting?.catch(() => {});
+      const ws = workers || [];
+      workers = null;
+      await Promise.all(ws.map(async (w) => {
+        w.ref();
+        await new Promise((resolve) => {
+          const t = setTimeout(resolve, 2000);
+          w.on("message", (m) => { if (m.closed) { clearTimeout(t); resolve(); } });
+          w.postMessage({ id: 0, close: true });
+        });
+        await w.terminate().catch(() => {});
+      }));
+      for (const [id, p] of waiting) { waiting.delete(id); p.reject(err); }
+      ring = null; free = [];
+    },
+  };
+}
