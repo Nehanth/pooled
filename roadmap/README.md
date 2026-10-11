@@ -14,7 +14,7 @@ When an issue is filed, it gets the `area:` label of the section it sits in here
 
 ## Big models
 
-- **P1** SSD expert offload: stream a MoE's routed experts from NVMe when VRAM and RAM together can't hold them, below the RAM tier `--ram` already has (#319, #320). The next model size up on a Mac + PC. [32](32-ssd-expert-offload.md)
+- **P1** SSD expert offload: stream a MoE's routed experts from NVMe when VRAM and RAM together can't hold them, below the RAM tier `--ram` already has (#319, #320). First target: the 122B in a browser tab on a Mac Studio alone. [32](32-ssd-expert-offload.md)
 - **P1** 122B in Mac + PC rooms: a split-vs-solo correctness check with experts offloaded, encode-ahead and decode-ahead under offload (off today), and taking the 122B out of `?dev=1`.
 - **P1** Converted-weight cache for the room node: CLI rooms convert and repack every load (the 122B: ~133 s from disk). The browser has one (`room/convertedcache.js`, #250); the room node doesn't.
 - **P2** Expert-split MoE across a room: devices hold different experts of the same layer instead of different layers. [10](10-moe-expert-split.md) ([#10](https://github.com/Nehanth/pooled/issues/10))

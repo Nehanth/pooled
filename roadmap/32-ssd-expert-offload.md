@@ -1,6 +1,6 @@
 # 32 · SSD expert offload
 
-**Phase:** big models · **Status:** PR 1 in progress · **Builds on:** #319 (ExpertStore), #320 (offload in rooms, `--ram`), #323
+**Phase:** big models · **Status:** PR 1 in progress · **First target:** the 122B in a browser tab on the Mac Studio alone · **Builds on:** #319 (ExpertStore), #320 (offload in rooms, `--ram`), #323
 
 ## Why
 
@@ -30,10 +30,15 @@ From the 122B work (scratchpad feasibility study on the 5070 PC, SK hynix P41):
 - NVMe cold random 4 MB reads: 1.8 GB/s at QD 1, 5.2 at QD 4, about 6.2 at QD 8 and up. So reads must be many and in flight at once; one synchronous handle serializes them.
 - mmap'd experts in llama.cpp (GLM-5 on the Spark and the PC) stalled at about 1 GB/s: page faults are latency-bound. Explicit parallel reads, not mmap.
 
-## Targets (estimates, to be replaced by measurements)
+## First target: the 122B in a browser tab on a Mac Studio
+
+The Mac Studio (36 GB unified memory) can't hold the 122B (72.5 GB) today, alone or in a tab. With a disk tier it can: the non-expert weights and the hottest experts stay in memory (about 25 GB lent), and each token's misses come from the model's files in the browser's origin-private file system (OPFS), read in a worker with sync access handles. On unified memory there is no separate VRAM, so the prefill region (1.64 GiB) fits without the region shrink the 5070 needs. A token touches 48 layers x 8 experts x 5.5 MB, about 2.1 GB if nothing is cached; with most of that hitting the in-memory cache, the rest is a few hundred MB from an SSD that reads 5-7 GB/s raw (less through OPFS). Estimate: 5-10 tok/s, to be measured. Order for it: PR 1, then the unified-memory disk tier (8) with an OPFS reader, then the room-node reader and T1 (2, 3), the planner and `--disk` (4, 5), lookahead (6).
+
+## Other targets (estimates, to be replaced by measurements)
 
 | Room | Model | Expected |
 |---|---|---|
+| Mac Studio alone, in a browser tab | 122B Q4_0 | 5-10 tok/s |
 | Mac (host) + 5070 PC with 19 PC layers on disk | 122B Q4_0 | 10.7-13 tok/s; 15-17 with lookahead (17 all in RAM today) |
 | 5070 PC alone (`pooled host --here --disk`), after the region shrink | 122B Q4_0 | 10-11 tok/s; 14-15 with lookahead. Impossible today |
 | Mac + Spark + PC | 397B Q4_0 | 4-5 tok/s; 8-10 with lookahead and a Spark disk tier |
@@ -47,7 +52,7 @@ From the 122B work (scratchpad feasibility study on the 5070 PC, SK hynix P41):
 5. CLI and room node: `--disk` on `host`, `join` and `--here`; docs. First real room: the 122B on Mac + PC with part of the PC on disk.
 6. Router lookahead prefetch.
 7. Region shrink, so the 122B runs on the PC alone.
-8. Unified-memory disk tier (Spark, then Mac).
+8. Unified-memory disk tier (Mac and Spark) with an OPFS reader for browser tabs. **Next after 1**, for the first target.
 9. Layer-major prefill for disk layers.
 10. Qwen3.5-397B-A17B: model entry, 512 experts and K = 10 in the kernels, llama.cpp goldens.
 11. Optional, each only if measured to help: an engine-layout pack file, a cost model for disk placement, a native IO addon.
