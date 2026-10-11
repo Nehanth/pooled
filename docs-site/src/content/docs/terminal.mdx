@@ -17,6 +17,8 @@ Sources (feat/pooled-join 88dc35a, PR #270, stacked on #266; the room page's gat
   room/plan.js; 35B on the RTX 5070 alone about 38-45 tok/s (37.5-44.9 measured on the published 0.4.0) and the 122B Spark/Mac+PC rooms: docs/bench-log.md 2026-10-02 and the
   maintainer's Mac Studio + RTX 5070 run, ~17 tok/s), the 122B (#316; NEED_GB 72 -> the picker's "needs 73 GB"; FILES 72.5 GB),
   help blocks re-copied from `node cli/bin/pooled.js <cmd> --help`
+- --disk (roadmap/32 steps 3-5: cli/lib/lend.js diskRule, DISK_RAM_MIN_GB 2; room/plan.js DISK_RAM_MIN, offloadNeedDisk;
+  engine/expert_t1.js; packages/room-node/shard.js expertReader): help blocks re-copied from `node cli/bin/pooled.js <cmd> --help`
 - cli/lib/lend.js: HELP_JOIN, HELP_HOST, parseGb (at least 1, capped at 64), memoryRule (discrete: free less 1.5 GB;
   unified: total less max(8 GB, 35%); Linux unified: never more than free now less 2 GB; 64 GB cap; half the largest
   buffer when unknown), formatStatus (phases and their words), explainError (messages and hints)
@@ -190,6 +192,17 @@ The header shows `RAM up to N GB`, and the host's log says which layers each dev
 | Qwen3.6 35B MoE on one RTX 5070 (12 GB): `pooled host qwen3.6-35b-moe --here` | about 38-45 tok/s |
 | Qwen3.5 122B MoE on a Mac Studio (lends 25 GB) and an RTX 5070 PC (the rest of the layers, 42 GB of experts in RAM) | about 17 tok/s, matching llama.cpp |
 
+### MoE experts read from disk
+
+With `--disk` (on `pooled join` and `pooled host`, `--here` too), a computer that keeps experts in RAM can also leave some layers' experts in the model's files and read them from the SSD when a token picks them. A RAM cache keeps the experts that are used again, so most tokens read only a few. This lets a computer hold more of a MoE model than its GPU and RAM together.
+
+- The room uses it only when nothing else holds the model: a room that fits with experts in RAM deals exactly as without `--disk`.
+- Each computer first keeps all the experts its `--ram` can hold, and only the rest stay on disk. It keeps at least 2 GB of that RAM for the disk cache.
+- It is slower than experts in RAM: every token waits for some reads. Answers are the same, bit for bit.
+- It needs the model on this computer's disk (`pooled pull`, or the download `pooled join` and `pooled host` do; not `--no-pull`), a discrete GPU and `--ram` of at least 2 GB. Unified memory (Apple silicon, the GB10) doesn't do it yet.
+
+The header shows `disk`, and the host's log says which layers each device reads from disk and how much RAM their cache takes.
+
 ### The status line
 
 The last line of the terminal shows the room, what is happening, the devices, the layers here, the room's speed on its last answer and how many passes ran on this computer:
@@ -258,6 +271,11 @@ Options
                     hold the layers the room needs from it (expert offload: the GPU keeps a cache
                     of them; slower than layers held whole). Discrete GPUs only. Default: total
                     RAM less 16 GB (at most what is free less 4, and 64); 0 never offloads
+  --disk            when even --ram can't hold the experts the room needs from this computer, leave
+                    some layers' experts in the model's files and read them from the SSD when a
+                    token picks them (a RAM cache keeps the ones used again). The room uses it only
+                    when nothing else holds the model, and it is slower again: every token waits
+                    for some reads. Needs --ram (at least 2 GB) and the model downloaded here
   --no-pull         don't download the model: stream this device's layers from Hugging Face
   --no-check        skip the test allocation that confirms the memory is there
   --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
@@ -334,9 +352,10 @@ pooled host qwen3.6-35b-moe --pool --gb 64 --start --yes
 |---|---|
 | `[model]`, `--model <m>` | The model picker. A part of the name works: `35b`. |
 | `--pool` | The "how do you want to run it" question: pooled with other devices, split across all of them. |
-| `--here` | The same question: all of it on this computer, lending what it needs, and it starts by itself. A MoE model that the GPU can't hold keeps some experts in RAM ([MoE experts in system RAM](#moe-experts-in-system-ram)), so a 12 GB GPU runs the 35B. An error when it doesn't fit here. |
+| `--here` | The same question: all of it on this computer, lending what it needs, and it starts by itself. A MoE model that the GPU can't hold keeps some experts in RAM ([MoE experts in system RAM](#moe-experts-in-system-ram)), so a 12 GB GPU runs the 35B; with `--disk`, some experts can stay on disk too ([MoE experts read from disk](#moe-experts-read-from-disk)). An error when it doesn't fit here. |
 | `--gb <n\|max>` | The pledge question. |
 | `--ram <n>` | How much system RAM a MoE model's experts may use when the GPU is short. `0` never does. |
+| `--disk` | When the RAM can't hold the experts either, reads some of them from the model's files ([MoE experts read from disk](#moe-experts-read-from-disk)). |
 | `-y`, `--yes` | Downloads a model that is not on this computer without asking. |
 | `--no-pull` | Doesn't download: this computer streams its layers from Hugging Face on every start. |
 | `--start` | Starts as soon as the pledges hold the model. |
@@ -386,6 +405,8 @@ Usage
     --gb <n|max>           how much this computer lends; skips the pledge question
     --ram <n>              system RAM for a MoE model's experts when the GPU is short (as pooled
                            join): a 12 GB GPU runs the 35B --here this way. 0 never offloads
+    --disk                 when --ram can't hold the experts either, read some of them from the
+                           model's files on the SSD as tokens need them (as pooled join; slower)
     -y, --yes              download the model without asking when it is not on this computer
     --no-pull              don't download: stream this computer's layers from Hugging Face
     --start                start as soon as the room's pledges hold the model

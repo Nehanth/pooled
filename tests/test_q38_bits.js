@@ -24,7 +24,7 @@ const { device } = await gpuDevice();
 const L = model.trunkLayers, tok = model.tokenizer();
 // MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 (tests/load_model.js offloadFromEnv): expert offload must give the same hashes
 // (and with OFFLOAD_DISK=all or a range: those layers' experts read from the file when used, the disk tier)
-const experts = offloadFromEnv(device, L, model);
+const experts = await offloadFromEnv(device, L, model);
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: true, experts });
 const eng = await Qwen35Engine.create({ device, meta: model.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, batchCols: 16, coopRowsB: 1,
   layerFuse: { "0": false, "1": true }[Deno.env.get("LAYER_FUSE")] });   // LAYER_FUSE=0 / 1: the decode layer fusions off / on (unset: the engine default; must not change a bit)

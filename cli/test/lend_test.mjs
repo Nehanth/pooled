@@ -359,3 +359,17 @@ test("explainError: a room short of a model is not a GPU out of memory (\"rOOM\"
   assert.doesNotMatch(x.message, /ran out of memory/);
   assert.match(explainError(new Error("GPU OOM in createBuffer"), {}).message, /ran out of memory/);
 });
+
+test("--disk: parsed on join and host; on only where expert offload is, with RAM for its cache", async () => {
+  const { diskRule, DISK_RAM_MIN_GB } = await import("../lib/lend.js");
+  assert.equal(parseLendArgs("join", ["ABCD", "--disk"]).disk, true);
+  assert.equal(parseLendArgs("join", ["ABCD"]).disk, false);
+  assert.equal(parseLendArgs("host", ["qwen3.6-35b-moe", "--here", "--disk", "--ram", "8"]).disk, true);
+  const pc = { kind: "discrete", name: "RTX 5070", totalGB: 12 };
+  assert.deepEqual(diskRule(pc, false, { gb: 24 }), { on: false, why: "" });
+  assert.deepEqual(diskRule(pc, true, { gb: 24, why: "--ram 24" }), { on: true, why: "--disk" });
+  assert.match(diskRule({ kind: "unified" }, true, { gb: 0 }).why, /not on unified memory/);
+  assert.match(diskRule(pc, true, { gb: 0, why: "--ram 0" }).why, /needs RAM for expert offload \(--ram 0\)/);
+  assert.match(diskRule(pc, true, { gb: DISK_RAM_MIN_GB - 1 }).why, new RegExp(`at least ${DISK_RAM_MIN_GB} GB`));
+  for (const h of [HELP_JOIN, HELP_HOST]) assert.match(h, /--disk/);
+});

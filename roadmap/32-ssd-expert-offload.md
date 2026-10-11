@@ -1,6 +1,6 @@
 # 32 · SSD expert offload
 
-**Phase:** big models · **Status:** PR 1 in progress · **First target:** the 122B in a browser tab on the Mac Studio alone · **Builds on:** #319 (ExpertStore), #320 (offload in rooms, `--ram`), #323
+**Phase:** big models · **Status:** PR 1 in progress; steps 3-5 (T1, planner, `--disk`) in a draft built on it · **First target:** the 122B in a browser tab on the Mac Studio alone · **Builds on:** #319 (ExpertStore), #320 (offload in rooms, `--ram`), #323
 
 ## Why
 
@@ -47,9 +47,9 @@ The Mac Studio (36 GB unified memory) can't hold the 122B (72.5 GB) today, alone
 
 1. **Engine disk tier, correctness first.** `engine/expert_disk.js` (per-expert reads and conversion, injected reader), ExpertStore `attach` / `prepare` / async region loads, the three engine hooks, `OFFLOAD_DISK` in the test loader. Gate: `test_q38_bits` on the 35B with every offloaded layer on disk prints the same hashes as main. A first tok/s baseline in bench-log.
 2. Room-node reader: worker threads, per-worker fds, a staging ring, and a disk benchmark (GB/s, p50/p99 per expert).
-3. T1: a RAM LRU of per-expert MAP_WRITE slots, plus a 3-tier cache simulator over recorded routing traces to size it.
-4. Planner: `meta.disk`, mPark + mDisk splits, deal fields, fuzz tests (rooms that fit without disk deal exactly as before).
-5. CLI and room node: `--disk` on `host`, `join` and `--here`; docs. First real room: the 122B on Mac + PC with part of the PC on disk.
+3. T1: a RAM cache of per-expert MAP_WRITE slots (`engine/expert_t1.js`): segmented LRU, admit-on-second-miss, a reserve of mapped free slots refilled after each submit, `writeBuffer` when none is free. Sized by the 3-tier simulator (`tests/sim/tiersim.js`, landed): 2 GiB at least (`DISK_RAM_MIN`).
+4. Planner: `meta.disk` / `meta.local`, `offloadNeedDisk` (the fewest offloaded layers for the VRAM, then the fewest on disk for the RAM), deal fields `diskLo` / `diskRamBytes`, property tests (rooms that fit without disk deal exactly as before).
+5. CLI and room node: `--disk` on `host`, `join` and `--here`; the worker-thread reader wired in with an in-thread fallback; docs. First real room still to run: the 122B on Mac + PC with part of the PC on disk.
 6. Router lookahead prefetch.
 7. Region shrink, so the 122B runs on the PC alone.
 8. Unified-memory disk tier (Mac and Spark) with an OPFS reader for browser tabs. **Next after 1**, for the first target.

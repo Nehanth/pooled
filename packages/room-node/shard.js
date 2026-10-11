@@ -11,6 +11,9 @@ import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { maxSeqFor, kvModeFor } from "../../room/models.js";
 import { convertPool } from "./convert.js";
 import { ExpertStore } from "../../engine/expert_store.js";
+import { expertDiskReader } from "./expert_disk.js";
+import { expertDisk } from "../../engine/expert_disk.js";
+import fs from "node:fs";
 
 // The tensors a shard's loader reads (engine/gguf.js ggufWeights / qwen35Weights), in about its order,
 // as { byteOffset, byteLength, shard? }: what source.js fetches ahead of it when it streams (shard: the file of a split GGUF)
@@ -33,10 +36,49 @@ export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }
 // layers [lo, hi) are parked in RAM (engine/expert_store.js ExpertStore) with a GPU cache of vramBytes (its slot pools +
 // prefill region) instead of uploaded. ramBytes: what the deal says they park; ramCap: the RAM this device lends
 // less the RAM the deal keeps free there (ramSpare; roomnode.js offloadOk): parking past it fails the load. A Qwen3.5 / 3.6 MoE shard on a room node only.
+// With the disk tier (roadmap/32): diskLo, diskRamBytes: the experts of layers [diskLo, hi) stay in the model's files
+// and are read when a token picks them (expert_disk.js's worker threads, from src.localPaths), through a RAM cache of
+// diskRamBytes (engine/expert_t1.js). diskReader: makes the reader ({ paths } -> expertDiskReader; tests stub it).
 // the layers an ai-load's offload covers within this shard's range, or null for none
 export function offloadLayers(o, range) {
   const lo = Math.max(range[0], +o?.lo || 0), hi = Math.min(range[1], +o?.hi || 0);
   return hi > lo && o.vramBytes > 0 ? Array.from({ length: hi - lo }, (_, i) => lo + i) : null;
+}
+// of those, the ones whose experts stay on disk ([diskLo, hi)), or [] for none
+export const diskLayers = (o, off) => (off && Number.isInteger(o?.diskLo) ? off.filter((l) => l >= o.diskLo) : []);
+
+// The disk tier's reader: expert_disk.js's worker threads, and when they can't run at all (no worker left: a bundle
+// without expert_disk_worker.js, threads that keep dying) the engine's own reader in this thread (engine/expert_disk.js
+// over positional reads of the same files): slower, the same bytes. make: the worker reader (tests stub it).
+export function expertReader({ paths, make = expertDiskReader, log = () => {} }) {
+  const w = make({ paths });
+  let fb = null, fds = null;
+  const inThread = () => {
+    if (fb) return fb;
+    log("expert disk reader: no worker threads, reading experts on the main thread (slower)");
+    fds = new Map();
+    const fh = async (i) => { let f = fds.get(i); if (!f) fds.set(i, f = fs.promises.open(paths[i], "r")); return f; };
+    return fb = expertDisk({ readAt: async (shard, off, len) => {
+      const out = new Uint8Array(len), f = await fh(shard);
+      let o = 0;
+      while (o < len) { const { bytesRead } = await f.read(out, o, len - o, off + o); if (bytesRead <= 0) break; o += bytesRead; }
+      if (o !== len) throw new Error(`short read in ${paths[shard]}: ${o} of ${len} B at ${off}`);
+      return out;
+    } });
+  };
+  return {
+    worker: w,
+    async readPart(info, e) {
+      if (fb) return fb.readPart(info, e);
+      try { return await w.readPart(info, e); }
+      catch (err) { if (!/no worker left/.test(String(err?.message))) throw err; return inThread().readPart(info, e); }
+    },
+    async close() {
+      await w.close?.();
+      for (const f of fds?.values() || []) try { await (await f).close(); } catch {}
+      fds = null;
+    },
+  };
 }
 
 // A model's transformer layers: config.json's num_hidden_layers for a dense GGUF (qwen3-*), the GGUF
@@ -59,7 +101,7 @@ export function checkRange(range) {
 
 // -> { device, engine, tok, cfg, G, tune, gpuErrors, experts }
 export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, null),
-  src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {}, offload = null }) {
+  src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {}, offload = null, diskReader = expertDiskReader }) {
   checkRange(range);
   const M = src.M;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
@@ -101,11 +143,18 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
       const G = out.G = G0;
       out.cfg = { num_hidden_layers: G.meta["qwen35.block_count"] - (G.meta["qwen35.nextn_predict_layers"] || 0) };
       if (needTok) { out.tok = makeTokenizer(tokenizerFromGGUF(G.meta)); out.tok.chatTemplate = G.meta["tokenizer.chat_template"] || ""; }
-      const total = qwen35ShardBytes(G, opts);
-      const off = offload && offloadLayers(offload, range);
+      const off = offload && offloadLayers(offload, range), dl = diskLayers(offload, off);
+      const total = qwen35ShardBytes(G, { ...opts, diskLayers: dl });
       if (off?.length) {
-        out.experts = new ExpertStore(device, { layers: off, vramBytes: offload.vramBytes, ramBytes: +offload.ramCap || Infinity, expectBytes: +offload.ramBytes || 0 });
-        log(`expert offload: layers ${off[0]}-${off[off.length - 1]} park their experts in RAM, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GB GPU cache`);
+        let disk = null;
+        if (dl.length) {
+          if (!src.localPaths) throw new Error("the host asked this device to read experts from disk, but the model's files are not on this device");
+          disk = { layers: dl, reader: expertReader({ paths: src.localPaths, make: diskReader, log }), ramBytes: +offload.diskRamBytes || 0 };
+        }
+        out.experts = new ExpertStore(device, { layers: off, vramBytes: offload.vramBytes, ramBytes: +offload.ramCap || Infinity, expectBytes: +offload.ramBytes || 0, disk });
+        const parked = off.length - dl.length;
+        log(`expert offload: ${parked ? `layers ${off[0]}-${off[parked - 1]} park their experts in RAM` : ""}${parked && dl.length ? "; " : ""}`
+          + `${dl.length ? `layers ${dl[0]}-${dl[dl.length - 1]} read theirs from disk (${(disk.ramBytes / 2 ** 30).toFixed(1)} GB RAM cache)` : ""}, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GB GPU cache`);
       }
       const weights = await qwen35Weights(G, src.bytesOf, { ...opts, experts: out.experts || null }, (done) => onProgress(done, total), upload);
       out.engine = await Qwen35Engine.create({
@@ -133,6 +182,6 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
         log(`expert offload: parked ${(out.experts.parkedBytes / 2 ** 30).toFixed(2)} GiB, more than the ${(offload.ramBytes / 2 ** 30).toFixed(2)} GiB the deal planned (within what this device lends)`);
     }
     return out;
-  } catch (e) { try { device.destroy(); } catch {} throw e; }
+  } catch (e) { await out.experts?.close().catch(() => {}); try { device.destroy(); } catch {} throw e; }
   finally { if (out.G) delete out.G.convert; await pool?.close(); }
 }

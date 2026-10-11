@@ -473,3 +473,17 @@ test("expert offload: a 12 GB GPU with RAM to spare runs the 35B --here, its exp
   const two = roomFitNow(olib, { model: "qwen3.6-35b-moe", devices: [dev("a", 14), dev("pc", 12, { offload: true, ramGB: 48 })] });
   assert.equal(two.fits, true); assert.equal(two.offload, false);
 });
+
+test("--here --disk: a MoE model the GPU and --ram can't hold runs here with some experts read from disk", async () => {
+  const { hereGB, selfMeta } = await import("../lib/hostui.js");
+  const { offloadFor } = await import("../../room/pledge.js");
+  const L = { ...lib, offloadFor }, M = "qwen3.6-35b-moe";
+  assert.equal(hereGB(L, M, { maxGB: 10, ramGB: 8, offGB: 10 }), null, "10 GB of GPU and 8 GB of RAM can't hold the 35B");
+  assert.equal(hereGB(L, M, { maxGB: 10, ramGB: 8, offGB: 10, disk: true }), 10, "with the disk tier they do");
+  const rows = modelRows(L, { keys: [M], pledgeGB: 10, maxGB: 10, ramGB: 8, offGB: 10, diskKeys: new Set([M]) });
+  assert.equal(rows[0].hereGB, 10); assert.ok(rows[0].hereOff && rows[0].hereDisk);
+  const plain = modelRows(L, { keys: [M], pledgeGB: 10, maxGB: 10, ramGB: 48, offGB: 10, diskKeys: new Set([M]) });
+  assert.ok(plain[0].hereOff && !plain[0].hereDisk, "48 GB of RAM: parked, no disk (the last resort)");
+  assert.deepEqual(selfMeta(10, 8, M), { contribGB: 10, webgpu: true, offload: true, ramGB: 8, disk: true, local: [M] });
+  assert.deepEqual(selfMeta(10, 0, M), { contribGB: 10, webgpu: true }, "no RAM: no disk tier");
+});

@@ -16,7 +16,7 @@ const ROOM_URL = "https://pooled.run/r/";
 
 // prepared: lendrun's prepare() result ({ rn, loader, rule, mem, adapterName }); version: for chat
 export async function runHostInteractive(opts, { prepared, version = "" }) {
-  const { rn, loader, rule, mem, ram } = prepared;
+  const { rn, loader, rule, mem, ram, disk } = prepared;
   const lib = { MODELS: rn.MODELS, FILES: rn.FILES, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote,
     shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, dealRoom: rn.dealRoom,
     pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote, offloadFor: rn.offloadFor };
@@ -28,7 +28,9 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   const smallest = Math.min(...keys.map((k) => modelNeedGB(lib, k, opts.ctx || 0) || 99));
   const pd = pledgeDefaults(mem, { maxGB, ruleGB: rule.gb, smallestNeedGB: Math.min(smallest, 4) });
   const pledge0 = opts.gbGiven ? rule.gb : pd.def;
-  const rowsFor = () => modelRows(lib, { keys, pulled, pledgeGB: S?.pledge.gb ?? pledge0, ctxAsk: opts.ctx || 0, maxGB: Math.max(pd.max, pledge0), ramGB: ram?.gb || 0, offGB: rule.gb });
+  // --disk: the disk tier counts for a model on this computer's disk, or one it will pull before it starts
+  const diskKeys = disk?.on ? new Set(opts.noPull ? pulled : keys) : new Set();
+  const rowsFor = () => modelRows(lib, { keys, pulled, pledgeGB: S?.pledge.gb ?? pledge0, ctxAsk: opts.ctx || 0, maxGB: Math.max(pd.max, pledge0), ramGB: ram?.gb || 0, offGB: rule.gb, diskKeys });
   let S = null;
   const rows0 = rowsFor();
   const model0 = opts.modelGiven ? opts.model : recommendModel(rows0);
@@ -56,7 +58,7 @@ export async function runHostInteractive(opts, { prepared, version = "" }) {
   };
 
   region.render(["", `  ${ST.spin(0)} opening a room on this computer…`]);
-  const node = await rn.createRoom({ model: model0, pledgeGB: pledge0, ramGB: ram?.gb || 0, mem, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: dir, ctx: opts.ctx || 0,
+  const node = await rn.createRoom({ model: model0, pledgeGB: pledge0, ramGB: ram?.gb || 0, expertDisk: !!disk?.on, mem, name: opts.name || deviceName(os.hostname()), signal: opts.signal, modelDir: dir, ctx: opts.ctx || 0,
     gate: true, ask: !opts.allowAll, setup: { webgpu: loader }, log, split: opts.split, ...(opts.roomCode ? { code: opts.roomCode } : {}) });
   node.setPledge(pledge0);
   const code = node.code;

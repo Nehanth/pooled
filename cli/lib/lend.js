@@ -13,6 +13,7 @@ export const UNIFIED_KEEP_FRAC = 0.35;  // ... or this share of it, whichever is
 export const LINUX_AVAIL_SLACK_GB = 2;  // unified memory on Linux: never more than what is free now, less this
 export const RAM_KEEP_GB = 16;          // expert offload (--ram): system RAM kept for the OS and other apps
 export const RAM_FREE_SLACK_GB = 4;     // ... and never more than what is free now, less this
+export const DISK_RAM_MIN_GB = 2;       // --disk: the least RAM the room keeps for the disk tier's cache (room/plan.js DISK_RAM_MIN)
 export const UPDATE_HINT = "npx @pooled/cli@latest";
 
 export const HELP_JOIN = `Usage
@@ -45,6 +46,11 @@ Options
                     hold the layers the room needs from it (expert offload: the GPU keeps a cache
                     of them; slower than layers held whole). Discrete GPUs only. Default: total
                     RAM less ${RAM_KEEP_GB} GB (at most what is free less ${RAM_FREE_SLACK_GB}, and ${DESK_MAX_GB}); 0 never offloads
+  --disk            when even --ram can't hold the experts the room needs from this computer, leave
+                    some layers' experts in the model's files and read them from the SSD when a
+                    token picks them (a RAM cache keeps the ones used again). The room uses it only
+                    when nothing else holds the model, and it is slower again: every token waits
+                    for some reads. Needs --ram (at least ${DISK_RAM_MIN_GB} GB) and the model downloaded here
   --no-pull         don't download the model: stream this device's layers from Hugging Face
   --no-check        skip the test allocation that confirms the memory is there
   --wait <min>      after the host has been gone a minute, keep trying to rejoin for this long
@@ -83,6 +89,8 @@ export const HELP_HOST = `Usage
     --gb <n|max>           how much this computer lends; skips the pledge question
     --ram <n>              system RAM for a MoE model's experts when the GPU is short (as pooled
                            join): a 12 GB GPU runs the 35B --here this way. 0 never offloads
+    --disk                 when --ram can't hold the experts either, read some of them from the
+                           model's files on the SSD as tokens need them (as pooled join; slower)
     -y, --yes              download the model without asking when it is not on this computer
     --no-pull              don't download: stream this computer's layers from Hugging Face
     --start                start as soon as the room's pledges hold the model
@@ -146,6 +154,17 @@ export function ramRule(mem, want, { totalGB = 0, freeGB = 0 } = {}) {
   return { gb, why: `${fmtGb(totalGB)} GB of RAM, less ${RAM_KEEP_GB} GB kept for the system` + (freeGB - RAM_FREE_SLACK_GB < totalGB - RAM_KEEP_GB ? `; ${fmtGb(freeGB)} GB is free right now` : "") };
 }
 
+// --disk: expert offload's disk tier (room/plan.js DISK_RAM_MIN, engine/expert_t1.js): only where offload is (a
+// discrete GPU with RAM for experts: ramRule's gb). On unified memory the GPU's memory is the system's, and a disk
+// tier there is a later step (roadmap/32 step 8). want: --disk given; ram: ramRule's answer. -> { on, why }
+export function diskRule(mem, want, ram) {
+  if (!want) return { on: false, why: "" };
+  if (mem?.kind === "unified") return { on: false, why: "--disk: not on unified memory yet (the GPU's memory is the system's RAM)" };
+  if (!(ram?.gb > 0)) return { on: false, why: `--disk needs RAM for expert offload (${ram?.why || "--ram 0"})` };
+  if (ram.gb < DISK_RAM_MIN_GB) return { on: false, why: `--disk needs at least ${DISK_RAM_MIN_GB} GB of --ram for its cache` };
+  return { on: true, why: "--disk" };
+}
+
 // --gb: a positive number of GB, or "max" -> { gb } | { max: true } | null (not given)
 export function parseGb(v) {
   if (v == null) return null;
@@ -159,7 +178,7 @@ export function parseGb(v) {
 const COMMON = {
   gb: { type: "string" }, ram: { type: "string" }, name: { type: "string" }, signal: { type: "string" }, models: { type: "string" },
   "no-check": { type: "boolean" }, "json-log": { type: "boolean" }, quiet: { type: "boolean" }, verbose: { type: "boolean" },
-  "no-pull": { type: "boolean" }, help: { type: "boolean", short: "h" },
+  "no-pull": { type: "boolean" }, disk: { type: "boolean" }, help: { type: "boolean", short: "h" },
 };
 const HOST_OPTS = { model: { type: "string" }, devices: { type: "string" }, wait: { type: "string" }, code: { type: "string" }, ctx: { type: "string" },
   "allow-all": { type: "boolean" }, "deny-unknown": { type: "boolean" }, start: { type: "boolean" }, chat: { type: "boolean" }, split: { type: "string" },
@@ -177,7 +196,7 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
   const o = r.values, pos = r.positionals;
   if (o.help) return { cmd, help: true };
   const out = { cmd, gb: parseGb(o.gb), ram: parseRam(o.ram), name: o.name ? cleanText(o.name, 40) : undefined, signal: o.signal || null,
-    modelDir: o.models || null, check: !o["no-check"], jsonLog: !!o["json-log"], quiet: !!o.quiet, verbose: !!o.verbose, noPull: !!o["no-pull"] };
+    modelDir: o.models || null, check: !o["no-check"], jsonLog: !!o["json-log"], quiet: !!o.quiet, verbose: !!o.verbose, noPull: !!o["no-pull"], disk: !!o.disk };
   if (o.name != null && !out.name) throw new UsageError("--name must not be empty");
   if (cmd === "join") {
     if (pos.length > 1) throw new UsageError(`one room code, not ${pos.length}: ${pos.join(" ")}`);
