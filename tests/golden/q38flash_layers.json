@@ -1,5 +1,5 @@
 {
- "_source": "llama.cpp f2cc728 CPU backend (q38dump: f32 KV, no flash attention, no repacking), bartowski Qwen3.8-Flash-Next-Q4_0; the reference matches these tensors to ~1e-7..1e-4 per op (tests/reference/ref_q38flash.mjs)",
+ "_source": "llama.cpp f2cc728 CPU backend (q38dump: f32 KV, no flash attention, no repacking), bartowski Qwen3.8-Flash-Next-Q4_0, from ~/llm/models/q38flash/dumps/s0; outputs only (no teacher forcing from this file: use the dumps); the reference matches these tensors to ~1e-7..1e-4 per op teacher-forced (tests/reference/ref_q38flash.mjs)",
  "ids": [760,6511,314,9338,369,11751],
  "layers": [
   [{"norm":1.3609,"head":[0.000218161,0.00168544,-0.00420555,0.000541755,0.000198401,0.0177294,0.000840451,0.000968037]},{"norm":2.1146,"head":[-0.000431606,0.00675748,-0.00280803,-0.00204963,-0.00266322,0.0458592,0.00460428,0.00274203]},{"norm":1.20955,"head":[0.000824377,0.0010535,-0.00230733,0.000118347,-0.00180074,0.0111787,0.000253794,-0.000378567]},{"norm":1.69532,"head":[0.000517632,0.00458605,-0.00901244,0.00136015,-0.00284565,0.0303737,0.00382139,0.00399319]},{"norm":1.22099,"head":[0.00107025,0.00386571,-0.00240922,0.00122452,-0.00244498,0.014673,0.00159275,-0.00150772]},{"norm":1.90163,"head":[0.00343242,0.00791002,-0.00374525,-0.0020064,-0.00661978,0.0360309,0.00119757,0.00471876]}],

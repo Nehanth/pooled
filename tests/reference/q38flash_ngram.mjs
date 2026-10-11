@@ -7,7 +7,9 @@
 //   mixed = ctx[0]*m[0] ^ ctx[1]*m[1] [^ ctx[2]*m[2]]      (uint64)
 //   row[(n-2)*perGram + g] = mixed % vocab[h] + offset[h]   for g in 0 .. perGram-1, h = (n-2)*perGram + g
 // The multipliers are 45-bit and token ids are below 2^18, so the products need 63 bits: BigInt, never Number.
-// No file access here, so the Deno unit test can import it.
+// No file access here, so the Deno unit test can import it. engine/ngram.js (draft PR #339) has its own copy of
+// this hash; nothing ties the two together except tests/fixtures/q38flash/ngram_rows.json, the rows llama.cpp
+// itself computed, which both should be tested against.
 
 // The hash constants from GGUF metadata (keys "qwen4exp.ple.*"). parseGGUFHeader returns uint64 as Number;
 // these values are below 2^53, so they are exact, and they become BigInt here.

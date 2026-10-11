@@ -5,9 +5,13 @@
 // Build: copy this directory into a llama.cpp checkout that has qwen4exp (master >= 6c84c7d) as examples/q38dump,
 // add "add_subdirectory(q38dump)" next to eval-callback in examples/CMakeLists.txt, then
 //   cmake -B build -DGGML_CUDA=ON && cmake --build build --target q38dump
-// Run on the CPU backend, f32 KV, no flash attention and no repacking, which is what the reference emulates:
-//   Q38_OUT=dumps Q38_TOKENS="760,6511,314,9338,369,11751;248044,760|6511" \
-//   Q38_FILTER='^(model\.input_embed|hc_init|ple_|hc_mixed|hc_inject|hc_combine|hc_gate|l_last|attn_output|attn_gated|linear_attn_out|final_output|z-|ffn_moe_out|ffn_out|ffn_moe_topk|ffn_moe_weights_norm|ffn_shexp_gated|result_norm|result_output)' \
+// Run on the CPU backend, f32 KV, no flash attention and no repacking, which is what the reference emulates.
+// The dumps the reference was checked against were made with exactly this, from ~/llm/models/q38flash, and live
+// in ~/llm/models/q38flash/dumps (689 MB, 4 sequences; re-running it reproduces them byte for byte):
+//   cd ~/llm/models/q38flash
+//   export Q38_OUT=dumps
+//   export Q38_TOKENS="760,6511,314,9338,369,11751;248044,760,6511,248044,248044,314,9338,248044,369;760,6511,314|9338,248044,369,11751|11751|248044|5|6;248319,248056,0,1,248045,248046,248044,7"
+//   export Q38_FILTER='^(model\.input_embed|hc_init|ple_|hc_mixed|hc_inject|hc_combine|hc_gate|l_last|attn_output|attn_gated|linear_attn_out|final_output|z-|ffn_moe_out|ffn_out|ffn_moe_topk|ffn_moe_weights_norm|ffn_shexp_gated|result_norm|result_output)'
 //   q38dump -m Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf -dev none -ngl 0 -fa off -ctk f32 -ctv f32 -nr -c 256 -t 16 --fit off
 // ';' separates sequences (memory is cleared between them), '|' splits one sequence into consecutive decode
 // calls, so the later chunks read their n-gram predecessors and PLE conv history from the cache.
@@ -25,6 +29,7 @@
 #include <clocale>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <regex>
 #include <sstream>

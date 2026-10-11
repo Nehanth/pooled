@@ -3,20 +3,28 @@
 // and checked against llama.cpp's own tensors, dumped by tests/reference/q38dump (llama.cpp CPU backend, f32 KV,
 // no flash attention, no weight repacking).
 //
-// The math is f32/f64 like the existing refs, with one difference: every matmul quantizes its activations the
-// way llama.cpp's CPU backend does before it multiplies a quantized weight (Q4_0/Q5_0/Q8_0 -> Q8_0 blocks,
-// Q4_1 -> Q8_1, Q6_K -> Q8_K, BF16 -> bf16), then takes the integer dot per block. With plain f32 activations
-// the gap would be ~1e-2 and hide real bugs.
+// The math is f32/f64 like the existing refs, with one difference: by default every matmul quantizes its
+// activations the way llama.cpp's CPU backend does before it multiplies a quantized weight (Q4_0/Q5_0/Q8_0 ->
+// Q8_0 blocks, Q4_1 -> Q8_1, Q6_K -> Q8_K, BF16 -> bf16, F16 -> f16), then takes the integer dot per block.
+// That is what lets it match llama.cpp per op at 1e-5. The engine's decode GEMVs keep f32 activations, so
+// `--act f32` (constructor { act: "f32" }) does that instead; it is ~1e-2 from llama.cpp's tensors (below).
+// Weight types handled: F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q8_0, Q6_K (bartowski Q4_0 uses all but F16 in
+// matmuls); any other type (K-quants other than Q6_K, IQ*) throws. The F16 path rounds activations to f16 as
+// ggml does but sums in its own order, so it is not checked to 1e-5 (no F16 matmul in the file it was built on).
 //
 // Agreement (2026-10-11, 4 sequences, 29 tokens, all 48 layers and the head; 6781 tensors compared):
-//  - teacher-forced: 94% of tensors within 1e-5 relative (L2), 99.1% within 1e-4, the worst 1.4e-3 (an hc_gate);
-//    the same expert sets everywhere, n-gram rows exact, the same argmax at every token
+//  - teacher-forced: 94% of tensors within 1e-5 relative (L2), 99.1% within 1e-4, all within 1e-3 except hc_gate
+//    (judged at 5e-3; worst 1.35e-3); the same expert sets everywhere, n-gram rows exact, the same argmax at
+//    every token
+//  - teacher-forced, --act f32: matmul outputs land around 1e-2 (worst 3.3e-2, hc_gate 1.6e-2, logits
+//    0.9e-2..3.3e-2; 89% of tensors within 1e-2); still the same expert sets and argmax at every token
 //  - free-running (our own tensors chained): Q8 activation rounding is discontinuous, so small differences grow:
 //    with llama.cpp's expert ids forced, layer 47 ends 1.8e-2 off and the logits 2.6e-2, every argmax equal;
 //    left alone, a near-tied router flips an expert from layer 1 on, layer 47 ends ~1e-1 off, and one argmax
 //    of six flips (a 0.24-logit near tie). So a per-layer gate for the engine should be teacher-forced too.
+//    With --act f32 (sequence 0): layer 47 ends 3.6e-2 off with llama.cpp's experts and 9e-2 without; argmax 6/6.
 //
-// What is new against Qwen3.5 (the Qwen3.8-Flash-Next design note, roadmap 33, section 1):
+// What is new against Qwen3.5 (the Qwen3.8-Flash-Next design note, roadmap/33-qwen38-flash.md, section 1):
 //  - hyper-connections: the residual is 4 streams R[4][2560]; every layer norm is a "mix" (per-stream RMS norm,
 //    low-rank sigmoid gate, mean over streams) and every residual add is a "combine" (scaled by 2*sigmoid(inj/4))
 //  - the DeltaNet output gate is sigmoid(z), not silu(z)
@@ -26,13 +34,19 @@
 // does at these lengths.
 //
 // usage:
-//   node tests/reference/ref_q38flash.mjs <seqDir> [--layers N] [--free [--route]] [--tol 1e-3] [--quiet]
+//   node tests/reference/ref_q38flash.mjs <seqDir> [--layers N] [--free [--route]] [--act q8|f32] [--tol 1e-3] [--gate-tol 5e-3] [--quiet]
 //     seqDir: one sequence of q38dump output, chunk dirs c0, c1, ... (shapes.tsv, <name>.<k>.f32, tokens.txt),
-//             decoded in order on one state (n-gram predecessors, PLE conv history, DeltaNet state, KV)
+//             decoded in order on one state (n-gram predecessors, PLE conv history, DeltaNet state, KV).
+//             The dumps behind the numbers above are ~/llm/models/q38flash/dumps/s0..s3 (689 MB, not committed);
+//             tests/reference/q38dump/q38dump.cpp has the exact command that writes them.
 //     --layers N: run layers 0..N-1 (default: all 48, then the head)
 //     --free: chain our own tensors (default: teacher-forced, every tapped tensor is replaced by llama.cpp's
 //             after it is compared, so each op is checked on llama.cpp's exact inputs)
 //     --route: with --free, still take llama.cpp's expert ids (separates routing flips from drift)
+//     --act f32: f32 activations in every matmul, as the engine's decode GEMVs (default q8: llama.cpp's CPU rounding)
+//     --tol: worst relative L2 allowed per tensor; --gate-tol: the same for hc_gate (see the tap below)
+//     Exit 1 when a tensor is over its tolerance, n-gram rows differ, or (teacher-forced or --route) a token's
+//     expert set differs from llama.cpp's.
 //     --quiet: print only tensors off by more than 1e-5
 //   Q38F_DIR=<dir with the 3 GGUF shards> (default models/q38flash)
 import fs from "fs";
@@ -124,20 +138,66 @@ export function openModel(dir = Q38F_DIR) {
   return { meta, tensors, weight, rowOf, close: () => fds.forEach((fd) => fs.closeSync(fd)) };
 }
 
+// Dequantize row r of a weight into out (length cols).
+function dequantRow(w, r, out) {
+  const b = w.bytes, ro = r * w.rowBytes, n = w.cols;
+  switch (w.type) {
+    case T_F32: out.set(new Float32Array(b.buffer.slice(b.byteOffset + ro, b.byteOffset + ro + n * 4))); return out;
+    case T_F16: for (let i = 0; i < n; i++) out[i] = F16[b[ro + 2 * i] | (b[ro + 2 * i + 1] << 8)]; return out;
+    case T_BF16: for (let i = 0; i < n; i++) { _b32[0] = (b[ro + 2 * i] | (b[ro + 2 * i + 1] << 8)) << 16; out[i] = _f32[0]; } return out;
+    case T_Q4_0:
+      for (let k = 0; k < n / 32; k++) {
+        const o = ro + k * 18, d = F16[b[o] | (b[o + 1] << 8)];
+        for (let l = 0; l < 16; l++) { const q = b[o + 2 + l]; out[k * 32 + l] = d * ((q & 15) - 8); out[k * 32 + l + 16] = d * ((q >> 4) - 8); }
+      }
+      return out;
+    case T_Q4_1:
+      for (let k = 0; k < n / 32; k++) {
+        const o = ro + k * 20, d = F16[b[o] | (b[o + 1] << 8)], mn = F16[b[o + 2] | (b[o + 3] << 8)];
+        for (let l = 0; l < 16; l++) { const q = b[o + 4 + l]; out[k * 32 + l] = d * (q & 15) + mn; out[k * 32 + l + 16] = d * (q >> 4) + mn; }
+      }
+      return out;
+    case T_Q5_0:
+      for (let k = 0; k < n / 32; k++) {
+        const o = ro + k * 22, d = F16[b[o] | (b[o + 1] << 8)];
+        const qh = (b[o + 2] | (b[o + 3] << 8) | (b[o + 4] << 16) | (b[o + 5] << 24)) >>> 0;
+        for (let j = 0; j < 16; j++) {
+          const v = b[o + 6 + j], h0 = ((qh >>> j) << 4) & 0x10, h1 = (qh >>> (j + 12)) & 0x10;
+          out[k * 32 + j] = d * (((v & 15) | h0) - 16); out[k * 32 + j + 16] = d * (((v >> 4) | h1) - 16);
+        }
+      }
+      return out;
+    case T_Q8_0:
+      for (let k = 0; k < n / 32; k++) {
+        const o = ro + k * 34, d = F16[b[o] | (b[o + 1] << 8)];
+        for (let j = 0; j < 32; j++) { const v = b[o + 2 + j]; out[k * 32 + j] = d * (v > 127 ? v - 256 : v); }
+      }
+      return out;
+    case T_Q6_K:                        // dequantize_row_q6_K
+      for (let k = 0; k < n / 256; k++) {
+        const o = ro + k * 210, d = F16[b[o + 208] | (b[o + 209] << 8)];
+        for (let half = 0; half < 2; half++) {
+          const ql = o + half * 64, qh = o + 128 + half * 32, sc = o + 192 + half * 8, y = k * 256 + half * 128;
+          const s = (i) => { const v = b[sc + i]; return v > 127 ? v - 256 : v; };
+          for (let l = 0; l < 32; l++) {
+            const is = l >> 4, h = b[qh + l];
+            out[y + l] = d * s(is) * (((b[ql + l] & 15) | ((h & 3) << 4)) - 32);
+            out[y + l + 32] = d * s(is + 2) * (((b[ql + l + 32] & 15) | (((h >> 2) & 3) << 4)) - 32);
+            out[y + l + 64] = d * s(is + 4) * (((b[ql + l] >> 4) | (((h >> 4) & 3) << 4)) - 32);
+            out[y + l + 96] = d * s(is + 6) * (((b[ql + l + 32] >> 4) | (((h >> 6) & 3) << 4)) - 32);
+          }
+        }
+      }
+      return out;
+  }
+  throw new Error(`${w.name}: dequant type ${w.type} not handled`);
+}
+
 // Dequantize a whole weight (small tensors: norms, conv kernels, embedding rows).
 export function dequant(w) {
-  const n = w.rows * w.cols, out = new Float32Array(n), b = w.bytes;
-  if (w.type === T_F32) return new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + n * 4));
-  if (w.type === T_F16) { for (let i = 0; i < n; i++) out[i] = F16[b[2 * i] | (b[2 * i + 1] << 8)]; return out; }
-  if (w.type === T_BF16) { const u = new Uint32Array(out.buffer); for (let i = 0; i < n; i++) u[i] = (b[2 * i] | (b[2 * i + 1] << 8)) << 16; return out; }
-  if (w.type === T_Q4_0) {
-    for (let k = 0; k < n / 32; k++) {
-      const o = k * 18, d = F16[b[o] | (b[o + 1] << 8)];
-      for (let l = 0; l < 16; l++) { const q = b[o + 2 + l]; out[k * 32 + l] = d * ((q & 15) - 8); out[k * 32 + l + 16] = d * ((q >> 4) - 8); }
-    }
-    return out;
-  }
-  throw new Error("dequant: type " + w.type);
+  const out = new Float32Array(w.rows * w.cols);
+  for (let r = 0; r < w.rows; r++) dequantRow(w, r, out.subarray(r * w.cols, (r + 1) * w.cols));
+  return out;
 }
 
 // ---- matmul with llama.cpp's CPU activation quantization ----
@@ -146,6 +206,7 @@ export function dequant(w) {
 function quantAct(x, type) {
   const n = x.length;
   if (type === T_F32) return x;
+  if (type === T_F16) { const y = new Float32Array(n); for (let i = 0; i < n; i++) y[i] = f16round(x[i]); return y; }
   if (type === T_BF16) { const y = new Float32Array(n); for (let i = 0; i < n; i++) y[i] = bf16round(x[i]); return y; }
   if (type === T_Q6_K) {               // quantize_row_q8_K_ref: d = max/-127 with the signed max, kept in f32
     const nb = n / 256, q = new Int8Array(n), d = new Float32Array(nb);
@@ -159,6 +220,7 @@ function quantAct(x, type) {
     }
     return { q, d };
   }
+  if (type !== T_Q4_0 && type !== T_Q4_1 && type !== T_Q5_0 && type !== T_Q8_0) throw new Error("quantAct: type " + type);
   // Q8_0 / Q8_1 (arch/arm quantize_row_q8_0/1): d = amax/127 stored as f16, values scaled by the unrounded 1/d
   const nb = n / 32, q = new Int8Array(n), d = new Float32Array(nb), s = new Float32Array(nb);
   for (let k = 0; k < nb; k++) {
@@ -179,6 +241,8 @@ function dotRow(w, r, a) {
   let acc = 0;
   switch (w.type) {
     case T_F32: { const f = new Float32Array(b.buffer, b.byteOffset + ro, w.cols); for (let i = 0; i < w.cols; i++) acc += f[i] * a[i]; return acc; }
+    // ggml_vec_dot_f16: f16 x f16 products (exact in f32), summed in f32 lanes; the sum order is not emulated
+    case T_F16: { for (let i = 0; i < w.cols; i++) acc += F16[b[ro + 2 * i] | (b[ro + 2 * i + 1] << 8)] * a[i]; return acc; }
     case T_BF16: { for (let i = 0; i < w.cols; i++) { _b32[0] = (b[ro + 2 * i] | (b[ro + 2 * i + 1] << 8)) << 16; acc += _f32[0] * a[i]; } return acc; }
     case T_Q4_0: {
       const q = a.q, d = a.d;
@@ -248,9 +312,25 @@ function dotRow(w, r, a) {
   throw new Error(`${w.name}: matmul type ${w.type} not handled`);
 }
 
-// Y [T x rows] = X [T x cols] W^T
-export function matmul(w, X, T) {
+// Y [T x rows] = X [T x cols] W^T.
+// act "q8" (default): each activation row is quantized for the weight's type as llama.cpp's CPU backend does.
+// act "f32": f32 activations against the dequantized weight row, as the engine's decode GEMVs do (only its dp4a
+// prefill quantizes activations, Q8_1-style). Against the q38dump tensors this lands near 1e-2, not 1e-5.
+export function matmul(w, X, T, act = "q8") {
   const Y = new Float32Array(T * w.rows);
+  if (act === "f32") {
+    const row = new Float32Array(w.cols);
+    for (let r = 0; r < w.rows; r++) {
+      dequantRow(w, r, row);
+      for (let t = 0; t < T; t++) {
+        let acc = 0;
+        for (let i = 0, o = t * w.cols; i < w.cols; i++) acc += row[i] * X[o + i];
+        Y[t * w.rows + r] = acc;
+      }
+    }
+    return Y;
+  }
+  if (act !== "q8") throw new Error("matmul: act must be q8 or f32, not " + act);
   for (let t = 0; t < T; t++) {
     const a = quantAct(X.subarray(t * w.cols, (t + 1) * w.cols), w.type);
     for (let r = 0; r < w.rows; r++) Y[t * w.rows + r] = dotRow(w, r, a);
@@ -280,11 +360,12 @@ function rmsnorm(x, n, eps, w = null) {
 // ---- the model ----
 
 export class Q38FlashRef {
-  // tap(name, tensor, shapeHint) is called for every named tensor (llama.cpp's cb() names); it may return a
-  // replacement (teacher forcing) or nothing.
-  constructor(model, tap = () => null) {
+  // tap(name, tensor) is called for every named tensor (llama.cpp's cb() names); it may return a replacement
+  // (teacher forcing) or nothing. act: "q8" (llama.cpp CPU activation rounding, the default) or "f32" (see matmul).
+  constructor(model, tap = () => null, { act = "q8" } = {}) {
     this.m = model;
     this.tap = tap;
+    this.act = act;
     const M = model.meta, A = (k) => M["qwen4exp." + k];
     this.hp = {
       nLayer: A("block_count"), d: A("embedding_length"), eps: A("attention.layer_norm_rms_epsilon"),
@@ -298,6 +379,7 @@ export class Q38FlashRef {
     this.P = pleParams(M);
     this.vocab = model.tensors["output.weight"].shape[0];
   }
+  mm(w, X, T) { return matmul(w, X, T, this.act); }
   _t(name, x) { const r = this.tap(name, x); return r || x; }
   isRecurrent(il) { return (il + 1) % this.hp.interval !== 0; }
 
@@ -319,9 +401,9 @@ export class Q38FlashRef {
   hcMix(R, T, wNorm, wDown, wUp, wInject, il, tag) {
     const { d, hc, eps } = this.hp, HD = hc * d;
     const xn = rmsnorm(R, d, eps, wNorm);
-    let lo = matmul(wDown, xn, T);
+    let lo = this.mm(wDown, xn, T);
     for (let i = 0; i < lo.length; i++) lo[i] = fr(silu(fr(lo[i] / hc)));
-    const gate = this._t("hc_gate" + tag, matmul(wUp, lo, T));
+    const gate = this._t("hc_gate" + tag, this.mm(wUp, lo, T));
     let mixed = new Float32Array(T * d);
     for (let t = 0; t < T; t++)
       for (let i = 0; i < d; i++) {
@@ -330,7 +412,7 @@ export class Q38FlashRef {
         mixed[t * d + i] = fr(s / hc);
       }
     mixed = this._t(il < 0 ? "result_norm" : "hc_mixed" + tag, mixed);
-    const inject = wInject ? this._t("hc_inject" + tag, matmul(wInject, xn, T)) : null;
+    const inject = wInject ? this._t("hc_inject" + tag, this.mm(wInject, xn, T)) : null;
     return { mixed, inject };
   }
 
@@ -359,8 +441,8 @@ export class Q38FlashRef {
     const { d, hc, eps } = this.hp, HD = hc * d, m = this.m, p = `blk.${il}.`;
     const nk = dequant(m.weight(p + "ple_norm_key.weight")), nq = dequant(m.weight(p + "ple_norm_query.weight"));
     const nc = dequant(m.weight(p + "ple_norm_conv.weight")), cw = dequant(m.weight(p + "ple_conv1d.weight")); // [HD][kern]
-    const key = rmsnorm(matmul(m.weight(p + "ple_key.weight"), emb, T), d, eps, nk);
-    const value = matmul(m.weight(p + "ple_value.weight"), emb, T);
+    const key = rmsnorm(this.mm(m.weight(p + "ple_key.weight"), emb, T), d, eps, nk);
+    const value = this.mm(m.weight(p + "ple_value.weight"), emb, T);
     const query = rmsnorm(R, d, eps, nq);
     let gate = new Float32Array(T * hc);
     for (let t = 0; t < T; t++)
@@ -400,9 +482,9 @@ export class Q38FlashRef {
   deltaNet(st, il, x, T) {
     const { eps, dConv, dState, nKH, nVH, dInner } = this.hp, m = this.m, p = `blk.${il}.`;
     const keyDim = dState * nKH, convDim = 2 * keyDim + dInner, K1 = dConv - 1;
-    const qkv = matmul(m.weight(p + "attn_qkv.weight"), x, T);
-    const z = this._t(`z-${il}`, matmul(m.weight(p + "attn_gate.weight"), x, T));
-    const beta = matmul(m.weight(p + "ssm_beta.weight"), x, T), alpha = matmul(m.weight(p + "ssm_alpha.weight"), x, T);
+    const qkv = this.mm(m.weight(p + "attn_qkv.weight"), x, T);
+    const z = this._t(`z-${il}`, this.mm(m.weight(p + "attn_gate.weight"), x, T));
+    const beta = this.mm(m.weight(p + "ssm_beta.weight"), x, T), alpha = this.mm(m.weight(p + "ssm_alpha.weight"), x, T);
     const dtB = dequant(m.weight(p + "ssm_dt.bias")), A = dequant(m.weight(p + "ssm_a"));
     const cw = dequant(m.weight(p + "ssm_conv1d.weight")), nw = dequant(m.weight(p + "ssm_norm.weight"));
     const S = st.S, conv = st.conv, scale = 1 / Math.sqrt(dState);
@@ -436,7 +518,7 @@ export class Q38FlashRef {
     out = rmsnorm(out, dState, eps, nw);
     for (let i = 0; i < out.length; i++) out[i] = fr(out[i] * fr(sigmoid(z[i])));
     out = this._t(`final_output-${il}`, out);
-    return this._t(`linear_attn_out-${il}`, matmul(m.weight(p + "ssm_out.weight"), out, T));
+    return this._t(`linear_attn_out-${il}`, this.mm(m.weight(p + "ssm_out.weight"), out, T));
   }
 
   // RoPE on the first nRot dims of each head, NeoX pairs (i, i + nRot/2); text positions are equal in every
@@ -457,8 +539,8 @@ export class Q38FlashRef {
   // Gated full attention (qwen4exp.cpp:932-1017), dense causal (== QSA below 2051 cells)
   attention(st, il, x, T) {
     const { eps, nH, nKV, hd } = this.hp, m = this.m, p = `blk.${il}.`;
-    const qf = matmul(m.weight(p + "attn_q.weight"), x, T), kr = matmul(m.weight(p + "attn_k.weight"), x, T);
-    const vr = matmul(m.weight(p + "attn_v.weight"), x, T);
+    const qf = this.mm(m.weight(p + "attn_q.weight"), x, T), kr = this.mm(m.weight(p + "attn_k.weight"), x, T);
+    const vr = this.mm(m.weight(p + "attn_v.weight"), x, T);
     const qn = dequant(m.weight(p + "attn_q_norm.weight")), kn = dequant(m.weight(p + "attn_k_norm.weight"));
     let out = new Float32Array(T * nH * hd);
     for (let t = 0; t < T; t++) {
@@ -483,14 +565,14 @@ export class Q38FlashRef {
       for (let i = 0; i < nH * hd; i++) out[t * nH * hd + i] = fr(out[t * nH * hd + i] * fr(sigmoid(g[i])));
     }
     out = this._t(`attn_gated-${il}`, out);
-    return this._t(`attn_output-${il}`, matmul(m.weight(p + "attn_output.weight"), out, T));
+    return this._t(`attn_output-${il}`, this.mm(m.weight(p + "attn_output.weight"), out, T));
   }
 
   // MoE (qwen4exp.cpp:1146-1194): softmax over all experts, top-K renormalised, SwiGLU experts, plus the
   // shared expert times sigmoid(gate_inp_shexp . x)
   moe(il, x, T) {
     const { d, nExp, nUsed } = this.hp, m = this.m, p = `blk.${il}.`;
-    const logits = matmul(m.weight(p + "ffn_gate_inp.weight"), x, T);
+    const logits = this.mm(m.weight(p + "ffn_gate_inp.weight"), x, T);
     let top = new Int32Array(T * nUsed), wts = new Float32Array(T * nUsed);
     for (let t = 0; t < T; t++) {
       const lg = logits.subarray(t * nExp, (t + 1) * nExp);
@@ -519,9 +601,9 @@ export class Q38FlashRef {
       return cache.get(e);
     };
     const swiglu = (wg, wu, wd, xt) => {
-      const g = matmul(wg, xt, 1), u = matmul(wu, xt, 1), h = new Float32Array(g.length);
+      const g = this.mm(wg, xt, 1), u = this.mm(wu, xt, 1), h = new Float32Array(g.length);
       for (let i = 0; i < g.length; i++) h[i] = fr(fr(silu(g[i])) * u[i]);
-      return matmul(wd, h, 1);
+      return this.mm(wd, h, 1);
     };
     for (let t = 0; t < T; t++) {
       const xt = x.subarray(t * d, (t + 1) * d);
@@ -531,7 +613,7 @@ export class Q38FlashRef {
       }
     }
     moe = this._t(`ffn_moe_out-${il}`, moe);
-    const sg = matmul(m.weight(p + "ffn_gate_inp_shexp.weight"), x, T);
+    const sg = this.mm(m.weight(p + "ffn_gate_inp_shexp.weight"), x, T);
     const [wg, wu, wd] = [m.weight(p + "ffn_gate_shexp.weight"), m.weight(p + "ffn_up_shexp.weight"), m.weight(p + "ffn_down_shexp.weight")];
     let sh = new Float32Array(T * d);
     for (let t = 0; t < T; t++) {
@@ -568,7 +650,7 @@ export class Q38FlashRef {
     st.pos += T;
     if (nLayers < this.hp.nLayer) return { R, logits: null };
     const { mixed } = this.hcMix(R, T, dequant(m.weight("output_hc_norm.weight")), m.weight("output_hc_down.weight"), m.weight("output_hc_up.weight"), null, -1, "");
-    return { R, logits: this._t("result_output", matmul(m.weight("output.weight"), mixed, T)) };
+    return { R, logits: this._t("result_output", this.mm(m.weight("output.weight"), mixed, T)) };
   }
 }
 
@@ -596,11 +678,14 @@ export function relErr(a, b) {
 async function main() {
   const args = process.argv.slice(2), dir = args[0];
   const opt = (k, dflt) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : dflt; };
-  if (!dir) { console.error("usage: node tests/reference/ref_q38flash.mjs <seqDir> [--layers N] [--free [--route]] [--tol 1e-3] [--quiet]"); process.exit(2); }
+  if (!dir) { console.error("usage: node tests/reference/ref_q38flash.mjs <seqDir> [--layers N] [--free [--route]] [--act q8|f32] [--tol 1e-3] [--gate-tol 5e-3] [--quiet]"); process.exit(2); }
   const nLayers = +opt("--layers", 48), free = args.includes("--free"), route = args.includes("--route"), tol = +opt("--tol", 1e-3);
-  const quiet = args.includes("--quiet");
+  const gateTol = +opt("--gate-tol", 5e-3), act = opt("--act", "q8"), quiet = args.includes("--quiet");
+  // expert sets are judged whenever llama.cpp's inputs are fed back (teacher-forced, or --route); left free,
+  // a near-tied router may legitimately pick another expert
+  const judgeExperts = !free || route;
   const chunks = fs.readdirSync(dir).filter((f) => /^c\d+$/.test(f)).sort((a, b) => +a.slice(1) - +b.slice(1));
-  let dump = null, seen = null, rows = null, worst = 0, ids = null;
+  let dump = null, seen = null, rows = null, worst = 0, worstGate = 0, expertMiss = 0, ids = null;
   const tap = (name, x) => {
     const k = seen.get(name) || 0;
     seen.set(name, k + 1);
@@ -614,18 +699,20 @@ async function main() {
         for (let t = 0; t < ids.length; t++) { const a = new Set(x.subarray(t * kk, (t + 1) * kk)); for (let j = 0; j < kk; j++) if (!a.has(ref[t * kk + j])) bad++; }
       } else for (let i = 0; i < ref.length; i++) if (ref[i] !== x[i]) bad++;
       rows.push([key, bad ? `${bad} differ` : "exact"]);
-      if (bad && !name.startsWith("ffn_moe_topk")) worst = Infinity;
+      if (bad && name.startsWith("ffn_moe_topk")) expertMiss += bad;
+      else if (bad) worst = Infinity;
       return free && !(route && name.startsWith("ffn_moe_topk")) ? null : ref;
     }
     if (ref.length !== x.length) { rows.push([key, `size ${x.length} vs ${ref.length}`]); worst = Infinity; return null; }
     const { rel, max } = relErr(x, ref);
     rows.push([key, `rel ${rel.toExponential(2)}  max|d| ${max.toExponential(2)}`]);
-    // hc_gate (the mixer's pre-sigmoid gate) is printed but not judged: one Q8 rounding flip in its 320-wide
-    // input moves it by up to ~1e-3 while the hc_mixed it feeds stays at ~1e-7
-    if (!name.startsWith("hc_gate")) worst = Math.max(worst, rel);
+    // hc_gate (the mixer's pre-sigmoid gate) gets its own, looser tolerance: one Q8 rounding flip in its 320-wide
+    // input moves it by up to ~1.4e-3 while the hc_mixed it feeds stays at ~1e-7
+    if (name.startsWith("hc_gate")) worstGate = Math.max(worstGate, rel);
+    else worst = Math.max(worst, rel);
     return free ? null : Float32Array.from(ref);
   };
-  const ref = new Q38FlashRef(openModel(), tap);
+  const ref = new Q38FlashRef(openModel(), tap, { act });
   const st = ref.newState();
   const t0 = performance.now();
   for (const c of chunks) {
@@ -641,9 +728,10 @@ async function main() {
       for (let t = 0; t < ids.length; t++) console.log(`  token ${t}: argmax ours ${am(logits, t)} llama.cpp ${d ? am(d, t) : "?"}`);
     }
   }
-  const mode = free ? (route ? "free-running, llama.cpp's experts" : "free-running") : "teacher-forced";
-  console.log(`${mode}, layers 0..${nLayers - 1}: worst rel ${worst.toExponential(2)} (tol ${tol}) in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
-  process.exit(worst <= tol ? 0 : 1);
+  const mode = (free ? (route ? "free-running, llama.cpp's experts" : "free-running") : "teacher-forced") + `, ${act} activations`;
+  console.log(`${mode}, layers 0..${nLayers - 1}: worst rel ${worst.toExponential(2)} (tol ${tol}), hc_gate ${worstGate.toExponential(2)} ` +
+    `(tol ${gateTol}), expert ids not in llama.cpp's set: ${expertMiss}${judgeExperts ? "" : " (not judged)"} in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+  process.exit(worst <= tol && worstGate <= gateTol && !(judgeExperts && expertMiss) ? 0 : 1);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) main();
