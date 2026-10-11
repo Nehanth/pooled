@@ -45,7 +45,7 @@ import { loadShard } from "./shard.js";
 import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { unpackWire } from "../../room/wire.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
-import { verifyHost, hostAllowed, startBusy, joinOrder } from "../../room/authz.js";
+import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
@@ -304,7 +304,7 @@ export class RoomNode extends EventEmitter {
   hostDealing(from) {
     const ai = this.ai;
     if (!ai.dealer || !this.dealerHere()) ai.dealer = from;
-    if (from === ai.dealer) ai.dealerActive = true;
+    if (from === ai.dealer) { ai.dealerActive = true; clearTimeout(ai.followTimer); }
   }
   dealerHere() { return !!this.ai.dealer && this.roomView().has(this.ai.dealer); }
   // a stripe (an extra association for the wire) joins the link's wire once it proved the mesh key
@@ -424,7 +424,12 @@ export class RoomNode extends EventEmitter {
     if (e?.hold && !PASS_HELD.has(obj?.t)) { if (e.hold.out.length < HELD_MAX) e.hold.out.push(obj); return; }
     try { e?.conn.send(obj); } catch {}
   }
-  broadcast(obj, filter = () => true) { for (const [id, e] of this.conns) if (filter(id, e)) this.sendTo(id, obj); }
+  // a start this node dealt failed: free for the next Start (room/authz.js)
+  clearDealer() { const ai = this.ai; ai.dealer = null; ai.dealerActive = false; ai.startAt = null; clearTimeout(ai.followTimer); }
+  broadcast(obj, filter = () => true) {
+    if (obj?.t === "ai-start-failed") this.clearDealer();
+    for (const [id, e] of this.conns) if (filter(id, e)) this.sendTo(id, obj);
+  }
   sendHidden(id, msg) {
     const e = this.conns.get(id);
     this.sent ||= { wire: 0, msg: 0 };
@@ -658,19 +663,24 @@ export class RoomNode extends EventEmitter {
         // its own model, so it refuses any other boss (verifyHost: fixedHost) and relays nothing
         {
           if (!MODELS[d.model]) return;
-          const busy = startBusy({ boss: d.boss, dealer: ai.dealer, dealerHere: this.dealerHere(), dealing: ai.dealerActive,
+          // only the creator's (its own, or one it checked): a member's copy sent here directly is ignored
+          if (!startFrom({ from, creator: PREFIX + this.code, isCreator: this.isHost })) return;
+          const busy = startBusy({ boss: d.boss, self: this.peer.id, dealer: ai.dealer, dealerHere: this.dealerHere(), dealing: ai.dealerActive,
             running: !!ai.engine || ai.online || ai.starting || !!ai.loadingShard || ai.role === "worker", pendingSince: ai.startAt, now: performance.now() });
           if (busy === "replay") return;
           const r = busy ? { ok: false, why: busy } : this.checkHost(d.boss, d.ids, from);
           if (!r.ok) { if (busy) this.log(`ignored ${d.by || "a device"}'s Start: ${busy}`); this.sendTo(from, { t: "ai-start-refused", by: this.name, why: r.why, ...(d.rq ? { rq: d.rq } : {}) }); return; }
         }
         ai.dealer = d.boss; ai.dealerActive = false; ai.startAt = performance.now();
+        // a host that never starts dealing doesn't hold this node: give up after START_PENDING_MS
+        clearTimeout(ai.followTimer);
+        if (d.boss !== this.peer.id) { ai.followTimer = setTimeout(() => { if (!ai.dealerActive && ai.dealer === d.boss) { this.log(`${d.by || "a device"}'s Start: its host didn't start dealing`); this.clearDealer(); } }, START_PENDING_MS); ai.followTimer.unref?.(); }
         if (d.boss === this.peer.id) { if (!this.hosting()) { this.modelHost = true; ai.role = "host"; } this.start(d.model).catch((err) => this.log("start failed: " + err.message)); }
         else ai.hostId = d.boss;
         return;
       case "ai-modelhost":   // the room's creator names the host it checked (a Start it saw): take it until it deals
         if (this.isHost || from !== PREFIX + this.code || typeof d.id !== "string" || this.dealerHere()) return;
-        ai.hostId = d.id;
+        ai.hostId = d.id; ai.dealer = d.id; ai.dealerActive = true;   // follow it: busy for a Start naming another device
         return;
       // --- worker
       case "ai-load": return this.workerLoad(from, d);
@@ -683,7 +693,7 @@ export class RoomNode extends EventEmitter {
       case "ai-layers":
         if (ai.role === "worker" && !d.by?.[this.name]) this.freeLayers("guest");
         return;
-      case "ai-start-failed": ai.dealer = null; ai.dealerActive = false; ai.startAt = null; ai.startFailed = d.why || "stopped"; if (!ai.loadingShard) this.freeLayers(null); this.emit("startfailed", d.why); return;
+      case "ai-start-failed": this.clearDealer(); ai.startFailed = d.why || "stopped"; if (!ai.loadingShard) this.freeLayers(null); this.emit("startfailed", d.why); return;
       case "ai-ready-all": ai.online = true; ai.model = d.model; if (!ai.role) ai.role = "guest";
         // the host opened the model at its fallback context (room/models.js pickCtx): say so
         ai.ctxNote = d.ctxWant > d.ctx && MODELS[d.model] ? ctxShortNote(String(MODELS[d.model].label).split("·")[0].trim(), d.ctx, d.ctxWant) : "";

@@ -37,6 +37,10 @@
 //                  the 24 GB device presses Start and runs the model (the review of 2a1cf4b).
 //   slowstart      a phone presses Start, the room's pick holds its own load for 52 s: the phone keeps
 //                  waiting (it doesn't say the model didn't start) and comes online once the load ends.
+//   fresh          a newcomer joins a room that has been up a while; a member links to it straight away and sends it
+//                  a Start naming itself (leaving out the bigger device), its own ai-ready-all and a token: the
+//                  newcomer follows none of it; then the room's pick presses Start and runs the model.
+//   restart        the pick's start fails (a worker reports it couldn't load): the pick can press Start again.
 //   loaddrop-gone  the same, and it stays away: past the rejoin grace (15 s here) the host re-deals by
 //                  itself without it (it used to sit "waiting for it to come back" for good: the grace ran
 //                  out while its own load was in progress).
@@ -52,7 +56,7 @@ import { loadPlaywright, chromiumPath, GPU_ARGS, serveRepo } from "./engine_synt
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf("--" + k); return i >= 0 ? argv[i + 1] : d; };
-const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,loaddrop-back,loaddrop-gone")).split(","));
+const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,fresh,restart,loaddrop-back,loaddrop-gone")).split(","));
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const PORT = +arg("port", 8191), SIG = PORT + 1;
 const MODEL_KEY = "qwen3.8-27b";
@@ -98,7 +102,7 @@ fs.writeFileSync(extra["/room.js"], room.replace(ANCHOR, '  conn.on("close", () 
   .replace(LOAD_ANCHOR, "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); if (window.__holdHostLoad) { const e = ai.engine; ai.engine = null; await new Promise((r) => { window.__hostLoadHeld = true; window.__releaseHostLoad = r; }); ai.engine = e; } }")
   + '\nwindow.__dropLinks = () => { for (const id of [...conns.keys()]) dropLink(id, "e2e: the link dropped"); };\n'
   // window.__send(id, msg): send a raw room message (a member forging host messages); __dealer(): the host this device checked
-  + 'window.__send = (id, m) => sendTo(id, m); window.__links = () => [...conns.keys()]; window.__dealer = () => ai.dealer; window.__hostId = () => ai.hostId; window.__myId = () => peer.id;\n');
+  + 'window.__send = (id, m) => sendTo(id, m); window.__links = () => [...conns.keys()]; window.__dealer = () => ai.dealer; window.__hostId = () => ai.hostId; window.__myId = () => peer.id; window.__link = (id) => ensureLink(id, 20000);\n');
 // globalThis.__e2eGraceMs (an init script): the rejoin grace (room/resume.js REJOIN_GRACE_MS, 60 s)
 const resume = fs.readFileSync(path.join(ROOT, "room/resume.js"), "utf8"), GRACE_ANCHOR = "export const REJOIN_GRACE_MS = 60000;";
 if (!resume.includes(GRACE_ANCHOR)) { console.error(`room/resume.js has no ${JSON.stringify(GRACE_ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
@@ -381,6 +385,51 @@ async function slowstart() {
   if (!up) for (const [n, p] of [["desk", desk], ["big", big], ["ph", ph]]) log(`slowstart: ${n}:`, JSON.stringify((await view(p)).status), JSON.stringify(await roomLog(p)), String(await p.evaluate(() => [window.__dealer(), window.__hostId()])));
 }
 
+async function fresh() {
+  const desk = await device("desk"), mal = await device("mal"), big = await device("big"), late = await device("late");
+  const code = await openRoom([[desk, "desk", 8], [mal, "mal", 10], [big, "big", 24]]);
+  await desk.waitForTimeout(12000);   // the room has been up a while
+  const [deskId, malId, bigId] = await Promise.all([desk, mal, big].map((p) => p.evaluate(() => window.__myId())));
+  await joinTab(late, "late", 6, code);
+  await late.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 4, null, { timeout: 60000 });
+  const lateId = await late.evaluate(() => window.__myId());
+  await mal.evaluate((id) => window.__link(id), lateId);
+  await mal.evaluate(([l, d, me, mk]) => {
+    window.__send(l, { t: "ai-start-req", model: mk, boss: me, by: "mal", ids: [d, me] });
+    window.__send(l, { t: "ai-ready-all", model: mk, ctx: 4096 });
+    window.__send(l, { t: "ai-genstart", name: "late", text: "q", mid: 1, asker: l });
+    window.__send(l, { t: "ai-token", text: "PWNED by mal" });
+    window.__send(l, { t: "ai-gendone", stats: {} });
+  }, [lateId, deskId, malId, MODEL_KEY]);
+  await late.waitForTimeout(1500);
+  const dl = await late.evaluate(() => [window.__dealer(), window.__hostId(), document.getElementById("ai-output").innerText.includes("PWNED")]);
+  check("fresh: a newcomer doesn't follow a member's Start sent straight to it", dl[0] !== malId && dl[1] !== malId, String(dl));
+  check("fresh: nothing forged in the newcomer's chat", !dl[2]);
+  await startModel(big, null);
+  const up = await online(big, 240000) && await online(late, 60000);
+  check("fresh: the room's pick starts the model, and the newcomer follows it", up && (await late.evaluate(() => window.__dealer())) === bigId, (await view(late)).status);
+}
+
+async function restart() {
+  const big = await device("big"), w = await device("w");
+  await openRoom([[big, "big", 24, "&gbps=100"], [w, "w", 12, "&gbps=1"]], "&split=memory");
+  const bigId = await big.evaluate(() => window.__myId());
+  await big.evaluate(() => { window.__holdHostLoad = true; });
+  await startModel(big, "memory");
+  const loaded = await w.waitForFunction(() => /ready · syncing with the room/.test(document.getElementById("ai-status").textContent), null, { timeout: 600000 }).then(() => true, () => false);
+  check("restart: the worker loads its layers", loaded);
+  if (!loaded) return;
+  await w.evaluate((b) => window.__send(b, { t: "ai-error", load: 1, message: "e2e: out of memory" }), bigId);
+  await big.waitForFunction(() => window.__hostLoadHeld, null, { timeout: 600000 }).catch(() => {});
+  await big.evaluate(() => { window.__holdHostLoad = false; window.__releaseHostLoad && window.__releaseHostLoad(); });
+  const failed = await big.waitForFunction(() => /^failed: /.test(document.getElementById("ai-status").textContent), null, { timeout: 300000 }).then(() => true, () => false);
+  check("restart: the start fails", failed, (await view(big)).status);
+  await big.waitForFunction(() => !document.getElementById("ai-start").disabled, null, { timeout: 30000 }).catch(() => {});
+  await big.click("#ai-start");
+  const up = await online(big, 400000) && await online(w, 60000);
+  check("restart: the pick presses Start again and the room comes online", up, JSON.stringify({ big: (await view(big)).status, w: (await view(w)).status }));
+}
+
 async function joinTab(p, name, gb, code, q = "") {
   await p.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG}&maxnew=24${q}`); await wired(p);
   await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
@@ -434,7 +483,7 @@ async function loaddrop(label, { hostGB, workerGB, back }) {
 let code = 1;
 try {
   for (const [name, fn] of [["leftout", () => leftout("leftout", [12, 8, 8])], ["leftout-guest", () => leftout("leftout-guest", [8, 12, 8])],
-    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart],
+    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart], ["fresh", fresh], ["restart", restart],
     ["loaddrop-back", () => loaddrop("loaddrop-back", { hostGB: 24, workerGB: 12, back: true })],
     ["loaddrop-gone", () => loaddrop("loaddrop-gone", { hostGB: 24, workerGB: 12, back: false })]]) {
     if (!ONLY.has(name)) continue;

@@ -12,8 +12,9 @@
 // trusted for those facts, and nothing else: it can't make the rule pick a device it doesn't pick.
 //
 // Decision: any device may press Start. ai-start-req {boss, ids} names the pick and the devices it was made
-// over; every device runs the same pick over those devices with the creator's facts (verifyHost) and follows
-// only when it lands on boss. A device that was not there for the Start (it joined later, or reloaded) takes a
+// over; it goes to the creator, which checks it and relays it, and every device runs the same pick over those
+// devices with the creator's facts (verifyHost) and follows only when it lands on boss. A device takes a Start
+// only from the creator: one a member sends it directly is ignored (the relayed copy follows). A device that was not there for the Start (it joined later, or reloaded) takes a
 // host only from the creator: the creator itself, or the host the creator names in ai-modelhost after it
 // checked that Start itself. Once a device follows a host it takes ai-load and FROM_HOST messages only from it,
 // and refuses another Start while that host is in the room and dealing (startBusy).
@@ -84,13 +85,22 @@ export function hostAllowed({ from, host = undefined, dealer, dealerHere, named 
   return from === named ? { take: true } : { take: false, why: "only the room's creator, or the host it named, can deal to a device that wasn't there for the Start" };
 }
 
-// Is this device busy with a Start already? A device whose host is in the room and dealing (or whose Start is
-// still waiting for its host to begin, START_PENDING_MS), or that holds or deals layers itself, refuses a Start
-// naming another host. A Start naming the host it follows is a replay: nothing to do.
+// Is this device busy with a Start already? It follows a host that is in the room and either deals (it has
+// shown it: ai-load, ai-layers, ai-hostprog ...) or was named less than START_PENDING_MS ago. Then a Start naming
+// that host again is a replay (nothing to do), and one naming another device is refused. A device that loads or
+// holds layers itself refuses a Start naming another device. A Start naming this device itself is a replay only
+// while it loads or runs: after a failed start it can start again.
 // -> "replay" | null (go ahead) | why it is refused
-export function startBusy({ boss, dealer, dealerHere, dealing, running, pendingSince = null, now = 0 }) {
-  if (dealer && dealerHere && boss === dealer) return "replay";
+export function startBusy({ boss, self = null, dealer, dealerHere, dealing, running, pendingSince = null, now = 0 }) {
+  const live = !!dealer && dealerHere && (dealing || (pendingSince != null && now - pendingSince < START_PENDING_MS));
+  if (boss === self) return running ? "replay" : live && dealer !== self ? "another Start is in progress" : null;
+  if (live && boss === dealer) return "replay";
   if (running) return "a model is already loading or running";
-  if (dealer && dealerHere && (dealing || (pendingSince != null && now - pendingSince < START_PENDING_MS))) return "another Start is in progress";
+  if (live) return "another Start is in progress";
   return null;
 }
+
+// Who may hand this device a Start: the room's creator (its own, or one it relayed after checking it; a device
+// in the room only seconds has no memory of who was there, so it takes the creator's check), or anyone when this
+// device is the creator.
+export const startFrom = ({ from, creator, isCreator }) => isCreator || from === creator;

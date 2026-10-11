@@ -1,7 +1,7 @@
 // room/authz.js: who runs the model (#17). The decision is every device's own (the same pick over the creator's
 // roster); the facts (membership, join order, metas) come from the creator. These cover the rule and the
 // review's repros on 2a1cf4b (packages/room-node/test/authz_test.mjs has the room node's side).
-import { verifyHost, hostAllowed, saneMeta, startBusy, joinOrder, JOIN_SLACK_MS, GBPS_MAX, START_PENDING_MS } from "../../room/authz.js";
+import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, JOIN_SLACK_MS, GBPS_MAX, START_PENDING_MS } from "../../room/authz.js";
 
 function eq(a, b, m) { const x = JSON.stringify(a), y = JSON.stringify(b); if (x !== y) throw new Error(`${m ? m + ": " : ""}${x} !== ${y}`); }
 const C = "pooled-room-4TKG9P";
@@ -76,13 +76,25 @@ Deno.test("authz: a hostless device takes a host only from the creator or the ho
   eq(hostAllowed({ from: "lap", dealer: "mac", dealerHere: false, named: C }).take, false, "its host left: still only the creator's word");
 });
 
-Deno.test("authz: one Start at a time; a replay is a no-op (review D, E)", () => {
-  const base = { dealer: "mac", dealerHere: true, now: 1000, running: false, dealing: false };
-  eq(startBusy({ ...base, boss: "mac", running: true }), "replay", "D: a Start naming the current host");
+Deno.test("authz: one Start at a time; a replay only while the host deals (review D, E, G; round 3 blocker 2)", () => {
+  const base = { self: "pc", dealer: "mac", dealerHere: true, now: 1000, running: false, dealing: false };
+  eq(startBusy({ ...base, boss: "mac", dealing: true }), "replay", "D: a Start naming the host that deals");
+  eq(startBusy({ ...base, boss: "mac", pendingSince: 900 }), "replay", "or was named moments ago");
+  eq(startBusy({ ...base, boss: "mac", pendingSince: 1000 - 10 * START_PENDING_MS }), null, "G: a host that never dealt: follow the new Start");
   eq(startBusy({ ...base, boss: "lap", running: true }) !== null, true, "a model loads or runs here");
   eq(startBusy({ ...base, boss: "lap", pendingSince: 500 }) !== null, true, "its Start waits for the host");
   eq(startBusy({ ...base, boss: "lap", dealing: true, pendingSince: 1000 - 10 * START_PENDING_MS }) !== null, true, "E: its host deals, however long it takes");
   eq(startBusy({ ...base, boss: "lap", pendingSince: 1000 - START_PENDING_MS - 1 }), null, "a Start whose host never began");
   eq(startBusy({ ...base, dealerHere: false, boss: "lap", dealing: true, pendingSince: 500 }), null, "its host left");
-  eq(startBusy({ boss: "lap", dealer: null, dealerHere: false, running: false }), null);
+  eq(startBusy({ boss: "lap", self: "pc", dealer: null, dealerHere: false, running: false }), null);
+  // the device itself: a replay only while it loads or runs; after a failed start it can start again
+  eq(startBusy({ boss: "pc", self: "pc", dealer: "pc", dealerHere: true, dealing: true, running: true }), "replay");
+  eq(startBusy({ boss: "pc", self: "pc", dealer: "pc", dealerHere: true, dealing: true, running: false }), null, "blocker 2: the pick restarts after a failure");
+  eq(startBusy({ boss: "pc", self: "pc", dealer: "mac", dealerHere: true, dealing: true, running: false }) !== null, true, "not while another host deals");
+});
+
+Deno.test("authz: a device takes a Start only from the creator (round 3 blocker 1)", () => {
+  eq(startFrom({ from: C, creator: C, isCreator: false }), true);
+  eq(startFrom({ from: "mallory", creator: C, isCreator: false }), false, "a member's copy sent straight to a newcomer");
+  eq(startFrom({ from: "mallory", creator: C, isCreator: true }), true, "the creator checks members' Starts");
 });

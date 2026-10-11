@@ -30,17 +30,66 @@ const load = (host, extra = {}) => ({ t: "ai-load", model: "nope", range: [0, 1]
 const took = (sent) => sent.at(-1)?.t === "ai-error" && !/refused/.test(sent.at(-1).message);
 const refused = (sent) => sent.at(-1)?.t === "ai-error" && sent.at(-1).load === 1 && /refused/.test(sent.at(-1).message);
 
+// a member's Start as the creator relays it after checking it (rq: who pressed Start)
+const relayed = (boss, ids, by = "mallory") => ({ t: "ai-start-req", model: "qwen3-1.7b", boss, by, ids, rq: "peer-" + by });
+
 test("Start: followed only when its boss is the room's pick, whoever pressed it", async () => {
   const { n, logs, sent } = device();
-  await n.aiOnData("peer-mallory", { t: "ai-start-req", model: "qwen3-1.7b", boss: "peer-mallory", by: "mallory", ids: ALL });
+  await n.aiOnData(C, relayed("peer-mallory", ALL));
   assert.equal(n.ai.dealer, null); assert.ok(logs.some((s) => /not following/.test(s)));
-  assert.equal(sent.at(-1).t, "ai-start-refused");
+  assert.equal(sent.at(-1).t, "ai-start-refused"); assert.equal(sent.at(-1).id, C); assert.equal(sent.at(-1).rq, "peer-mallory", "to the creator, for the requester");
   // leaving out the devices that joined after it: only a Start from seconds before they joined may (JOIN_SLACK_MS)
   for (const id of ALL) n.seenAt.set(id, performance.now() - 60000);
-  await n.aiOnData("peer-mallory", { t: "ai-start-req", model: "qwen3-1.7b", boss: "peer-mallory", by: "mallory", ids: [C, "peer-mallory"] });
+  await n.aiOnData(C, relayed("peer-mallory", [C, "peer-mallory"]));
   assert.equal(n.ai.dealer, null, "nor by leaving the bigger devices out");
-  await n.aiOnData("peer-mallory", { t: "ai-start-req", model: "qwen3-1.7b", boss: "peer-mac", by: "mallory", ids: ALL });
+  await n.aiOnData(C, relayed("peer-mac", ALL));
   assert.equal(n.ai.dealer, "peer-mac"); assert.equal(n.ai.hostId, "peer-mac");
+  clearTimeout(n.ai.followTimer);
+});
+
+test("round 3 F: a member's Start sent straight to a newcomer is ignored, whatever it says", async () => {
+  const { n, sent } = device();   // everything seen < 10 s ago: a newcomer
+  await n.aiOnData("peer-mallory", { t: "ai-start-req", model: "qwen3-1.7b", boss: "peer-mallory", by: "mallory", ids: [C, "peer-mallory"] });
+  await n.aiOnData("peer-mallory", { t: "ai-start-req", model: "qwen3-1.7b", boss: "peer-mac", by: "mallory", ids: ALL });
+  assert.equal(n.ai.dealer, null); assert.equal(n.ai.hostId, null);
+  await n.aiOnData("peer-mallory", { t: "ai-ready-all", model: "qwen3-1.7b" });
+  assert.equal(n.ai.online, false);
+  await n.aiOnData(C, { t: "ai-modelhost", id: "peer-mac" });
+  await n.aiOnData("peer-mac", load("peer-mac"));
+  assert.ok(took(sent), "the host the creator named still deals");
+});
+
+test("round 3 F2: a host the creator named makes a newcomer busy for a Start naming another device", async () => {
+  const { n, sent } = device();
+  await n.aiOnData(C, { t: "ai-modelhost", id: "peer-mac" });
+  await n.aiOnData(C, relayed("peer-mallory", [C, "peer-mallory"]));
+  assert.equal(n.ai.dealer, "peer-mac");
+  assert.equal(sent.at(-1).t, "ai-start-refused");
+});
+
+test("round 3 G / major 3: a followed host that never deals: the node gives up, and a new Start naming it is followed", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { n } = device();
+  await n.aiOnData(C, relayed("peer-mac", ALL));
+  assert.equal(n.ai.dealer, "peer-mac");
+  t.mock.timers.tick(60001);
+  assert.equal(n.ai.dealer, null, "gave up");
+  await n.aiOnData(C, relayed("peer-mac", ALL, "host"));
+  assert.equal(n.ai.dealer, "peer-mac", "a later Start is not swallowed as a replay");
+});
+
+test("round 3 blocker 2: after its own start fails, the pick can start again", async () => {
+  const { n, started } = device();
+  // this node is the room's pick in a room where it lends the most
+  roster(n, { "peer-mallory": { webgpu: true, contribGB: 2, ua: "Win" } });
+  n.members.find((m) => m.id === "peer-mac").meta = { webgpu: true, contribGB: 2, ua: "Mac" };
+  n.meta.contribGB = 40; n.members.find((m) => m.id === "peer-pc").meta = n.meta;
+  await n.aiOnData(C, relayed("peer-pc", ALL, "host"));
+  assert.deepEqual(started, ["qwen3-1.7b"]);
+  n.ai.dealer = "peer-pc"; n.ai.dealerActive = true;
+  n.broadcast({ t: "ai-start-failed", why: "out of memory" });   // its _start failing
+  await n.aiOnData(C, relayed("peer-pc", ALL, "host"));
+  assert.deepEqual(started, ["qwen3-1.7b", "qwen3-1.7b"]);
 });
 
 test("review A: a member's forged ai-ready-all doesn't make it a late joiner's host; the real host still deals", async () => {
@@ -77,7 +126,7 @@ test("review D: a replayed Start naming the current host does nothing", async ()
   await n.aiOnData(C, { t: "ai-start-req", model: "qwen3-1.7b", boss: "peer-mac", by: "host", ids: ALL });
   const at = n.ai.startAt;
   await new Promise((r) => setTimeout(r, 5));
-  await n.aiOnData("peer-mallory", { t: "ai-start-req", model: "qwen3-0.6b", boss: "peer-mac", by: "mallory", ids: ALL });
+  await n.aiOnData(C, { ...relayed("peer-mac", ALL), model: "qwen3-0.6b" });
   assert.equal(n.ai.startAt, at, "no refresh");
 });
 
@@ -89,7 +138,7 @@ test("review E: while its host deals, a re-pledged member's Start is refused, ho
   n.ai.startAt = performance.now() - 10 * 60000;
   roster(n, { "peer-mallory": { webgpu: true, contribGB: 64, ua: "Win" } });
   for (const id of ALL) n.seenAt.set(id, performance.now() - 100000);
-  await n.aiOnData("peer-mallory", { t: "ai-start-req", model: "qwen3-1.7b", boss: "peer-mallory", by: "mallory", ids: ALL });
+  await n.aiOnData(C, relayed("peer-mallory", ALL));
   assert.equal(n.ai.dealer, "peer-mac");
   assert.equal(sent.at(-1).t, "ai-start-refused"); assert.match(sent.at(-1).why, /in progress/);
   await n.aiOnData("peer-mac", { t: "ai-ready-all", model: "qwen3-1.7b" });
@@ -107,7 +156,7 @@ test("metas on the node's own links don't count: only the creator's roster (revi
   const { n } = device();
   // mallory tells this node directly it lends 64 GB (a hello / pledge on their link): ignored for the pick
   n.onData("peer-mallory", { t: "pledge", gb: 64 });
-  await n.aiOnData("peer-mallory", { t: "ai-start-req", model: "qwen3-1.7b", boss: "peer-mallory", by: "mallory", ids: ALL });
+  await n.aiOnData(C, relayed("peer-mallory", ALL));
   assert.equal(n.ai.dealer, null);
 });
 
