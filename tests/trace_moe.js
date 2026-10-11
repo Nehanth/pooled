@@ -12,8 +12,10 @@
 //              history with file contents (~10k tokens of prefill), then ~300 tokens of decode
 //   multiturn  four user turns in one conversation (each answer decoded and kept in context), ~150 tokens each
 //
-// Output per scenario: <name>.sel.npy uint8 [T, L, K] expert ids, <name>.w.npy float32 [T, L, K] router weights,
+// Output per scenario: <name>.sel.npy [T, L, K] expert ids (uint8, or uint16 for models with more than 256 experts:
+// Qwen3.8-Flash-Next and the 397B have 512), <name>.w.npy float32 [T, L, K] router weights,
 // <name>.json { tokens: [{ id, pos, turn, phase }], text, promptTokens, ... }. README.md in the directory: the format.
+// tests/sim/tiersim.js replays them through the VRAM / RAM / disk tiers.
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, MOE_PATH, Q122_PATH, streamWeights } from "./load_model.js";
 import { gpuGreedy } from "./gpusample_check.js";
@@ -35,6 +37,7 @@ const weights = await streamWeights(model, device, { lo: 0, hi: L, hasEmbed: tru
   (i) => { if (i % 8 === 7) console.log(`  layer ${i + 1}/${L} on the GPU, ${((performance.now() - t0) / 1000).toFixed(0)} s`); });
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 16384, moeTrace: true });
 const K = eng.moe.K, NE = eng.moe.nExp;
+const SelT = NE > 256 ? Uint16Array : Uint8Array;   // a uint8 would wrap expert ids past 255
 console.log(`${G.meta["general.name"]}: ${L} layers, ${NE} experts top-${K}, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 
 const profile = templateProfile(G.meta["tokenizer.chat_template"], tok);
@@ -117,7 +120,7 @@ for (const [name, sc] of Object.entries(SCEN)) {
       fed.push(cur);
       const tr = await eng.readMoeTrace();
       recs.push({ id: cur, pos, turn: ti, phase: n === 0 ? "last-prompt" : "decode" });
-      const s = new Uint8Array(L * K), w = new Float32Array(L * K);
+      const s = new SelT(L * K), w = new Float32Array(L * K);
       tr.forEach((r, l) => { s.set(r.sel, l * K); w.set(r.w, l * K); });
       sels.push(s); ws.push(w);
       if (EOS.has(next)) break;
@@ -128,9 +131,9 @@ for (const [name, sc] of Object.entries(SCEN)) {
     text += (ti ? "\n\n--- turn " + ti + " ---\n" : "") + a;
     if (sc.turns) { exact.set(msgs.length, { ids: [...closed, ...ans], thinkEnd: closed.length }); msgs.push({ role: "assistant", text: a }); }
   }
-  const T = recs.length, sel = new Uint8Array(T * L * K), w = new Float32Array(T * L * K);
+  const T = recs.length, sel = new SelT(T * L * K), w = new Float32Array(T * L * K);
   sels.forEach((s, i) => sel.set(s, i * L * K)); ws.forEach((x, i) => w.set(x, i * L * K));
-  npy(`${OUT}/${name}.sel.npy`, sel, "|u1", [T, L, K]);
+  npy(`${OUT}/${name}.sel.npy`, sel, NE > 256 ? "<u2" : "|u1", [T, L, K]);
   npy(`${OUT}/${name}.w.npy`, w, "<f4", [T, L, K]);
   // distinct experts touched per layer over the whole trace (a quick look at locality)
   const touched = Array.from({ length: L }, (_, l) => { const u = new Set(); for (let i = 0; i < T; i++) for (let k = 0; k < K; k++) u.add(sel[(i * L + l) * K + k]); return u.size; });

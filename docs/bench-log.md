@@ -2238,6 +2238,74 @@ Not measured here: the Mac (instructions in the PR), queue depth above 1 per wor
 read), Cache API reads from workers, and one device fed by several readers' mapped ranges, which is what the
 engine would do.
 
+## 2026-10-11: 3-tier expert cache simulator, 122B traces and a Flash extrapolation (branch feat/tiersim), no GPU
+
+`tests/sim/tiersim.js` (Node or Deno) replays `tests/trace_moe.js` routing traces through a per-layer VRAM pool (the
+`ExpertStore.plan()` LRU: a unit test replays random traces through the real store and gets the same hits), a global
+RAM LRU in bytes (T1; parked layers always hit), and disk, with an optional modelled router-lookahead prefetch. A cost
+model built from measured numbers (feasibility study on the 5070 PC, OPFS and Chrome uploads on the GB10, the offload
+phases above) turns that into ms per token. Decode only, batch 1, no MTP, first 32 steps not counted. It refuses
+traces whose layers / experts / top-K don't match the model. Run: `node tests/sim/tiersim.js <traces dir>` (~25 s).
+
+**Calibration covers the RAM path only.** The simulator reproduces the measured 122B Mac + PC room (PC 15-47 parked,
+26 slots) at 16.5 tok/s mid against ~17 measured. That room has no disk tier, so it checks Mac and PC compute, cuts and
+parked-to-VRAM copies, nothing else. The disk constants (NVMe at 1 MiB chunks, OPFS), the page cache, the tab upload
+and the disk-to-slot memcpy are not checked by it. They dominate every disk-bound row below (Mac alone, the PC tab,
+the `--ram 24` disk layers), which are uncalibrated. OPFS and upload numbers are GB10 numbers. #338's Spark OPFS probe
+does not change that: no Mac or Windows OPFS number exists yet. Hit rates match the store's replay on the traces
+exactly, and the engine's 72-77% at 43 slots; at 17 slots they read 5-10 points high (cold start).
+
+`--ram` is in GiB here, as the planner reads it (`room/pledge.js` `offloadFor`: `ramGB * 2 ** 30`, though the CLI
+help says GB). The 64 GB PC's default is `--ram 43` (59.6 GiB less 16).
+
+122B (real traces, modelled costs), tok/s mid [slowest trace slow costs - fastest trace fast costs]:
+
+| room | disk MB / token | tok/s |
+|---|---|---|
+| Mac alone, Chrome tab, expert cache 11 / 18 GiB (44 / 73 slots per layer) | 766 / 529 | 2.9 / 3.8 [1.9-5.3] |
+| Mac + PC room node, all PC experts parked (the measured room) | 0 | 16.5 [12.2-22.7] |
+| Mac + PC room node, `--ram 24`: 19 disk layers, T1 4 GiB | 164 | 9.5 [6.5-13.1] |
+| Mac + PC with the PC as a Chrome tab (36 slots, OPFS; Windows page cache 0 / 40 GiB) | 419 / 50 | 4.7 / 6.3 |
+
+Qwen3.8-Flash-Next, **EXTRAPOLATED**: the 122B traces mapped onto 512 experts / top-10 (each expert split into two
+children; q = how often a child flips: 0 keeps the 122B's locality, 0.5 halves it; quoted at q = 0.25, range over q in
+the report), Flash's byte sizes from `roadmap/33-qwen38-flash.md`:
+
+| room | pool hits | disk MB / token | tok/s mid, q = 0.25 [range] | q = 0 / 0.5 |
+|---|---|---|---|---|
+| Mac alone, tab, 11 / 18 GiB (85 / 140 slots; the 36 GB Mac leaves ~19 GB for the cache) | 64 / 76% | 479 / 322 | 4.2 / 5.7 [2.9-7.8] | 4.7-6.5 / 4.0-5.3 |
+| Mac + PC room node, `--ram 43` (31 parked + 3 disk layers, T1 2 GiB: 42.9 GiB = 46 GB of the PC's 64 GB) | 69% | 5 | 19.4 [14.0-26.5] | 19.9 / 19.2 |
+| Mac + PC room node, `--ram 24` (14 parked + 20 disk, T1 4 GiB) | 69% | 99 | 12.6 [8.7-17.5] | 14.0 / 12.0 |
+| Mac + PC tab (72 slots; page cache 0 / 40 GiB) | 71% | 276 / 53 | 6.5 / 8.2 | |
+
+A 25 GiB Mac cache (7.3 tok/s on Flash, 5.0 on the 122B) is in the report as a sensitivity row only: it needs a Mac
+with more than 36 GB.
+
+What it says:
+- **Lookahead with the modelled predictor loses everywhere.** Top-K recall 0.74-0.82, wrong picks uniform over the
+  layer: Mac alone 5.7 -> 4.4-4.5, CLI `--ram 24` 12.9 -> 11.3-11.7, PC tab 7.8 -> 6.0-6.1. Top-2K overfetch: 1.7 on
+  the Mac. The oracle (every true expert, nothing else) gives Mac 8.1, CLI 17.4, PC tab 10.9. Why the gap is open: the
+  oracle has recall 1 (no demand reads for missed experts) and no wrong picks, and the model's wrong picks are random
+  where a real router's are near misses. Record the real predictor's picks next to the traces before deciding.
+- **An inclusive T1 smaller than the pool above it does nothing.** It holds what the pool holds: 0-2 GiB of T1 under
+  a 2.4-3.5 GiB disk-layer pool gains under 3%. The Mac's OS page cache likewise gives 0 hits under an 18 GiB cache.
+  Ordering T1 by pool eviction (a victim cache) is worth 0-3%.
+- **At a fixed `--ram`, T1 beats parking whole layers for decode.** 122B at `--ram 24`: 16 disk layers + 2.5 GiB T1
+  give 9.3 tok/s; 26 disk + 15 GiB T1 give 13.7. Flash `--ram 40`: 6 disk layers is the best split (18.8). A parked
+  layer spends RAM on cold experts. This holds for decode only: a prefill frame loads each disk layer's whole expert
+  set from disk (~7 s per 512-token frame for 26 layers), so it needs layer-major prefill first (roadmap 32 item 9).
+- **Long sessions are a caveat.** The traces are 300-600 decode steps and touch 186-199 of 256 experts per layer on
+  average (108-256). Longer sessions spread routing further, so big-T1 and big-cache hit rates may be optimistic.
+  Played back to back as one 1,600-step session (four conversations, so topic changes) the ranking holds: 122B
+  `--ram 24` 9.4 at 16 disk layers, 13.8-13.9 at 26-28; Flash `--ram 24` best at 28 disk (16.1); Flash `--ram 40`
+  flat at 19.0-19.1 from 8 to 12 disk layers. A recorded 2-3k-token session would still be the real check.
+- Flash's 16 n-gram rows per token are 64 KiB of reads, 0-1.3 ms on the layer-1 device: noise next to the experts.
+
+`tests/trace_moe.js` now writes uint16 expert ids past 256 experts. uint8 would have wrapped Flash's ids above 255.
+Flash traces: once roadmap 33 PR 4 runs Flash resident on the GB10, add its path to `trace_moe.js`'s `MODEL` switch and
+record. `tiersim.js` reads 512-expert traces directly (no mapping), and those numbers replace the extrapolation above.
+Full tables, constants and caveats: the PR description.
+
 ## 2026-10-11: expert offload's disk reader on the room node (branch feat/room-node-disk-reader, roadmap 32 step 2), GB10
 
 `packages/room-node/expert_disk.js`: worker threads, each with its own fd per GGUF file, reading experts in ~1 MiB
