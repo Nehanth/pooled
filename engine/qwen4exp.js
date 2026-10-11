@@ -1,4 +1,4 @@
-// Qwen3.8-Flash-Next (llama.cpp arch "qwen4exp") on WebGPU: the decode path, weights resident, context <= 2048.
+// Qwen3.8-Flash-Next (llama.cpp arch "qwen4exp") on WebGPU: the decode path, weights resident; QSA past 2051 cells.
 // Roadmap 33 (roadmap/33-qwen38-flash.md) PR plan item 4.
 //
 // A separate engine module, not a mode of Qwen35Engine: the residual is 4 streams wide (hyper-connections), every
@@ -13,12 +13,17 @@
 //                                 -> HC mix -> MoE (top-10 of 512 + shared expert) -> HC combine
 //   head: HC mix (output_hc_*, no inject) -> output.weight -> greedy id on the GPU (and the logits on request)
 //
-// The math is tests/reference/ref_q38flash.mjs's with f32 activations (its --act f32 mode). Attention is dense causal:
-// QSA (PR 9) selects every cell below 2051 cached tokens, so dense is exact up to the 2048 cap here. The hook for
-// QSA is _attnOps: a selection pass between attn_prep and attn_dec that gives attn_dec a cell list.
+// The math is tests/reference/ref_q38flash.mjs's with f32 activations (its --act f32 mode). Attention: QSA
+// (engine/qwen4exp_qsa.js, PR plan item 9) when the full-attention layers' indexer weights are loaded: the indexer
+// state is kept from position 0, attention stays dense while it has <= 2051 cells (QSA selects them all there) and
+// reads the selected cells past that. Without the indexer weights (qsa: false) attention is dense and the context
+// is capped at 2048. Batched prefill / verify passes: engine/qwen4exp_batch.js, on this engine's state.
 import { qwen4expConfig } from "./gguf.js";
 import { NgramState } from "./ngram.js";
 import * as W from "./wgsl/qwen4exp.js";
+import { attnDecMcWGSL } from "./wgsl/qwen4exp_batch.js";
+import { qsaFlashPipelines, qsaShared, qsaScratch, qsaSetFrame, qsaLayerState, qsaBind, qsaStateOps, qsaSelectOps, qsaSparse,
+  QSA_MAXSEL, QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
 
 const U = GPUBufferUsage;
 const fr = Math.fround;
@@ -29,12 +34,21 @@ export class Qwen4ExpEngine {
   // weights: qwen4expWeights' structure (engine/gguf.js), each matrix with entry.gpu (streamed) or its CPU bytes.
   // ngram: an NgramTable (engine/ngram.js) for the PLE layer's rows; required when layerRange holds a PLE layer.
   // layerRange [lo, hi): the trunk layers this engine runs; hasEmbed / hasHead as Qwen35Engine.
-  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null }) {
+  // qsa: run QSA (default: when every full-attention layer in range has its indexer weights); maxSeq may then pass 2048.
+  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null, qsa = null }) {
     const cfg = this.cfg = qwen4expConfig(meta);
     this.device = device;
     const [lo, hi] = layerRange || [0, cfg.L];
     Object.assign(this, { lo, hi, hasEmbed, hasHead, pos: 0 });
-    if (maxSeq > 2048) throw new Error("qwen4exp: the dense decode path holds at most 2048 positions (QSA is PR 9)");
+    const qLayers = [];
+    for (let i = lo; i < hi; i++) if (cfg.qsa[i]) qLayers.push(weights.layers[i - lo]);
+    this.qsa = qsa ?? (qLayers.length > 0 && qLayers.every((L) => L.indexer));
+    if (this.qsa && qLayers.some((L) => !L.indexer)) throw new Error("qwen4exp: qsa needs the indexer weights (qwen4expWeights qsa: true)");
+    // which passes read QSA's selected cells: those with a column past 2051 cells (qsaAlways: every pass, for the
+    // QSA == dense check, tests/test_q38flash_batch.js)
+    this.qsaAlways = false;
+    this.sparse = (pos, n) => this.qsaAlways || qsaSparse(pos, n);
+    if (maxSeq > 2048 && qLayers.length && !this.qsa) throw new Error("qwen4exp: without QSA (the indexer weights) the context is capped at 2048 positions");
     this.maxSeq = maxSeq;
     const d = cfg.dim, hc = cfg.hc, HD = cfg.hDim, ss = cfg.ssm;
     this.dims = { dim: d, hDim: HD, vocab: hasHead ? weights.head.shape[0] : 0 };
@@ -56,6 +70,8 @@ export class Qwen4ExpEngine {
         dnConv: W.DN_CONV_WGSL, dnL2: W.DN_L2_WGSL, dnDelta: W.DN_DELTA_WGSL, dnGnorm: W.DN_GNORM_WGSL,
         attnPrep: W.ATTN_PREP_WGSL, attnDec: W.ATTN_DEC_WGSL, ple: W.PLE_WGSL, am1: W.ARGMAX1_WGSL, am2: W.ARGMAX2_WGSL })
         .map(async ([k, code]) => { P[k] = await pipe(code, k); }),
+      ...(this.qsa ? [(async () => { P.attnGather = await pipe(attnDecMcWGSL({ gather: QSA_SEL_STRIDE }), "attn_gather"); })(),
+        (async () => { this.qsaK = await qsaFlashPipelines(device); })()] : []),
     ]);
 
     // ---- scratch (shared by every layer: one token's ops run in order)
@@ -72,6 +88,10 @@ export class Qwen4ExpEngine {
       frame: device.createBuffer({ size: W.FRAME_FLOATS * 4, usage: U.UNIFORM | U.COPY_DST }),
     };
     if (pleLayers.length) Object.assign(B, { emb: buf(d), pk: buf(HD), pv: buf(d), dbg: buf(2 * HD + hc) });
+    if (this.qsa) {
+      this.qsaSh = qsaShared(device, { dim: d, maxSeq, eps: cfg.eps, theta: cfg.ropeTheta, nRot: cfg.indexer?.ropeDims ?? 64 });
+      this.qsaS = qsaScratch(device, { maxCols: 1, maxBlocks: this.qsaSh.maxBlocks });
+    }
     device.queue.writeBuffer(B.shIds, 0, new Uint32Array(4));
 
     // ---- weights to the GPU (entry.gpu when the loader streamed it; f32 tensors are uploaded here)
@@ -153,7 +173,9 @@ export class Qwen4ExpEngine {
         // the PLE norms and the conv kernel in one buffer (8 storage buffers per stage is WebGPU's default limit)
         const pw = new Float32Array(3 * HD + HD * K1);
         [pc.normKey, pc.normQuery, pc.normConv, pc.conv].forEach((e, j) => pw.set(e.data, j * HD));
-        attnOps.push({ pipe: P.ple, bg: bg(P.ple, [B.R, B.pk, B.pv, wq({ kind: "f32", data: pw, shape: [pw.length] }).buf,
+        st.pw = wq({ kind: "f32", data: pw, shape: [pw.length] }).buf;
+        st.pleU = { K1, slots };
+        attnOps.push({ pipe: P.ple, bg: bg(P.ple, [B.R, B.pk, B.pv, st.pw,
           st.ring, B.dbg, uni([d, K1, cfg.ple.ngram, slots, f(eps), hc, 0, 0]), frameU]), wg: [hc, 1, 1],
           taps: [[`ple_gate-${i}`, B.dbg, hc, "f32", 2 * HD], [`ple_gated_value-${i}`, B.dbg, HD], [`ple_conv_out-${i}`, B.dbg, HD, "f32", HD]] });
       }
@@ -207,25 +229,40 @@ export class Qwen4ExpEngine {
       this.logitStage = device.createBuffer({ size: Math.ceil(V * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
     }
     this.hStage = device.createBuffer({ size: HD * 4, usage: U.MAP_READ | U.COPY_DST });
+    this._wq = wq;   // engine/qwen4exp_batch.js builds its ops on the same weight buffers
     this._ropeTs = fr(Math.pow(cfg.ropeTheta, -2 / cfg.ropeDims));
     this.reset();
   }
 
-  // Gated full attention (dense causal). The QSA hook (PR 9): an indexer pass would go between attn_prep and
-  // attn_dec and hand attn_dec a selected-cell list; below 2051 cached tokens it selects every cell.
+  // Gated full attention. With QSA (engine/qwen4exp_qsa.js): the indexer state update on every step, dense
+  // attention while the step has <= 2051 cells, the selected cells past that (dyn ops: _encode asks them per step).
   _attnOps(L, i, st, { gemv, wq, bg, uni, f }) {
     const { cfg, B, P, device } = this, nH = cfg.nHeads, nKV = cfg.nKVHeads, hd = cfg.headDim;
     if (hd !== 256) throw new Error("qwen4exp: attn kernels assume head dim 256");
     const sz = this.maxSeq * nKV * hd * 4;
     st.kc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_DST });
     st.vc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_DST });
-    const ap = uni([nH, nKV, hd, cfg.ropeDims, f(cfg.eps), 0, 0, 0]);
+    const ap = st.ap = uni([nH, nKV, hd, cfg.ropeDims, f(cfg.eps), 0, 0, 0]);
+    const dense = { pipe: P.attnDec, bg: bg(P.attnDec, [B.qn, st.kc, st.vc, B.qf, B.ao, ap, B.frame]), wg: [nH, 1, 1], tap: [`attn_gated-${i}`, B.ao, nH * hd] };
+    let qsaState = [], qsaSel = [], gather = [];
+    if (this.qsa) {
+      st.qsa = qsaLayerState(device, L, { maxSeq: this.maxSeq, dim: cfg.dim });
+      const G = qsaBind(device, this.qsaK, this.qsaSh, this.qsaS, st.qsa, B.mixed);
+      qsaState = qsaStateOps(this.qsaK, G);
+      qsaSel = qsaSelectOps(this.qsaK, G, this.sparse);
+      dense.dyn = (pos, n) => (this.sparse(pos, n) ? null : [nH, 1, 1]);
+      gather = [{ pipe: P.attnGather, bg: bg(P.attnGather, [B.qn, st.kc, st.vc, B.qf, B.ao, ap, null, this.qsaS.sel]),
+        dyn: (pos, n) => (this.sparse(pos, n) ? [nH, 1, 1] : null), tap: [`attn_gated-${i}`, B.ao, nH * hd] }];
+    }
     return [
       gemv(wq(L.wq, "attn_q"), B.mixed, B.qf),
       gemv(wq(L.wk, "attn_k"), B.mixed, B.kb),
       gemv(wq(L.wv, "attn_v"), B.mixed, B.vb),
+      ...qsaState,
       { pipe: P.attnPrep, bg: bg(P.attnPrep, [B.qf, B.kb, B.vb, B.qn, st.kc, st.vc, wq(L.qNorm).buf, wq(L.kNorm).buf, ap, B.frame]), wg: [nH + nKV, 1, 1] },
-      { pipe: P.attnDec, bg: bg(P.attnDec, [B.qn, st.kc, st.vc, B.qf, B.ao, ap, B.frame]), wg: [nH, 1, 1], tap: [`attn_gated-${i}`, B.ao, nH * hd] },
+      ...qsaSel,
+      dense,
+      ...gather,
       gemv(wq(L.wo, "attn_output"), B.ao, B.out, { tap: [`attn_output-${i}`, B.out, cfg.dim] }),
     ];
   }
@@ -275,9 +312,21 @@ export class Qwen4ExpEngine {
     let th = fr(this.pos);
     for (let i = 0; i < cfg.ropeDims / 2; i++) { F[4 + i * 4] = fr(Math.cos(th)); F[5 + i * 4] = fr(Math.sin(th)); th = fr(th * this._ropeTs); }
     q.writeBuffer(B.frame, 0, F);
+    if (this.qsa) {
+      qsaSetFrame(this.device, this.qsaS, this.pos, 1);
+    }
   }
 
-  _encode(pass, ops) { for (const o of ops) { pass.setPipeline(o.pipe); pass.setBindGroup(0, o.bg); pass.dispatchWorkgroups(...o.wg); } }
+  // An op: { pipe, bg (group 0, or [group 0, group 1, ..]), wg, or dyn(pos, nCols) -> workgroups | null (skipped) }
+  _encode(pass, ops, pos = this.pos, nCols = 1) {
+    for (const o of ops) {
+      const wg = o.dyn ? o.dyn(pos, nCols) : o.wg;
+      if (!wg) continue;
+      pass.setPipeline(o.pipe);
+      if (Array.isArray(o.bg)) o.bg.forEach((g, k) => pass.setBindGroup(k, g)); else pass.setBindGroup(0, o.bg);
+      pass.dispatchWorkgroups(...wg);
+    }
+  }
 
   // One decode step. -> { id (greedy, when the engine has the head), logits (wantLogits) }
   async forwardToken(id, { wantLogits = false } = {}) {
@@ -324,6 +373,7 @@ export class Qwen4ExpEngine {
       if (Rin) dev.queue.writeBuffer(this.B.R, 0, Rin);
       const enc = dev.createCommandEncoder(), reads = [];
       for (const o of ops) {
+        if (o.dyn && !o.dyn(this.pos, 1)) continue;
         const pass = enc.beginComputePass();
         this._encode(pass, [o]);
         pass.end();

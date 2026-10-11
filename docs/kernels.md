@@ -117,6 +117,19 @@ Decode breaks even with dense at ~8K and is 7x faster at 32K, 19x at 256K. Prefi
 
 **Open items.** (1) Prefill attention: a tiled kernel over the union of a few adjacent columns' lists (per-column masks) would share K / V tiles as `attn_tile` does. (2) Decode select is one workgroup per column (183 µs at 256K); a multi-workgroup histogram, or ds4's tile-maximum prefilter fused into `qsa_score`, would cut it. (3) The engine's own `rope_part` takes `cos(p · pow(...))` directly, which drifts from ggml by ~1e-3 rad at p ~ 1e5; the QSA kernels use ggml's f32 theta product and a Cody-Waite reduction, the main attention's q / k rope does not. (4) `rawK` only needs the last few positions once their block is pooled (vLLM keeps a ring of `4·ceil((4 + n_draft)/4)`); a ring would save 256 B per position per layer. (5) Agreement with llama.cpp itself (not just this reference) is still to be checked with the 4K / 8K goldens once the Flash path runs end to end.
 
+### QSA on the Flash path, and its batched passes
+
+`engine/qwen4exp_qsa.js` wires the kernels above into the Qwen3.8-Flash-Next engine (`engine/qwen4exp.js`, decode) and its batched passes (`engine/qwen4exp_batch.js`, prefill and verify). Both share each QSA layer's `rawK` / `pooled` state. `qsa_proj`, `qsa_prep` and `qsa_pool` run on every pass from position 0. A pass in which every column has at most 2051 cells keeps the engine's dense attention, because QSA selects every cell there. A pass with any column past 2051 cells runs `qsa_score` (only when some column sees more than 512 blocks), then `qsa_select`, then a gathered attention. The gathered attention is `attnDecMcWGSL({ gather })` in `engine/wgsl/qwen4exp_batch.js`, which reads the Flash engine's f32 K / V cache. `attn_dec_qsa` from above does not fit here, because it reads the Qwen3.5 engine's f16 split-K layout; it can replace this kernel once Flash moves to that cache. Over the full row list the gathered kernel gives exactly the dense kernel's bits. `engine.qsaAlways = true` forces every pass onto the gathered path, which is how `tests/test_q38flash_batch.js` checks that QSA equals dense below 2052 cells.
+
+The batched kernels are the decode kernels plus a column index. Each column does the same arithmetic in the same order, so a pass of n columns leaves the engine where n decode steps would, bit for bit. `tests/test_q38flash_mc.js` checks this kernel by kernel on random data; `tests/test_q38flash_batch.js` checks it on the model's residual. Three kernels change shape:
+- `dn_conv` and `dn_delta` walk the columns in order and keep the conv history and S in registers.
+- The PLE block splits into `ple_gate`, `ple_conv` and `ple_ring`. Taps inside the pass read the pass's own buffer, and the ring is written last, so a pass longer than the 10-slot ring works. The gated value g goes through memory: when it was recomputed next to the residual add, the compiler fused the product into the add and the bits differed from decode.
+- `gemv_mc` shares each weight block's load and dequant across 4 columns.
+
+Verify passes copy the recurrent state (conv, S, PLE ring) before the pass. A partial accept restores that copy and re-runs the accepted columns. K / V and `rawK` are simply rewritten, and a pooled key is re-pooled when its block completes again.
+
+GB10, first 4 layers (Vulkan, Deno), 4300-token prompt: decode 40 tok/s, 64-column prefill 380 tok/s (9.4x). The bit-equality relies on the shader compiler treating the decode and batched kernels' expressions alike. It holds on the GB10's Vulkan driver; run `tests/test_q38flash_mc.js` once on Metal (Chrome) before relying on it there.
+
 ## Things tried and rejected (measured)
 - Q4 KV cache: −92.5% prefill.
 - External 0.6B draft model: different vocabulary (151,936 vs 248,320), can't verify.
