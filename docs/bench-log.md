@@ -2384,3 +2384,30 @@ GB/s, with the event loop busy converting the whole time: p99 182 ms per expert)
 fs.promises with UV_THREADPOOL_SIZE=16 (4.2-4.35 against 5.4-5.6 GB/s); a room node that only needs raw bytes can
 raise libuv's pool instead. conv per expert, 16 workers: Q4_0 layers p50 4.3 ms (p99 7.1-7.5), requantized layers
 p50 17.7-19.7 ms (p99 35-40).
+
+## 2026-10-11: disk tier with T1 and --disk rooms (branch feat/ssd-cli-disk-tiers, roadmap 32 steps 3-5), GB10
+
+Shared machine: another process held ~71 GB of GPU memory and ran the GPU at up to 95%, so speeds swing by up to 2x
+between identical runs; read them as directions, not numbers. The 35B's file was in the page cache for every run
+(warm reads), so disk wait here is the reader's, not the NVMe's.
+
+Exactness: `MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 tests/test_q38_bits.js` gives main's `5ef77d06 / 403ae12b` (plain,
+spec and GPU sampling agree) with `OFFLOAD_DISK=all OFFLOAD_DISK_RAM_GB=2` (in-thread reader; T1 7553 hits, 1 miss with
+no free slot) and with `OFFLOAD_DISK=20-39 OFFLOAD_DISK_RAM_GB=1 OFFLOAD_DISK_RESERVE=2 OFFLOAD_DISK_READER=workers`
+(20 parked + 20 disk layers, worker threads; 321 misses fell back to writeBuffer).
+
+Decode, `tests/bench/offload_bench.js` under Dawn, 35B, every layer offloaded, 3 GiB GPU budget (35 slots per layer,
+56% pool hits, 141 pool misses / token), LENS=512, worker reader:
+
+| experts | decode tok/s | disk reads / token | disk wait / token | T1 hits / token |
+|---|---|---|---|---|
+| parked in RAM | 11.4 | 0 | - | - |
+| disk, no T1 | 2.9 / 3.6 / 4.1 | 142 | 108-136 ms | - |
+| disk, T1 4 GiB | 3.4 / 4.7 / 7.0 | 81 | 72-97 ms | 61 |
+| disk, T1 8 GiB | 7.9 | 43 | 52 ms | 98 |
+
+Room: two room nodes in one process, local PeerServer (`packages/room-node/test/e2e.mjs nodepair`, OFFLOAD_DISCRETE=1,
+CTX=8192): host 6 GB (layers 0-8 + embed), worker 6 GB with `--ram 6 --disk` (WORKER_DISK=1). Parking alone can't hold
+the worker's 31 layers, so the deal gave it layers 15-19 parked (2.1 GB), 20-39 on disk with a 2.1 GB T1. Answer
+identical to the same room with `--ram 40` (all 31 offloaded layers parked, no disk dealt though `--disk` was on):
+12.1 tok/s cold, 31.9 tok/s on the repeat ask (T1 warm: 5676 hits, 4432 file reads, 3.3 s waiting over both asks).
