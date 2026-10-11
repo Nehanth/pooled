@@ -47,7 +47,7 @@ function realDir() {
   try { return Deno.env.get("Q38FLASH_DIR") || null; } catch { return null; }
 }
 const REAL = realDir();
-test({ name: "fixture: matches the real files in Q38FLASH_DIR (metadata, tensor tables, sizes)", ignore: !REAL, fn: () => {
+test({ name: "q38flash real files: the fixture matches the files in Q38FLASH_DIR (metadata, tensor tables, sizes)", ignore: !REAL, fn: () => {
   for (const f of FIX.files) {
     const path = `${REAL}/${f.name}`;
     eq(Deno.statSync(path).size, f.size, f.name + " size");
