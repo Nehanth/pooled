@@ -109,6 +109,7 @@ Deno.test("CTX caps: one layer's K (or V) buffer at max ctx, against WebGPU's 12
     "qwen3.6-35b-moe": { kvHeads: 2, headDim: 256, bytes: 2 },  // f16 KV
     "qwen3.5-122b-moe": { kvHeads: 2, headDim: 256, bytes: 2 }, // f16 KV (the 35B's K/V row)
     "qwen3-1.7b": { kvHeads: 8, headDim: 128, bytes: 4 },       // dense engine keeps f32 KV
+    "qwen3.8-flash": { kvHeads: 2, headDim: 256, bytes: 4 },    // the phase-1 Flash engine keeps f32 KV (2048 max)
   };
   for (const [model, c] of Object.entries(CTX)) {
     const s = shape[model];
@@ -239,7 +240,7 @@ Deno.test("catalogue: picker models exist, have memory needs and URLs by kind", 
   for (const k of PICKER) { ok(MODELS[k], `picker ${k} not in MODELS`); ok(NEED_GB[k] > 0, `picker ${k} has no NEED_GB`); }
   for (const k of Object.keys(NEED_GB)) ok(MODELS[k], `NEED_GB ${k} not in MODELS`);
   for (const [k, M] of Object.entries(MODELS)) {
-    ok(["gguf", "qwen35", "safetensors"].includes(M.kind), `${k}: unknown kind ${M.kind}`);
+    ok(["gguf", "qwen35", "qwen4exp", "safetensors"].includes(M.kind), `${k}: unknown kind ${M.kind}`);
     ok(M.label, `${k}: no label`);
     if (M.kind === "safetensors") ok(/^https:\/\/.*\.safetensors$/.test(M.st) && M.cfg && M.tok, `${k}: safetensors URLs`);
     else ok(/^https:\/\/.*\.gguf$/.test(M.gguf), `${k}: gguf URL`);

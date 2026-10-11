@@ -29,8 +29,8 @@ export function patchGenerator(s) {
   // host, speculative verify lap
   s = rep(s, "        const tLap = pre?.t0 ?? performance.now();", "        const tLap = pre?.t0 ?? performance.now(); __HP('h.lap0', 'ai-hidden-b', pos, tokens.length);", f);
   s = rep(s, "        const hostMs = performance.now() - tLap;", "        const hostMs = performance.now() - tLap; __HP('h.emb1', 'ai-hidden-b', pos, tokens.length);", f);
-  s = rep(s, "        sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb) });\n        const h = await returned;",
-    "        { const __w = packWire(hb); __HP('h.pack1', 'ai-hidden-b', pos, tokens.length); sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...__w }); }\n        const h = await returned; __HP('h.ret', 'ai-hidden-b', pos, tokens.length);", f);
+  s = rep(s, "        sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...packWire(hb, current.engine.frameIds ? tokens : null) });\n        const h = await returned;",
+    "        { const __w = packWire(hb, current.engine.frameIds ? tokens : null); __HP('h.pack1', 'ai-hidden-b', pos, tokens.length); sendChain({ t: \"ai-hidden-b\", basePos: pos, n: tokens.length, spec: 1, ...__w }); }\n        const h = await returned; __HP('h.ret', 'ai-hidden-b', pos, tokens.length);", f);
   s = rep(s, "          const toks = viaLookup ? await current.engine.specStepDrafts(next, sample, lk, spec) : await current.engine.specStep(next, sample, K, spec);",
     "          __HP('h.step0', viaLookup ? 'lookup' : 'draft', current.engine.pos, viaLookup ? lk.length : K); const toks = viaLookup ? await current.engine.specStepDrafts(next, sample, lk, spec) : await current.engine.specStep(next, sample, K, spec); __HP('h.step1', viaLookup ? 'lookup' : 'draft', current.engine.pos, toks.length);", f);
   return s;
@@ -41,8 +41,8 @@ export function patchPipeline(s) {
   // host, one token
   // (hostFuse: with ahead.h the layers already ran in headAhead, marked h.fuse0 / h.fuse1 below)
   s = rep(s, "    let h = ahead?.h || await current.engine.embedRun(id, pos);", "    __HP('h.lap0', 'ai-hidden', pos); let h = ahead?.h || await current.engine.embedRun(id, pos); __HP('h.emb1', 'ai-hidden', pos);", f);
-  s = rep(s, "      sendChain({ t: \"ai-hidden\", pos, ...packWire(h) });\n      ahead?.onSent?.();\n      h = await returned;",
-    "      { const __w = packWire(h); __HP('h.pack1', 'ai-hidden', pos); sendChain({ t: \"ai-hidden\", pos, ...__w }); }\n      ahead?.onSent?.();\n      h = await returned; __HP('h.ret', 'ai-hidden', pos);", f);
+  s = rep(s, "      sendChain({ t: \"ai-hidden\", pos, ...packWire(h, idsFor(current.engine, [id])) });\n      ahead?.onSent?.();\n      h = await returned;",
+    "      { const __w = packWire(h, idsFor(current.engine, [id])); __HP('h.pack1', 'ai-hidden', pos); sendChain({ t: \"ai-hidden\", pos, ...__w }); }\n      ahead?.onSent?.();\n      h = await returned; __HP('h.ret', 'ai-hidden', pos);", f);
   s = rep(s, "    const logits = await current.engine.headFromHidden(h);", "    __HP('h.head0', 'ai-hidden', pos); const logits = await current.engine.headFromHidden(h); __HP('h.head1', 'ai-hidden', pos);", f);
   // GPU sampling (exp/gpu-sample, --query gpusample=1): the same marks around the candidates head
   if (s.includes("      const c = await current.engine.headFromHiddenIds(h, desc);"))
@@ -55,13 +55,13 @@ export function patchPipeline(s) {
   // worker
   s = rep(s, "        ai.q = ai.q.then(() => workerFrame(d))", "        __HP('w.enq', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos); ai.q = ai.q.then(() => workerFrame(d))", f);
   s = rep(s, "    const t0 = performance.now();\n    if (d.t === \"ai-hidden-b\") {", "    const t0 = performance.now(); __HP('w.start', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos, d.n || 1);\n    if (d.t === \"ai-hidden-b\") {", f);
-  s = rep(s, "      const xs = unpackWire(d);", "      const xs = unpackWire(d); __HP('w.unp1', d.t, d.basePos);", f);
+  s = rep(s, "      const { h: xs, ids: tk } = splitWire(d, nTok, wdim);", "      const { h: xs, ids: tk } = splitWire(d, nTok, wdim); __HP('w.unp1', d.t, d.basePos);", f);
   s = rep(s, "      teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0);", "      __HP('w.gpu1', d.t, d.basePos); teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0);", f);
-  s = rep(s, "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };",
-    "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) }; __HP('w.pack1', d.t, d.basePos);", f);
-  s = rep(s, "      const hin = unpackWire(d);", "      const hin = unpackWire(d); __HP('w.unp1', d.t, d.pos);", f);
+  s = rep(s, "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb, ai.next === \"host\" ? null : tk) };",
+    "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb, ai.next === \"host\" ? null : tk) }; __HP('w.pack1', d.t, d.basePos);", f);
+  s = rep(s, "      const { h: hin, ids: tk } = splitWire(d, 1, wireDim(current.engine));", "      const { h: hin, ids: tk } = splitWire(d, 1, wireDim(current.engine)); __HP('w.unp1', d.t, d.pos);", f);
   s = rep(s, "      teleNote(\"one\", performance.now() - t0);", "      __HP('w.gpu1', d.t, d.pos); teleNote(\"one\", performance.now() - t0);", f);
-  s = rep(s, "      const msg = { pos: d.pos, ...packWire(h) };", "      const msg = { pos: d.pos, ...packWire(h) }; __HP('w.pack1', d.t, d.pos);", f);
+  s = rep(s, "      const msg = { pos: d.pos, ...packWire(h, ai.next === \"host\" ? null : tk) };", "      const msg = { pos: d.pos, ...packWire(h, ai.next === \"host\" ? null : tk) }; __HP('w.pack1', d.t, d.pos);", f);
   return s;
 }
 export function patchTransport(s) {
