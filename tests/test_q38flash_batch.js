@@ -165,6 +165,12 @@ async function layered() {
   }
 }
 
+function gap(lg) {
+  let a = -Infinity, b = -Infinity;
+  for (const v of lg) { if (v > a) { b = a; a = v; } else if (v > b) b = v; }
+  return a - b;
+}
+
 async function full() {
   const tok = model.tokenizer();
   const pick = env("CASES") ? env("CASES").split(",") : null;
@@ -179,15 +185,15 @@ async function full() {
     let r = await pb.prefill(g.prompt, { wantLogits: true });
     const pf = (performance.now() - t) / 1000;
     if (decodeFirst !== null) check(r.id === decodeFirst, `${name}: prefill greedy id ${r.id} == decode's ${decodeFirst}`);
-    const gen = [r.id];
+    const gen = [r.id], gaps = [gap(r.logits)];
     t = performance.now();
-    while (gen.length < N) { r = await eng.forwardToken(gen[gen.length - 1]); gen.push(r.id); }
+    while (gen.length < N) { r = await eng.forwardToken(gen[gen.length - 1], { wantLogits: true }); gen.push(r.id); gaps.push(gap(r.logits)); }
     const ts = (N - 1) / ((performance.now() - t) / 1000);
     const diff = gen.findIndex((x, i) => x !== g.ids[i]);
     const tie = (g.nearTies || []).map(([i]) => i).filter((i) => i < N);
     const ok = diff < 0, tieOk = !ok && tie.some((i) => i <= diff);
     console.log(`${ok || tieOk ? "ok  " : "FAIL"} ${name}: prompt ${g.prompt.length} tok, prefill ${pf.toFixed(1)} s (${(g.prompt.length / pf).toFixed(0)} tok/s) · decode ${ts.toFixed(2)} tok/s · ${ok ? `MATCH llama.cpp (${N} ids)` : tieOk ? `differs at ${diff} after llama.cpp's near tie at ${tie.filter((i) => i <= diff).join(",")}` : `MISMATCH at ${diff}`}`);
-    if (!ok) console.log(`  engine: ${JSON.stringify(tok.decode(gen))}\n  golden: ${JSON.stringify(g.text)}`);
+    if (!ok) console.log(`  engine: ${JSON.stringify(tok.decode(gen))}\n  golden: ${JSON.stringify(g.text)}\n  top-2 gap (nats) ours / llama.cpp, steps 0..${diff}: ${gaps.slice(0, diff + 1).map((x, i) => `${x.toFixed(3)}/${g.gap?.[i]?.toFixed(3)}`).join(" ")}`);
     if (!ok && !tieOk) fail++;
     // verify: the prompt again, then one verify pass over [last prompt token, gen[0..6]] gives gen[0..7]
     if (gen.length >= 8) {
