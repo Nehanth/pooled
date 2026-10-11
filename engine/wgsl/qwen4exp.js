@@ -20,16 +20,16 @@ fn silu(v: f32) -> f32 { return v / (1.0 + exp(-v)); }
 const blockDot = (kind, QS, SC, X) => kind === "q4" ? `
   {
     let s = unpack2x16float(${SC}[blk >> 1u])[blk & 1u];
-    let wo = blk * 4u;
-    let w0 = ${QS}[wo]; let w1 = ${QS}[wo + 1u]; let w2 = ${QS}[wo + 2u]; let w3 = ${QS}[wo + 3u];
+    let wv = ${QS}[blk];
+    let w0 = wv.x; let w1 = wv.y; let w2 = wv.z; let w3 = wv.w;
     d = s * (dot(q4lo(w0), ${X}[xb4]) + dot(q4lo(w1), ${X}[xb4 + 1u]) + dot(q4lo(w2), ${X}[xb4 + 2u]) + dot(q4lo(w3), ${X}[xb4 + 3u])
            + dot(q4hi(w0), ${X}[xb4 + 4u]) + dot(q4hi(w1), ${X}[xb4 + 5u]) + dot(q4hi(w2), ${X}[xb4 + 6u]) + dot(q4hi(w3), ${X}[xb4 + 7u]));
   }` : `
   {
     let s = unpack2x16float(${SC}[blk >> 1u])[blk & 1u];
-    let wo = blk * 8u;
-    var a = 0.0;
-    for (var j = 0u; j < 8u; j++) { a += dot(i8x4(${QS}[wo + j]), ${X}[xb4 + j]); }
+    let wa = ${QS}[blk * 2u]; let wb = ${QS}[blk * 2u + 1u];
+    let a = dot(i8x4(wa.x), ${X}[xb4]) + dot(i8x4(wa.y), ${X}[xb4 + 1u]) + dot(i8x4(wa.z), ${X}[xb4 + 2u]) + dot(i8x4(wa.w), ${X}[xb4 + 3u])
+          + dot(i8x4(wb.x), ${X}[xb4 + 4u]) + dot(i8x4(wb.y), ${X}[xb4 + 5u]) + dot(i8x4(wb.z), ${X}[xb4 + 6u]) + dot(i8x4(wb.w), ${X}[xb4 + 7u]);
     d = s * a;
   }`;
 
@@ -46,7 +46,7 @@ const LANE_REDUCE = (R = "fx_red") => `
 // Workgroups: x = ceil(dOut / 8) up to 32768, then y.
 export function gemvWGSL(kind) {
   const W = kind === "f32" ? `@group(0) @binding(0) var<storage, read> fx_w: array<vec4<f32>>;` : `
-@group(0) @binding(0) var<storage, read> fx_qs: array<u32>;
+@group(0) @binding(0) var<storage, read> fx_qs: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> fx_sc: array<u32>;`;
   const body = kind === "f32" ? `
     let n4 = fx_P.dIn / 4u;
@@ -89,10 +89,10 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
 // workgroup y = k. The shared expert runs it with ids = [0] and K = 1.
 export function moeGuWGSL(kind) {
   return DQ + `
-struct MP { dOut: u32, dIn: u32, K: u32, sig: u32 };
-@group(0) @binding(0) var<storage, read> fx_gq: array<u32>;
+struct MP { dOut: u32, dIn: u32, K: u32, sig: u32, wOff: u32, p0: u32, p1: u32, p2: u32 };
+@group(0) @binding(0) var<storage, read> fx_gq: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> fx_gs: array<u32>;
-@group(0) @binding(2) var<storage, read> fx_uq: array<u32>;
+@group(0) @binding(2) var<storage, read> fx_uq: array<vec4<u32>>;
 @group(0) @binding(3) var<storage, read> fx_us: array<u32>;
 @group(0) @binding(4) var<storage, read> fx_x: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read_write> fx_h: array<f32>;
@@ -134,8 +134,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
 // sigmoid(wts[k]) when sig = 1 (the shared expert's gate, sigmoid(ffn_gate_inp_shexp . x)).
 export function moeDnWGSL(kind) {
   return DQ + `
-struct MP { dOut: u32, dIn: u32, K: u32, sig: u32 };
-@group(0) @binding(0) var<storage, read> fx_qs: array<u32>;
+struct MP { dOut: u32, dIn: u32, K: u32, sig: u32, wOff: u32, p0: u32, p1: u32, p2: u32 };
+@group(0) @binding(0) var<storage, read> fx_qs: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> fx_sc: array<u32>;
 @group(0) @binding(2) var<storage, read> fx_x: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> fx_y: array<f32>;
@@ -152,7 +152,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
     let nb = fx_P.dIn / 32u;
     for (var p = lane; p < fx_P.K * nb; p += 32u) {
       let k = p / nb; let b = p % nb;
-      var wk = fx_wts[k];
+      var wk = fx_wts[fx_P.wOff + k];
       if (fx_P.sig == 1u) { wk = sigm(wk); }
       let blk = (fx_ids[k] * fx_P.dOut + r) * nb + b;
       let xb4 = (k * fx_P.dIn) / 4u + b * 8u;
@@ -276,59 +276,54 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   fx_R[j] += v * (2.0 * sigm(fx_inj[c] / f32(fx_P.hc)));
 }`;
 
-// Gated DeltaNet, step 1: the causal conv over the last convK inputs of each channel (state: the convK - 1 older
-// inputs, oldest first), then silu. w is [ch][convK], the newest tap last.
+// Gated DeltaNet, step 1: one workgroup of dS threads per 128-channel head of the conv input [q | k | v]: the causal
+// conv over the last convK inputs of each channel (state: the convK - 1 older inputs, oldest first; w is
+// [ch][convK], the newest tap last), silu, then for the q and k heads (workgroups < 2 * nKH) the l2 normalisation
+// v / max(|v|, eps).
 export const DN_CONV_WGSL = DQ + `
-struct DP { n: u32, K: u32, p0: u32, p1: u32 };
+struct DP { K: u32, nQK: u32, dS: u32, eps: f32 };
 @group(0) @binding(0) var<storage, read> fx_xin: array<f32>;
 @group(0) @binding(1) var<storage, read_write> fx_st: array<f32>;
 @group(0) @binding(2) var<storage, read> fx_w: array<f32>;
 @group(0) @binding(3) var<storage, read_write> fx_co: array<f32>;
 @group(0) @binding(4) var<uniform> fx_P: DP;
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) g: vec3<u32>) {
-  let c = g.x;
-  if (c >= fx_P.n) { return; }
+var<workgroup> fx_red: array<f32, 128>;
+@compute @workgroup_size(128)
+fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+  let t = l.x; let c = wg.x * fx_P.dS + t;
   let K1 = fx_P.K - 1u;
   let xv = fx_xin[c];
   var acc = fx_w[c * fx_P.K + K1] * xv;
   for (var j = 0u; j < K1; j++) { acc += fx_w[c * fx_P.K + j] * fx_st[c * K1 + j]; }
-  fx_co[c] = silu(acc);
+  let v = silu(acc);
   for (var j = 0u; j + 1u < K1; j++) { fx_st[c * K1 + j] = fx_st[c * K1 + j + 1u]; }
   fx_st[c * K1 + K1 - 1u] = xv;
-}`;
-
-// Step 2: l2-normalise each q and k head in place (2 * nKH workgroups of dS threads): v / max(|v|, eps).
-export const DN_L2_WGSL = `
-struct LP { dS: u32, eps: f32, p0: u32, p1: u32 };
-@group(0) @binding(0) var<storage, read_write> fx_co: array<f32>;
-@group(0) @binding(1) var<uniform> fx_P: LP;
-var<workgroup> fx_red: array<f32, 128>;
-@compute @workgroup_size(128)
-fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let t = l.x; let o = wg.x * fx_P.dS;
-  let v = fx_co[o + t];
+  if (wg.x >= fx_P.nQK) { fx_co[c] = v; return; }
   fx_red[t] = v * v;
   workgroupBarrier();
   for (var s = 64u; s > 0u; s >>= 1u) { if (t < s) { fx_red[t] += fx_red[t + s]; } workgroupBarrier(); }
-  fx_co[o + t] = v * (1.0 / max(sqrt(fx_red[0]), fx_P.eps));
+  fx_co[c] = v * (1.0 / max(sqrt(fx_red[0]), fx_P.eps));
 }`;
 
-// Step 3: the delta rule, one workgroup per V head, thread j owns column j of the head's state S[i][j]
-// (dS x dS). g = softplus(alpha + dt_bias) * A, decay = exp(g), beta = sigmoid(beta_raw):
-//   S *= decay; vhat = (v - S^T k) * beta; S += k vhat^T; o = S^T q / sqrt(dS).
-// The V-head order is the Qwen3.5 converter's: V head h reads QK head h % nKH.
+// Step 2: the delta rule, then the gated output norm; one workgroup per V head, thread j owns column j of the
+// head's state S[i][j] (dS x dS). g = softplus(alpha + dt_bias) * A, decay = exp(g), beta = sigmoid(beta_raw):
+//   S *= decay; vhat = (v - S^T k) * beta; S += k vhat^T; o = S^T q / sqrt(dS)
+//   y = rmsnorm(o) * ssm_norm * sigmoid(z)   (qwen4exp: sigmoid, where Qwen3.5 has silu)
+// The V-head order is the Qwen3.5 converter's: V head h reads QK head h % nKH. ba = [beta_raw (nVH) | alpha (nVH)],
+// dta = [dt_bias (nVH) | A (nVH)]; o keeps the raw delta-rule output (the per-layer check's attn_output).
 export const DN_DELTA_WGSL = DQ + `
-struct EP { nKH: u32, dS: u32, keyDim: u32, p0: u32 };
+struct EP { nKH: u32, dS: u32, keyDim: u32, nVH: u32, eps: f32, p0: u32, p1: u32, p2: u32 };
 @group(0) @binding(0) var<storage, read> fx_co: array<f32>;
 @group(0) @binding(1) var<storage, read_write> fx_S: array<f32>;
-@group(0) @binding(2) var<storage, read> fx_alpha: array<f32>;
-@group(0) @binding(3) var<storage, read> fx_beta: array<f32>;
-@group(0) @binding(4) var<storage, read> fx_dtb: array<f32>;
-@group(0) @binding(5) var<storage, read> fx_A: array<f32>;
+@group(0) @binding(2) var<storage, read> fx_ba: array<f32>;
+@group(0) @binding(3) var<storage, read> fx_dta: array<f32>;
+@group(0) @binding(4) var<storage, read> fx_z: array<f32>;
+@group(0) @binding(5) var<storage, read> fx_nw: array<f32>;
 @group(0) @binding(6) var<storage, read_write> fx_o: array<f32>;
-@group(0) @binding(7) var<uniform> fx_P: EP;
+@group(0) @binding(7) var<storage, read_write> fx_y: array<f32>;
+@group(0) @binding(8) var<uniform> fx_P: EP;
 var<workgroup> fx_kq: array<f32, 256>;
+var<workgroup> fx_red: array<f32, 128>;
 @compute @workgroup_size(128)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
   let h = wg.x; let j = l.x; let dS = fx_P.dS;
@@ -336,11 +331,11 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   fx_kq[j] = fx_co[fx_P.keyDim + kh * dS + j];          // k
   fx_kq[128u + j] = fx_co[kh * dS + j];               // q
   workgroupBarrier();
-  let araw = fx_alpha[h] + fx_dtb[h];
+  let araw = fx_ba[fx_P.nVH + h] + fx_dta[h];
   var sp = araw;
   if (araw <= 20.0) { sp = log(1.0 + exp(araw)); }
-  let decay = exp(sp * fx_A[h]);
-  let b = sigm(fx_beta[h]);
+  let decay = exp(sp * fx_dta[fx_P.nVH + h]);
+  let b = sigm(fx_ba[h]);
   let v = fx_co[2u * fx_P.keyDim + h * dS + j];
   let base = h * dS * dS;
   var vh = 0.0;
@@ -357,28 +352,14 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
     fx_S[base + i * dS + j] = s;
     acc += s * fx_kq[128u + i];
   }
-  fx_o[h * dS + j] = acc * scale;
-}`;
-
-// Step 4: the gated output norm, per V head: rmsnorm(o_h) * ssm_norm * sigmoid(z) (qwen4exp: sigmoid, where
-// Qwen3.5 has silu).
-export const DN_GNORM_WGSL = DQ + `
-struct GN { dS: u32, eps: f32, p0: u32, p1: u32 };
-@group(0) @binding(0) var<storage, read> fx_o: array<f32>;
-@group(0) @binding(1) var<storage, read> fx_z: array<f32>;
-@group(0) @binding(2) var<storage, read> fx_nw: array<f32>;
-@group(0) @binding(3) var<storage, read_write> fx_y: array<f32>;
-@group(0) @binding(4) var<uniform> fx_P: GN;
-var<workgroup> fx_red: array<f32, 128>;
-@compute @workgroup_size(128)
-fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let t = l.x; let i = wg.x * fx_P.dS + t;
-  let v = fx_o[i];
-  fx_red[t] = v * v;
+  let ov = acc * scale;
+  let oi = h * dS + j;
+  fx_o[oi] = ov;
+  fx_red[j] = ov * ov;
   workgroupBarrier();
-  for (var s = 64u; s > 0u; s >>= 1u) { if (t < s) { fx_red[t] += fx_red[t + s]; } workgroupBarrier(); }
-  let inv = 1.0 / sqrt(fx_red[0] / f32(fx_P.dS) + fx_P.eps);
-  fx_y[i] = (v * inv) * fx_nw[t] * sigm(fx_z[i]);
+  for (var s = 64u; s > 0u; s >>= 1u) { if (j < s) { fx_red[j] += fx_red[j + s]; } workgroupBarrier(); }
+  let inv = 1.0 / sqrt(fx_red[0] / f32(dS) + fx_P.eps);
+  fx_y[oi] = (ov * inv) * fx_nw[j] * sigm(fx_z[oi]);
 }`;
 
 // Per-token frame: the position and the RoPE cos/sin of each rotary pair at that position (computed on the CPU

@@ -24,6 +24,7 @@ const U = GPUBufferUsage;
 const fr = Math.fround;
 
 export class Qwen4ExpEngine {
+  static _ids = 0;
   static async create(opts) { const e = new Qwen4ExpEngine(); await e._init(opts); return e; }
 
   // weights: qwen4expWeights' structure (engine/gguf.js), each matrix with entry.gpu (streamed) or its CPU bytes.
@@ -53,7 +54,7 @@ export class Qwen4ExpEngine {
       ...kinds.map(async (k) => { P["gemv_" + k] = await pipe(W.gemvWGSL(k), "gemv_" + k); }),
       ...["q4", "q8"].map(async (k) => { P["gu_" + k] = await pipe(W.moeGuWGSL(k), "moe_gu_" + k); P["dn_" + k] = await pipe(W.moeDnWGSL(k), "moe_dn_" + k); }),
       ...Object.entries({ route: W.MOE_ROUTE_WGSL, hcNorm: W.HC_NORM_WGSL, hcMix: W.HC_MIX_WGSL, hcComb: W.HC_COMBINE_WGSL,
-        dnConv: W.DN_CONV_WGSL, dnL2: W.DN_L2_WGSL, dnDelta: W.DN_DELTA_WGSL, dnGnorm: W.DN_GNORM_WGSL,
+        dnConv: W.DN_CONV_WGSL, dnDelta: W.DN_DELTA_WGSL,
         attnPrep: W.ATTN_PREP_WGSL, attnDec: W.ATTN_DEC_WGSL, ple: W.PLE_WGSL, am1: W.ARGMAX1_WGSL, am2: W.ARGMAX2_WGSL })
         .map(async ([k, code]) => { P[k] = await pipe(code, k); }),
     ]);
@@ -65,10 +66,10 @@ export class Qwen4ExpEngine {
     this.dn = { convDim, keyDim };
     const B = this.B = {
       R: buf(HD), xn: buf(HD), lo: buf(cfg.hcRank), gate: buf(HD), mixed: buf(d), inj: buf(hc), out: buf(d),
-      qkv: buf(convDim), z: buf(ss.inner), alpha: buf(ss.nVHeads), beta: buf(ss.nVHeads), co: buf(convDim), o: buf(ss.inner), go: buf(ss.inner),
-      qf: buf(2 * nH * hd), kb: buf(nKV * hd), vb: buf(nKV * hd), qn: buf(nH * hd), ao: buf(nH * hd),
-      logits: buf(cfg.nExp), ids: buf(K), wts: buf(K), h: buf(K * cfg.expFF), moe: buf(d),
-      sg: buf(1), shIds: buf(1), hs: buf(cfg.shFF), sh: buf(d),
+      qkvz: buf(convDim + ss.inner), ba: buf(2 * ss.nVHeads), co: buf(convDim), o: buf(ss.inner), go: buf(ss.inner),
+      qkvA: buf(2 * nH * hd + 2 * nKV * hd), qn: buf(nH * hd), ao: buf(nH * hd),
+      logits: buf(cfg.nExp + 1), ids: buf(K), wts: buf(K), h: buf(K * cfg.expFF), moe: buf(d),
+      shIds: buf(1), hs: buf(cfg.shFF), sh: buf(d),
       frame: device.createBuffer({ size: W.FRAME_FLOATS * 4, usage: U.UNIFORM | U.COPY_DST }),
     };
     if (pleLayers.length) Object.assign(B, { emb: buf(d), pk: buf(HD), pv: buf(d), dbg: buf(2 * HD + hc) });
@@ -90,7 +91,7 @@ export class Qwen4ExpEngine {
       if (!e.gpu) {
         const mk = (data) => {
           const u8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-          const b = device.createBuffer({ size: Math.ceil(u8.byteLength / 4) * 4, usage: U.STORAGE | U.COPY_DST, mappedAtCreation: true });
+          const b = device.createBuffer({ size: Math.ceil(u8.byteLength / 4) * 4, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC, mappedAtCreation: true });
           new Uint8Array(b.getMappedRange()).set(u8);
           b.unmap();
           return b;
@@ -98,6 +99,19 @@ export class Qwen4ExpEngine {
         e.gpu = { kind: e.kind, qs: mk(e.qs), sc: mk(e.scales) };
       }
       return { kind: e.kind, qs: e.gpu.qs, sc: e.gpu.sc, shape: e.shape };
+    };
+
+    // f32 tensors end to end, as one entry (kept per pair: the cache key is the entries themselves)
+    const cats = new Map();
+    const cat = (...es) => {
+      const k = es.map((e) => (e.__id ||= ++Qwen4ExpEngine._ids)).join(",");
+      if (!cats.has(k)) {
+        const data = new Float32Array(es.reduce((n, e) => n + e.data.length, 0));
+        let o = 0;
+        for (const e of es) { data.set(e.data, o); o += e.data.length; }
+        cats.set(k, { kind: "f32", data });
+      }
+      return cats.get(k);
     };
 
     // ---- op builders: an op is { pipe, bg, wg: [x, y, z], tap?: [name, buffer, count, "f32" | "u32"] }
@@ -109,8 +123,32 @@ export class Qwen4ExpEngine {
       b.unmap();
       return b;
     };
+    // list: buffers, or { buffer, offset, size } views (offsets multiples of 256 bytes)
     const bg = (p, list) => device.createBindGroup({ layout: p.getBindGroupLayout(0),
-      entries: list.map((b, i) => (b ? { binding: i, resource: { buffer: b } } : null)).filter(Boolean) });
+      entries: list.map((b, i) => (b ? { binding: i, resource: b.buffer ? b : { buffer: b } } : null)).filter(Boolean) });
+    const view = (buffer, off, n) => ({ buffer, offset: off * 4, size: n * 4 });
+    // Quantized matrices of one kind and width stacked into one (rows end to end), so projections that read the
+    // same input run as one GEMV. The engine owns its weights: the parts' GPU buffers are freed. null when the
+    // kinds or widths differ.
+    const fuseRows = (...es) => {
+      const ms = es.map((e) => wq(e));
+      if (ms.some((m) => m.kind === "f32" || m.kind !== ms[0].kind || m.shape[1] !== ms[0].shape[1])) return null;
+      const cols = ms[0].shape[1], nb = cols / 32, qb = ms[0].kind === "q4" ? 16 : 32;
+      const rows = ms.reduce((n, m) => n + m.shape[0], 0);
+      if (ms.some((m) => (m.shape[0] * nb) % 2)) return null;   // scales are packed two per word
+      const qs = device.createBuffer({ size: rows * nb * qb, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
+      const sc = device.createBuffer({ size: rows * nb * 2, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
+      const enc = device.createCommandEncoder();
+      let r = 0;
+      for (const m of ms) {
+        enc.copyBufferToBuffer(m.qs, 0, qs, r * nb * qb, m.shape[0] * nb * qb);
+        enc.copyBufferToBuffer(m.sc, 0, sc, r * nb * 2, m.shape[0] * nb * 2);
+        r += m.shape[0];
+      }
+      device.queue.submit([enc.finish()]);
+      for (const e of es) { e.gpu.qs.destroy(); e.gpu.sc.destroy(); e.gpu = { kind: e.kind, qs, sc, fused: true }; }
+      return { kind: ms[0].kind, qs, sc, shape: [rows, cols] };
+    };
     const f = (v) => ({ f: v });
     const eps = cfg.eps;
     // y[yOff..] = mat x (mode 1: silu(acc * scale)); dOut / dIn from the weight's shape unless given
@@ -158,38 +196,39 @@ export class Qwen4ExpEngine {
           taps: [[`ple_gate-${i}`, B.dbg, hc, "f32", 2 * HD], [`ple_gated_value-${i}`, B.dbg, HD], [`ple_conv_out-${i}`, B.dbg, HD, "f32", HD]] });
       }
       attnOps.push(...hcMix(L.hcAttn, `-${i}`, `hc_mixed-${i}`));
-      if (isQ) attnOps.push(...this._attnOps(L, i, st, { gemv, wq, bg, uni, f, buf }));
+      if (isQ) attnOps.push(...this._attnOps(L, i, st, { gemv, wq, bg, uni, f, view, fuseRows }));
       else {
         st.conv = buf(convDim * (ss.convK - 1)); st.S = buf(ss.nVHeads * ss.stateSize * ss.stateSize);
-        attnOps.push(gemv(wq(L.wqkv, "qkv"), B.mixed, B.qkv));
-        attnOps.push(gemv(wq(L.wz, "z"), B.mixed, B.z, { tap: [`z-${i}`, B.z, ss.inner] }));
-        attnOps.push(gemv(wq(L.wBeta, "beta"), B.mixed, B.beta, { dIn: d }));
-        attnOps.push(gemv(wq(L.wAlpha, "alpha"), B.mixed, B.alpha, { dIn: d }));
-        attnOps.push({ pipe: P.dnConv, bg: bg(P.dnConv, [B.qkv, st.conv, wq(L.conv, "conv").buf, B.co, uni([convDim, ss.convK, 0, 0])]), wg: ewg(convDim) });
-        attnOps.push({ pipe: P.dnL2, bg: bg(P.dnL2, [B.co, uni([ss.stateSize, f(eps), 0, 0])]), wg: [2 * ss.nKHeads, 1, 1] });
-        attnOps.push({ pipe: P.dnDelta, bg: bg(P.dnDelta, [B.co, st.S, B.alpha, B.beta, wq(L.dtBias).buf, wq(L.ssmA).buf, B.o,
-          uni([ss.nKHeads, ss.stateSize, keyDim, 0])]), wg: [ss.nVHeads, 1, 1], tap: [`attn_output-${i}`, B.o, ss.inner] });
-        attnOps.push({ pipe: P.dnGnorm, bg: bg(P.dnGnorm, [B.o, B.z, wq(L.ssmNorm).buf, B.go, uni([ss.stateSize, f(eps), 0, 0])]),
-          wg: [ss.nVHeads, 1, 1], tap: [`final_output-${i}`, B.go, ss.inner] });
+        // [qkv | z]: one GEMV when both have one type (Q4_0 in every layer of the bartowski file)
+        const zTap = { tap: [`z-${i}`, B.qkvz, ss.inner, "f32", convDim] }, fz = fuseRows(L.wqkv, L.wz);
+        if (fz) attnOps.push(gemv(fz, B.mixed, B.qkvz, zTap));
+        else attnOps.push(gemv(wq(L.wqkv, "qkv"), B.mixed, B.qkvz), gemv(wq(L.wz, "z"), B.mixed, B.qkvz, { yOff: convDim, ...zTap }));
+        // beta and alpha as one GEMV, dt_bias and A as one buffer (cat: CPU copies of the f32 tensors)
+        attnOps.push(gemv(wq(cat(L.wBeta, L.wAlpha)), B.mixed, B.ba, { dIn: d }));
+        attnOps.push({ pipe: P.dnConv, bg: bg(P.dnConv, [view(B.qkvz, 0, convDim), st.conv, wq(L.conv, "conv").buf, B.co, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps)])]),
+          wg: [convDim / ss.stateSize, 1, 1] });
+        attnOps.push({ pipe: P.dnDelta, bg: bg(P.dnDelta, [B.co, st.S, B.ba, wq(cat(L.dtBias, L.ssmA)).buf, view(B.qkvz, convDim, ss.inner), wq(L.ssmNorm).buf, B.o, B.go,
+          uni([ss.nKHeads, ss.stateSize, keyDim, ss.nVHeads, f(eps), 0, 0, 0])]), wg: [ss.nVHeads, 1, 1],
+          taps: [[`attn_output-${i}`, B.o, ss.inner], [`final_output-${i}`, B.go, ss.inner]] });
         attnOps.push(gemv(wq(L.wOut, "ssm_out"), B.go, B.out, { tap: [`linear_attn_out-${i}`, B.out, d] }));
       }
       attnOps.push(hcComb(B.out, null, `hc_combine-${i}`));
       // MoE: router, top-K, routed experts, shared expert (gated by sigmoid(shRouter . x))
       ffnOps.push(...hcMix(L.hcFfn, `-${i}`, `hc_mixed-${i}`));
-      ffnOps.push(gemv(wq(L.router, "router"), B.mixed, B.logits, { dIn: d }));
+      // the router and the shared expert's gate as one GEMV: logits[nExp] is the shared gate's
+      ffnOps.push(gemv(wq(cat(L.router, L.shRouter)), B.mixed, B.logits, { dIn: d }));
       ffnOps.push({ pipe: P.route, bg: bg(P.route, [B.logits, B.ids, B.wts, uni([cfg.nExp, K, 0, 0])]), wg: [1, 1, 1],
         taps: [[`ffn_moe_topk-${i}`, B.ids, K, "u32"], [`ffn_moe_weights_norm-${i}`, B.wts, K]] });
       const eg = wq(L.expGate, "experts gate"), eu = wq(L.expUp, "experts up"), ed = wq(L.expDown, "experts down");
       if (eg.kind !== eu.kind) throw new Error(`qwen4exp: layer ${i} gate/up experts differ in type`);
       const ff = cfg.expFF;
-      ffnOps.push({ pipe: P["gu_" + eg.kind], bg: bg(P["gu_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, B.mixed, B.h, B.ids, uni([ff, d, K, 0])]), wg: [Math.ceil(ff / 8), K, 1] });
-      ffnOps.push({ pipe: P["dn_" + ed.kind], bg: bg(P["dn_" + ed.kind], [ed.qs, ed.sc, B.h, B.moe, B.ids, B.wts, uni([d, ff, K, 0])]), wg: [Math.ceil(d / 8), 1, 1],
+      ffnOps.push({ pipe: P["gu_" + eg.kind], bg: bg(P["gu_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, B.mixed, B.h, B.ids, uni([ff, d, K, 0, 0, 0, 0, 0])]), wg: [Math.ceil(ff / 8), K, 1] });
+      ffnOps.push({ pipe: P["dn_" + ed.kind], bg: bg(P["dn_" + ed.kind], [ed.qs, ed.sc, B.h, B.moe, B.ids, B.wts, uni([d, ff, K, 0, 0, 0, 0, 0])]), wg: [Math.ceil(d / 8), 1, 1],
         tap: [`ffn_moe_out-${i}`, B.moe, d] });
       const sgw = wq(L.shGate, "shared gate"), suw = wq(L.shUp, "shared up"), sdw = wq(L.shDown, "shared down"), sff = cfg.shFF;
       if (sgw.kind !== suw.kind) throw new Error(`qwen4exp: layer ${i} shared gate/up differ in type`);
-      ffnOps.push(gemv(wq(L.shRouter, "shared router"), B.mixed, B.sg, { dOut: 1, dIn: d }));
-      ffnOps.push({ pipe: P["gu_" + sgw.kind], bg: bg(P["gu_" + sgw.kind], [sgw.qs, sgw.sc, suw.qs, suw.sc, B.mixed, B.hs, B.shIds, uni([sff, d, 1, 0])]), wg: [Math.ceil(sff / 8), 1, 1] });
-      ffnOps.push({ pipe: P["dn_" + sdw.kind], bg: bg(P["dn_" + sdw.kind], [sdw.qs, sdw.sc, B.hs, B.sh, B.shIds, B.sg, uni([d, sff, 1, 1])]), wg: [Math.ceil(d / 8), 1, 1],
+      ffnOps.push({ pipe: P["gu_" + sgw.kind], bg: bg(P["gu_" + sgw.kind], [sgw.qs, sgw.sc, suw.qs, suw.sc, B.mixed, B.hs, B.shIds, uni([sff, d, 1, 0, 0, 0, 0, 0])]), wg: [Math.ceil(sff / 8), 1, 1] });
+      ffnOps.push({ pipe: P["dn_" + sdw.kind], bg: bg(P["dn_" + sdw.kind], [sdw.qs, sdw.sc, B.hs, B.sh, B.shIds, B.logits, uni([d, sff, 1, 1, cfg.nExp, 0, 0, 0])]), wg: [Math.ceil(d / 8), 1, 1],
         tap: [`ffn_shexp_gated-${i}`, B.sh, d] });
       ffnOps.push(hcComb(B.moe, B.sh, `l_last-${i}`));
       this.layers.push({ i, isQ, st, attnOps, ffnOps });
@@ -213,19 +252,20 @@ export class Qwen4ExpEngine {
 
   // Gated full attention (dense causal). The QSA hook (PR 9): an indexer pass would go between attn_prep and
   // attn_dec and hand attn_dec a selected-cell list; below 2051 cached tokens it selects every cell.
-  _attnOps(L, i, st, { gemv, wq, bg, uni, f }) {
+  _attnOps(L, i, st, { gemv, wq, bg, uni, f, view, fuseRows }) {
     const { cfg, B, P, device } = this, nH = cfg.nHeads, nKV = cfg.nKVHeads, hd = cfg.headDim;
     if (hd !== 256) throw new Error("qwen4exp: attn kernels assume head dim 256");
     const sz = this.maxSeq * nKV * hd * 4;
     st.kc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_DST });
     st.vc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_DST });
     const ap = uni([nH, nKV, hd, cfg.ropeDims, f(cfg.eps), 0, 0, 0]);
+    const nQ = 2 * nH * hd, nK = nKV * hd, qf = view(B.qkvA, 0, nQ), fq = fuseRows(L.wq, L.wk, L.wv);
     return [
-      gemv(wq(L.wq, "attn_q"), B.mixed, B.qf),
-      gemv(wq(L.wk, "attn_k"), B.mixed, B.kb),
-      gemv(wq(L.wv, "attn_v"), B.mixed, B.vb),
-      { pipe: P.attnPrep, bg: bg(P.attnPrep, [B.qf, B.kb, B.vb, B.qn, st.kc, st.vc, wq(L.qNorm).buf, wq(L.kNorm).buf, ap, B.frame]), wg: [nH + nKV, 1, 1] },
-      { pipe: P.attnDec, bg: bg(P.attnDec, [B.qn, st.kc, st.vc, B.qf, B.ao, ap, B.frame]), wg: [nH, 1, 1], tap: [`attn_gated-${i}`, B.ao, nH * hd] },
+      // [q|gate, k, v] into one buffer: one GEMV when the three share a type (Q6_K and Q8_0 both load as q8)
+      ...(fq ? [gemv(fq, B.mixed, B.qkvA)] : [gemv(wq(L.wq, "attn_q"), B.mixed, B.qkvA), gemv(wq(L.wk, "attn_k"), B.mixed, B.qkvA, { yOff: nQ }),
+        gemv(wq(L.wv, "attn_v"), B.mixed, B.qkvA, { yOff: nQ + nK })]),
+      { pipe: P.attnPrep, bg: bg(P.attnPrep, [qf, view(B.qkvA, nQ, nK), view(B.qkvA, nQ + nK, nK), B.qn, st.kc, st.vc, wq(L.qNorm).buf, wq(L.kNorm).buf, ap, B.frame]), wg: [nH + nKV, 1, 1] },
+      { pipe: P.attnDec, bg: bg(P.attnDec, [B.qn, st.kc, st.vc, qf, B.ao, ap, B.frame]), wg: [nH, 1, 1], tap: [`attn_gated-${i}`, B.ao, nH * hd] },
       gemv(wq(L.wo, "attn_output"), B.ao, B.out, { tap: [`attn_output-${i}`, B.out, cfg.dim] }),
     ];
   }
