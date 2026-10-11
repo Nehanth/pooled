@@ -55,8 +55,13 @@ export function gemvLanes(kind, dOut, dIn) {
 // Rows per lane group: quantized matrices with many rows take 4, so each lane loads its x block once for 4 rows
 // (x is read 8 times per weight byte otherwise).
 export const gemvRows = (kind, dOut) => (kind !== "f32" && dOut >= 2048 ? 4 : 1);
-export function gemvWGSL(kind, LANES = 32, R = 1) {
+// MIX (q4/q8, R = hc): the HC up projection fused with the mix: lane group g owns column i = g of every stream
+// (rows i + k * stride, stride = d in P.pad), writes the gates (for the per-layer check) and
+// mixed[i] = mean over k of xn[k * d + i] * sigmoid(gate_k).
+export function gemvWGSL(kind, LANES = 32, R = 1, MIX = false) {
   const RPW = 256 / LANES, RR = [...Array(R).keys()];
+  const rowOf = (k) => (MIX ? `r0 + ${k}u * fx_P.pad` : `r0 + ${k}u`);
+  const inRange = (k) => (MIX ? "r0 < fx_P.pad" : `r0 + ${k}u < fx_P.dOut`);
   const W = kind === "f32" ? `@group(0) @binding(0) var<storage, read> fx_w: array<vec4<f32>>;` : `
 @group(0) @binding(0) var<storage, read> fx_qs: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> fx_sc: array<u32>;`;
@@ -75,27 +80,28 @@ export function gemvWGSL(kind, LANES = 32, R = 1) {
     let ro = (fx_P.rowOff + r0) * n4;
     for (var i = lane; i < n4; i += ${LANES}u) { acc0 += dot(fx_w[ro + i], fx_x[fx_P.xOff4 + i]); }` : `
     let nb = fx_P.dIn / 32u;
-    let rb = (fx_P.rowOff + r0) * nb;
     for (var b = lane; b < nb; b += ${LANES}u) {
       let xb4 = fx_P.xOff4 + b * 8u;
       let xv0 = fx_x[xb4]; let xv1 = fx_x[xb4 + 1u]; let xv2 = fx_x[xb4 + 2u]; let xv3 = fx_x[xb4 + 3u];
       let xv4 = fx_x[xb4 + 4u]; let xv5 = fx_x[xb4 + 5u]; let xv6 = fx_x[xb4 + 6u]; let xv7 = fx_x[xb4 + 7u];
       var d = 0.0;
-${RR.map((k) => `      if (r0 + ${k}u < fx_P.dOut) { let blk = rb + ${k}u * nb + b; ${dotX("blk")} acc${k} += d; }`).join("\n")}
+${RR.map((k) => `      if (${inRange(k)}) { let blk = (fx_P.rowOff + ${rowOf(k)}) * nb + b; ${dotX("blk")} acc${k} += d; }`).join("\n")}
     }`;
   return DQ + `
 struct GP { dOut: u32, dIn: u32, rowOff: u32, xOff4: u32, yOff: u32, mode: u32, scale: f32, pad: u32 };
 ${W}
 @group(0) @binding(2) var<storage, read> fx_x: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> fx_y: array<f32>;
-@group(0) @binding(4) var<uniform> fx_P: GP;
+@group(0) @binding(4) var<uniform> fx_P: GP;${MIX ? `
+@group(0) @binding(5) var<storage, read> fx_xn: array<f32>;
+@group(0) @binding(6) var<storage, read_write> fx_mixed: array<f32>;` : ""}
 var<workgroup> fx_red: array<f32, ${256 * R}>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
   let lid = l.x; let lane = lid % ${LANES}u;
-  let r0 = ((wg.y * 32768u + wg.x) * ${RPW}u + lid / ${LANES}u) * ${R}u;
+  let r0 = ((wg.y * 32768u + wg.x) * ${RPW}u + lid / ${LANES}u)${MIX ? "" : ` * ${R}u`};
   ${RR.map((k) => `var acc${k} = 0.0;`).join(" ")}
-  if (r0 < fx_P.dOut) {${body}
+  if (${MIX ? "r0 < fx_P.pad" : "r0 < fx_P.dOut"}) {${body}
   }
   ${RR.map((k) => `fx_red[${k * 256}u + lid] = acc${k};`).join(" ")}
   workgroupBarrier();
@@ -103,11 +109,15 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
     if (lane < s) { ${RR.map((k) => `fx_red[${k * 256}u + lid] += fx_red[${k * 256}u + lid + s];`).join(" ")} }
     workgroupBarrier();
   }
-  if (lane < ${R}u && r0 + lane < fx_P.dOut) {
+${MIX ? `  if (lane == 0u && r0 < fx_P.pad) {
+    var m = 0.0;
+${RR.map((k) => `    { let g = fx_red[${k * 256}u + lid]; let row = ${rowOf(k)}; fx_y[fx_P.yOff + row] = g; m += fx_xn[row] * sigm(g); }`).join("\n")}
+    fx_mixed[r0] = m / ${R}.0;
+  }` : `  if (lane < ${R}u && r0 + lane < fx_P.dOut) {
     var v = fx_red[lane * 256u + lid - lane];
     if (fx_P.mode == 1u) { v = silu(v * fx_P.scale); }
     fx_y[fx_P.yOff + r0 + lane] = v;
-  }
+  }`}
 }`;
 }
 
@@ -247,25 +257,67 @@ fn main(@builtin(local_invocation_id) l: vec3<u32>) {
   }
 }`;
 
-// HC mixer, part 1: a separate RMS norm per stream, xn[c] = rmsnorm(R[c]) * w[c] (the converter folded 1 + w).
-// One workgroup per stream.
-export const HC_NORM_WGSL = `
-struct NP { d: u32, eps: f32, p0: u32, p1: u32 };
-@group(0) @binding(0) var<storage, read> fx_R: array<f32>;
-@group(0) @binding(1) var<storage, read> fx_w: array<f32>;
-@group(0) @binding(2) var<storage, read_write> fx_xn: array<f32>;
-@group(0) @binding(3) var<uniform> fx_P: NP;
-var<workgroup> fx_red: array<f32, 256>;
+// HC site: [the previous site's combine] + the mixer's per-stream RMS norm + [the inject projection, as per-stream
+// partial sums]. One workgroup per stream c:
+//   comb > 0:  R[c] += (a + b if comb == 2) * 2 * sigmoid(inj[c] / hc), inj[c] = sum over c' of injPrev[c * hc + c']
+//   xn[c] = rmsnorm(R[c]) * w[c]                      (the converter folded 1 + w)
+//   inj = 1:   injOut[r * hc + c] = injW[r][c * d ..] . xn[c]   (the consumer sums over c)
+// Combining stream c needs only stream c, so the combine before a mixer folds into its norm (vLLM's delayed
+// combine; roadmap 33 prior art) and the inject GEMV of 4 long rows becomes 4 per-stream dots.
+export const HC_SITE_WGSL = DQ + `
+struct NP { d: u32, hc: u32, eps: f32, comb: u32, inj: u32, p0: u32, p1: u32, p2: u32 };
+@group(0) @binding(0) var<storage, read_write> fx_R: array<f32>;
+@group(0) @binding(1) var<storage, read> fx_a: array<f32>;
+@group(0) @binding(2) var<storage, read> fx_b: array<f32>;
+@group(0) @binding(3) var<storage, read> fx_injPrev: array<f32>;
+@group(0) @binding(4) var<storage, read> fx_w: array<f32>;
+@group(0) @binding(5) var<storage, read_write> fx_xn: array<f32>;
+@group(0) @binding(6) var<storage, read> fx_injW: array<f32>;
+@group(0) @binding(7) var<storage, read_write> fx_injOut: array<f32>;
+@group(0) @binding(8) var<uniform> fx_P: NP;
+var<workgroup> fx_red: array<f32, 1024>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let t = l.x; let o = wg.x * fx_P.d;
+  let t = l.x; let c = wg.x; let d = fx_P.d; let hc = fx_P.hc; let o = c * d;
+  var gsc = 0.0;
+  if (fx_P.comb > 0u) {
+    var inj = 0.0;
+    for (var k = 0u; k < hc; k++) { inj += fx_injPrev[c * hc + k]; }
+    gsc = 2.0 * sigm(inj / f32(hc));
+  }
   var ss = 0.0;
-  for (var i = t; i < fx_P.d; i += 256u) { let v = fx_R[o + i]; ss += v * v; }
+  for (var i = t; i < d; i += 256u) {
+    var v = fx_R[o + i];
+    if (fx_P.comb > 0u) {
+      var u = fx_a[i];
+      if (fx_P.comb == 2u) { u += fx_b[i]; }
+      v += u * gsc;
+      fx_R[o + i] = v;
+    }
+    ss += v * v;
+  }
   fx_red[t] = ss;
   workgroupBarrier();
   for (var s = 128u; s > 0u; s >>= 1u) { if (t < s) { fx_red[t] += fx_red[t + s]; } workgroupBarrier(); }
-  let inv = 1.0 / sqrt(fx_red[0] / f32(fx_P.d) + fx_P.eps);
-  for (var i = t; i < fx_P.d; i += 256u) { fx_xn[o + i] = (fx_R[o + i] * inv) * fx_w[o + i]; }
+  let inv = 1.0 / sqrt(fx_red[0] / f32(d) + fx_P.eps);
+  workgroupBarrier();
+  var p0 = 0.0; var p1 = 0.0; var p2 = 0.0; var p3 = 0.0;
+  let HD = d * hc;
+  for (var i = t; i < d; i += 256u) {
+    let x = (fx_R[o + i] * inv) * fx_w[o + i];
+    fx_xn[o + i] = x;
+    if (fx_P.inj == 1u) {
+      p0 += fx_injW[o + i] * x; p1 += fx_injW[HD + o + i] * x;
+      p2 += fx_injW[2u * HD + o + i] * x; p3 += fx_injW[3u * HD + o + i] * x;
+    }
+  }
+  fx_red[t] = p0; fx_red[256u + t] = p1; fx_red[512u + t] = p2; fx_red[768u + t] = p3;
+  workgroupBarrier();
+  for (var s = 128u; s > 0u; s >>= 1u) {
+    if (t < s) { fx_red[t] += fx_red[t + s]; fx_red[256u + t] += fx_red[256u + t + s]; fx_red[512u + t] += fx_red[512u + t + s]; fx_red[768u + t] += fx_red[768u + t + s]; }
+    workgroupBarrier();
+  }
+  if (fx_P.inj == 1u && t < hc) { fx_injOut[t * hc + c] = fx_red[t * 256u]; }
 }`;
 
 // HC mixer, part 2: mixed[i] = mean over c of xn[c][i] * sigmoid(gate[c][i]).
@@ -284,7 +336,8 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   fx_mixed[i] = s / f32(fx_P.hc);
 }`;
 
-// hc_combine: R[c][i] += (a[i] + b[i]) * 2 * sigmoid(inj[c] / hc) (b only when useB = 1: the MoE's shared expert).
+// hc_combine: R[c][i] += (a[i] + b[i]) * 2 * sigmoid(inj[c] / hc) (b only when useB = 1: the MoE's shared expert),
+// inj[c] = the sum of HC_SITE's partials injPrev[c * hc + c'].
 export const HC_COMBINE_WGSL = DQ + `
 struct CP { d: u32, hc: u32, useB: u32, p1: u32 };
 @group(0) @binding(0) var<storage, read_write> fx_R: array<f32>;
@@ -299,7 +352,9 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   let c = j / fx_P.d; let i = j % fx_P.d;
   var v = fx_a[i];
   if (fx_P.useB == 1u) { v += fx_b[i]; }
-  fx_R[j] += v * (2.0 * sigm(fx_inj[c] / f32(fx_P.hc)));
+  var inj = 0.0;
+  for (var k = 0u; k < fx_P.hc; k++) { inj += fx_inj[c * fx_P.hc + k]; }
+  fx_R[j] += v * (2.0 * sigm(inj / f32(fx_P.hc)));
 }`;
 
 // Gated DeltaNet, step 1: one workgroup of dS threads per 128-channel head of the conv input [q | k | v]: the causal

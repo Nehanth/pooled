@@ -56,7 +56,8 @@ export class Qwen4ExpEngine {
         P[`gemv_${k}_${n}_${R}`] = await pipe(W.gemvWGSL(k, n, R), `gemv_${k}_${n}_${R}`);
       }))),
       ...["q4", "q8"].map(async (k) => { P["gu_" + k] = await pipe(W.moeGuWGSL(k), "moe_gu_" + k); P["dn_" + k] = await pipe(W.moeDnWGSL(k), "moe_dn_" + k); }),
-      ...Object.entries({ route: W.MOE_ROUTE_WGSL, hcNorm: W.HC_NORM_WGSL, hcMix: W.HC_MIX_WGSL, hcComb: W.HC_COMBINE_WGSL,
+      ...["q4", "q8"].flatMap((k) => [8, 16, 32].map(async (n) => { P[`gemvmix_${k}_${n}`] = await pipe(W.gemvWGSL(k, n, 4, true), `gemvmix_${k}_${n}`); })),
+      ...Object.entries({ route: W.MOE_ROUTE_WGSL, hcSite: W.HC_SITE_WGSL, hcMix: W.HC_MIX_WGSL, hcComb: W.HC_COMBINE_WGSL,
         dnConv: W.DN_CONV_WGSL, dnDelta: W.DN_DELTA_WGSL,
         attnPrep: W.ATTN_PREP_WGSL, attnDec: W.ATTN_DEC_WGSL, ple: W.PLE_WGSL, am1: W.ARGMAX1_WGSL, am2: W.ARGMAX2_WGSL })
         .map(async ([k, code]) => { P[k] = await pipe(code, k); }),
@@ -165,18 +166,50 @@ export class Qwen4ExpEngine {
       return { pipe: p, bg: g, wg: [Math.min(nwg, 32768), Math.ceil(nwg / 32768), 1], tap };
     };
     const ewg = (n) => [Math.ceil(n / 256), 1, 1];
-    // HC mixer: xn = per-stream rmsnorm(R) * norm; lo = silu(down xn / hc); gate = up lo; mixed = mean_c xn * sigmoid(gate);
-    // inj = inject xn. tag: "-i" for the dump names; inject null for the head
-    const hcMix = (hw, tag, nm, inject = true) => {
-      const norm = wq(hw.norm, "hc norm"), ops = [];
-      ops.push({ pipe: P.hcNorm, bg: bg(P.hcNorm, [B.R, norm.buf, B.xn, uni([d, f(eps), 0, 0])]), wg: [hc, 1, 1] });
-      ops.push(gemv(wq(hw.down, "hc down"), B.xn, B.lo, { dIn: HD, mode: 1, scale: 1 / hc }));
-      ops.push(gemv(wq(hw.up, "hc up"), B.lo, B.gate, { dIn: cfg.hcRank, tap: ["hc_gate" + tag, B.gate, HD] }));
-      ops.push({ pipe: P.hcMix, bg: bg(P.hcMix, [B.xn, B.gate, B.mixed, uni([d, hc, 0, 0])]), wg: ewg(d), tap: [nm, B.mixed, d] });
-      if (inject) ops.push(gemv(wq(hw.inject, "hc inject"), B.xn, B.inj, { dIn: HD, tap: ["hc_inject" + tag, B.inj, hc] }));
+    // HC sites. A layer has two (before its token mixer, before its MoE) and the head one; site h's inject partials go
+    // to inj[h % 2], so a site that folds the previous site's combine reads the one buffer and writes the other.
+    // A half layer is { pre (the PLE ops), site, rest, comb }; _halfOps lays it out unfused (each half on its own:
+    // the per-layer check forces R between halves) or fused (forwardToken: each combine folded into the next site).
+    if (hc !== 4) throw new Error("qwen4exp: the HC site kernel is written for 4 streams");
+    B.inj = [buf(hc * hc), buf(hc * hc)];
+    let nSite = 0;
+    // site: { w (norm), injW (null: the head), tag } -> the mixer after the norm: down, up (+ mix)
+    const hcMixRest = (hw, tag, nm) => {
+      const ops = [gemv(wq(hw.down, "hc down"), B.xn, B.lo, { dIn: HD, mode: 1, scale: 1 / hc })];
+      const up = wq(hw.up, "hc up");
+      if (up.kind !== "f32") {   // the up projection and the mix as one kernel (rows i, d + i, 2d + i, 3d + i per lane group)
+        const lanes = W.gemvLanes(up.kind, HD, cfg.hcRank), p = P[`gemvmix_${up.kind}_${lanes}`];
+        const u = uni([HD, cfg.hcRank, 0, 0, 0, 0, f(0), d]);
+        ops.push({ pipe: p, bg: bg(p, [up.qs, up.sc, B.lo, B.gate, u, B.xn, B.mixed]), wg: [Math.ceil(d / (256 / lanes)), 1, 1],
+          taps: [["hc_gate" + tag, B.gate, HD], [nm, B.mixed, d]] });
+      } else {
+        ops.push(gemv(up, B.lo, B.gate, { dIn: cfg.hcRank, tap: ["hc_gate" + tag, B.gate, HD] }));
+        ops.push({ pipe: P.hcMix, bg: bg(P.hcMix, [B.xn, B.gate, B.mixed, uni([d, hc, 0, 0])]), wg: ewg(d), tap: [nm, B.mixed, d] });
+      }
       return ops;
     };
-    const hcComb = (a, b, name) => ({ pipe: P.hcComb, bg: bg(P.hcComb, [B.R, a, b || a, B.inj, uni([d, hc, b ? 1 : 0, 0])]), wg: ewg(HD), tap: [name, B.R, HD] });
+    const site = (hw, tag, inject = true) => ({ h: nSite++, w: wq(hw.norm, "hc norm").buf, injW: inject ? wq(hw.inject, "hc inject").buf : null, tag });
+    // the site's kernel, folding comb (the previous half's { a, b, name, h }) when given
+    const siteOp = (S, comb) => {
+      const out = B.inj[S.h % 2], prev = comb ? B.inj[comb.h % 2] : B.inj[(S.h + 1) % 2];
+      const u = uni([d, hc, f(eps), comb ? (comb.b ? 2 : 1) : 0, S.injW ? 1 : 0, 0, 0, 0]);
+      const taps = [];
+      if (comb) taps.push([comb.name, B.R, HD]);
+      if (S.injW) taps.push(["hc_inject" + S.tag, out, hc * hc, "sum4"]);
+      return { pipe: P.hcSite, bg: bg(P.hcSite, [B.R, comb ? comb.a : B.mixed, comb?.b || B.mixed, prev, S.w, B.xn, S.injW || S.w, out, u]), wg: [hc, 1, 1], taps };
+    };
+    const combOp = (C) => ({ pipe: P.hcComb, bg: bg(P.hcComb, [B.R, C.a, C.b || C.a, B.inj[C.h % 2], uni([d, hc, C.b ? 1 : 0, 0])]), wg: ewg(HD), tap: [C.name, B.R, HD] });
+    this._halfOps = (halves, fused) => {
+      const lists = halves.map(() => []);
+      halves.forEach((H, k) => {
+        const prev = k > 0 ? halves[k - 1] : null;
+        const fold = fused && prev && prev.comb && !H.pre.length;   // the previous combine folds into this site
+        lists[k].push(...H.pre, siteOp(H.site, fold ? prev.comb : null), ...H.rest);
+        const next = halves[k + 1];
+        if (H.comb && !(fused && next && !next.pre.length)) lists[k].push(combOp(H.comb));
+      });
+      return lists;
+    };
 
     // ---- per layer state and ops
     const frameU = B.frame;
@@ -198,7 +231,8 @@ export class Qwen4ExpEngine {
           st.ring, B.dbg, uni([d, K1, cfg.ple.ngram, slots, f(eps), hc, 0, 0]), frameU]), wg: [hc, 1, 1],
           taps: [[`ple_gate-${i}`, B.dbg, hc, "f32", 2 * HD], [`ple_gated_value-${i}`, B.dbg, HD], [`ple_conv_out-${i}`, B.dbg, HD, "f32", HD]] });
       }
-      attnOps.push(...hcMix(L.hcAttn, `-${i}`, `hc_mixed-${i}`));
+      const pre = attnOps.splice(0), sA = site(L.hcAttn, `-${i}`);
+      attnOps.push(...hcMixRest(L.hcAttn, `-${i}`, `hc_mixed-${i}`));
       if (isQ) attnOps.push(...this._attnOps(L, i, st, { gemv, wq, bg, uni, f, view, fuseRows }));
       else {
         st.conv = buf(convDim * (ss.convK - 1)); st.S = buf(ss.nVHeads * ss.stateSize * ss.stateSize);
@@ -215,9 +249,10 @@ export class Qwen4ExpEngine {
           taps: [[`attn_output-${i}`, B.o, ss.inner], [`final_output-${i}`, B.go, ss.inner]] });
         attnOps.push(gemv(wq(L.wOut, "ssm_out"), B.go, B.out, { tap: [`linear_attn_out-${i}`, B.out, d] }));
       }
-      attnOps.push(hcComb(B.out, null, `hc_combine-${i}`));
+      const combA = { a: B.out, b: null, name: `hc_combine-${i}`, h: sA.h };
       // MoE: router, top-K, routed experts, shared expert (gated by sigmoid(shRouter . x))
-      ffnOps.push(...hcMix(L.hcFfn, `-${i}`, `hc_mixed-${i}`));
+      const sF = site(L.hcFfn, `-${i}`);
+      ffnOps.push(...hcMixRest(L.hcFfn, `-${i}`, `hc_mixed-${i}`));
       // the router and the shared expert's gate as one GEMV: logits[nExp] is the shared gate's
       ffnOps.push(gemv(wq(cat(L.router, L.shRouter)), B.mixed, B.logits, { dIn: d }));
       ffnOps.push({ pipe: P.route, bg: bg(P.route, [B.logits, B.ids, B.wts, uni([cfg.nExp, K, 0, 0])]), wg: [1, 1, 1],
@@ -233,22 +268,27 @@ export class Qwen4ExpEngine {
       ffnOps.push({ pipe: P["gu_" + sgw.kind], bg: bg(P["gu_" + sgw.kind], [sgw.qs, sgw.sc, suw.qs, suw.sc, B.mixed, B.hs, B.shIds, uni([sff, d, 1, 0, 0, 0, 0, 0])]), wg: [Math.ceil(sff / 8), 1, 1] });
       ffnOps.push({ pipe: P["dn_" + sdw.kind], bg: bg(P["dn_" + sdw.kind], [sdw.qs, sdw.sc, B.hs, B.sh, B.shIds, B.logits, uni([d, sff, 1, 1, cfg.nExp, 0, 0, 0])]), wg: [Math.ceil(d / 8), 1, 1],
         tap: [`ffn_shexp_gated-${i}`, B.sh, d] });
-      ffnOps.push(hcComb(B.moe, B.sh, `l_last-${i}`));
-      this.layers.push({ i, isQ, st, attnOps, ffnOps });
+      const combF = { a: B.moe, b: B.sh, name: `l_last-${i}`, h: sF.h };
+      this.layers.push({ i, isQ, st, halves: [{ pre, site: sA, rest: attnOps, comb: combA }, { pre: [], site: sF, rest: ffnOps, comb: combF }] });
     }
 
     // ---- head: the last HC mixer (no inject) stands in for the output norm, then the LM head and a GPU argmax
     if (hasHead) {
       const V = this.dims.vocab, per = 1024, nPart = Math.ceil(V / per);
       Object.assign(B, { hl: buf(V), part: buf(nPart * 2), am: buf(4) });
-      this.headOps = [...hcMix(weights.headHC, "", "result_norm", false),
+      this.headHalf = { pre: [], site: site(weights.headHC, "", false), comb: null, rest: [...hcMixRest(weights.headHC, "", "result_norm"),
         gemv(wq(weights.head, "output"), B.mixed, B.hl, { tap: ["result_output", B.hl, V] }),
         { pipe: P.am1, bg: bg(P.am1, [B.hl, B.part, uni([V, per, 0, 0])]), wg: [nPart, 1, 1] },
-        { pipe: P.am2, bg: bg(P.am2, [B.part, B.am, uni([nPart, 0, 0, 0])]), wg: [1, 1, 1] }];
+        { pipe: P.am2, bg: bg(P.am2, [B.part, B.am, uni([nPart, 0, 0, 0])]), wg: [1, 1, 1] }] };
       this.amStage = device.createBuffer({ size: 16, usage: U.MAP_READ | U.COPY_DST });
       this.logitStage = device.createBuffer({ size: Math.ceil(V * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
     }
     this.hStage = device.createBuffer({ size: HD * 4, usage: U.MAP_READ | U.COPY_DST });
+    // op lists: per half unfused (debugToken), per layer fused (forwardToken)
+    const halves = [...this.layers.flatMap((l) => l.halves), ...(hasHead ? [this.headHalf] : [])];
+    const dbg = this._halfOps(halves, false), fast = this._halfOps(halves, true);
+    this.layers.forEach((l, k) => { l.attnOps = dbg[2 * k]; l.ffnOps = dbg[2 * k + 1]; l.fast = [...fast[2 * k], ...fast[2 * k + 1]]; });
+    if (hasHead) { this.headOps = dbg[dbg.length - 1]; this.headFast = fast[fast.length - 1]; }
     this._ropeTs = fr(Math.pow(cfg.ropeTheta, -2 / cfg.ropeDims));
     this.reset();
   }
@@ -341,7 +381,7 @@ export class Qwen4ExpEngine {
     const firstPle = this.cfg.ple ? this.layers.findIndex((l) => this.cfg.ple.layers.includes(l.i)) : -1;
     const run = (ls) => {
       const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-      for (const l of ls) { this._encode(pass, l.attnOps); this._encode(pass, l.ffnOps); }
+      for (const l of ls) this._encode(pass, l.fast);
       pass.end();
       dev.queue.submit([enc.finish()]);
     };
@@ -349,8 +389,8 @@ export class Qwen4ExpEngine {
     if (rows) { if (firstPle > 0) run(this.layers.slice(0, firstPle)); at = Math.max(firstPle, 0); await rows; }
     for (const step = 12; at + step < this.layers.length; at += step) run(this.layers.slice(at, at + step));
     const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-    for (const l of this.layers.slice(at)) { this._encode(pass, l.attnOps); this._encode(pass, l.ffnOps); }
-    if (this.hasHead) this._encode(pass, this.headOps);
+    for (const l of this.layers.slice(at)) this._encode(pass, l.fast);
+    if (this.hasHead) this._encode(pass, this.headFast);
     pass.end();
     if (this.hasHead) {
       enc.copyBufferToBuffer(this.B.am, 0, this.amStage, 0, 16);
@@ -402,7 +442,12 @@ export class Qwen4ExpEngine {
       dev.queue.submit([enc.finish()]);
       for (const [name, s, n, type] of reads) {
         await s.mapAsync(GPUMapMode.READ);
-        const a = type === "u32" ? new Int32Array(s.getMappedRange().slice(0, n * 4)) : new Float32Array(s.getMappedRange().slice(0, n * 4));
+        let a = type === "u32" ? new Int32Array(s.getMappedRange().slice(0, n * 4)) : new Float32Array(s.getMappedRange().slice(0, n * 4));
+        if (type === "sum4") {   // the HC site's inject partials [row][stream] -> the inject values
+          const h = Math.sqrt(n), v = new Float32Array(h);
+          for (let r = 0; r < h; r++) for (let c = 0; c < h; c++) v[r] += a[r * h + c];
+          a = v;
+        }
         s.unmap(); s.destroy();
         const k = seen.get(name) || 0; seen.set(name, k + 1);
         out.set(`${name}.${k}`, a);

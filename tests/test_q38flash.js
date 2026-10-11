@@ -211,7 +211,7 @@ async function bench() {
   };
   const all = (f) => eng.layers.flatMap(f);
   {   // CPU side of one token: encoding every dispatch, and _begin (embedding row, n-gram rows, frame)
-    const ops = [...all((l) => [...l.attnOps, ...l.ffnOps]), ...eng.headOps], reps = 20;
+    const ops = [...all((l) => l.fast), ...eng.headFast], reps = 20;
     let t0 = performance.now();
     for (let k = 0; k < reps; k++) { const enc = device.createCommandEncoder(), pass = enc.beginComputePass(); eng._encode(pass, ops); pass.end(); enc.finish(); }
     const te = (performance.now() - t0) / reps;
@@ -219,15 +219,16 @@ async function bench() {
     for (let k = 0; k < reps; k++) { await eng._begin(1000 + k); eng.pos--; }
     console.log(`  CPU: encode ${te.toFixed(2)} ms, begin (embed + n-gram rows + frame) ${((performance.now() - t0) / reps).toFixed(2)} ms per token`);
   }
+  // the halves unfused (each with its own HC combine), then the token as forwardToken runs it (combines folded)
   await time("token mixers + HC (attn half)", all((l) => l.attnOps));
   await time("  DeltaNet halves", all((l) => (l.isQ ? [] : l.attnOps)));
   await time("  attention halves", all((l) => (l.isQ ? l.attnOps : [])));
   await time("MoE halves", all((l) => l.ffnOps));
   await time("head", eng.headOps);
-  await time("whole token", [...all((l) => [...l.attnOps, ...l.ffnOps]), ...eng.headOps]);
+  await time("whole token", [...all((l) => l.fast), ...eng.headFast]);
   // per kernel and launch shape, summed over the layers
   const groups = new Map();
-  for (const o of [...all((l) => [...l.attnOps, ...l.ffnOps]), ...eng.headOps]) {
+  for (const o of [...all((l) => l.fast), ...eng.headFast]) {
     const k = `${o.pipe.label} [${o.wg.join("x")}]`;
     if (!groups.has(k)) groups.set(k, []);
     groups.get(k).push(o);
