@@ -18,6 +18,7 @@ Sources (origin/main 40bb0fa):
 - origin/main 74744ac (PR #264): api/turn.mjs (TURN_KEY_ID + TURN_KEY_API_TOKEN, TURN_SECRET + TURN_HOST/TURN_URLS, TURN_TTL,
   TURN_RATE, TURN_ALLOWED_ORIGINS; 204 when unset), docs/rooms-at-work.md, room.js window.pooledNet and
   window.POOLED_TURN_ENDPOINT, room/ice.js wantDefaultRelay (window.TURN_SERVERS or a relay you set: /api/turn not asked)
+- cli/lib/relay.js header (POOLED_RELAY, POOLED_TURN, POOLED_TURN_USER, POOLED_TURN_CRED, POOLED_TURN_API; default https://pooled.run/api/turn), api/turn.mjs cliClient (X-Pooled-Client)
 - tests/run.sh (WEIGHT_CACHE default ~/.cache/swarmllm-weights, STRICT=1), tests/weight_cache.js (WEIGHT_CACHE_VERIFY), docs/testing-fast.md (WEIGHT_CACHE_PRUNE)
 - tests/load_model.js:30-35 ROOM_FLAGS; benchmarks/bench.js header (MODEL=qwen|q38, TOKENS default 32)
 - tests/bench_ctx.js header (MODEL=moe|27b, FILLS, CTX, KV=f16|q8, HW, DATE), PR #252
@@ -30,6 +31,17 @@ Sources (origin/main 40bb0fa):
 | `POOLED_TOKEN` | Requires this token on every request, as `Authorization: Bearer <t>` or `x-api-key: <t>`. Kept out of the process list, unlike `--token`. `--token-file` wins over it. An empty value is an error. |
 | `POOLED_KEEPALIVE_MS` | How often a waiting stream gets a keep-alive. For tests; the default is 10 s. |
 | `POOLED_LEGACY_AUTH` | `0`: `pooled host` and the OpenClaw plugin's host ignore the raw invite key from devices that run a Pooled from before channel-bound proofs (they wait for Allow) and refuse links that prove nothing. `1` (**unsafe**): `pooled serve`, `pooled chat`, `pooled join` and the plugin send their raw invite key to an older host, as before, instead of waiting for its Allow. Unset: hosts accept older devices for one release with a warning; clients never send raw keys. See [Security model](/docs/internals/security#who-is-on-a-link). |
+
+## Relay (pooled CLI)
+
+`pooled host`, `pooled join`, `pooled chat` and `pooled serve` connect directly when they can. When no direct path works (strict NAT or CGNAT on both ends, a network that blocks UDP), a link goes through a TURN relay: pooled.run's by default, fetched with credentials that expire. See [Use a TURN relay](/docs/rooms/networks#use-a-turn-relay).
+
+| Variable | What it does |
+|---|---|
+| `POOLED_RELAY` | `0`: no relay, direct links only. `1`: every link goes through the relay (to test it, or to keep your IP address from the other devices). Unset: the relay is used only when no direct path works. |
+| `POOLED_TURN` | Your own relay instead of pooled.run's: `turn:host:3478`, `turns:host:443?transport=tcp`, comma-separated for several. Nothing is fetched then. |
+| `POOLED_TURN_USER`, `POOLED_TURN_CRED` | The username and password for `POOLED_TURN`. |
+| `POOLED_TURN_API` | Where to fetch relay credentials. Default `https://pooled.run/api/turn`; point it at a self-hosted deployment's `/api/turn`. |
 
 The client tools read their own variables. These are the ones the banner prints:
 

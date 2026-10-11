@@ -77,6 +77,17 @@ Add `&relay=1` to use only the relay.
 Define `window.TURN_SERVERS`, an `RTCIceServer` array, before `room.js` loads.
 
 </TabItem>
+<TabItem label="Terminal (pooled CLI)">
+
+`pooled host`, `join`, `chat` and `serve` use pooled.run's relay on their own, from CLI 0.4.2. To use your own instead:
+
+```bash
+POOLED_TURN=turn:relay.example.org:3478 POOLED_TURN_USER=NAME POOLED_TURN_CRED=PASSWORD pooled join <ROOM CODE>
+```
+
+`POOLED_RELAY=1` sends every link through the relay; `POOLED_RELAY=0` turns it off. See [Environment variables](/docs/reference/environment#relay-pooled-cli).
+
+</TabItem>
 </Tabs>
 
 Join links and QR codes never include relay settings, so the password stays out of chats. Each device that can't connect directly needs the relay set itself.
