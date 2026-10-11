@@ -9,7 +9,7 @@
 // several workers can hold on one file), plus CACHE_GB GiB of expert-sized entries in the Cache API, keyed
 // the way room.js keys weight ranges (room/weightcache.js).
 //
-// Read sizes (docs: the Qwen3.8-Flash-Next design note, "Memory and bandwidth"):
+// Read sizes (roadmap/33-qwen38-flash.md, the Qwen3.8-Flash-Next design note, "Memory and bandwidth"):
 //   expert  2,764,800 B   one routed expert, gate + up + down, 3 x 2560 x 640 at Q4_0 (one read, as from a
 //                         per-expert file or a repacked layer file)
 //   part      921,600 B   one of those three: in the GGUF each lives in its own stacked tensor, so a miss
@@ -21,15 +21,18 @@
 //
 // Modes (a dedicated worker per reader, FileSystemSyncAccessHandle.read):
 //   read    the read alone, into a reused buffer
-//   write   read, then queue.writeBuffer into a GPU buffer (the worker's own GPUDevice)
+//   write   read, then queue.writeBuffer into a GPU buffer (the worker's own GPUDevice); at most RING pieces'
+//           work in flight (it waits on the onSubmittedWorkDone of the piece RING back, as map waits on its slot)
 //   map     read straight into a mapped MAP_WRITE staging buffer (a ring of 4 per worker), unmap,
 //           copyBufferToBuffer to a STORAGE buffer, map the slot again for its next use (worker's device)
 //   xfer    read into a fresh ArrayBuffer, transfer it to the page, which writeBuffers it on the page's
 //           device (an engine that lives on the main thread; at most 4 pieces in flight per worker)
 //   cache   Cache API: cache.match(key) + arrayBuffer() of a whole expert-sized entry, the way rangeFetch
-//           reads cached weights; C requests in flight from the page (no worker)
+//           reads cached weights; C requests in flight from the page's main thread (not from workers)
 // Per run: GB/s (bytes / wall time from the first read's start to the last one's end, all workers), reads/s,
-// and p50 / p99 of one piece's latency (read start to the piece being in the GPU queue, for the GPU modes).
+// and p10 / p50 / p99 of one piece's latency (read start to the piece being in the GPU queue, for the GPU
+// modes). For pieces under 4 KiB also `hits`: reads that took under 20 us, i.e. came from the page cache
+// (another read's readahead window) rather than the disk.
 // A run's GPU modes await onSubmittedWorkDone before the clock stops.
 
 export const SIZES = { expert: 2764800, part: 921600, row: 90 };
@@ -90,6 +93,7 @@ if (IS_WORKER) {
     const n = jobs.length / 2, lat = new Float64Array(n), S = (size + 3) & ~3;
     const scratch = new Uint8Array(S);
     const inFlight = [];   // xfer: ack promises of the pieces the page has not written yet
+    const done = new Array(RING).fill(null);   // write: onSubmittedWorkDone of the piece RING back, per slot
     acks = new Map();
     const t0 = now();
     for (let i = 0; i < n; i++) {
@@ -111,7 +115,11 @@ if (IS_WORKER) {
         self.postMessage({ op: "piece", i, slot: i % RING, buf: buf.buffer }, [buf.buffer]);
       } else {
         if (h.read(scratch.subarray(0, size), { at: off }) !== size) throw new Error("short read");
-        if (mode === "write") { dev.queue.writeBuffer(dst, (i % RING) * S, scratch, 0, S); if (i % RING === RING - 1) await dev.queue.onSubmittedWorkDone(); }
+        if (mode === "write") {   // writeBuffer copies scratch before it returns; only bound the work in flight
+          await done[i % RING];
+          dev.queue.writeBuffer(dst, (i % RING) * S, scratch, 0, S);
+          done[i % RING] = dev.queue.onSubmittedWorkDone();
+        }
         lat[i] = now() - s;
       }
     }
@@ -135,15 +143,18 @@ function ask(w, msg, onPiece) {
 const pct = (sorted, p) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))] : NaN;
 function shuffle(a, rnd) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
 function rng(seed) { let x = seed >>> 0 || 1; return () => { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; return (x >>> 0) / 2 ** 32; }; }
-function summary(lat, bytes, t0, t1) {
+export const HIT_MS = 0.02;   // a read under 20 us came from the page cache (a cold 90 B read off the NVMe is ~0.2 ms)
+export function summary(lat, bytes, t0, t1, S) {
   const s = Float64Array.from(lat).sort(), sec = (t1 - t0) / 1e3;
   return { reads: s.length, MB: +(bytes / 1e6).toFixed(1), ms: +(t1 - t0).toFixed(1), GBs: +(bytes / sec / 1e9).toFixed(2),
-    readsPerS: Math.round(s.length / sec), p50: +pct(s, 0.5).toFixed(3), p99: +pct(s, 0.99).toFixed(3) };
+    readsPerS: Math.round(s.length / sec), p10: +pct(s, 0.1).toFixed(3), p50: +pct(s, 0.5).toFixed(3), p99: +pct(s, 0.99).toFixed(3),
+    ...(S < 4096 ? { hits: s.filter((x) => x < HIT_MS).length } : {}) };
 }
 
 export class OpfsProbe {
-  // device: the page's GPUDevice (xfer mode); log: a line printer
-  constructor({ device = null, log = console.log } = {}) { this.device = device; this.log = log; this.workers = []; this.files = []; this.fileBytes = 0; this.shared = null; this.seed = 1; }
+  // device: the page's GPUDevice (xfer mode); log: a line printer; seed: of the random offsets (each run
+  // bumps it; the driver's SEED, so reruns on a kept profile read other offsets)
+  constructor({ device = null, log = console.log, seed = 1 } = {}) { this.device = device; this.log = log; this.workers = []; this.files = []; this.fileBytes = 0; this.shared = null; this.seed = seed; }
 
   worker() { return new Worker(new URL(import.meta.url), { type: "module" }); }
   async pool(n) { while (this.workers.length < n) this.workers.push(this.worker()); return this.workers.slice(0, n); }
@@ -190,8 +201,8 @@ export class OpfsProbe {
 
   // One run: W workers, `reads` pieces of `size` bytes (or fewer: the file set's distinct slots), mode as above
   // shared: every worker opens every file with a read-only handle (where Chrome has them); by default each
-  // worker has files of its own with ordinary handles. In Chrome 131 on Linux the read-only handles
-  // serialize reads across workers (1 worker's GB/s at any count; see docs/bench-log.md 2026-10-11).
+  // worker has files of its own with ordinary handles. In Chromium 131 on Linux read-only handles on shared
+  // files scale with workers like per-worker files (docs/bench-log.md 2026-10-11).
   async run({ size = "expert", W = 1, reads = 384, mode = "read", shared = false } = {}) {
     const S = SIZES[size] ?? +size;
     shared = shared && (await this.probeShared());
@@ -200,9 +211,9 @@ export class OpfsProbe {
     // distinct S-sized slots across all files; each worker takes its share (from its own files when not shared)
     const slotsPer = Math.floor(this.fileBytes / S), owner = (f) => f % W;
     const want = Math.min(reads, slotsPer * this.files.length), perW = Math.floor(want / W);
-    const pick = (fs) => {   // perW random distinct (file, slot) from files fs
+    const pick = (fs, count) => {   // count random distinct (file, slot) from files fs
       const total = slotsPer * fs.length, seen = new Set(), out = [];
-      while (out.length < 2 * perW && seen.size < total) {
+      while (out.length < 2 * count && seen.size < total) {
         const k = Math.floor(rnd() * total); if (seen.has(k)) continue; seen.add(k);
         out.push(fs[Math.floor(k / slotsPer)], (k % slotsPer) * S);
       }
@@ -210,8 +221,8 @@ export class OpfsProbe {
     };
     const fileIdx = this.files.map((_, i) => i);
     let jobs;
-    if (shared) { const all = pick(fileIdx), w2 = []; for (let w = 0; w < W; w++) w2.push(all.slice(w * 2 * perW, (w + 1) * 2 * perW)); jobs = w2; }
-    else jobs = ws.map((_, w) => pick(fileIdx.filter((f) => owner(f) === w)));
+    if (shared) { const all = pick(fileIdx, perW * W), w2 = []; for (let w = 0; w < W; w++) w2.push(all.slice(w * 2 * perW, (w + 1) * 2 * perW)); jobs = w2; }
+    else jobs = ws.map((_, w) => pick(fileIdx.filter((f) => owner(f) === w), perW));
     const gpu = mode === "write" || mode === "map" ? mode : null;
     await Promise.all(ws.map((w, i) => ask(w, { op: "open", files: shared ? this.files : this.files.filter((_, f) => owner(f) === i), shared, gpu, size: S })));
     // xfer: the page's device takes the pieces
@@ -224,7 +235,9 @@ export class OpfsProbe {
     if (dst) { await this.device.queue.onSubmittedWorkDone(); t1 = Math.max(t1, now()); dst.destroy(); }
     await Promise.all(ws.map((w) => ask(w, { op: "close" })));
     const lat = []; for (const r of res) lat.push(...r.lat);
-    return { size, S, mode, W, shared, ...summary(lat, lat.length * S, Math.min(...res.map((r) => r.t0)), t1) };
+    const perWorker = res.map((r) => r.lat.length);
+    if (perWorker.some((n) => n !== perW)) throw new Error(`uneven split: ${perWorker} reads, want ${perW} each`);
+    return { size, S, mode, W, shared, ...summary(lat, lat.length * S, Math.min(...res.map((r) => r.t0)), t1, S) };
   }
 
   // ---- Cache API (room/weightcache.js key shape and x-swarm-len header, its own cache name) ----
@@ -245,7 +258,8 @@ export class OpfsProbe {
     return { entries: n, wrote: todo.length, putGBs: todo.length ? +(todo.length * S / sec / 1e9).toFixed(2) : null };
   }
 
-  // C requests in flight, `reads` distinct entries in random order; read as rangeFetch does (match, check the length, arrayBuffer)
+  // C requests in flight from the page's main thread, `reads` distinct entries in random order; read as rangeFetch
+  // does (match, check the length, arrayBuffer). Not measured from workers.
   async cacheRun({ C = 1, reads = 256 } = {}) {
     const S = SIZES.expert, c = await caches.open("pooled-opfs-probe"), rnd = rng(++this.seed * 104729);
     const order = shuffle(this.cacheKeys.slice(), rnd).slice(0, reads), lat = [];
@@ -259,7 +273,7 @@ export class OpfsProbe {
         lat.push(now() - s);
       }
     }));
-    return { size: "expert", S, mode: "cache", W: C, ...summary(lat, lat.length * S, t0, now()) };
+    return { size: "expert", S, mode: "cache", W: C, ...summary(lat, lat.length * S, t0, now(), S) };
   }
 
   // Remove the test files and the cache (KEEP=0 in the driver)
