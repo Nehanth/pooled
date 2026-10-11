@@ -44,6 +44,7 @@ import { PERSONAS, specials, fitContext, templateProfile } from "./room/conversa
 import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS,
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
+import { HOST_AUTH_V, strictRoom, followStart, loadAllowed, creatorPicks } from "./room/authz.js";
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
@@ -133,6 +134,10 @@ const rand = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)))
 
 let peer = null;          // my PeerJS peer
 let isHost = false;
+// the room's creator said it names the model host (hello.ha / roster.ha, room/authz.js): devices then follow
+// only the model host it names. 0: a creator from before that, as before
+let creatorHa = 0;
+const roomStrict = () => isHost || strictRoom(creatorHa);
 let roomCode = null;
 // Joining (room/joingate.js). Host: the gate (invite key, passes, Ask before new devices join) and the
 // links waiting in its lobby. Guest: the invite key from the link it opened, the pass the host gave it,
@@ -1133,6 +1138,7 @@ function onData(from, d) {
         d.name = uniqueName(d.name, from, myName, roster);
       }
       e.name = d.name; e.meta = d.meta;
+      if (from === PREFIX + roomCode && +d.ha) creatorHa = +d.ha;   // the room's creator names the model host (room/authz.js)
       if (d.meta?.api && isHost && !apiWelcome(from, d)) break;
       members.set(from, { ...members.get(from), name: d.name, meta: d.meta });
       ensureCard(from, d.name, d.meta);
@@ -1188,6 +1194,7 @@ function onData(from, d) {
       }
       break;
     case "roster": {
+      if (from === PREFIX + roomCode && +d.ha) creatorHa = +d.ha;
       // the host's view of the room: draw a card per device, no mesh connections
       // colours follow the host's order (the host first, then join order), so a device has the
       // same colour on every screen (they used to go by first-seen order, which put "me" first)
@@ -1578,7 +1585,7 @@ function broadcastRoster() {
   // a: 1 = it proves its links (room/chanauth.js); a link from one without it runs an older Pooled
   const members = [{ id: peer.id, name: myName, meta: myMeta, ...(meshKey ? { a: 1 } : {}) },
     ...[...roster.entries()].map(([id, m]) => ({ id, ...m }))];
-  broadcastAll({ t: "roster", members });
+  broadcastAll({ t: "roster", members, ha: HOST_AUTH_V });
 }
 
 function meshConnect(targetId) {
@@ -1883,6 +1890,7 @@ async function start(create, resume = null, from = 0) {
 
   isHost = create;
   roomCode = code;
+  creatorHa = 0; ai.dealer = null;
   // the host's gate: a reloaded host keeps its invite key (links already shared keep working), the
   // passes it gave out and the Ask setting; a room saved by an older build gets a new one
   if (create) { gate = resume ? restoreGate(resume.gate, { ask: ASK_DEFAULT, legacy: LEGACY_AUTH }) : makeGate({ ask: ASK_DEFAULT, legacy: LEGACY_AUTH }); meshKey = gate.mk; askSwitch(); }
@@ -1961,8 +1969,9 @@ async function start(create, resume = null, from = 0) {
       // gate: 1 = this host holds new devices until it lets them in (admit / lobby); ask: whether it asks
       // auth: this device proves its links, and (the host) proves the invite key and passes back
       // instead of reading them (room/chanauth.js)
+      // ha: only this creator names the room's model host (room/authz.js)
       conn.send({ t: "hello", name: myName, meta: isHost ? { ...myMeta, api: 2, ctx: ctxMax() } : myMeta, v: PROTOCOL, auth: AUTH_V,
-        ...(isHost ? { gate: 1, ask: gate?.ask ? 1 : 0 } : {}) });
+        ...(isHost ? { gate: 1, ask: gate?.ask ? 1 : 0, ha: HOST_AUTH_V } : {}) });
     });
   });
 
@@ -2594,6 +2603,7 @@ async function serveWeight(from, d) {
 const concat = (a, b) => { const m = new Uint8Array(a.length + b.length); m.set(a); m.set(b, a.length); return m; };
 
 let ai = {
+  dealer: null,          // the model host the room's creator named (or this device's own Start): ai-load comes from it or the creator
   visibility: "all",   // who sees the chat: all | host | asker (room/visibility.js)
   engine: null, tok: null, cfg: null, device: null,
   role: null,            // "host" | "worker" | "guest"
@@ -3050,14 +3060,27 @@ function biggestPeerId() {
 function aiStartAnywhere() {
   const model = $("ai-model").value;
   const boss = biggestPeerId();
+  // a member asks the room's creator, which names who runs the model and tells the room (room/authz.js)
+  if (!isHost && roomStrict()) {
+    $("ai-start").disabled = true; $("ai-model").disabled = true;
+    aiStatus(`asked the host to start ${MODELS[model].label.split("·")[0].trim()}…`);
+    sendTo(PREFIX + roomCode, { t: "ai-start-req", model, boss, by: myName });
+    return;
+  }
+  startOn(model, boss, myName);
+}
+// boss runs the model: this device, or another one (its ai-layers and ai-ready-all are then the ones this
+// device listens to, FROM_HOST), and every device hears who
+function startOn(model, boss, by) {
+  ai.dealer = boss;
   if (boss === peer.id) { aiStart(model); return; }
-  ai.hostId = boss;   // its ai-layers and ai-ready-all are the ones this device listens to (FROM_HOST)
+  ai.hostId = boss;
   $("ai-start").disabled = true; $("ai-model").disabled = true;
   aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`);
   $("ldg-sub").textContent = `${conns.get(boss)?.name || "the biggest device"} is dealing the layers`;
   $("ldg-fill").style.width = "0%";
   aiStatus(`asked ${conns.get(boss)?.name || "the biggest device"} to start ${MODELS[model].label.split("·")[0].trim()}…`);
-  broadcastAll({ t: "ai-start-req", model, boss, by: myName });
+  broadcastAll({ t: "ai-start-req", model, boss, by });
 }
 // why a start stops when the room's pledges cannot hold the model (room/plan.js shortNote)
 function shortWhy(M, fit, names, metas) {
@@ -4138,6 +4161,11 @@ async function aiOnData(from, d) {
     if (from !== (ai.hostId || PREFIX + roomCode)) return;
   }
   if (d.t === "ai-load" && ai.role === "host") return;
+  // layers come from the room's creator or the model host it named, dealt as itself (room/authz.js)
+  if (d.t === "ai-load" && !loadAllowed({ from, host: d.host, creator: PREFIX + roomCode, dealer: ai.dealer, strict: roomStrict() })) {
+    log("room", `ignored layers dealt by ${e?.name || from}: only the model host the room's creator named deals them`);
+    return;
+  }
   // layers dealt by a host on another protocol would fail as NaNs or timeouts: refuse them out loud
   if (d.t === "ai-load" && d.v != null && d.v !== PROTOCOL) {
     const { local, remote } = versionMismatch({ mine: PROTOCOL, theirs: d.v, theyHost: true, me: myName });
@@ -4149,6 +4177,17 @@ async function aiOnData(from, d) {
   if ((d.t === "ai-hiddenret" || d.t === "ai-hiddenret-b") && from !== ai.chain[ai.chain.length - 1]) return;
   switch (d.t) {
     case "ai-start-req":
+      if (isHost) {
+        // a member pressed Start: this creator picks between it and itself (the choice the member made
+        // before, with the metas this device holds) and tells the room; a third device can't be named
+        const busy = ai.busy || !!ai.engine || ai.role === "host" || $("ai-panel").classList.contains("online");
+        const boss = MODELS[d.model] ? creatorPicks({ from, creator: peer.id, busy, isMember: roster.has(from) && !conns.get(from)?.meta?.api,
+          pick: () => pickModelHost([{ id: peer.id, meta: myMeta }, { id: from, meta: conns.get(from)?.meta }]) }) : null;
+        if (boss) { setModelValue(d.model); startOn(d.model, boss, roster.get(from)?.name || e?.name || "a device"); }
+        break;
+      }
+      if (!followStart({ from, creator: PREFIX + roomCode, strict: roomStrict() })) break;
+      ai.dealer = d.boss;
       setModelValue(d.model);   // every screen shows the model that was actually started
       // the device dealing the layers runs the room: listen to it, even before this device has a link to
       // it (a model host that is not the room's creator links every device before it deals)
@@ -4160,7 +4199,7 @@ async function aiOnData(from, d) {
       break;
     case "ai-modelhost":   // the room's creator: the model runs on another device, which links to this one
       if (isHost || from !== PREFIX + roomCode || ai.role === "host" || ai.role === "worker" || typeof d.id !== "string") break;
-      ai.hostId = d.id;
+      ai.hostId = d.id; ai.dealer = d.id;
       break;
     case "ai-next":
       // relink: the device after this one came back under the same id; the old link to it is dead
@@ -4227,13 +4266,14 @@ async function aiOnData(from, d) {
       // and it reconnected): keep that load, it reports ai-ready to the host when it is in
       const loadKey = shardKey(d.model, d.range);
       if (onLoadRequest({ loadingShard: ai.loadingShard, role: ai.role, currentKey: ai.loadKey, key: loadKey }) === "keep") {
-        ai.next = d.next; ai.hostId = d.host; ensureLink(d.next);
+        ai.next = d.next; ai.hostId = d.host; ai.dealer = d.host || from; ensureLink(d.next);
         break;
       }
       setModelValue(d.model);
       ai.role = "worker";
       ai.next = d.next;
       ai.hostId = d.host;
+      ai.dealer = d.host || from;
       ai.q = Promise.resolve();
       ai.startFailed = null;
       ai.wsrc = MODELS[d.model]?.gguf && d.inv ? weightSources(MODELS[d.model].gguf, d.inv) : null;

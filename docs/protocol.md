@@ -7,7 +7,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | Message | Direction | Meaning |
 |---|---|---|
 | `ai-wait` | host → worker | join accepted; wait for assignment |
-| `ai-load {v, model, range, next, host, offload?}` | host → worker | download and load layers `[range[0], range[1])`; forward to `next`. A worker on another protocol `v` refuses it with `ai-error` instead of loading. `offload {lo, hi, vramBytes, ramBytes, ramSpare?}` (expert offload, only to a device whose hello said `meta.offload` / `meta.ramGB`): keep the routed experts of layers `[lo, hi)` in RAM with a `vramBytes` GPU cache, and `ramSpare` bytes of RAM free past them; a device asked for more RAM than it lends (`ramBytes + ramSpare`) fails the load |
+| `ai-load {v, model, range, next, host, offload?}` | host → worker | download and load layers `[range[0], range[1])`; forward to `next`. Taken only from the room's creator or the model host the creator named, with `host` its sender's own id (see Who runs the model). A worker on another protocol `v` refuses it with `ai-error` instead of loading. `offload {lo, hi, vramBytes, ramBytes, ramSpare?}` (expert offload, only to a device whose hello said `meta.offload` / `meta.ramGB`): keep the routed experts of layers `[lo, hi)` in RAM with a `vramBytes` GPU cache, and `ramSpare` bytes of RAM free past them; a device asked for more RAM than it lends (`ramBytes + ramSpare`) fails the load |
 | `ai-progress {pct}` / `ai-hostprog` | worker ↔ host | download progress for the room UI |
 | `ai-ready {slots, ckpt, disk?}` / `ai-ready-all` | worker → host / host → all | layers loaded; room online. `slots`: the checkpoints the worker read back from disk; `ckpt: 1`: it applies checkpoint control on its frames (a room node hosting a dense model uses checkpoints only when every worker says so); `disk` (room nodes): `{ model, file, sig, ctx, kv }`, what keys this device's disk copies of pinned checkpoints (its model file's id and its engine's `stateSignature()`) |
 | `ai-ckpt-save {room, slot, h}` | host → worker | room nodes: the host pinned a prefix as slot `slot` (its save rides a frame's `sv`): write this device's part to disk under the room key `room` and the prefix hash `h` once the slot is saved here |
@@ -30,6 +30,7 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-linked {next, ok}` | worker → host | answer to `ai-next {relink}`: the fresh link to `next` is up (`ok`) or could not be opened. The host holds a waiting answer until it arrives (15 s at most), so the first frames after a device's return do not go down the dead link |
 | `ai-redeal {by, model}` | host → all | the host is dealing the layers again over the devices now in the room (after a departure, or to include late joiners); fresh `ai-load`s follow, cached ranges reload in seconds, the conversation is kept and re-prefilled on the next question |
 | `ai-ready-all {model}` to one device | host → newcomer | a device that joins an online room becomes an ask-only guest right away, followed by `ai-history {items}` (the last 20 exchanges) when the chat is visible to everyone. Sent with `ai-layers` on every hello, not only a first one: a device back on a new link (a reload, or a replacement link that reached the host before the old one's close) gets the room's state again, and a device in the chain that is still ready gets it too (#265). Screens take it idempotently |
+| `ai-start-req {model, boss, by}` | member → room's creator; room's creator → all | Start. A member sends it to the creator only; the creator picks who runs the model (the member or itself, `pickModelHost` over the two, with the metas the creator holds), and sends it to every device: `boss` runs the model, `by` pressed Start. A device follows it only from the creator (see Who runs the model) |
 | `ai-modelhost {id}` | room's creator → newcomer | the model runs on another device (`ai-start-req`'s `boss`, the biggest pledge, room/plan.js `pickModelHost`), which has no link to the newcomer yet: take that device's `ai-layers` / `ai-ready-all`. The model host links every device in the roster before it deals and welcomes devices that join later, so a device it leaves out of the deal can ask it |
 | `ai-layers {by, held?, out?}` / `ai-out {out}` | host → all | the deal: `by` each device's layer range by name; `held` the GB each holds of its pledge (the host's with the embedding and the head); `out` why a device with a GPU holds none, by name: `unneeded` (the others hold the model), `small` (its pledge is under one layer) or `late` (it joined after the start and waits for a re-deal; `ai-out` updates it, and `ai-ready-all` carries it too). Screens show it on the device cards and the Lend screen. Hints: devices that predate them ignore them (no `PROTOCOL` bump) |
 | `ai-style {persona, sampling, thinking}` | host → all | the host changed the answer style (screens show a toast); takes effect on the next question |
@@ -38,6 +39,15 @@ Browsers in a room form a WebRTC mesh (PeerJS signaling for the introduction onl
 | `ai-map {nodes, st, live}` | host → all | the room map (`#swarm-map`): chain order, layers and compute per device, lap = GPUs + wire, tok/s, draft acceptance; ~1/s while answering |
 | `ai-genstart {name, text, asker}` | host → all | carries the asker's peer id so that screen shows Stop |
 | `ai-gendone {stats, ctx, failed}` | host → all | `ctx: {used, max}` feeds every screen's context meter |
+
+## Who runs the model
+
+The **model host** deals the layers and sends what the room's devices take only from their host (`FROM_HOST` in room.js and the room node: `ai-layers`, `ai-token`, `ai-ready-all`, …). It is the strongest device (room/plan.js `pickModelHost`), not always the room's creator. Only the room's creator names it (room/authz.js):
+
+- the creator's own Start, an `ai-start-req` the creator sends, or `ai-modelhost`. A member's Start goes to the creator, which picks between the member and itself and tells the room; a member can't name a third device, and the creator ignores a Start while a model loads or runs;
+- a device takes `ai-load` only from the creator or the model host the creator named, and only with `host` its sender's id.
+
+So an admitted member can't make itself another device's host and write into its chat. A creator says it does this with `ha: 1` on its hello and roster. In a room whose creator runs an older Pooled (no `ha`) devices follow `ai-start-req` and `ai-load` from anyone, as before. An older member that is not the creator and starts the model itself (it was the strongest device) is not followed in a room whose creator has `ha`: update it, or start from the creator.
 
 ## Compute frames
 
@@ -117,7 +127,7 @@ Until it is let in, a link is not in the host's `conns`: nothing the room sends 
 
 | Message | Direction | Meaning |
 |---|---|---|
-| `hello {…, gate: 1, ask, auth: 1}` | host → any link it did not open | this host holds new devices at the gate; `ask`: it asks before letting a device in (the Invite sheet says so); `auth`: it takes proofs instead of the raw key and pass |
+| `hello {…, gate: 1, ask, auth: 1, ha: 1}` | host → any link it did not open | this host holds new devices at the gate; `ask`: it asks before letting a device in (the Invite sheet says so); `auth`: it takes proofs instead of the raw key and pass; `ha`: it names the room's model host, and devices follow only that one (`roster` carries `ha` too, in case the hello is lost) |
 | `hello {…, join: 1, auth: 1, jc, kc?, pid?}` | device or API client → host | this device can wait in the lobby, and what it can prove: `kc: 1` the invite key, `pid` a pass (an id derived from the pass's hash, not the pass), `jc` a commitment to its nonce. A device from before the proofs sends the raw `key?, pass?` here |
 | `auth {v: 1, hn}` | host → device | the host's challenge: its nonce for this link |
 | `auth-proof {jn, kp?, pp?}` | device → host | the device's nonce (it must match `jc`) and its proofs for the key (`kp`) and the pass (`pp`) |
