@@ -162,6 +162,25 @@ Deno.test("T1: never more slots than its bytes hold; a zero budget caches nothin
   assert(z.cap === 0 && !z.wants(1) && z.take(1) === null, "no room for one slot: nothing cached");
 });
 
+Deno.test("T1: a second miss with no free slot keeps its credit; maps settling after destroy() leave pending at 0", async () => {
+  const { T } = t1(4, { reserve: 1 });
+  for (const k of [1, 2, 3, 4]) { T.wants(k); put(T, k); }
+  assert(!T.wants(9) && T.wants(9), "9: first miss skipped, second admitted");
+  assert(T.take(9) === null, "but no slot is free");
+  assert(T.wants(9), "its next miss is still a second miss");
+  T.flush(); await tick();
+  put(T, 9);
+  assert(!T.ghost.has(9) && T.find(9, false) >= 0, "cached: the ghost entry is gone");
+  // maps that fail, and maps that resolve, after destroy(): neither takes pending below 0
+  const { dev, T: U } = t1(8, { reserve: 2 });
+  for (let k = 1; k <= 8; k++) { U.wants(k); put(U, k); }
+  dev.bufs[0].mapAsync = () => Promise.reject(new Error("device lost"));
+  U.flush();
+  assert(U.pending === 2, "two maps pending");
+  U.destroy(); await tick(); await tick();
+  assert(U.pending === 0, `pending after destroy: ${U.pending}`);
+});
+
 // ---- ExpertStore with T1 ----
 Deno.test("T1 store: the same pool bytes as the parked store over random decode, fewer reads, no mapped buffer submitted", async () => {
   for (const [t1n, slots] of [[6, 6], [12, 8], [40, 6], [64, 16]]) {

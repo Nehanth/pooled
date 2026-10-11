@@ -67,10 +67,11 @@ export class ExpertT1 {
     }
   }
   // Whether a miss of key should be cached (admit-on-second-miss): yes while the cache has never-used room, or when
-  // key missed before (it is in the ghost list); else it is remembered as a first miss.
+  // key missed before (it is in the ghost list); else it is remembered as a first miss. The ghost entry stays until
+  // commit() caches key, so a second miss that finds no free slot (take() -> null) keeps its credit for the next one.
   wants(key) {
     if (this.cap === 0) return false;
-    if (this.slots.length < this.cap || this.ghost.has(key)) { this.ghost.delete(key); return true; }
+    if (this.slots.length < this.cap || this.ghost.has(key)) return true;
     this.ghost.delete(key); this.ghost.set(key, true);
     if (this.ghost.size > this.cap) this.ghost.delete(this.ghost.keys().next().value);
     this.stats.skips++;
@@ -94,7 +95,7 @@ export class ExpertT1 {
   commit(s, key) {
     const S = this.slots[s];
     S.buf.unmap(); S.view = null; S.state = "full"; S.key = key;
-    this.of.set(key, s); this.prob.set(key, true);
+    this.of.set(key, s); this.prob.set(key, true); this.ghost.delete(key);
     this.stats.admits++;
     return S.buf;
   }
@@ -113,11 +114,12 @@ export class ExpertT1 {
       this.of.delete(key);
       S.state = "mapping"; S.key = -1; this.pending++; n++;
       this.stats.evicts++;
+      // a slot destroy() already killed is no longer counted in pending (destroy() zeroes it)
       S.buf.mapAsync(GPUMapMode.WRITE).then(() => {
-        this.pending--;
         if (S.state !== "mapping") return;
+        this.pending--;
         S.view = new Uint8Array(S.buf.getMappedRange()); S.state = "free"; this.freeIdx.push(s);
-      }, () => { this.pending--; S.state = "dead"; });
+      }, () => { if (S.state === "mapping") { this.pending--; S.state = "dead"; } });
     }
     return n;
   }

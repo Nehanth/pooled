@@ -49,7 +49,7 @@ The Mac Studio (36 GB unified memory) can't hold the 122B (72.5 GB) today, alone
 2. Room-node reader: worker threads, per-worker fds, a staging ring, and a disk benchmark (GB/s, p50/p99 per expert).
 3. T1: a RAM cache of per-expert MAP_WRITE slots (`engine/expert_t1.js`): segmented LRU, admit-on-second-miss, a reserve of mapped free slots refilled after each submit, `writeBuffer` when none is free. Sized by the 3-tier simulator (`tests/sim/tiersim.js`, landed): 2 GiB at least (`DISK_RAM_MIN`).
 4. Planner: `meta.disk` / `meta.local`, `offloadNeedDisk` (the fewest offloaded layers for the VRAM, then the fewest on disk for the RAM), deal fields `diskLo` / `diskRamBytes`, property tests (rooms that fit without disk deal exactly as before).
-5. CLI and room node: `--disk` on `host`, `join` and `--here`; the worker-thread reader wired in with an in-thread fallback; docs. First real room still to run: the 122B on Mac + PC with part of the PC on disk.
+5. CLI and room node: `--disk` on `host`, `join` and `--here`; the worker-thread reader wired in with an in-thread fallback; docs. First real room still to run: the 122B on Mac + PC with part of the PC on disk. Steps 3-5 reach `Qwen35Engine` models only (the 35B and the 122B). Qwen3.8-Flash-Next (roadmap 33) also needs: ExpertStore's `plan` / `prepare` cut hooks in the Flash engine (`engine/qwen4exp.js`, #346), its `MODELS` entry and a `roomBytes` experts profile so `offloadFor` / `roomFit` can deal it (roadmap 33 item 8, #347), and 512-expert offload (`OFFLOAD_EXPERTS`, roadmap 33 item 7).
 6. Router lookahead prefetch.
 7. Region shrink, so the 122B runs on the PC alone.
 8. Unified-memory disk tier (Mac and Spark) with an OPFS reader for browser tabs. **Next after 1**, for the first target.

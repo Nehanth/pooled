@@ -294,6 +294,13 @@ export function offloadCaps(L, pledges, layerBytes, hostBytes, off, disk = false
 // (offloadNeedDisk: the fewest m, then the fewest on disk) and the plan also has diskLayers and diskRamBytes: the
 // RAM for T1, all that is left past the parked experts and the spare (at least DISK_RAM_MIN). When parking holds
 // them, the plan is the one without disk, field for field.
+// The disk plan keeps the fewest m and does not step up toward OFFLOAD_GOOD_SLOTS, so its pools are small (19 slots
+// per layer for the 122B tab(28) + pc(10, --ram 24 --disk); 20 for the 35B on pc(10, --ram 8 --disk)). With the RAM
+// full, every layer the step-up adds goes to disk, and T1's experts spread over more layers. Measured on the GB10
+// (35B, pc(10, 8, disk), Dawn, warm page cache, docs/bench-log.md 2026-10-11): stepping up to 40 layers / 65 slots
+// took pool hits from 43% to 80% (147 -> 65 misses per token) but T1 hits fell from 69 to 7 per token and disk reads
+// rose from 35.5 to 40.8 per token; decode was within the shared GPU's noise (8.9-12.3 vs 9.9-10.3 tok/s). Disk reads
+// are the slowest tier on an NVMe PC, so the fewest m stays until a cold-cache run on the PC says otherwise.
 export const OFFLOAD_GOOD_SLOTS = 64;
 export function offloadPlan(n, bytes, ram, layerBytes, ex, minSlots = OFFLOAD_MIN_SLOTS, nExp = OFFLOAD_EXPERTS, pos = null, disk = false) {
   if (disk) {
