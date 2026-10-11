@@ -8,7 +8,7 @@ sidebar:
 ---
 
 {/*
-Sources (origin/main 40bb0fa):
+Sources (origin/main 2b39a86; every roadmap line checked against the code 2026-10-11):
 - roadmap/README.md (priorities P0/P1/P2, areas, numbered design files, pinned issue #83; several items stale)
 - GitHub issue states checked 2026-09-30 (#59, #70, #73, #75, #76, #81 closed; #1, #69, #77 still open though shipped)
 - Merged PRs: #259 (TURN relay, signaling fallback -> #1, part of #15), #242 (disk checkpoints -> #69),
@@ -38,19 +38,21 @@ Issues get the `area:` label of their section.
 
 ## Top of the list
 
-- **Prefill speed** (P0, [#2](https://github.com/Nehanth/pooled/issues/2)). Prefill is the biggest gap against native llama.cpp. On one GB10, the first token of a 172-token prompt takes about 1.0 s on the MoE, against about 0.07 s natively.
-- **Split MoE rooms that end answers mid-call** (P0, [#68](https://github.com/Nehanth/pooled/issues/68)). A two- or three-device MoE room must match a single device.
-- **Coop GEMV with 8 rows per workgroup** returns wrong values (P0, [#47](https://github.com/Nehanth/pooled/issues/47)).
-- **Hand the host role to another device** when the host leaves (P1, [#58](https://github.com/Nehanth/pooled/issues/58)).
-- **Pinned model revisions and weight hashes** (P1, [#19](https://github.com/Nehanth/pooled/issues/19)), so an upstream re-upload can't mix old and new ranges.
+- **SSD expert offload** (P1, [design note](https://github.com/Nehanth/pooled/blob/main/roadmap/32-ssd-expert-offload.md)). Stream a MoE's experts from NVMe when VRAM and RAM can't hold them, the next model size up on a Mac and a PC.
+- **Batched multi-session decode** (P1, [#72](https://github.com/Nehanth/pooled/issues/72)). Agents with subagents send requests at the same time; today they queue behind each other.
+- **Host-authoritative room page** (P1, [#17](https://github.com/Nehanth/pooled/issues/17)). Only the host may load a model or start the room's model; the room node already checks.
+- **Reproducible benchmarks** (P1, [#21](https://github.com/Nehanth/pooled/issues/21)). A protocol, one result format and a device matrix; a contributor is taking the first slice.
+- **Pinned model revisions** (P1, [#19](https://github.com/Nehanth/pooled/issues/19)), so an upstream re-upload can't mix old and new ranges.
 
 ## Shipped recently
 
-Some roadmap lines and issues lag behind merged work. As of September 30, 2026:
+As of October 11, 2026, every roadmap line was checked against the code:
 
-- **Done:** TURN relay for strict networks ([#1](https://github.com/Nehanth/pooled/issues/1)); room checkpoints on disk ([#69](https://github.com/Nehanth/pooled/issues/69)); tokenizer checked against llama.cpp ([#70](https://github.com/Nehanth/pooled/issues/70)); prefix-cache reuse across Code mode turns ([#73](https://github.com/Nehanth/pooled/issues/73)); harness audit fixes ([#76](https://github.com/Nehanth/pooled/issues/76)); delete one cached model ([#59](https://github.com/Nehanth/pooled/issues/59)); GPU tests that print FAIL exit nonzero ([#81](https://github.com/Nehanth/pooled/issues/81)); `npx @pooled/cli serve` with tool calling ([#4](https://github.com/Nehanth/pooled/issues/4)); converted weights cached in the browser ([#77](https://github.com/Nehanth/pooled/issues/77)).
-- **Partly:** self-hosted signaling ([#15](https://github.com/Nehanth/pooled/issues/15): fallback list and `?signal=` shipped); longer context ([#71](https://github.com/Nehanth/pooled/issues/71): `?kv=q8` exists, off by default); actionable errors ([#16](https://github.com/Nehanth/pooled/issues/16): no diagnostic report button yet); Code mode agent robustness ([#74](https://github.com/Nehanth/pooled/issues/74)); automatic re-deal ([#3](https://github.com/Nehanth/pooled/issues/3): experimental, on by default); keeping worker tabs alive ([#78](https://github.com/Nehanth/pooled/issues/78), [#44](https://github.com/Nehanth/pooled/issues/44)).
-- **`run_js` in production** ([#75](https://github.com/Nehanth/pooled/issues/75)) is closed, but needs a preview site on a second domain, which pooled.run doesn't have yet ([#79](https://github.com/Nehanth/pooled/issues/79)).
+- **`@pooled/cli` 0.4:** `pooled serve` with OpenAI and Anthropic endpoints and tool calling, `pooled host` / `join` / `chat` on a native peer, and the OpenClaw plugin ([#4](https://github.com/Nehanth/pooled/issues/4), [#11](https://github.com/Nehanth/pooled/issues/11)).
+- **Bigger models:** the Qwen3.5 122B, and MoE experts kept in system RAM (`--ram`), so a Mac Studio and an RTX 5070 PC run the 122B at about 17 tok/s.
+- **Security:** channel-bound join auth, where keys and passes are proved, never sent.
+- **Networks:** the TURN relay, in the browser and now the CLI ([#1](https://github.com/Nehanth/pooled/issues/1)).
+- **Speed and sessions:** the prefill kernels ([#2](https://github.com/Nehanth/pooled/issues/2)); checkpoints on disk and prefix reuse across agent turns ([#69](https://github.com/Nehanth/pooled/issues/69), [#73](https://github.com/Nehanth/pooled/issues/73)); GPU sampling ([#26](https://github.com/Nehanth/pooled/issues/26)); the GEMV 8-row fix ([#47](https://github.com/Nehanth/pooled/issues/47)).
 
 <Aside type="note">
 The [changelog](/docs/reference/changelog) has the full list of what changed in each release.
