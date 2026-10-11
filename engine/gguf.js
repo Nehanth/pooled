@@ -2,7 +2,7 @@
 // repacking into GPU-friendly layouts (packed nibbles + f16 scales), and
 // streaming upload straight into GPU buffers. See docs/models.md.
 // Parses GGUF v2/v3 and handles Q4_0, Q4_1, Q5_0, Q5_K, Q6_K, Q8_0, F16, BF16
-// and F32 tensors, plus the qwen35 loaders. The parser returns tensor byte
+// and F32 tensors, plus the qwen35 and qwen4exp loaders. The parser returns tensor byte
 // ranges so browser peers can range-fetch only their layers.
 
 const T_U8 = 0, T_I8 = 1, T_U16 = 2, T_I16 = 3, T_U32 = 4, T_I32 = 5, T_F32 = 6,
@@ -116,9 +116,11 @@ export function parseGGUFHeader(buf, opts = {}) {
     tensors[t.name] = { ...t, nElems: n, byteOffset: dataStart + t.offset, byteLength: bytes };
   }
   // the Qwen3.5+ MoE files use their own architecture name (keys like "qwen35moe.block_count");
-  // alias them under "qwen35." so the one engine reads both, dense and MoE
+  // alias them under "qwen35." so the one engine reads both, dense and MoE. Qwen3.8-Flash-Next ("qwen4exp")
+  // shares the Qwen3.5 keys too (block_count, ssm.*, expert_*, attention.*); its own keys (hyper_connection.*,
+  // attention.indexer.*, ple.*) are aliased along with them but read under their own names (qwen4expConfig).
   const arch = meta["general.architecture"];
-  if (typeof arch === "string" && arch !== "qwen35" && /^qwen3[5-9]/.test(arch))
+  if (typeof arch === "string" && arch !== "qwen35" && (/^qwen3[5-9]/.test(arch) || arch === "qwen4exp"))
     for (const k of Object.keys(meta)) if (k.startsWith(arch + ".")) { const a = "qwen35." + k.slice(arch.length + 1); if (!(a in meta)) meta[a] = meta[k]; }
   return { meta, tensors, dataStart, headerBytes: off };
 }
@@ -189,12 +191,15 @@ export function ggmlLayerNames(i) {
 export const GGML_EMBED = "token_embd.weight";
 export const GGML_FINAL_NORM = "output_norm.weight";
 export const GGML_OUTPUT = "output.weight"; // absent when embeddings are tied
+export const GGML_PLE_TABLE = "per_layer_token_embd.weight"; // qwen4exp's n-gram table: rows only, never an entry
 
 // One tensor's engine entry (repacked for the GPU) from a parsed GGUF header.
 // bytesOf: async (info) => Uint8Array of that tensor's data (local slice or
 // HTTP range fetch, same contract as the safetensors shard path).
 // cpuOnly: never through G.streamEntry (an offloaded expert tensor is parked by the caller, not uploaded)
 export async function ggufEntry(G, bytesOf, name, optional, onBytes = () => {}, cpuOnly = false) {
+  // Qwen3.8-Flash-Next's n-gram table (28.8 GB) is read 16 rows per token, never converted or uploaded whole
+  if (name === GGML_PLE_TABLE) throw new Error(name + " is read by rows (qwen4expPleTable), not loaded as a weight");
   const info0 = G.tensors[name];
   if (!info0) {
     if (optional) return null;
@@ -610,6 +615,262 @@ export function qwen35MtpBytes(G) {
   Object.values(qwen35NamesFor(G, N, true)).forEach((v) => { if (typeof v === "string") add(v); });
   ["eh_proj", "enorm", "hnorm", "shared_head_norm"].forEach((n) => add(p + n + ".weight"));
   return total;
+}
+
+
+// ---------- Qwen3.8-Flash-Next (llama.cpp arch "qwen4exp") loader ----------
+// Not a Qwen3.5 variant: every RMSNorm around the blocks is replaced by a 4-stream hyper-connection (HC) mixer, the
+// full-attention layers carry a sparse-attention indexer (QSA), layer 1 adds a gated n-gram embedding (PLE) read from
+// a 28.8 GB hash table, and there is no output norm (the last HC mixer feeds the head). The MTP block ships in a
+// separate GGUF. llama.cpp's port is the spec: src/models/qwen4exp.cpp (load_arch_tensors, ggml-org master f2cc728).
+
+// The model's shape from a qwen4exp header's metadata. The keys llama.cpp requires are required here too (a missing
+// one throws); qsa[i] covers the trunk and the MTP block. -> { L (trunk layers), nextn (MTP blocks in this file),
+// dim, hc, hcRank, hDim (the residual's width: hc streams of dim), qsa, ssm, nExp, K, expFF, shFF, indexer, ple }
+export function qwen4expConfig(meta) {
+  if (meta["general.architecture"] !== "qwen4exp") throw new Error(`not a qwen4exp GGUF (${meta["general.architecture"]})`);
+  const key = (k, required = true) => {
+    const v = meta["qwen4exp." + k];
+    if (v === undefined && required) throw new Error("qwen4exp: missing key qwen4exp." + k);
+    return v;
+  };
+  const all = key("block_count"), nextn = key("nextn_predict_layers", false) || 0, L = all - nextn;
+  const dim = key("embedding_length"), hc = key("hyper_connection.count"), hcRank = key("hyper_connection.low_rank");
+  // a per-layer key is one value for every layer or an array of exactly one per layer (llama.cpp get_key_or_arr)
+  const perLayer = (k, v) => {
+    if (!Array.isArray(v)) return Array(all).fill(v);
+    if (v.length !== all) throw new Error(`qwen4exp: ${v.length} ${k} for ${all} layers`);
+    return v;
+  };
+  // the layer types as llama.cpp sets them (qwen4exp.cpp:148-156): attention.recurrent_layers when the file has it,
+  // else every interval-th trunk layer is full attention (QSA), and so is every MTP block (i >= L)
+  const recurrent = key("attention.recurrent_layers", false), interval = key("full_attention_interval", false) ?? 4;
+  if (interval === 0) throw new Error("qwen4exp: full_attention_interval is 0");
+  const qsa = recurrent !== undefined ? perLayer("recurrent layer flags", recurrent).map((r) => !r)
+    : Array.from({ length: all }, (_, i) => i >= L || (i + 1) % interval === 0);
+  // the indexer pools its keys in blocks of the compress ratio, one for the whole model (qwen4exp.cpp:62-79): the
+  // QSA layers' shared ratio, 0 when the file has none
+  const topK = key("attention.indexer.top_k");
+  let block = 0;
+  for (const r of perLayer("compress ratios", key("attention.compress_ratios", false) ?? 0)) {
+    if (!r) continue;
+    if (block && r !== block) throw new Error(`qwen4exp: QSA layers must share one compress ratio, got ${block} and ${r}`);
+    block = r;
+  }
+  if (block === 1 || (block && topK % block)) throw new Error(`qwen4exp: compress ratio ${block} does not divide top_k ${topK}`);
+  const ssm = { convK: key("ssm.conv_kernel"), stateSize: key("ssm.state_size"), nKHeads: key("ssm.group_count"),
+    nVHeads: key("ssm.time_step_rank"), inner: key("ssm.inner_size") };
+  let ple = null;
+  const pleLayers = key("ple.layers", false);
+  if (pleLayers?.length) {
+    const ngram = key("ple.ngram_size"), headsPerNgram = key("ple.heads_per_ngram"), nHeads = (ngram - 1) * headsPerNgram;
+    const headDim = key("embedding_length_per_layer_input");
+    const multipliers = key("ple.layer_multipliers"), offsets = key("ple.head_offsets"), vocab = key("ple.head_vocab_sizes");
+    if (multipliers.length !== ngram || offsets.length !== nHeads || vocab.length !== nHeads)
+      throw new Error(`qwen4exp: PLE arrays of ${multipliers.length}/${offsets.length}/${vocab.length} for ${ngram}-grams, ${nHeads} heads`);
+    // the hash is 64-bit integer math (the multipliers are 45-bit): one rounded multiplier would move every row.
+    // The header parser reads u64 as Number, exact below 2^53; past that, refuse rather than hash wrong rows
+    if (!multipliers.every(Number.isSafeInteger)) throw new Error("qwen4exp: a PLE multiplier past 2^53");
+    if (nHeads * headDim !== dim) throw new Error(`qwen4exp: ${nHeads} PLE heads of ${headDim} make ${nHeads * headDim}, not ${dim}`);
+    for (const l of pleLayers) if (qsa[l]) throw new Error(`qwen4exp: PLE layer ${l} is not a DeltaNet layer`);
+    ple = { layers: pleLayers, ngram, headsPerNgram, nHeads, headDim, convK: key("ple.conv_kernel"),
+      eos: key("ple.eos_token_id"),
+      // files written before the key (or with 0) hash image positions as EOS (qwen4exp.cpp:1230)
+      image: key("ple.image_token_id", false) || key("ple.eos_token_id"),
+      multipliers: multipliers.map(BigInt), offsets, vocab,
+      rows: Math.max(...offsets.map((o, h) => o + vocab[h])) };   // the rows the heads index (the table pads past it)
+  }
+  return {
+    L, nextn, dim, hc, hcRank, hDim: hc * dim, eps: key("attention.layer_norm_rms_epsilon"),
+    nHeads: key("attention.head_count"), nKVHeads: key("attention.head_count_kv"), headDim: key("attention.key_length"),
+    ropeDims: key("rope.dimension_count"), ropeTheta: key("rope.freq_base"), ropeSections: key("rope.dimension_sections"),
+    qsa, ssm, nExp: key("expert_count"), K: key("expert_used_count"),
+    expFF: key("expert_feed_forward_length"), shFF: key("expert_shared_feed_forward_length"),
+    indexer: { nHeads: key("attention.indexer.head_count"), headDim: key("attention.indexer.key_length"),
+      topK, block },
+    ple,
+  };
+}
+
+// ggml tensor names -> engine names for one qwen4exp layer. The MoE, attention and DeltaNet names match
+// qwen35LayerNames; there are no attn_norm / post_attention_norm. Instead: two HC mixers (before the token mixer,
+// before the MoE), the QSA indexer on full-attention layers, and the PLE block on the n-gram layer.
+export function qwen4expLayerNames(i, { qsa = false, ple = false } = {}) {
+  const p = `blk.${i}.`;
+  const N = { isFull: qsa, isPle: ple,
+    hcAttnNorm: p + "hc_attn_norm.weight", hcAttnDown: p + "hc_attn_down.weight",
+    hcAttnUp: p + "hc_attn_up.weight", hcAttnInject: p + "hc_attn_inject.weight",
+    hcFfnNorm: p + "hc_ffn_norm.weight", hcFfnDown: p + "hc_ffn_down.weight",
+    hcFfnUp: p + "hc_ffn_up.weight", hcFfnInject: p + "hc_ffn_inject.weight",
+    router: p + "ffn_gate_inp.weight",
+    expGate: p + "ffn_gate_exps.weight", expUp: p + "ffn_up_exps.weight", expDown: p + "ffn_down_exps.weight",
+    shGate: p + "ffn_gate_shexp.weight", shUp: p + "ffn_up_shexp.weight", shDown: p + "ffn_down_shexp.weight",
+    shRouter: p + "ffn_gate_inp_shexp.weight",
+  };
+  if (qsa) Object.assign(N, {
+    wq: p + "attn_q.weight", wk: p + "attn_k.weight", wv: p + "attn_v.weight", wo: p + "attn_output.weight",
+    qNorm: p + "attn_q_norm.weight", kNorm: p + "attn_k_norm.weight",
+    idxQ: p + "indexer.q_proj.weight", idxK: p + "indexer.k_proj.weight",
+    idxQNorm: p + "indexer.q_norm.weight", idxKNorm: p + "indexer.k_norm.weight" });
+  else Object.assign(N, {
+    wqkv: p + "attn_qkv.weight", wz: p + "attn_gate.weight",
+    wBeta: p + "ssm_beta.weight", wAlpha: p + "ssm_alpha.weight",
+    dtBias: p + "ssm_dt.bias", ssmA: p + "ssm_a",
+    conv: p + "ssm_conv1d.weight", ssmNorm: p + "ssm_norm.weight",
+    wOut: p + "ssm_out.weight" });
+  if (ple) Object.assign(N, {
+    pleKey: p + "ple_key.weight", pleValue: p + "ple_value.weight",
+    pleNormKey: p + "ple_norm_key.weight", pleNormQuery: p + "ple_norm_query.weight",
+    pleNormConv: p + "ple_norm_conv.weight", pleConv: p + "ple_conv1d.weight" });
+  return N;
+}
+// qwen4expLayerNames for layer i of this file (cfg: qwen4expConfig(G.meta), passed when the caller has it)
+export function qwen4expNamesFor(G, i, cfg = qwen4expConfig(G.meta)) {
+  return qwen4expLayerNames(i, { qsa: cfg.qsa[i], ple: !!cfg.ple?.layers.includes(i) });
+}
+// the tensor names of a layer qwen4expWeights loads (qsa: false leaves out the indexer)
+const QWEN4EXP_INDEXER = new Set(["idxQ", "idxK", "idxQNorm", "idxKNorm"]);
+function qwen4expLoadedNames(N, qsa = true) {
+  return Object.entries(N).filter(([k, v]) => typeof v === "string" && (qsa || !QWEN4EXP_INDEXER.has(k))).map(([, v]) => v);
+}
+// the head: the last HC mixer (no inject) stands in for the output norm, then the LM head
+export const QWEN4EXP_HEAD = { hcNorm: "output_hc_norm.weight", hcDown: "output_hc_down.weight", hcUp: "output_hc_up.weight" };
+// the MTP block's own tensors besides its layer (blk.<L>.nextn.*): eh_proj is [fc_embedding | fc_hidden], hnorm and
+// the head mixer are per HC stream
+export function qwen4expMtpNames(L) {
+  const p = `blk.${L}.nextn.`;
+  return { ehProj: p + "eh_proj.weight", enorm: p + "enorm.weight", hnorm: p + "hnorm.weight",
+    hcHeadNorm: p + "hc_head_norm.weight", hcHeadDown: p + "hc_head_down.weight", hcHeadUp: p + "hc_head_up.weight" };
+}
+
+// Where the n-gram table is, for a row reader (it is never an entry: ggufEntry refuses it). Each of the ple.nHeads
+// hash heads owns rows [firstRow, firstRow + rows); a row is rowElems values of ggmlType, rowBytes long.
+// shard: which split file holds it (room/models.js mergeSplitHeaders; the caller maps it to that file's URL). -> null
+// for a file without one
+export function qwen4expPleTable(G, cfg = qwen4expConfig(G.meta)) {
+  const t = G.tensors[GGML_PLE_TABLE];
+  if (!t || !cfg.ple) return null;
+  const [rows, rowElems] = t.shape;
+  if (rowElems !== cfg.ple.headDim || rows < cfg.ple.rows)
+    throw new Error(`${GGML_PLE_TABLE}: ${rows} rows of ${rowElems}, the heads need ${cfg.ple.rows} of ${cfg.ple.headDim}`);
+  return { name: GGML_PLE_TABLE, shard: t.shard || 0, byteOffset: t.byteOffset, byteLength: t.byteLength,
+    ggmlType: t.ggmlType, rows, rowElems, rowBytes: ggmlTypeBytes(t.ggmlType, rowElems),
+    heads: cfg.ple.offsets.map((firstRow, h) => ({ firstRow, rows: cfg.ple.vocab[h] })) };
+}
+
+// The qwen4exp shard loader (qwen35Weights' contract). A layer has qwen35Weights' MoE and token-mixer fields plus
+// hcAttn / hcFfn ({ norm, down, up, inject }), indexer ({ q, k, qNorm, kNorm }) on QSA layers and ple ({ key, value,
+// normKey, normQuery, normConv, conv }) on the n-gram layer. The head is headHC ({ norm, down, up }) and head; there
+// is no finalNorm. pleTable (qwen4expPleTable) is returned with the n-gram layer, for the row reader.
+// mtp: the MTP file's parsed header, read through mtpBytesOf; loaded with the head as out.mtp = { layer, ehProj,
+// enorm, hnorm, hcHead }. Its tensors go through ggufEntry with the MTP header's own hooks, never G's:
+// mtp.entryCache (the converted-weights cache is keyed per file, and token_embd / output exist in both files) and
+// mtp.streamEntry (G's reads G's file) are unset unless the caller sets them for the MTP file; mtp.convert defaults
+// to G.convert, which only converts bytes. ggml-org's MTP file also carries its own token_embd and output (Q4_0; the trunk's head is
+// Q6_K); llama.cpp loading that file as its own model uses them, so mtpOwnHead loads them as mtp.embed / mtp.head.
+// experts: an ExpertStore, as in qwen35Weights (its layers' routed experts are parked, not returned for upload). The
+// MTP block's experts are parked too when the store has its layer (cfg.L), unlike qwen35Weights, which never parks it.
+// qsa: false skips the indexer tensors (layer.indexer = null), for the dense phase that does not run QSA.
+export async function qwen4expWeights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp = null, mtpBytesOf = null, mtpOwnHead = false,
+  experts = null, qsa = true }, onProgress = () => {}, onEntry = null) {
+  let fetched = 0;
+  const progress = (b) => { fetched += b; onProgress(fetched); };
+  const entryOf = (H, read) => async (name, optional) => {
+    const e = await ggufEntry(H, read, name, optional, progress);
+    if (e && onEntry) onEntry(e, name);
+    return e;
+  };
+  const entry = entryOf(G, bytesOf);
+  const cfg = qwen4expConfig(G.meta);
+  const loadLayer = async (H, read, N, i, mayPark) => {
+    const get = H === G ? entry : entryOf(H, read);
+    const group = async (o) => { const r = {}; for (const [k, n] of Object.entries(o)) r[k] = await get(n); return r; };
+    const L = { isFull: N.isFull, moe: true,
+      hcAttn: await group({ norm: N.hcAttnNorm, down: N.hcAttnDown, up: N.hcAttnUp, inject: N.hcAttnInject }) };
+    if (N.isFull) {
+      L.wq = await get(N.wq); L.wk = await get(N.wk); L.wv = await get(N.wv); L.wo = await get(N.wo);
+      L.qNorm = await get(N.qNorm); L.kNorm = await get(N.kNorm);
+      L.indexer = qsa ? await group({ q: N.idxQ, k: N.idxK, qNorm: N.idxQNorm, kNorm: N.idxKNorm }) : null;
+    } else {
+      L.wqkv = await get(N.wqkv); L.wz = await get(N.wz);
+      L.wBeta = await get(N.wBeta); L.wAlpha = await get(N.wAlpha);
+      L.dtBias = await get(N.dtBias); L.ssmA = await get(N.ssmA);
+      L.conv = await get(N.conv); L.ssmNorm = await get(N.ssmNorm);
+      L.wOut = await get(N.wOut);
+    }
+    if (N.isPle) L.ple = await group({ key: N.pleKey, value: N.pleValue, normKey: N.pleNormKey,
+      normQuery: N.pleNormQuery, normConv: N.pleNormConv, conv: N.pleConv });
+    L.hcFfn = await group({ norm: N.hcFfnNorm, down: N.hcFfnDown, up: N.hcFfnUp, inject: N.hcFfnInject });
+    L.router = await get(N.router);
+    if (mayPark && experts && experts.has(i)) {   // offloaded: converted on the CPU, parked, never uploaded
+      for (const [k, part] of [["expGate", "gate"], ["expUp", "up"], ["expDown", "down"]])
+        L[k] = experts.park(i, part, await ggufEntry(H, read, N[k], false, progress, true), cfg.nExp);
+    } else { L.expGate = await get(N.expGate); L.expUp = await get(N.expUp); L.expDown = await get(N.expDown); }
+    L.shGate = await get(N.shGate); L.shUp = await get(N.shUp); L.shDown = await get(N.shDown);
+    L.shRouter = await get(N.shRouter);
+    return L;
+  };
+  const layers = [];
+  for (let i = lo; i < hi; i++) layers.push(await loadLayer(G, bytesOf, qwen4expNamesFor(G, i, cfg), i, true));
+  const out = { layers };
+  if (cfg.ple && cfg.ple.layers.some((l) => l >= lo && l < hi)) out.pleTable = qwen4expPleTable(G, cfg);
+  if (hasEmbed || hasHead) out.embed = await entry(GGML_EMBED);
+  if (hasHead) {
+    out.headHC = { norm: await entry(QWEN4EXP_HEAD.hcNorm), down: await entry(QWEN4EXP_HEAD.hcDown), up: await entry(QWEN4EXP_HEAD.hcUp) };
+    out.head = await entry(GGML_OUTPUT, true);   // null: tied to the embedding (llama.cpp's fallback; no file does it)
+  }
+  if (mtp && hasHead) {
+    const mc = qwen4expConfig(mtp.meta);
+    if (!mc.nextn) throw new Error("the MTP GGUF has no nextn block");
+    if (mc.dim !== cfg.dim || mc.hc !== cfg.hc || mc.nExp !== cfg.nExp || mc.L !== cfg.L)
+      throw new Error("the MTP GGUF does not match the model");
+    const Hm = { meta: mtp.meta, tensors: mtp.tensors, entryCache: mtp.entryCache || null, streamEntry: mtp.streamEntry || null,
+      convert: mtp.convert || G.convert || null };
+    const read = mtpBytesOf || bytesOf, get = entryOf(Hm, read), M = qwen4expMtpNames(mc.L);
+    out.mtp = {
+      layer: await loadLayer(Hm, read, qwen4expNamesFor(mtp, mc.L, mc), mc.L, true),
+      ehProj: await get(M.ehProj), enorm: await get(M.enorm), hnorm: await get(M.hnorm),
+      hcHead: { norm: await get(M.hcHeadNorm), down: await get(M.hcHeadDown), up: await get(M.hcHeadUp) },
+    };
+    if (mtpOwnHead) { out.mtp.embed = await get(GGML_EMBED); out.mtp.head = await get(GGML_OUTPUT); }
+  }
+  return out;
+}
+
+// File bytes qwen4expWeights reads for a shard (progress bars, pledges). The n-gram table is never part of it.
+// mtp: the MTP file's parsed header, counted with the head as qwen4expWeights loads it. qsa: false leaves out the
+// indexer, as qwen4expWeights does.
+export function qwen4expShardBytes(G, { lo, hi, hasEmbed, hasHead, mtp = null, mtpOwnHead = false, qsa = true }) {
+  const cfg = qwen4expConfig(G.meta);
+  let total = 0;
+  const add = (n) => { if (G.tensors[n]) total += G.tensors[n].byteLength; };
+  for (let i = lo; i < hi; i++) qwen4expLoadedNames(qwen4expNamesFor(G, i, cfg), qsa).forEach(add);
+  if (hasEmbed || hasHead) add(GGML_EMBED);
+  if (hasHead) { Object.values(QWEN4EXP_HEAD).forEach(add); add(GGML_OUTPUT); }
+  if (mtp && hasHead) total += qwen4expMtpBytes(mtp, { ownHead: mtpOwnHead, qsa });
+  return total;
+}
+// bytes of the MTP file's block (its layer and nextn tensors; ownHead: its token_embd and output too; qsa: false
+// leaves out the indexer)
+export function qwen4expMtpBytes(Gm, { ownHead = false, qsa = true } = {}) {
+  const mc = qwen4expConfig(Gm.meta);
+  if (!mc.nextn) return 0;
+  let total = 0;
+  const add = (n) => { if (Gm.tensors[n]) total += Gm.tensors[n].byteLength; };
+  qwen4expLoadedNames(qwen4expNamesFor(Gm, mc.L, mc), qsa).forEach(add);
+  Object.values(qwen4expMtpNames(mc.L)).forEach(add);
+  if (ownHead) { add(GGML_EMBED); add(GGML_OUTPUT); }
+  return total;
+}
+
+// Bytes of the entry convertEntry makes from a tensor (what the engine holds, vs. byteLength, the file's): Q4_0
+// stays 4-bit, Q8_0 and every other quant matrix become Q8 (Q4_1, Q5_0, Q6_K widen), floats and vectors become f32.
+// Stacked experts count as the one matrix ggufEntry makes of them.
+export function entryByteLength(info) {
+  const n = info.nElems ?? info.shape.reduce((a, b) => a * b, 1), T = info.ggmlType;
+  const scales = Math.ceil(n / 32 / 2) * 4;   // f16 scales, two per u32 word
+  if (info.shape.length < 2 || T === GGML_F32 || T === GGML_F16 || T === GGML_BF16) return n * 4;
+  return (T === GGML_Q4_0 ? n / 2 : n) + scales;
 }
 
 
