@@ -178,8 +178,9 @@ export class Qwen4ExpEngine {
     // ---- per layer state and ops
     const frameU = B.frame;
     this.layers = [];
-    for (let i = lo; i < hi; i++) {
-      const L = weights.layers[i - lo], isQ = cfg.qsa[i], st = {}, attnOps = [], ffnOps = [];
+    // one layer's state and ops; also the MTP block's (engine/qwen4exp_mtp.js: i = cfg.L, a full-attention layer)
+    const layerOps = (L, i, isQ = cfg.qsa[i]) => {
+      const st = {}, attnOps = [], ffnOps = [];
       if (!!L.isFull !== !!isQ) throw new Error(`qwen4exp: layer ${i} type does not match the config`);
       // PLE (n-gram) injection, before the layer's first mixer
       if (pleLayers.includes(i)) {
@@ -231,8 +232,9 @@ export class Qwen4ExpEngine {
       ffnOps.push({ pipe: P["dn_" + sdw.kind], bg: bg(P["dn_" + sdw.kind], [sdw.qs, sdw.sc, B.hs, B.sh, B.shIds, B.logits, uni([d, sff, 1, 1, cfg.nExp, 0, 0, 0])]), wg: [Math.ceil(d / 8), 1, 1],
         tap: [`ffn_shexp_gated-${i}`, B.sh, d] });
       ffnOps.push(hcComb(B.moe, B.sh, `l_last-${i}`));
-      this.layers.push({ i, isQ, st, attnOps, ffnOps });
-    }
+      return { i, isQ, st, attnOps, ffnOps };
+    };
+    for (let i = lo; i < hi; i++) this.layers.push(layerOps(weights.layers[i - lo], i));
 
     // ---- head: the last HC mixer (no inject) stands in for the output norm, then the LM head and a GPU argmax
     if (hasHead) {
@@ -247,6 +249,8 @@ export class Qwen4ExpEngine {
     }
     this.hStage = device.createBuffer({ size: HD * 4, usage: U.MAP_READ | U.COPY_DST });
     this._ropeTs = fr(Math.pow(cfg.ropeTheta, -2 / cfg.ropeDims));
+    // the op builders, for modules that add ops on this engine's scratch and weights (engine/qwen4exp_mtp.js)
+    this._build = { gemv, wq, bg, uni, f, view, buf, hcMix, layerOps };
     this.reset();
   }
 
@@ -310,11 +314,15 @@ export class Qwen4ExpEngine {
       const emb = await this.ngram.rows(rows);
       q.writeBuffer(B.emb, 0, emb);
     } else this.ngs?.push([id]);
+    this._writeFrame(this.pos);
+  }
+  // the frame of a step at `pos` (the cells it attends: 0 .. pos; the rope table at pos)
+  _writeFrame(pos) {
     const F = new Float32Array(W.FRAME_FLOATS), Fu = new Uint32Array(F.buffer);
-    Fu[0] = this.pos; Fu[1] = this.pos + 1;
-    let th = fr(this.pos);
-    for (let i = 0; i < cfg.ropeDims / 2; i++) { F[4 + i * 4] = fr(Math.cos(th)); F[5 + i * 4] = fr(Math.sin(th)); th = fr(th * this._ropeTs); }
-    q.writeBuffer(B.frame, 0, F);
+    Fu[0] = pos; Fu[1] = pos + 1;
+    let th = fr(pos);
+    for (let i = 0; i < this.cfg.ropeDims / 2; i++) { F[4 + i * 4] = fr(Math.cos(th)); F[5 + i * 4] = fr(Math.sin(th)); th = fr(th * this._ropeTs); }
+    this.device.queue.writeBuffer(this.B.frame, 0, F);
   }
 
   _encode(pass, ops) { for (const o of ops) { pass.setPipeline(o.pipe); pass.setBindGroup(0, o.bg); pass.dispatchWorkgroups(...o.wg); } }
