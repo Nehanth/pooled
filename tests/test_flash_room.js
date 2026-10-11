@@ -10,7 +10,8 @@
 //   slots:  saveSlot / loadSlot and exportSlot / importState on both ends restore the PLE conv ring and the n-gram
 //           predecessors: the continuation after a restore is bit-identical
 // Needs engine/qwen4exp.js (PR #346) and the model (bartowski Qwen3.8-Flash-Next-Q4_0 in models/q38flash, or
-// Q38F_DIR=<dir>). N layers (LAYERS, default 3) of weights on the GPU, ~1.5 GB each.
+// Q38F_DIR=<dir>). Each engine loads its own layers (~1.5 GB each): about 3N layers on the GPU in all (LAYERS: N,
+// default 3), plus the head twice.
 //   deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights tests/test_flash_room.js
 import fs from "node:fs";
 import path from "node:path";
@@ -34,15 +35,17 @@ const G = model.G, cfg = qwen4expConfig(G.meta);
 if (!(N >= 2 && N <= cfg.L)) throw new Error("LAYERS must be 2.." + cfg.L);
 const t0 = performance.now();
 const up = (e, name) => { if (name !== "token_embd.weight") gpuUploadEntry(device, e, false); };
-const weights = await qwen4expWeights(G, model.bytesOf, { lo: 0, hi: N, hasEmbed: true, hasHead: true, qsa: false }, undefined, up);
-device.queue.submit([device.createCommandEncoder().finish()]);
-await device.queue.onSubmittedWorkDone();
 const fds = model.paths.map((p) => fs.openSync(p, "r"));
 const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.readSync(fds[file], b, 0, len, off); return b; };
 const table = () => new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
-// the engines share the weights: only their state and scratch buffers are their own
-const mk = (lo, hi, hasEmbed, hasHead = false) => Qwen4ExpEngine.create({ device, meta: G.meta, hasEmbed, hasHead, layerRange: [lo, hi],
-  weights: { ...weights, layers: weights.layers.slice(lo, hi) }, ngram: cfg.ple.layers.some((l) => l >= lo && l < hi) ? table() : null });
+// each engine loads its own weights: the engine owns them (it stacks some matrices into one and frees the parts)
+const mk = async (lo, hi, hasEmbed, hasHead = false) => {
+  const weights = await qwen4expWeights(G, model.bytesOf, { lo, hi, hasEmbed, hasHead, qsa: false }, undefined, up);
+  device.queue.submit([device.createCommandEncoder().finish()]);
+  await device.queue.onSubmittedWorkDone();
+  return Qwen4ExpEngine.create({ device, meta: G.meta, hasEmbed, hasHead, layerRange: [lo, hi], weights,
+    ngram: cfg.ple.layers.some((l) => l >= lo && l < hi) ? table() : null });
+};
 const ref = await mk(0, N, true), refHead = await mk(0, N, true, true);
 const host = FlashRoomEngine.wrap(await mk(0, 1, true, true)), work = FlashRoomEngine.wrap(await mk(1, N, false));
 console.log(`qwen4exp room split: layers 0..${N - 1} + head loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s; host [0, 1) + head, worker [1, ${N}) with the n-gram layer`);
