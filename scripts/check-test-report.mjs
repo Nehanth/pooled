@@ -9,6 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 export const MAY_SKIP = [
   ["weight cache:", "needs GGUF weights on disk and a writable cache dir; CI has neither"],
   ["tests/run.sh selftest:", "needs --allow-run; CI runs tests/run.sh selftest as its own step instead"],
+  ["fixture: matches the real files in Q38FLASH_DIR", "opt-in: needs the Qwen3.8-Flash GGUF files (100 GB) in Q38FLASH_DIR; CI has none"],
 ];
 
 // -> { total, failed: [name], skipped: [name] } from a JUnit XML string
