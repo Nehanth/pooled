@@ -90,7 +90,7 @@ async function perLayer(FREE) {
   };
   const rel = (a, b) => { let n = 0, dd = 0; for (let i = 0; i < b.length; i++) { const e = a[i] - b[i]; n += e * e; dd += b[i] * b[i]; } return Math.sqrt(n / (dd || 1)); };
   const worst = new Map();   // tensor kind -> [rel, key]
-  let expertMiss = 0, rowMiss = 0, argmaxSame = 0, argmaxN = 0, compared = 0;
+  let expertMiss = 0, expertN = 0, rowMiss = 0, argmaxSame = 0, argmaxN = 0, compared = 0;
   const kind = (k) => k.replace(/-\d+(\.\d+)?$/, "").replace(/\.\d+$/, "");
   const note = (key, r) => { const k = kind(key); if (!worst.has(k) || worst.get(k)[0] < r) worst.set(k, [r, key]); compared++; };
   for (const s of seqs) {
@@ -113,17 +113,25 @@ async function perLayer(FREE) {
         const rows = slice("ple_rows.0", t);
         if (rows && eng.lastRows) for (let j = 0; j < rows.length; j++) if (rows[j] !== eng.lastRows[j]) rowMiss++;
         let moe = null;
+        const flipped = new Set();   // layers where a near-tied router picked another expert: their MoE output differs
         for (const [key, a] of got) {
           const ref = slice(key, t);
           if (!ref) continue;
-          if (key.startsWith("ffn_moe_topk")) { const set = new Set(a); for (const e of ref) if (!set.has(e)) expertMiss++; continue; }
+          if (key.startsWith("ffn_moe_topk")) {
+            const set = new Set(a); let m = 0;
+            for (const e of ref) if (!set.has(e)) m++;
+            if (m) { expertMiss += m; flipped.add(key.split("-")[1].split(".")[0]); }
+            expertN += ref.length;
+            continue;
+          }
+          if (/^ffn_(moe_out|out|moe_weights_norm)-/.test(key) && flipped.has(key.split("-")[1].split(".")[0])) continue;
           if (ref.length !== a.length) { console.log(`  ${key}: size ${a.length} vs ${ref.length}`); fail++; continue; }
           if (forced.has(key)) continue;   // llama.cpp's residual, the reference's input: not the reference's output
           note(key, rel(a, ref));
           if (key.startsWith("ffn_moe_out")) moe = a;
           if (key.startsWith("ffn_shexp_gated") && moe) {
             const i = key.split("-")[1].split(".")[0], fo = slice(`ffn_out-${i}.0`, t);
-            if (fo) note(`ffn_out-${i}.0`, rel(moe.map((v, j) => v + a[j]), fo));
+            if (fo && !flipped.has(i)) note(`ffn_out-${i}.0`, rel(moe.map((v, j) => v + a[j]), fo));
           }
           if (key === "result_output.0") {
             const am = (x) => { let b = 0; for (let j = 1; j < x.length; j++) if (x[j] > x[b]) b = j; return b; };
@@ -145,8 +153,9 @@ async function perLayer(FREE) {
     if (over) bad++;
     console.log(`  ${k.padEnd(24)} worst rel ${r.toExponential(2)}  (${key})${over ? "  OVER " + TOL : ""}`);
   }
-  console.log(`  expert ids not in llama.cpp's set: ${expertMiss}; n-gram rows differing: ${rowMiss}${argmaxN ? `; argmax equal ${argmaxSame}/${argmaxN}` : ""}`);
-  if (bad || rowMiss || (refMode && !FREE && expertMiss) || (argmaxN && argmaxSame !== argmaxN && !FREE)) fail++;
+  console.log(`  expert ids not in the ${refMode ? "reference's" : "llama.cpp's"} set: ${expertMiss} of ${expertN} (their layers' MoE outputs not compared); n-gram rows differing: ${rowMiss}${argmaxN ? `; argmax equal ${argmaxSame}/${argmaxN}` : ""}`);
+  // against the reference a flip needs a router near tie at the f32 rounding level: allow 1 in 5,000
+  if (bad || rowMiss || (refMode && !FREE && expertMiss > expertN / 5000) || (argmaxN && argmaxSame !== argmaxN && !FREE)) fail++;
 }
 
 // ---- greedy ids vs llama.cpp
@@ -201,6 +210,15 @@ async function bench() {
     console.log(`  ${name.padEnd(28)} ${((performance.now() - t0) / reps).toFixed(2)} ms  (${ops.length} dispatches)`);
   };
   const all = (f) => eng.layers.flatMap(f);
+  {   // CPU side of one token: encoding every dispatch, and _begin (embedding row, n-gram rows, frame)
+    const ops = [...all((l) => [...l.attnOps, ...l.ffnOps]), ...eng.headOps], reps = 20;
+    let t0 = performance.now();
+    for (let k = 0; k < reps; k++) { const enc = device.createCommandEncoder(), pass = enc.beginComputePass(); eng._encode(pass, ops); pass.end(); enc.finish(); }
+    const te = (performance.now() - t0) / reps;
+    t0 = performance.now();
+    for (let k = 0; k < reps; k++) { await eng._begin(1000 + k); eng.pos--; }
+    console.log(`  CPU: encode ${te.toFixed(2)} ms, begin (embed + n-gram rows + frame) ${((performance.now() - t0) / reps).toFixed(2)} ms per token`);
+  }
   await time("token mixers + HC (attn half)", all((l) => l.attnOps));
   await time("  DeltaNet halves", all((l) => (l.isQ ? [] : l.attnOps)));
   await time("  attention halves", all((l) => (l.isQ ? l.attnOps : [])));

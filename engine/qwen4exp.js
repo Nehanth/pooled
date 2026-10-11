@@ -51,7 +51,10 @@ export class Qwen4ExpEngine {
     const kinds = ["q4", "q8", "f32"];
     const P = this.P = {};
     await Promise.all([
-      ...kinds.map(async (k) => { P["gemv_" + k] = await pipe(W.gemvWGSL(k), "gemv_" + k); }),
+      // the GEMVs come in one variant per row length (lanes per row): every one the model's shapes need
+      ...kinds.flatMap((k) => [8, 16, 32, 64, 128, 256].flatMap((n) => (k === "f32" ? [1] : [1, 4]).map(async (R) => {
+        P[`gemv_${k}_${n}_${R}`] = await pipe(W.gemvWGSL(k, n, R), `gemv_${k}_${n}_${R}`);
+      }))),
       ...["q4", "q8"].map(async (k) => { P["gu_" + k] = await pipe(W.moeGuWGSL(k), "moe_gu_" + k); P["dn_" + k] = await pipe(W.moeDnWGSL(k), "moe_dn_" + k); }),
       ...Object.entries({ route: W.MOE_ROUTE_WGSL, hcNorm: W.HC_NORM_WGSL, hcMix: W.HC_MIX_WGSL, hcComb: W.HC_COMBINE_WGSL,
         dnConv: W.DN_CONV_WGSL, dnDelta: W.DN_DELTA_WGSL,
@@ -155,10 +158,10 @@ export class Qwen4ExpEngine {
     // f32 entries carry no shape: pass dIn (dOut is then their length / dIn)
     const gemv = (M, x, y, { dIn = M.shape?.[1], dOut = M.shape?.[0] ?? M.n / dIn, rowOff = 0, xOff = 0, yOff = 0, mode = 0, scale = 0, tap } = {}) => {
       if (!(dIn > 0 && dOut > 0 && Number.isInteger(dOut))) throw new Error(`qwen4exp: gemv shape ${dOut} x ${dIn}`);
-      const p = P["gemv_" + M.kind];
+      const lanes = W.gemvLanes(M.kind, dOut, dIn), R = W.gemvRows(M.kind, dOut), p = P[`gemv_${M.kind}_${lanes}_${R}`];
       const u = uni([dOut, dIn, rowOff, xOff / 4, yOff, mode, f(scale), 0]);
       const g = M.kind === "f32" ? bg(p, [M.buf, null, x, y, u]) : bg(p, [M.qs, M.sc, x, y, u]);
-      const nwg = Math.ceil(dOut / 8);
+      const nwg = Math.ceil(dOut / (256 / lanes * R));
       return { pipe: p, bg: g, wg: [Math.min(nwg, 32768), Math.ceil(nwg / 32768), 1], tap };
     };
     const ewg = (n) => [Math.ceil(n / 256), 1, 1];
@@ -297,7 +300,9 @@ export class Qwen4ExpEngine {
   }
 
   // Everything one token needs before its layers run: the residual (from the embedding), the n-gram rows, the frame.
-  async _begin(id) {
+  // The n-gram rows are read without waiting (rows: the pending upload): forwardToken runs the layers before the
+  // PLE layer while they land; debugToken awaits them here.
+  async _begin(id, { defer = false } = {}) {
     if (this.pos >= this.maxSeq) throw new Error(`qwen4exp: context full (${this.maxSeq})`);
     const q = this.device.queue, { cfg, B } = this;
     if (this.hasEmbed) {
@@ -305,25 +310,46 @@ export class Qwen4ExpEngine {
       for (let c = 0; c < cfg.hc; c++) R.set(e, c * cfg.dim);
       q.writeBuffer(B.R, 0, R);
     }
+    let rows = null;
     if (B.emb) {
-      const rows = this.lastRows = this.ngs.push([id]);
-      const emb = await this.ngram.rows(rows);
-      q.writeBuffer(B.emb, 0, emb);
+      const r = this.lastRows = this.ngs.push([id]);
+      rows = this.ngram.rows(r).then((emb) => q.writeBuffer(B.emb, 0, emb));
     } else this.ngs?.push([id]);
     const F = new Float32Array(W.FRAME_FLOATS), Fu = new Uint32Array(F.buffer);
     Fu[0] = this.pos; Fu[1] = this.pos + 1;
     let th = fr(this.pos);
     for (let i = 0; i < cfg.ropeDims / 2; i++) { F[4 + i * 4] = fr(Math.cos(th)); F[5 + i * 4] = fr(Math.sin(th)); th = fr(th * this._ropeTs); }
     q.writeBuffer(B.frame, 0, F);
+    if (!defer && rows) await rows;
+    return rows;
   }
 
-  _encode(pass, ops) { for (const o of ops) { pass.setPipeline(o.pipe); pass.setBindGroup(0, o.bg); pass.dispatchWorkgroups(...o.wg); } }
+  _encode(pass, ops) {
+    let last = null;
+    for (const o of ops) {
+      if (o.pipe !== last) { pass.setPipeline(o.pipe); last = o.pipe; }
+      pass.setBindGroup(0, o.bg);
+      pass.dispatchWorkgroups(o.wg[0], o.wg[1], o.wg[2]);
+    }
+  }
 
   // One decode step. -> { id (greedy, when the engine has the head), logits (wantLogits) }
+  // The layers go in a few submits: the GPU starts on the first while the rest are encoded, and the layers before
+  // the PLE layer run while its n-gram rows are read.
   async forwardToken(id, { wantLogits = false } = {}) {
-    await this._begin(id);
-    const enc = this.device.createCommandEncoder(), pass = enc.beginComputePass();
-    for (const l of this.layers) { this._encode(pass, l.attnOps); this._encode(pass, l.ffnOps); }
+    const rows = await this._begin(id, { defer: true }), dev = this.device;
+    const firstPle = this.cfg.ple ? this.layers.findIndex((l) => this.cfg.ple.layers.includes(l.i)) : -1;
+    const run = (ls) => {
+      const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+      for (const l of ls) { this._encode(pass, l.attnOps); this._encode(pass, l.ffnOps); }
+      pass.end();
+      dev.queue.submit([enc.finish()]);
+    };
+    let at = 0;
+    if (rows) { if (firstPle > 0) run(this.layers.slice(0, firstPle)); at = Math.max(firstPle, 0); await rows; }
+    for (const step = 12; at + step < this.layers.length; at += step) run(this.layers.slice(at, at + step));
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    for (const l of this.layers.slice(at)) { this._encode(pass, l.attnOps); this._encode(pass, l.ffnOps); }
     if (this.hasHead) this._encode(pass, this.headOps);
     pass.end();
     if (this.hasHead) {

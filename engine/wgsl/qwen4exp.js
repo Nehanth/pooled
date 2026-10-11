@@ -41,25 +41,47 @@ const LANE_REDUCE = (R = "fx_red") => `
     workgroupBarrier();
   }`;
 
-// GEMV y[yOff + r] = epilogue(W[rowOff + r, :] . x[xOff4*4 ..]), r < dOut. 8 rows per workgroup, 32 lanes per row.
+// GEMV y[yOff + r] = epilogue(W[rowOff + r, :] . x[xOff4*4 ..]), r < dOut. LANES threads per row (a power of two,
+// 8..256; gemvLanes picks it from the row length), 256 / LANES rows per workgroup.
 // mode 0: store; 1: silu(acc * scale) (the HC down projection: silu(x / hc)).
-// Workgroups: x = ceil(dOut / 8) up to 32768, then y.
-export function gemvWGSL(kind) {
+// Workgroups: x = ceil(dOut / rows per workgroup) up to 32768, then y.
+export function gemvLanes(kind, dOut, dIn) {
+  const units = dIn / 32;                                // 32-wide blocks (8 vec4 of an f32 row)
+  if (dOut <= 16) return 256;                            // a few long rows (the HC inject): spread each row
+  let l = 8;
+  while (l < 256 && l * 2 < units) l *= 2;               // about two blocks per lane
+  return l;
+}
+// Rows per lane group: quantized matrices with many rows take 4, so each lane loads its x block once for 4 rows
+// (x is read 8 times per weight byte otherwise).
+export const gemvRows = (kind, dOut) => (kind !== "f32" && dOut >= 2048 ? 4 : 1);
+export function gemvWGSL(kind, LANES = 32, R = 1) {
+  const RPW = 256 / LANES, RR = [...Array(R).keys()];
   const W = kind === "f32" ? `@group(0) @binding(0) var<storage, read> fx_w: array<vec4<f32>>;` : `
 @group(0) @binding(0) var<storage, read> fx_qs: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> fx_sc: array<u32>;`;
+  // one row's block against the x block held in xv0..xv7
+  const dotX = (blk) => kind === "q4" ? `{
+        let s = unpack2x16float(fx_sc[${blk} >> 1u])[${blk} & 1u]; let wv = fx_qs[${blk}];
+        d = s * (dot(q4lo(wv.x), xv0) + dot(q4lo(wv.y), xv1) + dot(q4lo(wv.z), xv2) + dot(q4lo(wv.w), xv3)
+               + dot(q4hi(wv.x), xv4) + dot(q4hi(wv.y), xv5) + dot(q4hi(wv.z), xv6) + dot(q4hi(wv.w), xv7));
+      }` : `{
+        let s = unpack2x16float(fx_sc[${blk} >> 1u])[${blk} & 1u]; let wa = fx_qs[${blk} * 2u]; let wb = fx_qs[${blk} * 2u + 1u];
+        d = s * (dot(i8x4(wa.x), xv0) + dot(i8x4(wa.y), xv1) + dot(i8x4(wa.z), xv2) + dot(i8x4(wa.w), xv3)
+               + dot(i8x4(wb.x), xv4) + dot(i8x4(wb.y), xv5) + dot(i8x4(wb.z), xv6) + dot(i8x4(wb.w), xv7));
+      }`;
   const body = kind === "f32" ? `
     let n4 = fx_P.dIn / 4u;
-    let ro = (fx_P.rowOff + r) * n4;
-    for (var i = lane; i < n4; i += 32u) { acc += dot(fx_w[ro + i], fx_x[fx_P.xOff4 + i]); }` : `
+    let ro = (fx_P.rowOff + r0) * n4;
+    for (var i = lane; i < n4; i += ${LANES}u) { acc0 += dot(fx_w[ro + i], fx_x[fx_P.xOff4 + i]); }` : `
     let nb = fx_P.dIn / 32u;
-    let rb = (fx_P.rowOff + r) * nb;
-    for (var b = lane; b < nb; b += 32u) {
-      let blk = rb + b;
+    let rb = (fx_P.rowOff + r0) * nb;
+    for (var b = lane; b < nb; b += ${LANES}u) {
       let xb4 = fx_P.xOff4 + b * 8u;
+      let xv0 = fx_x[xb4]; let xv1 = fx_x[xb4 + 1u]; let xv2 = fx_x[xb4 + 2u]; let xv3 = fx_x[xb4 + 3u];
+      let xv4 = fx_x[xb4 + 4u]; let xv5 = fx_x[xb4 + 5u]; let xv6 = fx_x[xb4 + 6u]; let xv7 = fx_x[xb4 + 7u];
       var d = 0.0;
-      ${blockDot(kind, "fx_qs", "fx_sc", "fx_x")}
-      acc += d;
+${RR.map((k) => `      if (r0 + ${k}u < fx_P.dOut) { let blk = rb + ${k}u * nb + b; ${dotX("blk")} acc${k} += d; }`).join("\n")}
     }`;
   return DQ + `
 struct GP { dOut: u32, dIn: u32, rowOff: u32, xOff4: u32, yOff: u32, mode: u32, scale: f32, pad: u32 };
@@ -67,20 +89,24 @@ ${W}
 @group(0) @binding(2) var<storage, read> fx_x: array<vec4<f32>>;
 @group(0) @binding(3) var<storage, read_write> fx_y: array<f32>;
 @group(0) @binding(4) var<uniform> fx_P: GP;
-var<workgroup> fx_red: array<f32, 256>;
+var<workgroup> fx_red: array<f32, ${256 * R}>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let lid = l.x; let lane = lid & 31u;
-  let r = (wg.y * 32768u + wg.x) * 8u + (lid >> 5u);
-  var acc = 0.0;
-  if (r < fx_P.dOut) {${body}
+  let lid = l.x; let lane = lid % ${LANES}u;
+  let r0 = ((wg.y * 32768u + wg.x) * ${RPW}u + lid / ${LANES}u) * ${R}u;
+  ${RR.map((k) => `var acc${k} = 0.0;`).join(" ")}
+  if (r0 < fx_P.dOut) {${body}
   }
-  fx_red[lid] = acc;
-  ${LANE_REDUCE()}
-  if (lane == 0u && r < fx_P.dOut) {
-    var v = fx_red[lid];
+  ${RR.map((k) => `fx_red[${k * 256}u + lid] = acc${k};`).join(" ")}
+  workgroupBarrier();
+  for (var s = ${LANES / 2}u; s > 0u; s >>= 1u) {
+    if (lane < s) { ${RR.map((k) => `fx_red[${k * 256}u + lid] += fx_red[${k * 256}u + lid + s];`).join(" ")} }
+    workgroupBarrier();
+  }
+  if (lane < ${R}u && r0 + lane < fx_P.dOut) {
+    var v = fx_red[lane * 256u + lid - lane];
     if (fx_P.mode == 1u) { v = silu(v * fx_P.scale); }
-    fx_y[fx_P.yOff + r] = v;
+    fx_y[fx_P.yOff + r0 + lane] = v;
   }
 }`;
 }
@@ -323,13 +349,15 @@ struct EP { nKH: u32, dS: u32, keyDim: u32, nVH: u32, eps: f32, p0: u32, p1: u32
 @group(0) @binding(7) var<storage, read_write> fx_y: array<f32>;
 @group(0) @binding(8) var<uniform> fx_P: EP;
 var<workgroup> fx_kq: array<f32, 256>;
-var<workgroup> fx_red: array<f32, 128>;
-@compute @workgroup_size(128)
+var<workgroup> fx_red: array<f32, 256>;
+// 256 threads: column j = t % 128, rows i of half t / 128 (the state is 128 x 128: dS = 128)
+@compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
-  let h = wg.x; let j = l.x; let dS = fx_P.dS;
+  let h = wg.x; let t = l.x; let dS = fx_P.dS;
+  let j = t & 127u; let i0 = (t >> 7u) * 64u;
   let kh = h % fx_P.nKH;
-  fx_kq[j] = fx_co[fx_P.keyDim + kh * dS + j];          // k
-  fx_kq[128u + j] = fx_co[kh * dS + j];               // q
+  if (t < 128u) { fx_kq[t] = fx_co[fx_P.keyDim + kh * dS + t]; }   // k
+  else { fx_kq[t] = fx_co[kh * dS + t - 128u]; }                  // q
   workgroupBarrier();
   let araw = fx_ba[fx_P.nVH + h] + fx_dta[h];
   var sp = araw;
@@ -339,27 +367,34 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   let v = fx_co[2u * fx_P.keyDim + h * dS + j];
   let base = h * dS * dS;
   var vh = 0.0;
-  for (var i = 0u; i < dS; i++) {
+  for (var i = i0; i < i0 + 64u; i++) {
     let s = fx_S[base + i * dS + j] * decay;
     fx_S[base + i * dS + j] = s;
     vh += s * fx_kq[i];
   }
-  vh = (v - vh) * b;
-  let scale = 1.0 / sqrt(f32(dS));
+  fx_red[t] = vh;
+  workgroupBarrier();
+  vh = (v - (fx_red[j] + fx_red[128u + j])) * b;
+  workgroupBarrier();
   var acc = 0.0;
-  for (var i = 0u; i < dS; i++) {
+  for (var i = i0; i < i0 + 64u; i++) {
     let s = fx_S[base + i * dS + j] + fx_kq[i] * vh;
     fx_S[base + i * dS + j] = s;
     acc += s * fx_kq[128u + i];
   }
-  let ov = acc * scale;
-  let oi = h * dS + j;
-  fx_o[oi] = ov;
-  fx_red[j] = ov * ov;
+  fx_red[t] = acc;
   workgroupBarrier();
-  for (var s = 64u; s > 0u; s >>= 1u) { if (j < s) { fx_red[j] += fx_red[j + s]; } workgroupBarrier(); }
+  let ov = (fx_red[j] + fx_red[128u + j]) * (1.0 / sqrt(f32(dS)));
+  workgroupBarrier();
+  if (t < 128u) { fx_red[t] = ov * ov; } else { fx_red[t] = 0.0; }
+  workgroupBarrier();
+  for (var s = 128u; s > 0u; s >>= 1u) { if (t < s) { fx_red[t] += fx_red[t + s]; } workgroupBarrier(); }
   let inv = 1.0 / sqrt(fx_red[0] / f32(dS) + fx_P.eps);
-  fx_y[oi] = (ov * inv) * fx_nw[j] * sigm(fx_z[oi]);
+  if (t < 128u) {
+    let oi = h * dS + j;
+    fx_o[oi] = ov;
+    fx_y[oi] = (ov * inv) * fx_nw[j] * sigm(fx_z[oi]);
+  }
 }`;
 
 // Per-token frame: the position and the RoPE cos/sin of each rotary pair at that position (computed on the CPU
