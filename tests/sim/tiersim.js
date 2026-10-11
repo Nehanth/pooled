@@ -11,13 +11,17 @@
 //   disk       everything else, read from the GGUF (room node: worker threads + pread; tab: OPFS sync handles).
 //
 // Optional router lookahead: at layer l's readback the top-M experts predicted for layer l + A are read in the
-// background into T1 (into the pool on a tab, which has no T1). Traces do not record the lookahead router, so the
-// predictor is modelled: each true expert is in the predicted set with probability `recall` (docs/research/
-// offload-2026-09.md measured 77-87% top-8 one layer ahead on the 35B), and the rest of the M are wrong experts.
+// background. A room node reads them into T1 (prefetchTo "t1": disk read + memcpy into a slot; the copy to VRAM is
+// paid at use). A tab has no T1 of its own (its page cache is the OS's), so it uploads them straight into the pool
+// (prefetchTo "pool": a page-cache or disk read + one upload). roomRun() picks the destination from the device
+// profile. Traces do not record the lookahead router, so the predictor is modelled: each true expert is in the
+// predicted set with probability `recall` (docs/research/offload-2026-09.md measured 77-87% top-8 one layer ahead on
+// the 35B), and the rest of the M are wrong experts drawn uniformly from the layer.
 //
 // Traces: tests/trace_moe.js writes <name>.sel.npy (uint8, or uint16 past 256 experts) [T, L, K], <name>.w.npy
 // (float32) and <name>.json. Steps before WARM (32) run but are not counted: the cache starts cold, and in the
-// engine a prefill would have filled it.
+// engine a prefill would have filled it. The traces' geometry (layers, experts, top-K) must match the model's:
+// report() checks it, and simulate() checks the layers and the array length.
 //
 //   node tests/sim/tiersim.js <traceDir> [--model q122|q38flash] [--json out.json]
 //   deno run --allow-read --allow-write tests/sim/tiersim.js <traceDir> ...
@@ -62,10 +66,22 @@ export async function loadTraces(dir) {
     let w = null, meta = {};
     try { w = parseNpy(await readBytes(`${dir}/${name}.w.npy`)).data; } catch { /* weights are optional */ }
     try { meta = JSON.parse(await readText(`${dir}/${name}.json`)); } catch { /* so is the json */ }
-    const [T, L, K] = s.shape;
-    out.push({ name, T, L, K, nExp: meta.experts || (s.data.BYTES_PER_ELEMENT === 1 ? 256 : 1 + Math.max(...s.data)), sel: s.data, w, meta });
+    out.push(traceOf(name, s, w, meta));
   }
   return out;
+}
+// one trace from its parsed .sel.npy ({ data, shape }), weights and .json, checked against each other
+export function traceOf(name, s, w = null, meta = {}) {
+  if (s.shape.length !== 3) throw new Error(`${name}.sel.npy: shape [${s.shape}], expected [T, L, K]`);
+  const [T, L, K] = s.shape;
+  // no json: the id range gives a lower bound on the expert count (a loop: spreading ~200k ids overflows the stack)
+  let maxId = 0;
+  for (let i = 0; i < s.data.length; i++) if (s.data[i] > maxId) maxId = s.data[i];
+  const nExp = meta.experts || (s.data.BYTES_PER_ELEMENT === 1 ? 256 : 1 + maxId);
+  if (maxId >= nExp) throw new Error(`${name}: expert id ${maxId} >= ${nExp} experts`);
+  if ((meta.layers && meta.layers !== L) || (meta.topK && meta.topK !== K)) throw new Error(`${name}: .json says ${meta.layers} layers top-${meta.topK}, .sel.npy is [${T}, ${L}, ${K}]`);
+  if (w && w.length !== s.data.length) throw new Error(`${name}: ${w.length} router weights for ${s.data.length} ids`);
+  return { name, T, L, K, nExp, sel: s.data, w, meta };
 }
 
 // small deterministic hash -> [0, 1) (no Math.random: every run of the report gives the same numbers)
@@ -108,13 +124,42 @@ export const MODELS = {
   q122: { name: "Qwen3.5-122B-A10B Q4_0", L: 48, nExp: 256, K: 8, dim: 3072,
     expert: (l) => { const m = 3072 * 1024; return l < 6 ? { file: 2 * q40(m) + q41(m), engine: 2 * q40(m) + q80(m) } : { file: 3 * q40(m), engine: 3 * q40(m) }; },
     resident: 3383488512 / 48, head: 810516480, layerFixedMs: 0, ngram: false },
-  // Qwen3.8-Flash-Next bartowski Q4_0 (roadmap 33 design note, section 4): dim 2560, expert width 640. Dense bytes
+  // Qwen3.8-Flash-Next bartowski Q4_0 (roadmap/33-qwen38-flash.md, section 4): dim 2560, expert width 640. Dense bytes
   // per token ~3.4 GB including the 0.68 GB head, so ~56.7 MB per layer; +0.05 ms per layer for the hyper-connection
   // mixers' extra dispatches (an assumption, not measured).
   q38flash: { name: "Qwen3.8-Flash-Next Q4_0", L: 48, nExp: 512, K: 10, dim: 2560,
     expert: (l) => { const m = 2560 * 640; return l < 6 ? { file: 2 * q40(m) + q41(m), engine: 2 * q40(m) + q80(m) } : { file: 3 * q40(m), engine: 3 * q40(m) }; },
     resident: (3.4e9 - 0.68e9) / 48, head: 0.68e9, layerFixedMs: 0.05, ngram: true },
 };
+// the model a set of traces was recorded on: --model, else the traces' .json (model name, layers / experts / top-K),
+// else the geometry alone. Throws unless every trace has the model's layers, experts and top-K: a 35B trace (40
+// layers) replayed as the 122B would read past each step's rows into the next step's, with no error.
+export function modelFor(traces, key = null) {
+  if (!key) {
+    const name = traces[0].meta?.model || "";
+    key = /flash/i.test(name) ? "q38flash" : /122b/i.test(name) ? "q122"
+      : Object.keys(MODELS).find((k) => MODELS[k].L === traces[0].L && MODELS[k].K === traces[0].K && MODELS[k].nExp === traces[0].nExp);
+    if (!key) throw new Error(`no model for ${traces[0].name}: "${name}", ${traces[0].L} layers, ${traces[0].nExp} experts, top-${traces[0].K} (models: ${Object.keys(MODELS).join(", ")})`);
+  }
+  const model = MODELS[key];
+  if (!model) throw new Error(`unknown model ${key} (models: ${Object.keys(MODELS).join(", ")})`);
+  for (const tr of traces) {
+    if (tr.L !== model.L || tr.K !== model.K || tr.nExp !== model.nExp) {
+      throw new Error(`trace ${tr.name} is ${tr.L} layers, ${tr.nExp} experts, top-${tr.K}; ${model.name} is ${model.L}, ${model.nExp}, top-${model.K}`);
+    }
+  }
+  return key;
+}
+// traces played back to back as one session (the caches carry over), to see how the tiers do on a longer run
+export function concatTraces(trs, name = trs.map((t) => t.name).join("+")) {
+  const { L, K, nExp } = trs[0];
+  if (trs.some((t) => t.L !== L || t.K !== K || t.nExp !== nExp)) throw new Error("concatTraces: traces of different shapes");
+  const T = trs.reduce((s, t) => s + t.T, 0), sel = new trs[0].sel.constructor(T * L * K);
+  const w = trs.every((t) => t.w) ? new Float32Array(T * L * K) : null;
+  let o = 0;
+  for (const t of trs) { sel.set(t.sel, o); if (w) w.set(t.w, o); o += t.T * L * K; }
+  return { name, T, L, K, nExp, sel, w, meta: { concat: trs.map((t) => t.name) } };
+}
 export const expertBytesLayers = (model, layers, kind = "engine") => layers.reduce((s, l) => s + model.expert(l)[kind], 0);
 // equal slots for every offloaded layer from a byte budget (engine/expert_store.js), at least K
 export const slotsFor = (model, layers, bytes) => Math.max(model.K, Math.floor(bytes / expertBytesLayers(model, layers)));
@@ -123,21 +168,26 @@ export const range = (lo, hi) => Array.from({ length: hi - lo + 1 }, (_, i) => l
 // ---------------------------------------------------------------- the simulation
 
 // cfg: layers (offloaded, in order), P (slots per layer), parked (Set of layers whose experts are all in RAM),
-// t1Bytes (global RAM LRU for the other layers), prefetch ({ ahead, top, recall } or null), expert(l) bytes.
+// t1Bytes (global RAM LRU for the other layers), prefetch ({ ahead, top, recall } or null), prefetchTo ("t1": a
+// room node reads predictions into T1; "pool": a tab uploads them into the VRAM pool, from its page cache when there,
+// else from disk, which also puts them in the page cache), expert(l) bytes.
 // t1Policy: "use" (an expert is recent in T1 when it was last read from T1 or disk: what a plain LRU, or the OS
 // page cache, does) or "evict" (also when the pool evicts it: T1 then keeps what just left VRAM, a victim cache;
 // a room node can do this, the page cache cannot).
 // -> per counted step and offloaded layer: VRAM hits, T1 hits, disk reads (and their file / engine bytes), T1
-// bytes copied, prefetched reads, plus totals.
-export function simulate(tr, { layers, P, parked = new Set(), t1Bytes = 0, t1Policy = "use", prefetch = null, expert, warm = WARM, seed = 1 }) {
+// bytes copied, prefetched reads (disk: file / engine bytes; into the pool from T1: engine bytes), plus totals.
+export function simulate(tr, { layers, P, parked = new Set(), t1Bytes = 0, t1Policy = "use", prefetch = null, prefetchTo = "t1", expert, warm = WARM, seed = 1 }) {
   const { T, L, K, nExp, sel } = tr, nl = layers.length, N = Math.max(0, T - warm);
   if (P < K) throw new Error(`simulate: ${P} slots per layer < K = ${K}`);
+  if (sel.length !== T * L * K) throw new Error(`simulate: ${tr.name} has ${sel.length} ids, not T * L * K = ${T * L * K}`);
+  if (layers.some((l) => !(l >= 0 && l < L))) throw new Error(`simulate: layers ${layers[0]}-${layers[nl - 1]} outside the trace's 0-${L - 1}`);
+  if (prefetchTo !== "t1" && prefetchTo !== "pool") throw new Error(`simulate: prefetchTo "${prefetchTo}"`);
   const pools = layers.map(() => new Map());   // per layer: expert -> true, in LRU order (first = least recent)
   const t1 = new Map();                         // global: l * nExp + e -> engine bytes, LRU order
   let t1Used = 0;
   const slot = (l) => layers.indexOf(l);
   const z = () => new Float64Array(N * nl);
-  const r = { N, nl, layers, hitV: z(), hitT1: z(), disk: z(), diskFile: z(), diskEng: z(), t1Eng: z(), pfN: z(), pfFile: z(), pfUsed: z(), pfWasted: 0 };
+  const r = { N, nl, layers, hitV: z(), hitT1: z(), disk: z(), diskFile: z(), diskEng: z(), t1Eng: z(), pfN: z(), pfFile: z(), pfEng: z(), pfT1Eng: z(), pfUsed: z(), pfWasted: 0 };
   const pend = new Set();                       // keys prefetched and not yet used
   const t1Put = (key, bytes) => {
     if (t1Bytes <= 0 || bytes > t1Bytes) return;
@@ -185,10 +235,20 @@ export function simulate(tr, { layers, P, parked = new Set(), t1Bytes = 0, t1Pol
           const ebt = expert(lt);
           for (const e of pred) {
             const key = lt * nExp + e;
-            if (pools[lj].has(e) || t1.has(key)) continue;
-            if (counted) { r.pfN[x]++; r.pfFile[x] += ebt.file; }
-            if (t1Bytes > 0) { t1Put(key, ebt.engine); pend.add(key); }
-            else { poolPut(pools[lj], lt, e); if (!truth.has(e) && counted) r.pfWasted++; }   // a tab: straight into the pool
+            if (pools[lj].has(e)) {   // already in VRAM; a tab marks it recent so the other predictions don't evict it
+              if (prefetchTo === "pool") { pools[lj].delete(e); pools[lj].set(e, true); }
+              continue;
+            }
+            if (prefetchTo === "t1") {   // room node: disk -> T1 slot; the copy to VRAM is paid when it is used
+              if (t1.has(key)) continue;
+              if (counted) { r.pfN[x]++; r.pfFile[x] += ebt.file; r.pfEng[x] += ebt.engine; }
+              t1Put(key, ebt.engine); pend.add(key);
+            } else {                      // tab: page cache or disk -> upload into the pool, once
+              if (t1.has(key)) { const by = t1.get(key); t1.delete(key); t1.set(key, by); if (counted) r.pfT1Eng[x] += ebt.engine; }
+              else { if (counted) { r.pfN[x]++; r.pfFile[x] += ebt.file; r.pfEng[x] += ebt.engine; } t1Put(key, ebt.engine); }
+              poolPut(pools[lj], lt, e);
+              if (!truth.has(e) && counted) r.pfWasted++;
+            }
           }
         }
       }
@@ -204,7 +264,7 @@ export function simulate(tr, { layers, P, parked = new Set(), t1Bytes = 0, t1Pol
 // ---------------------------------------------------------------- the cost model
 // Three cases per number: lo (fast), mid, hi (slow). Sources: q122/feasibility.md (RTX 5070 PC, measured),
 // docs/research/offload-2026-09.md (OPFS and Chrome upload, measured on the GB10), docs/bench-log.md 2026-10-02
-// (offload phases 2a/2b), roadmap 33 (Flash bytes). Anything not measured on that device says so.
+// (offload phases 2a/2b), roadmap/33-qwen38-flash.md (Flash bytes). Anything not measured on that device says so.
 const C3 = (lo, mid, hi) => ({ lo, mid, hi });
 // NVMe random reads (SK hynix P41, 4 MB reads, measured): GB/s at queue depth 1 / 4 / 8 / 16 / 32
 const P41 = [[1, 1.8], [4, 5.2], [8, 6.2], [16, 6.2], [32, 6.3]];
@@ -267,11 +327,14 @@ export function deviceMs(model, prof, { resident = 0, sim = null, host = false, 
         diskBusy += rd;
         dk = rd + sim.diskEng[x] / 1e9 * (prof.t1 === "ram" ? 1 / prof.stage[c] + 1 / prof.copy[c] : 1 / prof.upload[c]) * 1e3;
       }
-      // a prefetch issued here must land within `ahead` layers of compute; the rest of its read is a stall. On a
-      // tab the prefetched expert is also uploaded into the pool (CPU and queue time, counted with the read).
-      if (sim.pfN[x]) {
-        const rd = sim.pfFile[x] / (prof.diskPeak(c) * 1e9) * 1e3 + (prof.t1 === "ram" ? 0 : sim.pfFile[x] / 1e9 / prof.upload[c] * 1e3);
-        diskBusy += rd;
+      // a prefetch issued here must land within `ahead` layers of compute; the rest of it is a stall. Room node:
+      // the read and the memcpy into a T1 slot (the copy to VRAM is a T1 hit at use). Tab: the read (or a warm
+      // page-cache read) and one upload into the pool (CPU and queue time, counted with the read).
+      if (sim.pfN[x] || sim.pfT1Eng[x]) {
+        const rdDisk = sim.pfFile[x] / (prof.diskPeak(c) * 1e9) * 1e3;
+        const rd = rdDisk + (prof.t1 === "ram" ? sim.pfEng[x] / 1e9 / prof.stage[c]
+          : (sim.pfEng[x] + sim.pfT1Eng[x]) / 1e9 / prof.upload[c] + sim.pfT1Eng[x] / 1e9 / prof.warm[c]) * 1e3;
+        diskBusy += rd;   // one background lane, as before: reads plus their staging or upload
         stall += Math.max(0, rd - (prefetch?.ahead || 1) * (lm + prof.cut[c]));
       }
       crit += lm + prof.cut[c] + t1 + dk;
@@ -290,7 +353,7 @@ export function deviceMs(model, prof, { resident = 0, sim = null, host = false, 
 // -> { ms: C3, tps: C3, sim (the offloading device's), parts (mid) }
 export function roomRun(tr, model, devices, { net = NET } = {}) {
   const ms = {}, out = { sims: [] };
-  const sims = devices.map((d) => d.offload ? simulate(tr, { expert: model.expert, ...d.offload }) : null);
+  const sims = devices.map((d) => d.offload ? simulate(tr, { expert: model.expert, prefetchTo: d.prof.t1 === "ram" ? "t1" : "pool", ...d.offload }) : null);
   for (const c of ["lo", "mid", "hi"]) {
     let tot = (devices.length > 1 ? net[c] : 0);
     const parts = [];
@@ -322,13 +385,21 @@ const LOOKAHEAD = (m) => [{ ahead: 1, top: m.K, recall: 0.82 }, { ahead: 2, top:
 const pfLabel = (pf) => pf.recall === 1 ? `ORACLE lookahead A=${pf.ahead} (exact set, an upper bound)` : `lookahead A=${pf.ahead} top-${pf.top} (recall ${pf.recall})`;
 
 // the rooms of the report, for a model. Parameters that are choices, not measurements, are in the row label.
+// Mac alone: the 36 GB Mac lends a tab ~25 GB, which leaves ~19 GB (17.7 GiB) for the expert cache after the dense
+// weights, embeddings, work buffers and prefill region (roadmap/33-qwen38-flash.md, section 4). 11 and 18 GiB fit
+// it; 25 GiB is a bigger Mac's, a sensitivity row only.
+// --ram: `pooled join --ram` says GB, but the planner and the store read it as GiB (room/pledge.js offloadFor:
+// ramGB * 2^30), and the default is the total less 16 from os.totalmem() / 2^30. So the sim's budgets are GiB, and
+// the 64 GB PC (59.6 GiB) defaults to --ram 43.
+export const MAC_TAB_FITS_GIB = 18;
 export function rooms(model) {
   const L = model.L, flash = model === MODELS.q38flash;
   const R = [];
   // Mac alone in a tab: every layer offloaded, the expert cache in unified memory, misses from OPFS
   for (const gb of [11, 18, 25]) {
     const layers = range(0, L - 1), P = slotsFor(model, layers, gb * GiB);
-    R.push({ group: "Mac alone (tab)", label: `${gb} GiB expert cache, ${P} slots/layer`, devices: [{ prof: PROFILES.macTab, host: true, ngram: true, offload: { layers, P } }] });
+    const fits = gb <= MAC_TAB_FITS_GIB ? "" : ", needs a Mac with more than 36 GB";
+    R.push({ group: "Mac alone (tab)", label: `${gb} GiB expert cache, ${P} slots/layer${fits}`, devices: [{ prof: PROFILES.macTab, host: true, ngram: true, offload: { layers, P } }] });
     if (gb === 18) {
       R.push({ group: "Mac alone (tab)", label: `18 GiB + 3 GiB OS page cache under OPFS`, devices: [{ prof: PROFILES.macTab, host: true, ngram: true, offload: { layers, P, t1Bytes: 3 * GiB } }] });
       for (const pf of LOOKAHEAD(model)) R.push({ group: "Mac alone (tab)", label: `18 GiB + ${pfLabel(pf)}`, devices: [{ prof: PROFILES.macTab, host: true, ngram: true, offload: { layers, P, prefetch: pf } }] });
@@ -346,7 +417,7 @@ export function rooms(model) {
       devices: [mac, { prof: PROFILES.pcCli, offload: { layers: pcLayers, P: pcP, parked, t1Bytes: t1GiB * GiB, t1Policy, prefetch } }] });
   };
   cli("RAM only", 0, 0);
-  if (flash) { cli("--ram ~44", 3, 2); cli("--ram ~44", 3, 2, LOOKAHEAD(model)[0]); }
+  if (flash) { cli("--ram 43 (64 GB PC default)", 3, 2); cli("--ram 43 (64 GB PC default)", 3, 2, LOOKAHEAD(model)[0]); }
   const mD = flash ? 20 : 19;
   cli("--ram 24", mD, 4);
   cli("--ram 24", mD, 4, null, "evict");
@@ -393,7 +464,7 @@ export function ramSplit(traces, model, ramGiB = 24) {
   const flash = model === MODELS.q38flash, macN = flash ? 14 : 15, pcLayers = range(macN, model.L - 1);
   const P = flash ? slotsFor(model, pcLayers, 6 * GiB) : 26, n = pcLayers.length;
   const layerGiB = (l) => model.expert(l).engine * model.nExp / GiB;
-  const out = [`PC --ram ${ramGiB} GiB over layers ${macN}-${model.L - 1} (${n} layers, ${layerGiB(model.L - 1).toFixed(2)} GiB of experts each), ${P} slots per layer\n`,
+  const out = [`PC --ram ${ramGiB} (GiB, as the planner reads it) over layers ${macN}-${model.L - 1} (${n} layers, ${layerGiB(model.L - 1).toFixed(2)} GiB of experts each), ${P} slots per layer\n`,
     `| disk layers | parked | T1 GiB | T1 / parked hits | disk | disk MB/token | tok/s mid [range] |`, `|---|---|---|---|---|---|---|`];
   for (let mD = 0; mD <= n; mD += 2) {
     const disk = pcLayers.slice(n - mD), parked = new Set(pcLayers.slice(0, n - mD));
@@ -436,7 +507,7 @@ function byRoom(rows) {
 export async function report(dir, { modelKey = null, json = null, log = console.log } = {}) {
   const traces = await loadTraces(dir);
   if (!traces.length) throw new Error(`no traces (<name>.sel.npy) in ${dir}`);
-  const key = modelKey || (traces[0].nExp === 512 ? "q38flash" : "q122");
+  const key = modelFor(traces, modelKey);
   const model = MODELS[key], all = { model: key, rows: {} };
   log(`# tiersim: ${traces.map((t) => `${t.name} (${t.T} steps)`).join(", ")}; ${model.name}; first ${WARM} steps not counted\n`);
 
@@ -457,7 +528,8 @@ export async function report(dir, { modelKey = null, json = null, log = console.
     const R = rooms(model).filter((r) => r.label.startsWith("RAM only"));
     const rr = byRoom(runRooms(traces, model, R))[0];
     calib = 17 / rr.tps.mid;
-    log(`## Calibration\n\nThe RAM-only Mac + PC room (122B, Mac 0-14, PC 15-47 parked, 26 slots) is modelled at ${f1(rr.tps.mid)} tok/s mid [${f1(rr.tps.hi)}-${f1(rr.tps.lo)}]; measured ~17 (PR #323 notes; #320 Spark + PC 12-19). Calibration factor ${calib.toFixed(2)}: "calibrated" columns multiply the mid by it.\n`);
+    log(`## Calibration (RAM path only)\n\nThe RAM-only Mac + PC room (122B, Mac 0-14, PC 15-47 parked, 26 slots) is modelled at ${f1(rr.tps.mid)} tok/s mid [${f1(rr.tps.hi)}-${f1(rr.tps.lo)}]; measured ~17 (PR #323 notes; #320 Spark + PC 12-19). Calibration factor ${calib.toFixed(2)}: "calibrated" columns multiply the mid by it.\n`);
+    log(`That room has no disk tier: it tests only Mac compute, PC compute, cuts and parked-to-VRAM copies. The disk (NVMe at 1 MiB chunks, OPFS), page-cache, tab-upload and stage constants are not tested by it, and they dominate every disk-bound row (Mac alone, the PC tab, the --ram disk layers). Those rows are uncalibrated, and the factor says nothing about them.\n`);
   }
 
   const R = rooms(model);
@@ -473,6 +545,14 @@ export async function report(dir, { modelKey = null, json = null, log = console.
   log("");
   log(ramSplit(traces, model, 24));
   log("");
+  // long sessions: the traces are 300-600 steps. Played back to back (the caches carry over, the topic changes) they
+  // are one longer, more spread-out session; check that the parked-vs-T1 ranking survives.
+  if (traces.length > 1) {
+    const long = concatTraces(traces);
+    log(`### Long-session check: ${long.name} played back to back (${long.T} steps, one session)\n`);
+    log(ramSplit([long], model, 24));
+    log("");
+  }
 
   // EXTRAPOLATION to Flash from 256-expert traces
   if (key === "q122") {
@@ -495,7 +575,13 @@ export async function report(dir, { modelKey = null, json = null, log = console.
       log(`### Flash rooms, q = ${q} (EXTRAPOLATION; mean over the 4 mapped traces)\n`);
       log(meanTable(byRoom(fr), calib));
       log("");
-      if (q === 0.25) { log(`### Flash T1 sizing, q = 0.25 (EXTRAPOLATION)\n`); log(t1Sweep(flashT[q], fl)); log(""); log(ramSplit(flashT[q], fl, 24)); log(""); log(ramSplit(flashT[q], fl, 40)); log(""); }
+      if (q === 0.25) {
+        log(`### Flash T1 sizing, q = 0.25 (EXTRAPOLATION)\n`); log(t1Sweep(flashT[q], fl)); log(""); log(ramSplit(flashT[q], fl, 24)); log(""); log(ramSplit(flashT[q], fl, 40)); log("");
+        if (traces.length > 1) {
+          const long = splitFlash(concatTraces(traces), { q });
+          log(`### Flash long-session check, q = 0.25: the ${traces.length} traces back to back (${long.T} steps)\n`); log(ramSplit([long], fl, 24)); log(""); log(ramSplit([long], fl, 40)); log("");
+        }
+      }
     }
   }
   if (json) {

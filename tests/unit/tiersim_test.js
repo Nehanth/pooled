@@ -1,8 +1,9 @@
 // CPU check of the 3-tier cache simulator (tests/sim/tiersim.js): the .npy reader, the VRAM pool against the real
 // ExpertStore plan() on random traces (same hits, so the simulator's pool is the engine's), T1 bookkeeping on a hand
-// worked case, the 512-expert mapping, and an oracle prefetch.
+// worked case, the 512-expert mapping, an oracle prefetch, where a prefetch lands (T1 on a room node, the pool on a
+// tab), and the checks that keep a trace from being replayed as the wrong model.
 // No GPU.   deno test --allow-read tests/unit/tiersim_test.js
-import { parseNpy, simulate, splitFlash, hash01, roomRun, MODELS, PROFILES, range } from "../sim/tiersim.js";
+import { parseNpy, simulate, splitFlash, hash01, roomRun, MODELS, PROFILES, range, traceOf, modelFor, concatTraces } from "../sim/tiersim.js";
 import { ExpertStore } from "../../engine/expert_store.js";
 
 globalThis.GPUBufferUsage ??= { MAP_READ: 1, MAP_WRITE: 2, COPY_SRC: 4, COPY_DST: 8, INDEX: 16, VERTEX: 32, UNIFORM: 64, STORAGE: 128, INDIRECT: 256, QUERY_RESOLVE: 512 };
@@ -115,4 +116,47 @@ Deno.test("prefetch: an oracle one layer ahead serves every disk layer but the f
   // a room's ms are its devices' plus the net; no offload, no cuts
   const m = MODELS.q122, one = roomRun(tr, m, [{ prof: PROFILES.pcCli, resident: 6 }]), two = roomRun(tr, m, [{ prof: PROFILES.pcCli, resident: 3 }, { prof: PROFILES.pcCli, resident: 3 }]);
   assert(Math.abs(two.ms.mid - one.ms.mid - 6) < 1e-9, "two devices: + the LAN's 6 ms");
+});
+
+Deno.test("traces: no .json and 192k uint16 ids (a Flash-sized trace) give nExp from the ids; bad geometry throws", () => {
+  const T = 400, L = 48, K = 10, sel = new Uint16Array(T * L * K).map((_, i) => i % 509);
+  const tr = traceOf("flash", { data: sel, shape: [T, L, K] });
+  assert(tr.nExp === 509 && tr.L === 48 && tr.K === 10, "nExp from the largest id " + tr.nExp);
+  let threw = false;
+  try { traceOf("bad", { data: sel, shape: [T, L, K] }, null, { layers: 40 }); } catch { threw = true; }
+  assert(threw, ".json layers != .npy layers throws");
+  // a 35B trace (40 layers, 256 experts, top-8) is not the 122B: picked by geometry it has no model, forced it throws
+  const t35 = { name: "35b", T: 4, L: 40, K: 8, nExp: 256, sel: new Uint8Array(4 * 40 * 8), meta: { model: "Qwen3.5 35B A3B" } };
+  for (const key of [null, "q122"]) { threw = false; try { modelFor([t35], key); } catch { threw = true; } assert(threw, `35B trace as ${key}`); }
+  const t122 = { ...t35, name: "122b", L: 48, sel: new Uint8Array(4 * 48 * 8), meta: { model: "Qwen3.5 122B A10B" } };
+  assert(modelFor([t122]) === "q122", "122B by name");
+  threw = false; try { modelFor([t122, t35], "q122"); } catch { threw = true; } assert(threw, "every trace is checked");
+  // simulate() refuses layers past the trace's
+  threw = false; try { simulate(t35, { layers: range(0, 47), P: 8, expert: unit }); } catch { threw = true; } assert(threw, "layers past L");
+});
+
+Deno.test("prefetch lands in T1 on a room node and in the pool on a tab, page cache or not", () => {
+  const tr = randTrace({ T: 80, L: 6, K: 4, nExp: 64, stay: 0.2, seed: 5 }), layers = range(0, 5), big = { file: 1e6, engine: 1e6 };
+  const pf = { ahead: 1, top: 4, recall: 1 };
+  const node = simulate(tr, { layers, P: 4, t1Bytes: 1e12, prefetch: pf, prefetchTo: "t1", expert: () => big, warm: 0 });
+  const tab = simulate(tr, { layers, P: 4, t1Bytes: 1e12, prefetch: pf, prefetchTo: "pool", expert: () => big, warm: 0 });
+  // oracle: on the tab every layer past the first finds its experts in the pool; on the node, in T1
+  const sum = (a, from) => a.reduce((s, v, x) => s + (x % 6 >= from ? v : 0), 0);
+  assert(sum(tab.hitT1, 1) === 0 && sum(tab.disk, 1) === 0 && sum(tab.hitV, 1) === (tr.T) * 5 * 4, "tab: pool hits " + sum(tab.hitV, 1));
+  assert(sum(node.disk, 1) === 0 && sum(node.hitT1, 1) > 0, "node: T1 hits");
+  // a tab with a page cache uploads a prediction once, from the page cache when it is there
+  assert(tab.pfT1Eng.reduce((a, b) => a + b, 0) > 0, "page-cache sourced prefetches");
+  // and roomRun picks the destination from the profile
+  const m = { ...MODELS.q122, L: 6, nExp: 64, K: 4, expert: () => big };
+  const r = roomRun(tr, m, [{ prof: PROFILES.pcTab, offload: { layers, P: 4, t1Bytes: 1e12, prefetch: pf } }]);
+  const want = simulate(tr, { layers, P: 4, t1Bytes: 1e12, prefetch: pf, prefetchTo: "pool", expert: () => big }).tot.hitV;
+  const rn = roomRun(tr, m, [{ prof: PROFILES.pcCli, offload: { layers, P: 4, t1Bytes: 1e12, prefetch: pf } }]);
+  assert(r.sim.hitV === want && rn.sim.hitV < want, `tab room: into the pool (${r.sim.hitV} = ${want}); room node: T1 (${rn.sim.hitV})`);
+});
+
+Deno.test("concatTraces: back to back, shapes checked", () => {
+  const a = randTrace({ T: 10, seed: 1 }), b = randTrace({ T: 7, seed: 2 });
+  const c = concatTraces([a, b]);
+  assert(c.T === 17 && c.sel.length === 17 * a.L * a.K && c.sel[10 * a.L * a.K] === b.sel[0], "concat");
+  let threw = false; try { concatTraces([a, randTrace({ T: 5, K: 3 })]); } catch { threw = true; } assert(threw, "shape mismatch");
 });
