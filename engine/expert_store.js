@@ -46,13 +46,16 @@ export class ExpertStore {
   // past it throws, so the load fails instead of the device coming online over what it lends. expectBytes: what the
   // whole store will park (room/plan.js offloadPlan ramBytes), so the last buffer is sized to what is left instead of
   // a whole parkBytes.
-  // disk: { layers, reader } (reader: engine/expert_disk.js expertDisk()): of the offloaded layers, those whose experts
-  // stay in the file
+  // disk: { layers, reader, ring } (reader: engine/expert_disk.js expertDisk(), or engine/expert_opfs.js in a tab): of
+  // the offloaded layers, those whose experts stay in the file. ring (optional, engine/stage_ring.js): decode cuts and
+  // prefill region fills copy the experts they read through mapped upload slots and copyBufferToBuffer instead of
+  // queue.writeBuffer
   constructor(device, { layers = [], vramBytes = 8 * 2 ** 30, slots = 0, parkBytes = 2 ** 30, ramBytes = Infinity, expectBytes = 0, disk = null } = {}) {
     this.device = device;
     this.layerSet = new Set(layers);
     this.diskSet = new Set((disk?.layers || []).filter((l) => this.layerSet.has(l)));
     this.reader = disk?.reader || null;
+    this.ring = disk?.ring || null;
     if (this.diskSet.size && !this.reader) throw new Error("ExpertStore: disk layers need a reader (engine/expert_disk.js)");
     this._staged = null;
     this.vramBytes = vramBytes; this.slotsOpt = slots;
@@ -308,7 +311,14 @@ export class ExpertStore {
     const S = this.L.get(layer), K = KS - 1, uniq = [];
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) { const e = sel[c * KS + k]; if (e < this.nExp && !uniq.includes(e)) uniq.push(e); }
     const ids = uniq.length > this.P ? uniq : uniq.filter((e) => S.slotOf[e] < 0);
-    this._staged = { layer, bytes: await this._readMany(layer, ids) };
+    // the cut before this one was submitted, its experts' copies with it: its ring slots map again while we read
+    this.ring?.recycle();
+    const bytes = await this._readMany(layer, ids);
+    if (this.ring) {
+      for (const b of bytes.values()) b.gpu = this.ring.put(b);
+      this.ring.seal();
+    }
+    this._staged = { layer, bytes };
     return ids.length;
   }
   // an expert into dst slot / region id `at`: a copy from its parked buffer, or (disk layer) a writeBuffer of the bytes
@@ -318,7 +328,12 @@ export class ExpertStore {
     const b = this._staged?.layer === layer ? this._staged.bytes.get(e) : null;
     if (!b) throw new Error(`expert offload: disk layer ${layer} expert ${e} was not prepared`);
     let n = 0;
-    ExpertStore.SLICES.forEach(([p, s], j) => { const per = S.parts[p].sl[s].per; this.device.queue.writeBuffer(dst[j], at * per, b[j]); n += per; });
+    ExpertStore.SLICES.forEach(([p, s], j) => {
+      const per = S.parts[p].sl[s].per;
+      if (enc && b.gpu) enc.copyBufferToBuffer(b.gpu.buf, b.gpu.offs[j], dst[j], at * per, per);   // staged in the ring
+      else this.device.queue.writeBuffer(dst[j], at * per, b[j]);
+      n += per;
+    });
     return n;
   }
   // The whole disk layer into the region (a prefill frame). Only after the caller has submitted everything that uses
@@ -330,9 +345,13 @@ export class ExpertStore {
     const S = this.L.get(layer), q = this.device.queue;
     R.layer = -1;
     let n = 0;
+    const runIds = (e0) => Array.from({ length: Math.min(run, this.nExp - e0) }, (_, i) => e0 + i);
+    // the next run is read while this one is written (two runs in memory at most; diskWaitMs counts the overlap too)
+    let next = this._readMany(layer, runIds(0));
     for (let e0 = 0; e0 < this.nExp; e0 += run) {
-      const ids = Array.from({ length: Math.min(run, this.nExp - e0) }, (_, i) => e0 + i);
-      const got = await this._readMany(layer, ids);
+      const ids = runIds(e0), got = await next;
+      if (e0 + run < this.nExp) { next = this._readMany(layer, runIds(e0 + run)); next.catch(() => {}); }
+      if (this.ring) { n += await this._regionRing(S, ids, got); continue; }
       ExpertStore.SLICES.forEach(([p, s], j) => {
         const per = S.parts[p].sl[s].per, buf = new Uint8Array(per * ids.length);
         ids.forEach((e, i) => buf.set(got.get(e)[j], i * per));
@@ -348,10 +367,43 @@ export class ExpertStore {
   async loadExpertsAsync(layer, sel, nCols, KS) {
     if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
     const ids = this._frameIds(sel, nCols, KS);
-    this._staged = { layer, bytes: await this._readMany(layer, ids) };
+    const got = await this._readMany(layer, ids);
+    if (this.ring) {
+      this.stats.regionBytes += await this._regionRing(this.L.get(layer), ids, got);
+      this.region.layer = -1; this.stats.regionCuts++;
+      return ids.length;
+    }
+    this._staged = { layer, bytes: got };
     this._toRegion(null, layer, ids);
     this._staged = null;
     return ids.length;
+  }
+  // Experts read for a prefill frame into the region at their ids, through the staging ring: copies in encoders of
+  // their own, submitted here, so they land in queue order after what the caller submitted and before its next
+  // encoder. The ring holds a few dozen experts, so a whole layer streams through it: when it is full, what is in it
+  // is submitted and the GPU hands slots back as it finishes copying them. -> bytes put
+  async _regionRing(S, ids, got) {
+    const R = this.region, q = this.device.queue, ring = this.ring;
+    let staged = [], n = 0;
+    const flush = () => {   // unmap what was put, then copy it (a slot is unmapped before any command uses it)
+      if (!staged.length) return;
+      ring.seal();
+      const enc = this.device.createCommandEncoder();
+      for (const [e, g] of staged) ExpertStore.SLICES.forEach(([p, s], j) => { const per = S.parts[p].sl[s].per; enc.copyBufferToBuffer(g.buf, g.offs[j], R.bufs[j], e * per, per); });
+      q.submit([enc.finish()]);
+      staged = [];
+      ring.recycle();
+    };
+    for (const e of ids) {
+      const b = got.get(e);
+      let g = ring.put(b);
+      if (!g) { flush(); if (await ring.waitFree()) g = ring.put(b); }
+      if (g) staged.push([e, g]);
+      else ExpertStore.SLICES.forEach(([p, s], j) => q.writeBuffer(R.bufs[j], e * S.parts[p].sl[s].per, b[j]));   // a ring that lost its slots (device lost)
+      n += S.perExp;
+    }
+    flush();
+    return n;
   }
   // drop every cached expert (tests: a cold cache)
   clear() { for (const l of this.layers || []) { const S = this.L.get(l); S.slotOf.fill(-1); S.expOf.fill(-1); S.used.fill(0); } }
@@ -359,6 +411,7 @@ export class ExpertStore {
     const s = this.stats, h = s.lookups ? (100 * s.hits / s.lookups).toFixed(1) : "-";
     return `expert offload: ${this.layers.length} layers, ${this.P} slots each (${(this.poolBytes / 2 ** 30).toFixed(2)} GiB) + region ${(this.regionBytes / 2 ** 30).toFixed(2)} GiB, parked ${(this.parkedBytes / 2 ** 30).toFixed(2)} GiB in ${(this.bufBytes / 2 ** 30).toFixed(2)} GiB of buffers; `
       + `${s.cuts} cuts, hits ${h}% (${s.hits}/${s.lookups}), ${(s.bytes / 2 ** 20).toFixed(0)} MiB copied to the pools, ${s.regionCuts} region cuts (${(s.regionBytes / 2 ** 20).toFixed(0)} MiB), ${s.layerLoads} whole-layer loads (${(s.layerBytes / 2 ** 30).toFixed(1)} GiB)`
-      + (this.diskSet.size ? `; ${this.diskSet.size} disk layers: ${s.diskReads} expert reads, ${(s.diskBytes / 2 ** 20).toFixed(0)} MiB from the file, ${(s.diskWaitMs / 1000).toFixed(2)} s waiting` : "");
+      + (this.diskSet.size ? `; ${this.diskSet.size} disk layers: ${s.diskReads} expert reads, ${(s.diskBytes / 2 ** 20).toFixed(0)} MiB from the file, ${(s.diskWaitMs / 1000).toFixed(2)} s waiting`
+        + (this.ring ? `, ${this.ring.stats.puts} through the staging ring (${this.ring.stats.full} found it full)` : "") : "");
   }
 }

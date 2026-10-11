@@ -2384,3 +2384,46 @@ GB/s, with the event loop busy converting the whole time: p99 182 ms per expert)
 fs.promises with UV_THREADPOOL_SIZE=16 (4.2-4.35 against 5.4-5.6 GB/s); a room node that only needs raw bytes can
 raise libuv's pool instead. conv per expert, 16 workers: Q4_0 layers p50 4.3 ms (p99 7.1-7.5), requantized layers
 p50 17.7-19.7 ms (p99 35-40).
+
+## 2026-10-11: the disk tier in a browser tab, 35B MoE from OPFS (branch feat/tab-disk-tier, on PR 1's feat/ssd-offload-disk-tier, roadmap 32 step 8), the Spark (GB10)
+
+`node tests/bench/tab_disk.mjs` (tests/bench/tab_disk.html): Qwen3.6-35B-A3B Q4_0 in headless Chrome (Playwright's
+Chromium, `--enable-unsafe-webgpu`, Vulkan), every one of the 40 layers' routed experts in the tab's OPFS
+(`engine/expert_opfs.js`: one file per layer, one 4 KiB-aligned 1.77 MB record per expert, already in the engine's
+layout), read by 4 workers with read-only shared sync handles into the ExpertStore pools through a 64-slot mapped
+staging ring (`engine/stage_ring.js`). Persistent profile on the internal NVMe; the profile's files are dropped from the
+page cache before each disk run (cold). Other agents were using the GPU, CPU and disk during these runs: the
+tok/s below moved by up to ~30% between identical runs. Decode: 64 greedy tokens after each of two chat prompts.
+
+- **Bit-exact.** The fingerprint (300-token batched prefill + 13 greedy steps, tests/test_q38_bits.js's plain part,
+  the room's engine preset) is `864fb862 / 4904e2db` for the disk tier with 16 and with 128 cached experts per layer
+  and for the resident model, same tokens.
+- **Ingest** (GGUF over HTTP ranges from tests/bench/serve.mjs -> convert -> a worker's sync handle): 17.5 GiB in 109 s
+  (0.17 GB/s), resumable at 256 MiB checkpoints. `persist()` false in a headless profile; quota 2.4 TB.
+
+| run | cache | hits | expert reads / token | OPFS wait / token | decode tok/s |
+|---|---|---|---|---|---|
+| resident | - | - | - | - | 58.3-60.2 |
+| parked (today's offload, all experts in mapped RAM) | 16 / layer | 51-57% | 0 | 0 | 8.5-8.6 |
+| parked | 128 / layer | 89-94% | 0 | 0 | 8.1 |
+| disk, first version (one worker per miss, writeBuffer) | 16 / layer | 51-57% | 139-158 | 154 / 130 ms | 2.18 / 2.46 |
+| disk, + ring | 16 / layer | 51-57% | 139-158 | 133 / 127 ms | 2.77 / 2.79 |
+| disk, + ring + striped lone misses | 16 / layer | 51-57% | 139-158 | 94-217 ms | 1.88-3.19 |
+| disk, first version + ring | 128 / layer (8.75 GiB) | 89-94% | 19-34 | 102 / 77 ms | 3.75 / 4.44 |
+| disk, + striped lone misses (ring 32 / 64 / off) | 128 / layer | 89-94% | 19-34 | 31-59 ms | 4.15-6.05 (ring off 4.50 / 5.77) |
+
+- **The ceiling is the cut, not the disk.** Every offloaded layer reads its selection back to the CPU once per token
+  (engine `_cutResolve`). In Chrome on the GB10 that costs ~2.9 ms per cut (parked: 8.5 tok/s with 40 offloaded
+  layers whatever the hit rate, vs 0.4 ms per cut in Dawn on the 5070), so 40 offloaded layers cap a tab at ~8.5 tok/s
+  before any read. A tab should offload as few layers as its memory allows (room/plan.js already picks the fewest).
+- **A lone miss is latency-bound.** At 94% hits a cut has ~0.5 misses: one 1.77 MB read at queue depth 1 is ~2-3 ms
+  cold. Striping a cut's records over the idle workers (`stripeBytes`, 256 KiB minimum stripe) cut the OPFS wait from
+  77-102 to 31-59 ms per token (+27-36% tok/s).
+- **The ring matters for prefill, little for decode.** The mapped ring plus reading the next run of a layer while the
+  current one is copied took the 300-token prefill (80 whole-layer region loads, 35 GiB, + 16 GiB of frames) from
+  130 s to 37-42 s. In decode the ring and `writeBuffer` are within noise at 128 slots (4.76 / 5.82 vs 4.50 / 5.77);
+  at 16 slots the ring gave +13-27% before striping.
+- Prefill on disk layers re-reads every expert of every layer per wide pass (roadmap/32 item 9, layer-major prefill).
+
+Not measured here: the Mac (runbook in tests/bench/tab_disk.mjs), cache sizes near the Mac default (~19.8 GiB), a model
+whose experts do not fit memory (the 122B, Flash), and a warm page cache.
