@@ -41,6 +41,9 @@
 //                  a Start naming itself (leaving out the bigger device), its own ai-ready-all and a token: the
 //                  newcomer follows none of it; then the room's pick presses Start and runs the model.
 //   restart        the pick's start fails (a worker reports it couldn't load): the pick can press Start again.
+//   refforge       a member presses Start (relayed by the creator); another member sends the creator a refusal
+//                  for it, claiming to be the creator: the creator forwards it under the sender's real name, the
+//                  requester keeps waiting, and it comes online with the room's pick.
 //   loaddrop-gone  the same, and it stays away: past the rejoin grace (15 s here) the host re-deals by
 //                  itself without it (it used to sit "waiting for it to come back" for good: the grace ran
 //                  out while its own load was in progress).
@@ -56,7 +59,7 @@ import { loadPlaywright, chromiumPath, GPU_ARGS, serveRepo } from "./engine_synt
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf("--" + k); return i >= 0 ? argv[i + 1] : d; };
-const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,fresh,restart,loaddrop-back,loaddrop-gone")).split(","));
+const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,fresh,restart,refforge,loaddrop-back,loaddrop-gone")).split(","));
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const PORT = +arg("port", 8191), SIG = PORT + 1;
 const MODEL_KEY = "qwen3.8-27b";
@@ -430,6 +433,22 @@ async function restart() {
   check("restart: the pick presses Start again and the room comes online", up, JSON.stringify({ big: (await view(big)).status, w: (await view(w)).status }));
 }
 
+async function refforge() {
+  const desk = await device("desk"), big = await device("big"), w = await device("w"), mal = await device("mal");
+  await openRoom([[desk, "desk", 8], [big, "big", 24], [w, "w", 12], [mal, "mal", 4]]);
+  const [deskId, bigId, wId] = await Promise.all([desk, big, w].map((p) => p.evaluate(() => window.__myId())));
+  await startModel(w, null);
+  await mal.waitForFunction((b) => window.__dealer() === b, bigId, { timeout: 30000 }).catch(() => {});
+  await mal.evaluate(([d, rq]) => window.__send(d, { t: "ai-start-refused", rq, by: "desk (the room's creator)", why: "you are not allowed to start models" }), [deskId, wId]);
+  await w.waitForTimeout(1500);
+  const st = (await view(w)).status;
+  check("refforge: another member's refusal doesn't cancel the requester's Start", !/didn't start/.test(st), st);
+  const log = await roomLog(w);
+  check("refforge: it is named by its real sender, not the name it claims", !/desk \(the room's creator\)/.test(log + st), log.slice(-300));
+  const up = await online(big, 300000) && await online(w, 60000);
+  check("refforge: the requester comes online with the room's pick", up, JSON.stringify(await view(w)));
+}
+
 async function joinTab(p, name, gb, code, q = "") {
   await p.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG}&maxnew=24${q}`); await wired(p);
   await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
@@ -483,7 +502,7 @@ async function loaddrop(label, { hostGB, workerGB, back }) {
 let code = 1;
 try {
   for (const [name, fn] of [["leftout", () => leftout("leftout", [12, 8, 8])], ["leftout-guest", () => leftout("leftout-guest", [8, 12, 8])],
-    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart], ["fresh", fresh], ["restart", restart],
+    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart], ["fresh", fresh], ["restart", restart], ["refforge", refforge],
     ["loaddrop-back", () => loaddrop("loaddrop-back", { hostGB: 24, workerGB: 12, back: true })],
     ["loaddrop-gone", () => loaddrop("loaddrop-gone", { hostGB: 24, workerGB: 12, back: false })]]) {
     if (!ONLY.has(name)) continue;

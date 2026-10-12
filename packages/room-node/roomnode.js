@@ -424,6 +424,13 @@ export class RoomNode extends EventEmitter {
     if (e?.hold && !PASS_HELD.has(obj?.t)) { if (e.hold.out.length < HELD_MAX) e.hold.out.push(obj); return; }
     try { e?.conn.send(obj); } catch {}
   }
+  // a host this node follows that shows no sign of dealing within START_PENDING_MS is dropped (room/authz.js)
+  followTimeout(id, what) {
+    const ai = this.ai;
+    clearTimeout(ai.followTimer);
+    ai.followTimer = setTimeout(() => { if (!ai.dealerActive && ai.dealer === id) { this.log(`${what}: its host didn't start dealing`); this.clearDealer(); } }, START_PENDING_MS);
+    ai.followTimer.unref?.();
+  }
   // a start this node dealt failed: free for the next Start (room/authz.js)
   clearDealer() { const ai = this.ai; ai.dealer = null; ai.dealerActive = false; ai.startAt = null; clearTimeout(ai.followTimer); }
   broadcast(obj, filter = () => true) {
@@ -624,6 +631,8 @@ export class RoomNode extends EventEmitter {
       case "roster":
         if (from !== PREFIX + this.code) return;
         this.members = d.members;
+        // the host this node followed left the room: free for the next Start
+        if (Array.isArray(d.members) && this.ai.dealer && this.ai.dealer !== this.peer.id && !d.members.some((m) => m?.id === this.ai.dealer)) this.clearDealer();
         if (Array.isArray(d.members)) { this.rosterOrder = joinOrder(d.members); for (const m of d.members) if (m?.id && !this.seenAt.has(m.id)) this.seenAt.set(m.id, performance.now()); }
         for (const m of d.members || []) {
           const c = this.conns.get(m.id); if (c) { c.meta = m.meta || {}; c.name = m.name; }
@@ -673,14 +682,14 @@ export class RoomNode extends EventEmitter {
         }
         ai.dealer = d.boss; ai.dealerActive = false; ai.startAt = performance.now();
         // a host that never starts dealing doesn't hold this node: give up after START_PENDING_MS
-        clearTimeout(ai.followTimer);
-        if (d.boss !== this.peer.id) { ai.followTimer = setTimeout(() => { if (!ai.dealerActive && ai.dealer === d.boss) { this.log(`${d.by || "a device"}'s Start: its host didn't start dealing`); this.clearDealer(); } }, START_PENDING_MS); ai.followTimer.unref?.(); }
+        if (d.boss !== this.peer.id) this.followTimeout(d.boss, `${d.by || "a device"}'s Start`);
         if (d.boss === this.peer.id) { if (!this.hosting()) { this.modelHost = true; ai.role = "host"; } this.start(d.model).catch((err) => this.log("start failed: " + err.message)); }
         else ai.hostId = d.boss;
         return;
       case "ai-modelhost":   // the room's creator names the host it checked (a Start it saw): take it until it deals
         if (this.isHost || from !== PREFIX + this.code || typeof d.id !== "string" || this.dealerHere()) return;
-        ai.hostId = d.id; ai.dealer = d.id; ai.dealerActive = true;   // follow it: busy for a Start naming another device
+        // follow it (busy for a Start naming another device) until it deals, or for START_PENDING_MS
+        ai.hostId = d.id; ai.dealer = d.id; ai.dealerActive = false; ai.startAt = performance.now(); this.followTimeout(d.id, "the host the creator named");
         return;
       // --- worker
       case "ai-load": return this.workerLoad(from, d);

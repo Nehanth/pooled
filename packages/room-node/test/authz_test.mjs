@@ -198,3 +198,56 @@ test("creator: join numbers are given once and kept when a device relinks", () =
   assert.equal(h.roster.get("peer-a").seq, a);
   assert.ok(h.roster.get("peer-b").seq > a);
 });
+
+test("final N1: a host the creator names that never deals is dropped after START_PENDING_MS", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { n, sent } = device();
+  await n.aiOnData(C, { t: "ai-modelhost", id: "peer-mac" });
+  assert.equal(n.ai.dealer, "peer-mac"); assert.equal(n.ai.dealerActive, false);
+  t.mock.timers.tick(60001);
+  assert.equal(n.ai.dealer, null, "dropped");
+  // the Mac re-pledged down to 2 GB: mallory is the pick now, and its Start and layers are taken
+  for (const id of ALL) n.seenAt.set(id, performance.now() - 100000);
+  roster(n); n.members.find((m) => m.id === "peer-mac").meta = { webgpu: true, contribGB: 2, ua: "Mac" };
+  await n.aiOnData(C, relayed("peer-mallory", ALL, "host"));
+  assert.equal(n.ai.dealer, "peer-mallory");
+  await n.aiOnData("peer-mallory", load("peer-mallory"));
+  assert.ok(took(sent));
+});
+
+test("final N2: the host the creator names is taken (the creator checked it on a Start it saw)", async () => {
+  const { n } = device();
+  await n.aiOnData(C, { t: "ai-modelhost", id: "peer-mallory" });
+  await n.aiOnData("peer-mallory", { t: "ai-ready-all", model: "qwen3-1.7b" });
+  assert.equal(n.ai.online, true);
+  assert.equal(n.ai.dealerActive, true);
+});
+
+test("final N3: a Start naming the host that deals is a replay: nothing changes", async () => {
+  const { n, sent } = device();
+  await n.aiOnData(C, relayed("peer-mac", ALL, "host"));
+  await n.aiOnData("peer-mac", { t: "ai-hostprog", all: {} });
+  const k = sent.length, at = n.ai.startAt;
+  await n.aiOnData(C, { ...relayed("peer-mac", ALL), rq: "peer-x" });
+  assert.equal(sent.length, k); assert.equal(n.ai.startAt, at); assert.equal(n.ai.dealer, "peer-mac");
+});
+
+test("final N4: the followed host leaves the roster: the node is free; it comes back smaller: the new pick's Start is followed", async () => {
+  const { n } = device();
+  await n.aiOnData(C, relayed("peer-mac", ALL, "host"));
+  await n.aiOnData("peer-mac", { t: "ai-hostprog", all: {} });
+  n.onData(C, { t: "roster", members: [{ id: C, name: "host", meta: META[C], seq: 0 }, { id: "peer-mallory", name: "mallory", meta: META["peer-mallory"], seq: 1 }, { id: "peer-pc", name: "pc", meta: n.meta, seq: 3 }] });
+  assert.equal(n.ai.dealer, null); assert.equal(n.ai.dealerActive, false);
+  n.onData(C, { t: "roster", members: [{ id: C, name: "host", meta: META[C], seq: 0 }, { id: "peer-mallory", name: "mallory", meta: META["peer-mallory"], seq: 1 },
+    { id: "peer-mac", name: "mac", meta: { ...META["peer-mac"], contribGB: 2 }, seq: 2 }, { id: "peer-pc", name: "pc", meta: n.meta, seq: 3 }] });
+  for (const id of ALL) n.seenAt.set(id, performance.now() - 100000);
+  await n.aiOnData(C, relayed("peer-mallory", ALL, "host"));
+  assert.equal(n.ai.dealer, "peer-mallory");
+});
+
+test("final N5: layers claiming another device as their host are refused", async () => {
+  const { n, sent } = device();
+  await n.aiOnData("peer-mallory", load(C));
+  assert.ok(refused(sent));
+  assert.match(sent.at(-1).message, /deals as itself/);
+});

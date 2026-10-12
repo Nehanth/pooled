@@ -44,7 +44,7 @@ import { PERSONAS, specials, fitContext, templateProfile } from "./room/conversa
 import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS,
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
-import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder } from "./room/authz.js";
+import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, START_PENDING_MS } from "./room/authz.js";
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
@@ -998,6 +998,19 @@ async function pathOf(id) {
 
 // a link is gone (closed, or dropped as silent): on the host the device left; workers wait for the roster
 // (e.dead: it was dropped for silence, "stopped responding")
+// the host this device followed left the room (the creator's roster dropped it): free for the next Start. A device
+// that only asked (a guest, no layers) goes back to the picker instead of a stale online screen; a creator that
+// left ends the room as before (hostGone)
+function followedHostLeft() {
+  const was = ai.dealer;
+  ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null; clearTimeout(ai.startWait); ai.startWait = null;
+  if (was === PREFIX + roomCode || ai.role === "host" || ai.engine || ai.loadingShard) return;
+  if (ai.hostId === was) ai.hostId = null;
+  aiLoading(false);
+  $("ai-panel").classList.remove("online");
+  $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
+  aiStatus("the model's host left the room: press Start to start it again");
+}
 function peerGone(id, e) {
   conns.delete(id);
   hbForget(liveness, id);
@@ -1006,6 +1019,7 @@ function peerGone(id, e) {
   for (const [k, v] of linksDown) if (k.endsWith("|" + id) || k.startsWith(id + "|") || (e?.name && v.name === e.name)) linksDown.delete(k);
   if (isHost) {
     dropCard(id); members.delete(id); roster.delete(id); broadcastRoster();
+    if (ai.dealer === id) followedHostLeft();   // the member it followed as the model host left
     const verb = e?.dead ? "stopped responding" : "left";
     log("room", `${e?.meta?.api ? "API client " : ""}${e?.name || id} ${verb}`);
     apiPeerGone(id);
@@ -1235,6 +1249,7 @@ function onData(from, d) {
         if (ce && from === PREFIX + roomCode && !isHost && m.name) ce.name = m.name;
       }
       for (const id of [...members.keys()]) if (!seen.has(id)) { members.delete(id); dropCard(id); }
+      if (ai.dealer && ai.dealer !== peer.id && !seen.has(ai.dealer)) followedHostLeft();
       // links that waited to see whether the roster lists their device as one from before the proofs
       if (from === PREFIX + roomCode) for (const [, c] of conns) if (c.hold?.waitOn) { const w = c.hold.waitOn; c.hold.waitOn = null; meshIn(c, w); }
       // this device runs the model but not the room: a device it has no link to can't ask it yet
@@ -3114,7 +3129,7 @@ function aiStartAnywhere() {
   ai.hostId = boss;   // its ai-layers and ai-ready-all are the ones this device listens to (FROM_HOST)
   // nobody follows it (their view differs, or another Start is in progress): give the button back. Any sign of
   // the host dealing (ai-layers, ai-hostprog, ai-ready-all) stops this
-  followWait(45000);
+  followWait(START_PENDING_MS);
   $("ai-start").disabled = true; $("ai-model").disabled = true;
   aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`);
   $("ldg-sub").textContent = `${conns.get(boss)?.name || "the biggest device"} is dealing the layers`;
@@ -3132,7 +3147,8 @@ function followWait(ms) {
 function startRefused(why) {
   clearTimeout(ai.startWait); ai.startWait = null;
   if (ai.loadingShard || ai.engine || ai.role === "worker" || ai.dealerActive || $("ai-panel").classList.contains("online")) return;
-  ai.dealer = null; ai.dealerFresh = false; ai.startAt = null; ai.hostId = null;
+  // (the host it asked for stays its named host: if that one deals after all, this device still takes part)
+  ai.dealer = null; ai.dealerFresh = false; ai.startAt = null;
   aiLoading(false);
   $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
   aiStatus("the model didn't start: " + why);
@@ -4261,11 +4277,11 @@ async function aiOnData(from, d) {
       }
       if (isHost) {
         const to = [...conns.keys()].filter((id) => id !== from && !conns.get(id)?.meta?.api);
-        ai.relay = { rq: from, to: new Set(to) };
+        ai.relay = { rq: from, boss: d.boss, to: new Set(to) };
         for (const id of to) sendTo(id, { ...d, rq: from });
       }
       ai.dealer = d.boss; ai.dealerFresh = true; ai.dealerActive = false; ai.startAt = performance.now();
-      if (d.boss !== peer.id) followWait(60000);
+      if (d.boss !== peer.id) followWait(START_PENDING_MS);
       setModelValue(d.model);   // every screen shows the model that was actually started
       // the device dealing the layers runs the room: listen to it, even before this device has a link to
       // it (a model host that is not the room's creator links every device before it deals)
@@ -4277,16 +4293,25 @@ async function aiOnData(from, d) {
       break;
     case "ai-start-refused": {   // a device didn't follow a Start (room/authz.js)
       // the creator: an answer to a Start it relayed goes to whoever pressed it
-      if (isHost && d.rq && ai.relay?.rq === d.rq && ai.relay.to.has(from) && conns.has(d.rq)) { sendTo(d.rq, { t: "ai-start-refused", by: d.by, why: d.why }); break; }
-      // a Start this device waits on: only the creator answers (its own check, or one it forwards)
-      if (ai.startWait && from === PREFIX + roomCode) startRefused(`${String(d.by || "a device").slice(0, 40)}: ${String(d.why || "refused").slice(0, 120)}`);
+      // (named by the link it came on, never by its own text; boss: 1 when the device that would run the model refused)
+      if (isHost && d.rq && ai.relay?.rq === d.rq && ai.relay.to.has(from) && conns.has(d.rq)) {
+        sendTo(d.rq, { t: "ai-start-refused", fwd: 1, boss: from === ai.relay.boss ? 1 : 0, by: conns.get(from)?.name || "a device", why: String(d.why || "").slice(0, 120) });
+        break;
+      }
+      // a Start this device waits on: only the creator answers. It gives up when the creator's own check refused it
+      // or the device that would run it did; another device's refusal is a note (the timer still runs)
+      if (ai.startWait && from === PREFIX + roomCode) {
+        const why = `${String(d.by || "a device").slice(0, 40)}: ${String(d.why || "refused").slice(0, 120)}`;
+        if (!d.fwd || d.boss) startRefused(why); else log("room", `${why} (it doesn't follow this Start)`);
+      }
       break;
     }
     case "ai-modelhost":   // the room's creator: the model runs on another device, which links to this one
       if (isHost || from !== PREFIX + roomCode || ai.role === "host" || ai.role === "worker" || typeof d.id !== "string") break;
       ai.hostId = d.id;
-      // the creator checked it on a Start it saw: follow it (busy for a Start naming another device)
-      if (!dealerHere()) { ai.dealer = d.id; ai.dealerActive = true; }
+      // the creator checked it on a Start it saw: follow it (busy for a Start naming another device) until it shows it
+      // deals, or for START_PENDING_MS
+      if (!dealerHere()) { ai.dealer = d.id; ai.dealerActive = false; ai.startAt = performance.now(); followWait(START_PENDING_MS); }
       break;
     case "ai-next":
       // relink: the device after this one came back under the same id; the old link to it is dead
