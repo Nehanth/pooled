@@ -5,7 +5,7 @@
 // Disk layers (the disk tier): the same pools and region, filled by writeBuffer from a reader, must hold the same bytes
 // as the parked path for the same selections.
 // No GPU.   deno test --no-check tests/unit/expert_store_test.js
-import { ExpertStore } from "../../engine/expert_store.js";
+import { ExpertStore, notParked } from "../../engine/expert_store.js";
 import { GGML_Q4_0, GGML_Q8_0 } from "../../engine/gguf.js";
 
 globalThis.GPUBufferUsage ??= { MAP_READ: 1, MAP_WRITE: 2, COPY_SRC: 4, COPY_DST: 8, INDEX: 16, VERTEX: 32, UNIFORM: 64, STORAGE: 128, INDIRECT: 256, QUERY_RESOLVE: 512 };
@@ -156,6 +156,40 @@ Deno.test("build: the budget sets the slots; under one token's experts it refuse
   for (const l of [0, 1]) ["gate", "up", "down"].forEach((p, i) => st2.park(l, p, entry(l, i, 16, 32, 64), 16));
   st2.build({ K: 8 });
   assert(st2.P === 10, `slots ${st2.P}`);
+});
+
+Deno.test("build without a region (one-token engines, Flash): its bytes go to the pools; a batch over the pool refuses", () => {
+  const per = 3 * (32 * 64 / 2 + 32 * 64 / 16), region = 16 * per;
+  const st = new ExpertStore(fakeDevice(), { layers: [0, 1], vramBytes: region + 2 * 10 * per + 100 });
+  for (const l of [0, 1]) ["gate", "up", "down"].forEach((p, i) => st.park(l, p, entry(l, i, 16, 32, 64), 16));
+  st.build({ K: 4, region: false });
+  assert(st.region === null && st.regionBytes === 0, "no region");
+  assert(st.P === 16, `the region's bytes become slots (capped at nExp): ${st.P}`);
+  const r = st.plan(fakeEncoder(), 0, sel1([1, 2, 3, 4]), 1, 5);
+  assert(r.pool && r.remap.length === 5, "one token through the pool");
+  const st2 = new ExpertStore(fakeDevice(), { layers: [0], slots: 4 });
+  ["gate", "up", "down"].forEach((p, i) => st2.park(0, p, entry(0, i, 16, 32, 64), 16));
+  st2.build({ K: 4, region: false });
+  let threw = false;
+  try { st2.plan(fakeEncoder(), 0, new Uint32Array([1, 2, 3, 4, 0, 5, 6, 7, 8, 0]), 2, 5); } catch (e) { threw = /no region/.test(e.message); }
+  assert(threw, "8 experts over 4 slots and no region: a clear error");
+  threw = false;
+  try { st2.loadLayer(fakeEncoder(), 0); } catch (e) { threw = /without a region/.test(e.message); }
+  assert(threw, "loadLayer refuses");
+});
+
+Deno.test("notParked: a batched engine binding a parked entry gets a readable error, not a missing buffer", () => {
+  const st = new ExpertStore(fakeDevice(), { layers: [7], slots: 4 });
+  const parked = st.park(7, "gate", entry(7, 0, 16, 32, 64), 16), resident = entry(7, 1, 16, 32, 64);
+  assert(notParked(resident, "experts gate") === resident, "a resident entry passes");
+  let msg = "";
+  try { notParked(parked, "experts gate"); } catch (e) { msg = e.message; }
+  assert(/layer 7's gate experts are offloaded/.test(msg) && /batched prefill \/ verify/.test(msg), msg || "no error");
+  // a store built with its region (expertRegion: true) gives a batch engine what it needs per offloaded layer
+  for (const [i, p] of [[1, "up"], [2, "down"]]) st.park(7, p, entry(7, i, 16, 32, 64), 16);
+  st.build({ K: 4 });
+  const enc = fakeEncoder();
+  assert(st.loadLayer(enc, 7) > 0 && st.regionEntry(7, "gate").qs, "loadLayer + regionEntry with the region");
 });
 
 Deno.test("park: a slice that doesn't fit what is left of a parked buffer fills it and goes on in the next, at an expert boundary", () => {

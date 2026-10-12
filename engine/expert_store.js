@@ -10,7 +10,7 @@
 //           quant and f16 scale arrays the kernels read), then unmapped for good.
 //   pool    per offloaded layer, a VRAM slot pool of P experts (six buffers: gate qs / scales, up qs / scales, down
 //           qs / scales, slot s at s * slice bytes), filled on demand and evicted least recently used.
-//   region  one transient whole-layer region (the six arrays of the largest offloaded layer, all 256 experts) shared
+//   region  one transient whole-layer region (the six arrays of the largest offloaded layer, all of its experts) shared
 //           by every offloaded layer: prefill frames copy a layer's whole expert set into it and run the existing
 //           expert-grouped kernels on it, and a batched pass whose experts do not fit the pool copies them there.
 //
@@ -46,6 +46,18 @@ import { ExpertT1 } from "./expert_t1.js";
 const MAP_PARK = () => GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC;
 const POOL_USAGE = () => GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 export const OFFLOAD_PARTS = ["gate", "up", "down"];
+
+// Engines that read a weight entry's GPU buffers directly (the batched passes, engine/qwen4exp_batch.js) call this
+// first: a parked entry has no buffers of its own, only the store's pools and region, so they must route the layer
+// through the store or refuse it, never bind it.
+export function notParked(e, what = "weight") {
+  if (e?.offload) {
+    throw new Error(`${what}: layer ${e.layer}'s ${e.part} experts are offloaded to the expert store (engine/expert_store.js); `
+      + "this engine binds expert weights directly and does not route offloaded layers yet (batched prefill / verify "
+      + "with expert offload is unsupported): run those layers resident, or decode them one token at a time");
+  }
+  return e;
+}
 
 export class ExpertStore {
   // layers: absolute layer indices whose routed experts are offloaded. vramBytes: the GPU budget for the slot pools
@@ -173,22 +185,24 @@ export class ExpertStore {
   // the six [part, slice] pairs of a layer, in pool / region buffer order
   static SLICES = [["gate", 0], ["gate", 1], ["up", 0], ["up", 1], ["down", 0], ["down", 1]];
   _per(S) { return ExpertStore.SLICES.map(([p, s]) => S.parts[p].sl[s].per); }
-  // Allocate the pools and the region. K: experts per token (the pool must hold one token's).
-  build({ K }) {
+  // Allocate the pools and the region. K: experts per token (the pool must hold one token's). region: false for an
+  // engine with no batched passes (engine/qwen4exp.js, one token at a time: a cut never has more than K experts), so
+  // the whole-layer region (1.4-1.8 GB for Qwen3.8-Flash-Next's 512 experts) goes to the pools instead.
+  build({ K, region = true }) {
     if (this.built) return this;
     this.seal();
     const dev = this.device, layers = [...this.L.keys()].sort((a, b) => a - b);
     for (const l of layers) for (const p of OFFLOAD_PARTS) if (!this.L.get(l).parts[p]) throw new Error(`ExpertStore: layer ${l} has no parked ${p} experts`);
     const nExp = this.L.get(layers[0]).parts.gate.nExp;
     // region: the largest layer's whole expert arrays, slice by slice
-    const regionSz = ExpertStore.SLICES.map((_, j) => Math.max(...layers.map((l) => this._per(this.L.get(l))[j])) * nExp);
+    const regionSz = ExpertStore.SLICES.map((_, j) => (region ? Math.max(...layers.map((l) => this._per(this.L.get(l))[j])) * nExp : 0));
     const regionBytes = regionSz.reduce((a, b) => a + b, 0);
     const perExp = layers.reduce((a, l) => a + this._per(this.L.get(l)).reduce((x, y) => x + y, 0), 0);
     let P = this.slotsOpt > 0 ? this.slotsOpt : Math.floor((this.vramBytes - regionBytes) / perExp);
     P = Math.min(nExp, P);
     if (!(P >= K)) throw new Error(`ExpertStore: ${(this.vramBytes / 2 ** 30).toFixed(2)} GiB holds ${P} experts per offloaded layer after the ${(regionBytes / 2 ** 30).toFixed(2)} GiB prefill region; one token needs ${K}`);
     dev.pushErrorScope("out-of-memory");
-    this.region = { bufs: regionSz.map((n) => dev.createBuffer({ size: n, usage: POOL_USAGE() })), layer: -1 };
+    this.region = region ? { bufs: regionSz.map((n) => dev.createBuffer({ size: n, usage: POOL_USAGE() })), layer: -1 } : null;
     for (const l of layers) {
       const S = this.L.get(l), per = this._per(S);
       S.pool = per.map((n) => dev.createBuffer({ size: n * P, usage: POOL_USAGE() }));
@@ -230,6 +244,7 @@ export class ExpertStore {
   // the region already holds it (encode order is execution order: one queue).
   loadLayer(enc, layer) {
     const R = this.region;
+    if (!R) throw new Error("ExpertStore: loadLayer on a store built without a region");
     if (R.layer === layer) return 0;
     if (this.isDisk(layer)) throw new Error(`expert offload: disk layer ${layer} must be loaded into the region with loadLayerAsync, after a submit`);
     const S = this.L.get(layer);
@@ -287,6 +302,7 @@ export class ExpertStore {
   }
   // these experts of a layer into the region at their own ids (the rest of it is stale from here on)
   _toRegion(enc, layer, ids) {
+    if (!this.region) throw new Error(`ExpertStore: layer ${layer}: ${ids.length} experts in one cut, over the ${this.P}-slot pool, and the store has no region`);
     const S = this.L.get(layer), done = this._staged?.layer === layer ? this._staged.region : null;
     // (a disk layer: prepare() already wrote what it read; only T1's experts are copied here)
     for (const e of ids) this.stats.regionBytes += done?.has(e) ? S.perExp : this._putExpert(enc, layer, S, e, this.region.bufs, e);
@@ -357,6 +373,7 @@ export class ExpertStore {
   // everything that uses the region is submitted (a writeBuffer lands in queue order). -> bytes written
   async _writeRegion(layer, ids, run = ExpertStore.REGION_RUN) {
     const S = this.L.get(layer), q = this.device.queue, R = this.region;
+    if (!R) throw new Error(`ExpertStore: layer ${layer}: ${ids.length} experts for the region, and the store has no region`);
     R.layer = -1;
     let n = 0;
     for (let i = 0; i < ids.length; i += run) {
@@ -399,6 +416,7 @@ export class ExpertStore {
   // the region. Reads in runs of `run` experts, so a layer is never held whole in memory.
   async loadLayerAsync(layer, run = ExpertStore.REGION_RUN) {
     const R = this.region;
+    if (!R) throw new Error("ExpertStore: loadLayerAsync on a store built without a region");
     if (R.layer === layer) return 0;
     if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
     this.t1?.flush();
