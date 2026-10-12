@@ -196,8 +196,28 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       planPrefetch(M.gguf, shardInfos(G, names));
       G.streamEntry = streamWithRetry(M.gguf, streamOpts, pace);
       const wc = await useConvertedCache(G, M.gguf), tw = performance.now();
-      const weights = await qwen4expWeights(G, rangeBytesOf(M.gguf, pace), opts, (done) => onProg(done, total),
-        (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(ai.device, e, false); });   // the embedding: CPU rows
+      // straight to the GPU, but not the embedding (the engine reads its rows on the CPU). A layer at a time, the
+      // queue flushed after each, as the room node loads it (packages/room-node/shard.js loadFlash): Dawn keeps a
+      // writeBuffer's staging copy until the queue moves on, and one batch of a big share's uploads ran the GB10 out
+      // of memory with the weights only half on the GPU
+      const bytesOf = rangeBytesOf(M.gguf, pace), dev = ai.device;
+      const up = (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(dev, e, false); };
+      let base = 0;
+      const part = async (o) => {
+        const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: false }, (done) => onProg(base + done, total), up);
+        base += qwen4expShardBytes(G, { ...o, qsa: false });
+        dev.queue.submit([dev.createCommandEncoder().finish()]);
+        await dev.queue.onSubmittedWorkDone();
+        return w;
+      };
+      const layers = [];
+      let pleTable = null;
+      for (let l = range[0]; l < range[1]; l++) {
+        const w = await part({ lo: l, hi: l + 1, hasEmbed: false, hasHead: false });
+        layers.push(w.layers[0]);
+        pleTable ||= w.pleTable || null;
+      }
+      const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
       await convertedSummary(wc, tw);
       const ngram = weights.pleTable ? await openNgramTable(G, M) : null;
       aiStatus("building GPU pipelines (compiling shaders)\u2026");
@@ -254,12 +274,17 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       crumb("n-gram table: OPFS");
       return t;
     } catch (e) {
-      // NotFoundError: no split copy here (the usual case until a tab ingests one); anything else is said, then HTTP
-      if (e?.name !== "NotFoundError" && e?.name !== "TypeError") console.warn("n-gram table: OPFS copy unusable:", e?.message || e);
+      // NotFoundError: no split copy here (the usual case until a tab ingests one). Anything else (a locked file,
+      // no OPFS or module workers in this browser, a short file) is said plainly before the HTTP fallback
+      if (e?.name !== "NotFoundError") {
+        const why = `${e?.name || "Error"}: ${String(e?.message || e).split("\n")[0].slice(0, 200)}`;
+        console.warn(`n-gram table: the OPFS copy (${NGRAM_OPFS_DIR.join("/")}) could not be opened (${why}); reading its rows by HTTP range instead (16 round trips a token)`);
+        crumb(`n-gram table: OPFS open failed (${why})`);
+      }
     }
     const t = new NgramTable(cfg, { readAt: httpReadAt(urls), layout: "tensor", inflight: 16 });
     t.where = urls[cfg.shard];
-    crumb("n-gram table: HTTP range");
+    crumb(`n-gram table: HTTP range from ${t.where}`);
     return t;
   }
 

@@ -33,7 +33,7 @@ test("loadShard refuses a NaN range before it asks for a GPU", async () => {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { shardTensors, qwen4expTensorNames, flashShardBytes, flashMemoryShort, openNgramTable } from "../shard.js";
+import { shardTensors, qwen4expTensorNames, flashShardBytes, flashCpuBytes, flashMemoryShort, openNgramTable } from "../shard.js";
 import { parseGGUFHeader, qwen4expShardBytes, qwen4expConfig, GGML_PLE_TABLE } from "../../../engine/gguf.js";
 import { ngramConfig, NgramState, dequantRow, rowAddress } from "../../../engine/ngram.js";
 import { mergeSplitHeaders } from "../../../room/models.js";
@@ -67,12 +67,24 @@ test("qwen4exp flashShardBytes / flashMemoryShort: a device short of memory is t
   const G = flashHeader(), c = qwen4expConfig(G.meta);
   const half = flashShardBytes(G, { lo: 0, hi: 24, hasHead: true, ctx: 2048 });
   const w = qwen4expShardBytes(G, { lo: 0, hi: 24, hasEmbed: false, hasHead: true, qsa: false });
+  const layer = (i) => qwen4expShardBytes(G, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: false });
+  const staged = Math.max(...Array.from({ length: 24 }, (_, i) => layer(i)), w - qwen4expShardBytes(G, { lo: 0, hi: 24, hasEmbed: false, hasHead: false, qsa: false }));
+  const cpu = flashCpuBytes(G, { hasHead: true });
+  // the CPU embedding (~0.36 GB) and the biggest part's upload staging come on top of the weights
+  assert.ok(cpu / 2 ** 30 > 0.3 && cpu / 2 ** 30 < 0.5, (cpu / 2 ** 30).toFixed(2));
+  assert.equal(flashCpuBytes(G, {}), 0, "a middle device keeps no embedding");
+  const extra = half - w - staged - cpu;
   // f32 K / V for its 6 attention layers at 2048 (4 MiB each), DeltaNet state for the other 18, the PLE ring, scratch
-  assert.ok(half > w + 6 * 2 * 2048 * c.nKVHeads * c.headDim * 4 && half < w + 2 ** 30, String(half - w));
-  assert.ok(half / 2 ** 30 > 34 && half / 2 ** 30 < 40, (half / 2 ** 30).toFixed(1));
+  assert.ok(extra > 6 * 2 * 2048 * c.nKVHeads * c.headDim * 4 && extra < 2 ** 30, String(extra));
+  assert.ok(half / 2 ** 30 > 35 && half / 2 ** 30 < 42, (half / 2 ** 30).toFixed(1));
+  assert.ok(flashShardBytes(G, { lo: 0, hi: 24, hasEmbed: true, hasHead: false, ctx: 2048 }) > flashShardBytes(G, { lo: 0, hi: 24, ctx: 2048 }) + 0.3 * 2 ** 30, "the host's embedding counts");
   assert.equal(flashMemoryShort(half, { kind: "unified", totalGB: 121, availGB: 100 }), null);
   assert.match(flashMemoryShort(half, { kind: "unified", totalGB: 121, availGB: 30 }), /needs 3\d\.\d GB and this computer has 30\.0 GB of unified memory free/);
   assert.match(flashMemoryShort(half, { kind: "discrete", name: "RTX 5070", freeGB: 11.5 }), /GPU memory and RTX 5070 has 11\.5 GB free/);
+  // on a discrete GPU the embedding is in RAM: only the GPU part is weighed against its free memory
+  const gpu = half - cpu, fits = { kind: "discrete", name: "big", freeGB: (gpu + cpu / 2) / 2 ** 30 + 0.5 };
+  assert.equal(flashMemoryShort(half, fits, { cpuBytes: cpu }), null);
+  assert.ok(flashMemoryShort(half, fits), "without cpuBytes it counts all of it");
   assert.equal(flashMemoryShort(half, { kind: "unknown" }), null, "nothing known: the load's out-of-memory scope decides");
   assert.equal(flashMemoryShort(half, { kind: "unified", totalGB: 36 }), null, "a Mac (no free figure): unchecked");
 });
@@ -106,6 +118,8 @@ test("qwen4exp openNgramTable: rows from the local shard at the table's offset (
   } finally { await t.close(); fs.rmSync(dir, { recursive: true, force: true }); }
   assert.equal(t.close, null, "closed once");
   // no local copy: HTTP range requests to the shard's URL
-  const h = await openNgramTable({ localPaths: null, urls: MODELS["qwen3.8-flash"].shards }, G);
+  const hl = [];
+  const h = await openNgramTable({ localPaths: null, urls: MODELS["qwen3.8-flash"].shards }, G, (m) => hl.push(m));
   assert.equal(h.where, MODELS["qwen3.8-flash"].shards[0]);
+  assert.match(hl[0], /NOT on this disk .* read by HTTP range from https:\/\/huggingface\.co\/.* slow/, "the fallback says so");
 });

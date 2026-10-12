@@ -205,32 +205,39 @@ export function qwen4expCore(e) {
     for (let k = 0; k < e.layers.length; k += SUBMIT_LAYERS) ops.push(per.slice(2 * k, 2 * (k + SUBMIT_LAYERS)).flat());
     return ops;
   };
+  const run = async (id, hidden) => {
+    await e._begin(id);
+    if (hidden) dev.queue.writeBuffer(e.B.R, 0, hidden);
+    const chunks = stepOps();
+    for (const c of chunks.slice(0, -1)) {
+      const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+      e._encode(pass, c);
+      pass.end();
+      dev.queue.submit([enc.finish()]);
+    }
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    e._encode(pass, chunks.at(-1) || []);
+    pass.end();
+    enc.copyBufferToBuffer(e.B.R, 0, e.hStage, 0, HD * 4);
+    dev.queue.submit([enc.finish()]);
+    e.pos++;
+    await e.hStage.mapAsync(MAP_READ);
+    const out = new Float32Array(e.hStage.getMappedRange()).slice();
+    e.hStage.unmap();
+    return out;
+  };
   return {
     device: dev, dims: e.dims, lo: e.lo, hi: e.hi, hasEmbed: e.hasEmbed, hasHead: e.hasHead, maxSeq: e.maxSeq,
     get pos() { return e.pos; }, set pos(v) { e.pos = v; },
     get ngs() { return e.ngs || null; },
     pleLayers: (cfg.ple?.layers || []).filter((l) => l >= e.lo && l < e.hi),
+    // A step that throws part way (a lost device, a failed readback) may have advanced state without pos: the engine is
+    // marked failed and refuses later steps until reset(), as its forwardToken does (engine/qwen4exp.js _check).
+    // The checks that change nothing (_check, a worker without the residual) throw before that.
     async step(id, hidden) {
-      await e._begin(id);
-      if (hidden) dev.queue.writeBuffer(e.B.R, 0, hidden);
-      else if (!e.hasEmbed) throw new Error("qwen4exp: no embedding here: a worker's step needs the residual");
-      const chunks = stepOps();
-      for (const c of chunks.slice(0, -1)) {
-        const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-        e._encode(pass, c);
-        pass.end();
-        dev.queue.submit([enc.finish()]);
-      }
-      const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-      e._encode(pass, chunks.at(-1) || []);
-      pass.end();
-      enc.copyBufferToBuffer(e.B.R, 0, e.hStage, 0, HD * 4);
-      dev.queue.submit([enc.finish()]);
-      e.pos++;
-      await e.hStage.mapAsync(MAP_READ);
-      const out = new Float32Array(e.hStage.getMappedRange()).slice();
-      e.hStage.unmap();
-      return out;
+      e._check(id);
+      if (!hidden && !e.hasEmbed) throw new Error("qwen4exp: no embedding here: a worker's step needs the residual");
+      try { return await run(id, hidden); } catch (err) { e._failed = err; throw err; }
     },
     async head(hidden) {
       if (!e.hasHead) throw new Error("qwen4exp: no head on this device");

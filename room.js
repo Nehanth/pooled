@@ -3044,9 +3044,10 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
 }
 
 // ---- host ----
-// what dropping an engine does not free with its GPU device: a Qwen3.8-Flash-Next engine's n-gram table reader
-// (OPFS workers holding their files' locks, room/flash.js close). Every other engine has no close
-function closeEngine() { try { ai.engine?.close?.()?.catch?.(() => {}); } catch {} }
+// Drop this tab's engine. What dropping one does not free with its GPU device: a Qwen3.8-Flash-Next engine's n-gram
+// table reader (OPFS workers holding their files' locks, room/flash.js close), so every path that lets go of
+// ai.engine comes through here. Every other engine has no close
+function closeEngine() { const e = ai.engine; ai.engine = null; try { e?.close?.()?.catch?.(() => {}); } catch {} }
 
 // the model host (room/plan.js pickModelHost): the strongest device, a computer before a phone,
 // whoever pressed Start. The room's creator stays the PeerJS hub either way.
@@ -3195,7 +3196,7 @@ async function aiStart(modelArg) {
     // what each device holds of its pledge (the host's includes the embedding and the head)
     ai.heldGB = Object.fromEntries([myName, ...ai.chainNames].map((nm, k) => [nm, deal.held[k] / 2 ** 30]));
     log("room", `memory per device (of its pledge): ${deal.used.map((i, k) => `${[myName, ...ai.chain.map(nameOf)][k]} ${(deal.held[k] / 2 ** 30).toFixed(2)} of ${(pledges[i] / 2 ** 30).toFixed(1)} GB`).join(" · ")}`);
-    if (deal.ngram) log("room", `the n-gram table (${(deal.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${deal.ngram.layer}): ${[myName, ...ai.chainNames][deal.ngram.at]} reads it from its own disk${deal.ngram.checked ? "" : " (its free disk is not reported: unchecked)"}`);
+    if (deal.ngram) log("room", `the n-gram table (${(deal.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${deal.ngram.layer}): ${[myName, ...ai.chainNames][deal.ngram.at]} reads it (from its own copy when it has one, else by HTTP range: its log says which)${deal.ngram.checked ? "" : "; whether it has the disk for it is not reported"}`);
 
     ai.deferred = [];
     // what every device already has cached, so each one can take its missing ranges from the room.
@@ -3262,7 +3263,6 @@ function aiStartStopped(why) {
   clearInterval(ai.progTimer);
   aiLoading(false);
   closeEngine();
-  ai.engine = null;
   ai.chain = []; ai.chainNames = []; ai.plan = null;   // nothing to re-seat or re-deal
   ai.heldGB = null; ai.outWhy = {}; paintHeld();
   failWaiters(new Error(why));
@@ -3285,7 +3285,7 @@ function aiLoadFailed(from, name, message) {
 function workerStopped() {
   if (ai.role !== "worker") return;
   closeEngine();
-  ai.role = null; ai.range = null; ai.engine = null;
+  ai.role = null; ai.range = null;
   try { ai.device?.destroy(); } catch {}
   ai.device = null;
 }
@@ -3301,7 +3301,7 @@ async function aiRedeal(force = false) {
   const model = ai.model || $("ai-model").value;
   failWaiters(new Error("re-dealing the layers"));
   ckptClear();
-  ai.engine = null; ai.busy = false; ai.fed = null;
+  closeEngine(); ai.busy = false; ai.fed = null;
   $("ai-panel").classList.remove("online");
   $("ai-row").style.display = "none";
   showRedeal(false);
@@ -4083,7 +4083,7 @@ function hostGone() {
     if (conns.has(PREFIX + roomCode)) { clearInterval(hostGone.timer); return; }
     if (Date.now() - t0 > HOST_WAIT_MS) {
       clearInterval(hostGone.timer);
-      ai.engine = null;
+      closeEngine();
       $("room-over-h").textContent = "Room over";
       $("room-over-why").textContent = "The host didn't come back. The host holds the conversation and the model's first and last layers, so this room can't answer any more.";
       aiStatus("the host left; this room is over");
@@ -4202,7 +4202,8 @@ async function aiOnData(from, d) {
       ai.outWhy = d.out && typeof d.out === "object" ? d.out : {};
       paintHeld();
       if (ai.role === "worker" && !d.by[myName]) {   // not in this deal: ask-only guest, GPU memory freed
-        ai.role = "guest"; ai.range = null; ai.engine = null; ai.held = null;
+        closeEngine();
+        ai.role = "guest"; ai.range = null; ai.held = null;
         try { ai.device?.destroy(); } catch {}
         ai.device = null;
       }
@@ -4290,7 +4291,7 @@ async function aiOnData(from, d) {
         aiLoading(false);
         aiStatus("failed: " + err.message);
         toast(`This device couldn't load its layers (${err.message}). Press Start to try again.`);
-        ai.engine = null;
+        closeEngine();
         $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
         sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1 });   // load: the host stops the start
       }

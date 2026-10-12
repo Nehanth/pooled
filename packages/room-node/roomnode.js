@@ -968,7 +968,7 @@ export class RoomNode extends EventEmitter {
     if (plan.leftOut.length) this.log(`${plan.leftOut.map(nameOf).join(", ")} ask without holding layers: the other devices hold the whole model${this.splitMode === "speed" ? " (split: fastest first)" : ""}`);
     ai.layersByName = Object.fromEntries([[this.name, `${ranges[0][0]}–${ranges[0][1] - 1}`], ...ai.chain.map((id, i) => [nameOf(id), `${ranges[i + 1][0]}–${ranges[i + 1][1] - 1}`])]);
     this.log(`${M.label}: layer split ${[`${this.name} ${assigned[0]}+embed`, ...ai.chain.map((id, i) => `${nameOf(id)} ${assigned[i + 1]}`)].join(" · ")}`);
-    if (plan.ngram) this.log(`the n-gram table (${(plan.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${plan.ngram.layer}): ${[this.name, ...ai.chainNames][plan.ngram.at]} reads it from its own disk${plan.ngram.checked ? "" : " (its free disk is not reported: unchecked)"}`);
+    if (plan.ngram) this.log(`the n-gram table (${(plan.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${plan.ngram.layer}): ${[this.name, ...ai.chainNames][plan.ngram.at]} reads it (from its own copy when it has one, else by HTTP range: its log says which)${plan.ngram.checked ? "" : "; whether it has the disk for it is not reported"}`);
     const offTxt = (o) => `layers ${o.lo}-${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`;
     plan.offload.forEach((o, k) => { if (o) this.log(`${k ? nameOf(ai.chain[k - 1]) : this.name} offloads ${offTxt(o)}`); });
     ai.offloadBy = Object.fromEntries(plan.offload.map((o, k) => [k ? nameOf(ai.chain[k - 1]) : this.name, o]).filter(([, o]) => o));

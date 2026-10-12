@@ -9,7 +9,7 @@ import { SLICE_BYTES } from "../../room/transport.js";
 import { dealRoom, placeNgram, ngramHolder, shortNote } from "../../room/plan.js";
 import { offloadFor, ngramFor, ngramDisk, pledgeGB } from "../../room/pledge.js";
 import { createPipeline } from "../../room/pipeline.js";
-import { FlashRoomEngine } from "../../room/flash.js";
+import { FlashRoomEngine, qwen4expCore } from "../../room/flash.js";
 import { NgramState, makeConfig } from "../../engine/ngram.js";
 import { f16ToF32, f32ToF16 } from "../../engine/gguf.js";
 
@@ -375,4 +375,46 @@ Deno.test("flash room: host + worker (layer 1 on either side) match one device, 
     eq(again, first, `split at ${split}: resumed from the checkpoint (PLE ring + predecessors restored on whichever device has layer 1)`);
     eq(againLogits, firstLogits, `split at ${split}: the same logits, bit for bit`);
   }
+});
+
+// ---------------------------------------------------------------- the core's failed-step guard
+
+Deno.test("flash core: a step that throws part way marks the engine failed, as forwardToken does; reset() clears it", async () => {
+  const HD = 8;
+  let lose = false, submits = 0;
+  const stage = { mapAsync: async () => { if (lose) throw Object.assign(new Error("device lost"), { name: "AbortError" }); }, getMappedRange: () => new ArrayBuffer(HD * 4), unmap() {} };
+  const pass = { end() {} }, enc = { beginComputePass: () => pass, copyBufferToBuffer() {}, finish: () => ({}) };
+  const e = {
+    device: { queue: { submit: () => { submits++; }, writeBuffer() {} }, createCommandEncoder: () => enc },
+    cfg: { hDim: HD, nKVHeads: 1, headDim: 2 }, dims: {}, lo: 0, hi: 1, hasEmbed: true, hasHead: false, maxSeq: 4, pos: 0,
+    layers: [{ attnOps: [], ffnOps: [], st: {} }], B: { R: {} }, hStage: stage, _failed: null,
+    // engine/qwen4exp.js's checks, as #346 has them
+    _check(id) {
+      if (this._failed) throw new Error("qwen4exp: an earlier step failed (" + this._failed.message + "); reset() first");
+      if (this.pos >= this.maxSeq) throw new Error(`qwen4exp: context full (${this.maxSeq})`);
+      if (!(Number.isInteger(id) && id >= 0 && id < 10)) throw new Error(`qwen4exp: token id ${id} outside the vocab (10)`);
+    },
+    async _begin(id) { this._check(id); },
+    _encode() {},
+    reset() { this.pos = 0; this._failed = null; },
+  };
+  const core = qwen4expCore(e);
+  eq((await core.step(1)).length, HD);
+  eq(e.pos, 1);
+  // a check that changes nothing throws without marking the engine
+  let msg = "";
+  try { await core.step(99); } catch (err) { msg = err.message; }
+  ok(/outside the vocab/.test(msg) && !e._failed, "a bad id is refused, the engine not failed");
+  lose = true;
+  msg = "";
+  try { await core.step(2); } catch (err) { msg = err.message; }
+  ok(msg === "device lost" && e._failed?.message === "device lost", "the readback's error marks the engine failed");
+  lose = false;
+  const before = submits;
+  msg = "";
+  try { await core.step(3); } catch (err) { msg = err.message; }
+  ok(/an earlier step failed \(device lost\); reset\(\) first/.test(msg), msg);
+  eq(submits, before, "a refused step submits nothing");
+  core.reset();
+  eq((await core.step(4)).length, HD, "after reset() the engine steps again");
 });

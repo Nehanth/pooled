@@ -162,29 +162,37 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
 }
 
 // ---------------- Qwen3.8-Flash-Next (qwen4exp) ----------------
-// What a qwen4exp shard holds on the GPU besides its weights: K / V in f32 for its attention layers at ctx positions,
-// the DeltaNet state per recurrent layer, the PLE ring on the n-gram layer, scratch. -> bytes
-export function flashShardBytes(G, { lo, hi, hasHead, ctx }) {
+// What a qwen4exp shard needs in memory besides its GPU weights: K / V in f32 for its attention layers at ctx
+// positions, the DeltaNet state per recurrent layer, the PLE ring on the n-gram layer, scratch; the embedding the
+// engine keeps on the CPU (flashCpuBytes: RAM, which on unified memory is the same memory); and Dawn's upload
+// staging: a writeBuffer's copy is kept until the queue moves on, and loadFlash flushes after each layer, so the
+// biggest one part (a layer, or the head) is staged on top of what is already up. -> bytes
+export function flashShardBytes(G, { lo, hi, hasEmbed = false, hasHead, ctx }) {
   const c = qwen4expConfig(G.meta), ss = c.ssm;
   let b = qwen4expShardBytes(G, { lo, hi, hasEmbed: false, hasHead, qsa: false });
+  let staged = hasHead ? qwen4expShardBytes(G, { lo: hi, hi, hasEmbed: false, hasHead: true, qsa: false }) - (G.tensors[GGML_EMBED]?.byteLength || 0) : 0;
   for (let i = lo; i < hi; i++) {
     if (c.qsa[i]) b += 2 * ctx * c.nKVHeads * c.headDim * 4;
     else b += ss.nVHeads * ss.stateSize * ss.stateSize * 4 + (2 * ss.nKHeads * ss.stateSize + ss.inner) * (ss.convK - 1) * 4;
+    staged = Math.max(staged, qwen4expShardBytes(G, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: false }));
   }
   if (c.ple && c.ple.layers.some((l) => l >= lo && l < hi)) b += 10 * c.hDim * 4;
-  return b + 64 * 2 ** 20;   // scratch, uniforms, staging
+  return b + staged + flashCpuBytes(G, { hasEmbed, hasHead }) + 64 * 2 ** 20;   // + scratch, uniforms
 }
+// the part of flashShardBytes held on the CPU: the embedding (~0.36 GB), whose rows the engine reads there
+export const flashCpuBytes = (G, { hasEmbed = false, hasHead = false } = {}) => (hasEmbed || hasHead ? G.tensors[GGML_EMBED]?.byteLength || 0 : 0);
 
 // Before a qwen4exp load: does this device have the memory for its share? On unified memory (a GB10, Apple silicon)
 // an allocation past what is free does not fail in WebGPU: the OS kills the process or swaps, so say it up front.
+// bytes: flashShardBytes; cpuBytes: the part of it in RAM (flashCpuBytes), not counted against a discrete GPU.
 // mem: env.js hostMemory() (detectMemory). -> null when it fits (or nothing is known), else the reason
-export function flashMemoryShort(bytes, mem, { slackGB = 2 } = {}) {
+export function flashMemoryShort(bytes, mem, { slackGB = 2, cpuBytes = 0 } = {}) {
   const gb = (n) => (n / 2 ** 30).toFixed(1);
   if (mem?.kind === "unified") {
     const free = mem.availGB ?? mem.freeGB;
     if (free > 0 && bytes / 2 ** 30 > free - slackGB) return `needs ${gb(bytes)} GB and this computer has ${free.toFixed(1)} GB of unified memory free (${slackGB} GB kept for the system)`;
-  } else if (mem?.kind === "discrete" && mem.freeGB > 0 && bytes / 2 ** 30 > mem.freeGB - 0.5)
-    return `needs ${gb(bytes)} GB of GPU memory and ${mem.name || "the GPU"} has ${mem.freeGB.toFixed(1)} GB free`;
+  } else if (mem?.kind === "discrete" && mem.freeGB > 0 && (bytes - cpuBytes) / 2 ** 30 > mem.freeGB - 0.5)
+    return `needs ${gb(bytes - cpuBytes)} GB of GPU memory and ${mem.name || "the GPU"} has ${mem.freeGB.toFixed(1)} GB free`;
   return null;
 }
 
@@ -204,20 +212,25 @@ export async function openNgramTable(src, G, log = () => {}) {
     log(`n-gram table: ${gb} GB, rows read from ${local}`);
     return t;
   }
+  // not on this disk (a node reads the model from disk only when every one of its files is there): Hugging Face
   const urls = src.urls || [src.url];
   if (!urls[cfg.shard]) throw new Error("the n-gram table's file has no URL");
   const t = new NgramTable(cfg, { readAt: httpReadAt(urls), layout: "tensor", inflight: 16 });
   t.close = async () => { t.close = null; };
   t.where = urls[cfg.shard];
-  log(`n-gram table: ${gb} GB, rows read by HTTP range from ${urls[cfg.shard]} (no local copy: pooled pull keeps one)`);
+  log(`n-gram table: ${gb} GB, NOT on this disk (the model's files are not all here: pooled pull keeps a local copy); its rows are read by HTTP range from ${urls[cfg.shard]}, 16 round trips a token: slow`);
   return t;
 }
+
+// Qwen3.8-Flash-Next's context until QSA (room/models.js CTX "qwen3.8-flash"; room/model-loader.js clamps a tab's too)
+const FLASH_MAX_CTX = 2048;
 
 // One qwen4exp shard: the weights (each matrix uploaded as it is converted; the embedding stays on the CPU, where the
 // engine reads its rows), the n-gram table when the range holds its layer, the engine, the room adapter.
 // -> FlashRoomEngine
 async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null }) {
   const c = qwen4expConfig(G.meta);
+  ctx = Math.min(ctx, FLASH_MAX_CTX);   // the dense phase's cap, before anything is sized or uploaded (as a tab's load)
   out.G = G;   // (loadShard's finally takes the conversion pool off it)
   out.cfg = { num_hidden_layers: c.L };
   if (range[1] > c.L) throw new Error(`bad layer range [${range[0]}, ${range[1]}]: the model has ${c.L} layers`);
@@ -225,7 +238,7 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   if (hasEmbed || hasHead) { out.tok = makeTokenizer(tokenizerFromGGUF(G.meta)); out.tok.chatTemplate = G.meta["tokenizer.chat_template"] || ""; }
   const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: false };
   const need = flashShardBytes(G, { ...opts, ctx });
-  const short = flashMemoryShort(need, mem || hostMemory());
+  const short = flashMemoryShort(need, mem || hostMemory(), { cpuBytes: flashCpuBytes(G, opts) });
   if (short) throw Object.assign(new Error(`can't hold layers ${range[0]}-${range[1] - 1} of Qwen3.8-Flash-Next here: it ${short}`), { oom: true, short: true });
   const total = qwen4expShardBytes(G, opts);
   // straight to the GPU, but not the embedding (Qwen4ExpEngine reads its rows on the CPU) nor f32 tensors (the engine
@@ -254,6 +267,6 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null });
   const fe = FlashRoomEngine.wrap(eng);
   out.flash = eng;   // the engine under the adapter (tests and benches: forwardToken, debugToken)
-  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB on the GPU${out.ngram ? ", the n-gram layer here" : ""}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
+  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB (weights, K/V, the CPU embedding, upload staging)${out.ngram ? ", the n-gram layer here" : ""}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
   return fe;
 }
