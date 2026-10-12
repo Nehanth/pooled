@@ -2384,3 +2384,73 @@ GB/s, with the event loop busy converting the whole time: p99 182 ms per expert)
 fs.promises with UV_THREADPOOL_SIZE=16 (4.2-4.35 against 5.4-5.6 GB/s); a room node that only needs raw bytes can
 raise libuv's pool instead. conv per expert, 16 workers: Q4_0 layers p50 4.3 ms (p99 7.1-7.5), requantized layers
 p50 17.7-19.7 ms (p99 35-40).
+
+## 2026-10-11: expert offload's per-layer cut in Chrome: 2.9 ms → 0.5 ms (branch feat/offload-cut-latency), the Spark (GB10)
+
+Context: PR #350 measured the 35B MoE (Qwen3.6-35B-A3B Q4_0) in headless Chrome with every expert parked in memory
+(no disk) at 8.1-8.6 tok/s, against 58-60 resident. So the per-layer readback that offload does (the "cut"), not the
+disk, set the cap. This entry measures where a cut's time goes and adds three exact fixes. Machine: DGX Spark,
+Chrome 131 (Playwright's Chromium, Vulkan via ANGLE, headless=new) and Node 22 + Dawn (npm webgpu 0.6.1). Other
+agents were using the GPU throughout; A/B variants ran interleaved in one process or tab, on one load.
+
+**Round-trip floor** (`tests/bench/cut_rt.{js,html,mjs}`: a tiny dispatch, a 128 B copy, submit, mapAsync; median ms;
+Chrome's `performance.now()` is 0.1 ms coarse):
+
+| | Chrome | Node / Dawn |
+|---|---|---|
+| map of an idle buffer | 0.1 | 0.006 |
+| submit + map, nothing in front | 0.3-2.4 (bimodal) | 0.029 |
+| submit + map, 80 us of GPU work in front | **2.8-2.9** | 0.095 |
+| the same, onSubmittedWorkDone then map | 2.7 | 0.099 |
+| the same with a **kick** (an idle 16 B buffer's mapAsync kept in flight) | **0.4** | 0.100 |
+| empty `queue.submit([])` every macrotask while waiting | 17-19 (worse) | 13-24 (worse) |
+| the 80 us of work alone | 0.08-0.12 | 0.080 |
+
+Chrome's GPU process resolves a map whose work was still running only on its next timed device check, about 2 ms
+later. Any request it handles also checks the device. In Dawn, a cut's round trip is 15-30 us plus the GPU work.
+
+**Per-cut phases in the engine** (`tests/bench/tab_cut.{html,mjs}` / `cut_prof.js` on `tests/bench/cut_core.js`, engine
+`cutProf`; ms per token over 63-127 decoded tokens, 40 cuts per token, 16 slots, 50-56% hits). In Chrome before:
+encode 1.0, submit 1.1, **wait 99-100**, plan 1.9. In Node: encode 1-2, submit 1.2, wait 24-27, plan 1.8-2.9. That
+wait is mostly real GPU work: the layer's attention, 159 expert copies (~250 MB) per token, and the experts. CPU
+planning and encoding are under 0.1 ms per cut in both runtimes. All of the Chrome loss is waiting on the map.
+
+**What changed** (all exact; roadmap/32 "The cut" has the design):
+- `engine/map_kick.js` `mapRead`, engine `mapKick` (on by default): the kick above, for every offload readback and the
+  token readback.
+- `cutPipe` (on by default; one-token decode): the cut encodes the layer's expert kernels before it waits and lands
+  the plan at the next cut, so the next layer is encoded while the GPU runs.
+- `cutSpec` (off by default): speculative windows. moe_remap maps ids to slots through GPU copies of the slot tables.
+  A layer that missed rarely skips its cut. A miss rolls the token back to that layer's FFN (recurrent state saved at
+  token start, x saved by moe_remap). The next real cut checks the window in its one map.
+
+**Decode tok/s, Chrome** (pairs = the two prompts of `cut_core.js`):
+
+| config | before (no kick, no pipe) | kick | kick + pipe | kick + pipe + cutSpec |
+|---|---|---|---|---|
+| resident (reference) | 56.5 / 58.2 | 57.3 / 60.2 | | |
+| 10 layers offloaded, 256 slots (every expert cached: the cut alone) | 24.1 / 24.8 | 44.4 / 45.1 | 46.3 / 46.7; rerun 42.7-44.9 | **54.0-55.1** (8 of 10 layers speculated, 0 rollbacks) |
+| all 40 offloaded, 16 slots (50-56% hits) | 8.7 / 9.1 | 23.9 / 23.9 | **24.3 / 24.4** | (does not speculate: every layer misses) |
+| all 40 offloaded, 64 slots (78-84% hits) | | | 13.2-13.5 (contended run) | 12.9-13.5 (0.5 rollbacks per token) |
+| all 40 offloaded, 128 slots (90-93% hits) | | | 27.5-29.9 | 27.0-29.1 (9-12 layers speculated, 3.2-3.7 rollbacks per token: neutral) |
+
+Cost of one cut in Chrome: (offloaded − resident) / cuts = **2.35 ms before, 0.49 ms with the kick**, ~0.4 ms with
+the pipe. **Node / Dawn**, same configs: 10 layers / 256 slots 47-55 tok/s without the fixes, 45-49 with (noise).
+All 40 / 16 slots 28-33 tok/s in every variant. cutSpec 44-49 vs 45-49 without. Dawn's cut is 0.2-0.3 ms, mostly GPU
+pipeline drain, so these changes are for the tab.
+
+**Bits.** The Chrome fingerprint (`cut_core.js` = test_q38_bits' plain part) is `864fb862 / 4904e2db` for resident and
+for every variant above (PR #350's value). Node / Dawn `tests/test_q38_bits.js MODEL=moe` gives `c2d80d71 / a6111fb2`,
+the same tokens, and spec == plain == GPU sampling for:
+- main: resident, OFFLOAD=all/16, OFFLOAD=0-19/128;
+- this branch: all/16, all/16 with OFFLOAD_SPEC=1 and =always, 0-19/128 with OFFLOAD_SPEC=1 and =always.
+
+=always speculates every layer on every token: 932 rollbacks on all/16 and 174 on 0-19/128. The store's counters
+(cuts, hits, MiB copied) equal main's in each config, so the LRU follows the same path.
+
+**Takeaways.**
+- The kick is what makes offload in a tab usable: 2.7× on the 40-layer, 16-slot run, matching PR #350's 8.1-8.6 to 24.
+- The rest of a cut in Chrome is about 0.5 ms (two IPC hops plus the GPU's drain and refill), versus 0.25 ms on Dawn.
+- cutSpec removes that cost only where layers almost never miss. Speculation should be re-tuned, and the planner
+  should prefer fewer offloaded layers with bigger caches, once the Mac's hit rates for Flash from disk are known.
+- Not measured: the Mac (Metal; Chrome's polling there may differ) and the disk tier (#350) together with this branch.

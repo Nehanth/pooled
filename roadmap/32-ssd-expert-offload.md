@@ -22,6 +22,24 @@ Prefill on a disk layer submits what's queued first, then fills the region async
 
 **Later, gated on measurements:** router lookahead (top-M experts for the next 2-3 layers, computed in the same readback, prefetched into T1 only); a smaller prefill region (R slots instead of every expert of a layer: 1.64 GiB for the 122B, too much for the 5070 alone); a unified-memory disk tier for the Spark and the Mac; layer-major prefill so each disk layer streams once per prompt.
 
+## The cut (per-layer readback) and how to shrink it
+
+Decode on an offloaded layer stops at `moe_route`: the encoder is submitted, the 9 routed ids are read back, `plan()` copies the misses into the layer's slot pool, and the expert kernels run on the CPU's slot ids. That round trip happens once per offloaded layer per token. PR #350 found it, not the disk, capping a tab: 8.1-8.6 tok/s on the 35B with every expert in memory, against 58-60 resident. Measured on the Spark, `feat/offload-cut-latency`, numbers in `docs/bench-log.md`:
+
+- **Where the time went in Chrome:** a `mapAsync` whose GPU work was still running when the request reached the GPU process resolved on that process's next timed check, about 2 ms later. A readback behind 80 us of GPU work took 2.9 ms median, while one with nothing left to run took 0.1-0.5 ms. Dawn in Node took 0.03 ms of overhead (0.095 ms against 0.080 ms of GPU work). CPU planning, submit and encoding were 0.05-0.1 ms per cut in both runtimes.
+- **Map kick (`engine/map_kick.js`, on by default).** While a readback is pending, the engine keeps one `mapAsync` of an idle 16-byte buffer in flight. Every request the GPU process handles makes it check the device too, so the real map resolves within one IPC round trip of the GPU finishing: 0.4 ms instead of 2.9 ms in the microbenchmark. Nothing reads the kick buffer. It costs nothing on Dawn and does not change resident decode, where decode-ahead already hides the readback.
+- **Encode while waiting (`cutPipe`, on by default; one-token decode).** For one token the pool path is certain (`nCols * K <= P`), so the cut encodes the layer's expert kernels before waiting, and the caller encodes the next layer while the selection comes back. `plan()`'s copies are submitted ahead of that part. The GPU receives the same commands in the same order. It gained about 0.1 ms per cut in Chrome.
+- **Speculative windows (`cutSpec`, off by default; one-token decode).** Each layer keeps a moving average of whether it missed. A layer below `cutSpecTheta` does not cut. Instead, `moe_remap` maps its ids to slots through a GPU copy of the store's table (`ExpertStore.gpuTables`, rewritten by `plan()` and `clear()`), and its experts run straight away. The ids and a miss flag go to a log, which the next real cut reads back in the same map. If every speculated layer hit, `plan()` is replayed for each one in order (stamps only), so the LRU state is exactly what a cut per layer would leave. If one missed, the token rolls back to that layer's FFN:
+  - its misses are copied into the pool;
+  - DeltaNet S and the conv windows of every later layer are restored from the copy taken at the token's start;
+  - x is restored from `moe_remap`'s copy of the layer's FFN input;
+  - the FFN reruns from its norm (same route, same ids) on the CPU's slot ids;
+  - encoding continues from the next layer. KV rows the window wrote are written again before anything reads them.
+
+  The last offloaded layer always cuts. Gate: `OFFLOAD_SPEC=always` (every layer speculates on every token, so most windows roll back: 932 rollbacks in one run) gives main's hashes and main's exact LRU counters.
+- **What still costs.** After the kick, a cut in Chrome costs about 0.5 ms (vs 0.2-0.3 ms on Dawn). Speculation removes it only on layers that hit everything, which needs a large cache per layer: P(all 8 hit) is 0.43 at 90% hits and 0.17 at 80%. With a cache that small it is neutral, because it seldom speculates. A tab should still offload as few layers as its memory allows; a planner cost model can use about 0.5 ms per offloaded layer in Chrome and 0.25 ms in Dawn.
+- **Considered and not built:** overlapping the next layer's attention (it reads this layer's output; only the shared expert is independent, about 1/9 of the expert FLOPs, too small to matter); poisoning every later kernel instead of rolling back (it touches every decode kernel or turns them all into indirect dispatches); a flag-only readback skipped on all-hit layers (the CPU still has to wait for the flag to know whether to encode copies, which is the same round trip).
+
 ## Measurements it starts from
 
 From the 122B work (scratchpad feasibility study on the 5070 PC, SK hynix P41):
