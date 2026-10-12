@@ -97,6 +97,9 @@ export class FlashRoomEngine {
   }
 
   reset() { this.core.reset(); }
+  // what the GPU device does not free: the n-gram table's open files or OPFS workers (room-node shard.js, room/model-loader.js).
+  // The holder calls it when it drops the engine, before or after destroying the device
+  close() { const p = this.core.close?.(); this.core.close = null; return p; }
 
   // ---- checkpoints (Qwen35Engine's contract: room/pipeline.js ckpt*, room/ckpt-store.js)
   // A state: { sig, pos, parts: [ArrayBuffer] }: the core's GPU parts, then (with a PLE layer) the n-gram
@@ -175,6 +178,8 @@ export class FlashRoomEngine {
   }
 }
 
+// layers per submit in a step (engine/qwen4exp.js forwardToken's step)
+const SUBMIT_LAYERS = 12;
 // what a device without checkpoints lacks (dropSlot / dropAllSlots stay: with no slots they do nothing)
 const SLOT_API = ["saveSlot", "loadSlot", "exportSlot", "exportState", "importState", "stateSignature"];
 // a GPU buffer copies can read (a test's fake buffer says nothing: yes)
@@ -186,25 +191,53 @@ const copyable = (b) => b?.usage == null || !!(b.usage & U.COPY_SRC);
 export function qwen4expCore(e) {
   const dev = e.device, cfg = e.cfg, HD = cfg.hDim;
   const kvRow = cfg.nKVHeads * cfg.headDim * 4;   // f32 K (or V) per position
+  // One step's ops: the layers' halves fused as forwardToken runs them (each HC combine folded into the next site),
+  // laid out without the head, so the last combine stays in and B.R is the finished residual (forwardToken's own
+  // lists fold the last layer's combine into the head's site when the engine has the head). Built on first use.
+  // Without _halfOps (an engine before the fused sites): the per-half lists, which compute the same R.
+  // Per layer, in submits of SUBMIT_LAYERS layers as forwardToken does: one submit of all 48 layers' dispatches
+  // lost the device on the GB10 (an AbortError on the readback), 12 per submit is what the engine runs.
+  let ops = null;
+  const stepOps = () => {
+    if (ops) return ops;
+    const per = e._halfOps ? e._halfOps(e.layers.flatMap((l) => l.halves), true) : e.layers.flatMap((l) => [l.attnOps, l.ffnOps]);
+    ops = [];
+    for (let k = 0; k < e.layers.length; k += SUBMIT_LAYERS) ops.push(per.slice(2 * k, 2 * (k + SUBMIT_LAYERS)).flat());
+    return ops;
+  };
+  const run = async (id, hidden) => {
+    await e._begin(id);
+    if (hidden) dev.queue.writeBuffer(e.B.R, 0, hidden);
+    const chunks = stepOps();
+    for (const c of chunks.slice(0, -1)) {
+      const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+      e._encode(pass, c);
+      pass.end();
+      dev.queue.submit([enc.finish()]);
+    }
+    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    e._encode(pass, chunks.at(-1) || []);
+    pass.end();
+    enc.copyBufferToBuffer(e.B.R, 0, e.hStage, 0, HD * 4);
+    dev.queue.submit([enc.finish()]);
+    e.pos++;
+    await e.hStage.mapAsync(MAP_READ);
+    const out = new Float32Array(e.hStage.getMappedRange()).slice();
+    e.hStage.unmap();
+    return out;
+  };
   return {
     device: dev, dims: e.dims, lo: e.lo, hi: e.hi, hasEmbed: e.hasEmbed, hasHead: e.hasHead, maxSeq: e.maxSeq,
     get pos() { return e.pos; }, set pos(v) { e.pos = v; },
     get ngs() { return e.ngs || null; },
     pleLayers: (cfg.ple?.layers || []).filter((l) => l >= e.lo && l < e.hi),
+    // A step that throws part way (a lost device, a failed readback) may have advanced state without pos: the engine is
+    // marked failed and refuses later steps until reset(), as its forwardToken does (engine/qwen4exp.js _check).
+    // The checks that change nothing (_check, a worker without the residual) throw before that.
     async step(id, hidden) {
-      await e._begin(id);
-      if (hidden) dev.queue.writeBuffer(e.B.R, 0, hidden);
-      else if (!e.hasEmbed) throw new Error("qwen4exp: no embedding here: a worker's step needs the residual");
-      const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-      for (const l of e.layers) { e._encode(pass, l.attnOps); e._encode(pass, l.ffnOps); }
-      pass.end();
-      enc.copyBufferToBuffer(e.B.R, 0, e.hStage, 0, HD * 4);
-      dev.queue.submit([enc.finish()]);
-      e.pos++;
-      await e.hStage.mapAsync(MAP_READ);
-      const out = new Float32Array(e.hStage.getMappedRange()).slice();
-      e.hStage.unmap();
-      return out;
+      e._check(id);
+      if (!hidden && !e.hasEmbed) throw new Error("qwen4exp: no embedding here: a worker's step needs the residual");
+      try { return await run(id, hidden); } catch (err) { e._failed = err; throw err; }
     },
     async head(hidden) {
       if (!e.hasHead) throw new Error("qwen4exp: no head on this device");
@@ -220,6 +253,8 @@ export function qwen4expCore(e) {
       return out;
     },
     reset() { e.reset(); },
+    // the n-gram table's reader (open files, OPFS workers), when the loader gave it a close
+    close() { return e.ngram?.close?.(); },
     stateParts(pos) {
       const parts = [];
       for (const l of e.layers) {

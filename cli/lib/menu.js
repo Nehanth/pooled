@@ -66,7 +66,8 @@ async function modelsHere() {
   const { loadRoomNode } = await import("./lendrun.js");
   const { listModels, modelsDir, fmtBytes } = await import("./cache.js");
   const rn = await loadRoomNode();
-  const keys = Object.keys(rn.MODELS).filter((k) => rn.MODELS[k].gguf && (rn.MODELS[k].kind === "gguf" || rn.MODELS[k].kind === "qwen35"));
+  const { hostable } = await import("./lend.js");
+  const keys = hostable(rn.MODELS).filter((k) => rn.MODELS[k].gguf);
   const rows = listModels(modelsDir(), rn.MODELS, rn.FILES, keys, rn.LOCAL).sort((a, b) => (a.fileBytes || 0) - (b.fileBytes || 0));
   const row = (x, bytes) => ({ key: x.key, hint: `${x.label} · ${fmtBytes(bytes)}` });
   return { pulled: rows.filter((x) => x.pulled).map((x) => row(x, x.bytes)), notPulled: rows.filter((x) => !x.pulled).map((x) => row(x, x.fileBytes)) };

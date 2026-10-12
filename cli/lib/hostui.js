@@ -128,9 +128,9 @@ export function recommendModel(rows) {
 // mem: detectMemory(); maxGB: the most this computer can lend. -> { def, max, totalGB }
 export function pledgeDefaults(mem, { maxGB, ruleGB, smallestNeedGB = 4 }) {
   const totalGB = mem?.totalGB > 0 ? mem.totalGB : null;
-  const max = Math.max(1, Math.min(64, Math.floor(maxGB || ruleGB || 1)));
+  const max = Math.max(1, Math.min(128, Math.floor(maxGB || ruleGB || 1)));
   const half = totalGB ? Math.round(totalGB / 2) : ruleGB || 1;
-  const def = Math.max(1, Math.min(max, Math.max(half, Math.ceil(smallestNeedGB))));
+  const def = Math.max(1, Math.min(max, 64, Math.max(half, Math.ceil(smallestNeedGB))));   // (the default stays within lend.js DESK_MAX_GB)
   return { def, max, totalGB };
 }
 

@@ -57,7 +57,7 @@ import { tokenTexts } from "../../harness/model-common.js";
 import { uniqueName, PING_MS, lastHeard, isSilentGone, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
 import { pledgeGB, afterLoadDeath, offloadFor, ngramFor } from "../../room/pledge.js";
-import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes } from "../../engine/gguf.js";
+import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes, qwen4expConfig, qwen4expShardBytes } from "../../engine/gguf.js";
 import { guardChunks } from "../../cli/lib/room.js";
 import { iceSetup, STUN } from "../../cli/lib/relay.js";
 import { parseServer, openPeer, reconnectDelay, FALLBACK_ERRORS } from "../../room/signal.js";
@@ -786,6 +786,8 @@ export class RoomNode extends EventEmitter {
   }
   freeLayers(role) {
     const ai = this.ai;
+    // what the device does not free with it: a Qwen3.8-Flash-Next engine's n-gram table reader (room/flash.js close)
+    try { ai.engine?.close?.()?.catch?.(() => {}); } catch {}
     ai.role = role; ai.range = null; ai.engine = null; ai.held = null;
     try { ai.device?.destroy(); } catch {}
     ai.device = null;
@@ -1011,6 +1013,14 @@ export class RoomNode extends EventEmitter {
         layerBytes = qwen35ShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false }) / 4 + ctx * kvBytesPerLayerPos(G.meta, kv);
         embedBytes = (G.tensors[GGML_EMBED]?.byteLength || 0) + (G.tensors[GGML_OUTPUT]?.byteLength || 0) + qwen35MtpBytes(G);
         experts = expertsOf(G, L);   // what each layer's routed experts park (null for a dense model): ExpertStore's sizes
+      } else if (M.kind === "qwen4exp") {
+        // Qwen3.8-Flash-Next: the dense phase (no QSA indexer), K / V in f32 on its attention layers (averaged over all
+        // of them), the embedding and the head's HC mixer + output.weight on the host; no expert offload yet
+        const G = await src.header(false), c = qwen4expConfig(G.meta);
+        L = c.L;
+        const kvPos = 2 * c.nKVHeads * c.headDim * 4 * c.qsa.filter(Boolean).length / L;
+        layerBytes = qwen4expShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false, qsa: false }) / 4 + ctx * kvPos;
+        embedBytes = qwen4expShardBytes(G, { lo: 0, hi: 0, hasEmbed: true, hasHead: true, qsa: false });
       } else {
         L = (await src.cfg()).num_hidden_layers;
         const G = await src.header(false);
@@ -1047,7 +1057,7 @@ export class RoomNode extends EventEmitter {
     if (plan.leftOut.length) this.log(`${plan.leftOut.map(nameOf).join(", ")} ask without holding layers: the other devices hold the whole model${this.splitMode === "speed" ? " (split: fastest first)" : ""}`);
     ai.layersByName = Object.fromEntries([[this.name, `${ranges[0][0]}–${ranges[0][1] - 1}`], ...ai.chain.map((id, i) => [nameOf(id), `${ranges[i + 1][0]}–${ranges[i + 1][1] - 1}`])]);
     this.log(`${M.label}: layer split ${[`${this.name} ${assigned[0]}+embed`, ...ai.chain.map((id, i) => `${nameOf(id)} ${assigned[i + 1]}`)].join(" · ")}`);
-    if (plan.ngram) this.log(`the n-gram table (${(plan.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${plan.ngram.layer}): ${[this.name, ...ai.chainNames][plan.ngram.at]} reads it from its own disk${plan.ngram.checked ? "" : " (its free disk is not reported: unchecked)"}`);
+    if (plan.ngram) this.log(`the n-gram table (${(plan.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${plan.ngram.layer}): ${[this.name, ...ai.chainNames][plan.ngram.at]} reads it (from its own copy when it has one, else by HTTP range: its log says which)${plan.ngram.checked ? "" : "; whether it has the disk for it is not reported"}`);
     const offTxt = (o) => `layers ${o.lo}-${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`;
     plan.offload.forEach((o, k) => { if (o) this.log(`${k ? nameOf(ai.chain[k - 1]) : this.name} offloads ${offTxt(o)}`); });
     ai.offloadBy = Object.fromEntries(plan.offload.map((o, k) => [k ? nameOf(ai.chain[k - 1]) : this.name, o]).filter(([, o]) => o));
@@ -1139,7 +1149,7 @@ export class RoomNode extends EventEmitter {
   // lend another amount (GB), as the room page's stepper does: a device tells its host ("pledge"), a
   // host tells the room; the next deal uses it
   setPledge(gb) {
-    const v = Math.min(64, Math.max(0.5, +gb || 0));
+    const v = Math.min(128, Math.max(0.5, +gb || 0));   // (env.js pledgeFor's most)
     this.pledgeGB = v;
     if (this.meta) this.meta.contribGB = v;
     if (this.isHost) { this.broadcast({ t: "pledge", gb: v }); this.emit("members"); }

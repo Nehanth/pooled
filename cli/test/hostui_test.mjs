@@ -29,7 +29,8 @@ test("the model list: smallest first, sizes, downloaded or not, and the recommen
 });
 
 test("pledge defaults: half the GPU as the room page, at least the smallest model's need, within the most it can lend", () => {
-  assert.deepEqual(pledgeDefaults({ kind: "unified", totalGB: 128 }, { maxGB: 83, ruleGB: 76, smallestNeedGB: 4 }), { def: 64, max: 64, totalGB: 128 });
+  assert.deepEqual(pledgeDefaults({ kind: "unified", totalGB: 128 }, { maxGB: 83, ruleGB: 76, smallestNeedGB: 4 }), { def: 64, max: 83, totalGB: 128 });   // the default stays 64; asked, up to what it can lend
+  assert.equal(pledgeDefaults({ kind: "unified", totalGB: 256 }, { maxGB: 240, ruleGB: 64 }).max, 128, "at most lend.js LEND_MAX_GB");
   assert.deepEqual(pledgeDefaults({ kind: "discrete", totalGB: 12 }, { maxGB: 11, ruleGB: 10, smallestNeedGB: 3.8 }), { def: 6, max: 11, totalGB: 12 });
   assert.equal(pledgeDefaults({ kind: "discrete", totalGB: 6 }, { maxGB: 5, ruleGB: 4.5, smallestNeedGB: 3.8 }).def, 4, "half is 3: raised to what the smallest model needs");
   assert.equal(pledgeDefaults({ kind: "discrete", totalGB: 4 }, { maxGB: 3, ruleGB: 2.5, smallestNeedGB: 3.8 }).def, 3, "never more than it can lend");
