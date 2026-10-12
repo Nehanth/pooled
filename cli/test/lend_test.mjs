@@ -153,6 +153,22 @@ test("memoryRule: discrete lends free less 1.5 GB, unified total less max(8 GB, 
   assert.equal(memoryRule({ kind: "unified", totalGB: 16 }, { max: true }).gb, 12);
 });
 
+test("memoryRule: an explicit pledge past 64 GB only when the model allows it (capGB: room/pledge.js maxPledgeGB)", () => {
+  const gb10 = { kind: "unified", totalGB: 121.7 };
+  // pooled host qwen3.6-35b-moe / qwen3.5-122b-moe: --gb max and --gb 100 cap at 64
+  let r = memoryRule(gb10, { max: true }, { capGB: DESK_MAX_GB });
+  assert.equal(r.gb, 64); assert.match(r.why, /capped at 64 GB per device/);
+  r = memoryRule(gb10, { gb: 100 }, { capGB: DESK_MAX_GB });
+  assert.equal(r.gb, 64); assert.match(r.why, /--gb 100, capped at 64 GB per device for this model/);
+  assert.equal(memoryRule(gb10, { gb: 40 }, { capGB: DESK_MAX_GB }).gb, 40);
+  // pooled host qwen3.8-flash: up to 128
+  assert.equal(memoryRule(gb10, { max: true }, { capGB: LEND_MAX_GB }).gb, 117.5);
+  assert.equal(memoryRule(gb10, { gb: 100 }, { capGB: LEND_MAX_GB }).gb, 100);
+  assert.equal(memoryRule({ kind: "unified", totalGB: 256 }, { gb: 500 }, { capGB: LEND_MAX_GB }).gb, 128);
+  // the rule without --gb stays at 64 for any model
+  assert.equal(memoryRule({ kind: "unified", totalGB: 256 }, null, { capGB: LEND_MAX_GB }).gb, 64);
+});
+
 test("memoryRule: --gb wins (and says when it is more than looks free); too little is 'low'; unknown falls back", () => {
   let r = memoryRule({ kind: "discrete", name: "x", freeGB: 6 }, { gb: 12 });
   assert.equal(r.gb, 12); assert.equal(r.over, true); assert.match(r.why, /more than the 4.5 GB that looks free/);
