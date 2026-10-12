@@ -22,7 +22,7 @@ import { qwen4expConfig } from "./gguf.js";
 import { NgramState } from "./ngram.js";
 import * as W from "./wgsl/qwen4exp.js";
 import { attnDecMcWGSL } from "./wgsl/qwen4exp_batch.js";
-import { qsaFlashPipelines, qsaShared, qsaScratch, qsaSetFrame, qsaLayerState, qsaBind, qsaStateOps, qsaSelectOps, qsaSparse,
+import { qsaCheckConfig, qsaFlashPipelines, qsaShared, qsaScratch, qsaSetFrame, qsaLayerState, qsaBind, qsaStateOps, qsaSelectOps, qsaSparse,
   QSA_MAXSEL, QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
 
 const U = GPUBufferUsage;
@@ -44,6 +44,7 @@ export class Qwen4ExpEngine {
     for (let i = lo; i < hi; i++) if (cfg.qsa[i]) qLayers.push(weights.layers[i - lo]);
     this.qsa = qsa ?? (qLayers.length > 0 && qLayers.every((L) => L.indexer));
     if (this.qsa && qLayers.some((L) => !L.indexer)) throw new Error("qwen4exp: qsa needs the indexer weights (qwen4expWeights qsa: true)");
+    if (this.qsa) qsaCheckConfig(cfg);
     // which passes read QSA's selected cells: those with a column past 2051 cells (qsaAlways: every pass, for the
     // QSA == dense check, tests/test_q38flash_batch.js)
     this.qsaAlways = false;
@@ -89,7 +90,7 @@ export class Qwen4ExpEngine {
     };
     if (pleLayers.length) Object.assign(B, { emb: buf(d), pk: buf(HD), pv: buf(d), dbg: buf(2 * HD + hc) });
     if (this.qsa) {
-      this.qsaSh = qsaShared(device, { dim: d, maxSeq, eps: cfg.eps, theta: cfg.ropeTheta, nRot: cfg.indexer?.ropeDims ?? 64 });
+      this.qsaSh = qsaShared(device, { dim: d, maxSeq, eps: cfg.eps, theta: cfg.ropeTheta, nRot: cfg.ropeDims });
       this.qsaS = qsaScratch(device, { maxCols: 1, maxBlocks: this.qsaSh.maxBlocks });
     }
     device.queue.writeBuffer(B.shIds, 0, new Uint32Array(4));

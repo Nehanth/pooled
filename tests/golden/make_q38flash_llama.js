@@ -3,15 +3,18 @@
 // Q4_0 GGUF, prompts sent as token ids from the engine's own tokenizer so both sides see the same prompt.
 //   llama-server -m models/q38flash/Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf -ngl 99 -fa on -c 9216 -np 1 \
 //     -ot "per_layer_token_embd=CPU" --port 8297
-//   deno run --allow-read --allow-net --allow-write tests/golden/make_q38flash_llama.js [http://127.0.0.1:8297] [n=64]
+//   deno run --allow-read --allow-env --allow-net --allow-write tests/golden/make_q38flash_llama.js [http://127.0.0.1:8297] [n=64] [cases]
+// cases: a comma list of case names; only those are run and merged into the existing file (the others are kept).
 // Cases: test_moe's three chat prompts; "eos-mid", an <|endoftext|> in the middle of the prompt (the n-gram
-// hash resets there); and "ctx4k" / "ctx8k", past QSA's 2051-cell budget, for the sparse-attention phase.
+// hash resets there); "ctx4k" / "ctx8k", past QSA's 2051-cell budget, for the sparse-attention phase; and
+// "ctx2k" (prompt and continuation stay under 2051 cells: dense, at long positions) / "ctx2k1" (just past 2051:
+// QSA drops a few blocks), which split a long-context mismatch into position drift vs the QSA selection.
 // Each case keeps its prompt ids, the greedy text and ids, and per step the gap between the top two
 // log-probabilities ("gap", nats). A step under 0.2 is a near tie that the engine may legitimately flip:
 // "nearTies" lists every one as [step, gap], "nearTie" is the first (or -1), so a test compares tokens only up
 // to there, or up to the first gap under the engine's own measured noise.
 import { openGGUF } from "../load_model.js";
-const URL_ = Deno.args[0] || "http://127.0.0.1:8297", N = +(Deno.args[1] || 64);
+const URL_ = Deno.args[0] || "http://127.0.0.1:8297", N = +(Deno.args[1] || 64), PICK = Deno.args[2]?.split(",") ?? null;
 const PATH = new URL("../../models/q38flash/Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf", import.meta.url).pathname;
 const model = openGGUF(PATH, { cache: false });
 const tok = model.tokenizer(), V = tok.vocab;
@@ -34,14 +37,19 @@ cases["eos-mid"] = { q: "<|endoftext|> mid-prompt, then: Write a haiku about the
   prompt: [...tok.encode("The quick brown fox jumps over the lazy dog."), V["<|endoftext|>"], ...chat("Write a haiku about the sea.")] };
 cases["ctx4k"] = { q: "roadmap notes (~4K tokens), which note is about disk", prompt: long(3900) };
 cases["ctx8k"] = { q: "roadmap notes (~8K tokens), which note is about disk", prompt: long(7900) };
+cases["ctx2k"] = { q: "roadmap notes (~2K tokens, prompt + 64 <= 2051 cells), which note is about disk", prompt: long(1950) };
+cases["ctx2k1"] = { q: "roadmap notes (~2.1K tokens, just past 2051 cells), which note is about disk", prompt: long(2070) };
 
 const NEAR_TIE = 0.2;
 const nearTies = (gap) => {
   const ties = gap.flatMap((g, i) => (g !== null && g < NEAR_TIE ? [[i, g]] : []));
   return { nearTie: ties.length ? ties[0][0] : -1, nearTies: ties };
 };
-const out = {};
+const p = new URL("./q38flash_llama_greedy.json", import.meta.url);
+const SOURCE = "unsloth llama.cpp b10840-mix-d5c17a0 CUDA llama-server on the GB10, greedy, bartowski Qwen3.8-Flash-Next-Q4_0 (3-file split), -fa on, per_layer_token_embd on the CPU";
+const out = PICK ? JSON.parse(Deno.readTextFileSync(p)) : { _source: SOURCE };
 for (const [name, { q, prompt }] of Object.entries(cases)) {
+  if (PICK && !PICK.includes(name)) continue;
   const r = await fetch(URL_ + "/completion", { method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ prompt, n_predict: N, temperature: 0, top_k: 1, cache_prompt: false, return_tokens: true, n_probs: 2, post_sampling_probs: false }) });
   const j = await r.json();
@@ -49,5 +57,4 @@ for (const [name, { q, prompt }] of Object.entries(cases)) {
   out[name] = { q, text: j.content, ids: j.tokens, ...nearTies(gap), gap, prompt };
   console.log(name, `${prompt.length} prompt tokens, near tie at ${out[name].nearTie}:`, JSON.stringify(j.content));
 }
-const p = new URL("./q38flash_llama_greedy.json", import.meta.url);
-Deno.writeTextFileSync(p, "{\n" + Object.entries({ _source: "unsloth llama.cpp b10840-mix-d5c17a0 CUDA llama-server on the GB10, greedy, bartowski Qwen3.8-Flash-Next-Q4_0 (3-file split), -fa on, per_layer_token_embd on the CPU", ...out }).map(([k, v]) => ` ${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(",\n") + "\n}\n");
+Deno.writeTextFileSync(p, "{\n" + Object.entries(out).map(([k, v]) => ` ${JSON.stringify(k)}: ${JSON.stringify(v)}`).join(",\n") + "\n}\n");

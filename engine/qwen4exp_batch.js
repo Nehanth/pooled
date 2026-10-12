@@ -16,6 +16,9 @@
 // Verify keeps a copy of the recurrent state (DeltaNet conv + S, the PLE ring) from before the pass; accept(n < N)
 // restores it, rolls the n-gram history back and re-runs the first n columns (no head). The K / V cache and QSA's
 // rawK need no copy (the re-run rewrites them) and a pooled key is re-pooled when its block completes again.
+// Cost: the re-run is the whole trunk for n columns (MoE expert reads included), about one more pass, and every
+// verify copies ~115 MB of state. Replace it with the Qwen3.5 engine's replay rollback (dn_delta_mc: replay only the
+// DeltaNet step from S before the pass) before MTP drafting is built on verify (docs/kernels.md).
 import * as MC from "./wgsl/qwen4exp_batch.js";
 import { qsaScratch, qsaSetFrame, qsaBind, qsaStateOps, qsaSelectOps, QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
 
@@ -198,9 +201,7 @@ export class Qwen4ExpBatch {
     }
     // the n-gram rows (the PLE layer's input), the history either way
     if (B.emb) {
-      const rows = eng.ngs.push(ids);
-      eng.lastRows = rows.subarray((n - 1) * eng.ngram.cfg.nHeads);
-      q.writeBuffer(B.emb, 0, await eng.ngram.rows(rows));
+      q.writeBuffer(B.emb, 0, await eng.ngram.rows(eng.ngs.push(ids)));
     } else eng.ngs?.push(ids);
     // the frame: pos and n, and every column's rope table (the decode frame's recurrence)
     q.writeBuffer(B.F, 0, new Uint32Array([pos, n, 0, 0]));

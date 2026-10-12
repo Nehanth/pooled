@@ -24,6 +24,16 @@ export { QSA_MAXSEL, QSA_SEL_STRIDE };
 const U = GPUBufferUsage;
 const ENTRIES = ["qsa_proj", "qsa_prep", "qsa_pool", "qsa_score", "qsa_score_c4", "qsa_select"];
 
+// The QSA kernels have the indexer's shape built in (engine/wgsl/qsa.js constants): refuse a model whose metadata
+// differs, rather than run them on the wrong shape. cfg: qwen4expConfig.
+export function qsaCheckConfig(cfg) {
+  const ix = cfg.indexer || {}, want = { nHeads: QSA_IH, headDim: QSA_ID, topK: QSA_NTOP * QSA_KPOOL, block: QSA_KPOOL };
+  const bad = Object.entries(want).filter(([k, v]) => ix[k] !== v);
+  if (bad.length) throw new Error("qwen4exp QSA: the kernels are built for indexer " + JSON.stringify(want) + ", the model has " + JSON.stringify(ix));
+  // the indexer q and pooled k are roped with the model's n_rot (llama.cpp qwen4exp.cpp:785, 801), in rotary pairs
+  if (!(cfg.ropeDims > 0 && cfg.ropeDims % 2 === 0 && cfg.ropeDims <= QSA_ID)) throw new Error("qwen4exp QSA: rope dims " + cfg.ropeDims + " for indexer heads of " + QSA_ID);
+}
+
 // true when a pass of nCols columns from pos needs the sparse path (some column has more than 2051 cells)
 export const qsaSparse = (pos, nCols) => pos + nCols > QSA_MAXSEL;
 

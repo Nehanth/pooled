@@ -6,15 +6,22 @@
 // Default: the first LAYERS (4) layers, no head (DeltaNet 0, the PLE layer 1, DeltaNet 2, QSA layer 3), on the
 // first NTOK (4300) tokens of the ctx8k golden's prompt, so the context passes QSA's 2051 cells. The reference is
 // the decode engine, one token at a time; every check compares the output residual (4 x 2560 floats) bit for bit:
+//   QSA vs reference    past 2051 cells, the decode engine's QSA state on the real activations of the last QSA layer
+//                       (layer 3) against the CPU reference (tests/reference/qsa_ref.mjs): raw keys, every pooled
+//                       key (re-pooled on the CPU from the GPU's raw keys), and at sampled positions the indexer
+//                       query, the block scores and the selected row list. The only check of qsa_score / qsa_select
+//                       against something independent on real data; prefill == decode below carries it to the passes
 //   prefill == decode   passes of mixed sizes (1 .. 64 columns, some across the 2051 / 2052 boundary)
 //   interleave          a prefill, then decode steps, then a prefill again
 //   QSA == dense        below 2052 cells: every pass forced onto the gathered (QSA) attention, decode and prefill
 //   verify / accept     verify passes of 6 columns with random accepts (state restored and re-run), across 2052
 //   timing              decode vs prefill tok/s for these layers
 // FULL=1: all 48 layers and the head (~75 GB of GPU memory): greedy ids vs llama.cpp
-// (tests/golden/q38flash_llama_greedy.json, every case including ctx4k / ctx8k) with the prompt run by the
+// (tests/golden/q38flash_llama_greedy.json, every case including ctx4k / ctx8k, and ctx2k / ctx2k1 either side of
+// 2051 cells) with the prompt run by the
 // batched prefill, the prefill's greedy id == the decode engine's on the short prompts, and a verify pass over the
-// golden continuation giving the decode steps' ids.
+// golden continuation giving the decode steps' ids. Cases that share a prompt prefix and fail at the same step on
+// the same token count as one failure seen again: a near tie in the later one does not excuse it.
 import fs from "node:fs";
 import path from "node:path";
 import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
@@ -22,6 +29,7 @@ import { Qwen4ExpBatch } from "../engine/qwen4exp_batch.js";
 import { qwen4expWeights, qwen4expConfig, gpuUploadEntry } from "../engine/gguf.js";
 import { ngramConfig, NgramTable } from "../engine/ngram.js";
 import { openGGUF, gpuDevice, watchGpuErrors } from "./load_model.js";
+import { QSA, QsaRefCache, poolBlock, indexerQuery, scoreBlocks, selectBlocks, selectedCells, f16bits, h2f } from "./reference/qsa_ref.mjs";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
 const DIR = env("Q38F_DIR", new URL("../models/q38flash", import.meta.url).pathname);
@@ -87,10 +95,17 @@ async function layered() {
   // the reference: decode steps
   eng.reset();
   const ref = [];
-  let t = performance.now();
-  for (const id of ids) ref.push((await eng.forwardToken(id)).hidden);
-  const decTs = NTOK / ((performance.now() - t) / 1000);
+  // positions where the QSA check reads the decode step's indexer scratch (past 2051 cells: scored and selected)
+  const qsaAt = eng.qsa ? [2051, 2052, 2053, 2600, 3333, NTOK - 1].filter((p, i, a) => p < NTOK && a.indexOf(p) === i) : [];
+  const qsaSnap = new Map();
+  let t = performance.now(), tRead = 0;
+  for (let p = 0; p < NTOK; p++) {
+    ref.push((await eng.forwardToken(ids[p])).hidden);
+    if (qsaAt.includes(p)) { const tr = performance.now(); qsaSnap.set(p, await readQsaScratch(p)); tRead += performance.now() - tr; }
+  }
+  const decTs = NTOK / ((performance.now() - t - tRead) / 1000);
   console.log(`decode reference: ${NTOK} tokens, ${decTs.toFixed(1)} tok/s (${nL} layers)`);
+  if (eng.qsa) await qsaVsRef(NTOK, qsaSnap);
 
   // prefill == decode, mixed pass sizes
   const run = async (label, chunks, n = NTOK, from = 0) => {
@@ -165,6 +180,66 @@ async function layered() {
   }
 }
 
+// ---- QSA on the real activations vs the CPU reference (decode engine, the last QSA layer in range)
+async function readBuf(b, bytes, off = 0) {
+  const st = device.createBuffer({ size: Math.ceil(bytes / 4) * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const e = device.createCommandEncoder(); e.copyBufferToBuffer(b, off, st, 0, Math.ceil(bytes / 4) * 4); device.queue.submit([e.finish()]);
+  await st.mapAsync(GPUMapMode.READ); const out = st.getMappedRange().slice(0); st.unmap(); st.destroy(); return out;
+}
+// the decode scratch after the step at p: the projection [q 512 ; k 128], the indexer query, the scores and the row list
+async function readQsaScratch(p) {
+  const S = eng.qsaS, nv = Math.floor((p + 1) / QSA.KPOOL);
+  const sel = new Uint32Array(await readBuf(S.sel, (QSA.MAX_SEL + 1) * 4));
+  return { proj: new Float32Array(await readBuf(S.proj, 640 * 4)), qi: new Float32Array(await readBuf(S.qi, 512 * 4)),
+    scores: nv > QSA.N_TOP ? new Float32Array(await readBuf(S.scores, nv * 4)) : null, rows: sel.slice(1, 1 + sel[0]) };
+}
+function f16s(ab) { return Float32Array.from(new Uint16Array(ab), h2f); }
+function rel(g, r) { let md = 0, mr = 0; for (let i = 0; i < r.length; i++) { md = Math.max(md, Math.abs(g[i] - r[i])); mr = Math.max(mr, Math.abs(r[i])); } return md / mr; }
+
+async function qsaVsRef(n, snaps) {
+  const li = eng.layers.findLastIndex((l) => l.isQ), l = eng.layers[li], ix = weights.layers[li].indexer;
+  if (cfg.ropeTheta !== QSA.THETA || cfg.ropeDims !== QSA.NROT) console.log(`  note: the reference ropes with ${QSA.NROT} dims, base ${QSA.THETA}; the model has ${cfg.ropeDims}, ${cfg.ropeTheta}`);
+  const tag = `QSA vs reference, layer ${l.i}`;
+  // raw keys: the GPU's cache, and at the sampled positions == the step's own k projection rounded to f16
+  const cache = new QsaRefCache({ maxSeq: n });
+  cache.rawK.set(f16s(await readBuf(l.st.qsa.rawK, n * QSA.ID * 2)));
+  cache.n = n;
+  let rawBad = 0;
+  for (const [p, s] of snaps) for (let d = 0; d < QSA.ID; d++) if (f16bits(s.proj[512 + d]) !== f16bits(cache.rawK[p * QSA.ID + d])) rawBad++;
+  // pooled keys: every complete block re-pooled on the CPU from those raw keys, vs the GPU's
+  const nb = Math.floor(n / QSA.KPOOL), gp = new Uint16Array(await readBuf(l.st.qsa.pooled, nb * QSA.ID * 2));
+  for (let b = 0; b < nb; b++) poolBlock(cache, b, ix.kNorm.data);
+  let pd = 0, pmu = 0;
+  for (let i = 0; i < nb * QSA.ID; i++) if (gp[i] !== f16bits(cache.pooled[i])) { pd++; pmu = Math.max(pmu, Math.abs(h2f(gp[i]) - cache.pooled[i])); }
+  check(rawBad <= 2 && pmu <= 2e-3, `${tag}: raw keys at ${snaps.size} positions == k_proj (${rawBad} f16 off); ${nb} pooled keys re-pooled on the CPU: ${pd}/${nb * QSA.ID} f16 values differ (max |d| ${pmu.toExponential(1)}, rounding flips only)`);
+  // with the GPU's pooled keys from here on, so a pooling flip does not count twice
+  cache.pooled.set(Float32Array.from(gp, h2f));
+  for (const [p, s] of snaps) {
+    const nv = Math.floor((p + 1) / QSA.KPOOL);
+    const qi = indexerQuery(s.proj, 0, p, ix.qNorm.data), qiRel = rel(s.qi, qi);
+    const sR = nv > QSA.N_TOP ? scoreBlocks(cache, qi, nv) : null;
+    const want = selectedCells(selectBlocks(sR, nv), p), got = s.rows;
+    const same = got.length === want.length && got.every((v, i) => v === want[i]);
+    let note = "", ok = qiRel < 1e-5 && (!sR || rel(s.scores, sR) < 1e-4);
+    // the GPU list must be the reference rule applied to the GPU's own scores, exactly
+    const own = s.scores ? selectedCells(selectBlocks(s.scores, nv), p) : want;
+    const ownSame = own.length === got.length && own.every((v, i) => v === got[i]);
+    if (!same && sR) {   // vs the reference's scores: allowed only as swaps within the measured score error of the cut
+      let err = 0; for (let b = 0; b < nv; b++) err = Math.max(err, Math.abs(s.scores[b] - sR[b]));
+      const gs = new Set(), ws = new Set();
+      for (let i = 0; i + 3 < got.length && i < QSA.N_TOP * 4; i += 4) gs.add(got[i] / 4);
+      for (let i = 0; i + 3 < want.length && i < QSA.N_TOP * 4; i += 4) ws.add(want[i] / 4);
+      const onlyG = [...gs].filter((b) => !ws.has(b)), onlyW = [...ws].filter((b) => !gs.has(b));
+      const T = Float32Array.from(sR).sort().reverse()[QSA.N_TOP - 1];
+      const off = Math.max(...onlyG.concat(onlyW).map((b) => Math.abs(sR[b] - T)));
+      const tie = onlyG.length === onlyW.length && off <= 2 * err;
+      note = `, ${onlyG.length} block swap(s) at ${off.toExponential(1)} from the cut (score error ${err.toExponential(1)})${tie ? ": near tie" : ""}`;
+      ok = ok && tie;
+    } else if (!same) ok = false;
+    check(ok && ownSame, `${tag}, decode at ${p} (${nv} blocks): ${got.length} rows, list ${same ? "== reference" : "differs"}${note}; == rule on GPU scores: ${ownSame}; qi rel ${qiRel.toExponential(1)}${sR ? `, scores rel ${rel(s.scores, sR).toExponential(1)}` : ""}`);
+  }
+}
+
 function gap(lg) {
   let a = -Infinity, b = -Infinity;
   for (const v of lg) { if (v > a) { b = a; a = v; } else if (v > b) b = v; }
@@ -174,6 +249,8 @@ function gap(lg) {
 async function full() {
   const tok = model.tokenizer();
   const pick = env("CASES") ? env("CASES").split(",") : null;
+  const results = [];
+  const sharedPrefix = (a, b) => { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; return i; };
   const cases = Object.entries(gold).filter(([k, v]) => !k.startsWith("_") && (!pick || pick.includes(k)) && v.prompt.length + v.ids.length <= eng.maxSeq);
   for (const [name, g] of cases) {
     const N = Math.min(+env("TOKENS", g.ids.length), g.ids.length);
@@ -191,8 +268,17 @@ async function full() {
     const ts = (N - 1) / ((performance.now() - t) / 1000);
     const diff = gen.findIndex((x, i) => x !== g.ids[i]);
     const tie = (g.nearTies || []).map(([i]) => i).filter((i) => i < N);
-    const ok = diff < 0, tieOk = !ok && tie.some((i) => i <= diff);
-    console.log(`${ok || tieOk ? "ok  " : "FAIL"} ${name}: prompt ${g.prompt.length} tok, prefill ${pf.toFixed(1)} s (${(g.prompt.length / pf).toFixed(0)} tok/s) · decode ${ts.toFixed(2)} tok/s · ${ok ? `MATCH llama.cpp (${N} ids)` : tieOk ? `differs at ${diff} after llama.cpp's near tie at ${tie.filter((i) => i <= diff).join(",")}` : `MISMATCH at ${diff}`}`);
+    const ok = diff < 0;
+    let tieOk = !ok && tie.some((i) => i <= diff);
+    // a near tie excuses a divergence only when it is a failure of its own: a case whose prompt shares a long prefix
+    // with an earlier case that already failed at the same step on the same token is that failure seen again
+    // (ctx8k repeats ctx4k's first 3835 prompt tokens and its first 6 ids), so it counts as failed too
+    const twin = !ok && results.find((o) => !o.ok && !o.tieOk && o.diff === diff && o.gen[diff] === gen[diff]
+      && g.ids.slice(0, diff + 1).every((x, i) => x === o.ids[i]) && sharedPrefix(o.prompt, g.prompt) >= 1024);
+    const withdrawn = twin && tieOk;
+    if (twin) tieOk = false;
+    results.push({ name, ok, tieOk, diff, gen, ids: g.ids, prompt: g.prompt });
+    console.log(`${ok || tieOk ? "ok  " : "FAIL"} ${name}: prompt ${g.prompt.length} tok, prefill ${pf.toFixed(1)} s (${(g.prompt.length / pf).toFixed(0)} tok/s) · decode ${ts.toFixed(2)} tok/s · ${ok ? `MATCH llama.cpp (${N} ids)` : tieOk ? `differs at ${diff} after llama.cpp's near tie at ${tie.filter((i) => i <= diff).join(",")}` : `MISMATCH at ${diff}${twin ? ` (the same divergence as ${twin.name}: shared prompt prefix, same step and token${withdrawn ? "; llama.cpp's near tie there does not excuse it" : ""})` : ""}`}`);
     if (!ok) console.log(`  engine: ${JSON.stringify(tok.decode(gen))}\n  golden: ${JSON.stringify(g.text)}\n  top-2 gap (nats) ours / llama.cpp, steps 0..${diff}: ${gaps.slice(0, diff + 1).map((x, i) => `${x.toFixed(3)}/${g.gap?.[i]?.toFixed(3)}`).join(" ")}`);
     if (!ok && !tieOk) fail++;
     // verify: the prompt again, then one verify pass over [last prompt token, gen[0..6]] gives gen[0..7]
@@ -204,5 +290,10 @@ async function full() {
       const same = v.ids.every((x, i) => x === gen[i]);
       check(same, `${name}: verify pass ids ${v.ids.join(",")} == decode ${gen.slice(0, 8).join(",")}`);
     }
+  }
+  // by attention phase: dense (every step <= 2051 cells) and sparse (QSA drops blocks); exact matches only
+  const phase = (sparse) => results.filter((r) => (r.prompt.length + r.ids.length > 2051) === sparse);
+  for (const [label, rs] of [["dense (<= 2051 cells)", phase(false)], ["long context (QSA past 2051 cells)", phase(true)]]) {
+    if (rs.length) console.log(`${label}: ${rs.filter((r) => r.ok).length}/${rs.length} goldens match llama.cpp exactly (${rs.map((r) => `${r.name} ${r.ok ? "match" : `${r.tieOk ? "near tie" : "MISMATCH"} at ${r.diff}`}`).join(", ")})`);
   }
 }
