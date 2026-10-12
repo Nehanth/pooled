@@ -81,7 +81,7 @@ export class ExpertStore {
     this.ramBytes = ramBytes > 0 ? ramBytes : Infinity; this.expectBytes = expectBytes > 0 ? expectBytes : 0;
     this.stats = this._zeroStats();
   }
-  _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0, diskReads: 0, diskBytes: 0, diskWaitMs: 0, t1Copies: 0, t1Writes: 0 }; }
+  _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0, specs: 0, specFails: 0, diskReads: 0, diskBytes: 0, diskWaitMs: 0, t1Copies: 0, t1Writes: 0 }; }
   resetStats() { this.stats = this._zeroStats(); if (this.t1) this.t1.stats = this.t1._zero(); }
   has(i) { return this.layerSet.has(i); }
   isDisk(i) { return this.diskSet.has(i); }
@@ -279,6 +279,7 @@ export class ExpertStore {
       st.bytes += this._putExpert(enc, layer, S, e, S.pool, v, true);
       st.misses++;
     }
+    if (miss.length && S.tab) this.device.queue.writeBuffer(S.tab, 0, S.slotOf);   // (before the copies' submit: nothing reads it between)
     this._staged = null;
     const remap = new Uint32Array(nCols * KS);
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) remap[c * KS + k] = S.slotOf[sel[c * KS + k]];
@@ -430,11 +431,28 @@ export class ExpertStore {
     return ids.length;
   }
   // drop every cached expert (tests: a cold cache)
-  clear() { for (const l of this.layers || []) { const S = this.L.get(l); S.slotOf.fill(-1); S.expOf.fill(-1); S.used.fill(0); } }
+  clear() {
+    for (const l of this.layers || []) {
+      const S = this.L.get(l); S.slotOf.fill(-1); S.expOf.fill(-1); S.used.fill(0);
+      if (S.tab) this.device.queue.writeBuffer(S.tab, 0, S.slotOf);
+    }
+  }
+  // GPU copies of every layer's expert -> slot table (-1: not cached), for the engine's speculative decode (cutSpec:
+  // REMAP_WGSL maps the route's ids to slots on the GPU). plan() and clear() rewrite a table whenever they change it;
+  // queue.writeBuffer is ordered with the submits around it, so a pass sees the table as of its own submit.
+  gpuTables() {
+    if (this.tabs) return;
+    for (const l of this.layers) {
+      const S = this.L.get(l);
+      S.tab = this.device.createBuffer({ size: this.nExp * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+      this.device.queue.writeBuffer(S.tab, 0, S.slotOf);
+    }
+    this.tabs = true;
+  }
   summary() {
     const s = this.stats, h = s.lookups ? (100 * s.hits / s.lookups).toFixed(1) : "-";
     return `expert offload: ${this.layers.length} layers, ${this.P} slots each (${(this.poolBytes / 2 ** 30).toFixed(2)} GiB) + region ${(this.regionBytes / 2 ** 30).toFixed(2)} GiB, parked ${(this.parkedBytes / 2 ** 30).toFixed(2)} GiB in ${(this.bufBytes / 2 ** 30).toFixed(2)} GiB of buffers; `
-      + `${s.cuts} cuts, hits ${h}% (${s.hits}/${s.lookups}), ${(s.bytes / 2 ** 20).toFixed(0)} MiB copied to the pools, ${s.regionCuts} region cuts (${(s.regionBytes / 2 ** 20).toFixed(0)} MiB), ${s.layerLoads} whole-layer loads (${(s.layerBytes / 2 ** 30).toFixed(1)} GiB)`
+      + `${s.cuts} cuts${s.specs || s.specFails ? ` (${s.specs} speculated without a wait, ${s.specFails} rolled back)` : ""}, hits ${h}% (${s.hits}/${s.lookups}), ${(s.bytes / 2 ** 20).toFixed(0)} MiB copied to the pools, ${s.regionCuts} region cuts (${(s.regionBytes / 2 ** 20).toFixed(0)} MiB), ${s.layerLoads} whole-layer loads (${(s.layerBytes / 2 ** 30).toFixed(1)} GiB)`
       + (this.diskSet.size ? `; ${this.diskSet.size} disk layers: ${s.diskReads} expert reads, ${(s.diskBytes / 2 ** 20).toFixed(0)} MiB from the file, ${(s.diskWaitMs / 1000).toFixed(2)} s waiting` : "")
       + (this.t1 ? `; RAM cache ${this.t1.full}/${this.t1.cap} experts (${(this.t1.bytes / 2 ** 30).toFixed(2)} of ${(this.t1Bytes / 2 ** 30).toFixed(2)} GiB): ${this.t1.stats.hits} hits, ${this.t1.stats.admits} admitted, ${this.t1.stats.skips} first misses, ${this.t1.stats.noSlot} with no free slot, ${this.t1.stats.evicts} evicted` : "");
   }
@@ -447,3 +465,38 @@ export class ExpertStore {
     await r?.close?.();
   }
 }
+
+// moe_remap (engine cutSpec, one token): an offloaded layer's route output (KS expert ids) -> slot ids through the
+// layer's GPU table, in place of the CPU's remap after a cut. A pick that is not cached reads slot 0 instead (wrong
+// expert) and counts as a miss: the layer's flag in the log tells the CPU to roll the token back to this layer's FFN.
+// It also logs the ids (the CPU replays plan() with them: the same LRU order as a cut) and keeps a copy of x, this
+// layer's FFN input, for that rollback. One workgroup.
+export const REMAP_WGSL = `
+struct RU { K: u32, KS: u32, j: u32, dim: u32, nOff: u32, p0: u32, p1: u32, p2: u32 };
+@group(0) @binding(0) var<storage, read> sel: array<u32>;
+@group(0) @binding(1) var<storage, read> tab: array<i32>;
+@group(0) @binding(2) var<storage, read_write> osel: array<u32>;
+@group(0) @binding(3) var<storage, read_write> slog: array<u32>;
+@group(0) @binding(4) var<storage, read> x: array<f32>;
+@group(0) @binding(5) var<storage, read_write> xs: array<f32>;
+@group(0) @binding(6) var<uniform> u: RU;
+var<workgroup> nmiss: atomic<u32>;
+@compute @workgroup_size(256)
+fn moe_remap(@builtin(local_invocation_id) l: vec3<u32>) {
+  let t = l.x;
+  if (t == 0u) { atomicStore(&nmiss, 0u); }
+  workgroupBarrier();
+  if (t < u.KS) {
+    let e = sel[t];
+    slog[u.j * u.KS + t] = e;
+    var s: u32 = 0u;
+    if (t < u.K) {
+      let v = tab[e];
+      if (v < 0) { atomicAdd(&nmiss, 1u); } else { s = u32(v); }
+    }
+    osel[t] = s;
+  }
+  for (var i: u32 = t; i < u.dim; i += 256u) { xs[u.j * u.dim + i] = x[i]; }
+  workgroupBarrier();
+  if (t == 0u) { slog[u.nOff * u.KS + u.j] = atomicLoad(&nmiss); }
+}`;

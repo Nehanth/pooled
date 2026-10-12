@@ -365,3 +365,23 @@ Deno.test("disk: prepare({ flush: false }) leaves T1 alone (engine _specCut: one
   assert(flushes === 1, `one flush, got ${flushes}`);
   st.t1 = null;
 });
+
+Deno.test("gpuTables: each layer's GPU table mirrors its expert -> slot table through plan() and clear()", () => {
+  const { dev, st, nExp } = makeStore({ slots: 6 });
+  const writes = [];
+  dev.queue = { writeBuffer(b, off, data) { writes.push(b); b.bytes.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), off); } };
+  st.gpuTables();
+  const same = () => st.layers.every((l) => { const S = st.L.get(l), t = new Int32Array(S.tab.bytes.buffer); return S.slotOf.every((v, e) => t[e] === v); });
+  assert(same(), "initial tables");
+  let a = 7;
+  const rnd = () => ((a = (Math.imul(a, 1103515245) + 12345) >>> 0) >>> 8) % nExp;
+  for (let i = 0; i < 300; i++) {
+    const l = st.layers[i % 2], ids = []; while (ids.length < 4) { const e = rnd() % 12; if (!ids.includes(e)) ids.push(e); }   // 12 hot experts, 6 slots: misses and hits
+    const n0 = writes.length, m0 = st.stats.misses;
+    st.plan(fakeEncoder(), l, sel1(ids), 1, 5);
+    assert((writes.length > n0) === (st.stats.misses > m0), "a table is written exactly when plan() changes it");
+    assert(same(), `tables after plan ${i}`);
+  }
+  st.clear();
+  assert(same() && st.layers.every((l) => new Int32Array(st.L.get(l).tab.bytes.buffer).every((v) => v === -1)), "clear empties the tables");
+});
