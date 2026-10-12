@@ -8,6 +8,8 @@
 //        experts and the 28.8 GB n-gram table, kept in PROFILE for the next run)
 //   node packages/room-node/test/flash_tab_gold.mjs tabnode   the tab hosts, a room node in this process joins with
 //        NODE_GB / NODE_RAM / --disk (NODE_DISK=1, default) and takes what the tab's pledge does not hold
+//   node packages/room-node/test/flash_tab_gold.mjs tabwait   the tab hosts and waits for EXT (1) devices from other
+//        machines (SIGNAL_HOST: this machine's LAN address; they run pooled join <code> --signal <host>:<PORT+2>)
 //   node packages/room-node/test/flash_tab_gold.mjs resident  the tab alone with TAB_GB=90 (no offload): the reference BITS
 // env: MODELS (~/llm/models: <MODELS>/q38flash/<the three files>), WEIGHTS_URL (fetch the files from there instead),
 //      CASES (default two-sum,bash,eos-mid), TAB_GB, TAB_RAM
@@ -27,7 +29,8 @@ const MODE = process.argv[2] || "tab";
 const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
 const NM = path.resolve(new URL("../node_modules", import.meta.url).pathname);
 const env = (k, d) => process.env[k] ?? d;
-const PORT = +env("PORT", 8261), SIG = PORT + 2, SIGNAL = `127.0.0.1:${SIG}`;
+// SIGNAL_HOST: this machine's LAN address, for devices on other machines (the PeerServer then listens on every address)
+const PORT = +env("PORT", 8261), SIG = PORT + 2, SIGNAL_HOST = env("SIGNAL_HOST", ""), SIGNAL = `${SIGNAL_HOST || "127.0.0.1"}:${SIG}`;
 const MODELS = path.resolve(env("MODELS", path.join(os.homedir(), "llm/models")));
 const FLASH_DIR = fs.existsSync(path.join(MODELS, "q38flash")) ? path.join(MODELS, "q38flash") : MODELS;
 const TAB_GB = +env("TAB_GB", MODE === "resident" ? 90 : 12), TAB_RAM = env("TAB_RAM", "3");
@@ -72,7 +75,7 @@ const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert:
   fs.createReadStream(p, { start: lo, end: hi, highWaterMark: 8 << 20 }).pipe(r);
 }).listen(PORT + 1, "127.0.0.1");
 const WEIGHTS = `https://127.0.0.1:${PORT + 1}/`;
-const peerServer = spawn(path.join(NM, ".bin/peerjs"), ["--port", String(SIG), "--path", "/", "--host", "127.0.0.1"], { stdio: "ignore" });
+const peerServer = spawn(path.join(NM, ".bin/peerjs"), ["--port", String(SIG), "--path", "/", "--host", SIGNAL_HOST ? "0.0.0.0" : "127.0.0.1"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 1500));
 
 let ctx = null, page = null, worker = null, code = 1;
@@ -103,6 +106,13 @@ try {
   await page.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
   const roomCode = (await page.textContent("#side-code")).trim().replace("-", "").match(/[A-Z0-9]{4,6}/)[0];
   log("room", roomCode);
+  if (MODE === "tabwait") {   // devices on other machines join (pooled join <code> --signal <SIGNAL>): wait for EXT of them
+    const want = 1 + +env("EXT", 1);
+    log(`waiting for ${want - 1} device(s): pooled join ${roomCode} --signal ${SIGNAL}`);
+    if (env("CODE_FILE", "")) fs.writeFileSync(env("CODE_FILE", ""), roomCode + "\n");
+    await page.waitForFunction((n) => document.querySelectorAll(".peer-card").length >= n, want, { timeout: +env("JOIN_MS", 1800e3), polling: 1000 });
+    await page.waitForTimeout(3000);
+  }
   if (MODE === "tabnode") {
     const MEM = env("OFFLOAD_DISCRETE", "1") === "1" ? { kind: "discrete", name: "test", totalGB: 0, freeGB: 0 } : null;
     worker = await joinRoom(roomCode, { pledgeGB: +env("NODE_GB", 8), ramGB: +env("NODE_RAM", 24), expertDisk: env("NODE_DISK", "1") === "1", mem: MEM,
