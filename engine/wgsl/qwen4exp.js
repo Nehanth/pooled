@@ -477,9 +477,16 @@ export const kvDecl = (kv, rw) => {
 };
 export const kvK4 = (kv, K, i) => (kv === "f16" ? `kv_k4(${K}[${i}])` : `${K}[${i}]`);
 // (e: an identifier, it is used twice)
-export const kvV1 = (kv, V, e) => (kv === "f16" ? `f16_f32((${V}[${e} >> 1u] >> ((${e} & 1u) << 4u)) & 0xffffu)` : `${V}[${e}]`);
+export const kvV1 = (kv, V, e) => (kv === "f16" ? `kv_h1((${V}[${e} >> 1u] >> ((${e} & 1u) << 4u)) & 0xffffu)` : `${V}[${e}]`);
+// unpack2x16float is exact for normal f16 values on every backend (only subnormals may flush); a word with a zero
+// exponent (zero or subnormal) takes f16.js's exact path, so the values are unpack2x16_exact's at the builtin's cost
 export const KV_F16_READ = /* wgsl */ `
-fn kv_k4(w: vec2<u32>) -> vec4<f32> { return vec4<f32>(unpack2x16_exact(w.x), unpack2x16_exact(w.y)); }
+fn kv_h2(w: u32) -> vec2<f32> {
+  if ((w & 0x7c00u) == 0u || (w & 0x7c000000u) == 0u) { return unpack2x16_exact(w); }
+  return unpack2x16float(w);
+}
+fn kv_h1(h: u32) -> f32 { if ((h & 0x7c00u) == 0u) { return f16_f32(h); } return unpack2x16float(h).x; }
+fn kv_k4(w: vec2<u32>) -> vec4<f32> { return vec4<f32>(kv_h2(w.x), kv_h2(w.y)); }
 `;
 // The cache write of one K / V head row (hd threads, thread t holds element t of the roped key r): f32 stores
 // directly; f16 stages the key in workgroup memory (st) so thread t < hd / 2 packs elements 2t, 2t + 1. The barrier
