@@ -7,9 +7,17 @@
 // spikes (0.3-0.6 GB), so 1 GB of layers is the most a phone can safely hold. Android tabs have
 // the same shape of limit and less data; navigator.deviceMemory (Chrome) sizes them.
 
+import { MODELS } from "./models.js";
+
 export const PHONE_DEFAULT_GB = 0.5;
 export const IOS_MAX_GB = 1;
-const DESK_MAX_GB = 64;
+export const DESK_MAX_GB = 64;
+// the most an explicit pledge (a room node's --gb N, --gb max, --here) may say: Qwen3.8-Flash-Next (~72 GB) on one big
+// unified-memory machine (a GB10, a 128 GB Mac). The host counts it only for that model (maxPledgeGB).
+export const PLEDGE_MAX_GB = 128;
+// the most one device's pledge counts for `model` (a key): 128 GB for Qwen3.8-Flash-Next (kind qwen4exp), else 64,
+// also when the model is not known
+export const maxPledgeGB = (model) => (MODELS[model]?.kind === "qwen4exp" ? PLEDGE_MAX_GB : DESK_MAX_GB);
 
 // kind: deviceKind() (room/preflight.js): "iPhone" | "iPad" | "Android" | "Android tablet" | "Mac" | "Device"
 // deviceMemory: navigator.deviceMemory (GB, rounded down to a power of two, at most 8; Chrome only)
@@ -31,13 +39,14 @@ export function pledgeRule(kind, deviceMemory) {
 
 // A pledge as the model host counts it: what the device says it lends, held to its kind's cap and
 // to any smaller cap it reported itself (meta.pledgeMax), and to a share the host lowered after the
-// device's tab was killed while loading (hostCap, GB). Devices from before the cap still get it.
-export function pledgeGB(meta, hostCap = Infinity) {
+// device's tab was killed while loading (hostCap, GB), and to the most a device lends for the room's model (model: its
+// key; maxPledgeGB: 64 GB, 128 for Qwen3.8-Flash-Next; 64 when not given). Devices from before the cap still get it.
+export function pledgeGB(meta, hostCap = Infinity, model = null) {
   const rule = pledgeRule(meta?.ua, NaN);
   const own = Number(meta?.pledgeMax) > 0 ? Number(meta.pledgeMax) : Infinity;
   const said = Number(meta?.contribGB);
   const gb = said > 0 ? said : (meta?.maxBufGB ? meta.maxBufGB * 0.5 : PHONE_DEFAULT_GB);
-  return Math.min(gb, rule.capped ? rule.max : Infinity, own, hostCap > 0 ? hostCap : Infinity);
+  return Math.min(gb, rule.capped ? rule.max : Infinity, own, hostCap > 0 ? hostCap : Infinity, maxPledgeGB(model));
 }
 
 // A device's tab was killed while loading its layers (it came back with the "died" breadcrumb).
