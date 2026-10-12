@@ -55,6 +55,7 @@ import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor } from "./room/pledge.
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
+import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 import { convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
 import { resumableGenerate, waitForRoom, linkSilent, backFromAway, sameShard, guestResume, GUEST_KEY, REJOIN_GRACE_MS, LINK_SILENT_MS } from "./room/resume.js";
@@ -1018,13 +1019,14 @@ function ensureCard(id, name, meta) {
     if (noted) sysNote(`${who} joined${meta?.contribGB && meta?.webgpu ? ` with ${meta.contribGB} GB` : ""}`, "join");
     // the chat on screen says it in the log already: no toast on top of that same line
     if (!(noted && $("ai-output").getClientRects().length)) presence(name || id, true);
+    if (performance.now() - roomSince > 2500) speedEvent(`${who} joined`);
     mascot(`${name || id} joined! ${members.size + 1} devices in the room.`);
   }
   const e = conns.get(id);
   if (e) e.card = card;
   return card;
 }
-function dropCard(id) { const c = cards.get(id); if (c) { c.remove(); cards.delete(id); presence(c.dataset.name || id, false); } }
+function dropCard(id) { const c = cards.get(id); if (c) { c.remove(); cards.delete(id); presence(c.dataset.name || id, false); speedEvent(`${c.dataset.name || id} left`); } }
 // open a data link to a chain neighbour if we do not have one yet; resolves when it is up
 const linked = (id) => { const e = conns.get(id); return !!e && !e.hold; };   // up, and proved
 function ensureLink(id, timeoutMs = 60000) {
@@ -2650,6 +2652,7 @@ function aiLoading(show, title) {
   if (show) { $("lc-model").textContent = MODELS[$("ai-model").value]?.label.split("·")[0].trim() || ""; lcBytes = false; eta.t0 = 0; lcStatus(null, "Getting this device ready"); }
   lcStarting(false);
   if (show) loadCardRender();
+  if (show && /re-deal/.test(title || "")) { speed.redeal = true; speedEvent("re-dealing layers"); }
 }
 // Every device has its layers: the card turns to the Pooled mark in its wave, "Starting <model>", and
 // the step it is on, until the room opens. After a short wait, so a small model that starts at once
@@ -2766,6 +2769,7 @@ function chatBotStart(mid) {
   m.pieces = [];
   o.appendChild(m); scrollChat();
   botEl = m;
+  speedStart();
 }
 function renderBot(m, live) {
   const b = m.querySelector(".bubble");
@@ -2806,6 +2810,7 @@ function chatBotEnd(note, stats) {
   if (stats) { const s = document.createElement("div"); s.className = "stats"; s.textContent = stats; acts.appendChild(s); }
   if (acts.childElementCount) botEl.appendChild(acts);
   if (!note && botEl.dataset.mid && readAloud && botEl.pieces.length) speak(botEl.pieces.map((p) => p.t).join(""));
+  speedDone(stats, botEl.dataset.mid ?? null);
   botEl = null;
 }
 // the clipboard icon, and the tick it turns into for a moment once copied
@@ -3148,6 +3153,7 @@ async function aiStart(modelArg) {
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
     // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); browsers never offload
     const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], experts);
+    ai.moe = !!experts;                       // the speed panel: a MoE model's cards say where the experts are
     // the model's default context, or its fallback when only that fits these pledges (room/models.js
     // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
     const pick = pickCtx(modelKey, { want: ROOM_CTX, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes, off).fits });
@@ -3327,6 +3333,7 @@ function paintHeld() {
       : why ? OUT_TEXT[why] || "" : held != null ? `uses ${held.toFixed(1)} of ${+pledgeGB(meta).toFixed(1)} GB pledged` : "";
     el.hidden = !el.textContent;
   }
+  speedDeal();
 }
 
 // a device in the chain left: every lap in flight fails now instead of timing out, and the room
@@ -3589,11 +3596,11 @@ const roomGenerateOnce = createGenerator({
 // Workers report their compute per frame kind (ai-tele); the host times each lap, so what is left
 // is the wire. The map shows the chain, what each device holds and how long its part takes.
 function mapNodes(kind = "spec") {
-  const nodes = [{ name: myName, layers: ai.layersByName?.[myName] || "", ms: ai.lapStat?.host, host: 1, amax: ai.hostAmax }];
+  const nodes = [{ name: myName, layers: ai.layersByName?.[myName] || "", ms: ai.lapStat?.host, host: 1, amax: ai.hostAmax, exp: expertsAt(ai.moe, ai.offloadBy?.[myName]) }];
   for (const id of ai.chain) {
     const t = ai.teleBy.get(id) || {};
     const name = conns.get(id)?.name || id;
-    nodes.push({ name, layers: ai.layersByName?.[name] || "", ms: t[kind] ?? t.spec ?? t.one, amax: t.amax });
+    nodes.push({ name, layers: ai.layersByName?.[name] || "", ms: t[kind] ?? t.spec ?? t.one, amax: t.amax, exp: expertsAt(ai.moe, ai.offloadBy?.[name]) });
   }
   return nodes;
 }
@@ -3676,6 +3683,9 @@ function renderMap(nodes, st, live) {
   el.querySelector(".sm-meta").textContent = bits.join(" · ") || `${nodes.length} device${nodes.length > 1 ? "s" : ""}`;
   el.querySelector(".sm-meta").title = `${nodes.length} device${nodes.length > 1 ? "s" : ""}: every token takes a lap through all of them`;
   deviceMark();
+  // the speed panel: "online · 2 devices" once per deal (the first map after a re-deal, or a new count)
+  if (speed.redeal || nodes.length !== speed.lastN) { speed.redeal = false; speed.lastN = nodes.length; speedEvent(onlineText(nodes.length)); }
+  renderSpeed();
 }
 // The folded band's split: one segment per device, as wide as its share of the layers (at least a few
 // px, so a phone holding one or two layers never drops out of the bar), in the device's colour, with a
@@ -3765,6 +3775,7 @@ new MutationObserver(() => bandFold(bandFolded())).observe($("chatpane"), { attr
 let pulseAt = 0, bandTokens = 0;
 function mapPulse() {
   bandTokens++;
+  speedTok();
   const tk = $("sm-tok"); if (tk) tk.textContent = bandTokens.toLocaleString("en-US");
   const now = performance.now(), rs = $("room-screen");
   const lap = parseFloat(rs.style.getPropertyValue("--lap")) || 600;
@@ -3811,6 +3822,121 @@ function teleNote(kind, ms) {
     sendTo(ai.hostId, { t: "ai-tele", k: Object.fromEntries(Object.entries(T.k).map(([a, b]) => [a, Math.round(b.ema * 10) / 10])), amax: Math.round(T.amax * 10) / 10 });
     T.amax = 0;
   }
+}
+
+// ---- the speed panel (room/speedo.js): this answer's tok/s, live and big; the recent answers' speeds,
+// marked by how many devices held the model; the room's events (a device joins, the re-deal, online);
+// and a card per device: its layers, its GB, where its experts are (MoE), its share of each token's time.
+// Every screen times the tokens it is shown; a finished answer's speed is the host's (its stats line).
+const speed = { meter: new SpeedMeter(), hist: [], events: [], asked: new Set(), lastN: 0, redeal: false, at: 0, idle: 0, seq: 0, last: null };
+function speedEvent(text) {
+  speed.events = pushEvent(speed.events, text, Date.now());
+  const ol = $("sp-events"); if (!ol) return;
+  ol.innerHTML = speed.events.map((e, i) => `<li${i === speed.events.length - 1 ? ' class="now"' : ""}>${esc(e.text)}</li>`).join("");
+}
+function speedStart() {
+  speed.meter.start();
+  clearTimeout(speed.idle);
+  $("speedo")?.classList.add("live");
+  $("sp-tps").textContent = fmtTps(0);
+  $("sp-unit").textContent = "live · this answer";
+}
+// a token on screen (mapPulse): the readout at most every 250 ms; 2.5 s without one ends the live state
+// (an answer that never gets its end here: Code's turns, a dropped link)
+function speedTok() {
+  if (!speed.meter.on) speedStart();
+  const now = performance.now();
+  speed.meter.tok(now);
+  clearTimeout(speed.idle);
+  speed.idle = setTimeout(() => speedDone(null), 2500);
+  if (now - speed.at < 250) return;
+  speed.at = now;
+  const r = speed.meter.rate(now);
+  if (r > 0) $("sp-tps").textContent = fmtTps(r);
+}
+// an answer ended (chatBotEnd): its speed from the host's stats line, else this screen's own timing
+function speedDone(stats, key = null) {
+  clearTimeout(speed.idle);
+  const avg = speed.meter.end(), st = parseStats(stats);
+  $("speedo")?.classList.remove("live");
+  const tps = st ? (st.count >= 2 ? st.tps : 0) : avg;   // a one-token answer has no speed worth showing
+  if (st && st.count >= 2) {
+    speed.hist = pushHistory(speed.hist, { key: key ?? "a" + ++speed.seq, tps: st.tps, devices: st.devices });
+    speed.last = st;
+  }
+  if (tps > 0) {
+    $("sp-tps").textContent = fmtTps(tps);
+    $("sp-unit").textContent = st ? `last answer · ${st.count} tok on ${st.devices} device${st.devices === 1 ? "" : "s"}` : "last answer";
+  }
+  paintHistory();
+}
+function paintHistory() {
+  const ol = $("sp-hist"); if (!ol) return;
+  const h = speed.hist, hs = barScale(h), cur = h.length ? h[h.length - 1].devices : 0;
+  ol.innerHTML = h.map((x, i) => {
+    const step = i === 0 || h[i - 1].devices !== x.devices;
+    return `<li class="bar${x.devices === cur ? " cur" : ""}${step ? " step" : ""}" data-tps="${x.tps}" data-n="${x.devices}" style="--h:${hs[i].toFixed(3)}" title="${fmtTps(x.tps)} tok/s on ${x.devices} device${x.devices === 1 ? "" : "s"}">`
+      + `<i></i>${step ? `<span class="nl">${x.devices} device${x.devices === 1 ? "" : "s"}</span>` : ""}</li>`;
+  }).join("");
+  ol.classList.toggle("empty", !h.length);
+  $("sp-gain").textContent = gainText(speedup(h));
+}
+// the model, its size, and the device cards; from the deal (ai.layersByName, ai.heldGB, ai.outWhy) and the
+// last map (each device's ms per lap and, for a MoE model, where its experts are)
+function renderSpeed() {
+  const box = $("speedo"); if (!box) return;
+  const key = ai.model || $("ai-model").value, M = MODELS[key];
+  $("sp-model").textContent = shortName(key);
+  $("sp-params").textContent = M ? paramsText(paramsOf(M.label, M.gguf || "")) : "";
+  const nodes = lastMap?.nodes || [], st = lastMap?.st || {};
+  const by = ai.layersByName || {}, holders = Object.keys(by);
+  const shares = tokenShares(nodes, st.lap);
+  const names = [...holders];
+  for (const c of document.querySelectorAll("#peers .peer-card")) if (!names.includes(c.dataset.name)) names.push(c.dataset.name);
+  const solo = holders.length === 1;
+  const totalL = holders.reduce((t, k) => { const m = /^(\d+)\D+(\d+)$/.exec(by[k]); return m ? Math.max(t, +m[2] + 1) : t; }, 0);
+  $("sp-devs").innerHTML = names.map((nm) => {
+    const meta = metaOf(nm) || {}, x = nodes.find((y) => y.name === nm), r = by[nm];
+    const n = /^(\d+)\D+(\d+)$/.exec(String(r || "")), nL = n ? +n[2] - +n[1] + 1 : 0;
+    const gb = ai.heldGB?.[nm], why = ai.outWhy?.[nm];
+    const part = shares?.parts.find((p) => p.name === nm);
+    const role = !r ? (meta.api ? "API client" : why === "late" ? "waits for a re-deal" : "asks only") : holders[0] === nm ? (solo ? "runs the whole model" : "model host") : "holds layers";
+    const lines = [];
+    if (r) lines.push(`<span>layers ${esc(humanRange(r))}</span>` + (gb != null ? `<span>${fmtGB(gb)}</span>` : ""), `<span class="dim">${totalL ? Math.round(100 * nL / totalL) : 0}% of the model</span>`);
+    else lines.push(`<span class="dim">${why === "late" ? "joined after the start: asks until a re-deal" : meta.api ? "asks through this room" : meta.webgpu === false ? "no WebGPU: asks, holds no layers" : "the others hold the model: it asks"}</span>`);
+    const ex = r ? expertsText(x?.exp ?? (ai.role === "host" ? expertsAt(ai.moe, ai.offloadBy?.[nm]) : null)) : "";
+    if (ex) lines.push(`<span class="ex">${esc(ex)}</span>`);
+    let time = "";
+    if (r && solo) time = `<div class="dv-t"><span>does all of every token</span></div>`;
+    else if (part?.timed) time = `<div class="dv-bar"><i style="width:${part.pct.toFixed(1)}%"></i></div><div class="dv-t"><span>${Math.round(part.ms)} ms of each ${Math.round(shares.lap)} ms token</span></div>`;
+    else if (r && shares) time = `<div class="dv-t"><span class="dim">no timing from this device</span></div>`;
+    return `<li class="dv${r ? " holds" : " ask"}" data-name="${esc(nm)}" style="--sw:${devColor(nm)}">`
+      + `<div class="dv-h"><i class="sw" aria-hidden="true"></i>${iconFor(meta)}<b>${esc(nm)}</b>${part?.timed ? `<span class="dv-pct">${Math.round(part.pct)}%</span>` : ""}</div>`
+      + `<div class="dv-role">${esc(role)}${nm === myName ? " · you" : ""}</div>`
+      + lines.map((l) => `<div class="dv-l">${l}</div>`).join("") + time + `</li>`;
+  }).join("");
+  // one token's time, end to end: each device's part in its colour, then the wire (and any device without timing)
+  const sh = $("sp-share");
+  if (shares) {
+    sh.hidden = false;
+    sh.innerHTML = `<div class="sh-cap">one token, ${Math.round(shares.lap)} ms round the room</div><div class="sh-bar">`
+      + shares.parts.filter((p) => p.timed).map((p) => `<i style="flex-grow:${p.ms.toFixed(2)};--sw:${devColor(p.name)}" title="${esc(p.name)}: ${Math.round(p.ms)} ms"></i>`).join("")
+      + (shares.rest.ms > 0 ? `<i class="wire" style="flex-grow:${shares.rest.ms.toFixed(2)}" title="${esc(shares.rest.label)}: ${Math.round(shares.rest.ms)} ms"></i>` : "")
+      + `</div><div class="sh-key">` + shares.parts.filter((p) => p.timed).map((p) => `<span style="--sw:${devColor(p.name)}"><i></i>${esc(p.name)} ${Math.round(p.pct)}%</span>`).join("")
+      + (shares.rest.ms > 0 ? `<span class="wire"><i></i>${esc(shares.rest.label)} ${Math.round(shares.rest.pct)}%</span>` : "") + `</div>`;
+  } else { sh.hidden = true; sh.innerHTML = ""; }
+}
+// the deal changed (who holds layers, who asks): the cards, an event for a device that asks only, and the
+// band itself on a screen that has the deal but no map yet (a guest that joined a room already online)
+function speedDeal() {
+  for (const [nm, why] of Object.entries(ai.outWhy || {})) {
+    if ((why === "unneeded" || why === "small") && !speed.asked.has(nm)) { speed.asked.add(nm); speedEvent(`${nm} asks only`); }
+  }
+  if (!lastMap && ai.layersByName && $("ai-panel").classList.contains("online")) {
+    renderMap(Object.keys(ai.layersByName).map((nm, i) => ({ name: nm, layers: ai.layersByName[nm], host: i === 0 ? 1 : 0 })), null, false);
+    return;
+  }
+  renderSpeed();
 }
 
 // who sees the chat: the host's dropdown. The full message goes to the screens allowed to see

@@ -522,6 +522,103 @@
   @keyframes smflash { 0%, 100% { background: var(--faint); box-shadow: none; } 8% { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); } 30% { background: var(--accent); box-shadow: none; } }
   @keyframes smrun { 0% { left: -30%; opacity: 1; } 100% { left: 100%; opacity: 1; } }
 
+  /* the speed panel (room/speedo.js, room.js renderSpeed): the readout, big enough to read on a screen
+     recording; the recent answers as bars, the newest device count in blue; the room's events; the model.
+     It replaces the band head's model name and tok/s, which stay in the page for the folded bar's width. */
+  #swarm-map .sm-head .sm-model, #swarm-map .sm-stats > div:first-child { display: none; }
+  #speedo { display: grid; grid-template-columns: minmax(200px, auto) minmax(0, 1fr) minmax(0, 340px); align-items: stretch; gap: 0; padding: 14px 0; border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  #speedo > div { min-width: 0; padding: 0 22px; }
+  #speedo > div + div { box-shadow: -1px 0 0 var(--rule-2); }
+  #speedo p { margin: 0; }
+  .sp-read { display: flex; flex-direction: column; justify-content: center; gap: 6px; }
+  .sp-num { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+  #sp-tps { font: 500 64px/.95 var(--mono); letter-spacing: -.04em; color: var(--text); font-variant-numeric: tabular-nums; }
+  .sp-u { font: 500 18px/1 var(--mono); color: var(--accent-text); }
+  .sp-sub { display: flex; align-items: center; gap: 7px; font: 400 13px/1.2 var(--sans); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #speedo.live #sp-tps { color: var(--accent-text); }
+  #speedo.live .sp-sub::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: livebeat 1.1s var(--ease) infinite; }
+  .sp-hist { display: flex; flex-direction: column; gap: 8px; }
+  .sp-cap { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font: 400 12px/1.2 var(--sans); color: var(--muted); white-space: nowrap; }
+  #sp-gain { font: 500 14px/1.2 var(--sans); letter-spacing: -.005em; color: var(--accent-text); overflow: hidden; text-overflow: ellipsis; }
+  #sp-hist { flex: 1; display: flex; align-items: flex-end; gap: 4px; min-height: 64px; margin: 0; padding: 0 0 18px; list-style: none; position: relative;
+    background: linear-gradient(var(--rule-2), var(--rule-2)) 0 calc(100% - 18px) / 100% 1px no-repeat; }
+  #sp-hist.empty::after { content: "each answer's speed shows here"; position: absolute; left: 0; bottom: 26px; font: 400 12px/1 var(--sans); color: var(--faint); }
+  #sp-hist .bar { position: relative; flex: 0 1 28px; min-width: 6px; height: calc(46px * var(--h)); display: flex; }
+  #sp-hist .bar i { flex: 1; border-radius: 4px 4px 1px 1px; background: var(--blue-200); transition: height .3s var(--ease); }
+  #sp-hist .bar.cur i { background: var(--accent); }
+  #sp-hist .bar:last-child i { box-shadow: 0 0 0 2px var(--accent-soft); }
+  #sp-hist .bar.step:not(:first-child) { margin-left: 10px; }
+  #sp-hist .bar.step:not(:first-child)::before { content: ""; position: absolute; left: -8px; bottom: -16px; height: calc(46px + 16px); max-height: 64px; border-left: 1px dashed var(--rule-3); }
+  #sp-hist .nl { position: absolute; left: 0; top: calc(100% + 4px); font: 500 11px/1 var(--mono); color: var(--muted); white-space: nowrap; }
+  #sp-hist .bar.cur .nl { color: var(--accent-text); }
+  .sp-side { display: flex; flex-direction: column; gap: 10px; justify-content: center; }
+  .sp-mod { display: flex; flex-direction: column; gap: 3px; }
+  #sp-model { font: 400 24px/1.05 var(--display); letter-spacing: -.02em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #sp-params { font: 400 13px/1.2 var(--mono); color: var(--ink-2); }
+  #sp-events { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; margin: 0; padding: 0; list-style: none; font: 400 13px/1.3 var(--sans); color: var(--muted); }
+  #sp-events li { white-space: nowrap; }
+  #sp-events li + li::before { content: "\2192"; margin: 0 6px; color: var(--faint); }
+  #sp-events li.now { color: var(--text); font-weight: 500; }
+  #sp-events li.now:last-child { animation: evin .5s var(--ease) both; }
+  @keyframes evin { from { opacity: 0; transform: translateY(3px); } }
+  /* a card per device: what it holds, where its experts are, its part of each token */
+  #sp-devs { display: flex; gap: 8px; margin: 0; padding: 0; list-style: none; overflow-x: auto; scrollbar-width: none; }
+  #sp-devs::-webkit-scrollbar { display: none; }
+  #sp-devs:empty { display: none; }
+  .dv { --sw: var(--faint); flex: 1 1 0; min-width: 210px; max-width: 360px; display: flex; flex-direction: column; gap: 5px; padding: 11px 14px 12px; border-radius: 10px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--rule-2), inset 3px 0 0 var(--sw); }   /* no entrance animation: the cards are redrawn with each map (every 800 ms while writing) */
+  .dv.ask { background: transparent; box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .dv-h { display: flex; align-items: center; gap: 7px; min-width: 0; }
+  .dv-h .sw { flex: none; width: 9px; height: 9px; border-radius: 50%; background: var(--sw); }
+  .dv-h svg { flex: none; color: var(--ink-2); }
+  .dv-h b { font: 500 16px/1.1 var(--sans); letter-spacing: -.01em; color: var(--text); text-transform: lowercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dv-pct { margin-left: auto; font: 500 18px/1 var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+  .dv-role { font: 400 12px/1.2 var(--sans); color: var(--accent-text); }
+  .dv.ask .dv-role { color: var(--muted); }
+  .dv-l { display: flex; flex-wrap: wrap; gap: 2px 10px; font: 400 13px/1.3 var(--mono); color: var(--ink-2); }
+  .dv-l span + span::before { content: "\00b7"; margin-right: 10px; color: var(--faint); }
+  .dv-l .dim, .dv-t .dim { color: var(--muted); }
+  .dv-l .ex { font-family: var(--sans); }
+  .dv-bar { height: 5px; margin-top: 2px; border-radius: 3px; background: var(--rule-2); overflow: hidden; }
+  .dv-bar i { display: block; height: 100%; border-radius: 3px; background: var(--sw); transition: width .4s var(--ease); }
+  .dv-t { font: 400 12px/1.2 var(--mono); color: var(--muted); }
+  /* one token's time round the room, in the devices' colours, then the wire */
+  #sp-share { display: flex; flex-direction: column; gap: 6px; }
+  .sh-cap { font: 400 12px/1.2 var(--sans); color: var(--muted); }
+  .sh-bar { display: flex; gap: 2px; height: 10px; }
+  .sh-bar i { flex: 1 1 0; min-width: 3px; border-radius: 3px; background: var(--sw); }
+  .sh-bar i.wire, .sh-key .wire i { background: repeating-linear-gradient(135deg, var(--rule-3) 0 3px, transparent 3px 6px); box-shadow: inset 0 0 0 1px var(--rule-3); }
+  .sh-key { display: flex; flex-wrap: wrap; gap: 4px 16px; font: 400 12px/1.2 var(--mono); color: var(--ink-2); }
+  .sh-key span { display: inline-flex; align-items: center; gap: 6px; }
+  .sh-key i { width: 9px; height: 9px; border-radius: 2px; background: var(--sw); }
+  /* folded: the readout and the history stay, smaller; the cards and the token bar go */
+  #swarm-map.folded #speedo { margin-top: 8px; padding: 8px 0; }
+  #swarm-map.folded #sp-tps { font-size: 40px; }
+  #swarm-map.folded :is(#sp-devs, #sp-share) { display: none; }
+  #swarm-map.folded #sp-hist { min-height: 40px; }
+  #swarm-map.folded #sp-hist .bar { height: calc(26px * var(--h)); }
+  #swarm-map.folded #sp-hist .bar.step:not(:first-child)::before { height: 40px; }
+  #swarm-map.folded #sp-model { font-size: 18px; }
+  @container pane (max-width: 760px) {
+    #speedo { grid-template-columns: minmax(0, 1fr); padding: 12px 0; row-gap: 10px; }
+    #speedo > div { padding: 0 14px; }
+    #speedo > div + div { box-shadow: none; }
+    .sp-side { order: -1; flex-direction: row; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; }
+    .sp-mod { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+    #speedo > .sp-hist { box-shadow: 0 -1px 0 var(--rule-2); padding-top: 10px; }
+    #sp-tps { font-size: 48px; }
+    .sp-u { font-size: 15px; }
+    #sp-model { font-size: 19px; }
+    #sp-params { font-size: 12px; }
+    #sp-events { font-size: 12px; }
+    #sp-events li:not(:nth-last-child(-n+2)) { display: none; }   /* the last two events on a phone */
+    .sp-sub { white-space: normal; }
+    .dv { min-width: 232px; }
+    .dv-l { font-size: 12px; }
+    #swarm-map.folded #sp-tps { font-size: 36px; }
+    #swarm-map.folded #speedo { row-gap: 8px; }
+    #swarm-map.folded .sp-hist { padding-top: 8px; }
+  }
+
   /* Chat | Code: the landing's segmented switch, a white pill that slides */
   .mode-row { display: flex; justify-content: center; padding: 10px 16px 8px; background: var(--bg); border-bottom: 1px solid var(--rule-2); }
   .mode-row:not(:has(#mode-bar:not([hidden]))) { display: none; }
@@ -1845,7 +1942,7 @@
   <main id="chatpane">
     <h1 class="sr-only" id="room-h">Room</h1>
     <div id="topline">
-      <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
+      <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><section id="speedo" aria-label="How fast the room writes"><div class="sp-read"><p class="sp-num"><b id="sp-tps" aria-live="off">–</b><span class="sp-u">tok/s</span></p><p id="sp-unit" class="sp-sub">waiting for a question</p></div><div class="sp-hist"><p class="sp-cap"><span>recent answers</span><span id="sp-gain"></span></p><ol id="sp-hist" class="empty" aria-label="Speed of recent answers"></ol></div><div class="sp-side"><p class="sp-mod"><b id="sp-model"></b><span id="sp-params"></span></p><ol id="sp-events" aria-label="Room events"></ol></div></section><ul id="sp-devs" aria-label="What each device does"></ul><div id="sp-share" hidden></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
       <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div></div>
     </div>
     <div id="chat-log" class="dev-only"></div>
