@@ -27,6 +27,8 @@ Pick by how much memory the room has. The header shows it as `N GB pooled`, and 
 | Qwen3 1.7B | 5.6 GB (4 GB at 8K) | 1.83 GB | 16K (8K when the room is short) |
 | Qwen3.8 27B | 17 GB | 16.06 GB | 16K (up to 64K) |
 | Qwen3.6 35B MoE | 22.5 GB | 20.84 GB | 32K (up to 128K) |
+| Qwen3.5 122B MoE (preview: `?dev=1`, or the terminal) | 73 GB | 72.52 GB | 32K (up to 128K) |
+| Qwen3.8-Flash-Next (preview: `?dev=1`, or `POOLED_DEV=1` in the terminal) | 72 GB | 100.6 GB (71.8 GB of layers, 28.8 GB n-gram table) | 2048 (longer context pending for 2.0) |
 
 The download is split across the devices that run the model, so each one fetches only its part.
 
@@ -42,7 +44,7 @@ The 1.7B opens with a 16K context when the room has 5.6 GB for it. With less, do
 
 In the terminal, `pooled host` and `pooled pull` also list the **Qwen3.5 122B MoE**: about 73 GB across the room and a 72.52 GB download. A Mac Studio lending 25 GB and an RTX 5070 PC keeping 42 GB of its experts in RAM run it at about 17 tok/s. The room page shows it only with `?dev=1`.
 
-When a room's GPUs and RAM together still fall short of a MoE model, a computer started with `--disk` can read some of its experts from the model's files on its SSD instead. The room does this only as a last resort, and it is slower. See [MoE experts read from disk](/docs/terminal#moe-experts-read-from-disk).
+When a room's GPUs and RAM together still fall short of a MoE model, a computer started with `--disk` can read some of its experts from the model's files on its SSD instead. The room does this only as a last resort, and it is slower. See [MoE experts read from disk](/docs/terminal#moe-experts-read-from-disk). A browser-tab version (Qwen3.8-Flash-Next in a Chrome tab, experts read from the SSD through OPFS) is pending for 2.0.
 
 Phones add little memory: 0.5 to 2 GB each. See [Phones and tablets](/docs/phones).
 

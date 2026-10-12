@@ -38,7 +38,7 @@ Issues get the `area:` label of their section.
 
 ## Top of the list
 
-- **SSD expert offload** (P1, [design note](https://github.com/Nehanth/pooled/blob/main/roadmap/32-ssd-expert-offload.md)). Stream a MoE's experts from NVMe when VRAM and RAM can't hold them, the next model size up on a Mac and a PC.
+- **SSD expert offload** (P1, [design note](https://github.com/Nehanth/pooled/blob/main/roadmap/32-ssd-expert-offload.md)). Stream a MoE's experts from NVMe when VRAM and RAM can't hold them, the next model size up on a Mac and a PC. Mostly landed: the room node's disk reader and `--disk` on `pooled join` / `pooled host` (steps 2-5), and the tab's disk tier as a bench page (step 8). Still to come: the tab tier in rooms for Qwen3.8-Flash-Next (#368).
 - **Batched multi-session decode** (P1, [#72](https://github.com/Nehanth/pooled/issues/72)). Agents with subagents send requests at the same time; today they queue behind each other.
 - **Host-authoritative room page** (P1, [#17](https://github.com/Nehanth/pooled/issues/17)). Only the host may load a model or start the room's model; the room node already checks.
 - **Reproducible benchmarks** (P1, [#21](https://github.com/Nehanth/pooled/issues/21)). A protocol, one result format and a device matrix; a contributor is taking the first slice.

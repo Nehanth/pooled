@@ -73,8 +73,9 @@ These stay in `room/models.js` for tests. The picker shows them with [`?dev=1`](
 | Qwen3 4B | GGUF Q8_0 | `DenseEngine` | 4.6 GB | 2048 |
 | SmolLM2 135M | safetensors bf16 | `DenseEngine` | 0.6 GB | 2048 |
 | Qwen 3.5 122B MoE (122B-A10B) | GGUF Q4_0, two files, 72.52 GB | `Qwen35Engine` | 72 GB | 32768 / 131072 |
+| Qwen3.8-Flash-Next (preview) | GGUF Q4_0, three files, 100.6 GB (71.8 GB of layers, a 28.8 GB n-gram table) | `Qwen4ExpEngine` | 72 GB, plus the n-gram table on the device holding layer 1 | 2048 / 2048 |
 
-Qwen3 0.6B is the golden-test model. The 122B MoE has 48 layers and 256 experts, 8 active per token (about 10B of the 122B). Besides `?dev=1`, it is in the terminal's list: `pooled pull` and `pooled host` (from `@pooled/cli` 0.4.0) offer it with what it needs.
+Qwen3 0.6B is the golden-test model. Qwen3.8-Flash-Next is a preview: it is listed with `?dev=1` on the page and `POOLED_DEV=1` in the terminal, its greedy output matches llama.cpp's golden ids, and rooms load it with dense attention, so its context is capped at 2048 tokens. A normal picker row (#370), running it in a tab with its experts on SSD (#368) and longer context are pending for 2.0. The 122B MoE has 48 layers and 256 experts, 8 active per token (about 10B of the 122B). Besides `?dev=1`, it is in the terminal's list: `pooled pull` and `pooled host` (from `@pooled/cli` 0.4.0) offer it with what it needs.
 
 ## Experts in system RAM
 
@@ -86,8 +87,9 @@ On the 35B and the 122B MoE, a `pooled host` or `pooled join` device with a disc
 |---|---|
 | `Qwen35Engine` | Qwen 3.8 27B, Qwen 3.6 35B MoE (`qwen35moe`), Qwen3.5-122B-A10B |
 | `DenseEngine` | Qwen3 0.6B, 1.7B, 4B, SmolLM2 135M |
+| `Qwen4ExpEngine` | Qwen3.8-Flash-Next (llama.cpp `qwen4exp`): 512 experts, 10 active, hyper-connections, a per-layer n-gram table and QSA (`engine/qwen4exp.js`; rooms through `room/flash.js`) |
 
-Both are Pooled's own WebGPU engines. See [Engine and kernels](/docs/internals/engine).
+All three are Pooled's own WebGPU engines. See [Engine and kernels](/docs/internals/engine).
 
 ## Adding a model
 

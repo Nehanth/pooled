@@ -33,7 +33,7 @@ Each published speed below is for a different model on different hardware, taken
 
 | Project | Published speed | Hardware | Source |
 |---|---|---|---|
-| **Pooled** | 35B MoE: 40–46 tok/s plain, 65–84 speculative on one device; 12.9 / 20.6 on two devices at 20 ms emulated latency | One GB10 (DGX Spark) | [Benchmarks](/docs/internals/benchmarks) |
+| **Pooled** | 35B MoE: 40–46 tok/s plain, 65–84 speculative on one device (2026-09-26, coding prompts; 64 plain at 1K context on 2026-10-02); 12.9 / 20.6 on two devices at 20 ms emulated latency | One GB10 (DGX Spark) | [Benchmarks](/docs/internals/benchmarks) |
 | exo | 31.9 tok/s Qwen3 235B; 32.5 tok/s DeepSeek V3.1 671B | 4× M3 Ultra Mac Studio | [Jeff Geerling](https://www.jeffgeerling.com/blog/2025/15-tb-vram-on-mac-studio-rdma-over-thunderbolt-5/) |
 | llama.cpp RPC | Qwen3 235B: 20.4 tok/s on 1 node, 15.2 tok/s on 4 nodes | 4× M3 Ultra | [Jeff Geerling](https://www.jeffgeerling.com/blog/2025/15-tb-vram-on-mac-studio-rdma-over-thunderbolt-5/) |
 | distributed-llama | Llama 3.2 3B Q40: 5.95 tok/s on 1 Pi 5, 13.68 on 4; Qwen3 30B A3B: 13.04 tok/s on 4 | Raspberry Pi 5 | [#165](https://github.com/b4rtaz/distributed-llama/discussions/165), [#255](https://github.com/b4rtaz/distributed-llama/discussions/255) |

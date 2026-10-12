@@ -169,12 +169,12 @@ WebGPU doesn't say how much memory a GPU has, so `pooled` asks the system (`nvid
 |---|---|
 | Discrete (its own memory) | Its free memory, less 1.5 GB |
 | Unified memory (Apple silicon, GB10) | The total, less max(8 GB, 35%). On Linux, never more than is free right now, less 2 GB |
-| Any | At most 64 GB per device |
+| Any | At most 64 GB per device (up to 128 GB for Qwen3.8-Flash-Next only) |
 | Memory can't be read | Half of the GPU's largest buffer, and it says so |
 
 On a discrete GPU it then allocates that much for a moment, to make sure it is really there. `--no-check` skips that. Unified memory skips it anyway: the system's numbers are the memory itself, and touching 64 GB of it takes about 20 s.
 
-- `--gb 12` lends 12 GB (at least 1, at most 64).
+- `--gb 12` lends 12 GB (at least 1, at most 64; up to 128 for Qwen3.8-Flash-Next only. A `pooled join` that says more than 64 counts as 64 in a room of any other model).
 - `--gb max` keeps only a small margin.
 
 ### MoE experts in system RAM
@@ -200,6 +200,7 @@ With `--disk` (on `pooled join` and `pooled host`, `--here` too), a computer tha
 - Each computer first keeps all the experts its `--ram` can hold, and only the rest stay on disk. It keeps at least 2 GB of that RAM for the disk cache.
 - It is slower than experts in RAM: every token waits for some reads. Answers are the same, bit for bit.
 - It needs the model on this computer's disk (`pooled pull`, or the download `pooled join` and `pooled host` do; not `--no-pull`), a discrete GPU and `--ram` of at least 2 GB. Unified memory (Apple silicon, the GB10) doesn't do it yet.
+- This is the terminal's disk tier. A browser tab has its own one in progress: Qwen3.8-Flash-Next in a Chrome tab with its experts copied once into the browser's storage (OPFS) and read from the SSD per token. On main it exists only as a bench page (`tests/bench/tab_disk.html`); turning it on in rooms is pending for 2.0 (#368).
 
 The header shows `disk`, and the host's log says which layers each device reads from disk and how much RAM their cache takes.
 
@@ -377,6 +378,8 @@ qwen3.8-27b        Qwen3.8 27B · Q4
 qwen3.6-35b-moe    Qwen3.6 35B MoE · Q4
 qwen3.5-122b-moe   Qwen3.5 122B MoE · Q4
 ```
+
+With `POOLED_DEV=1`, the list also has `qwen3.8-flash` (Qwen3.8-Flash-Next · Q4, a 100.6 GB download in three files: 71.8 GB of layers and a 28.8 GB n-gram table). It is a preview: rooms cap its context at 2048 tokens, and a normal picker row is pending for 2.0 (#370).
 
 The Qwen3.5 122B MoE is a 72.5 GB download (two files) and needs about 73 GB across the room. It is for a room of big machines, or one with a PC that keeps its experts in RAM. The room page lists it only with `?dev=1`.
 
