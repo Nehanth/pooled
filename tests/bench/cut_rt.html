@@ -1,0 +1,14 @@
+<!doctype html><title>cut round trip</title><pre id="log"></pre>
+<script type="module">
+// tests/bench/cut_rt.js in a tab: the floor of a GPU -> CPU round trip (driver: tests/bench/cut_rt.mjs). ?n=300&work=3000
+import { cutRoundTrip } from "./cut_rt.js";
+const q = new URLSearchParams(location.search), log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+try {
+  const ad = await navigator.gpu.requestAdapter(), device = await ad.requestDevice();
+  log(`cut round trip, ${ad.info?.vendor || ""} ${ad.info?.architecture || ""} ${ad.info?.description || ""}`);
+  const r0 = await cutRoundTrip({ device, N: +(q.get("n") || 300), log });
+  log("with work:");
+  const r1 = await cutRoundTrip({ device, N: +(q.get("n") || 300), workIters: +(q.get("work") || 3000), log });
+  window.RESULT = { r0, r1 };
+} catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e) }; }
+</script>

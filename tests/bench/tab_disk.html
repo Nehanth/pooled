@@ -1,0 +1,125 @@
+<!doctype html><title>tab disk tier</title><pre id="log"></pre>
+<script type="module">
+// The disk tier in a browser tab (engine/expert_opfs.js; roadmap/32 step 8): a Qwen3.5 / 3.6 MoE whose routed experts
+// are read from the tab's OPFS into a small GPU expert cache, against the same model resident. Driver:
+// tests/bench/tab_disk.mjs (or open this page by hand in Chrome on the Mac: see the runbook in that file).
+//   ?model=/models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf   the GGUF, served with Range support (tests/bench/serve.mjs)
+//   ?mode=disk | resident | parked | ingest   disk: the offloaded layers' experts from OPFS (ingested first when they
+//         are not there); resident: every weight on the GPU, no store (the reference); parked: today's offload, every
+//         expert parked in mapped buffers in memory (what the same cache costs without the disk); ingest: only fill OPFS
+//   ?offload=all | lo-hi | a,b,c   the layers whose experts are on disk (default all)
+//   ?slots=N | ?offgb=G | ?mem=G   the GPU expert cache: N experts per layer, or G GiB for the pools + prefill region,
+//         or engine/expert_opfs.js diskCacheBytes' bound for a device with G GiB of memory (mem=36: 19.8 GiB; on
+//         Apple a cache that big likely starves the page cache: sweep offgb=2, 4, 8 first, see the runbook)
+//   ?workers=4   OPFS reader workers;  ?ring=64 staging ring slots (0: queue.writeBuffer);  ?tokens=64 decode length
+//   ?bits=0      skip the bit-exactness fingerprint (prefill + 13 greedy steps, tests/test_q38_bits.js's)
+// window.RESULT: { mode, bits: { plain, hidden, tokens }, decode: { tps, tokens }, summary, ingest, reader }.
+import { Qwen35Engine } from "../../engine/qwen35.js";
+import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
+import { makeTokenizer, argmax } from "../../engine/engine.js";
+import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, streamEntryToGPU } from "../../engine/gguf.js";
+import { ExpertStore } from "../../engine/expert_store.js";
+import { StageRing } from "../../engine/stage_ring.js";
+import { expertLayout, expertContentSig, ingestExperts, opfsExpertStore, OpfsExpertReader, readManifest, ingested, ingestStorage, diskCacheBytes, EXPERT_OPFS_DIR } from "../../engine/expert_opfs.js";
+const q = new URLSearchParams(location.search), MODEL = q.get("model"), MODE = q.get("mode") || "disk";
+const N = +(q.get("tokens") || 64), W = +(q.get("workers") || 4), RING = +(q.get("ring") ?? 64);
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+const range = async (off, len) => { const r = await fetch(MODEL, { headers: { Range: `bytes=${off}-${off + len - 1}` } }); return new Uint8Array(await r.arrayBuffer()); };
+const res = { mode: MODE };
+try {
+  const ad = await navigator.gpu.requestAdapter();
+  const device = await ad.requestDevice({ requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize } });
+  let gpuErrors = 0;
+  device.addEventListener("uncapturederror", (e) => { if (gpuErrors++ < 3) log("GPU ERROR " + e.error?.message?.slice(0, 200)); });
+  device.lost.then((i) => log("DEVICE LOST " + i.message));
+  const G = parseGGUFHeader((await range(0, 64 << 20)).buffer);
+  const arch = G.meta["general.architecture"], L = G.meta[arch + ".block_count"] - (G.meta[arch + ".nextn_predict_layers"] || 0);
+  const tok = makeTokenizer(tokenizerFromGGUF(G.meta));
+  G.streamEntry = (info) => streamEntryToGPU(device, info, (i) => fetch(MODEL, { headers: { Range: `bytes=${i.byteOffset}-${i.byteOffset + i.byteLength - 1}` } }));
+  const ov = q.get("offload") || "all";
+  const layers = (ov === "all" ? Array.from({ length: L }, (_, i) => i) : ov.includes("-") ? (([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i))(ov.split("-").map(Number)) : ov.split(",").map(Number)).filter((i) => i >= 0 && i < L);
+  let experts = null;
+  const vramBytes = q.has("offgb") ? +q.get("offgb") * 2 ** 30 : q.has("mem") ? diskCacheBytes({ memoryBytes: +q.get("mem") * 2 ** 30, residentBytes: 2 * 2 ** 30 }) : 8 * 2 ** 30;
+  if (MODE === "parked") experts = new ExpertStore(device, { layers, slots: +(q.get("slots") || 0), vramBytes });
+  else if (MODE !== "resident") {
+    const lay = expertLayout(G, layers, { contentSig: await expertContentSig(G, (_s, off, len) => range(off, len)) });
+    // persist() and estimate() before an ingest, recorded; a quota below the copy is a warning, not a refusal: Chrome
+    // reports ~usage + 10.7 GB on a fresh origin and grows it as the origin writes (engine/expert_opfs.js
+    // ingestStorage). usage does not count OPFS files written through sync handles in an earlier session either.
+    const have = ingested(await readManifest([EXPERT_OPFS_DIR, lay.key]), lay);
+    res.storage = have ? await navigator.storage.estimate().then((e) => ({ quota: e.quota, usage: e.usage })).catch(() => null) : await ingestStorage(lay.totalBytes);
+    if (!have) {
+      log(`storage: persist() ${res.storage.persisted}, estimate() quota ${res.storage.quota == null ? "?" : (res.storage.quota / 2 ** 30).toFixed(1) + " GiB"}, copy ${(lay.totalBytes / 2 ** 30).toFixed(1)} GiB`);
+      if (res.storage.warning) log("WARNING " + res.storage.warning);
+      const store = await opfsExpertStore(lay), t0 = performance.now();
+      let last = 0, r;
+      // the writer worker holds exclusive read-write handles: release them even when the ingest fails (a fetch, the
+      // quota), or a retry or a reader in this page fails with NoModificationAllowed until a reload
+      try {
+        r = await ingestExperts({ layout: lay, store, readAt: (_s, off, len) => range(off, len), estimate: () => navigator.storage.estimate(), onProgress: (p) => {
+          const t = performance.now();
+          if (t - last > 10e3) { last = t; log(`ingest: ${(p.doneBytes / 2 ** 30).toFixed(1)} / ${(p.totalBytes / 2 ** 30).toFixed(1)} GiB`); }
+        } });
+      } catch (e) {   // out of room: the manifest stops at the last checkpoint, so the next load resumes, never reads it
+        if (e.name === "QuotaExceededError") res.ingest = { error: e.message, wroteGiB: e.wroteBytes / 2 ** 30, onDiskGiB: e.savedBytes / 2 ** 30, neededGiB: e.neededBytes / 2 ** 30, estimate: e.estimate };
+        throw e;
+      } finally { await store.shutdown(); }
+      const s = (performance.now() - t0) / 1000;
+      res.ingest = { gib: r.wroteBytes / 2 ** 30, s, gbps: r.wroteBytes / 1e9 / s, skippedGiB: r.skippedBytes / 2 ** 30, persisted: res.storage.persisted || store.persisted };
+      log(`ingest: ${res.ingest.gib.toFixed(2)} GiB in ${s.toFixed(0)} s (${res.ingest.gbps.toFixed(2)} GB/s), ${res.ingest.skippedGiB.toFixed(2)} GiB already there, persist() ${res.ingest.persisted}`);
+    } else log(`OPFS ${EXPERT_OPFS_DIR}/${lay.key}: every expert of ${layers.length} layers already there (${(lay.totalBytes / 2 ** 30).toFixed(2)} GiB)`);
+    if (MODE === "ingest") { window.RESULT = res; throw "done"; }
+    const reader = await OpfsExpertReader.open(lay, { workers: W });
+    const slotBytes = Math.max(...Object.values(lay.layers).map((x) => x.slices.reduce((a, b) => a + b, 0)));
+    const ring = RING > 0 ? new StageRing(device, { slotBytes, slots: RING }) : null;
+    experts = new ExpertStore(device, { layers, slots: +(q.get("slots") || 0), vramBytes, disk: { layers, reader, ring } });
+    res.reader = { workers: W, shared: reader.shared, ring: ring ? `${RING} x ${(slotBytes / 2 ** 20).toFixed(2)} MiB` : "off" };
+    log(`disk tier: ${layers.length} layers from OPFS, ${W} reader workers (${reader.shared ? "read-only shared handles" : "one owner per file"}), ring ${res.reader.ring}`);
+  }
+  let t0 = performance.now();
+  const weights = await qwen35Weights(G, (i) => range(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: false, experts });
+  // the room's engine settings (engine/preset.js), with the room's own flags from this page's query string
+  const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(q) });
+  applyRoomFlags(eng, q);
+  log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s, ${MODE}${eng.experts ? ", " + eng.experts.P + " experts cached per layer" : ""}`);
+  const h = (arrs) => { let x = 0x811c9dc5; for (const a of arrs) { const u = new Uint32Array(a.buffer, a.byteOffset, a.length); for (let i = 0; i < u.length; i++) x = Math.imul(x ^ u[i], 0x01000193) >>> 0; } return x.toString(16); };
+  if (q.get("bits") !== "0") {   // tests/test_q38_bits.js's fingerprint, plain part: batched prefill + 13 greedy steps
+    const ids = tok.encode(await (await fetch("/tests/golden/q38_bits_prompt.txt")).text()).slice(0, 300);
+    eng.reset(); t0 = performance.now();
+    await eng.prefillTokens(ids.slice(0, -1));
+    let lg = await eng.forwardToken(ids.at(-1));
+    const pf = (performance.now() - t0) / 1000;
+    const L0 = [Float32Array.from(lg)], out = [argmax(lg)];
+    for (let i = 0; i < 12; i++) { lg = await eng.forwardToken(out.at(-1)); L0.push(Float32Array.from(lg)); out.push(argmax(lg)); }
+    const x = await eng._readback(eng.x, eng.stageX, eng.dims.dim);
+    res.bits = { plain: h(L0), hidden: h([x]), tokens: out.join(","), text: tok.decode(out), prefillS: pf };
+    log(`BITS plain ${res.bits.plain} hidden ${res.bits.hidden} tokens ${res.bits.tokens} ${JSON.stringify(res.bits.text)} (300-token prefill ${pf.toFixed(1)} s)`);
+  }
+  // decode speed: a chat prompt, then N greedy tokens (GPU sampling when the engine has it, as the room)
+  const V = tok.vocab, chat = (s) => [V["<|im_start|>"], ...tok.encode("user\n" + s), V["<|im_end|>"], ...tok.encode("\n"), V["<|im_start|>"], ...tok.encode("assistant\n"), V["<think>"], ...tok.encode("\n\n"), V["</think>"], ...tok.encode("\n\n")];
+  const G1 = Object.assign((x) => (x && x.ids instanceof Uint32Array ? x.ids[0] : argmax(x)), { gpu: { kind: "greedy" } });
+  const GS = !!eng.gpuSample, fwd = (id) => (GS ? eng.forwardTokenIds(id) : eng.forwardToken(id)), pick = GS ? G1 : argmax;
+  const runs = [];
+  for (const prompt of ["Write a Python function that returns the two indices of a list whose values sum to a target.", "Explain what a hash map is, in two paragraphs."]) {
+    const pre = chat(prompt);
+    eng.reset(); await eng.prefillTokens(pre.slice(0, -1));
+    const s0 = eng.experts ? { ...eng.experts.stats } : null;
+    let next = pick(await fwd(pre.at(-1)));
+    const gen = [next]; t0 = performance.now();
+    for (let j = 1; j < N; j++) { next = pick(await fwd(next)); gen.push(next); }
+    const s = (performance.now() - t0) / 1000, r = { tps: (N - 1) / s, text: tok.decode(gen) };
+    if (s0) {
+      const d = (k) => eng.experts.stats[k] - s0[k];
+      r.hit = d("hits") / Math.max(1, d("lookups")); r.readsPerTok = d("diskReads") / N; r.mibPerTok = d("diskBytes") / 2 ** 20 / N; r.waitMsPerTok = d("diskWaitMs") / N;
+    }
+    runs.push(r);
+    log(`decode ${N} tokens: ${r.tps.toFixed(2)} tok/s${s0 ? `, hits ${(100 * r.hit).toFixed(1)}%, ${r.readsPerTok.toFixed(1)} expert reads / token (${r.mibPerTok.toFixed(0)} MiB), ${r.waitMsPerTok.toFixed(1)} ms / token waiting on OPFS` : ""}  ${JSON.stringify(r.text.slice(0, 80))}`);
+  }
+  res.decode = runs;
+  if (eng.experts) { res.summary = eng.experts.summary(); log(res.summary); res.readerStats = eng.experts.reader?.stats; }
+  res.gpuErrors = gpuErrors;
+  window.RESULT = res;
+} catch (e) {
+  if (e !== "done") { log("ERROR " + (e.stack || e)); window.RESULT = { ...res, error: String(e?.message || e) }; }
+}
+</script>

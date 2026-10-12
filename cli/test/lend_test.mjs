@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLendArgs, parseGb, parseRam, ramRule, autoRedeal, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, passCounter, explainError,
-  versionAdvice, versionFromBye, hostable, deviceName, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB } from "../lib/lend.js";
+  versionAdvice, versionFromBye, hostable, deviceName, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB, LEND_MAX_GB, devHint } from "../lib/lend.js";
 import { dawnLoader, dawnPackages, DAWN_VERSION } from "../lib/dawn.js";
 
 const GB = 2 ** 30;
@@ -65,11 +65,29 @@ test("host: model, devices, code, ctx", () => {
   assert.deepEqual(hostable(MODELS), ["qwen3-1.7b", "qwen3.6-35b-moe"]);
 });
 
+test("Qwen3.8-Flash-Next is a preview: listed and accepted only with POOLED_DEV=1, and named it says so", () => {
+  const M = { ...MODELS, "qwen3.8-flash": { kind: "qwen4exp" } };
+  assert.deepEqual(hostable(M, false), ["qwen3-1.7b", "qwen3.6-35b-moe"]);
+  assert.deepEqual(hostable(M, true), ["qwen3-1.7b", "qwen3.6-35b-moe", "qwen3.8-flash"]);
+  assert.equal(devHint(M, "qwen3.8-flash", false), "qwen3.8-flash is a preview: set POOLED_DEV=1 to use it");
+  assert.equal(devHint(M, "flash", false), "qwen3.8-flash is a preview: set POOLED_DEV=1 to use it");
+  assert.equal(devHint(M, "qwen3.8-flash", true), "");
+  assert.equal(devHint(M, "gpt-9", false), "");
+  const prev = process.env.POOLED_DEV;
+  try {
+    delete process.env.POOLED_DEV;
+    assert.throws(() => parseLendArgs("host", ["qwen3.8-flash"], { models: M }), /qwen3\.8-flash is a preview: set POOLED_DEV=1/);
+    process.env.POOLED_DEV = "1";
+    assert.equal(parseLendArgs("host", ["flash", "--here"], { models: M }).model, "qwen3.8-flash");
+  } finally { if (prev == null) delete process.env.POOLED_DEV; else process.env.POOLED_DEV = prev; }
+});
+
 test("--gb: numbers, max, and the per-device cap", () => {
   assert.equal(parseGb(undefined), null);
   assert.deepEqual(parseGb("MAX"), { max: true });
   assert.deepEqual(parseGb("7.5"), { gb: 7.5 });
-  assert.deepEqual(parseGb("500"), { gb: DESK_MAX_GB });
+  assert.deepEqual(parseGb("500"), { gb: LEND_MAX_GB });
+  assert.deepEqual(parseGb("90"), { gb: 90 });   // past the default cap when asked (a GB10 holding a ~72 GB model alone)
 });
 
 test("the help texts name every option", () => {
@@ -358,4 +376,18 @@ test("explainError: a room short of a model is not a GPU out of memory (\"rOOM\"
   const x = explainError(new Error("This room is 47.3 GB short for Qwen3.5 122B MoE. Add a device or raise a pledge."), {});
   assert.doesNotMatch(x.message, /ran out of memory/);
   assert.match(explainError(new Error("GPU OOM in createBuffer"), {}).message, /ran out of memory/);
+});
+
+test("--disk: parsed on join and host; on only where expert offload is, with RAM for its cache", async () => {
+  const { diskRule, DISK_RAM_MIN_GB } = await import("../lib/lend.js");
+  assert.equal(parseLendArgs("join", ["ABCD", "--disk"]).disk, true);
+  assert.equal(parseLendArgs("join", ["ABCD"]).disk, false);
+  assert.equal(parseLendArgs("host", ["qwen3.6-35b-moe", "--here", "--disk", "--ram", "8"]).disk, true);
+  const pc = { kind: "discrete", name: "RTX 5070", totalGB: 12 };
+  assert.deepEqual(diskRule(pc, false, { gb: 24 }), { on: false, why: "" });
+  assert.deepEqual(diskRule(pc, true, { gb: 24, why: "--ram 24" }), { on: true, why: "--disk" });
+  assert.match(diskRule({ kind: "unified" }, true, { gb: 0 }).why, /not on unified memory/);
+  assert.match(diskRule(pc, true, { gb: 0, why: "--ram 0" }).why, /needs RAM for expert offload \(--ram 0\)/);
+  assert.match(diskRule(pc, true, { gb: DISK_RAM_MIN_GB - 1 }).why, new RegExp(`at least ${DISK_RAM_MIN_GB} GB`));
+  for (const h of [HELP_JOIN, HELP_HOST]) assert.match(h, /--disk/);
 });

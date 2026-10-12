@@ -2306,6 +2306,90 @@ Flash traces: once roadmap 33 PR 4 runs Flash resident on the GB10, add its path
 record. `tiersim.js` reads 512-expert traces directly (no mapping), and those numbers replace the extrapolation above.
 Full tables, constants and caveats: the PR description.
 
+## 2026-10-11: Qwen3.8-Flash-Next expert offload in the engine, and RECORDED Flash routing traces (branch feat/flash-offload), the Spark (GB10)
+
+**Recorded traces replace the extrapolation above.** `tests/trace_flash.js` records the router's top-10 ids and
+weights at every layer of every decode pass through `Qwen4ExpEngine`'s `moeTrace` option, in `trace_moe.js`'s format.
+Greedy, thinking off, the room's chat template. Committed in `tests/sim/traces/q38flash` (selections gzipped, 0.9 MB for the first three, 2.1 MB with agent and long;
+`tiersim.js` reads `.npy.gz`): chat 300, code 400 and multiturn 600 decode steps, the 122B set's prompts. Distinct
+experts touched per layer over a trace: chat 101-390 (mean 247 of 512), code 175-429 (290), multiturn 148-446 (300).
+Added after review (same engine, main + this branch): agent 80 steps (the agent loop: two tool calls, then turn 2's
+prompt, 2176 ids, no longer fits the 2048 positions; 1,691 prompt tokens) and long 1,990 steps (one Go tutorial).
+Distinct experts per layer: agent 128-217 (166), long 269-492 (413).
+
+**The traces are decode passes only** (the last prompt token's and each generated token's, as trace_moe.js records).
+Prompt passes go through the pool too and churn it (each prompt token routes 10 experts per layer, and a long prompt
+evicts what decode had cached; not measured), so the hit rates below are for steady decode after a prompt, not a turn's first
+tokens. `PROMPT=1 tests/trace_flash.js ...` records the prompt passes as well (`phase: "prompt"`); not run yet.
+
+Pool hit rate vs fraction of a layer cached, all 48 layers, VRAM only, mean over the three traces (the hit rates are
+recorded routing replayed through the pool; only the tok/s further down are modelled):
+
+| fraction cached | slots | recorded Flash | extrapolated (q = 0 / 0.25 / 0.5) |
+|---|---|---|---|
+| 6.3% | 32 | 59.1% | 49.0 / 45.2 / 42.4% |
+| 12.5% | 64 | 71.3% | 62.2 / 58.0 / 55.2% |
+| 17.0% | 87 | 77.7% | 69.0 / 64.8 / 62.0% |
+| 25.0% | 128 | 85.4% | 78.0 / 73.8 / 71.1% |
+| 27.0% | 138 | 86.7% | 79.8 / 75.6 / 73.0% |
+| 50.0% | 256 | 94.0% | 91.2 / 88.1 / 86.4% |
+
+Flash's routing is **more local than even q = 0** (the 122B's locality carried over unchanged): 8-10 points more hits
+at the cache sizes the rooms use. The design note's 65-80% at 27% was low; it is 87%. Same cost model as above
+(modelled costs, disk rows uncalibrated): the tok/s are tiersim's cost model run on the recorded routing, not
+measured on a device. tok/s mid [slowest trace slow costs - fastest trace fast costs]:
+
+| room | pool hits | disk MB / token | tok/s, modelled (recorded routing) | modelled, extrapolated routing (q = 0.25) |
+|---|---|---|---|---|
+| Mac alone, tab, 11 / 18 GiB (85 / 140 slots) | 77 / 87% | 306 / 174 | **5.9 / 8.4** [4.0-12.3] | 4.2 / 5.7 |
+| Mac + PC room node, `--ram 43` (31 parked + 3 disk, T1 2 GiB) | 77% | 4 | **20.1** [14.7-27.4] | 19.4 |
+| Mac + PC room node, `--ram 24` (14 parked + 20 disk, T1 4 GiB) | 77% | 90 | **13.4** [9.8-18.3] | 12.6 |
+| Mac + PC tab (72 slots; page cache 0 / 40 GiB) | 78% | 204 / 42 | **7.9 / 9.7** | 6.5 / 8.2 |
+
+What changed vs the extrapolation:
+- **Mac alone gains the most: 5.7 -> 8.4 tok/s at 18 GiB** (disk 322 -> 174 MB/token). A 25 GiB cache would give 10.5.
+- The CLI room barely moves (19.4 -> 20.1): with every PC layer in RAM the pool's hit rate only shifts parked-copy time.
+- **`--ram 24` now prefers 24-28 disk layers + a big T1 (16.5-16.6 tok/s) over 20 disk layers (14.9)**, the same
+  shape as the extrapolation (best at 28 disk, 16.1). Played back to back as one 1,300-step session: 16.9 at 28-30.
+- Lookahead with the modelled predictor still loses everywhere (Mac 8.4 -> 5.7-6.0, `--ram 24` 13.6 -> 11.9-12.3,
+  PC tab 9.5 -> 6.8-7.1); the oracle bound rises to Mac 12.4, `--ram 24` 18.0, PC tab 13.3. Recording the real
+  lookahead router's picks next to the traces is still the open item.
+- Agent and long (recorded after review; the tables above stay on chat / code / multiturn), hit rate at
+  32 / 64 / 87 / 128 / 138 / 192 / 256 slots: agent 45.0 / 62.8 / 71.8 / 83.7 / 86.9 / 90.9 / 90.9%, long 56.7 / 72.4 /
+  79.2 / 86.4 / 87.6 / 92.6 / 95.8%; mean of all five 55.8 / 69.8 / 76.8 / 85.3 / 86.9 / 91.6 / 93.8%. The agent turn
+  is the least local at small caches, as on the 122B, but only 48 steps count past the warm-up (2048 positions cap
+  it); long holds the chat rates over 1,990 steps. Mac alone at 18 GiB, modelled: agent 8.7, long 8.7 tok/s.
+
+**The engine serves offloaded layers.** `Qwen4ExpEngine` with experts parked by the loader (`qwen4expWeights(...,
+{ experts })`, `OFFLOAD=lo-hi OFFLOAD_SLOTS=N` in `tests/test_q38flash.js`) cuts each offloaded layer's token after
+its router: the 10 ids are read back, `ExpertStore.plan` copies the misses into the layer's slot pool, and the same
+`moe_gu` / `moe_dn` kernels run on the pool through slot ids. No change to `engine/wgsl/qwen4exp.js`. One token at a
+time a cut holds at most K experts, so the store is built without the whole-layer prefill region
+(`build({ region: false })`). **Offload is decode-only**: batched prefill / verify (`engine/qwen4exp_batch.js`, #348,
+not on main yet) binds expert weights directly and refuses an offloaded layer with a readable error
+(`notParked`, engine/expert_store.js); offload plus batched prefill is unsupported until that integration lands
+(`expertRegion: true` keeps the store's whole-layer region for it). Gate (`BITS=1`: 24 greedy ids per golden prompt, hashes of every step's logits and of the
+final residual), on `feat/flash-engine` 2e48ff7:
+
+| run | decode | BITS |
+|---|---|---|
+| resident | 11.7-12.0 tok/s | ids cc765911 logits 649fc78d hidden 1200733c |
+| `OFFLOAD=0-15 OFFLOAD_SLOTS=16` (23.4 GiB parked, 0.73 GiB of pools) | 3.5 tok/s, 48.1% pool hits | identical |
+| `OFFLOAD=all OFFLOAD_DISK=all OFFLOAD_SLOTS=16` (SSD PR 1 + #349 merged; 48 disk layers) | 0.27-0.60 tok/s, 48.7% hits, 62.7 GB read in 165 s waiting | identical |
+
+16 slots is the stress setting (barely over K = 10: every token evicts); the rates say nothing about a sized cache.
+`OFFLOAD=all` with every expert parked in RAM does not fit the 80 GB job cap here (killed while loading).
+After rebasing onto `feat/flash-engine` c5d7633 (review fixes, on top of c2b2959's HC-site restructure) the resident
+run is 14.3 tok/s, BITS ids cc765911 logits a36a9220 hidden cb3459c9 (ids unchanged; new kernels change the logits'
+low bits).
+**Rerun on main after #346 (1e9d9f0) and #361 merged** (this branch merged with main, GB10): resident 13.8-14.1 tok/s,
+`OFFLOAD=0-15 OFFLOAD_SLOTS=16` 3.5 tok/s (48.1% hits, 23.4 GiB parked), both `BITS ids cc765911 logits a36a9220
+hidden cb3459c9`: identical. The offloaded per-layer path (`debugToken`) ran too: `LAYERS=16 OFFLOAD=0-15
+OFFLOAD_SLOTS=16` against the llama.cpp dumps prints the same report as `LAYERS=16` resident, line for line (every
+tensor's worst error, 38 of 5440 expert ids outside llama.cpp's set in both; 544 cuts, 33.5% hits). The
+`OFFLOAD_DISK` row above ran on the scratch merge exp/flash-disk2 (SSD PR 1 + #349): the store's disk hooks
+(`isDisk` / `attach` / `prepare`) are not on main, so that path needs a re-gate once the SSD PRs land.
+
 ## 2026-10-11: expert offload's disk reader on the room node (branch feat/room-node-disk-reader, roadmap 32 step 2), GB10
 
 `packages/room-node/expert_disk.js`: worker threads, each with its own fd per GGUF file, reading experts in ~1 MiB
@@ -2384,3 +2468,246 @@ GB/s, with the event loop busy converting the whole time: p99 182 ms per expert)
 fs.promises with UV_THREADPOOL_SIZE=16 (4.2-4.35 against 5.4-5.6 GB/s); a room node that only needs raw bytes can
 raise libuv's pool instead. conv per expert, 16 workers: Q4_0 layers p50 4.3 ms (p99 7.1-7.5), requantized layers
 p50 17.7-19.7 ms (p99 35-40).
+
+## 2026-10-11: disk tier with T1 and --disk rooms (branch feat/ssd-cli-disk-tiers, roadmap 32 steps 3-5), GB10
+
+Shared machine: another process held ~71 GB of GPU memory and ran the GPU at up to 95%, so speeds swing by up to 2x
+between identical runs; read them as directions, not numbers. The 35B's file was in the page cache for every run
+(warm reads), so disk wait here is the reader's, not the NVMe's.
+
+Exactness: `MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 tests/test_q38_bits.js` under Deno (wgpu) gives `5ef77d06 / 403ae12b`,
+the same as main at 2abdb01 under Deno on this machine (plain, spec and GPU sampling agree), with `OFFLOAD_DISK=all OFFLOAD_DISK_RAM_GB=2` (in-thread reader; T1 7553 hits, 1 miss with
+no free slot) and with `OFFLOAD_DISK=20-39 OFFLOAD_DISK_RAM_GB=1 OFFLOAD_DISK_RESERVE=2 OFFLOAD_DISK_READER=workers`
+(20 parked + 20 disk layers, worker threads; 321 misses fell back to writeBuffer). The hash depends on the runtime:
+under node + Dawn (`tests/dawn_run.mjs`) an independent review got `c2d80d71 / a6111fb2` on main at 2abdb01 and on this
+branch alike (OFFLOAD=0, OFFLOAD=all SLOTS=16, and OFFLOAD_DISK=10-39 OFFLOAD_DISK_RAM_GB=0.5 with the worker reader).
+What holds is "equal to main on the same machine and runtime", not a fixed value.
+
+Decode, `tests/bench/offload_bench.js` under Dawn, 35B, every layer offloaded, 3 GiB GPU budget (35 slots per layer,
+56% pool hits, 141 pool misses / token), LENS=512, worker reader:
+
+| experts | decode tok/s | disk reads / token | disk wait / token | T1 hits / token |
+|---|---|---|---|---|
+| parked in RAM | 11.4 | 0 | - | - |
+| disk, no T1 | 2.9 / 3.6 / 4.1 | 142 | 108-136 ms | - |
+| disk, T1 4 GiB | 3.4 / 4.7 / 7.0 | 81 | 72-97 ms | 61 |
+| disk, T1 8 GiB | 7.9 | 43 | 52 ms | 98 |
+
+Room: two room nodes in one process, local PeerServer (`packages/room-node/test/e2e.mjs nodepair`, OFFLOAD_DISCRETE=1,
+CTX=8192): host 6 GB (layers 0-8 + embed), worker 6 GB with `--ram 6 --disk` (WORKER_DISK=1). Parking alone can't hold
+the worker's 31 layers, so the deal gave it layers 15-19 parked (2.1 GB), 20-39 on disk with a 2.1 GB T1. Answer
+identical to the same room with `--ram 40` (all 31 offloaded layers parked, no disk dealt though `--disk` was on):
+12.1 tok/s cold, 31.9 tok/s on the repeat ask (T1 warm: 5676 hits, 4432 file reads, 3.3 s waiting over both asks).
+
+Planner follow-up (review of #349): the disk plan keeps offloadNeedDisk's fewest m and does not step up toward
+OFFLOAD_GOOD_SLOTS as the plan without disk does. Its 35B deal on one pc(10 GB, --ram 8 --disk) is layers 8-39
+offloaded, 17-39 on disk, 20 slots, T1 2.3 GiB; stepping up gives 0-39, 8-39 on disk, 65 slots, T1 2.1 GiB. Same
+bench (Dawn, LENS=512, DECODE=128, warm page cache, OFFLOAD_SLOTS pinned to the plan's), two runs each, another
+process holding ~47 GB of GPU memory:
+
+| plan | decode tok/s | pool hits | pool misses / token | T1 hits / token | disk reads / token | disk wait / token |
+|---|---|---|---|---|---|---|
+| fewest m (kept) | 12.3 / 8.9 | 42.6% | 147 | 69.4 | 35.5 | 34-42 ms |
+| stepped up | 10.3 / 9.9 | 79.7% | 65 | 7.0 | 40.8 | 44-46 ms |
+
+The step-up halves the pool copies but spreads T1 over 32 disk layers instead of 23, so the file is read more. Decode
+is within noise here; on an NVMe PC the extra reads are the expensive part, so the planner keeps the fewest m.
+
+## 2026-10-11: expert offload's per-layer cut in Chrome: 2.9 ms → 0.5 ms (branch feat/offload-cut-latency), the Spark (GB10)
+
+Context: PR #350 measured the 35B MoE (Qwen3.6-35B-A3B Q4_0) in headless Chrome with every expert parked in memory
+(no disk) at 8.1-8.6 tok/s, against 58-60 resident. So the per-layer readback that offload does (the "cut"), not the
+disk, set the cap. This entry measures where a cut's time goes and adds three exact fixes. Machine: DGX Spark,
+Chrome 131 (Playwright's Chromium, Vulkan via ANGLE, headless=new) and Node 22 + Dawn (npm webgpu 0.6.1). Other
+agents were using the GPU throughout; A/B variants ran interleaved in one process or tab, on one load.
+
+**Round-trip floor** (`tests/bench/cut_rt.{js,html,mjs}`: a tiny dispatch, a 128 B copy, submit, mapAsync; median ms;
+Chrome's `performance.now()` is 0.1 ms coarse):
+
+| | Chrome | Node / Dawn |
+|---|---|---|
+| map of an idle buffer | 0.1 | 0.006 |
+| submit + map, nothing in front | 0.3-2.4 (bimodal) | 0.029 |
+| submit + map, 80 us of GPU work in front | **2.8-2.9** | 0.095 |
+| the same, onSubmittedWorkDone then map | 2.7 | 0.099 |
+| the same with a **kick** (an idle 16 B buffer's mapAsync kept in flight) | **0.4** | 0.100 |
+| empty `queue.submit([])` every macrotask while waiting | 17-19 (worse) | 13-24 (worse) |
+| the 80 us of work alone | 0.08-0.12 | 0.080 |
+
+Chrome's GPU process resolves a map whose work was still running only on its next timed device check, about 2 ms
+later. Any request it handles also checks the device. In Dawn, a cut's round trip is 15-30 us plus the GPU work.
+
+**Per-cut phases in the engine** (`tests/bench/tab_cut.{html,mjs}` / `cut_prof.js` on `tests/bench/cut_core.js`, engine
+`cutProf`; ms per token over 63-127 decoded tokens, 40 cuts per token, 16 slots, 50-56% hits). In Chrome before:
+encode 1.0, submit 1.1, **wait 99-100**, plan 1.9. In Node: encode 1-2, submit 1.2, wait 24-27, plan 1.8-2.9. That
+wait is mostly real GPU work: the layer's attention, 159 expert copies (~250 MB) per token, and the experts. CPU
+planning and encoding are under 0.1 ms per cut in both runtimes. All of the Chrome loss is waiting on the map.
+
+**What changed** (all exact; roadmap/32 "The cut" has the design):
+- `engine/map_kick.js` `mapRead`, engine `mapKick`: the kick above. It applies to offloaded readbacks only (the cut,
+  region loads, an offloaded token's readback), and by default only in Chrome (`KICK_DEFAULT`). See "After review"
+  below.
+- `cutPipe` (opt-in; one-token decode): the cut encodes the layer's expert kernels before it waits and lands the plan
+  at the next cut, so the next layer is encoded while the GPU runs. No gain beyond noise (see below).
+- `cutSpec` (off by default): speculative windows. moe_remap maps ids to slots through GPU copies of the slot tables.
+  A layer that missed rarely skips its cut. A miss rolls the token back to that layer's FFN (recurrent state saved at
+  token start, x saved by moe_remap). The next real cut checks the window in its one map.
+
+**Decode tok/s, Chrome** (pairs = the two prompts of `cut_core.js`):
+
+| config | before (no kick, no pipe) | kick | kick + pipe | kick + pipe + cutSpec |
+|---|---|---|---|---|
+| resident (reference) | 56.5 / 58.2 | 57.3 / 60.2 | | |
+| 10 layers offloaded, 256 slots (every expert cached: the cut alone) | 24.1 / 24.8 | 44.4 / 45.1 | 46.3 / 46.7; rerun 42.7-44.9 (pipe: noise) | **54.0-55.1** (8 of 10 layers speculated, 0 rollbacks) |
+| all 40 offloaded, 16 slots (50-56% hits) | 8.7 / 9.1 | 23.9 / 23.9 | **24.3 / 24.4** | (does not speculate: every layer misses) |
+| all 40 offloaded, 64 slots (78-84% hits) | | | 13.2-13.5 (contended run) | 12.9-13.5 (0.5 rollbacks per token) |
+| all 40 offloaded, 128 slots (90-93% hits) | | | 27.5-29.9 | 27.0-29.1 (9-12 layers speculated, 3.2-3.7 rollbacks per token: neutral) |
+
+Cost of one cut in Chrome: (offloaded − resident) / cuts = **2.35 ms before, 0.49 ms with the kick**, ~0.4 ms with
+the pipe. **Node / Dawn**, same configs: 10 layers / 256 slots 47-55 tok/s without the fixes, 45-49 with (first run; rerun below).
+All 40 / 16 slots 28-33 tok/s in every variant. cutSpec 44-49 vs 45-49 without. Dawn's cut is 0.2-0.3 ms, mostly GPU
+pipeline drain, so these changes are for the tab.
+
+**Bits.** The Chrome fingerprint (`cut_core.js` = test_q38_bits' plain part) is `864fb862 / 4904e2db` for resident and
+for every variant above (PR #350's value). Node / Dawn `tests/test_q38_bits.js MODEL=moe` gives `c2d80d71 / a6111fb2`,
+the same tokens, and spec == plain == GPU sampling for:
+- main: resident, OFFLOAD=all/16, OFFLOAD=0-19/128;
+- this branch: all/16, all/16 with OFFLOAD_SPEC=1 and =always, 0-19/128 with OFFLOAD_SPEC=1 and =always.
+
+=always speculates every layer on every token: 932 rollbacks on all/16 and 174 on 0-19/128. Only the =always runs
+exercise rollback: OFFLOAD_SPEC=1 at 16 slots never speculates, and at 128 slots it speculated 180 layers with no
+rollback. The store's counters
+(cuts, hits, MiB copied) equal main's in each config, so the LRU follows the same path.
+
+**Takeaways.**
+- The kick is what makes offload in a tab usable: 2.7× on the 40-layer, 16-slot run, matching PR #350's 8.1-8.6 to 24.
+- The rest of a cut in Chrome is about 0.5 ms (two IPC hops plus the GPU's drain and refill), versus 0.25 ms on Dawn.
+- cutSpec removes that cost only where layers almost never miss. Speculation should be re-tuned, and the planner
+  should prefer fewer offloaded layers with bigger caches, once the Mac's hit rates for Flash from disk are known.
+- Not measured: the Mac (Metal; Chrome's polling there may differ) and the disk tier (#350) together with this branch.
+
+**After review** (same day; changes in the second commit):
+1. **No kick on resident readbacks.** A reviewer's interleaved Chrome A/B measured resident decode 2-6 tok/s *slower*
+   with the kick on the token readback (53.9 / 52.2 and 55.1 / 54.0 off, against 50.5 / 50.7 and 47.6 / 51.3 on), where
+   decode-ahead already hides that wait. The engine now kicks only offloaded readbacks (`_kick()`).
+2. **Kick only in Chrome by default.** Dawn 10 layers / 256 slots, rerun interleaved in one process (128 tokens, the
+   second pair of each variant, the first having misses):
+
+   | | off | kick | kick + pipe |
+   |---|---|---|---|
+   | round 1 (tok/s) | 48.6 | 48.3 / 42.8 | 46.1 / 45.0 |
+   | round 2 (tok/s) | 45.5 / 46.5 | 43.7 / 43.6 | 44.0 / 43.0 |
+   | wait per token (ms) | 3.9 | 3.9-6.0 | 3.0-3.3 |
+
+   The kick gains nothing on Dawn and may cost 0-2 tok/s, inside this shared machine's noise (a resident Dawn run in
+   the same window measured 15.8-52.7 tok/s). Deno (wgpu) was not measured, and the CPU and power cost of the kick
+   stream is not measured anywhere.
+3. **cutPipe off by default.** Chrome, interleaved, GPU heavily shared (resident 25.7-26.2 tok/s at the time), wait per
+   token over 10 cuts:
+
+   | 10 layers / 256 slots | off | kick | kick + pipe |
+   |---|---|---|---|
+   | wait per token (ms) | 27.3-32.0 | 17.9-20.7 | 18.6-21.6 |
+   | tok/s | 15.5-16.9 | 19.2-21.0 | 18.8-20.3 |
+
+   All 40 layers / 16 slots: off 8.4-8.9 tok/s, kick 12.8-22.7, kick + pipe 11.1-24.2. The kick holds up under load
+   and the pipe adds nothing measurable.
+4. **Robustness.** If a kick map fails, mapRead stops kicking and awaits the real map. A token that throws mid-way
+   clears the pending cut, the FFN mode, the gate count and mapped staging buffers (`_offAbort`). `_specCut` refuses
+   anything but one-token decode.
+5. **Gates rerun, all bit-exact.**
+   - Dawn `test_q38_bits MODEL=moe` gives `c2d80d71 / a6111fb2` for: resident, all/16, all/16 with `OFFLOAD_PIPE=1`,
+     all/16 with `OFFLOAD_SPEC=always` (932 rollbacks), 0-19/128 with `OFFLOAD_SPEC=always` (174 rollbacks) and with
+     `OFFLOAD_SPEC=1` (180 speculated, 0 rollbacks).
+   - Chrome gives `864fb862 / 4904e2db` for resident, every 10-layer variant, all/16 default, and all/16 with cutSpec
+     always speculating (9148 rollbacks over the run).
+   - One bench bug was fixed: variants inherited flags from the previous variant. The earlier tables set every flag
+     explicitly in each variant and are unaffected.
+
+## 2026-10-11: the disk reader's Windows ceiling (branch perf/windows-disk-reads), RTX 5070 PC and GB10
+
+On the PC (Windows, SK hynix P41, Node 24.15) `disk_expert_bench.mjs` stopped at ~2.3-2.6 GB/s raw and 1.3-1.7 conv
+whatever the worker count, warm no faster than first-touch. Profile (warm 1 MiB random reads of a Flash shard):
+workers reading on their own 16 GB/s; workers fed one read at a time by postMessage (with or without the
+SharedArrayBuffer in each message) 16 GB/s, main thread 15-27% busy; the pool's readAt 3.0-3.3 GB/s with the main
+thread **100% busy**. The cost: a fresh ~1 MiB buffer on the main thread (readAt's output, readPart's two slices) takes
+0.3-0.45 ms to fault in on Windows (0.03-0.15 on the GB10), so allocating and copying every part out of the ring capped
+the pool. Now a part or range up to chunkBytes is one job whose worker reads, converts and transfers its own buffers;
+larger or requant-split parts go through the ring and a worker gathers them out. Pool readAt warm: 3.0 -> 9.7-10.7 GB/s.
+`source.js` also read through one handle per file: on Windows reads on one handle run one at a time (cached, 4-16 lanes:
+~1.0 GB/s shared, 13.5 with a handle each). It now opens a handle per read in flight (`localFileReader`).
+
+PC, Flash, `GB=12`, first-touch = after reading 86 GB of other files (`EVICT`, now in the bench), 16 workers:
+
+| | raw GB/s | conv GB/s | p50 / p99 ms per Q4_0 expert (conv) | uv, libuv 16 |
+|---|---|---|---|---|
+| main, first-touch | 1.30 (2.26 in the earlier run) | 1.32 | 13.4 / 47.0 | 0.73 |
+| this branch, first-touch | **3.66** (32 workers: 4.36) | **2.62** | 5.1 / **11.1** | 1.54 |
+| main, warm | 2.19 | 1.63 | 10.8 / 46.0 | 1.37 |
+| this branch, warm | 7.76 | 3.66 | 2.8 / 6.6 | 2.91 |
+
+GB10 (Linux, cold, 16 workers; load average 33-36 from other agents, so conv varies 1.1-3.2 GB/s run to run on both
+sides): the 35B raw 2.90 -> 4.39 cold, 5.0 -> 14.0 warm, conv 2.36 -> 2.36 cold; the 122B raw 3.24 -> 5.39 cold, 4.7 -> 13.0
+warm, conv 3.17 / 2.45 / 1.34 (main) against 3.00 / 2.46 / 1.14 (branch) over three pairs. 4 MiB chunks: no better.
+
+## 2026-10-11: the disk tier in a browser tab, 35B MoE from OPFS (branch feat/tab-disk-tier, on PR 1's feat/ssd-offload-disk-tier, roadmap 32 step 8), the Spark (GB10)
+
+`node tests/bench/tab_disk.mjs` (tests/bench/tab_disk.html): Qwen3.6-35B-A3B Q4_0 in headless Chrome (Playwright's
+Chromium, `--enable-unsafe-webgpu`, Vulkan), every one of the 40 layers' routed experts in the tab's OPFS
+(`engine/expert_opfs.js`: one file per layer, one 4 KiB-aligned record per expert, already in the engine's
+layout; records vary by layer: 1.77 MiB per read on average in these runs, 2.19 MiB for the largest layer, which sizes
+the ring's slots), read by 4 workers with read-only shared sync handles into the ExpertStore pools through a 64-slot mapped
+staging ring (`engine/stage_ring.js`). Persistent profile on the internal NVMe; the profile's files are dropped from the
+page cache before each disk run (cold). Other agents were using the GPU, CPU and disk during these runs: the
+tok/s below moved by up to ~30% between identical runs. Decode: 64 greedy tokens after each of two chat prompts.
+
+- **Bit-exact.** The fingerprint (300-token batched prefill + 13 greedy steps, tests/test_q38_bits.js's plain part,
+  the room's engine preset) is `864fb862 / 4904e2db` for the disk tier with 16 and with 128 cached experts per layer
+  and for the resident model, same tokens.
+- **Ingest** (GGUF over HTTP ranges from tests/bench/serve.mjs -> convert -> a worker's sync handle): 17.5 GiB in 109 s
+  (0.17 GB/s), resumable at 256 MiB checkpoints. `persist()` false in a headless profile; quota 2.4 TB.
+  `navigator.storage.estimate()` reported usage 8987 B in a later session with the 17.5 GiB copy present: usage does
+  not count OPFS files written through sync handles in an earlier session, so it cannot gate a ~100 GB Flash ingest
+  (the page checks the copy's size against the quota instead).
+- **Bytes read.** The summary's "MiB from the file" counted the GGUF's bytes per expert in these runs (48644 MiB in one
+  run, where the reader read 53.1 GB = 49.4 GiB of padded records); it now counts the reader's record bytes.
+
+| run | cache | hits | expert reads / token | OPFS wait / token | decode tok/s |
+|---|---|---|---|---|---|
+| resident | - | - | - | - | 58.3-60.2 |
+| parked (today's offload, all experts in mapped RAM) | 16 / layer | 51-57% | 0 | 0 | 8.5-8.6 |
+| parked | 128 / layer | 89-94% | 0 | 0 | 8.1 |
+| disk, first version (one worker per miss, writeBuffer) | 16 / layer | 51-57% | 139-158 | 154 / 130 ms | 2.18 / 2.46 |
+| disk, + ring | 16 / layer | 51-57% | 139-158 | 133 / 127 ms | 2.77 / 2.79 |
+| disk, + ring + striped lone misses | 16 / layer | 51-57% | 139-158 | 94-217 ms | 1.88-3.19 |
+| disk, first version + ring | 128 / layer (8.75 GiB) | 89-94% | 19-34 | 102 / 77 ms | 3.75 / 4.44 |
+| disk, + striped lone misses (ring 32 / 64 / off) | 128 / layer | 89-94% | 19-34 | 31-59 ms | 4.15-6.05 (ring off 4.50 / 5.77) |
+
+- **The ceiling is the cut, not the disk.** Every offloaded layer reads its selection back to the CPU once per token
+  (engine `_cutResolve`). In Chrome on the GB10, parked runs at 8.5 tok/s with 40 offloaded layers whatever the hit
+  rate: 118 ms per token, ~2.9 ms per offloaded layer including that layer's GPU work (resident: ~17 ms per token for
+  all of it). So 40 offloaded layers cap a tab at ~8.5 tok/s before any read. Not measured in Chrome on the 5070; Node
+  + Dawn there resolved 40 cuts in 16.5 ms per token, also including the GPU work (~0.4 ms per cut, of which JS ~0.19
+  ms; this log, 2026-10-02, expert offload phase 2a). A tab should offload as few layers as its memory allows (room/plan.js already picks the fewest).
+- **A lone miss is latency-bound.** At 94% hits a cut has ~0.5 misses: one ~1.8 MiB read at queue depth 1 is ~2-3 ms
+  cold. Striping a cut's records over the idle workers (`stripeBytes`, 256 KiB minimum stripe) cut the OPFS wait from
+  77-102 to 31-59 ms per token (+27-36% tok/s).
+- **The ring matters for prefill, little for decode.** The mapped ring plus reading the next run of a layer while the
+  current one is copied took the 300-token prefill (80 whole-layer region loads, 35 GiB, + 16 GiB of frames) from
+  130 s to 37-42 s. In decode the ring and `writeBuffer` are within noise at 128 slots (4.76 / 5.82 vs 4.50 / 5.77);
+  at 16 slots the ring gave +13-27% before striping.
+- Prefill on disk layers re-reads every expert of every layer per wide pass (roadmap/32 item 9, layer-major prefill).
+
+Not measured here: the Mac (runbook in tests/bench/tab_disk.mjs: a cache sweep from 2 GiB up to diskCacheBytes' 19.8
+GiB bound for 36 GiB), a model
+whose experts do not fit memory (the 122B, Flash), and a warm page cache.
+
+## 2026-10-11: Mac Studio first tab runs (macOS 27, 36 GiB, Chrome 155.0.8059.39 headless, apple metal-3)
+
+Branches: main 5906f1e (opfs_read), feat/offload-cut-latency d1a490a (#351), feat/tab-disk-tier 19bbaad (#350). No sudo purge: "cold" = GB=48 > RAM (~35% page-cache hits); tab_disk runs warm.
+
+- OPFS expert reads (2.7 MB), W1/2/4/8: warm 33/58/75/88 GB/s; mostly cold 6.9/10.0/10.4/10.5 (= node native). Cold read->writeBuffer 2.5-8.7, mapped ring 6.3-10.7, xfer ~4.0. Rows (90 B): 205K/s at 16 workers mostly cold. Read-only shared handles: yes. persist() false; quota 10.7 GB on a fresh origin, grows with usage (48 GiB written fine).
+- Cut floor (cut_rt): submit+map after 0.18 ms GPU work 0.3 ms, with kick 0.4 ms; after 1.1 ms work both 1.3 ms. No polling penalty on Metal; queue.submit([]) ping 24 ms.
+- 35B tab (tab_cut): resident 103.5 tok/s. All 40 offloaded/16 slots: kick+pipe 47.5, kick off 47.6, both off 46.0. 10 offloaded/256 slots: ~81 all variants. Kick neutral on Metal. Cut fit: ms/token = 9.96 + 0.273 N (R² 0.996).
+- Tab disk tier (tab_disk, 4 workers, ring 64, warm): offgb 2/4/8/12/18/mem=36 = 15.2/20.7/27.4/30.2/30.2/30.4 tok/s (hits 59/77/91/95/95/95%); ring=0 at 2/4/8 = 7.2/10.8/18.4. Ingest 17.5 GiB 0.89 GB/s. Pick offgb=12. BITS 1b02b514/12de2ca for every run (Mac value; GB10 differs).
+- Found: tab_disk.html's quota precheck rejected a fresh origin (10.0 GiB < 17.5) although writes past it succeed; fixed on this branch.

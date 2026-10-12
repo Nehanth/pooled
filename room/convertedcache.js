@@ -18,8 +18,16 @@
 //
 // Safety: an entry is written (in the background, a bounded amount at a time) under a temp name
 // and renamed into place; on read the header and the exact file size are checked against the
-// tensor info, and anything off is dropped and converted fresh. Quota: an entry is only written while the origin keeps a reserve free (the raw
-// download cache matters more than this one); a quota error makes the cache read-only for the load.
+// tensor info, and anything off is dropped and converted fresh.
+//
+// Quota: before the first write the cache asks for persistent storage (navigator.storage.persist(), once, best
+// effort), then just writes. There is no precheck against navigator.storage.estimate(): Chrome reports a small
+// quota for a fresh origin (~10 GiB on a Mac with 159 GB free) and raises it as the origin writes (48 GiB went
+// past that figure with no error), so a precheck stopped the cache after a few GB for nothing, and the browser
+// does not tell a page the disk's real free space to check against instead. Chrome's own limit (a share of the
+// disk, and eviction under pressure) is the guard: a real QuotaExceededError during a write means "full", the
+// partial entry is deleted and the cache is read-only for the rest of the load (engine/expert_opfs.js
+// ingestStorage on the tab disk tier branch follows the same policy).
 // Everything here is best effort: any failure means "convert as before", never a failed load.
 
 export const WCACHE_EPOCH = 1;          // same meaning as LOADER_EPOCH in tests/weight_cache.js
@@ -86,14 +94,9 @@ export function worthCaching(info) {
   return info.ggmlType !== GGML_F32 && info.byteLength >= MIN_ENTRY_BYTES;
 }
 
-// Room left to write `bytes` while keeping a reserve free: max(1 GB, 15% of the quota).
-// est: navigator.storage.estimate() output; unknown quota -> no write.
-export function quotaAllows(est, bytes) {
-  const quota = est?.quota, usage = est?.usage;
-  if (!(quota > 0) || !(usage >= 0)) return false;
-  const reserve = Math.max(2 ** 30, quota * 0.15);
-  return usage + bytes <= quota - reserve;
-}
+// A write that failed for lack of room: QuotaExceededError (Chrome, Safari), its legacy code 22, or another
+// browser's quota error by message (Firefox's NS_ERROR_DOM_QUOTA_REACHED).
+export const isQuotaError = (e) => e?.name === "QuotaExceededError" || e?.code === 22 || /quota/i.test(e?.message || e?.name || "");
 
 // 32-bit multiply-xor hash of the payload (tests/weight_cache.js payloadHash, same value).
 export function payloadHash(...parts) {
@@ -160,17 +163,18 @@ async function writeWhole(dir, name, parts) {
 
 export class BrowserWeightCache {
   // dir: this key's OPFS directory handle; have: entry file names already in it
-  constructor(dir, meta, { have = new Set(), estimate = null, verify = false, policy = worthCaching, writeWindow = WRITE_WINDOW } = {}) {
+  // persist: navigator.storage.persist (or null), asked once before the first write
+  constructor(dir, meta, { have = new Set(), persist = null, verify = false, policy = worthCaching, writeWindow = WRITE_WINDOW } = {}) {
     this.dir = dir; this.meta = meta; this.have = have; this.window = writeWindow;
     this.pending = new Set(); this.pendingBytes = 0;
-    this.estimate = estimate; this.verify = verify; this.policy = policy;
-    this.readOnly = !estimate;
+    this.persist = persist; this.persisted = null; this.verify = verify; this.policy = policy;
+    this.readOnly = false; this.outOfRoom = false;
     // writeMs: time the load waited on writes (they mostly overlap the conversion)
     this.stats = { hit: 0, miss: 0, bad: 0, write: 0, skip: 0, full: 0, hitBytes: 0, writeBytes: 0, readMs: 0, writeMs: 0 };
   }
 
   // Open (creating) the directory for this model under root, drop the model's other directories.
-  // opts: { url, revision, G, converter, variant, estimate, verify, policy, writeWindow }. null when unusable.
+  // opts: { url, revision, G, converter, variant, persist, verify, policy, writeWindow }. null when unusable.
   static async open(root, opts) {
     try {
       const top = await root.getDirectoryHandle(WCACHE_DIR, { create: true });
@@ -185,7 +189,7 @@ export class BrowserWeightCache {
         if (n.endsWith(".bin")) have.add(n);
         else if (n.includes(".tmp-")) dir.removeEntry(n).catch(() => {});   // a tab that died mid-write
       }
-      const c = new BrowserWeightCache(dir, { ...meta, dir: name }, { have, estimate: opts.estimate, verify: opts.verify, policy: opts.policy, writeWindow: opts.writeWindow });
+      const c = new BrowserWeightCache(dir, { ...meta, dir: name }, { have, persist: opts.persist, verify: opts.verify, policy: opts.policy, writeWindow: opts.writeWindow });
       return c;
     } catch { return null; }
   }
@@ -207,22 +211,20 @@ export class BrowserWeightCache {
     }
   }
 
-  // Store a freshly converted entry, when the policy wants it and the quota has room. The write
+  // Store a freshly converted entry, when the policy wants it and no write has run out of room. The write
   // runs in the background so it overlaps the next tensor's download and conversion; put only
   // waits when more than writeWindow bytes are still being written (that caps the extra memory the
   // pending entries hold). flush() waits for all of them.
   async put(info, e) {
-    if (this.readOnly || !this.policy(info)) { this.stats.skip++; return; }
+    if (this.readOnly || !this.policy(info)) { this.stats[this.outOfRoom ? "full" : "skip"]++; return; }
     const enc = encodeEntry(info, e);
     if (!enc) { this.stats.skip++; return; }
-    let est = null;
-    try { est = await this.estimate(); } catch { /* unknown: no write */ }
-    // usage does not count the writes still in flight yet
-    if (!quotaAllows(est, enc.bytes + this.pendingBytes)) { this.stats.full++; return; }
+    if (this.persisted === null) this.persisted = this._persist();
+    await this.persisted;
     const tw = performance.now();
     while (this.pending.size && this.pendingBytes + enc.bytes > this.window) await Promise.race(this.pending);
     this.stats.writeMs += performance.now() - tw;
-    if (this.readOnly) { this.stats.skip++; return; }
+    if (this.readOnly) { this.stats[this.outOfRoom ? "full" : "skip"]++; return; }
     this.pendingBytes += enc.bytes;
     const p = this._write(entryFile(info.name), enc).finally(() => { this.pendingBytes -= enc.bytes; this.pending.delete(p); });
     this.pending.add(p);
@@ -236,8 +238,15 @@ export class BrowserWeightCache {
     this.stats.writeMs += performance.now() - t0;
   }
 
+  // Ask once for persistent storage, so the entries are not evicted under storage pressure (Chrome grants or
+  // denies it without a prompt). Best effort: denied, missing or throwing, the cache works the same.
+  async _persist() {
+    try { return (await this.persist?.()) === true; } catch { return false; }
+  }
+
   async _write(f, enc) {
     const tmp = `${f}.tmp-${Math.random().toString(36).slice(2)}`;
+    let direct = false;   // writing the real name (no move()): a failure leaves a torn file under it
     try {
       const h = await this.dir.getFileHandle(tmp, { create: true });
       const w = await h.createWritable();
@@ -249,15 +258,27 @@ export class BrowserWeightCache {
       } else {
         // no rename here: write the real name directly (a torn file fails the size check on read)
         await this.dir.removeEntry(tmp).catch(() => {});
+        direct = true;
         await writeWhole(this.dir, f, enc.parts);
       }
       this.have.add(f);
       this.stats.write++; this.stats.writeBytes += enc.bytes;
     } catch (err) {
-      // out of space (QuotaExceededError) or no writable files in this browser: read-only from here
+      // out of room (a quota error) or no writable files in this browser: read-only from here, and no
+      // partial entry left behind to be read back
+      const first = !this.readOnly;
       this.readOnly = true;
-      if (err?.name === "QuotaExceededError") this.stats.full++;
       await this.dir.removeEntry(tmp).catch(() => {});
+      if (direct) await this.dir.removeEntry(f).catch(() => {});
+      if (isQuotaError(err)) {
+        this.stats.full++;
+        if (!this.outOfRoom) {
+          this.outOfRoom = true;
+          console.warn(`converted weights: out of storage writing ${f} (${(enc.bytes / 2 ** 20).toFixed(0)} MB, ` +
+            `${(this.stats.writeBytes / 2 ** 20).toFixed(0)} MB saved this load); not caching the rest of this load ` +
+            `(${err?.message || err?.name})`);
+        }
+      } else if (first) console.warn(`converted weights: cannot write ${f}, not caching this load (${err?.message || err})`);
     }
   }
 
@@ -265,7 +286,7 @@ export class BrowserWeightCache {
     const s = this.stats, mb = (b) => (b / 2 ** 20).toFixed(0) + " MB";
     return `converted weights: ${s.hit} from this device (${mb(s.hitBytes)}, ${(s.readMs / 1000).toFixed(1)} s), ` +
       `${s.write} saved (${mb(s.writeBytes)}, ${(s.writeMs / 1000).toFixed(1)} s waited)` +
-      (s.bad ? `, ${s.bad} bad dropped` : "") + (s.full ? `, ${s.full} not saved (storage nearly full)` : "");
+      (s.bad ? `, ${s.bad} bad dropped` : "") + (s.full ? `, ${s.full} not saved (out of storage)` : "");
   }
 }
 
@@ -351,7 +372,7 @@ export async function attachBrowserWeightCache(G, url, { storage = globalThis.na
     }
     const c = await BrowserWeightCache.open(await storage.getDirectory(), {
       url, G, converter: converterMemo.v, verify,
-      estimate: storage.estimate ? () => storage.estimate() : null,
+      persist: storage.persist ? () => storage.persist() : null,
     });
     G.entryCache = c;
     return c;

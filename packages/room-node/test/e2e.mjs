@@ -16,7 +16,7 @@
 //        SETUP=solo|pair|proc|tab (the node alone, + a second node, the second node in its own process, + a browser tab), REQ (requests.jsonl
 //        recorded from an OpenClaw gateway), CKPT=0 (no checkpoints: the baseline), CTX, STEPS=turn1 (the cold turn only)
 // env: MODELS (model dir, layout of source.js LOCAL; default <checkout>/models), MODEL (qwen3-1.7b), PROMPT,
-//      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, WORKER_GB / WORKER_RAM / HOST_RAM (nodepair), NODE_RAM (tabhost), OFFLOAD_DISCRETE=1 (offload on unified memory, as a discrete GPU), CHROME_BIN (a Chromium or
+//      MAXNEW (48), REF (solo JSON from test/solo.mjs, to compare), NODE_GB, TAB_GB, WORKER_GB / WORKER_RAM / HOST_RAM (nodepair), WORKER_DISK=1 / HOST_DISK=1 (nodepair: --disk, expert offload's disk tier), NODE_RAM (tabhost), OFFLOAD_DISCRETE=1 (offload on unified memory, as a discrete GPU), CHROME_BIN (a Chromium or
 //      headless_shell with WebGPU; default playwright's), PORT (8231), OUT (result JSON path),
 //      SIGNAL=cloud / PAGE=live (the public PeerJS server / the room page on https://pooled.run)
 import http from "node:http";
@@ -341,9 +341,10 @@ try {
     out.node = { text, stats, sent: worker.sent, frames: worker.frames, frameMsAvg: worker.frames ? +(worker.frameMs / worker.frames).toFixed(2) : null, range: worker.ai.range, split: worker.split };
     out.tab = await tabStatus();
   } else if (MODE === "nodepair") {
-    host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, ramGB: +(process.env.HOST_RAM || 0), mem: MEM, name: "node-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a") });
-    // WORKER_GB / WORKER_RAM: the worker's own pledge, and RAM for experts (expert offload: it holds what the pledges can't)
-    worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || NODE_GB), ramGB: +(process.env.WORKER_RAM || 0), mem: MEM, name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
+    host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, ramGB: +(process.env.HOST_RAM || 0), expertDisk: process.env.HOST_DISK === "1", mem: MEM, name: "node-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a"), ...(CTX ? { ctx: CTX } : {}) });
+    // WORKER_GB / WORKER_RAM: the worker's own pledge, and RAM for experts (expert offload: it holds what the pledges can't);
+    // WORKER_DISK=1: and the disk tier (some experts read from the model's files when its RAM can't park them all)
+    worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || NODE_GB), ramGB: +(process.env.WORKER_RAM || 0), expertDisk: process.env.WORKER_DISK === "1", mem: MEM, name: "node-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
     const tStart = Date.now();
     await host.start(MODEL, { minDevices: 2, waitMs: 30000 });
     out.onlineS = (Date.now() - tStart) / 1000;
@@ -351,6 +352,10 @@ try {
     out.node = await ask(host);
     out.second = await ask(host);   // again: the caches' prefix is reused
     out.workerFrames = worker.frames; out.sent = { host: host.sent, worker: worker.sent };
+    out.offload = host.ai.offloadBy || null;
+    const ws = worker.ai.experts?.summary?.(), hs = host.ai.experts?.summary?.();
+    if (ws) { out.workerExperts = ws; log(`[b] ${ws}`); }
+    if (hs) { out.hostExperts = hs; log(`[a] ${hs}`); }
   }
   if (MODE === "auto") {   // createRoom + ask: no start() call, the ask deals the layers (solo here)
     host = await createRoom({ model: MODEL, pledgeGB: NODE_GB, name: "node-host", signal: SIGNAL, modelDir: MODELS, log: nodeLog("host") });

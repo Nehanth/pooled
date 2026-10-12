@@ -16,7 +16,7 @@ function loadEngine() {
   }, (err) => { engineLoad = null; throw new Error("couldn't load the inference engine (" + (err?.message || err) + "). Check the connection and try again"); });
 }
 import { GGML_EMBED, GGML_OUTPUT,
-  ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes }
+  ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes, qwen4expConfig, qwen4expShardBytes }
   from "./engine/gguf.js";
 import { roomQwen35Options, roomEngineFlags, applyRoomFlags } from "./engine/preset.js";   // no imports of its own; the engine itself loads late (loadEngine)
 import { WIRE_F16, f32ToB64, packF16, unpackF16, asU16, asF32, b64ToF32, wireStats } from "./room/wire.js";
@@ -26,7 +26,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions } from "./room/models.js";
+import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -44,6 +44,7 @@ import { PERSONAS, specials, fitContext, templateProfile } from "./room/conversa
 import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, staleNamesakes, renameTo, NAME_PROBE_MS,
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
+import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, START_PENDING_MS } from "./room/authz.js";
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
@@ -51,7 +52,7 @@ import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
-import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor } from "./room/pledge.js";
+import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
@@ -134,6 +135,16 @@ const rand = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)))
 
 let peer = null;          // my PeerJS peer
 let isHost = false;
+// Who runs the model is checked here, not taken from whoever says so (room/authz.js): when each device was
+// first seen, the creator's roster order (join order), and when this device joined
+const seenAt = new Map();
+let rosterOrder = [], joinedAt = 0;
+// a guest: the metas the pick is checked with, from the creator's roster only (not the hellos and pledges on
+// this device's own links). The creator: each device's join number (seq), given once and kept across relinks
+// and a resume
+let authzView = new Map();
+const seqOf = new Map();
+let nextSeq = 0;
 let roomCode = null;
 // Joining (room/joingate.js). Host: the gate (invite key, passes, Ask before new devices join) and the
 // links waiting in its lobby. Guest: the invite key from the link it opened, the pass the host gave it,
@@ -486,7 +497,7 @@ function roomFitFor(key) {
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
   const pledges = devs.map((d) => pledgeGB(d.meta) * 2 ** 30);
-  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes)); };
+  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key)); };
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
   return { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
@@ -988,6 +999,19 @@ async function pathOf(id) {
 
 // a link is gone (closed, or dropped as silent): on the host the device left; workers wait for the roster
 // (e.dead: it was dropped for silence, "stopped responding")
+// the host this device followed left the room (the creator's roster dropped it): free for the next Start. A device
+// that only asked (a guest, no layers) goes back to the picker instead of a stale online screen; a creator that
+// left ends the room as before (hostGone)
+function followedHostLeft() {
+  const was = ai.dealer;
+  ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null; clearTimeout(ai.startWait); ai.startWait = null;
+  if (was === PREFIX + roomCode || ai.role === "host" || ai.engine || ai.loadingShard) return;
+  if (ai.hostId === was) ai.hostId = null;
+  aiLoading(false);
+  $("ai-panel").classList.remove("online");
+  $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
+  aiStatus("the model's host left the room: press Start to start it again");
+}
 function peerGone(id, e) {
   conns.delete(id);
   hbForget(liveness, id);
@@ -996,6 +1020,7 @@ function peerGone(id, e) {
   for (const [k, v] of linksDown) if (k.endsWith("|" + id) || k.startsWith(id + "|") || (e?.name && v.name === e.name)) linksDown.delete(k);
   if (isHost) {
     dropCard(id); members.delete(id); roster.delete(id); broadcastRoster();
+    if (ai.dealer === id) followedHostLeft();   // the member it followed as the model host left
     const verb = e?.dead ? "stopped responding" : "left";
     log("room", `${e?.meta?.api ? "API client " : ""}${e?.name || id} ${verb}`);
     apiPeerGone(id);
@@ -1135,14 +1160,17 @@ function onData(from, d) {
         d.name = uniqueName(d.name, from, myName, roster);
       }
       e.name = d.name; e.meta = d.meta;
+      if (!seenAt.has(from)) seenAt.set(from, performance.now());
       if (d.meta?.api && isHost && !apiWelcome(from, d)) break;
       members.set(from, { ...members.get(from), name: d.name, meta: d.meta });
       ensureCard(from, d.name, d.meta);
       if (isHost) {
         // the model runs on another device (biggestPeerId): say which, so this one takes its ai-ready-all
         // when it links in (welcomeFar)
-        if (ai.role !== "host" && ai.hostId && ai.hostId !== peer.id && conns.has(ai.hostId) && ai.hostId !== from && $("ai-panel").classList.contains("online")) sendTo(from, { t: "ai-modelhost", id: ai.hostId });
-        roster.set(from, { name: d.name, meta: d.meta, ...(+d.auth >= AUTH_V ? { a: 1 } : {}) }); broadcastRoster();
+        // (only a host this creator checked on a Start it saw, room/authz.js: a newcomer takes no other)
+        if (ai.role !== "host" && ai.dealerFresh && ai.dealer && ai.dealer !== peer.id && conns.has(ai.dealer) && ai.dealer !== from) sendTo(from, { t: "ai-modelhost", id: ai.dealer });
+        if (!seqOf.has(from)) seqOf.set(from, ++nextSeq);
+        roster.set(from, { name: d.name, meta: d.meta, seq: seqOf.get(from), ...(+d.auth >= AUTH_V ? { a: 1 } : {}) }); broadcastRoster();
         if (!aiLoadDeath(from, d)) aiRejoin(from, d.name);
         if (d.died?.during && d.died.ago > 2) log("room", `${d.name} came back: its tab was killed ${d.died.ago} s ago while ${d.died.during}. Phones kill background tabs; keep the screen on.`);
         if (ai.visibility !== "all") sendTo(from, { t: "ai-visibility", mode: ai.visibility });
@@ -1190,6 +1218,10 @@ function onData(from, d) {
       }
       break;
     case "roster": {
+      if (from === PREFIX + roomCode && Array.isArray(d.members)) {
+        rosterOrder = joinOrder(d.members);
+        authzView = new Map(d.members.filter((m) => m?.id && !m.meta?.api).map((m) => [m.id, m.meta || {}]));
+      }
       // the host's view of the room: draw a card per device, no mesh connections
       // colours follow the host's order (the host first, then join order), so a device has the
       // same colour on every screen (they used to go by first-seen order, which put "me" first)
@@ -1206,6 +1238,7 @@ function onData(from, d) {
         if (m.id === peer.id) continue;
         seen.add(m.id);
         members.set(m.id, { name: m.name, meta: m.meta, ...(m.a ? { a: 1 } : {}) });
+        if (!seenAt.has(m.id)) seenAt.set(m.id, performance.now());
         const c = ensureCard(m.id, m.name, m.meta);
         if (m.meta?.contribGB) setLends(c, m.meta.contribGB);
         const ce = conns.get(m.id); if (ce) ce.meta = m.meta;
@@ -1218,6 +1251,7 @@ function onData(from, d) {
         if (ce && from === PREFIX + roomCode && !isHost && m.name) ce.name = m.name;
       }
       for (const id of [...members.keys()]) if (!seen.has(id)) { members.delete(id); dropCard(id); }
+      if (ai.dealer && ai.dealer !== peer.id && !seen.has(ai.dealer)) followedHostLeft();
       // links that waited to see whether the roster lists their device as one from before the proofs
       if (from === PREFIX + roomCode) for (const [, c] of conns) if (c.hold?.waitOn) { const w = c.hold.waitOn; c.hold.waitOn = null; meshIn(c, w); }
       // this device runs the model but not the room: a device it has no link to can't ask it yet
@@ -1578,7 +1612,7 @@ function renameSelf(name) {
 
 function broadcastRoster() {
   // a: 1 = it proves its links (room/chanauth.js); a link from one without it runs an older Pooled
-  const members = [{ id: peer.id, name: myName, meta: myMeta, ...(meshKey ? { a: 1 } : {}) },
+  const members = [{ id: peer.id, name: myName, meta: myMeta, seq: 0, ...(meshKey ? { a: 1 } : {}) },
     ...[...roster.entries()].map(([id, m]) => ({ id, ...m }))];
   broadcastAll({ t: "roster", members });
 }
@@ -1885,6 +1919,9 @@ async function start(create, resume = null, from = 0) {
 
   isHost = create;
   roomCode = code;
+  seenAt.clear(); rosterOrder = []; authzView = new Map(); joinedAt = performance.now(); ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null;
+  seqOf.clear(); nextSeq = 0;
+  if (create && resume?.seqs) for (const [id, n] of resume.seqs) if (typeof id === "string" && Number.isFinite(+n)) { seqOf.set(id, +n); nextSeq = Math.max(nextSeq, +n); }
   // the host's gate: a reloaded host keeps its invite key (links already shared keep working), the
   // passes it gave out and the Ask setting; a room saved by an older build gets a new one
   if (create) { gate = resume ? restoreGate(resume.gate, { ask: ASK_DEFAULT, legacy: LEGACY_AUTH }) : makeGate({ ask: ASK_DEFAULT, legacy: LEGACY_AUTH }); meshKey = gate.mk; askSwitch(); }
@@ -2596,6 +2633,11 @@ async function serveWeight(from, d) {
 const concat = (a, b) => { const m = new Uint8Array(a.length + b.length); m.set(a); m.set(b, a.length); return m; };
 
 let ai = {
+  dealer: null,          // the model host this device checked (room/authz.js): ai-load and FROM_HOST come only from it
+  dealerFresh: false,    // that host was checked on a Start this device saw (the creator names only such a host in ai-modelhost)
+  dealerActive: false,   // that host has shown it deals (ai-load, ai-layers, ai-hostprog, ai-ready-all): busy for other Starts
+  startAt: null,         // when this device followed a Start (a second one meanwhile is refused); null once it fails
+  startWait: null,       // this device pressed Start on another device's behalf: the timer that gives up
   visibility: "all",   // who sees the chat: all | host | asker (room/visibility.js)
   engine: null, tok: null, cfg: null, device: null,
   role: null,            // "host" | "worker" | "guest"
@@ -2970,6 +3012,8 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   mascot("Grabbing my slice of the model… hang tight.");
   // a previous attempt in this tab still owns its weights: release them first, or the
   // second load doubles GPU memory and every buffer after the limit comes back invalid
+  // (and a Qwen3.8-Flash-Next engine's n-gram workers, whose OPFS locks the new load's table needs: room/flash.js close)
+  closeEngine();
   if (ai.device) { try { ai.waker?.destroy(); ai.device.destroy(); } catch {} ai.device = null; ai.engine = null; }
   ai.held = null; ai.waker = null; ai.draft = null;
   ai.firstGpuError = null;
@@ -3047,22 +3091,79 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
 }
 
 // ---- host ----
+// Drop this tab's engine. What dropping one does not free with its GPU device: a Qwen3.8-Flash-Next engine's n-gram
+// table reader (OPFS workers holding their files' locks, room/flash.js close), so every path that lets go of
+// ai.engine comes through here. Every other engine has no close
+function closeEngine() { const e = ai.engine; ai.engine = null; try { e?.close?.()?.catch?.(() => {}); } catch {} }
+
 // the model host (room/plan.js pickModelHost): the strongest device, a computer before a phone,
 // whoever pressed Start. The room's creator stays the PeerJS hub either way.
 function biggestPeerId() {
-  return pickModelHost([{ id: peer.id, meta: myMeta }, ...[...conns].map(([id, e]) => ({ id, meta: e.meta }))]) || peer.id;
+  if (roomView().get(PREFIX + roomCode)?.fixedHost) return PREFIX + roomCode;   // a pooled host runs its own model
+  return pickModelHost([...roomView()].map(([id, meta]) => ({ id, meta: saneMeta(meta) }))) || peer.id;
 }
+// The facts the model host is checked with (room/authz.js): the devices in the creator's roster with the metas
+// it lists (not API clients). The creator: its own roster. A guest: the roster the creator sent, never the
+// hellos and pledges on its own links
+function roomView() {
+  if (isHost) {
+    const v = new Map([[peer.id, myMeta]]);
+    for (const [id, m] of roster) if (!m.meta?.api) v.set(id, m.meta || {});
+    return v;
+  }
+  const v = new Map(authzView);
+  if (!v.has(peer.id)) v.set(peer.id, myMeta);
+  return v;
+}
+const joinSeq = () => (isHost ? [peer.id, ...joinOrder([...roster].map(([id, m]) => ({ id, seq: m.seq })))] : rosterOrder);
+// does `boss` run the model, by this device's own pick over the devices `ids` names (room/authz.js)? On a Start
+// this device is in the room for, devices it has seen for a while can't be left out
+function checkHost(boss, ids, from) {
+  const now = performance.now();
+  const r = verifyHost({ boss, ids: Array.isArray(ids) ? ids : null, view: roomView(), creator: PREFIX + roomCode, from, order: joinSeq(),
+    seenFor: (id) => now - (id === peer.id ? joinedAt : seenAt.get(id) ?? now) });
+  if (!r.ok) log("room", `not following ${members.get(boss)?.name || boss} as the model host: ${r.why}`);
+  return r;
+}
+const dealerHere = () => !!ai.dealer && roomView().has(ai.dealer);
+const startRunning = () => ai.busy || !!ai.engine || !!ai.loadingShard || ai.role === "worker" || $("ai-panel").classList.contains("online");
 function aiStartAnywhere() {
   const model = $("ai-model").value;
   const boss = biggestPeerId();
-  if (boss === peer.id) { aiStart(model); return; }
+  const ids = [...roomView().keys()];
+  const busy = startBusy({ boss, self: peer.id, dealer: ai.dealer, dealerHere: dealerHere(), dealing: ai.dealerActive, running: startRunning(), pendingSince: ai.startAt, now: performance.now() });
+  if (busy === "replay") return;
+  if (busy) { aiStatus(`can't start: ${busy}`); return; }
+  ai.dealer = boss; ai.dealerFresh = true; ai.dealerActive = false; ai.startAt = performance.now();
+  // this device is the pick: it starts, and tells the room so every device checks it and follows (the creator
+  // relays it to the devices this one has no link to)
+  if (boss === peer.id) { broadcastAll({ t: "ai-start-req", model, boss, by: myName, ids }); aiStart(model); return; }
   ai.hostId = boss;   // its ai-layers and ai-ready-all are the ones this device listens to (FROM_HOST)
+  // nobody follows it (their view differs, or another Start is in progress): give the button back. Any sign of
+  // the host dealing (ai-layers, ai-hostprog, ai-ready-all) stops this
+  followWait(START_PENDING_MS);
   $("ai-start").disabled = true; $("ai-model").disabled = true;
   aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`);
   $("ldg-sub").textContent = `${conns.get(boss)?.name || "the biggest device"} is dealing the layers`;
   $("ldg-fill").style.width = "0%";
   aiStatus(`asked ${conns.get(boss)?.name || "the biggest device"} to start ${MODELS[model].label.split("·")[0].trim()}…`);
-  broadcastAll({ t: "ai-start-req", model, boss, by: myName });
+  broadcastAll({ t: "ai-start-req", model, boss, by: myName, ids });
+}
+// a Start this device follows (its own, or one the creator relayed): give up when its host shows no sign of
+// dealing in time, so a host that never starts doesn't hold the room
+function followWait(ms) {
+  clearTimeout(ai.startWait);
+  ai.startWait = setTimeout(() => startRefused(`${members.get(ai.dealer)?.name || "the host"} didn't start within ${Math.round(ms / 1000)} s`), ms);
+}
+// this device's Start was refused (ai-start-refused), or a Start it follows went nowhere: the picker comes back
+function startRefused(why) {
+  clearTimeout(ai.startWait); ai.startWait = null;
+  if (ai.loadingShard || ai.engine || ai.role === "worker" || ai.dealerActive || $("ai-panel").classList.contains("online")) return;
+  // (the host it asked for stays its named host: if that one deals after all, this device still takes part)
+  ai.dealer = null; ai.dealerFresh = false; ai.startAt = null;
+  aiLoading(false);
+  $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
+  aiStatus("the model didn't start: " + why);
 }
 // why a start stops when the room's pledges cannot hold the model (room/plan.js shortNote)
 function shortWhy(M, fit, names, metas) {
@@ -3077,6 +3178,7 @@ async function aiStart(modelArg) {
   $("ai-model").disabled = true;
   try {
     ai.role = "host";
+    ai.dealer = peer.id; ai.dealerFresh = true; ai.dealerActive = true;
     ai.degraded = false;
     ai.startFailed = null;
     ai.readyPeers = new Set();
@@ -3120,6 +3222,18 @@ async function aiStart(modelArg) {
       layerAt = (c) => w + c * kvBytesPerLayerPos(ai.G.meta, ROOM_KV);   // the attention layers' KV cache at the room's context
       embedBytes = hostHeldBytes("qwen35", { embed: ai.G.tensors[GGML_EMBED]?.byteLength || 0, out: ai.G.tensors[GGML_OUTPUT]?.byteLength || 0, mtp: qwen35MtpBytes(ai.G) });
       experts = expertsOf(ai.G, L);   // what each layer's experts park (null for a dense model): ExpertStore's sizes
+    } else if (M.kind === "qwen4exp") {
+      // Qwen3.8-Flash-Next: the dense phase (no QSA indexer; K / V in f32 on its attention layers, averaged), the
+      // embedding and the head's HC mixer + output.weight on the host; no expert offload yet (experts stays null)
+      aiStatus("reading model index…");
+      ai.G = await fetchModelHeader(M);
+      ai.GModel = modelKey;
+      const c = qwen4expConfig(ai.G.meta);
+      L = c.L;
+      const w = qwen4expShardBytes(ai.G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false, qsa: false }) / 4;
+      const kvPos = 2 * c.nKVHeads * c.headDim * 4 * c.qsa.filter(Boolean).length / L;
+      layerAt = (cx) => w + cx * kvPos;
+      embedBytes = qwen4expShardBytes(ai.G, { lo: 0, hi: 0, hasEmbed: true, hasHead: true, qsa: false });
     } else {
       cfg = await (await fetch(M.cfg)).json();
       L = cfg.num_hidden_layers;
@@ -3151,8 +3265,10 @@ async function aiStart(modelArg) {
     const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name)) * 2 ** 30;
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
-    // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); browsers never offload
-    const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], experts);
+    // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); browsers never offload.
+    // With the model key a node started with --disk that has this model's files (room/pledge.js diskFor) may also
+    // leave some layers' experts on disk when parking can't hold the model
+    const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], experts, modelKey);
     ai.moe = !!experts;                       // the speed panel: a MoE model's cards say where the experts are
     // the model's default context, or its fallback when only that fits these pledges (room/models.js
     // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
@@ -3169,7 +3285,9 @@ async function aiStart(modelArg) {
     // whose pledge is under one layer stay in the room as ask-only guests (room/plan.js dealRoom)
     const deal = dealRoom({ L, layerBytes, hostBytes: embedBytes, pledges, mode: $("ai-split").value === "speed" ? "speed" : "memory",
       ms: [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
-      phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS, off });
+      phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS, off,
+      // Qwen3.8-Flash-Next: the device dealt the n-gram layer must have its table on disk (null for every other model)
+      ngram: ngramFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], ngramOf(modelKey)) });
     if (!deal.fit.fits || !deal.used.length) throw new Error(shortWhy(M, deal.fit, [myName, ...ai.chain.map(nameOf)], [myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)]));
     ai.outWhy = Object.fromEntries(Object.entries(deal.out).map(([i, why]) => [nameOf(ai.chain[i - 1]), why]));
     for (const i of Object.keys(deal.out)) ai.leftOut.add(ai.chain[i - 1]);
@@ -3181,6 +3299,7 @@ async function aiStart(modelArg) {
     // what each device holds of its pledge (the host's includes the embedding and the head)
     ai.heldGB = Object.fromEntries([myName, ...ai.chainNames].map((nm, k) => [nm, deal.held[k] / 2 ** 30]));
     log("room", `memory per device (of its pledge): ${deal.used.map((i, k) => `${[myName, ...ai.chain.map(nameOf)][k]} ${(deal.held[k] / 2 ** 30).toFixed(2)} of ${(pledges[i] / 2 ** 30).toFixed(1)} GB`).join(" · ")}`);
+    if (deal.ngram) log("room", `the n-gram table (${(deal.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${deal.ngram.layer}): ${[myName, ...ai.chainNames][deal.ngram.at]} reads it (from its own copy when it has one, else by HTTP range: its log says which)${deal.ngram.checked ? "" : "; whether it has the disk for it is not reported"}`);
 
     ai.deferred = [];
     // what every device already has cached, so each one can take its missing ranges from the room.
@@ -3194,13 +3313,17 @@ async function aiStart(modelArg) {
       : "speculative decoding is off while experts are offloaded: plain decoding is faster there (?offspec=1 turns it on)");
     ai.chain.forEach((id, i) => {
       const o = deal.offload?.[i + 1];
-      if (o) log("room", `${nameOf(id)} offloads layers ${o.lo}–${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`);
+      const disk = o && Number.isInteger(o.diskLo);
+      if (o) log("room", `${nameOf(id)} offloads layers ${o.lo}–${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`
+        + (disk ? `; layers ${o.diskLo}–${o.hi - 1} read theirs from disk (${(o.diskRamBytes / 2 ** 30).toFixed(1)} GB RAM cache)` : ""));
       const msg = {
         t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX, kv: ROOM_KV,
         next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host",
         host: peer.id,
         inv,
-        ...(o ? { offload: { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}) } } : {}),
+        // the same shape as the room node's (packages/room-node/roomnode.js offloadMsg), disk tier included
+        ...(o ? { offload: { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}),
+          ...(disk ? { diskLo: o.diskLo, diskRamBytes: o.diskRamBytes } : {}) } } : {}),
       };
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });
       sendTo(id, msg);
@@ -3243,10 +3366,11 @@ async function aiStart(modelArg) {
 // the load stops at its next tensor (the pacer) and aiStart's catch lands here.
 function aiStartStopped(why) {
   ai.startFailed = null;
+  ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null;   // free for the next Start (room/authz.js)
   ai.redealPending = false;   // nothing to deal again: the room is stopped
   clearInterval(ai.progTimer);
   aiLoading(false);
-  ai.engine = null;
+  closeEngine();
   ai.chain = []; ai.chainNames = []; ai.plan = null;   // nothing to re-seat or re-deal
   ai.heldGB = null; ai.outWhy = {}; paintHeld();
   failWaiters(new Error(why));
@@ -3268,7 +3392,8 @@ function aiLoadFailed(from, name, message) {
 // a worker whose start was stopped: its layers are not needed, free them (the next ai-load deals afresh)
 function workerStopped() {
   if (ai.role !== "worker") return;
-  ai.role = null; ai.range = null; ai.engine = null;
+  closeEngine();
+  ai.role = null; ai.range = null;
   try { ai.device?.destroy(); } catch {}
   ai.device = null;
 }
@@ -3284,7 +3409,7 @@ async function aiRedeal(force = false) {
   const model = ai.model || $("ai-model").value;
   failWaiters(new Error("re-dealing the layers"));
   ckptClear();
-  ai.engine = null; ai.busy = false; ai.fed = null;
+  closeEngine(); ai.busy = false; ai.fed = null;
   $("ai-panel").classList.remove("online");
   $("ai-row").style.display = "none";
   showRedeal(false);
@@ -4186,7 +4311,7 @@ function hostGone() {
     if (conns.has(PREFIX + roomCode)) { clearInterval(hostGone.timer); return; }
     if (Date.now() - t0 > HOST_WAIT_MS) {
       clearInterval(hostGone.timer);
-      ai.engine = null;
+      closeEngine();
       $("room-over-h").textContent = "Room over";
       $("room-over-why").textContent = "The host didn't come back. The host holds the conversation and the model's first and last layers, so this room can't answer any more.";
       aiStatus("the host left; this room is over");
@@ -4217,7 +4342,7 @@ function saveHost() {
   try {
     localStorage.setItem(HOST_KEY, JSON.stringify({ code: roomCode, name: myName, signal: signalServer?.spec || null, model: ai.model || null, turns: ai.conv.turns,
       transcript: ai.transcript.filter((t) => !t.api).slice(-20), settings: ai.settings, peers: ai.chainNames || [], split: $("ai-split").value, ckptN: ai.ckptN || 0,
-      gate: gate ? saveGate(gate) : null, t: Date.now() }));
+      gate: gate ? saveGate(gate) : null, seqs: [...seqOf], selfHosted: ai.role === "host", t: Date.now() }));
   } catch {}
 }
 addEventListener("pagehide", saveHost);   // stamp the saved room as the tab unloads, so a reload can go straight back in
@@ -4237,6 +4362,8 @@ function resumeHost(r) {
   for (const it of ai.transcript) { chatUser(it.name, it.text); chatBotStart(it.mid); botEl.pieces = [{ t: it.reply || "", d: 0 }]; chatBotEnd(null, it.stats); }
   if (!r.model || !MODELS[r.model]) return;
   setModelValue(r.model); modelTouched = true;
+  // the model ran on another device: this creator doesn't start it on itself (the room's pick decides: press Start)
+  if (r.selfHosted === false) { aiStatus("resumed: the model ran on another device; press Start to start it again"); return; }
   // start the model again once the devices that held layers are back, or after 25 s regardless
   const want = new Set(r.peers || []), t0 = Date.now();
   aiStatus(want.size ? `resumed: waiting for ${[...want].join(", ")} to come back…` : "resumed: loading the model again…");
@@ -4256,14 +4383,31 @@ function resumeHost(r) {
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
   "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-share", "ai-wake", "ai-out"]);
+// a host showing it deals (room/authz.js): this device follows it from now on, busy for any other Start
+const HOST_SIGNS = new Set(["ai-layers", "ai-hostprog", "ai-ready-all", "ai-redeal", "ai-map"]);
+function hostDealing(from) {
+  if (!ai.dealer || !dealerHere()) ai.dealer = from;
+  if (from !== ai.dealer) return;
+  ai.dealerActive = true;
+  clearTimeout(ai.startWait); ai.startWait = null;
+}
 async function aiOnData(from, d) {
   if (d.t.startsWith("ai-code") || d.t.startsWith("ai-pv")) { codeOnData(from, d); return; }
   const e = conns.get(from);
   if (FROM_HOST.has(d.t)) {
     if (ai.role === "host") return;
-    if (from !== (ai.hostId || PREFIX + roomCode)) return;
+    // the host this device follows while it is in the room; before it follows one, the creator or the host the
+    // creator named in ai-modelhost (room/authz.js)
+    if (!hostAllowed({ from, dealer: ai.dealer, dealerHere: dealerHere(), named: ai.hostId || PREFIX + roomCode }).take) return;
+    if (HOST_SIGNS.has(d.t)) hostDealing(from);
   }
   if (d.t === "ai-load" && ai.role === "host") return;
+  if (d.t === "ai-load") {
+    const g = hostAllowed({ from, host: d.host, dealer: ai.dealer, dealerHere: dealerHere(), named: ai.hostId || PREFIX + roomCode });
+    // refused out loud: the host's start fails at once instead of waiting on this device
+    if (!g.take) { log("room", `refused layers from ${e?.name || from}: ${g.why}`); sendTo(from, { t: "ai-error", load: 1, message: `${myName} refused the layers: ${g.why}` }); return; }
+    hostDealing(from);
+  }
   // layers dealt by a host on another protocol would fail as NaNs or timeouts: refuse them out loud
   if (d.t === "ai-load" && d.v != null && d.v !== PROTOCOL) {
     const { local, remote } = versionMismatch({ mine: PROTOCOL, theirs: d.v, theyHost: true, me: myName });
@@ -4275,6 +4419,24 @@ async function aiOnData(from, d) {
   if ((d.t === "ai-hiddenret" || d.t === "ai-hiddenret-b") && from !== ai.chain[ai.chain.length - 1]) return;
   switch (d.t) {
     case "ai-start-req":
+      // every device checks the pick itself, with the creator's facts (room/authz.js); the creator relays a request
+      // it checked to the devices the requester has no link to yet (rq: who pressed Start, for their answers)
+      {
+        if (!MODELS[d.model]) break;
+        // only the creator's (its own, or one it checked and relays): a member's copy sent here directly is ignored
+        if (!startFrom({ from, creator: PREFIX + roomCode, isCreator: isHost })) break;
+        const busy = startBusy({ boss: d.boss, self: peer.id, dealer: ai.dealer, dealerHere: dealerHere(), dealing: ai.dealerActive, running: startRunning(), pendingSince: ai.startAt, now: performance.now() });
+        if (busy === "replay") break;   // the host this device follows already: nothing to do
+        const r = busy ? { ok: false, why: busy } : checkHost(d.boss, d.ids, from);
+        if (!r.ok) { if (busy) log("room", `ignored ${d.by || "a device"}'s Start: ${busy}`); sendTo(from, { t: "ai-start-refused", by: myName, why: r.why, ...(d.rq ? { rq: d.rq } : {}) }); break; }
+      }
+      if (isHost) {
+        const to = [...conns.keys()].filter((id) => id !== from && !conns.get(id)?.meta?.api);
+        ai.relay = { rq: from, boss: d.boss, to: new Set(to) };
+        for (const id of to) sendTo(id, { ...d, rq: from });
+      }
+      ai.dealer = d.boss; ai.dealerFresh = true; ai.dealerActive = false; ai.startAt = performance.now();
+      if (d.boss !== peer.id) followWait(START_PENDING_MS);
       setModelValue(d.model);   // every screen shows the model that was actually started
       // the device dealing the layers runs the room: listen to it, even before this device has a link to
       // it (a model host that is not the room's creator links every device before it deals)
@@ -4284,9 +4446,27 @@ async function aiOnData(from, d) {
       if (d.boss === peer.id) { toast(`${d.by} started ${MODELS[d.model]?.label.split("·")[0].trim()}`); aiStart(d.model); }
       else aiStatus(`${d.by} started the model…`);
       break;
+    case "ai-start-refused": {   // a device didn't follow a Start (room/authz.js)
+      // the creator: an answer to a Start it relayed goes to whoever pressed it
+      // (named by the link it came on, never by its own text; boss: 1 when the device that would run the model refused)
+      if (isHost && d.rq && ai.relay?.rq === d.rq && ai.relay.to.has(from) && conns.has(d.rq)) {
+        sendTo(d.rq, { t: "ai-start-refused", fwd: 1, boss: from === ai.relay.boss ? 1 : 0, by: conns.get(from)?.name || "a device", why: String(d.why || "").slice(0, 120) });
+        break;
+      }
+      // a Start this device waits on: only the creator answers. It gives up when the creator's own check refused it
+      // or the device that would run it did; another device's refusal is a note (the timer still runs)
+      if (ai.startWait && from === PREFIX + roomCode) {
+        const why = `${String(d.by || "a device").slice(0, 40)}: ${String(d.why || "refused").slice(0, 120)}`;
+        if (!d.fwd || d.boss) startRefused(why); else log("room", `${why} (it doesn't follow this Start)`);
+      }
+      break;
+    }
     case "ai-modelhost":   // the room's creator: the model runs on another device, which links to this one
       if (isHost || from !== PREFIX + roomCode || ai.role === "host" || ai.role === "worker" || typeof d.id !== "string") break;
       ai.hostId = d.id;
+      // the creator checked it on a Start it saw: follow it (busy for a Start naming another device) until it shows it
+      // deals, or for START_PENDING_MS
+      if (!dealerHere()) { ai.dealer = d.id; ai.dealerActive = false; ai.startAt = performance.now(); followWait(START_PENDING_MS); }
       break;
     case "ai-next":
       // relink: the device after this one came back under the same id; the old link to it is dead
@@ -4305,7 +4485,8 @@ async function aiOnData(from, d) {
       ai.outWhy = d.out && typeof d.out === "object" ? d.out : {};
       paintHeld();
       if (ai.role === "worker" && !d.by[myName]) {   // not in this deal: ask-only guest, GPU memory freed
-        ai.role = "guest"; ai.range = null; ai.engine = null; ai.held = null;
+        closeEngine();
+        ai.role = "guest"; ai.range = null; ai.held = null;
         try { ai.device?.destroy(); } catch {}
         ai.device = null;
       }
@@ -4393,13 +4574,14 @@ async function aiOnData(from, d) {
         aiLoading(false);
         aiStatus("failed: " + err.message);
         toast(`This device couldn't load its layers (${err.message}). Press Start to try again.`);
-        ai.engine = null;
+        closeEngine();
         $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
         sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1 });   // load: the host stops the start
       }
       break;
     }
     case "ai-start-failed":   // the host stopped the start: back to the picker, and a load still running here stops (the pacer)
+      ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null; clearTimeout(ai.startWait); ai.startWait = null;
       ai.heldGB = null; ai.outWhy = {}; paintHeld();
       ai.startFailed = d.why || "the start was stopped";
       if (freeOnStartFailed(ai.loadingShard)) workerStopped();   // (a load in flight stops at its next tensor, and its catch does this)
