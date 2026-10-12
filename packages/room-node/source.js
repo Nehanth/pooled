@@ -35,14 +35,11 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
   const stat = { from: isLocal ? "disk" : "Hugging Face", fetched: 0, total: 0, planned: false };
   const count = (n) => { if (stat.planned) stat.fetched += n; };
   const files = urls.map((url, i) => {
-    const f = { url, fh: null, pre: null, local: isLocal ? locals[i] : null };
+    const f = { url, file: null, pre: null, local: isLocal ? locals[i] : null };
     f.readAt = f.local
       ? async (off, len) => {
-        f.fh ||= await fs.promises.open(f.local, "r");
-        const out = new Uint8Array(len);
-        let o = 0;
-        while (o < len) { const { bytesRead } = await f.fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
-        if (o !== len) throw new Error(`short read in ${f.local} at ${off}`);
+        f.file ||= localFileReader(f.local);
+        const out = await f.file.readAt(off, len);
         count(len);
         return out;
       }
@@ -64,6 +61,8 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
   };
   return {
     M, local, url: M.gguf, stat, shards: urls.length,
+    // every file's local path in shard order when the whole model is local (expert_disk.js reads experts from them), else null
+    localPaths: isLocal ? [...locals] : null,
     readAt: files[0].readAt,   // the first file (ckptdisk.js modelFileId)
     bytesOf: (info) => fileOf(info).readAt(info.byteOffset, info.byteLength),
     // the tensors this load will read, in the loader's order ([{ byteOffset, byteLength, shard? }]): streaming,
@@ -86,7 +85,48 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
     },
     cfg: () => (M.cfg ? sideFile(M.cfg) : null),
     tokJson: () => (M.tok ? sideFile(M.tok) : null),
-    async close() { for (const f of files) { f.pre?.close(); f.pre = null; try { await f.fh?.close(); } catch {} f.fh = null; } },
+    async close() { for (const f of files) { f.pre?.close(); f.pre = null; await f.file?.close(); f.file = null; } },
+  };
+}
+
+// Positional reads of one local file -> Uint8Array, several at once, each on a handle of its own. On Windows the reads
+// on one handle run one at a time, whatever libuv's pool does: cached 1 MiB reads from 4-16 lanes on one shared handle
+// got ~1.0 GB/s on the RTX 5070 PC, against 6.5 from one lane and 13.5 with a handle per lane (NVMe, cold: 3-5 GB/s
+// with a handle per lane). A read takes an idle handle, else opens one more up to `lanes` (libuv runs at most
+// UV_THREADPOOL_SIZE file reads at a time, 4 by default), else shares the least busy one. A failed open (EMFILE, say)
+// fails every read waiting on that handle: each of them tries once more on another handle before giving up.
+export function localFileReader(file, { lanes = Math.max(4, parseInt(process.env.UV_THREADPOOL_SIZE, 10) || 0) } = {}) {
+  let hs = [], closed = false;
+  return {
+    get handles() { return hs.length; },
+    async readAt(off, len) {
+      for (let retried = false; ; retried = true) {
+        if (closed) throw new Error(`${file}: reader is closed`);
+        let h = hs.find((x) => !x.busy);
+        if (!h && hs.length < lanes) hs.push(h = { fh: fs.promises.open(file, "r"), busy: 0 });
+        h ||= hs.reduce((a, b) => (b.busy < a.busy ? b : a));
+        h.busy++;
+        try {
+          let fh;
+          try { fh = await h.fh; } catch (e) {
+            hs = hs.filter((x) => x !== h);   // a failed open is not kept
+            if (retried) throw e;
+            continue;
+          }
+          const out = new Uint8Array(len);
+          let o = 0;
+          while (o < len) { const { bytesRead } = await fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
+          if (o !== len) throw new Error(`short read in ${file} at ${off}`);
+          return out;
+        } finally { h.busy--; }
+      }
+    },
+    async close() {
+      closed = true;
+      const old = hs;
+      hs = [];
+      for (const h of old) try { await (await h.fh).close(); } catch {}
+    },
   };
 }
 

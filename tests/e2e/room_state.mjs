@@ -28,6 +28,22 @@
 //                  the 35B MoE's ~5 min on a PC): once that load is in the room does not go online without
 //                  it; it comes back (a new tab, same name) within the grace (45 s here), is dealt its
 //                  layers again, and the room answers.
+//   takeover       a member (the smallest pledge) presses Start: the creator checks it and relays it, and
+//                  the device that lends the most (not the creator) runs the model. Then that member forges
+//                  a Start naming itself, layers dealt by itself and host messages to the creator: the
+//                  creator refuses all of it, keeps its host, and the room still answers (#17).
+//   hijack         a member (10 GB) sends the creator its own ai-ready-all, a question and a token before any
+//                  Start while a 24 GB device is in the room: the creator follows nobody, shows nothing; then
+//                  the 24 GB device presses Start and runs the model (the review of 2a1cf4b).
+//   slowstart      a phone presses Start, the room's pick holds its own load for 52 s: the phone keeps
+//                  waiting (it doesn't say the model didn't start) and comes online once the load ends.
+//   fresh          a newcomer joins a room that has been up a while; a member links to it straight away and sends it
+//                  a Start naming itself (leaving out the bigger device), its own ai-ready-all and a token: the
+//                  newcomer follows none of it; then the room's pick presses Start and runs the model.
+//   restart        the pick's start fails (a worker reports it couldn't load): the pick can press Start again.
+//   refforge       a member presses Start (relayed by the creator); another member sends the creator a refusal
+//                  for it, claiming to be the creator: the creator forwards it under the sender's real name, the
+//                  requester keeps waiting, and it comes online with the room's pick.
 //   loaddrop-gone  the same, and it stays away: past the rejoin grace (15 s here) the host re-deals by
 //                  itself without it (it used to sit "waiting for it to come back" for good: the grace ran
 //                  out while its own load was in progress).
@@ -43,7 +59,7 @@ import { loadPlaywright, chromiumPath, GPU_ARGS, serveRepo } from "./engine_synt
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf("--" + k); return i >= 0 ? argv[i + 1] : d; };
-const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,loaddrop-back,loaddrop-gone")).split(","));
+const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,fresh,restart,refforge,loaddrop-back,loaddrop-gone")).split(","));
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const PORT = +arg("port", 8191), SIG = PORT + 1;
 const MODEL_KEY = "qwen3.8-27b";
@@ -87,7 +103,9 @@ if (!room.includes(LOAD_ANCHOR)) { console.error(`room.js has no ${JSON.stringif
 fs.writeFileSync(extra["/room.js"], room.replace(ANCHOR, '  conn.on("close", () => { if (window.__delayClose) setTimeout(onClose, window.__delayClose); else onClose(); });\n')
   .replace(HELLO_ANCHOR, HELLO_ANCHOR + "      if (window.__loseFirstHello && e && !e.lostHello) { e.lostHello = 1; break; }\n")
   .replace(LOAD_ANCHOR, "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); if (window.__holdHostLoad) { const e = ai.engine; ai.engine = null; await new Promise((r) => { window.__hostLoadHeld = true; window.__releaseHostLoad = r; }); ai.engine = e; } }")
-  + '\nwindow.__dropLinks = () => { for (const id of [...conns.keys()]) dropLink(id, "e2e: the link dropped"); };\n');
+  + '\nwindow.__dropLinks = () => { for (const id of [...conns.keys()]) dropLink(id, "e2e: the link dropped"); };\n'
+  // window.__send(id, msg): send a raw room message (a member forging host messages); __dealer(): the host this device checked
+  + 'window.__send = (id, m) => sendTo(id, m); window.__links = () => [...conns.keys()]; window.__dealer = () => ai.dealer; window.__hostId = () => ai.hostId; window.__myId = () => peer.id; window.__link = (id) => ensureLink(id, 20000);\n');
 // globalThis.__e2eGraceMs (an init script): the rejoin grace (room/resume.js REJOIN_GRACE_MS, 60 s)
 const resume = fs.readFileSync(path.join(ROOT, "room/resume.js"), "utf8"), GRACE_ANCHOR = "export const REJOIN_GRACE_MS = 60000;";
 if (!resume.includes(GRACE_ANCHOR)) { console.error(`room/resume.js has no ${JSON.stringify(GRACE_ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
@@ -304,6 +322,133 @@ async function duplicate() {
 }
 
 // a device joins a room that is already going (a new tab, as a reopened link)
+async function takeover() {
+  const desk = await device("desk"), big = await device("big"), mal = await device("mal");
+  await openRoom([[desk, "desk", 8], [big, "big", 12], [mal, "mal", 4]]);
+  await startModel(mal, null);   // the smallest pledge presses Start: the biggest runs the model
+  const up = await online(big) && await online(desk, 60000);
+  check("takeover: a member's Start runs the model on the device that lends the most", up && await isModelHost(big), (await view(desk)).status);
+  if (!up) return;
+  const ids = await Promise.all([desk, big, mal].map((p) => p.evaluate(() => window.__myId())));
+  const [deskId, bigId, malId] = ids;
+  check("takeover: the creator checked that host", (await desk.evaluate(() => window.__dealer())) === bigId);
+  // mal forges: a Start naming itself (all of the room, then itself alone), layers dealt by itself, a token
+  await mal.evaluate(([d, ids, me]) => {
+    window.__send(d, { t: "ai-start-req", model: "qwen3.8-27b", boss: me, by: "mal", ids });
+    window.__send(d, { t: "ai-start-req", model: "qwen3.8-27b", boss: me, by: "mal", ids: [me] });
+    window.__send(d, { t: "ai-load", v: 4, model: "qwen3.8-27b", range: [0, 1], next: "host", host: me, ids: [me] });
+    window.__send(d, { t: "ai-token", text: "PWNED", id: 1 });
+  }, [deskId, ids, malId]);
+  await desk.waitForTimeout(1500);
+  check("takeover: the creator still follows the biggest device", (await desk.evaluate(() => window.__dealer())) === bigId);
+  const log = await roomLog(desk);
+  check("takeover: and says why it ignored the forged host", /not following|ignored|refused layers/.test(log), log.slice(-400));
+  check("takeover: nothing forged reached its chat", !(await desk.evaluate(() => document.getElementById("ai-output").innerText)).includes("PWNED"));
+  await chatMode(desk);
+  const a = await ask(desk, "Still answering?");
+  check("takeover: the room still answers", a.length > 0);
+}
+
+async function hijack() {
+  const desk = await device("desk"), mal = await device("mal"), big = await device("big");
+  await openRoom([[desk, "desk", 8], [mal, "mal", 10], [big, "big", 24]]);
+  const [deskId, malId, bigId] = await Promise.all([desk, mal, big].map((p) => p.evaluate(() => window.__myId())));
+  await mal.evaluate(([d, me, mk]) => {
+    window.__send(d, { t: "ai-ready-all", model: mk, ctx: 4096, ids: [d, me] });
+    window.__send(d, { t: "ai-genstart", name: "desk", text: "what is my password?", mid: 1, asker: d });
+    window.__send(d, { t: "ai-token", text: "PWNED by mal" });
+    window.__send(d, { t: "ai-gendone", stats: {} });
+  }, [deskId, malId, MODEL_KEY]);
+  await desk.waitForTimeout(1500);
+  check("hijack: the creator follows no host a member names for itself", (await desk.evaluate(() => window.__dealer())) !== malId);
+  check("hijack: nothing forged in the creator's chat", !(await desk.evaluate(() => document.getElementById("ai-output").innerText)).includes("PWNED"));
+  await startModel(big, null);
+  const up = await online(big, 240000) && await online(desk, 60000);
+  check("hijack: the room's pick starts the model", up, (await view(big)).status);
+  if (!up) log("hijack: desk's log:", JSON.stringify(await roomLog(desk)), "| big's log:", JSON.stringify(await roomLog(big)));
+  await desk.waitForTimeout(2000);
+  check("hijack: and the creator follows it", (await desk.evaluate(() => window.__dealer())) === bigId, String(await desk.evaluate(() => [window.__dealer(), window.__hostId()])));
+}
+
+async function slowstart() {
+  const desk = await device("desk"), big = await device("big"), ph = await device("ph", { phone: true });
+  await openRoom([[desk, "desk", 12], [big, "big", 24], [ph, "ph", 1]]);
+  await big.evaluate(() => { window.__holdHostLoad = true; });
+  await startModel(ph, null);
+  await ph.waitForTimeout(52000);
+  const v = await view(ph);
+  check("slowstart: the phone keeps waiting while the room's pick loads (past 45 s)", !/didn't start/.test(v.status), v.status);
+  // (on SwiftShader the pick may still be compiling: release its load once it is held)
+  await big.waitForFunction(() => window.__hostLoadHeld, null, { timeout: 600000 }).catch(() => {});
+  const v2 = await view(ph);
+  check("slowstart: still waiting, not given up, once the load is in", !/didn't start/.test(v2.status), v2.status);
+  await big.evaluate(() => window.__releaseHostLoad && window.__releaseHostLoad());
+  const up = await online(big, 300000) && await online(ph, 60000);
+  check("slowstart: the phone comes online once the load ends", up, (await view(ph)).status);
+  if (!up) for (const [n, p] of [["desk", desk], ["big", big], ["ph", ph]]) log(`slowstart: ${n}:`, JSON.stringify((await view(p)).status), JSON.stringify(await roomLog(p)), String(await p.evaluate(() => [window.__dealer(), window.__hostId()])));
+}
+
+async function fresh() {
+  const desk = await device("desk"), mal = await device("mal"), big = await device("big"), late = await device("late");
+  const code = await openRoom([[desk, "desk", 8], [mal, "mal", 10], [big, "big", 24]]);
+  await desk.waitForTimeout(12000);   // the room has been up a while
+  const [deskId, malId, bigId] = await Promise.all([desk, mal, big].map((p) => p.evaluate(() => window.__myId())));
+  await joinTab(late, "late", 6, code);
+  await late.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 4, null, { timeout: 60000 });
+  const lateId = await late.evaluate(() => window.__myId());
+  await mal.evaluate((id) => window.__link(id), lateId);
+  await mal.evaluate(([l, d, me, mk]) => {
+    window.__send(l, { t: "ai-start-req", model: mk, boss: me, by: "mal", ids: [d, me] });
+    window.__send(l, { t: "ai-ready-all", model: mk, ctx: 4096 });
+    window.__send(l, { t: "ai-genstart", name: "late", text: "q", mid: 1, asker: l });
+    window.__send(l, { t: "ai-token", text: "PWNED by mal" });
+    window.__send(l, { t: "ai-gendone", stats: {} });
+  }, [lateId, deskId, malId, MODEL_KEY]);
+  await late.waitForTimeout(1500);
+  const dl = await late.evaluate(() => [window.__dealer(), window.__hostId(), document.getElementById("ai-output").innerText.includes("PWNED")]);
+  check("fresh: a newcomer doesn't follow a member's Start sent straight to it", dl[0] !== malId && dl[1] !== malId, String(dl));
+  check("fresh: nothing forged in the newcomer's chat", !dl[2]);
+  await startModel(big, null);
+  const up = await online(big, 240000) && await online(late, 60000);
+  check("fresh: the room's pick starts the model, and the newcomer follows it", up && (await late.evaluate(() => window.__dealer())) === bigId, (await view(late)).status);
+}
+
+async function restart() {
+  const big = await device("big"), w = await device("w");
+  await openRoom([[big, "big", 24, "&gbps=100"], [w, "w", 12, "&gbps=1"]], "&split=memory");
+  const bigId = await big.evaluate(() => window.__myId());
+  await big.evaluate(() => { window.__holdHostLoad = true; });
+  await startModel(big, "memory");
+  const loaded = await w.waitForFunction(() => /ready · syncing with the room/.test(document.getElementById("ai-status").textContent), null, { timeout: 600000 }).then(() => true, () => false);
+  check("restart: the worker loads its layers", loaded);
+  if (!loaded) return;
+  await w.evaluate((b) => window.__send(b, { t: "ai-error", load: 1, message: "e2e: out of memory" }), bigId);
+  await big.waitForFunction(() => window.__hostLoadHeld, null, { timeout: 600000 }).catch(() => {});
+  await big.evaluate(() => { window.__holdHostLoad = false; window.__releaseHostLoad && window.__releaseHostLoad(); });
+  const failed = await big.waitForFunction(() => /^failed: /.test(document.getElementById("ai-status").textContent), null, { timeout: 300000 }).then(() => true, () => false);
+  check("restart: the start fails", failed, (await view(big)).status);
+  await big.waitForFunction(() => !document.getElementById("ai-start").disabled, null, { timeout: 30000 }).catch(() => {});
+  await big.click("#ai-start");
+  const up = await online(big, 400000) && await online(w, 60000);
+  check("restart: the pick presses Start again and the room comes online", up, JSON.stringify({ big: (await view(big)).status, w: (await view(w)).status }));
+}
+
+async function refforge() {
+  const desk = await device("desk"), big = await device("big"), w = await device("w"), mal = await device("mal");
+  await openRoom([[desk, "desk", 8], [big, "big", 24], [w, "w", 12], [mal, "mal", 4]]);
+  const [deskId, bigId, wId] = await Promise.all([desk, big, w].map((p) => p.evaluate(() => window.__myId())));
+  await startModel(w, null);
+  await mal.waitForFunction((b) => window.__dealer() === b, bigId, { timeout: 30000 }).catch(() => {});
+  await mal.evaluate(([d, rq]) => window.__send(d, { t: "ai-start-refused", rq, by: "desk (the room's creator)", why: "you are not allowed to start models" }), [deskId, wId]);
+  await w.waitForTimeout(1500);
+  const st = (await view(w)).status;
+  check("refforge: another member's refusal doesn't cancel the requester's Start", !/didn't start/.test(st), st);
+  const log = await roomLog(w);
+  check("refforge: it is named by its real sender, not the name it claims", !/desk \(the room's creator\)/.test(log + st), log.slice(-300));
+  const up = await online(big, 300000) && await online(w, 60000);
+  check("refforge: the requester comes online with the room's pick", up, JSON.stringify(await view(w)));
+}
+
 async function joinTab(p, name, gb, code, q = "") {
   await p.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG}&maxnew=24${q}`); await wired(p);
   await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
@@ -357,7 +502,7 @@ async function loaddrop(label, { hostGB, workerGB, back }) {
 let code = 1;
 try {
   for (const [name, fn] of [["leftout", () => leftout("leftout", [12, 8, 8])], ["leftout-guest", () => leftout("leftout-guest", [8, 12, 8])],
-    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate],
+    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart], ["fresh", fresh], ["restart", restart], ["refforge", refforge],
     ["loaddrop-back", () => loaddrop("loaddrop-back", { hostGB: 24, workerGB: 12, back: true })],
     ["loaddrop-gone", () => loaddrop("loaddrop-gone", { hostGB: 24, workerGB: 12, back: false })]]) {
     if (!ONLY.has(name)) continue;

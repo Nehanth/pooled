@@ -351,8 +351,10 @@ export class Qwen4ExpEngine {
     const { cfg, B, P, device } = this, nH = cfg.nHeads, nKV = cfg.nKVHeads, hd = cfg.headDim;
     if (hd !== 256) throw new Error("qwen4exp: attn kernels assume head dim 256");
     const sz = this.maxSeq * nKV * hd * 4;
-    st.kc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_DST });
-    st.vc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_DST });
+    // COPY_SRC: a checkpoint copies the KV rows out on the GPU, as Qwen35Engine.saveSlot does (the DeltaNet state,
+    // conv window and PLE ring are scratch buf()s, which already have it)
+    st.kc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
+    st.vc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
     const ap = uni([nH, nKV, hd, cfg.ropeDims, f(cfg.eps), 0, 0, 0]);
     const nQ = 2 * nH * hd, nK = nKV * hd, qf = view(B.qkvA, 0, nQ), fq = fuseRows(L.wq, L.wk, L.wv);
     return [

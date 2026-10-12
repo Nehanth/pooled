@@ -679,6 +679,7 @@ test("expert offload: a worker whose experts would park past its RAM fails the l
   const n = fakeNode({ host: false, name: "pc" });
   n.ramGB = 12; n.modelDir = fs.mkdtempSync(path.join(os.tmpdir(), "rn-off-"));
   let seen = null;
+  n.ai.hostId = "h";   // the host the creator named (room/authz.js)
   // shard.js hands the offload to ExpertStore, which counts what it really parks against ramCap (engine/expert_store.js)
   n.loadShardFn = async ({ offload }) => {
     seen = offload;
@@ -723,6 +724,7 @@ test("split GGUF: openModel reads every file of a split model from disk, each te
   fs.writeFileSync(files[1], Buffer.from([11, 12, 13, 14, 15, 16, 17, 18]));
   const src = openModel(key, { modelDir: dir, fetch: () => { throw new Error("no network"); } });
   assert.equal(src.stat.from, "disk"); assert.equal(src.shards, 2); assert.equal(src.local, files[0]);
+  assert.deepEqual(src.localPaths, files);   // what expert_disk.js opens, in shard order
   assert.deepEqual([...(await src.bytesOf({ byteOffset: 2, byteLength: 3 }))], [3, 4, 5]);
   assert.deepEqual([...(await src.bytesOf({ byteOffset: 2, byteLength: 3, shard: 1 }))], [13, 14, 15]);
   await src.close();
@@ -731,6 +733,7 @@ test("split GGUF: openModel reads every file of a split model from disk, each te
   const urls = [];
   const s2 = openModel(key, { modelDir: dir, fetch: async (u, o) => { urls.push(u); const [a, b] = /bytes=(\d+)-(\d+)/.exec(o.headers.range).slice(1).map(Number); return new Response(new Uint8Array(b - a + 1).fill(7), { status: 206 }); } });
   assert.equal(s2.stat.from, "Hugging Face");
+  assert.equal(s2.localPaths, null);
   await s2.bytesOf({ byteOffset: 0, byteLength: 4, shard: 1 });
   assert.equal(urls[0], M.shards[1]);
   await s2.close();

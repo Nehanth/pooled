@@ -401,7 +401,8 @@ export function dealPreview(s, lib) {
   if (!rb) return null;
   const gpu = s.devices.filter((d) => d.gb > 0);
   const deal = lib.dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges: gpu.map((d) => d.gb * GiB),
-    mode: s.splitMode === "memory" ? "memory" : "speed", phone: gpu.map((d) => d.kind === "phone") });
+    mode: s.splitMode === "memory" ? "memory" : "speed", phone: gpu.map((d) => d.kind === "phone"),
+    ngram: lib.ngramFor && lib.ngramOf ? lib.ngramFor(gpu.map((d) => d.meta), lib.ngramOf(s.model)) : null });
   if (!deal?.used?.length) return null;
   const out = new Map();
   gpu.forEach((d, i) => { const k = deal.used.indexOf(i); out.set(d, k >= 0 ? deal.ranges[k] : null); });
