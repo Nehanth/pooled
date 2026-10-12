@@ -5,8 +5,8 @@
 //   deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights tests/test_q38flash.js
 //
 // Modes:
-//   (default)  greedy ids vs llama.cpp (tests/golden/q38flash_llama_greedy.json, the prompts under 2048 tokens):
-//              MATCH per prompt, with the golden's near ties reported; decode tok/s. TOKENS=n caps the ids compared
+//   (default)  greedy ids vs llama.cpp (tests/golden/q38flash_llama_greedy.json, the prompts under 2048 tokens,
+//              ctx2k the longest, ~1.9K): MATCH per prompt, with the golden's near ties reported; decode tok/s. TOKENS=n caps the ids compared
 //              (default: all of the golden's). CASES=a,b picks prompts.
 //   LAYERS=N   per-layer check against llama.cpp's own tensors (the q38dump dumps, Q38F_DUMPS, default
 //              <Q38F_DIR>/dumps; README there): layers 0..N-1 (48: and the head), every tapped tensor's relative
@@ -176,12 +176,12 @@ async function greedy() {
     while (gen.length < N) { r = await eng.forwardToken(gen[gen.length - 1], { wantLogits: true }); gen.push(r.id); gaps.push(gap(r.logits)); }
     const ts = (N - 1) / ((performance.now() - t) / 1000);
     tsAll.push(ts);
-    // the first differing id; a difference at or after one of llama.cpp's near ties (top-2 gap < 0.25 there)
-    // is reported but not a failure, as for the other goldens
+    // the first differing id; a difference at one of llama.cpp's near ties (its top-2 gap < 0.25 at that very step,
+    // so the two picks are within the noise) is reported but not a failure. Stricter than the other goldens, which
+    // excuse any difference after a tie: after a tie we matched through, a later difference is a failure
     const diff = gen.findIndex((x, i) => x !== g.ids[i]);
-    const tie = (g.nearTies || []).map(([i]) => i).filter((i) => i < N);
-    const ok = diff < 0, tieOk = !ok && tie.some((i) => i <= diff);
-    console.log(`${name}: prompt ${g.prompt.length} tok ${pf.toFixed(1)} s · decode ${ts.toFixed(2)} tok/s · ${ok ? `MATCH llama.cpp (${N} ids)` : tieOk ? `differs at ${diff} after llama.cpp's near tie at ${tie.filter((i) => i <= diff).join(",")} (not a failure)` : `MISMATCH at ${diff}`}`);
+    const ok = diff < 0, tieOk = !ok && g.gap?.[diff] != null && g.gap[diff] < 0.25;
+    console.log(`${name}: prompt ${g.prompt.length} tok ${pf.toFixed(1)} s · decode ${ts.toFixed(2)} tok/s · ${ok ? `MATCH llama.cpp (${N} ids)` : tieOk ? `differs at ${diff}, llama.cpp's near tie there (gap ${g.gap[diff]}; not a failure)` : `MISMATCH at ${diff}`}`);
     console.log(`  engine: ${JSON.stringify(tok.decode(gen))}`);
     if (!ok) console.log(`  golden: ${JSON.stringify(g.text)}\n  ours ${gen.slice(Math.max(0, diff - 2), diff + 3)} gap ${gaps[diff]?.toFixed(3)} vs llama.cpp ${g.ids.slice(Math.max(0, diff - 2), diff + 3)} gap ${g.gap?.[diff]}`);
     const ourTies = gaps.map((x, i) => [i, x]).filter(([, x]) => x < 0.25).map(([i, x]) => `${i}:${x.toFixed(3)}`);
@@ -191,8 +191,9 @@ async function greedy() {
   if (tsAll.length) console.log(`decode: ${(tsAll.reduce((a, b) => a + b) / tsAll.length).toFixed(2)} tok/s mean`);
 }
 
-// BENCH=1: decode tok/s without the logits readback (greedy ids only), and where one token's GPU time goes
-// (each part submitted alone, 20 times, timed to queue completion; frame state as after the run)
+// BENCH=1: decode tok/s without the logits readback (greedy ids only), and where one token's time goes: each part
+// submitted alone, 20 times, timed to queue completion (frame state as after the run). That is wall time per
+// submit, not GPU time: a small part bottoms out at the ~0.7 ms submit + wait, and a shared GPU inflates the rest.
 async function bench() {
   const tok = model.tokenizer(), N = +env("BENCH_TOKENS", 64);
   eng.reset();
@@ -207,7 +208,7 @@ async function bench() {
       eng._encode(pass, ops); pass.end(); device.queue.submit([enc.finish()]);
     }
     await device.queue.onSubmittedWorkDone();
-    console.log(`  ${name.padEnd(28)} ${((performance.now() - t0) / reps).toFixed(2)} ms  (${ops.length} dispatches)`);
+    console.log(`  ${name.padEnd(28)} ${((performance.now() - t0) / reps).toFixed(2)} ms wall per submit  (${ops.length} dispatches)`);
   };
   const all = (f) => eng.layers.flatMap(f);
   {   // CPU side of one token: encoding every dispatch, and _begin (embedding row, n-gram rows, frame)
@@ -216,7 +217,7 @@ async function bench() {
     for (let k = 0; k < reps; k++) { const enc = device.createCommandEncoder(), pass = enc.beginComputePass(); eng._encode(pass, ops); pass.end(); enc.finish(); }
     const te = (performance.now() - t0) / reps;
     t0 = performance.now();
-    for (let k = 0; k < reps; k++) { await eng._begin(1000 + k); eng.pos--; }
+    for (let k = 0; k < reps; k++) { await eng._begin(1000 + k); eng.ngs?.rollback(1); }   // _begin leaves pos; the n-gram push is undone
     console.log(`  CPU: encode ${te.toFixed(2)} ms, begin (embed + n-gram rows + frame) ${((performance.now() - t0) / reps).toFixed(2)} ms per token`);
   }
   // the halves unfused (each with its own HC combine), then the token as forwardToken runs it (combines folded)
