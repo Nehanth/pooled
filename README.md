@@ -21,7 +21,7 @@
 
 https://github.com/user-attachments/assets/5142d877-e4d5-4f6b-9b5e-0ef48dcb73f6
 
-<!-- PENDING 2.0: replace this video and caption with the Qwen3.8-Flash demo (Mac tab with experts on SSD, then a PC joins with `pooled join`) once #368 and #353 land and the video is attached to the 2.0 release. -->
+<!-- PENDING 2.0: replace this video and caption with the Qwen3.8-Flash demo (Mac tab with experts on SSD, then a PC joins with `pooled join`) once #368 lands (the speed panel, #353, is on main) and the video is attached to the 2.0 release. -->
 <p align="center"><sub>Demo, recorded September 27, 2026 (2:29, with voice and subtitles): Qwen 3.6 35B MoE across a Mac and an iPhone in browser tabs. The phone chats with it, then Code mode builds a Tetris game, fixes its own bug and restyles it. <a href="https://github.com/Nehanth/pooled/releases/download/v1.0.0/pooled-demo-2026-09-27.mp4">Download</a> · <a href="https://github.com/Nehanth/pooled/releases/download/v0.2.0/swarmllm-demo-2026-09-07.mp4">the September 7 demo</a>.</sub></p>
 
 Pooled runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.

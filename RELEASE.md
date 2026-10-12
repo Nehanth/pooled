@@ -27,4 +27,4 @@ Browser caches are per site. A device that downloaded weights on swarmllm.ai dow
 5. Tag: `git tag -a vX.Y.Z -m "..." && git push --tags`.
 6. Merge to `main`. Vercel deploys production. A manual `npx vercel deploy --prod` is only for emergencies.
 
-Versioning is `0.MINOR.PATCH` until the peer protocol is declared stable. A protocol change bumps MINOR.
+Versioning: the app has been `MAJOR.MINOR.PATCH` since 1.0.0 (2026-09-27). The peer protocol has its own number (`PROTOCOL` in `room/transport.js`, 4 since before 1.0.0), and `@pooled/cli` and `@pooled/openclaw` have their own versions.
