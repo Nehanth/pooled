@@ -3,6 +3,8 @@
 // MODEL=122b: Qwen3.5-122B-A10B (bartowski Q4_0, two-file split GGUF, 48 layers, 256 experts top-8, 16 query heads per kv
 // head) on the same prompts, goldens from llama.cpp 749f688 CUDA (llama-server, greedy) in tests/golden/q122_llama_greedy.json;
 // its weights stream to the GPU a layer at a time (tests/load_model.js streamWeights).
+// MODEL=q38flash: Qwen3.8-Flash-Next (qwen4exp) runs on its own engine (engine/qwen4exp.js): tests/test_q38flash.js
+if (Deno.env.get("MODEL") === "q38flash") await import("./test_q38flash.js");
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
 import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, MOE_PATH, Q122_PATH, streamWeights, wideOpts, offloadFromEnv } from "./load_model.js";
