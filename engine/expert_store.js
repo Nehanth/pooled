@@ -334,9 +334,11 @@ export class ExpertStore {
   // submitted): read the experts plan() will copy, the same set it computes (no LRU state changes in between).
   // Experts T1 holds are not read (plan() copies them from their slots). Everything encoded so far is submitted by
   // now (the engine's contract), so this is where T1 evicts to refill its reserve of free slots (flush).
-  async prepare(layer, sel, nCols, KS) {
+  // flush false: something encoded but not yet submitted may still copy from T1 slots (engine _specCut after its first
+  // prepare: several plan()s go into one encoder), so nothing is evicted this time.
+  async prepare(layer, sel, nCols, KS, { flush = true } = {}) {
     if (!this.isDisk(layer)) return 0;
-    this.t1?.flush();
+    if (flush) this.t1?.flush();
     const S = this.L.get(layer), K = KS - 1, uniq = [];
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) { const e = sel[c * KS + k]; if (e < this.nExp && !uniq.includes(e)) uniq.push(e); }
     const ids = (uniq.length > this.P ? uniq : uniq.filter((e) => S.slotOf[e] < 0)).filter((e) => !this.t1 || this.t1.find(this._key(layer, e), false) < 0);

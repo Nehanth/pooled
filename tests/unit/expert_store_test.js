@@ -355,3 +355,13 @@ Deno.test("disk: a failed read rejects prepare and leaves the store usable: the 
   try { await st.loadExpertsAsync(5, f, 3, 5); msg = ""; } catch (e) { msg = e.message; }
   assert(/EIO/.test(msg) && st.region.layer === -1, "frame load rejects, region not marked as a whole layer");
 });
+
+Deno.test("disk: prepare({ flush: false }) leaves T1 alone (engine _specCut: one encoder, several plans)", async () => {
+  const { st } = makeDiskStore();
+  let flushes = 0;
+  st.t1 = { flush() { flushes++; }, find: () => -1, wants: () => false };
+  await st.prepare(2, sel1([1, 2, 3, 4]), 1, 5);
+  await st.prepare(2, sel1([5, 6, 7, 8]), 1, 5, { flush: false });
+  assert(flushes === 1, `one flush, got ${flushes}`);
+  st.t1 = null;
+});
