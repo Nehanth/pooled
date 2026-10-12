@@ -18,7 +18,7 @@
 //
 // Column strides are in the uniforms. Bindings stay within WebGPU's default of 8 storage buffers per stage.
 
-import { gemvLanes } from "./qwen4exp.js";
+import { gemvLanes, kvCheck, kvDecl, kvK4, kvV1, kvStoreRow, KV_F16_READ } from "./qwen4exp.js";
 export { gemvLanes };
 
 const DQ = /* wgsl */ `
@@ -529,16 +529,20 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   for (var i = 0u; i < 64u; i++) { fx_S[base + (i0 + i) * dS + j] = S[i]; }
 }`;
 
-// Attention prep per column (ATTN_PREP_WGSL): workgroup (head, column), the column's rope table and position. q,
-// the gate, k and v come from the [q | gate, k, v] buffer (column stride qs; k at kOff, v at vOff).
-export const ATTN_PREP_MC_WGSL = `
+// Attention prep per column (attnPrepWGSL): workgroup (head, column), the column's rope table and position. q,
+// the gate, k and v come from the [q | gate, k, v] buffer (column stride qs; k at kOff, v at vOff). kv: the cache
+// format (engine/wgsl/qwen4exp.js kvStoreRow: the decode kernel's store, the same bits).
+export function attnPrepMcWGSL(kv = "f32") {
+  kvCheck(kv);
+  const D = kvDecl(kv, true);
+  return `${D.f16}
 struct AP { nH: u32, nKV: u32, hd: u32, nRot: u32, eps: f32, p0: u32, p1: u32, p2: u32 };
 struct MS { qs: u32, kOff: u32, vOff: u32, p0: u32 };
 ${MCF}
 @group(0) @binding(0) var<storage, read> fx_qkv: array<f32>;
 @group(0) @binding(1) var<storage, read_write> fx_qn: array<f32>;
-@group(0) @binding(2) var<storage, read_write> fx_kc: array<f32>;
-@group(0) @binding(3) var<storage, read_write> fx_vc: array<f32>;
+@group(0) @binding(2) var<storage, read_write> fx_kc: ${D.k};
+@group(0) @binding(3) var<storage, read_write> fx_vc: ${D.v};
 @group(0) @binding(4) var<storage, read> fx_qw: array<f32>;
 @group(0) @binding(5) var<storage, read> fx_kw: array<f32>;
 @group(0) @binding(6) var<storage, read> fx_cs: array<vec4<f32>>;   // [col][64] (cos, sin, 0, 0)
@@ -546,7 +550,7 @@ ${MCF}
 @group(0) @binding(8) var<uniform> fx_S: MS;
 @group(0) @binding(9) var<uniform> fx_F: McF;
 var<workgroup> fx_red: array<f32, 256>;
-var<workgroup> fx_hv: array<f32, 256>;
+var<workgroup> fx_hv: array<f32, 256>;${kv === "f16" ? "\nvar<workgroup> fx_kr: array<f32, 256>;" : ""}
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
   let t = l.x; let g = wg.x; let col = wg.y; let hd = fx_P.hd;
@@ -568,34 +572,32 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   var r = nv;
   if (t < hr) { let c = fx_cs[col * 64u + t]; r = nv * c.x - fx_hv[t + hr] * c.y; }
   else if (t < fx_P.nRot) { let c = fx_cs[col * 64u + t - hr]; r = fx_hv[t - hr] * c.y + nv * c.x; }
-  if (t < hd) {
-    if (isQ) { fx_qn[col * fx_P.nH * hd + g * hd + t] = r; }
-    else {
-      let h = g - fx_P.nH;
-      let o = (fx_F.pos + col) * fx_P.nKV * hd + h * hd + t;
-      fx_kc[o] = r;
-      fx_vc[o] = fx_qkv[cb + fx_S.vOff + h * hd + t];
-    }
-  }
+  if (isQ && t < hd) { fx_qn[col * fx_P.nH * hd + g * hd + t] = r; }
+  let h = select(g - fx_P.nH, 0u, isQ);
+  let vb = cb + fx_S.vOff + h * hd;${kvStoreRow(kv, { isK: "!isQ", t: "t", hd: "hd", o0: "(fx_F.pos + col) * fx_P.nKV * hd + h * hd", r: "r", vAt: (e) => `fx_qkv[vb + ${e}]`, K: "fx_kc", V: "fx_vc", st: "fx_kr" })}
 }`;
+}
+export const ATTN_PREP_MC_WGSL = attnPrepMcWGSL("f32");
 
-// Attention per column (ATTN_DEC_WGSL): workgroup (q head, column). gather = 0: dense causal over cells
+// Attention per column (attnDecWGSL): workgroup (q head, column). gather = 0: dense causal over cells
 // 0 .. pos + col; gather = stride: over the column's row list from qsa_select (sel[col * stride] = n, then n rows
 // ascending). With the list 0 .. p the gathered kernel does the dense arithmetic in the same order: the same bits.
 // At most ATTN_MAX_CELLS cells per column either way (dense runs only while every column has <= 2051 cells), so the
 // scores fit in workgroup memory. The gate is read from the [q | gate, k, v] buffer (column stride MS.qs). Out:
 // [col][nH * hd]. The gathered kernel does not read the frame (binding 6 is not in its layout); the decode engine
-// runs it with one column.
+// runs it with one column. kv: the cache format (as the decode kernel reads it).
 export const ATTN_MAX_CELLS = 2052;
-export function attnDecMcWGSL({ gather = 0 } = {}) {
+export function attnDecMcWGSL({ gather = 0, kv = "f32" } = {}) {
+  kvCheck(kv);
+  const D = kvDecl(kv, false);
   const row = (p) => gather ? `fx_sel[ib + ${p}]` : `${p}`;
-  return DQ + `
+  return DQ + D.f16 + (kv === "f16" ? KV_F16_READ : "") + `
 struct AP { nH: u32, nKV: u32, hd: u32, nRot: u32, eps: f32, p0: u32, p1: u32, p2: u32 };
 struct MS { qs: u32, kOff: u32, vOff: u32, p0: u32 };
 ${MCF}
 @group(0) @binding(0) var<storage, read> fx_qn: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> fx_kc: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> fx_vc: array<f32>;
+@group(0) @binding(1) var<storage, read> fx_kc: ${D.k};
+@group(0) @binding(2) var<storage, read> fx_vc: ${D.v};
 @group(0) @binding(3) var<storage, read> fx_qkv: array<f32>;
 @group(0) @binding(4) var<storage, read_write> fx_out: array<f32>;
 @group(0) @binding(5) var<uniform> fx_P: AP;
@@ -614,7 +616,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   for (var p = t; p < n; p += 256u) {
     let ko = (${row("p")} * fx_P.nKV + kvh) * hd4;
     var a = 0.0;
-    for (var i = 0u; i < hd4; i++) { a += dot(fx_qn[qb + i], fx_kc[ko + i]); }
+    for (var i = 0u; i < hd4; i++) { a += dot(fx_qn[qb + i], ${kvK4(kv, "fx_kc", "ko + i")}); }
     a *= scale;
     fx_sc[p] = a;
     m = max(m, a);
@@ -632,7 +634,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   let tot = fx_red[0];
   if (t < hd) {
     var acc = 0.0;
-    for (var p = 0u; p < n; p++) { acc += fx_sc[p] * fx_vc[(${row("p")} * fx_P.nKV + kvh) * hd + t]; }
+    for (var p = 0u; p < n; p++) { let ve = (${row("p")} * fx_P.nKV + kvh) * hd + t; acc += fx_sc[p] * ${kvV1(kv, "fx_vc", "ve")}; }
     fx_out[col * fx_P.nH * hd + h * hd + t] = (acc / tot) * sigm(fx_qkv[col * fx_S.qs + h * 2u * hd + hd + t]);
   }
 }`;

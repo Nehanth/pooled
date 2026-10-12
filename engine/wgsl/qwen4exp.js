@@ -7,6 +7,8 @@
 // block, four per word; f16 scales two per word), "f32" = row-major floats. Activations are f32 throughout (the
 // reference's --act f32 mode, tests/reference/ref_q38flash.mjs).
 
+import { F16_WGSL } from "./f16.js";
+
 // Dequant helpers: 4 elements of a q4 word (low or high nibbles) and of a q8 word, as vec4<f32>.
 const DQ = /* wgsl */ `
 fn q4lo(w: u32) -> vec4<f32> { return vec4<f32>(f32(w & 15u), f32((w >> 8u) & 15u), f32((w >> 16u) & 15u), f32((w >> 24u) & 15u)) - vec4<f32>(8.0); }
@@ -457,24 +459,66 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
 const FRAME = `struct Frame { pos: u32, seqLen: u32, p0: u32, p1: u32, cs: array<vec4<f32>, 64> };`;
 export const FRAME_FLOATS = 4 + 64 * 4;   // pos, seqLen, pad, pad, then (cos, sin, 0, 0) per rotary pair (<= 64 pairs)
 
+// The K / V cache formats (engine option kv): "f32" (4 B per value) or "f16" (2 B: packed pairs, low half = the
+// even element). f16 values are stored with f16.js's round-to-nearest-even (pack2x16_rne: pack2x16float's rounding
+// is the backend's, and D3D12's differs) and read back exactly (unpack2x16_exact: no subnormal flush), so every
+// backend keeps the same cache bits. The attention arithmetic is the f32 kernels' in the same order, on the f16
+// values: decode, prefill and verify passes still agree bit for bit with each other.
+export const KV_FORMATS = ["f32", "f16"];
+export const kvBytes = (kv) => (kv === "f16" ? 2 : 4);
+export function kvCheck(kv) { if (!KV_FORMATS.includes(kv)) throw new Error(`qwen4exp: KV format ${kv} (one of ${KV_FORMATS.join(", ")})`); }
+// WGSL pieces per format: the cache bindings' element type (K as vec4 units for the dot), a K vec4 read at a vec4
+// index, a V value read at an element index
+export const kvDecl = (kv, rw) => {
+  const a = rw ? "read_write" : "read";
+  return kv === "f16"
+    ? { k: `array<${rw ? "u32" : "vec2<u32>"}>`, v: "array<u32>", a, f16: F16_WGSL }
+    : { k: `array<${rw ? "f32" : "vec4<f32>"}>`, v: "array<f32>", a, f16: "" };
+};
+export const kvK4 = (kv, K, i) => (kv === "f16" ? `kv_k4(${K}[${i}])` : `${K}[${i}]`);
+// (e: an identifier, it is used twice)
+export const kvV1 = (kv, V, e) => (kv === "f16" ? `f16_f32((${V}[${e} >> 1u] >> ((${e} & 1u) << 4u)) & 0xffffu)` : `${V}[${e}]`);
+export const KV_F16_READ = /* wgsl */ `
+fn kv_k4(w: vec2<u32>) -> vec4<f32> { return vec4<f32>(unpack2x16_exact(w.x), unpack2x16_exact(w.y)); }
+`;
+// The cache write of one K / V head row (hd threads, thread t holds element t of the roped key r): f32 stores
+// directly; f16 stages the key in workgroup memory (st) so thread t < hd / 2 packs elements 2t, 2t + 1. The barrier
+// is at the top level (uniform control flow); o0: the row's first element, vAt(e): the V input element e of the row.
+export const kvStoreRow = (kv, { isK, t, hd, o0, r, vAt, K, V, st }) => kv === "f16" ? `
+  ${st}[${t}] = select(0.0, ${r}, ${isK} && ${t} < ${hd});
+  workgroupBarrier();
+  if (${isK} && ${t} < ${hd} / 2u) {
+    let o = (${o0}) / 2u + ${t};
+    ${K}[o] = pack2x16_rne(vec2<f32>(${st}[2u * ${t}], ${st}[2u * ${t} + 1u]));
+    ${V}[o] = pack2x16_rne(vec2<f32>(${vAt(`2u * ${t}`)}, ${vAt(`2u * ${t} + 1u`)}));
+  }` : `
+  if (${isK} && ${t} < ${hd}) {
+    let o = ${o0} + ${t};
+    ${K}[o] = ${r};
+    ${V}[o] = ${vAt(t)};
+  }`;
+
 // Gated attention, step 1 (one workgroup per Q head, then one per KV head; hd threads): per-head RMS norm,
 // partial NeoX RoPE (pairs i, i + nRot/2 for i < nRot/2), then the K/V cache write at frame.pos. q and the gate are
 // interleaved per head in qf: [q_h (hd) | gate_h (hd)].
-export const ATTN_PREP_WGSL = `
+export function attnPrepWGSL(kv = "f32") {
+  kvCheck(kv);
+  const D = kvDecl(kv, true);
+  return `${D.f16}
 ${FRAME}
 struct AP { nH: u32, nKV: u32, hd: u32, nRot: u32, eps: f32, p0: u32, p1: u32, p2: u32 };
 @group(0) @binding(0) var<storage, read> fx_qf: array<f32>;
 @group(0) @binding(1) var<storage, read> fx_kin: array<f32>;
 @group(0) @binding(2) var<storage, read> fx_vin: array<f32>;
 @group(0) @binding(3) var<storage, read_write> fx_qn: array<f32>;
-@group(0) @binding(4) var<storage, read_write> fx_kc: array<f32>;
-@group(0) @binding(5) var<storage, read_write> fx_vc: array<f32>;
+@group(0) @binding(4) var<storage, read_write> fx_kc: ${D.k};
+@group(0) @binding(5) var<storage, read_write> fx_vc: ${D.v};
 @group(0) @binding(6) var<storage, read> fx_qw: array<f32>;
 @group(0) @binding(7) var<storage, read> fx_kw: array<f32>;
 @group(0) @binding(8) var<uniform> fx_P: AP;
 @group(0) @binding(9) var<uniform> fx_F: Frame;
 var<workgroup> fx_red: array<f32, 256>;
-var<workgroup> fx_hv: array<f32, 256>;
+var<workgroup> fx_hv: array<f32, 256>;${kv === "f16" ? "\nvar<workgroup> fx_kr: array<f32, 256>;" : ""}
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
   let t = l.x; let g = wg.x; let hd = fx_P.hd;
@@ -495,26 +539,25 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   var r = nv;
   if (t < hr) { let c = fx_F.cs[t]; r = nv * c.x - fx_hv[t + hr] * c.y; }
   else if (t < fx_P.nRot) { let c = fx_F.cs[t - hr]; r = fx_hv[t - hr] * c.y + nv * c.x; }
-  if (t < hd) {
-    if (isQ) { fx_qn[g * hd + t] = r; }
-    else {
-      let h = g - fx_P.nH;
-      let o = fx_F.pos * fx_P.nKV * hd + h * hd + t;
-      fx_kc[o] = r;
-      fx_vc[o] = fx_vin[h * hd + t];
-    }
-  }
+  if (isQ && t < hd) { fx_qn[g * hd + t] = r; }
+  let h = select(g - fx_P.nH, 0u, isQ);
+  let vb = h * hd;${kvStoreRow(kv, { isK: "!isQ", t: "t", hd: "hd", o0: "fx_F.pos * fx_P.nKV * hd + h * hd", r: "r", vAt: (e) => `fx_vin[vb + ${e}]`, K: "fx_kc", V: "fx_vc", st: "fx_kr" })}
 }`;
+}
+export const ATTN_PREP_WGSL = attnPrepWGSL("f32");
 
 // Step 2: dense causal attention for one decode token over cache cells 0..frame.pos, one workgroup per Q head
 // (hd = 256 threads), then out = attn * sigmoid(gate). Scores live in workgroup memory: seqLen <= 2052 (dense runs up
 // to 2051 cells; past that QSA's gathered kernel, engine/wgsl/qwen4exp_batch.js attnDecMcWGSL, reads the selected ones).
-export const ATTN_DEC_WGSL = DQ + `
+export function attnDecWGSL(kv = "f32") {
+  kvCheck(kv);
+  const D = kvDecl(kv, false);
+  return DQ + D.f16 + (kv === "f16" ? KV_F16_READ : "") + `
 ${FRAME}
 struct AP { nH: u32, nKV: u32, hd: u32, nRot: u32, eps: f32, p0: u32, p1: u32, p2: u32 };
 @group(0) @binding(0) var<storage, read> fx_qn: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> fx_kc: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> fx_vc: array<f32>;
+@group(0) @binding(1) var<storage, read> fx_kc: ${D.k};
+@group(0) @binding(2) var<storage, read> fx_vc: ${D.v};
 @group(0) @binding(3) var<storage, read> fx_qf: array<f32>;
 @group(0) @binding(4) var<storage, read_write> fx_out: array<f32>;
 @group(0) @binding(5) var<uniform> fx_P: AP;
@@ -531,7 +574,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   for (var p = t; p < n; p += 256u) {
     let ko = (p * fx_P.nKV + kvh) * hd4;
     var a = 0.0;
-    for (var i = 0u; i < hd4; i++) { a += dot(fx_qn[h * hd4 + i], fx_kc[ko + i]); }
+    for (var i = 0u; i < hd4; i++) { a += dot(fx_qn[h * hd4 + i], ${kvK4(kv, "fx_kc", "ko + i")}); }
     a *= scale;
     fx_sc[p] = a;
     m = max(m, a);
@@ -549,10 +592,12 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   let tot = fx_red[0];
   if (t < hd) {
     var acc = 0.0;
-    for (var p = 0u; p < n; p++) { acc += fx_sc[p] * fx_vc[(p * fx_P.nKV + kvh) * hd + t]; }
+    for (var p = 0u; p < n; p++) { let ve = (p * fx_P.nKV + kvh) * hd + t; acc += fx_sc[p] * ${kvV1(kv, "fx_vc", "ve")}; }
     fx_out[h * hd + t] = (acc / tot) * sigm(fx_qf[h * 2u * hd + hd + t]);
   }
 }`;
+}
+export const ATTN_DEC_WGSL = attnDecWGSL("f32");
 
 // The n-gram (PLE) injection at its layer (roadmap 33 "N-gram embedding (PLE)"), one workgroup per stream c:
 //   key[c] = rmsnorm(pk[c]) * nk[c]; query[c] = rmsnorm(R[c]) * nq[c]; s = key[c] . query[c] / sqrt(d)

@@ -14,13 +14,18 @@
 // While every column has <= 2051 cells QSA selects them all, so the engine keeps its dense attention there
 // (bit-equal to the gathered kernel over the full list: tests/test_q38flash_batch.js).
 //
-// The attention itself is the engine's (f32 KV, one workgroup per head), not attn_dec_qsa from #344, which reads
-// the Qwen3.5 engine's f16 KV through its split-K layout; when the Flash path moves to that cache, swap the
-// gathered kernel for attn_dec_qsa (same row lists).
-import { qsaWGSL, QSA_KPOOL, QSA_NTOP, QSA_MAXSEL, QSA_SEL_STRIDE, QSA_PROJ, QSA_IH, QSA_ID, QSA_MAX_SEQ } from "./wgsl/qsa.js";
+// The attention itself is the engine's (its f32 or f16 KV, one workgroup per head), not attn_dec_qsa from #344,
+// which reads the Qwen3.5 engine's f16 KV through its split-K layout (same row lists).
+// rawK is a ring on this path (qsaFlashPipelines / qsaLayerState rawRing, QSA_RAW_RING rows by default): pooling
+// reads only the rows of the blocks a pass completes, so the ring needs pass columns + 3 rows, not the context.
+import { qsaWGSL, qsaRingOk, QSA_KPOOL, QSA_NTOP, QSA_MAXSEL, QSA_SEL_STRIDE, QSA_PROJ, QSA_IH, QSA_ID, QSA_MAX_SEQ } from "./wgsl/qsa.js";
 import { QSA_SPECS, qsaUniform, QSA_SCORE_CW } from "./qsa.js";
+import { QSA_RAW_RING } from "./qwen4exp_mem.js";
 
-export { QSA_MAXSEL, QSA_SEL_STRIDE };
+export { QSA_MAXSEL, QSA_SEL_STRIDE, QSA_KPOOL, QSA_ID };
+export { QSA_RAW_RING };
+// the widest pass a ring of R rows serves (the rows of the blocks it completes: up to nCols + 3)
+export const qsaRingCols = (R) => (R ? R - (QSA_KPOOL - 1) : Infinity);
 const U = GPUBufferUsage;
 const ENTRIES = ["qsa_proj", "qsa_prep", "qsa_pool", "qsa_score", "qsa_score_c4", "qsa_select"];
 
@@ -38,8 +43,8 @@ export function qsaCheckConfig(cfg) {
 export const qsaSparse = (pos, nCols) => pos + nCols > QSA_MAXSEL;
 
 // pipelines (explicit layouts: group 0 = [cfg, frame] uniforms, group 1 = the kernel's buffers)
-export async function qsaFlashPipelines(device) {
-  const module = device.createShaderModule({ code: qsaWGSL(), label: "qsa" });
+export async function qsaFlashPipelines(device, { rawRing = QSA_RAW_RING } = {}) {
+  const module = device.createShaderModule({ code: qsaWGSL({ rawRing }), label: "qsa" });
   const info = await module.getCompilationInfo?.();
   const errs = (info?.messages || []).filter((m) => m.type === "error");
   if (errs.length) throw new Error("QSA WGSL: " + errs.map((e) => `${e.lineNum}: ${e.message}`).join("; "));
@@ -74,10 +79,12 @@ export function qsaScratch(device, { maxCols, maxBlocks }) {
 }
 export const qsaSetFrame = (device, S, pos, nCols) => device.queue.writeBuffer(S.frame, 0, new Uint32Array([pos, pos + 1, nCols, 0]));
 
-// A QSA layer's state (rawK, pooled: f16, per sequence) and its indexer weights on the GPU. L.indexer: { q, k,
+// A QSA layer's state (rawK, pooled: f16, per sequence) and its indexer weights on the GPU. rawRing: rawK's rows
+// (a ring, as the pipelines were built with), 0 for every position. L.indexer: { q, k,
 // qNorm, kNorm } as qwen4expWeights loads them (BF16 projections dequantized to f32 on the CPU: exact, so packing
 // them back to BF16 loses nothing).
-export function qsaLayerState(device, L, { maxSeq, dim }) {
+export function qsaLayerState(device, L, { maxSeq, dim, rawRing = QSA_RAW_RING }) {
+  if (!qsaRingOk(rawRing)) throw new Error(`qwen4exp QSA: rawK ring of ${rawRing} rows`);
   const ix = L.indexer;
   if (!ix || !ix.q?.data || !ix.k?.data || !ix.qNorm?.data || !ix.kNorm?.data) throw new Error("qwen4exp QSA: layer without indexer weights (load with qsa: true)");
   if (ix.q.data.length !== QSA_IH * QSA_ID * dim || ix.k.data.length !== QSA_ID * dim) throw new Error("qwen4exp QSA: indexer shapes");
@@ -90,7 +97,7 @@ export function qsaLayerState(device, L, { maxSeq, dim }) {
     w[i] = (src[j] >>> 16) | (src[j + 1] & 0xffff0000);
   }
   return { w: up(w), qNorm: up(ix.qNorm.data), kNorm: up(ix.kNorm.data),
-    rawK: sb(maxSeq * QSA_ID * 2), pooled: sb(Math.ceil(maxSeq / QSA_KPOOL) * QSA_ID * 2) };
+    rawK: sb((rawRing || maxSeq) * QSA_ID * 2), pooled: sb(Math.ceil(maxSeq / QSA_KPOOL) * QSA_ID * 2), rawRing };
 }
 
 // Bind groups of one layer for one scratch set; x: the layer's attention input (column stride dim).

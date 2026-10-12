@@ -28,6 +28,7 @@
 //              offload every layer only with a disk tier (OFFLOAD_DISK=all, the SSD PRs' loader).
 //              Batched prefill / verify over offloaded layers (engine/qwen4exp_batch.js, expertRegion: true): tests/test_q38flash_batch.js.
 // OFFLOAD=lo-hi | all [OFFLOAD_GB=8 | OFFLOAD_SLOTS=N] work in every mode (offloaded layers' experts parked).
+// KV=f16: the f16 K / V cache (engine option kv) in every mode.
 import fs from "node:fs";
 import path from "node:path";
 import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
@@ -70,7 +71,7 @@ const weights = { ...rest, layers };
 const fds = model.paths.map((p) => fs.openSync(p, "r"));
 const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.readSync(fds[file], b, 0, len, off); return b; };
 const ngram = new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
-const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram });
+const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, kv: env("KV", "f32") });
 console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""} loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s${model.cache ? "; " + model.cache.summary() : ""}`);
 if (experts) console.log(`offload: layers ${experts.layers[0]}-${experts.layers.at(-1)}, ${experts.P} slots per layer`);
 
