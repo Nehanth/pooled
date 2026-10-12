@@ -45,6 +45,7 @@ import { loadShard } from "./shard.js";
 import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { unpackWire } from "../../room/wire.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
+import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
@@ -78,6 +79,8 @@ const PASS_HELD = new Set(["ping", "pong", "leaving", "mesh", "hello", "auth-pro
 const HOST_HANDSHAKE = new Set(["hello", "auth", "lobby", "admit", "bye"]);
 const MESH_WAIT_MS = 10000;
 const HELD_MAX = 256;   // messages a held link keeps (each way) until it is proved
+// a host showing it deals (room/authz.js)
+const HOST_SIGNS = new Set(["ai-layers", "ai-hostprog", "ai-ready-all", "ai-redeal", "ai-map"]);
 const FROM_HOST = new Set(["ai-layers", "ai-ready-all", "ai-reset", "ai-redeal", "ai-degraded", "ai-map", "ai-genstart",
   "ai-token", "ai-gendone", "ai-history", "ai-reacts", "ai-queue", "ai-queued", "ai-regen", "ai-hostprog", "ai-next",
   "ai-visibility", "ai-style", "ai-busy", "ai-wait", "ai-start-failed", "ai-load", "ai-share", "ai-wake", "ai-ckpt-save", "ai-ckpt-load"]);
@@ -172,7 +175,13 @@ export class RoomNode extends EventEmitter {
     this.roster = new Map();   // host: id -> { name, meta }
     this.probedHellos = new WeakMap();   // host: a hello held back while its namesake is pinged -> when
     this.pending = new Map();  // ensureLink in flight
-    this.ai = { role: null, engine: null, tok: null, cfg: null, device: null, chain: [], next: null, hostId: null,
+    // who runs the model is checked here, not taken from whoever says so (room/authz.js): when each device was
+    // first seen, the creator's roster (join order, and the metas the pick is checked with: not those on this node's
+    // own links), and (the creator) each device's join number, given once and kept across relinks.
+    this.seenAt = new Map(); this.rosterOrder = []; this.joinedAt = performance.now(); this.seqOf = new Map(); this.nextSeq = 0;
+    // ai.dealer: the model host this node follows; dealerActive: it has shown it deals; startAt: when this node
+    // followed a Start
+    this.ai = { dealer: null, dealerActive: false, startAt: null, role: null, engine: null, tok: null, cfg: null, device: null, chain: [], next: null, hostId: null,
       readyPeers: new Set(), pos: 0, fed: [], pendingCtl: {}, waiters: new Map(), q: Promise.resolve(), lock: Promise.resolve(),
       conv: { turns: [] }, settings: { persona: "default", sampling: "exact", thinking: false },
       apiCache: new AnswerCache(8), apiTurns: new TurnCache(), apiEnc: new EncodeCache(), apiProf: null, apiTT: null,
@@ -273,7 +282,36 @@ export class RoomNode extends EventEmitter {
     });
   }
   // (a host's meta names the model it will run, so a device joining before Start can say which)
-  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, api: 2, ctx: this.ctxMax(), ...(this.ai.model ? { model: this.ai.model } : {}) } : this.meta, v: PROTOCOL, auth: AUTH_V, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
+  // fixedHost: a pooled host creator runs the model itself (it serves the API); devices take that only from the
+  // room's creator (room/authz.js)
+  helloMsg(extra = {}) { return { t: "hello", name: this.name, meta: this.isHost ? { ...this.meta, fixedHost: 1, api: 2, ctx: this.ctxMax(), ...(this.ai.model ? { model: this.ai.model } : {}) } : this.meta, v: PROTOCOL, auth: AUTH_V, ...(this.isHost ? gateHelloFields(this.gate) : {}), ...extra }; }
+  // this node's view of the room for the model host's pick: itself and every device it knows (not API clients)
+  roomView() {
+    const v = new Map();
+    if (this.isHost) {
+      v.set(this.peer.id, { ...this.meta, fixedHost: 1 });
+      for (const [id, m] of this.roster) if (!m.meta?.api) v.set(id, m.meta || {});
+      return v;
+    }
+    for (const m of this.members || []) if (m?.id && !m.meta?.api) v.set(m.id, m.meta || {});
+    if (!v.has(this.peer.id)) v.set(this.peer.id, this.meta);
+    return v;
+  }
+  checkHost(boss, ids, from) {
+    const now = performance.now();
+    const r = verifyHost({ boss, ids: Array.isArray(ids) ? ids : null, view: this.roomView(), creator: PREFIX + this.code, from,
+      order: this.isHost ? [this.peer.id, ...joinOrder([...this.roster].map(([id, m]) => ({ id, seq: m.seq })))] : this.rosterOrder,
+      seenFor: (id) => now - (id === this.peer.id ? this.joinedAt : this.seenAt.get(id) ?? now) });
+    if (!r.ok) this.log(`not following ${this.conns.get(boss)?.name || boss} as the model host: ${r.why}`);
+    return r;
+  }
+  // a host showing it deals: this node follows it from now on, busy for any other Start (room/authz.js)
+  hostDealing(from) {
+    const ai = this.ai;
+    if (!ai.dealer || !this.dealerHere()) ai.dealer = from;
+    if (from === ai.dealer) { ai.dealerActive = true; clearTimeout(ai.followTimer); }
+  }
+  dealerHere() { return !!this.ai.dealer && this.roomView().has(this.ai.dealer); }
   // a stripe (an extra association for the wire) joins the link's wire once it proved the mesh key
   attachStripe(e, conn) { this.proveStripe(e, conn, "accept"); }
   // held: its wire channel, opened while it proved the mesh key (transport.js holdWire)
@@ -391,7 +429,19 @@ export class RoomNode extends EventEmitter {
     if (e?.hold && !PASS_HELD.has(obj?.t)) { if (e.hold.out.length < HELD_MAX) e.hold.out.push(obj); return; }
     try { e?.conn.send(obj); } catch {}
   }
-  broadcast(obj, filter = () => true) { for (const [id, e] of this.conns) if (filter(id, e)) this.sendTo(id, obj); }
+  // a host this node follows that shows no sign of dealing within START_PENDING_MS is dropped (room/authz.js)
+  followTimeout(id, what) {
+    const ai = this.ai;
+    clearTimeout(ai.followTimer);
+    ai.followTimer = setTimeout(() => { if (!ai.dealerActive && ai.dealer === id) { this.log(`${what}: its host didn't start dealing`); this.clearDealer(); } }, START_PENDING_MS);
+    ai.followTimer.unref?.();
+  }
+  // a start this node dealt failed: free for the next Start (room/authz.js)
+  clearDealer() { const ai = this.ai; ai.dealer = null; ai.dealerActive = false; ai.startAt = null; clearTimeout(ai.followTimer); }
+  broadcast(obj, filter = () => true) {
+    if (obj?.t === "ai-start-failed") this.clearDealer();
+    for (const [id, e] of this.conns) if (filter(id, e)) this.sendTo(id, obj);
+  }
   sendHidden(id, msg) {
     const e = this.conns.get(id);
     this.sent ||= { wire: 0, msg: 0 };
@@ -444,7 +494,7 @@ export class RoomNode extends EventEmitter {
   }
   broadcastRoster() {
     // a: 1 = it proves its links (chanauth.js); a link from one without it is a device from before them
-    const members = [{ id: this.peer.id, name: this.name, meta: this.meta, ...(this.mk ? { a: 1 } : {}) }, ...[...this.roster].map(([id, m]) => ({ id, ...m }))];
+    const members = [{ id: this.peer.id, name: this.name, meta: { ...this.meta, fixedHost: 1 }, seq: 0, ...(this.mk ? { a: 1 } : {}) }, ...[...this.roster].map(([id, m]) => ({ id, ...m }))];
     this.broadcast({ t: "roster", members });
   }
   pingTick() {
@@ -555,7 +605,9 @@ export class RoomNode extends EventEmitter {
         e.name = d.name; e.meta = d.meta || {};
         if (this.isHost) {
           if (d.meta?.api) this.ai.apis.set(from, { name: d.name, client: d.meta.client });
-          this.roster.set(from, { name: d.name, meta: d.meta, ...(+d.auth >= AUTH_V ? { a: 1 } : {}) });
+          if (!this.seqOf.has(from)) this.seqOf.set(from, ++this.nextSeq);
+          this.roster.set(from, { name: d.name, meta: d.meta, seq: this.seqOf.get(from), ...(+d.auth >= AUTH_V ? { a: 1 } : {}) });
+          if (!this.seenAt.has(from)) this.seenAt.set(from, performance.now());
           this.broadcastRoster();
           if (this.visibility !== "all") this.sendTo(from, { t: "ai-visibility", mode: this.visibility });
           if (this.hosting() && !this.loadDeath(from, d)) this.rejoin(from, d.name);
@@ -584,6 +636,9 @@ export class RoomNode extends EventEmitter {
       case "roster":
         if (from !== PREFIX + this.code) return;
         this.members = d.members;
+        // the host this node followed left the room: free for the next Start
+        if (Array.isArray(d.members) && this.ai.dealer && this.ai.dealer !== this.peer.id && !d.members.some((m) => m?.id === this.ai.dealer)) this.clearDealer();
+        if (Array.isArray(d.members)) { this.rosterOrder = joinOrder(d.members); for (const m of d.members) if (m?.id && !this.seenAt.has(m.id)) this.seenAt.set(m.id, performance.now()); }
         for (const m of d.members || []) {
           const c = this.conns.get(m.id); if (c) { c.meta = m.meta || {}; c.name = m.name; }
           if (m.id === this.peer.id && m.name && m.name !== this.name) this.name = m.name;   // the host made it unique
@@ -604,14 +659,42 @@ export class RoomNode extends EventEmitter {
   // ---------------- messages: worker and host ----------------
   async aiOnData(from, d) {
     const ai = this.ai, e = this.conns.get(from);
-    if (FROM_HOST.has(d.t)) { if (this.hosting()) return; if (from !== (ai.hostId || PREFIX + this.code)) return; }
+    // the host this node checked, while it is in the room; before that, as before (room/authz.js). ai-load: workerLoad
+    if (FROM_HOST.has(d.t) && d.t !== "ai-load") {
+      if (this.hosting()) return;
+      // the host this node follows while it is in the room; before it follows one, the creator or the host the
+      // creator named in ai-modelhost
+      if (!hostAllowed({ from, dealer: ai.dealer, dealerHere: this.dealerHere(), named: ai.hostId || PREFIX + this.code }).take) return;
+      if (HOST_SIGNS.has(d.t)) this.hostDealing(from);
+    }
+    if (d.t === "ai-load" && this.hosting()) return;
     if ((d.t === "ai-hiddenret" || d.t === "ai-hiddenret-b") && from !== ai.chain[ai.chain.length - 1]) return;
     switch (d.t) {
       // --- any device: the room picked a model host (room/plan.js pickModelHost: the strongest device,
       // whoever pressed Start); the room's creator stays the PeerJS hub either way
       case "ai-start-req":
+        // every device checks the pick itself with the creator's facts (room/authz.js). A pooled host creator runs
+        // its own model, so it refuses any other boss (verifyHost: fixedHost) and relays nothing
+        {
+          if (!MODELS[d.model]) return;
+          // only the creator's (its own, or one it checked): a member's copy sent here directly is ignored
+          if (!startFrom({ from, creator: PREFIX + this.code, isCreator: this.isHost })) return;
+          const busy = startBusy({ boss: d.boss, self: this.peer.id, dealer: ai.dealer, dealerHere: this.dealerHere(), dealing: ai.dealerActive,
+            running: !!ai.engine || ai.online || ai.starting || !!ai.loadingShard || ai.role === "worker", pendingSince: ai.startAt, now: performance.now() });
+          if (busy === "replay") return;
+          const r = busy ? { ok: false, why: busy } : this.checkHost(d.boss, d.ids, from);
+          if (!r.ok) { if (busy) this.log(`ignored ${d.by || "a device"}'s Start: ${busy}`); this.sendTo(from, { t: "ai-start-refused", by: this.name, why: r.why, ...(d.rq ? { rq: d.rq } : {}) }); return; }
+        }
+        ai.dealer = d.boss; ai.dealerActive = false; ai.startAt = performance.now();
+        // a host that never starts dealing doesn't hold this node: give up after START_PENDING_MS
+        if (d.boss !== this.peer.id) this.followTimeout(d.boss, `${d.by || "a device"}'s Start`);
         if (d.boss === this.peer.id) { if (!this.hosting()) { this.modelHost = true; ai.role = "host"; } this.start(d.model).catch((err) => this.log("start failed: " + err.message)); }
-        else if (this.conns.has(d.boss)) ai.hostId = d.boss;
+        else ai.hostId = d.boss;
+        return;
+      case "ai-modelhost":   // the room's creator names the host it checked (a Start it saw): take it until it deals
+        if (this.isHost || from !== PREFIX + this.code || typeof d.id !== "string" || this.dealerHere()) return;
+        // follow it (busy for a Start naming another device) until it deals, or for START_PENDING_MS
+        ai.hostId = d.id; ai.dealer = d.id; ai.dealerActive = false; ai.startAt = performance.now(); this.followTimeout(d.id, "the host the creator named");
         return;
       // --- worker
       case "ai-load": return this.workerLoad(from, d);
@@ -624,7 +707,7 @@ export class RoomNode extends EventEmitter {
       case "ai-layers":
         if (ai.role === "worker" && !d.by?.[this.name]) this.freeLayers("guest");
         return;
-      case "ai-start-failed": ai.startFailed = d.why || "stopped"; if (!ai.loadingShard) this.freeLayers(null); this.emit("startfailed", d.why); return;
+      case "ai-start-failed": this.clearDealer(); ai.startFailed = d.why || "stopped"; if (!ai.loadingShard) this.freeLayers(null); this.emit("startfailed", d.why); return;
       case "ai-ready-all": ai.online = true; ai.model = d.model; if (!ai.role) ai.role = "guest";
         // the host opened the model at its fallback context (room/models.js pickCtx): say so
         ai.ctxNote = d.ctxWant > d.ctx && MODELS[d.model] ? ctxShortNote(String(MODELS[d.model].label).split("·")[0].trim(), d.ctx, d.ctxWant) : "";
@@ -709,6 +792,11 @@ export class RoomNode extends EventEmitter {
   }
   async workerLoad(from, d) {
     const ai = this.ai;
+    // layers only from the model host this node checked (room/authz.js)
+    const g = hostAllowed({ from, host: d.host, dealer: ai.dealer, dealerHere: this.dealerHere(), named: ai.hostId || PREFIX + this.code });
+    // refused out loud: the host's start fails at once instead of waiting on this node
+    if (!g.take) { this.log(`refused layers from ${this.conns.get(from)?.name || from}: ${g.why}`); this.sendTo(from, { t: "ai-error", load: 1, message: `${this.name} refused the layers: ${g.why}` }); return; }
+    this.hostDealing(from);
     if (d.v != null && d.v !== PROTOCOL) { this.sendTo(from, { t: "ai-error", message: `protocol ${PROTOCOL} here, ${d.v} on the host` }); this.emit("version", { theirs: d.v, theyHost: true }); return; }
     if (!MODELS[d.model]) { this.sendTo(from, { t: "ai-error", message: `unknown model ${d.model}`, load: 1 }); return; }
     const kv = kvForLoad(d.model, d.kv, null);
@@ -888,6 +976,7 @@ export class RoomNode extends EventEmitter {
     const ai = this.ai;
     if (!this.hosting()) throw new Error("only the host deals layers");
     if (ai.engine && !redeal) return;
+    ai.dealer = this.peer.id; ai.dealerActive = true;
     const M = MODELS[modelKey];
     if (!M) throw new Error("unknown model " + modelKey);
     if (minDevices > 1) {   // wait for devices that hold layers
