@@ -5,9 +5,11 @@
 //     -ot "per_layer_token_embd=CPU" --port 8297
 //   deno run --allow-read --allow-net --allow-write tests/golden/make_q38flash_llama.js [http://127.0.0.1:8297] [n=64] [cases]
 // Cases: test_moe's three chat prompts; "eos-mid", an <|endoftext|> in the middle of the prompt (the n-gram
-// hash resets there); "ctx2k", just under the dense path's 2048 cap (prompt + ids); and "ctx4k" / "ctx8k", past
-// QSA's 2051-cell budget, for the sparse-attention phase. [cases] (comma separated) regenerates only those and
-// keeps the file's others.
+// hash resets there); "ctx2k", just under the dense path's 2048 cap (prompt + ids); "ctx4k" / "ctx8k", past
+// QSA's 2051-cell budget, for the sparse-attention phase; and "ctx2k_b" (prompt and continuation stay under 2051
+// cells: dense, at long positions) / "ctx2k1" (just past 2051: QSA drops a few blocks), which split a long-context
+// mismatch into position drift vs the QSA selection (tests/test_q38flash_batch.js). [cases] (comma separated)
+// regenerates only those and keeps the file's others.
 // Each case keeps its prompt ids, the greedy text and ids, and per step the gap between the top two
 // log-probabilities ("gap", nats). A step under 0.2 is a near tie that the engine may legitimately flip:
 // "nearTies" lists every one as [step, gap], "nearTie" is the first (or -1), so a test compares tokens only up
@@ -37,6 +39,8 @@ cases["eos-mid"] = { q: "<|endoftext|> mid-prompt, then: Write a haiku about the
 cases["ctx2k"] = { q: "roadmap notes (~1.9K tokens), which note is about disk", prompt: long(1880) };
 cases["ctx4k"] = { q: "roadmap notes (~4K tokens), which note is about disk", prompt: long(3900) };
 cases["ctx8k"] = { q: "roadmap notes (~8K tokens), which note is about disk", prompt: long(7900) };
+cases["ctx2k_b"] = { q: "roadmap notes (~2K tokens, prompt + 64 <= 2051 cells), which note is about disk", prompt: long(1950) };
+cases["ctx2k1"] = { q: "roadmap notes (~2.1K tokens, just past 2051 cells), which note is about disk", prompt: long(2070) };
 
 const NEAR_TIE = 0.2;
 const nearTies = (gap) => {
