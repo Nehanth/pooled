@@ -14,10 +14,10 @@
 // State per sequence and layer: rawK (maxSeq x 256 B) and pooled (maxSeq / 4 x 256 B), both f16. Everything else
 // is per-pass scratch shared by all layers.
 
-import { qsaWGSL, QSA_KPOOL, QSA_NTOP, QSA_MAXSEL, QSA_SEL_STRIDE, QSA_PROJ, QSA_IH, QSA_ID } from "./wgsl/qsa.js";
+import { qsaWGSL, QSA_KPOOL, QSA_NTOP, QSA_MAXSEL, QSA_SEL_STRIDE, QSA_PROJ, QSA_IH, QSA_ID, QSA_MAX_SEQ } from "./wgsl/qsa.js";
 import { attnDecWGSL, attnDecCombineGWSL, attnDecConfig, decSplits, DEC_CQ } from "./wgsl/attn_dec.js";
 
-export { QSA_KPOOL, QSA_NTOP, QSA_MAXSEL, QSA_SEL_STRIDE, QSA_PROJ };
+export { QSA_KPOOL, QSA_NTOP, QSA_MAXSEL, QSA_SEL_STRIDE, QSA_PROJ, QSA_MAX_SEQ };
 export const QSA_SCORE_CW = 4;   // columns per qsa_score workgroup for multi-column passes
 
 // attn_dec shape for the QSA attention: G = nH / nKV query heads per kv head, split into R workgroups of <= 8
@@ -62,8 +62,10 @@ export function qsaUniform({ xStride, scoreStride, nRot = 64, eps = 1e-6, theta 
 }
 
 // buffer sizes (bytes). State: rawK, pooled (per sequence and QSA layer). Scratch: proj, qi, scores, sel (per pass;
-// scores is the big one: maxCols x maxSeq / 4 floats, so a long prefill chunk is scored in column groups).
+// scores is the big one: maxCols x maxSeq / 4 floats). There is no column-group path: every kernel covers the
+// pass's frame.nCols columns, so the caller keeps the pass width <= qsaMaxCols (the scores binding must fit).
 export function qsaSizes({ maxSeq, maxCols }) {
+  if (maxSeq > QSA_MAX_SEQ) throw new Error(`QSA: maxSeq ${maxSeq} > ${QSA_MAX_SEQ} (qsa_cs's 2 pi reduction is exact only below it)`);
   const maxBlocks = Math.ceil(maxSeq / QSA_KPOOL);
   return {
     maxBlocks,
@@ -71,6 +73,13 @@ export function qsaSizes({ maxSeq, maxCols }) {
     proj: maxCols * QSA_PROJ * 4, qi: maxCols * QSA_IH * QSA_ID * 4,
     scores: maxCols * maxBlocks * 4, sel: maxCols * QSA_SEL_STRIDE * 4,
   };
+}
+
+// the widest pass whose scores scratch fits one storage binding (WebGPU's default maxStorageBufferBindingSize is
+// 128 MiB: at 262,144 positions a 512-column pass is exactly 128 MiB, so any longer context needs the adapter's
+// limit or fewer columns). Long wide chunks are also score-bound: see docs/kernels.md "QSA" timings.
+export function qsaMaxCols({ maxSeq, maxBinding = 128 << 20 }) {
+  return Math.max(1, Math.floor(maxBinding / (Math.ceil(maxSeq / QSA_KPOOL) * 4)));
 }
 
 // group 1 binding specs per entry point (binding -> "ro" | "rw" | "u"); group 0 is the engine's [cfg, frame]

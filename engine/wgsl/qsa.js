@@ -40,7 +40,8 @@ struct QS { xs: u32, ps: u32, qs: u32, ss: u32, ls: u32, nRot: u32, eps: f32, ts
 @group(0) @binding(0) var<uniform> cfg: Config;
 @group(0) @binding(1) var<uniform> frame: Frame;
 
-// cos / sin of an f32 angle x >= 0 (x < 2^16 * 2 pi): x - k * 2 pi in three exact-product steps, then the builtins
+// cos / sin of an f32 angle x >= 0 (x < 2^16 * 2 pi, so p < QSA_MAX_SEQ): x - k * 2 pi in three exact-product steps
+// that must not be reassociated, then the builtins
 fn qsa_cs(x: f32) -> vec2<f32> {
   let k = round(x * 0.15915494309189535);
   let r = ((x - k * 6.28125) - k * 0.0019378662109375) - k * -2.559031372584286e-6;
@@ -57,7 +58,12 @@ fn qsa_rope(a: f32, b: f32, p: u32, i: u32, ts: f32) -> vec2<f32> {
 
 // split 2 pi for qsa_cs: c1 has 8 significant bits and c2 8, so k * c1 and k * c2 are exact for k < 2^16
 // (positions below ~410K); c3 = 2 pi - c1 - c2 rounded. Checked in tests/unit/qsa_ref_test.js.
+// The three subtractions must run in that order: a compiler that reassociates them (fast-math, e.g. Metal) loses
+// the exactness. Only Vulkan (GB10) is tested so far; a Metal run should include tests/test_qsa.js.
 export const QSA_TWO_PI_SPLIT = [6.28125, 0.0019378662109375, -2.559031372584286e-6];
+// the largest maxSeq qsa_cs stays exact for: every angle is <= p, and k = round(p / 2 pi) must stay below 2^16
+// (65535.5 * 2 pi = 411,771). engine/qsa.js qsaSizes refuses more. The Flash GGUF's context_length is 262,144.
+export const QSA_MAX_SEQ = 411000;
 
 // --- qsa_proj: proj[col][r] = sum_d W[r][d] * x[col][d], W BF16 [640][dim] as u32 pairs (low half = even d) ---
 // 8 rows per workgroup, 32 lanes per row over d pairs lane, lane + 32, ...; lanes summed in a fixed tree.

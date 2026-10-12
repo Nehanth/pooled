@@ -218,11 +218,20 @@ async function e2e(ctx, { prefillCols, layer = null }) {
     // pooled keys: f16 GPU vs f16 CPU
     const nb = Math.floor(ctx / 4);
     const pk = await readU32(B.pooled, Math.max(1, Math.floor((ctx - 1) / 4)) * 64);
-    let nd = 0, mu = 0;   // pooled keys: f16 values that differ from the reference's, and the largest difference
-    for (let i = 0; i < pk.length; i++) for (const [h, r] of [[pk[i] & 0xffff, ref.pooled[2 * i]], [pk[i] >>> 16, ref.pooled[2 * i + 1]]]) {
-      if (h !== f16bits(r)) { nd++; mu = Math.max(mu, Math.abs(h2f(h) - r)); }
+    // pooled keys: f16 values that differ from the reference's, the largest difference, and the largest in f16 ulps
+    // of max(|value|, the key's rms): a rounding flip is <= 1 such ulp at any magnitude (real k_norm weights put
+    // values past 4, where one ulp is 3.9e-3), while near-zero entries of a roped key carry the f32 cancellation
+    // error of the key's own scale, many ulps of their own tiny value but well under one ulp of the rms
+    const ulp16 = (x) => 2 ** (Math.max(Math.floor(Math.log2(x)), -14) - 10);
+    let nd = 0, mu = 0, mulp = 0;
+    for (let k = 0; k < pk.length; k += 64) {
+      let ss = 0; for (let j = 0; j < 128; j++) ss += ref.pooled[2 * k + j] ** 2;
+      const rms = Math.sqrt(ss / 128) || 1;
+      for (let i = k; i < k + 64; i++) for (const [h, r] of [[pk[i] & 0xffff, ref.pooled[2 * i]], [pk[i] >>> 16, ref.pooled[2 * i + 1]]]) {
+        if (h !== f16bits(r)) { const d = Math.abs(h2f(h) - r); nd++; mu = Math.max(mu, d); mulp = Math.max(mulp, d / ulp16(Math.max(Math.abs(r), rms))); }
+      }
     }
-    if (mu > 2e-3) fails++;   // rounding flips only: an f16 ulp at 1 is 9.8e-4
+    check(mulp <= 1, `pooled ctx ${ctx}: f16 rounding flips only (max ${mulp.toFixed(4)} ulp of max(|v|, rms))`);
     const [g] = await gpuPass(L, q, pos, 1);
     const scoresGpu = nb > QSA.N_TOP ? await readF32(B.scores, nb) : null;
     const [r] = qsaStep(ref, { pos, nCols: 1, qIdxRaw: L.qIdxRaw.subarray(pos * 512), kIdxRaw: L.kIdxRaw.subarray(pos * 128), qNorm: L.qNorm, kNorm: L.kNorm, q, K: L.K, V: L.V, shape: { nH, nKV, hd } });

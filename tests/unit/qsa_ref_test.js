@@ -2,10 +2,10 @@
 //   - selection rule: top 512 by (score desc, index asc), ascending output; ties decided by block index
 //   - <= 2051 positions select everything (QSA == dense); 2052 drops exactly one block
 //   - a prefill chunk selects and attends exactly as token-by-token decode
-//   - qsa_cs's 2 pi split and the dispatch bounds
+//   - qsa_cs's 2 pi split and its position bound, the scores scratch bound, and the dispatch bounds
 import { QSA, QsaRefCache, qsaStep, selectBlocks, selectedCells, denseCells, f16round } from "../reference/qsa_ref.mjs";
-import { QSA_TWO_PI_SPLIT, QSA_MAXSEL } from "../../engine/wgsl/qsa.js";
-import { qsaDispatch, qsaAttnConfig, qsaMaxRows, qsaNeedsScore } from "../../engine/qsa.js";
+import { QSA_TWO_PI_SPLIT, QSA_MAXSEL, QSA_MAX_SEQ } from "../../engine/wgsl/qsa.js";
+import { qsaDispatch, qsaAttnConfig, qsaMaxRows, qsaNeedsScore, qsaSizes, qsaMaxCols } from "../../engine/qsa.js";
 
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 let seed = 99;
@@ -73,6 +73,18 @@ Deno.test("qsa_cs: 2 pi in three parts, the first two with 8 significant bits", 
   const bits = (x) => { let m = Math.abs(x); while (m !== Math.floor(m)) m *= 2; return m.toString(2).replace(/0+$/, "").length; };
   ok(bits(c1) <= 8 && bits(c2) <= 8, "8-bit parts");
   ok(Math.abs(c1 + c2 + c3 - 2 * Math.PI) < 1e-12 && Math.fround(c3) === c3, "sum");
+  // k = round(p / 2 pi) < 2^16 for every position below QSA_MAX_SEQ, and qsaSizes refuses a longer maxSeq
+  ok(Math.round(Math.fround(QSA_MAX_SEQ - 1) / (2 * Math.PI)) < 2 ** 16 && QSA_MAX_SEQ >= 262144, "max position");
+  let threw = false; try { qsaSizes({ maxSeq: QSA_MAX_SEQ + 1, maxCols: 1 }); } catch { threw = true; }
+  ok(threw && qsaSizes({ maxSeq: 262144, maxCols: 1 }).maxBlocks === 65536, "qsaSizes bound");
+});
+
+Deno.test("scores scratch fits one binding at qsaMaxCols", () => {
+  ok(qsaMaxCols({ maxSeq: 262144 }) === 512 && qsaMaxCols({ maxSeq: 262160 }) === 511, "256K: 512 columns is exactly 128 MiB");
+  for (const maxSeq of [4096, 32768, 262144, 400000]) {
+    const c = qsaMaxCols({ maxSeq });
+    ok(qsaSizes({ maxSeq, maxCols: c }).scores <= 128 << 20 && qsaSizes({ maxSeq, maxCols: c + 1 }).scores > 128 << 20, `maxSeq ${maxSeq}`);
+  }
 });
 
 Deno.test("dispatch bounds", () => {

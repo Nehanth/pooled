@@ -1,7 +1,9 @@
 // QSA kernel timings per attention layer (GPU timestamp queries), Qwen3.8-Flash-Next shape (24 q heads, 2 kv
 // heads, hd 256, indexer 4 x 128), random data, at context lengths CTX:
-//   decode:  prep, pool, score, select, attn (attn_dec_qsa + combine), their sum, and dense attn_dec at the same
-//            position for comparison (what the layer would cost without QSA)
+//   decode:  prep, pool, score, select, attn (attn_dec_qsa + combine), each timed alone, and "one pass": all five
+//            in order as the engine runs them, which also pays the gaps between dependent dispatches (15-55% over
+//            the stage sum). One pass is the figure to compare with dense attn_dec at the same position (what the
+//            layer would cost without QSA)
 //   prefill: a COLS-column chunk ending at the context length (score c4, select per column, attention with S = 4)
 // Each stage runs REPS times inside one timed compute pass; the figure is the per-run mean of the best of 3.
 // The indexer projection (qsa_proj, 640 x 2560 BF16) is timed once (decode and prefill) since it does not depend
@@ -115,7 +117,7 @@ for (const ctx of CTXS) {
     p.setPipeline(pDC); p.setBindGroup(0, g0); p.setBindGroup(1, gDC); p.dispatchWorkgroups(nH * DEC_CQ, 1, 1);
   });
   const all = await time((p) => encodeQsa(p, pipes, G, d, { stages: ["prep", "pool", "score", "select", "attn"] }));
-  console.log(`decode  ctx ${String(ctx).padStart(6)}: prep ${f(t.prep)} pool ${f(t.pool)} score ${f(t.score)} select ${f(t.select)} attn ${f(t.attn)} | sum ${f(tot)}, one pass ${f(all)} | dense attn_dec ${f(dense)}`);
+  console.log(`decode  ctx ${String(ctx).padStart(6)}: prep ${f(t.prep)} pool ${f(t.pool)} score ${f(t.score)} select ${f(t.select)} attn ${f(t.attn)} | one pass ${f(all)} (stage sum ${f(tot)}) | dense attn_dec ${f(dense)}, ${(dense / all).toFixed(2)}x`);
   // prefill chunk of COLS columns ending at ctx
   if (ctx >= COLS) {
     const pp = ctx - COLS;
