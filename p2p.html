@@ -776,6 +776,69 @@
   #ai-give { width: 100%; font: 500 13px/1 var(--sans); }
   #ai-panel:is(.loading, .online) :is(#ai-give, #ai-why) { display: none; }
   #ai-why { font-size: 12px; line-height: 1.45; color: var(--ink-2); text-align: center; }
+  /* a model kept on disk (room/diskpick.js): its row is a normal row with a ✦ and its size as the chip; picked, the
+     cost row, the consent, Start | Not now and Advanced take the place of the download note, and the side shows
+     how it speeds up as devices join. Same card, same width. */
+  .rung .rn .rx { display: inline-block; width: 10px; height: 10px; margin: 0 7px 0 0; vertical-align: -.5px; color: var(--accent); opacity: .75; }
+  .rung.sel .rn .rx { opacity: 1; }
+  .rung .dkc { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .rung.short:not(.sel) .dkc { color: var(--ink-3); box-shadow: none; }
+  .rung.sel .dkc { color: var(--accent-text); background: color-mix(in srgb, var(--accent) 9%, var(--panel)); box-shadow: none; }
+  .dk-burst { position: fixed; z-index: 60; width: 0; height: 0; pointer-events: none; color: var(--accent); }
+  .dk-burst svg { position: absolute; left: 0; top: 0; opacity: 0; will-change: transform, opacity; }
+  #ai-disk { display: flex; flex-direction: column; gap: 12px; margin: 2px 2px 4px; }
+  #ai-disk[hidden], #ai-adv[hidden], #ai-notnow[hidden], .ap-speed[hidden] { display: none; }
+  .dk-cost { margin: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+  .dk-cost > div { display: flex; flex-direction: column; gap: 6px; padding: 11px 12px 12px; min-width: 0; }
+  .dk-cost > div:first-child { padding-left: 0; }
+  .dk-cost > div:last-child { padding-right: 0; }
+  .dk-cost > div + div { border-left: 1px solid var(--rule); }
+  .dk-cost dt { font-size: 12px; color: var(--ink-3); }
+  .dk-cost dd { margin: 0; font: 400 24px/1 var(--mono); letter-spacing: -.05em; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .dk-cost dd .ap { color: var(--ink-4); margin-right: 1px; }
+  .dk-cost dd small { font: 400 11px/1 var(--mono); letter-spacing: 0; color: var(--ink-3); margin-left: 3px; }
+  .dk-cost p { margin: 0; font-size: 11.5px; line-height: 1.35; color: var(--ink-3); text-wrap: balance; }
+  .dk-agree { margin: 0; font-size: 13px; line-height: 1.5; color: var(--ink-2); text-wrap: pretty; }
+  .dk-agree b { color: var(--text); font-weight: 500; }
+  .dk-disk { display: flex; align-items: center; gap: 10px; margin-top: -4px; font: 400 12px/1 var(--mono); color: var(--ink-3); }
+  .dk-disk i { flex: none; position: relative; width: 80px; height: 4px; border-radius: 2px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); overflow: hidden; }
+  .dk-disk i::after { content: ""; position: absolute; inset: 0 auto 0 0; width: var(--f); border-radius: 2px; background: var(--accent); }
+  .ai-go { display: flex; gap: 8px; }
+  .ai-go #ai-start { flex: 1; min-width: 0; }
+  #ai-notnow { flex: none; height: 48px; padding: 0 16px; border-radius: 8px; font: 500 14px/1 var(--sans); color: var(--ink-2); }
+  #ai-adv { margin-top: 4px; border-top: 1px solid var(--rule-2); }
+  #ai-adv summary { display: flex; align-items: center; gap: 8px; padding: 12px 2px 0; list-style: none; cursor: pointer; font-size: 13px; color: var(--ink-2); }
+  #ai-adv summary:hover { color: var(--text); }
+  #ai-adv summary::-webkit-details-marker { display: none; }
+  #ai-adv summary svg { flex: none; color: var(--ink-3); transition: transform .2s var(--ease); }
+  #ai-adv[open] summary svg { transform: rotate(90deg); }
+  #ai-adv .def { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--ink-3); white-space: nowrap; }
+  .dk-rows { display: flex; flex-direction: column; margin-top: 4px; padding: 0 2px; }
+  .dk-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 14px; row-gap: 3px; padding: 11px 0; }
+  .dk-row + .dk-row { border-top: 1px solid var(--rule-2); }
+  .dk-row:last-child { padding-bottom: 0; }
+  .dk-row .k { font-size: 13px; color: var(--text); }
+  .dk-row .h { grid-column: 1; font-size: 12px; line-height: 1.45; color: var(--ink-3); }
+  .dk-row > :nth-child(2) { grid-row: 1 / span 2; grid-column: 2; }
+  .dk-row .v { font: 500 14px/1 var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+  .dk-del { height: 32px; padding: 0 11px; border-radius: 8px; font: 500 12px/1 var(--sans); color: var(--del); white-space: nowrap; }
+  .dk-del:hover:not(:disabled) { background: var(--diff-del); }
+  /* the side: measured speed by room size, solid to the low number, tint to the high one; one device more, dashed */
+  .ap-speed { display: flex; flex-direction: column; gap: 11px; }
+  .ap-speed .ap-k small { font: 400 11px/1 var(--mono); color: var(--ink-4); }
+  .dk-bar { display: grid; grid-template-columns: 66px minmax(0, 1fr) 70px; align-items: center; gap: 12px; font-size: 12.5px; color: var(--ink-2); }
+  .dk-bar .t { position: relative; height: 8px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .dk-bar .t i { position: absolute; inset: 0 auto 0 0; width: var(--w); border-radius: 4px; background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 55%, var(--panel)) 0 var(--lo), color-mix(in srgb, var(--accent) 25%, var(--panel)) 0); }
+  .dk-bar b { font: 400 14px/1 var(--mono); letter-spacing: -.02em; color: var(--ink-2); text-align: right; font-variant-numeric: tabular-nums; }
+  .dk-bar.on { color: var(--text); }
+  .dk-bar.on .t i { background: linear-gradient(90deg, var(--accent) 0 var(--lo), color-mix(in srgb, var(--accent) 60%, var(--panel)) 0); }
+  .dk-bar.on b { color: var(--text); font-weight: 500; }
+  .dk-bar.next { color: var(--ink-3); }
+  .dk-bar.next .t { background: none; box-shadow: none; border: 1px dashed color-mix(in srgb, var(--accent) 35%, var(--panel)); }
+  .dk-invite { justify-self: end; padding: 0; border: 0; background: none; font: 500 12px/1 var(--mono); color: var(--accent-text); white-space: nowrap; cursor: pointer; }
+  .dk-invite:hover { text-decoration: underline; text-underline-offset: 3px; background: none; }
+  .dk-note { margin: 1px 0 0; font-size: 12px; line-height: 1.45; color: var(--ink-3); text-wrap: pretty; }
+  #ai-panel:is(.loading, .online) :is(#ai-disk, #ai-adv, #ai-notnow) { display: none; }
   #ai-loading { display: none !important; }
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
   /* loading: the landing's pick card. The logo's wave, what loads, each device's share of it, and
@@ -1592,6 +1655,12 @@
     #ai-head { padding: 8px 10px 12px; }
     .rung { height: 46px; font-size: 13px; padding: 0 12px 0 10px; gap: 8px; }
     #ai-start { height: 46px; }
+    #ai-notnow { height: 46px; padding: 0 14px; }
+    #ai-disk { margin: 2px 4px 4px; }
+    .dk-cost > div { padding: 10px 8px 11px; }
+    .dk-cost dd { font-size: 21px; }
+    .dk-cost dd small { font-size: 10.5px; margin-left: 2px; }
+    .dk-bar { grid-template-columns: 62px minmax(0, 1fr) 64px; gap: 10px; }
     #ap-qr svg { width: 84px; height: 84px; }
     #side-code { font-size: 22px; }
     #ai-output { padding: 14px 12px 8px; }
@@ -1964,10 +2033,12 @@
           <div id="ai-ladder" role="radiogroup" aria-label="Model"></div>
           <span id="ai-status"></span>
           <p class="ap-note" id="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
-          <button id="ai-start" class="primary">Start the model</button>
+          <div id="ai-disk" aria-live="polite" hidden></div>
+          <div class="ai-go"><button id="ai-start" class="primary">Start the model</button><button id="ai-notnow" type="button" hidden>Not now</button></div>
           <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
           <p id="ai-short" role="status" hidden></p>
           <p id="ai-why" hidden>No device in this room can run a model: none has WebGPU. Join from a laptop or desktop in Chrome or Edge (or Safari 26) to start one.</p>
+          <details id="ai-adv" hidden><summary><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5"/></svg>Advanced<span class="def"></span></summary><div class="dk-rows"></div></details>
           <p id="start-why" class="sr-only"></p>
           <div id="redeal-why" hidden></div>
           <button id="ai-redeal" type="button" hidden>Re-deal the layers</button>
@@ -1979,6 +2050,7 @@
         </div>
       </div>
       <div class="ap-side">
+        <section class="ap-speed" id="ap-speed" aria-label="Speed as devices join" hidden></section>
         <section class="ap-pool" aria-label="The room's memory">
           <h3 class="ap-k"><span>The room pools</span><b id="ap-total">0 GB</b></h3>
           <div id="ap-meter" aria-hidden="true"><div class="apm-fill"></div><div class="apm-ticks"></div></div>

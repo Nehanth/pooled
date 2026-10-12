@@ -178,6 +178,19 @@ export const FILES = {
 // The models the room's picker offers. The others stay for tests and ?dev=1.
 export const PICKER = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 
+// Models that keep a copy on each device's disk and stream their experts from it, so they run on far less memory
+// than their size. The picker's row, its cost figures, the consent line, the Start label and the speed chart all
+// come from this entry (room/diskpick.js), so another big model gets the same picker by adding one.
+//   name: the row's name; params / arch: its chip ("177B · MoE · from disk")
+//   diskGB: what one device stores, at most, one time (the consent asks for this); memGB: about what it keeps in
+//   memory (the experts it uses most); speeds: measured tok/s ranges by devices in the room, fewest first; measured:
+//   where the speeds come from, for the chart's note
+export const DISK_COPY = {
+  "qwen3.8-flash": { name: "Qwen3.8 Flash", params: "177B", arch: "MoE", diskGB: 92, memGB: 20,
+    speeds: [{ devices: 1, lo: 7, hi: 8.5 }, { devices: 2, lo: 11, hi: 12 }],
+    measured: "from a Mac tab alone and with a gaming PC joined" },
+};
+
 const FLASH_BASE = "https://huggingface.co/bartowski/Qwen3.8-Flash-Next-GGUF/resolve/928589fdb66c6ff07f22ac561e3fbce76553548f/Qwen3.8-Flash-Next-Q4_0/";
 export const MODELS = {
   "qwen3-0.6b": { label: "Qwen3 0.6B · Q8", kind: "gguf",
