@@ -19,7 +19,8 @@ import { parseGGUFHeader } from "../engine/gguf.js";
 import { F16_WGSL } from "../engine/wgsl/f16.js";
 
 const quick = Deno.env.get("QUICK") === "1";
-const ad = await navigator.gpu.requestAdapter();
+const ad = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });   // the discrete GPU on hybrid PCs
+console.log(`adapter: ${[ad.info?.vendor, ad.info?.architecture, ad.info?.description].filter(Boolean).join(" ")}`);
 const device = await ad.requestDevice({ requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize } });
 let gpuErr = 0;
 device.addEventListener?.("uncapturederror", (e) => { if (gpuErr++ < 4) console.error("GPU ERROR:", e.error?.message?.slice(0, 400)); });

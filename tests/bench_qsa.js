@@ -16,7 +16,8 @@ import { attnDecWGSL, decSplits, DEC_CQ } from "../engine/wgsl/attn_dec.js";
 const env = (k, d) => Deno.env.get(k) ?? d;
 const CTXS = env("CTX", "4096,8192,32768").split(",").map(Number);
 const COLS = +env("COLS", 512), REPS = +env("REPS", 50), PSPLIT = 4;
-const ad = await navigator.gpu.requestAdapter();
+const ad = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });   // the discrete GPU on hybrid PCs
+console.log(`adapter: ${[ad.info?.vendor, ad.info?.architecture, ad.info?.description].filter(Boolean).join(" ")}`);
 const device = await ad.requestDevice({ requiredFeatures: ["timestamp-query"],
   requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize } });
 let gpuErr = 0;
