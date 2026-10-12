@@ -30,7 +30,10 @@ Deno.test("engine WGSL: no barrier that only some threads reach", () => {
 
 Deno.test("engine WGSL: coopWGSL's generated variants (_acc, _cv, _n) too", async () => {
   const gen = await generatedSources();
-  ok(gen.length >= 6 && gen.every((g) => g.js.includes("fn matvec_coop_n(")), "generated the normed GEMVs");
+  const coop = gen.filter((g) => g.file.startsWith("coop.js"));
+  ok(coop.length >= 6 && coop.every((g) => g.js.includes("fn matvec_coop_n(")), "generated the normed GEMVs");
+  // attn_tile's schedules (shared buffer, prefetch, skv): their barrier loop must hold up as generated, not just as a template
+  ok(gen.some((g) => g.file.startsWith("attn_tile.js") && g.js.includes("at_ks")), "generated the skv attn_tile");
   const found = gen.flatMap((g) => lintSources([g]));
   ok(!found.length, "\n" + found.map((x) => `${x.file} fn ${x.fn}: \`${x.what}\`: ${x.msg}`).join("\n"));
 });

@@ -1,8 +1,8 @@
 // Tiled prefill attention (engine/wgsl/attn_tile.js) alone at the MoE's shape (hd 256, 16 query heads, 2 KV heads):
 // one 16-column prefill pass at position POS of a synthetic f16 KV cache, timed over REPS launches per variant,
-// variants interleaved round by round. Variants: attnTileConfig flags (kvh, pf, nr). No model.
+// variants interleaved round by round. Variants: attnTileConfig flags (kvh, pf, nr, skv). No model.
 //   cd tests && deno run --unstable-webgpu --allow-read --allow-env bench/attn_tile_bench.js
-//   env: POS=8192,16384 VARIANTS='[{},{"pf":true},{"nr":true},{"pf":true,"nr":true}]' ROUNDS=5 REPS=20 NC=16
+//   env: WGMEM=1 POS=8192,16384 VARIANTS='[{},{"pf":true},{"nr":true},{"pf":true,"nr":true}]' ROUNDS=5 REPS=20 NC=16
 import { attnTileConfig, attnTileWGSL } from "../../engine/wgsl/attn_tile.js";
 const env = (k, d) => Deno.env.get(k) ?? d;
 const hd = 256, nH = 16, nKV = 2, G = nH / nKV, kvDim = nKV * hd, NC = +env("NC", 16);
@@ -11,7 +11,9 @@ const VARIANTS = JSON.parse(env("VARIANTS", '[{},{"pf":true},{"nr":true},{"pf":t
 const maxSeq = Math.max(...POS) + NC + 64;
 const faSplit = Math.max(256, Math.ceil(maxSeq / 128 / 64) * 64), faSplits = Math.ceil(maxSeq / faSplit);   // engine/qwen35.js sizing
 const ad = await navigator.gpu.requestAdapter();
-const device = await ad.requestDevice({ requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize } });
+// WGMEM=1: request the adapter's workgroup memory and size the tile for it (TK 16 at 32 KB)
+const WGMEM = env("WGMEM", "0") === "1" ? ad.limits.maxComputeWorkgroupStorageSize : 16384;
+const device = await ad.requestDevice({ requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, maxComputeWorkgroupStorageSize: WGMEM } });
 device.addEventListener?.("uncapturederror", (e) => console.error("GPU ERROR:", e.error?.message));
 const BU = GPUBufferUsage;
 let seed = 7; const rnd = () => { seed = (Math.imul(seed, 1103515245) + 12345) >>> 0; return (seed >>> 8) / 16777216; };
@@ -26,7 +28,7 @@ const cfgU = uni([2048, kvDim, nH, nKV, hd, 512, 248320, maxSeq, f32bits(1e-6), 
 const faU = uni([s0, s0, faSplit, faSplits]);
 const frames = Object.fromEntries(POS.map((p) => [p, uni([p, p + 1, NC, 0])]));
 const vs = VARIANTS.map((o) => {
-  const c = attnTileConfig({ hd, G, faSplit, faSplits, ...o });
+  const c = attnTileConfig({ hd, G, faSplit, faSplits, wgMem: WGMEM, ...o });
   device.pushErrorScope("validation");
   const mod = device.createShaderModule({ code: attnTileWGSL(c) });
   const pf = device.createComputePipeline({ layout: "auto", compute: { module: mod, entryPoint: "attn_flash_tile" } });
