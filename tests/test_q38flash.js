@@ -5,9 +5,11 @@
 //   deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights tests/test_q38flash.js
 //
 // Modes:
-//   (default)  greedy ids vs llama.cpp (tests/golden/q38flash_llama_greedy.json, the prompts under 2048 tokens,
-//              ctx2k the longest, ~1.9K): MATCH per prompt, with the golden's near ties reported; decode tok/s. TOKENS=n caps the ids compared
-//              (default: all of the golden's). CASES=a,b picks prompts.
+//   (default)  greedy ids vs llama.cpp (tests/golden/q38flash_llama_greedy.json, the cases whose prompt + ids fit
+//              maxSeq 2048: the chat prompts, ctx2k (1887 prompt tokens) and ctx2k_b (1943, the longest)): MATCH per
+//              prompt, or a difference at a backend near tie (tests/q38flash_rule.js: our token within 0.5 nats of
+//              llama.cpp's top there and our own top-2 gap under 0.5); decode tok/s. TOKENS=n caps the ids
+//              compared (default: all of the golden's). CASES=a,b picks prompts.
 //   LAYERS=N   per-layer check against llama.cpp's own tensors (the q38dump dumps, Q38F_DUMPS, default
 //              <Q38F_DIR>/dumps; README there): layers 0..N-1 (48: and the head), every tapped tensor's relative
 //              L2 error per token, and the expert sets. Teacher-forced by default (each half layer starts from
@@ -32,6 +34,7 @@ import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
 import { qwen4expWeights, qwen4expConfig, gpuUploadEntry } from "../engine/gguf.js";
 import { ngramConfig, NgramTable } from "../engine/ngram.js";
 import { openGGUF, gpuDevice, watchGpuErrors, offloadFromEnv } from "./load_model.js";
+import { judgeGolden, TIE_NATS } from "./q38flash_rule.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
 const DIR = env("Q38F_DIR", new URL("../models/q38flash", import.meta.url).pathname);
@@ -220,16 +223,16 @@ async function greedy() {
     while (gen.length < N) { r = await eng.forwardToken(gen[gen.length - 1], { wantLogits: true }); gen.push(r.id); gaps.push(gap(r.logits)); }
     const ts = (N - 1) / ((performance.now() - t) / 1000);
     tsAll.push(ts);
-    // the first differing id; a difference at one of llama.cpp's near ties (its top-2 gap < 0.25 at that very step,
-    // so the two picks are within the noise) is reported but not a failure. Stricter than the other goldens, which
-    // excuse any difference after a tie: after a tie we matched through, a later difference is a failure
-    const diff = gen.findIndex((x, i) => x !== g.ids[i]);
-    const ok = diff < 0, tieOk = !ok && g.gap?.[diff] != null && g.gap[diff] < 0.25;
-    console.log(`${name}: prompt ${g.prompt.length} tok ${pf.toFixed(1)} s · decode ${ts.toFixed(2)} tok/s · ${ok ? `MATCH llama.cpp (${N} ids)` : tieOk ? `differs at ${diff}, llama.cpp's near tie there (gap ${g.gap[diff]}; not a failure)` : `MISMATCH at ${diff}`}`);
+    // the first differing id, judged by tests/q38flash_rule.js: at a backend near tie (that very step: our token in
+    // llama.cpp's top-k within 0.5 nats of its top, our own top-2 gap under 0.5) it is reported but not a failure,
+    // and nothing after it is compared. A difference after a tie we matched through still fails
+    const J = judgeGolden(g, gen, gaps, N), { diff, ok } = J, tieOk = J.excused;
+    console.log(`${name}: prompt ${g.prompt.length} tok ${pf.toFixed(1)} s · decode ${ts.toFixed(2)} tok/s · ${J.msg}`);
     console.log(`  engine: ${JSON.stringify(tok.decode(gen))}`);
     if (!ok) console.log(`  golden: ${JSON.stringify(g.text)}\n  ours ${gen.slice(Math.max(0, diff - 2), diff + 3)} gap ${gaps[diff]?.toFixed(3)} vs llama.cpp ${g.ids.slice(Math.max(0, diff - 2), diff + 3)} gap ${g.gap?.[diff]}`);
-    const ourTies = gaps.map((x, i) => [i, x]).filter(([, x]) => x < 0.25).map(([i, x]) => `${i}:${x.toFixed(3)}`);
-    console.log(`  near ties (top-2 gap < 0.25): ours [${ourTies.join(" ")}] llama.cpp [${(g.nearTies || []).map(([i, x]) => `${i}:${x}`).join(" ")}]`);
+    const ourTies = gaps.map((x, i) => [i, x]).filter(([, x]) => x < TIE_NATS).map(([i, x]) => `${i}:${x.toFixed(3)}`);
+    const llTies = (g.gap || []).map((x, i) => [i, x]).filter(([, x]) => x != null && x < TIE_NATS).map(([i, x]) => `${i}:${x}`);
+    console.log(`  near ties (top-2 gap < ${TIE_NATS}): ours [${ourTies.join(" ")}] llama.cpp [${llTies.join(" ")}]`);
     if (!ok && !tieOk) fail++;
   }
   if (tsAll.length) console.log(`decode: ${(tsAll.reduce((a, b) => a + b) / tsAll.length).toFixed(2)} tok/s mean`);

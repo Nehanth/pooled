@@ -23,9 +23,12 @@
 // FULL=1: all 48 layers and the head (~75 GB of GPU memory): greedy ids vs llama.cpp
 // (tests/golden/q38flash_llama_greedy.json, every case including ctx4k / ctx8k; ctx2k and ctx2k_b stay dense at
 // long positions (1887 and 1943 prompt tokens, + 64 <= 2051 cells), ctx2k1 (2082) is just past 2051 cells, where
-// QSA drops a few blocks) with the prompt run by the batched prefill, the prefill's greedy id == the decode engine's on the short prompts, and a verify pass over the
-// golden continuation giving the decode steps' ids. Cases that share a prompt prefix and fail at the same step on
-// the same token count as one failure seen again: a near tie in the later one does not excuse it.
+// QSA drops a few blocks) with the prompt run by the batched prefill, judged by tests/q38flash_rule.js (a difference
+// passes only at a backend near tie: our token within 0.5 nats of llama.cpp's top there, our own top-2 gap under
+// 0.5); the prefill's greedy id == the decode engine's on the prompts of <= 256 tokens; and a verify pass of 8
+// columns over the golden continuation giving the decode steps' ids, accept(8) (the full-length accept only; partial
+// accepts are covered by the layered mode). Cases that share a prompt prefix and fail at the same step on the same
+// token count as one failure seen again: a near tie in the later one does not excuse it.
 import fs from "node:fs";
 import path from "node:path";
 import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
@@ -33,6 +36,7 @@ import { Qwen4ExpBatch } from "../engine/qwen4exp_batch.js";
 import { qwen4expWeights, qwen4expConfig, gpuUploadEntry } from "../engine/gguf.js";
 import { ngramConfig, NgramTable } from "../engine/ngram.js";
 import { openGGUF, gpuDevice, watchGpuErrors, offloadFromEnv } from "./load_model.js";
+import { judgeGolden } from "./q38flash_rule.js";
 import { QSA, QsaRefCache, poolBlock, indexerQuery, scoreBlocks, selectBlocks, selectedCells, f16bits, h2f } from "./reference/qsa_ref.mjs";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
@@ -49,7 +53,7 @@ const G = model.G, cfg = qwen4expConfig(G.meta);
 const nL = FULL ? cfg.L : +env("LAYERS", 4), hasHead = nL === cfg.L;
 const MAXSEQ = +env("MAXSEQ", FULL ? 8448 : 4608);
 
-const experts = offloadFromEnv(device, nL);
+const experts = await offloadFromEnv(device, nL, model);   // (async since the disk tier, #349; a disk layer is refused by Qwen4ExpBatch.create)
 let t0 = performance.now();
 const up = (e, name) => { if (name !== "token_embd.weight") gpuUploadEntry(device, e, false); };
 const flush = async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); };
@@ -275,10 +279,8 @@ async function full() {
     t = performance.now();
     while (gen.length < N) { r = await eng.forwardToken(gen[gen.length - 1], { wantLogits: true }); gen.push(r.id); gaps.push(gap(r.logits)); }
     const ts = (N - 1) / ((performance.now() - t) / 1000);
-    const diff = gen.findIndex((x, i) => x !== g.ids[i]);
-    const tie = (g.nearTies || []).map(([i]) => i).filter((i) => i < N);
-    const ok = diff < 0;
-    let tieOk = !ok && tie.some((i) => i <= diff);
+    const J = judgeGolden(g, gen, gaps, N), { diff, ok } = J;
+    let tieOk = J.excused;
     // a near tie excuses a divergence only when it is a failure of its own: a case whose prompt shares a long prefix
     // with an earlier case that already failed at the same step on the same token is that failure seen again
     // (ctx8k repeats ctx4k's first 3835 prompt tokens and its first 6 ids), so it counts as failed too
@@ -287,7 +289,7 @@ async function full() {
     const withdrawn = twin && tieOk;
     if (twin) tieOk = false;
     results.push({ name, ok, tieOk, diff, gen, ids: g.ids, prompt: g.prompt });
-    console.log(`${ok || tieOk ? "ok  " : "FAIL"} ${name}: prompt ${g.prompt.length} tok, prefill ${pf.toFixed(1)} s (${(g.prompt.length / pf).toFixed(0)} tok/s) · decode ${ts.toFixed(2)} tok/s · ${ok ? `MATCH llama.cpp (${N} ids)` : tieOk ? `differs at ${diff} after llama.cpp's near tie at ${tie.filter((i) => i <= diff).join(",")}` : `MISMATCH at ${diff}${twin ? ` (the same divergence as ${twin.name}: shared prompt prefix, same step and token${withdrawn ? "; llama.cpp's near tie there does not excuse it" : ""})` : ""}`}`);
+    console.log(`${ok || tieOk ? "ok  " : "FAIL"} ${name}: prompt ${g.prompt.length} tok, prefill ${pf.toFixed(1)} s (${(g.prompt.length / pf).toFixed(0)} tok/s) · decode ${ts.toFixed(2)} tok/s · ${J.msg}${twin ? ` (the same divergence as ${twin.name}: shared prompt prefix, same step and token${withdrawn ? "; the near tie does not excuse it" : ""})` : ""}`);
     if (!ok) console.log(`  engine: ${JSON.stringify(tok.decode(gen))}\n  golden: ${JSON.stringify(g.text)}\n  top-2 gap (nats) ours / llama.cpp, steps 0..${diff}: ${gaps.slice(0, diff + 1).map((x, i) => `${x.toFixed(3)}/${g.gap?.[i]?.toFixed(3)}`).join(" ")}`);
     if (!ok && !tieOk) fail++;
     // verify: the prompt again, then one verify pass over [last prompt token, gen[0..6]] gives gen[0..7]
@@ -299,6 +301,21 @@ async function full() {
       const same = v.ids.every((x, i) => x === gen[i]);
       check(same, `${name}: verify pass ids ${v.ids.join(",")} == decode ${gen.slice(0, 8).join(",")}`);
     }
+  }
+  // verifyCols: 1: the logits hold one column, so the prefill's head (on its last column) must run on exactly one
+  // column (the frame's nCols set to 1 before it; gemv_mc would otherwise fill GEMV_MC_COLS columns, past B.hl).
+  // Same engine, a second batch: its 64-column prefill's logits == the verifyCols 8 batch's bit for bit, its id ==
+  // the decode engine's, and a 1-column verify gives decode's next id.
+  {
+    const g = gold["two-sum"], pb1 = await Qwen4ExpBatch.create(eng, weights, { maxCols: 64, verifyCols: 1 });
+    eng.reset(); const dec = await eng.prefillTokens(g.prompt, { wantLogits: true }), next = (await eng.forwardToken(dec.id)).id;
+    eng.reset(); const r8 = await pb.prefill(g.prompt, { wantLogits: true });
+    eng.reset(); const r1 = await pb1.prefill(g.prompt, { wantLogits: true });
+    const same = new Uint32Array(r1.logits.buffer).every((x, i) => x === new Uint32Array(r8.logits.buffer)[i]);
+    const v = await pb1.verify([r1.id]);
+    await pb1.accept(1);
+    check(same && r1.id === dec.id && v.ids[0] === next && errors.count === 0,
+      `verifyCols 1: prefill logits ${same ? "==" : "differ from"} the verifyCols 8 batch's, id ${r1.id} vs decode ${dec.id}; 1-column verify id ${v.ids[0]} vs decode ${next}`);
   }
   // by attention phase: dense (every step <= 2051 cells) and sparse (QSA drops blocks); exact matches only
   const phase = (sparse) => results.filter((r) => (r.prompt.length + r.ids.length > 2051) === sparse);
