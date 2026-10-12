@@ -560,7 +560,7 @@ function roomFitFor(key) {
   if (!devs.length || !roomBytes(key, maxSeqFor(key, ask), kv)) return null;
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
-  const pledges = devs.map((d) => pledgeGB(d.meta) * 2 ** 30);
+  const pledges = devs.map((d) => pledgeGB(d.meta, Infinity, key) * 2 ** 30);
   const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key)); };
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
@@ -3352,7 +3352,7 @@ async function aiStart(modelArg) {
     // head and the draft block), and a room whose pledges can't hold the model does not start.
     ai.shareCap ??= new Map();
     const nameOf = (id) => conns.get(id)?.name || id;
-    const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name)) * 2 ** 30;
+    const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name), modelKey) * 2 ** 30;   // (64 GB a device, 128 for Flash)
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
     // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); a tab only with the OPFS disk
@@ -3563,7 +3563,7 @@ function paintHeld() {
     const el = card.querySelector(".pheld"); if (!el) continue;
     const meta = nm === myName ? myMeta : [...members.values()].find((m) => m.name === nm)?.meta;
     el.textContent = why === "unneeded" && isPhoneMeta(meta) ? "not needed: the computers hold the model"
-      : why ? OUT_TEXT[why] || "" : held != null ? `uses ${held.toFixed(1)} of ${+pledgeGB(meta).toFixed(1)} GB pledged` : "";
+      : why ? OUT_TEXT[why] || "" : held != null ? `uses ${held.toFixed(1)} of ${+pledgeGB(meta, Infinity, $("ai-model")?.value).toFixed(1)} GB pledged` : "";
     el.hidden = !el.textContent;
   }
 }
@@ -3669,7 +3669,7 @@ function aiLoadDeath(newId, d) {
   const deaths = (ai.loadDeaths.get(name) || 0) + 1;
   ai.loadDeaths.set(name, deaths);
   const meta = conns.get(newId)?.meta;
-  const r = afterLoadDeath({ layers: ai.layersN?.[name] || 1, layerGB: ai.layerGB || 0.5, gb: pledgeGB(meta, ai.shareCap.get(name)), deaths });
+  const r = afterLoadDeath({ layers: ai.layersN?.[name] || 1, layerGB: ai.layerGB || 0.5, gb: pledgeGB(meta, ai.shareCap.get(name), ai.GModel), deaths });
   let why;
   if (r.drop) {
     ai.dropped.add(name);
