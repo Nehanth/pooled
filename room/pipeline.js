@@ -1,6 +1,6 @@
 // Host/worker inference and checkpoints over caller-owned state and frame delivery.
 // No browser globals, engine construction, or PeerJS connection ownership.
-import { badF32, packWire, unpackWire, wireStats } from "./wire.js";
+import { badF32, packWire, unpackWire, splitWire, wireDim, idsFor, wireStats } from "./wire.js";
 import { DROP_ALL } from "./transport.js";
 import { lapTimeout } from "./liveness.js";
 import { PrefixIndex } from "../harness/prefix.js";
@@ -207,7 +207,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     // writes would land between the parts (engine offGate); fill once it is through
     const gate = ai.engine.offGate?.();
     if (gate) { const E0 = ai.engine; gate.then(() => { if (ai.engine === E0) fillDrafts(h, ids, i0, basePos, n); }); return; }
-    const dim = ai.engine.dims.dim, E = ai.engine, NC = E.NC || 4;
+    const dim = wireDim(ai.engine), E = ai.engine, NC = E.NC || 4;
     // Node prompt frames can span several batches; the browser keeps its original fill policy.
     let c = 0;
     if ((node ? E.mtpBatchFill !== false : MTP_BATCH) && E._mtpFillBatch && E.B && (node || n <= NC)) {
@@ -244,7 +244,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     if (ai.chain.length) {
       const hostMs = performance.now() - tHost;
       const returned = lapWait(pos, lapTimeout(ai.lapStat, 30000, chainRtt()), "token");
-      sendChain({ t: "ai-hidden", pos, ...packWire(h) });
+      sendChain({ t: "ai-hidden", pos, ...packWire(h, idsFor(current.engine, [id])) });
       ahead?.onSent?.();
       h = await returned;
       if (badF32(h)) throw new Error(peerError(pos));
@@ -284,7 +284,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
       // split: up to 16 prompt tokens per round, and several rounds in flight at once. Every device
       // runs frames in send order, so round r+1 can enter the host's layers while round r is on a
       // worker: the chain works like a pipeline instead of one device at a time.
-      const hdim = current.engine.dims.dim;
+      const hdim = wireDim(current.engine);
       const NC = current.engine.NC || 4;   // columns per GPU pass
       // step down 16 -> 8 -> 4 on the tail: without this a remainder of up to NC-1 tokens costs one
       // network lap each
@@ -297,7 +297,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
           const p = lapWait("b" + basePos, 90000, "batch prefill").then((h) => fillDrafts(h, ids, i0, basePos, n));
           p.catch(() => {});
           inflight.push(p);
-          sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb) });
+          sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb, idsFor(current.engine, ids.slice(i0, i0 + n))) });
         }
         ai.pos = basePos + n;
         ai.fed.push(...ids.slice(i0, i0 + n));
@@ -328,7 +328,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
           if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
           const p = lapWait("b" + basePos, 90000, "prefill tail");
           p.catch(() => {});
-          sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb) });
+          sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb, idsFor(current.engine, ids.slice(i0))) });
           ai.pos = basePos + n;
           ai.fed.push(...ids.slice(i0));
           i = ids.length;
@@ -336,7 +336,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
           const h = await p;
           if (badF32(h)) throw new Error(`NaN in hidden returned by peers (pos ${basePos})`);
           fillDrafts(h, ids, i0, basePos, n);
-          const dim = current.engine.dims.dim;
+          const dim = wireDim(current.engine);
           ai.lastHidden = h.slice((n - 1) * dim, n * dim);
           if (desc) {
             tailLogits = await current.engine.headFromHiddenIds(ai.lastHidden, desc);
@@ -381,16 +381,18 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     const t0 = performance.now();
     if (d.t === "ai-hidden-b") {
       // n hiddens in, my layers (batched), n hiddens on
-      const xs = unpackWire(d);
       const nTok = d.n || 4;
-      const wdim = current.engine.dims.dim;
+      const wdim = wireDim(current.engine);
+      // tk: the frame's token ids, when the host sent them (engine.frameIds); they go on to the next device too
+      const { h: xs, ids: tk } = splitWire(d, nTok, wdim);
       const NC = current.engine.NC || 4;
       // A node host's wide prompt uses prefill kernels; verifies retain per-column state.
       const wide = !d.spec && nTok >= 2 * NC && current.engine.prefillHidden && current.engine.prefillFrame?.() > 0;
-      const hb = wide ? await current.engine.prefillHidden(xs, d.basePos) : new Float32Array(nTok * wdim);
+      const hb = wide ? await current.engine.prefillHidden(xs, d.basePos, ...(tk ? [{ ids: tk }] : [])) : new Float32Array(nTok * wdim);
       if (!wide) for (let c = 0; c < nTok; c += NC) {
         const m = Math.min(NC, nTok - c);
-        hb.set(await current.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false), c * wdim);
+        hb.set(await current.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false,
+          ...(tk ? [{ ids: tk.subarray(c, c + m) }] : [])), c * wdim);
       }
       if (badF32(hb)) { if (!node) aiStatus(`⚠ NaN in batched prefill on this device`); sendTo(ai.hostId, { t: "ai-error", message: "NaN in batched prefill" }); }
       if (!node) {
@@ -399,15 +401,15 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
       }
       // the verify flag travels with the frame: every device snapshots its recurrent state per
       // column, or a later rollback on it restores a stale snapshot
-      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };
+      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb, ai.next === "host" ? null : tk) };
       if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret-b", ...bmsg });
       else sendHidden(ai.next, { t: "ai-hidden-b", ...bmsg, ...ctl });
       if (!node && d.spec) keepWarm(d.basePos);
     } else {
       // one token: run my layers, forward along the chain
-      const hin = unpackWire(d);
+      const { h: hin, ids: tk } = splitWire(d, 1, wireDim(current.engine));
       if (!node && badF32(hin)) { aiStatus(`⚠ NaN ARRIVED at this device (pos ${d.pos}) — upstream peer broken`); }
-      const h = await current.engine.runHidden(hin, d.pos);
+      const h = await current.engine.runHidden(hin, d.pos, ...(tk ? [{ ids: tk }] : []));
       if (badF32(h)) {
         if (!node) aiStatus(`⚠ NaN PRODUCED by this device (pos ${d.pos}, layers ${ai.range[0]}–${ai.range[1] - 1}) — GPU kernel issue here`);
         sendTo(ai.hostId, { t: "ai-error", message: node ? `NaN produced on node layers ${ai.range[0]}-${ai.range[1] - 1}` : `NaN produced on worker layers ${ai.range[0]}–${ai.range[1] - 1}` });
@@ -416,7 +418,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
         teleNote("one", performance.now() - t0);
         computePass(1, performance.now() - t0);
       }
-      const msg = { pos: d.pos, ...packWire(h) };
+      const msg = { pos: d.pos, ...packWire(h, ai.next === "host" ? null : tk) };
       if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
       else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });
       if (!node) keepWarm(d.pos);

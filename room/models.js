@@ -2,17 +2,22 @@
 
 // GB each model needs at its default context (the picker's "needs N GB"); NEED_MIN_GB: what a model
 // with a fallback context (CTX[model].fallback) needs there, the least a room can start it with
-export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "qwen3.5-122b-moe": 72.0, "smollm-135m": 0.6 };
+export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "qwen3.5-122b-moe": 72.0,
+  // Qwen3.8-Flash-Next: its 48 layers, the embedding and the head (71.8 GB in the file); the 28.8 GB n-gram table is
+  // not GPU memory (it stays on the disk of the device holding layer 1: SHAPE ngram, room/plan.js dealRoom)
+  "qwen3.8-flash": 72.0, "smollm-135m": 0.6 };
 export const NEED_MIN_GB = { "qwen3-1.7b": 4.0 };
 
 // What the model host holds besides its layers, in bytes, from the file's own tensor sizes: the
 // embedding stays in JS memory for row lookups, the output head goes to the GPU (the embedding again
 // when the two are tied), and the Qwen 3.5/3.8 engines add the draft (MTP) block and, for the
-// one-submit draft chain, a GPU copy of the embedding table (engine/qwen35.js). This is what the
+// one-submit draft chain, a GPU copy of the embedding table (engine/qwen35.js). Qwen3.8-Flash-Next (qwen4exp) keeps
+// its embedding in JS memory too; its `out` counts the head's HC mixer with output.weight, and its draft block (a
+// separate MTP file) is not loaded in rooms yet (mtp 0). This is what the
 // host's pledge pays for before its layers (room/plan.js layerCaps).
 export function hostHeldBytes(kind, { embed = 0, out = 0, mtp = 0 } = {}) {
   const held = embed + (out || embed);
-  return kind === "qwen35" ? held + mtp + (mtp ? embed : 0) : held;
+  return kind === "qwen35" ? held + mtp + (mtp ? embed : 0) : kind === "qwen4exp" ? held + mtp : held;
 }
 // K+V bytes per layer and position for a dense (Qwen3) room: the dense engine keeps its KV cache in
 // f32 (engine/dense.js), one K and one V row of kvDim per position
@@ -94,7 +99,29 @@ export const SHAPE = {
     park: { nExp: 256, runs: [[5, expertSlices(512, 2048, [Q4, Q4, Q41])], [35, expertSlices(512, 2048, [Q4, Q4, Q4])]] }, meta: ssmMeta(2048, 32, 16, 4096) },
   "qwen3.5-122b-moe": { kind: "qwen35", L: 48, layer: 1485116672, kvPos: { f16: 512, q8: 288 }, embed: 429096960, out: 625766400, mtp: 2682195968, exp: 1409286144,
     park: { nExp: 256, runs: [[6, expertSlices(1024, 3072, [Q4, Q4, Q41])], [42, expertSlices(1024, 3072, [Q4, Q4, Q4])]] }, meta: ssmMeta(3072, 64, 16, 8192) },
+  // Qwen3.8-Flash-Next (llama.cpp arch qwen4exp; roadmap/33), bartowski Q4_0 (three files), read from its headers:
+  // layer: the DeltaNet layers' average (36 of 48). The planner deals every layer at this one size, which under-counts
+  // the front of the model: layer 0 is 1.528 GB, layer 1 (with the PLE block) 1.546 GB, layers 0-5 carry Q4_1 down
+  // experts, so the host and whichever device holds layers 0-5 hold up to ~0.3 GB more than the deal says (the 12 QSA
+  // layers average 1.474 GB, about even). dealRoom has one layerBytes for every layer (roomFit, offload, placeNgram);
+  // per-range sizes would change all of them, so this stays a known gap, inside the pledge margin. kvPos: the 12 QSA layers'
+  // K+V, 2 KV heads x 256, kept in f32 by the phase-1 engine (engine/qwen4exp.js, PR #346), so 4 KB per QSA layer and
+  // position, 1 KB averaged over 4 (the room's KV format stays "f16": kvModeFor); out: output.weight and the head's
+  // HC mixer (output_hc_*); exp / park: 512 experts of 2560 x 640, layers 0-5 with Q4_1 down experts (parked as Q8).
+  // hDim: the 4-stream hyper-connection residual (4 x 2560) is what crosses devices (room/pipeline.js wireDim).
+  // ngram: the n-gram (PLE) table, read row by row by the device holding its layer (engine/ngram.js); never on a GPU
+  // and never part of a layer's bytes. pleState: that layer's extra state a checkpoint copies: the PLE conv history
+  // (10 positions x hDim f32, engine/qwen4exp.js st.ring).
+  "qwen3.8-flash": { kind: "qwen4exp", L: 48, layer: 1478069803, kvPos: { f16: 1024 }, embed: 357580800, out: 534620160, mtp: 0, exp: 1468006400,
+    park: { nExp: 512, runs: [[6, expertSlices(640, 2560, [Q4, Q4, Q41])], [42, expertSlices(640, 2560, [Q4, Q4, Q4])]] }, meta: ssmMeta(2560, 48, 16, 6144),
+    hDim: 10240, ngram: { layer: 1, bytes: 28800138240 }, pleState: 10 * 10240 * 4 },
 };
+// The width of the hidden state that crosses devices, in floats: the model's hidden size, or for Qwen3.8-Flash-Next
+// its 4-stream residual (SHAPE hDim). 0 when SHAPE does not say (the room reads it from the engine: wire.js wireDim).
+export const wireWidth = (model) => SHAPE[model]?.hDim || +SHAPE[model]?.meta?.["qwen35.embedding_length"] || 0;
+// Where a model's n-gram table must be: { layer, bytes } (the device holding that layer reads it from its own disk,
+// room/plan.js dealRoom ngram), or null for every model without one
+export const ngramOf = (model) => SHAPE[model]?.ngram || null;
 // A split GGUF's headers (llama.cpp gguf-split: MODELS[key].shards, in order) as one: the first file's metadata and
 // every file's tensors, each tensor with its file (shard: index; url: that file's URL when urls is given, for the
 // loaders that fetch by URL). Offsets stay within their own file. -> the first header, merged
@@ -123,7 +150,9 @@ export function roomBytes(model, ctx, kv = "f16") {
 
 // The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
 // each device downloads about its share of the layers, so the picker can say what this device will fetch.
-export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84, "qwen3.5-122b-moe": 72.52 };
+// Qwen3.8-Flash-Next: 71.8 of its 100.6 GB (FILES), without the 28.8 GB n-gram table, which only the device holding
+// layer 1 fetches (SHAPE ngram, ngramOf), on top of its share: counting it here would put ~29 GB on every device.
+export const FILE_GB = { "qwen3-1.7b": 1.83, "qwen3.8-27b": 16.06, "qwen3.6-35b-moe": 20.84, "qwen3.5-122b-moe": 72.52, "qwen3.8-flash": 71.8 };
 
 // Each GGUF's exact size and SHA-256 (Hugging Face's x-linked-size / x-linked-etag), so `pooled pull`
 // can check what it downloaded (cli/lib/cache.js)
@@ -137,11 +166,19 @@ export const FILES = {
   "qwen3.5-122b-moe": { bytes: 72517482816, shards: [
     { bytes: 39917224704, sha256: "717ab3efe330cb8581e7233bb93ad0c965fdb351ce5ae61a6f7b1252ba6925d9" },
     { bytes: 32600258112, sha256: "28d9accacf99f2e87c6b2f4a199556067775af6ecccd76e31904f5bb0fd5867f" }] },
+  // three files at the pinned revision (MODELS: resolve/928589f...), from the Hugging Face API (paths-info, lfs oid);
+  // the first holds the 28.8 GB n-gram table. mtp: ggml-org's MTP file at its pinned revision (not loaded in rooms yet)
+  "qwen3.8-flash": { bytes: 100599252672, shards: [
+    { bytes: 39853467552, sha256: "d2dbb1e9e21fc2b214c78dfba33e2db7c6d36efe81e10bd329c3ca90314d9685" },
+    { bytes: 39647284192, sha256: "d2b40751578e1e7a3725fa506410ba01dab544ca039d7da59ee9c8cfd10d4b5a" },
+    { bytes: 21098500928, sha256: "1404069b7cd14cf79d1631b8cf5c5fdff1bb4edd45d82c443e93503569c6706f" }],
+    mtp: { bytes: 2199652640, sha256: "d484e6e541a36b714976f72f7d1a86ae2cc450cff110b81e3656512784abd1c6" } },
 };
 
 // The models the room's picker offers. The others stay for tests and ?dev=1.
 export const PICKER = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 
+const FLASH_BASE = "https://huggingface.co/bartowski/Qwen3.8-Flash-Next-GGUF/resolve/928589fdb66c6ff07f22ac561e3fbce76553548f/Qwen3.8-Flash-Next-Q4_0/";
 export const MODELS = {
   "qwen3-0.6b": { label: "Qwen3 0.6B · Q8", kind: "gguf",
     gguf: "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf",
@@ -166,6 +203,14 @@ export const MODELS = {
   "qwen3.5-122b-moe": { label: "Qwen3.5 122B MoE \u00b7 Q4", kind: "qwen35",
     gguf: "https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf",
     shards: ["00001", "00002"].map((n) => `https://huggingface.co/bartowski/Qwen_Qwen3.5-122B-A10B-GGUF/resolve/main/Qwen_Qwen3.5-122B-A10B-Q4_0/Qwen_Qwen3.5-122B-A10B-Q4_0-${n}-of-00002.gguf`) },
+  // Qwen3.8-Flash-Next (roadmap/33): 512 experts, 10 active (~6B of 125B), a 4-stream residual and a 28.8 GB n-gram
+  // table read from disk by the device holding layer 1. ?dev=1 only, like the 122B: its own engine (engine/qwen4exp.js,
+  // PR #346; room/flash.js adapts it to the room), context <= 2048 until QSA (CTX). Pinned revisions: FILES' sizes and
+  // hashes are these files'. mtp: the draft block's file (not loaded in rooms yet).
+  "qwen3.8-flash": { label: "Qwen3.8 Flash Next \u00b7 Q4", kind: "qwen4exp",
+    gguf: FLASH_BASE + "Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf",
+    shards: ["00001", "00002", "00003"].map((n) => `${FLASH_BASE}Qwen3.8-Flash-Next-Q4_0-${n}-of-00003.gguf`),
+    mtp: "https://huggingface.co/ggml-org/Qwen3.8-Flash-Next-GGUF/resolve/052beeaca7bec4a303e59cc7bc630c4f3a1b845d/mtp-Qwen3.8-Flash-Next-Q4_0.gguf" },
   "smollm-135m": { label: "SmolLM 135M · bf16", kind: "safetensors",
     st: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/model.safetensors",
     cfg: "https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct/resolve/main/config.json",
@@ -200,6 +245,9 @@ export const CTX = {
   // the 122B MoE: 12 attention layers, 2 KV heads x 256 (the 35B's K/V row): 24 KB per position in f16, 128 MiB per
   // layer's K at 131072. Checked at short contexts so far (phase 1): its default stays at the 35B's
   "qwen3.5-122b-moe": { def: 32768, max: 131072 },
+  // Qwen3.8-Flash-Next: dense attention is exact up to 2051 cached tokens and the phase-1 engine refuses more (QSA,
+  // roadmap/33 PR plan item 9, lifts it). 12 QSA layers, 2 KV heads x 256 in f32: 4 MiB per layer's K at 2048
+  "qwen3.8-flash": { def: 2048, max: 2048 },
   // the dense engine keeps an f32 KV cache (~224 KB per position on the 1.7B: 1.8 GB at 8k, 3.6 GB
   // at 16k: 5.6 GB for the room in all). 16k fits an agent's prompt (OpenClaw's alone is ~12k), so
   // the room page, `pooled host` and the OpenClaw plugin all open it at 16k; a room short of that

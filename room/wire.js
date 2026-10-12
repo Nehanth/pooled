@@ -60,9 +60,51 @@ export function asU16(x) {
   throw new Error("bad f16 payload");
 }
 
-export function packWire(f) { return WIRE_F16 ? { data: packF16(f), enc: "f16" } : { data: f }; }
+// The floats per column of a frame: the engine's hDim when it has one (Qwen3.8-Flash-Next sends its 4-stream
+// residual, 4 x 2560 = 10240 floats, 20 KB per token in f16), else its hidden size. 0 when the engine says neither.
+export const wireDim = (engine) => engine?.dims?.hDim || engine?.dims?.dim || 0;
+// The token ids a host's frame carries for the devices past it (packWire): only for an engine that asks
+// (engine.frameIds: Qwen3.8-Flash-Next, whose n-gram layer may be on the first worker), else none
+export const idsFor = (engine, ids) => (engine?.frameIds ? ids : null);
+
+// ids (optional): the frame's token ids, one per column, after the values. A device whose layers read the tokens
+// themselves (Qwen3.8-Flash-Next's n-gram layer: engine.frameIds) gets them this way. Each id is two u16 (low word
+// first) in an f16 frame, one u32 bit pattern in an f32 one, so the transport carries them as payload: no header
+// field, no protocol change. splitWire tells them apart by the payload's length.
+export function packWire(f, ids = null) {
+  if (!ids?.length) return WIRE_F16 ? { data: packF16(f), enc: "f16" } : { data: f };
+  const n = ids.length;
+  if (WIRE_F16) {
+    const out = new Uint16Array(f.length + 2 * n);
+    out.set(packF16(f));
+    for (let k = 0; k < n; k++) { const t = idOf(ids[k]); out[f.length + 2 * k] = t & 0xffff; out[f.length + 2 * k + 1] = t >>> 16; }
+    return { data: out, enc: "f16" };
+  }
+  const out = new Float32Array(f.length + n);
+  out.set(f);
+  new Uint32Array(out.buffer, f.length * 4, n).set(Array.from(ids, idOf));
+  return { data: out };
+}
+const idOf = (t) => { if (!(Number.isInteger(t) && t >= 0 && t <= 0xffffffff)) throw new Error(`not a token id: ${t}`); return t; };
 
 export function unpackWire(d) { return d.enc === "f16" ? unpackF16(asU16(d.data)) : asF32(d.data); }
+
+// A frame of n columns of `width` floats -> { h: Float32Array(n * width), ids: Uint32Array(n) | null }: the token ids
+// when the sender added them (packWire), else null. Any other length (or no width: 0) is all hidden state, as
+// unpackWire reads it.
+export function splitWire(d, n, width) {
+  if (!(width > 0)) return { h: unpackWire(d), ids: null };
+  if (d.enc === "f16") {
+    const u = asU16(d.data), m = n * width;
+    if (u.length !== m + 2 * n) return { h: unpackF16(u), ids: null };
+    const ids = new Uint32Array(n);
+    for (let k = 0; k < n; k++) ids[k] = u[m + 2 * k] | (u[m + 2 * k + 1] << 16);
+    return { h: unpackF16(u.subarray(0, m)), ids };
+  }
+  const f = asF32(d.data), m = n * width;
+  if (f.length !== m + n) return { h: f, ids: null };
+  return { h: f.slice(0, m), ids: new Uint32Array(f.buffer.slice(f.byteOffset + m * 4, f.byteOffset + (m + n) * 4)) };
+}
 
 export function asF32(x) {
   if (typeof x === "string") return b64ToF32(x);

@@ -26,7 +26,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions } from "./room/models.js";
+import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -52,7 +52,7 @@ import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
-import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor } from "./room/pledge.js";
+import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
@@ -3258,7 +3258,9 @@ async function aiStart(modelArg) {
     // whose pledge is under one layer stay in the room as ask-only guests (room/plan.js dealRoom)
     const deal = dealRoom({ L, layerBytes, hostBytes: embedBytes, pledges, mode: $("ai-split").value === "speed" ? "speed" : "memory",
       ms: [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
-      phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS, off });
+      phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS, off,
+      // Qwen3.8-Flash-Next: the device dealt the n-gram layer must have its table on disk (null for every other model)
+      ngram: ngramFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], ngramOf(modelKey)) });
     if (!deal.fit.fits || !deal.used.length) throw new Error(shortWhy(M, deal.fit, [myName, ...ai.chain.map(nameOf)], [myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)]));
     ai.outWhy = Object.fromEntries(Object.entries(deal.out).map(([i, why]) => [nameOf(ai.chain[i - 1]), why]));
     for (const i of Object.keys(deal.out)) ai.leftOut.add(ai.chain[i - 1]);
@@ -3270,6 +3272,7 @@ async function aiStart(modelArg) {
     // what each device holds of its pledge (the host's includes the embedding and the head)
     ai.heldGB = Object.fromEntries([myName, ...ai.chainNames].map((nm, k) => [nm, deal.held[k] / 2 ** 30]));
     log("room", `memory per device (of its pledge): ${deal.used.map((i, k) => `${[myName, ...ai.chain.map(nameOf)][k]} ${(deal.held[k] / 2 ** 30).toFixed(2)} of ${(pledges[i] / 2 ** 30).toFixed(1)} GB`).join(" · ")}`);
+    if (deal.ngram) log("room", `the n-gram table (${(deal.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${deal.ngram.layer}): ${[myName, ...ai.chainNames][deal.ngram.at]} reads it from its own disk${deal.ngram.checked ? "" : " (its free disk is not reported: unchecked)"}`);
 
     ai.deferred = [];
     // what every device already has cached, so each one can take its missing ranges from the room.

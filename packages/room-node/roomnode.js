@@ -46,7 +46,7 @@ import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_AL
 import { unpackWire } from "../../room/wire.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
-import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf } from "../../room/models.js";
+import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
 import { isPrefix } from "../../harness/prefix.js";
@@ -56,7 +56,7 @@ import { validateApiAsk, apiPrompt, apiRun, AnswerCache, helloMeta, pieceDecoder
 import { tokenTexts } from "../../harness/model-common.js";
 import { uniqueName, PING_MS, lastHeard, isSilentGone, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
-import { pledgeGB, afterLoadDeath, offloadFor } from "../../room/pledge.js";
+import { pledgeGB, afterLoadDeath, offloadFor, ngramFor } from "../../room/pledge.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes } from "../../engine/gguf.js";
 import { guardChunks } from "../../cli/lib/room.js";
 import { iceSetup, STUN } from "../../cli/lib/relay.js";
@@ -955,8 +955,9 @@ export class RoomNode extends EventEmitter {
   // null for a dense model), or expertBytes: one layer's routed experts (an estimate): with it, a device that offloads (meta.offload,
   // meta.ramGB: room/pledge.js ramGB) holds layers past its pledge with their experts in its RAM when the pledges
   // alone fall short (room/plan.js dealRoom). offload: per device in [self, ...chain], null or { lo, hi, vramBytes,
-  // ramBytes, layers, slots }; the ai-load carries it.
-  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null }) {
+  // ramBytes, layers, slots }; the ai-load carries it. ngram: the model's n-gram table (room/models.js ngramOf: Qwen3.8-Flash-Next),
+  // or null: the device dealt its layer must have it on disk (room/plan.js placeNgram); the plan then has `ngram`.
+  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null, ngram = null }) {
     const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name)) * 2 ** 30;
     const per = fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
     const pledges = [pledgeOf(self.meta, self.name), ...peers.map((p) => pledgeOf(p.meta, p.name))];
@@ -965,12 +966,12 @@ export class RoomNode extends EventEmitter {
     // the host first, then the biggest devices, each up to its pledge; a device not needed (or whose
     // pledge is under one layer) joins without layers
     const deal = dealRoom({ L, layerBytes: per, hostBytes: hostB, pledges, mode: mode === "speed" ? "speed" : "memory",
-      phone: [false, ...peers.map((p) => isPhoneMeta(p.meta))], off });
+      phone: [false, ...peers.map((p) => isPhoneMeta(p.meta))], off, ngram: ngramFor([self.meta, ...peers.map((p) => p.meta)], ngram) });
     const needGB = (L * layerBytes + embedBytes) / 2 ** 30, haveGB = pledges.reduce((s, b) => s + b, 0) / 2 ** 30;
     if (!deal.fit.fits || !deal.used.length) return { chain: [], ranges: [], assigned: [], leftOut: [], fit: deal.fit, needGB, haveGB };
     const chain = deal.used.slice(1).map((i) => peers[i - 1].id);
     const leftOut = peers.map((p) => p.id).filter((id) => !chain.includes(id));
-    return { chain, ranges: deal.ranges, assigned: deal.assigned, leftOut, fit: deal.fit, needGB, haveGB, offload: deal.offload || deal.used.map(() => null) };
+    return { chain, ranges: deal.ranges, assigned: deal.assigned, leftOut, fit: deal.fit, needGB, haveGB, offload: deal.offload || deal.used.map(() => null), ngram: deal.ngram || null };
   }
   async _start(modelKey, { minDevices = 1, waitMs = 0, redeal = false } = {}) {
     const ai = this.ai;
@@ -1028,7 +1029,7 @@ export class RoomNode extends EventEmitter {
     ai.ctxNote = pick.note;
     if (ai.ctxNote) this.log(ai.ctxNote);
     const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
-      fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16"), experts });
+      fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16"), experts, ngram: ngramOf(modelKey) });
     if (!plan.fit.fits) {
       // short: the room stops instead of dealing past a pledge (a re-deal after a device left that the
       // others cannot hold, or a pledge lowered since the start): the host frees its layers, the
@@ -1046,6 +1047,7 @@ export class RoomNode extends EventEmitter {
     if (plan.leftOut.length) this.log(`${plan.leftOut.map(nameOf).join(", ")} ask without holding layers: the other devices hold the whole model${this.splitMode === "speed" ? " (split: fastest first)" : ""}`);
     ai.layersByName = Object.fromEntries([[this.name, `${ranges[0][0]}–${ranges[0][1] - 1}`], ...ai.chain.map((id, i) => [nameOf(id), `${ranges[i + 1][0]}–${ranges[i + 1][1] - 1}`])]);
     this.log(`${M.label}: layer split ${[`${this.name} ${assigned[0]}+embed`, ...ai.chain.map((id, i) => `${nameOf(id)} ${assigned[i + 1]}`)].join(" · ")}`);
+    if (plan.ngram) this.log(`the n-gram table (${(plan.ngram.bytes / 2 ** 30).toFixed(1)} GB, layer ${plan.ngram.layer}): ${[this.name, ...ai.chainNames][plan.ngram.at]} reads it from its own disk${plan.ngram.checked ? "" : " (its free disk is not reported: unchecked)"}`);
     const offTxt = (o) => `layers ${o.lo}-${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`;
     plan.offload.forEach((o, k) => { if (o) this.log(`${k ? nameOf(ai.chain[k - 1]) : this.name} offloads ${offTxt(o)}`); });
     ai.offloadBy = Object.fromEntries(plan.offload.map((o, k) => [k ? nameOf(ai.chain[k - 1]) : this.name, o]).filter(([, o]) => o));
