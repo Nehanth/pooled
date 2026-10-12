@@ -19,7 +19,7 @@
 // the 35B), and the rest of the M are wrong experts drawn uniformly from the layer.
 //
 // Traces: tests/trace_moe.js writes <name>.sel.npy (uint8, or uint16 past 256 experts) [T, L, K], <name>.w.npy
-// (float32) and <name>.json. Steps before WARM (32) run but are not counted: the cache starts cold, and in the
+// (float32) and <name>.json; either .npy may be gzipped (<name>.sel.npy.gz). Steps before WARM (32) run but are not counted: the cache starts cold, and in the
 // engine a prefill would have filled it. The traces' geometry (layers, experts, top-K) must match the model's:
 // report() checks it, and simulate() checks the layers and the array length.
 //
@@ -60,13 +60,20 @@ async function readText(p) { return new TextDecoder().decode(await readBytes(p))
 async function listDir(p) { if (isDeno) { const r = []; for await (const e of Deno.readDir(p)) r.push(e.name); return r; } return (await import("node:fs/promises")).readdir(p); }
 
 // trace = { name, T, L, K, nExp, sel (T*L*K expert ids), w (router weights or null), meta }
+// <name>.sel.npy or <name>.sel.npy.gz (the committed Flash set is gzipped: 512-expert ids are uint16), the same for .w.npy
+async function gunzip(u8) { return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()); }
+async function readNpy(p, files) {
+  if (files.includes(p.split("/").pop() + ".gz")) return parseNpy(await gunzip(await readBytes(p + ".gz")));
+  return parseNpy(await readBytes(p));
+}
 export async function loadTraces(dir) {
-  const names = (await listDir(dir)).filter((f) => f.endsWith(".sel.npy")).map((f) => f.slice(0, -8)).sort();
+  const files = await listDir(dir);
+  const names = [...new Set(files.filter((f) => /\.sel\.npy(\.gz)?$/.test(f)).map((f) => f.replace(/\.sel\.npy(\.gz)?$/, "")))].sort();
   const out = [];
   for (const name of names) {
-    const s = parseNpy(await readBytes(`${dir}/${name}.sel.npy`));
+    const s = await readNpy(`${dir}/${name}.sel.npy`, files);
     let w = null, meta = {};
-    try { w = parseNpy(await readBytes(`${dir}/${name}.w.npy`)).data; } catch { /* weights are optional */ }
+    try { w = (await readNpy(`${dir}/${name}.w.npy`, files)).data; } catch { /* weights are optional */ }
     try { meta = JSON.parse(await readText(`${dir}/${name}.json`)); } catch { /* so is the json */ }
     out.push(traceOf(name, s, w, meta));
   }
