@@ -23,7 +23,8 @@ Browser caches are per site. A device that downloaded weights on swarmllm.ai dow
 1. All GPU tests pass on the maintainer's hardware (`npm run test:gpu`, `npm run test:q38`), and the no-GPU checks pass (`npm test`, `npm run e2e:code`, `node tests/e2e/preview_browser.mjs`).
 2. [docs/bench-log.md](docs/bench-log.md) has rows for every performance change since the last tag.
 3. Update [CHANGELOG.md](CHANGELOG.md): move *Unreleased* into a dated section, and bump `version` in `package.json` and `CITATION.cff`.
-4. Tag: `git tag -a v0.X.0 -m "..." && git push --tags`.
-5. Merge to `main`. Vercel deploys production. A manual `npx vercel deploy --prod` is only for emergencies.
+4. Write the release notes at `docs/releases/<MAJOR.MINOR>.md` (headline, what's new by area, compatibility and upgrade notes, known limits); they become the GitHub release's text. If `@pooled/cli` or `@pooled/openclaw` changed, bump and publish them as their own READMEs say.
+5. Tag: `git tag -a vX.Y.Z -m "..." && git push --tags`.
+6. Merge to `main`. Vercel deploys production. A manual `npx vercel deploy --prod` is only for emergencies.
 
 Versioning is `0.MINOR.PATCH` until the peer protocol is declared stable. A protocol change bumps MINOR.
