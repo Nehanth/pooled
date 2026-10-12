@@ -69,6 +69,7 @@ test("disk tier: the host deals disk layers only to a --disk device with the mod
 test("disk tier: a worker loads its disk layers with the deal's numbers and frees the reader with its layers", async () => {
   const n = fakeNode({ host: false, name: "pc", ramGB: 12, expertDisk: true });
   n.modelDir = fs.mkdtempSync(path.join(os.tmpdir(), "rn-disk-"));
+  n.ai.hostId = "h";   // the host the creator named (room/authz.js, #337)
   let seen = null, closed = 0;
   n.loadShardFn = async ({ offload }) => { seen = offload; return { engine: { maxSeq: 4096, reset() {}, dropAllSlots() {} }, device: { destroy() {} }, cfg: {}, experts: { close: async () => { closed++; } } }; };
   n.ensureLink = async () => true;
