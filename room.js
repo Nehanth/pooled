@@ -2444,8 +2444,10 @@ let weightCache = null, cacheHits = 0;
 // fetched) and the "x-swarm-len" header are from before the rename to Pooled. They stay so weights
 // people already downloaded keep working; the Cache API is per site, so pooled.run starts empty anyway.
 // Keys and per-model bookkeeping live in room/weightcache.js.
+// ?rawcache=0: no copy of fetched weights in Cache Storage (a test machine short of disk)
 async function getWeightCache() {
   if (weightCache !== null) return weightCache;
+  if (new URLSearchParams(location.search).get("rawcache") === "0") return weightCache = false;
   try { weightCache = await caches.open(CACHE_NAME); } catch { weightCache = false; }
   return weightCache;
 }
