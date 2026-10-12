@@ -128,6 +128,25 @@ for (const [name, g] of cases) {
     }
   }
 }
+// where a draft's time goes: each part of the block submitted alone, 20 times, timed to queue completion
+{
+  const time = async (name, ops) => {
+    const reps = 20, t1 = performance.now();
+    for (let k = 0; k < reps; k++) {
+      const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+      eng._encode(pass, ops); pass.end(); device.queue.submit([enc.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+    console.log(`  draft ${name.padEnd(22)} ${((performance.now() - t1) / reps).toFixed(2)} ms  (${ops.length} dispatches)`);
+  };
+  await time("input (norms, eh_proj)", mtp.inTrunk);
+  await time("attention half", mtp.layer.attnOps);
+  await time("MoE half", mtp.layer.ffnOps);
+  await time("head", mtp.headOps);
+  const t1 = performance.now();
+  for (let k = 0; k < 20; k++) await mtp.run(1, 8, { head: true });
+  console.log(`  draft run() end to end    ${((performance.now() - t1) / 20).toFixed(2)} ms (with the id readback)`);
+}
 // what a batched verify would give: one pass of K + 1 columns (cost vK, from PR #348's measurements: pass it as
 // VERIFY_MS=k:ms,...; default: the decode step's time, i.e. a pass as cheap as one token) plus the drafts
 const step = sum.plainMs / sum.plainN;
