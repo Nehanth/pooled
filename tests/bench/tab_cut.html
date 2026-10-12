@@ -33,13 +33,14 @@ try {
   applyRoomFlags(eng, q);
   if (q.get("kick") === "0") eng.mapKick = false;
   Object.assign(eng, JSON.parse(q.get("eng") || "{}"));
-  log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s, ${MODE}${eng.experts ? `, ${eng.experts.layers.length} layers offloaded, ${eng.experts.P} experts cached per layer` : ""}, mapKick ${eng.mapKick !== false}`);
+  log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s, ${MODE}${eng.experts ? `, ${eng.experts.layers.length} layers offloaded, ${eng.experts.P} experts cached per layer` : ""}, kick ${eng._kick()}`);
   const prompt = await (await fetch("/tests/golden/q38_bits_prompt.txt")).text();
   // ?variants=[{"cutPipe":false,"mapKick":false},{}]: engine flag sets, one run each on the same load
   const runs = [];
+  const base = Object.fromEntries([...new Set(JSON.parse(q.get("variants") || "[{}]").flatMap(Object.keys))].map((k) => [k, eng[k]]));
   for (const v of JSON.parse(q.get("variants") || "[{}]")) {
-    Object.assign(eng, v);
-    log(`--- ${JSON.stringify(v)}: cutPipe ${eng.cutPipe !== false} mapKick ${eng.mapKick !== false}`);
+    Object.assign(eng, base, v);   // each variant from the same base (flags of earlier variants do not carry over)
+    log(`--- ${JSON.stringify(v)}: cutPipe ${eng.cutPipe === true} kick ${eng._kick()}`);
     runs.push({ v, ...(await cutBench({ eng, tok, prompt, N: +(q.get("tokens") || 64), bits: q.get("bits") !== "0", log })) });
   }
   window.RESULT = { mode: MODE, ...runs[0], runs, gpuErrors };

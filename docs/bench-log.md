@@ -2416,10 +2416,11 @@ wait is mostly real GPU work: the layer's attention, 159 expert copies (~250 MB)
 planning and encoding are under 0.1 ms per cut in both runtimes. All of the Chrome loss is waiting on the map.
 
 **What changed** (all exact; roadmap/32 "The cut" has the design):
-- `engine/map_kick.js` `mapRead`, engine `mapKick` (on by default): the kick above, for every offload readback and the
-  token readback.
-- `cutPipe` (on by default; one-token decode): the cut encodes the layer's expert kernels before it waits and lands
-  the plan at the next cut, so the next layer is encoded while the GPU runs.
+- `engine/map_kick.js` `mapRead`, engine `mapKick`: the kick above. It applies to offloaded readbacks only (the cut,
+  region loads, an offloaded token's readback), and by default only in Chrome (`KICK_DEFAULT`). See "After review"
+  below.
+- `cutPipe` (opt-in; one-token decode): the cut encodes the layer's expert kernels before it waits and lands the plan
+  at the next cut, so the next layer is encoded while the GPU runs. No gain beyond noise (see below).
 - `cutSpec` (off by default): speculative windows. moe_remap maps ids to slots through GPU copies of the slot tables.
   A layer that missed rarely skips its cut. A miss rolls the token back to that layer's FFN (recurrent state saved at
   token start, x saved by moe_remap). The next real cut checks the window in its one map.
@@ -2429,13 +2430,13 @@ planning and encoding are under 0.1 ms per cut in both runtimes. All of the Chro
 | config | before (no kick, no pipe) | kick | kick + pipe | kick + pipe + cutSpec |
 |---|---|---|---|---|
 | resident (reference) | 56.5 / 58.2 | 57.3 / 60.2 | | |
-| 10 layers offloaded, 256 slots (every expert cached: the cut alone) | 24.1 / 24.8 | 44.4 / 45.1 | 46.3 / 46.7; rerun 42.7-44.9 | **54.0-55.1** (8 of 10 layers speculated, 0 rollbacks) |
+| 10 layers offloaded, 256 slots (every expert cached: the cut alone) | 24.1 / 24.8 | 44.4 / 45.1 | 46.3 / 46.7; rerun 42.7-44.9 (pipe: noise) | **54.0-55.1** (8 of 10 layers speculated, 0 rollbacks) |
 | all 40 offloaded, 16 slots (50-56% hits) | 8.7 / 9.1 | 23.9 / 23.9 | **24.3 / 24.4** | (does not speculate: every layer misses) |
 | all 40 offloaded, 64 slots (78-84% hits) | | | 13.2-13.5 (contended run) | 12.9-13.5 (0.5 rollbacks per token) |
 | all 40 offloaded, 128 slots (90-93% hits) | | | 27.5-29.9 | 27.0-29.1 (9-12 layers speculated, 3.2-3.7 rollbacks per token: neutral) |
 
 Cost of one cut in Chrome: (offloaded − resident) / cuts = **2.35 ms before, 0.49 ms with the kick**, ~0.4 ms with
-the pipe. **Node / Dawn**, same configs: 10 layers / 256 slots 47-55 tok/s without the fixes, 45-49 with (noise).
+the pipe. **Node / Dawn**, same configs: 10 layers / 256 slots 47-55 tok/s without the fixes, 45-49 with (first run; rerun below).
 All 40 / 16 slots 28-33 tok/s in every variant. cutSpec 44-49 vs 45-49 without. Dawn's cut is 0.2-0.3 ms, mostly GPU
 pipeline drain, so these changes are for the tab.
 
@@ -2445,7 +2446,9 @@ the same tokens, and spec == plain == GPU sampling for:
 - main: resident, OFFLOAD=all/16, OFFLOAD=0-19/128;
 - this branch: all/16, all/16 with OFFLOAD_SPEC=1 and =always, 0-19/128 with OFFLOAD_SPEC=1 and =always.
 
-=always speculates every layer on every token: 932 rollbacks on all/16 and 174 on 0-19/128. The store's counters
+=always speculates every layer on every token: 932 rollbacks on all/16 and 174 on 0-19/128. Only the =always runs
+exercise rollback: OFFLOAD_SPEC=1 at 16 slots never speculates, and at 128 slots it speculated 180 layers with no
+rollback. The store's counters
 (cuts, hits, MiB copied) equal main's in each config, so the LRU follows the same path.
 
 **Takeaways.**
@@ -2454,3 +2457,41 @@ the same tokens, and spec == plain == GPU sampling for:
 - cutSpec removes that cost only where layers almost never miss. Speculation should be re-tuned, and the planner
   should prefer fewer offloaded layers with bigger caches, once the Mac's hit rates for Flash from disk are known.
 - Not measured: the Mac (Metal; Chrome's polling there may differ) and the disk tier (#350) together with this branch.
+
+**After review** (same day; changes in the second commit):
+1. **No kick on resident readbacks.** A reviewer's interleaved Chrome A/B measured resident decode 2-6 tok/s *slower*
+   with the kick on the token readback (53.9 / 52.2 and 55.1 / 54.0 off, against 50.5 / 50.7 and 47.6 / 51.3 on), where
+   decode-ahead already hides that wait. The engine now kicks only offloaded readbacks (`_kick()`).
+2. **Kick only in Chrome by default.** Dawn 10 layers / 256 slots, rerun interleaved in one process (128 tokens, the
+   second pair of each variant, the first having misses):
+
+   | | off | kick | kick + pipe |
+   |---|---|---|---|
+   | round 1 (tok/s) | 48.6 | 48.3 / 42.8 | 46.1 / 45.0 |
+   | round 2 (tok/s) | 45.5 / 46.5 | 43.7 / 43.6 | 44.0 / 43.0 |
+   | wait per token (ms) | 3.9 | 3.9-6.0 | 3.0-3.3 |
+
+   The kick gains nothing on Dawn and may cost 0-2 tok/s, inside this shared machine's noise (a resident Dawn run in
+   the same window measured 15.8-52.7 tok/s). Deno (wgpu) was not measured, and the CPU and power cost of the kick
+   stream is not measured anywhere.
+3. **cutPipe off by default.** Chrome, interleaved, GPU heavily shared (resident 25.7-26.2 tok/s at the time), wait per
+   token over 10 cuts:
+
+   | 10 layers / 256 slots | off | kick | kick + pipe |
+   |---|---|---|---|
+   | wait per token (ms) | 27.3-32.0 | 17.9-20.7 | 18.6-21.6 |
+   | tok/s | 15.5-16.9 | 19.2-21.0 | 18.8-20.3 |
+
+   All 40 layers / 16 slots: off 8.4-8.9 tok/s, kick 12.8-22.7, kick + pipe 11.1-24.2. The kick holds up under load
+   and the pipe adds nothing measurable.
+4. **Robustness.** If a kick map fails, mapRead stops kicking and awaits the real map. A token that throws mid-way
+   clears the pending cut, the FFN mode, the gate count and mapped staging buffers (`_offAbort`). `_specCut` refuses
+   anything but one-token decode.
+5. **Gates rerun, all bit-exact.**
+   - Dawn `test_q38_bits MODEL=moe` gives `c2d80d71 / a6111fb2` for: resident, all/16, all/16 with `OFFLOAD_PIPE=1`,
+     all/16 with `OFFLOAD_SPEC=always` (932 rollbacks), 0-19/128 with `OFFLOAD_SPEC=always` (174 rollbacks) and with
+     `OFFLOAD_SPEC=1` (180 speculated, 0 rollbacks).
+   - Chrome gives `864fb862 / 4904e2db` for resident, every 10-layer variant, all/16 default, and all/16 with cutSpec
+     always speculating (9148 rollbacks over the run).
+   - One bench bug was fixed: variants inherited flags from the previous variant. The earlier tables set every flag
+     explicitly in each variant and are unaffected.

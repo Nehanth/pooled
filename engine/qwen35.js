@@ -18,7 +18,7 @@ import { attnDecWGSL, attnDecCombineGWSL, attnDecConfig, decSplits, DEC_CQ } fro
 import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows, dp4aGroupWGSL } from "./wgsl/moe_group.js";
 import { f16ToF32, f32ToF16 } from "./gguf.js";
 import { TOPK_MAX, topkK, readCands } from "./topk.js";
-import { mapRead } from "./map_kick.js";
+import { mapRead, KICK_DEFAULT } from "./map_kick.js";
 import { REMAP_WGSL } from "./expert_store.js";
 
 // the kernels each layerFuse flag dispatches ("pass" has none of its own)
@@ -1748,13 +1748,16 @@ export class Qwen35Engine {
   // CPU encoding between cuts (a layer's attention etc.), submit = finish + submit, wait = awaiting the map of the
   // selection, plan = reading it, plan(), the slot ids and the copies / expert kernels' encoding
   //
-  // pipe (cutPipe, the one-token decode of _encodeForwardOff): the cut submits, then encodes the layer's expert kernels
+  // pipe (cutPipe, opt-in: no gain measured beyond noise; the one-token decode of _encodeForwardOff): the cut submits, then encodes the layer's expert kernels
   // on the slot pool at once and returns without waiting; the caller encodes the next layer while the GPU runs this
   // part and the selection comes back. The next cut (or _cutFlush) lands this one first (_cutLand: the map, plan(),
   // the misses' copies in a command buffer of their own and the slot ids), then submits its part, whose first kernels
   // are those experts. The GPU gets the same commands in the same order (copies, slot ids, experts, next layer); only
   // the CPU's encoding moves off the critical path, into the time the GPU and the readback take anyway. It needs the
   // pool path to be certain before the selection is known: nCols * K <= P (always for one token: P >= K).
+  // map kick (engine/map_kick.js) on an offloaded readback: mapKick true / false, else on in Chrome only. Never on a
+  // resident engine's readbacks (a review measured resident decode in Chrome 2-6 tok/s slower with it).
+  _kick() { return !!this.experts && (this.mapKick ?? KICK_DEFAULT); }
   async _cutResolve(enc, pipe = false) {
     const c = this._cut, q = this.device.queue, KS = this.moe.KS, bytes = c.nCols * KS * 4, st = this.offStage, P = this.cutProf;
     this._cut = null;
@@ -1764,7 +1767,7 @@ export class Qwen35Engine {
     const t1 = P ? performance.now() : 0;
     q.submit([enc.finish()]);
     this._gateOpen();
-    const mapped = mapRead(this.device, st, 0, bytes, this.mapKick !== false);
+    const mapped = mapRead(this.device, st, 0, bytes, this._kick());
     const { hs, gusRows, dncRows } = this.moe, L = c.L;
     if (pipe && !c.M && c.nCols * this.moe.K <= this.experts.P) {
       this._cutPend = { c, mapped, bytes };
@@ -1841,7 +1844,7 @@ export class Qwen35Engine {
     enc.copyBufferToBuffer(selBuf, 0, sg, 0, bytes);
     q.submit([enc.finish()]);
     this._gateOpen();
-    try { await mapRead(this.device, sg, 0, bytes, this.mapKick !== false); } finally { this._gateDone(); }
+    try { await mapRead(this.device, sg, 0, bytes, this._kick()); } finally { this._gateDone(); }
     const sel = new Uint32Array(sg.getMappedRange(0, bytes)).slice();
     sg.unmap();
     const e2 = this.device.createCommandEncoder();
@@ -3041,7 +3044,7 @@ export class Qwen35Engine {
       this.device.queue.submit([job.cb]);
     }
     const bytes = job.op.R * 4;
-    const mapped = mapRead(this.device, job.stage, 0, bytes, this.mapKick !== false);
+    const mapped = mapRead(this.device, job.stage, 0, bytes, this._kick());   // (resident: no kick, see map_kick.js)
     let next = null;
     if (this._fwdRun > 0 && this._canDecodeAhead(desc)) {
       this._setFrame(this.pos + 1, this.pos + 2);
@@ -3963,10 +3966,20 @@ export class Qwen35Engine {
     if (this.cutSpec) return this._encodeForwardSpec(pos, desc);
     if (this.cutProf) this.cutProf.last = performance.now();
     let enc = this._fwdBegin(false);
-    const pipe = this.cutPipe !== false;
-    for (let i = 0; i < this.layers.length; i++) { this._encodeLayerR(enc, this.layers[i], pos); if (this._cut) enc = await this._cutResolve(enc, pipe); }
-    enc = await this._cutFlush(enc);
+    const pipe = this.cutPipe === true;
+    try {
+      for (let i = 0; i < this.layers.length; i++) { this._encodeLayerR(enc, this.layers[i], pos); if (this._cut) enc = await this._cutResolve(enc, pipe); }
+      enc = await this._cutFlush(enc);
+    } catch (e) { await this._offAbort(); throw e; }
     return this._fwdEnd(enc, pos, desc);
+  }
+  // an offloaded token that threw mid-way: no cut, pending plan or FFN mode left behind, the gate count back, the
+  // staging buffers unmapped (so the next call can map them)
+  async _offAbort() {
+    const pd = this._cutPend;
+    this._cutPend = null; this._cut = null; this._ffnMode = null; this._pp = null; this._ppB = null;
+    if (pd) { try { await pd.mapped; } catch { /* the token failed anyway */ } this._gateDone(); }
+    for (const b of [this.offStage, this._spec?.stage]) if (b && b.mapState === "mapped") b.unmap();
   }
   // ---- cutSpec: speculative decode over offloaded layers (one token; engine flag, off by default) ----
   // A layer that has rarely missed of late (specMiss, a per-layer moving average of "had a miss this token", below
@@ -4024,15 +4037,17 @@ export class Qwen35Engine {
     }
     const missed = new Uint8Array(nL);
     let enc = this._fwdBegin(false), win = [], i = 0;
-    while (i < nL) {
-      this._ffnMode = mode[i] === "spec" ? "spec" : null;
-      this._encodeLayerR(enc, this.layers[i], pos);
-      this._ffnMode = null;
-      if (mode[i] === "spec") { win.push(i); i++; continue; }
-      if (!this._cut) { i++; continue; }
-      const r = await this._specCut(enc, win, i, missed, first);
-      enc = r.enc; i = r.next; win = [];
-    }
+    try {
+      while (i < nL) {
+        this._ffnMode = mode[i] === "spec" ? "spec" : null;
+        this._encodeLayerR(enc, this.layers[i], pos);
+        this._ffnMode = null;
+        if (mode[i] === "spec") { win.push(i); i++; continue; }
+        if (!this._cut) { i++; continue; }
+        const r = await this._specCut(enc, win, i, missed);
+        enc = r.enc; i = r.next; win = [];
+      }
+    } catch (e) { await this._offAbort(); throw e; }
     for (let k = 0; k < nL; k++) { const L = this.layers[k]; if (L.off) L.specMiss = 0.75 * L.specMiss + 0.25 * missed[k]; }
     return this._fwdEnd(enc, pos, desc);
   }
@@ -4040,6 +4055,7 @@ export class Qwen35Engine {
   async _specCut(enc, win, ci, missed) {
     const c = this._cut, sp = this._spec, st = this.experts, q = this.device.queue, { KS } = this.moe, nOff = sp.nOff, dim = this.dims.dim, P = this.cutProf;
     this._cut = null;
+    if (c.ppB || c.M || c.nCols !== 1) throw new Error("expert offload: a speculative window is one-token decode only");   // (reopen handles _pp only)
     const t0 = P ? performance.now() : 0;
     if (P && P.last) P.enc += t0 - P.last;
     const tail = nOff * KS + nOff, bytes = (tail + KS) * 4;
@@ -4048,7 +4064,7 @@ export class Qwen35Engine {
     q.submit([enc.finish()]);
     const t1 = P ? performance.now() : 0;
     this._gateOpen();
-    try { await mapRead(this.device, sp.stage, 0, bytes, this.mapKick !== false); } finally { this._gateDone(); }
+    try { await mapRead(this.device, sp.stage, 0, bytes, this._kick()); } finally { this._gateDone(); }
     const t2 = P ? performance.now() : 0;
     const a = new Uint32Array(sp.stage.getMappedRange(0, bytes)).slice();
     sp.stage.unmap();
@@ -4142,7 +4158,7 @@ export class Qwen35Engine {
     // (expert offload: no encode-ahead, a token's commands depend on its routing)
     const job = this.experts ? await this._encodeForwardOff(this.pos) : pre && pre.pos === this.pos && pre.key === this._fwdKey() ? pre : this._encodeForward(this.pos);
     this.device.queue.submit([job.cb]);
-    const mapped = mapRead(this.device, job.stage, 0, undefined, this.mapKick !== false);
+    const mapped = mapRead(this.device, job.stage, 0, undefined, this._kick());
     if (this.encodeAhead !== false && !this.experts && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1);
     await mapped;
     const logits = Float32Array.from(new Float32Array(job.stage.getMappedRange(), 0, vocab));

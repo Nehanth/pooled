@@ -56,3 +56,17 @@ Deno.test("mapRead: a failed map rejects", async () => {
   try { await mapRead(dev, b, 0, 4); } catch (e) { threw = /lost/.test(e.message); }
   assert(threw, "rejects with the map's error");
 });
+
+Deno.test("mapRead: a kick that fails stops the kicking; the real map is still awaited", async () => {
+  let kicks = 0, res;
+  const dev = { createBuffer: () => ({ mapAsync: () => { kicks++; return Promise.reject(new Error("lost")); }, unmap() {} }) };
+  const b = { mapAsync: () => new Promise((r) => (res = r)) };
+  const p = mapRead(dev, b, 0, 4);
+  await new Promise((r) => setTimeout(r, 20));
+  assert(kicks === 1, `one kick, then none (${kicks})`);
+  res();
+  await p;
+  b.mapAsync = () => Promise.resolve();
+  await mapRead(dev, b, 0, 4);   // a dead kick buffer stays dead
+  assert(kicks === 1, "no kick after the failure");
+});
