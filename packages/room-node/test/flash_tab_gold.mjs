@@ -48,7 +48,20 @@ const srv = http.createServer((q, r) => {
 const tlsDir = fs.mkdtempSync(path.join(os.tmpdir(), "flash-tab-"));
 execSync(`openssl req -x509 -newkey rsa:2048 -nodes -keyout ${tlsDir}/k.pem -out ${tlsDir}/c.pem -days 2 -subj /CN=127.0.0.1 2>/dev/null`);
 let served = 0;
+// WEIGHTS_URL: the model's files from another machine (an http Range server, e.g. the Spark's over the LAN), proxied here
+// (a routed request must keep its https)
+const REMOTE = env("WEIGHTS_URL", "").replace(/\/?$/, "/");
 const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert: fs.readFileSync(`${tlsDir}/c.pem`) }, (q, r) => {
+  if (REMOTE !== "/") {
+    const up = http.get(REMOTE + path.basename(q.url.split("?")[0]), { headers: q.headers.range ? { range: q.headers.range } : {} }, (u) => {
+      r.writeHead(u.statusCode, { ...u.headers, "access-control-allow-origin": "*", "access-control-expose-headers": "content-range, content-length, accept-ranges" });
+      u.on("data", (b) => { served += b.length; });
+      u.pipe(r);
+    });
+    up.on("error", () => { r.statusCode = 502; r.end(); });
+    q.on("close", () => up.destroy());
+    return;
+  }
   const p = path.join(FLASH_DIR, path.basename(decodeURIComponent(q.url.split("?")[0])));
   if (!fs.existsSync(p)) { r.statusCode = 404; r.end(); return; }
   const size = fs.statSync(p).size, m = /bytes=(\d+)-(\d*)/.exec(q.headers.range || "");
@@ -58,8 +71,7 @@ const wsrv = https.createServer({ key: fs.readFileSync(`${tlsDir}/k.pem`), cert:
     "access-control-allow-origin": "*", "access-control-expose-headers": "content-range, content-length, accept-ranges" });
   fs.createReadStream(p, { start: lo, end: hi, highWaterMark: 8 << 20 }).pipe(r);
 }).listen(PORT + 1, "127.0.0.1");
-// WEIGHTS_URL: the model's files from another machine (a Range server with CORS, e.g. the Spark's), not this one's
-const WEIGHTS = (env("WEIGHTS_URL", "") || `https://127.0.0.1:${PORT + 1}/`).replace(/\/?$/, "/");
+const WEIGHTS = `https://127.0.0.1:${PORT + 1}/`;
 const peerServer = spawn(path.join(NM, ".bin/peerjs"), ["--port", String(SIG), "--path", "/", "--host", "127.0.0.1"], { stdio: "ignore" });
 await new Promise((r) => setTimeout(r, 1500));
 
