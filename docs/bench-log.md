@@ -2649,3 +2649,65 @@ PC, Flash, `GB=12`, first-touch = after reading 86 GB of other files (`EVICT`, n
 GB10 (Linux, cold, 16 workers; load average 33-36 from other agents, so conv varies 1.1-3.2 GB/s run to run on both
 sides): the 35B raw 2.90 -> 4.39 cold, 5.0 -> 14.0 warm, conv 2.36 -> 2.36 cold; the 122B raw 3.24 -> 5.39 cold, 4.7 -> 13.0
 warm, conv 3.17 / 2.45 / 1.34 (main) against 3.00 / 2.46 / 1.14 (branch) over three pairs. 4 MiB chunks: no better.
+
+## 2026-10-11: the disk tier in a browser tab, 35B MoE from OPFS (branch feat/tab-disk-tier, on PR 1's feat/ssd-offload-disk-tier, roadmap 32 step 8), the Spark (GB10)
+
+`node tests/bench/tab_disk.mjs` (tests/bench/tab_disk.html): Qwen3.6-35B-A3B Q4_0 in headless Chrome (Playwright's
+Chromium, `--enable-unsafe-webgpu`, Vulkan), every one of the 40 layers' routed experts in the tab's OPFS
+(`engine/expert_opfs.js`: one file per layer, one 4 KiB-aligned record per expert, already in the engine's
+layout; records vary by layer: 1.77 MiB per read on average in these runs, 2.19 MiB for the largest layer, which sizes
+the ring's slots), read by 4 workers with read-only shared sync handles into the ExpertStore pools through a 64-slot mapped
+staging ring (`engine/stage_ring.js`). Persistent profile on the internal NVMe; the profile's files are dropped from the
+page cache before each disk run (cold). Other agents were using the GPU, CPU and disk during these runs: the
+tok/s below moved by up to ~30% between identical runs. Decode: 64 greedy tokens after each of two chat prompts.
+
+- **Bit-exact.** The fingerprint (300-token batched prefill + 13 greedy steps, tests/test_q38_bits.js's plain part,
+  the room's engine preset) is `864fb862 / 4904e2db` for the disk tier with 16 and with 128 cached experts per layer
+  and for the resident model, same tokens.
+- **Ingest** (GGUF over HTTP ranges from tests/bench/serve.mjs -> convert -> a worker's sync handle): 17.5 GiB in 109 s
+  (0.17 GB/s), resumable at 256 MiB checkpoints. `persist()` false in a headless profile; quota 2.4 TB.
+  `navigator.storage.estimate()` reported usage 8987 B in a later session with the 17.5 GiB copy present: usage does
+  not count OPFS files written through sync handles in an earlier session, so it cannot gate a ~100 GB Flash ingest
+  (the page checks the copy's size against the quota instead).
+- **Bytes read.** The summary's "MiB from the file" counted the GGUF's bytes per expert in these runs (48644 MiB in one
+  run, where the reader read 53.1 GB = 49.4 GiB of padded records); it now counts the reader's record bytes.
+
+| run | cache | hits | expert reads / token | OPFS wait / token | decode tok/s |
+|---|---|---|---|---|---|
+| resident | - | - | - | - | 58.3-60.2 |
+| parked (today's offload, all experts in mapped RAM) | 16 / layer | 51-57% | 0 | 0 | 8.5-8.6 |
+| parked | 128 / layer | 89-94% | 0 | 0 | 8.1 |
+| disk, first version (one worker per miss, writeBuffer) | 16 / layer | 51-57% | 139-158 | 154 / 130 ms | 2.18 / 2.46 |
+| disk, + ring | 16 / layer | 51-57% | 139-158 | 133 / 127 ms | 2.77 / 2.79 |
+| disk, + ring + striped lone misses | 16 / layer | 51-57% | 139-158 | 94-217 ms | 1.88-3.19 |
+| disk, first version + ring | 128 / layer (8.75 GiB) | 89-94% | 19-34 | 102 / 77 ms | 3.75 / 4.44 |
+| disk, + striped lone misses (ring 32 / 64 / off) | 128 / layer | 89-94% | 19-34 | 31-59 ms | 4.15-6.05 (ring off 4.50 / 5.77) |
+
+- **The ceiling is the cut, not the disk.** Every offloaded layer reads its selection back to the CPU once per token
+  (engine `_cutResolve`). In Chrome on the GB10, parked runs at 8.5 tok/s with 40 offloaded layers whatever the hit
+  rate: 118 ms per token, ~2.9 ms per offloaded layer including that layer's GPU work (resident: ~17 ms per token for
+  all of it). So 40 offloaded layers cap a tab at ~8.5 tok/s before any read. Not measured in Chrome on the 5070; Node
+  + Dawn there resolved 40 cuts in 16.5 ms per token, also including the GPU work (~0.4 ms per cut, of which JS ~0.19
+  ms; this log, 2026-10-02, expert offload phase 2a). A tab should offload as few layers as its memory allows (room/plan.js already picks the fewest).
+- **A lone miss is latency-bound.** At 94% hits a cut has ~0.5 misses: one ~1.8 MiB read at queue depth 1 is ~2-3 ms
+  cold. Striping a cut's records over the idle workers (`stripeBytes`, 256 KiB minimum stripe) cut the OPFS wait from
+  77-102 to 31-59 ms per token (+27-36% tok/s).
+- **The ring matters for prefill, little for decode.** The mapped ring plus reading the next run of a layer while the
+  current one is copied took the 300-token prefill (80 whole-layer region loads, 35 GiB, + 16 GiB of frames) from
+  130 s to 37-42 s. In decode the ring and `writeBuffer` are within noise at 128 slots (4.76 / 5.82 vs 4.50 / 5.77);
+  at 16 slots the ring gave +13-27% before striping.
+- Prefill on disk layers re-reads every expert of every layer per wide pass (roadmap/32 item 9, layer-major prefill).
+
+Not measured here: the Mac (runbook in tests/bench/tab_disk.mjs: a cache sweep from 2 GiB up to diskCacheBytes' 19.8
+GiB bound for 36 GiB), a model
+whose experts do not fit memory (the 122B, Flash), and a warm page cache.
+
+## 2026-10-11: Mac Studio first tab runs (macOS 27, 36 GiB, Chrome 155.0.8059.39 headless, apple metal-3)
+
+Branches: main 5906f1e (opfs_read), feat/offload-cut-latency d1a490a (#351), feat/tab-disk-tier 19bbaad (#350). No sudo purge: "cold" = GB=48 > RAM (~35% page-cache hits); tab_disk runs warm.
+
+- OPFS expert reads (2.7 MB), W1/2/4/8: warm 33/58/75/88 GB/s; mostly cold 6.9/10.0/10.4/10.5 (= node native). Cold read->writeBuffer 2.5-8.7, mapped ring 6.3-10.7, xfer ~4.0. Rows (90 B): 205K/s at 16 workers mostly cold. Read-only shared handles: yes. persist() false; quota 10.7 GB on a fresh origin, grows with usage (48 GiB written fine).
+- Cut floor (cut_rt): submit+map after 0.18 ms GPU work 0.3 ms, with kick 0.4 ms; after 1.1 ms work both 1.3 ms. No polling penalty on Metal; queue.submit([]) ping 24 ms.
+- 35B tab (tab_cut): resident 103.5 tok/s. All 40 offloaded/16 slots: kick+pipe 47.5, kick off 47.6, both off 46.0. 10 offloaded/256 slots: ~81 all variants. Kick neutral on Metal. Cut fit: ms/token = 9.96 + 0.273 N (R² 0.996).
+- Tab disk tier (tab_disk, 4 workers, ring 64, warm): offgb 2/4/8/12/18/mem=36 = 15.2/20.7/27.4/30.2/30.2/30.4 tok/s (hits 59/77/91/95/95/95%); ring=0 at 2/4/8 = 7.2/10.8/18.4. Ingest 17.5 GiB 0.89 GB/s. Pick offgb=12. BITS 1b02b514/12de2ca for every run (Mac value; GB10 differs).
+- Found: tab_disk.html's quota precheck rejected a fresh origin (10.0 GiB < 17.5) although writes past it succeed; fixed on this branch.

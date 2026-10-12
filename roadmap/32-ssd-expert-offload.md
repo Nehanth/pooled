@@ -70,7 +70,7 @@ The Mac Studio (36 GB unified memory) can't hold the 122B (72.5 GB) today, alone
 5. CLI and room node: `--disk` on `host`, `join` and `--here`; the worker-thread reader wired in with an in-thread fallback; docs. First real room still to run: the 122B on Mac + PC with part of the PC on disk. Steps 3-5 reach `Qwen35Engine` models only (the 35B and the 122B). Qwen3.8-Flash-Next (roadmap 33) also needs: ExpertStore's `plan` / `prepare` cut hooks in the Flash engine (`engine/qwen4exp.js`, #346), its `MODELS` entry and a `roomBytes` experts profile so `offloadFor` / `roomFit` can deal it (roadmap 33 item 8, #347), and 512-expert offload (`OFFLOAD_EXPERTS`, roadmap 33 item 7).
 6. Router lookahead prefetch.
 7. Region shrink, so the 122B runs on the PC alone.
-8. Unified-memory disk tier (Mac and Spark) with an OPFS reader for browser tabs. **Next after 1**, for the first target.
+8. Unified-memory disk tier (Mac and Spark) with an OPFS reader for browser tabs. **Next after 1**, for the first target. In progress (branch feat/tab-disk-tier, on PR 1): `engine/expert_opfs.js` (per-layer record files in OPFS, resumable ingest, a reader pool of read-only sync handles), `engine/stage_ring.js` (mapped upload ring), `tests/bench/tab_disk.mjs`. Bit-exact on the 35B in Chrome on the Spark; the planner / `noOffload` gate for unified memory goes with `--disk` (4, 5).
 9. Layer-major prefill for disk layers.
 10. Qwen3.5-397B-A17B: model entry, 512 experts and K = 10 in the kernels, llama.cpp goldens.
 11. Optional, each only if measured to help: an engine-layout pack file, a cost model for disk placement, a native IO addon.
