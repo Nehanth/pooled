@@ -1028,12 +1028,13 @@ export class RoomNode extends EventEmitter {
         experts = expertsOf(G, L);   // what each layer's routed experts park (null for a dense model): ExpertStore's sizes
       } else if (M.kind === "qwen4exp") {
         // Qwen3.8-Flash-Next: the dense phase (no QSA indexer), K / V in f32 on its attention layers (averaged over all
-        // of them), the embedding and the head's HC mixer + output.weight on the host; no expert offload yet
+        // of them), the embedding and the head's HC mixer + output.weight on the host
         const G = await src.header(false), c = qwen4expConfig(G.meta);
         L = c.L;
         const kvPos = 2 * c.nKVHeads * c.headDim * 4 * c.qsa.filter(Boolean).length / L;
         layerBytes = qwen4expShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false, qsa: false }) / 4 + ctx * kvPos;
         embedBytes = qwen4expShardBytes(G, { lo: 0, hi: 0, hasEmbed: true, hasHead: true, qsa: false });
+        experts = expertsOf(G, L);   // expert offload (shard.js loadFlash): parked in RAM, read from disk (--disk), or a tab's OPFS
       } else {
         L = (await src.cfg()).num_hidden_layers;
         const G = await src.header(false);

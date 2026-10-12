@@ -282,8 +282,20 @@ const metaPromise = (async () => {
   // run the 1.7B alone (half of maxBufferSize is 2 GB on a typical laptop, and 2 GB runs nothing)
   else if (m.contribGB) m.contribGB = Math.max(1, Math.round(m.contribGB), Math.min(SMALLEST_NEED, Math.floor(m.budgetGB)));
   if (m.contribGB && !joinGbChosen) $("join-gb").value = m.contribGB;
+  Object.assign(m, tabDiskMeta(m));
   return m;
 })();
+// Expert offload's disk tier in this tab (room/flashdisk.js; room/pledge.js offloadFor diskOnly): a computer's tab with
+// WebGPU and OPFS can hold Qwen3.8-Flash-Next layers past its pledge with their experts on its disk, read when a token
+// picks them. It never parks experts in RAM (on a Mac the GPU's memory is the RAM its pledge lends), so ramGB is only
+// what the disk tier's spare and RAM cache take: ?tabram=G (default TAB_RAM_GB; 0 turns the tier off, as ?tabdisk=0).
+// Phones never: their tabs die long before a model this size.
+const TAB_RAM_GB = 3, TAB_DISK_MODELS = ["qwen3.8-flash"];
+function tabDiskMeta(m) {
+  const q = new URLSearchParams(location.search), ram = q.has("tabram") ? +q.get("tabram") : TAB_RAM_GB;
+  if (!m.webgpu || m.phone || q.get("tabdisk") === "0" || !(ram > 0) || !navigator.storage?.getDirectory) return {};
+  return { offload: true, diskOnly: true, ramGB: ram, disk: true, local: TAB_DISK_MODELS.slice() };
+}
 
 // --- UI helpers ---
 function log(from, text) {
@@ -2999,7 +3011,8 @@ async function aiLoadShard(...args) {
     try { const c = JSON.parse(localStorage.getItem("pooled-crumb") || "null"); if (c?.loading) { delete c.loading; localStorage.setItem("pooled-crumb", JSON.stringify(c)); } } catch {}
   }
 }
-async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, KV_ASK)) {
+// offload: this device's part of the deal's expert offload (offMsg), Qwen3.8-Flash-Next on a tab: room/model-loader.js
+async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, KV_ASK), offload = null) {
   const M = MODELS[modelKey];
   ai.shardBytes = 0;   // until this load's first progress says how big the new range is
   aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
@@ -3073,7 +3086,7 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   }
   // every device (host included, even when its weights come from cache) keeps within a few
   // percent of the slowest device, so the bars climb together and the room finishes as one
-  await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: aiLoadPace },
+  await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: aiLoadPace, offload },
     { makeTokenizer, DenseEngine, Qwen35Engine, fetchModelShard, shardTensorNames });
   if (ai.peerBytes) log("room", `${myName}: ${(ai.peerBytes / 2 ** 20).toFixed(1)} MB of weights came from devices in the room, ${((ai.netBytes || 0) / 2 ** 20).toFixed(1)} MB from the network`);
   // batched draft-cache fill and refill, next step's first draft in the verify's pass (engine/preset.js)
@@ -3089,6 +3102,11 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
 // Drop this tab's engine. What dropping one does not free with its GPU device: a Qwen3.8-Flash-Next engine's n-gram
 // table reader (OPFS workers holding their files' locks, room/flash.js close), so every path that lets go of
 // ai.engine comes through here. Every other engine has no close
+// what an ai-load says about a device's expert offload (room/plan.js dealRoom offload; the room node's offloadMsg):
+// the layers, the GPU cache, the RAM it parks, and with the disk tier [diskLo, hi) and the RAM cache. diskOnly: a tab
+// (it reads every offloaded layer's experts from OPFS)
+const offMsg = (o) => (o ? { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}),
+  ...(Number.isInteger(o.diskLo) ? { diskLo: o.diskLo, diskRamBytes: o.diskRamBytes } : {}), ...(o.diskOnly ? { diskOnly: true } : {}) } : null);
 function closeEngine() { const e = ai.engine; ai.engine = null; try { e?.close?.()?.catch?.(() => {}); } catch {} }
 
 // the model host (room/plan.js pickModelHost): the strongest device, a computer before a phone,
@@ -3219,7 +3237,7 @@ async function aiStart(modelArg) {
       experts = expertsOf(ai.G, L);   // what each layer's experts park (null for a dense model): ExpertStore's sizes
     } else if (M.kind === "qwen4exp") {
       // Qwen3.8-Flash-Next: the dense phase (no QSA indexer; K / V in f32 on its attention layers, averaged), the
-      // embedding and the head's HC mixer + output.weight on the host; no expert offload yet (experts stays null)
+      // embedding and the head's HC mixer + output.weight on the host
       aiStatus("reading model index…");
       ai.G = await fetchModelHeader(M);
       ai.GModel = modelKey;
@@ -3229,6 +3247,7 @@ async function aiStart(modelArg) {
       const kvPos = 2 * c.nKVHeads * c.headDim * 4 * c.qsa.filter(Boolean).length / L;
       layerAt = (cx) => w + cx * kvPos;
       embedBytes = qwen4expShardBytes(ai.G, { lo: 0, hi: 0, hasEmbed: true, hasHead: true, qsa: false });
+      experts = expertsOf(ai.G, L);   // expert offload: a room node parks them (or reads them from disk), a tab reads them from OPFS
     } else {
       cfg = await (await fetch(M.cfg)).json();
       L = cfg.num_hidden_layers;
@@ -3260,7 +3279,8 @@ async function aiStart(modelArg) {
     const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name)) * 2 ** 30;
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
-    // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); browsers never offload.
+    // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); a tab only with the OPFS disk
+    // tier (tabDiskMeta: Qwen3.8-Flash-Next), its offloaded layers' experts read from its disk.
     // With the model key a node started with --disk that has this model's files (room/pledge.js diskFor) may also
     // leave some layers' experts on disk when parking can't hold the model
     const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], experts, modelKey);
@@ -3305,10 +3325,14 @@ async function aiStart(modelArg) {
     ai.offloadBy = Object.fromEntries((deal.offload || []).map((o, k) => [k ? nameOf(ai.chain[k - 1]) : myName, o]).filter(([, o]) => o));
     if (dealOffloads(ai.offloadBy)) log("room", specWithOffload(true, OFFLOAD_SPEC) ? "speculative decoding stays on with expert offload (?offspec=1)"
       : "speculative decoding is off while experts are offloaded: plain decoding is faster there (?offspec=1 turns it on)");
+    const offTab = (o) => `layers ${o.lo}\u2013${o.hi - 1} with their experts read from this device's disk (${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache, ${(o.diskRamBytes / 2 ** 30).toFixed(1)} GB RAM cache, ${o.slots} experts per layer)`;
+    const myOff = deal.offload?.[0] || null;
+    if (myOff) log("room", `${myName} offloads ${offTab(myOff)}`);
     ai.chain.forEach((id, i) => {
       const o = deal.offload?.[i + 1];
       const disk = o && Number.isInteger(o.diskLo);
-      if (o) log("room", `${nameOf(id)} offloads layers ${o.lo}–${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`
+      if (o?.diskOnly) log("room", `${nameOf(id)} offloads ${offTab(o)}`);
+      else if (o) log("room", `${nameOf(id)} offloads layers ${o.lo}–${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`
         + (disk ? `; layers ${o.diskLo}–${o.hi - 1} read theirs from disk (${(o.diskRamBytes / 2 ** 30).toFixed(1)} GB RAM cache)` : ""));
       const msg = {
         t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX, kv: ROOM_KV,
@@ -3316,8 +3340,7 @@ async function aiStart(modelArg) {
         host: peer.id,
         inv,
         // the same shape as the room node's (packages/room-node/roomnode.js offloadMsg), disk tier included
-        ...(o ? { offload: { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}),
-          ...(disk ? { diskLo: o.diskLo, diskRamBytes: o.diskRamBytes } : {}) } } : {}),
+        ...(o ? { offload: offMsg(o) } : {}),
       };
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });
       sendTo(id, msg);
@@ -3329,7 +3352,7 @@ async function aiStart(modelArg) {
       `${conns.get(id)?.name || id} ${assigned[i + 1]}`)].join(" · ");
     log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}${ROOM_KV === "q8" ? ", int8 KV" : ""}: ${splitDesc}`);
     ai.loadingShard = true;
-    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV); } finally { ai.loadingShard = false; }
+    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff)); } finally { ai.loadingShard = false; }
     if (ai.startFailed) throw new Error(ai.startFailed);   // a device failed to load its layers while this one loaded
     if (n > 1) await aiLoadDraft(modelKey);
     if (ai.redealPending) { ai.busy = false; ai.dealing = false; aiAutoRedeal(ai.redealWhy); return; }   // a device died (or stayed away) while loading: deal again
@@ -4429,9 +4452,9 @@ async function aiOnData(from, d) {
         } else {
           ai.loadingShard = true; ai.loadKey = loadKey;
           // d.kv: the host's KV format (a host without it: this device's own ?kv=, as before)
-          try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model), kvForLoad(d.model, d.kv, KV_ASK)); } finally { ai.loadingShard = false; }
+          try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model), kvForLoad(d.model, d.kv, KV_ASK), d.offload || null); } finally { ai.loadingShard = false; }
           if (ai.startFailed) throw new Error(ai.startFailed);
-          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv: kvForLoad(d.model, d.kv, KV_ASK) };
+          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv: kvForLoad(d.model, d.kv, KV_ASK), offload: d.offload || null };
         }
         keepAwake();
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
@@ -4741,6 +4764,29 @@ const roomApi = {
   mock: MOCK,
 };
 if (MOCK) window.__pooledMock = { model: null, api: roomApi };
+// ?dev=1 test hook (packages/room-node/test/flash_tab_gold.mjs): the model host generates from token ids through the
+// room (prefill, decode, every device's layers), greedy, no stop token, and fingerprints every step's logits (FNV-1a
+// over their bits: two runs with the same fingerprint computed the same logits, offloaded or resident). Also the
+// expert store's stats on this device. -> { tokens, tps, tPre, bits, experts }
+if (DEV) window.__pooledGen = async (ids, maxNew) => {
+  if (ai.role !== "host" || !ai.engine) throw new Error("not the model host, or no model loaded");
+  if (ai.busy) throw new Error("the room is busy");
+  ai.busy = "gen";
+  let x = 0x811c9dc5;
+  const sample = (lg) => {
+    const u = new Uint32Array(lg.buffer, lg.byteOffset, lg.length);
+    let best = 0;
+    for (let i = 0; i < lg.length; i++) { x = Math.imul(x ^ u[i], 0x01000193) >>> 0; if (lg[i] > lg[best]) best = i; }
+    return best;
+  };
+  const st = ai.engine.experts, s0 = st ? { ...st.stats, t1: st.t1 ? { ...st.t1.stats } : null } : null;
+  try {
+    const r = await roomGenerate(ids, { maxNew, sample, stop: new Set() });
+    const d = st ? Object.fromEntries(["cuts", "lookups", "hits", "misses", "diskReads", "diskBytes", "diskWaitMs", "t1Copies"].map((k) => [k, st.stats[k] - s0[k]])) : null;
+    if (d && st.t1) d.t1Hits = st.t1.stats.hits - s0.t1.hits;
+    return { tokens: r.tokens, tps: r.tps, tPre: r.tPre, bits: x.toString(16), experts: d, summary: st?.summary?.() || null };
+  } finally { ai.busy = false; }
+};
 
 $("ai-start").addEventListener("click", aiStartAnywhere);
 $("ai-redeal").addEventListener("click", () => aiRedeal());

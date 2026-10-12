@@ -56,7 +56,8 @@ export function afterLoadDeath({ layers, layerGB, gb, deaths }) {
 }
 
 // Expert offload (room/plan.js offloadNeed): the system RAM a device lets the room park a MoE model's routed experts
-// in, in GB. Only a device that says it can (meta.offload: a room node on a discrete GPU; browsers never offload)
+// in, in GB. Only a device that says it can (meta.offload: a room node on a discrete GPU, or a tab with the OPFS disk
+// tier, meta.diskOnly, whose ramGB is only for the disk tier's spare and cache: it never parks)
 // and as much as it says (meta.ramGB), held to the most one computer lends (DESK_MAX_GB). It is a promise like the
 // pledge: the deal never parks more than this. 0 for any other device.
 export function ramGB(meta) {
@@ -74,12 +75,15 @@ export function diskFor(meta, model) {
 // (room/models.js expertsOf, roomBytes experts: what ExpertStore parks, layer by layer) or one layer's bytes (an
 // estimate), or null when the model has none or no device offloads. model: the model's key; with it, a device with a
 // disk tier for it (diskFor) is in off.disk (the field is there only when one is)
+// A browser tab with the OPFS disk tier (meta.diskOnly; room.js tabDiskMeta) is in off.diskOnly: it never parks experts
+// (its GPU shares the computer's memory) and offloads only in the disk pass, for a model it can read experts of
+// (meta.local), with ramGB as RAM for the spare and T1 (room/plan.js diskOnlyAt).
 export function offloadFor(metas, ex, model = null) {
   const ram = metas.map((m) => ramGB(m) * 2 ** 30);
   const expertBytes = ex && typeof ex === "object" ? +ex.E || 0 : +ex || 0;
   if (!(expertBytes > 0) || !ram.some((r) => r > 0)) return null;
-  const disk = metas.map((m) => diskFor(m, model));
-  return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}) };
+  const disk = metas.map((m) => diskFor(m, model)), only = metas.map((m) => !!m?.diskOnly && ramGB(m) > 0);
+  return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}), ...(only.some(Boolean) ? { diskOnly: only } : {}) };
 }
 
 // The disk a device lets the room keep a model's n-gram table on (Qwen3.8-Flash-Next: room/plan.js placeNgram), in

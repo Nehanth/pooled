@@ -100,6 +100,9 @@ export class FlashRoomEngine {
   // what the GPU device does not free: the n-gram table's open files or OPFS workers (room-node shard.js, room/model-loader.js).
   // The holder calls it when it drops the engine, before or after destroying the device
   close() { const p = this.core.close?.(); this.core.close = null; return p; }
+  // the expert store of offloaded layers (engine/expert_store.js), or null: generate.js turns speculation off with one,
+  // the room's logs read its stats
+  get experts() { return this.core.experts || null; }
 
   // ---- checkpoints (Qwen35Engine's contract: room/pipeline.js ckpt*, room/ckpt-store.js)
   // A state: { sig, pos, parts: [ArrayBuffer] }: the core's GPU parts, then (with a PLE layer) the n-gram
@@ -253,8 +256,11 @@ export function qwen4expCore(e) {
       return out;
     },
     reset() { e.reset(); },
-    // the n-gram table's reader (open files, OPFS workers), when the loader gave it a close
-    close() { return e.ngram?.close?.(); },
+    // the n-gram table's reader (open files, OPFS workers), when the loader gave it a close, and the expert store's
+    // (expert offload: its disk reader's workers or threads, its RAM cache)
+    close() { return Promise.all([e.ngram?.close?.(), e.experts?.close?.()]); },
+    // the expert store, when layers are offloaded (stats: hits, disk reads)
+    get experts() { return e.experts || null; },
     stateParts(pos) {
       const parts = [];
       for (const l of e.layers) {
