@@ -83,6 +83,26 @@ End-to-end on the GB10 (two headless Chromium tabs, real PeerJS signaling and We
 
 Topology change (host link + on-demand chain links instead of a full mesh) and `--devices N` in the emulator, GB10, 27B, `japan` prompt, local signaling, loopback: 3 devices online in 3.0 min, prefill 4.5 s, decode 10.4 tok/s; 16 devices (8 phone-shaped, 64 layers dealt 18+embed / 4-5 per worker / 2 per phone) online in 2.3 min, prefill 8.3 / 7.2 s, decode 3.8 / 4.7 tok/s, every device holding one host link and two chain links, no errors. The decode drop on a zero-latency network is per-hop processing (unpack, upload, readback, pack), about 15 ms per hop, now a measured target. 64 tabs in one Chromium fail at `vkCreateDevice` (one GPU process, driver device cap); not a room limit.
 
+## 2026-10-11: prefill attention tile, K and V in separate buffers (attnTileSkv, branch perf/attn-tile-double-buffer)
+
+`attn_flash_tile` stages K and V in two workgroup buffers and runs each TK tile with two barriers instead of four
+(Triton study recommendation 3). Same TK, same generated arithmetic, so the same bits: `test_q38_bits.js` on main and
+the branch, GB10: 27B `BITS plain 4dc814b1 hidden 4f075117` both, MoE `5ef77d06 / 403ae12b` both; an 8192-token
+two-chunk prefill fingerprint (logits + hidden): 27B `958665e5 / c75dcdc`, MoE `5f36bcd8 / 55e8e93a`, equal on both;
+`bench_ctx.js` greedy text identical at every fill in all 28 runs. GPU output of the kernel bench == the old kernel.
+
+Kernel alone (`tests/bench/attn_tile_bench.js`, MoE shape, one 16-column pass, idle GPU, 21 rounds x 30 reps,
+two interleaved runs each, old -> skv): TK 8 (16 KB, the shipped default) 1K 527/521 -> 519/518 µs, 8K 925/923 ->
+931/927 µs, 16K 1565/1545 -> 1584/1537 µs (no change); TK 16 (`WGMEM=1`, 32 KB) 1K 555/519 -> 528/513 µs, 8K
+1053/906 -> 961/901 µs, 16K 1861/1493 -> 1666/1468 µs (1-10%). On the GB10 the four barriers were not what bounds this
+kernel at TK 8; the study's -15-30% does not hold here.
+
+End to end (`bench_ctx.js` CTX=16640 FILLS=1024,8192,16384 TOKENS=8, main vs branch interleaved ABBA, 7 runs each):
+other agents shared the GPU and the runs swing 2-3x in both directions, so the medians mean nothing; best of 7, main ->
+branch: MoE 1K 922 -> 803, 8K 1144 -> 1141, 16K 831 -> 838 tok/s; 27B 1K 230 -> 245, 8K 250 -> 276, 16K 206 -> 208
+tok/s. No measurable end-to-end change on the GB10. The option stays on (same bits, fewer barriers, which may matter
+more on GPUs where a barrier costs more: Apple, Adreno, D3D12); `ATTN_TILE_SKV=0` / `attnTileSkv: false` turns it off.
+
 ## 2026-10-01: split-K decode attention (attnDecode "v2") on by default (branch perf/kf-long-context)
 
 `engine/wgsl/attn_dec.js` replaces attn_flash + attn_combine for decode and verify passes. Its split length comes
