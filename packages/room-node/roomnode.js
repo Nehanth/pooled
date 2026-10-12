@@ -31,6 +31,7 @@
 //     agent's cache boundary, answer states kept by last use, one index for every session.
 //   disk copies of the pinned checkpoints (ckptdisk.js): a restarted host resumes its system prompt +
 //     tools from them, each device from its own copy (ai-ckpt-save / ai-ckpt-load / ai-ckpt-loaded).
+//   ai-tele (room/tele.js): a worker reports its compute per frame (and its expert cache) to the host, as a tab does.
 //   left out: disk copies of answer checkpoints, the speed split, dead-link redial
 //     (ICE state watch), changing the visibility at run time (the constructor sets it), Code mode, reactions/typing, the room
 //     map, weight caches and peer weights (ai-wget answered "miss"), the bandwidth test.
@@ -43,7 +44,8 @@ import * as env from "./env.js";
 import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
 import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
-import { unpackWire } from "../../room/wire.js";
+import { unpackWire, wireStats } from "../../room/wire.js";
+import { TeleMeter } from "../../room/tele.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
@@ -185,6 +187,7 @@ export class RoomNode extends EventEmitter {
       state: this.ai, options: { profile: "node" },
       transport: { sendHidden: (id, msg) => this.sendHidden(id, msg), sendTo: (id, msg) => this.sendTo(id, msg), chainRtt: () => this.chainRtt() },
       hooks: { wakeChain: (pos) => this.wakeChain(pos), prefillFrame: () => process.env.POOLED_PREFILL_FRAME,
+        teleNote: (kind, ms, n) => this.teleNote(kind, ms, n),
         onWorkerFrame: (ms) => { this.frames = (this.frames || 0) + 1; this.frameMs = (this.frameMs || 0) + ms; } },
     });
     this.generateAttempt = createGenerator({
@@ -787,6 +790,15 @@ export class RoomNode extends EventEmitter {
   }
   // frames run one at a time in arrival order; control rides on the frame and goes on with it
   workerFrame(...args) { return this.pipeline.workerFrame(...args); }
+  // worker: its compute per frame kind to the host (ai-tele, at most every 700 ms), as a browser worker reports it
+  // (room/tele.js), with the expert cache's hits and misses when this device offloads experts: the room page's map
+  // and speed panel time each device's part of a token from these
+  teleNote(kind, ms, n = 1) {
+    const ai = this.ai, T = this.tele ||= new TeleMeter();
+    T.note(kind, ms, n, wireStats.lastMax || 0);
+    const now = performance.now();
+    if (T.due(now) && ai.hostId) this.sendTo(ai.hostId, T.report(now, ai.engine?.experts));
+  }
   // the host link dropped: knock on the host id every 3 s for a minute (a host back from a lost
   // network, or its link redialed) and say hello {back: 1}; the host re-seats this device
   hostGone() {

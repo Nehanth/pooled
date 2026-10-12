@@ -4,6 +4,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { planChunks, rangePrefetcher, fetchRange, openModel } from "../source.js";
 import { RoomNode } from "../roomnode.js";
 
@@ -126,4 +129,17 @@ test("RoomNode: watchLoad emits loadstat { from, fetched, total, bps }, beforeLo
   assert.equal(last.fetched, 600); assert.equal(last.total, 1000); assert.equal(last.from, "Hugging Face");
   assert.ok(last.bps > 0);
   assert.deepEqual(n.loadStat, last);
+});
+
+test("openModel: a local GGUF smaller than the 12 MB header read (a test's synthetic model) is read whole", async () => {
+  const { writeSynth } = await import("../../../tests/e2e/synth.mjs");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rn-small-"));
+  fs.mkdirSync(path.join(dir, "qwen3.8-27b"));
+  writeSynth(path.join(dir, "qwen3.8-27b/Qwen3.8-27B-Q4_0.gguf"), { seed: 1 });
+  const src = openModel("qwen3.8-27b", { modelDir: dir });
+  assert.ok(src.local && fs.statSync(src.local).size < 12 * 2 ** 20);
+  const G = await src.header(true);
+  assert.ok(Object.keys(G.tensors).length > 0);
+  await src.close();
+  fs.rmSync(dir, { recursive: true });
 });

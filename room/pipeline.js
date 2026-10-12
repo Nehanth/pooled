@@ -393,10 +393,9 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
         hb.set(await current.engine.runHiddenBatch(xs.subarray(c * wdim, (c + m) * wdim), d.basePos + c, d.spec ? { base: c, total: nTok } : false), c * wdim);
       }
       if (badF32(hb)) { if (!node) aiStatus(`⚠ NaN in batched prefill on this device`); sendTo(ai.hostId, { t: "ai-error", message: "NaN in batched prefill" }); }
-      if (!node) {
-        teleNote(d.spec ? "spec" : "pre", performance.now() - t0);
-        computePass(nTok, performance.now() - t0);
-      }
+      // every worker reports its compute to the host (room/tele.js: browser tabs and room nodes alike)
+      teleNote(d.spec ? "spec" : "pre", performance.now() - t0, nTok);
+      if (!node) computePass(nTok, performance.now() - t0);
       // the verify flag travels with the frame: every device snapshots its recurrent state per
       // column, or a later rollback on it restores a stale snapshot
       const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb) };
@@ -412,10 +411,8 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
         if (!node) aiStatus(`⚠ NaN PRODUCED by this device (pos ${d.pos}, layers ${ai.range[0]}–${ai.range[1] - 1}) — GPU kernel issue here`);
         sendTo(ai.hostId, { t: "ai-error", message: node ? `NaN produced on node layers ${ai.range[0]}-${ai.range[1] - 1}` : `NaN produced on worker layers ${ai.range[0]}–${ai.range[1] - 1}` });
       }
-      if (!node) {
-        teleNote("one", performance.now() - t0);
-        computePass(1, performance.now() - t0);
-      }
+      teleNote("one", performance.now() - t0, 1);
+      if (!node) computePass(1, performance.now() - t0);
       const msg = { pos: d.pos, ...packWire(h) };
       if (ai.next === "host") sendHidden(ai.hostId, { t: "ai-hiddenret", ...msg });
       else sendHidden(ai.next, { t: "ai-hidden", ...msg, ...ctl });

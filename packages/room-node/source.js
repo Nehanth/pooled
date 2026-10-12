@@ -56,10 +56,12 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
   };
   // one file's index (and the tokenizer when asked): 12 MB first, doubling, as room/model-loader.js fetchGGUFHeader
   const headerOf = async (f, needTokenizer) => {
+    // (a local file smaller than that, as the tests' synthetic models are, is read whole)
+    const end = f.local ? (await fs.promises.stat(f.local)).size : Infinity;
     for (let size = 12 * 2 ** 20; ; size *= 2) {
-      const buf = await f.readAt(0, size);
+      const buf = await f.readAt(0, Math.min(size, end));
       try { return parseGGUFHeader(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), { skipTokenizer: !needTokenizer }); }
-      catch (e) { if (size > 256 * 2 ** 20) throw e; }
+      catch (e) { if (size > 256 * 2 ** 20 || size >= end) throw e; }
     }
   };
   return {

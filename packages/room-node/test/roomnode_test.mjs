@@ -738,3 +738,39 @@ test("split GGUF: openModel reads every file of a split model from disk, each te
   await s2.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test("worker: a room node reports its compute per frame to the host (ai-tele), with its expert cache's hits and misses", async () => {
+  const { packWire } = await import("../../../room/wire.js");
+  const n = fakeNode({ host: false, name: "pc" });
+  const H = "pooled-room-TEST";
+  n.ai.hostId = H; n.addPeer(H, "mac"); n.ai.role = "worker"; n.ai.next = "host"; n.ai.range = [10, 20];
+  const experts = { stats: { hits: 0, misses: 0 } };
+  n.ai.engine = {
+    dims: { dim: 4 }, NC: 4, experts,
+    runHidden: async (h) => { experts.stats.hits += 7; experts.stats.misses += 1; await new Promise((r) => setTimeout(r, 2)); return h; },
+    runHiddenBatch: async (xs) => { experts.stats.hits += 20; experts.stats.misses += 4; return xs; },
+  };
+  const one = (pos) => n.aiOnData(H, { t: "ai-hidden", pos, ...packWire(new Float32Array(4).fill(0.5)) });
+  await one(0);
+  await n.ai.q;
+  const tele = () => msgs(n, H, "ai-tele");
+  assert.equal(tele().length, 1, "the first frame reports at once");
+  const a = tele()[0];
+  assert.ok(a.k.one > 0, "compute ms for one-token frames: " + JSON.stringify(a));
+  assert.deepEqual(a.exp, { hits: 7, misses: 1, tok: 1, all: [7, 1] });
+  assert.equal(msgs(n, H, "ai-hiddenret").length, 1, "the frame went back to the host");
+  // more frames within 700 ms: no report yet; then one with their sum
+  await one(1); await one(2); await n.ai.q;
+  assert.equal(tele().length, 1, "at most one report every 700 ms");
+  n.tele.at -= 1000;
+  await n.aiOnData(H, { t: "ai-hidden-b", basePos: 3, n: 4, spec: 1, ...packWire(new Float32Array(16).fill(0.25)) });
+  await n.ai.q;
+  assert.equal(tele().length, 2);
+  const b = tele()[1];
+  assert.ok(b.k.spec > 0 && b.k.one > 0, JSON.stringify(b));
+  assert.deepEqual(b.exp, { hits: 34, misses: 6, tok: 6, all: [41, 7] });
+  // a dense engine (no experts): the same timing, no exp
+  delete n.ai.engine.experts; n.tele.at -= 1000;
+  await one(7); await n.ai.q;
+  assert.equal(tele()[2].exp, undefined);
+});

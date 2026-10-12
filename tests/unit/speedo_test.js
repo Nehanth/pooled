@@ -1,7 +1,8 @@
 // room/speedo.js: the speed panel's numbers and words (no DOM, times passed in).
 import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText,
-  tokenShares, pushEvent, onlineText, fmtGB } from "../../room/speedo.js";
+  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "../../room/speedo.js";
 import { MODELS } from "../../room/models.js";
+import { expertCache } from "../../room/tele.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const near = (a, b, m, e = 1e-6) => { if (!(Math.abs(a - b) <= e)) throw new Error((m || "mismatch") + `: ${a} != ${b}`); };
@@ -95,13 +96,25 @@ Deno.test("expertsAt / expertsText: dense none, MoE on the GPU, or parked in RAM
   eq(expertsText(e), "experts of layers 21–40 in RAM (12.5 GB), 3.0 GB GPU cache");
 });
 
+Deno.test("expertsHead / expertsCost: an offloading device's card says its GPU cache's hit rate and what a token costs", () => {
+  const off = expertsAt(true, { lo: 20, hi: 40, ramBytes: 12.5 * 2 ** 30, vramBytes: 3 * 2 ** 30 });
+  eq(expertsHead(null, null), ""); eq(expertsHead(expertsAt(true, null), null), "", "on the GPU: expertsText says it");
+  eq(expertsHead(off, null), "experts: GPU + RAM", "no report yet");
+  const xc = expertCache({ hits: 84, misses: 16, tok: 12, all: [84, 16] });
+  eq(expertsHead(off, xc), "experts: GPU + RAM, 84% hits");
+  eq(expertsCost(xc), "1.3 experts from RAM per token");
+  eq(expertsCost(expertCache({ hits: 9, misses: 1, tok: 1, all: [9, 1] })), "1 expert from RAM per token");
+  eq(expertsCost(expertCache({ hits: 0, misses: 24, tok: 2, all: [0, 24], reads: 24, readBytes: 24 * 3 * 2 ** 20 })), "12 experts from RAM per token · 12 disk reads per token (36 MB)");
+  eq(expertsCost(null), "");
+});
+
 Deno.test("tokenShares: each device's part of the lap, the rest is the wire (and devices without timing)", () => {
   eq(tokenShares([{ name: "mac", ms: 30 }], 30), null, "one device");
   eq(tokenShares([{ name: "mac", ms: 30 }, { name: "pc", ms: 10 }], 0), null, "no lap yet");
   const s = tokenShares([{ name: "mac", ms: 30 }, { name: "pc", ms: 10 }], 50);
   eq(s.parts.map((p) => [p.name, p.pct]), [["mac", 60], ["pc", 20]]);
   eq([s.rest.ms, s.rest.pct, s.rest.label], [10, 20, "wire"]);
-  // a room node sends no ai-tele: its time is in the rest, and the rest says so
+  // a worker that sends no ai-tele (an older version): its time is in the rest, and the rest says so
   const n = tokenShares([{ name: "mac", ms: 30 }, { name: "pc", ms: undefined }], 60);
   eq(n.parts.map((p) => [p.name, p.timed, p.pct]), [["mac", true, 50], ["pc", false, 0]]);
   eq([n.rest.ms, n.rest.label, n.untimed], [30, "wire + pc", ["pc"]]);
