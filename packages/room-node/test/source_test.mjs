@@ -149,3 +149,25 @@ test("localFileReader: reads at once go to handles of their own, up to lanes; by
     assert.equal(bad.handles, 0, "a failed open is not kept");
   } finally { await r.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("localFileReader: reads sharing a handle whose open fails (EMFILE) try once more on a fresh one", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lfr-")), file = path.join(dir, "f.bin"), data = randomBytes(MiB);
+  fs.writeFileSync(file, data);
+  const open = fs.promises.open;
+  let opens = 0;
+  fs.promises.open = (...a) => (++opens === 1 ? Promise.reject(Object.assign(new Error("EMFILE: too many open files"), { code: "EMFILE" })) : open(...a));
+  const r = localFileReader(file, { lanes: 1 });
+  try {
+    const offs = [0, 1000, 5000, 70000];
+    const got = await Promise.all(offs.map((o) => r.readAt(o, 4096)));   // one lane: all four wait on the first open
+    got.forEach((b, i) => assert.deepEqual(Buffer.from(b), data.subarray(offs[i], offs[i] + 4096)));
+    assert.equal(opens, 2, "one failed open, one fresh handle for the retries");
+    assert.equal(r.handles, 1);
+    // an open that fails twice fails the read
+    await r.close();
+    const r2 = localFileReader(file, { lanes: 1 });
+    fs.promises.open = () => Promise.reject(Object.assign(new Error("EMFILE: too many open files"), { code: "EMFILE" }));
+    await assert.rejects(r2.readAt(0, 1), /EMFILE/);
+    assert.equal(r2.handles, 0);
+  } finally { fs.promises.open = open; await r.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});

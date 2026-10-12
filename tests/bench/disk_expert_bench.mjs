@@ -172,10 +172,10 @@ function reader(mode, threads) {
     : async (L, e) => { await disk.readExpert(L.parts, e); return expBytes(L); };
   return {
     read, close: () => disk.close(), ready,
-    // per expert: worker read and convert time (summed over its chunks), the copy out of the ring
+    // per expert: worker read and convert time (summed over its chunks), the gathers out of the ring
     extra: () => {
       const n = disk.stats.parts / 3 || disk.stats.raw / 3 || 1, st = disk.stats;
-      return mode === "conv" ? ` | ${(st.convMs / n).toFixed(2)} | ${(st.copyMs / n).toFixed(2)}` : ` | | `;
+      return mode === "conv" ? ` | ${(st.convMs / n).toFixed(2)} | ${(st.gatherMs / n).toFixed(2)}` : ` | | `;
     },
     reset: () => { for (const k of Object.keys(disk.stats)) disk.stats[k] = 0; },
   };
@@ -208,7 +208,7 @@ console.log(`${TOKENS} tokens per pass (${(perToken * TOKENS / 1e9).toFixed(1)} 
   fd.forEach((x) => fs.closeSync(x));
   console.log(`convert on one thread: ${out.join("; ")}\n`);
 }
-console.log("| mode | workers | cache | GB/s | p50 ms / expert | p99 ms / expert | p50 ms / layer | ms / token | convert ms / expert | copy ms / expert |");
+console.log("| mode | workers | cache | GB/s | p50 ms / expert | p99 ms / expert | p50 ms / layer | ms / token | convert ms / expert | gather ms / expert |");
 console.log("|---|---|---|---|---|---|---|---|---|---|");
 for (const mode of MODES) {
   for (const threads of mode === "uv" || mode === "inline" ? [0] : THREADS) {

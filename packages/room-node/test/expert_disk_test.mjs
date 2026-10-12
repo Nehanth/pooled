@@ -8,7 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { expertDiskReader, expertPart, defaultDiskThreads } from "../expert_disk.js";
+import { expertDiskReader, expertPart, defaultDiskThreads, sharedReads } from "../expert_disk.js";
 import { parseGGUFHeader, convertEntry, ggmlTypeBytes, GGML_F32, GGML_Q4_0, GGML_Q8_0, GGML_Q4_1, GGML_Q5_K, GGML_Q6_K } from "../../../engine/gguf.js";
 
 // a GGUF v3 file with no metadata and these tensors ({ name, shape: [nExp, rows, cols], ggmlType, bytes })
@@ -147,6 +147,26 @@ test("expertDiskReader: readAt returns the file's bytes; chunks from a few bytes
       if (slotBytes) assert.equal(disk.stats.oversize, 3);
     } finally { await disk.close(); }
   }
+});
+
+test("sharedReads: a copy that throws fails only its own waiter, the others still settle", async () => {
+  let joins = 0, copies = 0;
+  const shared = sharedReads(() => joins++);
+  let go;
+  const make = () => new Promise((r) => { go = r; });
+  const copy = (v) => { if (++copies === 2) throw new RangeError("Array buffer allocation failed"); return v.slice(); };
+  const ps = Array.from({ length: 4 }, () => shared("k", make, copy));
+  assert.equal(joins, 3);
+  go(new Uint8Array([1, 2, 3]));
+  const rs = await Promise.allSettled(ps);
+  assert.deepEqual(rs.map((r) => r.status), ["fulfilled", "fulfilled", "rejected", "fulfilled"]);
+  assert.ok(rs[2].reason instanceof RangeError);
+  for (const i of [0, 1, 3]) assert.deepEqual([...rs[i].value], [1, 2, 3]);
+  assert.notEqual(rs[1].value, rs[0].value, "a waiter gets a copy, not the first caller's buffer");
+  // the key is free again: the next request starts a read of its own
+  const again = shared("k", () => Promise.resolve(new Uint8Array([9])), copy);
+  assert.deepEqual([...(await again)], [9]);
+  assert.equal(joins, 3);
 });
 
 test("expertDiskReader: overlapping reads of one expert share one read; leases hold their slot", async () => {
