@@ -29,6 +29,15 @@
 // columns over the golden continuation giving the decode steps' ids, accept(8) (the full-length accept only; partial
 // accepts are covered by the layered mode). Cases that share a prompt prefix and fail at the same step on the same
 // token count as one failure seen again: a near tie in the later one does not excuse it.
+// LONG=1: long context on the full model (all 48 layers + head, QSA on): the long goldens (ctx16k, ctx32k and
+// needle30k, ~15.7K / ~32K / ~29.7K prompt tokens; CASES=a,b picks others) run by the batched prefill, then decode,
+// judged by tests/q38flash_rule.js; per case the prefill time and tok/s, and decode tok/s. needle30k is a needle in
+// a haystack: a passphrase planted ~2.5K tokens in, asked for at the end; it fails when llama.cpp's answer has the
+// passphrase and ours does not (and its ids are judged as any golden's). MAXSEQ defaults to the longest case's prompt
+// + ids, rounded up to 256 (f32 K / V for 12 layers: ~1.6 GB at 32K). llama.cpp's 3 runs of these prompts part early
+// (ctx32k at step 0), so it also judges us against each run alone (that run's ids and top-5), and a case also passes
+// when the rule passes against one of llama.cpp's reruns. No verify pass or decode-only prefill here (one
+// 32K prefill is ~15 minutes on the GB10 at ~35 tok/s).
 import fs from "node:fs";
 import path from "node:path";
 import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
@@ -43,15 +52,18 @@ const env = (k, d) => Deno.env.get(k) ?? d;
 const DIR = env("Q38F_DIR", new URL("../models/q38flash", import.meta.url).pathname);
 const first = fs.readdirSync(DIR).filter((f) => /^Qwen3\.8-Flash-Next-.*-00001-of-\d{5}\.gguf$/.test(f))[0];
 if (!first) throw new Error("no Qwen3.8-Flash-Next shards in " + DIR);
-const FULL = env("FULL") === "1";
+const LONG = env("LONG") === "1", FULL = LONG || env("FULL") === "1";
 const gold = JSON.parse(fs.readFileSync(new URL("./golden/q38flash_llama_greedy.json", import.meta.url), "utf8"));
+const LONG_CASES = env("CASES") ? env("CASES").split(",") : ["ctx16k", "ctx32k", "needle30k"];
+if (LONG) for (const c of LONG_CASES) if (!gold[c]) throw new Error(`LONG=1: no golden "${c}" (tests/golden/make_q38flash_llama.js)`);
+const longSeq = LONG ? Math.ceil(Math.max(...LONG_CASES.map((c) => gold[c].prompt.length + gold[c].ids.length)) / 256) * 256 : 0;
 
 const { device } = await gpuDevice();
 const errors = watchGpuErrors(device);
 const model = openGGUF(path.join(DIR, first));
 const G = model.G, cfg = qwen4expConfig(G.meta);
 const nL = FULL ? cfg.L : +env("LAYERS", 4), hasHead = nL === cfg.L;
-const MAXSEQ = +env("MAXSEQ", FULL ? 8448 : 4608);
+const MAXSEQ = +env("MAXSEQ", LONG ? longSeq : FULL ? 8448 : 4608);
 
 const experts = await offloadFromEnv(device, nL, model);   // (async since the disk tier, #349; a disk layer is refused by Qwen4ExpBatch.create)
 let t0 = performance.now();
@@ -76,7 +88,7 @@ console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? 
 
 let fail = 0;
 const check = (ok, msg) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) fail++; };
-if (FULL) await full(); else await layered();
+if (LONG) await long(); else if (FULL) await full(); else await layered();
 if (experts) console.log(experts.summary());
 if (errors.count) { console.log(`${errors.count} GPU errors`); fail++; }
 console.log(fail ? "Q38FLASH BATCH FAIL" : "Q38FLASH BATCH PASS ✓");
@@ -322,4 +334,44 @@ async function full() {
   for (const [label, rs] of [["dense (<= 2051 cells)", phase(false)], ["long context (QSA past 2051 cells)", phase(true)]]) {
     if (rs.length) console.log(`${label}: ${rs.filter((r) => r.ok).length}/${rs.length} goldens match llama.cpp exactly (${rs.map((r) => `${r.name} ${r.ok ? "match" : `${r.tieOk ? "near tie" : "MISMATCH"} at ${r.diff}`}`).join(", ")})`);
   }
+}
+
+// ---- LONG=1: the long-context goldens, batched prefill (QSA) then decode
+async function long() {
+  const tok = model.tokenizer(), rows = [];
+  for (const name of LONG_CASES) {
+    const g = gold[name], N = Math.min(+env("TOKENS", g.ids.length), g.ids.length);
+    if (g.prompt.length + N > eng.maxSeq) { check(false, `${name}: ${g.prompt.length} + ${N} > maxSeq ${eng.maxSeq}`); continue; }
+    eng.reset();
+    let t = performance.now(), next = 4096;
+    let r = await pb.prefill(g.prompt, { wantLogits: true, onPass: (_, o, sz) => {
+      if (o + sz >= next) { next += 4096; console.log(`  ${name}: prefill ${o + sz}/${g.prompt.length}, ${((performance.now() - t) / 1000).toFixed(0)} s, ${((o + sz) / ((performance.now() - t) / 1000)).toFixed(1)} tok/s`); }
+    } });
+    const pf = (performance.now() - t) / 1000;
+    const gen = [r.id], gaps = [gap(r.logits)];
+    t = performance.now();
+    while (gen.length < N) { r = await eng.forwardToken(gen[gen.length - 1], { wantLogits: true }); gen.push(r.id); gaps.push(gap(r.logits)); }
+    const ts = (N - 1) / ((performance.now() - t) / 1000);
+    const J = judgeGolden(g, gen, gaps, N), text = tok.decode(gen);
+    // llama.cpp is not reproducible here (its 3 runs part at steps 0-40): the rule against each run on its own, with
+    // that run's ids and top-5. The case passes by the rule on the golden (as FULL=1), or by the rule on one of
+    // llama.cpp's own reruns: matching a run llama.cpp itself produced, through the same rule, is as good as matching
+    // the first (needle30k's run 1: llama.cpp's golden and rerun take different tokens at step 40, our gap there 0.53)
+    const runs = [{ ids: g.ids, top: g.top }, ...(g.runs || [])];
+    const JR = runs.map((rn) => judgeGolden({ ids: rn.ids, top: rn.top }, gen, gaps, Math.min(N, rn.ids.length)));
+    const byRun = JR.findIndex((Jk, k) => k > 0 && (Jk.ok || Jk.excused));
+    let ok = J.ok || J.excused || byRun > 0, needle = "";
+    if (g.needle) {
+      const ours = text.includes(g.needle), theirs = g.found ?? g.text.includes(g.needle);
+      needle = ` · needle "${g.needle}": ours ${ours ? "found" : "MISSING"}, llama.cpp ${theirs ? "found" : "missing"}`;
+      if (theirs && !ours) ok = false;
+    }
+    console.log(`${ok ? "ok  " : "FAIL"} ${name}: prompt ${g.prompt.length} tok, prefill ${pf.toFixed(0)} s (${(g.prompt.length / pf).toFixed(1)} tok/s) · decode ${ts.toFixed(2)} tok/s at ${g.prompt.length} ctx · ${J.msg}${needle}`);
+    console.log(`  engine: ${JSON.stringify(text)}`);
+    if (!J.ok) console.log(`  golden: ${JSON.stringify(g.text)}\n  top-2 gap (nats) ours / llama.cpp, steps 0..${J.diff}: ${gaps.slice(0, J.diff + 1).map((x, i) => `${x.toFixed(3)}/${g.gap?.[i]?.toFixed(3)}`).join(" ")}`);
+    console.log(`  vs each llama.cpp run (0: the golden): ${JR.map((Jk, k) => `run ${k}: ${Jk.ok ? `all ${Math.min(N, runs[k].ids.length)} ids` : `${Jk.diff} ids, then ${Jk.excused ? "near tie" : "MISMATCH"}`}`).join(", ")}${!(J.ok || J.excused) && byRun > 0 ? ` (passes by run ${byRun})` : ""}`);
+    if (!ok) fail++;
+    rows.push(`${name} | ${g.prompt.length} | ${pf.toFixed(0)} s (${(g.prompt.length / pf).toFixed(1)} tok/s) | ${ts.toFixed(2)} | ${J.ok ? "match" : J.excused ? `near tie at ${J.diff}` : `MISMATCH at ${J.diff}`}${!(J.ok || J.excused) && byRun > 0 ? `, matches llama.cpp's run ${byRun} (${JR[byRun].ok ? "all ids" : `near tie at ${JR[byRun].diff}`})` : ""}`);
+  }
+  console.log(`long context (QSA, maxSeq ${eng.maxSeq}, ${pb.maxCols}-column passes):\n  case | prompt | prefill | decode tok/s | vs llama.cpp\n  ${rows.join("\n  ")}`);
 }

@@ -159,6 +159,26 @@ What it still catches. Perturbing the engine in a scratch run (full model; `two-
 
 Greedy ids are a coarse oracle under either rule: the model absorbs a scaled layer, and its ids then move only at near ties. The x 2 run's `hash-map` step looks just like the unperturbed engine's `ctx2k_b` step (llama.cpp 0.34 vs ours 0.02), so no ids-only rule can excuse one and flag the other. Numeric errors are the per-layer check's job (`LAYERS=48 tests/test_q38flash.js`, relative L2 per tensor against llama.cpp's dumps); the goldens guard against gross breakage and wrong tokens at confident steps. Because of the non-reproducibility, `make_q38flash_llama.js` asks each case REPEAT (3) times. The first run is the golden; when another run's ids differ, the golden keeps that run's ids and top-5 ("runs"). The rule may take llama.cpp's top-5 from any run whose ids agree with the golden's up to the step. Without that, `ctx4k` would hinge on which run became the golden: 7276 is 0.505 below the top in the stored run, 0.447 and 0.054 in the two reruns. The maker reuses a case's stored prompt ids (the long prompts are cut from `roadmap/*.md`, which changes), so regenerating does not move a prompt.
 
+### Long context on the Flash path: goldens and the baseline
+
+`tests/golden/make_q38flash_llama.js` has three long cases, made with the same server (unsloth b10840 CUDA llama-server, `-fa on`, `per_layer_token_embd` on the CPU, now `-c 34816`; it fits on the GB10 with the whole model on the GPU), top-5 logprobs and 3 runs each. Their prompts are the roadmap notes followed by `docs/*.md` (roadmap alone is ~30K tokens), stored as ids:
+- `ctx16k` (15,718 prompt tokens) and `ctx32k` (31,958): the same question as `ctx4k` / `ctx8k` (which note is about running models from disk).
+- `needle30k` (29,737): a sentence with a made-up passphrase (`amber-falcon-4127`) planted ~2.5K tokens in, asked for at the end. The case keeps `needle` (the passphrase) and `found` (llama.cpp's answer has it: yes, in all 3 runs).
+
+llama.cpp is even less reproducible here than at 4-8K: on all three cases the 3 runs give different ids, and on `ctx32k` they part at step 0 ("Note 32" vs "Item 32"). `ctx16k`'s run 1 answers about another note entirely.
+
+`LONG=1 tests/test_q38flash_batch.js` runs them on the full model with QSA on (maxSeq 32256): batched prefill (64-column passes), then decode, judged by `tests/q38flash_rule.js`, plus the needle check (fail when llama.cpp found the passphrase and we did not). Because the runs part so early, it also judges us against each llama.cpp run alone (that run's ids and top-5), and a case passes when the rule passes against the golden or against one of llama.cpp's reruns. No verify pass or decode-only prefill in this mode: each would cost another long prefill.
+
+Baseline on main (d201874), GB10, full model resident, 64-column prefill passes, 64 ids decoded. The GPU was shared with other agents' jobs in both runs, so prefill tok/s moves by ~1.5x between them (and within a run: 21-39 tok/s per 4K stretch); our ids were the same in both:
+
+| case | prompt | prefill (run 2 / run 1) | decode tok/s (run 2 / run 1) | vs llama.cpp |
+|---|---|---|---|---|
+| `ctx16k` | 15,718 | 567 s, 27.7 tok/s / 764 s, 20.6 | 10.07 / 7.71 | near tie at step 3 (our top-2 gaps on steps 0-2 0.420 / 0.659 / 0.518 vs llama.cpp's 0.410 / 0.754 / 0.513) |
+| `ctx32k` | 31,958 | 1,077 s, 29.7 tok/s / 1,136 s, 28.1 | 11.21 / 9.34 | near tie at step 0: we take "Item" as llama.cpp's run 1 does (0.000 nats below its top), then share 21 ids with that run before a near tie |
+| `needle30k` | 29,737 | 759 s, 39.2 tok/s / 1,104 s, 26.9 | 11.61 / 11.18 | passphrase found; all 64 ids equal llama.cpp's run 1. Against the golden (run 0), step 40 differs with our gap 0.526, just over the rule's 0.5, where run 0 and run 1 themselves split: passes by run 1 |
+
+What it shows: QSA at 16-32K gives llama.cpp's answers within its own run-to-run spread, and retrieves a fact ~27K tokens back. Decode with ~30K tokens of context runs at 10-11.6 tok/s, within the 10-14 tok/s measured at short context (QSA attends ~2K cells). The cost is the prefill: 10-19 minutes for 16-32K tokens. Long-context open items for Flash: prefill speed (~3x decode, the per-column MoE); the room cap (rooms load `qsa: false`, 2048); f32 K / V (1.6 GB at 32K for 12 layers, f16 would halve it); `rawK` kept whole, not a ring; and the goldens' rule at long context, where llama.cpp's own runs part at steps 0-40 (`LONG=1` takes any run; `tests/q38flash_rule.js` itself still only takes the reruns' top-5 at the first differing step).
+
 ## Things tried and rejected (measured)
 - Q4 KV cache: −92.5% prefill.
 - External 0.6B draft model: different vocabulary (151,936 vs 248,320), can't verify.
