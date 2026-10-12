@@ -18,6 +18,8 @@ import { attnDecWGSL, attnDecCombineGWSL, attnDecConfig, decSplits, DEC_CQ } fro
 import { moeGroupWGSL, moeGroupSizes, dnGroupRows, tiledGroupWGSL, tileRows, dp4aGroupWGSL } from "./wgsl/moe_group.js";
 import { f16ToF32, f32ToF16 } from "./gguf.js";
 import { TOPK_MAX, topkK, readCands } from "./topk.js";
+import { mapRead, KICK_DEFAULT } from "./map_kick.js";
+import { REMAP_WGSL } from "./expert_store.js";
 
 // the kernels each layerFuse flag dispatches ("pass" has none of its own)
 const LF_PIPES = {
@@ -1663,7 +1665,20 @@ export class Qwen35Engine {
       if (this.moe.nrt) this._dxyz(p, "moe_nrt", L.bgNrt, Math.ceil((this.moe.nExp + 1) / this.moe.nrt.ROWS), 1, 1);
       else this._dop(p, L.mvRouter);
       this._dxyz(p, "moe_route", L.bgRoute, 1, 1, 1);
-      if (L.off) { this._cutAt(enc, p, L, 1, L.selBuf, null); return; }   // offloaded: the experts run after _cutResolve
+      if (L.off) {   // offloaded: the experts run after _cutResolve
+        const m = this._ffnMode;
+        if (m === "spec") {   // cutSpec: slot ids from the GPU table (moe_remap), no cut; checked at the next cut
+          p.setPipeline(this._spec.pipe); p.setBindGroup(0, L.bgRemap); p.dispatchWorkgroups(1);
+        }
+        if (m === "spec" || m === "redo") {   // (redo: the slot ids the CPU wrote, after a rollback to this layer)
+          this._dxyz(p, L.gusPipe, L.bgGusP, Math.ceil(hs / gusRows), KS, 1);
+          this._dxyz(p, L.dncPipe, L.bgDncP, Math.ceil(D.dim / dncRows), 1, 1);
+          if (p !== this._pp) p.end();
+          return;
+        }
+        this._cutAt(enc, p, L, 1, L.selBuf, null);
+        return;
+      }
       this._dxyz(p, L.gusPipe, L.bgGus, Math.ceil(hs / gusRows), KS, 1);
       this._dxyz(p, L.dncPipe, L.bgDnc, Math.ceil(D.dim / dncRows), 1, 1);
       if (p !== this._pp) p.end();
@@ -1725,16 +1740,49 @@ export class Qwen35Engine {
     this._offWaits--;
     // closes once the caller has gone on past its last cut: its encoding between two cuts is synchronous, so by the
     // next macrotask it is either waiting on another cut (offWaits > 0) or has submitted everything
-    setTimeout(() => { if (!this._offWaits && !this._cut && this._offGateP) { const g = this._offGateP; this._offGateP = null; g.res(); } }, 0);
+    setTimeout(() => { if (!this._offWaits && !this._cut && !this._cutPend && this._offGateP) { const g = this._offGateP; this._offGateP = null; g.res(); } }, 0);
   }
   // null when nothing of an offloaded call is in flight, else a promise that resolves when that may have changed (check again)
   offGate() { return this._offGateP ? this._offGateP.p : null; }
-  async _cutResolve(enc) {
-    const c = this._cut, q = this.device.queue, KS = this.moe.KS, bytes = c.nCols * KS * 4, st = this.offStage;
+  // cutProf (tests/bench/cut_prof.js): { n, enc, submit, wait, plan, last } ms totals per phase of the cuts: enc = the
+  // CPU encoding between cuts (a layer's attention etc.), submit = finish + submit, wait = awaiting the map of the
+  // selection, plan = reading it, plan(), the slot ids and the copies / expert kernels' encoding
+  //
+  // pipe (cutPipe, opt-in: no gain measured beyond noise; the one-token decode of _encodeForwardOff): the cut submits, then encodes the layer's expert kernels
+  // on the slot pool at once and returns without waiting; the caller encodes the next layer while the GPU runs this
+  // part and the selection comes back. The next cut (or _cutFlush) lands this one first (_cutLand: the map, plan(),
+  // the misses' copies in a command buffer of their own and the slot ids), then submits its part, whose first kernels
+  // are those experts. The GPU gets the same commands in the same order (copies, slot ids, experts, next layer); only
+  // the CPU's encoding moves off the critical path, into the time the GPU and the readback take anyway. It needs the
+  // pool path to be certain before the selection is known: nCols * K <= P (always for one token: P >= K).
+  // map kick (engine/map_kick.js) on an offloaded readback: mapKick true / false, else on in Chrome only. Never on a
+  // resident engine's readbacks (a review measured resident decode in Chrome 2-6 tok/s slower with it).
+  _kick() { return !!this.experts && (this.mapKick ?? KICK_DEFAULT); }
+  async _cutResolve(enc, pipe = false) {
+    const c = this._cut, q = this.device.queue, KS = this.moe.KS, bytes = c.nCols * KS * 4, st = this.offStage, P = this.cutProf;
     this._cut = null;
+    const t0 = P ? performance.now() : 0;
+    if (P && P.last) P.enc += t0 - P.last;
+    if (this._cutPend) await this._cutLand();   // the previous cut's copies and slot ids before this part
+    const t1 = P ? performance.now() : 0;
     q.submit([enc.finish()]);
     this._gateOpen();
-    try { await st.mapAsync(GPUMapMode.READ, 0, bytes); } finally { this._gateDone(); }
+    const mapped = mapRead(this.device, st, 0, bytes, this._kick());
+    const { hs, gusRows, dncRows } = this.moe, L = c.L;
+    if (pipe && !c.M && c.nCols * this.moe.K <= this.experts.P) {
+      this._cutPend = { c, mapped, bytes };
+      const e2 = this.device.createCommandEncoder(), p = e2.beginComputePass();
+      if (c.pp) this._pp = p;
+      if (c.ppB) this._ppB = p;
+      this._dxyz(p, L.gusPipe, L.bgGusP, Math.ceil(hs / gusRows), KS, 1);
+      this._dxyz(p, L.dncPipe, L.bgDncP, Math.ceil(this.dims.dim / dncRows), 1, 1);
+      if (!c.pp && !c.ppB) p.end();
+      if (P) { const t2 = performance.now(); P.n++; P.submit += t2 - t1; P.last = t2; }
+      return e2;
+    }
+    const t2 = P ? performance.now() : 0;
+    try { await mapped; } finally { this._gateDone(); }
+    const t3 = P ? performance.now() : 0;
     const sel = new Uint32Array(st.getMappedRange(0, bytes)).slice();
     st.unmap();
     const e2 = this.device.createCommandEncoder();
@@ -1743,7 +1791,6 @@ export class Qwen35Engine {
     const p = e2.beginComputePass();
     if (c.pp) this._pp = p;
     if (c.ppB) this._ppB = p;
-    const { hs, gusRows, dncRows } = this.moe, L = c.L;
     if (c.M) {
       this._dMC(p, L.gusPipe, r.pool ? c.M.gusP : c.M.gus, Math.ceil(hs / gusRows) * 64, 64, c.nCols * KS);
       this._dMC(p, L.dncPipe, r.pool ? c.M.dncP : c.M.dnc, Math.ceil(this.dims.dim / dncRows) * 64, 64, c.nCols);
@@ -1752,7 +1799,37 @@ export class Qwen35Engine {
       this._dxyz(p, L.dncPipe, r.pool ? L.bgDncP : L.bgDnc, Math.ceil(this.dims.dim / dncRows), 1, 1);
     }
     if (!c.pp && !c.ppB) p.end();
+    if (P) {
+      const t4 = performance.now();
+      P.n++; P.submit += t2 - t1; P.wait += t3 - t2; P.plan += t4 - t3; P.last = t4;
+    }
     return e2;
+  }
+  // a pipelined cut's second half: its selection, plan(), the misses' copies (submitted now, ahead of the part that
+  // runs its experts, which the caller submits next) and its slot ids (queue.writeBuffer: also ahead of that part)
+  async _cutLand() {
+    const { c, mapped, bytes } = this._cutPend, st = this.offStage, q = this.device.queue, P = this.cutProf;
+    const t0 = P ? performance.now() : 0;
+    try { await mapped; } finally { this._cutPend = null; this._gateDone(); }
+    const t1 = P ? performance.now() : 0;
+    const sel = new Uint32Array(st.getMappedRange(0, bytes)).slice();
+    st.unmap();
+    const e = this.device.createCommandEncoder(), b0 = this.experts.stats.bytes;
+    const r = this.experts.plan(e, c.L.offLayer, sel, c.nCols, this.moe.KS);
+    if (!r.pool) throw new Error("expert offload: a pipelined cut left the slot pool");   // (nCols * K <= P: cannot)
+    if (this.experts.stats.bytes !== b0) q.submit([e.finish()]);
+    q.writeBuffer(this.offSel, 0, r.remap);
+    if (P) { P.wait += t1 - t0; P.plan += performance.now() - t1; }
+  }
+  // the end of a pipelined pass: its last cut landed before the caller submits the rest
+  async _cutFlush(enc) {
+    if (this._cutPend) {
+      const P = this.cutProf, t0 = P ? performance.now() : 0;
+      if (P && P.last) P.enc += t0 - P.last;
+      await this._cutLand();
+      if (P) P.last = 0;
+    }
+    return enc;
   }
   // A prefill frame of W tokens on an offloaded layer (grouped prefill, after the routing of all W): its experts into
   // the store's region. A frame whose picks can cover the layer (W * K >= nExp; 512-token frames touch nearly every
@@ -1767,7 +1844,7 @@ export class Qwen35Engine {
     enc.copyBufferToBuffer(selBuf, 0, sg, 0, bytes);
     q.submit([enc.finish()]);
     this._gateOpen();
-    try { await sg.mapAsync(GPUMapMode.READ, 0, bytes); } finally { this._gateDone(); }
+    try { await mapRead(this.device, sg, 0, bytes, this._kick()); } finally { this._gateDone(); }
     const sel = new Uint32Array(sg.getMappedRange(0, bytes)).slice();
     sg.unmap();
     const e2 = this.device.createCommandEncoder();
@@ -2967,7 +3044,7 @@ export class Qwen35Engine {
       this.device.queue.submit([job.cb]);
     }
     const bytes = job.op.R * 4;
-    const mapped = job.stage.mapAsync(GPUMapMode.READ, 0, bytes);
+    const mapped = mapRead(this.device, job.stage, 0, bytes, this._kick());   // (resident: no kick, see map_kick.js)
     let next = null;
     if (this._fwdRun > 0 && this._canDecodeAhead(desc)) {
       this._setFrame(this.pos + 1, this.pos + 2);
@@ -3886,9 +3963,153 @@ export class Qwen35Engine {
   // expert offload: the same token, its command buffer split at every offloaded layer (_cutResolve submits the parts
   // up to each cut); -> the job of the last part, as _encodeForward's (cb not yet submitted)
   async _encodeForwardOff(pos, desc = null) {
+    if (this.cutSpec) return this._encodeForwardSpec(pos, desc);
+    if (this.cutProf) this.cutProf.last = performance.now();
     let enc = this._fwdBegin(false);
-    for (let i = 0; i < this.layers.length; i++) { this._encodeLayerR(enc, this.layers[i], pos); if (this._cut) enc = await this._cutResolve(enc); }
+    const pipe = this.cutPipe === true;
+    try {
+      for (let i = 0; i < this.layers.length; i++) { this._encodeLayerR(enc, this.layers[i], pos); if (this._cut) enc = await this._cutResolve(enc, pipe); }
+      enc = await this._cutFlush(enc);
+    } catch (e) { await this._offAbort(); throw e; }
     return this._fwdEnd(enc, pos, desc);
+  }
+  // an offloaded token that threw mid-way: no cut, pending plan or FFN mode left behind, the gate count back, the
+  // staging buffers unmapped (so the next call can map them)
+  async _offAbort() {
+    const pd = this._cutPend;
+    this._cutPend = null; this._cut = null; this._ffnMode = null; this._pp = null; this._ppB = null;
+    if (pd) { try { await pd.mapped; } catch { /* the token failed anyway */ } this._gateDone(); }
+    for (const b of [this.offStage, this._spec?.stage]) if (b && b.mapState === "mapped") b.unmap();
+  }
+  // ---- cutSpec: speculative decode over offloaded layers (one token; engine flag, off by default) ----
+  // A layer that has rarely missed of late (specMiss, a per-layer moving average of "had a miss this token", below
+  // cutSpecTheta) does not cut: moe_remap (engine/expert_store.js REMAP_WGSL) maps its route's ids to slots through
+  // the store's GPU table and its experts run at once, in the same command buffer as the layers around it. Its ids
+  // and a miss flag go to a log the next cut reads back with its own selection (one map for the whole window). If
+  // every speculated layer of the window hit, the CPU replays plan() for each of them in order (stamps only: the
+  // LRU state a cut per layer would leave) and handles the cut as before. If one missed, its experts read a slot that
+  // held another expert: the token rolls back to that layer's FFN. Its misses are copied into the pool, the recurrent
+  // state (DeltaNet S, conv window) of every later layer comes back from the copy taken at the token's start, x from
+  // moe_remap's copy of the layer's FFN input; the FFN then runs again from its norm (the same router and route, the
+  // same selection) on the CPU's slot ids, and encoding goes on from the next layer. KV rows the window wrote are
+  // written again before anything reads them. So every expert kernel that counts read the right expert: the same bits.
+  // The last offloaded layer always cuts (closes the last window). cutSpecMax: most layers speculated in a row.
+  _specInit() {
+    if (this._spec) return this._spec;
+    const dev = this.device, st = this.experts, { K, KS } = this.moe, dim = this.dims.dim;
+    st.gpuTables();
+    const offs = this.layers.filter((L) => L.off), nOff = offs.length;
+    const S = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
+    const log = dev.createBuffer({ size: (nOff * KS + nOff) * 4, usage: S });
+    const stage = dev.createBuffer({ size: (nOff * KS + nOff + KS) * 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const xs = dev.createBuffer({ size: nOff * dim * 4, usage: S });
+    const pipe = dev.createComputePipeline({ layout: "auto", compute: { module: dev.createShaderModule({ code: REMAP_WGSL }), entryPoint: "moe_remap" } });
+    offs.forEach((L, j) => {
+      L.specJ = j; L.specMiss = 1;   // pessimistic start: a layer cuts until it has hit for a few tokens
+      const u = this._buf(new Uint32Array([K, KS, j, dim, nOff, 0, 0, 0]), GPUBufferUsage.UNIFORM);
+      L.bgRemap = dev.createBindGroup({ layout: pipe.getBindGroupLayout(0),
+        entries: [L.selBuf, st.L.get(L.offLayer).tab, this.offSel, log, this.x, xs, u].map((b, i) => ({ binding: i, resource: { buffer: b } })) });
+    });
+    for (const L of this.layers) if (!L.isFull && L.S) {
+      L.S_spec = dev.createBuffer({ size: L.S.size, usage: S });
+      L.conv_spec = dev.createBuffer({ size: L.convState.size, usage: S });
+    }
+    return (this._spec = { pipe, log, stage, xs, nOff });
+  }
+  async _encodeForwardSpec(pos, desc = null) {
+    const sp = this._specInit(), q = this.device.queue, nL = this.layers.length, P = this.cutProf;
+    if (P) P.last = performance.now();
+    const th = this.cutSpecTheta ?? 0.25, mx = this.cutSpecMax ?? 8;
+    let lastOff = -1, run = 0, first = -1;
+    for (let i = 0; i < nL; i++) if (this.layers[i].off) lastOff = i;
+    const mode = this.layers.map((L, i) => {
+      if (!L.off) return null;
+      if (i !== lastOff && L.specMiss < th && run < mx) { run++; if (first < 0) first = i; return "spec"; }
+      run = 0; return "cut";
+    });
+    if (first >= 0) {   // the recurrent state of every layer after the first speculated one, for a rollback
+      const e = this.device.createCommandEncoder();
+      for (let i = first + 1; i < nL; i++) {
+        const L = this.layers[i];
+        if (L.S_spec) { e.copyBufferToBuffer(L.S, 0, L.S_spec, 0, L.S.size); e.copyBufferToBuffer(L.convState, 0, L.conv_spec, 0, L.convState.size); }
+      }
+      q.submit([e.finish()]);
+    }
+    const missed = new Uint8Array(nL);
+    let enc = this._fwdBegin(false), win = [], i = 0;
+    try {
+      while (i < nL) {
+        this._ffnMode = mode[i] === "spec" ? "spec" : null;
+        this._encodeLayerR(enc, this.layers[i], pos);
+        this._ffnMode = null;
+        if (mode[i] === "spec") { win.push(i); i++; continue; }
+        if (!this._cut) { i++; continue; }
+        const r = await this._specCut(enc, win, i, missed);
+        enc = r.enc; i = r.next; win = [];
+      }
+    } catch (e) { await this._offAbort(); throw e; }
+    for (let k = 0; k < nL; k++) { const L = this.layers[k]; if (L.off) L.specMiss = 0.75 * L.specMiss + 0.25 * missed[k]; }
+    return this._fwdEnd(enc, pos, desc);
+  }
+  // the cut at layer ci after a window of speculated layers (win): one readback of the window's log and ci's selection
+  async _specCut(enc, win, ci, missed) {
+    const c = this._cut, sp = this._spec, st = this.experts, q = this.device.queue, { KS } = this.moe, nOff = sp.nOff, dim = this.dims.dim, P = this.cutProf;
+    this._cut = null;
+    if (c.ppB || c.M || c.nCols !== 1) throw new Error("expert offload: a speculative window is one-token decode only");   // (reopen handles _pp only)
+    const t0 = P ? performance.now() : 0;
+    if (P && P.last) P.enc += t0 - P.last;
+    const tail = nOff * KS + nOff, bytes = (tail + KS) * 4;
+    if (win.length) enc.copyBufferToBuffer(sp.log, 0, sp.stage, 0, tail * 4);
+    enc.copyBufferToBuffer(c.L.selBuf, 0, sp.stage, tail * 4, KS * 4);
+    q.submit([enc.finish()]);
+    const t1 = P ? performance.now() : 0;
+    this._gateOpen();
+    try { await mapRead(this.device, sp.stage, 0, bytes, this._kick()); } finally { this._gateDone(); }
+    const t2 = P ? performance.now() : 0;
+    const a = new Uint32Array(sp.stage.getMappedRange(0, bytes)).slice();
+    sp.stage.unmap();
+    const e2 = this.device.createCommandEncoder();
+    const reopen = () => { if (c.pp) this._pp = e2.beginComputePass(); };
+    const { hs, gusRows, dncRows } = this.moe;
+    let next = ci + 1;
+    for (const m of win) {
+      const L = this.layers[m], j = L.specJ, sel = a.subarray(j * KS, (j + 1) * KS);
+      if (a[nOff * KS + j] === 0) {   // held: plan() only stamps its experts
+        const b0 = st.stats.bytes;
+        st.plan(e2, L.offLayer, sel, 1, KS);
+        if (st.stats.bytes !== b0) throw new Error(`expert offload: layer ${L.offLayer} hit on the GPU, missed on the CPU`);
+        st.stats.specs++; missed[m] = 0;
+        continue;
+      }
+      // missed: roll back to layer m's FFN (see the note at _specInit)
+      st.stats.specFails++; missed[m] = 1;
+      const r = st.plan(e2, L.offLayer, sel, 1, KS);
+      q.writeBuffer(this.offSel, 0, r.remap);
+      for (let k = m + 1; k <= ci; k++) {
+        const Lk = this.layers[k];
+        if (Lk.S_spec) { e2.copyBufferToBuffer(Lk.S_spec, 0, Lk.S, 0, Lk.S.size); e2.copyBufferToBuffer(Lk.conv_spec, 0, Lk.convState, 0, Lk.convState.size); }
+      }
+      e2.copyBufferToBuffer(sp.xs, j * dim * 4, this.x, 0, dim * 4);
+      reopen();
+      this._ffnMode = "redo";
+      this._encodeFFN(e2, L);
+      this._ffnMode = null;
+      next = m + 1;
+      break;
+    }
+    if (next === ci + 1) {   // the window held: the cut as _cutResolve handles it
+      const b0 = st.stats.misses;
+      const r = st.plan(e2, c.L.offLayer, a.subarray(tail, tail + KS), 1, KS);
+      missed[ci] = st.stats.misses !== b0 ? 1 : 0;
+      q.writeBuffer(this.offSel, 0, r.remap);
+      const p = e2.beginComputePass();
+      if (c.pp) this._pp = p;
+      this._dxyz(p, c.L.gusPipe, c.L.bgGusP, Math.ceil(hs / gusRows), KS, 1);
+      this._dxyz(p, c.L.dncPipe, c.L.bgDncP, Math.ceil(dim / dncRows), 1, 1);
+      if (!c.pp) p.end();
+    }
+    if (P) { const t3 = performance.now(); P.n++; P.submit += t1 - t0; P.wait += t2 - t1; P.plan += t3 - t2; P.last = t3; }
+    return { enc: e2, next };
   }
   _fwdBegin(ahead) {
     const enc = this.device.createCommandEncoder();
@@ -3937,7 +4158,7 @@ export class Qwen35Engine {
     // (expert offload: no encode-ahead, a token's commands depend on its routing)
     const job = this.experts ? await this._encodeForwardOff(this.pos) : pre && pre.pos === this.pos && pre.key === this._fwdKey() ? pre : this._encodeForward(this.pos);
     this.device.queue.submit([job.cb]);
-    const mapped = job.stage.mapAsync(GPUMapMode.READ);
+    const mapped = mapRead(this.device, job.stage, 0, undefined, this._kick());
     if (this.encodeAhead !== false && !this.experts && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1);
     await mapped;
     const logits = Float32Array.from(new Float32Array(job.stage.getMappedRange(), 0, vocab));
