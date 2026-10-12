@@ -2306,6 +2306,90 @@ Flash traces: once roadmap 33 PR 4 runs Flash resident on the GB10, add its path
 record. `tiersim.js` reads 512-expert traces directly (no mapping), and those numbers replace the extrapolation above.
 Full tables, constants and caveats: the PR description.
 
+## 2026-10-11: Qwen3.8-Flash-Next expert offload in the engine, and RECORDED Flash routing traces (branch feat/flash-offload), the Spark (GB10)
+
+**Recorded traces replace the extrapolation above.** `tests/trace_flash.js` records the router's top-10 ids and
+weights at every layer of every decode pass through `Qwen4ExpEngine`'s `moeTrace` option, in `trace_moe.js`'s format.
+Greedy, thinking off, the room's chat template. Committed in `tests/sim/traces/q38flash` (selections gzipped, 0.9 MB for the first three, 2.1 MB with agent and long;
+`tiersim.js` reads `.npy.gz`): chat 300, code 400 and multiturn 600 decode steps, the 122B set's prompts. Distinct
+experts touched per layer over a trace: chat 101-390 (mean 247 of 512), code 175-429 (290), multiturn 148-446 (300).
+Added after review (same engine, main + this branch): agent 80 steps (the agent loop: two tool calls, then turn 2's
+prompt, 2176 ids, no longer fits the 2048 positions; 1,691 prompt tokens) and long 1,990 steps (one Go tutorial).
+Distinct experts per layer: agent 128-217 (166), long 269-492 (413).
+
+**The traces are decode passes only** (the last prompt token's and each generated token's, as trace_moe.js records).
+Prompt passes go through the pool too and churn it (each prompt token routes 10 experts per layer, and a long prompt
+evicts what decode had cached; not measured), so the hit rates below are for steady decode after a prompt, not a turn's first
+tokens. `PROMPT=1 tests/trace_flash.js ...` records the prompt passes as well (`phase: "prompt"`); not run yet.
+
+Pool hit rate vs fraction of a layer cached, all 48 layers, VRAM only, mean over the three traces (the hit rates are
+recorded routing replayed through the pool; only the tok/s further down are modelled):
+
+| fraction cached | slots | recorded Flash | extrapolated (q = 0 / 0.25 / 0.5) |
+|---|---|---|---|
+| 6.3% | 32 | 59.1% | 49.0 / 45.2 / 42.4% |
+| 12.5% | 64 | 71.3% | 62.2 / 58.0 / 55.2% |
+| 17.0% | 87 | 77.7% | 69.0 / 64.8 / 62.0% |
+| 25.0% | 128 | 85.4% | 78.0 / 73.8 / 71.1% |
+| 27.0% | 138 | 86.7% | 79.8 / 75.6 / 73.0% |
+| 50.0% | 256 | 94.0% | 91.2 / 88.1 / 86.4% |
+
+Flash's routing is **more local than even q = 0** (the 122B's locality carried over unchanged): 8-10 points more hits
+at the cache sizes the rooms use. The design note's 65-80% at 27% was low; it is 87%. Same cost model as above
+(modelled costs, disk rows uncalibrated): the tok/s are tiersim's cost model run on the recorded routing, not
+measured on a device. tok/s mid [slowest trace slow costs - fastest trace fast costs]:
+
+| room | pool hits | disk MB / token | tok/s, modelled (recorded routing) | modelled, extrapolated routing (q = 0.25) |
+|---|---|---|---|---|
+| Mac alone, tab, 11 / 18 GiB (85 / 140 slots) | 77 / 87% | 306 / 174 | **5.9 / 8.4** [4.0-12.3] | 4.2 / 5.7 |
+| Mac + PC room node, `--ram 43` (31 parked + 3 disk, T1 2 GiB) | 77% | 4 | **20.1** [14.7-27.4] | 19.4 |
+| Mac + PC room node, `--ram 24` (14 parked + 20 disk, T1 4 GiB) | 77% | 90 | **13.4** [9.8-18.3] | 12.6 |
+| Mac + PC tab (72 slots; page cache 0 / 40 GiB) | 78% | 204 / 42 | **7.9 / 9.7** | 6.5 / 8.2 |
+
+What changed vs the extrapolation:
+- **Mac alone gains the most: 5.7 -> 8.4 tok/s at 18 GiB** (disk 322 -> 174 MB/token). A 25 GiB cache would give 10.5.
+- The CLI room barely moves (19.4 -> 20.1): with every PC layer in RAM the pool's hit rate only shifts parked-copy time.
+- **`--ram 24` now prefers 24-28 disk layers + a big T1 (16.5-16.6 tok/s) over 20 disk layers (14.9)**, the same
+  shape as the extrapolation (best at 28 disk, 16.1). Played back to back as one 1,300-step session: 16.9 at 28-30.
+- Lookahead with the modelled predictor still loses everywhere (Mac 8.4 -> 5.7-6.0, `--ram 24` 13.6 -> 11.9-12.3,
+  PC tab 9.5 -> 6.8-7.1); the oracle bound rises to Mac 12.4, `--ram 24` 18.0, PC tab 13.3. Recording the real
+  lookahead router's picks next to the traces is still the open item.
+- Agent and long (recorded after review; the tables above stay on chat / code / multiturn), hit rate at
+  32 / 64 / 87 / 128 / 138 / 192 / 256 slots: agent 45.0 / 62.8 / 71.8 / 83.7 / 86.9 / 90.9 / 90.9%, long 56.7 / 72.4 /
+  79.2 / 86.4 / 87.6 / 92.6 / 95.8%; mean of all five 55.8 / 69.8 / 76.8 / 85.3 / 86.9 / 91.6 / 93.8%. The agent turn
+  is the least local at small caches, as on the 122B, but only 48 steps count past the warm-up (2048 positions cap
+  it); long holds the chat rates over 1,990 steps. Mac alone at 18 GiB, modelled: agent 8.7, long 8.7 tok/s.
+
+**The engine serves offloaded layers.** `Qwen4ExpEngine` with experts parked by the loader (`qwen4expWeights(...,
+{ experts })`, `OFFLOAD=lo-hi OFFLOAD_SLOTS=N` in `tests/test_q38flash.js`) cuts each offloaded layer's token after
+its router: the 10 ids are read back, `ExpertStore.plan` copies the misses into the layer's slot pool, and the same
+`moe_gu` / `moe_dn` kernels run on the pool through slot ids. No change to `engine/wgsl/qwen4exp.js`. One token at a
+time a cut holds at most K experts, so the store is built without the whole-layer prefill region
+(`build({ region: false })`). **Offload is decode-only**: batched prefill / verify (`engine/qwen4exp_batch.js`, #348,
+not on main yet) binds expert weights directly and refuses an offloaded layer with a readable error
+(`notParked`, engine/expert_store.js); offload plus batched prefill is unsupported until that integration lands
+(`expertRegion: true` keeps the store's whole-layer region for it). Gate (`BITS=1`: 24 greedy ids per golden prompt, hashes of every step's logits and of the
+final residual), on `feat/flash-engine` 2e48ff7:
+
+| run | decode | BITS |
+|---|---|---|
+| resident | 11.7-12.0 tok/s | ids cc765911 logits 649fc78d hidden 1200733c |
+| `OFFLOAD=0-15 OFFLOAD_SLOTS=16` (23.4 GiB parked, 0.73 GiB of pools) | 3.5 tok/s, 48.1% pool hits | identical |
+| `OFFLOAD=all OFFLOAD_DISK=all OFFLOAD_SLOTS=16` (SSD PR 1 + #349 merged; 48 disk layers) | 0.27-0.60 tok/s, 48.7% hits, 62.7 GB read in 165 s waiting | identical |
+
+16 slots is the stress setting (barely over K = 10: every token evicts); the rates say nothing about a sized cache.
+`OFFLOAD=all` with every expert parked in RAM does not fit the 80 GB job cap here (killed while loading).
+After rebasing onto `feat/flash-engine` c5d7633 (review fixes, on top of c2b2959's HC-site restructure) the resident
+run is 14.3 tok/s, BITS ids cc765911 logits a36a9220 hidden cb3459c9 (ids unchanged; new kernels change the logits'
+low bits).
+**Rerun on main after #346 (1e9d9f0) and #361 merged** (this branch merged with main, GB10): resident 13.8-14.1 tok/s,
+`OFFLOAD=0-15 OFFLOAD_SLOTS=16` 3.5 tok/s (48.1% hits, 23.4 GiB parked), both `BITS ids cc765911 logits a36a9220
+hidden cb3459c9`: identical. The offloaded per-layer path (`debugToken`) ran too: `LAYERS=16 OFFLOAD=0-15
+OFFLOAD_SLOTS=16` against the llama.cpp dumps prints the same report as `LAYERS=16` resident, line for line (every
+tensor's worst error, 38 of 5440 expert ids outside llama.cpp's set in both; 544 cuts, 33.5% hits). The
+`OFFLOAD_DISK` row above ran on the scratch merge exp/flash-disk2 (SSD PR 1 + #349): the store's disk hooks
+(`isDisk` / `attach` / `prepare`) are not on main, so that path needs a re-gate once the SSD PRs land.
+
 ## 2026-10-11: expert offload's disk reader on the room node (branch feat/room-node-disk-reader, roadmap 32 step 2), GB10
 
 `packages/room-node/expert_disk.js`: worker threads, each with its own fd per GGUF file, reading experts in ~1 MiB

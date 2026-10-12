@@ -17,12 +17,21 @@
 //              compares against the JS reference (f32 activations, as the engine) instead: there TOL (default 2e-2)
 //              gates every tensor and the expert sets must equal. Against llama.cpp's Q8-rounded activations the
 //              errors compound within a half layer, so there only the argmax, n-gram rows and sizes gate.
+//   BITS=1     fingerprint: the golden prompts (CASES, default two-sum,bash) then BITS_TOKENS (24) greedy ids each,
+//              hashes of every step's logits and of the residual after the last one. Expert offload must not change
+//              a bit: run it resident, then with OFFLOAD=0-15 OFFLOAD_SLOTS=16 (tests/load_model.js offloadFromEnv;
+//              the loader parks the routed experts of those layers in RAM, ~23 GiB, and the engine serves them from
+//              a 16-slot pool per layer), and the BITS lines must be equal. Prints the store's hit rate. Not
+//              OFFLOAD=all with every expert in RAM: it does not fit an 80 GB job (parked RAM + the resident rest);
+//              offload every layer only with a disk tier (OFFLOAD_DISK=all, the SSD PRs' loader).
+//              Offload is decode-only: batched prefill / verify (engine/qwen4exp_batch.js) refuses offloaded layers.
+// OFFLOAD=lo-hi | all [OFFLOAD_GB=8 | OFFLOAD_SLOTS=N] work in every mode (offloaded layers' experts parked).
 import fs from "node:fs";
 import path from "node:path";
 import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
 import { qwen4expWeights, qwen4expConfig, gpuUploadEntry } from "../engine/gguf.js";
 import { ngramConfig, NgramTable } from "../engine/ngram.js";
-import { openGGUF, gpuDevice, watchGpuErrors } from "./load_model.js";
+import { openGGUF, gpuDevice, watchGpuErrors, offloadFromEnv } from "./load_model.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
 const DIR = env("Q38F_DIR", new URL("../models/q38flash", import.meta.url).pathname);
@@ -35,6 +44,9 @@ const errors = watchGpuErrors(device);
 const model = openGGUF(path.join(DIR, first));
 const G = model.G, cfg = qwen4expConfig(G.meta);
 const nL = LAYERS || cfg.L, hasHead = nL === cfg.L;
+// expert offload (OFFLOAD=...): those layers' routed experts are parked by the loader, not uploaded. The third
+// argument is for a store with a disk tier (roadmap 32, OFFLOAD_DISK on SSD PR 1's loader); ignored without one.
+const experts = await offloadFromEnv(device, nL, model);
 
 // the weights, a layer at a time, each matrix uploaded as it is converted (tests/load_model.js streamWeights, with
 // the qwen4exp loader); f32 tensors keep their CPU copy and the engine uploads them
@@ -43,7 +55,7 @@ const up = (e, name) => { if (name !== "token_embd.weight") gpuUploadEntry(devic
 const flush = async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); };
 const layers = [];
 for (let i = 0; i < nL; i++) {
-  layers.push((await qwen4expWeights(G, model.bytesOf, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: false }, undefined, up)).layers[0]);
+  layers.push((await qwen4expWeights(G, model.bytesOf, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: false, experts }, undefined, up)).layers[0]);
   await flush();
   if (i % 8 === 7 || i === nL - 1) console.log(`  layer ${i + 1}/${nL} on the GPU, ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 }
@@ -57,13 +69,16 @@ const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.rea
 const ngram = new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
 const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram });
 console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""} loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s${model.cache ? "; " + model.cache.summary() : ""}`);
+if (experts) console.log(`offload: layers ${experts.layers[0]}-${experts.layers.at(-1)}, ${experts.P} slots per layer`);
 
 let fail = 0;
-if (LAYERS) {
+if (env("BITS") === "1") await bits();
+else if (LAYERS) {
   for (const free of env("FREE") === "both" ? [false, true] : [env("FREE") === "1"]) await perLayer(free);
   if (hasHead && env("GREEDY") === "1") await greedy();   // the same load: per-layer, then the goldens
 } else await greedy();
 if (hasHead && env("BENCH") === "1") await bench();
+if (experts) console.log(experts.summary());
 if (errors.count) { console.log(`${errors.count} GPU errors`); fail++; }
 console.log(fail ? "Q38FLASH FAIL" : "Q38FLASH PASS ✓");
 Deno.exit(fail ? 1 : 0);
@@ -156,6 +171,35 @@ async function perLayer(FREE) {
   console.log(`  expert ids not in the ${refMode ? "reference's" : "llama.cpp's"} set: ${expertMiss} of ${expertN} (their layers' MoE outputs not compared); n-gram rows differing: ${rowMiss}${argmaxN ? `; argmax equal ${argmaxSame}/${argmaxN}` : ""}`);
   // against the reference a flip needs a router near tie at the f32 rounding level: allow 1 in 5,000
   if (bad || rowMiss || (refMode && !FREE && expertMiss > expertN / 5000) || (argmaxN && argmaxSame !== argmaxN && !FREE)) fail++;
+}
+
+// ---- BITS=1: logits and residual hashes (resident vs offloaded must print the same BITS line)
+async function bits() {
+  const gold = JSON.parse(fs.readFileSync(new URL("./golden/q38flash_llama_greedy.json", import.meta.url), "utf8"));
+  const names = (env("CASES") || "two-sum,bash").split(","), N = +env("BITS_TOKENS", 24);
+  const h = (arrs) => { let x = 0x811c9dc5; for (const a of arrs) { const u = new Uint32Array(a.buffer, a.byteOffset, a.length); for (let i = 0; i < u.length; i++) x = Math.imul(x ^ u[i], 0x01000193) >>> 0; } return x.toString(16); };
+  const lgs = [], hid = [], ids = [];
+  for (const name of names) {
+    eng.reset();
+    experts?.clear();   // a cold cache per prompt: every expert of the first steps is a miss
+    let r = await eng.prefillTokens(gold[name].prompt, { wantLogits: true });
+    const gen = [r.id];
+    lgs.push(r.logits);
+    const t = performance.now();
+    while (gen.length < N) { r = await eng.forwardToken(gen.at(-1), { wantLogits: true }); gen.push(r.id); lgs.push(r.logits); }
+    const ts = (N - 1) / ((performance.now() - t) / 1000);
+    // the residual after the last step (the head's input: the 4 streams)
+    const enc = device.createCommandEncoder();
+    enc.copyBufferToBuffer(eng.B.R, 0, eng.hStage, 0, cfg.hDim * 4);
+    device.queue.submit([enc.finish()]);
+    await eng.hStage.mapAsync(GPUMapMode.READ);
+    hid.push(new Float32Array(eng.hStage.getMappedRange()).slice());
+    eng.hStage.unmap();
+    ids.push(...gen);
+    const same = gen.every((x, i) => x === gold[name].ids[i] || i >= gold[name].ids.length);
+    console.log(`${name}: ${gen.length} ids ${same ? "== llama.cpp" : "differ from llama.cpp"} · decode ${ts.toFixed(2)} tok/s · logits ${h(lgs.slice(-N))} hidden ${h(hid.slice(-1))}`);
+  }
+  console.log(`BITS ids ${h([new Uint32Array(ids)])} logits ${h(lgs)} hidden ${h(hid)}`);
 }
 
 // ---- greedy ids vs llama.cpp

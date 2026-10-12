@@ -16,6 +16,10 @@
 //   QSA == dense        below 2052 cells: every pass forced onto the gathered (QSA) attention, decode and prefill
 //   verify / accept     verify passes of 6 columns with random accepts (state restored and re-run), across 2052
 //   timing              decode vs prefill tok/s for these layers
+// OFFLOAD=lo-hi [OFFLOAD_SLOTS=N]: those layers' routed experts parked in the expert store (engine/expert_store.js),
+// the engine built with expertRegion: true, so the batched passes route them through the store's region and decode
+// through its pools. Every check above still compares against the decode engine; the "BITS" line (a hash of the
+// 64-column prefill's residuals) must equal the resident run's.
 // FULL=1: all 48 layers and the head (~75 GB of GPU memory): greedy ids vs llama.cpp
 // (tests/golden/q38flash_llama_greedy.json, every case including ctx4k / ctx8k; ctx2k and ctx2k_b stay dense at
 // long positions (1887 and 1943 prompt tokens, + 64 <= 2051 cells), ctx2k1 (2082) is just past 2051 cells, where
@@ -28,7 +32,7 @@ import { Qwen4ExpEngine } from "../engine/qwen4exp.js";
 import { Qwen4ExpBatch } from "../engine/qwen4exp_batch.js";
 import { qwen4expWeights, qwen4expConfig, gpuUploadEntry } from "../engine/gguf.js";
 import { ngramConfig, NgramTable } from "../engine/ngram.js";
-import { openGGUF, gpuDevice, watchGpuErrors } from "./load_model.js";
+import { openGGUF, gpuDevice, watchGpuErrors, offloadFromEnv } from "./load_model.js";
 import { QSA, QsaRefCache, poolBlock, indexerQuery, scoreBlocks, selectBlocks, selectedCells, f16bits, h2f } from "./reference/qsa_ref.mjs";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
@@ -45,12 +49,13 @@ const G = model.G, cfg = qwen4expConfig(G.meta);
 const nL = FULL ? cfg.L : +env("LAYERS", 4), hasHead = nL === cfg.L;
 const MAXSEQ = +env("MAXSEQ", FULL ? 8448 : 4608);
 
+const experts = offloadFromEnv(device, nL);
 let t0 = performance.now();
 const up = (e, name) => { if (name !== "token_embd.weight") gpuUploadEntry(device, e, false); };
 const flush = async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); };
 const layers = [];
 for (let i = 0; i < nL; i++) {
-  layers.push((await qwen4expWeights(G, model.bytesOf, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: true }, undefined, up)).layers[0]);
+  layers.push((await qwen4expWeights(G, model.bytesOf, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: true, experts }, undefined, up)).layers[0]);
   await flush();
   if (i % 8 === 7 || i === nL - 1) console.log(`  layer ${i + 1}/${nL} on the GPU, ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 }
@@ -60,13 +65,15 @@ const weights = { ...rest, layers };
 const fds = model.paths.map((p) => fs.openSync(p, "r"));
 const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.readSync(fds[file], b, 0, len, off); return b; };
 const ngram = new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
-const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ });
+const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ, expertRegion: !!experts });
 const pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: +env("MAXCOLS", 64), verifyCols: 8 });
+if (experts) console.log(`offload: layers ${experts.layers[0]}-${experts.layers.at(-1)}, ${experts.P} slots per layer, region ${(experts.regionBytes / 2 ** 30).toFixed(2)} GiB`);
 console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? "on" : "off"}, maxSeq ${MAXSEQ}, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 
 let fail = 0;
 const check = (ok, msg) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) fail++; };
 if (FULL) await full(); else await layered();
+if (experts) console.log(experts.summary());
 if (errors.count) { console.log(`${errors.count} GPU errors`); fail++; }
 console.log(fail ? "Q38FLASH BATCH FAIL" : "Q38FLASH BATCH PASS ✓");
 Deno.exit(fail ? 1 : 0);
@@ -109,20 +116,22 @@ async function layered() {
 
   // prefill == decode, mixed pass sizes
   const run = async (label, chunks, n = NTOK, from = 0) => {
-    let bad = 0, worst = 0, firstBad = -1, passes = 0;
+    let bad = 0, worst = 0, firstBad = -1, passes = 0, h = 0x811c9dc5;
     const tt = performance.now();
     await pb.prefill(ids.slice(from, from + n), { chunks, head: "none", wantHidden: true, onPass: (r, o, sz) => {
       const c = cmpCols(r.hiddens, ref, from + o, sz); passes++;
+      for (const w of new Uint32Array(r.hiddens.buffer, r.hiddens.byteOffset, r.hiddens.length)) h = Math.imul(h ^ w, 0x01000193) >>> 0;
       bad += c.bad; worst = Math.max(worst, c.worst); if (firstBad < 0 && c.firstBad >= 0) firstBad = c.firstBad;
     } });
     const ts = n / ((performance.now() - tt) / 1000);
     check(bad === 0, `${label}: ${n} tokens in ${passes} passes, ${bad} columns differ from decode${bad ? ` (first at ${firstBad}, worst rel ${worst.toExponential(2)})` : " (bit-equal)"}; ${ts.toFixed(1)} tok/s incl. readback`);
-    return ts;
+    return { ts, hash: h.toString(16).padStart(8, "0") };
   };
   eng.reset();
   await run("prefill == decode, passes 1,5,64,37,64,3,64,64,2,63,17,64", [1, 5, 64, 37, 64, 3, 64, 64, 2, 63, 17, 64]);
   eng.reset();
-  await run("prefill == decode, 64-column passes", [64]);
+  const b64 = await run("prefill == decode, 64-column passes", [64]);
+  console.log(`BITS ${nL} layers, ${NTOK} tokens, 64-column prefill residual hash ${b64.hash}${experts ? " (offloaded)" : " (resident)"}`);
   // around the boundary: passes that end at 2050, 2051, 2052 and straddle it
   eng.reset();
   await run("prefill == decode, passes across 2051 / 2052", [64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 64, 2, 1, 1, 1, 1, 7, 64], Math.min(NTOK, 2200));

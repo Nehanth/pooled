@@ -24,10 +24,12 @@
 // rollback (save each column's DeltaNet inputs, replay only the delta step from S before the pass) before MTP
 // drafting is built on verify (docs/kernels.md).
 //
-// Expert offload (engine/expert_store.js): the router of every layer is marked (op.cut) where an offloaded layer
-// would split the pass: read the nCols x K ids back, copy the experts into the store's whole-layer region
-// (ExpertStore.loadLayer / loadExperts) and run the expert kernels on regionEntry() with the original ids. Until that
-// is wired, create() refuses an engine with offloaded layers.
+// Expert offload (engine/expert_store.js, engine created with expertRegion: true): an offloaded layer's pass splits
+// after its router (op.cut). A wide pass (nCols x K >= half the experts) copies the whole layer into the store's region
+// (ExpertStore.loadLayer, no readback); a narrow one (verify) reads the nCols x K ids back and copies only those
+// experts (loadExperts). The expert kernels then run on regionEntry() with the original expert ids: the same kernels
+// on the same bytes at another address, so an offloaded pass gives the resident bits. Without the region create()
+// refuses offloaded layers (the engine's _wq would too: notParked).
 import * as MC from "./wgsl/qwen4exp_batch.js";
 import { qsaScratch, qsaSetFrame, qsaBind, qsaStateOps, qsaSelectOps, QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
 
@@ -42,9 +44,9 @@ export class Qwen4ExpBatch {
   // maxCols: columns per pass (longer prompts run in several); verifyCols: the most columns a pass with the head on
   // every column (verify) takes, which sizes its logits (vocab x 4 B per column).
   async _init(eng, W, { maxCols = 64, verifyCols = 8 } = {}) {
-    const off = eng.offLayers?.length ? eng.offLayers : eng.layers.filter((l) => l.off).map((l) => l.i);
-    if (off.length || eng.experts) throw new Error(`qwen4exp batch: layers ${off.join(",")} have offloaded experts; batched passes do not route them `
-      + "through ExpertStore.loadLayer / loadExperts yet: run them with forwardToken / prefillTokens");
+    const offSet = eng.offLayers || new Set();
+    if (offSet.size && !eng.experts?.region) throw new Error(`qwen4exp batch: layers ${[...offSet].join(",")} have offloaded experts and the store has no `
+      + "whole-layer region: create the engine with expertRegion: true (batched passes route offloaded layers through ExpertStore.loadLayer / loadExperts)");
     const { device, cfg } = eng, wq = eng._wq;
     if (!wq) throw new Error("qwen4exp batch: the engine does not expose its weights (_wq)");
     Object.assign(this, { eng, device, cfg, maxCols, verifyCols: Math.min(verifyCols, maxCols) });
@@ -186,7 +188,9 @@ export class Qwen4ExpBatch {
       const sF = site(L.hcFfn), ffn = [...hcMixRest(L.hcFfn)];
       ffn.push(gemv(w.router, B.mixed, B.logits, { dIn: d }));
       ffn.push({ pipe: P.route, bg: bg(P.route, [B.logits, B.ids, B.wts, uni([cfg.nExp, K, ls, 0])]), dyn: (pos, n) => [n, 1, 1], cut: true });
-      const eg = wq(L.expGate, "experts gate"), eu = wq(L.expUp, "experts up"), ed = wq(L.expDown, "experts down"), ff = cfg.expFF;
+      // the routed experts: resident, or (offloaded) the store's region, filled after the cut
+      const off = offSet.has(i), ex = (k, part) => (off ? eng.experts.regionEntry(i, part) : wq(L[k], "experts " + part));
+      const eg = ex("expGate", "gate"), eu = ex("expUp", "up"), ed = ex("expDown", "down"), ff = cfg.expFF;
       ffn.push({ pipe: P["gu_" + eg.kind], bg: bg(P["gu_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, B.mixed, B.h, B.ids, uni([ff, d, K, d / 4, K * ff, K, 0, 0])]),
         dyn: (pos, n) => [cdiv(ff, 8), K, n] });
       ffn.push({ pipe: P["dn_" + ed.kind], bg: bg(P["dn_" + ed.kind], [ed.qs, ed.sc, B.h, B.moe, B.ids, B.wts, uni([d, ff, K, 0, 0, K, K, K * ff / 4])]),
@@ -198,7 +202,7 @@ export class Qwen4ExpBatch {
         dyn: (pos, n) => [cdiv(d, 8), 1, n] });
       const combF = { a: B.moe, b: B.sh, h: sF.h };
       halves.push({ pre, site: sA, rest, comb: combA }, { pre: [], site: sF, rest: ffn, comb: combF });
-      lmeta.push({ i, st });
+      lmeta.push({ i, st, off });
     }
 
     // ---- head: the head mixer's site (which folds the last layer's combine) on every column, then the mixer, the LM
@@ -217,6 +221,8 @@ export class Qwen4ExpBatch {
     const lists = halfOps(halves);
     this.layers = lmeta.map((m, k) => ({ ...m, ops: [...lists[2 * k], ...lists[2 * k + 1]] }));
     if (eng.hasHead) { const h = lists[lists.length - 1]; this.headSite = h.slice(0, 1); this.headRest = h.slice(1); }
+    for (const l of this.layers) if (l.off) { const at = l.ops.findIndex((o) => o.cut) + 1; l.route = l.ops.slice(0, at); l.exp = l.ops.slice(at); }
+    if (offSet.size) this.idStage = device.createBuffer({ size: N * K * 4, usage: U.MAP_READ | U.COPY_DST });
     this.hStage = device.createBuffer({ size: HD * 4, usage: U.MAP_READ | U.COPY_DST });
     this._stages = new Map();
     this._snap = null;
@@ -273,14 +279,11 @@ export class Qwen4ExpBatch {
 
     let at = 0;
     for (; at + SUBMIT_LAYERS < this.layers.length; at += SUBMIT_LAYERS) {
-      const enc = device.createCommandEncoder(), pass = enc.beginComputePass();
-      for (const l of this.layers.slice(at, at + SUBMIT_LAYERS)) eng._encode(pass, l.ops, pos, n);
-      pass.end();
-      q.submit([enc.finish()]);
+      const r = await this._encodeLayers(this.layers.slice(at, at + SUBMIT_LAYERS), pos, n);
+      r.pass.end();
+      q.submit([r.enc.finish()]);
     }
-    const enc = device.createCommandEncoder();
-    let pass = enc.beginComputePass();
-    for (const l of this.layers.slice(at)) eng._encode(pass, l.ops, pos, n);
+    let { enc, pass } = await this._encodeLayers(this.layers.slice(at), pos, n);
     if (eng.hasHead) eng._encode(pass, this.headSite, pos, n);   // the last layer's combine, on every column
     if (head === "all") eng._encode(pass, this.headRest, pos, n);
     pass.end();
@@ -312,6 +315,32 @@ export class Qwen4ExpBatch {
     if (wantHidden) out.hiddens = await this._read(hs, n * HB);
     if (head === "none" && !wantHidden) await q.onSubmittedWorkDone();
     return out;
+  }
+
+  // layers ls into a new encoder -> { enc, pass } (open). An offloaded layer cuts after its router: the experts it
+  // needs go into the store's region (encoded copies; a narrow pass reads its ids back first), then its expert ops.
+  async _encodeLayers(ls, pos, n) {
+    const { eng, device, cfg } = this, K = cfg.K, st = eng.experts;
+    let enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+    for (const l of ls) {
+      if (!l.off) { eng._encode(pass, l.ops, pos, n); continue; }
+      eng._encode(pass, l.route, pos, n);
+      pass.end();
+      if (2 * n * K >= cfg.nExp) st.loadLayer(enc, l.i);
+      else {
+        enc.copyBufferToBuffer(this.B.ids, 0, this.idStage, 0, n * K * 4);
+        device.queue.submit([enc.finish()]);
+        await this.idStage.mapAsync(GPUMapMode.READ, 0, n * K * 4);
+        const ids = new Uint32Array(this.idStage.getMappedRange(0, n * K * 4)), sel = new Uint32Array(n * (K + 1));
+        for (let c = 0; c < n; c++) { sel.set(ids.subarray(c * K, (c + 1) * K), c * (K + 1)); sel[c * (K + 1) + K] = cfg.nExp; }
+        this.idStage.unmap();
+        enc = device.createCommandEncoder();
+        st.loadExperts(enc, l.i, sel, n, K + 1);
+      }
+      pass = enc.beginComputePass();
+      eng._encode(pass, l.exp, pos, n);
+    }
+    return { enc, pass };
   }
 
   // Prompt tokens in passes of maxCols (the last pass gets the head). Returns the last pass's result (as _pass).
