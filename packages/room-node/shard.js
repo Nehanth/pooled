@@ -231,6 +231,7 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const { Qwen4ExpEngine } = await import("../../engine/qwen4exp.js");
   const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null });
   const fe = FlashRoomEngine.wrap(eng);
+  out.flash = eng;   // the engine under the adapter (tests and benches: forwardToken, debugToken)
   log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB on the GPU${out.ngram ? ", the n-gram layer here" : ""}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
   return fe;
 }
