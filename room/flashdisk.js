@@ -76,7 +76,7 @@ export async function tabExpertTier(device, G, layers, { readAt, offload, onStat
 // (file = the table's GGUF shard). Heads are copied `parallel` at a time, each through its own writable (written to a
 // swap file, committed on close): a head is either all there or not, and a load that stops part way copies only the
 // heads that are missing next time. -> bytes copied (0 when it was all there)
-export async function ingestNgram(cfg, readAt, { dir = NGRAM_OPFS_DIR, parallel = 4, onStatus = () => {}, onProgress = () => {}, log = () => {}, storage = globalThis.navigator?.storage } = {}) {
+export async function ingestNgram(cfg, readAt, { dir = NGRAM_OPFS_DIR, parallel = 2, onStatus = () => {}, onProgress = () => {}, log = () => {}, storage = globalThis.navigator?.storage } = {}) {
   let d = await storage.getDirectory();
   for (const p of dir) d = await d.getDirectoryHandle(p, { create: true });
   const want = (h) => cfg.vocab[h] * cfg.rowBytes, missing = [];
