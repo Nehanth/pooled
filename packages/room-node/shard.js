@@ -84,6 +84,8 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
   const out = { device, gpuErrors: 0 };
   let pool = null;
   device.addEventListener?.("uncapturederror", (ev) => { if (out.gpuErrors++ < 3) onGpuError(ev.error?.message || "GPU error"); });
+  // a lost device fails every later readback with a bare AbortError: say why it was lost
+  device.lost?.then((i) => { out.lost = i; if (i?.reason !== "destroyed") log(`GPU device lost (${i?.reason || "unknown"}): ${String(i?.message || "").split("\n")[0].slice(0, 300)}`); }).catch(() => {});
   // a buffer the GPU had no memory for is an error buffer: the layers would load "fine" and every answer come out as
   // garbage (seen on the RTX 5070 with the 122B's experts filling the RAM WDDM spills VRAM into). The whole load runs
   // in one out-of-memory scope and fails when anything in it ran out
@@ -145,6 +147,10 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
       const oom = await device.popErrorScope();
       if (oom) throw Object.assign(new Error(`the GPU ran out of memory while loading layers ${range[0]}-${range[1] - 1}: ${String(oom.message || "").split("\n")[0].slice(0, 200)}`), { oom: true });
     }
+    // a device lost during the load (on the GB10 an allocation past the memory there is VK_ERROR_OUT_OF_DEVICE_MEMORY
+    // and a lost device, not an out-of-memory error in the scope): say so now, not with the first answer's AbortError
+    await new Promise((r) => setTimeout(r, 0));
+    if (out.lost) throw Object.assign(new Error(`the GPU was lost while loading layers ${range[0]}-${range[1] - 1}: ${String(out.lost.message || out.lost.reason || "").split("\n")[0].slice(0, 200)}`), { oom: /MEMORY/i.test(String(out.lost.message)) });
     if (out.experts) {
       log(out.experts.summary().replace(/; \d+ cuts.*/, ""));
       if (offload.ramBytes > 0 && out.experts.parkedBytes > offload.ramBytes * 1.0001)
@@ -223,10 +229,26 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   if (short) throw Object.assign(new Error(`can't hold layers ${range[0]}-${range[1] - 1} of Qwen3.8-Flash-Next here: it ${short}`), { oom: true, short: true });
   const total = qwen4expShardBytes(G, opts);
   // straight to the GPU, but not the embedding (Qwen4ExpEngine reads its rows on the CPU) nor f32 tensors (the engine
-  // uploads those itself, some joined into one buffer)
-  const weights = await qwen4expWeights(G, src.bytesOf, opts, (done) => onProgress(done, total), (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(device, e, false); });
-  device.queue.submit([device.createCommandEncoder().finish()]);
-  await device.queue.onSubmittedWorkDone();
+  // uploads those itself, some joined into one buffer). A layer at a time, the queue flushed after each: Dawn keeps
+  // a writeBuffer's staging copy until the queue moves on, and 67 GB of uploads in one go ran the GB10 out of memory
+  // (VK_ERROR_OUT_OF_DEVICE_MEMORY, the device lost) with the weights only half on the GPU
+  const up = (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(device, e, false); };
+  const flush = async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); };
+  let base = 0;
+  const part = async (o) => {
+    const w = await qwen4expWeights(G, src.bytesOf, { ...o, qsa: false }, (done) => onProgress(base + done, total), up);
+    base += qwen4expShardBytes(G, { ...o, qsa: false });
+    await flush();
+    return w;
+  };
+  const layers = [];
+  let pleTable = null;
+  for (let i = range[0]; i < range[1]; i++) {
+    const w = await part({ lo: i, hi: i + 1, hasEmbed: false, hasHead: false });
+    layers.push(w.layers[0]);
+    pleTable ||= w.pleTable || null;
+  }
+  const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
   if (weights.pleTable) out.ngram = await openNgramTable(src, G, log);
   const { Qwen4ExpEngine } = await import("../../engine/qwen4exp.js");
   const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null });
