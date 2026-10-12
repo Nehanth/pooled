@@ -4,7 +4,9 @@
 // host compute, pack, send, wire, deliver, queue, unpack, GPU, readback, pack, send ... head.
 // Manual trigger only (research branch exp/base).
 //
-//   node tests/e2e/room_prof.mjs --model qwen3.6-35b-moe --devices 2 [--maxnew 48] [--modes plain,spec] [--out f.json] [--query gpusample=1]
+//   node tests/e2e/room_prof.mjs --model qwen3.6-35b-moe --devices 2 [--maxnew 48] [--modes plain,spec] [--out f.json] [--query gpusample=1] [--kicks 0,1]
+// --kicks 0,1,auto: each mode once per value on the one load (engine/map_kick.js is served with a dev-only switch,
+// window.__kick, that overrides every mapRead's kick argument: 0 plain mapAsync, 1 kick, auto the engine default). The kick's own maps are counted (gp.kicks), not timed.
 //
 // engine/generate.js, room/pipeline.js and room/transport.js are served with trace marks
 // by patchGenerator / patchPipeline / patchTransport in room_trace.mjs, which fail if anchors move.
@@ -38,7 +40,9 @@ const LOCAL = { "Qwen3.8-27B-Q4_0.gguf": "models/q38/model.gguf", "Qwen3-0.6B-Q8
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css", ".json": "application/json", ".svg": "image/svg+xml", ".png": "image/png" };
 
-const PATCHED = { [path.join(ROOT, "engine/generate.js")]: patchGenerator, [path.join(ROOT, "room/pipeline.js")]: patchPipeline, [path.join(ROOT, "room/transport.js")]: patchTransport };
+const KICKS = arg("kicks", "auto").split(",");
+const patchKick = (src) => { const a = "  if (kick === \"auto\") {"; if (!src.includes(a)) throw new Error("engine/map_kick.js changed: update patchKick in room_prof.mjs"); return src.replace(a, "  if (globalThis.__kick !== undefined) kick = globalThis.__kick;\n" + a); };
+const PATCHED = { [path.join(ROOT, "engine/map_kick.js")]: patchKick, [path.join(ROOT, "engine/generate.js")]: patchGenerator, [path.join(ROOT, "room/pipeline.js")]: patchPipeline, [path.join(ROOT, "room/transport.js")]: patchTransport };
 
 const srv = http.createServer((q, r) => {
   const p = path.join(ROOT, decodeURIComponent(q.url.split("?")[0]));
@@ -91,7 +95,7 @@ for (const [n, p] of Object.entries(tabs)) {
 }
 const t0 = Date.now(); const log = (...a) => console.error(((Date.now() - t0) / 1000).toFixed(0) + "s", ...a);
 const host = tabs.host;
-const out = { model: MODEL, devices: DEVICES, wire: WIRE, maxnew: MAXNEW, prompt: PROMPT, split: "", runs: [] };
+const out = { model: MODEL, devices: DEVICES, kicks: KICKS, wire: WIRE, maxnew: MAXNEW, prompt: PROMPT, split: "", runs: [] };
 try {
   for (const p of Object.values(tabs)) await p.goto(BASE);
   for (const p of Object.values(tabs)) await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
@@ -121,9 +125,9 @@ try {
     await host.waitForFunction(() => /^ready — prefill|^generation failed/.test(document.getElementById("ai-status").textContent), null, { timeout: 600000, polling: 250 });
     return host.textContent("#ai-status");
   };
-  for (const mode of MODES) {
-    for (const p of Object.values(tabs)) await p.evaluate((ns) => { window.__nospec = ns; }, mode === "plain");
-    log(mode, "warm-up:", (await ask()).slice(0, 120));
+  for (const mode of MODES) for (const kick of KICKS) {
+    for (const p of Object.values(tabs)) await p.evaluate(([ns, k]) => { window.__nospec = ns; window.__kick = k === "auto" ? "auto" : k === "1"; }, [mode === "plain", kick]);
+    log(mode, "kick", kick, "warm-up:", (await ask()).slice(0, 120));
     for (const p of Object.values(tabs)) await p.evaluate(() => { window.__hp = []; window.__gp = { subs: [], maps: [] }; window.__hpOn = true; });
     const st = await ask();
     for (const p of Object.values(tabs)) await p.evaluate(() => { window.__hpOn = false; });
@@ -140,8 +144,8 @@ try {
     }
     const reply = await host.evaluate(() => { const b = document.querySelectorAll(".m.bot .bubble"); return (b[b.length - 1]?.textContent || "").slice(0, 160); });
     const crumb = await host.evaluate(() => { try { return JSON.parse(localStorage.getItem("pooled-crumb") || "{}").s || ""; } catch { return ""; } });
-    log(mode, "measured:", st.slice(0, 160));
-    out.runs.push({ mode, status: st, reply, crumb, traces });
+    log(mode, "kick", kick, "measured:", st.slice(0, 160));
+    out.runs.push({ mode, kick, status: st, reply, crumb, traces });
   }
 } catch (e) {
   out.error = String(e).slice(0, 400);

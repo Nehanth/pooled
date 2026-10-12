@@ -45,3 +45,53 @@ export async function cutBench({ eng, tok, prompt, N = 64, bits = true, log = co
   if (eng.experts) { res.summary = eng.experts.summary(); log(res.summary); }
   return res;
 }
+
+// A room's per-token readbacks one at a time, map kick variants interleaved call by call on one load (?hop=N in
+// tab_cut.html, HOP=N in cut_prof.js): a worker's hop (runHidden: write the hidden, run the layers, read the hidden
+// back) over all layers, 20, 13, 10, 5 and 2, the host's first hop (embedRun), its head (headFromHiddenIds,
+// gpuSample's 16-byte readback) and the fused head + next hop (headAhead). Variants: off (plain mapAsync), on (kick at once), auto
+// (the engine default: in a browser, kick only if this staging buffer's last readback took under map_kick.js AUTO.ms;
+// never on Node / Deno). Each call is timed from its start to its result.
+// -> { [call]: { off, on, auto } } medians in ms, plus runHidden's submit -> onSubmittedWorkDone (no map)
+export async function hopBench({ eng, N = 40, log = console.log }) {
+  const med = (a) => { const s = [...a].sort((x, y) => x - y); return s[s.length >> 1]; };
+  const dim = eng.dims.dim, pos = 64, desc = { kind: "greedy" };
+  eng.reset();
+  const x = Float32Array.from(await eng.embedRun(1000, pos));
+  const calls = {
+    runHidden: () => eng.runHidden(x, pos),
+    embedRun: () => eng.embedRun(1000, pos),
+    headFromHiddenIds: () => eng.headFromHiddenIds(x, desc),
+    ...(eng.mtp && eng.headAhead && { headAhead: () => eng.headAhead(x, pos, desc) }),
+  };
+  // shorter hops (a device holding fewer layers): runHidden over the first n layers only
+  const full = eng.layers;
+  for (const n of [20, 13, 10, 5, 2]) if (n < full.length) calls[`runHidden_${n}layers`] = async () => { eng.layers = full.slice(0, n); try { return await eng.runHidden(x, pos); } finally { eng.layers = full; } };
+  const res = {}, k0 = eng.mapKick;
+  for (const [name, f] of Object.entries(calls)) {
+    for (let i = 0; i < 4; i++) await f();   // warm
+    const V = { off: false, on: true, auto: "auto" }, keys = Object.keys(V), t = { off: [], on: [], auto: [] };
+    for (let i = 0; i < N; i++) for (let j = 0; j < keys.length; j++) {
+      const k = keys[(i + j) % keys.length];
+      eng.mapKick = V[k];
+      const t0 = performance.now(); await f(); const ms = performance.now() - t0;
+      t[k].push(ms);
+    }
+    res[name] = { off: med(t.off), on: med(t.on), auto: med(t.auto) };
+    log(`hop ${name}: kick off ${res[name].off.toFixed(2)} ms, on ${res[name].on.toFixed(2)} ms, auto ${res[name].auto.toFixed(2)} ms`);
+  }
+  eng.mapKick = k0;
+  // GPU floor of the full hop: the same submit, waited with onSubmittedWorkDone (no map)
+  const g = [];
+  for (let i = 0; i < N; i++) {
+    eng.device.queue.writeBuffer(eng.x, 0, x);
+    eng._setFrame(pos, pos + 1);
+    const enc = eng.device.createCommandEncoder();
+    for (let l = 0; l < eng.layers.length; l++) eng._encodeLayer(enc, l);
+    const t0 = performance.now(); eng.device.queue.submit([enc.finish()]); await eng.device.queue.onSubmittedWorkDone(); g.push(performance.now() - t0);
+  }
+  res.runHidden.submitToDone = med(g);
+  log(`hop runHidden: submit -> onSubmittedWorkDone ${res.runHidden.submitToDone.toFixed(2)} ms`);
+  eng.reset();
+  return res;
+}

@@ -5,6 +5,7 @@ import { compilePipeline } from "./compile.js";
 import { moduleSet } from "./wgsl/prune.js";
 import { probeUnpack, coopWGSL } from "./wgsl/coop.js";
 import { f16ToF32 } from "./gguf.js";
+import { mapRead } from "./map_kick.js";
 import { denseAttnWGSL, DENSE_GLUE_WGSL, DENSE_GLUE3_WGSL } from "./wgsl/dense.js";
 
 export class DenseEngine {
@@ -517,11 +518,17 @@ export class DenseEngine {
     }
   }
 
+  // every readback on a room's token path (hidden states, head, drafts, verify, prefill): mapAsync(READ) with the map
+  // kick (engine/map_kick.js). In Chrome a map behind running GPU work otherwise resolves on the GPU process's ~2 ms
+  // device-check timer. mapKick: unset = "auto" (in a browser, kick a readback only if its last wait was short; never
+  // on Node / Deno), true, false.
+  _map(buf, offset = 0, size = undefined) { return mapRead(this.device, buf, offset, size, this.mapKick ?? "auto"); }
+
   async _readback(srcBuf, stageBuf, n) {
     const enc = this.device.createCommandEncoder();
     enc.copyBufferToBuffer(srcBuf, 0, stageBuf, 0, n * 4);
     this.device.queue.submit([enc.finish()]);
-    await stageBuf.mapAsync(GPUMapMode.READ);
+    await this._map(stageBuf);
     const out = Float32Array.from(new Float32Array(stageBuf.getMappedRange(), 0, n));
     stageBuf.unmap();
     return out;
@@ -577,7 +584,7 @@ export class DenseEngine {
     this._fwdPre = null;
     const job = pre && pre.pos === this.pos && pre.key === this._fwdKey() ? pre : this._encodeForward(this.pos);
     this.device.queue.submit([job.cb]);
-    const mapped = job.stage.mapAsync(GPUMapMode.READ);
+    const mapped = this._map(job.stage);
     if (this.encodeAhead !== false && this.pos + 1 < this.maxSeq) this._fwdPre = this._encodeForward(this.pos + 1);
     await mapped;
     const logits = Float32Array.from(new Float32Array(job.stage.getMappedRange(), 0, vocab));
@@ -816,7 +823,7 @@ export class DenseEngine {
     for (let l = 0; l < this.layers.length; l++) this._encodeLayerBatch(enc, l, basePos, n, exact);
     for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, this.stageXB, c * dim * 4, dim * 4);
     this.device.queue.submit([enc.finish()]);
-    await this.stageXB.mapAsync(GPUMapMode.READ, 0, n * dim * 4);
+    await this._map(this.stageXB, 0, n * dim * 4);
     const out = Float32Array.from(new Float32Array(this.stageXB.getMappedRange(0, n * dim * 4), 0, n * dim));
     this.stageXB.unmap();
     this.pos = basePos + n;
@@ -966,7 +973,7 @@ export class DenseEngine {
       enc.copyBufferToBuffer(this.logits, 0, this.stageLogitsN, c * vocab * 4, vocab * 4);
     }
     dev.queue.submit([enc.finish()]);
-    await this.stageLogitsN.mapAsync(GPUMapMode.READ, 0, n * vocab * 4);
+    await this._map(this.stageLogitsN, 0, n * vocab * 4);
     const all = new Float32Array(this.stageLogitsN.getMappedRange(0, n * vocab * 4)).slice();
     this.stageLogitsN.unmap();
     const out = [];

@@ -117,6 +117,7 @@ export const INIT = `(() => {
   const oMap = GPUBuffer.prototype.mapAsync;
   GPUBuffer.prototype.mapAsync = function (...a) {
     if (!window.__hpOn) return oMap.apply(this, a);
+    if (this.label === "map kick") { window.__gp.kicks = (window.__gp.kicks || 0) + 1; return oMap.apply(this, a); }   // engine/map_kick.js
     const r = { t0: T(), t1: 0, bytes: a[2] ?? this.size }; window.__gp.maps.push(r);
     return oMap.apply(this, a).then((v) => { r.t1 = T(); return v; });
   };

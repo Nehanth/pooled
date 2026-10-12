@@ -1886,11 +1886,17 @@ export class Qwen35Engine {
     return out;
   }
 
+  // every readback on a room's token path (hidden states, head, drafts, verify, prefill): mapAsync(READ) with the map
+  // kick (engine/map_kick.js). In Chrome a map behind running GPU work otherwise resolves on the GPU process's ~2 ms
+  // device-check timer. mapKick: unset = "auto" (in a browser, kick a readback only if its last wait was short; never
+  // on Node / Deno), true, false.
+  _map(buf, offset = 0, size = undefined) { return mapRead(this.device, buf, offset, size, this.mapKick ?? "auto"); }
+
   async _readback(srcBuf, stageBuf, n) {
     const enc = this.device.createCommandEncoder();
     enc.copyBufferToBuffer(srcBuf, 0, stageBuf, 0, n * 4);
     this.device.queue.submit([enc.finish()]);
-    await stageBuf.mapAsync(GPUMapMode.READ);
+    await this._map(stageBuf);
     const out = Float32Array.from(new Float32Array(stageBuf.getMappedRange(), 0, n));
     stageBuf.unmap();
     return out;
@@ -2894,7 +2900,7 @@ export class Qwen35Engine {
     for (let l = 0; l < this.layers.length; l++) { this._encodeLayerBatch(enc, l, basePos, n); if (this._cut) enc = await this._cutResolve(enc); }
     for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, this.stageXB, c * dim * 4, dim * 4);
     this.device.queue.submit([enc.finish()]);
-    await this.stageXB.mapAsync(GPUMapMode.READ, 0, n * dim * 4);
+    await this._map(this.stageXB, 0, n * dim * 4);
     const out = Float32Array.from(new Float32Array(this.stageXB.getMappedRange(0, n * dim * 4), 0, n * dim));
     this.stageXB.unmap();
     this.pos = basePos + n;
@@ -2950,7 +2956,7 @@ export class Qwen35Engine {
     p.end();
     for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.logits.buf, c * this.B.logits.stride, this.stageLogitsN, c * vocab * 4, vocab * 4);
     this.device.queue.submit([enc.finish()]);
-    await this.stageLogitsN.mapAsync(GPUMapMode.READ, 0, n * vocab * 4);
+    await this._map(this.stageLogitsN, 0, n * vocab * 4);
     const all = new Float32Array(this.stageLogitsN.getMappedRange(0, n * vocab * 4)).slice();
     this.stageLogitsN.unmap();
     const out = [];
@@ -3001,7 +3007,7 @@ export class Qwen35Engine {
     return op;
   }
   async _readTop(op) {
-    await this.stageTop.mapAsync(GPUMapMode.READ, 0, op.R * 4);
+    await this._map(this.stageTop, 0, op.R * 4);
     const c = readCands(new Uint32Array(this.stageTop.getMappedRange(0, op.R * 4)), 0, op.k);
     this.stageTop.unmap();
     return c;
@@ -3114,7 +3120,7 @@ export class Qwen35Engine {
     p.end();
     enc.copyBufferToBuffer(this.topBuf, 0, this.stageTopN, 0, n * op.R * 4);
     this.device.queue.submit([enc.finish()]);
-    await this.stageTopN.mapAsync(GPUMapMode.READ, 0, n * op.R * 4);
+    await this._map(this.stageTopN, 0, n * op.R * 4);
     const u = new Uint32Array(this.stageTopN.getMappedRange(0, n * op.R * 4));
     const out = [];
     for (let c = 0; c < n; c++) out.push(readCands(u, c * op.R, op.k));
@@ -3170,7 +3176,7 @@ export class Qwen35Engine {
     this.device.queue.submit([enc.finish()]);
     if (!wantLogits) return null;
     if (wantLogits === "argmax") {
-      await this.stageArg.mapAsync(GPUMapMode.READ);
+      await this._map(this.stageArg);
       const id = new Uint32Array(this.stageArg.getMappedRange())[0];
       this.stageArg.unmap();
       return id;
@@ -3228,7 +3234,7 @@ export class Qwen35Engine {
     const enc = this.device.createCommandEncoder();
     this._encodeDraftChain(enc, pos, K, this.stageArgK, 0, false);
     this.device.queue.submit([enc.finish()]);
-    await this.stageArgK.mapAsync(GPUMapMode.READ, 0, K * 16);
+    await this._map(this.stageArgK, 0, K * 16);
     const a = new Uint32Array(this.stageArgK.getMappedRange(0, K * 16));
     const drafts = Array.from({ length: K }, (_, k) => a[k * 4]);
     this.stageArgK.unmap();
@@ -3310,7 +3316,7 @@ export class Qwen35Engine {
     else for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.logits.buf, c * this.B.logits.stride, stage, c * vocab * 4, vocab * 4);
     q.submit([enc.finish()]);
     const bytes = tail + chainK * 16;
-    await stage.mapAsync(GPUMapMode.READ, 0, bytes);
+    await this._map(stage, 0, bytes);
     const m = stage.getMappedRange(0, bytes);
     const lgs = [];
     if (op) { const u = new Uint32Array(m, 0, tail / 4); for (let c = 0; c < n; c++) lgs.push(readCands(u, c * op.R, op.k)); }
@@ -3350,7 +3356,7 @@ export class Qwen35Engine {
     for (let c = 0; c < n; c++) enc.copyBufferToBuffer(this.B.x.buf, c * this.B.x.stride, stage, c * dim * 4, dim * 4);
     q.submit([enc.finish()]);
     const bytes = tail + K * 16;
-    await stage.mapAsync(GPUMapMode.READ, 0, bytes);
+    await this._map(stage, 0, bytes);
     const m = stage.getMappedRange(0, bytes);
     const hs = Float32Array.from(new Float32Array(m, 0, n * dim));
     const ids = new Uint32Array(m, tail, K * 4);
@@ -3398,7 +3404,7 @@ export class Qwen35Engine {
     enc.copyBufferToBuffer(this.x, 0, this.stageAhead, 16, dim * 4);
     dev.queue.submit([enc.finish()]);
     this._aheadAt = pos;
-    await this.stageAhead.mapAsync(GPUMapMode.READ, 0, 16 + dim * 4);
+    await this._map(this.stageAhead, 0, 16 + dim * 4);
     const m = this.stageAhead.getMappedRange(0, 16 + dim * 4);
     const cands = readCands(new Uint32Array(m, 0, 4), 0, op.k);
     const h = Float32Array.from(new Float32Array(m, 16, dim));
@@ -3608,7 +3614,7 @@ export class Qwen35Engine {
     if (!hs) enc.copyBufferToBuffer(this._xSave, 0, this.x, 0, D.dim * 4);
     dev.queue.submit([enc.finish()]);
     const st = this.stagePre;
-    const id = st.mapAsync(GPUMapMode.READ).then(() => { const v = new Uint32Array(st.getMappedRange())[0]; st.unmap(); return v; }, () => null);
+    const id = this._map(st).then(() => { const v = new Uint32Array(st.getMappedRange())[0]; st.unmap(); return v; }, () => null);
     this._preBusy = id;
     return id;
   }
@@ -3644,7 +3650,7 @@ export class Qwen35Engine {
     }
     enc.copyBufferToBuffer(this.argBuf, 0, this.stageArg, 0, 16);
     this.device.queue.submit([enc.finish()]);
-    await this.stageArg.mapAsync(GPUMapMode.READ);
+    await this._map(this.stageArg);
     id = new Uint32Array(this.stageArg.getMappedRange())[0];
     this.stageArg.unmap();
     return id;
@@ -3857,7 +3863,7 @@ export class Qwen35Engine {
       const st = this._stageW, enc = this.device.createCommandEncoder();
       for (let c = 0; c < m; c++) enc.copyBufferToBuffer(buf, c * stride, st, c * dim * 4, dim * 4);
       this.device.queue.submit([enc.finish()]);
-      await st.mapAsync(GPUMapMode.READ, 0, m * dim * 4);
+      await this._map(st, 0, m * dim * 4);
       out.set(new Float32Array(st.getMappedRange(0, m * dim * 4)), i * dim);
       st.unmap();
     };

@@ -2454,3 +2454,76 @@ the same tokens, and spec == plain == GPU sampling for:
 - cutSpec removes that cost only where layers almost never miss. Speculation should be re-tuned, and the planner
   should prefer fewer offloaded layers with bigger caches, once the Mac's hit rates for Flash from disk are known.
 - Not measured: the Mac (Metal; Chrome's polling there may differ) and the disk tier (#350) together with this branch.
+
+## 2026-10-11: map kick in browser rooms (branch feat/room-map-kick, on feat/offload-cut-latency), the Spark (GB10)
+
+Context: feat/offload-cut-latency (PR #351) added `engine/map_kick.js`: while a readback is pending, keep a mapAsync
+of an idle 16 B buffer in flight, because Chrome's GPU process otherwise notices finished GPU work only on a ~2 ms
+timer. This entry extends it to every readback on a room's per-token path and measures each one. Machine: DGX Spark,
+Chrome 131 (Playwright's Chromium, Vulkan, headless=new), Node 22 + Dawn (npm webgpu). Other agents used the GPU for
+most of the session (nvidia-smi 90-95% busy at times), so room tok/s moved ±30% between rounds of the same variant.
+Variants always ran interleaved on one load.
+
+**Readbacks per token in a room** (`tests/e2e/room_prof.mjs --kicks 0,1`, mapAsync timed in every tab; 35B MoE,
+2 devices, 20 + 20 layers; ms median; "GPU" = timestamped GPU time of the submits behind the map; contended GPU):
+
+| tab | readback | engine site | per token | wait | GPU |
+|---|---|---|---|---|---|
+| host, plain | 8208 B: head top-1 + next hidden (hostFuse) | `headAhead` | 1 | 13.8 | 9.5 |
+| worker, plain | 8192 B: the hop's hidden | `runHidden` → `_readback` | 1 | 13.9 | 6.4 |
+| host, spec | 64 B: K drafts | `_draftChain` | 0.21 | 5.1 | 2.8 |
+| host, spec | 32816 B: verify candidates + next drafts | `_verifyFused` | 0.21 | 21.8 | 17.2 |
+| worker, spec | 32768 B: 4 verify columns' hiddens | `runHiddenBatch` → `_runBatchAndRead` | 0.23 | 17.5 | 12.6 |
+| prefill (both) | 16 columns' hiddens | `prefillHidden`, `_runBatchAndRead` | per frame | | |
+
+Qwen3 1.7B (dense, 14 + 14 layers): host 8192 B (`embedRun`) + 607744 B logits (`headFromHidden`), worker 8192 B
+(`runHidden`); waits 21-25 ms against 17-21 ms GPU on the contended GPU. Other sites now routed the same way:
+`headFromHiddenIds` / `headBatch(Ids)` / `_readTop`, `_mtpRun`, `_hostTrunkFused`, `_mtpRefill` / `_takePre`,
+`forwardToken` (dense). room.js, room/pipeline.js and engine/generate.js call no mapAsync of their own. Left raw: one-off
+and debug reads (`_readParts`, `readMoeTrace`, `_sgmSelfTest`, `moeGroupStats`); a unit test enforces the list.
+
+**Each site alone, kick off / on interleaved call by call** (`tests/bench/cut_core.js` hopBench, `tab_cut.html?hop=60`
+and `HOP=60 cut_prof.js`; 35B resident; ms median of 60 calls each; Chrome run in a quiet spell, 12.1 ms
+submit → onSubmittedWorkDone for 40 layers):
+
+| call | Chrome off | Chrome on | Chrome auto | Dawn off | Dawn on |
+|---|---|---|---|---|---|
+| runHidden, 40 layers | 13.4 | 13.1 | 13.4 | 12.17 | 12.54 |
+| embedRun, 40 layers | 13.2 | 13.0 | 13.2 | 11.85 | 12.14 |
+| runHidden, 20 layers | 7.3 | 7.0 | 7.2 | 6.06 | 6.15 |
+| runHidden, 13 layers | 5.6 | 5.0 | 5.1 | 3.90 | 4.00 |
+| runHidden, 10 layers | 4.1 | 3.7 | 3.9 | 3.05 | 3.13 |
+| runHidden, 5 layers | 3.0 | 2.5 | 2.3 | 1.63 | 1.66 |
+| runHidden, 2 layers | 2.8 | 1.3 | 1.4 | 0.67 | 0.69 |
+| headFromHiddenIds (16 B) | 3.9 | 3.3 | 3.2 | 2.47 | 2.50 |
+
+Three other Chrome runs agree: short waits (2-13 layers, the head) gain 0.3-1.5 ms; a wait of 7 ms or more gains
+0-0.5 ms, sometimes loses 0.4. An independent review of #351 measured a 2-6 tok/s loss with the kick on Chrome's
+resident whole-token readback. On Dawn the kick costs 0.03-0.4 ms per readback and never helps.
+
+So the engine default for these sites is `mapKick` unset = **"auto"**: in a browser, kick a readback only if the same
+staging buffer's last readback took under 6 ms (`AUTO.ms`); never on Node / Deno. `mapKick = true / false` forces it.
+#351's own sites (the cut, `_regionLoad`, `forwardTokenIds`, `_specCut`, `forwardToken`) are unchanged.
+
+**Room tok/s** (`tests/e2e/room_latency.mjs --kicks 0,1,auto`, interleaved per answer, greedy, 64 tokens, chat / code
+prompt; median of 4 answers per cell; the GPU was shared with other agents' jobs):
+
+| 35B MoE | off | on | auto |
+|---|---|---|---|
+| solo, plain (chat / code) | 47.1 / 26.0 | 51.0 / 26.8 | 48.5 / 26.4 |
+| solo, spec | 43.0 / 41.3 | 45.8 / 41.0 | 37.6 / 40.8 |
+| 2 devices, plain | 20.4 / 41.5 | 20.9 / 41.0 | 21.0 / 36.9 |
+| 2 devices, spec | 43.4 / 42.8 | 43.8 / 38.0 | 43.4 / 43.1 |
+| 3 devices, plain | 24.3 / 19.4 | 27.9 / 20.6 | 24.8 / 19.3 |
+| 3 devices, spec | 21.0 / 48.4 | 20.7 / 50.7 | 21.3 / 49.4 |
+
+Qwen3 1.7B (off / on only): solo 42.6 / 41.6 plain, 2 devices 33.0 / 33.1, 3 devices 32.0 / 33.4 (chat plain).
+
+No room-level difference stands out of the noise: the per-hop gain at 2-3 devices on the 35B (13-20 layers a device,
+0.3-0.6 ms a hop, ~0.6 ms on the head) is 1-4% of a 25-50 ms token, below the run-to-run spread here. It should matter
+more with more devices (fewer layers each) and on small models where a hop's GPU work is ~1 ms; worth re-measuring on
+an idle GPU and on real two-machine rooms, and on Metal.
+
+**Exactness.** Every answer in every room run above has the same hash and token count with the kick off, on and auto
+(plain and speculative, 1-3 devices, both models). Dawn `tests/test_q38_bits.js MODEL=moe`: `c2d80d71 / a6111fb2`,
+spec == plain == GPU sampling, the same as #351.
