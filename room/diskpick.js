@@ -1,5 +1,5 @@
 // The picker for a model that keeps a copy on this device's disk (room/models.js DISK_COPY): its row's chip, the
-// three cost figures, the consent line, the Start label, the Advanced rows and the "Faster as devices join" chart.
+// three cost figures, the consent line, the Start label and the Advanced rows.
 // Pure: every word and number comes from the model's DISK_COPY entry, so another big model reuses all of it.
 // room.js puts the HTML in place; room/diskstore.js answers consent, stored size, delete and free disk.
 import { DISK_COPY } from "./models.js";
@@ -16,15 +16,18 @@ const num = (n) => String(+(+n).toFixed(1));
 // a GB amount from bytes: "92.0 GB", "640 MB"
 export const sizeText = (bytes) => bytes >= 2 ** 30 ? `${(bytes / 2 ** 30).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 2 ** 20))} MB`;
 
-// the row's chip: "177B · MoE · from disk"
+// the row's chip: "125B · MoE · from disk"
 export const rowChip = (m) => [m.params, m.arch, "from disk"].filter(Boolean).join(" · ");
+// its size in words: "125B (6B active)"
+export const paramsText = (m) => m.active ? `${m.params} (${m.active} active)` : m.params;
+// the row's tooltip: "Qwen3.8 Flash: 125B (6B active), MoE, its experts streamed from this device's disk"
+export const rowTitle = (m) => `${m.name}: ${[paramsText(m), m.arch].filter(Boolean).join(", ")}, its experts streamed from this device's disk`;
 
 // the measured speed over every room size: "7–12"
 export const speedRange = (m) => {
   const s = m.speeds || [];
   return s.length ? `${num(Math.min(...s.map((x) => x.lo)))}–${num(Math.max(...s.map((x) => x.hi)))}` : "";
 };
-const devicesText = (n) => `${n} device${n === 1 ? "" : "s"}`;
 
 // the three figures: [{ k, v, u, approx, note }]
 export function costFigures(m) {
@@ -70,20 +73,4 @@ export function advRowsHTML(m, { storedBytes = null } = {}) {
   return `<div class="dk-row"><span class="k">Disk to use</span><span class="v">${num(m.diskGB)} GB</span><span class="h">The most this browser stores. ${num(m.diskGB)} GB holds the whole model.</span></div>`
     + `<div class="dk-row"><span class="k">Memory for the expert cache</span><span class="v">~${num(m.memGB)} GB</span><span class="h">The experts it uses most stay in memory.</span></div>`
     + `<div class="dk-row"><span class="k">Stored copy</span><button type="button" class="dk-del"${storedBytes > 0 ? "" : " disabled"}>Delete stored copy</button><span class="h">${esc(storedText(storedBytes))}</span></div>`;
-}
-// The chart: one measured range per room size (solid to the low number, tint to the high one), the room's own size
-// marked, then a dashed row for one device more with "invite one". devices: WebGPU devices in the room now.
-export function speedRows(m, devices = 1) {
-  const s = m.speeds || [], top = Math.max(...s.map((x) => x.hi), 1) * 1.3;
-  const rows = s.map((x) => ({ label: devicesText(x.devices), range: `${num(x.lo)}–${num(x.hi)}`, on: x.devices === devices,
-    w: x.hi / top * 100, lo: x.lo / x.hi * 100 }));
-  const next = Math.max(devices, s.length ? s[s.length - 1].devices : 0) + 1;
-  return { rows, next: devicesText(next) };
-}
-export function chartHTML(m, devices = 1) {
-  const { rows, next } = speedRows(m, devices);
-  return `<h3 class="ap-k"><span>Faster as devices join</span><small>measured</small></h3>`
-    + rows.map((r) => `<div class="dk-bar${r.on ? " on" : ""}"><span>${esc(r.label)}</span><span class="t"><i style="--w:${r.w.toFixed(1)}%;--lo:${r.lo.toFixed(1)}%"></i></span><b>${esc(r.range)}</b></div>`).join("")
-    + `<div class="dk-bar next"><span>${esc(next)}</span><span class="t"></span><button type="button" class="dk-invite">invite one</button></div>`
-    + (m.measured ? `<p class="dk-note">Tokens per second, measured ${esc(m.measured)}.</p>` : "");
 }

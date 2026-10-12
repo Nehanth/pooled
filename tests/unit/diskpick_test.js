@@ -1,8 +1,8 @@
 // The picker's words for a model kept on disk (room/diskpick.js): every amount from room/models.js DISK_COPY, so a
-// future big model gets the same row, cost figures, consent, Start label and chart from its own entry.
+// future big model gets the same row, cost figures, consent and Start label from its own entry.
 import { DISK_COPY, MODELS, PICKER } from "../../room/models.js";
-import { diskCopyOf, rowChip, speedRange, costFigures, consentText, keptText, freeText, startLabel, advSummary, storedText,
-  speedRows, costHTML, consentHTML, advRowsHTML, chartHTML, sizeText } from "../../room/diskpick.js";
+import { diskCopyOf, rowChip, paramsText, rowTitle, speedRange, costFigures, consentText, keptText, freeText, startLabel, advSummary, storedText,
+  costHTML, consentHTML, advRowsHTML, sizeText } from "../../room/diskpick.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -18,7 +18,9 @@ Deno.test("DISK_COPY: Qwen3.8 Flash's entry is a real model, not in the default 
 
 Deno.test("diskpick: Qwen3.8 Flash's words, from its entry", () => {
   const m = DISK_COPY["qwen3.8-flash"];
-  eq(rowChip(m), "177B · MoE · from disk");
+  eq(rowChip(m), "125B · MoE · from disk", "the model card's size (roadmap/33), not the file's 177B");
+  eq(paramsText(m), "125B (6B active)");
+  eq(rowTitle(m), "Qwen3.8 Flash: 125B (6B active), MoE, its experts streamed from this device's disk");
   eq(speedRange(m), "7–12");
   eq(costFigures(m).map((f) => [f.k, f.v, f.u, !!f.approx, f.note]), [
     ["Stored once", "92", "GB", false, "Copied once, then starts fast"],
@@ -28,24 +30,17 @@ Deno.test("diskpick: Qwen3.8 Flash's words, from its entry", () => {
   eq(startLabel(m, false), "Allow 92 GB and start");
   eq(startLabel(m, true), "Start Qwen3.8 Flash");
   eq(advSummary(m), "92 GB disk · 20 GB memory");
-  const r2 = speedRows(m, 2), r1 = (n) => Math.round(n * 10) / 10;
-  eq(r2.rows.map((r) => [r.label, r.range, r.on, r1(r.w), r1(r.lo)]), [
-    ["1 device", "7–8.5", false, 54.5, 82.4],
-    ["2 devices", "11–12", true, 76.9, 91.7]], "the bars: the top speed at 1/1.3 of the track, solid to the low number");
-  eq(r2.next, "3 devices");
-  eq(speedRows(m, 1).next, "3 devices", "a room of one still invites the next size it has no measure for");
-  eq(speedRows(m, 4).next, "5 devices");
 });
 
 Deno.test("diskpick: another big model gets its own numbers, nothing of Flash's", () => {
   const m = { name: "Big One", params: "400B", arch: "MoE", diskGB: 210.5, memGB: 36, speeds: [{ devices: 2, lo: 3, hi: 4 }] };
   eq(rowChip(m), "400B · MoE · from disk");
+  eq(paramsText(m), "400B", "no active count: just the size");
   eq(costFigures(m).map((f) => f.v), ["210.5", "36", "3–4"]);
   eq(costFigures(m)[2].note, "Measured", "one measured size: no claim that it speeds up");
   eq(consentText(m), "This device keeps a copy of the model: up to 210.5 GB in this browser, one time. Delete it any time.");
   eq(startLabel(m, false), "Allow 210.5 GB and start");
-  eq(speedRows(m, 1).next, "3 devices");
-  for (const h of [costHTML(m), consentHTML(m), advRowsHTML(m), chartHTML(m)]) ok(!/Flash|92|177B/.test(h), h);
+  for (const h of [costHTML(m), consentHTML(m), advRowsHTML(m)]) ok(!/Flash|92|125B|6B active/.test(h), h);
 });
 
 Deno.test("diskpick: stored copy, free disk and the kept line", () => {

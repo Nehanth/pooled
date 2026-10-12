@@ -26,7 +26,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf } from "./room/models.js";
+import { MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -48,8 +48,8 @@ import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, STA
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { diskCopyOf, rowChip, starSVG } from "./room/diskpick.js";
-import { showDiskPick, initDiskPick, agreeOnStart, sparkleFrom } from "./room/diskpick-ui.js";
+import { diskCopyOf, rowChip, rowTitle, starSVG } from "./room/diskpick.js";
+import { showDiskPick, initDiskPick, agreeOnStart } from "./room/diskpick-ui.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
@@ -468,9 +468,10 @@ let wasReady = false;
 // someone picks a model by hand, the select follows the largest model the room can run.
 let modelTouched = false;
 const shortName = (key) => diskCopyOf(key)?.name || (MODELS[key]?.label || key).split("\u00b7")[0].trim();
-// the picker offers three models; ?dev=1 (and the local test rooms) offer every one in room/models.js
+// the picker's rows: the three models, and with ?dev=1 (and the local test rooms) the models kept on disk
+// (room/models.js DISK_COPY) too. The others stay in the (dev) select for tests, never in the rows.
 const DEV = document.documentElement.classList.contains("dev");
-const PICK_NEED = DEV ? NEED_GB : Object.fromEntries(PICKER.map((k) => [k, NEED_GB[k]]));
+const PICK_NEED = Object.fromEntries([...PICKER, ...(DEV ? Object.keys(DISK_COPY) : [])].map((k) => [k, NEED_GB[k]]));
 function addModelOption(key) {
   const sel = $("ai-model");
   if (!MODELS[key] || [...sel.options].some((o) => o.value === key)) return;
@@ -513,34 +514,34 @@ function fitLadder(pledged) {
     return f ? { ...x, ok: f.fit.fits, short: f.shortGB, f } : x;
   });
 }
+let ladderHTML = "";
 function renderLadder(pledged, rows = fitLadder(pledged)) {
   const el = $("ai-ladder"); if (!el) return;
   const none = !(pledged > 0);
   // a radio group: one tab stop (the picked row), arrows move the pick. The rows are re-rendered
   // on every change, so the focus follows the picked row when it was in the group.
   const had = el.contains(document.activeElement);
-  el.innerHTML = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + rows.map((x) => {
+  const html = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + rows.map((x) => {
     // fits only at the model's fallback context: say which, with what it needs there
     const back = x.ok && x.f?.fellBack;
     const gb = `<span class="nd">${back ? `${NEED_MIN_GB[x.key] ?? ""} GB · ${ctxK(x.f.ctx)}` : `${NEED_GB[x.key] ?? ""} GB`}</span>`;
     const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">${x.short} GB short</span>`;
     // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
     const sel = !none && x.key === $("ai-model").value;
-    // a model kept on disk (room/diskpick.js): the ✦ before its name, its size and where it runs from as the chip
+    // a model kept on disk (room/diskpick.js): the ✦ before its name, its size and where it runs from as the chip;
+    // picked, the row takes the Code tab's selected look (black, a soft blue glow, stars twinkling: site/js/sparkle.js)
     const dk = diskCopyOf(x.key);
-    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${x.ok ? "" : ` title="${esc(x.f?.note || "Invite a device to fit this")}"`}><span class="rn">${starSVG("rx")}${esc(dk.name)}</span><span class="fig"><span class="dkc">${esc(rowChip(dk))}</span></span></button>`;
+    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}" title="${esc(x.ok ? rowTitle(dk) : x.f?.note || "Invite a device to fit this")}"><span class="rn">${starSVG("rx")}${esc(dk.name)}</span><span class="fig"><span class="dkc">${esc(rowChip(dk))}</span></span></button>`;
     return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${back ? ` title="${esc(ctxShortNote(shortName(x.key), x.f.ctx, x.f.want))}"` : x.ok ? "" : ` title="${esc(x.f?.note || (giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"))}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
+  // the same rows: leave them be (the twinkling stars keep their rhythm through the room's updates)
+  if (html === ladderHTML && el.childElementCount) return;
+  el.innerHTML = ladderHTML = html;
+  el.querySelectorAll(".rung.disk").forEach((b) => window.pooledTwinkles?.(b));
   if (!el.querySelector(".rung.sel")) el.querySelector(".rung")?.setAttribute("tabindex", "0");
   if (had) el.querySelector('.rung[tabindex="0"]')?.focus({ preventScroll: true });
 }
-function pickRung(b) {
-  if (!b || $("ai-model").disabled) return;
-  const was = $("ai-model").value;
-  setModelValue(b.dataset.k); modelTouched = true; updateCluster();
-  // picking a disk model by hand: its ✦ bursts once (never on a re-render)
-  if (was !== b.dataset.k && diskCopyOf(b.dataset.k)) sparkleFrom($("ai-ladder").querySelector(`.rung.sel[data-k="${b.dataset.k}"] .rx`));
-}
+function pickRung(b) { if (!b || $("ai-model").disabled) return; setModelValue(b.dataset.k); modelTouched = true; updateCluster(); }
 $("ai-ladder").addEventListener("click", (e) => pickRung(e.target.closest(".rung")));
 $("ai-ladder").addEventListener("keydown", (e) => {
   const rs = [...$("ai-ladder").querySelectorAll(".rung")], i = rs.indexOf(e.target.closest(".rung"));
@@ -610,13 +611,13 @@ function updateNeed(pledged) {
   $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
     : note;
   if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
-  showDiskPick($("ai-model").value, row?.f ? row.f.devs.length : 1);
+  showDiskPick($("ai-model").value);
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
 }
 $("ai-model").addEventListener("change", () => { modelTouched = true; updateCluster(); });
 // a disk model's "Not now" lets go of it (back to the model the room would pick), "invite one" opens the invite
-initDiskPick({ notNow: () => { modelTouched = false; updateCluster(); $("ai-ladder").querySelector(".rung.sel")?.focus({ preventScroll: true }); }, invite: () => openShare() });
+initDiskPick({ notNow: () => { modelTouched = false; updateCluster(); $("ai-ladder").querySelector(".rung.sel")?.focus({ preventScroll: true }); } });
 function updateCluster() {
   const all = [myMeta, ...[...members.values()].map(m => m.meta).filter((m) => !m?.api)];
   const apis = members.size + 1 - all.length;
