@@ -129,6 +129,8 @@ try {
     if (!g) throw new Error("no golden case " + name);
     const n = Math.min(g.ids.length, +env("MAXNEW", g.ids.length)), t = Date.now();
     const r = await page.evaluate(([ids, n]) => window.__pooledGen(ids, n), [g.prompt, n]);
+    log(`${name}: raw ${JSON.stringify({ ...r, tokens: r.tokens?.length, summary: undefined })}`);
+    const fx = (v, d = 2) => (Number.isFinite(v) ? +v.toFixed(d) : null);
     const ids = r.tokens;
     let diff = ids.findIndex((x, i) => i < n && x !== g.ids[i]);
     if (diff < 0 && ids.length < n) diff = ids.length;
@@ -136,10 +138,10 @@ try {
     const verdict = diff < 0 ? "MATCH" : tieOk ? "TIE" : "MISMATCH";
     if (verdict === "MISMATCH") fail++;
     const e = r.experts, hit = e && e.lookups ? e.hits / e.lookups : null;
-    out.cases[name] = { verdict, n, diff, bits: r.bits, tps: +r.tps.toFixed(2), prefillS: +(r.tPre / 1000).toFixed(1), wallS: +((Date.now() - t) / 1000).toFixed(1), prompt: g.prompt.length,
-      ...(e ? { hostExperts: { ...e, hitRate: +hit.toFixed(3), diskReadsPerTok: +(e.diskReads / (n + g.prompt.length)).toFixed(1), t1Hits: e.t1Hits } } : {}),
+    out.cases[name] = { verdict, n, diff, bits: r.bits, tps: fx(r.tps), prefillS: fx(r.tPre / 1000, 1), wallS: +((Date.now() - t) / 1000).toFixed(1), prompt: g.prompt.length,
+      ...(e ? { hostExperts: { ...e, hitRate: fx(hit, 3), diskReadsPerTok: +(e.diskReads / (n + g.prompt.length)).toFixed(1), t1Hits: e.t1Hits } } : {}),
       ...(diff >= 0 ? { got: ids.slice(Math.max(0, diff - 2), diff + 4), want: g.ids.slice(Math.max(0, diff - 2), diff + 4) } : {}) };
-    log(`${name}: ${verdict}${diff >= 0 ? ` at ${diff}` : ` (${n} ids)`} · bits ${r.bits} · prompt ${g.prompt.length} tok in ${(r.tPre / 1000).toFixed(1)} s · decode ${r.tps.toFixed(2)} tok/s${hit != null ? ` · host pool hits ${(100 * hit).toFixed(1)}%, ${e.diskReads} disk reads, ${(e.diskWaitMs / 1000).toFixed(1)} s waiting` : ""}`);
+    log(`${name}: ${verdict}${diff >= 0 ? ` at ${diff}` : ` (${n} ids)`} · bits ${r.bits} · prompt ${g.prompt.length} tok in ${fx(r.tPre / 1000, 1)} s · decode ${fx(r.tps)} tok/s${hit != null ? ` · host pool hits ${(100 * hit).toFixed(1)}%, ${e.diskReads} disk reads, ${(e.diskWaitMs / 1000).toFixed(1)} s waiting` : ""}`);
     if (r.summary) out.hostSummary = r.summary;
     if (worker?.ai?.experts) { const s = worker.ai.experts.summary(); out.cases[name].nodeExperts = s; log("[node] " + s); }
   }
