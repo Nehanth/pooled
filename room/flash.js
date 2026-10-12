@@ -97,6 +97,9 @@ export class FlashRoomEngine {
   }
 
   reset() { this.core.reset(); }
+  // what the GPU device does not free: the n-gram table's open files or OPFS workers (room-node shard.js, room/model-loader.js).
+  // The holder calls it when it drops the engine, before or after destroying the device
+  close() { const p = this.core.close?.(); this.core.close = null; return p; }
 
   // ---- checkpoints (Qwen35Engine's contract: room/pipeline.js ckpt*, room/ckpt-store.js)
   // A state: { sig, pos, parts: [ArrayBuffer] }: the core's GPU parts, then (with a PLE layer) the n-gram
@@ -186,6 +189,13 @@ const copyable = (b) => b?.usage == null || !!(b.usage & U.COPY_SRC);
 export function qwen4expCore(e) {
   const dev = e.device, cfg = e.cfg, HD = cfg.hDim;
   const kvRow = cfg.nKVHeads * cfg.headDim * 4;   // f32 K (or V) per position
+  // One step's ops: the layers' halves fused as forwardToken runs them (each HC combine folded into the next site),
+  // laid out without the head, so the last combine stays in and B.R is the finished residual (forwardToken's own
+  // lists fold the last layer's combine into the head's site when the engine has the head). Built on first use.
+  // Without _halfOps (an engine before the fused sites): the per-half lists, which compute the same R.
+  let ops = null;
+  const stepOps = () => ops ||= e._halfOps ? e._halfOps(e.layers.flatMap((l) => l.halves), true).flat()
+    : e.layers.flatMap((l) => [...l.attnOps, ...l.ffnOps]);
   return {
     device: dev, dims: e.dims, lo: e.lo, hi: e.hi, hasEmbed: e.hasEmbed, hasHead: e.hasHead, maxSeq: e.maxSeq,
     get pos() { return e.pos; }, set pos(v) { e.pos = v; },
@@ -196,7 +206,7 @@ export function qwen4expCore(e) {
       if (hidden) dev.queue.writeBuffer(e.B.R, 0, hidden);
       else if (!e.hasEmbed) throw new Error("qwen4exp: no embedding here: a worker's step needs the residual");
       const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-      for (const l of e.layers) { e._encode(pass, l.attnOps); e._encode(pass, l.ffnOps); }
+      e._encode(pass, stepOps());
       pass.end();
       enc.copyBufferToBuffer(e.B.R, 0, e.hStage, 0, HD * 4);
       dev.queue.submit([enc.finish()]);
@@ -220,6 +230,8 @@ export function qwen4expCore(e) {
       return out;
     },
     reset() { e.reset(); },
+    // the n-gram table's reader (open files, OPFS workers), when the loader gave it a close
+    close() { return e.ngram?.close?.(); },
     stateParts(pos) {
       const parts = [];
       for (const l of e.layers) {

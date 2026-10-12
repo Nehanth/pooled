@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
 import { parseLendArgs, parseGb, detectMemory, memoryRule, ramRule, afterCheck, formatStatus, tpsFromStats, explainError, versionFromBye,
-  hostable, ctxNote, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST, needsRoom, loadText } from "./lend.js";
+  hostable, devHint, ctxNote, autoRedeal, fmtGb, fmtCode, passCounter, deviceName, UsageError, HELP_JOIN, HELP_HOST, needsRoom, loadText } from "./lend.js";
 import { dawnLoader, quietLoader, driverLog } from "./dawn.js";
 import { cleanText } from "./common.js";
 import { roomCodeFrom, roomKeyFrom } from "./room.js";
@@ -397,7 +397,7 @@ async function runHost(opts, out, prepared = null) {
   const p0 = prepared || await prepare(opts, out);
   const { rn, loader, adapterName, mem, ram } = p0;
   let rule = p0.rule;
-  if (!hostable(rn.MODELS).includes(opts.model)) throw new UsageError(`unknown model "${opts.model}"; one of: ${hostable(rn.MODELS).join(", ")}`);
+  if (!hostable(rn.MODELS).includes(opts.model)) throw new UsageError(devHint(rn.MODELS, opts.model) || `unknown model "${opts.model}"; one of: ${hostable(rn.MODELS).join(", ")}`);
   // --here: lend what the model needs on this computer alone and start; --pool: spread over the room
   if (opts.mode === "here") {
     const { hereGB, hereWhy, modelNeedGB, modelFallback } = await import("./hostui.js");
@@ -610,7 +610,7 @@ export async function lendMain(cmd, argv, { version = "" } = {}) {
     const keys = rn ? hostable(rn.MODELS) : null;
     if (keys && !keys.includes(opts.model)) {
       const m = resolveModel(opts.model, keys);
-      if (m.error) { process.stderr.write(`pooled host: ${m.error}; one of: ${keys.join(", ")}\n`); return 2; }
+      if (m.error) { process.stderr.write(`pooled host: ${devHint(rn.MODELS, opts.model) || `${m.error}; one of: ${keys.join(", ")}`}\n`); return 2; }
       opts.model = m.key;
     }
   }

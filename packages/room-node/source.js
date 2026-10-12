@@ -16,7 +16,11 @@ export const LOCAL = {
   "Qwen_Qwen3.6-35B-A3B-Q4_0.gguf": "q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf",
   "Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf": "q35-122b/Qwen_Qwen3.5-122B-A10B-Q4_0-00001-of-00002.gguf",
   "Qwen_Qwen3.5-122B-A10B-Q4_0-00002-of-00002.gguf": "q35-122b/Qwen_Qwen3.5-122B-A10B-Q4_0-00002-of-00002.gguf",
+  // Qwen3.8-Flash-Next (tests/test_q38flash.js reads models/q38flash)
+  ...Object.fromEntries(["00001", "00002", "00003"].map((n) => [`Qwen3.8-Flash-Next-Q4_0-${n}-of-00003.gguf`, `q38flash/Qwen3.8-Flash-Next-Q4_0-${n}-of-00003.gguf`])),
 };
+// the model kinds a room node loads (shard.js): dense GGUF, Qwen3.5 / 3.6 (qwen35), Qwen3.8-Flash-Next (qwen4exp)
+export const NODE_KINDS = new Set(["gguf", "qwen35", "qwen4exp"]);
 
 // A split GGUF (room/models.js MODELS[key].shards: llama.cpp's gguf-split, e.g. the 122B in two files) is read as one
 // model: the metadata is the first file's, every file lists its own tensors (offsets within that file), so each
@@ -24,7 +28,7 @@ export const LOCAL = {
 // (<modelDir>/<key>/<file>, as `pooled pull` keeps them); a model is local only when every file is.
 export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || null, fetch: fetchImpl = globalThis.fetch, concurrency = 6, capBytes = 512 * MiB } = {}) {
   const M = MODELS[modelKey];
-  if (!M || (M.kind !== "gguf" && M.kind !== "qwen35")) throw new Error(`unsupported model ${modelKey}`);
+  if (!M || !NODE_KINDS.has(M.kind)) throw new Error(`unsupported model ${modelKey}`);
   const urls = M.shards?.length ? M.shards : [M.gguf];
   // `pooled pull`'s layout (<dir>/<model key>/<file>, cli/lib/cache.js) first, then the test layout
   const localOf = (url) => { const base = url.split("/").pop(); return [path.join(modelDir, modelKey, base), LOCAL[base] && path.join(modelDir, LOCAL[base])].find((f) => f && fs.existsSync(f)) || null; };
@@ -37,15 +41,7 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
   const files = urls.map((url, i) => {
     const f = { url, fh: null, pre: null, local: isLocal ? locals[i] : null };
     f.readAt = f.local
-      ? async (off, len) => {
-        f.fh ||= await fs.promises.open(f.local, "r");
-        const out = new Uint8Array(len);
-        let o = 0;
-        while (o < len) { const { bytesRead } = await f.fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
-        if (o !== len) throw new Error(`short read in ${f.local} at ${off}`);
-        count(len);
-        return out;
-      }
+      ? async (off, len) => { const out = await readLocal(f, off, len); count(len); return out; }
       : async (off, len) => (f.pre && (await f.pre.read(off, len))) || fetchRange(fetchImpl, url, off, off + len, count);
     return f;
   });
@@ -67,6 +63,8 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
     // every file's local path in shard order when the whole model is local (expert_disk.js reads experts from them), else null
     localPaths: isLocal ? [...locals] : null,
     readAt: files[0].readAt,   // the first file (ckptdisk.js modelFileId)
+    // every file's URL in shard order (the n-gram table's HTTP reader when the model is not local: shard.js)
+    urls: [...urls],
     bytesOf: (info) => fileOf(info).readAt(info.byteOffset, info.byteLength),
     // the tensors this load will read, in the loader's order ([{ byteOffset, byteLength, shard? }]): streaming,
     // they are fetched ahead of the loader in large ranges, several at once; from disk, only counted
@@ -90,6 +88,16 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
     tokJson: () => (M.tok ? sideFile(M.tok) : null),
     async close() { for (const f of files) { f.pre?.close(); f.pre = null; try { await f.fh?.close(); } catch {} f.fh = null; } },
   };
+}
+
+// one positional read from a model file's local copy (its handle opened on first use, closed by close())
+async function readLocal(f, off, len) {
+  f.fh ||= await fs.promises.open(f.local, "r");
+  const out = new Uint8Array(len);
+  let o = 0;
+  while (o < len) { const { bytesRead } = await f.fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
+  if (o !== len) throw new Error(`short read in ${f.local} at ${off}`);
+  return out;
 }
 
 const MiB = 2 ** 20;

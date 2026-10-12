@@ -46,7 +46,9 @@ test("env: the pledge is what was asked, else half the largest buffer, 1..64 GB"
   assert.equal(pledgeFor(12, 100), 12);
   assert.equal(pledgeFor(null, 30), 15);
   assert.equal(pledgeFor(0, 0), 1);
-  assert.equal(pledgeFor(500, 0), 64);
+  assert.equal(pledgeFor(500, 0), 128);
+  assert.equal(pledgeFor(90, 0), 90);   // asked: past 64 (a big unified-memory machine)
+  assert.equal(pledgeFor(null, 400), 64);   // the default stays at 64
 });
 
 test("dealPlan: layers by pledge, an iPhone held to 1 GB, phones left out when computers hold the model", () => {
@@ -355,7 +357,7 @@ test("setPledge: a host tells the room, a device tells its host; the host's hell
   assert.equal(h.setPledge(12), 12);
   assert.equal(h.meta.contribGB, 12);
   assert.deepEqual(msgs(h, "p1", "pledge"), [{ t: "pledge", gb: 12 }]);
-  assert.equal(h.setPledge(500), 64, "at most 64 GB per device");
+  assert.equal(h.setPledge(500), 128, "at most 128 GB per device (env.js pledgeFor)");
   const d = fakeNode({ host: false, name: "node-abc" });
   d.ai.hostId = "pooled-room-TEST";
   d.addPeer("pooled-room-TEST", "host");
