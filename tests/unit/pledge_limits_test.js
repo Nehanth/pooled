@@ -7,7 +7,7 @@
 // "fit" all 28 layers; and when pledges fell short both splits spread the rest over everyone.
 import { planSplit, planForSpeed, roomFit, dealRoom, layerCaps, shortNote, shortBy, gbUp } from "../../room/plan.js";
 import { roomBytes, hostHeldBytes, SHAPE, NEED_GB, NEED_MIN_GB, PICKER, CTX, maxSeqFor, pickCtx } from "../../room/models.js";
-import { pledgeGB } from "../../room/pledge.js";
+import { pledgeGB, maxPledgeGB, DESK_MAX_GB, PLEDGE_MAX_GB } from "../../room/pledge.js";
 import { lendStatus } from "../../room/compute.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
@@ -227,4 +227,17 @@ Deno.test("lend screen: a device holding no layers says why", () => {
   eq(lendStatus({ ...base, phase: "loading", out: "unneeded", phone: true }).title, "Not needed");
   // holding layers: what it holds of what it pledged
   eq(lendStatus({ phase: "serving", lo: 21, hi: 28, model: "Qwen3 1.7B", held: 0.786, pledge: 1 }).sub, "Layers 22–28 · 0.8 of 1 GB · Qwen3 1.7B");
+});
+
+Deno.test("pledge cap: past 64 GB only for Qwen3.8-Flash-Next; every other model (and an unknown one) 64", () => {
+  eq([DESK_MAX_GB, PLEDGE_MAX_GB], [64, 128]);
+  eq(maxPledgeGB("qwen3.8-flash"), 128);
+  for (const k of ["qwen3.6-35b-moe", "qwen3.5-122b-moe", "qwen3.8-27b", "qwen3-1.7b", "no-such-model", null, undefined]) eq(maxPledgeGB(k), 64, String(k));
+  const node = (gb) => ({ contribGB: gb, webgpu: true });
+  for (const k of ["qwen3.6-35b-moe", "qwen3.5-122b-moe"]) { eq(pledgeGB(node(100), Infinity, k), 64, k); eq(pledgeGB(node(128), Infinity, k), 64, k); eq(pledgeGB(node(40), Infinity, k), 40, k); }
+  eq(pledgeGB(node(100)), 64, "no model: 64, as before #356");
+  eq(pledgeGB(node(100), Infinity, "qwen3.8-flash"), 100);
+  eq(pledgeGB(node(500), Infinity, "qwen3.8-flash"), 128);
+  eq(pledgeGB(node(100), 30, "qwen3.8-flash"), 30, "a host's lowered share still wins");
+  eq(pledgeGB({ contribGB: 100, webgpu: true, ua: "iPhone" }, Infinity, "qwen3.8-flash"), 1, "phones keep their cap");
 });

@@ -51,6 +51,23 @@ test("env: the pledge is what was asked, else half the largest buffer, 1..64 GB"
   assert.equal(pledgeFor(null, 400), 64);   // the default stays at 64
 });
 
+test("dealPlan: a pledge past 64 GB counts only for Qwen3.8-Flash-Next (--gb max / --gb 100 on a GB10)", () => {
+  const big = (gb, model) => RoomNode.dealPlan({ L: 48, layerBytes: 1.5 * GB, embedBytes: 1 * GB, self: { name: "spark", meta: { contribGB: gb } }, peers: [], model });
+  for (const model of ["qwen3.6-35b-moe", "qwen3.5-122b-moe", null]) {
+    for (const gb of [100, 120, 128]) {
+      const p = big(gb, model);
+      assert.equal(p.haveGB, 64, `${model} --gb ${gb}: counts 64`);
+      assert.equal(p.fit.fits, false, `${model}: 73 GB does not fit one device's 64`);
+    }
+  }
+  const f = big(100, "qwen3.8-flash");
+  assert.equal(f.haveGB, 100); assert.equal(f.fit.fits, true, "Flash: one device holds it alone");
+  assert.equal(big(128, "qwen3.8-flash").haveGB, 128);
+  // the context pick counts the same
+  const self = { name: "spark", meta: { contribGB: 100 } };
+  assert.equal(RoomNode.ctxPick("qwen3.5-122b-moe", { want: 4096, self }).fits === true, false);
+});
+
 test("dealPlan: layers by pledge, an iPhone held to 1 GB, phones left out when computers hold the model", () => {
   const self = { name: "spark", meta: { contribGB: 8 } };
   const L = 28, layerBytes = 0.06 * GB, embedBytes = 0.6 * GB;

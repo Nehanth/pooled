@@ -58,7 +58,7 @@ import { validateApiAsk, apiPrompt, apiRun, AnswerCache, helloMeta, pieceDecoder
 import { tokenTexts } from "../../harness/model-common.js";
 import { uniqueName, PING_MS, lastHeard, isSilentGone, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
-import { pledgeGB, afterLoadDeath, offloadFor, ngramFor } from "../../room/pledge.js";
+import { pledgeGB, afterLoadDeath, offloadFor, ngramFor, PLEDGE_MAX_GB } from "../../room/pledge.js";
 import { localModels } from "./source.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes, qwen4expConfig, qwen4expShardBytes } from "../../engine/gguf.js";
 import { guardChunks } from "../../cli/lib/room.js";
@@ -963,7 +963,7 @@ export class RoomNode extends EventEmitter {
   // holds besides), else the model's fallback when they hold it there (the 1.7B: 8k for 16k); an asked
   // --ctx stays. -> { ctx, want, fits, fellBack, note } (note: what the room says when it fell back)
   static ctxPick(modelKey, { want, ask = 0, kv = "f16", self, peers = [], shareCap = new Map() }) {
-    const pl = [self, ...peers].map((d) => pledgeGB(d.meta, shareCap.get(d.name)) * 2 ** 30);
+    const pl = [self, ...peers].map((d) => pledgeGB(d.meta, shareCap.get(d.name), modelKey) * 2 ** 30);
     const pick = pickCtx(modelKey, { want, ask, fitsAt: (c) => {
       const rb = roomBytes(modelKey, c, kv === "q8" ? "q8" : "f16");
       return !rb || roomFit(rb.L, pl, rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.experts || rb.expertBytes, modelKey)).fits;
@@ -985,7 +985,7 @@ export class RoomNode extends EventEmitter {
   // ngram: the model's n-gram table (room/models.js ngramOf: Qwen3.8-Flash-Next),
   // or null: the device dealt its layer must have it on disk (room/plan.js placeNgram); the plan then has `ngram`.
   static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null, model = null, ngram = null }) {
-    const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name)) * 2 ** 30;
+    const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name), model) * 2 ** 30;   // (64 GB a device, 128 for Flash)
     const per = fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
     const pledges = [pledgeOf(self.meta, self.name), ...peers.map((p) => pledgeOf(p.meta, p.name))];
     const off = offloadFor([self.meta, ...peers.map((p) => p.meta)], experts || expertBytes || fitBytes?.experts || fitBytes?.expertBytes || 0, model);
@@ -1176,7 +1176,7 @@ export class RoomNode extends EventEmitter {
   // lend another amount (GB), as the room page's stepper does: a device tells its host ("pledge"), a
   // host tells the room; the next deal uses it
   setPledge(gb) {
-    const v = Math.min(128, Math.max(0.5, +gb || 0));   // (env.js pledgeFor's most)
+    const v = Math.min(PLEDGE_MAX_GB, Math.max(0.5, +gb || 0));   // (env.js pledgeFor's most; the deal counts at most room/pledge.js maxPledgeGB(model))
     this.pledgeGB = v;
     if (this.meta) this.meta.contribGB = v;
     if (this.isHost) { this.broadcast({ t: "pledge", gb: v }); this.emit("members"); }
@@ -1289,7 +1289,7 @@ export class RoomNode extends EventEmitter {
     if (!d.died?.loading || !ai.plan.has(name) || !ai.chainNames.includes(name)) return false;
     const deaths = (ai.loadDeaths.get(name) || 0) + 1;
     ai.loadDeaths.set(name, deaths);
-    const r = afterLoadDeath({ layers: ai.layersN?.[name] || 1, layerGB: ai.layerGB || 0.5, gb: pledgeGB(this.conns.get(newId)?.meta, ai.shareCap.get(name)), deaths });
+    const r = afterLoadDeath({ layers: ai.layersN?.[name] || 1, layerGB: ai.layerGB || 0.5, gb: pledgeGB(this.conns.get(newId)?.meta, ai.shareCap.get(name), ai.model), deaths });
     if (r.drop) { ai.dropped.add(name); this.sendTo(newId, { t: "ai-share", drop: true, why: "This device's browser closed the tab while it loaded its layers, so the room runs without it. You can still ask questions." }); }
     else { ai.shareCap.set(name, r.gb); this.sendTo(newId, { t: "ai-share", gb: r.gb, why: `This device's browser closed the tab while it loaded its layers, so it now holds less of the model (${r.gb} GB).` }); }
     setTimeout(() => this.redeal(`${name}'s tab was killed while it loaded its layers: re-dealing ${r.drop ? "without it" : `with ${r.gb} GB for it`}`).catch((err) => { if (!err.short) this.log("re-deal failed: " + err.message); }), 500);
@@ -1751,7 +1751,7 @@ export class RoomNode extends EventEmitter {
   status() {
     const ai = this.ai;
     const devs = this.hosting()
-      ? [{ name: this.name, gb: this.meta?.contribGB || 0, self: true }, ...this.gpuPeers().map((id) => { const e = this.conns.get(id); return { name: e?.name || id, gb: +pledgeGB(e?.meta) || 0 }; })]
+      ? [{ name: this.name, gb: this.meta?.contribGB ? pledgeGB(this.meta, Infinity, ai.model) : 0, self: true }, ...this.gpuPeers().map((id) => { const e = this.conns.get(id); return { name: e?.name || id, gb: +pledgeGB(e?.meta, Infinity, ai.model) || 0 }; })]
       : (this.members || []).filter((m) => m.meta?.webgpu && !m.meta?.api).map((m) => ({ name: m.name, gb: +m.meta?.contribGB || 0 }));
     return { code: this.code, name: this.name, hosting: this.hosting(), role: ai.role, model: ai.model, online: !!ai.online, degraded: !!ai.degraded,
       short: ai.short || null, range: ai.range, devices: devs, pledgedGB: +devs.reduce((a, d) => a + d.gb, 0).toFixed(1),

@@ -124,7 +124,9 @@ export async function prepare(opts, out) {
     run: (cmd, args) => execFileSync(cmd, args, { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] }),
     read: (p) => readFileSync(p, "utf8"), totalmem: os.totalmem, freemem: os.freemem,
   });
-  let rule = memoryRule(mem, opts.gb, { maxBufGB: adapter.limits.maxBufferSize / 2 ** 30 });
+  // an explicit pledge goes past 64 GB only for Qwen3.8-Flash-Next (room/pledge.js maxPledgeGB); a join's model is not known yet
+  const capGB = opts.cmd === "host" && opts.modelGiven && rn.maxPledgeGB ? rn.maxPledgeGB(opts.model) : undefined;
+  let rule = memoryRule(mem, opts.gb, { maxBufGB: adapter.limits.maxBufferSize / 2 ** 30, capGB });
   if (rule.low) throw Object.assign(new Error(rule.why), { type: "low-memory" });
   // a discrete GPU's own memory: allocate it for a moment to make sure it is there. Not on unified
   // memory: the OS's numbers are the memory itself there, and touching 64 GB of it takes ~20 s (GB10)
@@ -406,7 +408,7 @@ async function runHost(opts, out, prepared = null) {
   if (opts.mode === "here") {
     const { hereGB, hereWhy, modelNeedGB, modelFallback } = await import("./hostui.js");
     const lib = { MODELS: rn.MODELS, NEED_GB: rn.NEED_GB, roomBytes: rn.roomBytes, roomFit: rn.roomFit, shortNote: rn.shortNote, shortBy: rn.shortBy, gbUp: rn.gbUp, pledgeGB: rn.pledgeGB, nodeCtxFor: rn.nodeCtxFor, pickCtx: rn.pickCtx, ctxShortNote: rn.ctxShortNote, offloadFor: rn.offloadFor };
-    const max = Math.max(rule.gb, memoryRule(mem, { max: true }).gb || rule.gb);
+    const max = Math.max(rule.gb, memoryRule(mem, { max: true }, { capGB: rn.maxPledgeGB(opts.model) }).gb || rule.gb);
     // a MoE model this GPU can't hold whole: with --ram (a discrete GPU's default), its experts in RAM, lending the rule's GB
     // --disk: the model's files will be here (pulled below), unless --no-pull streams a model that is not
     const hereDisk = !!disk?.on && !(opts.noPull && !modelState(opts.modelDir, opts.model, rn.MODELS, rn.FILES, rn.LOCAL).pulled);

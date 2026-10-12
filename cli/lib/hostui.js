@@ -60,7 +60,7 @@ export function needWords(lib, key, ctxAsk = 0, needGB = modelNeedGB(lib, key, c
 // with the layers it holds that way when the pledges alone fall short (room/plan.js roomFit); offload: it fits so.
 // -> { fits, needGB, minGB, haveGB, shortGB, note, ctx, want, fellBack, ctxNote, offload }
 export function roomFitNow(lib, { model, devices, ctxAsk = 0, spareGB = [] }) {
-  const pl = devices.map((d) => +lib.pledgeGB(d.meta) || 0);
+  const pl = devices.map((d) => +lib.pledgeGB(d.meta, Infinity, model) || 0);   // (64 GB a device, 128 for Flash)
   const haveGB = r1(pl.reduce((a, b) => a + b, 0));
   const needGB = modelNeedGB(lib, model, ctxAsk);
   const want = lib.nodeCtxFor(model, ctxAsk);
@@ -636,11 +636,12 @@ const loadNote = (ld) => (ld.from && ld.from !== "disk" && ld.fetched < ld.total
 
 // the room's devices for the screen, from the node: host first
 export function devicesFrom(node, lib, { pct = new Map(), ranges = null } = {}) {
-  const out = [{ id: "self", name: node.name, kind: deviceKind(node.meta, true), gb: +lib.pledgeGB(node.meta) || 0, self: true, meta: node.meta, pct: pct.get(node.name) ?? null, range: ranges?.[node.name] || null, rtt: null }];
+  const model = node.ai?.model || null;   // a pledge counts at most room/pledge.js maxPledgeGB(model)
+  const out = [{ id: "self", name: node.name, kind: deviceKind(node.meta, true), gb: +lib.pledgeGB(node.meta, Infinity, model) || 0, self: true, meta: node.meta, pct: pct.get(node.name) ?? null, range: ranges?.[node.name] || null, rtt: null }];
   for (const [id, e] of node.conns) {
     if (!e?.meta || e.meta.api) continue;
     const gpu = !!e.meta.webgpu;
-    out.push({ id, name: e.name || id, kind: deviceKind(e.meta), gb: gpu ? +lib.pledgeGB(e.meta) || 0 : null, self: false, meta: e.meta, pct: pct.get(e.name) ?? null, range: ranges?.[e.name] || null,
+    out.push({ id, name: e.name || id, kind: deviceKind(e.meta), gb: gpu ? +lib.pledgeGB(e.meta, Infinity, model) || 0 : null, self: false, meta: e.meta, pct: pct.get(e.name) ?? null, range: ranges?.[e.name] || null,
       rtt: Number.isFinite(e.rtt) ? e.rtt : null });
   }
   return out;

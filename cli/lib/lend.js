@@ -7,8 +7,9 @@ import { cleanText } from "./common.js";
 import { argsError, needsRoom, notARoom } from "./cli.js";
 
 export const DESK_MAX_GB = 64;          // room/pledge.js: the most one computer lends a room by default
-// the most it lends when told to (--gb N, --gb max, --here): a big unified-memory machine (a GB10, a 128 GB Mac)
-// holding a model of ~72 GB alone (Qwen3.5-122B, Qwen3.8-Flash-Next)
+// the most it lends when told to (--gb N, --gb max, --here) for Qwen3.8-Flash-Next only: a big unified-memory machine
+// (a GB10, a 128 GB Mac) holding that ~72 GB model alone. Any other model: DESK_MAX_GB. room/pledge.js maxPledgeGB(model)
+// is the rule; a pledge made before the model is known (pooled join) may say up to this and the host counts the model's cap
 export const LEND_MAX_GB = 128;
 export const DISCRETE_RESERVE_GB = 1.5; // kept free on a discrete GPU (the desktop, other apps)
 export const UNIFIED_KEEP_GB = 8;       // kept for the system on unified memory: at least this much
@@ -40,7 +41,8 @@ Options
   --gb <n|max>      how much memory to lend, in GB. Default: the memory rule, printed at start:
                     a discrete GPU lends its free memory less ${DISCRETE_RESERVE_GB} GB; unified memory (Apple
                     silicon, GB10) lends the total less max(${UNIFIED_KEEP_GB} GB, ${Math.round(UNIFIED_KEEP_FRAC * 100)}%). "max" keeps only a
-                    small margin. The rule lends at most ${DESK_MAX_GB} GB; --gb N or max up to ${LEND_MAX_GB}.
+                    small margin. At most ${DESK_MAX_GB} GB per device (${LEND_MAX_GB} with --gb N or max
+                    for Qwen3.8-Flash-Next).
   --name <s>        how the room shows this device (default: mac-, linux- or pc- and 3 letters
                     made from the hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
@@ -326,9 +328,11 @@ const floorGb = (x) => Math.floor(x * 2) / 2;   // half GB steps
 
 // The rule: how much to lend, and one line on why. mem: detectMemory(); want: parseGb(--gb) or null;
 // maxBufGB: the adapter's largest buffer (the fallback when the OS says nothing: half of it, as
-// room/pledge.js does for a device that pledges nothing). -> { gb, why, low, over }
+// room/pledge.js does for a device that pledges nothing). capGB: the most an explicit pledge (--gb N, --gb max) lends,
+// room/pledge.js maxPledgeGB(model) when the model is known (64 GB, 128 for Qwen3.8-Flash-Next), else LEND_MAX_GB
+// (pooled join: the host counts at most its model's cap). -> { gb, why, low, over }
 //   low: less than 1 GB is free (not enough to lend); over: --gb asks for more than looks free
-export function memoryRule(mem, want = null, { maxBufGB = 0 } = {}) {
+export function memoryRule(mem, want = null, { maxBufGB = 0, capGB = LEND_MAX_GB } = {}) {
   let avail = null, why;
   if (mem.kind === "discrete") {
     const keep = want?.max ? 0.5 : DISCRETE_RESERVE_GB;
@@ -344,8 +348,8 @@ export function memoryRule(mem, want = null, { maxBufGB = 0 } = {}) {
     }
   }
   if (want?.gb) {
-    const over = avail != null && want.gb > avail + 0.01;
-    return { gb: want.gb, why: `--gb ${want.gb}` + (over ? ` (more than the ${fmtGb(avail)} GB that looks free: the load may fail)` : ""), over, low: false };
+    const gb = Math.min(want.gb, capGB), over = avail != null && gb > avail + 0.01;
+    return { gb, why: `--gb ${want.gb}` + (gb < want.gb ? `, capped at ${gb} GB per device for this model` : "") + (over ? ` (more than the ${fmtGb(avail)} GB that looks free: the load may fail)` : ""), over, low: false };
   }
   if (avail == null) {
     const gb = Math.min(DESK_MAX_GB, Math.max(1, Math.round((maxBufGB || 2) * 0.5)));
@@ -353,7 +357,7 @@ export function memoryRule(mem, want = null, { maxBufGB = 0 } = {}) {
   }
   if (avail < 1) return { gb: 0, why, low: true, over: false };
   let gb = floorGb(avail);
-  const cap = want?.max ? LEND_MAX_GB : DESK_MAX_GB;   // --gb max (and --here's "the most it can"): past the default cap
+  const cap = want?.max ? Math.min(capGB, LEND_MAX_GB) : DESK_MAX_GB;   // --gb max (and --here's "the most it can"): Flash past the default cap
   if (gb > cap) { gb = cap; why += `, capped at ${cap} GB per device`; }
   return { gb, why, low: false, over: false };
 }

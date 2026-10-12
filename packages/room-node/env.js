@@ -7,6 +7,7 @@
 import { setFlagsFromString } from "node:v8";
 import { measureCopyGBps } from "../../room/gpuspeed.js";
 import { DENSE_SPEC_V } from "../../room/lookup.js";
+import { DESK_MAX_GB, PLEDGE_MAX_GB } from "../../room/pledge.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
@@ -127,6 +128,7 @@ export function hostMemory() {
 }
 // the RAM this device lets the room park experts in, GB: what it was told, at most 64 (as a pledge), whole tenths
 export const ramFor = (gb) => Math.max(0, Math.min(64, Math.floor((+gb || 0) * 10) / 10));
-// the GB this device lends: what it was told (1..128: a big unified-memory machine may hold a ~72 GB model alone),
-// else half its largest buffer (1..64)
-export const pledgeFor = (pledgeGB, maxBufGB) => (+pledgeGB > 0 ? Math.min(128, Math.max(1, +pledgeGB)) : Math.min(64, Math.max(1, Math.round(maxBufGB * 0.5) || 1)));
+// the GB this device lends: what it was told (1..128: one big unified-memory machine may hold Qwen3.8-Flash-Next alone;
+// the model is not known yet here, so the host's deal counts at most room/pledge.js maxPledgeGB(model): 64 for any
+// other model), else half its largest buffer (1..64)
+export const pledgeFor = (pledgeGB, maxBufGB) => (+pledgeGB > 0 ? Math.min(PLEDGE_MAX_GB, Math.max(1, +pledgeGB)) : Math.min(DESK_MAX_GB, Math.max(1, Math.round(maxBufGB * 0.5) || 1)));
