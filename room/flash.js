@@ -178,6 +178,8 @@ export class FlashRoomEngine {
   }
 }
 
+// layers per submit in a step (engine/qwen4exp.js forwardToken's step)
+const SUBMIT_LAYERS = 12;
 // what a device without checkpoints lacks (dropSlot / dropAllSlots stay: with no slots they do nothing)
 const SLOT_API = ["saveSlot", "loadSlot", "exportSlot", "exportState", "importState", "stateSignature"];
 // a GPU buffer copies can read (a test's fake buffer says nothing: yes)
@@ -193,9 +195,16 @@ export function qwen4expCore(e) {
   // laid out without the head, so the last combine stays in and B.R is the finished residual (forwardToken's own
   // lists fold the last layer's combine into the head's site when the engine has the head). Built on first use.
   // Without _halfOps (an engine before the fused sites): the per-half lists, which compute the same R.
+  // Per layer, in submits of SUBMIT_LAYERS layers as forwardToken does: one submit of all 48 layers' dispatches
+  // lost the device on the GB10 (an AbortError on the readback), 12 per submit is what the engine runs.
   let ops = null;
-  const stepOps = () => ops ||= e._halfOps ? e._halfOps(e.layers.flatMap((l) => l.halves), true).flat()
-    : e.layers.flatMap((l) => [...l.attnOps, ...l.ffnOps]);
+  const stepOps = () => {
+    if (ops) return ops;
+    const per = e._halfOps ? e._halfOps(e.layers.flatMap((l) => l.halves), true) : e.layers.flatMap((l) => [l.attnOps, l.ffnOps]);
+    ops = [];
+    for (let k = 0; k < e.layers.length; k += SUBMIT_LAYERS) ops.push(per.slice(2 * k, 2 * (k + SUBMIT_LAYERS)).flat());
+    return ops;
+  };
   return {
     device: dev, dims: e.dims, lo: e.lo, hi: e.hi, hasEmbed: e.hasEmbed, hasHead: e.hasHead, maxSeq: e.maxSeq,
     get pos() { return e.pos; }, set pos(v) { e.pos = v; },
@@ -205,8 +214,15 @@ export function qwen4expCore(e) {
       await e._begin(id);
       if (hidden) dev.queue.writeBuffer(e.B.R, 0, hidden);
       else if (!e.hasEmbed) throw new Error("qwen4exp: no embedding here: a worker's step needs the residual");
+      const chunks = stepOps();
+      for (const c of chunks.slice(0, -1)) {
+        const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+        e._encode(pass, c);
+        pass.end();
+        dev.queue.submit([enc.finish()]);
+      }
       const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-      e._encode(pass, stepOps());
+      e._encode(pass, chunks.at(-1) || []);
       pass.end();
       enc.copyBufferToBuffer(e.B.R, 0, e.hStage, 0, HD * 4);
       dev.queue.submit([enc.finish()]);
