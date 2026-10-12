@@ -9,8 +9,8 @@
 //   K=n (default the header's expert_used_count)  CHUNK_KB=1024  COLD=0|1  WARM=0|1  SEED=1  GPU=1 (the upload probes below)
 //
 // Modes:
-//   uv    fs.promises reads, one per part (what source.js does today): libuv's thread pool, UV_THREADPOOL_SIZE
-//         (default 4) reads at a time; THREADS does not apply
+//   uv    fs.promises reads, one per part, through source.js localFileReader (a handle per read in flight, as
+//         source.js reads): libuv's thread pool, UV_THREADPOOL_SIZE (default 4) reads at a time; THREADS does not apply
 //   inline the uv reads, then convertEntry on the main thread (what engine/expert_disk.js does in process): the
 //         baseline for conv. Run both uv modes with UV_THREADPOOL_SIZE=16 too: at 16 reads in flight libuv reads
 //         raw bytes as fast as the pool does, so the pool's gain is conv against inline, not raw against uv
@@ -21,7 +21,9 @@
 //
 // Cold needs Linux: `dd iflag=nocache count=0` (posix_fadvise DONTNEED, no root) drops a file's clean pages before
 // each cold pass. Pages another process has mapped stay; run it with nothing else reading the model. Elsewhere only
-// warm passes run.
+// warm passes run, unless EVICT=a.gguf,b.gguf names other large files (read only): before each configuration it reads
+// EVICT_GB (default 80) of them through the page cache, pushing the model's pages off (Windows' standby list; no
+// admin needed), and the first pass is reported as "first-touch" (as good as cold when EVICT_GB > the RAM).
 //
 // GPU=1 also answers what the T1 cache (step 3) needs from Dawn: whether queue.writeBuffer takes a view of a
 // SharedArrayBuffer (the staging ring), the memcpy rate from the ring into a mapped MAP_WRITE buffer, mapAsync(WRITE)
@@ -33,6 +35,7 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { parseGGUFHeader, convertEntry, GGML_Q4_0, GGML_Q8_0 } from "../../engine/gguf.js";
 import { expertDiskReader, expertPart } from "../../packages/room-node/expert_disk.js";
+import { localFileReader } from "../../packages/room-node/source.js";
 
 const env = (k, d) => process.env[k] ?? d;
 const list = (k, d) => env(k, d).split(",").map((s) => s.trim()).filter(Boolean);
@@ -96,6 +99,22 @@ function routing(seed) {
 }
 const ROUTE = routing(+env("SEED", 1));
 
+const EVICT = list("EVICT", ""), EVICT_GB = +env("EVICT_GB", 80);
+async function evict() {
+  const t0 = performance.now(), per = Math.ceil(EVICT_GB * GiB / EVICT.length), CH = 8 * MiB;
+  let tot = 0;
+  await Promise.all(EVICT.map(async (f) => {
+    const fh = await fs.promises.open(f, "r"), size = Math.min(per, (await fh.stat()).size);
+    let next = 0;
+    await Promise.all(Array.from({ length: 4 }, async () => {
+      const buf = Buffer.allocUnsafe(CH);
+      for (let o; (o = next) < size; ) { next += CH; const { bytesRead } = await fh.read(buf, 0, Math.min(CH, size - o), o); tot += bytesRead; }
+    }));
+    await fh.close();
+  }));
+  console.error(`evicted: read ${(tot / 1e9).toFixed(1)} GB of other files in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
+}
+
 function dropCache() {
   for (const f of files) execFileSync("dd", [`if=${f}`, "iflag=nocache", "count=0", "status=none"]);
 }
@@ -122,14 +141,9 @@ const pct = (a, p) => { const s = [...a].sort((x, y) => x - y); return s[Math.mi
 // mode, worker count -> a reader (L, e) -> bytes read, and its close()
 function reader(mode, threads) {
   if (mode === "uv" || mode === "inline") {
-    const fhs = files.map((f) => fs.promises.open(f, "r"));
+    const rs = files.map((f) => localFileReader(f));
     let convMs = 0, n = 0;
-    const readRange = async (shard, off, len) => {
-      const fh = await fhs[shard], b = Buffer.allocUnsafe(len);
-      let o = 0;
-      while (o < len) { const { bytesRead } = await fh.read(b, o, len - o, off + o); if (bytesRead <= 0) throw new Error("short read"); o += bytesRead; }
-      return b;
-    };
+    const readRange = (shard, off, len) => rs[shard].readAt(off, len);
     const readOne = async (t, e) => {
       const p = expertPart(t, e), b = await readRange(p.shard, p.off, p.len);
       if (mode === "inline") {   // on the event loop, as engine/expert_disk.js converts today
@@ -141,7 +155,7 @@ function reader(mode, threads) {
     };
     return {
       read: async (L, e) => (await Promise.all(L.parts.map((t) => readOne(t, e)))).reduce((a, b) => a + b, 0),
-      close: async () => { for (const fh of fhs) await (await fh).close(); },
+      close: async () => { for (const r of rs) await r.close(); },
       extra: () => (mode === "inline" ? ` | ${(convMs / (n / 3 || 1)).toFixed(2)} | ` : ""),
       reset: () => { convMs = 0; n = 0; },
     };
@@ -158,10 +172,10 @@ function reader(mode, threads) {
     : async (L, e) => { await disk.readExpert(L.parts, e); return expBytes(L); };
   return {
     read, close: () => disk.close(), ready,
-    // per expert: worker read and convert time (summed over its chunks), the copy out of the ring
+    // per expert: worker read and convert time (summed over its chunks), the gathers out of the ring
     extra: () => {
       const n = disk.stats.parts / 3 || disk.stats.raw / 3 || 1, st = disk.stats;
-      return mode === "conv" ? ` | ${(st.convMs / n).toFixed(2)} | ${(st.copyMs / n).toFixed(2)}` : ` | | `;
+      return mode === "conv" ? ` | ${(st.convMs / n).toFixed(2)} | ${(st.gatherMs / n).toFixed(2)}` : ` | | `;
     },
     reset: () => { for (const k of Object.keys(disk.stats)) disk.stats[k] = 0; },
   };
@@ -194,7 +208,7 @@ console.log(`${TOKENS} tokens per pass (${(perToken * TOKENS / 1e9).toFixed(1)} 
   fd.forEach((x) => fs.closeSync(x));
   console.log(`convert on one thread: ${out.join("; ")}\n`);
 }
-console.log("| mode | workers | cache | GB/s | p50 ms / expert | p99 ms / expert | p50 ms / layer | ms / token | convert ms / expert | copy ms / expert |");
+console.log("| mode | workers | cache | GB/s | p50 ms / expert | p99 ms / expert | p50 ms / layer | ms / token | convert ms / expert | gather ms / expert |");
 console.log("|---|---|---|---|---|---|---|---|---|---|");
 for (const mode of MODES) {
   for (const threads of mode === "uv" || mode === "inline" ? [0] : THREADS) {
@@ -202,8 +216,9 @@ for (const mode of MODES) {
     try {
       await R.ready;
       if (COLD) { dropCache(); R.reset?.(); row(mode, threads, "cold", await pass(R.read), R.extra()); }
+      else if (EVICT.length) { await evict(); R.reset?.(); row(mode, threads, "first-touch", await pass(R.read), R.extra()); }
       if (WARM) {
-        if (!COLD) await pass(R.read);   // fill the cache first
+        if (!COLD && !EVICT.length) await pass(R.read);   // fill the cache first
         R.reset?.(); row(mode, threads, "warm", await pass(R.read), R.extra());
       }
     } finally { await R.close(); }
