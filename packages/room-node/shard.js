@@ -19,6 +19,7 @@ import { convertPool } from "./convert.js";
 import { ExpertStore } from "../../engine/expert_store.js";
 import { expertDiskReader } from "./expert_disk.js";
 import { expertDisk } from "../../engine/expert_disk.js";
+import { localFileReader } from "./source.js";
 
 // The tensors a shard's loader reads (engine/gguf.js ggufWeights / qwen35Weights), in about its order,
 // as { byteOffset, byteLength, shard? }: what source.js fetches ahead of it when it streams (shard: the file of a split GGUF)
@@ -65,19 +66,12 @@ export const diskLayers = (o, off) => (off && Number.isInteger(o?.diskLo) ? off.
 // over positional reads of the same files): slower, the same bytes. make: the worker reader (tests stub it).
 export function expertReader({ paths, make = expertDiskReader, log = () => {} }) {
   const w = make({ paths });
-  let fb = null, fds = null;
+  let fb = null, files = null;
   const inThread = () => {
     if (fb) return fb;
     log("expert disk reader: no worker threads, reading experts on the main thread (slower)");
-    fds = new Map();
-    const fh = async (i) => { let f = fds.get(i); if (!f) fds.set(i, f = fs.promises.open(paths[i], "r")); return f; };
-    return fb = expertDisk({ readAt: async (shard, off, len) => {
-      const out = new Uint8Array(len), f = await fh(shard);
-      let o = 0;
-      while (o < len) { const { bytesRead } = await f.read(out, o, len - o, off + o); if (bytesRead <= 0) break; o += bytesRead; }
-      if (o !== len) throw new Error(`short read in ${paths[shard]}: ${o} of ${len} B at ${off}`);
-      return out;
-    } });
+    files = paths.map((p) => localFileReader(p));   // source.js: a handle per lane, as the model source reads
+    return fb = expertDisk({ readAt: (shard, off, len) => files[shard].readAt(off, len) });
   };
   return {
     worker: w,
@@ -88,8 +82,8 @@ export function expertReader({ paths, make = expertDiskReader, log = () => {} })
     },
     async close() {
       await w.close?.();
-      for (const f of fds?.values() || []) try { await (await f).close(); } catch {}
-      fds = null;
+      for (const f of files || []) try { await f.close(); } catch {}
+      files = null;
     },
   };
 }
