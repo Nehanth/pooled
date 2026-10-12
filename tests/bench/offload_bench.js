@@ -14,7 +14,7 @@ const { device } = await gpuDevice();
 const errors = watchGpuErrors(device);
 const model = openGGUF(env("MOE", BIG ? Q122_PATH : MOE_PATH));   // MOE=path: another copy of the file
 const G = model.G, L = trunkLayers(G), tok = model.tokenizer();
-const experts = offloadFromEnv(device, L, model);
+const experts = await offloadFromEnv(device, L, model);
 const t0 = performance.now();
 const range = { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: false, experts };
 const weights = BIG ? await streamWeights(model, device, range) : await model.weights(range);
@@ -44,6 +44,8 @@ for (const n of LENS) {
     if (eng.experts.diskSet?.size) {
       line += `\n  disk, prefill: ${d(s0, s1, "diskReads")} expert reads, ${(d(s0, s1, "diskBytes") / 2 ** 30).toFixed(2)} GiB, ${(d(s0, s1, "diskWaitMs") / 1000).toFixed(2)} s waiting`;
       line += `\n  disk, decode: ${(d(s1, s2, "diskReads") / DEC).toFixed(1)} expert reads / token, ${(d(s1, s2, "diskBytes") / 2 ** 20 / DEC).toFixed(1)} MiB / token, ${(d(s1, s2, "diskWaitMs") / DEC).toFixed(1)} ms waiting / token`;
+      // T1 (OFFLOAD_DISK_RAM_GB): pool misses served from the RAM cache, and those that went by writeBuffer (not admitted, or no free slot)
+      if (eng.experts.t1) line += `\n  RAM cache, decode: ${(d(s1, s2, "t1Copies") / DEC).toFixed(1)} hits / token, ${(d(s1, s2, "t1Writes") / DEC).toFixed(1)} uncached writes / token; ${eng.experts.t1.full}/${eng.experts.t1.cap} experts held`;
     }
   }
   console.log(line);

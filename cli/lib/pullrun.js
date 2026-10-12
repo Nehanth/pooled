@@ -7,6 +7,7 @@ import { style, label, progressRow, padStart, clip, gb, I } from "./style.js";
 import { liveRegion } from "./tui.js";
 import { colorOn } from "./tui.js";
 import { argsError } from "./cli.js";
+import { hostable, devHint } from "./lend.js";
 
 export const HELP_PULL = `Usage
   pooled pull <model>      download a model, so pooled host and pooled join start from disk
@@ -103,7 +104,7 @@ export async function pullMain(cmd0, argv, { loadRoomNode }) {
   const rn = await loadRoomNode();
   const dir = modelsDir({ flag: r.values.models });
   try { ensureModelsDir(dir); } catch (e) { process.stderr.write(`pooled ${cmd0}: can't make ${home(dir)}: ${e.message}\n`); return 1; }
-  const keys = Object.keys(rn.MODELS).filter((k) => rn.MODELS[k].gguf && (rn.MODELS[k].kind === "gguf" || rn.MODELS[k].kind === "qwen35"));
+  const keys = hostable(rn.MODELS).filter((k) => rn.MODELS[k].gguf);   // (Qwen3.8-Flash-Next with POOLED_DEV=1: lend.js)
   const c = colors(colorOn(process.stdout));
   const say = (s) => process.stdout.write(s + "\n");
   const err = (s) => process.stderr.write(s + "\n");
@@ -111,7 +112,7 @@ export async function pullMain(cmd0, argv, { loadRoomNode }) {
     if (!r.positionals.length) { err(`pooled ${cmd0} needs a model: pooled ${cmd0} ${keys.includes("qwen3-1.7b") ? "qwen3-1.7b" : keys[0]} (pooled list shows them all).`); return null; }
     if (r.positionals.length > 1) { err(`pooled ${cmd0} takes one model, not ${r.positionals.length}: ${r.positionals.slice(0, 3).join(" ")}`); return null; }
     const m = resolveModel(r.positionals[0], keys);
-    if (m.error) { err(`pooled ${cmd0}: ${m.error}; one of: ${m.choices.join(", ")}`); return null; }
+    if (m.error) { err(`pooled ${cmd0}: ${devHint(rn.MODELS, r.positionals[0]) || `${m.error}; one of: ${m.choices.join(", ")}`}`); return null; }
     return m.key;
   };
 

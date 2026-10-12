@@ -3,6 +3,8 @@
 // MODEL=122b: Qwen3.5-122B-A10B (bartowski Q4_0, two-file split GGUF, 48 layers, 256 experts top-8, 16 query heads per kv
 // head) on the same prompts, goldens from llama.cpp 749f688 CUDA (llama-server, greedy) in tests/golden/q122_llama_greedy.json;
 // its weights stream to the GPU a layer at a time (tests/load_model.js streamWeights).
+// MODEL=q38flash: Qwen3.8-Flash-Next (qwen4exp) runs on its own engine (engine/qwen4exp.js): tests/test_q38flash.js
+if (Deno.env.get("MODEL") === "q38flash") await import("./test_q38flash.js");
 import { Qwen35Engine } from "../engine/qwen35.js";
 import { argmax } from "../engine/engine.js";
 import { openGGUF, gpuDevice, watchGpuErrors, trunkLayers, MOE_PATH, Q122_PATH, streamWeights, wideOpts, offloadFromEnv } from "./load_model.js";
@@ -22,7 +24,7 @@ const L = trunkLayers(G);
 const tok = model.tokenizer();
 let t0 = performance.now();
 // OFFLOAD=lo-hi | all [OFFLOAD_GB=8 | OFFLOAD_SLOTS=N]: those layers' routed experts parked off the GPU's resident weights (expert offload)
-const experts = offloadFromEnv(device, L, model);
+const experts = await offloadFromEnv(device, L, model);
 const weights = BIG ? await streamWeights(model, device, { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp, experts }, (i) => { if (i % 8 === 7) console.log(`  layer ${i + 1}/${L} on the GPU, ${((performance.now() - t0) / 1000).toFixed(0)} s`); })
   : await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: hasMtp, experts });
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512,

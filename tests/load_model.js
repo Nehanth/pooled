@@ -232,11 +232,15 @@ export async function streamWeights(model, device, { lo, hi, hasEmbed = false, h
 //   OFFLOAD_SLOTS=N               a fixed slot count per layer instead (e.g. 16: a small cache)
 //   OFFLOAD_DISK=lo-hi | all | a,b  of those, the layers whose experts stay in the file and are read when used (the
 //                                 disk tier, roadmap/32); needs model (openGGUF's readShard)
+//   OFFLOAD_DISK_RAM_GB=2         RAM for the disk layers' cache (T1, engine/expert_t1.js; default 0: none)
+//   OFFLOAD_DISK_RESERVE=N        free T1 slots kept mapped (default 2 K, at least 16)
+//   OFFLOAD_DISK_READER=workers   read with the room node's worker threads (packages/room-node/expert_disk.js, as a
+//                                 room node does) instead of positional reads on this thread
 // -> an ExpertStore to pass as weights({ ..., experts }) / streamWeights(..., { experts }), or null
 const layerList = (v, n) => (v === "all" ? Array.from({ length: n }, (_, i) => i)
   : v.includes("-") ? (([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i))(v.split("-").map(Number))
   : v.split(",").map(Number)).filter((i) => i >= 0 && i < n);
-export function offloadFromEnv(device, nLayers, model = null) {
+export async function offloadFromEnv(device, nLayers, model = null) {
   const v = envGet("OFFLOAD");
   if (!v || v === "0") return null;
   const layers = layerList(v, nLayers), d = envGet("OFFLOAD_DISK");
@@ -244,7 +248,13 @@ export function offloadFromEnv(device, nLayers, model = null) {
   if (d && d !== "0") {
     if (!model?.readShard) throw new Error("OFFLOAD_DISK needs the model (offloadFromEnv(device, nLayers, model))");
     // positional reads per shard, as a Promise (the reader is async: a room node's source is)
-    disk = { layers: layerList(d, nLayers).filter((i) => layers.includes(i)), reader: expertDisk({ readAt: async (shard, off, len) => model.readShard(shard, off, len) }) };
+    const reader = envGet("OFFLOAD_DISK_READER") === "workers"
+      ? (await import("../packages/room-node/expert_disk.js")).expertDiskReader({ paths: model.paths })
+      : expertDisk({ readAt: async (shard, off, len) => model.readShard(shard, off, len) });
+    const named = layerList(d, nLayers), notOff = named.filter((i) => !layers.includes(i));
+    if (notOff.length) console.warn(`OFFLOAD_DISK: layers ${notOff.join(",")} are not in OFFLOAD (${v}): they stay resident, not on disk`);
+    disk = { layers: named.filter((i) => layers.includes(i)), reader, ramBytes: +(envGet("OFFLOAD_DISK_RAM_GB") || 0) * 2 ** 30,
+      ...(envGet("OFFLOAD_DISK_RESERVE") ? { reserve: +envGet("OFFLOAD_DISK_RESERVE") } : {}) };
   }
   return new ExpertStore(device, { layers, vramBytes: +(envGet("OFFLOAD_GB") || 8) * 2 ** 30, slots: +(envGet("OFFLOAD_SLOTS") || 0), disk });
 }

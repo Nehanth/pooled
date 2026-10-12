@@ -3,11 +3,20 @@
 // after room.js's lazy import; importing this module does not load the GPU engine.
 // Main-model dense/safetensors configuration and tokenizer preparation remain in room.js.
 import { parseGGUFHeader, ggufWeights, ggufShardBytes, GGML_EMBED, GGML_OUTPUT, GGML_FINAL_NORM,
-  ggmlLayerNames, qwen35Weights, qwen35ShardBytes, qwen35NamesFor, tokenizerFromGGUF, gpuUploadEntry, streamEntryToGPU }
+  ggmlLayerNames, qwen35Weights, qwen35ShardBytes, qwen35NamesFor, tokenizerFromGGUF, gpuUploadEntry, streamEntryToGPU,
+  qwen4expConfig, qwen4expNamesFor, qwen4expWeights, qwen4expShardBytes, QWEN4EXP_HEAD }
   from "../engine/gguf.js";
+import { ngramConfig, NgramTable, httpReadAt } from "../engine/ngram.js";
+import { FlashRoomEngine } from "./flash.js";
 import { MODELS, MAX_SEQ, mergeSplitHeaders } from "./models.js";
 import { cacheKey } from "./weightcache.js";
 import { attachBrowserWeightCache } from "./convertedcache.js";
+
+// Where a tab keeps Qwen3.8-Flash-Next's n-gram table split per head (engine/ngram.js ngramFileName), from the OPFS root
+export const NGRAM_OPFS_DIR = ["models", "q38flash-ngram"];
+// one qwen4exp layer's tensors as qwen4expWeights loads them in the dense phase (no QSA indexer), for the prefetcher
+const QWEN4EXP_INDEXER = new Set(["idxQ", "idxK", "idxQNorm", "idxKNorm"]);
+const flashLayerNames = (G, i) => Object.entries(qwen4expNamesFor(G, i)).filter(([k, v]) => typeof v === "string" && !QWEN4EXP_INDEXER.has(k)).map(([, v]) => v);
 
 export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMeta, getEnginePreset, options = {}, hooks = {} }) {
   if (typeof getEnginePreset !== "function") throw new TypeError("getEnginePreset must be a function");
@@ -161,6 +170,62 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         ...getEnginePreset(),
         kvQ8: kv === "q8",
       });
+    } else if (M.kind === "qwen4exp") {
+      // Qwen3.8-Flash-Next: its own engine (engine/qwen4exp.js) behind the room adapter (room/flash.js); the dense
+      // phase (no QSA indexer, context <= 2048). The embedding stays in JS memory (the engine reads its rows), and the
+      // device holding the n-gram layer reads that table's rows from OPFS (split per head) or by HTTP range
+      aiStatus("reading model index\u2026");
+      const needTok = hasEmbed || hasHead;
+      const cachedOk = ai.G && ai.GModel === modelKey && (!needTok || ai.G.meta["tokenizer.ggml.tokens"]);
+      const G = cachedOk ? ai.G : await fetchModelHeader(M, needTok);
+      ai.G = G; ai.GModel = modelKey;
+      const c = qwen4expConfig(G.meta);
+      if (range[1] > c.L) throw new Error(`bad layer range [${range[0]}, ${range[1]}]: the model has ${c.L} layers`);
+      ai.cfg = { num_hidden_layers: c.L };
+      if (needTok) {
+        ai.tok = makeTokenizer(tokenizerFromGGUF(G.meta));
+        ai.tok.chatTemplate = G.meta["tokenizer.chat_template"] || "";
+        apiModelLoaded();
+      }
+      const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: false };
+      const total = qwen4expShardBytes(G, opts);
+      const names = [];
+      for (let l = range[0]; l < range[1]; l++) names.push(...flashLayerNames(G, l));
+      if (hasEmbed || hasHead) names.push(GGML_EMBED);
+      if (hasHead) names.push(...Object.values(QWEN4EXP_HEAD), GGML_OUTPUT);
+      planPrefetch(M.gguf, shardInfos(G, names));
+      G.streamEntry = streamWithRetry(M.gguf, streamOpts, pace);
+      const wc = await useConvertedCache(G, M.gguf), tw = performance.now();
+      // straight to the GPU, but not the embedding (the engine reads its rows on the CPU). A layer at a time, the
+      // queue flushed after each, as the room node loads it (packages/room-node/shard.js loadFlash): Dawn keeps a
+      // writeBuffer's staging copy until the queue moves on, and one batch of a big share's uploads ran the GB10 out
+      // of memory with the weights only half on the GPU
+      const bytesOf = rangeBytesOf(M.gguf, pace), dev = ai.device;
+      const up = (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(dev, e, false); };
+      let base = 0;
+      const part = async (o) => {
+        const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: false }, (done) => onProg(base + done, total), up);
+        base += qwen4expShardBytes(G, { ...o, qsa: false });
+        dev.queue.submit([dev.createCommandEncoder().finish()]);
+        await dev.queue.onSubmittedWorkDone();
+        return w;
+      };
+      const layers = [];
+      let pleTable = null;
+      for (let l = range[0]; l < range[1]; l++) {
+        const w = await part({ lo: l, hi: l + 1, hasEmbed: false, hasHead: false });
+        layers.push(w.layers[0]);
+        pleTable ||= w.pleTable || null;
+      }
+      const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
+      await convertedSummary(wc, tw);
+      const ngram = weights.pleTable ? await openNgramTable(G, M) : null;
+      aiStatus("building GPU pipelines (compiling shaders)\u2026");
+      try {
+        const { Qwen4ExpEngine } = await import("../engine/qwen4exp.js");
+        ai.engine = FlashRoomEngine.wrap(await Qwen4ExpEngine.create({ device: ai.device, meta: G.meta, weights, layerRange: range,
+          hasEmbed, hasHead, maxSeq: Math.min(ctx, 2048), ngram }));
+      } catch (e) { await ngram?.close?.(); throw e; }
     } else if (M.kind === "gguf") {
       aiStatus("reading model index\u2026");
       const G = ai.G && ai.GModel === modelKey ? ai.G : await fetchGGUFHeader(M.gguf, false);   // vocab comes from tokenizer.json
@@ -194,6 +259,33 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       });
     }
     clearPrefetch();
+  }
+
+  // The n-gram table for the device holding Qwen3.8-Flash-Next's n-gram layer: its 16 per-head files in this origin's
+  // OPFS (NGRAM_OPFS_DIR, engine/ngram.js splitHeads; read by NgramWorkers, several heads at once) when they are
+  // there, else HTTP range requests into the GGUF shard that holds it (16 round trips a token: a cold start).
+  // close() releases the workers and their file locks (room/flash.js close, when the engine is dropped).
+  async function openNgramTable(G, M) {
+    const cfg = ngramConfig(G), urls = M.shards?.length ? M.shards : [M.gguf];
+    try {
+      const { NgramWorkers } = await import("../engine/ngram_worker.js");
+      const t = await NgramWorkers.open(cfg, { dir: NGRAM_OPFS_DIR, workers: 4 });
+      t.where = "opfs";
+      crumb("n-gram table: OPFS");
+      return t;
+    } catch (e) {
+      // NotFoundError: no split copy here (the usual case until a tab ingests one). Anything else (a locked file,
+      // no OPFS or module workers in this browser, a short file) is said plainly before the HTTP fallback
+      if (e?.name !== "NotFoundError") {
+        const why = `${e?.name || "Error"}: ${String(e?.message || e).split("\n")[0].slice(0, 200)}`;
+        console.warn(`n-gram table: the OPFS copy (${NGRAM_OPFS_DIR.join("/")}) could not be opened (${why}); reading its rows by HTTP range instead (16 round trips a token)`);
+        crumb(`n-gram table: OPFS open failed (${why})`);
+      }
+    }
+    const t = new NgramTable(cfg, { readAt: httpReadAt(urls), layout: "tensor", inflight: 16 });
+    t.where = urls[cfg.shard];
+    crumb(`n-gram table: HTTP range from ${t.where}`);
+    return t;
   }
 
   async function loadDraft({ modelKey, pace }, { DenseEngine }) {

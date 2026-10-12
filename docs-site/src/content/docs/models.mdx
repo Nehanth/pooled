@@ -16,6 +16,8 @@ Sources (for the fact-checker):
 - room/plan.js: bestFit() (picker preselects the biggest model that fits)
 - cli/README.md "Claude Code": its prompt is 15-20k tokens; use the MoE or 27B
 - room/pledge.js (phone caps)
+- --disk (roadmap/32 steps 3-5): room/plan.js roomFit (disk only when parking can't hold the model), DISK_RAM_MIN 2 GiB;
+  35B on a 10 GB GPU with --ram 8: short with RAM alone, fits with --disk (tests/unit/offload_disk_plan_test.js)
 */}
 
 Pick by how much memory the room has. The header shows it as `N GB pooled`, and the picker preselects the biggest model that fits.
@@ -39,6 +41,8 @@ The 1.7B opens with a 16K context when the room has 5.6 GB for it. With less, do
 - **One PC with a 12 GB GPU:** the MoE from the terminal, with `pooled host qwen3.6-35b-moe --here`. It keeps the experts the GPU can't hold in system RAM (about 19 GB of them) and runs at about 38-45 tok/s on an RTX 5070. See [MoE experts in system RAM](/docs/terminal#moe-experts-in-system-ram).
 
 In the terminal, `pooled host` and `pooled pull` also list the **Qwen3.5 122B MoE**: about 73 GB across the room and a 72.52 GB download. A Mac Studio lending 25 GB and an RTX 5070 PC keeping 42 GB of its experts in RAM run it at about 17 tok/s. The room page shows it only with `?dev=1`.
+
+When a room's GPUs and RAM together still fall short of a MoE model, a computer started with `--disk` can read some of its experts from the model's files on its SSD instead. The room does this only as a last resort, and it is slower. See [MoE experts read from disk](/docs/terminal#moe-experts-read-from-disk).
 
 Phones add little memory: 0.5 to 2 GB each. See [Phones and tablets](/docs/phones).
 

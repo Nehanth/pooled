@@ -61,7 +61,7 @@ Deno.test("readPart: a tensor in another shard of a split file, and the guards",
 const MOE = new URL("../../models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", import.meta.url).pathname;
 let moe = false;
 try { moe = Deno.statSync(MOE).isFile; } catch { moe = false; }
-Deno.test({ name: "readPart: the 35B MoE's experts equal their slices of the whole tensors (models/q36moe)", ignore: !moe, fn: async () => {
+Deno.test({ name: "q36moe real file: readPart gives the 35B MoE's experts as their slices of the whole tensors (models/q36moe)", ignore: !moe, fn: async () => {
   const fs = await import("node:fs");
   const fd = fs.openSync(MOE, "r");
   const read = (off, len) => { const out = new Uint8Array(len); let o = 0; while (o < len) { const n = fs.readSync(fd, out, o, len - o, off + o); if (n <= 0) break; o += n; } return out; };

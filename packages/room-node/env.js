@@ -84,7 +84,10 @@ export function highPerformance(gpu) {
 // unified memory (Apple silicon, a GB10 / Jetson): its "RAM" is the memory its pledge already lends, so parking
 // experts there frees nothing and spends the same memory twice. mem: cli/lib/lend.js detectMemory()'s answer
 // (the CLI has it); without one, probeMeta asks the OS itself, only when ramGB asks for offload.
-export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null } = {}) {
+// disk: this device has expert offload's disk tier (--disk: some experts may stay in the model's files, room/plan.js
+// DISK_RAM_MIN): meta.disk, and meta.local: the models whose files are all on this device's disk (source.js
+// localModels), the only ones it can read experts from. Only with offload (a discrete GPU and RAM for it).
+export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, disk = false, local = [] } = {}) {
   const ua = process.platform === "darwin" ? "Mac" : "Device";
   // dspec: dense verify frames of any column count (the repo's engine; room/lookup.js chainDenseSpec)
   const meta = { ua, webgpu: false, gpu: "no WebGPU", maxBufGB: 0, native: "node-dawn", dspec: DENSE_SPEC_V };
@@ -106,6 +109,10 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null }
     if (unifiedMemory(mem || hostMemory())) meta.noOffload = "unified memory";
     else { meta.offload = true; meta.ramGB = ramFor(ramGB); }
   }
+  if (disk) {
+    if (meta.offload) { meta.disk = true; meta.local = [...local]; }
+    else meta.noDisk = meta.noOffload || (meta.webgpu ? "no RAM for expert offload (--ram 0)" : "no WebGPU");
+  }
   return meta;
 }
 // whether the GPU shares the system's memory (detectMemory's kind; Apple silicon reads as unified there too)
@@ -120,5 +127,6 @@ export function hostMemory() {
 }
 // the RAM this device lets the room park experts in, GB: what it was told, at most 64 (as a pledge), whole tenths
 export const ramFor = (gb) => Math.max(0, Math.min(64, Math.floor((+gb || 0) * 10) / 10));
-// the GB this device lends: what it was told, else half its largest buffer; 1..64
-export const pledgeFor = (pledgeGB, maxBufGB) => Math.min(64, Math.max(1, +pledgeGB || Math.round(maxBufGB * 0.5) || 1));
+// the GB this device lends: what it was told (1..128: a big unified-memory machine may hold a ~72 GB model alone),
+// else half its largest buffer (1..64)
+export const pledgeFor = (pledgeGB, maxBufGB) => (+pledgeGB > 0 ? Math.min(128, Math.max(1, +pledgeGB)) : Math.min(64, Math.max(1, Math.round(maxBufGB * 0.5) || 1)));

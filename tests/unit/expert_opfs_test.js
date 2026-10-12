@@ -281,7 +281,8 @@ Deno.test("ring: decode cuts copy from mapped slots and give the writeBuffer pat
     if (!a.pool) for (let j = 0; j < 6; j++) assert(same(st.region.bufs[j].bytes, ref.region.bufs[j].bytes), `t ${t}: region`);
     await Promise.resolve(); await Promise.resolve();   // the GPU "finishes": recycled slots map again
   }
-  // a 3-column verify with 12 distinct experts: over the pool, all 12 read, through the region; 6 fit the ring
+  // a 3-column verify with 12 distinct experts: over the pool, all 12 read, into the region by prepare() (_writeRegion):
+  // the region fill streams through the 6-slot ring, waiting for slots instead of writeBuffer
   const big = Uint32Array.from([20, 21, 22, 23, 0, 24, 25, 26, 27, 0, 28, 29, 30, 31, 0]);
   await st.prepare(1, big, 3, 5); await ref.prepare(1, big, 3, 5);
   const encBig = dev.createCommandEncoder();
@@ -289,12 +290,19 @@ Deno.test("ring: decode cuts copy from mapped slots and give the writeBuffer pat
   dev.queue.submit([encBig.finish()]);
   for (let j = 0; j < 6; j++) assert(same(st.region.bufs[j].bytes, ref.region.bufs[j].bytes), "region bytes with an overflowing ring");
   const rs = st.ring.stats;
-  assert(rs.puts > 0 && rs.puts === st.stats.diskReads - rs.full, `ring: ${JSON.stringify(rs)} of ${st.stats.diskReads} reads`);
-  assert(rs.full > 0, "12 experts over 6 slots overflow into writeBuffer");
-  const ringBufs = new Set(st.ring.slots.map((s) => s.buf));
-  assert(dev.writes.length === rs.full * 6, `only overflow experts were written: ${dev.writes.length} writes, ${rs.full} overflows`);
-  assert(dev.writes.every(([b]) => !ringBufs.has(b)), "never a writeBuffer into the ring");
+  assert(rs.puts === st.stats.diskReads, `every read through the ring: ${JSON.stringify(rs)} of ${st.stats.diskReads} reads`);
+  assert(rs.full > 0 && dev.writes.length === 0, `12 experts over 6 slots: waited for slots, ${dev.writes.length} writes`);
   assert(/through the staging ring/.test(st.summary()), st.summary());
+  // a decode cut with more misses than the ring has slots: the overflow takes the writeBuffer path, same pool bytes
+  const { st: s2, dev: d2 } = diskStore(2), { st: r2 } = diskStore(0), sel = Uint32Array.from([3, 9, 17, 25, 0]);
+  await s2.prepare(0, sel, 1, 5); await r2.prepare(0, sel, 1, 5);
+  const e2 = d2.createCommandEncoder();
+  s2.plan(e2, 0, sel, 1, 5); r2.plan(fakeEncoder(), 0, sel, 1, 5);
+  d2.queue.submit([e2.finish()]);
+  for (let j = 0; j < 6; j++) assert(same(s2.L.get(0).pool[j].bytes, r2.L.get(0).pool[j].bytes), `overflow: pool slice ${j}`);
+  const ringBufs = new Set(s2.ring.slots.map((s) => s.buf));
+  assert(s2.ring.stats.puts === 2 && s2.ring.stats.full === 2 && d2.writes.length === 2 * 6, `2 through the ring, 2 written: ${JSON.stringify(s2.ring.stats)}, ${d2.writes.length} writes`);
+  assert(d2.writes.every(([b]) => !ringBufs.has(b)), "never a writeBuffer into the ring");
 });
 
 Deno.test("ring: prefill region fills (a whole layer, a short frame) stream through a small ring with the writeBuffer path's bytes", async () => {
@@ -337,6 +345,20 @@ Deno.test("ring: a prefill layer load right after a cut that filled the ring sti
   await st.loadLayerAsync(0, 7); await ref.loadLayerAsync(0, 7);
   for (let j = 0; j < 6; j++) assert(same(st.region.bufs[j].bytes, ref.region.bufs[j].bytes), `region slice ${j}`);
   assert(dev.writes.length === 0 && st.ring.stats.full > 0, `the layer waited for slots instead of writeBuffer: ${dev.writes.length} writes, ${JSON.stringify(st.ring.stats)}`);
+});
+
+Deno.test("ring: a speculative window's later prepare (flush false) leaves the slots its open encoder copies from mapped out", async () => {
+  // engine _specCut: several prepare() + plan() into one encoder before its submit; only the first may recycle
+  const { st, dev } = diskStore(8), { st: ref } = diskStore(0);
+  const a = Uint32Array.from([1, 2, 3, 4, 0]), b = Uint32Array.from([5, 6, 7, 8, 0]);
+  const enc = dev.createCommandEncoder();
+  await st.prepare(0, a, 1, 5); await ref.prepare(0, a, 1, 5);
+  st.plan(enc, 0, a, 1, 5); ref.plan(fakeEncoder(), 0, a, 1, 5);
+  await st.prepare(1, b, 1, 5, { flush: false }); await ref.prepare(1, b, 1, 5, { flush: false });   // throws if it recycled
+  st.plan(enc, 1, b, 1, 5); ref.plan(fakeEncoder(), 1, b, 1, 5);
+  dev.queue.submit([enc.finish()]);
+  for (const l of [0, 1]) for (let j = 0; j < 6; j++) assert(same(st.L.get(l).pool[j].bytes, ref.L.get(l).pool[j].bytes), `layer ${l} slice ${j}`);
+  assert(st.ring.stats.puts === 8 && dev.writes.length === 0, `8 experts through the ring: ${JSON.stringify(st.ring.stats)}`);
 });
 
 Deno.test("ring: the fake device catches a slot mapped again under an unsubmitted encoder", async () => {
