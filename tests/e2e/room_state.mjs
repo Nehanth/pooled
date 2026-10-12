@@ -422,11 +422,20 @@ async function restart() {
   const loaded = await w.waitForFunction(() => /ready · syncing with the room/.test(document.getElementById("ai-status").textContent), null, { timeout: 600000 }).then(() => true, () => false);
   check("restart: the worker loads its layers", loaded);
   if (!loaded) return;
+  // The worker's failure goes in only once the pick's own load is in and held, so the pick takes one
+  // path every run (it defers the stop, then stops when its load ends). Sent while the pick still
+  // loads, the pacer stops that load at its next tensor, it never reaches the hold, and the wait for
+  // the hold ran out its 10 min (CI on #351 and #364): the failure itself was shown at once.
+  const held = await big.waitForFunction(() => window.__hostLoadHeld || /^failed: /.test(document.getElementById("ai-status").textContent), null, { timeout: 300000 })
+    .then(() => big.evaluate(() => !!window.__hostLoadHeld), () => false);
+  check("restart: the pick's own load is in (held) before the worker's failure", held, (await view(big)).status);
+  if (!held) { log("restart: big's log:", JSON.stringify(await roomLog(big))); return; }
   await w.evaluate((b) => window.__send(b, { t: "ai-error", load: 1, message: "e2e: out of memory" }), bigId);
-  await big.waitForFunction(() => window.__hostLoadHeld, null, { timeout: 600000 }).catch(() => {});
-  await big.evaluate(() => { window.__holdHostLoad = false; window.__releaseHostLoad && window.__releaseHostLoad(); });
-  const failed = await big.waitForFunction(() => /^failed: /.test(document.getElementById("ai-status").textContent), null, { timeout: 300000 }).then(() => true, () => false);
+  await big.waitForFunction(() => /stopping the start/.test(document.getElementById("ai-status").textContent), null, { timeout: 30000 }).catch(() => {});
+  await big.evaluate(() => { window.__holdHostLoad = false; window.__releaseHostLoad(); });
+  const failed = await big.waitForFunction(() => /^failed: /.test(document.getElementById("ai-status").textContent), null, { timeout: 60000 }).then(() => true, () => false);
   check("restart: the start fails", failed, (await view(big)).status);
+  if (!failed) { log("restart: big's log:", JSON.stringify(await roomLog(big))); return; }
   await big.waitForFunction(() => !document.getElementById("ai-start").disabled, null, { timeout: 30000 }).catch(() => {});
   await big.click("#ai-start");
   const up = await online(big, 400000) && await online(w, 60000);
