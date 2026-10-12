@@ -15,8 +15,10 @@
 //             manifest records how many experts of each layer are on disk, saved at least every checkpointBytes
 //             after the data is flushed; a restart truncates a layer back to its last checkpoint and goes on from
 //             there. Files grow by writes (no big truncate up front: a fresh origin's quota grows with what is
-//             written, LocalMind's ingest note). opfsExpertStore() is the OPFS writer: a worker with a read-write
-//             sync access handle per file, and the manifest through createWritable (atomic on close).
+//             written, LocalMind's ingest note), and no precheck against estimate().quota either (ingestStorage:
+//             persist() and a warning, never a refusal; out of room, a write fails and the error says how far it
+//             got). opfsExpertStore() is the OPFS writer: a worker with a read-write sync access handle per file,
+//             and the manifest through createWritable (atomic on close).
 //   reader    OpfsExpertReader: ExpertStore's reader interface (readPart(info, e) -> { qs, sc }) over the files.
 //             Dedicated workers (sync access handles exist only there) each open every layer file with
 //             createSyncAccessHandle({ mode: "read-only" }), which several workers may hold on one file at once
@@ -117,8 +119,13 @@ export function expertPartOf(info) {
 //   one converts; inflight: chunks written but not yet acknowledged; checkpointBytes: the most that a crash can lose
 //   (the manifest is saved after each)
 //   onProgress({ doneBytes, totalBytes, layer, skippedBytes })
+//   estimate: () -> Promise<{ quota, usage }> (navigator.storage.estimate), read only when a write runs out of room,
+//   for the error's message
 // -> { totalBytes, wroteBytes, skippedBytes, layers }
-export async function ingestExperts({ layout, readAt, store, chunkExperts = 16, readAhead = 4, inflight = 4, checkpointBytes = 256 * 2 ** 20, onProgress = null }) {
+// Out of room (a QuotaExceededError from a write, a flush or the manifest) it throws ingestQuotaError's error: how much
+// this run wrote, how much is on disk up to the last checkpoint, how much the copy needs and the estimate. The manifest
+// still says only what was flushed before the last checkpoint, so ingested() is false and the next run resumes there.
+export async function ingestExperts({ layout, readAt, store, chunkExperts = 16, readAhead = 4, inflight = 4, checkpointBytes = 256 * 2 ** 20, onProgress = null, estimate = null }) {
   let m = await store.manifest();
   if (!m || m.version !== layout.version || m.key !== layout.key) m = { version: layout.version, key: layout.key, layers: {} };
   const ids = Object.keys(layout.layers).map(Number);
@@ -130,60 +137,107 @@ export async function ingestExperts({ layout, readAt, store, chunkExperts = 16, 
   }
   const skippedBytes = doneBytes;
   onProgress?.({ doneBytes, totalBytes, layer: -1, skippedBytes });
-  for (const l of ids) {
-    const L = layout.layers[l];
-    let ent = m.layers[l];
-    if (!ent || ent.nExp !== L.nExp || ent.recBytes !== L.recBytes) ent = m.layers[l] = { nExp: L.nExp, recBytes: L.recBytes, done: 0 };
-    if (ent.done >= L.nExp) continue;
-    await store.open(l, ent.done * L.recBytes);
-    const geo = PARTS.map((p) => expertGeometry(L.parts[p]));
-    const readChunk = async (e0, n) => Promise.all(PARTS.map(async (p, i) => {
-      const info = L.parts[p], len = n * geo[i].expBytes, off = info.byteOffset + e0 * geo[i].expBytes;
-      const b = await readAt(info.shard || 0, off, len);
-      if (b.byteLength < len) throw new Error(`expert OPFS ingest: short read of ${info.name} experts ${e0}..${e0 + n - 1} (${b.byteLength} of ${len} B)`);
-      return { off, b };
-    }));
-    let pend = [], since = 0, e0 = ent.done, eRead = e0;
-    const reads = [];   // the next readAhead chunks, being read while this one converts
-    const more = () => {
-      while (reads.length < Math.max(1, readAhead) && eRead < L.nExp) {
-        const p = readChunk(eRead, Math.min(chunkExperts, L.nExp - eRead));
-        p.catch(() => {});   // (a failure surfaces where it is awaited)
-        reads.push(p); eRead += chunkExperts;
-      }
-    };
-    while (e0 < L.nExp) {
-      more();
-      const n = Math.min(chunkExperts, L.nExp - e0), raw = await reads.shift();
-      const e1 = e0 + n;
-      more();
-      const rec = new Uint8Array(n * L.recBytes);
-      for (let i = 0; i < PARTS.length; i++) {
-        const { off, b } = raw[i];
-        const conv = expertDisk({ readAt: async (_s, o, len) => b.subarray(o - off, o - off + len) });
-        for (let k = 0; k < n; k++) {
-          const { qs, sc } = await conv.readPart(L.parts[PARTS[i]], e0 + k);
-          if (qs.byteLength !== L.slices[2 * i] || sc.byteLength !== L.slices[2 * i + 1]) throw new Error(`expert OPFS ingest: layer ${l} ${PARTS[i]} expert ${e0 + k} converted to ${qs.byteLength} / ${sc.byteLength} B`);
-          rec.set(qs, k * L.recBytes + L.offs[2 * i]); rec.set(sc, k * L.recBytes + L.offs[2 * i + 1]);
+  let pend = [], savedBytes = skippedBytes;   // savedBytes: what the saved manifest says is on disk
+  try {
+    for (const l of ids) {
+      const L = layout.layers[l];
+      let ent = m.layers[l];
+      if (!ent || ent.nExp !== L.nExp || ent.recBytes !== L.recBytes) ent = m.layers[l] = { nExp: L.nExp, recBytes: L.recBytes, done: 0 };
+      if (ent.done >= L.nExp) continue;
+      await store.open(l, ent.done * L.recBytes);
+      const geo = PARTS.map((p) => expertGeometry(L.parts[p]));
+      const readChunk = async (e0, n) => Promise.all(PARTS.map(async (p, i) => {
+        const info = L.parts[p], len = n * geo[i].expBytes, off = info.byteOffset + e0 * geo[i].expBytes;
+        const b = await readAt(info.shard || 0, off, len);
+        if (b.byteLength < len) throw new Error(`expert OPFS ingest: short read of ${info.name} experts ${e0}..${e0 + n - 1} (${b.byteLength} of ${len} B)`);
+        return { off, b };
+      }));
+      let since = 0, e0 = ent.done, eRead = e0;
+      const reads = [];   // the next readAhead chunks, being read while this one converts
+      const more = () => {
+        while (reads.length < Math.max(1, readAhead) && eRead < L.nExp) {
+          const p = readChunk(eRead, Math.min(chunkExperts, L.nExp - eRead));
+          p.catch(() => {});   // (a failure surfaces where it is awaited)
+          reads.push(p); eRead += chunkExperts;
         }
+      };
+      while (e0 < L.nExp) {
+        more();
+        const n = Math.min(chunkExperts, L.nExp - e0), raw = await reads.shift();
+        const e1 = e0 + n;
+        more();
+        const rec = new Uint8Array(n * L.recBytes);
+        for (let i = 0; i < PARTS.length; i++) {
+          const { off, b } = raw[i];
+          const conv = expertDisk({ readAt: async (_s, o, len) => b.subarray(o - off, o - off + len) });
+          for (let k = 0; k < n; k++) {
+            const { qs, sc } = await conv.readPart(L.parts[PARTS[i]], e0 + k);
+            if (qs.byteLength !== L.slices[2 * i] || sc.byteLength !== L.slices[2 * i + 1]) throw new Error(`expert OPFS ingest: layer ${l} ${PARTS[i]} expert ${e0 + k} converted to ${qs.byteLength} / ${sc.byteLength} B`);
+            rec.set(qs, k * L.recBytes + L.offs[2 * i]); rec.set(sc, k * L.recBytes + L.offs[2 * i + 1]);
+          }
+        }
+        const nb = rec.byteLength;   // (the OPFS store transfers rec's buffer to its worker: read the size first)
+        pend.push(store.write(l, e0 * L.recBytes, rec));
+        while (pend.length > inflight) await pend.shift();
+        since += nb; wroteBytes += nb; doneBytes += nb;
+        e0 = e1;
+        if (since >= checkpointBytes || e0 === L.nExp) {   // data on disk first, then the manifest that says so
+          await Promise.all(pend); pend = [];
+          await store.flush(l);
+          const was = ent.done;
+          ent.done = e0;
+          try { await store.saveManifest(m); } catch (e) { ent.done = was; throw e; }
+          savedBytes += (e0 - was) * L.recBytes;
+          since = 0;
+        }
+        onProgress?.({ doneBytes, totalBytes, layer: l, skippedBytes });
       }
-      const nb = rec.byteLength;   // (the OPFS store transfers rec's buffer to its worker: read the size first)
-      pend.push(store.write(l, e0 * L.recBytes, rec));
-      while (pend.length > inflight) await pend.shift();
-      since += nb; wroteBytes += nb; doneBytes += nb;
-      e0 = e1;
-      if (since >= checkpointBytes || e0 === L.nExp) {   // data on disk first, then the manifest that says so
-        await Promise.all(pend); pend = [];
-        await store.flush(l);
-        ent.done = e0;
-        await store.saveManifest(m);
-        since = 0;
-      }
-      onProgress?.({ doneBytes, totalBytes, layer: l, skippedBytes });
+      await store.close(l);
     }
-    await store.close(l);
+  } catch (e) {
+    await Promise.allSettled(pend);   // (writes still in flight fail too: not unhandled)
+    if (!isQuotaError(e)) throw e;
+    let est = null;
+    try { est = await estimate?.(); } catch { /* unknown */ }
+    throw ingestQuotaError(e, { wroteBytes, savedBytes, totalBytes, estimate: est });
   }
   return { totalBytes, wroteBytes, skippedBytes, layers: ids };
+}
+
+// ------------------------------------------------------------------ storage room
+
+// Do not precheck an ingest against navigator.storage.estimate().quota. Chrome reports a fresh origin's quota as
+// about usage + 10.7 GB whatever the disk has free (Chrome 155 on macOS: 10.0-10.7 GiB with 159 GB free), and the
+// quota grows as the origin writes: 48 GiB written past the reported quota went through (docs/bench-log.md,
+// 2026-10-11). A precheck refuses the 35B (17.5 GiB) and Flash (~72-105 GB) copies that would fit. Write, and fail
+// on a real write error (ingestExperts: QuotaExceededError -> ingestQuotaError). The same holds for any other OPFS
+// copy (a room loader's): use ingestStorage for the warning and the record, never to refuse.
+export const isQuotaError = (e) => e?.name === "QuotaExceededError" || /quota/i.test(e?.message || "");
+const gib = (b) => (b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GiB" : (b / 2 ** 20).toFixed(1) + " MiB");
+
+// Before an ingest, best effort: ask for persistent storage (Chrome grants or denies it without a prompt; denied, or
+// headless, the copy can be evicted under storage pressure) and read the estimate. Never throws.
+//   storage: navigator.storage (tests pass a stand-in) -> { persisted, quota, usage, warning } (warning: a line to log
+//   when the reported quota is below what the copy needs; the ingest goes on anyway)
+export async function ingestStorage(totalBytes, { storage = G_.navigator?.storage } = {}) {
+  let persisted = false, quota = null, usage = null;
+  try { persisted = (await storage?.persist?.()) === true; } catch { /* best effort */ }
+  try { const e = await storage?.estimate?.(); quota = e?.quota ?? null; usage = e?.usage ?? null; } catch { /* unknown */ }
+  const warning = quota != null && quota - (usage || 0) < totalBytes
+    ? `OPFS: estimate() reports ${gib(quota)} quota, ${gib(usage || 0)} used, the copy needs ${gib(totalBytes)}; going on (Chrome's quota grows as an origin writes; a real shortage fails the write)`
+    : null;
+  return { persisted, quota, usage, warning };
+}
+
+// The error for an ingest that ran out of room: what was written and what was needed, the estimate, the cause.
+//   wroteBytes: this run; savedBytes: on disk per the saved manifest (earlier runs + this run's checkpoints);
+//   totalBytes: the copy; estimate: { quota, usage } or null
+export function ingestQuotaError(cause, { wroteBytes, savedBytes, totalBytes, estimate = null }) {
+  const est = estimate?.quota != null ? `estimate() quota ${gib(estimate.quota)}, usage ${gib(estimate.usage || 0)}` : "estimate() unknown";
+  const e = new Error(`expert OPFS ingest: out of storage after writing ${gib(wroteBytes)} this run; ${gib(savedBytes)} of the ${gib(totalBytes)} copy is on disk to the last checkpoint, ${gib(totalBytes - savedBytes)} still needed (${est}). Free disk space and load again: the ingest resumes from the checkpoint. (${cause?.message || cause})`, { cause });
+  e.name = "QuotaExceededError";
+  Object.assign(e, { wroteBytes, savedBytes, totalBytes, neededBytes: totalBytes - savedBytes, estimate });
+  return e;
 }
 
 // whether the manifest has every expert of these layers (a reader can open them)

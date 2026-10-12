@@ -6,6 +6,9 @@
 //      exactly expertDisk's conversion over HTTP for every expert of every layer, read the way ExpertStore reads a
 //      cut (all of its misses at once), and for lone misses striped over the workers
 //   3. opening a copy that is not complete, or whose file was cut short, is refused
+//   4. out of room: ingestStorage (persist(), estimate()) warns but never refuses a copy bigger than the reported
+//      quota; a write that fails with QuotaExceededError (injected: a real one needs a full disk) stops the ingest
+//      with a clear error, the copy is not complete (the reader refuses it), and the next load resumes and finishes
 // No WebGPU needed (the GPU side is tests/bench/tab_disk.mjs).   node tests/e2e/expert_opfs.mjs [--experts 64] [--keep]
 import fs from "fs";
 import os from "os";
@@ -104,6 +107,29 @@ async function pageBody({ G, workers }, res) {
   let e4 = null;
   try { const R = await X.OpfsExpertReader.open(lay, { workers: 2 }); await R.close(); } catch (e) { e4 = e; }
   check("a file cut short is refused", !!e4 && /L001\.bin is/.test(e4.message), e4?.message);
+  // 4. out of room
+  await X.removeExperts(lay.key);
+  const st = await X.ingestStorage(lay.totalBytes), fake = await X.ingestStorage(lay.totalBytes, { storage: { persist: async () => false, estimate: async () => ({ quota: lay.totalBytes / 3, usage: 0 }) } });
+  check("ingestStorage: persist() and estimate() read, a small quota only warns", typeof st.persisted === "boolean" && st.quota > 0 && !!fake.warning,
+    `persist() ${st.persisted}, quota ${(st.quota / 2 ** 30).toFixed(1)} GiB, usage ${st.usage} B`);
+  store = await X.opfsExpertStore(lay);
+  const write = store.write;
+  let n = 0, e5 = null;
+  store.write = (l, at, b) => (++n > 10 ? Promise.reject(new DOMException("The operation failed because it would cause the application to exceed its storage quota.", "QuotaExceededError")) : write(l, at, b));
+  try { await X.ingestExperts({ layout: lay, store, readAt, chunkExperts: 8, inflight: 0, checkpointBytes: 16 * lay.layers[0].recBytes, estimate: () => navigator.storage.estimate() }); } catch (e) { e5 = e; }
+  await store.shutdown();
+  check("a write's QuotaExceededError stops the ingest with what was written and needed", e5?.name === "QuotaExceededError" && e5.wroteBytes === 80 * lay.layers[0].recBytes && e5.neededBytes > 0 && e5.estimate?.quota > 0 && /still needed/.test(e5.message), e5?.message);
+  const man5 = await X.readManifest([X.EXPERT_OPFS_DIR, lay.key]);
+  let e6 = null;
+  try { const R = await X.OpfsExpertReader.open(lay, { workers: 2 }); await R.close(); } catch (e) { e6 = e; }
+  check("the partial copy is not complete and the reader refuses it", !X.ingested(man5, lay) && !!e6 && /does not hold/.test(e6.message), `layers done ${JSON.stringify(Object.values(man5?.layers || {}).map((x) => x.done))}`);
+  store = await X.opfsExpertStore(lay);
+  const r6 = await X.ingestExperts({ layout: lay, store, readAt, chunkExperts: 8 });
+  await store.shutdown();
+  const R6 = await X.OpfsExpertReader.open(lay, { workers: 2 });
+  const g6 = await R6.readPart({ name: "blk.3.ffn_down_exps.weight" }, G.nExp - 1), w6 = want.find(([l, p, e]) => l === 3 && p === "down" && e === G.nExp - 1)[3];
+  await R6.close();
+  check("the next load resumes from the checkpoint and the copy reads back right", r6.skippedBytes === e5.savedBytes && r6.skippedBytes + r6.wroteBytes === lay.totalBytes && same(g6.qs, w6.qs) && same(g6.sc, w6.sc));
   await X.removeExperts(lay.key);
   return { out, ok: results.every(Boolean) && results.length > 0 };
 }

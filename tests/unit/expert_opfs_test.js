@@ -4,7 +4,7 @@
 // tests/e2e/expert_opfs.mjs in Chromium), and ExpertStore's staging ring: decode cuts through mapped slots and
 // copyBufferToBuffer put the same bytes in the same slots as the writeBuffer path.
 // No GPU, no browser.   deno test --no-check tests/unit/expert_opfs_test.js
-import { expertLayout, expertModelKey, expertContentSig, expertPartOf, ingestExperts, ingested, OpfsExpertReader, diskCacheBytes, expertFileName } from "../../engine/expert_opfs.js";
+import { expertLayout, expertModelKey, expertContentSig, expertPartOf, ingestExperts, ingested, ingestStorage, ingestQuotaError, OpfsExpertReader, diskCacheBytes, expertFileName } from "../../engine/expert_opfs.js";
 import { expertDisk } from "../../engine/expert_disk.js";
 import { StageRing } from "../../engine/stage_ring.js";
 import { ExpertStore } from "../../engine/expert_store.js";
@@ -114,6 +114,53 @@ Deno.test("ingest: a crash mid-layer resumes from the last checkpoint and gives 
   assert(r.skippedBytes === 20 * rec && r.wroteBytes === 12 * rec, `resumed: ${JSON.stringify(r)}`);
   assert(st.log.some(([k, l, keep]) => k === "open" && l === 1 && keep === 4 * rec), "layer 1 reopened at its checkpoint");
   for (const l of [0, 1]) assert(same(st.bytes(l), ref.bytes(l)), `layer ${l}: same bytes as an uninterrupted ingest`);
+});
+
+// Chrome on a Mac (2026-10-11): a fresh origin's estimate().quota is ~10.7 GB with 159 GB free and grows as the origin
+// writes, so a copy bigger than the reported quota must still be ingested; only a write that fails stops it
+Deno.test("quota: a reported quota below the copy warns and the ingest goes on; persist() is asked first", async () => {
+  const m = synthModel(), lay = expertLayout(m.G, [0, 1, 2]), calls = [];
+  const storage = { persist: async () => { calls.push("persist"); return false; }, estimate: async () => { calls.push("estimate"); return { quota: lay.totalBytes / 2, usage: 0 }; } };
+  const s = await ingestStorage(lay.totalBytes, { storage });
+  assert(calls.join() === "persist,estimate" && s.persisted === false && s.quota === lay.totalBytes / 2, JSON.stringify(s));
+  assert(s.warning && /going on/.test(s.warning), "a warning, not an error");
+  const r = await ingestExperts({ layout: lay, readAt: m.readAt, store: memStore(), chunkExperts: 3, estimate: storage.estimate });
+  assert(r.wroteBytes === lay.totalBytes, "the whole copy is written past the reported quota");
+  // room enough: no warning; a storage that throws or is missing: no throw, nothing known
+  assert((await ingestStorage(lay.totalBytes, { storage: { persist: async () => true, estimate: async () => ({ quota: 4 * lay.totalBytes, usage: 0 }) } })).warning === null, "room: no warning");
+  const bad = await ingestStorage(lay.totalBytes, { storage: { persist: async () => { throw new Error("no"); }, estimate: async () => { throw new Error("no"); } } });
+  assert(bad.persisted === false && bad.quota === null && bad.warning === null, JSON.stringify(bad));
+  assert((await ingestStorage(1, { storage: undefined })).quota === null, "no storage at all");
+});
+
+Deno.test("quota: a write's QuotaExceededError is a clear error and nothing past the last checkpoint is marked done", async () => {
+  const m = synthModel({ nExp: 16 }), lay = expertLayout(m.G, [0, 1]), rec = lay.layers[0].recBytes;
+  // the disk fills on the 11th write (2 experts each): layer 0 done, layer 1 checkpointed at 4 experts
+  const st = memStore(), write = st.write;
+  st.write = async function (l, at, b) {
+    if (this.writes >= 10) { const e = new Error("The operation failed because it would cause the application to exceed its storage quota."); e.name = "QuotaExceededError"; throw e; }
+    return write.call(this, l, at, b);
+  };
+  let err = null;
+  try { await ingestExperts({ layout: lay, readAt: m.readAt, store: st, chunkExperts: 2, inflight: 0, checkpointBytes: 4 * rec, estimate: async () => ({ quota: 10.7e9, usage: 20 * rec }) }); } catch (e) { err = e; }
+  assert(err?.name === "QuotaExceededError", `quota error: ${err}`);
+  assert(err.wroteBytes === 20 * rec && err.savedBytes === 20 * rec && err.totalBytes === lay.totalBytes && err.neededBytes === 12 * rec, JSON.stringify(err));
+  assert(err.estimate.quota === 10.7e9 && /out of storage after writing/.test(err.message) && /still needed/.test(err.message) && /estimate\(\) quota 10\.0 GiB/.test(err.message) && err.cause?.name === "QuotaExceededError", err.message);
+  const man = await st.manifest();
+  assert(!ingested(man, lay), "a failed ingest is never complete");
+  assert(man.layers[0].done === 16 && man.layers[1].done === 4, `checkpoint ${JSON.stringify(man.layers)}`);
+  // the manifest write itself running out of room: the in-memory count goes back too, the error is the same kind
+  const st2 = memStore();
+  st2.saveManifest = async () => { throw Object.assign(new Error("quota"), { name: "QuotaExceededError" }); };
+  try { await ingestExperts({ layout: lay, readAt: m.readAt, store: st2, chunkExperts: 2 }); err = null; } catch (e) { err = e; }
+  assert(err?.name === "QuotaExceededError" && err.savedBytes === 0 && /estimate\(\) unknown/.test(err.message), `${err?.message}`);
+  assert(await st2.manifest() === null, "nothing saved");
+  // the message's numbers; any other error goes through unchanged
+  const e3 = ingestQuotaError(new Error("x"), { wroteBytes: 2 ** 30, savedBytes: 2 ** 30, totalBytes: 3 * 2 ** 30 });
+  assert(e3.neededBytes === 2 * 2 ** 30 && /1\.0 GiB of the 3\.0 GiB copy/.test(e3.message), e3.message);
+  let other = null;
+  try { await ingestExperts({ layout: lay, readAt: async () => { throw new Error("fetch failed"); }, store: memStore() }); } catch (e) { other = e; }
+  assert(other?.message === "fetch failed", "a read error is not a quota error");
 });
 
 // a worker pool that answers "read" messages from in-memory files, after a delay, counting what it was sent

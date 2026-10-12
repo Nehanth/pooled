@@ -2436,3 +2436,13 @@ tok/s below moved by up to ~30% between identical runs. Decode: 64 greedy tokens
 Not measured here: the Mac (runbook in tests/bench/tab_disk.mjs: a cache sweep from 2 GiB up to diskCacheBytes' 19.8
 GiB bound for 36 GiB), a model
 whose experts do not fit memory (the 122B, Flash), and a warm page cache.
+
+## 2026-10-11: Mac Studio first tab runs (macOS 27, 36 GiB, Chrome 155.0.8059.39 headless, apple metal-3)
+
+Branches: main 5906f1e (opfs_read), feat/offload-cut-latency d1a490a (#351), feat/tab-disk-tier 19bbaad (#350). No sudo purge: "cold" = GB=48 > RAM (~35% page-cache hits); tab_disk runs warm.
+
+- OPFS expert reads (2.7 MB), W1/2/4/8: warm 33/58/75/88 GB/s; mostly cold 6.9/10.0/10.4/10.5 (= node native). Cold read->writeBuffer 2.5-8.7, mapped ring 6.3-10.7, xfer ~4.0. Rows (90 B): 205K/s at 16 workers mostly cold. Read-only shared handles: yes. persist() false; quota 10.7 GB on a fresh origin, grows with usage (48 GiB written fine).
+- Cut floor (cut_rt): submit+map after 0.18 ms GPU work 0.3 ms, with kick 0.4 ms; after 1.1 ms work both 1.3 ms. No polling penalty on Metal; queue.submit([]) ping 24 ms.
+- 35B tab (tab_cut): resident 103.5 tok/s. All 40 offloaded/16 slots: kick+pipe 47.5, kick off 47.6, both off 46.0. 10 offloaded/256 slots: ~81 all variants. Kick neutral on Metal. Cut fit: ms/token = 9.96 + 0.273 N (R² 0.996).
+- Tab disk tier (tab_disk, 4 workers, ring 64, warm): offgb 2/4/8/12/18/mem=36 = 15.2/20.7/27.4/30.2/30.2/30.4 tok/s (hits 59/77/91/95/95/95%); ring=0 at 2/4/8 = 7.2/10.8/18.4. Ingest 17.5 GiB 0.89 GB/s. Pick offgb=12. BITS 1b02b514/12de2ca for every run (Mac value; GB10 differs).
+- Found: tab_disk.html's quota precheck rejected a fresh origin (10.0 GiB < 17.5) although writes past it succeed; fixed on this branch.
