@@ -70,10 +70,30 @@ const fds = model.paths.map((p) => fs.openSync(p, "r"));
 const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.readSync(fds[file], b, 0, len, off); return b; };
 const ngram = new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
 const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ, expertRegion: !!experts });
-const pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: +env("MAXCOLS", 64), verifyCols: 8 });
+// pb: the exact kernels in the layered mode (its checks are bit for bit); in FULL mode the default (wide kernels for
+// prefill passes), EXACT=1 for the exact ones. pf (layered mode): the default batch, the wide-kernel checks
+const EXACT = env("EXACT") === "1";
+// DP4A=0 / moe / dense / 1: the wide kernels' dp4a choice (default: the batch's, f32)
+const dpOpt = (v) => (v === undefined ? {} : { dp4a: v === "1" ? true : v === "0" ? false : v });
+const pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: +env("MAXCOLS", FULL && !EXACT ? 1024 : 64), verifyCols: 8, exact: !FULL || EXACT,
+  ...(FULL ? dpOpt(Deno.env.get("DP4A")) : {}) });
+const wideOpts = { verifyCols: 8, ...(env("WIDE_COLS") ? { maxCols: +env("WIDE_COLS") } : {}) };
+const pf = FULL ? pb : await Qwen4ExpBatch.create(eng, weights, { ...wideOpts, ...dpOpt(env("DP4A")) });
+// the dp4a wide kernels too (when the device has them and DP4A does not pick a mode), with their own bounds
+const pfD = FULL || pf.dp4a || env("DP4A") !== undefined ? null : await Qwen4ExpBatch.create(eng, weights, { ...wideOpts, dp4a: true });
+const dpMode = (b) => (b.dpMoe && b.dpDense ? "dp4a" : b.dpMoe ? "moe" : b.dpDense ? "dense" : "f32");
 if (experts) console.log(`offload: layers ${experts.layers[0]}-${experts.layers.at(-1)}, ${experts.P} slots per layer, region ${(experts.regionBytes / 2 ** 30).toFixed(2)} GiB`);
 console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? "on" : "off"}, maxSeq ${MAXSEQ}, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 
+// the wide kernels' bounds on the relative error of a column's residual (max |d| / max |ref|), per layer against the
+// exact kernels and on the output against decode: p99 over the columns, and the max (a column whose router picks
+// another expert at a near tie moves by ~1e-2: no tolerance tighter than that holds for every column). f32: the sums
+// in another order (measured p99 ~3e-6, max 2e-4 on 4 layers). dp4a quantizes activations per 32 values, llama.cpp's
+// MMQ numerics (measured on 4 layers: the routed experts alone p99 1.2e-2 / max 3.6e-2; with the projections (the HC
+// ones stay f32) p99 1.8e-2 / max 5.7e-2)
+const BOUNDS = { f32: { p99: 2e-3, max: 5e-2 }, moe: { p99: 5e-2, max: 1e-1 }, dense: { p99: 5e-2, max: 1e-1 }, dp4a: { p99: 5e-2, max: 1e-1 } };
+// FULL=1, the whole model over ~2000 positions: the median column per layer (see full())
+const MED_BOUND = { f32: 1e-2, moe: 3e-2, dense: 3e-2, dp4a: 3e-2 };
 let fail = 0;
 const check = (ok, msg) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) fail++; };
 if (FULL) await full(); else await layered();
@@ -117,6 +137,7 @@ async function layered() {
   const decTs = NTOK / ((performance.now() - t - tRead) / 1000);
   console.log(`decode reference: ${NTOK} tokens, ${decTs.toFixed(1)} tok/s (${nL} layers)`);
   if (eng.qsa) await qsaVsRef(NTOK, qsaSnap);
+  if (env("WIDE_ONLY") === "1") { for (const b of [pf, pfD].filter((b) => b && (b === pf || b.dp4a))) await wideChecks(b, ids, ref, NTOK, decTs); return; }   // only the wide kernels' checks
 
   // prefill == decode, mixed pass sizes
   const run = async (label, chunks, n = NTOK, from = 0) => {
@@ -191,6 +212,85 @@ async function layered() {
     bad += cmpCols(r.hiddens, ref, p, 8).bad;
     check(bad === 0, `verify / accept: ${rounds} verify passes of 6 from ${start} (random accepts, to ${p}), then a pass: ${bad} columns differ from decode`);
   }
+  for (const b of [pf, pfD].filter((b) => b && (b === pf || b.dp4a))) await wideChecks(b, ids, ref, NTOK, decTs);
+}
+
+// ---- the wide kernels (the default batch, pf): within a tolerance of decode, per layer and on the output
+// relative error of one column: max |a - b| / max |b| over its hDim values
+function colRel(a, b, ao, bo, HD) {
+  let md = 0, mr = 0;
+  for (let i = 0; i < HD; i++) { md = Math.max(md, Math.abs(a[ao + i] - b[bo + i])); mr = Math.max(mr, Math.abs(b[bo + i])); }
+  return md / mr;
+}
+async function wideChecks(pf, ids, ref, NTOK, decTs) {
+  const HD = cfg.hDim, W = pf.maxCols, mode = dpMode(pf), { p99: LAYER_BOUND, max: MAX_BOUND } = BOUNDS[mode], OUT_BOUND = LAYER_BOUND;
+  console.log(`-- wide kernels: ${mode} (${W}-column passes)`);
+  // per layer: the wide kernels against the exact ones on the same passes (each from its own state), the residual
+  // after every layer; passes 0, 4 (past 2051 cells at 512 columns) and the last are compared
+  const keep = new Set([0, Math.min(4, Math.ceil(NTOK / W) - 1), Math.ceil(NTOK / W) - 1]);
+  const tapsOf = async (exact) => {
+    eng.reset();
+    const out = new Map(); let k = 0;
+    await pf.prefill(ids, { head: "none", exact, taps: true, onPass: (r, o, sz) => { if (keep.has(k)) out.set(k, { taps: r.taps, o, sz }); k++; } });
+    return out;
+  };
+  const tE = await tapsOf(true), tF = await tapsOf(false);
+  const errs = Array.from({ length: nL }, () => []);
+  for (const [k, e] of tE) {
+    const f = tF.get(k);
+    for (let l = 0; l < nL; l++) for (let c = 0; c < e.sz; c++) errs[l].push(colRel(f.taps[l], e.taps[l], c * HD, c * HD, HD));
+  }
+  const st = errs.map((a) => { const s = Float64Array.from(a).sort(); return { p50: s[s.length >> 1], p99: s[Math.floor(s.length * 0.99)], max: s[s.length - 1] }; });
+  for (let l = 0; l < nL; l++) console.log(`  layer ${l}: rel vs exact median ${st[l].p50.toExponential(2)}, p99 ${st[l].p99.toExponential(2)}, max ${st[l].max.toExponential(2)} (${errs[l].length} columns)`);
+  check(st.every((v) => v.p99 < LAYER_BOUND && v.max < MAX_BOUND), `wide (${mode}) vs exact per layer (${[...tE.keys()].map((k) => `pass ${k}`).join(", ")} of ${W} columns): p99 rel ${st.map((v) => v.p99.toExponential(2)).join(" ")} (bound ${LAYER_BOUND}), max ${st.map((v) => v.max.toExponential(2)).join(" ")} (bound ${MAX_BOUND})`);
+  // the output residual against the decode steps, every column, mixed pass sizes (narrow passes take the exact
+  // kernels), and a run across the 2051 / 2052 boundary
+  const dist = (a) => { const s = Float64Array.from(a).sort(); return { p50: s[s.length >> 1], p99: s[Math.floor(s.length * 0.99)], max: s[s.length - 1], over: a.filter((v) => v >= OUT_BOUND).length }; };
+  const fmt = (d) => `median ${d.p50.toExponential(2)}, p99 ${d.p99.toExponential(2)} (bound ${OUT_BOUND}), max ${d.max.toExponential(2)} (bound ${MAX_BOUND}; ${d.over} columns over ${OUT_BOUND})`;
+  const okD = (d) => d.p99 < OUT_BOUND && d.max < MAX_BOUND;
+  const run = async (label, chunks, n = NTOK, from = 0) => {
+    const es = []; let worstAt = -1, worst = 0, h = 0x811c9dc5;
+    const tt = performance.now();
+    await pf.prefill(ids.slice(from, from + n), { chunks, head: "none", wantHidden: true, onPass: (r, o, sz) => {
+      for (let c = 0; c < sz; c++) { const e = colRel(r.hiddens, ref[from + o + c], c * HD, 0, HD); es.push(e); if (e > worst) { worst = e; worstAt = from + o + c; } }
+      for (const w of new Uint32Array(r.hiddens.buffer, r.hiddens.byteOffset, r.hiddens.length)) h = Math.imul(h ^ w, 0x01000193) >>> 0;
+    } });
+    const ts = n / ((performance.now() - tt) / 1000), d = dist(es);
+    check(okD(d), `${label}: ${n} tokens, rel vs decode ${fmt(d)}, worst at ${worstAt}; ${ts.toFixed(1)} tok/s incl. readback`);
+    return h.toString(16).padStart(8, "0");
+  };
+  eng.reset();
+  const hw = await run(`wide (${mode}) prefill ~ decode, ${W}-column passes`, [W]);
+  console.log(`BITS ${nL} layers, ${NTOK} tokens, ${W}-column wide (${mode}) prefill residual hash ${hw}${experts ? " (offloaded)" : " (resident)"}`);
+  eng.reset();
+  await run(`wide (${mode}) prefill ~ decode, passes 16,300,1,512,40,17,512`, [16, 300, 1, 512, 40, 17, 512]);
+  eng.reset();
+  await run(`wide (${mode}) prefill ~ decode, passes across 2051 / 2052`, [512, 512, 512, 512, 3, 1, 16, 64], Math.min(NTOK, 2200));
+  // twice the same: the same bits (the grouped MoE's pair order is free, its sums are not)
+  { eng.reset(); const a = await pf.prefill(ids.slice(0, W), { head: "none", wantHidden: true }); eng.reset(); const b = await pf.prefill(ids.slice(0, W), { head: "none", wantHidden: true });
+    const same = new Uint32Array(a.hiddens.buffer).every((x, i) => x === new Uint32Array(b.hiddens.buffer)[i]);
+    check(same, `wide (${mode}) prefill twice: ${same ? "the same bits" : "DIFFERENT bits"}`); }
+  // interleave: a wide prefill, decode steps, a wide prefill again
+  {
+    eng.reset();
+    const a = Math.min(1500, NTOK - 400), b = a + 20;
+    const es = [];
+    const r1 = await pf.prefill(ids.slice(0, a), { head: "none", wantHidden: true });
+    const n1 = r1.hiddens.length / HD;
+    for (let c = 0; c < n1; c++) es.push(colRel(r1.hiddens, ref[a - n1 + c], c * HD, 0, HD));
+    for (let p = a; p < b; p++) es.push(colRel((await eng.forwardToken(ids[p])).hidden, ref[p], 0, 0, HD));
+    const r2 = await pf.prefill(ids.slice(b, b + 300), { head: "none", wantHidden: true, chunks: [300] });
+    for (let c = 0; c < 300; c++) es.push(colRel(r2.hiddens, ref[b + c], c * HD, 0, HD));
+    const d = dist(es);
+    check(okD(d), `wide (${mode}) interleave: prefill 0..${a}, decode ${a}..${b}, prefill ${b}..${b + 300}: rel vs decode ${fmt(d)}`);
+  }
+  // speed
+  eng.reset();
+  const t = performance.now();
+  await pf.prefill(ids, { head: "none" });
+  await device.queue.onSubmittedWorkDone();
+  const ts = NTOK / ((performance.now() - t) / 1000);
+  console.log(`wide (${mode}) prefill: ${NTOK} tokens, ${ts.toFixed(1)} tok/s (${nL} layers, ${W}-column passes) vs decode ${decTs.toFixed(1)}: ${(ts / decTs).toFixed(1)}x`);
 }
 
 // ---- QSA on the real activations vs the CPU reference (decode engine, the last QSA layer in range)
@@ -260,6 +360,31 @@ function gap(lg) {
 }
 
 async function full() {
+  // the wide kernels per layer on the whole model (with the head), against the exact ones: a short prompt in one pass
+  // (the layered bounds), and the last 128 columns of a prompt past 2051 cells (QSA selecting), each from its own
+  // prefill of the rest. Over ~2000 positions and 48 layers the two drift apart by more than one pass's rounding: a
+  // near tie in a router (or a QSA block score) flips at some column, that column moves by ~1e-2, and the DeltaNet
+  // state and attention carry part of it to every later column (from ~layer 20 on; two wide configurations that sum
+  // in another order drift the same way, see docs/kernels.md). So the long check bounds the median column per layer
+  // (MED_BOUND) and reports the max.
+  if (!pb.exact) {
+    const HD = cfg.hDim, mode = dpMode(pb), Bd = BOUNDS[mode];
+    for (const [label, ids, tail, long] of [["two-sum", gold["two-sum"].prompt, gold["two-sum"].prompt.length, false], ["ctx2k1 tail", gold.ctx2k1.prompt, 128, true]]) {
+      const tapsOf = async (exact) => {
+        eng.reset();
+        if (ids.length > tail) await pb.prefill(ids.slice(0, -tail), { head: "none", exact });
+        return (await pb.prefill(ids.slice(-tail), { head: "none", exact, taps: true, chunks: [tail] })).taps;
+      };
+      const e = await tapsOf(true), f = await tapsOf(false), st = [];
+      for (let l = 0; l < e.length; l++) {
+        const es = []; for (let c = 0; c < tail; c++) es.push(colRel(f[l], e[l], c * HD, c * HD, HD));
+        es.sort((a, b) => a - b); st.push({ p50: es[es.length >> 1], p99: es[Math.floor(es.length * 0.99)], max: es[es.length - 1] });
+      }
+      const worst = st.reduce((a, b) => ({ p50: Math.max(a.p50, b.p50), p99: Math.max(a.p99, b.p99), max: Math.max(a.max, b.max) }));
+      const ok = long ? worst.p50 < MED_BOUND[mode] : worst.p99 < Bd.p99 && worst.max < Bd.max;
+      check(ok, `wide (${mode}) vs exact per layer, ${label} (${tail} columns at ${ids.length - tail}): worst layer median ${worst.p50.toExponential(2)}${long ? ` (bound ${MED_BOUND[mode]})` : ""}, p99 ${worst.p99.toExponential(2)}${long ? "" : ` (bound ${Bd.p99})`}, max ${worst.max.toExponential(2)}${long ? "" : ` (bound ${Bd.max})`}; median at layers 0, 12, 24, 36, 47: ${[0, 12, 24, 36, 47].map((l) => st[l].p50.toExponential(1)).join(" ")}`);
+    }
+  }
   const tok = model.tokenizer();
   const pick = env("CASES") ? env("CASES").split(",") : null;
   const results = [];
@@ -307,7 +432,8 @@ async function full() {
   // Same engine, a second batch: its 64-column prefill's logits == the verifyCols 8 batch's bit for bit, its id ==
   // the decode engine's, and a 1-column verify gives decode's next id.
   {
-    const g = gold["two-sum"], pb1 = await Qwen4ExpBatch.create(eng, weights, { maxCols: 64, verifyCols: 1 });
+    // (pb's other options: the wide kernels' split-K depends on maxCols, so another width would sum in another order)
+    const g = gold["two-sum"], pb1 = await Qwen4ExpBatch.create(eng, weights, { maxCols: pb.maxCols, verifyCols: 1, exact: pb.exact, dp4a: pb.dpMoe && pb.dpDense ? true : pb.dpMoe ? "moe" : pb.dpDense ? "dense" : false });
     eng.reset(); const dec = await eng.prefillTokens(g.prompt, { wantLogits: true }), next = (await eng.forwardToken(dec.id)).id;
     eng.reset(); const r8 = await pb.prefill(g.prompt, { wantLogits: true });
     eng.reset(); const r1 = await pb1.prefill(g.prompt, { wantLogits: true });
