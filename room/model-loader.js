@@ -202,7 +202,9 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       let experts = null;
       if (off) {
         if (!globalThis.navigator?.storage?.getDirectory) throw new Error("the host asked this tab to read experts from disk, but this browser has no OPFS");
-        const readAt = async (shard, o, len) => new Uint8Array(await (await rangeFetch(urls[shard], o, o + len - 1, true)).arrayBuffer());
+        // straight from the network, never through the weight cache (rangeFetch stores what it fetches: 65 GB of experts
+        // there would be a second copy on this disk) nor the HTTP cache
+        const readAt = httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }) });
         const t = await tabExpertTier(dev, G, off.disk, { readAt, offload, workers: expertWorkers, ring: expertRing,
           onStatus: aiStatus, onProgress: (d, tot) => onProg(d, tot), log: (s) => { console.info(s); crumb(s); } });
         experts = t.store;
@@ -294,7 +296,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
     // not in OPFS yet: copy it there first (room/flashdisk.js ingestNgram; a failure falls back to HTTP below)
     if (ngramIngest && globalThis.navigator?.storage?.getDirectory) {
       try {
-        await ingestNgram(cfg, httpReadAt(urls), { onStatus: aiStatus, log: (s) => { console.info(s); crumb(s); } });
+        await ingestNgram(cfg, httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }) }), { onStatus: aiStatus, log: (s) => { console.info(s); crumb(s); } });
       } catch (e) {
         const why = `${e?.name || "Error"}: ${String(e?.message || e).split("\n")[0].slice(0, 200)}`;
         console.warn(`n-gram table: copying it into OPFS failed (${why}); reading its rows by HTTP range instead`);
