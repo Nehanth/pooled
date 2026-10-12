@@ -9,11 +9,14 @@
 //   ties     q_norm = 0: every score is 0, the lowest 512 blocks win, GPU == CPU exactly
 //   p == d   a prefill column's list and output == a decode step at that position, bit for bit
 //   determinism  the same pass twice gives the same bits
+//   f16      engine/wgsl/f16.js on the GPU: f16_rne == f16bits on ties, subnormals, overflow, NaN and random f32s;
+//            f16_f32 == h2f on all 65536 halves; reports how the backend's own pack2x16float / unpack2x16float differ
 //   cd tests && deno run --unstable-webgpu --allow-read test_qsa.js       (QUICK=1: contexts up to 8K)
 import { qsaPipelines, qsaBindGroups, qsaDispatch, qsaUniform, qsaSizes, encodeQsa, QSA_SEL_STRIDE, QSA_PROJ } from "../engine/qsa.js";
 import { attnDecWGSL, decSplits, DEC_CQ } from "../engine/wgsl/attn_dec.js";
 import { QSA, QsaRefCache, ingest, qsaStep, selectBlocks, selectedCells, attendCells, f16bits, h2f } from "./reference/qsa_ref.mjs";
 import { parseGGUFHeader } from "../engine/gguf.js";
+import { F16_WGSL } from "../engine/wgsl/f16.js";
 
 const quick = Deno.env.get("QUICK") === "1";
 const ad = await navigator.gpu.requestAdapter();
@@ -68,6 +71,53 @@ const gDenseC = device.createBindGroup({ layout: denseCLayout1, entries: [B.faO,
 const setFrame = (pos, nCols) => device.queue.writeBuffer(B.frame, 0, new Uint32Array([pos, pos + 1, nCols, 0]));
 const setFD = (S = adCfg.S) => device.queue.writeBuffer(B.fd, 0, new Uint32Array([qDim, qDim, S, adCfg.S]));
 function submit(fn) { const e = device.createCommandEncoder(), p = e.beginComputePass(); fn(p); p.end(); device.queue.submit([e.finish()]); }
+
+// ---- 0. the f16 helpers (engine/wgsl/f16.js) vs the CPU reference's f16bits / h2f ----
+{
+  const xs = [], u = new Uint32Array(1), fv = new Float32Array(u.buffer);
+  const fromBits = (b) => { u[0] = b >>> 0; return fv[0]; };
+  for (let h = 0; h < 0x7c00; h++) for (const sg of [0, 0x8000]) {      // every finite half: itself, the midpoint
+    const lo = h2f(h | sg), hi = h2f((h + 1) | sg);                       // to the next one (a tie), and 1 f32 ulp
+    xs.push(lo);                                                          // either side of that midpoint
+    if (h < 0x7bff) { const mid = Math.fround((lo + hi) / 2); u[0] = new Uint32Array(new Float32Array([mid]).buffer)[0]; xs.push(mid, fromBits(u[0] - 1), fromBits(u[0] + 1)); }
+  }
+  xs.push(65504, 65519.99, 65520, 65536, 1e30, -1e30, Infinity, -Infinity, NaN, -NaN, 0, -0, 1e-45, -1e-45, 2 ** -25, 2 ** -25 * 1.0001, 2 ** -26, 2 ** -24, 1.5 * 2 ** -25);
+  for (let i = 0; i < 1 << 16; i++) xs.push(fromBits((Math.floor(Math.random() * 2 ** 32)) >>> 0));
+  const x = Float32Array.from(xs), n = x.length;
+  const mod = device.createShaderModule({ code: F16_WGSL + /* wgsl */ `
+@group(0) @binding(0) var<storage, read> fx: array<f32>;
+@group(0) @binding(1) var<storage, read_write> fo: array<u32>;     // [n] rne | builtin << 16
+@group(0) @binding(2) var<storage, read_write> fh: array<u32>;     // [65536 * 2] f16_f32 bits, unpack2x16float bits
+@group(0) @binding(3) var<uniform> fn_: vec4<u32>;
+@compute @workgroup_size(256)
+fn f16_check(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x + gid.y * 65535u * 256u;
+  if (i < fn_.x) { fo[i] = f16_rne(fx[i]) | ((pack2x16float(vec2<f32>(fx[i], 0.0)) & 0xffffu) << 16u); }
+  if (i < 65536u) { fh[2u * i] = bitcast<u32>(f16_f32(i)); fh[2u * i + 1u] = bitcast<u32>(unpack2x16float(i).x); }
+}` });
+  const pl = device.createComputePipeline({ layout: "auto", compute: { module: mod, entryPoint: "f16_check" } });
+  const bx = buf(x), bo = mk(n * 4), bh = mk(65536 * 8), bn = buf(new Uint32Array([n, 0, 0, 0]), U_);
+  const bg = device.createBindGroup({ layout: pl.getBindGroupLayout(0), entries: [bx, bo, bh, bn].map((b, binding) => ({ binding, resource: { buffer: b } })) });
+  const wgs = Math.ceil(n / 256);
+  submit((p) => { p.setPipeline(pl); p.setBindGroup(0, bg); p.dispatchWorkgroups(Math.min(wgs, 65535), Math.ceil(wgs / 65535)); });
+  const o = await readU32(bo, n), hb = await readU32(bh, 65536 * 2);
+  let bad = 0, firstBad = -1, builtinDiff = 0, unpackDiff = 0, f2Bad = 0;
+  const hf = new Float32Array(1), hu = new Uint32Array(hf.buffer);
+  for (let i = 0; i < n; i++) {
+    const want = f16bits(x[i]);
+    if ((o[i] & 0xffff) !== want) { bad++; if (firstBad < 0) firstBad = i; }
+    if ((o[i] >>> 16) !== want && !Number.isNaN(x[i])) builtinDiff++;
+  }
+  for (let h = 0; h < 65536; h++) {
+    hf[0] = h2f(h); const want = hu[0], nan = Number.isNaN(hf[0]);
+    const ok = (b) => nan ? (((b >>> 23) & 0xff) === 0xff && (b & 0x7fffff) !== 0) : b === want;
+    if (!ok(hb[2 * h])) f2Bad++;
+    if (!ok(hb[2 * h + 1])) unpackDiff++;
+  }
+  check(bad === 0, `f16    f16_rne == f16bits on ${n} f32s (every half, every midpoint +- 1 ulp, edges, random bits)${bad ? `: ${bad} differ, first x = ${x[firstBad]} got 0x${(o[firstBad] & 0xffff).toString(16)} want 0x${f16bits(x[firstBad]).toString(16)}` : ""}; this backend's pack2x16float differs on ${builtinDiff}`);
+  check(f2Bad === 0, `f16    f16_f32 == h2f on all 65536 halves${f2Bad ? `: ${f2Bad} differ` : ""}; this backend's unpack2x16float differs on ${unpackDiff}`);
+  for (const b of [bx, bo, bh, bn]) b.destroy();
+}
 
 // ---- 1. qsa_proj vs float64 ----
 {
