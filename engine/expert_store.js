@@ -27,6 +27,18 @@ const MAP_PARK = () => GPUBufferUsage.MAP_WRITE | GPUBufferUsage.COPY_SRC;
 const POOL_USAGE = () => GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST;
 export const OFFLOAD_PARTS = ["gate", "up", "down"];
 
+// Engines that read a weight entry's GPU buffers directly (the batched passes, engine/qwen4exp_batch.js) call this
+// first: a parked entry has no buffers of its own, only the store's pools and region, so they must route the layer
+// through the store or refuse it, never bind it.
+export function notParked(e, what = "weight") {
+  if (e?.offload) {
+    throw new Error(`${what}: layer ${e.layer}'s ${e.part} experts are offloaded to the expert store (engine/expert_store.js); `
+      + "this engine binds expert weights directly and does not route offloaded layers yet (batched prefill / verify "
+      + "with expert offload is unsupported): run those layers resident, or decode them one token at a time");
+  }
+  return e;
+}
+
 export class ExpertStore {
   // layers: absolute layer indices whose routed experts are offloaded. vramBytes: the GPU budget for the slot pools
   // plus the prefill region. slots: a fixed slot count per layer instead (tests). parkBytes: size of each parked buffer.

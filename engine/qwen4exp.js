@@ -23,8 +23,14 @@
 // same moe_gu / moe_dn kernels run on the pool with slot ids (B.offIds) in place of expert ids. One token at a time,
 // a cut holds at most K experts, so the store is built without the whole-layer prefill region. moeTrace: the router's
 // ids and weights of every layer are kept per token for readMoeTrace() (tests/trace_flash.js).
+// Offload is decode-only for now: a batched prefill / verify engine (engine/qwen4exp_batch.js, PR #348) builds its
+// expert ops with _wq, which refuses a parked entry (notParked). Routing offloaded layers there means, per offloaded
+// layer and pass: end the compute pass after the router, ExpertStore.loadLayer (long frames) or loadExperts (short
+// ones, after reading the ids back) into the region, and bind regionEntry(i, part) with the original expert ids;
+// create the engine with expertRegion: true for that. this.offLayers lists the offloaded layers.
 import { qwen4expConfig } from "./gguf.js";
 import { NgramState } from "./ngram.js";
+import { notParked } from "./expert_store.js";
 import * as W from "./wgsl/qwen4exp.js";
 
 const U = GPUBufferUsage;
@@ -39,7 +45,10 @@ export class Qwen4ExpEngine {
   // drop their CPU copies once uploaded, so one weights object builds one engine (a second create throws).
   // ngram: an NgramTable (engine/ngram.js) for the PLE layer's rows; required when layerRange holds a PLE layer.
   // layerRange [lo, hi): the trunk layers this engine runs; hasEmbed / hasHead as Qwen35Engine.
-  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null, moeTrace = false }) {
+  // moeTrace: keep every layer's router ids and weights per token (readMoeTrace). expertRegion: build the expert store
+  // with its whole-layer region (ExpertStore.loadLayer / loadExperts / regionEntry), for a batched engine that routes
+  // offloaded layers; off by default, since decode alone never needs it and its 1.4-1.8 GB goes to the pools instead.
+  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null, moeTrace = false, expertRegion = false }) {
     const cfg = this.cfg = qwen4expConfig(meta);
     this.device = device;
     const [lo, hi] = layerRange || [0, cfg.L];
@@ -99,9 +108,10 @@ export class Qwen4ExpEngine {
       const st = offL[0].expGate.store;
       if (!offL.every((L) => L.expUp?.offload && L.expDown?.offload && L.expGate.store === st && L.expUp.store === st && L.expDown.store === st))
         throw new Error("qwen4exp: expert offload: a layer's experts are only partly parked, or in two stores");
-      st.build({ K, region: false });
+      st.build({ K, region: !!expertRegion });
       await st.checkAlloc();
       this.experts = st;
+      this.offLayers = new Set(offL.map((L) => L.expGate.layer));
       B.offIds = buf(K + 1);   // the slot ids of the cut's experts (ExpertStore.plan's remap: K, then the shared slot)
       this.offStage = device.createBuffer({ size: Math.ceil(K * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
     }
@@ -126,6 +136,7 @@ export class Qwen4ExpEngine {
         }
         return { kind: "f32", buf: e.gpuF32, n: e.data.length };
       }
+      notParked(e, what);   // an offloaded layer's experts have no GPU copy: engines that do not route them refuse
       if (e.gpu?.fused) throw new Error(`qwen4exp: weight ${what || ""} was fused into another engine's buffer (one weights object builds one engine)`);
       if (!e.gpu) {
         const mk = (data) => {
@@ -580,7 +591,8 @@ export class Qwen4ExpEngine {
     };
     for (const l of this.layers) {
       await run(l.attnOps, force(`in-${l.i}`));
-      if (l.off) {   // offloaded: the router, the cut, then the experts on the pool
+      if (l.off || this.moeTraceOn) {   // offloaded: the router, the cut, then the experts on the pool (moeTrace:
+        // every layer splits here too, so the trace holds every layer's ids, as in _forward)
         await run(l.ffnRoute, force(`mid-${l.i}`));
         dev.queue.submit([(await this._afterRoute(dev.createCommandEncoder(), l)).finish()]);
         await run(l.ffnExp, null);

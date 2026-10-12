@@ -19,9 +19,12 @@
 //              errors compound within a half layer, so there only the argmax, n-gram rows and sizes gate.
 //   BITS=1     fingerprint: the golden prompts (CASES, default two-sum,bash) then BITS_TOKENS (24) greedy ids each,
 //              hashes of every step's logits and of the residual after the last one. Expert offload must not change
-//              a bit: run it resident, then with OFFLOAD=all OFFLOAD_SLOTS=16 (tests/load_model.js offloadFromEnv;
-//              the loader parks the routed experts of those layers in RAM and the engine serves them from a 16-slot
-//              pool per layer), and the BITS lines must be equal. Prints the store's hit rate.
+//              a bit: run it resident, then with OFFLOAD=0-15 OFFLOAD_SLOTS=16 (tests/load_model.js offloadFromEnv;
+//              the loader parks the routed experts of those layers in RAM, ~23 GiB, and the engine serves them from
+//              a 16-slot pool per layer), and the BITS lines must be equal. Prints the store's hit rate. Not
+//              OFFLOAD=all with every expert in RAM: it does not fit an 80 GB job (parked RAM + the resident rest);
+//              offload every layer only with a disk tier (OFFLOAD_DISK=all, the SSD PRs' loader).
+//              Offload is decode-only: batched prefill / verify (engine/qwen4exp_batch.js) refuses offloaded layers.
 // OFFLOAD=lo-hi | all [OFFLOAD_GB=8 | OFFLOAD_SLOTS=N] work in every mode (offloaded layers' experts parked).
 import fs from "node:fs";
 import path from "node:path";

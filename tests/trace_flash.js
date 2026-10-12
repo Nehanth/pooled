@@ -2,7 +2,9 @@
 // (tests/sim/tiersim.js loadTraces reads both). For every one-token pass and every layer it records which of the 512
 // experts the router chose (top-10) and their normalized weights, through the engine's moeTrace option. The engine
 // has no batched prefill yet, so prompt tokens run one at a time like decode; only the decode passes (the last
-// prompt token's and each generated token's) are recorded, as trace_moe.js does.
+// prompt token's and each generated token's) are recorded, as trace_moe.js does. PROMPT=1 records the prompt passes
+// too (tokens[].phase "prompt"; tiersim then replays them with the rest): prompt passes churn the pool as well, and
+// a decode-only trace leaves that out.
 //
 //   deno run --unstable-webgpu --allow-read --allow-env --allow-write tests/trace_flash.js <outDir> [scenario,...]
 //   Q38F_DIR=<dir> (default models/q38flash); TOKENS=N caps every decode; DRY=1 renders and counts the prompts
@@ -32,7 +34,7 @@ import { renderApi, templateProfile } from "../room/conversation.js";
 const env = (k, d) => Deno.env.get(k) ?? d;
 const OUT = Deno.args[0] || "traces";
 const ONLY = Deno.args[1] ? Deno.args[1].split(",") : null;
-const CAP = +env("TOKENS", 0), DRY = env("DRY") === "1", WTS = env("WEIGHTS") !== "0";
+const CAP = +env("TOKENS", 0), DRY = env("DRY") === "1", WTS = env("WEIGHTS") !== "0", PROMPT = env("PROMPT") === "1";
 const MAXSEQ = 2048;
 const DIR = env("Q38F_DIR", new URL("../models/q38flash", import.meta.url).pathname);
 const first = fs.readdirSync(DIR).filter((f) => /^Qwen3\.8-Flash-Next-.*-00001-of-\d{5}\.gguf$/.test(f))[0];
@@ -135,7 +137,8 @@ for (const [name, sc] of Object.entries(SCEN)) {
   const exact = new Map();   // assistant message index -> the ids it was sampled as (renderApi turnIds), so each render extends the last
   const closed = [V["<think>"], ...tok.encode("\n\n"), V["</think>"], ...tok.encode("\n\n")];
   for (let ti = 0; ti < turns.length; ti++) {
-    if (sc.total && recs.length >= sc.total) break;
+    const nDec = () => recs.filter((r) => r.phase !== "prompt").length;   // sc.total counts decode passes
+    if (sc.total && nDec() >= sc.total) break;
     if (turns[ti]) msgs.push(turns[ti]);
     const ids = renderApi(tok, { system: sc.system, tools: sc.tools, messages: msgs, params: { thinking: false } }, profile,
       { turnIds: (j) => exact.get(j) || null }).ids;
@@ -144,12 +147,23 @@ for (const [name, sc] of Object.entries(SCEN)) {
     if (same < fed.length) throw new Error(`${name}: turn ${ti} does not extend the previous prompt (${same} of ${fed.length} ids agree)`);
     const add = ids.slice(fed.length);
     let t = performance.now();
-    if (add.length > 1) await eng.prefillTokens(add.slice(0, -1));
+    const keep = async (tr) => {
+      const s = new Uint16Array(L * K), w = new Float32Array(L * K);
+      tr.forEach((r, l) => { s.set(r.sel, l * K); w.set(r.w, l * K); });
+      sels.push(s); ws.push(w);
+    };
+    if (PROMPT) {   // every prompt pass recorded too
+      for (let j = 0; j < add.length - 1; j++) {
+        await eng.forwardToken(add[j]);
+        recs.push({ id: add[j], pos: fed.length + j, turn: ti, phase: "prompt" });
+        await keep(await eng.readMoeTrace());
+      }
+    } else if (add.length > 1) await eng.prefillTokens(add.slice(0, -1));
     prefillS += (performance.now() - t) / 1000; prefillTok += add.length - 1;
     fed = ids.slice(0, -1);
     let cur = add[add.length - 1];
     const ans = [];
-    const max = Math.min(CAP || sc.max, MAXSEQ - fed.length - 1, sc.total ? sc.total - recs.length : Infinity);
+    const max = Math.min(CAP || sc.max, MAXSEQ - fed.length - 1, sc.total ? sc.total - nDec() : Infinity);
     if (max <= 0) break;
     if (max < sc.max && !CAP) console.log(`  ${name} turn ${ti}: ${max} of ${sc.max} tokens fit the ${MAXSEQ} positions`);
     t = performance.now();
@@ -157,11 +171,8 @@ for (const [name, sc] of Object.entries(SCEN)) {
       const pos = fed.length;
       const next = (await eng.forwardToken(cur)).id;
       fed.push(cur);
-      const tr = await eng.readMoeTrace();
       recs.push({ id: cur, pos, turn: ti, phase: n === 0 ? "last-prompt" : "decode" });
-      const s = new Uint16Array(L * K), w = new Float32Array(L * K);
-      tr.forEach((r, l) => { s.set(r.sel, l * K); w.set(r.w, l * K); });
-      sels.push(s); ws.push(w);
+      await keep(await eng.readMoeTrace());
       if (EOS.has(next)) break;
       ans.push(next); cur = next;
     }

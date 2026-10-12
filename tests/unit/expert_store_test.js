@@ -3,7 +3,7 @@
 // on byte arrays, so a test can read back what a slot or the region holds. The GPU checks are tests/test_moe.js and
 // tests/test_q38_bits.js with OFFLOAD set (the offloaded engine must give the resident engine's bits).
 // No GPU.   deno test --no-check tests/unit/expert_store_test.js
-import { ExpertStore } from "../../engine/expert_store.js";
+import { ExpertStore, notParked } from "../../engine/expert_store.js";
 
 globalThis.GPUBufferUsage ??= { MAP_READ: 1, MAP_WRITE: 2, COPY_SRC: 4, COPY_DST: 8, INDEX: 16, VERTEX: 32, UNIFORM: 64, STORAGE: 128, INDIRECT: 256, QUERY_RESOLVE: 512 };
 const assert = (c, m) => { if (!c) throw new Error(m); };
@@ -167,6 +167,20 @@ Deno.test("build without a region (one-token engines, Flash): its bytes go to th
   threw = false;
   try { st2.loadLayer(fakeEncoder(), 0); } catch (e) { threw = /without a region/.test(e.message); }
   assert(threw, "loadLayer refuses");
+});
+
+Deno.test("notParked: a batched engine binding a parked entry gets a readable error, not a missing buffer", () => {
+  const st = new ExpertStore(fakeDevice(), { layers: [7], slots: 4 });
+  const parked = st.park(7, "gate", entry(7, 0, 16, 32, 64), 16), resident = entry(7, 1, 16, 32, 64);
+  assert(notParked(resident, "experts gate") === resident, "a resident entry passes");
+  let msg = "";
+  try { notParked(parked, "experts gate"); } catch (e) { msg = e.message; }
+  assert(/layer 7's gate experts are offloaded/.test(msg) && /batched prefill \/ verify/.test(msg), msg || "no error");
+  // a store built with its region (expertRegion: true) gives a batch engine what it needs per offloaded layer
+  for (const [i, p] of [[1, "up"], [2, "down"]]) st.park(7, p, entry(7, i, 16, 32, 64), 16);
+  st.build({ K: 4 });
+  const enc = fakeEncoder();
+  assert(st.loadLayer(enc, 7) > 0 && st.regionEntry(7, "gate").qs, "loadLayer + regionEntry with the region");
 });
 
 Deno.test("park: a slice that doesn't fit what is left of a parked buffer fills it and goes on in the next, at an expert boundary", () => {
