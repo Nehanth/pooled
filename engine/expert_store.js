@@ -375,7 +375,7 @@ export class ExpertStore {
   // else a writeBuffer, which lands in queue order, after what was submitted and before enc's commands.
   _putExpert(enc, layer, S, e, dst, at, admit = false) {
     if (!this.isDisk(layer)) return this._copyExpert(enc, S, e, dst, at);
-    const b = this._staged?.layer === layer ? this._staged.bytes.get(e) : null, T = this.t1, key = this._key(layer, e);
+    const b = this._staged?.layer === layer ? this._staged.bytes?.get(e) : null, T = this.t1, key = this._key(layer, e);
     let n = 0;
     if (!b) {   // not read: T1 holds it (prepare left it out)
       const s = T && enc ? T.find(key) : -1;
