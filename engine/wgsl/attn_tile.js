@@ -13,8 +13,12 @@
 //   3. V tile -> at_kv; each of the row's 4 threads sums the 4 partials in the same fixed order and runs
 //      the same online-softmax update (max / sum / rescale), so the copies agree bit for bit
 //   4. o = o * alpha + sum_t p[t] * v[t] over the thread's dims
+// That is four barriers per tile. With skv (separate K and V buffers, at_ks / at_vs) it is two: phase 1 stores V
+// while the scores are taken from K, phase 2 stores the next K while the softmax and P.V run from at_sp and V; the
+// arithmetic is the same text in the same order, so the bits are the same.
 // Workgroup memory: TK * HD * 4 (tile) + TK * 256 * 4 (partials) bytes; TK = 8 fits the 16 KB default at
-// HD = 256, TK = 16 needs 32 KB (picked only when the device grants it).
+// HD = 256, TK = 16 needs 32 KB (picked only when the device grants it). With kvh the two f16 tiles of skv take the
+// same bytes as one f32 tile, so skv never changes TK (attnTileBytes).
 //
 // Split length: the output uses attn_flash's partial layout (faO / faML: maxSplits slots per (column,
 // head)), so ceil(seqEnd / splitLen) <= maxSplits must hold. splitLen is derived from the pass itself
@@ -40,13 +44,25 @@ import { wgslToJs } from "./moe.js";
 // order, so the same bits.
 // nr: q, o and p as named variables (q0 .. q15, ...) instead of private arrays (a backend that keeps a private array in
 // scratch memory pays a memory access per use; the same values, so the same bits).
-export function attnTileConfig({ hd, G, faSplit, faSplits, wgMem = 16384, target = 32, tk = 0, kvh = false, pf = false, nr = false }) {
+// skv: K and V staged in two workgroup buffers instead of one shared at_kv, so the loads are scheduled around two
+// barriers per tile instead of four (V of tile t is stored while the scores of tile t are taken, K of tile t + 1 while
+// the softmax and P.V of tile t run). The same values in the same order, so the same bits. TK is picked exactly as
+// without it (TK changes the bits); skv is used only when both tiles fit next to the partials at that TK, which with
+// kvh is always (2 f16 tiles = 1 f32 tile), and without kvh only where the device grants the extra workgroup memory.
+// Otherwise the kernel keeps the shared buffer.
+export function attnTileConfig({ hd, G, faSplit, faSplits, wgMem = 16384, target = 32, tk = 0, kvh = false, pf = false, nr = false, skv = false }) {
   if (!(hd % 16 === 0 && hd >= 16 && hd <= 256 && G >= 1 && G <= 64)) return null;
   if (faSplit % 64 !== 0 || faSplits < 1) return null;
   const bytes = (TK) => TK * hd * 4 + TK * 256 * 4;
   const TK = tk || [16, 8, 4].find((t) => bytes(t) <= wgMem);
   if (!TK || bytes(TK) > wgMem) return null;
-  return { HD: hd, G, CW: Math.floor(64 / G), TK, FASPLIT: faSplit, FASPLITS: faSplits, TARGET: Math.max(1, target | 0), KVH: !!kvh, PF: !!pf, NR: !!nr };
+  const SKV = !!skv && attnTileBytes({ TK, HD: hd, KVH: !!kvh, SKV: true }) <= wgMem;
+  return { HD: hd, G, CW: Math.floor(64 / G), TK, FASPLIT: faSplit, FASPLITS: faSplits, TARGET: Math.max(1, target | 0), KVH: !!kvh, PF: !!pf, NR: !!nr, SKV };
+}
+
+// workgroup memory of a config: the staged tile(s) plus the score partials
+export function attnTileBytes(c) {
+  return (c.SKV ? 2 : 1) * c.TK * c.HD * (c.KVH ? 2 : 4) + c.TK * 256 * 4;
 }
 
 // JavaScript mirror of the kernel's split length for a pass whose last column sees seqEnd positions
@@ -102,9 +118,69 @@ export function attnTileBodies(c, js = false) {
         ${nm}${k} = ${js ? `[${src}[kb], ${src}[kb + 1u]]` : `vec2<u32>(${src}[kb], ${src}[kb + 1u])`};
       }
     }`).join("\n    ");
-  const store = (nm) => PK.map((k) => `{ let w = tid + ${256 * k}u; if (w < ${TK * HD4}u) { at_kv[w] = ${c.KVH ? `${nm}${k}` : E.v4of2(js ? `${nm}${k}[0]` : `${nm}${k}.x`, js ? `${nm}${k}[1]` : `${nm}${k}.y`)}; } }`).join("\n    ");
+  const store = (nm, dst = "at_kv") => PK.map((k) => `{ let w = tid + ${256 * k}u; if (w < ${TK * HD4}u) { ${dst}[w] = ${c.KVH ? `${nm}${k}` : E.v4of2(js ? `${nm}${k}[0]` : `${nm}${k}.x`, js ? `${nm}${k}[1]` : `${nm}${k}.y`)}; } }`).join("\n    ");
+  // SKV without PF: a tile straight from global memory into dst, unrolled like the prefetch (no loop whose trip count
+  // depends on the thread inside the tile loop, which has barriers: FXC)
+  const loadTo = (src, base, dst) => PK.map((k) => `{
+      let w = tid + ${256 * k}u;
+      if (w < ${TK * HD4}u) {
+        let t = ${E.div("w", `${HD4}u`)}; let d4 = w % ${HD4}u;
+        ${c.KVH ? (js ? "let kv = [0, 0];" : "var kv = vec2<u32>(0u);") : E.vdecl("kv")}
+        if (${base} + t < t1) {
+          let kb = (${base} + t) * kvw + g * ${HW}u + d4 * 2u;
+          kv = ${c.KVH ? (js ? `[${src}[kb], ${src}[kb + 1u]]` : `vec2<u32>(${src}[kb], ${src}[kb + 1u])`) : E.v4of2(`${src}[kb]`, `${src}[kb + 1u]`)};
+        }
+        ${dst}[w] = kv;
+      }
+    }`).join("\n    ");
   // a staged K / V vec4 (KVH: widened from its f16 pair at the read)
-  const kvAt = (ix) => c.KVH ? E.v4of2(`at_kv[${ix}].x`, `at_kv[${ix}].y`).replace(/\.x\b/g, js ? "[0]" : ".x").replace(/\.y\b/g, js ? "[1]" : ".y") : `at_kv[${ix}]`;
+  const kvAt = (ix, buf = "at_kv") => c.KVH ? E.v4of2(`${buf}[${ix}].x`, `${buf}[${ix}].y`).replace(/\.x\b/g, js ? "[0]" : ".x").replace(/\.y\b/g, js ? "[1]" : ".y") : `${buf}[${ix}]`;
+  // the tile's arithmetic, shared by both schedules (identical text, so identical order)
+  const scores = (kb) => `${T.map((t) => `{
+        ${E.vdecl("a")}
+        ${I.map((i) => E.vmad("a", `q[${i}u]`, kvAt(`${t * HD4 + i * 4}u + ds`, kb))).join(" ")}
+        at_sp[${t * 256}u + tid] = (a[0u] + a[1u]) + (a[2u] + a[3u]);
+      }`).join("\n      ")}`;
+  const softmax = `let n = min(${TK}u, rowEnd - c0);
+      let sb = r * 4u;
+      var cm: f32 = m;
+      ${T.map((t) => `p[${t}u] = (((at_sp[${t * 256}u + sb] + at_sp[${t * 256 + 1}u + sb]) + at_sp[${t * 256 + 2}u + sb]) + at_sp[${t * 256 + 3}u + sb]) / rs;
+      if (${t}u < n) { cm = max(cm, p[${t}u]); }`).join("\n      ")}
+      alpha = exp(m - cm);
+      l = l * alpha;
+      ${T.map((t) => `p[${t}u] = select(0.0, exp(p[${t}u] - cm), ${t}u < n); l += p[${t}u];`).join("\n      ")}
+      m = cm;`;
+  const pv = (vb) => `${I.map((i) => E.vscale(`o[${i}u]`, "alpha")).join(" ")}
+      ${T.map((t) => `{
+        let pt = p[${t}u];
+        ${I.map((i) => E.vmad(`o[${i}u]`, "pt", kvAt(`${t * HD4 + i * 4}u + ds`, vb))).join(" ")}
+      }`).join("\n      ")}`;
+  // SKV: two barriers per tile. Phase 1 (after barrier A): store V(c0) into at_vs, scores of tile c0 from at_ks into
+  // at_sp. Phase 2 (after barrier B): store K(c0 + TK) into at_ks, softmax from at_sp, P.V from at_vs. Every buffer is
+  // written in one phase and read in the other, so each write is separated from the reads before and after it by a
+  // barrier; K(t0) is stored before the loop.
+  const loopSkv = `${c.PF ? `${pfDecl}
+  ${fetch("at_k", "t0", "kr")}
+  ${fetch("at_v", "t0", "vr")}
+  ${store("kr", "at_ks")}
+  ${fetch("at_k", `t0 + ${TK}u`, "kr")}` : loadTo("at_k", "t0", "at_ks")}
+  for (var c0: u32 = t0; c0 < t1; c0 += ${TK}u) {
+    workgroupBarrier();
+    ${c.PF ? `${store("vr", "at_vs")}
+    ${fetch("at_v", `c0 + ${TK}u`, "vr")}` : loadTo("at_v", "c0", "at_vs")}
+    let act = c0 < rowEnd;
+    if (act) {
+      ${scores("at_ks")}
+    }
+    workgroupBarrier();
+    ${c.PF ? `${store("kr", "at_ks")}
+    ${fetch("at_k", `c0 + ${2 * TK}u`, "kr")}` : loadTo("at_k", `c0 + ${TK}u`, "at_ks")}
+    var alpha: f32 = 1.0;
+    if (act) {
+      ${softmax}
+      ${pv("at_vs")}
+    }
+  }`;
   const flash = `
   let sp = wg.x; let g = wg.y; let cg = wg.z; let tid = lid.x;
   let nc = max(frame.nCols, 1u);
@@ -128,7 +204,7 @@ export function attnTileBodies(c, js = false) {
   }
   var m: f32 = -3.0e38;
   var l: f32 = 0.0;
-  ${c.PF ? `${pfDecl}
+  ${c.SKV ? loopSkv : `${c.PF ? `${pfDecl}
   ${fetch("at_k", "t0", "kr")}
   ${fetch("at_v", "t0", "vr")}` : ""}
   for (var c0: u32 = t0; c0 < t1; c0 += ${TK}u) {
@@ -137,37 +213,21 @@ export function attnTileBodies(c, js = false) {
     ${c.PF ? fetch("at_k", `c0 + ${TK}u`, "kr") : ""}
     let act = c0 < rowEnd;
     if (act) {
-      ${T.map((t) => `{
-        ${E.vdecl("a")}
-        ${I.map((i) => E.vmad("a", `q[${i}u]`, kvAt(`${t * HD4 + i * 4}u + ds`))).join(" ")}
-        at_sp[${t * 256}u + tid] = (a[0u] + a[1u]) + (a[2u] + a[3u]);
-      }`).join("\n      ")}
+      ${scores("at_kv")}
     }
     workgroupBarrier();
     ${c.PF ? `${store("vr")}
     ${fetch("at_v", `c0 + ${TK}u`, "vr")}` : tileLoad("at_v")}
     var alpha: f32 = 1.0;
     if (act) {
-      let n = min(${TK}u, rowEnd - c0);
-      let sb = r * 4u;
-      var cm: f32 = m;
-      ${T.map((t) => `p[${t}u] = (((at_sp[${t * 256}u + sb] + at_sp[${t * 256 + 1}u + sb]) + at_sp[${t * 256 + 2}u + sb]) + at_sp[${t * 256 + 3}u + sb]) / rs;
-      if (${t}u < n) { cm = max(cm, p[${t}u]); }`).join("\n      ")}
-      alpha = exp(m - cm);
-      l = l * alpha;
-      ${T.map((t) => `p[${t}u] = select(0.0, exp(p[${t}u] - cm), ${t}u < n); l += p[${t}u];`).join("\n      ")}
-      m = cm;
+      ${softmax}
     }
     workgroupBarrier();
     if (act) {
-      ${I.map((i) => E.vscale(`o[${i}u]`, "alpha")).join(" ")}
-      ${T.map((t) => `{
-        let pt = p[${t}u];
-        ${I.map((i) => E.vmad(`o[${i}u]`, "pt", kvAt(`${t * HD4 + i * 4}u + ds`))).join(" ")}
-      }`).join("\n      ")}
+      ${pv("at_kv")}
     }
     workgroupBarrier();
-  }
+  }`}
   if (hasRow) {
     let hb = (col * cfg.nH + g * ${G}u + h) * atu.maxSplits + sp;
     let ob = hb * ${HD}u + ds * 4u;
@@ -224,7 +284,7 @@ struct FA { s0: u32, s1: u32, splitLen: u32, maxSplits: u32 };   // q col stride
 @group(1) @binding(3) var<storage, read_write> at_o: array<f32>;
 @group(1) @binding(4) var<storage, read_write> at_ml: array<f32>;
 @group(1) @binding(5) var<uniform> atu: FA;
-var<workgroup> at_kv: array<${c.KVH ? "vec2<u32>" : "vec4<f32>"}, ${c.TK * c.HD / 4}>;
+${(c.SKV ? ["at_ks", "at_vs"] : ["at_kv"]).map((n) => `var<workgroup> ${n}: array<${c.KVH ? "vec2<u32>" : "vec4<f32>"}, ${c.TK * c.HD / 4}>;`).join("\n")}
 var<workgroup> at_sp: array<f32, ${c.TK * 256}>;
 @compute @workgroup_size(256)
 fn attn_flash_tile(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {${flash}

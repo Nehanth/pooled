@@ -452,7 +452,10 @@ export function lintSources(sources) {
 // autotune, 4 or 8 rows).
 export async function generatedSources() {
   const { coopWGSL } = await import(new URL("../engine/wgsl/coop.js", import.meta.url).href);
+  const { attnTileConfig, attnTileWGSL } = await import(new URL("../engine/wgsl/attn_tile.js", import.meta.url).href);
   const out = [];
+  for (const o of [{}, { pf: true }, { kvh: true, pf: true, nr: true }, { kvh: true, pf: true, nr: true, skv: true }, { kvh: true, skv: true }, { pf: true, skv: true, wgMem: 32768, tk: 8 }])
+    out.push({ file: `attn_tile.js (generated: ${JSON.stringify(o)})`, js: "export const W = `" + attnTileWGSL(attnTileConfig({ hd: 256, G: 8, faSplit: 256, faSplits: 64, ...o })) + "`;" });
   for (const WG of [64, 128, 256]) for (const ROWS of [4, 8]) for (const unpack of [true, false])
     out.push({ file: `coop.js (generated: coopWGSL(${WG}, ${ROWS}, unpack ${unpack}, CV, NRM))`, js: "export const W = `" + coopWGSL(WG, ROWS, 64, 16, 1, unpack, true, true) + "`;" });
   return out;

@@ -245,7 +245,7 @@ export class Qwen35Engine {
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
-  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnTileKvh = true, attnTilePf = true, attnTileNr = true, wideDn = true, wideRouter = true, mtpWide = true, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, moeGroupDp4a, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse, moeTrace = false }) {
+  async _init({ device, meta, weights, layerRange, hasEmbed = true, hasHead = true, maxSeq = 512, vocab: vocabOpt, matvecVariant = "coop", coopWG = 256, coopRows = 4, batchCols = 4, coopRowsB = coopRows, gemm = true, draftVocab = 0, replayRollback = true, gemm8 = true, softmaxWG = true, draftChain = true, specFuse = true, attnGlue = true, dnFuse = true, attnMC = true, attnFlash = true, kvQ8 = false, attnTile = true, attnPrefillTile, attnPrefillSplits = 32, attnPrefillTK = 0, attnTileKvh = true, attnTilePf = true, attnTileNr = true, attnTileSkv = true, wideDn = true, wideRouter = true, mtpWide = true, attnDecode = "v2", attnDecodeSplits = 0, fuseProj = true, moeFuse = true, moeNormRouter = true, dnNormBA = true, moeDnRows = 1, moeFusedLayout: moeFusedLayoutOpt, moeKernel, draftVocabAuto = true, moeGroupPrefill, moeGroupUC = 8, moeGroupTiled = true, moeGroupDp4a, prefillUbatch, prefillTile, prefillDp4a, prefillDp4aTile, prefillMath, prefillSgm, adapterInfo, headRows = 0, gpuSample = true, argmaxWide = true, hostFuse = true, layerFuse, moeTrace = false }) {
     // GPU sampling (see headFromHiddenIds): argmax / top-k on the GPU, k (idx, value) pairs back
     // instead of the logits, when the sampler carries .gpu (room/sampling.js pickSampler). On by default
     // (GPU suites, the MoE/27B checks and split == solo rooms pass with it on); false: logits path.
@@ -386,8 +386,9 @@ export class Qwen35Engine {
         wgMem: device.limits.maxComputeWorkgroupStorageSize, target: attnPrefillSplits, tk: attnPrefillTK,
         // the K / V tile as f16 pairs (kvh), the next tile prefetched into registers (pf), named registers (nr): the same
         // arithmetic, so the same bits; GB10 one 16-column pass at 8K / 16K: 1630 / 2769 -> 1505 / 2468 µs
-        // (tests/bench/attn_tile_bench.js). attnTileKvh / attnTilePf / attnTileNr: false for A/B.
-        kvh: attnTileKvh, pf: attnTilePf, nr: attnTileNr }) : null;
+        // (tests/bench/attn_tile_bench.js). skv: K and V in separate workgroup buffers, two barriers per tile instead of
+        // four, the same bits (same TK; with kvh it always fits). attnTileKvh / attnTilePf / attnTileNr / attnTileSkv: false for A/B.
+        kvh: attnTileKvh, pf: attnTilePf, nr: attnTileNr, skv: attnTileSkv }) : null;
     // attnDecode: "v2" (default) = split-K decode attention with coalesced loads and per-position split
     // lengths (engine/wgsl/attn_dec.js) for decode and verify passes; faster than attn_flash at every context
     // length measured (docs/research/long-context-2026-09.md). Other numerics than attn_flash (same greedy

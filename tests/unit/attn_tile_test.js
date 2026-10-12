@@ -5,7 +5,7 @@
 // column's own position is ever used (those rows are NaN here), that every output of the pass is
 // written and nothing outside it, and that the JS split length mirrors the kernel's. No GPU.
 //   deno test --no-check tests/unit/attn_tile_test.js
-import { attnTileConfig, attnTileBodies, attnTileWGSL, tileSplitLen } from "../../engine/wgsl/attn_tile.js";
+import { attnTileConfig, attnTileBodies, attnTileWGSL, attnTileBytes, tileSplitLen } from "../../engine/wgsl/attn_tile.js";
 import { f16ToF32, f32ToF16 } from "../../engine/gguf.js";
 
 const H = {
@@ -18,15 +18,31 @@ const rnd = () => ((seed = (seed * 1103515245 + 12345) >>> 0) / 4294967296);
 // engine/qwen35.js split-K sizing
 const faSizing = (maxSeq) => { const faSplit = Math.max(256, Math.ceil(maxSeq / 128 / 64) * 64); return { faSplit, faSplits: Math.ceil(maxSeq / faSplit) }; };
 
-function runGrid(body, names, args, gx, gy, gz, wgArrays) {
+function runGrid(body, names, args, gx, gy, gz, wgArrays, race = false) {
   const hn = Object.keys(H);
-  const make = new Function(...hn, ...names, "at_kv", "at_sp", `return function* (wg, lid) {${body}};`);
+  const make = new Function(...hn, ...names, "at_kv", "at_sp", "at_ks", "at_vs", `return function* (wg, lid) {${body}};`);
   for (let z = 0; z < gz; z++) for (let y = 0; y < gy; y++) for (let x = 0; x < gx; x++) {
-    const [kv, sp] = wgArrays();
-    const fn = make(...hn.map((n) => H[n]), ...args, kv, sp);
+    // workgroup memory through a race detector: within one barrier phase, an element written by one thread must not be
+    // read or written by another (the CPU runs the threads one after another, so a race would otherwise go unseen)
+    const ph = { n: 0, tid: 0 };
+    const watch = (a, name) => {
+      const acc = new Map();   // index -> { phase, writer, readers }
+      const touch = (k, w) => {
+        let e = acc.get(k);
+        if (!e || e.phase !== ph.n) acc.set(k, e = { phase: ph.n, writer: -1, readers: new Set() });
+        if (w) { if ((e.writer >= 0 && e.writer !== ph.tid) || [...e.readers].some((r) => r !== ph.tid)) throw new Error(`race on ${name}[${k}] in phase ${ph.n}`); e.writer = ph.tid; }
+        else { if (e.writer >= 0 && e.writer !== ph.tid) throw new Error(`race on ${name}[${k}] in phase ${ph.n}`); e.readers.add(ph.tid); }
+      };
+      return new Proxy(a, {
+        get: (o, k) => { if (typeof k === "string" && /^\d+$/.test(k)) touch(+k, false); return o[k]; },
+        set: (o, k, v) => { if (typeof k === "string" && /^\d+$/.test(k)) touch(+k, true); o[k] = v; return true; },
+      });
+    };
+    const [kv, sp, ks, vs] = wgArrays().map((a, i) => race ? watch(a, ["at_kv", "at_sp", "at_ks", "at_vs"][i]) : a);
+    const fn = make(...hn.map((n) => H[n]), ...args, kv, sp, ks, vs);
     const th = Array.from({ length: 256 }, (_, t) => fn({ x, y, z }, { x: t }));
-    for (;;) {
-      const done = th.map((g) => g.next().done);
+    for (;; ph.n++) {
+      const done = th.map((g, t) => { ph.tid = t; return g.next().done; });
       if (done.every(Boolean)) break;
       if (done.some(Boolean)) throw new Error("threads disagree at a barrier");
     }
@@ -34,10 +50,10 @@ function runGrid(body, names, args, gx, gy, gz, wgArrays) {
 }
 
 // one prefill pass of nc columns at basePos; returns max relative error vs exact attention
-function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgMem = 16384, kvh = false, pf = false, nr = false }) {
+function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgMem = 16384, kvh = false, pf = false, nr = false, skv = false, race = false }) {
   const G = nH / nKV, kvDim = nKV * hd;
   const { faSplit, faSplits } = faSizing(maxSeq);
-  const c = attnTileConfig({ hd, G, faSplit, faSplits, wgMem, target, tk, kvh, pf, nr });
+  const c = attnTileConfig({ hd, G, faSplit, faSplits, wgMem, target, tk, kvh, pf, nr, skv });
   if (!c) throw new Error("config rejected");
   const seqEnd = basePos + nc;
   // K/V caches (f16 pairs); rows at or past seqEnd hold NaN: the kernel must never use them
@@ -55,9 +71,10 @@ function check({ hd, nH, nKV, nc = 16, basePos, maxSeq, target = 32, tk = 0, wgM
   const cfg = { kvDim, nH }, frame = { pos: basePos, seqLen: basePos + 1, nCols: nc, snap: 0 };
   const U = { s0, s1, splitLen: faSplit, maxSplits: faSplits };
   const js = attnTileBodies(c, true);
-  const wgA = () => [Array.from({ length: c.TK * hd / 4 }, () => [NaN, NaN, NaN, NaN]), new Float64Array(c.TK * 256).fill(NaN)];
+  const tile = () => Array.from({ length: c.TK * hd / 4 }, () => [NaN, NaN, NaN, NaN]);
+  const wgA = () => [tile(), new Float64Array(c.TK * 256).fill(NaN), tile(), tile()];
   runGrid(js.flash, ["cfg", "frame", "at_q", "at_k", "at_v", "at_o", "at_ml", "atu"], [cfg, frame, q, kc, vc, faO, faML, U],
-    faSplits, nKV, Math.ceil(nc / c.CW), wgA);
+    faSplits, nKV, Math.ceil(nc / c.CW), wgA, race);
   runGrid(js.combine, ["cfg", "frame", "atc_o", "atc_ml", "atc_out", "atc"], [cfg, frame, faO, faML, out, U], nH, nc, 1, wgA);
   let maxRel = 0;
   for (let col = 0; col < nc; col++) for (let qh = 0; qh < nH; qh++) {
@@ -105,6 +122,15 @@ Deno.test("attn_tile: WGSL shape", () => {
     const src = attnTileWGSL(c);
     const bytes = c.TK * hd * 4 + c.TK * 256 * 4;
     if (bytes > wgMem) throw new Error("workgroup memory over the limit");
+    for (const kvh of [false, true]) {
+      const cs = attnTileConfig({ hd, G, faSplit: 256, faSplits: 64, wgMem, kvh, pf: true, skv: true });
+      if (cs.TK !== c.TK) throw new Error("skv changed TK");
+      if (kvh && !cs.SKV) throw new Error("skv + kvh must always fit");
+      if (attnTileBytes(cs) > wgMem) throw new Error("skv: workgroup memory over the limit");
+      const ss = attnTileWGSL(cs);
+      if ((ss.match(/workgroupBarrier\(\)/g) || []).length !== (cs.SKV ? 2 : 4)) throw new Error("barriers per tile");
+      if (/undefined|NaN|\$\{/.test(ss) || (ss.match(/{/g) || []).length !== (ss.match(/}/g) || []).length) throw new Error("skv template");
+    }
     if (/undefined|NaN|\$\{/.test(src)) throw new Error("template leak");
     if ((src.match(/{/g) || []).length !== (src.match(/}/g) || []).length) throw new Error("unbalanced braces");
     for (const e of ["fn attn_flash_tile", "fn attn_combine_tile"]) if (!src.includes(e)) throw new Error("missing " + e);
@@ -159,4 +185,33 @@ Deno.test("attn_tile: nr leaves no private array", () => {
   const src = attnTileWGSL(c);
   if (/var (q|o|p): array/.test(src) || /\b[qop]\[\d+u\]/.test(src)) throw new Error("a private array is left");
   if (!/var q15 = vec4<f32>\(0\.0\);/.test(src) || !/var p7 = 0\.0;/.test(src)) throw new Error("named variables missing");
+});
+
+// skv (K and V in separate workgroup buffers, two barriers per tile instead of four), with and without pf / kvh / nr:
+// the same output as the shared-buffer kernel. f32 tiles (no kvh) use skv only where the memory allows it (32 KB at TK 8).
+Deno.test("attn_tile: skv gives the identical output", () => {
+  for (const t of [cases[0], cases[1], cases[2], cases[3], cases[4], cases[5]]) {
+    const s0 = seed;
+    const a = check({ ...t, kvh: true, pf: true, nr: true });
+    for (const o of [{ kvh: true, pf: true, nr: true, skv: true }, { kvh: true, skv: true }, { kvh: true, pf: true, skv: true }, { pf: true, skv: true, tk: 8, wgMem: 32768 }, { skv: true, tk: 4 }]) {
+      seed = s0;
+      const b = check({ ...t, ...o });
+      if (!b.c.SKV && o.kvh) throw new Error(`${t.name}: skv not taken`);
+      if (b.c.TK !== a.c.TK && !o.tk) throw new Error(`${t.name}: TK changed`);
+      if (o.tk && o.tk !== a.c.TK) continue;   // a different TK is a different kernel: only run it for the hazard checks above
+      if (a.out.some((v, i) => !Object.is(v, b.out[i]))) throw new Error(`${t.name}: ${JSON.stringify(o)} output differs`);
+    }
+    seed = s0; check(t);
+  }
+});
+
+// the race detector (runGrid race = true: an element of workgroup memory touched by two threads within one barrier
+// phase, with at least one write) over every staging schedule, on small shapes (it is slow)
+Deno.test("attn_tile: no workgroup-memory race in any schedule", () => {
+  const small = [{ hd: 64, nH: 8, nKV: 2, nc: 8, basePos: 37, maxSeq: 512 }, { hd: 128, nH: 12, nKV: 2, nc: 4, basePos: 70, maxSeq: 1024, wgMem: 32768 }];
+  for (const t of small) for (const o of [{}, { pf: true }, { kvh: true, pf: true, nr: true }, { kvh: true, pf: true, nr: true, skv: true }, { kvh: true, skv: true }, { pf: true, skv: true }]) {
+    const { maxRel, c } = check({ ...t, ...o, race: true });
+    if (o.skv && !c.SKV) throw new Error("skv not taken");
+    if (!(maxRel < 1e-9)) throw new Error(`max rel err ${maxRel}`);
+  }
 });
