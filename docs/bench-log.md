@@ -2305,3 +2305,66 @@ What it says:
 Flash traces: once roadmap 33 PR 4 runs Flash resident on the GB10, add its path to `trace_moe.js`'s `MODEL` switch and
 record. `tiersim.js` reads 512-expert traces directly (no mapping), and those numbers replace the extrapolation above.
 Full tables, constants and caveats: the PR description.
+
+## 2026-10-11: Qwen3.8-Flash-Next expert offload in the engine, and RECORDED Flash routing traces (branch feat/flash-offload), the Spark (GB10)
+
+**Recorded traces replace the extrapolation above.** `tests/trace_flash.js` records the router's top-10 ids and
+weights at every layer of every decode pass through `Qwen4ExpEngine`'s `moeTrace` option, in `trace_moe.js`'s format.
+Greedy, thinking off, the room's chat template. Committed in `tests/sim/traces/q38flash` (selections gzipped, 0.9 MB;
+`tiersim.js` reads `.npy.gz`): chat 300, code 400 and multiturn 600 decode steps, the 122B set's prompts. Distinct
+experts touched per layer over a trace: chat 101-390 (mean 247 of 512), code 175-429 (290), multiturn 148-446 (300).
+Not in the set yet: the agent scenario (the 2048-position engine fits one 1.4k-token tool turn, and that run stopped
+at its first tool call, 40 steps, too short past tiersim's 32 warm-up steps; the script now runs it as an agent loop
+up to 300 steps) and a 1.9k-step `long` session. Both are in the script and need one ~15 min GPU run.
+
+Pool hit rate vs fraction of a layer cached, all 48 layers, VRAM only, mean over the three traces:
+
+| fraction cached | slots | recorded Flash | extrapolated (q = 0 / 0.25 / 0.5) |
+|---|---|---|---|
+| 6.3% | 32 | 59.1% | 49.0 / 45.2 / 42.4% |
+| 12.5% | 64 | 71.3% | 62.2 / 58.0 / 55.2% |
+| 17.0% | 87 | 77.7% | 69.0 / 64.8 / 62.0% |
+| 25.0% | 128 | 85.4% | 78.0 / 73.8 / 71.1% |
+| 27.0% | 138 | 86.7% | 79.8 / 75.6 / 73.0% |
+| 50.0% | 256 | 94.0% | 91.2 / 88.1 / 86.4% |
+
+Flash's routing is **more local than even q = 0** (the 122B's locality carried over unchanged): 8-10 points more hits
+at the cache sizes the rooms use. The design note's 65-80% at 27% was low; it is 87%. Same cost model as above
+(modelled costs, disk rows uncalibrated), tok/s mid [slowest trace slow costs - fastest trace fast costs]:
+
+| room | pool hits | disk MB / token | tok/s, recorded | extrapolated (q = 0.25) |
+|---|---|---|---|---|
+| Mac alone, tab, 11 / 18 GiB (85 / 140 slots) | 77 / 87% | 306 / 174 | **5.9 / 8.4** [4.0-12.3] | 4.2 / 5.7 |
+| Mac + PC room node, `--ram 43` (31 parked + 3 disk, T1 2 GiB) | 77% | 4 | **20.1** [14.7-27.4] | 19.4 |
+| Mac + PC room node, `--ram 24` (14 parked + 20 disk, T1 4 GiB) | 77% | 90 | **13.4** [9.8-18.3] | 12.6 |
+| Mac + PC tab (72 slots; page cache 0 / 40 GiB) | 78% | 204 / 42 | **7.9 / 9.7** | 6.5 / 8.2 |
+
+What changed vs the extrapolation:
+- **Mac alone gains the most: 5.7 -> 8.4 tok/s at 18 GiB** (disk 322 -> 174 MB/token). A 25 GiB cache would give 10.5.
+- The CLI room barely moves (19.4 -> 20.1): with every PC layer in RAM the pool's hit rate only shifts parked-copy time.
+- **`--ram 24` now prefers 24-28 disk layers + a big T1 (16.5-16.6 tok/s) over 20 disk layers (14.9)**, the same
+  shape as the extrapolation (best at 28 disk, 16.1). Played back to back as one 1,300-step session: 16.9 at 28-30.
+- Lookahead with the modelled predictor still loses everywhere (Mac 8.4 -> 5.7-6.0, `--ram 24` 13.6 -> 11.9-12.3,
+  PC tab 9.5 -> 6.8-7.1); the oracle bound rises to Mac 12.4, `--ram 24` 18.0, PC tab 13.3. Recording the real
+  lookahead router's picks next to the traces is still the open item.
+- Not checked: sessions past 600 steps, and the agent turn (the 122B's agent trace was its least local).
+
+**The engine serves offloaded layers.** `Qwen4ExpEngine` with experts parked by the loader (`qwen4expWeights(...,
+{ experts })`, `OFFLOAD=lo-hi OFFLOAD_SLOTS=N` in `tests/test_q38flash.js`) cuts each offloaded layer's token after
+its router: the 10 ids are read back, `ExpertStore.plan` copies the misses into the layer's slot pool, and the same
+`moe_gu` / `moe_dn` kernels run on the pool through slot ids. No change to `engine/wgsl/qwen4exp.js`. One token at a
+time a cut holds at most K experts, so the store is built without the whole-layer prefill region
+(`build({ region: false })`). Gate (`BITS=1`: 24 greedy ids per golden prompt, hashes of every step's logits and of the
+final residual), on `feat/flash-engine` 2e48ff7:
+
+| run | decode | BITS |
+|---|---|---|
+| resident | 11.7-12.0 tok/s | ids cc765911 logits 649fc78d hidden 1200733c |
+| `OFFLOAD=0-15 OFFLOAD_SLOTS=16` (23.4 GiB parked, 0.73 GiB of pools) | 3.5 tok/s, 48.1% pool hits | identical |
+| `OFFLOAD=all OFFLOAD_DISK=all OFFLOAD_SLOTS=16` (SSD PR 1 + #349 merged; 48 disk layers) | 0.27-0.60 tok/s, 48.7% hits, 62.7 GB read in 165 s waiting | identical |
+
+16 slots is the stress setting (barely over K = 10: every token evicts); the rates say nothing about a sized cache.
+`OFFLOAD=all` with every expert parked in RAM does not fit the 80 GB job cap here (killed while loading).
+After rebasing onto `feat/flash-engine` c2b2959 (the HC-site restructure) the resident run is 14.3 tok/s, BITS ids
+cc765911 logits a36a9220 hidden cb3459c9 (ids unchanged; new kernels change the logits' low bits). The offloaded
+rerun on that base is still to do.
