@@ -18,6 +18,9 @@
 // big frames (docs/bench-log.md, "Hidden-state transport"), and control messages (chat tokens,
 // telemetry) are not delayed. Every device shares one GPU, so their GPU work is serialized.
 // Results for 2026-09-27 are in docs/bench-log.md ("Emulated latency").
+// --kicks 0,1,auto: also sweep the engine's map kick (engine/map_kick.js), interleaved per round on the one load:
+// engine/map_kick.js is served with a dev-only switch, window.__kick, that overrides every mapRead's kick argument
+// (0: a plain mapAsync, 1: kick, auto: the engine's default for the room's readbacks).
 import { chromium } from "playwright";
 import http from "http";
 import https from "https";
@@ -33,6 +36,7 @@ const LATS = arg("lat", "0,5,20").split(",").map(Number);
 const MODES = arg("modes", "plain,spec").split(",");
 const ROUNDS = +arg("rounds", 2);          // answers per (lat, mode), each one reported
 const MAXNEW = +arg("maxnew", 128);
+const KICKS = arg("kicks", "").split(",").filter(Boolean);   // [] = leave the engine's default
 const PORT = +arg("port", 8123), SIGNAL_PORT = +arg("signal-port", 9000), TLS_PORT = PORT + 1;
 const PROMPT = "I am planning a two week trip through Japan in late October with my partner. We land in Tokyo, want three days there, then a day trip to Nikko, then the bullet train to Kyoto for four days with a side trip to Nara, then two nights in Osaka, and we fly home from Osaka. We like food markets, old temples, hiking, and small neighborhood bars, and we want to avoid the most crowded tourist spots where we can. Our budget is moderate, around two hundred dollars a day for the two of us not counting hotels. Please give me a day by day itinerary with one main activity each morning and afternoon, a neighborhood to eat dinner in each night, and tell me which days I should buy a rail pass for and whether it is worth it at all.";
 const CODE = `def load_users(path):
@@ -82,12 +86,18 @@ function patchRoom(src, generation = false) {
   return src.replace(b, "else if ((!node || useSpec) && offOk && current.engine.mtp && current.engine.specStep && !window.__nospec) {")
     .replace(c, "} else if ((node ? useSpec && !current.engine.mtp : DENSE_SPEC) && offOk && ai.chain.length && current.engine.specStepDrafts && !current.engine.specStep && !window.__nospec) {");
 }
+function patchKick(src) {
+  const a = "  if (kick === \"auto\") {";
+  if (!src.includes(a)) throw new Error("engine/map_kick.js changed: update patchKick in room_latency.mjs");
+  return src.replace(a, "  if (globalThis.__kick !== undefined) kick = globalThis.__kick;\n" + a);
+}
 const srv = http.createServer((q, r) => {
   const p = path.join(ROOT, decodeURIComponent(q.url.split("?")[0]));
   if (!p.startsWith(ROOT) || !fs.existsSync(p) || fs.statSync(p).isDirectory()) { r.statusCode = 404; r.end(); return; }
   r.setHeader("content-type", MIME[path.extname(p)] || "application/octet-stream");
   if (p === path.join(ROOT, "engine/generate.js")) { r.end(patchRoom(fs.readFileSync(p, "utf8"), true)); return; }
   if (p === path.join(ROOT, "room.js")) { r.end(patchRoom(fs.readFileSync(p, "utf8"))); return; }
+  if (p === path.join(ROOT, "engine/map_kick.js") && KICKS.length) { r.end(patchKick(fs.readFileSync(p, "utf8"))); return; }
   fs.createReadStream(p).pipe(r);
 }).listen(PORT, "127.0.0.1");
 const tlsDir = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-lat-"));
@@ -159,7 +169,8 @@ try {
   await host.evaluate(() => { const s = document.getElementById("ai-sampling"); s.value = "exact"; s.dispatchEvent(new Event("change")); });   // greedy: same answer every round
   for (const pname of ASK) for (const lat of LATS) for (const mode of MODES) {
     for (const p of Object.values(tabs)) await p.evaluate(([l, ns]) => { window.__netlag = l; window.__nospec = ns; }, [lat, mode === "plain"]);
-    for (let r = 0; r < ROUNDS; r++) {
+    for (let r = 0; r < ROUNDS; r++) for (const kick of KICKS.length ? KICKS : [null]) {
+      if (kick != null) for (const p of Object.values(tabs)) await p.evaluate((k) => { window.__kick = k === "auto" ? "auto" : k === "1"; }, kick);
       await host.evaluate(() => document.getElementById("new-chat").click());
       await host.waitForTimeout(500);
       await host.evaluate((text) => {
@@ -177,7 +188,7 @@ try {
       let hsh = 0x811c9dc5; for (let i = 0; i < ans.length; i++) hsh = Math.imul(hsh ^ ans.charCodeAt(i), 0x01000193) >>> 0;
       const pre = /prefill (\d+) tok in ([\d.]+)s/.exec(st), dec = /(\d+) tok · ([\d.]+) tok\/s/.exec(st);
       const acc = /(\d+)% drafts accepted/.exec(st), cp = /(\d+) tok by lookup/.exec(st);
-      const row = { prompt: pname, lat, mode, round: r, copied: cp ? +cp[1] : 0, answerHash: hsh.toString(16), answerLen: ans.length, ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2], accepted: acc ? +acc[1] / 100 : null, status: st.slice(0, 160) };
+      const row = { prompt: pname, lat, mode, round: r, ...(kick != null && { kick }), copied: cp ? +cp[1] : 0, answerHash: hsh.toString(16), answerLen: ans.length, ttftMs: ttft && Math.round(ttft), prefillTok: pre && +pre[1], prefillS: pre && +pre[2], tokens: dec && +dec[1], tps: dec && +dec[2], accepted: acc ? +acc[1] / 100 : null, status: st.slice(0, 160) };
       log(JSON.stringify(row));
       out.rows.push(row);
     }

@@ -4,13 +4,14 @@
 // experts are resident or parked (today's offload: every expert in mapped buffers, a GPU slot pool per layer).
 //   ?model=/models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf  ?mode=parked|resident  ?offload=all|lo-hi|a,b
 //   ?slots=N (experts cached per layer) | ?offgb=G  ?tokens=64  ?kick=0 (engine mapKick off)  ?bits=0
+//   ?hop=N: instead, cut_core.js hopBench (a room's per-token readbacks, kick off / on interleaved, N calls each)
 //   ?eng={"k":v} any engine flag. window.RESULT: cut_core's result.
 import { Qwen35Engine } from "../../engine/qwen35.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { makeTokenizer } from "../../engine/engine.js";
 import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, streamEntryToGPU } from "../../engine/gguf.js";
 import { ExpertStore } from "../../engine/expert_store.js";
-import { cutBench } from "./cut_core.js";
+import { cutBench, hopBench } from "./cut_core.js";
 const q = new URLSearchParams(location.search), MODEL = q.get("model") || "/models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", MODE = q.get("mode") || "parked";
 const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
 const range = async (off, len) => { const r = await fetch(MODEL, { headers: { Range: `bytes=${off}-${off + len - 1}` } }); return new Uint8Array(await r.arrayBuffer()); };
@@ -37,7 +38,8 @@ try {
   const prompt = await (await fetch("/tests/golden/q38_bits_prompt.txt")).text();
   // ?variants=[{"cutPipe":false,"mapKick":false},{}]: engine flag sets, one run each on the same load
   const runs = [];
-  for (const v of JSON.parse(q.get("variants") || "[{}]")) {
+  if (q.get("hop")) runs.push({ v: {}, hop: await hopBench({ eng, N: +q.get("hop"), log }) });
+  else for (const v of JSON.parse(q.get("variants") || "[{}]")) {
     Object.assign(eng, v);
     log(`--- ${JSON.stringify(v)}: cutPipe ${eng.cutPipe !== false} mapKick ${eng.mapKick !== false}`);
     runs.push({ v, ...(await cutBench({ eng, tok, prompt, N: +(q.get("tokens") || 64), bits: q.get("bits") !== "0", log })) });
