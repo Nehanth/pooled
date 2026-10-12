@@ -187,6 +187,14 @@ The engine underneath Pooled is our own WGSL, not WebLLM, MLC or llama.cpp. The 
 - [little-coder](https://github.com/itayinbarr/little-coder): coding agent tuned for small local models, built on pi.
 - [aider](https://github.com/Aider-AI/aider): terminal pair-programming agent that works with almost any LLM, including local ones.
 
+## Research Pooled builds on
+
+- **Splitting a model across volunteers' machines.** Borzunov et al., [Petals: Collaborative Inference and Fine-tuning of Large Models](https://arxiv.org/abs/2209.01188) (2022). Pooled splits a model by layers across a room the same way, but every device joins from a browser tab instead of a Python install.
+- **Running from flash storage when the model does not fit in memory.** Alizadeh et al., [LLM in a flash: Efficient Large Language Model Inference with Limited Memory](https://arxiv.org/abs/2312.11514) (Apple, ACL 2024). Pooled's disk tier streams the experts a token needs from the SSD (OPFS in a tab, a file on a room node) into a GPU cache.
+- **Offloading mixture-of-experts layers.** Eliseev and Mazur, [Fast Inference of Mixture-of-Experts Language Models with Offloading](https://arxiv.org/abs/2312.17238) (2023). Pooled keeps a per-layer GPU cache of recently used experts and loads the misses after each router, which works because a token uses only 10 of a layer's 512 experts (Qwen3.8-Flash) and routing repeats: on recorded traces, caching 17% of a layer's experts serves about 77% of lookups ([docs/bench-log.md](docs/bench-log.md)).
+- **LLM inference in the browser.** Ruan et al., [WebLLM: A High-Performance In-Browser LLM Inference Engine](https://arxiv.org/abs/2412.15803) (2024). WebLLM showed WebGPU can run models close to native speed in one tab; Pooled's engine is separate hand-written WGSL, and pools several tabs and devices.
+- **Placing layers on uneven devices.** Zhang et al., [EdgeShard: Efficient LLM Inference via Collaborative Edge Computing](https://arxiv.org/abs/2405.14371) (2024). Pooled's planner likewise sizes each device's share of layers from its measured speed and memory.
+
 ## Browsers
 
 Chrome on macOS is the tested host. Safari on an iPhone joins a room and holds a few layers. Safari on a Mac reloads the tab under memory pressure when it holds most of the 27B, so do not host from it. Firefox and Linux Chromium need WebGPU turned on and we have not tested them. Devices without WebGPU join as ask-only guests.
