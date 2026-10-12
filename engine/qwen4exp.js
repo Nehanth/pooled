@@ -1,11 +1,12 @@
-// Qwen3.8-Flash-Next (llama.cpp arch "qwen4exp") on WebGPU: the decode path, weights resident, context <= 2048.
+// Qwen3.8-Flash-Next (llama.cpp arch "qwen4exp") on WebGPU: the decode path, weights resident; QSA past 2051 cells.
 // Roadmap 33 (roadmap/33-qwen38-flash.md) PR plan item 4.
 //
 // A separate engine module, not a mode of Qwen35Engine: the residual is 4 streams wide (hyper-connections), every
 // norm around the blocks is an HC mixer, layer 1 adds the n-gram (PLE) injection, the MoE has 512 experts / top-10
 // and there is no output norm, so every one of Qwen35Engine's fused decode paths would need an HC branch. This file
 // keeps the math in one readable place, one token at a time, with its own kernels (engine/wgsl/qwen4exp.js); the
-// batched / prefill paths, MTP, offload and room plumbing (PR plan items 5-8) build on it.
+// batched prefill / verify passes (engine/qwen4exp_batch.js, PR plan item 5) run on this engine's state and weight
+// buffers, and MTP, offload and room plumbing (items 6-8) build on it.
 //
 // One token (forwardToken):
 //   R = 4 copies of the token embedding                               (hc_init)
@@ -13,9 +14,14 @@
 //                                 -> HC mix -> MoE (top-10 of 512 + shared expert) -> HC combine
 //   head: HC mix (output_hc_*, no inject) -> output.weight -> greedy id on the GPU (and the logits on request)
 //
-// The math is tests/reference/ref_q38flash.mjs's with f32 activations (its --act f32 mode). Attention is dense causal:
-// QSA (PR 9) selects every cell below 2051 cached tokens, so dense is exact up to the 2048 cap here. The hook for
-// QSA is _attnOps: a selection pass between attn_prep and attn_dec that gives attn_dec a cell list.
+// The math is tests/reference/ref_q38flash.mjs's with f32 activations (its --act f32 mode). Attention: QSA
+// (engine/qwen4exp_qsa.js, PR plan item 9) when the full-attention layers' indexer weights are loaded: the indexer
+// state is kept from position 0, attention stays dense while a step has <= 2051 cells (QSA selects them all there)
+// and reads the selected cells past that. Without the indexer weights (qsa: false, the room loader's dense phase)
+// attention is dense and the context is capped at 2048.
+//
+// Ops ({ pipe, bg, wg }, _encode) may instead carry dyn(pos, nCols) -> workgroups | null (skipped): QSA's ops, whose
+// sizes and dense / gathered choice depend on the step's position. bg may be a list (groups 0, 1, ..).
 //
 // Expert offload (roadmap 33 item 7; engine/expert_store.js): layers whose routed experts the loader parked
 // (qwen4expWeights(..., { experts })) split the token's command buffer after their router, as Qwen35Engine's
@@ -23,15 +29,20 @@
 // same moe_gu / moe_dn kernels run on the pool with slot ids (B.offIds) in place of expert ids. One token at a time,
 // a cut holds at most K experts, so the store is built without the whole-layer prefill region. moeTrace: the router's
 // ids and weights of every layer are kept per token for readMoeTrace() (tests/trace_flash.js).
-// Offload is decode-only for now: a batched prefill / verify engine (engine/qwen4exp_batch.js, PR #348) builds its
-// expert ops with _wq, which refuses a parked entry (notParked). Routing offloaded layers there means, per offloaded
-// layer and pass: end the compute pass after the router, ExpertStore.loadLayer (long frames) or loadExperts (short
-// ones, after reading the ids back) into the region, and bind regionEntry(i, part) with the original expert ids;
-// create the engine with expertRegion: true for that. this.offLayers lists the offloaded layers.
+// The batched prefill / verify passes (engine/qwen4exp_batch.js) build their resident layers' expert ops with _wq,
+// which always refuses a parked entry (notParked). An offloaded layer's expert ops never go through _wq: they bind
+// the store's whole-layer region (regionEntry(i, part), the original expert ids), which exists only when the engine
+// was created with expertRegion: true (Qwen4ExpBatch.create refuses offloaded layers without it). Per offloaded layer
+// and pass (Qwen4ExpBatch._encodeLayers): end the compute pass after the router, then ExpertStore.loadLayer (wide
+// passes) or loadExperts (narrow ones, after reading the ids back) into the region. this.offLayers lists the
+// offloaded layers.
 import { qwen4expConfig } from "./gguf.js";
 import { NgramState } from "./ngram.js";
 import { notParked } from "./expert_store.js";
 import * as W from "./wgsl/qwen4exp.js";
+import { attnDecMcWGSL } from "./wgsl/qwen4exp_batch.js";
+import { qsaCheckConfig, qsaFlashPipelines, qsaShared, qsaScratch, qsaSetFrame, qsaLayerState, qsaBind, qsaStateOps, qsaSelectOps, qsaSparse,
+  QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
 
 const U = GPUBufferUsage;
 const fr = Math.fround;
@@ -45,15 +56,25 @@ export class Qwen4ExpEngine {
   // drop their CPU copies once uploaded, so one weights object builds one engine (a second create throws).
   // ngram: an NgramTable (engine/ngram.js) for the PLE layer's rows; required when layerRange holds a PLE layer.
   // layerRange [lo, hi): the trunk layers this engine runs; hasEmbed / hasHead as Qwen35Engine.
+  // qsa: run QSA (default: when every full-attention layer in range has its indexer weights); maxSeq may then pass 2048.
   // moeTrace: keep every layer's router ids and weights per token (readMoeTrace). expertRegion: build the expert store
   // with its whole-layer region (ExpertStore.loadLayer / loadExperts / regionEntry), for a batched engine that routes
   // offloaded layers; off by default, since decode alone never needs it and its 1.4-1.8 GB goes to the pools instead.
-  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null, moeTrace = false, expertRegion = false }) {
+  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null, qsa = null, moeTrace = false, expertRegion = false }) {
     const cfg = this.cfg = qwen4expConfig(meta);
     this.device = device;
     const [lo, hi] = layerRange || [0, cfg.L];
     Object.assign(this, { lo, hi, hasEmbed, hasHead, pos: 0 });
-    if (maxSeq > 2048) throw new Error("qwen4exp: the dense decode path holds at most 2048 positions (QSA is PR 9)");
+    const qLayers = [];
+    for (let i = lo; i < hi; i++) if (cfg.qsa[i]) qLayers.push(weights.layers[i - lo]);
+    this.qsa = qsa ?? (qLayers.length > 0 && qLayers.every((L) => L.indexer));
+    if (this.qsa && qLayers.some((L) => !L.indexer)) throw new Error("qwen4exp: qsa needs the indexer weights (qwen4expWeights qsa: true)");
+    if (this.qsa) qsaCheckConfig(cfg);
+    // which steps / passes read QSA's selected cells: those with a column past 2051 cells (qsaAlways: every one, for
+    // the QSA == dense check, tests/test_q38flash_batch.js)
+    this.qsaAlways = false;
+    this.sparse = (pos, n) => this.qsaAlways || qsaSparse(pos, n);
+    if (maxSeq > 2048 && qLayers.length && !this.qsa) throw new Error("qwen4exp: without QSA (the indexer weights) the context is capped at 2048 positions");
     this.maxSeq = maxSeq;
     const d = cfg.dim, hc = cfg.hc, HD = cfg.hDim, ss = cfg.ssm;
     // shapes the kernels hard-code (engine/wgsl/qwen4exp.js): the router's workgroup arrays, DeltaNet's 128 lanes
@@ -83,6 +104,9 @@ export class Qwen4ExpEngine {
         dnConv: W.DN_CONV_WGSL, dnDelta: W.DN_DELTA_WGSL,
         attnPrep: W.ATTN_PREP_WGSL, attnDec: W.ATTN_DEC_WGSL, ple: W.PLE_WGSL, am1: W.ARGMAX1_WGSL, am2: W.ARGMAX2_WGSL })
         .map(async ([k, code]) => { P[k] = await pipe(code, k); }),
+      // QSA: the gathered attention over the selected rows (one column), and the indexer kernels
+      ...(this.qsa ? [(async () => { P.attnGather = await pipe(attnDecMcWGSL({ gather: QSA_SEL_STRIDE }), "attn_gather"); })(),
+        (async () => { this.qsaK = await qsaFlashPipelines(device); })()] : []),
     ]);
 
     // ---- scratch (shared by every layer: one token's ops run in order)
@@ -100,6 +124,10 @@ export class Qwen4ExpEngine {
     };
     if (pleLayers.length) Object.assign(B, { emb: buf(d), pk: buf(HD), pv: buf(d), dbg: buf(2 * HD + hc) });
     device.queue.writeBuffer(B.shIds, 0, new Uint32Array(4));
+    if (this.qsa) {   // QSA's uniforms (shared with the batched passes) and its one-column scratch
+      this.qsaSh = qsaShared(device, { dim: d, maxSeq, eps: cfg.eps, theta: cfg.ropeTheta, nRot: cfg.ropeDims });
+      this.qsaS = qsaScratch(device, { maxCols: 1, maxBlocks: this.qsaSh.maxBlocks });
+    }
 
     // ---- expert offload: the store the loader parked these layers' experts in (one store for all of them)
     this.experts = null;
@@ -265,7 +293,8 @@ export class Qwen4ExpEngine {
     const frameU = B.frame;
     this.layers = [];
     for (let i = lo; i < hi; i++) {
-      const L = weights.layers[i - lo], isQ = cfg.qsa[i], st = {}, attnOps = [], ffnOps = [];
+      // st.w: the weights this engine joined or fused (their parts are consumed), for engine/qwen4exp_batch.js
+      const L = weights.layers[i - lo], isQ = cfg.qsa[i], st = { w: {} }, attnOps = [], ffnOps = [];
       if (!!L.isFull !== !!isQ) throw new Error(`qwen4exp: layer ${i} type does not match the config`);
       // PLE (n-gram) injection, before the layer's first mixer
       if (pleLayers.includes(i)) {
@@ -277,7 +306,9 @@ export class Qwen4ExpEngine {
         // the PLE norms and the conv kernel in one buffer (8 storage buffers per stage is WebGPU's default limit)
         const pw = new Float32Array(3 * HD + HD * K1);
         [pc.normKey, pc.normQuery, pc.normConv, pc.conv].forEach((e, j) => pw.set(e.data, j * HD));
-        attnOps.push({ pipe: P.ple, bg: bg(P.ple, [B.R, B.pk, B.pv, wq({ kind: "f32", data: pw, shape: [pw.length] }).buf,
+        st.w.pw = wq({ kind: "f32", data: pw, shape: [pw.length] }).buf;
+        st.pleU = { K1, slots };
+        attnOps.push({ pipe: P.ple, bg: bg(P.ple, [B.R, B.pk, B.pv, st.w.pw,
           st.ring, B.dbg, uni([d, K1, cfg.ple.ngram, slots, f(eps), hc, 0, 0]), frameU]), wg: [hc, 1, 1],
           taps: [[`ple_gate-${i}`, B.dbg, hc, "f32", 2 * HD], [`ple_gated_value-${i}`, B.dbg, HD], [`ple_conv_out-${i}`, B.dbg, HD, "f32", HD]] });
       }
@@ -287,14 +318,14 @@ export class Qwen4ExpEngine {
       else {
         st.conv = buf(convDim * (ss.convK - 1)); st.S = buf(ss.nVHeads * ss.stateSize * ss.stateSize);
         // [qkv | z]: one GEMV when both have one type (Q4_0 in every layer of the bartowski file)
-        const zTap = { tap: [`z-${i}`, B.qkvz, ss.inner, "f32", convDim] }, fz = fuseRows(L.wqkv, L.wz);
+        const zTap = { tap: [`z-${i}`, B.qkvz, ss.inner, "f32", convDim] }, fz = st.w.qkvz = fuseRows(L.wqkv, L.wz);
         if (fz) attnOps.push(gemv(fz, B.mixed, B.qkvz, zTap));
         else attnOps.push(gemv(wq(L.wqkv, "qkv"), B.mixed, B.qkvz), gemv(wq(L.wz, "z"), B.mixed, B.qkvz, { yOff: convDim, ...zTap }));
         // beta and alpha as one GEMV, dt_bias and A as one buffer (cat: CPU copies of the f32 tensors)
-        attnOps.push(gemv(wq(cat(L.wBeta, L.wAlpha)), B.mixed, B.ba, { dIn: d }));
+        attnOps.push(gemv(st.w.ba = wq(cat(L.wBeta, L.wAlpha)), B.mixed, B.ba, { dIn: d }));
         attnOps.push({ pipe: P.dnConv, bg: bg(P.dnConv, [view(B.qkvz, 0, convDim), st.conv, wq(L.conv, "conv").buf, B.co, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps)])]),
           wg: [convDim / ss.stateSize, 1, 1] });
-        attnOps.push({ pipe: P.dnDelta, bg: bg(P.dnDelta, [B.co, st.S, B.ba, wq(cat(L.dtBias, L.ssmA)).buf, view(B.qkvz, convDim, ss.inner), wq(L.ssmNorm).buf, B.o, B.go,
+        attnOps.push({ pipe: P.dnDelta, bg: bg(P.dnDelta, [B.co, st.S, B.ba, st.w.dta = wq(cat(L.dtBias, L.ssmA)).buf, view(B.qkvz, convDim, ss.inner), wq(L.ssmNorm).buf, B.o, B.go,
           uni([ss.nKHeads, ss.stateSize, keyDim, ss.nVHeads, f(eps), 0, 0, 0])]), wg: [ss.nVHeads, 1, 1],
           taps: [[`attn_output-${i}`, B.o, ss.inner], [`final_output-${i}`, B.go, ss.inner]] });
         attnOps.push(gemv(wq(L.wOut, "ssm_out"), B.go, B.out, { tap: [`linear_attn_out-${i}`, B.out, d] }));
@@ -304,7 +335,7 @@ export class Qwen4ExpEngine {
       const sF = site(L.hcFfn, `-${i}`);
       ffnOps.push(...hcMixRest(L.hcFfn, `-${i}`, `hc_mixed-${i}`));
       // the router and the shared expert's gate as one GEMV: logits[nExp] is the shared gate's
-      ffnOps.push(gemv(wq(cat(L.router, L.shRouter)), B.mixed, B.logits, { dIn: d }));
+      ffnOps.push(gemv(st.w.router = wq(cat(L.router, L.shRouter)), B.mixed, B.logits, { dIn: d }));
       ffnOps.push({ pipe: P.route, bg: bg(P.route, [B.logits, B.ids, B.wts, uni([cfg.nExp, K, 0, 0])]), wg: [1, 1, 1],
         taps: [[`ffn_moe_topk-${i}`, B.ids, K, "u32"], [`ffn_moe_weights_norm-${i}`, B.wts, K]] });
       // the routed experts: resident, or (offloaded) the layer's slot pool read through the slot ids, after the cut
@@ -338,6 +369,7 @@ export class Qwen4ExpEngine {
       this.logitStage = device.createBuffer({ size: Math.ceil(V * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
     }
     this.hStage = device.createBuffer({ size: HD * 4, usage: U.MAP_READ | U.COPY_DST });
+    this._wq = wq;   // engine/qwen4exp_batch.js builds its ops on the same weight buffers (st.w: the joined ones)
     // op lists: per half unfused (debugToken), per layer fused (forwardToken)
     const halves = [...this.layers.flatMap((l) => l.halves), ...(hasHead ? [this.headHalf] : [])];
     const dbg = this._halfOps(halves, false), fast = this._halfOps(halves, true);
@@ -356,8 +388,9 @@ export class Qwen4ExpEngine {
     this.reset();
   }
 
-  // Gated full attention (dense causal). The QSA hook (PR 9): an indexer pass would go between attn_prep and
-  // attn_dec and hand attn_dec a selected-cell list; below 2051 cached tokens it selects every cell.
+  // Gated full attention. With QSA (engine/qwen4exp_qsa.js): the indexer state update (proj, prep, pool) on every
+  // step, then dense attention while the step has <= 2051 cells, or score / select and the gathered attention over the
+  // selected cells past that (dyn ops: _encode asks them per step).
   _attnOps(L, i, st, { gemv, wq, bg, uni, f, view, fuseRows }) {
     const { cfg, B, P, device } = this, nH = cfg.nHeads, nKV = cfg.nKVHeads, hd = cfg.headDim;
     if (hd !== 256) throw new Error("qwen4exp: attn kernels assume head dim 256");
@@ -366,23 +399,43 @@ export class Qwen4ExpEngine {
     // conv window and PLE ring are scratch buf()s, which already have it)
     st.kc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
     st.vc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
-    const ap = uni([nH, nKV, hd, cfg.ropeDims, f(cfg.eps), 0, 0, 0]);
-    const nQ = 2 * nH * hd, nK = nKV * hd, qf = view(B.qkvA, 0, nQ), fq = fuseRows(L.wq, L.wk, L.wv);
+    const ap = st.ap = uni([nH, nKV, hd, cfg.ropeDims, f(cfg.eps), 0, 0, 0]);
+    const nQ = 2 * nH * hd, nK = nKV * hd, qf = view(B.qkvA, 0, nQ), fq = st.w.qkvA = fuseRows(L.wq, L.wk, L.wv);
+    const dense = { pipe: P.attnDec, bg: bg(P.attnDec, [B.qn, st.kc, st.vc, qf, B.ao, ap, B.frame]), wg: [nH, 1, 1], tap: [`attn_gated-${i}`, B.ao, nH * hd] };
+    let qsaState = [], qsaSel = [], gather = [];
+    if (this.qsa) {
+      st.qsa = qsaLayerState(device, L, { maxSeq: this.maxSeq, dim: cfg.dim });
+      const G = qsaBind(device, this.qsaK, this.qsaSh, this.qsaS, st.qsa, B.mixed);
+      qsaState = qsaStateOps(this.qsaK, G);
+      qsaSel = qsaSelectOps(this.qsaK, G, this.sparse);
+      dense.dyn = (pos, n) => (this.sparse(pos, n) ? null : [nH, 1, 1]);
+      // the batch kernel with one column: the gate at column 0 of qkvA (MS.qs unused)
+      gather = [{ pipe: P.attnGather, bg: bg(P.attnGather, [B.qn, st.kc, st.vc, B.qkvA, B.ao, ap, null, uni([0, nQ, nQ + nK, 0]), this.qsaS.sel]),
+        dyn: (pos, n) => (this.sparse(pos, n) ? [nH, 1, 1] : null), tap: [`attn_gated-${i}`, B.ao, nH * hd] }];
+    }
     return [
       // [q|gate, k, v] into one buffer: one GEMV when the three share a type (Q6_K and Q8_0 both load as q8)
       ...(fq ? [gemv(fq, B.mixed, B.qkvA)] : [gemv(wq(L.wq, "attn_q"), B.mixed, B.qkvA), gemv(wq(L.wk, "attn_k"), B.mixed, B.qkvA, { yOff: nQ }),
         gemv(wq(L.wv, "attn_v"), B.mixed, B.qkvA, { yOff: nQ + nK })]),
+      ...qsaState,
       { pipe: P.attnPrep, bg: bg(P.attnPrep, [qf, view(B.qkvA, nQ, nK), view(B.qkvA, nQ + nK, nK), B.qn, st.kc, st.vc, wq(L.qNorm).buf, wq(L.kNorm).buf, ap, B.frame]), wg: [nH + nKV, 1, 1] },
-      { pipe: P.attnDec, bg: bg(P.attnDec, [B.qn, st.kc, st.vc, qf, B.ao, ap, B.frame]), wg: [nH, 1, 1], tap: [`attn_gated-${i}`, B.ao, nH * hd] },
+      ...qsaSel,
+      dense,
+      ...gather,
       gemv(wq(L.wo, "attn_output"), B.ao, B.out, { tap: [`attn_output-${i}`, B.out, cfg.dim] }),
     ];
   }
 
   // reset() also clears a failed step (_failed): a step that throws part way may have advanced layer 0's DeltaNet
   // state and the n-gram predecessors without pos, so the engine refuses further tokens until reset.
+  // It also bumps _posGen (as every step does: a batched verify's snapshot is then stale, Qwen4ExpBatch.accept) and
+  // forgets which layer the expert store's region holds (a failed batched pass may have encoded a region load that
+  // never ran).
   reset() {
     this.pos = 0;
+    this._posGen = (this._posGen || 0) + 1;
     this._failed = null;
+    if (this.experts?.region) this.experts.region.layer = -1;
     this.ngs?.reset();
     const enc = this.device.createCommandEncoder();
     for (const l of this.layers) for (const b of [l.st.conv, l.st.S, l.st.ring]) if (b) enc.clearBuffer(b);
@@ -435,16 +488,20 @@ export class Qwen4ExpEngine {
     let th = fr(this.pos);
     for (let i = 0; i < cfg.ropeDims / 2; i++) { F[4 + i * 4] = fr(Math.cos(th)); F[5 + i * 4] = fr(Math.sin(th)); th = fr(th * this._ropeTs); }
     q.writeBuffer(B.frame, 0, F);
+    if (this.qsa) qsaSetFrame(this.device, this.qsaS, this.pos, 1);
     if (!defer && rows) await rows;
     return rows;
   }
 
-  _encode(pass, ops) {
+  // ops at position pos (the step's; a batched pass: its first) over nCols columns
+  _encode(pass, ops, pos = this.pos, nCols = 1) {
     let last = null;
     for (const o of ops) {
+      const wg = o.dyn ? o.dyn(pos, nCols) : o.wg;
+      if (!wg) continue;
       if (o.pipe !== last) { pass.setPipeline(o.pipe); last = o.pipe; }
-      pass.setBindGroup(0, o.bg);
-      pass.dispatchWorkgroups(o.wg[0], o.wg[1], o.wg[2]);
+      if (Array.isArray(o.bg)) o.bg.forEach((g, k) => pass.setBindGroup(k, g)); else pass.setBindGroup(0, o.bg);
+      pass.dispatchWorkgroups(wg[0], wg[1], wg[2]);
     }
   }
 
@@ -491,6 +548,7 @@ export class Qwen4ExpEngine {
   // the PLE layer run while its n-gram rows are read.
   async forwardToken(id, opts) {
     this._check(id);
+    this._posGen++;
     try { return await this._forward(id, opts); } catch (e) { this._failed = e; throw e; }
   }
 
@@ -547,7 +605,7 @@ export class Qwen4ExpEngine {
     return out;
   }
 
-  // Prompt tokens one at a time (the batched prefill is PR plan item 5). Returns the last step's result.
+  // Prompt tokens one at a time (the batched prefill: engine/qwen4exp_batch.js). Returns the last step's result.
   async prefillTokens(ids, opts) { let r = null; for (const t of ids) r = await this.forwardToken(t, opts); return r; }
 
   // Per-layer check (tests/test_q38flash.js): one token, each half layer submitted on its own with every tapped
@@ -556,6 +614,7 @@ export class Qwen4ExpEngine {
   // teacher-forced run. -> Map of "<name>.<k>" (k counts repeats within the token, as the dumps do) -> typed array.
   async debugToken(id, force) {
     this._check(id);
+    this._posGen++;
     try { return await this._debug(id, force); } catch (e) { this._failed = e; throw e; }
   }
 
@@ -566,6 +625,7 @@ export class Qwen4ExpEngine {
       if (Rin) dev.queue.writeBuffer(this.B.R, 0, Rin);
       const enc = dev.createCommandEncoder(), reads = [];
       for (const o of ops) {
+        if (o.dyn && !o.dyn(this.pos, 1)) continue;   // not run at this position (QSA's dense / gathered choice)
         const pass = enc.beginComputePass();
         this._encode(pass, [o]);
         pass.end();

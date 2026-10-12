@@ -507,8 +507,8 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
 }`;
 
 // Step 2: dense causal attention for one decode token over cache cells 0..frame.pos, one workgroup per Q head
-// (hd = 256 threads), then out = attn * sigmoid(gate). Scores live in workgroup memory: seqLen <= 2048.
-// QSA (roadmap 33 PR 9) replaces the cell range with the selected cells; below 2051 cached tokens it selects all.
+// (hd = 256 threads), then out = attn * sigmoid(gate). Scores live in workgroup memory: seqLen <= 2052 (dense runs up
+// to 2051 cells; past that QSA's gathered kernel, engine/wgsl/qwen4exp_batch.js attnDecMcWGSL, reads the selected ones).
 export const ATTN_DEC_WGSL = DQ + `
 ${FRAME}
 struct AP { nH: u32, nKV: u32, hd: u32, nRot: u32, eps: f32, p0: u32, p1: u32, p2: u32 };
@@ -519,7 +519,7 @@ struct AP { nH: u32, nKV: u32, hd: u32, nRot: u32, eps: f32, p0: u32, p1: u32, p
 @group(0) @binding(4) var<storage, read_write> fx_out: array<f32>;
 @group(0) @binding(5) var<uniform> fx_P: AP;
 @group(0) @binding(6) var<uniform> fx_F: Frame;
-var<workgroup> fx_sc: array<f32, 2048>;
+var<workgroup> fx_sc: array<f32, 2052>;
 var<workgroup> fx_red: array<f32, 256>;
 @compute @workgroup_size(256)
 fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
