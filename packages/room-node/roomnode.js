@@ -45,7 +45,7 @@ import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
 import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { unpackWire, wireStats } from "../../room/wire.js";
-import { TeleMeter } from "../../room/tele.js";
+import { TeleMeter, expertStoreOf } from "../../room/tele.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf } from "../../room/models.js";
@@ -898,7 +898,7 @@ export class RoomNode extends EventEmitter {
     const ai = this.ai, T = this.tele ||= new TeleMeter();
     T.note(kind, ms, n, wireStats.lastMax || 0);
     const now = performance.now();
-    if (T.due(now) && ai.hostId) this.sendTo(ai.hostId, T.report(now, ai.engine?.experts));
+    if (T.due(now) && ai.hostId) this.sendTo(ai.hostId, T.report(now, ai.experts || expertStoreOf(ai.engine)));
   }
   // the host link dropped: knock on the host id every 3 s for a minute (a host back from a lost
   // network, or its link redialed) and say hello {back: 1}; the host re-seats this device

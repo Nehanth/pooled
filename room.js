@@ -57,7 +57,7 @@ import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
 import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
-import { TeleMeter, expertCache, expertCacheOf } from "./room/tele.js";
+import { TeleMeter, expertCache, expertCacheOf, expertStoreOf } from "./room/tele.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 import { convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
 import { resumableGenerate, waitForRoom, linkSilent, backFromAway, sameShard, guestResume, GUEST_KEY, REJOIN_GRACE_MS, LINK_SILENT_MS } from "./room/resume.js";
@@ -3722,7 +3722,7 @@ const roomGenerateOnce = createGenerator({
 // Workers report their compute per frame kind (ai-tele); the host times each lap, so what is left
 // is the wire. The map shows the chain, what each device holds and how long its part takes.
 function mapNodes(kind = "spec") {
-  const nodes = [{ name: myName, layers: ai.layersByName?.[myName] || "", ms: ai.lapStat?.host, host: 1, amax: ai.hostAmax, exp: expertsAt(ai.moe, ai.offloadBy?.[myName]), xc: expertCacheOf(ai.engine?.experts) }];
+  const nodes = [{ name: myName, layers: ai.layersByName?.[myName] || "", ms: ai.lapStat?.host, host: 1, amax: ai.hostAmax, exp: expertsAt(ai.moe, ai.offloadBy?.[myName]), xc: expertCacheOf(expertStoreOf(ai.engine)) }];
   for (const id of ai.chain) {
     const t = ai.teleBy.get(id) || {};
     const name = conns.get(id)?.name || id;
@@ -3942,7 +3942,7 @@ function teleNote(kind, ms, n = 1) {
   const T = ai.tele ||= new TeleMeter();
   T.note(kind, ms, n, wireStats.lastMax || 0);
   const now = performance.now();
-  if (T.due(now) && ai.hostId) sendTo(ai.hostId, T.report(now, ai.engine?.experts));
+  if (T.due(now) && ai.hostId) sendTo(ai.hostId, T.report(now, expertStoreOf(ai.engine)));
 }
 
 // ---- the speed panel (room/speedo.js): this answer's tok/s, live and big; the recent answers' speeds,
@@ -4008,7 +4008,7 @@ function renderSpeed() {
   const box = $("speedo"); if (!box) return;
   const key = ai.model || $("ai-model").value, M = MODELS[key];
   $("sp-model").textContent = shortName(key);
-  $("sp-params").textContent = M ? paramsText(paramsOf(M.label, M.gguf || "")) : "";
+  $("sp-params").textContent = M ? paramsText(paramsOf(M.label, M.gguf || "", key)) : "";
   const nodes = lastMap?.nodes || [], st = lastMap?.st || {};
   const by = ai.layersByName || {}, holders = Object.keys(by);
   const shares = tokenShares(nodes, st.lap);
@@ -4620,7 +4620,7 @@ async function aiOnData(from, d) {
         if (stopsStart({ load: d.load, inChain: true, starting: ai.busy === true, online: $("ai-panel").classList.contains("online") })) aiLoadFailed(from, e?.name || from, d.message);
       }
       break;
-    case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0, xc: expertCache(d.exp, ai.teleBy.get(from)?.xc) }); } break;
+    case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0, xc: d.exp ? expertCache(d.exp, ai.teleBy.get(from)?.xc) : null }); } break;
     case "ai-inv-req": cachedRanges(d.url).then((have) => sendTo(from, { t: "ai-inv", url: d.url, have })); break;
     case "ai-inv": if (ai.invWait && ai.invWait.url === d.url && Array.isArray(d.have)) ai.invWait.inv[from] = d.have.slice(0, 20000); break;
     case "ai-wget": answerWget(from, d); break;

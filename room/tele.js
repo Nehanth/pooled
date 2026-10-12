@@ -8,42 +8,51 @@
 //
 // exp (optional; only from a device whose engine offloads experts, engine/expert_store.js): the expert cache's
 // lookups since the last report (hits, misses: experts already in the GPU slot pool, or copied in from RAM), the
-// tokens this device ran in that time (tok), the counts since the load (all), and, when the store reads experts
-// from disk (a disk reader at store.disk with expert_disk.js's stats), the disk reads and bytes since the last
-// report. A host that predates it ignores it; a worker that predates it sends none.
+// decode / verify tokens this device ran in that time (tok), the counts since the load (all), and, when the store
+// has disk layers (the disk tier: store.stats.diskReads / diskBytes), the experts read from the files and their
+// bytes since the last report. A host that predates it ignores it; a worker that predates it sends none.
 
 export const TELE_EVERY_MS = 700;
 
-// an ExpertStore's counters now (cumulative since its load); null without a store that looks up experts
+// the engine's ExpertStore, if it offloads experts: engine.experts (engine/qwen35.js, engine/qwen4exp.js), or its
+// core's behind the room's Flash adapter (room/flash.js FlashRoomEngine wraps the Qwen3.8-Flash-Next engine)
+export function expertStoreOf(engine) {
+  return engine?.experts || engine?.core?.experts || null;
+}
+
+// an ExpertStore's counters now (cumulative since its load or its last resetStats); null without a store that looks
+// up experts. A store with disk layers (engine/expert_store.js diskSet: the disk tier) also counts the experts it read
+// from the files (stats.diskReads, stats.diskBytes)
 export function expertCounters(store) {
   const s = store?.stats;
   if (!s || !Number.isFinite(s.hits) || !Number.isFinite(s.misses)) return null;
   const out = { hits: s.hits, misses: s.misses };
-  const d = store.disk?.stats;
-  if (d && Number.isFinite(d.parts)) { out.reads = d.parts; out.readBytes = +d.bytes || 0; }
+  if (store.diskSet?.size > 0 && Number.isFinite(s.diskReads)) { out.reads = s.diskReads; out.readBytes = +s.diskBytes || 0; }
   return out;
 }
 
-// the exp field of a report: the counters' change since `prev` (null: since zero), over `tok` tokens
+// the exp field of a report: the counters' change since `prev` (null: since zero), over `tok` tokens. Counters
+// that went down (the store's resetStats) count from zero again
 export function expertDelta(prev, cur, tok) {
   if (!cur) return null;
-  const p = prev || { hits: 0, misses: 0, reads: 0, readBytes: 0 };
-  const out = { hits: Math.max(0, cur.hits - p.hits), misses: Math.max(0, cur.misses - p.misses), tok: Math.max(0, tok | 0), all: [cur.hits, cur.misses] };
+  let p = prev || { hits: 0, misses: 0, reads: 0, readBytes: 0 };
+  if (cur.hits < p.hits || cur.misses < p.misses || (cur.reads != null && cur.reads < (p.reads || 0))) p = { hits: 0, misses: 0, reads: 0, readBytes: 0 };
+  const out = { hits: cur.hits - p.hits, misses: cur.misses - p.misses, tok: Math.max(0, tok | 0), all: [cur.hits, cur.misses] };
   if (cur.reads != null) { out.reads = Math.max(0, cur.reads - (p.reads || 0)); out.readBytes = Math.max(0, cur.readBytes - (p.readBytes || 0)); }
   return out;
 }
 
 // A worker's meter: note() every frame it computes, report() when due (at most every TELE_EVERY_MS).
 export class TeleMeter {
-  constructor(every = TELE_EVERY_MS) { this.every = every; this.k = {}; this.at = 0; this.amax = 0; this.tok = 0; this.xPrev = null; this.xStore = null; }
+  constructor(every = TELE_EVERY_MS) { this.every = every; this.k = {}; this.at = -Infinity; this.amax = 0; this.tok = 0; this.xPrev = null; this.xStore = null; }
   // kind: "one" | "spec" | "pre"; ms: this frame's compute; n: its tokens; amax: the wire's largest |x| (wire.js)
   note(kind, ms, n = 1, amax = 0) {
     this.amax = Math.max(this.amax, +amax || 0);
     const k = this.k[kind] ||= { ema: ms, n: 0 };
     k.ema = k.n ? 0.7 * k.ema + 0.3 * ms : ms; k.n++;
-    this.tok += n > 0 ? n : 1;
+    if (kind !== "pre") this.tok += n > 0 ? n : 1;   // the tokens decode and verify frames ran (a prompt's frames look up no experts)
   }
-  due(now) { return now - this.at > this.every; }
+  due(now) { return now - this.at > this.every; }   // the first report goes at once, however young the clock
   // the ai-tele message, and the window starts again; store: the engine's ExpertStore (engine.experts), if any
   report(now, store = null) {
     this.at = now;

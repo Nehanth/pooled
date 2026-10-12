@@ -87,11 +87,14 @@ export function barScale(hist, min = 0.06) {
 
 // A model's size from its picker label and file name: "Qwen3.8 27B · Q4" -> 27B; a MoE's file says how many
 // are active per token ("Qwen3.6-35B-A3B" -> 3B). { total, active, quant }; total "" when the label has none.
-export function paramsOf(label = "", url = "") {
+// A model whose label and file name carry no size (Qwen3.8 Flash Next) has it in SIZES, by its room/models.js key.
+const SIZES = { "qwen3.8-flash": { total: "125B", active: "6B" } };   // room/models.js: 512 experts, 10 active, ~6B of 125B
+export function paramsOf(label = "", url = "", key = "") {
   const parts = String(label).split("·").map((s) => s.trim());
   const m = /(?:^|\s)(\d+(?:\.\d+)?)\s?([BMT])\b/.exec(parts[0] || "");
   const a = /-A(\d+(?:\.\d+)?)B(?:\b|-|_)/i.exec(String(url).split("/").pop() || "");
-  return { total: m ? m[1] + m[2] : "", active: a ? a[1] + "B" : "", quant: parts[1] || "" };
+  const k = SIZES[key];
+  return { total: m ? m[1] + m[2] : k?.total || "", active: a ? a[1] + "B" : k?.active || "", quant: parts[1] || "" };
 }
 export function paramsText(p) {
   if (!p?.total) return p?.quant || "";
@@ -100,32 +103,42 @@ export function paramsText(p) {
 
 // Where a device's experts live, from what the host dealt (ai.offloadBy) for a MoE model: null for a dense
 // model; { where: "GPU" } when they sit with the layers; { where: "GPU + RAM", lo, hi, ramGB, cacheGB } when it
-// parks the experts of layers lo..hi-1 in system RAM with a GPU cache in front (room/plan.js dealRoom).
+// parks the experts of layers lo..hi-1 in system RAM with a GPU cache in front (room/plan.js dealRoom); with the
+// disk tier (dealRoom's diskLo: the experts of layers diskLo..hi-1 stay in the model's files) { where: "GPU + RAM +
+// disk", ..., diskLo }. The map carries it to the other screens, so a missing or odd field draws less, never NaN.
+const fin = (v) => Number.isFinite(+v) && v !== null && v !== "";
 export function expertsAt(moe, off) {
   if (!moe) return null;
-  if (!off) return { where: "GPU" };
-  return { where: "GPU + RAM", lo: off.lo, hi: off.hi, ramGB: (off.ramBytes || 0) / 2 ** 30, cacheGB: (off.vramBytes || 0) / 2 ** 30 };
+  if (!off || typeof off !== "object") return { where: "GPU" };
+  const disk = fin(off.diskLo) && fin(off.hi) && +off.diskLo < +off.hi;
+  return { where: disk ? "GPU + RAM + disk" : "GPU + RAM", lo: off.lo, hi: off.hi, ramGB: (+off.ramBytes || 0) / 2 ** 30, cacheGB: (+off.vramBytes || 0) / 2 ** 30,
+    ...(disk ? { diskLo: +off.diskLo } : {}) };
 }
 export function expertsText(e) {
-  if (!e) return "";
+  if (!e || typeof e !== "object") return "";
   if (e.where === "GPU") return "experts on GPU";
-  return `experts of layers ${e.lo + 1}–${e.hi} in RAM (${e.ramGB.toFixed(1)} GB), ${e.cacheGB.toFixed(1)} GB GPU cache`;
+  const gb = (v) => (Number.isFinite(+v) ? (+v).toFixed(1) : "?");
+  if (!fin(e.lo) || !fin(e.hi)) return `experts in ${e.where === "GPU + RAM + disk" ? "RAM and on disk" : "RAM"}, ${gb(e.cacheGB)} GB GPU cache`;
+  const lo = +e.lo, hi = +e.hi, dl = fin(e.diskLo) && +e.diskLo > lo && +e.diskLo < hi ? +e.diskLo : fin(e.diskLo) && +e.diskLo <= lo ? lo : null;
+  if (dl === null) return `experts of layers ${lo + 1}–${hi} in RAM (${gb(e.ramGB)} GB), ${gb(e.cacheGB)} GB GPU cache`;
+  if (dl === lo) return `experts of layers ${lo + 1}–${hi} on disk, ${gb(e.cacheGB)} GB GPU cache`;
+  return `experts of layers ${lo + 1}–${dl} in RAM (${gb(e.ramGB)} GB), ${dl + 1}–${hi} on disk, ${gb(e.cacheGB)} GB GPU cache`;
 }
 // The card's headline for a device that offloads: "experts: GPU + RAM, 84% hits", the hit rate of its GPU expert
 // cache from its ai-tele (room/tele.js expertCache: the last report with lookups); without one yet, the place only.
 // "" for a device that doesn't offload (expertsText says "experts on GPU" there).
 export function expertsHead(e, xc) {
-  if (!e || e.where === "GPU") return "";
-  return `experts: ${e.where}` + (xc && Number.isFinite(xc.hit) ? `, ${Math.round(xc.hit)}% hits` : "");
+  if (!e || typeof e !== "object" || e.where === "GPU" || typeof e.where !== "string") return "";
+  return `experts: ${e.where}` + (xc && Number.isFinite(+xc.hit) ? `, ${Math.round(+xc.hit)}% hits` : "");
 }
-// what each token costs the cache: "1.3 experts copied from RAM per token", and the disk reads when the store
-// reads experts from disk; "" without a report
+// what each token costs the cache: "1.3 experts copied in per token" (a miss: from the parked experts, the disk
+// tier's RAM cache or the file), and the disk reads when the store reads experts from disk; "" without a report
 const per = (v) => (v >= 10 ? Math.round(v) : Math.round(v * 10) / 10);
 export function expertsCost(xc) {
-  if (!xc) return "";
-  const bits = [];
-  if (xc.missPerTok != null) bits.push(`${per(xc.missPerTok)} expert${per(xc.missPerTok) === 1 ? "" : "s"} from RAM per token`);
-  if (xc.readsPerTok != null) bits.push(`${per(xc.readsPerTok)} disk read${per(xc.readsPerTok) === 1 ? "" : "s"} per token` + (xc.readMBPerTok > 0 ? ` (${per(xc.readMBPerTok)} MB)` : ""));
+  if (!xc || typeof xc !== "object") return "";
+  const bits = [], ok = (v) => v != null && Number.isFinite(+v) && +v >= 0;
+  if (ok(xc.missPerTok)) bits.push(`${per(+xc.missPerTok)} expert${per(+xc.missPerTok) === 1 ? "" : "s"} copied in per token`);
+  if (ok(xc.readsPerTok)) bits.push(`${per(+xc.readsPerTok)} disk read${per(+xc.readsPerTok) === 1 ? "" : "s"} per token` + (+xc.readMBPerTok > 0 ? ` (${per(+xc.readMBPerTok)} MB)` : ""));
   return bits.join(" · ");
 }
 
@@ -133,8 +146,10 @@ export function expertsCost(xc) {
 // timing, a worker's from its ai-tele: browser workers and room nodes both report it, room/tele.js) over the lap;
 // what is left is the wire, plus any device that reports no timing (a worker on an older version). null without a lap or with one device (it does all of every token).
 export function tokenShares(nodes, lap) {
-  if (!(lap > 0) || !nodes || nodes.length < 2) return null;
-  const parts = nodes.map((x) => ({ name: x.name, ms: x.ms > 0 ? x.ms : 0, timed: x.ms > 0 }));
+  lap = +lap;
+  if (!(lap > 0) || !Number.isFinite(lap) || !Array.isArray(nodes) || nodes.length < 2) return null;
+  // ms may come from another screen's map or an older worker: a number or nothing (never a string's concatenation)
+  const parts = nodes.map((x) => { const ms = +x?.ms; return { name: String(x?.name ?? ""), ms: ms > 0 && Number.isFinite(ms) ? ms : 0, timed: ms > 0 && Number.isFinite(ms) }; });
   const sum = parts.reduce((s, x) => s + x.ms, 0);
   const total = Math.max(lap, sum);   // EMAs of different lengths: the parts may add up past the lap
   for (const x of parts) x.pct = 100 * x.ms / total;

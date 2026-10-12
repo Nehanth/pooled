@@ -751,7 +751,7 @@ test("worker: a room node reports its compute per frame to the host (ai-tele), w
   n.ai.engine = {
     dims: { dim: 4 }, NC: 4, experts,
     runHidden: async (h) => { experts.stats.hits += 7; experts.stats.misses += 1; await new Promise((r) => setTimeout(r, 2)); return h; },
-    runHiddenBatch: async (xs) => { experts.stats.hits += 20; experts.stats.misses += 4; return xs; },
+    runHiddenBatch: async (xs) => { experts.stats.hits += 20; experts.stats.misses += 4; await new Promise((r) => setTimeout(r, 2)); return xs; },   // (a few ms: k.spec > 0 after rounding)
   };
   const one = (pos) => n.aiOnData(H, { t: "ai-hidden", pos, ...packWire(new Float32Array(4).fill(0.5)) });
   await one(0);

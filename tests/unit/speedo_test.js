@@ -86,6 +86,8 @@ Deno.test("paramsOf: the size from the picker label, the active count from a MoE
   eq(paramsText({ total: "27B", active: "", quant: "" }), "27B parameters");
   eq(paramsText({ total: "", active: "", quant: "Q4" }), "Q4");
   eq(paramsText(null), "");
+  // Flash Next: no size in its label or file names
+  eq(paramsText(paramsOf(MODELS["qwen3.8-flash"].label, MODELS["qwen3.8-flash"].gguf, "qwen3.8-flash")), "125B parameters · 6B active · Q4");
 });
 
 Deno.test("expertsAt / expertsText: dense none, MoE on the GPU, or parked in RAM by the deal", () => {
@@ -94,6 +96,15 @@ Deno.test("expertsAt / expertsText: dense none, MoE on the GPU, or parked in RAM
   const e = expertsAt(true, { lo: 20, hi: 40, ramBytes: 12.5 * 2 ** 30, vramBytes: 3 * 2 ** 30 });
   eq(e.where, "GPU + RAM");
   eq(expertsText(e), "experts of layers 21–40 in RAM (12.5 GB), 3.0 GB GPU cache");
+  // the disk tier (room/plan.js dealRoom diskLo): the last layers' experts stay in the files
+  const d = expertsAt(true, { lo: 20, hi: 40, diskLo: 34, ramBytes: 10 * 2 ** 30, vramBytes: 2 * 2 ** 30 });
+  eq(d.where, "GPU + RAM + disk");
+  eq(expertsText(d), "experts of layers 21–34 in RAM (10.0 GB), 35–40 on disk, 2.0 GB GPU cache");
+  eq(expertsText(expertsAt(true, { lo: 20, hi: 40, diskLo: 20, ramBytes: 0, vramBytes: 2 * 2 ** 30 })), "experts of layers 21–40 on disk, 2.0 GB GPU cache");
+  // from another screen's map: odd fields draw less, never NaN
+  eq(expertsText({ where: "GPU + RAM" }), "experts in RAM, ? GB GPU cache");
+  eq(expertsText(expertsAt(true, { lo: "x", hi: 4 })), "experts in RAM, 0.0 GB GPU cache");
+  eq(expertsHead({ where: 5 }, null), "");
 });
 
 Deno.test("expertsHead / expertsCost: an offloading device's card says its GPU cache's hit rate and what a token costs", () => {
@@ -102,9 +113,9 @@ Deno.test("expertsHead / expertsCost: an offloading device's card says its GPU c
   eq(expertsHead(off, null), "experts: GPU + RAM", "no report yet");
   const xc = expertCache({ hits: 84, misses: 16, tok: 12, all: [84, 16] });
   eq(expertsHead(off, xc), "experts: GPU + RAM, 84% hits");
-  eq(expertsCost(xc), "1.3 experts from RAM per token");
-  eq(expertsCost(expertCache({ hits: 9, misses: 1, tok: 1, all: [9, 1] })), "1 expert from RAM per token");
-  eq(expertsCost(expertCache({ hits: 0, misses: 24, tok: 2, all: [0, 24], reads: 24, readBytes: 24 * 3 * 2 ** 20 })), "12 experts from RAM per token · 12 disk reads per token (36 MB)");
+  eq(expertsCost(xc), "1.3 experts copied in per token");
+  eq(expertsCost(expertCache({ hits: 9, misses: 1, tok: 1, all: [9, 1] })), "1 expert copied in per token");
+  eq(expertsCost(expertCache({ hits: 0, misses: 24, tok: 2, all: [0, 24], reads: 24, readBytes: 24 * 3 * 2 ** 20 })), "12 experts copied in per token · 12 disk reads per token (36 MB)");
   eq(expertsCost(null), "");
 });
 
@@ -121,6 +132,10 @@ Deno.test("tokenShares: each device's part of the lap, the rest is the wire (and
   // EMAs can add up past the lap: shares stay within 100%
   const o = tokenShares([{ name: "a", ms: 40 }, { name: "b", ms: 30 }], 60);
   near(o.parts.reduce((t, p) => t + p.pct, 0) + o.rest.pct, 100); eq(o.rest.ms, 0);
+  // junk from a map or an older worker: a string's ms is a number, junk is no timing; a bad lap is none
+  const j = tokenShares([{ name: "a", ms: "20" }, { name: "b", ms: "x" }, null], "60");
+  eq(j.parts.map((p) => [p.name, p.ms, p.timed]), [["a", 20, true], ["b", 0, false], ["", 0, false]]);
+  eq(tokenShares([{ name: "a", ms: 1 }, { name: "b", ms: 1 }], "nope"), null);
 });
 
 Deno.test("pushEvent: newest last, capped, a repeat is one event", () => {
