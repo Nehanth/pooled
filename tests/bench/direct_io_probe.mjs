@@ -12,6 +12,7 @@
 //
 //   node tests/bench/direct_io_probe.mjs <model dir or .gguf files>
 //   ARMS=buffered:1,direct:1,buffered:16,direct:16   GB=2 (per arm)   RUN=0 (which disjoint slice set)   SEED=1
+//   EVICT=a.gguf,b.gguf EVICT_GB=80: read that much of other files first (pushes the model's pages out of the cache)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,6 +40,8 @@ if (!isMainThread) {
   const buf = direct ? alignedScratch(fds[0], maxLen + 2 * SECTOR) : Buffer.allocUnsafeSlow(maxLen);
   const lat = [];
   let bytes = 0;
+  const now = () => performance.timeOrigin + performance.now();
+  const tStart = now();
   for (let i; (i = Atomics.add(next, 0, 1)) < parts.length / 3; ) {
     const shard = parts[3 * i], off = parts[3 * i + 1], len = parts[3 * i + 2];
     const t0 = performance.now();
@@ -55,7 +58,7 @@ if (!isMainThread) {
     bytes += len;
   }
   for (const fd of fds) fs.closeSync(fd);
-  parentPort.postMessage({ lat, bytes });
+  parentPort.postMessage({ lat, bytes, tStart, tEnd: now() });
 } else {
   const { parseGGUFHeader } = await import("../../engine/gguf.js");
   const { expertPart } = await import("../../packages/room-node/expert_disk.js");
@@ -91,6 +94,22 @@ if (!isMainThread) {
   const maxLen = Math.max(...all.map((p) => p[2]));
   const pct = (a, p) => { const x = [...a].sort((u, v) => u - v); return x[Math.min(x.length - 1, Math.floor((p / 100) * x.length))]; };
   console.error(`${files.length} files, ${all.length} parts (mean ${(meanLen / MiB).toFixed(2)} MiB), ${per} parts per arm (${(per * meanLen / 1e9).toFixed(2)} GB), run ${RUN}, ${process.platform} node ${process.version}, direct flag 0x${DIRECT_FLAG.toString(16)}`);
+  // EVICT=a,b: read EVICT_GB (80) of other large files through the page cache first (Windows' standby list; no admin)
+  const EV = env("EVICT", "").split(",").filter(Boolean);
+  if (EV.length) {
+    const t0 = performance.now(), each = Math.ceil(+env("EVICT_GB", 80) * 1e9 / EV.length), CH = 8 * MiB;
+    let tot = 0;
+    await Promise.all(EV.map(async (f) => {
+      const fh = await fs.promises.open(f, "r"), size = Math.min(each, (await fh.stat()).size);
+      let at = 0;
+      await Promise.all(Array.from({ length: 4 }, async () => {
+        const b = Buffer.allocUnsafe(CH);
+        for (let o; (o = at) < size; ) { at += CH; const { bytesRead } = await fh.read(b, 0, Math.min(CH, size - o), o); tot += bytesRead; }
+      }));
+      await fh.close();
+    }));
+    console.error(`evicted: read ${(tot / 1e9).toFixed(1)} GB of other files in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
+  }
   if (process.platform === "linux") for (const f of files) execFileSync("dd", [`if=${f}`, "iflag=nocache", "count=0", "status=none"]);
 
   // byte check: the direct path returns the same bytes as a buffered read
@@ -114,7 +133,8 @@ if (!isMainThread) {
       const w = new Worker(new URL(import.meta.url), { workerData: { paths: files, mode: arm.mode, parts, next, maxLen } });
       w.on("message", resolve); w.on("error", reject);
     })));
-    const sec = (performance.now() - t0) / 1000, bytes = res.reduce((a, r) => a + r.bytes, 0), lat = res.flatMap((r) => r.lat);
+    // the reads' own span: first worker's first read to the last one's end (not the workers' start-up)
+    const sec = (Math.max(...res.map((r) => r.tEnd)) - Math.min(...res.map((r) => r.tStart))) / 1000, bytes = res.reduce((a, r) => a + r.bytes, 0), lat = res.flatMap((r) => r.lat);
     const row = { slot: j + 1, mode: arm.mode, inflight: arm.n, GBps: +(bytes / 1e9 / sec).toFixed(2), p50: +pct(lat, 50).toFixed(2), p99: +pct(lat, 99).toFixed(2), GB: +(bytes / 1e9).toFixed(2), s: +sec.toFixed(1) };
     rows.push(row);
     console.log(JSON.stringify(row));
