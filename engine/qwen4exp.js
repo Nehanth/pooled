@@ -29,12 +29,13 @@
 // same moe_gu / moe_dn kernels run on the pool with slot ids (B.offIds) in place of expert ids. One token at a time,
 // a cut holds at most K experts, so the store is built without the whole-layer prefill region. moeTrace: the router's
 // ids and weights of every layer are kept per token for readMoeTrace() (tests/trace_flash.js).
-// The batched prefill / verify passes (engine/qwen4exp_batch.js) build their expert ops with _wq, which refuses a
-// parked entry (notParked), unless the engine was created with expertRegion: true: then an offloaded layer's pass
-// routes its experts through the region (Qwen4ExpBatch._expertCut): per offloaded
-// layer and pass: end the compute pass after the router, ExpertStore.loadLayer (long frames) or loadExperts (short
-// ones, after reading the ids back) into the region, and bind regionEntry(i, part) with the original expert ids;
-// create the engine with expertRegion: true for that. this.offLayers lists the offloaded layers.
+// The batched prefill / verify passes (engine/qwen4exp_batch.js) build their resident layers' expert ops with _wq,
+// which always refuses a parked entry (notParked). An offloaded layer's expert ops never go through _wq: they bind
+// the store's whole-layer region (regionEntry(i, part), the original expert ids), which exists only when the engine
+// was created with expertRegion: true (Qwen4ExpBatch.create refuses offloaded layers without it). Per offloaded layer
+// and pass (Qwen4ExpBatch._encodeLayers): end the compute pass after the router, then ExpertStore.loadLayer (wide
+// passes) or loadExperts (narrow ones, after reading the ids back) into the region. this.offLayers lists the
+// offloaded layers.
 import { qwen4expConfig } from "./gguf.js";
 import { NgramState } from "./ngram.js";
 import { notParked } from "./expert_store.js";
@@ -427,9 +428,14 @@ export class Qwen4ExpEngine {
 
   // reset() also clears a failed step (_failed): a step that throws part way may have advanced layer 0's DeltaNet
   // state and the n-gram predecessors without pos, so the engine refuses further tokens until reset.
+  // It also bumps _posGen (as every step does: a batched verify's snapshot is then stale, Qwen4ExpBatch.accept) and
+  // forgets which layer the expert store's region holds (a failed batched pass may have encoded a region load that
+  // never ran).
   reset() {
     this.pos = 0;
+    this._posGen = (this._posGen || 0) + 1;
     this._failed = null;
+    if (this.experts?.region) this.experts.region.layer = -1;
     this.ngs?.reset();
     const enc = this.device.createCommandEncoder();
     for (const l of this.layers) for (const b of [l.st.conv, l.st.S, l.st.ring]) if (b) enc.clearBuffer(b);
@@ -542,6 +548,7 @@ export class Qwen4ExpEngine {
   // the PLE layer run while its n-gram rows are read.
   async forwardToken(id, opts) {
     this._check(id);
+    this._posGen++;
     try { return await this._forward(id, opts); } catch (e) { this._failed = e; throw e; }
   }
 
@@ -607,6 +614,7 @@ export class Qwen4ExpEngine {
   // teacher-forced run. -> Map of "<name>.<k>" (k counts repeats within the token, as the dumps do) -> typed array.
   async debugToken(id, force) {
     this._check(id);
+    this._posGen++;
     try { return await this._debug(id, force); } catch (e) { this._failed = e; throw e; }
   }
 

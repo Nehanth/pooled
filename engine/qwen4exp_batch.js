@@ -47,6 +47,10 @@ export class Qwen4ExpBatch {
     const offSet = eng.offLayers || new Set();
     if (offSet.size && !eng.experts?.region) throw new Error(`qwen4exp batch: layers ${[...offSet].join(",")} have offloaded experts and the store has no `
       + "whole-layer region: create the engine with expertRegion: true (batched passes route offloaded layers through ExpertStore.loadLayer / loadExperts)");
+    // the disk tier (#349): a disk layer fills the region only with loadLayerAsync / loadExpertsAsync after a submit,
+    // which these passes do not do yet (decode does: Qwen4ExpEngine._afterRoute, ExpertStore.prepare)
+    const diskL = [...offSet].filter((i) => eng.experts?.isDisk?.(i));
+    if (diskL.length) throw new Error(`qwen4exp batch: layers ${diskL.join(",")} are on the disk tier; batched passes do not read disk layers yet (RAM offload only)`);
     const { device, cfg } = eng, wq = eng._wq;
     if (!wq) throw new Error("qwen4exp batch: the engine does not expose its weights (_wq)");
     Object.assign(this, { eng, device, cfg, maxCols, verifyCols: Math.min(verifyCols, maxCols) });
@@ -80,6 +84,8 @@ export class Qwen4ExpBatch {
       logits: buf(N * ls), ids: buf(N * K), wts: buf(N * K), h: buf(N * K * cfg.expFF), moe: buf(N * d),
       shIds: buf(4), hs: buf(N * cfg.shFF), sh: buf(N * d),
       F: device.createBuffer({ size: 16, usage: U.UNIFORM | U.COPY_DST }), cs: buf(N * MC.MC_FRAME_COL),
+      // the head-on-the-last-column frame (pos + n - 1, 1 column), copied into F inside the pass's encoder (_run)
+      F1: device.createBuffer({ size: 16, usage: U.COPY_SRC | U.COPY_DST }),
     };
     device.queue.writeBuffer(B.shIds, 0, new Uint32Array(4));
     if (eng.B.emb) Object.assign(B, { emb: buf(N * d), pk: buf(N * HD), pv: buf(N * d), dbg: buf(2 * HD + hc) });
@@ -247,7 +253,13 @@ export class Qwen4ExpBatch {
   async _pass(ids, opts) {
     const eng = this.eng;
     eng._check(ids[0]);
-    try { return await this._run(ids, opts); } catch (e) { eng._failed = e; throw e; }
+    eng._posGen++;   // a verify snapshot taken before this pass is stale from here (accept checks it)
+    try { return await this._run(ids, opts); } catch (e) {
+      eng._failed = e;
+      // a region load encoded in a pass that was never submitted (or only partly) must not count as loaded
+      if (eng.experts?.region) eng.experts.region.layer = -1;
+      throw e;
+    }
   }
 
   async _run(ids, { head = "last", wantLogits = false, wantHidden = false, hidden = null } = {}) {
@@ -269,6 +281,7 @@ export class Qwen4ExpBatch {
     else eng.ngs?.push(ids);
     // the frame: pos and n, and every column's rope table (the decode frame's recurrence)
     q.writeBuffer(B.F, 0, new Uint32Array([pos, n, 0, 0]));
+    if (head === "last" && eng.hasHead) q.writeBuffer(B.F1, 0, new Uint32Array([pos + n - 1, 1, 0, 0]));
     const cs = new Float32Array(n * MC.MC_FRAME_COL);
     for (let c = 0; c < n; c++) {
       let th = fr(pos + c);
@@ -291,6 +304,10 @@ export class Qwen4ExpBatch {
     if (head === "last") {
       if (eng.hasHead) {   // the head on the last column: its normed residual into column 0, then one column
         if (n > 1) { enc.copyBufferToBuffer(B.xn, (n - 1) * HB, B.xnTmp, 0, HB); enc.copyBufferToBuffer(B.xnTmp, 0, B.xn, 0, HB); }
+        // and the frame's nCols to 1: gemv_mc guards its GEMV_MC_COLS columns with nCols, so with the pass's n it
+        // would compute the head on columns 0..3 and write them into B.hl, which holds only verifyCols columns (an
+        // encoded copy, not a writeBuffer: that would land before the layers above run)
+        enc.copyBufferToBuffer(B.F1, 0, B.F, 0, 16);
         pass = enc.beginComputePass();
         eng._encode(pass, this.headRest, pos + n - 1, 1);
         pass.end();
@@ -346,6 +363,7 @@ export class Qwen4ExpBatch {
   // Prompt tokens in passes of maxCols (the last pass gets the head). Returns the last pass's result (as _pass).
   // opts.chunks: explicit pass sizes (tests), repeated until the ids run out; opts.onPass(result, offset, size).
   async prefill(ids, { chunks = null, onPass = null, ...opts } = {}) {
+    this._pending = null;   // a verify before this prefill can no longer be accepted
     let r = null, o = 0, k = 0;
     while (o < ids.length) {
       const sz = Math.min(chunks ? chunks[k++ % chunks.length] : this.maxCols, this.maxCols, ids.length - o);
@@ -360,18 +378,23 @@ export class Qwen4ExpBatch {
   // A verify pass: ids = [the last accepted token, ...draft]; -> { ids: greedy id per column } (head), and hiddens
   // when wantHidden. The state before the pass is kept for accept().
   async verify(ids, { wantHidden = false } = {}) {
+    this._pending = null;
     this._save();
     const pos0 = this.eng.pos;
     const r = await this._pass(ids, { head: "all", wantHidden });
-    this._pending = { ids: ids.slice(), pos0 };
+    this._pending = { ids: ids.slice(), pos0, gen: this.eng._posGen };
     return r;
   }
 
-  // Keep the first n columns of the last verify pass (n = its length: nothing to do).
+  // Keep the first n columns of the last verify pass (n = its length: nothing to do). Only right after that pass:
+  // any step that moved the engine since (forwardToken, debugToken, a prefill or another pass, reset()) bumps its
+  // _posGen, and the snapshot (the state before the verify) would then roll back over that step, so accept refuses.
   async accept(n) {
     const v = this._pending;
     if (!v) throw new Error("qwen4exp batch: accept without a verify pass");
     this._pending = null;
+    if (v.gen !== this.eng._posGen || this.eng.pos !== v.pos0 + v.ids.length)
+      throw new Error("qwen4exp batch: accept after the engine moved past its verify pass (forwardToken, prefill or reset since); verify again");
     if (!(Number.isInteger(n) && n >= 0 && n <= v.ids.length)) throw new Error(`qwen4exp batch: accept(${n}) of ${v.ids.length}`);
     if (n === v.ids.length) return;
     this._restore();
