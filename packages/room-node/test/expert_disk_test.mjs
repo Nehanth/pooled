@@ -111,6 +111,28 @@ test("expertDiskReader: every expert of every type equals the whole-tensor conve
   } finally { await disk.close(); }
 });
 
+test("expertDiskReader: a part that fits in one job is read, converted and handed over by one worker, no ring", async () => {
+  const disk = expertDiskReader({ paths, threads: 3 });   // chunkBytes 1 MiB: every test part fits
+  try {
+    for (const info of experts) {
+      const all = await Promise.all(Array.from({ length: info.shape[0] }, (_, e) => disk.readPart(info, e)));
+      all.forEach((got, e) => {
+        same(got, want(info, e), `${info.name} expert ${e}`);
+        assert.ok(!(got.qs.buffer instanceof SharedArrayBuffer) && !(got.sc.buffer instanceof SharedArrayBuffer));
+        assert.equal(got.qs.byteOffset, 0); assert.equal(got.qs.buffer.byteLength, got.qs.byteLength, "a buffer of its own");
+      });
+    }
+    // Q4_0 / Q8_0 parts: one job each; requantized parts: split over the workers, then one gather job each
+    const direct = experts.filter((t) => t.ggmlType === GGML_Q4_0 || t.ggmlType === GGML_Q8_0).reduce((a, t) => a + t.shape[0], 0);
+    assert.equal(disk.stats.parts, experts.reduce((a, t) => a + t.shape[0], 0));
+    assert.ok(disk.stats.chunks > disk.stats.parts && direct > 0);
+    const file = fs.readFileSync(paths[0]);
+    const got = await disk.readAt(0, 3, 5000);
+    assert.equal(got.buffer.byteLength, 5000, "readAt: the worker's buffer, not a copy of a slice");
+    assert.deepEqual(Buffer.from(got), file.subarray(3, 5003));
+  } finally { await disk.close(); }
+});
+
 test("expertDiskReader: readAt returns the file's bytes; chunks from a few bytes to whole experts; slots smaller than a read", async () => {
   const file = fs.readFileSync(paths[1]);
   // slotBytes 4096 (one page): a 10000-byte readAt goes through three slots, a Q6_K expert (6 KB converted) gets a buffer of its own
@@ -216,8 +238,8 @@ test("expertDiskReader: a pool that cannot start (no worker file) fails every re
 test("expertDiskReader: close() fails a read in flight and one waiting for a slot; leases held stay readable", async () => {
   const disk = expertDiskReader({ paths, threads: 2, chunkBytes: 4096, ringSlots: 2, workerURL: testWorkerURL });
   const info = tensors["blk.0.ffn_gate_exps.weight"];
-  const held = await disk.leasePart(info, 0);   // one slot
-  const slow = disk.readAt(0, OFF_SLOW, 16).then(() => null, (e) => e);   // the other, in a worker for 300 ms
+  const held = await disk.leasePart(info, 0), held2 = await disk.leasePart(info, 3);   // both slots
+  const slow = disk.readAt(0, OFF_SLOW, 16).then(() => null, (e) => e);   // in a worker for 300 ms (one job, no slot)
   await new Promise((r) => setTimeout(r, 50));
   const waiting = disk.leasePart(info, 1).then(() => null, (e) => e);   // no slot left
   await new Promise((r) => setTimeout(r, 20));
@@ -226,7 +248,7 @@ test("expertDiskReader: close() fails a read in flight and one waiting for a slo
   assert.match((await waiting)?.message, /closed/, "the request waiting for a slot");
   assert.match((await slow)?.message, /closed/, "the read in flight");
   same(held, want(info, 0), "a lease held across close()");
-  held.release(); held.release();
+  held.release(); held.release(); held2.release();
   await assert.rejects(disk.leasePart(info, 2), /closed/);
   await assert.rejects(disk.readAt(0, 0, 16), /closed/);
 });
