@@ -20,7 +20,7 @@ const { device } = await gpuDevice();
 const L = model.trunkLayers, tok = model.tokenizer();
 const opts = { device, meta: model.meta, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 512, batchCols: 8, coopRowsB: 1 };
 const h = (arrs) => { let x = 0x811c9dc5; for (const a of arrs) { const u = new Uint32Array(a.buffer, a.byteOffset, a.length); for (let i = 0; i < u.length; i++) x = Math.imul(x ^ u[i], 0x01000193) >>> 0; } return x.toString(16); };
-const ids = tok.encode(await Deno.readTextFile(new URL("./golden/q38_bits_prompt.txt", import.meta.url))).slice(0, 20);   // 16 grouped + a 4-column pass
+const ids = tok.encode(await Deno.readTextFile(new URL("./golden/q38_bits_prompt.txt", import.meta.url))).slice(0, 21);   // 20 prefilled: a 16-token grouped frame + a 4-column pass
 let ok = true;
 const check = (c, m) => { console.log(`${c ? "ok  " : "FAIL"} ${m}`); ok &&= !!c; };
 
