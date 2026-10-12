@@ -137,6 +137,14 @@ export function localFileReader(file, { lanes = Math.max(4, parseInt(process.env
 }
 
 const MiB = 2 ** 20;
+
+// The models (keys) whose every file is in modelDir (openModel's localPaths): what a room node with expert offload's
+// disk tier can read experts from (env.js probeMeta meta.local). Every model on disk is listed, dense ones too: the
+// planner asks only about the model it deals (room/pledge.js diskFor).
+export function localModels(modelDir, keys = Object.keys(MODELS)) {
+  if (!modelDir) return [];
+  return keys.filter((k) => { try { return !!openModel(k, { modelDir }).localPaths; } catch { return false; } });
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // One HTTP range [start, end) -> Uint8Array, counting bytes as they arrive (onBytes(n); a failed try

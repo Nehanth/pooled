@@ -10,6 +10,7 @@ export const MAY_SKIP = [
   ["weight cache:", "needs GGUF weights on disk and a writable cache dir; CI has neither"],
   ["tests/run.sh selftest:", "needs --allow-run; CI runs tests/run.sh selftest as its own step instead"],
   ["q38flash real files:", "opt-in: needs the Qwen3.8-Flash GGUF files (100 GB) in Q38FLASH_DIR; CI has none"],
+  ["q36moe real file:", "needs the Qwen3.6-35B-A3B GGUF (models/q36moe, ~20 GB) for the disk tier's per-expert reads; CI has none"],
 ];
 
 // -> { total, failed: [name], skipped: [name] } from a JUnit XML string

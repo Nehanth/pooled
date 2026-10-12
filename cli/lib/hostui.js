@@ -71,14 +71,14 @@ export function roomFitNow(lib, { model, devices, ctxAsk = 0, spareGB = [] }) {
     return { fits, needGB, minGB: null, haveGB, shortGB, ctx: want, want, fellBack: false, ctxNote: "",
       note: fits ? "" : `This room is ${shortGB} GB short for ${label}: add a device or raise a pledge.` };
   }
-  const off = (rb) => (lib.offloadFor ? lib.offloadFor(devices.map((d) => d.meta), rb.experts || rb.expertBytes || 0) : null);
+  const off = (rb) => (lib.offloadFor ? lib.offloadFor(devices.map((d) => d.meta), rb.experts || rb.expertBytes || 0, model) : null);
   const fitAt = (c) => { const rb = lib.roomBytes(model, c, "f16"); return lib.roomFit(rb.L, pl.map((g) => g * GiB), rb.layerBytes, rb.hostBytes, off(rb)); };
   const pick = lib.pickCtx ? lib.pickCtx(model, { want, ask: ctxAsk, fitsAt: (c) => fitAt(c).fits }) : { ctx: want, want, fellBack: false };
   const fb = modelFallback(lib, model, ctxAsk);
   const base = { needGB, minGB: fb?.needGB ?? null, haveGB, ctx: pick.ctx, want, fellBack: !!pick.fellBack,
     ctxNote: pick.fellBack && lib.ctxShortNote ? lib.ctxShortNote(label, pick.ctx, want) : "" };
   const fit = fitAt(pick.ctx);
-  if (fit.fits) return { fits: true, ...base, shortGB: 0, note: "", offload: !!fit.offload };
+  if (fit.fits) return { fits: true, ...base, shortGB: 0, note: "", offload: !!fit.offload, disk: !!fit.disk };
   const shortGB = lib.gbUp(lib.shortBy ? lib.shortBy(fit, spareGB) : fit.short);
   const note = lib.shortNote(label, fit, devices.map((d) => d.name), spareGB).replace(/\. Add a device/, ": add a device");
   return { fits: false, ...base, shortGB, note };
@@ -89,27 +89,33 @@ export function roomFitNow(lib, { model, devices, ctxAsk = 0, spareGB = [] }) {
 // pulled: Set of model keys on disk; pledgeGB: what this computer lends (for "fits here alone");
 // maxGB: the most it can lend (hereGB: the whole GB "Run it here" lends, null when it can't hold it);
 // ramGB / offGB: expert offload (hereGB); hereOff: "Run it here" keeps some of the model's experts in RAM
-export function modelRows(lib, { keys, pulled = new Set(), pledgeGB = 0, ctxAsk = 0, maxGB = 0, ramGB = 0, offGB = 0 }) {
+// diskKeys: the models this computer can read experts of from disk (--disk, the model here or pulled before it runs);
+// hereDisk: "Run it here" reads some of them from disk
+export function modelRows(lib, { keys, pulled = new Set(), pledgeGB = 0, ctxAsk = 0, maxGB = 0, ramGB = 0, offGB = 0, diskKeys = new Set() }) {
   return keys.map((key) => {
-    const needGB = modelNeedGB(lib, key, ctxAsk);
-    const alone = roomFitNow(lib, { model: key, devices: [{ name: "this computer", meta: selfMeta(pledgeGB, ramGB) }], ctxAsk });
-    const here = hereGB(lib, key, { ctxAsk, maxGB: Math.max(maxGB, pledgeGB), ramGB, offGB });
+    const needGB = modelNeedGB(lib, key, ctxAsk), dk = diskKeys.has(key) ? key : null;
+    const alone = roomFitNow(lib, { model: key, devices: [{ name: "this computer", meta: selfMeta(pledgeGB, ramGB, dk) }], ctxAsk });
+    const here = hereGB(lib, key, { ctxAsk, maxGB: Math.max(maxGB, pledgeGB), ramGB, offGB, disk: !!dk });
+    const hf = here != null ? roomFitNow(lib, { model: key, devices: [{ name: "this computer", meta: selfMeta(here, ramGB, dk) }], ctxAsk }) : null;
     return { key, label: lib.MODELS[key].label, fileBytes: lib.FILES?.[key]?.bytes || null, pulled: pulled.has(key), needGB, fitsAlone: alone.fits,
       minNeed: modelFallback(lib, key, ctxAsk),
-      hereGB: here, hereOff: here != null && !!roomFitNow(lib, { model: key, devices: [{ name: "this computer", meta: selfMeta(here, ramGB) }], ctxAsk }).offload };
+      hereGB: here, hereOff: !!hf?.offload, ...(hf?.disk ? { hereDisk: true } : {}) };
   }).sort((a, b) => (a.fileBytes ?? Infinity) - (b.fileBytes ?? Infinity) || (a.needGB ?? 99) - (b.needGB ?? 99));
 }
-// this computer's meta for a fit check: its pledge, and the RAM it offers for experts (none: 0)
-const selfMeta = (gb, ramGB = 0) => ({ contribGB: gb, webgpu: true, ...(ramGB > 0 ? { offload: true, ramGB } : {}) });
+// this computer's meta for a fit check: its pledge, the RAM it offers for experts (none: 0), and with --disk the model
+// whose files it reads experts from (diskModel; room/pledge.js diskFor)
+export const selfMeta = (gb, ramGB = 0, diskModel = null) => ({ contribGB: gb, webgpu: true, ...(ramGB > 0 ? { offload: true, ramGB } : {}),
+  ...(ramGB > 0 && diskModel ? { disk: true, local: [diskModel] } : {}) });
 // "Run it here": the smallest whole GB, up to maxGB, at which this computer holds the model alone
 // (the room page's math: roomFit with the embedding and head on this device) at its default context,
 // else at its fallback (the 1.7B: 16K on 6 GB, else 8K on 4 GB) -> GB | null.
 // ramGB (expert offload, a discrete GPU's --ram): when no pledge up to maxGB holds a MoE model whole, it runs here
 // with the experts it can't hold in RAM, lending offGB (the memory rule's default: all the GPU it lends, the
-// expert cache gets the rest) when that fits.
-export function hereGB(lib, key, { ctxAsk = 0, maxGB = 0, ramGB = 0, offGB = maxGB } = {}) {
+// expert cache gets the rest) when that fits. disk (--disk, the model's files here): with some experts read from them
+// when parking can't hold the rest either.
+export function hereGB(lib, key, { ctxAsk = 0, maxGB = 0, ramGB = 0, offGB = maxGB, disk = false } = {}) {
   const need = modelNeedGB(lib, key, ctxAsk), min = modelFallback(lib, key, ctxAsk)?.needGB;
-  const at = (g, ram = 0) => roomFitNow(lib, { model: key, devices: [{ name: "this computer", meta: selfMeta(g, ram) }], ctxAsk });
+  const at = (g, ram = 0) => roomFitNow(lib, { model: key, devices: [{ name: "this computer", meta: selfMeta(g, ram, disk && ram > 0 ? key : null) }], ctxAsk });
   for (let g = Math.max(1, Math.floor(need || 1)); g <= Math.floor(maxGB); g++) { const f = at(g); if (f.fits && !f.fellBack) return g; }
   if (min) for (let g = Math.max(1, Math.floor(min)); g <= Math.floor(maxGB); g++) if (at(g).fits) return g;
   const og = Math.floor(Math.min(offGB || maxGB, maxGB) * 2) / 2;
@@ -527,7 +533,7 @@ export function render(s, { width: cols = 80, S = PLAIN, lib, spin = "", events 
     blank();
     const choices = [
       ["Pool with devices", "other devices join and each holds a part", true],
-      ["Run it here", row?.hereGB ? `all of it here, lending ${row.hereGB} GB${row.hereOff ? " (some experts in RAM: slower)" : ""}; others can chat` : hereWhy(row, s.pledge), !!row?.hereGB],
+      ["Run it here", row?.hereGB ? `all of it here, lending ${row.hereGB} GB${row.hereDisk ? " (some experts in RAM, some read from disk: slower)" : row.hereOff ? " (some experts in RAM: slower)" : ""}; others can chat` : hereWhy(row, s.pledge), !!row?.hereGB],
     ];
     const nameW = Math.max(...choices.map((c) => width(c[0]))) + 2;
     choices.forEach(([name, what, ok], i) => {

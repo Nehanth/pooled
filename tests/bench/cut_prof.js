@@ -11,7 +11,7 @@ const env = (k, d) => Deno.env.get(k) ?? d;
 const { device } = await gpuDevice();
 device.addEventListener?.("uncapturederror", (e) => console.log("GPU ERROR " + e.error?.message?.slice(0, 200)));
 const model = openGGUF(env("MOE", MOE_PATH)), G = model.G, L = trunkLayers(G), tok = model.tokenizer();
-const experts = offloadFromEnv(device, L);
+const experts = await offloadFromEnv(device, L, model);   // (async since the disk tier: OFFLOAD_DISK reads from model)
 const weights = await model.weights({ lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: false, experts });
 const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, ...roomQwen35Options(roomFlags()) });
 applyRoomFlags(eng, roomFlags());

@@ -2469,6 +2469,50 @@ fs.promises with UV_THREADPOOL_SIZE=16 (4.2-4.35 against 5.4-5.6 GB/s); a room n
 raise libuv's pool instead. conv per expert, 16 workers: Q4_0 layers p50 4.3 ms (p99 7.1-7.5), requantized layers
 p50 17.7-19.7 ms (p99 35-40).
 
+## 2026-10-11: disk tier with T1 and --disk rooms (branch feat/ssd-cli-disk-tiers, roadmap 32 steps 3-5), GB10
+
+Shared machine: another process held ~71 GB of GPU memory and ran the GPU at up to 95%, so speeds swing by up to 2x
+between identical runs; read them as directions, not numbers. The 35B's file was in the page cache for every run
+(warm reads), so disk wait here is the reader's, not the NVMe's.
+
+Exactness: `MODEL=moe OFFLOAD=all OFFLOAD_SLOTS=16 tests/test_q38_bits.js` under Deno (wgpu) gives `5ef77d06 / 403ae12b`,
+the same as main at 2abdb01 under Deno on this machine (plain, spec and GPU sampling agree), with `OFFLOAD_DISK=all OFFLOAD_DISK_RAM_GB=2` (in-thread reader; T1 7553 hits, 1 miss with
+no free slot) and with `OFFLOAD_DISK=20-39 OFFLOAD_DISK_RAM_GB=1 OFFLOAD_DISK_RESERVE=2 OFFLOAD_DISK_READER=workers`
+(20 parked + 20 disk layers, worker threads; 321 misses fell back to writeBuffer). The hash depends on the runtime:
+under node + Dawn (`tests/dawn_run.mjs`) an independent review got `c2d80d71 / a6111fb2` on main at 2abdb01 and on this
+branch alike (OFFLOAD=0, OFFLOAD=all SLOTS=16, and OFFLOAD_DISK=10-39 OFFLOAD_DISK_RAM_GB=0.5 with the worker reader).
+What holds is "equal to main on the same machine and runtime", not a fixed value.
+
+Decode, `tests/bench/offload_bench.js` under Dawn, 35B, every layer offloaded, 3 GiB GPU budget (35 slots per layer,
+56% pool hits, 141 pool misses / token), LENS=512, worker reader:
+
+| experts | decode tok/s | disk reads / token | disk wait / token | T1 hits / token |
+|---|---|---|---|---|
+| parked in RAM | 11.4 | 0 | - | - |
+| disk, no T1 | 2.9 / 3.6 / 4.1 | 142 | 108-136 ms | - |
+| disk, T1 4 GiB | 3.4 / 4.7 / 7.0 | 81 | 72-97 ms | 61 |
+| disk, T1 8 GiB | 7.9 | 43 | 52 ms | 98 |
+
+Room: two room nodes in one process, local PeerServer (`packages/room-node/test/e2e.mjs nodepair`, OFFLOAD_DISCRETE=1,
+CTX=8192): host 6 GB (layers 0-8 + embed), worker 6 GB with `--ram 6 --disk` (WORKER_DISK=1). Parking alone can't hold
+the worker's 31 layers, so the deal gave it layers 15-19 parked (2.1 GB), 20-39 on disk with a 2.1 GB T1. Answer
+identical to the same room with `--ram 40` (all 31 offloaded layers parked, no disk dealt though `--disk` was on):
+12.1 tok/s cold, 31.9 tok/s on the repeat ask (T1 warm: 5676 hits, 4432 file reads, 3.3 s waiting over both asks).
+
+Planner follow-up (review of #349): the disk plan keeps offloadNeedDisk's fewest m and does not step up toward
+OFFLOAD_GOOD_SLOTS as the plan without disk does. Its 35B deal on one pc(10 GB, --ram 8 --disk) is layers 8-39
+offloaded, 17-39 on disk, 20 slots, T1 2.3 GiB; stepping up gives 0-39, 8-39 on disk, 65 slots, T1 2.1 GiB. Same
+bench (Dawn, LENS=512, DECODE=128, warm page cache, OFFLOAD_SLOTS pinned to the plan's), two runs each, another
+process holding ~47 GB of GPU memory:
+
+| plan | decode tok/s | pool hits | pool misses / token | T1 hits / token | disk reads / token | disk wait / token |
+|---|---|---|---|---|---|---|
+| fewest m (kept) | 12.3 / 8.9 | 42.6% | 147 | 69.4 | 35.5 | 34-42 ms |
+| stepped up | 10.3 / 9.9 | 79.7% | 65 | 7.0 | 40.8 | 44-46 ms |
+
+The step-up halves the pool copies but spreads T1 over 32 disk layers instead of 23, so the file is read more. Decode
+is within noise here; on an NVMe PC the extra reads are the expensive part, so the planner keeps the fewest m.
+
 ## 2026-10-11: expert offload's per-layer cut in Chrome: 2.9 ms → 0.5 ms (branch feat/offload-cut-latency), the Spark (GB10)
 
 Context: PR #350 measured the 35B MoE (Qwen3.6-35B-A3B Q4_0) in headless Chrome with every expert parked in memory

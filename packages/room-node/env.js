@@ -84,7 +84,10 @@ export function highPerformance(gpu) {
 // unified memory (Apple silicon, a GB10 / Jetson): its "RAM" is the memory its pledge already lends, so parking
 // experts there frees nothing and spends the same memory twice. mem: cli/lib/lend.js detectMemory()'s answer
 // (the CLI has it); without one, probeMeta asks the OS itself, only when ramGB asks for offload.
-export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null } = {}) {
+// disk: this device has expert offload's disk tier (--disk: some experts may stay in the model's files, room/plan.js
+// DISK_RAM_MIN): meta.disk, and meta.local: the models whose files are all on this device's disk (source.js
+// localModels), the only ones it can read experts from. Only with offload (a discrete GPU and RAM for it).
+export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, disk = false, local = [] } = {}) {
   const ua = process.platform === "darwin" ? "Mac" : "Device";
   // dspec: dense verify frames of any column count (the repo's engine; room/lookup.js chainDenseSpec)
   const meta = { ua, webgpu: false, gpu: "no WebGPU", maxBufGB: 0, native: "node-dawn", dspec: DENSE_SPEC_V };
@@ -105,6 +108,10 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null }
   if (meta.webgpu && +ramGB > 0) {
     if (unifiedMemory(mem || hostMemory())) meta.noOffload = "unified memory";
     else { meta.offload = true; meta.ramGB = ramFor(ramGB); }
+  }
+  if (disk) {
+    if (meta.offload) { meta.disk = true; meta.local = [...local]; }
+    else meta.noDisk = meta.noOffload || (meta.webgpu ? "no RAM for expert offload (--ram 0)" : "no WebGPU");
   }
   return meta;
 }

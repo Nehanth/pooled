@@ -63,14 +63,23 @@ export function ramGB(meta) {
   const r = Number(meta?.ramGB);
   return meta?.offload && meta?.webgpu !== false && r > 0 ? Math.min(DESK_MAX_GB, r) : 0;
 }
+// Expert offload's disk tier (room/plan.js DISK_RAM_MIN): whether a device may leave some of this model's experts in
+// its files and read them when used. Only a device that offloads (ramGB) and says it has a disk tier (meta.disk: a
+// room node started with --disk) and has every file of this model on its own disk (meta.local: the model keys it
+// holds whole, room-node env.js probeMeta).
+export function diskFor(meta, model) {
+  return !!model && ramGB(meta) > 0 && !!meta?.disk && Array.isArray(meta?.local) && meta.local.includes(model);
+}
 // room/plan.js's `off` for a room's devices (metas, host first) and the model's routed experts: a profile
 // (room/models.js expertsOf, roomBytes experts: what ExpertStore parks, layer by layer) or one layer's bytes (an
-// estimate), or null when the model has none or no device offloads
-export function offloadFor(metas, ex) {
+// estimate), or null when the model has none or no device offloads. model: the model's key; with it, a device with a
+// disk tier for it (diskFor) is in off.disk (the field is there only when one is)
+export function offloadFor(metas, ex, model = null) {
   const ram = metas.map((m) => ramGB(m) * 2 ** 30);
   const expertBytes = ex && typeof ex === "object" ? +ex.E || 0 : +ex || 0;
   if (!(expertBytes > 0) || !ram.some((r) => r > 0)) return null;
-  return ex && typeof ex === "object" ? { expertBytes, experts: ex, ram } : { expertBytes, ram };
+  const disk = metas.map((m) => diskFor(m, model));
+  return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}) };
 }
 
 // The disk a device lets the room keep a model's n-gram table on (Qwen3.8-Flash-Next: room/plan.js placeNgram), in
