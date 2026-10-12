@@ -19,7 +19,7 @@
 // the 35B), and the rest of the M are wrong experts drawn uniformly from the layer.
 //
 // Traces: tests/trace_moe.js writes <name>.sel.npy (uint8, or uint16 past 256 experts) [T, L, K], <name>.w.npy
-// (float32) and <name>.json. Steps before WARM (32) run but are not counted: the cache starts cold, and in the
+// (float32) and <name>.json; either .npy may be gzipped (<name>.sel.npy.gz). Steps before WARM (32) run but are not counted: the cache starts cold, and in the
 // engine a prefill would have filled it. The traces' geometry (layers, experts, top-K) must match the model's:
 // report() checks it, and simulate() checks the layers and the array length.
 //
@@ -28,7 +28,9 @@
 //
 // With only a trace directory it prints the report (tables in markdown): the traced model's rooms, then (for 122B
 // traces) the extrapolation to Qwen3.8-Flash-Next. Every Flash number from 122B traces is an EXTRAPOLATION: the
-// traces are mapped onto 512 experts and top-10 by splitFlash() below, not recorded on Flash.
+// traces are mapped onto 512 experts and top-10 by splitFlash() below, not recorded on Flash. Recorded Flash traces
+// (tests/trace_flash.js; a set is committed in tests/sim/traces/q38flash) replay as they are, with the pool's
+// hit-rate curve first: `node tests/sim/tiersim.js tests/sim/traces/q38flash`.
 
 export const WARM = 32;
 const MiB = 2 ** 20, GiB = 2 ** 30;
@@ -58,13 +60,20 @@ async function readText(p) { return new TextDecoder().decode(await readBytes(p))
 async function listDir(p) { if (isDeno) { const r = []; for await (const e of Deno.readDir(p)) r.push(e.name); return r; } return (await import("node:fs/promises")).readdir(p); }
 
 // trace = { name, T, L, K, nExp, sel (T*L*K expert ids), w (router weights or null), meta }
+// <name>.sel.npy or <name>.sel.npy.gz (the committed Flash set is gzipped: 512-expert ids are uint16), the same for .w.npy
+async function gunzip(u8) { return new Uint8Array(await new Response(new Blob([u8]).stream().pipeThrough(new DecompressionStream("gzip"))).arrayBuffer()); }
+async function readNpy(p, files) {
+  if (files.includes(p.split("/").pop() + ".gz")) return parseNpy(await gunzip(await readBytes(p + ".gz")));
+  return parseNpy(await readBytes(p));
+}
 export async function loadTraces(dir) {
-  const names = (await listDir(dir)).filter((f) => f.endsWith(".sel.npy")).map((f) => f.slice(0, -8)).sort();
+  const files = await listDir(dir);
+  const names = [...new Set(files.filter((f) => /\.sel\.npy(\.gz)?$/.test(f)).map((f) => f.replace(/\.sel\.npy(\.gz)?$/, "")))].sort();
   const out = [];
   for (const name of names) {
-    const s = parseNpy(await readBytes(`${dir}/${name}.sel.npy`));
+    const s = await readNpy(`${dir}/${name}.sel.npy`, files);
     let w = null, meta = {};
-    try { w = parseNpy(await readBytes(`${dir}/${name}.w.npy`)).data; } catch { /* weights are optional */ }
+    try { w = (await readNpy(`${dir}/${name}.w.npy`, files)).data; } catch { /* weights are optional */ }
     try { meta = JSON.parse(await readText(`${dir}/${name}.json`)); } catch { /* so is the json */ }
     out.push(traceOf(name, s, w, meta));
   }
@@ -373,6 +382,7 @@ export function roomRun(tr, model, devices, { net = NET } = {}) {
 // ---------------------------------------------------------------- the report
 
 const pct = (x) => (100 * x).toFixed(1);
+const HIT_FRACS = [0.0625, 0.125, 0.17, 0.25, 0.27, 0.375, 0.5];
 const mb = (x) => (x / 1e6).toFixed(0);
 const f1 = (x) => x.toFixed(1);
 
@@ -532,6 +542,21 @@ export async function report(dir, { modelKey = null, json = null, log = console.
     log(`That room has no disk tier: it tests only Mac compute, PC compute, cuts and parked-to-VRAM copies. The disk (NVMe at 1 MiB chunks, OPFS), page-cache, tab-upload and stage constants are not tested by it, and they dominate every disk-bound row (Mac alone, the PC tab, the --ram disk layers). Those rows are uncalibrated, and the factor says nothing about them.\n`);
   }
 
+  // recorded Flash traces (tests/trace_flash.js): the pool's hit rate against the fraction of a layer cached, the
+  // curve the 122B report extrapolates (design note §4 guessed 65-80% at 27%)
+  if (key === "q38flash") {
+    log(`## ${model.name}: pool hit rate vs fraction of a layer cached (RECORDED traces, all ${model.L} layers, VRAM only)\n`);
+    log(`| fraction cached | slots | ${traces.map((t) => t.name).join(" | ")} | mean |\n|---|---|${traces.map(() => "---|").join("")}---|`);
+    for (const frac of HIT_FRACS) {
+      const P = Math.max(model.K, Math.round(frac * model.nExp));
+      const hs = traces.map((tr) => simulate(tr, { layers: range(0, model.L - 1), P, parked: new Set(range(0, model.L - 1)), expert: model.expert }).tot.hitV);
+      log(`| ${(frac * 100).toFixed(1)}% | ${P} | ${hs.map((h) => pct(h) + "%").join(" | ")} | ${pct(hs.reduce((a, b) => a + b, 0) / hs.length)}% |`);
+    }
+    log("");
+    const touched = traces.map((t) => t.meta?.distinctExpertsPerLayer).filter(Boolean);
+    if (touched.length) log(`Distinct experts touched per layer over each trace (of ${model.nExp}): ${traces.map((t) => { const d = t.meta?.distinctExpertsPerLayer; return d ? `${t.name} ${Math.min(...d)}-${Math.max(...d)} (mean ${(d.reduce((a, b) => a + b, 0) / d.length).toFixed(0)})` : null; }).filter(Boolean).join(", ")}.\n`);
+  }
+
   const R = rooms(model);
   const rows = runRooms(traces, model, R);
   all.rows[key] = rows;
@@ -563,7 +588,7 @@ export async function report(dir, { modelKey = null, json = null, log = console.
     log(`### Pool hit rate vs fraction of a layer cached (all 48 layers, VRAM only, mean over traces)\n`);
     log(`| fraction cached | 122B (measured traces) | Flash q=0 | Flash q=0.25 | Flash q=0.5 |\n|---|---|---|---|---|`);
     const qs = [0, 0.25, 0.5], flashT = Object.fromEntries(qs.map((q) => [q, traces.map((t) => splitFlash(t, { q }))]));
-    for (const frac of [0.0625, 0.125, 0.17, 0.25, 0.27, 0.375, 0.5]) {
+    for (const frac of HIT_FRACS) {
       const h = (trs, m) => { const P = Math.max(m.K, Math.round(frac * m.nExp)); return pct(trs.reduce((s, tr) => s + simulate(tr, { layers: range(0, 47), P, parked: new Set(range(0, 47)), expert: m.expert }).tot.hitV, 0) / trs.length); };
       log(`| ${(frac * 100).toFixed(1)}% | ${h(traces, model)}% | ${qs.map((q) => h(flashT[q], fl) + "%").join(" | ")} |`);
     }

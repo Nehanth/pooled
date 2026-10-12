@@ -16,8 +16,21 @@
 // The math is tests/reference/ref_q38flash.mjs's with f32 activations (its --act f32 mode). Attention is dense causal:
 // QSA (PR 9) selects every cell below 2051 cached tokens, so dense is exact up to the 2048 cap here. The hook for
 // QSA is _attnOps: a selection pass between attn_prep and attn_dec that gives attn_dec a cell list.
+//
+// Expert offload (roadmap 33 item 7; engine/expert_store.js): layers whose routed experts the loader parked
+// (qwen4expWeights(..., { experts })) split the token's command buffer after their router, as Qwen35Engine's
+// _cutAt / _cutResolve do: the 10 ids are read back, the store copies the misses into the layer's slot pool and the
+// same moe_gu / moe_dn kernels run on the pool with slot ids (B.offIds) in place of expert ids. One token at a time,
+// a cut holds at most K experts, so the store is built without the whole-layer prefill region. moeTrace: the router's
+// ids and weights of every layer are kept per token for readMoeTrace() (tests/trace_flash.js).
+// Offload is decode-only for now: a batched prefill / verify engine (engine/qwen4exp_batch.js, PR #348) builds its
+// expert ops with _wq, which refuses a parked entry (notParked). Routing offloaded layers there means, per offloaded
+// layer and pass: end the compute pass after the router, ExpertStore.loadLayer (long frames) or loadExperts (short
+// ones, after reading the ids back) into the region, and bind regionEntry(i, part) with the original expert ids;
+// create the engine with expertRegion: true for that. this.offLayers lists the offloaded layers.
 import { qwen4expConfig } from "./gguf.js";
 import { NgramState } from "./ngram.js";
+import { notParked } from "./expert_store.js";
 import * as W from "./wgsl/qwen4exp.js";
 
 const U = GPUBufferUsage;
@@ -32,7 +45,10 @@ export class Qwen4ExpEngine {
   // drop their CPU copies once uploaded, so one weights object builds one engine (a second create throws).
   // ngram: an NgramTable (engine/ngram.js) for the PLE layer's rows; required when layerRange holds a PLE layer.
   // layerRange [lo, hi): the trunk layers this engine runs; hasEmbed / hasHead as Qwen35Engine.
-  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null }) {
+  // moeTrace: keep every layer's router ids and weights per token (readMoeTrace). expertRegion: build the expert store
+  // with its whole-layer region (ExpertStore.loadLayer / loadExperts / regionEntry), for a batched engine that routes
+  // offloaded layers; off by default, since decode alone never needs it and its 1.4-1.8 GB goes to the pools instead.
+  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null, moeTrace = false, expertRegion = false }) {
     const cfg = this.cfg = qwen4expConfig(meta);
     this.device = device;
     const [lo, hi] = layerRange || [0, cfg.L];
@@ -85,6 +101,28 @@ export class Qwen4ExpEngine {
     if (pleLayers.length) Object.assign(B, { emb: buf(d), pk: buf(HD), pv: buf(d), dbg: buf(2 * HD + hc) });
     device.queue.writeBuffer(B.shIds, 0, new Uint32Array(4));
 
+    // ---- expert offload: the store the loader parked these layers' experts in (one store for all of them)
+    this.experts = null;
+    const offL = weights.layers.filter((L) => L.expGate?.offload);
+    if (offL.length) {
+      const st = offL[0].expGate.store;
+      if (!offL.every((L) => L.expUp?.offload && L.expDown?.offload && L.expGate.store === st && L.expUp.store === st && L.expDown.store === st))
+        throw new Error("qwen4exp: expert offload: a layer's experts are only partly parked, or in two stores");
+      st.build({ K, region: !!expertRegion });
+      await st.checkAlloc();
+      this.experts = st;
+      this.offLayers = new Set(offL.map((L) => L.expGate.layer));
+      B.offIds = buf(K + 1);   // the slot ids of the cut's experts (ExpertStore.plan's remap: K, then the shared slot)
+      this.offStage = device.createBuffer({ size: Math.ceil(K * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
+    }
+    // ---- router trace: every layer's ids and weights, per token
+    this.moeTraceOn = !!moeTrace;
+    if (this.moeTraceOn) {
+      const n = (hi - lo) * K;
+      B.trace = buf(2 * n);
+      this.traceStage = device.createBuffer({ size: Math.ceil(2 * n * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
+    }
+
     // ---- weights to the GPU (entry.gpu when the loader streamed it; f32 tensors are uploaded here)
     const wq = (e, what) => {
       if (!e) throw new Error("qwen4exp: missing weight " + what);
@@ -98,6 +136,7 @@ export class Qwen4ExpEngine {
         }
         return { kind: "f32", buf: e.gpuF32, n: e.data.length };
       }
+      notParked(e, what);   // an offloaded layer's experts have no GPU copy: engines that do not route them refuse
       if (e.gpu?.fused) throw new Error(`qwen4exp: weight ${what || ""} was fused into another engine's buffer (one weights object builds one engine)`);
       if (!e.gpu) {
         const mk = (data) => {
@@ -268,19 +307,23 @@ export class Qwen4ExpEngine {
       ffnOps.push(gemv(wq(cat(L.router, L.shRouter)), B.mixed, B.logits, { dIn: d }));
       ffnOps.push({ pipe: P.route, bg: bg(P.route, [B.logits, B.ids, B.wts, uni([cfg.nExp, K, 0, 0])]), wg: [1, 1, 1],
         taps: [[`ffn_moe_topk-${i}`, B.ids, K, "u32"], [`ffn_moe_weights_norm-${i}`, B.wts, K]] });
-      const eg = wq(L.expGate, "experts gate"), eu = wq(L.expUp, "experts up"), ed = wq(L.expDown, "experts down");
+      // the routed experts: resident, or (offloaded) the layer's slot pool read through the slot ids, after the cut
+      const off = !!L.expGate.offload, ids = off ? B.offIds : B.ids;
+      const ex = (k, part) => (off ? this.experts.poolEntry(i, part) : wq(L[k], "experts " + part));
+      const eg = ex("expGate", "gate"), eu = ex("expUp", "up"), ed = ex("expDown", "down");
       if (eg.kind !== eu.kind) throw new Error(`qwen4exp: layer ${i} gate/up experts differ in type`);
-      const ff = cfg.expFF;
-      ffnOps.push({ pipe: P["gu_" + eg.kind], bg: bg(P["gu_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, B.mixed, B.h, B.ids, uni([ff, d, K, 0, 0, 0, 0, 0])]), wg: [Math.ceil(ff / 8), K, 1] });
-      ffnOps.push({ pipe: P["dn_" + ed.kind], bg: bg(P["dn_" + ed.kind], [ed.qs, ed.sc, B.h, B.moe, B.ids, B.wts, uni([d, ff, K, 0, 0, 0, 0, 0])]), wg: [Math.ceil(d / 8), 1, 1],
+      const ff = cfg.expFF, nRoute = ffnOps.length;
+      ffnOps.push({ pipe: P["gu_" + eg.kind], bg: bg(P["gu_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, B.mixed, B.h, ids, uni([ff, d, K, 0, 0, 0, 0, 0])]), wg: [Math.ceil(ff / 8), K, 1] });
+      ffnOps.push({ pipe: P["dn_" + ed.kind], bg: bg(P["dn_" + ed.kind], [ed.qs, ed.sc, B.h, B.moe, ids, B.wts, uni([d, ff, K, 0, 0, 0, 0, 0])]), wg: [Math.ceil(d / 8), 1, 1],
         tap: [`ffn_moe_out-${i}`, B.moe, d] });
       const sgw = wq(L.shGate, "shared gate"), suw = wq(L.shUp, "shared up"), sdw = wq(L.shDown, "shared down"), sff = cfg.shFF;
       if (sgw.kind !== suw.kind) throw new Error(`qwen4exp: layer ${i} shared gate/up differ in type`);
       ffnOps.push({ pipe: P["gu_" + sgw.kind], bg: bg(P["gu_" + sgw.kind], [sgw.qs, sgw.sc, suw.qs, suw.sc, B.mixed, B.hs, B.shIds, uni([sff, d, 1, 0, 0, 0, 0, 0])]), wg: [Math.ceil(sff / 8), 1, 1] });
       ffnOps.push({ pipe: P["dn_" + sdw.kind], bg: bg(P["dn_" + sdw.kind], [sdw.qs, sdw.sc, B.hs, B.sh, B.shIds, B.logits, uni([d, sff, 1, 1, cfg.nExp, 0, 0, 0])]), wg: [Math.ceil(d / 8), 1, 1],
         tap: [`ffn_shexp_gated-${i}`, B.sh, d] });
+      ffnOps[nRoute - 1].cut = true;   // the router: an offloaded layer cuts after it, and the trace copies its ids
       const combF = { a: B.moe, b: B.sh, name: `l_last-${i}`, h: sF.h };
-      this.layers.push({ i, isQ, st, halves: [{ pre, site: sA, rest: attnOps, comb: combA }, { pre: [], site: sF, rest: ffnOps, comb: combF }] });
+      this.layers.push({ i, isQ, st, off, halves: [{ pre, site: sA, rest: attnOps, comb: combA }, { pre: [], site: sF, rest: ffnOps, comb: combF }] });
     }
 
     // ---- head: the last HC mixer (no inject) stands in for the output norm, then the LM head and a GPU argmax
@@ -299,6 +342,12 @@ export class Qwen4ExpEngine {
     const halves = [...this.layers.flatMap((l) => l.halves), ...(hasHead ? [this.headHalf] : [])];
     const dbg = this._halfOps(halves, false), fast = this._halfOps(halves, true);
     this.layers.forEach((l, k) => { l.attnOps = dbg[2 * k]; l.ffnOps = dbg[2 * k + 1]; l.fast = [...fast[2 * k], ...fast[2 * k + 1]]; });
+    // a cut layer's ops split after its router: ffnRoute / ffnExp (debugToken), fastRoute / fastExp (forwardToken)
+    const at = (ops) => ops.findIndex((o) => o.cut) + 1;
+    for (const l of this.layers) {
+      [l.ffnRoute, l.ffnExp] = [l.ffnOps.slice(0, at(l.ffnOps)), l.ffnOps.slice(at(l.ffnOps))];
+      [l.fastRoute, l.fastExp] = [l.fast.slice(0, at(l.fast)), l.fast.slice(at(l.fast))];
+    }
     if (hasHead) { this.headOps = dbg[dbg.length - 1]; this.headFast = fast[fast.length - 1]; }
     this._ropeTs = fr(Math.pow(cfg.ropeTheta, -2 / cfg.ropeDims));
     // the CPU copies behind the joined f32 tensors are on the GPU now (the op closures keep this scope alive)
@@ -399,6 +448,44 @@ export class Qwen4ExpEngine {
     }
   }
 
+  // After layer l's router, outside a compute pass: the trace copy, and for an offloaded layer the cut: submit what
+  // was encoded, read the K ids back, let the store copy the misses into the layer's pool (a disk layer's experts are
+  // read first: ExpertStore.prepare, roadmap 32) and write the slot ids. -> the encoder to continue in
+  async _afterRoute(enc, l) {
+    const { B, cfg } = this, K = cfg.K;
+    if (this.moeTraceOn) {
+      const at = (l.i - this.lo) * K * 4, n = (this.hi - this.lo) * K * 4;
+      enc.copyBufferToBuffer(B.ids, 0, B.trace, at, K * 4);
+      enc.copyBufferToBuffer(B.wts, 0, B.trace, n + at, K * 4);
+    }
+    if (!l.off) return enc;
+    const q = this.device.queue, st = this.experts, stage = this.offStage;
+    enc.copyBufferToBuffer(B.ids, 0, stage, 0, K * 4);
+    q.submit([enc.finish()]);
+    await stage.mapAsync(GPUMapMode.READ, 0, K * 4);
+    const sel = new Uint32Array(K + 1);   // ExpertStore's layout: K routed ids, then the shared expert's slot (unused)
+    sel.set(new Uint32Array(stage.getMappedRange(0, K * 4)));
+    stage.unmap();
+    if (st.isDisk?.(l.i)) await st.prepare(l.i, sel, 1, K + 1);
+    const e2 = this.device.createCommandEncoder(), r = st.plan(e2, l.i, sel, 1, K + 1);
+    if (!r.pool) throw new Error(`qwen4exp: layer ${l.i}: the expert pool holds fewer than one token's ${K} experts`);
+    q.writeBuffer(B.offIds, 0, r.remap);   // lands before e2's kernels (queue order)
+    return e2;
+  }
+
+  // the router's ids and weights of every layer for the last token (moeTrace) -> [{ sel: Uint32Array(K), w: Float32Array(K) }]
+  async readMoeTrace() {
+    if (!this.moeTraceOn) throw new Error("readMoeTrace: create the engine with moeTrace: true");
+    const n = (this.hi - this.lo) * this.cfg.K, K = this.cfg.K, enc = this.device.createCommandEncoder();
+    enc.copyBufferToBuffer(this.B.trace, 0, this.traceStage, 0, 2 * n * 4);
+    this.device.queue.submit([enc.finish()]);
+    await this.traceStage.mapAsync(GPUMapMode.READ, 0, 2 * n * 4);
+    const ab = this.traceStage.getMappedRange(0, 2 * n * 4).slice(0);
+    this.traceStage.unmap();
+    const ids = new Uint32Array(ab, 0, n), w = new Float32Array(ab, n * 4, n);
+    return this.layers.map((_, j) => ({ sel: ids.slice(j * K, (j + 1) * K), w: w.slice(j * K, (j + 1) * K) }));
+  }
+
   // One decode step. -> { id (greedy, when the engine has the head), logits (wantLogits) }
   // The layers go in a few submits: the GPU starts on the first while the rest are encoded, and the layers before
   // the PLE layer run while its n-gram rows are read.
@@ -410,17 +497,28 @@ export class Qwen4ExpEngine {
   async _forward(id, { wantLogits = false } = {}) {
     const rows = await this._begin(id, { defer: true }), dev = this.device;
     const firstPle = this.cfg.ple ? this.layers.findIndex((l) => this.cfg.ple.layers.includes(l.i)) : -1;
-    const run = (ls) => {
-      const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-      for (const l of ls) this._encode(pass, l.fast);
+    // ls into a new encoder; an offloaded layer (or every layer, with moeTrace) cuts after its router -> { enc, pass }
+    const encode = async (ls) => {
+      let enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+      for (const l of ls) {
+        if (!l.off && !this.moeTraceOn) { this._encode(pass, l.fast); continue; }
+        this._encode(pass, l.fastRoute);
+        pass.end();
+        enc = await this._afterRoute(enc, l);
+        pass = enc.beginComputePass();
+        this._encode(pass, l.fastExp);
+      }
+      return { enc, pass };
+    };
+    const run = async (ls) => {
+      const { enc, pass } = await encode(ls);
       pass.end();
       dev.queue.submit([enc.finish()]);
     };
     let at = 0;
-    if (rows) { if (firstPle > 0) run(this.layers.slice(0, firstPle)); at = Math.max(firstPle, 0); await rows; }
-    for (const step = 12; at + step < this.layers.length; at += step) run(this.layers.slice(at, at + step));
-    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-    for (const l of this.layers.slice(at)) this._encode(pass, l.fast);
+    if (rows) { if (firstPle > 0) await run(this.layers.slice(0, firstPle)); at = Math.max(firstPle, 0); await rows; }
+    for (const step = 12; at + step < this.layers.length; at += step) await run(this.layers.slice(at, at + step));
+    const { enc, pass } = await encode(this.layers.slice(at));
     if (this.hasHead) this._encode(pass, this.headFast);
     pass.end();
     if (this.hasHead) {
@@ -493,7 +591,12 @@ export class Qwen4ExpEngine {
     };
     for (const l of this.layers) {
       await run(l.attnOps, force(`in-${l.i}`));
-      await run(l.ffnOps, force(`mid-${l.i}`));
+      if (l.off || this.moeTraceOn) {   // offloaded: the router, the cut, then the experts on the pool (moeTrace:
+        // every layer splits here too, so the trace holds every layer's ids, as in _forward)
+        await run(l.ffnRoute, force(`mid-${l.i}`));
+        dev.queue.submit([(await this._afterRoute(dev.createCommandEncoder(), l)).finish()]);
+        await run(l.ffnExp, null);
+      } else await run(l.ffnOps, force(`mid-${l.i}`));
     }
     if (this.hasHead) await run(this.headOps, force("head"));
     this.pos++;
