@@ -620,10 +620,12 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
 }`;
 
 // Greedy head, stage 1: per workgroup (256 threads over a strided slice), the largest logit, lowest index on ties.
+// Partials are (index, bits of the value) as u32, as qwen35.js's argmax: an index bitcast to f32 is a denormal that
+// some backends (D3D/DXC, fast-math Metal) flush to 0.
 export const ARGMAX1_WGSL = `
 struct AM { n: u32, per: u32, p0: u32, p1: u32 };
 @group(0) @binding(0) var<storage, read> fx_lg: array<f32>;
-@group(0) @binding(1) var<storage, read_write> fx_part: array<vec2<f32>>;
+@group(0) @binding(1) var<storage, read_write> fx_part: array<vec2<u32>>;
 @group(0) @binding(2) var<uniform> fx_P: AM;
 var<workgroup> fx_rv: array<f32, 256>;
 var<workgroup> fx_ri: array<u32, 256>;
@@ -638,12 +640,12 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
     if (t < s) { let ov = fx_rv[t + s]; let oi = fx_ri[t + s]; if (ov > fx_rv[t] || (ov == fx_rv[t] && oi < fx_ri[t])) { fx_rv[t] = ov; fx_ri[t] = oi; } }
     workgroupBarrier();
   }
-  if (t == 0u) { fx_part[wg.x] = vec2<f32>(fx_rv[0], bitcast<f32>(fx_ri[0])); }
+  if (t == 0u) { fx_part[wg.x] = vec2<u32>(fx_ri[0], bitcast<u32>(fx_rv[0])); }
 }`;
 // Stage 2: one workgroup over the stage-1 partials -> out[0] = index, out[1] = bits of the value.
 export const ARGMAX2_WGSL = `
 struct AM { n: u32, per: u32, p0: u32, p1: u32 };
-@group(0) @binding(0) var<storage, read> fx_part: array<vec2<f32>>;
+@group(0) @binding(0) var<storage, read> fx_part: array<vec2<u32>>;
 @group(0) @binding(1) var<storage, read_write> fx_outv: array<u32>;
 @group(0) @binding(2) var<uniform> fx_P: AM;
 var<workgroup> fx_rv: array<f32, 256>;
@@ -652,7 +654,7 @@ var<workgroup> fx_ri: array<u32, 256>;
 fn main(@builtin(local_invocation_id) l: vec3<u32>) {
   let t = l.x;
   var bv = -3.0e38; var bi = 0xffffffffu;
-  for (var i = t; i < fx_P.n; i += 256u) { let p = fx_part[i]; let pi = bitcast<u32>(p.y); if (p.x > bv || (p.x == bv && pi < bi)) { bv = p.x; bi = pi; } }
+  for (var i = t; i < fx_P.n; i += 256u) { let p = fx_part[i]; let pv = bitcast<f32>(p.y); if (pv > bv || (pv == bv && p.x < bi)) { bv = pv; bi = p.x; } }
   fx_rv[t] = bv; fx_ri[t] = bi;
   workgroupBarrier();
   for (var s = 128u; s > 0u; s >>= 1u) {

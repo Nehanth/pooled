@@ -28,6 +28,8 @@ export class Qwen4ExpEngine {
   static async create(opts) { const e = new Qwen4ExpEngine(); await e._init(opts); return e; }
 
   // weights: qwen4expWeights' structure (engine/gguf.js), each matrix with entry.gpu (streamed) or its CPU bytes.
+  // The engine consumes them: fused projections replace their parts' GPU buffers, and the f32 tensors it joins
+  // drop their CPU copies once uploaded, so one weights object builds one engine (a second create throws).
   // ngram: an NgramTable (engine/ngram.js) for the PLE layer's rows; required when layerRange holds a PLE layer.
   // layerRange [lo, hi): the trunk layers this engine runs; hasEmbed / hasHead as Qwen35Engine.
   async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null }) {
@@ -38,12 +40,16 @@ export class Qwen4ExpEngine {
     if (maxSeq > 2048) throw new Error("qwen4exp: the dense decode path holds at most 2048 positions (QSA is PR 9)");
     this.maxSeq = maxSeq;
     const d = cfg.dim, hc = cfg.hc, HD = cfg.hDim, ss = cfg.ssm;
+    // shapes the kernels hard-code (engine/wgsl/qwen4exp.js): the router's workgroup arrays, DeltaNet's 128 lanes
+    if (cfg.nExp > 1024 || cfg.K > 32) throw new Error(`qwen4exp: the router kernel holds at most 1024 experts / top-32, not ${cfg.nExp} / ${cfg.K}`);
+    if (ss.stateSize !== 128) throw new Error(`qwen4exp: the DeltaNet kernels assume state size 128, not ${ss.stateSize}`);
     this.dims = { dim: d, hDim: HD, vocab: hasHead ? weights.head.shape[0] : 0 };
     const pleLayers = (cfg.ple?.layers || []).filter((l) => l >= lo && l < hi);
     if (pleLayers.length && !ngram) throw new Error("qwen4exp: layers " + pleLayers + " need the n-gram table (ngram: an NgramTable)");
     this.ngram = ngram;
     this.ngs = ngram ? new NgramState(ngram.cfg) : null;
     this.embed = weights.embed || null;
+    this.nVocab = this.embed ? (this.embed.shape?.[0] ?? this.embed.data.length / d) : 0;
 
     // ---- pipelines
     const pipe = async (code, label) => device.createComputePipelineAsync({ layout: "auto", label,
@@ -92,6 +98,7 @@ export class Qwen4ExpEngine {
         }
         return { kind: "f32", buf: e.gpuF32, n: e.data.length };
       }
+      if (e.gpu?.fused) throw new Error(`qwen4exp: weight ${what || ""} was fused into another engine's buffer (one weights object builds one engine)`);
       if (!e.gpu) {
         const mk = (data) => {
           const u8 = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -105,11 +112,14 @@ export class Qwen4ExpEngine {
       return { kind: e.kind, qs: e.gpu.qs, sc: e.gpu.sc, shape: e.shape };
     };
 
-    // f32 tensors end to end, as one entry (kept per pair: the cache key is the entries themselves)
-    const cats = new Map();
+    // f32 tensors end to end, as one entry (kept per pair: the cache key is the entries themselves). The joined
+    // copies and their parts' CPU data are released at the end of _init, once uploaded (~290 MB on the 48 layers)
+    const cats = new Map(), catParts = new Set();
     const cat = (...es) => {
       const k = es.map((e) => (e.__id ||= ++Qwen4ExpEngine._ids)).join(",");
       if (!cats.has(k)) {
+        if (es.some((e) => !e.data)) throw new Error("qwen4exp: an f32 weight was consumed by another engine (one weights object builds one engine)");
+        es.forEach((e) => catParts.add(e));
         const data = new Float32Array(es.reduce((n, e) => n + e.data.length, 0));
         let o = 0;
         for (const e of es) { data.set(e.data, o); o += e.data.length; }
@@ -132,10 +142,11 @@ export class Qwen4ExpEngine {
       entries: list.map((b, i) => (b ? { binding: i, resource: b.buffer ? b : { buffer: b } } : null)).filter(Boolean) });
     const view = (buffer, off, n) => ({ buffer, offset: off * 4, size: n * 4 });
     // Quantized matrices of one kind and width stacked into one (rows end to end), so projections that read the
-    // same input run as one GEMV. The engine owns its weights: the parts' GPU buffers are freed. null when the
-    // kinds or widths differ.
+    // same input run as one GEMV. The engine owns its weights: the parts' GPU buffers are freed and their entries
+    // marked fused (wq on one then throws, rather than hand back the stacked buffer with the part's shape). null
+    // when the kinds or widths differ.
     const fuseRows = (...es) => {
-      const ms = es.map((e) => wq(e));
+      const ms = es.map((e, j) => wq(e, "fused part " + j));
       if (ms.some((m) => m.kind === "f32" || m.kind !== ms[0].kind || m.shape[1] !== ms[0].shape[1])) return null;
       const cols = ms[0].shape[1], nb = cols / 32, qb = ms[0].kind === "q4" ? 16 : 32;
       const rows = ms.reduce((n, m) => n + m.shape[0], 0);
@@ -290,6 +301,9 @@ export class Qwen4ExpEngine {
     this.layers.forEach((l, k) => { l.attnOps = dbg[2 * k]; l.ffnOps = dbg[2 * k + 1]; l.fast = [...fast[2 * k], ...fast[2 * k + 1]]; });
     if (hasHead) { this.headOps = dbg[dbg.length - 1]; this.headFast = fast[fast.length - 1]; }
     this._ropeTs = fr(Math.pow(cfg.ropeTheta, -2 / cfg.ropeDims));
+    // the CPU copies behind the joined f32 tensors are on the GPU now (the op closures keep this scope alive)
+    cats.clear();
+    for (const e of catParts) e.data = null;
     this.reset();
   }
 
@@ -313,8 +327,11 @@ export class Qwen4ExpEngine {
     ];
   }
 
+  // reset() also clears a failed step (_failed): a step that throws part way may have advanced layer 0's DeltaNet
+  // state and the n-gram predecessors without pos, so the engine refuses further tokens until reset.
   reset() {
     this.pos = 0;
+    this._failed = null;
     this.ngs?.reset();
     const enc = this.device.createCommandEncoder();
     for (const l of this.layers) for (const b of [l.st.conv, l.st.S, l.st.ring]) if (b) enc.clearBuffer(b);
@@ -342,8 +359,15 @@ export class Qwen4ExpEngine {
   // Everything one token needs before its layers run: the residual (from the embedding), the n-gram rows, the frame.
   // The n-gram rows are read without waiting (rows: the pending upload): forwardToken runs the layers before the
   // PLE layer while they land; debugToken awaits them here.
-  async _begin(id, { defer = false } = {}) {
+  // The checks before a step changes any state (a throw here leaves the engine as it was).
+  _check(id) {
+    if (this._failed) throw new Error("qwen4exp: an earlier step failed (" + this._failed.message + "); reset() first");
     if (this.pos >= this.maxSeq) throw new Error(`qwen4exp: context full (${this.maxSeq})`);
+    if (this.hasEmbed && !(Number.isInteger(id) && id >= 0 && id < this.nVocab)) throw new Error(`qwen4exp: token id ${id} outside the vocab (${this.nVocab})`);
+  }
+
+  async _begin(id, { defer = false } = {}) {
+    this._check(id);
     const q = this.device.queue, { cfg, B } = this;
     if (this.hasEmbed) {
       const e = this._embedRow(id), R = new Float32Array(cfg.hDim);
@@ -376,7 +400,12 @@ export class Qwen4ExpEngine {
   // One decode step. -> { id (greedy, when the engine has the head), logits (wantLogits) }
   // The layers go in a few submits: the GPU starts on the first while the rest are encoded, and the layers before
   // the PLE layer run while its n-gram rows are read.
-  async forwardToken(id, { wantLogits = false } = {}) {
+  async forwardToken(id, opts) {
+    this._check(id);
+    try { return await this._forward(id, opts); } catch (e) { this._failed = e; throw e; }
+  }
+
+  async _forward(id, { wantLogits = false } = {}) {
     const rows = await this._begin(id, { defer: true }), dev = this.device;
     const firstPle = this.cfg.ple ? this.layers.findIndex((l) => this.cfg.ple.layers.includes(l.i)) : -1;
     const run = (ls) => {
@@ -403,6 +432,8 @@ export class Qwen4ExpEngine {
       await this.amStage.mapAsync(GPUMapMode.READ);
       out.id = new Uint32Array(this.amStage.getMappedRange())[0];
       this.amStage.unmap();
+      // the argmax's "no index" (every logit NaN or below -3e38)
+      if (out.id >= this.dims.vocab) throw new Error(`qwen4exp: no greedy id at position ${this.pos - 1} (non-finite logits)`);
       if (wantLogits) {
         await this.logitStage.mapAsync(GPUMapMode.READ);
         out.logits = new Float32Array(this.logitStage.getMappedRange(), 0, this.dims.vocab).slice();
@@ -423,7 +454,12 @@ export class Qwen4ExpEngine {
   // tensor read back. force(name) -> Float32Array | null: the residual to start a half layer from ("in-<i>" before
   // layer i's first mixer, "mid-<i>" before its MoE mixer; the dumps' hc_init / l_last-(i-1) / hc_combine-i), for a
   // teacher-forced run. -> Map of "<name>.<k>" (k counts repeats within the token, as the dumps do) -> typed array.
-  async debugToken(id, force = () => null) {
+  async debugToken(id, force) {
+    this._check(id);
+    try { return await this._debug(id, force); } catch (e) { this._failed = e; throw e; }
+  }
+
+  async _debug(id, force = () => null) {
     await this._begin(id);
     const out = new Map(), seen = new Map(), dev = this.device;
     const run = async (ops, Rin) => {
