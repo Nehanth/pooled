@@ -16,11 +16,15 @@
 // Bindings: group 0 is the engine's (cfg, frame: frame.pos is the pass's first position, max(frame.nCols, 1) its
 // columns), group 1 the kernel's own buffers plus the QS uniform below. Workgroup memory <= 10.5 KB, no f16 or
 // subgroup features, every barrier in uniform control flow (scripts/wgsl-barrier-lint.mjs).
+// f16 stores (rawK, pooled keys) round to nearest even by hand (engine/wgsl/f16.js), not pack2x16float, whose
+// rounding is the backend's (D3D12 differs from Vulkan / Metal), and rawK is read back exactly (no subnormal flush).
 //
 // Rope: theta_i = p * ts^i accumulated in f32 (ts = f32(1e7^(-2/64)), passed in QS) as ggml's rope cache builds
 // it, and cos / sin after a Cody-Waite reduction to [-pi, pi]. The engine's rope_part takes cos(p * pow(...))
 // directly, which at p ~ 1e4..1e5 drifts by ~1e-3 rad from ggml; for the indexer that drift would move scores and
 // flip near-tie selections, so these kernels follow ggml's arithmetic instead.
+
+import { F16_WGSL } from "./f16.js";
 
 export const QSA_KPOOL = 4, QSA_NTOP = 512, QSA_MAXSEL = QSA_NTOP * QSA_KPOOL + QSA_KPOOL - 1;   // 2051
 export const QSA_IH = 4, QSA_ID = 128, QSA_PROJ = QSA_IH * QSA_ID + QSA_ID;                      // 640
@@ -39,7 +43,7 @@ struct Frame { pos: u32, seqLen: u32, nCols: u32, snap: u32 };
 struct QS { xs: u32, ps: u32, qs: u32, ss: u32, ls: u32, nRot: u32, eps: f32, ts: f32 };
 @group(0) @binding(0) var<uniform> cfg: Config;
 @group(0) @binding(1) var<uniform> frame: Frame;
-
+${F16_WGSL}
 // cos / sin of an f32 angle x >= 0 (x < 2^16 * 2 pi, so p < QSA_MAX_SEQ): x - k * 2 pi in three exact-product steps
 // that must not be reassociated, then the builtins
 fn qsa_cs(x: f32) -> vec2<f32> {
@@ -111,7 +115,7 @@ fn qsa_prep(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
   if (h == 4u) {   // raw key: no norm, no rope
     pr_v[i] = v;
     workgroupBarrier();
-    if (i < 64u) { pr_raw[p * 64u + i] = pack2x16float(vec2<f32>(pr_v[2u * i], pr_v[2u * i + 1u])); }
+    if (i < 64u) { pr_raw[p * 64u + i] = pack2x16_rne(vec2<f32>(pr_v[2u * i], pr_v[2u * i + 1u])); }
     return;
   }
   pr_s[i] = v * v;
@@ -137,7 +141,7 @@ const poolWGSL = /* wgsl */ `
 @group(1) @binding(3) var<uniform> pl_u: QS;
 var<workgroup> pl_v: array<f32, 128>;
 var<workgroup> pl_s: array<f32, 128>;
-fn pl_raw_at(row: u32, d: u32) -> f32 { let w = unpack2x16float(pl_raw[row * 64u + d / 2u]); return select(w.x, w.y, (d & 1u) == 1u); }
+fn pl_raw_at(row: u32, d: u32) -> f32 { let w = unpack2x16_exact(pl_raw[row * 64u + d / 2u]); return select(w.x, w.y, (d & 1u) == 1u); }
 @compute @workgroup_size(128)
 fn qsa_pool(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let i = lid.x;
@@ -162,7 +166,7 @@ fn qsa_pool(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
   workgroupBarrier();
   pl_v[i] = o;
   workgroupBarrier();
-  if (i < 64u) { pl_out[b * 64u + i] = pack2x16float(vec2<f32>(pl_v[2u * i], pl_v[2u * i + 1u])); }
+  if (i < 64u) { pl_out[b * 64u + i] = pack2x16_rne(vec2<f32>(pl_v[2u * i], pl_v[2u * i + 1u])); }
 }
 `;
 
