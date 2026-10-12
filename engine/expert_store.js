@@ -66,6 +66,9 @@ export class ExpertStore {
     this.t1Reserve = disk?.reserve;
     this.t1 = null;
     if (this.diskSet.size && !this.reader) throw new Error("ExpertStore: disk layers need a reader (engine/expert_disk.js)");
+    const notOff = (disk?.layers || []).filter((l) => !this.layerSet.has(l));
+    if (notOff.length) console.warn(`ExpertStore: disk layers ${notOff.join(",")} are not offloaded layers: their experts stay resident on the GPU`);
+    if (disk && !this.diskSet.size && (disk.layers || []).length) console.warn("ExpertStore: none of the disk layers is offloaded: no disk tier");
     this._staged = null;
     this.vramBytes = vramBytes; this.slotsOpt = slots;
     this.parkBytes = Math.min(parkBytes, device.limits?.maxBufferSize ?? parkBytes);
@@ -114,6 +117,8 @@ export class ExpertStore {
   }
   // -> the placeholder entry the engine sees in place of the stacked expert tensor
   park(layer, part, e, nExp) {
+    // a disk layer's experts stay in the file (attach): a loader without that branch must not park them
+    if (this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is a disk layer: its experts are attached (attach()), not parked`);
     if (e.kind !== "q4" && e.kind !== "q8") throw new Error(`ExpertStore: layer ${layer} ${part} experts must be Q4_0 / Q8_0 after conversion (got ${e.kind})`);
     const [allRows, cols] = e.shape, rows = allRows / nExp;
     if (rows % 1 || cols % 32) throw new Error(`ExpertStore: layer ${layer} ${part}: shape ${e.shape} is not ${nExp} experts of whole blocks`);
@@ -281,8 +286,9 @@ export class ExpertStore {
   }
   // these experts of a layer into the region at their own ids (the rest of it is stale from here on)
   _toRegion(enc, layer, ids) {
-    const S = this.L.get(layer);
-    for (const e of ids) this.stats.regionBytes += this._putExpert(enc, layer, S, e, this.region.bufs, e);
+    const S = this.L.get(layer), done = this._staged?.layer === layer ? this._staged.region : null;
+    // (a disk layer: prepare() already wrote what it read; only T1's experts are copied here)
+    for (const e of ids) this.stats.regionBytes += done?.has(e) ? S.perExp : this._putExpert(enc, layer, S, e, this.region.bufs, e);
     this.region.layer = -1;
     this.stats.regionCuts++;
   }
@@ -313,7 +319,8 @@ export class ExpertStore {
     });
     return out;
   }
-  // these experts of a disk layer, read in parallel -> Map(e -> slices); stats count the wait
+  // these experts of a disk layer, read in parallel -> Map(e -> slices); stats count the wait. Callers keep ids to a
+  // run (REGION_RUN): each expert is held whole in memory until written (~10 MB on the 122B)
   async _readMany(layer, ids) {
     const S = this.L.get(layer), t0 = performance.now(), m = new Map();
     const got = await Promise.all(ids.map((e) => this._readExpert(S, e)));
@@ -333,9 +340,32 @@ export class ExpertStore {
     const S = this.L.get(layer), K = KS - 1, uniq = [];
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) { const e = sel[c * KS + k]; if (e < this.nExp && !uniq.includes(e)) uniq.push(e); }
     const ids = (uniq.length > this.P ? uniq : uniq.filter((e) => S.slotOf[e] < 0)).filter((e) => !this.t1 || this.t1.find(this._key(layer, e), false) < 0);
-    this._staged = { layer, bytes: await this._readMany(layer, ids) };
+    this._staged = null;
+    if (uniq.length > this.P) {
+      // plan() takes the region path: up to every expert of the layer, so they are written into the region here, a run
+      // at a time, instead of all held until plan() (everything that uses the region is submitted: the contract above)
+      await this._writeRegion(layer, ids);
+      this._staged = { layer, region: new Set(ids) };
+    } else this._staged = { layer, bytes: await this._readMany(layer, ids) };
     return ids.length;
   }
+  // these experts of a disk layer into the region at their own ids, read in runs of `run` (each run written, then
+  // dropped: a wide pass or a short frame can name ~all 256 experts, ~2.5 GB on the 122B if read at once). Only once
+  // everything that uses the region is submitted (a writeBuffer lands in queue order). -> bytes written
+  async _writeRegion(layer, ids, run = ExpertStore.REGION_RUN) {
+    const S = this.L.get(layer), q = this.device.queue, R = this.region;
+    R.layer = -1;
+    let n = 0;
+    for (let i = 0; i < ids.length; i += run) {
+      const part = ids.slice(i, i + run), got = await this._readMany(layer, part);
+      for (const e of part) {
+        const b = got.get(e);
+        ExpertStore.SLICES.forEach(([p, s], j) => { const per = S.parts[p].sl[s].per; q.writeBuffer(R.bufs[j], e * per, b[j]); n += per; });
+      }
+    }
+    return n;
+  }
+  static REGION_RUN = 32;
   _key(layer, e) { return layer * this.nExp + e; }
   // an expert into dst slot / region id `at`: a copy from its parked buffer, or (disk layer) from its T1 slot, or the
   // bytes prepare() read: into a free T1 slot and copied from there when T1 admits it (admit: a pool fill, enc given),
@@ -364,7 +394,7 @@ export class ExpertStore {
   }
   // The whole disk layer into the region (a prefill frame). Only after the caller has submitted everything that uses
   // the region. Reads in runs of `run` experts, so a layer is never held whole in memory.
-  async loadLayerAsync(layer, run = 32) {
+  async loadLayerAsync(layer, run = ExpertStore.REGION_RUN) {
     const R = this.region;
     if (R.layer === layer) return 0;
     if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
@@ -391,9 +421,10 @@ export class ExpertStore {
     if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
     this.t1?.flush();
     const ids = this._frameIds(sel, nCols, KS);
-    this._staged = { layer, bytes: await this._readMany(layer, ids) };
-    this._toRegion(null, layer, ids);
     this._staged = null;
+    this.stats.regionBytes += await this._writeRegion(layer, ids);
+    this.region.layer = -1;
+    this.stats.regionCuts++;
     return ids.length;
   }
   // drop every cached expert (tests: a cold cache)

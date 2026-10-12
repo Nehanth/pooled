@@ -251,7 +251,9 @@ export async function offloadFromEnv(device, nLayers, model = null) {
     const reader = envGet("OFFLOAD_DISK_READER") === "workers"
       ? (await import("../packages/room-node/expert_disk.js")).expertDiskReader({ paths: model.paths })
       : expertDisk({ readAt: async (shard, off, len) => model.readShard(shard, off, len) });
-    disk = { layers: layerList(d, nLayers).filter((i) => layers.includes(i)), reader, ramBytes: +(envGet("OFFLOAD_DISK_RAM_GB") || 0) * 2 ** 30,
+    const named = layerList(d, nLayers), notOff = named.filter((i) => !layers.includes(i));
+    if (notOff.length) console.warn(`OFFLOAD_DISK: layers ${notOff.join(",")} are not in OFFLOAD (${v}): they stay resident, not on disk`);
+    disk = { layers: named.filter((i) => layers.includes(i)), reader, ramBytes: +(envGet("OFFLOAD_DISK_RAM_GB") || 0) * 2 ** 30,
       ...(envGet("OFFLOAD_DISK_RESERVE") ? { reserve: +envGet("OFFLOAD_DISK_RESERVE") } : {}) };
   }
   return new ExpertStore(device, { layers, vramBytes: +(envGet("OFFLOAD_GB") || 8) * 2 ** 30, slots: +(envGet("OFFLOAD_SLOTS") || 0), disk });

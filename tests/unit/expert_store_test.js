@@ -287,3 +287,71 @@ Deno.test("disk: a store with parked and disk layers never reads for the parked 
   assert(reader.calls.length === 12 && reader.calls.every((c) => c[0] === 5), "disk layer: its reads only");
   assert(/disk layers: 12 expert reads|disk layers: 4 expert reads/.test(st.summary()), st.summary());
 });
+
+// a reader that counts the reads in flight (the most at once) and can be told to fail
+function countingReader(base) {
+  const r = { inflight: 0, most: 0, fail: 0, calls: base.calls, async readPart(info, e) {
+    r.inflight++; r.most = Math.max(r.most, r.inflight);
+    try {
+      if (r.fail > 0) { r.fail--; await new Promise((ok) => setTimeout(ok, 1)); throw new Error("EIO: disk read failed"); }
+      return await base.readPart(info, e);
+    } finally { r.inflight--; }
+  } };
+  return r;
+}
+
+Deno.test("disk: a wide pass and a short frame read in runs, never every expert at once", async () => {
+  const run0 = ExpertStore.REGION_RUN;
+  ExpertStore.REGION_RUN = 4;
+  try {
+    const { st, reader } = makeDiskStore({ nExp: 64 }), { st: ref } = makeStore({ nExp: 64 });   // 6 slots
+    const R = st.reader = countingReader(reader);
+    const KS = 5, sel = new Uint32Array(5 * KS);
+    for (let c = 0; c < 5; c++) sel.set([c * 4, c * 4 + 1, c * 4 + 2, 40 + c], c * KS);   // 20 distinct
+    const r = await diskPlan(st, 5, sel, 5, KS);
+    ref.plan(fakeEncoder(), 5, sel, 5, KS);
+    assert(!r.pool && R.calls.length === 20 * 3, `region path, 20 experts read (${R.calls.length / 3})`);
+    assert(R.most <= 4 * 3, `at most a run of 4 experts (12 parts) in flight, got ${R.most}`);
+    for (let j = 0; j < 6; j++) for (const e of new Set(sel.filter((_, i) => i % KS < KS - 1))) {
+      const per = st.L.get(5).parts[["gate", "up", "down"][j >> 1]].sl[j & 1].per;
+      assert(st.region.bufs[j].bytes.subarray(e * per, (e + 1) * per).every((x, i) => x === ref.region.bufs[j].bytes[e * per + i]), `region slice ${j} expert ${e}`);
+    }
+    assert(st.stats.regionCuts === 1 && st.stats.regionBytes === ref.stats.regionBytes, "region counters as the parked path's");
+    // a short prefill frame (engine _regionLoad, W * K < nExp)
+    R.most = 0;
+    const f = new Uint32Array(9 * KS);
+    for (let c = 0; c < 9; c++) f.set([c, 20 + c, 40 + c, 63 - c], c * KS);
+    const n = await st.loadExpertsAsync(2, f, 9, KS);
+    assert(n === 36 && R.most <= 12 && st.region.layer === -1, `36 experts in runs (most ${R.most})`);
+    for (const e of [0, 8, 20, 28, 40, 48, 63, 55]) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 2, p, e) === want(2, p, e), `frame expert ${e}`);
+  } finally { ExpertStore.REGION_RUN = run0; }
+});
+
+Deno.test("disk: park() refuses a disk layer (a loader without an attach branch)", () => {
+  const dev = fakeDevice(), st = new ExpertStore(dev, { layers: [2, 5], slots: 6, disk: { layers: [5], reader: fakeReader({ nExp: 32, rows: 64, cols: 128 }) } });
+  st.park(2, "gate", entry(2, 0, 32, 64, 128), 32);
+  let msg = "";
+  try { st.park(5, "gate", entry(5, 0, 32, 64, 128), 32); } catch (e) { msg = e.message; }
+  assert(/disk layer/.test(msg), `park on a disk layer throws (${msg})`);
+});
+
+Deno.test("disk: a failed read rejects prepare and leaves the store usable: the next prepare + plan give the parked bytes", async () => {
+  const { st, reader } = makeDiskStore({ slots: 8 }), { st: ref } = makeStore({ slots: 8 });
+  const R = st.reader = countingReader(reader);
+  await diskPlan(st, 2, sel1([1, 2, 3, 4]), 1, 5); ref.plan(fakeEncoder(), 2, sel1([1, 2, 3, 4]), 1, 5);
+  R.fail = 1;
+  let msg = "";
+  try { await st.prepare(2, sel1([5, 6, 7, 8]), 1, 5); } catch (e) { msg = e.message; }
+  assert(/EIO/.test(msg), `prepare rejects with the read's error (${msg})`);
+  // the engine marks itself failed and plans nothing; once reset, the same cut again
+  for (const s of [sel1([5, 6, 7, 8]), sel1([1, 9, 5, 2])]) {
+    const a = await diskPlan(st, 2, s, 1, 5), b = ref.plan(fakeEncoder(), 2, s, 1, 5);
+    assert(a.pool && a.remap.every((x, i) => x === b.remap[i]), "same plan after the failure");
+    assert(sameBytes(poolBytes(st, 2), poolBytes(ref, 2)), "same pool bytes after the failure");
+  }
+  // a failed run of a region fill leaves the region marked partial
+  R.fail = 1;
+  const f = new Uint32Array(3 * 5); f.set([1, 2, 3, 4], 0); f.set([5, 6, 7, 8], 5); f.set([9, 10, 11, 12], 10);
+  try { await st.loadExpertsAsync(5, f, 3, 5); msg = ""; } catch (e) { msg = e.message; }
+  assert(/EIO/.test(msg) && st.region.layer === -1, "frame load rejects, region not marked as a whole layer");
+});
