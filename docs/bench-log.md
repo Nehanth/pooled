@@ -2428,3 +2428,28 @@ process holding ~47 GB of GPU memory:
 
 The step-up halves the pool copies but spreads T1 over 32 disk layers instead of 23, so the file is read more. Decode
 is within noise here; on an NVMe PC the extra reads are the expensive part, so the planner keeps the fewest m.
+## 2026-10-11: the disk reader's Windows ceiling (branch perf/windows-disk-reads), RTX 5070 PC and GB10
+
+On the PC (Windows, SK hynix P41, Node 24.15) `disk_expert_bench.mjs` stopped at ~2.3-2.6 GB/s raw and 1.3-1.7 conv
+whatever the worker count, warm no faster than first-touch. Profile (warm 1 MiB random reads of a Flash shard):
+workers reading on their own 16 GB/s; workers fed one read at a time by postMessage (with or without the
+SharedArrayBuffer in each message) 16 GB/s, main thread 15-27% busy; the pool's readAt 3.0-3.3 GB/s with the main
+thread **100% busy**. The cost: a fresh ~1 MiB buffer on the main thread (readAt's output, readPart's two slices) takes
+0.3-0.45 ms to fault in on Windows (0.03-0.15 on the GB10), so allocating and copying every part out of the ring capped
+the pool. Now a part or range up to chunkBytes is one job whose worker reads, converts and transfers its own buffers;
+larger or requant-split parts go through the ring and a worker gathers them out. Pool readAt warm: 3.0 -> 9.7-10.7 GB/s.
+`source.js` also read through one handle per file: on Windows reads on one handle run one at a time (cached, 4-16 lanes:
+~1.0 GB/s shared, 13.5 with a handle each). It now opens a handle per read in flight (`localFileReader`).
+
+PC, Flash, `GB=12`, first-touch = after reading 86 GB of other files (`EVICT`, now in the bench), 16 workers:
+
+| | raw GB/s | conv GB/s | p50 / p99 ms per Q4_0 expert (conv) | uv, libuv 16 |
+|---|---|---|---|---|
+| main, first-touch | 1.30 (2.26 in the earlier run) | 1.32 | 13.4 / 47.0 | 0.73 |
+| this branch, first-touch | **3.66** (32 workers: 4.36) | **2.62** | 5.1 / **11.1** | 1.54 |
+| main, warm | 2.19 | 1.63 | 10.8 / 46.0 | 1.37 |
+| this branch, warm | 7.76 | 3.66 | 2.8 / 6.6 | 2.91 |
+
+GB10 (Linux, cold, 16 workers; load average 33-36 from other agents, so conv varies 1.1-3.2 GB/s run to run on both
+sides): the 35B raw 2.90 -> 4.39 cold, 5.0 -> 14.0 warm, conv 2.36 -> 2.36 cold; the 122B raw 3.24 -> 5.39 cold, 4.7 -> 13.0
+warm, conv 3.17 / 2.45 / 1.34 (main) against 3.00 / 2.46 / 1.14 (branch) over three pairs. 4 MiB chunks: no better.

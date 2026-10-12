@@ -81,3 +81,17 @@ export function offloadFor(metas, ex, model = null) {
   const disk = metas.map((m) => diskFor(m, model));
   return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}) };
 }
+
+// The disk a device lets the room keep a model's n-gram table on (Qwen3.8-Flash-Next: room/plan.js placeNgram), in
+// bytes: meta.ngram true when it already has the table (a room node with the model file: Infinity), else meta.diskGB
+// (what it has free for model files: a room node's filesystem, a tab's OPFS quota), else null (it did not say).
+export function ngramDisk(meta) {
+  if (meta?.ngram === true) return Infinity;
+  const g = Number(meta?.diskGB);
+  return meta?.diskGB != null && g >= 0 ? g * 2 ** 30 : null;
+}
+// room/plan.js's `ngram` for a room's devices (metas, host first) and the model's table (room/models.js ngramOf:
+// { layer, bytes }), or null for a model without one
+export function ngramFor(metas, ng) {
+  return ng && ng.bytes > 0 ? { layer: ng.layer, bytes: ng.bytes, disk: metas.map(ngramDisk) } : null;
+}

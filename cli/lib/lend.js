@@ -6,7 +6,10 @@ import { roomCodeFrom, roomKeyFrom } from "./room.js";
 import { cleanText } from "./common.js";
 import { argsError, needsRoom, notARoom } from "./cli.js";
 
-export const DESK_MAX_GB = 64;          // room/pledge.js: the most one computer lends a room
+export const DESK_MAX_GB = 64;          // room/pledge.js: the most one computer lends a room by default
+// the most it lends when told to (--gb N, --gb max, --here): a big unified-memory machine (a GB10, a 128 GB Mac)
+// holding a model of ~72 GB alone (Qwen3.5-122B, Qwen3.8-Flash-Next)
+export const LEND_MAX_GB = 128;
 export const DISCRETE_RESERVE_GB = 1.5; // kept free on a discrete GPU (the desktop, other apps)
 export const UNIFIED_KEEP_GB = 8;       // kept for the system on unified memory: at least this much
 export const UNIFIED_KEEP_FRAC = 0.35;  // ... or this share of it, whichever is more
@@ -37,7 +40,7 @@ Options
   --gb <n|max>      how much memory to lend, in GB. Default: the memory rule, printed at start:
                     a discrete GPU lends its free memory less ${DISCRETE_RESERVE_GB} GB; unified memory (Apple
                     silicon, GB10) lends the total less max(${UNIFIED_KEEP_GB} GB, ${Math.round(UNIFIED_KEEP_FRAC * 100)}%). "max" keeps only a
-                    small margin. At most ${DESK_MAX_GB} GB per device.
+                    small margin. The rule lends at most ${DESK_MAX_GB} GB; --gb N or max up to ${LEND_MAX_GB}.
   --name <s>        how the room shows this device (default: mac-, linux- or pc- and 3 letters
                     made from the hostname, the same each run, so a restart takes back its slot)
   --signal <spec>   PeerJS signaling server(s), as the room page's ?signal= (comma list;
@@ -172,7 +175,7 @@ export function parseGb(v) {
   const n = Number(v);
   if (!Number.isFinite(n) || n <= 0) throw new UsageError(`--gb must be a number of GB (like 12) or "max", not "${v}"`);
   if (n < 1) throw new UsageError("--gb must be at least 1 (GB)");
-  return { gb: Math.min(n, DESK_MAX_GB) };
+  return { gb: Math.min(n, LEND_MAX_GB) };
 }
 
 const COMMON = {
@@ -221,7 +224,7 @@ export function parseLendArgs(cmd, argv, { models = null } = {}) {
       if (!keys.includes(given)) {
         const hits = keys.filter((k) => k.includes(String(given).toLowerCase()));
         if (hits.length === 1) given = hits[0];
-        else throw new UsageError(`unknown model "${given}"; one of: ${keys.join(", ")}`);
+        else throw new UsageError(devHint(models, given) || `unknown model "${given}"; one of: ${keys.join(", ")}`);
       }
     }
     out.model = given || "qwen3-1.7b";
@@ -267,7 +270,19 @@ export function ctxNote(rn, model, ask) {
   const name = rn.MODELS[model].label.split("·")[0].trim().replace(/^Qwen[\d.]*\s+/, "");
   return `the ${name}'s context is ${got}; using that`;
 }
-export const hostable = (models) => Object.keys(models).filter((k) => models[k].kind === "gguf" || models[k].kind === "qwen35");
+// The models pooled host / pull / list offer. A preview model's kind (Qwen3.8-Flash-Next, qwen4exp: its own engine,
+// context <= 2048, no MTP in rooms yet) is listed and accepted only with POOLED_DEV=1, as the room page lists the 122B
+// only with ?dev=1. A room node still loads one a host deals it (pooled join).
+export const DEV_KINDS = ["qwen4exp"];
+export const devOn = (env = process.env) => env.POOLED_DEV === "1";
+export const hostable = (models, dev = devOn()) => Object.keys(models).filter((k) => models[k].kind === "gguf" || models[k].kind === "qwen35" || (dev && DEV_KINDS.includes(models[k].kind)));
+// a preview model named without POOLED_DEV=1: what to say ("" for any other name)
+export function devHint(models, given, dev = devOn()) {
+  if (dev || !models) return "";
+  const t = String(given || "").trim().toLowerCase();
+  const hit = Object.keys(models).filter((k) => DEV_KINDS.includes(models[k].kind) && (k === t || (t.length > 2 && k.includes(t))));
+  return hit.length === 1 ? `${hit[0]} is a preview: set POOLED_DEV=1 to use it` : "";
+}
 
 // ---------------- the memory rule ----------------
 // What the GPU has, from the OS (WebGPU does not say how much memory a GPU has):
@@ -338,7 +353,8 @@ export function memoryRule(mem, want = null, { maxBufGB = 0 } = {}) {
   }
   if (avail < 1) return { gb: 0, why, low: true, over: false };
   let gb = floorGb(avail);
-  if (gb > DESK_MAX_GB) { gb = DESK_MAX_GB; why += `, capped at ${DESK_MAX_GB} GB per device`; }
+  const cap = want?.max ? LEND_MAX_GB : DESK_MAX_GB;   // --gb max (and --here's "the most it can"): past the default cap
+  if (gb > cap) { gb = cap; why += `, capped at ${cap} GB per device`; }
   return { gb, why, low: false, over: false };
 }
 

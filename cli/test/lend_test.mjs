@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { parseLendArgs, parseGb, parseRam, ramRule, autoRedeal, detectMemory, memoryRule, afterCheck, formatStatus, tpsFromStats, passCounter, explainError,
-  versionAdvice, versionFromBye, hostable, deviceName, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB } from "../lib/lend.js";
+  versionAdvice, versionFromBye, hostable, deviceName, UsageError, HELP_JOIN, HELP_HOST, DESK_MAX_GB, LEND_MAX_GB, devHint } from "../lib/lend.js";
 import { dawnLoader, dawnPackages, DAWN_VERSION } from "../lib/dawn.js";
 
 const GB = 2 ** 30;
@@ -65,11 +65,29 @@ test("host: model, devices, code, ctx", () => {
   assert.deepEqual(hostable(MODELS), ["qwen3-1.7b", "qwen3.6-35b-moe"]);
 });
 
+test("Qwen3.8-Flash-Next is a preview: listed and accepted only with POOLED_DEV=1, and named it says so", () => {
+  const M = { ...MODELS, "qwen3.8-flash": { kind: "qwen4exp" } };
+  assert.deepEqual(hostable(M, false), ["qwen3-1.7b", "qwen3.6-35b-moe"]);
+  assert.deepEqual(hostable(M, true), ["qwen3-1.7b", "qwen3.6-35b-moe", "qwen3.8-flash"]);
+  assert.equal(devHint(M, "qwen3.8-flash", false), "qwen3.8-flash is a preview: set POOLED_DEV=1 to use it");
+  assert.equal(devHint(M, "flash", false), "qwen3.8-flash is a preview: set POOLED_DEV=1 to use it");
+  assert.equal(devHint(M, "qwen3.8-flash", true), "");
+  assert.equal(devHint(M, "gpt-9", false), "");
+  const prev = process.env.POOLED_DEV;
+  try {
+    delete process.env.POOLED_DEV;
+    assert.throws(() => parseLendArgs("host", ["qwen3.8-flash"], { models: M }), /qwen3\.8-flash is a preview: set POOLED_DEV=1/);
+    process.env.POOLED_DEV = "1";
+    assert.equal(parseLendArgs("host", ["flash", "--here"], { models: M }).model, "qwen3.8-flash");
+  } finally { if (prev == null) delete process.env.POOLED_DEV; else process.env.POOLED_DEV = prev; }
+});
+
 test("--gb: numbers, max, and the per-device cap", () => {
   assert.equal(parseGb(undefined), null);
   assert.deepEqual(parseGb("MAX"), { max: true });
   assert.deepEqual(parseGb("7.5"), { gb: 7.5 });
-  assert.deepEqual(parseGb("500"), { gb: DESK_MAX_GB });
+  assert.deepEqual(parseGb("500"), { gb: LEND_MAX_GB });
+  assert.deepEqual(parseGb("90"), { gb: 90 });   // past the default cap when asked (a GB10 holding a ~72 GB model alone)
 });
 
 test("the help texts name every option", () => {

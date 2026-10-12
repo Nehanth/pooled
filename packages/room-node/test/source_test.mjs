@@ -4,7 +4,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { planChunks, rangePrefetcher, fetchRange, openModel } from "../source.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { planChunks, rangePrefetcher, fetchRange, openModel, localFileReader } from "../source.js";
 import { RoomNode } from "../roomnode.js";
 
 const MiB = 2 ** 20;
@@ -126,4 +129,45 @@ test("RoomNode: watchLoad emits loadstat { from, fetched, total, bps }, beforeLo
   assert.equal(last.fetched, 600); assert.equal(last.total, 1000); assert.equal(last.from, "Hugging Face");
   assert.ok(last.bps > 0);
   assert.deepEqual(n.loadStat, last);
+});
+
+test("localFileReader: reads at once go to handles of their own, up to lanes; bytes right; a short read fails", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lfr-")), file = path.join(dir, "f.bin"), data = randomBytes(3 * MiB);
+  fs.writeFileSync(file, data);
+  const r = localFileReader(file, { lanes: 3 });
+  try {
+    const offs = Array.from({ length: 24 }, (_, i) => (i * 98765) % (2 * MiB));
+    const got = await Promise.all(offs.map((o) => r.readAt(o, 300000)));
+    got.forEach((b, i) => assert.deepEqual(Buffer.from(b), data.subarray(offs[i], offs[i] + 300000)));
+    assert.equal(r.handles, 3, "one handle per lane, no more than lanes");
+    await assert.rejects(r.readAt(3 * MiB - 10, 20), /short read/);
+    assert.deepEqual(Buffer.from(await r.readAt(5, 7)), data.subarray(5, 12));
+    await r.close();
+    await assert.rejects(r.readAt(0, 1), /closed/);
+    const bad = localFileReader(path.join(dir, "missing.bin"));
+    await assert.rejects(bad.readAt(0, 1), /ENOENT/);
+    assert.equal(bad.handles, 0, "a failed open is not kept");
+  } finally { await r.close(); fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("localFileReader: reads sharing a handle whose open fails (EMFILE) try once more on a fresh one", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lfr-")), file = path.join(dir, "f.bin"), data = randomBytes(MiB);
+  fs.writeFileSync(file, data);
+  const open = fs.promises.open;
+  let opens = 0;
+  fs.promises.open = (...a) => (++opens === 1 ? Promise.reject(Object.assign(new Error("EMFILE: too many open files"), { code: "EMFILE" })) : open(...a));
+  const r = localFileReader(file, { lanes: 1 });
+  try {
+    const offs = [0, 1000, 5000, 70000];
+    const got = await Promise.all(offs.map((o) => r.readAt(o, 4096)));   // one lane: all four wait on the first open
+    got.forEach((b, i) => assert.deepEqual(Buffer.from(b), data.subarray(offs[i], offs[i] + 4096)));
+    assert.equal(opens, 2, "one failed open, one fresh handle for the retries");
+    assert.equal(r.handles, 1);
+    // an open that fails twice fails the read
+    await r.close();
+    const r2 = localFileReader(file, { lanes: 1 });
+    fs.promises.open = () => Promise.reject(Object.assign(new Error("EMFILE: too many open files"), { code: "EMFILE" }));
+    await assert.rejects(r2.readAt(0, 1), /EMFILE/);
+    assert.equal(r2.handles, 0);
+  } finally { fs.promises.open = open; await r.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });

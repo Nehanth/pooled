@@ -509,6 +509,8 @@ export const gbUp = (bytes) => Math.ceil(bytes / 2 ** 30 * 10 - 1e-9) / 10;
 // two devices that could close the gap alone, the host's raise first when it is the smaller one.
 export function shortNote(label, fit, names = [], spareGB = []) {
   if (fit.fits) return "";
+  // the pledges hold it, but no device that can take the n-gram table's layer has the disk for it (dealRoom ngram)
+  if (fit.ngram) return `${label} needs ${gbUp(fit.ngram.bytes)} GB of free disk for its n-gram table on the device that holds layer ${fit.ngram.layer}, and the devices that could hold that layer don't have it. Free disk space there or add a device that has the room.`;
   const who = givers(fit, spareGB).slice(0, 2).map(({ i, b }) => `${names[i] || "a device"} could give ${gbUp(b)} GB more`);
   const head = `This room is ${gbUp(shortBy(fit, spareGB))} GB short for ${label}`;
   const host = fit.caps[0] < 1 ? `; the model host (${names[0] || "the biggest device"}) needs room for the embedding, the output head and a layer` : "";
@@ -539,7 +541,13 @@ export function shortBy(fit, spareGB = []) {
 // model does a device offload (dealOffload); the result then also has `offload`: per device in `used`, null or
 // { layers, lo, hi, vramBytes, ramBytes } (offloadPlan, with the range of its layers to offload), and with the disk
 // tier (only when parking can't hold the model) diskLo (layers [diskLo, hi) stay in the file) and diskRamBytes (T1).
-export function dealRoom({ L, layerBytes, hostBytes = 0, pledges, mode = "memory", ms = [], phone = [], phoneLayers = false, off = null }) {
+// ngram (optional, Qwen3.8-Flash-Next): the n-gram table's placement (ngramFor, room/pledge.js): the device dealt its
+// layer must have the table on its own disk (placeNgram). The result then also has `ngram`.
+export function dealRoom({ L, layerBytes, hostBytes = 0, pledges, mode = "memory", ms = [], phone = [], phoneLayers = false, off = null, ngram = null }) {
+  const d = dealLayers({ L, layerBytes, hostBytes, pledges, mode, ms, phone, phoneLayers, off });
+  return ngram && d.used.length ? placeNgram(d, ngram, { layerBytes, hostBytes }) : d;
+}
+function dealLayers({ L, layerBytes, hostBytes, pledges, mode, ms, phone, phoneLayers, off }) {
   const fit = roomFit(L, pledges, layerBytes, hostBytes, off);
   const none = { fit, used: [], assigned: [], ranges: [], held: [], out: {} };
   if (!fit.fits) return none;
@@ -569,4 +577,42 @@ export function dealRoom({ L, layerBytes, hostBytes = 0, pledges, mode = "memory
   }
   const held = idx.map((i, k) => assigned[k] * layerBytes + (i === 0 ? hostBytes : 0));
   return { fit, used: idx, assigned, ranges, held, out };
+}
+
+// ---------------- the n-gram table (Qwen3.8-Flash-Next, roadmap/33) ----------------
+// Flash's n-gram (PLE) embedding is a 28.8 GB table read a few rows per token (engine/ngram.js NgramTable) by the
+// device that runs its layer (layer 1). It never goes to a GPU and is not part of any layer's bytes, so the pledges
+// don't pay for it: the deal only has to give that layer to a device with the table on its own disk (a room node's
+// model file, or OPFS in a tab). ng: { layer, bytes, disk: [bytes per device, host first: what it can keep the
+// table in (the table already there counts as Infinity); null when it did not say] } (room/pledge.js ngramFor).
+// A device that did not say is taken at its word (as before the field existed): `checked` is then false.
+// When the device dealt the layer can't hold the table, the boundary between the host and the next device moves so
+// one that can holds it: the host takes the layer (a device that held only it then holds none), or the next device
+// takes every layer of the host's but the first. Only those two, within the pledges (fit.caps) and on a deal
+// without offload (an offloading device's plan is made for its range); otherwise the room does not start:
+// fit.fits false with fit.ngram = { layer, bytes } (what is missing: a device with that much disk for that layer).
+// -> the deal with ngram: { layer, bytes, device (index among the room's devices), at (index in `used`), checked }
+export function ngramHolder(ranges, layer) { return ranges.findIndex(([lo, hi]) => layer >= lo && layer < hi); }
+export function placeNgram(d, ng, { layerBytes, hostBytes = 0 }) {
+  const { layer, bytes } = ng, disk = ng.disk || [];
+  const says = (i) => disk[i] != null && !Number.isNaN(+disk[i]);
+  const can = (i) => !says(i) || +disk[i] >= bytes;
+  const done = (x, k) => ({ ...x, ngram: { layer, bytes, device: x.used[k], at: k, checked: says(x.used[k]) } });
+  const k = ngramHolder(d.ranges, layer);
+  if (k < 0) return d;   // (no device holds that layer: not a deal this model makes)
+  if (can(d.used[k])) return done(d, k);
+  const short = { fit: { ...d.fit, fits: false, ngram: { layer, bytes } }, used: [], assigned: [], ranges: [], held: [], out: {} };
+  if (d.offload?.some(Boolean) || d.used.length < 2) return short;
+  const caps = d.fit.caps, a = d.assigned.slice(), used = d.used.slice(), out = { ...d.out };
+  const [lo1] = d.ranges[1];
+  if (k === 1 && layer === lo1 && a[1] >= 1 && can(used[0]) && caps[used[0]] >= a[0] + 1) {
+    a[0]++; a[1]--;   // the host takes the layer
+    if (!a[1]) { out[used[1]] = "unneeded"; used.splice(1, 1); a.splice(1, 1); }
+  } else if (k === 0 && layer >= 1 && can(used[1]) && caps[used[1]] >= a[1] + a[0] - 1) {
+    a[1] += a[0] - 1; a[0] = 1;   // the next device takes the host's layers past the first
+  } else return short;
+  const ranges = rangesOf(a), held = used.map((i, j) => a[j] * layerBytes + (i === 0 ? hostBytes : 0));
+  const x = { ...d, used, assigned: a, ranges, held, out };
+  const j = ngramHolder(ranges, layer);
+  return j >= 0 && can(used[j]) ? done(x, j) : short;
 }
