@@ -418,3 +418,23 @@ Deno.test("flash core: a step that throws part way marks the engine failed, as f
   core.reset();
   eq((await core.step(4)).length, HD, "after reset() the engine steps again");
 });
+
+Deno.test("flash core: an offloaded layer's ops split at its router and the engine's cut runs between them, in order", async () => {
+  const HD = 4, seen = [];
+  const stage = { mapAsync: async () => {}, getMappedRange: () => new ArrayBuffer(HD * 4), unmap() {} };
+  const mkEnc = () => ({ beginComputePass: () => ({ end() {} }), copyBufferToBuffer() {}, finish: () => ({}) });
+  const op = (n, cut = false) => ({ n, cut });
+  const L = (i, off) => ({ i, off, st: {}, halves: [{ n: `a${i}` }, { n: `f${i}` }] });
+  const e = {
+    device: { queue: { submit() {}, writeBuffer() {} }, createCommandEncoder: mkEnc },
+    cfg: { hDim: HD, nKVHeads: 1, headDim: 2 }, dims: {}, lo: 0, hi: 3, hasEmbed: true, hasHead: false, maxSeq: 4, pos: 0,
+    layers: [L(0, false), L(1, true), L(2, false)], B: { R: {} }, hStage: stage, _failed: null,
+    // fused lists, two per layer: attention, then the MoE half with its router op marked cut
+    _halfOps: (halves) => halves.map((h) => (h.n[0] === "a" ? [op(h.n)] : [op(h.n + ".route", true), op(h.n + ".exp")])),
+    _check() {}, async _begin() {},
+    _encode(_pass, ops) { for (const o of ops) seen.push(o.n); },
+    async _afterRoute(enc, l) { seen.push(`cut${l.i}`); return mkEnc(); },
+  };
+  await qwen4expCore(e).step(1);
+  eq(seen, ["a0", "f0.route", "f0.exp", "a1", "f1.route", "cut1", "f1.exp", "a2", "f2.route", "f2.exp"]);
+});
