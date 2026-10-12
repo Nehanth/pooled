@@ -29,6 +29,13 @@
 // Shape limits: headDim 256, G = nH / nKV <= 8 per workgroup, f16 KV (not kvQ8). Workgroup memory <= 16 KB.
 // R > 1: more query heads per kv head than that (Qwen3.5-122B: 16), so each kv head gets R workgroups of
 // G = nH / nKV / R heads (wg.z runs over nKV * R; the engine passes that product as nKV and this G).
+//
+// gather = stride (QSA, engine/wgsl/qsa.js): each column attends to a list of KV rows instead of rows
+// 0 .. seqLen-1. Column col's list is ix[col * stride] = n, then n row indices ascending at ix[col * stride + 1 ..].
+// List position t stands where position t stands in the dense kernel (split lengths come from n), so with the
+// list 0 .. seqLen-1 the gathered kernel does the same arithmetic in the same order: the same bits as the dense
+// one. Entry points are attn_dec_qsa / attn_dec_qsa_combine(_g); binding 6 is the list. gather = 0 (default)
+// emits exactly the dense module.
 
 export function attnDecConfig({ hd, G, nKV, splits = 0, kvQ8 = false, R = 1 }) {
   if (kvQ8 || hd !== 256 || !(G >= 1 && G <= 8) || !(R >= 1)) return null;
@@ -57,7 +64,10 @@ struct FD { s0: u32, s1: u32, S: u32, slots: u32 };   // q col stride, out col s
 fn fd_split(s: u32, S: u32) -> u32 { return max(64u, ((s + S - 1u) / S + 63u) / 64u * 64u); }
 `;
 
-export function attnDecWGSL({ HD, G, S, R = 1 }) {
+export function attnDecWGSL({ HD, G, S, R = 1, gather = 0 }) {
+  const X = gather ? "_qsa" : "";
+  // KV row of list position e (a WGSL u32 expression)
+  const row = (e) => gather ? `ad_ix[ib + ${e}]` : `(${e})`;
   const CQ = DEC_CQ, CD = HD / CQ, CG = 256 / (CD / 4);   // slices, dims per slice, split groups
   const H = [...Array(G).keys()];
   const QV = HD / 4;                 // vec4s of q per head
@@ -80,7 +90,7 @@ export function attnDecWGSL({ HD, G, S, R = 1 }) {
 @group(1) @binding(2) var<storage, read> ad_v: array<vec4<u32>>;
 @group(1) @binding(3) var<storage, read_write> ad_o: array<f32>;
 @group(1) @binding(4) var<storage, read_write> ad_ml: array<f32>;
-@group(1) @binding(5) var<uniform> adu: FD;
+@group(1) @binding(5) var<uniform> adu: FD;${gather ? "\n@group(1) @binding(6) var<storage, read> ad_ix: array<u32>;   // per column: n, then n KV rows" : ""}
 var<workgroup> ad_qs: array<vec4<f32>, ${RED}>;
 var<workgroup> ad_sc: array<f32, ${G * 128}>;
 var<workgroup> ad_r1: array<f32, ${G * 32}>;
@@ -90,9 +100,9 @@ var<workgroup> ad_l: array<f32, ${G}>;
 var<workgroup> ad_a: array<f32, ${G}>;
 
 @compute @workgroup_size(256)
-fn attn_dec(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+fn attn_dec${X}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let sp = wg.x; let col = wg.y; let g = wg.z; let tid = lid.x;
-  let seqLen = frame.seqLen + col;
+  ${gather ? `let seqLen = ad_ix[col * ${gather}u]; let ib = col * ${gather}u + 1u;` : "let seqLen = frame.seqLen + col;"}
   let SL = fd_split(seqLen, adu.S);
   let t0 = sp * SL;
   if (t0 >= seqLen) { return; }
@@ -116,7 +126,7 @@ fn attn_dec(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
     // scores
     ${H.map((h) => `var s${h}: f32 = 0.0;`).join(" ")}
     if (r < n) {
-      let kb = (c0 + r) * kvRow + gOff;
+      let kb = ${row("c0 + r")} * kvRow + gOff;
       {
         ${scoreBatch(0)}
       }
@@ -157,17 +167,18 @@ fn attn_dec(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
     workgroupBarrier();
     // V: row group rg takes rows rg, rg + 8, ...; lane j takes dims 8j .. 8j + 7
     ${H.map((h) => `{ let a = ad_a[${h}u]; oa${h} *= a; ob${h} *= a; }`).join(" ")}
-    let vb = c0 * kvRow + gOff + j;
+    ${gather ? "let vb = gOff + j;" : "let vb = c0 * kvRow + gOff + j;"}
     var t = rg;
     for (; t + 24u < n; t += 32u) {
-      let v0 = ad_v[vb + t * kvRow]; let v1 = ad_v[vb + (t + 8u) * kvRow]; let v2 = ad_v[vb + (t + 16u) * kvRow]; let v3 = ad_v[vb + (t + 24u) * kvRow];
+      ${gather ? "let v0 = ad_v[vb + ad_ix[ib + c0 + t] * kvRow]; let v1 = ad_v[vb + ad_ix[ib + c0 + t + 8u] * kvRow]; let v2 = ad_v[vb + ad_ix[ib + c0 + t + 16u] * kvRow]; let v3 = ad_v[vb + ad_ix[ib + c0 + t + 24u] * kvRow];"
+        : "let v0 = ad_v[vb + t * kvRow]; let v1 = ad_v[vb + (t + 8u) * kvRow]; let v2 = ad_v[vb + (t + 16u) * kvRow]; let v3 = ad_v[vb + (t + 24u) * kvRow];"}
       ${vrow("v0", "t")}
       ${vrow("v1", "t + 8u")}
       ${vrow("v2", "t + 16u")}
       ${vrow("v3", "t + 24u")}
     }
     for (; t < n; t += 8u) {
-      let v0 = ad_v[vb + t * kvRow];
+      let v0 = ad_v[vb + ${gather ? "ad_ix[ib + c0 + t]" : "t"} * kvRow];
       ${vrow("v0", "t")}
     }
     workgroupBarrier();
@@ -188,22 +199,22 @@ fn attn_dec(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) 
   }
 }
 
-${attnDecCombineWGSL({ HD, S })}`;
+${attnDecCombineWGSL({ HD, S, gather })}`;
 }
 
 // attn_dec_combine_g in a module of its own (optional, like layerFuse's kernels: a compile failure leaves
 // attnDecode v2 running with the separate sigmoid_mul). One token only (column 0: the gate offset has no
 // column stride).
-export function attnDecCombineGWSL({ HD, S }) { return attnDecHeader + attnDecCombineWGSL({ HD, S, gate: true }); }
+export function attnDecCombineGWSL({ HD, S, gather = 0 }) { return attnDecHeader + attnDecCombineWGSL({ HD, S, gate: true, gather }); }
 
 // attn_dec_combine, and (gate = true) attn_dec_combine_g: the same combine with layerFuse.comb's sigmoid gate
 // for one token (sigmoid_mul folded in). The gate of q head qh is q_full[qh * 2 * hd + hd + i], the value
 // attn_glue copies into the gate buffer. The quotient goes through workgroup memory before the gate multiply,
 // as in attn_combine_g (layer_fuse.js): written as one expression, Metal may fold the two. Same bits as
 // attn_dec_combine + sigmoid_mul. No early return in the gated one: its barrier needs uniform control flow.
-function attnDecCombineWGSL({ HD, S, gate = false }) {
+function attnDecCombineWGSL({ HD, S, gate = false, gather = 0 }) {
   const CQ = DEC_CQ, CD = HD / CQ, CG = 256 / (CD / 4);
-  const F = gate ? "attn_dec_combine_g" : "attn_dec_combine";
+  const F = (gather ? "attn_dec_qsa_combine" : "attn_dec_combine") + (gate ? "_g" : "");
   const U = gate ? "adcg" : "adc";
   // store the vec4 r at dims 4 * (dq * CD / 4 + v) of head qh; gated: into workgroup memory first
   const put = (v) => gate ? `adcg_t[4u * ${v}] = r.x; adcg_t[4u * ${v} + 1u] = r.y; adcg_t[4u * ${v} + 2u] = r.z; adcg_t[4u * ${v} + 3u] = r.w;`
@@ -214,7 +225,8 @@ function attnDecCombineWGSL({ HD, S, gate = false }) {
 var<workgroup> adcg_t: array<f32, ${CD}>;   // this slice's quotients O / L` : `@group(1) @binding(3) var<uniform> adc: FD;`) + `
 var<workgroup> adc_w: array<f32, ${S}>;      // per-split weight exp(m_s - M)
 var<workgroup> adc_r: array<f32, 256>;       // reductions
-var<workgroup> adc_p: array<vec4<f32>, 256>; // split groups' partial outputs`;
+var<workgroup> adc_p: array<vec4<f32>, 256>; // split groups' partial outputs` + (gather ? `
+@group(1) @binding(6) var<storage, read> adc_ix: array<u32>;   // per column: n, then the KV rows` : "");
   const one = `if (tid < ${CD / 4}u) {
       let r = adc_o[b0 * ${HD / 4}u + vi] / adc_ml[b0 * 2u + 1u];
       ${put("lane")}
@@ -231,7 +243,7 @@ ${decl}
 fn ${F}(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
   let qh = wg.x / ${CQ}u; let dq = wg.x % ${CQ}u; let col = wg.y; let tid = lid.x;
   if (qh >= cfg.nH) { return; }
-  let seqLen = frame.seqLen + col;
+  let seqLen = ${gather ? `adc_ix[col * ${gather}u]` : "frame.seqLen + col"};
   let SL = fd_split(seqLen, ${U}.S);
   let ns = (seqLen + SL - 1u) / SL;
   let b0 = (col * cfg.nH + qh) * ${U}.slots;

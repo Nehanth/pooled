@@ -6,13 +6,11 @@ import { assert, assertEquals, assertNotEquals } from "https://deno.land/std@0.2
 import { ggufEntry, convertEntry, GGML_Q8_0, GGML_BF16, GGML_F32 } from "../../engine/gguf.js";
 import { LOADER_VERSION } from "../weight_cache.js";
 import {
-  WCACHE_DIR, HDR, revisionOf, modelOf, headerFingerprint, cacheDirName, converterVersion, worthCaching, quotaAllows,
+  WCACHE_DIR, HDR, revisionOf, modelOf, headerFingerprint, cacheDirName, converterVersion, worthCaching, isQuotaError,
   encodeEntry, decodeEntry, entryFile, BrowserWeightCache, convertedBytes, clearConverted, attachBrowserWeightCache,
   convertedByModel, deleteConverted,
 } from "../../room/convertedcache.js";
 import { FakeDir, FakeFile } from "../helpers/fake-opfs.js";
-
-const big = () => ({ quota: 100 * 2 ** 30, usage: 0 });
 
 // ---- synthetic tensors: one Q8_0 matrix (repack) and one BF16 matrix (-> f32) ----
 function makeModel({ offsetShift = 0 } = {}) {
@@ -41,7 +39,7 @@ const same = (a, b) => {
 };
 const URL_MAIN = "https://huggingface.co/org/repo/resolve/main/Model-Q4_0.gguf";
 const URL_PIN = "https://huggingface.co/org/repo/resolve/0123abcd/Model-Q4_0.gguf";
-const open = (root, G, extra = {}) => BrowserWeightCache.open(root, { url: URL_PIN, G, converter: "e1-test", estimate: async () => big(), ...extra });
+const open = (root, G, extra = {}) => BrowserWeightCache.open(root, { url: URL_PIN, G, converter: "e1-test", ...extra });
 
 Deno.test("revisionOf reads the pinned revision out of a resolve URL", () => {
   assertEquals(revisionOf(URL_PIN), "0123abcd");
@@ -84,16 +82,15 @@ Deno.test("converter version matches the CLI cache's LOADER_VERSION for the same
   assertNotEquals(await converterVersion(edited), LOADER_VERSION);
 });
 
-Deno.test("what gets cached, and the quota reserve", () => {
+Deno.test("what gets cached, and what counts as out of room", () => {
   assert(worthCaching({ ggmlType: GGML_BF16, byteLength: 2 ** 20 }));
   assert(!worthCaching({ ggmlType: GGML_BF16, byteLength: 1024 }));     // small: converting is cheaper
   assert(!worthCaching({ ggmlType: GGML_F32, byteLength: 2 ** 30 }));   // plain copy, nothing saved
-  const GB = 2 ** 30;
-  assert(quotaAllows({ quota: 100 * GB, usage: 10 * GB }, GB));
-  assert(!quotaAllows({ quota: 100 * GB, usage: 80 * GB }, 10 * GB));   // would eat into the 15 GB reserve
-  assert(!quotaAllows({ quota: 4 * GB, usage: 2.5 * GB }, 0.6 * GB));   // small quota: 1 GB reserve
-  assert(!quotaAllows(null, 1));
-  assert(!quotaAllows({ quota: 0, usage: 0 }, 1));
+  assert(isQuotaError(new DOMException("The operation failed because it would cause the quota to be exceeded", "QuotaExceededError")));
+  assert(isQuotaError({ name: "Error", code: 22 }));
+  assert(isQuotaError({ name: "NS_ERROR_DOM_QUOTA_REACHED" }));
+  assert(!isQuotaError(new DOMException("no", "NotAllowedError")));
+  assert(!isQuotaError(null));
 });
 
 Deno.test("entry format: round trip for q8 / f32, rejects the wrong tensor, a short file and a bad payload", async () => {
@@ -186,40 +183,83 @@ Deno.test("a damaged entry is dropped and converted fresh; leftover temp files a
   assert(dir.children.has(entryFile(info.name)));           // rewritten
 });
 
-Deno.test("quota: no write near the limit, a quota error makes the cache read-only", async () => {
+Deno.test("quota: a reported quota below the write size still writes, persist() is asked once", async () => {
   const m = makeModel();
-  const info = m.G.tensors["token_embd.weight"];
-  const e = convertEntry(info, await m.bytesOf(info));
-
   const root = new FakeDir();
-  const full = await open(root, m.G, { estimate: async () => ({ quota: 4 * 2 ** 30, usage: 3.5 * 2 ** 30 }) });
-  await full.put(info, e);
-  assertEquals(full.stats.full, 1);
-  assertEquals(full.stats.write, 0);
-  assert(!full.readOnly);   // may still fit later tensors after something else is freed
+  let persists = 0, estimates = 0;
+  // a fresh origin in Chrome: estimate() reports far less than the disk has, and grows as the origin writes
+  const storage = {
+    getDirectory: async () => root,
+    estimate: async () => { estimates++; return { quota: 1024, usage: 512 }; },
+    persist: async () => { persists++; return false; },   // denied: the cache works the same
+  };
+  const fetchFn = async () => new Response(await Deno.readFile(new URL("../../engine/gguf.js", import.meta.url)));
+  const G = { ...m.G };
+  const c = await attachBrowserWeightCache(G, URL_PIN, { storage, srcUrl: "https://quota/engine/gguf.js", fetchFn });
+  assertEquals(persists, 0);                                // not before there is something to write
+  for (const n of Object.keys(m.G.tensors)) await ggufEntry(G, m.bytesOf, n, false);
+  await c.flush();
+  assertEquals(c.stats.write, 2);
+  assertEquals(c.stats.full, 0);
+  assertEquals(persists, 1);
+  assertEquals(estimates, 0);                               // no precheck against the estimate
+  assert(await c.get(m.G.tensors["token_embd.weight"]));
 
-  const root2 = new FakeDir();
-  const c = await open(root2, m.G);
-  root2.failWrites = true;
-  await c.put(info, e); await c.flush();
-  assert(c.readOnly);
-  assertEquals(c.stats.full, 1);
-  assertEquals([...c.dir.children.keys()].filter((n) => n.endsWith(".bin") || n.includes(".tmp-")), []);
-  root2.failWrites = false;
-  await c.put(info, e); await c.flush();                    // read-only for the rest of this load
-  assertEquals(c.stats.write, 0);
+  // persist() missing or throwing: still writes
+  const t = await open(new FakeDir(), m.G, { persist: async () => { throw new Error("no"); } });
+  const info = m.G.tensors["token_embd.weight"];
+  await t.put(info, convertEntry(info, await m.bytesOf(info))); await t.flush();
+  assertEquals(t.stats.write, 1);
+});
 
-  const noEst = await open(new FakeDir(), m.G, { estimate: null });
-  assert(noEst.readOnly);
-  const throws = await open(new FakeDir(), m.G, { estimate: async () => { throw new Error("no"); } });
-  await throws.put(info, e); await throws.flush();
-  assertEquals(throws.stats.write, 0);
+Deno.test("quota: a QuotaExceededError on write stops caching, leaves no partial entry, never throws", async () => {
+  const m = makeModel();
+  const info = m.G.tensors["token_embd.weight"], q8 = m.G.tensors["blk.0.ffn_down.weight"];
+  const e = convertEntry(info, await m.bytesOf(info)), eq = convertEntry(q8, await m.bytesOf(q8));
+  const warn = console.warn, warned = [];
+  console.warn = (...a) => warned.push(a.join(" "));
+  try {
+    for (const noMove of [false, true]) {   // with move() (temp name), and writing the real name directly
+      const orig = FakeFile.prototype.move;
+      if (noMove) FakeFile.prototype.move = undefined;
+      try {
+        const root = new FakeDir();
+        const c = await open(root, m.G);
+        root.failWrites = true;
+        await c.put(info, e); await c.flush();              // resolves: the load goes on converting
+        assert(c.readOnly);
+        assertEquals([c.stats.full, c.stats.write], [1, 0]);
+        assertEquals([...c.dir.children.keys()].filter((n) => n.endsWith(".bin") || n.includes(".tmp-")), []);
+        root.failWrites = false;
+        await c.put(q8, eq); await c.flush();               // read-only for the rest of this load
+        assertEquals([c.stats.full, c.stats.write], [2, 0]);
+        assertEquals(await c.get(info), null);
+        // the next load finds nothing to read back as valid, and caches again
+        const c2 = await open(root, m.G);
+        assertEquals(c2.have.size, 0);
+        await c2.put(info, e); await c2.flush();
+        assertEquals(c2.stats.write, 1);
+        assert(same(await c2.get(info), e));
+      } finally { FakeFile.prototype.move = orig; }
+    }
+    assertEquals(warned.filter((w) => /out of storage/.test(w)).length, 2);   // once per load
+    assert(/not caching the rest of this load/.test(warned[0]));
+  } finally { console.warn = warn; }
+
+  // any other write failure (no writable files here): read-only too, but not counted as full
+  const root3 = new FakeDir(), c3 = await open(root3, m.G);
+  const cw = FakeFile.prototype.createWritable;
+  FakeFile.prototype.createWritable = async () => { throw new DOMException("no", "NotAllowedError"); };
+  console.warn = () => {};
+  try { await c3.put(info, e); await c3.flush(); } finally { FakeFile.prototype.createWritable = cw; console.warn = warn; }
+  assert(c3.readOnly);
+  assertEquals([c3.stats.full, c3.stats.write], [0, 0]);
 });
 
 Deno.test("attach, size and clear", async () => {
   const m = makeModel();
   const root = new FakeDir();
-  const storage = { getDirectory: async () => root, estimate: async () => big() };
+  const storage = { getDirectory: async () => root };
   let fetches = 0;
   const fetchFn = async () => { fetches++; return new Response(await Deno.readFile(new URL("../../engine/gguf.js", import.meta.url))); };
   const G = { ...m.G, entryCache: "stale" };
