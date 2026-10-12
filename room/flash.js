@@ -131,6 +131,7 @@ export class FlashRoomEngine {
     this.device.queue.submit([enc.finish()]);
     this.core.pos = sl.pos;
     if (this.core.ngs) sl.ngs ? this.core.ngs.import(sl.ngs) : this.core.ngs.reset();
+    this.core.clearFailed?.();   // the whole sequence state is replaced: a step that failed part way left nothing behind
   }
   dropSlot(name) {
     const sl = this.slots.get(name);
@@ -178,6 +179,7 @@ export class FlashRoomEngine {
     parts.forEach((p, i) => { if (p.bytes) this.device.queue.writeBuffer(p.buf, 0, st.parts[i]); });
     this.core.pos = st.pos;
     if (ngs) this.core.ngs.import(ngs);
+    this.core.clearFailed?.();   // (as loadSlot)
   }
 }
 
@@ -278,6 +280,10 @@ export function qwen4expCore(e) {
       return out;
     },
     reset() { e.reset(); },
+    // a checkpoint restored (FlashRoomEngine loadSlot / importState) replaces every state a failed step may have left
+    // half advanced, as Qwen35Engine's do: the engine takes steps again. The expert store's region (a batched pass's)
+    // may hold a layer a failed pass never finished loading: forgotten, as reset() does
+    clearFailed() { e._failed = null; if (e.experts?.region) e.experts.region.layer = -1; },
     // the n-gram table's reader (open files, OPFS workers), when the loader gave it a close, and the expert store's
     // (expert offload: its disk reader's workers or threads, its RAM cache)
     close() { return Promise.all([e.ngram?.close?.(), e.experts?.close?.()]); },

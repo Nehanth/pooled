@@ -134,10 +134,10 @@ const offloadOn = (off) => !!off && off.expertBytes > 0 && (off.ram || []).some(
 export const DISK_RAM_MIN = 2 * 2 ** 30;
 const diskOn = (off) => offloadOn(off) && (off.disk || []).some(Boolean);
 // A disk-only device (off.diskOnly[i]: a browser tab with expert offload's OPFS tier, engine/expert_opfs.js; the page
-// sets meta.diskOnly): its GPU shares the computer's memory, so it never parks experts in "RAM" (that is the memory its
-// pledge already lends): every layer it offloads reads its experts from disk, and its RAM (meta.ramGB) pays only for
-// the spare and T1, which has no minimum there (the 3-tier simulator: an inclusive T1 under a bigger VRAM pool gains
-// under 3%, docs/bench-log.md 2026-10-11). It counts only in roomFit's disk pass, never as a device that parks. Which
+// sets meta.tabDisk, room/pledge.js tabDiskGB): its GPU shares the computer's memory, so it never parks experts in "RAM"
+// (that is the memory its pledge already lends): every layer it offloads reads its experts from disk, and its RAM
+// (meta.tabDisk.ramGB) pays only for the spare and T1, which has no minimum there (the 3-tier simulator: an inclusive
+// T1 under a bigger VRAM pool gains under 3%, docs/bench-log.md 2026-10-11). It counts only in roomFit's disk pass, never as a device that parks. Which
 // layers it offloads is chosen by tabDiskCost (the fewest m starve every pool: see offloadPlan), not the fewest.
 const diskOnlyAt = (off, i) => !!off?.diskOnly?.[i];
 // The pool's hit rate by the fraction of a layer's experts it caches: Qwen3.8-Flash-Next's recorded routing (decode,

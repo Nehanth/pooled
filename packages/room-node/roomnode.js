@@ -656,10 +656,13 @@ export class RoomNode extends EventEmitter {
         return;
       case "ping": this.sendTo(from, { t: "pong", ts: d.ts }); return;
       case "pong": if (e) { e.missed = 0; if (Number.isFinite(d.ts)) e.rtt = performance.now() - d.ts; } return;
-      case "pledge":
-        if (e) e.meta = { ...e.meta, contribGB: d.gb };
-        if (this.isHost && this.roster.has(from)) { this.roster.get(from).meta = { ...this.roster.get(from).meta, contribGB: d.gb }; this.broadcastRoster(); }
+      case "pledge": {
+        // tabDisk (a tab's disk tier, when the message has it: its user said yes or no; room/pledge.js tabDiskGB)
+        const upd = (meta) => { const m = { ...meta, contribGB: d.gb }; if ("tabDisk" in d) { if (d.tabDisk && typeof d.tabDisk === "object") m.tabDisk = d.tabDisk; else delete m.tabDisk; } return m; };
+        if (e) e.meta = upd(e.meta);
+        if (this.isHost && this.roster.has(from)) { this.roster.get(from).meta = upd(this.roster.get(from).meta); this.broadcastRoster(); }
         return;
+      }
     }
   }
 
@@ -757,6 +760,8 @@ export class RoomNode extends EventEmitter {
       case "ai-progress": this.emit("progress", { name: e?.name || from, pct: d.pct }); return;
       case "ai-error":
         this.log(`${e?.name || from} failed: ${d.message}`);
+        // a tab refused the disk layers it was dealt (nodisk): the next deal counts it without its disk tier
+        if (d.nodisk && e?.meta?.tabDisk) { const { tabDisk, ...m } = e.meta; e.meta = m; }
         if (this.hosting() && ai.chain.includes(from)) {
           this.failWaiters(new Error(`${e?.name || from}: ${d.message}`));
           if (d.load && ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${d.message})`));

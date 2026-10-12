@@ -11,12 +11,26 @@
 //   node packages/room-node/test/flash_tab_gold.mjs tabwait   the tab hosts and waits for EXT (1) devices from other
 //        machines (SIGNAL_HOST: this machine's LAN address; they run pooled join <code> --signal <host>:<PORT+2>)
 //   node packages/room-node/test/flash_tab_gold.mjs resident  the tab alone with TAB_GB=90 (no offload): the reference BITS
+//   node packages/room-node/test/flash_tab_gold.mjs tabjoin   the demo's "PC joins": the tab comes online alone, then a
+//        room node joins (NODE_*), the tab's host re-deals (its Re-deal button) and the room runs the cases. Reports the
+//        bytes the tab fetched from the model files for each of the two loads (netGiB.alone, netGiB.redeal): on a warm
+//        tab the re-deal reads the layers that became resident from the OPFS copy, not the network.
+//   node packages/room-node/test/flash_tab_gold.mjs ckpt      checkpoints with offload (?ckpt=CKPT, default 2): turn A
+//        (two-sum, CKPT_N ids), turn B (bash, another prompt: the caches no longer hold A), turn C (A's prompt and ids,
+//        CKPT_N more): with checkpoints C restores A's end state (loadSlot) and prefills one token; with CKPT=0 it
+//        prefills everything. A + C must be the golden ids, C must reuse A's checkpoint (CKPT=2) or none (CKPT=0), and C's BITS be the same for both.
+// Consent: the tab answers its disk question (p2p.html #disk-ask) the way TABDISK says: allow (default: it clicks
+// Allow, as the demo's user does once), no, or page (?tabdisk=1: no question). The profile remembers the answer.
+// Prerequisites: npm ci at the repo root and in packages/room-node (playwright-core, peerjs); a Chrome with WebGPU
+// (CHROME_BIN; on the Spark ~/.cache/ms-playwright/chromium-1148/chrome-linux/chrome); the model files; openssl. A
+// fresh PROFILE takes ~96 GB of disk for the copy (check df -h first; delete test profiles after).
 // env: MODELS (~/llm/models: <MODELS>/q38flash/<the three files>), WEIGHTS_URL (fetch the files from there instead),
 //      CASES (default two-sum,bash,eos-mid), TAB_GB, TAB_RAM
 //      (the tab's ?tabram=, 3), NODE_GB (8), NODE_RAM (24), NODE_DISK (1), OFFLOAD_DISCRETE (1: the node counts as a
 //      discrete GPU on the GB10's unified memory), PROFILE (Chrome profile with the OPFS copy; default
 //      ~/.cache/pooled-flashtab-profile), CHROME_BIN (default Playwright's Chromium), HEADLESS (1), MAXNEW (cap per
-//      case, default the golden's length), PORT (8261), OUT (result JSON), SPLIT (memory), QUERY (extra page params)
+//      case, default the golden's length), PORT (8261), OUT (result JSON), SPLIT (memory), QUERY (extra page params),
+//      TABDISK (allow | no | page), CKPT (the page's ?ckpt=: 0 here, 2 in mode ckpt), CKPT_N (16)
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
@@ -35,6 +49,7 @@ const MODELS = path.resolve(env("MODELS", path.join(os.homedir(), "llm/models"))
 const FLASH_DIR = fs.existsSync(path.join(MODELS, "q38flash")) ? path.join(MODELS, "q38flash") : MODELS;
 const TAB_GB = +env("TAB_GB", MODE === "resident" ? 90 : 12), TAB_RAM = env("TAB_RAM", "3");
 const PROFILE = env("PROFILE", path.join(os.homedir(), ".cache", "pooled-flashtab-profile"));
+const TABDISK = env("TABDISK", "allow"), CKPT = env("CKPT", MODE === "ckpt" ? "2" : "0");
 const T0 = Date.now();
 const log = (...a) => console.error(((Date.now() - T0) / 1000).toFixed(1) + "s", ...a);
 const gold = JSON.parse(fs.readFileSync(path.join(ROOT, "tests/golden/q38flash_llama_greedy.json"), "utf8"));
@@ -93,7 +108,7 @@ async function openTab() {
   page.on("crash", () => log("tab CRASHED"));
   page.on("pageerror", (e) => log("tab pageerror:", String(e).slice(0, 300)));
   page.on("console", (m) => { const t = m.text(); if (m.type() === "error" || /expert|OPFS|n-gram|offload|ingest|disk tier/i.test(t)) log("tab:", t.slice(0, 400)); });
-  await page.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=${SIGNAL}&peerweights=0&dev=1&ckpt=0&split=${env("SPLIT", "memory")}&ask=0&tabram=${TAB_RAM}${env("QUERY", "") ? "&" + env("QUERY", "") : ""}`);
+  await page.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=${SIGNAL}&peerweights=0&dev=1&ckpt=${CKPT}&split=${env("SPLIT", "memory")}&ask=0&tabram=${TAB_RAM}${TABDISK === "page" ? "&tabdisk=1" : ""}${env("QUERY", "") ? "&" + env("QUERY", "") : ""}`);
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   await page.waitForTimeout(1500);
   await page.fill("#name-input", "flash-tab"); await page.fill("#join-gb", String(TAB_GB));
@@ -113,34 +128,85 @@ try {
     await page.waitForFunction((n) => document.querySelectorAll(".peer-card").length >= n, want, { timeout: +env("JOIN_MS", 1800e3), polling: 1000 });
     await page.waitForTimeout(3000);
   }
-  if (MODE === "tabnode") {
+  const joinNode = async () => {
     const MEM = env("OFFLOAD_DISCRETE", "1") === "1" ? { kind: "discrete", name: "test", totalGB: 0, freeGB: 0 } : null;
     worker = await joinRoom(roomCode, { pledgeGB: +env("NODE_GB", 8), ramGB: +env("NODE_RAM", 24), expertDisk: env("NODE_DISK", "1") === "1", mem: MEM,
       name: "flash-node", signal: SIGNAL, modelDir: MODELS, log: (s) => log("[node] " + s) });
     await page.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 60000 });
     await page.waitForTimeout(1500);
-  }
+  };
+  if (MODE === "tabnode") await joinNode();
+  // the tab's disk question (p2p.html #disk-ask), answered as TABDISK says, while it waits for the room to come online
+  out.diskAsked = 0;
+  const answer = async () => {
+    if (TABDISK === "page") return;
+    try {
+      if (await page.isVisible("#disk-ask")) {
+        out.diskAsked++;
+        log("disk question:", (await page.textContent("#disk-ask-why")).slice(0, 200));
+        await page.click(TABDISK === "no" ? "#disk-ask-no" : "#disk-ask-allow");
+      }
+    } catch { /* the page is busy */ }
+  };
+  const waitOnline = async (what) => {
+    const t0 = Date.now();
+    let lastS = "";
+    const poll = setInterval(async () => { await answer(); try { const s = (await tabStatus()).status; if (s !== lastS) { lastS = s; log("status:", s.slice(0, 200)); } } catch {} }, 2000);
+    try {
+      await page.waitForFunction(() => document.getElementById("ai-panel").classList.contains("online") || /^failed:|didn't start/.test(document.getElementById("ai-status").textContent), null, { timeout: +env("ONLINE_MS", 4 * 3600e3), polling: 2000 });
+    } finally { clearInterval(poll); }
+    const st = await tabStatus();
+    log(`${what}: tab log:\n  ` + st.log.join("\n  "));
+    if (!/online/.test(st.status) || /^failed:|didn't start/.test(st.status)) throw new Error(`${what}: tab start ${st.status}`);
+    return { s: (Date.now() - t0) / 1000, st };
+  };
   await page.selectOption("#ai-model", "qwen3.8-flash");
-  const tStart = Date.now();
+  let served0 = served;
   await page.click("#ai-start");
-  let lastS = "";
-  const poll = setInterval(async () => { try { const s = (await tabStatus()).status; if (s !== lastS) { lastS = s; log("status:", s.slice(0, 200)); } } catch {} }, 5000);
-  try {
-    await page.waitForFunction(() => document.getElementById("ai-panel").classList.contains("online") || /^failed:/.test(document.getElementById("ai-status").textContent), null, { timeout: +env("ONLINE_MS", 4 * 3600e3), polling: 2000 });
-  } finally { clearInterval(poll); }
-  out.onlineS = (Date.now() - tStart) / 1000;
-  out.tab = await tabStatus();
-  log("tab log:\n  " + out.tab.log.join("\n  "));
-  if (/^failed:/.test(out.tab.status)) throw new Error("tab start " + out.tab.status);
+  const on1 = await waitOnline("start");
+  out.onlineS = on1.s;
+  out.tab = on1.st;
+  const gib = (b) => +(b / 2 ** 30).toFixed(2);
+  out.netGiB = { alone: gib(served - served0) };
   log(`online in ${out.onlineS.toFixed(0)} s; ${(served / 2 ** 30).toFixed(1)} GiB served from the model files`);
+  if (MODE === "tabjoin") {
+    // the demo's second device: it joins the running room, the host re-deals (its Re-deal button), and every layer that
+    // moves from the tab's disk to its GPU must come from the OPFS copy
+    await joinNode();
+    await page.waitForFunction(() => !document.getElementById("ai-redeal").hidden, null, { timeout: 120000, polling: 1000 });
+    log("redeal offered:", await page.textContent("#redeal-why"));
+    served0 = served;
+    const tR = Date.now();
+    await page.evaluate(() => document.getElementById("ai-redeal").click());
+    await page.waitForFunction(() => !document.getElementById("ai-panel").classList.contains("online"), null, { timeout: 60000 });
+    const on2 = await waitOnline("re-deal");
+    out.redealS = (Date.now() - tR) / 1000;
+    out.netGiB.redeal = gib(served - served0);
+    out.tabRedeal = on2.st;
+    log(`re-dealt in ${out.redealS.toFixed(0)} s; the tab fetched ${out.netGiB.redeal} GiB from the model files (alone: ${out.netGiB.alone} GiB)`);
+  }
+  const fx = (v, d = 2) => (Number.isFinite(v) ? +v.toFixed(d) : null);
+  const gen = async (ids, n) => { const r = await page.evaluate(([ids, n]) => window.__pooledGen(ids, n), [ids, n]); log(`raw ${JSON.stringify({ ...r, tokens: r.tokens?.length, summary: undefined })}`); return r; };
   let fail = 0;
-  for (const name of CASES) {
+  if (MODE === "ckpt") {
+    // A, B, C (see the header): C restores A's end state with checkpoints on
+    const N = +env("CKPT_N", 16), A = gold["two-sum"], B = gold.bash;
+    const ra = await gen(A.prompt, N), rb = await gen(B.prompt, Math.min(8, B.ids.length));
+    // (A's end checkpoint holds its prompt and all N ids: C's prompt is one golden id longer, as a follow-up is, so the
+    // checkpoint is a strict prefix of it and only that id is prefilled)
+    const rc = await gen([...A.prompt, ...ra.tokens, A.ids[N]], N);
+    const both = [...ra.tokens, A.ids[N], ...rc.tokens], want = A.ids.slice(0, both.length);
+    const diff = both.findIndex((x, i) => x !== want[i]);
+    const restored = CKPT === "0" ? rc.reused === 0 : rc.reused === A.prompt.length + N;
+    const verdict = diff < 0 && both.length === 2 * N + 1 && restored ? "MATCH" : "MISMATCH";
+    if (verdict !== "MATCH") fail++;
+    out.cases.ckpt = { verdict, ckpt: CKPT, n: both.length, diff, reusedC: rc.reused, bitsA: ra.bits, bitsB: rb.bits, bitsC: rc.bits, prefillC: fx(rc.tPre / 1000, 1), tps: fx(rc.tps) };
+    log(`ckpt=${CKPT}: A+C ${verdict}${diff >= 0 ? ` at ${diff}` : ""} · C reused ${rc.reused} of ${A.prompt.length + N + 1} prompt ids · bits A ${ra.bits} B ${rb.bits} C ${rc.bits} · C's prefill ${fx(rc.tPre / 1000, 1)} s`);
+  } else for (const name of CASES) {
     const g = gold[name];
     if (!g) throw new Error("no golden case " + name);
     const n = Math.min(g.ids.length, +env("MAXNEW", g.ids.length)), t = Date.now();
-    const r = await page.evaluate(([ids, n]) => window.__pooledGen(ids, n), [g.prompt, n]);
-    log(`${name}: raw ${JSON.stringify({ ...r, tokens: r.tokens?.length, summary: undefined })}`);
-    const fx = (v, d = 2) => (Number.isFinite(v) ? +v.toFixed(d) : null);
+    const r = await gen(g.prompt, n);
     const ids = r.tokens;
     let diff = ids.findIndex((x, i) => i < n && x !== g.ids[i]);
     if (diff < 0 && ids.length < n) diff = ids.length;

@@ -1,16 +1,16 @@
 // Qwen3.8-Flash-Next with expert offload in the room's deal (room/plan.js; room/models.js flashOffload; room/pledge.js
-// offloadFor diskOnly; room/flashdisk.js tabOffloadLayers): a browser tab with the OPFS disk tier (meta.diskOnly) never
+// offloadFor diskOnly; room/flashdisk.js tabOffloadLayers): a browser tab with the OPFS disk tier (meta.tabDisk) never
 // parks experts and reads every layer it offloads from disk, with the layers it offloads chosen by tabDiskCost; Flash's
 // store has no whole-layer region; every pledge and every RAM promise holds.
 import { dealRoom, roomFit, offloadPlan, poolHitRate, tabDiskCost, OFFLOAD_MIN_SLOTS } from "../../room/plan.js";
 import { roomBytes, ngramOf, SHAPE, flashOffload, FLASH_CKPT_TOKENS } from "../../room/models.js";
-import { offloadFor, ngramFor, pledgeGB, ramGB } from "../../room/pledge.js";
-import { tabOffloadLayers } from "../../room/flashdisk.js";
+import { offloadFor, ngramFor, pledgeGB, ramGB, tabDiskGB } from "../../room/pledge.js";
+import { tabOffloadLayers, tabDiskChoice, saveTabDiskChoice, tabDiskMeta, tabDiskGate, tabRamCap, TAB_DISK_KEY } from "../../room/flashdisk.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 const GB = 2 ** 30, F = "qwen3.8-flash", M35 = "qwen3.6-35b-moe", M122 = "qwen3.5-122b-moe";
-const tab = (gb, ram = 3) => ({ webgpu: true, contribGB: gb, offload: true, diskOnly: true, ramGB: ram, disk: true, local: [F] });
+const tab = (gb, ram = 3, ask = false) => ({ webgpu: true, contribGB: gb, tabDisk: { ramGB: ram, models: [F], ...(ask ? { ask: true } : {}) } });
 const plainTab = (gb) => ({ webgpu: true, contribGB: gb });
 const pc = (gb, ram, disk = false, local = [F, M35, M122]) => ({ webgpu: true, contribGB: gb, offload: true, ramGB: ram, ...(disk ? { disk: true, local } : {}) });
 function deal(model, metas, ctx = 2048) {
@@ -71,7 +71,9 @@ Deno.test("flash: a tab with the disk tier never parks, and counts only for Flas
   }
   // a short Flash room without any disk tier stays short
   ok(!deal(F, [plainTab(22)]).d.fit.fits);
-  eq(ramGB(tab(22, 3)), 3);
+  eq(tabDiskGB(tab(22, 3), F), 3);
+  eq(ramGB(tab(22, 3)), 0, "a tab never offers RAM to park experts in (meta.offload / ramGB stay unset)");
+  eq(tabDiskGB(tab(22, 3), M35), 0, "nor a disk tier for another model");
   eq(offloadFor([tab(22), pc(10, 24)], 1e9, F).diskOnly, [true, false]);
   eq(offloadFor([plainTab(22), pc(10, 24)], 1e9, F).diskOnly, undefined, "no disk-only device: no field");
 });
@@ -106,4 +108,64 @@ Deno.test("flash: a small tab pledge (12 GB, the Spark gate) still holds every l
   // and roomFit agrees with the deal
   const rb = roomBytes(F, 2048);
   ok(roomFit(rb.L, [12 * GB], rb.layerBytes, rb.hostBytes, offloadFor([tab(12)], rb.experts, F)).fits);
+});
+
+Deno.test("flash: the tab's disk tier is its own meta field, which a host from before it ignores", () => {
+  // a released host (@pooled/cli 0.4.1) reads meta.offload / meta.ramGB: the tab sets neither, so it never deals a tab
+  // an offload (as with a plain tab)
+  const t = tab(12);
+  ok(!t.offload && t.ramGB == null && !t.diskOnly && !t.disk && !t.local, JSON.stringify(t));
+  // a tab whose user was not asked yet counts as one with the tier (it asks when the deal arrives)
+  const a = deal(F, [tab(22, 3, true)]).d, b = deal(F, [tab(22, 3)]).d;
+  eq(a, b, "ask: true deals as a yes would");
+  ok(a.offload[0]?.diskOnly);
+  // non-Flash models: the deal is the plain tab's, field for field (the reviewer's fuzz, scratchpad rv368_fuzz.mjs)
+  for (const model of [M35, M122, "qwen3-1.7b", "qwen3.8-27b"]) for (const ctx of [2048, 32768])
+    eq(deal(model, [tab(12), pc(8, 24, true)], ctx).d, deal(model, [plainTab(12), pc(8, 24, true)], ctx).d, `${model} @ ${ctx}`);
+});
+
+// ---------------------------------------------------------------- consent
+
+const store = (init = {}) => { const m = new Map(Object.entries(init)); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k), m }; };
+
+Deno.test("tab disk consent: the answer is remembered per origin, ?tabdisk= answers for one page", () => {
+  const st = store();
+  eq(tabDiskChoice({ storage: st }), null, "not asked yet");
+  saveTabDiskChoice("allow", st);
+  eq(st.m.get(TAB_DISK_KEY), "allow");
+  eq(tabDiskChoice({ storage: st }), "allow");
+  eq(tabDiskChoice({ search: "?tabdisk=0", storage: st }), "deny", "the page's answer wins");
+  saveTabDiskChoice("deny", st);
+  eq(tabDiskChoice({ storage: st }), "deny");
+  eq(tabDiskChoice({ search: "?tabdisk=1", storage: st }), "allow");
+  saveTabDiskChoice(null, st);
+  eq(tabDiskChoice({ storage: st }), null);
+  eq(tabDiskChoice({ storage: { getItem() { throw new Error("private mode"); } } }), null, "no storage: not asked");
+});
+
+Deno.test("tab disk consent: a tab advertises the tier only as its user answered (ask until then, nothing after a no)", () => {
+  const mac = { webgpu: true, phone: false };
+  eq(tabDiskMeta(mac, { opfs: true }), { ramGB: 3, models: [F], ask: true });
+  eq(tabDiskMeta(mac, { opfs: true, choice: "allow" }), { ramGB: 3, models: [F] });
+  eq(tabDiskMeta(mac, { opfs: true, choice: "deny" }), null);
+  eq(tabDiskMeta(mac, { opfs: false, choice: "allow" }), null, "no OPFS");
+  eq(tabDiskMeta({ webgpu: true, phone: true }, { opfs: true, choice: "allow" }), null, "phones never");
+  eq(tabDiskMeta(mac, { opfs: true, choice: "allow", search: "?tabram=0" }), null, "?tabram=0 turns it off");
+  // ?tabram is held to what the device can spare
+  eq(tabDiskMeta(mac, { opfs: true, choice: "allow", search: "?tabram=40" }).ramGB, 16);
+  eq(tabDiskMeta(mac, { opfs: true, choice: "allow", search: "?tabram=6", deviceMemory: 4 }).ramGB, 2, "half of a 4 GB device");
+  eq(tabRamCap(8), 16, "deviceMemory 8 means 8 or more");
+});
+
+Deno.test("tab disk consent: the receiving side refuses an offload it did not offer or its user turned down", () => {
+  const off = { lo: 0, hi: 48, diskLo: 0, vramBytes: 6 * GB, ramBytes: 0, diskRamBytes: GB, ramSpare: 1.6 * GB };
+  const offered = tabDiskMeta({ webgpu: true }, { opfs: true, choice: "allow" });
+  eq(tabDiskGate(null, { model: F }), null, "no offload: nothing to refuse");
+  eq(tabDiskGate(off, { model: F, tabDisk: offered, choice: "allow" }), null, "offered and allowed: go");
+  eq(tabDiskGate(off, { model: F, tabDisk: { ...offered, ask: true }, choice: null }), "ask", "not asked yet: ask");
+  ok(/did not offer its disk/.test(tabDiskGate(off, { model: F, tabDisk: null, choice: null })), "?tabdisk=0 / a plain tab");
+  ok(/did not offer its disk/.test(tabDiskGate(off, { model: F, tabDisk: null, choice: "allow" })), "allowed but not offered (?tabram=0)");
+  ok(/did not allow/.test(tabDiskGate(off, { model: F, tabDisk: offered, choice: "deny" })));
+  ok(/did not offer its disk for qwen3.6-35b-moe/.test(tabDiskGate(off, { model: M35, tabDisk: offered, choice: "allow" })), "another model");
+  ok(/RAM for the disk tier/.test(tabDiskGate({ ...off, diskRamBytes: 8 * GB }, { model: F, tabDisk: offered, choice: "allow" })), "more RAM than it offered");
 });

@@ -6,6 +6,7 @@
 // (engine/qwen4exp.js, imported when needed: it reads the WebGPU globals as it loads) behind the room adapter
 // (room/flash.js), and the device holding the n-gram layer reads that table's rows from the model file.
 import fs from "node:fs";
+import os from "node:os";
 import { autotuneCoop, makeTokenizer, DenseEngine, gpuSelfTest, kernelMicroTests } from "../../engine/engine.js";
 import { Qwen35Engine } from "../../engine/qwen35.js";
 import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizerFromGGUF, gpuUploadEntry, GGML_EMBED, GGML_FINAL_NORM, GGML_OUTPUT,
@@ -230,15 +231,21 @@ export const flashCpuBytes = (G, { hasEmbed = false, hasHead = false } = {}) => 
 
 // Before a qwen4exp load: does this device have the memory for its share? On unified memory (a GB10, Apple silicon)
 // an allocation past what is free does not fail in WebGPU: the OS kills the process or swaps, so say it up front.
-// bytes: flashShardBytes; cpuBytes: the part of it in RAM (flashCpuBytes), not counted against a discrete GPU.
+// bytes: everything the share takes (flashShardBytes, plus with expert offload the store's GPU cache and what it parks
+// in RAM); cpuBytes: the part of it in RAM (flashCpuBytes, the parked experts, the disk tier's RAM cache), not counted
+// against a discrete GPU but against the system's RAM there (sysFreeGB: os.freemem(), when known).
 // mem: env.js hostMemory() (detectMemory). -> null when it fits (or nothing is known), else the reason
-export function flashMemoryShort(bytes, mem, { slackGB = 2, cpuBytes = 0 } = {}) {
+export function flashMemoryShort(bytes, mem, { slackGB = 2, cpuBytes = 0, sysFreeGB = null } = {}) {
   const gb = (n) => (n / 2 ** 30).toFixed(1);
   if (mem?.kind === "unified") {
     const free = mem.availGB ?? mem.freeGB;
     if (free > 0 && bytes / 2 ** 30 > free - slackGB) return `needs ${gb(bytes)} GB and this computer has ${free.toFixed(1)} GB of unified memory free (${slackGB} GB kept for the system)`;
-  } else if (mem?.kind === "discrete" && mem.freeGB > 0 && (bytes - cpuBytes) / 2 ** 30 > mem.freeGB - 0.5)
-    return `needs ${gb(bytes - cpuBytes)} GB of GPU memory and ${mem.name || "the GPU"} has ${mem.freeGB.toFixed(1)} GB free`;
+  } else if (mem?.kind === "discrete") {
+    if (mem.freeGB > 0 && (bytes - cpuBytes) / 2 ** 30 > mem.freeGB - 0.5)
+      return `needs ${gb(bytes - cpuBytes)} GB of GPU memory and ${mem.name || "the GPU"} has ${mem.freeGB.toFixed(1)} GB free`;
+    if (sysFreeGB > 0 && cpuBytes / 2 ** 30 > sysFreeGB - slackGB)
+      return `needs ${gb(cpuBytes)} GB of system RAM (the embedding, the parked experts, the disk tier's cache) and this computer has ${sysFreeGB.toFixed(1)} GB free (${slackGB} GB kept for the system)`;
+  }
   return null;
 }
 
@@ -287,12 +294,12 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: false };
   const off = offload && offloadLayers(offload, range), dl = diskLayers(offload, off);
   const m = mem || hostMemory();
-  // the GPU holds the layers less their offloaded experts, plus the store's cache; on unified memory the parked experts
-  // and the disk tier's RAM cache take the same memory
-  let need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null }) + (off ? +offload.vramBytes || 0 : 0);
-  const cpu = flashCpuBytes(G, opts) + (off && m?.kind === "unified" ? (+offload.ramBytes || 0) + (dl.length ? +offload.diskRamBytes || 0 : 0) : 0);
-  if (m?.kind === "unified") need += cpu - flashCpuBytes(G, opts);
-  const short = flashMemoryShort(need, m, { cpuBytes: cpu });
+  // the GPU holds the layers less their offloaded experts, plus the store's cache; the parked experts and the disk tier's
+  // RAM cache are in RAM: on unified memory the same memory, on a discrete GPU the system's (checked against it too)
+  const ramOff = off ? (+offload.ramBytes || 0) + (dl.length ? +offload.diskRamBytes || 0 : 0) : 0;
+  const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null }) + (off ? +offload.vramBytes || 0 : 0) + ramOff;
+  const cpu = flashCpuBytes(G, opts) + ramOff;
+  const short = flashMemoryShort(need, m, { cpuBytes: cpu, sysFreeGB: m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null });
   if (short) throw Object.assign(new Error(`can't hold layers ${range[0]}-${range[1] - 1} of Qwen3.8-Flash-Next here: it ${short}`), { oom: true, short: true });
   if (off?.length) {
     let disk = null;

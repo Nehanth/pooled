@@ -86,6 +86,11 @@ test("qwen4exp flashShardBytes / flashMemoryShort: a device short of memory is t
   assert.equal(flashMemoryShort(half, fits, { cpuBytes: cpu }), null);
   assert.ok(flashMemoryShort(half, fits), "without cpuBytes it counts all of it");
   assert.equal(flashMemoryShort(half, { kind: "unknown" }), null, "nothing known: the load's out-of-memory scope decides");
+  // a discrete GPU with expert offload: what it parks (and the disk tier's RAM cache) counts against the system's RAM
+  const parked = 30 * 2 ** 30, gpuPart = 8 * 2 ** 30, rtx = { kind: "discrete", name: "RTX 5070", freeGB: 11.5 };
+  assert.equal(flashMemoryShort(gpuPart + parked, rtx, { cpuBytes: parked, sysFreeGB: 40 }), null, "30 GB parked in 40 GB of free RAM");
+  assert.match(flashMemoryShort(gpuPart + parked, rtx, { cpuBytes: parked, sysFreeGB: 24 }), /needs 30\.0 GB of system RAM .* 24\.0 GB free/);
+  assert.equal(flashMemoryShort(gpuPart + parked, rtx, { cpuBytes: parked }), null, "system RAM not known: unchecked");
   assert.equal(flashMemoryShort(half, { kind: "unified", totalGB: 36 }), null, "a Mac (no free figure): unchecked");
 });
 

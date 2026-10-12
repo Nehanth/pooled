@@ -468,6 +468,9 @@ export class OpfsExpertReader {
       }, (err) => js.forEach(([r]) => r.reject(err)));
     });
   }
+  // one expert's whole record (its six slices at layout.layers[layer].offs; room/flashdisk.js reads a resident layer's
+  // experts this way, every part from one read) -> Promise<Uint8Array>
+  record(layer, e) { return this._record(layer, e); }
   // ExpertStore's reader interface: expert e of a stacked tensor -> { qs, sc } in the engine's layout
   async readPart(info, e) {
     const { layer, part } = expertPartOf(info), L = this.layout.layers[layer];

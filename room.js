@@ -4,6 +4,7 @@
 // part of the join screen's module graph: loadEngine() imports it when this device enters a room,
 // and aiLoadShard waits for it. The join screen works as soon as the lobby modules below are in.
 import { createModelLoader } from "./room/model-loader.js";
+import { tabDiskChoice, saveTabDiskChoice, tabDiskMeta, tabExpertBytes, flashDiskBytes, removeFlashCopy, TAB_DISK_MODELS } from "./room/flashdisk.js";
 import { createPipeline } from "./room/pipeline.js";
 import { createGenerator } from "./engine/generate.js";
 import { argmax } from "./engine/sampling.js";
@@ -264,6 +265,9 @@ const SMALLEST_NEED = Math.min(...PICKER.map((k) => NEED_MIN_GB[k] ?? NEED_GB[k]
 // (typed, stepped or filled in while the probe ran: it takes up to ~0.5 s with the copy timing)
 let joinGbChosen = false;
 for (const [id, ev] of [["join-gb", "input"], ["gb-minus", "click"], ["gb-plus", "click"]]) $(id).addEventListener(ev, () => { joinGbChosen = true; });
+// (this tab's disk tier, below setTabDisk: whether it can have one; a worker's question left unanswered, after which
+// this page offers no disk until its user answers in Room settings)
+let tabDiskCan = false, tabDiskDeclined = false;
 const metaPromise = (async () => {
   const m = await probeGPU();
   if (m.webgpu && m.budgetGB) m.contribGB = Math.max(0.2, Math.round(m.budgetGB * 0.5 * 10) / 10);
@@ -282,19 +286,68 @@ const metaPromise = (async () => {
   // run the 1.7B alone (half of maxBufferSize is 2 GB on a typical laptop, and 2 GB runs nothing)
   else if (m.contribGB) m.contribGB = Math.max(1, Math.round(m.contribGB), Math.min(SMALLEST_NEED, Math.floor(m.budgetGB)));
   if (m.contribGB && !joinGbChosen) $("join-gb").value = m.contribGB;
-  Object.assign(m, tabDiskMeta(m));
+  tabDiskCan = !!(m.webgpu && !m.phone && navigator.storage?.getDirectory);
+  setTabDisk(m);
   return m;
 })();
-// Expert offload's disk tier in this tab (room/flashdisk.js; room/pledge.js offloadFor diskOnly): a computer's tab with
-// WebGPU and OPFS can hold Qwen3.8-Flash-Next layers past its pledge with their experts on its disk, read when a token
-// picks them. It never parks experts in RAM (on a Mac the GPU's memory is the RAM its pledge lends), so ramGB is only
-// what the disk tier's spare and RAM cache take: ?tabram=G (default TAB_RAM_GB; 0 turns the tier off, as ?tabdisk=0).
-// Phones never: their tabs die long before a model this size.
-const TAB_RAM_GB = 3, TAB_DISK_MODELS = ["qwen3.8-flash"];
-function tabDiskMeta(m) {
-  const q = new URLSearchParams(location.search), ram = q.has("tabram") ? +q.get("tabram") : TAB_RAM_GB;
-  if (!m.webgpu || m.phone || q.get("tabdisk") === "0" || !(ram > 0) || !navigator.storage?.getDirectory) return {};
-  return { offload: true, diskOnly: true, ramGB: ram, disk: true, local: TAB_DISK_MODELS.slice() };
+// Expert offload's disk tier in this tab (room/flashdisk.js; room/pledge.js tabDiskGB): a computer's tab with WebGPU and
+// OPFS can hold Qwen3.8-Flash-Next layers past its pledge with their experts on its disk, read when a token picks them,
+// and the n-gram table there too. Nothing is written until this tab's user says yes: the host asks when it starts
+// Flash (aiStart), a worker when a deal gives it disk layers (the loader's askDisk); the answer is remembered for this
+// site (localStorage) and changed in Room settings, where "Free disk space" deletes the copy. meta.tabDisk says what
+// the room may deal it: { ramGB, models, ask } until its user answers, without ask after a yes, nothing after a no.
+// ?tabram=G: the RAM its spare and RAM cache take (default 3, held to what the device can spare; 0 turns the tier
+// off); ?tabdisk=1 / ?tabdisk=0 answer for this page load only (tests).
+const tabDiskNow = () => tabDiskChoice({ search: location.search, storage: globalThis.localStorage });
+function setTabDisk(m = myMeta) {
+  const choice = tabDiskNow();
+  const t = tabDiskCan && !(tabDiskDeclined && choice !== "allow") ? tabDiskMeta(m, { search: location.search, choice, opfs: true, deviceMemory: navigator.deviceMemory }) : null;
+  if (t) m.tabDisk = t; else delete m.tabDisk;
+  return t;
+}
+// tell the room this tab's disk tier changed (the pledge message carries it: room/pledge.js tabDiskGB reads it)
+function tabDiskChanged() {
+  setTabDisk();
+  renderTabDisk();
+  if (myMeta.webgpu) broadcastAll({ t: "pledge", gb: myMeta.contribGB, tabDisk: myMeta.tabDisk || null });
+}
+// a peer's tabDisk from a pledge message: only the fields room/pledge.js reads, typed
+function cleanTabDisk(t) {
+  if (!t || typeof t !== "object") return undefined;
+  const models = Array.isArray(t.models) ? t.models.filter((x) => typeof x === "string").slice(0, 8) : [];
+  return +t.ramGB > 0 && models.length ? { ramGB: Math.min(64, +t.ramGB), models, ...(t.ask ? { ask: true } : {}) } : undefined;
+}
+// The question itself (p2p.html #disk-ask): "This model streams from your disk: it will store up to N GB in this
+// browser." Allow / No; the answer is remembered for this site. host: this device starts the model; else the room's
+// host asks for this device's disk. Unanswered for DISK_ASK_MS: no (for this deal only, not remembered).
+// -> Promise<boolean>
+const DISK_ASK_MS = 120e3;
+let diskAsking = null;
+function askTabDisk({ bytes, model, host = false }) {
+  if (diskAsking) return diskAsking;
+  const M = MODELS[model];
+  $("disk-ask-h").textContent = `${M?.label.split("\u00b7")[0].trim() || "This model"} streams from your disk`;
+  $("disk-ask-why").textContent = `It will store up to ${fmtBytes(bytes)} in this browser${host ? "" : ", for the room's host"}, so it can run more than this device's memory holds. `
+    + "It stays for next time; Room settings can free it.";
+  $("disk-ask").hidden = false;
+  $("disk-ask-allow").focus({ preventScroll: true });
+  diskAsking = new Promise((resolve) => {
+    const done = (v, remember) => {
+      clearTimeout(timer);
+      $("disk-ask-allow").onclick = $("disk-ask-no").onclick = null;
+      $("disk-ask").hidden = true;
+      diskAsking = null;
+      if (remember) saveTabDiskChoice(v ? "allow" : "deny", globalThis.localStorage);
+      else if (!v) tabDiskDeclined = true;
+      tabDiskChanged();
+      log("room", v ? `${myName} lets models use ${fmtBytes(bytes)} of its disk` : `${myName} keeps models off its disk${remember ? "" : " (no answer)"}`);
+      resolve(v);
+    };
+    const timer = setTimeout(() => done(false, false), DISK_ASK_MS);
+    $("disk-ask-allow").onclick = () => done(true, true);
+    $("disk-ask-no").onclick = () => done(false, true);
+  });
+  return diskAsking;
 }
 
 // --- UI helpers ---
@@ -1278,12 +1331,20 @@ function onData(from, d) {
       if (e.card) e.card.querySelector(".rtt").textContent = e.rtt + " ms";
       break;
     }
-    case "pledge":
-      if (e) { e.meta = { ...e.meta, contribGB: d.gb }; if (e.card) setLends(e.card, d.gb); }
-      if (members.has(from)) members.get(from).meta = { ...members.get(from).meta, contribGB: d.gb };
-      if (isHost && roster.has(from)) { roster.get(from).meta = { ...roster.get(from).meta, contribGB: d.gb }; broadcastRoster(); }
+    case "pledge": {
+      // tabDisk (when the message has it): the device's disk tier changed (its user said yes or no: room/pledge.js tabDiskGB)
+      const upd = (meta) => {
+        const m = { ...meta, contribGB: d.gb };
+        if ("tabDisk" in d) { const t = cleanTabDisk(d.tabDisk); if (t) m.tabDisk = t; else delete m.tabDisk; }
+        return m;
+      };
+      if (e) { e.meta = upd(e.meta); if (e.card) setLends(e.card, d.gb); }
+      if (members.has(from)) members.get(from).meta = upd(members.get(from).meta);
+      if (isHost && roster.has(from)) { roster.get(from).meta = upd(roster.get(from).meta); broadcastRoster(); }
+      if ("tabDisk" in d && cleanTabDisk(d.tabDisk) && !cleanTabDisk(d.tabDisk).ask) ai.noDisk?.delete(e?.name || from);   // it said yes after all
       updateCluster();
       break;
+    }
     case "bw-start": bwRecv.set(from, { bytes: 0, t0: performance.now() }); break;
     case "bw-end": {
       const st = bwRecv.get(from);
@@ -2687,7 +2748,11 @@ const modelLoader = createModelLoader({
   state: ai, rangeFetch, getWeightCache, getMeta: () => myMeta,
   options: modelLoadOptions(location.search), getEnginePreset: () => roomQwen35Options(location.search),
   hooks: { onStatus: aiStatus, crumb, onModelLoaded: apiModelLoaded,
-    onCacheHit(msg) { log("room", `${myName}: ${msg}`); } },
+    onCacheHit(msg) { log("room", `${myName}: ${msg}`); },
+    // this tab's disk (room/flashdisk.js tabDiskGate): what it offers and its user's answer; a worker asks when a deal
+    // needs its disk and its user was not asked yet
+    tabDisk: () => ({ tabDisk: myMeta.tabDisk || null, choice: tabDiskDeclined && tabDiskNow() !== "allow" ? "deny" : tabDiskNow() }),
+    askDisk: ({ model, bytes }) => askTabDisk({ model, bytes, host: ai.role === "host" }) },
 });
 const { fetchModelHeader, fetchGGUFHeader } = modelLoader;
 
@@ -3068,13 +3133,15 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
     if (hasEmbed || hasHead) { ai.tok = makeTokenizer(await (await fetch(M.tok)).json()); apiModelLoaded(); }
   }
 
-  const onProg = (done, total) => {
+  // line: what the bytes are, when the loader says (the experts' copy to this device's disk: room/flashdisk.js), so the
+  // status keeps saying that instead of flipping to "downloading" on every progress tick
+  const onProg = (done, total, line = null) => {
     aiProgress(done, total);
     // name where the bytes are coming from right now: the network, devices in the room, or this device's cache
     const gb = (b) => (b / 2 ** 30).toFixed(1) + " GB";
-    aiStatus(ai.netBytes ? `downloading weights\u2026${cacheHits ? ` (${gb(cacheHits)} was already on this device)` : ""}`
+    aiStatus(line || (ai.netBytes ? `downloading weights\u2026${cacheHits ? ` (${gb(cacheHits)} was already on this device)` : ""}`
       : ai.peerBytes ? `getting weights from devices in the room\u2026`
-      : cacheHits ? `loading weights from this device's cache\u2026` : `downloading weights\u2026`);
+      : cacheHits ? `loading weights from this device's cache\u2026` : `downloading weights\u2026`));
     ai.myPct = total ? done / total * 100 : 0;
     ai.shardBytes = total;   // the lending screen shows how much this device holds
     ai.prog = ai.prog || {}; ai.progAt = ai.progAt || {};
@@ -3181,6 +3248,13 @@ function startRefused(why) {
   aiStatus("the model didn't start: " + why);
 }
 // why a start stops when the room's pledges cannot hold the model (room/plan.js shortNote)
+// What a deal stores on the host tab's disk (its offloaded layers' experts in OPFS, the n-gram table when it holds that
+// layer), bytes: the number its question shows
+function hostDiskBytes(deal, modelKey) {
+  if (!TAB_DISK_MODELS.includes(modelKey) || !ai.G) return 0;
+  const o = deal.offload?.[0], layers = o && Number.isInteger(o.diskLo) ? Array.from({ length: o.hi - o.diskLo }, (_, i) => o.diskLo + i) : [];
+  return (layers.length ? tabExpertBytes(ai.G, layers) : 0) + (deal.ngram?.at === 0 ? deal.ngram.bytes : 0);
+}
 function shortWhy(M, fit, names, metas) {
   return shortNote(M.label.split("\u00b7")[0].trim(), fit, names, metas.map(spareGBOf));
 }
@@ -3282,13 +3356,36 @@ async function aiStart(modelArg) {
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
     // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); a tab only with the OPFS disk
-    // tier (tabDiskMeta: Qwen3.8-Flash-Next), its offloaded layers' experts read from its disk.
+    // tier (meta.tabDisk: Qwen3.8-Flash-Next, once its user says yes), its offloaded layers' experts read from its disk.
     // With the model key a node started with --disk that has this model's files (room/pledge.js diskFor) may also
     // leave some layers' experts on disk when parking can't hold the model
-    const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], experts, modelKey);
-    // the model's default context, or its fallback when only that fits these pledges (room/models.js
-    // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
-    const pick = pickCtx(modelKey, { want: ROOM_CTX, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes, off).fits });
+    // (a tab that refused the disk layers it was dealt, ai.noDisk, counts without its disk tier until it says yes)
+    const metasNow = () => [myMeta, ...ai.chain.map((id) => { const m = conns.get(id)?.meta; return m?.tabDisk && ai.noDisk?.has(nameOf(id)) ? { ...m, tabDisk: undefined } : m; })];
+    const wantCtx = ROOM_CTX;
+    const planNow = () => {
+      const metas = metasNow(), off = offloadFor(metas, experts, modelKey);
+      // the model's default context, or its fallback when only that fits these pledges (room/models.js
+      // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
+      const pick = pickCtx(modelKey, { want: wantCtx, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes, off).fits });
+      const lb = layerAt(pick.ctx);
+      // fastest devices first (measured ms per layer from earlier answers), fewest hops, or by memory;
+      // either way devices that are not needed (phones while the computers hold the model) and devices
+      // whose pledge is under one layer stay in the room as ask-only guests (room/plan.js dealRoom)
+      const deal = dealRoom({ L, layerBytes: lb, hostBytes: embedBytes, pledges, mode: $("ai-split").value === "speed" ? "speed" : "memory",
+        ms: [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
+        phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS, off,
+        // Qwen3.8-Flash-Next: the device dealt the n-gram layer must have its table on disk (null for every other model)
+        ngram: ngramFor(metas, ngramOf(modelKey)) });
+      return { pick, deal };
+    };
+    let { pick, deal } = planNow();
+    // This tab's own disk (room/flashdisk.js): when the deal stores anything on it (offloaded layers' experts, the n-gram
+    // table) and its user was not asked yet, ask once now (remembered); on a no, deal again without it
+    const myDisk = deal.fit.fits && myMeta.tabDisk?.ask ? hostDiskBytes(deal, modelKey) : 0;
+    if (myDisk > 0) {
+      aiStatus("waiting for this device's answer: may the model use its disk?");
+      if (!(await askTabDisk({ model: modelKey, bytes: myDisk, host: true }))) ({ pick, deal } = planNow());
+    }
     ROOM_CTX = pick.ctx;
     layerBytes = layerAt(ROOM_CTX);
     ai.ctxWant = pick.fellBack ? pick.want : 0;
@@ -3296,14 +3393,6 @@ async function aiStart(modelArg) {
     ai.ctxK = ctxK(pick.ctx);
     if (ai.ctxNote) log("room", ai.ctxNote);
     ai.layerGB = layerBytes / 2 ** 30;
-    // fastest devices first (measured ms per layer from earlier answers), fewest hops, or by memory;
-    // either way devices that are not needed (phones while the computers hold the model) and devices
-    // whose pledge is under one layer stay in the room as ask-only guests (room/plan.js dealRoom)
-    const deal = dealRoom({ L, layerBytes, hostBytes: embedBytes, pledges, mode: $("ai-split").value === "speed" ? "speed" : "memory",
-      ms: [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
-      phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS, off,
-      // Qwen3.8-Flash-Next: the device dealt the n-gram layer must have its table on disk (null for every other model)
-      ngram: ngramFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], ngramOf(modelKey)) });
     if (!deal.fit.fits || !deal.used.length) throw new Error(shortWhy(M, deal.fit, [myName, ...ai.chain.map(nameOf)], [myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)]));
     ai.outWhy = Object.fromEntries(Object.entries(deal.out).map(([i, why]) => [nameOf(ai.chain[i - 1]), why]));
     for (const i of Object.keys(deal.out)) ai.leftOut.add(ai.chain[i - 1]);
@@ -4475,7 +4564,9 @@ async function aiOnData(from, d) {
         toast(`This device couldn't load its layers (${err.message}). Press Start to try again.`);
         closeEngine();
         $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
-        sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1 });   // load: the host stops the start
+        // load: the host stops the start; noDisk: this device refused to store the model on its disk (its user said no,
+        // or it never offered it): the host deals again without its disk
+        sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1, ...(err.noDisk ? { nodisk: 1 } : {}) });
       }
       break;
     }
@@ -4513,6 +4604,15 @@ async function aiOnData(from, d) {
       break;
     case "ai-error":
       aiStatus(`peer ${e?.name || from} failed: ${d.message}`);
+      // a worker refused the disk layers it was dealt: deal again without its disk (noDiskMetas), not a failed start
+      if (d.nodisk && ai.role === "host" && ai.chain.includes(from)) {
+        const nm = e?.name || from;
+        (ai.noDisk ||= new Set()).add(nm);
+        log("room", `${nm} keeps the model off its disk: dealing the layers again without it`);
+        failWaiters(new Error(`${nm}: ${d.message}`));
+        aiAutoRedeal(`${nm} keeps the model off its disk: dealing the layers again…`);
+        break;
+      }
       if (ai.role === "host" && ai.chain.includes(from)) {
         failWaiters(new Error(`${e?.name || from}: ${d.message}`));
         // a device could not load its layers while the room was starting: the start cannot finish
@@ -4786,7 +4886,8 @@ if (DEV) window.__pooledGen = async (ids, maxNew) => {
     const r = await roomGenerate(ids, { maxNew, sample, stop: new Set() });
     const d = st ? Object.fromEntries(["cuts", "lookups", "hits", "misses", "diskReads", "diskBytes", "diskWaitMs", "t1Copies"].map((k) => [k, st.stats[k] - s0[k]])) : null;
     if (d && st.t1) d.t1Hits = st.t1.stats.hits - s0.t1.hits;
-    return { tokens: r.tokens, tps: r.tps, tPre: r.tPre, bits: x.toString(16), experts: d, summary: st?.summary?.() || null };
+    return { tokens: r.tokens, tps: r.tps, tPre: r.tPre, bits: x.toString(16), experts: d, summary: st?.summary?.() || null,
+      reused: r.reused, ckpt: { on: typeof ai.engine?.saveSlot === "function", slots: ai.ckpt?.items?.length ?? null } };
   } finally { ai.busy = false; }
 };
 
@@ -4868,6 +4969,7 @@ $("room-menu").addEventListener("toggle", () => {
   if (!$("room-menu").open) { if (cacheArmed) cacheDisarm(); return; }
   syncSegs();
   renderCacheModels();
+  renderTabDisk(true);
   // the room card pictures a finished answer's speed: not offered before one, and Share only where the browser can
   $("card-btn").hidden = !(bestTps || lastMap?.st?.tps || lastSoloTps);
   $("card-share").hidden = !navigator.canShare;
@@ -4897,6 +4999,44 @@ $("cache-clear").addEventListener("click", async (ev) => {
   try { await navigator.storage.getDirectory().then(clearConverted); } catch { /* no OPFS */ }
   try { await caches.delete(CACHE_NAME); weightCache = null; toast("cached weights cleared"); } catch { toast("could not clear the cache"); }
   renderCacheModels();
+});
+// This device's disk for big models (room/flashdisk.js): the switch is its user's answer (remembered for this site), and
+// "Free disk space" deletes the Flash copy (experts and n-gram table) with its size; two steps, like Clear above.
+// measure: also read how much the copy takes (the menu opening; a walk of the OPFS files)
+let tabDiskArmed = 0, tabDiskStored = 0;
+const tabDiskFreeLabel = (t, sub) => { const a = $("tabdisk-free"); a.childNodes[1].textContent = t; a.querySelector("small").textContent = sub; };
+async function renderTabDisk(measure = false) {
+  const on = tabDiskCan;
+  $("tabdisk-set").hidden = !on;
+  if (!on) { $("tabdisk-line").hidden = true; return; }
+  const choice = tabDiskNow();
+  $("tabdisk-allow").checked = choice === "allow";
+  $("d-tabdisk").textContent = `Qwen3.8 Flash can stream from disk when the room's memory is short: it stores up to about 92 GB in this browser. `
+    + (choice === "allow" ? "Allowed." : choice === "deny" ? "Not allowed." : "Not asked yet: you are asked when the model needs it.");
+  if (measure) tabDiskStored = (await flashDiskBytes().catch(() => ({ total: 0 }))).total;
+  $("tabdisk-line").hidden = !tabDiskStored;
+  if (!tabDiskArmed) tabDiskFreeLabel("Free disk space", `Deletes the big model's copy on this device (${fmtBytes(tabDiskStored)})`);
+}
+$("tabdisk-allow").addEventListener("change", (ev) => {
+  saveTabDiskChoice(ev.target.checked ? "allow" : "deny", globalThis.localStorage);
+  tabDiskDeclined = false;
+  tabDiskChanged();
+  toast(ev.target.checked ? "big models may use this device's disk" : "big models stay off this device's disk (Free disk space deletes what is there)");
+});
+$("tabdisk-free").addEventListener("click", async (ev) => {
+  ev.preventDefault();
+  if (!tabDiskArmed) {
+    if (!tabDiskStored) { toast("no model copy on this device's disk"); return; }
+    tabDiskFreeLabel(`Delete ${fmtBytes(tabDiskStored)}?`, "Press again; the next start that needs it copies it again");
+    const t = tabDiskArmed = setTimeout(() => { if (tabDiskArmed === t) { tabDiskArmed = 0; renderTabDisk(); } }, 6000);
+    return;
+  }
+  tabDiskArmed = 0;
+  // the running model reads the copy (open files): it has to stop first
+  if (ai.engine?.experts || (ai.model && TAB_DISK_MODELS.includes(ai.model) && ai.engine)) { toast("the model is using this copy: stop it (or leave the room) first"); renderTabDisk(); return; }
+  const r = await removeFlashCopy().catch(() => ({ removed: 0, kept: tabDiskStored }));
+  toast(r.kept ? `freed ${fmtBytes(r.removed)}; ${fmtBytes(r.kept)} is in use and stays` : `freed ${fmtBytes(r.removed)} of this device's disk`);
+  await renderTabDisk(true);
 });
 // One row per cached model with its size and a Delete button (two steps, like Clear above), so one
 // model's weights can go while the others stay. Filled each time the menu opens.

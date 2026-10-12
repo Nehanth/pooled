@@ -56,13 +56,26 @@ export function afterLoadDeath({ layers, layerGB, gb, deaths }) {
 }
 
 // Expert offload (room/plan.js offloadNeed): the system RAM a device lets the room park a MoE model's routed experts
-// in, in GB. Only a device that says it can (meta.offload: a room node on a discrete GPU, or a tab with the OPFS disk
-// tier, meta.diskOnly, whose ramGB is only for the disk tier's spare and cache: it never parks)
+// in, in GB. Only a device that says it can (meta.offload: a room node on a discrete GPU; browsers never park)
 // and as much as it says (meta.ramGB), held to the most one computer lends (DESK_MAX_GB). It is a promise like the
 // pledge: the deal never parks more than this. 0 for any other device.
 export function ramGB(meta) {
   const r = Number(meta?.ramGB);
   return meta?.offload && meta?.webgpu !== false && r > 0 ? Math.min(DESK_MAX_GB, r) : 0;
+}
+// Expert offload's disk tier in a browser tab (room/flashdisk.js tabDiskMeta; room.js): meta.tabDisk =
+// { ramGB, models, ask? }, a field of its own. It is not meta.offload / meta.ramGB on purpose: a host that predates it
+// (@pooled/cli 0.4.1's planner) reads those as RAM to park experts in, which a tab never does. ramGB: the RAM the
+// tier's spare and RAM cache (T1) may take; models: the model keys it reads experts of from disk (Qwen3.8-Flash-Next);
+// ask: its user has not said yes yet (the tab asks when a deal gives it disk layers, and refuses them on a no). A tab
+// whose user said no sends no tabDisk at all. -> GB for this model (0: no disk tier for it), held to DESK_MAX_GB
+export const TAB_DISK_MAX_GB = 16;
+export function tabDiskGB(meta, model) {
+  const t = meta?.tabDisk;
+  if (!t || typeof t !== "object" || meta?.webgpu === false || !model) return 0;
+  if (!Array.isArray(t.models) || !t.models.includes(model)) return 0;
+  const r = Number(t.ramGB);
+  return r > 0 ? Math.min(TAB_DISK_MAX_GB, r) : 0;
 }
 // Expert offload's disk tier (room/plan.js DISK_RAM_MIN): whether a device may leave some of this model's experts in
 // its files and read them when used. Only a device that offloads (ramGB) and says it has a disk tier (meta.disk: a
@@ -75,14 +88,15 @@ export function diskFor(meta, model) {
 // (room/models.js expertsOf, roomBytes experts: what ExpertStore parks, layer by layer) or one layer's bytes (an
 // estimate), or null when the model has none or no device offloads. model: the model's key; with it, a device with a
 // disk tier for it (diskFor) is in off.disk (the field is there only when one is)
-// A browser tab with the OPFS disk tier (meta.diskOnly; room.js tabDiskMeta) is in off.diskOnly: it never parks experts
-// (its GPU shares the computer's memory) and offloads only in the disk pass, for a model it can read experts of
-// (meta.local), with ramGB as RAM for the spare and T1 (room/plan.js diskOnlyAt).
+// A browser tab with the OPFS disk tier for this model (meta.tabDisk: tabDiskGB) is in off.diskOnly: it never parks
+// experts (its GPU shares the computer's memory) and offloads only in the disk pass, with tabDisk.ramGB as RAM for the
+// spare and T1 (room/plan.js diskOnlyAt). For any other model it counts as a plain tab (no offload), field for field.
 export function offloadFor(metas, ex, model = null) {
-  const ram = metas.map((m) => ramGB(m) * 2 ** 30);
+  const only = metas.map((m) => tabDiskGB(m, model) > 0);
+  const ram = metas.map((m, i) => (only[i] ? tabDiskGB(m, model) : m?.tabDisk ? 0 : ramGB(m)) * 2 ** 30);
   const expertBytes = ex && typeof ex === "object" ? +ex.E || 0 : +ex || 0;
   if (!(expertBytes > 0) || !ram.some((r) => r > 0)) return null;
-  const disk = metas.map((m) => diskFor(m, model)), only = metas.map((m) => !!m?.diskOnly && ramGB(m) > 0);
+  const disk = metas.map((m, i) => only[i] || (!m?.tabDisk && diskFor(m, model)));
   return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}), ...(only.some(Boolean) ? { diskOnly: only } : {}) };
 }
 
