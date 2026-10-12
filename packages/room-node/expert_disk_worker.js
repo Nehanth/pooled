@@ -49,7 +49,7 @@ parentPort.on("message", (m) => {
     const t0 = performance.now();
     if (m.gather) {
       const bufs = m.gather.map(([o, n]) => { const b = new ArrayBuffer(n); new Uint8Array(b).set(new Uint8Array(m.src, o, n)); return b; });
-      parentPort.postMessage({ id, bufs, copyMs: performance.now() - t0 }, bufs);
+      parentPort.postMessage({ id, bufs, gatherMs: performance.now() - t0 }, bufs);
       return;
     }
     if (!conv) {   // raw bytes: straight into a buffer of this worker's own, or into the shared one

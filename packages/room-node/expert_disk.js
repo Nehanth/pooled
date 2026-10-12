@@ -72,6 +72,27 @@ export function expertPart(info, e) {
   };
 }
 
+// Requests for the same key that overlap in time share one read: shared(key, make, copy) runs make() for the first
+// caller and hands it the result; every other one gets a copy made (copy(v)) before the first caller's code runs, so
+// no caller sees another's changes. A copy that throws (out of memory) fails only the caller it was for.
+// onJoin(): a request joined one in flight
+export function sharedReads(onJoin = () => {}) {
+  const shares = new Map();   // key -> the waiters of the read in flight
+  return function shared(key, make, copy) {
+    const ws = shares.get(key);
+    if (ws) { onJoin(); return new Promise((resolve, reject) => ws.push({ resolve, reject })); }
+    const waiters = [];
+    shares.set(key, waiters);
+    return make().then(
+      (v) => {
+        shares.delete(key);
+        for (const w of waiters) { try { w.resolve(copy(v)); } catch (err) { w.reject(err); } }
+        return v;
+      },
+      (err) => { shares.delete(key); for (const w of waiters) w.reject(err); throw err; });
+  };
+}
+
 export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkBytes = MiB, ringSlots = 32, slotBytes = 4 * MiB,
   perWorker = 2, maxRespawns = threads, workerURL = new URL("./expert_disk_worker.js", import.meta.url) } = {}) {
   if (!paths?.length) throw new Error("expertDiskReader: paths (one local GGUF file per shard) are required");
@@ -79,7 +100,9 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
   let dead = null, worked = false;   // dead: the error every request gets once no worker is left; worked: a job finished
   const jobs = [], waiting = new Map();   // queued chunk jobs; id -> { resolve, reject, w }
   const inflight = new Map();   // range key -> the read every overlapping request shares
-  const stats = { parts: 0, raw: 0, bytes: 0, chunks: 0, readMs: 0, convMs: 0, copyMs: 0, dedup: 0, slotWaits: 0, oversize: 0, lost: 0, respawns: 0 };
+  // chunks: read (and convert) jobs; gathers: jobs copying bytes out of the ring; gatherMs: their time, plus joining
+  // a long readAt's pieces
+  const stats = { parts: 0, raw: 0, bytes: 0, chunks: 0, gathers: 0, readMs: 0, convMs: 0, gatherMs: 0, dedup: 0, slotWaits: 0, oversize: 0, lost: 0, respawns: 0 };
 
   // no worker left: fail what is queued and waiting for a slot, and every request from now on
   function die(err) {
@@ -154,22 +177,15 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
     if (bad) throw bad.reason;
     return rs.map((r) => r.value);
   }
-  const tally = (m) => { stats.readMs += m.readMs || 0; stats.convMs += m.convMs || 0; stats.copyMs += m.copyMs || 0; stats.chunks++; return m; };
+  const tally = (m) => {
+    if (m.bufs) { stats.gatherMs += m.gatherMs || 0; stats.gathers++; }
+    else { stats.readMs += m.readMs || 0; stats.convMs += m.convMs || 0; stats.chunks++; }
+    return m;
+  };
   async function all(ps) { (await settled(ps)).forEach(tally); }
   const job = (msg) => run(msg).then(tally);
 
-  // Requests for the same range that overlap in time share one read: the first caller gets the result, every other
-  // one a copy made (copy(v)) before the first caller's code runs, so no caller sees another's changes
-  const shares = new Map();   // key -> the waiters of the read in flight
-  function shared(key, make, copy) {
-    const ws = shares.get(key);
-    if (ws) { stats.dedup++; return new Promise((resolve, reject) => ws.push({ resolve, reject })); }
-    const waiters = [];
-    shares.set(key, waiters);
-    return make().then(
-      (v) => { shares.delete(key); for (const w of waiters) w.resolve(copy(v)); return v; },
-      (err) => { shares.delete(key); for (const w of waiters) w.reject(err); throw err; });
-  }
+  const shared = sharedReads(() => stats.dedup++);
   // rows per job for a part: chunkBytes of them, and for a part requantized to Q8 (Q4_1 / Q5_0 / K-quants: ~19 ms
   // of CPU per Flash part against ~0.5 for a Q4_0 repack) at most a quarter of the part, so its conversion runs on
   // four workers at once. A part that fits in one job skips the ring
@@ -290,7 +306,7 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
             const t0 = performance.now();
             out = new Uint8Array(byteLength);
             got.forEach((b, i) => out.set(b, i * per));
-            stats.copyMs += performance.now() - t0;
+            stats.gatherMs += performance.now() - t0;
           }
         }
         stats.raw++; stats.bytes += byteLength;

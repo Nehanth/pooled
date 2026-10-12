@@ -93,26 +93,33 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
 // on one handle run one at a time, whatever libuv's pool does: cached 1 MiB reads from 4-16 lanes on one shared handle
 // got ~1.0 GB/s on the RTX 5070 PC, against 6.5 from one lane and 13.5 with a handle per lane (NVMe, cold: 3-5 GB/s
 // with a handle per lane). A read takes an idle handle, else opens one more up to `lanes` (libuv runs at most
-// UV_THREADPOOL_SIZE file reads at a time, 4 by default), else shares the least busy one.
+// UV_THREADPOOL_SIZE file reads at a time, 4 by default), else shares the least busy one. A failed open (EMFILE, say)
+// fails every read waiting on that handle: each of them tries once more on another handle before giving up.
 export function localFileReader(file, { lanes = Math.max(4, parseInt(process.env.UV_THREADPOOL_SIZE, 10) || 0) } = {}) {
   let hs = [], closed = false;
   return {
     get handles() { return hs.length; },
     async readAt(off, len) {
-      if (closed) throw new Error(`${file}: reader is closed`);
-      let h = hs.find((x) => !x.busy);
-      if (!h && hs.length < lanes) hs.push(h = { fh: fs.promises.open(file, "r"), busy: 0 });
-      h ||= hs.reduce((a, b) => (b.busy < a.busy ? b : a));
-      h.busy++;
-      try {
-        let fh;
-        try { fh = await h.fh; } catch (e) { hs = hs.filter((x) => x !== h); throw e; }   // a failed open is not kept
-        const out = new Uint8Array(len);
-        let o = 0;
-        while (o < len) { const { bytesRead } = await fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
-        if (o !== len) throw new Error(`short read in ${file} at ${off}`);
-        return out;
-      } finally { h.busy--; }
+      for (let retried = false; ; retried = true) {
+        if (closed) throw new Error(`${file}: reader is closed`);
+        let h = hs.find((x) => !x.busy);
+        if (!h && hs.length < lanes) hs.push(h = { fh: fs.promises.open(file, "r"), busy: 0 });
+        h ||= hs.reduce((a, b) => (b.busy < a.busy ? b : a));
+        h.busy++;
+        try {
+          let fh;
+          try { fh = await h.fh; } catch (e) {
+            hs = hs.filter((x) => x !== h);   // a failed open is not kept
+            if (retried) throw e;
+            continue;
+          }
+          const out = new Uint8Array(len);
+          let o = 0;
+          while (o < len) { const { bytesRead } = await fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
+          if (o !== len) throw new Error(`short read in ${file} at ${off}`);
+          return out;
+        } finally { h.busy--; }
+      }
     },
     async close() {
       closed = true;
