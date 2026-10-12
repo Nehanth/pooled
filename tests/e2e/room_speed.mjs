@@ -13,6 +13,9 @@
 // and GB and their part of each token's time, a bar of one token's time (each device, then the wire), bars
 // marked "2 devices" on both screens. A phone-size tab joins: its card says it asks only, and its own screen
 // shows the readout and the room's history. (The re-deal itself is not run: see the note in the body.)
+// Three: the mac and a room node (`pooled join`, packages/room-node, in this process on Dawn: the machine's GPU,
+// the synthetic model from a local model dir) as the pc: the node's card has its part of each token's time from
+// its ai-tele (room/tele.js), not "no timing from this device". NODE=0 skips it (no Dawn / GPU here).
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -30,6 +33,7 @@ const MODEL_URL = "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/
 const PEERJS_URL = "https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js";
 const UA_PHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
 
+const NODE = process.env.NODE !== "0";
 const t0 = Date.now();
 const log = (...a) => console.error(((Date.now() - t0) / 1000).toFixed(1).padStart(6) + "s", ...a);
 const results = [];
@@ -44,6 +48,10 @@ function findPkg(name) {
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pooled-room-speed-"));
 const modelBytes = fs.readFileSync(writeSynth(path.join(tmp, "synth.gguf"), { seed: 1, eosAt: 400 }).file);
+// the room node reads the model from disk: <modelDir>/<model key>/<file name> (packages/room-node/source.js)
+const modelDir = path.join(tmp, "models");
+fs.mkdirSync(path.join(modelDir, MODEL_KEY), { recursive: true });
+fs.writeFileSync(path.join(modelDir, MODEL_KEY, MODEL_URL.split("/").pop()), modelBytes);
 const extra = { "/engine/autotune.js": path.join(tmp, "autotune.js") };
 fs.writeFileSync(extra["/engine/autotune.js"], "export async function autotuneCoop() { return { wg: 64, rows: 4, results: [], stub: true }; }\n");
 const srv = serveRepo(PORT, extra);
@@ -139,15 +147,17 @@ async function shotLive(p, file, text) {
   return live;
 }
 
-// a room: the first device creates it, the others join with its code; then the model starts (split by pledge)
-async function room(devs) {
+// a room: the first device creates it, the others join with its code; then the model starts (split by pledge).
+// others(code): devices that are not tabs (a room node) join here; it says how many
+async function room(devs, others = null) {
   for (const [p, name, gb, q = ""] of devs) await enter(p, name, gb, q + (p === devs[0][0] ? "&ask=0&split=memory" : ""));
   const host = devs[0][0];
   await host.click("#create-btn");
   await host.waitForFunction(() => /^[A-Z0-9]{3}-[A-Z0-9]{3}$/.test(document.getElementById("side-code").textContent), null, { timeout: 30000 });
   const roomCode = (await host.textContent("#side-code")).trim().replace("-", "");
   for (const [p] of devs.slice(1)) { await p.fill("#code-input", roomCode); await p.click("#join-btn"); }
-  for (const [p] of devs) await p.waitForFunction((k) => document.querySelectorAll(".peer-card").length >= k, devs.length, { timeout: 60000 });
+  const nOther = others ? await others(roomCode) : 0;
+  for (const [p] of devs) await p.waitForFunction((k) => document.querySelectorAll(".peer-card").length >= k, devs.length + nOther, { timeout: 60000 });
   log("room", roomCode, devs.map(([, n, g]) => `${n} ${g} GB`).join(", "));
   await host.evaluate((m) => {
     for (const [id, v] of [["ai-model", m], ["ai-sampling", "exact"], ["ai-split", "memory"]]) { const s = document.getElementById(id); s.value = v; s.dispatchEvent(new Event("change", { bubbles: true })); }
@@ -158,7 +168,7 @@ async function room(devs) {
 }
 const closeAll = async () => { for (const c of ctxs.splice(0)) await c.close().catch(() => {}); };
 
-let code = 1;
+let code = 1, node = null;
 try {
   // ---- one device: the Mac alone
   const mac = await device("mac");
@@ -201,7 +211,9 @@ try {
   check("2 devices: a second answer", await ask(mac2, "And lakes?"));
   v = await panel(mac2);
   check("2 devices: the bars are marked 2 devices", v.bars.length === 2 && v.bars.every((b) => b.n === 2), JSON.stringify(v.bars));
-  check("2 devices: each device's share of a token's time", /mac \d+%/.test(v.share) && /wire/.test(v.share), v.share);
+  // (the wire's part shows when the devices' compute EMAs add up to less than the lap; on a fast local link they
+  // can reach it, room/speedo.js tokenShares, and the bar is the two devices alone)
+  check("2 devices: each device's share of a token's time", /mac \d+%/.test(v.share) && /pc \d+%/.test(v.share), v.share);
   check("2 devices: the cards say how much of each token each device takes", v.devs.every((d) => /ms of each \d+ ms token/.test(d.text)), JSON.stringify(v.devs));
   const pv2 = await panel(pc2);
   check("2 devices: the worker's screen shows the same history", pv2.bars.length === 2 && pv2.bars.every((b, i) => b.tps === v.bars[i].tps), JSON.stringify(pv2.bars));
@@ -227,6 +239,32 @@ try {
   await shot(phone, "7-phone-390-unfolded.png");
   await shot(mac2, "8-mac-pc-phone-1080p.png");
   for (const p of [mac2, pc2, phone]) check(`${p.label}: no page errors`, !p.errs.length, p.errs.join(" | "));
+  await closeAll();
+
+  // ---- a room node as the pc: `pooled join` on this machine's GPU (Dawn), the tab hosts
+  if (NODE) {
+    const { joinRoom } = await import("../../packages/room-node/index.js");
+    const mac3 = await device("mac");
+    const nodeLog = [];
+    await room([[mac3, "mac", 24]], async (c) => {
+      // 8 GB, under half the mac's 24: the tab stays the model host (room/plan.js pickModelHost would pick the node's
+      // real GPU over SwiftShader otherwise) and the node is its worker
+      node = await joinRoom(c, { pledgeGB: 8, name: "pc", signal: `127.0.0.1:${SIG}`, modelDir, log: (m) => nodeLog.push(String(m)) });
+      return 1;
+    });
+    check("room node: the room is online with the node holding layers", await online(mac3), nodeLog.slice(-8).join(" | "));
+    check("room node: the tab is the model host, the node its worker", !node.modelHost && node.ai.role === "worker", JSON.stringify({ modelHost: node.modelHost, role: node.ai.role }));
+    check("room node: an answer", await ask(mac3, "Tell me about forests."));
+    check("room node: a second answer", await ask(mac3, "And deserts?"));
+    await mac3.waitForFunction(() => /ms of each \d+ ms token/.test(document.querySelector('#sp-devs .dv[data-name="pc"]')?.innerText || ""), null, { timeout: 15000 }).catch(() => {});
+    v = await panel(mac3);
+    const pcCard = v.devs.find((d) => d.name === "pc")?.text || "";
+    check("room node: its card has its part of each token's time (its ai-tele)", /layers \d+–\d+/.test(pcCard) && /ms of each \d+ ms token/.test(pcCard) && !/no timing/.test(pcCard), JSON.stringify(v.devs));
+    check("room node: one token's bar has a part for it, not 'wire + pc'", /pc \d+%/.test(v.share) && !/wire \+ pc/.test(v.share), v.share);
+    log("panel with a room node:", JSON.stringify(v));
+    await shot(mac3, "9-mac-roomnode-1080p.png");
+    check("mac (room node room): no page errors", !mac3.errs.length, mac3.errs.join(" | "));
+  }
   code = results.length && results.every((r) => r.ok) ? 0 : 1;
 } catch (e) {
   check("ran to the end", false, String(e?.stack || e).slice(0, 500));
@@ -234,6 +272,7 @@ try {
   const fail = results.filter((r) => !r.ok).map((r) => r.name);
   console.log(JSON.stringify({ ok: code === 0, pass: results.length - fail.length, fail }));
   await closeAll();
+  await node?.close().catch(() => {});
   await browser.close().catch(() => {}); srv.close(); sig.kill(); fs.rmSync(tmp, { recursive: true, force: true });
   process.exit(code);
 }

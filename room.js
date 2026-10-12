@@ -56,7 +56,8 @@ import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor } from "./ro
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
-import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
+import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
+import { TeleMeter, expertCache, expertCacheOf } from "./room/tele.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 import { convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
 import { resumableGenerate, waitForRoom, linkSilent, backFromAway, sameShard, guestResume, GUEST_KEY, REJOIN_GRACE_MS, LINK_SILENT_MS } from "./room/resume.js";
@@ -3721,11 +3722,11 @@ const roomGenerateOnce = createGenerator({
 // Workers report their compute per frame kind (ai-tele); the host times each lap, so what is left
 // is the wire. The map shows the chain, what each device holds and how long its part takes.
 function mapNodes(kind = "spec") {
-  const nodes = [{ name: myName, layers: ai.layersByName?.[myName] || "", ms: ai.lapStat?.host, host: 1, amax: ai.hostAmax, exp: expertsAt(ai.moe, ai.offloadBy?.[myName]) }];
+  const nodes = [{ name: myName, layers: ai.layersByName?.[myName] || "", ms: ai.lapStat?.host, host: 1, amax: ai.hostAmax, exp: expertsAt(ai.moe, ai.offloadBy?.[myName]), xc: expertCacheOf(ai.engine?.experts) }];
   for (const id of ai.chain) {
     const t = ai.teleBy.get(id) || {};
     const name = conns.get(id)?.name || id;
-    nodes.push({ name, layers: ai.layersByName?.[name] || "", ms: t[kind] ?? t.spec ?? t.one, amax: t.amax, exp: expertsAt(ai.moe, ai.offloadBy?.[name]) });
+    nodes.push({ name, layers: ai.layersByName?.[name] || "", ms: t[kind] ?? t.spec ?? t.one, amax: t.amax, exp: expertsAt(ai.moe, ai.offloadBy?.[name]), xc: t.xc || null });
   }
   return nodes;
 }
@@ -3935,18 +3936,13 @@ function noteSpeeds() {
   put(myName, ai.lapStat?.host, ai.layersN?.[myName]);
   for (const id of ai.chain) { const name = conns.get(id)?.name || id; put(name, ai.teleBy.get(id)?.spec, ai.layersN?.[name]); }
 }
-// worker: EMA of compute ms per frame kind, reported to the host at most every 700 ms
-function teleNote(kind, ms) {
-  const T = ai.tele ||= { at: 0, k: {} };
-  T.amax = Math.max(T.amax || 0, wireStats.lastMax || 0);
-  const k = T.k[kind] ||= { ema: ms, n: 0 };
-  k.ema = k.n ? 0.7 * k.ema + 0.3 * ms : ms; k.n++;
+// worker: EMA of compute ms per frame kind, reported to the host at most every 700 ms (room/tele.js: the same
+// meter a room node worker reports with), with the expert cache's hits and misses when this engine offloads
+function teleNote(kind, ms, n = 1) {
+  const T = ai.tele ||= new TeleMeter();
+  T.note(kind, ms, n, wireStats.lastMax || 0);
   const now = performance.now();
-  if (now - T.at > 700 && ai.hostId) {
-    T.at = now;
-    sendTo(ai.hostId, { t: "ai-tele", k: Object.fromEntries(Object.entries(T.k).map(([a, b]) => [a, Math.round(b.ema * 10) / 10])), amax: Math.round(T.amax * 10) / 10 });
-    T.amax = 0;
-  }
+  if (T.due(now) && ai.hostId) sendTo(ai.hostId, T.report(now, ai.engine?.experts));
 }
 
 // ---- the speed panel (room/speedo.js): this answer's tok/s, live and big; the recent answers' speeds,
@@ -4029,8 +4025,12 @@ function renderSpeed() {
     const lines = [];
     if (r) lines.push(`<span>layers ${esc(humanRange(r))}</span>` + (gb != null ? `<span>${fmtGB(gb)}</span>` : ""), `<span class="dim">${totalL ? Math.round(100 * nL / totalL) : 0}% of the model</span>`);
     else lines.push(`<span class="dim">${why === "late" ? "joined after the start: asks until a re-deal" : meta.api ? "asks through this room" : meta.webgpu === false ? "no WebGPU: asks, holds no layers" : "the others hold the model: it asks"}</span>`);
-    const ex = r ? expertsText(x?.exp ?? (ai.role === "host" ? expertsAt(ai.moe, ai.offloadBy?.[nm]) : null)) : "";
-    if (ex) lines.push(`<span class="ex">${esc(ex)}</span>`);
+    // experts (MoE): on the GPU, or "experts: GPU + RAM, 84% hits" with where they park and what a token costs
+    const xe = r ? x?.exp ?? (ai.role === "host" ? expertsAt(ai.moe, ai.offloadBy?.[nm]) : null) : null;
+    const head = expertsHead(xe, x?.xc), ex = expertsText(xe), cost = expertsCost(x?.xc);
+    if (head) lines.push(`<span class="ex">${esc(head)}</span>`, `<span class="dim">${esc(ex.replace(/^experts of /, ""))}</span>`);
+    else if (ex) lines.push(`<span class="ex">${esc(ex)}</span>`);
+    if (head && cost) lines.push(`<span class="dim">${esc(cost)}</span>`);
     let time = "";
     if (r && solo) time = `<div class="dv-t"><span>does all of every token</span></div>`;
     else if (part?.timed) time = `<div class="dv-bar"><i style="width:${part.pct.toFixed(1)}%"></i></div><div class="dv-t"><span>${Math.round(part.ms)} ms of each ${Math.round(shares.lap)} ms token</span></div>`;
@@ -4620,7 +4620,7 @@ async function aiOnData(from, d) {
         if (stopsStart({ load: d.load, inChain: true, starting: ai.busy === true, online: $("ai-panel").classList.contains("online") })) aiLoadFailed(from, e?.name || from, d.message);
       }
       break;
-    case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0 }); } break;
+    case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0, xc: expertCache(d.exp, ai.teleBy.get(from)?.xc) }); } break;
     case "ai-inv-req": cachedRanges(d.url).then((have) => sendTo(from, { t: "ai-inv", url: d.url, have })); break;
     case "ai-inv": if (ai.invWait && ai.invWait.url === d.url && Array.isArray(d.have)) ai.invWait.inv[from] = d.have.slice(0, 20000); break;
     case "ai-wget": answerWget(from, d); break;

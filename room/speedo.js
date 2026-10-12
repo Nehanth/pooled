@@ -111,10 +111,27 @@ export function expertsText(e) {
   if (e.where === "GPU") return "experts on GPU";
   return `experts of layers ${e.lo + 1}–${e.hi} in RAM (${e.ramGB.toFixed(1)} GB), ${e.cacheGB.toFixed(1)} GB GPU cache`;
 }
+// The card's headline for a device that offloads: "experts: GPU + RAM, 84% hits", the hit rate of its GPU expert
+// cache from its ai-tele (room/tele.js expertCache: the last report with lookups); without one yet, the place only.
+// "" for a device that doesn't offload (expertsText says "experts on GPU" there).
+export function expertsHead(e, xc) {
+  if (!e || e.where === "GPU") return "";
+  return `experts: ${e.where}` + (xc && Number.isFinite(xc.hit) ? `, ${Math.round(xc.hit)}% hits` : "");
+}
+// what each token costs the cache: "1.3 experts copied from RAM per token", and the disk reads when the store
+// reads experts from disk; "" without a report
+const per = (v) => (v >= 10 ? Math.round(v) : Math.round(v * 10) / 10);
+export function expertsCost(xc) {
+  if (!xc) return "";
+  const bits = [];
+  if (xc.missPerTok != null) bits.push(`${per(xc.missPerTok)} expert${per(xc.missPerTok) === 1 ? "" : "s"} from RAM per token`);
+  if (xc.readsPerTok != null) bits.push(`${per(xc.readsPerTok)} disk read${per(xc.readsPerTok) === 1 ? "" : "s"} per token` + (xc.readMBPerTok > 0 ? ` (${per(xc.readMBPerTok)} MB)` : ""));
+  return bits.join(" · ");
+}
 
 // Each device's share of one token's time: its own compute per lap (nodes[i].ms: the host's from its lap
-// timing, a worker's from its ai-tele) over the lap; what is left is the wire, plus any device that reports
-// no timing (a room node). null without a lap or with one device (it does all of every token).
+// timing, a worker's from its ai-tele: browser workers and room nodes both report it, room/tele.js) over the lap;
+// what is left is the wire, plus any device that reports no timing (a worker on an older version). null without a lap or with one device (it does all of every token).
 export function tokenShares(nodes, lap) {
   if (!(lap > 0) || !nodes || nodes.length < 2) return null;
   const parts = nodes.map((x) => ({ name: x.name, ms: x.ms > 0 ? x.ms : 0, timed: x.ms > 0 }));
