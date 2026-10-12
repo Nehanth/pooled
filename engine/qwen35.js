@@ -36,6 +36,10 @@ const AHEAD_SETTLE = ["reset", "exportState", "exportSlot", "importState", "save
   "forwardToken", "prefillTokens", "prefillToken", "prefillHidden", "embedRun", "runHidden", "headFromHidden", "headFromHiddenIds",
   "embedRunBatch", "runHiddenBatch", "headBatch", "headBatchIds", "verifyN", "specStep", "specStepDrafts", "mtpRun", "headAhead",
   "keepAhead", "dropAhead", "setHidden", "ffnOnly", "_readback", "moeGroupStats"];
+// The methods that run layers or hand the sequence state out: after a disk read failed part way through a step
+// (_failed, see _diskWait) they refuse until reset() (or importState / loadSlot: the whole sequence state replaced)
+const FAILED_REFUSE = ["forwardToken", "forwardTokenIds", "prefillTokens", "prefillToken", "prefillHidden", "embedRun", "runHidden",
+  "embedRunBatch", "runHiddenBatch", "verifyN", "specStep", "specStepDrafts", "mtpRun", "headAhead", "ffnOnly", "exportState", "exportSlot", "saveSlot"];
 
 // Prefill GEMM operand precision (docs/research/prefill-f16-subgroup.md):
 //   "f32"      default: the row-stationary f32 GEMM (engine/wgsl/gemm.js), the pinned numerics
@@ -104,6 +108,15 @@ export class Qwen35Engine {
     await e._init({ ...Qwen35Engine.defaults, ...opts });
     // a decode-ahead step (forwardTokenIds) still queued is dropped before anything else touches the state
     for (const m of AHEAD_SETTLE) if (typeof e[m] === "function") { const f = e[m]; e[m] = function (...a) { this._settleAhead(); return f.apply(this, a); }; }
+    for (const m of FAILED_REFUSE) if (typeof e[m] === "function") {
+      const f = e[m], async = Qwen35Engine.prototype[m]?.constructor?.name === "AsyncFunction";
+      e[m] = function (...a) {
+        if (!this._failed) return f.apply(this, a);
+        const err = new Error(`qwen35: an earlier step failed part way (${this._failed.message}); reset() first`);
+        if (async) return Promise.reject(err);
+        throw err;
+      };
+    }
     return e;
   }
 
@@ -174,6 +187,7 @@ export class Qwen35Engine {
     parts.forEach((p, i) => { if (p.bytes) this.device.queue.writeBuffer(p.buf, 0, st.parts[i]); });
     this.pos = st.pos;
     this._pre = null;
+    this._failed = null;   // the whole sequence state is replaced: a step that failed part way left nothing behind
   }
   // GPU-side checkpoints: copies on the GPU (no readback), for switching between sessions or
   // rewinding an agent to an earlier turn. Costs GPU memory: the DeltaNet states (~3 MB per
@@ -199,6 +213,7 @@ export class Qwen35Engine {
     this.device.queue.submit([enc.finish()]);
     this.pos = sl.pos;
     this._pre = null;
+    this._failed = null;   // (as importState)
   }
   dropSlot(name) {
     const sl = this.slots?.get(name);
@@ -244,6 +259,7 @@ export class Qwen35Engine {
     this.device.queue.submit([enc.finish()]);
     this.pos = 0;
     this._pre = null;
+    this._failed = null;   // (a disk read that failed part way: _diskWait)
   }
 
   // opts: { device, meta (gguf meta), weights, layerRange, hasEmbed, hasHead, maxSeq }
@@ -1758,6 +1774,17 @@ export class Qwen35Engine {
   // map kick (engine/map_kick.js) on an offloaded readback: mapKick true / false, else on in Chrome only. Never on a
   // resident engine's readbacks (a review measured resident decode in Chrome 2-6 tok/s slower with it).
   _kick() { return !!this.experts && (this.mapKick ?? KICK_DEFAULT); }
+  // A disk layer's read (engine/expert_store.js prepare / loadExpertsAsync / loadLayerAsync), awaited with the gate
+  // open. One that fails leaves the step half run: the layers before it wrote their DeltaNet state, conv windows and
+  // K/V rows, but pos did not move, so running the token again would apply them twice. The engine is marked failed:
+  // every call that runs layers refuses until reset() (FAILED_REFUSE; as engine/qwen4exp.js's failed step), and the
+  // offloaded call's state (a pending cut, the FFN mode, mapped staging buffers) is cleared as _offAbort does.
+  async _diskWait(fn) {
+    this._gateOpen();
+    try { return await fn(); }
+    catch (e) { this._failed = e; await this._offAbort(); throw e; }
+    finally { this._gateDone(); }
+  }
   async _cutResolve(enc, pipe = false) {
     const c = this._cut, q = this.device.queue, KS = this.moe.KS, bytes = c.nCols * KS * 4, st = this.offStage, P = this.cutProf;
     this._cut = null;
@@ -1785,6 +1812,9 @@ export class Qwen35Engine {
     const t3 = P ? performance.now() : 0;
     const sel = new Uint32Array(st.getMappedRange(0, bytes)).slice();
     st.unmap();
+    // a disk layer (engine/expert_store.js): read the experts plan() will put, before it plans (the cut's encoder is
+    // submitted, so plan()'s writeBuffers land after it and before e2)
+    if (this.experts.isDisk(c.L.offLayer)) await this._diskWait(() => this.experts.prepare(c.L.offLayer, sel, c.nCols, KS));
     const e2 = this.device.createCommandEncoder();
     const r = this.experts.plan(e2, c.L.offLayer, sel, c.nCols, KS);
     if (r.pool) q.writeBuffer(c.M ? this.B.offSel : this.offSel, 0, r.remap);   // lands before e2's kernels (queue order)
@@ -1814,6 +1844,8 @@ export class Qwen35Engine {
     const t1 = P ? performance.now() : 0;
     const sel = new Uint32Array(st.getMappedRange(0, bytes)).slice();
     st.unmap();
+    // a disk layer: its misses read before plan() (nothing unsubmitted holds a T1 slot here: plan()'s copies go in e)
+    if (this.experts.isDisk(c.L.offLayer)) await this._diskWait(() => this.experts.prepare(c.L.offLayer, sel, c.nCols, this.moe.KS));
     const e = this.device.createCommandEncoder(), b0 = this.experts.stats.bytes;
     const r = this.experts.plan(e, c.L.offLayer, sel, c.nCols, this.moe.KS);
     if (!r.pool) throw new Error("expert offload: a pipelined cut left the slot pool");   // (nCols * K <= P: cannot)
@@ -1837,7 +1869,10 @@ export class Qwen35Engine {
   // distinct experts it chose. -> the encoder to continue in
   async _regionLoad(enc, L, selBuf, W) {
     const { K, KS, nExp } = this.moe, st = this.experts;
-    if (W * K >= nExp) { st.loadLayer(enc, L.offLayer); return enc; }
+    if (W * K >= nExp) {
+      if (!st.isDisk(L.offLayer)) { st.loadLayer(enc, L.offLayer); return enc; }
+      return this._regionLoadDisk(enc, L.offLayer);
+    }
     const bytes = W * KS * 4, q = this.device.queue;
     if (!this._offStageG || this._offStageG.size < bytes) { this._offStageG?.destroy(); this._offStageG = this.device.createBuffer({ size: bytes, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST }); }
     const sg = this._offStageG;
@@ -1847,9 +1882,22 @@ export class Qwen35Engine {
     try { await mapRead(this.device, sg, 0, bytes, this._kick()); } finally { this._gateDone(); }
     const sel = new Uint32Array(sg.getMappedRange(0, bytes)).slice();
     sg.unmap();
+    if (st.isDisk(L.offLayer)) {   // read after the submit above: the writeBuffers land before the next encoder
+      await this._diskWait(() => st.loadExpertsAsync(L.offLayer, sel, W, KS));
+      return this.device.createCommandEncoder();
+    }
     const e2 = this.device.createCommandEncoder();
     st.loadExperts(e2, L.offLayer, sel, W, KS);
     return e2;
+  }
+  // A disk layer's whole expert set into the region: submit what was encoded (it may still read the region), then
+  // read the layer and write it in queue order. -> a fresh encoder. A no-op when the region already holds it.
+  async _regionLoadDisk(enc, layer) {
+    const st = this.experts;
+    if (st.region.layer === layer) return enc;
+    this.device.queue.submit([enc.finish()]);
+    await this._diskWait(() => st.loadLayerAsync(layer));
+    return this.device.createCommandEncoder();
   }
   // Debug / test hook: run only layer i's FFN block on a given residual x (one token).
   async ffnOnly(i, xIn) {
@@ -2875,6 +2923,10 @@ export class Qwen35Engine {
     let enc = this.device.createCommandEncoder();
     for (let l = 0; l < this.layers.length; l++) {
       if (l && l % WIDE_SUBMIT_LAYERS === 0) { q.submit([enc.finish()]); enc = this.device.createCommandEncoder(); }
+      // a disk layer's experts into the region first (_encodeLayerWide's loadLayer is then a no-op): the read is async,
+      // and a writeBuffer inside this encoder would land before the earlier layers' kernels in it ran
+      const Lw = this.layers[l];
+      if (Lw.off && this.experts.isDisk(Lw.offLayer)) enc = await this._regionLoadDisk(enc, Lw.offLayer);
       this._encodeLayerWide(enc, l, basePos, w);
     }
     enc.copyBufferToBuffer(Wx.buf, (w - 1) * Wx.stride, this.x, 0, this.dims.dim * 4);
@@ -4070,12 +4122,21 @@ export class Qwen35Engine {
     sp.stage.unmap();
     const e2 = this.device.createCommandEncoder();
     const reopen = () => { if (c.pp) this._pp = e2.beginComputePass(); };
+    // a disk layer reads its misses before plan(). Only the first read may flush T1 (evict and remap slots): after
+    // it, e2 may already hold copies from T1 slots, which must stay unmapped until e2 is submitted.
+    let flushed = false;
+    const prep = async (layer, sel) => {
+      if (!st.isDisk(layer)) return;
+      const flush = !flushed; flushed = true;
+      await this._diskWait(() => st.prepare(layer, sel, 1, KS, { flush }));
+    };
     const { hs, gusRows, dncRows } = this.moe;
     let next = ci + 1;
     for (const m of win) {
       const L = this.layers[m], j = L.specJ, sel = a.subarray(j * KS, (j + 1) * KS);
       if (a[nOff * KS + j] === 0) {   // held: plan() only stamps its experts
         const b0 = st.stats.bytes;
+        await prep(L.offLayer, sel);   // (reads nothing: every expert is in the pool)
         st.plan(e2, L.offLayer, sel, 1, KS);
         if (st.stats.bytes !== b0) throw new Error(`expert offload: layer ${L.offLayer} hit on the GPU, missed on the CPU`);
         st.stats.specs++; missed[m] = 0;
@@ -4083,6 +4144,7 @@ export class Qwen35Engine {
       }
       // missed: roll back to layer m's FFN (see the note at _specInit)
       st.stats.specFails++; missed[m] = 1;
+      await prep(L.offLayer, sel);
       const r = st.plan(e2, L.offLayer, sel, 1, KS);
       q.writeBuffer(this.offSel, 0, r.remap);
       for (let k = m + 1; k <= ci; k++) {
@@ -4099,6 +4161,7 @@ export class Qwen35Engine {
     }
     if (next === ci + 1) {   // the window held: the cut as _cutResolve handles it
       const b0 = st.stats.misses;
+      await prep(c.L.offLayer, a.subarray(tail, tail + KS));
       const r = st.plan(e2, c.L.offLayer, a.subarray(tail, tail + KS), 1, KS);
       missed[ci] = st.stats.misses !== b0 ? 1 : 0;
       q.writeBuffer(this.offSel, 0, r.remap);

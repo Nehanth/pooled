@@ -22,7 +22,7 @@
 // The contract is engine/expert_disk.js's (PR 1): readPart(info, e) -> { qs, sc } for a header entry with shape
 // [nExp, rows, cols], ggmlType, byteOffset and shard; and readAt(shard, byteOffset, byteLength) -> Uint8Array, so
 // either the engine's in-process reader (expertDisk({ readAt: disk.readAt })) or this one (readPart converts in the
-// workers) can serve the ExpertStore. Not wired into the engine yet.
+// workers) can serve the ExpertStore. shard.js wires it in for a deal's disk layers (expertReader, roadmap 32 step 5).
 //
 // Reads of the same range that overlap in time share one read (in-flight dedup; nothing is kept once it is done:
 // a RAM cache of experts is step 3, T1). POOLED_DISK_THREADS sets the default pool size.
@@ -31,13 +31,14 @@
 // over the reader's life, once the pool has finished a job (a worker that cannot start at all, say a bundle without
 // expert_disk_worker.js, is not restarted). With no worker left, every request fails at once with that error.
 // There is no in-process fallback here, unlike convert.js: the engine's own reader (engine/expert_disk.js over
-// readAt) is that fallback, and PR 5 picks it when this one fails.
+// readAt) is that fallback, and shard.js expertReader switches to it when this one has no worker left.
 //
 // Two worker pools in one room node: this one (up to 16 threads, mostly blocked in the kernel on reads) and
 // convert.js's (up to 8, CPU-bound requant of whole tensors, only while a model loads). Both can run at once when a
 // load converts while experts are read, so a node may have up to 24 extra threads; the requant work is the same
-// (convertEntry's requantQ8Streaming on row slices). Before PR 5 wires this in, the two should share one pool or
-// size against each other (roadmap 32, step 2 follow-up).
+// (convertEntry's requantQ8Streaming on row slices). In a room node's load they don't overlap: shard.js makes this
+// reader during the load, but its workers start on the first read, and convert.js's pool closes when the load ends.
+// Sharing one pool is still a follow-up (roadmap 32, step 2).
 import os from "node:os";
 import { ggmlTypeBytes, GGML_F32, GGML_F16, GGML_BF16, GGML_Q4_0, GGML_Q8_0 } from "../../engine/gguf.js";
 

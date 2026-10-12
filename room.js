@@ -496,7 +496,7 @@ function roomFitFor(key) {
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
   const pledges = devs.map((d) => pledgeGB(d.meta) * 2 ** 30);
-  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes)); };
+  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key)); };
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
   return { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
@@ -3260,8 +3260,10 @@ async function aiStart(modelArg) {
     const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name)) * 2 ** 30;
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
-    // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); browsers never offload
-    const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], experts);
+    // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); browsers never offload.
+    // With the model key a node started with --disk that has this model's files (room/pledge.js diskFor) may also
+    // leave some layers' experts on disk when parking can't hold the model
+    const off = offloadFor([myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)], experts, modelKey);
     // the model's default context, or its fallback when only that fits these pledges (room/models.js
     // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
     const pick = pickCtx(modelKey, { want: ROOM_CTX, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes, off).fits });
@@ -3305,13 +3307,17 @@ async function aiStart(modelArg) {
       : "speculative decoding is off while experts are offloaded: plain decoding is faster there (?offspec=1 turns it on)");
     ai.chain.forEach((id, i) => {
       const o = deal.offload?.[i + 1];
-      if (o) log("room", `${nameOf(id)} offloads layers ${o.lo}–${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`);
+      const disk = o && Number.isInteger(o.diskLo);
+      if (o) log("room", `${nameOf(id)} offloads layers ${o.lo}–${o.hi - 1} with their experts in RAM (${(o.ramBytes / 2 ** 30).toFixed(1)} GB parked, ${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`
+        + (disk ? `; layers ${o.diskLo}–${o.hi - 1} read theirs from disk (${(o.diskRamBytes / 2 ** 30).toFixed(1)} GB RAM cache)` : ""));
       const msg = {
         t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx: ROOM_CTX, kv: ROOM_KV,
         next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host",
         host: peer.id,
         inv,
-        ...(o ? { offload: { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}) } } : {}),
+        // the same shape as the room node's (packages/room-node/roomnode.js offloadMsg), disk tier included
+        ...(o ? { offload: { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}),
+          ...(disk ? { diskLo: o.diskLo, diskRamBytes: o.diskRamBytes } : {}) } } : {}),
       };
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });
       sendTo(id, msg);

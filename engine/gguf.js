@@ -544,8 +544,12 @@ export async function qwen35Weights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp
       L.router = await entry(N.router);
       if (experts && !forceFull && experts.has(i)) {   // offloaded: converted on the CPU, parked, never uploaded
         const nExp = G.meta["qwen35.expert_count"];
-        for (const [k, part] of [["expGate", "gate"], ["expUp", "up"], ["expDown", "down"]])
-          L[k] = experts.park(i, part, await ggufEntry(G, bytesOf, N[k], false, (b) => { fetched += b; onProgress(fetched); }, true), nExp);
+        for (const [k, part] of [["expGate", "gate"], ["expUp", "up"], ["expDown", "down"]]) {
+          if (experts.isDisk?.(i)) {   // a disk layer: nothing read now, its experts are read from the file when used
+            if (!G.tensors[N[k]]) throw new Error("missing tensor " + N[k]);
+            L[k] = experts.attach(i, part, { name: N[k], ...G.tensors[N[k]] }, nExp);
+          } else L[k] = experts.park(i, part, await ggufEntry(G, bytesOf, N[k], false, (b) => { fetched += b; onProgress(fetched); }, true), nExp);
+        }
       } else { L.expGate = await entry(N.expGate); L.expUp = await entry(N.expUp); L.expDown = await entry(N.expDown); }
       L.shGate = await entry(N.shGate, true); L.shUp = await entry(N.shUp, true); L.shDown = await entry(N.shDown, true);
       L.shRouter = await entry(N.shRouter, true);
@@ -596,10 +600,14 @@ export async function qwen35Weights(G, bytesOf, { lo, hi, hasEmbed, hasHead, mtp
 export function qwen35NamesFor(G, i, forceFull = false) {
   return qwen35LayerNames(i, forceFull, (G.meta["qwen35.expert_count"] || 0) > 0, G.meta["qwen35.full_attention_interval"] || 4);
 }
-export function qwen35ShardBytes(G, { lo, hi, hasEmbed, hasHead, mtp = false }) {
+// diskLayers: layers whose routed experts stay in the file (expert offload's disk tier): not counted
+export function qwen35ShardBytes(G, { lo, hi, hasEmbed, hasHead, mtp = false, diskLayers = null }) {
   let total = 0;
   const add = (n) => { if (G.tensors[n]) total += G.tensors[n].byteLength; };
-  for (let i = lo; i < hi; i++) Object.values(qwen35NamesFor(G, i)).forEach((v) => { if (typeof v === "string") add(v); });
+  for (let i = lo; i < hi; i++) {
+    const N = qwen35NamesFor(G, i), skip = diskLayers?.includes?.(i) || diskLayers?.has?.(i) ? new Set([N.expGate, N.expUp, N.expDown]) : null;
+    Object.values(N).forEach((v) => { if (typeof v === "string" && !skip?.has(v)) add(v); });
+  }
   if (hasEmbed || hasHead) add(GGML_EMBED);
   if (hasHead) { add(GGML_FINAL_NORM); add(GGML_OUTPUT); }
   if (mtp && hasHead) total += qwen35MtpBytes(G);

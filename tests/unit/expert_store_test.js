@@ -2,16 +2,25 @@
 // the copies plan() encodes, the region fallback. A fake device records buffers and copies and replays the copies
 // on byte arrays, so a test can read back what a slot or the region holds. The GPU checks are tests/test_moe.js and
 // tests/test_q38_bits.js with OFFLOAD set (the offloaded engine must give the resident engine's bits).
+// Disk layers (the disk tier): the same pools and region, filled by writeBuffer from a reader, must hold the same bytes
+// as the parked path for the same selections.
 // No GPU.   deno test --no-check tests/unit/expert_store_test.js
 import { ExpertStore, notParked } from "../../engine/expert_store.js";
+import { GGML_Q4_0, GGML_Q8_0 } from "../../engine/gguf.js";
 
 globalThis.GPUBufferUsage ??= { MAP_READ: 1, MAP_WRITE: 2, COPY_SRC: 4, COPY_DST: 8, INDEX: 16, VERTEX: 32, UNIFORM: 64, STORAGE: 128, INDIRECT: 256, QUERY_RESOLVE: 512 };
 const assert = (c, m) => { if (!c) throw new Error(m); };
 
 function fakeDevice() {
-  const bufs = [];
+  const bufs = [], writes = [];
   return {
-    bufs, limits: { maxBufferSize: 2 ** 31 },
+    bufs, writes, limits: { maxBufferSize: 2 ** 31 },
+    // queue.writeBuffer (the disk tier's uploads): applied at once, as it lands in queue order
+    queue: { writeBuffer(b, off, data) {
+      const d = data instanceof Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      assert(off % 4 === 0 && d.byteLength % 4 === 0 && off + d.byteLength <= b.size, "writeBuffer range");
+      writes.push([b, off, d.byteLength]); b.bytes.set(d, off);
+    } },
     createBuffer({ size, usage, mappedAtCreation }) {
       const b = { size, usage, bytes: new Uint8Array(size), mapped: !!mappedAtCreation,
         getMappedRange() { return this.bytes.buffer; }, unmap() { this.mapped = false; } };
@@ -198,6 +207,197 @@ Deno.test("park: a slice that doesn't fit what is left of a parked buffer fills 
   enc = fakeEncoder();
   st.loadLayer(enc, 3);
   for (let e = 0; e < nExp; e++) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 3, p, e) === want(3, p, e), `region expert ${e} ${p}`);
+});
+
+// ---- disk layers ----
+// a reader whose expert e of (layer, part) is exactly what entry() parks there, after a random wait
+function fakeReader({ nExp, rows, cols, delay = true }) {
+  const calls = [];
+  let seed = 3;
+  const wait = () => new Promise((r) => setTimeout(r, delay ? ((seed = (seed * 1103515245 + 12345) >>> 0) % 4) : 0));
+  return { calls, async readPart(info, e) {
+    calls.push([info.layer, info.part, e]);
+    await wait();
+    const i = ["gate", "up", "down"].indexOf(info.part), q8 = i === 2;
+    const E = q8 ? entry(info.layer, i, nExp, cols, rows, "q8") : entry(info.layer, i, nExp, rows, cols);
+    const qsB = E.qs.length / nExp, sc = new Uint8Array(E.scales.buffer), scB = sc.length / nExp;
+    return { qs: E.qs.slice(e * qsB, (e + 1) * qsB), sc: sc.slice(e * scB, (e + 1) * scB) };
+  } };
+}
+// header entries as the loader passes them: stacked [nExp][rows][cols] (gate / up Q4_0, down Q8_0 with rows and cols swapped)
+const tinfo = (layer, part, nExp, rows, cols) => part === "down"
+  ? { layer, part, shape: [nExp, cols, rows], ggmlType: GGML_Q8_0, byteOffset: 0 }
+  : { layer, part, shape: [nExp, rows, cols], ggmlType: GGML_Q4_0, byteOffset: 0 };
+function makeDiskStore({ layers = [2, 5], disk = [2, 5], nExp = 32, slots = 6, rows = 64, cols = 128, delay = true } = {}) {
+  const dev = fakeDevice(), reader = fakeReader({ nExp, rows, cols, delay });
+  const st = new ExpertStore(dev, { layers, slots, parkBytes: 1 << 20, disk: { layers: disk, reader } });
+  for (const l of layers) ["gate", "up", "down"].forEach((p, i) => {
+    const ph = st.isDisk(l) ? st.attach(l, p, tinfo(l, p, nExp, rows, cols), nExp)
+      : st.park(l, p, i < 2 ? entry(l, i, nExp, rows, cols) : entry(l, i, nExp, cols, rows, "q8"), nExp);
+    assert(ph.offload && ph.layer === l && ph.part === p && ph.kind === (i < 2 ? "q4" : "q8"), "placeholder");
+  });
+  st.build({ K: 4 });
+  return { dev, st, reader, nExp };
+}
+// one cut on a disk layer as the engine runs it: prepare, then plan
+async function diskPlan(st, layer, sel, nCols, KS) { await st.prepare(layer, sel, nCols, KS); return st.plan(fakeEncoder(), layer, sel, nCols, KS); }
+const poolBytes = (st, l) => st.L.get(l).pool.map((b) => b.bytes);
+const sameBytes = (a, b) => a.length === b.length && a.every((x, i) => x.length === b[i].length && x.every((y, j) => y === b[i][j]));
+
+Deno.test("disk: attach parks nothing, sizes the pools and region as parking would", () => {
+  const { dev, st } = makeDiskStore();
+  const { st: ref } = makeStore();
+  assert(st.parkedBytes === 0 && dev.bufs.filter((b) => b.usage & GPUBufferUsage.MAP_WRITE).length === 0, "nothing parked");
+  assert(st.P === ref.P && st.regionBytes === ref.regionBytes && st.poolBytes === ref.poolBytes, "same pools and region");
+});
+
+Deno.test("disk: prepare + plan put the same bytes in the same slots as the parked path, over a random stream", async () => {
+  const { st } = makeDiskStore({ slots: 8 }), { st: ref } = makeStore({ slots: 8 });
+  let seed = 11;
+  const rnd = (n) => ((seed = (seed * 1103515245 + 12345) >>> 0) % n);
+  for (let t = 0; t < 150; t++) {
+    const l = rnd(2) ? 2 : 5, KS = 5, nCols = rnd(4) ? 1 : 2, sel = new Uint32Array(nCols * KS);
+    for (let c = 0; c < nCols; c++) { const ids = []; while (ids.length < 4) { const e = rnd(rnd(3) ? 12 : 32); if (!ids.includes(e)) ids.push(e); } sel.set(ids, c * KS); }
+    const a = await diskPlan(st, l, sel, nCols, KS), b = ref.plan(fakeEncoder(), l, sel, nCols, KS);
+    assert(a.pool === b.pool && (!a.pool || a.remap.every((x, i) => x === b.remap[i])), `t ${t}: same plan`);
+    assert(sameBytes(poolBytes(st, l), poolBytes(ref, l)), `t ${t}: same pool bytes`);
+    if (!a.pool) for (let j = 0; j < 6; j++) assert(st.region.bufs[j].bytes.every((x, i) => x === ref.region.bufs[j].bytes[i]), `t ${t}: same region`);
+  }
+  assert(st.stats.misses === ref.stats.misses && st.stats.hits === ref.stats.hits && st.stats.regionCuts === ref.stats.regionCuts, "same counters");
+  assert(st.stats.diskReads > 0 && st.stats.diskBytes > 0, "disk counters");
+});
+
+Deno.test("disk: only misses are read; a plan without prepare throws", async () => {
+  const { st, reader } = makeDiskStore();
+  await diskPlan(st, 2, sel1([7, 3, 9, 1]), 1, 5);
+  assert(reader.calls.length === 4 * 3, `4 misses x 3 parts, got ${reader.calls.length}`);
+  await diskPlan(st, 2, sel1([9, 7, 3, 1]), 1, 5);
+  assert(reader.calls.length === 12, "all hits: nothing read");
+  await diskPlan(st, 2, sel1([9, 7, 3, 20]), 1, 5);
+  assert(reader.calls.length === 15 && reader.calls.slice(12).every((c) => c[2] === 20), "one miss read");
+  let msg = "";
+  try { st.plan(fakeEncoder(), 2, sel1([21, 22, 23, 24]), 1, 5); } catch (e) { msg = e.message; }
+  assert(/not prepared/.test(msg), "unprepared plan throws");
+});
+
+Deno.test("disk: a batch over the pool's size reads every distinct expert and fills the region at their ids", async () => {
+  const { st, reader } = makeDiskStore(), { st: ref } = makeStore();   // 6 slots
+  const KS = 5, sel = new Uint32Array(2 * KS);
+  sel.set([1, 2, 3, 4], 0); sel.set([5, 6, 7, 8], KS);
+  const r = await diskPlan(st, 5, sel, 2, KS);
+  ref.plan(fakeEncoder(), 5, sel, 2, KS);
+  assert(!r.pool && reader.calls.length === 8 * 3 && st.region.layer === -1, "region path, 8 experts read");
+  for (const e of [1, 2, 3, 4, 5, 6, 7, 8]) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 5, p, e) === want(5, p, e), `region holds ${e}`);
+});
+
+Deno.test("disk: the whole layer into the region asynchronously; the sync calls refuse a disk layer", async () => {
+  const { st, nExp, dev } = makeDiskStore({ delay: false }), { st: ref } = makeStore();
+  for (const f of [() => st.loadLayer(fakeEncoder(), 2), () => st.loadExperts(fakeEncoder(), 2, sel1([1, 2, 3, 4]), 1, 5)]) {
+    let threw = false;
+    try { f(); } catch { threw = true; }
+    assert(threw, "sync region fill on a disk layer throws");
+  }
+  const w0 = dev.writes.length;
+  await st.loadLayerAsync(2, 7);   // runs of 7 experts
+  ref.loadLayer(fakeEncoder(), 2);
+  for (let j = 0; j < 6; j++) assert(st.region.bufs[j].bytes.every((x, i) => x === ref.region.bufs[j].bytes[i]), `region array ${j} equals the parked load`);
+  assert(st.region.layer === 2 && st.loadLayer(fakeEncoder(), 2) === 0, "the sync call is a no-op once it is there");
+  assert(dev.writes.length - w0 === 6 * Math.ceil(nExp / 7), "one write per slice per run");
+  assert(await st.loadLayerAsync(2) === 0, "skipped when already there");
+  // a short frame's experts
+  const sel = new Uint32Array(10); sel.set([3, 9, 30, 9], 0); sel.set([4, 3, 1, 2], 5);
+  const n = await st.loadExpertsAsync(5, sel, 2, 5);
+  assert(n === 6 && st.region.layer === -1, "6 distinct experts, region partial");
+  for (const e of [3, 9, 30, 4, 1, 2]) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 5, p, e) === want(5, p, e), `frame expert ${e}`);
+});
+
+Deno.test("disk: a store with parked and disk layers never reads for the parked ones", async () => {
+  const { st, reader } = makeDiskStore({ layers: [2, 5], disk: [5] });
+  assert(!st.isDisk(2) && st.isDisk(5) && st.parkedBytes > 0, "layer 2 parked, 5 on disk");
+  await diskPlan(st, 2, sel1([1, 2, 3, 4]), 1, 5);
+  st.loadLayer(fakeEncoder(), 2);
+  assert(reader.calls.length === 0, "parked layer: no reads");
+  await diskPlan(st, 5, sel1([1, 2, 3, 4]), 1, 5);
+  assert(reader.calls.length === 12 && reader.calls.every((c) => c[0] === 5), "disk layer: its reads only");
+  assert(/disk layers: 12 expert reads|disk layers: 4 expert reads/.test(st.summary()), st.summary());
+});
+
+// a reader that counts the reads in flight (the most at once) and can be told to fail
+function countingReader(base) {
+  const r = { inflight: 0, most: 0, fail: 0, calls: base.calls, async readPart(info, e) {
+    r.inflight++; r.most = Math.max(r.most, r.inflight);
+    try {
+      if (r.fail > 0) { r.fail--; await new Promise((ok) => setTimeout(ok, 1)); throw new Error("EIO: disk read failed"); }
+      return await base.readPart(info, e);
+    } finally { r.inflight--; }
+  } };
+  return r;
+}
+
+Deno.test("disk: a wide pass and a short frame read in runs, never every expert at once", async () => {
+  const run0 = ExpertStore.REGION_RUN;
+  ExpertStore.REGION_RUN = 4;
+  try {
+    const { st, reader } = makeDiskStore({ nExp: 64 }), { st: ref } = makeStore({ nExp: 64 });   // 6 slots
+    const R = st.reader = countingReader(reader);
+    const KS = 5, sel = new Uint32Array(5 * KS);
+    for (let c = 0; c < 5; c++) sel.set([c * 4, c * 4 + 1, c * 4 + 2, 40 + c], c * KS);   // 20 distinct
+    const r = await diskPlan(st, 5, sel, 5, KS);
+    ref.plan(fakeEncoder(), 5, sel, 5, KS);
+    assert(!r.pool && R.calls.length === 20 * 3, `region path, 20 experts read (${R.calls.length / 3})`);
+    assert(R.most <= 4 * 3, `at most a run of 4 experts (12 parts) in flight, got ${R.most}`);
+    for (let j = 0; j < 6; j++) for (const e of new Set(sel.filter((_, i) => i % KS < KS - 1))) {
+      const per = st.L.get(5).parts[["gate", "up", "down"][j >> 1]].sl[j & 1].per;
+      assert(st.region.bufs[j].bytes.subarray(e * per, (e + 1) * per).every((x, i) => x === ref.region.bufs[j].bytes[e * per + i]), `region slice ${j} expert ${e}`);
+    }
+    assert(st.stats.regionCuts === 1 && st.stats.regionBytes === ref.stats.regionBytes, "region counters as the parked path's");
+    // a short prefill frame (engine _regionLoad, W * K < nExp)
+    R.most = 0;
+    const f = new Uint32Array(9 * KS);
+    for (let c = 0; c < 9; c++) f.set([c, 20 + c, 40 + c, 63 - c], c * KS);
+    const n = await st.loadExpertsAsync(2, f, 9, KS);
+    assert(n === 36 && R.most <= 12 && st.region.layer === -1, `36 experts in runs (most ${R.most})`);
+    for (const e of [0, 8, 20, 28, 40, 48, 63, 55]) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 2, p, e) === want(2, p, e), `frame expert ${e}`);
+  } finally { ExpertStore.REGION_RUN = run0; }
+});
+
+Deno.test("disk: park() refuses a disk layer (a loader without an attach branch)", () => {
+  const dev = fakeDevice(), st = new ExpertStore(dev, { layers: [2, 5], slots: 6, disk: { layers: [5], reader: fakeReader({ nExp: 32, rows: 64, cols: 128 }) } });
+  st.park(2, "gate", entry(2, 0, 32, 64, 128), 32);
+  let msg = "";
+  try { st.park(5, "gate", entry(5, 0, 32, 64, 128), 32); } catch (e) { msg = e.message; }
+  assert(/disk layer/.test(msg), `park on a disk layer throws (${msg})`);
+});
+
+Deno.test("disk: a failed read rejects prepare and leaves the store usable: the next prepare + plan give the parked bytes", async () => {
+  const { st, reader } = makeDiskStore({ slots: 8 }), { st: ref } = makeStore({ slots: 8 });
+  const R = st.reader = countingReader(reader);
+  await diskPlan(st, 2, sel1([1, 2, 3, 4]), 1, 5); ref.plan(fakeEncoder(), 2, sel1([1, 2, 3, 4]), 1, 5);
+  R.fail = 1;
+  let msg = "";
+  try { await st.prepare(2, sel1([5, 6, 7, 8]), 1, 5); } catch (e) { msg = e.message; }
+  assert(/EIO/.test(msg), `prepare rejects with the read's error (${msg})`);
+  // the engine marks itself failed and plans nothing; once reset, the same cut again
+  for (const s of [sel1([5, 6, 7, 8]), sel1([1, 9, 5, 2])]) {
+    const a = await diskPlan(st, 2, s, 1, 5), b = ref.plan(fakeEncoder(), 2, s, 1, 5);
+    assert(a.pool && a.remap.every((x, i) => x === b.remap[i]), "same plan after the failure");
+    assert(sameBytes(poolBytes(st, 2), poolBytes(ref, 2)), "same pool bytes after the failure");
+  }
+  // a failed run of a region fill leaves the region marked partial
+  R.fail = 1;
+  const f = new Uint32Array(3 * 5); f.set([1, 2, 3, 4], 0); f.set([5, 6, 7, 8], 5); f.set([9, 10, 11, 12], 10);
+  try { await st.loadExpertsAsync(5, f, 3, 5); msg = ""; } catch (e) { msg = e.message; }
+  assert(/EIO/.test(msg) && st.region.layer === -1, "frame load rejects, region not marked as a whole layer");
+});
+
+Deno.test("disk: prepare({ flush: false }) leaves T1 alone (engine _specCut: one encoder, several plans)", async () => {
+  const { st } = makeDiskStore();
+  let flushes = 0;
+  st.t1 = { flush() { flushes++; }, find: () => -1, wants: () => false };
+  await st.prepare(2, sel1([1, 2, 3, 4]), 1, 5);
+  await st.prepare(2, sel1([5, 6, 7, 8]), 1, 5, { flush: false });
+  assert(flushes === 1, `one flush, got ${flushes}`);
+  st.t1 = null;
 });
 
 Deno.test("gpuTables: each layer's GPU table mirrors its expert -> slot table through plan() and clear()", () => {
