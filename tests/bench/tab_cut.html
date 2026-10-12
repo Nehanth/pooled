@@ -1,0 +1,48 @@
+<!doctype html><title>offload cut</title><pre id="log"></pre>
+<script type="module">
+// Expert offload's per-layer cut in a tab (driver: tests/bench/tab_cut.mjs): tests/bench/cut_core.js on a MoE whose
+// experts are resident or parked (today's offload: every expert in mapped buffers, a GPU slot pool per layer).
+//   ?model=/models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf  ?mode=parked|resident  ?offload=all|lo-hi|a,b
+//   ?slots=N (experts cached per layer) | ?offgb=G  ?tokens=64  ?kick=0 (engine mapKick off)  ?bits=0
+//   ?eng={"k":v} any engine flag. window.RESULT: cut_core's result.
+import { Qwen35Engine } from "../../engine/qwen35.js";
+import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
+import { makeTokenizer } from "../../engine/engine.js";
+import { parseGGUFHeader, qwen35Weights, tokenizerFromGGUF, streamEntryToGPU } from "../../engine/gguf.js";
+import { ExpertStore } from "../../engine/expert_store.js";
+import { cutBench } from "./cut_core.js";
+const q = new URLSearchParams(location.search), MODEL = q.get("model") || "/models/q36moe/Qwen_Qwen3.6-35B-A3B-Q4_0.gguf", MODE = q.get("mode") || "parked";
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+const range = async (off, len) => { const r = await fetch(MODEL, { headers: { Range: `bytes=${off}-${off + len - 1}` } }); return new Uint8Array(await r.arrayBuffer()); };
+try {
+  const ad = await navigator.gpu.requestAdapter();
+  const device = await ad.requestDevice({ requiredLimits: { maxBufferSize: ad.limits.maxBufferSize, maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize } });
+  let gpuErrors = 0;
+  device.addEventListener("uncapturederror", (e) => { if (gpuErrors++ < 3) log("GPU ERROR " + e.error?.message?.slice(0, 200)); });
+  device.lost.then((i) => log("DEVICE LOST " + i.message));
+  const G = parseGGUFHeader((await range(0, 64 << 20)).buffer);
+  const arch = G.meta["general.architecture"], L = G.meta[arch + ".block_count"] - (G.meta[arch + ".nextn_predict_layers"] || 0);
+  const tok = makeTokenizer(tokenizerFromGGUF(G.meta));
+  G.streamEntry = (info) => streamEntryToGPU(device, info, (i) => fetch(MODEL, { headers: { Range: `bytes=${i.byteOffset}-${i.byteOffset + i.byteLength - 1}` } }));
+  const ov = q.get("offload") || "all";
+  const layers = (ov === "all" ? Array.from({ length: L }, (_, i) => i) : ov.includes("-") ? (([a, b]) => Array.from({ length: b - a + 1 }, (_, i) => a + i))(ov.split("-").map(Number)) : ov.split(",").map(Number)).filter((i) => i >= 0 && i < L);
+  const experts = MODE === "parked" ? new ExpertStore(device, { layers, slots: +(q.get("slots") || 0), vramBytes: +(q.get("offgb") || 8) * 2 ** 30 }) : null;
+  const t0 = performance.now();
+  const weights = await qwen35Weights(G, (i) => range(i.byteOffset, i.byteLength), { lo: 0, hi: L, hasEmbed: true, hasHead: true, mtp: false, experts });
+  const eng = await Qwen35Engine.create({ device, meta: G.meta, weights, layerRange: [0, L], hasEmbed: true, hasHead: true, maxSeq: 2048, vocab: G.tensors["token_embd.weight"]?.shape?.[0], ...roomQwen35Options(q) });
+  applyRoomFlags(eng, q);
+  if (q.get("kick") === "0") eng.mapKick = false;
+  Object.assign(eng, JSON.parse(q.get("eng") || "{}"));
+  log(`${arch}: loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s, ${MODE}${eng.experts ? `, ${eng.experts.layers.length} layers offloaded, ${eng.experts.P} experts cached per layer` : ""}, kick ${eng._kick()}`);
+  const prompt = await (await fetch("/tests/golden/q38_bits_prompt.txt")).text();
+  // ?variants=[{"cutPipe":false,"mapKick":false},{}]: engine flag sets, one run each on the same load
+  const runs = [];
+  const base = Object.fromEntries([...new Set(JSON.parse(q.get("variants") || "[{}]").flatMap(Object.keys))].map((k) => [k, eng[k]]));
+  for (const v of JSON.parse(q.get("variants") || "[{}]")) {
+    Object.assign(eng, base, v);   // each variant from the same base (flags of earlier variants do not carry over)
+    log(`--- ${JSON.stringify(v)}: cutPipe ${eng.cutPipe === true} kick ${eng._kick()}`);
+    runs.push({ v, ...(await cutBench({ eng, tok, prompt, N: +(q.get("tokens") || 64), bits: q.get("bits") !== "0", log })) });
+  }
+  window.RESULT = { mode: MODE, ...runs[0], runs, gpuErrors };
+} catch (e) { log("ERROR " + (e.stack || e)); window.RESULT = { error: String(e?.message || e) }; }
+</script>
