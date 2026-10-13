@@ -3,15 +3,27 @@
 //
 // A pass runs nCols consecutive tokens through every layer at once, on the decode engine's own state (DeltaNet conv
 // and S, the PLE ring, the K / V cache, QSA's rawK / pooled keys, the n-gram history and pos) and its weight buffers
-// (the joined / fused ones from each layer's st.w): a pass leaves the engine exactly where nCols decode steps would,
-// bit for bit, so prefill and decode interleave freely. The op lists mirror the decode engine's: per layer two halves
+// (the joined / fused ones from each layer's st.w), so prefill and decode interleave freely. Two op lists:
+//   exact  the multi-column decode kernels below: a pass leaves the engine exactly where nCols decode steps would,
+//          bit for bit. Verify passes and passes narrower than FAST_MIN_COLS use them, and every pass with exact: true.
+//   wide   prefill passes of FAST_MIN_COLS+ columns (maxCols 1024 by default, 1021 within QSA's default raw-key
+//          ring): the kernels of engine/wgsl/qwen4exp_wide.js, tiled GEMMs for the projections, the expert-grouped
+//          MoE, attention per KV head and column group (on the engine's f32 or f16 K / V cache), DeltaNet's norm out
+//          of its sequential loop. Another summation order than decode, so
+//          within a tolerance of it: f32, one pass's rounding is ~1e-6 relative on the residual (4 layers: p99 3e-6,
+//          max 2e-4 per column), but over long prompts on the whole model a router (or QSA block score) near tie flips
+//          at some column and the recurrent state / attention carry it on: past ~2K positions the median column is
+//          ~3e-3 from the exact kernels from ~layer 20 on and single columns up to ~1e-1, as much as two wide widths
+//          differ from each other (docs/kernels.md). dp4a: true, llama.cpp's int8-activation numerics, ~1e-2 per pass.
+//          Checked per layer by tests/test_q38flash_batch.js and on the goldens (FULL=1).
+// The op lists mirror the decode engine's: per layer two halves
 // { pre, site, rest, comb }, laid out fused as forwardToken runs them (each HC combine folded into the next site,
 // _halfOps), with the multi-column kernels of engine/wgsl/qwen4exp_batch.js (the decode kernels with a column index;
 // gemv_mc shares each weight read across GEMV_MC_COLS columns). Ops carry dyn(pos, nCols) and run through the
 // engine's _encode. QSA: engine/qwen4exp_qsa.js, the decode path's rule per pass (dense while every column has
 // <= 2051 cells, the selected cells past that), on this module's own nCols-wide scratch.
 //
-//   const pb = await Qwen4ExpBatch.create(engine, weights, { maxCols: 64 });
+//   const pb = await Qwen4ExpBatch.create(engine, weights);          // { maxCols, exact, dp4a, verifyCols }
 //   const r = await pb.prefill(promptIds, { wantLogits: true });    // { id, logits } (head) or { hidden }
 //   const v = await pb.verify([last, ...draft]);                     // { ids }: a greedy id per column
 //   await pb.accept(n);                                              // keep the first n columns of that pass
@@ -28,15 +40,20 @@
 // Expert offload (engine/expert_store.js, engine created with expertRegion: true): an offloaded layer's pass splits
 // after its router (op.cut). A wide pass (nCols x K >= half the experts) copies the whole layer into the store's region
 // (ExpertStore.loadLayer, no readback); a narrow one (verify) reads the nCols x K ids back and copies only those
-// experts (loadExperts). The expert kernels then run on regionEntry() with the original expert ids: the same kernels
-// on the same bytes at another address, so an offloaded pass gives the resident bits. Without the region create()
-// refuses offloaded layers (the engine's _wq would too: notParked).
+// experts (loadExperts). The expert kernels (exact or grouped) then run on regionEntry() with the original expert ids:
+// the same kernels on the same bytes at another address, so an offloaded pass gives the resident bits. Without the
+// region create() refuses offloaded layers (the engine's _wq would too: notParked).
 import * as MC from "./wgsl/qwen4exp_batch.js";
+import * as WX from "./wgsl/qwen4exp_wide.js";
+import { probeDp4a } from "./wgsl/gemm_wide.js";
 import { qsaScratch, qsaSetFrame, qsaBind, qsaStateOps, qsaSelectOps, qsaRingCols, QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
+import { QSA_PROJ } from "./wgsl/qsa.js";
+import { qsaMaxCols } from "./qsa.js";
 
 const U = GPUBufferUsage;
 const fr = Math.fround;
 const SUBMIT_LAYERS = 12;   // layers per submit, as forwardToken
+const WIDE_COLS = 1024;     // default columns per pass with the wide kernels (fewer for long contexts: the scratch bindings)
 
 export class Qwen4ExpBatch {
   static async create(engine, weights, opts = {}) { const b = new Qwen4ExpBatch(); await b._init(engine, weights, opts); return b; }
@@ -44,7 +61,27 @@ export class Qwen4ExpBatch {
   // weights: the object the engine was built from (its unfused entries; the joined / fused ones come from st.w).
   // maxCols: columns per pass (longer prompts run in several); verifyCols: the most columns a pass with the head on
   // every column (verify) takes, which sizes its logits (vocab x 4 B per column).
-  async _init(eng, W, { maxCols = 64, verifyCols = 8 } = {}) {
+  // exact: only the bit-exact kernels (every pass == the decode steps, bit for bit; the debugging reference). Otherwise
+  // passes of at least FAST_MIN_COLS columns that do not take the head on every column (prefill, not verify) run the
+  // wide kernels (engine/wgsl/qwen4exp_wide.js): tiled GEMMs and the expert-grouped MoE, within a tolerance of decode.
+  // dp4a: the wide GEMMs and the grouped MoE on activations quantized per 32 values (llama.cpp's MMQ numerics; about
+  // 1.3x faster on the GB10, the residual ~1e-2 from decode): true, "moe" (the routed experts only) or "dense" (the
+  // projections only), when the device compiles dot4I8Packed. Default false: f32 tiles (one pass ~1e-6 from decode; see the header on long prompts).
+  // maxBinding: a lower binding limit than the device's (tests: the maxCols cap of a smaller device / a longer maxSeq).
+  async _init(eng, W, { maxCols = null, verifyCols = 8, exact = false, dp4a = false, maxBinding = Infinity } = {}) {
+    // the default width also fits QSA's raw-key ring (engine qsaRing: a pass completes blocks of up to maxCols + 3
+    // rows, 1021 columns with the default 1024-row ring); an explicit maxCols past the ring is refused below
+    if (maxCols == null && eng.qsa) maxCols = Math.min(exact ? 64 : WIDE_COLS, qsaRingCols(eng.qsaRing));
+    maxCols ??= exact ? 64 : WIDE_COLS;
+    {   // the widest scratch bindings must fit the device: QSA's scores (maxCols x maxSeq / 4), the experts' outputs
+      const lim = Math.min(eng.device.limits?.maxStorageBufferBindingSize ?? 128 << 20, maxBinding), c = eng.cfg;
+      maxCols = Math.min(maxCols, Math.floor(lim / (c.K * c.dim * 4)), ...(eng.qsa ? [qsaMaxCols({ maxSeq: eng.maxSeq, maxBinding: lim })] : []));
+    }
+    if (dp4a && !exact && !await probeDp4a(eng.device)) dp4a = false;
+    // which wide kernels run on dp4a: true (all), "moe" (the routed experts only), "dense" (the projections only)
+    this.dpMoe = !exact && (dp4a === true || dp4a === "moe");
+    this.dpDense = !exact && (dp4a === true || dp4a === "dense");
+    this.dp4a = this.dpMoe || this.dpDense;
     const offSet = eng.offLayers || new Set();
     if (offSet.size && !eng.experts?.region) throw new Error(`qwen4exp batch: layers ${[...offSet].join(",")} have offloaded experts and the store has no `
       + "whole-layer region: create the engine with expertRegion: true (batched passes route offloaded layers through ExpertStore.loadLayer / loadExperts)");
@@ -54,8 +91,9 @@ export class Qwen4ExpBatch {
     if (diskL.length) throw new Error(`qwen4exp batch: layers ${diskL.join(",")} are on the disk tier; batched passes do not read disk layers yet (RAM offload only)`);
     const { device, cfg } = eng, wq = eng._wq;
     if (!wq) throw new Error("qwen4exp batch: the engine does not expose its weights (_wq)");
-    Object.assign(this, { eng, device, cfg, maxCols, verifyCols: Math.min(verifyCols, maxCols) });
-    // QSA's raw-key ring holds the rows of the blocks a pass completes: up to maxCols + 3 (engine/wgsl/qsa.js)
+    Object.assign(this, { eng, device, cfg, maxCols, verifyCols: Math.min(verifyCols, maxCols), exact });
+    // QSA's raw-key ring holds the rows of the blocks a pass completes: up to maxCols + 3 (engine/wgsl/qsa.js). The
+    // default width is capped to the ring above; an explicit maxCols past it is refused
     if (eng.qsa && maxCols > qsaRingCols(eng.qsaRing))
       throw new Error(`qwen4exp batch: passes of ${maxCols} columns need a QSA raw-key ring of >= ${maxCols + 3} rows; the engine has ${eng.qsaRing} (Qwen4ExpEngine qsaRing)`);
     const d = cfg.dim, hc = cfg.hc, HD = cfg.hDim, ss = cfg.ssm, K = cfg.K, nH = cfg.nHeads, nKV = cfg.nKVHeads, hd = cfg.headDim;
@@ -72,7 +110,12 @@ export class Qwen4ExpBatch {
       ...Object.entries({ route: MC.MOE_ROUTE_MC_WGSL, hcSite: MC.HC_SITE_MC_WGSL, hcMix: MC.HC_MIX_MC_WGSL, hcComb: MC.HC_COMBINE_MC_WGSL,
         dnConv: MC.DN_CONV_MC_WGSL, dnDelta: MC.DN_DELTA_MC_WGSL, attnPrep: MC.attnPrepMcWGSL(eng.kv),
         attnDense: MC.attnDecMcWGSL({ kv: eng.kv }), attnGather: MC.attnDecMcWGSL({ gather: QSA_SEL_STRIDE, kv: eng.kv }),
-        ple: MC.PLE_MC_WGSL, am1: MC.ARGMAX1_MC_WGSL, am2: MC.ARGMAX2_MC_WGSL })
+        ple: MC.PLE_MC_WGSL, am1: MC.ARGMAX1_MC_WGSL, am2: MC.ARGMAX2_MC_WGSL,
+        ...(exact ? {} : { moeSort: WX.moeSortWWGSL(), moeComb: WX.MOE_COMB_W_WGSL, guW_q4: WX.moeGuWWGSL("q4"), guW_q8: WX.moeGuWWGSL("q8"),
+          dnW_q4: WX.moeDnWWGSL("q4"), dnW_q8: WX.moeDnWWGSL("q8"),
+          dnDeltaW: WX.DN_DELTA_W_WGSL, dnGnormW: WX.DN_GNORM_W_WGSL, dnConvW: WX.DN_CONV_W_WGSL, dnConvSt: WX.DN_CONV_ST_W_WGSL,
+          attnWD: WX.attnWWGSL({ G: nH / nKV, hd, kv: eng.kv }), attnWG: WX.attnWWGSL({ gather: QSA_SEL_STRIDE, G: nH / nKV, hd, kv: eng.kv }),
+          ...(this.dpMoe ? { guD_q4: WX.moeGuCWGSL("q4"), guD_q8: WX.moeGuCWGSL("q8"), dnD_q4: WX.moeDnCWGSL("q4"), dnD_q8: WX.moeDnCWGSL("q8") } : {}) }) })
         .map(async ([k, code]) => { P[k] = await pipe(code, k); }),
     ]);
     const lazy = new Map();
@@ -92,6 +135,10 @@ export class Qwen4ExpBatch {
       F1: device.createBuffer({ size: 16, usage: U.COPY_SRC | U.COPY_DST }),
     };
     device.queue.writeBuffer(B.shIds, 0, new Uint32Array(4));
+    const sortS = WX.moeSortWSizes({ maxCols: N, K, nExp: cfg.nExp });
+    if (!exact) Object.assign(B, { hsg: buf(N * cfg.shFF), yK: buf(N * K * d), grp: buf(sortS.words), dummy: buf(4) });
+    if (this.dp4a) Object.assign(B, { xq: buf(N * HD / 4), xd: buf(N * HD / 32), xqM: buf(N * d / 4), xdM: buf(N * d / 32),
+      hq: buf(N * K * cfg.expFF / 4), hd: buf(N * K * cfg.expFF / 32) });
     if (eng.B.emb) Object.assign(B, { emb: buf(N * d), pk: buf(N * HD), pv: buf(N * d), dbg: buf(2 * HD + hc) });
     if (eng.qsa) this.qsaS = qsaScratch(device, { maxCols: N, maxBlocks: eng.qsaSh.maxBlocks });
 
@@ -122,121 +169,223 @@ export class Qwen4ExpBatch {
     };
     const ewg = (n) => (pos, c) => [cdiv(n, 256), c, 1];
 
-    // HC sites, as the engine's: site h's inject partials go to inj[h % 2]
-    let nSite = 0;
-    const site = (hw, inject = true) => ({ h: nSite++, w: wq(hw.norm, "hc norm").buf, injW: inject ? wq(hw.inject, "hc inject").buf : null });
-    const siteOp = (S, comb) => {
-      const out = B.inj[S.h % 2], prev = comb ? B.inj[comb.h % 2] : B.inj[(S.h + 1) % 2];
-      const u = uni([d, hc, f(eps), comb ? (comb.b ? 2 : 1) : 0, S.injW ? 1 : 0, 0, 0, 0]);
-      return { pipe: P.hcSite, bg: bg(P.hcSite, [B.R, comb ? comb.a : B.mixed, comb?.b || B.mixed, prev, S.w, B.xn, S.injW || S.w, out, u]), dyn: (pos, n) => [hc, n, 1] };
-    };
-    const combOp = (Cb) => ({ pipe: P.hcComb, bg: bg(P.hcComb, [B.R, Cb.a, Cb.b || Cb.a, B.inj[Cb.h % 2], uni([d, hc, Cb.b ? 1 : 0, 0])]), dyn: ewg(HD) });
-    const hcMixRest = (hw) => {
-      const ops = [gemv(wq(hw.down, "hc down"), B.xn, B.lo, { dIn: HD, ys: rank, mode: 1, scale: 1 / hc })];
-      const up = wq(hw.up, "hc up");
-      if (up.kind !== "f32") {
-        const lanes = MC.gemvLanes(up.kind, HD, rank), u = uni([HD, rank, 0, 0, 0, 0, f(0), d, rank / 4, HD, 0, 0]);
-        ops.push(later(gemvPipe(`gemvmix_mc_${up.kind}_${lanes}`, MC.gemvMixMcWGSL(up.kind, lanes)), [up.qs, up.sc, B.lo, B.gate, u, B.xn, B.mixed],
-          (pos, n) => [cdiv(d, 256 / lanes), 1, n]));
-      } else {
-        ops.push(gemv(up, B.lo, B.gate, { dIn: rank, ys: HD }));
-        ops.push({ pipe: P.hcMix, bg: bg(P.hcMix, [B.xn, B.gate, B.mixed, uni([d, hc, 0, 0])]), dyn: ewg(d) });
+    // The wide GEMM (fast lists): y[col * ys + yOff + r] = epi(M x[col]) over the pass's columns -> [ops]. mode 1:
+    // silu(acc * scale); mode 2: silu(aux) * acc. Quantized weights on dp4a (gemm_d, after a quant_x of x unless xq
+    // gives x already quantized: { q, d }) or else f32 tiles (gemm_t, also every f32 weight). A shape with few output
+    // tiles at maxCols columns splits K (workgroup z) into the part buffer, summed in order by split_sum.
+    let partFloats = 0;
+    const partOf = () => B.kpart ??= buf(partFloats);   // (B.part is the head's argmax partials)
+    const quantX = (x, dIn, { xs = dIn, xOff = 0, mult = 1, q = B.xq, dq = B.xd } = {}) => later(gemvPipe("quant_x", WX.QUANT_X_WGSL),
+      [x, q, dq, uni([dIn, xOff / 4, xs / 4, mult]), B.F], (pos, n) => [cdiv(dIn / 32, 32), n * mult, 1]);
+    const gemmW = (M, x, y, { dIn = M.shape?.[1], dOut = M.shape?.[0] ?? M.n / dIn, xs = dIn, ys = dOut, xOff = 0, yOff = 0, mode = 0, scale = 0, aux = null, xq = null, f32 = false } = {}) => {
+      if (!(dIn > 0 && dOut > 0 && Number.isInteger(dOut) && dIn % 32 === 0)) throw new Error(`qwen4exp batch: gemm shape ${dOut} x ${dIn}`);
+      if (xs % 4 || xOff % 4) throw new Error("qwen4exp batch: gemm column stride / offset must be a multiple of 4");
+      // gemm_d steps KB blocks per stage (no tail guard): a row of dIn / 32 blocks not a multiple of KB takes gemm_t
+      const flt = M.kind === "f32" || M.kind === "bf16", nb = dIn / 32;
+      const D = this.dpDense && !f32 && !flt && nb % WX.DP4A_T.KB === 0, T = D ? WX.DP4A_T : WX.WIDE_T, KB = D ? T.KB : 1;
+      const tiles = cdiv(dOut, T.BM) * cdiv(N, T.BN);
+      let kPer = nb;
+      if (tiles < 160) kPer = Math.max(KB * 2, Math.ceil(Math.ceil(nb / Math.min(16, Math.round(320 / tiles))) / KB) * KB);
+      const S = cdiv(nb, kPer), ops = [];
+      if (S > 1) partFloats = Math.max(partFloats, S * N * dOut);
+      const out = S > 1 ? null : y;   // null: the split-K buffer, bound once its size is known (B.kpart, partOf)
+      const u = uni([dOut, dIn, xOff / 4, xs / 4, yOff, ys, mode, f(scale), kPer, S > 1 ? 1 : 0, 0, 0]);
+      if (D && !xq) { ops.push(quantX(x, dIn, { xs, xOff })); xq = { q: B.xq, d: B.xd }; }
+      const grid = (pos, n) => [cdiv(dOut, T.BM), cdiv(n, T.BN), S];
+      ops.push(D ? later(gemvPipe(`gemm_d_${M.kind}`, WX.gemmDWGSL(M.kind)), [M.qs, M.sc, xq.q, xq.d, out, u, B.F, aux || B.dummy], grid)
+        : later(gemvPipe(`gemm_t_${M.kind}`, WX.gemmTWGSL(M.kind)), flt ? [M.buf, null, x, out, u, B.F, aux || B.dummy] : [M.qs, M.sc, x, out, u, B.F, aux || B.dummy], grid));
+      if (S > 1) {
+        ops.push(later(gemvPipe("split_sum", WX.SPLIT_SUM_WGSL), [null, y, uni([dOut, dIn, 0, 0, yOff, ys, mode, f(scale), S, 0, 0, 0]), B.F, aux || B.dummy],
+          (pos, n) => [cdiv(dOut, 256), n, 1]));
+        ops.at(-2).partAt = D ? 4 : 3; ops.at(-1).partAt = 0;
       }
       return ops;
     };
-    const halfOps = (halves) => halves.map((H, k) => {
-      const prev = k > 0 ? halves[k - 1] : null, next = halves[k + 1];
-      const fold = prev && prev.comb && !H.pre.length;
-      const list = [...H.pre, siteOp(H.site, fold ? prev.comb : null), ...H.rest];
-      if (H.comb && !(next && !next.pre.length)) list.push(combOp(H.comb));
-      return list;
-    });
 
-    // ---- per layer ops, on the engine's per-layer state and weights
-    const halves = [], lmeta = [];
-    for (const el of eng.layers) {
-      const i = el.i, L = W.layers[i - eng.lo], st = el.st, w = st.w, pre = [], rest = [];
-      if (w.pw) {   // PLE: key / value projections of the n-gram rows, then the injection over the columns in order
-        const pc = L.ple, { K1, slots } = st.pleU;
-        pre.push(gemv(wq(pc.key, "ple key"), B.emb, B.pk));
-        pre.push(gemv(wq(pc.value, "ple value"), B.emb, B.pv));
-        pre.push({ pipe: P.ple, bg: bg(P.ple, [B.R, B.pk, B.pv, w.pw, st.ring, B.dbg, uni([d, K1, cfg.ple.ngram, slots, f(eps), hc, 0, 0]), B.F]), dyn: () => [hc, 1, 1] });
-      }
-      const sA = site(L.hcAttn);
-      rest.push(...hcMixRest(L.hcAttn));
-      if (el.isQ) {
-        if (w.qkvA) rest.push(gemv(w.qkvA, B.mixed, B.qkvA, { ys: qs }));
-        else rest.push(gemv(wq(L.wq, "attn_q"), B.mixed, B.qkvA, { ys: qs }), gemv(wq(L.wk, "attn_k"), B.mixed, B.qkvA, { ys: qs, yOff: nQ }),
-          gemv(wq(L.wv, "attn_v"), B.mixed, B.qkvA, { ys: qs, yOff: nQ + nK }));
-        let sel = [];
-        if (eng.qsa) {
-          const G = qsaBind(device, eng.qsaK, eng.qsaSh, this.qsaS, st.qsa, B.mixed);
-          rest.push(...qsaStateOps(eng.qsaK, G));
-          sel = qsaSelectOps(eng.qsaK, G, eng.sparse);
+    // The op lists, exact (the multi-column decode kernels) or fast (the wide kernels for the projections and the
+    // routed / shared experts; every other kernel as exact). -> { layers: [{ i, st, off, ops }], headSite, headRest }
+    const build = (fast) => {
+      const proj = (...a) => (fast ? gemmW(...a) : [gemv(...a)]);
+      // dp4a: the layer input (mixed) quantized once per half, after the HC mix, for every projection that reads it
+      const XM = fast && this.dp4a ? { q: B.xqM, d: B.xdM } : null;
+      // HC sites, as the engine's: site h's inject partials go to inj[h % 2]
+      let nSite = 0;
+      const site = (hw, inject = true) => ({ h: nSite++, w: wq(hw.norm, "hc norm").buf, injW: inject ? wq(hw.inject, "hc inject").buf : null });
+      const siteOp = (S, comb) => {
+        const out = B.inj[S.h % 2], prev = comb ? B.inj[comb.h % 2] : B.inj[(S.h + 1) % 2];
+        const u = uni([d, hc, f(eps), comb ? (comb.b ? 2 : 1) : 0, S.injW ? 1 : 0, 0, 0, 0]);
+        return { pipe: P.hcSite, bg: bg(P.hcSite, [B.R, comb ? comb.a : B.mixed, comb?.b || B.mixed, prev, S.w, B.xn, S.injW || S.w, out, u]), dyn: (pos, n) => [hc, n, 1], site: true };
+      };
+      const combOp = (Cb) => ({ pipe: P.hcComb, bg: bg(P.hcComb, [B.R, Cb.a, Cb.b || Cb.a, B.inj[Cb.h % 2], uni([d, hc, Cb.b ? 1 : 0, 0])]), dyn: ewg(HD) });
+      const hcMixRest = (hw, wide = fast) => {
+        const P2 = (...a) => (wide ? gemmW(...a) : [gemv(...a)]);
+        // the HC projections stay on f32 tiles with dp4a too: the up projection's outputs are the streams' gates, and
+        // with quantized inputs it alone moved the residual by ~1e-2 (p99 6e-2 -> 2e-2 on 4 layers); both are small
+        const ops = [...P2(wq(hw.down, "hc down"), B.xn, B.lo, { dIn: HD, ys: rank, mode: 1, scale: 1 / hc, f32: true })];
+        const up = wq(hw.up, "hc up");
+        if (up.kind !== "f32" && !wide) {
+          const lanes = MC.gemvLanes(up.kind, HD, rank), u = uni([HD, rank, 0, 0, 0, 0, f(0), d, rank / 4, HD, 0, 0]);
+          ops.push(later(gemvPipe(`gemvmix_mc_${up.kind}_${lanes}`, MC.gemvMixMcWGSL(up.kind, lanes)), [up.qs, up.sc, B.lo, B.gate, u, B.xn, B.mixed],
+            (pos, n) => [cdiv(d, 256 / lanes), 1, n]));
+        } else {
+          ops.push(...P2(up, B.lo, B.gate, { dIn: rank, ys: HD, f32: true }));
+          ops.push({ pipe: P.hcMix, bg: bg(P.hcMix, [B.xn, B.gate, B.mixed, uni([d, hc, 0, 0])]), dyn: ewg(d) });
         }
-        const ms = uni([qs, nQ, nQ + nK, 0]);
-        rest.push({ pipe: P.attnPrep, bg: bg(P.attnPrep, [B.qkvA, B.qn, st.kc, st.vc, wq(L.qNorm).buf, wq(L.kNorm).buf, B.cs, st.ap, ms, B.F]),
-          dyn: (pos, n) => [nH + nKV, n, 1] });
-        rest.push(...sel);
-        rest.push({ pipe: P.attnDense, bg: bg(P.attnDense, [B.qn, st.kc, st.vc, B.qkvA, B.ao, st.ap, B.F, ms]),
-          dyn: (pos, n) => (eng.qsa && eng.sparse(pos, n) ? null : [nH, n, 1]) });
-        if (eng.qsa) rest.push({ pipe: P.attnGather, bg: bg(P.attnGather, [B.qn, st.kc, st.vc, B.qkvA, B.ao, st.ap, null, ms, this.qsaS.sel]),
-          dyn: (pos, n) => (eng.sparse(pos, n) ? [nH, n, 1] : null) });
-        rest.push(gemv(wq(L.wo, "attn_output"), B.ao, B.out));
-      } else {
-        if (w.qkvz) rest.push(gemv(w.qkvz, B.mixed, B.qkvz, { ys: qkvzS }));
-        else rest.push(gemv(wq(L.wqkv, "qkv"), B.mixed, B.qkvz, { ys: qkvzS }), gemv(wq(L.wz, "z"), B.mixed, B.qkvz, { ys: qkvzS, yOff: convDim }));
-        rest.push(gemv(w.ba, B.mixed, B.ba, { dIn: d }));
-        rest.push({ pipe: P.dnConv, bg: bg(P.dnConv, [B.qkvz, st.conv, wq(L.conv, "conv").buf, B.co, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps), qkvzS, convDim, 0, 0]), B.F]),
-          dyn: () => [convDim / ss.stateSize, 1, 1] });
-        rest.push({ pipe: P.dnDelta, bg: bg(P.dnDelta, [B.co, st.S, B.ba, w.dta, B.qkvz, wq(L.ssmNorm).buf, B.o, B.go,
-          uni([ss.nKHeads, ss.stateSize, keyDim, ss.nVHeads, f(eps), convDim, 2 * ss.nVHeads, qkvzS, convDim, ss.inner, 0, 0]), B.F]), dyn: () => [ss.nVHeads, 1, 1] });
-        rest.push(gemv(wq(L.wOut, "ssm_out"), B.go, B.out));
-      }
-      const combA = { a: B.out, b: null, h: sA.h };
-      // MoE: router + shared gate (one GEMV), top-K per column, routed experts, shared expert
-      const sF = site(L.hcFfn), ffn = [...hcMixRest(L.hcFfn)];
-      ffn.push(gemv(w.router, B.mixed, B.logits, { dIn: d }));
-      ffn.push({ pipe: P.route, bg: bg(P.route, [B.logits, B.ids, B.wts, uni([cfg.nExp, K, ls, 0])]), dyn: (pos, n) => [n, 1, 1], cut: true });
-      // the routed experts: resident, or (offloaded) the store's region, filled after the cut
-      const off = offSet.has(i), ex = (k, part) => (off ? eng.experts.regionEntry(i, part) : wq(L[k], "experts " + part));
-      const eg = ex("expGate", "gate"), eu = ex("expUp", "up"), ed = ex("expDown", "down"), ff = cfg.expFF;
-      ffn.push({ pipe: P["gu_" + eg.kind], bg: bg(P["gu_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, B.mixed, B.h, B.ids, uni([ff, d, K, d / 4, K * ff, K, 0, 0])]),
-        dyn: (pos, n) => [cdiv(ff, 8), K, n] });
-      ffn.push({ pipe: P["dn_" + ed.kind], bg: bg(P["dn_" + ed.kind], [ed.qs, ed.sc, B.h, B.moe, B.ids, B.wts, uni([d, ff, K, 0, 0, K, K, K * ff / 4])]),
-        dyn: (pos, n) => [cdiv(d, 8), 1, n] });
-      const sgw = wq(L.shGate, "shared gate"), suw = wq(L.shUp, "shared up"), sdw = wq(L.shDown, "shared down"), sff = cfg.shFF;
-      ffn.push({ pipe: P["gu_" + sgw.kind], bg: bg(P["gu_" + sgw.kind], [sgw.qs, sgw.sc, suw.qs, suw.sc, B.mixed, B.hs, B.shIds, uni([sff, d, 1, d / 4, sff, 0, 0, 0])]),
-        dyn: (pos, n) => [cdiv(sff, 8), 1, n] });
-      ffn.push({ pipe: P["dn_" + sdw.kind], bg: bg(P["dn_" + sdw.kind], [sdw.qs, sdw.sc, B.hs, B.sh, B.shIds, B.logits, uni([d, sff, 1, 1, cfg.nExp, ls, 0, sff / 4])]),
-        dyn: (pos, n) => [cdiv(d, 8), 1, n] });
-      const combF = { a: B.moe, b: B.sh, h: sF.h };
-      halves.push({ pre, site: sA, rest, comb: combA }, { pre: [], site: sF, rest: ffn, comb: combF });
-      lmeta.push({ i, st, off });
-    }
+        if (wide && XM) ops.push(quantX(B.mixed, d, { q: XM.q, dq: XM.d }));
+        return ops;
+      };
+      const halfOps = (halves) => halves.map((H, k) => {
+        const prev = k > 0 ? halves[k - 1] : null, next = halves[k + 1];
+        const fold = prev && prev.comb && !H.pre.length;
+        const list = [...H.pre, siteOp(H.site, fold ? prev.comb : null), ...H.rest];
+        if (H.comb && !(next && !next.pre.length)) list.push(combOp(H.comb));
+        return list;
+      });
 
-    // ---- head: the head mixer's site (which folds the last layer's combine) on every column, then the mixer, the LM
-    // head and a greedy id per column ("all": verify), or on the last column only ("last": prefill)
+      // ---- per layer ops, on the engine's per-layer state and weights
+      const halves = [], lmeta = [];
+      for (const el of eng.layers) {
+        const i = el.i, L = W.layers[i - eng.lo], st = el.st, w = st.w, pre = [], rest = [];
+        if (w.pw) {   // PLE: key / value projections of the n-gram rows, then the injection over the columns in order
+          const pc = L.ple, { K1, slots } = st.pleU;
+          pre.push(...proj(wq(pc.key, "ple key"), B.emb, B.pk));
+          pre.push(...proj(wq(pc.value, "ple value"), B.emb, B.pv));
+          pre.push({ pipe: P.ple, bg: bg(P.ple, [B.R, B.pk, B.pv, w.pw, st.ring, B.dbg, uni([d, K1, cfg.ple.ngram, slots, f(eps), hc, 0, 0]), B.F]), dyn: () => [hc, 1, 1] });
+        }
+        const sA = site(L.hcAttn);
+        rest.push(...hcMixRest(L.hcAttn));
+        if (el.isQ) {
+          if (w.qkvA) rest.push(...proj(w.qkvA, B.mixed, B.qkvA, { ys: qs, xq: XM }));
+          else rest.push(...proj(wq(L.wq, "attn_q"), B.mixed, B.qkvA, { ys: qs, xq: XM }), ...proj(wq(L.wk, "attn_k"), B.mixed, B.qkvA, { ys: qs, yOff: nQ, xq: XM }),
+            ...proj(wq(L.wv, "attn_v"), B.mixed, B.qkvA, { ys: qs, yOff: nQ + nK, xq: XM }));
+          let sel = [];
+          if (eng.qsa) {
+            const G = qsaBind(device, eng.qsaK, eng.qsaSh, this.qsaS, st.qsa, B.mixed), so = qsaStateOps(eng.qsaK, G);
+            // the indexer projections as a wide GEMM in the wide lists, on the layer's own BF16 weights (st.qsa.w,
+            // [q ; k] rows as u32 pairs: the decode kernel's buffer, no second copy), widened to f32 in the kernel
+            if (fast) so.splice(0, 1, ...gemmW({ kind: "bf16", buf: st.qsa.w }, B.mixed, this.qsaS.proj, { dIn: d, dOut: QSA_PROJ }));
+            rest.push(...so);
+            sel = qsaSelectOps(eng.qsaK, G, eng.sparse);
+          }
+          const ms = uni([qs, nQ, nQ + nK, 0]);
+          rest.push({ pipe: P.attnPrep, bg: bg(P.attnPrep, [B.qkvA, B.qn, st.kc, st.vc, wq(L.qNorm).buf, wq(L.kNorm).buf, B.cs, st.ap, ms, B.F]),
+            dyn: (pos, n) => [nH + nKV, n, 1] });
+          rest.push(...sel);
+          if (fast) {   // the tiled attention: a KV head's query heads (and in the dense pass, ATTN_W.dense.CW columns) per workgroup
+            rest.push({ pipe: P.attnWD, bg: bg(P.attnWD, [B.qn, st.kc, st.vc, B.qkvA, B.ao, st.ap, B.F, ms]),
+              dyn: (pos, n) => (eng.qsa && eng.sparse(pos, n) ? null : [nKV, cdiv(n, WX.ATTN_W.dense.CW), 1]) });
+            if (eng.qsa) rest.push({ pipe: P.attnWG, bg: bg(P.attnWG, [B.qn, st.kc, st.vc, B.qkvA, B.ao, st.ap, B.F, ms, this.qsaS.sel]),
+              dyn: (pos, n) => (eng.sparse(pos, n) ? [nKV, n, 1] : null) });
+          } else {
+            rest.push({ pipe: P.attnDense, bg: bg(P.attnDense, [B.qn, st.kc, st.vc, B.qkvA, B.ao, st.ap, B.F, ms]),
+              dyn: (pos, n) => (eng.qsa && eng.sparse(pos, n) ? null : [nH, n, 1]) });
+            if (eng.qsa) rest.push({ pipe: P.attnGather, bg: bg(P.attnGather, [B.qn, st.kc, st.vc, B.qkvA, B.ao, st.ap, null, ms, this.qsaS.sel]),
+              dyn: (pos, n) => (eng.sparse(pos, n) ? [nH, n, 1] : null) });
+          }
+          rest.push(...proj(wq(L.wo, "attn_output"), B.ao, B.out));
+        } else {
+          if (w.qkvz) rest.push(...proj(w.qkvz, B.mixed, B.qkvz, { ys: qkvzS, xq: XM }));
+          else rest.push(...proj(wq(L.wqkv, "qkv"), B.mixed, B.qkvz, { ys: qkvzS, xq: XM }), ...proj(wq(L.wz, "z"), B.mixed, B.qkvz, { ys: qkvzS, yOff: convDim, xq: XM }));
+          rest.push(...proj(w.ba, B.mixed, B.ba, { dIn: d, xq: XM }));
+          const cv = wq(L.conv, "conv").buf, nCH = convDim / ss.stateSize;
+          if (fast && ss.convK <= 9) {   // every (head, column) at once (the conv reads only inputs), then the state
+            rest.push({ pipe: P.dnConvW, bg: bg(P.dnConvW, [B.qkvz, st.conv, cv, B.co, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps), qkvzS, convDim, 0, 0])]),
+              dyn: (pos, n) => [nCH, n, 1] });
+            rest.push({ pipe: P.dnConvSt, bg: bg(P.dnConvSt, [B.qkvz, st.conv, null, null, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps), qkvzS, convDim, nCH, 0]), B.F]),
+              dyn: () => [cdiv(convDim, 256), 1, 1] });
+          } else rest.push({ pipe: P.dnConv, bg: bg(P.dnConv, [B.qkvz, st.conv, cv, B.co, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps), qkvzS, convDim, 0, 0]), B.F]),
+            dyn: () => [nCH, 1, 1] });
+          const ep = uni([ss.nKHeads, ss.stateSize, keyDim, ss.nVHeads, f(eps), convDim, 2 * ss.nVHeads, qkvzS, convDim, ss.inner, 0, 0]);
+          if (fast) {   // the recurrence, then the gated norm over every (head, column) in parallel: the exact kernel's bits
+            rest.push({ pipe: P.dnDeltaW, bg: bg(P.dnDeltaW, [B.co, st.S, B.ba, w.dta, B.o, ep, B.F]), dyn: () => [ss.nVHeads, 1, 1] });
+            rest.push({ pipe: P.dnGnormW, bg: bg(P.dnGnormW, [B.o, B.qkvz, wq(L.ssmNorm).buf, B.go, ep]), dyn: (pos, n) => [ss.nVHeads, n, 1] });
+          } else rest.push({ pipe: P.dnDelta, bg: bg(P.dnDelta, [B.co, st.S, B.ba, w.dta, B.qkvz, wq(L.ssmNorm).buf, B.o, B.go, ep, B.F]), dyn: () => [ss.nVHeads, 1, 1] });
+          rest.push(...proj(wq(L.wOut, "ssm_out"), B.go, B.out));
+        }
+        const combA = { a: B.out, b: null, h: sA.h };
+        // MoE: router + shared gate (one projection), top-K per column, routed experts, shared expert
+        const sF = site(L.hcFfn), ffn = [...hcMixRest(L.hcFfn)];
+        ffn.push(...proj(w.router, B.mixed, B.logits, { dIn: d, xq: XM }));
+        ffn.push({ pipe: P.route, bg: bg(P.route, [B.logits, B.ids, B.wts, uni([cfg.nExp, K, ls, 0])]), dyn: (pos, n) => [n, 1, 1], cut: true });
+        // the routed experts: resident, or (offloaded) the store's region, filled after the cut
+        const off = offSet.has(i), ex = (k, part) => (off ? eng.experts.regionEntry(i, part) : wq(L[k], "experts " + part));
+        const eg = ex("expGate", "gate"), eu = ex("expUp", "up"), ed = ex("expDown", "down"), ff = cfg.expFF;
+        const sgw = wq(L.shGate, "shared gate"), suw = wq(L.shUp, "shared up"), sdw = wq(L.shDown, "shared down"), sff = cfg.shFF;
+        let combF;
+        if (fast) {
+          // expert-grouped: sort the (column, slot) pairs by expert, gate/up and down per tile of one expert's pairs,
+          // the shared expert as GEMMs, then the weighted sum (+ the gated shared expert) per column
+          const maxTiles = (n) => Math.ceil(n * K / WX.MOE_BP) + Math.min(cfg.nExp, n * K);
+          ffn.push({ pipe: P.moeSort, bg: bg(P.moeSort, [B.ids, B.grp, uni([cfg.nExp, K, sortS.PO, 0]), B.F]), dyn: () => [1, 1, 1] });
+          const RW = this.dpMoe ? WX.MOE_RC : WX.MOE_RW;
+          const guG = (pos, n) => [cdiv(ff, RW), maxTiles(n), 1], dnG = (pos, n) => [cdiv(d, RW), maxTiles(n), 1];
+          if (this.dpMoe) {   // on the quantized layer input (XM); h quantized per pair for the down projection
+            ffn.push({ pipe: P["guD_" + eg.kind], bg: bg(P["guD_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, XM.q, XM.d, B.h, B.grp, uni([ff, d, K, sortS.PO, ff, 0, 0, 0])]), dyn: guG });
+            ffn.push(quantX(B.h, ff, { mult: K, q: B.hq, dq: B.hd }));
+            ffn.push({ pipe: P["dnD_" + ed.kind], bg: bg(P["dnD_" + ed.kind], [ed.qs, ed.sc, B.hq, B.hd, B.yK, B.grp, uni([d, ff, K, sortS.PO, 0, 0, 0, 0])]), dyn: dnG });
+          } else {
+            ffn.push({ pipe: P["guW_" + eg.kind], bg: bg(P["guW_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, B.mixed, B.h, B.grp, uni([ff, d, K, sortS.PO, d / 4, ff, 0, 0])]), dyn: guG });
+            ffn.push({ pipe: P["dnW_" + ed.kind], bg: bg(P["dnW_" + ed.kind], [ed.qs, ed.sc, B.h, B.yK, B.grp, uni([d, ff, K, sortS.PO, 0, 0, 0, 0])]), dyn: dnG });
+          }
+          ffn.push(...gemmW(sgw, B.mixed, B.hsg, { dIn: d, dOut: sff, xq: XM }));
+          ffn.push(...gemmW(suw, B.mixed, B.hs, { dIn: d, dOut: sff, mode: 2, aux: B.hsg, xq: XM }));
+          ffn.push(...gemmW(sdw, B.hs, B.sh, { dIn: sff, dOut: d }));
+          ffn.push({ pipe: P.moeComb, bg: bg(P.moeComb, [B.yK, B.wts, B.sh, B.logits, B.moe, uni([d, K, ls, cfg.nExp])]), dyn: (pos, n) => [cdiv(d, 256), n, 1] });
+          combF = { a: B.moe, b: null, h: sF.h };
+        } else {
+          ffn.push({ pipe: P["gu_" + eg.kind], bg: bg(P["gu_" + eg.kind], [eg.qs, eg.sc, eu.qs, eu.sc, B.mixed, B.h, B.ids, uni([ff, d, K, d / 4, K * ff, K, 0, 0])]),
+            dyn: (pos, n) => [cdiv(ff, 8), K, n] });
+          ffn.push({ pipe: P["dn_" + ed.kind], bg: bg(P["dn_" + ed.kind], [ed.qs, ed.sc, B.h, B.moe, B.ids, B.wts, uni([d, ff, K, 0, 0, K, K, K * ff / 4])]),
+            dyn: (pos, n) => [cdiv(d, 8), 1, n] });
+          ffn.push({ pipe: P["gu_" + sgw.kind], bg: bg(P["gu_" + sgw.kind], [sgw.qs, sgw.sc, suw.qs, suw.sc, B.mixed, B.hs, B.shIds, uni([sff, d, 1, d / 4, sff, 0, 0, 0])]),
+            dyn: (pos, n) => [cdiv(sff, 8), 1, n] });
+          ffn.push({ pipe: P["dn_" + sdw.kind], bg: bg(P["dn_" + sdw.kind], [sdw.qs, sdw.sc, B.hs, B.sh, B.shIds, B.logits, uni([d, sff, 1, 1, cfg.nExp, ls, 0, sff / 4])]),
+            dyn: (pos, n) => [cdiv(d, 8), 1, n] });
+          combF = { a: B.moe, b: B.sh, h: sF.h };
+        }
+        halves.push({ pre, site: sA, rest, comb: combA }, { pre: [], site: sF, rest: ffn, comb: combF });
+        lmeta.push({ i, st, off });
+      }
+
+      // ---- head: the head mixer's site (which folds the last layer's combine) on every column, then the mixer, the
+      // LM head and a greedy id per column ("all": verify), or on the last column only ("last": prefill). The mixer and
+      // head stay on the exact kernels in both lists (one column, or a verify pass)
+      if (eng.hasHead) {
+        const V = eng.dims.vocab, per = 1024, nPart = cdiv(V, per);
+        halves.push({ pre: [], site: site(W.headHC, false), comb: null, rest: [...hcMixRest(W.headHC, false),
+          gemv(wq(W.head, "output"), B.mixed, B.hl, { dIn: d }),
+          { pipe: P.am1, bg: bg(P.am1, [B.hl, B.part, uni([V, per, nPart, 0])]), dyn: (pos, n) => [nPart, n, 1] },
+          { pipe: P.am2, bg: bg(P.am2, [B.part, B.am, uni([V, per, nPart, 0])]), dyn: (pos, n) => [n, 1, 1] }] });
+      }
+      return () => {   // once the pipelines are in: the lists, with every layer's split after its router
+        const lists = halfOps(halves);
+        const out = { layers: lmeta.map((m, k) => ({ ...m, ops: [...lists[2 * k], ...lists[2 * k + 1]] })) };
+        if (eng.hasHead) { const h = lists[lists.length - 1]; out.headSite = h.slice(0, 1); out.headRest = h.slice(1); }
+        for (const l of out.layers) if (l.off) { const at = l.ops.findIndex((o) => o.cut) + 1; l.route = l.ops.slice(0, at); l.exp = l.ops.slice(at); }
+        return out;
+      };
+    };
     if (eng.hasHead) {
-      const V = eng.dims.vocab, per = 1024, nPart = cdiv(V, per), NV = this.verifyCols;
+      const V = eng.dims.vocab, nPart = cdiv(V, 1024), NV = this.verifyCols;
       Object.assign(B, { hl: buf(NV * V), part: buf(NV * nPart * 2), am: buf(NV * 2) });
-      halves.push({ pre: [], site: site(W.headHC, false), comb: null, rest: [...hcMixRest(W.headHC),
-        gemv(wq(W.head, "output"), B.mixed, B.hl, { dIn: d }),
-        { pipe: P.am1, bg: bg(P.am1, [B.hl, B.part, uni([V, per, nPart, 0])]), dyn: (pos, n) => [nPart, n, 1] },
-        { pipe: P.am2, bg: bg(P.am2, [B.part, B.am, uni([V, per, nPart, 0])]), dyn: (pos, n) => [n, 1, 1] }] });
       this.amStage = device.createBuffer({ size: NV * 8, usage: U.MAP_READ | U.COPY_DST });
       this.logitStage = device.createBuffer({ size: Math.ceil(V * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
     }
-    await Promise.all(pending.map(async ({ op, pp, list }) => { op.pipe = await pp; op.bg = bg(op.pipe, list); }));
-    const lists = halfOps(halves);
-    this.layers = lmeta.map((m, k) => ({ ...m, ops: [...lists[2 * k], ...lists[2 * k + 1]] }));
-    if (eng.hasHead) { const h = lists[lists.length - 1]; this.headSite = h.slice(0, 1); this.headRest = h.slice(1); }
-    for (const l of this.layers) if (l.off) { const at = l.ops.findIndex((o) => o.cut) + 1; l.route = l.ops.slice(0, at); l.exp = l.ops.slice(at); }
+    const exactL = build(false), fastL = exact ? null : build(true);
+    await Promise.all(pending.map(async ({ op, pp, list }) => {
+      op.pipe = await pp;
+      if (op.partAt !== undefined) { list = list.slice(); list[op.partAt] = partOf(); }
+      op.bg = bg(op.pipe, list);
+    }));
+    this.L = { exact: exactL(), fast: fastL ? fastL() : null };
     if (offSet.size) this.idStage = device.createBuffer({ size: N * K * 4, usage: U.MAP_READ | U.COPY_DST });
     this.hStage = device.createBuffer({ size: HD * 4, usage: U.MAP_READ | U.COPY_DST });
     this._stages = new Map();
     this._snap = null;
   }
+
+  // whether a pass of n columns (head: as _run) runs the wide kernels
+  fastPass(n, head = "last") { return !this.exact && head !== "all" && n >= WX.FAST_MIN_COLS; }
 
   _stage(bytes) {
     let s = this._stages.get(bytes);
@@ -266,7 +415,11 @@ export class Qwen4ExpBatch {
     }
   }
 
-  async _run(ids, { head = "last", wantLogits = false, wantHidden = false, hidden = null } = {}) {
+  // exact: this pass on the exact kernels whatever its width. taps: also return taps (one Float32Array of n x hDim per
+  // layer: the residual after that layer, read where the next layer's first HC site has folded in its last combine,
+  // so the PLE layer's injection shows in the layer before it; the last one after the final combine) for the
+  // per-layer comparison of the wide kernels against the exact ones (tests/test_q38flash_batch.js).
+  async _run(ids, { head = "last", wantLogits = false, wantHidden = false, hidden = null, exact = false, taps = false } = {}) {
     const { eng, device, cfg, B } = this, q = device.queue, n = ids.length, pos = eng.pos, HD = cfg.hDim, d = cfg.dim;
     if (!(n >= 1 && n <= this.maxCols)) throw new Error(`qwen4exp batch: ${n} columns (1 .. ${this.maxCols})`);
     if (pos + n > eng.maxSeq) throw new Error(`qwen4exp: context full (${eng.maxSeq})`);
@@ -294,15 +447,24 @@ export class Qwen4ExpBatch {
     q.writeBuffer(B.cs, 0, cs);
     if (eng.qsa) qsaSetFrame(device, this.qsaS, pos, n);
 
+    // the wide kernels for a prefill pass of at least FAST_MIN_COLS columns (not with exact, not for verify)
+    const Ls = !exact && this.fastPass(n, head) ? this.L.fast : this.L.exact;
+    const tapBufs = [];
+    this._tap = taps ? (enc) => {
+      const b = device.createBuffer({ size: n * HD * 4, usage: U.MAP_READ | U.COPY_DST });
+      enc.copyBufferToBuffer(B.R, 0, b, 0, n * HD * 4);
+      tapBufs.push(b);
+    } : null;
     let at = 0;
-    for (; at + SUBMIT_LAYERS < this.layers.length; at += SUBMIT_LAYERS) {
-      const r = await this._encodeLayers(this.layers.slice(at, at + SUBMIT_LAYERS), pos, n);
+    for (; at + SUBMIT_LAYERS < Ls.layers.length; at += SUBMIT_LAYERS) {
+      const r = await this._encodeLayers(Ls.layers.slice(at, at + SUBMIT_LAYERS), pos, n);
       r.pass.end();
       q.submit([r.enc.finish()]);
     }
-    let { enc, pass } = await this._encodeLayers(this.layers.slice(at), pos, n);
-    if (eng.hasHead) eng._encode(pass, this.headSite, pos, n);   // the last layer's combine, on every column
-    if (head === "all") eng._encode(pass, this.headRest, pos, n);
+    let { enc, pass } = await this._encodeLayers(Ls.layers.slice(at), pos, n);
+    if (eng.hasHead) eng._encode(pass, Ls.headSite, pos, n);   // the last layer's combine, on every column
+    if (this._tap) { pass.end(); this._tap(enc); pass = enc.beginComputePass(); }   // the last layer's output (its combine: the head site's, or its own last op)
+    if (head === "all") eng._encode(pass, Ls.headRest, pos, n);
     pass.end();
     const out = {}, HB = HD * 4;
     if (head === "last") {
@@ -313,7 +475,7 @@ export class Qwen4ExpBatch {
         // encoded copy, not a writeBuffer: that would land before the layers above run)
         enc.copyBufferToBuffer(B.F1, 0, B.F, 0, 16);
         pass = enc.beginComputePass();
-        eng._encode(pass, this.headRest, pos + n - 1, 1);
+        eng._encode(pass, Ls.headRest, pos + n - 1, 1);
         pass.end();
         enc.copyBufferToBuffer(B.am, 0, this.amStage, 0, 8);
         if (wantLogits) enc.copyBufferToBuffer(B.hl, 0, this.logitStage, 0, eng.dims.vocab * 4);
@@ -335,6 +497,8 @@ export class Qwen4ExpBatch {
     if (head === "all") { const a = await this._read(this.amStage, n * 8, Uint32Array); out.ids = Array.from({ length: n }, (_, c) => a[2 * c]); }
     if (wantHidden) out.hiddens = await this._read(hs, n * HB);
     if (head === "none" && !wantHidden) await q.onSubmittedWorkDone();
+    if (taps) { out.taps = []; for (const b of tapBufs) { out.taps.push(await this._read(b, n * HD * 4)); b.destroy(); } }
+    this._tap = null;
     return out;
   }
 
@@ -343,9 +507,20 @@ export class Qwen4ExpBatch {
   async _encodeLayers(ls, pos, n) {
     const { eng, device, cfg } = this, K = cfg.K, st = eng.experts;
     let enc = device.createCommandEncoder(), pass = enc.beginComputePass();
+    // with a tap: the residual of the layer before l, once l's first HC site has folded in its combine
+    const tapped = (ops) => {
+      if (!this._tap) return ops;
+      const at = ops.findIndex((o) => o.site) + 1;
+      eng._encode(pass, ops.slice(0, at), pos, n);
+      pass.end(); this._tap(enc); pass = enc.beginComputePass();
+      return ops.slice(at);
+    };
     for (const l of ls) {
-      if (!l.off) { eng._encode(pass, l.ops, pos, n); continue; }
-      eng._encode(pass, l.route, pos, n);
+      const first = l.i === eng.lo;
+      // (the ops first: tapped() replaces the pass)
+      const ops = first ? (l.off ? l.route : l.ops) : tapped(l.off ? l.route : l.ops);
+      eng._encode(pass, ops, pos, n);
+      if (!l.off) continue;
       pass.end();
       if (2 * n * K >= cfg.nExp) st.loadLayer(enc, l.i);
       else {
@@ -385,7 +560,9 @@ export class Qwen4ExpBatch {
     this._pending = null;
     this._save();
     const pos0 = this.eng.pos;
-    const r = await this._pass(ids, { head: "all", wantHidden });
+    // exact: true, not only head "all": on an engine without the head (a later room stage) _run turns "all" into
+    // "none", which alone would send a verify of FAST_MIN_COLS+ columns to the wide kernels
+    const r = await this._pass(ids, { head: "all", wantHidden, exact: true });
     this._pending = { ids: ids.slice(), pos0, gen: this.eng._posGen };
     return r;
   }
@@ -404,7 +581,9 @@ export class Qwen4ExpBatch {
     this._restore();
     this.eng.pos = v.pos0;
     this.eng.ngs?.rollback(v.ids.length);
-    if (n) await this._pass(v.ids.slice(0, n), { head: "none" });
+    // on the exact kernels whatever n: the state kept must be the one the verify pass computed and scored (a replay of
+    // FAST_MIN_COLS+ columns would otherwise take the wide kernels and sum in another order)
+    if (n) await this._pass(v.ids.slice(0, n), { head: "none", exact: true });
   }
 
   // the recurrent state (DeltaNet conv + S, the PLE ring), copied on the GPU

@@ -14,7 +14,7 @@ trap 'rm -f "${TMPDIR:-/tmp}"/pooled-run.$$.*' EXIT   # a Ctrl-C mid-test leaves
 WC="${WEIGHT_CACHE:-$HOME/.cache/swarmllm-weights}"
 D="deno run --unstable-webgpu --allow-read --allow-env --allow-write=$WC --allow-net"   # net: test_shard fetches from Hugging Face
 quick=(test_selftest.js test_qwen.js test_smollm.js test_stream.js test_batch.js test_reset.js test_qwen_split.js test_qwen_stream.js test_batch_split.js test_runtime.js)
-extra=(test_moe.js test_shard.js test_split.js test_fuse_proj.js test_q17_split.js test_qwen4.js test_stream_engine.js test_q38_full.js test_qsa.js test_q38flash_mc.js)
+extra=(test_moe.js test_shard.js test_split.js test_fuse_proj.js test_q17_split.js test_qwen4.js test_stream_engine.js test_q38_full.js test_qsa.js test_q38flash_mc.js test_q38flash_wide.js)
 q38=(test_q38.js test_batch_q38.js test_mtp.js test_b4.js test_twins.js test_gemm.js test_q38_split.js test_mtp_split.js test_ctx.js)
 
 # run_one <file> [tail lines]: runs one test, prints the last lines of its output, returns 1 on a
