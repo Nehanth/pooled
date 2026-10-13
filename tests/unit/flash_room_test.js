@@ -253,7 +253,7 @@ const argmax = (a) => { let b = 0; for (let i = 1; i < a.length; i++) if (a[i] >
 Deno.test("flash adapter: one device, every layer: decode, slots, export / import with the n-gram state", async () => {
   const dev = fakeDevice(), L = 8;
   const E = new FlashRoomEngine(fakeCore(dev, { lo: 0, hi: L, L, hasEmbed: true, hasHead: true }));
-  eq([E.dims.hDim, E.frameIds, E.ckpt, E.mtp, E.maxSeq, E.stateSignature()], [16, true, true, null, 64, { v: 1, arch: "qwen4exp", lo: 0, hi: L, hDim: 16, kv: "f32", ple: [1] }]);
+  eq([E.dims.hDim, E.frameIds, E.ckpt, E.mtp, E.maxSeq, E.stateSignature()], [16, true, true, null, 64, { v: 2, arch: "qwen4exp", lo: 0, hi: L, kv: "f32", hDim: 16, ple: [1] }]);
   const run = async (ids, n) => {
     const out = [];
     await E.prefillTokens(ids.slice(0, -1));
