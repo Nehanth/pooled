@@ -3616,7 +3616,12 @@ async function aiStart(modelArg) {
     const myDisk = deal.fit.fits && myMeta.tabDisk?.ask ? hostDiskBytes(deal, modelKey) : 0;
     if (myDisk > 0) {
       aiStatus("Waiting for you to say if the model may be saved on this computer");
-      if (!(await askTabDisk({ model: modelKey, bytes: myDisk, host: true }))) ({ pick, deal } = planNow());
+      if (!(await askTabDisk({ model: modelKey, bytes: myDisk, host: true }))) {
+        ({ pick, deal } = planNow());
+        // "Not now" and the room can't run it without this disk: back to the picker quietly (no "N GB short" error);
+        // it shows disk storage off, with Allow under Start
+        if (!deal.fit.fits) { aiStartStopped("the host kept the model off its disk", { quiet: true }); return; }
+      }
     }
     ROOM_CTX = pick.ctx;
     layerBytes = layerAt(ROOM_CTX);
@@ -3705,7 +3710,8 @@ async function aiStart(modelArg) {
 // (ai-error with load). Every screen goes back to the model picker with Start on, so the room can try
 // again (the other screens are told with ai-start-failed). While this device still loads its own layers
 // the load stops at its next tensor (the pacer) and aiStart's catch lands here.
-function aiStartStopped(why) {
+// quiet: this device's own choice stopped it (a "Not now" to the disk question): no "failed" line here
+function aiStartStopped(why, { quiet = false } = {}) {
   ai.startFailed = null;
   ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null;   // free for the next Start (room/authz.js)
   ai.redealPending = false;   // nothing to deal again: the room is stopped
@@ -3716,7 +3722,7 @@ function aiStartStopped(why) {
   ai.heldGB = null; ai.outWhy = {}; paintHeld();
   failWaiters(new Error(why));
   $("ai-panel").classList.remove("online");
-  aiStatus("failed: " + why);
+  aiStatus(quiet ? "" : "failed: " + why);
   ai.busy = false;
   $("ai-start").disabled = false;
   $("ai-model").disabled = false;
