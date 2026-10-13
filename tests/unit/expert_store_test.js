@@ -267,6 +267,41 @@ Deno.test("disk: prepare + plan put the same bytes in the same slots as the park
   assert(st.stats.diskReads > 0 && st.stats.diskBytes > 0, "disk counters");
 });
 
+// a reader with leases (packages/room-node/expert_disk.js leasePart): the bytes in a shared buffer that the next lease
+// reuses, and that release() overwrites, so a store reading them after release() gets garbage
+function leasingReader(base, slots) {
+  let out = 0, most = 0, leases = 0;
+  const r = { calls: base.calls, readPart: base.readPart, leaseSlots: slots,
+    async leasePart(info, e) {
+      const { qs, sc } = await base.readPart(info, e);
+      const ring = new Uint8Array(new SharedArrayBuffer(qs.length + sc.length));
+      ring.set(qs); ring.set(sc, qs.length);
+      out++; leases++; most = Math.max(most, out);
+      let done = false;
+      return { qs: ring.subarray(0, qs.length), sc: ring.subarray(qs.length), release() { if (done) return; done = true; out--; ring.fill(0xee); } };
+    },
+    get out() { return out; }, get most() { return most; }, get leases() { return leases; } };
+  return r;
+}
+
+Deno.test("disk: cuts read as leases put the parked bytes in the pools and give every lease back after plan()", async () => {
+  for (const slots of [64, 6]) {   // 6: a cut of more than two misses does not fit the ring and reads plain arrays
+    const { st, reader } = makeDiskStore({ slots: 8 }), { st: ref } = makeStore({ slots: 8 });
+    const R = st.reader = leasingReader(reader, slots);
+    let seed = 5;
+    const rnd = (n) => ((seed = (seed * 1103515245 + 12345) >>> 0) % n);
+    for (let t = 0; t < 120; t++) {
+      const l = rnd(2) ? 2 : 5, KS = 5, nCols = rnd(4) ? 1 : 2, sel = new Uint32Array(nCols * KS);
+      for (let c = 0; c < nCols; c++) { const ids = []; while (ids.length < 4) { const e = rnd(rnd(3) ? 12 : 32); if (!ids.includes(e)) ids.push(e); } sel.set(ids, c * KS); }
+      const a = await diskPlan(st, l, sel, nCols, KS), b = ref.plan(fakeEncoder(), l, sel, nCols, KS);
+      assert(a.pool === b.pool && (!a.pool || a.remap.every((x, i) => x === b.remap[i])), `t ${t}: same plan`);
+      assert(sameBytes(poolBytes(st, l), poolBytes(ref, l)), `t ${t}: same pool bytes`);
+      assert(R.out === 0, `t ${t}: ${R.out} leases still held after plan()`);
+    }
+    assert(R.leases > 0 && R.most <= slots, `ring ${slots}: ${R.leases} leases, at most ${R.most} at once`);
+  }
+});
+
 Deno.test("disk: only misses are read; a plan without prepare throws", async () => {
   const { st, reader } = makeDiskStore();
   await diskPlan(st, 2, sel1([7, 3, 9, 1]), 1, 5);

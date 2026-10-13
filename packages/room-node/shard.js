@@ -81,6 +81,16 @@ export function expertReader({ paths, make = expertDiskReader, log = () => {} })
       try { return await w.readPart(info, e); }
       catch (err) { if (!/no worker left/.test(String(err?.message))) throw err; return inThread().readPart(info, e); }
     },
+    // leases (expert_disk.js leasePart: views of the reader's shared ring, valid until release()), for a store that
+    // copies the bytes out before it lets go of them (engine/expert_store.js prepare). The in-thread fallback's bytes
+    // are plain arrays: a lease of them releases nothing
+    get leaseSlots() { return !fb && w.leasePart ? w.leaseSlots || 0 : 0; },
+    async leasePart(info, e) {
+      const plain = async () => ({ ...(await inThread().readPart(info, e)), release() {} });
+      if (fb) return plain();
+      try { return await w.leasePart(info, e); }
+      catch (err) { if (!/no worker left/.test(String(err?.message))) throw err; return plain(); }
+    },
     async close() {
       await w.close?.();
       for (const f of files || []) try { await f.close(); } catch {}

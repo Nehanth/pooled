@@ -111,6 +111,20 @@ test("expertDiskReader: every expert of every type equals the whole-tensor conve
   } finally { await disk.close(); }
 });
 
+test("expertDiskReader: a lease of a whole part (one job, converted straight into the ring) equals the whole-tensor conversion", async () => {
+  const disk = expertDiskReader({ paths, threads: 3, ringSlots: 8 });
+  try {
+    assert.equal(disk.leaseSlots, 8);
+    for (const info of experts) for (let e = 0; e < info.shape[0]; e++) {
+      const l = await disk.leasePart(info, e);
+      try {
+        assert.ok(l.qs.buffer instanceof SharedArrayBuffer, "a view of the ring");
+        same({ qs: l.qs, sc: l.sc }, want(info, e), `${info.name} expert ${e} (lease)`);
+      } finally { l.release(); }
+    }
+  } finally { await disk.close(); }
+});
+
 test("expertDiskReader: a part that fits in one job is read, converted and handed over by one worker, no ring", async () => {
   const disk = expertDiskReader({ paths, threads: 3 });   // chunkBytes 1 MiB: every test part fits
   try {

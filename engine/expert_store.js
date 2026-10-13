@@ -85,6 +85,7 @@ export class ExpertStore {
     if (notOff.length) console.warn(`ExpertStore: disk layers ${notOff.join(",")} are not offloaded layers: their experts stay resident on the GPU`);
     if (disk && !this.diskSet.size && (disk.layers || []).length) console.warn("ExpertStore: none of the disk layers is offloaded: no disk tier");
     this._staged = null;
+    this._leases = [];           // reader leases (views of its shared ring) the staged bytes are in: released at _unstage
     this.vramBytes = vramBytes; this.slotsOpt = slots;
     this.parkBytes = Math.min(parkBytes, device.limits?.maxBufferSize ?? parkBytes);
     this.L = new Map();          // layer -> { parts: { gate|up|down: { kind, nExp, rows, cols, sl: [qs, sc] } } }
@@ -276,7 +277,7 @@ export class ExpertStore {
     st.lookups += uniq.length;
     if (uniq.length > this.P) {   // a wide verify / prompt-tail pass: through the region, no caching
       this._toRegion(enc, layer, uniq);
-      this._staged = null;
+      this._unstage();
       return { pool: false };
     }
     // recency is one stamp per use (hits in selection order, then the misses), so the order is total; the
@@ -298,7 +299,7 @@ export class ExpertStore {
       st.misses++;
     }
     if (miss.length && S.tab) this.device.queue.writeBuffer(S.tab, 0, S.slotOf);   // (before the copies' submit: nothing reads it between)
-    this._staged = null;
+    this._unstage();
     const remap = new Uint32Array(nCols * KS);
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) remap[c * KS + k] = S.slotOf[sel[c * KS + k]];
     return { pool: true, remap };
@@ -326,11 +327,16 @@ export class ExpertStore {
   }
 
   // ---- disk layers ----
-  // one expert's six slices (SLICES order), read and converted
-  async _readExpert(S, e) {
+  // one expert's six slices (SLICES order), read and converted. lease: as views of the reader's shared ring
+  // (reader.leasePart), held in _leases until _unstage: no arrays made per read, for a caller that copies the bytes
+  // out (into a T1 slot, a ring slot or by writeBuffer, all synchronous) before then
+  async _readExpert(S, e, lease = false) {
     const out = [];
-    const parts = await Promise.all(OFFLOAD_PARTS.map((p) => this.reader.readPart(S.parts[p].info, e)));
-    for (const r of parts) out.push(r.qs, r.sc);
+    const rs = await Promise.allSettled(OFFLOAD_PARTS.map((p) => (lease ? this.reader.leasePart(S.parts[p].info, e) : this.reader.readPart(S.parts[p].info, e))));
+    if (lease) for (const r of rs) if (r.status === "fulfilled") this._leases.push(r.value);
+    const bad = rs.find((r) => r.status === "rejected");
+    if (bad) throw bad.reason;
+    for (const { value: r } of rs) out.push(r.qs, r.sc);
     ExpertStore.SLICES.forEach(([p, s], j) => {
       // (a reader may pad the scales to whole u32 words, as convertEntry's Uint32Array does: only `want` bytes count)
       const want = S.parts[p].sl[s].per;
@@ -341,9 +347,9 @@ export class ExpertStore {
   }
   // these experts of a disk layer, read in parallel -> Map(e -> slices); stats count the wait. Callers keep ids to a
   // run (REGION_RUN): each expert is held whole in memory until written (~10 MB on the 122B)
-  async _readMany(layer, ids) {
+  async _readMany(layer, ids, lease = false) {
     const S = this.L.get(layer), t0 = performance.now(), m = new Map();
-    const got = await Promise.all(ids.map((e) => this._readExpert(S, e)));
+    const got = await Promise.all(ids.map((e) => this._readExpert(S, e, lease)));
     ids.forEach((e, i) => m.set(e, got[i]));
     this.stats.diskWaitMs += performance.now() - t0;
     this.stats.diskReads += ids.length;
@@ -364,7 +370,7 @@ export class ExpertStore {
     const S = this.L.get(layer), K = KS - 1, uniq = [];
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) { const e = sel[c * KS + k]; if (e < this.nExp && !uniq.includes(e)) uniq.push(e); }
     const ids = (uniq.length > this.P ? uniq : uniq.filter((e) => S.slotOf[e] < 0)).filter((e) => !this.t1 || this.t1.find(this._key(layer, e), false) < 0);
-    this._staged = null;
+    this._unstage();
     // the cut before this one was submitted, its experts' copies with it: its ring slots map again while we read. Not
     // when flush is false (engine _specCut after its first prepare: its unsubmitted encoder copies from those slots)
     if (flush) this.ring?.recycle();
@@ -374,7 +380,9 @@ export class ExpertStore {
       await this._writeRegion(layer, ids);
       this._staged = { layer, region: new Set(ids) };
     } else {
-      const bytes = await this._readMany(layer, ids);
+      // a cut's experts as leases when the reader has them and its ring holds the cut (a wide pass goes the region way)
+      const lease = !!this.reader.leasePart && ids.length * OFFLOAD_PARTS.length <= (this.reader.leaseSlots || 0);
+      const bytes = await this._readMany(layer, ids, lease);
       if (this.ring) {   // into ring slots now; plan() copies from them (a full ring: those take the writeBuffer path)
         for (const b of bytes.values()) b.gpu = this.ring.put(b);
         this.ring.seal();
@@ -403,6 +411,11 @@ export class ExpertStore {
     return n;
   }
   static REGION_RUN = 32;
+  // the staged bytes are done with: what they hold in the reader's ring goes back to it
+  _unstage() {
+    this._staged = null;
+    if (this._leases.length) for (const r of this._leases.splice(0)) r.release?.();
+  }
   _key(layer, e) { return layer * this.nExp + e; }
   // an expert into dst slot / region id `at`: a copy from its parked buffer, or (disk layer) from its T1 slot, or the
   // bytes prepare() read: into a free T1 slot and copied from there when T1 admits it (admit: a pool fill, enc given),
@@ -469,7 +482,7 @@ export class ExpertStore {
     if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
     this.t1?.flush();
     const ids = this._frameIds(sel, nCols, KS);
-    this._staged = null;
+    this._unstage();
     this.stats.regionBytes += await this._writeRegion(layer, ids);
     this.region.layer = -1;
     this.stats.regionCuts++;
@@ -538,6 +551,7 @@ export class ExpertStore {
   get t1RamBytes() { return this.t1 ? this.t1.bytes : 0; }
   // frees the RAM cache and stops the reader (room node: when the layers are freed)
   async close() {
+    this._unstage();
     this.t1?.destroy(); this.t1 = null;
     const r = this.reader; this.reader = null;
     await r?.close?.();

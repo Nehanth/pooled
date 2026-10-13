@@ -153,15 +153,18 @@ export function ggufToF32(info, bytes /* Uint8Array of the tensor's data */) {
 }
 
 // Repack Q8_0 for the GPU: {qs: Int8Array (as Uint32-aligned buffer), scales: Float32Array}
-export function q8Repack(info, bytes) {
+// out (optional): { qs: Uint8Array(n), sc16: Uint16Array(nb) } to write into instead of new arrays (expert offload's
+// disk workers convert straight into a shared staging slot: a fresh ~1 MiB array per expert part costs ~0.8 ms of page
+// faults on Windows with 16 workers at once). The bytes are the same; scales is then null.
+export function q8Repack(info, bytes, out = null) {
   const n = info.nElems;
   const nb = n / QK8_0;
-  const qs = new Uint8Array(n);
-  const scales = new Uint32Array(Math.ceil(nb / 2));   // raw f16 scales, 2 per word
-  const sc16 = new Uint16Array(scales.buffer);
+  const qs = out ? out.qs : new Uint8Array(n);
+  const scales = out ? null : new Uint32Array(Math.ceil(nb / 2));   // raw f16 scales, 2 per word
+  const sc16 = out ? out.sc16 : new Uint16Array(scales.buffer);
   if ((bytes.byteOffset & 1) === 0) {
     // 34-byte blocks keep 2-byte alignment: move u16 words (3x faster than subarray+set per block)
-    const src = new Uint16Array(bytes.buffer, bytes.byteOffset, nb * 17), dst = new Uint16Array(qs.buffer);
+    const src = new Uint16Array(bytes.buffer, bytes.byteOffset, nb * 17), dst = new Uint16Array(qs.buffer, qs.byteOffset, n / 2);
     for (let b = 0, s = 0, d = 0; b < nb; b++, s += 17, d += 16) {
       sc16[b] = src[s];
       for (let j = 0; j < 16; j++) dst[d + j] = src[s + 1 + j];
@@ -451,16 +454,17 @@ export function tokenizerFromGGUF(meta) {
 }
 
 // Repack Q4_0 for the GPU: nibbles stay packed (16 bytes/block), scales split out.
-export function q4Repack(info, bytes) {
+// out (optional): { qs: Uint8Array(n / 2), sc16: Uint16Array(nb) } to write into, as q8Repack's
+export function q4Repack(info, bytes, out = null) {
   const n = info.nElems;
   const nb = n / 32;
-  const qs = new Uint8Array(n / 2);
-  const scales = new Uint32Array(Math.ceil(nb / 2));   // raw f16 scales, 2 per word
-  const sc16 = new Uint16Array(scales.buffer);
+  const qs = out ? out.qs : new Uint8Array(n / 2);
+  const scales = out ? null : new Uint32Array(Math.ceil(nb / 2));   // raw f16 scales, 2 per word
+  const sc16 = out ? out.sc16 : new Uint16Array(scales.buffer);
   if ((bytes.byteOffset & 1) === 0) {
     // 18-byte blocks keep 2-byte alignment: move u16 words (3x faster than subarray+set per block;
     // this loop is most of a cold 27B load)
-    const src = new Uint16Array(bytes.buffer, bytes.byteOffset, nb * 9), dst = new Uint16Array(qs.buffer);
+    const src = new Uint16Array(bytes.buffer, bytes.byteOffset, nb * 9), dst = new Uint16Array(qs.buffer, qs.byteOffset, n / 4);
     for (let b = 0, s = 0, d = 0; b < nb; b++, s += 9, d += 8) {
       sc16[b] = src[s];
       dst[d] = src[s + 1]; dst[d + 1] = src[s + 2]; dst[d + 2] = src[s + 3]; dst[d + 3] = src[s + 4];

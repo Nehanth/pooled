@@ -3,11 +3,12 @@
 // a time) and, for an expert's rows, converts them with engine/gguf.js convertEntry, the function the engine's loader
 // runs. Three kinds of job:
 //   own     the range (converted when conv is set) into buffers this worker makes, transferred with the reply
-//   dst     into the pool's SharedArrayBuffer at the offsets the job names; only a short reply goes back
+//   dst     into the pool's SharedArrayBuffer at the offsets the job names (a Q4_0 / Q8_0 repack writes there
+//           directly); only a short reply goes back
 //   gather  [offset, length] ranges of a SharedArrayBuffer copied into buffers of this worker's own, transferred
 import fs from "node:fs";
 import { workerData, parentPort } from "node:worker_threads";
-import { convertEntry } from "../../engine/gguf.js";
+import { convertEntry, q4Repack, q8Repack, GGML_Q4_0, GGML_Q8_0 } from "../../engine/gguf.js";
 
 const { paths } = workerData;
 const fds = new Map();   // shard -> fd
@@ -65,6 +66,16 @@ parentPort.on("message", (m) => {
     // conv.rows whole rows of one expert: Q4_0 / Q8_0 blocks and the Q8 requant never span rows, so these
     // bytes are exactly the whole tensor's conversion at this row range
     const { ggmlType, rows, cols, scOff } = conv;
+    // into the shared slot: a Q4_0 / Q8_0 repack writes there itself, with no arrays of its own (a fresh ~1 MiB array
+    // per job costs ~0.8 ms of page faults on Windows with 16 workers at once, as much as the read). Same bytes as
+    // convertEntry's: these are its two repacks
+    if (!own && (ggmlType === GGML_Q4_0 || ggmlType === GGML_Q8_0) && dstOff % 2 === 0 && scOff % 2 === 0) {
+      const n = rows * cols;
+      (ggmlType === GGML_Q4_0 ? q4Repack : q8Repack)({ nElems: n }, raw,
+        { qs: new Uint8Array(dst, dstOff, ggmlType === GGML_Q4_0 ? n / 2 : n), sc16: new Uint16Array(dst, scOff, n / 32) });
+      parentPort.postMessage({ id, readMs: t1 - t0, convMs: performance.now() - t1 });
+      return;
+    }
     const e = convertEntry({ ggmlType, shape: [rows, cols], nElems: rows * cols }, raw);
     if (e.kind !== "q4" && e.kind !== "q8") throw new Error(`ggml type ${ggmlType} converts to ${e.kind}, not q4 / q8`);
     if (own) {   // convertEntry's own arrays (exactly qsBytes and scBytes, the scales padded to whole u32 words)
