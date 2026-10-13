@@ -27,14 +27,51 @@ export const rowTitle = (m) => `${m.name}: a ${paramsText(m)} model that keeps m
 // the line under the rows while it is picked (in place of the download note), in plain words: what it is, why it
 // fits where smaller models don't, and what more devices do. needGB / needDisk: roomFitFor's (null: not known yet;
 // needDisk false: no device here streams from disk, so needGB is the whole model on GPUs)
-export const pickNote = (m, needGB = null, needDisk = true) => !needDisk && needGB > 0
-  ? `${m.name} is a ${m.params} model that normally keeps most of itself on disk. With no disk storage in this room, it needs ${num(needGB)} GB of GPU memory.`
+// fits: roomFitFor's verdict (with needDisk false, the whole model fits in this room's GPU memory)
+export const pickNote = (m, needGB = null, needDisk = true, fits = false) => !needDisk && needGB > 0
+  ? (fits ? `${m.name} is a ${m.params} model. This room's GPU memory holds all of it.`
+    : `${m.name} is a ${m.params} model that keeps most of itself on disk. No device in this room can store it yet: allow disk storage, or invite a computer that can.`)
   : `${m.name} is a ${m.params} model. It keeps most of itself on disk, so it needs `
     + (needGB > 0 ? `only ${num(needGB)} GB of GPU memory` : "far less GPU memory than its size") + ". Each device that joins makes it faster.";
-// under Start, when it doesn't fit: by how much, and the fix this device's disk answer (diskState) leaves
-export const shortNote = (shortGB, state) => `${num(shortGB)} GB of GPU memory short. `
-  + (state === "ask" || state === "deny" ? "Allow disk storage, or invite more devices."
-    : state === "allow" ? "Invite more devices, or give more GPU memory." : "Invite more devices with GPUs.");
+// under Start, when it doesn't fit: by how much, and the fix this device's disk answer (diskState) leaves. needDisk
+// false: no device here can store it, which is the gap (not a GPU figure for the whole model)
+const FIX = (state) => state === "ask" || state === "deny" ? "Allow disk storage, or invite more devices."
+  : state === "allow" ? "Invite more devices, or give more GPU memory." : "Invite more devices with GPUs.";
+export const shortNote = (shortGB, state, needDisk = true) => (needDisk ? `${num(shortGB)} GB of GPU memory short. ` : "Needs a device that can store it. ") + FIX(state);
+
+// ---- The pool (room.js renderPool, while a disk model is picked): a GPU memory bar and a Storage bar ----
+// What each device brings beyond GPU memory is room/pledge.js storageOf: { kind: "disk" | "ram" | null, ask, ramGB }.
+// The figures are roomFitFor's (needGB, needDisk, fits, shortGB), never a whole-model GPU figure.
+// -> { text, num (GB, or null), chip (or null), ok }
+export function poolGpuLine(m, { needGB = null, needDisk = false, fits = false, shortGB = 0, nStore = 0 } = {}) {
+  if (needDisk && needGB != null) return { text: `${m.name} needs`, num: num(needGB), chip: fits ? "fits" : `${num(shortGB)} GB short`, ok: !!fits };
+  if (fits) return { text: `${m.name} fits in this room's GPU memory`, num: null, chip: "fits", ok: true };
+  if (nStore === 0) return { text: `${m.name} runs once a device stores it`, num: null, chip: null, ok: false };
+  return { text: "Not enough GPU memory in this room yet", num: null, chip: "short", ok: false };
+}
+// -> { text, chip (or null), ok }
+export function poolStoreLine(m, { nDisk = 0, nRam = 0, anyAsk = false, needDisk = false, fits = false } = {}) {
+  const size = sizeText(m.diskBytes);
+  if (nDisk > 0) return { text: `Keeps up to ${size} on each device's disk${anyAsk ? ", asks before saving" : ""}`, chip: "fits", ok: true };
+  if (nRam > 0) return { text: `Held in spare memory on ${nRam} device${nRam === 1 ? "" : "s"}`, chip: "fits", ok: true };
+  if (!needDisk && fits) return { text: "Not needed here, it all fits in GPU memory", chip: null, ok: false };
+  return { text: "No device here can store it", chip: "needs disk", ok: false };
+}
+// the fix under the Storage line: only when no device can store it, or the GPU memory is short with storage present
+// (no planner figure). state: this device's disk answer (room/diskstore.js diskState)
+export function poolFix(state, { nStore = 0, fits = false, needDisk = false, needGB = null } = {}) {
+  if (nStore === 0) {
+    if (!needDisk && fits) return "";
+    return state === "ask" || state === "deny" ? "Allow disk storage below, or invite a computer that can."
+      : state === "url" ? "This link turns disk storage off. Invite a computer that can store it."
+      : "Invite a computer with a GPU and free disk space.";
+  }
+  return !fits && (needGB == null || !needDisk) ? "Give more GPU memory below, or invite a device." : "";
+}
+// a device row's tag in the pool's list, and the words its tooltip uses
+export const devStoreTag = (st) => st?.kind === "disk" ? (st.ask ? "asks" : "disk") : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk";
+export const devStoreTitle = (name, gb, st) => `${name}: ${gb} GB GPU memory, `
+  + (st?.kind === "disk" ? (st.ask ? "asks before saving to disk" : "disk") : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk");
 
 // ---- Disk ----
 // state: room/diskstore.js diskState: "ask" | "allow" | "deny" | "url" (the address keeps it off: ?tabdisk=0, ?tabram=0)

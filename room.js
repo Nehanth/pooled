@@ -49,14 +49,14 @@ import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, STA
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { diskCopyOf, rowChipHTML, rowTitle } from "./room/diskpick.js";
-import { showDiskPick, initDiskPick, refreshDiskPick, diskShortNote } from "./room/diskpick-ui.js";
+import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle } from "./room/diskpick.js";
+import { showDiskPick, initDiskPick, refreshDiskPick, diskShortNote, diskStateOf } from "./room/diskpick-ui.js";
 import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
-import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor } from "./room/pledge.js";
+import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor, storageOf } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
@@ -613,7 +613,7 @@ function renderLadder(pledged, rows = fitLadder(pledged)) {
     // Its fit chip is the other rows' ("fits" / "N GB short"), from the same roomFitFor as the pool's line: the one
     // fit answer every visitor sees (the need line above the rows is the developer's)
     const dk = diskCopyOf(x.key);
-    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}" title="${esc(x.ok ? rowTitle(dk) : x.f?.note || "Invite a device to fit this")}"><span class="rn">${esc(dk.name)}</span><span class="fig">${rowChipHTML(dk)}${none ? "" : x.ok ? "<b>fits</b>" : `<span class="more">${x.short} GB short</span>`}</span></button>`;
+    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}" title="${esc(x.ok ? rowTitle(dk) : x.f?.note || "Invite a device to fit this")}"><span class="rn">${esc(dk.name)}</span><span class="fig">${rowChipHTML(dk)}${none ? "" : x.ok ? "<b>fits</b>" : x.f?.needDisk === false ? '<span class="more">needs disk</span>' : `<span class="more">${x.short} GB short</span>`}</span></button>`;
     return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${back ? ` title="${esc(ctxShortNote(shortName(x.key), x.f.ctx, x.f.want))}"` : x.ok ? "" : ` title="${esc(x.f?.note || (giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"))}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
   // the same rows: leave them be (the twinkling stars keep their rhythm through the room's updates)
@@ -663,7 +663,8 @@ function updateNeed(pledged) {
   const has = +pledged.toFixed(1);
   // a model with a fallback context says both needs; a room that holds it only there says so
   // (a disk model: on GPUs, and whether the rest streams from disk or no device here can)
-  const needs = row?.f?.needGB != null ? `${row.f.needGB} GB on GPUs${row.f.needDisk ? ", the rest streamed from disk" : ", with no disk here to stream from"}`
+  // (no device here can store it: the gap is a device that can, not the whole model's GPU figure)
+  const needs = row?.f?.needGB != null ? (row.f.needDisk ? `${row.f.needGB} GB on GPUs, the rest streamed from disk` : "a device that can store it on disk")
     : NEED_GB[$("ai-model").value] ? needText($("ai-model").value) : `${need} GB`;
   const back = ok && row?.f?.fellBack ? ` ${ctxShortNote(shortName($("ai-model").value), row.f.ctx, row.f.want)}.` : "";
   $("need-text").textContent = ok
@@ -674,7 +675,7 @@ function updateNeed(pledged) {
   // short: say by how much and who could give more, right under Start (a disk model: in GPU memory, and the fix its
   // disk answer leaves: room/diskpick.js shortNote)
   $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine;
-  $("ai-short").textContent = diskCopyOf($("ai-model").value) ? diskShortNote($("ai-model").value, shortGB) : note;
+  $("ai-short").textContent = diskCopyOf($("ai-model").value) ? diskShortNote($("ai-model").value, shortGB, row?.f?.needDisk !== false) : note;
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
   const meI = row?.f ? row.f.devs.findIndex((d) => d.meta === myMeta) : -1;
   const give = giveFor(meI >= 0 && row.f.fit.raise[meI] < Infinity ? gbUp(row.f.fit.raise[meI]) : row?.f ? 0 : need - pledged);
@@ -703,7 +704,7 @@ function updateNeed(pledged) {
   // read it with (room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap, whatever the stored answer), and, when
   // the room's fit streams from no disk (roomFitFor needDisk), that the whole model must fit on GPUs
   const tier = tabDiskCan ? tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }) : null;
-  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, needDisk: row?.f?.needGB != null ? !!row.f.needDisk : true, needGB: row?.f?.needGB ?? null });
+  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, needDisk: row?.f?.needGB != null ? !!row.f.needDisk : true, needGB: row?.f?.needGB ?? null, fits: !!ok });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
   return rows;
@@ -752,23 +753,50 @@ function renderPool(pledged, rows = []) {
   const had = new Map(rows.map((x) => [x.key, x.f ?? null]));
   const fitOf = new Map(Object.keys(PICK_NEED).map((k) => [k, had.has(k) ? had.get(k) : roomFitFor(k)]));
   const needs = Object.entries(PICK_NEED).map(([k, gb]) => [k, fitOf.get(k)?.needGB ?? gb]).sort((a, b) => a[1] - b[1]);
-  const top = Math.max(pledged, ...needs.map((x) => x[1])) * 1.06 || 1;
+  const sel = $("ai-model").value, dk = diskCopyOf(sel), F = dk ? fitOf.get(sel) : null;
+  // a disk model picked (room/diskpick.js pool words): the GPU bar shows only its tick, at the GPU memory the planner
+  // needs when the rest is stored on some device's disk; with no device that can store it there is no GPU figure to
+  // show (roomFitFor's would be the whole model on GPUs, which is not what it needs)
+  const dkTick = dk && F?.needDisk && F?.needGB != null ? F.needGB : null;
+  const top = (dk ? Math.max(pledged, dkTick || 0) : Math.max(pledged, ...needs.map((x) => x[1]))) * 1.06 || 1;
   $("ap-total").textContent = `${+pledged.toFixed(1)} GB`;
   const meter = $("ap-meter");
   meter.querySelector(".apm-fill").innerHTML = devs.map((d) => `<i style="--sw:${devColor(d.name)};width:${(d.meta.contribGB / top * 100).toFixed(2)}%" title="${esc(String(d.name))}: ${d.meta.contribGB} GB"></i>`).join("");
   // a tick where each model starts to fit; the picked one says what it needs
-  const sel = $("ai-model").value;
   const fitsK = (k, gb) => { const f = fitOf.get(k); return f ? f.fit.fits : pledged >= gb; };
-  meter.querySelector(".apm-ticks").innerHTML = needs.map(([k, gb]) => `<span class="${fitsK(k, gb) ? "ok" : ""}${k === sel ? " sel" : ""}${gb / top > 0.6 ? " r" : gb / top < 0.3 ? " l" : ""}" style="left:${(gb / top * 100).toFixed(2)}%" title="${esc(shortName(k))} needs ${gb} GB"></span>`).join("");
+  // a disk model's tick says GPU memory, or, with no device here to store it, that it needs one
+  const tickTitle = (k, gb) => !diskCopyOf(k) ? `${shortName(k)} needs ${gb} GB`
+    : fitOf.get(k)?.needDisk ? `${shortName(k)} needs ${gb} GB of GPU memory` : `${shortName(k)} needs a device that stores it`;
+  const ticks = dk ? (dkTick != null ? [[sel, dkTick]] : []) : needs;
+  meter.querySelector(".apm-ticks").innerHTML = ticks.map(([k, gb]) => `<span class="${fitsK(k, gb) ? "ok" : ""}${k === sel ? " sel" : ""}${gb / top > 0.6 ? " r" : gb / top < 0.3 ? " l" : ""}" style="left:${(gb / top * 100).toFixed(2)}%" title="${esc(tickTitle(k, gb))}"></span>`).join("");
   // what the selected model needs, as its own line under the meter (not a label hanging off its tick)
   const selNeed = needs.find(([k]) => k === sel);
   $("ap-need").hidden = !selNeed;
-  if (selNeed) {
+  // a disk model: what each device brings beyond GPU memory (room/pledge.js storageOf, offloadFor's rules, read-only)
+  const st = dk ? new Map(devs.map((d) => [d, storageOf(d.meta, sel)])) : null;
+  if (selNeed && dk) {
+    const all = [...st.values()], nDisk = all.filter((x) => x.kind === "disk").length, nRam = all.filter((x) => x.kind === "ram").length;
+    const fits = fitsK(sel, selNeed[1]), w = { needGB: F?.needGB ?? null, needDisk: !!F?.needDisk, fits, shortGB: F?.shortGB ?? 0, nStore: nDisk + nRam };
+    const g = poolGpuLine(dk, w), sl = poolStoreLine(dk, { ...w, nDisk, nRam, anyAsk: all.some((x) => x.kind === "disk" && x.ask) });
+    const chip = (c) => c ? `<span>${esc(c)}</span>` : "";
+    // the words in an <em> of their own, so a long line wraps beside its chip (p2p.html #ap-need em)
+    $("ap-need").innerHTML = `<em>${esc(g.text)}${g.num != null ? ` <b>${g.num} GB</b>` : ""}</em>${chip(g.chip)}`; $("ap-need").classList.toggle("ok", g.ok);
+    $("ap-store-n").textContent = `${nDisk + nRam} of ${devs.length}`;
+    $("ap-smeter").querySelector(".apm-fill").innerHTML = devs.map((d) => { const x = st.get(d);
+      return `<i class="${x.kind === "disk" ? (x.ask ? "ask" : "") : x.kind === "ram" ? "ram" : "no"}" style="--sw:${devColor(d.name)}"></i>`; }).join("");
+    $("ap-store").innerHTML = `<em>${esc(sl.text)}</em>${chip(sl.chip)}`; $("ap-store").classList.toggle("ok", sl.ok);
+    const fix = poolFix(diskStateOf(sel), w);
+    $("ap-store-fix").textContent = fix; $("ap-store-fix").hidden = !fix;
+  } else if (selNeed) {
     // the verdict is the row's (fitsK: roomFitFor's fit), the figures the planner's
     const [k, gb] = selNeed, f = fitOf.get(k), fits = fitsK(k, gb), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
     $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b>${f?.needGB != null ? " on GPUs" : ""}<span>${fits ? "fits" : `${short} GB short`}</span>`; $("ap-need").classList.toggle("ok", fits);
   }
-  $("ap-devs").innerHTML = devs.map((d) => `<li style="--sw:${devColor(d.name)}"><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB</b></li>`).join("")
+  const flash = !!(dk && selNeed);
+  for (const id of ["ap-gpu-k", "ap-store-k", "ap-smeter", "ap-store"]) $(id).hidden = !flash;
+  if (!flash) $("ap-store-fix").hidden = true;
+  $("ap-devs").innerHTML = devs.map((d) => { const x = flash ? st.get(d) : null;
+    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x))}</small>` : ""}</b></li>`; }).join("")
     || '<li class="none">No device with WebGPU yet</li>';
   devsEdge();
   const can = !!myMeta.webgpu;

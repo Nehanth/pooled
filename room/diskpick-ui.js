@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 const START = "Start the model", GIVES = "This device gives";
 let shown = null, stored = null, asked = 0, armed = 0, last = {}, covers = null;
 
-// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, needDisk, needGB } (this tab's
+// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, needDisk, needGB, fits } (this tab's
 // disk-tier RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether the room's fit streams from a disk
 // and the GPU memory it needs, roomFitFor's). Cheap when nothing changed: it runs on every room update.
 export function showDiskPick(key, info = last) {
@@ -27,7 +27,7 @@ export function showDiskPick(key, info = last) {
   $("ap-for").textContent = groupTitle(m);
   $("ap-me-k").textContent = "GPU memory";
   $("ap-covers").textContent = GPU_HINT;
-  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.needDisk !== false);
+  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.needDisk !== false, !!info.fits);
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;
   shown = sig;
@@ -45,7 +45,9 @@ function disarm() { if (armed) { clearTimeout(armed); armed = 0; } }
 export function refreshDiskPick() { const key = $("ai-model").value; if (diskCopyOf(key)) { asked = 0; shown = null; showDiskPick(key); } }
 
 // why the picked disk model doesn't fit, under Start: by how much and the fix this device's disk answer leaves
-export const diskShortNote = (key, shortGB) => shortNote(shortGB, diskStore.state(key));
+export const diskShortNote = (key, shortGB, needDisk = true) => shortNote(shortGB, diskStore.state(key), needDisk);
+// this device's disk answer for `key` (room/diskstore.js diskState), for the pool's fix line (room.js renderPool)
+export const diskStateOf = (key) => diskStore.state(key);
 
 // Wire the buttons: Allow (the same stored answer the disk question saves); Delete (two presses, like Room settings'
 // "Free disk space"). toast(text): the room's, for a delete that could not run.

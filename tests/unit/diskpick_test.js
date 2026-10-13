@@ -2,7 +2,9 @@
 // future big model gets the same row, cost figures, consent and Start label from its own entry. The consent state is
 // #368's stored answer (room/flashdisk.js TAB_DISK_KEY), read through room/diskstore.js diskState.
 import { DISK_COPY, MODELS, PICKER, SHAPE, diskCopyBytes } from "../../room/models.js";
-import { diskCopyOf, rowChip, rowChipHTML, paramsText, rowTitle, groupTitle, GPU_HINT, diskRow, diskRowHTML, settingsHTML, sizeText, pickNote, shortNote } from "../../room/diskpick.js";
+import { diskCopyOf, rowChip, rowChipHTML, paramsText, rowTitle, groupTitle, GPU_HINT, diskRow, diskRowHTML, settingsHTML, sizeText, pickNote, shortNote,
+  poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle } from "../../room/diskpick.js";
+import { storageOf, offloadFor } from "../../room/pledge.js";
 import { diskState } from "../../room/diskstore.js";
 import { minFitPledge, roomFit } from "../../room/plan.js";
 import { TAB_DISK_KEY, TAB_DISK_MODELS } from "../../room/flashdisk.js";
@@ -38,7 +40,9 @@ Deno.test("diskpick: the row, and the line under the rows", () => {
   eq(rowTitle(m), "Qwen3.8 Flash: a 125B (6B active) model that keeps most of itself on disk, so it needs far less GPU memory");
   eq(pickNote(m, 5.7), "Qwen3.8 Flash is a 125B model. It keeps most of itself on disk, so it needs only 5.7 GB of GPU memory. Each device that joins makes it faster.");
   ok(pickNote(m, null).includes("far less GPU memory than its size"), "before the planner has a figure");
-  eq(pickNote(m, 67, false), "Qwen3.8 Flash is a 125B model that normally keeps most of itself on disk. With no disk storage in this room, it needs 67 GB of GPU memory.", "never \"only 67 GB\"");
+  eq(pickNote(m, 67, false), "Qwen3.8 Flash is a 125B model that keeps most of itself on disk. No device in this room can store it yet: allow disk storage, or invite a computer that can.", "never a whole-model GPU figure");
+  eq(pickNote(m, 67, false, true), "Qwen3.8 Flash is a 125B model. This room's GPU memory holds all of it.");
+  ok(!/67| on GPUs/.test(pickNote(m, 67, false) + pickNote(m, 67, false, true)), "no 67");
   ok(!/MoE|expert|OPFS|pledge/i.test(pickNote(m, 5.7) + rowChip(m) + rowTitle(m)), "plain words");
 });
 
@@ -47,6 +51,9 @@ Deno.test("diskpick: short, under Start: by how much, and the fix this device's 
   eq(shortNote(55, "deny"), shortNote(55, "ask"));
   eq(shortNote(2.5, "allow"), "2.5 GB of GPU memory short. Invite more devices, or give more GPU memory.");
   for (const st of ["url", "small", "none"]) eq(shortNote(55, st), "55 GB of GPU memory short. Invite more devices with GPUs.", st);
+  eq(shortNote(55, "deny", false), "Needs a device that can store it. Allow disk storage, or invite more devices.", "no device can store it: no GPU figure");
+  eq(shortNote(55, "url", false), "Needs a device that can store it. Invite more devices with GPUs.");
+  eq(shortNote(55, "allow", false), "Needs a device that can store it. Invite more devices, or give more GPU memory.");
 });
 
 Deno.test("diskpick: the right column's group for the picked disk model", () => {
@@ -115,4 +122,75 @@ Deno.test("minFitPledge: the least total pledge at which the planner's own check
   near(m.scaled[0], 6 * GB, "scaled together"); near(m.scaled[1], 3 * GB, "scaled together");
   // with roomFit itself: 10 layers of 1 GB and a 0.5 GB host part fit at 10.5 GB on one device
   near(minFitPledge([40 * GB], (pl) => roomFit(10, pl, GB, GB / 2).fits).bytes, 10.5 * GB, "roomFit's own number");
+});
+
+const FL = "qwen3.8-flash";
+Deno.test("storageOf: what each device brings beyond GPU memory, by offloadFor's own rules", () => {
+  const tab = { webgpu: true, contribGB: 12, tabDisk: { ramGB: 3, models: [FL] } };
+  const asks = { webgpu: true, contribGB: 12, tabDisk: { ramGB: 3, models: [FL], ask: true } };
+  const said = { webgpu: true, contribGB: 12 };
+  const node = { webgpu: true, contribGB: 10, offload: true, offloadFlash: true, ramGB: 43, disk: true, local: [FL] };
+  const nodeNoLocal = { ...node, local: [] };
+  const nodeOld = { webgpu: true, contribGB: 10, offload: true, ramGB: 43, disk: true, local: [FL] };
+  const noGpu = { webgpu: false, contribGB: 0, tabDisk: { ramGB: 3, models: [FL] } };
+  const cases = [[tab, "disk", false], [asks, "disk", true], [said, null, false], [node, "disk", false], [nodeNoLocal, "ram", false], [nodeOld, null, false], [noGpu, null, false]];
+  const metas = cases.map((c) => c[0]), off = offloadFor(metas, 1e9, FL);
+  cases.forEach(([meta, kind, ask], i) => {
+    const s = storageOf(meta, FL);
+    eq([s.kind, s.ask], [kind, ask], `case ${i}`);
+    eq(s.kind === "disk", !!off.disk?.[i], `disk agrees with offloadFor, case ${i}`);
+    eq(s.kind != null, off.ram[i] > 0, `stores agrees with offloadFor's ram, case ${i}`);
+  });
+  eq(storageOf(nodeNoLocal, FL).ramGB, 43);
+  eq(storageOf(tab, "qwen3-1.7b").kind, null, "another model: a plain tab");
+});
+
+Deno.test("pool: the GPU line per state (G1-G5), never a whole-model GPU figure", () => {
+  const m = DISK_COPY[FL], line = (w) => { const g = poolGpuLine(m, w); return [g.text, g.num, g.chip, g.ok]; };
+  eq(line({ needGB: 5.7, needDisk: true, fits: true, shortGB: 0, nStore: 2 }), ["Qwen3.8 Flash needs", "5.7", "fits", true], "G1");
+  eq(line({ needGB: 5.7, needDisk: true, fits: false, shortGB: 1.7, nStore: 1 }), ["Qwen3.8 Flash needs", "5.7", "1.7 GB short", false], "G2");
+  eq(line({ needGB: 67, needDisk: false, fits: true, nStore: 0 }), ["Qwen3.8 Flash fits in this room's GPU memory", null, "fits", true], "G3");
+  eq(line({ needGB: 67, needDisk: false, fits: false, shortGB: 55, nStore: 0 }), ["Qwen3.8 Flash runs once a device stores it", null, null, false], "G4");
+  eq(line({ needGB: null, needDisk: false, fits: false, shortGB: 55, nStore: 0 }), ["Qwen3.8 Flash runs once a device stores it", null, null, false], "G4, no figure");
+  eq(line({ needGB: null, needDisk: false, fits: false, shortGB: 55, nStore: 1 }), ["Not enough GPU memory in this room yet", null, "short", false], "G5");
+});
+
+Deno.test("pool: the Storage line (S1-S5), the fix line and each device's tag", () => {
+  const m = DISK_COPY[FL], line = (w) => { const s = poolStoreLine(m, w); return [s.text, s.chip, s.ok]; };
+  eq(line({ nDisk: 2 }), ["Keeps up to 92.4 GB on each device's disk", "fits", true], "S1");
+  eq(line({ nDisk: 1, nRam: 1, anyAsk: true }), ["Keeps up to 92.4 GB on each device's disk, asks before saving", "fits", true], "S2");
+  eq(line({ nRam: 1 }), ["Held in spare memory on 1 device", "fits", true], "S3");
+  eq(line({ nRam: 2 })[0], "Held in spare memory on 2 devices", "S3, plural");
+  eq(line({ needDisk: false, fits: true }), ["Not needed here, it all fits in GPU memory", null, false], "S4");
+  eq(line({ needDisk: false, fits: false }), ["No device here can store it", "needs disk", false], "S5");
+  const s5 = { nStore: 0, fits: false, needDisk: false, needGB: 67 };
+  for (const st of ["ask", "deny"]) eq(poolFix(st, s5), "Allow disk storage below, or invite a computer that can.", st);
+  eq(poolFix("url", s5), "This link turns disk storage off. Invite a computer that can store it.");
+  for (const st of ["small", "none", "allow"]) eq(poolFix(st, s5), "Invite a computer with a GPU and free disk space.", st);
+  eq(poolFix("allow", { nStore: 1, fits: false, needDisk: false, needGB: null }), "Give more GPU memory below, or invite a device.", "G5");
+  eq(poolFix("ask", { nStore: 0, fits: true, needDisk: false, needGB: 67 }), "", "S4: nothing to fix");
+  eq(poolFix("allow", { nStore: 2, fits: false, needDisk: true, needGB: 5.7 }), "", "G2: the GPU line's chip says it");
+  eq(poolFix("allow", { nStore: 2, fits: true, needDisk: true, needGB: 5.7 }), "");
+  eq(devStoreTag({ kind: "disk", ask: false }), "disk");
+  eq(devStoreTag({ kind: "disk", ask: true }), "asks");
+  eq(devStoreTag({ kind: "ram", ramGB: 43 }), "43 GB RAM");
+  eq(devStoreTag({ kind: null }), "no disk");
+  eq(devStoreTitle("mac", 12, { kind: "disk", ask: true }), "mac: 12 GB GPU memory, asks before saving to disk");
+  eq(devStoreTitle("pc", 10, { kind: "ram", ramGB: 43 }), "pc: 10 GB GPU memory, 43 GB RAM");
+  eq(devStoreTitle("pc", 10, { kind: null }), "pc: 10 GB GPU memory, no disk");
+});
+
+Deno.test("pool: with needDisk false nothing says the whole model's GPU figure; plain words throughout", () => {
+  const m = DISK_COPY[FL], out = [];
+  for (const fits of [true, false]) for (const nStore of [0, 1]) for (const needGB of [67, null]) {
+    const w = { needGB, needDisk: false, fits, shortGB: 55, nStore, nDisk: 0, nRam: nStore };
+    const g = poolGpuLine(m, w), s = poolStoreLine(m, w);
+    out.push(g.text, g.num ?? "", g.chip ?? "", s.text, s.chip ?? "", ...["ask", "deny", "url", "small", "none", "allow"].map((st) => poolFix(st, w)));
+    out.push(pickNote(m, needGB, false, fits), shortNote(55, "ask", false));
+  }
+  const all = out.join(" | ");
+  ok(!/\b67\b/.test(all) && !all.includes(" on GPUs"), all);
+  const words = all + [true, false].map((a) => poolStoreLine(m, { nDisk: 1, anyAsk: a }).text).join(" ")
+    + ["disk", "ram", null].map((k) => devStoreTag({ kind: k, ramGB: 43 }) + devStoreTitle("x", 1, { kind: k, ramGB: 43 })).join(" ");
+  ok(!/MoE|expert|OPFS|pledge|offload/i.test(words), "banned words");
 });
