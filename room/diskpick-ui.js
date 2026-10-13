@@ -45,7 +45,7 @@ async function refresh(key) {
   stored = s; shown = null; showDiskPick(key);
 }
 function disarm() { if (armed) { clearTimeout(armed); armed = 0; } }
-// the stored copy changed elsewhere (Room settings' "Free disk space", a load that copied it): read it again
+// the stored copy changed elsewhere (Room settings' "Delete saved copy", a load that copied it): read it again
 export function refreshDiskPick() { const key = $("ai-model").value; if (diskCopyOf(key)) { asked = 0; shown = null; showDiskPick(key); } }
 
 // why the picked disk model doesn't fit, under Start: by how much and the fix this device's disk answer leaves
@@ -54,7 +54,7 @@ export const diskShortNote = (key, shortGB, stores = true) => shortNote(shortGB,
 export const diskStateOf = (key) => diskStore.state(key);
 
 // Wire the buttons: Allow (the same stored answer the disk question saves); Delete (two presses, like Room settings'
-// "Free disk space"). toast(text): the room's, for a delete that could not run.
+// "Delete saved copy"). toast(text): the room's, for a delete that could not run.
 export function initDiskPick({ toast = () => {} }) {
   // the same Allow, under Start (p2p.html #ai-allow-disk: room.js updateNeed shows it), then on to Start
   $("ai-allow-disk").addEventListener("click", () => {

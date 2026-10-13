@@ -300,7 +300,7 @@ const metaPromise = (async () => {
 // OPFS can hold Qwen3.8-Flash-Next layers past its pledge with their experts on its disk, read when a token picks them,
 // and the n-gram table there too. Nothing is written until this tab's user says yes: the host asks when it starts
 // Flash (aiStart), a worker when a deal gives it disk layers (the loader's askDisk); the answer is remembered for this
-// site (localStorage) and changed in Room settings, where "Free disk space" deletes the copy. meta.tabDisk says what
+// site (localStorage) and changed in Room settings, where "Delete saved copy" deletes the copy. meta.tabDisk says what
 // the room may deal it: { ramGB, models, ask } until its user answers, without ask after a yes, nothing after a no.
 // ?tabram=G: the RAM its spare and RAM cache take (default 3, held to what the device can spare; 0 turns the tier
 // off); ?tabdisk=0 says no for this page load (the URL can never say yes: room links keep their query).
@@ -324,18 +324,20 @@ function cleanTabDisk(t) {
   const models = Array.isArray(t.models) ? t.models.filter((x) => typeof x === "string").slice(0, 8) : [];
   return +t.ramGB > 0 && models.length ? { ramGB: Math.min(64, +t.ramGB), models, ...(t.ask ? { ask: true } : {}) } : undefined;
 }
-// The question itself (p2p.html #disk-ask): "This model streams from your disk: it will store up to N GB in this
-// browser." Allow / No; the answer is remembered for this site. host: this device starts the model; else the room's
-// host asks for this device's disk. Unanswered for DISK_ASK_MS: no (for this deal only, not remembered).
+// The question itself (p2p.html #disk-ask): "Save Qwen3.8 Flash to this device?", in the picker's words (it downloads
+// N GB once and keeps it on this device's disk). Download and save / Not now; the answer is remembered for this site.
+// host: this device starts the model; else the room's host asks for this device's disk. Unanswered for DISK_ASK_MS: no (for this deal only, not remembered).
 // -> Promise<boolean>
 const DISK_ASK_MS = 120e3;
 let diskAsking = null;
 function askTabDisk({ bytes, model, host = false }) {
   if (diskAsking) return diskAsking;
   const M = MODELS[model];
-  $("disk-ask-h").textContent = `${M ? shortName(model) : "This model"} streams from your disk`;   // the picker's name (room/diskpick.js)
-  $("disk-ask-why").textContent = `It will store up to ${fmtBytes(bytes)} in this browser${host ? "" : ", for the room's host"}, so it can run more than this device's memory holds. `
-    + "It stays for next time; Room settings can free it.";
+  const name = M ? shortName(model) : "this model";   // the picker's name (room/diskpick.js)
+  $("disk-ask-h").textContent = `Save ${name} to this device?`;
+  $("disk-ask-why").textContent = (host ? `It downloads ${fmtBytes(bytes)} once and keeps it on this device's disk, then reads from it while it runs. `
+    : `To help the room run ${name}, this device downloads ${fmtBytes(bytes)} once and keeps it on its disk. `)
+    + "Delete it any time from the model picker or Room settings.";
   $("disk-ask").hidden = false;
   $("disk-ask-allow").focus({ preventScroll: true });
   diskAsking = new Promise((resolve) => {
@@ -5396,7 +5398,7 @@ $("cache-clear").addEventListener("click", async (ev) => {
   renderCacheModels();
 });
 // This device's disk for big models (room/flashdisk.js): the switch is its user's answer (remembered for this site), and
-// "Free disk space" deletes the Flash copy (experts and n-gram table) with its size; two steps, like Clear above.
+// "Delete saved copy" deletes the Flash copy (experts and n-gram table) with its size; two steps, like Clear above.
 // measure: also read how much the copy takes (the menu opening; a walk of the OPFS files)
 let tabDiskArmed = 0, tabDiskStored = 0;
 const tabDiskFreeLabel = (t, sub) => { const a = $("tabdisk-free"); a.childNodes[1].textContent = t; a.querySelector("small").textContent = sub; };
@@ -5408,17 +5410,17 @@ async function renderTabDisk(measure = false) {
   $("tabdisk-allow").checked = choice === "allow";
   // the size is the picker's (DISK_COPY diskBytes), and so are the answer's words (room/diskpick.js DISK_STATE)
   const fl = DISK_COPY["qwen3.8-flash"];
-  $("d-tabdisk").textContent = `${fl.name} can stream from disk when the room's memory is short: it stores up to ${fmtBytes(fl.diskBytes)} in this browser. `
+  $("d-tabdisk").textContent = `${fl.name} runs from disk: it saves up to ${fmtBytes(fl.diskBytes)} to this device once. `
     + (choice === "allow" ? "Allowed." : choice === "deny" ? "Not allowed." : "Not asked: you are asked when the model needs it.");
   if (measure) tabDiskStored = (await flashDiskBytes().catch(() => ({ total: 0 }))).total;
   $("tabdisk-line").hidden = !tabDiskStored;
-  if (!tabDiskArmed) tabDiskFreeLabel("Free disk space", `Deletes the big model's copy on this device (${fmtBytes(tabDiskStored)})`);
+  if (!tabDiskArmed) tabDiskFreeLabel("Delete saved copy", `Deletes ${fl.name}'s copy on this device (${fmtBytes(tabDiskStored)})`);
 }
 $("tabdisk-allow").addEventListener("change", (ev) => {
   saveTabDiskChoice(ev.target.checked ? "allow" : "deny", globalThis.localStorage);
   tabDiskDeclined = false;
   tabDiskChanged();
-  toast(ev.target.checked ? "big models may use this device's disk" : "big models stay off this device's disk (Free disk space deletes what is there)");
+  toast(ev.target.checked ? "big models may use this device's disk" : "big models stay off this device's disk (Delete saved copy deletes what is there)");
 });
 $("tabdisk-free").addEventListener("click", async (ev) => {
   ev.preventDefault();
@@ -5432,7 +5434,7 @@ $("tabdisk-free").addEventListener("click", async (ev) => {
   const r = await freeTabDisk();
   if (r.refused) toast(r.refused);
 });
-// Delete the Flash copy on this device (Room settings' "Free disk space", the picker's "Delete stored copy"), after
+// Delete the Flash copy on this device (Room settings' "Delete saved copy", the picker's Delete), after
 // both presses. -> { removed, kept } or { refused: why it did not run }
 async function freeTabDisk() {
   // the running model reads the copy (open files), and a load may be copying into it or reading from it: stop first
