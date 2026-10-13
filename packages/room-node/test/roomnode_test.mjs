@@ -9,6 +9,7 @@ import { RoomNode, toApiRequest, eventEncoder } from "../roomnode.js";
 import { openModel, LOCAL } from "../source.js";
 import { pledgeFor } from "../env.js";
 import { offloadFor } from "../../../room/pledge.js";
+import { roomBytes, flashLayerCost, ngramOf } from "../../../room/models.js";
 import { PROTOCOL } from "../../../room/transport.js";
 import { finishRequest, askBody, needsV2 } from "../../../cli/lib/common.js";
 
@@ -67,6 +68,23 @@ test("dealPlan: a pledge past 64 GB counts only for Qwen3.8-Flash-Next (--gb max
   // the context pick counts the same
   const self = { name: "spark", meta: { contribGB: 100 } };
   assert.equal(RoomNode.ctxPick("qwen3.5-122b-moe", { want: 4096, self }).fits === true, false);
+});
+
+test("dealPlan: Qwen3.8-Flash-Next deals on its per-layer costs at the picked context (room/models.js flashLayerCost)", () => {
+  const F = "qwen3.8-flash", self = { name: "spark", meta: { contribGB: 40, ngram: true } }, peers = [{ id: "b", name: "spark2", meta: { contribGB: 40, ngram: true } }];
+  for (const ctx of [2048, 8192]) {
+    const rb = roomBytes(F, ctx), lc = flashLayerCost(F, ctx);
+    // the header's costs (layerCost) and SHAPE's (fitBytes.layerCost) are the same numbers: the same deal
+    const a = RoomNode.dealPlan({ L: 48, layerBytes: rb.layerBytes, layerCost: lc, embedBytes: rb.hostBytes, self, peers, fitBytes: rb, model: F, ngram: ngramOf(F) });
+    const b = RoomNode.dealPlan({ L: 48, layerBytes: rb.layerBytes, embedBytes: rb.hostBytes, self, peers, fitBytes: rb, model: F, ngram: ngramOf(F) });
+    assert.deepEqual(a.ranges, b.ranges);
+    assert.deepEqual(a.ranges, [[0, 24], [24, 48]]);
+    // needGB: the layers' exact total at that context plus the host's part
+    assert.ok(Math.abs(a.needGB - (lc.total + rb.hostBytes) / GB) < 1e-9, `${ctx}: ${a.needGB}`);
+    assert.equal(a.ngram.at, 0);
+  }
+  assert.ok(RoomNode.dealPlan({ L: 48, layerCost: flashLayerCost(F, 8192), embedBytes: roomBytes(F, 8192).hostBytes, self, peers, fitBytes: roomBytes(F, 8192), model: F }).needGB
+    > RoomNode.dealPlan({ L: 48, layerCost: flashLayerCost(F, 2048), embedBytes: roomBytes(F, 2048).hostBytes, self, peers, fitBytes: roomBytes(F, 2048), model: F }).needGB + 1, "8K's state and reserve: over a GB more");
 });
 
 test("dealPlan: layers by pledge, an iPhone held to 1 GB, phones left out when computers hold the model", () => {

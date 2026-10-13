@@ -36,7 +36,7 @@ import path from "node:path";
 import { shardTensors, qwen4expTensorNames, flashShardBytes, flashCpuBytes, flashMemoryShort, openNgramTable } from "../shard.js";
 import { parseGGUFHeader, qwen4expShardBytes, qwen4expConfig, GGML_PLE_TABLE } from "../../../engine/gguf.js";
 import { ngramConfig, NgramState, dequantRow, rowAddress } from "../../../engine/ngram.js";
-import { mergeSplitHeaders } from "../../../room/models.js";
+import { mergeSplitHeaders, flashRoomMem, flashLayerCost, ckptSlotsAt } from "../../../room/models.js";
 import { ggufFromFixture } from "../../../tests/helpers/gguf_fixture.js";
 
 const FIX = JSON.parse(fs.readFileSync(new URL("../../../tests/fixtures/q38flash/headers.json", import.meta.url), "utf8"));
@@ -92,6 +92,37 @@ test("qwen4exp flashShardBytes / flashMemoryShort: a device short of memory is t
   assert.match(flashMemoryShort(gpuPart + parked, rtx, { cpuBytes: parked, sysFreeGB: 24 }), /needs 30\.0 GB of system RAM .* 24\.0 GB free/);
   assert.equal(flashMemoryShort(gpuPart + parked, rtx, { cpuBytes: parked }), null, "system RAM not known: unchecked");
   assert.equal(flashMemoryShort(half, { kind: "unified", totalGB: 36 }), null, "a Mac (no free figure): unchecked");
+});
+
+// the load-time check and the planner size a range's state with one model (room/models.js flashRoomMem /
+// flashLayerCost), so a deal the planner made is never refused at load for a different formula
+test("qwen4exp flashShardBytes: the state and checkpoint reserve are the planner's, at 2048 and 32K, QSA off and on", () => {
+  const G = flashHeader();
+  const fixed = (o) => flashShardBytes(G, { ...o, ctx: 2048, qsa: false, slots: 0 }) - flashRoomMem(G, 2048, { qsa: false, range: [o.lo, o.hi] }).need;
+  for (const [lo, hi] of [[0, 24], [24, 48], [0, 3], [3, 4], [0, 48]]) for (const qsa of [false, true]) for (const ctx of [2048, 32768]) {
+    const o = { lo, hi, hasHead: lo === 0, ctx, qsa };
+    const b = flashShardBytes(G, o);
+    const m = flashRoomMem(G, ctx, { qsa, range: [lo, hi], ckptSlots: ckptSlotsAt(ctx) });
+    // the weights (with the indexer when qsa), the upload staging, the CPU part and scratch don't depend on ctx
+    const w = qwen4expShardBytes(G, { lo, hi, hasEmbed: false, hasHead: lo === 0, qsa }) - qwen4expShardBytes(G, { lo, hi, hasEmbed: false, hasHead: lo === 0, qsa: false });
+    const staged = (q) => Math.max(...Array.from({ length: hi - lo }, (_, k) => qwen4expShardBytes(G, { lo: lo + k, hi: lo + k + 1, hasEmbed: false, hasHead: false, qsa: q })),
+      lo === 0 ? qwen4expShardBytes(G, { lo: hi, hi, hasEmbed: false, hasHead: true, qsa: q }) - G.tensors["token_embd.weight"].byteLength : 0);
+    assert.equal(b - m.need, fixed({ lo, hi, hasHead: lo === 0 }) + w + staged(qsa) - staged(false), `[${lo}, ${hi}) ctx ${ctx} qsa ${qsa}`);
+    // and the planner's per-layer costs hold exactly the same state and reserve for those layers
+    const lc = flashLayerCost(G, ctx, { qsa });
+    let st = 0; for (let i = lo; i < hi; i++) st += lc.state[i];
+    assert.equal(st, m.state);
+    assert.equal(st * lc.slots, m.reserve);
+  }
+  // 2048 dense: what it was before the shared model (no reserve at 2048); 32K: the 2-slot reserve makes [0, 24) ~2.4 GB more
+  const d = flashShardBytes(G, { lo: 0, hi: 24, hasHead: true, ctx: 2048 }), l = flashShardBytes(G, { lo: 0, hi: 24, hasHead: true, ctx: 32768, qsa: true });
+  assert.ok(d / 2 ** 30 > 35 && d / 2 ** 30 < 36, (d / 2 ** 30).toFixed(2));
+  assert.ok((l - d) / 2 ** 30 > 2.3 && (l - d) / 2 ** 30 < 2.6, ((l - d) / 2 ** 30).toFixed(2));
+  // [0, 3) has no QSA layer, [3, 4) one: at 2048 the one layer holds less than the three (8.0 vs 9.7 MiB), at 32K
+  // over 13x more (130 vs 9.7 MiB: its K / V grow with ctx, the DeltaNet state does not)
+  const s03 = flashRoomMem(G, 32768, { range: [0, 3] }).state, s34 = flashRoomMem(G, 32768, { range: [3, 4] }).state;
+  assert.ok(s34 > 13 * s03 && flashRoomMem(G, 2048, { range: [3, 4] }).state < s03, `${s03} ${s34}`);
+  assert.equal(s03, flashRoomMem(G, 2048, { range: [0, 3] }).state, "DeltaNet + the PLE ring: fixed");
 });
 
 test("qwen4exp openNgramTable: rows from the local shard at the table's offset (its own file handle), close() releases it", async () => {

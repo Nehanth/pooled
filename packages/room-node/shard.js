@@ -15,7 +15,8 @@ import { ngramConfig, NgramTable, fileReadAt, httpReadAt } from "../../engine/ng
 import { FlashRoomEngine } from "../../room/flash.js";
 import { hostMemory } from "./env.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
-import { maxSeqFor, kvModeFor } from "../../room/models.js";
+import { maxSeqFor, kvModeFor, flashRoomMem, ckptSlotsAt } from "../../room/models.js";
+import { QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
 import { convertPool } from "./convert.js";
 import { ExpertStore } from "../../engine/expert_store.js";
 import { expertDiskReader } from "./expert_disk.js";
@@ -206,25 +207,27 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
 }
 
 // ---------------- Qwen3.8-Flash-Next (qwen4exp) ----------------
-// What a qwen4exp shard needs in memory besides its GPU weights: K / V in f32 for its attention layers at ctx
-// positions, the DeltaNet state per recurrent layer, the PLE ring on the n-gram layer, scratch; the embedding the
+// What a qwen4exp shard needs in memory besides its GPU weights: its layers' state at ctx positions and the checkpoint
+// reserve the deal set aside for them, from the room's one memory model (room/models.js flashRoomMem: K / V on its
+// attention layers, the QSA indexer's keys when qsa, the DeltaNet state per recurrent layer, the PLE ring on the
+// n-gram layer; ckptSlotsAt(ctx) copies of it), so the planner and this refusal agree; scratch; the embedding the
 // engine keeps on the CPU (flashCpuBytes: RAM, which on unified memory is the same memory); and Dawn's upload
 // staging: a writeBuffer's copy is kept until the queue moves on, and loadFlash flushes after each layer, so the
 // biggest one part (a layer, or the head) is staged on top of what is already up. -> bytes
 // offLayers (expert offload): layers whose routed experts are not on the GPU (parked or on disk): their bytes and their
 // staging leave those out; the store's GPU cache is the caller's to add (offload.vramBytes)
+// kv / qsa / ring: the load's engine options (the K / V format, the QSA indexer, its rawK ring rows); slots: the
+// checkpoint slots reserved (ckptSlotsAt(ctx): none at the dense phase's 2048)
 export const flashExpertBytes = (G, i) => ["gate", "up", "down"].reduce((a, p) => a + (G.tensors[`blk.${i}.ffn_${p}_exps.weight`]?.byteLength || 0), 0);
-export function flashShardBytes(G, { lo, hi, hasEmbed = false, hasHead, ctx, offLayers = null }) {
-  const c = qwen4expConfig(G.meta), ss = c.ssm, off = (i) => (offLayers?.includes?.(i) ? flashExpertBytes(G, i) : 0);
-  let b = qwen4expShardBytes(G, { lo, hi, hasEmbed: false, hasHead, qsa: false });
-  let staged = hasHead ? qwen4expShardBytes(G, { lo: hi, hi, hasEmbed: false, hasHead: true, qsa: false }) - (G.tensors[GGML_EMBED]?.byteLength || 0) : 0;
+export function flashShardBytes(G, { lo, hi, hasEmbed = false, hasHead, ctx, offLayers = null, kv = "f32", qsa = false, ring = QSA_RAW_RING, slots = ckptSlotsAt(ctx) }) {
+  const off = (i) => (offLayers?.includes?.(i) ? flashExpertBytes(G, i) : 0);
+  let b = qwen4expShardBytes(G, { lo, hi, hasEmbed: false, hasHead, qsa });
+  let staged = hasHead ? qwen4expShardBytes(G, { lo: hi, hi, hasEmbed: false, hasHead: true, qsa }) - (G.tensors[GGML_EMBED]?.byteLength || 0) : 0;
   for (let i = lo; i < hi; i++) {
     b -= off(i);
-    if (c.qsa[i]) b += 2 * ctx * c.nKVHeads * c.headDim * 4;
-    else b += ss.nVHeads * ss.stateSize * ss.stateSize * 4 + (2 * ss.nKHeads * ss.stateSize + ss.inner) * (ss.convK - 1) * 4;
-    staged = Math.max(staged, qwen4expShardBytes(G, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: false }) - off(i));
+    staged = Math.max(staged, qwen4expShardBytes(G, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa }) - off(i));
   }
-  if (c.ple && c.ple.layers.some((l) => l >= lo && l < hi)) b += 10 * c.hDim * 4;
+  if (hi > lo) b += flashRoomMem(G, ctx, { kv, qsa, ring, range: [lo, hi], ckptSlots: slots }).need;
   return b + staged + flashCpuBytes(G, { hasEmbed, hasHead }) + 64 * 2 ** 20;   // + scratch, uniforms
 }
 // the part of flashShardBytes held on the CPU: the embedding (~0.36 GB), whose rows the engine reads there

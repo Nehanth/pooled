@@ -48,9 +48,9 @@ import { loadShard } from "./shard.js";
 import { makeLink, attachWire, holdWire, wireReady, sendFrame, PROTOCOL, DROP_ALL } from "../../room/transport.js";
 import { unpackWire, wireStats } from "../../room/wire.js";
 import { TeleMeter, expertStoreOf } from "../../room/tele.js";
-import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce } from "../../room/plan.js";
+import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce, layersTotal } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
-import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf } from "../../room/models.js";
+import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
 import { isPrefix } from "../../harness/prefix.js";
@@ -1027,7 +1027,7 @@ export class RoomNode extends EventEmitter {
     const pl = [self, ...peers].map((d) => pledgeGB(d.meta, shareCap.get(d.name), modelKey) * 2 ** 30);
     const pick = pickCtx(modelKey, { want, ask, fitsAt: (c) => {
       const rb = roomBytes(modelKey, c, kv === "q8" ? "q8" : "f16");
-      return !rb || roomFit(rb.L, pl, rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.experts || rb.expertBytes, modelKey)).fits;
+      return !rb || roomFit(rb.L, pl, rb.layerCost || rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.experts || rb.expertBytes, modelKey)).fits;
     } });
     return { ...pick, note: pick.fellBack ? ctxShortNote(String(MODELS[modelKey]?.label || modelKey).split("·")[0].trim(), pick.ctx, pick.want) : "" };
   }
@@ -1045,9 +1045,12 @@ export class RoomNode extends EventEmitter {
   // model: the model's key (a device's disk tier counts only for a model whose files it has: room/pledge.js diskFor)
   // ngram: the model's n-gram table (room/models.js ngramOf: Qwen3.8-Flash-Next),
   // or null: the device dealt its layer must have it on disk (room/plan.js placeNgram); the plan then has `ngram`.
-  static dealPlan({ L, layerBytes, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null, model = null, ngram = null }) {
+  // layerCost (Qwen3.8-Flash-Next): each layer's own bytes at the room's context (room/models.js flashLayerCost, from
+  // the model's header), or fitBytes.layerCost (roomBytes' from SHAPE: the same numbers): the deal and needGB use them
+  static dealPlan({ L, layerBytes, layerCost = null, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null, model = null, ngram = null }) {
     const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name), model) * 2 ** 30;   // (64 GB a device, 128 for Flash)
-    const per = fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
+    const lc = layerCost || fitBytes?.layerCost || null;
+    const per = lc || fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
     const pledges = [pledgeOf(self.meta, self.name), ...peers.map((p) => pledgeOf(p.meta, p.name))];
     const off = offloadFor([self.meta, ...peers.map((p) => p.meta)], experts || expertBytes || fitBytes?.experts || fitBytes?.expertBytes || 0, model);
     // phones hold layers only when the computers cannot hold the model (room/plan.js); speed: fill
@@ -1055,7 +1058,7 @@ export class RoomNode extends EventEmitter {
     // pledge is under one layer) joins without layers
     const deal = dealRoom({ L, layerBytes: per, hostBytes: hostB, pledges, mode: mode === "speed" ? "speed" : "memory",
       phone: [false, ...peers.map((p) => isPhoneMeta(p.meta))], off, ngram: ngramFor([self.meta, ...peers.map((p) => p.meta)], ngram) });
-    const needGB = (L * layerBytes + embedBytes) / 2 ** 30, haveGB = pledges.reduce((s, b) => s + b, 0) / 2 ** 30;
+    const needGB = ((layerCost ? layersTotal(layerCost, L) : L * layerBytes) + embedBytes) / 2 ** 30, haveGB = pledges.reduce((s, b) => s + b, 0) / 2 ** 30;
     if (!deal.fit.fits || !deal.used.length) return { chain: [], ranges: [], assigned: [], leftOut: [], fit: deal.fit, needGB, haveGB };
     const chain = deal.used.slice(1).map((i) => peers[i - 1].id);
     const leftOut = peers.map((p) => p.id).filter((id) => !chain.includes(id));
@@ -1087,7 +1090,7 @@ export class RoomNode extends EventEmitter {
     const kv = kvModeFor(modelKey, null);
     ai.apiCache = new AnswerCache(8); ai.apiTurns.clear(); ai.apiEnc.clear(); ai.apiProf = null; ai.apiTT = null; ai.bounds.clear();
     const src = (this.openSource || openModel)(modelKey, { modelDir: this.modelDir });   // (tests stub openSource)
-    let L, layerBytes, embedBytes, experts = null;
+    let L, layerBytes, embedBytes, experts = null, flashG = null;
     try {
       if (M.kind === "qwen35") {
         const G = await src.header(false);
@@ -1100,12 +1103,11 @@ export class RoomNode extends EventEmitter {
         embedBytes = (G.tensors[GGML_EMBED]?.byteLength || 0) + (G.tensors[GGML_OUTPUT]?.byteLength || 0) + qwen35MtpBytes(G);
         experts = expertsOf(G, L);   // what each layer's routed experts park (null for a dense model): ExpertStore's sizes
       } else if (M.kind === "qwen4exp") {
-        // Qwen3.8-Flash-Next: the dense phase (no QSA indexer), K / V in f32 on its attention layers (averaged over all
-        // of them), the embedding and the head's HC mixer + output.weight on the host
-        const G = await src.header(false), c = qwen4expConfig(G.meta);
-        L = c.L;
-        const kvPos = 2 * c.nKVHeads * c.headDim * 4 * c.qsa.filter(Boolean).length / L;
-        layerBytes = qwen4expShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false, qsa: false }) / 4 + ctx * kvPos;
+        // Qwen3.8-Flash-Next: each layer's own bytes at the room's context (room/models.js flashLayerCost), sized below
+        // once the context is picked (so needGB, ai.layerGB and the deal are at the context the room opens with), the
+        // embedding and the head's HC mixer + output.weight on the host
+        const G = flashG = await src.header(false);
+        L = qwen4expConfig(G.meta).L;
         embedBytes = qwen4expShardBytes(G, { lo: 0, hi: 0, hasEmbed: true, hasHead: true, qsa: false });
         experts = expertsOf(G, L);   // expert offload (shard.js loadFlash): parked in RAM, read from disk (--disk), or a tab's OPFS
       } else {
@@ -1128,7 +1130,9 @@ export class RoomNode extends EventEmitter {
     ai.ctxWant = pick.fellBack ? pick.want : 0;
     ai.ctxNote = pick.note;
     if (ai.ctxNote) this.log(ai.ctxNote);
-    const plan = RoomNode.dealPlan({ L, layerBytes, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
+    const layerCost = flashG ? flashLayerCost(flashG, ctx) : null;
+    if (layerCost) layerBytes = layersTotal(layerCost, L) / L;   // (their average: ai.layerGB)
+    const plan = RoomNode.dealPlan({ L, layerBytes, layerCost, embedBytes, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap, mode: this.splitMode,
       fitBytes: roomBytes(modelKey, ctx, kv === "q8" ? "q8" : "f16"), experts, model: modelKey, ngram: ngramOf(modelKey) });
     if (!plan.fit.fits) {
       // short: the room stops instead of dealing past a pledge (a re-deal after a device left that the
