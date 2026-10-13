@@ -56,11 +56,11 @@ export function patchPipeline(s) {
   s = rep(s, "        ai.q = ai.q.then(() => workerFrame(d))", "        __HP('w.enq', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos); ai.q = ai.q.then(() => workerFrame(d))", f);
   s = rep(s, "    const t0 = performance.now();\n    if (d.t === \"ai-hidden-b\") {", "    const t0 = performance.now(); __HP('w.start', d.t, d.t === 'ai-hidden' ? d.pos : d.basePos, d.n || 1);\n    if (d.t === \"ai-hidden-b\") {", f);
   s = rep(s, "      const { h: xs, ids: tk } = splitWire(d, nTok, wdim);", "      const { h: xs, ids: tk } = splitWire(d, nTok, wdim); __HP('w.unp1', d.t, d.basePos);", f);
-  s = rep(s, "      teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0);", "      __HP('w.gpu1', d.t, d.basePos); teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0);", f);
+  s = rep(s, "      teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0, nTok);", "      __HP('w.gpu1', d.t, d.basePos); teleNote(d.spec ? \"spec\" : \"pre\", performance.now() - t0, nTok);", f);
   s = rep(s, "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb, ai.next === \"host\" ? null : tk) };",
     "      const bmsg = { basePos: d.basePos, n: nTok, ...(d.spec ? { spec: 1 } : {}), ...packWire(hb, ai.next === \"host\" ? null : tk) }; __HP('w.pack1', d.t, d.basePos);", f);
   s = rep(s, "      const { h: hin, ids: tk } = splitWire(d, 1, wireDim(current.engine));", "      const { h: hin, ids: tk } = splitWire(d, 1, wireDim(current.engine)); __HP('w.unp1', d.t, d.pos);", f);
-  s = rep(s, "      teleNote(\"one\", performance.now() - t0);", "      __HP('w.gpu1', d.t, d.pos); teleNote(\"one\", performance.now() - t0);", f);
+  s = rep(s, "      teleNote(\"one\", performance.now() - t0, 1);", "      __HP('w.gpu1', d.t, d.pos); teleNote(\"one\", performance.now() - t0, 1);", f);
   s = rep(s, "      const msg = { pos: d.pos, ...packWire(h, ai.next === \"host\" ? null : tk) };", "      const msg = { pos: d.pos, ...packWire(h, ai.next === \"host\" ? null : tk) }; __HP('w.pack1', d.t, d.pos);", f);
   return s;
 }

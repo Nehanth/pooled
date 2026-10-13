@@ -148,17 +148,20 @@ Deno.test("pipeline profiles: a replaced engine stays captured in node calls and
   }
 });
 
-Deno.test("pipeline node: browser abort and observer hooks do not affect node execution", async () => {
+Deno.test("pipeline node: browser abort and observer hooks do not affect node execution; it reports its compute (ai-tele)", async () => {
   const ai = { ...state(), abort: true, next: "host", hostId: "host" };
   const unexpected = () => { throw new Error("browser observer called"); };
+  const tele = [];
   ai.engine = { dims: { dim: 1 }, runHidden: async (h) => h,
     embedRun: async () => new Float32Array([1]), headFromHidden: async () => new Float32Array([2]),
   };
   const p = createPipeline({ state: ai, options: { profile: "node" },
     transport: { sendTo() {}, sendHidden() {} },
-    hooks: { onStatus: unexpected, teleNote: unexpected, computePass: unexpected, keepWarm: unexpected } });
+    hooks: { onStatus: unexpected, teleNote: (kind, ms, n) => tele.push([kind, ms >= 0, n]), computePass: unexpected, keepWarm: unexpected } });
   eq([...await p.aiPrefill([1])], [2]);
   await p.workerFrame({ t: "ai-hidden", pos: 0, ...packWire(new Float32Array([1])) });
+  // a room node worker times its frames like a browser worker (room/tele.js): the host's map and speed panel use it
+  eq(tele, [["one", true, 1]]);
 });
 
 
