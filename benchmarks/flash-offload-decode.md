@@ -239,3 +239,44 @@ with less RAM than its layers' experts.
   after this layer's experts) would need the guess after the experts, too late to overlap them.
 - **Two room nodes on one 12 GB GPU** page at a pledge of 3 + 8 GB (§1). #373's disk-share table and §0's
   configuration A were measured that way.
+
+## 7. Review fixes (2026-10-13 02:20 - ET, `d127493`)
+
+Three findings from the review of #378, all about the reader's lease ring, none about the bytes:
+
+- **The cut and the read-ahead shared 32 ring slots.** `prefetch()` for layer N+1 runs while layer N's cut still
+  holds its leases, and N+1's cut runs while the guess still holds its own, so on consecutive disk layers part of
+  each cut read plain arrays (the page-faulting path §2 removes). The room node's reader now has **64 slots**
+  (`shard.js`: 2 x K x 3 parts for Flash's K = 10; 256 MiB of shared memory, made on the first read). The store
+  counts `leasedReads` / `plainReads`; the profiler logs them.
+- **A read-ahead that failed** kept the leases its other parts got and was read again as leases the cut's budget
+  never counted (a wait for a ring slot only this store frees, near a full ring). Its leases now go back at once, and
+  it is read again as leases only if `_canLease(1)`.
+- **A cut that failed** left its leases, and those of reads that finished after the failure, held until the next
+  cut. `_readMany` now keeps a call's leases until every read has settled, then hands them to the store, or releases
+  all of them if one failed; `prepare()` unstages on a failure.
+
+Unit tests for each (`tests/unit/expert_store_test.js`, 27/27).
+
+**B' on the PC** (node `--ram 43 --disk --gb 6`, layers 29-47 from disk; decode tok/s summed over the 3 cases;
+`prev` = `c1f8bef`, 32 slots and the old counters; `r32` = `d127493` with `ringSlots: 32`, uncommitted, for the counts):
+
+| set | arm | tok/s | leased / plain reads |
+|---|---|---|---|
+| a6 | prev | 17.908 | (not counted) |
+| a6 | fix (64) | 15.233 | 18,324 / 0 |
+| a6 | fix (64) | 15.614 | 18,322 / 2 |
+| a6 | prev | 15.510 | (not counted) |
+| a7 | fix (64) | 15.665 | 18,323 / 1 |
+| a7 | r32 | 17.702 | 16,763 / 1,561 |
+| a7 | r32 | 14.562 | 16,743 / 1,581 |
+| a7 | fix (64) | 15.837 | 18,324 / 0 |
+
+With 32 slots 8.5% of B' reads were plain; with 64, none. Throughput: **no difference this setup can resolve.** The
+64-slot arms sit at 15.2-15.8; the 32-slot arms range from 14.6 to 17.9, and the fastest arm of both sets was a
+32-slot one run first or second. The finding was right about the mechanism, but it does not explain B''s 1.007x.
+The fix stays: it removes a path the PR meant to remove, for 128 MiB more shared memory.
+
+**Bits** (`BITS=1`, `d127493`): A' and B' both give **two-sum d0fde80c, bash e9ed19f7, eos-mid 19b0ecc8**, MATCH,
+the same as §4. Every arm of a6/a7 MATCHes the golden ids. Logs: `logs/a6-*`, `logs/a7-*`.
+
