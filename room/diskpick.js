@@ -31,14 +31,15 @@ export const rowTitle = (m) => `${m.name}: a ${paramsText(m)} model that keeps m
 // fits: roomFitFor's verdict (with stores false, the whole model fits in this room's GPU memory). disk: this device's
 // part, { state (room/diskstore.js diskState), shareBytes (roomFitFor share, null: not known), storedBytes (what is
 // saved: room/flashdisk.js flashDiskBytes, null: not known) }: what the first Start downloads, and that it happens once.
-// The GPU figure is rounded up to a whole GB here (8.1 and 8.6 both read "about 9 GB", so a device joining doesn't
-// grow it beside "makes it faster"); the pool's line keeps the exact one.
+// disk.devs: devices in the room (alone: answers start slowly). The GPU figure is the pool line's own (num), so the
+// note and "needs 8.1 GB" beside it never disagree.
 export const pickNote = (m, needGB = null, stores = true, fits = false, disk = {}) => !stores
   ? (fits ? `${m.name} is a ${m.params} model. This room's GPU memory holds all of it.`
     : `${m.name} is a ${m.params} model that keeps most of itself on disk.`)
   : [`${m.name} is a ${m.params} model. It keeps most of itself on disk, so it needs `
-    + (needGB > 0 ? `only about ${Math.ceil(needGB)} GB of GPU memory.` : "far less GPU memory than its size."),
-  downloadNote(m, disk), "Alone it reads from disk, so answers start slowly. Each device that joins makes it faster."].filter(Boolean).join(" ");
+    + (needGB > 0 ? `only about ${num(needGB)} GB of GPU memory.` : "far less GPU memory than its size."),
+  downloadNote(m, disk), (disk.devs ?? 1) > 1 ? "Each device that joins makes it faster."
+    : "Alone it reads from disk, so answers start slowly. Each device that joins makes it faster."].filter(Boolean).join(" ");
 // pickNote's sentence on what Start downloads to this device, by its disk answer: "" when it downloads nothing here
 function downloadNote(m, { state = null, shareBytes = null, storedBytes = null } = {}) {
   const need = sizeText(shareBytes > 0 ? shareBytes : m.diskBytes);
@@ -59,9 +60,9 @@ const FIX = (state) => state === "ask" || state === "deny" ? "Allow disk storage
   : state === "allow" ? "Invite more devices, or give more GPU memory." : "Invite more devices with GPUs.";
 export const shortNote = (shortGB, state, stores = true) => stores ? `${num(shortGB)} GB of GPU memory short. ${FIX(state)}`
   : state === "ask" || state === "deny" ? storeFix(state) : `Needs a device that can store it. ${storeFix(state)}`;
-// the button under Start that turns this device's disk storage on (p2p.html #ai-allow-disk): with what it would save
-// (shareBytes: roomFitFor share; null or 0: the whole copy)
-export const allowLabel = (m, shareBytes = null) => `Allow disk storage (${sizeText(shareBytes > 0 ? shareBytes : m.diskBytes)})`;
+// the button under Start that turns this device's disk storage on (p2p.html #ai-allow-disk): with the most it would
+// save. It shows only when the room doesn't fit, and roomFitFor knows this device's share only when it fits, so "up to"
+export const allowLabel = (m) => `Allow disk storage (up to ${sizeText(m.diskBytes)})`;
 
 // ---- The pool (room.js renderPool, while a disk model is picked): a GPU memory bar and a Storage bar ----
 // What each device brings beyond GPU memory is room/pledge.js storageOf: { kind: "disk" | "ram" | null, ask, ramGB }.

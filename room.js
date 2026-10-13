@@ -712,7 +712,7 @@ function updateNeed(pledged) {
   const dk = diskCopyOf($("ai-model").value), dState = dk ? diskStateOf($("ai-model").value) : null;
   const canAllow = !ok && (dState === "deny" || (dState === "ask" && row?.f?.stores === false));
   $("ai-allow-disk").hidden = !canAllow || ai.busy || !!ai.engine;
-  if (canAllow) $("ai-allow-disk").textContent = allowLabel(dk, row?.f?.share?.get(myName));
+  if (canAllow) $("ai-allow-disk").textContent = allowLabel(dk);
   // what pressing Start costs this device: about its share of the weights file (layers are dealt by
   // memory given), so a phone on mobile data sees ~0.2 GB and a laptop alone the whole file
   const file = FILE_GB[$("ai-model").value];
@@ -738,7 +738,7 @@ function updateNeed(pledged) {
   // read it with (room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap, whatever the stored answer); the
   // picker's note reads whether some device here can store it (roomFitFor stores)
   const tier = tabDiskCan ? tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }) : null;
-  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, stores: row?.f?.stores !== false, needGB: row?.f?.needGB ?? null, fits: !!ok, shareBytes: row?.f?.share?.get(myName) ?? null });
+  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, stores: row?.f?.stores !== false, needGB: row?.f?.needGB ?? null, fits: !!ok, shareBytes: row?.f?.share?.get(myName) ?? null, devs: row?.f?.devs?.length ?? 1 });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
   return rows;

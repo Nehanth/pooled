@@ -39,9 +39,12 @@ Deno.test("diskpick: the row, and the line under the rows", () => {
   ok(!/<svg/.test(rowChipHTML(m)), "no star");
   eq(rowTitle(m), "Qwen3.8 Flash: a 125B (6B active) model that keeps most of itself on disk, so it needs far less GPU memory");
   const END = "Alone it reads from disk, so answers start slowly. Each device that joins makes it faster.";
-  eq(pickNote(m, 5.7), `Qwen3.8 Flash is a 125B model. It keeps most of itself on disk, so it needs only about 6 GB of GPU memory. ${END}`);
-  eq(pickNote(m, 8.1), pickNote(m, 8.6), "a device joining doesn't grow the figure beside \"makes it faster\"");
-  ok(pickNote(m, 8.1).includes("only about 9 GB of GPU memory"));
+  eq(pickNote(m, 5.7), `Qwen3.8 Flash is a 125B model. It keeps most of itself on disk, so it needs only about 5.7 GB of GPU memory. ${END}`);
+  ok(pickNote(m, 8.1).includes("only about 8.1 GB of GPU memory"), "the pool line's figure (\"needs 8.1 GB\"), not rounded up");
+  ok(pickNote(m, 8).includes("only about 8 GB of GPU memory"));
+  const two = pickNote(m, 8.6, true, true, { devs: 2 });
+  ok(two.endsWith(" Each device that joins makes it faster.") && !/Alone/.test(two), "not alone: no \"Alone\"");
+  eq(pickNote(m, 8.6, true, true, { devs: 1 }), pickNote(m, 8.6, true, true), "one device: alone");
   ok(pickNote(m, null).includes("far less GPU memory than its size"), "before the planner has a figure");
   // what the first Start downloads to this device, by its disk answer
   const say = (disk) => pickNote(m, 8.1, true, true, disk).replace(/^.*?GPU memory\. /, "").replace(END, "").trim();
@@ -73,9 +76,7 @@ Deno.test("diskpick: short, under Start: by how much, and the fix this device's 
   for (const st of ["url", "small", "none", "allow"]) ok(shortNote(55, st, false).endsWith(poolFix(st, { nStore: 0 })), `the same fix under Start and in the pool, ${st}`);
   for (const st of ["ask", "deny"]) eq(poolFix(st, { nStore: 0 }), "", `disk storage off: the fix once, under Start beside its Allow, ${st}`);
   const m = DISK_COPY["qwen3.8-flash"];
-  eq(allowLabel(m), "Allow disk storage (92.4 GB)");
-  eq(allowLabel(m, 46.2 * GB), "Allow disk storage (46.2 GB)", "this device's share");
-  eq(allowLabel(m, 0), allowLabel(m));
+  eq(allowLabel(m), "Allow disk storage (up to 92.4 GB)", "shown only when it doesn't fit, when the share isn't known");
   for (const st of ["ask", "deny", "url", "small", "none", "allow"]) {
     ok(!/GPU memory short|GPUs\./.test(shortNote(55, st, false)), st);
   }

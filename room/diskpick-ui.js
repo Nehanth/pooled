@@ -11,7 +11,7 @@ const $ = (id) => document.getElementById(id);
 const START = "Start the model", GIVES = "This device gives";
 let shown = null, stored = null, asked = 0, armed = 0, last = {}, covers = null, invite = null;
 
-// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, stores, needGB, fits, shareBytes } (this tab's
+// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, stores, needGB, fits, shareBytes, devs } (this tab's
 // disk-tier RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether some device in the room can store it,
 // the GPU memory it needs and whether it fits, and what this tab would copy to its disk in this room: roomFitFor's share,
 // null when not known). Cheap when nothing changed: it runs on every room update.
@@ -29,7 +29,7 @@ export function showDiskPick(key, info = last) {
   $("ap-me-k").textContent = "GPU memory";
   $("ap-covers").textContent = GPU_HINT;
   $("side-hint").textContent = inviteHint(m);
-  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.stores !== false, !!info.fits, { state, shareBytes: info.shareBytes ?? null, storedBytes: stored });
+  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.stores !== false, !!info.fits, { state, shareBytes: info.shareBytes ?? null, storedBytes: stored, devs: info.devs ?? 1 });
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;
   shown = sig;
@@ -62,7 +62,10 @@ export function initDiskPick({ toast = () => {} }) {
     const key = $("ai-model").value;
     if (!diskCopyOf(key)) return;
     diskStore.allow(key); shown = null; showDiskPick(key);
-    $("ai-start").focus();
+    // this button hides now (allow re-ran updateCluster); Start may still be off (short of GPU memory too): then focus
+    // the reason under it (p2p.html #ai-short, tabindex -1), or the picker, so focus never drops to the page
+    const s = $("ai-start"), why = $("ai-short");
+    if (!s.disabled) s.focus(); else (why.hidden ? $("ai-model") : why).focus({ preventScroll: true });
   });
   $("ap-flash").addEventListener("click", async (e) => {
     const b = e.target.closest("button[data-act]"), key = $("ai-model").value;
