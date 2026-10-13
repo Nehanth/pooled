@@ -163,7 +163,18 @@ Not counted above: the verify snapshot (~115 MB, fixed), the fixed per-pass scra
 
 Checks on the GB10 (Vulkan, Deno), first 4 layers (`tests/test_q38flash_batch.js`, 4300 tokens of the ctx8k prompt, QSA on, raw-key ring 1024). Every check passes in both formats: prefill == decode bit for bit (mixed passes and across 2051 / 2052), interleave, QSA == dense, verify / accept, and QSA against the CPU reference (raw keys collected from the ring as decode runs, every pooled key re-pooled). The 64-column prefill hash is `d6a6d01a` for f32, the same as main before this change, so the ring changes no bit. It is `37561b6a` for f16. Each hash is the same with `OFFLOAD=0-3 OFFLOAD_SLOTS=16`. `tests/test_q38flash_ckpt.js` restores the state bit for bit in f32 and f16, with and without QSA.
 
-FULL_RESULTS
+Full model, judged by the golden rule (`FULL=1 CASES=ctx2k,ctx8k,ctx32k MAXSEQ=32256`, with the long goldens from the long-context goldens branch). Batched prefill, then decode, then a verify pass:
+
+| case (prompt tokens) | KV | prefill tok/s | decode tok/s | vs llama.cpp | verify == decode |
+|---|---|---|---|---|---|
+| ctx2k (1887) | f32 | 41 | 11.78 | near tie at 26 (our gap 0.225) | yes |
+| ctx2k (1887) | f16 | 37 | 11.27 | near tie at 26 (our gap 0.231) | yes |
+| ctx8k (7663) | f32 | 37 | 11.39 | near tie at 6 (our gap 0.262) | yes |
+| ctx8k (7663) | f16 | 37 | 11.34 | near tie at 6 (our gap 0.219) | yes |
+| ctx32k (31958) | f32 | 37 | 11.31 | near tie at 0 (our gap 0.407) | yes |
+| ctx32k (31958) | f16 | 37 | 11.23 | **rule FAIL at 0** (our gap 0.649 > 0.5) | yes |
+
+The engine allocated 1651 MiB of state at maxSeq 32256 with f32 and 895 MiB with f16. Speed is the same in both formats. At ctx32k step 0, both formats pick 1192, which is llama.cpp's top in one of its three runs. llama.cpp's own margin between 8839 and 1192 moves across its reruns from +0.49 (the golden) to +0.05 to -0.56 (1192 ahead). Our f16 margin is -0.65 and f32's is -0.41. The two formats agree on the first 8 ids (the verify pass) and on the answer: note 32, "SSD expert offload". By the rule as written, f16 still fails this case, so `kv` stays `"f32"` by default until it passes. The options are a rule that accepts our token when it is some llama.cpp run's top, or more 32K goldens to see how often f16 lands outside the window.
 
 ### The qwen4exp goldens' pass rule
 
