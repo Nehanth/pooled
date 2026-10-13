@@ -28,7 +28,7 @@ import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecode
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
 import { SHAPE, MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf, flashLayerCost, flashTabHostMargin,
-  flashLongMeta, flashRoomFormat, flashReadyFields, readyCtxShort } from "./room/models.js";
+  flashLongMeta, flashRoomFormat, flashReadyFields, readyCtxShort, flashDealReserve } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -3964,7 +3964,7 @@ async function aiStart(modelArg) {
         host: peer.id,
         inv,
         // the same shape as the room node's (packages/room-node/roomnode.js offloadMsg), disk tier included
-        ...(o ? { offload: offMsg(o) } : {}),
+        ...(o ? { offload: { ...offMsg(o), ...(flashDealReserve(modelKey) > 0 ? { batchReserve: flashDealReserve(modelKey) } : {}) } } : {}),
         ...(flash ? { flash } : {}),
       };
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });

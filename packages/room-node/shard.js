@@ -402,8 +402,10 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   // after it (the deal's own bar for a good cache: decode misses a little more often, prompt frames run batched), else
   // not at all (prompt frames one column at a time)
   if (!noBatch && off?.length) {
+    // (the scratch may also come from the dealer's reserve for it, offload.batchReserve, which the load's own count of
+    // its share can hide: it counts upload staging the deal does not)
     const st = out.experts, rb = st.regionSize(), sl = Math.max(0, slack ?? 0);
-    const fromSlack = Math.min(scratch, sl), kept = st.poolSlots(rb + scratch - fromSlack);
+    const fromSlack = Math.min(scratch, Math.max(sl, +offload.batchReserve || 0)), kept = st.poolSlots(rb + scratch - fromSlack);
     const enough = flashRegionForced() ? OFFLOAD_MIN_SLOTS : OFFLOAD_GOOD_SLOTS;
     if (sl >= rb + scratch && fits(rb + scratch)) {
       expertRegion = true; st.vramBytes += rb;
@@ -415,9 +417,10 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
     } else noBatch = `the offloaded layers need a ${gb(rb)} GB whole-layer region: the pledge has ${gb(sl)} GB past the share and the cache would keep ${Math.max(0, kept)} experts per layer (< ${enough})`;
   } else if (!noBatch && !fits(scratch)) noBatch = `no GPU memory left for the batched passes' ${gb(scratch)} GB of scratch`;
   if (noBatch) scratch = 0;
-  // an offloader without batched passes gives the dealer's scratch reserve (what of it is still slack) to its cache
-  if (noBatch && off?.length && slack > 0) {
-    const give = Math.min(slack, flashBatchScratch(flashBatchCols(false)));
+  // an offloader without batched passes gives the dealer's scratch reserve (offload.batchReserve: none from an older
+  // host, which kept nothing back) to its cache, so its cache is what the deal would have made without the reserve
+  if (noBatch && off?.length && +offload.batchReserve > 0) {
+    const give = +offload.batchReserve;
     if (fits(give)) { out.experts.vramBytes += give; log(`expert offload: the ${gb(give)} GB kept for batched passes goes to the expert cache`); }
   }
   const { Qwen4ExpEngine } = await import("../../engine/qwen4exp.js");

@@ -51,7 +51,7 @@ import { TeleMeter, expertStoreOf } from "../../room/tele.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce, layersTotal } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
 import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost,
-  flashRoomFormat, flashReadyFields, readyCtxShort } from "../../room/models.js";
+  flashRoomFormat, flashReadyFields, readyCtxShort, flashDealReserve } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
 import { isPrefix } from "../../harness/prefix.js";
@@ -111,6 +111,10 @@ export const cleanName = (s, id) => String(s ?? id).replace(/[\u0000-\u001f\u007
 // tier, the layers whose experts stay in the files ([diskLo, hi)) and the RAM their cache takes
 const offloadMsg = (o) => ({ lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}),
   ...(Number.isInteger(o.diskLo) ? { diskLo: o.diskLo, diskRamBytes: o.diskRamBytes } : {}) });
+// batchReserve (Qwen3.8-Flash-Next): the scratch this dealer kept back from the device's pledge (room/models.js
+// flashDealReserve), so an offloader that does not batch knows what it may give its expert cache (shard.js loadFlash).
+// Older devices ignore it; a device dealt by an older host sees none and gives nothing back
+export const withReserve = (msg, model) => (flashDealReserve(model) > 0 ? { ...msg, batchReserve: flashDealReserve(model) } : msg);
 
 export class RoomNode extends EventEmitter {
   // name, pledgeGB, signal ("host:port" PeerServer, null = the PeerJS cloud), modelDir, flags (engine
@@ -1188,13 +1192,13 @@ export class RoomNode extends EventEmitter {
     if (ai.redealWanted) { ai.startErr(ai.redealWanted); ai.redealWanted = null; }
     ai.chain.forEach((id, i) => {
       const msg = { t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx, kv, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: this.peer.id,
-        ...(plan.offload[i + 1] ? { offload: offloadMsg(plan.offload[i + 1]) } : {}), ...(flash ? { flash } : {}) };
+        ...(plan.offload[i + 1] ? { offload: withReserve(offloadMsg(plan.offload[i + 1]), modelKey) } : {}), ...(flash ? { flash } : {}) };
       ai.plan.set(nameOf(id), { msg });
       this.sendTo(id, msg);
     });
     this.broadcast({ t: "ai-layers", by: ai.layersByName });
     const t0 = performance.now();
-    const myOff = plan.offload[0] ? offloadMsg(plan.offload[0]) : null;
+    const myOff = plan.offload[0] ? withReserve(offloadMsg(plan.offload[0]), modelKey) : null;
     const keep = ai.engine && sameShard(ai.held, { model: modelKey, range: ranges[0], ctx, offload: myOff, flash }) && ai.held.kv === kv;
     let unwatch = () => {};
     try {
