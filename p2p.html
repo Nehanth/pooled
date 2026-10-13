@@ -789,10 +789,14 @@
   .rung.disk.sel .rn .rx { color: #A5B4FC; }
   .rung.disk.sel .dkc { color: #fff; background: rgba(255,255,255,.1); box-shadow: none; }
   .rung.disk.sel::before { background: #0B0D14; box-shadow: inset 0 0 0 4.5px #fff; }
-  /* Flash's two settings under Start (room/diskpick.js): GPU memory and Disk, in the Advanced-style rows, with the
-     rows' own chips ("fits", "short") and one short sentence */
-  #ai-disk { display: flex; flex-direction: column; gap: 4px; margin: 0 2px; }
-  #ai-disk[hidden], #ai-notnow[hidden] { display: none; }
+  /* Flash's per-device settings (room/diskpick.js): "This device, for Qwen3.8 Flash" in the right column, the pledge
+     stepper relabelled "GPU memory", then Disk and RAM for its cache in the Advanced-style rows with the rows' own
+     chips. Only while Flash is picked; its fit stays the need line's and the pool's. */
+  #ap-for[hidden], #ap-flash[hidden], #ai-notnow[hidden] { display: none; }
+  .ap-for { flex-basis: 100%; margin-bottom: -2px; }
+  .ap-me.flash > h3.ap-k { color: var(--text); }
+  .ap-me.flash .ap-covers { display: none; }
+  #ap-flash { flex-basis: 100%; padding: 0; border-top: 1px solid var(--rule-2); }
   .ai-go { display: flex; gap: 8px; }
   .ai-go #ai-start { flex: 1; min-width: 0; }
   #ai-notnow { flex: none; height: 48px; padding: 0 16px; border-radius: 8px; font-size: 15px; }
@@ -806,7 +810,7 @@
   .dk-row .v { font: 400 12px/1 var(--mono); color: var(--ink-2); }
   .dk-del, .dk-act { font: 500 12px/1 var(--sans); padding: 8px 11px; border-radius: 8px; }
   .dk-del { color: var(--del); }
-  #ai-panel:is(.loading, .online) :is(#ai-disk, #ai-notnow) { display: none; }
+  #ai-panel:is(.loading, .online) :is(#ap-flash, #ai-notnow) { display: none; }
   #ai-loading { display: none !important; }
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
   /* loading: the landing's pick card. The logo's wave, what loads, each device's share of it, and
@@ -1624,7 +1628,6 @@
     .rung { height: 46px; font-size: 13px; padding: 0 12px 0 10px; gap: 8px; }
     #ai-start { height: 46px; }
     #ai-notnow { height: 46px; padding: 0 14px; }
-    #ai-disk { margin: 0 4px; }
     #ap-qr svg { width: 84px; height: 84px; }
     #side-code { font-size: 22px; }
     #ai-output { padding: 14px 12px 8px; }
@@ -2003,7 +2006,6 @@
           <span id="ai-status"></span>
           <p class="ap-note" id="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
           <div class="ai-go"><button id="ai-start" class="primary">Start the model</button><button id="ai-notnow" type="button" hidden>Not now</button></div>
-          <div id="ai-disk" aria-live="polite" hidden></div>
           <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
           <p id="ai-short" role="status" hidden></p>
           <p id="ai-why" hidden>No device in this room can run a model: none has WebGPU. Join from a laptop or desktop in Chrome or Edge (or Safari 26) to start one.</p>
@@ -2025,12 +2027,14 @@
           <ul id="ap-devs" aria-label="What each device gives"></ul>
         </section>
         <section class="ap-me" id="ap-me" aria-label="This device">
-          <h3 class="ap-k"><span>This device gives</span></h3>
+          <p class="ap-k ap-for" id="ap-for" hidden></p>
+          <h3 class="ap-k"><span id="ap-me-k">This device gives</span></h3>
           <div class="ap-step" id="ap-step"><button class="step" id="ap-minus" type="button" aria-label="Less memory">&minus;</button><input id="ap-gb" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Memory this device gives, in GB" value="1"><span class="u">GB</span><button class="step" id="ap-plus" type="button" aria-label="More memory">+</button></div>
           <p class="ap-me-hint" id="ap-me-hint" hidden></p>
           <p class="ap-covers" id="ap-covers">A pledge is a promise: this device never holds more. It covers the layers it holds and their context memory, and on the device that hosts the model also the embedding and output head.</p>
           <p class="ap-no" id="ap-cap" hidden></p>
           <p class="ap-no" id="ap-no" hidden>This browser can't use its graphics chip, so this device can chat but not help run the model.</p>
+          <div class="dk-rows" id="ap-flash" aria-live="polite" hidden></div>
         </section>
         <section class="ap-room" id="side-room" aria-label="Invite more devices">
           <div id="ap-qr" aria-hidden="true"></div>

@@ -2,7 +2,7 @@
 // future big model gets the same row, cost figures, consent and Start label from its own entry. The consent state is
 // #368's stored answer (room/flashdisk.js TAB_DISK_KEY), read through room/diskstore.js diskState.
 import { DISK_COPY, MODELS, PICKER, SHAPE, diskCopyBytes } from "../../room/models.js";
-import { diskCopyOf, rowChip, paramsText, rowTitle, gpuRow, diskRow, gpuRowHTML, diskRowHTML, settingsHTML, sizeText } from "../../room/diskpick.js";
+import { diskCopyOf, rowChip, paramsText, rowTitle, groupTitle, diskRow, ramRow, diskRowHTML, ramRowHTML, settingsHTML, sizeText } from "../../room/diskpick.js";
 import { diskState } from "../../room/diskstore.js";
 import { minFitPledge, roomFit } from "../../room/plan.js";
 import { TAB_DISK_KEY, TAB_DISK_MODELS } from "../../room/flashdisk.js";
@@ -35,29 +35,30 @@ Deno.test("diskpick: the row", () => {
   eq(rowTitle(m), "Qwen3.8 Flash: 125B (6B active), MoE, its experts streamed from this device's disk");
 });
 
-Deno.test("diskpick: GPU memory shows the room's own need and verdict", () => {
-  const fit = gpuRow({ needGB: 5.7, hasGB: 12, fits: true, needDisk: true, mineGB: 12 });
-  eq([fit.k, fit.v, fit.chip], ["GPU memory", "needs 5.7 GB · room 12 GB", "fits"]);
-  eq(fit.h, "The least the room's GPUs need; the rest streams from disk. This device gives 12 GB.");
-  const short = gpuRow({ needGB: 67, hasGB: 12, fits: false, shortGB: 55, needDisk: false, mineGB: 12 });
-  eq([short.v, short.chip], ["needs 67 GB · room 12 GB", "55 GB short"]);
-  ok(short.h.startsWith("No disk tier here"));
-  ok(gpuRowHTML(fit).includes("<b>fits</b>"), "the rows' own fits chip");
-  ok(gpuRowHTML(short).includes('<span class="more">55 GB short</span>'), "and their short chip");
+Deno.test("diskpick: the right column's group for the picked disk model; RAM for its cache is read-only", () => {
+  const m = DISK_COPY["qwen3.8-flash"];
+  eq(groupTitle(m), "This device, for Qwen3.8 Flash");
+  const r = ramRow(3);
+  eq([r.k, r.v], ["RAM for its cache", "3 GB"], "tabDiskMeta's ramGB, as the code computes it");
+  eq(ramRow(1.5).v, "1.5 GB", "held to tabRamCap on a small device");
+  eq([ramRow(null), ramRow(0)], [null, null], "no tier: no row (the Disk row says why)");
+  ok(!ramRowHTML(r).includes("<button") && !ramRowHTML(r).includes("<input"), "a figure, not a control: nothing stores a change to it");
+  eq(ramRowHTML(null), "");
+  ok(!/OPFS|tabram|tabdisk/.test(r.h), "plain words");
 });
 
-Deno.test("diskpick: Disk shows #368's answer, the stored size, the tier's RAM, Allow and Free", () => {
+Deno.test("diskpick: Disk shows #368's answer, the stored size, Allow and Free", () => {
   const m = DISK_COPY["qwen3.8-flash"], acts = (d) => d.acts.map((a) => a.act);
-  let d = diskRow(m, { state: "allow", storedBytes: 0, ramGB: 3 });
-  eq([d.chip, d.h, acts(d)], ["Allowed", "0 GB of 92.4 GB stored · 3 GB RAM for its cache", []]);
-  d = diskRow(m, { state: "allow", storedBytes: 40 * GB, ramGB: 3 });
-  eq([d.h, acts(d)], ["40.0 GB of 92.4 GB stored · 3 GB RAM for its cache", ["free"]]);
+  let d = diskRow(m, { state: "allow", storedBytes: 0 });
+  eq([d.chip, d.h, acts(d)], ["Allowed", "0 GB of 92.4 GB stored", []]);
+  d = diskRow(m, { state: "allow", storedBytes: 40 * GB });
+  eq([d.h, acts(d)], ["40.0 GB of 92.4 GB stored", ["free"]]);
   eq(diskRow(m, { state: "allow", storedBytes: 40 * GB, armed: true }).acts[0].label, "Free 40.0 GB?", "the second press frees");
-  d = diskRow(m, { state: "ask", storedBytes: 0, ramGB: 3 });
+  d = diskRow(m, { state: "ask", storedBytes: 0 });
   eq([d.chip, acts(d)], ["Not asked yet", ["allow"]]); ok(d.h.endsWith("Start asks first"));
   d = diskRow(m, { state: "deny", storedBytes: 0 });
   eq([d.chip, acts(d)], ["Not allowed", ["allow"]]);
-  for (const st of ["url", "none"]) { d = diskRow(m, { state: st, storedBytes: 0, ramGB: null }); eq([d.chip, acts(d)], ["Not available", []], st); }
+  for (const st of ["url", "none"]) { d = diskRow(m, { state: st, storedBytes: 0 }); eq([d.chip, acts(d)], ["Not available", []], st); }
   eq(diskRow(m, { state: "none" }).h, "This browser can't store it (phones and some browsers can't)", "plain words");
   ok(!/OPFS|tabram|tabdisk/.test(diskRow(m, { state: "none" }).h + diskRow(m, { state: "url" }).h), "the jargon only in the tooltip");
   ok(diskRow(m, { state: "url" }).title.includes("?tabdisk=0") && diskRow(m, { state: "none" }).title.includes("OPFS"));
@@ -65,8 +66,11 @@ Deno.test("diskpick: Disk shows #368's answer, the stored size, the tier's RAM, 
   eq(acts(diskRow(m, { state: "none", storedBytes: GB })), ["free"], "a copy left behind can still be freed");
   ok(diskRowHTML(diskRow(m, { state: "allow" })).includes("<b>Allowed</b>"));
   ok(!diskRowHTML(diskRow(m, { state: "allow", storedBytes: 0 })).includes("data-act"), "nothing to do");
-  const h = settingsHTML(m, { needGB: 5.7, hasGB: 12, fits: true, needDisk: true }, { state: "ask", storedBytes: 0, ramGB: 3 });
+  const h = settingsHTML(m, { state: "ask", storedBytes: 0 }, 3);
   ok(!/\b20 GB\b|tok\/s|dk-cost|dk-agree/.test(h), "no tiles, no made-up figure, no repeated sentence");
+  eq([...h.matchAll(/<span class="k">([^<]*)/g)].map((x) => x[1]), ["Disk", "RAM for its cache"], "Disk, then its RAM");
+  ok(!/fits|short|GPU/.test(h), "no second fit answer: that is the need line's and the pool's");
+  eq([...settingsHTML(m, { state: "none" }, null).matchAll(/class="k"/g)].length, 1, "no tier: Disk only");
 });
 
 Deno.test("diskState: #368's stored answer; the URL can only say no", () => {

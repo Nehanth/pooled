@@ -658,7 +658,8 @@ function updateNeed(pledged) {
   $("need-fill").style.width = Math.min(100, ok ? 100 : pledged / (pledged + shortGB) * 100).toFixed(1) + "%";
   const has = +pledged.toFixed(1);
   // a model with a fallback context says both needs; a room that holds it only there says so
-  const needs = row?.f?.needGB != null ? `${row.f.needGB} GB${row.f.needDisk ? " on GPUs, the rest streamed from disk" : ""}`
+  // (a disk model: on GPUs, and whether the rest streams from disk or no device here can)
+  const needs = row?.f?.needGB != null ? `${row.f.needGB} GB on GPUs${row.f.needDisk ? ", the rest streamed from disk" : ", with no disk here to stream from"}`
     : NEED_GB[$("ai-model").value] ? needText($("ai-model").value) : `${need} GB`;
   const back = ok && row?.f?.fellBack ? ` ${ctxShortNote(shortName($("ai-model").value), row.f.ctx, row.f.want)}.` : "";
   $("need-text").textContent = ok
@@ -667,7 +668,7 @@ function updateNeed(pledged) {
   $("ai-need").classList.toggle("ok", ok);
   if (!ai.busy && !ai.engine) $("ai-start").disabled = !ok;
   // short: say by how much and who could give more, right under Start
-  // (a disk model says it in its GPU memory setting, under Start)
+  // (a disk model: its need line above says it, the one line on that side)
   $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine || !!diskCopyOf($("ai-model").value);
   $("ai-short").textContent = note;
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
@@ -694,10 +695,9 @@ function updateNeed(pledged) {
   $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
     : note;
   if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
-  // a disk model: its GPU memory setting shows these same figures (one need, one verdict), its Disk setting the
-  // tab's disk-tier RAM (room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap)
-  showDiskPick($("ai-model").value, { gpu: { needGB: row?.f?.needGB ?? need, hasGB: has, fits: ok, shortGB, needDisk: !!row?.f?.needDisk,
-    mineGB: myMeta.webgpu ? myMeta.contribGB : null }, ramGB: myMeta.tabDisk?.ramGB ?? null });
+  // a disk model: "This device, for <model>" in the right column (Disk, RAM for its cache: the tab's disk-tier RAM,
+  // room/flashdisk.js tabDiskMeta, TAB_RAM_GB held to tabRamCap); its fit is the line above and the pool's, only
+  showDiskPick($("ai-model").value, { ramGB: myMeta.tabDisk?.ramGB ?? null });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
 }
@@ -756,7 +756,7 @@ function renderPool(pledged) {
   $("ap-need").hidden = !selNeed;
   if (selNeed) {
     const [k, gb] = selNeed, f = fitOf.get(k), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
-    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b>${f?.needDisk ? " on GPUs" : ""}<span>${short > 0 ? `${short} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0);
+    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b>${f?.needGB != null ? " on GPUs" : ""}<span>${short > 0 ? `${short} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0);
   }
   $("ap-devs").innerHTML = devs.map((d) => `<li style="--sw:${devColor(d.name)}"><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB</b></li>`).join("")
     || '<li class="none">No device with WebGPU yet</li>';
