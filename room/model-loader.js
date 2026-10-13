@@ -165,16 +165,21 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
     if (!o.onParts) return loadShardIn(o, engines);
     // the other models' one part, from their onProgress (a Flash tab's parallel load makes its own tracker; its
     // sequential load, ?parload=0, sends only onProgress, as before)
-    let gpuParts = null;
+    let gpuParts = null, sentParts = false;
+    const onParts = (snap) => { sentParts = true; o.onParts(snap); };
+    // (the parts first, then the old callback: a page that reads the last snapshot in onProgress sees this one)
     const onProgress = (done, total, info) => {
+      if (!(info?.parts || info?.step)) {
+        gpuParts ||= partsTracker({ sizes: { gpu: Math.max(1, total) }, onParts });
+        gpuParts.at("gpu", done);
+      }
       o.onProgress(done, total, info);
-      if (info?.parts || info?.step) return;
-      gpuParts ||= partsTracker({ sizes: { gpu: Math.max(1, total) }, onParts: o.onParts });
-      gpuParts.at("gpu", done);
     };
     try {
-      const r = await loadShardIn({ ...o, onProgress }, engines);
+      const r = await loadShardIn({ ...o, onProgress, onParts }, engines);
       gpuParts?.state("gpu", "done");
+      // a load that said no progress at all (all from the cache): one last snapshot, so the page still gets one
+      if (!sentParts) onParts({ parts: [{ id: "gpu", done: 1, total: 1, state: "done" }, { id: "save", done: 0, total: 0, state: "skip" }, { id: "words", done: 0, total: 0, state: "skip" }] });
       return r;
     } catch (e) { gpuParts?.failRunning(); throw e; }
     finally { gpuParts?.flush(); }
@@ -261,7 +266,16 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       // there would be a second copy on this disk) nor the HTTP cache
       const readAt = httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }) });
       let experts = null, resident = null;
-      const streamPlain = streamWithRetry(M.gguf, streamOpts, pace);
+      // The GPU step's pacing (room.js aiLoadPace: hold it to the room's slowest GPU step), except while the parallel
+      // load says not to (room/flashload.js runFlashParts paced(): this tab's disk copy still runs after its GPU step,
+      // and held to a slow device the whole copy would start after that device is done). Unpaced, a Stop still ends
+      // it: the load's abort (gpuHold.signal) is checked instead
+      let gpuHold = null;   // { paced(), signal } during the parallel load's GPU step
+      const gpuPace = pace && (async () => {
+        if (gpuHold && !gpuHold.paced()) { if (gpuHold.signal.aborted) throw gpuHold.signal.reason; return; }
+        return pace();
+      });
+      const streamPlain = streamWithRetry(M.gguf, streamOpts, gpuPace);
       // what goes onto the GPU: the range's weights but the disk layers' experts
       const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: false };
       const skip = new Set(off?.disk || []);
@@ -303,7 +317,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         // queue flushed after each, as the room node loads it (packages/room-node/shard.js loadFlash): Dawn keeps a
         // writeBuffer's staging copy until the queue moves on, and one batch of a big share's uploads ran the GB10 out
         // of memory with the weights only half on the GPU
-        const bytesOf = rangeBytesOf(M.gguf, pace);
+        const bytesOf = rangeBytesOf(M.gguf, gpuPace);
         const up = (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(dev, e, false); };
         let base = 0;
         const part = async (o) => {
@@ -355,9 +369,10 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       async function loadFlashParallel() {
         const ac = new AbortController();
         // Stop (or another device's failed load): the copies stop too, not only the GPU step's paced fetches
-        const stopTick = setInterval(() => { if (ai.startFailed && !ac.signal.aborted) ac.abort(new Error(ai.startFailed)); }, 250);
         const wordsOn = !!ngCfg && !ngramCopyBlocked();
         const parts = partsTracker({ sizes: { gpu: total, save: off ? tabExpertBytes(G, off.disk) : 0, words: wordsOn ? wordsBytes : 0 }, onParts, onProg });
+        // (made after the tracker: sizing it can throw, and nothing would clear this then)
+        const stopTick = setInterval(() => { if (ai.startFailed && !ac.signal.aborted) ac.abort(new Error(ai.startFailed)); }, 250);
         let checks = (off ? 1 : 0) + (wordsOn ? 1 : 0);
         const checked = () => { if (--checks === 0) parts.note(null); };
         if (checks) parts.note("Checking what's already on this computer\u2026");
@@ -366,7 +381,10 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
           if (off) experts = expertStoreDeferred(dev, off.disk, offload);
           const inWorker = ngramWorker && typeof globalThis.Worker === "function";
           await runFlashParts({ parts, ac,
-            gpu: ({ at }) => gpuStep(at),
+            gpu: async ({ at, paced }) => {
+              gpuHold = { paced, signal: ac.signal };
+              try { return await gpuStep(at); } finally { gpuHold = null; }
+            },
             save: off ? {
               check: () => expertTierCheck(G, off.disk, { readAt }).finally(checked),
               copy: (chk, { at, signal }) => expertTierCopy(chk, { readAt, signal, onStatus: crumb, onProgress: (d) => at(d), log }),

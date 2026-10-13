@@ -34,10 +34,10 @@ function checkRules(snaps) {
   }
 }
 
-test("tracker: the first snapshot at once, sized up front; a part with nothing to do is skip from the start", () => {
+test("tracker: the first snapshot at once, sized up front; gpu runs, the copies wait; nothing to do is skip from the start", () => {
   const { snaps, progs } = tracked({ gpu: 100, save: 0, words: 50 });
   eq(snaps.length, 1);
-  eq(snaps[0].parts, [{ id: "gpu", done: 0, total: 100, state: "run" }, { id: "save", done: 0, total: 0, state: "skip" }, { id: "words", done: 0, total: 50, state: "run" }]);
+  eq(snaps[0].parts, [{ id: "gpu", done: 0, total: 100, state: "run" }, { id: "save", done: 0, total: 0, state: "skip" }, { id: "words", done: 0, total: 50, state: "wait" }]);
   eq(progs[0].slice(0, 2), [0, 150]);
   eq([progs[0][2].step, progs[0][2].stepNo, progs[0][2].steps, progs[0][2].gpuPct], ["gpu", 1, 2, 0]);
 });
@@ -50,8 +50,10 @@ test("tracker: bytes at most every 250 ms (the last one never lost), a state or 
   eq(timers.length, 1, "one timer for the burst");
   advance(250);
   eq(snaps.length, 2); eq(byId(snaps[1]).gpu.done, 30);
-  tr.state("save", "wait");          // at once
-  eq(snaps.length, 3); eq(byId(snaps[2]).save.state, "wait");
+  tr.state("save", "wait");          // already waiting: nothing new
+  eq(snaps.length, 2);
+  tr.state("save", "run");           // at once
+  eq(snaps.length, 3); eq(byId(snaps[2]).save.state, "run");
   tr.note("Checking");
   eq(snaps.length, 4); eq(snaps[3].note, "Checking");
   tr.note("Checking");               // the same note: nothing new
@@ -84,7 +86,7 @@ test("tracker: done never goes back, totals fixed; skip -> 0, fail keeps its byt
 
 test("tracker: onProgress sums the parts; its step is gpu while it runs, then the copy that runs; gpuPct stays 100 after", () => {
   const { tr, progs } = tracked({ gpu: 100, save: 1000, words: 300 }, { every: 0 });
-  tr.state("save", "wait");
+  tr.state("words", "run");
   tr.at("gpu", 50);
   let [d, t, info] = progs.at(-1);
   eq([d, t, info.step, info.gpuPct, info.stepDone, info.stepTotal], [50, 1400, "gpu", 50, 50, 100]);
@@ -261,4 +263,68 @@ test("parallel: no disk tier and no table (a plain Flash share): only gpu", asyn
   const r = await run(s, tr);
   eq([r.words, r.save], [null, null]);
   eq(snaps.at(-1).parts.map((x) => x.state), ["done", "skip", "skip"]);
+});
+
+// the GPU step as room.js paces it (aiLoadPace): while paced() says so it may not finish before the slowest device
+function pacedGpu(s, peer) {
+  const seen = [];
+  s.gpu = async ({ at, paced }) => {
+    s.ev.push("gpu:start"); at(10);
+    await tick();
+    seen.push(paced());
+    if (paced()) await peer.promise;    // held to the slowest device's GPU step
+    s.ev.push("gpu:end"); at(100);
+    return { pleTable: {} };
+  };
+  return seen;
+}
+
+test("parallel: in a room with a slow device, save's copy does not wait for it (the GPU step is not held while a copy is ahead)", async () => {
+  const { tr, snaps } = tracked({ gpu: 100, save: 1000, words: 300 }, { every: 0 });
+  const s = script(), peer = deferred();
+  const seen = pacedGpu(s, peer);
+  s.gate("save.check").resolve(); s.gate("words.check").resolve();
+  const p = run(s, tr);
+  await tick(); await tick(); await tick();
+  eq(seen, [false], "not paced: this tab still has its disk copy to run");
+  ok(s.ev.includes("save.copy:start"), `save's copy started before the slow device was done: ${s.ev.join()}`);
+  s.gate("save.copy").resolve(); s.gate("words.copy").resolve();
+  await p;
+  checkRules(snaps);
+});
+
+test("parallel: nothing left to copy (a second start) -> the GPU step keeps the room's pace", async () => {
+  const { tr, snaps } = tracked({ gpu: 100, save: 1000, words: 300 }, { every: 0 });
+  const s = script({ need: false, missing: [] }), peer = deferred();
+  const seen = pacedGpu(s, peer);
+  s.gate("save.check").resolve(); s.gate("words.check").resolve();
+  const p = run(s, tr);
+  await tick(); await tick(); await tick();
+  eq(seen, [true], "paced once save's check says nothing to copy");
+  ok(!s.ev.includes("gpu:end"), "held for the slow device");
+  peer.resolve();
+  await p;
+  // save and words went wait -> skip: never "run" with bytes that were not there
+  for (const id of ["save", "words"]) ok(snaps.every((x) => byId(x)[id].state !== "run"), `${id} never ran`);
+  checkRules(snaps);
+});
+
+test("parallel: save and words wait until their checks answer (no run with nothing moving)", async () => {
+  const { tr, snaps } = tracked({ gpu: 100, save: 1000, words: 300 }, { every: 0 });
+  const s = script();
+  const p = run(s, tr);
+  await tick();
+  eq(snaps.at(-1).parts.map((x) => x.state), ["run", "wait", "wait"]);
+  s.gate("words.check").resolve();
+  await tick();
+  eq(byId(snaps.at(-1)).words.state, "run", "words runs once its check says what is missing");
+  s.gate("gpu").resolve();
+  await tick();
+  eq(byId(snaps.at(-1)).save.state, "wait", "save's check is slower than the GPU step: still waiting, not running");
+  s.gate("save.check").resolve();
+  await tick(); await tick();
+  eq(byId(snaps.at(-1)).save.state, "run");
+  s.gate("save.copy").resolve(); s.gate("words.copy").resolve();
+  await p;
+  checkRules(snaps);
 });

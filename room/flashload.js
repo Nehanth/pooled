@@ -3,7 +3,9 @@
 // computer's disk, room/flashdisk.js expertTierCopy) and "words" (the n-gram table copied there, ingestNgram).
 // Before this they ran one after the other (save, words, gpu: 610 s on the Spark from localhost, the GPU last).
 //   t0      gpu starts; save's check (what is on disk already: latency, no conversion) and words (its check, then
-//           its copy in a worker, one head at a time) start next to it
+//           its copy in a worker, one head at a time) start next to it. While save still has a copy ahead, gpu is
+//           not held to the room's pace (room.js aiLoadPace): held to a slow device, the whole copy would start
+//           only after that device is done
 //   gpu     done: save's copy runs (on the main thread, as before: it is CPU-bound, and next to the GPU step it took
 //           the GPU's speed from 144 to 10 MB/s), words goes on with two heads at a time
 //   end     the experts' reader opens, words is awaited (it never fails the load: the table is read over the network
@@ -18,7 +20,7 @@ const TERMINAL = new Set(["done", "skip", "fail"]);
 
 // The parts' progress, throttled. sizes: { gpu, save, words } bytes (0: that part has nothing to do: "skip" from the
 // first snapshot). onParts(snapshot) and onProg(sumDone, sumTotal, info) are called together, at most every `every`
-// ms while bytes move and at once on any state or note change. info: { step (gpu while it runs, then the copy that
+// ms while bytes move and at once on any state or note change. gpu starts as "run", save and words as "wait". info: { step (gpu while it runs, then the copy that
 // runs), stepNo, steps, stepDone, stepTotal, gpuPct (gpu's own percent: 100 once it is done), parts }.
 // Rules: a part's done never goes down; its total is fixed, except skip (0) and fail (it keeps what it did: total =
 // done); done, skip and fail are final. The first snapshot is sent at once.
@@ -26,7 +28,8 @@ export function partsTracker({ sizes = {}, onParts = null, onProg = null, every 
   setTimer = (f, ms) => setTimeout(f, ms), clearTimer = (t) => clearTimeout(t) } = {}) {
   const parts = PART_ORDER.map((id) => {
     const total = Math.max(0, +sizes[id] || 0);
-    return { id, done: 0, total, state: total > 0 ? "run" : "skip" };
+    // gpu runs from the start; save and words wait until their check answers (save: until the GPU step is done)
+    return { id, done: 0, total, state: total > 0 ? (id === "gpu" ? "run" : "wait") : "skip" };
   });
   const by = Object.fromEntries(parts.map((p) => [p.id, p]));
   let note = null, last = -Infinity, timer = null, dirty = false;
@@ -86,7 +89,10 @@ export function partsTracker({ sizes = {}, onParts = null, onProg = null, every 
 }
 
 // The load's parts at the same time. parts: a partsTracker. ac: the load's AbortController (Stop fires it too).
-//   gpu({ at })                         -> weights   (today's GPU step; at(bytes) its progress)
+//   gpu({ at, paced })                  -> weights   (today's GPU step; at(bytes) its progress; paced(): whether it may
+//                                         be held to the room's pace (room.js aiLoadPace). Not while save still has
+//                                         a copy to run after it: held to the slowest device, the whole copy would
+//                                         start after that device is done, not next to it)
 //   save: { check() -> chk ({ need, haveBytes }), copy(chk, { at, signal }), open(chk) } | null
 //   words: { check() -> wchk ({ missing: [], presentBytes, dir }), copy(wchk, { at, signal, parallel, after,
 //           onState }) } | null   (parallel(): heads at a time, 1 while gpu runs, 2 after; after: settles once
@@ -96,17 +102,18 @@ export function partsTracker({ sizes = {}, onParts = null, onProg = null, every 
 // Any other failure (gpu, save's check or copy, open, finish) marks what still runs as failed, aborts the rest and
 // waits for it to stop (no worker or lock outlives the load), then throws.
 export async function runFlashParts({ parts, ac = new AbortController(), gpu, save = null, words = null, finish, onWordsFail = () => {} }) {
-  let gpuRunning = true, saveOver;
+  let gpuRunning = true, saveOver, saveAhead = !!save;
   const saveSettled = new Promise((r) => { saveOver = r; });
   const signal = ac.signal;
   const chkP = save ? Promise.resolve().then(() => save.check()) : null;
-  chkP?.then((c) => parts.state("save", c.need ? "wait" : "skip"), () => {});
+  chkP?.then((c) => { if (!c.need) { saveAhead = false; parts.state("save", "skip"); } }, () => {});
   chkP?.then((c) => { if (c.need) parts.at("save", c.haveBytes || 0); }, () => {});
   const wordsP = words ? (async () => {
     try {
       const c = await words.check();
       if (!c.missing.length) { parts.state("words", "skip"); return { ok: true, dir: c.dir }; }
       parts.at("words", c.presentBytes || 0);
+      parts.state("words", "run");
       await words.copy(c, { signal, at: (d) => parts.at("words", (c.presentBytes || 0) + d), parallel: () => (gpuRunning ? 1 : 2),
         after: saveSettled, onState: (s) => parts.state("words", s) });
       if (signal.aborted) throw signal.reason;
@@ -119,7 +126,7 @@ export async function runFlashParts({ parts, ac = new AbortController(), gpu, sa
     }
   })() : null;
   try {
-    const weights = await gpu({ at: (d) => parts.at("gpu", d) });
+    const weights = await gpu({ at: (d) => parts.at("gpu", d), paced: () => !saveAhead });
     gpuRunning = false;
     parts.state("gpu", "done");
     let chk = null;
