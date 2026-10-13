@@ -601,3 +601,56 @@ test("model loader: draft pacing never inherits the preceding shard's pacer", as
     eq(paced, 2); ok(state.engine === engine);
   });
 });
+
+// ---------------------------------------------------------------- a tab's disk (room/flashdisk.js consent)
+
+const FLASH_OFF = { lo: 0, hi: 48, diskLo: 0, vramBytes: 6 * 2 ** 30, ramBytes: 0, diskRamBytes: 2 ** 30, diskOnly: true };
+const flashLoad = (l, offload) => l.loadShard({ modelKey: "qwen3.8-flash", range: [0, 48], hasEmbed: true, hasHead: true, ctx: 2048, kv: "f16",
+  streamOpts: {}, onProgress() {}, offload }, {});
+
+test("a tab that did not opt in refuses the host's offload before reading or writing anything", async () => {
+  for (const [what, tabDisk, choice] of [
+    ["no hooks at all", undefined, undefined],
+    ["?tabdisk=0 (nothing offered)", null, "deny"],
+    ["offered, then its user said no", { ramGB: 3, models: ["qwen3.8-flash"] }, "deny"],
+    ["allowed but never offered (?tabram=0)", null, "allow"],
+    ["offered for another model", { ramGB: 3, models: ["qwen3.6-35b-moe"] }, "allow"],
+  ]) {
+    let fetched = 0, asked = 0;
+    const hooks = tabDisk === undefined ? {} : { tabDisk: () => ({ tabDisk, choice }), askDisk: async () => { asked++; return true; } };
+    const l = loader({}, async () => { fetched++; throw new Error("the network was touched"); }, { hooks });
+    let err = null;
+    try { await flashLoad(l, FLASH_OFF); } catch (e) { err = e; }
+    ok(err?.noDisk, `${what}: ${err}`);
+    ok(/refused to store the model on its disk/.test(err.message), err.message);
+    eq([what, fetched, asked], [what, 0, 0]);
+  }
+});
+
+test("a tab not asked yet asks its user first: a no refuses before anything is read, a yes goes on to the load", async () => {
+  for (const answer of [false, true]) {
+    let said = null, fetched = 0, asked = null;
+    const hooks = { tabDisk: () => ({ tabDisk: { ramGB: 3, models: ["qwen3.8-flash"], ...(said === "allow" ? {} : { ask: true }) }, choice: said }),
+      askDisk: async (q) => { asked = q; said = answer ? "allow" : "deny"; return answer; } };
+    const l = loader({}, async () => { fetched++; throw Object.assign(new Error("header"), { header: true }); }, { hooks });
+    let err = null;
+    try { await flashLoad(l, FLASH_OFF); } catch (e) { err = e; }
+    ok(asked && asked.layers.length === 48 && asked.bytes > 90 * 2 ** 30 && asked.bytes < 100 * 2 ** 30 && asked.ngramBytes > 28e9,
+      `asked about 48 layers' experts and the n-gram table, ~92 GiB: ${JSON.stringify(asked)}`);
+    if (answer) ok(err?.header && fetched > 0, `a yes went on to read the model's header: ${err}`);
+    else { ok(err?.noDisk && /its user said no/.test(err.message), String(err)); eq(fetched, 0); }
+  }
+});
+
+test("the n-gram table is copied to this tab's disk only when its user allowed it", async () => {
+  const cfg = { nHeads: 1, vocab: [4], rowBytes: 8, offsets: [0], nRows: 4, shard: 0, byteOffset: 0 };
+  for (const [choice, tabDisk, copies] of [[null, { ramGB: 3, models: ["qwen3.8-flash"], ask: true }, false], ["deny", null, false],
+    ["allow", null, false], ["allow", { ramGB: 3, models: ["qwen3.8-flash"] }, true]]) {
+    let touched = 0;
+    const storage = { getDirectory: async () => { touched++; throw new Error("stop here"); }, estimate: async () => ({}) };
+    const l = loader({}, async () => { throw new Error("no network"); }, { hooks: { tabDisk: () => ({ tabDisk, choice }) }, options: { wcache: false, prefetch: 0 } });
+    const r = await l.copyNgram(cfg, async () => new Uint8Array(0), ["models", "q38flash-ngram", "x"], { storage });
+    if (copies) ok(touched > 0 && r.skipped === "the copy failed", JSON.stringify(r));
+    else { eq(touched, 0); ok(/its user/.test(r.skipped), JSON.stringify(r)); }
+  }
+});

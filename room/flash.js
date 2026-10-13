@@ -100,6 +100,9 @@ export class FlashRoomEngine {
   // what the GPU device does not free: the n-gram table's open files or OPFS workers (room-node shard.js, room/model-loader.js).
   // The holder calls it when it drops the engine, before or after destroying the device
   close() { const p = this.core.close?.(); this.core.close = null; return p; }
+  // the expert store of offloaded layers (engine/expert_store.js), or null: generate.js turns speculation off with one,
+  // the room's logs read its stats
+  get experts() { return this.core.experts || null; }
 
   // ---- checkpoints (Qwen35Engine's contract: room/pipeline.js ckpt*, room/ckpt-store.js)
   // A state: { sig, pos, parts: [ArrayBuffer] }: the core's GPU parts, then (with a PLE layer) the n-gram
@@ -128,6 +131,7 @@ export class FlashRoomEngine {
     this.device.queue.submit([enc.finish()]);
     this.core.pos = sl.pos;
     if (this.core.ngs) sl.ngs ? this.core.ngs.import(sl.ngs) : this.core.ngs.reset();
+    this.core.clearFailed?.();   // the whole sequence state is replaced: a step that failed part way left nothing behind
   }
   dropSlot(name) {
     const sl = this.slots.get(name);
@@ -175,6 +179,7 @@ export class FlashRoomEngine {
     parts.forEach((p, i) => { if (p.bytes) this.device.queue.writeBuffer(p.buf, 0, st.parts[i]); });
     this.core.pos = st.pos;
     if (ngs) this.core.ngs.import(ngs);
+    this.core.clearFailed?.();   // (as loadSlot)
   }
 }
 
@@ -197,26 +202,48 @@ export function qwen4expCore(e) {
   // Without _halfOps (an engine before the fused sites): the per-half lists, which compute the same R.
   // Per layer, in submits of SUBMIT_LAYERS layers as forwardToken does: one submit of all 48 layers' dispatches
   // lost the device on the GB10 (an AbortError on the readback), 12 per submit is what the engine runs.
+  // Expert offload (engine/expert_store.js; the layers with l.off): such a layer's list splits after its router (the op
+  // marked cut), and between the two parts the engine's own cut runs (_afterRoute: submit, read the K ids back, let the
+  // store copy the misses into the layer's pool, write the slot ids), as forwardToken does. Without the cut its experts
+  // would run on whatever the pool held.
   let ops = null;
   const stepOps = () => {
     if (ops) return ops;
     const per = e._halfOps ? e._halfOps(e.layers.flatMap((l) => l.halves), true) : e.layers.flatMap((l) => [l.attnOps, l.ffnOps]);
     ops = [];
-    for (let k = 0; k < e.layers.length; k += SUBMIT_LAYERS) ops.push(per.slice(2 * k, 2 * (k + SUBMIT_LAYERS)).flat());
+    for (let k = 0; k < e.layers.length; k += SUBMIT_LAYERS)
+      ops.push(e.layers.slice(k, k + SUBMIT_LAYERS).map((l, j) => {
+        const list = [...per[2 * (k + j)], ...per[2 * (k + j) + 1]];
+        if (!l.off) return { l, list };
+        const at = list.findIndex((o) => o.cut) + 1;
+        if (!at) throw new Error(`qwen4exp: offloaded layer ${l.i} has no router cut in its ops`);
+        return { l, list: list.slice(0, at), exp: list.slice(at) };
+      }));
     return ops;
+  };
+  // one chunk's layers into enc (a cut layer submits what came before it) -> { enc, pass }
+  const encodeChunk = async (c) => {
+    let enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
+    for (const { l, list, exp } of c) {
+      e._encode(pass, list);
+      if (!exp) continue;
+      pass.end();
+      enc = await e._afterRoute(enc, l);
+      pass = enc.beginComputePass();
+      e._encode(pass, exp);
+    }
+    return { enc, pass };
   };
   const run = async (id, hidden) => {
     await e._begin(id);
     if (hidden) dev.queue.writeBuffer(e.B.R, 0, hidden);
     const chunks = stepOps();
     for (const c of chunks.slice(0, -1)) {
-      const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-      e._encode(pass, c);
+      const { enc, pass } = await encodeChunk(c);
       pass.end();
       dev.queue.submit([enc.finish()]);
     }
-    const enc = dev.createCommandEncoder(), pass = enc.beginComputePass();
-    e._encode(pass, chunks.at(-1) || []);
+    const { enc, pass } = await encodeChunk(chunks.at(-1) || []);
     pass.end();
     enc.copyBufferToBuffer(e.B.R, 0, e.hStage, 0, HD * 4);
     dev.queue.submit([enc.finish()]);
@@ -253,8 +280,15 @@ export function qwen4expCore(e) {
       return out;
     },
     reset() { e.reset(); },
-    // the n-gram table's reader (open files, OPFS workers), when the loader gave it a close
-    close() { return e.ngram?.close?.(); },
+    // a checkpoint restored (FlashRoomEngine loadSlot / importState) replaces every state a failed step may have left
+    // half advanced, as Qwen35Engine's do: the engine takes steps again. The expert store's region (a batched pass's)
+    // may hold a layer a failed pass never finished loading: forgotten, as reset() does
+    clearFailed() { e._failed = null; if (e.experts?.region) e.experts.region.layer = -1; },
+    // the n-gram table's reader (open files, OPFS workers), when the loader gave it a close, and the expert store's
+    // (expert offload: its disk reader's workers or threads, its RAM cache)
+    close() { return Promise.all([e.ngram?.close?.(), e.experts?.close?.()]); },
+    // the expert store, when layers are offloaded (stats: hits, disk reads)
+    get experts() { return e.experts || null; },
     stateParts(pos) {
       const parts = [];
       for (const l of e.layers) {

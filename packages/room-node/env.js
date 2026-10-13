@@ -108,7 +108,9 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, 
   meta.contribGB = pledgeFor(pledgeGB, meta.maxBufGB);
   if (meta.webgpu && +ramGB > 0) {
     if (unifiedMemory(mem || hostMemory())) meta.noOffload = "unified memory";
-    else { meta.offload = true; meta.ramGB = ramFor(ramGB); }
+    // offloadFlash: this node's shard.js offloads Qwen3.8-Flash-Next's experts too (a 0.4.1 node refuses them, so a host
+    // deals it Flash offload only when it says so: room/pledge.js offloadFor)
+    else { meta.offload = true; meta.ramGB = ramFor(ramGB); meta.offloadFlash = true; }
   }
   if (disk) {
     if (meta.offload) { meta.disk = true; meta.local = [...local]; }
