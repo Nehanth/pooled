@@ -9,6 +9,7 @@ import { runInNewContext } from "node:vm";
 import { measureCopyGBps } from "../../room/gpuspeed.js";
 import { DENSE_SPEC_V } from "../../room/lookup.js";
 import { DESK_MAX_GB, PLEDGE_MAX_GB } from "../../room/pledge.js";
+import { flashLongMeta } from "../../room/models.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import os from "node:os";
@@ -119,6 +120,8 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, 
     // the largest buffer this device can bind (shard.js asks for the adapter's limit): the host keeps
     // the room's context within every device's limit (room/models.js ctxForBinding)
     meta.maxBindMB = Math.floor(Math.min(a.limits.maxStorageBufferBindingSize, a.limits.maxBufferSize) / 2 ** 20);
+    // flashLong: this node loads Qwen3.8-Flash-Next with QSA when the host asks (ai-load.flash; room/models.js flashLongMeta)
+    meta.flashLong = flashLongMeta(meta.maxBindMB);
     meta.gbps = gbps != null ? Math.max(0, +gbps || 0) : await measureCopyGBps(a);
   }
   meta.phone = false;
@@ -135,6 +138,9 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, 
   }
   return meta;
 }
+// POOLED_QSA_ALWAYS=1: a test switch (shard.js loadFlash): a QSA Flash engine takes QSA's gathered attention on every
+// step, also below 2052 cells, where it gives dense attention's bits (the room's QSA == dense check)
+export const qsaAlways = (env = process.env) => env.POOLED_QSA_ALWAYS === "1";
 // whether the GPU shares the system's memory (detectMemory's kind; Apple silicon reads as unified there too)
 export const unifiedMemory = (mem) => mem?.kind === "unified";
 // detectMemory on this machine (nvidia-smi, amdgpu sysfs, the platform), or { kind: "unknown" } when it fails

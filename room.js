@@ -27,7 +27,8 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { SHAPE, MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf, flashLayerCost, flashTabHostMargin } from "./room/models.js";
+import { SHAPE, MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf, flashLayerCost, flashTabHostMargin,
+  flashLongMeta, flashRoomFormat, flashReadyFields, readyCtxShort } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -212,6 +213,9 @@ async function probeGPU() {
         // the largest buffer this device can bind (what aiLoadShardIn asks for; phones capped at 256 MB):
         // the host keeps the room's context within every device's limit (room/models.js ctxForBinding)
         meta.maxBindMB = Math.floor(Math.min(a.limits.maxStorageBufferBindingSize, a.limits.maxBufferSize, meta.ua === "iPhone" || meta.ua === "Android" ? 256 * 2 ** 20 : Infinity) / 2 ** 20);
+        // flashLong: this tab loads Qwen3.8-Flash-Next with QSA when the host asks (ai-load.flash; room/models.js
+        // flashLongMeta); ?flong=0 leaves it out, as a tab from before it (tests)
+        if (new URLSearchParams(location.search).get("flong") !== "0") meta.flashLong = flashLongMeta(meta.maxBindMB);
         // browsers hide real GPU memory (fingerprinting). Default to the
         // conservative per-buffer limit; the user can opt in to a real
         // measurement (see measureBudgetGB) which replaces this estimate.
@@ -3546,7 +3550,8 @@ async function aiLoadShard(...args) {
   }
 }
 // offload: this device's part of the deal's expert offload (offMsg), Qwen3.8-Flash-Next on a tab: room/model-loader.js
-async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, KV_ASK), offload = null) {
+// flash: Qwen3.8-Flash-Next's format from the host (ai-load.flash: QSA), or null for the dense engine
+async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, KV_ASK), offload = null, flash = null) {
   const M = MODELS[modelKey];
   ai.shardBytes = 0;   // until this load's first progress says how big the new range is
   aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
@@ -3610,7 +3615,7 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   // every device (host included, even when its weights come from cache) keeps within a few
   // percent of the slowest device, so the bars climb together and the room finishes as one
   ai.loadParts = null;
-  await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: aiLoadPace, offload,
+  await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: aiLoadPace, offload, flash,
     onParts: (s) => { ai.loadParts = s; } },   // onParts (contract): the load's parts for the load card (loadProg renders it)
     { makeTokenizer, DenseEngine, Qwen35Engine, fetchModelShard, shardTensorNames });
   if (ai.peerBytes) log("room", `${myName}: ${(ai.peerBytes / 2 ** 20).toFixed(1)} MB of weights came from devices in the room, ${((ai.netBytes || 0) / 2 ** 20).toFixed(1)} MB from the network`);
@@ -3943,6 +3948,10 @@ async function aiStart(modelArg) {
     const offTab = (o) => `layers ${o.lo}\u2013${o.hi - 1} with their experts read from this device's disk (${(o.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache, ${(o.diskRamBytes / 2 ** 30).toFixed(1)} GB RAM cache, ${o.slots} experts per layer)`;
     const myOff = deal.offload?.[0] || null;
     if (myOff) log("room", `${myName} offloads ${offTab(myOff)}`);
+    // Qwen3.8-Flash-Next's format (ai-load.flash): QSA when every dealt device loads it (meta.flashLong), else none
+    const flash = flashRoomFormat(modelKey, [myMeta, ...ai.chain.map((id) => conns.get(id)?.meta)]);
+    ai.roomModel = modelKey; ai.roomCtx = ROOM_CTX; ai.roomFlash = flash;
+    if (M.kind === "qwen4exp") log("room", flash ? `Qwen3.8 Flash with QSA (${flash.kv} K/V) at ${ROOM_CTX} positions` : `Qwen3.8 Flash dense at ${ROOM_CTX} positions (a device here runs an older Pooled)`);
     ai.chain.forEach((id, i) => {
       const o = deal.offload?.[i + 1];
       const disk = o && Number.isInteger(o.diskLo);
@@ -3956,6 +3965,7 @@ async function aiStart(modelArg) {
         inv,
         // the same shape as the room node's (packages/room-node/roomnode.js offloadMsg), disk tier included
         ...(o ? { offload: offMsg(o) } : {}),
+        ...(flash ? { flash } : {}),
       };
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });
       sendTo(id, msg);
@@ -3967,7 +3977,7 @@ async function aiStart(modelArg) {
       `${conns.get(id)?.name || id} ${assigned[i + 1]}`)].join(" · ");
     log("room", `${M.label} — layer split ${$("ai-split").value === "speed" ? "for speed" : "by pledge"}${ROOM_KV === "q8" ? ", int8 KV" : ""}: ${splitDesc}`);
     ai.loadingShard = true;
-    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff)); } finally { ai.loadingShard = false; }
+    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff), flash); } finally { ai.loadingShard = false; }
     if (ai.startFailed) throw new Error(ai.startFailed);   // a device failed to load its layers while this one loaded
     if (n > 1) await aiLoadDraft(modelKey);
     if (ai.redealPending) { ai.busy = false; ai.dealing = false; aiAutoRedeal(ai.redealWhy); return; }   // a device died (or stayed away) while loading: deal again
@@ -5322,9 +5332,9 @@ async function aiOnData(from, d) {
         } else {
           ai.loadingShard = true; ai.loadKey = loadKey;
           // d.kv: the host's KV format (a host without it: this device's own ?kv=, as before)
-          try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model), kvForLoad(d.model, d.kv, KV_ASK), d.offload || null); } finally { ai.loadingShard = false; }
+          try { await aiLoadShard(d.model || "smollm-135m", d.range, false, false, d.ctx || maxSeqFor(d.model), kvForLoad(d.model, d.kv, KV_ASK), d.offload || null, d.flash || null); } finally { ai.loadingShard = false; }
           if (ai.startFailed) throw new Error(ai.startFailed);
-          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv: kvForLoad(d.model, d.kv, KV_ASK), offload: d.offload || null };
+          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv: kvForLoad(d.model, d.kv, KV_ASK), offload: d.offload || null, flash: d.flash || null };
         }
         keepAwake();
         if (!(await ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
@@ -5335,7 +5345,8 @@ async function aiOnData(from, d) {
         $("ldg-fill").style.width = "100%";
         // slots: the host forgets the checkpoints not in them; ckpt: this device applies sv / ld / dp
         // (a room node hosting a dense model checks it: tabs from before the dense engine had slots ignore them)
-        sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0 });
+        // ctx, fsig (Flash): the positions this engine holds and its state signature
+        sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0, ...flashReadyFields(ai.engine, d.model) });
       } catch (err) {
         if (onLoadError(ai.startFailed) === "stopped") { workerStopped(); break; }   // the host stopped the start (ai-start-failed): this load stopped with it
         closeEngine();
@@ -5416,13 +5427,17 @@ async function aiOnData(from, d) {
       lcPaint(!!d.asking);
     }
       break;
-    case "ai-ready":
+    case "ai-ready": {
       if (ai.role !== "host" || !ai.chain.includes(from)) break;
+      // a worker whose engine holds fewer positions than the room's context (an older build loads Flash at 2048)
+      const short = readyCtxShort(ai.roomModel, ai.roomCtx, d, ai.roomFlash);
+      if (short) { log("room", `${e?.name || from}: ${short}`); aiLoadFailed(from, e?.name || from, short); break; }
       ai.readyPeers.add(from);
       (ai.ckptHeld ||= new Map()).set(from, d.slots);   // what it read back from disk (none from an older build)
       if (e?.card) { e.card.querySelector(".bw").textContent = "ready"; peerStatus(e.card, "ready", true); }
       aiMaybeReady();
       break;
+    }
     case "ai-error":
       aiStatus(`peer ${e?.name || from} failed: ${d.message}`);
       // a worker refused the offload it was dealt: a tab keeping the model off its disk (nodisk), or a room node from

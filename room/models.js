@@ -227,6 +227,9 @@ export function roomBytes(model, ctx, kv = "f16") {
 // The dense engine's longest context: QSA's selection equals dense attention below 2052 cells (engine/wgsl/qsa.js), and
 // the rooms load without the indexer up to here (CTX "qwen3.8-flash")
 export const FLASH_DENSE_CTX = 2048;
+// Rooms load Flash with QSA (ai-load.flash) at every context, 2048 included, when every dealt device can: the planner
+// counts QSA's indexer weights and state by default (a room with an older device loads dense: ~44 MB over, on the safe side)
+export const FLASH_ROOM_QSA = true;
 // Checkpoints at long context: one slot of a 32K room's state is ~0.8 GB per device, so a fixed slot count stops being
 // a small thing. Every Flash device of a room past FLASH_DENSE_CTX keeps CKPT_RESERVE_SLOTS slots (one answer, one pinned
 // prefix) of its range's state at the room's context in its deal (flashLayerCost); more come from slack at run time.
@@ -272,12 +275,12 @@ function flashSrc(src) {
   return out;
 }
 // The state a Flash device keeps for one sequence at ctx: qwen4expMemory on that source, plus a checkpoint reserve.
-// opts: kv ("f32": the engine's default), qsa (the indexer's state; default: past FLASH_DENSE_CTX, as the rooms load),
+// opts: kv ("f32": the engine's default), qsa (the indexer's weights and state; default FLASH_ROOM_QSA, as the rooms load),
 // ring (rawK ring rows), range ([lo, hi): the device's layers; the whole model by default), ckptSlots (checkpoint slots
 // of this state to reserve; 0 by default).
 // -> qwen4expMemory's { ctx, kv, bytes, state, total, perToken, ... } plus reserve (ckptSlots x state) and need
 // (total + reserve: what the device sets aside for it)
-export function flashRoomMem(src, ctx, { kv = "f32", qsa = ctx > FLASH_DENSE_CTX, ring = QSA_RAW_RING, range = null, ckptSlots = 0 } = {}) {
+export function flashRoomMem(src, ctx, { kv = "f32", qsa = FLASH_ROOM_QSA, ring = QSA_RAW_RING, range = null, ckptSlots = 0 } = {}) {
   const m = qwen4expMemory(flashSrc(src).cfg, { ctx, kv, qsa, rawRing: ring, layerRange: range });
   const reserve = ckptSlots * m.state;
   return { ...m, reserve, need: m.total + reserve };
@@ -310,7 +313,7 @@ export function flashTabHostMargin(src, offloaded = false) {
   return Math.max(0, ...w.map((b, i) => b - (offloaded ? S.experts?.[i] || 0 : 0))) + FLASH_SCRATCH;
 }
 const costMemo = new WeakMap();
-export function flashLayerCost(src, ctx, { kv = "f32", qsa = ctx > FLASH_DENSE_CTX, ring = QSA_RAW_RING, slots = ckptSlotsAt(ctx) } = {}) {
+export function flashLayerCost(src, ctx, { kv = "f32", qsa = FLASH_ROOM_QSA, ring = QSA_RAW_RING, slots = ckptSlotsAt(ctx) } = {}) {
   const S = flashSrc(src), key = `${ctx}|${kv}|${qsa}|${ring}|${slots}`;
   let per = costMemo.get(S);
   if (!per) costMemo.set(S, per = new Map());
@@ -459,6 +462,60 @@ export const CTX = {
 };
 // WebGPU's default maxStorageBufferBindingSize: what a device binds when it reports nothing
 export const WEBGPU_MIN_BIND = 128 * 2 ** 20;
+
+// ---- Qwen3.8-Flash-Next with QSA in rooms (long context, step 1: QSA loaded, the room still at 2048 positions)
+// Below 2052 cached cells QSA's selection is every cell, so a QSA engine gives a dense one's bits at 2048; loading it
+// now lets checkpoints, memory and mixed rooms be checked before the context goes up.
+// FLASH_QSA_RING: the raw indexer keys' ring rows (engine/qwen4exp_mem.js QSA_RAW_RING). FLASH_QSA_LAYER_BYTES: what QSA
+// adds on each of the 12 QSA layers at 2048 positions: the indexer weights (3,277,824 B, from the header) and its
+// state, the ring (1024 rows x 128 x f16) and the pooled keys (512 blocks x 128 x f16). The planner counts them per
+// layer (flashLayerCost with qsa: FLASH_ROOM_QSA), as the load check does (shard.js flashShardBytes).
+export const FLASH_QSA_RING = 1024;
+export const FLASH_QSA_LAYER_BYTES = 3277824 + FLASH_QSA_RING * 256 + 512 * 256;
+// What a build that loads Flash with QSA says in its hello (meta.flashLong, additive, no PROTOCOL bump): ctx, the longest
+// context its loader takes (QSA's 411,000, or what one f32 K / V buffer of 2 KV heads x 256 fits in maxBindMB); kv, its
+// K / V formats; batch, whether it runs batched prefill passes (not yet: 0). A device without it is an older build:
+// dense, 2048 positions.
+export function flashLongMeta(maxBindMB) {
+  const bind = (+maxBindMB > 0 ? +maxBindMB : WEBGPU_MIN_BIND / 2 ** 20) * 2 ** 20;
+  return { ctx: Math.min(411000, Math.floor(bind / (2 * 256 * 4))), kv: ["f32"], batch: 0 };
+}
+const flashLongOk = (m) => !!m?.flashLong && typeof m.flashLong === "object" && +m.flashLong.ctx >= 2048 && Array.isArray(m.flashLong.kv) && m.flashLong.kv.includes("f32");
+// The host's Flash format for ai-load (ai-load.flash): QSA on, f32 K / V, the 1024-row ring, when every device it dealt
+// layers to says it loads that (meta.flashLong); else null: no field, every device loads the dense 2048 engine as before.
+// One format for the whole room, chosen by the host only.
+export function flashRoomFormat(model, metas) {
+  if (MODELS[model]?.kind !== "qwen4exp" || !metas.length || !metas.every(flashLongOk)) return null;
+  return { qsa: 1, kv: "f32", ring: FLASH_QSA_RING };
+}
+// A worker's reading of ai-load.flash: null for none (the dense engine, at most 2048 positions), else
+// { kv, ring } for a QSA engine; a format this build does not load throws (said back to the host as a load error).
+export function flashLoadOpts(flash) {
+  if (!flash?.qsa) return null;
+  const kv = flash.kv ?? "f32", ring = flash.ring ?? FLASH_QSA_RING;
+  if (kv !== "f32") throw new Error(`the host asked for Qwen3.8-Flash-Next's K / V in ${String(kv).slice(0, 16)}; this device loads f32 only`);
+  if (!(Number.isInteger(ring) && ring >= 64 && ring <= 65536 && (ring & (ring - 1)) === 0)) throw new Error(`bad QSA ring ${String(ring).slice(0, 16)}`);
+  return { kv, ring };
+}
+// A worker's ai-ready, Flash only: ctx, the positions its engine holds, and fsig, its state signature (kv, qsa, qsaRing,
+// lo, hi), so the host sees what was loaded. -> fields to spread into ai-ready ({} for any other model)
+export function flashReadyFields(engine, model) {
+  if (MODELS[model]?.kind !== "qwen4exp" || !engine) return {};
+  let sig = null;
+  try { sig = typeof engine.stateSignature === "function" ? engine.stateSignature() : null; } catch {}
+  return { ctx: +engine.maxSeq || 0, ...(sig ? { fsig: sig } : {}) };
+}
+// The host, on a worker's ai-ready (d) in a Flash room of roomCtx positions with format flash (flashRoomFormat):
+// why its engine can't serve the room, or null. A worker that sends no ctx (an older build) holds 2048.
+export function readyCtxShort(model, roomCtx, d, flash = null) {
+  if (MODELS[model]?.kind !== "qwen4exp" || !(roomCtx > 0)) return null;
+  const has = +d?.ctx > 0 ? +d.ctx : 2048;
+  if (has < roomCtx) return `its engine holds ${has} positions and the room runs ${roomCtx}`;
+  const f = d?.fsig && typeof d.fsig === "object" ? d.fsig : null;
+  if (flash && f?.qsa && (f.kv !== flash.kv || f.qsaRing !== flash.ring))
+    return `its engine keeps K / V in ${String(f.kv).slice(0, 8)} with a ${+f.qsaRing || 0}-row ring; the room asked for ${flash.kv}, ${flash.ring}`;
+  return null;
+}
 // bytes of one attention layer's K (or V) cache buffer at ctx positions: kvDim x 1 (int8) or 2 (f16)
 export const kvLayerBufBytes = (meta, ctx, kv = "f16") =>
   ctx * (meta["qwen35.attention.head_count_kv"] || 0) * (meta["qwen35.attention.key_length"] || 0) * (kv === "q8" ? 1 : 2);

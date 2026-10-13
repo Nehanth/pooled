@@ -36,7 +36,7 @@ import path from "node:path";
 import { shardTensors, qwen4expTensorNames, flashShardBytes, flashCpuBytes, flashMemoryShort, openNgramTable } from "../shard.js";
 import { parseGGUFHeader, qwen4expShardBytes, qwen4expConfig, GGML_PLE_TABLE } from "../../../engine/gguf.js";
 import { ngramConfig, NgramState, dequantRow, rowAddress } from "../../../engine/ngram.js";
-import { mergeSplitHeaders, flashRoomMem, flashLayerCost, ckptSlotsAt } from "../../../room/models.js";
+import { mergeSplitHeaders, flashRoomMem, flashLayerCost, ckptSlotsAt, FLASH_QSA_LAYER_BYTES } from "../../../room/models.js";
 import { ggufFromFixture } from "../../../tests/helpers/gguf_fixture.js";
 
 const FIX = JSON.parse(fs.readFileSync(new URL("../../../tests/fixtures/q38flash/headers.json", import.meta.url), "utf8"));
@@ -123,6 +123,23 @@ test("qwen4exp flashShardBytes: the state and checkpoint reserve are the planner
   const s03 = flashRoomMem(G, 32768, { range: [0, 3] }).state, s34 = flashRoomMem(G, 32768, { range: [3, 4] }).state;
   assert.ok(s34 > 13 * s03 && flashRoomMem(G, 2048, { range: [3, 4] }).state < s03, `${s03} ${s34}`);
   assert.equal(s03, flashRoomMem(G, 2048, { range: [0, 3] }).state, "DeltaNet + the PLE ring: fixed");
+});
+
+test("qwen4exp with QSA (ai-load.flash): the indexer is read and counted, with its raw-key ring and pooled keys", () => {
+  const G = flashHeader(), sum = (ts) => ts.reduce((a, t) => a + t.byteLength, 0);
+  for (const o of [{ lo: 0, hi: 24, hasEmbed: true, hasHead: true }, { lo: 24, hi: 48, hasEmbed: false, hasHead: false }, { lo: 0, hi: 3, hasEmbed: false, hasHead: false }])
+    assert.equal(sum(shardTensors(G, "qwen4exp", { ...o, qsa: true })), qwen4expShardBytes(G, { ...o, qsa: true }), JSON.stringify(o));
+  assert.ok(qwen4expTensorNames(G, 3, true).some((n) => n.includes("indexer")) && !qwen4expTensorNames(G, 2, true).some((n) => n.includes("indexer")));
+  // 12 QSA layers, 6 in [0, 24): each adds its indexer weights (3.13 MiB) and, at 2048 positions, the 1024-row ring and
+  // 512 pooled blocks of 128 f16 (FLASH_QSA_LAYER_BYTES), plus the QSA score scratch once (room/models.js flashRoomMem)
+  const d = flashShardBytes(G, { lo: 0, hi: 24, hasHead: true, ctx: 2048, qsa: true }) - flashShardBytes(G, { lo: 0, hi: 24, hasHead: true, ctx: 2048 });
+  const sc = flashRoomMem(G, 2048, { qsa: true, range: [0, 24] }).bytes.scores;
+  assert.equal(d, 6 * FLASH_QSA_LAYER_BYTES + sc);
+  assert.equal(flashShardBytes(G, { lo: 0, hi: 3, ctx: 2048, qsa: true }), flashShardBytes(G, { lo: 0, hi: 3, ctx: 2048 }), "no QSA layer in [0, 3)");
+  // the planner's per-layer costs (room/models.js flashLayerCost) count the same QSA bytes for the whole model
+  assert.equal(flashLayerCost(G, 2048, { qsa: true }).total - flashLayerCost(G, 2048, { qsa: false }).total,
+    flashShardBytes(G, { lo: 0, hi: 48, ctx: 2048, qsa: true }) - flashShardBytes(G, { lo: 0, hi: 48, ctx: 2048 }));
+  assert.equal(qwen4expShardBytes(G, { lo: 3, hi: 4, hasEmbed: false, hasHead: false }) - qwen4expShardBytes(G, { lo: 3, hi: 4, hasEmbed: false, hasHead: false, qsa: false }), 3277824);
 });
 
 test("qwen4exp openNgramTable: rows from the local shard at the table's offset (its own file handle), close() releases it", async () => {

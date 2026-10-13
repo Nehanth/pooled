@@ -101,11 +101,14 @@ export function backFromAway(hiddenAt, now, minMs = 3000) {
 
 // A worker told to load what it already holds (it came back into its slot after a lock, with its
 // GPU buffers intact) skips the download and only rejoins the chain.
-// (and the same expert offload: msg.offload { lo, hi, vramBytes } from room/plan.js dealRoom, or none on both)
+// (and the same expert offload: msg.offload { lo, hi, vramBytes } from room/plan.js dealRoom, or none on both;
+// and the same Qwen3.8-Flash-Next format: msg.flash { qsa, kv, ring }, or none on both, so a dense 2048 engine is never
+// kept for a QSA room, nor the reverse)
+const flashKey = (f) => (f?.qsa ? `qsa:${f.kv ?? "f32"}:${f.ring ?? 1024}` : "dense");
 export function sameShard(held, msg) {
   const o = held?.offload || null, p = msg?.offload || null;
   const sameOff = !o === !p && (!o || (o.lo === p.lo && o.hi === p.hi && o.vramBytes === p.vramBytes));
-  return !!held && !!msg && held.model === msg.model && held.ctx === msg.ctx && sameOff
+  return !!held && !!msg && held.model === msg.model && held.ctx === msg.ctx && sameOff && flashKey(held.flash) === flashKey(msg.flash)
     && Array.isArray(held.range) && Array.isArray(msg.range) && held.range[0] === msg.range[0] && held.range[1] === msg.range[1];
 }
 

@@ -50,7 +50,8 @@ import { unpackWire, wireStats } from "../../room/wire.js";
 import { TeleMeter, expertStoreOf } from "../../room/tele.js";
 import { isPhoneMeta, roomFit, dealRoom, shortNote, specWithOffload, dealOffloads, parseForce, layersTotal } from "../../room/plan.js";
 import { verifyHost, hostAllowed, startBusy, startFrom, joinOrder, START_PENDING_MS } from "../../room/authz.js";
-import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost } from "../../room/models.js";
+import { MODELS, CTX, roomBytes, maxSeqFor, ctxForBinding, kvModeFor, kvForLoad, kvBytesPerLayerPos, MAX_NEW, MIN_ROOM, pickCtx, ctxShortNote, expertsOf, ngramOf, flashLayerCost,
+  flashRoomFormat, flashReadyFields, readyCtxShort } from "../../room/models.js";
 import { CkptIndex, CKPT_DEFAULTS, boundaryPin, pinPoints, cutPoints, turnPoint } from "./ckpt.js";
 import { CkptDisk, modelFileId, prefixHash, roomKey } from "./ckptdisk.js";
 import { isPrefix } from "../../harness/prefix.js";
@@ -763,10 +764,19 @@ export class RoomNode extends EventEmitter {
       case "ai-wget": this.sendTo(from, { t: "ai-wpart", id: d.id, miss: 1 }); return;
       case "ai-genstart": case "ai-token": case "ai-gendone": case "ai-busy": case "ai-queued": this.emit("chat", d); return;
       // --- host
-      case "ai-ready":
+      case "ai-ready": {
         if (!this.hosting() || !ai.chain.includes(from)) return;
+        // a worker whose engine holds fewer positions than the room's context (an older build loads Flash at 2048)
+        const short = readyCtxShort(ai.model, ai.roomCtx, d, ai.roomFlash);
+        if (short) {
+          this.log(`${e?.name || from}: ${short}`);
+          if (ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${short})`));
+          return;
+        }
+        (ai.readyInfo ||= new Map()).set(e?.name || from, { ctx: +d.ctx || null, fsig: d.fsig && typeof d.fsig === "object" ? d.fsig : null });   // (logs, tests)
         ai.readyPeers.add(from); ai.ckptCap.set(from, !!d.ckpt); ai.diskOf.set(from, d.disk && typeof d.disk === "object" ? d.disk : null); this.emit("progress", { name: e?.name, pct: 100 }); this.maybeReady();
         return;
+      }
       case "ai-ckpt-loaded":   // worker -> host: the slots it read back from disk (diskRestore)
         if (!this.hosting() || !ai.chain.includes(from)) return;
         ai.diskWait.get(from)?.(Array.isArray(d.slots) ? d.slots : []);
@@ -899,7 +909,7 @@ export class RoomNode extends EventEmitter {
         const unwatch = this.watchLoad(src);
         try {
           const r = await this.loadShardFn({ modelKey: d.model, range: d.range, hasEmbed: false, hasHead: false, ctx: d.ctx || maxSeqFor(d.model),
-            kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(d.offload),
+            kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(d.offload), flash: d.flash || null,
             onGpuError: (m) => { this.log("GPU error: " + m); this.sendTo(ai.hostId, { t: "ai-error", message: "GPU error: " + m.slice(0, 300) }); },
             onProgress: (done, total) => {
               if (ai.startFailed) throw new Error(ai.startFailed);
@@ -907,7 +917,7 @@ export class RoomNode extends EventEmitter {
               if (pct !== lastPct) { lastPct = pct; this.sendTo(ai.hostId, { t: "ai-progress", pct }); this.emit("loadprogress", pct); }
             } });
           Object.assign(ai, { engine: r.engine, device: r.device, cfg: r.cfg, range: d.range, model: d.model, experts: r.experts || null });
-          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv, offload: d.offload || null, file: this.disk ? await modelFileId(src) : null };
+          ai.held = { model: d.model, range: [d.range[0], d.range[1]], ctx: d.ctx, kv, offload: d.offload || null, flash: d.flash || null, file: this.disk ? await modelFileId(src) : null };
         } finally { unwatch(); await src.close(); }
       }
       if (!(await this.ensureLink(d.next))) throw new Error("could not connect to the next device in the chain");
@@ -916,7 +926,8 @@ export class RoomNode extends EventEmitter {
       // disk: what keys this device's disk copies (ckptdisk.js), for the host's room key
       ai.diskPend.clear();
       const disk = this.diskLocal();
-      this.sendTo(ai.hostId, { t: "ai-ready", slots: [], ckpt: ai.engine?.saveSlot ? 1 : 0, ...(disk ? { disk } : {}) });
+      // ctx, fsig: the positions this engine holds and (Flash) its state signature, so the host sees what was loaded
+      this.sendTo(ai.hostId, { t: "ai-ready", slots: [], ckpt: ai.engine?.saveSlot ? 1 : 0, ...(disk ? { disk } : {}), ...flashReadyFields(ai.engine, d.model) });
       this.emit("loaded", { range: d.range, model: d.model, s: (performance.now() - t0) / 1000 });
     } catch (err) {
       if (ai.startFailed) { this.freeLayers(null); return; }
@@ -1082,7 +1093,7 @@ export class RoomNode extends EventEmitter {
     ai.short = null; ai.startOk = ai.startErr = null;   // (this deal's, once its devices are dealt: dealAgain)
     // a fresh deal: every device starts without checkpoints (a worker that keeps its layers drops its
     // slots); what each worker applies comes with its ai-ready, which may arrive before this device's load ends
-    ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map();
+    ai.ckpt?.clear(); ai.dropQ = []; ai.ckptCap = new Map(); ai.readyInfo = new Map();
     // and, once every device is in, the pinned prefixes this room saved to disk before (diskRestore)
     ai.diskOf = new Map(); ai.diskRoom = null; ai.dealGen++; ai.diskRestore = !!this.disk;
     ai.relinks = new Map(); ai.gone = new Set(); ai.plan = new Map(); ai.lapStat = null;
@@ -1159,19 +1170,23 @@ export class RoomNode extends EventEmitter {
     if (dealOffloads(ai.offloadBy)) this.log(specWithOffload(true, this.offloadSpec) ? "speculative decoding stays on with expert offload (POOLED_OFFLOAD_SPEC=1)"
       : "speculative decoding is off while experts are offloaded: plain decoding is faster there (POOLED_OFFLOAD_SPEC=1 turns it on)");
     this.split = { L, ranges, names: [this.name, ...ai.chain.map(nameOf)] };
+    // Qwen3.8-Flash-Next's format (ai-load.flash): QSA when every dealt device loads it (meta.flashLong), else none
+    const flash = flashRoomFormat(modelKey, [this.meta, ...ai.chain.map(metaOf)]);
+    ai.roomCtx = ctx; ai.roomFlash = flash;
+    if (M.kind === "qwen4exp") this.log(flash ? `Qwen3.8-Flash-Next with QSA (${flash.kv} K/V, ring ${flash.ring}) at ${ctx} positions` : `Qwen3.8-Flash-Next dense at ${ctx} positions (a device here loads no QSA: an older build)`);
     const readyAll = new Promise((res, rej) => { ai.startOk = res; ai.startErr = rej; });
     readyAll.catch(() => {});
     if (ai.redealWanted) { ai.startErr(ai.redealWanted); ai.redealWanted = null; }
     ai.chain.forEach((id, i) => {
       const msg = { t: "ai-load", v: PROTOCOL, model: modelKey, range: ranges[i + 1], ctx, kv, next: i + 1 < ai.chain.length ? ai.chain[i + 1] : "host", host: this.peer.id,
-        ...(plan.offload[i + 1] ? { offload: offloadMsg(plan.offload[i + 1]) } : {}) };
+        ...(plan.offload[i + 1] ? { offload: offloadMsg(plan.offload[i + 1]) } : {}), ...(flash ? { flash } : {}) };
       ai.plan.set(nameOf(id), { msg });
       this.sendTo(id, msg);
     });
     this.broadcast({ t: "ai-layers", by: ai.layersByName });
     const t0 = performance.now();
     const myOff = plan.offload[0] ? offloadMsg(plan.offload[0]) : null;
-    const keep = ai.engine && sameShard(ai.held, { model: modelKey, range: ranges[0], ctx, offload: myOff }) && ai.held.kv === kv;
+    const keep = ai.engine && sameShard(ai.held, { model: modelKey, range: ranges[0], ctx, offload: myOff, flash }) && ai.held.kv === kv;
     let unwatch = () => {};
     try {
       if (!keep) {
@@ -1179,11 +1194,11 @@ export class RoomNode extends EventEmitter {
         ai.loadingShard = true;
         let lastPct = -1;
         unwatch = this.watchLoad(src);
-        const r = await this.loadShardFn({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(myOff),
+        const r = await this.loadShardFn({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(myOff), flash,
           onGpuError: (m) => this.log("GPU error: " + m),
           onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
         Object.assign(ai, { engine: r.engine, device: r.device, tok: r.tok, cfg: r.cfg, range: ranges[0], role: "host", experts: r.experts || null });
-        ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv, offload: myOff, file: this.disk ? await modelFileId(src) : null };
+        ai.held = { model: modelKey, range: [ranges[0][0], ranges[0][1]], ctx, kv, offload: myOff, flash, file: this.disk ? await modelFileId(src) : null };
       }
     } catch (err) { ai.starting = false; ai.redealWanted = null; clearTimeout(ai.idleRedeal); this.broadcast({ t: "ai-start-failed", why: err.message }); throw err; }
     finally { unwatch(); ai.loadingShard = false; await src.close(); }
