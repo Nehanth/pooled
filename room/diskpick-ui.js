@@ -11,9 +11,10 @@ const $ = (id) => document.getElementById(id);
 const START = "Start the model", GIVES = "This device gives";
 let shown = null, stored = null, asked = 0, armed = 0, last = {}, covers = null;
 
-// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, stores, needGB, fits } (this tab's
+// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, stores, needGB, fits, shareBytes } (this tab's
 // disk-tier RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether some device in the room can store it,
-// the GPU memory it needs and whether it fits, roomFitFor's). Cheap when nothing changed: it runs on every room update.
+// the GPU memory it needs and whether it fits, and what this tab would copy to its disk in this room: roomFitFor's share,
+// null when not known). Cheap when nothing changed: it runs on every room update.
 export function showDiskPick(key, info = last) {
   const m = diskCopyOf(key), on = !!m;
   last = info;
@@ -31,7 +32,7 @@ export function showDiskPick(key, info = last) {
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;
   shown = sig;
-  $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, ramGB: info.ramGB ?? null, armed: !!armed });
+  $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, ramGB: info.ramGB ?? null, armed: !!armed, shareBytes: info.shareBytes ?? null });
   // what is stored: asked once per pick (and after Free, or Room settings freeing it: refreshDiskPick)
   if (asked !== key) { asked = key; refresh(key); }
 }

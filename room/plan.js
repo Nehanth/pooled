@@ -444,6 +444,19 @@ function dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, of
   const held = used.map((i, k) => (offload[k] ? vramFor(pledges, hostBytes, i) : assigned[k] * layerBytes) + (i === 0 ? hostBytes : 0));
   return { fit, used, assigned, ranges, held, out, offload };
 }
+// What a deal keeps on each device's disk, bytes per device index (host first, as pledges): the routed experts of the
+// layers it leaves on disk ([diskLo, hi): expBytes each) and the n-gram table on the device dealt its layer. A room
+// node reads them from its own model files; a tab copies them to its disk (room/flashdisk.js), so this is what a tab
+// stores. n: how many devices; a device dealt nothing stores 0.
+export function diskShares(deal, n, expBytes) {
+  const out = new Array(n).fill(0);
+  (deal?.used || []).forEach((i, k) => {
+    const o = deal.offload?.[k];
+    if (o && Number.isInteger(o.diskLo)) out[i] += (o.hi - o.diskLo) * expBytes;
+    if (deal.ngram?.at === k) out[i] += deal.ngram.bytes;
+  });
+  return out;
+}
 // What this room can run, smallest model first: [{ key, need, ok, short }]. short is how many
 // more GB the room needs for that model (0 when it fits).
 export function ladder(needGB, pledgedGB) {
