@@ -238,6 +238,19 @@ for (const kind of ["q4", "q8"]) for (const [nExp, K, nCols, d, ff, hot] of [[16
   const dy = a.filter((v, i) => v !== b[i]).length, ds = sa.filter((v, i) => v !== sb[i]).length;
   check(dy === 0 && ds === 0, `dn_delta_w + dn_gnorm_w vs the exact kernel, ${nCols} columns: ${dy} outputs and ${ds} state values differ`);
 }
+// ---- dn_conv_w + dn_conv_st_w == the exact DN_CONV_MC (bit for bit), including the state, for passes longer and
+// shorter than the conv window
+for (const nCols of [37, 2, 1]) {
+  const K = 4, dS = 128, nQK = 32, nH = 80, convDim = nH * dS, xs = convDim + 64, cs = convDim + 32;
+  const xin = put(randF(nCols * xs, 2)), w = put(randF(convDim * K)), st0 = randF(convDim * (K - 1), 2), stA = put(st0), stB = put(st0);
+  const coA = put(new Float32Array(nCols * cs)), coB = put(new Float32Array(nCols * cs)), F = uni([0, nCols, 0, 0]);
+  run(MC.DN_CONV_MC_WGSL, [xin, stA, w, coA, uni([K, nQK, dS, { f: 1e-6 }, xs, cs, 0, 0]), F], [nH, 1, 1]);
+  run(X.DN_CONV_W_WGSL, [xin, stB, w, coB, uni([K, nQK, dS, { f: 1e-6 }, xs, cs, 0, 0])], [nH, nCols, 1]);
+  run(X.DN_CONV_ST_W_WGSL, [xin, stB, null, null, uni([K, nQK, dS, { f: 1e-6 }, xs, cs, nH, 0]), F], [Math.ceil(convDim / 256), 1, 1]);
+  const [a, b, sa, sb] = [await read(coA, nCols * cs, Uint32Array), await read(coB, nCols * cs, Uint32Array), await read(stA, convDim * (K - 1), Uint32Array), await read(stB, convDim * (K - 1), Uint32Array)];
+  const dy = a.filter((v, i) => v !== b[i]).length, ds = sa.filter((v, i) => v !== sb[i]).length;
+  check(dy === 0 && ds === 0, `dn_conv_w + dn_conv_st_w vs the exact kernel, ${nCols} columns: ${dy} outputs and ${ds} state values differ`);
+}
 if (gpuErr) { console.log(`${gpuErr} GPU errors`); fails++; }
 console.log(fails ? `Q38FLASH WIDE FAIL (${fails})` : "Q38FLASH WIDE PASS ✓");
 Deno.exit(fails ? 1 : 0);

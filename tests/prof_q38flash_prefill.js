@@ -55,10 +55,11 @@ let pb = null;
 for (const mode of MODES) {
   pb = await mk(mode);
   const rows = [];
+  // warm-up (every pipeline's first use, the sparse ones included): passes up to 3 x maxCols tokens, untimed
+  eng.reset();
+  await pb.prefill(prompt(Math.min(Math.max(...LENS), 3 * pb.maxCols, MAXSEQ)), { head: hasHead ? "last" : "none" });
   for (const n of LENS) {
     const ids = prompt(n);
-    eng.reset();
-    await pb.prefill(ids.slice(0, Math.min(n, pb.maxCols)), { head: hasHead ? "last" : "none" });   // warm-up (pipelines, first-use)
     eng.reset();
     const t = performance.now();
     await pb.prefill(ids, { head: hasHead ? "last" : "none" });

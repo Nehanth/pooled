@@ -99,7 +99,7 @@ export class Qwen4ExpBatch {
         ple: MC.PLE_MC_WGSL, am1: MC.ARGMAX1_MC_WGSL, am2: MC.ARGMAX2_MC_WGSL,
         ...(exact ? {} : { moeSort: WX.moeSortWWGSL(), moeComb: WX.MOE_COMB_W_WGSL, guW_q4: WX.moeGuWWGSL("q4"), guW_q8: WX.moeGuWWGSL("q8"),
           dnW_q4: WX.moeDnWWGSL("q4"), dnW_q8: WX.moeDnWWGSL("q8"),
-          dnDeltaW: WX.DN_DELTA_W_WGSL, dnGnormW: WX.DN_GNORM_W_WGSL,
+          dnDeltaW: WX.DN_DELTA_W_WGSL, dnGnormW: WX.DN_GNORM_W_WGSL, dnConvW: WX.DN_CONV_W_WGSL, dnConvSt: WX.DN_CONV_ST_W_WGSL,
           attnWD: WX.attnWWGSL({ G: nH / nKV, hd }), attnWG: WX.attnWWGSL({ gather: QSA_SEL_STRIDE, G: nH / nKV, hd }),
           ...(this.dpMoe ? { guD_q4: WX.moeGuCWGSL("q4"), guD_q8: WX.moeGuCWGSL("q8"), dnD_q4: WX.moeDnCWGSL("q4"), dnD_q8: WX.moeDnCWGSL("q8") } : {}) }) })
         .map(async ([k, code]) => { P[k] = await pipe(code, k); }),
@@ -277,8 +277,14 @@ export class Qwen4ExpBatch {
           if (w.qkvz) rest.push(...proj(w.qkvz, B.mixed, B.qkvz, { ys: qkvzS, xq: XM }));
           else rest.push(...proj(wq(L.wqkv, "qkv"), B.mixed, B.qkvz, { ys: qkvzS, xq: XM }), ...proj(wq(L.wz, "z"), B.mixed, B.qkvz, { ys: qkvzS, yOff: convDim, xq: XM }));
           rest.push(...proj(w.ba, B.mixed, B.ba, { dIn: d, xq: XM }));
-          rest.push({ pipe: P.dnConv, bg: bg(P.dnConv, [B.qkvz, st.conv, wq(L.conv, "conv").buf, B.co, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps), qkvzS, convDim, 0, 0]), B.F]),
-            dyn: () => [convDim / ss.stateSize, 1, 1] });
+          const cv = wq(L.conv, "conv").buf, nCH = convDim / ss.stateSize;
+          if (fast && ss.convK <= 9) {   // every (head, column) at once (the conv reads only inputs), then the state
+            rest.push({ pipe: P.dnConvW, bg: bg(P.dnConvW, [B.qkvz, st.conv, cv, B.co, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps), qkvzS, convDim, 0, 0])]),
+              dyn: (pos, n) => [nCH, n, 1] });
+            rest.push({ pipe: P.dnConvSt, bg: bg(P.dnConvSt, [B.qkvz, st.conv, null, null, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps), qkvzS, convDim, nCH, 0]), B.F]),
+              dyn: () => [cdiv(convDim, 256), 1, 1] });
+          } else rest.push({ pipe: P.dnConv, bg: bg(P.dnConv, [B.qkvz, st.conv, cv, B.co, uni([ss.convK, 2 * ss.nKHeads, ss.stateSize, f(eps), qkvzS, convDim, 0, 0]), B.F]),
+            dyn: () => [nCH, 1, 1] });
           const ep = uni([ss.nKHeads, ss.stateSize, keyDim, ss.nVHeads, f(eps), convDim, 2 * ss.nVHeads, qkvzS, convDim, ss.inner, 0, 0]);
           if (fast) {   // the recurrence, then the gated norm over every (head, column) in parallel: the exact kernel's bits
             rest.push({ pipe: P.dnDeltaW, bg: bg(P.dnDeltaW, [B.co, st.S, B.ba, w.dta, B.o, ep, B.F]), dyn: () => [ss.nVHeads, 1, 1] });

@@ -27,8 +27,9 @@
 //   moe_comb_w        moe[col][r] = sum_k w_k y[col * K + k][r] (k ascending) + sigmoid(shared gate) * sh[col][r].
 //   attn_w            attention with a KV head's 12 query heads (and in the dense phase 5 columns) per workgroup
 //                     sharing each K / V tile, online softmax; dense (causal) or gathered (QSA's row lists).
-//   dn_delta_w / dn_gnorm_w  the exact DeltaNet recurrence with its gated output norm moved out of the sequential
-//                     loop (same expressions: the exact kernel's bits).
+//   dn_delta_w / dn_gnorm_w  the exact DeltaNet recurrence (its state in registers, inputs loaded a column ahead)
+//                     with its gated output norm moved out of the sequential loop; dn_conv_w / dn_conv_st_w the conv
+//                     over every (head, column) at once. Same expressions: the exact kernels' bits.
 //
 // Pair p = col * K + slot, so h keeps the exact kernels' [col][K][expFF] layout. Offloaded layers bind the expert
 // store's region (regionEntry) with the original expert ids, as the exact kernels do.
@@ -633,8 +634,9 @@ export const moeDnCWGSL = (kind, KB = 4) => moeCoalesced(kind, false, KB);
 
 // ---- DeltaNet for wide passes: dn_delta_w is the exact kernel's recurrence (DN_DELTA_MC_WGSL, the same
 // arithmetic per column) without its gated output norm, which needs a 128-wide reduction (8 barriers) per column
-// inside the sequential loop; dn_gnorm_w applies it afterwards to every (V head, column) in parallel, with the
-// exact kernel's expressions (so the pair gives the exact kernel's bits).
+// inside the sequential loop, and with each column's inputs loaded one column ahead; dn_gnorm_w applies the norm
+// afterwards to every (V head, column) in parallel, with the exact kernel's expressions (so the pair gives the exact
+// kernel's bits).
 // dn_delta_w bindings: 0 co, 1 S, 2 ba, 3 dta, 4 o, 5 P (the exact kernel's EP), 6 F. Grid (nVHeads).
 export const DN_DELTA_W_WGSL = DQ + `
 struct EP { nKH: u32, dS: u32, keyDim: u32, nVH: u32, eps: f32, cs: u32, bs: u32, zs: u32, zOff: u32, os: u32, p0: u32, p1: u32 };
@@ -654,41 +656,40 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   let j = t & 127u; let i0 = (t >> 7u) * 64u;
   let kh = h % wx_P.nKH;
   let base = h * dS * dS;
-  var S: array<f32, 64>;
-  for (var i = 0u; i < 64u; i++) { S[i] = wx_S[base + (i0 + i) * dS + j]; }
+  // the thread's 64 entries of S as named registers (an array indexed in a loop may live in local memory)
+  ${rng(64).map((i) => `var s${i} = wx_S[base + (i0 + ${i}u) * dS + j];`).join(" ")}
+  // the column's inputs (this thread's k or q value, v, beta and alpha) are loaded one column ahead, so their global
+  // latency overlaps the previous column's arithmetic (the values, and so the bits, are the same)
+  let kqo = select(kh * dS + t - 128u, wx_P.keyDim + kh * dS + t, t < 128u);   // k (t < 128) or q
+  let vo = 2u * wx_P.keyDim + h * dS + j;
+  var nkq = wx_co[kqo]; var nv = wx_co[vo]; var nal = wx_ba[wx_P.nVH + h]; var nbe = wx_ba[h];
   for (var col = 0u; col < wx_F.nCols; col++) {
-    let cb = col * wx_P.cs; let bb = col * wx_P.bs;
+    let ckq = nkq; let v = nv; let cal = nal; let cbe = nbe;
+    if (col + 1u < wx_F.nCols) {
+      let cb = (col + 1u) * wx_P.cs; let bb = (col + 1u) * wx_P.bs;
+      nkq = wx_co[cb + kqo]; nv = wx_co[cb + vo]; nal = wx_ba[bb + wx_P.nVH + h]; nbe = wx_ba[bb + h];
+    }
     workgroupBarrier();
-    if (t < 128u) { wx_kq[t] = wx_co[cb + wx_P.keyDim + kh * dS + t]; }   // k
-    else { wx_kq[t] = wx_co[cb + kh * dS + t - 128u]; }                  // q
+    wx_kq[t] = ckq;
     workgroupBarrier();
-    let araw = wx_ba[bb + wx_P.nVH + h] + wx_dta[h];
+    let araw = cal + wx_dta[h];
     var sp = araw;
     if (araw <= 20.0) { sp = log(1.0 + exp(araw)); }
     let decay = exp(sp * wx_dta[wx_P.nVH + h]);
-    let b = sigm(wx_ba[bb + h]);
-    let v = wx_co[cb + 2u * wx_P.keyDim + h * dS + j];
+    let b = sigm(cbe);
     var vh = 0.0;
-    for (var i = 0u; i < 64u; i++) {
-      let s = S[i] * decay;
-      S[i] = s;
-      vh += s * wx_kq[i0 + i];
-    }
+    ${rng(64).map((i) => `s${i} = s${i} * decay; vh += s${i} * wx_kq[i0 + ${i}u];`).join("\n    ")}
     wx_red[t] = vh;
     workgroupBarrier();
     vh = (v - (wx_red[j] + wx_red[128u + j])) * b;
     workgroupBarrier();
     var acc = 0.0;
-    for (var i = 0u; i < 64u; i++) {
-      let s = S[i] + wx_kq[i0 + i] * vh;
-      S[i] = s;
-      acc += s * wx_kq[128u + i0 + i];
-    }
+    ${rng(64).map((i) => `s${i} = s${i} + wx_kq[i0 + ${i}u] * vh; acc += s${i} * wx_kq[128u + i0 + ${i}u];`).join("\n    ")}
     wx_red[t] = acc;
     workgroupBarrier();
     if (t < 128u) { wx_o[col * wx_P.os + h * dS + j] = (wx_red[j] + wx_red[128u + j]) * (1.0 / sqrt(f32(dS))); }
   }
-  for (var i = 0u; i < 64u; i++) { wx_S[base + (i0 + i) * dS + j] = S[i]; }
+  ${rng(64).map((i) => `wx_S[base + (i0 + ${i}u) * dS + j] = s${i};`).join(" ")}
 }`;
 // dn_gnorm_w bindings: 0 o, 1 z, 2 nw, 3 y, 4 P (EP). Grid (nVHeads, nCols).
 export const DN_GNORM_W_WGSL = DQ + `
@@ -709,4 +710,53 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
   for (var s = 128u; s > 0u; s >>= 1u) { if (t < s) { wx_red[t] += wx_red[t + s]; } workgroupBarrier(); }
   let inv = 1.0 / sqrt(wx_red[0] / f32(dS) + wx_P.eps);
   if (t < 128u) { wx_y[col * wx_P.os + oi] = (ov * inv) * wx_nw[j] * sigm(wx_z[col * wx_P.zs + wx_P.zOff + oi]); }
+}`;
+
+// ---- DeltaNet's causal conv + l2 for wide passes. The conv reads only inputs (the pass's columns and the K - 1
+// before them, kept in the state), so the columns need not run in order: dn_conv_w takes one workgroup per
+// (128-channel head, column) with the exact kernel's expressions (DN_CONV_MC_WGSL: the same bits), and
+// dn_conv_st_w then moves the state to the pass's last K - 1 inputs. K <= 9 (the exact kernel's bound).
+// dn_conv_w bindings: 0 xin, 1 st, 2 w, 3 co, 4 P (the exact kernel's DP). Grid (convDim / dS, nCols).
+// dn_conv_st_w bindings: 0 xin, 1 st, 4 P (p0 = convDim / dS), 5 F. Grid (ceil(convDim / 256)).
+const DN_CONV_HEAD = `
+struct DP { K: u32, nQK: u32, dS: u32, eps: f32, xs: u32, cs: u32, p0: u32, p1: u32 };
+${MCF}
+@group(0) @binding(0) var<storage, read> wx_xin: array<f32>;
+@group(0) @binding(4) var<uniform> wx_P: DP;
+@group(0) @binding(5) var<uniform> wx_F: McF;`;
+export const DN_CONV_W_WGSL = DQ + DN_CONV_HEAD + `
+@group(0) @binding(1) var<storage, read> wx_st: array<f32>;
+@group(0) @binding(2) var<storage, read> wx_w: array<f32>;
+@group(0) @binding(3) var<storage, read_write> wx_co: array<f32>;
+var<workgroup> wx_red: array<f32, 128>;
+@compute @workgroup_size(128)
+fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: vec3<u32>) {
+  let t = l.x; let c = wg.x * wx_P.dS + t; let col = wg.y;
+  let K1 = wx_P.K - 1u;
+  let xv = wx_xin[col * wx_P.xs + c];
+  var acc = wx_w[c * wx_P.K + K1] * xv;
+  for (var j = 0u; j < K1; j++) {
+    // h[j] of the exact kernel at this column: input col - K1 + j, or the state before the pass
+    var hj = 0.0;
+    if (col + j >= K1) { hj = wx_xin[(col + j - K1) * wx_P.xs + c]; } else { hj = wx_st[c * K1 + col + j]; }
+    acc += wx_w[c * wx_P.K + j] * hj;
+  }
+  let v = silu(acc);
+  if (wg.x >= wx_P.nQK) { wx_co[col * wx_P.cs + c] = v; return; }
+  wx_red[t] = v * v;
+  workgroupBarrier();
+  for (var s = 64u; s > 0u; s >>= 1u) { if (t < s) { wx_red[t] += wx_red[t + s]; } workgroupBarrier(); }
+  wx_co[col * wx_P.cs + c] = v * (1.0 / max(sqrt(wx_red[0]), wx_P.eps));
+}`;
+export const DN_CONV_ST_W_WGSL = DN_CONV_HEAD + `
+@group(0) @binding(1) var<storage, read_write> wx_st: array<f32>;
+@compute @workgroup_size(256)
+fn main(@builtin(global_invocation_id) g: vec3<u32>) {
+  let c = g.x; let n = wx_F.nCols; let K1 = wx_P.K - 1u;
+  if (c >= wx_P.dS * wx_P.p0) { return; }
+  var h: array<f32, 8>;
+  for (var j = 0u; j < K1; j++) {
+    if (n + j >= K1) { h[j] = wx_xin[(n + j - K1) * wx_P.xs + c]; } else { h[j] = wx_st[c * K1 + n + j]; }
+  }
+  for (var j = 0u; j < K1; j++) { wx_st[c * K1 + j] = h[j]; }
 }`;
