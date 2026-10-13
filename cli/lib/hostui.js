@@ -29,7 +29,8 @@ export function deviceKind(meta = {}, self = false) {
 
 // How much a model needs in this room: the whole deal's bytes at the context the node opens it with
 // (roomBytes), else room/models.js NEED_GB for a model without a SHAPE
-const needAt = (lib, key, ctx) => { const rb = lib.roomBytes(key, ctx, "f16"); return rb ? r1((rb.L * rb.layerBytes + rb.hostBytes) / GiB) : null; };
+// rounded up to a tenth of a GiB, as room/models.js NEED_GB (the room page's number for the same model)
+const needAt = (lib, key, ctx) => { const rb = lib.roomBytes(key, ctx, "f16"); return rb ? Math.ceil((rb.L * rb.layerBytes + rb.hostBytes) / GiB * 10 - 1e-9) / 10 : null; };
 export function modelNeedGB(lib, key, ctxAsk = 0) {
   return needAt(lib, key, lib.nodeCtxFor(key, ctxAsk)) ?? lib.NEED_GB[key] ?? null;
 }

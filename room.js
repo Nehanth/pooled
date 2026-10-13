@@ -27,7 +27,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { SHAPE, MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf, flashLayerCost } from "./room/models.js";
+import { SHAPE, MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf, flashLayerCost, flashTabHostMargin } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -46,7 +46,7 @@ import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, s
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
 import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, START_PENDING_MS } from "./room/authz.js";
-import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge, diskShares, PAGE_SHORT_FIX, layersTotal } from "./room/plan.js";
+import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge, diskShares, PAGE_SHORT_FIX, layersTotal, dealWithHostMargin } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle, allowLabel } from "./room/diskpick.js";
@@ -609,7 +609,14 @@ function roomFitFor(key) {
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
   const pledges = devs.map((d) => pledgeGB(d.meta, Infinity, key) * 2 ** 30);
   // (rb.layerCost: Qwen3.8-Flash-Next's per-layer bytes, room/models.js flashLayerCost; roomBytes is memoized per context)
-  const fitAt = (c, pl = pledges) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pl, rb.layerCost || rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key)); };
+  // (a tab model host of Flash also keeps its load margin, as aiStart deals it: room/models.js flashTabHostMargin,
+  // room/plan.js dealWithHostMargin; a room node host has its load check instead)
+  const margin = SHAPE[key]?.flash && !devs[0].meta?.native ? [flashTabHostMargin(key), flashTabHostMargin(key, true)] : null;
+  const fitAt = (c, pl = pledges) => {
+    const rb = roomBytes(key, c, kv), off = offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key);
+    if (!margin) return roomFit(rb.L, pl, rb.layerCost || rb.layerBytes, rb.hostBytes, off);
+    return dealWithHostMargin((x) => dealRoom({ L: rb.L, layerCost: rb.layerCost, hostBytes: rb.hostBytes + x, pledges: pl, off }), ...margin).fit;
+  };
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
   const out = { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
@@ -3792,7 +3799,7 @@ async function aiStart(modelArg) {
     const n = ai.chain.length + 1;
     // layerAt(ctx): one layer's bytes with its KV cache at that context, or (Qwen3.8-Flash-Next) each layer's own bytes
     // at that context (room/models.js flashLayerCost: room/plan.js takes either)
-    let L, layerBytes, layerAt, embedBytes, cfg = null, experts = null;
+    let L, layerBytes, layerAt, embedBytes, cfg = null, experts = null, hostMargin = null;
     if (M.kind === "qwen35") {
       aiStatus("Looking up the model…");
       ai.G = await fetchModelHeader(M);
@@ -3818,6 +3825,9 @@ async function aiStart(modelArg) {
       const G = ai.G;
       layerAt = (cx) => flashLayerCost(G, cx);
       embedBytes = qwen4expShardBytes(ai.G, { lo: 0, hi: 0, hasEmbed: true, hasHead: true, qsa: false });
+      // this tab's load margin past its layers: the biggest layer's upload staging and scratch, which no load check
+      // here counts (only its other weights when it offloads every layer it holds: room/plan.js dealWithHostMargin)
+      hostMargin = [flashTabHostMargin(G), flashTabHostMargin(G, true)];
       experts = expertsOf(ai.G, L);   // expert offload: a room node parks them (or reads them from disk), a tab reads them from OPFS
     } else {
       cfg = await (await fetch(M.cfg)).json();
@@ -3862,16 +3872,21 @@ async function aiStart(modelArg) {
       const metas = metasNow(), off = withSplit(offloadFor(metas, experts, modelKey));
       // the model's default context, or its fallback when only that fits these pledges (room/models.js
       // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
-      const pick = pickCtx(modelKey, { want: wantCtx, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes, off).fits });
+      const layersOf = (lb) => (typeof lb === "number" ? { layerBytes: lb } : { layerCost: lb });
+      const fitsAt = (c) => (hostMargin
+        ? dealWithHostMargin((x) => dealRoom({ L, ...layersOf(layerAt(c)), hostBytes: embedBytes + x, pledges, off }), ...hostMargin).fit.fits
+        : roomFit(L, pledges, layerAt(c), embedBytes, off).fits);
+      const pick = pickCtx(modelKey, { want: wantCtx, ask: CTX_ASK, fitsAt });
       const lb = layerAt(pick.ctx);
       // fastest devices first (measured ms per layer from earlier answers), fewest hops, or by memory;
       // either way devices that are not needed (phones while the computers hold the model) and devices
       // whose pledge is under one layer stay in the room as ask-only guests (room/plan.js dealRoom)
-      const deal = dealRoom({ L, ...(typeof lb === "number" ? { layerBytes: lb } : { layerCost: lb }), hostBytes: embedBytes, pledges, mode: $("ai-split").value === "speed" ? "speed" : "memory",
+      const dealX = (x) => dealRoom({ L, ...layersOf(lb), hostBytes: embedBytes + x, pledges, mode: $("ai-split").value === "speed" ? "speed" : "memory",
         ms: [ai.msPerLayer.get(myName), ...ai.chain.map((id) => ai.msPerLayer.get(nameOf(id)))],
         phone: [isPhoneMeta(myMeta), ...ai.chain.map((id) => isPhoneMeta(conns.get(id)?.meta))], phoneLayers: PHONE_LAYERS, off,
         // Qwen3.8-Flash-Next: the device dealt the n-gram layer must have its table on disk (null for every other model)
         ngram: ngramFor(metas, ngramOf(modelKey)) });
+      const deal = hostMargin ? dealWithHostMargin(dealX, ...hostMargin) : dealX(0);
       return { pick, deal };
     };
     ai.moe = !!experts;                       // the speed panel: a MoE model's cards say where the experts are

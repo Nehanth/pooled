@@ -94,16 +94,21 @@ export function costOf(layerBytes) {
   return { uniform: true, L: Infinity, span: (lo, hi) => (hi - lo) * b, at: (n) => n * b, fitN: (bytes) => (b > 0 && bytes > 0 ? Math.floor(bytes / b + 1e-9) : 0), avg: b, off: null,
     resident: (n, m, pos, E) => n * b - m * E };
 }
+// c.once / c.onceAt (optional): bytes a device keeps once when its range holds any layer flagged in onceAt (Flash: the QSA
+// score scratch, flashLayerCost), counted in every range's sum that holds one
 function perLayerCost(c, withOff = true) {
   const L = c.length, pre = new Float64Array(L + 1), worstMemo = new Map();
   for (let i = 0; i < L; i++) pre[i + 1] = pre[i] + (+c[i] || 0);
-  const span = (lo, hi) => (lo < 0 || hi > L || hi < lo ? Infinity : pre[hi] - pre[lo]);
+  const once = c.once > 0 && c.onceAt?.length === L ? c.once : 0, opre = new Uint16Array(L + 1);
+  if (once) for (let i = 0; i < L; i++) opre[i + 1] = opre[i] + (c.onceAt[i] ? 1 : 0);
+  const sum = (lo, hi) => pre[hi] - pre[lo] + (once && hi > lo && opre[hi] > opre[lo] ? once : 0);
+  const span = (lo, hi) => (lo < 0 || hi > L || hi < lo ? Infinity : sum(lo, hi));
   const worst = (n, lo0 = 0) => {
     if (n <= 0) return 0;
     if (lo0 + n > L) return Infinity;
     const k = n * (L + 1) + lo0;
     let w = worstMemo.get(k);
-    if (w === undefined) { w = 0; for (let s = lo0; s + n <= L; s++) w = Math.max(w, pre[s + n] - pre[s]); worstMemo.set(k, w); }
+    if (w === undefined) { w = 0; for (let s = lo0; s + n <= L; s++) w = Math.max(w, sum(s, s + n)); worstMemo.set(k, w); }
     return w;
   };
   const at = (n, pos = null) => {
@@ -125,10 +130,10 @@ function perLayerCost(c, withOff = true) {
     if (lo0 + n > L) return Infinity;
     const k = (n * (L + 1) + m) * (L + 1) + lo0;
     let w = resMemo.get(k);
-    if (w === undefined) { w = -Infinity; for (let s = lo0; s + n <= L; s++) w = Math.max(w, pre[s + n] - pre[s] - (epre[s + n] - epre[s + n - m])); resMemo.set(k, w); }
+    if (w === undefined) { w = -Infinity; for (let s = lo0; s + n <= L; s++) w = Math.max(w, sum(s, s + n) - (epre[s + n] - epre[s + n - m])); resMemo.set(k, w); }
     return w;
   };
-  return { uniform: false, L, span, at, fitN, avg: L ? pre[L] / L : 0, off, resident };
+  return { uniform: false, L, span, at, fitN, avg: L ? sum(0, L) / L : 0, off, resident };
 }
 // The layers' total bytes: L x a number, or the per-layer bytes' sum
 export const layersTotal = (layerBytes, L) => (layerBytes && typeof layerBytes === "object" ? costOf(layerBytes).span(0, layerBytes.length) : L * (+layerBytes || 0));
@@ -138,12 +143,23 @@ export const layersTotal = (layerBytes, L) => (layerBytes && typeof layerBytes =
 // (costOf: the host's from layer 0, every other device's the heaviest range it could be dealt);
 // hostBytes: what the model host holds besides its layers (the embedding, the output head, the
 // draft block: room/models.js hostHeldBytes). A pledge is a promise: nobody is dealt more than this.
+// With per-layer costs the last device that can hold a layer is sized on the range ending at layer L, exactly: every
+// deal (planSplit, planForSpeed, dealOffload, placeNgram) keeps the host-first order, so when it holds layers its
+// range is the tail. A device between them keeps the heaviest window (it could start anywhere past the host's).
 export function layerCaps(pledges, layerBytes, hostBytes = 0) {
   const C = costOf(layerBytes);
-  return pledges.map((p, i) => {
-    const b = (Number.isFinite(p) && p > 0 ? p : 0) - (i === 0 ? hostBytes : 0);
-    return C.avg > 0 && b > 0 ? C.fitN(b, i === 0 ? HOST_POS : PEER_POS) : 0;
-  });
+  const b = pledges.map((p, i) => (Number.isFinite(p) && p > 0 ? p : 0) - (i === 0 ? hostBytes : 0));
+  const caps = b.map((x, i) => (C.avg > 0 && x > 0 ? C.fitN(x, i === 0 ? HOST_POS : PEER_POS) : 0));
+  const t = lastPeer(b, C);
+  if (t) caps[t.i] = t.n;
+  return caps;
+}
+// The last device past the host that holds a layer of the tail, and how many it holds there ({ i, n }); null with one
+// size per layer (where a range is does not matter) or when none can
+function lastPeer(b, C) {
+  if (C.uniform || !(C.avg > 0)) return null;
+  for (let i = b.length - 1; i >= 1; i--) { const n = b[i] > 0 ? C.fitN(b[i], C.L) : 0; if (n >= 1) return { i, n }; }
+  return null;
 }
 
 // Whether a room's pledges hold a model, and if not by how much they fall short. Same arguments as
@@ -175,10 +191,12 @@ function residentFit(L, pledges, layerBytes, hostBytes) {
   if (!missing) return { fits: true, caps, missing: 0, short: 0, raise: caps.map(() => 0) };
   const p = (i) => (Number.isFinite(pledges[i]) && pledges[i] > 0 ? pledges[i] : 0);
   const others = has - caps[0], C = costOf(layerBytes);
+  // the last device holding layers is sized on the tail (layerCaps)
+  const last = C.uniform ? -1 : caps.reduce((j, c, i) => (i > 0 && c >= 1 ? i : j), -1);
   const raise = caps.map((c, i) => {
     if (i === 0) return hostBytes + C.at(Math.max(1, L - others), HOST_POS) - p(0);
     if (!hostOk) return Infinity;
-    return C.at(c + (L - has), PEER_POS) - p(i);
+    return C.at(c + (L - has), i === last ? C.L : PEER_POS) - p(i);
   }).map((b) => (b === Infinity ? b : Math.max(1, Math.ceil(b))));
   return { fits: false, caps, missing, short: Math.min(...raise), raise };
 }
@@ -821,6 +839,21 @@ function dealLayers({ L, layerBytes, hostBytes, pledges, mode, ms, phone, phoneL
   const C = costOf(layerBytes);
   const held = idx.map((i, k) => C.span(ranges[k][0], ranges[k][1]) + (i === 0 ? hostBytes : 0));
   return { fit, used: idx, assigned, ranges, held, out };
+}
+
+// The deal for a model host that loads without a load-time check (a room page's tab: room/models.js
+// flashTabHostMargin): it keeps `full` past its layers (their upload staging and scratch) while it holds a resident
+// layer, `small` when it offloads every layer it holds (their experts are never staged). deal(extra) -> dealRoom's
+// result with extra more host bytes. Returns the deal with `full`, or the one with `small` when that has the host
+// offloading every layer it holds (so a host that streams all its experts keeps its pool, and one with resident layers
+// its staging).
+export function dealWithHostMargin(deal, full, small = full) {
+  const a = deal(full);
+  if (!(small < full)) return a;
+  const allOff = (d) => !!(d.fit.fits && d.used.length && d.offload?.[0] && d.offload[0].lo === d.ranges[0][0]);
+  if (a.fit.fits && !allOff(a)) return a;
+  const b = deal(small);
+  return allOff(b) ? b : a;
 }
 
 // ---------------- the n-gram table (Qwen3.8-Flash-Next, roadmap/33) ----------------

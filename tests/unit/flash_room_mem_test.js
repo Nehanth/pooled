@@ -6,9 +6,9 @@
 //   deno test --allow-read tests/unit/flash_room_mem_test.js
 import { qwen4expMemory } from "../../engine/qwen4exp_mem.js";
 import { parseGGUFHeader, qwen4expConfig, qwen4expShardBytes } from "../../engine/gguf.js";
-import { SHAPE, NEED_GB, CTX, roomBytes, expertBytesOf, ngramOf, mergeSplitHeaders, flashCfgOf, flashRoomMem, flashLayerCost, flashCkptReserve,
+import { SHAPE, NEED_GB, CTX, roomBytes, expertBytesOf, ngramOf, mergeSplitHeaders, flashCfgOf, flashRoomMem, flashLayerCost, flashCkptReserve, flashTabHostMargin, FLASH_SCRATCH,
   ckptSlotsAt, CKPT_RESERVE_SLOTS, CKPT_TOKEN_CAP, FLASH_DENSE_CTX, FLASH_CKPT_TOKENS } from "../../room/models.js";
-import { costOf, layersTotal, layerCaps, roomFit, dealRoom, minFitPledge, offloadSpareOf, OFFLOAD_CKPT_SLOTS } from "../../room/plan.js";
+import { costOf, layersTotal, layerCaps, roomFit, dealRoom, minFitPledge, offloadSpareOf, OFFLOAD_CKPT_SLOTS, dealWithHostMargin } from "../../room/plan.js";
 import { offloadFor, ngramFor, pledgeGB } from "../../room/pledge.js";
 import { readFixture, ggufFromFixture } from "../helpers/gguf_fixture.js";
 
@@ -65,13 +65,18 @@ Deno.test("flash mem: flashLayerCost, each layer its own weights + state + reser
     const qsa = ctx > FLASH_DENSE_CTX;
     for (let i = 0; i < 48; i++) {
       const m = qwen4expMemory(cfg, { ctx, qsa, layerRange: [i, i + 1] });
-      eq(a[i], SHAPE[F].layers[i] + (qsa && cfg.qsa[i] ? SHAPE[F].indexer : 0) + m.total + a.slots * m.state, `${ctx} layer ${i}`);
+      eq(a[i], SHAPE[F].layers[i] + (qsa && cfg.qsa[i] ? SHAPE[F].indexer : 0) + m.state + a.slots * m.state, `${ctx} layer ${i}`);
+      eq([a.onceAt[i], a.once], qsa && cfg.qsa[i] ? [1, m.bytes.scores] : [0, a.once], `${ctx} layer ${i}: the score scratch, once`);
     }
-    ok(Math.abs(a.total - sum(a)) < 1);
-    // a range's state and reserve are flashRoomMem's (the load check's) for it, exactly
-    for (const [lo, hi] of [[0, 24], [24, 48], [0, 3], [3, 4]]) {
+    ok(Math.abs(a.total - sum(a) - a.once) < 1);
+    ok(qsa ? a.once > 0 : a.once === 0);
+    // a range's state and reserve are flashRoomMem's (the load check's) for it, exactly; its cost (costOf) is its
+    // weights + flashRoomMem's need with the reserve: the score scratch once per device, not once per QSA layer
+    const C = costOf(a);
+    for (const [lo, hi] of [[0, 24], [24, 48], [0, 3], [3, 4], [1, 48], [6, 30]]) {
       eq(sum(a.state, lo, hi), flashRoomMem(F, ctx, { range: [lo, hi] }).state, `${ctx} [${lo}, ${hi})`);
       eq(a.slots * sum(a.state, lo, hi), flashCkptReserve(F, [lo, hi], ctx, a.slots));
+      ok(Math.abs(C.span(lo, hi) - sum(a.weights, lo, hi) - flashRoomMem(F, ctx, { range: [lo, hi], ckptSlots: a.slots }).need) < 1, `${ctx} [${lo}, ${hi}): the planner's range is the load check's`);
     }
   }
   // no reserve at the dense 2048 (deals there as before), two slots past it
@@ -182,8 +187,8 @@ Deno.test("flash plan: the checkpoint reserve is counted once on a device that o
   eq(c8.slots, 2);
   eq(Math.round(sp8.vram), Math.round(p.work + n * p.state));
   eq(Math.round(sp8.ram - 1.5 * GB), Math.round(flashRoomMem(F, 8192, { range: [28, 48] }).state));
-  eq(Math.round(sum(c8, 28, 48) - sum(c8.weights, 28, 48) - sum(c8.state, 28, 48)), Math.round(flashCkptReserve(F, [28, 48], 8192) + 5 * flashRoomMem(F, 8192, { range: [31, 32] }).bytes.scores),
-    "the layers carry their 2-slot reserve (and the QSA layers the score scratch)");
+  eq(Math.round(C8.span(28, 48) - sum(c8.weights, 28, 48) - sum(c8.state, 28, 48)), Math.round(flashCkptReserve(F, [28, 48], 8192) + flashRoomMem(F, 8192, { range: [31, 32] }).bytes.scores),
+    "the layers carry their 2-slot reserve (and the range the score scratch, once)");
 });
 
 Deno.test("flash picker: the row at 2048 and 8K from the planner's costs (roomFit, minFitPledge, NEED_GB)", () => {
@@ -206,4 +211,56 @@ Deno.test("flash picker: the row at 2048 and 8K from the planner's costs (roomFi
     ok(m && m.bytes / GB > 4 && m.bytes / GB < 8, `${ctx}: ${m && m.bytes / GB}`);
     ok(fitAt(ctx, tpl, tab).disk, `${ctx}: from disk`);
   }
+});
+
+Deno.test("flash plan: the last device is sized on the tail it gets, so rooms with an exact split at 2048 fit", () => {
+  // two devices, whole GiB pledges at the margin: they fit on one size per layer and on the exact sums ([0, k) on the
+  // host, [k, 48) on the other), so they must fit here too (sizing every non-host device on its heaviest window refused them)
+  const rb = roomBytes(F, 2048), C = costOf(rb.layerCost);
+  for (const gb of [[36.5, 31.75], [28, 40], [39, 29], [50, 18], [61, 7], [24.75, 42.75], [12, 56.5]]) {
+    const pl = gb.map((g) => g * GB), f = roomFit(48, pl, rb.layerCost, rb.hostBytes);
+    ok(f.fits, `${gb}: ${JSON.stringify(f)}`);
+    for (const mode of ["memory", "speed"]) {
+      const d = dealRoom({ L: 48, layerCost: rb.layerCost, hostBytes: rb.hostBytes, pledges: pl, mode });
+      ok(d.used.length && d.ranges.at(-1)[1] === 48, `${gb} ${mode}`);
+      checkHeld({ rb, d, pledges: pl });
+    }
+  }
+  // 36.5 / 31.75: [0, 25) holds 35.44 GiB with the host's part, [25, 48) 31.58
+  ok(C.span(0, 25) + rb.hostBytes <= 36.5 * GB && C.span(25, 48) <= 31.75 * GB);
+  eq(layerCaps([36.5 * GB, 31.75 * GB], rb.layerCost, rb.hostBytes)[1], C.fitN(31.75 * GB, 48));
+  // a device between the host and the last keeps its heaviest window (it could be dealt one past layer 1); one
+  // size per layer is unchanged
+  eq(layerCaps([40 * GB, 20 * GB, 20 * GB], rb.layerCost, rb.hostBytes)[1], C.fitN(20 * GB, { lo: 1 }));
+  eq(layerCaps([10 * GB, 4 * GB, 4 * GB], GB, 0), [10, 4, 4]);
+});
+
+Deno.test("flash room: a tab model host sets aside its load margin; roomBytes is one frozen object per context", () => {
+  const S = SHAPE[F], ex = flashLayerCost(F, 2048).experts;
+  eq(flashTabHostMargin(F), Math.max(...S.layers) + FLASH_SCRATCH);
+  eq(flashTabHostMargin(F, true), Math.max(...S.layers.map((b, i) => b - ex[i])) + FLASH_SCRATCH);
+  eq([flashTabHostMargin(G), flashTabHostMargin(G, true)], [flashTabHostMargin(F), flashTabHostMargin(F, true)], "the header's and the picker's");
+  ok(flashTabHostMargin(F) > 1.4 * GB && flashTabHostMargin(F) < 1.6 * GB && flashTabHostMargin(F, true) < 0.2 * GB);
+  // the room page's deal (room.js aiStart): a tab host with resident layers keeps the full margin (two Sparks lending
+  // 40 GB, speed: [0, 27) as before the exact costs); one that offloads every layer it holds keeps the small one
+  const margin = [flashTabHostMargin(F), flashTabHostMargin(F, true)];
+  const tabDeal = (metas, mode = "memory") => {
+    const rb = roomBytes(F, 2048), pledges = metas.map((m) => pledgeGB(m, Infinity, F) * GB);
+    return dealWithHostMargin((x) => dealRoom({ L: 48, layerCost: rb.layerCost, hostBytes: rb.hostBytes + x, pledges, mode, off: offloadFor(metas, rb.experts, F) }), ...margin);
+  };
+  const two = tabDeal([node(40), node(40)], "speed"), rb = roomBytes(F, 2048), C = costOf(rb.layerCost);
+  eq(two.ranges[0], [0, 27]);
+  ok(Math.abs(two.held[0] - C.span(0, 27) - rb.hostBytes - margin[0]) < 1 && two.held[0] <= 40 * GB);
+  const tab22 = [{ webgpu: true, contribGB: 22, tabDisk: { ramGB: 3, models: [F] } }];
+  const t = tabDeal(tab22), full = dealRoom({ L: 48, layerCost: rb.layerCost, hostBytes: rb.hostBytes + margin[0], pledges: [22 * GB], off: offloadFor(tab22, rb.experts, F) });
+  ok(t.offload[0].lo === 0 && t.offload[0].slots > full.offload[0].slots, `${t.offload[0].slots} vs ${full.offload[0].slots}`);
+  // with nothing to choose between, the full margin's deal
+  let calls = 0;
+  eq(dealWithHostMargin(() => { calls++; return { fit: { fits: false }, used: [] }; }, 5, 5).fit.fits, false);
+  eq(calls, 1);
+  ok(Object.isFrozen(rb) && Object.isFrozen(rb.experts));
+  let threw = false;
+  try { rb.hostBytes = 0; } catch { threw = true; }
+  ok(threw && rb.hostBytes > 0, "a caller can't change another's roomBytes");
+  ok(roomBytes(F, 2048).hostBytes > 0);
 });

@@ -55,9 +55,9 @@ test("a short room: the same sentence and number as the room page; pledges that 
 
 test("Qwen3.8-Flash-Next: pooled host's fit and need are the planner's per-layer costs (room/models.js flashLayerCost)", () => {
   const F = "qwen3.8-flash", ctx = nodeCtxFor(F), rb = roomBytes(F, ctx, "f16");
-  // its need: every layer's own cost at the context plus the host's part, the room page's NEED_GB
-  assert.equal(modelNeedGB(lib, F), Math.round((rb.layerCost.total + rb.hostBytes) / 2 ** 30 * 10) / 10);
-  assert.ok(Math.abs(NEED_GB[F] - modelNeedGB(lib, F)) <= 0.1);
+  // its need: every layer's own cost at the context plus the host's part, rounded up to a tenth as the room page's NEED_GB
+  assert.equal(modelNeedGB(lib, F), Math.ceil((rb.layerCost.total + rb.hostBytes) / 2 ** 30 * 10 - 1e-9) / 10);
+  assert.equal(modelNeedGB(lib, F), NEED_GB[F]);
   // two Sparks lending 34 GB each: short by the exact sums' gap (the host's 24 layers hold layers 0-5, the heavy ones)
   const two = roomFitNow(lib, { model: F, devices: [dev("spark", 34, { ngram: true }), dev("spark2", 34, { ngram: true })], spareGB: [0, 0] });
   const fit = roomFit(48, [34 * 2 ** 30, 34 * 2 ** 30], rb.layerCost, rb.hostBytes);

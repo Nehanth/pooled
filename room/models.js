@@ -7,7 +7,8 @@ import { OFFLOAD_CKPT_SLOTS } from "./plan.js";
 // with a fallback context (CTX[model].fallback) needs there, the least a room can start it with
 export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "qwen3.5-122b-moe": 72.0,
   // Qwen3.8-Flash-Next: its 48 layers with their state at the default context, the embedding and the head, from the
-  // planner's own costs (roomBytes at CTX def: set at the end of this file, flashLayerCost); the 28.8 GB n-gram table
+  // planner's own costs (roomBytes at CTX def: set at the end of this file, flashLayerCost), in GiB (2^30, the unit the
+  // pledges are in: 67.1 is 72.05e9 bytes, what the old fixed 72.0 decimal GB was within 0.2%); the 28.8 GB n-gram table
   // is not GPU memory (it stays on the disk of the device holding layer 1: SHAPE ngram, room/plan.js dealRoom)
   "qwen3.8-flash": 0, "smollm-135m": 0.6 };
 export const NEED_MIN_GB = { "qwen3-1.7b": 4.0 };
@@ -209,6 +210,10 @@ export function roomBytes(model, ctx, kv = "f16") {
     out = { L: s.L, layerBytes: layerCost.total / s.L, layerCost, hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0, experts: parkProfile(s) || null };
   } else out = { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0,
     experts: parkProfile(s) || null };
+  // one object for every caller (the picker's probes, the deal, the cards): frozen, so no caller changes another's
+  // (layerCost is a typed array, which can't be frozen: flashLayerCost's memo, read-only by contract too)
+  if (out.experts) Object.freeze(out.experts);
+  Object.freeze(out);
   if (rbMemo.size > 256) rbMemo.clear();
   rbMemo.set(k, out);
   return out;
@@ -282,16 +287,28 @@ export function flashCkptReserve(src, range, ctx, slots = CKPT_RESERVE_SLOTS, op
   return slots * flashRoomMem(src, ctx, { ...opts, range }).state;
 }
 // Each layer's bytes in a Flash room at ctx: its weights (with the QSA indexer when qsa), its state at ctx (QSA layers
-// their K / V, rawK and pooled keys and the score scratch; DeltaNet layers their fixed S and conv window; the n-gram
+// their K / V, rawK and pooled keys; DeltaNet layers their fixed S and conv window; the n-gram
 // layer its ring), and its share of the checkpoint reserve (ckptSlotsAt(ctx) copies of its state). So a range's bytes
-// are the sum of its layers' (room/plan.js cuts ranges on these), and a range of three DeltaNet layers costs what it
-// does, not three averages. opts: as flashRoomMem (kv, qsa, ring), slots (the reserve: ckptSlotsAt(ctx) by default).
-// -> Float64Array(L) with: total (the sum), ctx, slots, weights / state / experts (per layer; experts: its routed
+// are the sum of its layers' plus the score scratch once (room/plan.js costOf cuts ranges on these), and a range of
+// three DeltaNet layers costs what it does, not three averages. opts: as flashRoomMem (kv, qsa, ring), slots (the reserve: ckptSlotsAt(ctx) by default).
+// -> Float64Array(L) with: total (the sum and once), once / onceAt (the QSA score scratch, one per device: its bytes, and
+// the layers whose range keeps it), ctx, slots, weights / state / experts (per layer; experts: its routed
 // experts in the file, what offloading it takes off the GPU: room/plan.js offloadAt), and what a device that offloads
 // keeps past these per layer (room/plan.js offloadSpare, once): offVram (its checkpoints' VRAM: OFFLOAD_CKPT_SLOTS
 // slots of 2048 positions at FLASH_DENSE_CTX and below; 0 past it, where the reserve is in the cost already) and offRam
 // (one checkpoint's copy in RAM on its way to disk: FLASH_CKPT_TOKENS / 2 positions at FLASH_DENSE_CTX and below, the
 // room's context past it: CKPT_TOKEN_CAP / 2)
+// What a room page's model host keeps free past its layers while it loads Flash: Dawn's upload staging of its biggest
+// layer and the engine's scratch, the terms a room node's load check counts on top of its deal (packages/room-node/
+// shard.js flashShardBytes). A tab has no load-time check, so a tab host's deal sets them aside with the embedding and
+// the head (room.js aiStart and roomFitFor; a room node or pooled host does not: its load check refuses instead)
+// offloaded: the host offloads every layer it holds, so their experts are not staged (flashShardBytes offLayers): the
+// biggest layer's other weights (room/plan.js dealWithHostMargin picks)
+export const FLASH_SCRATCH = 64 * 2 ** 20;
+export function flashTabHostMargin(src, offloaded = false) {
+  const S = flashSrc(src), w = S.weights || [];
+  return Math.max(0, ...w.map((b, i) => b - (offloaded ? S.experts?.[i] || 0 : 0))) + FLASH_SCRATCH;
+}
 const costMemo = new WeakMap();
 export function flashLayerCost(src, ctx, { kv = "f32", qsa = ctx > FLASH_DENSE_CTX, ring = QSA_RAW_RING, slots = ckptSlotsAt(ctx) } = {}) {
   const S = flashSrc(src), key = `${ctx}|${kv}|${qsa}|${ring}|${slots}`;
@@ -301,17 +318,22 @@ export function flashLayerCost(src, ctx, { kv = "f32", qsa = ctx > FLASH_DENSE_C
   const { cfg } = S, L = cfg.L;
   if (!S.weights) throw new Error("flashLayerCost: the source has no per-layer weights");
   const out = new Float64Array(L), weights = new Float64Array(L), state = new Float64Array(L), offVram = new Float64Array(L), offRam = new Float64Array(L);
+  const onceAt = new Uint8Array(L);
+  let once = 0;
   const dense = ctx <= FLASH_DENSE_CTX;
   for (let i = 0; i < L; i++) {
     const r = [i, i + 1];
     const m = qwen4expMemory(cfg, { ctx, kv, qsa, rawRing: ring, layerRange: r });
     weights[i] = S.weights[i] + (qsa ? S.indexer?.[i] || 0 : 0);
     state[i] = m.state;
-    out[i] = weights[i] + m.total + slots * m.state;
+    // the QSA score scratch is one buffer per device, not per layer: `once`, counted once in a range that holds a QSA
+    // layer (room/plan.js costOf), as the load check counts it (flashRoomMem over the range)
+    out[i] = weights[i] + m.state + slots * m.state;
+    if (m.bytes.scores > 0) { onceAt[i] = 1; once = Math.max(once, m.bytes.scores); }
     offVram[i] = dense ? OFFLOAD_CKPT_SLOTS * qwen4expMemory(cfg, { ctx: FLASH_DENSE_CTX, kv, qsa, rawRing: ring, layerRange: r }).state : 0;
     offRam[i] = qwen4expMemory(cfg, { ctx: dense ? FLASH_CKPT_TOKENS / 2 : CKPT_TOKEN_CAP(ctx) / 2, kv, qsa, rawRing: ring, layerRange: r }).state;
   }
-  Object.assign(out, { total: out.reduce((a, b) => a + b, 0), ctx, slots, weights, state, offVram, offRam, ...(S.experts ? { experts: Float64Array.from(S.experts) } : {}) });
+  Object.assign(out, { total: out.reduce((a, b) => a + b, 0) + once, once, onceAt, ctx, slots, weights, state, offVram, offRam, ...(S.experts ? { experts: Float64Array.from(S.experts) } : {}) });
   per.set(key, out);
   return out;
 }
