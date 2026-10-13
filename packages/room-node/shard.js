@@ -321,13 +321,13 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   // the GPU holds the layers less their offloaded experts, plus the store's cache; the parked experts and the disk tier's
   // RAM cache are in RAM: on unified memory the same memory, on a discrete GPU the system's (checked against it too)
   const ramOff = off ? (+offload.ramBytes || 0) + (dl.length ? +offload.diskRamBytes || 0 : 0) : 0;
-  // the batched passes' scratch (room/models.js flashBatchScratch) when this device may batch (an offloading one finds
-  // out below)
-  const solo = hasEmbed && hasHead && range[0] === 0 && range[1] === c.L, batchCols = flashBatchCols(solo);
-  const scratch = batch !== "off" && !dl.length ? flashBatchScratch(batchCols) : 0;
-  const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null, ring: q?.ring }) + (off ? +offload.vramBytes || 0 : 0) + ramOff + scratch;
+  // (the batched passes' scratch is not in need: it is decided once the weights are up, and a device without room for it
+  // runs its prompt frames one column at a time instead of refusing the load)
+  const solo = hasEmbed && hasHead && range[0] === 0 && range[1] === c.L;
+  const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null, ring: q?.ring }) + (off ? +offload.vramBytes || 0 : 0) + ramOff;
   const cpu = flashCpuBytes(G, opts) + ramOff;
-  const short = flashMemoryShort(need, m, { cpuBytes: cpu, sysFreeGB: m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null });
+  const sysFreeGB = m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null;
+  const short = flashMemoryShort(need, m, { cpuBytes: cpu, sysFreeGB });
   if (short) throw Object.assign(new Error(`can't hold layers ${range[0]}-${range[1] - 1} of Qwen3.8-Flash-Next here: it ${short}`), { oom: true, short: true });
   if (off?.length) {
     let disk = null;
@@ -383,22 +383,42 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
   if (weights.pleTable) out.ngram = await openNgramTable(src, G, log);
   let noBatch = batch === "off" ? "POOLED_FLASH_BATCH=0" : dl.length ? `layers ${dl[0]}-${dl[dl.length - 1]} read their experts from disk` : null;
-  let expertRegion = false;
-  // The deal gives the expert cache the rest of the pledge (room/plan.js offloadPlan), so the region comes from the
-  // pledge's slack past the share when there is that much (the cache keeps every slot it was dealt), else out of the
-  // cache when its pools keep OFFLOAD_GOOD_SLOTS experts per layer after it (the deal's own bar for a good cache: decode
-  // misses a little more often, prompt frames run batched), else not at all (prompt frames one column at a time)
+  let expertRegion = false, batchCols = flashBatchCols(solo), scratch = 0;
+  const gb = (n) => (n / 2 ** 30).toFixed(2);
+  // real memory, as the check above, with extra bytes on the GPU
+  const fits = (extra) => !flashMemoryShort(need + extra, m, { cpuBytes: cpu, sysFreeGB });
+  // the pledge's slack past this device's share: the pledge is GPU memory (on a discrete GPU the CPU embedding, the
+  // parked experts and the disk tier's RAM cache are not in it: flashMemoryShort's discrete branch). A dealer keeps
+  // room/models.js flashDealReserve back from every Flash pledge, so a device dealt all of it still has that much.
+  // null: the pledge is unknown (real memory only; no region from it)
+  const slack = pledgeBytes > 0 ? pledgeBytes - (m?.kind === "discrete" ? need - cpu : need) : null;
+  // a solo device's widest passes only when its pledge (when known) and its memory have room for their scratch, else
+  // the room's frame width
+  if (!noBatch && solo && !((slack == null || slack >= flashBatchScratch(batchCols)) && fits(flashBatchScratch(batchCols)))) batchCols = flashBatchCols(false);
+  if (!noBatch) scratch = flashBatchScratch(batchCols);
+  // The deal gives the expert cache the rest of the pledge (room/plan.js offloadPlan), so the region (and the scratch)
+  // come from the pledge's slack past the share when there is that much (the cache keeps every slot it was dealt),
+  // else out of the cache (what the slack does not cover) when its pools keep OFFLOAD_GOOD_SLOTS experts per layer
+  // after it (the deal's own bar for a good cache: decode misses a little more often, prompt frames run batched), else
+  // not at all (prompt frames one column at a time)
   if (!noBatch && off?.length) {
-    const st = out.experts, rb = st.regionSize(), slack = pledgeBytes > 0 ? pledgeBytes - need : 0, gb = (n) => (n / 2 ** 30).toFixed(2);
-    const fits = (extra) => !flashMemoryShort(need + extra, m, { cpuBytes: cpu, sysFreeGB: m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null });
-    const kept = st.poolSlots(rb), enough = flashRegionForced() ? OFFLOAD_MIN_SLOTS : OFFLOAD_GOOD_SLOTS;
-    if (slack >= rb && fits(rb)) {
+    const st = out.experts, rb = st.regionSize(), sl = Math.max(0, slack ?? 0);
+    const fromSlack = Math.min(scratch, sl), kept = st.poolSlots(rb + scratch - fromSlack);
+    const enough = flashRegionForced() ? OFFLOAD_MIN_SLOTS : OFFLOAD_GOOD_SLOTS;
+    if (sl >= rb + scratch && fits(rb + scratch)) {
       expertRegion = true; st.vramBytes += rb;
-      log(`expert offload: a ${gb(rb)} GB whole-layer region for batched prompt passes, from the pledge's ${gb(slack)} GB past the share`);
-    } else if (kept >= enough) {
-      expertRegion = true;
-      log(`expert offload: a ${gb(rb)} GB whole-layer region for batched prompt passes, out of the expert cache (${st.poolSlots()} -> ${kept} experts per layer)`);
-    } else noBatch = `the offloaded layers need a ${gb(rb)} GB whole-layer region: the pledge has ${gb(Math.max(0, slack))} GB past the share and the cache would keep ${Math.max(0, kept)} experts per layer (< ${enough})`;
+      log(`expert offload: a ${gb(rb)} GB whole-layer region for batched prompt passes, from the pledge's ${gb(sl)} GB past the share`);
+    } else if (kept >= enough && fits(fromSlack)) {
+      const was = st.poolSlots();
+      expertRegion = true; st.vramBytes -= scratch - fromSlack;
+      log(`expert offload: a ${gb(rb)} GB whole-layer region for batched prompt passes, out of the expert cache (${was} -> ${kept} experts per layer)`);
+    } else noBatch = `the offloaded layers need a ${gb(rb)} GB whole-layer region: the pledge has ${gb(sl)} GB past the share and the cache would keep ${Math.max(0, kept)} experts per layer (< ${enough})`;
+  } else if (!noBatch && !fits(scratch)) noBatch = `no GPU memory left for the batched passes' ${gb(scratch)} GB of scratch`;
+  if (noBatch) scratch = 0;
+  // an offloader without batched passes gives the dealer's scratch reserve (what of it is still slack) to its cache
+  if (noBatch && off?.length && slack > 0) {
+    const give = Math.min(slack, flashBatchScratch(flashBatchCols(false)));
+    if (fits(give)) { out.experts.vramBytes += give; log(`expert offload: the ${gb(give)} GB kept for batched passes goes to the expert cache`); }
   }
   const { Qwen4ExpEngine } = await import("../../engine/qwen4exp.js");
   const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null, expertRegion,
@@ -417,7 +437,7 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const fe = FlashRoomEngine.wrap(eng, { batch: pb });
   out.flash = eng;   // the engine under the adapter (tests and benches: forwardToken, debugToken)
   out.flashBatch = pb;
-  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB (weights${off ? " less the offloaded experts, the expert cache" : ""}, K/V, the CPU embedding, upload staging${scratch ? ", batch scratch" : ""})${out.ngram ? ", the n-gram layer here" : ""}; ${ctx} positions, ${eng.qsa ? `QSA (${eng.kv} K/V, ring ${eng.qsaRing})` : q ? "QSA loaded, no attention layer here" : "dense"}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
+  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${((need + scratch) / 2 ** 30).toFixed(1)} GB (weights${off ? " less the offloaded experts, the expert cache" : ""}, K/V, the CPU embedding, upload staging${scratch ? ", batch scratch" : ""})${out.ngram ? ", the n-gram layer here" : ""}; ${ctx} positions, ${eng.qsa ? `QSA (${eng.kv} K/V, ring ${eng.qsaRing})` : q ? "QSA loaded, no attention layer here" : "dense"}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
   log(pb ? `batched prompt passes: up to ${pb.maxCols} columns a pass (${pb.exact ? "exact" : "wide"} kernels), ${(out.batchBytes / 2 ** 20).toFixed(0)} MiB of scratch`
     : `prompt frames one column at a time: ${noBatch}`);
   return fe;

@@ -62,7 +62,7 @@ import { tokenTexts } from "../../harness/model-common.js";
 import { uniqueName, PING_MS, lastHeard, isSilentGone, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
 import { loadKey } from "../../room/startstop.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
-import { pledgeGB, afterLoadDeath, offloadFor, ngramFor, PLEDGE_MAX_GB } from "../../room/pledge.js";
+import { pledgeGB, dealPledgeBytes, afterLoadDeath, offloadFor, ngramFor, PLEDGE_MAX_GB } from "../../room/pledge.js";
 import { localModels } from "./source.js";
 import { GGML_EMBED, GGML_OUTPUT, ggmlLayerNames, qwen35ShardBytes, qwen35MtpBytes, qwen4expConfig, qwen4expShardBytes } from "../../engine/gguf.js";
 import { guardChunks } from "../../cli/lib/room.js";
@@ -1043,7 +1043,7 @@ export class RoomNode extends EventEmitter {
   // holds besides), else the model's fallback when they hold it there (the 1.7B: 8k for 16k); an asked
   // --ctx stays. -> { ctx, want, fits, fellBack, note } (note: what the room says when it fell back)
   static ctxPick(modelKey, { want, ask = 0, kv = "f16", self, peers = [], shareCap = new Map() }) {
-    const pl = [self, ...peers].map((d) => pledgeGB(d.meta, shareCap.get(d.name), modelKey) * 2 ** 30);
+    const pl = [self, ...peers].map((d) => dealPledgeBytes(d.meta, shareCap.get(d.name), modelKey));
     const pick = pickCtx(modelKey, { want, ask, fitsAt: (c) => {
       const rb = roomBytes(modelKey, c, kv === "q8" ? "q8" : "f16");
       return !rb || roomFit(rb.L, pl, rb.layerCost || rb.layerBytes, rb.hostBytes, offloadFor([self, ...peers].map((d) => d.meta), rb.experts || rb.expertBytes, modelKey)).fits;
@@ -1067,7 +1067,7 @@ export class RoomNode extends EventEmitter {
   // layerCost (Qwen3.8-Flash-Next): each layer's own bytes at the room's context (room/models.js flashLayerCost, from
   // the model's header), or fitBytes.layerCost (roomBytes' from SHAPE: the same numbers): the deal and needGB use them
   static dealPlan({ L, layerBytes, layerCost = null, embedBytes, self, peers, shareCap = new Map(), mode = "memory", fitBytes = null, expertBytes = 0, experts = null, model = null, ngram = null }) {
-    const pledgeOf = (m, name) => pledgeGB(m, shareCap.get(name), model) * 2 ** 30;   // (64 GB a device, 128 for Flash)
+    const pledgeOf = (m, name) => dealPledgeBytes(m, shareCap.get(name), model);   // (64 GB a device, 128 for Flash)
     const lc = layerCost || fitBytes?.layerCost || null;
     const per = lc || fitBytes?.layerBytes || layerBytes, hostB = fitBytes ? fitBytes.hostBytes : embedBytes;
     const pledges = [pledgeOf(self.meta, self.name), ...peers.map((p) => pledgeOf(p.meta, p.name))];
@@ -1077,7 +1077,8 @@ export class RoomNode extends EventEmitter {
     // pledge is under one layer) joins without layers
     const deal = dealRoom({ L, layerBytes: per, hostBytes: hostB, pledges, mode: mode === "speed" ? "speed" : "memory",
       phone: [false, ...peers.map((p) => isPhoneMeta(p.meta))], off, ngram: ngramFor([self.meta, ...peers.map((p) => p.meta)], ngram) });
-    const needGB = ((layerCost ? layersTotal(layerCost, L) : L * layerBytes) + embedBytes) / 2 ** 30, haveGB = pledges.reduce((s, b) => s + b, 0) / 2 ** 30;
+    // haveGB: what the devices pledged, as they said it (the deal itself keeps room/pledge.js dealPledgeBytes' reserve back)
+    const needGB = ((layerCost ? layersTotal(layerCost, L) : L * layerBytes) + embedBytes) / 2 ** 30, haveGB = [self, ...peers].reduce((s, d) => s + pledgeGB(d.meta, shareCap.get(d.name), model), 0);
     if (!deal.fit.fits || !deal.used.length) return { chain: [], ranges: [], assigned: [], leftOut: [], fit: deal.fit, needGB, haveGB };
     const chain = deal.used.slice(1).map((i) => peers[i - 1].id);
     const leftOut = peers.map((p) => p.id).filter((id) => !chain.includes(id));

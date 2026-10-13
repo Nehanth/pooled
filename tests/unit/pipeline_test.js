@@ -339,3 +339,16 @@ for (const profile of ["browser", "node"]) {
     ok(b.ms < 1000, `and soon (${b.ms.toFixed(0)} ms)`);
   });
 }
+
+// A prompt frame's timeout grows with the slowest recent lap but is capped (PREFILL_LAP_CAP bases): one cold or stalled
+// decode lap (lapStat.max) must not keep a dead device unreported for many minutes
+Deno.test("pipeline node: a lost prompt frame times out within the cap even after a very slow lap", async () => {
+  const ai = { ...state(), role: "host", chain: ["worker"], lapStat: { max: 1e6 } };
+  ai.engine = { dims: { dim: 1 }, NC: 4, embedRunBatch: async (ids) => Float32Array.from(ids), embedRun: async (id) => Float32Array.of(id), headFromHidden: async (h) => h };
+  const p = createPipeline({ state: ai, options: { profile: "node", prefillLapMs: 50 }, transport: { sendTo() {}, sendHidden() {} } });
+  const t = performance.now();
+  let err = null;
+  try { await p.aiPrefill(Array.from({ length: 17 }, (_, i) => i)); } catch (e) { err = e; }
+  ok(err && /pipeline timeout/.test(err.message), `times out: ${err?.message}`);
+  ok(performance.now() - t < 1000, `within 4 x 50 ms, not 16 x 1000 s (${(performance.now() - t).toFixed(0)} ms)`);
+});

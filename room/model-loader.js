@@ -358,12 +358,14 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
           hasEmbed, hasHead, maxSeq: q ? ctx : Math.min(ctx, 2048), ngram, ...(q ? { qsa: null, kv: q.kv, qsaRing: q.ring } : { qsa: false }) });
         // batched prompt passes (room/flash.js): built now so their pipelines compile during the load. Not over the disk
         // tier (a tab's offloaded experts are read from OPFS: Qwen4ExpBatch refuses those layers); a batch that fails to
-        // build leaves this tab on one decode step per column, as before, and the host narrows its frames for it
+        // build leaves this tab on one decode step per column, as before, and the host narrows its frames for it.
+        // Always the room's frame width, solo too: a tab has no memory check, and the dealer keeps back only that
+        // width's scratch from its pledge (room/models.js flashDealReserve), not a solo device's 1024 columns
         let pb = null;
         if (!experts) {
           try {
             const { Qwen4ExpBatch } = await import("../engine/qwen4exp_batch.js");
-            pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: flashBatchCols(hasEmbed && hasHead && range[0] === 0 && range[1] === c.L), verifyCols: 1 });
+            pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: flashBatchCols(false), verifyCols: 1 });
           } catch (e) { console.warn(`Flash: no batched prompt passes on this tab (${e?.message || e}); one column at a time`); }
         }
         ai.engine = FlashRoomEngine.wrap(eng, { batch: pb });

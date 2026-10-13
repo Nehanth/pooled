@@ -57,7 +57,7 @@ import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
-import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor, storageOf } from "./room/pledge.js";
+import { pledgeRule, pledgeGB, dealPledgeBytes, afterLoadDeath, offloadFor, ngramFor, storageOf } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
@@ -611,7 +611,7 @@ function roomFitFor(key) {
   if (!devs.length || !roomBytes(key, maxSeqFor(key, ask), kv)) return null;
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
-  const pledges = devs.map((d) => pledgeGB(d.meta, Infinity, key) * 2 ** 30);
+  const pledges = devs.map((d) => dealPledgeBytes(d.meta, Infinity, key));
   // (rb.layerCost: Qwen3.8-Flash-Next's per-layer bytes, room/models.js flashLayerCost; roomBytes is memoized per context)
   // (a tab model host of Flash also keeps its load margin, as aiStart deals it: room/models.js flashTabHostMargin,
   // room/plan.js dealWithHostMargin; a room node host has its load check instead)
@@ -3865,7 +3865,7 @@ async function aiStart(modelArg) {
     // head and the draft block), and a room whose pledges can't hold the model does not start.
     ai.shareCap ??= new Map();
     const nameOf = (id) => conns.get(id)?.name || id;
-    const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name), modelKey) * 2 ** 30;   // (64 GB a device, 128 for Flash)
+    const pledgeOf = (m, name) => dealPledgeBytes(m, ai.shareCap.get(name), modelKey);   // (64 GB a device, 128 for Flash)
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
     // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); a tab only with the OPFS disk

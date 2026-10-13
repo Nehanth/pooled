@@ -13,6 +13,11 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
   const { sendHidden, sendTo, chainRtt = () => 0 } = transport;
   const { profile = "browser", checkpointMax: CKPT_MAX = 2, fillDrafts: FILL_DRAFTS = true,
     mtpBatch: MTP_BATCH = true, tailFrame: TAIL_FRAME = true, prefillWindow = 6, prefillLapMs: PREFILL_LAP_MS = 90000 } = options;
+  // a prompt frame's timeout: the base, and n columns at the slowest recent lap (a device stepping one column at a
+  // time), at most PREFILL_LAP_CAP bases (lapStat.max fades slowly: one cold or stalled lap must not hold a dead device
+  // unreported for many minutes)
+  const PREFILL_LAP_CAP = 4;
+  const frameMs = (n) => Math.min(PREFILL_LAP_MS + n * (ai.lapStat?.max || 0), PREFILL_LAP_CAP * PREFILL_LAP_MS);
   const PREFILL_WINDOW = Number.isFinite(prefillWindow) ? Math.max(1, Math.floor(prefillWindow)) : 6;
   const { onStatus: aiStatus = () => {}, computePass = () => {}, teleNote = () => {},
     wakeChain = () => {}, keepWarm = () => {}, onFrame = () => {}, prefillFrame = () => undefined,
@@ -312,8 +317,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
         if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
         if (ai.chain.length) {
           while (inflight.length >= WINDOW) await inflight.shift();
-          // a frame's own time: the base, and n columns at the slowest recent lap (a device stepping one column at a time)
-          const lap = lapWait("b" + basePos, PREFILL_LAP_MS + n * (ai.lapStat?.max || 0), "batch prefill", ahead);
+          const lap = lapWait("b" + basePos, frameMs(n), "batch prefill", ahead);
           ahead = lap.catch(() => {});
           const p = lap.then((h) => fillDrafts(h, ids, i0, basePos, n));
           p.catch(() => {});
@@ -347,7 +351,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
           const n = ids.length - i, basePos = ai.pos, i0 = i;   // n <= 4: what the widths above left
           const hb = await current.engine.embedRunBatch(ids.slice(i), basePos);
           if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
-          const p = lapWait("b" + basePos, PREFILL_LAP_MS + n * (ai.lapStat?.max || 0), "prefill tail", ahead);
+          const p = lapWait("b" + basePos, frameMs(n), "prefill tail", ahead);
           p.catch(() => {});
           sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb, idsFor(current.engine, ids.slice(i0))) });
           ai.pos = basePos + n;
