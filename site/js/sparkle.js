@@ -30,6 +30,7 @@
     });
     el.appendChild(box);
   }
+  window.pooledTwinkles = twinkles;   // the room's picker: a disk model's row, picked, twinkles like the Code tab
   const init = () => { document.head.appendChild(css); document.querySelectorAll("[data-twinkle]").forEach(twinkles); };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
 })();

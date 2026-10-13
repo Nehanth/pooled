@@ -27,7 +27,7 @@ import { chatRecipients } from "./room/visibility.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecoder, helloMeta, withStyle, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "./room/api.js";
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
-import { MODELS, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf } from "./room/models.js";
+import { MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -46,9 +46,12 @@ import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, s
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
 import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, START_PENDING_MS } from "./room/authz.js";
-import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce } from "./room/plan.js";
+import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
+import { diskCopyOf, rowChipHTML, rowTitle, starSVG } from "./room/diskpick.js";
+import { showDiskPick, initDiskPick, refreshDiskPick } from "./room/diskpick-ui.js";
+import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
@@ -312,6 +315,7 @@ function tabDiskChanged() {
   setTabDisk();
   renderTabDisk();
   if (myMeta.webgpu) broadcastAll({ t: "pledge", gb: myMeta.contribGB, tabDisk: myMeta.tabDisk || null });
+  updateCluster();   // the picker: Flash's fit (this tab's disk tier counts or not) and its consent line
 }
 // a peer's tabDisk from a pledge message: only the fields room/pledge.js reads, typed
 function cleanTabDisk(t) {
@@ -328,7 +332,7 @@ let diskAsking = null;
 function askTabDisk({ bytes, model, host = false }) {
   if (diskAsking) return diskAsking;
   const M = MODELS[model];
-  $("disk-ask-h").textContent = `${M?.label.split("\u00b7")[0].trim() || "This model"} streams from your disk`;
+  $("disk-ask-h").textContent = `${M ? shortName(model) : "This model"} streams from your disk`;   // the picker's name (room/diskpick.js)
   $("disk-ask-why").textContent = `It will store up to ${fmtBytes(bytes)} in this browser${host ? "" : ", for the room's host"}, so it can run more than this device's memory holds. `
     + "It stays for next time; Room settings can free it.";
   $("disk-ask").hidden = false;
@@ -530,10 +534,12 @@ let wasReady = false;
 // The model ladder: every model with what this room still needs for it, smallest first. Until
 // someone picks a model by hand, the select follows the largest model the room can run.
 let modelTouched = false;
-const shortName = (key) => (MODELS[key]?.label || key).split("\u00b7")[0].trim();
-// the picker offers three models; ?dev=1 (and the local test rooms) offer every one in room/models.js
+const shortName = (key) => diskCopyOf(key)?.name || (MODELS[key]?.label || key).split("\u00b7")[0].trim();
+// the picker's rows: the three models and the models kept on disk (room/models.js DISK_COPY: Qwen3.8 Flash, which the
+// room never picks by itself and which asks before it stores anything: room/diskpick-ui.js, room/flashdisk.js). The
+// others stay in the (?dev=1) select for tests, never in the rows.
 const DEV = document.documentElement.classList.contains("dev");
-const PICK_NEED = DEV ? NEED_GB : Object.fromEntries(PICKER.map((k) => [k, NEED_GB[k]]));
+const PICK_NEED = Object.fromEntries([...PICKER, ...Object.keys(DISK_COPY)].map((k) => [k, NEED_GB[k]]));
 function addModelOption(key) {
   const sel = $("ai-model");
   if (!MODELS[key] || [...sel.options].some((o) => o.value === key)) return;
@@ -563,11 +569,23 @@ function roomFitFor(key) {
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
   const pledges = devs.map((d) => pledgeGB(d.meta, Infinity, key) * 2 ** 30);
-  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key)); };
+  const fitAt = (c, pl = pledges) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pl, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key)); };
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
-  return { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
+  const out = { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
     shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare) };
+  // a model kept on disk (room/models.js DISK_COPY): its need is the GPU memory the planner itself needs from these
+  // devices (room/plan.js minFitPledge over roomFit, with their offload and disk tiers), not its size. needGB, with
+  // needDisk when the rest streams from disk there; the picker's line, the pool's line and the row all use it.
+  if (diskCopyOf(key)) {
+    const has = pledges.reduce((a, b) => a + b, 0), m = minFitPledge(pledges, (pl) => fitAt(pick.ctx, pl).fits);
+    if (m) {
+      const needGB = fit.fits ? Math.min(gbUp(m.bytes), +(has / 2 ** 30).toFixed(1)) : gbUp(m.bytes);
+      const at = fitAt(pick.ctx, m.scaled);
+      Object.assign(out, { needGB, needDisk: !!(at.disk || at.offload), shortGB: fit.fits ? 0 : Math.max(0.1, +(needGB - has / 2 ** 30).toFixed(1)) });
+    }
+  }
+  return out;
 }
 // the ladder with each row's fit from the real deal where the model has a SHAPE (NEED_GB otherwise)
 function fitLadder(pledged) {
@@ -576,21 +594,32 @@ function fitLadder(pledged) {
     return f ? { ...x, ok: f.fit.fits, short: f.shortGB, f } : x;
   });
 }
+let ladderHTML = "";
 function renderLadder(pledged, rows = fitLadder(pledged)) {
   const el = $("ai-ladder"); if (!el) return;
   const none = !(pledged > 0);
   // a radio group: one tab stop (the picked row), arrows move the pick. The rows are re-rendered
   // on every change, so the focus follows the picked row when it was in the group.
   const had = el.contains(document.activeElement);
-  el.innerHTML = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + rows.map((x) => {
+  const html = (none ? '<p class="ai-nogpu">Needs a device with WebGPU</p>' : "") + rows.map((x) => {
     // fits only at the model's fallback context: say which, with what it needs there
     const back = x.ok && x.f?.fellBack;
     const gb = `<span class="nd">${back ? `${NEED_MIN_GB[x.key] ?? ""} GB · ${ctxK(x.f.ctx)}` : `${NEED_GB[x.key] ?? ""} GB`}</span>`;
     const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">${x.short} GB short</span>`;
     // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
     const sel = !none && x.key === $("ai-model").value;
+    // a model kept on disk (room/diskpick.js): the ✦ before its name, its size and where it runs from as the chip;
+    // picked, the row takes the Code tab's selected look (black, a soft blue glow, stars twinkling: site/js/sparkle.js).
+    // Its fit chip is the other rows' ("fits" / "N GB short"), from the same roomFitFor as the pool's line: the one
+    // fit answer every visitor sees (the need line above the rows is the developer's)
+    const dk = diskCopyOf(x.key);
+    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}" title="${esc(x.ok ? rowTitle(dk) : x.f?.note || "Invite a device to fit this")}"><span class="rn">${starSVG("rx")}${esc(dk.name)}</span><span class="fig">${rowChipHTML(dk)}${none ? "" : x.ok ? "<b>fits</b>" : `<span class="more">${x.short} GB short</span>`}</span></button>`;
     return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${back ? ` title="${esc(ctxShortNote(shortName(x.key), x.f.ctx, x.f.want))}"` : x.ok ? "" : ` title="${esc(x.f?.note || (giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"))}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
+  // the same rows: leave them be (the twinkling stars keep their rhythm through the room's updates)
+  if (html === ladderHTML && el.childElementCount) return;
+  el.innerHTML = ladderHTML = html;
+  el.querySelectorAll(".rung.disk").forEach((b) => window.pooledTwinkles?.(b));
   if (!el.querySelector(".rung.sel")) el.querySelector(".rung")?.setAttribute("tabindex", "0");
   if (had) el.querySelector('.rung[tabindex="0"]')?.focus({ preventScroll: true });
 }
@@ -612,15 +641,19 @@ function giveFor(short) {
   return v <= cap ? Math.ceil(v) : 0;
 }
 $("ai-give").addEventListener("click", (e) => lendGB(+e.currentTarget.dataset.gb));
+// -> the picker's rows (fitLadder), which renderPool reads too: one roomFitFor per model and room update, so the rows,
+// the need line and the pool's line can't drift apart
 function updateNeed(pledged) {
   const rows = fitLadder(pledged);
   if (!modelTouched && !ai.engine && !ai.busy && !$("ai-model").disabled) {
-    const fits = rows.filter((x) => x.ok);
-    $("ai-model").value = (fits.length ? fits[fits.length - 1] : rows[0]).key;
+    // never a model that stores a copy on disk: that one is only picked by hand (it asks first)
+    const auto = rows.filter((x) => !diskCopyOf(x.key)), fits = auto.filter((x) => x.ok);
+    $("ai-model").value = (fits.length ? fits[fits.length - 1] : auto[0] || rows[0]).key;
   }
   renderLadder(pledged, rows);
   const row = rows.find((x) => x.key === $("ai-model").value);
-  const need = NEED_GB[$("ai-model").value] || 1;
+  // a disk model's need is the planner's (roomFitFor needGB), else the model's size
+  const need = row?.f?.needGB ?? (NEED_GB[$("ai-model").value] || 1);
   // fits: every device's layers within its pledge, the host's with the embedding and the head
   // (roomFitFor); a model without a SHAPE falls back to the sum of the pledges against NEED_GB
   const ok = row ? row.ok : pledged >= need;
@@ -629,7 +662,9 @@ function updateNeed(pledged) {
   $("need-fill").style.width = Math.min(100, ok ? 100 : pledged / (pledged + shortGB) * 100).toFixed(1) + "%";
   const has = +pledged.toFixed(1);
   // a model with a fallback context says both needs; a room that holds it only there says so
-  const needs = NEED_GB[$("ai-model").value] ? needText($("ai-model").value) : `${need} GB`;
+  // (a disk model: on GPUs, and whether the rest streams from disk or no device here can)
+  const needs = row?.f?.needGB != null ? `${row.f.needGB} GB on GPUs${row.f.needDisk ? ", the rest streamed from disk" : ", with no disk here to stream from"}`
+    : NEED_GB[$("ai-model").value] ? needText($("ai-model").value) : `${need} GB`;
   const back = ok && row?.f?.fellBack ? ` ${ctxShortNote(shortName($("ai-model").value), row.f.ctx, row.f.want)}.` : "";
   $("need-text").textContent = ok
     ? `Needs ${needs}. The room has ${has} GB.${back}`
@@ -637,7 +672,8 @@ function updateNeed(pledged) {
   $("ai-need").classList.toggle("ok", ok);
   if (!ai.busy && !ai.engine) $("ai-start").disabled = !ok;
   // short: say by how much and who could give more, right under Start
-  $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine;
+  // (a disk model: its need line above says it, the one line on that side)
+  $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine || !!diskCopyOf($("ai-model").value);
   $("ai-short").textContent = note;
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
   const meI = row?.f ? row.f.devs.findIndex((d) => d.meta === myMeta) : -1;
@@ -663,24 +699,45 @@ function updateNeed(pledged) {
   $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
     : note;
   if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
+  // a disk model: "This device, for <model>" in the right column. Its Disk row says the RAM the tab's disk tier would
+  // read it with (room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap, whatever the stored answer), and, when
+  // the room's fit streams from no disk (roomFitFor needDisk), that the whole model must fit on GPUs
+  const tier = tabDiskCan ? tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }) : null;
+  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, needDisk: row?.f?.needGB != null ? !!row.f.needDisk : true });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
+  return rows;
 }
 $("ai-model").addEventListener("change", () => { modelTouched = true; updateCluster(); });
+// a disk model's "Not now" lets go of it (back to the model the room would pick), "invite one" opens the invite
+initDiskPick({ notNow: () => { modelTouched = false; updateCluster(); $("ai-ladder").querySelector(".rung.sel")?.focus({ preventScroll: true }); }, toast: (t) => toast(t) });
+// the picker's consent, stored copy and delete are this tab's disk tier's (room/flashdisk.js, below askTabDisk and
+// freeTabDisk): the same answer, the same bytes, the same guard
+connectDiskStore({
+  able: () => tabDiskCan,
+  can: () => tabDiskCan && !!tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }),
+  changed: (key) => {
+    tabDiskDeclined = false;
+    tabDiskChanged();
+    log("room", `${myName} lets models use up to ${fmtBytes(diskCopyOf(key)?.diskBytes || 0)} of its disk`);
+    toast("big models may use this device's disk");
+  },
+  free: () => freeTabDisk(),
+});
 function updateCluster() {
   const all = [myMeta, ...[...members.values()].map(m => m.meta).filter((m) => !m?.api)];
   const apis = members.size + 1 - all.length;
   const gpus = all.filter(m => m && m.webgpu).length;
   // only devices with WebGPU hold layers; the others join as ask-only guests
   const pledged = all.reduce((s, m) => s + (m?.webgpu ? m?.contribGB || 0 : 0), 0);
-  updateNeed(pledged);
+  const rows = updateNeed(pledged);
   const mem = all.reduce((s, m) => s + (m?.budgetGB || m?.maxBufGB || 0), 0);
   $("cluster-summary").textContent = DEV
     ? `${all.length} device${all.length > 1 ? "s" : ""}${apis ? ` \u00b7 ${apis} API client${apis > 1 ? "s" : ""}` : ""} \u00b7 ${gpus} WebGPU \u00b7 ${pledged.toFixed(1)} GB pledged`
     : `${all.length} device${all.length > 1 ? "s" : ""}${apis ? ` \u00b7 ${apis} API client${apis > 1 ? "s" : ""}` : ""} \u00b7 ${+pledged.toFixed(1)} GB pooled`;
   $("hdr-sum").innerHTML = `<b>${+pledged.toFixed(1)} GB</b> pooled`;
   $("peers-n").textContent = String(all.length);
-  renderPool(pledged);
+  renderPool(pledged, rows);
 }
 // the device list scrolls past four and a half rows (p2p.html #ap-devs): fade its bottom while more rows are below
 function devsEdge() { const l = $("ap-devs"); l.classList.toggle("more", l.scrollTop < l.scrollHeight - l.clientHeight - 1); }
@@ -688,24 +745,29 @@ $("ap-devs").addEventListener("scroll", devsEdge, { passive: true });
 if (typeof ResizeObserver === "function") new ResizeObserver(devsEdge).observe($("ap-devs"));
 // The model card's side: what the room pools (one segment per device, in its colour, with a tick at
 // each model's need), what this device lends (+/-), and the invite (QR, code, copy link).
-function renderPool(pledged) {
+// rows: updateNeed's (fitLadder): each model's roomFitFor, computed once for the picker and this side alike
+function renderPool(pledged, rows = []) {
   const devs = [{ name: myName, meta: myMeta }, ...[...members.values()].map((m) => ({ name: m.name || "device", meta: m.meta || {} }))].sort((x, y) => bySlot(x.name, y.name))
     .filter((d) => d.meta?.webgpu && d.meta?.contribGB && !d.meta?.api);
-  const needs = Object.entries(PICK_NEED).sort((a, b) => a[1] - b[1]);
+  // each model's need: a disk model's from the planner (roomFitFor needGB), so the tick, the line and the picker agree
+  const had = new Map(rows.map((x) => [x.key, x.f ?? null]));
+  const fitOf = new Map(Object.keys(PICK_NEED).map((k) => [k, had.has(k) ? had.get(k) : roomFitFor(k)]));
+  const needs = Object.entries(PICK_NEED).map(([k, gb]) => [k, fitOf.get(k)?.needGB ?? gb]).sort((a, b) => a[1] - b[1]);
   const top = Math.max(pledged, ...needs.map((x) => x[1])) * 1.06 || 1;
   $("ap-total").textContent = `${+pledged.toFixed(1)} GB`;
   const meter = $("ap-meter");
   meter.querySelector(".apm-fill").innerHTML = devs.map((d) => `<i style="--sw:${devColor(d.name)};width:${(d.meta.contribGB / top * 100).toFixed(2)}%" title="${esc(String(d.name))}: ${d.meta.contribGB} GB"></i>`).join("");
   // a tick where each model starts to fit; the picked one says what it needs
   const sel = $("ai-model").value;
-  const fitsK = (k, gb) => { const f = roomFitFor(k); return f ? f.fit.fits : pledged >= gb; };
+  const fitsK = (k, gb) => { const f = fitOf.get(k); return f ? f.fit.fits : pledged >= gb; };
   meter.querySelector(".apm-ticks").innerHTML = needs.map(([k, gb]) => `<span class="${fitsK(k, gb) ? "ok" : ""}${k === sel ? " sel" : ""}${gb / top > 0.6 ? " r" : gb / top < 0.3 ? " l" : ""}" style="left:${(gb / top * 100).toFixed(2)}%" title="${esc(shortName(k))} needs ${gb} GB"></span>`).join("");
   // what the selected model needs, as its own line under the meter (not a label hanging off its tick)
   const selNeed = needs.find(([k]) => k === sel);
   $("ap-need").hidden = !selNeed;
   if (selNeed) {
-    const [k, gb] = selNeed, f = roomFitFor(k), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
-    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b><span>${short > 0 ? `${short} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0);
+    // the verdict is the row's (fitsK: roomFitFor's fit), the figures the planner's
+    const [k, gb] = selNeed, f = fitOf.get(k), fits = fitsK(k, gb), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
+    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b>${f?.needGB != null ? " on GPUs" : ""}<span>${fits ? "fits" : `${short} GB short`}</span>`; $("ap-need").classList.toggle("ok", fits);
   }
   $("ap-devs").innerHTML = devs.map((d) => `<li style="--sw:${devColor(d.name)}"><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB</b></li>`).join("")
     || '<li class="none">No device with WebGPU yet</li>';
@@ -5149,8 +5211,10 @@ async function renderTabDisk(measure = false) {
   if (!on) { $("tabdisk-line").hidden = true; return; }
   const choice = tabDiskNow();
   $("tabdisk-allow").checked = choice === "allow";
-  $("d-tabdisk").textContent = `Qwen3.8 Flash can stream from disk when the room's memory is short: it stores up to about 92 GB in this browser. `
-    + (choice === "allow" ? "Allowed." : choice === "deny" ? "Not allowed." : "Not asked yet: you are asked when the model needs it.");
+  // the size is the picker's (DISK_COPY diskBytes), and so are the answer's words (room/diskpick.js DISK_STATE)
+  const fl = DISK_COPY["qwen3.8-flash"];
+  $("d-tabdisk").textContent = `${fl.name} can stream from disk when the room's memory is short: it stores up to ${fmtBytes(fl.diskBytes)} in this browser. `
+    + (choice === "allow" ? "Allowed." : choice === "deny" ? "Not allowed." : "Not asked: you are asked when the model needs it.");
   if (measure) tabDiskStored = (await flashDiskBytes().catch(() => ({ total: 0 }))).total;
   $("tabdisk-line").hidden = !tabDiskStored;
   if (!tabDiskArmed) tabDiskFreeLabel("Free disk space", `Deletes the big model's copy on this device (${fmtBytes(tabDiskStored)})`);
@@ -5170,15 +5234,23 @@ $("tabdisk-free").addEventListener("click", async (ev) => {
     return;
   }
   tabDiskArmed = 0;
+  const r = await freeTabDisk();
+  if (r.refused) toast(r.refused);
+});
+// Delete the Flash copy on this device (Room settings' "Free disk space", the picker's "Delete stored copy"), after
+// both presses. -> { removed, kept } or { refused: why it did not run }
+async function freeTabDisk() {
   // the running model reads the copy (open files), and a load may be copying into it or reading from it: stop first
   if (ai.loadingShard || ai.engine?.experts || (ai.model && TAB_DISK_MODELS.includes(ai.model) && ai.engine)) {
-    toast(ai.loadingShard ? "this device is loading its layers: wait for it, or stop the model, then free the space" : "the model is using this copy: stop it (or leave the room) first");
-    renderTabDisk(); return;
+    renderTabDisk();
+    return { refused: ai.loadingShard ? "this device is loading its layers: wait for it, or stop the model, then free the space" : "the model is using this copy: stop it (or leave the room) first" };
   }
   const r = await removeFlashCopy().catch(() => ({ removed: 0, kept: tabDiskStored }));
   toast(r.kept ? `freed ${fmtBytes(r.removed)}; ${fmtBytes(r.kept)} is in use and stays` : `freed ${fmtBytes(r.removed)} of this device's disk`);
   await renderTabDisk(true);
-});
+  refreshDiskPick();
+  return r;
+}
 // One row per cached model with its size and a Delete button (two steps, like Clear above), so one
 // model's weights can go while the others stay. Filled each time the menu opens.
 // A newer render (menu reopened, a delete finished) wins over one still reading the cache.

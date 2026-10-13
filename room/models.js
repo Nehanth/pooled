@@ -204,8 +204,21 @@ export const FILES = {
     mtp: { bytes: 2199652640, sha256: "d484e6e541a36b714976f72f7d1a86ae2cc450cff110b81e3656512784abd1c6" } },
 };
 
-// The models the room's picker offers. The others stay for tests and ?dev=1.
+// The models the room's picker offers, with the DISK_COPY models below. The others stay for tests and ?dev=1.
 export const PICKER = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
+
+// Models that keep a copy on each device's disk and stream their experts from it, so they run on far less memory
+// than their size. The picker's row and its two settings under Start (GPU memory, Disk) come from this entry and the
+// room's own figures (room/diskpick.js), so another big model gets the same picker by adding one.
+//   name: the row's name; params / arch: its chip ("125B · MoE · from disk"); active: parameters used per token (the
+//   longer description: "125B (6B active)"; the model card's numbers, roadmap/33)
+//   diskBytes: the most one tab stores (diskCopyBytes: every layer's experts and the n-gram table, room/flashdisk.js),
+//   the same bytes room.js hostDiskBytes gives the host's disk question for a deal that puts all of them on its disk
+//   ("92.4 GB")
+export const diskCopyBytes = (key) => { const s = SHAPE[key]; return s ? s.exp * s.L + (s.ngram?.bytes || 0) : 0; };
+export const DISK_COPY = {
+  "qwen3.8-flash": { name: "Qwen3.8 Flash", params: "125B", active: "6B", arch: "MoE", diskBytes: diskCopyBytes("qwen3.8-flash") },
+};
 
 const FLASH_BASE = "https://huggingface.co/bartowski/Qwen3.8-Flash-Next-GGUF/resolve/928589fdb66c6ff07f22ac561e3fbce76553548f/Qwen3.8-Flash-Next-Q4_0/";
 export const MODELS = {

@@ -79,9 +79,12 @@ try {
   await laptop.fill("#name-input", "Laptop"); await laptop.fill("#join-gb", "3");
   await phone.fill("#name-input", "iPhone"); await phone.fill("#join-gb", "1");
   await laptop.click("#create-btn");
-  await laptop.waitForFunction(() => /[A-Z0-9]{4}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
-  const code = (await laptop.textContent("#room-badge")).trim().match(/[A-Z0-9]{4}/)[0];
+  // the code reads "ABC-D12" (room/joingate.js formatCode)
+  await laptop.waitForFunction(() => /[A-Z0-9]{3}-?[A-Z0-9]{3}/.test(document.getElementById("room-badge").textContent), null, { timeout: 30000 });
+  const code = (await laptop.textContent("#room-badge")).trim().replace(/[^A-Z0-9]/g, "");
   await phone.fill("#code-input", code); await phone.click("#join-btn");
+  // a device that types the code asks the room's creator first (room/joingate.js): let it in
+  await laptop.waitForSelector("#jr-allow", { state: "visible", timeout: 30000 }); await laptop.click("#jr-allow");
   for (const p of [laptop, phone]) await p.waitForFunction(() => document.querySelectorAll(".peer-card").length >= 2, null, { timeout: 60000 });
   await laptop.waitForTimeout(1500);
   const pools = await laptop.evaluate(() => document.getElementById("ap-total").textContent);
