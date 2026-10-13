@@ -7,36 +7,37 @@ import { diskStore } from "./diskstore.js";
 
 const $ = (id) => document.getElementById(id);
 const START = "Start the model";
-let shown = null, stored = null, asked = 0, armed = 0;
+let shown = null, stored = null, asked = 0, armed = 0, last = {};
 
 // Show (or hide) the disk model's parts for the picked model `key`.
 // Cheap when nothing changed: it runs on every room update (room.js updateNeed).
-export function showDiskPick(key) {
+export function showDiskPick(key, need = {}) {
   const m = diskCopyOf(key), on = !!m;
+  last = need;
   for (const id of ["ai-disk", "ai-adv", "ai-notnow"]) $(id).hidden = !on;
   $("ap-note").hidden = on;
   if (!on) { if (shown) $("ai-start").textContent = START; shown = null; asked = 0; disarm(); return; }
   if (asked !== key) stored = null;
   const state = diskStore.state(key);
   $("ai-start").textContent = startLabel(m, state);
-  const sig = `${key}|${state}|${stored}|${!!armed}`;
+  const sig = `${key}|${state}|${stored}|${!!armed}|${need.needGB}|${need.needDisk}|${need.ramGB}`;
   if (sig === shown) return;
   if (shown?.split("|")[0] !== key) $("ai-adv").open = false;
   shown = sig;
-  $("ai-disk").innerHTML = costHTML(m) + consentHTML(m, { state, storedBytes: stored });
-  $("ai-adv").querySelector(".def").textContent = advSummary(m);
-  $("ai-adv").querySelector(".dk-rows").innerHTML = advRowsHTML(m, { storedBytes: stored, armed: !!armed });
+  $("ai-disk").innerHTML = costHTML(m, need) + consentHTML(m, { state, storedBytes: stored });
+  $("ai-adv").querySelector(".def").textContent = advSummary(m, need);
+  $("ai-adv").querySelector(".dk-rows").innerHTML = advRowsHTML(m, { storedBytes: stored, armed: !!armed, ramGB: need.ramGB });
   // what is stored: asked once per pick (and after a delete, or Room settings freeing it: refreshDiskPick)
   if (asked !== key) { asked = key; refresh(key); }
 }
 async function refresh(key) {
   const s = await diskStore.storedBytes(key);
   if (asked !== key) return;
-  stored = s; shown = null; showDiskPick(key);
+  stored = s; shown = null; showDiskPick(key, last);
 }
 function disarm() { if (armed) { clearTimeout(armed); armed = 0; } }
 // the stored copy changed elsewhere (Room settings' "Free disk space", a load that copied it): read it again
-export function refreshDiskPick() { const key = $("ai-model").value; if (diskCopyOf(key)) { asked = 0; shown = null; showDiskPick(key); } }
+export function refreshDiskPick() { const key = $("ai-model").value; if (diskCopyOf(key)) { asked = 0; shown = null; showDiskPick(key, last); } }
 
 // Wire the buttons: Not now (let go of the pick), Delete stored copy (two presses, like Room settings' Free disk space).
 // toast(text): the room's toast, for a delete that could not run (a load or the running model reads the copy)
@@ -46,14 +47,14 @@ export function initDiskPick({ notNow, toast = () => {} }) {
     const b = e.target.closest(".dk-del"), key = $("ai-model").value;
     if (!b || !diskCopyOf(key)) return;
     if (!armed) {
-      const t = armed = setTimeout(() => { if (armed === t) { armed = 0; shown = null; showDiskPick($("ai-model").value); } }, 6000);
-      shown = null; showDiskPick(key); return;
+      const t = armed = setTimeout(() => { if (armed === t) { armed = 0; shown = null; showDiskPick($("ai-model").value, last); } }, 6000);
+      shown = null; showDiskPick(key, last); return;
     }
     disarm();
     b.disabled = true;
     const r = await diskStore.deleteCopy(key).catch((err) => ({ refused: String(err?.message || err) }));
     if (r?.refused) toast(r.refused);
-    asked = 0; shown = null; showDiskPick($("ai-model").value);
+    asked = 0; shown = null; showDiskPick($("ai-model").value, last);
   });
 }
 // Start pressed on a disk model while this device was not asked yet: the press is its answer (the button said

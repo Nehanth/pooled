@@ -561,6 +561,27 @@ export function pickModelHost(devices) {
 // GB for the screen, rounded up to a tenth so "short by" never undersells what is missing
 export const gbUp = (bytes) => Math.ceil(bytes / 2 ** 30 * 10 - 1e-9) / 10;
 
+// The least memory a room's devices must pledge for a model, by the planner's own fit check: the smallest total of
+// these pledges, scaled together, at which fitsAt(pledgesScaled) still holds (roomFit, with whatever offload and disk
+// tier the devices offer). For a model whose experts stream from disk (room/models.js DISK_COPY) that is the GPU
+// memory it needs, far below its size; the picker shows it as the model's need, so its number and its "fits" agree.
+// pledges: bytes, one per device; fitsAt(pledges) -> bool. -> { bytes, scaled } (scaled: the pledges at that total),
+// or null when no total up to maxScale times these pledges fits (or nobody pledges)
+export function minFitPledge(pledges, fitsAt, { maxScale = 16, iters = 24 } = {}) {
+  const total = pledges.reduce((a, b) => a + (b > 0 ? b : 0), 0);
+  if (!(total > 0)) return null;
+  const at = (k) => pledges.map((b) => b * k);
+  let lo = 0, hi = 1;
+  if (!fitsAt(at(1))) {
+    lo = 1;
+    while (hi < maxScale && !fitsAt(at(hi * 2))) { lo = hi * 2; hi *= 2; }
+    if (hi >= maxScale) return null;
+    hi *= 2;
+  }
+  for (let i = 0; i < iters; i++) { const mid = (lo + hi) / 2; if (fitsAt(at(mid))) hi = mid; else lo = mid; }
+  return { bytes: total * hi, scaled: at(hi) };
+}
+
 // The one sentence a room that is short for a model shows under Start (and the reason a start stops).
 // label: the model's short name; fit: roomFit's result (host first); names: the devices in the same
 // order; spareGB: how much more each device could still lend (0 for a phone at its cap). Names up to

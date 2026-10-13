@@ -213,11 +213,11 @@ export const PICKER = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 //   longer description: "125B (6B active)"; the model card's numbers, roadmap/33)
 //   diskBytes: the most one tab stores (diskCopyBytes: every layer's experts and the n-gram table, room/flashdisk.js),
 //   the same bytes room.js hostDiskBytes gives the host's disk question for a deal that puts all of them on its disk
-//   ("92.4 GB"); memGB: about what it keeps in memory (the experts it uses most); speeds: measured tok/s ranges by
+//   ("92.4 GB"); speeds: measured tok/s ranges by
 //   devices in the room, fewest first (a Mac tab alone, then with a gaming PC joined)
 export const diskCopyBytes = (key) => { const s = SHAPE[key]; return s ? s.exp * s.L + (s.ngram?.bytes || 0) : 0; };
 export const DISK_COPY = {
-  "qwen3.8-flash": { name: "Qwen3.8 Flash", params: "125B", active: "6B", arch: "MoE", diskBytes: diskCopyBytes("qwen3.8-flash"), memGB: 20,
+  "qwen3.8-flash": { name: "Qwen3.8 Flash", params: "125B", active: "6B", arch: "MoE", diskBytes: diskCopyBytes("qwen3.8-flash"),
     speeds: [{ devices: 1, lo: 7, hi: 8.5 }, { devices: 2, lo: 11, hi: 12 }] },
 };
 

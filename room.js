@@ -46,7 +46,7 @@ import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, s
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
 import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, START_PENDING_MS } from "./room/authz.js";
-import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce } from "./room/plan.js";
+import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { diskCopyOf, rowChip, rowTitle, starSVG } from "./room/diskpick.js";
@@ -569,11 +569,23 @@ function roomFitFor(key) {
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
   const pledges = devs.map((d) => pledgeGB(d.meta, Infinity, key) * 2 ** 30);
-  const fitAt = (c) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pledges, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key)); };
+  const fitAt = (c, pl = pledges) => { const rb = roomBytes(key, c, kv); return roomFit(rb.L, pl, rb.layerBytes, rb.hostBytes, offloadFor(devs.map((d) => d.meta), rb.experts || rb.expertBytes, key)); };
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
-  return { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
+  const out = { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
     shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare) };
+  // a model kept on disk (room/models.js DISK_COPY): its need is the GPU memory the planner itself needs from these
+  // devices (room/plan.js minFitPledge over roomFit, with their offload and disk tiers), not its size. needGB, with
+  // needDisk when the rest streams from disk there; the picker's line, the pool's line and the row all use it.
+  if (diskCopyOf(key)) {
+    const has = pledges.reduce((a, b) => a + b, 0), m = minFitPledge(pledges, (pl) => fitAt(pick.ctx, pl).fits);
+    if (m) {
+      const needGB = fit.fits ? Math.min(gbUp(m.bytes), +(has / 2 ** 30).toFixed(1)) : gbUp(m.bytes);
+      const at = fitAt(pick.ctx, m.scaled);
+      Object.assign(out, { needGB, needDisk: !!(at.disk || at.offload), shortGB: fit.fits ? 0 : Math.max(0.1, +(needGB - has / 2 ** 30).toFixed(1)) });
+    }
+  }
+  return out;
 }
 // the ladder with each row's fit from the real deal where the model has a SHAPE (NEED_GB otherwise)
 function fitLadder(pledged) {
@@ -636,7 +648,8 @@ function updateNeed(pledged) {
   }
   renderLadder(pledged, rows);
   const row = rows.find((x) => x.key === $("ai-model").value);
-  const need = NEED_GB[$("ai-model").value] || 1;
+  // a disk model's need is the planner's (roomFitFor needGB), else the model's size
+  const need = row?.f?.needGB ?? (NEED_GB[$("ai-model").value] || 1);
   // fits: every device's layers within its pledge, the host's with the embedding and the head
   // (roomFitFor); a model without a SHAPE falls back to the sum of the pledges against NEED_GB
   const ok = row ? row.ok : pledged >= need;
@@ -645,7 +658,8 @@ function updateNeed(pledged) {
   $("need-fill").style.width = Math.min(100, ok ? 100 : pledged / (pledged + shortGB) * 100).toFixed(1) + "%";
   const has = +pledged.toFixed(1);
   // a model with a fallback context says both needs; a room that holds it only there says so
-  const needs = NEED_GB[$("ai-model").value] ? needText($("ai-model").value) : `${need} GB`;
+  const needs = row?.f?.needGB != null ? `${row.f.needGB} GB${row.f.needDisk ? " on GPUs, the rest streamed from disk" : ""}`
+    : NEED_GB[$("ai-model").value] ? needText($("ai-model").value) : `${need} GB`;
   const back = ok && row?.f?.fellBack ? ` ${ctxShortNote(shortName($("ai-model").value), row.f.ctx, row.f.want)}.` : "";
   $("need-text").textContent = ok
     ? `Needs ${needs}. The room has ${has} GB.${back}`
@@ -679,7 +693,7 @@ function updateNeed(pledged) {
   $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
     : note;
   if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
-  showDiskPick($("ai-model").value);
+  showDiskPick($("ai-model").value, { needGB: row?.f?.needGB ?? null, needDisk: !!row?.f?.needDisk, fits: ok, ramGB: myMeta.tabDisk?.ramGB ?? null });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
 }
@@ -721,21 +735,23 @@ if (typeof ResizeObserver === "function") new ResizeObserver(devsEdge).observe($
 function renderPool(pledged) {
   const devs = [{ name: myName, meta: myMeta }, ...[...members.values()].map((m) => ({ name: m.name || "device", meta: m.meta || {} }))].sort((x, y) => bySlot(x.name, y.name))
     .filter((d) => d.meta?.webgpu && d.meta?.contribGB && !d.meta?.api);
-  const needs = Object.entries(PICK_NEED).sort((a, b) => a[1] - b[1]);
+  // each model's need: a disk model's from the planner (roomFitFor needGB), so the tick, the line and the picker agree
+  const fitOf = new Map(Object.keys(PICK_NEED).map((k) => [k, roomFitFor(k)]));
+  const needs = Object.entries(PICK_NEED).map(([k, gb]) => [k, fitOf.get(k)?.needGB ?? gb]).sort((a, b) => a[1] - b[1]);
   const top = Math.max(pledged, ...needs.map((x) => x[1])) * 1.06 || 1;
   $("ap-total").textContent = `${+pledged.toFixed(1)} GB`;
   const meter = $("ap-meter");
   meter.querySelector(".apm-fill").innerHTML = devs.map((d) => `<i style="--sw:${devColor(d.name)};width:${(d.meta.contribGB / top * 100).toFixed(2)}%" title="${esc(String(d.name))}: ${d.meta.contribGB} GB"></i>`).join("");
   // a tick where each model starts to fit; the picked one says what it needs
   const sel = $("ai-model").value;
-  const fitsK = (k, gb) => { const f = roomFitFor(k); return f ? f.fit.fits : pledged >= gb; };
+  const fitsK = (k, gb) => { const f = fitOf.get(k); return f ? f.fit.fits : pledged >= gb; };
   meter.querySelector(".apm-ticks").innerHTML = needs.map(([k, gb]) => `<span class="${fitsK(k, gb) ? "ok" : ""}${k === sel ? " sel" : ""}${gb / top > 0.6 ? " r" : gb / top < 0.3 ? " l" : ""}" style="left:${(gb / top * 100).toFixed(2)}%" title="${esc(shortName(k))} needs ${gb} GB"></span>`).join("");
   // what the selected model needs, as its own line under the meter (not a label hanging off its tick)
   const selNeed = needs.find(([k]) => k === sel);
   $("ap-need").hidden = !selNeed;
   if (selNeed) {
-    const [k, gb] = selNeed, f = roomFitFor(k), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
-    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b><span>${short > 0 ? `${short} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0);
+    const [k, gb] = selNeed, f = fitOf.get(k), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
+    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b>${f?.needDisk ? " on GPUs" : ""}<span>${short > 0 ? `${short} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0);
   }
   $("ap-devs").innerHTML = devs.map((d) => `<li style="--sw:${devColor(d.name)}"><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB</b></li>`).join("")
     || '<li class="none">No device with WebGPU yet</li>';

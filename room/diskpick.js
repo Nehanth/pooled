@@ -33,12 +33,18 @@ export const speedRange = (m) => {
   return s.length ? `${num(Math.min(...s.map((x) => x.lo)))}–${num(Math.max(...s.map((x) => x.hi)))}` : "";
 };
 
-// the three figures: [{ k, v, u, approx, note }]
-export function costFigures(m) {
+// The cost row's figures: [{ k, v, u, approx, note }]. The memory is what the room computes, never a figure kept
+// here: need: { needGB, needDisk, ramGB } (room.js roomFitFor's needGB, the GPU memory the planner needs from the
+// room; ramGB: this tab's disk-tier RAM, room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap). Without a
+// needGB the memory tile is left out.
+export function costFigures(m, { needGB = null, needDisk = false, ramGB = null } = {}) {
   const more = (m.speeds || []).length > 1, d = sizeParts(m.diskBytes);
+  const mem = needGB == null ? null : { k: "Memory", v: num(needGB), u: "GB", note: needDisk
+    ? `On GPUs; the rest streams from disk${ramGB > 0 ? `, with ${num(ramGB)} GB of RAM here for it` : ""}`
+    : "On GPUs: the whole model, no disk here" };
   return [
     { k: "Stored once", v: d.v, u: d.u, note: "Copied once, then starts fast" },
-    { k: "Memory", v: num(m.memGB), u: "GB", approx: true, note: "For the experts it uses most" },
+    ...(mem ? [mem] : []),
     { k: "Speed", v: speedRange(m), u: "tok/s", note: more ? "Gets faster as devices join" : "Measured" },
   ];
 }
@@ -57,15 +63,15 @@ export const consentParts = (m, state = "ask", storedBytes = null) => {
 export const consentText = (m, state, storedBytes) => consentParts(m, state, storedBytes).join("");
 // Start: asks for the space while this device was not asked yet (the press is its answer), else just starts
 export const startLabel = (m, state = "ask") => state === "ask" ? `Allow ${sizeText(m.diskBytes)} and start` : `Start ${m.name}`;
-// Advanced's summary line: "92.4 GB disk · 20 GB memory"
-export const advSummary = (m) => `${sizeText(m.diskBytes)} disk · ${num(m.memGB)} GB memory`;
+// Advanced's summary line: "92.4 GB disk · 3 GB RAM" (the RAM only when this tab has a disk tier)
+export const advSummary = (m, { ramGB = null } = {}) => [`${sizeText(m.diskBytes)} disk`, ramGB > 0 ? `${num(ramGB)} GB RAM` : ""].filter(Boolean).join(" · ");
 // the stored copy's line: what is on this disk now
 export const storedText = (storedBytes) => storedBytes > 0 ? `${sizeText(storedBytes)} on this disk. Deleting frees the space; the next start that needs it copies it again.`
   : storedBytes === 0 ? "Nothing stored on this device yet." : "Not known in this browser.";
 
 // ---- HTML ----
-export function costHTML(m) {
-  return `<dl class="dk-cost" aria-label="What it takes">${costFigures(m).map((f) =>
+export function costHTML(m, need = {}) {
+  return `<dl class="dk-cost" aria-label="What it takes">${costFigures(m, need).map((f) =>
     `<div><dt>${esc(f.k)}</dt><dd>${f.approx ? '<span class="ap">~</span>' : ""}${esc(f.v)}<small>${esc(f.u)}</small></dd><p>${esc(f.note)}</p></div>`).join("")}</dl>`;
 }
 // the consent line for this device's answer
@@ -73,11 +79,11 @@ export function consentHTML(m, { state = "ask", storedBytes = null } = {}) {
   const [a, b, c] = consentParts(m, state, storedBytes);
   return `<p class="dk-agree">${esc(a)}<b>${esc(b)}</b>${esc(c)}</p>`;
 }
-// Advanced's rows: disk, memory, the stored copy with its delete (armed: the second press deletes, like Room
-// settings' "Free disk space")
-export function advRowsHTML(m, { storedBytes = null, armed = false } = {}) {
+// Advanced's rows: disk, this tab's disk-tier RAM (ramGB, null: no disk tier here), the stored copy with its delete
+// (armed: the second press deletes, like Room settings' "Free disk space")
+export function advRowsHTML(m, { storedBytes = null, armed = false, ramGB = null } = {}) {
   const d = sizeText(m.diskBytes);
   return `<div class="dk-row"><span class="k">Disk to use</span><span class="v">${d}</span><span class="h">The most this browser stores. ${d} holds the whole model.</span></div>`
-    + `<div class="dk-row"><span class="k">Memory for the expert cache</span><span class="v">~${num(m.memGB)} GB</span><span class="h">The experts it uses most stay in memory.</span></div>`
+    + `<div class="dk-row"><span class="k">RAM for the disk tier</span><span class="v">${ramGB > 0 ? `${num(ramGB)} GB` : "None"}</span><span class="h">${ramGB > 0 ? "The experts it reads most stay in this device's memory." : "This device has no disk tier, so it holds no layers from disk."}</span></div>`
     + `<div class="dk-row"><span class="k">Stored copy</span><button type="button" class="dk-del"${storedBytes > 0 ? "" : " disabled"}>${armed && storedBytes > 0 ? `Delete ${sizeText(storedBytes)}?` : "Delete stored copy"}</button><span class="h">${esc(armed && storedBytes > 0 ? "Press again to delete it." : storedText(storedBytes))}</span></div>`;
 }
