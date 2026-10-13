@@ -112,6 +112,12 @@ try {
       o.prof = { decodeSteps: n };
       for (const [k, v] of Object.entries(S)) o.prof[k + "Ms"] = +(v / n).toFixed(2);
       for (const k of ["readback", "disk", "plan", "between", "head", "tail"]) o.prof[k + "Share"] = +(S[k] / S.tok).toFixed(3);
+      // per offloaded layer, mean ms over the decode steps: [layer, readback, disk, plan]
+      const per = new Map();
+      for (const tk of rec.tokens.slice(g.prompt.length + 1)) for (const c of tk.cuts) {
+        const a = per.get(c.l) || [0, 0, 0]; a[0] += c.t1 - c.t - c.prep - c.plan; a[1] += c.prep; a[2] += c.plan; per.set(c.l, a);
+      }
+      o.prof.perLayer = [...per].map(([l, a]) => [l, ...a.map((x) => +(x / n).toFixed(2))]);
       o.prof.perCutMs = { readback: +(S.readback / S.cuts).toFixed(3), disk: +(S.disk / S.cuts).toFixed(3), plan: +(S.plan / S.cuts).toFixed(3) };
     }
     log(`${name}: ${verdict} ${JSON.stringify(o)}`);
