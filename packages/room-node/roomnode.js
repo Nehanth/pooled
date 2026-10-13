@@ -663,7 +663,9 @@ export class RoomNode extends EventEmitter {
         // tabDisk (a tab's disk tier, when the message has it: its user said yes or no; room/pledge.js tabDiskGB)
         const upd = (meta) => { const m = { ...meta, contribGB: d.gb }; if ("tabDisk" in d) { if (d.tabDisk && typeof d.tabDisk === "object") m.tabDisk = d.tabDisk; else delete m.tabDisk; } return m; };
         if (e) e.meta = upd(e.meta);
-        if (d.tabDisk && typeof d.tabDisk === "object" && !d.tabDisk.ask) this.ai.noDisk.delete(e?.name || from);   // it said yes after all
+        // it said yes after all: a disk tier room.js's cleanTabDisk keeps (RAM for it, the models it reads), not "ask"
+        const t = d.tabDisk;
+        if (t && typeof t === "object" && !t.ask && +t.ramGB > 0 && Array.isArray(t.models) && t.models.length) this.ai.noDisk.delete(e?.name || from);
         if (this.isHost && this.roster.has(from)) { this.roster.get(from).meta = upd(this.roster.get(from).meta); this.broadcastRoster(); }
         return;
       }
@@ -766,9 +768,10 @@ export class RoomNode extends EventEmitter {
         this.log(`${e?.name || from} failed: ${d.message}`);
         // a device refused the offload it was dealt: a tab keeping the model off its disk (nodisk), or a node from before
         // Flash offload (0.4.1: "no expert offload yet"). Deal again once without its offload (_start's peers: ai.noDisk),
-        // not a failed start, as the room page does (room.js ai-error); a second refusal from it stops the start as any
-        // error does
+        // not a failed start, as the room page does (room.js ai-error); a refusal from it after that answers a deal
+        // already replaced and is dropped (staleRefusal)
         if (this.offloadRefused(from, e, d)) return;
+        if (this.staleRefusal(from, e, d)) return;
         if (this.hosting() && ai.chain.includes(from)) {
           this.failWaiters(new Error(`${e?.name || from}: ${d.message}`));
           if (d.load && ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${d.message})`));
@@ -805,6 +808,18 @@ export class RoomNode extends EventEmitter {
     // up deals again now
     if (ai.starting) this.dealAgain(again);
     else if (ai.model && !this.closing) this.redeal(again).catch((err) => { if (!err.short) this.log("re-deal failed: " + err.message); });
+    return true;
+  }
+
+  // A refusal from a device already in ai.noDisk answers a deal that is already being replaced: the deal after its
+  // first refusal, and every one since, counts it without any offload, so it has none of its own to refuse (an
+  // ai-error names no deal: a tab's disk question, shared by the deals it spans, can time out after a re-deal and
+  // answer each). Dropped, not a failed start: a re-deal without its offload is on or done. A device that says yes
+  // again ("pledge") leaves ai.noDisk, and a refusal after that is a first one again. -> true when dropped
+  staleRefusal(from, e, d) {
+    const ai = this.ai, nm = e?.name || from;
+    if (!(d.nodisk || /has no expert offload yet/.test(String(d.message || ""))) || !this.hosting() || !ai.chain.includes(from) || !ai.noDisk.has(nm)) return false;
+    this.log(`${nm} refused an offload from an earlier deal: this deal gives it none`);
     return true;
   }
 

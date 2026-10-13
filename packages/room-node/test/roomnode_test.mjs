@@ -8,6 +8,7 @@ import path from "node:path";
 import { RoomNode, toApiRequest, eventEncoder } from "../roomnode.js";
 import { openModel, LOCAL } from "../source.js";
 import { pledgeFor } from "../env.js";
+import { offloadFor } from "../../../room/pledge.js";
 import { PROTOCOL } from "../../../room/transport.js";
 import { finishRequest, askBody, needsV2 } from "../../../cli/lib/common.js";
 
@@ -845,7 +846,9 @@ for (const [kind, refusal] of [
   });
 }
 
-test("offload refused twice by the same device: the second refusal stops the start as any error does", async () => {
+test("offload refused twice by the same device: the second answers a deal already replaced and is dropped", async () => {
+  // a tab's disk question spans deals (askTabDisk shares one promise): it can time out after the re-deal and refuse
+  // each deal it was asked for, the second time for a deal that no longer gives it any offload
   const n = redealNode({ hostGB: 4, peers: [] });
   n.addPeer("t", "tab", { webgpu: true, contribGB: 4, offload: true, ramGB: 16 });
   offloadDeal(n);
@@ -857,15 +860,37 @@ test("offload refused twice by the same device: the second refusal stops the sta
     release();
     await until(() => msgs(n, "t", "ai-load").length === 2);
     n.aiOnData("t", { t: "ai-error", load: 1, nodisk: 1, message: "keeps the model off its disk" });
-    await assert.rejects(p, /tab couldn't load its layers/);
+    assert.ok(n.logs.some((l) => /refused an offload from an earlier deal/.test(l)), n.logs.join("\n"));
+    assert.ok(n.ai.starting, "the start goes on");
+    n.aiOnData("t", { t: "ai-ready", slots: [] });
+    await p;
+    assert.ok(n.ai.online);
     assert.equal(msgs(n, "t", "ai-load").length, 2, "no third deal");
-    assert.deepEqual([n.ai.online, n.ai.starting], [false, false]);
+    // once up, a stale refusal still changes nothing
+    n.aiOnData("t", { t: "ai-error", load: 1, nodisk: 1, message: "keeps the model off its disk" });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(n.ai.online);
+    assert.equal(msgs(n, "t", "ai-load").length, 2);
   } finally { n.restore(); }
+});
+
+test("offload refused: the stripped meta the deal counts gives the device no offload in the real planner", () => {
+  // offloadDeal stands in for the deal; this checks the real offloadFor with what _start's metaOf leaves (no tabDisk,
+  // offload, ramGB), for a tab with Flash's disk tier and a node that offloads Flash
+  const flash = "qwen3.8-flash", strip = ({ tabDisk, offload, ramGB, ...rest }) => rest;
+  const host = { webgpu: true, contribGB: 8 };
+  const tab = { webgpu: true, contribGB: 4, tabDisk: { ramGB: 8, models: [flash] } };
+  const node = { webgpu: true, contribGB: 8, offload: true, ramGB: 32, offloadFlash: true };
+  const before = offloadFor([host, tab, node], GB, flash);
+  assert.ok(before.ram[1] > 0 && before.ram[2] > 0, "both offload as they announced");
+  const after = offloadFor([host, strip(tab), strip(node)], GB, flash);
+  assert.equal(after, null, "neither is dealt any offload once left out");
+  assert.equal(offloadFor([host, strip(tab), node], GB, flash).ram[1], 0);
 });
 
 test("offload refused: a device that later says yes to its disk tier is offered the offload again; other errors stop as before", async () => {
   const n = redealNode({ hostGB: 4, peers: [] });
-  n.addPeer("t", "tab", { webgpu: true, contribGB: 4, offload: true, ramGB: 16, tabDisk: { gb: 40, ask: true } });
+  n.addPeer("t", "tab", { webgpu: true, contribGB: 4, offload: true, ramGB: 16, tabDisk: { ramGB: 8, models: ["qwen3.8-flash"], ask: true } });
   offloadDeal(n);
   try {
     // a refusal from a device not in the chain, or from a room node not hosting: nothing happens
@@ -876,9 +901,11 @@ test("offload refused: a device that later says yes to its disk tier is offered 
     await until(() => msgs(n, "t", "ai-load").length);
     n.aiOnData("t", { t: "ai-error", load: 1, nodisk: 1, message: "keeps the model off its disk" });
     assert.ok(n.ai.noDisk.has("tab"));
-    n.onData("t", { t: "pledge", gb: 4, tabDisk: { gb: 40, ask: true } });
+    n.onData("t", { t: "pledge", gb: 4, tabDisk: { ramGB: 8, models: ["qwen3.8-flash"], ask: true } });
     assert.ok(n.ai.noDisk.has("tab"), "still asking: still without");
     n.onData("t", { t: "pledge", gb: 4, tabDisk: { gb: 40 } });
+    assert.ok(n.ai.noDisk.has("tab"), "a disk tier room.js's cleanTabDisk would drop (no ramGB, no models): still without");
+    n.onData("t", { t: "pledge", gb: 4, tabDisk: { ramGB: 8, models: ["qwen3.8-flash"] } });
     assert.ok(!n.ai.noDisk.has("tab"), "it said yes: offered again");
     release();
     await until(() => msgs(n, "t", "ai-load").length === 2);
