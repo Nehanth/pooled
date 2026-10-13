@@ -55,13 +55,40 @@ export function expertSlicesOf(G, i) {
 // (f16 K+V bytes per layer and position, averaged: a checkpoint's KV rows), state (a layer's recurrent state, averaged:
 // DeltaNet S and conv window, which a checkpoint copies and speculation's rollback keeps once more) and work (the
 // engine's working buffers: prefill frames, batched passes; offloadWork)
+// Qwen3.8-Flash-Next (qwen4exp) has its own sizes: K / V in f32 on its 12 QSA layers (averaged per layer), the DeltaNet
+// state from its own keys, no whole-layer region (flashOffload) and checkpoints of at most its 2048 positions.
 export function expertsOf(G, L) {
   const per = [];
   for (let i = 0; i < L; i++) { const x = expertSlicesOf(G, i); if (!x) return null; per.push(x); }
   if (!per.length || per.some((x) => x.nExp !== per[0].nExp)) return null;
   const M = G.meta || {};
-  return { E: expertBytesOf(G, 0, Math.min(4, L)) / Math.min(4, L), nExp: per[0].nExp, slices: per.map((x) => x.slices),
-    kvPos: kvBytesPerLayerPos(M, "f16"), state: stateBytesPerLayer(M), work: offloadWork(+M["qwen35.embedding_length"] || 0) };
+  const base = { E: expertBytesOf(G, 0, Math.min(4, L)) / Math.min(4, L), nExp: per[0].nExp, slices: per.map((x) => x.slices) };
+  if (M["general.architecture"] === "qwen4exp") return { ...base, ...flashOffload(flashMeta(M)) };
+  return { ...base, kvPos: kvBytesPerLayerPos(M, "f16"), state: stateBytesPerLayer(M), work: offloadWork(+M["qwen35.embedding_length"] || 0) };
+}
+// the fields flashOffload reads, from a qwen4exp header (per-layer arrays: the QSA flags as engine/gguf.js
+// qwen4expConfig sets them, every interval-th layer when the file has no recurrent_layers key)
+function flashMeta(M) {
+  const k = (n) => M["qwen4exp." + n];
+  const L = k("block_count") - (k("nextn_predict_layers") || 0), rec = k("attention.recurrent_layers"), iv = k("full_attention_interval") ?? 4;
+  const qsa = Array.from({ length: L }, (_, i) => (Array.isArray(rec) ? !rec[i] : (i + 1) % iv === 0)).filter(Boolean).length;
+  return { L, qsa, K: k("expert_used_count"), dim: k("embedding_length"), nKV: k("attention.head_count_kv"), headDim: k("attention.key_length"),
+    ssm: { state: k("ssm.state_size"), nVH: k("ssm.time_step_rank"), nKH: k("ssm.group_count"), inner: k("ssm.inner_size"), convK: k("ssm.conv_kernel") } };
+}
+// Expert offload's extra sizes for Qwen3.8-Flash-Next (room/plan.js offloadSpare, expertSizes), from flashMeta's fields:
+//   kvPos   K + V in f32 (the phase-1 engine), 2 x nKV x headDim x 4 per QSA layer and position, averaged over the layers
+//   state   a DeltaNet layer's S and conv window, averaged (the QSA layers have none)
+//   work    the engine's working buffers (offloadWork by the hidden size)
+//   region  false: engine/qwen4exp.js builds its expert store without the whole-layer region (decode one token at a
+//           time: a cut never holds more than K experts), so the deal must not set one aside
+//   ckptTokens  the checkpoints' KV rows: 8 slots of at most 2048 positions, not the Qwen 3.5 rooms' 32k
+//   K       experts a token picks (10 of 512): room/plan.js tabDiskCost
+export const FLASH_CKPT_TOKENS = 8 * 2048;
+export function flashOffload(f) {
+  const s = f.ssm, dn = (f.L - f.qsa) / f.L;
+  return { kvPos: 2 * f.nKV * f.headDim * 4 * f.qsa / f.L,
+    state: (s.nVH * s.state * s.state * 4 + (2 * s.nKH * s.state + s.inner) * (s.convK - 1) * 4) * dn,
+    work: offloadWork(f.dim), region: false, ckptTokens: FLASH_CKPT_TOKENS, K: f.K || 10 };
 }
 // A Qwen3.5 / 3.6 layer's recurrent state, averaged over the layers (all but every full_attention_interval-th are
 // DeltaNet): S (nVH x dState x dState f32) and the conv window (3 x convDim f32), as engine/qwen35.js allocates them
@@ -79,7 +106,7 @@ export function stateBytesPerLayer(meta) {
 export const offloadWork = (dim) => dim * 192 * 1024;
 // SHAPE's park (runs of layers that park alike) as expertsOf's profile
 const parkProfile = (s) => s.park && { E: s.exp, nExp: s.park.nExp, slices: s.park.runs.flatMap(([n, sl]) => Array(n).fill(sl)),
-  kvPos: s.kvPos.f16, state: stateBytesPerLayer(s.meta), work: offloadWork(s.meta["qwen35.embedding_length"]) };
+  ...(s.flash ? flashOffload(s.flash) : { kvPos: s.kvPos.f16, state: stateBytesPerLayer(s.meta), work: offloadWork(s.meta["qwen35.embedding_length"]) }) };
 
 // the header fields stateBytesPerLayer and offloadWork read (SHAPE's MoE models: their GGUFs' values)
 function ssmMeta(dim, nVH, nKH, inner) {
@@ -114,7 +141,9 @@ export const SHAPE = {
   // (10 positions x hDim f32, engine/qwen4exp.js st.ring).
   "qwen3.8-flash": { kind: "qwen4exp", L: 48, layer: 1478069803, kvPos: { f16: 1024 }, embed: 357580800, out: 534620160, mtp: 0, exp: 1468006400,
     park: { nExp: 512, runs: [[6, expertSlices(640, 2560, [Q4, Q4, Q41])], [42, expertSlices(640, 2560, [Q4, Q4, Q4])]] }, meta: ssmMeta(2560, 48, 16, 6144),
-    hDim: 10240, ngram: { layer: 1, bytes: 28800138240 }, pleState: 10 * 10240 * 4 },
+    hDim: 10240, ngram: { layer: 1, bytes: 28800138240 }, pleState: 10 * 10240 * 4,
+    // flashOffload's fields (expert offload: room/plan.js), from the header (flashMeta)
+    flash: { L: 48, qsa: 12, K: 10, dim: 2560, nKV: 2, headDim: 256, ssm: { state: 128, nVH: 48, nKH: 16, inner: 6144, convK: 4 } } },
 };
 // The width of the hidden state that crosses devices, in floats: the model's hidden size, or for Qwen3.8-Flash-Next
 // its 4-stream residual (SHAPE hDim). 0 when SHAPE does not say (the room reads it from the engine: wire.js wireDim).

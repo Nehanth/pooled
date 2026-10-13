@@ -211,8 +211,8 @@ Deno.test("kvForLoad: the host's kv wins over a worker's own ?kv=, so every devi
 Deno.test("room.js: the host sends its KV format with ai-load and workers build with it", () => {
   const src = Deno.readTextFileSync(new URL("../../room.js", import.meta.url));
   ok(/t: "ai-load",[^\n]*\bkv: ROOM_KV\b/.test(src), "ai-load carries kv: ROOM_KV");
-  ok(/aiLoadShard\(modelKey, ranges\[0\], true, true, ROOM_CTX, ROOM_KV\)/.test(src), "the host builds with ROOM_KV");
-  ok(/aiLoadShard\([^\n]*kvForLoad\(d\.model, d\.kv, KV_ASK\)\)/.test(src), "workers build with the host's kv");
+  ok(/aiLoadShard\(modelKey, ranges\[0\], true, true, ROOM_CTX, ROOM_KV[,)]/.test(src), "the host builds with ROOM_KV");
+  ok(/aiLoadShard\([^\n]*kvForLoad\(d\.model, d\.kv, KV_ASK\)[,)]/.test(src), "workers build with the host's kv");
   ok(/\* kvBytesPerLayerPos\(ai\.G\.meta, ROOM_KV\)/.test(src), "the layer deal counts the room's KV bytes");
 });
 

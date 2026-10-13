@@ -6,6 +6,7 @@
 // (engine/qwen4exp.js, imported when needed: it reads the WebGPU globals as it loads) behind the room adapter
 // (room/flash.js), and the device holding the n-gram layer reads that table's rows from the model file.
 import fs from "node:fs";
+import os from "node:os";
 import { autotuneCoop, makeTokenizer, DenseEngine, gpuSelfTest, kernelMicroTests } from "../../engine/engine.js";
 import { Qwen35Engine } from "../../engine/qwen35.js";
 import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizerFromGGUF, gpuUploadEntry, GGML_EMBED, GGML_FINAL_NORM, GGML_OUTPUT,
@@ -150,7 +151,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     log(`autotune WG=${out.tune.wg} ROWS=${out.tune.rows}`);
     const upload = (e, name) => gpuUploadEntry(device, e, name === GGML_EMBED);   // straight to the GPU
     if (kind === "qwen4exp") {
-      const r = await loadFlash({ device, G0, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out });
+      const r = await loadFlash({ device, G0, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, diskReader });
       out.engine = r;
     } else if (M.kind === "qwen35") {
       const G = out.G = G0;
@@ -209,14 +210,18 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
 // engine keeps on the CPU (flashCpuBytes: RAM, which on unified memory is the same memory); and Dawn's upload
 // staging: a writeBuffer's copy is kept until the queue moves on, and loadFlash flushes after each layer, so the
 // biggest one part (a layer, or the head) is staged on top of what is already up. -> bytes
-export function flashShardBytes(G, { lo, hi, hasEmbed = false, hasHead, ctx }) {
-  const c = qwen4expConfig(G.meta), ss = c.ssm;
+// offLayers (expert offload): layers whose routed experts are not on the GPU (parked or on disk): their bytes and their
+// staging leave those out; the store's GPU cache is the caller's to add (offload.vramBytes)
+export const flashExpertBytes = (G, i) => ["gate", "up", "down"].reduce((a, p) => a + (G.tensors[`blk.${i}.ffn_${p}_exps.weight`]?.byteLength || 0), 0);
+export function flashShardBytes(G, { lo, hi, hasEmbed = false, hasHead, ctx, offLayers = null }) {
+  const c = qwen4expConfig(G.meta), ss = c.ssm, off = (i) => (offLayers?.includes?.(i) ? flashExpertBytes(G, i) : 0);
   let b = qwen4expShardBytes(G, { lo, hi, hasEmbed: false, hasHead, qsa: false });
   let staged = hasHead ? qwen4expShardBytes(G, { lo: hi, hi, hasEmbed: false, hasHead: true, qsa: false }) - (G.tensors[GGML_EMBED]?.byteLength || 0) : 0;
   for (let i = lo; i < hi; i++) {
+    b -= off(i);
     if (c.qsa[i]) b += 2 * ctx * c.nKVHeads * c.headDim * 4;
     else b += ss.nVHeads * ss.stateSize * ss.stateSize * 4 + (2 * ss.nKHeads * ss.stateSize + ss.inner) * (ss.convK - 1) * 4;
-    staged = Math.max(staged, qwen4expShardBytes(G, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: false }));
+    staged = Math.max(staged, qwen4expShardBytes(G, { lo: i, hi: i + 1, hasEmbed: false, hasHead: false, qsa: false }) - off(i));
   }
   if (c.ple && c.ple.layers.some((l) => l >= lo && l < hi)) b += 10 * c.hDim * 4;
   return b + staged + flashCpuBytes(G, { hasEmbed, hasHead }) + 64 * 2 ** 20;   // + scratch, uniforms
@@ -226,15 +231,21 @@ export const flashCpuBytes = (G, { hasEmbed = false, hasHead = false } = {}) => 
 
 // Before a qwen4exp load: does this device have the memory for its share? On unified memory (a GB10, Apple silicon)
 // an allocation past what is free does not fail in WebGPU: the OS kills the process or swaps, so say it up front.
-// bytes: flashShardBytes; cpuBytes: the part of it in RAM (flashCpuBytes), not counted against a discrete GPU.
+// bytes: everything the share takes (flashShardBytes, plus with expert offload the store's GPU cache and what it parks
+// in RAM); cpuBytes: the part of it in RAM (flashCpuBytes, the parked experts, the disk tier's RAM cache), not counted
+// against a discrete GPU but against the system's RAM there (sysFreeGB: os.freemem(), when known).
 // mem: env.js hostMemory() (detectMemory). -> null when it fits (or nothing is known), else the reason
-export function flashMemoryShort(bytes, mem, { slackGB = 2, cpuBytes = 0 } = {}) {
+export function flashMemoryShort(bytes, mem, { slackGB = 2, cpuBytes = 0, sysFreeGB = null } = {}) {
   const gb = (n) => (n / 2 ** 30).toFixed(1);
   if (mem?.kind === "unified") {
     const free = mem.availGB ?? mem.freeGB;
     if (free > 0 && bytes / 2 ** 30 > free - slackGB) return `needs ${gb(bytes)} GB and this computer has ${free.toFixed(1)} GB of unified memory free (${slackGB} GB kept for the system)`;
-  } else if (mem?.kind === "discrete" && mem.freeGB > 0 && (bytes - cpuBytes) / 2 ** 30 > mem.freeGB - 0.5)
-    return `needs ${gb(bytes - cpuBytes)} GB of GPU memory and ${mem.name || "the GPU"} has ${mem.freeGB.toFixed(1)} GB free`;
+  } else if (mem?.kind === "discrete") {
+    if (mem.freeGB > 0 && (bytes - cpuBytes) / 2 ** 30 > mem.freeGB - 0.5)
+      return `needs ${gb(bytes - cpuBytes)} GB of GPU memory and ${mem.name || "the GPU"} has ${mem.freeGB.toFixed(1)} GB free`;
+    if (sysFreeGB > 0 && cpuBytes / 2 ** 30 > sysFreeGB - slackGB)
+      return `needs ${gb(cpuBytes)} GB of system RAM (the embedding, the parked experts, the disk tier's cache) and this computer has ${sysFreeGB.toFixed(1)} GB free (${slackGB} GB kept for the system)`;
+  }
   return null;
 }
 
@@ -269,20 +280,39 @@ const FLASH_MAX_CTX = 2048;
 
 // One qwen4exp shard: the weights (each matrix uploaded as it is converted; the embedding stays on the CPU, where the
 // engine reads its rows), the n-gram table when the range holds its layer, the engine, the room adapter.
+// offload (expert offload, as a Qwen3.5 shard's: offloadLayers / diskLayers): the routed experts of [lo, hi) are parked
+// in RAM, those of [diskLo, hi) read from the model's files on this disk (--disk), through the store's GPU slot pools;
+// engine/qwen4exp.js cuts each such layer after its router (no whole-layer region: decode one token at a time).
 // -> FlashRoomEngine
-async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null }) {
+async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null, diskReader = expertDiskReader }) {
   const c = qwen4expConfig(G.meta);
   ctx = Math.min(ctx, FLASH_MAX_CTX);   // the dense phase's cap, before anything is sized or uploaded (as a tab's load)
   out.G = G;   // (loadShard's finally takes the conversion pool off it)
   out.cfg = { num_hidden_layers: c.L };
   if (range[1] > c.L) throw new Error(`bad layer range [${range[0]}, ${range[1]}]: the model has ${c.L} layers`);
-  if (offload && offloadLayers(offload, range)) throw new Error("Qwen3.8-Flash-Next has no expert offload yet: this device can hold only layers that fit in what it lends");
   if (hasEmbed || hasHead) { out.tok = makeTokenizer(tokenizerFromGGUF(G.meta)); out.tok.chatTemplate = G.meta["tokenizer.chat_template"] || ""; }
   const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: false };
-  const need = flashShardBytes(G, { ...opts, ctx });
-  const short = flashMemoryShort(need, mem || hostMemory(), { cpuBytes: flashCpuBytes(G, opts) });
+  const off = offload && offloadLayers(offload, range), dl = diskLayers(offload, off);
+  const m = mem || hostMemory();
+  // the GPU holds the layers less their offloaded experts, plus the store's cache; the parked experts and the disk tier's
+  // RAM cache are in RAM: on unified memory the same memory, on a discrete GPU the system's (checked against it too)
+  const ramOff = off ? (+offload.ramBytes || 0) + (dl.length ? +offload.diskRamBytes || 0 : 0) : 0;
+  const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null }) + (off ? +offload.vramBytes || 0 : 0) + ramOff;
+  const cpu = flashCpuBytes(G, opts) + ramOff;
+  const short = flashMemoryShort(need, m, { cpuBytes: cpu, sysFreeGB: m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null });
   if (short) throw Object.assign(new Error(`can't hold layers ${range[0]}-${range[1] - 1} of Qwen3.8-Flash-Next here: it ${short}`), { oom: true, short: true });
-  const total = qwen4expShardBytes(G, opts);
+  if (off?.length) {
+    let disk = null;
+    if (dl.length) {
+      if (!src.localPaths) throw new Error("the host asked this device to read experts from disk, but the model's files are not on this device");
+      disk = { layers: dl, reader: expertReader({ paths: src.localPaths, make: diskReader, log }), ramBytes: +offload.diskRamBytes || 0 };
+    }
+    out.experts = new ExpertStore(device, { layers: off, vramBytes: offload.vramBytes, ramBytes: +offload.ramCap || Infinity, expectBytes: +offload.ramBytes || 0, disk });
+    const parked = off.length - dl.length;
+    log(`expert offload: ${parked ? `layers ${off[0]}-${off[parked - 1]} park their experts in RAM` : ""}${parked && dl.length ? "; " : ""}`
+      + `${dl.length ? `layers ${dl[0]}-${dl[dl.length - 1]} read theirs from disk (${(disk.ramBytes / 2 ** 30).toFixed(1)} GB RAM cache)` : ""}, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GB GPU cache`);
+  }
+  const total = qwen4expShardBytes(G, opts) - dl.reduce((a, l) => a + flashExpertBytes(G, l), 0);
   // straight to the GPU, but not the embedding (Qwen4ExpEngine reads its rows on the CPU) nor f32 tensors (the engine
   // uploads those itself, some joined into one buffer). A layer at a time, the queue flushed after each: Dawn keeps
   // a writeBuffer's staging copy until the queue moves on, and 67 GB of uploads in one go ran the GB10 out of memory
@@ -291,8 +321,8 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const flush = async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); };
   let base = 0;
   const part = async (o) => {
-    const w = await qwen4expWeights(G, src.bytesOf, { ...o, qsa: false }, (done) => onProgress(base + done, total), up);
-    base += qwen4expShardBytes(G, { ...o, qsa: false });
+    const w = await qwen4expWeights(G, src.bytesOf, { ...o, qsa: false, experts: out.experts || null }, (done) => onProgress(base + done, total), up);
+    base += qwen4expShardBytes(G, { ...o, qsa: false }) - (o.hi > o.lo && dl.includes(o.lo) ? flashExpertBytes(G, o.lo) : 0);
     await flush();
     return w;
   };
@@ -309,6 +339,6 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null });
   const fe = FlashRoomEngine.wrap(eng);
   out.flash = eng;   // the engine under the adapter (tests and benches: forwardToken, debugToken)
-  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB (weights, K/V, the CPU embedding, upload staging)${out.ngram ? ", the n-gram layer here" : ""}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
+  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB (weights${off ? " less the offloaded experts, the expert cache" : ""}, K/V, the CPU embedding, upload staging)${out.ngram ? ", the n-gram layer here" : ""}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
   return fe;
 }
