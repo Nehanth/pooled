@@ -810,12 +810,12 @@ function renderPool(pledged, rows = []) {
     const all = [...st.values()], nDisk = all.filter((x) => x.kind === "disk").length, nRam = all.filter((x) => x.kind === "ram").length;
     // whether any device can store it is roomFitFor's stores (the row, under Start and the picker read the same)
     const fits = fitsK(sel, selNeed[1]), w = { needGB: F?.needGB ?? null, needDisk: !!F?.needDisk, fits, shortGB: F?.shortGB ?? 0, nStore: F?.stores === false ? 0 : nDisk + nRam };
-    const g = poolGpuLine(dk, w), sl = poolStoreLine(dk, { ...w, nDisk, nRam, anyAsk: all.some((x) => x.kind === "disk" && x.ask), state: diskStateOf(sel) });
+    const g = poolGpuLine(dk, w), sl = poolStoreLine(dk, { ...w, nDisk, nRam, state: diskStateOf(sel) });
     const chip = (c) => c ? `<span>${esc(c)}</span>` : "";
     // the words in an <em> of their own, so a long line wraps beside its chip (p2p.html #ap-need em)
     $("ap-need").innerHTML = `<em>${esc(g.text)}${g.num != null ? ` <b>${g.num} GB</b>` : ""}</em>${chip(g.chip)}`; $("ap-need").classList.toggle("ok", g.ok);
     $("ap-need").classList.add("fl");
-    $("ap-store-n").textContent = `${nDisk + nRam} of ${devs.length}`;
+    $("ap-store-n").textContent = `${nDisk + nRam} of ${devs.length} can store it`;
     $("ap-smeter").querySelector(".apm-fill").innerHTML = devs.map((d) => { const x = st.get(d);
       return `<i class="${x.kind === "disk" ? (x.ask ? "ask" : "") : x.kind === "ram" ? "ram" : "no"}" style="--sw:${devColor(d.name)}"></i>`; }).join("");
     // written only when it changed: it is a live region, and renderPool runs on every room update
@@ -833,7 +833,7 @@ function renderPool(pledged, rows = []) {
   for (const id of ["ap-gpu-k", "ap-store-k", "ap-smeter", "ap-store"]) $(id).hidden = !flash;
   if (!flash) $("ap-store-fix").hidden = true;
   $("ap-devs").innerHTML = devs.map((d) => { const x = flash ? st.get(d) : null;
-    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x, F?.share?.get(d.name)))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny"))}</small>` : ""}</b></li>`; }).join("")
+    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x, F?.share?.get(d.name)))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny", dk))}</small>` : ""}</b></li>`; }).join("")
     || '<li class="none">No device with WebGPU yet</li>';
   devsEdge();
   const can = !!myMeta.webgpu;

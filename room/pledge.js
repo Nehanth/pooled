@@ -98,12 +98,13 @@ export function diskFor(meta, model) {
 const nodeRam = (m, model) => (MODELS[model]?.kind === "qwen4exp" && !m?.offloadFlash ? 0 : ramGB(m));
 // What a device brings beyond its GPU memory for `model`, as the pool's Storage bar shows it (room.js renderPool), by
 // offloadFor's rules for one meta: "disk" (a tab with the disk tier for it, ask: its user has not said yes yet; a room
-// node with --disk and the model's files), "ram" (a room node that parks it in RAM, ramGB), or null (nothing).
+// node with --disk and the model's files, ramGB: the RAM it reads them into), "ram" (a room node that parks it in RAM,
+// ramGB), or null (nothing).
 // Read-only: the planner reads offloadFor, never this.
 export function storageOf(meta, model) {
   if (tabDiskGB(meta, model) > 0) return { kind: "disk", ask: !!meta.tabDisk.ask, ramGB: 0 };
   const r = !meta?.tabDisk ? nodeRam(meta, model) : 0;
-  if (r > 0) return diskFor(meta, model) ? { kind: "disk", ask: false, ramGB: 0 } : { kind: "ram", ask: false, ramGB: r };
+  if (r > 0) return diskFor(meta, model) ? { kind: "disk", ask: false, ramGB: r } : { kind: "ram", ask: false, ramGB: r };
   return { kind: null, ask: false, ramGB: 0 };
 }
 // room/plan.js's `off` for a room's devices (metas, host first) and the model's routed experts: a profile

@@ -90,14 +90,14 @@ Deno.test("diskpick: Disk storage shows #368's answer, the stored size, the tier
   const m = DISK_COPY["qwen3.8-flash"], acts = (d) => d.acts.map((a) => a.act), size = sizeText(m.diskBytes);
   eq(size, "92.4 GB", "DISK_COPY's diskBytes, as the code computes it");
   let d = diskRow(m, { state: "allow", storedBytes: 0, ramGB: 3 });
-  eq([d.k, d.chip, d.h, acts(d)], ["Disk storage", "On", "Saves 92.4 GB to this device's disk the first time it starts · Uses 3 GB of RAM to read it", []]);
-  eq(diskRow(m, { state: "allow", storedBytes: 0, ramGB: 1.5 }).h.split(" · ")[1], "Uses 1.5 GB of RAM to read it", "tabRamCap on a small device");
+  eq([d.k, d.chip, d.h, d.title, acts(d)], ["Disk storage", "On", "Saves 92.4 GB to this device's disk the first time it starts", "Uses 3 GB of RAM to read it", []]);
+  eq(diskRow(m, { state: "allow", storedBytes: 0, ramGB: 1.5 }).title, "Uses 1.5 GB of RAM to read it", "tabRamCap on a small device");
   d = diskRow(m, { state: "allow", storedBytes: 40 * GB, ramGB: 3 });
-  eq([d.h, acts(d)], ["40.0 GB of 92.4 GB saved on this device · Uses 3 GB of RAM to read it", ["free"]]);
+  eq([d.h, acts(d)], ["40.0 GB of 92.4 GB saved on this device", ["free"]]);
   eq(diskRow(m, { state: "allow", storedBytes: 40 * GB, armed: true }).acts[0].label, "Delete 40.0 GB?", "the second press deletes");
   d = diskRow(m, { state: "ask", storedBytes: 0, ramGB: 3 });
   eq([d.chip, acts(d)], ["", ["allow"]], "not asked: no chip, Allow is the answer");
-  eq(d.h, "Lets Qwen3.8 Flash save 92.4 GB to this device's disk, once, and read it with 3 GB of RAM", "what Allow does, no second dialog");
+  eq([d.h, d.title], ["Lets Qwen3.8 Flash save 92.4 GB to this device's disk, once", "Uses 3 GB of RAM to read it"], "what Allow does, no second dialog");
   ok(!diskRowHTML(d).includes('class="more"'), "no empty chip");
   d = diskRow(m, { state: "deny", storedBytes: 0, ramGB: 3 });
   eq([d.chip, acts(d)], ["", ["allow"]], "a no: Allow again, no chip");
@@ -167,6 +167,7 @@ Deno.test("storageOf: what each device brings beyond GPU memory, by offloadFor's
     eq(s.kind != null, off.ram[i] > 0, `stores agrees with offloadFor's ram, case ${i}`);
   });
   eq(storageOf(nodeNoLocal, FL).ramGB, 43);
+  eq(storageOf(node, FL).ramGB, 43, "a --disk node keeps its RAM figure (the pool's tag shows it)");
   eq(storageOf(tab, "qwen3-1.7b").kind, null, "another model: a plain tab");
 });
 
@@ -182,10 +183,10 @@ Deno.test("pool: the GPU line per state (G1-G5), never a whole-model GPU figure"
 
 Deno.test("pool: the Storage line (S1-S5), the fix line and each device's tag", () => {
   const m = DISK_COPY[FL], line = (w) => { const s = poolStoreLine(m, w); return [s.text, s.chip, s.ok]; };
-  eq(line({ nDisk: 2 }), ["Split across 2 devices' disks, 92.4 GB in all", "fits", true], "S1");
-  eq(line({ nDisk: 1 }), ["Kept on disk, 92.4 GB in all", "fits", true], "S1, one device");
-  eq(line({ nDisk: 1, nRam: 1, anyAsk: true }), ["Kept on disk, 92.4 GB in all, asks before saving", "fits", true], "S2");
-  eq(line({ nRam: 1 }), ["Held in spare memory on 1 device", "fits", true], "S3");
+  eq(line({ nDisk: 2 }), ["Split across 2 devices' disks, 92.4 GB in all", "ready", true], "S1");
+  eq(line({ nDisk: 1 }), ["Kept on disk, 92.4 GB in all", "ready", true], "S1, one device");
+  eq(line({ nDisk: 1, nRam: 1 }), ["Kept on disk, 92.4 GB in all", "ready", true], "S2: the device that asks says so in its own tag");
+  eq(line({ nRam: 1 }), ["Held in spare memory on 1 device", "ready", true], "S3");
   eq(line({ nRam: 2 })[0], "Held in spare memory on 2 devices", "S3, plural");
   eq(line({ needDisk: false, fits: true }), ["Not needed here, it all fits in GPU memory", null, false], "S4");
   eq(line({ needDisk: false, fits: false }), ["No device here can store it", "needs disk", false], "S5");
@@ -201,17 +202,21 @@ Deno.test("pool: the Storage line (S1-S5), the fix line and each device's tag", 
   eq(poolFix("allow", { nStore: 2, fits: false, needDisk: true, needGB: 5.7 }), "", "G2: the GPU line's chip says it");
   eq(poolFix("allow", { nStore: 2, fits: true, needDisk: true, needGB: 5.7 }), "");
   eq(devStoreTag({ kind: "disk", ask: false }), "disk");
-  eq(devStoreTag({ kind: "disk", ask: true }), "asks");
+  eq(devStoreTag({ kind: "disk", ask: true }), "disk · will ask");
+  eq(devStoreTag({ kind: "disk", ask: false, ramGB: 0 }, null, false, m), "up to 92.4 GB disk", "a tab whose share is not known yet");
+  eq(devStoreTag({ kind: "disk", ask: true, ramGB: 0 }, null, false, m), "up to 92.4 GB disk · will ask");
+  eq(devStoreTag({ kind: "disk", ask: false, ramGB: 43 }, null, false, m), "43 GB RAM · disk", "a room node with --disk: its RAM shows");
   eq(devStoreTag({ kind: "ram", ramGB: 43 }), "43 GB RAM");
   eq(devStoreTag({ kind: null }), "no disk");
   eq(devStoreTag({ kind: null }, null, true), "disk off", "this device, its disk storage off");
   // a tab's share in this room (roomFitFor share)
   eq(devStoreTag({ kind: "disk", ask: false }, 46.2 * GB), "46.2 GB disk");
-  eq(devStoreTag({ kind: "disk", ask: true }, 46.2 * GB), "46.2 GB disk, asks");
+  eq(devStoreTag({ kind: "disk", ask: true }, 46.2 * GB), "46.2 GB disk · will ask");
   eq(devStoreTag({ kind: "disk", ask: false }, 0), "disk not needed");
   eq(devStoreTitle("mac", 12, { kind: "disk", ask: false }, 46.2 * GB), "mac: 12 GB GPU memory, disk, saves 46.2 GB there");
   eq(devStoreTitle("mac", 12, { kind: "disk", ask: true }), "mac: 12 GB GPU memory, asks before saving to disk");
   eq(devStoreTitle("pc", 10, { kind: "ram", ramGB: 43 }), "pc: 10 GB GPU memory, 43 GB RAM");
+  eq(devStoreTitle("pc", 10, { kind: "disk", ask: false, ramGB: 43 }), "pc: 10 GB GPU memory, 43 GB RAM, disk");
   eq(devStoreTitle("pc", 10, { kind: null }), "pc: 10 GB GPU memory, no disk");
 });
 
@@ -225,7 +230,7 @@ Deno.test("pool: with needDisk false nothing says the whole model's GPU figure; 
   }
   const all = out.join(" | ");
   ok(!/\b67\b/.test(all) && !all.includes(" on GPUs"), all);
-  const words = all + [true, false].map((a) => poolStoreLine(m, { nDisk: 1, anyAsk: a }).text).join(" ")
+  const words = all + [true, false].map((a) => poolStoreLine(m, { nDisk: a ? 1 : 0, nRam: 1 }).text).join(" ")
     + ["disk", "ram", null].map((k) => devStoreTag({ kind: k, ramGB: 43 }) + devStoreTitle("x", 1, { kind: k, ramGB: 43 })).join(" ");
   ok(!/MoE|expert|OPFS|pledge|offload/i.test(words), "banned words");
 });
@@ -254,9 +259,10 @@ Deno.test("pool: a single 4 GB tab with no disk: no row, Start or picker text sa
 Deno.test("diskpick: Disk storage says this device's share of the copy in this room", () => {
   const m = DISK_COPY["qwen3.8-flash"];
   eq(diskRow(m, { state: "allow", storedBytes: 0, ramGB: 3, shareBytes: 46.2 * GB }).h,
-    "Saves 46.2 GB (this device's share of 92.4 GB) to this device's disk the first time it starts · Uses 3 GB of RAM to read it");
+    "Saves 46.2 GB of 92.4 GB to this device's disk the first time it starts");
   eq(diskRow(m, { state: "ask", storedBytes: 0, ramGB: 3, shareBytes: 46.2 * GB }).h,
-    "Lets Qwen3.8 Flash save 46.2 GB (this device's share of 92.4 GB) to this device's disk, once, and read it with 3 GB of RAM");
+    "Lets Qwen3.8 Flash save 46.2 GB of 92.4 GB to this device's disk, once");
+  eq(diskRow(m, { state: "allow", storedBytes: 0, ramGB: 3, shareBytes: 0 }).title, "", "nothing to read here");
   eq(diskRow(m, { state: "allow", storedBytes: 0, ramGB: 3, shareBytes: m.diskBytes }).h.split(" · ")[0], "Saves 92.4 GB to this device's disk the first time it starts", "alone: the whole copy");
   eq(diskRow(m, { state: "allow", storedBytes: 20 * GB, ramGB: 3, shareBytes: 46.2 * GB }).h.split(" · ")[0], "20.0 GB of 46.2 GB saved on this device");
   eq(diskRow(m, { state: "allow", storedBytes: 92.4 * GB, ramGB: 3, shareBytes: 46.2 * GB }).h.split(" · ")[0], "92.4 GB saved on this device", "more than it needs: no \"of\"");
