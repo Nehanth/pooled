@@ -5,7 +5,8 @@
 //
 // Default: the first LAYERS (4) layers, no head (DeltaNet 0, the PLE layer 1, DeltaNet 2, QSA layer 3), on the
 // first NTOK (4300) tokens of the ctx8k golden's prompt, so the context passes QSA's 2051 cells. The reference is
-// the decode engine, one token at a time; every check compares the output residual (4 x 2560 floats) bit for bit:
+// the decode engine, one token at a time; every check of the exact kernels (exact: true, 64-column passes) compares
+// the output residual (4 x 2560 floats) bit for bit:
 //   QSA vs reference    past 2051 cells, the decode engine's QSA state on the real activations of the last QSA layer
 //                       (layer 3) against the CPU reference (tests/reference/qsa_ref.mjs): raw keys, every pooled
 //                       key (re-pooled on the CPU from the GPU's raw keys), and at sampled positions the indexer
@@ -16,11 +17,19 @@
 //   QSA == dense        below 2052 cells: every pass forced onto the gathered (QSA) attention, decode and prefill
 //   verify / accept     verify passes of 6 columns with random accepts (state restored and re-run), across 2052
 //   timing              decode vs prefill tok/s for these layers
+// Then the wide kernels (engine/wgsl/qwen4exp_wide.js), the default batch (f32) and, when the device has dp4a, a
+// dp4a one (DP4A=0|1|moe|dense picks one mode instead), each within its BOUNDS (relative error of a column's
+// residual, p99 and max over the columns):
+//   per layer           against the exact kernels, the residual after every layer (taps), passes 0, 4 and the last
+//   wide ~ decode       the output against the decode steps: 1024-column passes, mixed sizes (narrow passes take the
+//                       exact kernels), across 2051 / 2052, interleaved with decode steps; and twice the same bits
 // OFFLOAD=lo-hi [OFFLOAD_SLOTS=N]: those layers' routed experts parked in the expert store (engine/expert_store.js),
 // the engine built with expertRegion: true, so the batched passes route them through the store's region and decode
-// through its pools. Every check above still compares against the decode engine; the "BITS" line (a hash of the
-// 64-column prefill's residuals) must equal the resident run's.
-// FULL=1: all 48 layers and the head (~75 GB of GPU memory): greedy ids vs llama.cpp
+// through its pools. Every check above still compares against the decode engine; the "BITS" lines (hashes of the
+// 64-column exact prefill's and the wide prefills' residuals) must equal the resident run's.
+// FULL=1: all 48 layers and the head (~75 GB of GPU memory), with the default (wide) batch, EXACT=1 for the exact one:
+// the wide kernels per layer against the exact ones (a short prompt, and 128 columns past 2051 cells: MED_BOUND),
+// then greedy ids vs llama.cpp
 // (tests/golden/q38flash_llama_greedy.json, every case including ctx4k / ctx8k; ctx2k and ctx2k_b stay dense at
 // long positions (1887 and 1943 prompt tokens, + 64 <= 2051 cells), ctx2k1 (2082) is just past 2051 cells, where
 // QSA drops a few blocks) with the prompt run by the batched prefill, judged by tests/q38flash_rule.js (a difference
