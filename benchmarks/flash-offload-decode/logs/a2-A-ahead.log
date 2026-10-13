@@ -1,0 +1,101 @@
+node.exe : 1.2s [a] prof-b joined (nvidia blackwell, 8 GB)
+At C:\Users\naren\offdec-abseq.ps1:13 char:3
++   & node "$HOME\pooled-offdec\benchmarks\flash-offload-decode\profile ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (1.2s [a] prof-b...lackwell, 8 GB):String) [], Remote 
+   Exception
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+1.5s [a] Qwen3.8 Flash Next ┬╖ Q4: layer split prof-a 1+embed ┬╖ prof-b 47
+1.5s [a] the n-gram table (26.8 GB, layer 1): prof-b reads it (from its own copy when it has one, 
+else by HTTP range: its log says which); whether it has the disk for it is not reported
+1.5s [a] prof-b offloads layers 3-47 with their experts in RAM (19.6 GB parked, 2.6 GB of GPU 
+cache); layers 17-47 read theirs from disk (2.4 GB RAM cache)
+1.5s [a] speculative decoding is off while experts are offloaded: plain decoding is faster there 
+(POOLED_OFFLOAD_SPEC=1 turns it on)
+1.6s [b] dealt layers 1-47 of qwen3.8-flash; next: host
+1.6s [b] offloading the experts of layers 3-47 to RAM (layers 17-47: read from disk) (2.6 GB of 
+GPU cache)
+4.4s [a] autotune WG=128 ROWS=8
+5.0s [b] autotune WG=128 ROWS=8
+5.0s [b] expert offload: layers 3-16 park their experts in RAM; layers 17-47 read theirs from 
+disk (2.4 GB RAM cache), 2.56 GB GPU cache
+16.5s [a] Qwen3.8-Flash-Next layers 0-0 + embedding/head: 4.1 GB (weights, K/V, the CPU 
+embedding, upload staging)
+16.5s [a] host layers 0-0 + embedding/head ready in 15.0 s
+69.7s [b] n-gram table: 26.8 GB, rows read from 
+C:\llm\models\q38flash\Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf
+72.4s [b] Qwen3.8-Flash-Next layers 1-47: 31.4 GB (weights less the offloaded experts, the expert 
+cache, K/V, the CPU embedding, upload staging), the n-gram layer here
+72.5s [b] expert offload: 45 layers, 21 slots each (2.48 GiB) + region 0.00 GiB, parked 19.63 GiB 
+in 19.64 GiB of buffers
+72.6s [b] layers 1-47 ready in 71.0 s
+72.6s [a] room online ┬╖ 2 device(s), 48 layers
+72.6s online: {"L":48,"ranges":[[0,1],[1,48]],"names":["prof-a","prof-b"]} in 71 s
+204.0s two-sum: MATCH {"verdict":"MATCH","n":64,"prompt":23,"tps":0.707,"decodeS":90.48,"prefillS"
+:40.92,"wallS":131.4,"diskReads":10750,"diskMiB":28345,"diskWaitS":12.92,"t1Copies":2255,"t1Writes
+":7709,"aheadReads":12408,"aheadUsed":5584,"lookups":39150,"hits":20250,"misses":18900,"poolMiB":5
+0972,"reader":{"chunks":52722,"readMsPerChunk":1.714,"convMsPerChunk":0.923,"dedup":0},"prof":{"de
+codeSteps":63,"tokMs":1408.66,"cutsMs":45,"readbackMs":1029.6,"diskMs":152.48,"planMs":155.41,"bet
+weenMs":41.72,"headMs":7.16,"tailMs":22.29,"readsMs":121.44,"readbackShare":0.731,"diskShare":0.10
+8,"planShare":0.11,"betweenShare":0.03,"headShare":0.005,"tailShare":0.016,"perLayer":[[3,437.97,0
+,0.41],[4,12.12,0,0.39],[5,14.04,0,0.48],[6,11.73,0,0.48],[7,10.83,0,0.46],[8,11.38,0,0.37],[9,14.
+9,0,0.49],[10,12.99,0,0.58],[11,9.74,0,0.54],[12,13.17,0,0.62],[13,7.48,0,0.5],[14,11.46,0,0.56],[
+15,11.63,0,0.32],[16,13.79,0,0.34],[17,13.88,6.8,6],[18,13.07,5.41,6.8],[19,14.14,4.98,5.57],[20,1
+5.41,5.15,4.42],[21,15.82,4.99,5.05],[22,13.18,6.49,6.82],[23,10.61,4.48,4.79],[24,11.11,4.38,5.32
+],[25,7.31,6.14,5.33],[26,15.73,5.24,6.44],[27,12.93,4.81,5.19],[28,14.34,5.88,6.12],[29,10.97,4.0
+7,5.21],[30,15.14,3.87,4.37],[31,12.33,4.36,3.84],[32,16.14,4.29,3.75],[33,13.99,5.37,4.44],[34,12
+.51,4.08,4.87],[35,11.42,4.68,4.53],[36,13.15,2.83,2.96],[37,6.67,4.51,3.82],[38,13.93,4.49,5.51],
+[39,34.97,6.09,3.96],[40,21.29,4.97,4.17],[41,14.46,5.88,4.86],[42,11.37,3.54,3.94],[43,7.6,3.62,2
+.93],[44,10.4,4.46,3.56],[45,11.71,5.25,3.97],[46,16.01,3.81,3.65],[47,24.79,7.55,6.66]],"perCutMs
+":{"readback":22.88,"disk":3.388,"plan":3.454}}}
+204.0s [b] expert offload: 45 layers, 21 slots each (2.48 GiB) + region 0.00 GiB, parked 19.63 
+GiB in 19.64 GiB of buffers; 3915 cuts, hits 51.7% (20250/39150), 50972 MiB copied to the pools, 
+0 region cuts (0 MiB), 0 whole-layer loads (0.0 GiB); 31 disk layers: 10750 expert reads, 28345 
+MiB from the file, 12.92 s waiting; RAM cache 898/918 experts (2.36 of 2.36 GiB): 2255 hits, 3041 
+admitted, 7709 first misses, 0 with no free slot, 2143 evicted
+272.2s bash: MATCH {"verdict":"MATCH","n":22,"prompt":27,"tps":0.741,"decodeS":29.68,"prefillS":38
+.53,"wallS":68.2,"diskReads":5143,"diskMiB":13561,"diskWaitS":5.63,"t1Copies":1550,"t1Writes":4273
+,"aheadReads":5809,"aheadUsed":3011,"lookups":22050,"hits":12609,"misses":9441,"poolMiB":25369,"re
+ader":{"chunks":23823,"readMsPerChunk":1.349,"convMsPerChunk":0.806,"dedup":0},"prof":{"decodeStep
+s":21,"tokMs":1351.01,"cutsMs":45,"readbackMs":1041.89,"diskMs":110.54,"planMs":133.55,"betweenMs"
+:43.57,"headMs":7.46,"tailMs":14,"readsMs":93.76,"readbackShare":0.771,"diskShare":0.082,"planShar
+e":0.099,"betweenShare":0.032,"headShare":0.006,"tailShare":0.01,"perLayer":[[3,464.2,0,0.19],[4,8
+.04,0,0.24],[5,12.8,0,0.27],[6,16.28,0,0.23],[7,11.07,0,0.26],[8,10.71,0,0.25],[9,14.4,0,0.32],[10
+,12.53,0,0.39],[11,12.12,0,0.35],[12,12.76,0,0.51],[13,6.81,0,0.38],[14,12.26,0,0.38],[15,9.87,0,0
+.22],[16,13.65,0,0.34],[17,15,5.16,6.56],[18,13.44,4.53,5.37],[19,9.68,3.64,3.36],[20,13.31,2.91,3
+.97],[21,13.58,4.11,4.59],[22,13.96,3.6,5.22],[23,9.87,3.74,4.42],[24,18.06,2.58,3.27],[25,6.45,3.
+98,4.82],[26,15.88,4.29,5.57],[27,16.11,3.84,4.73],[28,14.6,3.36,5.03],[29,10.31,3.62,4.77],[30,15
+.59,3.73,4.27],[31,13.51,3.29,3.02],[32,13.99,3.95,3.19],[33,13.16,3.84,5.13],[34,10.79,2.54,3.79]
+,[35,10.42,2.04,3.19],[36,18.68,4.35,3.45],[37,6.2,2.84,4.1],[38,10.74,4.67,4.73],[39,33.18,4.66,3
+.05],[40,20.21,4.39,5.22],[41,10.43,3.55,3.33],[42,7.22,3.09,2.77],[43,8.42,2.65,2.64],[44,8.22,1.
+51,2.47],[45,17.92,3.48,3.89],[46,19.6,3.25,4.4],[47,15.85,3.36,4.89]],"perCutMs":{"readback":23.1
+53,"disk":2.457,"plan":2.968}}}
+272.2s [b] expert offload: 45 layers, 21 slots each (2.48 GiB) + region 0.00 GiB, parked 19.63 
+GiB in 19.64 GiB of buffers; 6120 cuts, hits 53.7% (32859/61200), 76341 MiB copied to the pools, 
+0 region cuts (0 MiB), 0 whole-layer loads (0.0 GiB); 31 disk layers: 15893 expert reads, 41905 
+MiB from the file, 18.54 s waiting; RAM cache 898/918 experts (2.36 of 2.36 GiB): 3805 hits, 3911 
+admitted, 11982 first misses, 0 with no free slot, 3013 evicted
+343.0s eos-mid: MATCH {"verdict":"MATCH","n":20,"prompt":31,"tps":0.703,"decodeS":28.47,"prefillS"
+:42.3,"wallS":70.8,"diskReads":5646,"diskMiB":14887,"diskWaitS":5.93,"t1Copies":1372,"t1Writes":45
+25,"aheadReads":6362,"aheadUsed":3233,"lookups":22950,"hits":12685,"misses":10265,"poolMiB":27660,
+"reader":{"chunks":26325,"readMsPerChunk":1.405,"convMsPerChunk":0.835,"dedup":0},"prof":{"decodeS
+teps":19,"tokMs":1418.23,"cutsMs":45,"readbackMs":1091.53,"diskMs":117.92,"planMs":137.94,"between
+Ms":43.22,"headMs":8.29,"tailMs":19.34,"readsMs":106.89,"readbackShare":0.77,"diskShare":0.083,"pl
+anShare":0.097,"betweenShare":0.03,"headShare":0.006,"tailShare":0.014,"perLayer":[[3,507.49,0,0.1
+9],[4,9.64,0,0.3],[5,12.99,0,0.36],[6,11.24,0,0.46],[7,8.91,0,0.52],[8,12.37,0,0.4],[9,15.53,0,0.5
+],[10,13.8,0,0.36],[11,10.37,0,0.43],[12,15.02,0,0.52],[13,8.78,0,0.43],[14,13.66,0,0.51],[15,10,0
+,0.26],[16,13.55,0,0.39],[17,14.29,5.04,5.55],[18,14.09,5.97,7.73],[19,22.95,4.63,4.42],[20,12.63,
+2.25,2.81],[21,12.52,5.46,3.88],[22,13.75,4.67,7.38],[23,6.72,3.65,2.89],[24,14.17,4.19,3.84],[25,
+6.87,5.92,4.56],[26,11.5,3.24,4.17],[27,11.55,3,3.66],[28,16.05,5.54,6.9],[29,12.35,4.74,4.96],[30
+,11.93,2.39,2.87],[31,18.97,2.84,2.34],[32,13.31,2.64,2.49],[33,11.64,3.46,4.38],[34,13.62,5.69,4.
+79],[35,9.47,3.31,2.9],[36,14.57,1.78,2.16],[37,6.16,7.07,4.04],[38,14.79,3.31,7.5],[39,54.75,2.43
+,1.51],[40,10.38,2.53,4.13],[41,7.52,2.33,3.99],[42,7.62,4.33,4.96],[43,8.82,1.52,1.71],[44,9.7,2.
+5,3.55],[45,8.08,4.23,3.8],[46,8.61,2.16,2.86],[47,28.8,5.1,9.63]],"perCutMs":{"readback":24.256,"
+disk":2.621,"plan":3.065}}}
+343.0s [b] expert offload: 45 layers, 21 slots each (2.48 GiB) + region 0.00 GiB, parked 19.63 
+GiB in 19.64 GiB of buffers; 8415 cuts, hits 54.1% (45544/84150), 104001 MiB copied to the pools, 
+0 region cuts (0 MiB), 0 whole-layer loads (0.0 GiB); 31 disk layers: 21539 expert reads, 56792 
+MiB from the file, 24.47 s waiting; RAM cache 898/918 experts (2.36 of 2.36 GiB): 5177 hits, 5032 
+admitted, 16507 first misses, 0 with no free slot, 4134 evicted
+343.0s [a] prof-b left
