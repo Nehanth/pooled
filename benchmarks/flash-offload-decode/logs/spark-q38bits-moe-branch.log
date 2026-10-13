@@ -1,0 +1,6 @@
+attnDecode v2 layerFuse {"dn":true,"conv":true,"kv":true,"comb":true,"norm":true,"pass":true} attn_dec_combine_g true
+plain: "8\n\n// ─── GGUF header ─────────────────" logits hash 5ef77d06
+spec : "8\n\n// ─── GGUF header ─────────────────" == plain tokens 23,271,320,21910,222,16493,54802,19913,4108,21910,222,54907,54907
+BITS plain 5ef77d06 hidden 403ae12b
+GPU sampling: plain 23,271,320,21910,222,16493,54802,19913,4108,21910,222,54907,54907 spec 23,271,320,21910,222,16493,54802,19913,4108,21910,222,54907,54907 == logits path
+expert offload: 40 layers, 16 slots each (1.09 GiB) + region 0.55 GiB, parked 0.00 GiB in 0.00 GiB of buffers; 2160 cuts, hits 26.0% (6801/26132), 12656 MiB copied to the pools, 480 region cuts (21547 MiB), 320 whole-layer loads (140.0 GiB); 40 disk layers: 93698 expert reads, 158882 MiB from the file, 40.47 s waiting; RAM cache 924/936 experts (2.00 of 2.00 GiB): 7553 hits, 1701 admitted, 2774 first misses, 1 with no free slot, 777 evicted
