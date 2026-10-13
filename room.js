@@ -3347,7 +3347,9 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   const onProg = loadProg;
   // every device (host included, even when its weights come from cache) keeps within a few
   // percent of the slowest device, so the bars climb together and the room finishes as one
-  await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: aiLoadPace, offload },
+  ai.loadParts = null;
+  await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: aiLoadPace, offload,
+    onParts: (s) => { ai.loadParts = s; } },   // onParts (contract): the load's parts for the load card (loadProg renders it)
     { makeTokenizer, DenseEngine, Qwen35Engine, fetchModelShard, shardTensorNames });
   if (ai.peerBytes) log("room", `${myName}: ${(ai.peerBytes / 2 ** 20).toFixed(1)} MB of weights came from devices in the room, ${((ai.netBytes || 0) / 2 ** 20).toFixed(1)} MB from the network`);
   // batched draft-cache fill and refill, next step's first draft in the verify's pass (engine/preset.js)
@@ -3378,8 +3380,9 @@ function loadProg(done, total, info = null) {
       : cacheHits ? `loading the model from this computer's cache\u2026` : `downloading the model\u2026`);
   }
   ai.myPct = loadPct(done, total);
-  // the GPU step's own percent, for the pacing (aiLoadPace): 0 while saving to the disk, which is never paced
-  ai.gpuPct = step !== "gpu" ? 0 : info?.stepTotal ? info.stepDone / info.stepTotal * 100 : ai.myPct;
+  // the GPU step's own percent, for the pacing (aiLoadPace): the loader's gpuPct (100 once the GPU step is done and a copy
+  // goes on, room/flashload.js); without it, 0 while saving to the disk, which is never paced
+  ai.gpuPct = info?.gpuPct ?? (step !== "gpu" ? 0 : info?.stepTotal ? info.stepDone / info.stepTotal * 100 : ai.myPct);
   if (!info || step === "gpu") ai.shardBytes = info?.stepTotal || total;   // the lending screen shows how much this device holds
   ai.prog = ai.prog || {}; ai.progAt = ai.progAt || {}; ai.step = ai.step || {}; ai.gpuProg = ai.gpuProg || {};
   ai.prog[myName] = Math.round(ai.myPct); ai.progAt[myName] = Date.now();

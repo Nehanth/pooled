@@ -8,7 +8,8 @@ import { parseGGUFHeader, ggufWeights, ggufShardBytes, GGML_EMBED, GGML_OUTPUT, 
   from "../engine/gguf.js";
 import { ngramConfig, NgramTable, httpReadAt } from "../engine/ngram.js";
 import { NGRAM_OPFS_DIR, ngramDir, ngramContentSig, tabOffloadLayers, tabExpertTier, opfsResidentExperts, ingestNgram,
-  tabDiskGate } from "./flashdisk.js";
+  tabDiskGate, tabExpertBytes, expertTierCheck, expertTierCopy, expertTierOpen, expertStoreDeferred, ngramCheck } from "./flashdisk.js";
+import { partsTracker, runFlashParts } from "./flashload.js";
 import { FlashRoomEngine } from "./flash.js";
 import { planSteps, loadTracker } from "./loadsteps.js";
 import { MODELS, MAX_SEQ, mergeSplitHeaders, roomBytes, ngramOf } from "./models.js";
@@ -41,7 +42,10 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   // ngramIngest: the device holding Flash's n-gram layer copies the table into OPFS when it is not there and this tab
   // may write to its disk (else it reads its rows by HTTP range, 16 round trips a token); expertWorkers / expertRing:
   // the OPFS disk tier's reader workers and staging ring slots (room/flashdisk.js)
-  const { wcache: WCACHE = true, wcacheVerify: WCACHE_VERIFY = false, prefetch = null, ngramIngest = true, expertWorkers = 4, expertRing = 64 } = options;
+  // parload: a Flash tab runs its three parts at the same time (room/flashload.js; false: one after the other, as
+  // before); ngramWorker: the n-gram table's copy runs in a worker (false: on the main thread, after the experts')
+  const { wcache: WCACHE = true, wcacheVerify: WCACHE_VERIFY = false, prefetch = null, ngramIngest = true, expertWorkers = 4, expertRing = 64,
+    parload = true, ngramWorker = true } = options;
   // Consent for this tab's disk (room/flashdisk.js): hooks.tabDisk() -> { tabDisk: what this tab advertises (meta.tabDisk),
   // choice: its user's answer ("allow" | "deny" | null) }; hooks.askDisk({ model, bytes, layers, ngramBytes }) ->
   // Promise<boolean>: ask the user (a worker whose deal needs its disk and who was not asked yet). Without them a tab
@@ -155,7 +159,27 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
 
   // offload (Qwen3.8-Flash-Next only, a tab with the OPFS disk tier): the deal's { lo, hi, diskLo, vramBytes,
   // diskRamBytes } for this device (room/plan.js dealOffload, diskOnly): those layers' experts are read from OPFS
-  async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace, offload = null }, engines) {
+  // onParts(snapshot): the load's parts (room/flashload.js partsTracker: { parts: [{ id, done, total, state }], note? }),
+  // at most ~4 a second and on every state change; every model sends it (one "gpu" part but a Flash tab's)
+  async function loadShard(o, engines) {
+    if (!o.onParts) return loadShardIn(o, engines);
+    // the other models' one part, from their onProgress (a Flash tab's parallel load makes its own tracker; its
+    // sequential load, ?parload=0, sends only onProgress, as before)
+    let gpuParts = null;
+    const onProgress = (done, total, info) => {
+      o.onProgress(done, total, info);
+      if (info?.parts || info?.step) return;
+      gpuParts ||= partsTracker({ sizes: { gpu: Math.max(1, total) }, onParts: o.onParts });
+      gpuParts.at("gpu", done);
+    };
+    try {
+      const r = await loadShardIn({ ...o, onProgress }, engines);
+      gpuParts?.state("gpu", "done");
+      return r;
+    } catch (e) { gpuParts?.failRunning(); throw e; }
+    finally { gpuParts?.flush(); }
+  }
+  async function loadShardIn({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, onParts = null, pace, offload = null }, engines) {
     const M = MODELS[modelKey];
     if (offload && M.kind !== "qwen4exp") throw new Error(`the host asked this tab to offload experts of ${M.label || modelKey}; a tab reads offloaded experts from its disk for Qwen3.8-Flash-Next only`);
     // the receiving side: an offload this tab did not offer, or its user turned down, is refused before anything is
@@ -238,48 +262,17 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       const readAt = httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }) });
       let experts = null, resident = null;
       const streamPlain = streamWithRetry(M.gguf, streamOpts, pace);
-      // The load's steps on one bar (room/loadsteps.js), sized before any of them starts: the offloaded layers' experts
-      // saved to this computer, the n-gram table saved there (when this device holds its layer and may write to its
-      // disk), then the layers onto the GPU. Each step's bytes go to onProgress as the whole load's done / total, with
-      // info { step, stepNo, steps, stepDone, stepTotal, line } (line: the technical detail, for the console and a
-      // tooltip): the bar never starts over between steps, and it reaches 100% only with the last GPU byte
+      // what goes onto the GPU: the range's weights but the disk layers' experts
       const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: false };
       const skip = new Set(off?.disk || []);
       const total = qwen4expShardBytes(G, opts) - [...skip].reduce((a, l) => a + flashExpertBytes(G, l), 0);
       // the same test qwen4expWeights uses to return the table's reader (engine/gguf.js: pleTable with the n-gram layer)
       const ngCfg = ngramLayerIn(c, range) ? (() => { try { return ngramConfig(G); } catch { return null; } })() : null;
-      const steps = loadTracker(planSteps({ saveBytes: off ? off.disk.reduce((a, l) => a + flashExpertBytes(G, l), 0) : 0,
-        wordsBytes: ngCfg && !ngramCopyBlocked() ? ngCfg.vocab.reduce((a, v) => a + v * ngCfg.rowBytes, 0) : 0, gpuBytes: total }));
-      const prog = (step, d, tot, line = null) => {
-        const o = steps.at(step, tot > 0 ? d / tot : 0);
-        onProg(o.done, o.total, { step, stepNo: o.stepNo, steps: o.steps, stepDone: d, stepTotal: tot, line });
-      };
-      try {
-        if (off) {
-          if (!globalThis.navigator?.storage?.getDirectory) throw new Error("the host asked this tab to read experts from disk, but this browser has no OPFS");
-          let line = null;
-          aiStatus("Checking what's already saved on this computer\u2026");
-          // (the copy's own lines are detail: the breadcrumbs and the bar's tooltip, not the status)
-          const t = await tabExpertTier(dev, G, off.disk, { readAt, offload, workers: expertWorkers, ring: expertRing,
-            onStatus: (s) => { line = s; crumb(s); }, onProgress: (d, tot, s) => prog("save", d, tot, s || line), log: (s) => { console.info(s); crumb(s); } });
-          experts = t.store;
-          if (!t.ingest) steps.drop("save");   // on this computer already: the bar skips the step, never goes back
-          console.info(`expert offload: layers ${off.disk[0]}-${off.disk[off.disk.length - 1]} read their experts from OPFS, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GiB GPU cache, ${((+offload.diskRamBytes || 0) / 2 ** 30).toFixed(2)} GiB RAM cache`);
-        }
-        // The n-gram table's copy before the GPU step, not after it: all of the disk writing is done when the bar
-        // says the layers are on the GPU (openNgramTable below then finds the copy there and only opens it). Nothing
-        // is held open across the GPU load; a copy that fails is said in the console, and openNgramTable then reads
-        // the rows by HTTP range rather than run a second, unseen copy after the bar is done
-        // (no "words" tick before the copy's first byte: a copy already on this computer reports none and the step
-        // leaves the plan without ever showing; one that fails partway keeps the bytes it did on the bar)
-        let ngramEarlyFailed = false;
-        if (ngCfg && steps.plan.some((s) => s.id === "words")) {
-          aiStatus("Checking what's already saved on this computer\u2026");
-          const copied = await saveNgramEarly(G, M, ngCfg, (d, tot) => prog("words", d, tot), { onFail: () => { ngramEarlyFailed = true; } });
-          if (!copied) steps.drop("words");
-        }
-        // resident layers whose experts this tab already copied to OPFS (a re-deal that moved them off disk): read from
-        // there, not downloaded again into the weight cache (room/flashdisk.js opfsResidentExperts; reading only)
+      const wordsBytes = ngCfg ? ngCfg.vocab.reduce((a, v) => a + v * ngCfg.rowBytes, 0) : 0;
+      // The GPU step, either order's: resident layers whose experts this tab already copied to OPFS (a re-deal that
+      // moved them off disk) are read from there, not downloaded again into the weight cache (room/flashdisk.js
+      // opfsResidentExperts; reading only), then a layer at a time onto the GPU. at(bytes): its progress -> weights
+      const gpuStep = async (at) => {
         const resLayers = [];
         for (let l = range[0]; l < range[1]; l++) if (!off?.disk.includes(l)) resLayers.push(l);
         resident = await opfsResidentExperts(dev, G, resLayers, { readAt, workers: expertWorkers }).catch((e) => {
@@ -290,7 +283,6 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
           const s = `layers ${resident.layers[0]}-${resident.layers[resident.layers.length - 1]}: experts from this device's disk copy, not the network`;
           console.info(s); crumb(s);
         }
-        prog("gpu", 0, total);
         const names = [];
         for (let l = range[0]; l < range[1]; l++) names.push(...flashLayerNames(G, l).filter((n) => !skip.has(l) || !/_exps\.weight$/.test(n)));
         if (hasEmbed || hasHead) names.push(GGML_EMBED);
@@ -315,7 +307,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         const up = (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(dev, e, false); };
         let base = 0;
         const part = async (o) => {
-          const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: false, experts }, (done) => prog("gpu", base + done, total), up);
+          const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: false, experts }, (done) => at(base + done), up);
           base += qwen4expShardBytes(G, { ...o, qsa: false }) - (o.hi > o.lo && skip.has(o.lo) ? flashExpertBytes(G, o.lo) : 0);
           dev.queue.submit([dev.createCommandEncoder().finish()]);
           await dev.queue.onSubmittedWorkDone();
@@ -334,16 +326,20 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
           const s = `${(resident.bytes / 2 ** 30).toFixed(1)} GB of resident experts read from this device's disk copy`;
           console.info(s); crumb(s);
         }
-        let ngram = null;
-        try {
-          // (a copy that failed just now is not tried again here, after the bar said the load was done: rows by HTTP range)
-          ngram = weights.pleTable ? await openNgramTable(G, M, { copy: !ngramEarlyFailed }) : null;
-          aiStatus("Almost ready\u2026");
-          const { Qwen4ExpEngine } = await import("../engine/qwen4exp.js");
-          ai.engine = FlashRoomEngine.wrap(await Qwen4ExpEngine.create({ device: ai.device, meta: G.meta, weights, layerRange: range,
-            hasEmbed, hasHead, maxSeq: Math.min(ctx, 2048), ngram }));
-          if (experts) console.info(experts.summary().replace(/; \d+ cuts.*/, ""));
-        } catch (e) { await ngram?.close?.(); throw e; }
+        return weights;
+      };
+      const makeEngine = async (weights, ngram) => {
+        const { Qwen4ExpEngine } = await import("../engine/qwen4exp.js");
+        ai.engine = FlashRoomEngine.wrap(await Qwen4ExpEngine.create({ device: ai.device, meta: G.meta, weights, layerRange: range,
+          hasEmbed, hasHead, maxSeq: Math.min(ctx, 2048), ngram }));
+        if (experts) console.info(experts.summary().replace(/; \d+ cuts.*/, ""));
+      };
+      const offInfo = () => console.info(`expert offload: layers ${off.disk[0]}-${off.disk[off.disk.length - 1]} read their experts from OPFS, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GiB GPU cache, ${((+offload.diskRamBytes || 0) / 2 ** 30).toFixed(2)} GiB RAM cache`);
+      const log = (s) => { console.info(s); crumb(s); };
+      try {
+        if (off && !globalThis.navigator?.storage?.getDirectory) throw new Error("the host asked this tab to read experts from disk, but this browser has no OPFS");
+        if (!parload) await loadFlashInOrder();
+        else await loadFlashParallel();
       } catch (e) {
         // a failed load (a weight download, the engine) frees what the disk tier holds: its reader's workers and file
         // handles, the RAM cache, the staging ring
@@ -352,6 +348,98 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       } finally {
         await resident?.close().catch(() => {});
         G.streamEntry = streamPlain;   // (ai.G outlives this load: no reader left behind on it)
+      }
+
+      // The three parts at the same time (room/flashload.js): the GPU step from the start, the experts' and the n-gram
+      // table's checks next to it, the table's copy in a worker next to it, the experts' copy once the GPU step is done
+      async function loadFlashParallel() {
+        const ac = new AbortController();
+        // Stop (or another device's failed load): the copies stop too, not only the GPU step's paced fetches
+        const stopTick = setInterval(() => { if (ai.startFailed && !ac.signal.aborted) ac.abort(new Error(ai.startFailed)); }, 250);
+        const wordsOn = !!ngCfg && !ngramCopyBlocked();
+        const parts = partsTracker({ sizes: { gpu: total, save: off ? tabExpertBytes(G, off.disk) : 0, words: wordsOn ? wordsBytes : 0 }, onParts, onProg });
+        let checks = (off ? 1 : 0) + (wordsOn ? 1 : 0);
+        const checked = () => { if (--checks === 0) parts.note(null); };
+        if (checks) parts.note("Checking what's already on this computer\u2026");
+        let ngram = null;
+        try {
+          if (off) experts = expertStoreDeferred(dev, off.disk, offload);
+          const inWorker = ngramWorker && typeof globalThis.Worker === "function";
+          await runFlashParts({ parts, ac,
+            gpu: ({ at }) => gpuStep(at),
+            save: off ? {
+              check: () => expertTierCheck(G, off.disk, { readAt }).finally(checked),
+              copy: (chk, { at, signal }) => expertTierCopy(chk, { readAt, signal, onStatus: crumb, onProgress: (d) => at(d), log }),
+              open: async (chk) => { await expertTierOpen(dev, chk, experts, { workers: expertWorkers, ring: expertRing }); offInfo(); },
+            } : null,
+            words: wordsOn ? {
+              check: () => ngramCheck(ngCfg, readAt, { url: urls[ngCfg.shard] }).finally(checked),
+              copy: async (c, { at, signal, parallel, after, onState }) => {
+                // without a worker the copy runs on this thread, after the experts' (two there at once starve both)
+                if (!inWorker) { onState("wait"); await after; onState("run"); }
+                return ingestNgram(ngCfg, readAt, { dir: c.dir, parallel, signal, onProgress: (d) => at(d), onStatus: crumb, log,
+                  worker: inWorker ? { urls } : null, mainAfter: after, onState });
+              },
+            } : null,
+            onWordsFail: (e) => {
+              const why = `${e?.name || "Error"}: ${String(e?.message || e).split("\n")[0].slice(0, 200)}`;
+              console.warn(`n-gram table: copying it into OPFS failed (${why}); reading its rows by HTTP range instead`);
+              crumb(`n-gram table: OPFS copy failed (${why})`);
+            },
+            finish: async ({ weights, words: w }) => {
+              parts.note("Almost ready\u2026");
+              aiStatus("Almost ready\u2026");
+              // the table's copy: opened where words left it (no second signature read, no second copy); a copy that
+              // failed reads its rows by HTTP range (#388: never a second, unseen copy after the bar is done)
+              ngram = weights.pleTable ? await openNgramTable(G, M, !w ? { copy: false } : w.ok ? { dir: w.dir, copy: false } : { copy: false, opfs: false }) : null;
+              await makeEngine(weights, ngram);
+            },
+          });
+        } catch (e) { await ngram?.close?.(); throw e; }
+        finally { clearInterval(stopTick); }
+      }
+
+      // One after the other, as before (?parload=0, for one release): the experts saved, the n-gram table saved, then
+      // the GPU, on one bar of named steps (room/loadsteps.js)
+      async function loadFlashInOrder() {
+        // The load's steps on one bar (room/loadsteps.js), sized before any of them starts: the offloaded layers' experts
+        // saved to this computer, the n-gram table saved there (when this device holds its layer and may write to its
+        // disk), then the layers onto the GPU. Each step's bytes go to onProgress as the whole load's done / total, with
+        // info { step, stepNo, steps, stepDone, stepTotal, line } (line: the technical detail, for the console and a
+        // tooltip): the bar never starts over between steps, and it reaches 100% only with the last GPU byte
+        const steps = loadTracker(planSteps({ saveBytes: off ? off.disk.reduce((a, l) => a + flashExpertBytes(G, l), 0) : 0,
+          wordsBytes: ngCfg && !ngramCopyBlocked() ? wordsBytes : 0, gpuBytes: total }));
+        const prog = (step, d, tot, line = null) => {
+          const o = steps.at(step, tot > 0 ? d / tot : 0);
+          onProg(o.done, o.total, { step, stepNo: o.stepNo, steps: o.steps, stepDone: d, stepTotal: tot, line });
+        };
+        if (off) {
+          let line = null;
+          aiStatus("Checking what's already saved on this computer\u2026");
+          // (the copy's own lines are detail: the breadcrumbs and the bar's tooltip, not the status)
+          const t = await tabExpertTier(dev, G, off.disk, { readAt, offload, workers: expertWorkers, ring: expertRing,
+            onStatus: (s) => { line = s; crumb(s); }, onProgress: (d, tot, s) => prog("save", d, tot, s || line), log });
+          experts = t.store;
+          if (!t.ingest) steps.drop("save");   // on this computer already: the bar skips the step, never goes back
+          offInfo();
+        }
+        // The n-gram table's copy before the GPU step: openNgramTable below then finds the copy there and only opens
+        // it; a copy that fails is said in the console, and openNgramTable then reads the rows by HTTP range
+        let ngramEarlyFailed = false;
+        if (ngCfg && steps.plan.some((s) => s.id === "words")) {
+          aiStatus("Checking what's already saved on this computer\u2026");
+          const copied = await saveNgramEarly(G, M, ngCfg, (d, tot) => prog("words", d, tot), { onFail: () => { ngramEarlyFailed = true; } });
+          if (!copied) steps.drop("words");
+        }
+        prog("gpu", 0, total);
+        const weights = await gpuStep((d) => prog("gpu", d, total));
+        let ngram = null;
+        try {
+          // (a copy that failed just now is not tried again here, after the bar said the load was done: rows by HTTP range)
+          ngram = weights.pleTable ? await openNgramTable(G, M, { copy: !ngramEarlyFailed }) : null;
+          aiStatus("Almost ready\u2026");
+          await makeEngine(weights, ngram);
+        } catch (e) { await ngram?.close?.(); throw e; }
       }
     } else if (M.kind === "gguf") {
       aiStatus("Looking up the model\u2026");
@@ -394,16 +482,18 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   // close() releases the workers and their file locks (room/flash.js close, when the engine is dropped).
   // The OPFS copy is keyed by the table's content (room/flashdisk.js ngramDir / ngramContentSig), and it is copied only
   // when this tab may write to its disk (its user said yes: hooks.tabDisk); a copy already there is read either way.
-  async function openNgramTable(G, M, { copy: tryCopy = true } = {}) {
+  // opts: dir (the copy's directory, known already: no signature read), copy (false: never copy here), opfs (false:
+  // straight to HTTP range, the copy failed in this load)
+  async function openNgramTable(G, M, { copy: tryCopy = true, dir: known = null, opfs = true } = {}) {
     const cfg = ngramConfig(G), urls = M.shards?.length ? M.shards : [M.gguf];
     const readAt = httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }) });
-    let dir = null;
-    if (globalThis.navigator?.storage?.getDirectory) {
+    let dir = opfs ? known : null;
+    if (opfs && !dir && globalThis.navigator?.storage?.getDirectory) {
       try { dir = ngramDir(await ngramContentSig(cfg, readAt, { url: urls[cfg.shard] })); }
       catch (e) { console.warn(`n-gram table: could not read its signature (${e?.message || e}); reading its rows by HTTP range`); }
     }
-    const copy = tryCopy ? await copyNgram(cfg, readAt, dir) : { skipped: "the copy failed earlier in this load" };
-    if (copy.skipped) { console.info(`n-gram table: not copied to this device's disk (${copy.skipped})`); crumb(`n-gram table: no OPFS copy (${copy.skipped})`); }
+    const copy = tryCopy ? await copyNgram(cfg, readAt, dir) : { skipped: opfs ? (known ? "copied earlier in this load" : "not copied in this load") : "the copy failed earlier in this load" };
+    if (copy.skipped && !known) { console.info(`n-gram table: not copied to this device's disk (${copy.skipped})`); crumb(`n-gram table: no OPFS copy (${copy.skipped})`); }
     if (dir) try {
       const { NgramWorkers } = await import("../engine/ngram_worker.js");
       const t = await NgramWorkers.open(cfg, { dir, workers: 4 });

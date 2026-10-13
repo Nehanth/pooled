@@ -419,3 +419,36 @@ Deno.test("gpuTables: each layer's GPU table mirrors its expert -> slot table th
   st.clear();
   assert(same() && st.layers.every((l) => new Int32Array(st.L.get(l).tab.bytes.buffer).every((v) => v === -1)), "clear empties the tables");
 });
+
+// ---- deferred reader (room/flashdisk.js expertStoreDeferred: the tab's disk copy runs after the GPU step) ----
+function attachAll(st, layers, nExp = 32, rows = 64, cols = 128) {
+  for (const l of layers) ["gate", "up", "down"].forEach((p) => st.attach(l, p, tinfo(l, p, nExp, rows, cols), nExp));
+}
+Deno.test("disk deferred: attach, then setDisk, then build works and reads like a store made with its reader", async () => {
+  const dev = fakeDevice(), reader = fakeReader({ nExp: 32, rows: 64, cols: 128, delay: false });
+  const st = new ExpertStore(dev, { layers: [2, 5], slots: 6, parkBytes: 1 << 20, disk: { layers: [2, 5], reader: null, deferred: true } });
+  attachAll(st, [2, 5]);
+  st.setDisk({ reader, ring: null });
+  st.build({ K: 4 });
+  const { st: ref } = makeDiskStore({ delay: false });
+  assert(st.P === ref.P && st.poolBytes === ref.poolBytes, "same pools as a store made with its reader");
+  await diskPlan(st, 2, sel1([1, 2, 3, 4]), 1, 5); await diskPlan(ref, 2, sel1([1, 2, 3, 4]), 1, 5);
+  assert(sameBytes(poolBytes(st, 2), poolBytes(ref, 2)), "same bytes in the pools");
+  assert(st.reader === reader, "the reader set");
+});
+Deno.test("disk deferred: build without setDisk throws; setDisk after build throws; close with no reader is fine", async () => {
+  const st = new ExpertStore(fakeDevice(), { layers: [2, 5], slots: 6, disk: { layers: [2, 5], reader: null, deferred: true } });
+  attachAll(st, [2, 5]);
+  let msg = "";
+  try { st.build({ K: 4 }); } catch (e) { msg = e.message; }
+  assert(/setDisk before build/.test(msg), `build without a reader throws (${msg})`);
+  await st.close();
+  // not deferred: the constructor still refuses disk layers without a reader
+  msg = "";
+  try { new ExpertStore(fakeDevice(), { layers: [2], disk: { layers: [2], reader: null } }); } catch (e) { msg = e.message; }
+  assert(/need a reader/.test(msg), `no reader, not deferred: throws (${msg})`);
+  const { st: built, reader } = makeDiskStore({ delay: false });
+  msg = "";
+  try { built.setDisk({ reader }); } catch (e) { msg = e.message; }
+  assert(/after build/.test(msg), `setDisk after build throws (${msg})`);
+});

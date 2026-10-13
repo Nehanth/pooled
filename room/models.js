@@ -360,8 +360,11 @@ export const kvBytesPerLayerPos = (meta, kv = "f16") => {
 // ?wcache=0 disables converted weights; ?wcacheverify=1 verifies them; ?prefetch=N overrides lookahead.
 export function modelLoadOptions(search) {
   const q = new URLSearchParams(search), prefetch = q.get("prefetch");
+  // parload=0: a Flash tab's load parts one after the other, as before room/flashload.js; ngramworker=0: its n-gram
+  // table copied on the main thread (after the experts')
   return { wcache: q.get("wcache") !== "0", wcacheVerify: q.get("wcacheverify") === "1",
-    prefetch: prefetch === null ? null : Math.max(0, parseInt(prefetch, 10) || 0) };
+    prefetch: prefetch === null ? null : Math.max(0, parseInt(prefetch, 10) || 0),
+    parload: q.get("parload") !== "0", ngramWorker: q.get("ngramworker") !== "0" };
 }
 
 export const MAX_NEW = 400;    // longest answer, tokens
