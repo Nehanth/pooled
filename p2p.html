@@ -669,7 +669,9 @@
   #ai-panel { display: none; flex: none; flex-direction: row; width: min(860px, calc(100% - 32px)); margin: max(24px, calc(20vh - 56px)) auto 32px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; overflow: hidden; box-shadow: 0 1px 2px rgba(20,22,29,.04), 0 12px 24px -12px rgba(20,22,29,.10), 0 40px 80px -40px rgba(20,22,29,.22); animation: enter .45s var(--ease) .05s both; }
   #ai-panel.loading { display: none !important; }
   #ai-panel.online:not(:has(#ai-redeal:not([hidden]))) { display: none !important; }
-  #ai-panel.online { margin: 12px auto 0; order: 0; width: min(460px, calc(100% - 32px)); }
+  /* online, it is only the re-deal card: a flat card in the flow with a gap under it, so it doesn't read as lying on
+     top of the answers below */
+  #ai-panel.online { margin: 12px auto 8px; order: 0; width: min(460px, calc(100% - 32px)); box-shadow: none; }
   #ai-panel.online .ap-side { display: none; }
   .ap-main { flex: 1.15 1 0; min-width: 0; display: flex; flex-direction: column; }
   .ap-side { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; background: var(--panel-3); border-left: 1px solid var(--rule-2); }

@@ -3749,9 +3749,12 @@ async function aiRedeal(force = false) {
   aiLoading(true, "re-dealing the layers");
   await aiStart(model);
 }
-function showRedeal(on, why) {
+// label: the button's words (devices that joined late: "Add pc to the model"); any other reason keeps the default
+const REDEAL = "Re-deal the layers";
+function showRedeal(on, why, label = REDEAL) {
   const b = $("ai-redeal");
   b.hidden = !on || ai.role !== "host";
+  if (on) b.textContent = label;
   if (why) $("redeal-why").textContent = why;
   $("redeal-why").hidden = b.hidden;
 }
@@ -3761,7 +3764,9 @@ function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.m
 function offerRedealForNewcomers() {
   if (ai.role !== "host" || !ai.engine || ai.degraded) return;
   const spare = sparePeers();
-  if (spare.length) showRedeal(true, `${spare.map((id) => conns.get(id)?.name || id).join(", ")} joined after the start and ${spare.length > 1 ? "wait" : "waits"} for a re-deal: re-deal to give ${spare.length > 1 ? "them" : "it"} layers`);
+  const n = spare.length, names = spare.map((id) => conns.get(id)?.name || id);
+  if (n) showRedeal(true, `${names.join(", ")} ${n > 1 ? "are" : "is"} here but not helping yet. Add ${n > 1 ? "them" : "it"} to share the work and speed up answers. Takes a few seconds; the chat stays.`,
+    `Add ${n > 1 ? `${n} devices` : names[0]} to the model`);
   // every screen says who waits for a re-deal (their cards, and their own Lend screen)
   if (spare.length) { ai.outWhy = outNow(); paintHeld(); broadcastAll({ t: "ai-out", out: ai.outWhy }); }
 }
@@ -3775,11 +3780,11 @@ function outNow() {
 // what a device the deal left out says in its own chat (the Serve API screen: room/compute.js lendStatus)
 function outNote(why) {
   if (why === "small") return "Not holding layers: what this device lends is less than one layer of this model. You can still ask.";
-  if (why === "late") return "This device joined after the start: it gets layers when the room re-deals. You can still ask.";
+  if (why === "late") return "This device joined after the start: it starts helping when the host adds it. You can still ask.";
   return `Not needed for this model: the ${isPhoneMeta(myMeta) ? "computers" : "other devices"} hold it. You can still ask.`;
 }
 // the device cards: what each holds of its pledge, or why it holds nothing
-const OUT_TEXT = { unneeded: "not needed: the others hold the model", small: "pledge under one layer", late: "joined after the start: waits for a re-deal" };
+const OUT_TEXT = { unneeded: "not needed: the others hold the model", small: "pledge under one layer", late: "joined after the start: not helping yet" };
 function paintHeld() {
   for (const card of document.querySelectorAll("#peers .peer-card")) {
     const nm = card.dataset.name, why = ai.outWhy?.[nm], held = ai.heldGB?.[nm];
