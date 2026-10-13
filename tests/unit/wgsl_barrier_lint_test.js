@@ -29,8 +29,17 @@ Deno.test("engine WGSL: no barrier that only some threads reach", () => {
 });
 
 Deno.test("engine WGSL: coopWGSL's generated variants (_acc, _cv, _n) too", async () => {
-  const gen = await generatedSources();
+  const gen = (await generatedSources()).filter((g) => g.file.startsWith("coop.js"));
   ok(gen.length >= 6 && gen.every((g) => g.js.includes("fn matvec_coop_n(")), "generated the normed GEMVs");
+  const found = gen.flatMap((g) => lintSources([g]));
+  ok(!found.length, "\n" + found.map((x) => `${x.file} fn ${x.fn}: \`${x.what}\`: ${x.msg}`).join("\n"));
+});
+
+Deno.test("engine WGSL: Flash's f32 / f16 K / V attention kernels and QSA's ring kernels, as generated", async () => {
+  const gen = (await generatedSources()).filter((g) => !g.file.startsWith("coop.js"));
+  ok(gen.length === 12, `generated ${gen.length} Flash / QSA variants`);
+  // the f16 store's barrier (kvStoreRow) is in the generated f16 prep kernels, so the lint sees it inside its fn
+  ok(gen.filter((g) => /attnPrep(Mc)?WGSL\("f16"\)/.test(g.file)).every((g) => g.js.includes("workgroupBarrier")), "f16 prep kernels hold the store barrier");
   const found = gen.flatMap((g) => lintSources([g]));
   ok(!found.length, "\n" + found.map((x) => `${x.file} fn ${x.fn}: \`${x.what}\`: ${x.msg}`).join("\n"));
 });

@@ -191,6 +191,10 @@ const copyable = (b) => b?.usage == null || !!(b.usage & U.COPY_SRC);
 export function qwen4expCore(e) {
   const dev = e.device, cfg = e.cfg, HD = cfg.hDim;
   const kvRow = cfg.nKVHeads * cfg.headDim * 4;   // f32 K (or V) per position
+  // This core's checkpoint layout (stateParts below, FlashRoomEngine.stateSignature) is the dense f32 one: f32 K / V
+  // rows, no QSA state. An engine built with kv: "f16" or QSA would checkpoint wrong rows and drop the indexer state:
+  // refuse it until the room delegates to the engine's own _stateParts / stateSignature (long-context integration).
+  if ((e.kv ?? "f32") !== "f32" || e.qsa) throw new Error(`room/flash.js: the room's Flash checkpoints are f32 K / V without QSA state, not kv ${e.kv}${e.qsa ? " with QSA" : ""}`);
   // One step's ops: the layers' halves fused as forwardToken runs them (each HC combine folded into the next site),
   // laid out without the head, so the last combine stays in and B.R is the finished residual (forwardToken's own
   // lists fold the last layer's combine into the head's site when the engine has the head). Built on first use.

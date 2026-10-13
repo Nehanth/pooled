@@ -12,7 +12,7 @@
 // Per-pass scratch that grows with the context: QSA's block scores, maxCols x ceil(ctx / 4) x 4 per batched pass
 // object (and 1 column for decode); the rest of the scratch is fixed (MBs) and left out.
 // "before" (main before the long-context work): kv "f32", rawRing 0 (rawK for every position).
-import { QSA_KPOOL, QSA_ID } from "./wgsl/qsa.js";
+import { QSA_KPOOL, QSA_ID, QSA_MAX_SEQ } from "./wgsl/qsa.js";
 
 // rawK ring rows by default: passes of up to 1021 columns (256 KB per QSA layer)
 export const QSA_RAW_RING = 1024;
@@ -20,10 +20,12 @@ export const QSA_RAW_RING = 1024;
 const al16 = (n) => Math.max(16, Math.ceil(n / 16) * 16);   // the engine's buffer rounding
 
 // cfg: qwen4expConfig. ctx: the context (the engine's maxSeq). layerRange: [lo, hi) of the trunk this device runs.
+// kv: the K / V format; the default is the engine's ("f32"), so a planner sizing an engine built with defaults never
+// under-counts; pass kv: "f16" for an engine created with it.
 // qsa: the full-attention layers keep the indexer state (false: the dense path, ctx <= 2048).
 // -> { ctx, kv, rawRing, bytes: { kv, rawK, pooled, deltaNet, ple, scores }, state (kv + rawK + pooled + deltaNet +
 //    ple: what a checkpoint of a full context holds), total (state + scores), perToken (the bytes each position adds) }
-export function qwen4expMemory(cfg, { ctx, kv = "f16", rawRing = QSA_RAW_RING, qsa = true, layerRange = null, maxCols = 64, batch = true } = {}) {
+export function qwen4expMemory(cfg, { ctx, kv = "f32", rawRing = QSA_RAW_RING, qsa = true, layerRange = null, maxCols = 64, batch = true } = {}) {
   if (!(Number.isInteger(ctx) && ctx > 0)) throw new Error(`qwen4expMemory: ctx ${ctx}`);
   if (kv !== "f32" && kv !== "f16") throw new Error(`qwen4expMemory: KV format ${kv}`);
   const [lo, hi] = layerRange || [0, cfg.L];
@@ -47,9 +49,20 @@ export function qwen4expMemory(cfg, { ctx, kv = "f16", rawRing = QSA_RAW_RING, q
   return { ctx, kv, rawRing: qsa ? rawRing : 0, layers: { qsa: nQ, deltaNet: nD }, bytes, state, total: state + bytes.scores, perToken };
 }
 
-// The longest context whose state (and scores) fit in `budget` bytes, for a planner that knows a device's free memory.
-export function qwen4expMaxCtx(cfg, budget, opts = {}) {
-  let lo = 0, hi = 1 << 20;
+// The engine's hard ceiling on the context for these options: QSA_MAX_SEQ with QSA (qsa_cs's 2 pi reduction), 2048
+// dense, and (maxBinding: the device's min(maxStorageBufferBindingSize, maxBufferSize)) the per-layer K / V buffer,
+// which the engine binds whole: 128 MiB is 65536 positions in f32, 131072 in f16.
+export function qwen4expCtxCap(cfg, { kv = "f32", qsa = true, maxBinding = Infinity } = {}) {
+  if (kv !== "f32" && kv !== "f16") throw new Error(`qwen4expCtxCap: KV format ${kv}`);
+  const row = cfg.nKVHeads * cfg.headDim * (kv === "f16" ? 2 : 4);
+  return Math.min(qsa ? QSA_MAX_SEQ : 2048, Math.floor(maxBinding / row));
+}
+
+// The longest context whose state (and scores) fit in `budget` bytes, for a planner that knows a device's free memory,
+// clamped to qwen4expCtxCap (a context the engine accepts). opts as qwen4expMemory, plus maxBinding.
+export function qwen4expMaxCtx(cfg, budget, { maxBinding, ...opts } = {}) {
+  let lo = 0, hi = qwen4expCtxCap(cfg, { kv: opts.kv, qsa: opts.qsa ?? true, maxBinding });
+  if (hi <= 0) return 0;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
     if (qwen4expMemory(cfg, { ...opts, ctx: mid }).total <= budget) lo = mid; else hi = mid - 1;

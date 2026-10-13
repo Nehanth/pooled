@@ -2,7 +2,8 @@
 // hand, f16 halving the K / V cache, the raw-key ring's fixed size, a room stage's share, and the budget inverse.
 // The engine's allocations are checked against it on the GPU (tests/test_q38flash_ckpt.js).
 // No GPU.   deno test --allow-read tests/unit/q38flash_mem_test.js
-import { qwen4expMemory, qwen4expMaxCtx, QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
+import { qwen4expMemory, qwen4expMaxCtx, qwen4expCtxCap, QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
+import { QSA_MAX_SEQ } from "../../engine/wgsl/qsa.js";
 
 const assert = (c, m) => { if (!c) throw new Error(m); };
 // the bartowski Qwen3.8-Flash-Next-Q4_0 config (qwen4expConfig), the fields the accounting reads
@@ -25,14 +26,16 @@ Deno.test("Flash state: sizes by hand at 32K", () => {
 
 Deno.test("Flash state: f16 halves the K / V cache, the ring makes rawK fixed", () => {
   for (const ctx of [8192, 32768, 131072, 262144]) {
-    const a = qwen4expMemory(cfg, { ctx, kv: "f32", rawRing: 0 }), b = qwen4expMemory(cfg, { ctx });
-    assert(b.kv === "f16" && b.rawRing === QSA_RAW_RING, "defaults: f16 KV, the ring");
+    const a = qwen4expMemory(cfg, { ctx, kv: "f32", rawRing: 0 }), b = qwen4expMemory(cfg, { ctx, kv: "f16" });
+    const d = qwen4expMemory(cfg, { ctx });
+    assert(d.kv === "f32" && d.rawRing === QSA_RAW_RING, "defaults match the engine's: f32 KV, the ring");
+    assert(d.bytes.kv === a.bytes.kv && b.rawRing === QSA_RAW_RING, `${ctx}: the default counts f32 K / V`);
     assert(b.bytes.kv * 2 === a.bytes.kv, `${ctx}: f16 KV is half`);
     assert(b.bytes.rawK === 12 * QSA_RAW_RING * 256, `${ctx}: rawK ring is ${QSA_RAW_RING} rows per layer`);
     assert(b.bytes.pooled === a.bytes.pooled && b.bytes.deltaNet === a.bytes.deltaNet, `${ctx}: pooled and DeltaNet unchanged`);
     assert(b.perToken === 12 * (2048 + 64), `${ctx}: 24.75 KB per token after`);
   }
-  const big = qwen4expMemory(cfg, { ctx: 262144 });
+  const big = qwen4expMemory(cfg, { ctx: 262144, kv: "f16" });
   assert(Math.round(big.bytes.kv / MiB) === 6144 && Math.round(big.bytes.pooled / MiB) === 192, "256K: 6 GiB KV, 192 MiB pooled");
 });
 
@@ -46,8 +49,20 @@ Deno.test("Flash state: a room stage holds its layers only; no QSA, no indexer s
 });
 
 Deno.test("Flash state: the longest context for a budget", () => {
-  for (const budget of [1, 4, 8].map((g) => g * 2 ** 30)) {
-    const n = qwen4expMaxCtx(cfg, budget);
-    assert(qwen4expMemory(cfg, { ctx: n }).total <= budget && qwen4expMemory(cfg, { ctx: n + 1 }).total > budget, `${budget}: ${n}`);
+  for (const kv of ["f32", "f16"]) for (const budget of [1, 4, 8].map((g) => g * 2 ** 30)) {
+    const n = qwen4expMaxCtx(cfg, budget, { kv });
+    assert(qwen4expMemory(cfg, { ctx: n, kv }).total <= budget && qwen4expMemory(cfg, { ctx: n + 1, kv }).total > budget, `${kv} ${budget}: ${n}`);
   }
+  // the default sizes an engine created with defaults (f32): 1 GiB is about half the f16 context
+  const f32 = qwen4expMaxCtx(cfg, 2 ** 30), f16 = qwen4expMaxCtx(cfg, 2 ** 30, { kv: "f16" });
+  assert(f32 === qwen4expMaxCtx(cfg, 2 ** 30, { kv: "f32" }) && f32 < f16 * 0.6, `default f32 ${f32} vs f16 ${f16}`);
+});
+
+Deno.test("Flash state: the budget inverse stays within the engine's caps", () => {
+  const huge = 2 ** 50, mb128 = 128 * MiB;
+  assert(qwen4expCtxCap(cfg) === QSA_MAX_SEQ && qwen4expMaxCtx(cfg, huge) === QSA_MAX_SEQ, "QSA: QSA_MAX_SEQ");
+  assert(qwen4expMaxCtx(cfg, huge, { qsa: false }) === 2048, "dense: 2048");
+  assert(qwen4expMaxCtx(cfg, huge, { maxBinding: mb128 }) === 65536, "128 MiB binding: 65536 f32 positions");
+  assert(qwen4expMaxCtx(cfg, huge, { kv: "f16", maxBinding: mb128 }) === 131072, "128 MiB binding: 131072 f16 positions");
+  assert(qwen4expMaxCtx(cfg, 2 ** 30, { maxBinding: mb128 }) === qwen4expMaxCtx(cfg, 2 ** 30), "a binding cap above the budget's context changes nothing");
 });
