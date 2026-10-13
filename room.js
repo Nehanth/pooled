@@ -46,10 +46,10 @@ import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, s
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
 import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, START_PENDING_MS } from "./room/authz.js";
-import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge, diskShares } from "./room/plan.js";
+import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge, diskShares, PAGE_SHORT_FIX } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle } from "./room/diskpick.js";
+import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle, allowLabel } from "./room/diskpick.js";
 import { showDiskPick, initDiskPick, refreshDiskPick, diskShortNote, diskStateOf } from "./room/diskpick-ui.js";
 import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
@@ -300,7 +300,7 @@ const metaPromise = (async () => {
 // OPFS can hold Qwen3.8-Flash-Next layers past its pledge with their experts on its disk, read when a token picks them,
 // and the n-gram table there too. Nothing is written until this tab's user says yes: the host asks when it starts
 // Flash (aiStart), a worker when a deal gives it disk layers (the loader's askDisk); the answer is remembered for this
-// site (localStorage) and changed in Room settings, where "Free disk space" deletes the copy. meta.tabDisk says what
+// site (localStorage) and changed in Room settings, where "Delete saved copy" deletes the copy. meta.tabDisk says what
 // the room may deal it: { ramGB, models, ask } until its user answers, without ask after a yes, nothing after a no.
 // ?tabram=G: the RAM its spare and RAM cache take (default 3, held to what the device can spare; 0 turns the tier
 // off); ?tabdisk=0 says no for this page load (the URL can never say yes: room links keep their query).
@@ -324,18 +324,20 @@ function cleanTabDisk(t) {
   const models = Array.isArray(t.models) ? t.models.filter((x) => typeof x === "string").slice(0, 8) : [];
   return +t.ramGB > 0 && models.length ? { ramGB: Math.min(64, +t.ramGB), models, ...(t.ask ? { ask: true } : {}) } : undefined;
 }
-// The question itself (p2p.html #disk-ask): "This model streams from your disk: it will store up to N GB in this
-// browser." Allow / No; the answer is remembered for this site. host: this device starts the model; else the room's
-// host asks for this device's disk. Unanswered for DISK_ASK_MS: no (for this deal only, not remembered).
+// The question itself (p2p.html #disk-ask): "Save Qwen3.8 Flash to this device?", in the picker's words (it downloads
+// N GB once and keeps it on this device's disk). Download and save / Not now; the answer is remembered for this site.
+// host: this device starts the model; else the room's host asks for this device's disk. Unanswered for DISK_ASK_MS: no (for this deal only, not remembered).
 // -> Promise<boolean>
 const DISK_ASK_MS = 120e3;
 let diskAsking = null;
 function askTabDisk({ bytes, model, host = false }) {
   if (diskAsking) return diskAsking;
   const M = MODELS[model];
-  $("disk-ask-h").textContent = `${M ? shortName(model) : "This model"} streams from your disk`;   // the picker's name (room/diskpick.js)
-  $("disk-ask-why").textContent = `It will store up to ${fmtBytes(bytes)} in this browser${host ? "" : ", for the room's host"}, so it can run more than this device's memory holds. `
-    + "It stays for next time; Room settings can free it.";
+  const name = M ? shortName(model) : "this model";   // the picker's name (room/diskpick.js)
+  $("disk-ask-h").textContent = `Save ${name} to this device?`;
+  $("disk-ask-why").textContent = (host ? `It downloads ${fmtBytes(bytes)} once and keeps it on this device's disk, then reads from it while it runs. `
+    : `To help the room run ${name}, this device downloads ${fmtBytes(bytes)} once and keeps it on its disk. `)
+    + "Delete it any time from the model picker or Room settings.";
   $("disk-ask").hidden = false;
   $("disk-ask-allow").focus({ preventScroll: true });
   diskAsking = new Promise((resolve) => {
@@ -574,7 +576,7 @@ function roomFitFor(key) {
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
   const out = { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
-    shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare) };
+    shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare, PAGE_SHORT_FIX) };
   // a model kept on disk (room/models.js DISK_COPY): its need is the GPU memory the planner itself needs from these
   // devices (room/plan.js minFitPledge over roomFit, with their offload and disk tiers), not its size. needGB, with
   // needDisk when the rest streams from disk there; the picker's line, the pool's line and the row all use it.
@@ -681,7 +683,7 @@ function updateNeed(pledged) {
   // GPU figure, so no GB gap is said for it anywhere (the row, under Start, the picker's note, the pool)
   const noStore = !ok && !!diskCopyOf($("ai-model").value) && row?.f?.stores === false;
   const note = noStore ? diskShortNote($("ai-model").value, shortGB, false)
-    : row?.f?.note || (ok ? "" : `This room is ${shortGB} GB short for ${shortName($("ai-model").value)}. Add a device or raise a pledge.`);
+    : row?.f?.note || (ok ? "" : `This room is ${shortGB} GB short for ${shortName($("ai-model").value)}. ${PAGE_SHORT_FIX}.`);
   $("need-fill").style.width = Math.min(100, ok ? 100 : noStore ? 0 : pledged / (pledged + shortGB) * 100).toFixed(1) + "%";
   const has = +pledged.toFixed(1);
   // a model with a fallback context says both needs; a room that holds it only there says so
@@ -698,11 +700,19 @@ function updateNeed(pledged) {
   // short: say by how much and who could give more, right under Start (a disk model: in GPU memory, and the fix its
   // disk answer leaves: room/diskpick.js shortNote)
   $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine;
-  $("ai-short").textContent = diskCopyOf($("ai-model").value) ? diskShortNote($("ai-model").value, shortGB, row?.f?.stores !== false) : note;
+  // written only when it changed: it is a live region (role=status), and this runs on every room update
+  const shortText = diskCopyOf($("ai-model").value) ? diskShortNote($("ai-model").value, shortGB, row?.f?.stores !== false) : note;
+  if ($("ai-short").textContent !== shortText) $("ai-short").textContent = shortText;
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
   const meI = row?.f ? row.f.devs.findIndex((d) => d.meta === myMeta) : -1;
   const give = giveFor(meI >= 0 && row.f.fit.raise[meI] < Infinity ? gbUp(row.f.fit.raise[meI]) : row?.f ? 0 : need - pledged);
   $("ai-give").hidden = ok || !give || ai.busy || !!ai.engine;
+  // short because this device's disk storage is off (not asked, or a no): turn it on right here, under Start, not only
+  // in the right column (room/diskpick-ui.js initDiskPick wires it)
+  const dk = diskCopyOf($("ai-model").value), dState = dk ? diskStateOf($("ai-model").value) : null;
+  const canAllow = !ok && (dState === "deny" || (dState === "ask" && row?.f?.stores === false));
+  $("ai-allow-disk").hidden = !canAllow || ai.busy || !!ai.engine;
+  if (canAllow) $("ai-allow-disk").textContent = allowLabel(dk);
   // what pressing Start costs this device: about its share of the weights file (layers are dealt by
   // memory given), so a phone on mobile data sees ~0.2 GB and a laptop alone the whole file
   const file = FILE_GB[$("ai-model").value];
@@ -728,7 +738,7 @@ function updateNeed(pledged) {
   // read it with (room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap, whatever the stored answer); the
   // picker's note reads whether some device here can store it (roomFitFor stores)
   const tier = tabDiskCan ? tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }) : null;
-  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, stores: row?.f?.stores !== false, needGB: row?.f?.needGB ?? null, fits: !!ok, shareBytes: row?.f?.share?.get(myName) ?? null });
+  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, stores: row?.f?.stores !== false, needGB: row?.f?.needGB ?? null, fits: !!ok, shareBytes: row?.f?.share?.get(myName) ?? null, devs: row?.f?.devs?.length ?? 1 });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
   return rows;
@@ -804,12 +814,12 @@ function renderPool(pledged, rows = []) {
     const all = [...st.values()], nDisk = all.filter((x) => x.kind === "disk").length, nRam = all.filter((x) => x.kind === "ram").length;
     // whether any device can store it is roomFitFor's stores (the row, under Start and the picker read the same)
     const fits = fitsK(sel, selNeed[1]), w = { needGB: F?.needGB ?? null, needDisk: !!F?.needDisk, fits, shortGB: F?.shortGB ?? 0, nStore: F?.stores === false ? 0 : nDisk + nRam };
-    const g = poolGpuLine(dk, w), sl = poolStoreLine(dk, { ...w, nDisk, nRam, anyAsk: all.some((x) => x.kind === "disk" && x.ask) });
+    const g = poolGpuLine(dk, w), sl = poolStoreLine(dk, { ...w, nDisk, nRam, state: diskStateOf(sel) });
     const chip = (c) => c ? `<span>${esc(c)}</span>` : "";
     // the words in an <em> of their own, so a long line wraps beside its chip (p2p.html #ap-need em)
     $("ap-need").innerHTML = `<em>${esc(g.text)}${g.num != null ? ` <b>${g.num} GB</b>` : ""}</em>${chip(g.chip)}`; $("ap-need").classList.toggle("ok", g.ok);
     $("ap-need").classList.add("fl");
-    $("ap-store-n").textContent = `${nDisk + nRam} of ${devs.length}`;
+    $("ap-store-n").textContent = `${nDisk + nRam} of ${devs.length} can store it`;
     $("ap-smeter").querySelector(".apm-fill").innerHTML = devs.map((d) => { const x = st.get(d);
       return `<i class="${x.kind === "disk" ? (x.ask ? "ask" : "") : x.kind === "ram" ? "ram" : "no"}" style="--sw:${devColor(d.name)}"></i>`; }).join("");
     // written only when it changed: it is a live region, and renderPool runs on every room update
@@ -827,7 +837,7 @@ function renderPool(pledged, rows = []) {
   for (const id of ["ap-gpu-k", "ap-store-k", "ap-smeter", "ap-store"]) $(id).hidden = !flash;
   if (!flash) $("ap-store-fix").hidden = true;
   $("ap-devs").innerHTML = devs.map((d) => { const x = flash ? st.get(d) : null;
-    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x, F?.share?.get(d.name)))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x, F?.share?.get(d.name)))}</small>` : ""}</b></li>`; }).join("")
+    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny"))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny", dk))}</small>` : ""}</b></li>`; }).join("")
     || '<li class="none">No device with WebGPU yet</li>';
   devsEdge();
   const can = !!myMeta.webgpu;
@@ -3079,6 +3089,7 @@ function chatBotEnd(note, stats) {
   botEl.querySelector(".bubble").replaceWith(fresh);
   renderBot(botEl, false);
   botEl.classList.remove("live");
+  if (!note && !ai.answered) { ai.answered = true; promptHint(); }
   // a finished answer in a background tab: say so in the tab title until the tab is looked at
   if (!note && document.hidden) { document.title = "\u2713 answer ready \u00b7 pooled"; }
   // under the answer: a copy icon (answers only, not notes), then the numbers
@@ -3386,7 +3397,16 @@ function loadProg(done, total, info = null) {
 // (it reads every offloaded layer's experts from OPFS)
 const offMsg = (o) => (o ? { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}),
   ...(Number.isInteger(o.diskLo) ? { diskLo: o.diskLo, diskRamBytes: o.diskRamBytes } : {}), ...(o.diskOnly ? { diskOnly: true } : {}) } : null);
-function closeEngine() { const e = ai.engine; ai.engine = null; try { e?.close?.()?.catch?.(() => {}); } catch {} }
+function closeEngine() { const e = ai.engine; ai.engine = null; try { e?.close?.()?.catch?.(() => {}); } catch {} ai.answered = false; promptHint(); }
+// The prompt's placeholder: a model read from disk (room/diskpick.js) is slow to its first answer, so until one has come
+// (since the model came online) the box says so; then the plain "Message the room". Only the placeholder: the status
+// lines and the speed numbers are the loading screen's.
+const PROMPT_PH = "Message the room";
+function promptHint() {
+  const k = ai.model || $("ai-model").value;
+  $("ai-prompt").placeholder = $("ai-panel").classList.contains("online") && !ai.answered && diskCopyOf(k)
+    ? `Ask ${shortName(k)}. The first answer takes a little while.` : PROMPT_PH;
+}
 
 // the model host (room/plan.js pickModelHost): the strongest device, a computer before a phone,
 // whoever pressed Start. The room's creator stays the PeerJS hub either way.
@@ -3466,7 +3486,7 @@ function hostDiskBytes(deal, modelKey) {
   return (layers.length ? tabExpertBytes(ai.G, layers) : 0) + (deal.ngram?.at === 0 ? deal.ngram.bytes : 0);
 }
 function shortWhy(M, fit, names, metas) {
-  return shortNote(M.label.split("\u00b7")[0].trim(), fit, names, metas.map(spareGBOf));
+  return shortNote(M.label.split("\u00b7")[0].trim(), fit, names, metas.map(spareGBOf), PAGE_SHORT_FIX);
 }
 async function aiStart(modelArg) {
   if (ai.engine || ai.busy) return;
@@ -3596,7 +3616,12 @@ async function aiStart(modelArg) {
     const myDisk = deal.fit.fits && myMeta.tabDisk?.ask ? hostDiskBytes(deal, modelKey) : 0;
     if (myDisk > 0) {
       aiStatus("Waiting for you to say if the model may be saved on this computer");
-      if (!(await askTabDisk({ model: modelKey, bytes: myDisk, host: true }))) ({ pick, deal } = planNow());
+      if (!(await askTabDisk({ model: modelKey, bytes: myDisk, host: true }))) {
+        ({ pick, deal } = planNow());
+        // "Not now" and the room can't run it without this disk: back to the picker quietly (no "N GB short" error);
+        // it shows disk storage off, with Allow under Start
+        if (!deal.fit.fits) { aiStartStopped("the host kept the model off its disk", { quiet: true }); return; }
+      }
     }
     ROOM_CTX = pick.ctx;
     layerBytes = layerAt(ROOM_CTX);
@@ -3685,7 +3710,8 @@ async function aiStart(modelArg) {
 // (ai-error with load). Every screen goes back to the model picker with Start on, so the room can try
 // again (the other screens are told with ai-start-failed). While this device still loads its own layers
 // the load stops at its next tensor (the pacer) and aiStart's catch lands here.
-function aiStartStopped(why) {
+// quiet: this device's own choice stopped it (a "Not now" to the disk question): no "failed" line here
+function aiStartStopped(why, { quiet = false } = {}) {
   ai.startFailed = null;
   ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null;   // free for the next Start (room/authz.js)
   ai.redealPending = false;   // nothing to deal again: the room is stopped
@@ -3696,7 +3722,7 @@ function aiStartStopped(why) {
   ai.heldGB = null; ai.outWhy = {}; paintHeld();
   failWaiters(new Error(why));
   $("ai-panel").classList.remove("online");
-  aiStatus("failed: " + why);
+  aiStatus(quiet ? "" : "failed: " + why);
   ai.busy = false;
   $("ai-start").disabled = false;
   $("ai-model").disabled = false;
@@ -3739,9 +3765,12 @@ async function aiRedeal(force = false) {
   aiLoading(true, "re-dealing the layers");
   await aiStart(model);
 }
-function showRedeal(on, why) {
+// label: the button's words (devices that joined late: "Add pc to the model"); any other reason keeps the default
+const REDEAL = "Re-deal the layers";
+function showRedeal(on, why, label = REDEAL) {
   const b = $("ai-redeal");
   b.hidden = !on || ai.role !== "host";
+  if (on) b.textContent = label;
   if (why) $("redeal-why").textContent = why;
   $("redeal-why").hidden = b.hidden;
 }
@@ -3751,7 +3780,9 @@ function sparePeers() { return [...conns.keys()].filter((id) => conns.get(id)?.m
 function offerRedealForNewcomers() {
   if (ai.role !== "host" || !ai.engine || ai.degraded) return;
   const spare = sparePeers();
-  if (spare.length) showRedeal(true, `${spare.map((id) => conns.get(id)?.name || id).join(", ")} joined after the start and ${spare.length > 1 ? "wait" : "waits"} for a re-deal: re-deal to give ${spare.length > 1 ? "them" : "it"} layers`);
+  const n = spare.length, names = spare.map((id) => conns.get(id)?.name || id);
+  if (n) showRedeal(true, `${names.join(", ")} ${n > 1 ? "are" : "is"} here but not helping yet. Add ${n > 1 ? "them" : "it"} to share the work and speed up answers. Takes a few seconds; the chat stays.`,
+    `Add ${n > 1 ? `${n} devices` : names[0]} to the model`);
   // every screen says who waits for a re-deal (their cards, and their own Lend screen)
   if (spare.length) { ai.outWhy = outNow(); paintHeld(); broadcastAll({ t: "ai-out", out: ai.outWhy }); }
 }
@@ -3765,11 +3796,11 @@ function outNow() {
 // what a device the deal left out says in its own chat (the Serve API screen: room/compute.js lendStatus)
 function outNote(why) {
   if (why === "small") return "Not holding layers: what this device lends is less than one layer of this model. You can still ask.";
-  if (why === "late") return "This device joined after the start: it gets layers when the room re-deals. You can still ask.";
+  if (why === "late") return "This device joined after the start: it starts helping when the host adds it. You can still ask.";
   return `Not needed for this model: the ${isPhoneMeta(myMeta) ? "computers" : "other devices"} hold it. You can still ask.`;
 }
 // the device cards: what each holds of its pledge, or why it holds nothing
-const OUT_TEXT = { unneeded: "not needed: the others hold the model", small: "pledge under one layer", late: "joined after the start: waits for a re-deal" };
+const OUT_TEXT = { unneeded: "not needed: the others hold the model", small: "pledge under one layer", late: "joined after the start: not helping yet" };
 function paintHeld() {
   for (const card of document.querySelectorAll("#peers .peer-card")) {
     const nm = card.dataset.name, why = ai.outWhy?.[nm], held = ai.heldGB?.[nm];
@@ -3952,6 +3983,7 @@ function aiMaybeReady() {
   clearInterval(ai.progTimer);
   if ($("load-card").classList.contains("on")) aiLoading(false);   // (a device back from a reload also lands here, with the chat up)
   $("ai-panel").classList.add("online");
+  promptHint();
   $("ai-row").style.display = "flex";
   $("chat-tools").hidden = false;
   $("new-chat").hidden = false;
@@ -5072,6 +5104,7 @@ async function aiOnData(from, d) {
       if (ai.role !== "host" && ai.role !== "worker") ai.role = "guest";
       if (ai.role !== "host") ai.hostId = from;
       if (MODELS[d.model]) { setModelValue(d.model); ai.model = d.model; }
+      promptHint();
       // the host opened the model at its fallback context: the room's memory is short for the default
       ai.ctxNote = d.ctxWant > d.ctx && MODELS[d.model] ? ctxShortNote(shortName(d.model), d.ctx, d.ctxWant) : "";
       ai.ctxK = d.ctx > 0 ? ctxK(d.ctx) : "";
@@ -5388,7 +5421,7 @@ $("cache-clear").addEventListener("click", async (ev) => {
   renderCacheModels();
 });
 // This device's disk for big models (room/flashdisk.js): the switch is its user's answer (remembered for this site), and
-// "Free disk space" deletes the Flash copy (experts and n-gram table) with its size; two steps, like Clear above.
+// "Delete saved copy" deletes the Flash copy (experts and n-gram table) with its size; two steps, like Clear above.
 // measure: also read how much the copy takes (the menu opening; a walk of the OPFS files)
 let tabDiskArmed = 0, tabDiskStored = 0;
 const tabDiskFreeLabel = (t, sub) => { const a = $("tabdisk-free"); a.childNodes[1].textContent = t; a.querySelector("small").textContent = sub; };
@@ -5400,17 +5433,17 @@ async function renderTabDisk(measure = false) {
   $("tabdisk-allow").checked = choice === "allow";
   // the size is the picker's (DISK_COPY diskBytes), and so are the answer's words (room/diskpick.js DISK_STATE)
   const fl = DISK_COPY["qwen3.8-flash"];
-  $("d-tabdisk").textContent = `${fl.name} can stream from disk when the room's memory is short: it stores up to ${fmtBytes(fl.diskBytes)} in this browser. `
+  $("d-tabdisk").textContent = `${fl.name} runs from disk: it saves up to ${fmtBytes(fl.diskBytes)} to this device once. `
     + (choice === "allow" ? "Allowed." : choice === "deny" ? "Not allowed." : "Not asked: you are asked when the model needs it.");
   if (measure) tabDiskStored = (await flashDiskBytes().catch(() => ({ total: 0 }))).total;
   $("tabdisk-line").hidden = !tabDiskStored;
-  if (!tabDiskArmed) tabDiskFreeLabel("Free disk space", `Deletes the big model's copy on this device (${fmtBytes(tabDiskStored)})`);
+  if (!tabDiskArmed) tabDiskFreeLabel("Delete saved copy", `Deletes ${fl.name}'s copy on this device (${fmtBytes(tabDiskStored)})`);
 }
 $("tabdisk-allow").addEventListener("change", (ev) => {
   saveTabDiskChoice(ev.target.checked ? "allow" : "deny", globalThis.localStorage);
   tabDiskDeclined = false;
   tabDiskChanged();
-  toast(ev.target.checked ? "big models may use this device's disk" : "big models stay off this device's disk (Free disk space deletes what is there)");
+  toast(ev.target.checked ? "big models may use this device's disk" : "big models stay off this device's disk (Delete saved copy deletes what is there)");
 });
 $("tabdisk-free").addEventListener("click", async (ev) => {
   ev.preventDefault();
@@ -5424,7 +5457,7 @@ $("tabdisk-free").addEventListener("click", async (ev) => {
   const r = await freeTabDisk();
   if (r.refused) toast(r.refused);
 });
-// Delete the Flash copy on this device (Room settings' "Free disk space", the picker's "Delete stored copy"), after
+// Delete the Flash copy on this device (Room settings' "Delete saved copy", the picker's Delete), after
 // both presses. -> { removed, kept } or { refused: why it did not run }
 async function freeTabDisk() {
   // the running model reads the copy (open files), and a load may be copying into it or reading from it: stop first
@@ -5970,6 +6003,7 @@ if (new URLSearchParams(location.search).get("sim") === "1" && ["127.0.0.1", "lo
       ai.range = mine ? [+mine[1], +mine[2] + 1] : null;
       aiLoading(false);
       $("ai-panel").classList.add("online");
+      promptHint();
       $("ai-row").style.display = "flex"; $("chat-tools").hidden = false; $("mode-bar").hidden = false;
       emptyText("The model is ready. Ask anything.");
       for (const card of document.querySelectorAll("#peers .peer-card")) peerStatus(card, "ready", true);
