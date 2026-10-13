@@ -3,11 +3,11 @@ const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); 
 const serving = { phase: "serving", lo: 0, hi: 20, model: "Qwen3.5 27B", bytes: 2.4 * 2 ** 30 };
 
 Deno.test("lend: serving shows its layers and how much it holds", () => {
-  eq(lendStatus(serving), { title: "Serving", sub: "Layers 1–20 · 2.4 GB · Qwen3.5 27B" });
+  eq(lendStatus(serving), { title: "Serving", sub: "Holds part of Qwen3.5 27B · 2.4 GB" });
 });
 Deno.test("lend: a small shard reads in MB, and no size before the load says one", () => {
-  eq(lendStatus({ ...serving, bytes: 300 * 2 ** 20 }).sub, "Layers 1–20 · 300 MB · Qwen3.5 27B");
-  eq(lendStatus({ ...serving, bytes: 0 }).sub, "Layers 1–20 · Qwen3.5 27B");
+  eq(lendStatus({ ...serving, bytes: 300 * 2 ** 20 }).sub, "Holds part of Qwen3.5 27B · 300 MB");
+  eq(lendStatus({ ...serving, bytes: 0 }).sub, "Holds part of Qwen3.5 27B");
 });
 Deno.test("lend: loading, not holding layers, standing by", () => {
   eq(lendStatus({ ...serving, phase: "loading", pct: 41.6 }).title, "Loading 42%");

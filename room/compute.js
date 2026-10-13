@@ -39,10 +39,10 @@ export function lendStatus(s) {
     : { title: "Host reconnecting", sub: s.over.why || "The host's tab closed. Waiting a minute in case it comes back." };
   const has = s.lo != null && s.hi != null && s.hi > s.lo;   // an empty range (lo == hi) holds nothing
   const model = s.model || "the model";
-  // "Layers 1–20 · 2.4 GB · Qwen": which layers, and how much of the model's weights they are
-  // (with the host's deal: "2.9 of 3 GB", what the device holds against what it pledged)
+  // "Holds part of Qwen · 2.4 GB": that it holds some of the model, and how much of its weights (with the host's deal:
+  // "2.9 of 3 GB", what the device holds against what it pledged). Which layers is the strip's job, not the words'.
   const mem = s.held != null && s.pledge ? `${(+s.held).toFixed(1)} of ${+(+s.pledge).toFixed(1)} GB` : s.bytes ? gb(s.bytes) : "";
-  const held = has ? `Layers ${s.lo + 1}–${s.hi}${mem ? " · " + mem : ""} · ${model}` : "";
+  const held = has ? `Holds part of ${model}${mem ? " · " + mem : ""}` : "";
   // while it works too: the hop dot and the numbers show the passes (between answers it stays "Serving")
   if (s.phase === "serving" && has) return { title: "Serving", sub: held };
   // holds no layers, and the host said why: this screen must not look broken
@@ -168,10 +168,11 @@ export function computeScreen({ state, keepAwake = () => {}, newRoom = () => {},
     $("cs-ms").textContent = lastMs != null ? Math.round(lastMs) + " ms" : "";
     $("cs-ms").parentNode.hidden = lastMs == null;
   }
-  // a pass hopped over to this device: its dot flashes
+  // a pass hopped over to this device: its dot flashes (the developer view only, ?dev=1: the numbers' row it sits in is
+  // hidden otherwise, and a flash on every token is loud)
   function hop() {
     const d = root.querySelector(".cs-hop");
-    if (!d || REDUCED()) return;
+    if (!d || REDUCED() || !document.documentElement.classList.contains("dev")) return;
     d.animate([{ opacity: 1, transform: "scale(1.6)", boxShadow: "0 0 10px var(--me)" }, { opacity: .35, transform: "scale(1)", boxShadow: "0 0 0 transparent" }], { duration: 420, easing: "cubic-bezier(.2,.7,.2,1)" });
     d.parentNode.animate([{ color: "#EEF0F6" }, { color: "var(--on-game-2)" }], { duration: 420, easing: "ease-out" });
   }

@@ -60,7 +60,8 @@ import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor, storageOf }
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
-import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
+import { stepPill, stepLine, stepBytes, rowVerb } from "./room/loadsteps.js";
+import { fmtTps, speedLine, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
 import { TeleMeter, expertCache, expertCacheOf, expertStoreOf } from "./room/tele.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 import { convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
@@ -707,11 +708,12 @@ function updateNeed(pledged) {
   const file = FILE_GB[$("ai-model").value];
   const mine = ok && file && myMeta.webgpu && myMeta.contribGB ? file * Math.min(1, myMeta.contribGB / pledged) : 0;
   const size = (gb) => gb < 1 ? `${Math.max(10, Math.round(gb * 1024 / 10) * 10)} MB` : `${gb.toFixed(1)} GB`;
+  // (a disk model, Qwen3.8 Flash: showDiskPick below writes its own note, pickNote, over this one)
   $("ap-note").textContent = mine
     ? (mine >= file * 0.98 ? `Start downloads the whole ${size(file)} model to this device, once. It stays cached for next time.`
       : `Start downloads about ${size(mine)} to this device (its share of ${size(file)}), once. It stays cached for next time.`)
-    : ok && file && !myMeta.webgpu ? "This device only chats, so it downloads no layers."
-    : "Each device downloads only its own layers, once. They stay cached for next time.";
+    : ok && file && !myMeta.webgpu ? "This device only asks questions, so it doesn't load any of the model."
+    : "Each device gets only its own part of the model, once. It stays saved for next time.";
   // every device here is chat only: say why Start is off, right under it
   $("ai-why").hidden = pledged > 0 || ai.busy || !!ai.engine;
   // and say so beside the stepper, which is the one-tap fix (not a second device)
@@ -2889,10 +2891,11 @@ function aiLoading(show, title) {
   $("ai-panel").classList.toggle("loading", !!show);
   $("load-card").classList.toggle("on", !!show);
   $("ai-empty").style.display = show ? "none" : "";
-  if (show) { $("lc-model").textContent = MODELS[$("ai-model").value]?.label.split("·")[0].trim() || ""; lcBytes = false; eta.t0 = 0; lcStatus(null, "Getting this device ready"); }
+  // (the model's name as the running screen says it: shortName)
+  if (show) { $("lc-model").textContent = MODELS[$("ai-model").value] ? shortName($("ai-model").value) : ""; lcBytes = false; eta.t0 = 0; lcStatus(null, "Getting this computer ready"); $("load-card").querySelector(".lc-note").textContent = lcNote(); }
   lcStarting(false);
   if (show) loadCardRender();
-  if (show && /re-deal/.test(title || "")) { speed.redeal = true; speedEvent("re-dealing layers"); }
+  if (show && /re-deal/.test(title || "")) { speed.redeal = true; speedEvent("Sharing out the model again"); }
 }
 // Every device has its layers: the card turns to the Pooled mark in its wave, "Starting <model>", and
 // the step it is on, until the room opens. After a short wait, so a small model that starts at once
@@ -2900,15 +2903,23 @@ function aiLoading(show, title) {
 let lcStartT = 0;
 function lcStarting(on, n = 0) {
   const card = $("load-card");
-  if (!on) { clearTimeout(lcStartT); lcStartT = 0; if (card.classList.contains("starting")) { card.classList.remove("starting"); $("lc-verb").textContent = "Loading"; $("load-card").querySelector(".lc-note").textContent = "Each device downloads only its own layers."; } return; }
+  if (!on) { clearTimeout(lcStartT); lcStartT = 0; if (card.classList.contains("starting")) { card.classList.remove("starting"); $("lc-verb").textContent = "Loading"; $("load-card").querySelector(".lc-note").textContent = lcNote(); } return; }
+  // (a device still saving to its disk is not done, whatever its bar says: room/loadsteps.js)
+  if (Object.values(ai.step || {}).some((s) => s === "save" || s === "words")) return;
   if (lcStartT || card.classList.contains("starting")) return;
   lcStartT = setTimeout(() => {
     lcStartT = 0;
     if (!card.classList.contains("on")) return;
     card.classList.add("starting");
     $("lc-verb").textContent = "Starting";
-    card.querySelector(".lc-note").textContent = n > 2 ? `All ${n} devices have their layers` : n === 2 ? "Both devices have their layers" : "The layers are all here";
+    card.querySelector(".lc-note").textContent = n > 2 ? `All ${n} devices are ready` : n === 2 ? "Both devices are ready" : "Everything is loaded";
   }, 700);
+}
+// the card's note under the model's name; for Qwen3.8 Flash on a tab whose user allowed its disk, that the first start
+// saves it there (room/flashdisk.js: the reason the first load has a saving step and later ones don't)
+function lcNote() {
+  const flashDisk = ($("ai-model")?.value || ai.model) === "qwen3.8-flash" && tabDiskNow() === "allow";
+  return "Each device gets only its own part of the model." + (flashDisk ? " The first time, it's saved to this computer so later starts are quick." : "");
 }
 function loadCardRender() {
   const rows = $("lc-rows"); if (!rows) return;
@@ -2917,8 +2928,11 @@ function loadCardRender() {
   const order = Object.keys(by);
   rows.innerHTML = names.map((nm) => {
     const pct = Math.max(0, Math.min(100, (ai.prog || {})[nm] ?? 0));
-    const l = by[nm];
-    return `<div class="lc-row${pct >= 100 ? " done" : ""}${l || !order.length ? "" : " out"}" style="--sw:${devColor(nm)}"><i class="sw"></i><div class="n"><span class="nm">${esc(String(nm))}${nm === myName ? " <small>(you)</small>" : ""}</span>${l ? `<span class="lr">${pct >= 100 ? "" : '<span class="lw">downloading </span>'}layers ${esc(humanRange(l))}</span>` : ""}</div><div class="bar"><div class="fill" style="width:${pct}%"></div></div><div class="pct">${pct >= 100 ? "ready" : pct + "%"}</div></div>`;
+    const l = by[nm], step = (ai.step || {})[nm];
+    // the row's verb from the step it is on (room/loadsteps.js: "saving" to its disk, then "loading"), its pct the
+    // whole load's: "ready" only once every step is done
+    const saving = step === "save" || step === "words";
+    return `<div class="lc-row${pct >= 100 ? " done" : ""}${saving ? " saving" : ""}${l || !order.length ? "" : " out"}" style="--sw:${devColor(nm)}"><i class="sw"></i><div class="n"><span class="nm">${esc(String(nm))}${nm === myName ? " <small>(you)</small>" : ""}</span>${l ? `<span class="lr" title="layers ${esc(humanRange(l))}">${pct >= 100 ? `${nm === myName ? "your" : "its"} part is in` : `<span class="lw">${rowVerb(step)} </span>${nm === myName ? "your" : "its"} part`}</span>` : ""}</div><div class="bar"><div class="fill" style="width:${pct}%"></div></div><div class="pct">${pct >= 100 ? "ready" : pct + "%"}</div></div>`;
   }).join("");
   // the model as a strip of layers: each device's share fills in as its download goes
   const spans = order.map((nm) => { const m = /^(\d+)\D+(\d+)$/.exec(by[nm]); return m ? { nm, lo: +m[1], hi: +m[2] + 1 } : null; }).filter(Boolean);
@@ -2931,7 +2945,9 @@ function loadCardRender() {
     const L = c * per, sp = spans.find((x) => L >= x.lo && L < x.hi);
     const pct = sp ? (ai.prog || {})[sp.nm] ?? 0 : 0;
     const got = sp && (L - sp.lo) / Math.max(1, sp.hi - sp.lo) * 100 < pct;
-    html += `<i${got ? ` style="background:${devColor(sp.nm)}"` : ""}></i>`;
+    // tinted lighter while that device is still saving to its disk, solid once its layers go onto the GPU
+    const sv = got && /^(save|words)$/.test((ai.step || {})[sp.nm] || "");
+    html += `<i${got ? `${sv ? ' class="saving"' : ""} style="background:${devColor(sp.nm)}"` : ""}></i>`;
   }
   strip.innerHTML = html;
   $("lc-sum").textContent = `${total} layers · ${spans.length} device${spans.length > 1 ? "s" : ""}`;
@@ -2943,21 +2959,42 @@ function loadCardRender() {
 // or 10 s with a steady rate), so the first guess is not a wild one.
 let lcBytes = false;
 const eta = { t0: 0, t: 0, done: 0, rate: 0, hist: [] };
-const fmtBytes = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GB" : Math.max(1, Math.round(b / 2 ** 20)) + " MB";
+const fmtBytes = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GB" : (b > 0 ? Math.max(1, Math.round(b / 2 ** 20)) : 0) + " MB";
+// a load's whole percent: rounded down, so 99.6% is not "100" (the card says "ready" and starts at 100: only at the end)
+const loadPct = (done, total) => (total > 0 ? (done >= total ? 100 : Math.max(0, Math.floor(done / total * 100))) : 0);
 function etaText(s) {
   if (s < 45) return "less than a minute left";
   if (s < 90) return "about a minute left";
   return `about ${Math.round(s / 60)} min left`;
 }
+// With p.step (a load in named steps, room/loadsteps.js: Qwen3.8 Flash saving to this computer, then the GPU): the
+// pill says which step ("Step 1 of 3"; or "Loading from cache" / "Copying from the room" when that is the news), the
+// line under it what the step does with its own bytes ("Saving the model to this computer (first time only) · 22.3 of
+// 63.6 GB"), and the time left is the whole card's (the row's % and the bar are the whole load too). The technical
+// line (what is being copied where) is in the tooltip only. Without p: just the text (no pill: it said "This
+// computer" next to every general status)
 function lcStatus(p, text) {
   const el = $("lc-status"); if (!el) return;
-  if (!p) { el.innerHTML = `<span class="src gpu">This device</span><span>${esc(String(text || "").replace(/^./, (c) => c.toUpperCase()))}</span>`; return; }
-  const src = p.src === "cache" ? ["cache", "Loading from cache"] : p.src === "peer" ? ["", "Copying from the room"] : ["", "Downloading"];
+  if (!p) { el.removeAttribute("title"); el.innerHTML = `<span class="msg">${esc(String(text || "").replace(/^./, (c) => c.toUpperCase()))}</span>`; return; }
   const et = p.left == null ? '<span class="eta wait">estimating time left</span>' : p.left > 1 ? `<span class="eta">${etaText(p.left)}</span>` : "";
+  if (p.step) {
+    const gpu = p.step === "gpu";
+    const src = gpu && p.src === "cache" ? ["cache", "Loading from cache"] : gpu && p.src === "peer" ? ["", "Copying from the room"] : [gpu ? "" : "save", stepPill(p)];
+    const pill = src[1] ? `<span class="src ${src[0]}">${esc(src[1])}</span>` : "";
+    const bytes = p.stepTotal > 0 ? ` \u00b7 <span class="b">${stepBytes(p.stepDone, p.stepTotal)}</span>` : "";
+    const line = `<span class="step${pill ? "" : " solo"}">${esc(stepLine(p.step))}${bytes}</span>`;
+    el.innerHTML = pill ? `${pill}${p.done < p.total ? et : ""}${line}` : `${line}${p.done < p.total ? et : ""}`;
+    if (p.line) el.title = p.line; else el.removeAttribute("title");
+    return;
+  }
+  el.removeAttribute("title");
+  const src = p.src === "cache" ? ["cache", "Loading from cache"] : p.src === "peer" ? ["", "Copying from the room"] : ["", "Downloading"];
   el.innerHTML = `<span class="src ${src[0]}">${src[1]}</span><span class="b">${fmtBytes(p.done)} of ${fmtBytes(p.total)}</span>${p.done < p.total ? et : ""}`;
 }
-function aiProgress(done, total, note) {
-  const pct = total ? Math.min(100, Math.round(done / total * 100)) : 0;
+// info: the load's step (room/model-loader.js qwen4exp: { step, stepNo, steps, stepDone, stepTotal, line }); done and
+// total are then the whole load's, so the bar and the time left run on across the steps
+function aiProgress(done, total, note, info = null) {
+  const pct = loadPct(done, total);
   const now = performance.now();
   if (done < eta.done || !eta.t0) { eta.t0 = eta.t = now; eta.done = done; eta.rate = 0; eta.hist = []; }
   else if (now - eta.t > 500) {
@@ -2974,7 +3011,7 @@ function aiProgress(done, total, note) {
   $("ldg-fill").style.width = pct + "%";
   $("ldg-sub").textContent = `${(done / 2 ** 20).toFixed(0)} MB of ${(total / 2 ** 20).toFixed(0)} MB · ${pct}%${leftTxt}` + (note ? " · " + note : "");
   lcBytes = done < total;
-  if (lcBytes) lcStatus({ done, total, left: known ? left : null, src: ai.netBytes ? "net" : ai.peerBytes ? "peer" : cacheHits ? "cache" : "net" });
+  if (lcBytes) lcStatus({ done, total, left: known ? left : null, src: ai.netBytes ? "net" : ai.peerBytes ? "peer" : cacheHits ? "cache" : "net", ...(info?.step ? info : {}) });
 }
 function emptyText(s) { $("ai-empty-t").textContent = s; }
 function aiOut() { const o = $("ai-output"); o.style.display = "block"; $("ai-empty").style.display = "none"; return o; }
@@ -3004,7 +3041,8 @@ function chatBotStart(mid) {
   m.querySelector(".wn").textContent = shortName(ai.model || $("ai-model").value) || "room";
   // until the first token: the working line (the first piece replaces it)
   const n = Object.keys(ai.layersByName || {}).length;
-  m.querySelector(".bubble").append(working({ lead: n ? `Reading your message on ${n} device${n > 1 ? "s" : ""}` : "" }));
+  // one steady line (no verbs rotating every two seconds); the device count only when there is more than one
+  m.querySelector(".bubble").append(working({ steady: true, lead: n > 1 ? `Reading your message on ${n} devices` : "Reading your message" }));
   m.classList.add("live");
   m.pieces = [];
   o.appendChild(m); scrollChat();
@@ -3047,11 +3085,35 @@ function chatBotEnd(note, stats) {
   const acts = document.createElement("div");
   acts.className = "m-acts";
   if (!note && botEl.pieces.length) acts.innerHTML = `<button type="button" class="copy-ans icon-act" aria-label="Copy the answer" title="Copy">${COPY_SVG}</button>`;
-  if (stats) { const s = document.createElement("div"); s.className = "stats"; s.textContent = stats; acts.appendChild(s); }
+  // the numbers ("24 tok · 18.3 tok/s · 2 devices") stay in the tooltip; the line says only what a person would want
+  // to know: that older messages were forgotten, the room carried on after a device left, or the answer failed
+  if (stats) { const s = document.createElement("div"); s.className = "stats"; s.textContent = statsNote(stats); s.title = stats; acts.appendChild(s); }
   if (acts.childElementCount) botEl.appendChild(acts);
   if (!note && botEl.dataset.mid && readAloud && botEl.pieces.length) speak(botEl.pieces.map((p) => p.t).join(""));
   speedDone(stats, botEl.dataset.mid ?? null);
   botEl = null;
+}
+// a device's share of the model in words, for its card: "half", "a third", "about 40%"
+function shareWords(f) {
+  const near = (x) => Math.abs(f - x) < 0.03;
+  return near(0.5) ? "half" : near(1 / 3) ? "a third" : near(2 / 3) ? "two thirds" : near(0.25) ? "a quarter" : near(0.75) ? "three quarters" : `about ${Math.max(1, Math.round(f * 100))}%`;
+}
+// the model's size, short: "125B model" (room/speedo.js paramsOf; what B means is in the tooltip, paramsText); ""
+// without a size
+function sizeText(p) {
+  const m = /^(\d+(?:\.\d+)?)([BMT])$/.exec(p?.total || "");
+  return m ? `${m[1]}${m[2]} model` : "";
+}
+// What the line under an answer shows of its stats (engine/generate.js; room/speedo.js parseStats reads the same
+// string, so it is not changed): nothing for an ordinary answer, a plain note when something happened
+function statsNote(stats) {
+  const s = String(stats || "");
+  if (/^failed:/.test(s)) return s;
+  const notes = [];
+  if (/forgotten to fit/.test(s)) notes.push("Forgot the oldest messages to make room");
+  if (/carried on after/.test(s)) notes.push("Kept going after a device left");
+  if (/via API/.test(s)) notes.push("Answered for a connected app, not part of this chat's memory");
+  return notes.join(" · ");
 }
 // the clipboard icon, and the tick it turns into for a moment once copied
 const COPY_SVG = '<svg class="cp" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8.5" rx="1.8"/><path d="M10.5 5.5V3.8c0-1-.8-1.8-1.8-1.8H4.3c-1 0-1.8.8-1.8 1.8v4.4c0 1 .8 1.8 1.8 1.8h1.2"/></svg><svg class="ok" width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7"/></svg>';
@@ -3168,17 +3230,21 @@ function setCtx(used, max) {
   const el = $("ctx-meter"); if (!el) return;
   if (!used || !max) { el.replaceChildren(); el.removeAttribute("title"); el.classList.remove("warn"); return; }
   const pct = Math.min(100, Math.max(1, Math.round(used / max * 100)));
-  el.innerHTML = `<i style="--p:${pct}" aria-hidden="true"></i>${pct}% of context`;
+  el.innerHTML = `<i style="--p:${pct}" aria-hidden="true"></i>${pct}% of chat memory used`;
   el.title = `${used.toLocaleString("en-US")} of ${max.toLocaleString("en-US")} tokens`;
   el.classList.toggle("warn", used > max * 0.8);
 }
 
 // Main and draft loads share the room's pacing and cancellation policy.
+// Only the GPU step is paced (room/loadsteps.js): a device still saving to its disk is not waited on, and a device's
+// GPU percent (ai.gpuProg) is compared, not its whole load's, or the one holding the n-gram table (28.8 GB more to
+// save) would hold the others back. A peer on an older build sends no step: its one percent is its GPU percent.
 function slowestLoadProgress() {
   const now = Date.now();
   let m = Infinity;
-  for (const [nm, pct] of Object.entries(ai.prog || {})) {
-    if (nm === myName || pct >= 100) continue;
+  for (const [nm, all] of Object.entries(ai.prog || {})) {
+    const step = (ai.step || {})[nm], pct = (ai.gpuProg || {})[nm] ?? all;
+    if (nm === myName || pct >= 100 || (step && step !== "gpu")) continue;
     if (now - ((ai.progAt || {})[nm] || 0) > 30000) continue;     // silent for 30 s: don't wait on it
     m = Math.min(m, pct);
   }
@@ -3186,12 +3252,17 @@ function slowestLoadProgress() {
 }
 async function aiLoadPace() {
   if (ai.startFailed) throw new Error(ai.startFailed);   // the start was stopped (aiStartStopped): no point loading the rest
-  while (ai.myPct < 100 && ai.myPct > slowestLoadProgress() + 4) {
-    aiStatus(`downloading weights\u2026 in step with the room (${Math.round(ai.myPct)}%)`);
+  while (ai.gpuPct < 100 && ai.gpuPct > slowestLoadProgress() + 4) {
+    aiStatus("Waiting a moment so every device finishes together");
     await new Promise((r) => setTimeout(r, 250));
   }
 }
 
+// what a person sees when this computer's GPU fails the quick check before a load (the self-test, the kernel tests): what
+// it means for them, in plain words; the test's own detail (err.detail) goes to the console and the room's log
+const GPU_CHECK_FAILED = "This computer's graphics chip didn't pass a quick check, so it can't hold part of the model.";
+// the same, as the host reads it about another device (its log and toast: "pc couldn't load its part of the model (…)"), with the detail
+const gpuCheckFailedFor = (err) => `its graphics chip didn't pass a quick check${err?.detail ? ` (${err.detail})` : ""}`;
 // the breadcrumbs written while this runs say "loading": if iOS kills the tab now, the host learns
 // from the hello after the reload that this share was too big for it (aiLoadDeath)
 async function aiLoadShard(...args) {
@@ -3207,7 +3278,7 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   const M = MODELS[modelKey];
   ai.shardBytes = 0;   // until this load's first progress says how big the new range is
   aiLoading(true, `loading layers ${range[0]}\u2013${range[1] - 1} of ${M.label.split("\u00b7")[0].trim()}`);
-  aiStatus("requesting GPU\u2026");
+  aiStatus("Getting this computer ready\u2026");
   mascot("Grabbing my slice of the model… hang tight.");
   // a previous attempt in this tab still owns its weights: release them first, or the
   // second load doubles GPU memory and every buffer after the limit comes back invalid
@@ -3217,7 +3288,7 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   ai.held = null; ai.waker = null; ai.draft = null;
   ai.firstGpuError = null;
   ai.peerBytes = 0; ai.netBytes = 0; cacheHits = 0;   // per load: a count left from an earlier load in this tab mislabels the status
-  if (!Qwen35Engine) { aiStatus("loading the inference engine\u2026"); await loadEngine(); }
+  if (!Qwen35Engine) { aiStatus("Getting this computer ready\u2026"); await loadEngine(); }
   const adapter = await navigator.gpu?.requestAdapter();
   if (!adapter) throw new Error("This browser has no WebGPU, so this device can't hold layers. Open the room in a recent Chrome, Edge or Safari, or run the model from another device");
   ai.device = await adapter.requestDevice({
@@ -3234,49 +3305,35 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
     log("room", "\u26a0 GPU error on " + myName + ": " + (ev.error?.message || "").slice(0, 140));
   });
   if (location.hash === "#debug") log("room", `${myName}: maxBuf ${(adapter.limits.maxBufferSize / 2 ** 30).toFixed(1)} GB \u00b7 maxBind ${(adapter.limits.maxStorageBufferBindingSize / 2 ** 20).toFixed(0)} MB`);
-  aiStatus("testing GPU kernels on this device\u2026");
+  aiStatus("Checking the graphics chip\u2026");
   const tAdapter = await navigator.gpu.requestAdapter();   // an adapter gives out one device only
   const tdev = await tAdapter.requestDevice();               // throwaway: its test buffers die with it
   const st = await gpuSelfTest(tdev);
   if (!st.ok) log("room", `${myName} GPU self-test: ${st.detail}`);
-  if (!st.ok) throw new Error("GPU self-test FAILED on this device: " + st.detail + " \u2014 please screenshot this");
+  // (the detail goes to the console and the room's log; the person sees what it means for this computer)
+  if (!st.ok) { console.error(`GPU self-test failed on this device: ${st.detail}`); throw Object.assign(new Error(GPU_CHECK_FAILED), { detail: `GPU self-test: ${st.detail}` }); }
   const mt = await kernelMicroTests(tdev);
   if (!mt.ok) log("room", `${myName} kernels: ${mt.detail}`);
-  if (!mt.ok) throw new Error("GPU kernel FAILED on this device \u2192 " + mt.firstFail + " \u2014 please send me this line");
+  if (!mt.ok) { console.error(`GPU kernel check failed on this device: ${mt.firstFail} (${mt.detail})`); throw Object.assign(new Error(GPU_CHECK_FAILED), { detail: `GPU kernel: ${mt.firstFail}` }); }
   try { tdev.destroy(); } catch {}
   ai.device.lost.then((l) => crumb("GPU device lost: " + l.reason + " " + l.message));
-  aiStatus("tuning kernels for this GPU\u2026");
+  aiStatus("Checking the graphics chip\u2026");
   ai.tune = await autotuneCoop(ai.device).catch(() => ({ wg: 256, rows: 4 }));
   crumb(`autotune: WG=${ai.tune.wg} ROWS=${ai.tune.rows}`);
   const isPhone = myMeta?.phone;
-  ai.myPct = 0;
-  ai.prog = { [myName]: 0 }; ai.progAt = { [myName]: Date.now() };
+  ai.myPct = 0; ai.gpuPct = 0;
+  ai.prog = { [myName]: 0 }; ai.progAt = { [myName]: Date.now() }; ai.step = {}; ai.gpuProg = {};
   const streamOpts = { pace: isPhone ? 300 : 0, staging: isPhone ? 2 * 2 ** 20 : 8 * 2 ** 20 };
   if (M.cfg) {
     ai.cfg = await (await fetch(M.cfg)).json();
     if (hasEmbed || hasHead) { ai.tok = makeTokenizer(await (await fetch(M.tok)).json()); apiModelLoaded(); }
   }
 
-  // line: what the bytes are, when the loader says (the experts' copy to this device's disk: room/flashdisk.js), so the
-  // status keeps saying that instead of flipping to "downloading" on every progress tick
-  const onProg = (done, total, line = null) => {
-    aiProgress(done, total);
-    // name where the bytes are coming from right now: the network, devices in the room, or this device's cache
-    const gb = (b) => (b / 2 ** 30).toFixed(1) + " GB";
-    aiStatus(line || (ai.netBytes ? `downloading weights\u2026${cacheHits ? ` (${gb(cacheHits)} was already on this device)` : ""}`
-      : ai.peerBytes ? `getting weights from devices in the room\u2026`
-      : cacheHits ? `loading weights from this device's cache\u2026` : `downloading weights\u2026`));
-    ai.myPct = total ? done / total * 100 : 0;
-    ai.shardBytes = total;   // the lending screen shows how much this device holds
-    ai.prog = ai.prog || {}; ai.progAt = ai.progAt || {};
-    ai.prog[myName] = Math.round(ai.myPct); ai.progAt[myName] = Date.now();
-    if (ai.role === "worker") sendTo(ai.hostId, { t: "ai-progress", pct: Math.round(ai.myPct) });
-    loadCardRender();
-  };
   if (ai.role === "host") {
     clearInterval(ai.progTimer);
-    ai.progTimer = setInterval(() => { if (ai.role === "host") broadcastAll({ t: "ai-hostprog", all: ai.prog || {}, at: Date.now() }); }, 600);
+    ai.progTimer = setInterval(() => { if (ai.role === "host") broadcastAll({ t: "ai-hostprog", all: ai.prog || {}, steps: ai.step || {}, gpu: ai.gpuProg || {}, at: Date.now() }); }, 600);
   }
+  const onProg = loadProg;
   // every device (host included, even when its weights come from cache) keeps within a few
   // percent of the slowest device, so the bars climb together and the room finishes as one
   await modelLoader.loadShard({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, pace: aiLoadPace, offload },
@@ -3289,6 +3346,35 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
   // the load card stays up (its "Starting" mark once every device has its layers) until the room
   // is online: the host takes it down in aiMaybeReady, a worker on ai-ready-all. Taking it down here
   // showed the model picker for the seconds between this device's layers and the room's.
+}
+
+// A load's progress (room/model-loader.js loadShard's onProgress). info: the step it is on (Qwen3.8 Flash: room/loadsteps.js,
+// done / total then the whole load's; { step, stepNo, steps, stepDone, stepTotal, line }); without it, the one step
+// of every other model, as before. The step line replaces the status while a step runs; the technical line (what is
+// copied where) goes to the breadcrumbs and the card's tooltip. Peers hear the whole load's percent, the step, and the
+// GPU step's own percent (the pacing compares that: slowestLoadProgress).
+function loadProg(done, total, info = null) {
+  info = info && typeof info === "object" ? info : null;
+  aiProgress(done, total, undefined, info);
+  const step = info?.step || "gpu";
+  if (info?.line) crumb(info.line);
+  if (info?.step) $("ai-status").textContent = stepLine(step, info);
+  else {
+    // name where the bytes are coming from right now: the network, devices in the room, or this device's cache
+    const gb = (b) => (b / 2 ** 30).toFixed(1) + " GB";
+    aiStatus(ai.netBytes ? `downloading the model\u2026${cacheHits ? ` (${gb(cacheHits)} was already on this computer)` : ""}`
+      : ai.peerBytes ? `copying the model from devices in the room\u2026`
+      : cacheHits ? `loading the model from this computer's cache\u2026` : `downloading the model\u2026`);
+  }
+  ai.myPct = loadPct(done, total);
+  // the GPU step's own percent, for the pacing (aiLoadPace): 0 while saving to the disk, which is never paced
+  ai.gpuPct = step !== "gpu" ? 0 : info?.stepTotal ? info.stepDone / info.stepTotal * 100 : ai.myPct;
+  if (!info || step === "gpu") ai.shardBytes = info?.stepTotal || total;   // the lending screen shows how much this device holds
+  ai.prog = ai.prog || {}; ai.progAt = ai.progAt || {}; ai.step = ai.step || {}; ai.gpuProg = ai.gpuProg || {};
+  ai.prog[myName] = Math.round(ai.myPct); ai.progAt[myName] = Date.now();
+  ai.step[myName] = info?.step || null; ai.gpuProg[myName] = Math.round(ai.gpuPct);
+  if (ai.role === "worker") sendTo(ai.hostId, { t: "ai-progress", pct: Math.round(ai.myPct), ...(info?.step ? { step: info.step, gpu: Math.round(ai.gpuPct) } : {}) });
+  loadCardRender();
 }
 
 // ---- host ----
@@ -3422,7 +3508,7 @@ async function aiStart(modelArg) {
     // layerAt(ctx): one layer's bytes with its KV cache at that context
     let L, layerBytes, layerAt, embedBytes, cfg = null, experts = null;
     if (M.kind === "qwen35") {
-      aiStatus("reading model index… (11 MB)");
+      aiStatus("Looking up the model…");
       ai.G = await fetchModelHeader(M);
       ai.GModel = modelKey;
       // one attention layer's K (or V) cache is a single GPU buffer: hold the context to what the
@@ -3438,7 +3524,7 @@ async function aiStart(modelArg) {
     } else if (M.kind === "qwen4exp") {
       // Qwen3.8-Flash-Next: the dense phase (no QSA indexer; K / V in f32 on its attention layers, averaged), the
       // embedding and the head's HC mixer + output.weight on the host
-      aiStatus("reading model index…");
+      aiStatus("Looking up the model…");
       ai.G = await fetchModelHeader(M);
       ai.GModel = modelKey;
       const c = qwen4expConfig(ai.G.meta);
@@ -3455,7 +3541,7 @@ async function aiStart(modelArg) {
 
     // real per-shard byte costs (gguf: from the file's own index)
     if (M.kind === "gguf") {
-      aiStatus("reading model index…");
+      aiStatus("Looking up the model…");
       ai.G = await fetchGGUFHeader(M.gguf, false);
       ai.GModel = modelKey;
       // one layer's weights plus its f32 KV cache at this room's context (engine/dense.js: 64 MB a
@@ -3509,7 +3595,7 @@ async function aiStart(modelArg) {
     // table) and its user was not asked yet, ask once now (remembered); on a no, deal again without it
     const myDisk = deal.fit.fits && myMeta.tabDisk?.ask ? hostDiskBytes(deal, modelKey) : 0;
     if (myDisk > 0) {
-      aiStatus("waiting for this device's answer: may the model use its disk?");
+      aiStatus("Waiting for you to say if the model may be saved on this computer");
       if (!(await askTabDisk({ model: modelKey, bytes: myDisk, host: true }))) ({ pick, deal } = planNow());
     }
     ROOM_CTX = pick.ctx;
@@ -3585,6 +3671,7 @@ async function aiStart(modelArg) {
     if (back) log("room", `${back} saved checkpoint${back > 1 ? "s" : ""} read back from disk`);
     aiMaybeReady();
   } catch (err) {
+    if (err?.detail) log("room", `${myName}: ${err.detail}`);   // (the GPU check's detail: the message says what it means)
     aiStartStopped(stopReason(ai.startFailed, err));   // a device that failed first is the reason, not what this load hit after
   } finally {
     ai.dealing = false;
@@ -3617,7 +3704,7 @@ function aiStartStopped(why) {
   broadcastAll({ t: "ai-start-failed", why });
 }
 function aiLoadFailed(from, name, message) {
-  const why = `${name} couldn't load its layers (${message})`;
+  const why = `${name} couldn't load its part of the model (${message})`;
   toast(`${why}: back to the model picker`);
   if (stopWhen(ai.loadingShard) === "defer") { ai.startFailed = why; aiStatus(`${why}: stopping the start…`); }
   else aiStartStopped(why);
@@ -4028,16 +4115,20 @@ function renderMap(nodes, st, live) {
     card.style.setProperty("--sw", devColor(card.dataset.name));
     card.style.setProperty("--k", Math.max(0, k));
     card.classList.toggle("holds", k >= 0 && !!nodes[k].layers);
-    card.querySelector(".play").textContent = k >= 0 && nodes[k].layers ? `layers ${humanRange(nodes[k].layers)}` : "";
+    // (which layers: the developer view and the tooltip; the card says it in words)
+    const holds = k >= 0 && nodes[k].layers, play = card.querySelector(".play");
+    play.textContent = !holds ? "" : DEV ? `layers ${humanRange(nodes[k].layers)}` : nodes.filter((x) => x.layers).length > 1 ? "holds part of the model" : "holds the whole model";
+    play.title = holds ? `layers ${humanRange(nodes[k].layers)}` : "";
   }
   const S = lastMap.st;
   $("sm-tps").textContent = S?.tps ? S.tps.toFixed(1) : "-";
   $("sm-lap").textContent = S?.lap ? String(Math.round(S.lap)) : "-";
-  (smLive ||= liveWords(el.querySelector(".sm-lt")))(!!live);   // "Twinkling…", "Weaving…" while writing
+  (smLive ||= liveWords(el.querySelector(".sm-lt")))(!!live);   // a steady "Writing…" while writing
+  paintLivePill();   // ("Reading…" before the answer's first word)
   el.querySelector(".sm-live").title = live ? "the room is writing an answer" : "waiting for a question";
   const bits = [];
   if (st?.tps) bits.push(`${st.tps.toFixed(1)} tok/s`);
-  if (st?.lap) bits.push(DEV ? `lap ${st.lap} ms = GPUs ${st.gpu} + wire ${st.net}` : `${st.lap} ms per word`);
+  if (st?.lap && DEV) bits.push(`lap ${st.lap} ms = GPUs ${st.gpu} + wire ${st.net}`);
   if (st?.acc != null && DEV) bits.push(`${Math.round(st.acc * 100)}% of drafts accepted`);
   el.querySelector(".sm-meta").textContent = bits.join(" · ") || `${nodes.length} device${nodes.length > 1 ? "s" : ""}`;
   el.querySelector(".sm-meta").title = `${nodes.length} device${nodes.length > 1 ? "s" : ""}: every token takes a lap through all of them`;
@@ -4182,7 +4273,13 @@ function teleNote(kind, ms, n = 1) {
 // marked by how many devices held the model; the room's events (a device joins, the re-deal, online);
 // and a card per device: its layers, its GB, where its experts are (MoE), its share of each token's time.
 // Every screen times the tokens it is shown; a finished answer's speed is the host's (its stats line).
-const speed = { meter: new SpeedMeter(), hist: [], events: [], asked: new Set(), lastN: 0, redeal: false, at: 0, idle: 0, seq: 0, last: null };
+const speed = { meter: new SpeedMeter(), hist: [], events: [], asked: new Set(), lastN: 0, redeal: false, at: 0, idle: 0, seq: 0, last: null, reading: false };
+// The band's pill while the room works on an answer: "Reading…" until its first word is on screen (the model is still
+// reading the message), "Writing…" after; renderMap's liveWords sets "Writing…" / "Ready", this corrects the first
+function paintLivePill() {
+  const m = $("swarm-map"), t = m?.querySelector(".sm-lt");
+  if (t && m.classList.contains("live")) t.textContent = speed.reading ? "Reading\u2026" : "Writing\u2026";
+}
 function speedEvent(text) {
   speed.events = pushEvent(speed.events, text, Date.now());
   const ol = $("sp-events"); if (!ol) return;
@@ -4192,13 +4289,25 @@ function speedStart() {
   speed.meter.start();
   clearTimeout(speed.idle);
   $("speedo")?.classList.add("live");
-  $("sp-tps").textContent = fmtTps(0);
-  $("sp-unit").textContent = "live · this answer";
+  speed.reading = true;
+  speedShow(0, { live: true });
+  paintLivePill();
+}
+// The readout: one plain line ("Writing about 3 words a second"), nothing until the rate settles; the exact tok/s in
+// its tooltip. (It was a 64px tok/s number: loud, and a unit most people don't know.)
+function speedShow(tps, { live = false, devices = 0, count = 0 } = {}) {
+  const el = $("sp-tps"); if (!el) return;
+  const line = speedLine(tps, { live, devices });
+  el.textContent = line;
+  el.title = tps > 0 ? `${fmtTps(tps)} tok/s` + (count ? ` · ${count} tokens` : "") + (devices ? ` · ${devices} device${devices === 1 ? "" : "s"}` : "") : "";
+  // (while live the pill above says "Reading…" / "Writing…": this cell stays empty until the rate settles, not a second copy)
+  $("sp-unit").textContent = line || live ? "" : "Waiting for a question";
 }
 // a token on screen (mapPulse): the readout at most every 250 ms; 2.5 s without one ends the live state
 // (an answer that never gets its end here: Code's turns, a dropped link)
 function speedTok() {
   if (!speed.meter.on) speedStart();
+  if (speed.reading) { speed.reading = false; paintLivePill(); }
   const now = performance.now();
   speed.meter.tok(now);
   clearTimeout(speed.idle);
@@ -4206,11 +4315,12 @@ function speedTok() {
   if (now - speed.at < 250) return;
   speed.at = now;
   const r = speed.meter.rate(now);
-  if (r > 0) $("sp-tps").textContent = fmtTps(r);
+  if (r > 0) speedShow(r, { live: true });
 }
 // an answer ended (chatBotEnd): its speed from the host's stats line, else this screen's own timing
 function speedDone(stats, key = null) {
   clearTimeout(speed.idle);
+  speed.reading = false;
   const avg = speed.meter.end(), st = parseStats(stats);
   $("speedo")?.classList.remove("live");
   const tps = st ? (st.count >= 2 ? st.tps : 0) : avg;   // a one-token answer has no speed worth showing
@@ -4218,10 +4328,8 @@ function speedDone(stats, key = null) {
     speed.hist = pushHistory(speed.hist, { key: key ?? "a" + ++speed.seq, tps: st.tps, devices: st.devices });
     speed.last = st;
   }
-  if (tps > 0) {
-    $("sp-tps").textContent = fmtTps(tps);
-    $("sp-unit").textContent = st ? `last answer · ${st.count} tok on ${st.devices} device${st.devices === 1 ? "" : "s"}` : "last answer";
-  }
+  if (tps > 0) speedShow(tps, { devices: st?.devices || 0, count: st?.count || 0 });
+  else speedShow(speed.last?.tps || 0, { devices: speed.last?.devices || 0 });   // a one-token, failed or stopped answer: the last one's speed, never "Writing…" with nothing running
   paintHistory();
 }
 function paintHistory() {
@@ -4241,7 +4349,10 @@ function renderSpeed() {
   const box = $("speedo"); if (!box) return;
   const key = ai.model || $("ai-model").value, M = MODELS[key];
   $("sp-model").textContent = shortName(key);
-  $("sp-params").textContent = M ? paramsText(paramsOf(M.label, M.gguf || "", key)) : "";
+  // "125B model"; its size in words, the active count and the quantization in the tooltip
+  const pa = M ? paramsOf(M.label, M.gguf || "", key) : null;
+  $("sp-params").textContent = pa ? sizeText(pa) : "";
+  $("sp-params").title = pa ? `${String(pa.total).replace(/B$/, " billion").replace(/M$/, " million").replace(/T$/, " trillion")} parameters: the model's size\n${paramsText(pa)}` : "";
   const nodes = lastMap?.nodes || [], st = lastMap?.st || {};
   const by = ai.layersByName || {}, holders = Object.keys(by);
   const shares = tokenShares(nodes, st.lap);
@@ -4254,28 +4365,38 @@ function renderSpeed() {
     const n = /^(\d+)\D+(\d+)$/.exec(String(r || "")), nL = n ? +n[2] - +n[1] + 1 : 0;
     const gb = ai.heldGB?.[nm], why = ai.outWhy?.[nm];
     const part = shares?.parts.find((p) => p.name === nm);
-    const role = !r ? (meta.api ? "API client" : why === "late" ? "waits for a re-deal" : "asks only") : holders[0] === nm ? (solo ? "runs the whole model" : "model host") : "holds layers";
-    const lines = [];
-    if (r) lines.push(`<span>layers ${esc(humanRange(r))}</span>` + (gb != null ? `<span>${fmtGB(gb)}</span>` : ""), `<span class="dim">${totalL ? Math.round(100 * nL / totalL) : 0}% of the model</span>`);
-    else lines.push(`<span class="dim">${why === "late" ? "joined after the start: asks until a re-deal" : meta.api ? "asks through this room" : meta.webgpu === false ? "no WebGPU: asks, holds no layers" : "the others hold the model: it asks"}</span>`);
-    // experts (MoE): on the GPU, or "experts: GPU + RAM, 84% hits" with where they park and what a token costs
+    const role = !r ? (meta.api ? "connected app" : why === "late" ? "waits for the model to be shared out again" : "only asking questions") : holders[0] === nm ? (solo ? "runs the whole model" : "started the room") : "holds part of the model";
+    // in plain words on the card: how much of the model it holds and its GB; which layers, where its experts are, the
+    // cache's hit rate, what a token costs it and its ms of each token go to the card's tooltip (the room's numbers
+    // stay one hover away, not on the screen)
+    const lines = [], tip = [];
+    const share = totalL ? nL / totalL : 0;
+    if (r) {
+      // (one device alone: its role already says "runs the whole model"; only its GB, if known)
+      if (!solo) lines.push(`<span>${share >= 0.995 ? "all of the model" : `holds ${shareWords(share)} of the model`}</span>` + (gb != null ? `<span>${fmtGB(gb)}</span>` : ""));
+      else if (gb != null) lines.push(`<span>${fmtGB(gb)}</span>`);
+      tip.push(`layers ${humanRange(r)} (${Math.round(100 * share)}% of the model)`);
+    } else lines.push(`<span class="dim">${why === "late" ? "joined after the start: asks until the model is shared out again" : meta.api ? "asks through this room" : meta.webgpu === false ? "this browser can't hold part of the model: it asks" : "the others hold the model: it asks"}</span>`);
+    // experts (MoE): where they are, the hit rate and the cost per token, in the tooltip; on the card only that a tab
+    // keeps part of its share on its disk
     const xe = r ? x?.exp ?? (ai.role === "host" ? expertsAt(ai.moe, ai.offloadBy?.[nm]) : null) : null;
     const head = expertsHead(xe, x?.xc), ex = expertsText(xe), cost = expertsCost(x?.xc);
-    if (head) lines.push(`<span class="ex">${esc(head)}</span>`, `<span class="dim">${esc(ex.replace(/^experts of /, ""))}</span>`);
-    else if (ex) lines.push(`<span class="ex">${esc(ex)}</span>`);
-    if (head && cost) lines.push(`<span class="dim">${esc(cost)}</span>`);
+    for (const t of [head, ex, head && cost]) if (t) tip.push(t);
+    if (xe && /disk/.test(xe.where || "")) lines.push(`<span class="dim">keeps part of its share on this computer's disk</span>`);
     let time = "";
-    if (r && solo) time = `<div class="dv-t"><span>does all of every token</span></div>`;
-    else if (part?.timed) time = `<div class="dv-bar"><i style="width:${part.pct.toFixed(1)}%"></i></div><div class="dv-t"><span>${Math.round(part.ms)} ms of each ${Math.round(shares.lap)} ms token</span></div>`;
-    else if (r && shares) time = `<div class="dv-t"><span class="dim">no timing from this device</span></div>`;
-    return `<li class="dv${r ? " holds" : " ask"}" data-name="${esc(nm)}" style="--sw:${devColor(nm)}">`
-      + `<div class="dv-h"><i class="sw" aria-hidden="true"></i>${iconFor(meta)}<b>${esc(nm)}</b>${part?.timed ? `<span class="dv-pct">${Math.round(part.pct)}%</span>` : ""}</div>`
+    if (part?.timed) {
+      time = `<div class="dv-bar"><i style="width:${part.pct.toFixed(1)}%"></i></div><div class="dv-t"><span>${Math.round(part.pct)}% of the work</span></div>`;
+      tip.push(`${Math.round(part.ms)} ms of each ${Math.round(shares.lap)} ms token`);
+    }
+    return `<li class="dv${r ? " holds" : " ask"}" data-name="${esc(nm)}" style="--sw:${devColor(nm)}"${tip.length ? ` title="${esc(tip.join("\n"))}"` : ""}>`
+      + `<div class="dv-h"><i class="sw" aria-hidden="true"></i>${iconFor(meta)}<b>${esc(nm)}</b></div>`
       + `<div class="dv-role">${esc(role)}${nm === myName ? " · you" : ""}</div>`
       + lines.map((l) => `<div class="dv-l">${l}</div>`).join("") + time + `</li>`;
   }).join("");
   // one token's time, end to end: each device's part in its colour, then the wire (and any device without timing)
+  // (developer view only, ?dev=1: one token's milliseconds round the room)
   const sh = $("sp-share");
-  if (shares) {
+  if (shares && DEV) {
     sh.hidden = false;
     sh.innerHTML = `<div class="sh-cap">one token, ${Math.round(shares.lap)} ms round the room</div><div class="sh-bar">`
       + shares.parts.filter((p) => p.timed).map((p) => `<i style="flex-grow:${p.ms.toFixed(2)};--sw:${devColor(p.name)}" title="${esc(p.name)}: ${Math.round(p.ms)} ms"></i>`).join("")
@@ -4288,7 +4409,7 @@ function renderSpeed() {
 // band itself on a screen that has the deal but no map yet (a guest that joined a room already online)
 function speedDeal() {
   for (const [nm, why] of Object.entries(ai.outWhy || {})) {
-    if ((why === "unneeded" || why === "small") && !speed.asked.has(nm)) { speed.asked.add(nm); speedEvent(`${nm} asks only`); }
+    if ((why === "unneeded" || why === "small") && !speed.asked.has(nm)) { speed.asked.add(nm); speedEvent(`${nm} is only asking questions`); }
   }
   if (!lastMap && ai.layersByName && $("ai-panel").classList.contains("online")) {
     renderMap(Object.keys(ai.layersByName).map((nm, i) => ({ name: nm, layers: ai.layersByName[nm], host: i === 0 ? 1 : 0 })), null, false);
@@ -4334,7 +4455,7 @@ async function roomGenerate(ids, opts = {}) {
       recover: ({ err }) => roomRecover(err, kind, status, aborted),
       onResume: ({ emitted }) => {
         const s = emitted ? `the room is whole again: carrying on after ${emitted} token${emitted === 1 ? "" : "s"}` : "the room is whole again: starting over";
-        status(s); aiStatus(s); log("room", s); toast(s);
+        status(s); aiStatus(s); log("room", s); toast(emitted ? "Everyone's back, carrying on" : "Everyone's back, starting the answer again");
       },
     }).then((r) => (r.resumed ? { ...r, stats: r.stats + ` · carried on after ${r.resumed > 1 ? r.resumed + " drops" : "a device dropped"}` } : r));
   } finally {
@@ -4350,7 +4471,7 @@ async function roomRecover(err, kind, status, aborted) {
   ai.recovering = { kind, since: Date.now() };
   const why = err?.message || "a device left";
   log("room", `the ${kind === "code" ? "Code run" : "answer"} is waiting: ${why}`);
-  toast(`${why}: waiting for the room to be whole again, then this ${kind === "code" ? "Code run" : "answer"} carries on`);
+  toast(`Waiting for everyone to be back, then this ${kind === "code" ? "Code run" : "answer"} carries on`);
   const say = (s) => { status(s); aiStatus(s); };
   try {
     await waitForRoom({
@@ -4382,7 +4503,7 @@ async function aiGenerate(textArg, who, askerId = peer.id, mode = "ask") {
   const asker = who || myName;
   if (!text || ai.busy || !ai.engine) return;
   if (ai.degraded) {
-    if (askerId === peer.id) toast("a device left: re-deal the layers first");
+    if (askerId === peer.id) toast("A device left. Share out the model again first.");
     else sendTo(askerId, { t: "ai-busy", why: "a device left the room; the host has to re-deal the layers first" });
     return;
   }
@@ -4813,12 +4934,13 @@ async function aiOnData(from, d) {
         } else {
           aiLoading(false);
           aiStatus("failed: " + err.message);
-          toast(`This device couldn't load its layers (${err.message}). Press Start to try again.`);
+          if (err.detail) log("room", `${myName}: ${err.detail}`);
+          toast(err.message === GPU_CHECK_FAILED ? err.message : `This device couldn't load its part of the model (${err.message}). Press Start to try again.`);
           $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
         }
         // load: the host stops the start; noDisk: this device refused to store the model on its disk (its user said no,
         // or it never offered it): the host deals again without its disk
-        sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1, ...(err.noDisk ? { nodisk: 1 } : {}) });
+        sendTo(ai.hostId, { t: "ai-error", message: err.message === GPU_CHECK_FAILED ? gpuCheckFailedFor(err) : err.message, load: 1, ...(err.noDisk ? { nodisk: 1 } : {}) });
       }
       break;
     }
@@ -4837,15 +4959,24 @@ async function aiOnData(from, d) {
     case "ai-hostprog": {
       const now = Date.now();
       ai.prog = { ...(d.all || {}), [myName]: Math.round(ai.myPct || 0) };
+      // each device's step and GPU percent (room/loadsteps.js; none from an older host)
+      ai.step = { ...(d.steps && typeof d.steps === "object" ? d.steps : {}), [myName]: (ai.step || {})[myName] ?? null };
+      ai.gpuProg = { ...(d.gpu && typeof d.gpu === "object" ? d.gpu : {}), [myName]: Math.round(ai.gpuPct || 0) };
       ai.progAt = ai.progAt || {};
       for (const nm of Object.keys(d.all || {})) if (nm !== myName) ai.progAt[nm] = now;
       loadCardRender();
       break;
     }
     case "ai-progress":
-      if (e?.card) { e.card.querySelector(".bw").textContent = "dl " + d.pct + "%"; peerStatus(e.card, "loading " + d.pct + "%"); }
-      ai.prog = ai.prog || {}; ai.progAt = ai.progAt || {};
-      ai.prog[e?.name || from] = d.pct; ai.progAt[e?.name || from] = Date.now(); loadCardRender();
+    {
+      // d.step / d.gpu: the step it is on and that step's GPU percent (room/loadsteps.js); an older peer sends neither
+      const step = /^(save|words|gpu)$/.test(d.step || "") ? d.step : null, nm = e?.name || from;
+      if (e?.card) { e.card.querySelector(".bw").textContent = `${rowVerb(step)} ${d.pct}%`; peerStatus(e.card, `${rowVerb(step)} ${d.pct}%`); }
+      ai.prog = ai.prog || {}; ai.progAt = ai.progAt || {}; ai.step = ai.step || {}; ai.gpuProg = ai.gpuProg || {};
+      ai.prog[nm] = d.pct; ai.progAt[nm] = Date.now(); ai.step[nm] = step;
+      if (Number.isFinite(+d.gpu)) ai.gpuProg[nm] = +d.gpu; else delete ai.gpuProg[nm];
+      loadCardRender();
+    }
       break;
     case "ai-ready":
       if (ai.role !== "host" || !ai.chain.includes(from)) break;
@@ -5154,7 +5285,7 @@ try { if (localStorage.getItem("pooled-autoredeal") === "off") $("ai-autoredeal"
 $("ai-autoredeal").addEventListener("change", (e) => {
   try { localStorage.setItem("pooled-autoredeal", e.target.checked ? "on" : "off"); } catch {}
   if (!e.target.checked) clearTimeout(ai.idleRedeal);
-  toast(e.target.checked ? "re-deals on its own when a device does not come back (experimental)" : "waits for a dropped device, or for you to re-deal");
+  toast(e.target.checked ? "Shares out the model again by itself if a device doesn't come back (experimental)" : "Waits for a device that dropped, or for you to share out the model again");
 });
 $("ai-split").addEventListener("change", () => {
   if (ai.role === "host" && ai.engine) showRedeal(true, $("ai-split").value === "speed" ? "re-deal to put the layers on the fastest devices (measured on the answers so far)" : "re-deal to split by memory again");

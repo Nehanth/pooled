@@ -226,7 +226,7 @@ Deno.test("lend screen: a device holding no layers says why", () => {
   eq(lendStatus({ ...base, out: "small" }).title, "Not holding layers");
   eq(lendStatus({ ...base, phase: "loading", out: "unneeded", phone: true }).title, "Not needed");
   // holding layers: what it holds of what it pledged
-  eq(lendStatus({ phase: "serving", lo: 21, hi: 28, model: "Qwen3 1.7B", held: 0.786, pledge: 1 }).sub, "Layers 22–28 · 0.8 of 1 GB · Qwen3 1.7B");
+  eq(lendStatus({ phase: "serving", lo: 21, hi: 28, model: "Qwen3 1.7B", held: 0.786, pledge: 1 }).sub, "Holds part of Qwen3 1.7B · 0.8 of 1 GB");
 });
 
 Deno.test("pledge cap: past 64 GB only for Qwen3.8-Flash-Next; every other model (and an unknown one) 64", () => {

@@ -27,9 +27,10 @@ export function verbs(rand = Math.random) {
 
 // a <span class="working">; since: the performance.now() the wait started; lead: what is happening,
 // in plain words ("Reading your message on 2 devices"), shown for the first LEAD_MS before the verbs,
-// since the verbs alone don't say what the wait is
+// since the verbs alone don't say what the wait is. steady: the lead (else the label) stays, no verbs
+// (the chat's wait: one calm line instead of a new word every two seconds)
 export const LEAD_MS = 4000;
-export function working({ since = performance.now(), label = "Working", lead = "" } = {}) {
+export function working({ since = performance.now(), label = "Working", lead = "", steady = false } = {}) {
   const el = document.createElement("span");
   el.className = "working";
   el.innerHTML = `${MARK}<span class="wk-v" aria-hidden="true"></span><span class="sr-only">${label}</span>`;
@@ -39,11 +40,11 @@ export function working({ since = performance.now(), label = "Working", lead = "
   const tick = () => {
     if (el.isConnected) seen = true;
     else if (seen || performance.now() - born > 10000) { clearInterval(timer); return; }
-    const t = performance.now() - since, w = lead && t < LEAD_MS ? -2 : Math.floor(t / 2000);
+    const t = performance.now() - since, w = steady || (lead && t < LEAD_MS) ? -2 : Math.floor(t / 2000);
     if (w !== word) {
       const first = word === -1;
       word = w;
-      v.textContent = (w === -2 ? lead : next()) + "…";
+      v.textContent = (w === -2 ? lead || label : next()) + "…";
       if (first) return;
       if (!reduced() && v.animate) v.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.7,.2,1)" });
     }
@@ -53,18 +54,20 @@ export function working({ since = performance.now(), label = "Working", lead = "
   return el;
 }
 
-// The band's pill while the room is writing: a word that changes every two seconds, like the working
-// line's verbs ("Twinkling…", "Weaving…"); "Ready" otherwise. liveWords(el) returns set(on).
+// The band's pill while the room is writing: a steady "Writing…" (liveText); "Ready" otherwise. It used to
+// change word every two seconds ("Twinkling…", "Weaving…"); with { rotate: true } it still does.
+// liveWords(el, opts) returns set(on).
 export const LIVE = ["Twinkling", "Weaving", "Shimmering", "Humming", "Stitching", "Conjuring", "Scribbling", "Whirring", "Sparkling", "Spinning"];
-export function liveWords(el) {
+export const liveText = (k = 0, { rotate = false } = {}) => (rotate ? LIVE[k % LIVE.length] : "Writing") + "\u2026";
+export function liveWords(el, { rotate = false } = {}) {
   let timer = 0, k = 0;
   const show = (anim) => {
-    el.textContent = LIVE[k % LIVE.length] + "\u2026";
+    el.textContent = liveText(k, { rotate });
     if (anim && !reduced() && el.animate) el.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.7,.2,1)" });
   };
   return (on) => {
     if (on === !!timer) return;
-    if (on) { k = 0; show(false); timer = setInterval(() => { k++; show(true); }, 2000); }
-    else { clearInterval(timer); timer = 0; el.textContent = "Ready"; }
+    if (on) { k = 0; show(false); timer = rotate ? setInterval(() => { k++; show(true); }, 2000) : -1; }
+    else { if (timer > 0) clearInterval(timer); timer = 0; el.textContent = "Ready"; }
   };
 }

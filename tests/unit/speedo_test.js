@@ -1,6 +1,6 @@
 // room/speedo.js: the speed panel's numbers and words (no DOM, times passed in).
 import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText,
-  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "../../room/speedo.js";
+  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB, wordsPerSec, speedWords, speedLine } from "../../room/speedo.js";
 import { MODELS } from "../../room/models.js";
 import { expertCache } from "../../room/tele.js";
 
@@ -143,13 +143,27 @@ Deno.test("pushEvent: newest last, capped, a repeat is one event", () => {
   ev = pushEvent(ev, onlineText(1), 1);
   ev = pushEvent(ev, "pc joined", 2);
   ev = pushEvent(ev, "pc joined", 3);
-  eq(ev, [{ text: "online · 1 device", at: 1 }, { text: "pc joined", at: 3 }]);
+  eq(ev, [{ text: "Running on 1 device", at: 1 }, { text: "pc joined", at: 3 }]);
   ev = pushEvent(ev, "", 4);
   eq(ev.length, 2);
   for (const t of ["re-dealing layers", onlineText(2), "phone joined", "phone asks only"]) ev = pushEvent(ev, t, 5);
-  eq(ev.map((e) => e.text), ["re-dealing layers", "online · 2 devices", "phone joined", "phone asks only"]);
+  eq(ev.map((e) => e.text), ["re-dealing layers", "Running on 2 devices", "phone joined", "phone asks only"]);
 });
 
 Deno.test("fmtGB: one decimal under 10 GB, never 0 GB", () => {
   eq([fmtGB(0.01), fmtGB(0.43), fmtGB(7.25), fmtGB(12.6)], ["<0.1 GB", "0.4 GB", "7.3 GB", "13 GB"]);
+});
+
+Deno.test("the speed in words: about 0.75 words a token, a plain line live and after an answer, nothing without a speed", () => {
+  eq(wordsPerSec(4), 3); eq(wordsPerSec(0), 0); eq(wordsPerSec(NaN), 0); eq(wordsPerSec(-1), 0); eq(wordsPerSec(Infinity), 0);
+  eq(speedWords(4), "about 3 words a second");
+  eq(speedWords(1.4), "about 1 word a second");
+  eq(speedWords(0.5), "less than a word a second");
+  eq(speedWords(0), "");
+  eq(speedLine(4, { live: true }), "Writing about 3 words a second");
+  eq(speedLine(21.4, { devices: 3 }), "Last answer: about 16 words a second on 3 devices");
+  eq(speedLine(4, { devices: 1 }), "Last answer: about 3 words a second on 1 device");
+  eq(speedLine(4), "Last answer: about 3 words a second");
+  eq(speedLine(0, { live: true }), "", "no dash: nothing until the rate settles");
+  for (const t of [speedLine(4, { live: true }), speedLine(30, { devices: 2 }), onlineText(2)]) if (/tok|ms\b/.test(t)) throw new Error(t);
 });

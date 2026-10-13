@@ -451,10 +451,12 @@
   #swarm-map.live .sm-live { background: var(--accent-soft); color: var(--accent-text); }
   .sm-lt { display: inline-block; }
   #swarm-map.live .sm-live { min-width: 104px; }   /* the words change every two seconds; the pill keeps its size */
-  #swarm-map.live .sm-live i { background: var(--accent); opacity: 1; animation: livebeat 1.1s var(--ease) infinite; }
+  #swarm-map.live .sm-live i { background: var(--accent); opacity: 1; }   /* a still dot: the pill's word says it is writing */
   @keyframes livebeat { 0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); } 60% { box-shadow: 0 0 0 5px transparent; } }
   /* the numbers: tok/s, ms a lap, tokens so far, context used of max */
   .sm-stats { margin: 0 0 0 auto; display: flex; gap: 4px; min-width: 0; }
+  /* its numbers (ms per word, tokens, context) are the developer view's; the composer's ring says how full the chat is */
+  html:not(.dev) .sm-stats { display: none; }
   .sm-stats > div { display: flex; align-items: baseline; gap: 5px; height: 26px; padding: 0 9px; border-radius: 8px; }
   .sm-stats > div + div { box-shadow: -1px 0 0 var(--rule-2); border-radius: 0; }
   .sm-stats dd { order: -1; font: 500 13px/26px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
@@ -493,16 +495,19 @@
   .hl span { font: 400 12px/1 var(--mono); flex: none; }
   .hl .lr { flex: none; margin-left: auto; padding-left: 6px; color: var(--muted); }
   .hl .lms { color: var(--accent-text); min-width: 5ch; text-align: right; }
+  html:not(.dev) .hl .lms { display: none; }   /* each lane's ms: the developer view only */
+  html:not(.dev) .hl .lr { display: none; }    /* and its layer numbers (the lane's tooltip has them) */
   .hl .lms:empty { display: none; }
   /* a lane's dot flashes as the pass reaches its first layer */
   .hl .act { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--sw); }
   #room-screen.sweep .sm-strip .hl .act { animation: actflash calc(var(--lap) * .9) var(--ease) both; animation-delay: calc(var(--lap) * .9 * var(--c0, 0) / var(--cells, 40)); }
-  @keyframes actflash { 0%, 100% { box-shadow: none; } 25% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--sw) 25%, transparent); } }
+  @keyframes actflash { 0%, 100% { box-shadow: none; } 25% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--sw) 12%, transparent); } }
   /* the rail is the whole model; the device's cells sit at their layers */
   .cells { display: grid; grid-template-columns: repeat(var(--cells, 40), minmax(0, 1fr)); gap: 2px; height: var(--lh); border-radius: 3px; background: linear-gradient(var(--rule-2), var(--rule-2)) center / 100% 2px no-repeat; }
   .cells i { grid-row: 1; border-radius: min(3px, calc(var(--lh) / 3)); background: var(--sw); transform-origin: center; }
   #room-screen.sweep .sm-strip .cells i { animation: cellhot calc(var(--lap) * .9) var(--ease) both; animation-delay: calc(var(--lap) * .9 * var(--c) / var(--cells, 40)); }
-  @keyframes cellhot { 0%, 100% { transform: none; filter: none; box-shadow: none; } 30% { transform: scaleY(1.3); filter: brightness(1.45) saturate(1.2); box-shadow: 0 0 10px rgba(42,69,224,.5); } }
+  /* the token passing through: a soft brightening of each cell, no jump or glow (it runs on every token) */
+  @keyframes cellhot { 0%, 100% { filter: none; } 35% { filter: brightness(1.15); } }
   /* many devices: the labels get smaller with the lanes */
   #swarm-map[data-many] .hl { font-size: 12px; }
   #swarm-map[data-many] .hl svg { display: none; }
@@ -523,8 +528,8 @@
   @keyframes smflash { 0%, 100% { background: var(--faint); box-shadow: none; } 8% { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); } 30% { background: var(--accent); box-shadow: none; } }
   @keyframes smrun { 0% { left: -30%; opacity: 1; } 100% { left: 100%; opacity: 1; } }
 
-  /* the speed panel (room/speedo.js, room.js renderSpeed): the readout, big enough to read on a screen
-     recording; the recent answers as bars, the newest device count in blue; the room's events; the model.
+  /* the speed panel (room/speedo.js, room.js renderSpeed): the readout, one plain line ("Writing about 3 words a
+     second"; the exact tok/s in its tooltip); the recent answers as bars, the newest device count in blue; the room's events; the model.
      It replaces the band head's model name and tok/s, which stay in the page for the folded bar's width. */
   #swarm-map .sm-head .sm-model, #swarm-map .sm-stats > div:first-child { display: none; }
   #speedo { display: grid; grid-template-columns: minmax(200px, auto) minmax(0, 1fr) minmax(0, 340px); align-items: stretch; gap: 0; padding: 14px 0; border-radius: 12px; background: var(--panel); box-shadow: inset 0 0 0 1px var(--rule-2); }
@@ -533,11 +538,10 @@
   #speedo p { margin: 0; }
   .sp-read { display: flex; flex-direction: column; justify-content: center; gap: 6px; }
   .sp-num { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
-  #sp-tps { font: 500 64px/.95 var(--mono); letter-spacing: -.04em; color: var(--text); font-variant-numeric: tabular-nums; }
-  .sp-u { font: 500 18px/1 var(--mono); color: var(--accent-text); }
+  .sp-num { white-space: normal; }
+  #sp-tps { font: 500 15px/1.35 var(--sans); letter-spacing: -.005em; color: var(--text); }
+  #sp-tps:empty { display: none; }
   .sp-sub { display: flex; align-items: center; gap: 7px; font: 400 13px/1.2 var(--sans); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #speedo.live #sp-tps { color: var(--accent-text); }
-  #speedo.live .sp-sub::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: livebeat 1.1s var(--ease) infinite; }
   .sp-hist { display: flex; flex-direction: column; gap: 8px; }
   .sp-cap { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font: 400 12px/1.2 var(--sans); color: var(--muted); white-space: nowrap; }
   #sp-gain { font: 500 14px/1.2 var(--sans); letter-spacing: -.005em; color: var(--accent-text); overflow: hidden; text-overflow: ellipsis; }
@@ -555,7 +559,7 @@
   .sp-side { display: flex; flex-direction: column; gap: 10px; justify-content: center; }
   .sp-mod { display: flex; flex-direction: column; gap: 3px; }
   #sp-model { font: 400 24px/1.05 var(--display); letter-spacing: -.02em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #sp-params { font: 400 13px/1.2 var(--mono); color: var(--ink-2); }
+  #sp-params { font: 400 13px/1.2 var(--sans); color: var(--ink-2); }
   #sp-events { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; margin: 0; padding: 0; list-style: none; font: 400 13px/1.3 var(--sans); color: var(--muted); }
   #sp-events li { white-space: nowrap; }
   #sp-events li + li::before { content: "\2192"; margin: 0 6px; color: var(--faint); }
@@ -593,21 +597,22 @@
   .sh-key i { width: 9px; height: 9px; border-radius: 2px; background: var(--sw); }
   /* folded: the readout and the history stay, smaller; the cards and the token bar go */
   #swarm-map.folded #speedo { margin-top: 8px; padding: 8px 0; }
-  #swarm-map.folded #sp-tps { font-size: 40px; }
   #swarm-map.folded :is(#sp-devs, #sp-share) { display: none; }
   #swarm-map.folded #sp-hist { min-height: 40px; }
   #swarm-map.folded #sp-hist .bar { height: calc(26px * var(--h)); }
   #swarm-map.folded #sp-hist .bar.step:not(:first-child)::before { height: 40px; }
   #swarm-map.folded #sp-model { font-size: 18px; }
+  /* no answers yet: no empty chart and placeholder (its column stays, so the layout doesn't jump at the first one) */
+  .sp-hist:has(> #sp-hist.empty) > * { visibility: hidden; }
   @container pane (max-width: 760px) {
+    /* on a phone the empty chart and an empty readout take no room at all: the chat starts higher */
+    #speedo > .sp-hist:has(> #sp-hist.empty), #speedo > .sp-read:has(#sp-tps:empty):has(#sp-unit:empty) { display: none; }
     #speedo { grid-template-columns: minmax(0, 1fr); padding: 12px 0; row-gap: 10px; }
     #speedo > div { padding: 0 14px; }
     #speedo > div + div { box-shadow: none; }
     .sp-side { order: -1; flex-direction: row; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px; }
     .sp-mod { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
     #speedo > .sp-hist { box-shadow: 0 -1px 0 var(--rule-2); padding-top: 10px; }
-    #sp-tps { font-size: 48px; }
-    .sp-u { font-size: 15px; }
     #sp-model { font-size: 19px; }
     #sp-params { font-size: 12px; }
     #sp-events { font-size: 12px; }
@@ -615,7 +620,6 @@
     .sp-sub { white-space: normal; }
     .dv { min-width: 232px; }
     .dv-l { font-size: 12px; }
-    #swarm-map.folded #sp-tps { font-size: 36px; }
     #swarm-map.folded #speedo { row-gap: 8px; }
     #swarm-map.folded .sp-hist { padding-top: 8px; }
   }
@@ -844,7 +848,7 @@
   .lc-row .n { display: flex; flex-direction: column; gap: 3px; min-width: 0; color: var(--text); }
   .lc-row .n .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* which layers this device is downloading (then holds), under its name */
-  .lc-row .n .lr { font: 400 11.5px/1.2 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; }
+  .lc-row .n .lr { font: 400 12px/1.2 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; }
   .lc-row.done .n .lr { color: var(--accent-text); }
   .lc-row .n small { color: var(--muted); font-size: 12px; }
   .lc-row .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
@@ -853,15 +857,23 @@
   .lc-row.done .pct { color: var(--accent-text); }
   #lc-strip { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 2px; height: 22px; }
   #lc-strip:empty { display: none; }
-  #lc-strip i { border-radius: 2px; background: var(--panel-2); transition: background-color .3s; }
+  #lc-strip i { border-radius: 2px; background: var(--panel-2); transition: background-color .3s, opacity .3s; }
+  /* a share still being saved to its device's disk (room/loadsteps.js): its cells lighter until they go onto the GPU */
+  #lc-strip i.saving { opacity: .4; }
+  .lc-row.saving .fill { opacity: .55; }
   #lc-status { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; margin-top: 16px; font-size: 13px; color: var(--ink-2); min-height: 20px; }
   #lc-status:empty { display: none; }
   #lc-status .src { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px 6px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-text); font: 500 12px/1 var(--mono); }
   #lc-status .src::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: blink 1.6s infinite; }
   #lc-status .src.cache { background: #E9F4EC; color: var(--ok); }
   #lc-status .src.gpu { background: var(--panel-2); color: var(--ink-2); }
+  #lc-status .src.save { background: var(--panel-2); color: var(--ink-2); }
+  /* "Step 1 of 3 · Saving the model to this computer (first time only)": its own line under the bytes */
+  #lc-status .step { flex-basis: 100%; order: 3; font-size: 12.5px; color: var(--ink-2); }
+  #lc-status .step.solo { flex-basis: auto; order: 0; }
+  #lc-status .step .b { font: inherit; color: var(--muted); }
   #lc-status .b { font: 400 12px/1 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
-  #lc-status .eta { margin-left: auto; color: var(--text); font-weight: 500; }
+  #lc-status .eta { margin-left: auto; color: var(--ink-2); font-weight: 400; }
   #lc-status .eta.wait { color: var(--muted); font-weight: 400; }
   /* every device has its layers: the rows give way to the Pooled mark in its wave while the model starts
      (on the GPUs, the devices linked up), until the room opens on the chat */
@@ -1650,7 +1662,6 @@
     #chat-log { display: none; }
     #load-card { padding: 16px; }
     .lc-row { grid-template-columns: 8px minmax(0, 150px) minmax(0, 1fr) 52px; gap: 8px; font-size: 13px; }
-    .lc-row .lw { display: none; }   /* phones: "layers 21–40" under the name, without "downloading" */
     .lc-head { flex-wrap: wrap; gap: 12px 14px; }
     .lc-head .dl { width: 34px; height: 34px; }
     .lc-h { flex-basis: calc(100% - 50px); }
@@ -1995,7 +2006,7 @@
   <main id="chatpane">
     <h1 class="sr-only" id="room-h">Room</h1>
     <div id="topline">
-      <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div><dt>tokens</dt><dd id="sm-tok">0</dd></div><div><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><section id="speedo" aria-label="How fast the room writes"><div class="sp-read"><p class="sp-num"><b id="sp-tps" aria-live="off">–</b><span class="sp-u">tok/s</span></p><p id="sp-unit" class="sp-sub">waiting for a question</p></div><div class="sp-hist"><p class="sp-cap"><span>recent answers</span><span id="sp-gain"></span></p><ol id="sp-hist" class="empty" aria-label="Speed of recent answers"></ol></div><div class="sp-side"><p class="sp-mod"><b id="sp-model"></b><span id="sp-params"></span></p><ol id="sp-events" aria-label="Room events"></ol></div></section><ul id="sp-devs" aria-label="What each device does"></ul><div id="sp-share" hidden></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
+      <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div class="dev-only" title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div class="dev-only"><dt>tokens</dt><dd id="sm-tok">0</dd></div><div class="dev-only"><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><section id="speedo" aria-label="How fast the room writes"><div class="sp-read"><p class="sp-num"><b id="sp-tps" aria-live="off"></b></p><p id="sp-unit" class="sp-sub">Waiting for a question</p></div><div class="sp-hist"><p class="sp-cap"><span>recent answers</span><span id="sp-gain"></span></p><ol id="sp-hist" class="empty" aria-label="Speed of recent answers"></ol></div><div class="sp-side"><p class="sp-mod"><b id="sp-model"></b><span id="sp-params"></span></p><ol id="sp-events" aria-label="Room events"></ol></div></section><ul id="sp-devs" aria-label="What each device does"></ul><div id="sp-share" hidden></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
       <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div></div>
     </div>
     <div id="chat-log" class="dev-only"></div>
@@ -2065,7 +2076,7 @@
       </div>
     </div>
     <div id="load-card">
-      <div class="lc-head"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><div class="lc-h"><p class="lc-t"><span id="lc-verb">Loading</span> <span id="lc-model"></span></p><p class="lc-note">Each device downloads only its own layers.</p></div><span id="lc-sum"></span></div>
+      <div class="lc-head"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><div class="lc-h"><p class="lc-t"><span id="lc-verb">Loading</span> <span id="lc-model"></span></p><p class="lc-note">Each device gets only its own part of the model.</p></div><span id="lc-sum"></span></div>
       <div id="lc-rows"></div>
       <div id="lc-strip" aria-hidden="true"></div>
       <p id="lc-status" aria-live="polite"></p>
@@ -2196,7 +2207,7 @@
       <div class="cs-stage"><canvas id="cs-flow" aria-hidden="true"></canvas><span class="cs-ring" id="cs-ring" aria-hidden="true"></span><svg id="cs-logo" viewBox="0 0 24 24" aria-hidden="true"></svg></div>
       <div class="cs-text">
         <div class="cs-say" aria-live="polite"><h1 id="cs-title">Standing by</h1><p id="cs-sub"></p></div>
-        <p id="cs-live" hidden><span class="cs-hopk"><i class="cs-hop" aria-hidden="true"></i>hop</span><span><b id="cs-rate">0</b> tok/s</span><span><b id="cs-tok">0</b> tokens here</span><span><b id="cs-ms">-</b> per hop</span></p>
+        <p id="cs-live" class="dev-only" hidden><span class="cs-hopk"><i class="cs-hop" aria-hidden="true"></i>hop</span><span><b id="cs-rate">0</b> tok/s</span><span><b id="cs-tok">0</b> tokens here</span><span><b id="cs-ms">-</b> per hop</span></p>
         <div id="cs-strip" aria-hidden="true"></div>
         <p id="cs-api" hidden><i aria-hidden="true"></i><span id="cs-api-t"></span></p>
       </div>

@@ -654,3 +654,38 @@ test("the n-gram table is copied to this tab's disk only when its user allowed i
     else { eq(touched, 0); ok(/its user/.test(r.skipped), JSON.stringify(r)); }
   }
 });
+
+// the n-gram table's copy ahead of the GPU step (loadShard qwen4exp, room/loadsteps.js "words"): its progress climbs to
+// the copy's total, a second call copies nothing and reports nothing, and it never throws (openNgramTable retries)
+test("saveNgramEarly: copies with progress when allowed, 0 when already there, not allowed, or failing", async () => {
+  const cfg = { nHeads: 2, vocab: [4, 4], rowBytes: 8, offsets: [0, 4], nRows: 8, shard: 0, byteOffset: 16, ggmlType: 2 };
+  const table = new Uint8Array(16 + 64).map((_, i) => i & 255);
+  const readAt = async (_f, off, len) => table.slice(off, off + len);
+  const M = { gguf: "https://example.test/m.gguf" };
+  const allow = { tabDisk: () => ({ tabDisk: { ramGB: 3, models: ["qwen3.8-flash"] }, choice: "allow" }) };
+  const root = new FakeDir(), storage = { getDirectory: async () => root, estimate: async () => ({ quota: 2 ** 40, usage: 0 }) };
+  const l = loader({}, async () => { throw new Error("no network"); }, { hooks: allow, options: { wcache: false, prefetch: 0 } });
+  const seen = [];
+  eq(await l.saveNgramEarly(null, M, cfg, (d, t) => seen.push([d, t]), { storage, readAt }), 64);
+  ok(seen.length && seen.every(([d, t], i) => t === 64 && (!i || d >= seen[i - 1][0])), JSON.stringify(seen));
+  eq(seen[seen.length - 1], [64, 64]);
+  const again = [];
+  eq(await l.saveNgramEarly(null, M, cfg, (d, t) => again.push([d, t]), { storage, readAt }), 0);
+  eq(again, []);
+  // not allowed: the disk is never touched
+  let touched = 0;
+  const watched = { getDirectory: async () => { touched++; return new FakeDir(); }, estimate: async () => ({}) };
+  const deny = loader({}, async () => { throw new Error("no network"); }, { hooks: { tabDisk: () => ({ tabDisk: null, choice: "deny" }) } });
+  eq(await deny.saveNgramEarly(null, M, cfg, () => {}, { storage: watched, readAt }), 0);
+  eq(touched, 0);
+  // a failing read: 0, no throw
+  const bad = async () => { throw new Error("network down"); };
+  let failed = 0;
+  eq(await l.saveNgramEarly(null, M, cfg, () => {}, { storage: { getDirectory: async () => new FakeDir(), estimate: async () => ({}) }, readAt: bad, onFail: () => failed++ }), 0);
+  // (the signature read failed before any copy: nothing started, so not a failed copy)
+  eq(failed, 0);
+  // a copy that starts and then fails (a read error after the signature): onFail, so openNgramTable won't copy again
+  const flaky = async (_f, off, len) => { if (off >= 16 + 32) throw new Error("network down"); return table.slice(off, off + len); };
+  eq(await l.saveNgramEarly(null, M, cfg, () => {}, { storage: { getDirectory: async () => new FakeDir(), estimate: async () => ({ quota: 2 ** 40, usage: 0 }) }, readAt: flaky, onFail: () => failed++ }), 0);
+  eq(failed, 1);
+});
