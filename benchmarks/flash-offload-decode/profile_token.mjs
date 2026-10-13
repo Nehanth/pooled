@@ -92,19 +92,23 @@ try {
   for (const name of CASES) {
     const g = gold[name];
     const st = () => ({ ...(worker.ai?.experts?.stats || {}) });
+    const rst = () => ({ ...(worker.ai?.experts?.reader?.worker?.stats || {}) });
+    const r0 = rst();
     rec.tokens = []; rec.cur = null;
     const s0 = st(), t1 = performance.now();
     const r = await host.locked(() => host.generate(g.prompt, { maxNew: g.ids.length, sample: greedy, stop: new Set() }));
     const wallMs = performance.now() - t1, s1 = st();
     if (rec.cur) { rec.cur.end = performance.now(); rec.tokens.push(rec.cur); rec.cur = null; }
-    const d = (k) => (s1[k] || 0) - (s0[k] || 0);
+    const d = (k) => (s1[k] || 0) - (s0[k] || 0), r1 = rst(), rd = (k) => (r1[k] || 0) - (r0[k] || 0);
     const ids = r.tokens, diff = ids.findIndex((x, i) => x !== g.ids[i]);
     const ties = (g.nearTies || []).map((x) => x[0]), tieOk = diff >= 0 && ties.some((i) => i <= diff);
     const verdict = diff < 0 ? (ids.length < g.ids.length ? "SHORT" : "MATCH") : tieOk ? "TIE" : "MISMATCH";
     if (verdict !== "MATCH") fail++;
     const o = out.cases[name] = { verdict, n: ids.length, prompt: g.prompt.length, tps: +r.tps.toFixed(3), decodeS: +(r.tDecode / 1000).toFixed(2), prefillS: +(r.tPre / 1000).toFixed(2),
       wallS: +(wallMs / 1000).toFixed(1), diskReads: d("diskReads"), diskMiB: +(d("diskBytes") / 2 ** 20).toFixed(0), diskWaitS: +(d("diskWaitMs") / 1000).toFixed(2),
-      t1Copies: d("t1Copies"), t1Writes: d("t1Writes"), lookups: d("lookups"), hits: d("hits"), misses: d("misses"), poolMiB: +(d("bytes") / 2 ** 20).toFixed(0) };
+      t1Copies: d("t1Copies"), t1Writes: d("t1Writes"), lookups: d("lookups"), hits: d("hits"), misses: d("misses"), poolMiB: +(d("bytes") / 2 ** 20).toFixed(0),
+      // the disk reader's jobs (all steps, prompt included): mean ms a worker spent reading / converting one
+      reader: { chunks: rd("chunks"), readMsPerChunk: +(rd("readMs") / rd("chunks")).toFixed(3), convMsPerChunk: +(rd("convMs") / rd("chunks")).toFixed(3), dedup: rd("dedup") } };
     if (patched) {
       // decode tokens: the steps after the prompt's (the prompt's go one at a time with offload); the first decode step
       // follows the last prompt step, so it is dropped too
