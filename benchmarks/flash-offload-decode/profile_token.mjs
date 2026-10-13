@@ -6,7 +6,8 @@
 // (ExpertStore.prepare) and the plan (ExpertStore.plan: the pool LRU and the copy encode, incl. the writeBuffer of
 // read bytes), plus the time between cuts (encoding the rest, outside any cut) and from the last cut to the next token.
 //   ROOT=<checkout> node profile_token.mjs     env: MODELS, CASES (two-sum,bash,eos-mid), HOST_GB (3), NODE_GB (8),
-//   NODE_RAM (24), NODE_DISK (1), PORT (8271), SPLIT (speed), PROF (1: patch and time; 0: only the stats), AHEAD (0: prefetch off), AHEAD_K (guessed experts read ahead)
+//   NODE_RAM (24), NODE_DISK (1), PORT (8271), SPLIT (speed), PROF (1: patch and time; 0: only the stats), AHEAD (0: prefetch off), AHEAD_K (guessed experts read ahead),
+//   BITS (1: fingerprint the room's readbacks per case)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -61,6 +62,27 @@ if (PROF) {
   };
   patched = 1;
 }
+// BITS=1: a fingerprint of everything the room reads back from its GPUs that is not an id list (the node's residual to
+// the host, every step's logits on the host): an FNV-1a hash over the bytes of each mapped range of 4 KiB or more, per
+// case. Two runs with the same BITS computed the same values bit for bit
+const BITS = env("BITS", "0") === "1";
+let bits = 0x811c9dc5 >>> 0, bitsN = 0;
+if (BITS) {
+  await (await import(url("packages/room-node/env.js"))).setupNode();
+  const G = globalThis.GPUBuffer?.prototype;
+  if (!G?.getMappedRange) throw new Error("BITS: no GPUBuffer.prototype.getMappedRange to wrap");
+  const gmr0 = G.getMappedRange;
+  G.getMappedRange = function (...a) {
+    const ab = gmr0.apply(this, a);
+    if (ab.byteLength >= 4096 && this.usage & GPUBufferUsage.MAP_READ) {
+      const u = new Uint32Array(ab, 0, ab.byteLength >> 2);
+      let h = bits;
+      for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u[i], 0x01000193) >>> 0;
+      bits = h; bitsN++;
+    }
+    return ab;
+  };
+}
 // one token's split (ms): cut = readback + disk + plan; between: from a cut's end to the next cut (encode and the
 // non-cut work); head: _begin to the first cut; tail: the last cut's end to the next token's _begin (the rest of the
 // layers, the readback of the residual, the hop to the host and back)
@@ -98,6 +120,7 @@ try {
     const rst = () => ({ ...(worker.ai?.experts?.reader?.worker?.stats || {}) });
     const r0 = rst();
     rec.tokens = []; rec.cur = null;
+    bits = 0x811c9dc5 >>> 0; bitsN = 0;
     const s0 = st(), t1 = performance.now();
     const r = await host.locked(() => host.generate(g.prompt, { maxNew: g.ids.length, sample: greedy, stop: new Set() }));
     const wallMs = performance.now() - t1, s1 = st();
@@ -112,6 +135,7 @@ try {
       t1Copies: d("t1Copies"), t1Writes: d("t1Writes"), aheadReads: d("aheadReads"), aheadUsed: d("aheadUsed"), lookups: d("lookups"), hits: d("hits"), misses: d("misses"), poolMiB: +(d("bytes") / 2 ** 20).toFixed(0),
       // the disk reader's jobs (all steps, prompt included): mean ms a worker spent reading / converting one
       reader: { chunks: rd("chunks"), readMsPerChunk: +(rd("readMs") / rd("chunks")).toFixed(3), convMsPerChunk: +(rd("convMs") / rd("chunks")).toFixed(3), dedup: rd("dedup") } };
+    if (BITS) { o.bits = bits.toString(16).padStart(8, "0"); o.bitsReads = bitsN; }
     if (patched) {
       // decode tokens: the steps after the prompt's (the prompt's go one at a time with offload); the first decode step
       // follows the last prompt step, so it is dropped too
