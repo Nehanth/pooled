@@ -187,3 +187,11 @@ Deno.test("flash: a 0.4.1 node (no meta.offloadFlash) is never dealt Flash offlo
   // the Qwen 3.5 MoEs: the old node offloads as it always did, field for field
   for (const model of [M35, M122]) eq(deal(model, [plainTab(12), pc041(8, 24, true)], 32768).d, deal(model, [plainTab(12), pc(8, 24, true)], 32768).d, model);
 });
+
+Deno.test("diskShares: each device's disk layers' experts, and the n-gram table where its layer is", async () => {
+  const { diskShares } = await import("../../room/plan.js");
+  const deal = { used: [0, 2], offload: [{ lo: 0, hi: 20, diskLo: 4 }, { lo: 20, hi: 48, diskLo: 30 }], ngram: { at: 0, bytes: 1000 } };
+  const s = diskShares(deal, 3, 10);
+  if (JSON.stringify(s) !== JSON.stringify([16 * 10 + 1000, 0, 18 * 10])) throw new Error(JSON.stringify(s));
+  if (JSON.stringify(diskShares({ used: [0], offload: [null] }, 1, 10)) !== "[0]") throw new Error("no disk layers");
+});

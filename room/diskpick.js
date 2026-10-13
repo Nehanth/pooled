@@ -58,7 +58,7 @@ export function poolGpuLine(m, { needGB = null, needDisk = false, fits = false, 
 // -> { text, chip (or null), ok }
 export function poolStoreLine(m, { nDisk = 0, nRam = 0, anyAsk = false, needDisk = false, fits = false } = {}) {
   const size = sizeText(m.diskBytes);
-  if (nDisk > 0) return { text: `Keeps up to ${size} on each device's disk${anyAsk ? ", asks before saving" : ""}`, chip: "fits", ok: true };
+  if (nDisk > 0) return { text: `${nDisk > 1 ? `Split across ${nDisk} devices' disks` : "Kept on disk"}, ${size} in all${anyAsk ? ", asks before saving" : ""}`, chip: "fits", ok: true };
   if (nRam > 0) return { text: `Held in spare memory on ${nRam} device${nRam === 1 ? "" : "s"}`, chip: "fits", ok: true };
   if (!needDisk && fits) return { text: "Not needed here, it all fits in GPU memory", chip: null, ok: false };
   return { text: "No device here can store it", chip: "needs disk", ok: false };
@@ -70,9 +70,14 @@ export function poolFix(state, { nStore = 0, fits = false, needDisk = false, nee
   return !fits && (needGB == null || !needDisk) ? "Give more GPU memory below, or invite a device." : "";
 }
 // a device row's tag in the pool's list, and the words its tooltip uses
-export const devStoreTag = (st) => st?.kind === "disk" ? (st.ask ? "asks" : "disk") : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk";
-export const devStoreTitle = (name, gb, st) => `${name}: ${gb} GB GPU memory, `
-  + (st?.kind === "disk" ? (st.ask ? "asks before saving to disk" : "disk") : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk");
+// share: what this tab would copy to its disk in this room (roomFitFor share: bytes, 0 when the room doesn't need its
+// disk), null for a room node (it reads its own files) or when not known
+export const devStoreTag = (st, share = null) => st?.kind === "disk"
+  ? (share > 0 ? `${sizeText(share)} disk${st.ask ? ", asks" : ""}` : share === 0 ? "disk not needed" : st.ask ? "asks" : "disk")
+  : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk";
+export const devStoreTitle = (name, gb, st, share = null) => `${name}: ${gb} GB GPU memory, `
+  + (st?.kind === "disk" ? (st.ask ? "asks before saving to disk" : "disk") + (share > 0 ? `, saves ${sizeText(share)} there` : "")
+    : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk");
 
 // ---- Disk ----
 // state: room/diskstore.js diskState: "ask" | "allow" | "deny" | "url" (the address keeps it off: ?tabdisk=0, ?tabram=0)
@@ -89,16 +94,25 @@ const WHY = { url: "This link turns disk storage off on this device", small: "Th
 const TIP = { url: "?tabdisk=0 or ?tabram=0 in the address", small: "tabRamCap leaves no RAM for the disk tier",
   none: "No disk tier: a phone, no WebGPU, or no OPFS (origin-private file system)" };
 // storedBytes: room/flashdisk.js flashDiskBytes (null: unknown); ramGB: this tab's disk-tier RAM (tabDiskMeta's ramGB:
-// TAB_RAM_GB held to tabRamCap; null without a tier); armed: Free was pressed once (the second press frees)
-export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, armed = false } = {}) {
+// TAB_RAM_GB held to tabRamCap; null without a tier); armed: Free was pressed once (the second press frees);
+// shareBytes: what this device would copy in this room (roomFitFor share: its layers' experts and, on the device that
+// holds its layer, the n-gram table; 0 when the room doesn't need its disk), null when not known (the whole copy then)
+export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, armed = false, shareBytes = null } = {}) {
   const stored = storedBytes > 0 ? sizeText(storedBytes) : storedBytes === 0 ? "0 GB" : "?";
   const total = sizeText(m.diskBytes), ram = ramGB > 0 ? `${num(ramGB)} GB of RAM` : "";
+  const part = shareBytes > 0 && shareBytes < m.diskBytes * 0.99, need = part ? sizeText(shareBytes) : total;
+  const whose = part ? ` (this device's share of ${total})` : "";
   const parts = [];
   if (state === "allow") {
-    parts.push(storedBytes > 0 ? `${stored} of ${total} saved on this device` : `Saves ${total} to this device's disk the first time it starts`);
-    if (ram) parts.push(`Uses ${ram} to read it`);
+    if (shareBytes === 0 && !(storedBytes > 0)) parts.push("This room doesn't need this device's disk right now");
+    else {
+      parts.push(storedBytes > 0 ? (shareBytes != null && storedBytes >= shareBytes * 0.99 ? `${stored} saved on this device` : `${stored} of ${need} saved on this device`)
+        : `Saves ${need}${whose} to this device's disk the first time it starts`);
+      if (ram && shareBytes !== 0) parts.push(`Uses ${ram} to read it`);
+    }
   } else if (state === "ask" || state === "deny") {
-    parts.push(`Lets ${m.name} save ${total} to this device's disk, once, and read it with ${ram || "a little RAM"}`);
+    parts.push(shareBytes === 0 ? `Lets ${m.name} save up to ${total} to this device's disk when the room needs it`
+      : `Lets ${m.name} save ${need}${whose} to this device's disk, once, and read it with ${ram || "a little RAM"}`);
     if (storedBytes > 0) parts.push(`${stored} saved`);
   } else {
     parts.push(WHY[state] || WHY.none);
