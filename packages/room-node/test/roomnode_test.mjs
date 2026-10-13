@@ -794,3 +794,98 @@ test("worker: a room node reports its compute per frame to the host (ai-tele), w
   await one(7); await n.ai.q;
   assert.equal(tele()[2].exp, undefined);
 });
+
+// A device that refuses the offload it was dealt (#368's follow-up): a tab keeping the model off its disk (ai-error
+// nodisk) or a 0.4.1 node ("no expert offload yet"). The host deals again once without that device's offload, as the
+// room page does (room.js ai-error, aiStart's metasNow); a second refusal from it stops the start as any error does.
+// dealPlan is wrapped so a device whose meta still offers offload (meta.offload) is dealt some: what the host passes
+// it is what this test checks (no GPU, no real MoE header).
+function offloadDeal(n) {
+  const real = RoomNode.dealPlan, seen = [];
+  RoomNode.dealPlan = (args) => {
+    seen.push(args.peers.map((p) => ({ name: p.name, offload: !!p.meta?.offload, tabDisk: !!p.meta?.tabDisk, ramGB: p.meta?.ramGB })));
+    const plan = real(args);
+    plan.offload = [null, ...plan.chain.map((id) => (args.peers.find((p) => p.id === id)?.meta?.offload ? { lo: 20, hi: 28, vramBytes: GB, ramBytes: 2 * GB } : null))];
+    return plan;
+  };
+  n.restore = () => { RoomNode.dealPlan = real; };
+  return seen;
+}
+for (const [kind, refusal] of [
+  ["a tab keeping the model off its disk (nodisk)", { t: "ai-error", load: 1, nodisk: 1, message: "this device keeps the model off its disk" }],
+  ["a 0.4.1 node (no expert offload yet)", { t: "ai-error", load: 1, message: "Qwen3.8-Flash-Next has no expert offload yet" }]]) {
+  test(`offload refused by ${kind}: the node host deals again once without its offload and comes online`, async () => {
+    const n = redealNode({ hostGB: 4, peers: [] });
+    n.addPeer("t", "tab", { webgpu: true, contribGB: 4, offload: true, ramGB: 16, tabDisk: { gb: 40 } });
+    const seen = offloadDeal(n);
+    try {
+      const release = slowHost(n);
+      const p = n.start("qwen3-1.7b"); p.catch(() => {});
+      await until(() => msgs(n, "t", "ai-load").length);
+      assert.ok(msgs(n, "t", "ai-load")[0].offload, "dealt an offload first");
+      n.aiOnData("t", refusal);
+      release();
+      await until(() => msgs(n, "t", "ai-load").length === 2);
+      const again = msgs(n, "t", "ai-load")[1];
+      assert.equal(again.offload, undefined, "the re-deal has no offload for it");
+      assert.deepEqual(seen.at(-1), [{ name: "tab", offload: false, tabDisk: false, ramGB: undefined }], "dealt as a device without any offload");
+      assert.ok(n.logs.some((l) => /dealing the layers again without its offload/.test(l)), n.logs.join("\n"));
+      assert.equal(n.conns.get("t").meta.offload, true, "its hello's meta is left as it said (the deal leaves the offload out)");
+      n.aiOnData("t", { t: "ai-ready", slots: [] });
+      await p;
+      assert.ok(n.ai.online && n.whole());
+      // the next start (a rejoin, a pooled host start again) still counts it without the offload
+      const q = n.redeal("again"); q.catch(() => {});
+      await until(() => msgs(n, "t", "ai-load").length === 3);
+      assert.equal(msgs(n, "t", "ai-load")[2].offload, undefined);
+      n.aiOnData("t", { t: "ai-ready", slots: [] });
+      await q;
+      assert.ok(n.ai.online);
+    } finally { n.restore(); }
+  });
+}
+
+test("offload refused twice by the same device: the second refusal stops the start as any error does", async () => {
+  const n = redealNode({ hostGB: 4, peers: [] });
+  n.addPeer("t", "tab", { webgpu: true, contribGB: 4, offload: true, ramGB: 16 });
+  offloadDeal(n);
+  try {
+    const release = slowHost(n);
+    const p = n.start("qwen3-1.7b"); p.catch(() => {});
+    await until(() => msgs(n, "t", "ai-load").length);
+    n.aiOnData("t", { t: "ai-error", load: 1, nodisk: 1, message: "keeps the model off its disk" });
+    release();
+    await until(() => msgs(n, "t", "ai-load").length === 2);
+    n.aiOnData("t", { t: "ai-error", load: 1, nodisk: 1, message: "keeps the model off its disk" });
+    await assert.rejects(p, /tab couldn't load its layers/);
+    assert.equal(msgs(n, "t", "ai-load").length, 2, "no third deal");
+    assert.deepEqual([n.ai.online, n.ai.starting], [false, false]);
+  } finally { n.restore(); }
+});
+
+test("offload refused: a device that later says yes to its disk tier is offered the offload again; other errors stop as before", async () => {
+  const n = redealNode({ hostGB: 4, peers: [] });
+  n.addPeer("t", "tab", { webgpu: true, contribGB: 4, offload: true, ramGB: 16, tabDisk: { gb: 40, ask: true } });
+  offloadDeal(n);
+  try {
+    // a refusal from a device not in the chain, or from a room node not hosting: nothing happens
+    n.aiOnData("t", { t: "ai-error", load: 1, nodisk: 1, message: "no" });
+    assert.equal(n.ai.noDisk.size, 0);
+    const release = slowHost(n);
+    const p = n.start("qwen3-1.7b"); p.catch(() => {});
+    await until(() => msgs(n, "t", "ai-load").length);
+    n.aiOnData("t", { t: "ai-error", load: 1, nodisk: 1, message: "keeps the model off its disk" });
+    assert.ok(n.ai.noDisk.has("tab"));
+    n.onData("t", { t: "pledge", gb: 4, tabDisk: { gb: 40, ask: true } });
+    assert.ok(n.ai.noDisk.has("tab"), "still asking: still without");
+    n.onData("t", { t: "pledge", gb: 4, tabDisk: { gb: 40 } });
+    assert.ok(!n.ai.noDisk.has("tab"), "it said yes: offered again");
+    release();
+    await until(() => msgs(n, "t", "ai-load").length === 2);
+    assert.ok(msgs(n, "t", "ai-load")[1].offload, "dealt its offload again");
+    // any other load error stops the start
+    n.aiOnData("t", { t: "ai-error", load: 1, message: "GPU error: device lost" });
+    await assert.rejects(p, /tab couldn't load its layers \(GPU error/);
+    assert.equal(msgs(n, "t", "ai-load").length, 2);
+  } finally { n.restore(); }
+});

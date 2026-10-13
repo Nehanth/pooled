@@ -195,7 +195,7 @@ export class RoomNode extends EventEmitter {
       apiCache: new AnswerCache(8), apiTurns: new TurnCache(), apiEnc: new EncodeCache(), apiProf: null, apiTT: null,
       apis: new Map(), runs: new Map(), degraded: false, model: null, range: null, online: false,
       plan: new Map(), gone: new Set(), chainNames: [], relinks: new Map(), lapStat: null, held: null,
-      shareCap: new Map(), dropped: new Set(), loadDeaths: new Map(),
+      shareCap: new Map(), dropped: new Set(), loadDeaths: new Map(), noDisk: new Set(),
       ckpt: null, dropQ: [], ckptCap: new Map(), bounds: new Map(),
       diskOf: new Map(), diskRoom: null, diskWait: new Map(), diskPend: new Map(), dealGen: 0 };
     this.pipeline = createPipeline({
@@ -663,6 +663,7 @@ export class RoomNode extends EventEmitter {
         // tabDisk (a tab's disk tier, when the message has it: its user said yes or no; room/pledge.js tabDiskGB)
         const upd = (meta) => { const m = { ...meta, contribGB: d.gb }; if ("tabDisk" in d) { if (d.tabDisk && typeof d.tabDisk === "object") m.tabDisk = d.tabDisk; else delete m.tabDisk; } return m; };
         if (e) e.meta = upd(e.meta);
+        if (d.tabDisk && typeof d.tabDisk === "object" && !d.tabDisk.ask) this.ai.noDisk.delete(e?.name || from);   // it said yes after all
         if (this.isHost && this.roster.has(from)) { this.roster.get(from).meta = upd(this.roster.get(from).meta); this.broadcastRoster(); }
         return;
       }
@@ -764,9 +765,10 @@ export class RoomNode extends EventEmitter {
       case "ai-error":
         this.log(`${e?.name || from} failed: ${d.message}`);
         // a device refused the offload it was dealt: a tab keeping the model off its disk (nodisk), or a node from before
-        // Flash offload (0.4.1: "no expert offload yet"). The next start counts it without any offload (this host does
-        // not re-deal by itself here: the start fails and the next one leaves it out)
-        if ((d.nodisk || /has no expert offload yet/.test(String(d.message || ""))) && e?.meta) { const { tabDisk, offload, ramGB, ...m } = e.meta; e.meta = m; }
+        // Flash offload (0.4.1: "no expert offload yet"). Deal again once without its offload (_start's peers: ai.noDisk),
+        // not a failed start, as the room page does (room.js ai-error); a second refusal from it stops the start as any
+        // error does
+        if (this.offloadRefused(from, e, d)) return;
         if (this.hosting() && ai.chain.includes(from)) {
           this.failWaiters(new Error(`${e?.name || from}: ${d.message}`));
           if (d.load && ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${d.message})`));
@@ -785,6 +787,25 @@ export class RoomNode extends EventEmitter {
         if (ai.askerId === from) ai.chatAbort?.abort();
         return;
     }
+  }
+
+  // A chain device refused the offload it was dealt (ai-error nodisk, or an older node's "no expert offload yet"): the
+  // first time, every deal from now on counts it without any offload (ai.noDisk, by name: it holds across a rejoin, until
+  // its user says yes to the disk tier: "pledge") and the room deals again now. -> true when handled (a re-deal is on)
+  offloadRefused(from, e, d) {
+    const ai = this.ai, nm = e?.name || from;
+    const oldNode = /has no expert offload yet/.test(String(d.message || ""));
+    if (!(d.nodisk || oldNode) || !this.hosting() || !ai.chain.includes(from) || ai.noDisk.has(nm)) return false;
+    ai.noDisk.add(nm);
+    const why = d.nodisk ? `${nm} keeps the model off its disk` : `${nm} can't offload this model's experts (an older pooled)`;
+    this.log(`${why}: dealing the layers again without its offload`);
+    this.failWaiters(new Error(`${nm}: ${d.message}`));
+    const again = `${why}: dealing the layers again`;
+    // a deal in progress ends and deals again once this device's own load is in (_start's readyAll); a room that was
+    // up deals again now
+    if (ai.starting) this.dealAgain(again);
+    else if (ai.model && !this.closing) this.redeal(again).catch((err) => { if (!err.short) this.log("re-deal failed: " + err.message); });
+    return true;
   }
 
   // ---------------- worker (room.js ai-load + workerFrame) ----------------
@@ -1064,7 +1085,9 @@ export class RoomNode extends EventEmitter {
     const nameOf = (id) => this.conns.get(id)?.name || id;
     if (this.expertDisk && this.meta) this.meta.local = localModels(this.modelDir);   // (a model pulled since this device opened)
     ai.dealtPeers = new Set(this.gpuPeers());   // every device this deal saw, left out or not (for a --devices host's re-deal)
-    const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: this.conns.get(id)?.meta }));
+    // (a device that refused the offload it was dealt, ai.noDisk: counted without any, no disk tier, nothing parked)
+    const metaOf = (id) => { const m = this.conns.get(id)?.meta; if (!m || !ai.noDisk.has(nameOf(id))) return m; const { tabDisk, offload, ramGB, ...rest } = m; return rest; };
+    const peers = this.gpuPeers().sort().filter((id) => !ai.dropped.has(nameOf(id))).map((id) => ({ id, name: nameOf(id), meta: metaOf(id) }));
     // the model's default context, or its fallback (the 1.7B: 8k for 16k) when only that fits the
     // room's pledges (room/models.js pickCtx, the room page's rule); an asked --ctx stays as asked
     const pick = RoomNode.ctxPick(modelKey, { want: ctx, ask: this.ctxAsk, kv, self: { name: this.name, meta: this.meta }, peers, shareCap: ai.shareCap });
