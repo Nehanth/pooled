@@ -230,7 +230,7 @@ const tinfo = (layer, part, nExp, rows, cols) => part === "down"
   : { layer, part, shape: [nExp, rows, cols], ggmlType: GGML_Q4_0, byteOffset: 0 };
 function makeDiskStore({ layers = [2, 5], disk = [2, 5], nExp = 32, slots = 6, rows = 64, cols = 128, delay = true } = {}) {
   const dev = fakeDevice(), reader = fakeReader({ nExp, rows, cols, delay });
-  const st = new ExpertStore(dev, { layers, slots, parkBytes: 1 << 20, disk: { layers: disk, reader } });
+  const st = new ExpertStore(dev, { layers, slots, parkBytes: 1 << 20, disk: { layers: disk, reader, ahead: true } });
   for (const l of layers) ["gate", "up", "down"].forEach((p, i) => {
     const ph = st.isDisk(l) ? st.attach(l, p, tinfo(l, p, nExp, rows, cols), nExp)
       : st.park(l, p, i < 2 ? entry(l, i, nExp, rows, cols) : entry(l, i, nExp, cols, rows, "q8"), nExp);
@@ -341,6 +341,7 @@ Deno.test("disk: prefetch skips what the pool or T1 holds, and does nothing with
   assert(st.prefetch(2, [1, 2, 3, 9]) === 0, "a parked layer: nothing");
   st.ahead = false;
   assert(st.prefetch(5, [10, 11]) === 0, "ahead off: nothing");
+  assert(new ExpertStore(fakeDevice(), { layers: [5], slots: 6, disk: { layers: [5], reader } }).ahead === false, "off unless the disk tier asks for it");
   st.ahead = true;
   await diskPlan(st, 5, sel1([9, 1, 2, 3]), 1, 5);
   assert(reader.calls.length === n0 + 3 && st.stats.aheadUsed === 1, "the cut read nothing more");

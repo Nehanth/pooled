@@ -366,7 +366,7 @@ export class Qwen4ExpEngine {
     // Qwen4ExpEngine.aheadK: how many of the guessed top experts are read ahead (up to 32, the route kernel's most;
     // default K)
     const KA = this.aheadK = Math.min(32, Qwen4ExpEngine.aheadK || K);
-    if (this.experts?.diskSet?.size) {
+    if (this.experts?.diskSet?.size && this.experts.ahead) {
       for (let j = 0; j + 1 < this.layers.length; j++) {
         const l = this.layers[j], n = this.layers[j + 1];
         if (!l.off || !this.experts.isDisk(n.i)) continue;

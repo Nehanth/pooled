@@ -66,11 +66,14 @@ export class ExpertStore {
   // past it throws, so the load fails instead of the device coming online over what it lends. expectBytes: what the
   // whole store will park (room/plan.js offloadPlan ramBytes), so the last buffer is sized to what is left instead of
   // a whole parkBytes.
-  // disk: { layers, reader, ramBytes, reserve, ring } (reader: engine/expert_disk.js expertDisk(), the room node's
+  // disk: { layers, reader, ramBytes, reserve, ring, ahead } (reader: engine/expert_disk.js expertDisk(), the room node's
   // packages/room-node/expert_disk.js, or engine/expert_opfs.js in a tab): of the offloaded layers, those whose experts
   // stay in the file; ramBytes: RAM for T1, the cache of their experts (0: none); reserve: free T1 slots kept mapped
   // (default 2 K, at least 16); ring (optional, engine/stage_ring.js): decode cuts and region fills copy the experts
-  // they read (and T1 does not take) through mapped upload slots and copyBufferToBuffer instead of queue.writeBuffer
+  // they read (and T1 does not take) through mapped upload slots and copyBufferToBuffer instead of queue.writeBuffer;
+  // ahead: read the next disk layer's guessed experts early (prefetch(); engine/qwen4exp.js makes the guess). On for a
+  // room node's reader (packages/room-node/shard.js), where it was measured (benchmarks/flash-offload-decode.md); a
+  // tab's OPFS reader has not been timed with it, so it is off by default
   constructor(device, { layers = [], vramBytes = 8 * 2 ** 30, slots = 0, parkBytes = 2 ** 30, ramBytes = Infinity, expectBytes = 0, disk = null } = {}) {
     this.device = device;
     this.layerSet = new Set(layers);
@@ -88,7 +91,7 @@ export class ExpertStore {
     this._leases = [];           // reader leases (views of its shared ring) the staged bytes are in: released at _unstage
     this._held = 0;              // leases taken and not released yet (staged and read ahead): at most reader.leaseSlots
     this._pf = null;             // experts read ahead for one disk layer (prefetch): { layer, m: Map(e -> { done, leases }) }
-    this.ahead = true;           // prefetch() reads (false: it does nothing)
+    this.ahead = !!disk?.ahead;  // prefetch() reads (false: it does nothing; an engine then builds no guess either)
     this.vramBytes = vramBytes; this.slotsOpt = slots;
     this.parkBytes = Math.min(parkBytes, device.limits?.maxBufferSize ?? parkBytes);
     this.L = new Map();          // layer -> { parts: { gate|up|down: { kind, nExp, rows, cols, sl: [qs, sc] } } }

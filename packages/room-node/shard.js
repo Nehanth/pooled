@@ -315,7 +315,8 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
     let disk = null;
     if (dl.length) {
       if (!src.localPaths) throw new Error("the host asked this device to read experts from disk, but the model's files are not on this device");
-      disk = { layers: dl, reader: expertReader({ paths: src.localPaths, make: diskReader, log }), ramBytes: +offload.diskRamBytes || 0 };
+      // ahead: the next disk layer's guessed experts are read early (engine/qwen4exp.js; benchmarks/flash-offload-decode.md)
+      disk = { layers: dl, reader: expertReader({ paths: src.localPaths, make: diskReader, log }), ramBytes: +offload.diskRamBytes || 0, ahead: true };
     }
     out.experts = new ExpertStore(device, { layers: off, vramBytes: offload.vramBytes, ramBytes: +offload.ramCap || Infinity, expectBytes: +offload.ramBytes || 0, disk });
     const parked = off.length - dl.length;
