@@ -1,0 +1,21 @@
+1.9s [a] prof-b joined (nvidia blackwell, 6 GB)
+2.3s [a] Qwen3.8 Flash Next · Q4: layer split prof-a 1+embed · prof-b 47
+2.3s [a] the n-gram table (26.8 GB, layer 1): prof-b reads it (from its own copy when it has one, else by HTTP range: its log says which); whether it has the disk for it is not reported
+2.3s [a] prof-b offloads layers 1-47 with their experts in RAM (19.1 GB parked, 3.3 GB of GPU cache); layers 14-47 read theirs from disk (2.9 GB RAM cache)
+2.3s [a] speculative decoding is off while experts are offloaded: plain decoding is faster there (POOLED_OFFLOAD_SPEC=1 turns it on)
+2.3s [b] dealt layers 1-47 of qwen3.8-flash; next: host
+2.3s [b] offloading the experts of layers 1-47 to RAM (layers 14-47: read from disk) (3.3 GB of GPU cache)
+6.7s [b] autotune WG=128 ROWS=8
+6.8s [b] expert offload: layers 1-13 park their experts in RAM; layers 14-47 read theirs from disk (2.9 GB RAM cache), 3.30 GB GPU cache
+6.8s [a] autotune WG=256 ROWS=8
+17.6s [a] Qwen3.8-Flash-Next layers 0-0 + embedding/head: 4.1 GB (weights, K/V, the CPU embedding, upload staging)
+18.2s [a] host layers 0-0 + embedding/head ready in 15.9 s
+54.4s [b] n-gram table: 26.8 GB, rows read from C:\llm\models\q38flash\Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf
+56.6s [b] Qwen3.8-Flash-Next layers 1-47: 28.0 GB (weights less the offloaded experts, the expert cache, K/V, the CPU embedding, upload staging), the n-gram layer here
+56.7s [b] expert offload: 47 layers, 26 slots each (3.25 GiB) + region 0.00 GiB, parked 19.09 GiB in 19.10 GiB of buffers
+56.8s [b] layers 1-47 ready in 54.5 s
+56.8s [a] room online · 2 device(s), 48 layers
+56.8s online: {"L":48,"ranges":[[0,1],[1,48]],"names":["prof-a","prof-b"]} in 55 s
+75.6s bash: MATCH {"verdict":"MATCH","n":22,"prompt":27,"tps":3.603,"decodeS":6.11,"prefillS":12.71,"wallS":18.8,"diskReads":5564,"diskMiB":14671,"diskWaitS":7.93,"t1Copies":1044,"t1Writes":3809,"lookups":23030,"hits":13859,"misses":9171,"poolMiB":24988,"reader":{"chunks":16692,"readMsPerChunk":1.93,"convMsPerChunk":0.777,"dedup":0},"prof":{"decodeSteps":21,"tokMs":276.28,"cutsMs":47,"readbackMs":58.45,"diskMs":132.9,"planMs":64.7,"betweenMs":8.87,"headMs":3.04,"tailMs":8.32,"readsMs":92.86,"readbackShare":0.212,"diskShare":0.481,"planShare":0.234,"betweenShare":0.032,"headShare":0.011,"tailShare":0.03,"perLayer":[[1,1.02,0,0.14],[2,1.32,0,0.17],[3,1.4,0,0.09],[4,1.18,0,0.12],[5,1.26,0,0.11],[6,1.26,0,0.1],[7,1.14,0,0.09],[8,1.13,0,0.07],[9,1.05,0,0.07],[10,1.06,0,0.07],[11,1.05,0,0.07],[12,1.07,0,0.08],[13,0.8,0,0.06],[14,1.07,4.11,1.68],[15,1.23,2.88,1.01],[16,1.16,3.28,1.26],[17,1.18,4.93,2.11],[18,1.26,4.8,2.34],[19,1.28,4.43,2.2],[20,1.27,4.02,1.52],[21,1.27,4.08,1.85],[22,1.24,5.07,2.61],[23,1.39,4.45,2.12],[24,1.87,3.36,1.86],[25,0.77,4.18,2.04],[26,1.34,4.78,2.7],[27,1.39,3.85,2.07],[28,1.38,4.67,2.67],[29,1.37,5.02,2.62],[30,1.4,4.53,2.3],[31,1.42,3.15,1.53],[32,1.28,3.14,1.51],[33,1.34,4.3,2.5],[34,1.38,3.69,1.96],[35,1.36,3.4,1.58],[36,1.3,3.48,1.51],[37,0.79,3.71,1.77],[38,1.3,4.08,2.01],[39,1.34,3.68,1.52],[40,1.28,3.59,1.71],[41,1.32,3.22,1.18],[42,1.24,3.07,1.6],[43,1.26,3.01,1.38],[44,1.27,3.51,1.27],[45,1.3,3.75,1.77],[46,1.32,3.88,1.82],[47,1.34,3.77,1.9]],"perCutMs":{"readback":1.244,"disk":2.828,"plan":1.377}}}
+75.6s [b] expert offload: 47 layers, 26 slots each (3.25 GiB) + region 0.00 GiB, parked 19.09 GiB in 19.10 GiB of buffers; 2303 cuts, hits 60.2% (13859/23030), 24988 MiB copied to the pools, 0 region cuts (0 MiB), 0 whole-layer loads (0.0 GiB); 34 disk layers: 5564 expert reads, 14671 MiB from the file, 7.93 s waiting; RAM cache 1106/1126 experts (2.90 of 2.90 GiB): 1044 hits, 1755 admitted, 3809 first misses, 0 with no free slot, 649 evicted
+75.6s [a] prof-b left

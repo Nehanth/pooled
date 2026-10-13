@@ -281,6 +281,8 @@ export function expertDiskReader({ paths, threads = defaultDiskThreads(), chunkB
   return {
     threads,
     stats,
+    // how many leases (leasePart) a caller may hold at once: the ring's slots
+    leaseSlots: ringSlots,
     // the bytes [byteOffset, byteOffset + byteLength) of one shard -> a Uint8Array of its own (plain memory, not
     // shared). Up to chunkBytes: one job, the worker's buffer transferred. Longer: through ring slots a slot at a
     // time, each slot's bytes in chunkBytes pieces over the workers, gathered out by a worker (and, for a read longer

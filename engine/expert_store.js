@@ -66,11 +66,14 @@ export class ExpertStore {
   // past it throws, so the load fails instead of the device coming online over what it lends. expectBytes: what the
   // whole store will park (room/plan.js offloadPlan ramBytes), so the last buffer is sized to what is left instead of
   // a whole parkBytes.
-  // disk: { layers, reader, ramBytes, reserve, ring } (reader: engine/expert_disk.js expertDisk(), the room node's
+  // disk: { layers, reader, ramBytes, reserve, ring, ahead } (reader: engine/expert_disk.js expertDisk(), the room node's
   // packages/room-node/expert_disk.js, or engine/expert_opfs.js in a tab): of the offloaded layers, those whose experts
   // stay in the file; ramBytes: RAM for T1, the cache of their experts (0: none); reserve: free T1 slots kept mapped
   // (default 2 K, at least 16); ring (optional, engine/stage_ring.js): decode cuts and region fills copy the experts
-  // they read (and T1 does not take) through mapped upload slots and copyBufferToBuffer instead of queue.writeBuffer
+  // they read (and T1 does not take) through mapped upload slots and copyBufferToBuffer instead of queue.writeBuffer;
+  // ahead: read the next disk layer's guessed experts early (prefetch(); engine/qwen4exp.js makes the guess). On for a
+  // room node's reader (packages/room-node/shard.js), where it was measured (benchmarks/flash-offload-decode.md); a
+  // tab's OPFS reader has not been timed with it, so it is off by default
   constructor(device, { layers = [], vramBytes = 8 * 2 ** 30, slots = 0, parkBytes = 2 ** 30, ramBytes = Infinity, expectBytes = 0, disk = null } = {}) {
     this.device = device;
     this.layerSet = new Set(layers);
@@ -85,6 +88,10 @@ export class ExpertStore {
     if (notOff.length) console.warn(`ExpertStore: disk layers ${notOff.join(",")} are not offloaded layers: their experts stay resident on the GPU`);
     if (disk && !this.diskSet.size && (disk.layers || []).length) console.warn("ExpertStore: none of the disk layers is offloaded: no disk tier");
     this._staged = null;
+    this._leases = [];           // reader leases (views of its shared ring) the staged bytes are in: released at _unstage
+    this._held = 0;              // leases taken and not released yet (staged and read ahead): at most reader.leaseSlots
+    this._pf = null;             // experts read ahead for one disk layer (prefetch): { layer, m: Map(e -> { done, leases }) }
+    this.ahead = !!disk?.ahead;  // prefetch() reads (false: it does nothing; an engine then builds no guess either)
     this.vramBytes = vramBytes; this.slotsOpt = slots;
     this.parkBytes = Math.min(parkBytes, device.limits?.maxBufferSize ?? parkBytes);
     this.L = new Map();          // layer -> { parts: { gate|up|down: { kind, nExp, rows, cols, sl: [qs, sc] } } }
@@ -96,7 +103,9 @@ export class ExpertStore {
     this.ramBytes = ramBytes > 0 ? ramBytes : Infinity; this.expectBytes = expectBytes > 0 ? expectBytes : 0;
     this.stats = this._zeroStats();
   }
-  _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0, specs: 0, specFails: 0, diskReads: 0, diskBytes: 0, diskWaitMs: 0, t1Copies: 0, t1Writes: 0 }; }
+  // aheadReads: experts prefetch() read; aheadUsed: of those, the ones a cut then needed (the rest were read for nothing)
+  // leasedReads / plainReads: experts read as leases of the reader's ring / as arrays of their own (no ring slot left)
+  _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0, specs: 0, specFails: 0, diskReads: 0, diskBytes: 0, diskWaitMs: 0, t1Copies: 0, t1Writes: 0, aheadReads: 0, aheadUsed: 0, leasedReads: 0, plainReads: 0 }; }
   resetStats() { this.stats = this._zeroStats(); if (this.t1) this.t1.stats = this.t1._zero(); }
   has(i) { return this.layerSet.has(i); }
   isDisk(i) { return this.diskSet.has(i); }
@@ -276,7 +285,7 @@ export class ExpertStore {
     st.lookups += uniq.length;
     if (uniq.length > this.P) {   // a wide verify / prompt-tail pass: through the region, no caching
       this._toRegion(enc, layer, uniq);
-      this._staged = null;
+      this._unstage();
       return { pool: false };
     }
     // recency is one stamp per use (hits in selection order, then the misses), so the order is total; the
@@ -298,7 +307,7 @@ export class ExpertStore {
       st.misses++;
     }
     if (miss.length && S.tab) this.device.queue.writeBuffer(S.tab, 0, S.slotOf);   // (before the copies' submit: nothing reads it between)
-    this._staged = null;
+    this._unstage();
     const remap = new Uint32Array(nCols * KS);
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) remap[c * KS + k] = S.slotOf[sel[c * KS + k]];
     return { pool: true, remap };
@@ -326,11 +335,17 @@ export class ExpertStore {
   }
 
   // ---- disk layers ----
-  // one expert's six slices (SLICES order), read and converted
-  async _readExpert(S, e) {
+  // one expert's six slices (SLICES order), read and converted. leases (an array): as views of the reader's shared ring
+  // (reader.leasePart), each lease pushed there to be released (_unstage for _leases): no arrays made per read, for a
+  // caller that copies the bytes out (into a T1 slot, a ring slot or by writeBuffer, all synchronous) before then
+  async _readExpert(S, e, leases = null) {
     const out = [];
-    const parts = await Promise.all(OFFLOAD_PARTS.map((p) => this.reader.readPart(S.parts[p].info, e)));
-    for (const r of parts) out.push(r.qs, r.sc);
+    if (leases) this.stats.leasedReads++; else this.stats.plainReads++;
+    const rs = await Promise.allSettled(OFFLOAD_PARTS.map((p) => (leases ? this._lease(S.parts[p].info, e) : this.reader.readPart(S.parts[p].info, e))));
+    if (leases) for (const r of rs) if (r.status === "fulfilled") leases.push(r.value);
+    const bad = rs.find((r) => r.status === "rejected");
+    if (bad) throw bad.reason;
+    for (const { value: r } of rs) out.push(r.qs, r.sc);
     ExpertStore.SLICES.forEach(([p, s], j) => {
       // (a reader may pad the scales to whole u32 words, as convertEntry's Uint32Array does: only `want` bytes count)
       const want = S.parts[p].sl[s].per;
@@ -339,11 +354,40 @@ export class ExpertStore {
     });
     return out;
   }
+  // one lease, counted in _held from now until its release (or its failure)
+  _lease(info, e) {
+    this._held++;
+    return this.reader.leasePart(info, e).then((r) => {
+      let done = false;
+      return { qs: r.qs, sc: r.sc, release: () => { if (done) return; done = true; this._held--; r.release?.(); } };
+    }, (err) => { this._held--; throw err; });
+  }
+  // whether n more experts may be read as leases: the reader has them and its ring holds them on top of those taken
+  // (a lease past the ring's slots would wait for one that only this store gives back)
+  _canLease(n) { return !!this.reader?.leasePart && this._held + n * OFFLOAD_PARTS.length <= (this.reader.leaseSlots || 0); }
   // these experts of a disk layer, read in parallel -> Map(e -> slices); stats count the wait. Callers keep ids to a
-  // run (REGION_RUN): each expert is held whole in memory until written (~10 MB on the 122B)
-  async _readMany(layer, ids) {
+  // run (REGION_RUN): each expert is held whole in memory until written (~10 MB on the 122B). lease: read as leases
+  // into _leases. pf: experts already read ahead (prefetch's Map), used instead of a read, their leases into _leases
+  async _readMany(layer, ids, { lease = false, pf = null } = {}) {
     const S = this.L.get(layer), t0 = performance.now(), m = new Map();
-    const got = await Promise.all(ids.map((e) => this._readExpert(S, e)));
+    // the leases of this call, kept here until every read has settled: then into _leases, or all released if a read
+    // failed (so a failed cut holds no ring slots, and no read that finishes after the failure adds any)
+    const held = [];
+    const rs = await Promise.allSettled(ids.map((e) => {
+      const x = pf?.get(e);
+      if (!x) return this._readExpert(S, e, lease ? held : null);
+      pf.delete(e);
+      return x.done.then((b) => { held.push(...x.leases.splice(0)); this.stats.aheadUsed++; return b; }, () => {
+        // a read ahead that failed: what it leased goes back now, and it is read again, as leases only if the ring
+        // has room for them on top of what is held (the cut's budget did not count this expert)
+        for (const r of x.leases.splice(0)) r.release();
+        return this._readExpert(S, e, lease && this._canLease(1) ? held : null);
+      });
+    }));
+    const bad = rs.find((r) => r.status === "rejected");
+    if (bad) { for (const r of held) r.release(); throw bad.reason; }
+    this._leases.push(...held);
+    const got = rs.map((r) => r.value);
     ids.forEach((e, i) => m.set(e, got[i]));
     this.stats.diskWaitMs += performance.now() - t0;
     this.stats.diskReads += ids.length;
@@ -364,22 +408,33 @@ export class ExpertStore {
     const S = this.L.get(layer), K = KS - 1, uniq = [];
     for (let c = 0; c < nCols; c++) for (let k = 0; k < K; k++) { const e = sel[c * KS + k]; if (e < this.nExp && !uniq.includes(e)) uniq.push(e); }
     const ids = (uniq.length > this.P ? uniq : uniq.filter((e) => S.slotOf[e] < 0)).filter((e) => !this.t1 || this.t1.find(this._key(layer, e), false) < 0);
-    this._staged = null;
+    this._unstage();
+    // what prefetch() read for this layer (only one layer's reads are kept: an older guess is dropped)
+    const pf = this._pf?.layer === layer ? this._pf.m : null;
+    if (this._pf && !pf) this._dropAhead();
+    this._pf = null;
     // the cut before this one was submitted, its experts' copies with it: its ring slots map again while we read. Not
     // when flush is false (engine _specCut after its first prepare: its unsubmitted encoder copies from those slots)
     if (flush) this.ring?.recycle();
     if (uniq.length > this.P) {
       // plan() takes the region path: up to every expert of the layer, so they are written into the region here, a run
       // at a time, instead of all held until plan() (everything that uses the region is submitted: the contract above)
+      if (pf) this._dropAhead({ layer, m: pf });
       await this._writeRegion(layer, ids);
       this._staged = { layer, region: new Set(ids) };
     } else {
-      const bytes = await this._readMany(layer, ids);
-      if (this.ring) {   // into ring slots now; plan() copies from them (a full ring: those take the writeBuffer path)
-        for (const b of bytes.values()) b.gpu = this.ring.put(b);
-        this.ring.seal();
-      }
-      this._staged = { layer, bytes };
+      // a cut's experts as leases when the reader has them and its ring holds the cut (a wide pass goes the region way)
+      const lease = this._canLease(ids.filter((e) => !pf?.has(e)).length);
+      try {
+        let bytes;
+        try { bytes = await this._readMany(layer, ids, { lease, pf }); }
+        finally { if (pf?.size) this._dropAhead({ layer, m: pf }); }   // guessed, not picked: read for nothing
+        if (this.ring) {   // into ring slots now; plan() copies from them (a full ring: those take the writeBuffer path)
+          for (const b of bytes.values()) b.gpu = this.ring.put(b);
+          this.ring.seal();
+        }
+        this._staged = { layer, bytes };
+      } catch (err) { this._unstage(); throw err; }   // a failed cut gives its leases back now, not at the next cut
     }
     return ids.length;
   }
@@ -403,6 +458,37 @@ export class ExpertStore {
     return n;
   }
   static REGION_RUN = 32;
+  // Read ahead (engine/qwen4exp.js _afterRoute): sel, the K experts the engine guesses a disk layer will pick (its
+  // router run a layer early, on the layer before's MoE input), is read now, while the layer before finishes on the GPU,
+  // so that layer's prepare() finds them read. Only the ones a cut would read: not in the layer's pool (nothing
+  // changes it before that layer's own plan()) and not in T1. Same reads, same bytes: a guess only moves a read earlier,
+  // and a wrong one is a read for nothing (stats aheadReads - aheadUsed), never a different expert. -> experts read
+  prefetch(layer, sel) {
+    if (!this.ahead || !this.built || !this.isDisk(layer) || !this.reader) return 0;
+    this._dropAhead();
+    const S = this.L.get(layer), m = new Map();
+    for (const e of sel) {
+      if (!(e < this.nExp) || m.has(e) || S.slotOf[e] >= 0 || (this.t1 && this.t1.find(this._key(layer, e), false) >= 0)) continue;
+      const leases = [], done = this._readExpert(S, e, this._canLease(1) ? leases : null);
+      done.catch(() => {});
+      m.set(e, { done, leases });
+    }
+    this._pf = m.size ? { layer, m } : null;
+    this.stats.aheadReads += m.size;
+    return m.size;
+  }
+  // reads ahead nobody will use: their leases go back once each read is done
+  _dropAhead(pf = this._pf) {
+    if (pf === this._pf) this._pf = null;
+    if (!pf) return;
+    for (const x of pf.m.values()) { const free = () => { for (const r of x.leases.splice(0)) r.release(); }; x.done.then(free, free); }
+    pf.m.clear();
+  }
+  // the staged bytes are done with: what they hold in the reader's ring goes back to it
+  _unstage() {
+    this._staged = null;
+    if (this._leases.length) for (const r of this._leases.splice(0)) r.release?.();
+  }
   _key(layer, e) { return layer * this.nExp + e; }
   // an expert into dst slot / region id `at`: a copy from its parked buffer, or (disk layer) from its T1 slot, or the
   // bytes prepare() read: into a free T1 slot and copied from there when T1 admits it (admit: a pool fill, enc given),
@@ -469,7 +555,7 @@ export class ExpertStore {
     if (!this.isDisk(layer)) throw new Error(`ExpertStore: layer ${layer} is not a disk layer`);
     this.t1?.flush();
     const ids = this._frameIds(sel, nCols, KS);
-    this._staged = null;
+    this._unstage();
     this.stats.regionBytes += await this._writeRegion(layer, ids);
     this.region.layer = -1;
     this.stats.regionCuts++;
@@ -509,6 +595,7 @@ export class ExpertStore {
   }
   // drop every cached expert (tests: a cold cache)
   clear() {
+    this._dropAhead();
     for (const l of this.layers || []) {
       const S = this.L.get(l); S.slotOf.fill(-1); S.expOf.fill(-1); S.used.fill(0);
       if (S.tab) this.device.queue.writeBuffer(S.tab, 0, S.slotOf);
@@ -538,6 +625,8 @@ export class ExpertStore {
   get t1RamBytes() { return this.t1 ? this.t1.bytes : 0; }
   // frees the RAM cache and stops the reader (room node: when the layers are freed)
   async close() {
+    this._unstage();
+    this._dropAhead();
     this.t1?.destroy(); this.t1 = null;
     const r = this.reader; this.reader = null;
     await r?.close?.();

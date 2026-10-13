@@ -66,7 +66,10 @@ export const diskLayers = (o, off) => (off && Number.isInteger(o?.diskLo) ? off.
 // without expert_disk_worker.js, threads that keep dying) the engine's own reader in this thread (engine/expert_disk.js
 // over positional reads of the same files): slower, the same bytes. make: the worker reader (tests stub it).
 export function expertReader({ paths, make = expertDiskReader, log = () => {} }) {
-  const w = make({ paths });
+  // ringSlots: the store holds a cut's leases and the next disk layer's read-ahead at once (engine/expert_store.js
+  // prefetch: up to 2 x K experts x 3 parts, 60 for Flash's K = 10). With 32, the read-ahead took the ring and the next
+  // cut read plain arrays. 64 slots of 4 MiB: 256 MiB of shared memory, made on the first read
+  const w = make({ paths, ringSlots: 64 });
   let fb = null, files = null;
   const inThread = () => {
     if (fb) return fb;
@@ -80,6 +83,16 @@ export function expertReader({ paths, make = expertDiskReader, log = () => {} })
       if (fb) return fb.readPart(info, e);
       try { return await w.readPart(info, e); }
       catch (err) { if (!/no worker left/.test(String(err?.message))) throw err; return inThread().readPart(info, e); }
+    },
+    // leases (expert_disk.js leasePart: views of the reader's shared ring, valid until release()), for a store that
+    // copies the bytes out before it lets go of them (engine/expert_store.js prepare). The in-thread fallback's bytes
+    // are plain arrays: a lease of them releases nothing
+    get leaseSlots() { return !fb && w.leasePart ? w.leaseSlots || 0 : 0; },
+    async leasePart(info, e) {
+      const plain = async () => ({ ...(await inThread().readPart(info, e)), release() {} });
+      if (fb) return plain();
+      try { return await w.leasePart(info, e); }
+      catch (err) { if (!/no worker left/.test(String(err?.message))) throw err; return plain(); }
     },
     async close() {
       await w.close?.();
@@ -305,7 +318,8 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
     let disk = null;
     if (dl.length) {
       if (!src.localPaths) throw new Error("the host asked this device to read experts from disk, but the model's files are not on this device");
-      disk = { layers: dl, reader: expertReader({ paths: src.localPaths, make: diskReader, log }), ramBytes: +offload.diskRamBytes || 0 };
+      // ahead: the next disk layer's guessed experts are read early (engine/qwen4exp.js; benchmarks/flash-offload-decode.md)
+      disk = { layers: dl, reader: expertReader({ paths: src.localPaths, make: diskReader, log }), ramBytes: +offload.diskRamBytes || 0, ahead: true };
     }
     out.experts = new ExpertStore(device, { layers: off, vramBytes: offload.vramBytes, ramBytes: +offload.ramCap || Infinity, expectBytes: +offload.ramBytes || 0, disk });
     const parked = off.length - dl.length;
