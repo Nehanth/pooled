@@ -5,7 +5,7 @@
 export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "qwen3.5-122b-moe": 72.0,
   // Qwen3.8-Flash-Next: its 48 layers, the embedding and the head (71.8 GB in the file); the 28.8 GB n-gram table is
   // not GPU memory (it stays on the disk of the device holding layer 1: SHAPE ngram, room/plan.js dealRoom)
-  "qwen3.8-flash": 72.0, "smollm-135m": 0.6 };
+  "qwen3.8-flash": 74.5, "smollm-135m": 0.6 };
 export const NEED_MIN_GB = { "qwen3-1.7b": 4.0 };
 
 // What the model host holds besides its layers, in bytes, from the file's own tensor sizes: the
@@ -127,11 +127,12 @@ export const SHAPE = {
   "qwen3.5-122b-moe": { kind: "qwen35", L: 48, layer: 1485116672, kvPos: { f16: 512, q8: 288 }, embed: 429096960, out: 625766400, mtp: 2682195968, exp: 1409286144,
     park: { nExp: 256, runs: [[6, expertSlices(1024, 3072, [Q4, Q4, Q41])], [42, expertSlices(1024, 3072, [Q4, Q4, Q4])]] }, meta: ssmMeta(3072, 64, 16, 8192) },
   // Qwen3.8-Flash-Next (llama.cpp arch qwen4exp; roadmap/33), bartowski Q4_0 (three files), read from its headers:
-  // layer: the DeltaNet layers' average (36 of 48). The planner deals every layer at this one size, which under-counts
-  // the front of the model: layer 0 is 1.528 GB, layer 1 (with the PLE block) 1.546 GB, layers 0-5 carry Q4_1 down
-  // experts, so the host and whichever device holds layers 0-5 hold up to ~0.3 GB more than the deal says (the 12 QSA
-  // layers average 1.474 GB, about even). dealRoom has one layerBytes for every layer (roomFit, offload, placeNgram);
-  // per-range sizes would change all of them, so this stays a known gap, inside the pledge margin. kvPos: the 12 QSA layers'
+  // layer: layers 0-3's average without QSA's indexer, the size room.js aiStart measures from the header
+  // (qwen4expShardBytes over [0, 4) / 4), so the picker's need is the one Start checks. It must go with exp (also
+  // layers 0-3's): the planner keeps layer - exp on the GPU for every offloaded layer, and the file's whole average
+  // (1.476 GB) less exp left ~10 MB a layer where the file has 50-63 MB, so the picker said Flash fit in 5.7 GB of
+  // GPU memory and Start, at ~8 GB, refused it. Layers 0-5 carry Q4_1 down experts, so this is a little over the
+  // average: dealRoom has one layerBytes for every layer, and the heavier front is what the host holds. kvPos: the 12 QSA layers'
   // K+V, 2 KV heads x 256, kept in f32 by the phase-1 engine (engine/qwen4exp.js, PR #346), so 4 KB per QSA layer and
   // position, 1 KB averaged over 4 (the room's KV format stays "f16": kvModeFor); out: output.weight and the head's
   // HC mixer (output_hc_*); exp / park: 512 experts of 2560 x 640, layers 0-5 with Q4_1 down experts (parked as Q8).
@@ -139,7 +140,7 @@ export const SHAPE = {
   // ngram: the n-gram (PLE) table, read row by row by the device holding its layer (engine/ngram.js); never on a GPU
   // and never part of a layer's bytes. pleState: that layer's extra state a checkpoint copies: the PLE conv history
   // (10 positions x hDim f32, engine/qwen4exp.js st.ring).
-  "qwen3.8-flash": { kind: "qwen4exp", L: 48, layer: 1478069803, kvPos: { f16: 1024 }, embed: 357580800, out: 534620160, mtp: 0, exp: 1468006400,
+  "qwen3.8-flash": { kind: "qwen4exp", L: 48, layer: 1531208864, kvPos: { f16: 1024 }, embed: 357580800, out: 534620160, mtp: 0, exp: 1468006400,
     park: { nExp: 512, runs: [[6, expertSlices(640, 2560, [Q4, Q4, Q41])], [42, expertSlices(640, 2560, [Q4, Q4, Q4])]] }, meta: ssmMeta(2560, 48, 16, 6144),
     hDim: 10240, ngram: { layer: 1, bytes: 28800138240 }, pleState: 10 * 10240 * 4,
     // flashOffload's fields (expert offload: room/plan.js), from the header (flashMeta)
