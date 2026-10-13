@@ -6,7 +6,7 @@
 // (ExpertStore.prepare) and the plan (ExpertStore.plan: the pool LRU and the copy encode, incl. the writeBuffer of
 // read bytes), plus the time between cuts (encoding the rest, outside any cut) and from the last cut to the next token.
 //   ROOT=<checkout> node profile_token.mjs     env: MODELS, CASES (two-sum,bash,eos-mid), HOST_GB (3), NODE_GB (8),
-//   NODE_RAM (24), NODE_DISK (1), PORT (8271), SPLIT (speed), PROF (1: patch and time; 0: only the stats)
+//   NODE_RAM (24), NODE_DISK (1), PORT (8271), SPLIT (speed), PROF (1: patch and time; 0: only the stats), AHEAD (0: prefetch off)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -86,6 +86,8 @@ try {
   const t = Date.now();
   await host.start(MODEL, { minDevices: 2, waitMs: 120000 });
   out.loadS = (Date.now() - t) / 1000;
+  // AHEAD=0: a store with prefetch() turns it off (the read-ahead arm of the A/B off, on the same checkout)
+  if (env("AHEAD", "") === "0" && worker.ai?.experts && "ahead" in worker.ai.experts) { worker.ai.experts.ahead = false; out.ahead = false; }
   out.split = host.split;
   log(`online: ${JSON.stringify(host.split)} in ${out.loadS.toFixed(0)} s`);
   let fail = 0;
