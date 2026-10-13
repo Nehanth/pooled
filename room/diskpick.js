@@ -1,7 +1,6 @@
 // The picker for a model that keeps a copy on this device's disk (room/models.js DISK_COPY): its row's chip and
 // tooltip, and its two settings under Start: GPU memory (what the room puts on GPUs, against the planner's own
-// minimum) and Disk (this device's answer, what is stored, the RAM its disk tier uses, Allow / Free), with one
-// short sentence. Pure: the words come from the DISK_COPY entry and the figures room.js computes, so another big
+// minimum) and Disk (this device's answer, what is stored, the RAM its disk tier uses, Allow / Free). Pure: the words come from the DISK_COPY entry and the figures room.js computes, so another big
 // model reuses all of it.
 // The consent is room/flashdisk.js's (#368): one stored answer per site (TAB_DISK_KEY) and one question (room.js
 // askTabDisk); the Disk row shows that answer (room/diskstore.js diskState) and its Allow saves the same one.
@@ -26,15 +25,12 @@ export const paramsText = (m) => m.active ? `${m.params} (${m.active} active)` :
 // the row's tooltip: "Qwen3.8 Flash: 125B (6B active), MoE, its experts streamed from this device's disk"
 export const rowTitle = (m) => `${m.name}: ${[paramsText(m), m.arch].filter(Boolean).join(", ")}, its experts streamed from this device's disk`;
 
-// the one sentence under the two settings
-export const lineText = (m) => `Its experts stream from each device's disk: up to ${sizeText(m.diskBytes)} stored once in this browser.`;
-
 // ---- GPU memory ----
 // needGB / hasGB / fits / shortGB: the figures room.js updateNeed shows (roomFitFor's needGB for a disk model: the
 // planner's least GPU memory for this room, with its disk tiers; roomFit's verdict); needDisk: the rest streams from
 // disk; mineGB: what this device gives (its pledge)
 export function gpuRow({ needGB = null, hasGB = 0, fits = false, shortGB = 0, needDisk = false, mineGB = null } = {}) {
-  const v = needGB == null ? `room ${num(hasGB)} GB` : `needs ${num(needGB)} · room ${num(hasGB)} GB`;
+  const v = needGB == null ? `room ${num(hasGB)} GB` : `needs ${num(needGB)} GB · room ${num(hasGB)} GB`;
   const chip = fits ? "fits" : `${num(shortGB)} GB short`;
   const mine = mineGB > 0 ? ` This device gives ${num(mineGB)} GB.` : "";
   const h = needGB == null ? `What the room's devices give.${mine}`
@@ -52,13 +48,15 @@ export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, ar
   const stored = storedBytes > 0 ? sizeText(storedBytes) : storedBytes === 0 ? "0 GB" : "?";
   const can = state === "allow" || state === "ask" || state === "deny";
   const parts = can ? [`${stored} of ${sizeText(m.diskBytes)} stored`, ...(ramGB > 0 ? [`${num(ramGB)} GB RAM for its cache`] : [])]
-    : [state === "url" ? "?tabdisk=0 keeps this page off the disk" : "No disk tier here: a phone, no OPFS, or ?tabram=0"];
+    : [state === "url" ? "This page keeps the model off this device's disk" : "This browser can't store it (phones and some browsers can't)"];
+  // the developer's detail, only as the tooltip
+  const title = state === "url" ? "?tabdisk=0 in the address" : state === "none" ? "No disk tier: a phone, no OPFS (origin-private file system), or ?tabram=0" : "";
   if (state === "ask") parts.push("Start asks first");
   if (!can && storedBytes > 0) parts.push(`${stored} stored`);
   const acts = [];
   if (state === "ask" || state === "deny") acts.push({ act: "allow", label: "Allow" });
   if (storedBytes > 0) acts.push({ act: "free", label: armed ? `Free ${stored}?` : "Free" });
-  return { k: "Disk", chip: DISK_STATE[state] || DISK_STATE.none, ok: state === "allow", h: parts.join(" · "), acts };
+  return { k: "Disk", chip: DISK_STATE[state] || DISK_STATE.none, ok: state === "allow", h: parts.join(" · "), title, acts };
 }
 
 // ---- HTML (p2p.html .dk-row, with the rows' chips: .fig, b for "fits" / "Allowed", .more otherwise) ----
@@ -68,8 +66,8 @@ export function gpuRowHTML(g) {
 }
 export function diskRowHTML(d) {
   const btn = (a) => `<button type="button" class="${a.act === "free" ? "dk-del" : "dk-act"}" data-act="${a.act}">${esc(a.label)}</button>`;
-  return `<div class="dk-row"><span class="k">${esc(d.k)}</span><span class="fig">${chipHTML(d.chip, d.ok)}${d.acts.map(btn).join("")}</span><span class="h">${esc(d.h)}</span></div>`;
+  return `<div class="dk-row"><span class="k">${esc(d.k)}</span><span class="fig">${chipHTML(d.chip, d.ok)}${d.acts.map(btn).join("")}</span><span class="h"${d.title ? ` title="${esc(d.title)}"` : ""}>${esc(d.h)}</span></div>`;
 }
 export function settingsHTML(m, gpu, disk) {
-  return `<div class="dk-rows">${gpuRowHTML(gpuRow(gpu))}${diskRowHTML(diskRow(m, disk))}</div><p class="dk-agree">${esc(lineText(m))}</p>`;
+  return `<div class="dk-rows">${gpuRowHTML(gpuRow(gpu))}${diskRowHTML(diskRow(m, disk))}</div>`;
 }
