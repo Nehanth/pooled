@@ -92,3 +92,16 @@ Deno.test("flashDiskBytes / removeFlashCopy: what the copies take, and deleting 
   finally { if (nav) Object.defineProperty(navigator, "storage", nav); else delete navigator.storage; }
   eq(await flashDiskBytes({ storage }), { experts: 0, ngram: 0, total: 0 });
 });
+
+Deno.test("ingestNgram: onProgress climbs to the total and never goes back; a copy already there reports nothing", async () => {
+  const root = new FakeDir(), storage = storageOf(root), dir = ngramDir("aaaa0009");
+  const seen = [];
+  eq(await ingestNgram(cfg, source().readAt, { dir, storage, onProgress: (d, t) => seen.push([d, t]) }), 256);
+  ok(seen.length > 0, "no progress");
+  for (let i = 1; i < seen.length; i++) ok(seen[i][0] >= seen[i - 1][0], `went back: ${JSON.stringify(seen.slice(i - 1, i + 1))}`);
+  ok(seen.every(([, t]) => t === 256), "the total is the copy's");
+  eq(seen[seen.length - 1], [256, 256]);
+  const again = [];
+  eq(await ingestNgram(cfg, source().readAt, { dir, storage, onProgress: (d, t) => again.push([d, t]) }), 0);
+  eq(again, [], "all there: no progress");
+});

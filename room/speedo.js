@@ -13,6 +13,26 @@ export function fmtTps(v) {
   return v >= 100 ? String(Math.round(v)) : v.toFixed(1);
 }
 
+// The speed in words, for the panel (the tok/s number stays in its tooltip): about 0.75 words a token in English text.
+// wordsPerSec(tps) -> words a second; speedWords(tps) -> "about 3 words a second" ("" without a speed)
+export const WORDS_PER_TOKEN = 0.75;
+export const wordsPerSec = (tps) => (+tps > 0 && Number.isFinite(+tps) ? +tps * WORDS_PER_TOKEN : 0);
+export function speedWords(tps) {
+  const w = wordsPerSec(tps);
+  if (!(w > 0)) return "";
+  if (w < 0.75) return "less than a word a second";
+  const n = Math.max(1, Math.round(w));
+  return `about ${n} word${n === 1 ? "" : "s"} a second`;
+}
+// the readout's line: live "Writing about 3 words a second"; after an answer "Last answer: about 3 words a second on
+// 2 devices"; "" without a speed (the panel shows nothing rather than a dash)
+export function speedLine(tps, { live = false, devices = 0 } = {}) {
+  const w = speedWords(tps);
+  if (!w) return "";
+  if (live) return `Writing ${w}`;
+  return `Last answer: ${w}` + (devices > 0 ? ` on ${devices} device${devices === 1 ? "" : "s"}` : "");
+}
+
 // an answer's stats line -> { count, tps, devices }; null for one without a speed ("failed: ...", a note)
 export function parseStats(stats) {
   const s = String(stats || "");
@@ -165,7 +185,7 @@ export function pushEvent(list, text, now, max = 4) {
   else out.push({ text, at: now });
   return out.slice(-max);
 }
-export const onlineText = (n) => `online · ${n} device${n === 1 ? "" : "s"}`;
+export const onlineText = (n) => `Running on ${n} device${n === 1 ? "" : "s"}`;
 
 // GB as the cards print it (a tiny share, as the tests' synthetic model has, is not "0 GB")
 export const fmtGB = (gb) => (gb < 0.05 ? "<0.1" : gb >= 10 ? Math.round(gb) : Math.round(gb * 10) / 10) + " GB";

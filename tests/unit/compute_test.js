@@ -120,11 +120,11 @@ Deno.test("compute screen: the status line for each phase, table-driven", () => 
   const s = computeScreen({ state: () => st });
   s.open();
   const cases = [
-    [{ phase: "serving", lo: 2, hi: 6, model: "Qwen", devices: 3, code: "ABCD" }, "Serving", "Layers 3–6 · Qwen", false],
+    [{ phase: "serving", lo: 2, hi: 6, model: "Qwen", devices: 3, code: "ABCD" }, "Serving", "Holds part of Qwen", false],
     // an empty range is no layers (it used to read "Layers 1–0")
     [{ phase: "serving", lo: 0, hi: 0, devices: 2 }, "Not holding layers", "The other devices run the model", true],
-    [{ phase: "serving", lo: 0, hi: 1, devices: 2 }, "Serving", "Layers 1–1 · the model", false],
-    [{ phase: "loading", pct: 42.4, lo: 0, hi: 10, model: "Qwen", devices: 2 }, "Loading 42%", "Layers 1–10 · Qwen", true],
+    [{ phase: "serving", lo: 0, hi: 1, devices: 2 }, "Serving", "Holds part of the model", false],
+    [{ phase: "loading", pct: 42.4, lo: 0, hi: 10, model: "Qwen", devices: 2 }, "Loading 42%", "Holds part of Qwen", true],
     [{ phase: "loading", model: "Qwen", devices: 2 }, "Loading", "Qwen", true],
     [{ phase: "serving", devices: 2, model: "Qwen" }, "Not holding layers", "The other devices run Qwen", true],
     [{ phase: "serving", devices: 2 }, "Not holding layers", "The other devices run the model", true],

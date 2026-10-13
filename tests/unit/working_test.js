@@ -1,5 +1,5 @@
 // room/working.js: the words of the "working" line shown before a model's first token.
-import { verbs } from "../../room/working.js";
+import { verbs, liveText, LIVE } from "../../room/working.js";
 
 Deno.test("verbs: one word at a time, never the same twice in a row, every verb before a repeat", () => {
   const next = verbs();
@@ -11,3 +11,8 @@ Deno.test("verbs: one word at a time, never the same twice in a row, every verb 
   if (first.size !== 16) throw new Error(`the first 16 are not all different: ${[...first]}`);
 });
 
+
+Deno.test("liveText: the band's pill says a steady \"Writing…\"; the rotating words only when asked for", () => {
+  for (let k = 0; k < 12; k++) if (liveText(k) !== "Writing\u2026") throw new Error(`k=${k}: ${liveText(k)}`);
+  if (liveText(1, { rotate: true }) !== LIVE[1] + "\u2026") throw new Error(liveText(1, { rotate: true }));
+});

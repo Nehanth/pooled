@@ -116,7 +116,7 @@ export async function flashExpertSig(G, readAt) {
 //   contentSig (flashExpertSig's) }
 // -> { store, reader, layout, ingest: { wroteBytes, skippedBytes, s } | null }. store.close() also frees the ring.
 export async function tabExpertTier(device, G, layers, { readAt, offload, onStatus = () => {}, onProgress = () => {}, log = () => {}, workers = 4, ring = 64, storage = G_.navigator?.storage, contentSig = null } = {}) {
-  let line = "checking this device's copy of the experts…";
+  let line = "Checking what's already saved on this computer…";
   onStatus(line);
   const layout = expertLayout(G, layers, { contentSig: contentSig ?? await flashExpertSig(G, readAt) });
   const dir = [EXPERT_OPFS_DIR, layout.key];
