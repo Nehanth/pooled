@@ -1,34 +1,37 @@
 // The picker's part for a model kept on disk (room/models.js DISK_COPY), in the page: "Not now" beside Start, and the
-// right column's "This device, for <model>" group: the pledge stepper (room.js's, relabelled "GPU memory"), then Disk
-// and RAM for its cache (#ap-flash). Shown only while that model is picked. (Its row, black and twinkling when
-// picked, is room.js renderLadder's; whether it fits, room.js updateNeed's need line and renderPool's.)
+// right column's "This device, for <model>" group: the pledge stepper (room.js's, relabelled "GPU memory", its pledge
+// paragraph swapped for a one-line hint), then Disk (#ap-flash). Shown only while that model is picked. (Its row,
+// black and twinkling when picked, with its fit chip, is room.js renderLadder's; the pool's line is renderPool's.)
 // The words and HTML are room/diskpick.js's; the answer, the stored size, Allow and Free are #368's, through
 // room/diskstore.js (one stored answer, one question: room.js askTabDisk; one delete: room.js freeTabDisk).
-import { diskCopyOf, groupTitle, settingsHTML } from "./diskpick.js";
+import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT } from "./diskpick.js";
 import { diskStore } from "./diskstore.js";
 
 const $ = (id) => document.getElementById(id);
 const START = "Start the model", GIVES = "This device gives";
-let shown = null, stored = null, asked = 0, armed = 0, last = {};
+let shown = null, stored = null, asked = 0, armed = 0, last = {}, covers = null;
 
-// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB } (this tab's disk-tier RAM,
-// room/flashdisk.js tabDiskMeta's, or null without a tier). Cheap when nothing changed: it runs on every room update.
+// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, needDisk } (this tab's disk-tier
+// RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether the room's fit streams from a disk,
+// roomFitFor's). Cheap when nothing changed: it runs on every room update.
 export function showDiskPick(key, info = last) {
   const m = diskCopyOf(key), on = !!m;
   last = info;
   for (const id of ["ap-flash", "ap-for", "ai-notnow"]) $(id).hidden = !on;
   $("ap-note").hidden = on;
   $("ap-me").classList.toggle("flash", on);
-  if (!on) { if (shown) { $("ai-start").textContent = START; $("ap-me-k").textContent = GIVES; } shown = null; asked = 0; disarm(); return; }
+  if (covers == null) covers = $("ap-covers").textContent;
+  if (!on) { if (shown) { $("ai-start").textContent = START; $("ap-me-k").textContent = GIVES; $("ap-covers").textContent = covers; } shown = null; asked = 0; disarm(); return; }
   if (asked !== key) stored = null;
   const state = diskStore.state(key);
   $("ai-start").textContent = `Start ${m.name}`;
   $("ap-for").textContent = groupTitle(m);
   $("ap-me-k").textContent = "GPU memory";
+  $("ap-covers").textContent = GPU_HINT;
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;
   shown = sig;
-  $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, armed: !!armed }, info.ramGB ?? null);
+  $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, ramGB: info.ramGB ?? null, needDisk: info.needDisk !== false, armed: !!armed });
   // what is stored: asked once per pick (and after Free, or Room settings freeing it: refreshDiskPick)
   if (asked !== key) { asked = key; refresh(key); }
 }

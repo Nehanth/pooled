@@ -49,7 +49,7 @@ import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, STA
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { diskCopyOf, rowChip, rowTitle, starSVG } from "./room/diskpick.js";
+import { diskCopyOf, rowChipHTML, rowTitle, starSVG } from "./room/diskpick.js";
 import { showDiskPick, initDiskPick, refreshDiskPick } from "./room/diskpick-ui.js";
 import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
@@ -609,9 +609,11 @@ function renderLadder(pledged, rows = fitLadder(pledged)) {
     // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
     const sel = !none && x.key === $("ai-model").value;
     // a model kept on disk (room/diskpick.js): the ✦ before its name, its size and where it runs from as the chip;
-    // picked, the row takes the Code tab's selected look (black, a soft blue glow, stars twinkling: site/js/sparkle.js)
+    // picked, the row takes the Code tab's selected look (black, a soft blue glow, stars twinkling: site/js/sparkle.js).
+    // Its fit chip is the other rows' ("fits" / "N GB short"), from the same roomFitFor as the pool's line: the one
+    // fit answer every visitor sees (the need line above the rows is the developer's)
     const dk = diskCopyOf(x.key);
-    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}" title="${esc(x.ok ? rowTitle(dk) : x.f?.note || "Invite a device to fit this")}"><span class="rn">${starSVG("rx")}${esc(dk.name)}</span><span class="fig"><span class="dkc">${esc(rowChip(dk))}</span></span></button>`;
+    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}" title="${esc(x.ok ? rowTitle(dk) : x.f?.note || "Invite a device to fit this")}"><span class="rn">${starSVG("rx")}${esc(dk.name)}</span><span class="fig">${rowChipHTML(dk)}${none ? "" : x.ok ? "<b>fits</b>" : `<span class="more">${x.short} GB short</span>`}</span></button>`;
     return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${back ? ` title="${esc(ctxShortNote(shortName(x.key), x.f.ctx, x.f.want))}"` : x.ok ? "" : ` title="${esc(x.f?.note || (giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"))}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
   // the same rows: leave them be (the twinkling stars keep their rhythm through the room's updates)
@@ -639,6 +641,8 @@ function giveFor(short) {
   return v <= cap ? Math.ceil(v) : 0;
 }
 $("ai-give").addEventListener("click", (e) => lendGB(+e.currentTarget.dataset.gb));
+// -> the picker's rows (fitLadder), which renderPool reads too: one roomFitFor per model and room update, so the rows,
+// the need line and the pool's line can't drift apart
 function updateNeed(pledged) {
   const rows = fitLadder(pledged);
   if (!modelTouched && !ai.engine && !ai.busy && !$("ai-model").disabled) {
@@ -695,11 +699,14 @@ function updateNeed(pledged) {
   $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
     : note;
   if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
-  // a disk model: "This device, for <model>" in the right column (Disk, RAM for its cache: the tab's disk-tier RAM,
-  // room/flashdisk.js tabDiskMeta, TAB_RAM_GB held to tabRamCap); its fit is the line above and the pool's, only
-  showDiskPick($("ai-model").value, { ramGB: myMeta.tabDisk?.ramGB ?? null });
+  // a disk model: "This device, for <model>" in the right column. Its Disk row says the RAM the tab's disk tier would
+  // read it with (room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap, whatever the stored answer), and, when
+  // the room's fit streams from no disk (roomFitFor needDisk), that the whole model must fit on GPUs
+  const tier = tabDiskCan ? tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }) : null;
+  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, needDisk: row?.f?.needGB != null ? !!row.f.needDisk : true });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
+  return rows;
 }
 $("ai-model").addEventListener("change", () => { modelTouched = true; updateCluster(); });
 // a disk model's "Not now" lets go of it (back to the model the room would pick), "invite one" opens the invite
@@ -707,6 +714,7 @@ initDiskPick({ notNow: () => { modelTouched = false; updateCluster(); $("ai-ladd
 // the picker's consent, stored copy and delete are this tab's disk tier's (room/flashdisk.js, below askTabDisk and
 // freeTabDisk): the same answer, the same bytes, the same guard
 connectDiskStore({
+  able: () => tabDiskCan,
   can: () => tabDiskCan && !!tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }),
   changed: (key) => {
     tabDiskDeclined = false;
@@ -722,14 +730,14 @@ function updateCluster() {
   const gpus = all.filter(m => m && m.webgpu).length;
   // only devices with WebGPU hold layers; the others join as ask-only guests
   const pledged = all.reduce((s, m) => s + (m?.webgpu ? m?.contribGB || 0 : 0), 0);
-  updateNeed(pledged);
+  const rows = updateNeed(pledged);
   const mem = all.reduce((s, m) => s + (m?.budgetGB || m?.maxBufGB || 0), 0);
   $("cluster-summary").textContent = DEV
     ? `${all.length} device${all.length > 1 ? "s" : ""}${apis ? ` \u00b7 ${apis} API client${apis > 1 ? "s" : ""}` : ""} \u00b7 ${gpus} WebGPU \u00b7 ${pledged.toFixed(1)} GB pledged`
     : `${all.length} device${all.length > 1 ? "s" : ""}${apis ? ` \u00b7 ${apis} API client${apis > 1 ? "s" : ""}` : ""} \u00b7 ${+pledged.toFixed(1)} GB pooled`;
   $("hdr-sum").innerHTML = `<b>${+pledged.toFixed(1)} GB</b> pooled`;
   $("peers-n").textContent = String(all.length);
-  renderPool(pledged);
+  renderPool(pledged, rows);
 }
 // the device list scrolls past four and a half rows (p2p.html #ap-devs): fade its bottom while more rows are below
 function devsEdge() { const l = $("ap-devs"); l.classList.toggle("more", l.scrollTop < l.scrollHeight - l.clientHeight - 1); }
@@ -737,11 +745,13 @@ $("ap-devs").addEventListener("scroll", devsEdge, { passive: true });
 if (typeof ResizeObserver === "function") new ResizeObserver(devsEdge).observe($("ap-devs"));
 // The model card's side: what the room pools (one segment per device, in its colour, with a tick at
 // each model's need), what this device lends (+/-), and the invite (QR, code, copy link).
-function renderPool(pledged) {
+// rows: updateNeed's (fitLadder): each model's roomFitFor, computed once for the picker and this side alike
+function renderPool(pledged, rows = []) {
   const devs = [{ name: myName, meta: myMeta }, ...[...members.values()].map((m) => ({ name: m.name || "device", meta: m.meta || {} }))].sort((x, y) => bySlot(x.name, y.name))
     .filter((d) => d.meta?.webgpu && d.meta?.contribGB && !d.meta?.api);
   // each model's need: a disk model's from the planner (roomFitFor needGB), so the tick, the line and the picker agree
-  const fitOf = new Map(Object.keys(PICK_NEED).map((k) => [k, roomFitFor(k)]));
+  const had = new Map(rows.map((x) => [x.key, x.f ?? null]));
+  const fitOf = new Map(Object.keys(PICK_NEED).map((k) => [k, had.has(k) ? had.get(k) : roomFitFor(k)]));
   const needs = Object.entries(PICK_NEED).map(([k, gb]) => [k, fitOf.get(k)?.needGB ?? gb]).sort((a, b) => a[1] - b[1]);
   const top = Math.max(pledged, ...needs.map((x) => x[1])) * 1.06 || 1;
   $("ap-total").textContent = `${+pledged.toFixed(1)} GB`;
@@ -755,8 +765,9 @@ function renderPool(pledged) {
   const selNeed = needs.find(([k]) => k === sel);
   $("ap-need").hidden = !selNeed;
   if (selNeed) {
-    const [k, gb] = selNeed, f = fitOf.get(k), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
-    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b>${f?.needGB != null ? " on GPUs" : ""}<span>${short > 0 ? `${short} GB short` : "fits"}</span>`; $("ap-need").classList.toggle("ok", short <= 0);
+    // the verdict is the row's (fitsK: roomFitFor's fit), the figures the planner's
+    const [k, gb] = selNeed, f = fitOf.get(k), fits = fitsK(k, gb), short = f ? f.shortGB : +Math.max(0, gb - pledged).toFixed(1);
+    $("ap-need").innerHTML = `${esc(shortName(k))} needs <b>${gb} GB</b>${f?.needGB != null ? " on GPUs" : ""}<span>${fits ? "fits" : `${short} GB short`}</span>`; $("ap-need").classList.toggle("ok", fits);
   }
   $("ap-devs").innerHTML = devs.map((d) => `<li style="--sw:${devColor(d.name)}"><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB</b></li>`).join("")
     || '<li class="none">No device with WebGPU yet</li>';
@@ -5200,8 +5211,10 @@ async function renderTabDisk(measure = false) {
   if (!on) { $("tabdisk-line").hidden = true; return; }
   const choice = tabDiskNow();
   $("tabdisk-allow").checked = choice === "allow";
-  $("d-tabdisk").textContent = `Qwen3.8 Flash can stream from disk when the room's memory is short: it stores up to about 92 GB in this browser. `
-    + (choice === "allow" ? "Allowed." : choice === "deny" ? "Not allowed." : "Not asked yet: you are asked when the model needs it.");
+  // the size is the picker's (DISK_COPY diskBytes), and so are the answer's words (room/diskpick.js DISK_STATE)
+  const fl = DISK_COPY["qwen3.8-flash"];
+  $("d-tabdisk").textContent = `${fl.name} can stream from disk when the room's memory is short: it stores up to ${fmtBytes(fl.diskBytes)} in this browser. `
+    + (choice === "allow" ? "Allowed." : choice === "deny" ? "Not allowed." : "Not asked: you are asked when the model needs it.");
   if (measure) tabDiskStored = (await flashDiskBytes().catch(() => ({ total: 0 }))).total;
   $("tabdisk-line").hidden = !tabDiskStored;
   if (!tabDiskArmed) tabDiskFreeLabel("Free disk space", `Deletes the big model's copy on this device (${fmtBytes(tabDiskStored)})`);

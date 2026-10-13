@@ -1,9 +1,9 @@
 // The picker for a model that keeps a copy on this device's disk (room/models.js DISK_COPY): its row's chip and
 // tooltip, and its per-device settings in the right column's "This device, for <model>" group, under the pledge
-// stepper (room.js renderPool): Disk (this device's answer, what is stored, Allow / Free) and RAM for its cache (the
-// RAM its disk tier uses, read-only: room/flashdisk.js tabDiskMeta). Whether it fits is said once, by the picker's
-// need line and the pool's (room.js updateNeed, renderPool). Pure: the words come from the DISK_COPY entry and the
-// figures room.js computes, so another big model reuses all of it.
+// stepper (room.js renderPool, relabelled "GPU memory"): Disk (this device's answer, what is stored, the RAM its disk
+// tier reads it with: room/flashdisk.js tabDiskMeta, Allow / Free). Whether it fits is one answer, roomFitFor's: the
+// row's own chip, the pool's line (and the dev need line), all from the same rows (room.js updateNeed, renderPool).
+// Pure: the words come from the DISK_COPY entry and the figures room.js computes, so another big model reuses all of it.
 // The consent is room/flashdisk.js's (#368): one stored answer per site (TAB_DISK_KEY) and one question (room.js
 // askTabDisk); the Disk row shows that answer (room/diskstore.js diskState) and its Allow saves the same one.
 import { DISK_COPY } from "./models.js";
@@ -22,50 +22,59 @@ export const sizeText = (bytes) => bytes >= 2 ** 30 ? `${(bytes / 2 ** 30).toFix
 
 // the row's chip: "125B · MoE · from disk"
 export const rowChip = (m) => [m.params, m.arch, "from disk"].filter(Boolean).join(" · ");
+// the chip as the row renders it: the size and architecture drop away on a phone (p2p.html .dkz), "from disk" stays
+export const rowChipHTML = (m) => {
+  const head = [m.params, m.arch].filter(Boolean).join(" · ");
+  return `<span class="dkc">${head ? `<span class="dkz">${esc(head)} · </span>` : ""}from disk</span>`;
+};
 // its size in words: "125B (6B active)"
 export const paramsText = (m) => m.active ? `${m.params} (${m.active} active)` : m.params;
 // the row's tooltip: "Qwen3.8 Flash: 125B (6B active), MoE, its experts streamed from this device's disk"
 export const rowTitle = (m) => `${m.name}: ${[paramsText(m), m.arch].filter(Boolean).join(", ")}, its experts streamed from this device's disk`;
 
 // ---- Disk ----
-// state: room/diskstore.js diskState: "ask" | "allow" | "deny" | "url" (?tabdisk=0) | "none" (a phone, no OPFS)
-export const DISK_STATE = { allow: "Allowed", ask: "Not asked yet", deny: "Not allowed", url: "Not available", none: "Not available" };
+// state: room/diskstore.js diskState: "ask" | "allow" | "deny" | "url" (the address keeps it off: ?tabdisk=0, ?tabram=0)
+// | "small" (no RAM to spare for its tier: tabRamCap) | "none" (no disk tier at all: a phone, no OPFS, no WebGPU)
+export const DISK_STATE = { allow: "Allowed", ask: "Not asked", deny: "Not allowed", url: "Not available", small: "Not available", none: "Not available" };
 // the group's heading: "This device, for Qwen3.8 Flash"
 export const groupTitle = (m) => `This device, for ${m.name}`;
-// storedBytes: room/flashdisk.js flashDiskBytes (null: unknown); armed: Free was pressed once (the second press frees)
-export function diskRow(m, { state = "ask", storedBytes = null, armed = false } = {}) {
+// the GPU memory stepper's one-line hint while a disk model is picked (its pledge paragraph steps aside)
+export const GPU_HINT = "The most this device's GPU holds for the room";
+// why this device can't keep the copy, in plain words (the developer's detail goes in the tooltip)
+const WHY = { url: "This page keeps the model off this device's disk", small: "This device has too little memory to spare for it",
+  none: "This browser can't store it" };
+const TIP = { url: "?tabdisk=0 or ?tabram=0 in the address", small: "tabRamCap leaves no RAM for the disk tier",
+  none: "No disk tier: a phone, no WebGPU, or no OPFS (origin-private file system)" };
+// storedBytes: room/flashdisk.js flashDiskBytes (null: unknown); ramGB: this tab's disk-tier RAM (tabDiskMeta's ramGB:
+// TAB_RAM_GB held to tabRamCap; null without a tier); needDisk: the room's fit streams from some device's disk
+// (roomFitFor), false when the whole model must fit on GPUs; armed: Free was pressed once (the second press frees)
+export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, needDisk = true, armed = false } = {}) {
   const stored = storedBytes > 0 ? sizeText(storedBytes) : storedBytes === 0 ? "0 GB" : "?";
-  const can = state === "allow" || state === "ask" || state === "deny";
-  const parts = can ? [`${stored} of ${sizeText(m.diskBytes)} stored`]
-    : [state === "url" ? "This page keeps the model off this device's disk" : "This browser can't store it (phones and some browsers can't)"];
-  // the developer's detail, only as the tooltip
-  const title = state === "url" ? "?tabdisk=0 in the address" : state === "none" ? "No disk tier: a phone, no OPFS (origin-private file system), or ?tabram=0" : "";
-  if (state === "ask") parts.push("Start asks first");
-  if (!can && storedBytes > 0) parts.push(`${stored} stored`);
+  const ram = ramGB > 0 ? `${num(ramGB)} GB of RAM to read it` : "";
+  const parts = [];
+  if (state === "allow") parts.push([`${stored} of ${sizeText(m.diskBytes)} stored`, ram].filter(Boolean).join(" · "));
+  else if (state === "ask" || state === "deny") {
+    parts.push(`Allow lets ${m.name} store up to ${sizeText(m.diskBytes)} on this device's disk${ram ? ` and use ${ram}` : ""}`
+      + (needDisk ? "" : "; without it, the whole model must fit on GPUs"));
+    if (storedBytes > 0) parts.push(`${stored} stored`);
+  } else {
+    parts.push((WHY[state] || WHY.none) + (needDisk ? "" : ", so the whole model must fit on GPUs"));
+    if (storedBytes > 0) parts.push(`${stored} stored`);
+  }
   const acts = [];
   if (state === "ask" || state === "deny") acts.push({ act: "allow", label: "Allow" });
   if (storedBytes > 0) acts.push({ act: "free", label: armed ? `Free ${stored}?` : "Free" });
-  return { k: "Disk", chip: DISK_STATE[state] || DISK_STATE.none, ok: state === "allow", h: parts.join(" · "), title, acts };
+  const can = state === "allow" || state === "ask" || state === "deny";
+  return { k: "Disk", chip: DISK_STATE[state] || DISK_STATE.none, ok: state === "allow", h: parts.join(" · "), title: can ? "" : TIP[state] || TIP.none, acts };
 }
 
-// ---- RAM for its cache ----
-// ramGB: this tab's disk-tier RAM (tabDiskMeta's ramGB: TAB_RAM_GB held to tabRamCap), or null without a tier (then no
-// row: the Disk row says why). Read-only: the page has no stored setting for it, only a developer's address flag.
-export function ramRow(ramGB = null) {
-  if (!(ramGB > 0)) return null;
-  return { k: "RAM for its cache", v: `${num(ramGB)} GB`, h: "Holds experts read from disk, on top of what it gives" };
-}
-
-// ---- HTML (p2p.html #ap-flash .dk-row, with the rows' chips: .fig, b for "fits" / "Allowed", .more otherwise) ----
+// ---- HTML (p2p.html #ap-flash .dk-row, with the rows' chips: .fig, b for "Allowed", .more otherwise) ----
 const chipHTML = (text, ok) => ok ? `<b>${esc(text)}</b>` : `<span class="more">${esc(text)}</span>`;
-export function ramRowHTML(r) {
-  return r ? `<div class="dk-row"><span class="k">${esc(r.k)}</span><span class="fig"><span class="nd">${esc(r.v)}</span></span><span class="h">${esc(r.h)}</span></div>` : "";
-}
 export function diskRowHTML(d) {
   const btn = (a) => `<button type="button" class="${a.act === "free" ? "dk-del" : "dk-act"}" data-act="${a.act}">${esc(a.label)}</button>`;
   return `<div class="dk-row"><span class="k">${esc(d.k)}</span><span class="fig">${chipHTML(d.chip, d.ok)}${d.acts.map(btn).join("")}</span><span class="h"${d.title ? ` title="${esc(d.title)}"` : ""}>${esc(d.h)}</span></div>`;
 }
-// the group's rows under the pledge stepper: Disk, then RAM for its cache
-export function settingsHTML(m, disk, ramGB = null) {
-  return diskRowHTML(diskRow(m, disk)) + ramRowHTML(ramRow(ramGB));
+// the group's row under the pledge stepper (relabelled "GPU memory"): Disk, with the RAM its tier reads it with
+export function settingsHTML(m, disk) {
+  return diskRowHTML(diskRow(m, disk));
 }

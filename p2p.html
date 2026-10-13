@@ -787,15 +787,18 @@
   .rung.disk.sel, .rung.disk.sel:hover:not(:disabled) { background: #0B0D14; border-color: #0B0D14; color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25), 0 0 16px -3px rgba(110,134,255,.6); }
   .rung.disk.sel > .pooled-tw { opacity: 1; }
   .rung.disk.sel .rn .rx { color: #A5B4FC; }
-  .rung.disk.sel .dkc { color: #fff; background: rgba(255,255,255,.1); box-shadow: none; }
+  .rung.disk.sel .dkc, .rung.disk.sel .more { color: #fff; background: rgba(255,255,255,.1); box-shadow: none; }
+  .rung.disk.sel b { color: #C7D2FE; background: rgba(110,134,255,.24); }
+  /* short (the longer chip) or a phone: the chip keeps "from disk" so the name and the fit chip keep their room */
+  .rung.disk.short .dkz { display: none; }
+  @media (max-width: 480px) { .rung .dkc .dkz { display: none; } }
   .rung.disk.sel::before { background: #0B0D14; box-shadow: inset 0 0 0 4.5px #fff; }
   /* Flash's per-device settings (room/diskpick.js): "This device, for Qwen3.8 Flash" in the right column, the pledge
-     stepper relabelled "GPU memory", then Disk and RAM for its cache in the Advanced-style rows with the rows' own
-     chips. Only while Flash is picked; its fit stays the need line's and the pool's. */
+     stepper relabelled "GPU memory" with a one-line hint in place of the pledge paragraph, then Disk in the
+     Advanced-style rows with the rows' own chips. Only while Flash is picked; its fit is its row's chip and the pool's. */
   #ap-for[hidden], #ap-flash[hidden], #ai-notnow[hidden] { display: none; }
   .ap-for { flex-basis: 100%; margin-bottom: -2px; }
   .ap-me.flash > h3.ap-k { color: var(--text); }
-  .ap-me.flash .ap-covers { display: none; }
   #ap-flash { flex-basis: 100%; padding: 0; border-top: 1px solid var(--rule-2); }
   .ai-go { display: flex; gap: 8px; }
   .ai-go #ai-start { flex: 1; min-width: 0; }
