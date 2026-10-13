@@ -347,6 +347,76 @@ Deno.test("disk: prefetch skips what the pool or T1 holds, and does nothing with
   assert(reader.calls.length === n0 + 3 && st.stats.aheadUsed === 1, "the cut read nothing more");
 });
 
+// a leasing reader whose leasePart fails for the parts fail(info, e) names (once each, unless sticky), the rest leased
+function failingLeases(base, slots, fail, { sticky = false } = {}) {
+  const R = leasingReader(base, slots), lp = R.leasePart, failed = new Set();
+  R.leasePart = async (info, e) => {
+    const k = `${info.layer}:${info.part}:${e}`;
+    if (fail(info, e) && (sticky || !failed.has(k))) { failed.add(k); await new Promise((r) => setTimeout(r, 1)); throw new Error(`disk read ${k} failed`); }
+    return lp(info, e);
+  };
+  return R;
+}
+
+Deno.test("disk: a read ahead that failed gives its leases back at once; the cut reads it again and gets the parked bytes", async () => {
+  const { st, reader } = makeDiskStore({ slots: 8 }), { st: ref } = makeStore({ slots: 8 });
+  // expert 9's down part fails once: its gate and up leases are taken, then let go
+  const R = st.reader = failingLeases(reader, 64, (info, e) => e === 9 && info.part === "down");
+  st.prefetch(5, [9, 1, 2]);
+  await new Promise((r) => setTimeout(r, 20));   // the read ahead has failed by now
+  const sel = sel1([9, 1, 2, 3]);
+  const a = await diskPlan(st, 5, sel, 1, 5), b = ref.plan(fakeEncoder(), 5, sel, 1, 5);
+  assert(a.remap.every((x, i) => x === b.remap[i]) && sameBytes(poolBytes(st, 5), poolBytes(ref, 5)), "same plan, same bytes");
+  assert(R.out === 0 && st._held === 0, `${R.out} leases held after plan(), _held ${st._held}`);
+  assert(st.stats.aheadUsed === 2 && st.stats.plainReads === 0, `ahead used ${st.stats.aheadUsed}, ${st.stats.plainReads} plain reads`);
+});
+
+Deno.test("disk: a read ahead that failed is read again as arrays when the ring has no room left for it", async () => {
+  const { st, reader } = makeDiskStore({ slots: 8 }), { st: ref } = makeStore({ slots: 8 });
+  // 11 slots: the guess holds 5 (1's three, 9's gate and up), the cut's 3 and 4 take 6; once 9's two go back, 9 again
+  // as leases would make 12
+  const R = st.reader = failingLeases(reader, 11, (info, e) => e === 9 && info.part === "down");
+  st.prefetch(5, [9, 1]);
+  await new Promise((r) => setTimeout(r, 20));
+  const sel = sel1([9, 1, 3, 4]);
+  const a = await diskPlan(st, 5, sel, 1, 5), b = ref.plan(fakeEncoder(), 5, sel, 1, 5);
+  assert(a.remap.every((x, i) => x === b.remap[i]) && sameBytes(poolBytes(st, 5), poolBytes(ref, 5)), "same plan, same bytes");
+  assert(R.most <= 11 && R.out === 0 && st._held === 0, `at most ${R.most} leases at once, ${R.out} held after`);
+  assert(st.stats.plainReads === 1, `${st.stats.plainReads} plain reads (expert 9 again)`);
+});
+
+Deno.test("disk: a cut whose read fails rejects with every lease given back, including reads that finish after the failure", async () => {
+  const { st, reader } = makeDiskStore({ slots: 8 });
+  // expert 7 fails fast; 1, 2 and 3 finish after it (the fake reader waits up to 3 ms)
+  const R = st.reader = failingLeases(reader, 64, (info, e) => e === 7, { sticky: true });
+  st.prefetch(5, [1, 2]);
+  let err = null;
+  try { await st.prepare(5, sel1([7, 1, 2, 3]), 1, 5); } catch (e) { err = e; }
+  assert(err && /disk read 5:\w+:7 failed/.test(err.message), `prepare rejects: ${err?.message}`);
+  assert(R.out === 0 && st._held === 0 && st._leases.length === 0 && !st._staged, `${R.out} leases held right after the failure, _held ${st._held}`);
+  await new Promise((r) => setTimeout(r, 20));
+  assert(R.out === 0 && st._held === 0 && st._leases.length === 0, `${R.out} leases held later`);
+  // the next cut of the layer reads as leases again
+  R.leasePart = leasingReader(reader, 64).leasePart;
+  await diskPlan(st, 5, sel1([1, 2, 3, 4]), 1, 5);
+  assert(st.stats.plainReads === 0, `${st.stats.plainReads} plain reads`);
+});
+
+Deno.test("disk: with the room node's 64 ring slots, a cut and the next layer's read ahead both read as leases", async () => {
+  const { st, reader } = makeDiskStore({ slots: 8 });
+  const R = st.reader = leasingReader(reader, 64);
+  for (let t = 0; t < 20; t++) {
+    const a = [0, 1, 2, 3].map((k) => (t * 4 + k) % 32), b = a.map((e) => (e + 16) % 32);
+    await st.prepare(2, sel1(a), 1, 5);
+    st.prefetch(5, b);                                       // while layer 2's cut still holds its leases
+    st.plan(fakeEncoder(), 2, sel1(a), 1, 5);
+    await diskPlan(st, 5, sel1([...b.slice(0, 2), (b[2] + 7) % 32, (b[3] + 9) % 32]), 1, 5);   // two guessed right, two not
+  }
+  await new Promise((r) => setTimeout(r, 20));
+  assert(st.stats.plainReads === 0 && st.stats.leasedReads > 0, `${st.stats.leasedReads} leased, ${st.stats.plainReads} plain`);
+  assert(R.most <= 64 && R.out === 0, `at most ${R.most} leases at once, ${R.out} held after`);
+});
+
 Deno.test("disk: only misses are read; a plan without prepare throws", async () => {
   const { st, reader } = makeDiskStore();
   await diskPlan(st, 2, sel1([7, 3, 9, 1]), 1, 5);

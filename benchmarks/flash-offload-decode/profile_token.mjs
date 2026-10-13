@@ -132,7 +132,7 @@ try {
     if (verdict !== "MATCH") fail++;
     const o = out.cases[name] = { verdict, n: ids.length, prompt: g.prompt.length, tps: +r.tps.toFixed(3), decodeS: +(r.tDecode / 1000).toFixed(2), prefillS: +(r.tPre / 1000).toFixed(2),
       wallS: +(wallMs / 1000).toFixed(1), diskReads: d("diskReads"), diskMiB: +(d("diskBytes") / 2 ** 20).toFixed(0), diskWaitS: +(d("diskWaitMs") / 1000).toFixed(2),
-      t1Copies: d("t1Copies"), t1Writes: d("t1Writes"), aheadReads: d("aheadReads"), aheadUsed: d("aheadUsed"), lookups: d("lookups"), hits: d("hits"), misses: d("misses"), poolMiB: +(d("bytes") / 2 ** 20).toFixed(0),
+      t1Copies: d("t1Copies"), t1Writes: d("t1Writes"), aheadReads: d("aheadReads"), aheadUsed: d("aheadUsed"), leasedReads: d("leasedReads"), plainReads: d("plainReads"), lookups: d("lookups"), hits: d("hits"), misses: d("misses"), poolMiB: +(d("bytes") / 2 ** 20).toFixed(0),
       // the disk reader's jobs (all steps, prompt included): mean ms a worker spent reading / converting one
       reader: { chunks: rd("chunks"), readMsPerChunk: +(rd("readMs") / rd("chunks")).toFixed(3), convMsPerChunk: +(rd("convMs") / rd("chunks")).toFixed(3), dedup: rd("dedup") } };
     if (BITS) { o.bits = bits.toString(16).padStart(8, "0"); o.bitsReads = bitsN; }

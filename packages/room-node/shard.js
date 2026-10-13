@@ -66,7 +66,10 @@ export const diskLayers = (o, off) => (off && Number.isInteger(o?.diskLo) ? off.
 // without expert_disk_worker.js, threads that keep dying) the engine's own reader in this thread (engine/expert_disk.js
 // over positional reads of the same files): slower, the same bytes. make: the worker reader (tests stub it).
 export function expertReader({ paths, make = expertDiskReader, log = () => {} }) {
-  const w = make({ paths });
+  // ringSlots: the store holds a cut's leases and the next disk layer's read-ahead at once (engine/expert_store.js
+  // prefetch: up to 2 x K experts x 3 parts, 60 for Flash's K = 10). With 32, the read-ahead took the ring and the next
+  // cut read plain arrays. 64 slots of 4 MiB: 256 MiB of shared memory, made on the first read
+  const w = make({ paths, ringSlots: 64 });
   let fb = null, files = null;
   const inThread = () => {
     if (fb) return fb;

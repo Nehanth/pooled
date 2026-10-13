@@ -104,7 +104,8 @@ export class ExpertStore {
     this.stats = this._zeroStats();
   }
   // aheadReads: experts prefetch() read; aheadUsed: of those, the ones a cut then needed (the rest were read for nothing)
-  _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0, specs: 0, specFails: 0, diskReads: 0, diskBytes: 0, diskWaitMs: 0, t1Copies: 0, t1Writes: 0, aheadReads: 0, aheadUsed: 0 }; }
+  // leasedReads / plainReads: experts read as leases of the reader's ring / as arrays of their own (no ring slot left)
+  _zeroStats() { return { cuts: 0, lookups: 0, hits: 0, misses: 0, bytes: 0, regionCuts: 0, regionBytes: 0, layerLoads: 0, layerBytes: 0, specs: 0, specFails: 0, diskReads: 0, diskBytes: 0, diskWaitMs: 0, t1Copies: 0, t1Writes: 0, aheadReads: 0, aheadUsed: 0, leasedReads: 0, plainReads: 0 }; }
   resetStats() { this.stats = this._zeroStats(); if (this.t1) this.t1.stats = this.t1._zero(); }
   has(i) { return this.layerSet.has(i); }
   isDisk(i) { return this.diskSet.has(i); }
@@ -339,6 +340,7 @@ export class ExpertStore {
   // caller that copies the bytes out (into a T1 slot, a ring slot or by writeBuffer, all synchronous) before then
   async _readExpert(S, e, leases = null) {
     const out = [];
+    if (leases) this.stats.leasedReads++; else this.stats.plainReads++;
     const rs = await Promise.allSettled(OFFLOAD_PARTS.map((p) => (leases ? this._lease(S.parts[p].info, e) : this.reader.readPart(S.parts[p].info, e))));
     if (leases) for (const r of rs) if (r.status === "fulfilled") leases.push(r.value);
     const bad = rs.find((r) => r.status === "rejected");
@@ -368,15 +370,24 @@ export class ExpertStore {
   // into _leases. pf: experts already read ahead (prefetch's Map), used instead of a read, their leases into _leases
   async _readMany(layer, ids, { lease = false, pf = null } = {}) {
     const S = this.L.get(layer), t0 = performance.now(), m = new Map();
-    const into = lease ? this._leases : null;
-    const got = await Promise.all(ids.map((e) => {
+    // the leases of this call, kept here until every read has settled: then into _leases, or all released if a read
+    // failed (so a failed cut holds no ring slots, and no read that finishes after the failure adds any)
+    const held = [];
+    const rs = await Promise.allSettled(ids.map((e) => {
       const x = pf?.get(e);
-      if (!x) return this._readExpert(S, e, into);
+      if (!x) return this._readExpert(S, e, lease ? held : null);
       pf.delete(e);
-      // (a read ahead that failed is read again; its leases, if any, are released with the cut's)
-      const own = () => { this._leases.push(...x.leases.splice(0)); };
-      return x.done.then((b) => { own(); this.stats.aheadUsed++; return b; }, () => { own(); return this._readExpert(S, e, into); });
+      return x.done.then((b) => { held.push(...x.leases.splice(0)); this.stats.aheadUsed++; return b; }, () => {
+        // a read ahead that failed: what it leased goes back now, and it is read again, as leases only if the ring
+        // has room for them on top of what is held (the cut's budget did not count this expert)
+        for (const r of x.leases.splice(0)) r.release();
+        return this._readExpert(S, e, lease && this._canLease(1) ? held : null);
+      });
     }));
+    const bad = rs.find((r) => r.status === "rejected");
+    if (bad) { for (const r of held) r.release(); throw bad.reason; }
+    this._leases.push(...held);
+    const got = rs.map((r) => r.value);
     ids.forEach((e, i) => m.set(e, got[i]));
     this.stats.diskWaitMs += performance.now() - t0;
     this.stats.diskReads += ids.length;
@@ -414,14 +425,16 @@ export class ExpertStore {
     } else {
       // a cut's experts as leases when the reader has them and its ring holds the cut (a wide pass goes the region way)
       const lease = this._canLease(ids.filter((e) => !pf?.has(e)).length);
-      let bytes;
-      try { bytes = await this._readMany(layer, ids, { lease, pf }); }
-      finally { if (pf?.size) this._dropAhead({ layer, m: pf }); }   // guessed, not picked: read for nothing
-      if (this.ring) {   // into ring slots now; plan() copies from them (a full ring: those take the writeBuffer path)
-        for (const b of bytes.values()) b.gpu = this.ring.put(b);
-        this.ring.seal();
-      }
-      this._staged = { layer, bytes };
+      try {
+        let bytes;
+        try { bytes = await this._readMany(layer, ids, { lease, pf }); }
+        finally { if (pf?.size) this._dropAhead({ layer, m: pf }); }   // guessed, not picked: read for nothing
+        if (this.ring) {   // into ring slots now; plan() copies from them (a full ring: those take the writeBuffer path)
+          for (const b of bytes.values()) b.gpu = this.ring.put(b);
+          this.ring.seal();
+        }
+        this._staged = { layer, bytes };
+      } catch (err) { this._unstage(); throw err; }   // a failed cut gives its leases back now, not at the next cut
     }
     return ids.length;
   }
