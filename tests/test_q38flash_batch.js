@@ -23,14 +23,20 @@
 //   per layer           against the exact kernels, the residual after every layer (taps), passes 0, 4 and the last
 //   wide ~ decode       the output against the decode steps: 1024-column passes, mixed sizes (narrow passes take the
 //                       exact kernels), across 2051 / 2052, interleaved with decode steps; and twice the same bits
+//   wide verify/accept  a wide batch with verifyCols 24: verify passes and accept's replays (17+ columns) on the
+//                       exact kernels, every column bit-equal to decode
+// MAXBIND=<bytes> (with a large MAXSEQ, e.g. MAXSEQ=200000 MAXBIND=134217728, WebGPU's default limit): the wide
+// batches' maxCols capped by QSA's score scratch (671 columns there), the checks above at that width.
 // OFFLOAD=lo-hi [OFFLOAD_SLOTS=N]: those layers' routed experts parked in the expert store (engine/expert_store.js),
 // the engine built with expertRegion: true, so the batched passes route them through the store's region and decode
 // through its pools. Every check above still compares against the decode engine; the "BITS" lines (hashes of the
 // 64-column exact prefill's and the wide prefills' residuals) must equal the resident run's.
 // FULL=1: all 48 layers and the head (~75 GB of GPU memory), with the default (wide) batch, EXACT=1 for the exact one:
-// the wide kernels per layer against the exact ones (a short prompt, and 128 columns past 2051 cells: MED_BOUND),
+// the wide kernels per layer against the exact ones (a short prompt within BOUNDS; and the last LONG_TAIL (128) columns
+// of LONG_CASE (ctx2k1, past 2051 cells; ctx32k for 32K) within DRIFT_X of a second wide width's drift, see full()),
 // then greedy ids vs llama.cpp
-// (tests/golden/q38flash_llama_greedy.json, every case including ctx4k / ctx8k; ctx2k and ctx2k_b stay dense at
+// (tests/golden/q38flash_llama_greedy.json, every case including ctx4k / ctx8k / ctx32k (MAXSEQ defaults to the
+// longest); ctx2k and ctx2k_b stay dense at
 // long positions (1887 and 1943 prompt tokens, + 64 <= 2051 cells), ctx2k1 (2082) is just past 2051 cells, where
 // QSA drops a few blocks) with the prompt run by the batched prefill, judged by tests/q38flash_rule.js (a difference
 // passes only at a backend near tie: our token within 0.5 nats of llama.cpp's top there, our own top-2 gap under
@@ -60,7 +66,9 @@ const errors = watchGpuErrors(device);
 const model = openGGUF(path.join(DIR, first));
 const G = model.G, cfg = qwen4expConfig(G.meta);
 const nL = FULL ? cfg.L : +env("LAYERS", 4), hasHead = nL === cfg.L;
-const MAXSEQ = +env("MAXSEQ", FULL ? 8448 : 4608);
+// FULL: room for every golden (prompt + ids; ctx32k's ~31.7K), rounded up to 256 cells
+const goldMax = Math.max(...Object.entries(gold).filter(([k]) => !k.startsWith("_")).map(([, g]) => g.prompt.length + g.ids.length));
+const MAXSEQ = +env("MAXSEQ", FULL ? Math.ceil(goldMax / 256) * 256 : 4608);
 
 const experts = await offloadFromEnv(device, nL, model);   // (async since the disk tier, #349; a disk layer is refused by Qwen4ExpBatch.create)
 let t0 = performance.now();
@@ -86,22 +94,34 @@ const EXACT = env("EXACT") === "1";
 const dpOpt = (v) => (v === undefined ? {} : { dp4a: v === "1" ? true : v === "0" ? false : v });
 const pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: +env("MAXCOLS", FULL && !EXACT ? 1024 : 64), verifyCols: 8, exact: !FULL || EXACT,
   ...(FULL ? dpOpt(Deno.env.get("DP4A")) : {}) });
-const wideOpts = { verifyCols: 8, ...(env("WIDE_COLS") ? { maxCols: +env("WIDE_COLS") } : {}) };
+// MAXBIND=<bytes>: the wide batches see that binding limit (with a large MAXSEQ, QSA's score scratch caps maxCols)
+const wideOpts = { verifyCols: 8, ...(env("WIDE_COLS") ? { maxCols: +env("WIDE_COLS") } : {}), ...(env("MAXBIND") ? { maxBinding: +env("MAXBIND") } : {}) };
 const pf = FULL ? pb : await Qwen4ExpBatch.create(eng, weights, { ...wideOpts, ...dpOpt(env("DP4A")) });
 // the dp4a wide kernels too (when the device has them and DP4A does not pick a mode), with their own bounds
 const pfD = FULL || pf.dp4a || env("DP4A") !== undefined ? null : await Qwen4ExpBatch.create(eng, weights, { ...wideOpts, dp4a: true });
 const dpMode = (b) => (b.dpMoe && b.dpDense ? "dp4a" : b.dpMoe ? "moe" : b.dpDense ? "dense" : "f32");
+const pfMain = pf;
+if (env("MAXBIND")) {   // the cap must have bitten: fewer columns than asked (the default 1024 or WIDE_COLS)
+  const want = +env("WIDE_COLS", 1024);
+  console.log(`MAXBIND ${env("MAXBIND")} at maxSeq ${MAXSEQ}: wide passes of ${pf.maxCols} columns (asked ${want})`);
+  if (!(pf.maxCols < want)) { console.log(`FAIL MAXBIND did not cap maxCols`); Deno.exit(1); }
+}
 if (experts) console.log(`offload: layers ${experts.layers[0]}-${experts.layers.at(-1)}, ${experts.P} slots per layer, region ${(experts.regionBytes / 2 ** 30).toFixed(2)} GiB`);
 console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? "on" : "off"}, maxSeq ${MAXSEQ}, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 
 // the wide kernels' bounds on the relative error of a column's residual (max |d| / max |ref|), per layer against the
-// exact kernels and on the output against decode: p99 over the columns, and the max (a column whose router picks
-// another expert at a near tie moves by ~1e-2: no tolerance tighter than that holds for every column). f32: the sums
-// in another order (measured p99 ~3e-6, max 2e-4 on 4 layers). dp4a quantizes activations per 32 values, llama.cpp's
+// exact kernels and on the output against decode: p99 over the columns, and the max. f32: the sums in another order
+// (measured p99 ~3e-6, max 2e-4 on 4 layers; the prompt is fixed, so a router near tie that would move one column by
+// ~1e-2 either shows up in every run or never: none does on these 4300 tokens). dp4a quantizes activations per 32 values, llama.cpp's
 // MMQ numerics (measured on 4 layers: the routed experts alone p99 1.2e-2 / max 3.6e-2; with the projections (the HC
 // ones stay f32) p99 1.8e-2 / max 5.7e-2)
-const BOUNDS = { f32: { p99: 2e-3, max: 5e-2 }, moe: { p99: 5e-2, max: 1e-1 }, dense: { p99: 5e-2, max: 1e-1 }, dp4a: { p99: 5e-2, max: 1e-1 } };
-// FULL=1, the whole model over ~2000 positions: the median column per layer (see full())
+// f32 at ~10x / ~25x the measured p99 / max, so an error of ~1e-4 on every column, or of ~5e-3 on a few, fails.
+const BOUNDS = { f32: { p99: 3e-5, max: 5e-3 }, moe: { p99: 5e-2, max: 1e-1 }, dense: { p99: 5e-2, max: 1e-1 }, dp4a: { p99: 5e-2, max: 1e-1 } };
+// FULL=1, the whole model over thousands of positions (see full()): per layer, wide vs exact within DRIFT_X of the
+// drift between two wide widths (1024- and 512-column passes: the same kernels, another summation order), each
+// statistic floored at DRIFT_FLOOR (the single-pass rounding, where no drift has built up yet); and the median
+// column under MED_BOUND
+const DRIFT_X = 3, DRIFT_FLOOR = { p50: 3e-5, p99: 3e-5, max: 1e-3 };
 const MED_BOUND = { f32: 1e-2, moe: 3e-2, dense: 3e-2, dp4a: 3e-2 };
 let fail = 0;
 const check = (ok, msg) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) fail++; };
@@ -293,6 +313,24 @@ async function wideChecks(pf, ids, ref, NTOK, decTs) {
     const d = dist(es);
     check(okD(d), `wide (${mode}) interleave: prefill 0..${a}, decode ${a}..${b}, prefill ${b}..${b + 300}: rel vs decode ${fmt(d)}`);
   }
+  // verify / accept on a wide batch with verify passes of 24 columns: verify runs the exact kernels, and so must
+  // accept's replay of n >= FAST_MIN_COLS (16) columns, or the kept state is not the one verify scored: every
+  // column (verify, then a pass on the accepted state) bit-equal to decode
+  if (pf === pfMain) {
+    const pv = await Qwen4ExpBatch.create(eng, weights, { ...wideOpts, verifyCols: 24, dp4a: pf.dp4a ? (mode === "dp4a" ? true : mode) : false });
+    eng.reset();
+    const start = Math.min(2040, NTOK - 80);
+    await pv.prefill(ids.slice(0, start), { head: "none", exact: true });
+    let p = start, bad = 0;
+    for (const k of [20, 17, 24]) {
+      const r = await pv.verify(ids.slice(p, p + 24), { wantHidden: true });
+      bad += cmpCols(r.hiddens, ref, p, 24).bad;
+      await pv.accept(k); p += k;
+    }
+    const r = await pv.prefill(ids.slice(p, p + 8), { head: "none", wantHidden: true, chunks: [8] });
+    bad += cmpCols(r.hiddens, ref, p, 8).bad;
+    check(bad === 0, `wide batch (${mode}), verifyCols 24: verify 24 / accept 20, 17, 24 from ${start}, then a pass: ${bad} columns differ from decode (accept's replay on the exact kernels)`);
+  }
   // speed
   eng.reset();
   const t = performance.now();
@@ -370,28 +408,48 @@ function gap(lg) {
 
 async function full() {
   // the wide kernels per layer on the whole model (with the head), against the exact ones: a short prompt in one pass
-  // (the layered bounds), and the last 128 columns of a prompt past 2051 cells (QSA selecting), each from its own
-  // prefill of the rest. Over ~2000 positions and 48 layers the two drift apart by more than one pass's rounding: a
-  // near tie in a router (or a QSA block score) flips at some column, that column moves by ~1e-2, and the DeltaNet
-  // state and attention carry part of it to every later column (from ~layer 20 on; two wide configurations that sum
-  // in another order drift the same way, see docs/kernels.md). So the long check bounds the median column per layer
-  // (MED_BOUND) and reports the max.
+  // (the layered BOUNDS), and the last LONG_TAIL columns of LONG_CASE (default ctx2k1, past 2051 cells: QSA selecting),
+  // each from its own prefill of the rest. Over thousands of positions and 48 layers wide and exact drift apart by
+  // more than one pass's rounding: a near tie in a router (or a QSA block score) flips at some column, that column moves
+  // by ~1e-2, and the DeltaNet state and attention carry part of it to every later column (from ~layer 20 on). Two wide
+  // widths (pb, and pb2 at half its columns: other pass boundaries and split-K, so another summation order) drift the
+  // same way, so the long check is comparative: per layer, wide vs exact's median, p99 and max within DRIFT_X of wide vs
+  // wide2's (each floored at DRIFT_FLOOR), and the median under MED_BOUND. A kernel error well above the model's own
+  // sensitivity (on every column, or on a minority) shows in wide vs exact but not in wide vs wide2 (same kernels).
   if (!pb.exact) {
     const HD = cfg.hDim, mode = dpMode(pb), Bd = BOUNDS[mode];
-    for (const [label, ids, tail, long] of [["two-sum", gold["two-sum"].prompt, gold["two-sum"].prompt.length, false], ["ctx2k1 tail", gold.ctx2k1.prompt, 128, true]]) {
-      const tapsOf = async (exact) => {
-        eng.reset();
-        if (ids.length > tail) await pb.prefill(ids.slice(0, -tail), { head: "none", exact });
-        return (await pb.prefill(ids.slice(-tail), { head: "none", exact, taps: true, chunks: [tail] })).taps;
-      };
-      const e = await tapsOf(true), f = await tapsOf(false), st = [];
-      for (let l = 0; l < e.length; l++) {
-        const es = []; for (let c = 0; c < tail; c++) es.push(colRel(f[l], e[l], c * HD, c * HD, HD));
-        es.sort((a, b) => a - b); st.push({ p50: es[es.length >> 1], p99: es[Math.floor(es.length * 0.99)], max: es[es.length - 1] });
+    const pb2 = await Qwen4ExpBatch.create(eng, weights, { maxCols: Math.max(16, pb.maxCols >> 1), verifyCols: 8, dp4a: dpMode(pb) === "f32" ? false : dpMode(pb) === "dp4a" ? true : dpMode(pb) });
+    const LC = env("LONG_CASE", "ctx2k1"), LT = +env("LONG_TAIL", 128);
+    if (gold[LC].prompt.length > MAXSEQ) throw new Error(`LONG_CASE ${LC}: ${gold[LC].prompt.length} tokens > MAXSEQ ${MAXSEQ}`);
+    const stats = (a, b, n) => {
+      const out = [];
+      for (let l = 0; l < a.length; l++) {
+        const es = []; for (let c = 0; c < n; c++) es.push(colRel(a[l], b[l], c * HD, c * HD, HD));
+        es.sort((x, y) => x - y); out.push({ p50: es[es.length >> 1], p99: es[Math.floor(es.length * 0.99)], max: es[es.length - 1] });
       }
-      const worst = st.reduce((a, b) => ({ p50: Math.max(a.p50, b.p50), p99: Math.max(a.p99, b.p99), max: Math.max(a.max, b.max) }));
-      const ok = long ? worst.p50 < MED_BOUND[mode] : worst.p99 < Bd.p99 && worst.max < Bd.max;
-      check(ok, `wide (${mode}) vs exact per layer, ${label} (${tail} columns at ${ids.length - tail}): worst layer median ${worst.p50.toExponential(2)}${long ? ` (bound ${MED_BOUND[mode]})` : ""}, p99 ${worst.p99.toExponential(2)}${long ? "" : ` (bound ${Bd.p99})`}, max ${worst.max.toExponential(2)}${long ? "" : ` (bound ${Bd.max})`}; median at layers 0, 12, 24, 36, 47: ${[0, 12, 24, 36, 47].map((l) => st[l].p50.toExponential(1)).join(" ")}`);
+      return out;
+    };
+    const worstOf = (st) => st.reduce((a, b) => ({ p50: Math.max(a.p50, b.p50), p99: Math.max(a.p99, b.p99), max: Math.max(a.max, b.max) }));
+    for (const [label, ids, tail, long] of [["two-sum", gold["two-sum"].prompt, gold["two-sum"].prompt.length, false], [`${LC} tail`, gold[LC].prompt, LT, true]]) {
+      const tapsOf = async (b, exact) => {
+        eng.reset();
+        const t = performance.now();
+        if (ids.length > tail) await b.prefill(ids.slice(0, -tail), { head: "none", exact });
+        const r = (await b.prefill(ids.slice(-tail), { head: "none", exact, taps: true, chunks: [tail] })).taps;
+        if (long) console.log(`  ${label}: ${exact ? "exact" : `wide ${b.maxCols}`} prefill of ${ids.length} tokens in ${((performance.now() - t) / 1000).toFixed(0)} s`);
+        return r;
+      };
+      const e = await tapsOf(pb, true), f = await tapsOf(pb, false), st = stats(f, e, tail), worst = worstOf(st);
+      if (!long) {
+        check(worst.p99 < Bd.p99 && worst.max < Bd.max, `wide (${mode}) vs exact per layer, ${label} (${tail} columns): worst layer median ${worst.p50.toExponential(2)}, p99 ${worst.p99.toExponential(2)} (bound ${Bd.p99}), max ${worst.max.toExponential(2)} (bound ${Bd.max})`);
+        continue;
+      }
+      const f2 = await tapsOf(pb2, false), sw = stats(f, f2, tail);
+      const ratio = st.map((v, l) => Math.max(...["p50", "p99", "max"].map((k) => v[k] / Math.max(sw[l][k], DRIFT_FLOOR[k]))));
+      const bad = ratio.flatMap((r, l) => (r > DRIFT_X ? [l] : []));
+      for (const l of [0, 6, 12, 18, 24, 30, 36, 42, 47]) console.log(`  layer ${l}: wide vs exact median ${st[l].p50.toExponential(2)} p99 ${st[l].p99.toExponential(2)} max ${st[l].max.toExponential(2)} | wide ${pb.maxCols} vs ${pb2.maxCols} median ${sw[l].p50.toExponential(2)} p99 ${sw[l].p99.toExponential(2)} max ${sw[l].max.toExponential(2)} | ratio ${ratio[l].toFixed(2)}`);
+      const rl = ratio.indexOf(Math.max(...ratio));
+      check(!bad.length && worst.p50 < MED_BOUND[mode], `wide (${mode}) vs exact per layer, ${label} (${tail} columns at ${ids.length - tail}): within ${DRIFT_X}x of the wide ${pb.maxCols} vs ${pb2.maxCols} drift at every layer (worst ratio ${ratio[rl].toFixed(2)} at layer ${rl}${bad.length ? `; over at layers ${bad.join(",")}` : ""}); worst layer median ${worst.p50.toExponential(2)} (bound ${MED_BOUND[mode]}), p99 ${worst.p99.toExponential(2)}, max ${worst.max.toExponential(2)}; the wide-wide drift: median ${worstOf(sw).p50.toExponential(2)}, p99 ${worstOf(sw).p99.toExponential(2)}, max ${worstOf(sw).max.toExponential(2)}`);
     }
   }
   const tok = model.tokenizer();

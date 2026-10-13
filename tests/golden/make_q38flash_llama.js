@@ -1,14 +1,15 @@
 // Goldens for Qwen3.8-Flash-Next (roadmap/33-qwen38-flash.md, section 5): greedy continuations from a running llama-server that
 // knows the qwen4exp arch (the unsloth b10840 build on the GB10; mainline needs >= 6c84c7d), same bartowski
 // Q4_0 GGUF, prompts sent as token ids from the engine's own tokenizer so both sides see the same prompt.
-//   llama-server -m models/q38flash/Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf -ngl 99 -fa on -c 9216 -np 1 \
+//   llama-server -m models/q38flash/Qwen3.8-Flash-Next-Q4_0-00001-of-00003.gguf -ngl 99 -fa on -c 33792 -np 1 \
 //     -ot "per_layer_token_embd=CPU" --port 8297
 //   deno run --allow-read --allow-net --allow-write tests/golden/make_q38flash_llama.js [http://127.0.0.1:8297] [n=64] [cases]
 // Cases: test_moe's three chat prompts; "eos-mid", an <|endoftext|> in the middle of the prompt (the n-gram
 // hash resets there); "ctx2k", just under the dense path's 2048 cap (prompt + ids); "ctx4k" / "ctx8k", past
 // QSA's 2051-cell budget, for the sparse-attention phase; and "ctx2k_b" (prompt and continuation stay under 2051
 // cells: dense, at long positions) / "ctx2k1" (just past 2051: QSA drops a few blocks), which split a long-context
-// mismatch into position drift vs the QSA selection (tests/test_q38flash_batch.js). [cases] (comma separated)
+// mismatch into position drift vs the QSA selection (tests/test_q38flash_batch.js); "ctx32k" (~31.6K prompt tokens,
+// the long-context target: QSA keeps 2048 of ~32K cells, the wide prefill's 1024-column passes). [cases] (comma separated)
 // regenerates only those and keeps the file's others.
 // Each case keeps its prompt ids, the greedy text and ids, and per step the gap between the top two
 // log-probabilities ("gap", nats). A step under 0.2 is a near tie that the engine may legitimately flip:
@@ -50,6 +51,7 @@ cases["ctx4k"] = { q: "roadmap notes (~4K tokens), which note is about disk", pr
 cases["ctx8k"] = { q: "roadmap notes (~8K tokens), which note is about disk", prompt: long(7900) };
 cases["ctx2k_b"] = { q: "roadmap notes (~2K tokens, prompt + 64 <= 2051 cells), which note is about disk", prompt: long(1950) };
 cases["ctx2k1"] = { q: "roadmap notes (~2.1K tokens, just past 2051 cells), which note is about disk", prompt: long(2070) };
+cases["ctx32k"] = { q: "roadmap notes (~32K tokens), which note is about disk", prompt: long(31600) };
 
 const NEAR_TIE = 0.2;
 const nearTies = (gap) => {

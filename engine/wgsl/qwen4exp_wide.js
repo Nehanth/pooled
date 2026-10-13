@@ -64,7 +64,7 @@ const deq = (kind, QS, SC, blk, pre = "e") => kind === "q4" ? `
 // the staged tiles). Per stage KH halves of a quant block (16 values each: Q4_0's low or high nibbles, one Q8_0 vec4,
 // four f32 vec4s): the weight tile dequantized once into workgroup memory (k-major, vec4 over 4 rows) and the
 // activation tile (k-major, vec4 over 4 columns), then 16 * KH rank-1 updates. Workgroup memory 64 * KH * (BM + BN).
-// Bindings: 0 qs (q4 / q8) or w (f32 rows), 1 sc, 2 x, 3 y, 4 P, 5 F (frame: nCols), 6 aux (mode 2).
+// Bindings: 0 qs (q4 / q8) or w (f32 rows; bf16 rows as u32 pairs, low half first: QSA's indexer weights), 1 sc, 2 x, 3 y, 4 P, 5 F (frame: nCols), 6 aux (mode 2).
 // Workgroups (ceil(dOut / BM), ceil(nCols / BN)). x column c at x[(xOff4 + c * xs4) * 4 ..]; columns past nCols
 // read column nCols - 1 and are not stored. One f32 accumulator per output, k ascending.
 export function gemmTWGSL(kind, c = WIDE_T) {
@@ -76,11 +76,12 @@ export function gemmTWGSL(kind, c = WIDE_T) {
   const wUnits = BM4 * 4 * KH, xUnits = BN4 * 4 * KH;
   const wval = (r) => kind === "q4" ? `select(q4hi(wt_q[g${r}][jj]), q4lo(wt_q[g${r}][jj]), hf == 0u) * unpack2x16float(wt_sc[g${r} >> 1u])[g${r} & 1u]`
     : kind === "q8" ? `i8x4(wt_q[g${r} * 2u + hf][jj]) * unpack2x16float(wt_sc[g${r} >> 1u])[g${r} & 1u]`
+    : kind === "bf16" ? `bf16x4(wt_b[min(row0 + rq * 4u + ${r}u, dOut - 1u) * n4 + kb * 8u + hf * 4u + jj])`
     : `wt_w[min(row0 + rq * 4u + ${r}u, dOut - 1u) * n4 + kb * 8u + hf * 4u + jj]`;
   const wload = (j) => `
     { let li = t + ${j * T}u; if (li < ${wUnits}u) {
       let rq = li % ${BM4}u; let rest = li / ${BM4}u; let jj = rest % 4u; let hh = rest / 4u; let hf = (s * ${KH}u + hh) % 2u; let kb = (s * ${KH}u + hh) / 2u;
-      ${kind === "f32" ? "" : R4.map((r) => `let g${r} = min(row0 + rq * 4u + ${r}u, dOut - 1u) * nb + kb;`).join(" ")}
+      ${kind === "f32" || kind === "bf16" ? "" : R4.map((r) => `let g${r} = min(row0 + rq * 4u + ${r}u, dOut - 1u) * nb + kb;`).join(" ")}
       ${R4.map((r) => `let d${r} = ${wval(r)};`).join("\n      ")}
       ${R4.map((i) => `wt_W[(hh * 16u + 4u * jj + ${i}u) * ${BM4}u + rq] = vec4<f32>(d0[${i}], d1[${i}], d2[${i}], d3[${i}]);`).join("\n      ")}
     } }`;
@@ -99,6 +100,10 @@ export function gemmTWGSL(kind, c = WIDE_T) {
     ${NJ.map((j) => R4.map((cc) => `{ let col = col0 + (tx + ${j * TX}u) * 4u + ${cc}u; if (col < nc) { put(${acc(i, rr, j)}[${cc}], col, row, wg.z, nc); } }`).join(" ")).join("\n    ")}
   } }`).join("")).join("");
   const W = kind === "f32" ? `@group(0) @binding(0) var<storage, read> wt_w: array<vec4<f32>>;`
+    : kind === "bf16" ? `@group(0) @binding(0) var<storage, read> wt_b: array<vec2<u32>>;
+fn bf16x4(w: vec2<u32>) -> vec4<f32> {
+  return vec4<f32>(bitcast<f32>(w.x << 16u), bitcast<f32>(w.x & 0xFFFF0000u), bitcast<f32>(w.y << 16u), bitcast<f32>(w.y & 0xFFFF0000u));
+}`
     : `@group(0) @binding(0) var<storage, read> wt_q: array<vec4<u32>>;\n@group(0) @binding(1) var<storage, read> wt_sc: array<u32>;`;
   return DQ + `
 struct GP { dOut: u32, dIn: u32, xOff4: u32, xs4: u32, yOff: u32, ys: u32, mode: u32, scale: f32, kPer: u32, split: u32, p0: u32, p1: u32 };

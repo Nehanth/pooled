@@ -1,5 +1,5 @@
 // The wide (fast) Qwen3.8-Flash-Next prefill kernels (engine/wgsl/qwen4exp_wide.js) against a float64 CPU reference
-// on random data, no model: the tiled GEMM (q4 / q8 / f32 weights, odd row counts, column guards, offsets and
+// on random data, no model: the tiled GEMM (q4 / q8 / f32 / bf16 weights, odd row counts, column guards, offsets and
 // strides, each epilogue mode), and the expert-grouped MoE (sort, gate/up, down, combine) for every pair of a pass,
 // including experts with more pairs than one tile holds and experts no column picked. Bound: max |gpu - ref| /
 // max |ref| < 5e-6 per output tensor (f32 sums in another order than the reference). Also: two runs give the same bits.
@@ -49,6 +49,12 @@ const f16 = (m, e) => ({ bits: ((e + 15) << 10) | m, v: (1 + m / 1024) * 2 ** e 
 function quant(kind, rows, dIn) {
   const nBlk = rows * dIn / 32, deq = new Float64Array(rows * dIn);
   if (kind === "f32") { const w = randF(rows * dIn, 0.2); deq.set(w); return { kind, buf: put(w), deq }; }
+  if (kind === "bf16") {   // u32 pairs, low half = the even value (QSA's indexer weights, engine/qwen4exp_qsa.js)
+    const w = randF(rows * dIn, 0.2), wb = new Uint32Array(w.buffer), pk = new Uint32Array(rows * dIn / 2);
+    for (let i = 0; i < pk.length; i++) pk[i] = (wb[2 * i] >>> 16) | (wb[2 * i + 1] & 0xffff0000);
+    for (let i = 0; i < w.length; i++) deq[i] = new Float32Array(new Uint32Array([wb[i] & 0xffff0000]).buffer)[0];
+    return { kind, buf: put(pk), deq };
+  }
   const sc = new Uint32Array(Math.ceil(nBlk / 2)), sv = new Float64Array(nBlk);
   for (let b = 0; b < nBlk; b++) { const h = f16(Math.floor((rnd() + 0.5) * 1023), -7 - Math.floor((rnd() + 0.5) * 3)); sc[b >> 1] |= h.bits << ((b & 1) * 16); sv[b] = h.v; }
   const per = kind === "q4" ? 16 : 32, qs = new Uint8Array(nBlk * per);
@@ -83,7 +89,7 @@ console.log(`dp4a (packed_4x8_integer_dot_product): ${dp4aOk ? "yes" : "no: the 
 
 // ---- gemm_t (f32 tiles) and gemm_d (dp4a), with and without split-K
 const dummy = mk(16);
-for (const kind of ["q4", "q8", "f32"]) for (const [dOut, dIn, nCols, maxCols] of [[200, 320, 37, 64], [64, 2560, 128, 128], [513, 640, 5, 64]]) for (const mode of [0, 1, 2]) for (const dp4a of kind === "f32" || !dp4aOk ? [false] : [false, true]) for (const split of [1, 3]) {
+for (const kind of ["q4", "q8", "f32", "bf16"]) for (const [dOut, dIn, nCols, maxCols] of [[200, 320, 37, 64], [64, 2560, 128, 128], [513, 640, 5, 64]]) for (const mode of [0, 1, 2]) for (const dp4a of kind === "f32" || kind === "bf16" || !dp4aOk ? [false] : [false, true]) for (const split of [1, 3]) {
   const W = quant(kind, dOut, dIn), xs4 = dIn / 4 + 3, xOff4 = 2, ys = dOut + 7, yOff = 3, scale = 0.25, nb = dIn / 32;
   const kPer = split > 1 ? Math.ceil(nb / split / 2) * 2 : 1 << 30;
   const x = randF(xOff4 * 4 + maxCols * xs4 * 4), aux = randF(maxCols * ys + yOff + 64, 4);
@@ -97,7 +103,7 @@ for (const kind of ["q4", "q8", "f32"]) for (const [dOut, dIn, nCols, maxCols] o
     run(X.QUANT_X_WGSL, [xb, qb, db, uni([dIn, xOff4, xs4, 1]), F], [Math.ceil(nb / 32), nCols, 1]);
     run(X.gemmDWGSL(kind), [W.qs, W.sc, qb, db, out, P, F, ab], grid(X.DP4A_T.BM, X.DP4A_T.BN));
     xq = Array.from({ length: nCols }, (_, c) => quantRef(x, (xOff4 + c * xs4) * 4, dIn));
-  } else run(X.gemmTWGSL(kind), kind === "f32" ? [W.buf, null, xb, out, P, F, ab] : [W.qs, W.sc, xb, out, P, F, ab], grid(X.WIDE_T.BM, X.WIDE_T.BN));
+  } else run(X.gemmTWGSL(kind), kind === "f32" || kind === "bf16" ? [W.buf, null, xb, out, P, F, ab] : [W.qs, W.sc, xb, out, P, F, ab], grid(X.WIDE_T.BM, X.WIDE_T.BN));
   if (split > 1) run(X.SPLIT_SUM_WGSL, [part, yb, uni([dOut, dIn, xOff4, xs4, yOff, ys, mode, { f: scale }, split, 0, 0, 0]), F, ab], [Math.ceil(dOut / 256), nCols, 1]);
   const got = await read(yb, maxCols * ys + 64);
   const ref = new Float64Array(nCols * dOut), g = new Float64Array(nCols * dOut);

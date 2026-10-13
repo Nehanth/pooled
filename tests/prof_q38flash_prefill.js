@@ -48,8 +48,8 @@ const mk = (m) => Qwen4ExpBatch.create(eng, weights, { ...(m === "exact" ? { exa
 const MODES = env("MODES", "f32").split(",");
 console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}${experts ? `, offload ${experts.layers[0]}-${experts.layers.at(-1)}` : ""}, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 
-// a prompt of n tokens: the longest golden prompt, repeated
-const base = Object.values(gold).filter((g) => g.prompt).sort((a, b) => b.prompt.length - a.prompt.length)[0].prompt;
+// a prompt of n tokens: ctx8k's prompt (7663 tokens), repeated (fixed, so the timings stay comparable as goldens are added)
+const base = gold.ctx8k.prompt;
 const prompt = (n) => Array.from({ length: n }, (_, i) => base[i % base.length]);
 let pb = null;
 for (const mode of MODES) {

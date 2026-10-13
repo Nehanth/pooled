@@ -9,8 +9,12 @@
 //   wide   prefill passes of FAST_MIN_COLS+ columns (maxCols 1024 by default): the kernels of
 //          engine/wgsl/qwen4exp_wide.js, tiled GEMMs for the projections, the expert-grouped MoE, attention per KV
 //          head and column group, DeltaNet's norm out of its sequential loop. Another summation order than decode, so
-//          within a tolerance of it (f32: ~1e-6 relative on the residual; dp4a: true, llama.cpp's int8-activation
-//          numerics, ~1e-2), checked per layer by tests/test_q38flash_batch.js and on the goldens (FULL=1).
+//          within a tolerance of it: f32, one pass's rounding is ~1e-6 relative on the residual (4 layers: p99 3e-6,
+//          max 2e-4 per column), but over long prompts on the whole model a router (or QSA block score) near tie flips
+//          at some column and the recurrent state / attention carry it on: past ~2K positions the median column is
+//          ~3e-3 from the exact kernels from ~layer 20 on and single columns up to ~1e-1, as much as two wide widths
+//          differ from each other (docs/kernels.md). dp4a: true, llama.cpp's int8-activation numerics, ~1e-2 per pass.
+//          Checked per layer by tests/test_q38flash_batch.js and on the goldens (FULL=1).
 // The op lists mirror the decode engine's: per layer two halves
 // { pre, site, rest, comb }, laid out fused as forwardToken runs them (each HC combine folded into the next site,
 // _halfOps), with the multi-column kernels of engine/wgsl/qwen4exp_batch.js (the decode kernels with a column index;
@@ -60,11 +64,12 @@ export class Qwen4ExpBatch {
   // wide kernels (engine/wgsl/qwen4exp_wide.js): tiled GEMMs and the expert-grouped MoE, within a tolerance of decode.
   // dp4a: the wide GEMMs and the grouped MoE on activations quantized per 32 values (llama.cpp's MMQ numerics; about
   // 1.3x faster on the GB10, the residual ~1e-2 from decode): true, "moe" (the routed experts only) or "dense" (the
-  // projections only), when the device compiles dot4I8Packed. Default false: f32 tiles, within ~1e-6 of decode.
-  async _init(eng, W, { maxCols = null, verifyCols = 8, exact = false, dp4a = false } = {}) {
+  // projections only), when the device compiles dot4I8Packed. Default false: f32 tiles (one pass ~1e-6 from decode; see the header on long prompts).
+  // maxBinding: a lower binding limit than the device's (tests: the maxCols cap of a smaller device / a longer maxSeq).
+  async _init(eng, W, { maxCols = null, verifyCols = 8, exact = false, dp4a = false, maxBinding = Infinity } = {}) {
     maxCols ??= exact ? 64 : WIDE_COLS;
     {   // the widest scratch bindings must fit the device: QSA's scores (maxCols x maxSeq / 4), the experts' outputs
-      const lim = eng.device.limits?.maxStorageBufferBindingSize ?? 128 << 20, c = eng.cfg;
+      const lim = Math.min(eng.device.limits?.maxStorageBufferBindingSize ?? 128 << 20, maxBinding), c = eng.cfg;
       maxCols = Math.min(maxCols, Math.floor(lim / (c.K * c.dim * 4)), ...(eng.qsa ? [qsaMaxCols({ maxSeq: eng.maxSeq, maxBinding: lim })] : []));
     }
     if (dp4a && !exact && !await probeDp4a(eng.device)) dp4a = false;
@@ -166,7 +171,9 @@ export class Qwen4ExpBatch {
     const gemmW = (M, x, y, { dIn = M.shape?.[1], dOut = M.shape?.[0] ?? M.n / dIn, xs = dIn, ys = dOut, xOff = 0, yOff = 0, mode = 0, scale = 0, aux = null, xq = null, f32 = false } = {}) => {
       if (!(dIn > 0 && dOut > 0 && Number.isInteger(dOut) && dIn % 32 === 0)) throw new Error(`qwen4exp batch: gemm shape ${dOut} x ${dIn}`);
       if (xs % 4 || xOff % 4) throw new Error("qwen4exp batch: gemm column stride / offset must be a multiple of 4");
-      const D = this.dpDense && !f32 && M.kind !== "f32", T = D ? WX.DP4A_T : WX.WIDE_T, KB = D ? T.KB : 1, nb = dIn / 32;
+      // gemm_d steps KB blocks per stage (no tail guard): a row of dIn / 32 blocks not a multiple of KB takes gemm_t
+      const flt = M.kind === "f32" || M.kind === "bf16", nb = dIn / 32;
+      const D = this.dpDense && !f32 && !flt && nb % WX.DP4A_T.KB === 0, T = D ? WX.DP4A_T : WX.WIDE_T, KB = D ? T.KB : 1;
       const tiles = cdiv(dOut, T.BM) * cdiv(N, T.BN);
       let kPer = nb;
       if (tiles < 160) kPer = Math.max(KB * 2, Math.ceil(Math.ceil(nb / Math.min(16, Math.round(320 / tiles))) / KB) * KB);
@@ -177,7 +184,7 @@ export class Qwen4ExpBatch {
       if (D && !xq) { ops.push(quantX(x, dIn, { xs, xOff })); xq = { q: B.xq, d: B.xd }; }
       const grid = (pos, n) => [cdiv(dOut, T.BM), cdiv(n, T.BN), S];
       ops.push(D ? later(gemvPipe(`gemm_d_${M.kind}`, WX.gemmDWGSL(M.kind)), [M.qs, M.sc, xq.q, xq.d, out, u, B.F, aux || B.dummy], grid)
-        : later(gemvPipe(`gemm_t_${M.kind}`, WX.gemmTWGSL(M.kind)), M.kind === "f32" ? [M.buf, null, x, out, u, B.F, aux || B.dummy] : [M.qs, M.sc, x, out, u, B.F, aux || B.dummy], grid));
+        : later(gemvPipe(`gemm_t_${M.kind}`, WX.gemmTWGSL(M.kind)), flt ? [M.buf, null, x, out, u, B.F, aux || B.dummy] : [M.qs, M.sc, x, out, u, B.F, aux || B.dummy], grid));
       if (S > 1) {
         ops.push(later(gemvPipe("split_sum", WX.SPLIT_SUM_WGSL), [null, y, uni([dOut, dIn, 0, 0, yOff, ys, mode, f(scale), S, 0, 0, 0]), B.F, aux || B.dummy],
           (pos, n) => [cdiv(dOut, 256), n, 1]));
@@ -245,15 +252,9 @@ export class Qwen4ExpBatch {
           let sel = [];
           if (eng.qsa) {
             const G = qsaBind(device, eng.qsaK, eng.qsaSh, this.qsaS, st.qsa, B.mixed), so = qsaStateOps(eng.qsaK, G);
-            // the indexer projections as an f32 GEMM (the BF16 weights widened: the same values) in the wide lists
-            const ix = L.indexer;
-            if (fast && ix?.q?.data && ix?.k?.data) {
-              if (!st.qsaW32) {
-                st.qsaW32 = device.createBuffer({ size: (ix.q.data.length + ix.k.data.length) * 4, usage: U.STORAGE | U.COPY_DST });
-                device.queue.writeBuffer(st.qsaW32, 0, ix.q.data); device.queue.writeBuffer(st.qsaW32, ix.q.data.length * 4, ix.k.data);
-              }
-              so.splice(0, 1, ...gemmW({ kind: "f32", buf: st.qsaW32 }, B.mixed, this.qsaS.proj, { dIn: d, dOut: QSA_PROJ }));
-            }
+            // the indexer projections as a wide GEMM in the wide lists, on the layer's own BF16 weights (st.qsa.w,
+            // [q ; k] rows as u32 pairs: the decode kernel's buffer, no second copy), widened to f32 in the kernel
+            if (fast) so.splice(0, 1, ...gemmW({ kind: "bf16", buf: st.qsa.w }, B.mixed, this.qsaS.proj, { dIn: d, dOut: QSA_PROJ }));
             rest.push(...so);
             sel = qsaSelectOps(eng.qsaK, G, eng.sparse);
           }
@@ -550,7 +551,9 @@ export class Qwen4ExpBatch {
     this._pending = null;
     this._save();
     const pos0 = this.eng.pos;
-    const r = await this._pass(ids, { head: "all", wantHidden });
+    // exact: true, not only head "all": on an engine without the head (a later room stage) _run turns "all" into
+    // "none", which alone would send a verify of FAST_MIN_COLS+ columns to the wide kernels
+    const r = await this._pass(ids, { head: "all", wantHidden, exact: true });
     this._pending = { ids: ids.slice(), pos0, gen: this.eng._posGen };
     return r;
   }
@@ -569,7 +572,9 @@ export class Qwen4ExpBatch {
     this._restore();
     this.eng.pos = v.pos0;
     this.eng.ngs?.rollback(v.ids.length);
-    if (n) await this._pass(v.ids.slice(0, n), { head: "none" });
+    // on the exact kernels whatever n: the state kept must be the one the verify pass computed and scored (a replay of
+    // FAST_MIN_COLS+ columns would otherwise take the wide kernels and sum in another order)
+    if (n) await this._pass(v.ids.slice(0, n), { head: "none", exact: true });
   }
 
   // the recurrent state (DeltaNet conv + S, the PLE ring), copied on the GPU
