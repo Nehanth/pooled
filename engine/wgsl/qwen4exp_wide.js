@@ -34,6 +34,8 @@
 // Pair p = col * K + slot, so h keeps the exact kernels' [col][K][expFF] layout. Offloaded layers bind the expert
 // store's region (regionEntry) with the original expert ids, as the exact kernels do.
 
+import { kvCheck, kvDecl, kvK4, KV_F16_READ } from "./qwen4exp.js";
+
 const DQ = /* wgsl */ `
 fn q4lo(w: u32) -> vec4<f32> { return vec4<f32>(f32(w & 15u), f32((w >> 8u) & 15u), f32((w >> 16u) & 15u), f32((w >> 24u) & 15u)) - vec4<f32>(8.0); }
 fn q4hi(w: u32) -> vec4<f32> { return vec4<f32>(f32((w >> 4u) & 15u), f32((w >> 12u) & 15u), f32((w >> 20u) & 15u), f32((w >> 28u) & 15u)) - vec4<f32>(8.0); }
@@ -341,19 +343,24 @@ fn main(@builtin(global_invocation_id) g: vec3<u32>) {
 // (sel[col * stride] = n, then n rows), as attnDecMcWGSL's gathered kernel. Out: [col][nH * hd], gated by
 // sigmoid(gate) from the [q | gate, k, v] buffer, as the exact kernel. Workgroup memory: TK * hd * 4 + TK * NT * 4
 // (NT threads: 256 dense, 64 gathered, where the 12 rows x 4 threads leave the rest idle).
+// kv: the cache format (engine/wgsl/qwen4exp.js kvDecl): "f16" reads K and V as packed pairs (4 values per vec2<u32>)
+// with the decode kernels' exact read (kv_k4) and stages them as f32, so the arithmetic is the f32 kernel's on the
+// cache's values.
 // Bindings: 0 qn, 1 kc, 2 vc, 3 qkv, 4 out, 5 AP, 6 F (dense), 7 MS, 8 sel (gather).
 export const ATTN_W = Object.freeze({ dense: { CW: 5, TPR: 4, NT: 256 }, gather: { CW: 1, TPR: 4, NT: 64 }, TK: 8 });
-export function attnWWGSL({ gather = 0, G = 12, hd = 256, TK = ATTN_W.TK, ...o } = {}) {
+export function attnWWGSL({ gather = 0, G = 12, hd = 256, TK = ATTN_W.TK, kv = "f32", ...o } = {}) {
+  kvCheck(kv);
+  const KD = kvDecl(kv, false).k;   // f32: array<vec4<f32>>; f16: array<vec2<u32>> (K and V both read 4 values at a time)
   const { CW, TPR, NT } = { ...(gather ? ATTN_W.gather : ATTN_W.dense), ...o }, R = G * CW, NV = hd / 4 / TPR, H4 = hd / 4;
   if (R * TPR > NT || gather && CW !== 1 || hd % (4 * TPR)) throw new Error(`attn_w: ${R} rows x ${TPR} threads, hd ${hd}`);
   const V = rng(NV), J = rng(TK);
-  return DQ + `
+  return DQ + (kv === "f16" ? kvDecl(kv, false).f16 + KV_F16_READ : "") + `
 struct AP { nH: u32, nKV: u32, hd: u32, nRot: u32, eps: f32, p0: u32, p1: u32, p2: u32 };
 struct MS { qs: u32, kOff: u32, vOff: u32, p0: u32 };
 ${MCF}
 @group(0) @binding(0) var<storage, read> aw_qn: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> aw_kc: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> aw_vc: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> aw_kc: ${KD};
+@group(0) @binding(2) var<storage, read> aw_vc: ${KD};
 @group(0) @binding(3) var<storage, read> aw_qkv: array<vec4<f32>>;
 @group(0) @binding(4) var<storage, read_write> aw_out: array<vec4<f32>>;
 @group(0) @binding(5) var<uniform> aw_P: AP;
@@ -384,7 +391,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
     for (var li = tid; li < ${TK * H4}u; li += ${NT}u) {
       let j = li / ${H4}u; let v = li % ${H4}u;
       let c = ${gather ? `aw_sel[sb + 1u + min(t0 + j, nCell - 1u)]` : `min(t0 + j, nCell - 1u)`};
-      aw_kv[li] = aw_kc[(c * nKV + kvh) * ${H4}u + v];
+      aw_kv[li] = ${kvK4(kv, "aw_kc", `(c * nKV + kvh) * ${H4}u + v`)};
     }
     workgroupBarrier();
     ${J.map((j) => `{ var p = 0.0; ${V.map((i) => `p += dot(q${i}, aw_kv[${j * H4 + i * TPR}u + ds]);`).join(" ")} aw_sp[${j * NT}u + tid] = p; }`).join("\n    ")}
@@ -392,7 +399,7 @@ fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) l: v
     for (var li = tid; li < ${TK * H4}u; li += ${NT}u) {
       let j = li / ${H4}u; let v = li % ${H4}u;
       let c = ${gather ? `aw_sel[sb + 1u + min(t0 + j, nCell - 1u)]` : `min(t0 + j, nCell - 1u)`};
-      aw_kv[li] = aw_vc[(c * nKV + kvh) * ${H4}u + v];
+      aw_kv[li] = ${kvK4(kv, "aw_vc", `(c * nKV + kvh) * ${H4}u + v`)};
     }
     workgroupBarrier();
     let rb = r * ${TPR}u;

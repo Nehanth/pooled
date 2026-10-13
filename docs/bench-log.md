@@ -2711,3 +2711,28 @@ Branches: main 5906f1e (opfs_read), feat/offload-cut-latency d1a490a (#351), fea
 - 35B tab (tab_cut): resident 103.5 tok/s. All 40 offloaded/16 slots: kick+pipe 47.5, kick off 47.6, both off 46.0. 10 offloaded/256 slots: ~81 all variants. Kick neutral on Metal. Cut fit: ms/token = 9.96 + 0.273 N (R² 0.996).
 - Tab disk tier (tab_disk, 4 workers, ring 64, warm): offgb 2/4/8/12/18/mem=36 = 15.2/20.7/27.4/30.2/30.2/30.4 tok/s (hits 59/77/91/95/95/95%); ring=0 at 2/4/8 = 7.2/10.8/18.4. Ingest 17.5 GiB 0.89 GB/s. Pick offgb=12. BITS 1b02b514/12de2ca for every run (Mac value; GB10 differs).
 - Found: tab_disk.html's quota precheck rejected a fresh origin (10.0 GiB < 17.5) although writes past it succeed; fixed on this branch.
+
+## 2026-10-12: Flash long-context baseline, 16K / 32K / needle (branch test/flash-long-context-goldens), GB10
+
+Main at d201874, full Qwen3.8-Flash-Next resident (Vulkan, Deno), QSA on, maxSeq 32256, batched prefill in 64-column
+passes then 64 decode steps: `LONG=1 tests/test_q38flash_batch.js`. Goldens from the unsloth b10840 CUDA llama-server
+(`-fa on`, `per_layer_token_embd` on the CPU, `-c 34816`: fits on the GB10), top-5, 3 runs each
+(`tests/golden/make_q38flash_llama.js ... ctx16k,ctx32k,needle30k`). The GPU was shared with other agents' jobs in
+both runs; run 2 is the cleaner one.
+
+| case | prompt tokens | prefill run 2 (run 1) | decode tok/s run 2 (run 1) | vs llama.cpp |
+|---|---|---|---|---|
+| ctx16k | 15,718 | 567 s, 27.7 tok/s (764 s, 20.6) | 10.07 (7.71) | near tie at step 3 |
+| ctx32k | 31,958 | 1,077 s, 29.7 tok/s (1,136 s, 28.1) | 11.21 (9.34) | near tie at step 0; 21 ids shared with llama.cpp's run 1 |
+| needle30k | 29,737 | 759 s, 39.2 tok/s (1,104 s, 26.9) | 11.61 (11.18) | passphrase found (llama.cpp: 3 of 3 runs); all 64 ids = llama.cpp's run 1 |
+
+- Prefill is the problem: 32K tokens take ~18 minutes at ~30 tok/s, about 3x decode, as at 4-8K: the MoE runs per
+  column per expert.
+- Decode at 16-32K: 10.07-11.61 tok/s (run 2), 7.71-11.18 (run 1), vs 13.30 tok/s mean at short context in the same
+  session (`tests/test_q38flash.js`): ~15-25% slower, GPU contended throughout; parity not shown.
+- Prefill per 4K stretch on the cleaner needle30k run: ~39-40 tok/s from the first stretch to the last (cumulative 36.9 ->
+  39.2), so prefill cost per token does not grow with context.
+- Only needle30k is a correctness signal (passphrase found; llama.cpp 3 of 3). ctx16k / ctx32k pass on a near tie after
+  3 and 0 ids against the golden, and ctx16k's answer names another note than all 3 llama.cpp runs: smoke tests only.
+- llama.cpp is not reproducible at these lengths: its 3 runs of each prompt part at steps 0-40 (ctx32k at step 0,
+  "Note" vs "Item"). Our ids were identical in both runs.

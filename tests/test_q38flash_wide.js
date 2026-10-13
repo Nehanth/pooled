@@ -6,6 +6,7 @@
 //   deno run --unstable-webgpu --allow-read tests/test_q38flash_wide.js
 import * as X from "../engine/wgsl/qwen4exp_wide.js";
 import * as MC from "../engine/wgsl/qwen4exp_batch.js";
+import { f16bits, h2f } from "./reference/qsa_ref.mjs";
 
 const ad = await navigator.gpu.requestAdapter();
 const device = await ad.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: ad.limits.maxStorageBufferBindingSize, maxBufferSize: ad.limits.maxBufferSize } });
@@ -200,11 +201,19 @@ for (const kind of ["q4", "q8"]) for (const [nExp, K, nCols, d, ff, hot] of [[16
   const bnd = dp4a ? DP4A_BOUND : BOUND;
   check(sortOk && eh < bnd && eo < bnd && same, `moe grouped ${vr} ${kind} (down ${D.kind}), ${nExp} experts top-${K}, ${nCols} columns, ${nT} tiles: sort ${sortOk ? "ok" : "BAD"}, h rel ${eh.toExponential(2)}, out rel ${eo.toExponential(2)}, rerun ${same ? "same bits" : "DIFFERS"}`);
 }
-// ---- attn_w: dense (causal, column groups) and gathered (row lists), vs float64
+// ---- attn_w: dense (causal, column groups) and gathered (row lists), vs float64; in both K / V cache formats.
+// f16 (the engine's kv: "f16"): the cache as packed pairs (low half = the even element, f16bits: round to nearest
+// even), some values zero or subnormal (the read's exact path); the reference is float64 on the f16 values
 {
   const nH = 24, nKV = 2, hd = 256, G = nH / nKV, qs = 2 * nH * hd + 2 * nKV * hd, stride = 2049;
-  for (const [pos, nCols, gather] of [[0, 37, false], [1500, 64, false], [2200, 23, true], [100, 7, true]]) {
+  const pack16 = (a) => { const w = new Uint32Array(a.length / 2); for (let i = 0; i < w.length; i++) w[i] = f16bits(a[2 * i]) | (f16bits(a[2 * i + 1]) << 16); return w; };
+  for (const kv of ["f32", "f16"]) for (const [pos, nCols, gather] of [[0, 37, false], [1500, 64, false], [2200, 23, true], [100, 7, true]]) {
     const maxSeq = pos + nCols + 8, kc = randF(maxSeq * nKV * hd), vc = randF(maxSeq * nKV * hd), qn = randF(nCols * nH * hd, 2), qkv = randF(nCols * qs, 4);
+    if (kv === "f16") for (const a of [kc, vc]) {
+      for (let i = 0; i < a.length; i += 97) a[i] = i % 2 ? 0 : 3e-6 * (rnd() + 0.5);   // zeros and f16 subnormals
+      for (let i = 0; i < a.length; i++) a[i] = h2f(f16bits(a[i]));                       // the values the cache holds
+    }
+    const kcB = kv === "f16" ? pack16(kc) : kc, vcB = kv === "f16" ? pack16(vc) : vc;
     // gathered: per column a sorted random subset of 0 .. pos + col (up to 2048 rows), always holding the last
     const lists = [], sel = new Uint32Array(nCols * stride);
     for (let c = 0; c < nCols; c++) {
@@ -216,7 +225,7 @@ for (const kind of ["q4", "q8"]) for (const [nExp, K, nCols, d, ff, hot] of [[16
     const out = put(new Float32Array(nCols * nH * hd).fill(7));
     const F = uni([pos, nCols, 0, 0]), AP = uni([nH, nKV, hd, 64, { f: 1e-6 }, 0, 0, 0]), MS = uni([qs, 2 * nH * hd, 2 * nH * hd + nKV * hd, 0]);
     const cw = gather ? 1 : X.ATTN_W.dense.CW;
-    run(X.attnWWGSL({ gather: gather ? stride : 0, G }), [put(qn), put(kc), put(vc), put(qkv), out, AP, F, MS, ...(gather ? [put(sel)] : [])], [nKV, Math.ceil(nCols / cw), 1]);
+    run(X.attnWWGSL({ gather: gather ? stride : 0, G, kv }), [put(qn), put(kcB), put(vcB), put(qkv), out, AP, F, MS, ...(gather ? [put(sel)] : [])], [nKV, Math.ceil(nCols / cw), 1]);
     const got = await read(out, nCols * nH * hd), ref = new Float64Array(nCols * nH * hd);
     for (let c = 0; c < nCols; c++) for (let h = 0; h < nH; h++) {
       const kvh = Math.floor(h / G), L = lists[c], sc = L.map((p) => { let a = 0; for (let i = 0; i < hd; i++) a += qn[(c * nH + h) * hd + i] * kc[(p * nKV + kvh) * hd + i]; return a / Math.sqrt(hd); });
@@ -227,7 +236,7 @@ for (const kind of ["q4", "q8"]) for (const [nExp, K, nCols, d, ff, hot] of [[16
       }
     }
     const e = relErr(got, ref);
-    check(e < BOUND, `attn_w ${gather ? "gathered" : "dense"}, pos ${pos}, ${nCols} columns: rel ${e.toExponential(2)}`);
+    check(e < BOUND, `attn_w ${gather ? "gathered" : "dense"}, ${kv} KV, pos ${pos}, ${nCols} columns: rel ${e.toExponential(2)}`);
   }
 }
 // ---- dn_delta_w + dn_gnorm_w == the exact DN_DELTA_MC (bit for bit: the same expressions, the norm moved out)
