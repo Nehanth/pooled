@@ -119,10 +119,10 @@ console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? 
 const BOUNDS = { f32: { p99: 3e-5, max: 5e-3 }, moe: { p99: 5e-2, max: 1e-1 }, dense: { p99: 5e-2, max: 1e-1 }, dp4a: { p99: 5e-2, max: 1e-1 } };
 // FULL=1, the whole model over thousands of positions (see full()): per layer, wide vs exact within DRIFT_X of the
 // drift between two wide widths (1024- and 512-column passes: the same kernels, another summation order), each
-// statistic floored at DRIFT_FLOOR (the single-pass rounding, where no drift has built up yet); and the median
-// column under MED_BOUND
+// statistic floored at DRIFT_FLOOR (the single-pass rounding, where no drift has built up yet). No absolute bound:
+// the drift grows with the context (median column at layer 47: ~3e-3 at 2K, ~3e-2 at 32K, wide vs wide as much as
+// wide vs exact; docs/kernels.md)
 const DRIFT_X = 3, DRIFT_FLOOR = { p50: 3e-5, p99: 3e-5, max: 1e-3 };
-const MED_BOUND = { f32: 1e-2, moe: 3e-2, dense: 3e-2, dp4a: 3e-2 };
 let fail = 0;
 const check = (ok, msg) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) fail++; };
 if (FULL) await full(); else await layered();
@@ -412,23 +412,25 @@ async function full() {
   // each from its own prefill of the rest. Over thousands of positions and 48 layers wide and exact drift apart by
   // more than one pass's rounding: a near tie in a router (or a QSA block score) flips at some column, that column moves
   // by ~1e-2, and the DeltaNet state and attention carry part of it to every later column (from ~layer 20 on). Two wide
-  // widths (pb, and pb2 at half its columns: other pass boundaries and split-K, so another summation order) drift the
-  // same way, so the long check is comparative: per layer, wide vs exact's median, p99 and max within DRIFT_X of wide vs
-  // wide2's (each floored at DRIFT_FLOOR), and the median under MED_BOUND. A kernel error well above the model's own
-  // sensitivity (on every column, or on a minority) shows in wide vs exact but not in wide vs wide2 (same kernels).
+  // widths (pb, and LONG_WIDTHS (512, 256, 768): other pass boundaries and split-K, so other summation orders) drift the
+  // same way, so the long check is comparative: per layer, wide vs exact's median, p99 and max within DRIFT_X of the
+  // largest wide vs other-width drift (each floored at DRIFT_FLOOR). One other width is not enough at 32K: a column
+  // that flips at a late layer moves by up to ~1 (relative) between some pair of widths and not others. A kernel error well above the model's own
+  // sensitivity (on every column, or on a minority) shows in wide vs exact but not between the wide widths (same kernels).
   if (!pb.exact) {
     const HD = cfg.hDim, mode = dpMode(pb), Bd = BOUNDS[mode];
-    const pb2 = await Qwen4ExpBatch.create(eng, weights, { maxCols: Math.max(16, pb.maxCols >> 1), verifyCols: 8, dp4a: dpMode(pb) === "f32" ? false : dpMode(pb) === "dp4a" ? true : dpMode(pb) });
+    const dpo = dpMode(pb) === "f32" ? false : dpMode(pb) === "dp4a" ? true : dpMode(pb);
+    // LONG_WIDTHS: the other wide widths whose drift from pb makes the envelope (per layer and statistic, the largest)
+    const widths = env("LONG_WIDTHS", "512,256,768").split(",").map(Number).filter((w) => w >= 16 && w < pb.maxCols);
+    const pbs = [];
+    for (const w of widths) pbs.push(await Qwen4ExpBatch.create(eng, weights, { maxCols: w, verifyCols: 8, dp4a: dpo }));
     const LC = env("LONG_CASE", "ctx2k1"), LT = +env("LONG_TAIL", 128);
     if (gold[LC].prompt.length > MAXSEQ) throw new Error(`LONG_CASE ${LC}: ${gold[LC].prompt.length} tokens > MAXSEQ ${MAXSEQ}`);
-    const stats = (a, b, n) => {
-      const out = [];
-      for (let l = 0; l < a.length; l++) {
-        const es = []; for (let c = 0; c < n; c++) es.push(colRel(a[l], b[l], c * HD, c * HD, HD));
-        es.sort((x, y) => x - y); out.push({ p50: es[es.length >> 1], p99: es[Math.floor(es.length * 0.99)], max: es[es.length - 1] });
-      }
-      return out;
-    };
+    const cols = (a, b, n) => a.map((_, l) => Array.from({ length: n }, (_, c) => colRel(a[l], b[l], c * HD, c * HD, HD)));
+    const stats = (a, b, n) => cols(a, b, n).map((es) => {
+      es = es.slice().sort((x, y) => x - y);
+      return { p50: es[es.length >> 1], p99: es[Math.floor(es.length * 0.99)], max: es[es.length - 1] };
+    });
     const worstOf = (st) => st.reduce((a, b) => ({ p50: Math.max(a.p50, b.p50), p99: Math.max(a.p99, b.p99), max: Math.max(a.max, b.max) }));
     for (const [label, ids, tail, long] of [["two-sum", gold["two-sum"].prompt, gold["two-sum"].prompt.length, false], [`${LC} tail`, gold[LC].prompt, LT, true]]) {
       const tapsOf = async (b, exact) => {
@@ -444,12 +446,20 @@ async function full() {
         check(worst.p99 < Bd.p99 && worst.max < Bd.max, `wide (${mode}) vs exact per layer, ${label} (${tail} columns): worst layer median ${worst.p50.toExponential(2)}, p99 ${worst.p99.toExponential(2)} (bound ${Bd.p99}), max ${worst.max.toExponential(2)} (bound ${Bd.max})`);
         continue;
       }
-      const f2 = await tapsOf(pb2, false), sw = stats(f, f2, tail);
+      const fw = []; for (const b of pbs) fw.push(await tapsOf(b, false));
+      const sws = fw.map((g) => stats(f, g, tail));
+      const sw = st.map((_, l) => ({ p50: Math.max(...sws.map((x) => x[l].p50)), p99: Math.max(...sws.map((x) => x[l].p99)), max: Math.max(...sws.map((x) => x[l].max)) }));
       const ratio = st.map((v, l) => Math.max(...["p50", "p99", "max"].map((k) => v[k] / Math.max(sw[l][k], DRIFT_FLOOR[k]))));
       const bad = ratio.flatMap((r, l) => (r > DRIFT_X ? [l] : []));
-      for (const l of [0, 6, 12, 18, 24, 30, 36, 42, 47]) console.log(`  layer ${l}: wide vs exact median ${st[l].p50.toExponential(2)} p99 ${st[l].p99.toExponential(2)} max ${st[l].max.toExponential(2)} | wide ${pb.maxCols} vs ${pb2.maxCols} median ${sw[l].p50.toExponential(2)} p99 ${sw[l].p99.toExponential(2)} max ${sw[l].max.toExponential(2)} | ratio ${ratio[l].toFixed(2)}`);
+      const W2 = pbs.map((b) => b.maxCols).join("/");
+      for (const l of [...new Set([0, 6, 12, 18, 24, 30, 36, 42, 47, ...bad])].sort((a, b) => a - b)) console.log(`  layer ${l}: wide vs exact median ${st[l].p50.toExponential(2)} p99 ${st[l].p99.toExponential(2)} max ${st[l].max.toExponential(2)} | wide ${pb.maxCols} vs ${W2} median ${sw[l].p50.toExponential(2)} p99 ${sw[l].p99.toExponential(2)} max ${sw[l].max.toExponential(2)} (max per width ${sws.map((x) => x[l].max.toExponential(1)).join(" ")}) | ratio ${ratio[l].toFixed(2)}`);
       const rl = ratio.indexOf(Math.max(...ratio));
-      check(!bad.length && worst.p50 < MED_BOUND[mode], `wide (${mode}) vs exact per layer, ${label} (${tail} columns at ${ids.length - tail}): within ${DRIFT_X}x of the wide ${pb.maxCols} vs ${pb2.maxCols} drift at every layer (worst ratio ${ratio[rl].toFixed(2)} at layer ${rl}${bad.length ? `; over at layers ${bad.join(",")}` : ""}); worst layer median ${worst.p50.toExponential(2)} (bound ${MED_BOUND[mode]}), p99 ${worst.p99.toExponential(2)}, max ${worst.max.toExponential(2)}; the wide-wide drift: median ${worstOf(sw).p50.toExponential(2)}, p99 ${worstOf(sw).p99.toExponential(2)}, max ${worstOf(sw).max.toExponential(2)}`);
+      {   // the columns behind the worst ratio: wide vs exact, and vs each other width
+        const ce = cols(f, e, tail)[rl], cw = fw.map((g) => cols(f, g, tail)[rl]);
+        const top = ce.map((v, c) => [v, c]).sort((a, b) => b[0] - a[0]).slice(0, 4);
+        console.log(`  layer ${rl}, largest wide-vs-exact columns: ${top.map(([v, c]) => `col ${ids.length - tail + c}: ${v.toExponential(2)} (vs widths ${cw.map((x) => x[c].toExponential(1)).join(" ")})`).join("; ")}`);
+      }
+      check(!bad.length, `wide (${mode}) vs exact per layer, ${label} (${tail} columns at ${ids.length - tail}): within ${DRIFT_X}x of the wide ${pb.maxCols} vs ${W2} drift at every layer (worst ratio ${ratio[rl].toFixed(2)} at layer ${rl}${bad.length ? `; over at layers ${bad.join(",")}` : ""}); worst layer median ${worst.p50.toExponential(2)}, p99 ${worst.p99.toExponential(2)}, max ${worst.max.toExponential(2)}; the wide-wide drift: median ${worstOf(sw).p50.toExponential(2)}, p99 ${worstOf(sw).p99.toExponential(2)}, max ${worstOf(sw).max.toExponential(2)}`);
     }
   }
   const tok = model.tokenizer();
