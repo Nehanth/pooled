@@ -362,3 +362,13 @@ test("qwen4expWeights: the MTP file uses its own hooks (G.convert by default), a
   await qwen4expWeights(G, async () => new Uint8Array(0), { lo: 0, hi: 0, hasHead: true, mtp: Gm, mtpBytesOf: mread });
   ok(mcached.includes("blk.48.nextn.eh_proj.weight"), "the MTP header's own cache");
 });
+
+test("SHAPE: the picker's layer and expert sizes are the ones Start measures from the header (room.js aiStart)", async () => {
+  const { SHAPE, expertsOf } = await import("../../room/models.js");
+  const { G } = headers(), S = SHAPE["qwen3.8-flash"];
+  // aiStart: layerAt = qwen4expShardBytes over layers 0-3 without the indexer, / 4; experts = expertsOf(G, L)
+  eq(S.layer, qwen4expShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false, qsa: false }) / 4, "layer");
+  eq(S.exp, expertsOf(G, LAYERS).E, "exp");
+  // so the part a disk tier keeps on the GPU (layer - exp) is the file's, not ~10 MB
+  ok(S.layer - S.exp > 50e6, `layer - exp ${S.layer - S.exp}`);
+});

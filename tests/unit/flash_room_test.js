@@ -46,7 +46,7 @@ Deno.test("flash catalogue: dev-gated entry, pinned files, shape from the GGUF h
   // what the host holds past its layers: the embedding (JS memory), output.weight and the head's HC mixer
   eq(hostHeldBytes("qwen4exp", S), 357580800 + 534620160);
   const rb = roomBytes(KEY, 2048);
-  eq([rb.L, rb.layerBytes, rb.expertBytes, rb.experts.nExp, rb.experts.slices.length], [48, 1478069803 + 2048 * 1024, 1468006400, 512, 48]);
+  eq([rb.L, rb.layerBytes, rb.expertBytes, rb.experts.nExp, rb.experts.slices.length], [48, 1531208864 + 2048 * 1024, 1468006400, 512, 48]);
   // NEED_GB: the layers, embedding and head at 2048 (the table is disk, not GPU memory)
   const need = (48 * rb.layerBytes + rb.hostBytes) / 1e9;
   ok(Math.abs(need - NEED_GB[KEY]) < 0.5, `NEED_GB ${NEED_GB[KEY]} vs ${need.toFixed(2)} GB`);
