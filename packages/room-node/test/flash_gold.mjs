@@ -17,7 +17,9 @@
 //      SAME_AS=<an earlier run's OUT>: also require every case's ids to equal that run's (a batched room against the
 //        same room per token, POOLED_FLASH_BATCH=0, or against main's)
 //      WORKER_RAM_GB=N (pair): the worker lends N GB of RAM for expert offload, so a WORKER_GB under its share parks
-//        experts (shard.js loadFlash: batched passes with the whole-layer region when it fits, else per token)
+//        experts (shard.js loadFlash: batched passes with the whole-layer region when it fits, else per token); the
+//        worker then reports a discrete GPU (a unified-memory node never offloads)
+//      POOLED_FLASH_REGION=1 (room-node env.js): an offloading device takes the region whenever its cache keeps 16 slots
 //      POOLED_FLASH_BATCH=0 | exact (room-node env.js): batched prompt passes off / on the bit-exact kernels
 //      FRAMES=128,256 (a node host's prompt frame widths, POOLED_PREFILL_FRAME): every case once per width, keyed
 //        name@width, the caches cleared between (no checkpoint or live prefix carries over)
@@ -57,7 +59,10 @@ try {
     host = await createRoom({ model: MODEL, pledgeGB: +(process.env.HOST_GB || 40), name: "flash-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a"), split });
     if (process.env.CODE_FILE) { fs.writeFileSync(process.env.CODE_FILE, host.code); log(`room ${host.code}: waiting for a worker from another process`); }
     else worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || 40), name: "flash-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b"),
-      ...(+process.env.WORKER_RAM_GB > 0 ? { ramGB: +process.env.WORKER_RAM_GB } : {}) });
+      ...(+process.env.WORKER_RAM_GB > 0 ? { ramGB: +process.env.WORKER_RAM_GB } : {}),
+      // a room node on unified memory never offloads (env.js probeMeta): the worker says it is a discrete GPU instead (the
+      // PC's case), so the deal parks its experts. Its loads still check the real memory (shard.js hostMemory)
+      ...(+process.env.WORKER_RAM_GB > 0 ? { mem: { kind: "discrete", name: "flash_gold worker", freeGB: +(process.env.WORKER_GB || 40) + 4, sysFreeGB: 64 } } : {}) });
     const t = Date.now();
     await host.start(MODEL, { minDevices: 2, waitMs: process.env.CODE_FILE ? +(process.env.WAIT_S || 600) * 1000 : 60000 });
     out.loadS = (Date.now() - t) / 1000;
