@@ -104,7 +104,7 @@ export function backFromAway(hiddenAt, now, minMs = 3000) {
 // (and the same expert offload: msg.offload { lo, hi, vramBytes } from room/plan.js dealRoom, or none on both;
 // and the same Qwen3.8-Flash-Next format: msg.flash { qsa, kv, ring }, or none on both, so a dense 2048 engine is never
 // kept for a QSA room, nor the reverse)
-const flashKey = (f) => (f?.qsa ? `qsa:${f.kv ?? "f32"}:${f.ring ?? 1024}` : "dense");
+export const flashKey = (f) => (f?.qsa ? `qsa:${f.kv ?? "f32"}:${f.ring ?? 1024}` : "dense");
 export function sameShard(held, msg) {
   const o = held?.offload || null, p = msg?.offload || null;
   const sameOff = !o === !p && (!o || (o.lo === p.lo && o.hi === p.hi && o.vramBytes === p.vramBytes));

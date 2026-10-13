@@ -60,6 +60,7 @@ import { pickSampler } from "../../room/sampling.js";
 import { validateApiAsk, apiPrompt, apiRun, AnswerCache, helloMeta, pieceDecoder, API_LIMITS, apiPrompt2, apiRun2, TurnCache, EncodeCache } from "../../room/api.js";
 import { tokenTexts } from "../../harness/model-common.js";
 import { uniqueName, PING_MS, lastHeard, isSilentGone, staleNamesakes, NAME_PROBE_MS } from "../../room/liveness.js";
+import { loadKey } from "../../room/startstop.js";
 import { resumableGenerate, waitForRoom, sameShard, linkSilent, REJOIN_GRACE_MS, LINK_SILENT_MS } from "../../room/resume.js";
 import { pledgeGB, afterLoadDeath, offloadFor, ngramFor, PLEDGE_MAX_GB } from "../../room/pledge.js";
 import { localModels } from "./source.js";
@@ -889,7 +890,7 @@ export class RoomNode extends EventEmitter {
     // re-seated in its slot (the host link dropped and came back) with the same layers still on the
     // GPU: no reload, only a reset (room.js keeps them the same way)
     const keep = ai.engine && sameShard(ai.held, d) && ai.held.kv === kv;
-    if (ai.loadingShard && ai.loadKey === `${d.model}:${d.range}`) { ai.next = d.next; ai.hostId = d.host || from; this.ensureLink(d.next); return; }
+    if (ai.loadingShard && ai.loadKey === loadKey(d.model, d.range, d.flash)) { ai.next = d.next; ai.hostId = d.host || from; this.ensureLink(d.next); return; }
     if (ai.device && !keep) this.freeLayers(null);
     ai.role = "worker"; ai.next = d.next; ai.hostId = d.host || from; ai.q = Promise.resolve(); ai.startFailed = null;
     this.ensureLink(d.next);   // open the link to the chain neighbour while the weights load
@@ -902,7 +903,7 @@ export class RoomNode extends EventEmitter {
         this.log(`dealt layers ${d.range[0]}-${d.range[1] - 1} of ${d.model}; next: ${d.next}`);
         if (d.offload) this.log(`offloading the experts of layers ${d.offload.lo}-${d.offload.hi - 1} to RAM${Number.isInteger(d.offload.diskLo) ? ` (layers ${d.offload.diskLo}-${d.offload.hi - 1}: read from disk)` : ""} (${(d.offload.vramBytes / 2 ** 30).toFixed(1)} GB of GPU cache)`);
         let lastPct = -1;
-        ai.loadingShard = true; ai.loadKey = `${d.model}:${d.range}`;
+        ai.loadingShard = true; ai.loadKey = loadKey(d.model, d.range, d.flash);
         if (this.beforeLoad) await this.beforeLoad(d.model);
         if (ai.startFailed) throw new Error(ai.startFailed);
         const src = openModel(d.model, { modelDir: this.modelDir });

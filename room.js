@@ -5309,7 +5309,7 @@ async function aiOnData(from, d) {
     case "ai-load": {
       // the host re-seats this device while its load of the same layers still runs (it dropped this tab
       // and it reconnected): keep that load, it reports ai-ready to the host when it is in
-      const loadKey = shardKey(d.model, d.range);
+      const loadKey = shardKey(d.model, d.range, d.flash);
       if (onLoadRequest({ loadingShard: ai.loadingShard, role: ai.role, currentKey: ai.loadKey, key: loadKey }) === "keep") {
         ai.next = d.next; ai.hostId = d.host; ensureLink(d.next);
         break;

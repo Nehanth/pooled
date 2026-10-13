@@ -2,7 +2,7 @@
 // picks for the room (ai-load.flash), a worker's reading of it, what its ai-ready reports (ctx, fsig) and the host's
 // check of that, and the planner's QSA constant against the engine's own accounting (engine/qwen4exp_mem.js).
 // No GPU.   deno test --allow-read tests/unit/flash_room_format_test.js
-import { flashLongMeta, flashRoomFormat, flashLoadOpts, flashReadyFields, readyCtxShort, roomBytes, SHAPE,
+import { flashLongMeta, flashRoomFormat, flashLoadOpts, flashReadyFields, readyCtxShort, flashQsaIn, roomBytes, SHAPE,
   FLASH_QSA_RING, FLASH_QSA_LAYER_BYTES, flashLayerCost } from "../../room/models.js";
 import { qwen4expMemory, QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
 
@@ -58,7 +58,12 @@ Deno.test("flash format: ai-ready's ctx / fsig, and the host's check of them", (
   ok(/holds 4096/.test(readyCtxShort(F, 8192, { ctx: 4096 }, qsa)));
   ok(/K \/ V in f16/.test(readyCtxShort(F, 2048, { ctx: 2048, fsig: { ...sig, kv: "f16" } }, qsa)), "a format the host did not ask for");
   ok(/512-row ring/.test(readyCtxShort(F, 2048, { ctx: 2048, fsig: { ...sig, qsaRing: 512 } }, qsa)));
-  eq(readyCtxShort(F, 2048, { ctx: 2048, fsig: { ...sig, qsa: false, qsaRing: 0 } }, qsa), null, "a range with no QSA layer reports qsa false");
+  eq(readyCtxShort(F, 2048, { ctx: 2048, fsig: { ...sig, lo: 24, hi: 27, qsa: false, qsaRing: 0 } }, qsa), null, "a range with no QSA layer reports qsa false");
+  ok(/runs dense attention; the room asked for QSA/.test(readyCtxShort(F, 2048, { ctx: 2048, fsig: { ...sig, qsa: false, qsaRing: 0 } }, qsa)),
+    "a dense engine on layers with QSA layers, in a QSA room");
+  ok(/runs QSA; the room asked for dense/.test(readyCtxShort(F, 2048, { ctx: 2048, fsig: sig }, null)), "a QSA engine in a dense room");
+  eq(readyCtxShort(F, 2048, { ctx: 2048, fsig: { ...sig, qsa: false, qsaRing: 0 } }, null), null, "dense in a dense room");
+  eq([flashQsaIn(F, 0, 3), flashQsaIn(F, 0, 4), flashQsaIn(F, 44, 47), flashQsaIn(F, 47, 48), flashQsaIn(F, undefined, 4)], [false, true, false, true, true]);
   eq(readyCtxShort("qwen3.8-27b", 65536, { ctx: 2048 }, null), null, "Flash only");
   eq(readyCtxShort(F, undefined, { ctx: 1 }, null), null, "no room context known");
 });

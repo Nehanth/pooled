@@ -512,9 +512,22 @@ export function readyCtxShort(model, roomCtx, d, flash = null) {
   const has = +d?.ctx > 0 ? +d.ctx : 2048;
   if (has < roomCtx) return `its engine holds ${has} positions and the room runs ${roomCtx}`;
   const f = d?.fsig && typeof d.fsig === "object" ? d.fsig : null;
-  if (flash && f?.qsa && (f.kv !== flash.kv || f.qsaRing !== flash.ring))
+  if (!f) return null;
+  if (flash && f.qsa && (f.kv !== flash.kv || f.qsaRing !== flash.ring))
     return `its engine keeps K / V in ${String(f.kv).slice(0, 8)} with a ${+f.qsaRing || 0}-row ring; the room asked for ${flash.kv}, ${flash.ring}`;
+  // the other engine type: a dense engine on layers with a QSA layer in a QSA room, or a QSA engine in a dense room
+  // (a range with no QSA layer reports qsa false in either)
+  if (!!flash !== !!f.qsa && flashQsaIn(model, f.lo, f.hi))
+    return `its engine runs ${f.qsa ? "QSA" : "dense attention"}; the room asked for ${flash ? "QSA" : "dense attention"}`;
   return null;
+}
+// Does layers [lo, hi) of a Flash model hold a QSA (full-attention) layer? Every interval-th layer is one
+// (engine/gguf.js qwen4expConfig's rule, SHAPE's interval); a range it can't read counts as holding one.
+export function flashQsaIn(model, lo, hi) {
+  const s = SHAPE[model], every = +s?.meta?.["qwen35.full_attention_interval"] || 4;
+  if (!Number.isInteger(lo) || !Number.isInteger(hi) || hi <= lo) return true;
+  for (let i = lo; i < hi; i++) if ((i + 1) % every === 0) return true;
+  return false;
 }
 // bytes of one attention layer's K (or V) cache buffer at ctx positions: kvDim x 1 (int8) or 2 (f16)
 export const kvLayerBufBytes = (meta, ctx, kv = "f16") =>

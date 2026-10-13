@@ -118,6 +118,8 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
   src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {}, offload = null, diskReader = expertDiskReader, flash = null }) {
   checkRange(range);
   const M = src.M;
+  // the host's Flash format, checked before the GPU is asked for or anything streams (a format this build can't load throws)
+  const fq = M.kind === "qwen4exp" ? flashLoadOpts(flash) : null;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("no WebGPU adapter on this machine");
   const device = await adapter.requestDevice({ requiredLimits: {
@@ -136,7 +138,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     // the index first, so a streamed shard's weights download while the GPU tests and tunes below run
     const kind = M.kind === "qwen35" || M.kind === "qwen4exp" ? M.kind : "gguf";
     const needTok = kind !== "gguf" && (hasEmbed || hasHead);
-    const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, ...(kind === "qwen35" ? { mtp: hasHead } : {}), ...(kind === "qwen4exp" && flash?.qsa ? { qsa: true } : {}) };
+    const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, ...(kind === "qwen35" ? { mtp: hasHead } : {}), ...(fq ? { qsa: true } : {}) };
     const G0 = await src.header(needTok);
     // requantizing the tensors the GPU has no kernel for (Q4_1 / K-quants -> Q8) on worker threads:
     // seconds per tensor on the event loop otherwise (convert.js)
