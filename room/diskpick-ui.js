@@ -1,24 +1,23 @@
-// The picker's part for a model kept on disk (room/models.js DISK_COPY), in the page: "Not now" beside Start, and the
-// right column's "This device, for <model>" group: the pledge stepper (room.js's, relabelled "GPU memory", its pledge
+// The picker's part for a model kept on disk (room/models.js DISK_COPY), in the page: a plain line under the rows
+// (what it is, what it needs), why it is short under Start, and the right column's "What this device gives" group: the pledge stepper (room.js's, relabelled "GPU memory", its pledge
 // paragraph swapped for a one-line hint), then Disk (#ap-flash). Shown only while that model is picked. (Its row,
 // black and twinkling when picked, with its fit chip, is room.js renderLadder's; the pool's line is renderPool's.)
 // The words and HTML are room/diskpick.js's; the answer, the stored size, Allow and Free are #368's, through
 // room/diskstore.js (one stored answer, one question: room.js askTabDisk; one delete: room.js freeTabDisk).
-import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT } from "./diskpick.js";
+import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT, pickNote, shortNote } from "./diskpick.js";
 import { diskStore } from "./diskstore.js";
 
 const $ = (id) => document.getElementById(id);
 const START = "Start the model", GIVES = "This device gives";
 let shown = null, stored = null, asked = 0, armed = 0, last = {}, covers = null;
 
-// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, needDisk } (this tab's disk-tier
-// RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether the room's fit streams from a disk,
-// roomFitFor's). Cheap when nothing changed: it runs on every room update.
+// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, needDisk, needGB } (this tab's
+// disk-tier RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether the room's fit streams from a disk
+// and the GPU memory it needs, roomFitFor's). Cheap when nothing changed: it runs on every room update.
 export function showDiskPick(key, info = last) {
   const m = diskCopyOf(key), on = !!m;
   last = info;
-  for (const id of ["ap-flash", "ap-for", "ai-notnow"]) $(id).hidden = !on;
-  $("ap-note").hidden = on;
+  for (const id of ["ap-flash", "ap-for"]) $(id).hidden = !on;
   $("ap-me").classList.toggle("flash", on);
   if (covers == null) covers = $("ap-covers").textContent;
   if (!on) { if (shown) { $("ai-start").textContent = START; $("ap-me-k").textContent = GIVES; $("ap-covers").textContent = covers; } shown = null; asked = 0; disarm(); return; }
@@ -28,6 +27,7 @@ export function showDiskPick(key, info = last) {
   $("ap-for").textContent = groupTitle(m);
   $("ap-me-k").textContent = "GPU memory";
   $("ap-covers").textContent = GPU_HINT;
+  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.needDisk !== false);
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;
   shown = sig;
@@ -44,10 +44,12 @@ function disarm() { if (armed) { clearTimeout(armed); armed = 0; } }
 // the stored copy changed elsewhere (Room settings' "Free disk space", a load that copied it): read it again
 export function refreshDiskPick() { const key = $("ai-model").value; if (diskCopyOf(key)) { asked = 0; shown = null; showDiskPick(key); } }
 
-// Wire the buttons: Not now (let go of the pick); Allow (the same stored answer the disk question saves);
-// Free (two presses, like Room settings' "Free disk space"). toast(text): the room's, for a Free that could not run.
-export function initDiskPick({ notNow, toast = () => {} }) {
-  $("ai-notnow").addEventListener("click", notNow);
+// why the picked disk model doesn't fit, under Start: by how much and the fix this device's disk answer leaves
+export const diskShortNote = (key, shortGB) => shortNote(shortGB, diskStore.state(key));
+
+// Wire the buttons: Allow (the same stored answer the disk question saves); Delete (two presses, like Room settings'
+// "Free disk space"). toast(text): the room's, for a delete that could not run.
+export function initDiskPick({ toast = () => {} }) {
   $("ap-flash").addEventListener("click", async (e) => {
     const b = e.target.closest("button[data-act]"), key = $("ai-model").value;
     if (!b || !diskCopyOf(key)) return;

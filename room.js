@@ -49,8 +49,8 @@ import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, STA
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { diskCopyOf, rowChipHTML, rowTitle, starSVG } from "./room/diskpick.js";
-import { showDiskPick, initDiskPick, refreshDiskPick } from "./room/diskpick-ui.js";
+import { diskCopyOf, rowChipHTML, rowTitle } from "./room/diskpick.js";
+import { showDiskPick, initDiskPick, refreshDiskPick, diskShortNote } from "./room/diskpick-ui.js";
 import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
@@ -608,12 +608,12 @@ function renderLadder(pledged, rows = fitLadder(pledged)) {
     const fig = x.ok ? `${gb}<b>fits</b>` : none ? gb : `<span class="more">${x.short} GB short</span>`;
     // with no device that can hold layers, nothing reads as picked: there is nothing to start yet
     const sel = !none && x.key === $("ai-model").value;
-    // a model kept on disk (room/diskpick.js): the ✦ before its name, its size and where it runs from as the chip;
-    // picked, the row takes the Code tab's selected look (black, a soft blue glow, stars twinkling: site/js/sparkle.js).
+    // a model kept on disk (room/diskpick.js): its size and where it runs from as the chip; picked, the row takes the
+    // Code tab's selected look (black, a soft blue glow, stars twinkling: site/js/sparkle.js).
     // Its fit chip is the other rows' ("fits" / "N GB short"), from the same roomFitFor as the pool's line: the one
     // fit answer every visitor sees (the need line above the rows is the developer's)
     const dk = diskCopyOf(x.key);
-    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}" title="${esc(x.ok ? rowTitle(dk) : x.f?.note || "Invite a device to fit this")}"><span class="rn">${starSVG("rx")}${esc(dk.name)}</span><span class="fig">${rowChipHTML(dk)}${none ? "" : x.ok ? "<b>fits</b>" : `<span class="more">${x.short} GB short</span>`}</span></button>`;
+    if (dk) return `<button type="button" role="radio" class="rung disk${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}" title="${esc(x.ok ? rowTitle(dk) : x.f?.note || "Invite a device to fit this")}"><span class="rn">${esc(dk.name)}</span><span class="fig">${rowChipHTML(dk)}${none ? "" : x.ok ? "<b>fits</b>" : `<span class="more">${x.short} GB short</span>`}</span></button>`;
     return `<button type="button" role="radio" class="rung${x.ok ? " ok" : " short"}${sel ? " sel" : ""}" data-k="${x.key}" aria-checked="${sel}" tabindex="${sel ? 0 : -1}"${back ? ` title="${esc(ctxShortNote(shortName(x.key), x.f.ctx, x.f.want))}"` : x.ok ? "" : ` title="${esc(x.f?.note || (giveFor(x.short) ? "Raise This device gives, or invite a device" : "Invite a device to fit this"))}"`}><span class="rn">${esc(shortName(x.key))}</span><span class="fig">${fig}</span></button>`;
   }).join("");
   // the same rows: leave them be (the twinkling stars keep their rhythm through the room's updates)
@@ -671,10 +671,10 @@ function updateNeed(pledged) {
     : `Needs ${needs}. The room has ${has} GB, ${shortGB} GB short.`;
   $("ai-need").classList.toggle("ok", ok);
   if (!ai.busy && !ai.engine) $("ai-start").disabled = !ok;
-  // short: say by how much and who could give more, right under Start
-  // (a disk model: its need line above says it, the one line on that side)
-  $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine || !!diskCopyOf($("ai-model").value);
-  $("ai-short").textContent = note;
+  // short: say by how much and who could give more, right under Start (a disk model: in GPU memory, and the fix its
+  // disk answer leaves: room/diskpick.js shortNote)
+  $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine;
+  $("ai-short").textContent = diskCopyOf($("ai-model").value) ? diskShortNote($("ai-model").value, shortGB) : note;
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
   const meI = row?.f ? row.f.devs.findIndex((d) => d.meta === myMeta) : -1;
   const give = giveFor(meI >= 0 && row.f.fit.raise[meI] < Infinity ? gbUp(row.f.fit.raise[meI]) : row?.f ? 0 : need - pledged);
@@ -703,14 +703,13 @@ function updateNeed(pledged) {
   // read it with (room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap, whatever the stored answer), and, when
   // the room's fit streams from no disk (roomFitFor needDisk), that the whole model must fit on GPUs
   const tier = tabDiskCan ? tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }) : null;
-  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, needDisk: row?.f?.needGB != null ? !!row.f.needDisk : true });
+  showDiskPick($("ai-model").value, { ramGB: tier?.ramGB ?? null, needDisk: row?.f?.needGB != null ? !!row.f.needDisk : true, needGB: row?.f?.needGB ?? null });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
   return rows;
 }
 $("ai-model").addEventListener("change", () => { modelTouched = true; updateCluster(); });
-// a disk model's "Not now" lets go of it (back to the model the room would pick), "invite one" opens the invite
-initDiskPick({ notNow: () => { modelTouched = false; updateCluster(); $("ai-ladder").querySelector(".rung.sel")?.focus({ preventScroll: true }); }, toast: (t) => toast(t) });
+initDiskPick({ toast: (t) => toast(t) });
 // the picker's consent, stored copy and delete are this tab's disk tier's (room/flashdisk.js, below askTabDisk and
 // freeTabDisk): the same answer, the same bytes, the same guard
 connectDiskStore({
