@@ -1,19 +1,31 @@
 // The picker's words for a model kept on disk (room/diskpick.js): every amount from room/models.js DISK_COPY, so a
-// future big model gets the same row, cost figures, consent and Start label from its own entry.
-import { DISK_COPY, MODELS, PICKER } from "../../room/models.js";
-import { diskCopyOf, rowChip, paramsText, rowTitle, speedRange, costFigures, consentText, keptText, freeText, startLabel, advSummary, storedText,
+// future big model gets the same row, cost figures, consent and Start label from its own entry. The consent state is
+// #368's stored answer (room/flashdisk.js TAB_DISK_KEY), read through room/diskstore.js diskState.
+import { DISK_COPY, MODELS, PICKER, SHAPE, diskCopyBytes } from "../../room/models.js";
+import { diskCopyOf, rowChip, paramsText, rowTitle, speedRange, costFigures, consentText, startLabel, advSummary, storedText,
   costHTML, consentHTML, advRowsHTML, sizeText } from "../../room/diskpick.js";
+import { diskState } from "../../room/diskstore.js";
+import { TAB_DISK_KEY, TAB_DISK_MODELS } from "../../room/flashdisk.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 const GB = 2 ** 30;
+const mem = (v) => { const o = v == null ? {} : { [TAB_DISK_KEY]: v }; return { getItem: (k) => o[k] ?? null, setItem: (k, x) => { o[k] = x; }, removeItem: (k) => { delete o[k]; } }; };
 
-Deno.test("DISK_COPY: Qwen3.8 Flash's entry is a real model, not in the default picker (dev-gated)", () => {
+Deno.test("DISK_COPY: Qwen3.8 Flash's entry is a real model with a disk tier, a row of its own beside PICKER's", () => {
   const m = DISK_COPY["qwen3.8-flash"];
   ok(m && MODELS["qwen3.8-flash"], "an entry for a model in MODELS");
-  ok(!PICKER.includes("qwen3.8-flash"), "Flash stays out of the default picker");
+  ok(!PICKER.includes("qwen3.8-flash"), "PICKER keeps the three models the room picks by itself");
+  ok(Object.keys(DISK_COPY).every((k) => TAB_DISK_MODELS.includes(k)), "every disk row is a model room/flashdisk.js serves");
   eq(diskCopyOf("qwen3-1.7b"), null, "a normal model has none");
   ok(m.speeds.every((s, i) => s.lo <= s.hi && (i === 0 || s.devices > m.speeds[i - 1].devices)), "speeds: fewest devices first, lo <= hi");
+});
+
+Deno.test("DISK_COPY: the stored size is every layer's experts and the n-gram table (the host's disk question's 92.4 GB)", () => {
+  const s = SHAPE["qwen3.8-flash"], m = DISK_COPY["qwen3.8-flash"];
+  eq(m.diskBytes, s.exp * s.L + s.ngram.bytes);
+  eq(diskCopyBytes("qwen3.8-flash"), m.diskBytes);
+  eq(sizeText(m.diskBytes), "92.4 GB", "what room.js fmtBytes shows in the question");
 });
 
 Deno.test("diskpick: Qwen3.8 Flash's words, from its entry", () => {
@@ -23,36 +35,57 @@ Deno.test("diskpick: Qwen3.8 Flash's words, from its entry", () => {
   eq(rowTitle(m), "Qwen3.8 Flash: 125B (6B active), MoE, its experts streamed from this device's disk");
   eq(speedRange(m), "7–12");
   eq(costFigures(m).map((f) => [f.k, f.v, f.u, !!f.approx, f.note]), [
-    ["Stored once", "92", "GB", false, "Copied once, then starts fast"],
+    ["Stored once", "92.4", "GB", false, "Copied once, then starts fast"],
     ["Memory", "20", "GB", true, "For the experts it uses most"],
     ["Speed", "7–12", "tok/s", false, "Gets faster as devices join"]]);
-  eq(consentText(m), "This device keeps a copy of the model: up to 92 GB in this browser, one time. Delete it any time.");
-  eq(startLabel(m, false), "Allow 92 GB and start");
-  eq(startLabel(m, true), "Start Qwen3.8 Flash");
-  eq(advSummary(m), "92 GB disk · 20 GB memory");
+  eq(advSummary(m), "92.4 GB disk · 20 GB memory");
+});
+
+Deno.test("diskpick: the consent line says what the disk question says, and shows the answer already given", () => {
+  const m = DISK_COPY["qwen3.8-flash"];
+  // room.js askTabDisk: "<name> streams from your disk" / "It will store up to N in this browser, so it can run more
+  // than this device's memory holds. It stays for next time; Room settings can free it."
+  eq(consentText(m, "ask"), "Qwen3.8 Flash streams from your disk: it will store up to 92.4 GB in this browser, so it can run more than this device's memory holds. It stays for next time; Room settings can free it.");
+  eq(startLabel(m, "ask"), "Allow 92.4 GB and start", "the press is the answer, for the same bytes");
+  for (const st of ["allow", "deny", "url", "none"]) eq(startLabel(m, st), "Start Qwen3.8 Flash", st + ": nothing to ask");
+  ok(consentText(m, "allow").startsWith("This device lets big models use its disk"));
+  ok(consentText(m, "allow", 40 * GB).includes("40.0 GB stored now"));
+  ok(consentText(m, "deny").includes("Room settings changes that"), "a no is changed where #368 changes it");
+  ok(consentText(m, "url").includes("?tabdisk=0"));
+  ok(!/Allow|store up to/.test(consentText(m, "none")), "no disk tier: nothing to agree to");
+  ok(consentHTML(m).includes("<b>up to 92.4 GB in this browser,</b>"));
+});
+
+Deno.test("diskState: #368's stored answer; the URL can only say no", () => {
+  const k = "qwen3.8-flash";
+  eq(diskState(k, { can: true, storage: mem(null) }), "ask");
+  eq(diskState(k, { can: true, storage: mem("allow") }), "allow");
+  eq(diskState(k, { can: true, storage: mem("deny") }), "deny");
+  eq(diskState(k, { can: true, search: "?tabdisk=0", storage: mem("allow") }), "url", "?tabdisk=0 wins over a stored yes");
+  eq(diskState(k, { can: true, search: "?tabdisk=1", storage: mem(null) }), "ask", "and nothing in the URL says yes");
+  eq(diskState(k, { can: false, storage: mem("allow") }), "none", "a tab without a disk tier");
+  eq(diskState("qwen3-1.7b", { can: true, storage: mem("allow") }), "none", "a model without one");
+  eq(diskState(k, { can: true, storage: { getItem() { throw new Error("blocked"); } } }), "ask", "storage that throws: not asked");
 });
 
 Deno.test("diskpick: another big model gets its own numbers, nothing of Flash's", () => {
-  const m = { name: "Big One", params: "400B", arch: "MoE", diskGB: 210.5, memGB: 36, speeds: [{ devices: 2, lo: 3, hi: 4 }] };
+  const m = { name: "Big One", params: "400B", arch: "MoE", diskBytes: 210.5 * GB, memGB: 36, speeds: [{ devices: 2, lo: 3, hi: 4 }] };
   eq(rowChip(m), "400B · MoE · from disk");
   eq(paramsText(m), "400B", "no active count: just the size");
   eq(costFigures(m).map((f) => f.v), ["210.5", "36", "3–4"]);
   eq(costFigures(m)[2].note, "Measured", "one measured size: no claim that it speeds up");
-  eq(consentText(m), "This device keeps a copy of the model: up to 210.5 GB in this browser, one time. Delete it any time.");
-  eq(startLabel(m, false), "Allow 210.5 GB and start");
+  ok(consentText(m).startsWith("Big One streams from your disk: it will store up to 210.5 GB"));
+  eq(startLabel(m, "ask"), "Allow 210.5 GB and start");
   for (const h of [costHTML(m), consentHTML(m), advRowsHTML(m)]) ok(!/Flash|92|125B|6B active/.test(h), h);
 });
 
-Deno.test("diskpick: stored copy, free disk and the kept line", () => {
-  const m = DISK_COPY["qwen3.8-flash"];
+Deno.test("diskpick: the stored copy and its two-press delete", () => {
   eq(sizeText(92 * GB), "92.0 GB"); eq(sizeText(300 * 2 ** 20), "300 MB");
-  eq(freeText(412.6 * GB), "412 GB free on this disk"); eq(freeText(null), "");
   eq(storedText(0), "Nothing stored on this device yet."); eq(storedText(null), "Not known in this browser.");
   ok(storedText(91.5 * GB).startsWith("91.5 GB on this disk."));
-  ok(keptText(m, 91.5 * GB).includes("91.5 GB in this browser"));
-  ok(consentHTML(m, { freeBytes: 412 * GB }).includes("412 GB free on this disk"), "free disk shown when known");
-  ok(!consentHTML(m, {}).includes("free"), "and not when it is unknown");
+  const m = DISK_COPY["qwen3.8-flash"];
   ok(/dk-del" disabled/.test(advRowsHTML(m, { storedBytes: 0 })), "nothing stored: delete is off");
   ok(!/dk-del" disabled/.test(advRowsHTML(m, { storedBytes: GB })), "a copy: delete is on");
-  ok(consentHTML(m).includes("<b>up to 92 GB in this browser, one time.</b>"));
+  ok(advRowsHTML(m, { storedBytes: GB, armed: true }).includes("Delete 1.0 GB?"), "armed: the second press deletes");
+  ok(!advRowsHTML(m, { storedBytes: 0, armed: true }).includes("?</button>"), "nothing to delete: never armed");
 });

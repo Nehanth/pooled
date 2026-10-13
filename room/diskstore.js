@@ -1,23 +1,35 @@
-// This device's copy of a disk-streamed model (room/models.js DISK_COPY): what the picker asks, in one place.
-//   consent(key) -> bool                 did this device agree to keep the copy
-//   setConsent(key, on)                  agree (Start) or take it back (Delete stored copy)
-//   storedBytes(key) -> Promise<number|null>   bytes stored now (null: unknown)
-//   deleteCopy(key) -> Promise<bool>     remove the stored copy (and the consent)
-//   freeBytes() -> Promise<number|null>  free disk for this browser (null: unknown)
-// STUB until PR #368 (feat/flash-tab-disk) lands: consent lives in localStorage; the stored size, the delete and the
-// free disk are #368's (its OPFS disk tier: room/flashdisk.js, engine/expert_opfs.js removeExperts, the n-gram
-// table's NGRAM_OPFS_DIR). Replace the bodies marked #368 with its functions; the picker calls only this object.
-const KEY = "pooled-disk-consent";
-const read = () => { try { return JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch { return {}; } };
-const write = (o) => { try { localStorage.setItem(KEY, JSON.stringify(o)); } catch { /* private mode: asks again next time */ } };
+// This device's copy of a disk-streamed model (room/models.js DISK_COPY): what the picker asks, answered by #368's disk
+// tier (room/flashdisk.js) and room.js's handling of it. Nothing here keeps its own state or asks its own question:
+//   state(key)          -> "ask" | "allow" | "deny" | "url" | "none"   (diskState: tabDiskChoice's stored answer)
+//   allow(key)          the picker's "Allow N GB and start": the same answer the disk question's Allow gives
+//                       (saveTabDiskChoice "allow", then room.js tabDiskChanged tells the room)
+//   storedBytes(key)    -> Promise<number|null>  flashDiskBytes().total (the experts' copy and the n-gram table)
+//   deleteCopy(key)     -> Promise<{ removed, kept } | { refused }>  room.js freeTabDisk: Room settings' "Free disk
+//                       space", with its guard (not while a load or the running model reads the copy)
+// room.js connects its side (connectDiskStore) at startup.
+import { tabDiskChoice, saveTabDiskChoice, flashDiskBytes, TAB_DISK_MODELS } from "./flashdisk.js";
+
+const G_ = /** @type {any} */ (globalThis);
+// room.js's side: can (this tab has a disk tier: WebGPU, OPFS, not a phone), changed (after an answer), free (the delete)
+let room = { can: () => false, changed: () => {}, free: async () => ({ refused: "not connected" }) };
+export function connectDiskStore(hooks) { room = { ...room, ...hooks }; }
+
+// The picker's view of this device's answer for `key`. can: this tab has a disk tier; search: location.search;
+// storage: localStorage. ?tabdisk=0 is "url" (no for this page; the URL can never say yes: tabDiskChoice)
+export function diskState(key, { can = false, search = "", storage = null } = {}) {
+  if (!TAB_DISK_MODELS.includes(key) || !can) return "none";
+  if (new URLSearchParams(search).get("tabdisk") === "0") return "url";
+  return tabDiskChoice({ search, storage }) || "ask";
+}
 
 export const diskStore = {
-  consent: (key) => !!read()[key],
-  setConsent(key, on) { const o = read(); if (on) o[key] = Date.now(); else delete o[key]; write(o); },
-  // #368: the OPFS copy's bytes (the experts' manifest + the n-gram table) for this model
-  storedBytes: async (_key) => null,
-  // #368: removeExperts for this model's copies and the n-gram table's directory
-  async deleteCopy(key) { this.setConsent(key, false); return false; },
-  // #368: its disk estimate (Chrome's quota alone reads ~10 GB on a fresh origin, so it is not shown as free disk)
-  freeBytes: async () => null,
+  state: (key) => diskState(key, { can: room.can(), search: G_.location?.search || "", storage: G_.localStorage }),
+  allow(key) {
+    if (diskStore.state(key) !== "ask") return false;
+    saveTabDiskChoice("allow", G_.localStorage);
+    room.changed(key);
+    return true;
+  },
+  storedBytes: async (_key) => { try { return (await flashDiskBytes()).total; } catch { return null; } },
+  deleteCopy: (_key) => room.free(),
 };

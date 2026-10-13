@@ -50,7 +50,8 @@ import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { diskCopyOf, rowChip, rowTitle, starSVG } from "./room/diskpick.js";
-import { showDiskPick, initDiskPick, agreeOnStart } from "./room/diskpick-ui.js";
+import { showDiskPick, initDiskPick, agreeOnStart, refreshDiskPick } from "./room/diskpick-ui.js";
+import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
@@ -314,6 +315,7 @@ function tabDiskChanged() {
   setTabDisk();
   renderTabDisk();
   if (myMeta.webgpu) broadcastAll({ t: "pledge", gb: myMeta.contribGB, tabDisk: myMeta.tabDisk || null });
+  updateCluster();   // the picker: Flash's fit (this tab's disk tier counts or not) and its consent line
 }
 // a peer's tabDisk from a pledge message: only the fields room/pledge.js reads, typed
 function cleanTabDisk(t) {
@@ -330,7 +332,7 @@ let diskAsking = null;
 function askTabDisk({ bytes, model, host = false }) {
   if (diskAsking) return diskAsking;
   const M = MODELS[model];
-  $("disk-ask-h").textContent = `${M?.label.split("\u00b7")[0].trim() || "This model"} streams from your disk`;
+  $("disk-ask-h").textContent = `${M ? shortName(model) : "This model"} streams from your disk`;   // the picker's name (room/diskpick.js)
   $("disk-ask-why").textContent = `It will store up to ${fmtBytes(bytes)} in this browser${host ? "" : ", for the room's host"}, so it can run more than this device's memory holds. `
     + "It stays for next time; Room settings can free it.";
   $("disk-ask").hidden = false;
@@ -533,10 +535,11 @@ let wasReady = false;
 // someone picks a model by hand, the select follows the largest model the room can run.
 let modelTouched = false;
 const shortName = (key) => diskCopyOf(key)?.name || (MODELS[key]?.label || key).split("\u00b7")[0].trim();
-// the picker's rows: the three models, and with ?dev=1 (and the local test rooms) the models kept on disk
-// (room/models.js DISK_COPY) too. The others stay in the (dev) select for tests, never in the rows.
+// the picker's rows: the three models and the models kept on disk (room/models.js DISK_COPY: Qwen3.8 Flash, which the
+// room never picks by itself and which asks before it stores anything: room/diskpick-ui.js, room/flashdisk.js). The
+// others stay in the (?dev=1) select for tests, never in the rows.
 const DEV = document.documentElement.classList.contains("dev");
-const PICK_NEED = Object.fromEntries([...PICKER, ...(DEV ? Object.keys(DISK_COPY) : [])].map((k) => [k, NEED_GB[k]]));
+const PICK_NEED = Object.fromEntries([...PICKER, ...Object.keys(DISK_COPY)].map((k) => [k, NEED_GB[k]]));
 function addModelOption(key) {
   const sel = $("ai-model");
   if (!MODELS[key] || [...sel.options].some((o) => o.value === key)) return;
@@ -682,7 +685,18 @@ function updateNeed(pledged) {
 }
 $("ai-model").addEventListener("change", () => { modelTouched = true; updateCluster(); });
 // a disk model's "Not now" lets go of it (back to the model the room would pick), "invite one" opens the invite
-initDiskPick({ notNow: () => { modelTouched = false; updateCluster(); $("ai-ladder").querySelector(".rung.sel")?.focus({ preventScroll: true }); } });
+initDiskPick({ notNow: () => { modelTouched = false; updateCluster(); $("ai-ladder").querySelector(".rung.sel")?.focus({ preventScroll: true }); }, toast: (t) => toast(t) });
+// the picker's consent, stored copy and delete are this tab's disk tier's (room/flashdisk.js, below askTabDisk and
+// freeTabDisk): the same answer, the same bytes, the same guard
+connectDiskStore({
+  can: () => tabDiskCan && !!tabDiskMeta(myMeta, { search: location.search, opfs: true, deviceMemory: navigator.deviceMemory }),
+  changed: (key) => {
+    tabDiskDeclined = false;
+    tabDiskChanged();
+    log("room", `${myName} lets models use ${fmtBytes(diskCopyOf(key)?.diskBytes || 0)} of its disk`);
+  },
+  free: () => freeTabDisk(),
+});
 function updateCluster() {
   const all = [myMeta, ...[...members.values()].map(m => m.meta).filter((m) => !m?.api)];
   const apis = members.size + 1 - all.length;
@@ -5186,15 +5200,23 @@ $("tabdisk-free").addEventListener("click", async (ev) => {
     return;
   }
   tabDiskArmed = 0;
+  const r = await freeTabDisk();
+  if (r.refused) toast(r.refused);
+});
+// Delete the Flash copy on this device (Room settings' "Free disk space", the picker's "Delete stored copy"), after
+// both presses. -> { removed, kept } or { refused: why it did not run }
+async function freeTabDisk() {
   // the running model reads the copy (open files), and a load may be copying into it or reading from it: stop first
   if (ai.loadingShard || ai.engine?.experts || (ai.model && TAB_DISK_MODELS.includes(ai.model) && ai.engine)) {
-    toast(ai.loadingShard ? "this device is loading its layers: wait for it, or stop the model, then free the space" : "the model is using this copy: stop it (or leave the room) first");
-    renderTabDisk(); return;
+    renderTabDisk();
+    return { refused: ai.loadingShard ? "this device is loading its layers: wait for it, or stop the model, then free the space" : "the model is using this copy: stop it (or leave the room) first" };
   }
   const r = await removeFlashCopy().catch(() => ({ removed: 0, kept: tabDiskStored }));
   toast(r.kept ? `freed ${fmtBytes(r.removed)}; ${fmtBytes(r.kept)} is in use and stays` : `freed ${fmtBytes(r.removed)} of this device's disk`);
   await renderTabDisk(true);
-});
+  refreshDiskPick();
+  return r;
+}
 // One row per cached model with its size and a Delete button (two steps, like Clear above), so one
 // model's weights can go while the others stay. Filled each time the menu opens.
 // A newer render (menu reopened, a delete finished) wins over one still reading the cache.

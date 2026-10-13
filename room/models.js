@@ -204,18 +204,20 @@ export const FILES = {
     mtp: { bytes: 2199652640, sha256: "d484e6e541a36b714976f72f7d1a86ae2cc450cff110b81e3656512784abd1c6" } },
 };
 
-// The models the room's picker offers. The others stay for tests and ?dev=1.
+// The models the room's picker offers, with the DISK_COPY models below. The others stay for tests and ?dev=1.
 export const PICKER = ["qwen3-1.7b", "qwen3.8-27b", "qwen3.6-35b-moe"];
 
 // Models that keep a copy on each device's disk and stream their experts from it, so they run on far less memory
 // than their size. The picker's row, its cost figures, the consent line and the Start label all come from this entry (room/diskpick.js), so another big model gets the same picker by adding one.
 //   name: the row's name; params / arch: its chip ("125B · MoE · from disk"); active: parameters used per token (the
 //   longer description: "125B (6B active)"; the model card's numbers, roadmap/33)
-//   diskGB: what one device stores, at most, one time (the consent asks for this); memGB: about what it keeps in
-//   memory (the experts it uses most); speeds: measured tok/s ranges by devices in the room, fewest first (a Mac tab
-//   alone, then with a gaming PC joined)
+//   diskBytes: the most one tab stores (diskCopyBytes: every layer's experts and the n-gram table, room/flashdisk.js),
+//   the same bytes room.js hostDiskBytes gives the host's disk question for a deal that puts all of them on its disk
+//   ("92.4 GB"); memGB: about what it keeps in memory (the experts it uses most); speeds: measured tok/s ranges by
+//   devices in the room, fewest first (a Mac tab alone, then with a gaming PC joined)
+export const diskCopyBytes = (key) => { const s = SHAPE[key]; return s ? s.exp * s.L + (s.ngram?.bytes || 0) : 0; };
 export const DISK_COPY = {
-  "qwen3.8-flash": { name: "Qwen3.8 Flash", params: "125B", active: "6B", arch: "MoE", diskGB: 92, memGB: 20,
+  "qwen3.8-flash": { name: "Qwen3.8 Flash", params: "125B", active: "6B", arch: "MoE", diskBytes: diskCopyBytes("qwen3.8-flash"), memGB: 20,
     speeds: [{ devices: 1, lo: 7, hi: 8.5 }, { devices: 2, lo: 11, hi: 12 }] },
 };
 
