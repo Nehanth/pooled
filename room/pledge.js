@@ -100,12 +100,17 @@ export function diskFor(meta, model) {
 // A browser tab with the OPFS disk tier for this model (meta.tabDisk: tabDiskGB) is in off.diskOnly: it never parks
 // experts (its GPU shares the computer's memory) and offloads only in the disk pass, with tabDisk.ramGB as RAM for the
 // spare and T1 (room/plan.js diskOnlyAt). For any other model it counts as a plain tab (no offload), field for field.
+// A room node offloads Qwen3.8-Flash-Next's experts only when its meta says it can (meta.offloadFlash, set by a node
+// whose shard.js has Flash offload): a released 0.4.1 node says offload for the Qwen 3.5 MoEs but refuses Flash's, so
+// it is dealt Flash layers within its pledge (as a node without --ram).
 export function offloadFor(metas, ex, model = null) {
+  const flash = MODELS[model]?.kind === "qwen4exp";
+  const nodeRam = (m) => (flash && !m?.offloadFlash ? 0 : ramGB(m));
   const only = metas.map((m) => tabDiskGB(m, model) > 0);
-  const ram = metas.map((m, i) => (only[i] ? tabDiskGB(m, model) : m?.tabDisk ? 0 : ramGB(m)) * 2 ** 30);
+  const ram = metas.map((m, i) => (only[i] ? tabDiskGB(m, model) : m?.tabDisk ? 0 : nodeRam(m)) * 2 ** 30);
   const expertBytes = ex && typeof ex === "object" ? +ex.E || 0 : +ex || 0;
   if (!(expertBytes > 0) || !ram.some((r) => r > 0)) return null;
-  const disk = metas.map((m, i) => only[i] || (!m?.tabDisk && diskFor(m, model)));
+  const disk = metas.map((m, i) => only[i] || (!m?.tabDisk && nodeRam(m) > 0 && diskFor(m, model)));
   return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}), ...(only.some(Boolean) ? { diskOnly: only } : {}) };
 }
 

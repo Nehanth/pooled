@@ -299,7 +299,7 @@ const metaPromise = (async () => {
 // site (localStorage) and changed in Room settings, where "Free disk space" deletes the copy. meta.tabDisk says what
 // the room may deal it: { ramGB, models, ask } until its user answers, without ask after a yes, nothing after a no.
 // ?tabram=G: the RAM its spare and RAM cache take (default 3, held to what the device can spare; 0 turns the tier
-// off); ?tabdisk=1 / ?tabdisk=0 answer for this page load only (tests).
+// off); ?tabdisk=0 says no for this page load (the URL can never say yes: room links keep their query).
 const tabDiskNow = () => tabDiskChoice({ search: location.search, storage: globalThis.localStorage });
 function setTabDisk(m = myMeta) {
   const choice = tabDiskNow();
@@ -3365,8 +3365,9 @@ async function aiStart(modelArg) {
     // tier (meta.tabDisk: Qwen3.8-Flash-Next, once its user says yes), its offloaded layers' experts read from its disk.
     // With the model key a node started with --disk that has this model's files (room/pledge.js diskFor) may also
     // leave some layers' experts on disk when parking can't hold the model
-    // (a tab that refused the disk layers it was dealt, ai.noDisk, counts without its disk tier until it says yes)
-    const metasNow = () => [myMeta, ...ai.chain.map((id) => { const m = conns.get(id)?.meta; return m?.tabDisk && ai.noDisk?.has(nameOf(id)) ? { ...m, tabDisk: undefined } : m; })];
+    // (a device that refused the offload it was dealt, ai.noDisk: a tab keeping the model off its disk, an older node,
+    // counts without any offload: no disk tier, nothing parked)
+    const metasNow = () => [myMeta, ...ai.chain.map((id) => { const m = conns.get(id)?.meta; return m && ai.noDisk?.has(nameOf(id)) ? { ...m, tabDisk: undefined, offload: undefined, ramGB: undefined } : m; })];
     const wantCtx = ROOM_CTX;
     const planNow = () => {
       const metas = metasNow(), off = offloadFor(metas, experts, modelKey);
@@ -4685,11 +4686,18 @@ async function aiOnData(from, d) {
         sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0 });
       } catch (err) {
         if (onLoadError(ai.startFailed) === "stopped") { workerStopped(); break; }   // the host stopped the start (ai-start-failed): this load stopped with it
-        aiLoading(false);
-        aiStatus("failed: " + err.message);
-        toast(`This device couldn't load its layers (${err.message}). Press Start to try again.`);
         closeEngine();
-        $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
+        if (err.noDisk) {
+          // not a failure to report: this device kept the model off its disk, and the host deals again without it
+          const why = "this device keeps the model off its disk: the host is dealing the layers again without it";
+          aiStatus(why); toast(why); log("room", `${myName}: ${err.message}`);
+          $("ldg-sub").textContent = "the host is dealing the layers again without this device's disk";
+        } else {
+          aiLoading(false);
+          aiStatus("failed: " + err.message);
+          toast(`This device couldn't load its layers (${err.message}). Press Start to try again.`);
+          $("ai-start").disabled = false; $("ai-model").disabled = false; updateCluster();
+        }
         // load: the host stops the start; noDisk: this device refused to store the model on its disk (its user said no,
         // or it never offered it): the host deals again without its disk
         sendTo(ai.hostId, { t: "ai-error", message: err.message, load: 1, ...(err.noDisk ? { nodisk: 1 } : {}) });
@@ -4730,13 +4738,17 @@ async function aiOnData(from, d) {
       break;
     case "ai-error":
       aiStatus(`peer ${e?.name || from} failed: ${d.message}`);
-      // a worker refused the disk layers it was dealt: deal again without its disk (noDiskMetas), not a failed start
-      if (d.nodisk && ai.role === "host" && ai.chain.includes(from)) {
+      // a worker refused the offload it was dealt: a tab keeping the model off its disk (nodisk), or a room node from
+      // before Flash offload (@pooled/cli 0.4.1's shard.js: "no expert offload yet"). Deal again once without its
+      // offload (aiStart's metasNow), not a failed start; a second refusal from it stops the start as any error does
+      const oldNode = /has no expert offload yet/.test(String(d.message || ""));
+      if ((d.nodisk || oldNode) && ai.role === "host" && ai.chain.includes(from) && !ai.noDisk?.has(e?.name || from)) {
         const nm = e?.name || from;
         (ai.noDisk ||= new Set()).add(nm);
-        log("room", `${nm} keeps the model off its disk: dealing the layers again without it`);
+        const why = d.nodisk ? `${nm} keeps the model off its disk` : `${nm} can't offload this model's experts (an older pooled)`;
+        log("room", `${why}: dealing the layers again without its offload`);
         failWaiters(new Error(`${nm}: ${d.message}`));
-        aiAutoRedeal(`${nm} keeps the model off its disk: dealing the layers again…`);
+        aiAutoRedeal(`${why}: dealing the layers again…`);
         break;
       }
       if (ai.role === "host" && ai.chain.includes(from)) {
@@ -5158,8 +5170,11 @@ $("tabdisk-free").addEventListener("click", async (ev) => {
     return;
   }
   tabDiskArmed = 0;
-  // the running model reads the copy (open files): it has to stop first
-  if (ai.engine?.experts || (ai.model && TAB_DISK_MODELS.includes(ai.model) && ai.engine)) { toast("the model is using this copy: stop it (or leave the room) first"); renderTabDisk(); return; }
+  // the running model reads the copy (open files), and a load may be copying into it or reading from it: stop first
+  if (ai.loadingShard || ai.engine?.experts || (ai.model && TAB_DISK_MODELS.includes(ai.model) && ai.engine)) {
+    toast(ai.loadingShard ? "this device is loading its layers: wait for it, or stop the model, then free the space" : "the model is using this copy: stop it (or leave the room) first");
+    renderTabDisk(); return;
+  }
   const r = await removeFlashCopy().catch(() => ({ removed: 0, kept: tabDiskStored }));
   toast(r.kept ? `freed ${fmtBytes(r.removed)}; ${fmtBytes(r.kept)} is in use and stays` : `freed ${fmtBytes(r.removed)} of this device's disk`);
   await renderTabDisk(true);

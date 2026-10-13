@@ -763,8 +763,10 @@ export class RoomNode extends EventEmitter {
       case "ai-progress": this.emit("progress", { name: e?.name || from, pct: d.pct }); return;
       case "ai-error":
         this.log(`${e?.name || from} failed: ${d.message}`);
-        // a tab refused the disk layers it was dealt (nodisk): the next deal counts it without its disk tier
-        if (d.nodisk && e?.meta?.tabDisk) { const { tabDisk, ...m } = e.meta; e.meta = m; }
+        // a device refused the offload it was dealt: a tab keeping the model off its disk (nodisk), or a node from before
+        // Flash offload (0.4.1: "no expert offload yet"). The next start counts it without any offload (this host does
+        // not re-deal by itself here: the start fails and the next one leaves it out)
+        if ((d.nodisk || /has no expert offload yet/.test(String(d.message || ""))) && e?.meta) { const { tabDisk, offload, ramGB, ...m } = e.meta; e.meta = m; }
         if (this.hosting() && ai.chain.includes(from)) {
           this.failWaiters(new Error(`${e?.name || from}: ${d.message}`));
           if (d.load && ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${d.message})`));

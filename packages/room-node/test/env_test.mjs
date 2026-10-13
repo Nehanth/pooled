@@ -46,6 +46,7 @@ test("probeMeta: offload on a discrete GPU, never on unified memory", async () =
   try {
     const disc = await probeMeta(8, { gbps: 0, ramGB: 40, mem: { kind: "discrete", name: "RTX 5070", totalGB: 12, freeGB: 11 } });
     assert.equal(disc.offload, true); assert.equal(disc.ramGB, 40);
+    assert.equal(disc.offloadFlash, true, "this node offloads Flash too: hosts deal it Flash offload (room/pledge.js offloadFor)");
     for (const mem of [{ kind: "unified", name: "NVIDIA GB10", totalGB: 119 }, { kind: "unified", name: "Apple silicon", totalGB: 64 }]) {
       const m = await probeMeta(8, { gbps: 0, ramGB: 40, mem });
       assert.equal(m.offload, undefined, mem.name); assert.equal(m.ramGB, undefined); assert.equal(m.noOffload, "unified memory");

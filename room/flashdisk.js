@@ -39,12 +39,11 @@ export const TAB_DISK_KEY = "pooled-tabdisk";
 // the models a tab's disk tier serves, and the RAM it offers by default for the tier's spare and T1 (?tabram=G)
 export const TAB_DISK_MODELS = ["qwen3.8-flash"];
 export const TAB_RAM_GB = 3;
-// This tab's answer: "allow", "deny" or null (not asked yet). ?tabdisk=1 / ?tabdisk=0 answer for this page only (tests,
-// a kiosk) and win over the stored one. storage: localStorage, or null (nothing remembered)
+// This tab's answer: "allow", "deny" or null (not asked yet). ?tabdisk=0 says no for this page only (a kiosk, a test);
+// the URL can never say yes: room links (/r/:code, the invite) keep their query, so a host could hand out one that
+// skips the question. Only the user's own answer (stored, or the dialog) allows. storage: localStorage, or null
 export function tabDiskChoice({ search = "", storage = null } = {}) {
-  const q = new URLSearchParams(search).get("tabdisk");
-  if (q === "1") return "allow";
-  if (q === "0") return "deny";
+  if (new URLSearchParams(search).get("tabdisk") === "0") return "deny";
   try { const v = storage?.getItem(TAB_DISK_KEY); return v === "allow" || v === "deny" ? v : null; } catch { return null; }
 }
 // remember (or with null, forget) the answer for this origin
@@ -305,11 +304,12 @@ export async function ingestNgram(cfg, readAt, { dir, parallel = 2, onStatus = (
       } catch (e) { await w.abort?.().catch(() => {}); throw e; }
     };
     const queue = missing.slice();
-    await Promise.all(Array.from({ length: Math.min(parallel, queue.length) }, async () => {
+    // allSettled: the lock is held until every head has stopped (a failed one's siblings abort, then settle)
+    await Promise.allSettled(Array.from({ length: Math.min(parallel, queue.length) }, async () => {
       while (queue.length && !failed) {
         try { await one(queue.shift()); } catch (e) { if (!failed) { failed = e; ac.abort(); } throw e; }
       }
-    })).catch(() => {});
+    }));
     if (failed) throw failed;
     log(`n-gram table: copied ${gb(total)} GB (${missing.length} heads) into OPFS in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
     return total;

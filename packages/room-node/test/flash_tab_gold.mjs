@@ -20,7 +20,9 @@
 //        CKPT_N more): with checkpoints C restores A's end state (loadSlot) and prefills one token; with CKPT=0 it
 //        prefills everything. A + C must be the golden ids, C must reuse A's checkpoint (CKPT=2) or none (CKPT=0), and C's BITS be the same for both.
 // Consent: the tab answers its disk question (p2p.html #disk-ask) the way TABDISK says: allow (default: it clicks
-// Allow, as the demo's user does once), no, or page (?tabdisk=1: no question). The profile remembers the answer.
+// Allow, as the demo's user does once), no, or seed (localStorage pooled-tabdisk=allow before the page loads, as an
+// earlier yes leaves it: no question). The URL can't answer yes (room/flashdisk.js tabDiskChoice). The profile
+// remembers the answer.
 // Prerequisites: npm ci at the repo root and in packages/room-node (playwright-core, peerjs); a Chrome with WebGPU
 // (CHROME_BIN; on the Spark ~/.cache/ms-playwright/chromium-1148/chrome-linux/chrome); the model files; openssl. A
 // fresh PROFILE takes ~96 GB of disk for the copy (check df -h first; delete test profiles after).
@@ -30,7 +32,7 @@
 //      discrete GPU on the GB10's unified memory), PROFILE (Chrome profile with the OPFS copy; default
 //      ~/.cache/pooled-flashtab-profile), CHROME_BIN (default Playwright's Chromium), HEADLESS (1), MAXNEW (cap per
 //      case, default the golden's length), PORT (8261), OUT (result JSON), SPLIT (memory), QUERY (extra page params),
-//      TABDISK (allow | no | page), CKPT (the page's ?ckpt=: 0 here, 2 in mode ckpt), CKPT_N (16)
+//      TABDISK (allow | no | seed), CKPT (the page's ?ckpt=: 0 here, 2 in mode ckpt), CKPT_N (16)
 import http from "node:http";
 import https from "node:https";
 import fs from "node:fs";
@@ -104,11 +106,12 @@ async function openTab() {
   // the model's files from this machine (the room page asks Hugging Face for them)
   await ctx.route(/huggingface\.co\/bartowski\/Qwen3\.8-Flash-Next-GGUF\/.*\.gguf$/, (route) => route.continue({ url: WEIGHTS + route.request().url().split("/").pop() }));
   await ctx.route("https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js", (route) => route.fulfill({ path: path.join(NM, "peerjs/dist/peerjs.min.js"), contentType: "text/javascript" }));
+  if (TABDISK === "seed") await ctx.addInitScript(() => { try { localStorage.setItem("pooled-tabdisk", "allow"); } catch { /* no storage */ } });
   page = ctx.pages()[0] || await ctx.newPage();
   page.on("crash", () => log("tab CRASHED"));
   page.on("pageerror", (e) => log("tab pageerror:", String(e).slice(0, 300)));
   page.on("console", (m) => { const t = m.text(); if (m.type() === "error" || /expert|OPFS|n-gram|offload|ingest|disk tier/i.test(t)) log("tab:", t.slice(0, 400)); });
-  await page.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=${SIGNAL}&peerweights=0&dev=1&ckpt=${CKPT}&split=${env("SPLIT", "memory")}&ask=0&tabram=${TAB_RAM}${TABDISK === "page" ? "&tabdisk=1" : ""}${env("QUERY", "") ? "&" + env("QUERY", "") : ""}`);
+  await page.goto(`http://127.0.0.1:${PORT}/p2p.html?signal=${SIGNAL}&peerweights=0&dev=1&ckpt=${CKPT}&split=${env("SPLIT", "memory")}&ask=0&tabram=${TAB_RAM}${env("QUERY", "") ? "&" + env("QUERY", "") : ""}`);
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   await page.waitForTimeout(1500);
   await page.fill("#name-input", "flash-tab"); await page.fill("#join-gb", String(TAB_GB));
@@ -139,7 +142,7 @@ try {
   // the tab's disk question (p2p.html #disk-ask), answered as TABDISK says, while it waits for the room to come online
   out.diskAsked = 0;
   const answer = async () => {
-    if (TABDISK === "page") return;
+    if (TABDISK === "seed") return;
     try {
       if (await page.isVisible("#disk-ask")) {
         out.diskAsked++;

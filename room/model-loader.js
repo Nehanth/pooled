@@ -264,7 +264,15 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         if (hasHead) names.push(...Object.values(QWEN4EXP_HEAD), GGML_OUTPUT);
         const fromDisk = new Set(resident?.layers || []);
         planPrefetch(M.gguf, shardInfos(G, names.filter((n) => { const m = /^blk\.(\d+)\.ffn_(gate|up|down)_exps\.weight$/.exec(n); return !m || !fromDisk.has(+m[1]); })));
-        G.streamEntry = resident ? async (info) => (await resident.entry(info)) ?? streamPlain(info) : streamPlain;
+        // (a read of the copy that fails, a short read or a bad record, is said and that tensor comes from the network)
+        const fromCopy = async (info) => {
+          try { return await resident.entry(info); } catch (e) {
+            const s = `expert OPFS copy: ${info.name} could not be read from it (${e?.message || e}); downloading it`;
+            console.warn(s); crumb(s);
+            return null;
+          }
+        };
+        G.streamEntry = resident ? async (info) => (await fromCopy(info)) ?? streamPlain(info) : streamPlain;
         const wc = await useConvertedCache(G, M.gguf), tw = performance.now();
         // straight to the GPU, but not the embedding (the engine reads its rows on the CPU). A layer at a time, the
         // queue flushed after each, as the room node loads it (packages/room-node/shard.js loadFlash): Dawn keeps a

@@ -12,7 +12,9 @@ const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 const GB = 2 ** 30, F = "qwen3.8-flash", M35 = "qwen3.6-35b-moe", M122 = "qwen3.5-122b-moe";
 const tab = (gb, ram = 3, ask = false) => ({ webgpu: true, contribGB: gb, tabDisk: { ramGB: ram, models: [F], ...(ask ? { ask: true } : {}) } });
 const plainTab = (gb) => ({ webgpu: true, contribGB: gb });
-const pc = (gb, ram, disk = false, local = [F, M35, M122]) => ({ webgpu: true, contribGB: gb, offload: true, ramGB: ram, ...(disk ? { disk: true, local } : {}) });
+const pc = (gb, ram, disk = false, local = [F, M35, M122]) => ({ webgpu: true, contribGB: gb, offload: true, ramGB: ram, offloadFlash: true, ...(disk ? { disk: true, local } : {}) });
+// a released @pooled/cli 0.4.1 node: it offloads the Qwen 3.5 MoEs but its shard.js refuses Flash's experts
+const pc041 = (gb, ram, disk = false, local = [F, M35, M122]) => { const m = pc(gb, ram, disk, local); delete m.offloadFlash; return m; };
 function deal(model, metas, ctx = 2048) {
   const rb = roomBytes(model, ctx);
   const d = dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges: metas.map((m) => pledgeGB(m) * GB), mode: "memory",
@@ -128,7 +130,7 @@ Deno.test("flash: the tab's disk tier is its own meta field, which a host from b
 
 const store = (init = {}) => { const m = new Map(Object.entries(init)); return { getItem: (k) => m.get(k) ?? null, setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k), m }; };
 
-Deno.test("tab disk consent: the answer is remembered per origin, ?tabdisk= answers for one page", () => {
+Deno.test("tab disk consent: the answer is remembered per origin, ?tabdisk=0 says no for one page, the URL never says yes", () => {
   const st = store();
   eq(tabDiskChoice({ storage: st }), null, "not asked yet");
   saveTabDiskChoice("allow", st);
@@ -137,7 +139,11 @@ Deno.test("tab disk consent: the answer is remembered per origin, ?tabdisk= answ
   eq(tabDiskChoice({ search: "?tabdisk=0", storage: st }), "deny", "the page's answer wins");
   saveTabDiskChoice("deny", st);
   eq(tabDiskChoice({ storage: st }), "deny");
-  eq(tabDiskChoice({ search: "?tabdisk=1", storage: st }), "allow");
+  saveTabDiskChoice(null, st);
+  // the URL can only say no: a host's link with ?tabdisk=1 (room links keep their query) does not skip the question
+  eq(tabDiskChoice({ search: "?tabdisk=1", storage: st }), null, "?tabdisk=1 is no answer");
+  saveTabDiskChoice("deny", st);
+  eq(tabDiskChoice({ search: "?tabdisk=1", storage: st }), "deny", "nor does it beat a stored no");
   saveTabDiskChoice(null, st);
   eq(tabDiskChoice({ storage: st }), null);
   eq(tabDiskChoice({ storage: { getItem() { throw new Error("private mode"); } } }), null, "no storage: not asked");
@@ -168,4 +174,16 @@ Deno.test("tab disk consent: the receiving side refuses an offload it did not of
   ok(/did not allow/.test(tabDiskGate(off, { model: F, tabDisk: offered, choice: "deny" })));
   ok(/did not offer its disk for qwen3.6-35b-moe/.test(tabDiskGate(off, { model: M35, tabDisk: offered, choice: "allow" })), "another model");
   ok(/RAM for the disk tier/.test(tabDiskGate({ ...off, diskRamBytes: 8 * GB }, { model: F, tabDisk: offered, choice: "allow" })), "more RAM than it offered");
+});
+
+Deno.test("flash: a 0.4.1 node (no meta.offloadFlash) is never dealt Flash offload, and still serves layers in its pledge", () => {
+  const { rb, d } = deal(F, [tab(22), pc041(10, 43, true)]);
+  ok(!d.offload?.[1], `no offload for the old node: ${JSON.stringify(d.offload)}`);
+  if (d.fit.fits) ok(d.assigned[1] <= Math.floor(10 * GB / rb.layerBytes), "within its pledge");
+  // the tab offloads from disk instead, so the room still fits
+  ok(d.fit.fits && d.offload[0]?.diskOnly, JSON.stringify(d.fit));
+  eq(offloadFor([pc041(10, 43, true)], 1e9, F), null, "alone: no device offloads Flash");
+  ok(offloadFor([pc(10, 43, true)], 1e9, F)?.ram[0] > 0, "a new node does");
+  // the Qwen 3.5 MoEs: the old node offloads as it always did, field for field
+  for (const model of [M35, M122]) eq(deal(model, [plainTab(12), pc041(8, 24, true)], 32768).d, deal(model, [plainTab(12), pc(8, 24, true)], 32768).d, model);
 });
