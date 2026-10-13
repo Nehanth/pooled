@@ -437,7 +437,8 @@ async function restart() {
   check("restart: the start fails", failed, (await view(big)).status);
   if (!failed) { log("restart: big's log:", JSON.stringify(await roomLog(big))); return; }
   await big.waitForFunction(() => !document.getElementById("ai-start").disabled, null, { timeout: 30000 }).catch(() => {});
-  await big.click("#ai-start");
+  // a failed start stays on the load card with Try again (room.js lcStop); the picker's Start is behind it
+  await big.click(await big.isVisible("#lc-retry") ? "#lc-retry" : "#ai-start");
   const up = await online(big, 400000) && await online(w, 60000);
   check("restart: the pick presses Start again and the room comes online", up, JSON.stringify({ big: (await view(big)).status, w: (await view(w)).status }));
 }
