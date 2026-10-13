@@ -18,7 +18,8 @@
 //
 // Verify keeps a copy of the recurrent state (DeltaNet conv + S, the PLE ring) from before the pass; accept(n < N)
 // restores it, rolls the n-gram history back and re-runs the first n columns (no head). The K / V cache and QSA's
-// rawK need no copy (the re-run rewrites them) and a pooled key is re-pooled when its block completes again.
+// rawK need no copy (the re-run rewrites them; the raw-key ring's rows of the block open before the pass are not
+// touched by it, since a pass has at most ring - 3 columns) and a pooled key is re-pooled when its block completes again.
 // Cost: the re-run is the whole trunk for n columns (MoE expert reads included), about one more pass, and every
 // verify copies ~115 MB of state. Deferred (#348 review finding 3): replace it with the Qwen3.5 engine's replay
 // rollback (save each column's DeltaNet inputs, replay only the delta step from S before the pass) before MTP
@@ -31,7 +32,7 @@
 // on the same bytes at another address, so an offloaded pass gives the resident bits. Without the region create()
 // refuses offloaded layers (the engine's _wq would too: notParked).
 import * as MC from "./wgsl/qwen4exp_batch.js";
-import { qsaScratch, qsaSetFrame, qsaBind, qsaStateOps, qsaSelectOps, QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
+import { qsaScratch, qsaSetFrame, qsaBind, qsaStateOps, qsaSelectOps, qsaRingCols, QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
 
 const U = GPUBufferUsage;
 const fr = Math.fround;
@@ -54,6 +55,9 @@ export class Qwen4ExpBatch {
     const { device, cfg } = eng, wq = eng._wq;
     if (!wq) throw new Error("qwen4exp batch: the engine does not expose its weights (_wq)");
     Object.assign(this, { eng, device, cfg, maxCols, verifyCols: Math.min(verifyCols, maxCols) });
+    // QSA's raw-key ring holds the rows of the blocks a pass completes: up to maxCols + 3 (engine/wgsl/qsa.js)
+    if (eng.qsa && maxCols > qsaRingCols(eng.qsaRing))
+      throw new Error(`qwen4exp batch: passes of ${maxCols} columns need a QSA raw-key ring of >= ${maxCols + 3} rows; the engine has ${eng.qsaRing} (Qwen4ExpEngine qsaRing)`);
     const d = cfg.dim, hc = cfg.hc, HD = cfg.hDim, ss = cfg.ssm, K = cfg.K, nH = cfg.nHeads, nKV = cfg.nKVHeads, hd = cfg.headDim;
     const { convDim, keyDim } = eng.dn, N = maxCols, eps = cfg.eps, C = MC.GEMV_MC_COLS, rank = cfg.hcRank;
     const nQ = 2 * nH * hd, nK = nKV * hd, qs = nQ + 2 * nK, qkvzS = convDim + ss.inner, ls = cfg.nExp + 1;
@@ -66,8 +70,8 @@ export class Qwen4ExpBatch {
     await Promise.all([
       ...["q4", "q8"].map(async (k) => { P["gu_" + k] = await pipe(MC.moeGuMcWGSL(k), "moe_gu_mc_" + k); P["dn_" + k] = await pipe(MC.moeDnMcWGSL(k), "moe_dn_mc_" + k); }),
       ...Object.entries({ route: MC.MOE_ROUTE_MC_WGSL, hcSite: MC.HC_SITE_MC_WGSL, hcMix: MC.HC_MIX_MC_WGSL, hcComb: MC.HC_COMBINE_MC_WGSL,
-        dnConv: MC.DN_CONV_MC_WGSL, dnDelta: MC.DN_DELTA_MC_WGSL, attnPrep: MC.ATTN_PREP_MC_WGSL,
-        attnDense: MC.attnDecMcWGSL(), attnGather: MC.attnDecMcWGSL({ gather: QSA_SEL_STRIDE }),
+        dnConv: MC.DN_CONV_MC_WGSL, dnDelta: MC.DN_DELTA_MC_WGSL, attnPrep: MC.attnPrepMcWGSL(eng.kv),
+        attnDense: MC.attnDecMcWGSL({ kv: eng.kv }), attnGather: MC.attnDecMcWGSL({ gather: QSA_SEL_STRIDE, kv: eng.kv }),
         ple: MC.PLE_MC_WGSL, am1: MC.ARGMAX1_MC_WGSL, am2: MC.ARGMAX2_MC_WGSL })
         .map(async ([k, code]) => { P[k] = await pipe(code, k); }),
     ]);

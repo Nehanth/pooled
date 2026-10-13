@@ -16,6 +16,9 @@
 //   QSA == dense        below 2052 cells: every pass forced onto the gathered (QSA) attention, decode and prefill
 //   verify / accept     verify passes of 6 columns with random accepts (state restored and re-run), across 2052
 //   timing              decode vs prefill tok/s for these layers
+// KV=f16: the engine's f16 K / V cache (default f32); every check above holds as is (decode, prefill and verify
+// read the same f16 cache). QSA_RING=n: the raw-key ring's rows (default the engine's, 1024; 0 = one per position);
+// with a ring the QSA check collects the raw keys from it as the decode reference runs (every ring / 2 steps).
 // OFFLOAD=lo-hi [OFFLOAD_SLOTS=N]: those layers' routed experts parked in the expert store (engine/expert_store.js),
 // the engine built with expertRegion: true, so the batched passes route them through the store's region and decode
 // through its pools. Every check above still compares against the decode engine; the "BITS" line (a hash of the
@@ -63,7 +66,7 @@ const errors = watchGpuErrors(device);
 const model = openGGUF(path.join(DIR, first));
 const G = model.G, cfg = qwen4expConfig(G.meta);
 const nL = FULL ? cfg.L : +env("LAYERS", 4), hasHead = nL === cfg.L;
-const MAXSEQ = +env("MAXSEQ", LONG ? longSeq : FULL ? 8448 : 4608);
+const MAXSEQ = +env("MAXSEQ", LONG ? longSeq : FULL ? 8448 : 4608), KV = env("KV", "f32");
 
 const experts = await offloadFromEnv(device, nL, model);   // (async since the disk tier, #349; a disk layer is refused by Qwen4ExpBatch.create)
 let t0 = performance.now();
@@ -81,10 +84,12 @@ const weights = { ...rest, layers };
 const fds = model.paths.map((p) => fs.openSync(p, "r"));
 const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.readSync(fds[file], b, 0, len, off); return b; };
 const ngram = new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
-const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ, expertRegion: !!experts });
+const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ, expertRegion: !!experts,
+  kv: KV, ...(env("QSA_RING") !== undefined ? { qsaRing: +env("QSA_RING") } : {}) });
 const pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: +env("MAXCOLS", 64), verifyCols: 8 });
 if (experts) console.log(`offload: layers ${experts.layers[0]}-${experts.layers.at(-1)}, ${experts.P} slots per layer, region ${(experts.regionBytes / 2 ** 30).toFixed(2)} GiB`);
-console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? "on" : "off"}, maxSeq ${MAXSEQ}, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
+console.log(`qwen4exp: ${nL} layers${hasHead ? " + head" : ""}, QSA ${eng.qsa ? `on (raw-key ring ${eng.qsaRing || "off"})` : "off"}, KV ${eng.kv}, maxSeq ${MAXSEQ}, `
+  + `state ${(eng.stateBytes().state / 2 ** 20).toFixed(0)} MiB, loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s`);
 
 let fail = 0;
 const check = (ok, msg) => { console.log(`${ok ? "ok  " : "FAIL"} ${msg}`); if (!ok) fail++; };
@@ -121,14 +126,25 @@ async function layered() {
   // positions where the QSA check reads the decode step's indexer scratch (past 2051 cells: scored and selected)
   const qsaAt = eng.qsa ? [2051, 2052, 2053, 2600, 3333, NTOK - 1].filter((p, i, a) => p < NTOK && a.indexOf(p) === i) : [];
   const qsaSnap = new Map();
+  // the last QSA layer's raw keys of every position: with a ring, read every ring / 2 steps as the reference runs
+  const qL = eng.qsa ? eng.layers.findLast((l) => l.isQ) : null, ring = eng.qsaRing;
+  const rawAll = eng.qsa ? new Uint16Array(NTOK * QSA.ID) : null;
+  const ringRead = async (p) => {   // after the step at p: rows max(0, p + 1 - ring) .. p
+    const R = new Uint16Array(await readBuf(qL.st.qsa.rawK, ring * QSA.ID * 2));
+    for (let r = Math.max(0, p + 1 - ring); r <= p; r++) rawAll.set(R.subarray((r % ring) * QSA.ID, (r % ring + 1) * QSA.ID), r * QSA.ID);
+  };
   let t = performance.now(), tRead = 0;
   for (let p = 0; p < NTOK; p++) {
     ref.push((await eng.forwardToken(ids[p])).hidden);
-    if (qsaAt.includes(p)) { const tr = performance.now(); qsaSnap.set(p, await readQsaScratch(p)); tRead += performance.now() - tr; }
+    const tr = performance.now();
+    if (qsaAt.includes(p)) qsaSnap.set(p, await readQsaScratch(p));
+    if (eng.qsa && ring && ((p + 1) % (ring / 2) === 0 || p === NTOK - 1)) await ringRead(p);
+    tRead += performance.now() - tr;
   }
+  if (eng.qsa && !ring) rawAll.set(new Uint16Array(await readBuf(qL.st.qsa.rawK, NTOK * QSA.ID * 2)));
   const decTs = NTOK / ((performance.now() - t - tRead) / 1000);
   console.log(`decode reference: ${NTOK} tokens, ${decTs.toFixed(1)} tok/s (${nL} layers)`);
-  if (eng.qsa) await qsaVsRef(NTOK, qsaSnap);
+  if (eng.qsa) await qsaVsRef(NTOK, qsaSnap, rawAll);
 
   // prefill == decode, mixed pass sizes
   const run = async (label, chunks, n = NTOK, from = 0) => {
@@ -218,16 +234,15 @@ async function readQsaScratch(p) {
   return { proj: new Float32Array(await readBuf(S.proj, 640 * 4)), qi: new Float32Array(await readBuf(S.qi, 512 * 4)),
     scores: nv > QSA.N_TOP ? new Float32Array(await readBuf(S.scores, nv * 4)) : null, rows: sel.slice(1, 1 + sel[0]) };
 }
-function f16s(ab) { return Float32Array.from(new Uint16Array(ab), h2f); }
 function rel(g, r) { let md = 0, mr = 0; for (let i = 0; i < r.length; i++) { md = Math.max(md, Math.abs(g[i] - r[i])); mr = Math.max(mr, Math.abs(r[i])); } return md / mr; }
 
-async function qsaVsRef(n, snaps) {
+async function qsaVsRef(n, snaps, rawAll) {
   const li = eng.layers.findLastIndex((l) => l.isQ), l = eng.layers[li], ix = weights.layers[li].indexer;
   if (cfg.ropeTheta !== QSA.THETA || cfg.ropeDims !== QSA.NROT) console.log(`  note: the reference ropes with ${QSA.NROT} dims, base ${QSA.THETA}; the model has ${cfg.ropeDims}, ${cfg.ropeTheta}`);
   const tag = `QSA vs reference, layer ${l.i}`;
   // raw keys: the GPU's cache, and at the sampled positions == the step's own k projection rounded to f16
   const cache = new QsaRefCache({ maxSeq: n });
-  cache.rawK.set(f16s(await readBuf(l.st.qsa.rawK, n * QSA.ID * 2)));
+  cache.rawK.set(Float32Array.from(rawAll, h2f));
   cache.n = n;
   let rawBad = 0;
   for (const [p, s] of snaps) for (let d = 0; d < QSA.ID; d++) if (f16bits(s.proj[512 + d]) !== f16bits(cache.rawK[p * QSA.ID + d])) rawBad++;

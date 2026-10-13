@@ -20,6 +20,13 @@
 // and reads the selected cells past that. Without the indexer weights (qsa: false, the room loader's dense phase)
 // attention is dense and the context is capped at 2048.
 //
+// Long context (docs/kernels.md "Flash long context"): kv "f16" keeps the 12 attention layers' K / V caches as f16
+// (half of f32's 48 KB per token; the kernels read them exactly and do the f32 arithmetic in the same order, so
+// decode, prefill and verify still agree bit for bit), and QSA's raw indexer keys are a ring of qsaRing rows (pooling
+// only reads the blocks a pass completes) instead of one row per position. qwen4expMemory (engine/qwen4exp_mem.js)
+// gives the state's bytes per context length; stateBytes() is what this engine allocated, _stateParts(pos) what a
+// checkpoint copies.
+//
 // Ops ({ pipe, bg, wg }, _encode) may instead carry dyn(pos, nCols) -> workgroups | null (skipped): QSA's ops, whose
 // sizes and dense / gathered choice depend on the step's position. bg may be a list (groups 0, 1, ..).
 //
@@ -42,7 +49,8 @@ import { notParked } from "./expert_store.js";
 import * as W from "./wgsl/qwen4exp.js";
 import { attnDecMcWGSL } from "./wgsl/qwen4exp_batch.js";
 import { qsaCheckConfig, qsaFlashPipelines, qsaShared, qsaScratch, qsaSetFrame, qsaLayerState, qsaBind, qsaStateOps, qsaSelectOps, qsaSparse,
-  QSA_SEL_STRIDE } from "./qwen4exp_qsa.js";
+  QSA_SEL_STRIDE, QSA_RAW_RING, QSA_KPOOL, QSA_ID } from "./qwen4exp_qsa.js";
+import { qwen4expMemory } from "./qwen4exp_mem.js";
 
 const U = GPUBufferUsage;
 const fr = Math.fround;
@@ -60,7 +68,11 @@ export class Qwen4ExpEngine {
   // moeTrace: keep every layer's router ids and weights per token (readMoeTrace). expertRegion: build the expert store
   // with its whole-layer region (ExpertStore.loadLayer / loadExperts / regionEntry), for a batched engine that routes
   // offloaded layers; off by default, since decode alone never needs it and its 1.4-1.8 GB goes to the pools instead.
-  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null, qsa = null, moeTrace = false, expertRegion = false }) {
+  // kv: the attention layers' K / V cache format, "f32" (the default) or "f16" (half the memory). qsaRing: QSA's raw
+  // indexer keys as a ring of this many rows (a power of two; batched passes of up to qsaRing - 3 columns), 0 to keep
+  // one row per position.
+  async _init({ device, meta, weights, layerRange = null, hasEmbed = true, hasHead = true, maxSeq = 2048, ngram = null, qsa = null, moeTrace = false, expertRegion = false,
+    kv = "f32", qsaRing = QSA_RAW_RING }) {
     const cfg = this.cfg = qwen4expConfig(meta);
     this.device = device;
     const [lo, hi] = layerRange || [0, cfg.L];
@@ -76,6 +88,17 @@ export class Qwen4ExpEngine {
     this.sparse = (pos, n) => this.qsaAlways || qsaSparse(pos, n);
     if (maxSeq > 2048 && qLayers.length && !this.qsa) throw new Error("qwen4exp: without QSA (the indexer weights) the context is capped at 2048 positions");
     this.maxSeq = maxSeq;
+    W.kvCheck(kv);
+    this.kv = kv;
+    this.qsaRing = this.qsa ? qsaRing : 0;
+    // each attention layer's K and V are one buffer each, bound whole: it must fit the device's binding limit (the
+    // test devices ask for the adapter's; a browser's default is 128 MiB: 65536 positions in f32, 131072 in f16)
+    this.kvBufBytes = maxSeq * cfg.nKVHeads * cfg.headDim * W.kvBytes(kv);
+    if (qLayers.length) {
+      const lim = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
+      if (this.kvBufBytes > lim) throw new Error(`qwen4exp: context ${maxSeq} needs a ${(this.kvBufBytes / 2 ** 20).toFixed(0)} MiB ${kv} K / V buffer per attention layer; `
+        + `this GPU device binds at most ${(lim / 2 ** 20).toFixed(0)} MiB (a shorter context${kv === "f32" ? ", or kv: \"f16\"" : ""})`);
+    }
     const d = cfg.dim, hc = cfg.hc, HD = cfg.hDim, ss = cfg.ssm;
     // shapes the kernels hard-code (engine/wgsl/qwen4exp.js): the router's workgroup arrays, DeltaNet's 128 lanes
     if (cfg.nExp > 1024 || cfg.K > 32) throw new Error(`qwen4exp: the router kernel holds at most 1024 experts / top-32, not ${cfg.nExp} / ${cfg.K}`);
@@ -102,11 +125,11 @@ export class Qwen4ExpEngine {
       ...["q4", "q8"].flatMap((k) => [8, 16, 32].map(async (n) => { P[`gemvmix_${k}_${n}`] = await pipe(W.gemvWGSL(k, n, 4, true), `gemvmix_${k}_${n}`); })),
       ...Object.entries({ route: W.MOE_ROUTE_WGSL, hcSite: W.HC_SITE_WGSL, hcMix: W.HC_MIX_WGSL, hcComb: W.HC_COMBINE_WGSL,
         dnConv: W.DN_CONV_WGSL, dnDelta: W.DN_DELTA_WGSL,
-        attnPrep: W.ATTN_PREP_WGSL, attnDec: W.ATTN_DEC_WGSL, ple: W.PLE_WGSL, am1: W.ARGMAX1_WGSL, am2: W.ARGMAX2_WGSL })
+        attnPrep: W.attnPrepWGSL(kv), attnDec: W.attnDecWGSL(kv), ple: W.PLE_WGSL, am1: W.ARGMAX1_WGSL, am2: W.ARGMAX2_WGSL })
         .map(async ([k, code]) => { P[k] = await pipe(code, k); }),
       // QSA: the gathered attention over the selected rows (one column), and the indexer kernels
-      ...(this.qsa ? [(async () => { P.attnGather = await pipe(attnDecMcWGSL({ gather: QSA_SEL_STRIDE }), "attn_gather"); })(),
-        (async () => { this.qsaK = await qsaFlashPipelines(device); })()] : []),
+      ...(this.qsa ? [(async () => { P.attnGather = await pipe(attnDecMcWGSL({ gather: QSA_SEL_STRIDE, kv }), "attn_gather"); })(),
+        (async () => { this.qsaK = await qsaFlashPipelines(device, { rawRing: this.qsaRing }); })()] : []),
     ]);
 
     // ---- scratch (shared by every layer: one token's ops run in order)
@@ -394,7 +417,7 @@ export class Qwen4ExpEngine {
   _attnOps(L, i, st, { gemv, wq, bg, uni, f, view, fuseRows }) {
     const { cfg, B, P, device } = this, nH = cfg.nHeads, nKV = cfg.nKVHeads, hd = cfg.headDim;
     if (hd !== 256) throw new Error("qwen4exp: attn kernels assume head dim 256");
-    const sz = this.maxSeq * nKV * hd * 4;
+    const sz = this.kvBufBytes;
     // COPY_SRC: a checkpoint copies the KV rows out on the GPU, as Qwen35Engine.saveSlot does (the DeltaNet state,
     // conv window and PLE ring are scratch buf()s, which already have it)
     st.kc = device.createBuffer({ size: sz, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST });
@@ -404,7 +427,7 @@ export class Qwen4ExpEngine {
     const dense = { pipe: P.attnDec, bg: bg(P.attnDec, [B.qn, st.kc, st.vc, qf, B.ao, ap, B.frame]), wg: [nH, 1, 1], tap: [`attn_gated-${i}`, B.ao, nH * hd] };
     let qsaState = [], qsaSel = [], gather = [];
     if (this.qsa) {
-      st.qsa = qsaLayerState(device, L, { maxSeq: this.maxSeq, dim: cfg.dim });
+      st.qsa = qsaLayerState(device, L, { maxSeq: this.maxSeq, dim: cfg.dim, rawRing: this.qsaRing });
       const G = qsaBind(device, this.qsaK, this.qsaSh, this.qsaS, st.qsa, B.mixed);
       qsaState = qsaStateOps(this.qsaK, G);
       qsaSel = qsaSelectOps(this.qsaK, G, this.sparse);
@@ -424,6 +447,46 @@ export class Qwen4ExpEngine {
       ...gather,
       gemv(wq(L.wo, "attn_output"), B.ao, B.out, { tap: [`attn_output-${i}`, B.out, cfg.dim] }),
     ];
+  }
+
+  // ---- per-sequence state: sizes, checkpoints
+  // What a checkpoint copies at pos (as Qwen35Engine._stateParts): per attention layer the K / V rows [0, pos) and,
+  // with QSA, the raw-key ring (whole: it holds the open block's rows) and the pooled keys of the complete blocks
+  // [0, floor(pos / 4)); per DeltaNet layer S and the conv window; the PLE ring. Every buffer has COPY_SRC (#361).
+  // The CPU part (pos, the n-gram predecessors: ngs.export()) is the caller's. -> [{ buf, bytes }]
+  _stateParts(pos = this.pos) {
+    const row = this.cfg.nKVHeads * this.cfg.headDim * W.kvBytes(this.kv), parts = [];
+    for (const { st } of this.layers) {
+      if (st.kc) {
+        parts.push({ buf: st.kc, bytes: pos * row }, { buf: st.vc, bytes: pos * row });
+        if (st.qsa) {
+          parts.push({ buf: st.qsa.rawK, bytes: st.qsa.rawRing ? st.qsa.rawK.size : pos * QSA_ID * 2 });
+          parts.push({ buf: st.qsa.pooled, bytes: Math.floor(pos / QSA_KPOOL) * QSA_ID * 2 });
+        }
+      }
+      for (const b of [st.S, st.conv, st.ring]) if (b) parts.push({ buf: b, bytes: b.size });
+    }
+    return parts;
+  }
+  // What a saved state must match to be loaded here
+  stateSignature() {
+    return { v: 1, arch: "qwen4exp", lo: this.lo, hi: this.hi, kv: this.kv, qsa: !!this.qsa, qsaRing: this.qsaRing, dim: this.cfg.dim };
+  }
+  // The bytes of per-sequence state this engine allocated, by kind (qwen4expMemory's split; scores: this engine's
+  // one-column QSA scratch only)
+  stateBytes() {
+    const b = { kv: 0, rawK: 0, pooled: 0, deltaNet: 0, ple: 0 };
+    for (const { st } of this.layers) {
+      if (st.kc) b.kv += st.kc.size + st.vc.size;
+      if (st.qsa) { b.rawK += st.qsa.rawK.size; b.pooled += st.qsa.pooled.size; }
+      if (st.S) b.deltaNet += st.S.size + st.conv.size;
+      if (st.ring) b.ple += st.ring.size;
+    }
+    return { bytes: b, state: b.kv + b.rawK + b.pooled + b.deltaNet + b.ple };
+  }
+  // qwen4expMemory for this engine's layers and formats
+  memory(opts = {}) {
+    return qwen4expMemory(this.cfg, { ctx: this.maxSeq, kv: this.kv, rawRing: this.qsaRing, qsa: !!this.qsa, layerRange: [this.lo, this.hi], ...opts });
   }
 
   // reset() also clears a failed step (_failed): a step that throws part way may have advanced layer 0's DeltaNet
