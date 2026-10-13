@@ -21,7 +21,8 @@
 //                save is saveSlot, the restore loadSlot, and again importState(exportSlot) (the disk copy's path, which
 //                reads every part back to the CPU); the tail runs through the room's step (embedRun). The negative
 //                controls import the slot's export with the left-out parts taken from the overwritten state. Also
-//                checks the signature is the engine's with v 2 and that a v1 one is refused.
+//                checks the signature is the engine's with v 2 and that a v1 one is refused, and that the room's step
+//                gives the engine's forwardToken hidden states on the tail (so a room step without QSA is seen).
 // Also: the engine's allocated state (stateBytes) == qwen4expMemory's sizes for its layers and formats.
 //   LAYERS=4 deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights tests/test_q38flash_ckpt.js
 import fs from "node:fs";
@@ -175,6 +176,19 @@ for (const how of room ? ["loadSlot", "importState(exportSlot)"] : ["copy"]) {
   const diff = cmp(A, B), sdiff = stateDiff(sA, await snap(eng.pos));
   console.log(`restored at pos ${s.pos}${room ? ` by ${how}` : ""}: tail hidden states ${diff ? diff + " values differ" : "bit for bit"}, state after the tail ${sdiff ? sdiff + " buffers differ" : `bit for bit (${sA.length} buffers)`}`);
   if (diff || sdiff) fail++;
+}
+// ROOM: A and B both ran through the room's step, so the checks above cannot see a room step that computes something
+// else than the engine (a missing QSA op or uniform in stepOps). Restore once more and run the tail through the
+// engine's own forwardToken: it has to give A.
+if (room) {
+  await overwrite();
+  await roomLoad(s, {});
+  const E = []; for (const t of tail) E.push((await eng.forwardToken(t)).hidden);
+  let d = 0, mx = 0, ref = 0;
+  for (let p = 0; p < tail.length; p++) for (let i = 0; i < A[p].length; i++) { const e = Math.abs(A[p][i] - E[p][i]); if (!Object.is(A[p][i], E[p][i])) d++; if (!(e <= mx)) mx = e; ref = Math.max(ref, Math.abs(E[p][i])); }
+  const ok = Number.isFinite(mx) && mx <= 1e-3 * ref;
+  console.log(`${ok ? "ok  " : "FAIL"} room step vs engine forwardToken on the tail: ${d ? `${d} values differ, max |diff| ${mx.toPrecision(3)} (max |h| ${ref.toPrecision(3)})` : "bit for bit"}`);
+  if (!ok) fail++;
 }
 if (errors.count) { console.log(`${errors.count} GPU errors`); fail++; }
 console.log(fail ? "Q38FLASH CKPT FAIL" : "Q38FLASH CKPT PASS ✓");

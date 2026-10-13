@@ -4,9 +4,10 @@
 //
 // What is kept: the pinned checkpoints only (ckpt.js: a prompt's fixed start, the system prompt and
 // tools, and an agent's cache boundary). Answer and turn checkpoints change every call and stay in
-// GPU memory. Each device writes its own layers' part (engine exportSlot: its KV rows [0, n), its
-// DeltaNet states and conv windows, as raw GPU bytes: what importState uploads with one writeBuffer
-// per part) when the host pins a prefix, and reads it back when the room comes online again.
+// GPU memory. Each device writes its own layers' part (engine exportSlot: its KV rows [0, n) in the
+// engine's KV format (f32 or f16), its DeltaNet states and conv windows, and for Flash with QSA the
+// raw-key ring and pooled keys, as raw GPU bytes: what importState uploads with one writeBuffer per
+// part) when the host pins a prefix, and reads it back when the room comes online again.
 //
 // When a copy may be used. A KV state is only valid for exactly the computation that made it, so
 // every file is keyed by, and its header repeats in full:

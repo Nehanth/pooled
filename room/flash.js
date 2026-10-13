@@ -203,7 +203,7 @@ const copyable = (b) => b?.usage == null || !!(b.usage & U.COPY_SRC);
 // rows, the embedding into R) and _encode. Once the engine has step / head / stateParts of its own, this goes.
 export function qwen4expCore(e) {
   const dev = e.device, cfg = e.cfg, HD = cfg.hDim;
-  const kvRow = cfg.nKVHeads * cfg.headDim * 4;   // f32 K (or V) per position
+  const kvRow = cfg.nKVHeads * cfg.headDim * 4;   // f32 K (or V) per position: only the fallback list below (no _stateParts)
   // Checkpoints use the engine's own state list and signature (engine/qwen4exp.js _stateParts / stateSignature, #375:
   // K / V rows in its KV format, QSA's raw-key ring and pooled keys). An engine without _stateParts (before #375) gets
   // the dense f32 list below, which only fits an f32 engine without QSA: anything else is refused rather than
