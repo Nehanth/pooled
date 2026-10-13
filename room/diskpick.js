@@ -113,6 +113,8 @@ export const devStoreTitle = (name, gb, st, share = null) => `${name}: ${gb} GB 
 export const DISK_STATE = { allow: "On", ask: "", deny: "", url: "Unavailable", small: "Unavailable", none: "Unavailable" };
 // the group's heading, like the pool's "The room pools"
 export const groupTitle = () => "What this device gives";
+// the invite card's hint while it is picked: what is missing is speed, not memory
+export const inviteHint = (m) => `Scan it, or type the code on another device. Each device that joins makes ${m.name} faster; a computer with lots of RAM helps most.`;
 // the GPU memory stepper's one-line hint while a disk model is picked (its pledge paragraph steps aside)
 export const GPU_HINT = "How much of this device's graphics memory the model may use";
 // why this device can't keep the copy, in plain words (the developer's detail goes in the tooltip)

@@ -4,12 +4,12 @@
 // black and twinkling when picked, with its fit chip, is room.js renderLadder's; the pool's line is renderPool's.)
 // The words and HTML are room/diskpick.js's; the answer, the stored size, Allow and Free are #368's, through
 // room/diskstore.js (one stored answer, one question: room.js askTabDisk; one delete: room.js freeTabDisk).
-import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT, pickNote, shortNote } from "./diskpick.js";
+import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT, pickNote, shortNote, inviteHint } from "./diskpick.js";
 import { diskStore } from "./diskstore.js";
 
 const $ = (id) => document.getElementById(id);
 const START = "Start the model", GIVES = "This device gives";
-let shown = null, stored = null, asked = 0, armed = 0, last = {}, covers = null;
+let shown = null, stored = null, asked = 0, armed = 0, last = {}, covers = null, invite = null;
 
 // Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, stores, needGB, fits, shareBytes } (this tab's
 // disk-tier RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether some device in the room can store it,
@@ -20,14 +20,15 @@ export function showDiskPick(key, info = last) {
   last = info;
   for (const id of ["ap-flash", "ap-for"]) $(id).hidden = !on;
   $("ap-me").classList.toggle("flash", on);
-  if (covers == null) covers = $("ap-covers").textContent;
-  if (!on) { if (shown) { $("ai-start").textContent = START; $("ap-me-k").textContent = GIVES; $("ap-covers").textContent = covers; } shown = null; asked = 0; disarm(); return; }
+  if (covers == null) { covers = $("ap-covers").textContent; invite = $("side-hint").textContent; }
+  if (!on) { if (shown) { $("ai-start").textContent = START; $("ap-me-k").textContent = GIVES; $("ap-covers").textContent = covers; $("side-hint").textContent = invite; } shown = null; asked = 0; disarm(); return; }
   if (asked !== key) stored = null;
   const state = diskStore.state(key);
   $("ai-start").textContent = `Start ${m.name}`;
   $("ap-for").textContent = groupTitle(m);
   $("ap-me-k").textContent = "GPU memory";
   $("ap-covers").textContent = GPU_HINT;
+  $("side-hint").textContent = inviteHint(m);
   $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.stores !== false, !!info.fits, { state, shareBytes: info.shareBytes ?? null, storedBytes: stored });
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;

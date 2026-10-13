@@ -2,7 +2,7 @@
 // future big model gets the same row, cost figures, consent and Start label from its own entry. The consent state is
 // #368's stored answer (room/flashdisk.js TAB_DISK_KEY), read through room/diskstore.js diskState.
 import { DISK_COPY, MODELS, PICKER, SHAPE, diskCopyBytes } from "../../room/models.js";
-import { diskCopyOf, rowChip, rowChipHTML, paramsText, rowTitle, groupTitle, GPU_HINT, diskRow, diskRowHTML, settingsHTML, sizeText, pickNote, shortNote, allowLabel,
+import { diskCopyOf, rowChip, rowChipHTML, paramsText, rowTitle, groupTitle, GPU_HINT, diskRow, diskRowHTML, settingsHTML, sizeText, pickNote, shortNote, allowLabel, inviteHint,
   poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle } from "../../room/diskpick.js";
 import { storageOf, offloadFor } from "../../room/pledge.js";
 import { diskState } from "../../room/diskstore.js";
@@ -84,6 +84,8 @@ Deno.test("diskpick: short, under Start: by how much, and the fix this device's 
 Deno.test("diskpick: the right column's group for the picked disk model", () => {
   eq(groupTitle(DISK_COPY["qwen3.8-flash"]), "What this device gives");
   ok(!/OPFS|tabram|tabdisk|pledge/i.test(GPU_HINT), "the GPU memory hint in plain words");
+  eq(inviteHint(DISK_COPY["qwen3.8-flash"]), "Scan it, or type the code on another device. Each device that joins makes Qwen3.8 Flash faster; a computer with lots of RAM helps most.");
+  ok(!/memory it gives/.test(inviteHint(DISK_COPY["qwen3.8-flash"])), "speed, not memory");
 });
 
 Deno.test("diskpick: Disk storage shows #368's answer, the stored size, the tier's RAM, Allow and Delete", () => {
