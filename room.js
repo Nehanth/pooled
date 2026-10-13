@@ -3089,6 +3089,7 @@ function chatBotEnd(note, stats) {
   botEl.querySelector(".bubble").replaceWith(fresh);
   renderBot(botEl, false);
   botEl.classList.remove("live");
+  if (!note && !ai.answered) { ai.answered = true; promptHint(); }
   // a finished answer in a background tab: say so in the tab title until the tab is looked at
   if (!note && document.hidden) { document.title = "\u2713 answer ready \u00b7 pooled"; }
   // under the answer: a copy icon (answers only, not notes), then the numbers
@@ -3396,7 +3397,16 @@ function loadProg(done, total, info = null) {
 // (it reads every offloaded layer's experts from OPFS)
 const offMsg = (o) => (o ? { lo: o.lo, hi: o.hi, vramBytes: o.vramBytes, ramBytes: o.ramBytes, ...(o.ramSpare > 0 ? { ramSpare: o.ramSpare } : {}),
   ...(Number.isInteger(o.diskLo) ? { diskLo: o.diskLo, diskRamBytes: o.diskRamBytes } : {}), ...(o.diskOnly ? { diskOnly: true } : {}) } : null);
-function closeEngine() { const e = ai.engine; ai.engine = null; try { e?.close?.()?.catch?.(() => {}); } catch {} }
+function closeEngine() { const e = ai.engine; ai.engine = null; try { e?.close?.()?.catch?.(() => {}); } catch {} ai.answered = false; promptHint(); }
+// The prompt's placeholder: a model read from disk (room/diskpick.js) is slow to its first answer, so until one has come
+// (since the model came online) the box says so; then the plain "Message the room". Only the placeholder: the status
+// lines and the speed numbers are the loading screen's.
+const PROMPT_PH = "Message the room";
+function promptHint() {
+  const k = ai.model || $("ai-model").value;
+  $("ai-prompt").placeholder = $("ai-panel").classList.contains("online") && !ai.answered && diskCopyOf(k)
+    ? `Ask ${shortName(k)}. The first answer takes a little while.` : PROMPT_PH;
+}
 
 // the model host (room/plan.js pickModelHost): the strongest device, a computer before a phone,
 // whoever pressed Start. The room's creator stays the PeerJS hub either way.
@@ -3967,6 +3977,7 @@ function aiMaybeReady() {
   clearInterval(ai.progTimer);
   if ($("load-card").classList.contains("on")) aiLoading(false);   // (a device back from a reload also lands here, with the chat up)
   $("ai-panel").classList.add("online");
+  promptHint();
   $("ai-row").style.display = "flex";
   $("chat-tools").hidden = false;
   $("new-chat").hidden = false;
@@ -5087,6 +5098,7 @@ async function aiOnData(from, d) {
       if (ai.role !== "host" && ai.role !== "worker") ai.role = "guest";
       if (ai.role !== "host") ai.hostId = from;
       if (MODELS[d.model]) { setModelValue(d.model); ai.model = d.model; }
+      promptHint();
       // the host opened the model at its fallback context: the room's memory is short for the default
       ai.ctxNote = d.ctxWant > d.ctx && MODELS[d.model] ? ctxShortNote(shortName(d.model), d.ctx, d.ctxWant) : "";
       ai.ctxK = d.ctx > 0 ? ctxK(d.ctx) : "";
@@ -5985,6 +5997,7 @@ if (new URLSearchParams(location.search).get("sim") === "1" && ["127.0.0.1", "lo
       ai.range = mine ? [+mine[1], +mine[2] + 1] : null;
       aiLoading(false);
       $("ai-panel").classList.add("online");
+      promptHint();
       $("ai-row").style.display = "flex"; $("chat-tools").hidden = false; $("mode-bar").hidden = false;
       emptyText("The model is ready. Ask anything.");
       for (const card of document.querySelectorAll("#peers .peer-card")) peerStatus(card, "ready", true);
