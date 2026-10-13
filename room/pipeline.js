@@ -5,10 +5,14 @@ import { DROP_ALL } from "./transport.js";
 import { lapTimeout } from "./liveness.js";
 import { PrefixIndex } from "../harness/prefix.js";
 
+// a chain with a device that steps prompt frames one column at a time (chainSlow): frames of this many columns, and
+// this many in flight
+export const SLOW_FRAME = 16, SLOW_WINDOW = 2;
+
 export function createPipeline({ state: ai, transport, options = {}, hooks = {}, checkpointStore: ckptDisk = null, getRoomCode = () => null }) {
   const { sendHidden, sendTo, chainRtt = () => 0 } = transport;
   const { profile = "browser", checkpointMax: CKPT_MAX = 2, fillDrafts: FILL_DRAFTS = true,
-    mtpBatch: MTP_BATCH = true, tailFrame: TAIL_FRAME = true, prefillWindow = 6 } = options;
+    mtpBatch: MTP_BATCH = true, tailFrame: TAIL_FRAME = true, prefillWindow = 6, prefillLapMs: PREFILL_LAP_MS = 90000 } = options;
   const PREFILL_WINDOW = Number.isFinite(prefillWindow) ? Math.max(1, Math.floor(prefillWindow)) : 6;
   const { onStatus: aiStatus = () => {}, computePass = () => {}, teleNote = () => {},
     wakeChain = () => {}, keepWarm = () => {}, onFrame = () => {}, prefillFrame = () => undefined,
@@ -21,15 +25,24 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
   const headError = (pos) => `NaN in logits (pos ${pos})` + (node ? "" : " — head/lm_head kernel issue on host");
   const defaultStatus = aiStatus;
 
-  function lapWait(key, ms, what) {
+  // after: a promise (the frame queued ahead of this one on the chain): the timer starts once it settles, not at send.
+  // Prompt frames wait behind each other at the slowest device, so frame k of a window would otherwise be timed for
+  // the k frames ahead of it as well
+  function lapWait(key, ms, what, after = null) {
     return new Promise((res, rej) => {
-      const timer = setTimeout(() => { ai.waiters.delete(key); rej(new Error(`pipeline timeout (${what}): a device in the room stopped answering` + (node ? "" : ". Check that every device's tab is open with its screen on, then ask again"))); }, ms);
+      let timer = null, done = false;
+      const arm = () => { if (!done) timer = setTimeout(() => { ai.waiters.delete(key); rej(new Error(`pipeline timeout (${what}): a device in the room stopped answering` + (node ? "" : ". Check that every device's tab is open with its screen on, then ask again"))); }, ms); };
       ai.waiters.set(key, {
-        res: (h) => { clearTimeout(timer); res(h); },
-        rej: (e) => { clearTimeout(timer); rej(e); },
+        res: (h) => { done = true; clearTimeout(timer); res(h); },
+        rej: (e) => { done = true; clearTimeout(timer); rej(e); },
       });
+      if (after) after.then(arm, arm); else arm();
     });
   }
+  // a device in the chain runs prompt frames one column at a time (ai-ready batch: 0, or an older build that does not
+  // say: room.js / roomnode.js record it in ai.batchOf for a Flash room): the host's frames stay narrow and few, so a
+  // slow device never holds PREFILL_WINDOW wide frames
+  function chainSlow() { return !!ai.batchOf && ai.chain.some((id) => ai.batchOf.get(id) === false); }
 
   function failWaiters(err) { for (const [k, w] of ai.waiters) { ai.waiters.delete(k); w.rej(err); } }
 
@@ -287,16 +300,22 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
       // runs frames in send order, so round r+1 can enter the host's layers while round r is on a
       // worker: the chain works like a pipeline instead of one device at a time.
       const hdim = wireDim(current.engine);
-      const NC = current.engine.NC || 4;   // columns per GPU pass
+      // columns per GPU pass; a slow chain (chainSlow): SLOW_FRAME columns per frame, SLOW_WINDOW frames in flight
+      const slow = chainSlow(), NC = slow ? Math.min(SLOW_FRAME, current.engine.NC || 4) : current.engine.NC || 4;
+      const WINDOW = slow ? Math.min(SLOW_WINDOW, PREFILL_WINDOW) : PREFILL_WINDOW;
       // step down 16 -> 8 -> 4 on the tail: without this a remainder of up to NC-1 tokens costs one
       // network lap each
       const widths = [NC, ...[8, 4].filter((w) => w < NC)];
       const inflight = [];
+      let ahead = null;   // the lap of the frame sent last: the next frame's timer starts when it is back (lapWait after)
       const send = async (hb, basePos, i0, n) => {
         if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
         if (ai.chain.length) {
-          while (inflight.length >= PREFILL_WINDOW) await inflight.shift();
-          const p = lapWait("b" + basePos, 90000, "batch prefill").then((h) => fillDrafts(h, ids, i0, basePos, n));
+          while (inflight.length >= WINDOW) await inflight.shift();
+          // a frame's own time: the base, and n columns at the slowest recent lap (a device stepping one column at a time)
+          const lap = lapWait("b" + basePos, PREFILL_LAP_MS + n * (ai.lapStat?.max || 0), "batch prefill", ahead);
+          ahead = lap.catch(() => {});
+          const p = lap.then((h) => fillDrafts(h, ids, i0, basePos, n));
           p.catch(() => {});
           inflight.push(p);
           sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb, idsFor(current.engine, ids.slice(i0, i0 + n))) });
@@ -309,7 +328,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
       try {
         // Node hosts can send wide prompt frames through every device's prefill kernels.
         // The caller supplies its environment override; browser host framing stays unchanged.
-        const F = node && ai.chain.length && current.engine.prefillHidden && current.engine.prefillFrame?.() > 0
+        const F = node && ai.chain.length && !slow && current.engine.prefillHidden && current.engine.prefillFrame?.() > 0
           ? +(prefillFrame() || current.engine.prefillFrame()) || 0 : 0;
         while (F && ids.length - 1 - i >= 2 * NC && !aborted()) {
           const n = Math.min(F, ids.length - 1 - i), basePos = ai.pos;
@@ -328,7 +347,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
           const n = ids.length - i, basePos = ai.pos, i0 = i;   // n <= 4: what the widths above left
           const hb = await current.engine.embedRunBatch(ids.slice(i), basePos);
           if (badF32(hb)) throw new Error(`NaN in batched prefill (pos ${basePos})`);
-          const p = lapWait("b" + basePos, 90000, "prefill tail");
+          const p = lapWait("b" + basePos, PREFILL_LAP_MS + n * (ai.lapStat?.max || 0), "prefill tail", ahead);
           p.catch(() => {});
           sendChain({ t: "ai-hidden-b", basePos, n, ...packWire(hb, idsFor(current.engine, ids.slice(i0))) });
           ai.pos = basePos + n;

@@ -775,7 +775,10 @@ export class RoomNode extends EventEmitter {
           return;
         }
         (ai.readyInfo ||= new Map()).set(e?.name || from, { ctx: +d.ctx || null, fsig: d.fsig && typeof d.fsig === "object" ? d.fsig : null });   // (logs, tests)
-        ai.readyPeers.add(from); ai.ckptCap.set(from, !!d.ckpt); ai.diskOf.set(from, d.disk && typeof d.disk === "object" ? d.disk : null); this.emit("progress", { name: e?.name, pct: 100 }); this.maybeReady();
+        ai.readyPeers.add(from); ai.ckptCap.set(from, !!d.ckpt);
+        ai.diskOf.set(from, d.disk && typeof d.disk === "object" ? d.disk : null);
+        if (MODELS[ai.model]?.kind === "qwen4exp") (ai.batchOf ||= new Map()).set(from, d.batch === 1);   // (room/pipeline.js chainSlow)
+        this.emit("progress", { name: e?.name, pct: 100 }); this.maybeReady();
         return;
       }
       case "ai-ckpt-loaded":   // worker -> host: the slots it read back from disk (diskRestore)
@@ -911,6 +914,7 @@ export class RoomNode extends EventEmitter {
         try {
           const r = await this.loadShardFn({ modelKey: d.model, range: d.range, hasEmbed: false, hasHead: false, ctx: d.ctx || maxSeqFor(d.model),
             kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(d.offload), flash: d.flash || null,
+            pledgeBytes: this.meta ? pledgeGB(this.meta, Infinity, d.model) * 2 ** 30 : 0,
             onGpuError: (m) => { this.log("GPU error: " + m); this.sendTo(ai.hostId, { t: "ai-error", message: "GPU error: " + m.slice(0, 300) }); },
             onProgress: (done, total) => {
               if (ai.startFailed) throw new Error(ai.startFailed);
@@ -927,8 +931,11 @@ export class RoomNode extends EventEmitter {
       // disk: what keys this device's disk copies (ckptdisk.js), for the host's room key
       ai.diskPend.clear();
       const disk = this.diskLocal();
-      // ctx, fsig: the positions this engine holds and (Flash) its state signature, so the host sees what was loaded
-      this.sendTo(ai.hostId, { t: "ai-ready", slots: [], ckpt: ai.engine?.saveSlot ? 1 : 0, ...(disk ? { disk } : {}), ...flashReadyFields(ai.engine, d.model) });
+      // ctx, fsig: the positions this engine holds and (Flash) its state signature, so the host sees what was loaded;
+      // batch (Qwen3.8-Flash-Next): whether this device runs prompt frames in batched passes (room/flash.js), so the host
+      // can narrow its frames for one that does not (room/pipeline.js chainSlow). Older hosts ignore both
+      this.sendTo(ai.hostId, { t: "ai-ready", slots: [], ckpt: ai.engine?.saveSlot ? 1 : 0, ...(disk ? { disk } : {}), ...flashReadyFields(ai.engine, d.model),
+        ...(ai.engine?.batch !== undefined ? { batch: ai.engine.batch ? 1 : 0 } : {}) });
       this.emit("loaded", { range: d.range, model: d.model, s: (performance.now() - t0) / 1000 });
     } catch (err) {
       if (ai.startFailed) { this.freeLayers(null); return; }
@@ -1090,7 +1097,7 @@ export class RoomNode extends EventEmitter {
         await new Promise((r) => setTimeout(r, 250));
       }
     }
-    ai.starting = true; ai.degraded = false; ai.readyPeers = new Set(); ai.model = modelKey; ai.online = false;
+    ai.starting = true; ai.degraded = false; ai.readyPeers = new Set(); ai.batchOf = new Map(); ai.model = modelKey; ai.online = false;
     ai.short = null; ai.startOk = ai.startErr = null;   // (this deal's, once its devices are dealt: dealAgain)
     // a fresh deal: every device starts without checkpoints (a worker that keeps its layers drops its
     // slots); what each worker applies comes with its ai-ready, which may arrive before this device's load ends
@@ -1196,6 +1203,7 @@ export class RoomNode extends EventEmitter {
         let lastPct = -1;
         unwatch = this.watchLoad(src);
         const r = await this.loadShardFn({ modelKey, range: ranges[0], hasEmbed: true, hasHead: true, ctx, kv, src, flags: this.flags, selfTest: this.selfTest, log: this.log, offload: this.offloadOk(myOff), flash,
+          pledgeBytes: this.meta ? pledgeGB(this.meta, ai.shareCap.get(this.name), modelKey) * 2 ** 30 : 0,
           onGpuError: (m) => this.log("GPU error: " + m),
           onProgress: (done, total) => { const pct = Math.round(total ? (done / total) * 100 : 0); if (pct !== lastPct) { lastPct = pct; this.emit("loadprogress", pct); } } });
         Object.assign(ai, { engine: r.engine, device: r.device, tok: r.tok, cfg: r.cfg, range: ranges[0], role: "host", experts: r.experts || null });

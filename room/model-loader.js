@@ -10,7 +10,7 @@ import { ngramConfig, NgramTable, httpReadAt } from "../engine/ngram.js";
 import { NGRAM_OPFS_DIR, ngramDir, ngramContentSig, tabOffloadLayers, tabExpertTier, opfsResidentExperts, ingestNgram,
   tabDiskGate, tabExpertBytes, expertTierCheck, expertTierCopy, expertTierOpen, expertStoreDeferred, ngramCheck, savePoolFor, protocolOf, onHttp1 } from "./flashdisk.js";
 import { partsTracker, runFlashParts } from "./flashload.js";
-import { FlashRoomEngine } from "./flash.js";
+import { FlashRoomEngine, flashBatchCols } from "./flash.js";
 import { planSteps, loadTracker } from "./loadsteps.js";
 import { MODELS, MAX_SEQ, mergeSplitHeaders, roomBytes, ngramOf, flashLoadOpts } from "./models.js";
 import { cacheKey } from "./weightcache.js";
@@ -354,8 +354,19 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       };
       const makeEngine = async (weights, ngram) => {
         const { Qwen4ExpEngine } = await import("../engine/qwen4exp.js");
-        ai.engine = FlashRoomEngine.wrap(await Qwen4ExpEngine.create({ device: ai.device, meta: G.meta, weights, layerRange: range,
-          hasEmbed, hasHead, maxSeq: q ? ctx : Math.min(ctx, 2048), ngram, ...(q ? { qsa: null, kv: q.kv, qsaRing: q.ring } : { qsa: false }) }));
+        const eng = await Qwen4ExpEngine.create({ device: ai.device, meta: G.meta, weights, layerRange: range,
+          hasEmbed, hasHead, maxSeq: q ? ctx : Math.min(ctx, 2048), ngram, ...(q ? { qsa: null, kv: q.kv, qsaRing: q.ring } : { qsa: false }) });
+        // batched prompt passes (room/flash.js): built now so their pipelines compile during the load. Not over the disk
+        // tier (a tab's offloaded experts are read from OPFS: Qwen4ExpBatch refuses those layers); a batch that fails to
+        // build leaves this tab on one decode step per column, as before, and the host narrows its frames for it
+        let pb = null;
+        if (!experts) {
+          try {
+            const { Qwen4ExpBatch } = await import("../engine/qwen4exp_batch.js");
+            pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: flashBatchCols(hasEmbed && hasHead && range[0] === 0 && range[1] === c.L), verifyCols: 1 });
+          } catch (e) { console.warn(`Flash: no batched prompt passes on this tab (${e?.message || e}); one column at a time`); }
+        }
+        ai.engine = FlashRoomEngine.wrap(eng, { batch: pb });
         if (experts) console.info(experts.summary().replace(/; \d+ cuts.*/, ""));
       };
       const offInfo = () => console.info(`expert offload: layers ${off.disk[0]}-${off.disk[off.disk.length - 1]} read their experts from OPFS, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GiB GPU cache, ${((+offload.diskRamBytes || 0) / 2 ** 30).toFixed(2)} GiB RAM cache`);

@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { dawnFlagsFor, v8FlagsFor, probeMeta, unifiedMemory, qsaAlways } from "../env.js";
+import { dawnFlagsFor, v8FlagsFor, probeMeta, unifiedMemory, qsaAlways, flashBatchMode, flashRegionForced } from "../env.js";
 
 const SKIP = "d3d_skip_shader_optimizations";
 test("dawnFlagsFor: DAWN_OPTS elsewhere, FXC's optimizer off on Windows", () => {
@@ -60,4 +60,12 @@ test("probeMeta: offload on a discrete GPU, never on unified memory", async () =
   } finally {
     if (had) Object.defineProperty(globalThis.navigator, "gpu", had); else delete globalThis.navigator.gpu;
   }
+});
+
+test("POOLED_FLASH_BATCH / POOLED_FLASH_REGION: the Flash batched-prefill test switches", () => {
+  for (const [v, want] of [[undefined, "wide"], ["", "wide"], ["1", "wide"], ["wide", "wide"], ["0", "off"], ["false", "off"], [" OFF ", "off"], ["exact", "exact"], ["Exact", "exact"]])
+    assert.equal(flashBatchMode(v === undefined ? {} : { POOLED_FLASH_BATCH: v }), want, String(v));
+  assert.equal(flashRegionForced({}), false);
+  assert.equal(flashRegionForced({ POOLED_FLASH_REGION: "1" }), true);
+  assert.equal(flashRegionForced({ POOLED_FLASH_REGION: "0" }), false);
 });

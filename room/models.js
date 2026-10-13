@@ -80,12 +80,24 @@ function flashMeta(M) {
   return { L, qsa, K: k("expert_used_count"), dim: k("embedding_length"), nKV: k("attention.head_count_kv"), headDim: k("attention.key_length"),
     ssm: { state: k("ssm.state_size"), nVH: k("ssm.time_step_rank"), nKH: k("ssm.group_count"), inner: k("ssm.inner_size"), convK: k("ssm.conv_kernel") } };
 }
+// Batched prompt passes (room/flash.js): the prompt frame width a node host sends (FlashRoomEngine.prefillFrame;
+// POOLED_PREFILL_FRAME overrides it), measured on the GB10 pair (PR body): wider frames run the wide kernels better,
+// narrower ones keep both devices busy (room/pipeline.js PREFILL_WINDOW frames in flight)
+export const FLASH_PREFILL_FRAME = 256;
+// The GPU buffers a Qwen4ExpBatch allocates (its scratch B, the readback stages; no QSA): measured on the GB10 with
+// tests/test_q38flash_room_batch.js (qwen4expBatchBytes after create): 156.9 MiB at maxCols 256 and 612.0 MiB at 1024
+// on a worker's layers (a host's with the embedding: 141.8 / 552.0), so 621,363 B per column and 5.4 MiB fixed; the
+// wantHidden stage (maxCols x hDim f32, made on the first frame) on top. -> bytes
+export const FLASH_BATCH_BYTES_PER_COL = 622000, FLASH_BATCH_BYTES_FIXED = 6 * 2 ** 20;
+export function flashBatchScratch(cols) { return FLASH_BATCH_BYTES_FIXED + cols * (FLASH_BATCH_BYTES_PER_COL + 10240 * 4); }
 // Expert offload's extra sizes for Qwen3.8-Flash-Next (room/plan.js offloadSpare, expertSizes), from flashMeta's fields:
 //   kvPos   K + V in f32 (the phase-1 engine), 2 x nKV x headDim x 4 per QSA layer and position, averaged over the layers
 //   state   a DeltaNet layer's S and conv window, averaged (the QSA layers have none): speculation's rollback copy
-//   work    the engine's working buffers (offloadWork by the hidden size)
-//   region  false: engine/qwen4exp.js builds its expert store without the whole-layer region (decode one token at a
-//           time: a cut never holds more than K experts), so the deal must not set one aside
+//   work    the engine's working buffers (offloadWork by the hidden size) and the batched passes' scratch at the room's
+//           prompt frame width (flashBatchScratch, measured)
+//   region  false: the deal sets no whole-layer region aside; the device takes one for batched prompt passes only from
+//           its pledge's slack or out of a cache that keeps OFFLOAD_GOOD_SLOTS after it (room-node shard.js loadFlash),
+//           else runs prompt frames one column at a time
 //   byLayer the checkpoints' part comes from the room's per-layer costs (flashLayerCost: its offVram / offRam, the
 //           shared flashCkptReserve), not from kvPos x ckptTokens, whenever the deal has them
 //   ckptTokens  without per-layer costs (a deal given one number per layer): 8 slots of at most 2048 positions
@@ -95,7 +107,7 @@ export function flashOffload(f) {
   const s = f.ssm, dn = (f.L - f.qsa) / f.L;
   return { kvPos: 2 * f.nKV * f.headDim * 4 * f.qsa / f.L,
     state: (s.nVH * s.state * s.state * 4 + (2 * s.nKH * s.state + s.inner) * (s.convK - 1) * 4) * dn,
-    work: offloadWork(f.dim), region: false, byLayer: true, ckptTokens: FLASH_CKPT_TOKENS, K: f.K || 10 };
+    work: offloadWork(f.dim) + flashBatchScratch(FLASH_PREFILL_FRAME), region: false, byLayer: true, ckptTokens: FLASH_CKPT_TOKENS, K: f.K || 10 };
 }
 // A Qwen3.5 / 3.6 layer's recurrent state, averaged over the layers (all but every full_attention_interval-th are
 // DeltaNet): S (nVH x dState x dState f32) and the conv window (3 x convDim f32), as engine/qwen35.js allocates them

@@ -14,6 +14,14 @@
 //      CASES=a,b (default every golden case under 2048 tokens), SOLO_GB (90), OUT (result JSON), PORT (8251),
 //      POOLED_QSA_ALWAYS=1 (QSA's gathered attention on every step, env.js qsaAlways). The result records the room's
 //      Flash format (ai-load.flash: QSA, or null for dense) and what each worker's ai-ready said it loaded.
+//      SAME_AS=<an earlier run's OUT>: also require every case's ids to equal that run's (a batched room against the
+//        same room per token, POOLED_FLASH_BATCH=0, or against main's)
+//      WORKER_RAM_GB=N (pair): the worker lends N GB of RAM for expert offload, so a WORKER_GB under its share parks
+//        experts (shard.js loadFlash: batched passes with the whole-layer region when it fits, else per token)
+//      POOLED_FLASH_BATCH=0 | exact (room-node env.js): batched prompt passes off / on the bit-exact kernels
+//      FRAMES=128,256 (a node host's prompt frame widths, POOLED_PREFILL_FRAME): every case once per width, keyed
+//        name@width, the caches cleared between (no checkpoint or live prefix carries over)
+// Each case reports its prompt's prefill time and tok/s (prefillS, prefillTps), decode tok/s and its ids
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -48,7 +56,8 @@ try {
     const split = process.env.SPLIT || "memory";
     host = await createRoom({ model: MODEL, pledgeGB: +(process.env.HOST_GB || 40), name: "flash-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a"), split });
     if (process.env.CODE_FILE) { fs.writeFileSync(process.env.CODE_FILE, host.code); log(`room ${host.code}: waiting for a worker from another process`); }
-    else worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || 40), name: "flash-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
+    else worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || 40), name: "flash-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b"),
+      ...(+process.env.WORKER_RAM_GB > 0 ? { ramGB: +process.env.WORKER_RAM_GB } : {}) });
     const t = Date.now();
     await host.start(MODEL, { minDevices: 2, waitMs: process.env.CODE_FILE ? +(process.env.WAIT_S || 600) * 1000 : 60000 });
     out.loadS = (Date.now() - t) / 1000;
@@ -60,7 +69,10 @@ try {
   out.qsaAlways = process.env.POOLED_QSA_ALWAYS === "1";
   log(`online: ${JSON.stringify(host.split)} in ${out.loadS.toFixed(0)} s; Flash format ${JSON.stringify(out.flash)}; engines ${JSON.stringify(out.engines)}`);
   let fail = 0;
-  for (const [name, g] of cases) {
+  const same = process.env.SAME_AS ? JSON.parse(fs.readFileSync(process.env.SAME_AS, "utf8")) : null;
+  const widths = process.env.FRAMES ? process.env.FRAMES.split(",") : [null];
+  for (const [name, g, w] of widths.flatMap((w) => cases.map(([k, v]) => [w ? `${k}@${w}` : k, v, w]))) {
+    if (w) { process.env.POOLED_PREFILL_FRAME = w; host.ai.fed = null; host.ckptClear(true); }
     const t = performance.now();
     // the room's head logits at every step (plain decoding: one sample call per answer token; Flash has no
     // speculative path), for the rule's top-2 gap and the top-5 at the first difference
@@ -74,9 +86,13 @@ try {
     if (diff < 0 && ids.length < g.ids.length) diff = ids.length;
     const verdict = diff < 0 ? "MATCH" : J.excused ? "TIE" : "MISMATCH";
     if (verdict === "MISMATCH") fail++;
-    out.cases[name] = { verdict, n: g.ids.length, diff, rule: J.msg, tps: +r.tps.toFixed(2), prefillS: +(r.tPre / 1000).toFixed(2), prompt: g.prompt.length, wallS: +((performance.now() - t) / 1000).toFixed(1),
-      text: host.ai.tok.decode(ids), ids, ...(diff >= 0 ? { got: ids.slice(Math.max(0, diff - 2), diff + 4), want: g.ids.slice(Math.max(0, diff - 2), diff + 4), ourTop: tops[diff], llamaTop: g.top?.[diff] } : {}) };
-    log(`${name}: ${verdict}${diff >= 0 ? ` at ${diff}: ${diff < ids.length ? J.msg : `${ids.length} of ${g.ids.length} ids`}` : ` (${g.ids.length} ids)`} · prompt ${g.prompt.length} tok in ${(r.tPre / 1000).toFixed(1)} s · decode ${r.tps.toFixed(2)} tok/s`);
+    // the same ids as the reference run (SAME_AS), when given
+    const ref = (same?.cases?.[name] || same?.cases?.[name.split("@")[0]])?.ids, sameIds = ref ? ref.length === ids.length && ref.every((x, i) => x === ids[i]) : null;
+    if (sameIds === false) fail++;
+    out.cases[name] = { verdict, n: g.ids.length, diff, rule: J.msg, tps: +r.tps.toFixed(2), prefillS: +(r.tPre / 1000).toFixed(2), prefillTps: +(g.prompt.length / (r.tPre / 1000)).toFixed(1),
+      prompt: g.prompt.length, wallS: +((performance.now() - t) / 1000).toFixed(1), ...(sameIds !== null ? { sameIds } : {}),
+      text: host.ai.tok.decode(ids), ids: Array.from(ids), ...(diff >= 0 ? { got: ids.slice(Math.max(0, diff - 2), diff + 4), want: g.ids.slice(Math.max(0, diff - 2), diff + 4), ourTop: tops[diff], llamaTop: g.top?.[diff] } : {}) };
+    log(`${name}: ${verdict}${diff >= 0 ? ` at ${diff}: ${diff < ids.length ? J.msg : `${ids.length} of ${g.ids.length} ids`}` : ` (${g.ids.length} ids)`} · prompt ${g.prompt.length} tok in ${(r.tPre / 1000).toFixed(1)} s (${(g.prompt.length / (r.tPre / 1000)).toFixed(1)} tok/s) · decode ${r.tps.toFixed(2)} tok/s${sameIds === null ? "" : sameIds ? " · ids == SAME_AS" : " · ids DIFFER from SAME_AS"}`);
   }
   out.pass = !fail;
   code = fail ? 1 : 0;

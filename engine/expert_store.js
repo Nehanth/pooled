@@ -219,6 +219,22 @@ export class ExpertStore {
   // the six [part, slice] pairs of a layer, in pool / region buffer order
   static SLICES = [["gate", 0], ["gate", 1], ["up", 0], ["up", 1], ["down", 0], ["down", 1]];
   _per(S) { return ExpertStore.SLICES.map(([p, s]) => S.parts[p].sl[s].per); }
+  // The whole-layer region build({ region: true }) would allocate for the layers parked so far: the largest layer's
+  // whole expert arrays, slice by slice (a loader decides from it whether the device has the room; room-node shard.js)
+  regionSize() {
+    const layers = [...this.L.keys()];
+    if (!layers.length) return 0;
+    const nExp = this.L.get(layers[0]).parts.gate.nExp, per = layers.map((l) => this._per(this.L.get(l)));
+    return ExpertStore.SLICES.reduce((a, _, j) => a + Math.max(...per.map((x) => x[j])) * nExp, 0);
+  }
+  // The experts each offloaded layer's pool would hold with a region of regionBytes taken out of vramBytes (build's P)
+  poolSlots(regionBytes = 0) {
+    const layers = [...this.L.keys()];
+    if (!layers.length) return 0;
+    if (this.slotsOpt > 0) return this.slotsOpt;
+    const perExp = layers.reduce((a, l) => a + this._per(this.L.get(l)).reduce((x, y) => x + y, 0), 0);
+    return Math.min(this.L.get(layers[0]).parts.gate.nExp, Math.floor((this.vramBytes - regionBytes) / perExp));
+  }
   // Allocate the pools and the region. K: experts per token (the pool must hold one token's). region: false for an
   // engine with no batched passes (engine/qwen4exp.js, one token at a time: a cut never has more than K experts), so
   // the whole-layer region (1.4-1.8 GB for Qwen3.8-Flash-Next's 512 experts) goes to the pools instead.

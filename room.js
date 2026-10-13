@@ -3780,7 +3780,7 @@ async function aiStart(modelArg) {
     ai.dealer = peer.id; ai.dealerFresh = true; ai.dealerActive = true;
     ai.degraded = false;
     ai.startFailed = null;
-    ai.readyPeers = new Set();
+    ai.readyPeers = new Set(); ai.batchOf = new Map();
     ai.ckptHeld = new Map();
     ai.relinks = new Map();
     ai.teleBy = new Map();
@@ -5345,8 +5345,10 @@ async function aiOnData(from, d) {
         $("ldg-fill").style.width = "100%";
         // slots: the host forgets the checkpoints not in them; ckpt: this device applies sv / ld / dp
         // (a room node hosting a dense model checks it: tabs from before the dense engine had slots ignore them)
-        // ctx, fsig (Flash): the positions this engine holds and its state signature
-        sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0, ...flashReadyFields(ai.engine, d.model) });
+        // ctx, fsig (Flash): the positions this engine holds and its state signature; batch (Qwen3.8-Flash-Next): whether
+        // this device runs prompt frames in batched passes (room/flash.js); a host narrows its frames for a device that
+        // does not (room/pipeline.js chainSlow). Older hosts ignore them
+        sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0, ...flashReadyFields(ai.engine, d.model), ...(ai.engine?.batch !== undefined ? { batch: ai.engine.batch ? 1 : 0 } : {}) });
       } catch (err) {
         if (onLoadError(ai.startFailed) === "stopped") { workerStopped(); break; }   // the host stopped the start (ai-start-failed): this load stopped with it
         closeEngine();
@@ -5434,6 +5436,8 @@ async function aiOnData(from, d) {
       if (short) { log("room", `${e?.name || from}: ${short}`); aiLoadFailed(from, e?.name || from, short); break; }
       ai.readyPeers.add(from);
       (ai.ckptHeld ||= new Map()).set(from, d.slots);   // what it read back from disk (none from an older build)
+      // a Flash worker without batched passes (batch: 0, or a build before them that does not say): narrow prompt frames
+      if (MODELS[ai.model]?.kind === "qwen4exp") (ai.batchOf ||= new Map()).set(from, d.batch === 1);
       if (e?.card) { e.card.querySelector(".bw").textContent = "ready"; peerStatus(e.card, "ready", true); }
       aiMaybeReady();
       break;
