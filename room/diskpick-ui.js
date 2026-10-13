@@ -28,7 +28,7 @@ export function showDiskPick(key, info = last) {
   $("ap-for").textContent = groupTitle(m);
   $("ap-me-k").textContent = "GPU memory";
   $("ap-covers").textContent = GPU_HINT;
-  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.stores !== false, !!info.fits);
+  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.stores !== false, !!info.fits, { state, shareBytes: info.shareBytes ?? null, storedBytes: stored });
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;
   shown = sig;

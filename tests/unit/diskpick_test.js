@@ -38,13 +38,27 @@ Deno.test("diskpick: the row, and the line under the rows", () => {
   ok(rowChipHTML(m).includes('<span class="dkz">125B · </span>runs from disk'), "a phone keeps only \"runs from disk\"");
   ok(!/<svg/.test(rowChipHTML(m)), "no star");
   eq(rowTitle(m), "Qwen3.8 Flash: a 125B (6B active) model that keeps most of itself on disk, so it needs far less GPU memory");
-  eq(pickNote(m, 5.7), "Qwen3.8 Flash is a 125B model. It keeps most of itself on disk, so it needs only 5.7 GB of GPU memory. Each device that joins makes it faster.");
+  const END = "Alone it reads from disk, so answers start slowly. Each device that joins makes it faster.";
+  eq(pickNote(m, 5.7), `Qwen3.8 Flash is a 125B model. It keeps most of itself on disk, so it needs only about 6 GB of GPU memory. ${END}`);
+  eq(pickNote(m, 8.1), pickNote(m, 8.6), "a device joining doesn't grow the figure beside \"makes it faster\"");
+  ok(pickNote(m, 8.1).includes("only about 9 GB of GPU memory"));
   ok(pickNote(m, null).includes("far less GPU memory than its size"), "before the planner has a figure");
+  // what the first Start downloads to this device, by its disk answer
+  const say = (disk) => pickNote(m, 8.1, true, true, disk).replace(/^.*?GPU memory\. /, "").replace(END, "").trim();
+  eq(say({ state: "allow", shareBytes: null, storedBytes: 0 }), "The first Start downloads 92.4 GB to this device's disk, once; that can take an hour or more on home internet.");
+  eq(say({ state: "allow", shareBytes: 46.2 * GB, storedBytes: 0 }), "The first Start downloads 46.2 GB to this device's disk, once; that can take an hour or more on home internet.", "its share");
+  eq(say({ state: "allow", shareBytes: 46.2 * GB, storedBytes: 46.2 * GB }), "It's already saved on this device.");
+  eq(say({ state: "allow", shareBytes: null, storedBytes: m.diskBytes }), "It's already saved on this device.");
+  eq(say({ state: "allow", shareBytes: 46.2 * GB, storedBytes: 10 * GB }), "Start finishes saving 46.2 GB to this device's disk.");
+  eq(say({ state: "ask", shareBytes: null, storedBytes: 0 }), "Start asks first, then downloads 92.4 GB to this device's disk, once.");
+  for (const st of ["deny", "url", "small", "none"]) eq(say({ state: st, shareBytes: null, storedBytes: 0 }), "", st);
+  eq(say({ state: "allow", shareBytes: 0, storedBytes: 0 }), "", "the room doesn't need this device's disk");
+  eq(say({ state: "ask", shareBytes: 0, storedBytes: 0 }), "");
   eq(pickNote(m, 67, false), "Qwen3.8 Flash is a 125B model that keeps most of itself on disk.", "no device stores it: never a whole-model GPU figure, and the fix is said under Start and in the pool");
   eq(pickNote(m, null, false), pickNote(m, 67, false), "no planner figure (a small room): the same, never \"far less GPU memory\"");
   eq(pickNote(m, 67, false, true), "Qwen3.8 Flash is a 125B model. This room's GPU memory holds all of it.");
   ok(!/67| on GPUs/.test(pickNote(m, 67, false) + pickNote(m, 67, false, true)), "no 67");
-  ok(!/MoE|expert|OPFS|pledge/i.test(pickNote(m, 5.7) + rowChip(m) + rowTitle(m)), "plain words");
+  ok(!/MoE|expert|OPFS|pledge/i.test(["allow", "ask", "deny"].map((st) => pickNote(m, 5.7, true, true, { state: st })).join(" ") + rowChip(m) + rowTitle(m)), "plain words");
 });
 
 Deno.test("diskpick: short, under Start: by how much, and the fix this device's disk answer leaves", () => {

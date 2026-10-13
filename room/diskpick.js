@@ -28,12 +28,26 @@ export const rowTitle = (m) => `${m.name}: a ${paramsText(m)} model that keeps m
 // fits where smaller models don't, and what more devices do. needGB: roomFitFor's GPU figure (null: not known yet).
 // stores: some device in the room can store it (roomFitFor stores, room/pledge.js storageOf); false: no GPU figure is
 // said at all (the planner's would be the whole model on GPUs), and the fix is said once, under Start and in the pool.
-// fits: roomFitFor's verdict (with stores false, the whole model fits in this room's GPU memory)
-export const pickNote = (m, needGB = null, stores = true, fits = false) => !stores
+// fits: roomFitFor's verdict (with stores false, the whole model fits in this room's GPU memory). disk: this device's
+// part, { state (room/diskstore.js diskState), shareBytes (roomFitFor share, null: not known), storedBytes (what is
+// saved: room/flashdisk.js flashDiskBytes, null: not known) }: what the first Start downloads, and that it happens once.
+// The GPU figure is rounded up to a whole GB here (8.1 and 8.6 both read "about 9 GB", so a device joining doesn't
+// grow it beside "makes it faster"); the pool's line keeps the exact one.
+export const pickNote = (m, needGB = null, stores = true, fits = false, disk = {}) => !stores
   ? (fits ? `${m.name} is a ${m.params} model. This room's GPU memory holds all of it.`
     : `${m.name} is a ${m.params} model that keeps most of itself on disk.`)
-  : `${m.name} is a ${m.params} model. It keeps most of itself on disk, so it needs `
-    + (needGB > 0 ? `only ${num(needGB)} GB of GPU memory` : "far less GPU memory than its size") + ". Each device that joins makes it faster.";
+  : [`${m.name} is a ${m.params} model. It keeps most of itself on disk, so it needs `
+    + (needGB > 0 ? `only about ${Math.ceil(needGB)} GB of GPU memory.` : "far less GPU memory than its size."),
+  downloadNote(m, disk), "Alone it reads from disk, so answers start slowly. Each device that joins makes it faster."].filter(Boolean).join(" ");
+// pickNote's sentence on what Start downloads to this device, by its disk answer: "" when it downloads nothing here
+function downloadNote(m, { state = null, shareBytes = null, storedBytes = null } = {}) {
+  const need = sizeText(shareBytes > 0 ? shareBytes : m.diskBytes);
+  if (state === "ask") return shareBytes === 0 ? "" : `Start asks first, then downloads ${need} to this device's disk, once.`;
+  if (state !== "allow" || shareBytes === 0) return "";
+  const share = shareBytes > 0 ? shareBytes : m.diskBytes;
+  if (storedBytes > 0 && storedBytes >= share * 0.99) return "It's already saved on this device.";
+  return storedBytes > 0 ? `Start finishes saving ${need} to this device's disk.` : `The first Start downloads ${need} to this device's disk, once; that can take an hour or more on home internet.`;
+}
 // What to do when no device in the room can store it, by this device's disk answer (room/diskstore.js diskState): the
 // same words under Start (shortNote) and under the pool's Storage line (poolFix)
 export const storeFix = (state) => state === "ask" || state === "deny" ? "Allow disk storage, or invite a computer that can."
