@@ -37,36 +37,46 @@ export function overall(plan, stepId, stepDone = 0) {
 export const drop = (plan, id) => plan.filter((s) => s.id !== id);
 
 // A load's progress as it goes: at(stepId, fraction 0..1 of that step) -> overall(...) whose pct and done never go
-// back (a dropped step shrinks the total; the bar can jump forward, never back). drop(id) as above.
+// back (a dropped step shrinks the total; the bar can jump forward, never back). drop(id): a step that never reported
+// any bytes leaves the plan; one that did (a copy that failed partway) keeps the bytes it did and ends there, so the
+// total never shrinks below what the bar already showed (else the next step would start at 100%, "ready")
 export function loadTracker(plan) {
   let p = plan.slice(), best = 0, bestDone = 0;
+  const did = {};   // step id -> the most bytes it reported
   return {
     get plan() { return p; },
     at(stepId, frac) {
       const s = p.find((x) => x.id === stepId);
-      const o = overall(p, stepId, s ? Math.max(0, Math.min(1, +frac || 0)) * s.bytes : 0);
+      const mine = s ? Math.max(0, Math.min(1, +frac || 0)) * s.bytes : 0;
+      if (s) did[stepId] = Math.max(did[stepId] || 0, mine);
+      const o = overall(p, stepId, mine);
       best = Math.max(best, o.pct); bestDone = Math.max(bestDone, Math.min(o.done, o.total));
       return { ...o, pct: best, done: Math.max(o.done, Math.min(bestDone, o.total)) };
     },
-    drop(id) { p = drop(p, id); },
+    drop(id) {
+      const d = did[id] || 0;
+      p = d > 0 ? p.map((s) => (s.id === id ? { ...s, bytes: Math.min(s.bytes, d) } : s)) : drop(p, id);
+    },
   };
 }
 
-// The pill on the load card for a step ("Copying from the room" / "Loading from cache" replace the GPU step's when
-// that is where its bytes come from: room.js lcStatus)
-export function stepLabel(id) {
-  return id === "save" || id === "words" ? "Saving to this computer" : "Loading onto the graphics chip";
-}
+// The pill on the load card: which step of how many ("Step 1 of 3"), and nothing for a load of one step (the line
+// under it says what it is). room.js lcStatus puts "Copying from the room" / "Loading from cache" there instead when
+// that is where the GPU step's bytes come from.
+export const stepPill = ({ stepNo = 1, steps = 1 } = {}) => (steps > 1 ? `Step ${stepNo} of ${steps}` : "");
 const LINES = {
   save: "Saving the model to this computer (first time only)",
   words: "Saving the model's word list to this computer (first time only)",
   gpu: "Putting the model on the graphics chip",
 };
-// the line under the bar: "Step 1 of 3 · Saving the model to this computer (first time only)"; without a count when
-// there is only one step
-export function stepLine(id, { stepNo = 1, steps = 1 } = {}) {
-  const t = LINES[id] || LINES.gpu;
-  return steps > 1 ? `Step ${stepNo} of ${steps} · ${t}` : t;
+// the line under the pill, what the step does: "Saving the model to this computer (first time only)" (room.js lcStatus
+// adds the step's own bytes: "· 22.3 of 63.6 GB")
+export const stepLine = (id) => LINES[id] || LINES.gpu;
+// a step's bytes, one unit when both have it: "22.3 of 63.6 GB", "300 MB of 1.2 GB"
+export function stepBytes(done, total) {
+  const f = (b) => (b >= 2 ** 30 ? [(b / 2 ** 30).toFixed(1), "GB"] : [String(b > 0 ? Math.max(1, Math.round(b / 2 ** 20)) : 0), "MB"]);
+  const [d, du] = f(+done || 0), [t, tu] = f(+total || 0);
+  return du === tu || d === "0" ? `${d} of ${t} ${tu}` : `${d} ${du} of ${t} ${tu}`;
 }
 // a device's row on the load card and its card in the room: "saving" while it writes to its disk, "loading" after
 export const rowVerb = (id) => (id === "save" || id === "words" ? "saving" : "loading");

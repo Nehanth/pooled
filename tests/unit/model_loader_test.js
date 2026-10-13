@@ -680,5 +680,12 @@ test("saveNgramEarly: copies with progress when allowed, 0 when already there, n
   eq(touched, 0);
   // a failing read: 0, no throw
   const bad = async () => { throw new Error("network down"); };
-  eq(await l.saveNgramEarly(null, M, cfg, () => {}, { storage: { getDirectory: async () => new FakeDir(), estimate: async () => ({}) }, readAt: bad }), 0);
+  let failed = 0;
+  eq(await l.saveNgramEarly(null, M, cfg, () => {}, { storage: { getDirectory: async () => new FakeDir(), estimate: async () => ({}) }, readAt: bad, onFail: () => failed++ }), 0);
+  // (the signature read failed before any copy: nothing started, so not a failed copy)
+  eq(failed, 0);
+  // a copy that starts and then fails (a read error after the signature): onFail, so openNgramTable won't copy again
+  const flaky = async (_f, off, len) => { if (off >= 16 + 32) throw new Error("network down"); return table.slice(off, off + len); };
+  eq(await l.saveNgramEarly(null, M, cfg, () => {}, { storage: { getDirectory: async () => new FakeDir(), estimate: async () => ({ quota: 2 ** 40, usage: 0 }) }, readAt: flaky, onFail: () => failed++ }), 0);
+  eq(failed, 1);
 });

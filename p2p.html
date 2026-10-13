@@ -496,6 +496,7 @@
   .hl .lr { flex: none; margin-left: auto; padding-left: 6px; color: var(--muted); }
   .hl .lms { color: var(--accent-text); min-width: 5ch; text-align: right; }
   html:not(.dev) .hl .lms { display: none; }   /* each lane's ms: the developer view only */
+  html:not(.dev) .hl .lr { display: none; }    /* and its layer numbers (the lane's tooltip has them) */
   .hl .lms:empty { display: none; }
   /* a lane's dot flashes as the pass reaches its first layer */
   .hl .act { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--sw); }
@@ -558,7 +559,7 @@
   .sp-side { display: flex; flex-direction: column; gap: 10px; justify-content: center; }
   .sp-mod { display: flex; flex-direction: column; gap: 3px; }
   #sp-model { font: 400 24px/1.05 var(--display); letter-spacing: -.02em; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  #sp-params { font: 400 13px/1.2 var(--mono); color: var(--ink-2); }
+  #sp-params { font: 400 13px/1.2 var(--sans); color: var(--ink-2); }
   #sp-events { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 0; margin: 0; padding: 0; list-style: none; font: 400 13px/1.3 var(--sans); color: var(--muted); }
   #sp-events li { white-space: nowrap; }
   #sp-events li + li::before { content: "\2192"; margin: 0 6px; color: var(--faint); }
@@ -601,7 +602,11 @@
   #swarm-map.folded #sp-hist .bar { height: calc(26px * var(--h)); }
   #swarm-map.folded #sp-hist .bar.step:not(:first-child)::before { height: 40px; }
   #swarm-map.folded #sp-model { font-size: 18px; }
+  /* no answers yet: no empty chart and placeholder (its column stays, so the layout doesn't jump at the first one) */
+  .sp-hist:has(> #sp-hist.empty) > * { visibility: hidden; }
   @container pane (max-width: 760px) {
+    /* on a phone the empty chart and an empty readout take no room at all: the chat starts higher */
+    #speedo > .sp-hist:has(> #sp-hist.empty), #speedo > .sp-read:has(#sp-tps:empty):has(#sp-unit:empty) { display: none; }
     #speedo { grid-template-columns: minmax(0, 1fr); padding: 12px 0; row-gap: 10px; }
     #speedo > div { padding: 0 14px; }
     #speedo > div + div { box-shadow: none; }
@@ -843,7 +848,7 @@
   .lc-row .n { display: flex; flex-direction: column; gap: 3px; min-width: 0; color: var(--text); }
   .lc-row .n .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* which layers this device is downloading (then holds), under its name */
-  .lc-row .n .lr { font: 400 11.5px/1.2 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; }
+  .lc-row .n .lr { font: 400 12px/1.2 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; }
   .lc-row.done .n .lr { color: var(--accent-text); }
   .lc-row .n small { color: var(--muted); font-size: 12px; }
   .lc-row .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
@@ -864,9 +869,11 @@
   #lc-status .src.gpu { background: var(--panel-2); color: var(--ink-2); }
   #lc-status .src.save { background: var(--panel-2); color: var(--ink-2); }
   /* "Step 1 of 3 · Saving the model to this computer (first time only)": its own line under the bytes */
-  #lc-status .step { flex-basis: 100%; font-size: 12.5px; color: var(--muted); }
+  #lc-status .step { flex-basis: 100%; order: 3; font-size: 12.5px; color: var(--ink-2); }
+  #lc-status .step.solo { flex-basis: auto; order: 0; }
+  #lc-status .step .b { font: inherit; color: var(--muted); }
   #lc-status .b { font: 400 12px/1 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
-  #lc-status .eta { margin-left: auto; color: var(--text); font-weight: 500; }
+  #lc-status .eta { margin-left: auto; color: var(--ink-2); font-weight: 400; }
   #lc-status .eta.wait { color: var(--muted); font-weight: 400; }
   /* every device has its layers: the rows give way to the Pooled mark in its wave while the model starts
      (on the GPUs, the devices linked up), until the room opens on the chat */
@@ -1655,7 +1662,6 @@
     #chat-log { display: none; }
     #load-card { padding: 16px; }
     .lc-row { grid-template-columns: 8px minmax(0, 150px) minmax(0, 1fr) 52px; gap: 8px; font-size: 13px; }
-    .lc-row .lw { display: none; }   /* phones: "layers 21–40" under the name, without "downloading" */
     .lc-head { flex-wrap: wrap; gap: 12px 14px; }
     .lc-head .dl { width: 34px; height: 34px; }
     .lc-h { flex-basis: calc(100% - 50px); }

@@ -268,11 +268,14 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         }
         // The n-gram table's copy before the GPU step, not after it: all of the disk writing is done when the bar
         // says the layers are on the GPU (openNgramTable below then finds the copy there and only opens it). Nothing
-        // is held open across the GPU load; a failed copy is said in the console and openNgramTable tries again or
-        // reads the rows by HTTP range, as before
+        // is held open across the GPU load; a copy that fails is said in the console, and openNgramTable then reads
+        // the rows by HTTP range rather than run a second, unseen copy after the bar is done
+        // (no "words" tick before the copy's first byte: a copy already on this computer reports none and the step
+        // leaves the plan without ever showing; one that fails partway keeps the bytes it did on the bar)
+        let ngramEarlyFailed = false;
         if (ngCfg && steps.plan.some((s) => s.id === "words")) {
-          prog("words", 0, 1);
-          const copied = await saveNgramEarly(G, M, ngCfg, (d, tot) => prog("words", d, tot));
+          aiStatus("Checking what's already saved on this computer\u2026");
+          const copied = await saveNgramEarly(G, M, ngCfg, (d, tot) => prog("words", d, tot), { onFail: () => { ngramEarlyFailed = true; } });
           if (!copied) steps.drop("words");
         }
         // resident layers whose experts this tab already copied to OPFS (a re-deal that moved them off disk): read from
@@ -333,7 +336,8 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         }
         let ngram = null;
         try {
-          ngram = weights.pleTable ? await openNgramTable(G, M) : null;
+          // (a copy that failed just now is not tried again here, after the bar said the load was done: rows by HTTP range)
+          ngram = weights.pleTable ? await openNgramTable(G, M, { copy: !ngramEarlyFailed }) : null;
           aiStatus("Almost ready\u2026");
           const { Qwen4ExpEngine } = await import("../engine/qwen4exp.js");
           ai.engine = FlashRoomEngine.wrap(await Qwen4ExpEngine.create({ device: ai.device, meta: G.meta, weights, layerRange: range,
@@ -390,7 +394,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   // close() releases the workers and their file locks (room/flash.js close, when the engine is dropped).
   // The OPFS copy is keyed by the table's content (room/flashdisk.js ngramDir / ngramContentSig), and it is copied only
   // when this tab may write to its disk (its user said yes: hooks.tabDisk); a copy already there is read either way.
-  async function openNgramTable(G, M) {
+  async function openNgramTable(G, M, { copy: tryCopy = true } = {}) {
     const cfg = ngramConfig(G), urls = M.shards?.length ? M.shards : [M.gguf];
     const readAt = httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }) });
     let dir = null;
@@ -398,7 +402,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       try { dir = ngramDir(await ngramContentSig(cfg, readAt, { url: urls[cfg.shard] })); }
       catch (e) { console.warn(`n-gram table: could not read its signature (${e?.message || e}); reading its rows by HTTP range`); }
     }
-    const copy = await copyNgram(cfg, readAt, dir);
+    const copy = tryCopy ? await copyNgram(cfg, readAt, dir) : { skipped: "the copy failed earlier in this load" };
     if (copy.skipped) { console.info(`n-gram table: not copied to this device's disk (${copy.skipped})`); crumb(`n-gram table: no OPFS copy (${copy.skipped})`); }
     if (dir) try {
       const { NgramWorkers } = await import("../engine/ngram_worker.js");
@@ -449,14 +453,16 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   }
   // The n-gram table's copy ahead of the GPU step (loadShard qwen4exp): openNgramTable's signature read and copy, but
   // no workers opened (no file handle or lock lives across the GPU load). -> bytes copied; 0 when it was all there,
-  // not allowed, or it failed (said in the console; openNgramTable then tries again or falls back, as without this)
-  async function saveNgramEarly(G, M, cfg, onProgress = () => {}, { storage = globalThis.navigator?.storage, readAt = null } = {}) {
+  // not allowed, or it failed (said in the console; a copy that failed calls onFail and openNgramTable then reads by HTTP range)
+  // onFail(): the copy started and failed (not called when it was not allowed or already there)
+  async function saveNgramEarly(G, M, cfg, onProgress = () => {}, { storage = globalThis.navigator?.storage, readAt = null, onFail = () => {} } = {}) {
     const urls = M.shards?.length ? M.shards : [M.gguf];
     readAt ||= httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }) });
     try {
       if (ngramCopyBlocked(storage)) return 0;
       const dir = ngramDir(await ngramContentSig(cfg, readAt, { url: urls[cfg.shard] }));
       const r = await copyNgram(cfg, readAt, dir, { storage, onProgress });
+      if (r.skipped === "the copy failed") onFail();
       return r.copied || 0;
     } catch (e) {
       console.warn(`n-gram table: the early copy did not run (${e?.message || e}); it is tried again when the table opens`);

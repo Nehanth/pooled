@@ -1,7 +1,7 @@
 // room/loadsteps.js: one device's load as named steps on one bar (Qwen3.8 Flash: save to this computer, save the word
 // list, then the GPU). The bar must only go forward, reach 100% only at the end of the last step, and say it in plain
 // words (no "experts", "OPFS", "n-gram", "kernels" on the screen).
-import { planSteps, overall, drop, loadTracker, stepLabel, stepLine, rowVerb, STEP_ORDER } from "../../room/loadsteps.js";
+import { planSteps, overall, drop, loadTracker, stepPill, stepLine, stepBytes, rowVerb, STEP_ORDER } from "../../room/loadsteps.js";
 
 const eq = (a, b, m = "") => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error(`${m} ${ja} != ${jb}`); };
 const ok = (c, m = "assertion failed") => { if (!c) throw new Error(m); };
@@ -50,6 +50,20 @@ Deno.test("loadTracker: monotonic across save -> words -> gpu, a dropped step ne
   eq(t.at("gpu", 0.2).pct, 100);
 });
 
+Deno.test("loadTracker: a step that fails partway keeps what it did: the next step starts below 100% and climbs", () => {
+  // save 30, word list 28.8, GPU 10 (GB): the word list fails at half, then the GPU step runs
+  const t = loadTracker(planSteps({ saveBytes: 30, wordsBytes: 28.8, gpuBytes: 10 }));
+  t.at("save", 1);
+  const half = t.at("words", 0.5);
+  t.drop("words");
+  const g0 = t.at("gpu", 0), g5 = t.at("gpu", 0.5), g1 = t.at("gpu", 1);
+  ok(g0.done < g0.total && g0.pct < 100, `not ready at the GPU step's start: ${JSON.stringify(g0)}`);
+  ok(g0.pct >= half.pct && g5.done > g0.done && g5.pct < 100, `climbs: ${JSON.stringify([half, g0, g5])}`);
+  eq([g0.stepNo, g0.steps], [3, 3]);
+  eq(g1.pct, 100);
+  eq(g1.done, g1.total);
+});
+
 Deno.test("loadTracker: a save step found already on disk is dropped before it starts: the bar starts at 0 of the rest", () => {
   const t = loadTracker(planSteps({ saveBytes: 60, gpuBytes: 10 }));
   t.drop("save");
@@ -58,13 +72,15 @@ Deno.test("loadTracker: a save step found already on disk is dropped before it s
 });
 
 Deno.test("the words on the card: plain, one per step, the count only with more than one step", () => {
-  eq(stepLabel("save"), "Saving to this computer");
-  eq(stepLabel("words"), "Saving to this computer");
-  eq(stepLabel("gpu"), "Loading onto the graphics chip");
-  eq(stepLine("save", { stepNo: 1, steps: 3 }), "Step 1 of 3 · Saving the model to this computer (first time only)");
-  eq(stepLine("words", { stepNo: 2, steps: 3 }), "Step 2 of 3 · Saving the model's word list to this computer (first time only)");
-  eq(stepLine("gpu", { stepNo: 3, steps: 3 }), "Step 3 of 3 · Putting the model on the graphics chip");
-  eq(stepLine("gpu", { stepNo: 1, steps: 1 }), "Putting the model on the graphics chip");
+  // the count in the pill, the sentence under it: each said once
+  eq(stepPill({ stepNo: 1, steps: 3 }), "Step 1 of 3");
+  eq(stepPill({ stepNo: 1, steps: 1 }), "");
+  eq(stepLine("save"), "Saving the model to this computer (first time only)");
+  eq(stepLine("words"), "Saving the model's word list to this computer (first time only)");
+  eq(stepLine("gpu"), "Putting the model on the graphics chip");
+  eq(stepBytes(22.3 * 2 ** 30, 63.6 * 2 ** 30), "22.3 of 63.6 GB");
+  eq(stepBytes(300 * 2 ** 20, 1.2 * 2 ** 30), "300 MB of 1.2 GB");
+  eq(stepBytes(0, 11.8 * 2 ** 30), "0 of 11.8 GB");
   eq([rowVerb("save"), rowVerb("words"), rowVerb("gpu"), rowVerb(null)], ["saving", "saving", "loading", "loading"]);
 });
 
@@ -72,7 +88,7 @@ Deno.test("the words on the card: plain, one per step, the count only with more 
 export const JARGON = /\b(experts?|OPFS|n-?gram|kernels?|shaders?|MoE|tok\/s|T1|pledges?|GPU pipelines?|re-?deal\w*)\b/i;
 Deno.test("no jargon in any step's label, line or verb", () => {
   for (const id of STEP_ORDER) {
-    for (const s of [stepLabel(id), stepLine(id, { stepNo: 1, steps: 3 }), rowVerb(id)]) ok(!JARGON.test(s), `jargon in "${s}"`);
+    for (const s of [stepPill({ stepNo: 1, steps: 3 }), stepLine(id), rowVerb(id)]) ok(!JARGON.test(s), `jargon in "${s}"`);
   }
 });
 

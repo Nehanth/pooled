@@ -6,12 +6,14 @@
 //   node tests/e2e/room_speed.mjs                    the checks
 //   node tests/e2e/room_speed.mjs --shots DIR        and screenshots of each step in DIR (1920x1080, 390x844)
 //
-// Two rooms. One: a "mac" runs the model alone and answers twice: the readout shows the speed live and then
-// the last answer's, the history two bars marked "1 device", one device card that runs the whole model, the
-// event line "online · 1 device"; a "pc" joins after the start: "pc joined", its card waits for a re-deal.
-// Two: the mac and the pc from the start, split by pledge: "online · 2 devices", two cards with their layers
-// and GB and their part of each token's time, a bar of one token's time (each device, then the wire), bars
-// marked "2 devices" on both screens. A phone-size tab joins: its card says it asks only, and its own screen
+// Two rooms. One: a "mac" runs the model alone and answers twice: the readout shows the speed live ("Writing about
+// N words a second") and then the last answer's ("Last answer: …"), the history two bars marked "1 device", one
+// device card that runs the whole model, the event line "Running on 1 device"; a "pc" joins after the start: "pc
+// joined", its card waits for the model to be shared out again. Two: the mac and the pc from the start, split by
+// pledge: "Running on 2 devices", two cards with how much of the model they hold and their GB (their layers and part
+// of each token's time in the card's tooltip), bars marked "2 devices" on both screens. The exact numbers (tok/s,
+// layers, ms) are in tooltips for a visitor (dev=0); the bar of one token's time (#sp-share) is the dev view's
+// (dev=1), checked on a second tab of the host's room. A phone-size tab joins: its card says it asks only, and its own screen
 // shows the readout and the room's history. (The re-deal itself is not run: see the note in the body.)
 // Three: the mac and a room node (`pooled join`, packages/room-node, in this process on Dawn: the machine's GPU,
 // the synthetic model from a local model dir) as the pc: the node's card has its part of each token's time from
@@ -99,7 +101,8 @@ async function device(name, { phone = false, size = null } = {}) {
 const base = `http://127.0.0.1:${PORT}/p2p.html?signal=127.0.0.1:${SIG}&maxnew=1200&dev=0`;
 const wired = (p) => p.waitForFunction(() => typeof Peer === "function" && window.pooledWired, null, { timeout: 60000 });
 async function enter(p, name, gb, q = "") {
-  await p.goto(base + q); await wired(p);
+  // (q with dev=1: the developer view, in place of the visitor's dev=0)
+  await p.goto(/[?&]dev=1\b/.test(q) ? (base + q).replace("&dev=0", "") : base + q); await wired(p);
   await p.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
   await p.fill("#name-input", name); await p.fill("#join-gb", String(gb));
 }
@@ -118,14 +121,16 @@ const panel = (p) => p.evaluate(() => {
   const q = (s) => document.querySelector(s);
   return {
     shown: !!q("#speedo") && q("#speedo").getClientRects().length > 0,
-    tps: q("#sp-tps")?.textContent || "",
+    // the readout is a sentence; its tooltip has the exact tok/s ("18.3 tok/s · …"), read as the number
+    line: q("#sp-tps")?.textContent || "",
+    tps: +(/^(\d+(?:\.\d+)?) tok\/s/.exec(q("#sp-tps")?.title || "")?.[1] || 0),
     unit: q("#sp-unit")?.textContent || "",
     model: q("#sp-model")?.textContent || "",
     params: q("#sp-params")?.textContent || "",
     bars: [...document.querySelectorAll("#sp-hist .bar")].map((b) => ({ tps: +b.dataset.tps, n: +b.dataset.n })),
     gain: q("#sp-gain")?.textContent || "",
     events: [...document.querySelectorAll("#sp-events li")].map((e) => e.textContent),
-    devs: [...document.querySelectorAll("#sp-devs .dv")].map((d) => ({ name: d.dataset.name, text: d.innerText.replace(/\s+/g, " ").trim() })),
+    devs: [...document.querySelectorAll("#sp-devs .dv")].map((d) => ({ name: d.dataset.name, text: d.innerText.replace(/\s+/g, " ").trim(), tip: d.title || "" })),
     share: q("#sp-share")?.innerText.replace(/\s+/g, " ").trim() || "",
   };
 });
@@ -141,7 +146,7 @@ async function shotLive(p, file, text) {
   await fresh(p);
   const n = await p.evaluate(() => document.querySelectorAll("#ai-output .m.bot .stats").length);
   await p.evaluate((t) => { const b = document.getElementById("ai-prompt"); b.value = t; b.dispatchEvent(new Event("input")); document.getElementById("ai-send").click(); }, text);
-  const live = await p.waitForFunction(() => document.getElementById("speedo")?.classList.contains("live") && +document.getElementById("sp-tps").textContent > 0, null, { timeout: 120000, polling: 100 }).then(() => true, () => false);
+  const live = await p.waitForFunction(() => document.getElementById("speedo")?.classList.contains("live") && /^Writing /.test(document.getElementById("sp-tps").textContent) && parseFloat(document.getElementById("sp-tps").title) > 0, null, { timeout: 120000, polling: 100 }).then(() => true, () => false);
   if (live) await shot(p, file);
   await p.waitForFunction((k) => document.querySelectorAll("#ai-output .m.bot .stats").length > k, n, { timeout: 240000, polling: 250 }).catch(() => {});
   return live;
@@ -175,14 +180,14 @@ try {
   const code1 = await room([[mac, "mac", 24]]);
   check("1 device: the room is online", await online(mac));
   let v = await panel(mac);
-  check("the panel shows the model's name and parameter count", v.shown && /Qwen3\.8/.test(v.model) && /27B parameters/.test(v.params), JSON.stringify(v));
-  check("1 device: one device card that holds every layer", v.devs.length === 1 && /runs the whole model/.test(v.devs[0].text) && /layers 1–\d+/.test(v.devs[0].text) && /GB/.test(v.devs[0].text), JSON.stringify(v.devs));
-  check("1 device: the event line says online · 1 device", /online · 1 device/.test(v.events.at(-1) || ""), JSON.stringify(v.events));
+  check("the panel shows the model's name and size", v.shown && /Qwen3\.8/.test(v.model) && /^27B model$/.test(v.params), JSON.stringify(v));
+  check("1 device: one device card that holds every layer (its layers in the tooltip)", v.devs.length === 1 && /runs the whole model/.test(v.devs[0].text) && /layers 1–\d+/.test(v.devs[0].tip) && /GB/.test(v.devs[0].text), JSON.stringify(v.devs));
+  check("1 device: the event line says Running on 1 device", /Running on 1 device/.test(v.events.at(-1) || ""), JSON.stringify(v.events));
   check("1 device: the readout live while it answers", await shotLive(mac, "1-mac-solo-live-1080p.png", "Tell me about the sea."));
   check("1 device: a second answer", await ask(mac, "And about the mountains?"));
   v = await panel(mac);
   check("1 device: two bars in the history, marked 1 device", v.bars.length === 2 && v.bars.every((b) => b.n === 1 && b.tps > 0), JSON.stringify(v.bars));
-  check("1 device: the readout keeps the last answer's speed", +v.tps > 0 && /last answer/.test(v.unit), JSON.stringify(v));
+  check("1 device: the readout keeps the last answer's speed", v.tps > 0 && /^Last answer: /.test(v.line) && v.unit === "", JSON.stringify(v));
   await shot(mac, "2-mac-solo-1080p.png");
   // the PC joins after the start: the event line says so, its card waits for a re-deal
   const pc = await device("pc");
@@ -191,7 +196,7 @@ try {
   await mac.waitForFunction(() => /pc joined/.test(document.getElementById("sp-events").textContent) && document.querySelectorAll("#sp-devs .dv").length === 2, null, { timeout: 60000 }).catch(() => {});
   v = await panel(mac);
   check("the event line says the pc joined", /pc joined/.test(v.events.at(-1) || ""), JSON.stringify(v.events));
-  check("its card says it waits for a re-deal", /waits for a re-deal/.test(v.devs.find((d) => d.name === "pc")?.text || ""), JSON.stringify(v.devs));
+  check("its card says it waits for the model to be shared out again", /waits for the model to be shared out again/.test(v.devs.find((d) => d.name === "pc")?.text || ""), JSON.stringify(v.devs));
   await mac.waitForFunction(() => !document.getElementById("ai-redeal").hidden, null, { timeout: 60000 }).catch(() => {});
   await shot(mac, "3-pc-joined-1080p.png");
   // (the re-deal itself is not run here: a tab's second WebGPU device right after its first fails in headless
@@ -205,16 +210,15 @@ try {
   check("2 devices: the room is online", up);
   await mac2.waitForFunction(() => document.querySelectorAll("#sp-devs .dv.holds").length === 2, null, { timeout: 30000 }).catch(() => {});
   v = await panel(mac2);
-  check("2 devices: the event line says online · 2 devices", /online · 2 devices/.test(v.events.at(-1) || ""), JSON.stringify(v.events));
-  check("2 devices: two device cards with their layers and GB", v.devs.length === 2 && v.devs.every((d) => /layers \d+–\d+/.test(d.text) && /GB/.test(d.text)), JSON.stringify(v.devs));
+  check("2 devices: the event line says Running on 2 devices", /Running on 2 devices/.test(v.events.at(-1) || ""), JSON.stringify(v.events));
+  check("2 devices: two device cards with their share and GB (layers in the tooltip)", v.devs.length === 2 && v.devs.every((d) => /of the model/.test(d.text) && /GB/.test(d.text) && /layers \d+–\d+/.test(d.tip)), JSON.stringify(v.devs));
   check("2 devices: the readout live while it answers", await shotLive(mac2, "4-mac-pc-live-1080p.png", "Now tell me about rivers."));
   check("2 devices: a second answer", await ask(mac2, "And lakes?"));
   v = await panel(mac2);
   check("2 devices: the bars are marked 2 devices", v.bars.length === 2 && v.bars.every((b) => b.n === 2), JSON.stringify(v.bars));
-  // (the wire's part shows when the devices' compute EMAs add up to less than the lap; on a fast local link they
-  // can reach it, room/speedo.js tokenShares, and the bar is the two devices alone)
-  check("2 devices: each device's share of a token's time", /mac \d+%/.test(v.share) && /pc \d+%/.test(v.share), v.share);
-  check("2 devices: the cards say how much of each token each device takes", v.devs.every((d) => /ms of each \d+ ms token/.test(d.text)), JSON.stringify(v.devs));
+  // (a visitor sees no bar of one token's time: the dev view's; each card's tooltip has its ms of each token)
+  check("2 devices: no token-time bar for a visitor", !v.share, v.share);
+  check("2 devices: the cards' tooltips say how much of each token each device takes", v.devs.every((d) => /ms of each \d+ ms token/.test(d.tip)), JSON.stringify(v.devs));
   const pv2 = await panel(pc2);
   check("2 devices: the worker's screen shows the same history", pv2.bars.length === 2 && pv2.bars.every((b, i) => b.tps === v.bars[i].tps), JSON.stringify(pv2.bars));
   log("panel with 2 devices:", JSON.stringify(v));
@@ -233,7 +237,7 @@ try {
   const ok = await ask(phone, "Hi from the phone.");
   check("phone: its question is answered", ok);
   const pv = await panel(phone);
-  check("phone: its readout and history show the room's speed", pv.shown && +pv.tps > 0 && pv.bars.length >= 1 && pv.bars.at(-1).n === 2, JSON.stringify(pv));
+  check("phone: its readout and history show the room's speed", pv.shown && pv.tps > 0 && /^Last answer: /.test(pv.line) && pv.bars.length >= 1 && pv.bars.at(-1).n === 2, JSON.stringify(pv));
   await shot(phone, "6-phone-390.png");
   await phone.evaluate(() => document.getElementById("band-toggle").click());   // unfolded: the device cards
   await shot(phone, "7-phone-390-unfolded.png");
@@ -246,7 +250,7 @@ try {
     const { joinRoom } = await import("../../packages/room-node/index.js");
     const mac3 = await device("mac");
     const nodeLog = [];
-    await room([[mac3, "mac", 24]], async (c) => {
+    await room([[mac3, "mac", 24, "&dev=1"]], async (c) => {
       // 8 GB, under half the mac's 24: the tab stays the model host (room/plan.js pickModelHost would pick the node's
       // real GPU over SwiftShader otherwise) and the node is its worker
       node = await joinRoom(c, { pledgeGB: 8, name: "pc", signal: `127.0.0.1:${SIG}`, modelDir, log: (m) => nodeLog.push(String(m)) });
@@ -256,11 +260,13 @@ try {
     check("room node: the tab is the model host, the node its worker", !node.modelHost && node.ai.role === "worker", JSON.stringify({ modelHost: node.modelHost, role: node.ai.role }));
     check("room node: an answer", await ask(mac3, "Tell me about forests."));
     check("room node: a second answer", await ask(mac3, "And deserts?"));
-    await mac3.waitForFunction(() => /ms of each \d+ ms token/.test(document.querySelector('#sp-devs .dv[data-name="pc"]')?.innerText || ""), null, { timeout: 15000 }).catch(() => {});
+    await mac3.waitForFunction(() => /ms of each \d+ ms token/.test(document.querySelector('#sp-devs .dv[data-name="pc"]')?.title || ""), null, { timeout: 15000 }).catch(() => {});
     v = await panel(mac3);
     const pcCard = v.devs.find((d) => d.name === "pc")?.text || "";
-    check("room node: its card has its part of each token's time (its ai-tele)", /layers \d+–\d+/.test(pcCard) && /ms of each \d+ ms token/.test(pcCard) && !/no timing/.test(pcCard), JSON.stringify(v.devs));
-    check("room node: one token's bar has a part for it, not 'wire + pc'", /pc \d+%/.test(v.share) && !/wire \+ pc/.test(v.share), v.share);
+    const pcTip = v.devs.find((d) => d.name === "pc")?.tip || "";
+    check("room node: its card has its part of each token's time (its ai-tele)", /layers \d+–\d+/.test(pcTip) && /ms of each \d+ ms token/.test(pcTip) && !/no timing/.test(pcCard + pcTip), JSON.stringify(v.devs));
+    // (mac3 is the dev view, dev=1: one token's bar of each device's part)
+    check("room node: one token's bar has a part for it, not 'wire + pc' (dev view)", /pc \d+%/.test(v.share) && !/wire \+ pc/.test(v.share), v.share);
     log("panel with a room node:", JSON.stringify(v));
     await shot(mac3, "9-mac-roomnode-1080p.png");
     check("mac (room node room): no page errors", !mac3.errs.length, mac3.errs.join(" | "));
