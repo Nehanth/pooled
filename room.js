@@ -3988,8 +3988,9 @@ function aiMaybeReady() {
   aiStatus(`cluster online · ${n} device${n > 1 ? "s" : ""}, ${ai.cfg.num_hidden_layers} layers split ${n} ways`);
   clearInterval(ai.progTimer);
   if ($("load-card").classList.contains("on")) aiLoading(false);   // (a device back from a reload also lands here, with the chat up)
+  const wasOnline = $("ai-panel").classList.contains("online");
   $("ai-panel").classList.add("online");
-  speedReady();   // speedReady (C)
+  if (!wasOnline) speedReady();   // speedReady (C) (aiMaybeReady runs again after a relink, re-deal or recovery)
   promptHint();
   $("ai-row").style.display = "flex";
   $("chat-tools").hidden = false;
@@ -4215,8 +4216,9 @@ function bandFolded() {
   let v = null;
   try { v = localStorage.getItem("pooled-band-" + bandMode()); } catch {}
   // folded everywhere unless this viewer opened it ("Show the layers"): at ready the band is one line, never a panel
-  // that opens by itself
-  return v ? v === "folded" : true;
+  // that opens by itself. (The developer view, ?dev=1, keeps the old default: open on a desktop's Chat, for its numbers.)
+  if (v) return v === "folded";
+  return DEV ? bandMode() === "code" || innerWidth < 820 || matchMedia("(max-height: 500px) and (pointer: coarse)").matches : true;
 }
 function bandFold(on, save = false) {
   const el = $("swarm-map"), b = $("band-toggle");
@@ -4340,7 +4342,8 @@ function speedReady() {
 function speedMeta() {
   const el = $("swarm-map")?.querySelector(".sm-meta"); if (!el) return;
   const L = speed.last;
-  el.textContent = bandLine(L);
+  const gain = L ? gainText(speedup(speed.hist)) : "";
+  el.textContent = bandLine(L) + (gain ? ` · ${gain}` : "");
   const tip = L ? `${fmtTps(L.tps)} tok/s` + (L.count ? ` · ${L.count} tokens` : "") + (L.devices ? ` · ${L.devices} device${L.devices === 1 ? "" : "s"}` : "") : "";
   el.title = [tip, DEV ? speed.devTip : ""].filter(Boolean).join("\n");
 }
@@ -4372,14 +4375,14 @@ function speedTok() {
   const now = performance.now();
   speed.meter.tok(now);
   clearTimeout(speed.idle);
-  speed.idle = setTimeout(() => speedDone(null), 2500);
+  speed.idle = setTimeout(() => speedDone(null, null, true), 2500);
   if (now - speed.at < 250) return;
   speed.at = now;
   const r = speed.meter.rate(now);
-  if (r > 0) speedShow(r, { live: true });
+  if (r > 0) { $("speedo")?.classList.remove("quiet"); speedShow(r, { live: true }); }   // (a real answer, two words or more, is running: the opened panel's readout may show)
 }
 // an answer ended (chatBotEnd): its speed from the host's stats line, else this screen's own timing
-function speedDone(stats, key = null) {
+function speedDone(stats, key = null, own = false) {
   clearTimeout(speed.idle);
   speed.reading = false;
   speed.firstWait = false;
@@ -4389,7 +4392,8 @@ function speedDone(stats, key = null) {
   if (st && st.count >= 2) {
     speed.hist = pushHistory(speed.hist, { key: key ?? "a" + ++speed.seq, tps: st.tps, devices: st.devices });
     speed.last = st;
-  } else if (!st && avg > 0) speed.last = { count: speed.meter.n, tps: avg, devices: lastMap?.nodes?.length || 1 };   // (no stats line: this screen's own timing)
+  } else if (own && avg > 0 && speed.meter.n >= 2) speed.last = { count: speed.meter.n, tps: avg, devices: lastMap?.nodes?.length || 1 };   // (an answer with no stats line ever, e.g. Code's turns: this screen's own timing; a failed or stopped one leaves it)
+  if (speed.last) $("speedo")?.classList.remove("quiet");   // the head line has a speed: so may the opened panel
   speedMeta();
   if (tps > 0) speedShow(tps, { devices: st?.devices || 0, count: st?.count || 0 });
   else speedShow(speed.last?.tps || 0, { devices: speed.last?.devices || 0 });   // a one-token, failed or stopped answer: the last one's speed, never "Writing…" with nothing running
@@ -6036,6 +6040,7 @@ if (new URLSearchParams(location.search).get("sim") === "1" && ["127.0.0.1", "lo
       ai.range = mine ? [+mine[1], +mine[2] + 1] : null;
       aiLoading(false);
       $("ai-panel").classList.add("online");
+      speedReady();   // speedReady (C)
       promptHint();
       $("ai-row").style.display = "flex"; $("chat-tools").hidden = false; $("mode-bar").hidden = false;
       emptyText("The model is ready. Ask anything.");
