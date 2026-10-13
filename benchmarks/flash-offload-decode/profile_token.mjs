@@ -27,6 +27,8 @@ const PROF = env("PROF", "1") === "1";
 const rec = { tokens: [], cur: null };
 let patched = 0;
 if (PROF) {
+  // the engine modules read WebGPU's globals at import: Dawn first, as a room node does
+  await (await import(url("packages/room-node/env.js"))).setupNode();
   const { Qwen4ExpEngine } = await import(url("engine/qwen4exp.js"));
   const { ExpertStore } = await import(url("engine/expert_store.js"));
   const P = Qwen4ExpEngine.prototype, S = ExpertStore.prototype;
