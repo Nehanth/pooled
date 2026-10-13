@@ -93,6 +93,19 @@ export function tabDiskGB(meta, model) {
 export function diskFor(meta, model) {
   return !!model && ramGB(meta) > 0 && !!meta?.disk && Array.isArray(meta?.local) && meta.local.includes(model);
 }
+// The RAM a room node lets the room park this model's experts in (ramGB), or 0 for Qwen3.8-Flash-Next on a node whose
+// meta does not say it offloads Flash (meta.offloadFlash): offloadFor's own rule, shared with storageOf
+const nodeRam = (m, model) => (MODELS[model]?.kind === "qwen4exp" && !m?.offloadFlash ? 0 : ramGB(m));
+// What a device brings beyond its GPU memory for `model`, as the pool's Storage bar shows it (room.js renderPool), by
+// offloadFor's rules for one meta: "disk" (a tab with the disk tier for it, ask: its user has not said yes yet; a room
+// node with --disk and the model's files), "ram" (a room node that parks it in RAM, ramGB), or null (nothing).
+// Read-only: the planner reads offloadFor, never this.
+export function storageOf(meta, model) {
+  if (tabDiskGB(meta, model) > 0) return { kind: "disk", ask: !!meta.tabDisk.ask, ramGB: 0 };
+  const r = !meta?.tabDisk ? nodeRam(meta, model) : 0;
+  if (r > 0) return diskFor(meta, model) ? { kind: "disk", ask: false, ramGB: 0 } : { kind: "ram", ask: false, ramGB: r };
+  return { kind: null, ask: false, ramGB: 0 };
+}
 // room/plan.js's `off` for a room's devices (metas, host first) and the model's routed experts: a profile
 // (room/models.js expertsOf, roomBytes experts: what ExpertStore parks, layer by layer) or one layer's bytes (an
 // estimate), or null when the model has none or no device offloads. model: the model's key; with it, a device with a
@@ -104,13 +117,11 @@ export function diskFor(meta, model) {
 // whose shard.js has Flash offload): a released 0.4.1 node says offload for the Qwen 3.5 MoEs but refuses Flash's, so
 // it is dealt Flash layers within its pledge (as a node without --ram).
 export function offloadFor(metas, ex, model = null) {
-  const flash = MODELS[model]?.kind === "qwen4exp";
-  const nodeRam = (m) => (flash && !m?.offloadFlash ? 0 : ramGB(m));
   const only = metas.map((m) => tabDiskGB(m, model) > 0);
-  const ram = metas.map((m, i) => (only[i] ? tabDiskGB(m, model) : m?.tabDisk ? 0 : nodeRam(m)) * 2 ** 30);
+  const ram = metas.map((m, i) => (only[i] ? tabDiskGB(m, model) : m?.tabDisk ? 0 : nodeRam(m, model)) * 2 ** 30);
   const expertBytes = ex && typeof ex === "object" ? +ex.E || 0 : +ex || 0;
   if (!(expertBytes > 0) || !ram.some((r) => r > 0)) return null;
-  const disk = metas.map((m, i) => only[i] || (!m?.tabDisk && nodeRam(m) > 0 && diskFor(m, model)));
+  const disk = metas.map((m, i) => only[i] || (!m?.tabDisk && nodeRam(m, model) > 0 && diskFor(m, model)));
   return { expertBytes, ...(ex && typeof ex === "object" ? { experts: ex } : {}), ram, ...(disk.some(Boolean) ? { disk } : {}), ...(only.some(Boolean) ? { diskOnly: only } : {}) };
 }
 

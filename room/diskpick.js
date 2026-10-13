@@ -25,16 +25,54 @@ export const paramsText = (m) => m.active ? `${m.params} (${m.active} active)` :
 // the row's tooltip: "Qwen3.8 Flash: a 125B model (6B active) that keeps most of itself on disk"
 export const rowTitle = (m) => `${m.name}: a ${paramsText(m)} model that keeps most of itself on disk, so it needs far less GPU memory`;
 // the line under the rows while it is picked (in place of the download note), in plain words: what it is, why it
-// fits where smaller models don't, and what more devices do. needGB / needDisk: roomFitFor's (null: not known yet;
-// needDisk false: no device here streams from disk, so needGB is the whole model on GPUs)
-export const pickNote = (m, needGB = null, needDisk = true) => !needDisk && needGB > 0
-  ? `${m.name} is a ${m.params} model that normally keeps most of itself on disk. With no disk storage in this room, it needs ${num(needGB)} GB of GPU memory.`
+// fits where smaller models don't, and what more devices do. needGB: roomFitFor's GPU figure (null: not known yet).
+// stores: some device in the room can store it (roomFitFor stores, room/pledge.js storageOf); false: no GPU figure is
+// said at all (the planner's would be the whole model on GPUs), and the fix is said once, under Start and in the pool.
+// fits: roomFitFor's verdict (with stores false, the whole model fits in this room's GPU memory)
+export const pickNote = (m, needGB = null, stores = true, fits = false) => !stores
+  ? (fits ? `${m.name} is a ${m.params} model. This room's GPU memory holds all of it.`
+    : `${m.name} is a ${m.params} model that keeps most of itself on disk.`)
   : `${m.name} is a ${m.params} model. It keeps most of itself on disk, so it needs `
     + (needGB > 0 ? `only ${num(needGB)} GB of GPU memory` : "far less GPU memory than its size") + ". Each device that joins makes it faster.";
-// under Start, when it doesn't fit: by how much, and the fix this device's disk answer (diskState) leaves
-export const shortNote = (shortGB, state) => `${num(shortGB)} GB of GPU memory short. `
-  + (state === "ask" || state === "deny" ? "Allow disk storage, or invite more devices."
-    : state === "allow" ? "Invite more devices, or give more GPU memory." : "Invite more devices with GPUs.");
+// What to do when no device in the room can store it, by this device's disk answer (room/diskstore.js diskState): the
+// same words under Start (shortNote) and under the pool's Storage line (poolFix)
+export const storeFix = (state) => state === "ask" || state === "deny" ? "Allow disk storage, or invite a computer that can."
+  : state === "url" ? "Invite a computer that can." : "Invite a computer with a GPU and free disk space.";
+// under Start, when it doesn't fit: by how much, and the fix this device's disk answer (diskState) leaves. stores
+// false: no device here can store it, which is the gap (not a GPU figure for the whole model)
+const FIX = (state) => state === "ask" || state === "deny" ? "Allow disk storage, or invite more devices."
+  : state === "allow" ? "Invite more devices, or give more GPU memory." : "Invite more devices with GPUs.";
+export const shortNote = (shortGB, state, stores = true) => stores ? `${num(shortGB)} GB of GPU memory short. ${FIX(state)}`
+  : `Needs a device that can store it. ${storeFix(state)}`;
+
+// ---- The pool (room.js renderPool, while a disk model is picked): a GPU memory bar and a Storage bar ----
+// What each device brings beyond GPU memory is room/pledge.js storageOf: { kind: "disk" | "ram" | null, ask, ramGB }.
+// The figures are roomFitFor's (needGB, needDisk, fits, shortGB), never a whole-model GPU figure.
+// -> { text, num (GB, or null), chip (or null), ok }
+export function poolGpuLine(m, { needGB = null, needDisk = false, fits = false, shortGB = 0, nStore = 0 } = {}) {
+  if (needDisk && needGB != null) return { text: `${m.name} needs`, num: num(needGB), chip: fits ? "fits" : `${num(shortGB)} GB short`, ok: !!fits };
+  if (fits) return { text: `${m.name} fits in this room's GPU memory`, num: null, chip: "fits", ok: true };
+  if (nStore === 0) return { text: `${m.name} runs once a device stores it`, num: null, chip: null, ok: false };
+  return { text: "Not enough GPU memory in this room yet", num: null, chip: "short", ok: false };
+}
+// -> { text, chip (or null), ok }
+export function poolStoreLine(m, { nDisk = 0, nRam = 0, anyAsk = false, needDisk = false, fits = false } = {}) {
+  const size = sizeText(m.diskBytes);
+  if (nDisk > 0) return { text: `Keeps up to ${size} on each device's disk${anyAsk ? ", asks before saving" : ""}`, chip: "fits", ok: true };
+  if (nRam > 0) return { text: `Held in spare memory on ${nRam} device${nRam === 1 ? "" : "s"}`, chip: "fits", ok: true };
+  if (!needDisk && fits) return { text: "Not needed here, it all fits in GPU memory", chip: null, ok: false };
+  return { text: "No device here can store it", chip: "needs disk", ok: false };
+}
+// the fix under the Storage line: only when no device can store it, or the GPU memory is short with storage present
+// (no planner figure). state: this device's disk answer (room/diskstore.js diskState)
+export function poolFix(state, { nStore = 0, fits = false, needDisk = false, needGB = null } = {}) {
+  if (nStore === 0) return !needDisk && fits ? "" : storeFix(state);
+  return !fits && (needGB == null || !needDisk) ? "Give more GPU memory below, or invite a device." : "";
+}
+// a device row's tag in the pool's list, and the words its tooltip uses
+export const devStoreTag = (st) => st?.kind === "disk" ? (st.ask ? "asks" : "disk") : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk";
+export const devStoreTitle = (name, gb, st) => `${name}: ${gb} GB GPU memory, `
+  + (st?.kind === "disk" ? (st.ask ? "asks before saving to disk" : "disk") : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk");
 
 // ---- Disk ----
 // state: room/diskstore.js diskState: "ask" | "allow" | "deny" | "url" (the address keeps it off: ?tabdisk=0, ?tabram=0)
@@ -46,14 +84,13 @@ export const groupTitle = () => "What this device gives";
 // the GPU memory stepper's one-line hint while a disk model is picked (its pledge paragraph steps aside)
 export const GPU_HINT = "How much of this device's graphics memory the model may use";
 // why this device can't keep the copy, in plain words (the developer's detail goes in the tooltip)
-const WHY = { url: "This link turns disk storage off", small: "This device doesn't have enough spare memory to read from disk",
+const WHY = { url: "This link turns disk storage off on this device", small: "This device doesn't have enough spare memory to read from disk",
   none: "This browser can't store it on disk" };
 const TIP = { url: "?tabdisk=0 or ?tabram=0 in the address", small: "tabRamCap leaves no RAM for the disk tier",
   none: "No disk tier: a phone, no WebGPU, or no OPFS (origin-private file system)" };
 // storedBytes: room/flashdisk.js flashDiskBytes (null: unknown); ramGB: this tab's disk-tier RAM (tabDiskMeta's ramGB:
-// TAB_RAM_GB held to tabRamCap; null without a tier); needDisk: the room's fit streams from some device's disk
-// (roomFitFor), false when the whole model must fit on GPUs; armed: Free was pressed once (the second press frees)
-export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, needDisk = true, armed = false } = {}) {
+// TAB_RAM_GB held to tabRamCap; null without a tier); armed: Free was pressed once (the second press frees)
+export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, armed = false } = {}) {
   const stored = storedBytes > 0 ? sizeText(storedBytes) : storedBytes === 0 ? "0 GB" : "?";
   const total = sizeText(m.diskBytes), ram = ramGB > 0 ? `${num(ramGB)} GB of RAM` : "";
   const parts = [];
@@ -64,7 +101,7 @@ export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, ne
     parts.push(`Lets ${m.name} save ${total} to this device's disk, once, and read it with ${ram || "a little RAM"}`);
     if (storedBytes > 0) parts.push(`${stored} saved`);
   } else {
-    parts.push((WHY[state] || WHY.none) + (needDisk ? "" : ", so the whole model has to fit in GPU memory"));
+    parts.push(WHY[state] || WHY.none);
     if (storedBytes > 0) parts.push(`${stored} saved`);
   }
   const acts = [];
