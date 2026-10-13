@@ -6,16 +6,18 @@ const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
 
 Deno.test("modelLoadOptions: browser flags keep defaults and prefetch parsing", () => {
   for (const [search, want] of [
-    ["", { wcache: true, wcacheVerify: false, prefetch: null }],
-    ["?wcache=0&wcacheverify=1&prefetch=0", { wcache: false, wcacheVerify: true, prefetch: 0 }],
-    ["?wcache=1&wcacheverify=0&prefetch=3", { wcache: true, wcacheVerify: false, prefetch: 3 }],
-    ["?wcache=&wcacheverify=&prefetch=", { wcache: true, wcacheVerify: false, prefetch: 0 }],
-    ["?wcache=false&wcacheverify=true&prefetch=bad", { wcache: true, wcacheVerify: false, prefetch: 0 }],
-    ["?prefetch=-3", { wcache: true, wcacheVerify: false, prefetch: 0 }],
-    ["?prefetch=2.9", { wcache: true, wcacheVerify: false, prefetch: 2 }],
-    ["?prefetch=2tails", { wcache: true, wcacheVerify: false, prefetch: 2 }],
-    ["?prefetch=0x10", { wcache: true, wcacheVerify: false, prefetch: 0 }],
-    ["?prefetch=1&prefetch=4", { wcache: true, wcacheVerify: false, prefetch: 1 }],
+    ["", { wcache: true, wcacheVerify: false, prefetch: null, parload: true, ngramWorker: true }],
+    ["?wcache=0&wcacheverify=1&prefetch=0", { wcache: false, wcacheVerify: true, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?wcache=1&wcacheverify=0&prefetch=3", { wcache: true, wcacheVerify: false, prefetch: 3, parload: true, ngramWorker: true }],
+    ["?wcache=&wcacheverify=&prefetch=", { wcache: true, wcacheVerify: false, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?wcache=false&wcacheverify=true&prefetch=bad", { wcache: true, wcacheVerify: false, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?prefetch=-3", { wcache: true, wcacheVerify: false, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?prefetch=2.9", { wcache: true, wcacheVerify: false, prefetch: 2, parload: true, ngramWorker: true }],
+    ["?prefetch=2tails", { wcache: true, wcacheVerify: false, prefetch: 2, parload: true, ngramWorker: true }],
+    ["?prefetch=0x10", { wcache: true, wcacheVerify: false, prefetch: 0, parload: true, ngramWorker: true }],
+    ["?prefetch=1&prefetch=4", { wcache: true, wcacheVerify: false, prefetch: 1, parload: true, ngramWorker: true }],
+    ["?parload=0", { wcache: true, wcacheVerify: false, prefetch: null, parload: false, ngramWorker: true }],
+    ["?ngramworker=0&parload=1", { wcache: true, wcacheVerify: false, prefetch: null, parload: true, ngramWorker: false }],
   ]) eq(modelLoadOptions(search), want, search);
 });
 

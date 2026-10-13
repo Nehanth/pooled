@@ -80,7 +80,9 @@ export class ExpertStore {
     this.t1Reserve = disk?.reserve;
     this.t1 = null;
     this.ring = disk?.ring || null;
-    if (this.diskSet.size && !this.reader) throw new Error("ExpertStore: disk layers need a reader (engine/expert_disk.js)");
+    // deferred: the reader comes later (setDisk, before build): a tab opens its OPFS reader only once the copy is done,
+    // while the load attaches the disk layers' placeholders (attach reads nothing) as the GPU step goes
+    if (this.diskSet.size && !this.reader && !disk?.deferred) throw new Error("ExpertStore: disk layers need a reader (engine/expert_disk.js)");
     const notOff = (disk?.layers || []).filter((l) => !this.layerSet.has(l));
     if (notOff.length) console.warn(`ExpertStore: disk layers ${notOff.join(",")} are not offloaded layers: their experts stay resident on the GPU`);
     if (disk && !this.diskSet.size && (disk.layers || []).length) console.warn("ExpertStore: none of the disk layers is offloaded: no disk tier");
@@ -177,6 +179,13 @@ export class ExpertStore {
     S.parts[part] = { kind, nExp, rows, cols, info, disk: true, sl: [{ per: qsB }, { per: scB }] };
     return { kind, shape: [nExp * rows, cols], offload: true, store: this, layer, part };
   }
+  // the disk tier's reader (and staging ring) of a store made with disk.deferred, once its files are there; before build
+  setDisk({ reader, ring = null } = {}) {
+    if (this.built) throw new Error("ExpertStore: setDisk after build");
+    if (!reader) throw new Error("ExpertStore: setDisk needs a reader");
+    this.reader = reader; this.ring = ring;
+    return this;
+  }
   // unmap every parked buffer (the copy engine reads them from here on)
   seal() {
     if (this.sealed) return;
@@ -193,6 +202,7 @@ export class ExpertStore {
   // the whole-layer region (1.4-1.8 GB for Qwen3.8-Flash-Next's 512 experts) goes to the pools instead.
   build({ K, region = true }) {
     if (this.built) return this;
+    if (this.diskSet.size && !this.reader) throw new Error("ExpertStore: disk layers need a reader (setDisk before build)");
     this.seal();
     const dev = this.device, layers = [...this.L.keys()].sort((a, b) => a - b);
     for (const l of layers) for (const p of OFFLOAD_PARTS) if (!this.L.get(l).parts[p]) throw new Error(`ExpertStore: layer ${l} has no parked ${p} experts`);

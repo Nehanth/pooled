@@ -116,6 +116,38 @@ Deno.test("ingest: a crash mid-layer resumes from the last checkpoint and gives 
   for (const l of [0, 1]) assert(same(st.bytes(l), ref.bytes(l)), `layer ${l}: same bytes as an uninterrupted ingest`);
 });
 
+Deno.test("ingest: a stop (signal) mid-layer reads nothing more, keeps the last checkpoint, and a resume gives the same files", async () => {
+  const m = synthModel({ nExp: 16 }), lay = expertLayout(m.G, [0, 1]), rec = lay.layers[0].recBytes;
+  const ref = memStore();
+  await ingestExperts({ layout: lay, readAt: m.readAt, store: ref, chunkExperts: 2 });
+  const st = memStore(), ac = new AbortController();
+  let reads = 0, after = 0, sawSignal = 0;
+  const readAt = async (s, o, n, opt) => {
+    reads++; if (opt?.signal) sawSignal++;
+    if (ac.signal.aborted) after++;
+    return m.readAt(s, o, n);
+  };
+  let err = null;
+  // stop after layer 1's 3rd chunk was converted (layer 0 is 8 chunks): checkpoints every 4 experts
+  try {
+    await ingestExperts({ layout: lay, readAt, store: st, chunkExperts: 2, readAhead: 2, checkpointBytes: 4 * rec, signal: ac.signal,
+      onProgress: (p) => { if (p.layer === 1 && p.doneBytes >= 16 * rec + 6 * rec) ac.abort(new Error("stopped")); } });
+  } catch (e) { err = e; }
+  assert(err?.message === "stopped", `the stop's reason is thrown: ${err}`);
+  assert(after === 0 && sawSignal === reads, `no read starts after the stop (${after}), every read carries the signal (${sawSignal}/${reads})`);
+  const man = await st.manifest();
+  assert(man.layers[0].done === 16 && man.layers[1].done === 4, `the last checkpoint: ${JSON.stringify(man.layers)}`);
+  const r = await ingestExperts({ layout: lay, readAt: m.readAt, store: st, chunkExperts: 2, checkpointBytes: 4 * rec });
+  assert(r.skippedBytes === 20 * rec && r.wroteBytes === 12 * rec, `resumed at the checkpoint: ${JSON.stringify(r)}`);
+  for (const l of [0, 1]) assert(same(st.bytes(l), ref.bytes(l)), `layer ${l}: same bytes as an uninterrupted ingest`);
+  assert(JSON.stringify(await st.manifest()) === JSON.stringify(await ref.manifest()), "the same manifest");
+  // a signal already stopped: nothing is read or written
+  const none = memStore(), ac2 = new AbortController(); ac2.abort(new Error("stopped first"));
+  err = null;
+  try { await ingestExperts({ layout: lay, readAt: async () => { throw new Error("read"); }, store: none, signal: ac2.signal }); } catch (e) { err = e; }
+  assert(err?.message === "stopped first" && none.writes === 0, String(err));
+});
+
 // Chrome on a Mac (2026-10-11): a fresh origin's estimate().quota is ~10.7 GB with 159 GB free and grows as the origin
 // writes, so a copy bigger than the reported quota must still be ingested; only a write that fails stops it
 Deno.test("quota: a reported quota below the copy warns and the ingest goes on; persist() is asked first", async () => {
