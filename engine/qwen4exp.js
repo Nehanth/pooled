@@ -363,20 +363,23 @@ export class Qwen4ExpEngine {
     // ExpertStore.prefetch: those experts are read from disk while this layer finishes. The guess only moves reads
     // earlier: the next layer's cut still reads back its real ids and plans with them. Nothing the token computes reads
     // B.ahead*.
+    // Qwen4ExpEngine.aheadK: how many of the guessed top experts are read ahead (up to 32, the route kernel's most;
+    // default K)
+    const KA = this.aheadK = Math.min(32, Qwen4ExpEngine.aheadK || K);
     if (this.experts?.diskSet?.size) {
       for (let j = 0; j + 1 < this.layers.length; j++) {
         const l = this.layers[j], n = this.layers[j + 1];
         if (!l.off || !this.experts.isDisk(n.i)) continue;
-        B.aheadLogits ||= buf(cfg.nExp + 1); B.aheadIds ||= buf(K); B.aheadWts ||= buf(K);
+        B.aheadLogits ||= buf(cfg.nExp + 1); B.aheadIds ||= buf(KA); B.aheadWts ||= buf(KA);
         const rest = l.halves[1].rest, at = rest.findIndex((o) => o.cut);
         rest[at].cut = false;   // the cut moves after the guess (the ids it reads back are written by then)
         rest.splice(at + 1, 0, gemv(n.st.w.router, B.mixed, B.aheadLogits, { dIn: d }),
-          { pipe: P.route, bg: bg(P.route, [B.aheadLogits, B.aheadIds, B.aheadWts, uni([cfg.nExp, K, 0, 0])]), wg: [1, 1, 1], cut: true });
+          { pipe: P.route, bg: bg(P.route, [B.aheadLogits, B.aheadIds, B.aheadWts, uni([cfg.nExp, KA, 0, 0])]), wg: [1, 1, 1], cut: true });
         l.ahead = n.i;
       }
-      // the cut's readback: K ids, then K guessed ids of the next layer
+      // the cut's readback: K ids, then KA guessed ids of the next layer
       this.offStage.destroy();
-      this.offStage = device.createBuffer({ size: Math.ceil(2 * K * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
+      this.offStage = device.createBuffer({ size: Math.ceil((K + KA) * 4 / 16) * 16, usage: U.MAP_READ | U.COPY_DST });
     }
 
     // ---- head: the last HC mixer (no inject) stands in for the output norm, then the LM head and a GPU argmax
@@ -538,15 +541,15 @@ export class Qwen4ExpEngine {
       enc.copyBufferToBuffer(B.wts, 0, B.trace, n + at, K * 4);
     }
     if (!l.off) return enc;
-    const q = this.device.queue, st = this.experts, stage = this.offStage, ahead = l.ahead != null && st.ahead !== false, nb = (ahead ? 2 : 1) * K * 4;
+    const q = this.device.queue, st = this.experts, stage = this.offStage, ahead = l.ahead != null && st.ahead !== false, KA = this.aheadK, nb = (K + (ahead ? KA : 0)) * 4;
     enc.copyBufferToBuffer(B.ids, 0, stage, 0, K * 4);
-    if (ahead) enc.copyBufferToBuffer(B.aheadIds, 0, stage, K * 4, K * 4);
+    if (ahead) enc.copyBufferToBuffer(B.aheadIds, 0, stage, K * 4, KA * 4);
     q.submit([enc.finish()]);
     await stage.mapAsync(GPUMapMode.READ, 0, nb);
     const got = new Uint32Array(stage.getMappedRange(0, nb));
     const sel = new Uint32Array(K + 1);   // ExpertStore's layout: K routed ids, then the shared expert's slot (unused)
     sel.set(got.subarray(0, K));
-    const guess = ahead ? got.slice(K, 2 * K) : null;
+    const guess = ahead ? got.slice(K, K + KA) : null;
     stage.unmap();
     if (st.isDisk?.(l.i)) await st.prepare(l.i, sel, 1, K + 1);
     // the next layer's guessed experts are read while this one's copies, experts and the next layer's attention run

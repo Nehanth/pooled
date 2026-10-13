@@ -6,7 +6,7 @@
 // (ExpertStore.prepare) and the plan (ExpertStore.plan: the pool LRU and the copy encode, incl. the writeBuffer of
 // read bytes), plus the time between cuts (encoding the rest, outside any cut) and from the last cut to the next token.
 //   ROOT=<checkout> node profile_token.mjs     env: MODELS, CASES (two-sum,bash,eos-mid), HOST_GB (3), NODE_GB (8),
-//   NODE_RAM (24), NODE_DISK (1), PORT (8271), SPLIT (speed), PROF (1: patch and time; 0: only the stats), AHEAD (0: prefetch off)
+//   NODE_RAM (24), NODE_DISK (1), PORT (8271), SPLIT (speed), PROF (1: patch and time; 0: only the stats), AHEAD (0: prefetch off), AHEAD_K (guessed experts read ahead)
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +32,7 @@ if (PROF) {
   const { Qwen4ExpEngine } = await import(url("engine/qwen4exp.js"));
   const { ExpertStore } = await import(url("engine/expert_store.js"));
   const P = Qwen4ExpEngine.prototype, S = ExpertStore.prototype;
+  if (env("AHEAD_K", "")) Qwen4ExpEngine.aheadK = +env("AHEAD_K", "");   // the read-ahead's width (engines made from now on)
   const begin0 = P._begin, after0 = P._afterRoute, prep0 = S.prepare, plan0 = S.plan;
   P._begin = function (...a) {
     const t = performance.now();
