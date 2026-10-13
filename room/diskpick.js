@@ -102,9 +102,9 @@ export const devStoreTag = (st, share = null, off = false, m = null) => st?.kind
     : (share > 0 ? `${sizeText(share)} disk` : share === 0 ? "disk not needed" : m ? `up to ${sizeText(m.diskBytes)} disk` : "disk")
       + (st.ask && share !== 0 ? " · will ask" : ""))
   : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : st?.kind == null && off ? "disk off" : "no disk";
-export const devStoreTitle = (name, gb, st, share = null) => `${name}: ${gb} GB GPU memory, `
+export const devStoreTitle = (name, gb, st, share = null, off = false) => `${name}: ${gb} GB GPU memory, `
   + (st?.kind === "disk" ? (st.ramGB > 0 ? `${num(st.ramGB)} GB RAM, ` : "") + (st.ask ? "asks before saving to disk" : "disk") + (share > 0 ? `, saves ${sizeText(share)} there` : "")
-    : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk");
+    : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : off ? "disk storage off" : "no disk");
 
 // ---- Disk ----
 // state: room/diskstore.js diskState: "ask" | "allow" | "deny" | "url" (the address keeps it off: ?tabdisk=0, ?tabram=0)

@@ -224,6 +224,7 @@ Deno.test("pool: the Storage line (S1-S5), the fix line and each device's tag", 
   eq(devStoreTitle("pc", 10, { kind: "ram", ramGB: 43 }), "pc: 10 GB GPU memory, 43 GB RAM");
   eq(devStoreTitle("pc", 10, { kind: "disk", ask: false, ramGB: 43 }), "pc: 10 GB GPU memory, 43 GB RAM, disk");
   eq(devStoreTitle("pc", 10, { kind: null }), "pc: 10 GB GPU memory, no disk");
+  eq(devStoreTitle("mac", 12, { kind: null }, null, true), "mac: 12 GB GPU memory, disk storage off");
 });
 
 Deno.test("pool: with needDisk false nothing says the whole model's GPU figure; plain words throughout", () => {
