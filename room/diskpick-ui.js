@@ -4,7 +4,7 @@
 // black and twinkling when picked, with its fit chip, is room.js renderLadder's; the pool's line is renderPool's.)
 // The words and HTML are room/diskpick.js's; the answer, the stored size, Allow and Free are #368's, through
 // room/diskstore.js (one stored answer, one question: room.js askTabDisk; one delete: room.js freeTabDisk).
-import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT, pickNote, shortNote, inviteHint } from "./diskpick.js";
+import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT, pickNote, shortNote, inviteHint, sizeText } from "./diskpick.js";
 import { diskStore } from "./diskstore.js";
 
 const $ = (id) => document.getElementById(id);
@@ -24,7 +24,9 @@ export function showDiskPick(key, info = last) {
   if (!on) { if (shown) { $("ai-start").textContent = START; $("ap-me-k").textContent = GIVES; $("ap-covers").textContent = covers; $("side-hint").textContent = invite; } shown = null; asked = 0; disarm(); return; }
   if (asked !== key) stored = null;
   const state = diskStore.state(key);
-  $("ai-start").textContent = `Start ${m.name}`;
+  // not asked yet: pressing Start is this device's yes (room.js aiStart), so the button says what it saves
+  const saves = state === "ask" && info.fits && info.shareBytes > 0 ? ` \u00b7 saves ${sizeText(info.shareBytes)} here, once` : "";
+  $("ai-start").textContent = `Start ${m.name}${saves}`;
   $("ap-for").textContent = groupTitle(m);
   $("ap-me-k").textContent = "GPU memory";
   $("ap-covers").textContent = GPU_HINT;
