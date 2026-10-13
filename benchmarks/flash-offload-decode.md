@@ -194,7 +194,13 @@ numbers are in the JSON.
   disk through the room node's worker reader, which on this branch serves its pool cuts as leases): main and the
   branch both **BITS plain 5ef77d06 hidden 403ae12b**, the same greedy / spec / GPU-sampled tokens, and the same
   store counters (2,160 cuts, 93,698 expert reads; `logs/spark-q38bits-moe-*.log`). The 35B engine has no read-ahead.
-- **`packages/room-node/test/flash_tab_gold.mjs tab`, `TAB_GB=12`** (Spark): pending: the GB10 was busy with other agents' Flash tests when this was written; queued for the next idle window (the result will be added here).
+- **`packages/room-node/test/flash_tab_gold.mjs tab`, `TAB_GB=12`** (Spark): **not run.** From 00:41 to 02:17 ET the GB10 ran other agents'
+  Flash tests back to back (`test_q38flash_batch.js`, `test_q38flash.js`, a llama-server), about 20 s apart, and this
+  test needs the GPU to itself for half an hour; only the 35B gate found a window. What it would check: on this
+  branch a tab runs main's path apart from the store's bookkeeping. Its reader (OPFS) has no leases, `disk.ahead` is
+  off so the engine builds no guess and nothing is read ahead, and `q4Repack` / `q8Repack` without an output give the
+  same arrays as before. Still open: run `TAB_GB=12 node packages/room-node/test/flash_tab_gold.mjs tab` on main and
+  the branch and compare BITS.
 - After the A/B, the read-ahead was made a disk-tier option (`disk.ahead`, `c1f8bef`): on for room nodes
   (`shard.js`), off elsewhere, so a tab (OPFS reader, not timed with it) builds no guess and reads nothing ahead, as
   on main. The room path is unchanged by that: a run of the final commit (A', `BITS=1`, set a5) gives the same three
@@ -206,7 +212,7 @@ numbers are in the JSON.
 order misses 1.10x by 0.008. Configuration B could not run on one machine. The bit-identity gates pass.
 
 **Under §0.1 (the fresh run, set a4): keep.** A' 1.528x / 1.213x (>= 1.10x in both orders), B' 1.497x / 1.007x
-(>= 0.97x in both), bit identity as above.
+(>= 0.97x in both), bit identity as above, except that the tab gate is not run (§4).
 
 The two disagree because of one thing: configuration A's token is 70-75% GPU paging, which no change to the offload
 path touches. In absolute terms the prototype saves the same there as in A': the disk wait drops from 239-246 to
@@ -221,8 +227,8 @@ with less RAM than its layers' experts.
 ## 6. Not measured, and open
 
 - **The Spark.** Its GPU was running other agents' Flash tests (`test_q38flash*.js`, `q38flash_kv_compare.js`, a
-  llama-server) for most of the session; only the two gate tests ran there, each in an idle window. No profile or A/B
-  on Linux.
+  llama-server) for most of the session; only the 35B gate ran there, in an idle window. No profile or A/B on Linux,
+  and `flash_tab_gold.mjs` at `TAB_GB=12` is not run (§4).
 - **The demo room itself** (Mac tab + PC): no disk layers there (above), so no change is expected; not timed.
 - **A tab with the read-ahead.** Off there (`disk.ahead`); the OPFS reader's cost for wrong guesses is unknown.
 - **The plan's copy** (17-25% of an A' token): the CPU writes each read expert into a T1 slot or a `writeBuffer`
