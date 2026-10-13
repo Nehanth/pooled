@@ -4,7 +4,7 @@
 // black and twinkling when picked, with its fit chip, is room.js renderLadder's; the pool's line is renderPool's.)
 // The words and HTML are room/diskpick.js's; the answer, the stored size, Allow and Free are #368's, through
 // room/diskstore.js (one stored answer, one question: room.js askTabDisk; one delete: room.js freeTabDisk).
-import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT, pickNote, shortNote, inviteHint } from "./diskpick.js";
+import { diskCopyOf, groupTitle, settingsHTML, GPU_HINT, pickNote, shortNote, inviteHint, sizeText } from "./diskpick.js";
 import { diskStore } from "./diskstore.js";
 
 const $ = (id) => document.getElementById(id);
@@ -24,7 +24,9 @@ export function showDiskPick(key, info = last) {
   if (!on) { if (shown) { $("ai-start").textContent = START; $("ap-me-k").textContent = GIVES; $("ap-covers").textContent = covers; $("side-hint").textContent = invite; } shown = null; asked = 0; disarm(); return; }
   if (asked !== key) stored = null;
   const state = diskStore.state(key);
-  $("ai-start").textContent = `Start ${m.name}`;
+  // not asked yet: pressing Start is this device's yes (room.js aiStart), so the button says what it saves
+  const saves = state === "ask" && info.fits && info.shareBytes > 0 ? ` \u00b7 saves ${sizeText(info.shareBytes)} here, once` : "";
+  $("ai-start").textContent = `Start ${m.name}${saves}`;
   $("ap-for").textContent = groupTitle(m);
   $("ap-me-k").textContent = "GPU memory";
   $("ap-covers").textContent = GPU_HINT;
@@ -35,7 +37,7 @@ export function showDiskPick(key, info = last) {
   shown = sig;
   // the buttons are rebuilt: keep keyboard focus on the same one (Allow pressed: on Delete, or the row when gone)
   const fa = $("ap-flash").contains(document.activeElement) ? document.activeElement.dataset?.act || "row" : null;
-  $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, ramGB: info.ramGB ?? null, armed: !!armed, shareBytes: info.shareBytes ?? null });
+  $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, ramGB: info.ramGB ?? null, armed: !!armed, shareBytes: info.shareBytes ?? null, startSays: !!saves });
   if (fa) ($("ap-flash").querySelector(`[data-act="${fa === "allow" ? "free" : fa}"]`) || $("ap-flash")).focus({ preventScroll: true });
   // what is stored: asked once per pick (and after Free, or Room settings freeing it: refreshDiskPick)
   if (asked !== key) { asked = key; refresh(key); }
@@ -49,6 +51,9 @@ function disarm() { if (armed) { clearTimeout(armed); armed = 0; } }
 // the stored copy changed elsewhere (Room settings' "Delete saved copy", a load that copied it): read it again
 export function refreshDiskPick() { const key = $("ai-model").value; if (diskCopyOf(key)) { asked = 0; shown = null; showDiskPick(key); } }
 
+// what is saved of `key` on this device, as last read for the picker (null: not read yet): the load card's guess at
+// its rows from the press (room.js lcExpect)
+export const storedNow = (key) => (asked === key ? stored : null);
 // why the picked disk model doesn't fit, under Start: by how much and the fix this device's disk answer leaves
 export const diskShortNote = (key, shortGB, stores = true) => shortNote(shortGB, diskStore.state(key), stores);
 // this device's disk answer for `key` (room/diskstore.js diskState), for the pool's fix line (room.js renderPool)
