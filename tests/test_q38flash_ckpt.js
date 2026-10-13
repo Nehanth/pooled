@@ -17,6 +17,11 @@
 //                with the other chunk's pooled keys, so the tail's hidden states alone do not see them: the check
 //                also compares the whole state after the tail (every _stateParts buffer, bit for bit), where a
 //                missing ring shows in block 575's pooled key and missing pooled keys in blocks 0-574.
+//   ROOM=1       the same checks through the room's adapter (room/flash.js FlashRoomEngine over qwen4expCore): the
+//                save is saveSlot, the restore loadSlot, and again importState(exportSlot) (the disk copy's path, which
+//                reads every part back to the CPU); the tail runs through the room's step (embedRun). The negative
+//                controls import the slot's export with the left-out parts taken from the overwritten state. Also
+//                checks the signature is the engine's with v 2 and that a v1 one is refused.
 // Also: the engine's allocated state (stateBytes) == qwen4expMemory's sizes for its layers and formats.
 //   LAYERS=4 deno run --unstable-webgpu --allow-read --allow-env --allow-write=$HOME/.cache/swarmllm-weights tests/test_q38flash_ckpt.js
 import fs from "node:fs";
@@ -26,6 +31,7 @@ import { Qwen4ExpBatch } from "../engine/qwen4exp_batch.js";
 import { qwen4expWeights, qwen4expConfig, gpuUploadEntry } from "../engine/gguf.js";
 import { ngramConfig, NgramTable } from "../engine/ngram.js";
 import { openGGUF, gpuDevice, watchGpuErrors } from "./load_model.js";
+import { FlashRoomEngine } from "../room/flash.js";
 
 const env = (k, d) => Deno.env.get(k) ?? d;
 const DIR = env("Q38F_DIR", new URL("../models/q38flash", import.meta.url).pathname);
@@ -35,7 +41,7 @@ if (!first) throw new Error("no Qwen3.8-Flash-Next shards in " + DIR);
 const { device } = await gpuDevice();
 const errors = watchGpuErrors(device);
 const model = openGGUF(path.join(DIR, first));
-const G = model.G, cfg = qwen4expConfig(G.meta), nL = +env("LAYERS", 4), KV = env("KV", "f32"), QSA = env("QSA") === "1";
+const G = model.G, cfg = qwen4expConfig(G.meta), nL = +env("LAYERS", 4), KV = env("KV", "f32"), QSA = env("QSA") === "1", ROOM = env("ROOM") === "1";
 if (!cfg.qsa.slice(0, nL).some(Boolean)) throw new Error(`LAYERS=${nL} holds no attention layer (no KV cache to copy)`);
 
 const t0 = performance.now();
@@ -46,7 +52,8 @@ const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.rea
 const ngram = new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
 const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead: false, ngram, kv: KV, ...(QSA ? { maxSeq: 4608 } : {}) });
 const pb = QSA ? await Qwen4ExpBatch.create(eng, weights, { maxCols: 64 }) : null;
-console.log(`qwen4exp: layers [0, ${nL}) loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s; KV ${eng.kv}, QSA ${eng.qsa ? `on (raw-key ring ${eng.qsaRing} rows)` : "off"}`);
+const room = ROOM ? FlashRoomEngine.wrap(eng) : null;
+console.log(`qwen4exp: layers [0, ${nL}) loaded in ${((performance.now() - t0) / 1000).toFixed(0)} s; KV ${eng.kv}, QSA ${eng.qsa ? `on (raw-key ring ${eng.qsaRing} rows)` : "off"}${ROOM ? "; through the room's adapter" : ""}`);
 
 const U = GPUBufferUsage, kvRow = cfg.nKVHeads * cfg.headDim * (KV === "f16" ? 2 : 4);
 let fail = 0;
@@ -57,9 +64,41 @@ let fail = 0;
   console.log(`${same ? "ok  " : "FAIL"} state bytes at maxSeq ${eng.maxSeq}: allocated ${JSON.stringify(got.bytes)} ${same ? "==" : "!="} qwen4expMemory ${JSON.stringify(want.bytes)}`);
   if (!same) fail++;
 }
+// the room adapter: checkpoints on, the signature the engine's with the adapter's v 2, a v1 state refused
+if (room) {
+  const sig = room.stateSignature(), es = eng.stateSignature();
+  const sigOk = room.ckpt && sig.v === 2 && Object.keys(es).every((k) => k === "v" || sig[k] === es[k]) && sig.hDim === cfg.hDim && sig.qsa === !!eng.qsa && sig.kv === KV;
+  console.log(`${sigOk ? "ok  " : "FAIL"} room signature ${JSON.stringify(sig)}`);
+  if (!sigOk) fail++;
+}
 // the GPU state of every layer: [buffer, bytes that matter at pos]
 const parts = (pos) => eng._stateParts(pos).map(({ buf, bytes }) => [buf, bytes]);
+const roomSave = () => {
+  room.saveSlot("s");
+  return { pos: eng.pos, room: true, bufs: room.slots.get("s").bufs };
+};
+// the room's restores: loadSlot, or importState of the slot's export (the disk path). skip: the parts the import takes
+// from the state as it is now (the overwritten one) instead of the slot, for the negative controls
+const roomLoad = async (s, { skip = null, viaImport = false } = {}) => {
+  if (!viaImport && !skip) { room.loadSlot("s"); return; }
+  const st = await room.exportSlot("s");
+  if (skip) {
+    const now = await room.exportState(), cur = parts(eng.pos);
+    // exportState is at the overwritten pos; the skipped parts (ring: whole; pooled: blocks below pos) are taken from it
+    parts(s.pos).forEach(([b, n], i) => {
+      if (!skip.has(b)) return;
+      const j = cur.findIndex(([c]) => c === b), have = new Uint8Array(n);
+      have.set(new Uint8Array(now.parts[j]).subarray(0, Math.min(n, now.parts[j].byteLength)));
+      st.parts[i] = have.buffer;
+    });
+  }
+  let refused = false;
+  try { room.importState({ ...st, sig: { ...st.sig, v: 1 } }); } catch { refused = true; }
+  if (!refused) { console.log("FAIL importState took a v1 signature"); fail++; }
+  room.importState(st);
+};
 const save = () => {
+  if (room) return roomSave();
   const enc = device.createCommandEncoder();
   const bufs = parts(eng.pos).map(([b, n]) => {
     const c = device.createBuffer({ size: Math.max(4, n), usage: U.COPY_SRC | U.COPY_DST });
@@ -70,7 +109,8 @@ const save = () => {
   return { pos: eng.pos, ng: eng.ngs?.export(), bufs };
 };
 // skip: buffers to leave out of the restore (the negative controls)
-const load = (s, skip = null) => {
+const load = async (s, skip = null) => {
+  if (room) return roomLoad(s, { skip });
   const enc = device.createCommandEncoder();
   parts(s.pos).forEach(([b, n], i) => { if (n && !skip?.has(b)) enc.copyBufferToBuffer(s.bufs[i], 0, b, 0, n); });
   device.queue.submit([enc.finish()]);
@@ -87,7 +127,7 @@ const snap = async (pos) => {
   return out;
 };
 const stateDiff = (X, Y) => X.reduce((n, x, i) => n + (x.length !== Y[i].length || x.some((v, j) => v !== Y[i][j]) ? 1 : 0), 0);
-const run = async (ids) => { const out = []; for (const t of ids) out.push((await eng.forwardToken(t)).hidden); return out; };
+const run = async (ids) => { const out = []; for (const t of ids) out.push(room ? await room.embedRun(t, eng.pos) : (await eng.forwardToken(t)).hidden); return out; };
 
 const gold = QSA ? JSON.parse(fs.readFileSync(new URL("./golden/q38flash_llama_greedy.json", import.meta.url), "utf8")) : null;
 const prefix = QSA ? gold.ctx8k.prompt.slice(0, 2302) : [9707, 11, 1879, 374, 264], tail = [1273, 13, 576, 3974], other = [785, 6722, 315, 9625, 374, 12095];
@@ -98,7 +138,7 @@ const s = save();
 const h2f = (h) => { const e = (h >> 10) & 31, m = h & 1023, v = e === 0 ? m * 2 ** -24 : e === 31 ? (m ? NaN : Infinity) : (1 + m / 1024) * 2 ** (e - 15); return h & 0x8000 ? -v : v; };
 const kSlot = eng.layers.findIndex((l) => l.st.kc);
 for (const [name, gpuBuf] of [["K", eng.layers[kSlot].st.kc], ["V", eng.layers[kSlot].st.vc]]) {
-  const cBuf = s.bufs[parts(s.pos).findIndex(([b]) => b === gpuBuf)];
+  const cBuf = s.bufs[parts(s.pos).findIndex(([b]) => b === gpuBuf)];   // (the room's slot keeps the same list's copies)
   const stage = device.createBuffer({ size: cBuf.size, usage: U.MAP_READ | U.COPY_DST }), enc = device.createCommandEncoder();
   enc.copyBufferToBuffer(cBuf, 0, stage, 0, cBuf.size);
   device.queue.submit([enc.finish()]);
@@ -122,18 +162,20 @@ if (pb) {
   const qs = eng.layers.filter((l) => l.st.qsa).map((l) => l.st.qsa);
   for (const [name, skip] of [["the raw-key ring", new Set(qs.map((q) => q.rawK))], ["the pooled keys", new Set(qs.map((q) => q.pooled))]]) {
     await overwrite();
-    load(s, skip);
+    await load(s, skip);
     const d = cmp(A, await run(tail)), ds = stateDiff(sA, await snap(eng.pos));
     console.log(`${d || ds ? "ok  " : "FAIL"} control: restored without ${name}: tail ${d} hidden values and ${ds} state buffers differ ${d || ds ? "(the test sees it)" : "(the test cannot see this part)"}`);
     if (!d && !ds) fail++;
   }
 }
-await overwrite();
-load(s);
-const B = await run(tail);
-const diff = cmp(A, B), sdiff = stateDiff(sA, await snap(eng.pos));
-console.log(`restored at pos ${s.pos}: tail hidden states ${diff ? diff + " values differ" : "bit for bit"}, state after the tail ${sdiff ? sdiff + " buffers differ" : `bit for bit (${sA.length} buffers)`}`);
-if (diff || sdiff) fail++;
+for (const how of room ? ["loadSlot", "importState(exportSlot)"] : ["copy"]) {
+  await overwrite();
+  if (room) await roomLoad(s, { viaImport: how !== "loadSlot" }); else await load(s);
+  const B = await run(tail);
+  const diff = cmp(A, B), sdiff = stateDiff(sA, await snap(eng.pos));
+  console.log(`restored at pos ${s.pos}${room ? ` by ${how}` : ""}: tail hidden states ${diff ? diff + " values differ" : "bit for bit"}, state after the tail ${sdiff ? sdiff + " buffers differ" : `bit for bit (${sA.length} buffers)`}`);
+  if (diff || sdiff) fail++;
+}
 if (errors.count) { console.log(`${errors.count} GPU errors`); fail++; }
 console.log(fail ? "Q38FLASH CKPT FAIL" : "Q38FLASH CKPT PASS ✓");
 Deno.exit(fail ? 1 : 0);

@@ -28,7 +28,10 @@
 //   head(hidden) -> Promise<Float32Array(vocab)>      the head's HC mixer and output.weight on a final residual
 //   reset()                     pos 0, recurrent state, PLE ring and ngs cleared
 //   stateParts(pos) -> [{ buf, bytes }]               the GPU buffers of everything per sequence at pos: DeltaNet S
-//                               and conv window, K / V rows [0, pos), the PLE ring
+//                               and conv window, K / V rows [0, pos) in the engine's KV format, with QSA the raw-key
+//                               ring and the complete blocks' pooled keys, the PLE ring (the engine's _stateParts)
+//   signature() -> {}           what a saved state must match (the engine's stateSignature: arch, lo, hi, kv, qsa,
+//                               qsaRing, dim); optional, a core without it is the dense f32 layout
 import { NgramState } from "../engine/ngram.js";
 
 // WebGPU's flag values (the spec's), for a page or test without the globals until a device exists
@@ -107,9 +110,14 @@ export class FlashRoomEngine {
   // ---- checkpoints (Qwen35Engine's contract: room/pipeline.js ckpt*, room/ckpt-store.js)
   // A state: { sig, pos, parts: [ArrayBuffer] }: the core's GPU parts, then (with a PLE layer) the n-gram
   // predecessors as one more part, Int32Array [p1, p2, pos].
+  // The signature is the engine's own (its KV format, QSA, the raw-key ring, the layer range) with this adapter's
+  // fields after it: v 2 (the engine's parts, QSA state included) overwrites the engine's v 1, so a v1 copy (the dense
+  // f32 list without QSA state, before the room used the engine's parts) never matches: it reads as missing on disk
+  // (room/ckpt-store.js, packages/room-node/ckptdisk.js key on the sig) and importState refuses it.
   stateSignature() {
     const c = this.core;
-    return { v: 1, arch: "qwen4exp", lo: c.lo, hi: c.hi, hDim: c.dims.hDim, kv: "f32", ple: c.pleLayers.slice() };
+    const base = c.signature ? c.signature() : { v: 1, arch: "qwen4exp", lo: c.lo, hi: c.hi, kv: "f32" };
+    return { ...base, v: 2, hDim: c.dims.hDim, ple: c.pleLayers.slice() };
   }
   _ngsPart(st = this.core.ngs?.export()) { return st ? new Int32Array([st.p1, st.p2, st.pos]).buffer : null; }
   saveSlot(name) {
@@ -196,10 +204,12 @@ const copyable = (b) => b?.usage == null || !!(b.usage & U.COPY_SRC);
 export function qwen4expCore(e) {
   const dev = e.device, cfg = e.cfg, HD = cfg.hDim;
   const kvRow = cfg.nKVHeads * cfg.headDim * 4;   // f32 K (or V) per position
-  // This core's checkpoint layout (stateParts below, FlashRoomEngine.stateSignature) is the dense f32 one: f32 K / V
-  // rows, no QSA state. An engine built with kv: "f16" or QSA would checkpoint wrong rows and drop the indexer state:
-  // refuse it until the room delegates to the engine's own _stateParts / stateSignature (long-context integration).
-  if ((e.kv ?? "f32") !== "f32" || e.qsa) throw new Error(`room/flash.js: the room's Flash checkpoints are f32 K / V without QSA state, not kv ${e.kv}${e.qsa ? " with QSA" : ""}`);
+  // Checkpoints use the engine's own state list and signature (engine/qwen4exp.js _stateParts / stateSignature, #375:
+  // K / V rows in its KV format, QSA's raw-key ring and pooled keys). An engine without _stateParts (before #375) gets
+  // the dense f32 list below, which only fits an f32 engine without QSA: anything else is refused rather than
+  // checkpointed wrong.
+  const own = typeof e._stateParts === "function";
+  if (!own && ((e.kv ?? "f32") !== "f32" || e.qsa)) throw new Error(`room/flash.js: an engine without _stateParts checkpoints as f32 K / V without QSA state, not kv ${e.kv}${e.qsa ? " with QSA" : ""}`);
   // One step's ops: the layers' halves fused as forwardToken runs them (each HC combine folded into the next site),
   // laid out without the head, so the last combine stays in and B.R is the finished residual (forwardToken's own
   // lists fold the last layer's combine into the head's site when the engine has the head). Built on first use.
@@ -294,6 +304,7 @@ export function qwen4expCore(e) {
     // the expert store, when layers are offloaded (stats: hits, disk reads)
     get experts() { return e.experts || null; },
     stateParts(pos) {
+      if (own) return e._stateParts(pos);
       const parts = [];
       for (const l of e.layers) {
         const st = l.st;
@@ -302,5 +313,6 @@ export function qwen4expCore(e) {
       }
       return parts;
     },
+    ...(typeof e.stateSignature === "function" ? { signature: () => e.stateSignature() } : {}),
   };
 }

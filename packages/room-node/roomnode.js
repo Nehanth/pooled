@@ -1426,7 +1426,9 @@ export class RoomNode extends EventEmitter {
   diskLocal() {
     const ai = this.ai, E = ai.engine;
     if (!this.disk || !E?.stateSignature || !E.exportSlot || !E.importState || !ai.held?.file || !ai.model) return null;
-    return { model: ai.model, file: ai.held.file, sig: E.stateSignature(), ctx: E.maxSeq || ai.held.ctx || 0, kv: ai.held.kv || "f16" };
+    // kv: Flash (arch qwen4exp) reports its engine's real KV format (its signature's); the room's KV ask is a Qwen 3.5 one
+    const sig = E.stateSignature();
+    return { model: ai.model, file: ai.held.file, sig, ctx: E.maxSeq || ai.held.ctx || 0, kv: (sig.arch === "qwen4exp" && sig.kv) || ai.held.kv || "f16" };
   }
   // The room key: the model, context and KV mode and every device's file and state signature, host
   // first, in chain order (a worker's state depends on what every device before it computed). null
