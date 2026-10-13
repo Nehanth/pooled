@@ -124,32 +124,40 @@ export function progressTracker() {
   let best = 0, bestDone = 0;
   return {
     push({ parts = [], done = 0, total = 0 } = {}) {
-      const pct = wholePct(done, total);
+      // (99 at most while a part has not ended: a part still waiting with no size yet adds nothing to total)
+      const pct = allEnded(parts) ? wholePct(done, total) : Math.min(99, wholePct(done, total));
       best = Math.max(best, pct); bestDone = Math.max(bestDone, +done || 0);
-      return { parts, done: bestDone, total, pct: best };
+      return { parts, done: Math.min(bestDone, total > 0 ? total : bestDone), total, pct: best };
     },
   };
 }
 
 // The room's bar over every device: byDevice { name -> { parts?, done?, total?, left?, pct? } } -> { done, total,
-// pct, left, slowest }. done / total: the bytes of the devices that report bytes; a peer on an older build has only
-// its pct and is left out of them (the room's % then averages over the devices with bytes; with none, over the pcts).
-// left: the most any running device has left, null while one running device has no estimate. slowest: that device
-// (or, with an unknown one, the running device furthest behind). best: the room's pct so far (it never goes back).
+// pct, left, slowest, ended }. Every device counts, the ones that have not said anything yet too (a device on its disk
+// question, its graphics chip check, or a peer on an older build that sends only a percent): with bytes from every
+// device the bar is their bytes summed, else the average of each device's percent. 99 at most until every device has
+// ended (ended). left: the most any running device has left, null while one running device has no estimate.
+// slowest: that device (or, with an unknown one, the running device furthest behind). best: the room's pct so far
+// (it never goes back).
 export function roomProgress(byDevice = {}, best = 0) {
-  let done = 0, total = 0;
+  let done = 0, total = 0, allBytes = true, n = 0;
   const pcts = [], running = [];
   for (const [name, d] of Object.entries(byDevice)) {
+    n++;
     const bytes = Number.isFinite(d?.done) && Number.isFinite(d?.total) && d.total > 0;
-    const pct = bytes ? wholePct(d.done, d.total) : Math.max(0, Math.min(100, +d?.pct || 0));
-    if (bytes) { done += Math.min(d.done, d.total); total += d.total; } else pcts.push(pct);
-    const ended = d?.parts?.length ? d.parts.every((p) => ENDED.has(p.state)) : bytes ? d.done >= d.total : pct >= 100;
+    const ended = d?.parts?.length ? d.parts.every((p) => ENDED.has(p.state)) : bytes ? d.done >= d.total : +d?.pct >= 100;
+    let pct = bytes ? wholePct(d.done, d.total) : Math.max(0, Math.min(100, +d?.pct || 0));
+    if (!ended) pct = Math.min(99, pct);
+    pcts.push(pct);
+    if (bytes) { done += Math.min(d.done, d.total); total += d.total; } else allBytes = false;
     if (!ended) running.push({ name, pct, left: d?.left == null || !Number.isFinite(+d.left) ? null : Math.max(0, +d.left) });
   }
   const unknown = running.filter((r) => r.left == null);
   const slow = unknown.length ? unknown.reduce((a, r) => (r.pct < a.pct ? r : a)) : running.length ? running.reduce((a, r) => (r.left > a.left ? r : a)) : null;
-  const pct = Math.max(+best || 0, total > 0 ? wholePct(done, total) : pcts.length ? Math.floor(pcts.reduce((a, b) => a + b, 0) / pcts.length) : 0);
-  return { done, total, pct, left: unknown.length ? null : slow ? slow.left : 0, slowest: slow?.name ?? null };
+  const ended = n > 0 && !running.length;
+  const raw = allBytes && total > 0 ? wholePct(done, total) : pcts.length ? Math.floor(pcts.reduce((a, b) => a + b, 0) / pcts.length) : 0;
+  const pct = ended ? Math.max(+best || 0, raw) : Math.min(99, Math.max(+best || 0, raw));
+  return { done, total, pct, left: unknown.length ? null : slow ? slow.left : 0, slowest: slow?.name ?? null, ended };
 }
 
 // The time left on one device: push(now ms, parts, agg { done, total }?) -> seconds, or null until it is worth
@@ -238,24 +246,68 @@ export const stepLine = (id) => LINES[id] || LINES.gpu;
 // (the peer card in the room: "saving" while a device writes to its disk, "loading" after; deviceVerb on the card)
 export const rowVerb = (id) => (DISK.has(id) ? "saving" : "loading");
 
-const LONG = { save: "Saving to this computer", words: "Saving the word list", gpu: "Loading the graphics chip" };
-const SHORT = { save: "Saving", words: "Word list", gpu: "Graphics chip" };
-// One part's row on the card -> { label, value, cls, pct }. solo: this computer alone (long label, its GB); else a
-// meter under a device's row (short label, a %). single: the model loads in one part (every model but Flash)
+const LONG = { save: "Saving to this computer (once)", words: "Saving to this computer (once)", gpu: "Loading onto the graphics chip" };
+const SHORT = { save: "Saving", words: "Saving", gpu: "Loading" };
+// One part's row -> { label, value, cls, pct }. solo: this computer alone (long label, its GB); else short (a %).
+// single: the model loads in one part (every model but Flash)
 export function partRow(p, solo = true, { single = false } = {}) {
   const label = single && p.id === "gpu" ? (solo ? "Downloading the model" : "Loading") : (solo ? LONG : SHORT)[p.id] || LONG.gpu;
   const pct = p.state === "done" ? 100 : p.total > 0 ? wholePct(p.done, p.total) : 0;
   if (p.state === "skip") return { label, value: "", cls: "skip", pct: 0 };
   if (p.state === "wait") return { label, value: "waiting", cls: "wait", pct: 0 };
-  if (p.state === "done") return { label, value: solo ? "\u2713 done" : "\u2713", cls: "done", pct: 100 };
+  if (p.state === "done") return { label, value: solo ? "✓ done" : "✓", cls: "done", pct: 100 };
   if (p.state === "fail") return p.id === "words" ? { label, value: solo ? "read online instead" : "online", cls: "fb", pct: 100 } : { label, value: "stopped", cls: "fail", pct };
   return { label, value: solo ? (p.total > 0 ? stepBytes(p.done, p.total) : "starting") : `${pct}%`, cls: "run", pct };
+}
+
+// This computer's save as one figure: the model's parts and its word list saved to the disk, summed, so it is the same
+// number Start promised ("saves 92.4 GB here, once"). A word list that could not be saved is read online instead (the
+// note says so, WORDS_NOTE): it leaves the sum. hint: the bytes this device's save was sized at (the Start label's,
+// the disk question's), for a part that is still waiting with no size yet (today's sequential loader).
+// -> { done, total, state } or null when nothing is saved here (a second start, another model)
+export function diskPart(parts = [], hint = 0) {
+  const disk = parts.filter((p) => DISK.has(p.id) && p.state !== "skip" && !(p.id === "words" && p.state === "fail"));
+  if (!disk.length) return null;
+  let done = 0, total = 0, open = false;
+  for (const p of disk) {
+    if (p.total == null) { open = true; done += +p.done || 0; continue; }
+    const t = p.state === "fail" ? +p.done || 0 : +p.total || 0;
+    done += Math.min(+p.done || 0, t); total += t;
+  }
+  if (open && +hint > total) total = +hint;
+  const st = disk.map((p) => p.state);
+  const state = st.includes("fail") ? "fail" : st.includes("run") ? "run" : st.every((x) => x === "wait") ? "wait" : st.every((x) => ENDED.has(x)) ? "done" : "run";
+  return { id: "disk", done: Math.min(done, total || done), total, state };
+}
+
+// The rows a device alone shows, in order: "Saving to this computer (once)" (save and word list as one, diskPart) and
+// "Loading onto the graphics chip". One row only (a second start, any other model): no rows, its bytes go under the
+// main bar instead (cardSub). -> [{ k, label, value, cls, pct }]
+export function cardRows(parts = [], { single = false, hint = 0 } = {}) {
+  const rows = [];
+  const disk = diskPart(parts, hint);
+  if (disk) {
+    const r = disk.state === "run" && disk.total > 0 ? { value: stepBytes(disk.done, disk.total), cls: "run", pct: wholePct(disk.done, disk.total) }
+      : disk.state === "run" ? { value: "starting", cls: "run", pct: 0 }
+        : partRow({ ...disk, id: "save" }, true);
+    rows.push({ k: "disk", label: LONG.save, value: r.value, cls: r.cls, pct: r.pct });
+  }
+  const g = parts.find((p) => p.id === "gpu" && p.state !== "skip");
+  if (g) rows.push({ k: "gpu", ...partRow(g, true, { single }) });
+  return rows.length > 1 ? rows : [];
+}
+// the line under the main bar when there are no rows (one part): "3.1 of 11.8 GB"; "" when the size is not known yet
+export function cardSub(parts = []) {
+  const live = parts.filter((p) => p.state !== "skip");
+  const done = live.reduce((a, p) => a + (+p.done || 0), 0), total = live.reduce((a, p) => a + (p.total == null ? 0 : +p.total || 0), 0);
+  return total > 0 && !allEnded(live) ? stepBytes(Math.min(done, total), total) : "";
 }
 
 const runs = (parts, id) => parts.some((p) => p.id === id && p.state === "run");
 const stateOf = (parts, id) => parts.find((p) => p.id === id)?.state;
 const allEnded = (parts) => parts.length > 0 && parts.every((p) => ENDED.has(p.state));
 const allWait = (parts) => !parts.length || parts.every((p) => p.state === "wait" || p.state === "skip") && !parts.some((p) => p.done > 0);
+export const partsEnded = allEnded;
 // was this device's start a second one (both copies already on it)?
 export const cachedStart = (parts) => parts.length > 1 && stateOf(parts, "save") === "skip" && stateOf(parts, "words") === "skip";
 // did this load save anything to the disk (a first start)? null while not known
@@ -264,14 +316,15 @@ export function firstStart(parts) {
   return parts.some((p) => DISK.has(p.id) && p.state !== "skip");
 }
 
-// A device's row verb: "getting ready", "saving and loading", "saving to its disk", "finishing its save", "loading",
-// "loading from its disk", "waiting for pc", "✓ ready"
-export function deviceVerb(parts = [], { roomReady = false, slowest = null, cached = null, self = null } = {}) {
-  if (allEnded(parts)) return roomReady ? "✓ ready" : slowest && slowest !== self ? `waiting for ${slowest}` : "✓ ready";
+// A device's short state beside its one bar: "getting ready", "saving · loading", "saving", "finishing its save",
+// "loading", "loading from its disk", "waiting for pc", "ready"; asking: its user is being asked about its disk
+export function deviceVerb(parts = [], { roomReady = false, slowest = null, cached = null, self = null, asking = false } = {}) {
+  if (asking) return "asked to save its part";
+  if (allEnded(parts)) return roomReady ? "ready" : slowest && slowest !== self ? `waiting for ${slowest}` : "ready";
   if (allWait(parts)) return "getting ready";
   const disk = runs(parts, "save") || runs(parts, "words"), gpu = runs(parts, "gpu");
-  if (disk && gpu) return "saving and loading";
-  if (disk) return stateOf(parts, "gpu") === "done" ? "finishing its save" : "saving to its disk";
+  if (disk && gpu) return "saving · loading";
+  if (disk) return stateOf(parts, "gpu") === "done" ? "finishing its save" : "saving";
   if (gpu) return (cached ?? cachedStart(parts)) ? "loading from its disk" : "loading";
   return "getting ready";
 }
@@ -281,7 +334,7 @@ const DISKFULL = /quota|disk.?full|no space|out of (disk )?space|not enough (dis
 export const stopWho = (why) => /^(.+?) couldn't load its part/.exec(String(why || ""))?.[1] || null;
 export const stopIsDisk = (why) => DISKFULL.test(String(why || ""));
 
-// The card's big line. room { left }, phase "pressed" | "run" | "ready" | "stopped"; ctx { model, why, me }
+// The card's big line. room { left, ended }, phase "pressed" | "run" | "ready" | "stopped"; ctx { model, why, me }
 export function headline(room = {}, phase = "run", { model = "The model", why = "", me = null } = {}) {
   if (phase === "ready") return `${model} is ready`;
   if (phase === "stopped") {
@@ -289,69 +342,77 @@ export function headline(room = {}, phase = "run", { model = "The model", why = 
     const who = stopWho(why);
     return !who || who === me ? "This computer ran out of disk space" : `${who} ran out of disk space`;
   }
+  if (room.ended) return "Almost ready…";
   if (phase === "pressed" || room.left == null) return "Getting ready…";
   return `Ready to chat in ${leftText(room.left)}`;
 }
 
 const names = (devices) => devices.length > 2 ? `${devices.length} devices` : devices.map((d) => d.name).join(" and ");
-// The line under it. devices [{ name, you, parts, done, total }]; ctx { host (a follower before the deal), redeal,
-// paced (the pacer holds this device), single (the model loads in one part), cached (this computer has the copy) }
+// The line under it. devices [{ name, you, parts, done, total, asking }]; ctx { host (a follower before the deal),
+// model (its name), redeal, paced (the pacer holds this device), single (the model loads in one part), first (this
+// start saves to a disk), cached (this computer has the copy), asking (this computer's user is being asked) }
 export function sentence(room = {}, phase = "run", devices = [], ctx = {}) {
   const solo = devices.length <= 1;
+  const model = ctx.model || "the model";
   if (phase === "ready") return solo ? "Running on this computer. Ask it anything below." : `Running on ${names(devices)} together. Ask it anything below.`;
-  if (ctx.host && !devices.some((d) => d.parts?.length)) return `${ctx.host} is getting the model ready.`;
+  if (ctx.asking) return "The room is waiting for your answer.";
+  if (ctx.host && !devices.some((d) => d.parts?.length)) return `${ctx.host} started ${model}. This computer is getting its part ready.`;
   if (ctx.redeal && phase === "pressed") return "Sharing out the model again. Nothing is lost.";
   if (!solo) {
+    const asked = devices.find((d) => d.asking && !d.you);
+    if (asked) return `Waiting for ${asked.name} to say if it can save its part.`;
     if (phase === "pressed" || devices.every((d) => allWait(d.parts || []))) return `${names(devices)} are checking what's already saved.`;
     const me = devices.find((d) => d.you);
+    if (room.ended) return "Every part is loaded. Starting up.";
     if (ctx.paced && room.slowest) return `Waiting for ${room.slowest} to catch up.`;
     if (me && allEnded(me.parts || []) && room.slowest && room.slowest !== me.name) return `Your part is ready. Waiting for ${room.slowest} to finish.`;
     return ctx.single ? "Each device downloads its own part and loads it."
       : ctx.first === false ? "Each device loads its own part from its disk." : "Each device saves its own part and loads it.";
   }
   const parts = devices[0]?.parts || [];
-  let s;
-  if (phase === "pressed" || allWait(parts)) s = "Checking this computer and what's already saved.";
-  else {
-    const disk = runs(parts, "save") || runs(parts, "words"), gpu = runs(parts, "gpu"), g = stateOf(parts, "gpu");
-    if (disk && gpu) s = "Saving the model to this computer and loading it at the same time.";
-    else if (disk && g === "wait") s = "Saving the model to this computer first. This happens once.";
-    else if (disk && g === "done") s = "The graphics chip is loaded. Finishing the save to this computer.";
-    else if (gpu && (ctx.single || parts.length === 1)) s = "Downloading the model and loading it onto the graphics chip.";
-    else if (gpu && parts.some((p) => DISK.has(p.id) && (p.state === "done" || p.state === "fail"))) s = "Saved. Now loading it onto the graphics chip.";
-    else if (gpu && (ctx.cached ?? cachedStart(parts))) s = "Loading it from this computer onto the graphics chip.";
-    else if (gpu) s = "Loading it onto the graphics chip.";
-    else s = "Almost ready.";
-  }
-  if (phase !== "pressed" && room.left == null && (devices[0]?.done > 0) && !allEnded(parts)) s += " Working out how long this takes…";
-  return s;
+  if (phase === "pressed" || allWait(parts)) return "Checking this computer and what's already saved.";
+  if (room.ended || allEnded(parts)) return "Everything is loaded. Starting up.";
+  const disk = runs(parts, "save") || runs(parts, "words"), gpu = runs(parts, "gpu"), g = stateOf(parts, "gpu");
+  if (disk && gpu) return "Saving the model to this computer and loading it at the same time.";
+  if (disk && g === "wait") return "Saving the model to this computer first.";
+  if (disk && g === "done") return "The graphics chip is loaded. Finishing the save to this computer.";
+  if (gpu && (ctx.single || parts.length === 1)) return "Downloading the model and loading it onto the graphics chip.";
+  if (gpu && parts.some((p) => DISK.has(p.id) && (p.state === "done" || p.state === "fail"))) return "Saved. Now loading it onto the graphics chip.";
+  if (gpu && (ctx.cached ?? cachedStart(parts))) return "Loading it from this computer onto the graphics chip.";
+  if (gpu) return "Loading it onto the graphics chip.";
+  return "Almost ready.";
 }
 
+const tookText = (s) => (s >= 90 ? `${Math.round(s / 60)} min` : `${Math.max(1, Math.round(s))} s`);
 // The quiet line at the bottom. first: this start saves to the disk (true), it is a second start (false), or not known
-// (null); took: seconds from Start to ready
-export function footer(phase = "run", { solo = true, first = null, took = null, wordsFailed = false } = {}) {
+// (null); took: seconds from Start to ready; saved: bytes this computer saved for next time (the ready card's one line)
+export function footer(phase = "run", { solo = true, first = null, took = null, wordsFailed = false, saved = 0 } = {}) {
   if (phase === "stopped") return "";
   if (phase === "ready") {
     if (took == null) return "";
-    const t = took >= 90 ? `${Math.round(took / 60)} min` : `${Math.max(1, Math.round(took))} s`;
-    return first ? `Took ${t} · next start about a minute` : `Took ${t}`;
+    const gb = saved >= GiB ? `${(saved / GiB).toFixed(1)} GB` : "";
+    return first && gb ? `Saved ${gb}${solo ? "" : " here"} for next time · took ${tookText(took)}`
+      : first ? `Took ${tookText(took)} · next start about a minute` : `Took ${tookText(took)}`;
   }
   if (wordsFailed) return "";   // the note box says it
   if (!first) return "";
   return solo ? "The saving happens once. Next time it starts in about a minute."
     : "Each device saves only its own part, once. Next time it starts in about a minute.";
 }
-export const WORDS_NOTE = ["The word list didn't fit on this computer's disk.", " It's read online instead, so answers may start a moment later. Nothing to do."];
+export const WORDS_NOTE = ["Part of the model is read online instead.", " It couldn't all be saved on this computer, so answers may start a moment later. Nothing to do."];
 
-// What a stopped start says under its headline. save: the stopping device's save part ({ done, total } bytes) or null
-// plain: why is already said in plain words (the room can't hold the model, the graphics chip check); else the
-// technical why stays in the tooltip and this says which device could not load its part
+// What a stopped start says under its headline. save: the stopping device's save (diskPart: { done, total } bytes) or
+// null. plain: why is already said in plain words (the room can't hold the model, the graphics chip check); else the
+// technical why stays in the tooltip and this says which device could not load its part. me: this device's name: a
+// stop on another device says where to free space ("on pc") and that Try again is pressed here
 export function stoppedText(why, { me = null, save = null, plain = false } = {}) {
   const who = stopWho(why);
   if (stopIsDisk(why) && save?.total > 0) {
     const gb = (b) => (b / GiB).toFixed(1);
-    const x = save.done, y = save.total;
-    return `${gb(x)} of ${gb(y)} GB is saved and stays saved. Free up about ${Math.ceil((y - x) / GiB + 2)} GB, then Try again continues from there.`;
+    const x = save.done, y = save.total, other = who && who !== me;
+    const need = Math.max(0.1, (y - x) / GiB);
+    return `${gb(x)} of ${gb(y)} GB is saved and stays saved. Free up about ${Math.ceil(need + 2)} GB ${other ? `on ${who}` : "on this computer"} `
+      + `(${need.toFixed(1)} GB plus a little extra), then press Try again${other ? " here" : ""}.`;
   }
   if (who) return `${who === me ? "This computer" : who} couldn't load its part.`;
   const s = String(why || "").trim();
@@ -360,7 +421,8 @@ export function stoppedText(why, { me = null, save = null, plain = false } = {})
 // the eyebrow over the headline
 export function eyebrow(phase, { model = "the model", first = null } = {}) {
   if (phase === "stopped") return `${model} stopped`;
-  if (phase === "ready") return first === true ? "First start \u00b7 saved for next time" : first === false ? "Started from what's saved" : "Started";
+  // (ready: the footer says what was saved, in one line)
+  if (phase === "ready") return first === true ? `${model} \u00b7 first start` : first === false ? "Started from what's saved" : "Started";
   if (first === true) return `Starting ${model} · first start`;
   if (first === false) return `Starting ${model} · saved from last time`;
   return `Starting ${model}`;

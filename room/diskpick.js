@@ -38,12 +38,14 @@ export const pickNote = (m, needGB = null, stores = true, fits = false, disk = {
     : `${m.name} is a ${m.params} model that keeps most of itself on disk.`)
   : [`${m.name} is a ${m.params} model. It keeps most of itself on disk, so it needs `
     + (needGB > 0 ? `only about ${num(needGB)} GB of GPU memory.` : "far less GPU memory than its size."),
-  downloadNote(m, disk), (disk.devs ?? 1) > 1 ? "Each device that joins makes it faster."
+  downloadNote(m, { ...disk, fits }), (disk.devs ?? 1) > 1 ? "Each device that joins makes it faster."
     : "Alone it reads from disk, so answers start slowly. Each device that joins makes it faster."].filter(Boolean).join(" ");
 // pickNote's sentence on what Start downloads to this device, by its disk answer: "" when it downloads nothing here
-function downloadNote(m, { state = null, shareBytes = null, storedBytes = null } = {}) {
+// (not asked yet and the room fits with this device's share known: Start's label says what it saves, and the press is
+// the yes, so nothing asks first)
+function downloadNote(m, { state = null, shareBytes = null, storedBytes = null, fits = false } = {}) {
   const need = sizeText(shareBytes > 0 ? shareBytes : m.diskBytes);
-  if (state === "ask") return shareBytes === 0 ? "" : `Start asks first, then downloads ${need} to this device's disk, once.`;
+  if (state === "ask") return shareBytes === 0 ? "" : fits && shareBytes > 0 ? `Start saves ${need} to this device's disk, once.` : `Start asks first, then downloads ${need} to this device's disk, once.`;
   if (state !== "allow" || shareBytes === 0) return "";
   const share = shareBytes > 0 ? shareBytes : m.diskBytes;
   if (storedBytes > 0 && storedBytes >= share * 0.99) return "It's already saved on this device.";
@@ -98,10 +100,11 @@ export function poolFix(state, { nStore = 0, fits = false, needDisk = false, nee
 // disk), null for a room node (it reads its own files) or when not known. off: this device, whose disk storage is off
 // (a no), so not "no disk". m: the model (its whole copy, "up to 92.4 GB disk", while a tab's share is not known). A
 // room node on disk says the RAM it reads into ("43 GB RAM · disk")
-export const devStoreTag = (st, share = null, off = false, m = null) => st?.kind === "disk"
+// self: this device, whose Start press is its yes (so no "will ask" beside its own share)
+export const devStoreTag = (st, share = null, off = false, m = null, self = false) => st?.kind === "disk"
   ? (st.ramGB > 0 ? `${num(st.ramGB)} GB RAM · disk`
     : (share > 0 ? `${sizeText(share)} disk` : share === 0 ? "disk not needed" : m ? `up to ${sizeText(m.diskBytes)} disk` : "disk")
-      + (st.ask && share !== 0 ? " · will ask" : ""))
+      + (st.ask && share !== 0 && !(self && share > 0) ? " · will ask" : ""))
   : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : st?.kind == null && off ? "disk off" : "no disk";
 export const devStoreTitle = (name, gb, st, share = null, off = false) => `${name}: ${gb} GB GPU memory, `
   + (st?.kind === "disk" ? (st.ramGB > 0 ? `${num(st.ramGB)} GB RAM, ` : "") + (st.ask ? "asks before saving to disk" : "disk") + (share > 0 ? `, saves ${sizeText(share)} there` : "")
@@ -127,7 +130,9 @@ const TIP = { url: "?tabdisk=0 or ?tabram=0 in the address", small: "tabRamCap l
 // TAB_RAM_GB held to tabRamCap; null without a tier); armed: Free was pressed once (the second press frees);
 // shareBytes: what this device would copy in this room (roomFitFor share: its layers' experts and, on the device that
 // holds its layer, the n-gram table; 0 when the room doesn't need its disk), null when not known (the whole copy then)
-export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, armed = false, shareBytes = null } = {}) {
+// startSays: Start's label says what it saves here (not asked yet, the room fits): the press is the yes, so no Allow
+// beside it (two buttons that both mean yes)
+export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, armed = false, shareBytes = null, startSays = false } = {}) {
   const stored = storedBytes > 0 ? sizeText(storedBytes) : storedBytes === 0 ? "0 GB" : "?";
   const total = sizeText(m.diskBytes), ram = ramGB > 0 ? `${num(ramGB)} GB of RAM` : "";
   const part = shareBytes > 0 && shareBytes < m.diskBytes * 0.99, need = part ? sizeText(shareBytes) : total;
@@ -139,6 +144,9 @@ export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, ar
       parts.push(storedBytes > 0 ? (shareBytes != null && storedBytes >= shareBytes * 0.99 ? `${stored} saved on this device` : `${stored} of ${need} saved on this device`)
         : `Saves ${need}${whose} to this device's disk the first time it starts`);
     }
+  } else if (state === "ask" && startSays && shareBytes > 0) {
+    parts.push(`Start saves ${need}${whose} to this device's disk, once`);
+    if (storedBytes > 0) parts.push(`${stored} saved`);
   } else if (state === "ask" || state === "deny") {
     parts.push(shareBytes === 0 ? `Lets ${m.name} save up to ${total} to this device's disk when the room needs it`
       : `Lets ${m.name} save ${need}${whose} to this device's disk, once`);
@@ -149,7 +157,7 @@ export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, ar
   }
   const acts = [];
   // aria: what a screen reader says for the button (not just "Allow")
-  if (state === "ask" || state === "deny") acts.push({ act: "allow", label: "Allow", aria: `Allow disk storage for ${m.name}` });
+  if (state === "deny" || (state === "ask" && !(startSays && shareBytes > 0))) acts.push({ act: "allow", label: "Allow", aria: `Allow disk storage for ${m.name}` });
   if (storedBytes > 0) acts.push({ act: "free", label: armed ? `Delete ${stored}?` : "Delete", aria: `${armed ? "Confirm: delete" : "Delete"} ${m.name}'s saved copy (${stored})` });
   const can = state === "allow" || state === "ask" || state === "deny";
   // the RAM it reads the copy with goes in the tooltip: one line less, so the column doesn't jump as devices join

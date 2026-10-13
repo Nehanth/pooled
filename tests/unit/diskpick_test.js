@@ -57,6 +57,8 @@ Deno.test("diskpick: the row, and the line under the rows", () => {
   for (const st of ["deny", "url", "small", "none"]) eq(say({ state: st, shareBytes: null, storedBytes: 0 }), "", st);
   eq(say({ state: "allow", shareBytes: 0, storedBytes: 0 }), "", "the room doesn't need this device's disk");
   eq(say({ state: "ask", shareBytes: 0, storedBytes: 0 }), "");
+  eq(say({ state: "ask", shareBytes: 92.4 * GB, storedBytes: 0 }), "Start saves 92.4 GB to this device's disk, once.", "Start's label is the yes: nothing asks first");
+  eq(pickNote(m, 8.1, true, false, { state: "ask", shareBytes: 92.4 * GB }).includes("Start asks first"), true, "short of room: Start can't say it, so it asks");
   eq(pickNote(m, 67, false), "Qwen3.8 Flash is a 125B model that keeps most of itself on disk.", "no device stores it: never a whole-model GPU figure, and the fix is said under Start and in the pool");
   eq(pickNote(m, null, false), pickNote(m, 67, false), "no planner figure (a small room): the same, never \"far less GPU memory\"");
   eq(pickNote(m, 67, false, true), "Qwen3.8 Flash is a 125B model. This room's GPU memory holds all of it.");
@@ -102,6 +104,8 @@ Deno.test("diskpick: Disk storage shows #368's answer, the stored size, the tier
   eq([d.chip, acts(d)], ["", ["allow"]], "not asked: no chip, Allow is the answer");
   eq([d.h, d.title], ["Lets Qwen3.8 Flash save 92.4 GB to this device's disk, once", "Uses 3 GB of RAM to read it"], "what Allow does, no second dialog");
   ok(!diskRowHTML(d).includes('class="more"'), "no empty chip");
+  d = diskRow(m, { state: "ask", storedBytes: 0, ramGB: 3, shareBytes: 92.4 * GB, startSays: true });
+  eq([d.h, acts(d)], ["Start saves 92.4 GB to this device's disk, once", []], "Start says it saves: no Allow beside a Start that means yes");
   d = diskRow(m, { state: "deny", storedBytes: 0, ramGB: 3 });
   eq([d.chip, acts(d)], ["", ["allow"]], "a no: Allow again, no chip");
   ok(d.h.startsWith("Lets Qwen3.8 Flash save 92.4 GB"));
@@ -219,6 +223,7 @@ Deno.test("pool: the Storage line (S1-S5), the fix line and each device's tag", 
   // a tab's share in this room (roomFitFor share)
   eq(devStoreTag({ kind: "disk", ask: false }, 46.2 * GB), "46.2 GB disk");
   eq(devStoreTag({ kind: "disk", ask: true }, 46.2 * GB), "46.2 GB disk · will ask");
+  eq(devStoreTag({ kind: "disk", ask: true }, 46.2 * GB, false, m, true), "46.2 GB disk", "this device: its Start press is the yes");
   eq(devStoreTag({ kind: "disk", ask: false }, 0), "disk not needed");
   eq(devStoreTitle("mac", 12, { kind: "disk", ask: false }, 46.2 * GB), "mac: 12 GB GPU memory, disk, saves 46.2 GB there");
   eq(devStoreTitle("mac", 12, { kind: "disk", ask: true }), "mac: 12 GB GPU memory, asks before saving to disk");

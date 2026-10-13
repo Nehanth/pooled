@@ -5,7 +5,7 @@
 import {
   PART_ORDER, GATE, planSteps, drop, loadTracker, partsFromProg, partsFromSnapshot, progressTracker, roomProgress, etaTracker,
   packParts, unpackParts, leftText, stepBytes, stepLine, rowVerb, partRow, deviceVerb, headline, sentence, footer, eyebrow,
-  stoppedText, stopWho, stopIsDisk, cachedStart, firstStart, wholePct, WORDS_NOTE,
+  stoppedText, stopWho, stopIsDisk, cachedStart, firstStart, wholePct, WORDS_NOTE, diskPart, cardRows, cardSub, partsEnded,
 } from "../../room/loadsteps.js";
 
 const eq = (a, b, m = "") => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error(`${m} ${ja} != ${jb}`); };
@@ -132,9 +132,9 @@ Deno.test("roomProgress: byte sums, an older peer, left and slowest", () => {
     pc: { parts: [{ id: "gpu", state: "run" }], done: 10, total: 100, left: 600 },
   });
   eq([r.done, r.total, r.pct, r.left, r.slowest], [40, 200, 20, 600, "pc"]);
-  // an older peer: pct only, out of the byte sums
+  // an older peer: pct only, out of the byte sums; the room's bar then averages every device's percent
   const o = roomProgress({ mac: { parts: [{ id: "gpu", state: "run" }], done: 50, total: 100, left: 60 }, old: { pct: 10 } });
-  eq([o.done, o.total, o.pct], [50, 100, 50]);
+  eq([o.done, o.total, o.pct], [50, 100, 30]);
   eq([o.left, o.slowest], [null, "old"], "a running device without an estimate");
   eq(roomProgress({ a: { pct: 40 }, b: { pct: 60 } }).pct, 50, "only old peers: the pcts average");
   // a done device does not hold the time left
@@ -142,6 +142,66 @@ Deno.test("roomProgress: byte sums, an older peer, left and slowest", () => {
   eq([d.left, d.slowest], [120, "pc"]);
   eq(roomProgress({ mac: { parts: [{ id: "gpu", state: "done" }], done: 10, total: 10 } }).left, 0);
   eq(roomProgress({ mac: { parts: [], done: 10, total: 100 } }, 30).pct, 30, "held to its best");
+});
+
+Deno.test("roomProgress: a device that has not said anything yet holds the room's bar back (no early 100%)", () => {
+  const mac = (d, st = "run") => ({ parts: [{ id: "gpu", state: st }], done: d, total: 100, left: 10 });
+  // pc was dealt a part but is on its disk question: no bytes, no percent
+  let r = roomProgress({ mac: mac(50), pc: { parts: [], pct: 0 } });
+  eq(r.pct, 25, "the average of each device's percent, pc's 0 too");
+  r = roomProgress({ mac: mac(100, "done"), pc: { parts: [], pct: 0 } }, r.pct);
+  eq([r.pct, r.ended, r.slowest], [50, false, "pc"]);
+  r = roomProgress({ mac: mac(100, "done"), pc: { parts: [{ id: "gpu", state: "run" }], done: 2, total: 100 } }, 99);
+  eq([r.pct, r.ended], [99, false], "a best of 99 can't reach 100 until every device has ended");
+  r = roomProgress({ mac: mac(100, "done"), pc: { parts: [{ id: "gpu", state: "done" }], done: 100, total: 100 } }, 99);
+  eq([r.pct, r.ended], [100, true]);
+  eq(roomProgress({ old: { pct: 100 }, mac: mac(100, "done") }).pct, 100, "an older peer at 100 has ended");
+});
+
+Deno.test("progressTracker: a part waiting with no size keeps it under 100", () => {
+  const t = progressTracker();
+  const o = t.push(partsFromSnapshot({ parts: [{ id: "gpu", done: 10, total: 10, state: "done" }, { id: "save", done: 0, total: null, state: "wait" }] }));
+  eq(o.pct, 99);
+  eq(t.push(partsFromSnapshot({ parts: [{ id: "gpu", done: 10, total: 10, state: "done" }, { id: "save", done: 5, total: 5, state: "done" }] })).pct, 100);
+});
+
+Deno.test("a concurrent loader's parts in the order it sends them (gpu first) give the same card", () => {
+  // room/flashload.js partsTracker: parts ["gpu", "save", "words"], the gpu first and done while the copies go on
+  const snap = (g, sv, w, st) => ({ parts: [{ id: "gpu", done: g, total: 10, state: st[0] }, { id: "save", done: sv, total: 60, state: st[1] }, { id: "words", done: w, total: 30, state: st[2] }] });
+  const t = progressTracker();
+  let o = t.push(partsFromSnapshot(snap(5, 0, 3, ["run", "wait", "run"])));
+  eq(firstStart(o.parts), true, "a first start, whatever the order");
+  o = t.push(partsFromSnapshot(snap(10, 20, 10, ["done", "run", "run"])));
+  eq(deviceVerb(o.parts), "finishing its save");
+  eq(cardRows(o.parts).map((r) => [r.k, r.value]), [["disk", stepBytes(30, 90)], ["gpu", "\u2713 done"]]);
+  ok(o.pct < 100);
+  o = t.push(partsFromSnapshot(snap(10, 60, 30, ["done", "done", "done"])));
+  eq(o.pct, 100);
+});
+
+Deno.test("diskPart / cardRows / cardSub: the save is one figure, the one Start promised", () => {
+  const P = (sv, w, g) => [{ id: "save", ...sv }, { id: "words", ...w }, { id: "gpu", ...g }];
+  // 63.6 + 28.8 = 92.4 GB, Start's "saves 92.4 GB here, once"
+  let parts = P({ done: 22.3 * GB, total: 63.6 * GB, state: "run" }, { done: 0, total: 28.8 * GB, state: "run" }, { done: 0, total: 11.8 * GB, state: "run" });
+  eq((diskPart(parts).total / GB).toFixed(1), "92.4");
+  const rows = cardRows(parts);
+  eq(rows.map((r) => [r.k, r.label, r.value]), [["disk", "Saving to this computer (once)", "22.3 of 92.4 GB"], ["gpu", "Loading onto the graphics chip", "0 of 11.8 GB"]]);
+  // today's sequential loader: the word list waits with no size yet; the hint (Start's figure) stands in
+  parts = P({ done: 22.3 * GB, total: 63.6 * GB, state: "run" }, { done: 0, total: null, state: "wait" }, { done: 0, total: null, state: "wait" });
+  eq(cardRows(parts, { hint: 92.4 * GB })[0].value, "22.3 of 92.4 GB");
+  eq(cardRows(parts)[0].value, "22.3 of 63.6 GB", "no hint: what is known");
+  // the word list could not be saved: it leaves the save's figure (the note says it is read online)
+  parts = P({ done: 52 * GB, total: 63.6 * GB, state: "run" }, { done: 9 * GB, total: 9 * GB, state: "fail" }, { done: 11.8 * GB, total: 11.8 * GB, state: "done" });
+  eq(cardRows(parts).map((r) => r.value), ["52.0 of 63.6 GB", "\u2713 done"]);
+  // placeholders on the press: two grey rows
+  eq(cardRows(P({ done: 0, total: null, state: "wait" }, { done: 0, total: null, state: "skip" }, { done: 0, total: null, state: "wait" })).map((r) => r.cls), ["wait", "wait"]);
+  // one part (a second start, another model): no rows, the bytes go under the bar
+  parts = P({ state: "skip", done: 0, total: 0 }, { state: "skip", done: 0, total: 0 }, { done: 3.1 * GB, total: 11.8 * GB, state: "run" });
+  eq(cardRows(parts), []);
+  eq(cardSub(parts), "3.1 of 11.8 GB");
+  eq(cardSub([{ id: "gpu", done: 1, total: 1, state: "done" }]), "", "nothing under the bar once it is loaded");
+  eq(diskPart(parts), null);
+  ok(partsEnded([{ id: "gpu", state: "done" }]) && !partsEnded([]));
 });
 
 Deno.test("etaTracker: quiet until 20 s and 1 GiB, shared link, hysteresis", () => {
@@ -190,15 +250,15 @@ Deno.test("leftText at its edges", () => {
 });
 
 Deno.test("partRow: labels and values", () => {
-  eq(partRow({ id: "save", done: 19.1 * GB, total: 63.6 * GB, state: "run" }), { label: "Saving to this computer", value: "19.1 of 63.6 GB", cls: "run", pct: 30 });
+  eq(partRow({ id: "save", done: 19.1 * GB, total: 63.6 * GB, state: "run" }), { label: "Saving to this computer (once)", value: "19.1 of 63.6 GB", cls: "run", pct: 30 });
   eq(partRow({ id: "words", state: "wait", done: 0, total: null }).value, "waiting");
   eq(partRow({ id: "gpu", state: "done", done: 1, total: 1 }).value, "✓ done");
   eq(partRow({ id: "gpu", state: "done", done: 1, total: 1 }, false).value, "\u2713", "a meter says it short");
   eq(partRow({ id: "save", state: "skip" }).cls, "skip");
-  eq(partRow({ id: "words", state: "fail", done: 1, total: 1 }), { label: "Saving the word list", value: "read online instead", cls: "fb", pct: 100 });
+  eq(partRow({ id: "words", state: "fail", done: 1, total: 1 }), { label: "Saving to this computer (once)", value: "read online instead", cls: "fb", pct: 100 });
   eq(partRow({ id: "save", state: "fail", done: 1, total: 1 }).value, "stopped");
   eq(partRow({ id: "gpu", state: "run", done: 1, total: 4 }, true, { single: true }).label, "Downloading the model");
-  eq(partRow({ id: "gpu", state: "run", done: 1, total: 4 }, false), { label: "Graphics chip", value: "25%", cls: "run", pct: 25 });
+  eq(partRow({ id: "gpu", state: "run", done: 1, total: 4 }, false), { label: "Loading", value: "25%", cls: "run", pct: 25 });
   eq(stepBytes(300 * 2 ** 20, 1.2 * GB), "300 MB of 1.2 GB");
 });
 
@@ -206,14 +266,15 @@ Deno.test("deviceVerb: every row", () => {
   const P = (s, w, g) => [{ id: "save", state: s, done: 1 }, { id: "words", state: w, done: 1 }, { id: "gpu", state: g, done: 1 }];
   eq(deviceVerb([{ id: "save", state: "wait", done: 0 }, { id: "gpu", state: "wait", done: 0 }]), "getting ready");
   eq(deviceVerb([]), "getting ready");
-  eq(deviceVerb(P("run", "wait", "run")), "saving and loading");
-  eq(deviceVerb(P("done", "run", "run")), "saving and loading");
+  eq(deviceVerb(P("run", "wait", "run")), "saving \u00b7 loading");
+  eq(deviceVerb(P("done", "run", "run")), "saving \u00b7 loading");
   eq(deviceVerb(P("run", "run", "done")), "finishing its save");
-  eq(deviceVerb(P("run", "wait", "wait")), "saving to its disk");
+  eq(deviceVerb(P("run", "wait", "wait")), "saving");
   eq(deviceVerb(P("done", "done", "run")), "loading");
   eq(deviceVerb(P("skip", "skip", "run")), "loading from its disk");
   eq(deviceVerb(P("done", "done", "done"), { slowest: "pc", self: "mac" }), "waiting for pc");
-  eq(deviceVerb(P("done", "fail", "done"), { roomReady: true, slowest: "pc" }), "✓ ready");
+  eq(deviceVerb(P("done", "fail", "done"), { roomReady: true, slowest: "pc" }), "ready");
+  eq(deviceVerb([], { asking: true }), "asked to save its part");
   eq(rowVerb("save"), "saving"); eq(rowVerb(null), "loading");
 });
 
@@ -221,6 +282,7 @@ Deno.test("headline / sentence / footer / stopped copy", () => {
   eq(headline({ left: null }, "run"), "Getting ready…");
   eq(headline({ left: 540 }, "pressed"), "Getting ready…");
   eq(headline({ left: 540 }, "run"), "Ready to chat in about 9 min");
+  eq(headline({ left: 0, ended: true }, "run"), "Almost ready…", "every part done, not ready yet: no time");
   eq(headline({}, "ready", { model: "Qwen3.8 Flash" }), "Qwen3.8 Flash is ready");
   eq(headline({}, "stopped", { why: "QuotaExceededError: the quota has been exceeded" }), "This computer ran out of disk space");
   eq(headline({}, "stopped", { why: "pc couldn't load its part of the model (QuotaExceededError)", me: "mac" }), "pc ran out of disk space");
@@ -230,12 +292,14 @@ Deno.test("headline / sentence / footer / stopped copy", () => {
   const P = (s, w, g) => [{ id: "save", state: s, done: 1 }, { id: "words", state: w, done: 1 }, { id: "gpu", state: g, done: 1 }];
   eq(sentence({}, "pressed", me([])), "Checking this computer and what's already saved.");
   eq(sentence({ left: 9 }, "run", me(P("run", "wait", "run"))), "Saving the model to this computer and loading it at the same time.");
-  eq(sentence({ left: 9 }, "run", me(P("run", "wait", "wait"))), "Saving the model to this computer first. This happens once.");
+  eq(sentence({ left: 9 }, "run", me(P("run", "wait", "wait"))), "Saving the model to this computer first.");
   eq(sentence({ left: 9 }, "run", me(P("done", "run", "done"))), "The graphics chip is loaded. Finishing the save to this computer.");
   eq(sentence({ left: 9 }, "run", me(P("done", "fail", "run"))), "Saved. Now loading it onto the graphics chip.");
   eq(sentence({ left: 9 }, "run", me(P("skip", "skip", "run"))), "Loading it from this computer onto the graphics chip.");
   eq(sentence({ left: 9 }, "run", me([{ id: "gpu", state: "run", done: 1 }])), "Downloading the model and loading it onto the graphics chip.");
-  eq(sentence({ left: null }, "run", me(P("run", "wait", "wait"))), "Saving the model to this computer first. This happens once. Working out how long this takes…");
+  eq(sentence({ left: null }, "run", me(P("run", "wait", "wait"))), "Saving the model to this computer first.", "no appended line that wraps and goes");
+  eq(sentence({ ended: true }, "run", me(P("done", "done", "done"))), "Everything is loaded. Starting up.");
+  eq(sentence({}, "run", me([]), { asking: true }), "The room is waiting for your answer.");
   eq(sentence({}, "ready", me([])), "Running on this computer. Ask it anything below.");
   // two devices
   const two = (mine, theirs) => [{ name: "mac", you: true, parts: mine }, { name: "pc", parts: theirs }];
@@ -245,7 +309,8 @@ Deno.test("headline / sentence / footer / stopped copy", () => {
   eq(sentence({ slowest: "pc" }, "run", two(P("done", "done", "run"), P("run", "skip", "run")), { paced: true }), "Waiting for pc to catch up.");
   eq(sentence({}, "pressed", two([], []), { redeal: true }), "Sharing out the model again. Nothing is lost.");
   eq(sentence({ slowest: "pc" }, "run", two(P("skip", "skip", "run"), P("skip", "skip", "run")), { first: false }), "Each device loads its own part from its disk.");
-  eq(sentence({}, "pressed", two([], []), { host: "pc" }), "pc is getting the model ready.");
+  eq(sentence({}, "pressed", two([], []), { host: "mac", model: "Qwen3.8 Flash" }), "mac started Qwen3.8 Flash. This computer is getting its part ready.");
+  eq(sentence({}, "run", [{ name: "mac", you: true, parts: P("run", "wait", "run") }, { name: "pc", parts: [], asking: true }]), "Waiting for pc to say if it can save its part.");
   eq(sentence({}, "ready", two([], [])), "Running on mac and pc together. Ask it anything below.");
   eq(sentence({}, "pressed", [...two([], []), { name: "ipad", parts: [] }]), "3 devices are checking what's already saved.");
   // footer
@@ -253,15 +318,19 @@ Deno.test("headline / sentence / footer / stopped copy", () => {
   eq(footer("run", { solo: false, first: true }), "Each device saves only its own part, once. Next time it starts in about a minute.");
   eq(footer("run", { first: false }), "", "no 'first time' note on a second start");
   eq(footer("ready", { first: true, took: 540 }), "Took 9 min · next start about a minute");
+  eq(footer("ready", { first: true, took: 840, saved: 92.4 * GB }), "Saved 92.4 GB for next time · took 14 min");
+  eq(footer("ready", { solo: false, first: true, took: 660, saved: 31.8 * GB }), "Saved 31.8 GB here for next time · took 11 min");
   eq(footer("ready", { first: false, took: 41 }), "Took 41 s");
   // eyebrow and stopped
   eq(eyebrow("run", { model: "Qwen3.8 Flash", first: true }), "Starting Qwen3.8 Flash · first start");
   eq(eyebrow("run", { model: "Qwen3.8 Flash", first: false }), "Starting Qwen3.8 Flash · saved from last time");
   eq(eyebrow("run", { model: "Qwen3.8 Flash" }), "Starting Qwen3.8 Flash");
   eq(eyebrow("stopped", { model: "Qwen3.8 Flash" }), "Qwen3.8 Flash stopped");
-  eq(eyebrow("ready", { model: "Qwen3.8 Flash", first: true }), "First start \u00b7 saved for next time");
+  eq(eyebrow("ready", { model: "Qwen3.8 Flash", first: true }), "Qwen3.8 Flash \u00b7 first start");
   eq(eyebrow("ready", { model: "Qwen3 1.7B" }), "Started");
-  eq(stoppedText("QuotaExceededError", { save: { done: 40 * GB, total: 63.6 * GB } }), "40.0 of 63.6 GB is saved and stays saved. Free up about 26 GB, then Try again continues from there.");
+  eq(stoppedText("QuotaExceededError", { save: { done: 40 * GB, total: 63.6 * GB } }), "40.0 of 63.6 GB is saved and stays saved. Free up about 26 GB on this computer (23.6 GB plus a little extra), then press Try again.");
+  eq(stoppedText("pc couldn't load its part of the model (QuotaExceededError)", { me: "mac", save: { done: 18.2 * GB, total: 31.8 * GB } }),
+    "18.2 of 31.8 GB is saved and stays saved. Free up about 16 GB on pc (13.6 GB plus a little extra), then press Try again here.", "the device that has to free space is named; Try again is here");
   eq(stoppedText("pc couldn't load its part of the model (boom)", { me: "mac" }), "pc couldn't load its part.");
   eq(stoppedText("Unexpected token 'm', \"maximum qu\"... is not valid JSON"), "This computer couldn't load its part.", "the technical why stays in the tooltip");
   eq(stoppedText("This room is 4 GB short for Qwen3.8 27B", { plain: true }), "This room is 4 GB short for Qwen3.8 27B.");
@@ -280,7 +349,7 @@ Deno.test("no technical words in anything the card says", () => {
       out.push(headline({ left: 100 }, ph, { model: "Qwen3.8 Flash", why: "x" }), eyebrow(ph, { model: "Qwen3.8 Flash", first: firstStart(parts) }));
       out.push(footer(ph, { solo: a === "run", first: true, took: 60 }));
     }
-    out.push(deviceVerb(parts, { slowest: "pc" }), ...parts.flatMap((p) => [partRow(p).label, partRow(p).value, partRow(p, false).label, partRow(p, false).value]));
+    out.push(deviceVerb(parts, { slowest: "pc" }), ...cardRows(parts).flatMap((r) => [r.label, r.value]), cardSub(parts), ...parts.flatMap((p) => [partRow(p).label, partRow(p).value, partRow(p, false).label, partRow(p, false).value]));
   }
   out.push(stoppedText("QuotaExceededError", { save: { done: 1, total: 2 * GB } }), stoppedText("x"));
   for (const s of out) ok(!BAD.test(s), `jargon in "${s}"`);

@@ -50,7 +50,7 @@ import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle, allowLabel } from "./room/diskpick.js";
-import { showDiskPick, initDiskPick, refreshDiskPick, diskShortNote, diskStateOf } from "./room/diskpick-ui.js";
+import { showDiskPick, initDiskPick, refreshDiskPick, diskShortNote, diskStateOf, storedNow } from "./room/diskpick-ui.js";
 import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
@@ -60,8 +60,8 @@ import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor, storageOf }
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
-import { PART_ORDER, partsFromProg, partsFromSnapshot, progressTracker, etaTracker, roomProgress, packParts, unpackParts, wholePct, stepLine, rowVerb,
-  partRow, deviceVerb, headline, sentence, footer, eyebrow, stoppedText, stopWho, firstStart, WORDS_NOTE } from "./room/loadsteps.js";
+import { partsFromProg, partsFromSnapshot, progressTracker, etaTracker, roomProgress, packParts, unpackParts, wholePct, stepLine, rowVerb,
+  deviceVerb, headline, sentence, footer, eyebrow, stoppedText, stopWho, firstStart, WORDS_NOTE, cardRows, cardSub, diskPart, partsEnded } from "./room/loadsteps.js";
 import { fmtTps, speedLine, bandLine, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
 import { TeleMeter, expertCache, expertCacheOf, expertStoreOf } from "./room/tele.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
@@ -335,6 +335,28 @@ function askTabDisk({ bytes, model, host = false }) {
   if (diskAsking) return diskAsking;
   const M = MODELS[model];
   const name = M ? shortName(model) : "this model";   // the picker's name (room/diskpick.js)
+  if (bytes > 0) lc.diskHint = bytes;
+  // under a load card (a worker the deal gives disk layers, the host mid-start): the question is part of the card, and
+  // the room's card shows it waits on this device's answer; no sheet over it
+  if ($("load-card").classList.contains("on") && lc.phase !== "stopped" && lc.phase !== "ready") {
+    diskAsking = new Promise((resolve) => {
+      const done = (v, remember) => {
+        clearTimeout(timer);
+        lcAsk(null);
+        diskAsking = null;
+        if (remember) saveTabDiskChoice(v ? "allow" : "deny", globalThis.localStorage);
+        else if (!v) tabDiskDeclined = true;
+        tabDiskChanged();
+        log("room", v ? `${myName} lets models use ${fmtBytes(bytes)} of its disk` : `${myName} keeps models off its disk${remember ? "" : " (no answer)"}`);
+        resolve(v);
+      };
+      const timer = setTimeout(() => done(false, false), DISK_ASK_MS);
+      lcAsk({ text: host ? `Save ${fmtBytes(bytes)} of ${name} on this computer, once?` : `Save this computer's ${fmtBytes(bytes)} part of ${name} here, once?`,
+        sub: `${host ? "It's" : "The room waits for your answer (up to 2 min). It's"} kept on this computer's disk so later starts are quick. Delete it any time from the model picker.`,
+        resolve: (v) => done(v, true) });
+    });
+    return diskAsking;
+  }
   $("disk-ask-h").textContent = `Save ${name} to this device?`;
   $("disk-ask-why").textContent = (host ? `It downloads ${fmtBytes(bytes)} once and keeps it on this device's disk, then reads from it while it runs. `
     : `To help the room run ${name}, this device downloads ${fmtBytes(bytes)} once and keeps it on its disk. `)
@@ -363,11 +385,14 @@ function askTabDisk({ bytes, model, host = false }) {
 // Start, pressed on this device while its disk was not asked yet, said "saves N GB here, once" (room/diskpick-ui.js):
 // the press is the yes, remembered as the question's would be (the picker's disk control can still say no)
 function diskYesByStart(bytes) {
-  ai.pressedHere = false;
+  ai.pressedHere = false; if (bytes > 0) lc.diskHint = bytes;
   saveTabDiskChoice("allow", globalThis.localStorage); tabDiskDeclined = false; tabDiskChanged();
   log("room", `${myName} lets models use ${fmtBytes(bytes)} of its disk (Start)`);
   return Promise.resolve(true);
 }
+
+// Start's label says what it saves here ("saves 92.4 GB here, once": room/diskpick-ui.js): only then is the press a yes
+const startSaysSave = () => / saves \S+ \S+ here, once/.test($("ai-start")?.textContent || "");
 
 // --- UI helpers ---
 function log(from, text) {
@@ -847,7 +872,7 @@ function renderPool(pledged, rows = []) {
   for (const id of ["ap-gpu-k", "ap-store-k", "ap-smeter", "ap-store"]) $(id).hidden = !flash;
   if (!flash) $("ap-store-fix").hidden = true;
   $("ap-devs").innerHTML = devs.map((d) => { const x = flash ? st.get(d) : null;
-    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny"))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny", dk))}</small>` : ""}</b></li>`; }).join("")
+    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny"))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny", dk, d.name === myName))}</small>` : ""}</b></li>`; }).join("")
     || '<li class="none">No device with WebGPU yet</li>';
   devsEdge();
   const can = !!myMeta.webgpu;
@@ -1209,7 +1234,7 @@ async function pathOf(id) {
 // that only asked (a guest, no layers) goes back to the picker instead of a stale online screen; a creator that
 // left ends the room as before (hostGone)
 function followedHostLeft() {
-  const was = ai.dealer;
+  const was = ai.dealer; ai.pressedHere = false;
   ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null; clearTimeout(ai.startWait); ai.startWait = null;
   if (was === PREFIX + roomCode || ai.role === "host" || ai.engine || ai.loadingShard) return;
   if (ai.hostId === was) ai.hostId = null;
@@ -2909,22 +2934,30 @@ function crumb(s) { try { localStorage.setItem("pooled-crumb", JSON.stringify({ 
 // The load card (p2p.html #load-card): from the Start press to the first question, one card that tells one story.
 // It shows the moment Start is pressed (or a Start this device follows), says how long until chat as soon as that
 // is worth saying (room/loadsteps.js etaTracker), turns into "ready" in the same place, and goes away when the first
-// question is sent (aiOut) or on New chat. The composer sits under it the whole time, off until ready, so nothing on
-// the page jumps. One device alone: its parts as rows (save to this computer, the word list, the graphics chip);
-// several: a row per device with its parts as small meters. The parts come from today's sequential onProgress
-// (loadProg -> partsFromProg) or a concurrent loader's onParts (loadParts -> partsFromSnapshot): the same card.
-// A start that fails stops in place (lcStop): what is saved stays saved, Try again goes on from there.
+// question is sent (aiOut) or on New chat. The card's top stays put (only its bottom grows) and the composer sits
+// under it the whole time: a question typed while it loads is sent when the model is ready (lc.queued).
+// One device alone: two rows at most, "Saving to this computer (once)" (the model and its word list as one figure,
+// the one Start promised) and "Loading onto the graphics chip"; with one part only, no rows, its bytes under the bar.
+// Several: a row per device, one bar and a short state each. The parts come from today's sequential onProgress
+// (loadProg -> partsFromProg) or a concurrent loader's parts (onProgress info.parts, onParts: loadParts ->
+// partsFromSnapshot): the same card. A start that fails stops in place (lcStop): what is saved stays saved, Try
+// again goes on from there. A disk question during the load is asked in the card (askTabDisk), not over it.
 const lcFresh = () => ({ t0: performance.now(), prog: progressTracker(), eta: etaTracker(), adapt: {}, phase: "pressed", parts: false,
   mine: null, left: null, roomBest: 0, why: "", host: null, redeal: false, paced: false, took: null, sentAt: 0,
-  paintAt: 0, raf: 0, timer: 0, sig: "", struct: "", gb: {}, gbAt: 0 });
+  paintAt: 0, raf: 0, timer: 0, sig: "", struct: "", gb: {}, gbAt: 0, modelKey: null, expect: false, diskHint: 0, queued: false, asking: false });
 let lc = lcFresh();
-// the composer under the card: there from the Start press, off until the model is ready
-function composerLock(on, placeholder) {
+// the card is up and loading (not ready, not stopped): the composer queues instead of sending
+const lcLoading = () => $("load-card").classList.contains("on") && (lc.phase === "pressed" || lc.phase === "run");
+// the composer under the card: there from the Start press; while it loads, a question waits for ready (aiSubmit)
+function composerLock(on) {
   const p = $("ai-prompt");
-  p.disabled = !!on; $("ai-send").disabled = !!on;
-  if (placeholder || on) p.placeholder = placeholder || "Type your first question"; else promptHint();
+  p.disabled = false; $("ai-send").disabled = false;
+  if (!on) lc.queued = false;
+  if (on) p.placeholder = "Type your first question"; else promptHint();
+  sendLabel();
 }
-function aiLoading(show, title) {
+// modelKey: the model this card starts (a follower knows it from the Start message, not from its own picker)
+function aiLoading(show, title, modelKey = null) {
   $("ai-loading").style.display = "none";   // (the old sidebar bar: one bar on screen, the card's)
   if (title) $("ldg-title").textContent = title;
   const card = $("load-card"), was = card.classList.contains("on");
@@ -2935,44 +2968,91 @@ function aiLoading(show, title) {
     // a fresh card for a new Start (or Try again); a load that starts under a card already up (the host's own after
     // its press, a re-deal mid-load) keeps its bar's best and its clock (lcNewLoad)
     // (and no other device's numbers from the last start: the room's bar starts from 0)
-    if (!was || lc.phase === "stopped" || lc.phase === "ready") { cancelAnimationFrame(lc.raf); clearTimeout(lc.timer); lc = lcFresh(); ai.partsW = {}; ai.leftBy = {}; ai.prog = {}; }
+    if (!was || lc.phase === "stopped" || lc.phase === "ready") {
+      cancelAnimationFrame(lc.raf); clearTimeout(lc.timer);
+      const queued = lc.queued && lc.phase === "stopped";   // (Try again keeps a question that was waiting)
+      lc = lcFresh(); lc.queued = queued; ai.partsW = {}; ai.leftBy = {}; ai.prog = {}; ai.askBy = {};
+      lcAsk(null);
+    }
+    if (modelKey && MODELS[modelKey]) lc.modelKey = modelKey;
+    if (!lc.modelKey) lc.modelKey = $("ai-model")?.value || ai.model || null;
+    lc.expect = lcExpect();
     if (/re-deal/.test(title || "")) lc.redeal = true;
     card.classList.remove("stopped", "ready");
     $("ai-row").style.display = "flex";
-    composerLock(true);
+    if (lc.phase === "pressed" || lc.phase === "run") composerLock(true);
     lcPaint(true);
   } else {
     const wasReady = lc.phase === "ready";
     lc.phase = "off"; cancelAnimationFrame(lc.raf); clearTimeout(lc.timer);
     card.classList.remove("stopped", "ready");
+    lcAsk(null);
     composerLock(false);
+    // (no live-looking message box under the picker after a Start that went nowhere: only a room that is up chats)
+    $("ai-row").style.display = $("ai-panel").classList.contains("online") ? "flex" : "none";
     if (wasReady) emptyText("The model is ready. Ask anything.");
   }
   if (show && /re-deal/.test(title || "")) { speed.redeal = true; speedEvent("Sharing out the model again"); }
 }
-// a load starts on this device (aiLoadShardIn): its parts from scratch, the card's bar and clock as they are
-function lcNewLoad() { lc.adapt = {}; lc.eta = etaTracker(); lc.parts = false; lc.mine = null; lc.left = null; lc.host = null; lc.dealt = true; }
-// every device has its layers and the room is up: the card says so where it stands, and the composer opens
+// What the card will show, drawn grey from the press so it doesn't grow from nothing: this computer alone starting
+// Qwen3.8 Flash for the first time (its disk may be used and the copy is not all there) has two rows
+function lcExpect() {
+  const k = lc.modelKey;
+  if (!diskCopyOf(k) || lcDevices().length > 1) return false;
+  if (tabDiskNow() !== "allow" && !/ saves /.test($("ai-start")?.textContent || "")) return false;
+  const st = storedNow(k), need = lc.diskHint || diskCopyOf(k).diskBytes || 0;
+  return !(st > 0 && need > 0 && st >= need * 0.99);
+}
+// a load starts on this device (aiLoadShardIn): its parts from scratch (its own bar too: a re-deal's new total is not
+// compared with the old one); the room's bar keeps its best (lc.roomBest) and the clock runs from the press
+function lcNewLoad() { lc.adapt = {}; lc.prog = progressTracker(); lc.eta = etaTracker(); lc.parts = false; lc.mine = null; lc.left = null; lc.host = null; lc.dealt = true; lc.gb = {}; lc.gbAt = 0; }
+// every device has its layers and the room is up: the card says so where it stands, and the composer opens. A chat
+// that already has turns (a re-deal mid-chat, a late joiner added) goes straight back to its conversation
 function lcReady() {
   if (!$("load-card").classList.contains("on") || lc.phase === "ready") return;
-  lc.phase = "ready"; lc.took = (performance.now() - lc.t0) / 1000; ai.pressedHere = false;
-  $("load-card").classList.add("ready");
-  $("ai-row").style.display = "flex";
-  composerLock(false, "Ask anything");
-  lcPaint(true);
+  const queued = lc.queued;
+  ai.pressedHere = false;
+  if (ai.conv?.turns?.length) aiLoading(false);
+  else {
+    lc.phase = "ready"; lc.took = (performance.now() - lc.t0) / 1000;
+    $("load-card").classList.add("ready");
+    $("ai-row").style.display = "flex";
+    composerLock(false);
+    lcPaint(true);
+  }
+  // the question typed while it loaded: sent now (after the caller has put the room online)
+  if (queued) setTimeout(() => { if ($("ai-panel").classList.contains("online") && $("ai-prompt").value.trim()) aiSubmit(); }, 0);
 }
 // the start stopped (failed): the card stays with what happened and what to do; the bar stays where it got to
 function lcStop(why, plain = false) {
   const card = $("load-card");
   if (!card.classList.contains("on")) { card.classList.add("on"); $("ai-panel").classList.add("loading"); $("ai-empty").style.display = "none"; }
+  const queued = lc.queued;
   lc.phase = "stopped"; lc.why = String(why || ""); lc.plain = !!plain; ai.pressedHere = false;
   card.classList.add("stopped"); card.classList.remove("ready");
+  lcAsk(null);
   $("ai-row").style.display = "none";
-  composerLock(false);
+  composerLock(false); lc.queued = queued;
   lcPaint(true);
 }
 $("lc-retry")?.addEventListener("click", () => { $("ai-start").disabled = false; $("ai-model").disabled = false; $("ai-start").click(); });
-$("lc-pick")?.addEventListener("click", () => { aiLoading(false); updateCluster(); });
+$("lc-pick")?.addEventListener("click", () => { lc.queued = false; aiLoading(false); updateCluster(); });
+// The disk question inside the card (askTabDisk while the card is up): q { text, sub, resolve(yes) } or null to clear
+function lcAsk(q) {
+  const box = $("lc-ask"); if (!box) return;
+  const was = lc.asking;
+  lc.asking = !!q;
+  if (!q) { box.hidden = true; $("lc-ask-yes").onclick = $("lc-ask-no").onclick = null; }
+  else {
+    $("lc-ask-q").textContent = q.text; $("lc-ask-h").textContent = q.sub;
+    box.hidden = false;
+    $("lc-ask-yes").onclick = () => q.resolve(true); $("lc-ask-no").onclick = () => q.resolve(false);
+    $("lc-ask-yes").focus({ preventScroll: true });
+  }
+  // the room hears that this device waits on its user (its row: "asked to save its part")
+  if (was !== lc.asking && ai.role === "worker" && ai.hostId) sendTo(ai.hostId, { t: "ai-progress", pct: Math.round(ai.myPct || 0), asking: lc.asking ? 1 : 0, ...(ai.partsW?.[myName] ? { parts: ai.partsW[myName], left: lc.left } : {}) });
+  if (was !== lc.asking) lcPaint(true);
+}
 
 // this device's parts into the card: lc.mine (its bar, never backwards) and lc.left (its time left)
 function lcPush(s) {
@@ -2984,9 +3064,10 @@ function lcPush(s) {
 }
 // what peers hear about this device's parts (ai-progress, ai-hostprog): packed parts and its bytes
 const lcWire = () => (lc.mine ? { p: packParts(lc.mine.parts), db: [Math.round(lc.mine.done), Math.round(lc.mine.total)] } : null);
-// onParts (contract): a loader that runs the parts at the same time says where each one is
-// (room/model-loader.js loadShard's onParts; from the first one on, onProgress only drives the pacing)
+// onParts (contract): a loader that runs the parts at the same time says where each one is (room/model-loader.js
+// loadShard's onParts, or the same snapshot as onProgress's info.parts: loadProg); from then on the card uses those
 function loadParts(snap) {
+  if (!snap || !Array.isArray(snap.parts)) return;
   lc.parts = true;
   lcPush(partsFromSnapshot(snap));
   if (ai.role === "worker" && performance.now() - lc.sentAt > 250) { lc.sentAt = performance.now(); sendTo(ai.hostId, { t: "ai-progress", pct: Math.round(ai.myPct || 0), ...(ai.step?.[myName] ? { step: ai.step[myName], gpu: Math.round(ai.gpuPct || 0) } : {}), parts: ai.partsW[myName], left: lc.left }); }
@@ -3009,19 +3090,20 @@ function lcDevices() {
   else names = names.filter((nm) => nm === myName ? myMeta.webgpu !== false : [...conns.values()].some((c) => c.name === nm && c.meta?.webgpu));
   if (!names.length) names = [myName];
   return [...new Set(names)].sort(bySlot).map((nm) => {
-    if (nm === myName) return { name: nm, you: true, parts: lc.mine?.parts || [], done: lc.mine?.done, total: lc.mine?.total, left: lc.left, pct: lc.mine?.pct ?? 0 };
+    if (nm === myName) return { name: nm, you: true, parts: lc.mine?.parts || [], done: lc.mine?.done, total: lc.mine?.total, left: lc.left, pct: lc.mine?.pct ?? 0, asking: lc.asking };
     const w = ai.partsW?.[nm], parts = w ? unpackParts(w.p) : null, pct = (ai.prog || {})[nm] ?? 0;
-    return { name: nm, parts: parts || [], done: w?.db?.[0], total: w?.db?.[1], left: ai.leftBy?.[nm] ?? null, pct, old: !parts && pct > 0, step: (ai.step || {})[nm] || null };
+    return { name: nm, parts: parts || [], done: w?.db?.[0], total: w?.db?.[1], left: ai.leftBy?.[nm] ?? null, pct, old: !parts && pct > 0, step: (ai.step || {})[nm] || null, asking: !!ai.askBy?.[nm] };
   });
 }
-const lcModel = () => { const k = ai.model && lc.phase === "ready" ? ai.model : $("ai-model")?.value; return MODELS[k] ? shortName(k) : "the model"; };
-const lcFlash = () => ($("ai-model")?.value || ai.model) === "qwen3.8-flash";
+const lcKey = () => (lc.phase === "ready" && ai.model) || lc.modelKey || $("ai-model")?.value || ai.model;
+const lcModel = () => { const k = lcKey(); return MODELS[k] ? shortName(k) : "the model"; };
+const lcFlash = () => lcKey() === "qwen3.8-flash";
 // Paint the card: at most every 250 ms (a part's state or the phase changing paints at once), its GB figures
 // rewritten at most once a second
 function lcPaint(now = false) {
   if (!$("load-card").classList.contains("on")) return;
   const devs = lcDevices();
-  const sig = lc.phase + "|" + devs.map((d) => d.name + ":" + (d.parts || []).map((p) => p.state).join(",")).join(";");
+  const sig = lc.phase + "|" + lc.asking + "|" + devs.map((d) => d.name + ":" + (d.asking ? "?" : "") + (d.parts || []).map((p) => p.state).join(",")).join(";");
   if (sig !== lc.sig) now = true;
   if (!now) {
     if (lc.raf || lc.timer) return;
@@ -3033,10 +3115,16 @@ function lcPaint(now = false) {
   cancelAnimationFrame(lc.raf); clearTimeout(lc.timer); lc.raf = lc.timer = 0;
   lcPaintNow(sig);
 }
+// a GB figure held back by the once-a-second rule is painted when its second is up (a load that then goes quiet
+// doesn't leave an old figure under a newer bar)
+function lcGbLater() {
+  if (lc.gbTimer) return;
+  lc.gbTimer = setTimeout(() => { lc.gbTimer = 0; lcPaint(true); }, Math.max(50, 1000 - (performance.now() - lc.gbAt)));
+}
 function lcPaintNow(sigIn) {
   const card = $("load-card"); if (!card.classList.contains("on")) return;
   const devs = lcDevices(), solo = devs.length <= 1, phase = lc.phase;
-  lc.sig = sigIn || phase + "|" + devs.map((d) => d.name + ":" + (d.parts || []).map((p) => p.state).join(",")).join(";");
+  lc.sig = sigIn || phase + "|" + lc.asking + "|" + devs.map((d) => d.name + ":" + (d.asking ? "?" : "") + (d.parts || []).map((p) => p.state).join(",")).join(";");
   lc.paintAt = performance.now();
   const gbNow = lc.paintAt - lc.gbAt > 1000; if (gbNow) lc.gbAt = lc.paintAt;
   const by = Object.fromEntries(devs.map((d) => [d.name, d]));
@@ -3045,61 +3133,67 @@ function lcPaintNow(sigIn) {
   const me = devs.find((d) => d.you), myParts = me?.parts || [];
   const single = !lcFlash() || (myParts.length === 1);
   // first start: this load (or another device's) saves to its disk; only on a tab that may use its disk
-  const firstOf = (d) => firstStart(d.parts || []);
-  const firsts = devs.map(firstOf).filter((x) => x != null);
+  const firsts = devs.map((d) => firstStart(d.parts || [])).filter((x) => x != null);
   const first = single ? null : firsts.some(Boolean) ? true : firsts.length && tabDiskNow() === "allow" ? false : null;
   const wordsFailed = myParts.some((p) => p.id === "words" && p.state === "fail");
   const model = lcModel();
+  const ready = phase === "ready", stopped = phase === "stopped";
   const set = (sel, text) => { const el = card.querySelector(sel); if (el && el.textContent !== text) el.textContent = text; };
   set(".lc-eyebrow", eyebrow(phase, { model, first }));
   set(".lc-hl", headline(room, phase, { model, why: lc.why, me: myName }));
   // the sentence: a stopped start says what happened and what to do
   let sent;
-  if (phase === "stopped") {
+  if (stopped) {
     const who = stopWho(lc.why), d = by[who && by[who] ? who : myName];
-    const sv = d?.parts?.find((p) => p.id === "save");
+    const sv = diskPart(d?.parts || [], d?.you ? lc.diskHint : 0);
     sent = stoppedText(lc.why, { me: myName, save: sv && sv.total > 0 ? sv : null, plain: lc.plain });
     card.querySelector(".lc-sent").title = lc.why;
   } else {
-    sent = sentence(room, phase, devs, { host: lc.host, redeal: lc.redeal && !lc.mine, paced: lc.paced, single, first, cached: lcFlash() && tabDiskNow() === "allow" ? null : false });
+    sent = sentence(room, phase, devs, { host: lc.host, model, redeal: lc.redeal && !lc.mine, paced: lc.paced, single, first, asking: lc.asking,
+      cached: lcFlash() && tabDiskNow() === "allow" ? null : false });
     card.querySelector(".lc-sent").removeAttribute("title");
   }
   set(".lc-sent", sent);
   // the room's bar
-  const pct = phase === "ready" ? 100 : room.pct;
+  const pct = ready ? 100 : room.pct;
   card.querySelector(".lc-bar .fill").style.width = pct + "%";
-  set(".lc-bar .pct", phase === "ready" ? "✓ 100%" : pct + "%");
+  set(".lc-bar .pct", ready ? "100%" : pct + "%");
   card.querySelector(".lc-bar").setAttribute("aria-valuenow", String(pct));
-  // the rows: this computer's parts when it is alone, else a row per device with its parts under it
-  const ready = phase === "ready";
-  const meter = (d, id) => {
-    const p = (d.parts || []).find((x) => x.id === id);
-    if (!p || p.state === "skip") return { k: id, empty: true };
-    const r = ready && p.state !== "fail" ? { label: partRow(p, false, { single }).label, value: "✓", cls: "done", pct: 100 } : partRow(p, false, { single });
-    return { k: id, ...r };
-  };
-  const rows = solo
-    ? myParts.filter((p) => p.state !== "skip").map((p) => {
-      const r = ready && p.state !== "fail" ? { ...partRow(p, true, { single }), value: "✓ done", cls: "done", pct: 100 } : partRow(p, true, { single });
+  // the rows: this computer alone, at most two (cardRows), grey placeholders from the press; several devices, one
+  // row each with one bar. Ready: no rows (the footer says it in one line)
+  let rows = [];
+  if (!ready && solo) {
+    const parts = !myParts.length && lc.expect ? [{ id: "save", done: 0, total: null, state: "wait" }, { id: "gpu", done: 0, total: null, state: "wait" }] : myParts;
+    rows = cardRows(parts, { single, hint: lc.diskHint }).map((r) => {
       // GB text at most once a second (the bar under it moves every paint)
-      if (r.cls === "run") { if (gbNow || !lc.gb[p.id]) lc.gb[p.id] = r.value; else r.value = lc.gb[p.id]; }
-      return { k: p.id, ...r };
-    })
-    : devs.map((d) => {
-      const dp = d.parts || [];
-      const pctD = d.old || !dp.length ? Math.round(d.pct || 0) : Number.isFinite(d.done) && d.total > 0 ? wholePct(d.done, d.total) : 0;
-      const verb = ready ? "" : d.old ? `${rowVerb(d.step)}` : deviceVerb(dp, { roomReady: ready, slowest: room.slowest, self: d.name, cached: lcFlash() ? null : false });
-      const done = ready || (dp.length && dp.every((p) => ["done", "skip", "fail"].includes(p.state)));
-      return { k: d.name, you: !!d.you, verb, pct: ready ? 100 : pctD, label: ready ? "ready" : `${pctD}%`, done: !!done,
-        meters: d.old || single ? [] : PART_ORDER.map((id) => meter(d, id)) };
+      if (r.cls === "run") { if (gbNow || !lc.gb[r.k]) lc.gb[r.k] = r.value; else if (r.value !== lc.gb[r.k]) { r.value = lc.gb[r.k]; lcGbLater(); } }
+      return r;
     });
-  const struct = (solo ? "s|" : "d|") + rows.map((r) => r.k + (r.meters ? ":" + r.meters.map((m) => m.empty ? "_" : m.k).join("") : "")).join(";");
+  } else if (!ready) {
+    rows = devs.map((d) => {
+      const dp = d.parts || [];
+      const ended = !!dp.length && partsEnded(dp);
+      let pctD = d.old || !dp.length ? Math.round(d.pct || 0) : Number.isFinite(d.done) && d.total > 0 ? wholePct(d.done, d.total) : 0;
+      if (!ended) pctD = Math.min(99, pctD);
+      const verb = stopped ? "stopped" : d.old ? rowVerb(d.step) : deviceVerb(dp, { roomReady: false, slowest: room.slowest, self: d.name, asking: d.asking, cached: lcFlash() ? null : false });
+      return { k: d.name, you: !!d.you, verb, pct: ended ? 100 : pctD, label: `${ended ? 100 : pctD}%`, done: ended };
+    });
+  }
+  // with no rows, this computer's bytes under the bar ("3.1 of 11.8 GB")
+  const sub = card.querySelector(".lc-sub");
+  if (sub) {
+    sub.hidden = ready || stopped || rows.length > 0 || !solo;
+    let t = sub.hidden ? "" : cardSub(myParts);
+    if (t) { if (gbNow || !lc.gb.sub) lc.gb.sub = t; else if (t !== lc.gb.sub) { t = lc.gb.sub; lcGbLater(); } }
+    if (sub.textContent !== t) sub.textContent = t;
+  }
+  const struct = (solo ? "s|" : "d|") + rows.map((r) => r.k).join(";");
   const box = $("lc-rows");
   if (struct !== lc.struct) {
     lc.struct = struct;
     box.innerHTML = solo
       ? rows.map((r) => `<div class="lc-part" data-k="${r.k}"><span class="l"></span><span class="v"></span><div class="bar"><i></i></div></div>`).join("")
-      : rows.map((r) => `<div class="lc-dev${r.you ? " you" : ""}" data-k="${esc(r.k)}" style="--sw:${devColor(r.k)}"><div class="lc-row"><i class="sw"></i><div class="n"><span class="nm">${esc(r.k)}${r.you ? " <small>(you)</small>" : ""}</span><span class="lr"></span></div><div class="bar"><div class="fill"></div></div><div class="pct"></div></div>${r.meters.length ? `<div class="lc-meters">${r.meters.map((m) => m.empty ? "<span></span>" : `<span class="m" data-m="${m.k}"><span class="l"></span><b></b><span class="bar"><i></i></span></span>`).join("")}</div>` : ""}</div>`).join("");
+      : rows.map((r) => `<div class="lc-dev${r.you ? " you" : ""}" data-k="${esc(r.k)}" style="--sw:${devColor(r.k)}"><div class="lc-row"><i class="sw"></i><div class="n"><span class="nm">${esc(r.k)}${r.you ? " <small>(you)</small>" : ""}</span><span class="lr"></span></div><div class="bar"><div class="fill"></div></div><div class="pct"></div></div></div>`).join("");
   }
   const els = box.children;
   rows.forEach((r, i) => {
@@ -3115,26 +3209,18 @@ function lcPaintNow(sigIn) {
     el.querySelector(".lr").textContent = r.verb;
     el.querySelector(".fill").style.width = r.pct + "%";
     el.querySelector(".pct").textContent = r.label;
-    for (const m of r.meters) {
-      if (m.empty) continue;
-      const me2 = el.querySelector(`[data-m="${m.k}"]`); if (!me2) continue;
-      me2.className = `m ${m.cls}`;
-      me2.querySelector(".l").textContent = m.label;
-      me2.querySelector("b").textContent = m.value;
-      me2.querySelector(".bar i").style.width = m.pct + "%";
-    }
   });
-  // the footer, or the note when the word list could not be saved; the buttons when it stopped
+  // the footer, or the note when part of the model is read online; the buttons when it stopped
   const note = card.querySelector(".lc-foot");
-  if (wordsFailed && phase !== "ready" && phase !== "stopped") {
+  if (wordsFailed && !ready && !stopped) {
     note.classList.add("box");
     if (!note.querySelector("b")) note.innerHTML = `<b>${esc(WORDS_NOTE[0])}</b>${esc(WORDS_NOTE[1])}`;
   } else {
     note.classList.remove("box");
-    const t = footer(phase, { solo, first, took: lc.took, wordsFailed });
+    const t = footer(phase, { solo, first, took: lc.took, wordsFailed, saved: diskPart(myParts)?.done || 0 });
     if (note.textContent !== t || note.querySelector("b")) note.textContent = t;
   }
-  $("lc-actions").hidden = phase !== "stopped";
+  $("lc-actions").hidden = !stopped;
 }
 // the hidden sidebar bar's numbers (the end-to-end tests read #ldg-sub as a trace); the card is lcPaint's
 const fmtBytes = (b) => b >= 2 ** 30 ? (b / 2 ** 30).toFixed(1) + " GB" : (b > 0 ? Math.max(1, Math.round(b / 2 ** 20)) : 0) + " MB";
@@ -3180,6 +3266,13 @@ function chatBotStart(mid) {
     then: speed.firstWait ? { after: 4000, text: "The first answer takes a little longer" } : null }));
   m.classList.add("live");
   m.pieces = [];
+  // the first answer of a model that reads from disk is slow to start: after 10 s of nothing, say that it is expected
+  const k = ai.model || $("ai-model").value;
+  if (!ai.answered && diskCopyOf(k)) setTimeout(() => {
+    const v = m.querySelector(".wk-v");
+    if (v && m.isConnected && !m.pieces.length && m.classList.contains("live"))
+      v.textContent = n > 1 ? "Thinking\u2026 the first answer takes a little while." : "Thinking\u2026 on one computer the first answer can take a minute.";
+  }, 10000);
   o.appendChild(m); scrollChat();
   botEl = m;
   speedStart();
@@ -3354,6 +3447,13 @@ function setBusyUI(busy, canStop) {
 // while busy, the button stops the answer when the box is empty and queues the text otherwise
 function sendLabel() {
   const b = $("ai-send"), busy = $("ai-row").classList.contains("busy"), typed = !!$("ai-prompt").value.trim();
+  // under a load card that is still loading: Send keeps the question for when the model is ready (aiSubmit)
+  if (lcLoading()) {
+    if (!typed) lc.queued = false;
+    b.classList.remove("stop"); b.textContent = lc.queued ? "Sends when ready" : "Send"; b.disabled = lc.queued;
+    return;
+  }
+  if (b.textContent === "Sends when ready") b.disabled = false;
   const stop = busy && b.dataset.canStop === "1" && !typed;
   b.classList.toggle("stop", stop);
   b.textContent = stop ? "Stop" : busy ? "Queue" : "Send";
@@ -3470,7 +3570,7 @@ async function aiLoadShardIn(modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor
 
   if (ai.role === "host") {
     clearInterval(ai.progTimer);
-    ai.progTimer = setInterval(() => { if (ai.role === "host") broadcastAll({ t: "ai-hostprog", all: ai.prog || {}, steps: ai.step || {}, gpu: ai.gpuProg || {}, parts: ai.partsW || {}, left: ai.leftBy || {}, at: Date.now() }); }, 600);
+    ai.progTimer = setInterval(() => { if (ai.role === "host") broadcastAll({ t: "ai-hostprog", all: ai.prog || {}, steps: ai.step || {}, gpu: ai.gpuProg || {}, parts: ai.partsW || {}, left: ai.leftBy || {}, ask: ai.askBy || {}, at: Date.now() }); }, 600);
   }
   const onProg = loadProg;
   // every device (host included, even when its weights come from cache) keeps within a few
@@ -3508,7 +3608,9 @@ function loadProg(done, total, info = null) {
       : cacheHits ? `loading the model from this computer's cache\u2026` : `downloading the model\u2026`);
   }
   // the card's parts (room/loadsteps.js partsFromProg), unless a loader that says them itself (onParts) took over
-  if (!lc.parts) lcPush(partsFromProg(lc.adapt, done, total, info));
+  // (a concurrent loader sends its parts with each onProgress too, info.parts: those, whatever order its steps run in)
+  if (Array.isArray(info?.parts)) { lc.parts = true; lcPush(partsFromSnapshot({ parts: info.parts })); }
+  else if (!lc.parts) lcPush(partsFromProg(lc.adapt, done, total, info));
   ai.myPct = loadPct(done, total);
   // the GPU step's own percent, for the pacing (aiLoadPace): the loader's gpuPct (100 once the GPU step is done and a copy
   // goes on, room/flashload.js); without it, 0 while saving to the disk, which is never paced
@@ -3540,7 +3642,7 @@ function closeEngine() { const e = ai.engine; ai.engine = null; try { e?.close?.
 // lines and the speed numbers are the loading screen's.
 const PROMPT_PH = "Message the room";
 function promptHint() {
-  if ($("ai-prompt").disabled) return;   // (under the load card: composerLock's "Type your first question")
+  if (lcLoading()) return;   // (under the load card: composerLock's "Type your first question")
   const k = ai.model || $("ai-model").value;
   $("ai-prompt").placeholder = $("ai-panel").classList.contains("online") && !ai.answered && diskCopyOf(k)
     ? `Ask ${shortName(k)}. The first answer takes a little while.` : PROMPT_PH;
@@ -3588,14 +3690,14 @@ function aiStartAnywhere() {
   // this device is the pick: it starts, and tells the room so every device checks it and follows (the creator
   // relays it to the devices this one has no link to)
   // (the card shows now, not after the model's header is fetched: no dead click; the press is this device's disk consent)
-  if (boss === peer.id) { broadcastAll({ t: "ai-start-req", model, boss, by: myName, ids }); aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`); ai.pressedHere = true; aiStart(model); return; }
+  if (boss === peer.id) { broadcastAll({ t: "ai-start-req", model, boss, by: myName, ids }); ai.pressedHere = startSaysSave(); aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`, model); aiStart(model); return; }
   ai.hostId = boss;   // its ai-layers and ai-ready-all are the ones this device listens to (FROM_HOST)
   // nobody follows it (their view differs, or another Start is in progress): give the button back. Any sign of
   // the host dealing (ai-layers, ai-hostprog, ai-ready-all) stops this
   followWait(START_PENDING_MS);
-  ai.pressedHere = true;   // (its disk's yes, if the host deals it a part that saves: diskYesByStart)
+  ai.pressedHere = startSaysSave();   // (its disk's yes, if the host deals it a part that saves: diskYesByStart)
   $("ai-start").disabled = true; $("ai-model").disabled = true;
-  aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`);
+  aiLoading(true, `starting ${MODELS[model].label.split("·")[0].trim()}`, model);
   lc.host = conns.get(boss)?.name || members.get(boss)?.name || "The biggest device"; lcPaint(true);
   aiStatus(`asked ${conns.get(boss)?.name || "the biggest device"} to start ${MODELS[model].label.split("·")[0].trim()}…`);
   broadcastAll({ t: "ai-start-req", model, boss, by: myName, ids });
@@ -3608,7 +3710,7 @@ function followWait(ms) {
 }
 // this device's Start was refused (ai-start-refused), or a Start it follows went nowhere: the picker comes back
 function startRefused(why) {
-  clearTimeout(ai.startWait); ai.startWait = null;
+  clearTimeout(ai.startWait); ai.startWait = null; ai.pressedHere = false;
   if (ai.loadingShard || ai.engine || ai.role === "worker" || ai.dealerActive || $("ai-panel").classList.contains("online")) return;
   // (the host it asked for stays its named host: if that one deals after all, this device still takes part)
   ai.dealer = null; ai.dealerFresh = false; ai.startAt = null;
@@ -3754,6 +3856,7 @@ async function aiStart(modelArg) {
     // table) and its user was not asked yet, ask once now (remembered); on a no, deal again without it
     const myDisk = deal.fit.fits && myMeta.tabDisk?.ask ? hostDiskBytes(deal, modelKey) : 0;
     const pressed = ai.pressedHere; ai.pressedHere = false;
+    if (deal.fit.fits) { const hb = hostDiskBytes(deal, modelKey); if (hb > 0) lc.diskHint = hb; }
     if (myDisk > 0 && pressed) await diskYesByStart(myDisk);   // the press said what it saves: no question
     else if (myDisk > 0) {
       aiStatus("Waiting for you to say if the model may be saved on this computer");
@@ -3856,7 +3959,7 @@ async function aiStart(modelArg) {
 // failed: a load failed (this device's, or one the host heard of): the load card stays where it got to and says what
 // happened, with Try again and Pick another model (lcStop). Without it (a Start that went nowhere): the picker
 function aiStartStopped(why, { quiet = false, failed = false, plain = false } = {}) {
-  ai.startFailed = null;
+  ai.startFailed = null; ai.pressedHere = false;
   ai.dealer = null; ai.dealerFresh = false; ai.dealerActive = false; ai.startAt = null;   // free for the next Start (room/authz.js)
   ai.redealPending = false;   // nothing to deal again: the room is stopped
   clearInterval(ai.progTimer);
@@ -5006,8 +5109,8 @@ async function aiOnData(from, d) {
       // it (a model host that is not the room's creator links every device before it deals)
       if (d.boss !== peer.id) ai.hostId = d.boss;
       $("ai-start").disabled = true; $("ai-model").disabled = true;
-      if (d.boss !== peer.id) { aiLoading(true, `starting ${MODELS[d.model]?.label.split("·")[0].trim()}`); lc.host = conns.get(d.boss)?.name || members.get(d.boss)?.name || String(d.by || "The host").slice(0, 40); lcPaint(true); }
-      else if (!ai.engine && !ai.busy) aiLoading(true, `starting ${MODELS[d.model]?.label.split("·")[0].trim()}`);
+      if (d.boss !== peer.id) { aiLoading(true, `starting ${MODELS[d.model]?.label.split("·")[0].trim()}`, d.model); lc.host = conns.get(d.boss)?.name || members.get(d.boss)?.name || String(d.by || "The host").slice(0, 40); lcPaint(true); }
+      else if (!ai.engine && !ai.busy) aiLoading(true, `starting ${MODELS[d.model]?.label.split("·")[0].trim()}`, d.model);
       if (d.boss === peer.id) { toast(`${d.by} started ${MODELS[d.model]?.label.split("·")[0].trim()}`); aiStart(d.model); }
       else aiStatus(`${d.by} started the model…`);
       break;
@@ -5182,6 +5285,8 @@ async function aiOnData(from, d) {
       if (d.left && typeof d.left === "object") for (const [nm, v] of Object.entries(d.left)) if (nm !== myName && (v == null || Number.isFinite(+v))) lb[nm] = v == null ? null : +v;
       ai.partsW = { ...pw, ...(ai.partsW?.[myName] ? { [myName]: ai.partsW[myName] } : {}) };
       ai.leftBy = { ...lb, [myName]: lc.left };
+      ai.askBy = {};
+      if (d.ask && typeof d.ask === "object") for (const [nm, v] of Object.entries(d.ask)) if (nm !== myName && v) ai.askBy[nm] = true;
       if (lc.host && Object.keys(pw).length) lc.host = null;   // the host shows it deals: the card shows the devices
       lcPaint();
       break;
@@ -5199,7 +5304,8 @@ async function aiOnData(from, d) {
       const pw = partsWireIn(d.parts);
       if (pw) ai.partsW[nm] = pw; else delete ai.partsW[nm];
       ai.leftBy[nm] = d.left == null || !Number.isFinite(+d.left) ? null : +d.left;
-      lcPaint();
+      ai.askBy = ai.askBy || {}; ai.askBy[nm] = !!d.asking;   // its user is being asked about its disk (lcAsk)
+      lcPaint(!!d.asking);
     }
       break;
     case "ai-ready":
@@ -6121,7 +6227,8 @@ if ($("api-panel")) {
 function aiSubmit() {
   const text = $("ai-prompt").value.trim();
   if (!text) return;
-  // (the composer is off until the model is ready; Enter is held here too)
+  // while the load card loads, the question waits and is sent when the model is ready (lcReady)
+  if (lcLoading()) { lc.queued = true; sendLabel(); return; }
   if (!$("ai-panel").classList.contains("online") || (ai.role === "host" && !ai.engine)) return;
   if (ai.role === "host") { $("ai-prompt").value = ""; growPrompt(); aiAsk(text, myName, peer.id); return; }
   const hostId = ai.hostId;

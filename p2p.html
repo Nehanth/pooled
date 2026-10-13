@@ -838,8 +838,10 @@
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
   /* The load card (room.js lcPaint): from the Start press to the first question, one card telling one story.
      Eyebrow, the headline (how long until chat, then "ready"), one sentence of what is happening, the room's bar,
-     then this computer's parts (alone) or a row per device with its parts as meters, and a quiet footer */
-  #load-card { display: none; margin: auto; width: min(600px, calc(100% - 32px)); padding: 24px 24px 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 1px 2px rgba(20,22,29,.04), 0 12px 24px -12px rgba(20,22,29,.10), 0 40px 80px -40px rgba(20,22,29,.22); }
+     then this computer's two rows at most (alone; one part: its bytes under the bar) or a row per device with one
+     bar each, and a quiet footer. A disk question asked during the load is in the card (.lc-ask) */
+  /* its top stays put (it grows only downwards as rows come and go), the composer stays at the bottom */
+  #load-card { display: none; margin: clamp(16px, 9vh, 88px) auto auto; width: min(600px, calc(100% - 32px)); padding: 24px 24px 20px; background: var(--panel); border: 1px solid var(--border); border-radius: 16px; box-shadow: 0 1px 2px rgba(20,22,29,.04), 0 12px 24px -12px rgba(20,22,29,.10), 0 40px 80px -40px rgba(20,22,29,.22); }
   #load-card.on { display: block; animation: enter .35s var(--ease); }
   /* while it is up, the transcript stays out of the way (the first question takes the card down: room.js aiOut) */
   #load-card.on ~ #ai-output { display: none !important; }
@@ -858,43 +860,41 @@
   #load-card.ready .lc-bar .pct { color: var(--ok); }
   #load-card.stopped .lc-bar .fill { background: var(--muted); }
   #load-card.stopped .lc-bar .pct { color: var(--muted); }
-  #load-card.stopped :is(.lc-part.run, .lc-meters .m.run, .lc-meters .m.wait) .bar i, #load-card.stopped .lc-row .fill { background: var(--muted); }
+  /* stopped: nothing on it reads as still going or as a success (finished rows grey too) */
+  #load-card.stopped :is(.lc-part.run, .lc-part.done) .bar i, #load-card.stopped .lc-row .fill { background: var(--faint); }
+  #load-card.stopped .lc-part.done .v { color: var(--muted); }
+  .lc-sub { margin: 8px 0 0; min-height: 18px; font: 400 12px/18px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+  .lc-sub[hidden] { display: none; }
+  .lc-ask { margin-top: 16px; padding: 14px 16px; border-radius: 12px; background: var(--panel-3); border: 1px solid var(--rule-2); }
+  .lc-ask[hidden] { display: none; }
+  .lc-ask .q { font-size: 15px; font-weight: 500; color: var(--text); }
+  .lc-ask .h { margin-top: 4px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+  .lc-ask .lc-actions { margin-top: 12px; }
   #lc-rows { margin: 18px 0 0; border-top: 1px solid var(--rule-2); }
   #lc-rows:empty { display: none; }
   /* one part on this computer: label | value, a thin bar under it */
   .lc-part { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: baseline; padding: 11px 0; border-bottom: 1px solid var(--rule-2); font-size: 14px; color: var(--text); }
   .lc-part .v { font: 400 12px/1.2 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .lc-part .bar { grid-column: 1 / -1; height: 4px; background: var(--panel-2); border-radius: 2px; overflow: hidden; }
-  .lc-part .bar i, .lc-meters .bar i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width .6s var(--ease); }
+  .lc-part .bar i { display: block; height: 100%; width: 0%; background: var(--accent); border-radius: 2px; transition: width .6s var(--ease); }
   .lc-part.wait { color: var(--muted); }
   .lc-part.done .v { color: var(--ok); }
   .lc-part.done .bar i { background: var(--ok); }
   .lc-part.fail .v { color: var(--err); }
   .lc-part.fail .bar i { background: var(--muted); }
   /* the word list read online instead: hatched, not an error */
-  :is(.lc-part, .lc-meters .m).fb .bar i { background: repeating-linear-gradient(135deg, var(--faint) 0 4px, transparent 4px 8px); }
+  .lc-part.fb .bar i { background: repeating-linear-gradient(135deg, var(--faint) 0 4px, transparent 4px 8px); }
   /* a device's row (several devices) and its parts as meters under it */
-  .lc-dev { border-bottom: 1px solid var(--rule-2); padding: 2px 0 12px; }
+  .lc-dev { border-bottom: 1px solid var(--rule-2); padding: 2px 0; }
   .lc-row { display: grid; grid-template-columns: 8px minmax(0, 190px) minmax(0, 1fr) 52px; align-items: center; gap: 12px; min-height: 40px; font-size: 14px; }
   .lc-row .sw { width: 8px; height: 8px; border-radius: 50%; background: var(--sw); }
   .lc-row .n { display: flex; align-items: baseline; gap: 8px; min-width: 0; color: var(--text); }
   .lc-row .n .nm { flex: none; white-space: nowrap; }
   .lc-row .n .lr { font: 400 13px/1.2 var(--sans); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-transform: none; }
-  .lc-dev.done .n .lr { color: var(--ok); }
   .lc-row .n small { color: var(--muted); font-size: 12px; }
   .lc-row .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
   .lc-row .fill { height: 100%; width: 0%; background: var(--sw); border-radius: 3px; transition: width .6s var(--ease); }
   .lc-row .pct { text-align: right; color: var(--muted); font: 400 12px/1 var(--mono); white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .lc-dev.done .pct { color: var(--ok); }
-  .lc-meters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-left: 20px; font-size: 11px; color: var(--muted); }
-  .lc-meters .m { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 6px; align-items: baseline; }
-  .lc-meters .m b { font: 400 11px/1 var(--mono); color: var(--ink-2); font-variant-numeric: tabular-nums; }
-  .lc-meters .m .l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .lc-meters .bar { grid-column: 1 / -1; height: 3px; background: var(--panel-2); border-radius: 2px; overflow: hidden; }
-  .lc-meters .bar i { background: var(--sw); }
-  .lc-meters .m.done b { color: var(--ok); }
-  .lc-meters .m.done .bar i { background: var(--ok); }
-  .lc-meters .m.wait b { color: var(--muted); }
   .lc-foot { margin-top: 14px; font-size: 13px; line-height: 1.45; color: var(--muted); }
   .lc-foot:empty { display: none; }
   .lc-foot.box { padding: 10px 12px; border-radius: 10px; background: var(--panel-3); border: 1px solid var(--rule-2); color: var(--ink-2); }
@@ -1690,9 +1690,7 @@
     .lc-row .bar { grid-column: 2 / -1; grid-row: 2; }
     .lc-dev { padding-bottom: 10px; }
     .lc-part .bar { display: none; }
-    .lc-dev:not(.you) .lc-meters { display: none; }
-    .lc-meters { margin: 8px 0 0; gap: 8px; font-size: 10.5px; }
-    .lc-meters .m b { font-size: 10.5px; }
+    #load-card { margin-top: 12px; }
     .ag-h, #code-driver, #code-log, #code-bar { padding-left: 12px; padding-right: 12px; }
     #code-row { margin-left: 10px; margin-right: 10px; }
     #code-pane :is(.cm-approve button, #pv-open) { min-height: 36px; font-size: 12px; }
@@ -2107,6 +2105,8 @@
       <h2 class="lc-hl" aria-live="polite">Getting ready…</h2>
       <p class="lc-sent"></p>
       <div class="lc-bar" role="progressbar" aria-label="Starting the model" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="track"><div class="fill"></div></div><span class="pct">0%</span></div>
+      <p class="lc-sub" hidden></p>
+      <div class="lc-ask" id="lc-ask" role="group" aria-labelledby="lc-ask-q" hidden><p class="q" id="lc-ask-q"></p><p class="h" id="lc-ask-h"></p><div class="lc-actions"><button type="button" class="primary" id="lc-ask-yes">Save</button><button type="button" id="lc-ask-no">No</button></div></div>
       <div id="lc-rows"></div>
       <p class="lc-foot"></p>
       <div class="lc-actions" id="lc-actions" hidden><button type="button" class="primary" id="lc-retry">Try again</button><button type="button" id="lc-pick">Pick another model</button></div>
