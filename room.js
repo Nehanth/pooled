@@ -698,7 +698,9 @@ function updateNeed(pledged) {
   // short: say by how much and who could give more, right under Start (a disk model: in GPU memory, and the fix its
   // disk answer leaves: room/diskpick.js shortNote)
   $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine;
-  $("ai-short").textContent = diskCopyOf($("ai-model").value) ? diskShortNote($("ai-model").value, shortGB, row?.f?.stores !== false) : note;
+  // written only when it changed: it is a live region (role=status), and this runs on every room update
+  const shortText = diskCopyOf($("ai-model").value) ? diskShortNote($("ai-model").value, shortGB, row?.f?.stores !== false) : note;
+  if ($("ai-short").textContent !== shortText) $("ai-short").textContent = shortText;
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
   const meI = row?.f ? row.f.devs.findIndex((d) => d.meta === myMeta) : -1;
   const give = giveFor(meI >= 0 && row.f.fit.raise[meI] < Infinity ? gbUp(row.f.fit.raise[meI]) : row?.f ? 0 : need - pledged);

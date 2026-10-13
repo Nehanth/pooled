@@ -145,8 +145,9 @@ export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, ar
     if (storedBytes > 0) parts.push(`${stored} saved`);
   }
   const acts = [];
-  if (state === "ask" || state === "deny") acts.push({ act: "allow", label: "Allow" });
-  if (storedBytes > 0) acts.push({ act: "free", label: armed ? `Delete ${stored}?` : "Delete" });
+  // aria: what a screen reader says for the button (not just "Allow")
+  if (state === "ask" || state === "deny") acts.push({ act: "allow", label: "Allow", aria: `Allow disk storage for ${m.name}` });
+  if (storedBytes > 0) acts.push({ act: "free", label: armed ? `Delete ${stored}?` : "Delete", aria: `${armed ? "Confirm: delete" : "Delete"} ${m.name}'s saved copy (${stored})` });
   const can = state === "allow" || state === "ask" || state === "deny";
   // the RAM it reads the copy with goes in the tooltip: one line less, so the column doesn't jump as devices join
   const title = !can ? TIP[state] || TIP.none : ram && shareBytes !== 0 ? `Uses ${ram} to read it` : "";
@@ -156,7 +157,7 @@ export function diskRow(m, { state = "ask", storedBytes = null, ramGB = null, ar
 // ---- HTML (p2p.html #ap-flash .dk-row, with the rows' chips: .fig, b for "Allowed", .more otherwise) ----
 const chipHTML = (text, ok) => !text ? "" : ok ? `<b>${esc(text)}</b>` : `<span class="more">${esc(text)}</span>`;
 export function diskRowHTML(d) {
-  const btn = (a) => `<button type="button" class="${a.act === "free" ? "dk-del" : "dk-act"}" data-act="${a.act}">${esc(a.label)}</button>`;
+  const btn = (a) => `<button type="button" class="${a.act === "free" ? "dk-del" : "dk-act"}" data-act="${a.act}"${a.aria ? ` aria-label="${esc(a.aria)}"` : ""}>${esc(a.label)}</button>`;
   return `<div class="dk-row"><span class="k">${esc(d.k)}</span><span class="fig">${chipHTML(d.chip, d.ok)}${d.acts.map(btn).join("")}</span><span class="h"${d.title ? ` title="${esc(d.title)}"` : ""}>${esc(d.h)}</span></div>`;
 }
 // the group's row under the pledge stepper (relabelled "GPU memory"): Disk storage, with the RAM its tier reads it with

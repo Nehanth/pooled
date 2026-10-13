@@ -815,6 +815,7 @@
   .ap-for { flex-basis: 100%; margin-bottom: -2px; }
   .ap-me.flash > h3.ap-k { color: var(--text); }
   #ap-flash { flex-basis: 100%; padding: 0; border-top: 1px solid var(--rule-2); }
+  #ap-flash:focus { outline: none; }
   .ai-go { display: flex; gap: 8px; }
   .ai-go #ai-start { flex: 1; min-width: 0; }
   .dk-rows { display: flex; flex-direction: column; padding: 0 2px; }
@@ -2063,7 +2064,7 @@
           <p class="ap-covers" id="ap-covers">A pledge is a promise: this device never holds more. It covers the layers it holds and their context memory, and on the device that hosts the model also the embedding and output head.</p>
           <p class="ap-no" id="ap-cap" hidden></p>
           <p class="ap-no" id="ap-no" hidden>This browser can't use its graphics chip, so this device can chat but not help run the model.</p>
-          <div class="dk-rows" id="ap-flash" aria-live="polite" hidden></div>
+          <div class="dk-rows" id="ap-flash" tabindex="-1" hidden></div>
         </section>
         <section class="ap-room" id="side-room" aria-label="Invite more devices">
           <div id="ap-qr" aria-hidden="true"></div>

@@ -32,7 +32,10 @@ export function showDiskPick(key, info = last) {
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;
   shown = sig;
+  // the buttons are rebuilt: keep keyboard focus on the same one (Allow pressed: on Delete, or the row when gone)
+  const fa = $("ap-flash").contains(document.activeElement) ? document.activeElement.dataset?.act || "row" : null;
   $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, ramGB: info.ramGB ?? null, armed: !!armed, shareBytes: info.shareBytes ?? null });
+  if (fa) ($("ap-flash").querySelector(`[data-act="${fa === "allow" ? "free" : fa}"]`) || $("ap-flash")).focus({ preventScroll: true });
   // what is stored: asked once per pick (and after Free, or Room settings freeing it: refreshDiskPick)
   if (asked !== key) { asked = key; refresh(key); }
 }
@@ -73,5 +76,6 @@ export function initDiskPick({ toast = () => {} }) {
     const r = await diskStore.deleteCopy(key).catch((err) => ({ refused: String(err?.message || err) }));
     if (r?.refused) toast(r.refused);
     asked = 0; shown = null; showDiskPick($("ai-model").value);
+    if (!b.isConnected) $("ap-flash").focus({ preventScroll: true });
   });
 }

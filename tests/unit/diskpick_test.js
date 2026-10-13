@@ -114,6 +114,10 @@ Deno.test("diskpick: Disk storage shows #368's answer, the stored size, the tier
   ok(diskRowHTML(diskRow(m, { state: "none" })).includes(' title="No disk tier'));
   eq(acts(diskRow(m, { state: "none", storedBytes: GB })), ["free"], "a copy left behind can still be deleted");
   ok(diskRowHTML(diskRow(m, { state: "allow" })).includes("<b>On</b>"));
+  // a screen reader hears what each button does, not just "Allow"
+  ok(diskRowHTML(diskRow(m, { state: "ask" })).includes('data-act="allow" aria-label="Allow disk storage for Qwen3.8 Flash">Allow</button>'));
+  ok(diskRowHTML(diskRow(m, { state: "allow", storedBytes: 40 * GB })).includes('aria-label="Delete Qwen3.8 Flash&#39;s saved copy (40.0 GB)">Delete</button>'));
+  eq(diskRow(m, { state: "allow", storedBytes: 40 * GB, armed: true }).acts[0].aria, "Confirm: delete Qwen3.8 Flash's saved copy (40.0 GB)");
   ok(!diskRowHTML(diskRow(m, { state: "allow", storedBytes: 0 })).includes("data-act"), "nothing to do");
   const h = settingsHTML(m, { state: "ask", storedBytes: 0, ramGB: 3 });
   ok(!/\b20 GB\b|tok\/s|dk-cost|dk-agree/.test(h), "no tiles, no made-up figure, no repeated sentence");
