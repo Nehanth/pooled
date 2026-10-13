@@ -279,7 +279,8 @@
   .menu-acts :is(button, a):hover:not(:disabled) { background: var(--panel-3); }
   .menu-acts :is(button, a):hover .ic { background: var(--panel); box-shadow: inset 0 0 0 1px var(--border); color: var(--text); }
   .menu-acts button:active:not(:disabled) { transform: none; }
-  #cache-line { display: contents; }
+  #cache-line, #tabdisk-line { display: contents; }
+  #tabdisk-set { margin: 0 0 8px; }
   #cache-models { list-style: none; margin: 0 0 4px; padding: 0 0 0 44px; display: flex; flex-direction: column; gap: 4px; }
   #cache-models li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); }
   #cache-models li span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
@@ -756,11 +757,11 @@
   .rung { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 10px; width: 100%; height: 52px; font: 400 14px/1.2 var(--sans); padding: 0 14px 0 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--rule-2); border-radius: 12px; text-align: left; }
   .rung::before { content: ""; width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--border-2); background: var(--panel); transition: box-shadow .15s; }
   .rung .rn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rung .nd { font: 400 12px/1 var(--mono); color: var(--muted); }
-  .rung .fig { display: inline-flex; align-items: center; gap: 8px; justify-self: end; white-space: nowrap; }
-  .rung b { font: 500 11px/1 var(--mono); color: var(--accent-text); padding: 4px 6px; border-radius: 4px; background: var(--accent-soft); }
+  .rung .nd, .dk-row .nd { font: 400 12px/1 var(--mono); color: var(--muted); }
+  .rung .fig, .dk-row .fig { display: inline-flex; align-items: center; gap: 8px; justify-self: end; white-space: nowrap; }
+  .rung b, .dk-row .fig b { font: 500 11px/1 var(--mono); color: var(--accent-text); padding: 4px 6px; border-radius: 4px; background: var(--accent-soft); }
   /* short: a neutral tag in the shape of "fits" (calm, no warning colour) */
-  .rung .more { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .rung .more, .dk-row .more { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
   .rung.ok { color: var(--text); }
   /* short rows stay selectable, so their text keeps AA contrast: only the circle and chip fade */
   .rung.short:not(.sel) { color: var(--ink-4); }
@@ -776,6 +777,43 @@
   #ai-give { width: 100%; font: 500 13px/1 var(--sans); }
   #ai-panel:is(.loading, .online) :is(#ai-give, #ai-why) { display: none; }
   #ai-why { font-size: 12px; line-height: 1.45; color: var(--ink-2); text-align: center; }
+  /* a model kept on disk (room/diskpick.js): a normal row with a ✦ and its size as the chip. Picked, it takes the Code
+     tab's selected look (#mode-bar: near-black, a soft blue glow, stars twinkling inside: site/js/sparkle.js), and the
+     cost, the consent, Start | Not now and Advanced take the place of the download note. Same card, same width. */
+  .rung.disk { position: relative; transition: background-color .3s ease, box-shadow .3s ease, border-color .3s ease, color .3s ease; }
+  .rung .rn .rx { display: inline-block; width: 10px; height: 10px; margin: 0 7px 0 0; vertical-align: -.5px; color: var(--accent); }
+  .rung .dkc { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .rung.short:not(.sel) .dkc { color: var(--ink-3); box-shadow: none; }
+  .rung.disk.sel, .rung.disk.sel:hover:not(:disabled) { background: #0B0D14; border-color: #0B0D14; color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25), 0 0 16px -3px rgba(110,134,255,.6); }
+  .rung.disk.sel > .pooled-tw { opacity: 1; }
+  .rung.disk.sel .rn .rx { color: #A5B4FC; }
+  .rung.disk.sel .dkc, .rung.disk.sel .more { color: #fff; background: rgba(255,255,255,.1); box-shadow: none; }
+  .rung.disk.sel b { color: #C7D2FE; background: rgba(110,134,255,.24); }
+  /* short (the longer chip) or a phone: the chip keeps "from disk" so the name and the fit chip keep their room */
+  .rung.disk.short .dkz { display: none; }
+  @media (max-width: 480px) { .rung .dkc .dkz { display: none; } }
+  .rung.disk.sel::before { background: #0B0D14; box-shadow: inset 0 0 0 4.5px #fff; }
+  /* Flash's per-device settings (room/diskpick.js): "This device, for Qwen3.8 Flash" in the right column, the pledge
+     stepper relabelled "GPU memory" with a one-line hint in place of the pledge paragraph, then Disk in the
+     Advanced-style rows with the rows' own chips. Only while Flash is picked; its fit is its row's chip and the pool's. */
+  #ap-for[hidden], #ap-flash[hidden], #ai-notnow[hidden] { display: none; }
+  .ap-for { flex-basis: 100%; margin-bottom: -2px; }
+  .ap-me.flash > h3.ap-k { color: var(--text); }
+  #ap-flash { flex-basis: 100%; padding: 0; border-top: 1px solid var(--rule-2); }
+  .ai-go { display: flex; gap: 8px; }
+  .ai-go #ai-start { flex: 1; min-width: 0; }
+  #ai-notnow { flex: none; height: 48px; padding: 0 16px; border-radius: 8px; font-size: 15px; }
+  .dk-rows { display: flex; flex-direction: column; padding: 0 2px; }
+  .dk-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 14px; row-gap: 3px; padding: 10px 0; }
+  .dk-row + .dk-row { border-top: 1px solid var(--rule-2); }
+  .dk-row:last-child { padding-bottom: 0; }
+  .dk-row .k { font-size: 13px; color: var(--text); }
+  .dk-row .h { grid-column: 1; font-size: 12px; line-height: 1.45; color: var(--muted); }
+  .dk-row > :nth-child(2) { grid-row: 1 / span 2; grid-column: 2; }
+  .dk-row .v { font: 400 12px/1 var(--mono); color: var(--ink-2); }
+  .dk-del, .dk-act { font: 500 12px/1 var(--sans); padding: 8px 11px; border-radius: 8px; }
+  .dk-del { color: var(--del); }
+  #ai-panel:is(.loading, .online) :is(#ap-flash, #ai-notnow) { display: none; }
   #ai-loading { display: none !important; }
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
   /* loading: the landing's pick card. The logo's wave, what loads, each device's share of it, and
@@ -1592,6 +1630,7 @@
     #ai-head { padding: 8px 10px 12px; }
     .rung { height: 46px; font-size: 13px; padding: 0 12px 0 10px; gap: 8px; }
     #ai-start { height: 46px; }
+    #ai-notnow { height: 46px; padding: 0 14px; }
     #ap-qr svg { width: 84px; height: 84px; }
     #side-code { font-size: 22px; }
     #ai-output { padding: 14px 12px 8px; }
@@ -1872,10 +1911,15 @@
       </div>
       <section class="ms" aria-labelledby="ms-room">
         <h3 id="ms-room">Room</h3>
+        <div class="set set-row" id="tabdisk-set" hidden>
+          <div class="set-l"><b id="l-tabdisk">Let big models use this device's disk</b><span id="d-tabdisk">Qwen3.8 Flash can stream from disk when the room's memory is short: it stores up to about 92 GB in this browser.</span></div>
+          <label class="switch"><input type="checkbox" id="tabdisk-allow" role="switch" aria-labelledby="l-tabdisk" aria-describedby="d-tabdisk"><i aria-hidden="true"></i></label>
+        </div>
         <div class="menu-acts">
           <button id="export-chat" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2.5v7M5 6.5l3 3 3-3M3 11.5v2h10v-2"/></svg></span>Save the chat<small>The conversation as a Markdown file</small></button>
           <button id="card-btn" type="button"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.6"/><path d="M2.5 11l3.5-3.5 2.5 2.5 2-2 3 3"/><circle cx="10.8" cy="5.9" r=".9"/></svg></span>Room card<small>A picture of this room's devices and speed</small></button>
           <a id="docs-link" href="/docs" target="_blank" rel="noopener"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 2.5h7.5L13 5v8.5H3z"/><path d="M5.5 7.5h5M5.5 10h5"/></svg></span>Docs<small>How rooms, the Serve API and Code mode work (new tab)</small></a>
+          <span id="tabdisk-line" hidden><a href="#" id="tabdisk-free"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2.5" y="4" width="11" height="8" rx="1.5"/><path d="M5 9.5h3"/><circle cx="11" cy="9.5" r=".8"/></svg></span>Free disk space<small>Deletes the big model's copy on this device</small></a></span>
           <span id="cache-line"><a href="#" id="cache-clear"><span class="ic"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 4.5h11M6 4.5V3h4v1.5M4 4.5l.7 9h6.6l.7-9"/></svg></span>Clear cached weights<small>Frees this device's disk; the next start downloads again</small></a></span>
         </div>
         <ul id="cache-models" aria-label="Cached models" hidden></ul>
@@ -1964,7 +2008,7 @@
           <div id="ai-ladder" role="radiogroup" aria-label="Model"></div>
           <span id="ai-status"></span>
           <p class="ap-note" id="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
-          <button id="ai-start" class="primary">Start the model</button>
+          <div class="ai-go"><button id="ai-start" class="primary">Start the model</button><button id="ai-notnow" type="button" hidden>Not now</button></div>
           <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
           <p id="ai-short" role="status" hidden></p>
           <p id="ai-why" hidden>No device in this room can run a model: none has WebGPU. Join from a laptop or desktop in Chrome or Edge (or Safari 26) to start one.</p>
@@ -1986,12 +2030,14 @@
           <ul id="ap-devs" aria-label="What each device gives"></ul>
         </section>
         <section class="ap-me" id="ap-me" aria-label="This device">
-          <h3 class="ap-k"><span>This device gives</span></h3>
+          <p class="ap-k ap-for" id="ap-for" hidden></p>
+          <h3 class="ap-k"><span id="ap-me-k">This device gives</span></h3>
           <div class="ap-step" id="ap-step"><button class="step" id="ap-minus" type="button" aria-label="Less memory">&minus;</button><input id="ap-gb" type="text" inputmode="decimal" autocomplete="off" spellcheck="false" aria-label="Memory this device gives, in GB" value="1"><span class="u">GB</span><button class="step" id="ap-plus" type="button" aria-label="More memory">+</button></div>
           <p class="ap-me-hint" id="ap-me-hint" hidden></p>
           <p class="ap-covers" id="ap-covers">A pledge is a promise: this device never holds more. It covers the layers it holds and their context memory, and on the device that hosts the model also the embedding and output head.</p>
           <p class="ap-no" id="ap-cap" hidden></p>
           <p class="ap-no" id="ap-no" hidden>This browser can't use its graphics chip, so this device can chat but not help run the model.</p>
+          <div class="dk-rows" id="ap-flash" aria-live="polite" hidden></div>
         </section>
         <section class="ap-room" id="side-room" aria-label="Invite more devices">
           <div id="ap-qr" aria-hidden="true"></div>
@@ -2109,6 +2155,13 @@
     <h2 id="room-over-h">Room over</h2>
     <div class="k" id="room-over-why"></div>
     <div class="row"><button id="room-over-new" type="button" class="primary">Start a new room</button></div>
+  </div>
+</div>
+<div id="disk-ask" class="overlay" hidden>
+  <div class="sheet" role="alertdialog" aria-modal="true" aria-labelledby="disk-ask-h" aria-describedby="disk-ask-why">
+    <h2 id="disk-ask-h">This model streams from your disk</h2>
+    <div class="k" id="disk-ask-why"></div>
+    <div class="row"><button id="disk-ask-allow" type="button" class="primary">Allow</button><button id="disk-ask-no" type="button">No</button></div>
   </div>
 </div>
 <div id="leave" class="overlay" hidden>

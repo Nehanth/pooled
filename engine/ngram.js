@@ -305,11 +305,13 @@ export function opfsReadAt(syncHandles) {
 // the body is read, unless the request starts at 0 and Content-Length says the whole file is no bigger than asked.
 // A 206's Content-Range, when the response exposes it (cross-origin it needs Access-Control-Expose-Headers), must
 // start where we asked.
+// (a call's optional 4th argument { signal } aborts its request: room/flashdisk.js ingestNgram stops the other heads' reads
+// on the first failure)
 export function httpReadAt(urls, { fetch: f = globalThis.fetch, headers = {} } = {}) {
-  return async (file, off, len) => {
+  return async (file, off, len, { signal } = {}) => {
     const url = urls[file];
     if (!url) throw new Error(`n-gram: no URL for file ${file}`);
-    const r = await f(url, { headers: { ...headers, Range: `bytes=${off}-${off + len - 1}` } });
+    const r = await f(url, { headers: { ...headers, Range: `bytes=${off}-${off + len - 1}` }, ...(signal ? { signal } : {}) });
     const hdr = (k) => r.headers?.get?.(k) ?? null;
     const refuse = (why) => { r.body?.cancel?.()?.catch?.(() => {}); throw new Error(`n-gram: ${url} ${why}`); };
     if (r.status === 206) {

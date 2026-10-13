@@ -659,10 +659,13 @@ export class RoomNode extends EventEmitter {
         return;
       case "ping": this.sendTo(from, { t: "pong", ts: d.ts }); return;
       case "pong": if (e) { e.missed = 0; if (Number.isFinite(d.ts)) e.rtt = performance.now() - d.ts; } return;
-      case "pledge":
-        if (e) e.meta = { ...e.meta, contribGB: d.gb };
-        if (this.isHost && this.roster.has(from)) { this.roster.get(from).meta = { ...this.roster.get(from).meta, contribGB: d.gb }; this.broadcastRoster(); }
+      case "pledge": {
+        // tabDisk (a tab's disk tier, when the message has it: its user said yes or no; room/pledge.js tabDiskGB)
+        const upd = (meta) => { const m = { ...meta, contribGB: d.gb }; if ("tabDisk" in d) { if (d.tabDisk && typeof d.tabDisk === "object") m.tabDisk = d.tabDisk; else delete m.tabDisk; } return m; };
+        if (e) e.meta = upd(e.meta);
+        if (this.isHost && this.roster.has(from)) { this.roster.get(from).meta = upd(this.roster.get(from).meta); this.broadcastRoster(); }
         return;
+      }
     }
   }
 
@@ -760,6 +763,10 @@ export class RoomNode extends EventEmitter {
       case "ai-progress": this.emit("progress", { name: e?.name || from, pct: d.pct }); return;
       case "ai-error":
         this.log(`${e?.name || from} failed: ${d.message}`);
+        // a device refused the offload it was dealt: a tab keeping the model off its disk (nodisk), or a node from before
+        // Flash offload (0.4.1: "no expert offload yet"). The next start counts it without any offload (this host does
+        // not re-deal by itself here: the start fails and the next one leaves it out)
+        if ((d.nodisk || /has no expert offload yet/.test(String(d.message || ""))) && e?.meta) { const { tabDisk, offload, ramGB, ...m } = e.meta; e.meta = m; }
         if (this.hosting() && ai.chain.includes(from)) {
           this.failWaiters(new Error(`${e?.name || from}: ${d.message}`));
           if (d.load && ai.starting) ai.startErr?.(new Error(`${e?.name || from} couldn't load its layers (${d.message})`));
@@ -1040,12 +1047,13 @@ export class RoomNode extends EventEmitter {
         experts = expertsOf(G, L);   // what each layer's routed experts park (null for a dense model): ExpertStore's sizes
       } else if (M.kind === "qwen4exp") {
         // Qwen3.8-Flash-Next: the dense phase (no QSA indexer), K / V in f32 on its attention layers (averaged over all
-        // of them), the embedding and the head's HC mixer + output.weight on the host; no expert offload yet
+        // of them), the embedding and the head's HC mixer + output.weight on the host
         const G = await src.header(false), c = qwen4expConfig(G.meta);
         L = c.L;
         const kvPos = 2 * c.nKVHeads * c.headDim * 4 * c.qsa.filter(Boolean).length / L;
         layerBytes = qwen4expShardBytes(G, { lo: 0, hi: 4, hasEmbed: false, hasHead: false, qsa: false }) / 4 + ctx * kvPos;
         embedBytes = qwen4expShardBytes(G, { lo: 0, hi: 0, hasEmbed: true, hasHead: true, qsa: false });
+        experts = expertsOf(G, L);   // expert offload (shard.js loadFlash): parked in RAM, read from disk (--disk), or a tab's OPFS
       } else {
         L = (await src.cfg()).num_hidden_layers;
         const G = await src.header(false);

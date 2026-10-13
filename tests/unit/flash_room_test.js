@@ -418,3 +418,53 @@ Deno.test("flash core: a step that throws part way marks the engine failed, as f
   core.reset();
   eq((await core.step(4)).length, HD, "after reset() the engine steps again");
 });
+
+Deno.test("flash room engine: a checkpoint restored (loadSlot / importState) clears a failed step, as Qwen35Engine's do", async () => {
+  const HD = 8;
+  let lose = false;
+  const stage = { mapAsync: async () => { if (lose) throw new Error("device lost"); }, getMappedRange: () => new ArrayBuffer(HD * 4), unmap() {} };
+  const enc = { beginComputePass: () => ({ end() {} }), copyBufferToBuffer() {}, finish: () => ({}) };
+  const e = {
+    device: { queue: { submit() {}, writeBuffer() {} }, createCommandEncoder: () => enc, createBuffer: () => ({ destroy() {} }) },
+    cfg: { hDim: HD, nKVHeads: 1, headDim: 2 }, dims: { hDim: HD }, lo: 0, hi: 1, hasEmbed: true, hasHead: false, maxSeq: 8, pos: 0,
+    layers: [{ attnOps: [], ffnOps: [], st: {} }], B: { R: {} }, hStage: stage, _failed: null,
+    _check() { if (this._failed) throw new Error("qwen4exp: an earlier step failed (" + this._failed.message + "); reset() first"); },
+    async _begin(id) { this._check(id); },
+    _encode() {},
+    reset() { this.pos = 0; this._failed = null; },
+  };
+  const fe = new FlashRoomEngine(qwen4expCore(e));
+  ok(typeof fe.saveSlot === "function", "checkpoints on");
+  await fe.prefillToken(1);
+  fe.saveSlot(1);
+  const fail = async () => { lose = true; try { await fe.prefillToken(2); } catch { /* the readback */ } lose = false; ok(e._failed, "the step failed"); };
+  await fail();
+  fe.loadSlot(1);
+  ok(!e._failed, "loadSlot cleared the failed step");
+  await fe.prefillToken(3);
+  await fail();
+  fe.importState({ sig: fe.stateSignature(), pos: 1, parts: [] });
+  ok(!e._failed, "importState cleared it too");
+  eq(fe.pos, 1);
+  await fe.prefillToken(4);
+});
+
+Deno.test("flash core: an offloaded layer's ops split at its router and the engine's cut runs between them, in order", async () => {
+  const HD = 4, seen = [];
+  const stage = { mapAsync: async () => {}, getMappedRange: () => new ArrayBuffer(HD * 4), unmap() {} };
+  const mkEnc = () => ({ beginComputePass: () => ({ end() {} }), copyBufferToBuffer() {}, finish: () => ({}) });
+  const op = (n, cut = false) => ({ n, cut });
+  const L = (i, off) => ({ i, off, st: {}, halves: [{ n: `a${i}` }, { n: `f${i}` }] });
+  const e = {
+    device: { queue: { submit() {}, writeBuffer() {} }, createCommandEncoder: mkEnc },
+    cfg: { hDim: HD, nKVHeads: 1, headDim: 2 }, dims: {}, lo: 0, hi: 3, hasEmbed: true, hasHead: false, maxSeq: 4, pos: 0,
+    layers: [L(0, false), L(1, true), L(2, false)], B: { R: {} }, hStage: stage, _failed: null,
+    // fused lists, two per layer: attention, then the MoE half with its router op marked cut
+    _halfOps: (halves) => halves.map((h) => (h.n[0] === "a" ? [op(h.n)] : [op(h.n + ".route", true), op(h.n + ".exp")])),
+    _check() {}, async _begin() {},
+    _encode(_pass, ops) { for (const o of ops) seen.push(o.n); },
+    async _afterRoute(enc, l) { seen.push(`cut${l.i}`); return mkEnc(); },
+  };
+  await qwen4expCore(e).step(1);
+  eq(seen, ["a0", "f0.route", "f0.exp", "a1", "f1.route", "cut1", "f1.exp", "a2", "f2.route", "f2.exp"]);
+});
