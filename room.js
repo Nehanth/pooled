@@ -61,7 +61,7 @@ import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
 import { stepPill, stepLine, stepBytes, rowVerb } from "./room/loadsteps.js";
-import { fmtTps, speedLine, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
+import { fmtTps, speedLine, bandLine, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
 import { TeleMeter, expertCache, expertCacheOf, expertStoreOf } from "./room/tele.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 import { convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
@@ -3051,8 +3051,11 @@ function chatBotStart(mid) {
   m.querySelector(".wn").textContent = shortName(ai.model || $("ai-model").value) || "room";
   // until the first token: the working line (the first piece replaces it)
   const n = Object.keys(ai.layersByName || {}).length;
-  // one steady line (no verbs rotating every two seconds); the device count only when there is more than one
-  m.querySelector(".bubble").append(working({ steady: true, lead: n > 1 ? `Reading your message on ${n} devices` : "Reading your message" }));
+  // one steady line (no verbs rotating every two seconds); the device count only when there is more than one. The first
+  // question since the model went ready can take a while (the model warms up on it): after 4 s with no word, it says so
+  // once, in plain words, here in the bubble (no panel, no number)
+  m.querySelector(".bubble").append(working({ steady: true, lead: n > 1 ? `Reading your message on ${n} devices` : "Reading your message",
+    then: speed.firstWait ? { after: 4000, text: "The first answer takes a little longer" } : null }));
   m.classList.add("live");
   m.pieces = [];
   o.appendChild(m); scrollChat();
@@ -3985,7 +3988,9 @@ function aiMaybeReady() {
   aiStatus(`cluster online · ${n} device${n > 1 ? "s" : ""}, ${ai.cfg.num_hidden_layers} layers split ${n} ways`);
   clearInterval(ai.progTimer);
   if ($("load-card").classList.contains("on")) aiLoading(false);   // (a device back from a reload also lands here, with the chat up)
+  const wasOnline = $("ai-panel").classList.contains("online");
   $("ai-panel").classList.add("online");
+  if (!wasOnline) speedReady();   // speedReady (C) (aiMaybeReady runs again after a relink, re-deal or recovery)
   promptHint();
   $("ai-row").style.display = "flex";
   $("chat-tools").hidden = false;
@@ -4161,12 +4166,12 @@ function renderMap(nodes, st, live) {
   (smLive ||= liveWords(el.querySelector(".sm-lt")))(!!live);   // a steady "Writing…" while writing
   paintLivePill();   // ("Reading…" before the answer's first word)
   el.querySelector(".sm-live").title = live ? "the room is writing an answer" : "waiting for a question";
+  // (the head's line is the last answer's speed, speedMeta; the developer view's lap and drafts go to its tooltip only)
   const bits = [];
-  if (st?.tps) bits.push(`${st.tps.toFixed(1)} tok/s`);
   if (st?.lap && DEV) bits.push(`lap ${st.lap} ms = GPUs ${st.gpu} + wire ${st.net}`);
   if (st?.acc != null && DEV) bits.push(`${Math.round(st.acc * 100)}% of drafts accepted`);
-  el.querySelector(".sm-meta").textContent = bits.join(" · ") || `${nodes.length} device${nodes.length > 1 ? "s" : ""}`;
-  el.querySelector(".sm-meta").title = `${nodes.length} device${nodes.length > 1 ? "s" : ""}: every token takes a lap through all of them`;
+  speed.devTip = bits.join(" · ");
+  speedMeta();
   deviceMark();
   // the speed panel: "online · 2 devices" once per deal (the first map after a re-deal, or a new count)
   if (speed.redeal || nodes.length !== speed.lastN) { speed.redeal = false; speed.lastN = nodes.length; speedEvent(onlineText(nodes.length)); }
@@ -4210,8 +4215,10 @@ const bandMode = () => ($("chatpane").classList.contains("code-mode") ? "code" :
 function bandFolded() {
   let v = null;
   try { v = localStorage.getItem("pooled-band-" + bandMode()); } catch {}
-  // Code, and phones (upright, or on their side: a short touch screen), start with it folded
-  return v ? v === "folded" : bandMode() === "code" || innerWidth < 820 || matchMedia("(max-height: 500px) and (pointer: coarse)").matches;
+  // folded everywhere unless this viewer opened it ("Show the layers"): at ready the band is one line, never a panel
+  // that opens by itself. (The developer view, ?dev=1, keeps the old default: open on a desktop's Chat, for its numbers.)
+  if (v) return v === "folded";
+  return DEV ? bandMode() === "code" || innerWidth < 820 || matchMedia("(max-height: 500px) and (pointer: coarse)").matches : true;
 }
 function bandFold(on, save = false) {
   const el = $("swarm-map"), b = $("band-toggle");
@@ -4308,7 +4315,8 @@ function teleNote(kind, ms, n = 1) {
 // marked by how many devices held the model; the room's events (a device joins, the re-deal, online);
 // and a card per device: its layers, its GB, where its experts are (MoE), its share of each token's time.
 // Every screen times the tokens it is shown; a finished answer's speed is the host's (its stats line).
-const speed = { meter: new SpeedMeter(), hist: [], events: [], asked: new Set(), lastN: 0, redeal: false, at: 0, idle: 0, seq: 0, last: null, reading: false };
+const speed = { meter: new SpeedMeter(), hist: [], events: [], asked: new Set(), lastN: 0, redeal: false, at: 0, idle: 0, seq: 0, last: null, reading: false,
+  firstWait: false, devTip: "" };
 // The band's pill while the room works on an answer: "Reading…" until its first word is on screen (the model is still
 // reading the message), "Writing…" after; renderMap's liveWords sets "Writing…" / "Ready", this corrects the first
 function paintLivePill() {
@@ -4319,6 +4327,25 @@ function speedEvent(text) {
   speed.events = pushEvent(speed.events, text, Date.now());
   const ol = $("sp-events"); if (!ol) return;
   ol.innerHTML = speed.events.map((e, i) => `<li${i === speed.events.length - 1 ? ' class="now"' : ""}>${esc(e.text)}</li>`).join("");
+}
+// The model went ready (the host's aiMaybeReady, a device's first ai-ready-all): nothing about speed until a real
+// answer. The panel (only open when this viewer asked for it) keeps its readout and chart out of sight (quiet), the
+// head's line stays empty, the band folds unless this viewer opened it, and the first question gets its plain wait words.
+function speedReady() {
+  speed.firstWait = true;
+  if (!speed.hist.length) $("speedo")?.classList.add("quiet");
+  if (!speed.last) speedMeta();
+  bandFold(bandFolded());
+}
+// the band head's one line: the last real answer's speed in words ("Last answer: about 3 words a second"), 12px,
+// muted; "" before one. Its tooltip has the numbers ("1.5 tok/s · 24 tokens · 1 device"), and the dev view's lap.
+function speedMeta() {
+  const el = $("swarm-map")?.querySelector(".sm-meta"); if (!el) return;
+  const L = speed.last;
+  const gain = L ? gainText(speedup(speed.hist)) : "";
+  el.textContent = bandLine(L) + (gain ? ` · ${gain}` : "");
+  const tip = L ? `${fmtTps(L.tps)} tok/s` + (L.count ? ` · ${L.count} tokens` : "") + (L.devices ? ` · ${L.devices} device${L.devices === 1 ? "" : "s"}` : "") : "";
+  el.title = [tip, DEV ? speed.devTip : ""].filter(Boolean).join("\n");
 }
 function speedStart() {
   speed.meter.start();
@@ -4335,34 +4362,39 @@ function speedShow(tps, { live = false, devices = 0, count = 0 } = {}) {
   const line = speedLine(tps, { live, devices });
   el.textContent = line;
   el.title = tps > 0 ? `${fmtTps(tps)} tok/s` + (count ? ` · ${count} tokens` : "") + (devices ? ` · ${devices} device${devices === 1 ? "" : "s"}` : "") : "";
-  // (while live the pill above says "Reading…" / "Writing…": this cell stays empty until the rate settles, not a second copy)
-  $("sp-unit").textContent = line || live ? "" : "Waiting for a question";
+  // (while live the pill above says "Reading…" / "Writing…"; before an answer the chat says "The model is ready. Ask
+  // anything.": no "Waiting for a question" here)
+  $("sp-unit").textContent = "";
 }
 // a token on screen (mapPulse): the readout at most every 250 ms; 2.5 s without one ends the live state
 // (an answer that never gets its end here: Code's turns, a dropped link)
 function speedTok() {
+  speed.firstWait = false;
   if (!speed.meter.on) speedStart();
   if (speed.reading) { speed.reading = false; paintLivePill(); }
   const now = performance.now();
   speed.meter.tok(now);
   clearTimeout(speed.idle);
-  speed.idle = setTimeout(() => speedDone(null), 2500);
+  speed.idle = setTimeout(() => speedDone(null, null, true), 2500);
   if (now - speed.at < 250) return;
   speed.at = now;
   const r = speed.meter.rate(now);
-  if (r > 0) speedShow(r, { live: true });
+  if (r > 0) { $("speedo")?.classList.remove("quiet"); speedShow(r, { live: true }); }   // (a real answer, two words or more, is running: the opened panel's readout may show)
 }
 // an answer ended (chatBotEnd): its speed from the host's stats line, else this screen's own timing
-function speedDone(stats, key = null) {
+function speedDone(stats, key = null, own = false) {
   clearTimeout(speed.idle);
   speed.reading = false;
+  speed.firstWait = false;
   const avg = speed.meter.end(), st = parseStats(stats);
   $("speedo")?.classList.remove("live");
   const tps = st ? (st.count >= 2 ? st.tps : 0) : avg;   // a one-token answer has no speed worth showing
   if (st && st.count >= 2) {
     speed.hist = pushHistory(speed.hist, { key: key ?? "a" + ++speed.seq, tps: st.tps, devices: st.devices });
     speed.last = st;
-  }
+  } else if (own && avg > 0 && speed.meter.n >= 2) speed.last = { count: speed.meter.n, tps: avg, devices: lastMap?.nodes?.length || 1 };   // (an answer with no stats line ever, e.g. Code's turns: this screen's own timing; a failed or stopped one leaves it)
+  if (speed.last) $("speedo")?.classList.remove("quiet");   // the head line has a speed: so may the opened panel
+  speedMeta();
   if (tps > 0) speedShow(tps, { devices: st?.devices || 0, count: st?.count || 0 });
   else speedShow(speed.last?.tps || 0, { devices: speed.last?.devices || 0 });   // a one-token, failed or stopped answer: the last one's speed, never "Writing…" with nothing running
   paintHistory();
@@ -4376,6 +4408,7 @@ function paintHistory() {
       + `<i></i>${step ? `<span class="nl">${x.devices} device${x.devices === 1 ? "" : "s"}</span>` : ""}</li>`;
   }).join("");
   ol.classList.toggle("empty", !h.length);
+  if (h.length) $("speedo")?.classList.remove("quiet");   // the first real answer: the readout and the chart may show
   $("sp-gain").textContent = gainText(speedup(h));
 }
 // the model, its size, and the device cards; from the deal (ai.layersByName, ai.heldGB, ai.outWhy) and the
@@ -5104,6 +5137,7 @@ async function aiOnData(from, d) {
       aiLoading(false);
       if (d.out && typeof d.out === "object") { ai.outWhy = d.out; paintHeld(); }
       $("ai-panel").classList.add("online");
+      if (!wasOnline) speedReady();   // speedReady (C) (the host sends ai-ready-all again on every hello)
       if (ai.role !== "host" && ai.role !== "worker") ai.role = "guest";
       if (ai.role !== "host") ai.hostId = from;
       if (MODELS[d.model]) { setModelValue(d.model); ai.model = d.model; }
@@ -6006,6 +6040,7 @@ if (new URLSearchParams(location.search).get("sim") === "1" && ["127.0.0.1", "lo
       ai.range = mine ? [+mine[1], +mine[2] + 1] : null;
       aiLoading(false);
       $("ai-panel").classList.add("online");
+      speedReady();   // speedReady (C)
       promptHint();
       $("ai-row").style.display = "flex"; $("chat-tools").hidden = false; $("mode-bar").hidden = false;
       emptyText("The model is ready. Ask anything.");

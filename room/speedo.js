@@ -33,6 +33,15 @@ export function speedLine(tps, { live = false, devices = 0 } = {}) {
   return `Last answer: ${w}` + (devices > 0 ? ` on ${devices} device${devices === 1 ? "" : "s"}` : "");
 }
 
+// The band head's one calm line, from the last real answer ({ tps, devices }, two tokens or more): "Last answer: about
+// 3 words a second" (" on 2 devices" with more than one); "" before there is one. Never a live number: while an answer
+// is written the band's pill says "Reading…" / "Writing…".
+export function bandLine(last) {
+  if (!last || !(+last.tps > 0)) return "";
+  const n = +last.devices || 0;
+  return speedLine(+last.tps, { devices: n > 1 ? n : 0 });
+}
+
 // an answer's stats line -> { count, tps, devices }; null for one without a speed ("failed: ...", a note)
 export function parseStats(stats) {
   const s = String(stats || "");
