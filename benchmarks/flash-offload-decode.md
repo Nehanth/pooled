@@ -194,7 +194,7 @@ numbers are in the JSON.
   disk through the room node's worker reader, which on this branch serves its pool cuts as leases): main and the
   branch both **BITS plain 5ef77d06 hidden 403ae12b**, the same greedy / spec / GPU-sampled tokens, and the same
   store counters (2,160 cuts, 93,698 expert reads; `logs/spark-q38bits-moe-*.log`). The 35B engine has no read-ahead.
-- **`packages/room-node/test/flash_tab_gold.mjs tab`, `TAB_GB=12`** (Spark): **not run.** From 00:41 to 02:17 ET the GB10 ran other agents'
+- **`packages/room-node/test/flash_tab_gold.mjs tab`, `TAB_GB=12`** (Spark): run after the review, §7 (pass, the same BITS as main). Before that, **not run.** From 00:41 to 02:17 ET the GB10 ran other agents'
   Flash tests back to back (`test_q38flash_batch.js`, `test_q38flash.js`, a llama-server), about 20 s apart, and this
   test needs the GPU to itself for half an hour; only the 35B gate found a window. What it would check: on this
   branch a tab runs main's path apart from the store's bookkeeping. Its reader (OPFS) has no leases, `disk.ahead` is
@@ -228,7 +228,7 @@ with less RAM than its layers' experts.
 
 - **The Spark.** Its GPU was running other agents' Flash tests (`test_q38flash*.js`, `q38flash_kv_compare.js`, a
   llama-server) for most of the session; only the 35B gate ran there, in an idle window. No profile or A/B on Linux,
-  and `flash_tab_gold.mjs` at `TAB_GB=12` is not run (§4).
+  and `flash_tab_gold.mjs` at `TAB_GB=12` ran only after the review (§7).
 - **The demo room itself** (Mac tab + PC): no disk layers there (above), so no change is expected; not timed.
 - **A tab with the read-ahead.** Off there (`disk.ahead`); the OPFS reader's cost for wrong guesses is unknown.
 - **The plan's copy** (17-25% of an A' token): the CPU writes each read expert into a T1 slot or a `writeBuffer`
@@ -279,4 +279,11 @@ The fix stays: it removes a path the PR meant to remove, for 128 MiB more shared
 
 **Bits** (`BITS=1`, `d127493`): A' and B' both give **two-sum d0fde80c, bash e9ed19f7, eos-mid 19b0ecc8**, MATCH,
 the same as §4. Every arm of a6/a7 MATCHes the golden ids. Logs: `logs/a6-*`, `logs/a7-*`.
+
+**The tab gate** (Spark, 2026-10-13 03:08-03:17 ET, GPU otherwise idle; `TAB_GB=12 CHROME_BIN=<Playwright chromium-1148>
+node packages/room-node/test/flash_tab_gold.mjs tab`, main `952efbe` (the branch's base) then the branch `63274e7`):
+both **PASS**, every case MATCH, and the same BITS: **two-sum 62b93608, bash 8ac3ef63, eos-mid 79bde45**. The store's
+counters are identical too (8,976 cuts, 29,025 expert reads, 82,418 MiB copied to the pools, the same RAM-cache
+numbers), so the tab runs main's path. Disk wait 48.1 s on main, 36.0 s on the branch, but the branch ran second
+on a warm page cache: not a measurement. Logs: `logs/spark-tabgold-*.json`.
 
