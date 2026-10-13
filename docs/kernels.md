@@ -174,7 +174,18 @@ Full model, judged by the golden rule (`FULL=1 CASES=ctx2k,ctx8k,ctx32k MAXSEQ=3
 | ctx32k (31958) | f32 | 37 | 11.31 | near tie at 0 (our gap 0.407) | yes |
 | ctx32k (31958) | f16 | 37 | 11.23 | **rule FAIL at 0** (our gap 0.649 > 0.5) | yes |
 
-The engine allocated 1651 MiB of state at maxSeq 32256 with f32 and 895 MiB with f16. Speed is the same in both formats. At ctx32k step 0, both formats pick 1192, which is llama.cpp's top in one of its three runs. llama.cpp's own margin between 8839 and 1192 moves across its reruns from +0.49 (the golden) to +0.05 to -0.56 (1192 ahead). Our f16 margin is -0.65 and f32's is -0.41. The two formats agree on the first 8 ids (the verify pass) and on the answer: note 32, "SSD expert offload". By the rule as written, f16 still fails this case, so `kv` stays `"f32"` by default until it passes. The options are a rule that accepts our token when it is some llama.cpp run's top, or more 32K goldens to see how often f16 lands outside the window.
+The engine allocated 1651 MiB of state at maxSeq 32256 with f32 and 895 MiB with f16. Speed is the same in both formats. At ctx32k step 0, both formats pick 1192, which is llama.cpp's top in one of its three runs. llama.cpp's own margin between 8839 and 1192 moves across its reruns from +0.49 (the golden) to +0.05 to -0.56 (1192 ahead). Our f16 margin is -0.65 and f32's is -0.41. The two formats agree on the first 8 ids (the verify pass) and on the answer: note 32, "SSD expert offload". The rule cannot settle f16 at 32K. The goldens ran llama.cpp with its default f16 K / V cache (no `-ctk` / `-ctv`). llama.cpp's rerun 1 picks 1192 by 0.56 nats, so llama.cpp would fail this same rule against its own golden. Its spread across reruns on this step (1.05 nats) is about twice the 0.5 threshold, and at 32K only step 0 is compared, so f32's pass (gap 0.407) is one noisy token too. The ctx32k golden comes from the long-context goldens PR (#374), which isn't merged.
+
+The deterministic check is `tests/q38flash_kv_compare.js`. It teacher-forces the same prompt through f32 and f16, then compares the next-token distributions over the last N positions. ctx32k, last 32 positions (31926-31957), full model, QSA on, ring 1024:
+
+| | f32 vs f16 |
+|---|---|
+| top-1 agreement | 31 / 32. The one flip (pos 31951) is at a near tie: f32's gap is 0.908, f16's 0.267 |
+| KL(f32 \|\| f16) | mean 5.3e-3 nats, median 4.2e-5, max 0.157 (pos 31951); 0.0098 at the last position, the golden's step 0 |
+| max \|d logprob\| over f32's top 20 | mean 0.78, max 2.12 nats. The large values come from tokens far below the top: at pos 31948 the top-2 gap is 25.8 nats |
+| top-2 gap at the last position | 0.407 (f32) / 0.649 (f16), the same as the gate |
+
+In short, f16 perturbs the distribution slightly and moves the argmax only where f32 is already within about 1 nat. That is the same size as llama.cpp's run-to-run spread. `kv` stays `"f32"` by default in this change. Switching the default is a separate call, to make with the room integration.
 
 ### The qwen4exp goldens' pass rule
 
