@@ -289,7 +289,7 @@ Deno.test("disk: cuts read as leases put the parked bytes in the pools and give 
     const { st, reader } = makeDiskStore({ slots: 8 }), { st: ref } = makeStore({ slots: 8 });
     const R = st.reader = leasingReader(reader, slots);
     let seed = 5;
-    const rnd = (n) => ((seed = (seed * 1103515245 + 12345) >>> 0) % n);
+    const rnd = (n) => ((seed = (seed * 1103515245 + 12345) >>> 0) >>> 16) % n;
     for (let t = 0; t < 120; t++) {
       const l = rnd(2) ? 2 : 5, KS = 5, nCols = rnd(4) ? 1 : 2, sel = new Uint32Array(nCols * KS);
       for (let c = 0; c < nCols; c++) { const ids = []; while (ids.length < 4) { const e = rnd(rnd(3) ? 12 : 32); if (!ids.includes(e)) ids.push(e); } sel.set(ids, c * KS); }
@@ -300,6 +300,50 @@ Deno.test("disk: cuts read as leases put the parked bytes in the pools and give 
     }
     assert(R.leases > 0 && R.most <= slots, `ring ${slots}: ${R.leases} leases, at most ${R.most} at once`);
   }
+});
+
+Deno.test("disk: prefetch reads a guess early; the cut uses what it guessed right, the pools get the parked bytes, every lease comes back", async () => {
+  for (const slots of [64, 12]) {   // 12: a guess and a cut past the ring read plain arrays instead of waiting for a slot
+    const { st, reader } = makeDiskStore({ slots: 8 }), { st: ref } = makeStore({ slots: 8 });
+    const R = st.reader = leasingReader(reader, slots);
+    let seed = 7, reads = 0;
+    const rnd = (n) => ((seed = (seed * 1103515245 + 12345) >>> 0) >>> 16) % n;   // (the high bits: the low ones cycle)
+    for (let t = 0; t < 150; t++) {
+      const l = rnd(2) ? 2 : 5, KS = 5, sel = new Uint32Array(KS), ids = [];
+      while (ids.length < 4) { const e = rnd(rnd(3) ? 12 : 32); if (!ids.includes(e)) ids.push(e); }
+      sel.set(ids);
+      // the guess: some of the real picks, some not, now and then another layer's (dropped by this layer's prepare)
+      const guess = ids.map((e) => (rnd(2) ? e : rnd(32)));
+      const before = R.calls.length;
+      st.prefetch(rnd(8) ? l : (l === 2 ? 5 : 2), guess);
+      if (rnd(3) === 0) await new Promise((r) => setTimeout(r, rnd(4)));   // the read ahead done, or still going
+      const a = await diskPlan(st, l, sel, 1, KS), b = ref.plan(fakeEncoder(), l, sel, 1, KS);
+      reads += R.calls.length - before;
+      assert(a.pool === b.pool && a.remap.every((x, i) => x === b.remap[i]), `t ${t}: same plan`);
+      assert(sameBytes(poolBytes(st, l), poolBytes(ref, l)), `t ${t}: same pool bytes`);
+    }
+    await new Promise((r) => setTimeout(r, 20));   // reads ahead that were dropped finish and give their leases back
+    assert(R.out === 0 && st._held === 0, `ring ${slots}: ${R.out} leases still held`);
+    assert(R.most <= slots, `ring ${slots}: at most ${R.most} leases at once`);
+    const s = st.stats;
+    assert(s.aheadReads > 0 && s.aheadUsed > 0 && s.aheadUsed <= s.aheadReads, `ahead ${s.aheadUsed}/${s.aheadReads}`);
+    // every read is a cut's own or a read ahead: a guess the cut used is never read twice
+    assert(reads === 3 * (s.diskReads - s.aheadUsed + s.aheadReads), `${reads} part reads for ${s.diskReads} cut reads, ${s.aheadUsed}/${s.aheadReads} ahead`);
+    assert(s.misses === ref.stats.misses && s.hits === ref.stats.hits, "same counters");
+  }
+});
+
+Deno.test("disk: prefetch skips what the pool or T1 holds, and does nothing with ahead off or on a parked layer", async () => {
+  const { st, reader } = makeDiskStore({ layers: [2, 5], disk: [5] });
+  await diskPlan(st, 5, sel1([1, 2, 3, 4]), 1, 5);
+  const n0 = reader.calls.length;
+  assert(st.prefetch(5, [1, 2, 3, 9]) === 1 && reader.calls.length === n0 + 3, "only expert 9 is read ahead");
+  assert(st.prefetch(2, [1, 2, 3, 9]) === 0, "a parked layer: nothing");
+  st.ahead = false;
+  assert(st.prefetch(5, [10, 11]) === 0, "ahead off: nothing");
+  st.ahead = true;
+  await diskPlan(st, 5, sel1([9, 1, 2, 3]), 1, 5);
+  assert(reader.calls.length === n0 + 3 && st.stats.aheadUsed === 1, "the cut read nothing more");
 });
 
 Deno.test("disk: only misses are read; a plan without prepare throws", async () => {
