@@ -53,6 +53,13 @@ export const diskStateOf = (key) => diskStore.state(key);
 // Wire the buttons: Allow (the same stored answer the disk question saves); Delete (two presses, like Room settings'
 // "Free disk space"). toast(text): the room's, for a delete that could not run.
 export function initDiskPick({ toast = () => {} }) {
+  // the same Allow, under Start (p2p.html #ai-allow-disk: room.js updateNeed shows it), then on to Start
+  $("ai-allow-disk").addEventListener("click", () => {
+    const key = $("ai-model").value;
+    if (!diskCopyOf(key)) return;
+    diskStore.allow(key); shown = null; showDiskPick(key);
+    $("ai-start").focus();
+  });
   $("ap-flash").addEventListener("click", async (e) => {
     const b = e.target.closest("button[data-act]"), key = $("ai-model").value;
     if (!b || !diskCopyOf(key)) return;

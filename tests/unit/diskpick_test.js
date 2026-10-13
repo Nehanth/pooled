@@ -2,7 +2,7 @@
 // future big model gets the same row, cost figures, consent and Start label from its own entry. The consent state is
 // #368's stored answer (room/flashdisk.js TAB_DISK_KEY), read through room/diskstore.js diskState.
 import { DISK_COPY, MODELS, PICKER, SHAPE, diskCopyBytes } from "../../room/models.js";
-import { diskCopyOf, rowChip, rowChipHTML, paramsText, rowTitle, groupTitle, GPU_HINT, diskRow, diskRowHTML, settingsHTML, sizeText, pickNote, shortNote,
+import { diskCopyOf, rowChip, rowChipHTML, paramsText, rowTitle, groupTitle, GPU_HINT, diskRow, diskRowHTML, settingsHTML, sizeText, pickNote, shortNote, allowLabel,
   poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle } from "../../room/diskpick.js";
 import { storageOf, offloadFor } from "../../room/pledge.js";
 import { diskState } from "../../room/diskstore.js";
@@ -66,11 +66,17 @@ Deno.test("diskpick: short, under Start: by how much, and the fix this device's 
   eq(shortNote(55, "deny"), shortNote(55, "ask"));
   eq(shortNote(2.5, "allow"), "2.5 GB of GPU memory short. Invite more devices, or give more GPU memory.");
   for (const st of ["url", "small", "none"]) eq(shortNote(55, st), "55 GB of GPU memory short. Invite more devices with GPUs.", st);
-  eq(shortNote(55, "deny", false), "Needs a device that can store it. Allow disk storage, or invite a computer that can.", "no device can store it: no GPU figure");
+  eq(shortNote(55, "deny", false), "Disk storage is off on this device. Allow it, or invite a computer that can store it.", "no device can store it: no GPU figure");
+  eq(shortNote(55, "ask", false), shortNote(55, "deny", false), "not asked yet: the same");
   eq(shortNote(55, "url", false), "Needs a device that can store it. Invite a computer that can.", "the link turns disk off: not a GPU fix");
   eq(shortNote(55, "allow", false), "Needs a device that can store it. Invite a computer with a GPU and free disk space.");
+  for (const st of ["url", "small", "none", "allow"]) ok(shortNote(55, st, false).endsWith(poolFix(st, { nStore: 0 })), `the same fix under Start and in the pool, ${st}`);
+  for (const st of ["ask", "deny"]) eq(poolFix(st, { nStore: 0 }), "", `disk storage off: the fix once, under Start beside its Allow, ${st}`);
+  const m = DISK_COPY["qwen3.8-flash"];
+  eq(allowLabel(m), "Allow disk storage (92.4 GB)");
+  eq(allowLabel(m, 46.2 * GB), "Allow disk storage (46.2 GB)", "this device's share");
+  eq(allowLabel(m, 0), allowLabel(m));
   for (const st of ["ask", "deny", "url", "small", "none", "allow"]) {
-    ok(shortNote(55, st, false).endsWith(poolFix(st, { nStore: 0 })), `the same fix under Start and in the pool, ${st}`);
     ok(!/GPU memory short|GPUs\./.test(shortNote(55, st, false)), st);
   }
 });
@@ -183,8 +189,11 @@ Deno.test("pool: the Storage line (S1-S5), the fix line and each device's tag", 
   eq(line({ nRam: 2 })[0], "Held in spare memory on 2 devices", "S3, plural");
   eq(line({ needDisk: false, fits: true }), ["Not needed here, it all fits in GPU memory", null, false], "S4");
   eq(line({ needDisk: false, fits: false }), ["No device here can store it", "needs disk", false], "S5");
+  for (const st of ["ask", "deny"]) eq(line({ needDisk: false, fits: false, state: st }), ["Disk storage is off on this device", "off", false], `S5, ${st}`);
+  for (const st of ["url", "small", "none", "allow"]) eq(line({ needDisk: false, fits: false, state: st })[0], "No device here can store it", st);
+  eq(poolStoreLine(m, { state: "deny" }).text, "Disk storage is off on this device");
   const s5 = { nStore: 0, fits: false, needDisk: false, needGB: 67 };
-  for (const st of ["ask", "deny"]) eq(poolFix(st, s5), "Allow disk storage, or invite a computer that can.", st);
+  for (const st of ["ask", "deny"]) eq(poolFix(st, s5), "", `${st}: said once, under Start`);
   eq(poolFix("url", s5), "Invite a computer that can.", "the Disk storage row says the link turns it off");
   for (const st of ["small", "none", "allow"]) eq(poolFix(st, s5), "Invite a computer with a GPU and free disk space.", st);
   eq(poolFix("allow", { nStore: 1, fits: false, needDisk: false, needGB: null }), "Give more GPU memory below, or invite a device.", "G5");
@@ -195,6 +204,7 @@ Deno.test("pool: the Storage line (S1-S5), the fix line and each device's tag", 
   eq(devStoreTag({ kind: "disk", ask: true }), "asks");
   eq(devStoreTag({ kind: "ram", ramGB: 43 }), "43 GB RAM");
   eq(devStoreTag({ kind: null }), "no disk");
+  eq(devStoreTag({ kind: null }, null, true), "disk off", "this device, its disk storage off");
   // a tab's share in this room (roomFitFor share)
   eq(devStoreTag({ kind: "disk", ask: false }, 46.2 * GB), "46.2 GB disk");
   eq(devStoreTag({ kind: "disk", ask: true }, 46.2 * GB), "46.2 GB disk, asks");

@@ -49,7 +49,7 @@ import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, STA
 import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge, diskShares } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
-import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle } from "./room/diskpick.js";
+import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle, allowLabel } from "./room/diskpick.js";
 import { showDiskPick, initDiskPick, refreshDiskPick, diskShortNote, diskStateOf } from "./room/diskpick-ui.js";
 import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
@@ -703,6 +703,12 @@ function updateNeed(pledged) {
   const meI = row?.f ? row.f.devs.findIndex((d) => d.meta === myMeta) : -1;
   const give = giveFor(meI >= 0 && row.f.fit.raise[meI] < Infinity ? gbUp(row.f.fit.raise[meI]) : row?.f ? 0 : need - pledged);
   $("ai-give").hidden = ok || !give || ai.busy || !!ai.engine;
+  // short because this device's disk storage is off (not asked, or a no): turn it on right here, under Start, not only
+  // in the right column (room/diskpick-ui.js initDiskPick wires it)
+  const dk = diskCopyOf($("ai-model").value), dState = dk ? diskStateOf($("ai-model").value) : null;
+  const canAllow = !ok && (dState === "deny" || (dState === "ask" && row?.f?.stores === false));
+  $("ai-allow-disk").hidden = !canAllow || ai.busy || !!ai.engine;
+  if (canAllow) $("ai-allow-disk").textContent = allowLabel(dk, row?.f?.share?.get(myName));
   // what pressing Start costs this device: about its share of the weights file (layers are dealt by
   // memory given), so a phone on mobile data sees ~0.2 GB and a laptop alone the whole file
   const file = FILE_GB[$("ai-model").value];
@@ -804,7 +810,7 @@ function renderPool(pledged, rows = []) {
     const all = [...st.values()], nDisk = all.filter((x) => x.kind === "disk").length, nRam = all.filter((x) => x.kind === "ram").length;
     // whether any device can store it is roomFitFor's stores (the row, under Start and the picker read the same)
     const fits = fitsK(sel, selNeed[1]), w = { needGB: F?.needGB ?? null, needDisk: !!F?.needDisk, fits, shortGB: F?.shortGB ?? 0, nStore: F?.stores === false ? 0 : nDisk + nRam };
-    const g = poolGpuLine(dk, w), sl = poolStoreLine(dk, { ...w, nDisk, nRam, anyAsk: all.some((x) => x.kind === "disk" && x.ask) });
+    const g = poolGpuLine(dk, w), sl = poolStoreLine(dk, { ...w, nDisk, nRam, anyAsk: all.some((x) => x.kind === "disk" && x.ask), state: diskStateOf(sel) });
     const chip = (c) => c ? `<span>${esc(c)}</span>` : "";
     // the words in an <em> of their own, so a long line wraps beside its chip (p2p.html #ap-need em)
     $("ap-need").innerHTML = `<em>${esc(g.text)}${g.num != null ? ` <b>${g.num} GB</b>` : ""}</em>${chip(g.chip)}`; $("ap-need").classList.toggle("ok", g.ok);
@@ -827,7 +833,7 @@ function renderPool(pledged, rows = []) {
   for (const id of ["ap-gpu-k", "ap-store-k", "ap-smeter", "ap-store"]) $(id).hidden = !flash;
   if (!flash) $("ap-store-fix").hidden = true;
   $("ap-devs").innerHTML = devs.map((d) => { const x = flash ? st.get(d) : null;
-    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x, F?.share?.get(d.name)))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x, F?.share?.get(d.name)))}</small>` : ""}</b></li>`; }).join("")
+    return `<li style="--sw:${devColor(d.name)}"${x ? ` title="${esc(devStoreTitle(String(d.name), d.meta.contribGB, x, F?.share?.get(d.name)))}"` : ""}><i></i><span>${esc(String(d.name))}${d.name === myName ? " <small>(this device)</small>" : ""}</span><b>${d.meta.contribGB} GB${x ? `<small class="dk"> · ${esc(devStoreTag(x, F?.share?.get(d.name), d.name === myName && diskStateOf(sel) === "deny"))}</small>` : ""}</b></li>`; }).join("")
     || '<li class="none">No device with WebGPU yet</li>';
   devsEdge();
   const can = !!myMeta.webgpu;

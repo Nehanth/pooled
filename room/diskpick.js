@@ -48,16 +48,20 @@ function downloadNote(m, { state = null, shareBytes = null, storedBytes = null }
   if (storedBytes > 0 && storedBytes >= share * 0.99) return "It's already saved on this device.";
   return storedBytes > 0 ? `Start finishes saving ${need} to this device's disk.` : `The first Start downloads ${need} to this device's disk, once; that can take an hour or more on home internet.`;
 }
-// What to do when no device in the room can store it, by this device's disk answer (room/diskstore.js diskState): the
-// same words under Start (shortNote) and under the pool's Storage line (poolFix)
-export const storeFix = (state) => state === "ask" || state === "deny" ? "Allow disk storage, or invite a computer that can."
+// What to do when no device in the room can store it, by this device's disk answer (room/diskstore.js diskState): under
+// Start (shortNote) and, when it is not this device's answer, under the pool's Storage line too (poolFix). Asked or a
+// no: this device could store it, so say that its disk storage is off (Start's Allow button, allowLabel, is the fix)
+export const storeFix = (state) => state === "ask" || state === "deny" ? "Disk storage is off on this device. Allow it, or invite a computer that can store it."
   : state === "url" ? "Invite a computer that can." : "Invite a computer with a GPU and free disk space.";
 // under Start, when it doesn't fit: by how much, and the fix this device's disk answer (diskState) leaves. stores
 // false: no device here can store it, which is the gap (not a GPU figure for the whole model)
 const FIX = (state) => state === "ask" || state === "deny" ? "Allow disk storage, or invite more devices."
   : state === "allow" ? "Invite more devices, or give more GPU memory." : "Invite more devices with GPUs.";
 export const shortNote = (shortGB, state, stores = true) => stores ? `${num(shortGB)} GB of GPU memory short. ${FIX(state)}`
-  : `Needs a device that can store it. ${storeFix(state)}`;
+  : state === "ask" || state === "deny" ? storeFix(state) : `Needs a device that can store it. ${storeFix(state)}`;
+// the button under Start that turns this device's disk storage on (p2p.html #ai-allow-disk): with what it would save
+// (shareBytes: roomFitFor share; null or 0: the whole copy)
+export const allowLabel = (m, shareBytes = null) => `Allow disk storage (${sizeText(shareBytes > 0 ? shareBytes : m.diskBytes)})`;
 
 // ---- The pool (room.js renderPool, while a disk model is picked): a GPU memory bar and a Storage bar ----
 // What each device brings beyond GPU memory is room/pledge.js storageOf: { kind: "disk" | "ram" | null, ask, ramGB }.
@@ -69,26 +73,31 @@ export function poolGpuLine(m, { needGB = null, needDisk = false, fits = false, 
   if (nStore === 0) return { text: `${m.name} runs once a device stores it`, num: null, chip: null, ok: false };
   return { text: "Not enough GPU memory in this room yet", num: null, chip: "short", ok: false };
 }
+// state: this device's disk answer (room/diskstore.js diskState): asked or a no, nothing here stores it because this
+// device's disk storage is off, not because no device could
 // -> { text, chip (or null), ok }
-export function poolStoreLine(m, { nDisk = 0, nRam = 0, anyAsk = false, needDisk = false, fits = false } = {}) {
+export function poolStoreLine(m, { nDisk = 0, nRam = 0, anyAsk = false, needDisk = false, fits = false, state = null } = {}) {
   const size = sizeText(m.diskBytes);
   if (nDisk > 0) return { text: `${nDisk > 1 ? `Split across ${nDisk} devices' disks` : "Kept on disk"}, ${size} in all${anyAsk ? ", asks before saving" : ""}`, chip: "fits", ok: true };
   if (nRam > 0) return { text: `Held in spare memory on ${nRam} device${nRam === 1 ? "" : "s"}`, chip: "fits", ok: true };
   if (!needDisk && fits) return { text: "Not needed here, it all fits in GPU memory", chip: null, ok: false };
+  if (state === "ask" || state === "deny") return { text: "Disk storage is off on this device", chip: "off", ok: false };
   return { text: "No device here can store it", chip: "needs disk", ok: false };
 }
 // the fix under the Storage line: only when no device can store it, or the GPU memory is short with storage present
-// (no planner figure). state: this device's disk answer (room/diskstore.js diskState)
+// (no planner figure). state: this device's disk answer (room/diskstore.js diskState); asked or a no, the fix is said
+// once, under Start, beside its Allow button
 export function poolFix(state, { nStore = 0, fits = false, needDisk = false, needGB = null } = {}) {
-  if (nStore === 0) return !needDisk && fits ? "" : storeFix(state);
+  if (nStore === 0) return (!needDisk && fits) || state === "ask" || state === "deny" ? "" : storeFix(state);
   return !fits && (needGB == null || !needDisk) ? "Give more GPU memory below, or invite a device." : "";
 }
 // a device row's tag in the pool's list, and the words its tooltip uses
 // share: what this tab would copy to its disk in this room (roomFitFor share: bytes, 0 when the room doesn't need its
-// disk), null for a room node (it reads its own files) or when not known
-export const devStoreTag = (st, share = null) => st?.kind === "disk"
+// disk), null for a room node (it reads its own files) or when not known. off: this device, whose disk storage is off
+// (a no), so not "no disk"
+export const devStoreTag = (st, share = null, off = false) => st?.kind === "disk"
   ? (share > 0 ? `${sizeText(share)} disk${st.ask ? ", asks" : ""}` : share === 0 ? "disk not needed" : st.ask ? "asks" : "disk")
-  : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk";
+  : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : st?.kind == null && off ? "disk off" : "no disk";
 export const devStoreTitle = (name, gb, st, share = null) => `${name}: ${gb} GB GPU memory, `
   + (st?.kind === "disk" ? (st.ask ? "asks before saving to disk" : "disk") + (share > 0 ? `, saves ${sizeText(share)} there` : "")
     : st?.kind === "ram" ? `${num(st.ramGB)} GB RAM` : "no disk");
