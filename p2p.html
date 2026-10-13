@@ -698,11 +698,14 @@
   .apm-ticks span.sel.ok b { color: var(--accent-text); }
   .apm-ticks span.r b { left: auto; right: -2px; transform: none; }
   .apm-ticks span.l b { left: -2px; transform: none; }
-  #ap-need, #ap-store { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; margin: 0 0 14px; font-size: 12px; color: var(--muted); }
+  #ap-need, #ap-store { display: flex; align-items: baseline; gap: 6px; margin: 0 0 14px; font-size: 12px; color: var(--muted); }
   :is(#ap-need, #ap-store) b { font: 500 12px/1 var(--mono); color: var(--text); }
-  :is(#ap-need, #ap-store) span { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--ink-2); white-space: nowrap; }
+  :is(#ap-need, #ap-store) span { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--ink-2); }
   :is(#ap-need, #ap-store).ok span { color: var(--accent-text); }
-  :is(#ap-need, #ap-store) em { flex: 1 1 0; min-width: 0; font-style: normal; line-height: 1.45; }
+  /* the disk model's two lines (#ap-need.fl while it is picked): the words wrap beside the chip; other models' line is unchanged */
+  :is(#ap-need.fl, #ap-store) { flex-wrap: wrap; }
+  :is(#ap-need.fl, #ap-store) span { white-space: nowrap; }
+  :is(#ap-need.fl, #ap-store) em { flex: 1 1 0; min-width: 0; font-style: normal; line-height: 1.45; }
   #ap-store-fix { margin: -8px 0 14px; font-size: 12px; line-height: 1.45; color: var(--muted); }
   #ap-devs li small.dk { color: var(--muted); }
   /* four and a half rows (20px rows, 6px gaps), then the list scrolls: the card keeps its height as more

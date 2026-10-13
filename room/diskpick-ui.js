@@ -11,9 +11,9 @@ const $ = (id) => document.getElementById(id);
 const START = "Start the model", GIVES = "This device gives";
 let shown = null, stored = null, asked = 0, armed = 0, last = {}, covers = null;
 
-// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, needDisk, needGB, fits } (this tab's
-// disk-tier RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether the room's fit streams from a disk
-// and the GPU memory it needs, roomFitFor's). Cheap when nothing changed: it runs on every room update.
+// Show (or hide) the disk model's settings for the picked model `key`. info: { ramGB, stores, needGB, fits } (this tab's
+// disk-tier RAM, room/flashdisk.js tabDiskMeta's, or null without a tier; whether some device in the room can store it,
+// the GPU memory it needs and whether it fits, roomFitFor's). Cheap when nothing changed: it runs on every room update.
 export function showDiskPick(key, info = last) {
   const m = diskCopyOf(key), on = !!m;
   last = info;
@@ -27,11 +27,11 @@ export function showDiskPick(key, info = last) {
   $("ap-for").textContent = groupTitle(m);
   $("ap-me-k").textContent = "GPU memory";
   $("ap-covers").textContent = GPU_HINT;
-  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.needDisk !== false, !!info.fits);
+  $("ap-note").textContent = pickNote(m, info.needGB ?? null, info.stores !== false, !!info.fits);
   const sig = JSON.stringify([key, state, stored, !!armed, info]);
   if (sig === shown) return;
   shown = sig;
-  $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, ramGB: info.ramGB ?? null, needDisk: info.needDisk !== false, armed: !!armed });
+  $("ap-flash").innerHTML = settingsHTML(m, { state, storedBytes: stored, ramGB: info.ramGB ?? null, armed: !!armed });
   // what is stored: asked once per pick (and after Free, or Room settings freeing it: refreshDiskPick)
   if (asked !== key) { asked = key; refresh(key); }
 }
@@ -45,7 +45,7 @@ function disarm() { if (armed) { clearTimeout(armed); armed = 0; } }
 export function refreshDiskPick() { const key = $("ai-model").value; if (diskCopyOf(key)) { asked = 0; shown = null; showDiskPick(key); } }
 
 // why the picked disk model doesn't fit, under Start: by how much and the fix this device's disk answer leaves
-export const diskShortNote = (key, shortGB, needDisk = true) => shortNote(shortGB, diskStore.state(key), needDisk);
+export const diskShortNote = (key, shortGB, stores = true) => shortNote(shortGB, diskStore.state(key), stores);
 // this device's disk answer for `key` (room/diskstore.js diskState), for the pool's fix line (room.js renderPool)
 export const diskStateOf = (key) => diskStore.state(key);
 
