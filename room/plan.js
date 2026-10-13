@@ -598,15 +598,17 @@ export function minFitPledge(pledges, fitsAt, { maxScale = 16, iters = 24 } = {}
 // The one sentence a room that is short for a model shows under Start (and the reason a start stops).
 // label: the model's short name; fit: roomFit's result (host first); names: the devices in the same
 // order; spareGB: how much more each device could still lend (0 for a phone at its cap). Names up to
-// two devices that could close the gap alone, the host's raise first when it is the smaller one.
-export function shortNote(label, fit, names = [], spareGB = []) {
+// two devices that could close the gap alone, the host's raise first when it is the smaller one. fix: what to do, in
+// the words of where it shows (the CLI's "raise a pledge" by default; the page passes PAGE_SHORT_FIX)
+export const PAGE_SHORT_FIX = "Invite a device, or give more GPU memory on the right";
+export function shortNote(label, fit, names = [], spareGB = [], fix = "Add a device or raise a pledge") {
   if (fit.fits) return "";
   // the pledges hold it, but no device that can take the n-gram table's layer has the disk for it (dealRoom ngram)
   if (fit.ngram) return `${label} needs ${gbUp(fit.ngram.bytes)} GB of free disk for its n-gram table on the device that holds layer ${fit.ngram.layer}, and the devices that could hold that layer don't have it. Free disk space there or add a device that has the room.`;
   const who = givers(fit, spareGB).slice(0, 2).map(({ i, b }) => `${names[i] || "a device"} could give ${gbUp(b)} GB more`);
   const head = `This room is ${gbUp(shortBy(fit, spareGB))} GB short for ${label}`;
   const host = fit.caps[0] < 1 ? `; the model host (${names[0] || "the biggest device"}) needs room for the embedding, the output head and a layer` : "";
-  return `${head}${host}. Add a device or raise a pledge${who.length ? `: ${who.join(", or ")}` : ""}.`;
+  return `${head}${host}. ${fix}${who.length ? `: ${who.join(", or ")}` : ""}.`;
 }
 // the devices that could close the gap alone, fewest bytes first: [{ i, b }]
 const givers = (fit, spareGB) => fit.raise.map((b, i) => ({ i, b })).filter(({ i, b }) => b < Infinity && gbUp(b) <= (spareGB[i] || 0) + 1e-9)

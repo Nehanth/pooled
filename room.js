@@ -46,7 +46,7 @@ import { PING_MS, lastHeard, isSilentGone, midLoad, uniqueName, quietNamesake, s
   makeLiveness, heard as hbHeard, arm as hbArm, disarm as hbDisarm, forget as hbForget, tick as hbTick, deadAfter, suspectBack, STALL_MS } from "./room/liveness.js";
 import { stopsStart, stopWhen, stopReason, loadKey as shardKey, onLoadRequest, onLoadError, freeOnStartFailed } from "./room/startstop.js";
 import { verifyHost, hostAllowed, saneMeta, startBusy, startFrom, joinOrder, START_PENDING_MS } from "./room/authz.js";
-import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge, diskShares } from "./room/plan.js";
+import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom, shortNote, shortBy, gbUp, specWithOffload, dealOffloads, parseForce, minFitPledge, diskShares, PAGE_SHORT_FIX } from "./room/plan.js";
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle, allowLabel } from "./room/diskpick.js";
@@ -576,7 +576,7 @@ function roomFitFor(key) {
   const pick = pickCtx(key, { want: maxSeqFor(key, ask), ask, fitsAt: (c) => fitAt(c).fits });
   const fit = fitAt(pick.ctx), spare = devs.map((d) => spareGBOf(d.meta));
   const out = { fit, devs, ctx: pick.ctx, want: pick.want, fellBack: pick.fellBack,
-    shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare) };
+    shortGB: gbUp(shortBy(fit, spare)), note: shortNote(shortName(key), fit, devs.map((d) => d.name), spare, PAGE_SHORT_FIX) };
   // a model kept on disk (room/models.js DISK_COPY): its need is the GPU memory the planner itself needs from these
   // devices (room/plan.js minFitPledge over roomFit, with their offload and disk tiers), not its size. needGB, with
   // needDisk when the rest streams from disk there; the picker's line, the pool's line and the row all use it.
@@ -683,7 +683,7 @@ function updateNeed(pledged) {
   // GPU figure, so no GB gap is said for it anywhere (the row, under Start, the picker's note, the pool)
   const noStore = !ok && !!diskCopyOf($("ai-model").value) && row?.f?.stores === false;
   const note = noStore ? diskShortNote($("ai-model").value, shortGB, false)
-    : row?.f?.note || (ok ? "" : `This room is ${shortGB} GB short for ${shortName($("ai-model").value)}. Add a device or raise a pledge.`);
+    : row?.f?.note || (ok ? "" : `This room is ${shortGB} GB short for ${shortName($("ai-model").value)}. ${PAGE_SHORT_FIX}.`);
   $("need-fill").style.width = Math.min(100, ok ? 100 : noStore ? 0 : pledged / (pledged + shortGB) * 100).toFixed(1) + "%";
   const has = +pledged.toFixed(1);
   // a model with a fallback context says both needs; a room that holds it only there says so
@@ -3476,7 +3476,7 @@ function hostDiskBytes(deal, modelKey) {
   return (layers.length ? tabExpertBytes(ai.G, layers) : 0) + (deal.ngram?.at === 0 ? deal.ngram.bytes : 0);
 }
 function shortWhy(M, fit, names, metas) {
-  return shortNote(M.label.split("\u00b7")[0].trim(), fit, names, metas.map(spareGBOf));
+  return shortNote(M.label.split("\u00b7")[0].trim(), fit, names, metas.map(spareGBOf), PAGE_SHORT_FIX);
 }
 async function aiStart(modelArg) {
   if (ai.engine || ai.busy) return;
