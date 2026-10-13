@@ -92,6 +92,9 @@ async function device(name, { phone = false, size = null } = {}) {
     return route.abort();
   });
   await ctx.addInitScript((n) => { try { if (!sessionStorage.getItem("pooled-name")) sessionStorage.setItem("pooled-name", n); } catch {} }, name);
+  // the band starts folded (one line) for everyone; a desktop viewer here opened it before ("Show the layers", kept in
+  // this browser), so the panel is on screen. The phone opens it by its toggle, below.
+  if (!phone) await ctx.addInitScript(() => { try { localStorage.setItem("pooled-band-chat", "open"); } catch {} });
   const p = await ctx.newPage();
   p.label = name; p.errs = [];
   p.on("pageerror", (e) => p.errs.push(String(e).slice(0, 200)));
@@ -236,10 +239,14 @@ try {
   check("phone: the event line says it joined", v.events.some((e) => /phone joined/.test(e)), JSON.stringify(v.events));
   const ok = await ask(phone, "Hi from the phone.");
   check("phone: its question is answered", ok);
-  const pv = await panel(phone);
-  check("phone: its readout and history show the room's speed", pv.shown && pv.tps > 0 && /^Last answer: /.test(pv.line) && pv.bars.length >= 1 && pv.bars.at(-1).n === 2, JSON.stringify(pv));
+  // folded (the phone's start): one line in the band head, the last answer's speed in words; no panel
+  const fold = await phone.evaluate(() => ({ meta: document.querySelector("#swarm-map .sm-meta").textContent, panel: document.getElementById("speedo").getClientRects().length > 0 }));
+  check("phone: folded, the band's one line says the last answer's speed", /^Last answer: (about \d+ words? |less than a word )a second on 2 devices$/.test(fold.meta) && !fold.panel, JSON.stringify(fold));
   await shot(phone, "6-phone-390.png");
-  await phone.evaluate(() => document.getElementById("band-toggle").click());   // unfolded: the device cards
+  await phone.evaluate(() => document.getElementById("band-toggle").click());   // Show the layers: the panel and the device cards
+  await phone.waitForTimeout(300);
+  const pv = await panel(phone);
+  check("phone: opened, its readout and history show the room's speed", pv.shown && pv.tps > 0 && /^Last answer: /.test(pv.line) && pv.bars.length >= 1 && pv.bars.at(-1).n === 2, JSON.stringify(pv));
   await shot(phone, "7-phone-390-unfolded.png");
   await shot(mac2, "8-mac-pc-phone-1080p.png");
   for (const p of [mac2, pc2, phone]) check(`${p.label}: no page errors`, !p.errs.length, p.errs.join(" | "));

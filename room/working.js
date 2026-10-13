@@ -30,7 +30,14 @@ export function verbs(rand = Math.random) {
 // since the verbs alone don't say what the wait is. steady: the lead (else the label) stays, no verbs
 // (the chat's wait: one calm line instead of a new word every two seconds)
 export const LEAD_MS = 4000;
-export function working({ since = performance.now(), label = "Working", lead = "", steady = false } = {}) {
+// steady mode's words t ms into the wait: the lead (else the label); with then = { after, text }, that text once
+// `after` ms have passed with no output ("Reading your message" -> "The first answer takes a little longer"). One
+// swap only, never a verb.
+export function waitText(t, { lead = "", label = "Working", then = null } = {}) {
+  if (then && then.text && t >= (+then.after || 0)) return then.text;
+  return lead || label;
+}
+export function working({ since = performance.now(), label = "Working", lead = "", steady = false, then = null } = {}) {
   const el = document.createElement("span");
   el.className = "working";
   el.innerHTML = `${MARK}<span class="wk-v" aria-hidden="true"></span><span class="sr-only">${label}</span>`;
@@ -40,11 +47,13 @@ export function working({ since = performance.now(), label = "Working", lead = "
   const tick = () => {
     if (el.isConnected) seen = true;
     else if (seen || performance.now() - born > 10000) { clearInterval(timer); return; }
-    const t = performance.now() - since, w = steady || (lead && t < LEAD_MS) ? -2 : Math.floor(t / 2000);
+    const t = performance.now() - since;
+    // steady with then: -3 once the wait is past then.after (its text), -2 before (the lead)
+    const w = steady ? (then && waitText(t, { lead, label, then }) === then.text ? -3 : -2) : lead && t < LEAD_MS ? -2 : Math.floor(t / 2000);
     if (w !== word) {
       const first = word === -1;
       word = w;
-      v.textContent = (w === -2 ? lead || label : next()) + "…";
+      v.textContent = (w === -3 ? then.text : w === -2 ? lead || label : next()) + "…";
       if (first) return;
       if (!reduced() && v.animate) v.animate([{ opacity: 0, transform: "translateY(3px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(.2,.7,.2,1)" });
     }

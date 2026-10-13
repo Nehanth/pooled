@@ -462,7 +462,10 @@
   .sm-stats dd { order: -1; font: 500 13px/26px var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
   .sm-stats dt { font: 400 12px/26px var(--sans); color: var(--muted); }
   .sm-stats dd.warn { color: var(--warn-text); }
-  .sm-meta { margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
+  /* the last real answer's speed, in words ("Last answer: about 3 words a second"; room.js speedMeta): one calm 12px
+     line, empty until there is one; never a live number */
+  .sm-meta { flex: 0 1 auto; min-width: 0; margin-left: auto; overflow: hidden; text-overflow: ellipsis; font: 400 12px/1 var(--sans); color: var(--muted); }
+  .sm-meta:empty { display: none; }
   /* folded: the split as small blocks, one per layer (or per few on a narrow bar), each in the colour
      of the device holding it, with small gaps (room.js paintMini) */
   .sm-mini { display: none; flex: 1 1 0; min-width: 40px; height: 16px; gap: 2px; align-items: stretch; }
@@ -474,6 +477,9 @@
   #swarm-map.folded .sm-strip { display: none; }
   #swarm-map.folded { gap: 0; padding-top: 8px; padding-bottom: 8px; }
   #swarm-map.folded .sm-stats > div:not(:first-child) { display: none; }
+  /* folded: one line, the model's name, its state, the split and the last answer's speed; no panel */
+  #swarm-map.folded .sm-head .sm-model { display: block; flex: 0 1 auto; min-width: 0; }
+  #swarm-map.folded .sm-head { flex-wrap: nowrap; }
   #room-screen.sweep #swarm-map.folded .sm-mini i { animation: minihot calc(var(--lap) * .9) var(--ease) both; animation-delay: calc(var(--lap) * .9 * var(--k, 0) / var(--lanes, 2)); }
   @keyframes minihot { 30% { filter: brightness(1.5) saturate(1.2); } }
   #band-toggle { flex: none; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); }
@@ -595,13 +601,12 @@
   .sh-key { display: flex; flex-wrap: wrap; gap: 4px 16px; font: 400 12px/1.2 var(--mono); color: var(--ink-2); }
   .sh-key span { display: inline-flex; align-items: center; gap: 6px; }
   .sh-key i { width: 9px; height: 9px; border-radius: 2px; background: var(--sw); }
-  /* folded: the readout and the history stay, smaller; the cards and the token bar go */
-  #swarm-map.folded #speedo { margin-top: 8px; padding: 8px 0; }
-  #swarm-map.folded :is(#sp-devs, #sp-share) { display: none; }
-  #swarm-map.folded #sp-hist { min-height: 40px; }
-  #swarm-map.folded #sp-hist .bar { height: calc(26px * var(--h)); }
-  #swarm-map.folded #sp-hist .bar.step:not(:first-child)::before { height: 40px; }
-  #swarm-map.folded #sp-model { font-size: 18px; }
+  /* folded: no panel at all (the head's one line says the last answer's speed); the cards and the token bar go too */
+  #swarm-map.folded :is(#speedo, #sp-devs, #sp-share) { display: none; }
+  /* open before any real answer (room.js speedReady): the model and the device cards only, no readout and no empty chart */
+  #speedo.quiet > :is(.sp-read, .sp-hist) { display: none; }
+  #speedo.quiet { grid-template-columns: minmax(0, 1fr); }
+  #speedo.quiet > .sp-side { box-shadow: none; }
   /* no answers yet: no empty chart and placeholder (its column stays, so the layout doesn't jump at the first one) */
   .sp-hist:has(> #sp-hist.empty) > * { visibility: hidden; }
   @container pane (max-width: 760px) {
@@ -620,8 +625,6 @@
     .sp-sub { white-space: normal; }
     .dv { min-width: 232px; }
     .dv-l { font-size: 12px; }
-    #swarm-map.folded #speedo { row-gap: 8px; }
-    #swarm-map.folded .sp-hist { padding-top: 8px; }
   }
 
   /* Chat | Code: the landing's segmented switch, a white pill that slides */
@@ -2009,7 +2012,7 @@
   <main id="chatpane">
     <h1 class="sr-only" id="room-h">Room</h1>
     <div id="topline">
-      <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div class="dev-only" title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div class="dev-only"><dt>tokens</dt><dd id="sm-tok">0</dd></div><div class="dev-only"><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta" hidden></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><section id="speedo" aria-label="How fast the room writes"><div class="sp-read"><p class="sp-num"><b id="sp-tps" aria-live="off"></b></p><p id="sp-unit" class="sp-sub">Waiting for a question</p></div><div class="sp-hist"><p class="sp-cap"><span>recent answers</span><span id="sp-gain"></span></p><ol id="sp-hist" class="empty" aria-label="Speed of recent answers"></ol></div><div class="sp-side"><p class="sp-mod"><b id="sp-model"></b><span id="sp-params"></span></p><ol id="sp-events" aria-label="Room events"></ol></div></section><ul id="sp-devs" aria-label="What each device does"></ul><div id="sp-share" hidden></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
+      <div id="swarm-map" hidden><div class="sm-head"><span class="sm-model"></span><span class="sm-live"><i aria-hidden="true"></i><span class="sm-lt">Ready</span></span><div class="sm-mini" aria-hidden="true"></div><dl class="sm-stats"><div><dt>tok/s</dt><dd id="sm-tps">-</dd></div><div class="dev-only" title="How long one word takes to pass through every device"><dt>ms per word</dt><dd id="sm-lap">-</dd></div><div class="dev-only"><dt>tokens</dt><dd id="sm-tok">0</dd></div><div class="dev-only"><dt>context</dt><dd id="sm-ctx">-</dd></div></dl><span class="sm-meta"></span><button id="band-toggle" class="tip-l" type="button" aria-expanded="true" aria-controls="sm-body" aria-label="Hide the layers" data-tip="Hide the layers"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 8.5L7 5l3.5 3.5"/></svg></button></div><section id="speedo" aria-label="How fast the room writes"><div class="sp-read"><p class="sp-num"><b id="sp-tps" aria-live="off"></b></p><p id="sp-unit" class="sp-sub"></p></div><div class="sp-hist"><p class="sp-cap"><span>recent answers</span><span id="sp-gain"></span></p><ol id="sp-hist" class="empty" aria-label="Speed of recent answers"></ol></div><div class="sp-side"><p class="sp-mod"><b id="sp-model"></b><span id="sp-params"></span></p><ol id="sp-events" aria-label="Room events"></ol></div></section><ul id="sp-devs" aria-label="What each device does"></ul><div id="sp-share" hidden></div><div class="sm-strip" id="sm-body" aria-hidden="true"></div><div class="sm-track dev-only"></div></div>
       <div class="mode-row"><div id="mode-bar" role="tablist" aria-label="room mode" hidden><button id="mode-chat" role="tab" type="button" aria-selected="true" aria-controls="chatpane">Chat</button><button id="mode-code" data-twinkle role="tab" type="button" aria-selected="false" aria-controls="code-pane">Code</button></div></div>
     </div>
     <div id="chat-log" class="dev-only"></div>

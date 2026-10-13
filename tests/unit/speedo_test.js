@@ -1,6 +1,6 @@
 // room/speedo.js: the speed panel's numbers and words (no DOM, times passed in).
 import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText,
-  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB, wordsPerSec, speedWords, speedLine } from "../../room/speedo.js";
+  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB, wordsPerSec, speedWords, speedLine, bandLine } from "../../room/speedo.js";
 import { MODELS } from "../../room/models.js";
 import { expertCache } from "../../room/tele.js";
 
@@ -166,4 +166,21 @@ Deno.test("the speed in words: about 0.75 words a token, a plain line live and a
   eq(speedLine(4), "Last answer: about 3 words a second");
   eq(speedLine(0, { live: true }), "", "no dash: nothing until the rate settles");
   for (const t of [speedLine(4, { live: true }), speedLine(30, { devices: 2 }), onlineText(2)]) if (/tok|ms\b/.test(t)) throw new Error(t);
+});
+
+Deno.test("bandLine: the band head's one line, only after a real answer (two tokens or more)", () => {
+  eq(bandLine(null), "");
+  eq(bandLine(undefined), "");
+  eq(bandLine({ tps: 0, devices: 1 }), "");
+  eq(bandLine({ tps: 4, devices: 1 }), "Last answer: about 3 words a second");
+  eq(bandLine({ tps: 4, devices: 2 }), "Last answer: about 3 words a second on 2 devices");
+  eq(bandLine({ tps: 0.5, devices: 1 }), "Last answer: less than a word a second");
+  // a one-token answer ("Paris") gives no history and no last answer: the line stays empty
+  let hist = [], last = null;
+  const st = parseStats("1 tok · 0.0 tok/s · 1 device");
+  if (st && st.count >= 2) { hist = pushHistory(hist, { key: "a", tps: st.tps, devices: st.devices }); last = st; }
+  eq(hist.length, 0);
+  eq(bandLine(last), "");
+  // never a live line, never a number in tok/s
+  for (const t of [bandLine({ tps: 40, devices: 3 }), bandLine({ tps: 4, devices: 1 })]) if (/tok|Writing/.test(t)) throw new Error(t);
 });
