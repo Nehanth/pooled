@@ -757,11 +757,11 @@
   .rung { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 10px; width: 100%; height: 52px; font: 400 14px/1.2 var(--sans); padding: 0 14px 0 12px; color: var(--muted); background: var(--panel); border: 1px solid var(--rule-2); border-radius: 12px; text-align: left; }
   .rung::before { content: ""; width: 14px; height: 14px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--border-2); background: var(--panel); transition: box-shadow .15s; }
   .rung .rn { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rung .nd { font: 400 12px/1 var(--mono); color: var(--muted); }
-  .rung .fig { display: inline-flex; align-items: center; gap: 8px; justify-self: end; white-space: nowrap; }
-  .rung b { font: 500 11px/1 var(--mono); color: var(--accent-text); padding: 4px 6px; border-radius: 4px; background: var(--accent-soft); }
+  .rung .nd, .dk-row .nd { font: 400 12px/1 var(--mono); color: var(--muted); }
+  .rung .fig, .dk-row .fig { display: inline-flex; align-items: center; gap: 8px; justify-self: end; white-space: nowrap; }
+  .rung b, .dk-row .fig b { font: 500 11px/1 var(--mono); color: var(--accent-text); padding: 4px 6px; border-radius: 4px; background: var(--accent-soft); }
   /* short: a neutral tag in the shape of "fits" (calm, no warning colour) */
-  .rung .more { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
+  .rung .more, .dk-row .more { font: 400 11px/1 var(--mono); color: var(--ink-2); padding: 4px 6px; border-radius: 4px; background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--rule-2); }
   .rung.ok { color: var(--text); }
   /* short rows stay selectable, so their text keeps AA contrast: only the circle and chip fade */
   .rung.short:not(.sel) { color: var(--ink-4); }
@@ -789,31 +789,15 @@
   .rung.disk.sel .rn .rx { color: #A5B4FC; }
   .rung.disk.sel .dkc { color: #fff; background: rgba(255,255,255,.1); box-shadow: none; }
   .rung.disk.sel::before { background: #0B0D14; box-shadow: inset 0 0 0 4.5px #fff; }
-  #ai-disk { display: flex; flex-direction: column; gap: 10px; margin: 2px 2px 4px; }
-  #ai-disk[hidden], #ai-adv[hidden], #ai-notnow[hidden] { display: none; }
-  .dk-cost { margin: 0; display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); border-top: 1px solid var(--rule-2); border-bottom: 1px solid var(--rule-2); }
-  .dk-cost > div { display: flex; flex-direction: column; gap: 6px; padding: 12px 12px; min-width: 0; }
-  .dk-cost > div:first-child { padding-left: 0; }
-  .dk-cost > div:last-child { padding-right: 0; }
-  .dk-cost > div + div { border-left: 1px solid var(--rule-2); }
-  .dk-cost dt { font-size: 13px; color: var(--muted); }
-  .dk-cost dd { margin: 0; font: 500 22px/1 var(--mono); letter-spacing: -.02em; color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  .dk-cost dd .ap { color: var(--muted); }
-  .dk-cost dd small { font: 400 12px/1 var(--mono); letter-spacing: 0; color: var(--muted); margin-left: 3px; }
-  .dk-cost p { margin: 0; font-size: 12px; line-height: 1.4; color: var(--muted); }
+  /* Flash's two settings under Start (room/diskpick.js): GPU memory and Disk, in the Advanced-style rows, with the
+     rows' own chips ("fits", "short") and one short sentence */
+  #ai-disk { display: flex; flex-direction: column; gap: 4px; margin: 0 2px; }
+  #ai-disk[hidden], #ai-notnow[hidden] { display: none; }
   .dk-agree { margin: 0; font-size: 12px; line-height: 1.45; color: var(--muted); }
-  .dk-agree b { color: var(--text); font-weight: 500; }
   .ai-go { display: flex; gap: 8px; }
   .ai-go #ai-start { flex: 1; min-width: 0; }
   #ai-notnow { flex: none; height: 48px; padding: 0 16px; border-radius: 8px; font-size: 15px; }
-  #ai-adv { margin-top: 2px; border-top: 1px solid var(--rule-2); }
-  #ai-adv summary { display: flex; align-items: center; gap: 8px; padding: 12px 2px 0; list-style: none; cursor: pointer; font-size: 13px; color: var(--muted); }
-  #ai-adv summary:hover { color: var(--text); }
-  #ai-adv summary::-webkit-details-marker { display: none; }
-  #ai-adv summary svg { flex: none; transition: transform .2s var(--ease); }
-  #ai-adv[open] summary svg { transform: rotate(90deg); }
-  #ai-adv .def { margin-left: auto; font: 400 12px/1 var(--mono); color: var(--muted); white-space: nowrap; }
-  .dk-rows { display: flex; flex-direction: column; margin-top: 4px; padding: 0 2px; }
+  .dk-rows { display: flex; flex-direction: column; padding: 0 2px; }
   .dk-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 14px; row-gap: 3px; padding: 10px 0; }
   .dk-row + .dk-row { border-top: 1px solid var(--rule-2); }
   .dk-row:last-child { padding-bottom: 0; }
@@ -821,8 +805,9 @@
   .dk-row .h { grid-column: 1; font-size: 12px; line-height: 1.45; color: var(--muted); }
   .dk-row > :nth-child(2) { grid-row: 1 / span 2; grid-column: 2; }
   .dk-row .v { font: 400 12px/1 var(--mono); color: var(--ink-2); }
-  .dk-del { font: 500 12px/1 var(--sans); padding: 8px 11px; border-radius: 8px; color: var(--del); }
-  #ai-panel:is(.loading, .online) :is(#ai-disk, #ai-adv, #ai-notnow) { display: none; }
+  .dk-del, .dk-act { font: 500 12px/1 var(--sans); padding: 8px 11px; border-radius: 8px; }
+  .dk-del { color: var(--del); }
+  #ai-panel:is(.loading, .online) :is(#ai-disk, #ai-notnow) { display: none; }
   #ai-loading { display: none !important; }
   @keyframes enter { from { opacity: 0; transform: translateY(8px); } }
   /* loading: the landing's pick card. The logo's wave, what loads, each device's share of it, and
@@ -1640,9 +1625,7 @@
     .rung { height: 46px; font-size: 13px; padding: 0 12px 0 10px; gap: 8px; }
     #ai-start { height: 46px; }
     #ai-notnow { height: 46px; padding: 0 14px; }
-    #ai-disk { margin: 2px 4px 4px; }
-    .dk-cost > div { padding: 10px 8px; }
-    .dk-cost dd { font-size: 20px; }
+    #ai-disk { margin: 0 4px; }
     #ap-qr svg { width: 84px; height: 84px; }
     #side-code { font-size: 22px; }
     #ai-output { padding: 14px 12px 8px; }
@@ -2020,12 +2003,11 @@
           <div id="ai-ladder" role="radiogroup" aria-label="Model"></div>
           <span id="ai-status"></span>
           <p class="ap-note" id="ap-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
-          <div id="ai-disk" aria-live="polite" hidden></div>
           <div class="ai-go"><button id="ai-start" class="primary">Start the model</button><button id="ai-notnow" type="button" hidden>Not now</button></div>
+          <div id="ai-disk" aria-live="polite" hidden></div>
           <button id="ai-give" type="button" hidden>Give 4 GB from this device</button>
           <p id="ai-short" role="status" hidden></p>
           <p id="ai-why" hidden>No device in this room can run a model: none has WebGPU. Join from a laptop or desktop in Chrome or Edge (or Safari 26) to start one.</p>
-          <details id="ai-adv" hidden><summary><svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 2.5 8 6l-3.5 3.5"/></svg>Advanced<span class="def"></span></summary><div class="dk-rows"></div></details>
           <p id="start-why" class="sr-only"></p>
           <div id="redeal-why" hidden></div>
           <button id="ai-redeal" type="button" hidden>Re-deal the layers</button>

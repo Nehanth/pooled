@@ -50,7 +50,7 @@ import { isPhoneMeta, ladder, codeFromLocation, pickModelHost, roomFit, dealRoom
 import { measureCopyGBps } from "./room/gpuspeed.js";
 import { qrSVG } from "./room/qr.js";
 import { diskCopyOf, rowChip, rowTitle, starSVG } from "./room/diskpick.js";
-import { showDiskPick, initDiskPick, agreeOnStart, refreshDiskPick } from "./room/diskpick-ui.js";
+import { showDiskPick, initDiskPick, refreshDiskPick } from "./room/diskpick-ui.js";
 import { connectDiskStore } from "./room/diskstore.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
@@ -667,7 +667,8 @@ function updateNeed(pledged) {
   $("ai-need").classList.toggle("ok", ok);
   if (!ai.busy && !ai.engine) $("ai-start").disabled = !ok;
   // short: say by how much and who could give more, right under Start
-  $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine;
+  // (a disk model says it in its GPU memory setting, under Start)
+  $("ai-short").hidden = ok || !(pledged > 0) || ai.busy || !!ai.engine || !!diskCopyOf($("ai-model").value);
   $("ai-short").textContent = note;
   // short, and this device alone can close the gap: offer that one tap next to the disabled Start
   const meI = row?.f ? row.f.devs.findIndex((d) => d.meta === myMeta) : -1;
@@ -693,7 +694,10 @@ function updateNeed(pledged) {
   $("start-why").textContent = ok ? "" : !(pledged > 0) ? "No device with WebGPU yet. Invite one to start a model."
     : note;
   if (ok) $("ai-start").removeAttribute("aria-describedby"); else $("ai-start").setAttribute("aria-describedby", "start-why");
-  showDiskPick($("ai-model").value, { needGB: row?.f?.needGB ?? null, needDisk: !!row?.f?.needDisk, fits: ok, ramGB: myMeta.tabDisk?.ramGB ?? null });
+  // a disk model: its GPU memory setting shows these same figures (one need, one verdict), its Disk setting the
+  // tab's disk-tier RAM (room/flashdisk.js tabDiskMeta: TAB_RAM_GB held to tabRamCap)
+  showDiskPick($("ai-model").value, { gpu: { needGB: row?.f?.needGB ?? need, hasGB: has, fits: ok, shortGB, needDisk: !!row?.f?.needDisk,
+    mineGB: myMeta.webgpu ? myMeta.contribGB : null }, ramGB: myMeta.tabDisk?.ramGB ?? null });
   if (ok && !wasReady) { $("ai-start").classList.remove("unlocked"); void $("ai-start").offsetWidth; $("ai-start").classList.add("unlocked"); }
   wasReady = ok;
 }
@@ -707,7 +711,8 @@ connectDiskStore({
   changed: (key) => {
     tabDiskDeclined = false;
     tabDiskChanged();
-    log("room", `${myName} lets models use ${fmtBytes(diskCopyOf(key)?.diskBytes || 0)} of its disk`);
+    log("room", `${myName} lets models use up to ${fmtBytes(diskCopyOf(key)?.diskBytes || 0)} of its disk`);
+    toast("big models may use this device's disk");
   },
   free: () => freeTabDisk(),
 });
@@ -5075,7 +5080,7 @@ if (DEV) window.__pooledGen = async (ids, maxNew) => {
   } finally { ai.busy = false; }
 };
 
-$("ai-start").addEventListener("click", () => { agreeOnStart($("ai-model").value); aiStartAnywhere(); });
+$("ai-start").addEventListener("click", aiStartAnywhere);
 $("ai-redeal").addEventListener("click", () => aiRedeal());
 // auto re-deal (experimental): the host's choice, remembered on this device
 try { if (localStorage.getItem("pooled-autoredeal") === "off") $("ai-autoredeal").checked = false; } catch {}
