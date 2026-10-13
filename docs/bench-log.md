@@ -2728,6 +2728,11 @@ both runs; run 2 is the cleaner one.
 
 - Prefill is the problem: 32K tokens take ~18 minutes at ~30 tok/s, about 3x decode, as at 4-8K: the MoE runs per
   column per expert.
-- Decode with ~30K tokens of context is 10-11.6 tok/s, no slower than at short context (QSA attends ~2K cells).
+- Decode at 16-32K: 10.07-11.61 tok/s (run 2), 7.71-11.18 (run 1), vs 13.30 tok/s mean at short context in the same
+  session (`tests/test_q38flash.js`): ~15-25% slower, GPU contended throughout; parity not shown.
+- Prefill per 4K stretch on the cleaner needle30k run: ~39-40 tok/s from the first stretch to the last (cumulative 36.9 ->
+  39.2), so prefill cost per token does not grow with context.
+- Only needle30k is a correctness signal (passphrase found; llama.cpp 3 of 3). ctx16k / ctx32k pass on a near tie after
+  3 and 0 ids against the golden, and ctx16k's answer names another note than all 3 llama.cpp runs: smoke tests only.
 - llama.cpp is not reproducible at these lengths: its 3 runs of each prompt part at steps 0-40 (ctx32k at step 0,
   "Note" vs "Item"). Our ids were identical in both runs.

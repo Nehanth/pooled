@@ -343,9 +343,13 @@ async function long() {
     const g = gold[name], N = Math.min(+env("TOKENS", g.ids.length), g.ids.length);
     if (g.prompt.length + N > eng.maxSeq) { check(false, `${name}: ${g.prompt.length} + ${N} > maxSeq ${eng.maxSeq}`); continue; }
     eng.reset();
-    let t = performance.now(), next = 4096;
+    // progress every ~4K tokens: the rate over that stretch alone, and the cumulative average since the prefill began
+    let t = performance.now(), next = 4096, lastN = 0, lastT = t;
     let r = await pb.prefill(g.prompt, { wantLogits: true, onPass: (_, o, sz) => {
-      if (o + sz >= next) { next += 4096; console.log(`  ${name}: prefill ${o + sz}/${g.prompt.length}, ${((performance.now() - t) / 1000).toFixed(0)} s, ${((o + sz) / ((performance.now() - t) / 1000)).toFixed(1)} tok/s`); }
+      if (o + sz < next) return;
+      const now = performance.now();
+      console.log(`  ${name}: prefill ${o + sz}/${g.prompt.length}, ${((now - t) / 1000).toFixed(0)} s, last stretch ${((o + sz - lastN) / ((now - lastT) / 1000)).toFixed(1)} tok/s, cumulative ${((o + sz) / ((now - t) / 1000)).toFixed(1)} tok/s`);
+      next += 4096; lastN = o + sz; lastT = now;
     } });
     const pf = (performance.now() - t) / 1000;
     const gen = [r.id], gaps = [gap(r.logits)];
@@ -371,7 +375,10 @@ async function long() {
     if (!J.ok) console.log(`  golden: ${JSON.stringify(g.text)}\n  top-2 gap (nats) ours / llama.cpp, steps 0..${J.diff}: ${gaps.slice(0, J.diff + 1).map((x, i) => `${x.toFixed(3)}/${g.gap?.[i]?.toFixed(3)}`).join(" ")}`);
     console.log(`  vs each llama.cpp run (0: the golden): ${JR.map((Jk, k) => `run ${k}: ${Jk.ok ? `all ${Math.min(N, runs[k].ids.length)} ids` : `${Jk.diff} ids, then ${Jk.excused ? "near tie" : "MISMATCH"}`}`).join(", ")}${!(J.ok || J.excused) && byRun > 0 ? ` (passes by run ${byRun})` : ""}`);
     if (!ok) fail++;
-    rows.push(`${name} | ${g.prompt.length} | ${pf.toFixed(0)} s (${(g.prompt.length / pf).toFixed(1)} tok/s) | ${ts.toFixed(2)} | ${J.ok ? "match" : J.excused ? `near tie at ${J.diff}` : `MISMATCH at ${J.diff}`}${!(J.ok || J.excused) && byRun > 0 ? `, matches llama.cpp's run ${byRun} (${JR[byRun].ok ? "all ids" : `near tie at ${JR[byRun].diff}`})` : ""}`);
+    // ids compared: how many of our ids equal llama.cpp's before the first difference, against the golden and at best
+    // against any of its runs. A pass on few ids is a near tie early on, not evidence of agreement on the answer
+    const cmp = JR.map((Jk, k) => (Jk.ok ? Math.min(N, runs[k].ids.length) : Jk.diff));
+    rows.push(`${name} | ${g.prompt.length} | ${pf.toFixed(0)} s (${(g.prompt.length / pf).toFixed(1)} tok/s) | ${ts.toFixed(2)} | ${cmp[0]} / ${Math.max(...cmp)} of ${N} | ${J.ok ? "match" : J.excused ? `near tie at ${J.diff}` : `MISMATCH at ${J.diff}`}${!(J.ok || J.excused) && byRun > 0 ? `, matches llama.cpp's run ${byRun} (${JR[byRun].ok ? "all ids" : `near tie at ${JR[byRun].diff}`})` : ""}${needle ? `, needle ${text.includes(g.needle) ? "found" : "MISSING"}` : ""}`);
   }
-  console.log(`long context (QSA, maxSeq ${eng.maxSeq}, ${pb.maxCols}-column passes):\n  case | prompt | prefill | decode tok/s | vs llama.cpp\n  ${rows.join("\n  ")}`);
+  console.log(`long context (QSA, maxSeq ${eng.maxSeq}, ${pb.maxCols}-column passes):\n  case | prompt | prefill | decode tok/s | ids equal before the first difference (golden / best run) | vs llama.cpp\n  ${rows.join("\n  ")}`);
 }
