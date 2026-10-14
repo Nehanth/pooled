@@ -102,11 +102,11 @@ const HELLO_ANCHOR = '    case "hello":\n      // one protocol per room: a tab f
 if (!room.includes(HELLO_ANCHOR)) { console.error(`room.js has no ${JSON.stringify(HELLO_ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
 // window.__holdHostLoad = true: the model host's own load, once its layers are in, holds until
 // window.__releaseHostLoad() (a slow host: its engine not up yet, as while it loads; it ends when the test says)
-const LOAD_ANCHOR = "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff)); }";
+const LOAD_ANCHOR = "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff), flash); }";
 if (!room.includes(LOAD_ANCHOR)) { console.error(`room.js has no ${JSON.stringify(LOAD_ANCHOR)}: update tests/e2e/room_state.mjs`); process.exit(2); }
 fs.writeFileSync(extra["/room.js"], room.replace(ANCHOR, '  conn.on("close", () => { if (window.__delayClose) setTimeout(onClose, window.__delayClose); else onClose(); });\n')
   .replace(HELLO_ANCHOR, HELLO_ANCHOR + "      if (window.__loseFirstHello && e && !e.lostHello) { e.lostHello = 1; break; }\n")
-  .replace(LOAD_ANCHOR, "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff)); if (window.__holdHostLoad) { const e = ai.engine; ai.engine = null; await new Promise((r) => { window.__hostLoadHeld = true; window.__releaseHostLoad = r; }); ai.engine = e; } }")
+  .replace(LOAD_ANCHOR, "    try { await aiLoadShard(modelKey, ranges[0], true, true, ROOM_CTX, ROOM_KV, offMsg(myOff), flash); if (window.__holdHostLoad) { const e = ai.engine; ai.engine = null; await new Promise((r) => { window.__hostLoadHeld = true; window.__releaseHostLoad = r; }); ai.engine = e; } }")
   + '\nwindow.__dropLinks = () => { for (const id of [...conns.keys()]) dropLink(id, "e2e: the link dropped"); };\n'
   // window.__send(id, msg): send a raw room message (a member forging host messages); __dealer(): the host this device checked
   + 'window.__send = (id, m) => sendTo(id, m); window.__links = () => [...conns.keys()]; window.__dealer = () => ai.dealer; window.__hostId = () => ai.hostId; window.__myId = () => peer.id; window.__link = (id) => ensureLink(id, 20000);\n');

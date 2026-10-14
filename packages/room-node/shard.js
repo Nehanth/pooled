@@ -13,9 +13,9 @@ import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizer
   ggmlLayerNames, qwen35NamesFor, qwen4expConfig, qwen4expNamesFor, qwen4expWeights, qwen4expShardBytes, QWEN4EXP_HEAD } from "../../engine/gguf.js";
 import { ngramConfig, NgramTable, fileReadAt, httpReadAt } from "../../engine/ngram.js";
 import { FlashRoomEngine } from "../../room/flash.js";
-import { hostMemory } from "./env.js";
+import { hostMemory, qsaAlways } from "./env.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
-import { maxSeqFor, kvModeFor, flashRoomMem, ckptSlotsAt } from "../../room/models.js";
+import { maxSeqFor, kvModeFor, flashRoomMem, ckptSlotsAt, flashLoadOpts } from "../../room/models.js";
 import { QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
 import { convertPool } from "./convert.js";
 import { ExpertStore } from "../../engine/expert_store.js";
@@ -26,11 +26,12 @@ import { fastLoad, fastLoadOn } from "./fastload.js";
 
 // The tensors a shard's loader reads (engine/gguf.js ggufWeights / qwen35Weights), in about its order,
 // as { byteOffset, byteLength, shard? }: what source.js fetches ahead of it when it streams (shard: the file of a split GGUF)
-export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }) {
+export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false, qsa = false }) {
   const names = [];
   const strings = (o) => Object.values(o).filter((v) => typeof v === "string");
-  // qwen4exp: the dense phase skips QSA's indexer (qwen4expWeights qsa: false), and the n-gram table is read by rows
-  const layer = (i) => (kind === "qwen35" ? strings(qwen35NamesFor(G, i)) : kind === "qwen4exp" ? qwen4expTensorNames(G, i) : strings(ggmlLayerNames(i)));
+  // qwen4exp: the dense phase skips QSA's indexer (qwen4expWeights qsa: false; qsa: a QSA room's load reads it), and the
+  // n-gram table is read by rows
+  const layer = (i) => (kind === "qwen35" ? strings(qwen35NamesFor(G, i)) : kind === "qwen4exp" ? qwen4expTensorNames(G, i, qsa) : strings(ggmlLayerNames(i)));
   for (let i = lo; i < hi; i++) names.push(...layer(i));
   if (hasEmbed || hasHead) names.push(GGML_EMBED);
   if (hasHead) names.push(...(kind === "qwen4exp" ? Object.values(QWEN4EXP_HEAD) : [GGML_FINAL_NORM]), GGML_OUTPUT);
@@ -43,10 +44,10 @@ export function shardTensors(G, kind, { lo, hi, hasEmbed, hasHead, mtp = false }
   return out;
 }
 
-// The tensors of one qwen4exp layer qwen4expWeights loads in the dense phase (no QSA indexer), in its order
+// The tensors of one qwen4exp layer qwen4expWeights loads in the dense phase (no QSA indexer; qsa: with it), in its order
 const QWEN4EXP_INDEXER = new Set(["idxQ", "idxK", "idxQNorm", "idxKNorm"]);
-export function qwen4expTensorNames(G, i) {
-  return Object.entries(qwen4expNamesFor(G, i)).filter(([k, v]) => typeof v === "string" && !QWEN4EXP_INDEXER.has(k)).map(([, v]) => v);
+export function qwen4expTensorNames(G, i, qsa = false) {
+  return Object.entries(qwen4expNamesFor(G, i)).filter(([k, v]) => typeof v === "string" && (qsa || !QWEN4EXP_INDEXER.has(k))).map(([, v]) => v);
 }
 
 // offload (expert offload, room/plan.js dealRoom): { lo, hi, vramBytes, ramBytes, ramCap }: the routed experts of
@@ -111,10 +112,14 @@ export function checkRange(range) {
 }
 
 // -> { device, engine, tok, cfg, G, tune, gpuErrors, experts }
+// flash: Qwen3.8-Flash-Next's format from the host's ai-load (room/models.js flashRoomFormat / flashLoadOpts): null for the
+// dense engine at <= 2048 positions, { qsa, kv, ring } for a QSA one
 export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, null),
-  src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {}, offload = null, diskReader = expertDiskReader }) {
+  src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {}, offload = null, diskReader = expertDiskReader, flash = null }) {
   checkRange(range);
   const M = src.M;
+  // the host's Flash format, checked before the GPU is asked for or anything streams (a format this build can't load throws)
+  const fq = M.kind === "qwen4exp" ? flashLoadOpts(flash) : null;
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("no WebGPU adapter on this machine");
   const device = await adapter.requestDevice({ requiredLimits: {
@@ -133,7 +138,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     // the index first, so a streamed shard's weights download while the GPU tests and tunes below run
     const kind = M.kind === "qwen35" || M.kind === "qwen4exp" ? M.kind : "gguf";
     const needTok = kind !== "gguf" && (hasEmbed || hasHead);
-    const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, ...(kind === "qwen35" ? { mtp: hasHead } : {}) };
+    const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, ...(kind === "qwen35" ? { mtp: hasHead } : {}), ...(fq ? { qsa: true } : {}) };
     const G0 = await src.header(needTok);
     // requantizing the tensors the GPU has no kernel for (Q4_1 / K-quants -> Q8) on worker threads:
     // seconds per tensor on the event loop otherwise (convert.js)
@@ -153,7 +158,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     log(`autotune WG=${out.tune.wg} ROWS=${out.tune.rows}`);
     const upload = (e, name) => gpuUploadEntry(device, e, name === GGML_EMBED);   // straight to the GPU
     if (kind === "qwen4exp") {
-      const r = await loadFlash({ device, G0, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, diskReader, pool });
+      const r = await loadFlash({ device, G0, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, diskReader, pool, flash });
       out.engine = r;
     } else if (M.kind === "qwen35") {
       const G = out.G = G0;
@@ -279,7 +284,7 @@ export async function openNgramTable(src, G, log = () => {}) {
   return t;
 }
 
-// Qwen3.8-Flash-Next's context until QSA (room/models.js CTX "qwen3.8-flash"; room/model-loader.js clamps a tab's too)
+// Qwen3.8-Flash-Next's context without QSA (a host that sends no ai-load.flash; room/model-loader.js clamps a tab's too)
 const FLASH_MAX_CTX = 2048;
 
 // One qwen4exp shard: the weights (each matrix uploaded as it is converted; the embedding stays on the CPU, where the
@@ -287,21 +292,25 @@ const FLASH_MAX_CTX = 2048;
 // offload (expert offload, as a Qwen3.5 shard's: offloadLayers / diskLayers): the routed experts of [lo, hi) are parked
 // in RAM, those of [diskLo, hi) read from the model's files on this disk (--disk), through the store's GPU slot pools;
 // engine/qwen4exp.js cuts each such layer after its router (no whole-layer region: decode one token at a time).
+// flash (ai-load.flash, room/models.js flashLoadOpts): with qsa, the indexer weights are loaded and the engine runs QSA
+// on its attention layers (a range without one builds none: its signature says qsa false), with the host's K / V format
+// and ring; without, the dense engine as before, its context capped at 2048. POOLED_QSA_ALWAYS=1 (env.js qsaAlways, a
+// test switch): QSA's gathered path on every step, also below 2052 cells (the same bits as dense there).
 // -> FlashRoomEngine
-async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null, diskReader = expertDiskReader, pool = null }) {
-  const c = qwen4expConfig(G.meta);
-  ctx = Math.min(ctx, FLASH_MAX_CTX);   // the dense phase's cap, before anything is sized or uploaded (as a tab's load)
+async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null, diskReader = expertDiskReader, pool = null, flash = null }) {
+  const c = qwen4expConfig(G.meta), q = flashLoadOpts(flash);
+  if (!q) ctx = Math.min(ctx, FLASH_MAX_CTX);   // the dense phase's cap, before anything is sized or uploaded (as a tab's load)
   out.G = G;   // (loadShard's finally takes the conversion pool off it)
   out.cfg = { num_hidden_layers: c.L };
   if (range[1] > c.L) throw new Error(`bad layer range [${range[0]}, ${range[1]}]: the model has ${c.L} layers`);
   if (hasEmbed || hasHead) { out.tok = makeTokenizer(tokenizerFromGGUF(G.meta)); out.tok.chatTemplate = G.meta["tokenizer.chat_template"] || ""; }
-  const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: false };
+  const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: !!q };
   const off = offload && offloadLayers(offload, range), dl = diskLayers(offload, off);
   const m = mem || hostMemory();
   // the GPU holds the layers less their offloaded experts, plus the store's cache; the parked experts and the disk tier's
   // RAM cache are in RAM: on unified memory the same memory, on a discrete GPU the system's (checked against it too)
   const ramOff = off ? (+offload.ramBytes || 0) + (dl.length ? +offload.diskRamBytes || 0 : 0) : 0;
-  const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null }) + (off ? +offload.vramBytes || 0 : 0) + ramOff;
+  const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null, ring: q?.ring }) + (off ? +offload.vramBytes || 0 : 0) + ramOff;
   const cpu = flashCpuBytes(G, opts) + ramOff;
   const short = flashMemoryShort(need, m, { cpuBytes: cpu, sysFreeGB: m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null });
   if (short) throw Object.assign(new Error(`can't hold layers ${range[0]}-${range[1] - 1} of Qwen3.8-Flash-Next here: it ${short}`), { oom: true, short: true });
@@ -344,8 +353,8 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const flush = timed("flush", async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); });
   let base = 0;
   const part = async (o) => {
-    const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: false, experts: out.experts || null }, (done) => onProgress(base + done, total), up);
-    base += qwen4expShardBytes(G, { ...o, qsa: false }) - (o.hi > o.lo && dl.includes(o.lo) ? flashExpertBytes(G, o.lo) : 0);
+    const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: !!q, experts: out.experts || null }, (done) => onProgress(base + done, total), up);
+    base += qwen4expShardBytes(G, { ...o, qsa: !!q }) - (o.hi > o.lo && dl.includes(o.lo) ? flashExpertBytes(G, o.lo) : 0);
     await flush();
     return w;
   };
@@ -359,12 +368,14 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
   if (weights.pleTable) out.ngram = await openNgramTable(src, G, log);
   const { Qwen4ExpEngine } = await import("../../engine/qwen4exp.js");
-  const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null });
+  const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null,
+    ...(q ? { qsa: null, kv: q.kv, qsaRing: q.ring } : { qsa: false }) });
+  if (eng.qsa && qsaAlways()) { eng.qsaAlways = true; log("POOLED_QSA_ALWAYS=1: QSA's gathered attention on every step (a test switch)"); }
   if (fl && process.env.POOLED_FASTLOAD_TRACE) fs.writeFileSync(process.env.POOLED_FASTLOAD_TRACE, JSON.stringify(fl.trace()));
   fl?.close(); out.fastLoad = null;
   log(`load: ${Object.entries(T).map(([k, v]) => `${k} ${v.toFixed(1)} s`).join(", ")}${fl ? ` (read ahead, ${fl.stats.repacked} tensors repacked on ${pool.threads} threads, ${(fl.stats.newBytes / 2 ** 30).toFixed(1)} GiB of shared buffers)` : ""}`);
   const fe = FlashRoomEngine.wrap(eng);
   out.flash = eng;   // the engine under the adapter (tests and benches: forwardToken, debugToken)
-  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB (weights${off ? " less the offloaded experts, the expert cache" : ""}, K/V, the CPU embedding, upload staging)${out.ngram ? ", the n-gram layer here" : ""}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
+  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB (weights${off ? " less the offloaded experts, the expert cache" : ""}, K/V, the CPU embedding, upload staging)${out.ngram ? ", the n-gram layer here" : ""}; ${ctx} positions, ${eng.qsa ? `QSA (${eng.kv} K/V, ring ${eng.qsaRing})` : q ? "QSA loaded, no attention layer here" : "dense"}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
   return fe;
 }

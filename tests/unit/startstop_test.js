@@ -28,6 +28,9 @@ Deno.test("onLoadRequest: a re-seat of the same layers keeps the load in flight"
   const key = loadKey("qwen", [4, 8]);
   eq(key, "qwen:4,8");
   eq(loadKey(undefined, [0, 2]), "smollm-135m:0,2");
+  eq(loadKey("qwen", [4, 8], null), key, "no flash: the key as before");
+  eq(loadKey("qwen", [4, 8], { qsa: 1, kv: "f32", ring: 1024 }), "qwen:4,8:qsa:f32:1024");
+  eq(onLoadRequest({ loadingShard: true, role: "worker", currentKey: key, key: loadKey("qwen", [4, 8], { qsa: 1 }) }), "load", "a load in flight in another Flash format is not kept");
   eq(onLoadRequest({ loadingShard: true, role: "worker", currentKey: key, key }), "keep");
   eq(onLoadRequest({ loadingShard: true, role: "worker", currentKey: loadKey("qwen", [4, 9]), key }), "load", "other layers");
   eq(onLoadRequest({ loadingShard: false, role: "worker", currentKey: key, key }), "load", "the load already finished");

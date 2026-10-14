@@ -8,8 +8,12 @@
 //   node packages/room-node/test/flash_gold.mjs pair   two room nodes in this process, a local PeerJS server between
 //        them: HOST_GB / WORKER_GB (default 40 / 40, memory split: layers 0-23 + embedding/head and the n-gram table
 //        on the host, 24-47 on the worker). SPLIT=speed with HOST_GB=3 puts layers 1-47 (and the table) on the worker.
+//        CODE_FILE=<path>: the worker is not started here: the room's code is written to that file and the host waits
+//        (WAIT_S, default 600) for a node from another process to join, e.g. one from an older build (a mixed room).
 // env: MODELS (default ~/llm/models: models/q38flash/<file>, source.js LOCAL, or <dir>/qwen3.8-flash/<file>),
-//      CASES=a,b (default every golden case under 2048 tokens), SOLO_GB (90), OUT (result JSON), PORT (8251)
+//      CASES=a,b (default every golden case under 2048 tokens), SOLO_GB (90), OUT (result JSON), PORT (8251),
+//      POOLED_QSA_ALWAYS=1 (QSA's gathered attention on every step, env.js qsaAlways). The result records the room's
+//      Flash format (ai-load.flash: QSA, or null for dense) and what each worker's ai-ready said it loaded.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -43,13 +47,18 @@ try {
   } else if (MODE === "pair") {
     const split = process.env.SPLIT || "memory";
     host = await createRoom({ model: MODEL, pledgeGB: +(process.env.HOST_GB || 40), name: "flash-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a"), split });
-    worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || 40), name: "flash-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
+    if (process.env.CODE_FILE) { fs.writeFileSync(process.env.CODE_FILE, host.code); log(`room ${host.code}: waiting for a worker from another process`); }
+    else worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || 40), name: "flash-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b") });
     const t = Date.now();
-    await host.start(MODEL, { minDevices: 2, waitMs: 60000 });
+    await host.start(MODEL, { minDevices: 2, waitMs: process.env.CODE_FILE ? +(process.env.WAIT_S || 600) * 1000 : 60000 });
     out.loadS = (Date.now() - t) / 1000;
   } else throw new Error("mode: solo | pair");
   out.split = host.split;
-  log(`online: ${JSON.stringify(host.split)} in ${out.loadS.toFixed(0)} s`);
+  out.flash = host.ai.roomFlash ?? null;
+  out.engines = [{ name: host.name, maxSeq: host.ai.engine?.maxSeq, sig: host.ai.engine?.stateSignature?.() || null },
+    ...[...(host.ai.readyInfo || new Map())].map(([name, r]) => ({ name, maxSeq: r.ctx, sig: r.fsig }))];
+  out.qsaAlways = process.env.POOLED_QSA_ALWAYS === "1";
+  log(`online: ${JSON.stringify(host.split)} in ${out.loadS.toFixed(0)} s; Flash format ${JSON.stringify(out.flash)}; engines ${JSON.stringify(out.engines)}`);
   let fail = 0;
   for (const [name, g] of cases) {
     const t = performance.now();
@@ -66,7 +75,7 @@ try {
     const verdict = diff < 0 ? "MATCH" : J.excused ? "TIE" : "MISMATCH";
     if (verdict === "MISMATCH") fail++;
     out.cases[name] = { verdict, n: g.ids.length, diff, rule: J.msg, tps: +r.tps.toFixed(2), prefillS: +(r.tPre / 1000).toFixed(2), prompt: g.prompt.length, wallS: +((performance.now() - t) / 1000).toFixed(1),
-      text: host.ai.tok.decode(ids), ...(diff >= 0 ? { got: ids.slice(Math.max(0, diff - 2), diff + 4), want: g.ids.slice(Math.max(0, diff - 2), diff + 4), ourTop: tops[diff], llamaTop: g.top?.[diff] } : {}) };
+      text: host.ai.tok.decode(ids), ids, ...(diff >= 0 ? { got: ids.slice(Math.max(0, diff - 2), diff + 4), want: g.ids.slice(Math.max(0, diff - 2), diff + 4), ourTop: tops[diff], llamaTop: g.top?.[diff] } : {}) };
     log(`${name}: ${verdict}${diff >= 0 ? ` at ${diff}: ${diff < ids.length ? J.msg : `${ids.length} of ${g.ids.length} ids`}` : ` (${g.ids.length} ids)`} · prompt ${g.prompt.length} tok in ${(r.tPre / 1000).toFixed(1)} s · decode ${r.tps.toFixed(2)} tok/s`);
   }
   out.pass = !fail;

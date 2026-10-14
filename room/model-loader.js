@@ -12,7 +12,7 @@ import { NGRAM_OPFS_DIR, ngramDir, ngramContentSig, tabOffloadLayers, tabExpertT
 import { partsTracker, runFlashParts } from "./flashload.js";
 import { FlashRoomEngine } from "./flash.js";
 import { planSteps, loadTracker } from "./loadsteps.js";
-import { MODELS, MAX_SEQ, mergeSplitHeaders, roomBytes, ngramOf } from "./models.js";
+import { MODELS, MAX_SEQ, mergeSplitHeaders, roomBytes, ngramOf, flashLoadOpts } from "./models.js";
 import { cacheKey } from "./weightcache.js";
 import { attachBrowserWeightCache } from "./convertedcache.js";
 
@@ -36,7 +36,8 @@ function tabDiskAskBytes(model, layers, range) {
 // tensors a Flash tab's GPU step keeps in flight (room/model-loader.js planPrefetch; ?prefetch=N overrides)
 const FLASH_PREFETCH = 12;
 export const ngramLayerIn = (c, range) => !!c?.ple?.layers?.some((l) => l >= range[0] && l < range[1]);
-const flashLayerNames = (G, i) => Object.entries(qwen4expNamesFor(G, i)).filter(([k, v]) => typeof v === "string" && !QWEN4EXP_INDEXER.has(k)).map(([, v]) => v);
+// (qsa: with QSA's indexer tensors, when the host's ai-load.flash asks for a QSA engine)
+const flashLayerNames = (G, i, qsa = false) => Object.entries(qwen4expNamesFor(G, i)).filter(([k, v]) => typeof v === "string" && (qsa || !QWEN4EXP_INDEXER.has(k))).map(([, v]) => v);
 
 export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMeta, getEnginePreset, options = {}, hooks = {} }) {
   if (typeof getEnginePreset !== "function") throw new TypeError("getEnginePreset must be a function");
@@ -166,6 +167,8 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   // diskRamBytes } for this device (room/plan.js dealOffload, diskOnly): those layers' experts are read from OPFS
   // onParts(snapshot): the load's parts (room/flashload.js partsTracker: { parts: [{ id, done, total, state }], note? }),
   // at most ~4 a second and on every state change; every model sends it (one "gpu" part but a Flash tab's)
+  // flash (Qwen3.8-Flash-Next): the host's ai-load.flash (room/models.js flashLoadOpts): QSA's indexer weights loaded and
+  // the engine built with QSA, the host's K / V format and ring, the context as dealt; null: the dense engine at <= 2048
   async function loadShard(o, engines) {
     if (!o.onParts) return loadShardIn(o, engines);
     // the other models' one part, from their onProgress (a Flash tab's parallel load makes its own tracker; its
@@ -189,7 +192,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
     } catch (e) { gpuParts?.failRunning(); throw e; }
     finally { gpuParts?.flush(); }
   }
-  async function loadShardIn({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, onParts = null, pace, offload = null }, engines) {
+  async function loadShardIn({ modelKey, range, hasEmbed, hasHead, ctx, kv, streamOpts, onProgress: onProg, onParts = null, pace, offload = null, flash = null }, engines) {
     const M = MODELS[modelKey];
     if (offload && M.kind !== "qwen4exp") throw new Error(`the host asked this tab to offload experts of ${M.label || modelKey}; a tab reads offloaded experts from its disk for Qwen3.8-Flash-Next only`);
     // the receiving side: an offload this tab did not offer, or its user turned down, is refused before anything is
@@ -248,15 +251,15 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         kvQ8: kv === "q8",
       });
     } else if (M.kind === "qwen4exp") {
-      // Qwen3.8-Flash-Next: its own engine (engine/qwen4exp.js) behind the room adapter (room/flash.js); the dense
-      // phase (no QSA indexer, context <= 2048). The embedding stays in JS memory (the engine reads its rows), and the
+      // Qwen3.8-Flash-Next: its own engine (engine/qwen4exp.js) behind the room adapter (room/flash.js); with QSA when
+      // the host asks (flash), else the dense phase (no QSA indexer, context <= 2048). The embedding stays in JS memory (the engine reads its rows), and the
       // device holding the n-gram layer reads that table's rows from OPFS (split per head) or by HTTP range
       aiStatus("Looking up the model\u2026");
       const needTok = hasEmbed || hasHead;
       const cachedOk = ai.G && ai.GModel === modelKey && (!needTok || ai.G.meta["tokenizer.ggml.tokens"]);
       const G = cachedOk ? ai.G : await fetchModelHeader(M, needTok);
       ai.G = G; ai.GModel = modelKey;
-      const c = qwen4expConfig(G.meta);
+      const c = qwen4expConfig(G.meta), q = flashLoadOpts(flash);
       if (range[1] > c.L) throw new Error(`bad layer range [${range[0]}, ${range[1]}]: the model has ${c.L} layers`);
       ai.cfg = { num_hidden_layers: c.L };
       if (needTok) {
@@ -282,7 +285,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       });
       const streamPlain = streamWithRetry(M.gguf, streamOpts, gpuPace);
       // what goes onto the GPU: the range's weights but the disk layers' experts
-      const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: false };
+      const opts = { lo: range[0], hi: range[1], hasEmbed, hasHead, qsa: !!q };
       const skip = new Set(off?.disk || []);
       const total = qwen4expShardBytes(G, opts) - [...skip].reduce((a, l) => a + flashExpertBytes(G, l), 0);
       // the same test qwen4expWeights uses to return the table's reader (engine/gguf.js: pleTable with the n-gram layer)
@@ -303,7 +306,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
           console.info(s); crumb(s);
         }
         const names = [];
-        for (let l = range[0]; l < range[1]; l++) names.push(...flashLayerNames(G, l).filter((n) => !skip.has(l) || !/_exps\.weight$/.test(n)));
+        for (let l = range[0]; l < range[1]; l++) names.push(...flashLayerNames(G, l, !!q).filter((n) => !skip.has(l) || !/_exps\.weight$/.test(n)));
         if (hasEmbed || hasHead) names.push(GGML_EMBED);
         if (hasHead) names.push(...Object.values(QWEN4EXP_HEAD), GGML_OUTPUT);
         const fromDisk = new Set(resident?.layers || []);
@@ -328,8 +331,8 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         const up = (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(dev, e, false); };
         let base = 0;
         const part = async (o) => {
-          const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: false, experts }, (done) => at(base + done), up);
-          base += qwen4expShardBytes(G, { ...o, qsa: false }) - (o.hi > o.lo && skip.has(o.lo) ? flashExpertBytes(G, o.lo) : 0);
+          const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: !!q, experts }, (done) => at(base + done), up);
+          base += qwen4expShardBytes(G, { ...o, qsa: !!q }) - (o.hi > o.lo && skip.has(o.lo) ? flashExpertBytes(G, o.lo) : 0);
           dev.queue.submit([dev.createCommandEncoder().finish()]);
           await dev.queue.onSubmittedWorkDone();
           return w;
@@ -352,7 +355,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       const makeEngine = async (weights, ngram) => {
         const { Qwen4ExpEngine } = await import("../engine/qwen4exp.js");
         ai.engine = FlashRoomEngine.wrap(await Qwen4ExpEngine.create({ device: ai.device, meta: G.meta, weights, layerRange: range,
-          hasEmbed, hasHead, maxSeq: Math.min(ctx, 2048), ngram }));
+          hasEmbed, hasHead, maxSeq: q ? ctx : Math.min(ctx, 2048), ngram, ...(q ? { qsa: null, kv: q.kv, qsaRing: q.ring } : { qsa: false }) }));
         if (experts) console.info(experts.summary().replace(/; \d+ cuts.*/, ""));
       };
       const offInfo = () => console.info(`expert offload: layers ${off.disk[0]}-${off.disk[off.disk.length - 1]} read their experts from OPFS, ${(offload.vramBytes / 2 ** 30).toFixed(2)} GiB GPU cache, ${((+offload.diskRamBytes || 0) / 2 ** 30).toFixed(2)} GiB RAM cache`);
