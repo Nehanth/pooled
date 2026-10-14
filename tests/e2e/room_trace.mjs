@@ -68,7 +68,7 @@ export function patchTransport(s) {
   const f = "room/transport.js";
   s = HP + s;
   s = rep(s, "  const flags = packFlags(msg);", "  const flags = packFlags(msg); __HP('send0', msg.t, pos, bytes.length, nSlices);", f);
-  s = rep(s, "  return true;\n}\n// The open channel", "  __HP('send1', msg.t, pos);\n  return true;\n}\n// The open channel", f);
+  s = rep(s, "  if (queued) drainLater(link);\n  return true;\n}", "  if (queued) drainLater(link);\n  __HP('send1', msg.t, pos);\n  return true;\n}", f);
   s = rep(s, "  if (!r) { r = {", "  if (!r) { __HP('rx0', KINDS[kind], pos, nSlices); r = {", f);
   s = rep(s, "  link.recv++;", "  link.recv++; __HP('rx1', KINDS[kind], pos);", f);
   s = rep(s, "    link.expect++;\n    onFrame(m);", "    link.expect++;\n    __HP('dlv', m.t, m.pos ?? m.basePos);\n    onFrame(m);", f);
