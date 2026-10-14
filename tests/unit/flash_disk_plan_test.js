@@ -15,10 +15,11 @@ const plainTab = (gb) => ({ webgpu: true, contribGB: gb });
 const pc = (gb, ram, disk = false, local = [F, M35, M122]) => ({ webgpu: true, contribGB: gb, offload: true, ramGB: ram, offloadFlash: true, ...(disk ? { disk: true, local } : {}) });
 // a released @pooled/cli 0.4.1 node: it offloads the Qwen 3.5 MoEs but its shard.js refuses Flash's experts
 const pc041 = (gb, ram, disk = false, local = [F, M35, M122]) => { const m = pc(gb, ram, disk, local); delete m.offloadFlash; return m; };
-function deal(model, metas, ctx = 2048) {
-  const rb = roomBytes(model, ctx);
+// split: the extra off fields (speedSplit: false keeps dealOffload's split by memory; hostLayers)
+function deal(model, metas, ctx = 2048, split = {}) {
+  const rb = roomBytes(model, ctx), off = offloadFor(metas, rb.experts, model);
   const d = dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges: metas.map((m) => pledgeGB(m) * GB), mode: "memory",
-    off: offloadFor(metas, rb.experts, model), ngram: ngramFor(metas, ngramOf(model)) });
+    off: off && { ...off, ...split }, ngram: ngramFor(metas, ngramOf(model)) });
   return { rb, d };
 }
 const perExp = (rb) => rb.experts.slices[47].reduce((a, b) => a + b, 0);
@@ -61,7 +62,7 @@ Deno.test("flash: offloading more layers beats the fewest on a tab (tabDiskCost,
 
 Deno.test("flash: a tab with the disk tier never parks, and counts only for Flash", () => {
   // parking pass: the tab is pledge-only; Mac + PC with --ram 43: the PC parks, the tab holds what its pledge holds
-  const { rb, d } = deal(F, [tab(22), pc(10, 43)]);
+  const { rb, d } = deal(F, [tab(22), pc(10, 43)], 2048, { speedSplit: false });
   ok(d.fit.fits && !d.fit.disk, "parking holds it");
   ok(d.offload[0] === null, "the tab offloads nothing");
   eq(d.assigned[0], Math.floor((22 * GB - rb.hostBytes) / rb.layerBytes), "the tab: its pledge's layers");
@@ -81,7 +82,7 @@ Deno.test("flash: a tab with the disk tier never parks, and counts only for Flas
 });
 
 Deno.test("flash: Mac tab + PC (--ram 24 --disk): both offload, the tab from OPFS, the PC parks then reads its last layers from disk", () => {
-  const { d } = deal(F, [tab(22), pc(10, 24, true)]);
+  const { d } = deal(F, [tab(22), pc(10, 24, true)], 2048, { speedSplit: false });
   ok(d.fit.fits && d.fit.disk);
   const [t, p] = d.offload;
   ok(t?.diskOnly && t.ramBytes === 0 && t.diskLo === t.lo, JSON.stringify(t));
@@ -194,4 +195,31 @@ Deno.test("diskShares: each device's disk layers' experts, and the n-gram table 
   const s = diskShares(deal, 3, 10);
   if (JSON.stringify(s) !== JSON.stringify([16 * 10 + 1000, 0, 18 * 10])) throw new Error(JSON.stringify(s));
   if (JSON.stringify(diskShares({ used: [0], offload: [null] }, 1, 10)) !== "[0]") throw new Error("no disk layers");
+});
+
+Deno.test("flash: the tab host + PC node split by modelled speed (splitBySpeed)", () => {
+  // the demo at the Mac's 12 GB: by memory the PC (--gb 10 --ram 43 --disk) got 35 layers, 3 of them read from its disk
+  const mem = deal(F, [tab(12), pc(10, 43, true)], 2048, { speedSplit: false }).d;
+  ok(Number.isInteger(mem.offload[1].diskLo), "by memory the PC reads some experts from its disk");
+  const { rb, d } = deal(F, [tab(12), pc(10, 43, true)]);
+  ok(d.speed && d.speed.was === mem.assigned[0] && d.assigned[0] > mem.assigned[0], JSON.stringify(d.speed));
+  ok(!Number.isInteger(d.offload[1].diskLo), "by speed the PC parks every expert it offloads: none on its disk");
+  ok(d.offload[1].slots > mem.offload[1].slots, `a bigger pool on the PC (${mem.offload[1].slots} -> ${d.offload[1].slots} slots)`);
+  eq(d.ranges, [[0, d.assigned[0]], [d.assigned[0], 48]]);
+  // the promises: the tab's offload is a disk-only plan within its pledge, the PC's RAM holds what it parks
+  const [t, p] = d.offload;
+  ok(t.diskOnly && t.hi === d.assigned[0] && t.ramSpare + t.diskRamBytes <= 3 * GB + 1, JSON.stringify(t));
+  ok(p.ramBytes + p.ramSpare <= 43 * GB + 1 && p.hi === 48, JSON.stringify(p));
+  ok(d.held[0] <= 12 * GB + 1 && d.held[1] <= 10 * GB + 1, "the pledges");
+  eq(d.ngram?.at, 0);
+  // at 20 GB the memory split is within the model's margin: it stays
+  eq(deal(F, [tab(20), pc(10, 43, true)]).d.ranges, deal(F, [tab(20), pc(10, 43, true)], 2048, { speedSplit: false }).d.ranges);
+  // forced (?hostlayers=)
+  eq(deal(F, [tab(20), pc(10, 43, true)], 2048, { hostLayers: 20 }).d.assigned, [20, 28]);
+  // not this room shape (two nodes, a tab without the disk tier): untouched
+  for (const metas of [[pc(10, 43, true), pc(10, 43, true)], [plainTab(22), pc(10, 43, true)]]) {
+    const a = deal(F, metas).d, b = deal(F, metas, 2048, { speedSplit: false }).d;
+    eq(a, b); ok(!a.speed);
+  }
+  ok(rb.L === 48);
 });

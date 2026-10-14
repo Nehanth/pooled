@@ -41,9 +41,9 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
   const files = urls.map((url, i) => {
     const f = { url, file: null, pre: null, local: isLocal ? locals[i] : null };
     f.readAt = f.local
-      ? async (off, len) => {
+      ? async (off, len, into) => {
         f.file ||= localFileReader(f.local);
-        const out = await f.file.readAt(off, len);
+        const out = await f.file.readAt(off, len, into);
         count(len);
         return out;
       }
@@ -70,6 +70,9 @@ export function openModel(modelKey, { modelDir = process.env.POOLED_MODELS || nu
     // every file's local path in shard order when the whole model is local (expert_disk.js reads experts from them), else null
     localPaths: isLocal ? [...locals] : null,
     readAt: files[0].readAt,   // the first file (ckptdisk.js modelFileId)
+    // a local model's bytes [off, off + len) of file `shard` into `into` (a Uint8Array of len bytes, shared memory too):
+    // fastload.js reads ahead of the loader with it. null when the model is streamed
+    readInto: isLocal ? (shard, off, len, into) => files[shard].readAt(off, len, into) : null,
     // every file's URL in shard order (the n-gram table's HTTP reader when the model is not local: shard.js)
     urls: [...urls],
     bytesOf: (info) => fileOf(info).readAt(info.byteOffset, info.byteLength),
@@ -107,7 +110,8 @@ export function localFileReader(file, { lanes = Math.max(4, parseInt(process.env
   let hs = [], closed = false;
   return {
     get handles() { return hs.length; },
-    async readAt(off, len) {
+    // into (optional): a Uint8Array of len bytes to read into (shared memory too) instead of a new one
+    async readAt(off, len, into = null) {
       for (let retried = false; ; retried = true) {
         if (closed) throw new Error(`${file}: reader is closed`);
         let h = hs.find((x) => !x.busy);
@@ -121,7 +125,8 @@ export function localFileReader(file, { lanes = Math.max(4, parseInt(process.env
             if (retried) throw e;
             continue;
           }
-          const out = new Uint8Array(len);
+          if (into && into.byteLength !== len) throw new Error(`${file}: read of ${len} bytes into ${into.byteLength}`);
+          const out = into || new Uint8Array(len);
           let o = 0;
           while (o < len) { const { bytesRead } = await fh.read(out, o, Math.min(len - o, 1 << 30), off + o); if (bytesRead <= 0) break; o += bytesRead; }
           if (o !== len) throw new Error(`short read in ${file} at ${off}`);

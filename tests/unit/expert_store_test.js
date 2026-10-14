@@ -452,3 +452,29 @@ Deno.test("disk deferred: build without setDisk throws; setDisk after build thro
   try { built.setDisk({ reader }); } catch (e) { msg = e.message; }
   assert(/after build/.test(msg), `setDisk after build throws (${msg})`);
 });
+
+Deno.test("prealloc: the parked buffers made up front hold the same bytes at the same places, and leftovers go", () => {
+  const layers = [1, 2, 3, 4, 5, 6, 7, 8], nExp = 32, rows = 64, cols = 128;
+  const fill = (st) => { for (const l of layers) ["gate", "up", "down"].forEach((p, i) => st.park(l, p, i < 2 ? entry(l, i, nExp, rows, cols) : entry(l, i, nExp, cols, rows, "q8"), nExp)); };
+  const t = new ExpertStore(fakeDevice(), { layers, slots: 6, parkBytes: 1 << 20 });
+  fill(t);
+  const expect = t.parkedBytes;   // what the deal would say they park
+  const a = new ExpertStore(fakeDevice(), { layers, slots: 6, parkBytes: 1 << 20, expectBytes: expect });
+  fill(a);
+  const dev = fakeDevice(), b = new ExpertStore(dev, { layers, slots: 6, parkBytes: 1 << 20, expectBytes: expect });
+  const n = b.prealloc();
+  assert(n >= 1 && dev.bufs.length === n, `made ${n} buffers up front`);
+  fill(b);
+  const lay = (st) => [...st.L.entries()].map(([l, S]) => [l, ["gate", "up", "down"].map((p) => S.parts[p].sl.map((x) => x.segs.map((g) => [st.park_.findIndex((q) => q.buf === g.buf), g.off, g.e0, g.n])))]);
+  assert(JSON.stringify(lay(a)) === JSON.stringify(lay(b)), "the same slices in the same buffers at the same offsets");
+  assert(a.park_.map((p) => p.buf.bytes).every((x, i) => x.slice(0, a.park_[i].used).every((v, j) => v === b.park_[i].buf.bytes[j])), "the same bytes");
+  // more than the store needed: a buffer made up front that nothing parked in is destroyed when the store seals
+  const d2 = fakeDevice(), c = new ExpertStore(d2, { layers: [2], slots: 6, parkBytes: 1 << 20, expectBytes: 8 << 20 });
+  c.prealloc();
+  const made = d2.bufs.length;
+  let destroyed = 0;
+  d2.bufs.forEach((x) => { x.destroy = () => { destroyed++; }; });
+  ["gate", "up", "down"].forEach((p, i) => c.park(2, p, i < 2 ? entry(2, i, nExp, rows, cols) : entry(2, i, nExp, cols, rows, "q8"), nExp));
+  c.seal();
+  assert(destroyed === made - c.park_.length && c.bufBytes === c.park_.reduce((s, p) => s + p.buf.size, 0), `${destroyed} unused buffers destroyed, bufBytes counts only the kept ones`);
+});

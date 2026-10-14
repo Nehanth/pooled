@@ -259,7 +259,9 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
       if (c.bad) throw new Error(headError(ai.pos));
       return c;
     }
+    const tHead = ai.lapLog ? performance.now() : 0;
     const logits = await current.engine.headFromHidden(h);
+    if (ai.lapLog?.length) ai.lapLog[ai.lapLog.length - 1][2] = performance.now() - tHead;   // (the lap's head ms, ?dev=1)
     if (badF32(logits)) throw new Error(headError(ai.pos));
     return logits;
   }
@@ -363,6 +365,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     L.max = Math.max(lapMs, 0.98 * (L.max || 0));   // the slowest recent lap, fading over ~50 laps (lap timeouts)
     L.host = L.n ? 0.7 * L.host + 0.3 * hostMs : hostMs;
     L.n++;
+    ai.lapLog?.push([lapMs, hostMs, 0, performance.now() - lapMs]);   // (room.js window.__pooledGen, ?dev=1: every lap of one run: lap, host, head ms, start)
   }
 
   async function workerFrame(d) {

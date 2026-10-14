@@ -112,6 +112,10 @@ export class ExpertStore {
   _alloc(per, want) {
     if (this.sealed) throw new Error("ExpertStore: parked buffers are sealed");
     let p = this.park_[this.park_.length - 1];
+    if ((!p || p.used + per > p.buf.size) && this._pre?.length && this._pre[0].buf.size >= Math.ceil(per / 256) * 256) {
+      p = this._pre.shift();   // made up front (prealloc)
+      this.park_.push(p);
+    }
     if (!p || p.used + per > p.buf.size) {
       const one = Math.ceil(per / 256) * 256, left = this.expectBytes - this.placed;
       let size = Math.max(one, this.expectBytes > 0 ? Math.min(this.parkBytes, Math.ceil(Math.max(0, left) / 256) * 256 + 4096) : this.parkBytes);
@@ -131,6 +135,22 @@ export class ExpertStore {
     p.used += Math.ceil(n * per / 256) * 256;
     this.placed += n * per;
     return at;
+  }
+  // Make the parked buffers up front, all but the last (partial) one of the expectBytes the store will park, within the
+  // RAM it may take: on the RTX 5070 PC a 1 GiB buffer took 65-200 ms to make while the RAM was free, and 550-800 ms
+  // once a load reading ~6 GB/s had filled the RAM with the file's cached pages (the OS zeroes each page it takes back):
+  // 18.5 of a 37 s load (packages/room-node/fastload.js makes them before it starts reading). -> the buffers made
+  prealloc() {
+    if (this.sealed || !(this.expectBytes > 0)) return 0;
+    this._pre ||= [];
+    const size = Math.min(this.parkBytes, this.device.limits?.maxBufferSize ?? Infinity);
+    let n = 0;
+    while (this.bufBytes + 2 * size <= this.expectBytes && this.bufBytes + size <= this.ramBytes) {
+      const buf = this.device.createBuffer({ size, usage: MAP_PARK(), mappedAtCreation: true });
+      this._pre.push({ buf, view: new Uint8Array(buf.getMappedRange()), used: 0 });
+      this.bufBytes += size; n++;
+    }
+    return n;
   }
   // -> the placeholder entry the engine sees in place of the stacked expert tensor
   park(layer, part, e, nExp) {
@@ -190,6 +210,8 @@ export class ExpertStore {
   seal() {
     if (this.sealed) return;
     for (const p of this.park_) { p.buf.unmap(); p.view = null; }
+    for (const p of this._pre || []) { this.bufBytes -= p.buf.size; p.buf.unmap(); p.buf.destroy(); }   // made up front, not needed
+    this._pre = null;
     this.sealed = true;
   }
 

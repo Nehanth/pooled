@@ -21,6 +21,7 @@ import { ExpertStore } from "../../engine/expert_store.js";
 import { expertDiskReader } from "./expert_disk.js";
 import { expertDisk } from "../../engine/expert_disk.js";
 import { localFileReader } from "./source.js";
+import { fastLoad, fastLoadOn } from "./fastload.js";
 
 // The tensors a shard's loader reads (engine/gguf.js ggufWeights / qwen35Weights), in about its order,
 // as { byteOffset, byteLength, shard? }: what source.js fetches ahead of it when it streams (shard: the file of a split GGUF)
@@ -151,7 +152,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     log(`autotune WG=${out.tune.wg} ROWS=${out.tune.rows}`);
     const upload = (e, name) => gpuUploadEntry(device, e, name === GGML_EMBED);   // straight to the GPU
     if (kind === "qwen4exp") {
-      const r = await loadFlash({ device, G0, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, diskReader });
+      const r = await loadFlash({ device, G0, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, diskReader, pool });
       out.engine = r;
     } else if (M.kind === "qwen35") {
       const G = out.G = G0;
@@ -200,7 +201,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
         log(`expert offload: parked ${(out.experts.parkedBytes / 2 ** 30).toFixed(2)} GiB, more than the ${(offload.ramBytes / 2 ** 30).toFixed(2)} GiB the deal planned (within what this device lends)`);
     }
     return out;
-  } catch (e) { await out.experts?.close().catch(() => {}); try { await out.engine?.close?.(); } catch {} try { await out.ngram?.close?.(); } catch {} try { device.destroy(); } catch {} throw e; }
+  } catch (e) { out.fastLoad?.close(); await out.experts?.close().catch(() => {}); try { await out.engine?.close?.(); } catch {} try { await out.ngram?.close?.(); } catch {} try { device.destroy(); } catch {} throw e; }
   finally { if (out.G) delete out.G.convert; await pool?.close(); }
 }
 
@@ -284,7 +285,7 @@ const FLASH_MAX_CTX = 2048;
 // in RAM, those of [diskLo, hi) read from the model's files on this disk (--disk), through the store's GPU slot pools;
 // engine/qwen4exp.js cuts each such layer after its router (no whole-layer region: decode one token at a time).
 // -> FlashRoomEngine
-async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null, diskReader = expertDiskReader }) {
+async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null, diskReader = expertDiskReader, pool = null }) {
   const c = qwen4expConfig(G.meta);
   ctx = Math.min(ctx, FLASH_MAX_CTX);   // the dense phase's cap, before anything is sized or uploaded (as a tab's load)
   out.G = G;   // (loadShard's finally takes the conversion pool off it)
@@ -317,11 +318,30 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   // uploads those itself, some joined into one buffer). A layer at a time, the queue flushed after each: Dawn keeps
   // a writeBuffer's staging copy until the queue moves on, and 67 GB of uploads in one go ran the GB10 out of memory
   // (VK_ERROR_OUT_OF_DEVICE_MEMORY, the device lost) with the weights only half on the GPU
-  const up = (e, name) => { if (name !== GGML_EMBED) gpuUploadEntry(device, e, false); };
-  const flush = async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); };
+  // where the load's time goes (out.loadTimes, seconds; with fastload.js reads run ahead and repacks on threads, so
+  // read is the loader's wait for its bytes and the stages no longer add up to the load)
+  const T = out.loadTimes = { read: 0, convert: 0, park: 0, upload: 0, flush: 0 };
+  const timed = (k, f) => async (...a) => { const t = performance.now(); try { return await f(...a); } finally { T[k] += (performance.now() - t) / 1000; } };
+  // fastload.js (POOLED_FASTLOAD=0: off): the tensors this load reads, in the loader's order (the disk layers' experts stay in the file)
+  const dlExp = new Set(dl.flatMap((l) => ["gate", "up", "down"].map((p) => `blk.${l}.ffn_${p}_exps.weight`)));
+  const byKey = new Map(Object.values(G.tensors).map((t) => [`${t.shard || 0}:${t.byteOffset}`, t]));
+  const plan = shardTensors(G, "qwen4exp", opts).map((t) => byKey.get(`${t.shard || 0}:${t.byteOffset}`)).filter((t) => t && !dlExp.has(t.name));
+  const fl = fastLoadOn() ? fastLoad({ src, G, plan, pool, log, ...(+process.env.POOLED_FASTLOAD_AHEAD > 0 ? { aheadBytes: +process.env.POOLED_FASTLOAD_AHEAD * 2 ** 30 } : {}) }) : null;
+  // the parked buffers up front, while the RAM is still free (ExpertStore.prealloc); the first reads run meanwhile
+  if (fl && out.experts) { const t = performance.now(); out.experts.prealloc(); T.prealloc = (performance.now() - t) / 1000; }
+  out.fastLoad = fl;
+  const bytesOf = timed("read", fl ? fl.bytesOf : src.bytesOf);
+  const conv0 = fl ? fl.convert : G.convert;
+  if (conv0) G.convert = timed("convert", conv0);
+  if (out.experts) {
+    const p0 = out.experts.park.bind(out.experts);
+    out.experts.park = (layer, part, e, nExp) => { const t = performance.now(); try { return p0(layer, part, e, nExp); } finally { fl?.release(e); T.park += (performance.now() - t) / 1000; } };
+  }
+  const up = (e, name) => { if (name !== GGML_EMBED) { const t = performance.now(); gpuUploadEntry(device, e, false); fl?.release(e); const d = performance.now() - t; T.upload += d / 1000; fl?.upTrace(G.tensors[name], d); } };
+  const flush = timed("flush", async () => { device.queue.submit([device.createCommandEncoder().finish()]); await device.queue.onSubmittedWorkDone(); });
   let base = 0;
   const part = async (o) => {
-    const w = await qwen4expWeights(G, src.bytesOf, { ...o, qsa: false, experts: out.experts || null }, (done) => onProgress(base + done, total), up);
+    const w = await qwen4expWeights(G, bytesOf, { ...o, qsa: false, experts: out.experts || null }, (done) => onProgress(base + done, total), up);
     base += qwen4expShardBytes(G, { ...o, qsa: false }) - (o.hi > o.lo && dl.includes(o.lo) ? flashExpertBytes(G, o.lo) : 0);
     await flush();
     return w;
@@ -337,6 +357,9 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   if (weights.pleTable) out.ngram = await openNgramTable(src, G, log);
   const { Qwen4ExpEngine } = await import("../../engine/qwen4exp.js");
   const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null });
+  if (fl && process.env.POOLED_FASTLOAD_TRACE) fs.writeFileSync(process.env.POOLED_FASTLOAD_TRACE, JSON.stringify(fl.trace()));
+  fl?.close(); out.fastLoad = null;
+  log(`load: ${Object.entries(T).map(([k, v]) => `${k} ${v.toFixed(1)} s`).join(", ")}${fl ? ` (read ahead, ${fl.stats.repacked} tensors repacked on ${pool.threads} threads, ${(fl.stats.newBytes / 2 ** 30).toFixed(1)} GiB of shared buffers)` : ""}`);
   const fe = FlashRoomEngine.wrap(eng);
   out.flash = eng;   // the engine under the adapter (tests and benches: forwardToken, debugToken)
   log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB (weights${off ? " less the offloaded experts, the expert cache" : ""}, K/V, the CPU embedding, upload staging)${out.ngram ? ", the n-gram layer here" : ""}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
