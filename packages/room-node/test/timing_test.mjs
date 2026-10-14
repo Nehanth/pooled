@@ -7,10 +7,12 @@ test("room node passes its optional timing observer to the shared worker pipelin
   const records = [], node = new RoomNode({ pledgeGB: 6, ckptDisk: false, onTiming: (r) => records.push(r) });
   Object.assign(node.ai, { role: "worker", hostId: "host", next: "host", range: [1, 2],
     engine: { runHidden: async (h) => h } });
-  const sent = []; node.sendHidden = (_, d) => sent.push(d);
+  const sent = [], telemetry = []; node.sendHidden = (_, d) => sent.push(d);
+  node.teleNote = (kind, ms, n) => { assert.ok(Number.isFinite(ms)); telemetry.push([kind, n]); };
   await node.aiOnData("host", { t: "ai-hidden", pos: 7, ...packWire(Float32Array.of(8)) });
   await node.ai.q;
   assert.equal(sent[0].t, "ai-hiddenret");
+  assert.deepEqual(telemetry, [["one", 1]]);
   assert.equal(records.length, 1);
   assert.equal(records[0].phase, "worker");
   assert.equal(records[0].status, "forwarded");

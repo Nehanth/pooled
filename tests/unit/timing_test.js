@@ -35,12 +35,15 @@ for (const profile of ["browser", "node"]) {
         runHidden: async (h) => { calls.push("single"); return h.map((x) => x + 1); },
         runHiddenBatch: async (h) => { calls.push("batch"); return h.map((x) => x + 1); },
       };
-      const p = createPipeline({ state: ai, options: { profile }, hooks: { onTiming },
+      const telemetry = [];
+      const p = createPipeline({ state: ai, options: { profile }, hooks: { onTiming,
+        teleNote(kind, ms, n) { ok(Number.isFinite(ms) && ms >= 0); telemetry.push([kind, n]); } },
         transport: { sendTo() {}, sendHidden: (_, d) => sent.push(d) } });
       for (const d of [frame(0, { reset: 1 }),
         { t: "ai-hidden-b", basePos: 1, n: 5, spec: 1, rb: 0, sv: 1, ...packWire(new Float32Array(5)) }, frame(1)]) p.handleFrame("host", d);
       await ai.q;
-      return { sent, calls };
+      eq(telemetry, [["one", 1], ["spec", 5], ["one", 1]]);
+      return { sent, calls, telemetry };
     }
     const baseline = await run(null), records = [];
     eq(await run((r) => records.push(r)), baseline);
