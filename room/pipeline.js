@@ -15,9 +15,14 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
     mtpBatch: MTP_BATCH = true, tailFrame: TAIL_FRAME = true, prefillWindow = 6, prefillLapMs: PREFILL_LAP_MS = 90000 } = options;
   // a prompt frame's timeout: the base, and n columns at the slowest recent lap (a device stepping one column at a
   // time), at most PREFILL_LAP_CAP bases (lapStat.max fades slowly: one cold or stalled lap must not hold a dead device
-  // unreported for many minutes)
-  const PREFILL_LAP_CAP = 4;
-  const frameMs = (n) => Math.min(PREFILL_LAP_MS + n * (ai.lapStat?.max || 0), PREFILL_LAP_CAP * PREFILL_LAP_MS);
+  // unreported for many minutes). Frames wider than CAP_COLS scale the base and the cap by their width (a host whose
+  // layers read experts from disk sends 4096-column frames: room/flash.js diskFrames), which a device stepping one
+  // column at a time takes minutes over (~270 s at 15 tok/s) whatever the decode laps were
+  const PREFILL_LAP_CAP = 4, CAP_COLS = 256;
+  const frameMs = (n) => {
+    const k = Math.max(1, n / CAP_COLS);
+    return Math.min(k * PREFILL_LAP_MS + n * (ai.lapStat?.max || 0), k * PREFILL_LAP_CAP * PREFILL_LAP_MS);
+  };
   const PREFILL_WINDOW = Number.isFinite(prefillWindow) ? Math.max(1, Math.floor(prefillWindow)) : 6;
   const { onStatus: aiStatus = () => {}, computePass = () => {}, teleNote = () => {},
     wakeChain = () => {}, keepWarm = () => {}, onFrame = () => {}, prefillFrame = () => undefined,
