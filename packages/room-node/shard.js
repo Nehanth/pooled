@@ -13,7 +13,7 @@ import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizer
   ggmlLayerNames, qwen35NamesFor, qwen4expConfig, qwen4expNamesFor, qwen4expWeights, qwen4expShardBytes, QWEN4EXP_HEAD } from "../../engine/gguf.js";
 import { ngramConfig, NgramTable, fileReadAt, httpReadAt } from "../../engine/ngram.js";
 import { FlashRoomEngine, flashBatchCols, flashBatchScratch, qwen4expBatchBytes } from "../../room/flash.js";
-import { hostMemory, qsaAlways, flashBatchMode, flashRegionForced } from "./env.js";
+import { hostMemory, qsaAlways, flashBatchMode, flashRegionForced, flashLayered } from "./env.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { maxSeqFor, kvModeFor, flashRoomMem, ckptSlotsAt, flashLoadOpts } from "../../room/models.js";
 import { QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
@@ -382,7 +382,8 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   }
   const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
   if (weights.pleTable) out.ngram = await openNgramTable(src, G, log);
-  let noBatch = batch === "off" ? "POOLED_FLASH_BATCH=0" : dl.length ? `layers ${dl[0]}-${dl[dl.length - 1]} read their experts from disk` : null;
+  // (disk layers batch too: a pass reads each one's experts from its file into the region, engine/qwen4exp_batch.js)
+  let noBatch = batch === "off" ? "POOLED_FLASH_BATCH=0" : null;
   let expertRegion = false, batchCols = flashBatchCols(solo, q?.ring), scratch = 0;
   const gb = (n) => (n / 2 ** 30).toFixed(2);
   // real memory, as the check above, with extra bytes on the GPU
@@ -434,7 +435,7 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   if (!noBatch) {
     const { Qwen4ExpBatch } = await import("../../engine/qwen4exp_batch.js");
     // created now: its pipelines compile during the load, not on the first prompt
-    pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: batchCols, verifyCols: 1, exact: batch === "exact" });
+    pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: batchCols, verifyCols: 1, exact: batch === "exact", ...(flashLayered() ? {} : { layeredCols: 0 }) });
     out.batchBytes = qwen4expBatchBytes(pb);
   }
   const fe = FlashRoomEngine.wrap(eng, { batch: pb });

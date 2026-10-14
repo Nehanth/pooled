@@ -654,13 +654,15 @@ export function modelLoadOptions(search) {
   // table copied on the main thread (after the experts'). The experts' first save (room/flashdisk.js expertTierCopy):
   // saveworkers=N copies in N workers (0: on the main thread, as before), savechunk / saveahead: experts a read and
   // reads in flight per worker, saveearly=0: the save waits for the GPU step even in workers; cdnresolve=0: every
-  // range request goes through the model's URL (Hugging Face's 302) instead of the CDN URL it redirected to
+  // range request goes through the model's URL (Hugging Face's 302) instead of the CDN URL it redirected to;
+  // diskbatch=0: a tab whose layers read experts from its disk reads prompts one column at a time, as before;
+  // layered=0: its batched prompt passes go pass after pass through every layer (each disk layer read once a pass)
   const int = (k, d, lo = 0, hi = 64) => { const v = parseInt(q.get(k) ?? "", 10); return Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : d; };
   return { wcache: q.get("wcache") !== "0", wcacheVerify: q.get("wcacheverify") === "1",
     prefetch: prefetch === null ? null : Math.max(0, parseInt(prefetch, 10) || 0),
     parload: q.get("parload") !== "0", ngramWorker: q.get("ngramworker") !== "0",
     save: { workers: int("saveworkers", SAVE_WORKERS), chunk: int("savechunk", 8, 1, 64), ahead: int("saveahead", 3, 1, 16), early: q.get("saveearly") !== "0" },
-    cdnResolve: q.get("cdnresolve") !== "0" };
+    cdnResolve: q.get("cdnresolve") !== "0", diskBatch: q.get("diskbatch") !== "0", layered: q.get("layered") !== "0" };
 }
 
 export const MAX_NEW = 400;    // longest answer, tokens
