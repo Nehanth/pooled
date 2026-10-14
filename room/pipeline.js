@@ -337,9 +337,10 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
       };
       try {
         // Node hosts can send wide prompt frames through every device's prefill kernels.
-        // The caller supplies its environment override; browser host framing stays unchanged.
-        const F = node && ai.chain.length && !slow && current.engine.prefillHidden && current.engine.prefillFrame?.() > 0
-          ? +(prefillFrame() || current.engine.prefillFrame()) || 0 : 0;
+        // The caller supplies its environment override. A browser host sends them only when its own layers read
+        // experts from disk (engine.diskFrames: its frames then run layer by layer, each disk layer read once a frame)
+        const F = (node || current.engine.diskFrames) && ai.chain.length && !slow && current.engine.prefillHidden && current.engine.prefillFrame?.() > 0
+          ? +((node && prefillFrame()) || current.engine.prefillFrame()) || 0 : 0;
         while (F && ids.length - 1 - i >= 2 * NC && !aborted()) {
           const n = Math.min(F, ids.length - 1 - i), basePos = ai.pos;
           await send(await current.engine.prefillHidden(ids.slice(i, i + n), basePos), basePos, i, n);
