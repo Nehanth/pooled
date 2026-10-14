@@ -29,7 +29,8 @@ export function deviceKind(meta = {}, self = false) {
 
 // How much a model needs in this room: the whole deal's bytes at the context the node opens it with
 // (roomBytes), else room/models.js NEED_GB for a model without a SHAPE
-const needAt = (lib, key, ctx) => { const rb = lib.roomBytes(key, ctx, "f16"); return rb ? r1((rb.L * rb.layerBytes + rb.hostBytes) / GiB) : null; };
+// rounded up to a tenth of a GiB, as room/models.js NEED_GB (the room page's number for the same model)
+const needAt = (lib, key, ctx) => { const rb = lib.roomBytes(key, ctx, "f16"); return rb ? Math.ceil((rb.L * rb.layerBytes + rb.hostBytes) / GiB * 10 - 1e-9) / 10 : null; };
 export function modelNeedGB(lib, key, ctxAsk = 0) {
   return needAt(lib, key, lib.nodeCtxFor(key, ctxAsk)) ?? lib.NEED_GB[key] ?? null;
 }
@@ -72,7 +73,8 @@ export function roomFitNow(lib, { model, devices, ctxAsk = 0, spareGB = [] }) {
       note: fits ? "" : `This room is ${shortGB} GB short for ${label}: add a device or raise a pledge.` };
   }
   const off = (rb) => (lib.offloadFor ? lib.offloadFor(devices.map((d) => d.meta), rb.experts || rb.expertBytes || 0, model) : null);
-  const fitAt = (c) => { const rb = lib.roomBytes(model, c, "f16"); return lib.roomFit(rb.L, pl.map((g) => g * GiB), rb.layerBytes, rb.hostBytes, off(rb)); };
+  // (rb.layerCost: Qwen3.8-Flash-Next's per-layer bytes, room/models.js flashLayerCost, which roomFit takes in place of one size)
+  const fitAt = (c) => { const rb = lib.roomBytes(model, c, "f16"); return lib.roomFit(rb.L, pl.map((g) => g * GiB), rb.layerCost || rb.layerBytes, rb.hostBytes, off(rb)); };
   const pick = lib.pickCtx ? lib.pickCtx(model, { want, ask: ctxAsk, fitsAt: (c) => fitAt(c).fits }) : { ctx: want, want, fellBack: false };
   const fb = modelFallback(lib, model, ctxAsk);
   const base = { needGB, minGB: fb?.needGB ?? null, haveGB, ctx: pick.ctx, want, fellBack: !!pick.fellBack,
@@ -406,7 +408,7 @@ export function dealPreview(s, lib) {
   const rb = lib.roomBytes(s.model, s.fit.ctx || lib.nodeCtxFor(s.model, s.ctxAsk || 0), "f16");
   if (!rb) return null;
   const gpu = s.devices.filter((d) => d.gb > 0);
-  const deal = lib.dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges: gpu.map((d) => d.gb * GiB),
+  const deal = lib.dealRoom({ L: rb.L, layerBytes: rb.layerBytes, layerCost: rb.layerCost || null, hostBytes: rb.hostBytes, pledges: gpu.map((d) => d.gb * GiB),
     mode: s.splitMode === "memory" ? "memory" : "speed", phone: gpu.map((d) => d.kind === "phone"),
     ngram: lib.ngramFor && lib.ngramOf ? lib.ngramFor(gpu.map((d) => d.meta), lib.ngramOf(s.model)) : null });
   if (!deal?.used?.length) return null;

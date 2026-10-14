@@ -29,7 +29,7 @@ Deno.test("flash profile: no region, Flash's own K / V, state and checkpoint row
   eq([p.nExp, p.K, p.region, p.ckptTokens], [512, 10, false, FLASH_CKPT_TOKENS]);
   eq(p.kvPos, 1024, "2 KV heads x 256 x f32 x K+V on 12 of 48 layers");
   eq(p.state, (48 * 128 * 128 * 4 + (2 * 16 * 128 + 6144) * 3 * 4) * 36 / 48, "the DeltaNet layers' S and conv window, averaged");
-  eq(flashOffload(SHAPE[F].flash), { kvPos: p.kvPos, state: p.state, work: p.work, region: false, ckptTokens: FLASH_CKPT_TOKENS, K: 10 });
+  eq(flashOffload(SHAPE[F].flash), { kvPos: p.kvPos, state: p.state, work: p.work, region: false, byLayer: true, ckptTokens: FLASH_CKPT_TOKENS, K: 10 });
   eq(p.slices.length, 48);
 });
 

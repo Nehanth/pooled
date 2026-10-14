@@ -1,11 +1,16 @@
 // Model catalogue for the room: URLs, layer counts, memory needs, context length.
+import { qwen4expMemory, QSA_RAW_RING } from "../engine/qwen4exp_mem.js";
+import { qwen4expConfig, qwen4expShardBytes } from "../engine/gguf.js";
+import { OFFLOAD_CKPT_SLOTS } from "./plan.js";
 
 // GB each model needs at its default context (the picker's "needs N GB"); NEED_MIN_GB: what a model
 // with a fallback context (CTX[model].fallback) needs there, the least a room can start it with
 export const NEED_GB = { "qwen3-0.6b": 0.8, "qwen3-1.7b": 5.6, "qwen3-4b": 4.6, "qwen3.8-27b": 17.0, "qwen3.6-35b-moe": 22.5, "qwen3.5-122b-moe": 72.0,
-  // Qwen3.8-Flash-Next: its 48 layers, the embedding and the head (71.8 GB in the file); the 28.8 GB n-gram table is
-  // not GPU memory (it stays on the disk of the device holding layer 1: SHAPE ngram, room/plan.js dealRoom)
-  "qwen3.8-flash": 74.5, "smollm-135m": 0.6 };
+  // Qwen3.8-Flash-Next: its 48 layers with their state at the default context, the embedding and the head, from the
+  // planner's own costs (roomBytes at CTX def: set at the end of this file, flashLayerCost), in GiB (2^30, the unit the
+  // pledges are in: 67.1 is 72.05e9 bytes, what the old fixed 72.0 decimal GB was within 0.2%); the 28.8 GB n-gram table
+  // is not GPU memory (it stays on the disk of the device holding layer 1: SHAPE ngram, room/plan.js dealRoom)
+  "qwen3.8-flash": 0, "smollm-135m": 0.6 };
 export const NEED_MIN_GB = { "qwen3-1.7b": 4.0 };
 
 // What the model host holds besides its layers, in bytes, from the file's own tensor sizes: the
@@ -77,18 +82,20 @@ function flashMeta(M) {
 }
 // Expert offload's extra sizes for Qwen3.8-Flash-Next (room/plan.js offloadSpare, expertSizes), from flashMeta's fields:
 //   kvPos   K + V in f32 (the phase-1 engine), 2 x nKV x headDim x 4 per QSA layer and position, averaged over the layers
-//   state   a DeltaNet layer's S and conv window, averaged (the QSA layers have none)
+//   state   a DeltaNet layer's S and conv window, averaged (the QSA layers have none): speculation's rollback copy
 //   work    the engine's working buffers (offloadWork by the hidden size)
 //   region  false: engine/qwen4exp.js builds its expert store without the whole-layer region (decode one token at a
 //           time: a cut never holds more than K experts), so the deal must not set one aside
-//   ckptTokens  the checkpoints' KV rows: 8 slots of at most 2048 positions, not the Qwen 3.5 rooms' 32k
+//   byLayer the checkpoints' part comes from the room's per-layer costs (flashLayerCost: its offVram / offRam, the
+//           shared flashCkptReserve), not from kvPos x ckptTokens, whenever the deal has them
+//   ckptTokens  without per-layer costs (a deal given one number per layer): 8 slots of at most 2048 positions
 //   K       experts a token picks (10 of 512): room/plan.js tabDiskCost
 export const FLASH_CKPT_TOKENS = 8 * 2048;
 export function flashOffload(f) {
   const s = f.ssm, dn = (f.L - f.qsa) / f.L;
   return { kvPos: 2 * f.nKV * f.headDim * 4 * f.qsa / f.L,
     state: (s.nVH * s.state * s.state * 4 + (2 * s.nKH * s.state + s.inner) * (s.convK - 1) * 4) * dn,
-    work: offloadWork(f.dim), region: false, ckptTokens: FLASH_CKPT_TOKENS, K: f.K || 10 };
+    work: offloadWork(f.dim), region: false, byLayer: true, ckptTokens: FLASH_CKPT_TOKENS, K: f.K || 10 };
 }
 // A Qwen3.5 / 3.6 layer's recurrent state, averaged over the layers (all but every full_attention_interval-th are
 // DeltaNet): S (nVH x dState x dState f32) and the conv window (3 x convDim f32), as engine/qwen35.js allocates them
@@ -113,6 +120,14 @@ function ssmMeta(dim, nVH, nKH, inner) {
   return { "qwen35.embedding_length": dim, "qwen35.ssm.state_size": 128, "qwen35.ssm.time_step_rank": nVH, "qwen35.ssm.group_count": nKH,
     "qwen35.ssm.inner_size": inner, "qwen35.full_attention_interval": 4 };
 }
+// Qwen3.8-Flash-Next's 48 layers' weights in bytes (SHAPE layers), eight a row
+const FLASH_LAYER_BYTES = [
+  1527552896, 1546189696, 1527552896, 1523539968, 1527552896, 1519688576, 1465416576, 1461157888,
+  1475124096, 1465416576, 1465416576, 1463001088, 1473280896, 1465416576, 1467259776, 1469267968,
+  1473280896, 1467259776, 1465416576, 1461157888, 1475124096, 1465416576, 1465416576, 1463001088,
+  1473280896, 1465416576, 1467259776, 1469267968, 1473280896, 1467259776, 1465416576, 1461157888,
+  1475124096, 1465416576, 1465416576, 1463001088, 1473280896, 1465416576, 1467259776, 1469267968,
+  1473280896, 1475124096, 1475124096, 1471111168, 1475124096, 1475124096, 1475124096, 1471111168];
 // Each picker model's shape, from its GGUF header (the host reads the same numbers from the file at
 // Start, so these only let the picker say before Start whether the room's pledges hold the model):
 // L layers; layer = one layer's weights (the largest group's average for the hybrids); kvPos = K+V
@@ -127,13 +142,13 @@ export const SHAPE = {
   "qwen3.5-122b-moe": { kind: "qwen35", L: 48, layer: 1485116672, kvPos: { f16: 512, q8: 288 }, embed: 429096960, out: 625766400, mtp: 2682195968, exp: 1409286144,
     park: { nExp: 256, runs: [[6, expertSlices(1024, 3072, [Q4, Q4, Q41])], [42, expertSlices(1024, 3072, [Q4, Q4, Q4])]] }, meta: ssmMeta(3072, 64, 16, 8192) },
   // Qwen3.8-Flash-Next (llama.cpp arch qwen4exp; roadmap/33), bartowski Q4_0 (three files), read from its headers:
-  // layer: layers 0-3's average without QSA's indexer, the size room.js aiStart measures from the header
-  // (qwen4expShardBytes over [0, 4) / 4), so the picker's need is the one Start checks. It must go with exp (also
-  // layers 0-3's): the planner keeps layer - exp on the GPU for every offloaded layer, and the file's whole average
-  // (1.476 GB) less exp left ~10 MB a layer where the file has 50-63 MB, so the picker said Flash fit in 5.7 GB of
-  // GPU memory and Start, at ~8 GB, refused it. Layers 0-5 carry Q4_1 down experts, so this is a little over the
-  // average: dealRoom has one layerBytes for every layer, and the heavier front is what the host holds. kvPos: the 12 QSA layers'
-  // K+V, 2 KV heads x 256, kept in f32 by the phase-1 engine (engine/qwen4exp.js, PR #346), so 4 KB per QSA layer and
+  // layer: layers 0-3's average without QSA's indexer (qwen4expShardBytes over [0, 4) / 4), which goes with exp (also
+  // layers 0-3's) wherever one size per layer is still read (#386: the file's whole average less exp left ~10 MB a layer
+  // on the GPU for an offloaded layer, so the picker said Flash fit where Start refused it). The room deals Flash by
+  // each layer's own cost (`layers` below, flashLayerCost: layer 0 is 1.528 GB, layer 1 with the PLE block 1.546 GB,
+  // layers 0-5 carry Q4_1 down experts, plus each layer's own state at the room's context), not by this one size, and
+  // the picker and Start compute those costs the same way (from SHAPE or from the header). kvPos: the 12 QSA
+  // layers' K+V, 2 KV heads x 256, kept in f32 by the engine (engine/qwen4exp.js), so 4 KB per QSA layer and
   // position, 1 KB averaged over 4 (the room's KV format stays "f16": kvModeFor); out: output.weight and the head's
   // HC mixer (output_hc_*); exp / park: 512 experts of 2560 x 640, layers 0-5 with Q4_1 down experts (parked as Q8).
   // hDim: the 4-stream hyper-connection residual (4 x 2560) is what crosses devices (room/pipeline.js wireDim).
@@ -143,8 +158,16 @@ export const SHAPE = {
   "qwen3.8-flash": { kind: "qwen4exp", L: 48, layer: 1531208864, kvPos: { f16: 1024 }, embed: 357580800, out: 534620160, mtp: 0, exp: 1468006400,
     park: { nExp: 512, runs: [[6, expertSlices(640, 2560, [Q4, Q4, Q41])], [42, expertSlices(640, 2560, [Q4, Q4, Q4])]] }, meta: ssmMeta(2560, 48, 16, 6144),
     hDim: 10240, ngram: { layer: 1, bytes: 28800138240 }, pleState: 10 * 10240 * 4,
-    // flashOffload's fields (expert offload: room/plan.js), from the header (flashMeta)
-    flash: { L: 48, qsa: 12, K: 10, dim: 2560, nKV: 2, headDim: 256, ssm: { state: 128, nVH: 48, nKH: 16, inner: 6144, convK: 4 } } },
+    // flashOffload's fields (expert offload: room/plan.js), from the header (flashMeta); iv (every iv-th layer is QSA)
+    // and ple (the n-gram layer's ring) for flashCfgOf, which sizes the state without a header (flashRoomMem)
+    flash: { L: 48, qsa: 12, K: 10, dim: 2560, nKV: 2, headDim: 256, iv: 4, ssm: { state: 128, nVH: 48, nKH: 16, inner: 6144, convK: 4 },
+      ple: { layers: [1], ngram: 3, convK: 4 } },
+    // layers: each layer's weights as the room loads them (qwen4expShardBytes of [i, i+1), no QSA indexer), from the
+    // header (tests/unit/flash_mem_test.js checks them against tests/fixtures/q38flash): layers 0-5 carry Q4_1 down
+    // experts (+50-80 MB), layer 1 the PLE block. indexer: what loading QSA adds to each QSA layer (its indexer);
+    // layerExp: each layer's routed experts in the file, in runs (expertBytesOf: 6 x Q4_1-down layers, then 42): what
+    // offloading that layer takes off the GPU (room/plan.js offloadAt), where `exp` is layers 0-3's average
+    layers: FLASH_LAYER_BYTES, indexer: 3277824, layerExp: [[6, 1468006400], [42, 1415577600]] },
 };
 // The width of the hidden state that crosses devices, in floats: the model's hidden size, or for Qwen3.8-Flash-Next
 // its 4-stream residual (SHAPE hDim). 0 when SHAPE does not say (the room reads it from the engine: wire.js wireDim).
@@ -172,10 +195,147 @@ export function expertBytesOf(G, lo, hi) {
 // { L, layerBytes, hostBytes, expertBytes } for a room running `model` at `ctx` positions with `kv` format, or
 // null for a model without a SHAPE (the picker then falls back to NEED_GB). expertBytes: 0 for a dense model;
 // experts: the MoE models' offload profile (expertsOf), else null.
+// Qwen3.8-Flash-Next also has layerCost: each layer's own bytes at ctx (flashLayerCost, the engine's K / V format: its
+// `kv` here is the room's protocol field, which stays "f16" for Flash), which every deal and fit check takes in place
+// of layerBytes (room/plan.js roomFit, dealRoom); layerBytes is then their average, so L x layerBytes is still the
+// layers' total. Memoized per (model, ctx, kv): the picker asks on every room update (minFitPledge probes ~24 times).
+const rbMemo = new Map();
 export function roomBytes(model, ctx, kv = "f16") {
   const s = SHAPE[model]; if (!s) return null;
-  return { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0,
+  const k = `${model}|${ctx}|${kv}`;
+  if (rbMemo.has(k)) return rbMemo.get(k);
+  let out;
+  if (s.flash) {
+    const layerCost = flashLayerCost(s, ctx);
+    out = { L: s.L, layerBytes: layerCost.total / s.L, layerCost, hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0, experts: parkProfile(s) || null };
+  } else out = { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0,
     experts: parkProfile(s) || null };
+  // one object for every caller (the picker's probes, the deal, the cards): frozen, so no caller changes another's
+  // (layerCost is a typed array, which can't be frozen: flashLayerCost's memo, read-only by contract too)
+  if (out.experts) Object.freeze(out.experts);
+  Object.freeze(out);
+  if (rbMemo.size > 256) rbMemo.clear();
+  rbMemo.set(k, out);
+  return out;
+}
+
+// ---------------- Qwen3.8-Flash-Next's memory in a room: one model for every caller ----------------
+// The planner (room/plan.js through roomBytes / flashLayerCost), the room page's deal (room.js aiStart), the room
+// node's deal and context pick (packages/room-node/roomnode.js), its load-time check (shard.js flashShardBytes), the
+// picker (room.js roomFitFor, minFitPledge, NEED_GB) and the expert-offload spare (room/plan.js offloadSpare) all size
+// Flash's per-sequence state with engine/qwen4exp_mem.js qwen4expMemory, through flashRoomMem.
+// The dense engine's longest context: QSA's selection equals dense attention below 2052 cells (engine/wgsl/qsa.js), and
+// the rooms load without the indexer up to here (CTX "qwen3.8-flash")
+export const FLASH_DENSE_CTX = 2048;
+// Checkpoints at long context: one slot of a 32K room's state is ~0.8 GB per device, so a fixed slot count stops being
+// a small thing. Every Flash device of a room past FLASH_DENSE_CTX keeps CKPT_RESERVE_SLOTS slots (one answer, one pinned
+// prefix) of its range's state at the room's context in its deal (flashLayerCost); more come from slack at run time.
+// At FLASH_DENSE_CTX and below the deal reserves nothing for them (as before), except on a device that offloads experts:
+// OFFLOAD_CKPT_SLOTS slots of 2048 positions (room/plan.js offloadSpare, FLASH_CKPT_TOKENS), once, from these costs.
+export const CKPT_RESERVE_SLOTS = 2;
+// the checkpoint tokens a device keeps room for past FLASH_DENSE_CTX: the reserve's two slots of the room's context
+export const CKPT_TOKEN_CAP = (ctx) => 2 * ctx;
+// the slots a deal reserves in each layer's cost at ctx
+export const ckptSlotsAt = (ctx) => (ctx > FLASH_DENSE_CTX ? CKPT_RESERVE_SLOTS : 0);
+
+// qwen4expConfig's fields that qwen4expMemory reads, from SHAPE's flash entry (no header: the picker)
+export function flashCfgOf(f, hDim = 4 * f.dim) {
+  return { L: f.L, hDim, nKVHeads: f.nKV, headDim: f.headDim, qsa: Array.from({ length: f.L }, (_, i) => (i + 1) % (f.iv || 4) === 0),
+    ssm: { convK: f.ssm.convK, stateSize: f.ssm.state, nKHeads: f.ssm.nKH, nVHeads: f.ssm.nVH, inner: f.ssm.inner },
+    ple: f.ple ? { layers: f.ple.layers.slice(), ngram: f.ple.ngram, convK: f.ple.convK } : null };
+}
+// A Flash source as { cfg, weights (per layer, no indexer), indexer (per layer: what QSA's indexer adds) }, from a model
+// key or its SHAPE entry (the picker), a GGUF header (G: { meta, tensors }; the room page and the room node read it
+// at Start, the loaders at load), or a bare qwen4expConfig (no weights: flashRoomMem only)
+const srcMemo = new WeakMap();
+function flashSrc(src) {
+  if (typeof src === "string") src = SHAPE[src];
+  if (!src || typeof src !== "object") throw new Error("flashSrc: not a Qwen3.8-Flash-Next source");
+  if (srcMemo.has(src)) return srcMemo.get(src);
+  let out;
+  if (src.flash) {
+    const cfg = flashCfgOf(src.flash, src.hDim);
+    out = { cfg, weights: src.layers || null, indexer: cfg.qsa.map((q) => (q ? src.indexer || 0 : 0)),
+      experts: src.layerExp ? src.layerExp.flatMap(([n, b]) => Array(n).fill(b)) : null };
+  } else if (src.meta && src.tensors) {
+    const cfg = qwen4expConfig(src.meta), w = [], ix = [], ex = [];
+    for (let i = 0; i < cfg.L; i++) {
+      const o = { lo: i, hi: i + 1, hasEmbed: false, hasHead: false };
+      w.push(qwen4expShardBytes(src, { ...o, qsa: false }));
+      ix.push(qwen4expShardBytes(src, { ...o, qsa: true }) - w[i]);
+      ex.push(expertBytesOf(src, i, i + 1));
+    }
+    out = { cfg, weights: w, indexer: ix, experts: ex };
+  } else if (Array.isArray(src.qsa) && src.ssm) out = { cfg: src, weights: null, indexer: null };
+  else throw new Error("flashSrc: not a Qwen3.8-Flash-Next source");
+  srcMemo.set(src, out);
+  return out;
+}
+// The state a Flash device keeps for one sequence at ctx: qwen4expMemory on that source, plus a checkpoint reserve.
+// opts: kv ("f32": the engine's default), qsa (the indexer's state; default: past FLASH_DENSE_CTX, as the rooms load),
+// ring (rawK ring rows), range ([lo, hi): the device's layers; the whole model by default), ckptSlots (checkpoint slots
+// of this state to reserve; 0 by default).
+// -> qwen4expMemory's { ctx, kv, bytes, state, total, perToken, ... } plus reserve (ckptSlots x state) and need
+// (total + reserve: what the device sets aside for it)
+export function flashRoomMem(src, ctx, { kv = "f32", qsa = ctx > FLASH_DENSE_CTX, ring = QSA_RAW_RING, range = null, ckptSlots = 0 } = {}) {
+  const m = qwen4expMemory(flashSrc(src).cfg, { ctx, kv, qsa, rawRing: ring, layerRange: range });
+  const reserve = ckptSlots * m.state;
+  return { ...m, reserve, need: m.total + reserve };
+}
+// The checkpoint reserve of a device holding `range` at ctx: `slots` copies of that range's state (flashRoomMem)
+export function flashCkptReserve(src, range, ctx, slots = CKPT_RESERVE_SLOTS, opts = {}) {
+  return slots * flashRoomMem(src, ctx, { ...opts, range }).state;
+}
+// Each layer's bytes in a Flash room at ctx: its weights (with the QSA indexer when qsa), its state at ctx (QSA layers
+// their K / V, rawK and pooled keys; DeltaNet layers their fixed S and conv window; the n-gram
+// layer its ring), and its share of the checkpoint reserve (ckptSlotsAt(ctx) copies of its state). So a range's bytes
+// are the sum of its layers' plus the score scratch once (room/plan.js costOf cuts ranges on these), and a range of
+// three DeltaNet layers costs what it does, not three averages. opts: as flashRoomMem (kv, qsa, ring), slots (the reserve: ckptSlotsAt(ctx) by default).
+// -> Float64Array(L) with: total (the sum and once), once / onceAt (the QSA score scratch, one per device: its bytes, and
+// the layers whose range keeps it), ctx, slots, weights / state / experts (per layer; experts: its routed
+// experts in the file, what offloading it takes off the GPU: room/plan.js offloadAt), and what a device that offloads
+// keeps past these per layer (room/plan.js offloadSpare, once): offVram (its checkpoints' VRAM: OFFLOAD_CKPT_SLOTS
+// slots of 2048 positions at FLASH_DENSE_CTX and below; 0 past it, where the reserve is in the cost already) and offRam
+// (one checkpoint's copy in RAM on its way to disk: FLASH_CKPT_TOKENS / 2 positions at FLASH_DENSE_CTX and below, the
+// room's context past it: CKPT_TOKEN_CAP / 2)
+// What a room page's model host keeps free past its layers while it loads Flash: Dawn's upload staging of its biggest
+// layer and the engine's scratch, the terms a room node's load check counts on top of its deal (packages/room-node/
+// shard.js flashShardBytes). A tab has no load-time check, so a tab host's deal sets them aside with the embedding and
+// the head (room.js aiStart and roomFitFor; a room node or pooled host does not: its load check refuses instead)
+// offloaded: the host offloads every layer it holds, so their experts are not staged (flashShardBytes offLayers): the
+// biggest layer's other weights (room/plan.js dealWithHostMargin picks)
+export const FLASH_SCRATCH = 64 * 2 ** 20;
+export function flashTabHostMargin(src, offloaded = false) {
+  const S = flashSrc(src), w = S.weights || [];
+  return Math.max(0, ...w.map((b, i) => b - (offloaded ? S.experts?.[i] || 0 : 0))) + FLASH_SCRATCH;
+}
+const costMemo = new WeakMap();
+export function flashLayerCost(src, ctx, { kv = "f32", qsa = ctx > FLASH_DENSE_CTX, ring = QSA_RAW_RING, slots = ckptSlotsAt(ctx) } = {}) {
+  const S = flashSrc(src), key = `${ctx}|${kv}|${qsa}|${ring}|${slots}`;
+  let per = costMemo.get(S);
+  if (!per) costMemo.set(S, per = new Map());
+  if (per.has(key)) return per.get(key);
+  const { cfg } = S, L = cfg.L;
+  if (!S.weights) throw new Error("flashLayerCost: the source has no per-layer weights");
+  const out = new Float64Array(L), weights = new Float64Array(L), state = new Float64Array(L), offVram = new Float64Array(L), offRam = new Float64Array(L);
+  const onceAt = new Uint8Array(L);
+  let once = 0;
+  const dense = ctx <= FLASH_DENSE_CTX;
+  for (let i = 0; i < L; i++) {
+    const r = [i, i + 1];
+    const m = qwen4expMemory(cfg, { ctx, kv, qsa, rawRing: ring, layerRange: r });
+    weights[i] = S.weights[i] + (qsa ? S.indexer?.[i] || 0 : 0);
+    state[i] = m.state;
+    // the QSA score scratch is one buffer per device, not per layer: `once`, counted once in a range that holds a QSA
+    // layer (room/plan.js costOf), as the load check counts it (flashRoomMem over the range)
+    out[i] = weights[i] + m.state + slots * m.state;
+    if (m.bytes.scores > 0) { onceAt[i] = 1; once = Math.max(once, m.bytes.scores); }
+    offVram[i] = dense ? OFFLOAD_CKPT_SLOTS * qwen4expMemory(cfg, { ctx: FLASH_DENSE_CTX, kv, qsa, rawRing: ring, layerRange: r }).state : 0;
+    offRam[i] = qwen4expMemory(cfg, { ctx: dense ? FLASH_CKPT_TOKENS / 2 : CKPT_TOKEN_CAP(ctx) / 2, kv, qsa, rawRing: ring, layerRange: r }).state;
+  }
+  Object.assign(out, { total: out.reduce((a, b) => a + b, 0) + once, once, onceAt, ctx, slots, weights, state, offVram, offRam, ...(S.experts ? { experts: Float64Array.from(S.experts) } : {}) });
+  per.set(key, out);
+  return out;
 }
 
 // The whole weights file per picker model, in GB (the GGUF's size on Hugging Face). A room splits it:
@@ -378,3 +538,7 @@ export function modelLoadOptions(search) {
 export const MAX_NEW = 400;    // longest answer, tokens
 export const MAX_NEW_THINKING = 1200;   // with thinking on, the think block comes out of the same budget
 export const MIN_ROOM = 32;    // a prompt must leave at least this many tokens for the answer
+
+// Flash's "needs N GB": the planner's own bytes at its default context (roomBytes: every layer's cost, the host's part),
+// rounded up to a tenth, so the picker's number follows the memory model instead of a fixed figure
+NEED_GB["qwen3.8-flash"] = (() => { const rb = roomBytes("qwen3.8-flash", CTX["qwen3.8-flash"].def); return Math.ceil((rb.L * rb.layerBytes + rb.hostBytes) / 2 ** 30 * 10 - 1e-9) / 10; })();
