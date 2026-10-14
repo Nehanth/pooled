@@ -7,7 +7,7 @@
 import { qwen4expMemory } from "../../engine/qwen4exp_mem.js";
 import { parseGGUFHeader, qwen4expConfig, qwen4expShardBytes } from "../../engine/gguf.js";
 import { SHAPE, NEED_GB, CTX, roomBytes, expertBytesOf, ngramOf, mergeSplitHeaders, flashCfgOf, flashRoomMem, flashLayerCost, flashCkptReserve, flashTabHostMargin, FLASH_SCRATCH,
-  ckptSlotsAt, CKPT_RESERVE_SLOTS, CKPT_TOKEN_CAP, FLASH_DENSE_CTX, FLASH_CKPT_TOKENS } from "../../room/models.js";
+  ckptSlotsAt, CKPT_RESERVE_SLOTS, CKPT_TOKEN_CAP, FLASH_DENSE_CTX, FLASH_ROOM_QSA, FLASH_CKPT_TOKENS } from "../../room/models.js";
 import { costOf, layersTotal, layerCaps, roomFit, dealRoom, minFitPledge, offloadSpareOf, OFFLOAD_CKPT_SLOTS, dealWithHostMargin } from "../../room/plan.js";
 import { offloadFor, ngramFor, pledgeGB } from "../../room/pledge.js";
 import { readFixture, ggufFromFixture } from "../helpers/gguf_fixture.js";
@@ -52,9 +52,8 @@ Deno.test("flash mem: flashRoomMem is qwen4expMemory on the real config, from SH
       eq([r.reserve, r.need], [2 * want.state, want.total + 2 * want.state]);
       eq(flashCkptReserve(F, range, ctx, 2, { kv, qsa }), 2 * want.state);
     }
-  // the rooms' default: dense (no indexer state) up to FLASH_DENSE_CTX, QSA past it
-  eq(flashRoomMem(F, 2048).bytes.rawK, 0);
-  ok(flashRoomMem(F, 4096).bytes.rawK > 0);
+  // the rooms' default: QSA at every context, 2048 included (FLASH_ROOM_QSA: the rooms load it there, ai-load.flash)
+  ok(FLASH_ROOM_QSA && flashRoomMem(F, 2048).bytes.rawK > 0 && flashRoomMem(F, 4096).bytes.rawK > 0);
 });
 
 Deno.test("flash mem: flashLayerCost, each layer its own weights + state + reserve; SHAPE == header", () => {
@@ -62,7 +61,7 @@ Deno.test("flash mem: flashLayerCost, each layer its own weights + state + reser
     const a = flashLayerCost(F, ctx), b = flashLayerCost(G, ctx);
     eq(Array.from(a), Array.from(b), `${ctx}: the picker's costs are the host's`);
     eq([a.ctx, a.slots], [ctx, ckptSlotsAt(ctx)]);
-    const qsa = ctx > FLASH_DENSE_CTX;
+    const qsa = FLASH_ROOM_QSA;
     for (let i = 0; i < 48; i++) {
       const m = qwen4expMemory(cfg, { ctx, qsa, layerRange: [i, i + 1] });
       eq(a[i], SHAPE[F].layers[i] + (qsa && cfg.qsa[i] ? SHAPE[F].indexer : 0) + m.state + a.slots * m.state, `${ctx} layer ${i}`);
@@ -174,10 +173,11 @@ Deno.test("flash plan: the checkpoint reserve is counted once on a device that o
   const p = roomBytes(F, 2048).experts, n = 20, pos = 48;   // the PC's last 20 layers [28, 48)
   // at 2048: nothing reserved in the layers' costs, OFFLOAD_CKPT_SLOTS of 2048 positions in the offload spare (as
   // before: the averaged formula's number within a percent), exactly flashCkptReserve of its range
-  const c2 = flashLayerCost(F, 2048), C2 = costOf(c2);
+  // (a dense room's costs, qsa false, for the comparison with the averaged formula, which has no QSA)
+  const c2 = flashLayerCost(F, 2048, { qsa: false }), C2 = costOf(c2);
   eq(c2.slots, 0);
   const sp = offloadSpareOf(p, n, C2, pos), old = offloadSpareOf(p, n);
-  const ck = flashCkptReserve(F, [28, 48], 2048, OFFLOAD_CKPT_SLOTS);
+  const ck = flashCkptReserve(F, [28, 48], 2048, OFFLOAD_CKPT_SLOTS, { qsa: false });
   eq(Math.round(sp.vram), Math.round(p.work + n * p.state + ck));
   ok(Math.abs(sp.vram - old.vram) / old.vram < 0.01 && Math.abs(sp.ram - old.ram) / old.ram < 0.01, `${sp.vram} vs ${old.vram}, ${sp.ram} vs ${old.ram}`);
   eq(old.vram, p.work + n * (p.state * (1 + OFFLOAD_CKPT_SLOTS) + p.kvPos * FLASH_CKPT_TOKENS), "without per-layer costs: today's formula");
