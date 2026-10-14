@@ -350,6 +350,12 @@ export async function readManifest(dir) {
   } catch { return null; }
 }
 
+// Save a copy's manifest (dir: its OPFS path): through a writable, atomic on close
+export async function saveExpertManifest(dir, m) {
+  const w = await (await (await opfsDir(dir, true)).getFileHandle("manifest.json", { create: true })).createWritable();
+  await w.write(JSON.stringify(m)); await w.close();
+}
+
 // The OPFS writer for ingestExperts: one worker, a read-write sync access handle per layer file while it is written.
 // dir: the path from the OPFS root (default [EXPERT_OPFS_DIR, layout.key]). Asks for persistent storage (Chrome grants
 // or denies it without a prompt; denied, the copy can be evicted under storage pressure) -> the store, with persisted.
@@ -360,10 +366,7 @@ export async function opfsExpertStore(layout, { dir = [EXPERT_OPFS_DIR, layout.k
   return {
     dir, persisted,
     manifest: () => readManifest(dir),
-    async saveManifest(m) {
-      const w = await (await (await opfsDir(dir, true)).getFileHandle("manifest.json", { create: true })).createWritable();
-      await w.write(JSON.stringify(m)); await w.close();
-    },
+    saveManifest: (m) => saveExpertManifest(dir, m),
     open: (l, keep) => rpc.call(0, { op: "wopen", dir, name: name(l), keep }),
     write: (l, at, bytes) => { const buf = bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes.buffer : bytes.slice().buffer; return rpc.call(0, { op: "write", name: name(l), at, buf }, [buf]); },
     flush: (l) => rpc.call(0, { op: "flush", name: name(l) }),

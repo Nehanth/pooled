@@ -8,7 +8,7 @@ import { parseGGUFHeader, ggufWeights, ggufShardBytes, GGML_EMBED, GGML_OUTPUT, 
   from "../engine/gguf.js";
 import { ngramConfig, NgramTable, httpReadAt } from "../engine/ngram.js";
 import { NGRAM_OPFS_DIR, ngramDir, ngramContentSig, tabOffloadLayers, tabExpertTier, opfsResidentExperts, ingestNgram,
-  tabDiskGate, tabExpertBytes, expertTierCheck, expertTierCopy, expertTierOpen, expertStoreDeferred, ngramCheck } from "./flashdisk.js";
+  tabDiskGate, tabExpertBytes, expertTierCheck, expertTierCopy, expertTierOpen, expertStoreDeferred, ngramCheck, savePoolFor, protocolOf, onHttp1 } from "./flashdisk.js";
 import { partsTracker, runFlashParts } from "./flashload.js";
 import { FlashRoomEngine } from "./flash.js";
 import { planSteps, loadTracker } from "./loadsteps.js";
@@ -33,6 +33,8 @@ function tabDiskAskBytes(model, layers, range) {
 }
 // Whether layers [range[0], range[1]) of a qwen4exp model (c: qwen4expConfig) hold its n-gram (PLE) layer: the test
 // engine/gguf.js qwen4expWeights uses to return the table's reader (weights.pleTable), asked before the load
+// tensors a Flash tab's GPU step keeps in flight (room/model-loader.js planPrefetch; ?prefetch=N overrides)
+const FLASH_PREFETCH = 12;
 export const ngramLayerIn = (c, range) => !!c?.ple?.layers?.some((l) => l >= range[0] && l < range[1]);
 const flashLayerNames = (G, i) => Object.entries(qwen4expNamesFor(G, i)).filter(([k, v]) => typeof v === "string" && !QWEN4EXP_INDEXER.has(k)).map(([, v]) => v);
 
@@ -43,9 +45,11 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   // may write to its disk (else it reads its rows by HTTP range, 16 round trips a token); expertWorkers / expertRing:
   // the OPFS disk tier's reader workers and staging ring slots (room/flashdisk.js)
   // parload: a Flash tab runs its three parts at the same time (room/flashload.js; false: one after the other, as
-  // before); ngramWorker: the n-gram table's copy runs in a worker (false: on the main thread, after the experts')
+  // before); ngramWorker: the n-gram table's copy runs in a worker (false: on the main thread, after the experts');
+  // save: { workers, chunk, ahead, early } the experts' first save in workers (room/models.js modelLoadOptions;
+  // workers 0: on the main thread); cdnResolve: range reads follow the model host's redirect once (engine/ngram.js)
   const { wcache: WCACHE = true, wcacheVerify: WCACHE_VERIFY = false, prefetch = null, ngramIngest = true, expertWorkers = 4, expertRing = 64,
-    parload = true, ngramWorker = true } = options;
+    parload = true, ngramWorker = true, save: saveOpts = { workers: 0, chunk: 8, ahead: 3, early: true }, cdnResolve = true } = options;
   // Consent for this tab's disk (room/flashdisk.js): hooks.tabDisk() -> { tabDisk: what this tab advertises (meta.tabDisk),
   // choice: its user's answer ("allow" | "deny" | null) }; hooks.askDisk({ model, bytes, layers, ngramBytes }) ->
   // Promise<boolean>: ask the user (a worker whose deal needs its disk and who was not asked yet). Without them a tab
@@ -108,9 +112,10 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   const prefetcher = { url: null, list: [], at: new Map(), pending: new Map(), taken: new Set() };
   // (a split GGUF's tensors carry their own file's url: the list goes file by file, and every key names the file:
   // "<url>@<offset>")
-  function planPrefetch(url, infos) {
+  // ahead: tensors in flight for this load (the explicit prefetch flag and phones still win)
+  function planPrefetch(url, infos, ahead = 4) {
     clearPrefetch();
-    prefetcher.url = url;
+    prefetcher.url = url; prefetcher.ahead = ahead;
     prefetcher.list = infos.filter(Boolean).sort((a, b) => (a.shard || 0) - (b.shard || 0) || a.byteOffset - b.byteOffset);
     prefetcher.at = new Map(prefetcher.list.map((x, i) => [(x.url || url) + "@" + x.byteOffset, i]));
   }
@@ -122,7 +127,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   function rangeOf(url, info) {
     const lo = info.byteOffset, hi = info.byteOffset + info.byteLength - 1, u = info.url || url;
     if (url !== prefetcher.url) return rangeFetch(u, lo, hi);
-    const ahead = prefetch ?? (getMeta()?.phone ? 1 : 4);
+    const ahead = prefetch ?? (getMeta()?.phone ? 1 : prefetcher.ahead || 4);
     const key = u + "@" + lo, i = prefetcher.at.get(key);
     prefetcher.taken.add(key);
     if (i !== undefined) for (let k = i + 1; k <= i + ahead && k < prefetcher.list.length; k++) {
@@ -264,7 +269,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       const off = tabOffloadLayers(offload, range), dev = ai.device;
       // straight from the network, never through the weight cache (rangeFetch stores what it fetches: 65 GB of experts
       // there would be a second copy on this disk) nor the HTTP cache
-      const readAt = httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }) });
+      const readAt = httpReadAt(urls, { fetch: (u, init) => fetch(u, { ...init, cache: "no-store" }), resolve: cdnResolve });
       let experts = null, resident = null;
       // The GPU step's pacing (room.js aiLoadPace: hold it to the room's slowest GPU step), except while the parallel
       // load says not to (room/flashload.js runFlashParts paced(): this tab's disk copy still runs after its GPU step,
@@ -302,7 +307,9 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         if (hasEmbed || hasHead) names.push(GGML_EMBED);
         if (hasHead) names.push(...Object.values(QWEN4EXP_HEAD), GGML_OUTPUT);
         const fromDisk = new Set(resident?.layers || []);
-        planPrefetch(M.gguf, shardInfos(G, names.filter((n) => { const m = /^blk\.(\d+)\.ffn_(gate|up|down)_exps\.weight$/.exec(n); return !m || !fromDisk.has(+m[1]); })));
+        // 12 tensors in flight, not 4: a Flash layer is ~40 small tensors, and over Hugging Face each one pays a
+        // redirect and the CDN's first byte (HF-like latency, 40 MB/s a request: 14 -> 27 MB/s with 16)
+        planPrefetch(M.gguf, shardInfos(G, names.filter((n) => { const m = /^blk\.(\d+)\.ffn_(gate|up|down)_exps\.weight$/.exec(n); return !m || !fromDisk.has(+m[1]); })), FLASH_PREFETCH);
         // (a read of the copy that fails, a short read or a bad record, is said and that tensor comes from the network)
         const fromCopy = async (info) => {
           try { return await resident.entry(info); } catch (e) {
@@ -380,6 +387,9 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         try {
           if (off) experts = expertStoreDeferred(dev, off.disk, offload);
           const inWorker = ngramWorker && typeof globalThis.Worker === "function";
+          // the experts' save in workers (engine/expert_ingest_pool.js), or null: on this thread after the GPU step
+          // (fewer requests on an HTTP/1.1 host, whose 6 connections the GPU step and the n-gram copy share: savePoolFor)
+          const savePool = typeof globalThis.Worker === "function" ? savePoolFor(urls, { ...saveOpts, resolve: cdnResolve }, { protocolOf }) : null;
           await runFlashParts({ parts, ac,
             gpu: async ({ at, paced }) => {
               gpuHold = { paced, signal: ac.signal };
@@ -387,7 +397,9 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
             },
             save: off ? {
               check: () => expertTierCheck(G, off.disk, { readAt }).finally(checked),
-              copy: (chk, { at, signal }) => expertTierCopy(chk, { readAt, signal, onStatus: crumb, onProgress: (d) => at(d), log }),
+              copy: (chk, { at, signal }) => expertTierCopy(chk, { readAt, signal, onStatus: crumb, onProgress: (d) => at(d), log, pool: savePool }),
+              // in workers the copy leaves the main thread to the GPU step, so it starts next to it
+              early: !!savePool && !savePool.h1 && saveOpts.early,
               open: async (chk) => { await expertTierOpen(dev, chk, experts, { workers: expertWorkers, ring: expertRing }); offInfo(); },
             } : null,
             words: wordsOn ? {
@@ -396,7 +408,8 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
                 // without a worker the copy runs on this thread, after the experts' (two there at once starve both)
                 if (!inWorker) { onState("wait"); await after; onState("run"); }
                 return ingestNgram(ngCfg, readAt, { dir: c.dir, parallel, signal, onProgress: (d) => at(d), onStatus: crumb, log,
-                  worker: inWorker ? { urls } : null, mainAfter: after, onState });
+                  // (one read in flight a head on an HTTP/1.1 host: its 6 connections are shared with the save and the GPU step)
+                  worker: inWorker ? { urls, resolve: cdnResolve, ...(onHttp1(urls, protocolOf) ? { readAhead: 1 } : {}) } : null, mainAfter: after, onState });
               },
             } : null,
             onWordsFail: (e) => {

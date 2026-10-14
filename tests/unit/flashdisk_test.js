@@ -1,6 +1,6 @@
 // room/flashdisk.js on an in-memory OPFS: the n-gram table's copy (keyed by content, one ingest of a directory at a
 // time, the first failure stops the rest), and the free-disk-space helpers.
-import { ingestNgram, ngramContentSig, ngramDir, NGRAM_OPFS_DIR, flashDiskBytes, removeFlashCopy } from "../../room/flashdisk.js";
+import { ingestNgram, ngramContentSig, ngramDir, NGRAM_OPFS_DIR, flashDiskBytes, removeFlashCopy, savePoolFor, onHttp1 } from "../../room/flashdisk.js";
 import { EXPERT_OPFS_DIR } from "../../engine/expert_opfs.js";
 import { ngramFileName } from "../../engine/ngram.js";
 import { FakeDir } from "../helpers/fake-opfs.js";
@@ -104,4 +104,15 @@ Deno.test("ingestNgram: onProgress climbs to the total and never goes back; a co
   const again = [];
   eq(await ingestNgram(cfg, source().readAt, { dir, storage, onProgress: (d, t) => again.push([d, t]) }), 0);
   eq(again, [], "all there: no progress");
+});
+
+Deno.test("savePoolFor: the configured pool over HTTP/2; 3 workers, one chunk in flight each on an HTTP/1.1 host; none with 0 workers", () => {
+  const hf = ["https://huggingface.co/a/resolve/x/f-00001.gguf", "https://huggingface.co/a/resolve/x/f-00002.gguf"];
+  eq(savePoolFor(hf, { workers: 4, chunk: 8, ahead: 3 }), { urls: hf, workers: 4, chunkExperts: 8, readAhead: 3, resolve: true, h1: false }, "https, protocol unknown");
+  eq(savePoolFor(hf, { workers: 4 }, { protocolOf: () => "h2" }).workers, 4, "h2");
+  eq(savePoolFor(hf, { workers: 4, chunk: 8 }, { protocolOf: () => "http/1.1" }), { urls: hf, workers: 3, chunkExperts: 16, readAhead: 1, resolve: true, h1: true }, "https over HTTP/1.1");
+  eq(savePoolFor(["http://127.0.0.1:8080/m/f.gguf"], { workers: 4, chunk: 32, resolve: false }), { urls: ["http://127.0.0.1:8080/m/f.gguf"], workers: 3, chunkExperts: 32, readAhead: 1, resolve: false, h1: true }, "http://");
+  eq(savePoolFor(hf, { workers: 0 }), null, "workers 0: the main thread");
+  eq(savePoolFor([], { workers: 4 }), null, "no URL");
+  ok(onHttp1(["http://x/f"]) && !onHttp1(hf) && onHttp1(hf, () => "http/1.1") && !onHttp1(hf, () => "h3"), "onHttp1");
 });

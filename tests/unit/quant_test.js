@@ -133,3 +133,21 @@ Deno.test("Q8 dequant: signed bytes and per-block scales by hand", () => {
   eq([...y.slice(0, 5)], [0, 0.5, 63.5, -64, -0.5]);
   eq([...y.slice(32, 37)], [0, 2, 254, -256, -2]);
 });
+
+Deno.test("requantQ8Streaming Q4_1: the fused path is byte for byte dequantF32 + quantizeQ8 (also inf / NaN scales)", async () => {
+  const { requantQ8Streaming, dequantF32, GGML_Q4_1 } = await import("../../engine/gguf.js");
+  const ref = (rows, cols, b) => quantizeQ8(dequantF32({ ggmlType: GGML_Q4_1, nElems: rows * cols }, b));
+  let s = 99;
+  const byte = () => (s = (s * 1103515245 + 12345) >>> 0) >>> 24;
+  for (const [rows, cols, kind] of [[4, 64, "random"], [32, 640, "sane"], [2, 2560, "sane"], [8, 96, "random"], [3, 32, "edge"]]) {
+    const nb = rows * cols / 32, b = new Uint8Array(nb * 20);
+    for (let i = 0; i < b.length; i++) b[i] = byte();
+    if (kind === "sane") for (let i = 0; i < b.length; i += 20) { b[i] = byte(); b[i + 1] = 0x20 + (byte() & 7); b[i + 2] = byte(); b[i + 3] = 0xa0 + (byte() & 7); }
+    if (kind === "edge") {   // d = +inf, m = NaN, d = 0 and m = 0 (an all-zero block), d = -0
+      b.set([0x00, 0x7c, 0x00, 0x3c], 0); b.set([0x00, 0x3c, 0x01, 0x7e], 20); b.fill(0, 40, 60); b.set([0x00, 0x80, 0x00, 0x00], 40);
+    }
+    const a = requantQ8Streaming({ ggmlType: GGML_Q4_1, shape: [rows, cols] }, b), r = ref(rows, cols, b);
+    eq(Array.from(a.qs), Array.from(r.qs), `${rows}x${cols} ${kind}: qs`);
+    eq(Array.from(new Uint8Array(a.scales.buffer)), Array.from(new Uint8Array(r.scales.buffer)), `${rows}x${cols} ${kind}: scales`);
+  }
+});

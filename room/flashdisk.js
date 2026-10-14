@@ -19,7 +19,7 @@
 // (engine/expert_opfs.js ingestStorage), so a low estimate is a warning, and only a real write error stops a copy.
 // Browser-only at runtime (OPFS, workers); importing it touches neither.
 import { expertLayout, expertContentSig, expertModelKey, expertPartOf, ingestExperts, opfsExpertStore, OpfsExpertReader, readManifest, ingested,
-  ingestStorage, removeExperts, EXPERT_OPFS_DIR } from "../engine/expert_opfs.js";
+  ingestStorage, removeExperts, saveExpertManifest, EXPERT_OPFS_DIR } from "../engine/expert_opfs.js";
 import { expertKind } from "../engine/expert_disk.js";
 import { ExpertStore } from "../engine/expert_store.js";
 import { StageRing } from "../engine/stage_ring.js";
@@ -144,7 +144,10 @@ export async function expertTierCheck(G, layers, { readAt, contentSig = null } =
 // The experts' copy into OPFS (engine/expert_opfs.js ingestExperts, resumable) when expertTierCheck said it is needed.
 // signal stops it (the manifest keeps its last checkpoint). onProgress(done, total, line): record bytes, the skipped
 // ones included. -> { wroteBytes, skippedBytes, s } | null (nothing to copy)
-export async function expertTierCopy(chk, { readAt, storage = G_.navigator?.storage, onStatus = () => {}, onProgress = () => {}, log = () => {}, signal = null, readAhead = 4 } = {}) {
+// pool: { urls, workers, chunkExperts, readAhead, resolve, make? } copies in workers instead (engine/expert_ingest_pool.js:
+// each fetches, converts and writes whole layers, off the main thread). A pool that fails before writing a byte (no
+// module workers or sync access handles in this browser) falls back to this thread's copy, from the same checkpoints.
+export async function expertTierCopy(chk, { readAt, storage = G_.navigator?.storage, onStatus = () => {}, onProgress = () => {}, log = () => {}, signal = null, readAhead = 4, pool = null } = {}) {
   const { layout, dir, layers } = chk;
   if (!chk.need) {
     log(`expert disk tier: the experts of layers ${layers[0]}-${layers[layers.length - 1]} are in OPFS already (${gb(layout.totalBytes)} GB)`);
@@ -152,19 +155,59 @@ export async function expertTierCopy(chk, { readAt, storage = G_.navigator?.stor
   }
   const st = await ingestStorage(layout.totalBytes, { storage });
   if (st.warning) log(st.warning);
-  const w = await opfsExpertStore(layout, { dir });
   const t0 = performance.now();
   let last = 0, line = null;
-  try {
-    const r = await ingestExperts({ layout, store: w, readAt, readAhead, signal, estimate: () => storage?.estimate?.(), onProgress: (p) => {
-      const t = performance.now();
-      if (t - last > 1000) { last = t; line = `copying the experts of ${layers.length} layers to this device's disk: ${gb(p.doneBytes)} of ${gb(p.totalBytes)} GB (once; later loads read them from there)`; onStatus(line); }
-      onProgress(p.doneBytes, p.totalBytes, line);
-    } });
-    const ingest = { wroteBytes: r.wroteBytes, skippedBytes: r.skippedBytes, s: (performance.now() - t0) / 1000 };
-    log(`expert disk tier: copied ${gb(r.wroteBytes)} GB of experts into OPFS in ${ingest.s.toFixed(0)} s (${gb(r.skippedBytes)} GB already there; persist() ${st.persisted || w.persisted})`);
+  const prog = (p) => {
+    const t = performance.now();
+    if (t - last > 1000) { last = t; line = `copying the experts of ${layers.length} layers to this device's disk: ${gb(p.doneBytes)} of ${gb(p.totalBytes)} GB (once; later loads read them from there)`; onStatus(line); }
+    onProgress(p.doneBytes, p.totalBytes, line);
+  };
+  const done = (r, how) => {
+    const ingest = { wroteBytes: r.wroteBytes, skippedBytes: r.skippedBytes, s: (performance.now() - t0) / 1000, how };
+    log(`expert disk tier: copied ${gb(r.wroteBytes)} GB of experts into OPFS ${how} in ${ingest.s.toFixed(0)} s (${(r.wroteBytes / 2 ** 20 / Math.max(ingest.s, 1e-3)).toFixed(0)} MB/s; ${gb(r.skippedBytes)} GB already there; persist() ${st.persisted})`);
     return ingest;
+  };
+  if (pool?.urls?.length && (pool.make || typeof G_.Worker === "function")) {
+    const { ingestExpertsPool } = await import("../engine/expert_ingest_pool.js");
+    const manifestOnly = { manifest: () => readManifest(dir), saveManifest: (m) => saveExpertManifest(dir, m) };
+    try {
+      const r = await ingestExpertsPool({ layout, urls: pool.urls, dir, store: manifestOnly, workers: pool.workers, chunkExperts: pool.chunkExperts,
+        readAhead: pool.readAhead, resolve: pool.resolve, make: pool.make, signal, estimate: () => storage?.estimate?.(), onProgress: prog });
+      return done(r, `in ${pool.workers} workers`);
+    } catch (e) {
+      if (e?.wrote || signal?.aborted) throw e;
+      log(`expert disk tier: the copy workers could not run (${e?.name || "Error"}: ${String(e?.message || e).split("\n")[0].slice(0, 200)}); copying on the main thread`);
+    }
+  }
+  const w = await opfsExpertStore(layout, { dir });
+  try {
+    const r = await ingestExperts({ layout, store: w, readAt, readAhead, signal, estimate: () => storage?.estimate?.(), onProgress: prog });
+    return done(r, "on the main thread");
   } finally { await w.shutdown(); }
+}
+
+// The experts' save pool for a model at `urls` (expertTierCopy's pool option): { urls, workers, chunkExperts,
+// readAhead, resolve }, or null (copy on the main thread). Chrome opens at most 6 HTTP/1.1 connections to a host,
+// for the whole profile: 4 workers' 36 range requests took all six and the GPU step and the n-gram copy waited
+// minutes for one (a local http:// server). Over HTTP/2 (Hugging Face and its CDN; Chrome speaks it over TLS only)
+// requests share one connection, so nothing waits. So a host on HTTP/1.1 (an http:// URL, or nextHopProtocol says
+// so) gets at most 3 workers with one chunk in flight each, bigger chunks, and starts after the GPU step (the
+// loader: early only off HTTP/1.1). One worker there saved at ~120 MB/s: it fetches, converts and writes in turn.
+// protocolOf(url): the protocol the browser used for the model's files (resource timing), or "" when unknown.
+export function savePoolFor(urls, { workers = 4, chunk = 8, ahead = 3, resolve = true } = {}, { protocolOf = () => "" } = {}) {
+  if (!(workers > 0) || !urls?.length) return null;
+  const h1 = onHttp1(urls, protocolOf);
+  return h1 ? { urls, workers: Math.min(workers, 3), chunkExperts: Math.max(chunk, 16), readAhead: 1, resolve, h1: true }
+    : { urls, workers, chunkExperts: chunk, readAhead: ahead, resolve, h1: false };
+}
+// whether the model's host speaks HTTP/1.1 to this browser (6 connections a host): savePoolFor
+export const onHttp1 = (urls, protocolOf = () => "") => urls.some((u) => /^http:/i.test(u) || /^http\/1/i.test(protocolOf(u) || ""));
+// resource timing's nextHopProtocol of the latest request to url ("" when there is none, or it is hidden)
+export function protocolOf(url) {
+  try {
+    const es = G_.performance?.getEntriesByName?.(url) || [];
+    return es.length ? String(es[es.length - 1].nextHopProtocol || "") : "";
+  } catch { return ""; }
 }
 
 // The ExpertStore of a tab's disk layers before their files are there (engine/expert_store.js disk.deferred): the GPU
@@ -335,7 +378,7 @@ export async function ngramCheck(cfg, readAt, { storage = G_.navigator?.storage,
 // first failure stops the other heads at once (their reads aborted, their writables discarded). Concurrent ingests of
 // one directory run one after the other (the second finds the heads there). Other copies under NGRAM_OPFS_DIR (an
 // older table, the unkeyed layout before ngramDir) are removed first: only this table's copy is ever read.
-//   worker: { urls, make? } copies the heads in a dedicated worker instead (engine/ngram_copy_worker.js: sync access
+//   worker: { urls, make?, resolve?, readAhead? } copies the heads in a dedicated worker instead (engine/ngram_copy_worker.js: sync access
 //           handles, its own fetches), off the main thread. A worker that fails before writing a byte (no module
 //           workers or sync handles in this browser) falls back to the writables, after `mainAfter` (a promise: the
 //           loader passes the experts' copy, so two main-thread copies never run at once); onState("wait" | "run")
@@ -369,7 +412,7 @@ export async function ingestNgram(cfg, readAt, { dir, parallel = 2, onStatus = (
     if (worker) {
       try {
         const { copyHeadsInWorker } = await import("../engine/ngram_copy_worker.js");
-        await copyHeadsInWorker(cfg, { urls: worker.urls, make: worker.make, dir, heads: missing, parallel: par, signal,
+        await copyHeadsInWorker(cfg, { urls: worker.urls, make: worker.make, cdnResolve: worker.resolve !== false, ...(worker.readAhead ? { readAhead: worker.readAhead } : {}), dir, heads: missing, parallel: par, signal,
           onProgress: (done) => { onProgress(done, total); status(done); } });
         how = "in a worker";
       } catch (e) {
@@ -399,7 +442,7 @@ async function copyMain(cfg, readAt, d, missing, { par, signal, onProgress }) {
   const one = async (h) => {
     const w = await (await d.getFileHandle(ngramFileName(h), { create: true })).createWritable({ keepExistingData: false });
     try {
-      await splitHeads(cfg, read, (_h, bytes, at) => { if (failed) throw failed; return w.write({ type: "write", position: at, data: bytes }); }, { heads: [h], onProgress: (n) => {
+      await splitHeads(cfg, read, (_h, bytes, at) => { if (failed) throw failed; return w.write({ type: "write", position: at, data: bytes }); }, { heads: [h], readAhead: 4, onProgress: (n) => {
         cur.set(h, n);
         onProgress([...cur.values()].reduce((a, b) => a + b, 0));
       } });

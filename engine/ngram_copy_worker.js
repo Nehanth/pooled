@@ -10,8 +10,8 @@
 // chunk, so "the file is head h's size" (ingestNgram's test) still means "head h is all there". A copy that stops
 // part way leaves the file short, and the next load copies that head again.
 //
-// Messages, main -> worker: { op: "copy", cfg, urls, dir, heads, parallel } (cfg: { shard, byteOffset, offsets,
-// vocab, rowBytes }); { op: "parallel", n } (heads at a time from now on); { op: "abort" }.
+// Messages, main -> worker: { op: "copy", cfg, urls, dir, heads, parallel, chunkRows?, readAhead?, resolve? } (cfg:
+// { shard, byteOffset, offsets, vocab, rowBytes }); { op: "parallel", n } (heads at a time from now on); { op: "abort" }.
 // worker -> main: { op: "progress", done } (bytes, at most ~4 a second), { op: "head", h }, then one of
 // { op: "done" } / { op: "error", name, message, wrote } (wrote: whether any byte reached a file), sent only once every
 // file it opened is closed.
@@ -19,6 +19,9 @@ import { splitHeads, httpReadAt, ngramFileName } from "./ngram.js";
 
 const G = /** @type {any} */ (globalThis);
 const IS_WORKER = typeof G.WorkerGlobalScope !== "undefined" && G.self instanceof G.WorkerGlobalScope;
+// A head is read in chunks of CHUNK_ROWS rows (11.25 MiB of Flash's 90-byte rows), READ_AHEAD of them in flight: one
+// 5.6 MiB read at a time paid a round trip per chunk and copied a head at ~9 MB/s over Hugging Face
+export const CHUNK_ROWS = 1 << 17, READ_AHEAD = 4;
 const abortError = () => Object.assign(new Error("the copy was stopped"), { name: "AbortError" });
 
 // The copy itself. job: { cfg, urls, dir, heads, parallel }. env: { getDirectory() (the OPFS root), fetch, post(msg),
@@ -30,7 +33,9 @@ export function copyHeads(job, env) {
   const now = env.now || (() => Date.now());
   const ac = new AbortController(), open = new Set(), cur = new Map();
   const fetchLow = (u, init) => env.fetch(u, { ...init, cache: "no-store", priority: "low" });
-  const readAt = httpReadAt(urls, { fetch: fetchLow });
+  // (resolve: Hugging Face's 302 to its CDN followed once per file, not once per chunk: engine/ngram.js httpReadAt)
+  const readAt = httpReadAt(urls, { fetch: fetchLow, resolve: job.resolve !== false });
+  const chunkRows = job.chunkRows || CHUNK_ROWS, readAhead = job.readAhead || READ_AHEAD;
   const read = (f, o, n) => { if (failed) throw failed; return readAt(f, o, n, { signal: ac.signal }); };
   const progress = (force = false) => {
     const t = now();
@@ -46,7 +51,7 @@ export function copyHeads(job, env) {
         if (failed) throw failed;
         await sh.write(bytes, { at });   // (await: older Safari's handle returns promises)
         wrote = true;
-      }, { heads: [h], onProgress: (n) => { cur.set(h, n); done = [...cur.values()].reduce((a, b) => a + b, 0); progress(); } });
+      }, { heads: [h], chunkRows, readAhead, onProgress: (n) => { cur.set(h, n); done = [...cur.values()].reduce((a, b) => a + b, 0); progress(); } });
       if (failed) throw failed;
       await sh.flush();
     } finally {
@@ -100,9 +105,11 @@ if (IS_WORKER) {
 // Copy `heads` of the table in a worker. cfg: the table's config (engine/ngram.js ngramConfig); urls: the GGUF's files
 // (by shard); dir: the OPFS path. parallel: a number, or a function read every 250 ms (heads at a time). signal aborts
 // it (the worker stops, closes its files, then it is terminated; at most ~2 s). onProgress(bytes done of these heads).
-// make(url) -> a Worker (tests). -> Promise<bytes> when every head is there. A failure rejects with the worker's error
+// make(url) -> a Worker (tests). chunkRows / readAhead: rows a read and reads in flight per head (CHUNK_ROWS,
+// READ_AHEAD); cdnResolve: follow the file's redirect once (engine/ngram.js httpReadAt resolve). -> Promise<bytes> when every head is there. A failure rejects with the worker's error
 // and .wrote: false when nothing reached a file (the caller may copy another way), true otherwise.
-export function copyHeadsInWorker(cfg, { urls, dir, heads, parallel = 2, signal = null, onProgress = () => {}, make = null, url = import.meta.url, closeWaitMs = 2000 } = {}) {
+export function copyHeadsInWorker(cfg, { urls, dir, heads, parallel = 2, signal = null, onProgress = () => {}, make = null, url = import.meta.url, closeWaitMs = 2000,
+  chunkRows = CHUNK_ROWS, readAhead = READ_AHEAD, cdnResolve = true } = {}) {
   const par = typeof parallel === "function" ? parallel : () => parallel;
   const total = heads.reduce((a, h) => a + cfg.vocab[h] * cfg.rowBytes, 0);
   return new Promise((resolve, reject) => {
@@ -139,7 +146,7 @@ export function copyHeadsInWorker(cfg, { urls, dir, heads, parallel = 2, signal 
     if (signal?.aborted) { onAbort(); return; }
     signal?.addEventListener?.("abort", onAbort, { once: true });
     const plain = { shard: cfg.shard, byteOffset: cfg.byteOffset, offsets: [...cfg.offsets], vocab: [...cfg.vocab], rowBytes: cfg.rowBytes };
-    w.postMessage({ op: "copy", cfg: plain, urls: [...urls], dir: [...dir], heads: [...heads], parallel: last, maxParallel: 2 });
+    w.postMessage({ op: "copy", cfg: plain, urls: [...urls], dir: [...dir], heads: [...heads], parallel: last, maxParallel: 2, chunkRows, readAhead, resolve: cdnResolve });
     tick = setInterval(() => { const n = par(); if (n !== last) { last = n; try { w.postMessage({ op: "parallel", n }); } catch { /* gone */ } } }, 250);
   });
 }
