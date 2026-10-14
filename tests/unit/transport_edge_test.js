@@ -5,7 +5,7 @@
 // No GPU, no network: channels are stubs and the clock is fake.
 import {
   makeLink, sendFrame, attachWire, wireReady, packFlags, unpackFlags, packCkpt, unpackCkpt,
-  SLICE_BYTES, WIRE_ID, DROP_ALL, DUP_SLICES,
+  SLICE_BYTES, WIRE_ID, DROP_ALL, DUP_SLICES, SEND_HIGH,
 } from "../../room/transport.js";
 
 const HDR = 32, PER = SLICE_BYTES - HDR, GAP_MS = 5000, GAP_MAX_MS = 60000;
@@ -428,19 +428,66 @@ Deno.test("transport: a channel that refuses a send mid-frame: the slice goes ou
   eq(got, [1, 2, 3]); eq(clock.pending(), 0);
 }));
 
-Deno.test("transport: a send that no channel takes returns quietly, and the receiver skips the frame once the close shows", () => withClock((clock) => {
+Deno.test("transport: a send that every open channel refuses waits, and later frames wait behind it", () => withClock((clock) => {
+  const link = makeLink({ dup: 0 }), wire = [];
+  const chans = [0, 1].map((i) => ({ i, readyState: "open", bufferedAmount: 0, send(buf) { if (this.dead) throw new Error("OperationError: RTCDataChannel send queue is full"); wire.push({ i, buf }); } }));
+  link.chans.push(...chans);
+  const three = (p) => ({ t: "ai-hidden-b", basePos: p, n: 1, data: new Uint16Array((PER * 2 + 2) / 2).fill(p) });
+  sendFrame(link, three(1));
+  chans[0].dead = chans[1].dead = true;                          // both still say "open" but refuse (a full queue)
+  ok(sendFrame(link, three(2)), "does not throw");
+  clock.advance(100);
+  chans[0].dead = chans[1].dead = false;
+  sendFrame(link, three(3));
+  eq(wire.length, 3, "frame 3 waits behind frame 2");
+  clock.advance(100);
+  const got = []; const r = receiver((m) => got.push(m.basePos));
+  for (const w of wire) r.send(w);
+  eq(got, [1, 2, 3]); eq([link.waited, link.lost, clock.pending()], [6, 0, 0]);
+}));
+
+Deno.test("transport: a send that no channel takes once they all closed is lost, and the receiver skips the frame once the close shows", () => withClock((clock) => {
   const link = makeLink({ dup: 0 }), wire = [];
   const chans = [0, 1].map((i) => ({ i, readyState: "open", bufferedAmount: 0, send(buf) { if (this.dead) throw new Error("InvalidStateError"); wire.push({ i, buf }); } }));
   link.chans.push(...chans);
   const three = (p) => ({ t: "ai-hidden-b", basePos: p, n: 1, data: new Uint16Array((PER * 2 + 2) / 2).fill(p) });
   sendFrame(link, three(1));
-  chans[0].dead = chans[1].dead = true;                          // both still say "open" but refuse
+  chans[0].dead = chans[1].dead = true;
   ok(sendFrame(link, three(2)), "does not throw");
-  chans[0].dead = chans[1].dead = false;
+  for (const c of chans) c.readyState = "closed";                 // they were closing: what waited goes down with them
+  clock.advance(100);
+  eq([link.lost, clock.pending()], [3, 0]);
+  link.chans = [0, 1].map((i) => ({ i, readyState: "open", bufferedAmount: 0, send(buf) { wire.push({ i, buf }); } }));
   sendFrame(link, three(3));
   const got = []; const r = receiver((m) => got.push(m.basePos));
   for (const w of wire) r.send(w);
   eq(got, [1, 3], "both channels showed frame 3, so frame 2 can never come");
+}));
+
+// A browser's data channel refuses sends past 16 MiB queued: a frame bigger than that (a disk host's 4096-column
+// prompt frame, 80 MiB) goes out as the channel drains, every slice of it, and the frames after it follow in order
+Deno.test("transport back-pressure: a frame past the channels' queue limit goes out as they drain, in order", () => withClock((clock) => {
+  const LIMIT = 16 << 20, link = makeLink({ dup: 0 }), wire = [];
+  const chans = [0, 1].map((i) => ({ i, readyState: "open", bufferedAmount: 0,
+    send(buf) { if (this.bufferedAmount + buf.byteLength > LIMIT) throw new Error("OperationError: RTCDataChannel send queue is full"); this.bufferedAmount += buf.byteLength; wire.push({ i, buf }); } }));
+  link.chans.push(...chans);
+  const big = new Uint16Array(4096 * 10240 / 8).map((_, i) => (i * 2654435761) >>> 16);   // 10 MiB: past SEND_HIGH
+  ok(sendFrame(link, { t: "ai-hidden-b", basePos: 0, n: 512, data: big }));
+  ok(sendFrame(link, { t: "ai-hidden-b", basePos: 512, n: 512, data: big }));
+  ok(sendFrame(link, { t: "ai-hidden", pos: 1024, data: new Uint16Array(10240) }));
+  ok(chans.every((c) => c.bufferedAmount <= SEND_HIGH), "no channel holds more than SEND_HIGH");
+  ok(link.out.length > link.outHead, "the rest waits");
+  const got = []; const r = receiver((m) => got.push(m));
+  // the channels drain 1 MiB each per 25 ms
+  for (let t = 0; t < 400 && link.out.length > link.outHead; t++) {
+    for (const c of chans) c.bufferedAmount = Math.max(0, c.bufferedAmount - (1 << 20));
+    clock.advance(25);
+  }
+  for (const w of wire) r.send(w);
+  eq(got.map((m) => m.basePos ?? m.pos), [0, 512, 1024]);
+  ok(got[0].data.every((x, i) => x === big[i]) && got[1].data.every((x, i) => x === big[i]), "byte-exact");
+  eq([link.lost, clock.pending()], [0, 0]);
+  ok(link.waited > 0);
 }));
 
 // ---------------------------------------------------------------- small frames twice, backed-up channels
