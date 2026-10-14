@@ -14,6 +14,7 @@ import { FlashRoomEngine, flashBatchCols } from "./flash.js";
 import { planSteps, loadTracker } from "./loadsteps.js";
 import { MODELS, MAX_SEQ, mergeSplitHeaders, roomBytes, ngramOf, flashLoadOpts } from "./models.js";
 import { cacheKey } from "./weightcache.js";
+import { OFFLOAD_GOOD_SLOTS } from "./plan.js";
 import { attachBrowserWeightCache } from "./convertedcache.js";
 
 // Where a tab keeps Qwen3.8-Flash-Next's n-gram table split per head (engine/ngram.js ngramFileName), from the OPFS root
@@ -48,9 +49,10 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   // parload: a Flash tab runs its three parts at the same time (room/flashload.js; false: one after the other, as
   // before); ngramWorker: the n-gram table's copy runs in a worker (false: on the main thread, after the experts');
   // save: { workers, chunk, ahead, early } the experts' first save in workers (room/models.js modelLoadOptions;
-  // workers 0: on the main thread); cdnResolve: range reads follow the model host's redirect once (engine/ngram.js)
+  // workers 0: on the main thread); cdnResolve: range reads follow the model host's redirect once (engine/ngram.js);
+  // diskBatch: a tab with disk-tier layers runs batched prompt passes over them (a whole-layer region out of its cache)
   const { wcache: WCACHE = true, wcacheVerify: WCACHE_VERIFY = false, prefetch = null, ngramIngest = true, expertWorkers = 4, expertRing = 64,
-    parload = true, ngramWorker = true, save: saveOpts = { workers: 0, chunk: 8, ahead: 3, early: true }, cdnResolve = true } = options;
+    parload = true, ngramWorker = true, save: saveOpts = { workers: 0, chunk: 8, ahead: 3, early: true }, cdnResolve = true, diskBatch = true } = options;
   // Consent for this tab's disk (room/flashdisk.js): hooks.tabDisk() -> { tabDisk: what this tab advertises (meta.tabDisk),
   // choice: its user's answer ("allow" | "deny" | null) }; hooks.askDisk({ model, bytes, layers, ngramBytes }) ->
   // Promise<boolean>: ask the user (a worker whose deal needs its disk and who was not asked yet). Without them a tab
@@ -354,15 +356,25 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
       };
       const makeEngine = async (weights, ngram) => {
         const { Qwen4ExpEngine } = await import("../engine/qwen4exp.js");
+        // the disk tier's layers batch through the expert store's whole-layer region (1.4-1.8 GB, out of the deal's GPU
+        // cache), read from OPFS once a pass instead of once a column (engine/qwen4exp_batch.js), when the cache keeps
+        // OFFLOAD_GOOD_SLOTS experts per layer after it (room-node shard.js's bar); else one column at a time
+        let region = false;
+        if (experts && diskBatch) {
+          const rb = experts.regionSize(), kept = experts.poolSlots(rb);
+          region = kept >= OFFLOAD_GOOD_SLOTS;
+          console.info(region ? `expert offload: a ${(rb / 2 ** 30).toFixed(2)} GB whole-layer region for batched prompt passes over the disk layers, out of the GPU cache (${experts.poolSlots()} -> ${kept} experts per layer)`
+            : `expert offload: no batched prompt passes over the disk layers: the GPU cache would keep ${kept} experts per layer after a ${(rb / 2 ** 30).toFixed(2)} GB region (< ${OFFLOAD_GOOD_SLOTS})`);
+        }
         const eng = await Qwen4ExpEngine.create({ device: ai.device, meta: G.meta, weights, layerRange: range,
-          hasEmbed, hasHead, maxSeq: q ? ctx : Math.min(ctx, 2048), ngram, ...(q ? { qsa: null, kv: q.kv, qsaRing: q.ring } : { qsa: false }) });
-        // batched prompt passes (room/flash.js): built now so their pipelines compile during the load. Not over the disk
-        // tier (a tab's offloaded experts are read from OPFS: Qwen4ExpBatch refuses those layers); a batch that fails to
-        // build leaves this tab on one decode step per column, as before, and the host narrows its frames for it.
+          hasEmbed, hasHead, maxSeq: q ? ctx : Math.min(ctx, 2048), ngram, expertRegion: region, ...(q ? { qsa: null, kv: q.kv, qsaRing: q.ring } : { qsa: false }) });
+        // batched prompt passes (room/flash.js): built now so their pipelines compile during the load. Over the disk
+        // tier only with the region above; a batch that fails to build leaves this tab on one decode step per column,
+        // as before, and the host narrows its frames for it.
         // Always the room's frame width, solo too: a tab has no memory check, and the dealer keeps back only that
         // width's scratch from its pledge (room/models.js flashDealReserve), not a solo device's 1024 columns
         let pb = null;
-        if (!experts) {
+        if (!experts || region) {
           try {
             const { Qwen4ExpBatch } = await import("../engine/qwen4exp_batch.js");
             pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: flashBatchCols(false, q?.ring), verifyCols: 1 });

@@ -42,7 +42,9 @@
 // (ExpertStore.loadLayer, no readback); a narrow one (verify) reads the nCols x K ids back and copies only those
 // experts (loadExperts). The expert kernels (exact or grouped) then run on regionEntry() with the original expert ids:
 // the same kernels on the same bytes at another address, so an offloaded pass gives the resident bits. Without the
-// region create() refuses offloaded layers (the engine's _wq would too: notParked).
+// region create() refuses offloaded layers (the engine's _wq would too: notParked). A disk-tier layer's experts are
+// read from its file (ExpertStore.loadLayerAsync / loadExpertsAsync) after a submit, so a 1024-column pass reads each
+// disk layer once instead of once per column.
 import * as MC from "./wgsl/qwen4exp_batch.js";
 import * as WX from "./wgsl/qwen4exp_wide.js";
 import { probeDp4a } from "./wgsl/gemm_wide.js";
@@ -85,10 +87,8 @@ export class Qwen4ExpBatch {
     const offSet = eng.offLayers || new Set();
     if (offSet.size && !eng.experts?.region) throw new Error(`qwen4exp batch: layers ${[...offSet].join(",")} have offloaded experts and the store has no `
       + "whole-layer region: create the engine with expertRegion: true (batched passes route offloaded layers through ExpertStore.loadLayer / loadExperts)");
-    // the disk tier (#349): a disk layer fills the region only with loadLayerAsync / loadExpertsAsync after a submit,
-    // which these passes do not do yet (decode does: Qwen4ExpEngine._afterRoute, ExpertStore.prepare)
-    const diskL = [...offSet].filter((i) => eng.experts?.isDisk?.(i));
-    if (diskL.length) throw new Error(`qwen4exp batch: layers ${diskL.join(",")} are on the disk tier; batched passes do not read disk layers yet (RAM offload only)`);
+    // the disk tier (#349): a disk layer fills the region with loadLayerAsync / loadExpertsAsync after a submit
+    // (_encodeLayers), as the Qwen3.5 engine's grouped prefill does (engine/qwen35.js _regionLoad / _regionLoadDisk)
     const { device, cfg } = eng, wq = eng._wq;
     if (!wq) throw new Error("qwen4exp batch: the engine does not expose its weights (_wq)");
     Object.assign(this, { eng, device, cfg, maxCols, verifyCols: Math.min(verifyCols, maxCols), exact });
@@ -522,16 +522,26 @@ export class Qwen4ExpBatch {
       eng._encode(pass, ops, pos, n);
       if (!l.off) continue;
       pass.end();
-      if (2 * n * K >= cfg.nExp) st.loadLayer(enc, l.i);
-      else {
+      // a disk layer's experts are read after a submit of everything encoded so far (it may still use the region):
+      // the store's writes then land in queue order, before the next encoder's kernels
+      const disk = !!st.isDisk?.(l.i);
+      if (2 * n * K >= cfg.nExp) {
+        if (!disk) st.loadLayer(enc, l.i);
+        else if (st.region.layer !== l.i) {
+          device.queue.submit([enc.finish()]);
+          await st.loadLayerAsync(l.i);
+          enc = device.createCommandEncoder();
+        }
+      } else {
         enc.copyBufferToBuffer(this.B.ids, 0, this.idStage, 0, n * K * 4);
         device.queue.submit([enc.finish()]);
         await this.idStage.mapAsync(GPUMapMode.READ, 0, n * K * 4);
         const ids = new Uint32Array(this.idStage.getMappedRange(0, n * K * 4)), sel = new Uint32Array(n * (K + 1));
         for (let c = 0; c < n; c++) { sel.set(ids.subarray(c * K, (c + 1) * K), c * (K + 1)); sel[c * (K + 1) + K] = cfg.nExp; }
         this.idStage.unmap();
+        if (disk) await st.loadExpertsAsync(l.i, sel, n, K + 1);
         enc = device.createCommandEncoder();
-        st.loadExperts(enc, l.i, sel, n, K + 1);
+        if (!disk) st.loadExperts(enc, l.i, sel, n, K + 1);
       }
       pass = enc.beginComputePass();
       eng._encode(pass, l.exp, pos, n);
