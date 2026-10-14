@@ -159,7 +159,7 @@ export class Qwen4ExpEngine {
       const st = offL[0].expGate.store;
       if (!offL.every((L) => L.expUp?.offload && L.expDown?.offload && L.expGate.store === st && L.expUp.store === st && L.expDown.store === st))
         throw new Error("qwen4exp: expert offload: a layer's experts are only partly parked, or in two stores");
-      st.build({ K, region: !!expertRegion });
+      st.build({ K, region: expertRegion === "shared" ? "shared" : !!expertRegion });   // ("shared": the region borrowed from the pools)
       await st.checkAlloc();
       this.experts = st;
       this.offLayers = new Set(offL.map((L) => L.expGate.layer));

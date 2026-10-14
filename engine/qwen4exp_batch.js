@@ -553,14 +553,16 @@ export class Qwen4ExpBatch {
     return { enc, pass };
   }
 
-  // Layer by layer (an engine with disk-tier layers): the columns of up to LAYERED_COLS tokens go through one layer
+  // Layer by layer (an engine with disk-tier layers, or a shared region): the columns of up to LAYERED_COLS tokens go through one layer
   // pass by pass before the next layer, so each disk layer's experts are read from its file once for all of them
   // (loadLayerAsync), not once per pass. The same passes (maxCols columns each, the wide or exact kernels as _run
   // picks) in the same order within every layer, so the bits are _passes's: a layer's state (DeltaNet, K / V, QSA)
   // sees its columns in order; each pass's residual waits in a buffer between layers. Head "none" only (a room's
   // prompt frames and a solo prompt: room/flash.js _passes). hidden: the input residuals (n x hDim) on a device
   // without the embedding; wantHidden: -> { hiddens } (n x hDim), the output residuals.
-  layered(n) { return !!this.eng.experts?.diskSet?.size && n > this.maxCols && this.layeredCols > this.maxCols; }
+  // Also with the region borrowed from the cache (ExpertStore shared: a room node whose cache is about a region's size):
+  // its layers in RAM copy into the region once for the group, not once a pass.
+  layered(n) { const st = this.eng.experts; return !!(st?.diskSet?.size || st?.region?.shared) && n > this.maxCols && this.layeredCols > this.maxCols; }
   async passesLayered(ids, { hidden = null, wantHidden = false } = {}) {
     const eng = this.eng;
     eng._check(ids[0]);

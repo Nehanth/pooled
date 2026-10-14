@@ -13,7 +13,7 @@ import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizer
   ggmlLayerNames, qwen35NamesFor, qwen4expConfig, qwen4expNamesFor, qwen4expWeights, qwen4expShardBytes, QWEN4EXP_HEAD } from "../../engine/gguf.js";
 import { ngramConfig, NgramTable, fileReadAt, httpReadAt } from "../../engine/ngram.js";
 import { FlashRoomEngine, flashBatchCols, flashBatchScratch, qwen4expBatchBytes } from "../../room/flash.js";
-import { hostMemory, qsaAlways, flashBatchMode, flashRegionForced, flashLayered } from "./env.js";
+import { hostMemory, qsaAlways, flashBatchMode, flashRegionForced, flashLayered, flashSharedRegion } from "./env.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { maxSeqFor, kvModeFor, flashRoomMem, ckptSlotsAt, flashLoadOpts } from "../../room/models.js";
 import { QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
@@ -304,7 +304,8 @@ const FLASH_MAX_CTX = 2048;
 // at load time, so prompt frames (and a solo room's prompt) run several columns per pass (room/flash.js); "off": one
 // decode step per column, as before. An offloaded layer needs the store's whole-layer region for them (~1.4 GB of GPU;
 // below: from pledgeBytes' slack past the share, or out of a cache that stays good, else this device runs its frames
-// per token). Disk-tier layers never batch (Qwen4ExpBatch refuses them). The batch is built from the weights object
+// per token; or, with every offloaded layer in RAM, borrowed from the cache for each prompt frame: the store's shared
+// region, engine/expert_store.js). Disk-tier layers never batch (Qwen4ExpBatch refuses them). The batch is built from the weights object
 // (its unfused entries) but its ops bind GPU buffers only: nothing of the object stays alive past the load.
 // -> FlashRoomEngine
 async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null, diskReader = expertDiskReader, pool = null, flash = null,
@@ -415,7 +416,29 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
       const was = st.poolSlots();
       expertRegion = true; st.vramBytes -= scratch - fromSlack;
       log(`expert offload: a ${gb(rb)} GB whole-layer region for batched prompt passes, out of the expert cache (${was} -> ${kept} experts per layer)`);
-    } else noBatch = `the offloaded layers need a ${gb(rb)} GB whole-layer region: the pledge has ${gb(sl)} GB past the share and the cache would keep ${Math.max(0, kept)} experts per layer (< ${enough})`;
+    } else {
+      // A cache about a region's size (a node lending little GPU memory past its layers): the region is borrowed from it
+      // for each prompt frame (ExpertStore build "shared": the frame overwrites the cache, which decode refills from the
+      // parked experts in RAM, at copy speed; the frame's passes go layer by layer, so each layer is copied in once).
+      // Not with disk layers, whose refills would read the disk again. The cache must hold a whole layer's experts in
+      // all, so the passes narrow (their scratch shrinks: 169 MiB at 256 columns, 48 at 64) until it does, the
+      // dealer's reserve past the scratch going to the cache.
+      const vb = st.vramBytes, res = +offload.batchReserve || 0;
+      for (const w of [batchCols, 128, 64].filter((x, i, a) => x <= batchCols && a.indexOf(x) === i)) {
+        if (!flashSharedRegion() || st.diskSet.size) break;
+        const sc = flashBatchScratch(w), fs = Math.min(sc, Math.max(sl, res)), spare = Math.max(0, res - sc);
+        st.vramBytes = vb - (sc - fs) + spare;
+        if (st.sharedFits() && st.poolSlots() >= OFFLOAD_MIN_SLOTS && fits(fs + spare)) {
+          expertRegion = "shared"; batchCols = w; scratch = sc;
+          log(`expert offload: batched prompt passes of ${w} columns borrow the whole-layer region from the expert cache (${gb(rb)} GB; ${st.poolSlots()} experts per layer, refilled from RAM after each prompt frame)`);
+          break;
+        }
+      }
+      if (!expertRegion) {
+        st.vramBytes = vb;
+        noBatch = `the offloaded layers need a ${gb(rb)} GB whole-layer region: the pledge has ${gb(sl)} GB past the share and the cache would keep ${Math.max(0, kept)} experts per layer (< ${enough})`;
+      }
+    }
   } else if (!noBatch && !fits(scratch)) noBatch = `no GPU memory left for the batched passes' ${gb(scratch)} GB of scratch`;
   if (noBatch) scratch = 0;
   // an offloader without batched passes gives the dealer's scratch reserve (offload.batchReserve: none from an older

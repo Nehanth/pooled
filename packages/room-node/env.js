@@ -162,6 +162,10 @@ export const flashRegionForced = (env = process.env) => env.POOLED_FLASH_REGION 
 // through every layer (each disk layer read once a pass) instead of layer by layer (engine/qwen4exp_batch.js
 // passesLayered: once for up to 4096 tokens; the same bits). Not a user setting
 export const flashLayered = (env = process.env) => env.POOLED_FLASH_LAYERED !== "0";
+// Test switch POOLED_FLASH_SHARED=0 (shard.js loadFlash): a device whose cache can't spare a whole-layer region runs its
+// prompt frames one column at a time instead of borrowing the region from its cache (engine/expert_store.js shared).
+// Not a user setting
+export const flashSharedRegion = (env = process.env) => env.POOLED_FLASH_SHARED !== "0";
 // whether the GPU shares the system's memory (detectMemory's kind; Apple silicon reads as unified there too)
 export const unifiedMemory = (mem) => mem?.kind === "unified";
 // detectMemory on this machine (nvidia-smi, amdgpu sysfs, the platform), or { kind: "unknown" } when it fails
