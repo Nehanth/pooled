@@ -352,3 +352,22 @@ Deno.test("pipeline node: a lost prompt frame times out within the cap even afte
   ok(err && /pipeline timeout/.test(err.message), `times out: ${err?.message}`);
   ok(performance.now() - t < 1000, `within 4 x 50 ms, not 16 x 1000 s (${(performance.now() - t).toFixed(0)} ms)`);
 });
+
+// A wide prompt frame (a disk-tier host's 4096 columns, room/flash.js diskFrames) gets a base and a cap scaled by its
+// width over 256 columns: the 360 s cap timed out a 4096-column frame on a device stepping one column at a time
+Deno.test("pipeline: a wide prompt frame's timeout scales with its width", async () => {
+  const ai = { ...state(), role: "host", chain: ["worker"], lapStat: { max: 0 } };
+  ai.engine = { dims: { dim: 1 }, NC: 4, diskFrames: true, prefillFrame: () => 1024, prefillHidden: async (ids) => Float32Array.from(ids),
+    embedRunBatch: async (ids) => Float32Array.from(ids), embedRun: async (id) => Float32Array.of(id), headFromHidden: async (h) => h };
+  const sent = [];
+  const p = createPipeline({ state: ai, options: { prefillLapMs: 20 }, transport: { sendTo() {}, sendHidden: (id, m) => sent.push(m) } });
+  const t = performance.now();
+  let err = null;
+  try { await p.aiPrefill(Array.from({ length: 1025 }, (_, i) => i)); } catch (e) { err = e; }
+  const ms = performance.now() - t;
+  ok(err && /pipeline timeout/.test(err.message), `times out: ${err?.message}`);
+  eq(sent[0]?.n, 1024);
+  // 1024 columns: 4 x the 20 ms base (80 ms), not 20 ms
+  ok(ms >= 75, `not before 4 x the base (${ms.toFixed(0)} ms)`);
+  ok(ms < 1000, `but still soon (${ms.toFixed(0)} ms)`);
+});
