@@ -383,7 +383,7 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
   if (weights.pleTable) out.ngram = await openNgramTable(src, G, log);
   let noBatch = batch === "off" ? "POOLED_FLASH_BATCH=0" : dl.length ? `layers ${dl[0]}-${dl[dl.length - 1]} read their experts from disk` : null;
-  let expertRegion = false, batchCols = flashBatchCols(solo), scratch = 0;
+  let expertRegion = false, batchCols = flashBatchCols(solo, q?.ring), scratch = 0;
   const gb = (n) => (n / 2 ** 30).toFixed(2);
   // real memory, as the check above, with extra bytes on the GPU
   const fits = (extra) => !flashMemoryShort(need + extra, m, { cpuBytes: cpu, sysFreeGB });
@@ -394,7 +394,7 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   const slack = pledgeBytes > 0 ? pledgeBytes - (m?.kind === "discrete" ? need - cpu : need) : null;
   // a solo device's widest passes only when its pledge (when known) and its memory have room for their scratch, else
   // the room's frame width
-  if (!noBatch && solo && !((slack == null || slack >= flashBatchScratch(batchCols)) && fits(flashBatchScratch(batchCols)))) batchCols = flashBatchCols(false);
+  if (!noBatch && solo && !((slack == null || slack >= flashBatchScratch(batchCols)) && fits(flashBatchScratch(batchCols)))) batchCols = flashBatchCols(false, q?.ring);
   if (!noBatch) scratch = flashBatchScratch(batchCols);
   // The deal gives the expert cache the rest of the pledge (room/plan.js offloadPlan), so the region (and the scratch)
   // come from the pledge's slack past the share when there is that much (the cache keeps every slot it was dealt),

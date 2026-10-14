@@ -9,7 +9,7 @@ import { SLICE_BYTES } from "../../room/transport.js";
 import { dealRoom, placeNgram, ngramHolder, shortNote } from "../../room/plan.js";
 import { offloadFor, ngramFor, ngramDisk, pledgeGB } from "../../room/pledge.js";
 import { createPipeline } from "../../room/pipeline.js";
-import { FlashRoomEngine, qwen4expCore } from "../../room/flash.js";
+import { FlashRoomEngine, qwen4expCore, flashBatchCols } from "../../room/flash.js";
 import { NgramState, makeConfig } from "../../engine/ngram.js";
 import { f16ToF32, f32ToF16 } from "../../engine/gguf.js";
 
@@ -568,4 +568,12 @@ Deno.test("flash batch: prefillHidden without a batch is refused; a worker's pre
   ok(bad, "the n-gram layer here: the ids are needed");
   const h = await B.prefillHidden(new Float32Array(2 * T_HD), 0, { ids: new Uint32Array([3, 4]) });
   eq([h.length, core.pos], [2 * T_HD, 2]);
+});
+
+Deno.test("flash batch width: a QSA engine's passes stay under its raw-key ring (engine/qwen4exp_batch.js refuses wider)", () => {
+  // no ring (a dense engine): solo 1024, a room device the frame width
+  eq([flashBatchCols(true), flashBatchCols(false)], [1024, 256]);
+  // the rooms' 1024-row ring: a pass completes blocks of up to cols + 3 rows, so solo runs 960 columns, rooms 256
+  eq([flashBatchCols(true, 1024), flashBatchCols(false, 1024)], [960, 256]);
+  ok(flashBatchCols(true, 1024) + 3 <= 1024 && flashBatchCols(false, 128) + 3 <= 128);
 });

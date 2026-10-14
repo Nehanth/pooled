@@ -365,7 +365,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         if (!experts) {
           try {
             const { Qwen4ExpBatch } = await import("../engine/qwen4exp_batch.js");
-            pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: flashBatchCols(false), verifyCols: 1 });
+            pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: flashBatchCols(false, q?.ring), verifyCols: 1 });
           } catch (e) { console.warn(`Flash: no batched prompt passes on this tab (${e?.message || e}); one column at a time`); }
         }
         ai.engine = FlashRoomEngine.wrap(eng, { batch: pb });

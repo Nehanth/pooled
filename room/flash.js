@@ -36,6 +36,7 @@
 //   signature() -> {}           what a saved state must match (the engine's stateSignature: arch, lo, hi, kv, qsa,
 //                               qsaRing, dim); optional, a core without it is the dense f32 layout
 import { NgramState } from "../engine/ngram.js";
+import { QSA_KPOOL } from "../engine/wgsl/qsa.js";
 import { FLASH_PREFILL_FRAME, flashBatchScratch, FLASH_BATCH_BYTES_PER_COL, FLASH_BATCH_BYTES_FIXED } from "./models.js";
 
 // WebGPU's flag values (the spec's), for a page or test without the globals until a device exists
@@ -245,7 +246,12 @@ export { FLASH_PREFILL_FRAME, flashBatchScratch, FLASH_BATCH_BYTES_PER_COL, FLAS
 // (every layer, the embedding and the head: a solo room's prompt goes through it in one prefillTokens) runs the batch's
 // widest default; a room's devices run the host's prompt frames (FLASH_PREFILL_FRAME columns), so wider passes would
 // only cost scratch (flashBatchScratch).
-export const flashBatchCols = (solo) => (solo ? FLASH_SOLO_COLS : FLASH_PREFILL_FRAME);
+// ring (a QSA engine's raw-key ring rows, ai-load.flash): a pass completes blocks of up to cols + 3 rows of it
+// (engine/qwen4exp_batch.js refuses wider passes), so the width stays under ring - 3, in whole 64-column steps
+export const flashBatchCols = (solo, ring = 0) => {
+  const cols = solo ? FLASH_SOLO_COLS : FLASH_PREFILL_FRAME;
+  return ring > 0 ? Math.min(cols, Math.max(64, Math.floor((ring - (QSA_KPOOL - 1)) / 64) * 64)) : cols;
+};
 const FLASH_SOLO_COLS = 1024;
 // what a Qwen4ExpBatch holds on the GPU: every buffer it created (scratch, QSA scratch, stages) -> bytes
 export function qwen4expBatchBytes(pb) {
