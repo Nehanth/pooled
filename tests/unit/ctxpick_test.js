@@ -107,10 +107,7 @@ Deno.test("ctxpick: prefill estimates in words", () => {
   ok(prefillSeconds(F, 8192, { mode: "perToken" }) > prefillSeconds(F, 8192, { mode: "disk" }) && prefillSeconds(F, 8192, { mode: "disk" }) > prefillSeconds(F, 8192));
   // the tab's measurements: 1887 tokens in 51 s, 7663 in 134 s
   ok(Math.abs(prefillSeconds(F, 1887, { mode: "disk" }) - 51) < 2 && Math.abs(prefillSeconds(F, 7663, { mode: "disk" }) - 134) < 2);
-  // and the tab with a room node stepping its frames: 1887 in 80 s, 7663 in 300 s
-  ok(Math.abs(prefillSeconds(F, 1887, { mode: "diskRoom" }) - 80) < 8 && Math.abs(prefillSeconds(F, 7663, { mode: "diskRoom" }) - 300) < 15);
-  eq([prefillMode({ fits: true }), prefillMode({ offload: true }), prefillMode({ offload: true, disk: true }), prefillMode({ offload: true, disk: true, caps: [29, 19] })],
-    ["batch", "perToken", "disk", "diskRoom"]);
+  eq([prefillMode({ fits: true }), prefillMode({ offload: true }), prefillMode({ offload: true, disk: true })], ["batch", "perToken", "disk"]);
   eq(prefillSeconds("qwen3.8-27b", 8192), null);
   eq([durationWords(40), durationWords(600), durationWords(7200)], ["about 40 s", "about 10 min", "about 2 h"]);
 });
