@@ -493,11 +493,12 @@ export const FLASH_QSA_RING = 1024;
 export const FLASH_QSA_LAYER_BYTES = 3277824 + FLASH_QSA_RING * 256 + 512 * 256;
 // What a build that loads Flash with QSA says in its hello (meta.flashLong, additive, no PROTOCOL bump): ctx, the longest
 // context its loader takes (QSA's 411,000, or what one f32 K / V buffer of 2 KV heads x 256 fits in maxBindMB); kv, its
-// K / V formats; batch, whether it runs batched prefill passes (not yet: 0). A device without it is an older build:
-// dense, 2048 positions.
-export function flashLongMeta(maxBindMB) {
+// K / V formats; batch, whether it runs batched prefill passes (1 by default: room/flash.js with a Qwen4ExpBatch; a node
+// with POOLED_FLASH_BATCH=0 says 0; informational, ai-ready.batch is what the host acts on). A device without it is an
+// older build: dense, 2048 positions.
+export function flashLongMeta(maxBindMB, { batch = 1 } = {}) {
   const bind = (+maxBindMB > 0 ? +maxBindMB : WEBGPU_MIN_BIND / 2 ** 20) * 2 ** 20;
-  return { ctx: Math.min(411000, Math.floor(bind / (2 * 256 * 4))), kv: ["f32"], batch: 0 };
+  return { ctx: Math.min(411000, Math.floor(bind / (2 * 256 * 4))), kv: ["f32"], batch: batch ? 1 : 0 };
 }
 const flashLongOk = (m) => !!m?.flashLong && typeof m.flashLong === "object" && +m.flashLong.ctx >= 2048 && Array.isArray(m.flashLong.kv) && m.flashLong.kv.includes("f32");
 // The host's Flash format for ai-load (ai-load.flash): QSA on, f32 K / V, the 1024-row ring, when every device it dealt
