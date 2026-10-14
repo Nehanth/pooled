@@ -11,6 +11,8 @@
 //        CODE_FILE=<path>: the worker is not started here: the room's code is written to that file and the host waits
 //        (WAIT_S, default 600) for a node from another process to join, e.g. one from an older build (a mixed room).
 // env: MODELS (default ~/llm/models: models/q38flash/<file>, source.js LOCAL, or <dir>/qwen3.8-flash/<file>),
+//      CTX=N (the room's context, asked; the cases with prompt + ids <= N; default: the cases under 2048, the room
+//        opening where it opens), POOLED_FLASH_KV=f32 (both nodes: an f32 K / V room instead of f16, env.js),
 //      CASES=a,b (default every golden case under 2048 tokens), SOLO_GB (90), OUT (result JSON), PORT (8251),
 //      POOLED_QSA_ALWAYS=1 (QSA's gathered attention on every step, env.js qsaAlways). The result records the room's
 //      Flash format (ai-load.flash: QSA, or null for dense) and what each worker's ai-ready said it loaded.
@@ -41,7 +43,13 @@ const T0 = Date.now();
 const log = (...a) => console.error(((Date.now() - T0) / 1000).toFixed(1) + "s", ...a);
 const gold = JSON.parse(fs.readFileSync(new URL("../../../tests/golden/q38flash_llama_greedy.json", import.meta.url), "utf8"));
 const pick = process.env.CASES ? process.env.CASES.split(",") : null;
-const cases = Object.entries(gold).filter(([k, v]) => !k.startsWith("_") && (!pick || pick.includes(k)) && v.prompt.length + v.ids.length <= 2048);
+// CTX=N (rooms long-context PR 5 / 6): the room's context, asked of the host (--ctx: tried alone), and the cases that fit
+// it (prompt + ids <= N); without it the room opens where it opens (the longest proven context it holds) and the cases
+// are the ones under 2048, as before. LONG judging past 8K: llama.cpp's own runs part early there (docs/kernels.md), so
+// a case passes against the golden or against any of llama.cpp's reruns, and a needle case also needs the passphrase
+// llama.cpp found (tests/test_q38flash_batch.js LONG=1's rule)
+const CTX_ASK = +process.env.CTX || 0, MAXCTX = CTX_ASK || 2048;
+const cases = Object.entries(gold).filter(([k, v]) => !k.startsWith("_") && (!pick || pick.includes(k)) && v.prompt.length + v.ids.length <= MAXCTX);
 const out = { mode: MODE, model: MODEL, cases: {} };
 
 const peerServer = spawn(path.join(NM, ".bin/peerjs"), ["--port", String(SIG), "--path", "/", "--host", "127.0.0.1"], { stdio: "ignore" });
@@ -50,13 +58,13 @@ let host = null, worker = null, code = 1;
 const nodeLog = (who) => (m) => log(`[${who}] ${m}`);
 try {
   if (MODE === "solo") {
-    host = await createRoom({ model: MODEL, pledgeGB: +(process.env.SOLO_GB || 90), name: "flash-solo", signal: SIGNAL, modelDir: MODELS, log: nodeLog("host"), split: "speed" });
+    host = await createRoom({ model: MODEL, pledgeGB: +(process.env.SOLO_GB || 90), ...(CTX_ASK ? { ctx: CTX_ASK } : {}), name: "flash-solo", signal: SIGNAL, modelDir: MODELS, log: nodeLog("host"), split: "speed" });
     const t = Date.now();
     await host.start(MODEL);
     out.loadS = (Date.now() - t) / 1000;
   } else if (MODE === "pair") {
     const split = process.env.SPLIT || "memory";
-    host = await createRoom({ model: MODEL, pledgeGB: +(process.env.HOST_GB || 40), name: "flash-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a"), split });
+    host = await createRoom({ model: MODEL, pledgeGB: +(process.env.HOST_GB || 40), ...(CTX_ASK ? { ctx: CTX_ASK } : {}), name: "flash-a", signal: SIGNAL, modelDir: MODELS, log: nodeLog("a"), split });
     if (process.env.CODE_FILE) { fs.writeFileSync(process.env.CODE_FILE, host.code); log(`room ${host.code}: waiting for a worker from another process`); }
     else worker = await joinRoom(host.code, { pledgeGB: +(process.env.WORKER_GB || 40), name: "flash-b", signal: SIGNAL, modelDir: MODELS, log: nodeLog("b"),
       ...(+process.env.WORKER_RAM_GB > 0 ? { ramGB: +process.env.WORKER_RAM_GB } : {}),
@@ -86,18 +94,27 @@ try {
     const r = await host.locked(() => host.generate(g.prompt, { maxNew: g.ids.length, sample, stop: new Set() }));
     const ids = r.tokens;
     if (gaps.length < ids.length) throw new Error(`${name}: ${gaps.length} sample calls for ${ids.length} tokens (a path that samples elsewhere: the gaps would not line up)`);
-    const J = judgeGolden(g, ids, gaps, g.ids.length);
+    let J = judgeGolden(g, ids, gaps, g.ids.length), byRun = 0;
+    // (long cases: against any of llama.cpp's reruns when not against the golden; the one that matched furthest)
+    if (!J.ok && !J.excused && g.prompt.length > 8192)
+      for (const [k, run] of (g.runs || []).entries()) {
+        const R = judgeGolden({ ...g, ids: run.ids, top: run.top, runs: [] }, ids, gaps, Math.min(g.ids.length, run.ids.length));
+        if (R.ok || R.excused) { J = R; byRun = k + 1; break; }
+      }
     let diff = J.diff;
     if (diff < 0 && ids.length < g.ids.length) diff = ids.length;
-    const verdict = diff < 0 ? "MATCH" : J.excused ? "TIE" : "MISMATCH";
+    const text = host.ai.tok.decode(ids);
+    // a needle case: the passphrase must be in our answer when llama.cpp found it
+    const needle = g.needle ? text.includes(g.needle) : null, needleBad = g.needle && g.found && !needle;
+    const verdict = needleBad ? "MISMATCH" : diff < 0 ? "MATCH" : J.excused ? "TIE" : "MISMATCH";
     if (verdict === "MISMATCH") fail++;
     // the same ids as the reference run (SAME_AS), when given
     const ref = (same?.cases?.[name] || same?.cases?.[name.split("@")[0]])?.ids, sameIds = ref ? ref.length === ids.length && ref.every((x, i) => x === ids[i]) : null;
     if (sameIds === false) fail++;
-    out.cases[name] = { verdict, n: g.ids.length, diff, rule: J.msg, tps: +r.tps.toFixed(2), prefillS: +(r.tPre / 1000).toFixed(2), prefillTps: +(g.prompt.length / (r.tPre / 1000)).toFixed(1),
+    out.cases[name] = { verdict, n: g.ids.length, diff, rule: J.msg, ...(byRun ? { byRun } : {}), ...(needle !== null ? { needle, llamaFound: !!g.found } : {}), ctx: host.ai.roomCtx, kv: host.ai.roomFlash?.kv ?? null, tps: +r.tps.toFixed(2), prefillS: +(r.tPre / 1000).toFixed(2), prefillTps: +(g.prompt.length / (r.tPre / 1000)).toFixed(1),
       prompt: g.prompt.length, wallS: +((performance.now() - t) / 1000).toFixed(1), ...(sameIds !== null ? { sameIds } : {}),
-      text: host.ai.tok.decode(ids), ids: Array.from(ids), ...(diff >= 0 ? { got: ids.slice(Math.max(0, diff - 2), diff + 4), want: g.ids.slice(Math.max(0, diff - 2), diff + 4), ourTop: tops[diff], llamaTop: g.top?.[diff] } : {}) };
-    log(`${name}: ${verdict}${diff >= 0 ? ` at ${diff}: ${diff < ids.length ? J.msg : `${ids.length} of ${g.ids.length} ids`}` : ` (${g.ids.length} ids)`} · prompt ${g.prompt.length} tok in ${(r.tPre / 1000).toFixed(1)} s (${(g.prompt.length / (r.tPre / 1000)).toFixed(1)} tok/s) · decode ${r.tps.toFixed(2)} tok/s${sameIds === null ? "" : sameIds ? " · ids == SAME_AS" : " · ids DIFFER from SAME_AS"}`);
+      text, ids: Array.from(ids), ...(diff >= 0 ? { got: ids.slice(Math.max(0, diff - 2), diff + 4), want: g.ids.slice(Math.max(0, diff - 2), diff + 4), ourTop: tops[diff], llamaTop: g.top?.[diff] } : {}) };
+    log(`${name}: ${verdict}${byRun ? ` (against llama.cpp's rerun ${byRun})` : ""}${needle !== null ? ` · needle ${needle ? "found" : "MISSING"}` : ""}${diff >= 0 ? ` at ${diff}: ${diff < ids.length ? J.msg : `${ids.length} of ${g.ids.length} ids`}` : ` (${g.ids.length} ids)`} · prompt ${g.prompt.length} tok in ${(r.tPre / 1000).toFixed(1)} s (${(g.prompt.length / (r.tPre / 1000)).toFixed(1)} tok/s) · decode ${r.tps.toFixed(2)} tok/s${sameIds === null ? "" : sameIds ? " · ids == SAME_AS" : " · ids DIFFER from SAME_AS"}`);
   }
   out.pass = !fail;
   code = fail ? 1 : 0;
