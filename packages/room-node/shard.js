@@ -382,7 +382,8 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   }
   const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
   if (weights.pleTable) out.ngram = await openNgramTable(src, G, log);
-  let noBatch = batch === "off" ? "POOLED_FLASH_BATCH=0" : dl.length ? `layers ${dl[0]}-${dl[dl.length - 1]} read their experts from disk` : null;
+  // (disk layers batch too: a pass reads each one's experts from its file into the region, engine/qwen4exp_batch.js)
+  let noBatch = batch === "off" ? "POOLED_FLASH_BATCH=0" : null;
   let expertRegion = false, batchCols = flashBatchCols(solo, q?.ring), scratch = 0;
   const gb = (n) => (n / 2 ** 30).toFixed(2);
   // real memory, as the check above, with extra bytes on the GPU
