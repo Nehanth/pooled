@@ -122,7 +122,11 @@ export class FlashRoomEngine {
   }
   // a node host's wide prompt frames (room/pipeline.js aiPrefill) and a worker's (workerFrame): frame columns per frame
   // when this device batches, else 0 (the frames then come in NC-column chunks, one core step a column)
-  prefillFrame() { return this.batch ? this.frame : 0; }
+  // A device with disk-tier layers runs a frame layer by layer (each disk layer read once for it: batch.passesLayered),
+  // so it asks for frames of the batch's layeredCols: a host with them sends them that wide (room/pipeline.js aiPrefill,
+  // browser hosts too: diskFrames)
+  get diskFrames() { return !!this.batch?.layered?.(this.batch.layeredCols); }
+  prefillFrame() { return !this.batch ? 0 : this.diskFrames ? Math.max(this.frame, this.batch.layeredCols) : this.frame; }
   // src: the host's token ids (it has the embedding), or a worker's input residuals (n x hDim) with opts.ids
   async prefillHidden(src, basePos, { ids = null } = {}) {
     if (!this.batch) throw new Error("qwen4exp: prefillHidden without batched passes on this device (prefillFrame() is 0)");
