@@ -75,21 +75,27 @@ export function ctxOptions(model, { metas, pledges, costs = roomCosts(model), ma
   });
 }
 
-// How long reading a prompt of `tokens` takes, from the rooms' measured prefill rates (packages/room-node/test/
-// flash_gold.mjs pair, two room nodes on one GB10, f16 K / V, 2026-10-13; docs/long-context-and-sessions.md):
-// batched when every device runs batched passes (room/flash.js), else one column at a time (a tab reading experts from
-// its disk, an offloader without the region). Batched: 189 tok/s at 8K, 200 at 32K and 64K, 186 at 128K (ctx8k, ctx32k,
-// ctx64k, ctx128k). One column at a time: 15.8 tok/s at 8K (POOLED_FLASH_BATCH=0); the cost per token stays about flat
-// with QSA (its attention reads at most 2051 cells), so the longer lengths use it too. -> seconds, or null for a model
-// without measurements. The fast case: a room of slower GPUs, or one reading experts from disk, takes longer.
-export const FLASH_PREFILL_TPS = { batch: { 8192: 189, 32768: 200, 65536: 200, 131072: 186 }, perToken: { 8192: 15.8, 131072: 15.8 } };
-export function prefillSeconds(model, tokens, { batch = true } = {}) {
+// How long reading a prompt of `tokens` takes, from the rooms' measured prefill rates (2026-10-13, this repo's GB10;
+// docs/long-context-and-sessions.md), by how the room reads a prompt (mode):
+//   batch     every device runs batched passes (room/flash.js): two room nodes, f16 K / V (flash_gold.mjs pair):
+//             189 tok/s at 8K, 200 at 32K and 64K, 186 at 128K
+//   perToken  a device steps prompt frames one column at a time with its experts in GPU memory or RAM (an offloader
+//             without the region, POOLED_FLASH_BATCH=0): 15.8 tok/s at 8K, about flat with length (QSA reads at most
+//             2051 cells a token)
+//   disk      a device reads experts from its disk (a tab's disk tier: those layers never batch): 1.8 tok/s
+//             (flash_tab_gold.mjs tab, a 12 GB tab on the GB10; a Mac's own disk may differ)
+// -> seconds, or null for a model without measurements
+export const FLASH_PREFILL_TPS = { batch: { 8192: 189, 32768: 200, 65536: 200, 131072: 186 }, perToken: { 8192: 15.8, 131072: 15.8 }, disk: { 8192: 1.8, 131072: 1.8 } };
+export function prefillSeconds(model, tokens, { mode = "batch" } = {}) {
   if (MODELS[model]?.kind !== "qwen4exp" || !(tokens > 0)) return null;
-  const t = FLASH_PREFILL_TPS[batch ? "batch" : "perToken"], ks = Object.keys(t).map(Number).sort((a, b) => a - b);
+  const t = FLASH_PREFILL_TPS[mode] || FLASH_PREFILL_TPS.batch, ks = Object.keys(t).map(Number).sort((a, b) => a - b);
   // the rate measured at the nearest length at or above it (rates fall a little with length)
   const k = ks.find((x) => x >= tokens) ?? ks[ks.length - 1];
   return tokens / t[k];
 }
+// How a room reads prompts, from its fit (roomFitFor's): disk when some layers read experts from disk, perToken when a
+// device offloads (its frames usually run per token: #381's region rule), else batch
+export const prefillMode = (fit) => (fit?.disk ? "disk" : fit?.offload ? "perToken" : "batch");
 // "about 2 min", "about 1.5 h": a duration in words for the picker
 export function durationWords(s) {
   if (!(s > 0)) return "";

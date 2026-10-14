@@ -7,7 +7,7 @@ import { parseGGUFHeader, qwen4expConfig, qwen4expShardBytes } from "../../engin
 import { mergeSplitHeaders, flashLayerCost, flashLongMeta, expertsOf, CTX, FLASH_CTX_OPTIONS, FLASH_CTX_PROVEN, maxSeqFor } from "../../room/models.js";
 import { minFitPledge, gbUp } from "../../room/plan.js";
 import { pledgeGB, dealPledgeBytes } from "../../room/pledge.js";
-import { roomCtxPlan, roomCosts, hostMarginFor, ctxOptions, fitAtCtx, prefillSeconds, durationWords } from "../../room/ctxpick.js";
+import { roomCtxPlan, roomCosts, hostMarginFor, ctxOptions, fitAtCtx, prefillSeconds, prefillMode, durationWords } from "../../room/ctxpick.js";
 import { readFixture, ggufFromFixture } from "../helpers/gguf_fixture.js";
 
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -103,7 +103,8 @@ Deno.test("ctxpick: no choice opens at the longest proven context the room holds
 
 Deno.test("ctxpick: prefill estimates in words", () => {
   ok(prefillSeconds(F, 8192) > 0 && prefillSeconds(F, 131072) > prefillSeconds(F, 32768));
-  ok(prefillSeconds(F, 8192, { batch: false }) > prefillSeconds(F, 8192));
+  ok(prefillSeconds(F, 8192, { mode: "disk" }) > prefillSeconds(F, 8192, { mode: "perToken" }) && prefillSeconds(F, 8192, { mode: "perToken" }) > prefillSeconds(F, 8192));
+  eq([prefillMode({ fits: true }), prefillMode({ offload: true }), prefillMode({ offload: true, disk: true })], ["batch", "perToken", "disk"]);
   eq(prefillSeconds("qwen3.8-27b", 8192), null);
   eq([durationWords(40), durationWords(600), durationWords(7200)], ["about 40 s", "about 10 min", "about 2 h"]);
 });

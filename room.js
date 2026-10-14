@@ -53,7 +53,7 @@ import { qrSVG } from "./room/qr.js";
 import { diskCopyOf, rowChipHTML, rowTitle, poolGpuLine, poolStoreLine, poolFix, devStoreTag, devStoreTitle, allowLabel } from "./room/diskpick.js";
 import { showDiskPick, initDiskPick, refreshDiskPick, diskShortNote, diskStateOf, storedNow } from "./room/diskpick-ui.js";
 import { connectDiskStore } from "./room/diskstore.js";
-import { roomCtxPlan, hostMarginFor, ctxOptions, prefillSeconds, durationWords } from "./room/ctxpick.js";
+import { roomCtxPlan, hostMarginFor, ctxOptions, prefillSeconds, prefillMode, durationWords } from "./room/ctxpick.js";
 import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
@@ -719,20 +719,20 @@ function pickRung(b) { if (!b || $("ai-model").disabled) return; setModelValue(b
 // that fits). The same numbers as the need line, the pool and Start (roomCtxPlan). Room settings has the same choice
 // (#ai-ctx-set) for a running room, where a change loads the model again (ctxChange).
 let ctxHTML = "";
-function ctxOptionWords(key, o, batch) {
+function ctxOptionWords(key, o, mode) {
   if (!o.fits) return o.why;
-  const t = durationWords(prefillSeconds(key, o.ctx, { batch }));
+  const t = durationWords(prefillSeconds(key, o.ctx, { mode }));
   return `${o.needGB} GB${t ? ` · a full paste ${t}` : ""}`;
 }
 function renderCtx(row) {
   const el = $("ai-ctx"), key = $("ai-model").value, opts = row?.f?.ctxOpts || [];
-  // (prompt passes run batched unless a device reads experts from its disk: room/flash.js, room-node shard.js)
-  const batch = !row?.f?.fit?.disk;
+  // (how this room reads a prompt: batched, one column at a time, or from a device's disk: room/ctxpick.js prefillMode)
+  const mode = prefillMode(row?.f?.fit);
   let html = "";
   if (opts.length) {
     const cur = row.f.ctx;
     html = `<p>Context: how much text it reads at once</p><div class="cx" role="radiogroup" aria-label="Context length">${opts.map((o) =>
-      `<button type="button" role="radio" data-c="${o.ctx}" aria-checked="${o.ctx === cur}" class="${o.ctx === cur ? "sel" : ""}"${o.fits ? "" : " disabled"} title="${esc(`${o.label} context: ${ctxOptionWords(key, o, batch)}`)}">${o.label}<small>${esc(ctxOptionWords(key, o, batch))}</small></button>`).join("")}</div>`;
+      `<button type="button" role="radio" data-c="${o.ctx}" aria-checked="${o.ctx === cur}" class="${o.ctx === cur ? "sel" : ""}"${o.fits ? "" : " disabled"} title="${esc(`${o.label} context: ${ctxOptionWords(key, o, mode)}`)}">${o.label}<small>${esc(ctxOptionWords(key, o, mode))}</small></button>`).join("")}</div>`;
   }
   el.hidden = !html;
   if (html !== ctxHTML) el.innerHTML = ctxHTML = html;
