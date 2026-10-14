@@ -19,7 +19,7 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
   // The existing callers have different Continue, cancellation and lookup lifetimes.
   const node = options.profile === "node", plainDraft = node ? 0 : false;
   const { aiPrefill, aiPipeToken, ckptResume, resetState, ckptClear, ckptSave, ckptEngine,
-    lapWait, sendChain, noteLap } = pipeline;
+    lapWait, sendChain, noteLap, noteOperation = null, noteGeneration = null } = pipeline;
   const { computePass = noop, mapPulse = noop, pushMap = noop, crumb = noop, noteSpeeds = noop,
     onSoloSpeed = noop, wakeChain = noop, chainRtt = () => 0, getPeerMeta = noop, log = noop,
     preparePrompt, finish } = hooks;
@@ -31,11 +31,12 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
         const tLap = pre?.t0 ?? performance.now();
         wakeChain(pos);
         const n = tokens.length, hdim = wireDim(current.engine), NC = current.engine.NC || 4;
-        const hb = pre?.hs || new Float32Array(n * hdim);
+        const hb = pre?.hs || new Float32Array(n * hdim), started = noteOperation ? performance.now() : 0;
         if (!pre) for (let c = 0; c < n; c += NC) {
           const m = Math.min(NC, n - c);
           hb.set(await current.engine.embedRunBatch(tokens.slice(c, c + m), pos + c, { base: c, total: n }), c * hdim);
         }
+        if (noteOperation && !pre) noteOperation("host", pos, n, started);
         if (badF32(hb)) throw new Error(`NaN after ${node ? "host" : "HOST"} layers (pos ${pos})`);
         const hostMs = performance.now() - tLap;
         const returned = lapWait("b" + pos, lapTimeout(ai.lapStat, 90000, chainRtt()), "verify");
@@ -70,6 +71,14 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
     // masks logits has no .gpu and keeps the full-logits path. specStep checks the same itself.
     let prepared = null;
     const desc = current.engine.gpuDescFor?.(sample) || null;
+    if (noteOperation) {
+      const original = sample;
+      sample = Object.assign((logits) => {
+        const started = performance.now(), id = original(logits);
+        noteOperation("sample", ai.pos, 1, started);
+        return id;
+      }, { gpu: original.gpu });   // retain even a non-enumerable GPU sampler descriptor
+    }
     try {
       let logits = null;
       if (preparePrompt) {
@@ -179,6 +188,7 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
           const lk = LOOKUP && current.engine.specStepDrafts && ai.fed ? lookupDrafts([...ai.fed, next], Math.min(lkMax, roomLeft, maxNew - count)) : [];
           const viaLookup = lk.length >= 2;
           const toks = viaLookup ? await current.engine.specStepDrafts(next, sample, lk, spec) : await current.engine.specStep(next, sample, K, spec);
+          if (noteOperation) noteOperation("verify", ai.pos, (viaLookup ? lk.length : K) + 1, tStep);
           if (viaLookup) copied += toks.length - 1;
           lkFull = viaLookup && toks.length === lk.length + 1;
           if (!node) ai.lkFull = lkFull;
@@ -240,7 +250,9 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
           const tStep = node ? 0 : performance.now();
           if (lk.length) {
             current.engine.pos = ai.pos;
+            const started = noteOperation ? performance.now() : 0;
             toks = await current.engine.specStepDrafts(next, sample, lk, spec);
+            if (noteOperation) noteOperation("verify", ai.pos, lk.length + 1, started);
             ai.fed?.push(next, ...toks.slice(0, -1));
             ai.pos = current.engine.pos;
             ai.lastHidden = current.engine.lastHidden;
@@ -289,7 +301,9 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
             if (i === 0 && first != null) next = first;
             else if (!deferred) next = sample(logits);
             else {
+              const started = noteOperation ? performance.now() : 0;
               const r = await current.engine.headAhead(ai.lastHidden, ai.pos, desc);
+              if (noteOperation) noteOperation("head-host", ai.pos, 1, started);
               if (r.cands.bad) throw new Error(`NaN in logits (pos ${ai.pos})${node ? "" : " — head/lm_head kernel issue on host"}`);
               logits = r.cands; deferred = false;
               next = sample(r.cands);
@@ -312,7 +326,9 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
           capped = true;
           // for Continue: the chosen id (sample reads logits or GPU candidates alike)
           if (!node && deferred && !aborted() && ai.pos < ctxMax() - 1) {
+            const started = noteOperation ? performance.now() : 0;
             logits = await current.engine.headFromHiddenIds(ai.lastHidden, desc);
+            if (noteOperation) noteOperation("head", ai.pos - 1, 1, started);
             if (logits.bad) throw new Error(`NaN in logits (pos ${ai.pos})${node ? "" : " — head/lm_head kernel issue on host"}`);
           }
           if (!node && logits && !aborted() && ai.pos < ctxMax() - 1) ai.pending = { next: sample(logits), at: ai.pos };
@@ -340,5 +356,21 @@ export function createGenerator({ state: ai, pipeline, options = {}, hooks = {} 
     return { tokens, reason, reused, prefilled, count, tps, acc, copied, tPre, tDecode, preFrames, stats, capped };
   }
 
-  return generate;
+  if (!noteGeneration) return generate;
+  // Observe the existing attempt, including a node's asynchronous finish hook.
+  // Recovery invokes this again; collectors must not merge it into one fast run.
+  return async (ids, request = {}) => {
+    noteGeneration("start", { ids: Array.from(ids) });
+    try {
+      const result = await generate(ids, { ...request, onToken(id, drafted) {
+        noteGeneration("token", { id, drafted: !!drafted });
+        request.onToken?.(id, drafted);
+      } });
+      noteGeneration("end", { result: { ...result, tokens: result.tokens.slice() } });
+      return result;
+    } catch (error) {
+      noteGeneration("error", { error: String(error?.message || error) });
+      throw error;
+    }
+  };
 }

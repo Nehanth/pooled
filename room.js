@@ -6,6 +6,7 @@
 import { createModelLoader } from "./room/model-loader.js";
 import { tabDiskChoice, saveTabDiskChoice, tabDiskMeta, tabExpertBytes, flashDiskBytes, removeFlashCopy, TAB_DISK_MODELS } from "./room/flashdisk.js";
 import { createPipeline } from "./room/pipeline.js";
+import { createTimingCollector } from "./room/timing.js";
 import { createGenerator } from "./engine/generate.js";
 import { argmax } from "./engine/sampling.js";
 let autotuneCoop, makeTokenizer, DenseEngine, fetchModelShard, shardTensorNames, gpuSelfTest, kernelMicroTests, Qwen35Engine;
@@ -4410,11 +4411,13 @@ async function aiLoadDraft(modelKey) {
 const TAIL_FRAME = new URLSearchParams(location.search).get("tail") !== "0";   // ?tail=0: old per-token tail, for A/B   // prefill rounds in flight round the chain at once
 
 // Engines stay lazy-loaded; the browser owns delivery, storage and UI observers.
+const benchParams = new URLSearchParams(location.search);
+const benchTiming = benchParams.get("bench") === "1" && benchParams.get("timing") === "1" ? createTimingCollector() : null;
 const pipeline = createPipeline({
   state: ai, transport: { sendHidden, sendTo, chainRtt },
   options: { checkpointMax: CKPT_MAX, fillDrafts: FILL_DRAFTS, mtpBatch: MTP_BATCH, tailFrame: TAIL_FRAME, prefillWindow: PREFILL_WINDOW },
   checkpointStore: ckptDisk, getRoomCode: () => roomCode,
-  hooks: { onStatus: aiStatus, computePass: compute.pass, teleNote, wakeChain, keepWarm,
+  hooks: { onTiming: benchTiming?.record, onStatus: aiStatus, computePass: compute.pass, teleNote, wakeChain, keepWarm,
     onFrame(d) { ai.waker?.stop(); ai.lastFramePos = d.t === "ai-hidden" ? d.pos : d.basePos; } },
 });
 const { failWaiters, ckptClear, ckptRestore, ckptPrune, ckptRejoin } = pipeline;
@@ -5743,6 +5746,11 @@ if (DEV) window.__pooledGen = async (ids, maxNew) => {
 if (DEV) window.__pooledInvite = () => (roomCode ? roomLink() : null);
 // (?dev=1&stalls=MS: log this page's event-loop stalls past MS, for the Flash room's slow laps)
 if (DEV && +SPLIT_Q.get("stalls") > 0) { let last = performance.now(); setInterval(() => { const now = performance.now(); if (now - last > 50 + +SPLIT_Q.get("stalls")) console.error(`event loop stalled ${(now - last - 50).toFixed(0)} ms at ${new Date().toISOString().slice(11, 23)}`); last = now; }, 50); }
+if (benchParams.get("bench") === "1") import("./benchmarks/bench_room_browser.js").then(({ browserBenchmark }) => {
+  window.__pooledBench = browserBenchmark({ state: ai, pipeline, api: roomApi, timing: benchTiming, connections: conns,
+    options: { lookup: LOOKUP, denseSpec: DENSE_SPEC, fillDrafts: FILL_DRAFTS, hostFuse: HOST_FUSE,
+      draftK: DRAFT_K, tailFrame: TAIL_FRAME, prefillWindow: PREFILL_WINDOW } });
+});
 
 $("ai-start").addEventListener("click", aiStartAnywhere);
 $("ai-redeal").addEventListener("click", () => aiRedeal());
