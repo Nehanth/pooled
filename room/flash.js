@@ -89,8 +89,11 @@ export class FlashRoomEngine {
   // the embedding when xs is null) and xs (the input residuals, n x hDim, on a device without the embedding).
   // want: return the output residuals (n x hDim); else nothing is read back (a solo prompt: the caches are what count)
   async _passes(ids, xs, basePos, want = true) {
-    const b = this.batch, W = this.dims.hDim, n = ids.length, out = want ? new Float32Array(n * W) : null;
+    const b = this.batch, W = this.dims.hDim, n = ids.length;
     this.core.pos = basePos;
+    // disk-tier layers: layer by layer, each one read from disk once for up to b.layeredCols tokens (same bits)
+    if (b.layered?.(n)) return (await b.passesLayered(Array.from(ids), { hidden: xs, wantHidden: want })).hiddens;
+    const out = want ? new Float32Array(n * W) : null;
     for (let o = 0; o < n; o += b.maxCols) {
       const m = Math.min(b.maxCols, n - o);
       // (_pass: a pass that throws part way marks the engine failed, as a core step does)
