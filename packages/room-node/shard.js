@@ -13,7 +13,7 @@ import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizer
   ggmlLayerNames, qwen35NamesFor, qwen4expConfig, qwen4expNamesFor, qwen4expWeights, qwen4expShardBytes, QWEN4EXP_HEAD } from "../../engine/gguf.js";
 import { ngramConfig, NgramTable, fileReadAt, httpReadAt } from "../../engine/ngram.js";
 import { FlashRoomEngine, flashBatchCols, flashBatchScratch, qwen4expBatchBytes } from "../../room/flash.js";
-import { hostMemory, qsaAlways, flashBatchMode, flashRegionForced } from "./env.js";
+import { hostMemory, qsaAlways, flashBatchMode, flashRegionForced, flashLayered } from "./env.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { maxSeqFor, kvModeFor, flashRoomMem, ckptSlotsAt, flashLoadOpts } from "../../room/models.js";
 import { QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
@@ -435,7 +435,7 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   if (!noBatch) {
     const { Qwen4ExpBatch } = await import("../../engine/qwen4exp_batch.js");
     // created now: its pipelines compile during the load, not on the first prompt
-    pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: batchCols, verifyCols: 1, exact: batch === "exact" });
+    pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: batchCols, verifyCols: 1, exact: batch === "exact", ...(flashLayered() ? {} : { layeredCols: 0 }) });
     out.batchBytes = qwen4expBatchBytes(pb);
   }
   const fe = FlashRoomEngine.wrap(eng, { batch: pb });

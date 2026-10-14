@@ -50,9 +50,10 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
   // before); ngramWorker: the n-gram table's copy runs in a worker (false: on the main thread, after the experts');
   // save: { workers, chunk, ahead, early } the experts' first save in workers (room/models.js modelLoadOptions;
   // workers 0: on the main thread); cdnResolve: range reads follow the model host's redirect once (engine/ngram.js);
-  // diskBatch: a tab with disk-tier layers runs batched prompt passes over them (a whole-layer region out of its cache)
+  // diskBatch: a tab with disk-tier layers runs batched prompt passes over them (a whole-layer region out of its cache);
+  // layered: those passes go layer by layer (engine/qwen4exp_batch.js passesLayered: each disk layer read once a prompt)
   const { wcache: WCACHE = true, wcacheVerify: WCACHE_VERIFY = false, prefetch = null, ngramIngest = true, expertWorkers = 4, expertRing = 64,
-    parload = true, ngramWorker = true, save: saveOpts = { workers: 0, chunk: 8, ahead: 3, early: true }, cdnResolve = true, diskBatch = true } = options;
+    parload = true, ngramWorker = true, save: saveOpts = { workers: 0, chunk: 8, ahead: 3, early: true }, cdnResolve = true, diskBatch = true, layered = true } = options;
   // Consent for this tab's disk (room/flashdisk.js): hooks.tabDisk() -> { tabDisk: what this tab advertises (meta.tabDisk),
   // choice: its user's answer ("allow" | "deny" | null) }; hooks.askDisk({ model, bytes, layers, ngramBytes }) ->
   // Promise<boolean>: ask the user (a worker whose deal needs its disk and who was not asked yet). Without them a tab
@@ -377,7 +378,7 @@ export function createModelLoader({ state: ai, rangeFetch, getWeightCache, getMe
         if (!experts || region) {
           try {
             const { Qwen4ExpBatch } = await import("../engine/qwen4exp_batch.js");
-            pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: flashBatchCols(false, q?.ring), verifyCols: 1 });
+            pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: flashBatchCols(false, q?.ring), verifyCols: 1, ...(layered ? {} : { layeredCols: 0 }) });
           } catch (e) { console.warn(`Flash: no batched prompt passes on this tab (${e?.message || e}); one column at a time`); }
         }
         ai.engine = FlashRoomEngine.wrap(eng, { batch: pb });

@@ -56,6 +56,7 @@ const U = GPUBufferUsage;
 const fr = Math.fround;
 const SUBMIT_LAYERS = 12;   // layers per submit, as forwardToken
 const WIDE_COLS = 1024;     // default columns per pass with the wide kernels (fewer for long contexts: the scratch bindings)
+const LAYERED_COLS = 4096;  // tokens a layered prompt (disk-tier layers: passesLayered) takes through each layer at once
 
 export class Qwen4ExpBatch {
   static async create(engine, weights, opts = {}) { const b = new Qwen4ExpBatch(); await b._init(engine, weights, opts); return b; }
@@ -70,7 +71,10 @@ export class Qwen4ExpBatch {
   // 1.3x faster on the GB10, the residual ~1e-2 from decode): true, "moe" (the routed experts only) or "dense" (the
   // projections only), when the device compiles dot4I8Packed. Default false: f32 tiles (one pass ~1e-6 from decode; see the header on long prompts).
   // maxBinding: a lower binding limit than the device's (tests: the maxCols cap of a smaller device / a longer maxSeq).
-  async _init(eng, W, { maxCols = null, verifyCols = 8, exact = false, dp4a = false, maxBinding = Infinity } = {}) {
+  // layeredCols: with disk-tier layers, the tokens passesLayered takes through each layer at once (their residuals,
+  // layeredCols x hDim x 4 B, wait in one buffer; 0: pass after pass through every layer, as without disk layers)
+  async _init(eng, W, { maxCols = null, verifyCols = 8, exact = false, dp4a = false, maxBinding = Infinity, layeredCols = LAYERED_COLS } = {}) {
+    this.layeredCols = Math.max(0, +layeredCols || 0);
     // the default width also fits QSA's raw-key ring (engine qsaRing: a pass completes blocks of up to maxCols + 3
     // rows, 1021 columns with the default 1024-row ring); an explicit maxCols past the ring is refused below
     if (maxCols == null && eng.qsa) maxCols = Math.min(exact ? 64 : WIDE_COLS, qsaRingCols(eng.qsaRing));
@@ -547,6 +551,93 @@ export class Qwen4ExpBatch {
       eng._encode(pass, l.exp, pos, n);
     }
     return { enc, pass };
+  }
+
+  // Layer by layer (an engine with disk-tier layers): the columns of up to LAYERED_COLS tokens go through one layer
+  // pass by pass before the next layer, so each disk layer's experts are read from its file once for all of them
+  // (loadLayerAsync), not once per pass. The same passes (maxCols columns each, the wide or exact kernels as _run
+  // picks) in the same order within every layer, so the bits are _passes's: a layer's state (DeltaNet, K / V, QSA)
+  // sees its columns in order; each pass's residual waits in a buffer between layers. Head "none" only (a room's
+  // prompt frames and a solo prompt: room/flash.js _passes). hidden: the input residuals (n x hDim) on a device
+  // without the embedding; wantHidden: -> { hiddens } (n x hDim), the output residuals.
+  layered(n) { return !!this.eng.experts?.diskSet?.size && n > this.maxCols && this.layeredCols > this.maxCols; }
+  async passesLayered(ids, { hidden = null, wantHidden = false } = {}) {
+    const eng = this.eng;
+    eng._check(ids[0]);
+    eng._posGen++;
+    try { return await this._layered(ids, hidden, wantHidden); } catch (e) {
+      eng._failed = e;
+      if (eng.experts?.region) eng.experts.region.layer = -1;
+      throw e;
+    } finally { this._lmBuf?.destroy(); this._lmBuf = null; }
+  }
+  async _layered(ids, hidden, wantHidden) {
+    const { eng, device, cfg, B } = this, q = device.queue, HD = cfg.hDim, HB = HD * 4, d = cfg.dim, N = ids.length;
+    if (eng.pos + N > eng.maxSeq) throw new Error(`qwen4exp: context full (${eng.maxSeq})`);
+    if (eng.hasEmbed && !ids.every((id) => Number.isInteger(id) && id >= 0 && id < eng.nVocab)) throw new Error("qwen4exp batch: token id outside the vocab");
+    if (!eng.hasEmbed && !(hidden && hidden.length === N * HD)) throw new Error("qwen4exp batch: this stage needs the input residual (hidden, n x hDim)");
+    const out = wantHidden ? new Float32Array(N * HD) : null, span = Math.max(this.maxCols, Math.floor(this.layeredCols / this.maxCols) * this.maxCols);
+    // what a pass carries from one layer to the next (per column): the residual, and the last FFN half's combine,
+    // which the next layer's first HC site folds in (build(): comb { a: moe, b: sh }, its inject partials in inj)
+    const carry = [[B.R, HD], [B.moe, d], [B.sh, d], [B.inj[0], cfg.hc * cfg.hc], [B.inj[1], cfg.hc * cfg.hc]];
+    const colB = carry.reduce((a, [, w]) => a + w * 4, 0);
+    for (let g0 = 0; g0 < N; g0 += span) {
+      const gN = Math.min(span, N - g0), pos0 = eng.pos;
+      if (!this._lmBuf || this._lmBuf.size < gN * colB) { this._lmBuf?.destroy(); this._lmBuf = device.createBuffer({ size: gN * colB, usage: U.STORAGE | U.COPY_SRC | U.COPY_DST }); }
+      const Rg = this._lmBuf;
+      // the group's columns of carry[k] at base[k] (the residuals first, at 0)
+      const base = []; carry.reduce((a, [, w]) => { base.push(a); return a + gN * w * 4; }, 0);
+      const move = (enc, p, save) => carry.forEach(([b, w], k) => (save ? enc.copyBufferToBuffer(b, 0, Rg, base[k] + p.o * w * 4, p.n * w * 4)
+        : enc.copyBufferToBuffer(Rg, base[k] + p.o * w * 4, b, 0, p.n * w * 4)));
+      // the passes: their columns, frame, rope table and n-gram rows (the history pushed in order, as _run does)
+      const P = [];
+      for (let o = 0; o < gN; o += this.maxCols) {
+        const n = Math.min(this.maxCols, gN - o), pid = ids.slice(g0 + o, g0 + o + n), pos = pos0 + o;
+        const cs = new Float32Array(n * MC.MC_FRAME_COL);
+        for (let c = 0; c < n; c++) {
+          let th = fr(pos + c);
+          for (let i = 0; i < cfg.ropeDims / 2; i++) { cs[c * MC.MC_FRAME_COL + i * 4] = fr(Math.cos(th)); cs[c * MC.MC_FRAME_COL + i * 4 + 1] = fr(Math.sin(th)); th = fr(th * eng._ropeTs); }
+        }
+        const emb = B.emb ? await eng.ngram.rows(eng.ngs.push(pid)) : (eng.ngs?.push(pid), null);
+        P.push({ o, n, pos, cs, emb, Ls: this.fastPass(n, "none") ? this.L.fast : this.L.exact });
+      }
+      // the input residuals of every column
+      if (eng.hasEmbed) {
+        const R = new Float32Array(gN * HD);
+        for (let c = 0; c < gN; c++) { const e = eng._embedRow(ids[g0 + c]); for (let s = 0; s < cfg.hc; s++) R.set(e, c * HD + s * d); }
+        q.writeBuffer(Rg, 0, R);
+      } else q.writeBuffer(Rg, 0, hidden.subarray(g0 * HD, (g0 + gN) * HD));
+      const nL = P[0].Ls.layers.length;
+      for (let li = 0; li < nL; li++) {
+        for (const p of P) {
+          // this pass's frame (queue order: after the last pass's submit, before this one's)
+          q.writeBuffer(B.F, 0, new Uint32Array([p.pos, p.n, 0, 0]));
+          q.writeBuffer(B.cs, 0, p.cs);
+          if (eng.qsa) qsaSetFrame(device, this.qsaS, p.pos, p.n);
+          if (p.emb) q.writeBuffer(B.emb, 0, p.emb);
+          // (the first layer: only the residuals; the rest is what the last pass left, as pass after pass)
+          const e0 = device.createCommandEncoder();
+          if (li) move(e0, p, false);
+          else e0.copyBufferToBuffer(Rg, p.o * HB, B.R, 0, p.n * HB);
+          q.submit([e0.finish()]);
+          // (a disk layer: the first pass reads it into the region, the others find it there)
+          const { enc, pass } = await this._encodeLayers([p.Ls.layers[li]], p.pos, p.n);
+          if (li === nL - 1 && eng.hasHead) eng._encode(pass, p.Ls.headSite, p.pos, p.n);
+          pass.end();
+          move(enc, p, true);
+          q.submit([enc.finish()]);
+        }
+      }
+      eng.pos = pos0 + gN;
+      if (wantHidden) {
+        const st = device.createBuffer({ size: gN * HB, usage: U.MAP_READ | U.COPY_DST }), e = device.createCommandEncoder();
+        e.copyBufferToBuffer(Rg, 0, st, 0, gN * HB);
+        q.submit([e.finish()]);
+        try { out.set(await this._read(st, gN * HB), g0 * HD); } finally { st.destroy(); }
+      }
+      else await q.onSubmittedWorkDone();
+    }
+    return { hiddens: out };
   }
 
   // Prompt tokens in passes of maxCols (the last pass gets the head). Returns the last pass's result (as _pass).

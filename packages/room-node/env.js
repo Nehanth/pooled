@@ -155,6 +155,10 @@ export function flashBatchMode(env = process.env) {
 // after it (by default only when they keep OFFLOAD_GOOD_SLOTS, which the deals seldom leave): so a gate can run an
 // offloaded worker batched. Not a user setting
 export const flashRegionForced = (env = process.env) => env.POOLED_FLASH_REGION === "1";
+// Test switch POOLED_FLASH_LAYERED=0 (shard.js loadFlash): batched passes over disk-tier layers go pass after pass
+// through every layer (each disk layer read once a pass) instead of layer by layer (engine/qwen4exp_batch.js
+// passesLayered: once for up to 4096 tokens; the same bits). Not a user setting
+export const flashLayered = (env = process.env) => env.POOLED_FLASH_LAYERED !== "0";
 // whether the GPU shares the system's memory (detectMemory's kind; Apple silicon reads as unified there too)
 export const unifiedMemory = (mem) => mem?.kind === "unified";
 // detectMemory on this machine (nvidia-smi, amdgpu sysfs, the platform), or { kind: "unknown" } when it fails
