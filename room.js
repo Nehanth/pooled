@@ -1504,6 +1504,9 @@ function onData(from, d) {
       const upd = (meta) => {
         const m = { ...meta, contribGB: d.gb };
         if ("tabDisk" in d) { const t = cleanTabDisk(d.tabDisk); if (t) m.tabDisk = t; else delete m.tabDisk; }
+        // local: a room node with the disk tier downloaded a model after it joined (packages/room-node announceLocal):
+        // the models whose files are all on its disk now (meta.local, room/pledge.js diskFor)
+        if (m.disk && Array.isArray(d.local)) m.local = d.local.filter((k) => typeof k === "string" && k.length > 0 && k.length <= 64).slice(0, 32);
         return m;
       };
       if (e) { e.meta = upd(e.meta); if (e.card) setLends(e.card, d.gb); }

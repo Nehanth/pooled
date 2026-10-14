@@ -71,6 +71,9 @@ import { Ask, Collector } from "../../cli/lib/answer.js";
 import { hostGate, gateHelloFields, holdConn, allowJoin, denyJoin, waitingJoins, joinHello, deviceGateMessage, onHostHello, meshHello, meshVerdict,
   keyFragment, randomCode, CODE_LEN } from "./gate.js";
 
+// a pledge's local list (model keys, room/pledge.js diskFor): strings only, short, at most 32
+export const cleanLocal = (a) => (Array.isArray(a) ? a.filter((k) => typeof k === "string" && k.length > 0 && k.length <= 64).slice(0, 32) : []);
+
 export const PREFIX = "pooled-room-";
 const CODE_ABC = "ABCDEFGHJKMNPQRSTVWXYZ23456789";   // room/plan.js codeFromLocation's alphabet
 export const randCode = (n = 4) => Array.from(crypto.getRandomValues(new Uint32Array(n)), (x) => CODE_ABC[x % CODE_ABC.length]).join("");
@@ -661,7 +664,10 @@ export class RoomNode extends EventEmitter {
       case "pong": if (e) { e.missed = 0; if (Number.isFinite(d.ts)) e.rtt = performance.now() - d.ts; } return;
       case "pledge": {
         // tabDisk (a tab's disk tier, when the message has it: its user said yes or no; room/pledge.js tabDiskGB)
-        const upd = (meta) => { const m = { ...meta, contribGB: d.gb }; if ("tabDisk" in d) { if (d.tabDisk && typeof d.tabDisk === "object") m.tabDisk = d.tabDisk; else delete m.tabDisk; } return m; };
+        // local (a room node with the disk tier, after it downloaded a model: announceLocal): the models whose files are all
+        // on its disk now (meta.local, room/pledge.js diskFor); kept only for a device that said it has a disk tier
+        const upd = (meta) => { const m = { ...meta, contribGB: d.gb }; if ("tabDisk" in d) { if (d.tabDisk && typeof d.tabDisk === "object") m.tabDisk = d.tabDisk; else delete m.tabDisk; }
+          if (m.disk && Array.isArray(d.local)) m.local = cleanLocal(d.local); return m; };
         if (e) e.meta = upd(e.meta);
         // it said yes after all: a disk tier room.js's cleanTabDisk keeps (RAM for it, the models it reads), not "ask"
         const t = d.tabDisk;
@@ -1228,6 +1234,15 @@ export class RoomNode extends EventEmitter {
     if (this.isHost) { this.broadcast({ t: "pledge", gb: v }); this.emit("members"); }
     else if (this.ai.hostId && this.conns.has(this.ai.hostId)) this.sendTo(this.ai.hostId, { t: "pledge", gb: v });
     return v;
+  }
+  // the disk tier's models changed (pooled join downloaded the room's model after it joined): tell the host, whose next
+  // deal may then leave some of that model's experts in the files here (meta.local, room/pledge.js diskFor)
+  announceLocal() {
+    if (!this.expertDisk || !this.meta) return false;
+    this.meta.local = localModels(this.modelDir);
+    if (this.isHost) return true;
+    if (this.ai.hostId && this.conns.has(this.ai.hostId)) this.sendTo(this.ai.hostId, { t: "pledge", gb: this.pledgeGB || this.meta.contribGB, local: this.meta.local });
+    return true;
   }
   ctxMax() { return this.ai.engine?.maxSeq || nodeCtxFor(this.ai.model || "qwen3-1.7b", this.ctxAsk); }
   // v2 asks (tools): the loaded model's template profile and token texts (room.js apiProfile / apiTokenTexts)
