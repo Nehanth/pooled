@@ -389,6 +389,28 @@ test("setPledge: a host tells the room, a device tells its host; the host's hell
   assert.equal(h.conns.get("p1").meta.contribGB, 9);
 });
 
+test("announceLocal: a device with the disk tier tells its host the models it now has; the host keeps them only for one with a disk tier", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rn-local-"));
+  fs.mkdirSync(path.join(dir, "qwen17"));
+  fs.writeFileSync(path.join(dir, "qwen17/model.gguf"), "x");
+  const d = fakeNode({ host: false, name: "node-abc" });
+  d.modelDir = dir; d.ai.hostId = "pooled-room-TEST"; d.addPeer("pooled-room-TEST", "host");
+  assert.equal(d.announceLocal(), false, "no disk tier: nothing to say");
+  d.expertDisk = true; d.meta.disk = true; d.meta.local = [];
+  assert.equal(d.announceLocal(), true);
+  const m = msgs(d, "pooled-room-TEST", "pledge");
+  assert.equal(m.length, 1); assert.equal(m[0].gb, 8); assert.ok(m[0].local.includes("qwen3-1.7b"));
+  assert.ok(d.meta.local.includes("qwen3-1.7b"));
+  const h = fakeNode();
+  h.addPeer("p1", "pc", { webgpu: true, contribGB: 10, offload: true, ramGB: 43, disk: true, local: [] });
+  h.addPeer("p2", "tab", { webgpu: true, contribGB: 4 });
+  h.onData("p1", { t: "pledge", gb: 10, local: ["qwen3.8-flash", 7, "x".repeat(99)] });
+  h.onData("p2", { t: "pledge", gb: 4, local: ["qwen3.8-flash"] });
+  assert.deepEqual(h.conns.get("p1").meta.local, ["qwen3.8-flash"]);
+  assert.equal(h.conns.get("p2").meta.local, undefined, "no disk tier: its local list means nothing");
+  fs.rmSync(dir, { recursive: true });
+});
+
 test("dealPlan split: speed puts it all on the host when its pledge holds it; memory spreads by pledge; speed spills over when it doesn't", () => {
   const self = { name: "spark", meta: { contribGB: 8 } };
   const L = 28, layerBytes = 0.06 * GB, embedBytes = 0.6 * GB;

@@ -7,7 +7,8 @@ import { style, label, progressRow, padStart, clip, gb, I } from "./style.js";
 import { liveRegion } from "./tui.js";
 import { colorOn } from "./tui.js";
 import { argsError } from "./cli.js";
-import { hostable, devHint } from "./lend.js";
+import { hostable, devHint, DEV_KINDS, fmtGb } from "./lend.js";
+import { statfsSync } from "node:fs";
 
 export const HELP_PULL = `Usage
   pooled pull <model>      download a model, so pooled host and pooled join start from disk
@@ -111,6 +112,10 @@ export async function pullMain(cmd0, argv, { loadRoomNode }) {
   const pick = () => {
     if (!r.positionals.length) { err(`pooled ${cmd0} needs a model: pooled ${cmd0} ${keys.includes("qwen3-1.7b") ? "qwen3-1.7b" : keys[0]} (pooled list shows them all).`); return null; }
     if (r.positionals.length > 1) { err(`pooled ${cmd0} takes one model, not ${r.positionals.length}: ${r.positionals.slice(0, 3).join(" ")}`); return null; }
+    // a preview model (Qwen3.8-Flash-Next) named in full: pooled pull / rm take it without POOLED_DEV=1, so a device can
+    // have it on disk before it joins a room that runs it (pooled join reads its experts from those files, --disk)
+    const exact = String(r.positionals[0]).trim().toLowerCase();
+    if (cmd !== "list" && rn.MODELS[exact]?.gguf && DEV_KINDS.includes(rn.MODELS[exact].kind)) return exact;
     const m = resolveModel(r.positionals[0], keys);
     if (m.error) { err(`pooled ${cmd0}: ${devHint(rn.MODELS, r.positionals[0]) || `${m.error}; one of: ${m.choices.join(", ")}`}`); return null; }
     return m.key;
@@ -144,6 +149,11 @@ export async function pullMain(cmd0, argv, { loadRoomNode }) {
   const st = modelState(dir, key, rn.MODELS, rn.FILES, rn.LOCAL);
   const total = rn.FILES?.[key]?.bytes;
   if (st.pulled) { say(`${key} is already downloaded (${fmtBytes(st.bytes)} in ${home(dir)}/${key}): pooled host ${key}`); return 0; }
+  // room for it on the disk (what is left to download, plus 2 GB)
+  try {
+    const f = statfsSync(dir), free = Number(f.bavail) * Number(f.bsize), need = Math.max(0, (total || 0) - (st.partBytes || 0));
+    if (need && free < need + 2 * 2 ** 30) { err(`pooled pull: ${key} needs ${fmtGb(need / 2 ** 30)} GB more and ${home(dir)} has ${fmtGb(free / 2 ** 30)} GB free`); return 1; }
+  } catch {}
   const tty = !!process.stderr.isTTY && process.env.TERM !== "dumb";
   if (!tty) say(`pulling ${key} (${rn.MODELS[key].label}): ${fmtBytes(total)}${st.partBytes ? `, ${fmtBytes(st.partBytes)} already here` : ""} into ${home(dir)}/${key}`);
   const ac = new AbortController();
