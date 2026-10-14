@@ -59,6 +59,7 @@ const FLASH_DIR = fs.existsSync(path.join(MODELS, "q38flash")) ? path.join(MODEL
 const TAB_GB = +env("TAB_GB", MODE === "resident" ? 90 : 12), TAB_RAM = env("TAB_RAM", "3");
 const PROFILE = env("PROFILE", path.join(os.homedir(), ".cache", "pooled-flashtab-profile"));
 const TABDISK = env("TABDISK", "allow"), CKPT = env("CKPT", MODE === "ckpt" ? "2" : "0");
+const TRACE = env("TRACE", "") === "1";
 const ORIGIN = env("ORIGIN", "").replace(/\/$/, "");   // serve the page from here under that origin (demo)
 const T0 = Date.now();
 const log = (...a) => console.error(((Date.now() - T0) / 1000).toFixed(1) + "s", ...a);
@@ -133,7 +134,7 @@ async function openTab() {
   page = ctx.pages()[0] || await ctx.newPage();
   page.on("crash", () => log("tab CRASHED"));
   page.on("pageerror", (e) => log("tab pageerror:", String(e).slice(0, 300)));
-  page.on("console", (m) => { const t = m.text(); if (m.type() === "error" || /expert|OPFS|n-gram|offload|ingest|disk tier/i.test(t)) log("tab:", t.slice(0, 400)); });
+  page.on("console", (m) => { const t = m.text(); if (m.type() === "error" || TRACE || /expert|OPFS|n-gram|offload|ingest|disk tier/i.test(t)) log("tab:", t.slice(0, 400)); });
   const q = `peerweights=0&dev=1&ckpt=${CKPT}&split=${env("SPLIT", "memory")}&ask=0&tabram=${TAB_RAM}${env("QUERY", "") ? "&" + env("QUERY", "") : ""}`;
   await page.goto(ORIGIN ? `${ORIGIN}/room?${q}` : `http://127.0.0.1:${PORT}/p2p.html?signal=${SIGNAL}&${q}`);
   await page.waitForFunction(() => document.getElementById("join-gb").value !== "", null, { timeout: 60000 });
@@ -213,7 +214,15 @@ try {
     log(`re-dealt in ${out.redealS.toFixed(0)} s; the tab fetched ${out.netGiB.redeal} GiB from the model files (alone: ${out.netGiB.alone} GiB)`);
   }
   const fx = (v, d = 2) => (Number.isFinite(v) ? +v.toFixed(d) : null);
-  const gen = async (ids, n) => { const r = await page.evaluate(([ids, n]) => window.__pooledGen(ids, n), [ids, n]); log(`raw ${JSON.stringify({ ...r, tokens: r.tokens?.length, summary: undefined, laps: r.laps?.length, tele: r.tele?.length })}`); return r; };
+  // TRACE=1: the tab's whole console, and its status line every 15 s while a prompt runs (where a stuck one stopped)
+  const gen = async (ids, n) => {
+    let lastS = "";
+    const poll = TRACE ? setInterval(async () => { try { const s = (await tabStatus()).status; if (s !== lastS) { lastS = s; log("gen status:", s.slice(0, 200)); } } catch {} }, 15000) : null;
+    let r;
+    try { r = await page.evaluate(([ids, n]) => window.__pooledGen(ids, n), [ids, n]); } finally { clearInterval(poll); }
+    log(`raw ${JSON.stringify({ ...r, tokens: r.tokens?.length, summary: undefined, laps: r.laps?.length, tele: r.tele?.length })}`);
+    return r;
+  };
   const med = (a) => { const b = a.filter(Number.isFinite).sort((x, y) => x - y); return b.length ? +b[b.length >> 1].toFixed(1) : null; };
   // the golden CASES (REPS times each), each answer's verdict, speed and where its time went, into bag
   const runCases = async (bag, tag = "", cases = CASES) => {

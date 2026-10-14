@@ -82,20 +82,31 @@ export function ctxOptions(model, { metas, pledges, costs = roomCosts(model), ma
 //   perToken  a device steps prompt frames one column at a time with its experts in GPU memory or RAM (an offloader
 //             without the region, POOLED_FLASH_BATCH=0): 15.8 tok/s at 8K, about flat with length (QSA reads at most
 //             2051 cells a token)
-//   disk      a device reads experts from its disk (a tab's disk tier: those layers never batch): 1.8 tok/s
-//             (flash_tab_gold.mjs tab, a 12 GB tab on the GB10; a Mac's own disk may differ)
+//   disk      a device reads experts from its disk (a tab's disk tier): its layered passes (engine/qwen4exp_batch.js
+//             passesLayered) read each disk layer once per FLASH_PREFILL_DISK.group tokens, so a group costs
+//             groupS of reads and every token perTokS more: 1887 tokens in 51 s, 7663 in 134 s (flash_tab_gold.mjs
+//             tab, a 22 GB tab on the GB10; a Mac's own disk may differ)
+//   diskRoom  the same in a room of several devices: the others are full too (a disk room is one RAM offload could not
+//             hold), so they step the tab's wide frames one column at a time, and the slower of the two sets the
+//             pace: about stepTps (tabnode, the tab and a room node with layers 29-47: 1887 tokens in 80 s, 7663 in 300 s)
 // -> seconds, or null for a model without measurements
-export const FLASH_PREFILL_TPS = { batch: { 8192: 189, 32768: 200, 65536: 200, 131072: 186 }, perToken: { 8192: 15.8, 131072: 15.8 }, disk: { 8192: 1.8, 131072: 1.8 } };
+export const FLASH_PREFILL_TPS = { batch: { 8192: 189, 32768: 200, 65536: 200, 131072: 186 }, perToken: { 8192: 15.8, 131072: 15.8 } };
+export const FLASH_PREFILL_DISK = { group: 4096, groupS: 35.7, perTokS: 1 / 123, stepTps: 25 };
 export function prefillSeconds(model, tokens, { mode = "batch" } = {}) {
   if (MODELS[model]?.kind !== "qwen4exp" || !(tokens > 0)) return null;
+  if (mode === "disk" || mode === "diskRoom") {
+    const d = FLASH_PREFILL_DISK, s = Math.ceil(tokens / d.group) * d.groupS + tokens * d.perTokS;
+    return mode === "disk" ? s : Math.max(s, tokens / d.stepTps);
+  }
   const t = FLASH_PREFILL_TPS[mode] || FLASH_PREFILL_TPS.batch, ks = Object.keys(t).map(Number).sort((a, b) => a - b);
   // the rate measured at the nearest length at or above it (rates fall a little with length)
   const k = ks.find((x) => x >= tokens) ?? ks[ks.length - 1];
   return tokens / t[k];
 }
-// How a room reads prompts, from its fit (roomFitFor's): disk when some layers read experts from disk, perToken when a
+// How a room reads prompts, from its fit (roomFitFor's): disk when some layers read experts from disk (diskRoom with
+// other devices), perToken when a
 // device offloads (its frames usually run per token: #381's region rule), else batch
-export const prefillMode = (fit) => (fit?.disk ? "disk" : fit?.offload ? "perToken" : "batch");
+export const prefillMode = (fit) => (fit?.disk ? ((fit.caps?.length || 1) > 1 ? "diskRoom" : "disk") : fit?.offload ? "perToken" : "batch");
 // "about 2 min", "about 1.5 h": a duration in words for the picker
 export function durationWords(s) {
   if (!(s > 0)) return "";
