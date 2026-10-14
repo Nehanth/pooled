@@ -444,6 +444,68 @@ function dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, of
   const held = used.map((i, k) => (offload[k] ? vramFor(pledges, hostBytes, i) : assigned[k] * layerBytes) + (i === 0 ? hostBytes : 0));
   return { fit, used, assigned, ranges, held, out, offload };
 }
+// ---------------- a disk-only tab host + a room node that parks: the split by modelled speed ----------------
+// One answer's tokens run through the devices one after another, so a token costs the sum of each device's part, and
+// the split is worth choosing per layer. dealOffload gives a disk-only tab (the Mac in the Flash demo) only what its
+// pledge holds before disk and the node the rest: with the Mac lending 20 GB the RTX 5070 node (--gb 10 --ram 43
+// --disk) got layers 14-47, 31 of them parked with 26 experts cached each (56-60% hits, ~180 copies from RAM a
+// token, one GPU round trip per parked layer): 54-70 ms a token there against 12-18 ms for the Mac's 14 layers, and
+// at a 12 GB lend the node also read 3 layers' experts from its disk. Here the host's share k is the one whose
+// modelled cost (tabCost + nodeCost) is lowest among the shares both devices can hold (offloadPlan, as dealOffload
+// plans them). Only for that room shape (two devices: the host a disk-only tab, the other a node that parks); every
+// other deal is dealOffload's. off.hostLayers (the page's ?hostlayers=, tests) sets k; off.speedSplit === false
+// (?flashsplit=0) keeps dealOffload's.
+// The constants (ms a token) are measured on the demo's machines (Mac Studio tab, RTX 5070 node; PR notes):
+//   TAB_LAYER_MS: a tab layer (14 layers 12-18 ms, the embedding and n-gram rows included); TAB_CUT2_MS: an offloaded
+//     layer's cut; TAB_MISS_MS: an expert read from OPFS into the pool (the Mac alone: ~100 reads a token for ~65 ms)
+//   NODE_LAYER_MS: a node layer (6 resident layers 4.7 ms a step); NODE_CUT_MS: a parked layer's cut (6 cuts +1.1 ms);
+//     NODE_MISS_MS: an expert copied from parked RAM (2.76 MB at ~30 GB/s); NODE_DISK_MISS_MS: one read from the
+//     node's model file (~3 GB/s cold)
+// The model only ranks splits; SPLIT_GAIN keeps dealOffload's unless another is clearly cheaper.
+export const TAB_LAYER_MS = 1.0, TAB_CUT2_MS = 0.3, TAB_MISS_MS = 0.67;
+export const SPLIT_GAIN = 0.1;
+export const NODE_LAYER_MS = 0.78, NODE_CUT_MS = 0.18, NODE_MISS_MS = 0.09, NODE_DISK_MISS_MS = 0.9;
+export function tabCost(n, plan, X) {
+  if (!plan) return n * TAB_LAYER_MS;
+  return n * TAB_LAYER_MS + plan.layers * TAB_CUT2_MS + plan.layers * X.K * (1 - poolHitRate(plan.slots / X.nExp)) * TAB_MISS_MS;
+}
+export function nodeCost(n, plan, X) {
+  if (!plan) return n * NODE_LAYER_MS;
+  const missPer = X.K * (1 - poolHitRate(plan.slots / X.nExp)), d = plan.diskLayers || 0;
+  return n * NODE_LAYER_MS + plan.layers * NODE_CUT_MS + missPer * ((plan.layers - d) * NODE_MISS_MS + d * NODE_DISK_MISS_MS);
+}
+function splitBySpeed(d, { L, layerBytes, hostBytes, pledges, off }) {
+  if (off.speedSplit === false || d.used.length !== 2) return null;
+  const [h, w] = d.used;
+  if (h !== 0 || !diskOnlyAt(off, h) || !off.disk?.[h] || diskOnlyAt(off, w) || !(off.ram?.[w] > 0)) return null;
+  const ex = offEx(off), X0 = expertSizes(ex, OFFLOAD_EXPERTS);
+  const X = { nExp: X0.nExp, K: X0.K, perExp: Number.isFinite(X0.L) ? X0.park(0, X0.L) / X0.L / X0.nExp : X0.E / X0.nExp };
+  const vh = vramFor(pledges, hostBytes, h), vw = vramFor(pledges, hostBytes, w);
+  // -> { k, hp, wp, cost } for the host holding layers [0, k), or null when one of them can't
+  const at = (k) => {
+    const nw = L - k;
+    if (k < 1 || nw < 1) return null;
+    const hp = k * layerBytes <= vh + 1e-6 ? null : offloadPlan(k, vh, off.ram[h], layerBytes, ex, off.minSlots, OFFLOAD_EXPERTS, k, true, true);
+    if (k * layerBytes > vh + 1e-6 && !hp) return null;
+    const wp = nw * layerBytes <= vw + 1e-6 ? null : offloadPlan(nw, vw, off.ram[w], layerBytes, ex, off.minSlots, OFFLOAD_EXPERTS, L, !!off.disk?.[w], false);
+    if (nw * layerBytes > vw + 1e-6 && !wp) return null;
+    return { k, hp, wp, cost: tabCost(k, hp, X) + nodeCost(nw, wp, X) };
+  };
+  let best = null;
+  if (Number.isInteger(off.hostLayers)) best = at(off.hostLayers);
+  else for (let k = 1; k < L; k++) { const c = at(k); if (c && (!best || c.cost < best.cost - 1e-9)) best = c; }
+  if (!best) return null;
+  // the model is coarse (a few ms either way at the 20 GB demo split, where the measured best was dealOffload's own):
+  // keep dealOffload's split unless another is modelled at least SPLIT_GAIN cheaper (or the share is forced)
+  const was = at(d.assigned[0]);
+  if (!Number.isInteger(off.hostLayers) && was && best.cost > was.cost * (1 - SPLIT_GAIN)) return null;
+  const assigned = [best.k, L - best.k], ranges = rangesOf(assigned);
+  const plan = (p, k) => p && { ...p, lo: ranges[k][1] - p.layers, hi: ranges[k][1], ...(p.diskLayers > 0 ? { diskLo: ranges[k][1] - p.diskLayers } : {}) };
+  const offload = [plan(best.hp, 0), plan(best.wp, 1)];
+  const held = [offload[0] ? vh : assigned[0] * layerBytes, offload[1] ? vw : assigned[1] * layerBytes].map((b, k) => b + (d.used[k] === 0 ? hostBytes : 0));
+  return { ...d, assigned, ranges, held, offload, speed: { k: best.k, ms: +best.cost.toFixed(1), was: d.assigned[0] } };
+}
+
 // What a deal keeps on each device's disk, bytes per device index (host first, as pledges): the routed experts of the
 // layers it leaves on disk ([diskLo, hi): expBytes each) and the n-gram table on the device dealt its layer. A room
 // node reads them from its own model files; a tab copies them to its disk (room/flashdisk.js), so this is what a tab
@@ -645,7 +707,10 @@ function dealLayers({ L, layerBytes, hostBytes, pledges, mode, ms, phone, phoneL
   const fit = roomFit(L, pledges, layerBytes, hostBytes, off);
   const none = { fit, used: [], assigned: [], ranges: [], held: [], out: {} };
   if (!fit.fits) return none;
-  if (fit.offload) return dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, off, fit }) || { ...none, fit: { ...fit, fits: false } };
+  if (fit.offload) {
+    const d = dealOffload({ L, layerBytes, hostBytes, pledges, phone, phoneLayers, off, fit });
+    return (d && splitBySpeed(d, { L, layerBytes, hostBytes, pledges, off })) || d || { ...none, fit: { ...fit, fits: false } };
+  }
   const out = {};
   // a device whose pledge is under one layer holds none (the host always has room: fit says so)
   let idx = fit.caps.map((c, i) => i).filter((i) => i === 0 || fit.caps[i] >= 1);

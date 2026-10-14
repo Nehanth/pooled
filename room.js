@@ -3858,7 +3858,7 @@ async function aiStart(modelArg) {
     const metasNow = () => [myMeta, ...ai.chain.map((id) => { const m = conns.get(id)?.meta; return m && ai.noDisk?.has(nameOf(id)) ? { ...m, tabDisk: undefined, offload: undefined, ramGB: undefined } : m; })];
     const wantCtx = ROOM_CTX;
     const planNow = () => {
-      const metas = metasNow(), off = offloadFor(metas, experts, modelKey);
+      const metas = metasNow(), off = withSplit(offloadFor(metas, experts, modelKey));
       // the model's default context, or its fallback when only that fits these pledges (room/models.js
       // pickCtx: the same rule as the picker's roomFitFor and pooled host); a short room stays short
       const pick = pickCtx(modelKey, { want: wantCtx, ask: CTX_ASK, fitsAt: (c) => roomFit(L, pledges, layerAt(c), embedBytes, off).fits });
@@ -4356,6 +4356,10 @@ const DENSE_SPEC = new URLSearchParams(location.search).get("densespec") !== "0"
 // speculation while a room node in the deal offloads experts (room/plan.js specWithOffload): off by default
 // there (plain decoding is faster), ?offspec=1 forces it on, ?offspec=0 off
 const OFFLOAD_SPEC = parseForce(new URLSearchParams(location.search).get("offspec"));
+// a disk-only tab host + a room node that parks (room/plan.js splitBySpeed): ?flashsplit=0 keeps the split by memory,
+// ?hostlayers=K gives the host K layers (tests)
+const SPLIT_Q = new URLSearchParams(location.search);
+const withSplit = (off) => (!off ? off : { ...off, ...(SPLIT_Q.get("flashsplit") === "0" ? { speedSplit: false } : {}), ...(+SPLIT_Q.get("hostlayers") > 0 ? { hostLayers: +SPLIT_Q.get("hostlayers") } : {}) });
 // ?draft=qwen3-0.6b (experimental, off by default): the host also loads that small model whole and it
 // drafts when prompt lookup finds nothing (room/draftmodel.js); ?draftk=N drafts per lap (default 4).
 // Same tokenizer as the Qwen3 1.7B / 4B. Exact like lookup: the verify decides every token.
@@ -5420,7 +5424,7 @@ async function aiOnData(from, d) {
         if (stopsStart({ load: d.load, inChain: true, starting: ai.busy === true, online: $("ai-panel").classList.contains("online") })) aiLoadFailed(from, e?.name || from, d.message);
       }
       break;
-    case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0, xc: d.exp ? expertCache(d.exp, ai.teleBy.get(from)?.xc) : null }); } break;
+    case "ai-tele": if (ai.role === "host") { ai.teleBy.set(from, { ...(d.k || {}), amax: +d.amax || 0, xc: d.exp ? expertCache(d.exp, ai.teleBy.get(from)?.xc) : null }); ai.teleLog?.push({ k: d.k, exp: d.exp }); } break;
     case "ai-inv-req": cachedRanges(d.url).then((have) => sendTo(from, { t: "ai-inv", url: d.url, have })); break;
     case "ai-inv": if (ai.invWait && ai.invWait.url === d.url && Array.isArray(d.have)) ai.invWait.inv[from] = d.have.slice(0, 20000); break;
     case "ai-wget": answerWget(from, d); break;
@@ -5687,14 +5691,19 @@ if (DEV) window.__pooledGen = async (ids, maxNew) => {
     return best;
   };
   const st = ai.engine.experts, s0 = st ? { ...st.stats, t1: st.t1 ? { ...st.t1.stats } : null } : null;
+  ai.lapLog = []; ai.teleLog = [];   // every lap (lap ms, host ms) and every worker report of this run
   try {
     const r = await roomGenerate(ids, { maxNew, sample, stop: new Set() });
+    const laps = ai.lapLog, tele = ai.teleLog;
     const d = st ? Object.fromEntries(["cuts", "lookups", "hits", "misses", "diskReads", "diskBytes", "diskWaitMs", "t1Copies"].map((k) => [k, st.stats[k] - s0[k]])) : null;
     if (d && st.t1) d.t1Hits = st.t1.stats.hits - s0.t1.hits;
     return { tokens: r.tokens, tps: r.tps, tPre: r.tPre, bits: x.toString(16), experts: d, summary: st?.summary?.() || null,
-      reused: r.reused, ckpt: { on: typeof ai.engine?.saveSlot === "function", slots: ai.ckpt?.items?.length ?? null } };
-  } finally { ai.busy = false; }
+      reused: r.reused, ckpt: { on: typeof ai.engine?.saveSlot === "function", slots: ai.ckpt?.items?.length ?? null }, laps, tele };
+  } finally { ai.busy = false; ai.lapLog = ai.teleLog = null; }
 };
+if (DEV) window.__pooledInvite = () => (roomCode ? roomLink() : null);
+// (?dev=1&stalls=MS: log this page's event-loop stalls past MS, for the Flash room's slow laps)
+if (DEV && +SPLIT_Q.get("stalls") > 0) { let last = performance.now(); setInterval(() => { const now = performance.now(); if (now - last > 50 + +SPLIT_Q.get("stalls")) console.error(`event loop stalled ${(now - last - 50).toFixed(0)} ms at ${new Date().toISOString().slice(11, 23)}`); last = now; }, 50); }
 
 $("ai-start").addEventListener("click", aiStartAnywhere);
 $("ai-redeal").addEventListener("click", () => aiRedeal());

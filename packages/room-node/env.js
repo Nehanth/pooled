@@ -5,6 +5,7 @@
 // setupNode() is idempotent and must run before anything touches navigator.gpu or new Peer().
 
 import { setFlagsFromString } from "node:v8";
+import { runInNewContext } from "node:vm";
 import { measureCopyGBps } from "../../room/gpuspeed.js";
 import { DENSE_SPEC_V } from "../../room/lookup.js";
 import { DESK_MAX_GB, PLEDGE_MAX_GB } from "../../room/pledge.js";
@@ -39,6 +40,22 @@ export function dawnFlagsFor(env = process.env, platform = process.platform) {
 // re-exec): V8 compiles nothing with Maglev after it, and what Node had already compiled with Maglev
 // before (path helpers while loading modules) predates the device.
 export const v8FlagsFor = (platform = process.platform) => (platform === "win32" ? ["--no-maglev"] : []);
+
+// A young-generation collection, for while this device waits for its next frame (roomnode.js, after it sends one;
+// off by default, POOLED_IDLE_GC=1 turns it on: in the Flash room it cut the PC's slow frames from 4-5 to 2-3 in five
+// answers, but the room's speed did not move past its WiFi noise, so it stays a switch until a wired run says more).
+// Each token leaves Dawn wrappers behind (command encoders and buffers, map promises: a few per expert cut, 31 cuts a token on the Flash demo's RTX 5070 share) that are still alive at the
+// scavenge that runs in the middle of the next token's GPU work, so they move to the old space and come back as
+// mark-compacts whose finalizers stall the process: 55-90 ms every ~0.5 s in a busy readback loop on that PC, and
+// 130-290 ms frames in a Flash room (6 of its 11 slow laps in five answers). A scavenge once the token is done (its
+// wrappers dead by then) keeps them out of the old space: the same loop's worst wait went from 88 to 21 ms.
+// --expose-gc set now gives the gc function to contexts made after it (vm.runInNewContext).
+let gcFn;
+export function minorGc() {
+  if (gcFn === undefined) { try { setFlagsFromString("--expose-gc"); gcFn = runInNewContext("gc"); } catch { gcFn = null; } }
+  try { gcFn?.({ type: "minor" }); } catch { gcFn = null; }
+}
+export const idleGcOn = (env = process.env) => env.POOLED_IDLE_GC === "1";
 
 // webgpu: an async loader for Dawn ({ create, globals }), for a caller that resolves it from its own
 // install (the pooled CLI: an optional package); default the npm "webgpu" package next to this one

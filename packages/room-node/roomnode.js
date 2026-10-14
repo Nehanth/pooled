@@ -39,7 +39,9 @@ import { createPipeline } from "../../room/pipeline.js";
 import { createGenerator } from "../../engine/generate.js";
 import fs from "node:fs";
 import { EventEmitter } from "node:events";
-import { setupNode, probeMeta } from "./env.js";
+import { setupNode, probeMeta, minorGc, idleGcOn } from "./env.js";
+// POOLED_WIRE_DUP: frames of up to that many slices go out twice (room/transport.js; the page's ?wiredup=)
+const wireDupOpt = () => (process.env.POOLED_WIRE_DUP !== undefined && +process.env.POOLED_WIRE_DUP >= 0 ? { dup: Math.min(64, +process.env.POOLED_WIRE_DUP) } : {});
 import * as env from "./env.js";
 import { openModel } from "./source.js";
 import { loadShard } from "./shard.js";
@@ -126,6 +128,13 @@ export class RoomNode extends EventEmitter {
     // specWithOffload): null = off there, on otherwise (the default); true / false = always on / off with offload.
     // POOLED_OFFLOAD_SPEC=1 / 0 sets it from the environment
     this.offloadSpec = offloadSpec === true || offloadSpec === false ? offloadSpec : null;
+    this.idleGc = idleGcOn();
+    // (diagnostics) POOLED_SLOWFRAME also logs event-loop stalls longer than it
+    if (+process.env.POOLED_SLOWFRAME > 0) {
+      let last = performance.now();
+      const lim = +process.env.POOLED_SLOWFRAME, t = setInterval(() => { const now = performance.now(); if (now - last > 50 + lim) this.log?.(`event loop stalled ${(now - last - 50).toFixed(0)} ms`); last = now; }, 50);
+      t.unref?.();
+    }
     // relay: ask for a TURN relay (cli/lib/relay.js) so links still open when no direct path works (strict NAT
     // or CGNAT on both ends). Default: on with a public signaling server, off with one on this machine (tests).
     this.relay = relay ?? !/^(localhost|127\.|\[::1\])/i.test(String(signal ?? ""));
@@ -407,7 +416,7 @@ export class RoomNode extends EventEmitter {
     // a device in the creator's roster: its name and meta from there until its hello says (the hello is
     // the first message on the link, and WebRTC can lose that one: room.js wire)
     const known = old ? null : (this.members || []).find((m) => m.id === conn.peer);
-    const e = { conn, name: name || old?.name || known?.name || conn.peer, meta: old?.meta || known?.meta || {}, link: makeLink(), stripes: [], seen: performance.now(), missed: 0, rtt: old?.rtt ?? null, initiator, stripesLater: !!(hold && stripesLater) };
+    const e = { conn, name: name || old?.name || known?.name || conn.peer, meta: old?.meta || known?.meta || {}, link: makeLink(wireDupOpt()), stripes: [], seen: performance.now(), missed: 0, rtt: old?.rtt ?? null, initiator, stripesLater: !!(hold && stripesLater) };
     if (hold) this.holdLink(e, hold);
     this.conns.set(conn.peer, e);
     if (old && old.conn !== conn) {
@@ -458,6 +467,8 @@ export class RoomNode extends EventEmitter {
   sendHidden(id, msg) {
     const e = this.conns.get(id);
     this.sent ||= { wire: 0, msg: 0 };
+    // the token's GPU wrappers are garbage now: collect them while this device waits for its next frame (env.js minorGc)
+    if (this.idleGc && !this.gcQueued) { this.gcQueued = true; setImmediate(() => { this.gcQueued = false; minorGc(); }); }
     if (e?.hold) { this.sendTo(id, msg); return; }
     if (e?.link && wireReady(e.link) && sendFrame(e.link, msg)) { this.sent.wire++; return; }
     this.sent.msg++;
@@ -946,6 +957,7 @@ export class RoomNode extends EventEmitter {
   teleNote(kind, ms, n = 1) {
     const ai = this.ai, T = this.tele ||= new TeleMeter();
     T.note(kind, ms, n, wireStats.lastMax || 0);
+    if (kind === "one" && ms > (+process.env.POOLED_SLOWFRAME || Infinity)) this.log(`slow frame: ${ms.toFixed(0)} ms for one token's layers`);   // (diagnostics)
     const now = performance.now();
     if (T.due(now) && ai.hostId) this.sendTo(ai.hostId, T.report(now, ai.experts || expertStoreOf(ai.engine)));
   }
