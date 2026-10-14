@@ -45,13 +45,13 @@ function entry(layer, part, nExp, rows, cols, kind = "q4") {
   for (let e = 0; e < nExp; e++) { qs.fill((layer * 31 + part * 7 + e) & 255, e * qsB, (e + 1) * qsB); sc.fill((layer * 13 + part * 5 + e * 3) & 255, e * scB, (e + 1) * scB); }
   return { kind, qs, scales: new Uint32Array(sc.buffer), shape: [nExp * rows, cols] };
 }
-function makeStore({ layers = [2, 5], nExp = 32, slots = 6, rows = 64, cols = 128 } = {}) {
+function makeStore({ layers = [2, 5], nExp = 32, slots = 6, rows = 64, cols = 128, region = true } = {}) {
   const dev = fakeDevice(), st = new ExpertStore(dev, { layers, slots, parkBytes: 1 << 20 });
   for (const l of layers) ["gate", "up", "down"].forEach((p, i) => {
     const ph = st.park(l, p, i < 2 ? entry(l, i, nExp, rows, cols) : entry(l, i, nExp, cols, rows, "q8"), nExp);
     assert(ph.offload && ph.layer === l && ph.part === p, "placeholder");
   });
-  st.build({ K: 4 });
+  st.build({ K: 4, region });
   return { dev, st, nExp, rows, cols };
 }
 // what pool slot s / the region at expert e holds for (layer, part): the first byte of its qs slice
@@ -228,7 +228,7 @@ function fakeReader({ nExp, rows, cols, delay = true }) {
 const tinfo = (layer, part, nExp, rows, cols) => part === "down"
   ? { layer, part, shape: [nExp, cols, rows], ggmlType: GGML_Q8_0, byteOffset: 0 }
   : { layer, part, shape: [nExp, rows, cols], ggmlType: GGML_Q4_0, byteOffset: 0 };
-function makeDiskStore({ layers = [2, 5], disk = [2, 5], nExp = 32, slots = 6, rows = 64, cols = 128, delay = true } = {}) {
+function makeDiskStore({ layers = [2, 5], disk = [2, 5], nExp = 32, slots = 6, rows = 64, cols = 128, delay = true, region = true } = {}) {
   const dev = fakeDevice(), reader = fakeReader({ nExp, rows, cols, delay });
   const st = new ExpertStore(dev, { layers, slots, parkBytes: 1 << 20, disk: { layers: disk, reader } });
   for (const l of layers) ["gate", "up", "down"].forEach((p, i) => {
@@ -236,7 +236,7 @@ function makeDiskStore({ layers = [2, 5], disk = [2, 5], nExp = 32, slots = 6, r
       : st.park(l, p, i < 2 ? entry(l, i, nExp, rows, cols) : entry(l, i, nExp, cols, rows, "q8"), nExp);
     assert(ph.offload && ph.layer === l && ph.part === p && ph.kind === (i < 2 ? "q4" : "q8"), "placeholder");
   });
-  st.build({ K: 4 });
+  st.build({ K: 4, region });
   return { dev, st, reader, nExp };
 }
 // one cut on a disk layer as the engine runs it: prepare, then plan
@@ -477,4 +477,103 @@ Deno.test("prealloc: the parked buffers made up front hold the same bytes at the
   ["gate", "up", "down"].forEach((p, i) => c.park(2, p, i < 2 ? entry(2, i, nExp, rows, cols) : entry(2, i, nExp, cols, rows, "q8"), nExp));
   c.seal();
   assert(destroyed === made - c.park_.length && c.bufBytes === c.park_.reduce((s, p) => s + p.buf.size, 0), `${destroyed} unused buffers destroyed, bufBytes counts only the kept ones`);
+});
+
+// ---- the region borrowed from the pools (build({ region: "shared" }): a room node whose cache is about a region's size) ----
+// what global slot g of the shared buffers holds for part: the first byte of its qs slice
+const sharedByte = (st, part, g) => { const S = st.L.get(st.layers[0]), j = ["gate", "up", "down"].indexOf(part) * 2; return S.pool[j].bytes[g * S.parts[part].sl[0].per]; };
+// every cached expert of every layer still in its slot, and the table, the reverse table and the GPU table agree
+function checkShared(st) {
+  for (const l of st.layers) {
+    const S = st.L.get(l);
+    S.slotOf.forEach((v, e) => {
+      if (v < 0) return;
+      assert(S.expOf[v] === e, `layer ${l}: tables agree on expert ${e}`);
+      for (const p of ["gate", "up", "down"]) assert(sharedByte(st, p, S.base + v) === want(l, p, e), `layer ${l} expert ${e} ${p} in global slot ${S.base + v}`);
+    });
+    S.expOf.forEach((e, v) => assert(e < 0 || S.slotOf[e] === v, `layer ${l}: slot ${v}`));
+    if (S.tab) { const t = new Int32Array(S.tab.bytes.buffer); S.slotOf.forEach((v, e) => assert(t[e] === (v < 0 ? -1 : S.base + v), `layer ${l}: GPU table at ${e}`)); }
+  }
+}
+
+Deno.test("shared region: no buffers of its own; the pools are ranges of one set of six, and plan() returns global slots", () => {
+  const { dev, st } = makeStore({ slots: 16, region: "shared" }), { st: own } = makeStore({ slots: 16 });
+  assert(st.region.shared && st.regionBytes === 0 && st.poolBytes === own.poolBytes, "no region bytes");
+  assert(dev.bufs.filter((b) => b.usage & GPUBufferUsage.STORAGE).length === 6, "six buffers in all");
+  assert(st.layers.every((l) => st.L.get(l).pool === st.region.bufs) && st.L.get(5).base === 16, "every pool is the region's buffers");
+  const r = st.plan(fakeEncoder(), 5, sel1([7, 3, 9, 1]), 1, 5);
+  assert(r.pool && [...r.remap.subarray(0, 4)].every((g) => g >= 16 && g < 32), "layer 5's slots are 16..31");
+  checkShared(st);
+  assert(st.summary().includes("the region in the pools"), "summary");
+});
+
+Deno.test("shared region: sharedFits needs equal expert sizes and nExp slots in all; build refuses otherwise", () => {
+  assert(makeStore({ slots: 16 }).st.sharedFits(), "2 x 16 >= 32");
+  const { st } = makeStore({ slots: 15 });
+  assert(!st.sharedFits(), "2 x 15 < 32");
+  let threw = false;
+  try { makeStore({ slots: 15, region: "shared" }); } catch { threw = true; }
+  assert(threw, "build refuses");
+});
+
+Deno.test("shared region: loadLayer drops the cached experts it overwrites; a pool fill there makes the region hold no layer", () => {
+  const { st, nExp } = makeStore({ slots: 16, region: "shared" });
+  st.plan(fakeEncoder(), 2, sel1([7, 3, 9, 1]), 1, 5);
+  st.plan(fakeEncoder(), 5, sel1([7, 3, 9, 1]), 1, 5);
+  st.loadLayer(fakeEncoder(), 2);
+  for (let e = 0; e < nExp; e++) for (const p of ["gate", "up", "down"]) assert(regionByte(st, 2, p, e) === want(2, p, e), "region contents");
+  assert(st.layers.every((l) => st.L.get(l).slotOf.every((v) => v < 0)), "every slot overwritten (2 x 16 = 32 slots, 32 experts)");
+  checkShared(st);
+  // a decode cut after the prompt copies its experts back, over the region
+  const enc = fakeEncoder(), r = st.plan(enc, 5, sel1([7, 3, 9, 1]), 1, 5);
+  assert(r.pool && enc.copies.length === 24 && st.region.layer === -1, "misses again; the region holds no layer");
+  checkShared(st);
+  const c = fakeEncoder();
+  st.loadLayer(c, 2);
+  assert(c.copies.length > 0, "the region is filled again, not skipped");
+});
+
+Deno.test("shared region: a random stream of decode cuts, wide cuts and whole layers keeps every slot and the region right", () => {
+  const { dev, st, nExp } = makeStore({ slots: 20, region: "shared" });   // 40 slots: 8 never under the region
+  dev.queue = { writeBuffer(b, off, data) { b.bytes.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength), off); } };
+  st.gpuTables();
+  let seed = 5;
+  const rnd = (n) => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8) % n;
+  for (let t = 0; t < 400; t++) {
+    const l = rnd(2) ? 2 : 5, what = rnd(10);
+    if (what === 0) {
+      st.loadLayer(fakeEncoder(), l);
+      for (let e = 0; e < nExp; e++) for (const p of ["gate", "up", "down"]) assert(regionByte(st, l, p, e) === want(l, p, e), `t ${t}: region`);
+    } else {
+      const KS = 5, nCols = what === 1 ? 12 : 1, sel = new Uint32Array(nCols * KS);
+      for (let c = 0; c < nCols; c++) { const ids = []; while (ids.length < 4) { const e = rnd(nCols > 1 || !rnd(3) ? 32 : 14); if (!ids.includes(e)) ids.push(e); } sel.set(ids, c * KS); }
+      const r = st.plan(fakeEncoder(), l, sel, nCols, KS);
+      if (r.pool) for (let i = 0; i < nCols * KS; i++) { if (i % KS === 4) continue; for (const p of ["gate", "up", "down"]) assert(sharedByte(st, p, r.remap[i]) === want(l, p, sel[i]), `t ${t}: remap ${i}`); }
+      else for (let i = 0; i < nCols * KS; i++) if (i % KS !== 4) for (const p of ["gate", "up", "down"]) assert(regionByte(st, l, p, sel[i]) === want(l, p, sel[i]), `t ${t}: region cut`);
+    }
+    checkShared(st);
+  }
+  assert(st.stats.hits > 0 && st.stats.regionCuts > 0 && st.stats.layerLoads > 0, "every path ran: " + JSON.stringify([st.stats.hits, st.stats.regionCuts, st.stats.layerLoads]));
+});
+
+Deno.test("shared region, disk layers: prepare + plan and the async region fills give the parked bytes; the region drops what it overwrites", async () => {
+  const { st, nExp } = makeDiskStore({ slots: 16, region: "shared", delay: false });
+  let seed = 9;
+  const rnd = (n) => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8) % n;
+  for (let t = 0; t < 120; t++) {
+    const l = rnd(2) ? 2 : 5, what = rnd(8);
+    if (what === 0) {
+      await st.loadLayerAsync(l, 7);
+      for (let e = 0; e < nExp; e++) for (const p of ["gate", "up", "down"]) assert(regionByte(st, l, p, e) === want(l, p, e), `t ${t}: region`);
+    } else if (what === 1) {
+      const sel = new Uint32Array(10); sel.set([rnd(32), 30, 31, 29], 0); sel.set([1, 2, 3, 4], 5);
+      await st.loadExpertsAsync(l, sel, 2, 5);
+      for (const e of [30, 31, 29, 1, 2, 3, 4]) for (const p of ["gate", "up", "down"]) assert(regionByte(st, l, p, e) === want(l, p, e), `t ${t}: frame expert`);
+    } else {
+      const ids = []; while (ids.length < 4) { const e = rnd(12); if (!ids.includes(e)) ids.push(e); }
+      const r = await diskPlan(st, l, sel1(ids), 1, 5);
+      for (let k = 0; k < 4; k++) for (const p of ["gate", "up", "down"]) assert(sharedByte(st, p, r.remap[k]) === want(l, p, ids[k]), `t ${t}: slot`);
+    }
+    checkShared(st);
+  }
 });

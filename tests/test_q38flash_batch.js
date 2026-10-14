@@ -31,8 +31,9 @@
 // KV=f16: the engine's f16 K / V cache (default f32); every check above holds as is (decode, exact prefill and verify
 // read the same f16 cache, and so does the wide attention). QSA_RING=n: the raw-key ring's rows (default the
 // engine's, 1024; 0 = one per position); with a ring the QSA check collects the raw keys from it as the decode reference runs (every ring / 2 steps).
-// OFFLOAD=lo-hi [OFFLOAD_SLOTS=N]: those layers' routed experts parked in the expert store (engine/expert_store.js),
-// the engine built with expertRegion: true, so the batched passes route them through the store's region and decode
+// OFFLOAD=lo-hi [OFFLOAD_SLOTS=N] [REGION=shared]: those layers' routed experts parked in the expert store (engine/expert_store.js),
+// the engine built with expertRegion: true (REGION=shared: the region borrowed from the pools, as a room node with a
+// small cache), so the batched passes route them through the store's region and decode
 // through its pools. Every check above still compares against the decode engine; the "BITS" lines (hashes of the
 // 64-column exact prefill's and the wide prefills' residuals) must equal the resident run's.
 // FULL=1: all 48 layers and the head (~75 GB of GPU memory), with the default (wide) batch, EXACT=1 for the exact one:
@@ -104,7 +105,7 @@ const weights = { ...rest, layers };
 const fds = model.paths.map((p) => fs.openSync(p, "r"));
 const readAt = async (file, off, len) => { const b = new Uint8Array(len); fs.readSync(fds[file], b, 0, len, off); return b; };
 const ngram = new NgramTable(ngramConfig(G), { readAt, layout: "tensor" });
-const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ, expertRegion: !!experts,
+const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: [0, nL], hasEmbed: true, hasHead, ngram, maxSeq: MAXSEQ, expertRegion: experts ? (env("REGION", "") === "shared" ? "shared" : true) : false,
   kv: KV, ...(env("QSA_RING") !== undefined ? { qsaRing: +env("QSA_RING") } : {}) });
 // pb: the exact kernels in the layered mode (its checks are bit for bit); in FULL mode the default (wide kernels for
 // prefill passes, maxCols 1024 capped to QSA's raw-key ring: 1021 with the default ring), EXACT=1 for the exact ones.
