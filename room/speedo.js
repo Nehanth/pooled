@@ -77,8 +77,8 @@ export class SpeedMeter {
   end() { this.on = false; return this.average(); }
 }
 
-// the history of answers, newest last, at most `max`: { key, tps, devices }; an answer shown again (a
-// reloaded tab replays the conversation) keeps its one entry
+// the history of answers, newest last, at most `max`: { key, tps, devices, warm?, model? } (warm: one of the first
+// answers after a load, warmupAnswers); an answer shown again (a reloaded tab replays the conversation) keeps its one entry
 export function pushHistory(hist, entry, max = 16) {
   if (!entry || !(entry.tps > 0)) return hist;
   const out = entry.key != null ? hist.filter((h) => h.key !== entry.key) : hist.slice();
@@ -87,24 +87,33 @@ export function pushHistory(hist, entry, max = 16) {
 }
 
 const median = (a) => { const s = [...a].sort((x, y) => x - y), k = s.length >> 1; return s.length % 2 ? s[k] : (s[k - 1] + s[k]) / 2; };
-// The change since the device count changed: the median of the newest run of answers with the same count
-// against the run before it. { x, from, to } (x = new / old) or null with no earlier run.
+// The first answers after a load or a re-deal are slower than the ones after them (each device's first pass reads its
+// part from disk, warms its caches and compiles its kernels): the first one on one device, the first two on several.
+// Those answers are marked warm (room.js speedDone) and never compared.
+export const warmupAnswers = (devices) => (+devices > 1 ? 2 : 1);
+// how many of the newest steady answers on a device count are looked at, and how many of the fastest of those count
+// (a slow answer now and then, a long prefill or a busy machine, does not set the figure)
+export const RECENT = 5, BEST = 3;
+const typical = (xs) => median(xs.slice(-RECENT).map((h) => h.tps).sort((x, y) => y - x).slice(0, BEST));
+// Like with like: the steady answers (not warm) on the newest answer's device count against the steady answers on the
+// count before it, the same model, each side the median of the best BEST of its newest RECENT. { x, from, to } (x = new /
+// old) or null when it would mislead: the newest answer is a warm-up, or either side has no steady answer yet.
 export function speedup(hist) {
-  if (hist.length < 2) return null;
-  const cur = hist[hist.length - 1].devices;
-  let i = hist.length - 1;
-  while (i >= 0 && hist[i].devices === cur) i--;
-  if (i < 0) return null;
-  const prev = hist[i].devices;
-  let j = i;
-  while (j >= 0 && hist[j].devices === prev) j--;
-  const a = median(hist.slice(j + 1, i + 1).map((h) => h.tps)), b = median(hist.slice(i + 1).map((h) => h.tps));
-  return a > 0 ? { x: b / a, from: prev, to: cur } : null;
+  if (!Array.isArray(hist) || hist.length < 2) return null;
+  const last = hist[hist.length - 1];
+  if (!last || last.warm || !(last.tps > 0)) return null;
+  const cur = last.devices, steady = hist.filter((h) => h && !h.warm && h.tps > 0 && h.model === last.model);
+  let prev = null;
+  for (let i = steady.length - 1; i >= 0; i--) if (steady[i].devices !== cur) { prev = steady[i].devices; break; }
+  if (prev == null) return null;
+  const a = typical(steady.filter((h) => h.devices === prev)), b = typical(steady.filter((h) => h.devices === cur));
+  return a > 0 && b > 0 ? { x: b / a, from: prev, to: cur } : null;
 }
+// (within 10% is "about as fast": answers on the same devices vary that much from one to the next)
 export function gainText(g) {
   if (!g || !(g.x > 0)) return "";
   const on = `than on ${g.from} device${g.from === 1 ? "" : "s"}`;
-  if (Math.abs(g.x - 1) < 0.05) return `about as fast as on ${g.from} device${g.from === 1 ? "" : "s"}`;
+  if (Math.abs(g.x - 1) < 0.1) return `about as fast as on ${g.from} device${g.from === 1 ? "" : "s"}`;
   return g.x > 1 ? `${g.x.toFixed(g.x >= 10 ? 0 : 1)}× faster ${on}` : `${Math.round((1 - g.x) * 100)}% slower ${on}`;
 }
 

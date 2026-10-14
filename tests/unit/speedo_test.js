@@ -1,6 +1,6 @@
 // room/speedo.js: the speed panel's numbers and words (no DOM, times passed in).
 import { fmtTps, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText,
-  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB, wordsPerSec, speedWords, speedLine, bandLine } from "../../room/speedo.js";
+  expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB, wordsPerSec, speedWords, speedLine, bandLine, warmupAnswers } from "../../room/speedo.js";
 import { MODELS } from "../../room/models.js";
 import { expertCache } from "../../room/tele.js";
 
@@ -54,20 +54,41 @@ Deno.test("pushHistory: newest last, capped, one entry per answer key, none with
   eq(h.length, 16); eq(h[15].key, "k29");
 });
 
-Deno.test("speedup: the newest run of answers against the run before, by device count", () => {
-  const H = (...xs) => xs.map(([tps, devices], i) => ({ key: i, tps, devices }));
+Deno.test("speedup: steady answers on this device count against the best recent steady ones on the other", () => {
+  const H = (...xs) => xs.map(([tps, devices, warm = false], i) => ({ key: i, tps, devices, warm }));
+  eq(speedup([]), null);
   eq(speedup(H([5, 1])), null);
-  eq(speedup(H([5, 1], [6, 1])), null, "one run");
+  eq(speedup(H([5, 1], [6, 1])), null, "one count only");
   const g = speedup(H([5, 1], [7, 1], [6, 1], [13, 2], [11, 2]));
-  eq([g.from, g.to], [1, 2]); near(g.x, 12 / 6, "medians");
-  // only the run right before counts (a third device after two)
+  eq([g.from, g.to], [1, 2]); near(g.x, 12 / 6, "medians of the best");
+  // the count before the newest: a third device after two
   const g3 = speedup(H([5, 1], [12, 2], [12, 2], [18, 3]));
   eq([g3.from, g3.to], [2, 3]); near(g3.x, 1.5);
   eq(gainText(g), "2.0× faster than on 1 device");
   eq(gainText({ x: 12.4, from: 1, to: 2 }), "12× faster than on 1 device");
   eq(gainText({ x: 0.75, from: 2, to: 1 }), "25% slower than on 2 devices");
   eq(gainText({ x: 1.02, from: 2, to: 3 }), "about as fast as on 2 devices");
+  eq(gainText({ x: 0.91, from: 1, to: 2 }), "about as fast as on 1 device", "within 10%: answers vary that much");
   eq(gainText(null), "");
+});
+Deno.test("speedup: the Flash demo (2026-10-13): no '9% slower' right after the re-deal, then 1.7×", () => {
+  // Mac alone q1 7.6 (the first answer after its load: warm), a steady one at 7.4; the PC added: q2 6.9 (warm), q3 11.0
+  // (warm: the second on two devices), q4 12.5, q5 6.7 (a slow one), 11.6
+  const h = [], add = (tps, devices, warm) => h.push({ key: h.length, tps, devices, warm, model: "qwen3.8-flash" });
+  add(7.6, 1, true); eq(speedup(h), null);
+  add(7.4, 1, false); eq(speedup(h), null);
+  add(6.9, 2, true); eq(speedup(h), null, "the first answer on 2 devices is a warm-up: nothing said");
+  add(11.0, 2, true); eq(speedup(h), null, "and the second");
+  add(12.5, 2, false); near(speedup(h).x, 12.5 / 7.4); eq(gainText(speedup(h)), "1.7× faster than on 1 device");
+  add(6.7, 2, false); near(speedup(h).x, (12.5 + 6.7) / 2 / 7.4, "a slow answer: the median of the two");
+  add(11.6, 2, false); near(speedup(h).x, 11.6 / 7.4, "the best three of the newest five");
+  // with only warm answers alone the comparison stays hidden (better nothing than a misleading figure)
+  eq(speedup(h.map((x) => (x.devices === 1 ? { ...x, warm: true } : x))), null);
+  // another model's answers are not compared
+  eq(speedup([{ key: 0, tps: 7, devices: 1, model: "a" }, { key: 1, tps: 12, devices: 2, model: "b" }]), null);
+});
+Deno.test("warmupAnswers: one on one device, two on several", () => {
+  eq(warmupAnswers(1), 1); eq(warmupAnswers(2), 2); eq(warmupAnswers(5), 2); eq(warmupAnswers(0), 1);
 });
 
 Deno.test("barScale: heights against the fastest, a sliver at least", () => {
