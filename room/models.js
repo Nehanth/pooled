@@ -214,8 +214,8 @@ export function expertBytesOf(G, lo, hi) {
 // { L, layerBytes, hostBytes, expertBytes } for a room running `model` at `ctx` positions with `kv` format, or
 // null for a model without a SHAPE (the picker then falls back to NEED_GB). expertBytes: 0 for a dense model;
 // experts: the MoE models' offload profile (expertsOf), else null.
-// Qwen3.8-Flash-Next also has layerCost: each layer's own bytes at ctx (flashLayerCost, the engine's K / V format: its
-// `kv` here is the room's protocol field, which stays "f16" for Flash), which every deal and fit check takes in place
+// Qwen3.8-Flash-Next also has layerCost: each layer's own bytes at ctx (flashLayerCost, in the engine's K / V format: kv
+// "f32", or f16 for "f16" / anything else, the rooms' format: flashRoomLimits), which every deal and fit check takes in place
 // of layerBytes (room/plan.js roomFit, dealRoom); layerBytes is then their average, so L x layerBytes is still the
 // layers' total. Memoized per (model, ctx, kv): the picker asks on every room update (minFitPledge probes ~24 times).
 const rbMemo = new Map();
@@ -225,7 +225,8 @@ export function roomBytes(model, ctx, kv = "f16") {
   if (rbMemo.has(k)) return rbMemo.get(k);
   let out;
   if (s.flash) {
-    const layerCost = flashLayerCost(s, ctx);
+    // (Flash: kv is the engine's K / V format, "f32" or f16 for anything else: FLASH_ROOM_KV, flashRoomLimits)
+    const layerCost = flashLayerCost(s, ctx, { kv: kv === "f32" ? "f32" : "f16" });
     out = { L: s.L, layerBytes: layerCost.total / s.L, layerCost, hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0, experts: parkProfile(s) || null };
   } else out = { L: s.L, layerBytes: s.layer + ctx * (s.kvPos[kv] ?? s.kvPos.f16), hostBytes: hostHeldBytes(s.kind, s), expertBytes: s.exp || 0,
     experts: parkProfile(s) || null };
@@ -451,6 +452,18 @@ export const MAX_SEQ = 2048;
 // the whole model, spread over the devices that hold the layers. The host reads the engine's
 // maxSeq, so prompts, answer budgets and "context full" all follow it.
 export const MAX_SEQ_LONG = 8192;
+// Qwen3.8-Flash-Next's contexts in rooms. FLASH_CTX_PROVEN: the lengths a room has been checked at against llama.cpp
+// (packages/room-node/test/flash_gold.mjs pair, f16 K / V, batched, 2026-10-13; docs/long-context-and-sessions.md has the
+// runs). A length that is not proven is not offered and not opened. FLASH_CTX_OPTIONS: the picker's choices (a short
+// list), the proven ones only. 131072 is not proven yet: memory and the 128 MiB binding hold it in f16, and a
+// passphrase ~111K tokens back is found, but ctx128k and needle120k each differ from llama.cpp at one step by ~1.0 nat,
+// past the golden rule's 0.5, in f16 and in f32 alike; add it here once a run passes.
+export const FLASH_CTX_PROVEN = [2048, 8192, 16384, 32768, 65536];
+export const FLASH_CTX_OPTIONS = [8192, 32768, 65536, 131072].filter((c) => FLASH_CTX_PROVEN.includes(c));
+function FLASH_CTX_ENTRY() {
+  const top = Math.max(...FLASH_CTX_PROVEN);
+  return { def: top, max: top, ladder: FLASH_CTX_PROVEN.slice().sort((a, b) => b - a) };
+}
 // Context per model, in tokens: the default a room opens with and the most ?ctx=N may ask for, and
 // for some a fallback: the context a room opens with instead when its pledges can't hold the model
 // at the default but can at the fallback (pickCtx), so a room short of memory still starts.
@@ -470,9 +483,11 @@ export const CTX = {
   // the 122B MoE: 12 attention layers, 2 KV heads x 256 (the 35B's K/V row): 24 KB per position in f16, 128 MiB per
   // layer's K at 131072. Checked at short contexts so far (phase 1): its default stays at the 35B's
   "qwen3.5-122b-moe": { def: 32768, max: 131072 },
-  // Qwen3.8-Flash-Next: dense attention is exact up to 2051 cached tokens and the phase-1 engine refuses more (QSA,
-  // roadmap/33 PR plan item 9, lifts it). 12 QSA layers, 2 KV heads x 256 in f32: 4 MiB per layer's K at 2048
-  "qwen3.8-flash": { def: 2048, max: 2048 },
+  // Qwen3.8-Flash-Next with QSA (rooms long-context PR 5): the longest context proven correct in a room (FLASH_CTX_PROVEN,
+  // goldens on the GB10) is both the default and the cap; the ladder is the proven lengths, longest first: a room opens at
+  // the longest its devices hold (pickCtx), and the picker offers them (FLASH_CTX_OPTIONS). 12 QSA layers, 2 KV heads x
+  // 256: in f16 (FLASH_ROOM_KV) one layer's K at 131072 is 128 MiB, WebGPU's default binding
+  "qwen3.8-flash": FLASH_CTX_ENTRY(),
   // the dense engine keeps an f32 KV cache (~224 KB per position on the 1.7B: 1.8 GB at 8k, 3.6 GB
   // at 16k: 5.6 GB for the room in all). 16k fits an agent's prompt (OpenClaw's alone is ~12k), so
   // the room page, `pooled host` and the OpenClaw plugin all open it at 16k; a room short of that
@@ -496,9 +511,11 @@ export const FLASH_QSA_LAYER_BYTES = 3277824 + FLASH_QSA_RING * 256 + 512 * 256;
 // K / V formats; batch, whether it runs batched prefill passes (1 by default: room/flash.js with a Qwen4ExpBatch; a node
 // with POOLED_FLASH_BATCH=0 says 0; informational, ai-ready.batch is what the host acts on). A device without it is an
 // older build: dense, 2048 positions.
+// ctx16 (rooms long-context PR 5 / 9): the same for f16 K / V, which this build also loads (kv lists "f16"); an older
+// build without it loads f32 only.
 export function flashLongMeta(maxBindMB, { batch = 1 } = {}) {
   const bind = (+maxBindMB > 0 ? +maxBindMB : WEBGPU_MIN_BIND / 2 ** 20) * 2 ** 20;
-  return { ctx: Math.min(411000, Math.floor(bind / (2 * 256 * 4))), kv: ["f32"], batch: batch ? 1 : 0 };
+  return { ctx: Math.min(411000, Math.floor(bind / (2 * 256 * 4))), ctx16: Math.min(411000, Math.floor(bind / (2 * 256 * 2))), kv: ["f32", "f16"], batch: batch ? 1 : 0 };
 }
 const flashLongOk = (m) => !!m?.flashLong && typeof m.flashLong === "object" && +m.flashLong.ctx >= 2048 && Array.isArray(m.flashLong.kv) && m.flashLong.kv.includes("f32");
 // The host's Flash format for ai-load (ai-load.flash): QSA on, f32 K / V, the 1024-row ring, when every device it dealt
@@ -506,14 +523,29 @@ const flashLongOk = (m) => !!m?.flashLong && typeof m.flashLong === "object" && 
 // One format for the whole room, chosen by the host only.
 export function flashRoomFormat(model, metas) {
   if (MODELS[model]?.kind !== "qwen4exp" || !metas.length || !metas.every(flashLongOk)) return null;
-  return { qsa: 1, kv: "f32", ring: FLASH_QSA_RING };
+  return { qsa: 1, kv: flashKvOf(metas), ring: FLASH_QSA_RING };
+}
+// The rooms' K / V format for Flash: f16 (half f32's memory per token: 128K fits one 128 MiB binding) when every device
+// loads it (meta.flashLong.kv), else f32 (a build from before f16 in rooms)
+export const FLASH_ROOM_KV = "f16";
+const flashKvOf = (metas) => (metas.every((m) => Array.isArray(m?.flashLong?.kv) && m.flashLong.kv.includes(FLASH_ROOM_KV)) ? FLASH_ROOM_KV : "f32");
+// What a Flash room's devices (metas, host first; every device that may be dealt layers) allow, before any deal: kv, the
+// K / V format they'd load (flashRoomFormat's), and cap, the longest context every one of them takes: its
+// meta.flashLong ctx16 (f16) or ctx (f32), 2048 for a device without flashLong (an older build: dense, 2048).
+// -> { kv, cap } (kv also for the planner: roomBytes(model, ctx, kv)); any other model: { kv: null, cap: Infinity }
+export function flashRoomLimits(model, metas) {
+  if (MODELS[model]?.kind !== "qwen4exp") return { kv: null, cap: Infinity };
+  const ms = metas.filter(Boolean);
+  if (!ms.length || !ms.every(flashLongOk)) return { kv: "f32", cap: FLASH_DENSE_CTX };
+  const kv = flashKvOf(ms);
+  return { kv, cap: Math.min(...ms.map((m) => +(kv === "f16" ? m.flashLong.ctx16 || m.flashLong.ctx : m.flashLong.ctx) || FLASH_DENSE_CTX)) };
 }
 // A worker's reading of ai-load.flash: null for none (the dense engine, at most 2048 positions), else
 // { kv, ring } for a QSA engine; a format this build does not load throws (said back to the host as a load error).
 export function flashLoadOpts(flash) {
   if (!flash?.qsa) return null;
   const kv = flash.kv ?? "f32", ring = flash.ring ?? FLASH_QSA_RING;
-  if (kv !== "f32") throw new Error(`the host asked for Qwen3.8-Flash-Next's K / V in ${String(kv).slice(0, 16)}; this device loads f32 only`);
+  if (kv !== "f32" && kv !== "f16") throw new Error(`the host asked for Qwen3.8-Flash-Next's K / V in ${String(kv).slice(0, 16)}; this device loads f32 or f16`);
   if (!(Number.isInteger(ring) && ring >= 64 && ring <= 65536 && (ring & (ring - 1)) === 0)) throw new Error(`bad QSA ring ${String(ring).slice(0, 16)}`);
   return { kv, ring };
 }
@@ -565,16 +597,22 @@ export const maxSeqFor = (model, ask = 0) => {
   return ask > 0 ? Math.min(c.max, Math.max(2048, Math.round(ask / 256) * 256)) : c.def;
 };
 // The contexts a room tries for `model`, best first: `want` (the context it would open with), then the
-// model's fallback when it has one below `want`. An explicit ask (?ctx=, --ctx) is tried alone.
+// model's fallback when it has one below `want`, or (Qwen3.8-Flash-Next: CTX ladder) every ladder step below `want`.
+// An explicit ask (?ctx=, --ctx, the picker's context choice) is tried alone.
 export const ctxChoices = (model, want = maxSeqFor(model), ask = 0) => {
-  const fb = CTX[model]?.fallback;
-  return ask > 0 || !(fb > 0) || fb >= want ? [want] : [want, fb];
+  const c = CTX[model], fb = c?.fallback;
+  if (ask > 0) return [want];
+  if (c?.ladder) return [want, ...c.ladder.filter((x) => x < want)];
+  return !(fb > 0) || fb >= want ? [want] : [want, fb];
 };
 // The context a room opens with: the first of ctxChoices whose deal fits (fitsAt(ctx) -> bool), else
 // the smallest of them (what a short room is short for: the least it could start with).
 // -> { ctx, want, fits, fellBack } (fellBack: it fits, but only at a shorter context than `want`)
-export function pickCtx(model, { want = maxSeqFor(model), ask = 0, fitsAt }) {
-  const cs = ctxChoices(model, want, ask);
+// cap: the longest context the room's devices take (flashRoomLimits): longer choices are skipped, and when every choice
+// is longer the room is tried at the cap alone
+export function pickCtx(model, { want = maxSeqFor(model), ask = 0, fitsAt, cap = Infinity }) {
+  let cs = ctxChoices(model, want, ask).filter((c) => c <= cap);
+  if (!cs.length) cs = [Math.min(want, cap)];
   const i = cs.findIndex((c) => !!fitsAt(c));
   const ctx = cs[i < 0 ? cs.length - 1 : i];
   return { ctx, want, fits: i >= 0, fellBack: i > 0 };

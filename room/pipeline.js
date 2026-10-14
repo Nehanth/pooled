@@ -9,6 +9,12 @@ import { PrefixIndex } from "../harness/prefix.js";
 // this many in flight
 export const SLOW_FRAME = 16, SLOW_WINDOW = 2;
 
+// xs[lo, hi) onto arr, one at a time: arr.push(...xs) passes every element as an argument, and a long prompt (~120K ids
+// and up) throws "Maximum call stack size exceeded" there
+export function pushAll(arr, xs, lo = 0, hi = xs.length) {
+  for (let k = lo; k < hi; k++) arr.push(xs[k]);
+  return arr;
+}
 export function createPipeline({ state: ai, transport, options = {}, hooks = {}, checkpointStore: ckptDisk = null, getRoomCode = () => null }) {
   const { sendHidden, sendTo, chainRtt = () => 0 } = transport;
   const { profile = "browser", checkpointMax: CKPT_MAX = 2, fillDrafts: FILL_DRAFTS = true,
@@ -291,7 +297,7 @@ export function createPipeline({ state: ai, transport, options = {}, hooks = {},
       current.engine.pos = ai.pos;
       await current.engine.prefillTokens(ids.slice(0, -1));
       ai.pos = current.engine.pos;
-      ai.fed.push(...ids.slice(0, -1));
+      pushAll(ai.fed, ids, 0, ids.length - 1);   // (not push(...ids): a 128K prompt is past the engine's argument limit)
       return aiPipeToken(ids[ids.length - 1], true, undefined, desc);
     }
     let i = 0;

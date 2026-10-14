@@ -53,6 +53,44 @@ each has a switch for A/B timing on real hardware.
   that binds less than 256 MiB. Needle retrieval and speed at 32K..128K:
   `tests/needle_ctx.js` and docs/bench-log.md (2026-09-30).
 
+## Qwen3.8 Flash in rooms: long context (rooms long-context PR 5, 2026-10-13)
+
+Rooms run Flash with QSA and f16 K / V, at up to **64K** (65,536 tokens), the longest context checked against llama.cpp
+in a room. The picker offers 8K, 32K and 64K, each with the GPU memory it needs in that room and about how long a full
+paste takes to read; a room opens at the longest proven length its devices hold (`room/models.js` `FLASH_CTX_PROVEN`,
+`room/ctxpick.js`).
+
+Goldens, two room nodes on one GB10 (40 / 40 GB, layers 0-23 + 24-47, f16 K / V, batched prefill, the f16 wire),
+`flash_gold.mjs pair CTX=131072` (`tests/golden/q38flash_llama_greedy.json`; past 8K a case passes against llama.cpp's
+golden or any of its reruns, and a needle case needs the passphrase):
+
+| case | prompt | verdict | prefill (first answer) | decode |
+|---|---|---|---|---|
+| two-sum / bash / eos-mid | 23-31 | MATCH | 0.8-1.0 s | 15-18 tok/s |
+| hash-map | 23 | TIE at 49 | 0.6 s | 15.8 |
+| ctx2k / ctx2k_b / ctx2k1 | 1,887-2,082 | TIE at 26 / 6 / 13 | 10-11 s | 12.1-12.4 |
+| ctx4k | 3,867 | TIE at 6 | 18.9 s (204 tok/s) | 12.5 |
+| ctx8k | 7,663 | TIE at 6 | 37.5 s (204 tok/s) | 13.0 |
+| ctx16k | 15,718 | TIE at 3 | 78.5 s (200 tok/s) | 12.3 |
+| ctx32k | 31,958 | TIE at 0 (llama.cpp's rerun 1) | 160 s (200 tok/s) | 12.7 |
+| needle30k | 29,737 | MATCH (rerun 1), passphrase found | 150 s (198 tok/s) | 12.5 |
+| ctx64k | 64,795 | TIE at 13 (rerun 1) | 323 s (201 tok/s) | 12.6 |
+| needle120k | 119,198 | **passphrase found**; MISMATCH at step 0 (1.0 nat below llama.cpp's top) | 639 s (187 tok/s) | 12.1 |
+| ctx128k | 129,936 | MISMATCH at 21 (1.04 nats below llama.cpp's top; the same answer in substance) | 697 s (187 tok/s) | 12.1 |
+
+- The same pair in f32 K / V gives the same verdicts at 16K-32K and the same two 128K differences, at the same steps:
+  they are not f16's. Not resolved yet (both engines keep rope angles in f32; the next check is a solo run, no wire).
+- 8K with batching off (`POOLED_FLASH_BATCH=0`, one column at a time): 15.8-18.3 tok/s, ctx8k in 485 s. Batched and
+  per-token ids are identical on ctx4k and ctx8k; on ctx2k they part at step 29, after both left the golden at its near
+  tie at 26.
+- 128K fits by memory: f16 K / V is 128 MiB per QSA layer at 131,072 (WebGPU's default binding), and the planner holds
+  the demo room (a Mac tab lending 22 GB with the disk tier, a PC lending 12 GB) at 128K with the tab's disk-tier RAM at
+  4 GB (`room/flashdisk.js` `TAB_RAM_GB`, was 3). It is left out until a run passes the rule.
+
+Memory per device follows `flashLayerCost` (#380): weights, the range's state at the context, two checkpoint slots of
+it, and the QSA scores once. A room node keeps at most those two slots past 2048 (one answer, one pinned prefix), so a
+long chat never outgrows what the deal reserved. A tab keeps `?ckpt=2` by default.
+
 ## Sessions: save, restore, rewind, share a prefix
 
 `engine/qwen35.js`:

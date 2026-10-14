@@ -324,7 +324,7 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   // (the batched passes' scratch is not in need: it is decided once the weights are up, and a device without room for it
   // runs its prompt frames one column at a time instead of refusing the load)
   const solo = hasEmbed && hasHead && range[0] === 0 && range[1] === c.L;
-  const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null, ring: q?.ring }) + (off ? +offload.vramBytes || 0 : 0) + ramOff;
+  const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null, ring: q?.ring, kv: q?.kv }) + (off ? +offload.vramBytes || 0 : 0) + ramOff;
   const cpu = flashCpuBytes(G, opts) + ramOff;
   const sysFreeGB = m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null;
   const short = flashMemoryShort(need, m, { cpuBytes: cpu, sysFreeGB });
