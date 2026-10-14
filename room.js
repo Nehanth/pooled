@@ -639,8 +639,11 @@ function roomFitFor(key) {
     // as aiStart calls it, the split by memory); only tabs copy (a room node reads its own files). null when it doesn't fit
     if (fit.fits && SHAPE[key]?.exp) {
       const rb = roomBytes(key, pick.ctx, kv), metas = devs.map((d) => d.meta);
-      const deal = dealRoom({ L: rb.L, layerBytes: rb.layerBytes, hostBytes: rb.hostBytes, pledges, phone: metas.map(isPhoneMeta), phoneLayers: new URLSearchParams(location.search).get("phonelayers") === "1",
+      // (Flash: each layer's own cost and a tab host's load margin, as aiStart deals it)
+      const dealX = (x) => dealRoom({ L: rb.L, ...(rb.layerCost ? { layerCost: rb.layerCost } : { layerBytes: rb.layerBytes }), hostBytes: rb.hostBytes + x, pledges,
+        phone: metas.map(isPhoneMeta), phoneLayers: new URLSearchParams(location.search).get("phonelayers") === "1",
         off: offloadFor(metas, rb.experts || rb.expertBytes, key), ngram: ngramFor(metas, ngramOf(key)) });
+      const deal = margin ? dealWithHostMargin(dealX, ...margin) : dealX(0);
       if (deal.fit.fits) {
         const sh = diskShares(deal, devs.length, SHAPE[key].exp);
         out.share = new Map(devs.map((d, i) => [d.name, d.meta?.tabDisk ? sh[i] : null]));
