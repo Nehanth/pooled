@@ -581,13 +581,16 @@ function splitBySpeed(d, { L, layerBytes, hostBytes, pledges, off }) {
   const X = { nExp: X0.nExp, K: X0.K, perExp: Number.isFinite(X0.L) ? X0.park(0, X0.L) / X0.L / X0.nExp : X0.E / X0.nExp };
   const vh = vramFor(pledges, hostBytes, h), vw = vramFor(pledges, hostBytes, w);
   // -> { k, hp, wp, cost } for the host holding layers [0, k), or null when one of them can't
+  // (layerBytes: one size, or since #380 each layer's own costs: costOf, as dealOffload; a plain k * layerBytes was NaN there)
+  const C = costOf(layerBytes);
   const at = (k) => {
     const nw = L - k;
     if (k < 1 || nw < 1) return null;
-    const hp = k * layerBytes <= vh + 1e-6 ? null : offloadPlan(k, vh, off.ram[h], layerBytes, ex, off.minSlots, OFFLOAD_EXPERTS, k, true, true);
-    if (k * layerBytes > vh + 1e-6 && !hp) return null;
-    const wp = nw * layerBytes <= vw + 1e-6 ? null : offloadPlan(nw, vw, off.ram[w], layerBytes, ex, off.minSlots, OFFLOAD_EXPERTS, L, !!off.disk?.[w], false);
-    if (nw * layerBytes > vw + 1e-6 && !wp) return null;
+    const hb = C.span(0, k), wb = C.span(k, L);
+    const hp = hb <= vh + 1e-6 ? null : offloadPlan(k, vh, off.ram[h], layerBytes, ex, off.minSlots, OFFLOAD_EXPERTS, k, true, true);
+    if (hb > vh + 1e-6 && !hp) return null;
+    const wp = wb <= vw + 1e-6 ? null : offloadPlan(nw, vw, off.ram[w], layerBytes, ex, off.minSlots, OFFLOAD_EXPERTS, L, !!off.disk?.[w], false);
+    if (wb > vw + 1e-6 && !wp) return null;
     return { k, hp, wp, cost: tabCost(k, hp, X) + nodeCost(nw, wp, X) };
   };
   let best = null;
@@ -601,7 +604,7 @@ function splitBySpeed(d, { L, layerBytes, hostBytes, pledges, off }) {
   const assigned = [best.k, L - best.k], ranges = rangesOf(assigned);
   const plan = (p, k) => p && { ...p, lo: ranges[k][1] - p.layers, hi: ranges[k][1], ...(p.diskLayers > 0 ? { diskLo: ranges[k][1] - p.diskLayers } : {}) };
   const offload = [plan(best.hp, 0), plan(best.wp, 1)];
-  const held = [offload[0] ? vh : assigned[0] * layerBytes, offload[1] ? vw : assigned[1] * layerBytes].map((b, k) => b + (d.used[k] === 0 ? hostBytes : 0));
+  const held = [offload[0] ? vh : C.span(0, best.k), offload[1] ? vw : C.span(best.k, L)].map((b, k) => b + (d.used[k] === 0 ? hostBytes : 0));
   return { ...d, assigned, ranges, held, offload, speed: { k: best.k, ms: +best.cost.toFixed(1), was: d.assigned[0] } };
 }
 
