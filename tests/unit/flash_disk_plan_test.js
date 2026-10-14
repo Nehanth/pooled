@@ -223,3 +223,21 @@ Deno.test("flash: the tab host + PC node split by modelled speed (splitBySpeed)"
   }
   ok(rb.L === 48);
 });
+
+Deno.test("flash: splitBySpeed on each layer's own costs (rb.layerCost, as Start deals since #380): finite, within every pledge", () => {
+  const rb = roomBytes(F, 2048);
+  ok(rb.layerCost, "roomBytes gives Flash's per-layer costs");
+  for (const g of [12, 20, 22]) for (const ctx of [2048]) {
+    const metas = [tab(g), pc(10, 43, true)], pledges = metas.map((m) => pledgeGB(m) * GB);
+    const d = dealRoom({ L: rb.L, layerCost: rb.layerCost, hostBytes: rb.hostBytes, pledges, off: offloadFor(metas, rb.experts, F), ngram: ngramFor(metas, ngramOf(F)) });
+    ok(d.fit.fits, `${g} GB fits`);
+    ok(d.held.every((b, k) => Number.isFinite(b) && b <= pledges[d.used[k]] + 1), `${g} GB: held ${d.held} within ${pledges}`);
+    // the PC is never dealt more than its pledge holds resident unless it has an offload plan for them
+    ok(d.offload[1] || d.held[1] <= pledges[1] + 1, `${g} GB: PC plan`);
+  }
+  // a host whose share fits resident (a 30 GB tab given 3 layers): held is those layers' own bytes (was NaN)
+  const big = [tab(30), pc(10, 43, true)], pl = big.map((m) => pledgeGB(m) * GB);
+  const d = dealRoom({ L: rb.L, layerCost: rb.layerCost, hostBytes: rb.hostBytes, pledges: pl, off: { ...offloadFor(big, rb.experts, F), hostLayers: 3 }, ngram: ngramFor(big, ngramOf(F)) });
+  eq(d.assigned, [3, 45]); ok(!d.offload[0], "the 3 layers stay on the tab's GPU");
+  ok(d.held.every(Number.isFinite) && Math.abs(d.held[0] - (rb.layerCost.slice(0, 3).reduce((a, b) => a + b, 0) + rb.hostBytes)) < 1e6 * 64, `held ${d.held}`);
+});
