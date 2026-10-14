@@ -1,5 +1,5 @@
 // Model catalogue, loading flags, and shared context/memory policy from room/models.js.
-import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvLayerBufBytes, ctxForBinding, WEBGPU_MIN_BIND, kvModeFor, kvForLoad, KV_MODES, NEED_MIN_GB, ctxChoices, pickCtx, ctxK, ctxShortNote, needText, modelLoadOptions } from "../../room/models.js";
+import { MODELS, NEED_GB, PICKER, CTX, MAX_SEQ, MAX_SEQ_LONG, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, kvBytesPerLayerPos, kvLayerBufBytes, ctxForBinding, WEBGPU_MIN_BIND, kvModeFor, kvForLoad, KV_MODES, NEED_MIN_GB, ctxChoices, pickCtx, ctxK, ctxShortNote, needText, modelLoadOptions, SAVE_WORKERS } from "../../room/models.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
 const ok = (c, m) => { if (!c) throw new Error(m || "assertion failed"); };
@@ -18,7 +18,20 @@ Deno.test("modelLoadOptions: browser flags keep defaults and prefetch parsing", 
     ["?prefetch=1&prefetch=4", { wcache: true, wcacheVerify: false, prefetch: 1, parload: true, ngramWorker: true }],
     ["?parload=0", { wcache: true, wcacheVerify: false, prefetch: null, parload: false, ngramWorker: true }],
     ["?ngramworker=0&parload=1", { wcache: true, wcacheVerify: false, prefetch: null, parload: true, ngramWorker: false }],
-  ]) eq(modelLoadOptions(search), want, search);
+  ]) {
+    const { wcache, wcacheVerify, prefetch, parload, ngramWorker } = modelLoadOptions(search);
+    eq({ wcache, wcacheVerify, prefetch, parload, ngramWorker }, want, search);
+  }
+});
+
+Deno.test("modelLoadOptions: the experts' first save flags", () => {
+  const o = modelLoadOptions("");
+  eq(o.save, { workers: SAVE_WORKERS, chunk: 8, ahead: 3, early: true }, "defaults");
+  eq(o.cdnResolve, true, "the CDN URL is used by default");
+  const p = modelLoadOptions("?saveworkers=0&savechunk=16&saveahead=2&saveearly=0&cdnresolve=0");
+  eq(p.save, { workers: 0, chunk: 16, ahead: 2, early: false }, "flags");
+  eq(p.cdnResolve, false, "cdnresolve=0");
+  eq(modelLoadOptions("?saveworkers=999&savechunk=0&saveahead=x").save, { workers: 64, chunk: 1, ahead: 3, early: true }, "clamped / bad values");
 });
 
 Deno.test("maxSeqFor: table of models and ?ctx= asks", () => {

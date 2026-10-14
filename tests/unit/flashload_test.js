@@ -328,3 +328,43 @@ test("parallel: save and words wait until their checks answer (no run with nothi
   await p;
   checkRules(snaps);
 });
+
+test("parallel, save.early (a copy in workers): the copy starts next to the GPU step once its check answers", async () => {
+  const { tr, snaps } = tracked({ gpu: 100, save: 1000, words: 300 }, { every: 0 });
+  const s = script();
+  s.save.early = true;
+  const p = run(s, tr);
+  await tick();
+  ok(!s.ev.includes("save.copy:start"), "not before its check answers");
+  s.gate("save.check").resolve(); s.gate("words.check").resolve();
+  await tick();
+  ok(s.ev.includes("save.copy:start") && !s.ev.includes("gpu:end"), `the copy runs next to the GPU step: ${s.ev.join()}`);
+  eq(byId(snaps.at(-1)).save.state, "run");
+  s.gate("save.copy").resolve();
+  await tick();
+  eq(byId(snaps.at(-1)).save.state, "done", "done as soon as the copy is, the GPU step still running");
+  s.gate("gpu").resolve(); s.gate("words.copy").resolve();
+  await p;
+  eq(s.ev.filter((e) => e === "save.copy:start").length, 1, "copied once");
+  ok(s.ev.indexOf("save.open:start") > s.ev.indexOf("gpu:end"), "the reader opens after the GPU step");
+  checkRules(snaps);
+});
+
+test("parallel, save.early: a copy that fails stops the load at once, not after the GPU step", async () => {
+  const { tr, snaps } = tracked({ gpu: 100, save: 1000, words: 300 }, { every: 0 });
+  const s = script();
+  s.save.early = true;
+  const ac = new AbortController();
+  // a GPU step that sees the abort (the loader's unpaced step checks the load's signal)
+  s.gpu = async () => { await new Promise((_, rej) => ac.signal.addEventListener("abort", () => rej(ac.signal.reason), { once: true })); };
+  s.gate("save.check").resolve(); s.gate("words.check").resolve();
+  const p = run(s, tr, { ac });
+  await tick();
+  s.gate("save.copy").reject(new Error("disk full"));
+  let err = null;
+  try { await p; } catch (e) { err = e; }
+  ok(/disk full/.test(err?.message), String(err));
+  ok(s.seen.wordsSignal.aborted, "words stopped too");
+  eq(byId(snaps.at(-1)).save.state, "fail");
+  checkRules(snaps);
+});

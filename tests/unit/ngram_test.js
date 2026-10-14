@@ -334,3 +334,60 @@ Deno.test("a table through the HTTP reader, tensor layout, equals dequantF32", a
   const ids = st.push([1, 2, 3, 4, 50, 6, 7]);
   assert(same(await t.rows(ids), expect(all, cfg, ids)), "HTTP rows differ");
 });
+
+Deno.test("httpReadAt resolve: one redirect per file, then its target; an expired or refused target goes back through the URL", async () => {
+  const whole = Uint8Array.from({ length: 4096 }, (_, i) => i & 255);
+  let t = 1_000_000, gen = 1;
+  const st = { model: 0, cdn: 0 };
+  const res = (url, a, b, redirected, finalUrl) => ({ status: 206, redirected, url: finalUrl, headers: { get: (k) => (k === "content-range" ? `bytes ${a}-${b}/4096` : null) }, arrayBuffer: async () => whole.slice(a, b + 1).buffer });
+  const fetch = async (url, init) => {
+    const [a, b] = /bytes=(\d+)-(\d+)/.exec(init.headers.Range).slice(1).map(Number);
+    await new Promise((r) => setTimeout(r, 1));
+    if (url === "model") { st.model++; return res(url, a, b, true, `cdn${gen}?Expires=${Math.floor(t / 1000) + 3600}`); }
+    st.cdn++;
+    if (url !== `cdn${gen}?Expires=${Math.floor(t / 1000) + 3600}` && !url.startsWith(`cdn${gen}?`)) return { status: 403, headers: { get: () => null }, body: { cancel: async () => {} } };
+    return res(url, a, b, false, url);
+  };
+  const read = httpReadAt(["model"], { fetch, resolve: true, now: () => t });
+  // 8 reads at once: the first asks the model URL, the rest wait for its answer and go to the CDN
+  const got = await Promise.all(Array.from({ length: 8 }, (_, i) => read(0, i * 100, 50)));
+  assert(got.every((g, i) => same(g, whole.subarray(i * 100, i * 100 + 50))), "the bytes");
+  assert(st.model === 1 && st.cdn === 7, `one redirect: ${JSON.stringify(st)}`);
+  // the signature rotates (an expired URL answers 403): one failed CDN read, one redirect, then the new target
+  gen = 2;
+  assert(same(await read(0, 7, 9), whole.subarray(7, 16)), "read after the target expired");
+  assert(st.model === 2 && st.cdn === 8, `re-resolved: ${JSON.stringify(st)}`);
+  assert(same(await read(0, 1000, 10), whole.subarray(1000, 1010)) && st.model === 2 && st.cdn === 9, `then the new target: ${JSON.stringify(st)}`);
+  // past its Expires (less 5 min) it is not used at all
+  t += 3600e3;
+  await read(0, 0, 4);
+  assert(st.model === 3, `expired by the clock: through the URL (${JSON.stringify(st)})`);
+  // without resolve: every read through the URL; a host that does not redirect is not waited on
+  const st2 = { n: 0, live: 0, max: 0 };
+  const plain = async (url, init) => {
+    st2.n++; st2.live++; st2.max = Math.max(st2.max, st2.live);
+    const [a, b] = /bytes=(\d+)-(\d+)/.exec(init.headers.Range).slice(1).map(Number);
+    await new Promise((r) => setTimeout(r, 2));
+    st2.live--;
+    return res(url, a, b, false, url);
+  };
+  const r2 = httpReadAt(["u"], { fetch: plain, resolve: true });
+  await r2(0, 0, 10);
+  await Promise.all(Array.from({ length: 6 }, (_, i) => r2(0, i * 10, 10)));
+  assert(st2.max === 6, `no redirect: reads go out together (max ${st2.max} in flight)`);
+});
+
+Deno.test("splitHeads readAhead: reads in flight up to readAhead, writes in order, the same files", async () => {
+  const cfg = makeConfig({ offsets: [0, 40, 70, 100], vocab: [40, 30, 30, 20], mult: [1, 1, 1], ngramSize: 3, perNgram: 2, width: 32, eos: 1, ggmlType: GGML_Q8_0 });
+  const shard = Uint8Array.from({ length: 120 * cfg.rowBytes }, (_, i) => (i * 7) & 255);
+  let live = 0, max = 0;
+  const base = memoryReadAt([shard]);
+  const readAt = async (f, o, n) => { live++; max = Math.max(max, live); await new Promise((r) => setTimeout(r, 1)); live--; return base(f, o, n); };
+  const writes = [];
+  const files = cfg.vocab.map((v) => new Uint8Array(v * cfg.rowBytes));
+  const total = await splitHeads(cfg, readAt, async (h, b, off) => { writes.push([h, off]); files[h].set(b, off); }, { chunkRows: 7, readAhead: 4 });
+  assert(total === 120 * cfg.rowBytes && max === 4, `total ${total}, max in flight ${max}`);
+  const order = writes.map(([h, off]) => h * 1e6 + off);
+  assert(order.every((x, i) => !i || x > order[i - 1]), "writes in order");
+  for (let h = 0; h < 4; h++) assert(same(files[h], shard.subarray(cfg.offsets[h] * cfg.rowBytes, (cfg.offsets[h] + cfg.vocab[h]) * cfg.rowBytes)), `head ${h}`);
+});

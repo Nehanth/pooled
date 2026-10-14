@@ -7,7 +7,8 @@
 //           not held to the room's pace (room.js aiLoadPace): held to a slow device, the whole copy would start
 //           only after that device is done
 //   gpu     done: save's copy runs (on the main thread, as before: it is CPU-bound, and next to the GPU step it took
-//           the GPU's speed from 144 to 10 MB/s), words goes on with two heads at a time
+//           the GPU's speed from 144 to 10 MB/s), words goes on with two heads at a time. A copy in workers
+//           (engine/expert_ingest_pool.js, save.early) starts at t0 instead, once its check answers
 //   end     the experts' reader opens, words is awaited (it never fails the load: the table is read over the network
 //           instead), then the engine
 // Each part's bytes and state go to onParts (the contract with the load card: { parts: [{ id, done, total, state }],
@@ -93,7 +94,8 @@ export function partsTracker({ sizes = {}, onParts = null, onProg = null, every 
 //                                         be held to the room's pace (room.js aiLoadPace). Not while save still has
 //                                         a copy to run after it: held to the slowest device, the whole copy would
 //                                         start after that device is done, not next to it)
-//   save: { check() -> chk ({ need, haveBytes }), copy(chk, { at, signal }), open(chk) } | null
+//   save: { check() -> chk ({ need, haveBytes }), copy(chk, { at, signal }), open(chk), early? } | null   (early: copy
+//                                         starts next to the GPU step, as soon as check answers; else after it)
 //   words: { check() -> wchk ({ missing: [], presentBytes, dir }), copy(wchk, { at, signal, parallel, after,
 //           onState }) } | null   (parallel(): heads at a time, 1 while gpu runs, 2 after; after: settles once
 //           save's copy is over, for a copy that must not run next to it)
@@ -125,6 +127,14 @@ export async function runFlashParts({ parts, ac = new AbortController(), gpu, sa
       return { ok: false, error: e };
     }
   })() : null;
+  // save.early: the copy starts once its check answers, next to the GPU step (a copy off the main thread: workers);
+  // its failure stops the load at once (the GPU step, unpaced while a copy runs, sees the abort)
+  const copyP = save?.early ? chkP.then((c) => {
+    if (!c.need || signal.aborted) return;
+    parts.state("save", "run");
+    return save.copy(c, { signal, at: (d) => parts.at("save", d) });
+  }) : null;
+  copyP?.then(() => { saveAhead = false; if (!signal.aborted) parts.state("save", "done"); }, (e) => { if (!signal.aborted) ac.abort(e); });
   try {
     const weights = await gpu({ at: (d) => parts.at("gpu", d), paced: () => !saveAhead });
     gpuRunning = false;
@@ -134,7 +144,7 @@ export async function runFlashParts({ parts, ac = new AbortController(), gpu, sa
       chk = await chkP;
       if (chk.need) {
         parts.state("save", "run");
-        await save.copy(chk, { signal, at: (d) => parts.at("save", d) });
+        await (copyP || save.copy(chk, { signal, at: (d) => parts.at("save", d) }));
         if (signal.aborted) throw signal.reason;
         parts.state("save", "done");
       }
@@ -149,7 +159,7 @@ export async function runFlashParts({ parts, ac = new AbortController(), gpu, sa
     saveOver();
     parts.failRunning();
     if (!signal.aborted) ac.abort(e);
-    await Promise.allSettled([wordsP, chkP].filter(Boolean));
+    await Promise.allSettled([wordsP, chkP, copyP].filter(Boolean));
     throw e;
   } finally {
     parts.flush();

@@ -256,6 +256,7 @@ export function requantQ8Streaming(info, bytes) {
   const qs = new Uint8Array(n);
   const scales = new Uint32Array(Math.ceil(n / 32 / 2));
   const sc16 = new Uint16Array(scales.buffer);
+  if (info.ggmlType === GGML_Q4_1 && n % 32 === 0) { q41ToQ8(bytes, n / 32, qs, sc16); return { qs, scales }; }
   const CH = Math.max(1, Math.floor((8 * 2 ** 20) / (cols * 4))); // ~8MB f32 per chunk
   for (let r0 = 0; r0 < rows; r0 += CH) {
     const rc = Math.min(CH, rows - r0);
@@ -268,6 +269,41 @@ export function requantQ8Streaming(info, bytes) {
     sc16.set(new Uint16Array(q.scales.buffer, 0, nbChunk), (r0 * cols) / 32);
   }
   return { qs, scales };
+}
+
+// Q4_1 -> Q8 in one pass, byte for byte what dequantF32 + quantizeQ8 give (tests/unit/quant_test.js checks it): a
+// Q4_1 block has only 16 distinct values, fround(d * k + m) for k = 0..15 (dequantF32's f32 store), so each is
+// divided and rounded once instead of 32 times, and nothing goes through an f32 array. Flash's down experts are Q4_1:
+// the old path converted them at ~62 MB/s on one core (GB10), the main thread's wall in a tab's first save.
+let _f16tab = null;   // every f16 bit pattern -> its value (f16ToF32's, exact in an f64)
+const _q41v = new Float64Array(16), _q41q = new Uint8Array(16);
+function q41ToQ8(bytes, nb, qs, sc16) {
+  const T = _f16tab ||= Float64Array.from({ length: 65536 }, (_, h) => f16ToF32(h));
+  const v = _q41v, qv = _q41q;
+  for (let b = 0; b < nb; b++) {
+    const base = b * 20, o = b * 32;
+    const d = T[bytes[base] | (bytes[base + 1] << 8)], m = T[bytes[base + 2] | (bytes[base + 3] << 8)];
+    if (!Number.isFinite(d) || !Number.isFinite(m)) {   // an inf / NaN scale: the reference path, for its NaN rules
+      const q = quantizeQ8(dequantF32({ ggmlType: GGML_Q4_1, nElems: 32 }, bytes.subarray(base, base + 20)));
+      qs.set(q.qs, o); sc16[b] = q.scales[0] & 0xFFFF;
+      continue;
+    }
+    for (let k = 0; k < 16; k++) v[k] = Math.fround(d * k + m);
+    // the largest |value| among the nibbles used (finite here: no NaN to propagate)
+    let used = 0;
+    for (let l = 0; l < 16; l++) { const q = bytes[base + 4 + l]; used |= (1 << (q & 0xF)) | (1 << (q >> 4)); }
+    let amax = 0;
+    for (let k = 0; k < 16; k++) if (used & (1 << k)) { const a = Math.abs(v[k]); if (a > amax) amax = a; }
+    const h = f32ToF16(amax / 127 || 1);
+    sc16[b] = h;
+    const dd = T[h] || 1;
+    for (let k = 0; k < 16; k++) { const r = Math.round(v[k] / dd); qv[k] = (r > 127 ? 127 : r < -127 ? -127 : r) & 0xFF; }
+    for (let l = 0; l < 16; l++) {
+      const q = bytes[base + 4 + l];
+      qs[o + l] = qv[q & 0xF];
+      qs[o + l + 16] = qv[q >> 4];
+    }
+  }
 }
 
 export async function ggufWeights(G, bytesOf, { lo, hi, hasEmbed, hasHead }, onProgress = () => {}, onEntry = null) {
