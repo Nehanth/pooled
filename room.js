@@ -61,8 +61,9 @@ import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
 import { partsFromProg, partsFromSnapshot, progressTracker, etaTracker, roomProgress, packParts, unpackParts, wholePct, stepLine, rowVerb,
-  deviceVerb, headline, sentence, footer, eyebrow, stoppedText, stopWho, firstStart, WORDS_NOTE, cardRows, cardSub, diskPart, partsEnded } from "./room/loadsteps.js";
-import { fmtTps, speedLine, bandLine, parseStats, SpeedMeter, pushHistory, speedup, gainText, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
+  deviceVerb, headline, sentence, footer, eyebrow, stoppedText, stopWho, firstStart, WORDS_NOTE, cardRows, cardSub, diskPart, partsEnded, slimLine, redealGuess, redealWait } from "./room/loadsteps.js";
+import { addable, addWhen, wouldHelp } from "./room/autoadd.js";
+import { fmtTps, speedLine, bandLine, parseStats, SpeedMeter, pushHistory, speedup, gainText, warmupAnswers, barScale, paramsOf, paramsText, expertsAt, expertsText, expertsHead, expertsCost, tokenShares, pushEvent, onlineText, fmtGB } from "./room/speedo.js";
 import { TeleMeter, expertCache, expertCacheOf, expertStoreOf } from "./room/tele.js";
 import { serverList, parseServer, openPeer, FALLBACK_ERRORS, reconnectDelay } from "./room/signal.js";
 import { convertedBytes, clearConverted, convertedByModel, deleteConverted, modelOf } from "./room/convertedcache.js";
@@ -804,7 +805,7 @@ function updateCluster() {
   $("cluster-summary").textContent = DEV
     ? `${all.length} device${all.length > 1 ? "s" : ""}${apis ? ` \u00b7 ${apis} API client${apis > 1 ? "s" : ""}` : ""} \u00b7 ${gpus} WebGPU \u00b7 ${pledged.toFixed(1)} GB pledged`
     : `${all.length} device${all.length > 1 ? "s" : ""}${apis ? ` \u00b7 ${apis} API client${apis > 1 ? "s" : ""}` : ""} \u00b7 ${+pledged.toFixed(1)} GB pooled`;
-  $("hdr-sum").innerHTML = `<b>${+pledged.toFixed(1)} GB</b> pooled`;
+  $("hdr-sum").innerHTML = `<b>${+pledged.toFixed(1)} GB</b><span class="hw"> pooled</span>`;
   $("peers-n").textContent = String(all.length);
   renderPool(pledged, rows);
 }
@@ -2947,7 +2948,8 @@ function crumb(s) { try { localStorage.setItem("pooled-crumb", JSON.stringify({ 
 // again goes on from there. A disk question during the load is asked in the card (askTabDisk), not over it.
 const lcFresh = () => ({ t0: performance.now(), prog: progressTracker(), eta: etaTracker(), adapt: {}, phase: "pressed", parts: false,
   mine: null, left: null, roomBest: 0, why: "", host: null, redeal: false, paced: false, took: null, sentAt: 0,
-  paintAt: 0, raf: 0, timer: 0, sig: "", struct: "", gb: {}, gbAt: 0, modelKey: null, expect: false, diskHint: 0, queued: false, asking: false });
+  paintAt: 0, raf: 0, timer: 0, sig: "", struct: "", gb: {}, gbAt: 0, modelKey: null, expect: false, diskHint: 0, queued: false, asking: false,
+  adding: [], guess: null, rateAt: {}, peerEta: {} });
 let lc = lcFresh();
 // the card is up and loading (not ready, not stopped): the composer queues instead of sending
 const lcLoading = () => $("load-card").classList.contains("on") && (lc.phase === "pressed" || lc.phase === "run");
@@ -2956,7 +2958,7 @@ function composerLock(on) {
   const p = $("ai-prompt");
   p.disabled = false; $("ai-send").disabled = false;
   if (!on) lc.queued = false;
-  if (on) p.placeholder = "Type your first question"; else promptHint();
+  if (on) p.placeholder = $("load-card").classList.contains("slim") ? "Type your next question" : "Type your first question"; else promptHint();
   sendLabel();
 }
 // modelKey: the model this card starts (a follower knows it from the Start message, not from its own picker)
@@ -2964,6 +2966,9 @@ function aiLoading(show, title, modelKey = null) {
   $("ai-loading").style.display = "none";   // (the old sidebar bar: one bar on screen, the card's)
   if (title) $("ldg-title").textContent = title;
   const card = $("load-card"), was = card.classList.contains("on");
+  // a load under a conversation (a re-deal: a device added or gone) is a slim line over the chat, which stays; the
+  // full card is for a first Start (and a start that stopped: lcStop)
+  card.classList.toggle("slim", !!show && !!$("ai-output").querySelector(".m"));
   $("ai-panel").classList.toggle("loading", !!show);
   card.classList.toggle("on", !!show);
   $("ai-empty").style.display = show ? "none" : "";
@@ -2988,13 +2993,14 @@ function aiLoading(show, title, modelKey = null) {
   } else {
     const wasReady = lc.phase === "ready";
     lc.phase = "off"; cancelAnimationFrame(lc.raf); clearTimeout(lc.timer);
-    card.classList.remove("stopped", "ready");
+    card.classList.remove("stopped", "ready", "slim");
     lcAsk(null);
     composerLock(false);
     // (no live-looking message box under the picker after a Start that went nowhere: only a room that is up chats)
     $("ai-row").style.display = $("ai-panel").classList.contains("online") ? "flex" : "none";
     if (wasReady) emptyText("The model is ready. Ask anything.");
   }
+  if (show) speed.since = 0;   // the next answers warm up (room/speedo.js warmupAnswers)
   if (show && /re-deal/.test(title || "")) { speed.redeal = true; speedEvent("Sharing out the model again"); }
 }
 // What the card will show, drawn grey from the press so it doesn't grow from nothing: this computer alone starting
@@ -3008,7 +3014,7 @@ function lcExpect() {
 }
 // a load starts on this device (aiLoadShardIn): its parts from scratch (its own bar too: a re-deal's new total is not
 // compared with the old one); the room's bar keeps its best (lc.roomBest) and the clock runs from the press
-function lcNewLoad() { lc.adapt = {}; lc.prog = progressTracker(); lc.eta = etaTracker(); lc.parts = false; lc.mine = null; lc.left = null; lc.host = null; lc.dealt = true; lc.gb = {}; lc.gbAt = 0; }
+function lcNewLoad() { delete lc.rateAt[myName]; lc.adapt = {}; lc.prog = progressTracker(); lc.eta = etaTracker(); lc.parts = false; lc.mine = null; lc.left = null; lc.host = null; lc.dealt = true; lc.gb = {}; lc.gbAt = 0; }
 // every device has its layers and the room is up: the card says so where it stands, and the composer opens. A chat
 // that already has turns (a re-deal mid-chat, a late joiner added) goes straight back to its conversation
 function lcReady() {
@@ -3032,7 +3038,7 @@ function lcStop(why, plain = false) {
   if (!card.classList.contains("on")) { card.classList.add("on"); $("ai-panel").classList.add("loading"); $("ai-empty").style.display = "none"; }
   const queued = lc.queued;
   lc.phase = "stopped"; lc.why = String(why || ""); lc.plain = !!plain; ai.pressedHere = false;
-  card.classList.add("stopped"); card.classList.remove("ready");
+  card.classList.add("stopped"); card.classList.remove("ready", "slim");
   lcAsk(null);
   $("ai-row").style.display = "none";
   composerLock(false); lc.queued = queued;
@@ -3061,12 +3067,22 @@ function lcAsk(q) {
 function lcPush(s) {
   lc.mine = lc.prog.push(s);
   lc.left = lc.eta.push(performance.now(), lc.mine.parts, s);
+  rateSeen(myName, lc.mine.done);
   if (lc.phase === "pressed") lc.phase = "run";
   ai.partsW = ai.partsW || {}; ai.leftBy = ai.leftBy || {};
   ai.partsW[myName] = lcWire(); ai.leftBy[myName] = lc.left;
 }
 // what peers hear about this device's parts (ai-progress, ai-hostprog): packed parts and its bytes
 const lcWire = () => (lc.mine ? { p: packParts(lc.mine.parts), db: [Math.round(lc.mine.done), Math.round(lc.mine.total)] } : null);
+// How fast each device loaded, bytes a second, by name: measured over each load (10 s or more of it), kept for the
+// session, so the offer to add a device that loaded here before says how long it takes (room/loadsteps.js redealGuess)
+const loadRates = {};
+function rateSeen(nm, done) {
+  if (!nm || !(+done >= 0)) return;
+  const now = performance.now(), r = lc.rateAt[nm];
+  if (!r || done < r.d) { lc.rateAt[nm] = { t: now, d: +done }; return; }
+  if (now - r.t >= 10000 && done > r.d) loadRates[nm] = (done - r.d) / ((now - r.t) / 1000);
+}
 // onParts (contract): a loader that runs the parts at the same time says where each one is (room/model-loader.js
 // loadShard's onParts, or the same snapshot as onProgress's info.parts: loadProg); from then on the card uses those
 function loadParts(snap) {
@@ -3143,7 +3159,11 @@ function lcPaintNow(sigIn) {
   const ready = phase === "ready", stopped = phase === "stopped";
   const set = (sel, text) => { const el = card.querySelector(sel); if (el && el.textContent !== text) el.textContent = text; };
   set(".lc-eyebrow", eyebrow(phase, { model, first }));
-  set(".lc-hl", headline(room, phase, { model, why: lc.why, me: myName }));
+  const slim = card.classList.contains("slim");
+  // slim (a re-deal under the chat): one line, "Adding pc to the model · about 2 min left"; the guess from before it
+  // started counts down until the devices' own estimates come in
+  const guess = lc.guess == null ? null : Math.max(0, lc.guess - (performance.now() - lc.t0) / 1000);
+  set(".lc-hl", slim ? slimLine(room, phase, { adding: lc.adding, guess }) : headline(room, phase, { model, why: lc.why, me: myName }));
   // the sentence: a stopped start says what happened and what to do
   let sent;
   if (stopped) {
@@ -4004,25 +4024,38 @@ async function aiRedeal(force = false) {
   if (ai.loadingShard) { toast("wait for this device's layers to finish loading, then re-deal"); return; }
   $("chat-tools").hidden = true;
   const model = ai.model || $("ai-model").value;
+  // who this adds (the slim line over the chat names them) and how long that took them before, if they loaded here
+  // (added on its own: the devices it chose; else the ones that are not phones: a phone stays out while computers hold the model)
+  const spare = sparePeers(), comp = spare.filter((id) => !isPhoneMeta(conns.get(id)?.meta));
+  const adding = ai.addPending?.length ? ai.addPending.slice() : (comp.length ? comp : spare).map((id) => conns.get(id)?.name || id);
+  const guess = redealGuess((comp.length ? comp : spare).filter((id) => adding.includes(conns.get(id)?.name || id)).map(joinerLoad));
+  ai.redealAt = Date.now(); clearTimeout(ai.addTimer); ai.addPending = [];
   failWaiters(new Error("re-dealing the layers"));
   ckptClear();
   closeEngine(); ai.busy = false; ai.fed = null;
   $("ai-panel").classList.remove("online");
   $("ai-row").style.display = "none";
   showRedeal(false);
-  broadcastAll({ t: "ai-redeal", by: myName, model });
+  broadcastAll({ t: "ai-redeal", by: myName, model, adding, ...(guess != null ? { guess: Math.round(guess) } : {}) });
   codeRoleChanged();
   aiLoading(true, "re-dealing the layers");
+  lc.adding = adding; lc.guess = guess; lcPaint(true);
   await aiStart(model);
 }
 // label: the button's words (devices that joined late: "Add pc to the model"); any other reason keeps the default
 const REDEAL = "Re-deal the layers";
-function showRedeal(on, why, label = REDEAL) {
+function showRedeal(on, why, label = REDEAL, { skip = false } = {}) {
   const b = $("ai-redeal");
   b.hidden = !on || ai.role !== "host";
   if (on) b.textContent = label;
   if (why) $("redeal-why").textContent = why;
   $("redeal-why").hidden = b.hidden;
+  $("ai-redeal-skip").hidden = b.hidden || !skip;
+}
+// what a device that joined late would load, and how fast it loaded here before (null: it hasn't): redealGuess's input
+function joinerLoad(id) {
+  const e = conns.get(id), nm = e?.name || id;
+  return { bytes: pledgeGB(e?.meta, ai.shareCap?.get(nm), ai.model) * 2 ** 30, rate: loadRates[nm] || 0 };
 }
 // devices with a GPU that are in the room but hold no layers (joined after the start)
 // (a device the deal left out by name is still left out under a new id after a reload, not "late")
@@ -4031,11 +4064,44 @@ function offerRedealForNewcomers() {
   if (ai.role !== "host" || !ai.engine || ai.degraded) return;
   const spare = sparePeers();
   const n = spare.length, names = spare.map((id) => conns.get(id)?.name || id);
-  if (n) showRedeal(true, `${names.join(", ")} ${n > 1 ? "are" : "is"} here but not helping yet. Add ${n > 1 ? "them" : "it"} to share the work and speed up answers. Takes a few seconds; the chat stays.`,
+  // (an honest wait: the PC took 100 s to load its part of Qwen3.8 Flash, not "a few seconds")
+  const wait = redealWait(redealGuess(spare.map(joinerLoad)));
+  const auto = autoAddTick();
+  if (n && auto.length) showRedeal(true, `${andList(auto)} joined. Adding ${auto.length > 1 ? "them" : "it"} to the model when the room is free: ${wait}, and the chat stays.`, "Add now", { skip: true });
+  else if (n) showRedeal(true, `${names.join(", ")} ${n > 1 ? "are" : "is"} here but not helping yet. Add ${n > 1 ? "them" : "it"} to share the work and speed up answers. Takes ${wait}; the chat stays.`,
     `Add ${n > 1 ? `${n} devices` : names[0]} to the model`);
   // every screen says who waits for a re-deal (their cards, and their own Lend screen)
   if (spare.length) { ai.outWhy = outNow(); paintHeld(); broadcastAll({ t: "ai-out", out: ai.outWhy }); }
 }
+const andList = (ns) => (ns.length > 2 ? `${ns.slice(0, -1).join(", ")} and ${ns[ns.length - 1]}` : ns.join(" and "));
+// A device that joins while the model runs is added on its own (room/autoadd.js): a few seconds after the newest join,
+// once the room is idle, at most one re-deal every 90 s and the same device at most twice. Looks again while it has to
+// wait; returns the names it is about to add ([] for none: the offer's button stays for those)
+function autoAddTick() {
+  clearTimeout(ai.addTimer); ai.addTimer = 0;
+  if (ai.role !== "host") return (ai.addPending = []);
+  const now = Date.now(), spare = sparePeers();
+  ai.joinSeen ??= new Map(); ai.addSkip ??= new Set(); ai.addCount ??= new Map();
+  const devs = spare.map((id) => {
+    const m = conns.get(id)?.meta || {}, nm = conns.get(id)?.name || id;
+    if (!ai.joinSeen.has(nm)) ai.joinSeen.set(nm, now);
+    return { name: nm, webgpu: !!m.webgpu, api: !!m.api, phone: isPhoneMeta(m), gb: pledgeGB(m, ai.shareCap?.get(nm), ai.model) };
+  });
+  const help = wouldHelp({ split: $("ai-split").value, offload: Object.keys(ai.offloadBy || {}).length > 0,
+    unneeded: [...conns.values()].some((c) => ai.outWhy?.[c.name] === "unneeded"), chain: ai.chain?.length || 0 });
+  const names = help ? addable(devs, { layerGB: ai.layerGB || 0, skip: ai.addSkip, added: ai.addCount }) : [];
+  const w = addWhen({ on: autoAddOn(), host: true, online: !!ai.engine && $("ai-panel").classList.contains("online"), degraded: !!ai.degraded,
+    busy: !!ai.busy, loading: !!ai.loadingShard || !!ai.dealing, queued: ai.queue?.length || 0, names,
+    joinedAt: Math.max(0, ...names.map((nm) => ai.joinSeen.get(nm) || 0)), lastAt: ai.redealAt || 0, now });
+  ai.addPending = w.go || w.wait != null ? names : [];
+  if (w.go) {
+    for (const nm of names) ai.addCount.set(nm, (ai.addCount.get(nm) || 0) + 1);
+    log("room", `adding ${names.join(", ")} to the model (joined while it ran)`);
+    setTimeout(() => aiRedeal(), 0);
+  } else if (w.wait != null) ai.addTimer = setTimeout(offerRedealForNewcomers, w.wait);   // (which looks again, and repaints the offer)
+  return ai.addPending;
+}
+function autoAddOn() { return $("ai-autoadd")?.checked !== false; }
 // why each device with a GPU holds no layers, by name: "unneeded" (the others hold the model),
 // "small" (its pledge is under one layer), "late" (it joined after the start and waits for a re-deal)
 function outNow() {
@@ -4046,7 +4112,7 @@ function outNow() {
 // what a device the deal left out says in its own chat (the Serve API screen: room/compute.js lendStatus)
 function outNote(why) {
   if (why === "small") return "Not holding layers: what this device lends is less than one layer of this model. You can still ask.";
-  if (why === "late") return "This device joined after the start: it starts helping when the host adds it. You can still ask.";
+  if (why === "late") return "This device joined after the start: it starts helping once the room adds it (about a minute or two to load its part). You can still ask.";
   return `Not needed for this model: the ${isPhoneMeta(myMeta) ? "computers" : "other devices"} hold it. You can still ask.`;
 }
 // the device cards: what each holds of its pledge, or why it holds nothing
@@ -4088,7 +4154,7 @@ function aiPeerLeft(id, name, verb = "left") {
   $("ai-row").style.display = ai.engine || $("load-card").classList.contains("on") ? "flex" : "none";
   const auto = autoRedealOn(), secs = Math.round(REJOIN_GRACE_MS / 1000);
   aiStatus(running ? `${why}: waiting for it to come back, then this ${ai.busy === "code" ? "Code run" : "answer"} carries on` : `${why}: waiting for it to come back${auto ? ` (re-dealing without it in ${secs} s)` : ""}, or re-deal the layers`);
-  showRedeal(true, `${why}. It goes back into its slot if it returns${auto ? `; otherwise the layers are dealt again over the devices still here in ${secs} s (experimental)` : ""}. Or re-deal now: cached layers reload in seconds.`);
+  showRedeal(true, `${why}. It goes back into its slot if it returns${auto ? `; otherwise the layers are dealt again over the devices still here in ${secs} s (experimental)` : ""}. Or re-deal now; the chat stays.`);
   broadcastAll({ t: "ai-degraded", why: `${why}: waiting for it to come back` });
   codeRoleChanged();
   // idle room: re-deal on its own after the grace period (a run in progress does this in roomRecover).
@@ -4562,8 +4628,10 @@ function teleNote(kind, ms, n = 1) {
 // marked by how many devices held the model; the room's events (a device joins, the re-deal, online);
 // and a card per device: its layers, its GB, where its experts are (MoE), its share of each token's time.
 // Every screen times the tokens it is shown; a finished answer's speed is the host's (its stats line).
+// (since / count: the answers since the last load and the device count they ran on, so the first ones after a load,
+// a re-deal or a change of count are marked warm and never compared: room/speedo.js speedup)
 const speed = { meter: new SpeedMeter(), hist: [], events: [], asked: new Set(), lastN: 0, redeal: false, at: 0, idle: 0, seq: 0, last: null, reading: false,
-  firstWait: false, devTip: "" };
+  firstWait: false, devTip: "", since: 0, count: 0 };
 // The band's pill while the room works on an answer: "Reading…" until its first word is on screen (the model is still
 // reading the message), "Writing…" after; renderMap's liveWords sets "Writing…" / "Ready", this corrects the first
 function paintLivePill() {
@@ -4637,7 +4705,9 @@ function speedDone(stats, key = null, own = false) {
   $("speedo")?.classList.remove("live");
   const tps = st ? (st.count >= 2 ? st.tps : 0) : avg;   // a one-token answer has no speed worth showing
   if (st && st.count >= 2) {
-    speed.hist = pushHistory(speed.hist, { key: key ?? "a" + ++speed.seq, tps: st.tps, devices: st.devices });
+    if (st.devices !== speed.count) { speed.count = st.devices; speed.since = 0; }
+    const warm = speed.since++ < warmupAnswers(st.devices);
+    speed.hist = pushHistory(speed.hist, { key: key ?? "a" + ++speed.seq, tps: st.tps, devices: st.devices, warm, model: ai.model || null });
     speed.last = st;
   } else if (own && avg > 0 && speed.meter.n >= 2) speed.last = { count: speed.meter.n, tps: avg, devices: lastMap?.nodes?.length || 1 };   // (an answer with no stats line ever, e.g. Code's turns: this screen's own timing; a failed or stopped one leaves it)
   if (speed.last) $("speedo")?.classList.remove("quiet");   // the head line has a speed: so may the opened panel
@@ -4651,7 +4721,7 @@ function paintHistory() {
   const h = speed.hist, hs = barScale(h), cur = h.length ? h[h.length - 1].devices : 0;
   ol.innerHTML = h.map((x, i) => {
     const step = i === 0 || h[i - 1].devices !== x.devices;
-    return `<li class="bar${x.devices === cur ? " cur" : ""}${step ? " step" : ""}" data-tps="${x.tps}" data-n="${x.devices}" style="--h:${hs[i].toFixed(3)}" title="${fmtTps(x.tps)} tok/s on ${x.devices} device${x.devices === 1 ? "" : "s"}">`
+    return `<li class="bar${x.devices === cur ? " cur" : ""}${step ? " step" : ""}${x.warm ? " warm" : ""}" data-tps="${x.tps}" data-n="${x.devices}" style="--h:${hs[i].toFixed(3)}" title="${fmtTps(x.tps)} tok/s on ${x.devices} device${x.devices === 1 ? "" : "s"}${x.warm ? " (warming up: not compared)" : ""}">`
       + `<i></i>${step ? `<span class="nl">${x.devices} device${x.devices === 1 ? "" : "s"}</span>` : ""}</li>`;
   }).join("");
   ol.classList.toggle("empty", !h.length);
@@ -5177,6 +5247,8 @@ async function aiOnData(from, d) {
       $("room-over").hidden = true;
       setModelValue(d.model);
       aiLoading(true, "re-dealing the layers");
+      lc.adding = Array.isArray(d.adding) ? d.adding.filter((x) => typeof x === "string").slice(0, 16).map((x) => x.slice(0, 40)) : [];
+      lc.guess = Number.isFinite(+d.guess) && +d.guess > 0 ? Math.min(+d.guess, 3 * 3600) : null; lcPaint(true);
       $("ldg-sub").textContent = `${d.by} is re-dealing the layers over the devices in the room`;
       aiStatus(`${d.by} is re-dealing the layers…`);
       break;
@@ -5307,6 +5379,15 @@ async function aiOnData(from, d) {
       const pw = partsWireIn(d.parts);
       if (pw) ai.partsW[nm] = pw; else delete ai.partsW[nm];
       ai.leftBy[nm] = d.left == null || !Number.isFinite(+d.left) ? null : +d.left;
+      if (pw?.db) rateSeen(nm, pw.db[0]);
+      // a peer that sends only its percent (a room node, `pooled join`): its time left from that percent of what it was
+      // dealt (ai.heldGB), so the card and the re-deal's slim line have a real estimate for it too
+      const held = +ai.heldGB?.[nm] * 2 ** 30, pct = +d.pct;
+      if (!pw && ai.leftBy[nm] == null && held > 0 && Number.isFinite(pct)) {
+        const done = Math.max(0, Math.min(100, pct)) / 100 * held;
+        ai.leftBy[nm] = (lc.peerEta[nm] ||= etaTracker()).push(performance.now(), [{ id: "gpu", done, total: held, state: pct >= 100 ? "done" : "run" }]);
+        rateSeen(nm, done);
+      }
       ai.askBy = ai.askBy || {}; ai.askBy[nm] = !!d.asking;   // its user is being asked about its disk (lcAsk)
       lcPaint(!!d.asking);
     }
@@ -5617,6 +5698,19 @@ if (DEV) window.__pooledGen = async (ids, maxNew) => {
 
 $("ai-start").addEventListener("click", aiStartAnywhere);
 $("ai-redeal").addEventListener("click", () => aiRedeal());
+// "Not now" on a device about to be added on its own: it waits for the button instead
+$("ai-redeal-skip").addEventListener("click", () => {
+  for (const nm of ai.addPending || []) (ai.addSkip ??= new Set()).add(nm);
+  clearTimeout(ai.addTimer); ai.addPending = [];
+  offerRedealForNewcomers();
+});
+// adding devices that join while the model runs: on unless this device's host turned it off (remembered here)
+try { if (localStorage.getItem("pooled-autoadd") === "off") $("ai-autoadd").checked = false; } catch {}
+$("ai-autoadd").addEventListener("change", (e) => {
+  try { localStorage.setItem("pooled-autoadd", e.target.checked ? "on" : "off"); } catch {}
+  if (!e.target.checked) { clearTimeout(ai.addTimer); ai.addPending = []; }
+  offerRedealForNewcomers();
+});
 // auto re-deal (experimental): the host's choice, remembered on this device
 try { if (localStorage.getItem("pooled-autoredeal") === "off") $("ai-autoredeal").checked = false; } catch {}
 $("ai-autoredeal").addEventListener("change", (e) => {

@@ -161,13 +161,21 @@ export function roomProgress(byDevice = {}, best = 0) {
 }
 
 // The time left on one device: push(now ms, parts, agg { done, total }?) -> seconds, or null until it is worth
-// saying (20 s since the first byte and 1 GiB in). Each running part's rate over the last 20 s; the time is the
-// longer of the slowest gating part alone and every remaining byte over the summed rate (the parts share one
-// network link). A part waiting with an unknown total (today's sequential loader) counts as agg.total - agg.done.
-// What it shows moves only by at least max(20%, 120 s) or after 10 s held, and never goes up by less than 60 s.
-export function etaTracker({ windowMs = 20000, minMs = 20000, minBytes = GiB, holdMs = 10000 } = {}) {
+// saying (20 s since the first byte and 1 GiB in). Each running part's rate over the last minute (windowMs); the raw
+// time is the longer of the slowest gating part alone and every remaining byte over the summed rate (the parts share
+// one network link): on the safe side, as a part that finishes may or may not hand its share of the link to the others
+// (the first save's word list did, partly). A part waiting with an unknown total (today's sequential loader) counts as
+// agg.total - agg.done.
+// What it shows is calm (the first save's estimate went 42 -> 49 -> 25 -> 35 -> 4 min, flash demo 2026-10-13):
+// - it counts down with the clock, and falls toward a lower raw time smoothly (fallMs: an exponential approach), never
+//   below the floor: every remaining byte over the best summed rate of the last few minutes (bestMs), the most
+//   optimistic honest figure;
+// - it never goes up by a little: only when the raw time stays at least upFrac (and upMin s) above it for upHoldMs, and
+//   then to the raw time at once; meanwhile it holds at the floor rather than count down past it.
+export function etaTracker({ windowMs = 60000, minMs = 20000, minBytes = GiB, bestMs = 180000, fallMs = 30000, upFrac = 0.3, upMin = 120, upHoldMs = 60000 } = {}) {
   const hist = new Map();   // part id -> [{ t, d }]
-  let t0 = null, d0 = null, shown = null, setAt = 0;
+  const rates = [];         // [{ t, r }]: the summed rate at each push, for the floor
+  let t0 = null, d0 = null, shown = null, at = 0, upSince = null, out = null;   // out: the last value returned
   return {
     push(now, parts = [], agg = null) {
       const sumDone = parts.reduce((a, p) => a + (p.state === "skip" ? 0 : +p.done || 0), 0);
@@ -193,14 +201,27 @@ export function etaTracker({ windowMs = 20000, minMs = 20000, minBytes = GiB, ho
         // sequential: what is left is the whole load's remainder (the running part's own remainder is inside it)
         rem = Math.max(rem, (+agg.total || 0) - (+agg.done || 0));
       }
-      if (t0 == null || now - t0 < minMs || sumDone - d0 < minBytes || !(rate > 0)) return shown == null ? null : Math.max(0, shown - (now - setAt) / 1000);
+      const counting = () => (shown == null ? null : (out = Math.max(0, shown - (now - at) / 1000)));
+      if (t0 == null || now - t0 < minMs || sumDone - d0 < minBytes || !(rate > 0)) return counting();
+      rates.push({ t: now, r: rate });
+      while (rates.length > 1 && now - rates[0].t > bestMs) rates.shift();
       const raw = Math.max(gate, rem / rate);
-      if (shown == null) { shown = raw; setAt = now; return raw; }
-      const cur = Math.max(0, shown - (now - setAt) / 1000);
-      const diff = raw - cur;
-      const big = Math.abs(diff) >= Math.max(0.2 * cur, 120), held = now - setAt >= holdMs;
-      if ((big || held) && !(diff > 0 && diff < 60)) { shown = raw; setAt = now; return raw; }
-      return cur;
+      const best = Math.max(rate, ...rates.map((x) => x.r)), floor = rem / best;
+      if (shown == null) { shown = out = Math.max(raw, floor); at = now; return shown; }
+      const dt = now - at, nat = Math.max(0, shown - dt / 1000);
+      let v;
+      if (raw >= nat * (1 + upFrac) && raw - nat >= upMin) {
+        upSince ??= now;
+        v = now - upSince >= upHoldMs ? raw : Math.max(nat, Math.min(out, floor));
+        if (v === raw) upSince = null;
+      } else {
+        upSince = null;
+        // toward the raw time (when it is lower), at most down with the clock otherwise; held at the floor
+        const target = Math.min(nat, Math.max(raw, floor));
+        v = Math.max(target + (nat - target) * Math.exp(-dt / fallMs), Math.min(out, floor));
+      }
+      shown = out = v; at = now;
+      return v;
     },
   };
 }
@@ -230,6 +251,34 @@ export function leftText(s) {
   if (s >= 45) return "about a minute";
   return "under a minute";
 }
+// ---- adding devices to a running model (a re-deal): the chat stays, a slim line above it says how it goes ----
+
+// Before it starts: how long adding these devices takes, from each one's bytes to load over the rate it loaded at
+// before in this room (room.js loadRates); joiners [{ bytes, rate }] -> the longest in seconds, or null when one of them
+// has no measured rate yet (a device that just joined): then the words say "about a minute or two" (redealWait)
+export function redealGuess(joiners = []) {
+  if (!Array.isArray(joiners) || !joiners.length) return null;
+  let worst = 0;
+  for (const j of joiners) {
+    if (!(+j?.bytes > 0) || !(+j?.rate > 0)) return null;
+    worst = Math.max(worst, +j.bytes / +j.rate);
+  }
+  return worst;
+}
+// "about 3 min", "under a minute"; "about a minute or two" without an estimate (never "a few seconds": adding the PC to
+// Qwen3.8 Flash took 100 s, flash demo 2026-10-13)
+export const redealWait = (s) => (s == null || !Number.isFinite(+s) ? "about a minute or two" : leftText(s));
+const andNames = (ns) => (ns.length > 2 ? `${ns.length} devices` : ns.join(" and "));
+// The slim line over the chat while a running model is shared out again: "Adding pc to the model · about 2 min left";
+// "Sharing out the model again · …" when nobody new is added (a device left). room { left, ended } (roomProgress);
+// guess: the estimate from before it started (redealGuess), until the devices' own come in
+export function slimLine(room = {}, phase = "run", { adding = [], guess = null } = {}) {
+  const lead = adding?.length ? `Adding ${andNames(adding)} to the model` : "Sharing out the model again";
+  if (phase === "ready" || room.ended) return `${lead} · almost ready`;
+  const left = room.left != null && Number.isFinite(+room.left) ? +room.left : guess;
+  return `${lead} · ${left != null && Number.isFinite(+left) ? `${leftText(left)} left` : "about a minute or two"}`;
+}
+
 // a part's bytes, one unit when both have it: "22.3 of 63.6 GB", "300 MB of 1.2 GB"
 export function stepBytes(done, total) {
   const f = (b) => (b >= 2 ** 30 ? [(b / 2 ** 30).toFixed(1), "GB"] : [String(b > 0 ? Math.max(1, Math.round(b / 2 ** 20)) : 0), "MB"]);

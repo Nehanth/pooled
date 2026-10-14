@@ -180,6 +180,9 @@ let code = 1, node = null;
 try {
   // ---- one device: the Mac alone
   const mac = await device("mac");
+  // (this room's mac waits for the button: a PC that joins late is added on its own by default, room/autoadd.js, and
+  // that re-deal is not run here, see below; tests/e2e/room_state.mjs autoadd runs it)
+  await mac.context().addInitScript(() => { try { localStorage.setItem("pooled-autoadd", "off"); } catch {} });
   const code1 = await room([[mac, "mac", 24]]);
   check("1 device: the room is online", await online(mac));
   let v = await panel(mac);

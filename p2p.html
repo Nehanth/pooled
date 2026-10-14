@@ -489,6 +489,7 @@
   .wd { display: inline-flex; gap: 3px; }
   .wd i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
   .wd i:nth-child(2) { background: var(--a2); } .wd i:nth-child(3) { background: var(--a3); }
+  .m.bot:not(.live) .wd { display: none; }   /* the dots say "writing": they go when the answer is done */
   .m.bot.live .wd i { animation: pulse 1s infinite; }
   .m.bot.live .wd i:nth-child(2) { animation-delay: .33s; }
   .m.bot.live .wd i:nth-child(3) { animation-delay: .66s; }
@@ -557,6 +558,7 @@
   #sp-hist .bar { position: relative; flex: 0 1 28px; min-width: 6px; height: calc(46px * var(--h)); display: flex; }
   #sp-hist .bar i { flex: 1; border-radius: 4px 4px 1px 1px; background: var(--blue-200); transition: height .3s var(--ease); }
   #sp-hist .bar.cur i { background: var(--accent); }
+  #sp-hist .bar.warm i { opacity: .45; }   /* a warm-up answer (the first after a load): shown, never compared */
   #sp-hist .bar:last-child i { box-shadow: 0 0 0 2px var(--accent-soft); }
   #sp-hist .bar.step:not(:first-child) { margin-left: 10px; }
   #sp-hist .bar.step:not(:first-child)::before { content: ""; position: absolute; left: -8px; bottom: -16px; height: calc(46px + 16px); max-height: 64px; border-left: 1px dashed var(--rule-3); }
@@ -796,6 +798,8 @@
   .rung.sel::before { box-shadow: inset 0 0 0 4.5px var(--accent); }
   #ai-redeal { width: 100%; font: 500 13px/1 var(--sans); border-color: var(--warn); color: var(--warn-text); }
   #redeal-why { font-size: 12px; color: var(--ink-2); }
+  #ai-redeal-skip { align-self: center; padding: 4px 8px; border: 0; background: transparent; font: 500 12px/1 var(--sans); color: var(--muted); }
+  #ai-redeal-skip:hover:not(:disabled) { color: var(--text); background: transparent; text-decoration: underline; }
   #ai-give, #ai-allow-disk { width: 100%; font: 500 13px/1 var(--sans); }
   #ai-panel:is(.loading, .online) :is(#ai-give, #ai-allow-disk, #ai-why) { display: none; }
   #ai-why { font-size: 12px; line-height: 1.45; color: var(--ink-2); text-align: center; }
@@ -845,6 +849,17 @@
   #load-card.on { display: block; animation: enter .35s var(--ease); }
   /* while it is up, the transcript stays out of the way (the first question takes the card down: room.js aiOut) */
   #load-card.on ~ #ai-output { display: none !important; }
+  /* slim: a load under a conversation (a device added, or one gone: a re-deal) is one line and a thin bar over the
+     chat, which stays readable; the composer under it sends a question once the model is back (room.js aiLoading) */
+  #load-card.on.slim { display: grid; grid-template-columns: minmax(0, 1fr) minmax(96px, 30%); align-items: center; column-gap: 16px; flex: none;
+    width: auto; margin: 8px var(--gutter) 0; padding: 10px 14px; border-radius: 12px; box-shadow: none; animation: enter .25s var(--ease); }
+  #load-card.slim :is(.lc-top, .lc-sent, .lc-sub, #lc-rows, .lc-foot) { display: none; }
+  #load-card.slim .lc-hl { margin: 0; min-width: 0; font: 400 13px/1.35 var(--sans); letter-spacing: 0; color: var(--ink-2); }
+  #load-card.slim .lc-bar { margin: 0; gap: 10px; }
+  #load-card.slim .lc-bar .track { height: 4px; }
+  #load-card.slim .lc-bar .pct { min-width: 32px; font-size: 11px; color: var(--muted); }
+  #load-card.slim .lc-ask { grid-column: 1 / -1; }
+  #load-card.on.slim ~ #ai-output { display: block !important; }
   .lc-top { display: flex; align-items: center; gap: 14px; }
   .lc-top .dl { flex: none; width: 40px; height: 40px; }
   #load-card:is(.ready, .stopped) .lc-top .dl circle { animation: none; }
@@ -908,6 +923,10 @@
   @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
   #ai-output { display: none; flex: 1; min-height: 0; overflow-y: auto; white-space: normal; word-wrap: break-word; padding: 20px var(--gutter) 10px; background: transparent; scrollbar-width: thin; scrollbar-color: var(--faint) transparent; }
+  /* scrolled, the answers fade under its top edge rather than end in a hard cut that reads as a card lying over them
+     (the "Add pc" card above it at 1000 px, flash demo 2026-10-13); at the top the fade is only the padding */
+  #ai-output { -webkit-mask-image: linear-gradient(transparent, #000 14px); mask-image: linear-gradient(transparent, #000 14px); }
+  #chatpane:has(#ai-panel.online) #ai-output { margin-top: 4px; }
   #ai-output .u { color: var(--accent-text); font-weight: 600; }
   #ai-output .stats { font-family: var(--mono); color: var(--muted); font-size: 11px; }
   .m { display: flex; flex-direction: column; margin: 14px 0; max-width: min(80%, 640px); animation: enter .3s var(--ease); }
@@ -1639,6 +1658,19 @@
   @media (max-width: 1000px) {
     body.in-room .pchip .cg { display: none; }
   }
+  /* a one-row bar from 821 to 1180 px (a 1000 px window, the Flash demo): the devices' chips come first, so the words
+     around them give way ("Room" before the code, "Serve" before API, the chips' icons and GB; under 960 the logo's
+     word and "pooled" after the total) and a second device's chip is never cut down to its dot */
+  @media (min-width: 821px) and (max-width: 1180px) {
+    body.in-room #room-badge::before { display: none; }
+    body.in-room #room-badge { padding-left: 12px; }
+    body.in-room #compute-open .lw { display: none; }
+    body.in-room .pchip .pic, body.in-room .pchip .cg { display: none; }
+    body.in-room header { gap: 10px; }
+  }
+  @media (min-width: 821px) and (max-width: 960px) {
+    body.in-room .logo span, body.in-room #hdr-sum .hw { display: none; }
+  }
 
   /* ---- phones and narrow windows: the bar takes two rows (room and actions; the devices) ---- */
   @media (max-width: 820px) {
@@ -1691,6 +1723,7 @@
     .lc-dev { padding-bottom: 10px; }
     .lc-part .bar { display: none; }
     #load-card { margin-top: 12px; }
+    #load-card.on.slim { grid-template-columns: minmax(0, 1fr); row-gap: 6px; margin: 8px 10px 0; padding: 10px 12px; }
     .ag-h, #code-driver, #code-log, #code-bar { padding-left: 12px; padding-right: 12px; }
     #code-row { margin-left: 10px; margin-right: 10px; }
     #code-pane :is(.cm-approve button, #pv-open) { min-height: 36px; font-size: 12px; }
@@ -1712,6 +1745,8 @@
   /* a first row too narrow for "Serve API" (measured: at 421px, with "Room" back beside the code, it pushed settings to a second row):
      "API" beside the mark, its name still "Serve API" */
   @media (max-width: 480px) { #compute-open .lw { display: none; } }
+  /* under 400 px the mark alone (its name stays "Serve API"): with "API" beside it the settings button took a row of its own */
+  @media (max-width: 400px) { #compute-open .lbl { display: none; } #compute-open { padding: 0 10px; } }
   @media (max-width: 370px) {
     body.in-room #hdr-sum { width: 0; padding: 0; font-size: 0; }   /* no total; its fade still ends the chip row */
     #share-btn .lbl { display: none; }
@@ -1948,6 +1983,10 @@
             <select id="ai-split" class="seg-src" aria-labelledby="l-split" tabindex="-1"><option value="memory">by memory (every device holds some)</option><option value="speed" selected>for speed (fastest devices, fewest hops)</option></select>
           </div>
           <div class="set set-row">
+            <div class="set-l"><b id="l-autoadd">Add devices that join</b><span>A device that joins while the model runs is added to it when the room is free: each device loads its part again (about a minute or two), and the chat stays.</span></div>
+            <label class="switch"><input type="checkbox" id="ai-autoadd" role="switch" aria-labelledby="l-autoadd" checked><i aria-hidden="true"></i></label>
+          </div>
+          <div class="set set-row">
             <div class="set-l"><b id="l-autoredeal">Re-deal on its own <span class="exp">experimental</span></b><span>When a device drops and is not back within a minute, deal its layers to the devices still here; an answer or Code run in progress carries on.</span></div>
             <label class="switch"><input type="checkbox" id="ai-autoredeal" role="switch" aria-labelledby="l-autoredeal" checked><i aria-hidden="true"></i></label>
           </div>
@@ -2060,6 +2099,7 @@
           <p id="start-why" class="sr-only"></p>
           <div id="redeal-why" hidden></div>
           <button id="ai-redeal" type="button" hidden>Re-deal the layers</button>
+          <button id="ai-redeal-skip" type="button" hidden>Not now</button>
         </div>
         <div id="ai-loading" style="display:none">
           <div id="ldg-title"></div>

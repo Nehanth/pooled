@@ -40,6 +40,10 @@
 //   fresh          a newcomer joins a room that has been up a while; a member links to it straight away and sends it
 //                  a Start naming itself (leaving out the bigger device), its own ai-ready-all and a token: the
 //                  newcomer follows none of it; then the room's pick presses Start and runs the model.
+//   autoadd        a model runs on one device with a conversation; a phone joins (it only asks: the room does not
+//                  reload), then a laptop joins and is added with no click: a few seconds later the host shares the
+//                  model out again by itself, the chat stays on screen under a slim "Adding late to the model" line,
+//                  and the room comes back with late holding layers.
 //   restart        the pick's start fails (a worker reports it couldn't load): the pick can press Start again.
 //   refforge       a member presses Start (relayed by the creator); another member sends the creator a refusal
 //                  for it, claiming to be the creator: the creator forwards it under the sender's real name, the
@@ -59,7 +63,7 @@ import { loadPlaywright, chromiumPath, GPU_ARGS, serveRepo } from "./engine_synt
 
 const argv = process.argv.slice(2);
 const arg = (k, d) => { const i = argv.indexOf("--" + k); return i >= 0 ? argv[i + 1] : d; };
-const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,fresh,restart,refforge,loaddrop-back,loaddrop-gone")).split(","));
+const ONLY = new Set((arg("only", "leftout,leftout-guest,leftout-lost-hello,rejoin,duplicate,takeover,hijack,slowstart,fresh,autoadd,restart,refforge,loaddrop-back,loaddrop-gone")).split(","));
 const ROOT = path.resolve(new URL(".", import.meta.url).pathname, "../..");
 const PORT = +arg("port", 8191), SIG = PORT + 1;
 const MODEL_KEY = "qwen3.8-27b";
@@ -413,6 +417,29 @@ async function fresh() {
   check("fresh: the room's pick starts the model, and the newcomer follows it", up && (await late.evaluate(() => window.__dealer())) === bigId, (await view(late)).status);
 }
 
+async function autoadd() {
+  const big = await device("big"), phone = await device("phone", { phone: true }), late = await device("late");
+  const code = await openRoom([[big, "big", 24]], "&split=memory");
+  await startModel(big, "memory");
+  check("autoadd: the model runs on one device", await online(big));
+  check("autoadd: and answers", !!(await ask(big, "hello")));
+  // a phone joins: it only asks while a computer holds the model; nothing reloads
+  await joinTab(phone, "phone", 2, code);
+  await big.waitForFunction(() => document.querySelectorAll("#peers .peer-card").length >= 2, null, { timeout: 60000 });
+  await big.waitForTimeout(9000);   // past the grace (room/autoadd.js GRACE_MS) and a poll
+  const v0 = await view(big);
+  check("autoadd: a phone that joins does not make the room reload", v0.online && !v0.loading && !/adding phone/.test(await roomLog(big)), JSON.stringify(v0));
+  // a laptop joins: added with no click; the chat stays on screen while the layers are dealt again
+  await joinTab(late, "late", 8, code);
+  const slim = await big.waitForFunction(() => { const c = document.getElementById("load-card"); return c.classList.contains("on") && c.classList.contains("slim"); }, null, { timeout: 60000, polling: 100 }).then(() => true, () => false);
+  const v1 = await big.evaluate(() => ({ chat: getComputedStyle(document.getElementById("ai-output")).display !== "none" && document.querySelectorAll("#ai-output .m").length >= 2,
+    line: document.querySelector("#load-card .lc-hl").textContent, clicks: 0 }));
+  check("autoadd: a laptop that joins is added with no click, under a slim line, the chat on screen", slim && v1.chat && /^Adding late to the model · /.test(v1.line) && !/second/.test(v1.line), JSON.stringify(v1));
+  const back = await online(big, 300000) && await big.waitForFunction(() => !document.getElementById("load-card").classList.contains("on"), null, { timeout: 60000 }).then(() => true, () => false);
+  const held = await big.evaluate(() => /layer split by pledge: you \d+\+embed[^\n]* late \d+/.test(document.getElementById("chat-log").innerText));
+  check("autoadd: the room comes back with late holding layers, the conversation kept", back && held && (await big.evaluate(() => document.querySelectorAll("#ai-output .m").length)) >= 2, JSON.stringify(await view(big)) + " " + (await roomLog(big)).slice(-400));
+}
+
 async function restart() {
   const big = await device("big"), w = await device("w");
   await openRoom([[big, "big", 24, "&gbps=100"], [w, "w", 12, "&gbps=1"]], "&split=memory");
@@ -512,7 +539,7 @@ async function loaddrop(label, { hostGB, workerGB, back }) {
 let code = 1;
 try {
   for (const [name, fn] of [["leftout", () => leftout("leftout", [12, 8, 8])], ["leftout-guest", () => leftout("leftout-guest", [8, 12, 8])],
-    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart], ["fresh", fresh], ["restart", restart], ["refforge", refforge],
+    ["leftout-lost-hello", () => leftout("leftout-lost-hello", [8, 12, 8], { loseHello: true })], ["rejoin", rejoin], ["duplicate", duplicate], ["takeover", takeover], ["hijack", hijack], ["slowstart", slowstart], ["fresh", fresh], ["autoadd", autoadd], ["restart", restart], ["refforge", refforge],
     ["loaddrop-back", () => loaddrop("loaddrop-back", { hostGB: 24, workerGB: 12, back: true })],
     ["loaddrop-gone", () => loaddrop("loaddrop-gone", { hostGB: 24, workerGB: 12, back: false })]]) {
     if (!ONLY.has(name)) continue;

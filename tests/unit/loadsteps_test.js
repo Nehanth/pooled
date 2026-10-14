@@ -4,7 +4,7 @@
 // jump around; no "experts", "OPFS", "n-gram", "kernels" on the screen.
 import {
   PART_ORDER, GATE, planSteps, drop, loadTracker, partsFromProg, partsFromSnapshot, progressTracker, roomProgress, etaTracker,
-  packParts, unpackParts, leftText, stepBytes, stepLine, rowVerb, partRow, deviceVerb, headline, sentence, footer, eyebrow,
+  packParts, unpackParts, leftText, redealGuess, redealWait, slimLine, stepBytes, stepLine, rowVerb, partRow, deviceVerb, headline, sentence, footer, eyebrow,
   stoppedText, stopWho, stopIsDisk, cachedStart, firstStart, wholePct, WORDS_NOTE, diskPart, cardRows, cardSub, partsEnded,
 } from "../../room/loadsteps.js";
 
@@ -221,17 +221,16 @@ Deno.test("etaTracker: quiet until 20 s and 1 GiB, shared link, hysteresis", () 
   const perPart = (60 * GB - 2100 * MB) / (100 * MB), shared = (70 * GB - 3150 * MB) / (150 * MB);
   ok(v != null && Math.abs(v - Math.max(perPart, shared)) < 1, `eta ${v}`);
   ok(shared >= perPart - 1e-9 || v >= shared, "the shared-link term is at least the per-part term here");
-  // hysteresis: a small change inside 10 s does not move it
+  // a faster rate: it falls toward the new time smoothly, not in one jump
   const H = etaTracker({ minMs: 0, minBytes: 0 }), big = (d) => [{ id: "gpu", done: d, total: 100000, state: "run" }];
   H.push(0, big(0)); const s0 = H.push(1000, big(100));   // 999 s
-  const s1 = H.push(2000, big(220));                      // rate 110 -> ~889 s: under 20% of 998, held
-  ok(Math.abs(s1 - (s0 - 1)) < 1e-6, `held (counts down) ${s0} -> ${s1}`);
-  const s2 = H.push(12500, big(1150));                   // 10 s held, and up by more than a minute: it moves
-  ok(s2 > s1 + 60, `moves after 10 s ${s1} -> ${s2}`);
-  // never raised by less than 60 s: 90 s shown, 11 s later the rate says 89 s (a raise of 10 over the 79 it counted down to)
+  const s1 = H.push(2000, big(220));                      // rate 110 -> ~889 s
+  ok(s1 < s0 - 1 && s1 > 889, `falls smoothly ${s0} -> ${s1}`);
+  // never raised by a little: 90 s shown, 11 s later the rate says 89 s (10 over the 79 it counted down to)
   const r = (d) => [{ id: "gpu", done: d, total: 10000, state: "run" }], R2 = etaTracker({ minMs: 0, minBytes: 0 });
   R2.push(0, r(0)); eq(R2.push(10000, r(1000)), 90);
-  eq(R2.push(21000, r(1990)), 79, "no small raise, even after 10 s held");
+  const v2 = R2.push(21000, r(1990));                     // counted down to 79; the best rate's floor is 80.1
+  ok(v2 < 90 && v2 >= 79, `no small raise (and not under the floor): ${v2}`);
   // today's sequential loader: a waiting part with no total counts the whole remainder
   const S = etaTracker({ minMs: 0, minBytes: 0 }), seq = (d) => [{ id: "save", done: d, total: 100, state: "run" }, { id: "gpu", done: 0, total: null, state: "wait" }];
   S.push(0, seq(0), { done: 0, total: 1100 });
@@ -353,4 +352,85 @@ Deno.test("no technical words in anything the card says", () => {
   }
   out.push(stoppedText("QuotaExceededError", { save: { done: 1, total: 2 * GB } }), stoppedText("x"));
   for (const s of out) ok(!BAD.test(s), `jargon in "${s}"`);
+});
+
+// The first save's time left, recorded on the Flash demo (2026-10-13, take1-load-watch.log: the card every 30 s while
+// Qwen3.8 Flash saved 92.4 GB to a Mac Studio): [s, GB saved (the model and its word list), GB on the GPU (null: done)].
+// The old estimate read 43, 49, 45, 29, 27, 25, 33, 38, 28 ... 35 ... 24, 14, 7 min on it.
+const TAKE1 = [[0, 0.885, 1.3], [30, 1.3, 1.9], [60, 1.7, 2.4], [90, 3.6, null], [120, 7.0, null], [150, 10.3, null], [180, 13.2, null], [210, 15.6, null],
+  [241, 18.4, null], [271, 21.2, null], [301, 23.4, null], [331, 25.9, null], [361, 28.9, null], [391, 31.7, null], [421, 34.6, null], [452, 37.5, null],
+  [482, 40.6, null], [512, 43.1, null], [542, 45.2, null], [572, 47.4, null], [602, 49.7, null], [632, 51.9, null], [662, 54.5, null], [692, 57.2, null],
+  [722, 60.0, null], [752, 62.6, null], [782, 65.0, null], [812, 66.9, null], [842, 69.1, null], [872, 71.8, null], [902, 74.3, null], [932, 76.2, null],
+  [963, 78.8, null], [993, 79.8, null], [1023, 80.8, null], [1053, 81.8, null], [1083, 82.8, null], [1113, 83.8, null], [1143, 84.9, null], [1173, 85.9, null],
+  [1203, 86.9, null], [1233, 88.0, null], [1263, 89.0, null], [1293, 90.0, null], [1323, 91.0, null], [1353, 91.6, null], [1383, 92.1, null]];
+// The trace pushed every second as the concurrent loader's three parts: the save (63.6 GB) and the word list (28.8 GB,
+// steady at ~0.9 GB/min while the save ran, ~2 GB/min after: the end of the log) share the recorded sum. bursty: inside
+// each 30 s the bytes land unevenly (a burst, a 21 s stall, a slow start, a fast start), as a download does
+function replayTake1(e, { bursty = false } = {}) {
+  const shown = [];
+  for (let t = 0; t <= 1383; t++) {
+    let k = TAKE1.findIndex((x) => x[0] > t); if (k < 0) k = TAKE1.length;
+    const a = TAKE1[Math.max(0, k - 1)], b = TAKE1[Math.min(TAKE1.length - 1, k)];
+    let f = b[0] > a[0] ? (t - a[0]) / (b[0] - a[0]) : 0;
+    if (bursty) { const q = Math.floor(t / 30) % 4; f = q === 0 ? Math.min(1, f * 3) : q === 1 ? (f < 0.7 ? 0 : (f - 0.7) / 0.3) : q === 2 ? f * f : Math.sqrt(f); }
+    const d = a[1] + (b[1] - a[1]) * f, g = a[2] == null || t >= 90 ? null : a[2] + ((b[2] ?? 3.2) - a[2]) * f;
+    const w = Math.min(28.8, t < 963 ? 14.8 * t / 963 : 14.8 + (d - 78.8)), sv = Math.min(63.6, d - w);
+    const v = e.push(20000 + t * 1000, [{ id: "save", done: sv * GB, total: 63.6 * GB, state: sv >= 63.6 ? "done" : "run" },
+      { id: "words", done: w * GB, total: 28.8 * GB, state: "run" }, { id: "gpu", done: (g ?? 3.2) * GB, total: 3.2 * GB, state: g == null ? "done" : "run" }]);
+    if (v != null) shown.push({ t, v });
+  }
+  return shown;
+}
+Deno.test("etaTracker: the Flash demo's first save (recorded), steady and bursty: it only counts down", () => {
+  for (const bursty of [false, true]) {
+    const s = replayTake1(etaTracker(), { bursty });
+    ok(s.length > 1300, "an estimate from early on");
+    for (let i = 1; i < s.length; i++) ok(s[i].v <= s[i - 1].v + 1e-6, `${bursty ? "bursty" : "steady"}: went up at ${s[i].t} s: ${s[i - 1].v} -> ${s[i].v}`);
+    // what it says, in minutes, every 30 s: never back up
+    const words = s.filter((x) => x.t % 30 === 0).map((x) => leftText(x.v));
+    const mins = words.map((x) => { const m = /about (\d+)\s+min/.exec(x); return m ? +m[1] : x === "about a minute" ? 1 : 0; });
+    for (let i = 1; i < mins.length; i++) ok(mins[i] <= mins[i - 1], `${bursty ? "bursty" : "steady"} words went up: ${words.join(", ")}`);
+    // and it ends: under a minute by the last 30 s (it took 1394 s)
+    ok(s[s.length - 1].v < 60, `ends near 0: ${s[s.length - 1].v}`);
+  }
+});
+Deno.test("etaTracker: a big, lasting slowdown raises it once (after a minute), a short stall never", () => {
+  const MB = 2 ** 20, e = etaTracker({ minMs: 0, minBytes: 0 }), p = (d) => [{ id: "gpu", done: d, total: 20 * GB, state: "run" }];
+  let d = 0, t = 0, last = null;
+  const step = (rate, secs) => { const out = []; for (let i = 0; i < secs; i++) { t += 1000; d += rate * MB; out.push(last = e.push(t, p(d))); } return out; };
+  step(100, 60);                                     // 100 MB/s: ~ (20 GB - 6 GB) / 100 MB/s
+  const before = last;
+  const stall = step(0, 20);                          // a 20 s stall: no raise
+  ok(stall.every((v, i) => v <= (i ? stall[i - 1] : before) + 1e-6), "a stall does not raise it");
+  const slow = step(25, 150);                         // a quarter of the rate for good: raised once, by a lot
+  const ups = slow.map((v, i) => v - (i ? slow[i - 1] : stall[stall.length - 1])).filter((x) => x > 1e-6);
+  eq(ups.length, 1, "raised once");
+  ok(ups[0] >= 120, `by a lot: ${ups[0]}`);
+});
+Deno.test("etaTracker: never below what the best recent rate allows (the floor), even when the clock runs past it", () => {
+  const e = etaTracker({ minMs: 0, minBytes: 0 }), p = (d) => [{ id: "gpu", done: d, total: 1000, state: "run" }];
+  e.push(0, p(0)); e.push(10000, p(100));            // 10 B/s: 90 s
+  let v = 0;
+  for (let t = 11; t <= 120; t++) v = e.push(t * 1000, p(100 + (t - 10) * 4));   // 4 B/s from here, a slowdown under the raise's 30%
+  const rem = 1000 - (100 + 110 * 4), best = 10;      // the best summed rate it saw (within 3 min)
+  ok(v >= rem / best - 1e-6, `held at the floor ${v} >= ${rem / best}`);
+});
+
+Deno.test("redealGuess / redealWait: a joiner's bytes over its measured rate, else 'about a minute or two'", () => {
+  eq(redealGuess([]), null);
+  eq(redealGuess([{ bytes: 10 * GB, rate: 0 }]), null, "no rate yet");
+  eq(redealGuess([{ bytes: 10 * GB, rate: 100 * 2 ** 20 }, { bytes: 4 * GB, rate: 0 }]), null, "one without a rate");
+  eq(redealGuess([{ bytes: 10 * GB, rate: 100 * 2 ** 20 }, { bytes: 6 * GB, rate: 20 * 2 ** 20 }]), 6 * 1024 / 20, "the slowest");
+  eq(redealWait(null), "about a minute or two");
+  eq(redealWait(102), "about 2\u00a0min");
+  eq(redealWait(30), "under a minute");
+  for (const s of [null, 1, 5, 102, 600]) ok(!/second/.test(redealWait(s)), "never promises seconds");
+});
+Deno.test("slimLine: the one line over the chat while devices are added", () => {
+  eq(slimLine({}, "pressed", { adding: ["pc"] }), "Adding pc to the model · about a minute or two");
+  eq(slimLine({ left: 130 }, "run", { adding: ["pc"] }), "Adding pc to the model · about 2\u00a0min left");
+  eq(slimLine({ left: null }, "run", { adding: ["pc", "laptop"], guess: 50 }), "Adding pc and laptop to the model · about a minute left");
+  eq(slimLine({ left: 20 }, "run", { adding: ["a", "b", "c"] }), "Adding 3 devices to the model · under a minute left");
+  eq(slimLine({ ended: true }, "run", { adding: ["pc"] }), "Adding pc to the model · almost ready");
+  eq(slimLine({ left: 300 }, "run", {}), "Sharing out the model again · about 5\u00a0min left");
 });
