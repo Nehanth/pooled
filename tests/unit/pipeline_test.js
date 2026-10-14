@@ -308,3 +308,47 @@ for (const profile of ["browser", "node"]) {
     eq(singles, profile === "node" ? [[9, 109]] : Array.from({ length: 9 }, (_, i) => [i + 1, 101 + i]));
   });
 }
+
+// Prompt frames queue behind each other at the slowest device: each frame's lap timer starts when the frame ahead of it
+// is back, not at send, so frames 2..6 of a window through a slow device do not time out (room/pipeline.js lapWait after)
+for (const profile of ["browser", "node"]) {
+  Deno.test(`pipeline ${profile}: a slow device's queued prompt frames are each timed from the frame ahead of them`, async () => {
+    const run = async (stallAt = -1) => {
+      const ai = { ...state(), role: "host", chain: ["worker"] }, sent = [];
+      ai.engine = { dims: { dim: 1 }, NC: 4, embedRunBatch: async (ids) => Float32Array.from(ids), embedRun: async (id) => Float32Array.of(id), headFromHidden: async (h) => h };
+      let p, busy = Promise.resolve(), k = 0;
+      // the worker runs frames one after another, 40 ms each: 6 in flight return at 40, 80, ..., 240 ms after send
+      p = createPipeline({ state: ai, options: { profile, prefillLapMs: 100 }, transport: { sendTo() {}, sendHidden(_, d) {
+        if (!d.n) { queueMicrotask(() => p.handleFrame("worker", { ...d, t: "ai-hiddenret" })); return; }
+        sent.push(d.basePos);
+        if (k++ === stallAt) return;   // this frame never comes back
+        busy = busy.then(() => new Promise((r) => setTimeout(r, 40))).then(() => p.handleFrame("worker", { ...d, t: "ai-hiddenret-b" }));
+      } } });
+      const t = performance.now();
+      const ids = Array.from({ length: 6 * 16 + 1 }, (_, i) => i);
+      try { await p.aiPrefill(ids); return { ok: true, ms: performance.now() - t, sent }; }
+      catch (e) { return { ok: false, err: e.message, ms: performance.now() - t, sent }; }
+    };
+    const a = await run();
+    ok(a.ok, `no timeout: ${a.err}`);
+    ok(a.ms > 200, `the six frames took the slow device's time (${a.ms.toFixed(0)} ms), more than one frame's timeout`);
+    eq(a.sent.length, 6);
+    // a frame that never returns still times out: ~100 ms after the frame ahead of it came back
+    const b = await run(2);
+    ok(!b.ok && /pipeline timeout \(batch prefill\)/.test(b.err), `a lost frame times out: ${b.err}`);
+    ok(b.ms < 1000, `and soon (${b.ms.toFixed(0)} ms)`);
+  });
+}
+
+// A prompt frame's timeout grows with the slowest recent lap but is capped (PREFILL_LAP_CAP bases): one cold or stalled
+// decode lap (lapStat.max) must not keep a dead device unreported for many minutes
+Deno.test("pipeline node: a lost prompt frame times out within the cap even after a very slow lap", async () => {
+  const ai = { ...state(), role: "host", chain: ["worker"], lapStat: { max: 1e6 } };
+  ai.engine = { dims: { dim: 1 }, NC: 4, embedRunBatch: async (ids) => Float32Array.from(ids), embedRun: async (id) => Float32Array.of(id), headFromHidden: async (h) => h };
+  const p = createPipeline({ state: ai, options: { profile: "node", prefillLapMs: 50 }, transport: { sendTo() {}, sendHidden() {} } });
+  const t = performance.now();
+  let err = null;
+  try { await p.aiPrefill(Array.from({ length: 17 }, (_, i) => i)); } catch (e) { err = e; }
+  ok(err && /pipeline timeout/.test(err.message), `times out: ${err?.message}`);
+  ok(performance.now() - t < 1000, `within 4 x 50 ms, not 16 x 1000 s (${(performance.now() - t).toFixed(0)} ms)`);
+});

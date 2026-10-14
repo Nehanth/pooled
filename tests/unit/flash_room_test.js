@@ -9,7 +9,7 @@ import { SLICE_BYTES } from "../../room/transport.js";
 import { dealRoom, placeNgram, ngramHolder, shortNote } from "../../room/plan.js";
 import { offloadFor, ngramFor, ngramDisk, pledgeGB } from "../../room/pledge.js";
 import { createPipeline } from "../../room/pipeline.js";
-import { FlashRoomEngine, qwen4expCore } from "../../room/flash.js";
+import { FlashRoomEngine, qwen4expCore, flashBatchCols } from "../../room/flash.js";
 import { NgramState, makeConfig } from "../../engine/ngram.js";
 import { f16ToF32, f32ToF16 } from "../../engine/gguf.js";
 
@@ -472,4 +472,108 @@ Deno.test("flash core: an offloaded layer's ops split at its router and the engi
   };
   await qwen4expCore(e).step(1);
   eq(seen, ["a0", "f0.route", "f0.exp", "a1", "f1.route", "cut1", "f1.exp", "a2", "f2.route", "f2.exp"]);
+});
+
+// ---------------------------------------------------------------- batched passes (Qwen4ExpBatch in rooms)
+
+// A stand-in for engine/qwen4exp_batch.js over a fake core: _pass runs its columns through the core's own steps (so
+// the bits are the per-token ones, as the exact kernels give) and records each pass's width and kind
+function fakeBatch(core, maxCols = 32) {
+  const b = { maxCols, passes: [],
+    async _pass(ids, { head = "last", wantHidden = false, hidden = null } = {}) {
+      if (!(ids.length >= 1 && ids.length <= maxCols)) throw new Error(`fake batch: ${ids.length} columns`);
+      eq(head, "none", "room passes take no head");
+      b.passes.push([core.pos, ids.length, hidden ? "hidden" : "embed"]);
+      const out = new Float32Array(ids.length * T_HD);
+      for (let c = 0; c < ids.length; c++) out.set(await core.step(ids[c], hidden ? hidden.subarray(c * T_HD, (c + 1) * T_HD) : null), c * T_HD);
+      return wantHidden ? { hiddens: out } : {};
+    } };
+  return b;
+}
+function batchRoom(split, { L = 8, maxSeq = 512, hostBatch = true, workBatch = true, frame = 256, maxCols = 32 } = {}) {
+  const dev = [fakeDevice(), fakeDevice()];
+  const st = (o) => ({ waiters: new Map(), pendingCtl: {}, dropQ: [], pos: 0, fed: [], q: Promise.resolve(), ...o });
+  const hc = fakeCore(dev[0], { lo: 0, hi: split, L, hasEmbed: true, hasHead: true, maxSeq });
+  const wc = fakeCore(dev[1], { lo: split, hi: L, L, hasEmbed: false, hasHead: false, maxSeq });
+  const hb = hostBatch ? fakeBatch(hc, maxCols) : null, wb = workBatch ? fakeBatch(wc, maxCols) : null;
+  const host = st({ role: "host", chain: ["w"], engine: new FlashRoomEngine(hc, { batch: hb, frame }) });
+  const work = st({ role: "worker", chain: [], next: "host", hostId: "host", range: [split, L], engine: new FlashRoomEngine(wc, { batch: wb, frame }) });
+  const frames = [];
+  let ph, pw, inflight = 0, most = 0;
+  ph = createPipeline({ state: host, options: { profile: "node" },
+    transport: { sendTo() {}, sendHidden: (id, m) => { if (m.t === "ai-hidden-b") { inflight++; most = Math.max(most, inflight); } frames.push(m.n || 1); const f = { ...m, data: m.data.slice() }; setImmediate(() => pw.handleFrame("host", f)); } } });
+  pw = createPipeline({ state: work, options: { profile: "node" },
+    transport: { sendTo: (id, m) => { if (m.t === "ai-error") ph.failWaiters(new Error("worker: " + m.message)); },
+      sendHidden: (id, m) => { if (m.t === "ai-hiddenret-b") inflight--; const f = { ...m, data: m.data.slice() }; setImmediate(() => ph.handleFrame("w", f)); } } });
+  return { host, work, ph, pw, hb, wb, frames, most: () => most };
+}
+const longPrompt = Array.from({ length: 300 }, (_, i) => (i * 7 + 3) % (T_VOCAB - 1));
+
+Deno.test("flash batch: wide prompt frames and a worker's chunks run in batched passes (<= maxCols), same greedy ids as per token", async () => {
+  const L = 8;
+  const soloAi = { waiters: new Map(), pendingCtl: {}, dropQ: [], pos: 0, fed: [], q: Promise.resolve(), chain: [], role: "host",
+    engine: new FlashRoomEngine(fakeCore(fakeDevice(), { lo: 0, hi: L, L, hasEmbed: true, hasHead: true, maxSeq: 512 })) };
+  eq([soloAi.engine.NC, soloAi.engine.prefillFrame(), soloAi.engine.batch], [4, 0, null], "no batch: 4 columns a chunk, no wide frames");
+  const solo = createPipeline({ state: soloAi, options: { profile: "node" }, transport: { sendTo() {}, sendHidden() { throw new Error("solo"); } } });
+  const want = await greedy(solo, soloAi, longPrompt, 8);
+  for (const split of [1, 2, 5]) {
+    const R = batchRoom(split, { L });
+    eq([R.host.engine.NC, R.host.engine.prefillFrame()], [64, 256]);
+    const got = await greedy(R.ph, R.host, longPrompt, 8);
+    eq(got, want, `split at ${split}: batched room == one device per token`);
+    // the node host's frames: one 256-column frame (prefillHidden), then 64 / 8 / 4-column ones, then single tokens
+    ok(R.frames[0] === 256, `first frame 256 columns, got ${R.frames[0]}`);
+    for (const b of [R.hb, R.wb]) {
+      ok(b.passes.length && b.passes.every(([, n]) => n <= b.maxCols), "every pass within maxCols");
+      eq(b.passes.reduce((a, [, n]) => a + n, 0), R.frames.filter((n) => n > 1).reduce((a, n) => a + n, 0), "every frame column went through a batched pass");
+    }
+    ok(R.hb.passes.every(([, , k]) => k === "embed") && R.wb.passes.every(([, , k]) => k === "hidden"), "the host embeds, the worker takes the residual");
+  }
+});
+
+Deno.test("flash batch: a solo room's prompt (prefillTokens) runs in passes, the last token through the head as before", async () => {
+  const L = 8, core = fakeCore(fakeDevice(), { lo: 0, hi: L, L, hasEmbed: true, hasHead: true, maxSeq: 512 }), b = fakeBatch(core, 100);
+  const ai = { waiters: new Map(), pendingCtl: {}, dropQ: [], pos: 0, fed: [], q: Promise.resolve(), chain: [], role: "host", engine: new FlashRoomEngine(core, { batch: b }) };
+  const ref = { waiters: new Map(), pendingCtl: {}, dropQ: [], pos: 0, fed: [], q: Promise.resolve(), chain: [], role: "host",
+    engine: new FlashRoomEngine(fakeCore(fakeDevice(), { lo: 0, hi: L, L, hasEmbed: true, hasHead: true, maxSeq: 512 })) };
+  const mk = (s) => createPipeline({ state: s, options: { profile: "browser" }, transport: { sendTo() {}, sendHidden() { throw new Error("solo"); } } });
+  eq(await greedy(mk(ai), ai, longPrompt, 6), await greedy(mk(ref), ref, longPrompt, 6));
+  eq(b.passes.map(([p, n]) => [p, n]), [[0, 100], [100, 100], [200, 99]], "the prompt less its last token, 100 columns a pass, from position 0");
+});
+
+Deno.test("flash batch: a chain with a device that can't batch gets 16-column frames, 2 in flight, and the same ids", async () => {
+  const L = 8;
+  const ref = batchRoom(2, { L });
+  const want = await greedy(ref.ph, ref.host, longPrompt, 6);
+  const R = batchRoom(2, { L, workBatch: false });
+  R.host.batchOf = new Map([["w", false]]);   // its ai-ready said batch: 0 (or nothing: a build before batched passes)
+  eq(await greedy(R.ph, R.host, longPrompt, 6), want);
+  ok(Math.max(...R.frames) === 16, `frames of at most 16 columns, got ${Math.max(...R.frames)}`);
+  ok(R.most() <= 2, `at most 2 frames in flight, saw ${R.most()}`);
+  ok(ref.most() > 2 || ref.frames[0] === 256, "the batched chain keeps its window");
+  // one that says it batches keeps the wide frames
+  const R2 = batchRoom(2, { L });
+  R2.host.batchOf = new Map([["w", true]]);
+  await greedy(R2.ph, R2.host, longPrompt, 2);
+  eq(R2.frames[0], 256);
+});
+
+Deno.test("flash batch: prefillHidden without a batch is refused; a worker's prefillHidden needs the frame's ids for the n-gram layer", async () => {
+  const dev = fakeDevice(), L = 8;
+  const E = new FlashRoomEngine(fakeCore(dev, { lo: 1, hi: L, L, hasEmbed: false, hasHead: false, maxSeq: 64 }));
+  let bad = false; try { await E.prefillHidden(new Float32Array(2 * T_HD), 0); } catch (e) { bad = /without batched passes/.test(e.message); }
+  ok(bad, "no batch: refused");
+  const core = fakeCore(dev, { lo: 1, hi: L, L, hasEmbed: false, hasHead: false, maxSeq: 64 }), B = new FlashRoomEngine(core, { batch: fakeBatch(core) });
+  bad = false; try { await B.prefillHidden(new Float32Array(2 * T_HD), 0); } catch (e) { bad = /token ids/.test(e.message); }
+  ok(bad, "the n-gram layer here: the ids are needed");
+  const h = await B.prefillHidden(new Float32Array(2 * T_HD), 0, { ids: new Uint32Array([3, 4]) });
+  eq([h.length, core.pos], [2 * T_HD, 2]);
+});
+
+Deno.test("flash batch width: a QSA engine's passes stay under its raw-key ring (engine/qwen4exp_batch.js refuses wider)", () => {
+  // no ring (a dense engine): solo 1024, a room device the frame width
+  eq([flashBatchCols(true), flashBatchCols(false)], [1024, 256]);
+  // the rooms' 1024-row ring: a pass completes blocks of up to cols + 3 rows, so solo runs 960 columns, rooms 256
+  eq([flashBatchCols(true, 1024), flashBatchCols(false, 1024)], [960, 256]);
+  ok(flashBatchCols(true, 1024) + 3 <= 1024 && flashBatchCols(false, 128) + 3 <= 128);
 });

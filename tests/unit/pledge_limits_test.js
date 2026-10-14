@@ -7,7 +7,7 @@
 // "fit" all 28 layers; and when pledges fell short both splits spread the rest over everyone.
 import { planSplit, planForSpeed, roomFit, dealRoom, layerCaps, shortNote, shortBy, gbUp, PAGE_SHORT_FIX } from "../../room/plan.js";
 import { roomBytes, hostHeldBytes, SHAPE, NEED_GB, NEED_MIN_GB, PICKER, CTX, maxSeqFor, pickCtx } from "../../room/models.js";
-import { pledgeGB, maxPledgeGB, DESK_MAX_GB, PLEDGE_MAX_GB } from "../../room/pledge.js";
+import { pledgeGB, dealPledgeBytes, maxPledgeGB, DESK_MAX_GB, PLEDGE_MAX_GB } from "../../room/pledge.js";
 import { lendStatus } from "../../room/compute.js";
 
 const eq = (a, b, m) => { const ja = JSON.stringify(a), jb = JSON.stringify(b); if (ja !== jb) throw new Error((m || "mismatch") + ": " + ja + " != " + jb); };
@@ -244,4 +244,17 @@ Deno.test("pledge cap: past 64 GB only for Qwen3.8-Flash-Next; every other model
   eq(pledgeGB(node(500), Infinity, "qwen3.8-flash"), 128);
   eq(pledgeGB(node(100), 30, "qwen3.8-flash"), 30, "a host's lowered share still wins");
   eq(pledgeGB({ contribGB: 100, webgpu: true, ua: "iPhone" }, Infinity, "qwen3.8-flash"), 1, "phones keep their cap");
+});
+
+// A Flash dealer keeps the batched passes' scratch (at the room's frame width) back from every pledge, so a device dealt
+// its whole pledge still has room for it; other models deal the whole pledge
+Deno.test("dealPledgeBytes: Qwen3.8-Flash-Next keeps flashDealReserve back from each pledge, other models none", async () => {
+  const { flashDealReserve, flashBatchScratch, FLASH_PREFILL_FRAME } = await import("../../room/models.js");
+  const meta = { contribGB: 24 };
+  eq(dealPledgeBytes(meta, Infinity, "qwen3.8-27b"), pledgeGB(meta, Infinity, "qwen3.8-27b") * 2 ** 30);
+  eq(flashDealReserve("qwen3.8-flash"), flashBatchScratch(FLASH_PREFILL_FRAME));
+  eq(dealPledgeBytes(meta, Infinity, "qwen3.8-flash"), pledgeGB(meta, Infinity, "qwen3.8-flash") * 2 ** 30 - flashBatchScratch(FLASH_PREFILL_FRAME));
+  // the host's measured 159 MiB at 256 columns (the PLE layer's range) plus the 10 MiB wantHidden stage fit in it
+  if (!(flashBatchScratch(256) >= (159 + 10) * 2 ** 20)) throw new Error("scratch constant under the measured host scratch");
+  eq(dealPledgeBytes({ contribGB: 0.1 }, Infinity, "qwen3.8-flash") >= 0, true);
 });

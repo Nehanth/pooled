@@ -7,7 +7,7 @@
 // spikes (0.3-0.6 GB), so 1 GB of layers is the most a phone can safely hold. Android tabs have
 // the same shape of limit and less data; navigator.deviceMemory (Chrome) sizes them.
 
-import { MODELS } from "./models.js";
+import { MODELS, flashDealReserve } from "./models.js";
 
 export const PHONE_DEFAULT_GB = 0.5;
 export const IOS_MAX_GB = 1;
@@ -47,6 +47,12 @@ export function pledgeGB(meta, hostCap = Infinity, model = null) {
   const said = Number(meta?.contribGB);
   const gb = said > 0 ? said : (meta?.maxBufGB ? meta.maxBufGB * 0.5 : PHONE_DEFAULT_GB);
   return Math.min(gb, rule.capped ? rule.max : Infinity, own, hostCap > 0 ? hostCap : Infinity, maxPledgeGB(model));
+}
+
+// A pledge as a dealer deals it, in bytes: pledgeGB less what the room's model keeps back on every device
+// (room/models.js flashDealReserve: Qwen3.8-Flash-Next's batched-pass scratch)
+export function dealPledgeBytes(meta, hostCap = Infinity, model = null) {
+  return Math.max(0, pledgeGB(meta, hostCap, model) * 2 ** 30 - flashDealReserve(model));
 }
 
 // A device's tab was killed while loading its layers (it came back with the "died" breadcrumb).

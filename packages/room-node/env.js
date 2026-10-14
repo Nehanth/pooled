@@ -121,7 +121,7 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, 
     // the room's context within every device's limit (room/models.js ctxForBinding)
     meta.maxBindMB = Math.floor(Math.min(a.limits.maxStorageBufferBindingSize, a.limits.maxBufferSize) / 2 ** 20);
     // flashLong: this node loads Qwen3.8-Flash-Next with QSA when the host asks (ai-load.flash; room/models.js flashLongMeta)
-    meta.flashLong = flashLongMeta(meta.maxBindMB);
+    meta.flashLong = flashLongMeta(meta.maxBindMB, { batch: flashBatchMode() !== "off" });
     meta.gbps = gbps != null ? Math.max(0, +gbps || 0) : await measureCopyGBps(a);
   }
   meta.phone = false;
@@ -141,6 +141,20 @@ export async function probeMeta(pledgeGB, { gbps = null, ramGB = 0, mem = null, 
 // POOLED_QSA_ALWAYS=1: a test switch (shard.js loadFlash): a QSA Flash engine takes QSA's gathered attention on every
 // step, also below 2052 cells, where it gives dense attention's bits (the room's QSA == dense check)
 export const qsaAlways = (env = process.env) => env.POOLED_QSA_ALWAYS === "1";
+// Test switch POOLED_FLASH_BATCH (read by shard.js loadFlash): Qwen3.8-Flash-Next's batched passes for prompt frames
+// and a solo room's prompt (room/flash.js, engine/qwen4exp_batch.js). "0" turns them off (every column one decode step,
+// as before batched prefill: the gates compare a batched room with the same room per token); "exact" keeps the batch
+// on the bit-exact multi-column kernels (the same bits as "0", passes of 64); anything else, or unset: the wide kernels
+// (#377, the default). Not a user setting. -> "off" | "exact" | "wide"
+export function flashBatchMode(env = process.env) {
+  const v = String(env.POOLED_FLASH_BATCH ?? "").trim().toLowerCase();
+  return v === "0" || v === "false" || v === "off" ? "off" : v === "exact" ? "exact" : "wide";
+}
+// Test switch POOLED_FLASH_REGION=1 (shard.js loadFlash): a device with offloaded Flash experts takes the batched
+// passes' whole-layer region out of its expert cache whenever the pools keep OFFLOAD_MIN_SLOTS experts per layer
+// after it (by default only when they keep OFFLOAD_GOOD_SLOTS, which the deals seldom leave): so a gate can run an
+// offloaded worker batched. Not a user setting
+export const flashRegionForced = (env = process.env) => env.POOLED_FLASH_REGION === "1";
 // whether the GPU shares the system's memory (detectMemory's kind; Apple silicon reads as unified there too)
 export const unifiedMemory = (mem) => mem?.kind === "unified";
 // detectMemory on this machine (nvidia-smi, amdgpu sysfs, the platform), or { kind: "unknown" } when it fails

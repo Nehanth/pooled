@@ -12,13 +12,14 @@ import { Qwen35Engine } from "../../engine/qwen35.js";
 import { ggufWeights, ggufShardBytes, qwen35Weights, qwen35ShardBytes, tokenizerFromGGUF, gpuUploadEntry, GGML_EMBED, GGML_FINAL_NORM, GGML_OUTPUT,
   ggmlLayerNames, qwen35NamesFor, qwen4expConfig, qwen4expNamesFor, qwen4expWeights, qwen4expShardBytes, QWEN4EXP_HEAD } from "../../engine/gguf.js";
 import { ngramConfig, NgramTable, fileReadAt, httpReadAt } from "../../engine/ngram.js";
-import { FlashRoomEngine } from "../../room/flash.js";
-import { hostMemory, qsaAlways } from "./env.js";
+import { FlashRoomEngine, flashBatchCols, flashBatchScratch, qwen4expBatchBytes } from "../../room/flash.js";
+import { hostMemory, qsaAlways, flashBatchMode, flashRegionForced } from "./env.js";
 import { roomQwen35Options, applyRoomFlags } from "../../engine/preset.js";
 import { maxSeqFor, kvModeFor, flashRoomMem, ckptSlotsAt, flashLoadOpts } from "../../room/models.js";
 import { QSA_RAW_RING } from "../../engine/qwen4exp_mem.js";
 import { convertPool } from "./convert.js";
 import { ExpertStore } from "../../engine/expert_store.js";
+import { OFFLOAD_GOOD_SLOTS, OFFLOAD_MIN_SLOTS } from "../../room/plan.js";
 import { expertDiskReader } from "./expert_disk.js";
 import { expertDisk } from "../../engine/expert_disk.js";
 import { localFileReader } from "./source.js";
@@ -114,8 +115,11 @@ export function checkRange(range) {
 // -> { device, engine, tok, cfg, G, tune, gpuErrors, experts }
 // flash: Qwen3.8-Flash-Next's format from the host's ai-load (room/models.js flashRoomFormat / flashLoadOpts): null for the
 // dense engine at <= 2048 positions, { qsa, kv, ring } for a QSA one
+// pledgeBytes: what this device lends the room (a Qwen3.8-Flash-Next shard with offloaded experts takes the batched
+// passes' whole-layer region only when the pledge has room for it past the share; 0: unknown, no region)
 export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxSeqFor(modelKey), kv = kvModeFor(modelKey, null),
-  src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {}, offload = null, diskReader = expertDiskReader, flash = null }) {
+  src, flags = "", onProgress = () => {}, log = () => {}, selfTest = true, onGpuError = () => {}, offload = null, diskReader = expertDiskReader, flash = null,
+  pledgeBytes = 0, batch = flashBatchMode() }) {
   checkRange(range);
   const M = src.M;
   // the host's Flash format, checked before the GPU is asked for or anything streams (a format this build can't load throws)
@@ -158,7 +162,7 @@ export async function loadShard({ modelKey, range, hasEmbed, hasHead, ctx = maxS
     log(`autotune WG=${out.tune.wg} ROWS=${out.tune.rows}`);
     const upload = (e, name) => gpuUploadEntry(device, e, name === GGML_EMBED);   // straight to the GPU
     if (kind === "qwen4exp") {
-      const r = await loadFlash({ device, G0, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, diskReader, pool, flash });
+      const r = await loadFlash({ device, G0, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, diskReader, pool, flash, pledgeBytes, batch });
       out.engine = r;
     } else if (M.kind === "qwen35") {
       const G = out.G = G0;
@@ -291,13 +295,20 @@ const FLASH_MAX_CTX = 2048;
 // engine reads its rows), the n-gram table when the range holds its layer, the engine, the room adapter.
 // offload (expert offload, as a Qwen3.5 shard's: offloadLayers / diskLayers): the routed experts of [lo, hi) are parked
 // in RAM, those of [diskLo, hi) read from the model's files on this disk (--disk), through the store's GPU slot pools;
-// engine/qwen4exp.js cuts each such layer after its router (no whole-layer region: decode one token at a time).
+// engine/qwen4exp.js cuts each such layer after its router.
 // flash (ai-load.flash, room/models.js flashLoadOpts): with qsa, the indexer weights are loaded and the engine runs QSA
 // on its attention layers (a range without one builds none: its signature says qsa false), with the host's K / V format
 // and ring; without, the dense engine as before, its context capped at 2048. POOLED_QSA_ALWAYS=1 (env.js qsaAlways, a
 // test switch): QSA's gathered path on every step, also below 2052 cells (the same bits as dense there).
+// batch (env.js flashBatchMode: POOLED_FLASH_BATCH): "wide" / "exact" build the batched passes (engine/qwen4exp_batch.js)
+// at load time, so prompt frames (and a solo room's prompt) run several columns per pass (room/flash.js); "off": one
+// decode step per column, as before. An offloaded layer needs the store's whole-layer region for them (~1.4 GB of GPU;
+// below: from pledgeBytes' slack past the share, or out of a cache that stays good, else this device runs its frames
+// per token). Disk-tier layers never batch (Qwen4ExpBatch refuses them). The batch is built from the weights object
+// (its unfused entries) but its ops bind GPU buffers only: nothing of the object stays alive past the load.
 // -> FlashRoomEngine
-async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null, diskReader = expertDiskReader, pool = null, flash = null }) {
+async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, offload, onProgress, log, out, mem = null, diskReader = expertDiskReader, pool = null, flash = null,
+  pledgeBytes = 0, batch = "wide" }) {
   const c = qwen4expConfig(G.meta), q = flashLoadOpts(flash);
   if (!q) ctx = Math.min(ctx, FLASH_MAX_CTX);   // the dense phase's cap, before anything is sized or uploaded (as a tab's load)
   out.G = G;   // (loadShard's finally takes the conversion pool off it)
@@ -310,9 +321,13 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   // the GPU holds the layers less their offloaded experts, plus the store's cache; the parked experts and the disk tier's
   // RAM cache are in RAM: on unified memory the same memory, on a discrete GPU the system's (checked against it too)
   const ramOff = off ? (+offload.ramBytes || 0) + (dl.length ? +offload.diskRamBytes || 0 : 0) : 0;
+  // (the batched passes' scratch is not in need: it is decided once the weights are up, and a device without room for it
+  // runs its prompt frames one column at a time instead of refusing the load)
+  const solo = hasEmbed && hasHead && range[0] === 0 && range[1] === c.L;
   const need = flashShardBytes(G, { ...opts, ctx, offLayers: off || null, ring: q?.ring }) + (off ? +offload.vramBytes || 0 : 0) + ramOff;
   const cpu = flashCpuBytes(G, opts) + ramOff;
-  const short = flashMemoryShort(need, m, { cpuBytes: cpu, sysFreeGB: m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null });
+  const sysFreeGB = m?.kind === "discrete" ? (m.sysFreeGB ?? os.freemem() / 2 ** 30) : null;
+  const short = flashMemoryShort(need, m, { cpuBytes: cpu, sysFreeGB });
   if (short) throw Object.assign(new Error(`can't hold layers ${range[0]}-${range[1] - 1} of Qwen3.8-Flash-Next here: it ${short}`), { oom: true, short: true });
   if (off?.length) {
     let disk = null;
@@ -367,15 +382,66 @@ async function loadFlash({ device, G0: G, src, range, hasEmbed, hasHead, ctx, of
   }
   const weights = { ...(await part({ lo: range[1], hi: range[1], hasEmbed, hasHead })), layers, ...(pleTable ? { pleTable } : {}) };
   if (weights.pleTable) out.ngram = await openNgramTable(src, G, log);
+  let noBatch = batch === "off" ? "POOLED_FLASH_BATCH=0" : dl.length ? `layers ${dl[0]}-${dl[dl.length - 1]} read their experts from disk` : null;
+  let expertRegion = false, batchCols = flashBatchCols(solo, q?.ring), scratch = 0;
+  const gb = (n) => (n / 2 ** 30).toFixed(2);
+  // real memory, as the check above, with extra bytes on the GPU
+  const fits = (extra) => !flashMemoryShort(need + extra, m, { cpuBytes: cpu, sysFreeGB });
+  // the pledge's slack past this device's share: the pledge is GPU memory (on a discrete GPU the CPU embedding, the
+  // parked experts and the disk tier's RAM cache are not in it: flashMemoryShort's discrete branch). A dealer keeps
+  // room/models.js flashDealReserve back from every Flash pledge, so a device dealt all of it still has that much.
+  // null: the pledge is unknown (real memory only; no region from it)
+  const slack = pledgeBytes > 0 ? pledgeBytes - (m?.kind === "discrete" ? need - cpu : need) : null;
+  // a solo device's widest passes only when its pledge (when known) and its memory have room for their scratch, else
+  // the room's frame width
+  if (!noBatch && solo && !((slack == null || slack >= flashBatchScratch(batchCols)) && fits(flashBatchScratch(batchCols)))) batchCols = flashBatchCols(false, q?.ring);
+  if (!noBatch) scratch = flashBatchScratch(batchCols);
+  // The deal gives the expert cache the rest of the pledge (room/plan.js offloadPlan), so the region (and the scratch)
+  // come from the pledge's slack past the share when there is that much (the cache keeps every slot it was dealt),
+  // else out of the cache (what the slack does not cover) when its pools keep OFFLOAD_GOOD_SLOTS experts per layer
+  // after it (the deal's own bar for a good cache: decode misses a little more often, prompt frames run batched), else
+  // not at all (prompt frames one column at a time)
+  if (!noBatch && off?.length) {
+    // (the scratch may also come from the dealer's reserve for it, offload.batchReserve, which the load's own count of
+    // its share can hide: it counts upload staging the deal does not)
+    const st = out.experts, rb = st.regionSize(), sl = Math.max(0, slack ?? 0);
+    const fromSlack = Math.min(scratch, Math.max(sl, +offload.batchReserve || 0)), kept = st.poolSlots(rb + scratch - fromSlack);
+    const enough = flashRegionForced() ? OFFLOAD_MIN_SLOTS : OFFLOAD_GOOD_SLOTS;
+    if (sl >= rb + scratch && fits(rb + scratch)) {
+      expertRegion = true; st.vramBytes += rb;
+      log(`expert offload: a ${gb(rb)} GB whole-layer region for batched prompt passes, from the pledge's ${gb(sl)} GB past the share`);
+    } else if (kept >= enough && fits(fromSlack)) {
+      const was = st.poolSlots();
+      expertRegion = true; st.vramBytes -= scratch - fromSlack;
+      log(`expert offload: a ${gb(rb)} GB whole-layer region for batched prompt passes, out of the expert cache (${was} -> ${kept} experts per layer)`);
+    } else noBatch = `the offloaded layers need a ${gb(rb)} GB whole-layer region: the pledge has ${gb(sl)} GB past the share and the cache would keep ${Math.max(0, kept)} experts per layer (< ${enough})`;
+  } else if (!noBatch && !fits(scratch)) noBatch = `no GPU memory left for the batched passes' ${gb(scratch)} GB of scratch`;
+  if (noBatch) scratch = 0;
+  // an offloader without batched passes gives the dealer's scratch reserve (offload.batchReserve: none from an older
+  // host, which kept nothing back) to its cache, so its cache is what the deal would have made without the reserve
+  if (noBatch && off?.length && +offload.batchReserve > 0) {
+    const give = +offload.batchReserve;
+    if (fits(give)) { out.experts.vramBytes += give; log(`expert offload: the ${gb(give)} GB kept for batched passes goes to the expert cache`); }
+  }
   const { Qwen4ExpEngine } = await import("../../engine/qwen4exp.js");
-  const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null,
+  const eng = await Qwen4ExpEngine.create({ device, meta: G.meta, weights, layerRange: range, hasEmbed, hasHead, maxSeq: ctx, ngram: out.ngram || null, expertRegion,
     ...(q ? { qsa: null, kv: q.kv, qsaRing: q.ring } : { qsa: false }) });
   if (eng.qsa && qsaAlways()) { eng.qsaAlways = true; log("POOLED_QSA_ALWAYS=1: QSA's gathered attention on every step (a test switch)"); }
   if (fl && process.env.POOLED_FASTLOAD_TRACE) fs.writeFileSync(process.env.POOLED_FASTLOAD_TRACE, JSON.stringify(fl.trace()));
   fl?.close(); out.fastLoad = null;
   log(`load: ${Object.entries(T).map(([k, v]) => `${k} ${v.toFixed(1)} s`).join(", ")}${fl ? ` (read ahead, ${fl.stats.repacked} tensors repacked on ${pool.threads} threads, ${(fl.stats.newBytes / 2 ** 30).toFixed(1)} GiB of shared buffers)` : ""}`);
-  const fe = FlashRoomEngine.wrap(eng);
+  let pb = null;
+  if (!noBatch) {
+    const { Qwen4ExpBatch } = await import("../../engine/qwen4exp_batch.js");
+    // created now: its pipelines compile during the load, not on the first prompt
+    pb = await Qwen4ExpBatch.create(eng, weights, { maxCols: batchCols, verifyCols: 1, exact: batch === "exact" });
+    out.batchBytes = qwen4expBatchBytes(pb);
+  }
+  const fe = FlashRoomEngine.wrap(eng, { batch: pb });
   out.flash = eng;   // the engine under the adapter (tests and benches: forwardToken, debugToken)
-  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${(need / 2 ** 30).toFixed(1)} GB (weights${off ? " less the offloaded experts, the expert cache" : ""}, K/V, the CPU embedding, upload staging)${out.ngram ? ", the n-gram layer here" : ""}; ${ctx} positions, ${eng.qsa ? `QSA (${eng.kv} K/V, ring ${eng.qsaRing})` : q ? "QSA loaded, no attention layer here" : "dense"}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
+  out.flashBatch = pb;
+  log(`Qwen3.8-Flash-Next layers ${range[0]}-${range[1] - 1}${hasHead ? " + embedding/head" : ""}: ${((need + scratch) / 2 ** 30).toFixed(1)} GB (weights${off ? " less the offloaded experts, the expert cache" : ""}, K/V, the CPU embedding, upload staging${scratch ? ", batch scratch" : ""})${out.ngram ? ", the n-gram layer here" : ""}; ${ctx} positions, ${eng.qsa ? `QSA (${eng.kv} K/V, ring ${eng.qsaRing})` : q ? "QSA loaded, no attention layer here" : "dense"}${fe.ckpt ? "" : "; no checkpoints (its K/V can't be copied out)"}`);
+  log(pb ? `batched prompt passes: up to ${pb.maxCols} columns a pass (${pb.exact ? "exact" : "wide"} kernels), ${(out.batchBytes / 2 ** 20).toFixed(0)} MiB of scratch`
+    : `prompt frames one column at a time: ${noBatch}`);
   return fe;
 }

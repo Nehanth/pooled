@@ -12,7 +12,8 @@ const throws = (f, re, m) => { try { f(); } catch (e) { if (re && !re.test(e.mes
 const F = "qwen3.8-flash";
 
 Deno.test("flash format: meta.flashLong says the longest context one f32 K / V buffer binds, at most QSA's", () => {
-  eq(flashLongMeta(128), { ctx: 65536, kv: ["f32"], batch: 0 });
+  eq(flashLongMeta(128), { ctx: 65536, kv: ["f32"], batch: 1 });
+  eq(flashLongMeta(128, { batch: false }).batch, 0, "a node with POOLED_FLASH_BATCH=0");
   eq(flashLongMeta(512).ctx, 262144);
   eq(flashLongMeta(1e9).ctx, 411000, "QSA_MAX_SEQ");
   eq(flashLongMeta(undefined).ctx, 65536, "no maxBindMB: WebGPU's default 128 MiB");

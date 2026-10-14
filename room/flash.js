@@ -14,6 +14,9 @@
 //     sequence: a reset clears them, a slot restores them, exportSlot / importState carry them to and from disk.
 //   - Phase 1 (dense attention, context <= 2048, no MTP): no speculative verify (spec frames are refused), no GPU
 //     sampling (the plain decode path: headFromHidden, then the room's sampler).
+//   - Prompt frames (a node host's wide frames, a browser host's 64-column ones, a worker's frames) and a solo room's
+//     prompt run in batched passes (engine/qwen4exp_batch.js, the wide kernels: within a tolerance of per-token
+//     decode, not bit-equal) when the loader built one for this device; else one decode step a column, as before.
 //
 // The core: what this adapter needs from the Flash engine, one token at a time. PR #346's Qwen4ExpEngine runs its
 // layers and its head in one forwardToken and has no slots; qwen4expCore below builds this interface from its
@@ -33,18 +36,29 @@
 //   signature() -> {}           what a saved state must match (the engine's stateSignature: arch, lo, hi, kv, qsa,
 //                               qsaRing, dim); optional, a core without it is the dense f32 layout
 import { NgramState } from "../engine/ngram.js";
+import { QSA_KPOOL } from "../engine/wgsl/qsa.js";
+import { FLASH_PREFILL_FRAME, flashBatchScratch, FLASH_BATCH_BYTES_PER_COL, FLASH_BATCH_BYTES_FIXED } from "./models.js";
 
 // WebGPU's flag values (the spec's), for a page or test without the globals until a device exists
 const U = globalThis.GPUBufferUsage || { MAP_READ: 1, COPY_SRC: 4, COPY_DST: 8 };
 const MAP_READ = globalThis.GPUMapMode?.READ ?? 1;
 
 export class FlashRoomEngine {
-  constructor(core) {
+  // opts.batch: a Qwen4ExpBatch on the same engine (engine/qwen4exp_batch.js), which runs every multi-column call below
+  // (prompt frames, a solo room's prompt) in passes of up to its maxCols columns. The loaders create it when this device
+  // can batch: no disk-tier layers, offloaded ones only with the store's whole-layer region. Without it every column
+  // is one core step, as before.
+  // opts.frame: the prompt frame width a node host sends (prefillFrame), FLASH_PREFILL_FRAME by default
+  constructor(core, { batch = null, frame = FLASH_PREFILL_FRAME } = {}) {
     this.core = core;
     this.device = core.device;
     this.frameIds = true;   // frames carry the token ids (the n-gram layer may be on the first worker)
     this.mtp = null;        // no draft block in rooms yet: plain decoding
-    this.NC = 4;            // columns per pipeline batch (the core runs them one at a time)
+    this.batch = batch || null;
+    // columns per pipeline batch: a browser host's prompt frames (room/pipeline.js widths) and a worker's runHiddenBatch
+    // chunks. With the batch, FLASH_BATCH_NC columns per frame (one pass each); without it 4 (one core step a column)
+    this.NC = this.batch ? FLASH_BATCH_NC : 4;
+    this.frame = this.batch ? Math.max(this.NC, Math.floor(frame) || FLASH_PREFILL_FRAME) : 0;
     this.slots = new Map();
     // checkpoints only when every state buffer can be copied out. PR #346 creates its K/V caches without COPY_SRC, so a
     // device holding an attention layer can't save one. Then this engine has no slot methods at all: every reader of the
@@ -54,7 +68,7 @@ export class FlashRoomEngine {
     this.ckpt = core.stateParts(0).every((p) => copyable(p.buf));
     if (!this.ckpt) for (const k of SLOT_API) this[k] = undefined;
   }
-  static wrap(engine) { return new FlashRoomEngine(qwen4expCore(engine)); }
+  static wrap(engine, opts = {}) { return new FlashRoomEngine(qwen4expCore(engine), opts); }
 
   get dims() { return this.core.dims; }
   get maxSeq() { return this.core.maxSeq; }
@@ -71,10 +85,26 @@ export class FlashRoomEngine {
   }
   _noSpec(spec) { if (spec) throw new Error("qwen4exp: no speculative verify in rooms yet (phase 1 has no MTP)"); }
 
+  // n columns from basePos through the batch, in passes of at most its maxCols: ids (the tokens; the n-gram rows, and
+  // the embedding when xs is null) and xs (the input residuals, n x hDim, on a device without the embedding).
+  // want: return the output residuals (n x hDim); else nothing is read back (a solo prompt: the caches are what count)
+  async _passes(ids, xs, basePos, want = true) {
+    const b = this.batch, W = this.dims.hDim, n = ids.length, out = want ? new Float32Array(n * W) : null;
+    this.core.pos = basePos;
+    for (let o = 0; o < n; o += b.maxCols) {
+      const m = Math.min(b.maxCols, n - o);
+      // (_pass: a pass that throws part way marks the engine failed, as a core step does)
+      const r = await b._pass(Array.from(ids.slice(o, o + m)), { head: "none", wantHidden: want, ...(xs ? { hidden: xs.subarray(o * W, (o + m) * W) } : {}) });
+      if (want) out.set(r.hiddens, o * W);
+    }
+    return out;
+  }
+
   // ---- the host: embedding + its layers; the head on what comes back
   async embedRun(id, pos) { this.core.pos = pos; return this.core.step(id, null); }
   async embedRunBatch(ids, basePos, spec = false) {
     this._noSpec(spec);
+    if (this.batch && ids.length > 1) return this._passes(ids, null, basePos);
     const W = this.dims.hDim, out = new Float32Array(ids.length * W);
     this.core.pos = basePos;
     for (let c = 0; c < ids.length; c++) out.set(await this.core.step(ids[c], null), c * W);
@@ -83,7 +113,20 @@ export class FlashRoomEngine {
   async headFromHidden(h) { return this.core.head(h); }
   // solo (every layer here): layers only for the prompt, the last token through aiPipeToken's head
   async prefillToken(id) { await this.core.step(id, null); }
-  async prefillTokens(ids) { for (const t of ids) await this.core.step(t, null); }
+  async prefillTokens(ids) {
+    if (this.batch && ids.length > 1) { await this._passes(ids, null, this.core.pos, false); return; }
+    for (const t of ids) await this.core.step(t, null);
+  }
+  // a node host's wide prompt frames (room/pipeline.js aiPrefill) and a worker's (workerFrame): frame columns per frame
+  // when this device batches, else 0 (the frames then come in NC-column chunks, one core step a column)
+  prefillFrame() { return this.batch ? this.frame : 0; }
+  // src: the host's token ids (it has the embedding), or a worker's input residuals (n x hDim) with opts.ids
+  async prefillHidden(src, basePos, { ids = null } = {}) {
+    if (!this.batch) throw new Error("qwen4exp: prefillHidden without batched passes on this device (prefillFrame() is 0)");
+    if (this.core.hasEmbed) return this._passes(src, null, basePos);
+    const n = src.length / this.dims.hDim;
+    return this._passes(this._ids(ids, n, `${n} tokens`), src, basePos);
+  }
 
   // ---- a worker: a residual in, its layers, a residual out. opts.ids: the frame's token ids (wire.js splitWire)
   async runHidden(h, pos, { ids = null } = {}) {
@@ -93,7 +136,9 @@ export class FlashRoomEngine {
   }
   async runHiddenBatch(xs, basePos, spec = false, { ids = null } = {}) {
     this._noSpec(spec);
-    const W = this.dims.hDim, n = xs.length / W, tk = this._ids(ids, n, `${n} tokens`), out = new Float32Array(xs.length);
+    const W = this.dims.hDim, n = xs.length / W, tk = this._ids(ids, n, `${n} tokens`);
+    if (this.batch && n > 1) return this._passes(tk, xs, basePos);
+    const out = new Float32Array(xs.length);
     this.core.pos = basePos;
     for (let c = 0; c < n; c++) out.set(await this.core.step(tk[c], xs.subarray(c * W, (c + 1) * W)), c * W);
     return out;
@@ -193,6 +238,34 @@ export class FlashRoomEngine {
 
 // layers per submit in a step (engine/qwen4exp.js forwardToken's step)
 const SUBMIT_LAYERS = 12;
+// With batched passes: the columns of a browser host's prompt frames and of a worker's runHiddenBatch chunks (NC). A node
+// host's prompt frames are FLASH_PREFILL_FRAME wide (room/models.js; POOLED_PREFILL_FRAME overrides it there)
+export const FLASH_BATCH_NC = 64;
+export { FLASH_PREFILL_FRAME, flashBatchScratch, FLASH_BATCH_BYTES_PER_COL, FLASH_BATCH_BYTES_FIXED };
+// Batched passes (the loaders: room-node shard.js loadFlash, room/model-loader.js): columns per pass. A solo device
+// (every layer, the embedding and the head: a solo room's prompt goes through it in one prefillTokens) runs the batch's
+// widest default; a room's devices run the host's prompt frames (FLASH_PREFILL_FRAME columns), so wider passes would
+// only cost scratch (flashBatchScratch).
+// ring (a QSA engine's raw-key ring rows, ai-load.flash): a pass completes blocks of up to cols + 3 rows of it
+// (engine/qwen4exp_batch.js refuses wider passes), so the width stays under ring - 3, in whole 64-column steps
+export const flashBatchCols = (solo, ring = 0) => {
+  const cols = solo ? FLASH_SOLO_COLS : FLASH_PREFILL_FRAME;
+  return ring > 0 ? Math.min(cols, Math.max(64, Math.floor((ring - (QSA_KPOOL - 1)) / 64) * 64)) : cols;
+};
+const FLASH_SOLO_COLS = 1024;
+// what a Qwen4ExpBatch holds on the GPU: every buffer it created (scratch, QSA scratch, stages) -> bytes
+export function qwen4expBatchBytes(pb) {
+  const seen = new Set();
+  const add = (v) => { if (!v || typeof v !== "object") return; if (Array.isArray(v)) { v.forEach(add); return; } if (typeof v.size === "number" && typeof v.destroy === "function") seen.add(v); };
+  for (const v of Object.values(pb.B || {})) add(v);
+  for (const v of Object.values(pb.qsaS || {})) add(v);
+  for (const k of ["amStage", "logitStage", "hStage", "idStage"]) add(pb[k]);
+  for (const v of pb._stages?.values?.() || []) add(v);
+  let b = 0;
+  for (const x of seen) b += x.size;
+  return b;
+}
+
 // what a device without checkpoints lacks (dropSlot / dropAllSlots stay: with no slots they do nothing)
 const SLOT_API = ["saveSlot", "loadSlot", "exportSlot", "exportState", "importState", "stateSignature"];
 // a GPU buffer copies can read (a test's fake buffer says nothing: yes)

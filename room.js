@@ -28,7 +28,7 @@ import { validateApiAsk, apiPrompt, apiRun, AnswerCache, API_LIMITS, pieceDecode
 import { tokenTexts } from "./harness/model-common.js";
 import { CkptStore } from "./room/ckpt-store.js";
 import { SHAPE, MODELS, DISK_COPY, NEED_GB, NEED_MIN_GB, FILE_GB, PICKER, MAX_SEQ, MAX_NEW, MAX_NEW_THINKING, MIN_ROOM, maxSeqFor, ctxForBinding, kvBytesPerLayerPos, kvModeFor, kvForLoad, hostHeldBytes, denseKvBytesPerLayerPos, roomBytes, pickCtx, ctxK, ctxShortNote, needText, expertsOf, modelLoadOptions, ngramOf, flashLayerCost, flashTabHostMargin,
-  flashLongMeta, flashRoomFormat, flashReadyFields, readyCtxShort } from "./room/models.js";
+  flashLongMeta, flashRoomFormat, flashReadyFields, readyCtxShort, flashDealReserve } from "./room/models.js";
 // the context window of the loaded engine (per model: room/models.js CTX; 2048 for the small ones)
 const ctxMax = () => ai.engine?.maxSeq || MAX_SEQ;
 // ?ckpt=N: keep the room's state after the last N answers on every device (GPU copies), so a
@@ -57,7 +57,7 @@ import { DENSE_SPEC_V } from "./room/lookup.js";
 import { DraftModel } from "./room/draftmodel.js";
 import { drawCard } from "./room/card.js";
 import { probe as preflight, deviceKind } from "./room/preflight.js";
-import { pledgeRule, pledgeGB, afterLoadDeath, offloadFor, ngramFor, storageOf } from "./room/pledge.js";
+import { pledgeRule, pledgeGB, dealPledgeBytes, afterLoadDeath, offloadFor, ngramFor, storageOf } from "./room/pledge.js";
 import { computeScreen } from "./room/compute.js";
 import { CACHE_NAME, PREFIX as CACHE_PREFIX, cacheKey, cachedModels, deleteModel } from "./room/weightcache.js";
 import { working, liveWords } from "./room/working.js";
@@ -611,7 +611,7 @@ function roomFitFor(key) {
   if (!devs.length || !roomBytes(key, maxSeqFor(key, ask), kv)) return null;
   const hid = pickModelHost(devs);
   devs.sort((a, b) => (b.id === hid) - (a.id === hid));
-  const pledges = devs.map((d) => pledgeGB(d.meta, Infinity, key) * 2 ** 30);
+  const pledges = devs.map((d) => dealPledgeBytes(d.meta, Infinity, key));
   // (rb.layerCost: Qwen3.8-Flash-Next's per-layer bytes, room/models.js flashLayerCost; roomBytes is memoized per context)
   // (a tab model host of Flash also keeps its load margin, as aiStart deals it: room/models.js flashTabHostMargin,
   // room/plan.js dealWithHostMargin; a room node host has its load check instead)
@@ -3780,7 +3780,7 @@ async function aiStart(modelArg) {
     ai.dealer = peer.id; ai.dealerFresh = true; ai.dealerActive = true;
     ai.degraded = false;
     ai.startFailed = null;
-    ai.readyPeers = new Set();
+    ai.readyPeers = new Set(); ai.batchOf = new Map();
     ai.ckptHeld = new Map();
     ai.relinks = new Map();
     ai.teleBy = new Map();
@@ -3865,7 +3865,7 @@ async function aiStart(modelArg) {
     // head and the draft block), and a room whose pledges can't hold the model does not start.
     ai.shareCap ??= new Map();
     const nameOf = (id) => conns.get(id)?.name || id;
-    const pledgeOf = (m, name) => pledgeGB(m, ai.shareCap.get(name), modelKey) * 2 ** 30;   // (64 GB a device, 128 for Flash)
+    const pledgeOf = (m, name) => dealPledgeBytes(m, ai.shareCap.get(name), modelKey);   // (64 GB a device, 128 for Flash)
     const pledges = [pledgeOf(myMeta, myName), ...ai.chain.map((id) => pledgeOf(conns.get(id)?.meta, nameOf(id)))];
     // expert offload: a room node with a discrete GPU (meta.offload, meta.ramGB) holds layers past its pledge with
     // their experts in its RAM, when the pledges alone can't hold the model (room/plan.js); a tab only with the OPFS disk
@@ -3964,7 +3964,7 @@ async function aiStart(modelArg) {
         host: peer.id,
         inv,
         // the same shape as the room node's (packages/room-node/roomnode.js offloadMsg), disk tier included
-        ...(o ? { offload: offMsg(o) } : {}),
+        ...(o ? { offload: { ...offMsg(o), ...(flashDealReserve(modelKey) > 0 ? { batchReserve: flashDealReserve(modelKey) } : {}) } } : {}),
         ...(flash ? { flash } : {}),
       };
       ai.plan.set(conns.get(id)?.name || id, { msg, small: false });
@@ -5345,8 +5345,10 @@ async function aiOnData(from, d) {
         $("ldg-fill").style.width = "100%";
         // slots: the host forgets the checkpoints not in them; ckpt: this device applies sv / ld / dp
         // (a room node hosting a dense model checks it: tabs from before the dense engine had slots ignore them)
-        // ctx, fsig (Flash): the positions this engine holds and its state signature
-        sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0, ...flashReadyFields(ai.engine, d.model) });
+        // ctx, fsig (Flash): the positions this engine holds and its state signature; batch (Qwen3.8-Flash-Next): whether
+        // this device runs prompt frames in batched passes (room/flash.js); a host narrows its frames for a device that
+        // does not (room/pipeline.js chainSlow). Older hosts ignore them
+        sendTo(ai.hostId, { t: "ai-ready", slots, ckpt: ai.engine?.saveSlot ? 1 : 0, ...flashReadyFields(ai.engine, d.model), ...(ai.engine?.batch !== undefined ? { batch: ai.engine.batch ? 1 : 0 } : {}) });
       } catch (err) {
         if (onLoadError(ai.startFailed) === "stopped") { workerStopped(); break; }   // the host stopped the start (ai-start-failed): this load stopped with it
         closeEngine();
@@ -5434,6 +5436,8 @@ async function aiOnData(from, d) {
       if (short) { log("room", `${e?.name || from}: ${short}`); aiLoadFailed(from, e?.name || from, short); break; }
       ai.readyPeers.add(from);
       (ai.ckptHeld ||= new Map()).set(from, d.slots);   // what it read back from disk (none from an older build)
+      // a Flash worker without batched passes (batch: 0, or a build before them that does not say): narrow prompt frames
+      if (MODELS[ai.model]?.kind === "qwen4exp") (ai.batchOf ||= new Map()).set(from, d.batch === 1);
       if (e?.card) { e.card.querySelector(".bw").textContent = "ready"; peerStatus(e.card, "ready", true); }
       aiMaybeReady();
       break;
