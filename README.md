@@ -25,6 +25,10 @@ https://github.com/user-attachments/assets/5142d877-e4d5-4f6b-9b5e-0ef48dcb73f6
 
 Pooled runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.
 
+## Duga direction (proposed)
+
+This repository is being adapted toward **Duga**, a website-first assistant at duga.app. The initial direction is account-free: connect devices using invite links or room codes with host approval by default. The runtime below remains Pooled; this note does not announce a deployed Duga service. See [the Duga design note](docs/design/duga.md) for scope and privacy boundaries.
+
 ## How it works
 
 Friends open one link. Each device (laptop, desktop, phone) holds some of the model's layers and runs them on its own GPU with our own WGSL kernels. For every token, a small hidden state (10 KB on the 27B, 4 KB on the MoE) passes from tab to tab over direct WebRTC connections, and the host turns the result into the next word.
