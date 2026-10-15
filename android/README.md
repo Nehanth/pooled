@@ -23,7 +23,7 @@ Outputs:
 - `app/build/outputs/apk/debug/app-debug.apk` — installable development-signed APK.
 - `app/build/outputs/bundle/debug/app-debug.aab` — development bundle, not a production/Play Store upload.
 
-With a connected emulator/device: `android/gradlew -p android connectedDebugAndroidTest`. A native smoke test includes bundled UI, explicit note persistence, scoped bridge presence, JNI loading, oracle-status reporting and missing-model rejection. Returning a rejected oracle status is a tested failure path, not an Android equivalence pass.
+With a connected emulator/device: `android/gradlew -p android connectedDebugAndroidTest`. A native smoke test includes bundled UI, explicit note persistence, scoped bridge presence, JNI loading, oracle-status reporting and missing-model rejection. The Android 15 emulator currently returns a numerical mismatch (status 2) and Local stays disabled there. This tests safe rejection, not Android equivalence or successful native-model chat. Physical-device validation and device-appropriate oracle capture remain outstanding.
 
 ## GitHub Actions and tag delivery
 

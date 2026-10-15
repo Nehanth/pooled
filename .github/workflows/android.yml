@@ -17,7 +17,6 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
       DUGA_WEBGPU_MODULE: native/vulkan/oracle/node_modules/webgpu/index.js
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -25,6 +24,11 @@ jobs:
         with: { node-version: 22 }
       - name: Install native build and software Vulkan driver
         run: sudo apt-get update && sudo apt-get install -y g++ libvulkan-dev mesa-vulkan-drivers
+      - name: Select the installed software Vulkan ICD
+        run: |
+          mapfile -t icds < <(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name '*lvp*.json' -print)
+          test "${#icds[@]}" -eq 1 || { echo 'Expected one installed Lavapipe driver'; exit 1; }
+          printf 'VK_ICD_FILENAMES=%s\n' "${icds[0]}" >> "$GITHUB_ENV"
       - name: Install pinned shader compiler and WebGPU oracle
         run: |
           rustup update stable --no-self-update
