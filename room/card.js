@@ -26,7 +26,7 @@ export function drawCard(canvas, info) {
   mark(g, 64, 62, 36);
   g.fillStyle = C.text; g.font = `500 34px ${SANS}`; g.textBaseline = "alphabetic";
   if ("letterSpacing" in g) g.letterSpacing = "-1.2px";
-  g.fillText("pooled", 114, 92);
+  g.fillText("Duga", 114, 92);
   if ("letterSpacing" in g) g.letterSpacing = "0px";
   g.fillStyle = C.muted; g.font = `400 16px ${SANS}`;
   g.fillText("Room", 64, 130);
@@ -66,6 +66,6 @@ export function drawCard(canvas, info) {
     if (i < n - 1) { g.strokeStyle = C.accent; g.lineWidth = 3; g.beginPath(); g.moveTo(x + w + 4, y + h / 2); g.lineTo(x + w + gap - 4, y + h / 2); g.stroke(); }
   });
   g.fillStyle = C.muted; g.font = `400 16px ${MONO}`;
-  g.fillText("one AI model across the devices in a room, in browser tabs · pooled.run", 64, H - 34);
+  g.fillText("one AI model across the devices in a room, in browser tabs · duga.app", 64, H - 34);
   return canvas;
 }

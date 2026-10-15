@@ -1,13 +1,13 @@
 <p align="center">
-  <a href="https://pooled.run"><picture>
+  <a href="https://duga.app"><picture>
     <source media="(prefers-color-scheme: dark)" srcset="site/logo/wordmark-dark.svg">
-    <img src="site/logo/wordmark-light.svg" height="56" alt="pooled">
+    <img src="site/logo/wordmark-light.svg" height="56" alt="Duga">
   </picture></a>
 </p>
-<p align="center"><b>Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents.</b></p>
+<p align="center"><b>Your devices. Your assistant. Account-free chat, local inference and trusted-device coding rooms.</b></p>
 <p align="center">
-  <a href="https://pooled.run">Site</a> ·
-  <a href="https://pooled.run/room">Start a room</a> ·
+  <a href="https://duga.app">Site</a> ·
+  <a href="https://duga.app/room">Open a room</a> ·
   <a href="docs/architecture.md">Architecture</a> ·
   <a href="docs/bench-log.md">Benchmarks</a> ·
   <a href="roadmap/">Roadmap</a> ·
@@ -23,11 +23,13 @@ https://github.com/user-attachments/assets/5142d877-e4d5-4f6b-9b5e-0ef48dcb73f6
 
 <p align="center"><sub>Demo, recorded September 27, 2026 (2:29, with voice and subtitles): Qwen 3.6 35B MoE across a Mac and an iPhone in browser tabs. The phone chats with it, then Code mode builds a Tetris game, fixes its own bug and restyles it. <a href="https://github.com/Nehanth/pooled/releases/download/v1.0.0/pooled-demo-2026-09-27.mp4">Download</a> · <a href="https://github.com/Nehanth/pooled/releases/download/v0.2.0/swarmllm-demo-2026-09-07.mp4">the September 7 demo</a>.</sub></p>
 
-Pooled runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.
+The underlying Pooled runtime runs one open model across the devices in a room. Your laptop, a friend's desktop and a phone each hold some of the model's layers, and together they run a model none of them could run alone. You can chat with it, or switch to Code mode and let it build and fix a small app right in the tab. There is nothing to install and no account, and no server does any of the thinking.
 
-## Duga direction (proposed)
+## Duga preview
 
-This repository is being adapted toward **Duga**, a website-first assistant at duga.app. The initial direction is account-free: connect devices using invite links or room codes with host approval by default. The runtime below remains Pooled; this note does not announce a deployed Duga service. See [the Duga design note](docs/design/duga.md) for scope and privacy boundaries.
+Duga is an account-free browser assistant built on the Pooled runtime. The root page provides local streaming chat, explicit browser-only notes, session activity and a room workspace. It downloads Qwen3 0.6B weights on first use and runs on WebGPU; there is no hosted inference fallback. Invite links and host-approved codes connect devices through the existing `/room` and `/r/:code` routes.
+
+Private Net ownership enforcement, Global Net, credits, service connectors and microphone conversation remain proposed. See [the Duga design note](docs/design/duga.md) for implementation boundaries, privacy and validation. The upstream Pooled CLI/package names and wire/storage identifiers are preserved for compatibility.
 
 ## How it works
 

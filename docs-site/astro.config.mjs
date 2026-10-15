@@ -19,7 +19,7 @@ const repoLinks = {
 
 // Served by the main Vercel project at https://pooled.run/docs (static files, no hosted service).
 export default defineConfig({
-	site: 'https://pooled.run',
+	site: 'https://duga.app',
 	base: '/docs',
 	trailingSlash: 'never', // vercel.json has "trailingSlash": false
 	outDir: './dist', // build-vercel.mjs copies this to <site>/docs next to the static site
@@ -43,7 +43,7 @@ export default defineConfig({
 	integrations: [
 		repoLinks,
 		starlight({
-			title: 'Pooled docs',
+			title: 'Duga docs',
 			description: 'Peer-to-peer LLM inference in the browser. Pool your devices to run big open models.',
 			favicon: '/favicon.svg',
 			logo: { light: './src/assets/wordmark-light.svg', dark: './src/assets/wordmark-dark.svg', replacesTitle: true },

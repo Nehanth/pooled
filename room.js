@@ -2621,7 +2621,7 @@ $("share-close").addEventListener("click", closeShare);
 $("share").addEventListener("click", (e) => { if (e.target === $("share")) closeShare(); });
 $("room-over-close").addEventListener("click", () => { $("room-over").hidden = true; });
 $("share-copy").addEventListener("click", copyRoomLink);
-$("share-native").addEventListener("click", () => navigator.share?.({ title: "Join my Pooled room", text: `Room ${formatCode(roomCode)}: add this device to the AI model we run together`, url: roomLink() }).catch(() => {}));
+$("share-native").addEventListener("click", () => navigator.share?.({ title: "Join my Duga room", text: `Room ${formatCode(roomCode)}: add this device to the AI model we run together`, url: roomLink() }).catch(() => {}));
 // the logo leads home. In a room it asks first: it sits in the thumb's corner on a phone, and
 // leaving ends the room for everyone (the host) or takes this device's layers with it
 const logoLink = document.querySelector(".logo a");
@@ -3447,17 +3447,17 @@ $("card-btn").addEventListener("click", () => { $("room-menu").open = false; ope
 $("card-close").addEventListener("click", closeCard);
 $("card").addEventListener("click", (e) => { if (e.target === $("card")) closeCard(); });
 $("card-save").addEventListener("click", async () => {
-  const a = document.createElement("a"); a.href = URL.createObjectURL(await cardBlob()); a.download = `pooled-${roomCode || "room"}.png`; a.click();
+  const a = document.createElement("a"); a.href = URL.createObjectURL(await cardBlob()); a.download = `duga-${roomCode || "room"}.png`; a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 });
 $("card-share").addEventListener("click", async () => {
-  const file = new File([await cardBlob()], `pooled-${roomCode || "room"}.png`, { type: "image/png" });
-  if (navigator.canShare?.({ files: [file] })) navigator.share({ files: [file], title: "Our Pooled room" }).catch(() => {});
+  const file = new File([await cardBlob()], `duga-${roomCode || "room"}.png`, { type: "image/png" });
+  if (navigator.canShare?.({ files: [file] })) navigator.share({ files: [file], title: "Our Duga room" }).catch(() => {});
   else toast("this browser can't share images: use save");
 });
 let lastSoloTps = 0;
 function exportChat() {
-  const lines = [`# Pooled room ${formatCode(roomCode || "")}`, "", `_${new Date().toISOString().slice(0, 16).replace("T", " ")} · ${MODELS[ai.model || $("ai-model").value]?.label || ""}_`, ""];
+  const lines = [`# Duga room ${formatCode(roomCode || "")}`, "", `_${new Date().toISOString().slice(0, 16).replace("T", " ")} · ${MODELS[ai.model || $("ai-model").value]?.label || ""}_`, ""];
   for (const m of document.querySelectorAll("#ai-output .m")) {
     if (m.classList.contains("user")) lines.push(`**${m.dataset.name || "?"}:** ${m.dataset.text || ""}`, "");
     else if (m.pieces) {
@@ -3468,7 +3468,7 @@ function exportChat() {
   }
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type: "text/markdown" }));
-  a.download = `pooled-chat-${roomCode || "room"}.md`;
+  a.download = `duga-chat-${roomCode || "room"}.md`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
@@ -5664,8 +5664,8 @@ const staleModule = (err) => err instanceof SyntaxError || /binding name|export 
 function codeLoadFailed(err) {
   if (staleModule(err)) {
     let tried = false; try { tried = sessionStorage.getItem("pooled-stale-reload") === "1"; sessionStorage.setItem("pooled-stale-reload", "1"); } catch {}
-    if (isHost && !tried) { toast("Pooled was just updated: reloading to open Code…"); setTimeout(() => location.reload(), 900); return; }
-    toast("Pooled was just updated. Reload this page to open Code.");
+    if (isHost && !tried) { toast("Duga was just updated: reloading to open Code…"); setTimeout(() => location.reload(), 900); return; }
+    toast("Duga was just updated. Reload this page to open Code.");
     return;
   }
   toast("Code mode failed to load: " + err.message);
@@ -6470,9 +6470,9 @@ if (new URLSearchParams(location.search).get("sim") === "1" && ["127.0.0.1", "lo
       const ns = names();
       clearChat();
       sysNote(`Model ready on ${ns.length} devices`);
-      chatUser(ns[0], "what is Pooled?");
+      chatUser(ns[0], "what is Duga?");
       chatBotStart(1);
-      botEl.pieces = [{ t: "Pooled runs one open AI model across the devices in this room. Each one holds some of my layers, and **every word I write passes through all of them**, right here in your browser tabs.", d: 0 }];
+      botEl.pieces = [{ t: "Duga runs one open AI model across the devices in this room. Each one holds some of my layers, and **every word I write passes through all of them**, right here in your browser tabs.", d: 0 }];
       chatBotEnd(null, "21.4 tok/s · 3 devices");
       sysNote(`${ns[ns.length - 1]} joined with 2 GB`, "join");
       chatUser(ns[ns.length - 1], "can it write code?");

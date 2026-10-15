@@ -1,349 +1,120 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2">
-<title>pooled: pool your devices, run AI together</title>
-<link rel="canonical" href="https://pooled.run/">
-<meta name="description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="pooled">
-<meta property="og:title" content="pooled: pool your devices, run AI together">
-<meta property="og:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
-<meta property="og:url" content="https://pooled.run/">
-<meta property="og:image" content="https://pooled.run/site/og.png?v=2">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="pooled: Pool your devices. Run AI together. Below, the demo: a Tetris game an agent wrote, on a model pooled across three devices">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="pooled: pool your devices, run AI together">
-<meta name="twitter:description" content="Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents. Open source, MIT.">
-<meta name="twitter:image" content="https://pooled.run/site/og.png?v=2">
-<meta name="twitter:image:alt" content="pooled: Pool your devices. Run AI together. Below, the demo: a Tetris game an agent wrote, on a model pooled across three devices">
-<meta name="theme-color" content="#F6F5F1">
-<link rel="icon" type="image/svg+xml" sizes="any" href="/favicon.svg?v=3">
-<link rel="manifest" href="/site.webmanifest?v=2">
-<link rel="preload" href="/site/fonts/geist-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/site/fonts/geist-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="preload" href="/site/fonts/funnel-display-latin.woff2" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="/site/css/fonts.css">
-<link rel="stylesheet" href="/site/css/tokens.css">
-<link rel="stylesheet" href="/site/css/site.css">
-<script src="/site/js/boot.js"></script>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Duga · Your devices. Your assistant.</title>
+  <meta name="description" content="An account-free assistant in your browser. Chat locally, save notes you control, and connect trusted devices with invite links or room codes.">
+  <link rel="canonical" href="https://duga.app/">
+  <meta property="og:title" content="Duga · Your devices. Your assistant.">
+  <meta property="og:description" content="An account-free assistant in your browser. Start locally, or connect trusted devices with an invite.">
+  <meta property="og:url" content="https://duga.app/">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://duga.app/site/og.png?v=3">
+  <meta property="og:image:alt" content="Duga account-free assistant workspace">
+  <meta name="theme-color" content="#F6F5F1">
+  <meta name="referrer" content="no-referrer">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=4">
+  <link rel="manifest" href="/site.webmanifest?v=3">
+  <link rel="stylesheet" href="/site/css/fonts.css">
+  <link rel="stylesheet" href="/site/css/tokens.css">
+  <link rel="stylesheet" href="/app/app.css">
+  <script type="module" src="/app/app.js"></script>
 </head>
 <body>
-<svg class="sprite" width="0" height="0" aria-hidden="true" focusable="false">
-  <symbol id="i-mark" viewBox="0 0 24 24"><circle cx="3.4" cy="3.4" r="1.8"/><circle cx="10.2" cy="3.4" r="1.99"/><circle cx="18.5" cy="3.4" r="2.38"/><circle cx="3.4" cy="10.2" r="1.99"/><circle cx="10.2" cy="10.2" r="2.38"/><circle cx="18.5" cy="10.2" r="2.94"/><circle cx="3.4" cy="18.5" r="2.38"/><circle cx="10.2" cy="18.5" r="2.94"/><circle cx="18.5" cy="18.5" r="3.9" fill="#2A45E0"/></symbol>
-  <symbol id="i-laptop" viewBox="0 0 16 16"><path d="M3 3.5h10v7H3zM1.2 12.5h13.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
-  <symbol id="i-phone" viewBox="0 0 16 16"><rect x="4.5" y="1.5" width="7" height="13" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M7 12.2h2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
-  <symbol id="i-desk" viewBox="0 0 16 16"><path d="M1.8 2.8h12.4v8.4H1.8zM8 11.2v2.6M5.2 13.8h5.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
-  <symbol id="i-lock" viewBox="0 0 10 10"><rect x="2" y="4.5" width="6" height="4.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3.5 4.5V3a1.5 1.5 0 0 1 3 0v1.5" fill="none" stroke="currentColor" stroke-width="1.3"/></symbol>
-  <symbol id="i-check" viewBox="0 0 12 12"><path d="m2.5 6.2 2.3 2.3 4.7-5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="i-file" viewBox="0 0 14 14"><path d="M3.5 1.5h4.5l3 3v8h-7.5z M8 1.5v3h3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
-  <symbol id="i-dir" viewBox="0 0 14 14"><path d="M1.5 3.5h4l1.2 1.3h5.8v6.7h-11z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></symbol>
-  <symbol id="i-down" viewBox="0 0 14 14"><path d="M7 2v7.2M3.8 6.4 7 9.6l3.2-3.2M2.5 12h9" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="i-reload" viewBox="0 0 12 12"><path d="M10 6a4 4 0 1 1-1.2-2.85M10 1.8v2.4H7.6" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="i-shuffle" viewBox="0 0 16 16"><path d="M2 4.5h2.5c3 0 4 7 7 7H14M12 9.5l2 2-2 2M2 11.5h2.5c1.2 0 2-1 2.6-2.2M9.3 6.5c.6-1.1 1.3-2 2.2-2H14M12 2.5l2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-  <symbol id="i-arrow" viewBox="0 0 10 10"><path d="M2 8 8 2M3.5 2H8v4.5" fill="none" stroke="currentColor" stroke-width="1.4"/></symbol>
-  <symbol id="i-next" viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
-</svg>
-
 <a class="skip" href="#main">Skip to content</a>
-
-<nav class="nav" aria-label="Main">
-  <div class="wrap nav-in">
-    <a class="brand" href="#top" aria-label="Pooled home">
-      <svg class="mark" width="22" height="22" aria-hidden="true"><use href="#i-mark"/></svg>
-      <span class="wm">pooled</span>
-    </a>
-    <div class="right">
-      <a class="nav-link" href="/docs">Docs</a>
-      <div class="nav-seg" role="group" aria-label="Use it from the terminal or with agents"><a href="/docs/terminal">CLI</a><a href="/docs/kits/openclaw">Agents<span class="nav-tag">beta</span></a></div>
-      <a class="gh-link" href="https://github.com/Nehanth/pooled" aria-label="pooled on GitHub" title="GitHub"><svg width="20" height="20" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg></a>
-      <a class="btn btn-blue btn-sm" href="/room">Start a room</a>
+<div class="app">
+  <aside class="sidebar" id="sidebar" aria-label="Duga navigation">
+    <a class="brand" href="#chat"><img src="/site/logo/mark.svg" width="26" height="26" alt=""><span>Duga</span><small>preview</small></a>
+    <button class="new-chat" id="new-conversation" type="button"><span aria-hidden="true">＋</span> New conversation</button>
+    <nav aria-label="Workspace">
+      <button data-view="chat" aria-current="page"><span aria-hidden="true">◌</span> Assistant</button>
+      <button data-view="code"><span aria-hidden="true">⌘</span> Code <small>room</small></button>
+      <p class="nav-label">Your workspace</p>
+      <button data-view="devices"><span aria-hidden="true">▣</span> Devices</button>
+      <button data-view="memories"><span aria-hidden="true">◇</span> Memory</button>
+      <button data-view="connections"><span aria-hidden="true">↗</span> Connections</button>
+      <button data-view="activity"><span aria-hidden="true">≋</span> Activity</button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="session-card"><i></i><div><b>Account-free session</b><span>No login. No compute donation.</span></div></div>
+      <button data-view="settings" class="settings-link">Settings &amp; privacy <span aria-hidden="true">↗</span></button>
+      <a href="/docs">Documentation ↗</a>
+      <small>Built on the Pooled runtime.</small>
     </div>
-  </div>
-</nav>
-
-<main id="main">
-  <header class="hero" id="top">
-    <canvas class="swarm" id="swarm" aria-hidden="true"></canvas>
-    <div class="wrap hero-in">
-      <h1>Pool your devices. <span>Run AI together.</span></h1>
-      <p class="sub">Peer-to-peer LLM inference in the browser. Pool your devices to run big open models, for chat and coding agents.</p>
-    </div>
-  </header>
-
-  <section class="stage" aria-labelledby="stage-h">
-    <h2 class="sr-only" id="stage-h">How a room works</h2>
-    <div class="wrap">
-      <div class="demo" id="demo" data-scene="tabs" data-mode="chat">
-
-        <div class="modes" role="tablist" aria-label="Demo">
-          <span class="pill" aria-hidden="true"></span>
-          <button type="button" role="tab" id="mChat" aria-controls="win" aria-selected="true">Chat</button>
-          <button type="button" role="tab" id="mCode" data-twinkle aria-controls="win" aria-selected="false" tabindex="-1">Code</button>
-        </div>
-
-        <div class="win" id="win" role="tabpanel" aria-labelledby="mChat">
-          <!-- the room: its code, and every device in it -->
-          <div class="hd">
-            <span class="hd-room"><svg class="mark" width="16" height="16" aria-hidden="true"><use href="#i-mark"/></svg><span class="hd-k">Room</span><b class="hd-code" id="hdCode" role="img" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></b></span>
-            <ul class="chips" id="chips" aria-label="Devices in the room">
-              <li class="chip c0"><svg width="14" height="14" aria-hidden="true"><use href="#i-laptop"/></svg><span class="cn" data-name="0">fox</span><span class="cg">10 GB</span><span class="cst"></span></li>
-              <li class="chip c1"><svg width="14" height="14" aria-hidden="true"><use href="#i-desk"/></svg><span class="cn" data-name="1">heron</span><span class="cg">12 GB</span><span class="cst"></span></li>
-              <li class="chip c2"><svg width="14" height="14" aria-hidden="true"><use href="#i-phone"/></svg><span class="cn" data-name="2">lynx</span><span class="cg">2 GB</span><span class="cst"></span></li>
-            </ul>
-            <span class="hd-sum"><b id="gbSum">24 GB</b><span class="pw"> pooled</span></span>
-            <span class="hd-inv" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg><span class="lbl">Invite</span></span>
-            <span class="hd-me" id="hdMe" aria-hidden="true"><svg class="hm" width="16" height="16" viewBox="0 0 24 24"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle class="lit" cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg></span>
-          </div>
-
-          <!-- someone joined: the room's toast (room.js presence), bottom right -->
-          <div class="toasts" aria-hidden="true"><p class="toast c1" id="toastB"><span><span data-name="1">heron</span> joined</span></p><p class="toast c2" id="toastC"><span><span data-name="2">lynx</span> joined</span></p></div>
-          <div class="body" id="body">
-
-            <!-- 1, 2: a laptop starts a room (it already has a name), a desktop joins with the code -->
-            <div class="scene s-tabs">
-              <div class="tab" id="tabA">
-                <p class="tab-dev"><svg width="14" height="14" aria-hidden="true"><use href="#i-laptop"/></svg>MacBook Air</p>
-                <div class="tabwin">
-                  <div class="tab-bar"><span class="url"><svg width="10" height="10" aria-hidden="true"><use href="#i-lock"/></svg>pooled.run/room</span></div>
-                  <div class="tab-body">
-                    <div class="mcard">
-                      <div class="mpre">
-                        <h3>New room</h3>
-                        <p>You get a code to type on your other devices.</p>
-                        <p class="nm-k">This device</p>
-                        <span class="devname" id="nmA"><span class="nm-v" data-name="0">fox</span><span class="shuf" aria-hidden="true"><svg width="14" height="14"><use href="#i-shuffle"/></svg></span></span>
-                        <span class="mbtn blue" id="aGo">Start a room</span>
-                      </div>
-                      <div class="mpost">
-                        <p class="mk">Room code</p>
-                        <p class="mcode" id="aCode" role="img" aria-label="K7QX"><span>K</span><span>7</span><span>Q</span><span>X</span></p>
-                        <p class="mwait"><span class="live" aria-hidden="true"></span>Waiting for your other devices</p>
-                        <p class="mjoined"><svg width="12" height="12" aria-hidden="true"><use href="#i-check"/></svg><span><span data-name="1">heron</span> joined</span></p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div class="tab" id="tabB">
-                <p class="tab-dev"><svg width="14" height="14" aria-hidden="true"><use href="#i-desk"/></svg>Desktop PC</p>
-                <div class="tabwin">
-                  <div class="tab-bar"><span class="url"><svg width="10" height="10" aria-hidden="true"><use href="#i-lock"/></svg>pooled.run/room</span></div>
-                  <div class="tab-body">
-                    <div class="mcard">
-                      <div class="mjoin">
-                        <h3>Have a code?</h3>
-                        <p class="nm-k">This device</p>
-                        <span class="devname" id="nmB"><span class="nm-v" data-name="1">heron</span><span class="shuf" aria-hidden="true"><svg width="14" height="14"><use href="#i-shuffle"/></svg></span></span>
-                        <div class="slots" role="img" aria-label="Code typed: K7QX"><i>K</i><i>7</i><i>Q</i><i>X</i></div>
-                        <span class="mbtn" id="bBtn">Join</span>
-                        <p class="mok"><svg width="12" height="12" aria-hidden="true"><use href="#i-check"/></svg>Joined room K7QX</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <!-- 3: the room's model card: each device lends memory (a friend's phone joins and adds its share),
-                 then the room picks a model that fits. 4: the layers are dealt by memory and each device fetches
-                 only its own. 5: every word passes through all of them -->
-            <div class="model" id="model">
-              <div class="card" id="card" data-face="pool">
-                <div class="cd-pick">
-                  <p class="cd-h"><b>Pick a model</b><span>Anyone in the room can start it.</span></p>
-                  <ul class="rungs" id="rungs">
-                    <li class="ok" data-need="4"><span class="rn">Qwen3 1.7B</span><span class="fig"><span class="nd">4 GB</span><b>fits</b><span class="more"></span></span></li>
-                    <li class="ok" data-need="17"><span class="rn">Qwen3.8 27B</span><span class="fig"><span class="nd">17 GB</span><b>fits</b><span class="more"></span></span></li>
-                    <li class="ok sel" data-need="22.5"><span class="rn">Qwen3.6 35B MoE</span><span class="fig"><span class="nd">22.5 GB</span><b>fits</b><span class="more"></span></span></li>
-                  </ul>
-                  <p class="cd-note">Each device downloads only its own layers, once. They stay cached for next time.</p>
-                  <span class="mbtn blue" id="startBtn">Start the model</span>
-                </div>
-                <div class="cd-pool">
-                  <section class="cd-sec">
-                    <p class="ap-k"><span>The room pools</span><b id="poolGB">24 GB</b></p>
-                    <div class="meter" id="meter" aria-hidden="true">
-                      <div class="mt-fill"><i class="c0" style="width:39.3%"></i><i class="c1" style="width:47.2%"></i><i class="c2" style="width:7.9%"></i></div>
-                      <div class="mt-ticks"><span class="ok" style="left:15.7%"></span><span class="ok" style="left:66.8%"></span><span class="ok sel r" id="tick" style="left:88.4%"></span></div>
-                    </div>
-                    <p class="need ok" id="need"><span class="nn">Qwen3.6 35B MoE needs</span><span class="nn2">Needs</span> <b>22.5 GB</b><span>fits</span></p>
-                    <ul class="devs" id="devs" aria-label="What each device lends">
-                      <li class="c0"><i></i><span><span data-name="0">fox</span> <small>(this device)</small></span><b>10 GB</b></li>
-                      <li class="c1"><i></i><span data-name="1">heron</span><b>12 GB</b></li>
-                      <li class="c2"><i></i><span><span data-name="2">lynx</span> <small>(phone)</small></span><b>2 GB</b></li>
-                    </ul>
-                  </section>
-                  <section class="cd-sec cd-me">
-                    <p class="ap-k"><span>This device gives</span></p>
-                    <span class="ap-step"><span class="step" id="lendMinus">&minus;</span><b id="lendGB">10</b><span class="u">GB</span><span class="step" id="lendPlus">+</span></span>
-                  </section>
-                </div>
-              </div>
-
-              <div class="band" id="band">
-                <p class="bd-h"><span class="bd-n">Qwen3.6 35B MoE</span><span class="bd-live" aria-hidden="true"><i></i><span id="bdLive">Ready</span></span><span class="bd-mini" aria-hidden="true"><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c2"></i><i class="c2"></i><i class="c2"></i></span><span class="bd-s" id="mdS">Ready on 3 devices · 40 layers, split by memory</span><span class="bd-stats" aria-hidden="true"><span><b>21.4</b>tok/s</span><span><b>64</b>ms per word</span><span><b id="bdTok">31</b>tokens</span><span><b>1.8k / 32k</b>context</span></span><span class="bd-tog" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4 10 4-4 4 4"/></svg></span></p>
-                <div class="rows" id="rows">
-                  <div class="row c0">
-                    <p class="hl"><i class="act" aria-hidden="true"></i><svg width="13" height="13" aria-hidden="true"><use href="#i-laptop"/></svg><b data-name="0">fox</b><span class="hs"><span class="lr">layers 1-17</span><span class="lms">18 ms</span><span class="hg" id="hg0">9.6 GB, from cache</span></span></p>
-                    <div class="cells" id="cells0"><i style="grid-column-start:1"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-                  </div>
-                  <div class="row c1">
-                    <p class="hl"><i class="act" aria-hidden="true"></i><svg width="13" height="13" aria-hidden="true"><use href="#i-desk"/></svg><b data-name="1">heron</b><span class="hs"><span class="lr">layers 18-37</span><span class="lms">27 ms</span><span class="hg" id="hg1">11.2 GB, ready</span></span></p>
-                    <div class="cells" id="cells1"><i style="grid-column-start:18"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-                  </div>
-                  <div class="row c2">
-                    <p class="hl"><i class="act" aria-hidden="true"></i><svg width="13" height="13" aria-hidden="true"><use href="#i-phone"/></svg><b data-name="2">lynx</b><span class="hs"><span class="lr">layers 38-40</span><span class="lms">36 ms</span><span class="hg" id="hg2">1.7 GB, ready</span></span></p>
-                    <div class="cells" id="cells2"><i style="grid-column-start:38"></i><i></i><i></i></div>
-                  </div>
-                  <span class="pkt" id="pkt" aria-hidden="true"></span>
-                </div>
-                <p class="lk-l" aria-hidden="true"><b>about 10 KB</b> between devices per word</p>
-              </div>
-
-              <!-- 4: the download, as the room's load card (p2p.html #load-card): a row per device, the model's
-                   layers as a strip that fills in each device's colour, and how far along the whole thing is -->
-              <div class="ldc" id="ldc">
-                <div class="lc-head"><svg class="dl" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:2"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:3"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:2"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:3"/><circle cx="18.5" cy="18.5" r="3.9" style="--rc:4"/></svg><div class="lc-h"><p class="lc-t">Loading Qwen3.6 35B MoE</p><p class="lc-note">Each device downloads only its own layers.</p></div></div>
-                <div class="lc-rows" id="lcRows">
-                  <div class="lc-row done c0"><i class="sw"></i><div class="n"><span class="nm"><span data-name="0">fox</span> <small>(you)</small></span><span class="lr">layers 1–17</span></div><div class="bar"><div class="fill" style="width:100%"></div></div><div class="pct">ready</div></div>
-                  <div class="lc-row done c1"><i class="sw"></i><div class="n"><span class="nm"><span data-name="1">heron</span></span><span class="lr">layers 18–37</span></div><div class="bar"><div class="fill" style="width:100%"></div></div><div class="pct">ready</div></div>
-                  <div class="lc-row done c2"><i class="sw"></i><div class="n"><span class="nm"><span data-name="2">lynx</span></span><span class="lr">layers 38–40</span></div><div class="bar"><div class="fill" style="width:100%"></div></div><div class="pct">ready</div></div>
-                </div>
-                <div class="lc-strip" id="lcStrip" aria-hidden="true"><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c0"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c1"></i><i class="c2"></i><i class="c2"></i><i class="c2"></i></div>
-                <p class="lc-status" id="lcStatus"><span class="src">Downloading</span><span class="b">22.5 GB of 22.5 GB</span></p>
-              </div>
-            </div>
-
-
-            <div class="scene s-chat">
-              <ol class="msgs" id="msgs">
-                <li class="sys"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8"/><circle cx="10.2" cy="3.4" r="1.99"/><circle cx="18.5" cy="3.4" r="2.38"/><circle cx="3.4" cy="10.2" r="1.99"/><circle cx="10.2" cy="10.2" r="2.38"/><circle cx="18.5" cy="10.2" r="2.94"/><circle cx="3.4" cy="18.5" r="2.38"/><circle cx="10.2" cy="18.5" r="2.94"/><circle cx="18.5" cy="18.5" r="3.9"/></svg><span>Model ready on 3 devices</span></li>
-                <li class="q" data-at="q1"><span class="who" data-name="0">fox</span><p>what is Pooled?</p></li>
-                <li class="a" data-at="a1"><span class="who"><span class="wn">Qwen3.6 35B MoE</span><span class="wd" aria-hidden="true"><i></i><i></i><i></i></span></span><p class="wkb" aria-hidden="true"><span class="working"><svg class="wk-mk" width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:3"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:4"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:3"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:4"/><circle class="lit" cx="18.5" cy="18.5" r="3.9" style="--rc:5"/></svg><span>Pondering…</span></span></p><p class="say" id="a1">Pooled splits big models across devices, so together they run models none of them could run alone. It can chat, or write code.</p><div class="m-acts" aria-hidden="true"><span class="icon-act"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8.5" rx="1.8"/><path d="M10.5 5.5V3.8c0-1-.8-1.8-1.8-1.8H4.3c-1 0-1.8.8-1.8 1.8v4.4c0 1 .8 1.8 1.8 1.8h1.2"/></svg></span><span class="stats">21.4 tok/s · 3 devices</span></div></li>
-              </ol>
-              <div class="ctools" aria-hidden="true"><span class="ct-b">Show drafts</span><span class="ctx"><i style="--p:1"></i>1% of context</span></div>
-              <div class="composer" id="chatComposer" aria-hidden="true">
-                <span class="field"><span class="typed" id="chatTyped"></span><span class="ph">Message the room</span></span>
-                <span class="send">Send</span>
-              </div>
-            </div>
-
-            <!-- 6 to 8: Code. Files on the left, the agent, then the app it serves -->
-            <div class="scene s-code">
-              <div class="files">
-                <div class="cf-proj" aria-hidden="true"><span class="cf-sel"><span id="fDir">tetris</span><svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="m4 6 4 4 4-4"/></svg></span><span class="cf-btn">New</span><span class="cf-btn">Open folder…</span><span class="cf-kind">saved in this browser</span></div>
-                <p class="fh"><svg width="14" height="14" aria-hidden="true"><use href="#i-dir"/></svg><span>Files</span></p>
-                <ul class="ftree" id="ftree">
-                  <li data-f="index.html"><svg width="13" height="13" aria-hidden="true"><use href="#i-file"/></svg><span class="fn">index.html</span><span class="fm">24</span></li>
-                  <li data-f="style.css"><svg width="13" height="13" aria-hidden="true"><use href="#i-file"/></svg><span class="fn">style.css</span><span class="fm">60</span></li>
-                  <li data-f="game.js" class="mod"><svg width="13" height="13" aria-hidden="true"><use href="#i-file"/></svg><span class="fn">game.js</span><span class="fm">213</span></li>
-                </ul>
-                <p class="fempty">No files yet</p>
-              </div>
-
-              <div class="agent">
-                <p class="ag-h"><span>Agent</span><span class="ag-m">Qwen3.6 35B MoE on 3 devices</span></p>
-                <ol class="log" id="log">
-                  <li class="cu" data-at="c-q"><span class="who" data-name="0">fox</span><p>build me a tetris game</p></li>
-                  <li class="ct" data-at="c-s1"><p class="say">I'll write three files and serve them on :5173.</p></li>
-                  <li class="tool" data-at="c-t0"><p class="tl"><span class="nm">write_file</span><span class="br">index.html</span><span class="ms">21 ms</span><span class="st">done</span></p><div class="diff new"><p class="dh"><b>index.html</b><span class="nf">new file · <span class="nl">0</span> lines</span></p><div class="rs"></div></div></li>
-                  <li class="tool" data-at="c-t1"><p class="tl"><span class="nm">write_file</span><span class="br">style.css</span><span class="ms">13 ms</span><span class="st">done</span></p><div class="diff new"><p class="dh"><b>style.css</b><span class="nf">new file · <span class="nl">0</span> lines</span></p><div class="rs"></div></div></li>
-                  <li class="tool" data-at="c-t2"><p class="tl"><span class="nm">write_file</span><span class="br">game.js</span><span class="ms">20 ms</span><span class="st">done</span></p><div class="diff new"><p class="dh"><b>game.js</b><span class="nf">new file · <span class="nl">0</span> lines</span></p><div class="rs"></div></div></li>
-                  <li class="wlive pending" id="lv"><p class="lh"><span class="nm">writing</span><b id="lvF">game.js</b><span class="n" id="lvN">0 lines</span></p><pre id="lvPre"></pre></li>
-                  <li class="tool" data-at="c-t3"><p class="tl"><span class="nm">serve</span><span class="br">5173</span><span class="ms">552 ms</span><span class="st">done</span></p></li>
-                  <li class="ct" data-at="c-s2"><p class="say">Tetris is running on :5173.</p></li>
-                  <li class="cstats" data-at="c-st2"><p>5 steps · 4 tool calls · 3 devices · 8.4 s</p></li>
-                  <li class="cu" data-at="c-q2"><span class="who" data-name="0">fox</span><p>make the pieces blue and add a next-piece preview</p></li>
-                  <li class="tool" data-at="c-t4"><p class="tl"><span class="nm">edit_file</span><span class="br">game.js</span><span class="ms">16 ms</span><span class="st">done</span></p>
-                    <div class="diff"><p class="dh"><b>game.js</b><span class="dn"><span class="add">+4</span><span class="del">-1</span></span></p><div class="rs" id="diff"><span class="r del">const COLORS = ["#F08A6C", "#F2C14E", "#6CC5A1", ...];</span><span class="r add">const COLORS = ["#2A45E0", "#6E86FF", "#A5B4FC", ...];</span><span class="r add">const next = document.getElementById("next");</span><span class="r add">function drawNext() { paint(next, queue[0]); }</span><span class="r add">// called after each spawn()</span></div></div></li>
-                  <li class="ct" data-at="c-s3"><p class="say">Done. The pieces are blue, and the next one shows beside the board.</p></li>
-                  <li class="cstats" data-at="c-st3"><p>3 steps · 2 tool calls · 3 devices · 3.1 s</p></li>
-                </ol>
-                <div class="cbar" aria-hidden="true"><span class="cb-auto"><i></i>Auto-approve edits</span><span class="cb-b">New task</span></div>
-                <div class="composer" id="codeComposer" aria-hidden="true">
-                  <span class="field"><span class="typed" id="codeTyped"></span><span class="ph">Ask the agent to build or change something</span></span>
-                  <span class="send">Send</span><span class="stop">Stop</span>
-                </div>
-              </div>
-
-              <div class="pvcol" id="pvcol">
-                <div class="pv" id="pv">
-                  <div class="pv-h" aria-hidden="true"><span class="pv-tabs"><span class="on">Preview</span><span>Editor</span></span></div>
-                  <div class="pv-bar"><svg class="pv-rl" width="12" height="12" aria-hidden="true"><use href="#i-reload"/></svg><span class="pv-addr"><svg width="10" height="10" aria-hidden="true"><use href="#i-lock"/></svg><span class="host">sandbox:5173</span><span class="pth">/index.html</span></span><span class="pv-rev" id="pvRev">rev 1</span><span class="pv-sb">sandbox</span><span class="pv-open">Open <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"><path d="M3 7l4-4M3.5 3H7v3.5"/></svg></span><button type="button" class="pv-back" id="pvBack">Back to the demo</button><span class="br-load" aria-hidden="true"><i id="brLoad"></i></span></div>
-                  <div class="pv-frame" id="pvFrame">
-                    <div class="app" id="app">
-                      <div class="game" id="game" tabindex="0" role="application" aria-label="The Tetris game the agent wrote, playing itself. Play it with the arrow keys and space; Escape hands it back.">
-                        <svg class="board-static" viewBox="0 0 200 400" aria-hidden="true"><rect width="200" height="400" fill="#0E1328"/><rect x="121" y="261" width="18" height="18" fill="#6E86FF"/><rect x="141" y="261" width="18" height="18" fill="#6E86FF"/><rect x="1" y="281" width="18" height="18" fill="#2A45E0"/><rect x="101" y="281" width="18" height="18" fill="#6E86FF"/><rect x="121" y="281" width="18" height="18" fill="#6E86FF"/><rect x="141" y="281" width="18" height="18" fill="#6E86FF"/><rect x="1" y="301" width="18" height="18" fill="#2A45E0"/><rect x="41" y="301" width="18" height="18" fill="#A5B4FC"/><rect x="61" y="301" width="18" height="18" fill="#A5B4FC"/><rect x="121" y="301" width="18" height="18" fill="#8EA2FF"/><rect x="141" y="301" width="18" height="18" fill="#8EA2FF"/><rect x="181" y="301" width="18" height="18" fill="#C9D1F7"/><rect x="1" y="321" width="18" height="18" fill="#2A45E0"/><rect x="41" y="321" width="18" height="18" fill="#A5B4FC"/><rect x="61" y="321" width="18" height="18" fill="#A5B4FC"/><rect x="81" y="321" width="18" height="18" fill="#DCE2FF"/><rect x="101" y="321" width="18" height="18" fill="#8EA2FF"/><rect x="121" y="321" width="18" height="18" fill="#8EA2FF"/><rect x="181" y="321" width="18" height="18" fill="#C9D1F7"/><rect x="1" y="341" width="18" height="18" fill="#2A45E0"/><rect x="21" y="341" width="18" height="18" fill="#4A5FD0"/><rect x="41" y="341" width="18" height="18" fill="#4A5FD0"/><rect x="81" y="341" width="18" height="18" fill="#DCE2FF"/><rect x="101" y="341" width="18" height="18" fill="#DCE2FF"/><rect x="121" y="341" width="18" height="18" fill="#DCE2FF"/><rect x="161" y="341" width="18" height="18" fill="#C9D1F7"/><rect x="181" y="341" width="18" height="18" fill="#C9D1F7"/><rect x="1" y="361" width="18" height="18" fill="#DCE2FF"/><rect x="21" y="361" width="18" height="18" fill="#4A5FD0"/><rect x="41" y="361" width="18" height="18" fill="#4A5FD0"/><rect x="61" y="361" width="18" height="18" fill="#6E86FF"/><rect x="81" y="361" width="18" height="18" fill="#6E86FF"/><rect x="101" y="361" width="18" height="18" fill="#6E86FF"/><rect x="141" y="361" width="18" height="18" fill="#A5B4FC"/><rect x="161" y="361" width="18" height="18" fill="#A5B4FC"/><rect x="181" y="361" width="18" height="18" fill="#8EA2FF"/><rect x="1" y="381" width="18" height="18" fill="#DCE2FF"/><rect x="21" y="381" width="18" height="18" fill="#DCE2FF"/><rect x="41" y="381" width="18" height="18" fill="#DCE2FF"/><rect x="61" y="381" width="18" height="18" fill="#C9D1F7"/><rect x="81" y="381" width="18" height="18" fill="#6E86FF"/><rect x="101" y="381" width="18" height="18" fill="#8EA2FF"/><rect x="121" y="381" width="18" height="18" fill="#8EA2FF"/><rect x="141" y="381" width="18" height="18" fill="#A5B4FC"/><rect x="161" y="381" width="18" height="18" fill="#A5B4FC"/><rect x="181" y="381" width="18" height="18" fill="#8EA2FF"/><rect x="81" y="61" width="18" height="18" fill="#6E86FF"/><rect x="101" y="61" width="18" height="18" fill="#6E86FF"/><rect x="121" y="61" width="18" height="18" fill="#6E86FF"/><rect x="101" y="81" width="18" height="18" fill="#6E86FF"/></svg>
-                        <canvas id="appc" aria-hidden="true"></canvas>
-                      </div>
-                    </div>
-                    <!-- while the agent edits the served app the preview frosts over, as in the room (room/code-ui.js editWin) -->
-                    <div class="ew" id="ew" aria-hidden="true"><div class="ew-box"><svg class="wk-mk" width="28" height="28" viewBox="0 0 24 24" aria-hidden="true"><circle cx="3.4" cy="3.4" r="1.8" style="--rc:0"/><circle cx="10.2" cy="3.4" r="1.99" style="--rc:1"/><circle cx="18.5" cy="3.4" r="2.38" style="--rc:3"/><circle cx="3.4" cy="10.2" r="1.99" style="--rc:1"/><circle cx="10.2" cy="10.2" r="2.38" style="--rc:2"/><circle cx="18.5" cy="10.2" r="2.94" style="--rc:4"/><circle cx="3.4" cy="18.5" r="2.38" style="--rc:3"/><circle cx="10.2" cy="18.5" r="2.94" style="--rc:4"/><circle class="lit" cx="18.5" cy="18.5" r="3.9" style="--rc:5"/></svg><span class="ew-t">Editing <span id="ewF">game.js</span></span></div></div>
-                    <!-- touch: the arrow keys and space, under the thumb -->
-                    <div class="pad" id="pad" aria-hidden="true">
-                      <span class="pad-l"><button type="button" tabindex="-1" data-key="ArrowLeft" aria-label="Left"><svg width="16" height="16" viewBox="0 0 16 16"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" tabindex="-1" data-key="ArrowRight" aria-label="Right"><svg width="16" height="16" viewBox="0 0 16 16"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button></span>
-                      <span class="pad-r"><button type="button" tabindex="-1" data-key="ArrowUp" aria-label="Up"><svg width="16" height="16" viewBox="0 0 16 16"><path d="m3 10 5-5 5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" tabindex="-1" data-key="ArrowDown" aria-label="Down"><svg width="16" height="16" viewBox="0 0 16 16"><path d="m3 6 5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></button><button type="button" tabindex="-1" data-key=" " class="pad-a" aria-label="Space">space</button></span>
-                    </div>
-                  </div>
-                  <div class="pv-con" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="m3.5 2 3 3-3 3"/></svg><span class="k">Console</span><span class="n">1 log</span><span class="c">Clear</span></div>
-                </div>
-              </div>
-            </div>
-
+  </aside>
+  <div class="main-wrap">
+    <header class="topbar">
+      <button id="nav-toggle" class="icon-button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">☰</button>
+      <div><span class="crumb">Workspace / </span><b id="view-title">Assistant</b></div>
+      <div class="top-actions"><span class="chip"><i></i> On this device</span><button id="mode-open" class="mode-button" aria-haspopup="dialog">Local <span aria-hidden="true">⌄</span></button></div>
+    </header>
+    <main id="main" tabindex="-1">
+      <section data-panel="chat" class="chat-panel" aria-label="Assistant">
+        <div class="conversation" id="conversation" role="log" aria-label="Conversation" aria-live="polite"></div>
+        <div class="welcome" id="welcome">
+          <span class="eyebrow">A LITTLE MORE POSSIBLE, TOGETHER</span>
+          <div class="welcome-mark"><img src="/site/logo/mark.svg" width="46" height="46" alt=""></div>
+          <h1>What’s on your mind?</h1>
+          <p>Your ideas, your devices, your assistant.<br>Start here. No account needed.</p>
+          <div class="suggestions">
+            <button data-prompt="Help me turn a busy week into a realistic plan."><span>↗</span><b>Make a little space</b><small>Plan the week ahead</small></button>
+            <button data-prompt="Help me write a clear, friendly message. Ask me who it is for and what I want to say."><span>✎</span><b>Find the right words</b><small>Draft something thoughtful</small></button>
+            <button data-view="code"><span>⌘</span><b>Build an idea</b><small>Open the coding workspace</small></button>
           </div>
         </div>
-
-        <!-- the caption: which step this is; each dot jumps to one -->
-        <div class="stepbar" id="stepbar">
-          <p class="sb-now"><span class="sb-n" id="sbN">8/8</span><span class="sb-t" id="sbT" aria-live="off">Ask for a change. It edits the code and reloads.</span></p>
-          <!-- tabindex=-1 until demo.js runs: without JS the steps are a plain list, not dead buttons -->
-          <ol class="sb-dots" aria-label="Steps">
-            <li><button type="button" data-step="0" tabindex="-1"><i></i><span class="lbl">Start a room. Your laptop already has a name.</span></button></li>
-            <li><button type="button" data-step="1" tabindex="-1"><i></i><span class="lbl">Join from your desktop with the code</span></button></li>
-            <li><button type="button" data-step="2" tabindex="-1"><i></i><span class="lbl">Each device lends some memory. A friend's phone joins in too.</span></button></li>
-            <li><button type="button" data-step="3" tabindex="-1"><i></i><span class="lbl">Pick a model that fits. Each device downloads only its own layers.</span></button></li>
-            <li><button type="button" data-step="4" tabindex="-1"><i></i><span class="lbl">Every word passes through every device, 40 layers in total.</span></button></li>
-            <li class="gap"><button type="button" data-step="5" tabindex="-1"><i></i><span class="lbl">Switch to Code and ask for a game</span></button></li>
-            <li><button type="button" data-step="6" tabindex="-1"><i></i><span class="lbl">It writes the files and serves them on :5173</span></button></li>
-            <li><button type="button" data-step="7" tabindex="-1"><i></i><span class="lbl">Ask for a change. It edits the code and reloads.</span></button></li>
-          </ol>
-          <button class="replay" id="pause" type="button" aria-label="Pause the demo" title="Pause"><svg class="i-pause" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M5.5 3.5v9M10.5 3.5v9"/></svg><svg class="i-play" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M5 3.2v9.6L12.5 8z"/></svg></button>
-          <button class="replay" id="replay" type="button" aria-label="Replay from the start" title="Replay"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9M2.5 2.5v3h3"/></svg></button>
+        <div class="composer-area">
+          <div id="run-status" role="status" aria-live="polite"></div>
+          <progress id="load-progress" max="100" value="0" aria-label="Model download" hidden></progress>
+          <form id="chat-form" class="composer">
+            <label class="sr-only" for="prompt">Message Duga</label>
+            <textarea id="prompt" placeholder="Ask Duga anything…" rows="2" maxlength="16000" required></textarea>
+            <div class="composer-tools"><span class="model-name">Qwen3 0.6B <small>· local</small></span><div><button id="voice-open" type="button" class="quiet" aria-haspopup="dialog">Voice</button><button id="stop" type="button" hidden>Stop</button><button id="send" type="submit" class="primary" aria-label="Send message">Send ↑</button></div></div>
+          </form>
+          <div class="composer-foot"><span><i></i> Messages stay on this device.</span><button id="chat-export" class="text-button">Export chat</button></div>
+          <p class="bootstrap-note">First message downloads about 640 MB of model weights from Hugging Face. Requires WebGPU and sufficient device memory. Small model, limited quality. No hosted fallback.</p>
+          <label class="memory-use"><input id="use-memories" type="checkbox"> Include my saved notes in this local conversation</label>
         </div>
-      </div>
-    </div>
-  </section>
-
-  <section class="closer" id="closer" aria-labelledby="closer-h">
-    <canvas class="swarm" id="swarm2" aria-hidden="true"></canvas>
-    <div class="wrap closer-in">
-      <div class="logo-slot" id="logoSlot" aria-hidden="true"><svg width="96" height="96"><use href="#i-mark"/></svg></div>
-      <h2 id="closer-h">Your devices are already a supercomputer. <span>Introduce them.</span></h2>
-      <div class="ctas">
-        <a class="btn btn-blue" href="/room">Start a room <svg width="16" height="16" aria-hidden="true"><use href="#i-next"/></svg></a>
-        <a class="btn btn-star" href="https://github.com/Nehanth/pooled" data-stars aria-label="Star pooled on GitHub"><svg class="gh" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><svg class="star" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 .25a.75.75 0 0 1 .67.42l1.88 3.8 4.2.61a.75.75 0 0 1 .42 1.28l-3.04 2.96.72 4.18a.75.75 0 0 1-1.09.79L8 12.33l-3.76 1.98a.75.75 0 0 1-1.09-.79l.72-4.18L.83 6.38a.75.75 0 0 1 .42-1.28l4.2-.61L7.33.67A.75.75 0 0 1 8 .25z"/></svg><span class="st-l">Star</span><span class="st-n" hidden></span></a>
-      </div>
-    </div>
-  </section>
-</main>
-
-<footer class="footer">
-  <div class="wrap foot-in">
-    <span class="brand small"><svg class="mark" width="16" height="16" aria-hidden="true"><use href="#i-mark"/></svg><span class="wm">pooled</span></span>
-    <span class="foot-note">Open source, MIT.</span>
+      </section>
+      <section data-panel="devices" class="page-panel" hidden>
+        <span class="eyebrow">A PLACE FOR YOUR DEVICES</span><h1>Better, connected.</h1>
+        <p class="intro">Bring your trusted devices into a room. An invite link or a code is all you need.</p>
+        <div class="device-card"><div class="device-icon">▣</div><div><h2>This browser</h2><p id="gpu-status">Checking local inference support…</p></div><span class="chip">This device</span></div>
+        <div class="two-col">
+          <article class="card"><h2>Connect a device</h2><p>Create a room, then share its invite link or code with your other device.</p><button id="create-room" class="primary">Open a new room ↗</button><small>Room members are trusted with inference data. An invite does not prove device ownership.</small></article>
+          <article class="card"><h2>Have an invite?</h2><p>Codes ask the host to let you in. Invite links admit their holders.</p><form id="join-form"><label for="invite">Room code or invite link</label><input id="invite" autocomplete="off" spellcheck="false" placeholder="ABC-234 or https://…/r/…#k=…" required><button class="primary">Join room ↗</button><p id="invite-error" role="alert"></p></form></article>
+        </div>
+        <div class="notice"><b>Your local chat stays here.</b> Opening a room does not transfer your conversation or saved notes. Device availability, capacity, jobs and leaving controls are shown in the room. Disconnecting does not revoke an invite or returning-device pass; persistent revocation is not implemented.</div>
+        <article class="card"><h2>Contribute idle compute</h2><p>Global Net contribution and credits are not available. Opening Duga never enrolls your device as a public worker. A closed or suspended browser tab cannot act as an always-on worker.</p></article>
+      </section>
+      <section data-panel="memories" class="page-panel" hidden>
+        <span class="eyebrow">CONTEXT YOU CONTROL</span><h1>A few things to remember.</h1><p class="intro">Notes you explicitly save, stored in this browser only. Nothing is inferred or saved automatically.</p>
+        <form id="memory-form" class="card"><label for="memory-text">What would you like to save?</label><textarea id="memory-text" maxlength="2000" rows="3" placeholder="For example: I prefer short answers." required></textarea><div class="row"><button id="memory-save" class="primary">Save note</button><button id="memory-cancel" type="button" hidden>Cancel edit</button><span id="memory-status" role="status"></span></div></form>
+        <div class="section-heading"><h2>Saved notes <span id="memory-count">0</span></h2><div><button id="memory-export">Export</button><button id="memory-clear" class="danger">Delete all</button></div></div>
+        <div id="memory-list"></div><p class="muted">Select “Include my saved notes” before sending to use them. They are never sent to rooms or public workers. Clearing browser data also deletes these notes.</p>
+      </section>
+      <section data-panel="connections" class="page-panel" hidden>
+        <span class="eyebrow">KEEP THE BOUNDARIES CLEAR</span><h1>Your connections.</h1><p class="intro">No services are connected. Duga cannot read your email, calendar or files through this assistant.</p>
+        <div class="two-col"><article class="card"><span class="badge">Planned</span><h2>Calendar &amp; email</h2><p>Read-only integrations will come first, with scoped permissions and visible revocation. Write actions will require review.</p><button disabled>Not available</button></article><article class="card"><span class="badge">Available in rooms</span><h2>Coding tools</h2><p>Use the existing Code workspace and CLI/API bridge. File permissions and code approvals are handled there.</p><button data-view="code">Open workspace →</button></article></div>
+        <div class="notice">Connector credentials belong in a trusted environment. Public inference workers must never receive tokens or unrestricted tool access.</div>
+      </section>
+      <section data-panel="activity" class="page-panel" hidden>
+        <span class="eyebrow">NO INVISIBLE ACTIONS</span><h1>What Duga is doing.</h1><p class="intro">Local session events. Message text and invite secrets are never recorded here. Room agents have their own activity and approval views.</p><div class="section-heading"><h2>This session</h2><button id="activity-clear">Clear activity</button></div><ol id="activity-list" class="activity-list"></ol>
+      </section>
+      <section data-panel="code" class="workspace-panel" hidden>
+        <div class="workspace-intro"><div><h1>A workspace for your ideas.</h1><p>The existing room runtime powers chat, coding agents, previews and device controls. Choose a model, then open its Code tab. Local notes and chat are not transferred.</p></div><a href="/room" target="_blank" rel="noopener noreferrer">Open in a new tab ↗</a></div>
+        <button id="workspace-open" class="primary">Open room workspace</button>
+        <iframe id="workspace" title="Duga room and coding workspace" referrerpolicy="no-referrer" hidden></iframe>
+      </section>
+      <section data-panel="settings" class="page-panel" hidden>
+        <span class="eyebrow">YOUR SESSION, EXPLAINED</span><h1>A little transparency.</h1><div class="card"><h2>No account required</h2><p>Chat is held in tab memory and disappears on reload. Saved notes use local browser storage. There is no cross-device sync or account recovery.</p><h2>Where computation happens</h2><p>Local uses this device’s GPU. Model downloads contact Hugging Face; your prompts are not included in those requests. No inference API receives your conversations. Loading may fail on unsupported browsers or devices with insufficient memory.</p><h2>Trusted rooms</h2><p>Rooms use signaling and may use relays. Admitted inference devices can learn room data. Invite links grant bearer access; codes require host approval by default. A room is not an ownership-enforced Private Net.</p><h2>What is still planned</h2><p>Private Net ownership enforcement, Global Net, credits, service connectors, microphone conversation and cross-device durable memory are not implemented.</p><a href="/docs/privacy">Read the threat model ↗</a></div><button id="data-delete" class="danger">Delete local chat, notes &amp; activity</button></section>
+    </main>
   </div>
-</footer>
-
-<script defer src="/site/js/swarm.js"></script>
-<script defer src="/site/js/apps.js"></script>
-<script defer src="/site/js/hl.js"></script>
-<script defer src="/site/js/stars.js"></script>
-<script defer src="/site/js/sparkle.js"></script>
-<script defer src="/site/js/demo.js"></script>
+</div>
+<dialog id="mode-dialog" aria-labelledby="mode-title"><button class="dialog-close" data-close aria-label="Close">×</button><span class="eyebrow">WHERE YOUR TASK RUNS</span><h2 id="mode-title">Choose your compute.</h2><p>Placement is a privacy choice. Duga never silently switches networks.</p><div id="mode-options"></div><p class="muted">Need more capacity today? Open a trusted room from Devices. It is separate from this local conversation.</p></dialog>
+<dialog id="voice-dialog" aria-labelledby="voice-title"><button class="dialog-close" data-close aria-label="Close">×</button><h2 id="voice-title">Voice, with a clear boundary.</h2><p>Microphone conversation is not available yet. Duga has not requested microphone permission or started recording. Push-to-talk is planned; room speech synthesis can read answers aloud where supported.</p><button data-close>Back to typing</button></dialog>
+<dialog id="confirm-dialog" aria-labelledby="confirm-title"><h2 id="confirm-title">Delete these items?</h2><p id="confirm-text"></p><div class="row"><button id="confirm-cancel">Cancel</button><button id="confirm-delete" class="danger">Delete</button></div></dialog>
+<div id="notice" class="toast" role="status" aria-live="polite" hidden></div>
+<noscript><p>Duga requires JavaScript for local inference. No account is needed. Enable JavaScript to continue.</p></noscript>
 </body>
 </html>

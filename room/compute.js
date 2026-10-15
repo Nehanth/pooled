@@ -271,7 +271,7 @@ export function computeScreen({ state, keepAwake = () => {}, newRoom = () => {},
     if (document.hidden) {
       hiddenAt = performance.now();
       // the tab strip is all its owner sees now: say what this tab needs
-      if (root.dataset.phase === "serving" || root.dataset.phase === "loading") document.title = "Lending \u00b7 bring this tab back \u00b7 pooled";
+      if (root.dataset.phase === "serving" || root.dataset.phase === "loading") document.title = "Lending \u00b7 bring this tab back \u00b7 Duga";
       return;
     }
     if (hiddenAt) { awayMs = performance.now() - hiddenAt; awayAt = performance.now(); hiddenAt = 0; }

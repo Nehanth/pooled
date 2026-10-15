@@ -1,9 +1,9 @@
 ---
-title: What is Pooled
+title: What is Duga
 eyebrow: Getting started
-description: Pooled runs one open model across the devices in a room, in browser tabs. Nothing to install, no account, and no server does the thinking.
+description: Duga runs one open model across the devices in a room, in browser tabs. Nothing to install, no account, and no server does the thinking.
 sidebar:
-  label: What is Pooled
+  label: What is Duga
   order: 1
 ---
 import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
@@ -15,13 +15,17 @@ Sources (for the fact-checker):
 - room/joingate.js: CODE_LEN = 6, formatCode ("4TK-G9P")
 */}
 
-Pooled runs one AI model across several devices at once. Your laptop, a friend's desktop and a phone each hold part of the model and run it on their own GPU, in a browser tab. Together they run a model none of them could run alone.
+Duga’s [assistant](/) starts with local chat and explicit browser-only notes, without an account. Its first message downloads about 640 MB of Qwen3 0.6B weights and requires WebGPU. There is no hosted fallback. Private Net ownership enforcement, Global Net, credits, connectors and microphone conversation are not available yet.
+
+The room workspace below is the existing Pooled runtime. Invite links and host-approved room codes work without accounts; local assistant chat and saved notes are not transferred into a room.
+
+The Duga room, powered by Pooled, runs one AI model across several devices at once. Your laptop, a friend's desktop and a phone each hold part of the model and run it on their own GPU, in a browser tab. Together they run a model none of them could run alone.
 
 There is nothing to install and no account. The model runs on your devices, not on a server.
 
 ## How it works in 30 seconds
 
-1. One device opens [pooled.run/room](https://pooled.run/room) and starts a room. It gets a code like `4TK-G9P`.
+1. One device opens [duga.app/room](/room) and starts a room. It gets a code like `4TK-G9P`.
 2. Other devices join with the code, a link or a QR code. Each one gives the room some memory.
 3. Someone picks a model and presses **Start the model**. Each device downloads only its part.
 4. Everyone in the room can ask the model questions.
@@ -62,6 +66,6 @@ Everyone in a room can see what is asked, unless the host limits it. Run rooms w
   <LinkCard title="Invite devices" href="/docs/invite" description="Add a phone, a second laptop or a friend's desktop." />
 </CardGrid>
 
-Want a step-by-step walk-through? The [starter kits](/docs/kits/first-chat) take you through each way to use Pooled: one laptop, two devices, Code mode, coding tools, the terminal and OpenClaw.
+Want a step-by-step walk-through? The [starter kits](/docs/kits/first-chat) take you through each way to use Duga: one laptop, two devices, Code mode, coding tools, the terminal and OpenClaw.
 
 Curious how it works under the hood? See [Architecture](/docs/internals/architecture).

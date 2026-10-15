@@ -29,7 +29,7 @@ Deno.test("card: size, header, and the tok/s number (one decimal, '-' when unkno
   ok(out === f.canvas, "returns the canvas");
   eq([f.canvas.width, f.canvas.height], [1200, 630]);
   const t = f.texts();
-  for (const s of ["pooled", "Room", "ABCD", " · Sep 29", "12.3", "tok/s"]) ok(t.includes(s), `missing ${s}: ${t}`);
+  for (const s of ["Duga", "Room", "ABCD", " · Sep 29", "12.3", "tok/s"]) ok(t.includes(s), `missing ${s}: ${t}`);
   eq(f.g.letterSpacing, "0px", "letter spacing is put back");
   const g2 = fakeCanvas();
   drawCard(g2.canvas, { nodes: [node("a", "")] });
