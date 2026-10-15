@@ -47,6 +47,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn, execSync } from "node:child_process";
 import { joinRoom } from "../index.js";
+import { judgeGolden } from "../../../tests/q38flash_rule.js";
 
 const MODE = process.argv[2] || "tab";
 const ROOT = path.resolve(new URL("../../..", import.meta.url).pathname);
@@ -240,8 +241,12 @@ try {
       const ids = r.tokens;
       let diff = ids.findIndex((x, i) => i < n && x !== g.ids[i]);
       if (diff < 0 && ids.length < n) diff = ids.length;
-      const ties = (g.nearTies || []).map((x) => x[0]), tieOk = diff >= 0 && ties.some((i) => i <= diff);
+      // a difference passes at an earlier listed near tie (the answers part there), or by the golden rule at that step
+      // (tests/q38flash_rule.js: our token within 0.5 nats of llama.cpp's top in any of its runs, our own gap under 0.5)
+      const ties = (g.nearTies || []).map((x) => x[0]), judged = diff >= 0 ? judgeGolden(g, ids, r.gaps, n) : null;
+      const tieOk = diff >= 0 && (ties.some((i) => i <= diff) || !!judged?.excused);
       const verdict = diff < 0 ? "MATCH" : tieOk ? "TIE" : "MISMATCH";
+      if (judged) log(`  ${name}: ${judged.msg}`);
       if (verdict === "MISMATCH") fail++;
       const e = r.experts, hit = e && e.lookups ? e.hits / e.lookups : null;
       const c = bag[key] = { verdict, n, diff, bits: r.bits, tps: fx(r.tps), prefillS: fx(r.tPre / 1000, 1), wallS: +((Date.now() - t) / 1000).toFixed(1), prompt: g.prompt.length,
@@ -280,8 +285,9 @@ try {
       const r1 = await gen(g.prompt, N), r2 = await gen([...g.prompt, ...r1.tokens, g.ids[N]], N);
       const both = [...r1.tokens, g.ids[N], ...r2.tokens], want = g.ids.slice(0, both.length);
       const diff = both.findIndex((x, i) => x !== want[i]);
-      const ties = (g.nearTies || []).map((x) => x[0]);
-      const verdict = diff < 0 && both.length === 2 * N + 1 ? "MATCH" : ties.some((i) => i <= diff) ? "TIE" : "MISMATCH";
+      const ties = (g.nearTies || []).map((x) => x[0]), judged = diff >= 0 ? judgeGolden(g, both, [...(r1.gaps || []), null, ...(r2.gaps || [])], both.length) : null;
+      const verdict = diff < 0 && both.length === 2 * N + 1 ? "MATCH" : diff >= 0 && (ties.some((i) => i <= diff) || judged?.excused) ? "TIE" : "MISMATCH";
+      if (judged) log(`  turns: ${judged.msg}`);
       if (verdict === "MISMATCH") fail++;
       out.turns = { case: tc, verdict, diff, n: both.length, prompt1: g.prompt.length, prompt2: g.prompt.length + N + 1, reused2: r2.reused,
         prefill1S: fx(r1.tPre / 1000, 1), prefill2S: fx(r2.tPre / 1000, 1), tps1: fx(r1.tps), tps2: fx(r2.tps), bits: [r1.bits, r2.bits] };

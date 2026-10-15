@@ -5790,10 +5790,16 @@ if (DEV) window.__pooledGen = async (ids, maxNew) => {
   if (ai.busy) throw new Error("the room is busy");
   ai.busy = "gen";
   let x = 0x811c9dc5;
+  // (gaps: each step's top-2 logit gap, in nats: the golden rule's near tie, tests/q38flash_rule.js judgeGolden)
+  const gaps = [];
   const sample = (lg) => {
     const u = new Uint32Array(lg.buffer, lg.byteOffset, lg.length);
-    let best = 0;
-    for (let i = 0; i < lg.length; i++) { x = Math.imul(x ^ u[i], 0x01000193) >>> 0; if (lg[i] > lg[best]) best = i; }
+    let best = 0, second = -Infinity;
+    for (let i = 0; i < lg.length; i++) {
+      x = Math.imul(x ^ u[i], 0x01000193) >>> 0;
+      if (lg[i] > lg[best]) { if (i) second = lg[best]; best = i; } else if (i && lg[i] > second) second = lg[i];
+    }
+    gaps.push(+(lg[best] - second).toFixed(4));
     return best;
   };
   const st = ai.engine.experts, s0 = st ? { ...st.stats, t1: st.t1 ? { ...st.t1.stats } : null } : null;
@@ -5803,7 +5809,7 @@ if (DEV) window.__pooledGen = async (ids, maxNew) => {
     const laps = ai.lapLog, tele = ai.teleLog;
     const d = st ? Object.fromEntries(["cuts", "lookups", "hits", "misses", "diskReads", "diskBytes", "diskWaitMs", "t1Copies"].map((k) => [k, st.stats[k] - s0[k]])) : null;
     if (d && st.t1) d.t1Hits = st.t1.stats.hits - s0.t1.hits;
-    return { tokens: r.tokens, tps: r.tps, tPre: r.tPre, bits: x.toString(16), experts: d, summary: st?.summary?.() || null,
+    return { tokens: r.tokens, tps: r.tps, tPre: r.tPre, bits: x.toString(16), gaps, experts: d, summary: st?.summary?.() || null,
       reused: r.reused, ckpt: { on: typeof ai.engine?.saveSlot === "function", slots: ai.ckpt?.items?.length ?? null }, laps, tele };
   } finally { ai.busy = false; ai.lapLog = ai.teleLog = null; }
 };
