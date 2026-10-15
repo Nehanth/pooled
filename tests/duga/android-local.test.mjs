@@ -5,6 +5,99 @@ import {makeTokenizer} from '../../engine/tokenizer.js';
 import {buildIds,specials} from '../../room/conversation.js';
 import {loadAndroidLocal} from '../../app/android-local.js';
 
+test('an already cancelled Android preparation makes no native or tokenizer requests',async()=>{
+  const originalFetch=globalThis.fetch,originalRuntime=globalThis.DugaNativeRuntime;
+  const calls=[],abort=new AbortController();abort.abort();
+  globalThis.fetch=async()=>{calls.push('fetch');throw Error('Unexpected tokenizer request');};
+  globalThis.DugaNativeRuntime={call:async type=>{calls.push(type);return {context:1024};}};
+  try{
+    await assert.rejects(loadAndroidLocal({signal:abort.signal}),{name:'AbortError'});
+    assert.deepEqual(calls,[]);
+  }finally{globalThis.fetch=originalFetch;if(originalRuntime===undefined)delete globalThis.DugaNativeRuntime;else globalThis.DugaNativeRuntime=originalRuntime;}
+});
+
+test('cancelled native opening closes the model before preparation rejects',async()=>{
+  const originalFetch=globalThis.fetch,originalRuntime=globalThis.DugaNativeRuntime;
+  const calls=[],abort=new AbortController();let finishOpen;
+  globalThis.fetch=async()=>{calls.push('fetch');throw Error('Unexpected tokenizer request');};
+  globalThis.DugaNativeRuntime={call:async type=>{
+    calls.push(type);
+    if(type==='load')return new Promise(resolve=>{finishOpen=resolve;});
+    if(type==='close')throw Error('Cleanup failure must not hide cancellation');
+    return {};
+  }};
+  try{
+    const loading=loadAndroidLocal({signal:abort.signal});
+    abort.abort();
+    assert.deepEqual(calls,['load','cancel']);
+    // NativeVulkan.open can publish its handle after cancel has already run.
+    finishOpen({context:1024});
+    await assert.rejects(loading,{name:'AbortError'});
+    assert.deepEqual(calls,['load','cancel','cancel','close']);
+    abort.signal.dispatchEvent(new Event('abort'));
+    assert.equal(calls.length,4,'Preparation must remove its abort listener');
+  }finally{globalThis.fetch=originalFetch;if(originalRuntime===undefined)delete globalThis.DugaNativeRuntime;else globalThis.DugaNativeRuntime=originalRuntime;}
+});
+
+test('tokenizer preparation errors and cancellation release the native model',async t=>{
+  const fixture=buildDense({layers:1,dim:128,inter:256,nH:4,nKV:2,hd:64});
+  for(const failure of ['fetch','json','abort'])await t.test(failure,async()=>{
+    const originalFetch=globalThis.fetch,originalRuntime=globalThis.DugaNativeRuntime;
+    const calls=[],abort=new AbortController(),error=Error('Tokenizer failed');
+    globalThis.DugaNativeRuntime={call:async type=>{calls.push(type);return {context:1024};}};
+    globalThis.fetch=async(url,options)=>{
+      assert.equal(url,'/models/tokenizer.json');assert.equal(options?.signal,abort.signal);
+      if(failure==='fetch')return new Response('',{status:404});
+      return {ok:true,json:async()=>{
+        if(failure==='json')throw error;
+        abort.abort();return fixture.tokenizer;
+      }};
+    };
+    try{
+      await assert.rejects(loadAndroidLocal({signal:abort.signal}),failure==='abort'?{name:'AbortError'}:failure==='json'?error:/Native tokenizer unavailable/);
+      assert.equal(calls[0],'load');assert.equal(calls.at(-1),'close');
+      assert.ok(calls.includes('cancel'));
+      const count=calls.length;abort.signal.dispatchEvent(new Event('abort'));
+      assert.equal(calls.length,count,'Preparation must remove its abort listener');
+    }finally{globalThis.fetch=originalFetch;if(originalRuntime===undefined)delete globalThis.DugaNativeRuntime;else globalThis.DugaNativeRuntime=originalRuntime;}
+  });
+});
+
+test('Android decoding flushes an incomplete UTF-8 suffix when generation ends',async t=>{
+  const fixture=buildDense({layers:1,dim:128,inter:256,nH:4,nKV:2,hd:64});
+  // One token holds a complete Cyrillic character and the start of another,
+  // reproducing the pinned tokenizer's token 2226 without external model files.
+  const incomplete=Math.max(...Object.values(fixture.tokenizer.model.vocab),...fixture.tokenizer.added_tokens.map(t=>t.id))+1;
+  fixture.tokenizer.model.vocab['Ð¾Ð']=incomplete;
+  const tok=makeTokenizer(fixture.tokenizer),S=specials(tok),turns=[{role:'user',text:'Hello'}];
+  assert.equal(tok.decode([incomplete]),'о\uFFFD');
+  const prompt=buildIds(tok,{turns,thinking:false}),a=tok.encode('A')[0],continuation=tok.encode('о')[1];
+  for(const {name,output,budget} of [
+    {name:'one-token budget',output:[incomplete],budget:1},
+    {name:'suffix after emitted text',output:[a,incomplete],budget:2},
+    {name:'stop token',output:[incomplete],budget:3},
+    {name:'completed UTF-8',output:[incomplete,continuation],budget:2},
+  ])await t.test(name,async()=>{
+    const originalFetch=globalThis.fetch,originalRuntime=globalThis.DugaNativeRuntime;
+    let evaluated=0,stored;const chunks=[];
+    globalThis.fetch=async()=>new Response(JSON.stringify(fixture.tokenizer));
+    globalThis.DugaNativeRuntime={call:async type=>{
+      if(type==='load')return {context:prompt.length+budget+2};
+      if(type==='evaluate'){const generated=++evaluated-prompt.length;return {token:generated<0?S.imEnd:output[generated]??S.imEnd};}
+      return {};
+    }};
+    try{
+      const model=await loadAndroidLocal();
+      try{
+        for await(const delta of model.generate({turns,onTokens:ids=>{stored=ids;}}))chunks.push(delta);
+        assert.equal(chunks.join(''),tok.decode(output));
+        assert.deepEqual(stored,output);
+        if(name==='completed UTF-8')assert.deepEqual(chunks,['оо'],'Do not emit replacement characters before decoding finishes');
+      }finally{model.dispose();}
+    }finally{globalThis.fetch=originalFetch;if(originalRuntime===undefined)delete globalThis.DugaNativeRuntime;else globalThis.DugaNativeRuntime=originalRuntime;}
+  });
+});
+
 test('Android prefill preserves exact prompt order, bounds bridge work and stops on cancellation',async()=>{
   const fixture=buildDense({layers:1,dim:128,inter:256,nH:4,nKV:2,hd:64});
   const tok=makeTokenizer(fixture.tokenizer),S=specials(tok),turns=[{role:'user',text:'Hello'}];

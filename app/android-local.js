@@ -4,15 +4,19 @@ import { buildIds, specials } from '../room/conversation.js';
 import { makeTokenizer } from '../engine/tokenizer.js';
 import { OwnIds } from '../harness/model-common.js';
 export async function loadAndroidLocal({ signal,onStatus=()=>{},onProgress=()=>{} }={}) {
+  signal?.throwIfAborted();
   const call=globalThis.DugaNativeRuntime.call;
   const stop=()=>{call('cancel').catch(()=>{});};
   signal?.addEventListener('abort',stop,{once:true});
-  let info;
-  try { info=await call('load',{},p=>{onStatus(p.status||'Preparing native Vulkan…');if(p.total)onProgress(p.done,p.total);});signal?.throwIfAborted(); }
-  catch(e){stop();throw e;}
+  let info,tok;
+  try {
+    info=await call('load',{},p=>{onStatus(p.status||'Preparing native Vulkan…');if(p.total)onProgress(p.done,p.total);});signal?.throwIfAborted();
+    const response=await fetch('/models/tokenizer.json',{signal});if(!response.ok)throw Error('Native tokenizer unavailable.');
+    tok=makeTokenizer(await response.json());signal?.throwIfAborted();
+  }
+  catch(e){stop();await call('close').catch(()=>{});throw e;}
   finally { signal?.removeEventListener('abort',stop); }
-  const response=await fetch('/models/tokenizer.json');if(!response.ok)throw Error('Native tokenizer unavailable.');
-  const tok=makeTokenizer(await response.json()),own=new OwnIds(),S=specials(tok),stops=new Set([S.imEnd,S.eot].filter(Number.isInteger));
+  const own=new OwnIds(),S=specials(tok),stops=new Set([S.imEnd,S.eot].filter(Number.isInteger));
   let disposed=false;
   return {
     dispose(){if(disposed)return;disposed=true;stop();call('close').catch(()=>{});},
@@ -38,7 +42,9 @@ export async function loadAndroidLocal({ signal,onStatus=()=>{},onProgress=()=>{
           output.push(result.token);const now=tok.decode(output);if(now.length>text.length&&!now.endsWith('\uFFFD')){yield now.slice(text.length);text=now;}
           if(i+1<max)result=await call('evaluate',{ids:[result.token],reset:false});
         }
-        own.set(tok.decode(output),output.slice());
+        const all=tok.decode(output);
+        if(all.length>text.length)yield all.slice(text.length);
+        own.set(all,output.slice());
         // Session history outlives the GPU model when Android pauses the app.
         onTokens(output.slice());
       } finally {signal?.removeEventListener('abort',stop);}
